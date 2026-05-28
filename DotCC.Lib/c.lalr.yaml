@@ -214,19 +214,30 @@ productions:
     rules:
       - { lhs: Fn, rhs: [Type, ID, '(', ParamList, ')', Block], action: funcDef }
       - { lhs: Fn, rhs: [Type, ID, '(', ')', Block],             action: funcDefNoArgs }
+      # `(void)` parameter-list — the C-correct "explicitly no args" form,
+      # distinct from `()` (which in old-K&R semantics means "unspecified
+      # args"). Lowers identically to funcDefNoArgs at emit time. No S/R
+      # conflict with `(ParamList)` because at state [( . ] with LA `void`,
+      # the parser only completes this rule when the next-after-void is `)`
+      # — not `ID` (which would be a void-typed parameter inside ParamList,
+      # syntactically valid but downstream-reject-able anyway).
+      - { lhs: Fn, rhs: [Type, ID, '(', 'void', ')', Block],     action: funcDefVoidArgs }
       # Forward declarations: prototype ends with `;` instead of `{ block }`.
       # No S/R with the definition rules — lookahead `;` vs `{` disambiguates
       # after parsing the param list.
       - { lhs: Fn, rhs: [Type, ID, '(', ParamList, ')', ';'], action: protoDef }
       - { lhs: Fn, rhs: [Type, ID, '(', ')', ';'],             action: protoDefNoArgs }
+      - { lhs: Fn, rhs: [Type, ID, '(', 'void', ')', ';'],     action: protoDefVoidArgs }
       # `static` modifier on function definition / prototype. Internal linkage
       # in C — visitor tracks this so library mode (-shared) doesn't add the
       # function to the [UnmanagedCallersOnly] exports list. Body emission is
       # otherwise identical to the bare `funcDef` family.
       - { lhs: Fn, rhs: ['static', Type, ID, '(', ParamList, ')', Block], action: funcDefStatic }
       - { lhs: Fn, rhs: ['static', Type, ID, '(', ')', Block],             action: funcDefStaticNoArgs }
+      - { lhs: Fn, rhs: ['static', Type, ID, '(', 'void', ')', Block],     action: funcDefStaticVoidArgs }
       - { lhs: Fn, rhs: ['static', Type, ID, '(', ParamList, ')', ';'], action: protoDefStatic }
       - { lhs: Fn, rhs: ['static', Type, ID, '(', ')', ';'],             action: protoDefStaticNoArgs }
+      - { lhs: Fn, rhs: ['static', Type, ID, '(', 'void', ')', ';'],     action: protoDefStaticVoidArgs }
       # Struct declaration: `struct ID { MemberList } ;`. Disambiguates from
       # `struct ID *? ID(...)` (function returning a struct) by lookahead on
       # `{` — when the parser sees `struct ID {`, structDef is the only

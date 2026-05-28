@@ -4,13 +4,13 @@
 
 #include "stdio.h"
 
-void log_here() {
+void log_here(void) {
     // __func__ expands to the enclosing function name. __FILE__ and
     // __LINE__ to the current file and line at the directive position.
     printf("fn=%s file=%s line=%d\n", __func__, __FILE__, __LINE__);
 }
 
-int main() {
+int main(void) {
     printf("fn=%s file=%s line=%d\n", __func__, __FILE__, __LINE__);
     log_here();
     return 0;

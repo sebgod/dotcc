@@ -108,11 +108,35 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
         return $"static unsafe {type} {name}()\n{body}";
     }
 
+    // `T name(void) { … }` — C's explicit "no args" form. Lowers identically
+    // to `T name() { … }`; the `void` is purely a parameter-list marker, not
+    // a real parameter type.
+    public string Visit(C.FuncDefVoidArgs n)
+    {
+        var type = (string)n.Arg0.Content;
+        var name = (string)n.Arg1.Content;
+        var body = ResolveFuncPlaceholder((string)n.Arg5.Content, name);
+        if (name == "main") { MainArity = 0; }
+        else { _exports.Add(new Export(name, type, "")); }
+        return $"static unsafe {type} {name}()\n{body}";
+    }
+
+    public string Visit(C.FuncDefStaticVoidArgs n)
+    {
+        var type = (string)n.Arg1.Content;
+        var name = (string)n.Arg2.Content;
+        var body = ResolveFuncPlaceholder((string)n.Arg6.Content, name);
+        if (name == "main") { MainArity = 0; }
+        return $"static unsafe {type} {name}()\n{body}";
+    }
+
     // Prototypes: C# methods hoist, so we emit nothing.
     public string Visit(C.ProtoDef n) => string.Empty;
     public string Visit(C.ProtoDefNoArgs n) => string.Empty;
+    public string Visit(C.ProtoDefVoidArgs n) => string.Empty;
     public string Visit(C.ProtoDefStatic n) => string.Empty;
     public string Visit(C.ProtoDefStaticNoArgs n) => string.Empty;
+    public string Visit(C.ProtoDefStaticVoidArgs n) => string.Empty;
 
     // `struct ID { fields } ;` — emit a C# struct declaration into the side
     // channel; contribute nothing to the function-emit stream. The struct

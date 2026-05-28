@@ -114,8 +114,8 @@ Source of truth for the grammar: `DotCC.Lib/c.lalr.yaml`. Source of truth for th
 
 | Feature | Status | Notes |
 |---|---|---|
-| Function definition `T f(args) { … }` | ✅ | `funcDef` / `funcDefNoArgs` |
-| Function prototype `T f(args);` | ✅ | `protoDef` / `protoDefNoArgs` — emitted as empty (C# hoists) |
+| Function definition `T f(args) { … }` | ✅ | `funcDef` / `funcDefNoArgs` / `funcDefVoidArgs` (the C-correct `(void)` form). Static variants for each. |
+| Function prototype `T f(args);` | ✅ | `protoDef` / `protoDefNoArgs` / `protoDefVoidArgs` — emitted as empty (C# methods hoist). Static variants for each. |
 | Multiple declarators `int x, y;` | ✅ | `Decl → Type DeclItemList`; `DeclItem → ID | ID = E`. Plain item lowers to `name = default` (so C# definite-assignment is satisfied for struct/union fields). Mixed init / no-init works (`int a = 1, b, c = 3;`). Array declarators stay single-only (the lowering to `T* arr = stackalloc T[N]` doesn't compose with peers). Fixture `multi-decl/` |
 | Initializer lists `int arr[] = {1, 2, 3}`, `Point p = {1, 2}` | ✅ | Array form lowers to `T* arr = stackalloc T[]{ … }` (both sized `int x[3]` and implicit-size `int x[]`). Struct positional init lowers to `Point p = new Point { x = 1, y = 2 };` — the emitter tracks field names per struct in `_structFields` (populated by `StructDef` / `TypedefStruct` / `UnionDef` draining the names pushed by each `StructMember` visit) and looks them up to rebuild the named-initializer form C# requires. Partial init `Vec3 v = {7}` zeroes the trailing fields (C# default semantics matching C). Fixtures `array-init/`, `struct-init/`. |
 | Designated initialisers (C99) `{.x = 1}` | ❌ | Depends on `struct` |
