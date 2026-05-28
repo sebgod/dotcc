@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    DotCC.Libc — the libc surface dotcc-emitted programs link against. Each
+    function routes to a .NET BCL primitive:
+      printf / puts → Console.Write
+      malloc / free → NativeMemory
+      strlen / strcmp / memset / strcpy → pointer arithmetic over byte*
+      L (string literal pin) → MemoryMarshal.GetReference on a ReadOnlySpan<byte>
+    Pure unsafe code; no allocations on the hot paths; AOT-clean; trim-clean.
+
+    Today the emitter (DotCC.Lib/Compiler.BuildShell) still inlines copies of
+    these helpers into every generated program — keeps the file-based-program
+    output self-contained when run with `dotnet run` on a single .cs file.
+    The library lives here so it can be grown / unit-tested in isolation, and
+    so the emitter can switch to referencing it (via the #:package directive
+    once published, or via ProjectReference for csproj-emit) once the surface
+    stabilises.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <RootNamespace>DotCC.Libc</RootNamespace>
+    <AssemblyName>DotCC.Libc</AssemblyName>
+    <IsAotCompatible>true</IsAotCompatible>
+    <IsTrimmable>true</IsTrimmable>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="DotCC.Tests" />
+  </ItemGroup>
+
+</Project>

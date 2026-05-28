@@ -1,0 +1,60 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    DotCC.Lib — the actual compiler. Owns the C grammar (c.lalr.yaml), the
+    visitor that lowers the AST to C# source snippets, the preprocessor that
+    handles #include / #define / #undef / #if-family directives, and the
+    public Compiler.EmitCSharp / Compiler.Preprocess entry points.
+
+    The DotCC frontend exe is a thin shell over this library. Tests link
+    against this library directly so the pipeline is exercisable in-process
+    (no Process.Start of the frontend or `dotnet run` of emitted code
+    required for unit tests; functional tests use Roslyn in-process to
+    compile + run the emitted C# without leaving the test runner).
+
+    Sibling-or-NuGet for SharpAstro.LALR.CC mirrors the same auto-detect set
+    up in repo-root Directory.Build.props ($(UseLocalLalrCc)). The library
+    is AOT-clean so the frontend can publish trim+AOT without warnings.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <RootNamespace>DotCC</RootNamespace>
+    <AssemblyName>DotCC.Lib</AssemblyName>
+    <IsAotCompatible>true</IsAotCompatible>
+    <IsTrimmable>true</IsTrimmable>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
+    <CompilerGeneratedFilesOutputPath>$(BaseIntermediateOutputPath)generated</CompilerGeneratedFilesOutputPath>
+  </PropertyGroup>
+
+  <!-- ===== Sibling mode: ProjectReference + analyzer + YamlDotNet handshake ===== -->
+  <ItemGroup Condition="'$(UseLocalLalrCc)' == 'true'">
+    <ProjectReference Include="..\..\..\sharpastro\LALR.CC\LALR.CC\LALR.CC.csproj" />
+    <ProjectReference Include="..\..\..\sharpastro\LALR.CC\LALR.CC.SourceGenerators\LALR.CC.SourceGenerators.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseLocalLalrCc)' == 'true'">
+    <PackageReference Include="YamlDotNet" GeneratePathProperty="true" PrivateAssets="all" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UseLocalLalrCc)' == 'true'">
+    <Analyzer Include="$(PkgYamlDotNet)\lib\netstandard2.0\YamlDotNet.dll" />
+  </ItemGroup>
+
+  <!-- ===== NuGet mode: single PackageReference (generator + YamlDotNet bundled) ===== -->
+  <ItemGroup Condition="'$(UseLocalLalrCc)' != 'true'">
+    <PackageReference Include="SharpAstro.LALR.CC" />
+  </ItemGroup>
+
+  <!-- Grammar source. Filename → generated class: c.lalr.yaml → DotCC.C. -->
+  <ItemGroup>
+    <AdditionalFiles Include="c.lalr.yaml" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="DotCC.Tests" />
+    <InternalsVisibleTo Include="DotCC.FunctionalTests" />
+  </ItemGroup>
+
+</Project>

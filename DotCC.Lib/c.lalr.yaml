@@ -1,0 +1,751 @@
+# C — the dotcc grammar. Initially seeded from LALR.CC's CMinus example
+# (a tight C99 subset transpiled to unsafe AOT-clean C#), and being expanded
+# from there toward more of real C. The filename drives the generated class
+# name: `c.lalr.yaml` → `DotCC.C` (schema + AST records + IVisitor + the
+# preprocessor framework hooks).
+#
+# Pipeline (assembled in Program.cs):
+#   BytesLexer → PreprocessorTokenStream → SyncLATokenIterator → Parser → CSharpEmitter
+#
+# The preprocessor block at the bottom of this file declares `#include /
+# #define / #undef` directives plus the conditional family
+# (`#if / #ifdef / #ifndef / #else / #endif`). The source generator emits an
+# `IPreprocessor` interface with one method per declared directive; the
+# visitor wires that into BytesLexer → WrapPreprocessor → parser so the
+# directives run end-to-end before parsing even starts.
+#
+# What's in the language:
+#   - Functions: `int foo(int* p, int n) { ... }`
+#   - Local decls with optional init: `int x;` or `int x = 5;`
+#   - Pointer types of arbitrary depth: `int*`, `int**`
+#   - Statements: if/else, while, return, expression-stmt, block
+#   - Expressions with full C-style precedence including assignment-as-expr,
+#     unary `*` / `&` / `-`, calls with arg lists
+#   - Line comments `// ...`
+#   - Preprocessor: `#include "file.cmm"` and `#define NAME body`
+#
+# What's deliberately OUT:
+#   - typedefs (avoid the classic "lexer hack")
+#   - structs, unions, arrays (just pointers + heap)
+#   - string literals (only `"..."` is the directive arg for `#include`)
+#   - global variables (only function definitions at top level)
+#   - varargs, function-like macros, `#if`/`#ifdef`/conditional compilation
+#   - `setjmp`/`longjmp`, switch/case, for-loops, bitwise ops
+#
+# Precedence ladder (lowest → highest):
+#   E       : assignment (right-associative)
+#   LOr     : ||
+#   LAnd    : &&
+#   Equ     : == !=
+#   Rel     : < > <= >=
+#   Add     : + -
+#   Mul     : * /
+#   Unary   : unary * & -                       (right-associative)
+#   Postfix : function call                     (left-associative)
+#   Primary : ID, NUM, ( E )
+#
+# Dangling-else: the two `if` rules share a `derivation: rightmost` group so on
+# lookahead `else` at state `[if ( E ) Stmt]` the parser shifts (else binds to
+# the nearest if). Same trick the LaTeX example uses for unary minus.
+
+symbols:
+  - TU           # 0  translation unit (start) — distinct from FnList so the
+                 #    parser doesn't terminate on the first reduced function
+  - FnList       # 1
+  - Fn           # 2
+  - ParamList    # 3
+  - Param        # 4
+  - Type         # 5
+  - Block        # 6
+  - StmtList     # 7
+  - Stmt         # 8
+  - Decl         # 9
+  - E            # 10  expression (incl. assignment)
+  - LOr          # 11
+  - LAnd         # 12
+  - Equ          # 13  == !=
+  - Rel          # 14  < > <= >=
+  - Add          # 15  + -
+  - Mul          # 16  * /
+  - Unary        # 17
+  - Postfix      # 18
+  - Primary      # 19
+  - ArgList      # 20
+  - 'int'        # 21  keyword
+  - 'if'         # 22
+  - 'else'       # 23
+  - 'while'      # 24
+  - 'return'     # 25
+  - '('          # 26
+  - ')'          # 27
+  - '{'          # 28
+  - '}'          # 29
+  - ';'          # 30
+  - ','          # 31
+  - '='          # 32
+  - '||'         # 33
+  - '&&'         # 34
+  - '=='         # 35
+  - '!='         # 36
+  - '<'          # 37
+  - '>'          # 38
+  - '<='         # 39
+  - '>='         # 40
+  - '+'          # 41
+  - '-'          # 42
+  - '*'          # 43
+  - '/'          # 44
+  - '&'          # 45
+  - ID           # 46
+  - NUM          # 47
+  - STRING       # 48  string literal — usable in expressions and as #include arg
+  - WS           # 49  whitespace (ignored)
+  - LINE_COMMENT # 50  // to end of line (ignored)
+  - '#include'   # 51  preprocessor directive — consumed before parsing
+  - '#define'    # 52  preprocessor directive — consumed before parsing
+  - '#undef'     # 53  preprocessor directive — removes a macro definition
+  - '#if'        # 54  preprocessor conditional — only literal `0`/`1` supported in v1
+  - '#ifdef'     # 55  preprocessor conditional — branch if macro defined
+  - '#ifndef'    # 56  preprocessor conditional — branch if macro NOT defined (header guards)
+  - '#else'      # 57  preprocessor conditional — flips the current branch
+  - '#endif'     # 58  preprocessor conditional — pops the conditional stack
+  - 'char'       # 59  primitive type — pointer arithmetic walks bytes
+  - 'float'      # 60  primitive type — IEEE-754 32-bit
+  - 'double'     # 61  primitive type — IEEE-754 64-bit (printf '%f' default)
+  - 'void'       # 62  primitive type — only valid as function return
+  - '...'        # 63  varargs marker — only in function param lists
+  - FLOAT        # 64  float literal (mandatory decimal point — `1.5`, `3.14e10`)
+  - BLOCK_COMMENT # 65 /* ... */ (ignored)
+  - 'break'       # 66  keyword — exits the nearest enclosing loop
+  - 'continue'    # 67  keyword — jumps to the loop test of the nearest enclosing loop
+  - 'for'         # 68  keyword
+  - '++'          # 69  increment op (pre + post)
+  - '--'          # 70  decrement op (pre + post)
+  - '+='          # 71  compound assignment
+  - '-='          # 72
+  - '*='          # 73
+  - '/='          # 74
+  - '%='          # 75
+  - '%'           # 76  modulo op (binary, at Mul precedence)
+  # Bitwise operator tokens and the non-terminals carrying their precedence
+  # ladder. Real C order (lowest → highest): `|` < `^` < `&` < `==/!=` < `<` etc.
+  # < `<< >>` < `+ -`. Logical `||` and `&&` sit above all of these.
+  - BOr           # 77  bitwise OR  — between LAnd and BXor
+  - BXor          # 78  bitwise XOR — between BOr and BAnd
+  - BAnd          # 79  bitwise AND — between BXor and Equ
+  - Shift         # 80  << / >>     — between Rel and Add
+  - '|'           # 81
+  - '^'           # 82
+  - '~'           # 83  unary bit-NOT
+  - '<<'          # 84
+  - '>>'          # 85
+  - '&='          # 86  compound bitwise AND-assign
+  - '|='          # 87
+  - '^='          # 88
+  - '<<='         # 89
+  - '>>='         # 90
+  - '['           # 91  array subscript / array decl
+  - ']'           # 92
+  - 'switch'      # 93  keyword
+  - 'case'        # 94  keyword
+  - 'default'     # 95  keyword
+  - ':'           # 96  case-label separator
+  - CaseList      # 97  one or more cases inside a switch block
+  - Case          # 98  single `case E :` or `default :` clause
+  - 'struct'      # 99  keyword — both `struct S` (type) and `struct S { … } ;` (def)
+  - 'sizeof'      # 100 keyword — `sizeof(Type)` only (expr form deferred)
+  - '.'           # 101 member access on value
+  - '->'          # 102 member access on pointer
+  - MemberList    # 103 non-terminal: one or more struct member fields
+  - Member        # 104 non-terminal: single `Type ID ;` inside a struct body
+  - 'typedef'     # 105 keyword — top-level type aliasing
+  # TYPE_NAME — synthetic terminal: never emitted by the byte lexer. The
+  # TypeNameRewriter (a RewritingTokenStream sitting between the
+  # preprocessor and the LA iterator) promotes ID → TYPE_NAME whenever the
+  # token's content is a name previously bound by a `typedef`. This is the
+  # classic C lexer hack: it lets the LALR(1) parser cleanly disambiguate
+  # `Color * x;` (declaration when Color is a typedef-name → TYPE_NAME *
+  # ID ;) from `c * x;` (multiplication expression when c is a variable).
+  - TYPE_NAME     # 106
+  - 'do'          # 107 do-while loop keyword
+  - '!'           # 108 logical NOT (unary)
+  - '?'           # 109 ternary conditional
+  - CHAR          # 110 char literal — `'a'`, `'\n'` etc.
+  # DeclItemList / DeclItem — multi-declarator factoring. `Decl → Type
+  # DeclItemList` lets `int x, y, z;` and `int x = 1, y = 2;` parse with
+  # one Type and a comma-separated list of individual declarators. Array
+  # declarators stay in their own single-declarator rule because they
+  # lower to `T* arr = stackalloc T[N]` which doesn't compose with peers.
+  - DeclItemList  # 111
+  - DeclItem      # 112
+  - 'enum'        # 113 keyword
+  - EnumList      # 114 non-terminal: one or more enumerators in a body
+  - EnumItem      # 115 non-terminal: single `ID` or `ID = E`
+  - 'union'       # 116 keyword
+  # `static` storage class — internal linkage when applied to function
+  # definitions. Default linkage (no modifier) is `extern` per C semantics.
+  # Library mode (the -shared frontend flag) reflects this in C# by marking
+  # non-static functions with [UnmanagedCallersOnly] for export.
+  - 'static'      # 117 keyword
+
+productions:
+  # Start production. Single-non-terminal — trimmed at parse time so the root
+  # Item carries FnList's already-built C# source string.
+  - derivation: none
+    rules:
+      - { lhs: TU, rhs: [FnList] }
+
+  - derivation: leftmost
+    rules:
+      - { lhs: FnList, rhs: [Fn, FnList], action: fnsCons }
+      - { lhs: FnList, rhs: [Fn],          action: fnsOne }
+
+  - derivation: none
+    rules:
+      - { lhs: Fn, rhs: [Type, ID, '(', ParamList, ')', Block], action: funcDef }
+      - { lhs: Fn, rhs: [Type, ID, '(', ')', Block],             action: funcDefNoArgs }
+      # Forward declarations: prototype ends with `;` instead of `{ block }`.
+      # No S/R with the definition rules — lookahead `;` vs `{` disambiguates
+      # after parsing the param list.
+      - { lhs: Fn, rhs: [Type, ID, '(', ParamList, ')', ';'], action: protoDef }
+      - { lhs: Fn, rhs: [Type, ID, '(', ')', ';'],             action: protoDefNoArgs }
+      # `static` modifier on function definition / prototype. Internal linkage
+      # in C — visitor tracks this so library mode (-shared) doesn't add the
+      # function to the [UnmanagedCallersOnly] exports list. Body emission is
+      # otherwise identical to the bare `funcDef` family.
+      - { lhs: Fn, rhs: ['static', Type, ID, '(', ParamList, ')', Block], action: funcDefStatic }
+      - { lhs: Fn, rhs: ['static', Type, ID, '(', ')', Block],             action: funcDefStaticNoArgs }
+      - { lhs: Fn, rhs: ['static', Type, ID, '(', ParamList, ')', ';'], action: protoDefStatic }
+      - { lhs: Fn, rhs: ['static', Type, ID, '(', ')', ';'],             action: protoDefStaticNoArgs }
+      # Struct declaration: `struct ID { MemberList } ;`. Disambiguates from
+      # `struct ID *? ID(...)` (function returning a struct) by lookahead on
+      # `{` — when the parser sees `struct ID {`, structDef is the only
+      # production that fits. The visitor side-channels the resulting
+      # source into a struct-decls collection (see CSharpEmitter); the
+      # action's emit value is empty so it doesn't appear inside the user-
+      # function emit, which would violate C#'s top-level-statements-before-
+      # type-declarations rule.
+      - { lhs: Fn, rhs: ['struct', ID, '{', MemberList, '}', ';'], action: structDef }
+      # Enum declaration: `enum Name { A, B = 5, C } ;`. Lowers to a series
+      # of top-level `const int NAME = VAL;` so users can reference the
+      # enumerators by their bare name (matching C's int-constant
+      # semantics). The visitor auto-numbers items that have no explicit
+      # value: each unnumbered item is `previous + 1`, starting at 0.
+      - { lhs: Fn, rhs: ['enum', ID, '{', EnumList, '}', ';'], action: enumDef }
+      # Union declaration: `union Name { Type f1; Type f2; … } ;`. Reuses
+      # the struct MemberList. Lowers to a C# struct with
+      # [StructLayout(LayoutKind.Explicit)] and [FieldOffset(0)] on every
+      # member — matches C's overlapping-storage semantics.
+      - { lhs: Fn, rhs: ['union', ID, '{', MemberList, '}', ';'], action: unionDef }
+      # `typedef Type ID ;` — simple alias. Covers `typedef int Color;`,
+      # `typedef int* IntPtr;`, and `typedef struct Foo Foo;` (the last one
+      # because Type reduces from `struct ID`). The rewriter records the
+      # trailing ID as a typedef-name so subsequent uses lex as TYPE_NAME.
+      # The visitor emits a C# `using` alias when the source type lowers to
+      # a single C# identifier (e.g. struct tag), otherwise emits nothing —
+      # C# already infers usage from the underlying type and the lexer hack
+      # has done its job at parse time.
+      - { lhs: Fn, rhs: ['typedef', Type, ID, ';'], action: typedefAlias }
+      # `typedef struct ID { MemberList } ID ;` — struct definition + alias
+      # in one go (the common C idiom). The trailing ID may differ from the
+      # tag — the visitor emits the C# struct under the alias name (since C#
+      # has no separate tag namespace) plus an empty alias for the tag form
+      # when they differ.
+      - { lhs: Fn, rhs: ['typedef', 'struct', ID, '{', MemberList, '}', ID, ';'], action: typedefStruct }
+      # Function-pointer typedef: `typedef Ret (*Name)(args);`. Lowers to
+      # C# `using unsafe Name = delegate*<args..., Ret>;`. The standalone
+      # form `int (*fn)(int);` is famously hard to LALR-parse due to the
+      # embedded name — typedef'd form is the idiomatic use case anyway,
+      # and once aliased, `Name fn;` works through the TypeNameRewriter.
+      - { lhs: Fn, rhs: ['typedef', Type, '(', '*', ID, ')', '(', ParamList, ')', ';'], action: typedefFnPtr }
+      - { lhs: Fn, rhs: ['typedef', Type, '(', '*', ID, ')', '(', ')', ';'], action: typedefFnPtrNoArgs }
+
+  - derivation: leftmost
+    rules:
+      - { lhs: ParamList, rhs: [Param, ',', ParamList], action: paramsCons }
+      - { lhs: ParamList, rhs: [Param],                  action: paramsOne }
+      # Varargs marker — only legal at the end of the param list, since
+      # `...` can't start another `Param ',' ...` chain. The grammar lets
+      # `paramsVararg` appear only as the tail because `...` is not a Param.
+      - { lhs: ParamList, rhs: [Param, ',', '...'],     action: paramsVararg }
+
+  - derivation: none
+    rules:
+      - { lhs: Param, rhs: [Type, ID], action: param }
+
+  # Type extends rightward into pointer levels: `int * *` → `int**`. Base
+  # types are int/char/float/double/void; pointers compose on top of any.
+  # `void` is only meaningful as a function return type; the grammar doesn't
+  # enforce that — let the consumer C compiler catch invalid uses.
+  - derivation: leftmost
+    rules:
+      - { lhs: Type, rhs: [Type, '*'],   action: typePtr }
+      - { lhs: Type, rhs: ['int'],       action: typeInt }
+      - { lhs: Type, rhs: ['char'],      action: typeChar }
+      - { lhs: Type, rhs: ['float'],     action: typeFloat }
+      - { lhs: Type, rhs: ['double'],    action: typeDouble }
+      - { lhs: Type, rhs: ['void'],      action: typeVoid }
+      # `struct ID` as a type reference — used in declarations, parameters,
+      # casts, sizeof. The visitor emits just `ID` since C# doesn't require
+      # the `struct` keyword in usage position (only at declaration).
+      - { lhs: Type, rhs: ['struct', ID], action: typeStruct }
+      # `TYPE_NAME` — synthetic terminal injected by TypeNameRewriter for
+      # any ID that's been seen on the LHS of a previous `typedef`. The
+      # visitor emits the type-name string verbatim (it's already the
+      # C# type identifier we want).
+      - { lhs: Type, rhs: [TYPE_NAME], action: typeName }
+      # `enum ID` as a type reference. Lowers to plain `int` in C# since
+      # enumerators are emitted as `const int` constants (not a C# enum).
+      - { lhs: Type, rhs: ['enum', ID], action: typeEnum }
+      # `union ID` as a type reference — emits just the ID (the generated
+      # union-struct decl shares the same name, like `struct ID`).
+      - { lhs: Type, rhs: ['union', ID], action: typeUnion }
+
+  - derivation: none
+    rules:
+      - { lhs: Block, rhs: ['{', StmtList, '}'], action: block }
+      - { lhs: Block, rhs: ['{', '}'],            action: blockEmpty }
+
+  - derivation: leftmost
+    rules:
+      - { lhs: StmtList, rhs: [Stmt, StmtList], action: stmtsCons }
+      - { lhs: StmtList, rhs: [Stmt],            action: stmtsOne }
+
+  # Dangling-else: rightmost so on lookahead `else` at state `[if ( E ) Stmt]`
+  # the parser shifts (binds the else to the nearest if). The two if rules
+  # have to share a group for the precedence resolution to apply.
+  - derivation: rightmost
+    rules:
+      - { lhs: Stmt, rhs: ['if', '(', E, ')', Stmt],             action: stmtIf }
+      - { lhs: Stmt, rhs: ['if', '(', E, ')', Stmt, 'else', Stmt], action: stmtIfElse }
+
+  # All other Stmt rules. Disjoint first sets — no S/R within this group.
+  - derivation: none
+    rules:
+      - { lhs: Stmt, rhs: ['while', '(', E, ')', Stmt], action: stmtWhile }
+      # `do Stmt while (E) ;` — runs the body at least once. Cond is
+      # wrapped with Cond.B like the other loop conditions.
+      - { lhs: Stmt, rhs: ['do', Stmt, 'while', '(', E, ')', ';'], action: stmtDoWhile }
+      # for-loop with declaration init: `for (int i = 0; i < n; i++) stmt`.
+      # Two productions covering the two common init shapes (decl vs expr).
+      # Init/cond/incr are all required for now — empty clauses (`for (;;)`)
+      # come later. The condition `E` becomes a bool in C# because all our
+      # comparison/logical visitors already emit bool-yielding form.
+      - { lhs: Stmt, rhs: ['for', '(', Decl, ';', E, ';', E, ')', Stmt], action: stmtForDecl }
+      - { lhs: Stmt, rhs: ['for', '(', E,    ';', E, ';', E, ')', Stmt], action: stmtForExpr }
+      - { lhs: Stmt, rhs: ['return', E, ';'],            action: stmtReturn }
+      - { lhs: Stmt, rhs: ['return', ';'],                action: stmtReturnVoid }
+      # `break;` / `continue;` — bare keyword + semicolon. Grammar accepts
+      # them anywhere a Stmt is valid; semantic validity (must be inside a
+      # loop) is enforced by the downstream C# compiler. Matches real C.
+      - { lhs: Stmt, rhs: ['break', ';'],                  action: stmtBreak }
+      - { lhs: Stmt, rhs: ['continue', ';'],               action: stmtContinue }
+      # `switch (E) { CaseList }`. Each Case is one `case X: stmts` or
+      # `default: stmts` clause; the user is responsible for ending each
+      # clause with `break;` (matches C convention and C# requirement).
+      # Fall-through (no `break`) emits the same shape but C# rejects it —
+      # we surface the C# error as a dotcc compile failure for now.
+      - { lhs: Stmt, rhs: ['switch', '(', E, ')', '{', CaseList, '}'], action: stmtSwitch }
+      - { lhs: Stmt, rhs: [Decl, ';'],                    action: stmtDecl }
+      - { lhs: Stmt, rhs: [E, ';'],                        action: stmtExpr }
+      - { lhs: Stmt, rhs: [Block] }
+
+  # MemberList: one or more `Type ID ;` declarations inside a struct body.
+  - derivation: leftmost
+    rules:
+      - { lhs: MemberList, rhs: [Member, MemberList], action: membersCons }
+      - { lhs: MemberList, rhs: [Member],              action: membersOne }
+
+  - derivation: none
+    rules:
+      - { lhs: Member, rhs: [Type, ID, ';'], action: structMember }
+
+  # EnumList / EnumItem — enumerator body for `enum Name { … }`.
+  - derivation: leftmost
+    rules:
+      - { lhs: EnumList, rhs: [EnumItem], action: enumListOne }
+      - { lhs: EnumList, rhs: [EnumList, ',', EnumItem], action: enumListCons }
+
+  - derivation: none
+    rules:
+      - { lhs: EnumItem, rhs: [ID], action: enumItem }
+      - { lhs: EnumItem, rhs: [ID, '=', E], action: enumItemInit }
+
+  # CaseList: one or more Case clauses inside a switch block.
+  - derivation: leftmost
+    rules:
+      - { lhs: CaseList, rhs: [Case, CaseList], action: casesCons }
+      - { lhs: CaseList, rhs: [Case],            action: casesOne }
+
+  # Case: `case E : Stmts` or `default : Stmts`. The body is a StmtList —
+  # one or more statements. To terminate properly the user writes `break;`
+  # at the end (or `return`, or `continue` inside an outer loop).
+  - derivation: none
+    rules:
+      - { lhs: Case, rhs: ['case', E, ':', StmtList],   action: caseValue }
+      - { lhs: Case, rhs: ['default', ':', StmtList],   action: caseDefault }
+
+  - derivation: none
+    rules:
+      # Multi-declarator: `Type x` / `Type x = E` / `Type x, y` / `Type x = 1, y = 2`.
+      # Single-declarator forms are the special case where DeclItemList has
+      # one element. The Type prefix is shared across all comma-separated
+      # items, matching real C (where `int x, y;` declares two `int`s).
+      - { lhs: Decl, rhs: [Type, DeclItemList], action: decl }
+      # Stack-allocated array: `int arr[N]`. Lowers to `int* arr = stackalloc int[N]`
+      # so subscript and pointer arithmetic both work naturally in C# `unsafe`
+      # blocks. Size must be a compile-time constant or an int expression
+      # — same constraint C and C# both enforce. Kept as a single-declarator
+      # rule because the lowering rewrites the type (T → T*) and the
+      # initializer (= stackalloc) — doesn't compose with peers in one decl.
+      - { lhs: Decl, rhs: [Type, ID, '[', E, ']'], action: declArr }
+      # Array with aggregate initializer: `int arr[N] = {1, 2, 3}` (sized) or
+      # `int arr[] = {1, 2, 3}` (size derived from init). Both lower to
+      # `T* arr = stackalloc T[]{ 1, 2, 3 }`. We reuse ArgList for the brace
+      # contents — it's a comma-separated expression list, which is exactly
+      # the same shape.
+      - { lhs: Decl, rhs: [Type, ID, '[', E, ']', '=', '{', ArgList, '}'], action: declArrInit }
+      - { lhs: Decl, rhs: [Type, ID, '[', ']', '=', '{', ArgList, '}'], action: declArrInitImplicit }
+      # Struct aggregate initializer: `Point p = {1, 2};`. The visitor looks
+      # up the struct's field names from a side map populated by StructDef /
+      # TypedefStruct / UnionDef, then emits `Point p = new Point { x = 1,
+      # y = 2 };` — C# requires named members in object initializers (no
+      # positional form). Single-declarator only (like declArr*) since the
+      # lowering rewrites the initializer shape.
+      - { lhs: Decl, rhs: [Type, ID, '=', '{', ArgList, '}'], action: declStructInit }
+
+  # DeclItemList: comma-separated list of declarators sharing a leading Type.
+  - derivation: leftmost
+    rules:
+      - { lhs: DeclItemList, rhs: [DeclItem], action: declItemListOne }
+      - { lhs: DeclItemList, rhs: [DeclItemList, ',', DeclItem], action: declItemListCons }
+
+  - derivation: none
+    rules:
+      - { lhs: DeclItem, rhs: [ID], action: declItem }
+      - { lhs: DeclItem, rhs: [ID, '=', E], action: declItemInit }
+
+  # Assignment (incl. compound) is right-associative — all E rules share the
+  # rightmost group so on lookahead `=`/`+=`/... at state `[..LOr]` the
+  # parser shifts. Compound assigns lower to `(lhs OP= rhs)` literally —
+  # C# has the same operators with identical semantics.
+  - derivation: rightmost
+    rules:
+      - { lhs: E, rhs: [LOr, '=',  E], action: assign }
+      - { lhs: E, rhs: [LOr, '+=', E], action: addAssign }
+      - { lhs: E, rhs: [LOr, '-=', E], action: subAssign }
+      - { lhs: E, rhs: [LOr, '*=', E], action: mulAssign }
+      - { lhs: E, rhs: [LOr, '/=', E], action: divAssign }
+      - { lhs: E, rhs: [LOr, '%=', E], action: modAssign }
+      - { lhs: E, rhs: [LOr, '&=',  E], action: andAssign }
+      - { lhs: E, rhs: [LOr, '|=',  E], action: orAssign  }
+      - { lhs: E, rhs: [LOr, '^=',  E], action: xorAssign }
+      - { lhs: E, rhs: [LOr, '<<=', E], action: shlAssign }
+      - { lhs: E, rhs: [LOr, '>>=', E], action: shrAssign }
+      # Ternary `c ? a : b` — between LOr and assignment in real C precedence.
+      # Both branches are `E` so nested ternaries chain right-associative,
+      # matching C. Cond.B wraps the C-truthy condition at emit time.
+      - { lhs: E, rhs: [LOr, '?', E, ':', E], action: ternary }
+      - { lhs: E, rhs: [LOr] }
+
+  - derivation: leftmost
+    rules:
+      - { lhs: LOr, rhs: [LOr, '||', LAnd], action: lor }
+      - { lhs: LOr, rhs: [LAnd] }
+
+  - derivation: leftmost
+    rules:
+      # `&&` lowers from LAnd to BOr (was Equ pre-bitwise); the ladder now
+      # passes through the four bitwise tiers before reaching Equ.
+      - { lhs: LAnd, rhs: [LAnd, '&&', BOr], action: land }
+      - { lhs: LAnd, rhs: [BOr] }
+
+  - derivation: leftmost
+    rules:
+      - { lhs: BOr,  rhs: [BOr, '|', BXor], action: bOr }
+      - { lhs: BOr,  rhs: [BXor] }
+
+  - derivation: leftmost
+    rules:
+      - { lhs: BXor, rhs: [BXor, '^', BAnd], action: bXor }
+      - { lhs: BXor, rhs: [BAnd] }
+
+  - derivation: leftmost
+    rules:
+      # Bitwise AND. `&` is already a Unary op (addrOf); the lexer emits one
+      # `&` token and the parser disambiguates by context — binary at this
+      # precedence vs unary in `Unary`. LALR(1) handles this cleanly because
+      # the LHS of `BAnd & Equ` is BAnd (already-reduced expr) whereas the
+      # unary `& Unary` only fires when there's no left-hand expression yet.
+      - { lhs: BAnd, rhs: [BAnd, '&', Equ], action: bAnd }
+      - { lhs: BAnd, rhs: [Equ] }
+
+  - derivation: leftmost
+    rules:
+      - { lhs: Equ, rhs: [Equ, '==', Rel], action: eq }
+      - { lhs: Equ, rhs: [Equ, '!=', Rel], action: neq }
+      - { lhs: Equ, rhs: [Rel] }
+
+  - derivation: leftmost
+    rules:
+      - { lhs: Rel, rhs: [Rel, '<',  Shift], action: lt }
+      - { lhs: Rel, rhs: [Rel, '>',  Shift], action: gt }
+      - { lhs: Rel, rhs: [Rel, '<=', Shift], action: le }
+      - { lhs: Rel, rhs: [Rel, '>=', Shift], action: ge }
+      - { lhs: Rel, rhs: [Shift] }
+
+  - derivation: leftmost
+    rules:
+      - { lhs: Shift, rhs: [Shift, '<<', Add], action: shl }
+      - { lhs: Shift, rhs: [Shift, '>>', Add], action: shr }
+      - { lhs: Shift, rhs: [Add] }
+
+  - derivation: leftmost
+    rules:
+      - { lhs: Add, rhs: [Add, '+', Mul], action: add }
+      - { lhs: Add, rhs: [Add, '-', Mul], action: sub }
+      - { lhs: Add, rhs: [Mul] }
+
+  - derivation: leftmost
+    rules:
+      - { lhs: Mul, rhs: [Mul, '*', Unary], action: mul }
+      - { lhs: Mul, rhs: [Mul, '/', Unary], action: div }
+      - { lhs: Mul, rhs: [Mul, '%', Unary], action: mod }
+      - { lhs: Mul, rhs: [Unary] }
+
+  # Unary operators are right-associative: `--x` is `-(-x)`, `**p` is `*(*p)`.
+  # Cast `(Type) Unary` lives here too so its precedence matches real C
+  # (binds tighter than mul/div, looser than postfix calls). Disambiguates
+  # from `Primary -> '(' E ')'` by lookahead: after `(`, a Type-starting
+  # keyword (int/char/float/double/void) → cast; anything else → paren-expr.
+  - derivation: rightmost
+    rules:
+      - { lhs: Unary, rhs: ['*',  Unary], action: deref }
+      - { lhs: Unary, rhs: ['&',  Unary], action: addrOf }
+      - { lhs: Unary, rhs: ['-',  Unary], action: neg }
+      - { lhs: Unary, rhs: ['~',  Unary], action: bNot }
+      # Logical `!` — C-truthy NOT. Lowers to `(Cond.B(E) ? 0 : 1)` so the
+      # result is int (matching C: `!x` yields 0 or 1, never bool).
+      - { lhs: Unary, rhs: ['!',  Unary], action: lNot }
+      # Prefix ++/-- — right-associative like the rest of Unary. C and C#
+      # both forbid stacking (`++++x` doesn't compile in either), but the
+      # grammar lets them stack and the C# compiler will diagnose.
+      - { lhs: Unary, rhs: ['++', Unary], action: preInc }
+      - { lhs: Unary, rhs: ['--', Unary], action: preDec }
+      - { lhs: Unary, rhs: ['(', Type, ')', Unary], action: cast }
+      # `sizeof(Type)` — emits C# `sizeof(T)` which works for unmanaged types
+      # in unsafe context. All dotcc structs are unmanaged (only primitive
+      # and pointer fields) so this is always valid. The expression form
+      # `sizeof expr` is deferred — needs type inference to lower correctly.
+      - { lhs: Unary, rhs: ['sizeof', '(', Type, ')'], action: sizeofType }
+      - { lhs: Unary, rhs: [Postfix] }
+
+  - derivation: leftmost
+    rules:
+      - { lhs: Postfix, rhs: [Postfix, '(', ArgList, ')'], action: call }
+      - { lhs: Postfix, rhs: [Postfix, '(', ')'],            action: callNoArgs }
+      # Postfix ++/-- — left-associative (chained `x++` then `++` is illegal
+      # in C and C# both; the grammar permits but the downstream compiler
+      # diagnoses).
+      - { lhs: Postfix, rhs: [Postfix, '++'],                 action: postInc }
+      - { lhs: Postfix, rhs: [Postfix, '--'],                 action: postDec }
+      # Subscript `expr[i]`. Lowers to the same syntax in C# — pointer
+      # subscript desugars to `*(expr + i)` per the language spec, same as C.
+      - { lhs: Postfix, rhs: [Postfix, '[', E, ']'],          action: subscript }
+      # Member access on a struct value (`s.f`) or struct pointer (`p->f`).
+      # C# accepts both `.` and `->` with identical semantics in unsafe
+      # contexts (which is where all dotcc-emitted user code lives).
+      - { lhs: Postfix, rhs: [Postfix, '.',  ID],             action: memberDot }
+      - { lhs: Postfix, rhs: [Postfix, '->', ID],             action: memberArrow }
+      - { lhs: Postfix, rhs: [Primary] }
+
+  - derivation: none
+    rules:
+      - { lhs: Primary, rhs: [ID],          action: var }
+      - { lhs: Primary, rhs: [NUM],         action: num }
+      - { lhs: Primary, rhs: [FLOAT],       action: flt }
+      - { lhs: Primary, rhs: [STRING],      action: str }
+      # `'a'`, `'\n'` etc. — C char literal. In C the value has type int
+      # but is conventionally assigned to char/byte; we lower to `(byte)'a'`
+      # since our `char` is `byte`. Escape processing happens in the visitor.
+      - { lhs: Primary, rhs: [CHAR],        action: chr }
+      - { lhs: Primary, rhs: ['(', E, ')'], action: paren }
+
+  - derivation: leftmost
+    rules:
+      - { lhs: ArgList, rhs: [E, ',', ArgList], action: argsCons }
+      - { lhs: ArgList, rhs: [E],                action: argsOne }
+
+lexer:
+  root:
+    # Preprocessor directives — single-token matches. Longest-match in the byte
+    # DFA picks `#include` over any prefix; first-rule-wins handles ties.
+    # Order matters here too: `#ifndef` and `#ifdef` need to precede `#if`
+    # since they share the prefix and on identical-length ambiguity the
+    # earlier rule wins (and longest-match picks the longer string anyway).
+    - { symbol: '#ifndef',  match: '#ifndef' }
+    - { symbol: '#ifdef',   match: '#ifdef' }
+    - { symbol: '#if',      match: '#if' }
+    - { symbol: '#else',    match: '#else' }
+    - { symbol: '#endif',   match: '#endif' }
+    - { symbol: '#include', match: '#include' }
+    - { symbol: '#define',  match: '#define' }
+    - { symbol: '#undef',   match: '#undef' }
+
+    # Block comments — must precede the `/` operator rule so the slash isn't
+    # eaten first. The regex avoids alternation (IRx has no `|`):
+    #   /\*  [^*]*  ( \* [^/] [^*]* )*  \*+ /
+    # = `/*` then non-stars then (single `*` not followed by `/` then more
+    # non-stars)* then one-or-more `*` then `/`. Classic C-comment regex
+    # rendered without alternation; handles `/**/`, `/* x */`, `/** comment **/`.
+    - { symbol: BLOCK_COMMENT, match: '/\*[^*]*(\*[^/][^*]*)*\*+/', action: ignore }
+
+    # Line comments. Ignored.
+    - { symbol: LINE_COMMENT, match: '//[^\n]*', action: ignore }
+
+    # Keywords first — first-rule-wins on ties with identifier (e.g. `int` is 3
+    # chars matching both `int` keyword and `[a-zA-Z_]...` identifier; keyword
+    # wins because it sits earlier).
+    - { symbol: 'int',    match: 'int' }
+    - { symbol: 'char',   match: 'char' }
+    - { symbol: 'float',  match: 'float' }
+    - { symbol: 'double', match: 'double' }
+    - { symbol: 'void',   match: 'void' }
+    - { symbol: 'if',     match: 'if' }
+    - { symbol: 'else',   match: 'else' }
+    - { symbol: 'while',  match: 'while' }
+    - { symbol: 'return', match: 'return' }
+    - { symbol: 'break',    match: 'break' }
+    - { symbol: 'continue', match: 'continue' }
+    - { symbol: 'for',      match: 'for' }
+    - { symbol: 'switch',   match: 'switch' }
+    - { symbol: 'case',     match: 'case' }
+    - { symbol: 'default',  match: 'default' }
+    - { symbol: 'struct',   match: 'struct' }
+    - { symbol: 'sizeof',   match: 'sizeof' }
+    - { symbol: 'typedef',  match: 'typedef' }
+    - { symbol: 'do',       match: 'do' }
+    - { symbol: 'enum',     match: 'enum' }
+    - { symbol: 'union',    match: 'union' }
+    - { symbol: 'static',   match: 'static' }
+
+    # Multi-char operators. Longest-match handles `==` vs `=`, `<=` vs `<`, etc.
+    # so the ordering doesn't strictly matter — listed multi-char first for
+    # readability.
+    - { symbol: '==', match: '==' }
+    - { symbol: '!=', match: '!=' }
+    - { symbol: '<=', match: '<=' }
+    - { symbol: '>=', match: '>=' }
+    - { symbol: '&&', match: '&&' }
+    - { symbol: '||', match: '\|\|' }
+    # Multi-char inc/dec and compound assignment. Listed before their
+    # single-char counterparts so longest-match (and first-rule-on-tie)
+    # picks the multi-char form. `++ -- += -= *= /= %=`.
+    - { symbol: '++', match: '\+\+' }
+    - { symbol: '--', match: '\-\-' }
+    - { symbol: '+=', match: '\+=' }
+    - { symbol: '-=', match: '\-=' }
+    - { symbol: '*=', match: '\*=' }
+    - { symbol: '/=', match: '/=' }
+    - { symbol: '%=', match: '%=' }
+    # Bitwise compound first (longest-match: `<<=` before `<<` before `<=`).
+    - { symbol: '<<=', match: '<<=' }
+    - { symbol: '>>=', match: '>>=' }
+    - { symbol: '&=',  match: '&=' }
+    - { symbol: '|=',  match: '\|=' }
+    - { symbol: '^=',  match: '\^=' }
+    # Then bitwise shifts (two-char) before single-char `<` / `>`.
+    - { symbol: '<<',  match: '<<' }
+    - { symbol: '>>',  match: '>>' }
+    # Arrow operator before single-char `-` and `>` (longest-match).
+    - { symbol: '->',  match: '\->' }
+
+    # Single-char operators and punctuation.
+    - { symbol: '=', match: '=' }
+    - { symbol: '<', match: '<' }
+    - { symbol: '>', match: '>' }
+    - { symbol: '+', match: '\+' }
+    - { symbol: '-', match: '\-' }
+    - { symbol: '*', match: '\*' }
+    - { symbol: '/', match: '/' }
+    - { symbol: '%', match: '%' }
+    - { symbol: '&', match: '&' }
+    - { symbol: '|', match: '\|' }
+    - { symbol: '^', match: '\^' }
+    - { symbol: '~', match: '~' }
+    - { symbol: '(', match: '\(' }
+    - { symbol: ')', match: '\)' }
+    - { symbol: '{', match: '\{' }
+    - { symbol: '}', match: '\}' }
+    - { symbol: '[', match: '\[' }
+    - { symbol: ']', match: '\]' }
+    - { symbol: ';', match: ';' }
+    - { symbol: ',', match: ',' }
+    - { symbol: ':', match: ':' }
+    - { symbol: '?', match: '\?' }
+    # `!=` must lex before `!` (longest-match) — but `!=` already lives in
+    # the multi-char block above, so single `!` here is safe.
+    - { symbol: '!', match: '!' }
+
+    # Varargs marker `...` (three literal dots). MUST precede the single
+    # `.` member-access rule below — longest-match picks `...` over `.`,
+    # but listing this first removes any ambiguity on first-rule-wins ties.
+    - { symbol: '...', match: '\.\.\.' }
+    - { symbol: '.',   match: '\.' }
+
+    # Literals. FLOAT BEFORE NUM so longest-match picks float for `123.5`
+    # (NUM would match just `123` otherwise). FLOAT requires a mandatory
+    # decimal point to disambiguate cleanly from NUM — `123` is INT, `123.0`
+    # is FLOAT. Suffixed form `123.5f` / `123.5F` first (longest match);
+    # un-suffixed second. Both passthrough to C# numeric literal syntax,
+    # which accepts `f`/`F`. (Real C also accepts `L` for long double; we
+    # skip that since C# has no `L` suffix on floats.)
+    # STRING used both by #include args and as in-expression literals via
+    # the `Primary -> STRING` production.
+    - { symbol: STRING, match: '"[^"]*"' }
+    # Char literal: IRx has no `.` (any-char) operator — it parses `.` as
+    # literal. Use a char class on the inner byte instead. Two rules so the
+    # escape form (4 bytes) outranks the plain form (3 bytes) by
+    # longest-match. The class on rule 1 lists every escape char we accept;
+    # rule 2 matches any non-quote, non-backslash byte. Visitor decodes the
+    # escape at emit time and lowers to `(byte)'X'`.
+    - { symbol: CHAR,   match: '''\\[nrtbf0\\''"]''' }
+    - { symbol: CHAR,   match: '''[^''\\]''' }
+    - { symbol: FLOAT,  match: '[0-9]+\.[0-9]+([eE][+\-]?[0-9]+)?[fF]' }
+    - { symbol: FLOAT,  match: '[0-9]+\.[0-9]+([eE][+\-]?[0-9]+)?' }
+    # Hex literal — listed before NUM so longest-match (`0xFF` > `0`) picks
+    # it. C# accepts the same `0x`-prefixed syntax, so the Num visitor just
+    # passes the raw content through unchanged.
+    - { symbol: NUM,    match: '0[xX][0-9a-fA-F]+' }
+    - { symbol: NUM,    match: '[0-9]+' }
+    - { symbol: ID,     match: '[a-zA-Z_][a-zA-Z_0-9]*' }
+
+    # Whitespace + newlines: ignored. The preprocessor uses SourcePosition.Line
+    # to detect directive line boundaries — which the byte-DFA lexer populates
+    # whether or not WS is ignored, so this works.
+    - { symbol: WS, match: '[ \t\r\n]+', action: ignore }
+
+# Preprocessor declaration. The source generator turns this block into:
+#   public interface IPreprocessor {
+#       IEnumerable<Item> OnInclude(IReadOnlyList<Item> args);
+#       IEnumerable<Item> OnDefine(IReadOnlyList<Item> args);
+#       IEnumerable<Item> OnUndef(IReadOnlyList<Item> args);
+#       IEnumerable<Item> Rewrite(Item token);
+#       bool IsDefined(string name);     // for #ifdef / #ifndef
+#   }
+# plus BuildPreprocessor() / WrapPreprocessor() helpers. The `conditionals:`
+# block tells the framework which directives belong to the built-in
+# conditional-compilation engine (the user doesn't implement those — the
+# runtime tracks the #if/#endif stack and suppresses tokens in false branches
+# automatically, consulting `IsDefined` for #ifdef/#ifndef).
+preprocessor:
+  directives:
+    '#include': onInclude
+    '#define':  onDefine
+    '#undef':   onUndef
+  conditionals:
+    if:     '#if'
+    ifdef:  '#ifdef'
+    ifndef: '#ifndef'
+    else:   '#else'
+    endif:  '#endif'

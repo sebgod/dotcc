@@ -1,0 +1,4 @@
+stack: (1, 2)
+after try_mutate: (1, 2)
+heap: (10, 20)
+translated: (15, 27)

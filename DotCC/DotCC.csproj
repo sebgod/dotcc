@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    DotCC — thin clang-like frontend over DotCC.Lib. Owns CLI argument
+    parsing and dispatch only; all compiler logic lives in DotCC.Lib so it
+    can be exercised in-process from DotCC.Tests / DotCC.FunctionalTests
+    without spawning the frontend exe.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>DotCC</RootNamespace>
+    <AssemblyName>dotcc</AssemblyName>
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.CommandLine" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DotCC.Lib\DotCC.Lib.csproj" />
+  </ItemGroup>
+
+</Project>

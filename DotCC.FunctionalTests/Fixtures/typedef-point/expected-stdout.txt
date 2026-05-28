@@ -1,0 +1,4 @@
+brighten(5) = 15
+sum = 300
+pt: (1, 2)
+translated: (13, 24)

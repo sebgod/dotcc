@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Functional / end-to-end tests for the dotcc pipeline.
+
+    For each fixture directory under Fixtures/<name>/ that contains an
+    expected-stdout.txt sidecar, the test:
+      1. Drives DotCC.Compiler.EmitCSharp() over the fixture's .c files
+         (in-process, no frontend exe spawn).
+      2. Compiles the emitted C# string with Roslyn (Microsoft.CodeAnalysis.CSharp,
+         AllowUnsafe=true, OutputKind.ConsoleApplication).
+      3. Loads the resulting assembly into a fresh AssemblyLoadContext.
+      4. Invokes its entry point with Console.Out redirected to a StringWriter.
+      5. Asserts the captured stdout equals expected-stdout.txt.
+
+    No Process.Start anywhere — neither the frontend exe nor `dotnet run`.
+    Fast and deterministic; adding a new fixture is just dropping a folder
+    with .c + expected-stdout.txt into Fixtures/.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>DotCC.FunctionalTests</RootNamespace>
+    <AssemblyName>DotCC.FunctionalTests</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DotCC.Lib\DotCC.Lib.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="Shouldly" />
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" />
+  </ItemGroup>
+
+  <!-- Fixture .c/.h/.txt files copied to output so the test discovers them
+       at runtime via AppContext.BaseDirectory. -->
+  <ItemGroup>
+    <None Include="Fixtures\**\*.c" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\**\*.h" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\**\*.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

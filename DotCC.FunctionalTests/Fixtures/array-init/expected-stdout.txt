@@ -1,0 +1,3 @@
+sized total=150
+derived total=10
+letters: h i !

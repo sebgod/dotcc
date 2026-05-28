@@ -1,0 +1,27 @@
+# .NET build outputs
+bin/
+obj/
+*.user
+*.suo
+*.userprefs
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.swp
+
+# dotcc-emitted artifacts (default output dirs and per-example builds)
+a.out-cs/
+examples/*/build/
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# NuGet cache
+*.nupkg
+packages/
+
+# AOT publish artifacts that escape bin/
+*.pdb

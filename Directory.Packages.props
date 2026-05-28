@@ -1,0 +1,32 @@
+<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- LALR.CC runtime + bundled source generator (ships YamlDotNet in the
+         analyzer payload, so consumers need no extra dance — the same
+         package handles both the runtime API and the *.lalr.yaml generator). -->
+    <PackageVersion Include="SharpAstro.LALR.CC" Version="3.1.0" />
+
+    <!-- Build-time only: needed in sibling mode so the source generator can
+         resolve YamlDotNet from the analyzer host. Unused (and not pulled)
+         in NuGet mode because the SharpAstro.LALR.CC package already bundles
+         YamlDotNet under analyzers/dotnet/cs/. -->
+    <PackageVersion Include="YamlDotNet" Version="17.1.0" />
+
+    <!-- CLI argument parsing (clang-like flags). -->
+    <PackageVersion Include="System.CommandLine" Version="2.0.5" />
+
+    <!-- Test stack: xUnit v3 on Microsoft.Testing.Platform + Shouldly. Same
+         versions in use by sebgod/chess + sharpastro/LALR.CC. -->
+    <PackageVersion Include="xunit.v3" Version="3.2.2" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.3.0" />
+    <PackageVersion Include="Shouldly" Version="4.3.0" />
+    <PackageVersion Include="coverlet.collector" Version="8.0.1" />
+
+    <!-- Functional tests use in-process Roslyn to compile + run dotcc's
+         emitted C# without spawning subprocesses. -->
+    <PackageVersion Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,42 @@
+<Project>
+
+  <!--
+    Shared MSBuild settings for every project in the dotcc solution.
+    .NET 10 + C# 14, AOT-friendly, deterministic, nullable on.
+
+    DotCC is intentionally tiny on top of LALR.CC — most of the heavy lifting
+    (grammar → parse table → lexer DFA → source-generated AST + IVisitor)
+    happens inside SharpAstro.LALR.CC. The compiler exe just wires up a
+    visitor that emits C#.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>14</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+
+  <!--
+    Sibling-or-NuGet wiring for SharpAstro.LALR.CC.
+    Auto-detect: if `../../sharpastro/LALR.CC/LALR.CC/LALR.CC.csproj` exists
+    relative to the repo root, default to sibling ProjectReference. Otherwise
+    fall back to PackageReference of SharpAstro.LALR.CC from nuget.org.
+    Override on the CLI:  dotnet build -p:UseLocalLalrCc=false
+    (forces NuGet even when the sibling working copy is present).
+    The csproj reads $(UseLocalLalrCc) and switches its ItemGroup accordingly.
+  -->
+  <PropertyGroup>
+    <UseLocalLalrCc Condition="'$(UseLocalLalrCc)' == ''
+      AND Exists('$(MSBuildThisFileDirectory)..\..\sharpastro\LALR.CC\LALR.CC\LALR.CC.csproj')
+      AND Exists('$(MSBuildThisFileDirectory)..\..\sharpastro\LALR.CC\LALR.CC.SourceGenerators\LALR.CC.SourceGenerators.csproj')">true</UseLocalLalrCc>
+  </PropertyGroup>
+
+</Project>

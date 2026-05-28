@@ -1,0 +1,4 @@
+Red=0 Green=1 Blue=5 Yellow=6 Purple=7
+OK=200 NotFound=404 ServerError=500
+yellow
+color_value(Blue)=50

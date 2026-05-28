@@ -1,0 +1,7 @@
+!0=1 !1=0 !!42=1
+max=20 min=10
+score=75 grade=C
+do-once count=1
+6 5 4 3 2 1 
+matched 'a'
+nl=10 tab=9 backslash=92
