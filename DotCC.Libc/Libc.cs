@@ -20,7 +20,7 @@ namespace DotCC.Libc;
 /// any hot path (Printf's <see cref="PrintfBuilder"/> is a ref struct,
 /// <see cref="L"/> pins RVA data, strlen/strcmp/memset are bare loops).
 /// </remarks>
-public static unsafe class Libc
+public static unsafe partial class Libc
 {
     // ---------------------------------------------------------------------
     // Memory: malloc / free

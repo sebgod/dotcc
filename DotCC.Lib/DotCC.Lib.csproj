@@ -52,6 +52,30 @@
     <AdditionalFiles Include="c.lalr.yaml" />
   </ItemGroup>
 
+  <!-- Synthetic standard headers shipped with the compiler.
+       Embedded so the runtime can resolve `#include <math.h>` etc.
+       without any disk I/O at runtime — same model as clang's
+       "lib/clang/<ver>/include/" tree, but loaded from the assembly
+       manifest. Compiler.SystemHeaders reads them at startup via
+       Assembly.GetManifestResourceStream. -->
+  <ItemGroup>
+    <EmbeddedResource Include="include\*.h" LogicalName="DotCC.SystemHeaders.%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <!-- DotCC.Libc runtime sources, embedded as resources. These are the
+       SAME .cs files that DotCC.Libc.csproj compiles into the testable
+       runtime DLL; we ALSO embed them here so Compiler.BuildShell can
+       splice them into every emitted .cs file without disk I/O at
+       runtime. Single source of truth — edit a method in
+       ../DotCC.Libc/Libc.cs and it lands both in the unit tests and
+       in every emitted program. Once DotCC.Libc ships to NuGet, the
+       emitter can switch to `#:package DotCC.Libc@x` + `using static`
+       and drop this embedding entirely. -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\DotCC.Libc\*.cs"
+                      LogicalName="DotCC.Runtime.%(Filename)%(Extension)" />
+  </ItemGroup>
+
   <ItemGroup>
     <InternalsVisibleTo Include="DotCC.Tests" />
     <InternalsVisibleTo Include="DotCC.FunctionalTests" />

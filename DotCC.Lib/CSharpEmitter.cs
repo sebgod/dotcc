@@ -847,11 +847,28 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     {
         var callee = T(n.Arg0);
         var args = A(n.Arg2);  // strongly-typed arg list, no sentinel splitting
-        if (callee == "Printf")
+        // printf-family fluent lowering. C `printf("%d %s", x, s)` → C#
+        // `printf(L("%d %s\0"u8)).Arg(x).Arg(s).Done()` — works around
+        // `params object[]` not accepting raw pointers. The callee name
+        // arrives unmapped (post-MapBuiltin-as-identity) so we match the
+        // C spelling. `fprintf(stream, fmt, …)` follows the same shape
+        // but with the stream as the first call arg.
+        if (callee == "printf")
         {
             var sb = new StringBuilder();
-            sb.Append("Printf(").Append(args[0]).Append(')');
+            sb.Append("printf(").Append(args[0]).Append(')');
             for (int i = 1; i < args.Count; i++)
+            {
+                sb.Append(".Arg(").Append(args[i]).Append(')');
+            }
+            sb.Append(".Done()");
+            return sb.ToString();
+        }
+        if (callee == "fprintf" && args.Count >= 2)
+        {
+            var sb = new StringBuilder();
+            sb.Append("fprintf(").Append(args[0]).Append(", ").Append(args[1]).Append(')');
+            for (int i = 2; i < args.Count; i++)
             {
                 sb.Append(".Arg(").Append(args[i]).Append(')');
             }
@@ -864,7 +881,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     public EmitContent Visit(C.CallNoArgs n)
     {
         var callee = T(n.Arg0);
-        if (callee == "Printf") { return "Printf(L(\"\\0\"u8)).Done()"; }
+        if (callee == "printf") { return "printf(L(\"\\0\"u8)).Done()"; }
         return $"{callee}()";
     }
 
@@ -967,13 +984,18 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
 
     public EmitContent Visit(C.Paren n) => $"({T(n.Arg1)})";
 
-    private static string MapBuiltin(string name) => name switch
-    {
-        "malloc" => "Malloc",
-        "free" => "Free",
-        "printf" => "Printf",
-        _ => name,
-    };
+    /// <summary>
+    /// Identity for now — kept as a seam in case future grammar features
+    /// need to remap a C identifier to a different C# name before emit.
+    /// </summary>
+    /// <remarks>
+    /// Previously this remapped <c>printf → Printf</c>, <c>malloc → Malloc</c>,
+    /// <c>free → Free</c> to reach BuildShell's top-level (uppercase) helper
+    /// functions. After the DotCC.Libc unification, the emitted shell has
+    /// <c>using static Libc;</c> which brings the lowercase C-spelled
+    /// methods directly into scope — so the remapping became unnecessary.
+    /// </remarks>
+    private static string MapBuiltin(string name) => name;
 
     private static string EscapeForUtf8Literal(string body)
     {

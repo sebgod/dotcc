@@ -46,6 +46,23 @@ internal sealed class CPreprocessor : C.IPreprocessor
     // so nested includes work correctly.
     private string? _currentlyIncluding;
     private readonly HashSet<string> _pragmaOnceFiles = new(StringComparer.Ordinal);
+    // Multiple-include optimization. After processing a file for the first
+    // time we scan its raw text for the standard header-guard wrapping
+    // pattern (`#ifndef X / #define X / ... / #endif` with nothing
+    // meaningful outside the guard) and cache `filename → X`. On the next
+    // `#include` of the same name, if `X` is still defined we short-circuit
+    // without opening + lexing the file again. Same optimization gcc and
+    // clang document as "controlling macro" detection — it's what lets
+    // real codebases include the same header transitively from a hundred
+    // translation units without paying lex cost each time. A value of
+    // `null` in this map means "we've examined the file and it has no
+    // controlling guard" — we still re-process it on each include, just
+    // don't re-scan.
+    private readonly Dictionary<string, string?> _fileGuards = new(StringComparer.Ordinal);
+    // Diagnostic counter: number of `#include` calls that short-circuited
+    // via the multiple-include optimization. Exposed for tests so the
+    // optimization can be asserted observable without resorting to timing.
+    internal int IncludeOptimizationHits { get; private set; }
 
     // Symbol ids resolved once for the predefined-identifier substitutions
     // in `Rewrite`. `__FILE__` synthesizes a STRING token; `__LINE__`
@@ -105,10 +122,28 @@ internal sealed class CPreprocessor : C.IPreprocessor
             // Already processed via `#pragma once` — drop the include body.
             return Array.Empty<Item>();
         }
+        // Multiple-include optimization: if a previous include of this same
+        // file detected the standard header-guard wrapping pattern and the
+        // guard macro is still defined, the file is guaranteed to expand
+        // to nothing useful — skip opening + lexing entirely.
+        if (_fileGuards.TryGetValue(name, out var cachedGuard)
+            && cachedGuard is not null
+            && _macros.ContainsKey(cachedGuard))
+        {
+            IncludeOptimizationHits++;
+            return Array.Empty<Item>();
+        }
         if (!_files.TryGetValue(name, out var source))
         {
             Console.Error.WriteLine($"dotcc: #include '{name}' not resolvable (not in -I dirs or system headers)");
             return Array.Empty<Item>();
+        }
+        // First-time include of this file: scan the source text for a
+        // controlling header guard. Cache the result (or null) so the
+        // detection cost is paid at most once per filename.
+        if (!_fileGuards.ContainsKey(name))
+        {
+            _fileGuards[name] = DetectControllingMacro(source);
         }
         var saved = _currentlyIncluding;
         _currentlyIncluding = name;
@@ -124,6 +159,173 @@ internal sealed class CPreprocessor : C.IPreprocessor
         {
             _currentlyIncluding = saved;
         }
+    }
+
+    /// <summary>
+    /// Scan <paramref name="source"/> for the standard header-guard
+    /// wrapping pattern:
+    /// <code>
+    /// #ifndef NAME
+    /// #define NAME
+    /// ... body ...
+    /// #endif
+    /// </code>
+    /// Returns <c>NAME</c> if the file matches that shape exactly (only
+    /// comments + whitespace are allowed outside the outer guard), else
+    /// <c>null</c>. This is the same "controlling macro" detection gcc
+    /// and clang use to short-circuit subsequent includes — the speedup
+    /// matters in real projects where the same header gets transitively
+    /// pulled in from dozens of TUs.
+    /// </summary>
+    /// <remarks>
+    /// Operates on the raw source text rather than the lexer's tokens
+    /// because (a) directives need a different tokenisation than C
+    /// statements and (b) we want this to run BEFORE the recursive
+    /// preprocess, so it can decide whether to even enter that recursion.
+    /// </remarks>
+    internal static string? DetectControllingMacro(string source)
+    {
+        var i = SkipWhitespaceAndComments(source, 0);
+        if (!MatchDirective(source, ref i, "ifndef")) { return null; }
+        i = SkipHSpace(source, i);
+        if (!ReadIdent(source, ref i, out var guardName)) { return null; }
+        i = SkipWhitespaceAndComments(source, i);
+        if (!MatchDirective(source, ref i, "define")) { return null; }
+        i = SkipHSpace(source, i);
+        if (!ReadIdent(source, ref i, out var defineName)) { return null; }
+        if (guardName != defineName) { return null; }
+
+        // Scan the body, tracking nesting depth. We've just consumed the
+        // outer #ifndef → depth starts at 1. Find the matching #endif
+        // (depth back to 0) and verify nothing meaningful follows it.
+        var depth = 1;
+        var endifEnd = -1;
+        while (i < source.Length && depth > 0)
+        {
+            i = SkipWhitespaceAndComments(source, i);
+            if (i >= source.Length) { break; }
+            // Any '#' at this point IS a directive — SkipWhitespaceAndComments
+            // already advanced past comments, and intra-line content (string
+            // literals, code) doesn't contain a stray '#' that'd land here at
+            // a line-leading position. We just peek the directive name.
+            if (source[i] == '#')
+            {
+                i++;
+                i = SkipHSpace(source, i);
+                if (!ReadIdent(source, ref i, out var directive))
+                {
+                    // `#` followed by nothing — skip the line, keep scanning.
+                    i = SkipToEndOfLine(source, i);
+                    continue;
+                }
+                switch (directive)
+                {
+                    case "if":
+                    case "ifdef":
+                    case "ifndef":
+                        depth++;
+                        break;
+                    case "endif":
+                        depth--;
+                        if (depth == 0) { endifEnd = i; }
+                        else if (depth < 0) { return null; }
+                        break;
+                    // `#else` / `#elif` don't change nesting; everything else
+                    // (#define, #include, #pragma, #error, #warning, #undef,
+                    // #line, ...) is just regular body content.
+                }
+                i = SkipToEndOfLine(source, i);
+            }
+            else
+            {
+                // Non-directive line — skip to next.
+                i = SkipToEndOfLine(source, i);
+            }
+        }
+        if (endifEnd < 0) { return null; }
+
+        // Only whitespace / comments allowed after the closing #endif.
+        var tail = SkipWhitespaceAndComments(source, endifEnd);
+        if (tail < source.Length) { return null; }
+        return guardName;
+    }
+
+    private static int SkipWhitespaceAndComments(string s, int i)
+    {
+        while (i < s.Length)
+        {
+            var c = s[i];
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { i++; continue; }
+            if (c == '/' && i + 1 < s.Length)
+            {
+                if (s[i + 1] == '/')
+                {
+                    // Line comment runs to newline.
+                    i += 2;
+                    while (i < s.Length && s[i] != '\n') { i++; }
+                    continue;
+                }
+                if (s[i + 1] == '*')
+                {
+                    // Block comment runs to */.
+                    i += 2;
+                    while (i + 1 < s.Length && !(s[i] == '*' && s[i + 1] == '/')) { i++; }
+                    if (i + 1 < s.Length) { i += 2; }
+                    else { i = s.Length; }
+                    continue;
+                }
+            }
+            break;
+        }
+        return i;
+    }
+
+    private static int SkipHSpace(string s, int i)
+    {
+        while (i < s.Length && (s[i] == ' ' || s[i] == '\t')) { i++; }
+        return i;
+    }
+
+    private static int SkipToEndOfLine(string s, int i)
+    {
+        while (i < s.Length && s[i] != '\n') { i++; }
+        if (i < s.Length) { i++; }
+        return i;
+    }
+
+    /// <summary>
+    /// Try to match a preprocessor directive (<c># [space*] keyword</c>)
+    /// at position <paramref name="i"/>. Advances <paramref name="i"/>
+    /// past the directive keyword on success.
+    /// </summary>
+    private static bool MatchDirective(string s, ref int i, string keyword)
+    {
+        var start = i;
+        if (i >= s.Length || s[i] != '#') { return false; }
+        i++;
+        i = SkipHSpace(s, i);
+        if (i + keyword.Length > s.Length) { i = start; return false; }
+        for (var k = 0; k < keyword.Length; k++)
+        {
+            if (s[i + k] != keyword[k]) { i = start; return false; }
+        }
+        var after = i + keyword.Length;
+        // Reject identifier continuation: `#ifndefined` is not `#ifndef`.
+        if (after < s.Length && (char.IsLetterOrDigit(s[after]) || s[after] == '_'))
+        {
+            i = start;
+            return false;
+        }
+        i = after;
+        return true;
+    }
+
+    private static bool ReadIdent(string s, ref int i, out string name)
+    {
+        var start = i;
+        while (i < s.Length && (char.IsLetterOrDigit(s[i]) || s[i] == '_')) { i++; }
+        name = s[start..i];
+        return name.Length > 0;
     }
 
     /// <summary>

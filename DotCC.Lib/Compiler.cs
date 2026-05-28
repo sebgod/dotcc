@@ -34,45 +34,104 @@ public static class Compiler
     /// headers win on name collisions (mirrors clang's local-first rule for
     /// quoted includes).
     /// </summary>
-    internal static readonly Dictionary<string, string> SystemHeaders = new(StringComparer.Ordinal)
+    /// <remarks>
+    /// Source: real <c>.h</c> files under <c>DotCC.Lib/include/</c>, embedded
+    /// into this assembly as resources at build time (manifest names of the
+    /// form <c>DotCC.SystemHeaders.&lt;filename&gt;</c>) — same shape as
+    /// clang's <c>lib/clang/&lt;ver&gt;/include/</c> tree, just loaded from
+    /// the assembly manifest instead of disk. Edit the file, rebuild, and
+    /// the new content is picked up. Lazy-initialized so the loader cost
+    /// hits the first <c>EmitCSharp</c>/<c>Preprocess</c> call rather than
+    /// every type-init.
+    /// </remarks>
+    internal static IReadOnlyDictionary<string, string> SystemHeaders => _systemHeaders.Value;
+
+    private static readonly Lazy<IReadOnlyDictionary<string, string>> _systemHeaders =
+        new(LoadEmbeddedSystemHeaders);
+
+    private static Dictionary<string, string> LoadEmbeddedSystemHeaders()
     {
-        ["stdio.h"] = """
-            #ifndef _DOTCC_STDIO_H
-            #define _DOTCC_STDIO_H
-            int printf(char* fmt, ...);
-            #endif
-            """,
-        ["stdlib.h"] = """
-            #ifndef _DOTCC_STDLIB_H
-            #define _DOTCC_STDLIB_H
-            void* malloc(int size);
-            void free(void* p);
-            #endif
-            """,
-        // NULL lives in <stddef.h> in real C; we surface it from a synthetic
-        // header users can include explicitly. Expanded to C#'s `null`
-        // keyword (rather than real C's `((void*)0)`) because C# rejects
-        // implicit `void* → T*` conversion — but a bare `null` literal binds
-        // to any pointer type without further help.
-        ["stddef.h"] = """
-            #ifndef _DOTCC_STDDEF_H
-            #define _DOTCC_STDDEF_H
-            #define NULL null
-            #endif
-            """,
-        // C99 boolean macros. `bool` expands to the `_Bool` keyword (a real
-        // TypeSpec); `true` and `false` self-substitute so they pass through
-        // as C#-native bool literals at the Var visitor.
-        ["stdbool.h"] = """
-            #ifndef _DOTCC_STDBOOL_H
-            #define _DOTCC_STDBOOL_H
-            #define bool _Bool
-            #define true true
-            #define false false
-            #define __bool_true_false_are_defined 1
-            #endif
-            """,
-    };
+        const string prefix = "DotCC.SystemHeaders.";
+        var asm = typeof(Compiler).Assembly;
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var name in asm.GetManifestResourceNames())
+        {
+            if (!name.StartsWith(prefix, StringComparison.Ordinal)) { continue; }
+            var fileName = name[prefix.Length..];
+            using var stream = asm.GetManifestResourceStream(name)
+                ?? throw new InvalidOperationException($"missing embedded header resource: {name}");
+            using var reader = new StreamReader(stream);
+            map[fileName] = reader.ReadToEnd();
+        }
+        return map;
+    }
+
+    /// <summary>
+    /// Concatenated DotCC.Libc runtime source — the embedded <c>.cs</c>
+    /// files from <c>../DotCC.Libc/*.cs</c> with their file-scope
+    /// artifacts (<c>#nullable enable</c>, <c>using</c> directives,
+    /// <c>namespace DotCC.Libc;</c>) stripped so the contained class +
+    /// struct declarations land cleanly inside the emitted file's
+    /// type-declarations section. <see cref="BuildShell"/> splices this
+    /// block in once per emit. Single source of truth: editing
+    /// <c>../DotCC.Libc/Libc.cs</c> updates BOTH the unit-tested DLL
+    /// AND every emitted program.
+    /// </summary>
+    private static readonly Lazy<string> _runtimeBlock = new(LoadRuntimeBlock);
+
+    private static string LoadRuntimeBlock()
+    {
+        const string prefix = "DotCC.Runtime.";
+        var asm = typeof(Compiler).Assembly;
+        var pieces = new List<(string FileName, string Content)>();
+        foreach (var name in asm.GetManifestResourceNames())
+        {
+            if (!name.StartsWith(prefix, StringComparison.Ordinal)) { continue; }
+            using var stream = asm.GetManifestResourceStream(name)
+                ?? throw new InvalidOperationException($"missing embedded runtime resource: {name}");
+            using var reader = new StreamReader(stream);
+            pieces.Add((name[prefix.Length..], reader.ReadToEnd()));
+        }
+        // Deterministic order — emitted code should be byte-identical
+        // across runs given the same inputs.
+        pieces.Sort((a, b) => StringComparer.Ordinal.Compare(a.FileName, b.FileName));
+
+        var sb = new StringBuilder();
+        sb.AppendLine("// ---- Embedded DotCC.Libc runtime — single source of truth.");
+        sb.AppendLine("//      Edits to ../DotCC.Libc/*.cs land here automatically on next build.");
+        foreach (var (fileName, content) in pieces)
+        {
+            sb.AppendLine($"// ---- {fileName} ----");
+            sb.AppendLine(StripFileScopeArtifacts(content));
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Remove file-scope artifacts from a source string so the remaining
+    /// type declarations can be concatenated into a different file's
+    /// type-declaration region. Stripped:
+    /// <list type="bullet">
+    ///   <item><c>#nullable enable</c> / <c>#nullable disable</c></item>
+    ///   <item>top-level <c>using</c> directives (the shell already
+    ///     declares the union it needs)</item>
+    ///   <item><c>namespace DotCC.Libc;</c> (so the contained classes
+    ///     land at file scope in the emitted program)</item>
+    /// </list>
+    /// </summary>
+    private static string StripFileScopeArtifacts(string src)
+    {
+        var sb = new StringBuilder(src.Length);
+        foreach (var rawLine in src.Split('\n'))
+        {
+            var trimmed = rawLine.TrimStart();
+            if (trimmed.StartsWith("#nullable", StringComparison.Ordinal)) { continue; }
+            if (trimmed.StartsWith("using ", StringComparison.Ordinal)) { continue; }
+            if (trimmed.StartsWith("namespace ", StringComparison.Ordinal)) { continue; }
+            sb.Append(rawLine).Append('\n');
+        }
+        return sb.ToString();
+    }
 
     /// <summary>
     /// Compile <paramref name="inputPaths"/> to a single C# source string.
@@ -268,6 +327,10 @@ public static class Compiler
         {
             return BuildLibraryShell(emittedFnList, structDecls, usingAliases, exports);
         }
+        // Embedded DotCC.Libc runtime block — spliced into the heredoc
+        // below so the emitted .cs is self-contained even without a
+        // <PackageReference Include="DotCC.Libc"> in scope.
+        var runtimeBlock = _runtimeBlock.Value;
         var header = fileBased ? "#:property AllowUnsafeBlocks=true\n\n" : string.Empty;
         var entry = mainArity switch
         {
@@ -316,30 +379,28 @@ public static class Compiler
             // Emitted by dotcc from c.lalr.yaml + the input translation units.
             // </auto-generated>
             using System;
+            using System.Globalization;
+            using System.IO;
             using System.Runtime.InteropServices;
             using System.Runtime.CompilerServices;
+            using System.Text;
+            // ---- DotCC.Libc runtime (embedded source) ----------------
+            // The Libc class (declared at file end, spliced in from the
+            // ../DotCC.Libc/*.cs sources) holds every libc function +
+            // every <math.h>/<tgmath.h> entry — each one with both
+            // float and double overloads. Importing it statically here
+            // means `sin(x)` / `printf("…")` / `malloc(n)` in user code
+            // resolve by bare name to the matching method, and overload
+            // resolution picks the right form. That's exactly what
+            // <tgmath.h>'s _Generic macros do in real C; we get the
+            // same dispatch for free without preprocessor machinery.
+            using static Libc;
 
             // ---- typedef'd `using` aliases (C# 12+ permits `using unsafe X = Y;`
             //      at file scope, ahead of top-level statements). Empty when no
             //      `typedef` declarations were seen.
             {{usingAliases}}
             {{entry}}
-
-            // String literal → pinned UTF-8 RVA pointer. Lives in the
-            // assembly's read-only data section, so the pointer is valid for
-            // program lifetime — no heap allocation, no GC pinning.
-            static unsafe byte* L(ReadOnlySpan<byte> u8) =>
-                (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(u8));
-
-            // malloc returns void* (real C semantics); user code casts.
-            static unsafe void* Malloc(int size) => NativeMemory.Alloc((nuint)size);
-            static unsafe void Free(void* p) => NativeMemory.Free(p);
-
-            // Fluent printf — works around `params object[]` not accepting raw
-            // pointers. Each Arg overload consumes the next % spec from the
-            // format pointer. The builder is a ref struct so it stays
-            // stack-only and zero-alloc.
-            static unsafe PrintfBuilder Printf(byte* fmt) => new PrintfBuilder(fmt);
 
 
             // ---- user functions (static unsafe local functions) ----
@@ -367,282 +428,7 @@ public static class Compiler
                 public static unsafe bool B(void* p) => p != null;
             }
 
-            unsafe ref struct PrintfBuilder
-            {
-                private byte* _fmt;
-                public PrintfBuilder(byte* fmt) { _fmt = fmt; }
-
-                // Parsed C printf spec: conversion char + optional flags, width,
-                // and precision. -1 means "unspecified" for width/precision.
-                // Length modifiers (l/L/h/z) and the '#' alt-form flag are
-                // recognized in ParseSpec but ignored at emit time — none of
-                // our target outputs depend on them.
-                private struct Spec
-                {
-                    public byte Conv;
-                    public int Width;
-                    public int Precision;
-                    public bool Left;
-                    public bool Zero;
-                    public bool Plus;
-                    public bool Space;
-                }
-
-                public PrintfBuilder Arg(int v)
-                {
-                    var spec = ConsumeUntilSpec();
-                    var ci = System.Globalization.CultureInfo.InvariantCulture;
-                    string s;
-                    switch (spec.Conv)
-                    {
-                        case (byte)'d': case (byte)'i':
-                            s = v.ToString(ci);
-                            if (spec.Plus && v >= 0) { s = "+" + s; }
-                            else if (spec.Space && v >= 0) { s = " " + s; }
-                            break;
-                        case (byte)'x': s = v.ToString("x", ci); break;
-                        case (byte)'X': s = v.ToString("X", ci); break;
-                        case (byte)'c': Console.Write((char)v); return this;
-                        case (byte)'f': case (byte)'e': case (byte)'g':
-                            // Integer formatted via the float path — same precision rules apply.
-                            s = FormatFloat((double)v, spec, ci);
-                            break;
-                        default: s = v.ToString(ci); break;
-                    }
-                    Console.Write(ApplyWidth(s, spec));
-                    return this;
-                }
-
-                public PrintfBuilder Arg(double v)
-                {
-                    var spec = ConsumeUntilSpec();
-                    var ci = System.Globalization.CultureInfo.InvariantCulture;
-                    string s;
-                    switch (spec.Conv)
-                    {
-                        case (byte)'d': case (byte)'i':
-                            s = ((int)v).ToString(ci);
-                            break;
-                        case (byte)'f': case (byte)'e': case (byte)'g':
-                        default:
-                            s = FormatFloat(v, spec, ci);
-                            break;
-                    }
-                    Console.Write(ApplyWidth(s, spec));
-                    return this;
-                }
-
-                public PrintfBuilder Arg(float v) => Arg((double)v);
-
-                // bool → 1/0 for `%d` and friends. Without this, C# would
-                // route `Console.Write(bool)` to a different overload that
-                // emits `"True"`/`"False"` — wrong for C printf semantics.
-                public PrintfBuilder Arg(bool v) => Arg(v ? 1 : 0);
-
-                // Long / unsigned long overloads for the extended integer
-                // type family. Format logic mirrors Arg(int) but with the
-                // value's own ToString so the full 64-bit value survives.
-                public PrintfBuilder Arg(long v)
-                {
-                    var spec = ConsumeUntilSpec();
-                    var ci = System.Globalization.CultureInfo.InvariantCulture;
-                    string s;
-                    switch (spec.Conv)
-                    {
-                        case (byte)'d': case (byte)'i':
-                            s = v.ToString(ci);
-                            if (spec.Plus && v >= 0) { s = "+" + s; }
-                            else if (spec.Space && v >= 0) { s = " " + s; }
-                            break;
-                        case (byte)'x': s = v.ToString("x", ci); break;
-                        case (byte)'X': s = v.ToString("X", ci); break;
-                        case (byte)'f': case (byte)'e': case (byte)'g':
-                            s = FormatFloat((double)v, spec, ci);
-                            break;
-                        default: s = v.ToString(ci); break;
-                    }
-                    Console.Write(ApplyWidth(s, spec));
-                    return this;
-                }
-
-                public PrintfBuilder Arg(ulong v)
-                {
-                    var spec = ConsumeUntilSpec();
-                    var ci = System.Globalization.CultureInfo.InvariantCulture;
-                    string s;
-                    switch (spec.Conv)
-                    {
-                        case (byte)'u':
-                        case (byte)'d': case (byte)'i':
-                            s = v.ToString(ci);
-                            break;
-                        case (byte)'x': s = v.ToString("x", ci); break;
-                        case (byte)'X': s = v.ToString("X", ci); break;
-                        default: s = v.ToString(ci); break;
-                    }
-                    Console.Write(ApplyWidth(s, spec));
-                    return this;
-                }
-
-                // uint → routed through long (implicit conversion is unsafe
-                // for full-range; we just promote since ulong's high-bit
-                // distinction rarely matters for printf semantics).
-                public PrintfBuilder Arg(uint v) => Arg((long)v);
-
-                public PrintfBuilder Arg(byte* v)
-                {
-                    var spec = ConsumeUntilSpec();
-                    string s;
-                    if (spec.Conv == (byte)'s' && v != null)
-                    {
-                        int len = 0;
-                        while (v[len] != 0) { len++; }
-                        s = System.Text.Encoding.UTF8.GetString(v, len);
-                        // Precision on `%s` caps the string length per C99.
-                        if (spec.Precision >= 0 && spec.Precision < s.Length)
-                        {
-                            s = s[..spec.Precision];
-                        }
-                    }
-                    else if (v == null)
-                    {
-                        s = "(null)";
-                    }
-                    else
-                    {
-                        // System-qualified so a user `typedef int* IntPtr;` (which
-                        // lowers to `using unsafe IntPtr = int*;`) doesn't shadow
-                        // the BCL type here.
-                        s = ((System.IntPtr)v).ToString("X");
-                    }
-                    Console.Write(ApplyWidth(s, spec));
-                    return this;
-                }
-
-                public int Done()
-                {
-                    while (*_fmt != 0)
-                    {
-                        if (*_fmt == (byte)'%' && _fmt[1] == (byte)'%')
-                        {
-                            Console.Write('%');
-                            _fmt += 2;
-                            continue;
-                        }
-                        WriteUtf8Codepoint(ref _fmt);
-                    }
-                    return 0;
-                }
-
-                private Spec ConsumeUntilSpec()
-                {
-                    while (*_fmt != 0)
-                    {
-                        if (*_fmt == (byte)'%')
-                        {
-                            _fmt++;
-                            if (*_fmt == (byte)'%')
-                            {
-                                Console.Write('%');
-                                _fmt++;
-                                continue;
-                            }
-                            return ParseSpec();
-                        }
-                        WriteUtf8Codepoint(ref _fmt);
-                    }
-                    return new Spec { Conv = 0, Width = -1, Precision = -1 };
-                }
-
-                // Parse `[flags][width][.precision][length]conv` from the byte
-                // stream starting just past the leading `%`. Advances `_fmt`
-                // through the entire spec, including the conversion char.
-                private Spec ParseSpec()
-                {
-                    var s = new Spec { Width = -1, Precision = -1 };
-                    while (*_fmt != 0)
-                    {
-                        switch (*_fmt)
-                        {
-                            case (byte)'-': s.Left = true; _fmt++; continue;
-                            case (byte)'+': s.Plus = true; _fmt++; continue;
-                            case (byte)' ': s.Space = true; _fmt++; continue;
-                            case (byte)'0': s.Zero = true; _fmt++; continue;
-                            case (byte)'#': _fmt++; continue;
-                        }
-                        break;
-                    }
-                    while (*_fmt >= (byte)'0' && *_fmt <= (byte)'9')
-                    {
-                        if (s.Width < 0) { s.Width = 0; }
-                        s.Width = s.Width * 10 + (*_fmt - (byte)'0');
-                        _fmt++;
-                    }
-                    if (*_fmt == (byte)'.')
-                    {
-                        _fmt++;
-                        s.Precision = 0;
-                        while (*_fmt >= (byte)'0' && *_fmt <= (byte)'9')
-                        {
-                            s.Precision = s.Precision * 10 + (*_fmt - (byte)'0');
-                            _fmt++;
-                        }
-                    }
-                    while (*_fmt == (byte)'l' || *_fmt == (byte)'L' || *_fmt == (byte)'h' || *_fmt == (byte)'z')
-                    {
-                        _fmt++;
-                    }
-                    s.Conv = *_fmt;
-                    if (s.Conv != 0) { _fmt++; }
-                    return s;
-                }
-
-                private static string FormatFloat(double v, Spec spec, System.Globalization.CultureInfo ci)
-                {
-                    var prec = spec.Precision >= 0 ? spec.Precision : 6;
-                    string s = spec.Conv switch
-                    {
-                        (byte)'e' => v.ToString("E" + prec.ToString(ci), ci),
-                        (byte)'g' => spec.Precision >= 0
-                            ? v.ToString("G" + prec.ToString(ci), ci)
-                            : v.ToString("G", ci),
-                        _ => v.ToString("F" + prec.ToString(ci), ci),
-                    };
-                    if (spec.Plus && v >= 0) { s = "+" + s; }
-                    else if (spec.Space && v >= 0) { s = " " + s; }
-                    return s;
-                }
-
-                private static string ApplyWidth(string s, Spec spec)
-                {
-                    if (spec.Width <= 0 || s.Length >= spec.Width) { return s; }
-                    if (spec.Left) { return s.PadRight(spec.Width, ' '); }
-                    // Zero-padding only when right-aligned and no precision (per C).
-                    // When the value carries a leading sign, the zero-pad goes
-                    // between the sign and the digits — handle that case.
-                    if (spec.Zero)
-                    {
-                        if (s.Length > 0 && (s[0] == '-' || s[0] == '+' || s[0] == ' '))
-                        {
-                            return s[0] + new string('0', spec.Width - s.Length) + s[1..];
-                        }
-                        return s.PadLeft(spec.Width, '0');
-                    }
-                    return s.PadLeft(spec.Width, ' ');
-                }
-
-                private static void WriteUtf8Codepoint(ref byte* p)
-                {
-                    byte b = *p;
-                    if (b < 0x80) { Console.Write((char)b); p++; return; }
-                    int len = 1;
-                    if ((b & 0xE0) == 0xC0) { len = 2; }
-                    else if ((b & 0xF0) == 0xE0) { len = 3; }
-                    else if ((b & 0xF8) == 0xF0) { len = 4; }
-                    Console.Write(System.Text.Encoding.UTF8.GetString(p, len));
-                    p += len;
-                }
-            }
+            {{runtimeBlock}}
             """;
     }
 
@@ -659,6 +445,11 @@ public static class Compiler
         string usingAliases,
         IReadOnlyList<CSharpEmitter.Export> exports)
     {
+        // Same embedded DotCC.Libc runtime block as exe mode — the
+        // library and exe shells share the same set of stdlib functions;
+        // only the framing (DotCcLib + DotCcExports vs. top-level
+        // statements + `main`) differs.
+        var runtimeBlock = _runtimeBlock.Value;
         // Visitor emits user fns as `static unsafe T name(...)` — class-member
         // default is private, which would block DotCcExports from calling
         // them. Promote to `public static unsafe …`. DotCcLib itself is
@@ -691,8 +482,12 @@ public static class Compiler
             // C-ABI exports via [UnmanagedCallersOnly].
             // </auto-generated>
             using System;
+            using System.Globalization;
+            using System.IO;
             using System.Runtime.InteropServices;
             using System.Runtime.CompilerServices;
+            using System.Text;
+            using static Libc;
 
             // ---- typedef'd `using` aliases (same as exe mode).
             {{usingAliases}}
@@ -703,15 +498,6 @@ public static class Compiler
             internal static class DotCcLib
             {
             {{indentedFns}}
-
-                // Runtime helpers — same shape as the exe shell, promoted to
-                // class methods so user code resolves them by bare name
-                // within the class scope.
-                internal static unsafe byte* L(ReadOnlySpan<byte> u8) =>
-                    (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(u8));
-                internal static unsafe void* Malloc(int size) => NativeMemory.Alloc((nuint)size);
-                internal static unsafe void Free(void* p) => NativeMemory.Free(p);
-                internal static unsafe PrintfBuilder Printf(byte* fmt) => new PrintfBuilder(fmt);
             }
 
             // C-ABI exports. Each wrapper trampoline delegates to the matching
@@ -732,260 +518,7 @@ public static class Compiler
                 public static unsafe bool B(void* p) => p != null;
             }
 
-            unsafe ref struct PrintfBuilder
-            {
-                private byte* _fmt;
-                public PrintfBuilder(byte* fmt) { _fmt = fmt; }
-
-                private struct Spec
-                {
-                    public byte Conv;
-                    public int Width;
-                    public int Precision;
-                    public bool Left;
-                    public bool Zero;
-                    public bool Plus;
-                    public bool Space;
-                }
-
-                public PrintfBuilder Arg(int v)
-                {
-                    var spec = ConsumeUntilSpec();
-                    var ci = System.Globalization.CultureInfo.InvariantCulture;
-                    string s;
-                    switch (spec.Conv)
-                    {
-                        case (byte)'d': case (byte)'i':
-                            s = v.ToString(ci);
-                            if (spec.Plus && v >= 0) { s = "+" + s; }
-                            else if (spec.Space && v >= 0) { s = " " + s; }
-                            break;
-                        case (byte)'x': s = v.ToString("x", ci); break;
-                        case (byte)'X': s = v.ToString("X", ci); break;
-                        case (byte)'c': Console.Write((char)v); return this;
-                        case (byte)'f': case (byte)'e': case (byte)'g':
-                            s = FormatFloat((double)v, spec, ci);
-                            break;
-                        default: s = v.ToString(ci); break;
-                    }
-                    Console.Write(ApplyWidth(s, spec));
-                    return this;
-                }
-
-                public PrintfBuilder Arg(double v)
-                {
-                    var spec = ConsumeUntilSpec();
-                    var ci = System.Globalization.CultureInfo.InvariantCulture;
-                    string s;
-                    switch (spec.Conv)
-                    {
-                        case (byte)'d': case (byte)'i':
-                            s = ((int)v).ToString(ci);
-                            break;
-                        case (byte)'f': case (byte)'e': case (byte)'g':
-                        default:
-                            s = FormatFloat(v, spec, ci);
-                            break;
-                    }
-                    Console.Write(ApplyWidth(s, spec));
-                    return this;
-                }
-
-                public PrintfBuilder Arg(float v) => Arg((double)v);
-
-                // bool → 1/0 for `%d` and friends. Without this, C# would
-                // route `Console.Write(bool)` to a different overload that
-                // emits `"True"`/`"False"` — wrong for C printf semantics.
-                public PrintfBuilder Arg(bool v) => Arg(v ? 1 : 0);
-
-                // Long / unsigned long overloads for the extended integer
-                // type family. Format logic mirrors Arg(int) but with the
-                // value's own ToString so the full 64-bit value survives.
-                public PrintfBuilder Arg(long v)
-                {
-                    var spec = ConsumeUntilSpec();
-                    var ci = System.Globalization.CultureInfo.InvariantCulture;
-                    string s;
-                    switch (spec.Conv)
-                    {
-                        case (byte)'d': case (byte)'i':
-                            s = v.ToString(ci);
-                            if (spec.Plus && v >= 0) { s = "+" + s; }
-                            else if (spec.Space && v >= 0) { s = " " + s; }
-                            break;
-                        case (byte)'x': s = v.ToString("x", ci); break;
-                        case (byte)'X': s = v.ToString("X", ci); break;
-                        case (byte)'f': case (byte)'e': case (byte)'g':
-                            s = FormatFloat((double)v, spec, ci);
-                            break;
-                        default: s = v.ToString(ci); break;
-                    }
-                    Console.Write(ApplyWidth(s, spec));
-                    return this;
-                }
-
-                public PrintfBuilder Arg(ulong v)
-                {
-                    var spec = ConsumeUntilSpec();
-                    var ci = System.Globalization.CultureInfo.InvariantCulture;
-                    string s;
-                    switch (spec.Conv)
-                    {
-                        case (byte)'u':
-                        case (byte)'d': case (byte)'i':
-                            s = v.ToString(ci);
-                            break;
-                        case (byte)'x': s = v.ToString("x", ci); break;
-                        case (byte)'X': s = v.ToString("X", ci); break;
-                        default: s = v.ToString(ci); break;
-                    }
-                    Console.Write(ApplyWidth(s, spec));
-                    return this;
-                }
-
-                // uint → routed through long (implicit conversion is unsafe
-                // for full-range; we just promote since ulong's high-bit
-                // distinction rarely matters for printf semantics).
-                public PrintfBuilder Arg(uint v) => Arg((long)v);
-
-                public PrintfBuilder Arg(byte* v)
-                {
-                    var spec = ConsumeUntilSpec();
-                    string s;
-                    if (spec.Conv == (byte)'s' && v != null)
-                    {
-                        int len = 0;
-                        while (v[len] != 0) { len++; }
-                        s = System.Text.Encoding.UTF8.GetString(v, len);
-                        if (spec.Precision >= 0 && spec.Precision < s.Length)
-                        {
-                            s = s[..spec.Precision];
-                        }
-                    }
-                    else if (v == null) { s = "(null)"; }
-                    else { s = ((System.IntPtr)v).ToString("X"); }
-                    Console.Write(ApplyWidth(s, spec));
-                    return this;
-                }
-
-                public int Done()
-                {
-                    while (*_fmt != 0)
-                    {
-                        if (*_fmt == (byte)'%' && _fmt[1] == (byte)'%')
-                        {
-                            Console.Write('%');
-                            _fmt += 2;
-                            continue;
-                        }
-                        WriteUtf8Codepoint(ref _fmt);
-                    }
-                    return 0;
-                }
-
-                private Spec ConsumeUntilSpec()
-                {
-                    while (*_fmt != 0)
-                    {
-                        if (*_fmt == (byte)'%')
-                        {
-                            _fmt++;
-                            if (*_fmt == (byte)'%')
-                            {
-                                Console.Write('%');
-                                _fmt++;
-                                continue;
-                            }
-                            return ParseSpec();
-                        }
-                        WriteUtf8Codepoint(ref _fmt);
-                    }
-                    return new Spec { Conv = 0, Width = -1, Precision = -1 };
-                }
-
-                private Spec ParseSpec()
-                {
-                    var s = new Spec { Width = -1, Precision = -1 };
-                    while (*_fmt != 0)
-                    {
-                        switch (*_fmt)
-                        {
-                            case (byte)'-': s.Left = true; _fmt++; continue;
-                            case (byte)'+': s.Plus = true; _fmt++; continue;
-                            case (byte)' ': s.Space = true; _fmt++; continue;
-                            case (byte)'0': s.Zero = true; _fmt++; continue;
-                            case (byte)'#': _fmt++; continue;
-                        }
-                        break;
-                    }
-                    while (*_fmt >= (byte)'0' && *_fmt <= (byte)'9')
-                    {
-                        if (s.Width < 0) { s.Width = 0; }
-                        s.Width = s.Width * 10 + (*_fmt - (byte)'0');
-                        _fmt++;
-                    }
-                    if (*_fmt == (byte)'.')
-                    {
-                        _fmt++;
-                        s.Precision = 0;
-                        while (*_fmt >= (byte)'0' && *_fmt <= (byte)'9')
-                        {
-                            s.Precision = s.Precision * 10 + (*_fmt - (byte)'0');
-                            _fmt++;
-                        }
-                    }
-                    while (*_fmt == (byte)'l' || *_fmt == (byte)'L' || *_fmt == (byte)'h' || *_fmt == (byte)'z')
-                    {
-                        _fmt++;
-                    }
-                    s.Conv = *_fmt;
-                    if (s.Conv != 0) { _fmt++; }
-                    return s;
-                }
-
-                private static string FormatFloat(double v, Spec spec, System.Globalization.CultureInfo ci)
-                {
-                    var prec = spec.Precision >= 0 ? spec.Precision : 6;
-                    string s = spec.Conv switch
-                    {
-                        (byte)'e' => v.ToString("E" + prec.ToString(ci), ci),
-                        (byte)'g' => spec.Precision >= 0
-                            ? v.ToString("G" + prec.ToString(ci), ci)
-                            : v.ToString("G", ci),
-                        _ => v.ToString("F" + prec.ToString(ci), ci),
-                    };
-                    if (spec.Plus && v >= 0) { s = "+" + s; }
-                    else if (spec.Space && v >= 0) { s = " " + s; }
-                    return s;
-                }
-
-                private static string ApplyWidth(string s, Spec spec)
-                {
-                    if (spec.Width <= 0 || s.Length >= spec.Width) { return s; }
-                    if (spec.Left) { return s.PadRight(spec.Width, ' '); }
-                    if (spec.Zero)
-                    {
-                        if (s.Length > 0 && (s[0] == '-' || s[0] == '+' || s[0] == ' '))
-                        {
-                            return s[0] + new string('0', spec.Width - s.Length) + s[1..];
-                        }
-                        return s.PadLeft(spec.Width, '0');
-                    }
-                    return s.PadLeft(spec.Width, ' ');
-                }
-
-                private static void WriteUtf8Codepoint(ref byte* p)
-                {
-                    byte b = *p;
-                    if (b < 0x80) { Console.Write((char)b); p++; return; }
-                    int len = 1;
-                    if ((b & 0xE0) == 0xC0) { len = 2; }
-                    else if ((b & 0xF0) == 0xE0) { len = 3; }
-                    else if ((b & 0xF8) == 0xF0) { len = 4; }
-                    Console.Write(System.Text.Encoding.UTF8.GetString(p, len));
-                    p += len;
-                }
-            }
+            {{runtimeBlock}}
             """;
     }
 

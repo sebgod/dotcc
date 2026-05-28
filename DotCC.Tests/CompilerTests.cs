@@ -358,8 +358,11 @@ public sealed class CompilerTests
             var emitted = Compiler.EmitCSharp(new[] { src });
             emitted.ShouldContain("return ");
             // The 5 should appear (twice — substituted into both x positions)
-            // and SQUARE shouldn't survive into the emit.
-            emitted.ShouldNotContain("SQUARE");
+            // and SQUARE shouldn't survive as a macro-invocation token in
+            // the emit. Match `SQUARE(` so the case-insensitive comparison
+            // doesn't trip on the math.h docstring "square root" that the
+            // embedded DotCC.Libc runtime carries through.
+            emitted.ShouldNotContain("SQUARE(");
         }
         finally { File.Delete(src); }
     }

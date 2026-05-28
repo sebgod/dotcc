@@ -141,6 +141,7 @@ Source of truth for the grammar: `DotCC.Lib/c.lalr.yaml`. Source of truth for th
 | `#error msg` | ✅ | Aborts compilation by throwing `CompileException` (same surface as a parse failure); frontend maps to a non-zero exit with `dotcc: #error: <msg>`. |
 | `#warning msg` (C23) | ✅ | Emits `dotcc: #warning: <msg>` to stderr and continues. Same path as `#error` but non-fatal. |
 | `#pragma …` | 🟡 | `#pragma once` is honored — `CPreprocessor` tracks `_pragmaOnceFiles` keyed by the currently-being-processed filename, short-circuits subsequent `#include` of the same name. All other pragmas silently ignored (matches the C convention: unknown pragmas don't break the build). |
+| Multiple-include optimization (controlling-macro detection) | ✅ | After the first `#include` of a file, `CPreprocessor.DetectControllingMacro` scans the raw source for the standard `#ifndef X / #define X / ... / #endif` wrapping pattern (with only whitespace + comments outside the outer guard). If detected, the result is cached on `_fileGuards[filename] = X`; subsequent `#include`s of the same file check `IsDefined(X)` and short-circuit without re-opening or re-lexing. Same optimization gcc/clang call "controlling macro detection". `CPreprocessor.IncludeOptimizationHits` counts the short-circuits (used by `PreprocessorIncludeGuardTests` to assert the optimization actually fires). |
 | `#line N`, `#line N "file"` | 🚫 | Useful only for generated-code lineage which dotcc doesn't preserve |
 | `##` token-pasting | ✅ | `MacroExpander.Substitute` recognizes `LHS ## RHS` patterns in function-like bodies: resolves each operand (formal-param → arg tokens, else literal token), pastes the last LHS token with the first RHS token into one ID-shaped token carrying the concatenated content. After paste, the multi-pass rescan re-checks the result — so `MAKEFOO(1)` → `foo_1` → resolves to the matching `#define foo_1 100`. Fixture `macro-ops/`. |
 | `#` stringification | ✅ | `# PARAM` inside a function-like body emits a STRING token built from the arg's source text. Token contents joined with single spaces; `"` and `\` inside content are backslash-escaped so the resulting literal is well-formed. Fixture `macro-ops/`. |
@@ -212,17 +213,21 @@ The runtime surface dotcc-emitted programs link against. Each function routes to
 
 ### `math.h`
 
+Every function exists as a `double` overload (routes to `System.Math`) **and** a `float` overload (routes to `System.MathF`); the explicit `…f`-suffix C99 forms (`sinf`, `cosf`, `sqrtf`, …) are wired alongside. Lives in `DotCC.Libc/MathLib.cs` as a `partial` extension of `Libc`. The same `.cs` file is **embedded into `DotCC.Lib.dll`** at build time (`<EmbeddedResource Include="..\DotCC.Libc\*.cs">`); `Compiler.LoadRuntimeBlock` splices it into every emitted program's type-decls section, and `using static Libc;` brings the methods into scope by bare name so user calls resolve through C# overload resolution. Single source of truth — no duplicated inline copy. Header lives at `DotCC.Lib/include/math.h` (also embedded — see "Synthetic system headers + runtime" below). Fixture `math-basic/` covers double-precision dispatch end-to-end with MSVC oracle validation.
+
 | Function | Status | Notes |
 |---|---|---|
-| `sin`, `cos`, `tan` | ❌ | `Math.Sin` etc. |
-| `asin`, `acos`, `atan`, `atan2` | ❌ | `Math.Asin` etc. |
-| `sinh`, `cosh`, `tanh` (+ inverses, C99) | ❌ | `Math.Sinh` etc. |
-| `exp`, `log`, `log10`, `log2` (C99) | ❌ | `Math.Exp` etc. |
-| `pow`, `sqrt`, `cbrt` (C99) | ❌ | `Math.Pow` / `Sqrt` / `Cbrt` |
-| `ceil`, `floor`, `round`, `trunc` (C99) | ❌ | `Math.Ceiling` etc. |
-| `fabs`, `fmod`, `fmin` (C99), `fmax` (C99) | ❌ | `Math.Abs` etc. |
-| `NAN`, `INFINITY`, `isnan`, `isinf` (C99) | ❌ | `double.NaN`, `double.PositiveInfinity`, `double.IsNaN` |
-| Type-generic `tgmath.h` (C99) | 🚫 | Needs C11 `_Generic` — not worth the cost |
+| `sin`, `cos`, `tan` (+ `…f`) | ✅ | `Math.Sin` / `MathF.Sin` etc. |
+| `asin`, `acos`, `atan`, `atan2` (+ `…f`) | ✅ | `Math.Asin` / `MathF.Asin` etc. |
+| `sinh`, `cosh`, `tanh` (+ `…f`, C99) | ✅ | `Math.Sinh` / `MathF.Sinh` etc. |
+| `exp`, `log`, `log10`, `log2` (+ `…f`, C99) | ✅ | `Math.Exp` / `MathF.Exp` etc. |
+| `pow`, `sqrt`, `cbrt` (+ `…f`, C99) | ✅ | `Math.Pow` / `Sqrt` / `Cbrt` and MathF counterparts |
+| `ceil`, `floor`, `round`, `trunc` (+ `…f`, C99) | ✅ | `round` forced to `MidpointRounding.AwayFromZero` to match C99 (BCL default is banker's rounding, which diverges from MSVC). |
+| `fabs`, `fmod`, `fmin`, `fmax` (+ `…f`, C99) | ✅ | `Math.Abs` / native `%` for fmod (sign-of-x matches C99) / `Math.Min` / `Math.Max` |
+| `NAN`, `INFINITY`, `HUGE_VAL`, `HUGE_VALF` | ✅ | Properties on `Libc` returning `double.NaN` / `double.PositiveInfinity`. |
+| `M_PI`, `M_E`, `M_SQRT2`, `M_LN2`, `M_LN10` | ✅ | `const double` fields on `Libc`. dotcc defines them unconditionally; MSVC gates them behind `_USE_MATH_DEFINES` — portable code defines that macro before `#include <math.h>`. |
+| `isnan`, `isinf`, `isfinite` (C99) | ✅ | Return `int` (1 / 0) — match C99 macro semantics, not C# `bool`. Both float and double overloads. |
+| Type-generic `tgmath.h` (C99) | ✅ | C# already has overload resolution, so we sidestep C11 `_Generic` entirely: the float + double overloads on `Libc` give type-generic dispatch for free. `tgmath.h` is therefore just a one-line wrapper that `#include`s `math.h`. Fixture `tgmath-overload/`. |
 
 ### `ctype.h`
 
@@ -260,7 +265,7 @@ The runtime surface dotcc-emitted programs link against. Each function routes to
 | Feature | C version | Status | Notes |
 |---|---|---|---|
 | Variadic macros, mixed decls/code, designated init, restrict, complex types, VLA, `_Bool`, `inline`, `__func__`, line comments | C99 | various above | dotcc's baseline target |
-| `_Generic` | C11 | ❌ | Type-generic dispatch — complex; low priority |
+| `_Generic` | C11 | ❌ | Type-generic dispatch. Lower priority than it'd otherwise be: the most common use case (`tgmath.h`) is already covered by C#'s overload resolution on `Libc` — see the `tgmath.h` row above. |
 | `_Static_assert` / `static_assert` | C11 | ❌ | Compile-time check |
 | `_Noreturn` / `noreturn` | C11 | ❌ | Cosmetic — emit `[DoesNotReturn]` |
 | Anonymous structs/unions | C11 | ❌ | Depends on `struct`/`union` |
@@ -288,10 +293,51 @@ Listed here so we don't relitigate them. All marked 🚫 above.
 - **`setjmp`/`longjmp`** — non-local jumps can't be implemented safely on the CLR; programs that need them are out of dotcc's reach.
 - **`signal.h`** — POSIX signal model doesn't map onto .NET.
 - **`gets`** — removed in C11; security disaster.
-- **`tgmath.h`** — depends on `_Generic`.
 - **Annex K bounds-checked interfaces** — almost no real-world C uses them.
 - **`threads.h` (C11)** — emitted code can call .NET threading directly.
 - **`_BitInt(N)`** — only well-defined for two widths on .NET; not worth the complexity.
+
+## Synthetic system headers + runtime
+
+dotcc ships its own copies of the C99 standard headers AND its libc implementations, both as **real files in source control**, both embedded into `DotCC.Lib.dll` so the compiler can serve them at emit time without any runtime disk I/O. Same model as clang's `lib/clang/<ver>/include/` tree, just loaded from the assembly manifest.
+
+**Two parallel embeddings (see `DotCC.Lib.csproj`):**
+
+| Source location | Logical name in manifest | Loader | Consumed by |
+|---|---|---|---|
+| `DotCC.Lib/include/*.h` | `DotCC.SystemHeaders.<filename>` | `Compiler.LoadEmbeddedSystemHeaders` | Preprocessor: resolves `#include <math.h>` etc. against the embedded files |
+| `..\DotCC.Libc\*.cs` | `DotCC.Runtime.<filename>` | `Compiler.LoadRuntimeBlock` | `BuildShell`: splices the runtime source into the emitted program's type-decls section |
+
+The runtime embedding is what makes dotcc's emit **single-source-of-truth**. The `.cs` files under `DotCC.Libc/` (`Libc.cs`, `MathLib.cs`, `PrintfBuilder.cs`, `ScanfReader.cs`, `SprintfBuilder.cs`) compile into `DotCC.Libc.dll` for unit testing AND are loaded from the manifest at emit time. `LoadRuntimeBlock` strips file-scope artifacts (`#nullable enable`, `using` directives, `namespace DotCC.Libc;`) so the contained class declarations land cleanly at file scope in the emitted program. Every emitted file then has `using static Libc;` at the top, which brings `printf` / `malloc` / `sin` / `cos` / `sqrt` / etc. into scope by bare name.
+
+**Header guards use the standard glibc/MSVC convention** (`_STDIO_H`, `_MATH_H`, …) rather than a dotcc-specific prefix, so portable code that does `#ifdef _MATH_H` to detect whether the header has been pulled in works correctly.
+
+**Why this design**: emitted file-based programs (`#:property AllowUnsafeBlocks=true`) stay self-contained — you can `dotnet run hello.cs` with no `<PackageReference>` and no external assemblies — but the implementations live in real refactorable `.cs` files, not as raw-string literals in the compiler source. The migration path to a NuGet-distributed `DotCC.Libc` is a one-line change in `BuildShell` (drop the `{{runtimeBlock}}` splice, add `#:package DotCC.Libc@<ver>` to the file-based header).
+
+**MSVC oracle interop**: when `cl.exe` compiles the same `.c` source, it uses its own `<math.h>` (not ours). Both compilers declare the same C99 surface, so the differential test still produces matching output. Each side using its own copy of the standard headers is by design, not a bug.
+
+## Standards interop (autoconf / `./configure`)
+
+A real C compiler has to be driveable by feature-detection tooling. The autoconf model is: `$CC -c conftest.c` runs against tiny probe programs, and the exit code drives `#define HAVE_X 1` macros in `config.h`. dotcc participates in this naturally because its CLI is clang-shaped (`-c`, `-E`, `-I`, `-D`, `-o`) and it exits non-zero on parse failure.
+
+**Probes that work out of the box** (`CC=dotcc ./configure`):
+
+| Probe shape | Outcome | Why |
+|---|---|---|
+| `AC_CHECK_HEADERS([stdio.h])` / `[stdlib.h]` / `[stddef.h]` / `[stdbool.h]` / `[math.h]` / `[tgmath.h]` | ✅ HAVE_X=1 | Resolved via embedded synthetic headers under `DotCC.Lib/include/`. |
+| `AC_CHECK_FUNCS([printf])` / `[malloc]` / `[free]` / `[strlen]` / `[strcmp]` / `[strcpy]` / `[memset]` / `[memcpy]` / `[sin]` / `[cos]` / `[sqrt]` / `[pow]` / … | ✅ HAVE_X=1 | Declared in our synthetic headers; the probe links because `using static Libc;` makes them resolvable in the emitted C#. |
+| `AC_CHECK_HEADERS([unistd.h])` / `[errno.h]` / `[string.h]` / `[time.h]` / `[ctype.h]` | ❌ HAVE_X=0 | Not (yet) embedded — autoconf will correctly route to fallback code paths. |
+| `AC_CHECK_FUNCS([fopen])` / `[atoi]` / `[strchr]` / `[strstr]` / `[abs]` | ❌ HAVE_X=0 | Not declared yet — see the ❌ rows in the libc tables above. As features land, probes flip from ❌ to ✅ automatically. |
+
+**Probes that need workarounds:**
+
+- **Dialect flags** — `-std=c99` / `-pedantic` / `-Wall` aren't recognized today. Real `./configure` runs often pass them; dotcc would error out, which probes interpret as "feature not supported". Fix is mechanical: accept-and-ignore unknown flags in `System.CommandLine`, log a one-line warning at most.
+- **Compiler identity macros** — `__GNUC__` / `__clang__` / `_MSC_VER` aren't predefined. Codebases probing for these correctly land in the generic-compiler fallback, which is usually a safe default. We could predefine a `__DOTCC__` macro so codebases can target dotcc-specific paths if needed.
+- **`AC_CHECK_LIB([m], [sin])`** — link-time probes. dotcc doesn't produce `.o`/`.a` and doesn't accept `-l`. Workaround: declare a synthetic libm and have the probe pass at compile-time even without real link semantics. The `sin` function is already in our embedded runtime so a no-op `-l` accept-and-ignore would work.
+- **`AC_RUN_IFELSE`** — probes that compile AND execute the probe program. Works in principle (emitted `.cs` runs via `dotnet run`), but autoconf expects a native executable in `./conftest.exe`. A `dotcc --wrap` mode that emits a shim shell script invoking `dotnet run` on the emit would close this gap. Lower priority — most probes are compile-only.
+- **Error-message-parsing probes** — a few legacy probes grep gcc-style diagnostics (`"error: implicit declaration"` etc.). dotcc emits its own format (`"dotcc: parse failed: …"`). Most modern probes check only exit codes; the legacy ones need either a `--diag-format=gcc` shim or codebase-level patches.
+
+**Realistic next milestone**: pick a small autotools-using codebase (`libcsv`, a small zlib subset, a stb_*-style single-file thing) and run `CC=dotcc ./configure && make`. The first failure tells you where to invest. Most likely landing-pad: unrecognized dialect/warning flags — a 5-minute fix in `System.CommandLine`.
 
 ## Test corpus and oracles
 
