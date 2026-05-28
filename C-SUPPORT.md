@@ -28,9 +28,9 @@ Source of truth for the grammar: `DotCC.Lib/c.lalr.yaml`. Source of truth for th
 | Float literal `1.5`, `1.5e10`, `1.5f` | ✅ | `FLOAT` token (mandatory `.` to disambiguate from `NUM`) |
 | Double suffix `1.5l` (long double) | 🚫 | C# has no `long double`; we pass `f`/`F` through, others won't typecheck |
 | Char literal `'a'`, `'\n'` | ✅ | `CHAR` lexer rule split into two (escape-form + plain) to avoid IRx alternation; visitor lowers to `(byte)'X'`. Supported escapes: `\n \r \t \\ \' \" \0 \b \f`. Fixture `small-ops/` |
-| String literal `"…"` | 🟡 | `STRING` token regex is `"[^"]*"` — basic strings work but **escaped quotes inside the literal (`"a \"b\" c"`) don't**. LALR.CC's lexer regex syntax forbids alternation, so we can't express the `"(\\.|[^"\\])*"` pattern that real C lexers use. Workaround until upstream gains alternation: split strings around the embedded quote (`"a " "\"" "b"` — adjacent-string concat) or pre-encode via `#define`. Tracking as a real gap; common enough in real code to deserve a proper fix. |
+| String literal `"…"` | ✅ | `STRING` token regex `"(\\["\\nrtbf0v'/aex0-9]\|[^"\\])*"` — matches the open quote, then any sequence of (backslash-escape OR non-quote-non-backslash), then closing quote. Supports the canonical C shape including embedded `\"`. Lowered to `L("…\0"u8)` with the original escape sequences preserved verbatim into the C# UTF-8 literal (C# decodes `\\` / `\n` / `\t` / etc. on its own). Fixture `string-escape-quotes/`. Relies on alternation support in LALR.CC's IRxParser. |
 | Wide string literal `L"…"`, `u"…"`, `U"…"` | 🚫 | dotcc is UTF-8-native — wide types add no value |
-| Escape sequences `\n \t \\ \xNN` outside string body | 🟡 | Passed verbatim into the C# UTF-8 literal; C# accepts most. Escape-quote `\"` inside a string literal hits the lexer limitation above. |
+| Escape sequences `\n \t \\ \" \xNN` | ✅ | Recognized inside string literals (above) and char literals; passed verbatim into the C# UTF-8 literal so C# decodes them. |
 | Trigraphs `??=` etc. | 🚫 | Removed in C23; never useful |
 | Digraphs `<% %> :> :>` etc. | 🚫 | Same reasoning |
 

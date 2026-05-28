@@ -820,8 +820,12 @@ lexer:
     # which accepts `f`/`F`. (Real C also accepts `L` for long double; we
     # skip that since C# has no `L` suffix on floats.)
     # STRING used both by #include args and as in-expression literals via
-    # the `Primary -> STRING` production.
-    - { symbol: STRING, match: '"[^"]*"' }
+    # the `Primary -> STRING` production. Pattern:
+    #   open quote, then ( escape-pair OR any-non-quote-non-backslash )* , then close quote.
+    # IRxParser doesn't support `.` as wildcard, so the escape continuation
+    # is an explicit character class of the C standard escape chars.
+    # Relies on alternation `|` in IRxParser, added upstream in LALR.CC.
+    - { symbol: STRING, match: '"(\\["\\nrtbf0v''/aex0-9]|[^"\\])*"' }
     # Char literal: IRx has no `.` (any-char) operator — it parses `.` as
     # literal. Use a char class on the inner byte instead. Two rules so the
     # escape form (4 bytes) outranks the plain form (3 bytes) by

@@ -1,0 +1,3 @@
+with "embedded" quotes
+escape combos: \ " /
+trailing backslash safe: x\
