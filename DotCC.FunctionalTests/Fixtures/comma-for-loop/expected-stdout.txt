@@ -1,0 +1,9 @@
+i=0 j=10
+i=1 j=9
+i=2 j=8
+i=3 j=7
+i=4 j=6
+meetings=5 final i=5 j=5
+a=0 b=100 c=50
+a=1 b=90 c=55
+a=2 b=80 c=60

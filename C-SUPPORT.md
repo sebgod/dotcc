@@ -86,7 +86,7 @@ Source of truth for the grammar: `DotCC.Lib/c.lalr.yaml`. Source of truth for th
 | Compound assign `&= \|= ^= <<= >>=` | ✅ | All five in the rightmost-= group; fixture `bitwise/` covers `\|=`, `^=`, `<<=`, `>>=` |
 | Increment / decrement `++` / `--` (pre and post) | ✅ | `preInc`/`preDec` in `Unary`, `postInc`/`postDec` in `Postfix`; fixture `factorial-for/`, `fibonacci/`, `fizzbuzz/` (all use `i++`) |
 | Ternary `c ? a : b` | ✅ | `E → LOr '?' E ':' E` in the rightmost E group. Lowers to `(Cond.B(c) ? a : b)`. Right-associative — chained ternaries `a ? 1 : b ? 2 : 3` work naturally. Fixture `small-ops/` |
-| Comma operator `a, b` | ❌ | At top of E ladder, evaluates left, returns right |
+| Comma operator `a, b` | 🟡 | Supported in `for`-loop init / update positions: `for (i=0, j=10; …; i++, j--)`. C# accepts the same comma-list shape there, so the lowering is straight passthrough. Full comma operator in arbitrary expression position (e.g. `int x = (setup(), value);`) needs a new top-level `Expr` non-terminal above `E` plus a value-of-rhs lowering — deferred. Fixture `comma-for-loop/`. |
 | `sizeof(type)` and `sizeof expr` | ❌ | Type form is a `Unary`; expr form needs type inference (later) |
 | Subscript `arr[i]` | ✅ | Emitted as-is in C# unsafe context (pointer subscript matches C semantics); fixture `array-sum/` |
 | Cast `(T)expr` | ✅ | `Unary -> '(' Type ')' Unary` |

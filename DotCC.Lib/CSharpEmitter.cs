@@ -616,9 +616,18 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // incr keeps the emitter from wrapping `i++` in extra parens that C#
     // rejects in for-clause position.
     public EmitContent Visit(C.StmtForDecl n) =>
-        $"for ({T(n.Arg2)}; Cond.B({T(n.Arg4)}); {StripOuterParens(T(n.Arg6))}) {T(n.Arg8)}";
+        $"for ({T(n.Arg2)}; Cond.B({T(n.Arg4)}); {T(n.Arg6)}) {T(n.Arg8)}";
     public EmitContent Visit(C.StmtForExpr n) =>
-        $"for ({StripOuterParens(T(n.Arg2))}; Cond.B({T(n.Arg4)}); {StripOuterParens(T(n.Arg6))}) {T(n.Arg8)}";
+        $"for ({T(n.Arg2)}; Cond.B({T(n.Arg4)}); {T(n.Arg6)}) {T(n.Arg8)}";
+
+    // Comma-separated expression list used in for-init / for-update.
+    // C# accepts `for (i=0, j=10; …; i++, j--)` natively, so we just
+    // splice the expressions together with `, ` between them — no
+    // helper, no parens, no special lowering. The single-expression
+    // form passes through unchanged so for-loops with a lone init or
+    // update still emit identically to before.
+    public EmitContent Visit(C.CommaExprOne n) => StripOuterParens(T(n.Arg0));
+    public EmitContent Visit(C.CommaExprCons n) => $"{T(n.Arg0)}, {StripOuterParens(T(n.Arg2))}";
     public EmitContent Visit(C.StmtReturn n) => $"return {T(n.Arg1)};\n";
     public EmitContent Visit(C.StmtReturnVoid n) => "return;\n";
     public EmitContent Visit(C.StmtBreak n) => "break;\n";

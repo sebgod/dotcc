@@ -222,6 +222,12 @@ symbols:
   # before the Block body reduces. That ordering lets __func__ resolve
   # without a placeholder-then-string-replace dance.
   - FnSig          # 134
+  # CommaExprList — one-or-more comma-separated E's. Used in for-loop init
+  # and update positions where C lets you write `for (i=0, j=10; …; i++, j--)`.
+  # C# accepts the same comma-list shape in for-init/update, so the
+  # lowering is just `e1, e2, e3` verbatim. Full C-style comma operator
+  # in arbitrary expression position needs more work — see C-SUPPORT.md.
+  - CommaExprList  # 135
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -406,8 +412,16 @@ productions:
       # Init/cond/incr are all required for now — empty clauses (`for (;;)`)
       # come later. The condition `E` becomes a bool in C# because all our
       # comparison/logical visitors already emit bool-yielding form.
-      - { lhs: Stmt, rhs: ['for', '(', Decl, ';', E, ';', E, ')', Stmt], action: stmtForDecl }
-      - { lhs: Stmt, rhs: ['for', '(', E,    ';', E, ';', E, ')', Stmt], action: stmtForExpr }
+      - { lhs: Stmt, rhs: ['for', '(', Decl, ';', E, ';', CommaExprList, ')', Stmt], action: stmtForDecl }
+      - { lhs: Stmt, rhs: ['for', '(', CommaExprList, ';', E, ';', CommaExprList, ')', Stmt], action: stmtForExpr }
+      # Comma-separated expression list. Used in for-init / for-update so
+      # `for (i=0, j=10; …; i++, j--)` parses. C lets the comma operator
+      # appear in arbitrary expression contexts too; that more general
+      # form isn't supported yet (would need a top-level Expr non-terminal
+      # over E, plus a lowering for the value-of-rhs semantics). The
+      # for-init/update positions cover the dominant use case.
+      - { lhs: CommaExprList, rhs: [E],                        action: commaExprOne }
+      - { lhs: CommaExprList, rhs: [CommaExprList, ',', E],    action: commaExprCons }
       - { lhs: Stmt, rhs: ['return', E, ';'],            action: stmtReturn }
       - { lhs: Stmt, rhs: ['return', ';'],                action: stmtReturnVoid }
       # `break;` / `continue;` — bare keyword + semicolon. Grammar accepts
