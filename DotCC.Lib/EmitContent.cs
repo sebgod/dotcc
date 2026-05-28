@@ -65,4 +65,21 @@ public abstract record EmitContent
     /// commas inside <c>new T { … }</c>.
     /// </summary>
     public sealed record InitMembers(IReadOnlyList<string> Members) : EmitContent;
+
+    /// <summary>
+    /// Function-signature breakdown produced by an <c>FnSig</c> reduction.
+    /// Because <c>FnSig</c> reduces BEFORE the enclosing <c>Block</c>
+    /// (LALR bottom-up: the left child of <c>Fn → FnSig Block</c> is fully
+    /// reduced first), the <c>FnSig</c> action sets the visitor's
+    /// "current function" state in time for any <c>__func__</c> reference
+    /// inside the body to resolve directly — no placeholder
+    /// string-substitution dance. The <c>FuncDef</c> action consumes this
+    /// to add the function to the exports list (when non-static) and to
+    /// concatenate header + body.
+    /// </summary>
+    public sealed record FnHeader(
+        string Type,
+        string Name,
+        string Params,
+        bool IsStatic) : EmitContent;
 }

@@ -49,6 +49,14 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     private static IReadOnlyList<string> EI(Item it) => ((EmitContent.EnumItems)it.Content).Items;
     /// <summary>Read a child as a designated-initializer member list.</summary>
     private static IReadOnlyList<string> IM(Item it) => ((EmitContent.InitMembers)it.Content).Members;
+    /// <summary>Read a child as a function-signature header.</summary>
+    private static EmitContent.FnHeader FH(Item it) => (EmitContent.FnHeader)it.Content;
+
+    // Name of the function currently being reduced. Set by each fnSig*
+    // action; cleared by funcDef/funcProto when the enclosing Fn finishes.
+    // Read by Visit(Var) so `__func__` resolves directly to the enclosing
+    // function's name — no placeholder-string substitution.
+    private string? _currentFunctionName;
 
     public int MainArity { get; private set; } = -1;
 
@@ -88,78 +96,65 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     public string UsingAliases => _aliases.ToString();
     public void ResetUsingAliases() { _aliases.Clear(); _aliasNames.Clear(); }
 
+    // ---- Function signature visitors ------------------------------------
+    // Each FnSig variant extracts (type, name, params) from its position,
+    // sets `_currentFunctionName` (consumed by Visit(Var) for `__func__`),
+    // and returns a structured EmitContent.FnHeader for the enclosing Fn
+    // reduction to combine with the body.
+
+    public EmitContent Visit(C.FnSig n)  // Type ID ( ParamList )
+        => StartFn(type: T(n.Arg0), name: T(n.Arg1), pars: T(n.Arg3), isStatic: false);
+    public EmitContent Visit(C.FnSigNoArgs n)  // Type ID ( )
+        => StartFn(type: T(n.Arg0), name: T(n.Arg1), pars: "", isStatic: false);
+    public EmitContent Visit(C.FnSigVoidArgs n)  // Type ID ( void )
+        => StartFn(type: T(n.Arg0), name: T(n.Arg1), pars: "", isStatic: false);
+    public EmitContent Visit(C.FnSigStatic n)  // static Type ID ( ParamList )
+        => StartFn(type: T(n.Arg1), name: T(n.Arg2), pars: T(n.Arg4), isStatic: true);
+    public EmitContent Visit(C.FnSigStaticNoArgs n)  // static Type ID ( )
+        => StartFn(type: T(n.Arg1), name: T(n.Arg2), pars: "", isStatic: true);
+    public EmitContent Visit(C.FnSigStaticVoidArgs n)  // static Type ID ( void )
+        => StartFn(type: T(n.Arg1), name: T(n.Arg2), pars: "", isStatic: true);
+
+    private EmitContent.FnHeader StartFn(string type, string name, string pars, bool isStatic)
+    {
+        // Set the active-function name BEFORE Block reduces — this is the
+        // whole point of the FnSig split. Any __func__ inside the body
+        // resolves to this directly at Var-visit time.
+        _currentFunctionName = name;
+        return new EmitContent.FnHeader(type, name, pars, isStatic);
+    }
+
+    // ---- Function definition / prototype --------------------------------
+    // `Fn → FnSig Block` and `Fn → FnSig ';'`. The FnSig has already run
+    // and stashed (type/name/params/isStatic) into a typed FnHeader plus
+    // set `_currentFunctionName` for the body's Var visits to consume.
+    // Now we do the bookkeeping (MainArity, exports list) and emit/clear.
+
     public EmitContent Visit(C.FuncDef n)
     {
-        var type = T(n.Arg0);
-        var name = T(n.Arg1);
-        var pars = T(n.Arg3);
-        var body = ResolveFuncPlaceholder(T(n.Arg5), name);
-        if (name == "main") { MainArity = CountCommas(pars) + 1; }
-        else { _exports.Add(new Export(name, type, pars)); }
-        return $"static unsafe {type} {name}({pars})\n{body}";
+        var sig = FH(n.Arg0);
+        var body = T(n.Arg1);
+        // Bookkeeping: `main` records arity (0 when params are empty,
+        // CountCommas+1 otherwise — `int main()` is arity 0, not 1);
+        // non-static non-main goes on the exports list for library-mode
+        // [UnmanagedCallersOnly] wrappers.
+        if (sig.Name == "main")
+        {
+            MainArity = string.IsNullOrEmpty(sig.Params) ? 0 : CountCommas(sig.Params) + 1;
+        }
+        else if (!sig.IsStatic) { _exports.Add(new Export(sig.Name, sig.Type, sig.Params)); }
+        _currentFunctionName = null;  // exit function scope
+        return $"static unsafe {sig.Type} {sig.Name}({sig.Params})\n{body}";
     }
 
-    public EmitContent Visit(C.FuncDefNoArgs n)
+    public EmitContent Visit(C.FuncProto n)
     {
-        var type = T(n.Arg0);
-        var name = T(n.Arg1);
-        var body = ResolveFuncPlaceholder(T(n.Arg4), name);
-        if (name == "main") { MainArity = 0; }
-        else { _exports.Add(new Export(name, type, "")); }
-        return $"static unsafe {type} {name}()\n{body}";
+        // Prototypes emit nothing — C# methods hoist. We still need to
+        // unwind the FnSig's _currentFunctionName since the body wasn't
+        // visited but the name was set.
+        _currentFunctionName = null;
+        return string.Empty;
     }
-
-    // `static T name(args) { … }` — internal linkage. Body emit is identical
-    // to the bare form; we just skip adding the function to the exports list
-    // so library mode keeps it private to the assembly.
-    public EmitContent Visit(C.FuncDefStatic n)
-    {
-        var type = T(n.Arg1);
-        var name = T(n.Arg2);
-        var pars = T(n.Arg4);
-        var body = ResolveFuncPlaceholder(T(n.Arg6), name);
-        if (name == "main") { MainArity = CountCommas(pars) + 1; }
-        return $"static unsafe {type} {name}({pars})\n{body}";
-    }
-
-    public EmitContent Visit(C.FuncDefStaticNoArgs n)
-    {
-        var type = T(n.Arg1);
-        var name = T(n.Arg2);
-        var body = ResolveFuncPlaceholder(T(n.Arg5), name);
-        if (name == "main") { MainArity = 0; }
-        return $"static unsafe {type} {name}()\n{body}";
-    }
-
-    // `T name(void) { … }` — C's explicit "no args" form. Lowers identically
-    // to `T name() { … }`; the `void` is purely a parameter-list marker, not
-    // a real parameter type.
-    public EmitContent Visit(C.FuncDefVoidArgs n)
-    {
-        var type = T(n.Arg0);
-        var name = T(n.Arg1);
-        var body = ResolveFuncPlaceholder(T(n.Arg5), name);
-        if (name == "main") { MainArity = 0; }
-        else { _exports.Add(new Export(name, type, "")); }
-        return $"static unsafe {type} {name}()\n{body}";
-    }
-
-    public EmitContent Visit(C.FuncDefStaticVoidArgs n)
-    {
-        var type = T(n.Arg1);
-        var name = T(n.Arg2);
-        var body = ResolveFuncPlaceholder(T(n.Arg6), name);
-        if (name == "main") { MainArity = 0; }
-        return $"static unsafe {type} {name}()\n{body}";
-    }
-
-    // Prototypes: C# methods hoist, so we emit nothing.
-    public EmitContent Visit(C.ProtoDef n) => string.Empty;
-    public EmitContent Visit(C.ProtoDefNoArgs n) => string.Empty;
-    public EmitContent Visit(C.ProtoDefVoidArgs n) => string.Empty;
-    public EmitContent Visit(C.ProtoDefStatic n) => string.Empty;
-    public EmitContent Visit(C.ProtoDefStaticNoArgs n) => string.Empty;
-    public EmitContent Visit(C.ProtoDefStaticVoidArgs n) => string.Empty;
 
     // `struct ID { fields } ;` — emit a C# struct declaration into the side
     // channel; contribute nothing to the function-emit stream. The struct
@@ -889,43 +884,33 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
 
     public EmitContent Visit(C.ArgsOne n) => new EmitContent.Args(new[] { T(n.Arg0) });
 
-    // Variable reference. Three emit-time rewrites: `__func__` → a
-    // placeholder that Visit(FuncDef*) resolves later (once it knows the
-    // enclosing function's name); enumerator → `EnumName.Member` for any
-    // bare ID matching a previously-declared enumerator (so C code writing
-    // `Red` lands as `Color.Red`); builtin name → BCL helper for
-    // `malloc` / `free` / `printf`. Otherwise pass through.
+    // Variable reference. Three emit-time rewrites:
+    //   - `__func__` → `L("name\0"u8)` using `_currentFunctionName` (set
+    //     by the enclosing FnSig action before this Var visit runs —
+    //     LALR bottom-up, FnSig fully reduces before Block descends);
+    //   - enumerator → `EnumName.Member` so bare `Red` lands as `Color.Red`;
+    //   - builtin name → BCL helper for `malloc` / `free` / `printf`.
+    // Otherwise pass the identifier through verbatim.
     public EmitContent Visit(C.Var n)
     {
         var name = T(n.Arg0);
-        if (name == "__func__") { return FuncPlaceholder; }
+        if (name == "__func__")
+        {
+            // `_currentFunctionName` is the enclosing function being
+            // reduced. If it's null we're outside any function (illegal
+            // C use of __func__) — emit a sentinel so Roslyn surfaces the
+            // bug as an undefined-identifier diagnostic rather than us
+            // silently producing wrong code.
+            var fn = _currentFunctionName
+                ?? throw new CompileException("`__func__` used outside any function definition");
+            return $"L(\"{fn}\\0\"u8)";
+        }
         if (_enumerators.TryGetValue(name, out var enumName))
         {
             return $"{enumName}.{name}";
         }
         return MapBuiltin(name);
     }
-
-    /// <summary>
-    /// Placeholder Visit(Var) emits for <c>__func__</c>. Each Visit(FuncDef*)
-    /// post-processes its body string and replaces every occurrence with
-    /// the function's actual name wrapped in the dotcc UTF-8 string-literal
-    /// idiom. The token is intentionally not a valid C# expression — if
-    /// substitution misses (e.g. <c>__func__</c> outside any function, which
-    /// is illegal C), Roslyn rejects the result and surfaces the bug.
-    /// </summary>
-    private const string FuncPlaceholder = "__DOTCC_CURRENT_FUNC__";
-
-    /// <summary>
-    /// Resolve <see cref="FuncPlaceholder"/> in a function body. Each
-    /// occurrence becomes <c>L("fnname\0"u8)</c> — a byte* to the pinned
-    /// UTF-8 RVA — so the result is callable as a C-string anywhere a
-    /// <c>byte*</c> is expected (printf, strlen, etc.).
-    /// </summary>
-    private static string ResolveFuncPlaceholder(string body, string fnName)
-        => body.Contains(FuncPlaceholder)
-            ? body.Replace(FuncPlaceholder, $"L(\"{fnName}\\0\"u8)")
-            : body;
     // Integer literal — pass-through for unsuffixed; normalize C suffixes
     // (u/U/l/L/ll/LL/ul/ull, case-insensitive, order-insensitive) to C#'s
     // equivalents (no `ll` form — both `l` and `ll` mean 64-bit `long` in

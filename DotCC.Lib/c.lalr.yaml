@@ -217,6 +217,11 @@ symbols:
   - 'goto'         # 132 keyword
   - '_Bool'        # 133 keyword (C99) — the underlying boolean type;
                    #     `bool` is a macro in <stdbool.h> that expands to it.
+  # FnSig — the signature half of a function definition. Factored out so
+  # its action (which captures the function name into emitter state) runs
+  # before the Block body reduces. That ordering lets __func__ resolve
+  # without a placeholder-then-string-replace dance.
+  - FnSig          # 134
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -230,34 +235,35 @@ productions:
       - { lhs: FnList, rhs: [Fn, FnList], action: fnsCons }
       - { lhs: FnList, rhs: [Fn],          action: fnsOne }
 
+  # Function signature — six combinations of storage class × parameter form.
+  # Each fnSig* action returns a structured EmitContent.FnHeader carrying
+  # (type, name, params, isStatic), AND sets the emitter's
+  # _currentFunctionName state so any __func__ inside the body resolves to
+  # this name at Var-visit time.
   - derivation: none
     rules:
-      - { lhs: Fn, rhs: [Type, ID, '(', ParamList, ')', Block], action: funcDef }
-      - { lhs: Fn, rhs: [Type, ID, '(', ')', Block],             action: funcDefNoArgs }
-      # `(void)` parameter-list — the C-correct "explicitly no args" form,
-      # distinct from `()` (which in old-K&R semantics means "unspecified
-      # args"). Lowers identically to funcDefNoArgs at emit time. No S/R
-      # conflict with `(ParamList)` because at state [( . ] with LA `void`,
-      # the parser only completes this rule when the next-after-void is `)`
-      # — not `ID` (which would be a void-typed parameter inside ParamList,
-      # syntactically valid but downstream-reject-able anyway).
-      - { lhs: Fn, rhs: [Type, ID, '(', 'void', ')', Block],     action: funcDefVoidArgs }
-      # Forward declarations: prototype ends with `;` instead of `{ block }`.
-      # No S/R with the definition rules — lookahead `;` vs `{` disambiguates
-      # after parsing the param list.
-      - { lhs: Fn, rhs: [Type, ID, '(', ParamList, ')', ';'], action: protoDef }
-      - { lhs: Fn, rhs: [Type, ID, '(', ')', ';'],             action: protoDefNoArgs }
-      - { lhs: Fn, rhs: [Type, ID, '(', 'void', ')', ';'],     action: protoDefVoidArgs }
-      # `static` modifier on function definition / prototype. Internal linkage
-      # in C — visitor tracks this so library mode (-shared) doesn't add the
-      # function to the [UnmanagedCallersOnly] exports list. Body emission is
-      # otherwise identical to the bare `funcDef` family.
-      - { lhs: Fn, rhs: ['static', Type, ID, '(', ParamList, ')', Block], action: funcDefStatic }
-      - { lhs: Fn, rhs: ['static', Type, ID, '(', ')', Block],             action: funcDefStaticNoArgs }
-      - { lhs: Fn, rhs: ['static', Type, ID, '(', 'void', ')', Block],     action: funcDefStaticVoidArgs }
-      - { lhs: Fn, rhs: ['static', Type, ID, '(', ParamList, ')', ';'], action: protoDefStatic }
-      - { lhs: Fn, rhs: ['static', Type, ID, '(', ')', ';'],             action: protoDefStaticNoArgs }
-      - { lhs: Fn, rhs: ['static', Type, ID, '(', 'void', ')', ';'],     action: protoDefStaticVoidArgs }
+      - { lhs: FnSig, rhs: [Type, ID, '(', ParamList, ')'],     action: fnSig }
+      - { lhs: FnSig, rhs: [Type, ID, '(', ')'],                action: fnSigNoArgs }
+      - { lhs: FnSig, rhs: [Type, ID, '(', 'void', ')'],        action: fnSigVoidArgs }
+      - { lhs: FnSig, rhs: ['static', Type, ID, '(', ParamList, ')'], action: fnSigStatic }
+      - { lhs: FnSig, rhs: ['static', Type, ID, '(', ')'],            action: fnSigStaticNoArgs }
+      - { lhs: FnSig, rhs: ['static', Type, ID, '(', 'void', ')'],    action: fnSigStaticVoidArgs }
+
+  - derivation: none
+    rules:
+      # Function — split into FnSig (signature) and the body half. Since
+      # FnSig reduces BEFORE Block in LALR bottom-up, the FnSig action can
+      # set the visitor's "current function" state in time for any
+      # `__func__` inside the body to resolve directly. Six FnSig variants
+      # cover the storage-class × parameter-form combinations:
+      #   FnSig → Type ID ( ParamList )      regular function
+      #   FnSig → Type ID ( )                no-args (K&R)
+      #   FnSig → Type ID ( void )           explicit no-args
+      #   plus static-modifier variants of each.
+      # Then `Fn → FnSig Block` is a function definition, `Fn → FnSig ';'`
+      # is a prototype. Saves 4 productions overall (8 vs 12).
+      - { lhs: Fn, rhs: [FnSig, Block], action: funcDef }
+      - { lhs: Fn, rhs: [FnSig, ';'],    action: funcProto }
       # Struct declaration: `struct ID { MemberList } ;`. Disambiguates from
       # `struct ID *? ID(...)` (function returning a struct) by lookahead on
       # `{` — when the parser sees `struct ID {`, structDef is the only
