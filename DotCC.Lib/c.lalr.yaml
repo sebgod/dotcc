@@ -202,6 +202,18 @@ symbols:
   # (`.` vs anything-else after `{`) keeps it LALR(1)-clean.
   - MemberInitList # 124
   - MemberInit     # 125
+  # Integer type-specifier keywords. Combinations are enumerated as
+  # individual Type productions further down (canonical-order only —
+  # `signed long long`, not `long signed long`).
+  - 'short'        # 126
+  - 'long'         # 127
+  - 'unsigned'     # 128
+  - 'signed'       # 129
+  # Specifier-list machinery — declaration-specifier sequence the way real
+  # C compilers do it: accumulate keywords in any order, resolve to a
+  # concrete type once at the end via the visitor's ResolveTypeSpec().
+  - TypeSpecList   # 130
+  - TypeSpec       # 131
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -304,18 +316,16 @@ productions:
     rules:
       - { lhs: Param, rhs: [Type, ID], action: param }
 
-  # Type extends rightward into pointer levels: `int * *` → `int**`. Base
-  # types are int/char/float/double/void; pointers compose on top of any.
-  # `void` is only meaningful as a function return type; the grammar doesn't
-  # enforce that — let the consumer C compiler catch invalid uses.
+  # Type — the "declarator type" non-terminal. Most C type forms reduce to
+  # this via TypeSpecList (the C-standard declaration-specifier sequence:
+  # any order, any combination of `signed/unsigned`, `short/long/long-long`,
+  # `char/int/float/double/void` keywords). Tag types (`struct`/`union`/
+  # `enum`/`TYPE_NAME`) don't combine with other specifiers — they're
+  # separate Type productions. Pointer depth composes left-recursively.
   - derivation: leftmost
     rules:
       - { lhs: Type, rhs: [Type, '*'],   action: typePtr }
-      - { lhs: Type, rhs: ['int'],       action: typeInt }
-      - { lhs: Type, rhs: ['char'],      action: typeChar }
-      - { lhs: Type, rhs: ['float'],     action: typeFloat }
-      - { lhs: Type, rhs: ['double'],    action: typeDouble }
-      - { lhs: Type, rhs: ['void'],      action: typeVoid }
+      - { lhs: Type, rhs: [TypeSpecList], action: typeFromSpec }
       # `struct ID` as a type reference — used in declarations, parameters,
       # casts, sizeof. The visitor emits just `ID` since C# doesn't require
       # the `struct` keyword in usage position (only at declaration).
@@ -331,6 +341,30 @@ productions:
       # `union ID` as a type reference — emits just the ID (the generated
       # union-struct decl shares the same name, like `struct ID`).
       - { lhs: Type, rhs: ['union', ID], action: typeUnion }
+
+  # TypeSpecList — accumulator of declaration-specifier keywords. Free
+  # order: `long unsigned int` and `unsigned int long` and `int unsigned
+  # long` all parse the same multiset. The visitor emits a marker string
+  # per spec; TypeSpecList just concatenates; Type → TypeSpecList's
+  # visitor (`typeFromSpec`) inspects the final marker set and resolves
+  # to the corresponding C# type. Adding `const`/`volatile`/etc. later
+  # just adds new TypeSpec rules — no combinatorial explosion.
+  - derivation: leftmost
+    rules:
+      - { lhs: TypeSpecList, rhs: [TypeSpec], action: typeSpecListOne }
+      - { lhs: TypeSpecList, rhs: [TypeSpecList, TypeSpec], action: typeSpecListCons }
+
+  - derivation: none
+    rules:
+      - { lhs: TypeSpec, rhs: ['int'],      action: tsInt }
+      - { lhs: TypeSpec, rhs: ['char'],     action: tsChar }
+      - { lhs: TypeSpec, rhs: ['float'],    action: tsFloat }
+      - { lhs: TypeSpec, rhs: ['double'],   action: tsDouble }
+      - { lhs: TypeSpec, rhs: ['void'],     action: tsVoid }
+      - { lhs: TypeSpec, rhs: ['short'],    action: tsShort }
+      - { lhs: TypeSpec, rhs: ['long'],     action: tsLong }
+      - { lhs: TypeSpec, rhs: ['unsigned'], action: tsUnsigned }
+      - { lhs: TypeSpec, rhs: ['signed'],   action: tsSigned }
 
   - derivation: none
     rules:
@@ -670,6 +704,10 @@ lexer:
     - { symbol: 'float',  match: 'float' }
     - { symbol: 'double', match: 'double' }
     - { symbol: 'void',   match: 'void' }
+    - { symbol: 'short',    match: 'short' }
+    - { symbol: 'long',     match: 'long' }
+    - { symbol: 'unsigned', match: 'unsigned' }
+    - { symbol: 'signed',   match: 'signed' }
     - { symbol: 'if',     match: 'if' }
     - { symbol: 'else',   match: 'else' }
     - { symbol: 'while',  match: 'while' }
@@ -772,6 +810,12 @@ lexer:
     - { symbol: CHAR,   match: '''[^''\\]''' }
     - { symbol: FLOAT,  match: '[0-9]+\.[0-9]+([eE][+\-]?[0-9]+)?[fF]' }
     - { symbol: FLOAT,  match: '[0-9]+\.[0-9]+([eE][+\-]?[0-9]+)?' }
+    # Integer literals — with optional C int-suffix (u/U/l/L combinations).
+    # Suffixed variants listed FIRST so longest-match picks them when the
+    # suffix is present. The Num visitor normalizes C suffixes (l/ll/ul/ull/
+    # case-insensitive) to C# equivalents (L/UL).
+    - { symbol: NUM,    match: '0[xX][0-9a-fA-F]+[uUlL]+' }
+    - { symbol: NUM,    match: '[0-9]+[uUlL]+' }
     # Hex literal — listed before NUM so longest-match (`0xFF` > `0`) picks
     # it. C# accepts the same `0x`-prefixed syntax, so the Num visitor just
     # passes the raw content through unchanged.

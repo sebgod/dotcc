@@ -419,6 +419,56 @@ public static class Compiler
 
                 public PrintfBuilder Arg(float v) => Arg((double)v);
 
+                // Long / unsigned long overloads for the extended integer
+                // type family. Format logic mirrors Arg(int) but with the
+                // value's own ToString so the full 64-bit value survives.
+                public PrintfBuilder Arg(long v)
+                {
+                    var spec = ConsumeUntilSpec();
+                    var ci = System.Globalization.CultureInfo.InvariantCulture;
+                    string s;
+                    switch (spec.Conv)
+                    {
+                        case (byte)'d': case (byte)'i':
+                            s = v.ToString(ci);
+                            if (spec.Plus && v >= 0) { s = "+" + s; }
+                            else if (spec.Space && v >= 0) { s = " " + s; }
+                            break;
+                        case (byte)'x': s = v.ToString("x", ci); break;
+                        case (byte)'X': s = v.ToString("X", ci); break;
+                        case (byte)'f': case (byte)'e': case (byte)'g':
+                            s = FormatFloat((double)v, spec, ci);
+                            break;
+                        default: s = v.ToString(ci); break;
+                    }
+                    Console.Write(ApplyWidth(s, spec));
+                    return this;
+                }
+
+                public PrintfBuilder Arg(ulong v)
+                {
+                    var spec = ConsumeUntilSpec();
+                    var ci = System.Globalization.CultureInfo.InvariantCulture;
+                    string s;
+                    switch (spec.Conv)
+                    {
+                        case (byte)'u':
+                        case (byte)'d': case (byte)'i':
+                            s = v.ToString(ci);
+                            break;
+                        case (byte)'x': s = v.ToString("x", ci); break;
+                        case (byte)'X': s = v.ToString("X", ci); break;
+                        default: s = v.ToString(ci); break;
+                    }
+                    Console.Write(ApplyWidth(s, spec));
+                    return this;
+                }
+
+                // uint → routed through long (implicit conversion is unsafe
+                // for full-range; we just promote since ulong's high-bit
+                // distinction rarely matters for printf semantics).
+                public PrintfBuilder Arg(uint v) => Arg((long)v);
+
                 public PrintfBuilder Arg(byte* v)
                 {
                     var spec = ConsumeUntilSpec();
@@ -722,6 +772,56 @@ public static class Compiler
                 }
 
                 public PrintfBuilder Arg(float v) => Arg((double)v);
+
+                // Long / unsigned long overloads for the extended integer
+                // type family. Format logic mirrors Arg(int) but with the
+                // value's own ToString so the full 64-bit value survives.
+                public PrintfBuilder Arg(long v)
+                {
+                    var spec = ConsumeUntilSpec();
+                    var ci = System.Globalization.CultureInfo.InvariantCulture;
+                    string s;
+                    switch (spec.Conv)
+                    {
+                        case (byte)'d': case (byte)'i':
+                            s = v.ToString(ci);
+                            if (spec.Plus && v >= 0) { s = "+" + s; }
+                            else if (spec.Space && v >= 0) { s = " " + s; }
+                            break;
+                        case (byte)'x': s = v.ToString("x", ci); break;
+                        case (byte)'X': s = v.ToString("X", ci); break;
+                        case (byte)'f': case (byte)'e': case (byte)'g':
+                            s = FormatFloat((double)v, spec, ci);
+                            break;
+                        default: s = v.ToString(ci); break;
+                    }
+                    Console.Write(ApplyWidth(s, spec));
+                    return this;
+                }
+
+                public PrintfBuilder Arg(ulong v)
+                {
+                    var spec = ConsumeUntilSpec();
+                    var ci = System.Globalization.CultureInfo.InvariantCulture;
+                    string s;
+                    switch (spec.Conv)
+                    {
+                        case (byte)'u':
+                        case (byte)'d': case (byte)'i':
+                            s = v.ToString(ci);
+                            break;
+                        case (byte)'x': s = v.ToString("x", ci); break;
+                        case (byte)'X': s = v.ToString("X", ci); break;
+                        default: s = v.ToString(ci); break;
+                    }
+                    Console.Write(ApplyWidth(s, spec));
+                    return this;
+                }
+
+                // uint → routed through long (implicit conversion is unsafe
+                // for full-range; we just promote since ulong's high-bit
+                // distinction rarely matters for printf semantics).
+                public PrintfBuilder Arg(uint v) => Arg((long)v);
 
                 public PrintfBuilder Arg(byte* v)
                 {

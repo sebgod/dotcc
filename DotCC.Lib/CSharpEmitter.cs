@@ -396,13 +396,72 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
     public string Visit(C.ParamsOne n) => (string)n.Arg0.Content;
     public string Visit(C.ParamsVararg n) => $"{(string)n.Arg0.Content}, params object[] _va";
 
-    // Types
-    public string Visit(C.TypeInt n) => "int";
-    public string Visit(C.TypeChar n) => "byte";   // char* → byte* arithmetic
-    public string Visit(C.TypeFloat n) => "float";
-    public string Visit(C.TypeDouble n) => "double";
-    public string Visit(C.TypeVoid n) => "void";
+    // Types — pointer composition + tag types stay direct; everything that
+    // accumulates declaration specifiers (signed/unsigned, short/long, int/
+    // char/float/double/void) goes through TypeSpec → TypeSpecList →
+    // ResolveTypeSpec, matching how real C compilers handle the
+    // free-order specifier sequence.
     public string Visit(C.TypePtr n) => $"{(string)n.Arg0.Content}*";
+
+    // Each TypeSpec keyword maps to a single-char marker. Multi-char-friendly
+    // because `long long` shows up as `LL`. TypeSpecList concatenates the
+    // markers in order; ResolveTypeSpec inspects the final string.
+    public string Visit(C.TsInt n)      => "i";
+    public string Visit(C.TsChar n)     => "c";
+    public string Visit(C.TsFloat n)    => "f";
+    public string Visit(C.TsDouble n)   => "d";
+    public string Visit(C.TsVoid n)     => "v";
+    public string Visit(C.TsShort n)    => "H";   // (capital H — 's' is reserved for signed)
+    public string Visit(C.TsLong n)     => "L";
+    public string Visit(C.TsUnsigned n) => "U";
+    public string Visit(C.TsSigned n)   => "S";
+
+    public string Visit(C.TypeSpecListOne n)  => (string)n.Arg0.Content;
+    public string Visit(C.TypeSpecListCons n) => (string)n.Arg0.Content + (string)n.Arg1.Content;
+
+    public string Visit(C.TypeFromSpec n) => ResolveTypeSpec((string)n.Arg0.Content);
+
+    /// <summary>
+    /// Resolve a declaration-specifier marker string (concatenated by
+    /// TypeSpec/TypeSpecList visitors) to a C# type name. Order-insensitive:
+    /// `long unsigned int` and `unsigned int long` both produce <c>"LUi"</c>
+    /// which resolves to <c>"ulong"</c>. Long and long-long both map to
+    /// C# <c>long</c> (64-bit unconditionally in C#) — dotcc accepts the
+    /// MSVC 32-bit `long` semantic loss as a documented quirk.
+    /// </summary>
+    private static string ResolveTypeSpec(string markers)
+    {
+        var isUnsigned = markers.Contains('U');
+        var isSigned   = markers.Contains('S');
+        var isShort    = markers.Contains('H');
+        var longCount  = 0;
+        foreach (var c in markers) { if (c == 'L') { longCount++; } }
+
+        char? baseChar = null;
+        foreach (var c in "icfdv")
+        {
+            if (markers.Contains(c)) { baseChar = c; break; }
+        }
+
+        // Non-integer bases ignore signedness/size modifiers (semantically
+        // invalid in real C, but our job here is to emit *something* —
+        // Roslyn will reject any genuinely-bogus uses downstream).
+        if (baseChar == 'f') { return "float"; }
+        if (baseChar == 'd') { return "double"; }
+        if (baseChar == 'v') { return "void"; }
+        if (baseChar == 'c')
+        {
+            // dotcc's `char` is `byte` (unsigned). `signed char` becomes
+            // sbyte; `unsigned char` stays byte.
+            if (isSigned) { return "sbyte"; }
+            return "byte";
+        }
+
+        // Integer family.
+        if (isShort) { return isUnsigned ? "ushort" : "short"; }
+        if (longCount > 0) { return isUnsigned ? "ulong" : "long"; }
+        return isUnsigned ? "uint" : "int";
+    }
 
     // Block / statements
     public string Visit(C.Block n) => "{\n" + IndentEach((string)n.Arg1.Content) + "}\n";
@@ -693,7 +752,38 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
         => body.Contains(FuncPlaceholder)
             ? body.Replace(FuncPlaceholder, $"L(\"{fnName}\\0\"u8)")
             : body;
-    public string Visit(C.Num n) => (string)n.Arg0.Content;
+    // Integer literal — pass-through for unsuffixed; normalize C suffixes
+    // (u/U/l/L/ll/LL/ul/ull, case-insensitive, order-insensitive) to C#'s
+    // equivalents (no `ll` form — both `l` and `ll` mean 64-bit `long` in
+    // C#, since C# `long` is unconditionally 64-bit).
+    public string Visit(C.Num n) => NormalizeIntSuffix((string)n.Arg0.Content);
+
+    private static string NormalizeIntSuffix(string raw)
+    {
+        if (string.IsNullOrEmpty(raw)) { return raw; }
+        var end = raw.Length;
+        while (end > 0 && (raw[end - 1] is 'u' or 'U' or 'l' or 'L')) { end--; }
+        if (end == raw.Length) { return raw; }
+        var digits = raw[..end];
+        var suffix = raw[end..];
+        var hasU = false;
+        var lCount = 0;
+        foreach (var c in suffix)
+        {
+            if (c is 'u' or 'U') { hasU = true; }
+            else if (c is 'l' or 'L') { lCount++; }
+        }
+        // C# suffix mapping: u → uint/ulong (compiler-chosen), L → long,
+        // UL → ulong. C# accepts both lowercase and uppercase; we emit the
+        // C# canonical uppercase form for readability.
+        return (hasU, lCount) switch
+        {
+            (false, 0) => digits,           // unreachable (no suffix removed)
+            (true, 0)  => digits + "u",
+            (false, _) => digits + "L",     // any number of l's → long
+            (true, _)  => digits + "UL",    // u + any l's → ulong
+        };
+    }
     public string Visit(C.Flt n) => (string)n.Arg0.Content;
 
     public string Visit(C.Str n)

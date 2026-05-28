@@ -1,0 +1,7 @@
+short=100 unsigned short=60000
+long=2000000000 unsigned long=4000000000
+long long=9000000000 unsigned long long=18000000000
+unsigned=12345 signed int=-42
+free order: 42 43 44
+free unsigned: 100 101 102
+uchar=200 schar=-50

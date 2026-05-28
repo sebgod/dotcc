@@ -24,7 +24,7 @@ Source of truth for the grammar: `DotCC.Lib/c.lalr.yaml`. Source of truth for th
 | Hex int literal `0xFF` | ✅ | Lexer rule above NUM (longest-match wins); visitor passes through — C# accepts identical syntax. Fixture `bitwise/` |
 | Octal int literal `0755` | ❌ | Conflicts with `0` then `755`; add rule, longer-match wins |
 | Binary int literal `0b1010` | ❌ | C23 — straightforward addition |
-| Int suffixes `123u`, `123L`, `123ull` | ❌ | Lex rule + visitor map (`L` → `long`, `u` → `uint`) |
+| Int suffixes `123u`, `123L`, `123ull` | ✅ | Lexer accepts any combination of `u`/`U`/`l`/`L` (one or more) after a decimal or hex digit run. Visitor's `NormalizeIntSuffix` collapses to C#'s form: `u` → `u` (compiler resolves uint/ulong), one-or-more `L` → `L` (long; C# has no `ll`), `u` + `L`s → `UL` (ulong). |
 | Float literal `1.5`, `1.5e10`, `1.5f` | ✅ | `FLOAT` token (mandatory `.` to disambiguate from `NUM`) |
 | Double suffix `1.5l` (long double) | 🚫 | C# has no `long double`; we pass `f`/`F` through, others won't typecheck |
 | Char literal `'a'`, `'\n'` | ✅ | `CHAR` lexer rule split into two (escape-form + plain) to avoid IRx alternation; visitor lowers to `(byte)'X'`. Supported escapes: `\n \r \t \\ \' \" \0 \b \f`. Fixture `small-ops/` |
@@ -40,9 +40,9 @@ Source of truth for the grammar: `DotCC.Lib/c.lalr.yaml`. Source of truth for th
 |---|---|---|
 | `int` | ✅ | Lowered to C# `int` |
 | `char` | ✅ | Lowered to C# `byte` (so `char*` arithmetic walks bytes) |
-| `short`, `unsigned short` | ❌ | Lower to `short` / `ushort` |
-| `long`, `long long`, `unsigned long`, `unsigned long long` | ❌ | Lower to `long` / `ulong` (32-vs-64 bit char/short mismatch is documented as dotcc-quirk) |
-| `signed` / `unsigned` qualifiers | ❌ | Map to C# signed/unsigned int variants |
+| `short`, `unsigned short` | ✅ | `short` / `ushort`. Resolved via the `TypeSpecList` accumulator. |
+| `long`, `long long`, `unsigned long`, `unsigned long long` | ✅ | All map to C# `long` / `ulong` (64-bit unconditionally in C#). MSVC-Windows's 32-bit `long` quirk is silently widened — dotcc-documented choice. |
+| `signed` / `unsigned` qualifiers | ✅ | Free-order with the size and base keywords (the grammar uses a real-compiler-shape `TypeSpec` accumulator, not enumerated combinations). `unsigned char` → `byte`, `signed char` → `sbyte`. |
 | `float` | ✅ | C# `float` |
 | `double` | ✅ | C# `double` |
 | `long double` | 🚫 | No C# equivalent |
