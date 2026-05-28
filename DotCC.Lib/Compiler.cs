@@ -131,7 +131,10 @@ public static class Compiler
             }
 
             if (allFunctions.Length > 0) { allFunctions.AppendLine(); }
-            allFunctions.Append((string)result.Content);
+            // The visitor's IVisitor<EmitContent> returns a discriminated
+            // union; for the top-level FnList the result is always a Text
+            // variant carrying the concatenated function emit string.
+            allFunctions.Append(((EmitContent.Text)result.Content).Value);
 
             if (emitter.MainArity >= 0)
             {

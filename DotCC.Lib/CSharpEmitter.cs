@@ -1,7 +1,9 @@
 #nullable enable
 
 using System;
+using System.Collections.Generic;
 using System.Text;
+using LALR.CC.LexicalGrammar;
 
 namespace DotCC;
 
@@ -20,12 +22,33 @@ namespace DotCC;
 /// where the source's usage allows (e.g. <c>int*</c>+<c>malloc</c> → <c>int[]</c>
 /// when only ever indexed; <c>char*</c> → <c>string</c> for printf-only consumers).
 /// </remarks>
-internal sealed class CSharpEmitter : C.IVisitor<string>
+internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
 {
-    // Separator used by ArgsCons so Call can split args back out for printf
-    // specialisation. U+0001 SOH can't appear in source that survived the lexer,
-    // so splitting on it is unambiguous.
-    private const char ArgSep = '';
+    // ---- Reading children -------------------------------------------------
+    // Every visit method accesses its child results via `n.ArgX.Content`.
+    // Content is `object` carrying an EmitContent variant; T() / S() / A()
+    // / EI() / IM() are the typed accessors. T() is by far the most common —
+    // most children are plain text.
+
+    /// <summary>Read a child as code text — the common case. Handles
+    /// both visit-produced <see cref="EmitContent.Text"/> wrappers AND
+    /// raw lexer-token strings (terminals like <c>ID</c>/<c>NUM</c>
+    /// arrive with the lexeme as a plain string).</summary>
+    private static string T(Item it) => it.Content switch
+    {
+        EmitContent.Text t => t.Value,
+        string s => s,
+        _ => throw new InvalidCastException(
+            $"expected EmitContent.Text or string, got {it.Content?.GetType().FullName ?? "null"}"),
+    };
+    /// <summary>Read a child as an accumulated specifier list.</summary>
+    private static IReadOnlyList<string> S(Item it) => ((EmitContent.SpecList)it.Content).Specs;
+    /// <summary>Read a child as an argument list (call/array-init).</summary>
+    private static IReadOnlyList<string> A(Item it) => ((EmitContent.Args)it.Content).Values;
+    /// <summary>Read a child as an enum-item list.</summary>
+    private static IReadOnlyList<string> EI(Item it) => ((EmitContent.EnumItems)it.Content).Items;
+    /// <summary>Read a child as a designated-initializer member list.</summary>
+    private static IReadOnlyList<string> IM(Item it) => ((EmitContent.InitMembers)it.Content).Members;
 
     public int MainArity { get; private set; } = -1;
 
@@ -65,22 +88,22 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
     public string UsingAliases => _aliases.ToString();
     public void ResetUsingAliases() { _aliases.Clear(); _aliasNames.Clear(); }
 
-    public string Visit(C.FuncDef n)
+    public EmitContent Visit(C.FuncDef n)
     {
-        var type = (string)n.Arg0.Content;
-        var name = (string)n.Arg1.Content;
-        var pars = (string)n.Arg3.Content;
-        var body = ResolveFuncPlaceholder((string)n.Arg5.Content, name);
+        var type = T(n.Arg0);
+        var name = T(n.Arg1);
+        var pars = T(n.Arg3);
+        var body = ResolveFuncPlaceholder(T(n.Arg5), name);
         if (name == "main") { MainArity = CountCommas(pars) + 1; }
         else { _exports.Add(new Export(name, type, pars)); }
         return $"static unsafe {type} {name}({pars})\n{body}";
     }
 
-    public string Visit(C.FuncDefNoArgs n)
+    public EmitContent Visit(C.FuncDefNoArgs n)
     {
-        var type = (string)n.Arg0.Content;
-        var name = (string)n.Arg1.Content;
-        var body = ResolveFuncPlaceholder((string)n.Arg4.Content, name);
+        var type = T(n.Arg0);
+        var name = T(n.Arg1);
+        var body = ResolveFuncPlaceholder(T(n.Arg4), name);
         if (name == "main") { MainArity = 0; }
         else { _exports.Add(new Export(name, type, "")); }
         return $"static unsafe {type} {name}()\n{body}";
@@ -89,21 +112,21 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
     // `static T name(args) { … }` — internal linkage. Body emit is identical
     // to the bare form; we just skip adding the function to the exports list
     // so library mode keeps it private to the assembly.
-    public string Visit(C.FuncDefStatic n)
+    public EmitContent Visit(C.FuncDefStatic n)
     {
-        var type = (string)n.Arg1.Content;
-        var name = (string)n.Arg2.Content;
-        var pars = (string)n.Arg4.Content;
-        var body = ResolveFuncPlaceholder((string)n.Arg6.Content, name);
+        var type = T(n.Arg1);
+        var name = T(n.Arg2);
+        var pars = T(n.Arg4);
+        var body = ResolveFuncPlaceholder(T(n.Arg6), name);
         if (name == "main") { MainArity = CountCommas(pars) + 1; }
         return $"static unsafe {type} {name}({pars})\n{body}";
     }
 
-    public string Visit(C.FuncDefStaticNoArgs n)
+    public EmitContent Visit(C.FuncDefStaticNoArgs n)
     {
-        var type = (string)n.Arg1.Content;
-        var name = (string)n.Arg2.Content;
-        var body = ResolveFuncPlaceholder((string)n.Arg5.Content, name);
+        var type = T(n.Arg1);
+        var name = T(n.Arg2);
+        var body = ResolveFuncPlaceholder(T(n.Arg5), name);
         if (name == "main") { MainArity = 0; }
         return $"static unsafe {type} {name}()\n{body}";
     }
@@ -111,42 +134,42 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
     // `T name(void) { … }` — C's explicit "no args" form. Lowers identically
     // to `T name() { … }`; the `void` is purely a parameter-list marker, not
     // a real parameter type.
-    public string Visit(C.FuncDefVoidArgs n)
+    public EmitContent Visit(C.FuncDefVoidArgs n)
     {
-        var type = (string)n.Arg0.Content;
-        var name = (string)n.Arg1.Content;
-        var body = ResolveFuncPlaceholder((string)n.Arg5.Content, name);
+        var type = T(n.Arg0);
+        var name = T(n.Arg1);
+        var body = ResolveFuncPlaceholder(T(n.Arg5), name);
         if (name == "main") { MainArity = 0; }
         else { _exports.Add(new Export(name, type, "")); }
         return $"static unsafe {type} {name}()\n{body}";
     }
 
-    public string Visit(C.FuncDefStaticVoidArgs n)
+    public EmitContent Visit(C.FuncDefStaticVoidArgs n)
     {
-        var type = (string)n.Arg1.Content;
-        var name = (string)n.Arg2.Content;
-        var body = ResolveFuncPlaceholder((string)n.Arg6.Content, name);
+        var type = T(n.Arg1);
+        var name = T(n.Arg2);
+        var body = ResolveFuncPlaceholder(T(n.Arg6), name);
         if (name == "main") { MainArity = 0; }
         return $"static unsafe {type} {name}()\n{body}";
     }
 
     // Prototypes: C# methods hoist, so we emit nothing.
-    public string Visit(C.ProtoDef n) => string.Empty;
-    public string Visit(C.ProtoDefNoArgs n) => string.Empty;
-    public string Visit(C.ProtoDefVoidArgs n) => string.Empty;
-    public string Visit(C.ProtoDefStatic n) => string.Empty;
-    public string Visit(C.ProtoDefStaticNoArgs n) => string.Empty;
-    public string Visit(C.ProtoDefStaticVoidArgs n) => string.Empty;
+    public EmitContent Visit(C.ProtoDef n) => string.Empty;
+    public EmitContent Visit(C.ProtoDefNoArgs n) => string.Empty;
+    public EmitContent Visit(C.ProtoDefVoidArgs n) => string.Empty;
+    public EmitContent Visit(C.ProtoDefStatic n) => string.Empty;
+    public EmitContent Visit(C.ProtoDefStaticNoArgs n) => string.Empty;
+    public EmitContent Visit(C.ProtoDefStaticVoidArgs n) => string.Empty;
 
     // `struct ID { fields } ;` — emit a C# struct declaration into the side
     // channel; contribute nothing to the function-emit stream. The struct
     // is marked `unsafe` so it can legally contain pointer fields; all our
     // C structs are by definition unmanaged (no GC refs in their fields)
     // so this is sound.
-    public string Visit(C.StructDef n)
+    public EmitContent Visit(C.StructDef n)
     {
-        var name = (string)n.Arg1.Content;
-        var members = (string)n.Arg3.Content;
+        var name = T(n.Arg1);
+        var members = T(n.Arg3);
         DrainPendingFields(name);
         _structs.Append("unsafe struct ").Append(name).Append("\n{\n");
         _structs.Append(IndentEach(members));
@@ -158,20 +181,20 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
     // regardless of declaration order, so we emit nothing. The full
     // StructDef (if any) lands later in the same translation unit and
     // populates _structFields then.
-    public string Visit(C.StructFwd n) => string.Empty;
+    public EmitContent Visit(C.StructFwd n) => string.Empty;
 
-    public string Visit(C.MembersCons n) => (string)n.Arg0.Content + (string)n.Arg1.Content;
-    public string Visit(C.MembersOne n)  => (string)n.Arg0.Content;
+    public EmitContent Visit(C.MembersCons n) => T(n.Arg0) + T(n.Arg1);
+    public EmitContent Visit(C.MembersOne n)  => T(n.Arg0);
     // `Type ID ;` member — emit as public field. C convention is that all
     // struct fields are accessible to anyone with a pointer; matching that
     // requires `public` in C#. Field names also pushed onto _pendingFields
     // so the enclosing StructDef / TypedefStruct / UnionDef can index them
     // by struct name for the aggregate-init lookup later.
-    public string Visit(C.StructMember n)
+    public EmitContent Visit(C.StructMember n)
     {
-        var fieldName = (string)n.Arg1.Content;
+        var fieldName = T(n.Arg1);
         _pendingFields.Add(fieldName);
-        return $"public {(string)n.Arg0.Content} {fieldName};\n";
+        return $"public {T(n.Arg0)} {fieldName};\n";
     }
 
     private void DrainPendingFields(string typeName)
@@ -182,25 +205,25 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
     // `struct ID` as a type reference — emit just the ID. C# doesn't use the
     // `struct` keyword in usage position (only in declaration), and the
     // generated struct decl shares the same name.
-    public string Visit(C.TypeStruct n) => (string)n.Arg1.Content;
+    public EmitContent Visit(C.TypeStruct n) => T(n.Arg1);
 
     // `enum ID` as a type reference — lowers to plain `int` because we emit
     // enumerators as `const int` rather than a C# enum (so the bare names
     // are usable like C's int constants without explicit casts).
-    public string Visit(C.TypeEnum n) => "int";
+    public EmitContent Visit(C.TypeEnum n) => "int";
 
     // `union ID` as a type reference — emit just the ID. The
     // [StructLayout(LayoutKind.Explicit)] struct declaration shares the name.
-    public string Visit(C.TypeUnion n) => (string)n.Arg1.Content;
+    public EmitContent Visit(C.TypeUnion n) => T(n.Arg1);
 
     // `union Name { Type f1; Type f2; … } ;` — emit a C# struct with
     // [StructLayout(LayoutKind.Explicit)] and [FieldOffset(0)] on each
     // member, giving C's overlapping-storage semantics. Reuses the
     // MemberList parsed for struct (one `Type ID ;` per member).
-    public string Visit(C.UnionDef n)
+    public EmitContent Visit(C.UnionDef n)
     {
-        var name = (string)n.Arg1.Content;
-        var members = (string)n.Arg3.Content;
+        var name = T(n.Arg1);
+        var members = T(n.Arg3);
         DrainPendingFields(name);
         _structs.Append("[global::System.Runtime.InteropServices.StructLayout(global::System.Runtime.InteropServices.LayoutKind.Explicit)]\n");
         _structs.Append("unsafe struct ").Append(name).Append("\n{\n");
@@ -241,10 +264,10 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
     // Auto-numbering: each item with no explicit initializer takes `prev + 1`;
     // the first such item is 0. Returns empty so the function-emit stream
     // stays free of type decls (which C# requires AFTER top-level statements).
-    public string Visit(C.EnumDef n)
+    public EmitContent Visit(C.EnumDef n)
     {
-        var enumName = (string)n.Arg1.Content;
-        var items = ((string)n.Arg3.Content).Split(EnumSep);
+        var enumName = T(n.Arg1);
+        var items = EI(n.Arg3);  // typed EmitContent.EnumItems — no sentinel split
         _structs.Append("static class ").Append(enumName).Append("\n{\n");
         var next = 0L;
         foreach (var raw in items)
@@ -284,17 +307,27 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
         return string.Empty;
     }
 
-    private const char EnumSep = '';
-    public string Visit(C.EnumListOne n)  => (string)n.Arg0.Content;
-    public string Visit(C.EnumListCons n) => $"{(string)n.Arg0.Content}{EnumSep}{(string)n.Arg2.Content}";
-    public string Visit(C.EnumItem n)     => (string)n.Arg0.Content;
-    public string Visit(C.EnumItemInit n) => $"{(string)n.Arg0.Content}={(string)n.Arg2.Content}";
+    // EnumList accumulator — produces a typed EmitContent.EnumItems list.
+    // Each element is either "name" (no explicit value) or "name=expr" so
+    // EnumDef can split with one IndexOf('='). No sentinel chars.
+    public EmitContent Visit(C.EnumListOne n) => new EmitContent.EnumItems(new[] { T(n.Arg0) });
+    public EmitContent Visit(C.EnumListCons n)
+    {
+        var prev = EI(n.Arg0);
+        var next = T(n.Arg2);
+        var combined = new List<string>(prev.Count + 1);
+        combined.AddRange(prev);
+        combined.Add(next);
+        return new EmitContent.EnumItems(combined);
+    }
+    public EmitContent Visit(C.EnumItem n)     => T(n.Arg0);
+    public EmitContent Visit(C.EnumItemInit n) => $"{T(n.Arg0)}={T(n.Arg2)}";
 
     // `Type -> TYPE_NAME` — the rewriter-synthesised terminal carrying a
     // typedef'd name. The Content is the raw identifier string; emit it
     // verbatim since the using-alias (or struct decl) we emitted for the
     // typedef already binds that name in C#'s namespace.
-    public string Visit(C.TypeName n) => (string)n.Arg0.Content;
+    public EmitContent Visit(C.TypeName n) => T(n.Arg0);
 
     // `typedef Type ID ;` — register an `using unsafe Alias = Type;` line in
     // the aliases side channel. Suppressed when Alias == Type (e.g.
@@ -303,10 +336,10 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
     // Suppressed too when the alias was already emitted earlier in the same
     // translation unit (deduplication — real C allows redeclaration to the
     // same type, real C# rejects duplicate aliases).
-    public string Visit(C.TypedefAlias n)
+    public EmitContent Visit(C.TypedefAlias n)
     {
-        var type = (string)n.Arg1.Content;
-        var alias = (string)n.Arg2.Content;
+        var type = T(n.Arg1);
+        var alias = T(n.Arg2);
         if (alias != type && _aliasNames.Add(alias))
         {
             _aliases.Append("using unsafe ").Append(alias).Append(" = ").Append(type).Append(";\n");
@@ -320,11 +353,11 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
     // parameter names from the ParamList — C# function pointers are
     // by-type-only — by splitting on commas and dropping the trailing ID
     // from each "Type ID" chunk.
-    public string Visit(C.TypedefFnPtr n)
+    public EmitContent Visit(C.TypedefFnPtr n)
     {
-        var ret = (string)n.Arg1.Content;
-        var name = (string)n.Arg4.Content;
-        var pars = (string)n.Arg7.Content;
+        var ret = T(n.Arg1);
+        var name = T(n.Arg4);
+        var pars = T(n.Arg7);
         var typesOnly = StripParamNames(pars);
         _aliasNames.Add(name);
         _aliases.Append("using unsafe ").Append(name).Append(" = delegate*<")
@@ -332,10 +365,10 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
         return string.Empty;
     }
 
-    public string Visit(C.TypedefFnPtrNoArgs n)
+    public EmitContent Visit(C.TypedefFnPtrNoArgs n)
     {
-        var ret = (string)n.Arg1.Content;
-        var name = (string)n.Arg4.Content;
+        var ret = T(n.Arg1);
+        var name = T(n.Arg4);
         _aliasNames.Add(name);
         _aliases.Append("using unsafe ").Append(name).Append(" = delegate*<")
             .Append(ret).Append(">;\n");
@@ -363,11 +396,11 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
     // `typedef struct ID { MemberList } ID ;` — emit the struct under the
     // alias name (the trailing ID). When tag != alias, also bind the tag as
     // a `using` alias so code using `struct Tag` typeref form also resolves.
-    public string Visit(C.TypedefStruct n)
+    public EmitContent Visit(C.TypedefStruct n)
     {
-        var tag = (string)n.Arg2.Content;
-        var members = (string)n.Arg4.Content;
-        var alias = (string)n.Arg6.Content;
+        var tag = T(n.Arg2);
+        var members = T(n.Arg4);
+        var alias = T(n.Arg6);
         // Index fields under BOTH the alias and the tag — code may refer to
         // the type by either name (and `using unsafe Tag = Alias;` below
         // makes the tag a real type reference too).
@@ -385,44 +418,59 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
         return string.Empty;
     }
 
-    public string Visit(C.FnsCons n) =>
-        (string)n.Arg0.Content + (((string)n.Arg0.Content).Length > 0 ? "\n\n" : "") + (string)n.Arg1.Content;
+    public EmitContent Visit(C.FnsCons n) =>
+        T(n.Arg0) + ((T(n.Arg0)).Length > 0 ? "\n\n" : "") + T(n.Arg1);
 
-    public string Visit(C.FnsOne n) => (string)n.Arg0.Content;
+    public EmitContent Visit(C.FnsOne n) => T(n.Arg0);
 
     // Params
-    public string Visit(C.Param n) => $"{(string)n.Arg0.Content} {(string)n.Arg1.Content}";
-    public string Visit(C.ParamsCons n) => $"{(string)n.Arg0.Content}, {(string)n.Arg2.Content}";
-    public string Visit(C.ParamsOne n) => (string)n.Arg0.Content;
-    public string Visit(C.ParamsVararg n) => $"{(string)n.Arg0.Content}, params object[] _va";
+    public EmitContent Visit(C.Param n) => $"{T(n.Arg0)} {T(n.Arg1)}";
+    public EmitContent Visit(C.ParamsCons n) => $"{T(n.Arg0)}, {T(n.Arg2)}";
+    public EmitContent Visit(C.ParamsOne n) => T(n.Arg0);
+    public EmitContent Visit(C.ParamsVararg n) => $"{T(n.Arg0)}, params object[] _va";
 
     // Types — pointer composition + tag types stay direct; everything that
     // accumulates declaration specifiers (signed/unsigned, short/long, int/
     // char/float/double/void) goes through TypeSpec → TypeSpecList →
     // ResolveTypeSpec, matching how real C compilers handle the
     // free-order specifier sequence.
-    public string Visit(C.TypePtr n) => $"{(string)n.Arg0.Content}*";
+    public EmitContent Visit(C.TypePtr n) => $"{T(n.Arg0)}*";
 
     // Each TypeSpec keyword maps to its own bracketed marker — `<int>`,
     // `<unsigned>`, `<_Bool>` etc. Bracketing makes the markers
     // self-delimiting (no opaque single-char shorthand to memorise) and
     // makes accumulated lists trivially parseable: `<unsigned><long><int>`.
     // TypeSpecList concatenates; ResolveTypeSpec splits on `<...>` segments.
-    public string Visit(C.TsInt n)      => "<int>";
-    public string Visit(C.TsChar n)     => "<char>";
-    public string Visit(C.TsFloat n)    => "<float>";
-    public string Visit(C.TsDouble n)   => "<double>";
-    public string Visit(C.TsVoid n)     => "<void>";
-    public string Visit(C.TsShort n)    => "<short>";
-    public string Visit(C.TsLong n)     => "<long>";
-    public string Visit(C.TsUnsigned n) => "<unsigned>";
-    public string Visit(C.TsSigned n)   => "<signed>";
-    public string Visit(C.TsBool n)     => "<_Bool>";
+    // TypeSpec visitors emit single-element SpecList; TypeSpecList* accumulate
+    // them. TypeFromSpec resolves the multiset to a final C# type name.
+    // No more sentinel-encoded marker strings — the list IS the schema.
+    private static EmitContent.SpecList Spec(string kw) => new(new[] { kw });
 
-    public string Visit(C.TypeSpecListOne n)  => (string)n.Arg0.Content;
-    public string Visit(C.TypeSpecListCons n) => (string)n.Arg0.Content + (string)n.Arg1.Content;
+    public EmitContent Visit(C.TsInt n)      => Spec("int");
+    public EmitContent Visit(C.TsChar n)     => Spec("char");
+    public EmitContent Visit(C.TsFloat n)    => Spec("float");
+    public EmitContent Visit(C.TsDouble n)   => Spec("double");
+    public EmitContent Visit(C.TsVoid n)     => Spec("void");
+    public EmitContent Visit(C.TsShort n)    => Spec("short");
+    public EmitContent Visit(C.TsLong n)     => Spec("long");
+    public EmitContent Visit(C.TsUnsigned n) => Spec("unsigned");
+    public EmitContent Visit(C.TsSigned n)   => Spec("signed");
+    public EmitContent Visit(C.TsBool n)     => Spec("_Bool");
 
-    public string Visit(C.TypeFromSpec n) => ResolveTypeSpec((string)n.Arg0.Content);
+    public EmitContent Visit(C.TypeSpecListOne n)  => S(n.Arg0) is var specs
+        ? new EmitContent.SpecList(specs) : throw new InvalidOperationException();
+
+    public EmitContent Visit(C.TypeSpecListCons n)
+    {
+        var prev = S(n.Arg0);
+        var next = S(n.Arg1);
+        var combined = new List<string>(prev.Count + next.Count);
+        combined.AddRange(prev);
+        combined.AddRange(next);
+        return new EmitContent.SpecList(combined);
+    }
+
+    public EmitContent Visit(C.TypeFromSpec n) => ResolveTypeSpec(S(n.Arg0));
 
     /// <summary>
     /// Resolve a declaration-specifier marker string (concatenated by
@@ -432,18 +480,12 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
     /// C# <c>long</c> (64-bit unconditionally in C#) — dotcc accepts the
     /// MSVC 32-bit `long` semantic loss as a documented quirk.
     /// </summary>
-    // Regex over the bracketed-keyword marker stream. Each match is one
-    // specifier; `Groups[1].Value` is the keyword. Pre-compiled because
-    // ResolveTypeSpec runs once per Type reduction.
-    private static readonly System.Text.RegularExpressions.Regex _typeSpecPattern
-        = new(@"<(\w+)>", System.Text.RegularExpressions.RegexOptions.Compiled);
-
-    private static string ResolveTypeSpec(string markers)
+    private static string ResolveTypeSpec(IReadOnlyList<string> specs)
     {
-        // Parse the marker stream once via switch — string-literal cases
-        // compile to an interned hash check, so this is allocation-free and
-        // faster than a Dictionary. Duplicates AND contradictions are both
-        // detectable in this single pass.
+        // Single-pass count of each specifier class. Duplicates AND
+        // contradictions surface in the same loop. The input list IS the
+        // typed schema (EmitContent.SpecList) — no string encoding, no
+        // regex parsing, no Contains brittleness.
         var unsignedCount = 0;
         var signedCount = 0;
         var shortCount = 0;
@@ -453,9 +495,9 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
         var baseCount = 0;
         var baseConflict = false;
 
-        foreach (System.Text.RegularExpressions.Match m in _typeSpecPattern.Matches(markers))
+        foreach (var kw in specs)
         {
-            switch (m.Groups[1].Value)
+            switch (kw)
             {
                 case "unsigned": unsignedCount++; break;
                 case "signed":   signedCount++; break;
@@ -467,7 +509,6 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
                 case "float":
                 case "double":
                 case "void":
-                    var kw = m.Groups[1].Value;
                     if (baseKw is null) { baseKw = kw; baseCount = 1; }
                     else if (baseKw == kw) { baseCount++; }
                     else { baseConflict = true; }
@@ -480,47 +521,47 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
             || unsignedCount > 0 || signedCount > 0 || shortCount > 0 || longCount > 0))
         {
             throw new CompileException(
-                $"`_Bool` cannot be combined with other type specifiers (got `{PrettyMarkers(markers)}`)");
+                $"`_Bool` cannot be combined with other type specifiers (got `{PrettySpecs(specs)}`)");
         }
         if (unsignedCount > 0 && signedCount > 0)
         {
             throw new CompileException(
-                $"cannot combine `signed` and `unsigned` (got `{PrettyMarkers(markers)}`)");
+                $"cannot combine `signed` and `unsigned` (got `{PrettySpecs(specs)}`)");
         }
         if (unsignedCount > 1)
         {
             throw new CompileException(
-                $"duplicate `unsigned` specifier (got `{PrettyMarkers(markers)}`)");
+                $"duplicate `unsigned` specifier (got `{PrettySpecs(specs)}`)");
         }
         if (signedCount > 1)
         {
             throw new CompileException(
-                $"duplicate `signed` specifier (got `{PrettyMarkers(markers)}`)");
+                $"duplicate `signed` specifier (got `{PrettySpecs(specs)}`)");
         }
         if (shortCount > 0 && longCount > 0)
         {
             throw new CompileException(
-                $"cannot combine `short` and `long` (got `{PrettyMarkers(markers)}`)");
+                $"cannot combine `short` and `long` (got `{PrettySpecs(specs)}`)");
         }
         if (shortCount > 1)
         {
             throw new CompileException(
-                $"duplicate `short` specifier (got `{PrettyMarkers(markers)}`)");
+                $"duplicate `short` specifier (got `{PrettySpecs(specs)}`)");
         }
         if (longCount > 2)
         {
             throw new CompileException(
-                $"cannot have more than two `long`s (got `{PrettyMarkers(markers)}`)");
+                $"cannot have more than two `long`s (got `{PrettySpecs(specs)}`)");
         }
         if (baseConflict)
         {
             throw new CompileException(
-                $"cannot combine multiple base types (got `{PrettyMarkers(markers)}`)");
+                $"cannot combine multiple base types (got `{PrettySpecs(specs)}`)");
         }
         if (baseCount > 1)
         {
             throw new CompileException(
-                $"duplicate `{baseKw}` specifier (got `{PrettyMarkers(markers)}`)");
+                $"duplicate `{baseKw}` specifier (got `{PrettySpecs(specs)}`)");
         }
 
         // float / double / void don't take signedness or size modifiers.
@@ -528,7 +569,7 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
             && (unsignedCount > 0 || signedCount > 0 || shortCount > 0 || longCount > 0))
         {
             throw new CompileException(
-                $"`{baseKw}` cannot take size or sign modifiers (got `{PrettyMarkers(markers)}`)");
+                $"`{baseKw}` cannot take size or sign modifiers (got `{PrettySpecs(specs)}`)");
         }
 
         // Resolve. Order: _Bool first (mutually exclusive), then non-int
@@ -548,105 +589,95 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
     }
 
     /// <summary>
-    /// Render a bracketed-keyword marker stream back into its source-text
-    /// C keywords, space-separated, in the order the user wrote them.
-    /// Used only for error messages so they read like a compiler diagnostic.
+    /// Render a typed specifier list back as space-separated C keywords,
+    /// preserving the order the user wrote them. Used only for error
+    /// messages so they read like a real compiler diagnostic.
     /// </summary>
-    private static string PrettyMarkers(string markers)
-    {
-        var sb = new StringBuilder();
-        var first = true;
-        foreach (System.Text.RegularExpressions.Match m in _typeSpecPattern.Matches(markers))
-        {
-            if (!first) { sb.Append(' '); }
-            first = false;
-            sb.Append(m.Groups[1].Value);
-        }
-        return sb.ToString();
-    }
+    private static string PrettySpecs(IReadOnlyList<string> specs) =>
+        string.Join(" ", specs);
 
     // Block / statements
-    public string Visit(C.Block n) => "{\n" + IndentEach((string)n.Arg1.Content) + "}\n";
-    public string Visit(C.BlockEmpty n) => "{ }\n";
-    public string Visit(C.StmtsCons n) => (string)n.Arg0.Content + (string)n.Arg1.Content;
-    public string Visit(C.StmtsOne n) => (string)n.Arg0.Content;
+    public EmitContent Visit(C.Block n) => "{\n" + IndentEach(T(n.Arg1)) + "}\n";
+    public EmitContent Visit(C.BlockEmpty n) => "{ }\n";
+    public EmitContent Visit(C.StmtsCons n) => T(n.Arg0) + T(n.Arg1);
+    public EmitContent Visit(C.StmtsOne n) => T(n.Arg0);
     // Conditions are wrapped with B(...) so int- and pointer-valued conditions
     // (`while (1)`, `if (p)`, `for (...; n; ...)`) typecheck. The B overloads
     // live in BuildShell — see Compiler.BuildShell.
-    public string Visit(C.StmtIf n) => $"if (Cond.B({(string)n.Arg2.Content})) {(string)n.Arg4.Content}";
-    public string Visit(C.StmtIfElse n) =>
-        $"if (Cond.B({(string)n.Arg2.Content})) {(string)n.Arg4.Content}else {(string)n.Arg6.Content}";
-    public string Visit(C.StmtWhile n) => $"while (Cond.B({(string)n.Arg2.Content})) {(string)n.Arg4.Content}";
+    public EmitContent Visit(C.StmtIf n) => $"if (Cond.B({T(n.Arg2)})) {T(n.Arg4)}";
+    public EmitContent Visit(C.StmtIfElse n) =>
+        $"if (Cond.B({T(n.Arg2)})) {T(n.Arg4)}else {T(n.Arg6)}";
+    public EmitContent Visit(C.StmtWhile n) => $"while (Cond.B({T(n.Arg2)})) {T(n.Arg4)}";
 
     // `do Stmt while (E) ;` — body runs at least once. C# accepts the same
     // shape; only the condition needs Cond.B wrapping. Note the trailing
     // semicolon is required in both C and C#.
-    public string Visit(C.StmtDoWhile n) =>
-        $"do {(string)n.Arg1.Content}while (Cond.B({(string)n.Arg4.Content}));\n";
+    public EmitContent Visit(C.StmtDoWhile n) =>
+        $"do {T(n.Arg1)}while (Cond.B({T(n.Arg4)}));\n";
 
     // `for (Decl; E; E) Stmt` — emit C#'s for verbatim. C# accepts the same
     // shape; the init declaration scopes to the loop body. The init Decl
     // here is the LHS (`int i = 0` form); the StripOuterParens on the
     // incr keeps the emitter from wrapping `i++` in extra parens that C#
     // rejects in for-clause position.
-    public string Visit(C.StmtForDecl n) =>
-        $"for ({(string)n.Arg2.Content}; Cond.B({(string)n.Arg4.Content}); {StripOuterParens((string)n.Arg6.Content)}) {(string)n.Arg8.Content}";
-    public string Visit(C.StmtForExpr n) =>
-        $"for ({StripOuterParens((string)n.Arg2.Content)}; Cond.B({(string)n.Arg4.Content}); {StripOuterParens((string)n.Arg6.Content)}) {(string)n.Arg8.Content}";
-    public string Visit(C.StmtReturn n) => $"return {(string)n.Arg1.Content};\n";
-    public string Visit(C.StmtReturnVoid n) => "return;\n";
-    public string Visit(C.StmtBreak n) => "break;\n";
-    public string Visit(C.StmtContinue n) => "continue;\n";
+    public EmitContent Visit(C.StmtForDecl n) =>
+        $"for ({T(n.Arg2)}; Cond.B({T(n.Arg4)}); {StripOuterParens(T(n.Arg6))}) {T(n.Arg8)}";
+    public EmitContent Visit(C.StmtForExpr n) =>
+        $"for ({StripOuterParens(T(n.Arg2))}; Cond.B({T(n.Arg4)}); {StripOuterParens(T(n.Arg6))}) {T(n.Arg8)}";
+    public EmitContent Visit(C.StmtReturn n) => $"return {T(n.Arg1)};\n";
+    public EmitContent Visit(C.StmtReturnVoid n) => "return;\n";
+    public EmitContent Visit(C.StmtBreak n) => "break;\n";
+    public EmitContent Visit(C.StmtContinue n) => "continue;\n";
 
     // switch (E) Block — switch body is a plain Block. `case X:` and
     // `default:` are statement-level labels (see CaseLabel/DefaultLabel)
     // that can appear anywhere inside the Block — including nested inside
     // a do-while or other control flow, enabling Duff's-device-shaped code.
     // C# accepts the same shape.
-    public string Visit(C.StmtSwitch n) =>
-        $"switch ({(string)n.Arg2.Content}) {(string)n.Arg4.Content}";
+    public EmitContent Visit(C.StmtSwitch n) =>
+        $"switch ({T(n.Arg2)}) {T(n.Arg4)}";
 
     // Statement-level case/default labels. Body is a single Stmt (which
     // may itself be another labeled stmt — `case 1: case 2: do_thing();`
     // chains naturally).
-    public string Visit(C.CaseLabel n) =>
-        $"case {(string)n.Arg1.Content}:\n{(string)n.Arg3.Content}";
-    public string Visit(C.DefaultLabel n) =>
-        $"default:\n{(string)n.Arg2.Content}";
-    public string Visit(C.StmtDecl n) => $"{(string)n.Arg0.Content};\n";
+    public EmitContent Visit(C.CaseLabel n) =>
+        $"case {T(n.Arg1)}:\n{T(n.Arg3)}";
+    public EmitContent Visit(C.DefaultLabel n) =>
+        $"default:\n{T(n.Arg2)}";
+    public EmitContent Visit(C.StmtDecl n) => $"{T(n.Arg0)};\n";
 
     // `goto label;` — C# accepts the same keyword + identifier syntax with
     // identical forward-reference semantics inside a method body, so the
     // lowering is verbatim.
-    public string Visit(C.StmtGoto n) => $"goto {(string)n.Arg1.Content};\n";
+    public EmitContent Visit(C.StmtGoto n) => $"goto {T(n.Arg1)};\n";
 
     // `label: Stmt` — emit the label followed by the body statement.
     // Whitespace shape: label on its own line for readability.
-    public string Visit(C.StmtLabel n) =>
-        $"{(string)n.Arg0.Content}:\n{(string)n.Arg2.Content}";
+    public EmitContent Visit(C.StmtLabel n) =>
+        $"{T(n.Arg0)}:\n{T(n.Arg2)}";
 
     // Empty statement `;` — required pre-C23 if you want to label the end
     // of a block (`end: ;`). Emit as a bare semicolon; C# parses it as an
     // empty statement too.
-    public string Visit(C.StmtEmpty n) => ";\n";
-    public string Visit(C.StmtExpr n) =>
+    public EmitContent Visit(C.StmtEmpty n) => ";\n";
+    public EmitContent Visit(C.StmtExpr n) =>
         // CS0201: bare parenthesized assignment isn't a statement. Peel the
         // outer parens that our binop emitters wrap on.
-        $"{StripOuterParens((string)n.Arg0.Content)};\n";
+        $"{StripOuterParens(T(n.Arg0))};\n";
 
     // Declarations
     // `Type DeclItemList` — covers single (`int x;`), single-with-init
     // (`int x = 5;`), and multi-declarator (`int x, y, z;`,
     // `int x = 1, y = 2;`) forms. C# accepts the same `int x, y = 5, z;`
     // syntax so the lowering is verbatim.
-    public string Visit(C.Decl n) => $"{(string)n.Arg0.Content} {(string)n.Arg1.Content}";
+    public EmitContent Visit(C.Decl n) => $"{T(n.Arg0)} {T(n.Arg1)}";
 
     // DeclItemList: comma-joined sequence of DeclItem strings. Cons emits
     // `prev, next` and One just forwards the single item — the comma
     // separator between items appears here, while the Type prefix lands
     // in Decl above.
-    public string Visit(C.DeclItemListOne n)  => (string)n.Arg0.Content;
-    public string Visit(C.DeclItemListCons n) => $"{(string)n.Arg0.Content}, {(string)n.Arg2.Content}";
+    public EmitContent Visit(C.DeclItemListOne n)  => T(n.Arg0);
+    public EmitContent Visit(C.DeclItemListCons n) => $"{T(n.Arg0)}, {T(n.Arg2)}";
 
     // DeclItem: a single declarator. The plain `int x;` form emits `int x = default`
     // because C# enforces definite-assignment on struct fields — relevant for
@@ -655,43 +686,56 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
     // null for pointers, zero struct for value types), which matches the
     // observable behavior of well-written C (where reading uninitialized
     // locals is undefined behavior anyway).
-    public string Visit(C.DeclItem n)     => $"{(string)n.Arg0.Content} = default";
-    public string Visit(C.DeclItemInit n) => $"{(string)n.Arg0.Content} = {(string)n.Arg2.Content}";
+    public EmitContent Visit(C.DeclItem n)     => $"{T(n.Arg0)} = default";
+    public EmitContent Visit(C.DeclItemInit n) => $"{T(n.Arg0)} = {T(n.Arg2)}";
     // C `T arr[N]` → C# `T* arr = stackalloc T[N]`. Uses stackalloc (no heap
     // alloc, no GC pin) so arrays live in the same lifetime as locals — matches
     // C semantics for block-scoped automatic arrays. Pointer subscript `arr[i]`
     // works directly in C# unsafe contexts (it desugars to `*(arr + i)`).
-    public string Visit(C.DeclArr n) =>
-        $"{(string)n.Arg0.Content}* {(string)n.Arg1.Content} = stackalloc {(string)n.Arg0.Content}[{StripOuterParens((string)n.Arg3.Content)}]";
+    public EmitContent Visit(C.DeclArr n) =>
+        $"{T(n.Arg0)}* {T(n.Arg1)} = stackalloc {T(n.Arg0)}[{StripOuterParens(T(n.Arg3))}]";
 
     // C `T arr[N] = {1, 2, 3}` (or `T arr[] = {…}`) → C# `T* arr = stackalloc T[]{ 1, 2, 3 }`.
     // The explicit-size form ignores the size operand because C# infers it
-    // from the initializer; both shapes share the same emit. ArgList comes
-    // through with the ArgSep sentinel (U+0001) — split and rejoin with `, `.
-    public string Visit(C.DeclArrInit n) =>
-        EmitArrInit((string)n.Arg0.Content, (string)n.Arg1.Content, (string)n.Arg7.Content);
-    public string Visit(C.DeclArrInitImplicit n) =>
-        EmitArrInit((string)n.Arg0.Content, (string)n.Arg1.Content, (string)n.Arg6.Content);
+    // from the initializer; both shapes share the same emit. ArgList arrives
+    // as a typed EmitContent.Args (read via A()) — no sentinel decoding.
+    public EmitContent Visit(C.DeclArrInit n) =>
+        EmitArrInit(T(n.Arg0), T(n.Arg1), A(n.Arg7));
+    public EmitContent Visit(C.DeclArrInitImplicit n) =>
+        EmitArrInit(T(n.Arg0), T(n.Arg1), A(n.Arg6));
 
-    private static string EmitArrInit(string type, string name, string argList) =>
-        $"{type}* {name} = stackalloc {type}[]{{ {argList.Replace(ArgSep.ToString(), ", ")} }}";
+    private static string EmitArrInit(string type, string name, IReadOnlyList<string> args) =>
+        $"{type}* {name} = stackalloc {type}[]{{ {string.Join(", ", args)} }}";
 
     // `Point p = { .x = 1, .y = 2 };` — designated initializer (C99). The
     // user named the fields directly so we don't need _structFields here:
     // the MemberInitList already emits `field = value` pairs in the right
     // shape for C#'s object-initializer syntax. Order of fields can differ
     // from declaration order (C99 allows it; C# does too).
-    public string Visit(C.DeclStructDesignated n)
+    public EmitContent Visit(C.DeclStructDesignated n)
     {
-        var type = (string)n.Arg0.Content;
-        var name = (string)n.Arg1.Content;
-        var members = (string)n.Arg4.Content;
-        return $"{type} {name} = new {type} {{ {members} }}";
+        var type = T(n.Arg0);
+        var name = T(n.Arg1);
+        var members = IM(n.Arg4);  // typed InitMembers list
+        return $"{type} {name} = new {type} {{ {string.Join(", ", members)} }}";
     }
 
-    public string Visit(C.MemberInitListOne n) => (string)n.Arg0.Content;
-    public string Visit(C.MemberInitListCons n) => $"{(string)n.Arg0.Content}, {(string)n.Arg2.Content}";
-    public string Visit(C.MemberInit n) => $"{(string)n.Arg1.Content} = {(string)n.Arg3.Content}";
+    // MemberInitListOne / MemberInitListCons accumulate `.field = expr`
+    // items as a typed EmitContent.InitMembers. MemberInit emits the
+    // individual `field = expr` snippet (plain text, joined at the
+    // DeclStructDesignated consumer).
+    public EmitContent Visit(C.MemberInitListOne n) =>
+        new EmitContent.InitMembers(new[] { T(n.Arg0) });
+    public EmitContent Visit(C.MemberInitListCons n)
+    {
+        var prev = IM(n.Arg0);
+        var next = T(n.Arg2);
+        var combined = new List<string>(prev.Count + 1);
+        combined.AddRange(prev);
+        combined.Add(next);
+        return new EmitContent.InitMembers(combined);
+    }
+    public EmitContent Visit(C.MemberInit n) => $"{T(n.Arg1)} = {T(n.Arg3)}";
 
     // `Point p = {1, 2};` — struct aggregate init. C# can't take positional
     // initializers on a struct, so we look up the struct's field names (from
@@ -700,14 +744,11 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
     // If the type isn't a known struct (e.g. user wrote it for a typedef'd
     // primitive), fall back to a zero init with a comment — Roslyn will
     // surface the real error if the user pursued it.
-    public string Visit(C.DeclStructInit n)
+    public EmitContent Visit(C.DeclStructInit n)
     {
-        var type = (string)n.Arg0.Content;
-        var name = (string)n.Arg1.Content;
-        var argList = (string)n.Arg4.Content;
-        var values = string.IsNullOrEmpty(argList)
-            ? Array.Empty<string>()
-            : argList.Split(ArgSep);
+        var type = T(n.Arg0);
+        var name = T(n.Arg1);
+        var values = A(n.Arg4);  // typed EmitContent.Args — no sentinel split
 
         if (!_structFields.TryGetValue(type, out var fields))
         {
@@ -716,7 +757,7 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
 
         var sb = new StringBuilder();
         sb.Append(type).Append(' ').Append(name).Append(" = new ").Append(type).Append(" { ");
-        var count = Math.Min(values.Length, fields.Count);
+        var count = Math.Min(values.Count, fields.Count);
         for (var i = 0; i < count; i++)
         {
             if (i > 0) { sb.Append(", "); }
@@ -727,116 +768,126 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
     }
 
     // Expressions — paren-heavy to stay precedence-safe.
-    public string Visit(C.Assign n) => $"({(string)n.Arg0.Content} = {(string)n.Arg2.Content})";
-    public string Visit(C.AddAssign n) => $"({(string)n.Arg0.Content} += {(string)n.Arg2.Content})";
-    public string Visit(C.SubAssign n) => $"({(string)n.Arg0.Content} -= {(string)n.Arg2.Content})";
-    public string Visit(C.MulAssign n) => $"({(string)n.Arg0.Content} *= {(string)n.Arg2.Content})";
-    public string Visit(C.DivAssign n) => $"({(string)n.Arg0.Content} /= {(string)n.Arg2.Content})";
-    public string Visit(C.ModAssign n) => $"({(string)n.Arg0.Content} %= {(string)n.Arg2.Content})";
+    public EmitContent Visit(C.Assign n) => $"({T(n.Arg0)} = {T(n.Arg2)})";
+    public EmitContent Visit(C.AddAssign n) => $"({T(n.Arg0)} += {T(n.Arg2)})";
+    public EmitContent Visit(C.SubAssign n) => $"({T(n.Arg0)} -= {T(n.Arg2)})";
+    public EmitContent Visit(C.MulAssign n) => $"({T(n.Arg0)} *= {T(n.Arg2)})";
+    public EmitContent Visit(C.DivAssign n) => $"({T(n.Arg0)} /= {T(n.Arg2)})";
+    public EmitContent Visit(C.ModAssign n) => $"({T(n.Arg0)} %= {T(n.Arg2)})";
     // Logical `||` and `&&` — wrap each operand with Cond.B so the C-truthy
     // conversion works for int / double / pointer AND bool (when the
     // operand is already a comparison result like `a == NULL`). The
     // previous `!= 0` form broke when an operand was bool because
     // `bool != 0` isn't a valid C# expression.
-    public string Visit(C.Lor n) =>
-        $"(Cond.B({(string)n.Arg0.Content}) || Cond.B({(string)n.Arg2.Content}))";
-    public string Visit(C.Land n) =>
-        $"(Cond.B({(string)n.Arg0.Content}) && Cond.B({(string)n.Arg2.Content}))";
-    public string Visit(C.Eq n) => $"({(string)n.Arg0.Content} == {(string)n.Arg2.Content})";
-    public string Visit(C.Neq n) => $"({(string)n.Arg0.Content} != {(string)n.Arg2.Content})";
-    public string Visit(C.Lt n) => $"({(string)n.Arg0.Content} < {(string)n.Arg2.Content})";
-    public string Visit(C.Gt n) => $"({(string)n.Arg0.Content} > {(string)n.Arg2.Content})";
-    public string Visit(C.Le n) => $"({(string)n.Arg0.Content} <= {(string)n.Arg2.Content})";
-    public string Visit(C.Ge n) => $"({(string)n.Arg0.Content} >= {(string)n.Arg2.Content})";
+    public EmitContent Visit(C.Lor n) =>
+        $"(Cond.B({T(n.Arg0)}) || Cond.B({T(n.Arg2)}))";
+    public EmitContent Visit(C.Land n) =>
+        $"(Cond.B({T(n.Arg0)}) && Cond.B({T(n.Arg2)}))";
+    public EmitContent Visit(C.Eq n) => $"({T(n.Arg0)} == {T(n.Arg2)})";
+    public EmitContent Visit(C.Neq n) => $"({T(n.Arg0)} != {T(n.Arg2)})";
+    public EmitContent Visit(C.Lt n) => $"({T(n.Arg0)} < {T(n.Arg2)})";
+    public EmitContent Visit(C.Gt n) => $"({T(n.Arg0)} > {T(n.Arg2)})";
+    public EmitContent Visit(C.Le n) => $"({T(n.Arg0)} <= {T(n.Arg2)})";
+    public EmitContent Visit(C.Ge n) => $"({T(n.Arg0)} >= {T(n.Arg2)})";
     // Bitwise — same precedence and semantics in C# (binary `& | ^ << >>`,
     // unary `~`). The visitor just emits the C# operator verbatim.
-    public string Visit(C.BOr n)  => $"({(string)n.Arg0.Content} | {(string)n.Arg2.Content})";
-    public string Visit(C.BXor n) => $"({(string)n.Arg0.Content} ^ {(string)n.Arg2.Content})";
-    public string Visit(C.BAnd n) => $"({(string)n.Arg0.Content} & {(string)n.Arg2.Content})";
-    public string Visit(C.Shl n)  => $"({(string)n.Arg0.Content} << {(string)n.Arg2.Content})";
-    public string Visit(C.Shr n)  => $"({(string)n.Arg0.Content} >> {(string)n.Arg2.Content})";
-    public string Visit(C.BNot n) => $"(~{(string)n.Arg1.Content})";
+    public EmitContent Visit(C.BOr n)  => $"({T(n.Arg0)} | {T(n.Arg2)})";
+    public EmitContent Visit(C.BXor n) => $"({T(n.Arg0)} ^ {T(n.Arg2)})";
+    public EmitContent Visit(C.BAnd n) => $"({T(n.Arg0)} & {T(n.Arg2)})";
+    public EmitContent Visit(C.Shl n)  => $"({T(n.Arg0)} << {T(n.Arg2)})";
+    public EmitContent Visit(C.Shr n)  => $"({T(n.Arg0)} >> {T(n.Arg2)})";
+    public EmitContent Visit(C.BNot n) => $"(~{T(n.Arg1)})";
 
     // Logical NOT: lower to `(Cond.B(E) ? 0 : 1)` so the result is int,
     // matching C's `!x` yielding 0 or 1 (never a bool). Cond.B picks the
     // right truthy overload based on E's type (int/double/pointer/bool).
-    public string Visit(C.LNot n) => $"(Cond.B({(string)n.Arg1.Content}) ? 0 : 1)";
+    public EmitContent Visit(C.LNot n) => $"(Cond.B({T(n.Arg1)}) ? 0 : 1)";
 
     // Ternary `c ? a : b` — Cond.B wraps the C-truthy condition. The two
     // branches need a common C# type; the user is responsible for keeping
     // them compatible (matches the C constraint that the branches share
     // arithmetic conversions).
-    public string Visit(C.Ternary n) =>
-        $"(Cond.B({(string)n.Arg0.Content}) ? {(string)n.Arg2.Content} : {(string)n.Arg4.Content})";
-    public string Visit(C.AndAssign n) => $"({(string)n.Arg0.Content} &= {(string)n.Arg2.Content})";
-    public string Visit(C.OrAssign n)  => $"({(string)n.Arg0.Content} |= {(string)n.Arg2.Content})";
-    public string Visit(C.XorAssign n) => $"({(string)n.Arg0.Content} ^= {(string)n.Arg2.Content})";
-    public string Visit(C.ShlAssign n) => $"({(string)n.Arg0.Content} <<= {(string)n.Arg2.Content})";
-    public string Visit(C.ShrAssign n) => $"({(string)n.Arg0.Content} >>= {(string)n.Arg2.Content})";
+    public EmitContent Visit(C.Ternary n) =>
+        $"(Cond.B({T(n.Arg0)}) ? {T(n.Arg2)} : {T(n.Arg4)})";
+    public EmitContent Visit(C.AndAssign n) => $"({T(n.Arg0)} &= {T(n.Arg2)})";
+    public EmitContent Visit(C.OrAssign n)  => $"({T(n.Arg0)} |= {T(n.Arg2)})";
+    public EmitContent Visit(C.XorAssign n) => $"({T(n.Arg0)} ^= {T(n.Arg2)})";
+    public EmitContent Visit(C.ShlAssign n) => $"({T(n.Arg0)} <<= {T(n.Arg2)})";
+    public EmitContent Visit(C.ShrAssign n) => $"({T(n.Arg0)} >>= {T(n.Arg2)})";
 
-    public string Visit(C.Add n) => $"({(string)n.Arg0.Content} + {(string)n.Arg2.Content})";
-    public string Visit(C.Sub n) => $"({(string)n.Arg0.Content} - {(string)n.Arg2.Content})";
-    public string Visit(C.Mul n) => $"({(string)n.Arg0.Content} * {(string)n.Arg2.Content})";
-    public string Visit(C.Div n) => $"({(string)n.Arg0.Content} / {(string)n.Arg2.Content})";
-    public string Visit(C.Mod n) => $"({(string)n.Arg0.Content} % {(string)n.Arg2.Content})";
-    public string Visit(C.Cast n) => $"(({(string)n.Arg1.Content}){(string)n.Arg3.Content})";
-    public string Visit(C.Deref n) => $"(*{(string)n.Arg1.Content})";
-    public string Visit(C.AddrOf n) => $"(&{(string)n.Arg1.Content})";
-    public string Visit(C.Neg n) => $"(-{(string)n.Arg1.Content})";
+    public EmitContent Visit(C.Add n) => $"({T(n.Arg0)} + {T(n.Arg2)})";
+    public EmitContent Visit(C.Sub n) => $"({T(n.Arg0)} - {T(n.Arg2)})";
+    public EmitContent Visit(C.Mul n) => $"({T(n.Arg0)} * {T(n.Arg2)})";
+    public EmitContent Visit(C.Div n) => $"({T(n.Arg0)} / {T(n.Arg2)})";
+    public EmitContent Visit(C.Mod n) => $"({T(n.Arg0)} % {T(n.Arg2)})";
+    public EmitContent Visit(C.Cast n) => $"(({T(n.Arg1)}){T(n.Arg3)})";
+    public EmitContent Visit(C.Deref n) => $"(*{T(n.Arg1)})";
+    public EmitContent Visit(C.AddrOf n) => $"(&{T(n.Arg1)})";
+    public EmitContent Visit(C.Neg n) => $"(-{T(n.Arg1)})";
     // Prefix ++/-- — strip outer parens of operand to avoid CS0131 on a
     // parenthesised lvalue. `(x)++` would parse as post-inc on a parens
     // expression, but C# accepts `++x` directly.
-    public string Visit(C.PreInc n) => $"(++{StripOuterParens((string)n.Arg1.Content)})";
-    public string Visit(C.PreDec n) => $"(--{StripOuterParens((string)n.Arg1.Content)})";
+    public EmitContent Visit(C.PreInc n) => $"(++{StripOuterParens(T(n.Arg1))})";
+    public EmitContent Visit(C.PreDec n) => $"(--{StripOuterParens(T(n.Arg1))})";
     // Postfix ++/-- — same stripping; emit `x++` rather than `(x)++`.
-    public string Visit(C.PostInc n) => $"({StripOuterParens((string)n.Arg0.Content)}++)";
-    public string Visit(C.PostDec n) => $"({StripOuterParens((string)n.Arg0.Content)}--)";
+    public EmitContent Visit(C.PostInc n) => $"({StripOuterParens(T(n.Arg0))}++)";
+    public EmitContent Visit(C.PostDec n) => $"({StripOuterParens(T(n.Arg0))}--)";
     // Subscript `expr[i]` — emit as-is; C# pointer subscript matches C semantics.
-    public string Visit(C.Subscript n) =>
-        $"({StripOuterParens((string)n.Arg0.Content)}[{StripOuterParens((string)n.Arg2.Content)}])";
+    public EmitContent Visit(C.Subscript n) =>
+        $"({StripOuterParens(T(n.Arg0))}[{StripOuterParens(T(n.Arg2))}])";
 
     // Member access — `.` on a struct value, `->` on a struct pointer.
     // C# accepts both syntaxes in unsafe context (where all our user code
     // lives), so emit verbatim.
-    public string Visit(C.MemberDot n) =>
-        $"({StripOuterParens((string)n.Arg0.Content)}.{(string)n.Arg2.Content})";
-    public string Visit(C.MemberArrow n) =>
-        $"({StripOuterParens((string)n.Arg0.Content)}->{(string)n.Arg2.Content})";
+    public EmitContent Visit(C.MemberDot n) =>
+        $"({StripOuterParens(T(n.Arg0))}.{T(n.Arg2)})";
+    public EmitContent Visit(C.MemberArrow n) =>
+        $"({StripOuterParens(T(n.Arg0))}->{T(n.Arg2)})";
 
     // `sizeof(Type)` — emit C# sizeof. Valid in unsafe contexts for any
     // unmanaged type (which all our types are).
-    public string Visit(C.SizeofType n) => $"sizeof({(string)n.Arg2.Content})";
+    public EmitContent Visit(C.SizeofType n) => $"sizeof({T(n.Arg2)})";
 
-    public string Visit(C.Call n)
+    public EmitContent Visit(C.Call n)
     {
-        var callee = (string)n.Arg0.Content;
-        var argsRaw = (string)n.Arg2.Content;
+        var callee = T(n.Arg0);
+        var args = A(n.Arg2);  // strongly-typed arg list, no sentinel splitting
         if (callee == "Printf")
         {
-            var args = argsRaw.Split(ArgSep);
             var sb = new StringBuilder();
             sb.Append("Printf(").Append(args[0]).Append(')');
-            for (int i = 1; i < args.Length; i++)
+            for (int i = 1; i < args.Count; i++)
             {
                 sb.Append(".Arg(").Append(args[i]).Append(')');
             }
             sb.Append(".Done()");
             return sb.ToString();
         }
-        return $"{callee}({argsRaw.Replace(ArgSep.ToString(), ", ")})";
+        return $"{callee}({string.Join(", ", args)})";
     }
 
-    public string Visit(C.CallNoArgs n)
+    public EmitContent Visit(C.CallNoArgs n)
     {
-        var callee = (string)n.Arg0.Content;
+        var callee = T(n.Arg0);
         if (callee == "Printf") { return "Printf(L(\"\\0\"u8)).Done()"; }
         return $"{callee}()";
     }
 
-    public string Visit(C.ArgsCons n) =>
-        $"{(string)n.Arg0.Content}{ArgSep}{(string)n.Arg2.Content}";
+    // ArgsCons (`ArgList → E ',' ArgList`) prepends the new expression
+    // (Arg0, Text) onto the recursively-built ArgList (Arg2, Args).
+    // ArgsOne wraps the single E into a one-element Args list.
+    // Call / DeclArrInit / DeclArrInitImplicit consume via A() — no
+    // sentinel splitting, no encoded strings.
+    public EmitContent Visit(C.ArgsCons n)
+    {
+        var head = T(n.Arg0);
+        var tail = A(n.Arg2);
+        var combined = new List<string>(tail.Count + 1) { head };
+        combined.AddRange(tail);
+        return new EmitContent.Args(combined);
+    }
 
-    public string Visit(C.ArgsOne n) => (string)n.Arg0.Content;
+    public EmitContent Visit(C.ArgsOne n) => new EmitContent.Args(new[] { T(n.Arg0) });
 
     // Variable reference. Three emit-time rewrites: `__func__` → a
     // placeholder that Visit(FuncDef*) resolves later (once it knows the
@@ -844,9 +895,9 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
     // bare ID matching a previously-declared enumerator (so C code writing
     // `Red` lands as `Color.Red`); builtin name → BCL helper for
     // `malloc` / `free` / `printf`. Otherwise pass through.
-    public string Visit(C.Var n)
+    public EmitContent Visit(C.Var n)
     {
-        var name = (string)n.Arg0.Content;
+        var name = T(n.Arg0);
         if (name == "__func__") { return FuncPlaceholder; }
         if (_enumerators.TryGetValue(name, out var enumName))
         {
@@ -879,7 +930,7 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
     // (u/U/l/L/ll/LL/ul/ull, case-insensitive, order-insensitive) to C#'s
     // equivalents (no `ll` form — both `l` and `ll` mean 64-bit `long` in
     // C#, since C# `long` is unconditionally 64-bit).
-    public string Visit(C.Num n) => NormalizeIntSuffix((string)n.Arg0.Content);
+    public EmitContent Visit(C.Num n) => NormalizeIntSuffix(T(n.Arg0));
 
     private static string NormalizeIntSuffix(string raw)
     {
@@ -907,11 +958,11 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
             (true, _)  => digits + "UL",    // u + any l's → ulong
         };
     }
-    public string Visit(C.Flt n) => (string)n.Arg0.Content;
+    public EmitContent Visit(C.Flt n) => T(n.Arg0);
 
-    public string Visit(C.Str n)
+    public EmitContent Visit(C.Str n)
     {
-        var raw = (string)n.Arg0.Content;
+        var raw = T(n.Arg0);
         if (raw is null || raw.Length < 2) { return "L(\"\\0\"u8)"; }
         var body = raw[1..^1];
         return $"L(\"{EscapeForUtf8Literal(body)}\\0\"u8)";
@@ -921,15 +972,15 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
     // so we lower to `(byte)'X'` where X is the unescaped char value.
     // Pass the C escape sequence through to C#'s char literal syntax —
     // both languages accept `\n`, `\t`, `\\`, `\'`, `\"`, `\0`, `\r`.
-    public string Visit(C.Chr n)
+    public EmitContent Visit(C.Chr n)
     {
-        var raw = (string)n.Arg0.Content;
+        var raw = T(n.Arg0);
         if (raw is null || raw.Length < 3) { return "(byte)0"; }
         var body = raw[1..^1];
         return $"(byte)'{body}'";
     }
 
-    public string Visit(C.Paren n) => $"({(string)n.Arg1.Content})";
+    public EmitContent Visit(C.Paren n) => $"({T(n.Arg1)})";
 
     private static string MapBuiltin(string name) => name switch
     {
