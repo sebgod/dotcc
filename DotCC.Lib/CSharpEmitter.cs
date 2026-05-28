@@ -527,6 +527,12 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
 
     // Params
     public EmitContent Visit(C.Param n) => $"{T(n.Arg0)} {T(n.Arg1)}";
+    // C array-parameter decay: `T arr[]` / `T arr[N]` ≡ `T* arr` per
+    // C99 §6.7.5.3p7. The size in the sized form is informational only —
+    // we discard it (intentionally don't evaluate Arg3) since C semantics
+    // give the call site no way to observe a mismatch anyway.
+    public EmitContent Visit(C.ParamArrayUnsized n) => $"{T(n.Arg0)}* {T(n.Arg1)}";
+    public EmitContent Visit(C.ParamArraySized n) => $"{T(n.Arg0)}* {T(n.Arg1)}";
     public EmitContent Visit(C.ParamsCons n) => $"{T(n.Arg0)}, {T(n.Arg2)}";
     public EmitContent Visit(C.ParamsOne n) => T(n.Arg0);
     public EmitContent Visit(C.ParamsVararg n) => $"{T(n.Arg0)}, params object[] _va";

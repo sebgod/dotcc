@@ -339,6 +339,14 @@ productions:
   - derivation: none
     rules:
       - { lhs: Param, rhs: [Type, ID], action: param }
+      # C array-parameter decay (C99 §6.7.5.3p7): `T arr[]` and `T arr[N]`
+      # in a function-parameter position are equivalent to `T* arr` — the
+      # array silently decays to a pointer at the function-type boundary.
+      # The size in `T arr[N]` is informational only (clang/gcc don't even
+      # warn at the call site for size mismatches without `-Wstrict-prototypes`),
+      # so we drop it entirely and emit a pointer parameter.
+      - { lhs: Param, rhs: [Type, ID, '[', ']'],     action: paramArrayUnsized }
+      - { lhs: Param, rhs: [Type, ID, '[', E, ']'],  action: paramArraySized }
 
   # Type — the "declarator type" non-terminal. Most C type forms reduce to
   # this via TypeSpecList (the C-standard declaration-specifier sequence:

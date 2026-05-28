@@ -50,7 +50,7 @@ Source of truth for the grammar: `DotCC.Lib/c.lalr.yaml`. Source of truth for th
 | `_Bool` / `bool` (C99 stdbool.h) | ✅ | `_Bool` is a TypeSpec keyword; resolves to C# `bool`. Synthetic `stdbool.h` defines `bool` → `_Bool`, `true`/`false` self-substitute (pass through as C# bool literals), and `__bool_true_false_are_defined`. PrintfBuilder gains `Arg(bool)` routing through `int` so `%d` formats as 1/0. Combinations with sign/size specifiers (`unsigned _Bool` etc.) throw `CompileException`. Fixture `bool-stdbool/`. |
 | Pointer types `T*`, `T**`, … | ✅ | Composes left-to-right via `TypePtr` production |
 | Array decl `T arr[N]` | ✅ | Lowered to `T* arr = stackalloc T[N]` so block-scoped automatic arrays match C's lifetime + subscript semantics; fixture `array-sum/` |
-| Array param decay `T arr[]` | ❌ | Decay to `T*` (same as C) |
+| Array param decay `T arr[]` / `T arr[N]` | ✅ | Both forms lower to `T* arr` per C99 §6.7.5.3p7. The size in the sized form is informational only (C compilers don't enforce it at call sites). Fixture `array-param-decay/` |
 | Variable-length arrays (C99) | ❌ | C99 optional; deprioritised — most idiomatic C code uses `malloc` |
 | `struct` declaration | ✅ | Lowered to `unsafe struct ID { public T field; … }`; fields public to match C accessibility. Emitted via a visitor side channel into the type-decl section (C# requires types after top-level statements). Fixture `struct-point/` |
 | `struct` member access `.` / `->` | ✅ | Both lowered verbatim; C# accepts `->` on struct pointers in unsafe context (identical semantics to C). Fixture `struct-point/` covers both forms |
