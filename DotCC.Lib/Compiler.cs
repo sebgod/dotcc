@@ -80,12 +80,16 @@ public static class Compiler
             var pre = new CPreprocessor(lexerTable, includeMap, defines ?? Array.Empty<string>());
             using var lexer = BytesLexer.FromString(source, lexerTable);
             using var preproc = C.WrapPreprocessor(lexer, pre);
+            // MacroExpander: function-like macro expansion. Needs lookahead
+            // for the `(`, which the Rewrite hook can't do — so it lives as
+            // its own RewritingTokenStream subclass after the preprocessor
+            // populated the macro table.
+            using var macroExp = new MacroExpander(preproc, pre);
             // TypeNameRewriter: the C lexer hack. Promotes ID → TYPE_NAME for
-            // any name previously bound by a `typedef`. Sits AFTER the
-            // preprocessor (so macro-expanded tokens are still considered)
-            // and BEFORE the LA iterator (so the parser sees the rewritten
-            // stream).
-            using var typeRewriter = new TypeNameRewriter(preproc);
+            // any name previously bound by a `typedef`. Sits AFTER macro
+            // expansion (so expanded names can also trigger typedef
+            // rewrites) and BEFORE the LA iterator.
+            using var typeRewriter = new TypeNameRewriter(macroExp);
             using var tokens = new SyncLATokenIterator(typeRewriter);
 
             Item result;
@@ -143,9 +147,12 @@ public static class Compiler
             var pre = new CPreprocessor(lexerTable, includeMap, defines ?? Array.Empty<string>());
             using var lexer = BytesLexer.FromString(source, lexerTable);
             using var preproc = C.WrapPreprocessor(lexer, pre);
-            while (preproc.MoveNext())
+            // -E mode also routes through MacroExpander so function-like
+            // macro expansion is visible in the dumped token stream.
+            using var macroExp = new MacroExpander(preproc, pre);
+            while (macroExp.MoveNext())
             {
-                var t = preproc.Current;
+                var t = macroExp.Current;
                 output.Write(t.Content is string s ? s : t.Content?.ToString());
                 output.Write(' ');
             }

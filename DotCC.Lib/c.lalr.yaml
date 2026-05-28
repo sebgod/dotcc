@@ -187,6 +187,10 @@ symbols:
   # Library mode (the -shared frontend flag) reflects this in C# by marking
   # non-static functions with [UnmanagedCallersOnly] for export.
   - 'static'      # 117 keyword
+  - '#pragma'     # 118 preprocessor directive — `#pragma once` and friends
+  - '#error'      # 119 preprocessor directive — fail compilation with a message
+  - '#warning'    # 120 preprocessor directive — diagnostic, continues
+  - '#elif'       # 121 preprocessor conditional — else-if with expression
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -585,12 +589,20 @@ lexer:
     # earlier rule wins (and longest-match picks the longer string anyway).
     - { symbol: '#ifndef',  match: '#ifndef' }
     - { symbol: '#ifdef',   match: '#ifdef' }
+    # `#elif` before `#else` — they don't share a prefix but `#elif` and
+    # `#endif` both start with `#e`; longest-match handles it.
+    - { symbol: '#elif',    match: '#elif' }
     - { symbol: '#if',      match: '#if' }
     - { symbol: '#else',    match: '#else' }
     - { symbol: '#endif',   match: '#endif' }
     - { symbol: '#include', match: '#include' }
     - { symbol: '#define',  match: '#define' }
     - { symbol: '#undef',   match: '#undef' }
+    # `#warning` must precede `#pragma` if any prefix sharing; no shared
+    # prefix here so order is just cosmetic.
+    - { symbol: '#pragma',  match: '#pragma' }
+    - { symbol: '#warning', match: '#warning' }
+    - { symbol: '#error',   match: '#error' }
 
     # Block comments — must precede the `/` operator rule so the slash isn't
     # eaten first. The regex avoids alternation (IRx has no `|`):
@@ -743,9 +755,13 @@ preprocessor:
     '#include': onInclude
     '#define':  onDefine
     '#undef':   onUndef
+    '#pragma':  onPragma
+    '#error':   onError
+    '#warning': onWarning
   conditionals:
     if:     '#if'
     ifdef:  '#ifdef'
     ifndef: '#ifndef'
     else:   '#else'
+    elif:   '#elif'
     endif:  '#endif'

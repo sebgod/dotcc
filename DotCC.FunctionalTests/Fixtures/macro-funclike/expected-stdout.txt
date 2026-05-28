@@ -1,0 +1,8 @@
+min(3, 7) = 3
+max(3, 7) = 7
+square(1 + 2) = 9
+clamp(120, 0, 100) = 100
+clamp(-5, 0, 100) = 0
+clamp(50, 0, 100) = 50
+8 is even
+7 is odd

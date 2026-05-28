@@ -13,11 +13,32 @@ namespace DotCC;
 /// <see cref="IsDefined"/> consult. Resolves <c>#include</c> against a shared
 /// header map (system + user headers).
 /// </summary>
+/// <summary>
+/// One macro definition. Object-like macros have <see cref="Params"/> = null
+/// and a body that's substituted verbatim at the use site. Function-like
+/// macros carry their formal parameter list AND a body — invocation requires
+/// matching <c>(</c> at the use site followed by comma-separated arg
+/// expressions; <see cref="MacroExpander"/> does that paren-balanced collection
+/// + per-parameter substitution.
+/// </summary>
+internal sealed record MacroDef(string Name, IReadOnlyList<string>? Params, IReadOnlyList<Item> Body)
+{
+    public bool IsFunctionLike => Params is not null;
+}
+
 internal sealed class CPreprocessor : C.IPreprocessor
 {
     private readonly Dictionary<string, LexRule[]> _lexerTable;
     private readonly Dictionary<string, string> _files;
-    private readonly Dictionary<string, List<Item>> _macros = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, MacroDef> _macros = new(StringComparer.Ordinal);
+    // `#pragma once` machinery. _currentlyIncluding tracks the filename of
+    // the include OnInclude is currently processing so that when OnPragma
+    // sees `once` it knows which file to remember; _pragmaOnceFiles is the
+    // set of include-once-marked filenames. Re-entrancy: OnInclude saves/
+    // restores _currentlyIncluding around the recursive sub-preprocessor
+    // drain so nested #includes work correctly.
+    private string? _currentlyIncluding;
+    private readonly HashSet<string> _pragmaOnceFiles = new(StringComparer.Ordinal);
 
     public CPreprocessor(
         Dictionary<string, LexRule[]> lexerTable,
@@ -34,34 +55,87 @@ internal sealed class CPreprocessor : C.IPreprocessor
             // for those cases.
             var eq = d.IndexOf('=');
             var name = eq < 0 ? d : d[..eq];
-            _macros[name] = new List<Item>();
+            _macros[name] = new MacroDef(name, Params: null, Body: Array.Empty<Item>());
         }
     }
 
+    /// <summary>
+    /// Public accessor used by <see cref="MacroExpander"/> to consult the
+    /// macro table during expansion. Returns false for both undefined names
+    /// and names defined as function-like-but-without-args at the call site
+    /// (the latter is the expander's call to resolve).
+    /// </summary>
+    public bool TryGetMacro(string name, out MacroDef macro)
+        => _macros.TryGetValue(name, out macro!);
+
     public IEnumerable<Item> OnInclude(IReadOnlyList<Item> args)
     {
-        if (args.Count == 0)
+        var name = ResolveIncludeName(args);
+        if (name is null) { return Array.Empty<Item>(); }
+        if (_pragmaOnceFiles.Contains(name))
         {
-            Console.Error.WriteLine("dotcc: #include with no argument");
+            // Already processed via `#pragma once` — drop the include body.
             return Array.Empty<Item>();
         }
-        var raw = (string)args[0].Content;
-        if (raw is null || raw.Length < 2 || raw[0] != '"' || raw[^1] != '"')
-        {
-            Console.Error.WriteLine($"dotcc: #include arg '{raw}' is not a quoted filename");
-            return Array.Empty<Item>();
-        }
-        var name = raw[1..^1];
         if (!_files.TryGetValue(name, out var source))
         {
             Console.Error.WriteLine($"dotcc: #include '{name}' not resolvable (not in -I dirs or system headers)");
             return Array.Empty<Item>();
         }
-        using var subLexer = BytesLexer.FromString(source, _lexerTable);
-        using var subPreproc = C.WrapPreprocessor(subLexer, this);
-        var tokens = new List<Item>();
-        while (subPreproc.MoveNext()) { tokens.Add(subPreproc.Current); }
-        return tokens;
+        var saved = _currentlyIncluding;
+        _currentlyIncluding = name;
+        try
+        {
+            using var subLexer = BytesLexer.FromString(source, _lexerTable);
+            using var subPreproc = C.WrapPreprocessor(subLexer, this);
+            var tokens = new List<Item>();
+            while (subPreproc.MoveNext()) { tokens.Add(subPreproc.Current); }
+            return tokens;
+        }
+        finally
+        {
+            _currentlyIncluding = saved;
+        }
+    }
+
+    /// <summary>
+    /// Resolve the header name from an <c>#include</c>'s collected same-line
+    /// args. Accepts two forms: quoted (a single STRING token like
+    /// <c>"foo.h"</c>) and angle (a sequence opening with <c>&lt;</c> and
+    /// closing with <c>&gt;</c>, fragmented across multiple tokens because
+    /// the byte lexer treats angle brackets and dots as separate operators
+    /// — we just concatenate the inner token content back into a filename).
+    /// </summary>
+    private static string? ResolveIncludeName(IReadOnlyList<Item> args)
+    {
+        if (args.Count == 0)
+        {
+            Console.Error.WriteLine("dotcc: #include with no argument");
+            return null;
+        }
+
+        // Quoted form: `#include "foo.h"` — single STRING token.
+        if (args.Count == 1 && args[0].Content is string raw
+            && raw.Length >= 2 && raw[0] == '"' && raw[^1] == '"')
+        {
+            return raw[1..^1];
+        }
+
+        // Angle form: `#include <stdio.h>` — bracketed sequence of tokens.
+        if (args.Count >= 2
+            && args[0].Content is string open && open == "<"
+            && args[^1].Content is string close && close == ">")
+        {
+            var sb = new System.Text.StringBuilder();
+            for (var i = 1; i < args.Count - 1; i++)
+            {
+                sb.Append(args[i].Content?.ToString());
+            }
+            return sb.ToString();
+        }
+
+        Console.Error.WriteLine($"dotcc: #include arg is not a recognized form (got {args.Count} tokens; expected `\"foo.h\"` or `<foo.h>`)");
+        return null;
     }
 
     public IEnumerable<Item> OnDefine(IReadOnlyList<Item> args)
@@ -77,7 +151,37 @@ internal sealed class CPreprocessor : C.IPreprocessor
             Console.Error.WriteLine("dotcc: #define name is empty");
             return Array.Empty<Item>();
         }
-        _macros[name] = args.Count > 1 ? args.Skip(1).ToList() : new List<Item>();
+
+        // Function-like detection: `#define NAME ( … ) body`. We can't
+        // distinguish `NAME(x)` from `NAME (x)` here (the byte lexer drops
+        // whitespace), so the convention is: any `(` immediately following
+        // the name in the directive's args triggers function-like form. The
+        // closing `)` ends the parameter list; everything after is the body.
+        if (args.Count >= 2 && args[1].Content?.ToString() == "(")
+        {
+            var paramNames = new List<string>();
+            var pos = 2;
+            while (pos < args.Count && args[pos].Content?.ToString() != ")")
+            {
+                if (args[pos].Content is string p && p != ",")
+                {
+                    paramNames.Add(p);
+                }
+                pos++;
+            }
+            if (pos >= args.Count)
+            {
+                Console.Error.WriteLine($"dotcc: #define {name}(…) missing closing ')'");
+                return Array.Empty<Item>();
+            }
+            var body = args.Skip(pos + 1).ToList();
+            _macros[name] = new MacroDef(name, paramNames, body);
+            return Array.Empty<Item>();
+        }
+
+        // Object-like: body is everything after the name.
+        var objBody = args.Count > 1 ? args.Skip(1).ToList() : new List<Item>();
+        _macros[name] = new MacroDef(name, Params: null, Body: objBody);
         return Array.Empty<Item>();
     }
 
@@ -92,12 +196,68 @@ internal sealed class CPreprocessor : C.IPreprocessor
 
     public IEnumerable<Item> Rewrite(Item token)
     {
-        if (token.Content is string text && _macros.TryGetValue(text, out var body))
+        // Function-like macros need lookahead (peek for the `(`) which the
+        // Rewrite hook can't do — MacroExpander handles those downstream.
+        // Object-like still expands here so the existing -E (Preprocess-only)
+        // mode keeps working without wiring MacroExpander into that pipeline.
+        if (token.Content is string text
+            && _macros.TryGetValue(text, out var macro)
+            && !macro.IsFunctionLike)
         {
-            return body;
+            return macro.Body;
         }
         return new[] { token };
     }
 
     public bool IsDefined(string name) => name != null && _macros.ContainsKey(name);
+
+    /// <summary>
+    /// <c>#pragma</c> dispatcher. Currently only <c>#pragma once</c> is
+    /// honoured — the rest are silently ignored (matches the convention of
+    /// most compilers: unknown pragmas don't break the build).
+    /// </summary>
+    public IEnumerable<Item> OnPragma(IReadOnlyList<Item> args)
+    {
+        if (args.Count > 0 && args[0].Content is string s && s == "once")
+        {
+            // Remember the currently-being-processed file as include-once.
+            // Any subsequent #include of the same filename short-circuits in
+            // OnInclude.
+            if (_currentlyIncluding is not null)
+            {
+                _pragmaOnceFiles.Add(_currentlyIncluding);
+            }
+        }
+        return Array.Empty<Item>();
+    }
+
+    /// <summary>
+    /// <c>#error msg</c> — abort compilation with the joined message text.
+    /// Visible to callers as a <see cref="CompileException"/>, same as a
+    /// parse failure.
+    /// </summary>
+    public IEnumerable<Item> OnError(IReadOnlyList<Item> args)
+    {
+        throw new CompileException($"#error: {JoinArgs(args)}");
+    }
+
+    /// <summary>
+    /// <c>#warning msg</c> — emit a diagnostic to stderr and continue.
+    /// </summary>
+    public IEnumerable<Item> OnWarning(IReadOnlyList<Item> args)
+    {
+        Console.Error.WriteLine($"dotcc: #warning: {JoinArgs(args)}");
+        return Array.Empty<Item>();
+    }
+
+    private static string JoinArgs(IReadOnlyList<Item> args)
+    {
+        var sb = new System.Text.StringBuilder();
+        for (var i = 0; i < args.Count; i++)
+        {
+            if (i > 0) { sb.Append(' '); }
+            sb.Append(args[i].Content?.ToString());
+        }
+        return sb.ToString();
+    }
 }

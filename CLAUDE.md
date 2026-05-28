@@ -65,7 +65,8 @@ The compilation pipeline is a straight pull-pipe inside `DotCC.Lib`:
 
 ```
 .c file → BytesLexer
-        → PreprocessorTokenStream  (#include / #define / #undef / #if / #ifdef / #ifndef / #else / #endif)
+        → PreprocessorTokenStream  (#include / #define / #undef / #if / #ifdef / #ifndef / #else / #endif / #pragma / #error / #warning; object-like macro substitution via Rewrite)
+        → MacroExpander            (function-like macro expansion with paren-balanced arg collection + multi-pass rescan)
         → TypeNameRewriter         (C lexer hack: promote ID → TYPE_NAME after typedef)
         → SyncLATokenIterator      (one-token lookahead)
         → Parser                   (LALR(1) tables built from c.lalr.yaml)
@@ -73,11 +74,12 @@ The compilation pipeline is a straight pull-pipe inside `DotCC.Lib`:
         → BuildShell(...)          (wrap the emitted fn list in a .NET 10 program shell)
 ```
 
-`PreprocessorTokenStream` and `TypeNameRewriter` are both `RewritingTokenStream` subclasses (a small upstream base class in LALR.CC that owns the iterator plumbing — ready queue, look-ahead buffer, exhaustion flag — and exposes a `ProcessToken` hook plus `Emit` / `CollectUntil` / `TryReadNext` helpers). The preprocessor consumes one to expand macros / dispatch directives; the typedef rewriter consumes another to track typename state and rewrite `ID` tokens after a `typedef`. Future contextual-keyword or DSL-mode rewriters will plug in the same way — one subclass per policy, mechanics shared.
+`PreprocessorTokenStream`, `MacroExpander`, and `TypeNameRewriter` are all `RewritingTokenStream` subclasses (a small upstream base class in LALR.CC that owns the iterator plumbing — ready queue, look-ahead buffer, exhaustion flag — and exposes a `ProcessToken` hook plus `Emit` / `CollectUntil` / `TryReadNext` helpers). The preprocessor handles directives + object-like macro substitution; `MacroExpander` handles function-like macros where `TryReadNext`-based lookahead is needed (peek for the `(`, collect paren-balanced args, substitute formals → actuals, rescan); the typedef rewriter tracks typename state and rewrites `ID` tokens after a `typedef`. Future contextual-keyword or DSL-mode rewriters will plug in the same way — one subclass per policy, mechanics shared.
 
 All four pipeline stages are owned by SharpAstro.LALR.CC. `DotCC.Lib` only contributes:
 - `Compiler.EmitCSharp(...)` / `Compiler.Preprocess(...)` — the public entry points (`Compiler.cs`)
-- `CPreprocessor` — impl of generated `C.IPreprocessor` (macros, `#include` resolution, defined-set tracking)
+- `CPreprocessor` — impl of generated `C.IPreprocessor` (object-like + function-like macros, `#include` quoted and angle, `#pragma once`, `#error`/`#warning`, defined-set tracking)
+- `MacroExpander` — `RewritingTokenStream` subclass handling function-like macro calls with paren-balanced arg collection and multi-pass rescan
 - `TypeNameRewriter` — `RewritingTokenStream` subclass implementing the C lexer hack: tracks typedef-bound names and promotes matching `ID` tokens to the `TYPE_NAME` terminal so the parser unambiguously routes `Color * x;` as a declaration when `Color` is a typedef-name
 - `CSharpEmitter` — impl of generated `C.IVisitor<string>` (one `Visit` method per AST record)
 - `BuildShell` — C# scaffolding around emitted functions (PrintfBuilder, malloc/free helpers, argv UTF-8 marshalling)

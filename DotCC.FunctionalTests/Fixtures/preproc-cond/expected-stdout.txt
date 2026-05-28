@@ -1,0 +1,5 @@
+greeting: v2 or later
+have_version=1
+tier: high
+bitshift_ok=1
+bucket: default

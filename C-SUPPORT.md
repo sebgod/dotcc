@@ -128,16 +128,16 @@ Source of truth for the grammar: `DotCC.Lib/c.lalr.yaml`. Source of truth for th
 | Feature | Status | Notes |
 |---|---|---|
 | `#include "header.h"` | ✅ | Quoted-form; resolves against `-I` dirs + `.c`'s own dir + synthetic `SystemHeaders` |
-| `#include <header.h>` | ❌ | Currently only quoted-form is parsed; angle-form needs a lexer tweak |
+| `#include <header.h>` | ✅ | Angle-form supported by reassembling the fragmented `<`, name, `.`, ext, `>` tokens back into a filename — no lexer state change needed. Resolved against the same path stack as quoted-form (`-I` dirs + .c sibling dirs + synthetic SystemHeaders). |
 | `#define NAME body` | 🟡 | Macro body stored as Items; substituted via `Rewrite` hook. Empty body OK (defined-as-marker) |
-| `#define NAME(args) body` | ❌ | Function-like macros — significant work (parameter substitution) |
+| `#define NAME(args) body` | ✅ | Function-like macros via `MacroExpander` (a `RewritingTokenStream` subclass — same pattern as `PreprocessorTokenStream` and `TypeNameRewriter`). Sits between the preprocessor and the typedef rewriter; uses `TryReadNext` lookahead to detect `(` after a macro name, paren-balanced arg collection (commas inside nested parens don't split), per-parameter substitution into the body, and a multi-pass rescan with a per-call hiding set so `#define CLAMP(x, lo, hi) MAX(lo, MIN(x, hi))` fully expands. Object-like still handled by `CPreprocessor.Rewrite` upstream. Fixture `macro-funclike/` (MSVC-oracle-validated). |
 | `#undef NAME` | ✅ | `OnUndef` |
-| `#if 0 / #if 1` | 🟡 | Literal `0`/`1` works via `IsDefined`-driven engine; expression evaluation (`#if X > 5`) doesn't |
+| `#if <expr>` | ✅ | Full C constant-expression evaluator (upstream in LALR.CC's `PreprocessorExpressionEvaluator`): integer literals (decimal `0x...` hex), `defined(NAME)` and `defined NAME`, arithmetic (`+ - * / %`), comparison (`< > <= >= == !=`), logical (`&& || !`), bitwise (`& | ^ ~ << >>`), ternary (`?:`), parens. Object-like macros expand before evaluation, so `#if VERSION >= 2` works when `VERSION` is `#define`'d. Fixture `preproc-cond/`. |
 | `#ifdef NAME`, `#ifndef NAME` | ✅ | Built-in conditional engine consults `IsDefined`; fixture `hello/` uses `#ifndef` header guards |
-| `#else`, `#elif`, `#endif` | 🟡 | `#else` + `#endif` work; `#elif` not yet (add as conditional directive) |
-| `#error msg` | ❌ | Emit Roslyn-style diagnostic |
-| `#warning msg` (C23) | ❌ | Same |
-| `#pragma …` | ❌ | Mostly ignorable; `#pragma once` is the high-value one |
+| `#else`, `#elif`, `#endif` | ✅ | All three supported. `#elif` participates in the if/elif/else chain — the runtime branch stack tracks `(emitting, anyEmittedYet)` per entry, so once any arm is true the rest of the chain stays suppressed regardless of expression results. Fixture `preproc-cond/`. |
+| `#error msg` | ✅ | Aborts compilation by throwing `CompileException` (same surface as a parse failure); frontend maps to a non-zero exit with `dotcc: #error: <msg>`. |
+| `#warning msg` (C23) | ✅ | Emits `dotcc: #warning: <msg>` to stderr and continues. Same path as `#error` but non-fatal. |
+| `#pragma …` | 🟡 | `#pragma once` is honored — `CPreprocessor` tracks `_pragmaOnceFiles` keyed by the currently-being-processed filename, short-circuits subsequent `#include` of the same name. All other pragmas silently ignored (matches the C convention: unknown pragmas don't break the build). |
 | `#line N`, `#line N "file"` | 🚫 | Useful only for generated-code lineage which dotcc doesn't preserve |
 | `##` token-pasting | ❌ | Needs function-like macros first |
 | `#` stringification | ❌ | Same |

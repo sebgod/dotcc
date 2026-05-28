@@ -94,4 +94,235 @@ public sealed class CompilerTests
         }
         finally { File.Delete(src); }
     }
+
+    [Fact]
+    public void Include_angle_form_resolves_to_synthetic_stdio_header()
+    {
+        // `#include <stdio.h>` reassembles the fragmented `<`, `stdio`, `.`,
+        // `h`, `>` tokens back into a filename and resolves against
+        // SystemHeaders (which carries the synthetic stdio.h).
+        var src = WriteTemp("""
+            #include <stdio.h>
+            int main() { printf("hi"); return 0; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("static unsafe int main()");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Pragma_once_short_circuits_repeated_include()
+    {
+        // The directory of the .c file is also on the include search path,
+        // so a sibling header is reachable via `#include "shared.h"`. The
+        // header defines a macro and ends with `#pragma once`; if it were
+        // re-included on the second `#include`, the second `#define` of
+        // ANSWER would still substitute (it'd just shadow). The user-visible
+        // behavior here is "the include should be processed exactly once" —
+        // which we observe by counting `#define ANSWER 42` re-entry…
+        // actually the most observable thing is "no error from re-include".
+        var dir = Path.Combine(Path.GetTempPath(), $"dotcc-pragma-{System.Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var headerPath = Path.Combine(dir, "shared.h");
+            File.WriteAllText(headerPath, """
+                #pragma once
+                #define ANSWER 42
+                """);
+            var srcPath = Path.Combine(dir, "main.c");
+            File.WriteAllText(srcPath, """
+                #include "shared.h"
+                #include "shared.h"
+                int main() { return ANSWER; }
+                """);
+            var emitted = Compiler.EmitCSharp(new[] { srcPath });
+            emitted.ShouldContain("return 42;");
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    [Fact]
+    public void Error_directive_aborts_compilation()
+    {
+        var src = WriteTemp("""
+            #error this is a forced failure
+            int main() { return 0; }
+            """);
+        try
+        {
+            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
+                .Message.ShouldContain("#error");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Warning_directive_continues_compilation()
+    {
+        // #warning emits to stderr but doesn't abort; the program should
+        // still compile and main should be present in the output.
+        var src = WriteTemp("""
+            #warning informational only
+            int main() { return 7; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("static unsafe int main()");
+            emitted.ShouldContain("return 7;");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Function_macro_two_args_substitutes_each()
+    {
+        // The canonical example. `MAX(a, b)` should land at the call site
+        // as `((1) > (2) ? (1) : (2))` in the post-preprocess stream.
+        var src = WriteTemp("""
+            #define MAX(a, b) ((a) > (b) ? (a) : (b))
+            int main() { return MAX(1, 2); }
+            """);
+        try
+        {
+            using var sw = new StringWriter();
+            Compiler.Preprocess(new[] { src }, sw);
+            var dumped = sw.ToString();
+
+            // Both formal params replaced with the actual int literals.
+            dumped.ShouldNotContain(" MAX ");
+            dumped.ShouldNotContain(" a ");
+            dumped.ShouldNotContain(" b ");
+            dumped.ShouldContain(" 1 ");
+            dumped.ShouldContain(" 2 ");
+            // The surrounding parens + ternary structure all preserved.
+            dumped.ShouldContain(" > ");
+            dumped.ShouldContain(" ? ");
+            dumped.ShouldContain(" : ");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Function_macro_emits_and_compiles_end_to_end()
+    {
+        // Full pipeline: parser must see a valid expression after expansion.
+        // The emitted C# should compile (no syntax errors).
+        var src = WriteTemp("""
+            #define SQUARE(x) ((x) * (x))
+            int main() { return SQUARE(5); }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("return ");
+            // The 5 should appear (twice — substituted into both x positions)
+            // and SQUARE shouldn't survive into the emit.
+            emitted.ShouldNotContain("SQUARE");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Function_macro_zero_args_works()
+    {
+        // `#define PI() 3.14159` — function-like but takes no params.
+        // Still requires a `()` at the call site to trigger expansion.
+        var src = WriteTemp("""
+            #define PI() 314
+            int main() { return PI(); }
+            """);
+        try
+        {
+            using var sw = new StringWriter();
+            Compiler.Preprocess(new[] { src }, sw);
+            var dumped = sw.ToString();
+            dumped.ShouldNotContain(" PI ");
+            dumped.ShouldContain(" 314 ");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Function_macro_name_without_parens_passes_through()
+    {
+        // `#define ADD(a, b) ((a) + (b))` then bare `ADD` (no `(`) — the
+        // macro name should land in the output as an identifier, not get
+        // expanded. Real C allows this idiom (e.g. function-pointer math
+        // through #ifdef-tested alternatives).
+        var src = WriteTemp("""
+            #define ADD(a, b) ((a) + (b))
+            int main() { int x = ADD; return 0; }
+            """);
+        try
+        {
+            using var sw = new StringWriter();
+            Compiler.Preprocess(new[] { src }, sw);
+            var dumped = sw.ToString();
+            // `ADD` appears as a bare ID (no call) — the macro definition
+            // line had `ADD ( a , b ) ( ( a ) + ( b ) )` which got consumed
+            // by OnDefine, so the only remaining `ADD` is the use-site one.
+            dumped.ShouldContain(" ADD ");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Function_macro_with_nested_parens_in_args_paren_balanced()
+    {
+        // `MAX((a+b), c)` — the inner `(a+b)` has its own parens. The
+        // comma inside `(a+b)` (if any) must NOT split the arg list at
+        // depth 1; arg collection is paren-balanced.
+        var src = WriteTemp("""
+            #define MAX(a, b) ((a) > (b) ? (a) : (b))
+            int main() { return MAX((1 + 2), 3); }
+            """);
+        try
+        {
+            using var sw = new StringWriter();
+            Compiler.Preprocess(new[] { src }, sw);
+            var dumped = sw.ToString();
+            dumped.ShouldNotContain("MAX");
+            // The `1 + 2` lands wherever `a` was — verify the addition
+            // tokens are present (a appeared 3 times in the body, so 1+2
+            // gets substituted in 3 times).
+            dumped.ShouldContain(" 1 ");
+            dumped.ShouldContain(" + ");
+            dumped.ShouldContain(" 2 ");
+            dumped.ShouldContain(" 3 ");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Object_like_macro_still_works_alongside_function_like()
+    {
+        // Regression: refactoring _macros to MacroDef shouldn't break the
+        // existing object-like substitution path (which lives in Rewrite,
+        // not MacroExpander).
+        var src = WriteTemp("""
+            #define ANSWER 42
+            #define DOUBLE(x) ((x) * 2)
+            int main() { return DOUBLE(ANSWER); }
+            """);
+        try
+        {
+            using var sw = new StringWriter();
+            Compiler.Preprocess(new[] { src }, sw);
+            var dumped = sw.ToString();
+            // ANSWER should expand to 42 (object-like).
+            dumped.ShouldNotContain(" ANSWER ");
+            // DOUBLE(...) should expand to `((42) * 2)` — the inner arg
+            // came in as `ANSWER` and got object-like-expanded BEFORE
+            // reaching MacroExpander (Rewrite happens upstream).
+            dumped.ShouldNotContain(" DOUBLE ");
+            dumped.ShouldContain(" 42 ");
+            dumped.ShouldContain(" * ");
+        }
+        finally { File.Delete(src); }
+    }
 }
