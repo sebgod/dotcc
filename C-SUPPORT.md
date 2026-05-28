@@ -249,6 +249,25 @@ Synthetic header at `DotCC.Lib/include/limits.h` defines the C99 numeric-limit m
 | `LONG_MIN`/`MAX`, `ULONG_MAX` | ±9223372036854775808, 18446744073709551615uL | 64-bit on dotcc (LP64); 32-bit on MSVC-Windows (LLP64). Documented divergence — programs hard-depending on `LONG_MAX == 2147483647` behave differently. |
 | `LLONG_MIN`/`MAX`, `ULLONG_MAX` | same as `LONG_*` | dotcc's `long long` == `long` (both 64-bit) |
 
+### `float.h` (C99)
+
+Synthetic header at `DotCC.Lib/include/float.h` exposes the IEEE-754 limit macros for `float` (binary32) and `double` (binary64). dotcc has no distinct `long double` — the `LDBL_*` macros alias the `DBL_*` values (matches what real C does on platforms without 80-bit extended precision). Fixture `float-limits/`.
+
+| Macro | Value | Notes |
+|---|---|---|
+| `FLT_RADIX` | 2 | IEEE-754 base |
+| `FLT_MANT_DIG` / `DBL_MANT_DIG` / `LDBL_MANT_DIG` | 24 / 53 / 53 | significand bits |
+| `FLT_DIG` / `DBL_DIG` / `LDBL_DIG` | 6 / 15 / 15 | round-trip-safe decimal digits |
+| `FLT_MIN_EXP` / `MAX_EXP` | -125 / 128 | binary-radix exponent bounds |
+| `DBL_MIN_EXP` / `MAX_EXP` | -1021 / 1024 | likewise for double |
+| `FLT_MIN_10_EXP` / `MAX_10_EXP` | -37 / 38 | decimal-radix exponent bounds |
+| `DBL_MIN_10_EXP` / `MAX_10_EXP` | -307 / 308 | likewise for double |
+| `FLT_MAX` / `DBL_MAX` / `LDBL_MAX` | IEEE-754 maxima | 3.402…e+38F / 1.797…e+308 |
+| `FLT_MIN` / `DBL_MIN` / `LDBL_MIN` | smallest positive normalized | 1.175…e-38F / 2.225…e-308 |
+| `FLT_EPSILON` / `DBL_EPSILON` / `LDBL_EPSILON` | gap to 1.0 | 1.192…e-7F / 2.220…e-16 |
+| `FLT_ROUNDS` | 1 | round to nearest (IEEE-754 + .NET FP default) |
+| `FLT_EVAL_METHOD` | 0 | no extra precision; each op evaluates in its declared type |
+
 ### `math.h`
 
 Every function exists as a `double` overload (routes to `System.Math`) **and** a `float` overload (routes to `System.MathF`); the explicit `…f`-suffix C99 forms (`sinf`, `cosf`, `sqrtf`, …) are wired alongside. Lives in `DotCC.Libc/MathLib.cs` as a `partial` extension of `Libc`. The same `.cs` file is **embedded into `DotCC.Lib.dll`** at build time (`<EmbeddedResource Include="..\DotCC.Libc\*.cs">`); `Compiler.LoadRuntimeBlock` splices it into every emitted program's type-decls section, and `using static Libc;` brings the methods into scope by bare name so user calls resolve through C# overload resolution. Single source of truth — no duplicated inline copy. Header lives at `DotCC.Lib/include/math.h` (also embedded — see "Synthetic system headers + runtime" below). Fixture `math-basic/` covers double-precision dispatch end-to-end with MSVC oracle validation.
@@ -346,7 +365,7 @@ Listed here so we don't relitigate them. All marked 🚫 above.
 
 ## Synthetic system headers + runtime
 
-dotcc ships its own copies of the C99 standard headers (`stdio.h`, `stdlib.h`, `stddef.h`, `stdbool.h`, `stdint.h`, `limits.h`, `assert.h`, `ctype.h`, `math.h`, `tgmath.h`, `string.h`) AND its libc implementations, both as **real files in source control**, both embedded into `DotCC.Lib.dll` so the compiler can serve them at emit time without any runtime disk I/O. Same model as clang's `lib/clang/<ver>/include/` tree, just loaded from the assembly manifest.
+dotcc ships its own copies of the C99 standard headers (`stdio.h`, `stdlib.h`, `stddef.h`, `stdbool.h`, `stdint.h`, `limits.h`, `float.h`, `assert.h`, `ctype.h`, `math.h`, `tgmath.h`, `string.h`) AND its libc implementations, both as **real files in source control**, both embedded into `DotCC.Lib.dll` so the compiler can serve them at emit time without any runtime disk I/O. Same model as clang's `lib/clang/<ver>/include/` tree, just loaded from the assembly manifest.
 
 **Two parallel embeddings (see `DotCC.Lib.csproj`):**
 
