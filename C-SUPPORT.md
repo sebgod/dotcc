@@ -285,9 +285,11 @@ Every function exists as a `double` overload (routes to `System.Math`) **and** a
 
 ### `assert.h`
 
+Synthetic header at `DotCC.Lib/include/assert.h` with the canonical `NDEBUG`-aware shape. Implementations in `DotCC.Libc/AssertLib.cs`. Fixture `assert-basic/` covers the happy path; unit tests cover the failure throw + NDEBUG no-op.
+
 | Function | Status | Notes |
 |---|---|---|
-| `assert(expr)` | ❌ | Macro that compiles to `Debug.Assert` |
+| `assert(expr)` | ✅ | When `NDEBUG` is undefined, expands to `__dotcc_assert(expr)` — overloaded for `int` / `bool` / `double` / `void*` so any truthy expression resolves through C# overload resolution. Failed assertion throws `Libc.AssertionFailedException` carrying the source text of `expr` (via `[CallerArgumentExpression]` at the call site — gives glibc-style diagnostic quality without preprocessor stringification). When `NDEBUG` IS defined, expands to a call to `__dotcc_assert_noop()` so the expression is NOT evaluated (matches C99 §7.2.1.1; rare side-effecting `assert(f())` style won't run `f`). Re-includable: `#undef` at the top of the header lets the macro be redefined according to current `NDEBUG` state on every `#include`. |
 | `static_assert` (C11) | ❌ | Compile-time check; could lower to `#error` if expr is constant-false |
 
 ### `errno.h`, `signal.h`, `setjmp.h`
@@ -337,7 +339,7 @@ Listed here so we don't relitigate them. All marked 🚫 above.
 
 ## Synthetic system headers + runtime
 
-dotcc ships its own copies of the C99 standard headers (`stdio.h`, `stdlib.h`, `stddef.h`, `stdbool.h`, `stdint.h`, `limits.h`, `math.h`, `tgmath.h`, `string.h`) AND its libc implementations, both as **real files in source control**, both embedded into `DotCC.Lib.dll` so the compiler can serve them at emit time without any runtime disk I/O. Same model as clang's `lib/clang/<ver>/include/` tree, just loaded from the assembly manifest.
+dotcc ships its own copies of the C99 standard headers (`stdio.h`, `stdlib.h`, `stddef.h`, `stdbool.h`, `stdint.h`, `limits.h`, `assert.h`, `math.h`, `tgmath.h`, `string.h`) AND its libc implementations, both as **real files in source control**, both embedded into `DotCC.Lib.dll` so the compiler can serve them at emit time without any runtime disk I/O. Same model as clang's `lib/clang/<ver>/include/` tree, just loaded from the assembly manifest.
 
 **Two parallel embeddings (see `DotCC.Lib.csproj`):**
 

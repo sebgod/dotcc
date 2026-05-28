@@ -354,6 +354,56 @@ public sealed class CompilerTests
     }
 
     [Fact]
+    public void Include_assert_h_expands_to_dotcc_assert_call()
+    {
+        // <assert.h> with NDEBUG undefined expands `assert(expr)` to
+        // `__dotcc_assert(expr)`, a C# call resolved at link time
+        // against DotCC.Libc.Libc's overloaded methods. The
+        // [CallerArgumentExpression] attribute on the C# side captures
+        // the source text of `expr` at the call site for diagnostic
+        // messages.
+        var src = WriteTemp("""
+            #include <assert.h>
+            int main() { int x = 5; assert(x > 0); return 0; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            // Macro must have substituted — no `assert(` literal in emit.
+            emitted.ShouldNotContain("assert(x > 0)");
+            // Should call __dotcc_assert with the condition expression.
+            emitted.ShouldContain("__dotcc_assert");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Include_assert_h_with_NDEBUG_lowers_to_noop_call()
+    {
+        // `#define NDEBUG` before `#include <assert.h>` selects the
+        // no-op branch: `assert(expr)` expands to `__dotcc_assert_noop()`.
+        // The condition expression is NOT evaluated (matches C99 §7.2.1.1).
+        var src = WriteTemp("""
+            #define NDEBUG
+            #include <assert.h>
+            int explode_marker_z7q() { return 0; }
+            int main() { assert(explode_marker_z7q()); return 0; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("__dotcc_assert_noop()");
+            // The condition `explode_marker_z7q()` should appear EXACTLY
+            // once — at the function definition. If NDEBUG hadn't
+            // discarded the call site, we'd see a second occurrence.
+            var calls = System.Text.RegularExpressions.Regex.Matches(
+                emitted, @"explode_marker_z7q\s*\(").Count;
+            calls.ShouldBe(1);
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Include_string_h_resolves_and_calls_typecheck()
     {
         // <string.h> is a real .h file under DotCC.Lib/include/ — the
