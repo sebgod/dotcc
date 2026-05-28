@@ -1,6 +1,7 @@
 #nullable enable
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
@@ -16,12 +17,17 @@ namespace DotCC.FunctionalTests;
 /// Discovery uses Microsoft's <c>vswhere.exe</c>, which is the only
 /// supported way to locate a Visual Studio install on modern Windows
 /// (registry queries are unreliable since VS 2017 went side-by-side).
-/// Compilation goes through a generated wrapper batch that
-/// <c>call vcvars64.bat</c> first, then <c>cl /Fe:&lt;exe&gt; ...</c>;
-/// vcvars sets up <c>PATH</c>, <c>INCLUDE</c>, <c>LIB</c> in the cmd
-/// session so cl can find headers and link against MSVCRT. Output of
-/// vcvars is captured and discarded — we only care about the program's
-/// stdout after it runs.
+///
+/// <para>
+/// <b>vcvars caching</b>: <c>vcvars64.bat</c> sets up <c>PATH</c>,
+/// <c>INCLUDE</c>, <c>LIB</c>, etc. for cl.exe. The naive approach is
+/// "wrap every test in a <c>cmd /c call vcvars && cl …</c>" — but
+/// spawning cmd.exe + running the bat per test costs ~1s of startup
+/// overhead per fixture. Instead we run vcvars ONCE at
+/// <see cref="EnsureInitialised"/> time, capture the resulting
+/// environment, and spawn cl.exe directly with that env per test. Cuts
+/// per-test wall time by ~5x for the oracle pass.
+/// </para>
 ///
 /// On non-Windows or hosts without VS, <see cref="IsAvailable"/> is false
 /// and tests should <see cref="Xunit.Assert.Skip"/> to keep CI green where
@@ -33,11 +39,16 @@ internal static class MsvcOracle
     private static bool _initialised;
     private static string? _vsInstallPath;
     private static string? _vcvarsBatPath;
+    // Captured environment after `call vcvars64.bat`. Each ProcessStartInfo's
+    // Environment is populated from this so cl.exe finds its headers / libs
+    // without needing to re-invoke the bat per test.
+    private static Dictionary<string, string>? _vcvarsEnv;
+    private static string? _clExePath;
 
     /// <summary>True if vswhere found a VS install with VC tools.</summary>
     public static bool IsAvailable
     {
-        get { EnsureInitialised(); return _vcvarsBatPath is not null; }
+        get { EnsureInitialised(); return _clExePath is not null; }
     }
 
     /// <summary>Discovered VS install root (e.g. <c>C:\Program Files\Microsoft Visual Studio\18\Professional</c>).</summary>
@@ -55,7 +66,7 @@ internal static class MsvcOracle
     public static string CompileAndRun(string[] csources, string workDir, string[]? runArgs = null)
     {
         EnsureInitialised();
-        if (_vcvarsBatPath is null)
+        if (_clExePath is null || _vcvarsEnv is null)
         {
             throw new InvalidOperationException("MSVC oracle is not available on this host.");
         }
@@ -81,53 +92,71 @@ internal static class MsvcOracle
             }
         }
 
+        // ── cl.exe compile ──
         var exeName = "msvc-oracle.exe";
-        var batPath = Path.Combine(workDir, "msvc-build-and-run.bat");
-        var sb = new StringBuilder();
-        sb.AppendLine("@echo off");
-        sb.AppendLine($"cd /d \"{workDir}\"");
-        // Quote the vcvars path — VS lives under Program Files.
-        sb.AppendLine($"call \"{_vcvarsBatPath}\" >NUL 2>NUL");
-        sb.Append("cl /nologo /Fe:").Append(exeName);
-        foreach (var n in localNames) { sb.Append(' ').Append(n); }
-        sb.AppendLine(" 1>cl.stdout.log 2>cl.stderr.log");
-        sb.AppendLine("if errorlevel 1 ( type cl.stdout.log & type cl.stderr.log & exit /b 1 )");
-        sb.Append($".\\{exeName}");
-        if (runArgs is not null)
+        var cl = new ProcessStartInfo
         {
-            foreach (var a in runArgs) { sb.Append(' ').Append('"').Append(a).Append('"'); }
-        }
-        sb.AppendLine();
-        File.WriteAllText(batPath, sb.ToString());
-
-        // Note: vcvars64.bat *must* run without output redirection from the
-        // .bat-level `call`; redirecting `>NUL` at the inner level (as the
-        // bat does) works, but redirecting the outer `cmd /c` would suppress
-        // env propagation. We use Process.Start with redirected stdout/err
-        // on the cmd.exe wrapper — that's at the parent level, doesn't
-        // interfere with vcvars' own internal redirects.
-        var psi = new ProcessStartInfo
-        {
-            FileName = "cmd.exe",
+            FileName = _clExePath,
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             WorkingDirectory = workDir,
         };
-        psi.ArgumentList.Add("/C");
-        psi.ArgumentList.Add(batPath);
+        ApplyCachedEnv(cl);
+        cl.ArgumentList.Add("/nologo");
+        cl.ArgumentList.Add($"/Fe:{exeName}");
+        foreach (var n in localNames) { cl.ArgumentList.Add(n); }
 
-        using var proc = Process.Start(psi)
-            ?? throw new InvalidOperationException("failed to spawn cmd.exe for MSVC oracle");
-        var stdout = proc.StandardOutput.ReadToEnd();
-        var stderr = proc.StandardError.ReadToEnd();
-        proc.WaitForExit();
-        if (proc.ExitCode != 0)
+        using (var clProc = Process.Start(cl)
+            ?? throw new InvalidOperationException("failed to spawn cl.exe for MSVC oracle"))
+        {
+            var clOut = clProc.StandardOutput.ReadToEnd();
+            var clErr = clProc.StandardError.ReadToEnd();
+            clProc.WaitForExit();
+            if (clProc.ExitCode != 0)
+            {
+                throw new InvalidOperationException(
+                    $"MSVC oracle: cl.exe failed (exit {clProc.ExitCode}).\n--- cl stdout ---\n{clOut}\n--- cl stderr ---\n{clErr}");
+            }
+        }
+
+        // ── run produced .exe ──
+        var run = new ProcessStartInfo
+        {
+            FileName = Path.Combine(workDir, exeName),
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            WorkingDirectory = workDir,
+        };
+        ApplyCachedEnv(run);
+        if (runArgs is not null)
+        {
+            foreach (var a in runArgs) { run.ArgumentList.Add(a); }
+        }
+
+        using var runProc = Process.Start(run)
+            ?? throw new InvalidOperationException("failed to spawn MSVC-built exe");
+        var stdout = runProc.StandardOutput.ReadToEnd();
+        var stderr = runProc.StandardError.ReadToEnd();
+        runProc.WaitForExit();
+        if (runProc.ExitCode != 0)
         {
             throw new InvalidOperationException(
-                $"MSVC oracle build/run failed (exit {proc.ExitCode}).\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}");
+                $"MSVC oracle: produced exe failed (exit {runProc.ExitCode}).\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}");
         }
         return stdout;
+    }
+
+    /// <summary>
+    /// Apply the cached vcvars environment to <paramref name="psi"/>'s
+    /// Environment dict. We replace rather than merge — Process.Start
+    /// already seeds Environment from the parent before we touch it, so
+    /// just overlay the vcvars-set keys on top.
+    /// </summary>
+    private static void ApplyCachedEnv(ProcessStartInfo psi)
+    {
+        foreach (var (k, v) in _vcvarsEnv!) { psi.Environment[k] = v; }
     }
 
     private static void EnsureInitialised()
@@ -139,8 +168,21 @@ internal static class MsvcOracle
             _initialised = true;
             // Windows-only oracle. Skip silently on other platforms.
             if (!OperatingSystem.IsWindows()) { return; }
-            try { ProbeVswhere(); }
-            catch { /* leave _vcvarsBatPath null — IsAvailable returns false */ }
+            try
+            {
+                ProbeVswhere();
+                if (_vcvarsBatPath is not null)
+                {
+                    CaptureVcvarsEnv();
+                    LocateClExe();
+                }
+            }
+            catch
+            {
+                // Leave fields null — IsAvailable returns false and tests skip.
+                _vcvarsEnv = null;
+                _clExePath = null;
+            }
         }
     }
 
@@ -174,5 +216,69 @@ internal static class MsvcOracle
         if (!File.Exists(vcvars)) { return; }
         _vsInstallPath = path;
         _vcvarsBatPath = vcvars;
+    }
+
+    /// <summary>
+    /// One-shot vcvars64.bat invocation: run it through cmd.exe, then
+    /// dump <c>set</c> to capture the post-vcvars environment. Parse the
+    /// <c>KEY=VALUE</c> lines into a dictionary that subsequent process
+    /// launches splice into their <see cref="ProcessStartInfo.Environment"/>.
+    /// </summary>
+    private static void CaptureVcvarsEnv()
+    {
+        // Use raw `Arguments` rather than ArgumentList — ArgumentList
+        // escapes shell metacharacters like `&&`, `>`, and quoted paths
+        // in a way that confuses cmd.exe. The command is built so
+        // vcvars's stdout/stderr go to NUL (avoiding the "Setting up..."
+        // banner mixing with the env dump), then `set` writes KEY=VALUE
+        // lines to OUR captured stdout.
+        var psi = new ProcessStartInfo
+        {
+            FileName = "cmd.exe",
+            Arguments = $"/c \"\"{_vcvarsBatPath}\" >NUL 2>NUL && set\"",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        using var proc = Process.Start(psi)
+            ?? throw new InvalidOperationException("failed to spawn cmd.exe for vcvars capture");
+        var stdout = proc.StandardOutput.ReadToEnd();
+        var stderr = proc.StandardError.ReadToEnd();
+        proc.WaitForExit();
+        if (proc.ExitCode != 0)
+        {
+            throw new InvalidOperationException(
+                $"vcvars capture failed (exit {proc.ExitCode}).\n--- stdout (first 500) ---\n{stdout[..Math.Min(500, stdout.Length)]}\n--- stderr ---\n{stderr}");
+        }
+        var env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var line in stdout.Split('\n'))
+        {
+            var trimmed = line.TrimEnd('\r');
+            var eq = trimmed.IndexOf('=');
+            if (eq <= 0) { continue; }
+            env[trimmed[..eq]] = trimmed[(eq + 1)..];
+        }
+        _vcvarsEnv = env;
+    }
+
+    /// <summary>
+    /// Look up <c>cl.exe</c> on the vcvars-modified <c>PATH</c>. Stored
+    /// as an absolute path so each <see cref="CompileAndRun"/> call can
+    /// invoke it without re-resolving.
+    /// </summary>
+    private static void LocateClExe()
+    {
+        if (_vcvarsEnv is null) { return; }
+        if (!_vcvarsEnv.TryGetValue("PATH", out var path)) { return; }
+        foreach (var dir in path.Split(Path.PathSeparator))
+        {
+            if (string.IsNullOrEmpty(dir)) { continue; }
+            var candidate = Path.Combine(dir, "cl.exe");
+            if (File.Exists(candidate))
+            {
+                _clExePath = candidate;
+                return;
+            }
+        }
     }
 }
