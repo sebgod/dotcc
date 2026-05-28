@@ -110,8 +110,8 @@ Source of truth for the grammar: `DotCC.Lib/c.lalr.yaml`. Source of truth for th
 | `break;` | ✅ | `stmtBreak`; fixture `loop-break/` |
 | `continue;` | ✅ | `stmtContinue`; fixture `loop-break/` |
 | `return;`, `return e;` | ✅ | `stmtReturn` / `stmtReturnVoid` |
-| `goto label;` + labels | ❌ | Add label-stmt and `goto` production; lower to C# `goto` literally |
-| Empty stmt `;` | ❌ | Add `Stmt -> ';'` rule |
+| `goto label;` + labels | ✅ | Direct lowering — C# accepts identical `goto label;` and `label: Stmt` syntax with the same forward-reference semantics inside a method body. Productions: `Stmt → 'goto' ID ';'` and `Stmt → ID ':' Stmt`. Fixture `goto-cleanup/` exercises the canonical "goto-out" error-cleanup ladder. |
+| Empty stmt `;` | ✅ | `Stmt → ';'` — emits a bare semicolon. Needed so labels can attach to the end of a block (`end: ;` is valid pre-C23). |
 
 ## Declarations
 

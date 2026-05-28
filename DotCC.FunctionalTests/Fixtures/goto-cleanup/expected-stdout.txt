@@ -1,0 +1,5 @@
+first negative idx: 2
+chain ok: 6
+chain fail@1: -1
+chain fail@2: -2
+chain fail@3: -3

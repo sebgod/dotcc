@@ -511,6 +511,21 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
     public string Visit(C.CaseDefault n) =>
         $"default:\n{IndentEach((string)n.Arg2.Content)}";
     public string Visit(C.StmtDecl n) => $"{(string)n.Arg0.Content};\n";
+
+    // `goto label;` — C# accepts the same keyword + identifier syntax with
+    // identical forward-reference semantics inside a method body, so the
+    // lowering is verbatim.
+    public string Visit(C.StmtGoto n) => $"goto {(string)n.Arg1.Content};\n";
+
+    // `label: Stmt` — emit the label followed by the body statement.
+    // Whitespace shape: label on its own line for readability.
+    public string Visit(C.StmtLabel n) =>
+        $"{(string)n.Arg0.Content}:\n{(string)n.Arg2.Content}";
+
+    // Empty statement `;` — required pre-C23 if you want to label the end
+    // of a block (`end: ;`). Emit as a bare semicolon; C# parses it as an
+    // empty statement too.
+    public string Visit(C.StmtEmpty n) => ";\n";
     public string Visit(C.StmtExpr n) =>
         // CS0201: bare parenthesized assignment isn't a statement. Peel the
         // outer parens that our binop emitters wrap on.
@@ -615,10 +630,15 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
     public string Visit(C.MulAssign n) => $"({(string)n.Arg0.Content} *= {(string)n.Arg2.Content})";
     public string Visit(C.DivAssign n) => $"({(string)n.Arg0.Content} /= {(string)n.Arg2.Content})";
     public string Visit(C.ModAssign n) => $"({(string)n.Arg0.Content} %= {(string)n.Arg2.Content})";
+    // Logical `||` and `&&` — wrap each operand with Cond.B so the C-truthy
+    // conversion works for int / double / pointer AND bool (when the
+    // operand is already a comparison result like `a == NULL`). The
+    // previous `!= 0` form broke when an operand was bool because
+    // `bool != 0` isn't a valid C# expression.
     public string Visit(C.Lor n) =>
-        $"({(string)n.Arg0.Content} != 0 || {(string)n.Arg2.Content} != 0)";
+        $"(Cond.B({(string)n.Arg0.Content}) || Cond.B({(string)n.Arg2.Content}))";
     public string Visit(C.Land n) =>
-        $"({(string)n.Arg0.Content} != 0 && {(string)n.Arg2.Content} != 0)";
+        $"(Cond.B({(string)n.Arg0.Content}) && Cond.B({(string)n.Arg2.Content}))";
     public string Visit(C.Eq n) => $"({(string)n.Arg0.Content} == {(string)n.Arg2.Content})";
     public string Visit(C.Neq n) => $"({(string)n.Arg0.Content} != {(string)n.Arg2.Content})";
     public string Visit(C.Lt n) => $"({(string)n.Arg0.Content} < {(string)n.Arg2.Content})";

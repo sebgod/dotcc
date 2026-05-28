@@ -214,6 +214,7 @@ symbols:
   # concrete type once at the end via the visitor's ResolveTypeSpec().
   - TypeSpecList   # 130
   - TypeSpec       # 131
+  - 'goto'         # 132 keyword
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -414,6 +415,13 @@ productions:
       - { lhs: Stmt, rhs: [Decl, ';'],                    action: stmtDecl }
       - { lhs: Stmt, rhs: [E, ';'],                        action: stmtExpr }
       - { lhs: Stmt, rhs: [Block] }
+      # `goto label ;` and `label : Stmt` — direct lowering, C# accepts
+      # identical syntax (and the same forward-reference semantics inside
+      # a method body). Empty statement `;` so labels at the end of a
+      # block can attach to something (`end: ;` — required pre-C23 anyway).
+      - { lhs: Stmt, rhs: ['goto', ID, ';'],               action: stmtGoto }
+      - { lhs: Stmt, rhs: [ID, ':', Stmt],                 action: stmtLabel }
+      - { lhs: Stmt, rhs: [';'],                           action: stmtEmpty }
 
   # MemberList: one or more `Type ID ;` declarations inside a struct body.
   - derivation: leftmost
@@ -708,6 +716,7 @@ lexer:
     - { symbol: 'long',     match: 'long' }
     - { symbol: 'unsigned', match: 'unsigned' }
     - { symbol: 'signed',   match: 'signed' }
+    - { symbol: 'goto',     match: 'goto' }
     - { symbol: 'if',     match: 'if' }
     - { symbol: 'else',   match: 'else' }
     - { symbol: 'while',  match: 'while' }
