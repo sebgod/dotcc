@@ -38,6 +38,19 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     {
         EmitContent.Text t => t.Value,
         string s => s,
+        // setjmp variants must be consumed by Visit(Eq)/Visit(Neq) or
+        // Visit(StmtIfElse). Reaching T() means setjmp showed up in a
+        // context dotcc can't rewrite to try/catch — fail loudly with
+        // a clear hint rather than silently emitting a bogus call.
+        EmitContent.SetjmpCall =>
+            throw new CompileException(
+                "setjmp(env) can only appear as the condition of an `if/else` or " +
+                "as `setjmp(env) == 0` / `!= 0`. Other contexts (assignment to a " +
+                "variable, switch condition, etc.) aren't supported — see <setjmp.h>."),
+        EmitContent.SetjmpCheckZero =>
+            throw new CompileException(
+                "setjmp(env) == 0 / != 0 comparison can only appear as the condition " +
+                "of an `if/else`. See <setjmp.h>."),
         _ => throw new InvalidCastException(
             $"expected EmitContent.Text or string, got {it.Content?.GetType().FullName ?? "null"}"),
     };
@@ -695,105 +708,59 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // live in BuildShell — see Compiler.BuildShell.
     public EmitContent Visit(C.StmtIf n)
     {
-        var condText = T(n.Arg2);
-        if (TryRecognizeSetjmpInIf(condText, out var envName, out var conditionIsZero))
+        // setjmp in an `if` without an `else` can't be locally rewritten
+        // — there's no "normal path" to put in the try block. Fail with
+        // a clear hint; the user should add an else branch.
+        if (n.Arg2.Content is EmitContent.SetjmpCall
+            or EmitContent.SetjmpCheckZero)
         {
-            // `if (setjmp(env)) { recovery }` with no else: the normal
-            // path continues after the if. We can't wrap "the rest of
-            // the function" locally — that's the documented limitation.
-            // Require an else branch for setjmp idioms.
             throw new CompileException(
-                $"setjmp(env) in an `if` condition requires a matching `else` clause; " +
-                $"see the supported patterns in <setjmp.h>'s header comment.");
+                "setjmp(env) in an `if` condition requires a matching `else` clause; " +
+                "see the supported patterns in <setjmp.h>'s header comment.");
         }
-        return $"if (Cond.B({condText})) {T(n.Arg4)}";
+        return $"if (Cond.B({T(n.Arg2)})) {T(n.Arg4)}";
     }
 
     public EmitContent Visit(C.StmtIfElse n)
     {
-        var condText = T(n.Arg2);
-        var thenBody = T(n.Arg4);
-        var elseBody = T(n.Arg6);
-        if (TryRecognizeSetjmpInIf(condText, out var envName, out var conditionIsZero))
+        // Setjmp recognition via AST inspection — no text matching.
+        // Visit(Call) for setjmp returns a SetjmpCall variant; Visit(Eq)/
+        // Visit(Neq) escalate to SetjmpCheckZero when one operand is
+        // setjmp and the other is the literal 0. Both shapes get the
+        // try/catch rewrite here.
+        switch (n.Arg2.Content)
         {
-            // Map if/else to try/catch based on which condition shape
-            // we matched:
-            //   if (setjmp(env))         { recovery } else { normal }
-            //     → conditionIsZero == false → catch=then, try=else
-            //   if (setjmp(env) == 0)    { normal }   else { recovery }
-            //     → conditionIsZero == true  → catch=else, try=then
-            var (tryBody, catchBody) = conditionIsZero
-                ? (thenBody, elseBody)
-                : (elseBody, thenBody);
-            return
-                $"try {tryBody}" +
-                $"catch (Libc.LongJmpException __jmp) when (__jmp.Token == {envName}) " +
-                $"{{ var __longjmp_value = __jmp.Value; {catchBody} }}";
+            case EmitContent.SetjmpCall sj:
+                // `if (setjmp(env))         { recovery } else { normal }`
+                //   setjmp is truthy ONLY on the longjmp re-entry, so:
+                //     then-branch = recovery (catch body)
+                //     else-branch = normal   (try body)
+                return EmitSetjmpRewrite(sj.EnvName, tryBody: T(n.Arg6), catchBody: T(n.Arg4));
+
+            case EmitContent.SetjmpCheckZero scz:
+                // `if (setjmp(env) == 0)    { normal }   else { recovery }`
+                //   TruthyOnFirstCall=true: then-branch = normal, else = recovery.
+                // `if (setjmp(env) != 0)    { recovery } else { normal }`
+                //   TruthyOnFirstCall=false: then-branch = recovery, else = normal.
+                var (tryBody, catchBody) = scz.TruthyOnFirstCall
+                    ? (T(n.Arg4), T(n.Arg6))
+                    : (T(n.Arg6), T(n.Arg4));
+                return EmitSetjmpRewrite(scz.EnvName, tryBody, catchBody);
+
+            default:
+                return $"if (Cond.B({T(n.Arg2)})) {T(n.Arg4)}else {T(n.Arg6)}";
         }
-        return $"if (Cond.B({condText})) {thenBody}else {elseBody}";
     }
 
     /// <summary>
-    /// Pattern-match a condition text for the standard <c>setjmp</c>
-    /// idioms. Returns the env-name and whether the condition was
-    /// <c>== 0</c> (true on first call) or bare (true on longjmp
-    /// recovery).
+    /// Emit the <c>try / catch when</c> shape that lowers a recognised
+    /// <c>setjmp/longjmp</c> idiom. The <c>when</c> filter matches on
+    /// the env-token identity so nested setjmps stay disambiguated.
     /// </summary>
-    private static bool TryRecognizeSetjmpInIf(string condText, out string envName, out bool conditionIsZero)
-    {
-        // Whitespace + parens are added by various visitors; canonicalise
-        // by stripping outer parens repeatedly before matching.
-        var s = condText.Trim();
-        while (s.Length >= 2 && s[0] == '(' && s[^1] == ')')
-        {
-            // Only strip if these parens are balanced as the outermost.
-            var depth = 0;
-            var balanced = true;
-            for (var i = 0; i < s.Length - 1; i++)
-            {
-                if (s[i] == '(') { depth++; }
-                else if (s[i] == ')') { depth--; if (depth == 0) { balanced = false; break; } }
-            }
-            if (!balanced) { break; }
-            s = s[1..^1].Trim();
-        }
-
-        // Shape A: `setjmp(NAME)` — truthy on recovery.
-        // Shape B: `setjmp(NAME) == 0` (or `0 == setjmp(NAME)`) — truthy on first call.
-        // The emit puts spaces around `==`; allow `0 == setjmp(...)` form
-        // too in case future visitors flip the operands.
-        var setjmpMatch = SetjmpCallPattern.Match(s);
-        if (setjmpMatch.Success && setjmpMatch.Index == 0 && setjmpMatch.Length == s.Length)
-        {
-            envName = setjmpMatch.Groups[1].Value;
-            conditionIsZero = false;
-            return true;
-        }
-
-        var eqMatch = SetjmpEqualsZeroPattern.Match(s);
-        if (eqMatch.Success)
-        {
-            envName = eqMatch.Groups[1].Value;
-            conditionIsZero = true;
-            return true;
-        }
-
-        envName = string.Empty;
-        conditionIsZero = false;
-        return false;
-    }
-
-    // Match `setjmp(IDENT)` with optional whitespace; capture the env name.
-    private static readonly System.Text.RegularExpressions.Regex SetjmpCallPattern =
-        new(@"^\s*setjmp\s*\(\s*(\w+)\s*\)\s*$", System.Text.RegularExpressions.RegexOptions.Compiled);
-
-    // Match `setjmp(IDENT) == 0` or `0 == setjmp(IDENT)`, with optional parens
-    // around the setjmp call or the zero. The emit's Equ visitor wraps both
-    // operands in parens, so the common shape we'll actually see is
-    // `(setjmp(env)) == (0)`.
-    private static readonly System.Text.RegularExpressions.Regex SetjmpEqualsZeroPattern =
-        new(@"^\s*\(?\s*setjmp\s*\(\s*(\w+)\s*\)\s*\)?\s*==\s*\(?\s*0\s*\)?\s*$|^\s*\(?\s*0\s*\)?\s*==\s*\(?\s*setjmp\s*\(\s*(\w+)\s*\)\s*\)?\s*$",
-            System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static string EmitSetjmpRewrite(string envName, string tryBody, string catchBody) =>
+        $"try {tryBody}" +
+        $"catch (Libc.LongJmpException __jmp) when (__jmp.Token == {envName}) " +
+        $"{{ var __longjmp_value = __jmp.Value; {catchBody} }}";
     public EmitContent Visit(C.StmtWhile n) => $"while (Cond.B({T(n.Arg2)})) {T(n.Arg4)}";
 
     // `do Stmt while (E) ;` — body runs at least once. C# accepts the same
@@ -979,8 +946,44 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         $"(Cond.B({T(n.Arg0)}) || Cond.B({T(n.Arg2)}))";
     public EmitContent Visit(C.Land n) =>
         $"(Cond.B({T(n.Arg0)}) && Cond.B({T(n.Arg2)}))";
-    public EmitContent Visit(C.Eq n) => $"({T(n.Arg0)} == {T(n.Arg2)})";
-    public EmitContent Visit(C.Neq n) => $"({T(n.Arg0)} != {T(n.Arg2)})";
+    public EmitContent Visit(C.Eq n) => MaybeSetjmpCompare(n.Arg0, n.Arg2, isEquals: true)
+        ?? (EmitContent)$"({T(n.Arg0)} == {T(n.Arg2)})";
+    public EmitContent Visit(C.Neq n) => MaybeSetjmpCompare(n.Arg0, n.Arg2, isEquals: false)
+        ?? (EmitContent)$"({T(n.Arg0)} != {T(n.Arg2)})";
+
+    /// <summary>
+    /// If one side of an <c>==</c>/<c>!=</c> comparison is a
+    /// <see cref="EmitContent.SetjmpCall"/> and the other is the
+    /// literal <c>0</c>, return a <see cref="EmitContent.SetjmpCheckZero"/>
+    /// variant for the enclosing <c>StmtIfElse</c> to consume. Otherwise
+    /// return null so the caller falls back to the normal textual emit.
+    /// </summary>
+    private static EmitContent? MaybeSetjmpCompare(Item left, Item right, bool isEquals)
+    {
+        if (left.Content is EmitContent.SetjmpCall lsj && IsLiteralZero(right))
+        {
+            return new EmitContent.SetjmpCheckZero(lsj.EnvName, TruthyOnFirstCall: isEquals);
+        }
+        if (right.Content is EmitContent.SetjmpCall rsj && IsLiteralZero(left))
+        {
+            return new EmitContent.SetjmpCheckZero(rsj.EnvName, TruthyOnFirstCall: isEquals);
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// True when <paramref name="it"/> is the literal integer <c>0</c>.
+    /// Accepts the raw lexer token (NUM "0") and the visitor-produced
+    /// <c>EmitContent.Text("0")</c>; rejects everything else including
+    /// <c>0.0</c>, <c>(0)</c> (which would be a parenthesised primary),
+    /// and any constant expression that happens to evaluate to zero.
+    /// </summary>
+    private static bool IsLiteralZero(Item it) => it.Content switch
+    {
+        EmitContent.Text { Value: "0" } => true,
+        string s => s == "0",
+        _ => false,
+    };
     public EmitContent Visit(C.Lt n) => $"({T(n.Arg0)} < {T(n.Arg2)})";
     public EmitContent Visit(C.Gt n) => $"({T(n.Arg0)} > {T(n.Arg2)})";
     public EmitContent Visit(C.Le n) => $"({T(n.Arg0)} <= {T(n.Arg2)})";
@@ -1048,6 +1051,17 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     {
         var callee = T(n.Arg0);
         var args = A(n.Arg2);  // strongly-typed arg list, no sentinel splitting
+        // setjmp(env) — return a SetjmpCall marker variant rather than
+        // emit as a regular function call. The parent visitor (Equ for
+        // `setjmp(env) == 0` or StmtIfElse for the bare condition)
+        // recognises the variant and rewrites the surrounding if/else
+        // into a try/catch shape. Any other context lets the variant
+        // escape to T(), which throws CompileException — setjmp is a
+        // non-local-jump primitive, not a regular call.
+        if (callee == "setjmp" && args.Count == 1)
+        {
+            return new EmitContent.SetjmpCall(args[0]);
+        }
         // printf-family fluent lowering. C `printf("%d %s", x, s)` → C#
         // `printf(L("%d %s\0"u8)).Arg(x).Arg(s).Done()` — works around
         // `params object[]` not accepting raw pointers. The callee name

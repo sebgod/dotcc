@@ -82,4 +82,31 @@ public abstract record EmitContent
         string Name,
         string Params,
         bool IsStatic) : EmitContent;
+
+    /// <summary>
+    /// AST marker for a <c>setjmp(env)</c> call. Emitted by
+    /// <c>Visit(Call)</c> when it recognises the callee as
+    /// <c>setjmp</c>; consumed by either <c>Visit(Equ)</c> (when the
+    /// setjmp is compared against 0) or directly by
+    /// <c>Visit(StmtIfElse)</c> (when the setjmp is the bare condition).
+    /// Any other context raises a <c>CompileException</c> via the
+    /// <c>T()</c> accessor — setjmp is a non-local-jump magic primitive
+    /// and only the documented if/else shapes get the try/catch rewrite.
+    /// Carries the env identifier name so the catch filter
+    /// (<c>when (__jmp.Token == env)</c>) can reference it directly.
+    /// </summary>
+    public sealed record SetjmpCall(string EnvName) : EmitContent;
+
+    /// <summary>
+    /// AST marker for a <c>setjmp(env) == 0</c> (or <c>0 == setjmp(env)</c>,
+    /// or the corresponding <c>!=</c> shape) comparison. Produced by
+    /// <c>Visit(Equ)</c> when one operand is <see cref="SetjmpCall"/>
+    /// and the other is the literal <c>0</c>; consumed by
+    /// <c>Visit(StmtIfElse)</c> to emit the try/catch rewrite. The
+    /// <see cref="TruthyOnFirstCall"/> flag tells the consumer which
+    /// branch is "normal" and which is "recovery" — <c>== 0</c> is
+    /// truthy on the initial call (so the then-branch is normal),
+    /// while <c>!= 0</c> flips it.
+    /// </summary>
+    public sealed record SetjmpCheckZero(string EnvName, bool TruthyOnFirstCall) : EmitContent;
 }
