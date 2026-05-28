@@ -1,0 +1,6 @@
+alpha=52 digit=10 alnum=62
+space=6 upper=26 lower=26
+xdigit=22 cntrl=33 print=95
+graph=94 punct=32
+toupper('a')=A tolower('Z')=z
+toupper('A')=A tolower('z')=z toupper('5')=5

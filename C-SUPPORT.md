@@ -269,10 +269,17 @@ Every function exists as a `double` overload (routes to `System.Math`) **and** a
 
 ### `ctype.h`
 
+Synthetic header + implementations in `DotCC.Libc/CTypeLib.cs`. All predicates implement the "C" locale behavior — ASCII only, bytes outside 0..127 return 0 (matches glibc with `LC_ALL=C`). Predicates take `int` and return `int` (non-zero on match, zero otherwise) per the standard. Fixture `ctype-predicates/`.
+
 | Function | Status | Notes |
 |---|---|---|
-| `isalpha`, `isdigit`, `isalnum`, `isspace`, `isupper`, `islower`, `ispunct`, `isxdigit`, `iscntrl`, `isprint`, `isgraph` | ❌ | Trivial wrappers around `char.IsX((char)b)` with ASCII restriction |
-| `toupper`, `tolower` | ❌ | `char.ToUpper`/`ToLower` ASCII only |
+| `isalpha`, `isdigit`, `isalnum` | ✅ | A-Z / a-z, 0-9, union of both. |
+| `isspace` | ✅ | ` \t\n\r\v\f` |
+| `isupper`, `islower` | ✅ | A-Z, a-z |
+| `isxdigit` | ✅ | 0-9 / A-F / a-f (hex chars) |
+| `iscntrl`, `isprint`, `isgraph` | ✅ | < 0x20 \|\| == 0x7F  /  0x20..0x7E  /  0x21..0x7E |
+| `ispunct` | ✅ | `isgraph && !isalnum` |
+| `toupper`, `tolower` | ✅ | ASCII letter mapping; non-letter / non-ASCII passes through unchanged (returns `int` so EOF round-trips). |
 
 ### `time.h`
 
@@ -339,7 +346,7 @@ Listed here so we don't relitigate them. All marked 🚫 above.
 
 ## Synthetic system headers + runtime
 
-dotcc ships its own copies of the C99 standard headers (`stdio.h`, `stdlib.h`, `stddef.h`, `stdbool.h`, `stdint.h`, `limits.h`, `assert.h`, `math.h`, `tgmath.h`, `string.h`) AND its libc implementations, both as **real files in source control**, both embedded into `DotCC.Lib.dll` so the compiler can serve them at emit time without any runtime disk I/O. Same model as clang's `lib/clang/<ver>/include/` tree, just loaded from the assembly manifest.
+dotcc ships its own copies of the C99 standard headers (`stdio.h`, `stdlib.h`, `stddef.h`, `stdbool.h`, `stdint.h`, `limits.h`, `assert.h`, `ctype.h`, `math.h`, `tgmath.h`, `string.h`) AND its libc implementations, both as **real files in source control**, both embedded into `DotCC.Lib.dll` so the compiler can serve them at emit time without any runtime disk I/O. Same model as clang's `lib/clang/<ver>/include/` tree, just loaded from the assembly manifest.
 
 **Two parallel embeddings (see `DotCC.Lib.csproj`):**
 
