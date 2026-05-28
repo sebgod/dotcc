@@ -215,6 +215,8 @@ symbols:
   - TypeSpecList   # 130
   - TypeSpec       # 131
   - 'goto'         # 132 keyword
+  - '_Bool'        # 133 keyword (C99) — the underlying boolean type;
+                   #     `bool` is a macro in <stdbool.h> that expands to it.
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -366,6 +368,7 @@ productions:
       - { lhs: TypeSpec, rhs: ['long'],     action: tsLong }
       - { lhs: TypeSpec, rhs: ['unsigned'], action: tsUnsigned }
       - { lhs: TypeSpec, rhs: ['signed'],   action: tsSigned }
+      - { lhs: TypeSpec, rhs: ['_Bool'],    action: tsBool }
 
   - derivation: none
     rules:
@@ -406,12 +409,16 @@ productions:
       # loop) is enforced by the downstream C# compiler. Matches real C.
       - { lhs: Stmt, rhs: ['break', ';'],                  action: stmtBreak }
       - { lhs: Stmt, rhs: ['continue', ';'],               action: stmtContinue }
-      # `switch (E) { CaseList }`. Each Case is one `case X: stmts` or
-      # `default: stmts` clause; the user is responsible for ending each
-      # clause with `break;` (matches C convention and C# requirement).
-      # Fall-through (no `break`) emits the same shape but C# rejects it —
-      # we surface the C# error as a dotcc compile failure for now.
-      - { lhs: Stmt, rhs: ['switch', '(', E, ')', '{', CaseList, '}'], action: stmtSwitch }
+      # `switch (E) Block` — the switch body is a plain Block (sequence of
+      # statements). `case X:` and `default:` are statement-level labels
+      # (see `caseLabel` / `defaultLabel` further down), so they can appear
+      # ANYWHERE inside the switch's Block — including deeply nested,
+      # interleaved with loops. This is what lets Duff's device parse:
+      # the do-while loop's body has case labels mixed in alongside regular
+      # statements. C# accepts the same shape (case labels anywhere inside
+      # the switch block). User still writes `break;` per case clause —
+      # matches C convention and C# requirement.
+      - { lhs: Stmt, rhs: ['switch', '(', E, ')', Block], action: stmtSwitch }
       - { lhs: Stmt, rhs: [Decl, ';'],                    action: stmtDecl }
       - { lhs: Stmt, rhs: [E, ';'],                        action: stmtExpr }
       - { lhs: Stmt, rhs: [Block] }
@@ -421,6 +428,8 @@ productions:
       # block can attach to something (`end: ;` — required pre-C23 anyway).
       - { lhs: Stmt, rhs: ['goto', ID, ';'],               action: stmtGoto }
       - { lhs: Stmt, rhs: [ID, ':', Stmt],                 action: stmtLabel }
+      - { lhs: Stmt, rhs: ['case', E, ':', Stmt],          action: caseLabel }
+      - { lhs: Stmt, rhs: ['default', ':', Stmt],          action: defaultLabel }
       - { lhs: Stmt, rhs: [';'],                           action: stmtEmpty }
 
   # MemberList: one or more `Type ID ;` declarations inside a struct body.
@@ -444,19 +453,13 @@ productions:
       - { lhs: EnumItem, rhs: [ID], action: enumItem }
       - { lhs: EnumItem, rhs: [ID, '=', E], action: enumItemInit }
 
-  # CaseList: one or more Case clauses inside a switch block.
-  - derivation: leftmost
-    rules:
-      - { lhs: CaseList, rhs: [Case, CaseList], action: casesCons }
-      - { lhs: CaseList, rhs: [Case],            action: casesOne }
-
-  # Case: `case E : Stmts` or `default : Stmts`. The body is a StmtList —
-  # one or more statements. To terminate properly the user writes `break;`
-  # at the end (or `return`, or `continue` inside an outer loop).
-  - derivation: none
-    rules:
-      - { lhs: Case, rhs: ['case', E, ':', StmtList],   action: caseValue }
-      - { lhs: Case, rhs: ['default', ':', StmtList],   action: caseDefault }
+  # `case E :` and `default :` as statement-level labels — body is a
+  # single Stmt (which may itself be a Block, a labeled stmt, a loop, …).
+  # This matches the C standard "labeled-statement" production and lets
+  # cases be sprinkled anywhere inside a switch body. Notably enables
+  # Duff's device, where case labels are interleaved into a do-while
+  # loop body. Real C also requires the surrounding switch — we don't
+  # enforce that (Roslyn does, post-lowering).
 
   - derivation: none
     rules:
@@ -717,6 +720,10 @@ lexer:
     - { symbol: 'unsigned', match: 'unsigned' }
     - { symbol: 'signed',   match: 'signed' }
     - { symbol: 'goto',     match: 'goto' }
+    # `_Bool` must come BEFORE the ID rule so it lexes as a keyword rather
+    # than identifier. C99 reserves the underscore-uppercase prefix; the
+    # nicer `bool` lives in <stdbool.h> as a #define that expands here.
+    - { symbol: '_Bool',    match: '_Bool' }
     - { symbol: 'if',     match: 'if' }
     - { symbol: 'else',   match: 'else' }
     - { symbol: 'while',  match: 'while' }

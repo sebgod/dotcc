@@ -403,18 +403,21 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
     // free-order specifier sequence.
     public string Visit(C.TypePtr n) => $"{(string)n.Arg0.Content}*";
 
-    // Each TypeSpec keyword maps to a single-char marker. Multi-char-friendly
-    // because `long long` shows up as `LL`. TypeSpecList concatenates the
-    // markers in order; ResolveTypeSpec inspects the final string.
-    public string Visit(C.TsInt n)      => "i";
-    public string Visit(C.TsChar n)     => "c";
-    public string Visit(C.TsFloat n)    => "f";
-    public string Visit(C.TsDouble n)   => "d";
-    public string Visit(C.TsVoid n)     => "v";
-    public string Visit(C.TsShort n)    => "H";   // (capital H — 's' is reserved for signed)
-    public string Visit(C.TsLong n)     => "L";
-    public string Visit(C.TsUnsigned n) => "U";
-    public string Visit(C.TsSigned n)   => "S";
+    // Each TypeSpec keyword maps to its own bracketed marker — `<int>`,
+    // `<unsigned>`, `<_Bool>` etc. Bracketing makes the markers
+    // self-delimiting (no opaque single-char shorthand to memorise) and
+    // makes accumulated lists trivially parseable: `<unsigned><long><int>`.
+    // TypeSpecList concatenates; ResolveTypeSpec splits on `<...>` segments.
+    public string Visit(C.TsInt n)      => "<int>";
+    public string Visit(C.TsChar n)     => "<char>";
+    public string Visit(C.TsFloat n)    => "<float>";
+    public string Visit(C.TsDouble n)   => "<double>";
+    public string Visit(C.TsVoid n)     => "<void>";
+    public string Visit(C.TsShort n)    => "<short>";
+    public string Visit(C.TsLong n)     => "<long>";
+    public string Visit(C.TsUnsigned n) => "<unsigned>";
+    public string Visit(C.TsSigned n)   => "<signed>";
+    public string Visit(C.TsBool n)     => "<_Bool>";
 
     public string Visit(C.TypeSpecListOne n)  => (string)n.Arg0.Content;
     public string Visit(C.TypeSpecListCons n) => (string)n.Arg0.Content + (string)n.Arg1.Content;
@@ -429,38 +432,137 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
     /// C# <c>long</c> (64-bit unconditionally in C#) — dotcc accepts the
     /// MSVC 32-bit `long` semantic loss as a documented quirk.
     /// </summary>
+    // Regex over the bracketed-keyword marker stream. Each match is one
+    // specifier; `Groups[1].Value` is the keyword. Pre-compiled because
+    // ResolveTypeSpec runs once per Type reduction.
+    private static readonly System.Text.RegularExpressions.Regex _typeSpecPattern
+        = new(@"<(\w+)>", System.Text.RegularExpressions.RegexOptions.Compiled);
+
     private static string ResolveTypeSpec(string markers)
     {
-        var isUnsigned = markers.Contains('U');
-        var isSigned   = markers.Contains('S');
-        var isShort    = markers.Contains('H');
-        var longCount  = 0;
-        foreach (var c in markers) { if (c == 'L') { longCount++; } }
+        // Parse the marker stream once via switch — string-literal cases
+        // compile to an interned hash check, so this is allocation-free and
+        // faster than a Dictionary. Duplicates AND contradictions are both
+        // detectable in this single pass.
+        var unsignedCount = 0;
+        var signedCount = 0;
+        var shortCount = 0;
+        var longCount = 0;
+        var boolCount = 0;
+        string? baseKw = null;
+        var baseCount = 0;
+        var baseConflict = false;
 
-        char? baseChar = null;
-        foreach (var c in "icfdv")
+        foreach (System.Text.RegularExpressions.Match m in _typeSpecPattern.Matches(markers))
         {
-            if (markers.Contains(c)) { baseChar = c; break; }
+            switch (m.Groups[1].Value)
+            {
+                case "unsigned": unsignedCount++; break;
+                case "signed":   signedCount++; break;
+                case "short":    shortCount++; break;
+                case "long":     longCount++; break;
+                case "_Bool":    boolCount++; break;
+                case "int":
+                case "char":
+                case "float":
+                case "double":
+                case "void":
+                    var kw = m.Groups[1].Value;
+                    if (baseKw is null) { baseKw = kw; baseCount = 1; }
+                    else if (baseKw == kw) { baseCount++; }
+                    else { baseConflict = true; }
+                    break;
+            }
         }
 
-        // Non-integer bases ignore signedness/size modifiers (semantically
-        // invalid in real C, but our job here is to emit *something* —
-        // Roslyn will reject any genuinely-bogus uses downstream).
-        if (baseChar == 'f') { return "float"; }
-        if (baseChar == 'd') { return "double"; }
-        if (baseChar == 'v') { return "void"; }
-        if (baseChar == 'c')
+        // Validation. Each rule mirrors a real-C diagnostic.
+        if (boolCount > 0 && (boolCount > 1 || baseKw is not null
+            || unsignedCount > 0 || signedCount > 0 || shortCount > 0 || longCount > 0))
         {
-            // dotcc's `char` is `byte` (unsigned). `signed char` becomes
-            // sbyte; `unsigned char` stays byte.
-            if (isSigned) { return "sbyte"; }
-            return "byte";
+            throw new CompileException(
+                $"`_Bool` cannot be combined with other type specifiers (got `{PrettyMarkers(markers)}`)");
+        }
+        if (unsignedCount > 0 && signedCount > 0)
+        {
+            throw new CompileException(
+                $"cannot combine `signed` and `unsigned` (got `{PrettyMarkers(markers)}`)");
+        }
+        if (unsignedCount > 1)
+        {
+            throw new CompileException(
+                $"duplicate `unsigned` specifier (got `{PrettyMarkers(markers)}`)");
+        }
+        if (signedCount > 1)
+        {
+            throw new CompileException(
+                $"duplicate `signed` specifier (got `{PrettyMarkers(markers)}`)");
+        }
+        if (shortCount > 0 && longCount > 0)
+        {
+            throw new CompileException(
+                $"cannot combine `short` and `long` (got `{PrettyMarkers(markers)}`)");
+        }
+        if (shortCount > 1)
+        {
+            throw new CompileException(
+                $"duplicate `short` specifier (got `{PrettyMarkers(markers)}`)");
+        }
+        if (longCount > 2)
+        {
+            throw new CompileException(
+                $"cannot have more than two `long`s (got `{PrettyMarkers(markers)}`)");
+        }
+        if (baseConflict)
+        {
+            throw new CompileException(
+                $"cannot combine multiple base types (got `{PrettyMarkers(markers)}`)");
+        }
+        if (baseCount > 1)
+        {
+            throw new CompileException(
+                $"duplicate `{baseKw}` specifier (got `{PrettyMarkers(markers)}`)");
         }
 
-        // Integer family.
-        if (isShort) { return isUnsigned ? "ushort" : "short"; }
-        if (longCount > 0) { return isUnsigned ? "ulong" : "long"; }
-        return isUnsigned ? "uint" : "int";
+        // float / double / void don't take signedness or size modifiers.
+        if ((baseKw is "float" or "double" or "void")
+            && (unsignedCount > 0 || signedCount > 0 || shortCount > 0 || longCount > 0))
+        {
+            throw new CompileException(
+                $"`{baseKw}` cannot take size or sign modifiers (got `{PrettyMarkers(markers)}`)");
+        }
+
+        // Resolve. Order: _Bool first (mutually exclusive), then non-int
+        // bases, then char (with signedness), then sized-int family.
+        if (boolCount == 1) { return "bool"; }
+        if (baseKw == "float")  { return "float"; }
+        if (baseKw == "double") { return "double"; }
+        if (baseKw == "void")   { return "void"; }
+        if (baseKw == "char")
+        {
+            // dotcc's `char` is `byte` (unsigned). `signed char` → sbyte.
+            return signedCount > 0 ? "sbyte" : "byte";
+        }
+        if (shortCount > 0) { return unsignedCount > 0 ? "ushort" : "short"; }
+        if (longCount > 0)  { return unsignedCount > 0 ? "ulong"  : "long"; }
+        return unsignedCount > 0 ? "uint" : "int";
+    }
+
+    /// <summary>
+    /// Render a bracketed-keyword marker stream back into its source-text
+    /// C keywords, space-separated, in the order the user wrote them.
+    /// Used only for error messages so they read like a compiler diagnostic.
+    /// </summary>
+    private static string PrettyMarkers(string markers)
+    {
+        var sb = new StringBuilder();
+        var first = true;
+        foreach (System.Text.RegularExpressions.Match m in _typeSpecPattern.Matches(markers))
+        {
+            if (!first) { sb.Append(' '); }
+            first = false;
+            sb.Append(m.Groups[1].Value);
+        }
+        return sb.ToString();
     }
 
     // Block / statements
@@ -496,20 +598,21 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
     public string Visit(C.StmtBreak n) => "break;\n";
     public string Visit(C.StmtContinue n) => "continue;\n";
 
-    // switch (E) { case … default … } — emit C# switch verbatim. The
-    // condition value is an int (no Cond.B wrapping; C# switch accepts
-    // numeric directly). C# requires each case body end with break/return —
-    // user is expected to write `break;` (real C convention). Fall-through
-    // surfaces as a downstream C# error if the user omits the break.
+    // switch (E) Block — switch body is a plain Block. `case X:` and
+    // `default:` are statement-level labels (see CaseLabel/DefaultLabel)
+    // that can appear anywhere inside the Block — including nested inside
+    // a do-while or other control flow, enabling Duff's-device-shaped code.
+    // C# accepts the same shape.
     public string Visit(C.StmtSwitch n) =>
-        $"switch ({(string)n.Arg2.Content}) {{\n{IndentEach((string)n.Arg5.Content)}}}\n";
+        $"switch ({(string)n.Arg2.Content}) {(string)n.Arg4.Content}";
 
-    public string Visit(C.CasesCons n) => (string)n.Arg0.Content + (string)n.Arg1.Content;
-    public string Visit(C.CasesOne n)  => (string)n.Arg0.Content;
-    public string Visit(C.CaseValue n) =>
-        $"case {(string)n.Arg1.Content}:\n{IndentEach((string)n.Arg3.Content)}";
-    public string Visit(C.CaseDefault n) =>
-        $"default:\n{IndentEach((string)n.Arg2.Content)}";
+    // Statement-level case/default labels. Body is a single Stmt (which
+    // may itself be another labeled stmt — `case 1: case 2: do_thing();`
+    // chains naturally).
+    public string Visit(C.CaseLabel n) =>
+        $"case {(string)n.Arg1.Content}:\n{(string)n.Arg3.Content}";
+    public string Visit(C.DefaultLabel n) =>
+        $"default:\n{(string)n.Arg2.Content}";
     public string Visit(C.StmtDecl n) => $"{(string)n.Arg0.Content};\n";
 
     // `goto label;` — C# accepts the same keyword + identifier syntax with

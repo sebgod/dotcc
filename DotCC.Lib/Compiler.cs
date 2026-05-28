@@ -60,6 +60,18 @@ public static class Compiler
             #define NULL null
             #endif
             """,
+        // C99 boolean macros. `bool` expands to the `_Bool` keyword (a real
+        // TypeSpec); `true` and `false` self-substitute so they pass through
+        // as C#-native bool literals at the Var visitor.
+        ["stdbool.h"] = """
+            #ifndef _DOTCC_STDBOOL_H
+            #define _DOTCC_STDBOOL_H
+            #define bool _Bool
+            #define true true
+            #define false false
+            #define __bool_true_false_are_defined 1
+            #endif
+            """,
     };
 
     /// <summary>
@@ -419,6 +431,11 @@ public static class Compiler
 
                 public PrintfBuilder Arg(float v) => Arg((double)v);
 
+                // bool → 1/0 for `%d` and friends. Without this, C# would
+                // route `Console.Write(bool)` to a different overload that
+                // emits `"True"`/`"False"` — wrong for C printf semantics.
+                public PrintfBuilder Arg(bool v) => Arg(v ? 1 : 0);
+
                 // Long / unsigned long overloads for the extended integer
                 // type family. Format logic mirrors Arg(int) but with the
                 // value's own ToString so the full 64-bit value survives.
@@ -772,6 +789,11 @@ public static class Compiler
                 }
 
                 public PrintfBuilder Arg(float v) => Arg((double)v);
+
+                // bool → 1/0 for `%d` and friends. Without this, C# would
+                // route `Console.Write(bool)` to a different overload that
+                // emits `"True"`/`"False"` — wrong for C printf semantics.
+                public PrintfBuilder Arg(bool v) => Arg(v ? 1 : 0);
 
                 // Long / unsigned long overloads for the extended integer
                 // type family. Format logic mirrors Arg(int) but with the

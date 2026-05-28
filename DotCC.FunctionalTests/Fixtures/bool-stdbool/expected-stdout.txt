@@ -1,0 +1,6 @@
+a=1 b=0
+gt=1 eq=0
+7 is positive
+-3 is not positive
+4 even, 5 odd
+both=1 either=1

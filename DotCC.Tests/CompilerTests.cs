@@ -64,6 +64,143 @@ public sealed class CompilerTests
     }
 
     [Fact]
+    public void Duffs_device_parses_and_emits_structure()
+    {
+        // The legendary loop-unrolling trick. Case labels are interleaved
+        // into a do-while body inside a switch — `case 7: case 6: …` mixed
+        // with code that pre-C99 compilers happily accept. dotcc's grammar
+        // handles it (case/default are statement-level labels that can
+        // appear anywhere in a switch body).
+        //
+        // Important: the emit is structurally faithful but C# REJECTS it
+        // — both because C# requires case labels at the top of the switch
+        // (not inside nested blocks) AND because C# forbids implicit case
+        // fall-through (CS0163). Translating Duff's device to runnable C#
+        // requires a flat-switch-with-goto-case transformation, which is
+        // a known limitation. This test pins down the grammar/emit half:
+        // dotcc parses and emits without throwing.
+        var src = WriteTemp("""
+            void duff_copy(int* dst, int* src, int count) {
+                int n = (count + 7) / 8;
+                switch (count % 8) {
+                case 0: do { *dst = *src; dst = dst + 1; src = src + 1;
+                case 7:      *dst = *src; dst = dst + 1; src = src + 1;
+                case 6:      *dst = *src; dst = dst + 1; src = src + 1;
+                case 5:      *dst = *src; dst = dst + 1; src = src + 1;
+                case 4:      *dst = *src; dst = dst + 1; src = src + 1;
+                case 3:      *dst = *src; dst = dst + 1; src = src + 1;
+                case 2:      *dst = *src; dst = dst + 1; src = src + 1;
+                case 1:      *dst = *src; dst = dst + 1; src = src + 1;
+                        } while (--n > 0);
+                }
+            }
+            int main() { return 0; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            // Structural assertions — confirms the case-labels-inside-do-while
+            // shape made it through parse + emit intact.
+            emitted.ShouldContain("switch ((count % 8))");
+            emitted.ShouldContain("case 0:");
+            emitted.ShouldContain("case 7:");
+            emitted.ShouldContain("case 1:");
+            emitted.ShouldContain("do {");
+            emitted.ShouldContain("while (Cond.B(");
+        }
+        finally { File.Delete(src); }
+    }
+
+    // ---- Negative tests: invalid programs must be REJECTED ---------------
+    // Each verifies that semantically-invalid C — well-formed at the parse
+    // level but contradictory at the type-resolution level — fails with a
+    // CompileException naming the actual user-typed keywords.
+
+    [Fact]
+    public void Conflicting_signedness_throws()
+    {
+        var src = WriteTemp("int main() { signed unsigned int x = 0; return x; }");
+        try
+        {
+            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
+                .Message.ShouldContain("cannot combine `signed` and `unsigned`");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Duplicate_unsigned_throws()
+    {
+        var src = WriteTemp("int main() { unsigned unsigned int x = 0; return x; }");
+        try
+        {
+            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
+                .Message.ShouldContain("duplicate `unsigned`");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Multiple_base_types_throws()
+    {
+        var src = WriteTemp("int main() { int float x = 0; return 0; }");
+        try
+        {
+            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
+                .Message.ShouldContain("multiple base types");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Conflicting_size_modifiers_throws()
+    {
+        var src = WriteTemp("int main() { short long x = 0; return 0; }");
+        try
+        {
+            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
+                .Message.ShouldContain("cannot combine `short` and `long`");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Triple_long_throws()
+    {
+        var src = WriteTemp("int main() { long long long x = 0; return 0; }");
+        try
+        {
+            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
+                .Message.ShouldContain("more than two `long`");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Bool_combined_with_other_specifier_throws()
+    {
+        var src = WriteTemp("int main() { unsigned _Bool x = 0; return 0; }");
+        try
+        {
+            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
+                .Message.ShouldContain("`_Bool` cannot be combined");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Float_with_size_modifier_throws()
+    {
+        var src = WriteTemp("int main() { long float x = 0; return 0; }");
+        try
+        {
+            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
+                .Message.ShouldContain("`float` cannot take size or sign modifiers");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void EmitCSharp_throws_when_no_main()
     {
         var src = WriteTemp("int foo() { return 0; }");
