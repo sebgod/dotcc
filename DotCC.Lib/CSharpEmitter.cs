@@ -64,6 +64,9 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     private static IReadOnlyList<string> IM(Item it) => ((EmitContent.InitMembers)it.Content).Members;
     /// <summary>Read a child as a function-signature header.</summary>
     private static EmitContent.FnHeader FH(Item it) => (EmitContent.FnHeader)it.Content;
+    /// <summary>Read a child as an init-declarator list (file-scope and
+    /// block-scope declarations both flow through this).</summary>
+    private static IReadOnlyList<EmitContent.DeclEntry> DE(Item it) => ((EmitContent.DeclEntries)it.Content).Entries;
 
     // Name of the function currently being reduced. Set by each fnSig*
     // action; cleared by funcDef/funcProto when the enclosing Fn finishes.
@@ -204,36 +207,47 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // populates _structFields then.
     public EmitContent Visit(C.StructFwd n) => string.Empty;
 
-    // File-scope variable declarations. Appended to the _globals side
-    // channel; the shell wraps them in a `static unsafe class DotCcGlobals`
-    // declared in the type-decls section. Field type uses the QualifyPredefinedTypeName
-    // pass so `jmp_buf env;` (which after typedef lowering references
+    // File-scope variable declarations — `int x;`, `int x = 5;`, and the
+    // multi-declarator forms `int a, b;` / `int a = 1, b = 2;` /
+    // `int a, b = 5;`. Each declarator appends one `public static unsafe`
+    // field to the _globals side channel; the shell wraps them in a
+    // `static unsafe class DotCcGlobals` declared in the type-decls
+    // section. Type runs through QualifyPredefinedTypeName so
+    // `jmp_buf env;` (which after typedef lowering references
     // `LongJmpToken`) reaches `Libc.LongJmpToken` correctly — bare
     // nested-type names don't resolve at class-member-decl position
     // for the same reason the alias-emit path qualifies them.
-    public EmitContent Visit(C.GlobalVar n)
+    //
+    // Reference types (currently just `LongJmpToken` + its `jmp_buf`
+    // typedef alias) get an auto `= new T()` for no-init entries —
+    // C# default-inits class-typed fields to null, and the longjmp
+    // exception filter compares tokens by reference identity, so a
+    // null env would silently break setjmp/longjmp dispatch.
+    public EmitContent Visit(C.GlobalDeclList n)
     {
         var rawType = T(n.Arg0);
         var type = QualifyPredefinedTypeName(rawType);
-        var name = T(n.Arg1);
-        // Reference types need `new T()`; value types initialize to default
-        // by C# semantics. Without an initializer, a C# reference field
-        // defaults to null, which breaks reference-equality dispatch
-        // (the longjmp exception filter compares Token instances). For
-        // predefined ref types (LongJmpToken) AND aliases that resolve
-        // to them (jmp_buf via typedef), auto-instantiate.
         var isRefType = IsPredefinedRefTypeName(rawType) || _refTypeAliases.Contains(rawType);
-        var init = isRefType ? $" = new {type}()" : string.Empty;
-        _globals.Append("    public static unsafe ").Append(type).Append(' ').Append(name).Append(init).Append(";\n");
-        return string.Empty;
-    }
-
-    public EmitContent Visit(C.GlobalVarInit n)
-    {
-        var type = QualifyPredefinedTypeName(T(n.Arg0));
-        var name = T(n.Arg1);
-        var init = T(n.Arg3);
-        _globals.Append("    public static unsafe ").Append(type).Append(' ').Append(name).Append(" = ").Append(init).Append(";\n");
+        foreach (var entry in DE(n.Arg1))
+        {
+            string init;
+            if (entry.Init is { } userInit)
+            {
+                init = $" = {userInit}";
+            }
+            else if (isRefType)
+            {
+                init = $" = new {type}()";
+            }
+            else
+            {
+                // Value-type field with no initializer — C# zero-inits
+                // class fields, which matches C's static-storage default
+                // (all zero-bits). No explicit initializer needed.
+                init = string.Empty;
+            }
+            _globals.Append("    public static unsafe ").Append(type).Append(' ').Append(entry.Name).Append(init).Append(";\n");
+        }
         return string.Empty;
     }
 
@@ -839,24 +853,45 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // (`int x = 5;`), and multi-declarator (`int x, y, z;`,
     // `int x = 1, y = 2;`) forms. C# accepts the same `int x, y = 5, z;`
     // syntax so the lowering is verbatim.
-    public EmitContent Visit(C.Decl n) => $"{T(n.Arg0)} {T(n.Arg1)}";
+    public EmitContent Visit(C.Decl n) => $"{T(n.Arg0)} {DeclEntriesToBlockScopeString(DE(n.Arg1))}";
 
-    // DeclItemList: comma-joined sequence of DeclItem strings. Cons emits
-    // `prev, next` and One just forwards the single item — the comma
-    // separator between items appears here, while the Type prefix lands
-    // in Decl above.
-    public EmitContent Visit(C.DeclItemListOne n)  => T(n.Arg0);
-    public EmitContent Visit(C.DeclItemListCons n) => $"{T(n.Arg0)}, {T(n.Arg2)}";
+    // DeclItemList: structured accumulator of (name, init?) pairs.
+    // Returning a typed DeclEntries instead of a pre-joined string lets
+    // the file-scope GlobalDeclList visitor apply per-entry policy
+    // (e.g. auto-init LongJmpToken with `new T()` for the no-init form)
+    // while the block-scope Decl visitor still gets the same C# multi-
+    // declarator join shape via DeclEntriesToBlockScopeString.
+    public EmitContent Visit(C.DeclItemListOne n)  => (EmitContent.DeclEntries)n.Arg0.Content;
+    public EmitContent Visit(C.DeclItemListCons n)
+    {
+        var prev = DE(n.Arg0);
+        var next = DE(n.Arg2);
+        var combined = new List<EmitContent.DeclEntry>(prev.Count + next.Count);
+        combined.AddRange(prev);
+        combined.AddRange(next);
+        return new EmitContent.DeclEntries(combined);
+    }
 
-    // DeclItem: a single declarator. The plain `int x;` form emits `int x = default`
-    // because C# enforces definite-assignment on struct fields — relevant for
-    // [StructLayout(Explicit)] unions where writing one member doesn't satisfy
-    // the others. `default` is zero-initialized for all our types (0 for ints,
-    // null for pointers, zero struct for value types), which matches the
-    // observable behavior of well-written C (where reading uninitialized
-    // locals is undefined behavior anyway).
-    public EmitContent Visit(C.DeclItem n)     => $"{T(n.Arg0)} = default";
-    public EmitContent Visit(C.DeclItemInit n) => $"{T(n.Arg0)} = {T(n.Arg2)}";
+    // DeclItem: a single declarator. Carries the (name, init?) pair
+    // upward via DeclEntries so the consuming Decl/GlobalDeclList can
+    // decide how to materialise it. The plain `int x;` form has Init=null;
+    // the consumer fills in `= default` (block scope) or omits the
+    // initializer (file scope, value types — C# zero-inits class fields).
+    public EmitContent Visit(C.DeclItem n) =>
+        new EmitContent.DeclEntries(new[] { new EmitContent.DeclEntry(T(n.Arg0), null) });
+    public EmitContent Visit(C.DeclItemInit n) =>
+        new EmitContent.DeclEntries(new[] { new EmitContent.DeclEntry(T(n.Arg0), T(n.Arg2)) });
+
+    // Join structured DeclEntries into the block-scope C# multi-declarator
+    // form: `name = default, name = expr, ...`. Block scope can't omit the
+    // initializer on locals (C# enforces definite-assignment for struct
+    // fields used after declaration), so we fill no-init entries with
+    // `= default` — zero-initialized for all our types (0 / null / empty
+    // struct), which matches the observable behavior of well-written C.
+    private static string DeclEntriesToBlockScopeString(IReadOnlyList<EmitContent.DeclEntry> entries)
+    {
+        return string.Join(", ", entries.Select(e => $"{e.Name} = {e.Init ?? "default"}"));
+    }
     // C `T arr[N]` → C# `T* arr = stackalloc T[N]`. Uses stackalloc (no heap
     // alloc, no GC pin) so arrays live in the same lifetime as locals — matches
     // C semantics for block-scoped automatic arrays. Pointer subscript `arr[i]`

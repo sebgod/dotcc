@@ -317,15 +317,16 @@ productions:
       # and once aliased, `Name fn;` works through the TypeNameRewriter.
       - { lhs: Fn, rhs: ['typedef', Type, '(', '*', ID, ')', '(', ParamList, ')', ';'], action: typedefFnPtr }
       - { lhs: Fn, rhs: ['typedef', Type, '(', '*', ID, ')', '(', ')', ';'], action: typedefFnPtrNoArgs }
-      # File-scope variable declarations: `int x;` or `int x = E;` at
-      # top level. Real C needs these for globals (e.g. <setjmp.h>'s
-      # `jmp_buf env;` shared between the setjmp site and the longjmp
-      # caller). Lowered to a `static unsafe Type name;` (or `= E;`)
-      # at the top of the emitted file's statement section. No
-      # multi-declarator form yet (`int a, b;` at file scope) — add
-      # when something demands it.
-      - { lhs: Fn, rhs: [Type, ID, ';'],          action: globalVar }
-      - { lhs: Fn, rhs: [Type, ID, '=', E, ';'],  action: globalVarInit }
+      # File-scope variable declarations: `int x;`, `int x = E;`, and
+      # the multi-declarator forms `int a, b;` / `int a = 1, b = 2;`
+      # / `int a, b = 5;` at top level. Real C needs these for globals
+      # (e.g. <setjmp.h>'s `jmp_buf env;` shared between the setjmp site
+      # and the longjmp caller). Lowered to one `static unsafe Type name`
+      # (or `= E`) per declarator inside `DotCcGlobals`. Reuses the same
+      # `DeclItemList` non-terminal that block-level `Decl` uses, so the
+      # comma-separated init-declarator semantics stay in lockstep
+      # between file-scope and block-scope declarations.
+      - { lhs: Fn, rhs: [Type, DeclItemList, ';'], action: globalDeclList }
 
   - derivation: leftmost
     rules:

@@ -109,4 +109,25 @@ public abstract record EmitContent
     /// while <c>!= 0</c> flips it.
     /// </summary>
     public sealed record SetjmpCheckZero(string EnvName, bool TruthyOnFirstCall) : EmitContent;
+
+    /// <summary>
+    /// One init-declarator inside a declaration's <c>init-declarator-list</c>
+    /// (C99 §6.7). <see cref="Init"/> is <c>null</c> for the bare-name form
+    /// (<c>int x</c>) and the already-emitted C# expression text for the
+    /// initialised form (<c>int x = 5</c>). Consumed by <c>Visit(Decl)</c>
+    /// (block-scope, joins with commas into a single C# declaration) and by
+    /// <c>Visit(GlobalDeclList)</c> (file-scope, emits one
+    /// <c>public static unsafe</c> field per entry into <c>DotCcGlobals</c>).
+    /// Carrying the (name, init?) pair structurally instead of pre-joining
+    /// lets the file-scope path apply per-entry policy — e.g. auto-init
+    /// reference types like <c>LongJmpToken</c> with <c>new T()</c> instead
+    /// of letting them default to <c>null</c>.
+    /// </summary>
+    public sealed record DeclEntry(string Name, string? Init);
+
+    /// <summary>
+    /// Accumulator for an init-declarator list. <c>declItem</c>/<c>declItemInit</c>
+    /// produce a single-entry list; <c>declItemListCons</c> concatenates.
+    /// </summary>
+    public sealed record DeclEntries(IReadOnlyList<DeclEntry> Entries) : EmitContent;
 }
