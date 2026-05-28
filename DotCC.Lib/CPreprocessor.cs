@@ -382,14 +382,16 @@ internal sealed class CPreprocessor : C.IPreprocessor
             return Array.Empty<Item>();
         }
 
-        // Function-like detection: `#define NAME ( … ) body`. We can't
-        // distinguish `NAME(x)` from `NAME (x)` here (the byte lexer drops
-        // whitespace), so the convention is: any `(` immediately following
-        // the name in the directive's args triggers function-like form. The
-        // closing `)` ends the parameter list; everything after is the body.
-        // A trailing `...` in the param list marks the macro variadic;
-        // extra invocation args land in __VA_ARGS__ at expansion.
-        if (args.Count >= 2 && args[1].Content?.ToString() == "(")
+        // Function-like detection: `#define NAME(args) body` is function-
+        // like ONLY when the `(` is immediately adjacent to NAME with no
+        // intervening whitespace. `#define NAME (args) body` (with space)
+        // is object-like with body `(args) body`. The byte lexer drops
+        // whitespace, but it preserves token positions — we check that
+        // the `(` token's column is exactly NAME.column + NAME.length.
+        // The closing `)` ends the parameter list; everything after is
+        // the body. A trailing `...` in the param list marks the macro
+        // variadic; extra invocation args land in __VA_ARGS__ at expansion.
+        if (args.Count >= 2 && args[1].Content?.ToString() == "(" && IsAdjacent(args[0], args[1]))
         {
             var paramNames = new List<string>();
             var isVariadic = false;
@@ -457,10 +459,45 @@ internal sealed class CPreprocessor : C.IPreprocessor
             // mode keeps working without wiring MacroExpander into that pipeline.
             if (_macros.TryGetValue(text, out var macro) && !macro.IsFunctionLike)
             {
-                return macro.Body;
+                // Rescan the expansion so chained macros like
+                //   #define UCHAR_MAX 255
+                //   #define CHAR_MAX  UCHAR_MAX
+                // transitively resolve at use site. Hide set guards
+                // against self-referential cycles (`#define A A`).
+                var hideSet = new HashSet<string>(StringComparer.Ordinal) { text };
+                return ExpandObjectLikeBody(macro.Body, hideSet);
             }
         }
         return new[] { token };
+    }
+
+    /// <summary>
+    /// Rescan a macro body for further object-like substitutions. Each
+    /// token whose text matches a known object-like macro NOT in the
+    /// hide set gets replaced by its body, which is itself recursively
+    /// rescanned. The hide set propagates outward to the caller's name
+    /// so a macro can't expand to itself (per the C standard's
+    /// "hideset" rule).
+    /// </summary>
+    private List<Item> ExpandObjectLikeBody(IReadOnlyList<Item> body, HashSet<string> hideSet)
+    {
+        var result = new List<Item>(body.Count);
+        foreach (var item in body)
+        {
+            if (item.Content is string text
+                && !hideSet.Contains(text)
+                && _macros.TryGetValue(text, out var inner)
+                && !inner.IsFunctionLike)
+            {
+                var nestedHide = new HashSet<string>(hideSet, StringComparer.Ordinal) { text };
+                result.AddRange(ExpandObjectLikeBody(inner.Body, nestedHide));
+            }
+            else
+            {
+                result.Add(item);
+            }
+        }
+        return result;
     }
 
     public bool IsDefined(string name) => name != null && _macros.ContainsKey(name);
@@ -502,6 +539,22 @@ internal sealed class CPreprocessor : C.IPreprocessor
     {
         Console.Error.WriteLine($"dotcc: #warning: {JoinArgs(args)}");
         return Array.Empty<Item>();
+    }
+
+    /// <summary>
+    /// Are <paramref name="left"/> and <paramref name="right"/> tokens
+    /// adjacent in the source — i.e., no whitespace between them?
+    /// Used by <see cref="OnDefine"/> to distinguish function-like
+    /// (<c>NAME(args)</c>, no space) from object-like with parenthesized
+    /// body (<c>NAME (expr)</c>, space). Both tokens must be on the
+    /// same line; the right token's column must equal left's column
+    /// plus left's text length.
+    /// </summary>
+    private static bool IsAdjacent(Item left, Item right)
+    {
+        if (left.Position.Line != right.Position.Line) { return false; }
+        var leftText = left.Content?.ToString() ?? string.Empty;
+        return right.Position.Column == left.Position.Column + leftText.Length;
     }
 
     private static string JoinArgs(IReadOnlyList<Item> args)

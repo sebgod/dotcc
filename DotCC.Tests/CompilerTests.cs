@@ -251,6 +251,87 @@ public sealed class CompilerTests
     }
 
     [Fact]
+    public void Define_object_like_with_parenthesized_body_is_not_function_like()
+    {
+        // `#define SCHAR_MIN (-128)` with a space before `(` is object-
+        // like with body `(-128)`. Without whitespace tracking the
+        // preprocessor used to mis-parse it as a function-like macro
+        // taking `-128` as a "parameter". Position-based adjacency
+        // check fixes that — the `(` here is NOT adjacent to SCHAR_MIN.
+        var src = WriteTemp("""
+            #define SCHAR_MIN (-128)
+            int main() { return SCHAR_MIN; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            // The macro must expand at the use site — the literal name
+            // should not survive into the emit.
+            emitted.ShouldNotContain("return SCHAR_MIN");
+            emitted.ShouldContain("-128");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Define_function_like_no_space_is_recognized()
+    {
+        // `#define SQ(x) ((x)*(x))` with `(` IMMEDIATELY after the name
+        // (no space) IS function-like. The adjacency check must accept
+        // this case.
+        var src = WriteTemp("""
+            #define SQ(x) ((x)*(x))
+            int main() { return SQ(5); }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            // The visitor adds spaces around `*` and outer parens, so
+            // match the substitution fact (each `x` became `5`) rather
+            // than the exact whitespace layout.
+            emitted.ShouldContain("(5) * (5)");
+            emitted.ShouldNotContain("SQ(");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Define_object_like_macro_chain_expands_transitively()
+    {
+        // `#define B A` where A is `#define A 42` should expand B → 42,
+        // not B → A. Hide-set rescan handles the chain at use site.
+        var src = WriteTemp("""
+            #define A 42
+            #define B A
+            int main() { return B; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("return 42;");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Define_self_referential_macro_does_not_infinite_loop()
+    {
+        // `#define A A` is legal C — the hide set guards against the
+        // self-loop, so A expands to A (the bare token) once and stops.
+        var src = WriteTemp("""
+            #define A A
+            int main() { int A = 5; return A; }
+            """);
+        try
+        {
+            // Compile shouldn't hang or stack-overflow.
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("int A = 5");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Include_stdint_h_typedefs_lower_to_using_aliases()
     {
         // <stdint.h> declares int8_t/int16_t/int32_t/int64_t + uint variants

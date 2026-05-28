@@ -132,8 +132,8 @@ Source of truth for the grammar: `DotCC.Lib/c.lalr.yaml`. Source of truth for th
 |---|---|---|
 | `#include "header.h"` | ✅ | Quoted-form; resolves against `-I` dirs + `.c`'s own dir + synthetic `SystemHeaders` |
 | `#include <header.h>` | ✅ | Angle-form supported by reassembling the fragmented `<`, name, `.`, ext, `>` tokens back into a filename — no lexer state change needed. Resolved against the same path stack as quoted-form (`-I` dirs + .c sibling dirs + synthetic SystemHeaders). |
-| `#define NAME body` | 🟡 | Macro body stored as Items; substituted via `Rewrite` hook. Empty body OK (defined-as-marker) |
-| `#define NAME(args) body` | ✅ | Function-like macros via `MacroExpander` (a `RewritingTokenStream` subclass — same pattern as `PreprocessorTokenStream` and `TypeNameRewriter`). Sits between the preprocessor and the typedef rewriter; uses `TryReadNext` lookahead to detect `(` after a macro name, paren-balanced arg collection (commas inside nested parens don't split), per-parameter substitution into the body, and a multi-pass rescan with a per-call hiding set so `#define CLAMP(x, lo, hi) MAX(lo, MIN(x, hi))` fully expands. Object-like still handled by `CPreprocessor.Rewrite` upstream. Fixture `macro-funclike/` (MSVC-oracle-validated). |
+| `#define NAME body` | ✅ | Macro body stored as Items; substituted via `Rewrite` hook with a hide-set-guarded rescan so chained macros (`#define B A` where `A` is `#define A 42`) transitively resolve at use site. Self-referential `#define A A` doesn't infinite-loop (hide set prevents the cycle, per the C standard). Empty body OK (defined-as-marker). |
+| `#define NAME(args) body` | ✅ | Function-like macros via `MacroExpander` (a `RewritingTokenStream` subclass — same pattern as `PreprocessorTokenStream` and `TypeNameRewriter`). Sits between the preprocessor and the typedef rewriter; uses `TryReadNext` lookahead to detect `(` after a macro name, paren-balanced arg collection (commas inside nested parens don't split), per-parameter substitution into the body, and a multi-pass rescan with a per-call hiding set so `#define CLAMP(x, lo, hi) MAX(lo, MIN(x, hi))` fully expands. Object-like still handled by `CPreprocessor.Rewrite` upstream. **Whitespace-aware detection**: `#define NAME(x) body` is function-like ONLY when `(` is immediately adjacent to NAME (no space) — `#define NAME (expr)` (with space) is object-like with body `(expr)`. Disambiguation uses token positions. Fixture `macro-funclike/` (MSVC-oracle-validated). |
 | `#undef NAME` | ✅ | `OnUndef` |
 | `#if <expr>` | ✅ | Full C constant-expression evaluator (upstream in LALR.CC's `PreprocessorExpressionEvaluator`): integer literals (decimal `0x...` hex), `defined(NAME)` and `defined NAME`, arithmetic (`+ - * / %`), comparison (`< > <= >= == !=`), logical (`&& || !`), bitwise (`& | ^ ~ << >>`), ternary (`?:`), parens. Object-like macros expand before evaluation, so `#if VERSION >= 2` works when `VERSION` is `#define`'d. Fixture `preproc-cond/`. |
 | `#ifdef NAME`, `#ifndef NAME` | ✅ | Built-in conditional engine consults `IsDefined`; fixture `hello/` uses `#ifndef` header guards |
@@ -234,6 +234,21 @@ Synthetic header at `DotCC.Lib/include/stdint.h` declares the fixed-width intege
 | `int_least8_t` / `int_fast8_t` / etc. families | ❌ | C99-optional — rarely seen in modern code. Same shape as the fixed-width forms above when added. |
 | Format-string macros `PRId32` etc. | ❌ | Live in `<inttypes.h>` — separate header, not yet shipped. |
 
+### `limits.h`
+
+Synthetic header at `DotCC.Lib/include/limits.h` defines the C99 numeric-limit macros for the primitive int family. Pure `#define` numeric literals — usable as integer constant expressions. Fixture `limits-constants/`.
+
+| Macro | Value | Notes |
+|---|---|---|
+| `CHAR_BIT` | 8 | bits per char (always 8 on dotcc; C# `byte`) |
+| `MB_LEN_MAX` | 1 | UTF-8 per-byte model — each `char` is one byte |
+| `SCHAR_MIN`/`MAX`, `UCHAR_MAX` | -128, 127, 255 | signed/unsigned `char` extrema |
+| `CHAR_MIN`/`CHAR_MAX` | 0, 255 | plain `char` (dotcc unsigned). **Documented divergence**: MSVC's plain `char` is signed; programs that compare against CHAR_MIN/MAX produce different results across dotcc and MSVC. The signed/unsigned-explicit forms above are portable. |
+| `SHRT_MIN`/`MAX`, `USHRT_MAX` | ±32768, 65535 | always 16-bit on both compilers |
+| `INT_MIN`/`MAX`, `UINT_MAX` | ±2147483648, 4294967295u | always 32-bit |
+| `LONG_MIN`/`MAX`, `ULONG_MAX` | ±9223372036854775808, 18446744073709551615uL | 64-bit on dotcc (LP64); 32-bit on MSVC-Windows (LLP64). Documented divergence — programs hard-depending on `LONG_MAX == 2147483647` behave differently. |
+| `LLONG_MIN`/`MAX`, `ULLONG_MAX` | same as `LONG_*` | dotcc's `long long` == `long` (both 64-bit) |
+
 ### `math.h`
 
 Every function exists as a `double` overload (routes to `System.Math`) **and** a `float` overload (routes to `System.MathF`); the explicit `…f`-suffix C99 forms (`sinf`, `cosf`, `sqrtf`, …) are wired alongside. Lives in `DotCC.Libc/MathLib.cs` as a `partial` extension of `Libc`. The same `.cs` file is **embedded into `DotCC.Lib.dll`** at build time (`<EmbeddedResource Include="..\DotCC.Libc\*.cs">`); `Compiler.LoadRuntimeBlock` splices it into every emitted program's type-decls section, and `using static Libc;` brings the methods into scope by bare name so user calls resolve through C# overload resolution. Single source of truth — no duplicated inline copy. Header lives at `DotCC.Lib/include/math.h` (also embedded — see "Synthetic system headers + runtime" below). Fixture `math-basic/` covers double-precision dispatch end-to-end with MSVC oracle validation.
@@ -322,7 +337,7 @@ Listed here so we don't relitigate them. All marked 🚫 above.
 
 ## Synthetic system headers + runtime
 
-dotcc ships its own copies of the C99 standard headers (`stdio.h`, `stdlib.h`, `stddef.h`, `stdbool.h`, `stdint.h`, `math.h`, `tgmath.h`, `string.h`) AND its libc implementations, both as **real files in source control**, both embedded into `DotCC.Lib.dll` so the compiler can serve them at emit time without any runtime disk I/O. Same model as clang's `lib/clang/<ver>/include/` tree, just loaded from the assembly manifest.
+dotcc ships its own copies of the C99 standard headers (`stdio.h`, `stdlib.h`, `stddef.h`, `stdbool.h`, `stdint.h`, `limits.h`, `math.h`, `tgmath.h`, `string.h`) AND its libc implementations, both as **real files in source control**, both embedded into `DotCC.Lib.dll` so the compiler can serve them at emit time without any runtime disk I/O. Same model as clang's `lib/clang/<ver>/include/` tree, just loaded from the assembly manifest.
 
 **Two parallel embeddings (see `DotCC.Lib.csproj`):**
 
