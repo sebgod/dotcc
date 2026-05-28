@@ -49,6 +49,17 @@ public static class Compiler
             void free(void* p);
             #endif
             """,
+        // NULL lives in <stddef.h> in real C; we surface it from a synthetic
+        // header users can include explicitly. Expanded to C#'s `null`
+        // keyword (rather than real C's `((void*)0)`) because C# rejects
+        // implicit `void* → T*` conversion — but a bare `null` literal binds
+        // to any pointer type without further help.
+        ["stddef.h"] = """
+            #ifndef _DOTCC_STDDEF_H
+            #define _DOTCC_STDDEF_H
+            #define NULL null
+            #endif
+            """,
     };
 
     /// <summary>

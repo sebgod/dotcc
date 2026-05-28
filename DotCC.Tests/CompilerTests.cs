@@ -460,6 +460,75 @@ public sealed class CompilerTests
     }
 
     [Fact]
+    public void Designated_struct_init_emits_named_csharp_initializer()
+    {
+        var src = WriteTemp("""
+            struct Point { int x; int y; };
+            int main() {
+                struct Point p = { .x = 7, .y = 13 };
+                return p.x + p.y;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            // Designated init lowers to C#'s object-initializer syntax,
+            // using the user-provided field names directly.
+            emitted.ShouldContain("new Point { x = 7, y = 13 }");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Designated_init_supports_omitted_fields_zero_filled_per_C99()
+    {
+        // Per C99, fields not in the designated list zero-fill. C# struct
+        // object-initializer does the same: omitted members keep default.
+        var src = WriteTemp("""
+            struct Pair { int a; int b; };
+            int main() {
+                struct Pair p = { .b = 99 };
+                return p.a + p.b;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("new Pair { b = 99 }");
+            // The `.a` field is absent from the initializer — C# defaults it to 0.
+            emitted.ShouldNotContain("a = ");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Forward_struct_decl_emits_nothing_and_does_not_break_later_definition()
+    {
+        // `struct Node;` declares the tag without a body. C# types hoist,
+        // so the forward decl emits nothing; the later full definition
+        // works as normal.
+        var src = WriteTemp("""
+            struct Node;
+            struct Node { int val; struct Node* next; };
+            int main() {
+                struct Node n;
+                n.val = 5;
+                return n.val;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            // Full struct decl is present (forward decl shouldn't have
+            // duplicated it).
+            emitted.ShouldContain("unsafe struct Node");
+            emitted.ShouldContain("public int val");
+            emitted.ShouldContain("public Node* next");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Predefined_func_resolves_to_string_of_enclosing_function_name()
     {
         // __func__ is visitor-time, not preprocessor-time — drives through

@@ -154,6 +154,12 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
         return string.Empty;
     }
 
+    // `struct Node ;` — forward declaration. C# resolves type references
+    // regardless of declaration order, so we emit nothing. The full
+    // StructDef (if any) lands later in the same translation unit and
+    // populates _structFields then.
+    public string Visit(C.StructFwd n) => string.Empty;
+
     public string Visit(C.MembersCons n) => (string)n.Arg0.Content + (string)n.Arg1.Content;
     public string Visit(C.MembersOne n)  => (string)n.Arg0.Content;
     // `Type ID ;` member — emit as public field. C convention is that all
@@ -492,6 +498,23 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
 
     private static string EmitArrInit(string type, string name, string argList) =>
         $"{type}* {name} = stackalloc {type}[]{{ {argList.Replace(ArgSep.ToString(), ", ")} }}";
+
+    // `Point p = { .x = 1, .y = 2 };` — designated initializer (C99). The
+    // user named the fields directly so we don't need _structFields here:
+    // the MemberInitList already emits `field = value` pairs in the right
+    // shape for C#'s object-initializer syntax. Order of fields can differ
+    // from declaration order (C99 allows it; C# does too).
+    public string Visit(C.DeclStructDesignated n)
+    {
+        var type = (string)n.Arg0.Content;
+        var name = (string)n.Arg1.Content;
+        var members = (string)n.Arg4.Content;
+        return $"{type} {name} = new {type} {{ {members} }}";
+    }
+
+    public string Visit(C.MemberInitListOne n) => (string)n.Arg0.Content;
+    public string Visit(C.MemberInitListCons n) => $"{(string)n.Arg0.Content}, {(string)n.Arg2.Content}";
+    public string Visit(C.MemberInit n) => $"{(string)n.Arg1.Content} = {(string)n.Arg3.Content}";
 
     // `Point p = {1, 2};` — struct aggregate init. C# can't take positional
     // initializers on a struct, so we look up the struct's field names (from

@@ -197,6 +197,11 @@ symbols:
   # something to emit so the body collection sees the right tokens.
   - '##'          # 122 token-paste operator
   - '#'           # 123 stringification operator
+  # Designated-initializer machinery — `Point p = { .x = 1, .y = 2 };`
+  # parses through MemberInitList instead of ArgList. Distinct lookahead
+  # (`.` vs anything-else after `{`) keeps it LALR(1)-clean.
+  - MemberInitList # 124
+  - MemberInit     # 125
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -247,6 +252,11 @@ productions:
       # function emit, which would violate C#'s top-level-statements-before-
       # type-declarations rule.
       - { lhs: Fn, rhs: ['struct', ID, '{', MemberList, '}', ';'], action: structDef }
+      # Forward struct declaration: `struct Node ;` (no body). Required for
+      # self-referential types declared across translation-unit boundaries
+      # and for circular references between sibling types. Emits nothing
+      # in C# (types hoist regardless of declaration order).
+      - { lhs: Fn, rhs: ['struct', ID, ';'], action: structFwd }
       # Enum declaration: `enum Name { A, B = 5, C } ;`. Lowers to a series
       # of top-level `const int NAME = VAL;` so users can reference the
       # enumerators by their bare name (matching C's int-constant
@@ -434,6 +444,11 @@ productions:
       # positional form). Single-declarator only (like declArr*) since the
       # lowering rewrites the initializer shape.
       - { lhs: Decl, rhs: [Type, ID, '=', '{', ArgList, '}'], action: declStructInit }
+      # Designated initializer (C99): `Point p = { .x = 1, .y = 2 };`. The
+      # user names the fields directly — no _structFields lookup needed at
+      # emit time. LALR(1)-distinguished from the positional form by the
+      # leading `.` after `{`.
+      - { lhs: Decl, rhs: [Type, ID, '=', '{', MemberInitList, '}'], action: declStructDesignated }
 
   # DeclItemList: comma-separated list of declarators sharing a leading Type.
   - derivation: leftmost
@@ -445,6 +460,16 @@ productions:
     rules:
       - { lhs: DeclItem, rhs: [ID], action: declItem }
       - { lhs: DeclItem, rhs: [ID, '=', E], action: declItemInit }
+
+  # MemberInitList — one or more `.field = E` items, comma-separated.
+  - derivation: leftmost
+    rules:
+      - { lhs: MemberInitList, rhs: [MemberInit], action: memberInitListOne }
+      - { lhs: MemberInitList, rhs: [MemberInitList, ',', MemberInit], action: memberInitListCons }
+
+  - derivation: none
+    rules:
+      - { lhs: MemberInit, rhs: ['.', ID, '=', E], action: memberInit }
 
   # Assignment (incl. compound) is right-associative — all E rules share the
   # rightmost group so on lookahead `=`/`+=`/... at state `[..LOr]` the
