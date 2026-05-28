@@ -1,0 +1,6 @@
+strlen = 5
+eq sign = 0
+lt sign = -1
+strcpy = copied (len 6)
+memset[0] = 0
+memcpy = memcp

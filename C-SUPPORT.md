@@ -28,9 +28,9 @@ Source of truth for the grammar: `DotCC.Lib/c.lalr.yaml`. Source of truth for th
 | Float literal `1.5`, `1.5e10`, `1.5f` | ✅ | `FLOAT` token (mandatory `.` to disambiguate from `NUM`) |
 | Double suffix `1.5l` (long double) | 🚫 | C# has no `long double`; we pass `f`/`F` through, others won't typecheck |
 | Char literal `'a'`, `'\n'` | ✅ | `CHAR` lexer rule split into two (escape-form + plain) to avoid IRx alternation; visitor lowers to `(byte)'X'`. Supported escapes: `\n \r \t \\ \' \" \0 \b \f`. Fixture `small-ops/` |
-| String literal `"…"` | ✅ | `STRING` token; lowered to `L("…\0"u8)` |
+| String literal `"…"` | 🟡 | `STRING` token regex is `"[^"]*"` — basic strings work but **escaped quotes inside the literal (`"a \"b\" c"`) don't**. LALR.CC's lexer regex syntax forbids alternation, so we can't express the `"(\\.|[^"\\])*"` pattern that real C lexers use. Workaround until upstream gains alternation: split strings around the embedded quote (`"a " "\"" "b"` — adjacent-string concat) or pre-encode via `#define`. Tracking as a real gap; common enough in real code to deserve a proper fix. |
 | Wide string literal `L"…"`, `u"…"`, `U"…"` | 🚫 | dotcc is UTF-8-native — wide types add no value |
-| Escape sequences `\n \t \\ \" \xNN` | 🟡 | Passed verbatim into the C# UTF-8 literal; C# accepts most; `\x` accepted in C and C# alike |
+| Escape sequences `\n \t \\ \xNN` outside string body | 🟡 | Passed verbatim into the C# UTF-8 literal; C# accepts most. Escape-quote `\"` inside a string literal hits the lexer limitation above. |
 | Trigraphs `??=` etc. | 🚫 | Removed in C23; never useful |
 | Digraphs `<% %> :> :>` etc. | 🚫 | Same reasoning |
 
@@ -150,7 +150,9 @@ Source of truth for the grammar: `DotCC.Lib/c.lalr.yaml`. Source of truth for th
 
 ## libc (`DotCC.Libc/`)
 
-The runtime surface dotcc-emitted programs link against. Each function routes to a BCL primitive. The emitter still **inlines** copies of the helpers today; once `DotCC.Libc` is published to NuGet, emitted programs will reference the package.
+The runtime surface dotcc-emitted programs link against. Each function routes to a BCL primitive. Implementations live in `DotCC.Libc/*.cs`; the same source compiles into `DotCC.Libc.dll` for unit tests AND is embedded as a resource into `DotCC.Lib.dll` (spliced into every emitted program by `BuildShell` — single source of truth). Once `DotCC.Libc` is published to NuGet, the embedding goes away and emitted programs reference the package directly.
+
+**Design rule: reentrant by default.** Where the C standard offers a stateful and a reentrant variant of the same function (`strtok` / `strtok_r`, `rand` / `rand_r`, `asctime` / `asctime_r`, `localtime` / `localtime_r`, etc.), dotcc implements the reentrant form as the primitive and exposes the stateful form (if at all) as a thin wrapper using `[ThreadStatic]` storage. Hidden static state in libc is a notorious source of multithreading bugs; emitted dotcc programs target .NET where threading is cheap and idiomatic, so the reentrant shape is the right default. Real C programs that need the C89 stateful form keep working through the wrapper, but the docs steer users to the `_r` variant.
 
 ### `stdio.h`
 
@@ -193,22 +195,25 @@ The runtime surface dotcc-emitted programs link against. Each function routes to
 
 ### `string.h`
 
+Synthetic header at `DotCC.Lib/include/string.h` declares the surface; implementations live in `DotCC.Libc.Libc`. Fixture `string-h-basic/` exercises every declared function end-to-end with MSVC oracle validation.
+
 | Function | Status | Notes |
 |---|---|---|
-| `strlen` | ✅ | Pointer loop |
-| `strcmp` | ✅ | Pointer loop |
+| `strlen` | ✅ | Pointer loop; declared in `<string.h>`. Returns `int` (dotcc-specific — real C returns `size_t`; portable code should cast). |
+| `strcmp` | ✅ | Pointer loop; declared in `<string.h>`. |
 | `strncmp` | ❌ | Bounded `strcmp` |
-| `strcpy` | ✅ | Pointer loop |
+| `strcpy` | ✅ | Pointer loop; declared in `<string.h>`. |
 | `strncpy` | ❌ | Bounded `strcpy` |
 | `strcat`, `strncat` | ❌ | Append to NUL-terminated dst |
 | `strchr`, `strrchr` | ❌ | Find char in NUL-terminated string |
 | `strstr` | ❌ | Find substring |
-| `strtok` | ❌ | Stateful; thread-local cursor or use `strtok_r` (POSIX) |
+| `strtok_r` (POSIX) / `strtok_s` (C11 Annex K) | ❌ | **The reentrant primitive — implement this first.** Takes an explicit `char **saveptr` so multiple concurrent calls don't clobber each other. dotcc should default to the reentrant shape across the libc surface (no hidden static state). |
+| `strtok` | ❌ | C89 stateful form (static internal cursor → not thread-safe, can't be called recursively). When added, expose as a thin wrapper around `strtok_r` with a `[ThreadStatic]` saveptr — same shape as glibc, but documented as "use `strtok_r` if you can". |
 | `strerror` | ❌ | Map errno to message |
 | `memcmp` | ❌ | Trivial — `Span.SequenceCompareTo` |
-| `memcpy` | ✅ | `Buffer.MemoryCopy` |
+| `memcpy` | ✅ | `Buffer.MemoryCopy`; declared in `<string.h>`. |
 | `memmove` | ❌ | Same as memcpy but overlap-safe; `Buffer.MemoryCopy` is overlap-safe so add as an alias |
-| `memset` | ✅ | `NativeMemory.Fill` |
+| `memset` | ✅ | `NativeMemory.Fill`; declared in `<string.h>`. |
 | `memchr` | ❌ | Find byte in buffer |
 
 ### `math.h`
@@ -299,7 +304,7 @@ Listed here so we don't relitigate them. All marked 🚫 above.
 
 ## Synthetic system headers + runtime
 
-dotcc ships its own copies of the C99 standard headers AND its libc implementations, both as **real files in source control**, both embedded into `DotCC.Lib.dll` so the compiler can serve them at emit time without any runtime disk I/O. Same model as clang's `lib/clang/<ver>/include/` tree, just loaded from the assembly manifest.
+dotcc ships its own copies of the C99 standard headers (`stdio.h`, `stdlib.h`, `stddef.h`, `stdbool.h`, `math.h`, `tgmath.h`, `string.h`) AND its libc implementations, both as **real files in source control**, both embedded into `DotCC.Lib.dll` so the compiler can serve them at emit time without any runtime disk I/O. Same model as clang's `lib/clang/<ver>/include/` tree, just loaded from the assembly manifest.
 
 **Two parallel embeddings (see `DotCC.Lib.csproj`):**
 

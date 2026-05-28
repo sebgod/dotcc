@@ -251,6 +251,35 @@ public sealed class CompilerTests
     }
 
     [Fact]
+    public void Include_string_h_resolves_and_calls_typecheck()
+    {
+        // <string.h> is a real .h file under DotCC.Lib/include/ — the
+        // synthetic header declares strlen/strcmp/strcpy/memset/memcpy
+        // (already implemented in DotCC.Libc.Libc). The parser must see
+        // the prototypes so the calls below typecheck.
+        var src = WriteTemp("""
+            #include <string.h>
+            int main()
+            {
+                int n = strlen("hello");
+                int c = strcmp("a", "b");
+                return n + c;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("static unsafe int main()");
+            // The functions resolve via `using static Libc;` in the shell — no
+            // remap to capitalized names, the C-spelled identifiers pass
+            // through. Spot-check that the call sites survive.
+            emitted.ShouldContain("strlen(");
+            emitted.ShouldContain("strcmp(");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Pragma_once_short_circuits_repeated_include()
     {
         // The directory of the .c file is also on the include search path,
