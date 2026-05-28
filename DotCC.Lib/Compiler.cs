@@ -78,6 +78,7 @@ public static class Compiler
         {
             var source = File.ReadAllText(unitPath);
             var pre = new CPreprocessor(lexerTable, includeMap, defines ?? Array.Empty<string>());
+            pre.SetActiveFilename(Path.GetFileName(unitPath));
             using var lexer = BytesLexer.FromString(source, lexerTable);
             using var preproc = C.WrapPreprocessor(lexer, pre);
             // MacroExpander: function-like macro expansion. Needs lookahead
@@ -145,6 +146,7 @@ public static class Compiler
             output.WriteLine($"# {unitPath}");
             var source = File.ReadAllText(unitPath);
             var pre = new CPreprocessor(lexerTable, includeMap, defines ?? Array.Empty<string>());
+            pre.SetActiveFilename(Path.GetFileName(unitPath));
             using var lexer = BytesLexer.FromString(source, lexerTable);
             using var preproc = C.WrapPreprocessor(lexer, pre);
             // -E mode also routes through MacroExpander so function-like

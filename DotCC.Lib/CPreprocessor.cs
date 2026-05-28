@@ -37,14 +37,21 @@ internal sealed class CPreprocessor : C.IPreprocessor
     private readonly Dictionary<string, LexRule[]> _lexerTable;
     private readonly Dictionary<string, string> _files;
     private readonly Dictionary<string, MacroDef> _macros = new(StringComparer.Ordinal);
-    // `#pragma once` machinery. _currentlyIncluding tracks the filename of
-    // the include OnInclude is currently processing so that when OnPragma
-    // sees `once` it knows which file to remember; _pragmaOnceFiles is the
-    // set of include-once-marked filenames. Re-entrancy: OnInclude saves/
-    // restores _currentlyIncluding around the recursive sub-preprocessor
-    // drain so nested #includes work correctly.
+    // `#pragma once` machinery + active filename for `__FILE__`. The same
+    // `_currentlyIncluding` field tracks both: it names the file the
+    // preprocessor is currently processing (the top-level translation unit
+    // OR a recursive `#include`). The top-level value is set by
+    // `SetActiveFilename` from Compiler.EmitCSharp before processing; the
+    // OnInclude handler saves+restores around its recursive sub-preprocess
+    // so nested includes work correctly.
     private string? _currentlyIncluding;
     private readonly HashSet<string> _pragmaOnceFiles = new(StringComparer.Ordinal);
+
+    // Symbol ids resolved once for the predefined-identifier substitutions
+    // in `Rewrite`. `__FILE__` synthesizes a STRING token; `__LINE__`
+    // synthesizes a NUM token with the use site's line number.
+    private readonly int _numSymbolId;
+    private readonly int _stringSymbolId;
 
     public CPreprocessor(
         Dictionary<string, LexRule[]> lexerTable,
@@ -53,6 +60,13 @@ internal sealed class CPreprocessor : C.IPreprocessor
     {
         _lexerTable = lexerTable;
         _files = files;
+        var symMap = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var sym in C.Definition.SymbolNames)
+        {
+            symMap[sym.Name] = sym.ID;
+        }
+        _numSymbolId = symMap["NUM"];
+        _stringSymbolId = symMap["STRING"];
         foreach (var d in predefines)
         {
             // -D NAME or -D NAME=VALUE. Stored body is empty (defined-as-marker)
@@ -73,6 +87,14 @@ internal sealed class CPreprocessor : C.IPreprocessor
     /// </summary>
     public bool TryGetMacro(string name, out MacroDef macro)
         => _macros.TryGetValue(name, out macro!);
+
+    /// <summary>
+    /// Set the active source filename for <c>__FILE__</c> expansion. Called
+    /// by <see cref="Compiler.EmitCSharp"/> / <see cref="Compiler.Preprocess"/>
+    /// at the start of each translation unit. <c>#include</c>'s recursive
+    /// drive overwrites this around the nested processing (then restores).
+    /// </summary>
+    public void SetActiveFilename(string name) => _currentlyIncluding = name;
 
     public IEnumerable<Item> OnInclude(IReadOnlyList<Item> args)
     {
@@ -210,15 +232,31 @@ internal sealed class CPreprocessor : C.IPreprocessor
 
     public IEnumerable<Item> Rewrite(Item token)
     {
-        // Function-like macros need lookahead (peek for the `(`) which the
-        // Rewrite hook can't do — MacroExpander handles those downstream.
-        // Object-like still expands here so the existing -E (Preprocess-only)
-        // mode keeps working without wiring MacroExpander into that pipeline.
-        if (token.Content is string text
-            && _macros.TryGetValue(text, out var macro)
-            && !macro.IsFunctionLike)
+        // Predefined identifiers come first — they shadow any same-named
+        // user macro by C standard (which forbids redefining them anyway).
+        if (token.Content is string text)
         {
-            return macro.Body;
+            if (text == "__LINE__")
+            {
+                var line = token.Position.Line.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                return new[] { new Item(_numSymbolId, line, token.Position) };
+            }
+            if (text == "__FILE__")
+            {
+                var name = _currentlyIncluding ?? string.Empty;
+                // STRING tokens carry the raw lexeme including surrounding
+                // quotes — the visitor's Str() strips them and re-wraps in
+                // the u8 literal form.
+                return new[] { new Item(_stringSymbolId, "\"" + name + "\"", token.Position) };
+            }
+            // Function-like macros need lookahead (peek for the `(`) which the
+            // Rewrite hook can't do — MacroExpander handles those downstream.
+            // Object-like still expands here so the existing -E (Preprocess-only)
+            // mode keeps working without wiring MacroExpander into that pipeline.
+            if (_macros.TryGetValue(text, out var macro) && !macro.IsFunctionLike)
+            {
+                return macro.Body;
+            }
         }
         return new[] { token };
     }

@@ -1,0 +1,2 @@
+fn=main file=main.c line=14
+fn=log_here file=main.c line=10

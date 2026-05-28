@@ -417,6 +417,72 @@ public sealed class CompilerTests
     }
 
     [Fact]
+    public void Predefined_FILE_expands_to_string_literal_of_active_filename()
+    {
+        var src = WriteTemp("""
+            int main() { char* f = __FILE__; return 0; }
+            """);
+        try
+        {
+            using var sw = new StringWriter();
+            Compiler.Preprocess(new[] { src }, sw);
+            var dumped = sw.ToString();
+            // __FILE__ should have expanded to a STRING token. The dumped
+            // token stream prints token content verbatim, so we just look
+            // for any string-literal containing the bare filename.
+            var bareName = Path.GetFileName(src);
+            dumped.ShouldNotContain(" __FILE__ ");
+            dumped.ShouldContain(bareName);
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Predefined_LINE_expands_to_numeric_literal_at_use_site()
+    {
+        // The __LINE__ appears on line 2 of the source — should expand to `2`.
+        var src = WriteTemp("""
+            int main() {
+                int line_here = __LINE__;
+                return line_here;
+            }
+            """);
+        try
+        {
+            using var sw = new StringWriter();
+            Compiler.Preprocess(new[] { src }, sw);
+            var dumped = sw.ToString();
+            dumped.ShouldNotContain(" __LINE__ ");
+            // Line 2 in our source (the `int line_here = …;` line).
+            dumped.ShouldContain(" 2 ");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Predefined_func_resolves_to_string_of_enclosing_function_name()
+    {
+        // __func__ is visitor-time, not preprocessor-time — drives through
+        // EmitCSharp end-to-end. Each occurrence is replaced with the
+        // dotcc string-literal idiom carrying the enclosing function name.
+        var src = WriteTemp("""
+            int compute() { char* name = __func__; return 0; }
+            int main() { char* mn = __func__; return compute(); }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            // `__func__` should NOT survive into the emitted C# — it'd be
+            // an undefined identifier and Roslyn would reject it.
+            emitted.ShouldNotContain("__func__");
+            // Both function names should appear as string-literal targets.
+            emitted.ShouldContain("L(\"compute\\0\"u8)");
+            emitted.ShouldContain("L(\"main\\0\"u8)");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Variadic_macro_with_named_params_plus_extras()
     {
         // Named param `level` + variadic extras. `level` substitutes

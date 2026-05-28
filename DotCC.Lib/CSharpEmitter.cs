@@ -70,7 +70,7 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
         var type = (string)n.Arg0.Content;
         var name = (string)n.Arg1.Content;
         var pars = (string)n.Arg3.Content;
-        var body = (string)n.Arg5.Content;
+        var body = ResolveFuncPlaceholder((string)n.Arg5.Content, name);
         if (name == "main") { MainArity = CountCommas(pars) + 1; }
         else { _exports.Add(new Export(name, type, pars)); }
         return $"static unsafe {type} {name}({pars})\n{body}";
@@ -80,7 +80,7 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
     {
         var type = (string)n.Arg0.Content;
         var name = (string)n.Arg1.Content;
-        var body = (string)n.Arg4.Content;
+        var body = ResolveFuncPlaceholder((string)n.Arg4.Content, name);
         if (name == "main") { MainArity = 0; }
         else { _exports.Add(new Export(name, type, "")); }
         return $"static unsafe {type} {name}()\n{body}";
@@ -94,7 +94,7 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
         var type = (string)n.Arg1.Content;
         var name = (string)n.Arg2.Content;
         var pars = (string)n.Arg4.Content;
-        var body = (string)n.Arg6.Content;
+        var body = ResolveFuncPlaceholder((string)n.Arg6.Content, name);
         if (name == "main") { MainArity = CountCommas(pars) + 1; }
         return $"static unsafe {type} {name}({pars})\n{body}";
     }
@@ -103,7 +103,7 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
     {
         var type = (string)n.Arg1.Content;
         var name = (string)n.Arg2.Content;
-        var body = (string)n.Arg5.Content;
+        var body = ResolveFuncPlaceholder((string)n.Arg5.Content, name);
         if (name == "main") { MainArity = 0; }
         return $"static unsafe {type} {name}()\n{body}";
     }
@@ -609,19 +609,43 @@ internal sealed class CSharpEmitter : C.IVisitor<string>
 
     public string Visit(C.ArgsOne n) => (string)n.Arg0.Content;
 
-    // Variable reference. Two emit-time rewrites: enumerator → `EnumName.Member`
-    // for any bare ID matching a previously-declared enumerator (so C code
-    // writing `Red` lands as `Color.Red`); builtin name → BCL helper for
-    // `malloc`/`free`/`printf`. Otherwise pass through.
+    // Variable reference. Three emit-time rewrites: `__func__` → a
+    // placeholder that Visit(FuncDef*) resolves later (once it knows the
+    // enclosing function's name); enumerator → `EnumName.Member` for any
+    // bare ID matching a previously-declared enumerator (so C code writing
+    // `Red` lands as `Color.Red`); builtin name → BCL helper for
+    // `malloc` / `free` / `printf`. Otherwise pass through.
     public string Visit(C.Var n)
     {
         var name = (string)n.Arg0.Content;
+        if (name == "__func__") { return FuncPlaceholder; }
         if (_enumerators.TryGetValue(name, out var enumName))
         {
             return $"{enumName}.{name}";
         }
         return MapBuiltin(name);
     }
+
+    /// <summary>
+    /// Placeholder Visit(Var) emits for <c>__func__</c>. Each Visit(FuncDef*)
+    /// post-processes its body string and replaces every occurrence with
+    /// the function's actual name wrapped in the dotcc UTF-8 string-literal
+    /// idiom. The token is intentionally not a valid C# expression — if
+    /// substitution misses (e.g. <c>__func__</c> outside any function, which
+    /// is illegal C), Roslyn rejects the result and surfaces the bug.
+    /// </summary>
+    private const string FuncPlaceholder = "__DOTCC_CURRENT_FUNC__";
+
+    /// <summary>
+    /// Resolve <see cref="FuncPlaceholder"/> in a function body. Each
+    /// occurrence becomes <c>L("fnname\0"u8)</c> — a byte* to the pinned
+    /// UTF-8 RVA — so the result is callable as a C-string anywhere a
+    /// <c>byte*</c> is expected (printf, strlen, etc.).
+    /// </summary>
+    private static string ResolveFuncPlaceholder(string body, string fnName)
+        => body.Contains(FuncPlaceholder)
+            ? body.Replace(FuncPlaceholder, $"L(\"{fnName}\\0\"u8)")
+            : body;
     public string Visit(C.Num n) => (string)n.Arg0.Content;
     public string Visit(C.Flt n) => (string)n.Arg0.Content;
 
