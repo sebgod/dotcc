@@ -1,0 +1,7 @@
+STR(hello) = hello
+STR(1 + 2) = 1 + 2
+pick 1 = 111
+pick 2 = 222
+age = 30
+a=1 b=2 c=3
+[L7] code=42 msg=ok

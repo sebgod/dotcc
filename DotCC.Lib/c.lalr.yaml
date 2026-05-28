@@ -191,6 +191,12 @@ symbols:
   - '#error'      # 119 preprocessor directive — fail compilation with a message
   - '#warning'    # 120 preprocessor directive — diagnostic, continues
   - '#elif'       # 121 preprocessor conditional — else-if with expression
+  # In-body macro operators. They only ever appear inside `#define` bodies
+  # — MacroExpander.Substitute consumes them at expansion time, so they
+  # never reach the parser. Adding them here just gives the byte lexer
+  # something to emit so the body collection sees the right tokens.
+  - '##'          # 122 token-paste operator
+  - '#'           # 123 stringification operator
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -603,6 +609,11 @@ lexer:
     - { symbol: '#pragma',  match: '#pragma' }
     - { symbol: '#warning', match: '#warning' }
     - { symbol: '#error',   match: '#error' }
+    # In-body operators: `##` (token paste) must precede `#` (stringify)
+    # so longest-match picks the two-char form first. Both come AFTER all
+    # the directive rules so `#define` etc. still win on longer matches.
+    - { symbol: '##',       match: '##' }
+    - { symbol: '#',        match: '#' }
 
     # Block comments — must precede the `/` operator rule so the slash isn't
     # eaten first. The regex avoids alternation (IRx has no `|`):

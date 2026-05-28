@@ -325,4 +325,119 @@ public sealed class CompilerTests
         }
         finally { File.Delete(src); }
     }
+
+    [Fact]
+    public void Stringify_operator_quotes_the_arg_text()
+    {
+        // `#x` reconstructs the arg's source text as a STRING literal.
+        var src = WriteTemp("""
+            #define STR(x) #x
+            int main() { char* s = STR(hello world); return 0; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            // The emitted C# wraps strings in L("...\0"u8); the inner
+            // content should carry "hello world".
+            emitted.ShouldContain("hello");
+            emitted.ShouldContain("world");
+            // STR shouldn't survive — the call expanded into a string literal.
+            emitted.ShouldNotContain("STR(");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Token_paste_concatenates_into_single_identifier()
+    {
+        // `a ## b` pastes the two tokens into one identifier. Combined
+        // with rescan, the pasted name can refer to another macro.
+        var src = WriteTemp("""
+            #define foo_1 100
+            #define MAKEFOO(n) foo_##n
+            int main() { return MAKEFOO(1); }
+            """);
+        try
+        {
+            using var sw = new StringWriter();
+            Compiler.Preprocess(new[] { src }, sw);
+            var dumped = sw.ToString();
+            // After paste: foo_1 → rescan expands to 100.
+            dumped.ShouldNotContain("MAKEFOO");
+            dumped.ShouldNotContain(" ## ");
+            dumped.ShouldContain(" 100 ");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Token_paste_with_two_formals()
+    {
+        // `a ## b` where BOTH operands are formal params. The pasted
+        // result substitutes both args' last/first tokens.
+        var src = WriteTemp("""
+            #define glue_2 200
+            #define CAT(a, b) a ## b
+            int main() { return CAT(glue_, 2); }
+            """);
+        try
+        {
+            using var sw = new StringWriter();
+            Compiler.Preprocess(new[] { src }, sw);
+            var dumped = sw.ToString();
+            // CAT(glue_, 2) → glue_2 → 200 (after rescan picks up glue_2).
+            dumped.ShouldNotContain("CAT");
+            dumped.ShouldContain(" 200 ");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Variadic_macro_va_args_expands_to_extras()
+    {
+        // The canonical use: `LOG(fmt, ...)` → `printf(fmt, __VA_ARGS__)`.
+        var src = WriteTemp("""
+            #define LOG(fmt, ...) printf(fmt, __VA_ARGS__)
+            int main() { LOG("a=%d b=%d c=%d\n", 1, 2, 3); return 0; }
+            """);
+        try
+        {
+            using var sw = new StringWriter();
+            Compiler.Preprocess(new[] { src }, sw);
+            var dumped = sw.ToString();
+            // __VA_ARGS__ should be replaced by the three int args, all
+            // present and comma-separated.
+            dumped.ShouldNotContain("__VA_ARGS__");
+            dumped.ShouldNotContain("LOG(");
+            dumped.ShouldContain(" 1 ");
+            dumped.ShouldContain(" 2 ");
+            dumped.ShouldContain(" 3 ");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Variadic_macro_with_named_params_plus_extras()
+    {
+        // Named param `level` + variadic extras. `level` substitutes
+        // by name; the extras land in `__VA_ARGS__`.
+        var src = WriteTemp("""
+            #define WARN(level, ...) printf("[%d] ", level); printf(__VA_ARGS__)
+            int main() {
+                WARN(7, "x=%d\n", 42);
+                return 0;
+            }
+            """);
+        try
+        {
+            using var sw = new StringWriter();
+            Compiler.Preprocess(new[] { src }, sw);
+            var dumped = sw.ToString();
+            dumped.ShouldContain(" 7 ");
+            dumped.ShouldContain(" 42 ");
+            dumped.ShouldNotContain("__VA_ARGS__");
+            dumped.ShouldNotContain("WARN(");
+        }
+        finally { File.Delete(src); }
+    }
 }

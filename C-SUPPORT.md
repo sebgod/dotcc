@@ -139,10 +139,10 @@ Source of truth for the grammar: `DotCC.Lib/c.lalr.yaml`. Source of truth for th
 | `#warning msg` (C23) | ✅ | Emits `dotcc: #warning: <msg>` to stderr and continues. Same path as `#error` but non-fatal. |
 | `#pragma …` | 🟡 | `#pragma once` is honored — `CPreprocessor` tracks `_pragmaOnceFiles` keyed by the currently-being-processed filename, short-circuits subsequent `#include` of the same name. All other pragmas silently ignored (matches the C convention: unknown pragmas don't break the build). |
 | `#line N`, `#line N "file"` | 🚫 | Useful only for generated-code lineage which dotcc doesn't preserve |
-| `##` token-pasting | ❌ | Needs function-like macros first |
-| `#` stringification | ❌ | Same |
+| `##` token-pasting | ✅ | `MacroExpander.Substitute` recognizes `LHS ## RHS` patterns in function-like bodies: resolves each operand (formal-param → arg tokens, else literal token), pastes the last LHS token with the first RHS token into one ID-shaped token carrying the concatenated content. After paste, the multi-pass rescan re-checks the result — so `MAKEFOO(1)` → `foo_1` → resolves to the matching `#define foo_1 100`. Fixture `macro-ops/`. |
+| `#` stringification | ✅ | `# PARAM` inside a function-like body emits a STRING token built from the arg's source text. Token contents joined with single spaces; `"` and `\` inside content are backslash-escaped so the resulting literal is well-formed. Fixture `macro-ops/`. |
 | `__FILE__`, `__LINE__`, `__func__` (C99) | ❌ | Synthesise via SourcePosition; `__func__` needs visitor knowledge of current fn name |
-| Variadic macros `...` / `__VA_ARGS__` (C99) | ❌ | Depends on function-like macros |
+| Variadic macros `...` / `__VA_ARGS__` (C99) | ✅ | `OnDefine` detects a trailing `...` in the param list and sets `MacroDef.IsVariadic`. At expansion, extras beyond the named-param count are comma-joined and bound to the magic name `__VA_ARGS__` in the substitution map; references to that name in the body expand to the joined extras. Fixture `macro-ops/` (variadic `LOG(fmt, ...)` shape). |
 
 ## libc (`DotCC.Libc/`)
 

@@ -37,6 +37,10 @@ internal sealed class MacroExpander : RewritingTokenStream
     private readonly int _openParenSymbol;
     private readonly int _closeParenSymbol;
     private readonly int _commaSymbol;
+    private readonly int _stringSymbol;
+    private readonly int _hashSymbol;
+    private readonly int _hashHashSymbol;
+    private const string VaArgsName = "__VA_ARGS__";
 
     public MacroExpander(ISyncIterator<Item> inner, CPreprocessor cpp) : base(inner)
     {
@@ -50,6 +54,9 @@ internal sealed class MacroExpander : RewritingTokenStream
         _openParenSymbol = map["("];
         _closeParenSymbol = map[")"];
         _commaSymbol = map[","];
+        _stringSymbol = map["STRING"];
+        _hashSymbol = map["#"];
+        _hashHashSymbol = map["##"];
     }
 
     protected override void ProcessToken(Item token)
@@ -230,10 +237,21 @@ internal sealed class MacroExpander : RewritingTokenStream
 
     /// <summary>
     /// Substitute formal parameters in <paramref name="macro"/>'s body with
-    /// the actual arg-token lists. Missing args (fewer actuals than formals)
-    /// expand to nothing — matches real C's "empty argument" behavior.
-    /// Extra args (more actuals than formals) are dropped; v1 doesn't yet
-    /// support C99 variadic <c>__VA_ARGS__</c>.
+    /// the actual arg-token lists. Handles three operators inline:
+    /// <list type="bullet">
+    ///   <item><c>#PARAM</c> stringification: reconstructs the arg's source
+    ///     text into a STRING token (escapes <c>"</c> and <c>\</c>).</item>
+    ///   <item><c>LHS ## RHS</c> token-pasting: glues the last token of
+    ///     LHS with the first token of RHS into a single ID-shaped token
+    ///     carrying the concatenated text. Either side may be a formal
+    ///     param (substituted first) or a literal token.</item>
+    ///   <item><c>__VA_ARGS__</c>: bound to all extra invocation args
+    ///     beyond the formal count, comma-joined, when the macro is
+    ///     declared variadic (<c>#define LOG(fmt, ...)</c>).</item>
+    /// </list>
+    /// Missing args expand to nothing; extras beyond the formal count are
+    /// dropped (non-variadic) or accumulated into <c>__VA_ARGS__</c>
+    /// (variadic).
     /// </summary>
     private List<Item> Substitute(MacroDef macro, List<List<Item>> args)
     {
@@ -242,21 +260,136 @@ internal sealed class MacroExpander : RewritingTokenStream
         {
             paramMap[macro.Params[i]] = i < args.Count ? args[i] : Array.Empty<Item>();
         }
-
-        var result = new List<Item>(macro.Body.Count);
-        foreach (var bt in macro.Body)
+        if (macro.IsVariadic)
         {
+            // Extras beyond the named params land in __VA_ARGS__,
+            // comma-joined (real C: the args' separating commas are
+            // preserved verbatim, including spaces around them).
+            var extras = new List<Item>();
+            var startIdx = macro.Params.Count;
+            for (var i = startIdx; i < args.Count; i++)
+            {
+                if (i > startIdx)
+                {
+                    extras.Add(new Item(_commaSymbol, ",", default));
+                }
+                extras.AddRange(args[i]);
+            }
+            paramMap[VaArgsName] = extras;
+        }
+
+        var body = macro.Body;
+        var result = new List<Item>(body.Count);
+        for (var i = 0; i < body.Count; i++)
+        {
+            var bt = body[i];
+
+            // `LHS ## RHS` — token-paste. Lookahead at i+1 for `##` and
+            // i+2 for RHS. Either side might be a formal param or a
+            // literal token. Substitute first, then paste the last token
+            // of LHS with the first token of RHS.
+            if (i + 2 < body.Count && body[i + 1].ID == _hashHashSymbol)
+            {
+                var lhs = ResolveOperand(bt, paramMap);
+                var rhs = ResolveOperand(body[i + 2], paramMap);
+                AppendPasted(result, lhs, rhs, bt.Position);
+                i += 2;
+                continue;
+            }
+
+            // `# PARAM` — stringify. Only meaningful when followed by a
+            // formal param name; if not, emit `#` as-is (which will likely
+            // cause a downstream parse error — same as real C).
+            if (bt.ID == _hashSymbol
+                && i + 1 < body.Count
+                && body[i + 1].Content is string pname1
+                && paramMap.TryGetValue(pname1, out var stringifyTokens))
+            {
+                var text = Stringify(stringifyTokens);
+                result.Add(new Item(_stringSymbol, "\"" + text + "\"", bt.Position));
+                i++;
+                continue;
+            }
+
+            // Regular param substitution (also covers __VA_ARGS__ since
+            // we bound it in paramMap above).
             if (bt.ID == _idSymbol
-                && bt.Content is string pname
-                && paramMap.TryGetValue(pname, out var argTokens))
+                && bt.Content is string pname2
+                && paramMap.TryGetValue(pname2, out var argTokens))
             {
                 result.AddRange(argTokens);
+                continue;
             }
-            else
-            {
-                result.Add(bt);
-            }
+
+            result.Add(bt);
         }
         return result;
+    }
+
+    /// <summary>
+    /// Resolve a paste-operand. Formal-param names look up the
+    /// corresponding actual-arg token list; anything else passes through
+    /// as a single-token list.
+    /// </summary>
+    private IReadOnlyList<Item> ResolveOperand(Item t, Dictionary<string, IReadOnlyList<Item>> paramMap)
+    {
+        if (t.ID == _idSymbol
+            && t.Content is string s
+            && paramMap.TryGetValue(s, out var tokens))
+        {
+            return tokens;
+        }
+        return new[] { t };
+    }
+
+    /// <summary>
+    /// Emit <paramref name="lhs"/> + <paramref name="rhs"/> with the last
+    /// token of lhs glued to the first token of rhs into one ID-shaped
+    /// token. When either side is empty, the other side passes through
+    /// untouched (matches the C rule "pasting an empty operand is a no-op").
+    /// </summary>
+    private void AppendPasted(List<Item> result, IReadOnlyList<Item> lhs, IReadOnlyList<Item> rhs, SourcePosition position)
+    {
+        if (lhs.Count == 0)
+        {
+            result.AddRange(rhs);
+            return;
+        }
+        if (rhs.Count == 0)
+        {
+            result.AddRange(lhs);
+            return;
+        }
+        for (var k = 0; k < lhs.Count - 1; k++) { result.Add(lhs[k]); }
+        var pasted = (lhs[^1].Content?.ToString() ?? string.Empty)
+                   + (rhs[0].Content?.ToString() ?? string.Empty);
+        result.Add(new Item(_idSymbol, pasted, position));
+        for (var k = 1; k < rhs.Count; k++) { result.Add(rhs[k]); }
+    }
+
+    /// <summary>
+    /// Reconstruct an arg's source text from its token list — used by the
+    /// <c>#</c> stringification operator. Tokens are joined with single
+    /// spaces (matches what most C preprocessors emit); <c>"</c> and <c>\</c>
+    /// inside any token content are backslash-escaped so the resulting
+    /// STRING token is well-formed.
+    /// </summary>
+    private static string Stringify(IReadOnlyList<Item> tokens)
+    {
+        var sb = new System.Text.StringBuilder();
+        var first = true;
+        foreach (var t in tokens)
+        {
+            if (!first) { sb.Append(' '); }
+            first = false;
+            var c = t.Content?.ToString();
+            if (c is null) { continue; }
+            foreach (var ch in c)
+            {
+                if (ch == '\\' || ch == '"') { sb.Append('\\'); }
+                sb.Append(ch);
+            }
+        }
+        return sb.ToString();
     }
 }

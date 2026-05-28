@@ -19,9 +19,15 @@ namespace DotCC;
 /// macros carry their formal parameter list AND a body — invocation requires
 /// matching <c>(</c> at the use site followed by comma-separated arg
 /// expressions; <see cref="MacroExpander"/> does that paren-balanced collection
-/// + per-parameter substitution.
+/// + per-parameter substitution. Variadic macros (<c>#define LOG(fmt, ...)</c>)
+/// set <see cref="IsVariadic"/> — extra args beyond the formal list bind to
+/// the magic name <c>__VA_ARGS__</c> at substitution time.
 /// </summary>
-internal sealed record MacroDef(string Name, IReadOnlyList<string>? Params, IReadOnlyList<Item> Body)
+internal sealed record MacroDef(
+    string Name,
+    IReadOnlyList<string>? Params,
+    IReadOnlyList<Item> Body,
+    bool IsVariadic = false)
 {
     public bool IsFunctionLike => Params is not null;
 }
@@ -157,13 +163,21 @@ internal sealed class CPreprocessor : C.IPreprocessor
         // whitespace), so the convention is: any `(` immediately following
         // the name in the directive's args triggers function-like form. The
         // closing `)` ends the parameter list; everything after is the body.
+        // A trailing `...` in the param list marks the macro variadic;
+        // extra invocation args land in __VA_ARGS__ at expansion.
         if (args.Count >= 2 && args[1].Content?.ToString() == "(")
         {
             var paramNames = new List<string>();
+            var isVariadic = false;
             var pos = 2;
             while (pos < args.Count && args[pos].Content?.ToString() != ")")
             {
-                if (args[pos].Content is string p && p != ",")
+                var tokenText = args[pos].Content?.ToString();
+                if (tokenText == "...")
+                {
+                    isVariadic = true;
+                }
+                else if (tokenText is { } p && p != ",")
                 {
                     paramNames.Add(p);
                 }
@@ -175,7 +189,7 @@ internal sealed class CPreprocessor : C.IPreprocessor
                 return Array.Empty<Item>();
             }
             var body = args.Skip(pos + 1).ToList();
-            _macros[name] = new MacroDef(name, paramNames, body);
+            _macros[name] = new MacroDef(name, paramNames, body, isVariadic);
             return Array.Empty<Item>();
         }
 
