@@ -74,6 +74,19 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     public string StructDecls => _structs.ToString();
     public void ResetStructDecls() => _structs.Clear();
 
+    // Side channel for file-scope variable declarations. Real C uses
+    // these for globals visible across functions (`jmp_buf env;` for
+    // setjmp, FILE* logs, opt parsers, etc.). C# top-level local
+    // variables can't be captured by static local functions, so we
+    // can't emit them as plain `T x;` at the top of the entry block.
+    // Instead they collect into a `static unsafe class DotCcGlobals`
+    // declared in the type-decls section; the shell adds
+    // `using static DotCcGlobals;` so user code resolves the names
+    // unqualified.
+    private readonly StringBuilder _globals = new();
+    public string Globals => _globals.ToString();
+    public void ResetGlobals() => _globals.Clear();
+
     // Exports list: each non-static (external-linkage) C function definition.
     // Tuple is (cName, csharpReturnType, csharpParamList). Library mode reads
     // this list to emit a matching [UnmanagedCallersOnly(EntryPoint = "name")]
@@ -177,6 +190,39 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // StructDef (if any) lands later in the same translation unit and
     // populates _structFields then.
     public EmitContent Visit(C.StructFwd n) => string.Empty;
+
+    // File-scope variable declarations. Appended to the _globals side
+    // channel; the shell wraps them in a `static unsafe class DotCcGlobals`
+    // declared in the type-decls section. Field type uses the QualifyPredefinedTypeName
+    // pass so `jmp_buf env;` (which after typedef lowering references
+    // `LongJmpToken`) reaches `Libc.LongJmpToken` correctly — bare
+    // nested-type names don't resolve at class-member-decl position
+    // for the same reason the alias-emit path qualifies them.
+    public EmitContent Visit(C.GlobalVar n)
+    {
+        var rawType = T(n.Arg0);
+        var type = QualifyPredefinedTypeName(rawType);
+        var name = T(n.Arg1);
+        // Reference types need `new T()`; value types initialize to default
+        // by C# semantics. Without an initializer, a C# reference field
+        // defaults to null, which breaks reference-equality dispatch
+        // (the longjmp exception filter compares Token instances). For
+        // predefined ref types (LongJmpToken) AND aliases that resolve
+        // to them (jmp_buf via typedef), auto-instantiate.
+        var isRefType = IsPredefinedRefTypeName(rawType) || _refTypeAliases.Contains(rawType);
+        var init = isRefType ? $" = new {type}()" : string.Empty;
+        _globals.Append("    public static unsafe ").Append(type).Append(' ').Append(name).Append(init).Append(";\n");
+        return string.Empty;
+    }
+
+    public EmitContent Visit(C.GlobalVarInit n)
+    {
+        var type = QualifyPredefinedTypeName(T(n.Arg0));
+        var name = T(n.Arg1);
+        var init = T(n.Arg3);
+        _globals.Append("    public static unsafe ").Append(type).Append(' ').Append(name).Append(" = ").Append(init).Append(";\n");
+        return string.Empty;
+    }
 
     public EmitContent Visit(C.MembersCons n) => T(n.Arg0) + T(n.Arg1);
     public EmitContent Visit(C.MembersOne n)  => T(n.Arg0);
@@ -333,13 +379,61 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // same type, real C# rejects duplicate aliases).
     public EmitContent Visit(C.TypedefAlias n)
     {
-        var type = T(n.Arg1);
+        var rawType = T(n.Arg1);
+        var type = QualifyPredefinedTypeName(rawType);
         var alias = T(n.Arg2);
+        // If the alias resolves (directly or transitively) to a predefined
+        // reference type, record the alias so GlobalVar can auto-init
+        // instances. `jmp_buf` → `LongJmpToken` is the canonical case.
+        if (IsPredefinedRefTypeName(rawType) || _refTypeAliases.Contains(rawType))
+        {
+            _refTypeAliases.Add(alias);
+        }
         if (alias != type && _aliasNames.Add(alias))
         {
             _aliases.Append("using unsafe ").Append(alias).Append(" = ").Append(type).Append(";\n");
         }
         return string.Empty;
+    }
+
+    /// <summary>
+    /// Set of typedef'd alias names whose underlying type is a
+    /// predefined C# reference type (currently just <c>LongJmpToken</c>
+    /// from <c>&lt;setjmp.h&gt;</c>). Used by <see cref="Visit(C.GlobalVar)"/>
+    /// to auto-instantiate the field — without an initializer the C#
+    /// field would default to <c>null</c>, which breaks the longjmp
+    /// exception filter that compares tokens by reference identity.
+    /// </summary>
+    private readonly HashSet<string> _refTypeAliases = new(StringComparer.Ordinal);
+
+    private static bool IsPredefinedRefTypeName(string typeText)
+    {
+        foreach (var name in Compiler.PredefinedTypeNames)
+        {
+            if (typeText == name) { return true; }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// In a <c>using unsafe Alias = X;</c> directive, C#'s name resolution
+    /// for X does NOT consult <c>using static</c> directives in the same
+    /// file — it only sees the enclosing namespace + type-alias usings.
+    /// So a nested type like <c>Libc.LongJmpToken</c>, even with
+    /// <c>using static Libc;</c> declared above, doesn't resolve as the
+    /// bare <c>LongJmpToken</c> when used as the RHS of a type alias.
+    /// Qualify it. The PredefinedTypeNames list (see Compiler) is small
+    /// and known; we prefix those with <c>Libc.</c> when emitting alias
+    /// directives. Inside method bodies the bare name still works via
+    /// <c>using static</c>, so this only affects the alias-emit path.
+    /// </summary>
+    private static string QualifyPredefinedTypeName(string type)
+    {
+        foreach (var name in Compiler.PredefinedTypeNames)
+        {
+            if (type == name) { return "Libc." + name; }
+        }
+        return type;
     }
 
     // `typedef Ret (*Name)(args);` → `using unsafe Name = delegate*<args, Ret>;`.
@@ -599,9 +693,107 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // Conditions are wrapped with B(...) so int- and pointer-valued conditions
     // (`while (1)`, `if (p)`, `for (...; n; ...)`) typecheck. The B overloads
     // live in BuildShell — see Compiler.BuildShell.
-    public EmitContent Visit(C.StmtIf n) => $"if (Cond.B({T(n.Arg2)})) {T(n.Arg4)}";
-    public EmitContent Visit(C.StmtIfElse n) =>
-        $"if (Cond.B({T(n.Arg2)})) {T(n.Arg4)}else {T(n.Arg6)}";
+    public EmitContent Visit(C.StmtIf n)
+    {
+        var condText = T(n.Arg2);
+        if (TryRecognizeSetjmpInIf(condText, out var envName, out var conditionIsZero))
+        {
+            // `if (setjmp(env)) { recovery }` with no else: the normal
+            // path continues after the if. We can't wrap "the rest of
+            // the function" locally — that's the documented limitation.
+            // Require an else branch for setjmp idioms.
+            throw new CompileException(
+                $"setjmp(env) in an `if` condition requires a matching `else` clause; " +
+                $"see the supported patterns in <setjmp.h>'s header comment.");
+        }
+        return $"if (Cond.B({condText})) {T(n.Arg4)}";
+    }
+
+    public EmitContent Visit(C.StmtIfElse n)
+    {
+        var condText = T(n.Arg2);
+        var thenBody = T(n.Arg4);
+        var elseBody = T(n.Arg6);
+        if (TryRecognizeSetjmpInIf(condText, out var envName, out var conditionIsZero))
+        {
+            // Map if/else to try/catch based on which condition shape
+            // we matched:
+            //   if (setjmp(env))         { recovery } else { normal }
+            //     → conditionIsZero == false → catch=then, try=else
+            //   if (setjmp(env) == 0)    { normal }   else { recovery }
+            //     → conditionIsZero == true  → catch=else, try=then
+            var (tryBody, catchBody) = conditionIsZero
+                ? (thenBody, elseBody)
+                : (elseBody, thenBody);
+            return
+                $"try {tryBody}" +
+                $"catch (Libc.LongJmpException __jmp) when (__jmp.Token == {envName}) " +
+                $"{{ var __longjmp_value = __jmp.Value; {catchBody} }}";
+        }
+        return $"if (Cond.B({condText})) {thenBody}else {elseBody}";
+    }
+
+    /// <summary>
+    /// Pattern-match a condition text for the standard <c>setjmp</c>
+    /// idioms. Returns the env-name and whether the condition was
+    /// <c>== 0</c> (true on first call) or bare (true on longjmp
+    /// recovery).
+    /// </summary>
+    private static bool TryRecognizeSetjmpInIf(string condText, out string envName, out bool conditionIsZero)
+    {
+        // Whitespace + parens are added by various visitors; canonicalise
+        // by stripping outer parens repeatedly before matching.
+        var s = condText.Trim();
+        while (s.Length >= 2 && s[0] == '(' && s[^1] == ')')
+        {
+            // Only strip if these parens are balanced as the outermost.
+            var depth = 0;
+            var balanced = true;
+            for (var i = 0; i < s.Length - 1; i++)
+            {
+                if (s[i] == '(') { depth++; }
+                else if (s[i] == ')') { depth--; if (depth == 0) { balanced = false; break; } }
+            }
+            if (!balanced) { break; }
+            s = s[1..^1].Trim();
+        }
+
+        // Shape A: `setjmp(NAME)` — truthy on recovery.
+        // Shape B: `setjmp(NAME) == 0` (or `0 == setjmp(NAME)`) — truthy on first call.
+        // The emit puts spaces around `==`; allow `0 == setjmp(...)` form
+        // too in case future visitors flip the operands.
+        var setjmpMatch = SetjmpCallPattern.Match(s);
+        if (setjmpMatch.Success && setjmpMatch.Index == 0 && setjmpMatch.Length == s.Length)
+        {
+            envName = setjmpMatch.Groups[1].Value;
+            conditionIsZero = false;
+            return true;
+        }
+
+        var eqMatch = SetjmpEqualsZeroPattern.Match(s);
+        if (eqMatch.Success)
+        {
+            envName = eqMatch.Groups[1].Value;
+            conditionIsZero = true;
+            return true;
+        }
+
+        envName = string.Empty;
+        conditionIsZero = false;
+        return false;
+    }
+
+    // Match `setjmp(IDENT)` with optional whitespace; capture the env name.
+    private static readonly System.Text.RegularExpressions.Regex SetjmpCallPattern =
+        new(@"^\s*setjmp\s*\(\s*(\w+)\s*\)\s*$", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    // Match `setjmp(IDENT) == 0` or `0 == setjmp(IDENT)`, with optional parens
+    // around the setjmp call or the zero. The emit's Equ visitor wraps both
+    // operands in parens, so the common shape we'll actually see is
+    // `(setjmp(env)) == (0)`.
+    private static readonly System.Text.RegularExpressions.Regex SetjmpEqualsZeroPattern =
+        new(@"^\s*\(?\s*setjmp\s*\(\s*(\w+)\s*\)\s*\)?\s*==\s*\(?\s*0\s*\)?\s*$|^\s*\(?\s*0\s*\)?\s*==\s*\(?\s*setjmp\s*\(\s*(\w+)\s*\)\s*\)?\s*$",
+            System.Text.RegularExpressions.RegexOptions.Compiled);
     public EmitContent Visit(C.StmtWhile n) => $"while (Cond.B({T(n.Arg2)})) {T(n.Arg4)}";
 
     // `do Stmt while (E) ;` — body runs at least once. C# accepts the same

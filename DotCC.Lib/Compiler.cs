@@ -134,6 +134,21 @@ public static class Compiler
     }
 
     /// <summary>
+    /// C#-side type names that the parser should recognise as type
+    /// identifiers from the start — without first seeing them on the
+    /// LHS of a <c>typedef</c>. Used to expose opaque libc-class types
+    /// (mainly through synthetic headers like <c>&lt;setjmp.h&gt;</c>
+    /// which writes <c>typedef LongJmpToken jmp_buf;</c>). dotcc
+    /// deliberately avoids inventing new C keywords for these — the
+    /// grammar stays a pure C subset, and the seed mechanism here is
+    /// what lets typedef-chain a C-side alias to a C#-side class.
+    /// </summary>
+    internal static readonly string[] PredefinedTypeNames =
+    {
+        "LongJmpToken", // <setjmp.h> — opaque jmp_buf target
+    };
+
+    /// <summary>
     /// Compile <paramref name="inputPaths"/> to a single C# source string.
     /// </summary>
     /// <param name="libraryMode">When true (frontend's <c>-shared</c> flag),
@@ -171,8 +186,11 @@ public static class Compiler
             // TypeNameRewriter: the C lexer hack. Promotes ID → TYPE_NAME for
             // any name previously bound by a `typedef`. Sits AFTER macro
             // expansion (so expanded names can also trigger typedef
-            // rewrites) and BEFORE the LA iterator.
-            using var typeRewriter = new TypeNameRewriter(macroExp);
+            // rewrites) and BEFORE the LA iterator. Seeded with the small
+            // set of C#-side libc classes that user code reaches by name
+            // through synthetic-header typedefs (e.g. <setjmp.h>'s
+            // `typedef LongJmpToken jmp_buf;`).
+            using var typeRewriter = new TypeNameRewriter(macroExp, PredefinedTypeNames);
             using var tokens = new SyncLATokenIterator(typeRewriter);
 
             Item result;
@@ -210,7 +228,7 @@ public static class Compiler
             throw new CompileException("no `main` function defined in any translation unit.");
         }
 
-        return BuildShell(mainArity, allFunctions.ToString(), emitter.StructDecls, emitter.UsingAliases, fileBased, libraryMode, emitter.Exports);
+        return BuildShell(mainArity, allFunctions.ToString(), emitter.StructDecls, emitter.UsingAliases, emitter.Globals, fileBased, libraryMode, emitter.Exports);
     }
 
     /// <summary>
@@ -319,13 +337,14 @@ public static class Compiler
         string emittedFnList,
         string structDecls,
         string usingAliases,
+        string globals,
         bool fileBased,
         bool libraryMode,
         IReadOnlyList<CSharpEmitter.Export> exports)
     {
         if (libraryMode)
         {
-            return BuildLibraryShell(emittedFnList, structDecls, usingAliases, exports);
+            return BuildLibraryShell(emittedFnList, structDecls, usingAliases, globals, exports);
         }
         // Embedded DotCC.Libc runtime block — spliced into the heredoc
         // below so the emitted .cs is self-contained even without a
@@ -395,6 +414,13 @@ public static class Compiler
             // <tgmath.h>'s _Generic macros do in real C; we get the
             // same dispatch for free without preprocessor machinery.
             using static Libc;
+            // ---- File-scope variables ---------------------------------
+            // C globals live as static fields of a `DotCcGlobals` class
+            // (declared at file end). `using static DotCcGlobals;` makes
+            // them visible by bare name in every function — C local
+            // functions can't capture top-level locals because they're
+            // emitted as `static`, hence the class indirection.
+            using static DotCcGlobals;
 
             // ---- typedef'd `using` aliases (C# 12+ permits `using unsafe X = Y;`
             //      at file scope, ahead of top-level statements). Empty when no
@@ -411,6 +437,13 @@ public static class Compiler
             //      statements to precede type declarations) ----
 
             {{structDecls}}
+
+            // C file-scope variables, collected as static fields. Empty
+            // class when no globals are declared — harmless but kept for
+            // shell-shape stability.
+            static unsafe class DotCcGlobals
+            {
+            {{globals}}}
 
             // C-truthy → C# bool. The visitor wraps every conditional context
             // (`if`/`while`/`for`-cond) with `Cond.B(...)` so int- and
@@ -443,6 +476,7 @@ public static class Compiler
         string emittedFnList,
         string structDecls,
         string usingAliases,
+        string globals,
         IReadOnlyList<CSharpEmitter.Export> exports)
     {
         // Same embedded DotCC.Libc runtime block as exe mode — the
@@ -488,6 +522,7 @@ public static class Compiler
             using System.Runtime.CompilerServices;
             using System.Text;
             using static Libc;
+            using static DotCcGlobals;
 
             // ---- typedef'd `using` aliases (same as exe mode).
             {{usingAliases}}
@@ -508,6 +543,13 @@ public static class Compiler
 
             // ---- Type declarations (top-level — same as exe mode). ----
             {{structDecls}}
+
+            // C file-scope variables, collected as static fields (same as
+            // exe mode). DotCcLib reaches them via `using static DotCcGlobals;`
+            // — adding that import here too so library-mode emits work.
+            static unsafe class DotCcGlobals
+            {
+            {{globals}}}
 
             // C-truthy → C# bool. Same set of overloads as exe mode.
             static class Cond

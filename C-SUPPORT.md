@@ -120,6 +120,7 @@ Source of truth for the grammar: `DotCC.Lib/c.lalr.yaml`. Source of truth for th
 | Function definition `T f(args) { … }` | ✅ | `funcDef` / `funcDefNoArgs` / `funcDefVoidArgs` (the C-correct `(void)` form). Static variants for each. |
 | Function prototype `T f(args);` | ✅ | `protoDef` / `protoDefNoArgs` / `protoDefVoidArgs` — emitted as empty (C# methods hoist). Static variants for each. |
 | Multiple declarators `int x, y;` | ✅ | `Decl → Type DeclItemList`; `DeclItem → ID | ID = E`. Plain item lowers to `name = default` (so C# definite-assignment is satisfied for struct/union fields). Mixed init / no-init works (`int a = 1, b, c = 3;`). Array declarators stay single-only (the lowering to `T* arr = stackalloc T[N]` doesn't compose with peers). Fixture `multi-decl/` |
+| File-scope variable `T name;` / `T name = E;` | ✅ | C globals at file scope (e.g. `jmp_buf env;` for setjmp). Collected by the emitter into a `static unsafe class DotCcGlobals` declared in the type-decls section; `using static DotCcGlobals;` in the shell brings the names into scope unqualified for every emitted function. **Multi-declarator at file scope** (`int a, b;`) not yet supported — declare each separately. Aliases that resolve through `typedef` to predefined C# reference types (currently just `jmp_buf` → `Libc.LongJmpToken`) get auto-initialized with `new T()` so reference-equality dispatch (longjmp's exception filter) works. |
 | Initializer lists `int arr[] = {1, 2, 3}`, `Point p = {1, 2}` | ✅ | Array form lowers to `T* arr = stackalloc T[]{ … }` (both sized `int x[3]` and implicit-size `int x[]`). Struct positional init lowers to `Point p = new Point { x = 1, y = 2 };` — the emitter tracks field names per struct in `_structFields` (populated by `StructDef` / `TypedefStruct` / `UnionDef` draining the names pushed by each `StructMember` visit) and looks them up to rebuild the named-initializer form C# requires. Partial init `Vec3 v = {7}` zeroes the trailing fields (C# default semantics matching C). Fixtures `array-init/`, `struct-init/`. |
 | Designated initialisers (C99) `{.x = 1}` | ✅ | New `MemberInit` / `MemberInitList` grammar productions; `Decl → Type ID '=' '{' MemberInitList '}'` distinguishes from the positional form by lookahead on `.` after `{`. User provides field names directly so no `_structFields` lookup is needed at emit time. Omitted fields zero-fill per C99 (matches C#'s struct object-initializer default behavior). Fixture `struct-linked-list/` (designated init for `Pair`). |
 | Storage classes `static`, `extern`, `auto`, `register` | 🟡 | `static` recognized as a function-level modifier — function definitions with `static` have internal linkage (no `[UnmanagedCallersOnly]` export wrapper in library mode). `extern` not yet a keyword but bare top-level functions already have external linkage by C default. `auto`/`register` are 🚫. Block-scope `static`/`extern` on variables (file-scope statics, function-static locals) not yet. |
@@ -324,7 +325,7 @@ Synthetic header at `DotCC.Lib/include/assert.h` with the canonical `NDEBUG`-awa
 |---|---|---|
 | `errno.h` (errno, perror) | 🟡 | Thread-local int; map common values to BCL exceptions |
 | `signal.h` | 🚫 | Out of scope — managed runtimes don't model POSIX signals usefully |
-| `setjmp.h` (`setjmp`/`longjmp`) | 🚫 | Cannot be implemented safely on CLR — non-local jumps break C# stack invariants |
+| `setjmp.h` (`setjmp`/`longjmp`) | 🟡 | Implemented via .NET exceptions. `longjmp(env, val)` throws a tagged `LongJmpException` carrying the env token + value; the emitter recognises `if (setjmp(env) == 0) {normal} else {recovery}` and `if (setjmp(env)) {recovery} else {normal}` patterns in user code and rewrites the `if/else` into `try / catch when (__jmp.Token == env)`. **Bonus over real C**: `finally` blocks DO run on the unwind (.NET exception semantics) — strictly better than real `longjmp`'s silent-skip behavior. **Limitation**: only the two recognised `if/else` shapes work. Other forms (`switch (setjmp(env))`, raw value capture into a variable, `setjmp` outside `if/else` conditions) raise `CompileException`. `jmp_buf` lowers to the predefined C# type `Libc.LongJmpToken` via the TypeNameRewriter seed list — no fake keywords in the grammar. Fixture `setjmp-cleanup/` exercises a 3-deep frame unwind. |
 
 ## Beyond C99
 
@@ -356,7 +357,6 @@ Listed here so we don't relitigate them. All marked 🚫 above.
 - **`long double`** — no C# equivalent.
 - **`volatile`** — no useful semantic on managed runtimes; we just accept and ignore the qualifier.
 - **`restrict`** — optimisation hint with no analogue in C#.
-- **`setjmp`/`longjmp`** — non-local jumps can't be implemented safely on the CLR; programs that need them are out of dotcc's reach.
 - **`signal.h`** — POSIX signal model doesn't map onto .NET.
 - **`gets`** — removed in C11; security disaster.
 - **Annex K bounds-checked interfaces** — almost no real-world C uses them.
@@ -365,7 +365,7 @@ Listed here so we don't relitigate them. All marked 🚫 above.
 
 ## Synthetic system headers + runtime
 
-dotcc ships its own copies of the C99 standard headers (`stdio.h`, `stdlib.h`, `stddef.h`, `stdbool.h`, `stdint.h`, `limits.h`, `float.h`, `assert.h`, `ctype.h`, `math.h`, `tgmath.h`, `string.h`) AND its libc implementations, both as **real files in source control**, both embedded into `DotCC.Lib.dll` so the compiler can serve them at emit time without any runtime disk I/O. Same model as clang's `lib/clang/<ver>/include/` tree, just loaded from the assembly manifest.
+dotcc ships its own copies of the C99 standard headers (`stdio.h`, `stdlib.h`, `stddef.h`, `stdbool.h`, `stdint.h`, `limits.h`, `float.h`, `assert.h`, `ctype.h`, `setjmp.h`, `math.h`, `tgmath.h`, `string.h`) AND its libc implementations, both as **real files in source control**, both embedded into `DotCC.Lib.dll` so the compiler can serve them at emit time without any runtime disk I/O. Same model as clang's `lib/clang/<ver>/include/` tree, just loaded from the assembly manifest.
 
 **Two parallel embeddings (see `DotCC.Lib.csproj`):**
 

@@ -52,9 +52,22 @@ internal sealed class TypeNameRewriter : RewritingTokenStream
     private readonly int _openParenSymbol;
     private readonly int _closeParenSymbol;
     private readonly int _starSymbol;
-    private readonly HashSet<string> _typeNames = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _typeNames;
+    private readonly HashSet<string> _seedTypeNames;
 
-    public TypeNameRewriter(ISyncIterator<Item> inner) : base(inner)
+    /// <summary>
+    /// Construct a rewriter over <paramref name="inner"/>, optionally
+    /// pre-populated with <paramref name="seedTypeNames"/> — identifiers
+    /// the user code can reference as types without first seeing a
+    /// <c>typedef</c> definition. Used to expose C#-side libc types
+    /// (e.g. <c>LongJmpToken</c> for <c>&lt;setjmp.h&gt;</c>) so a
+    /// synthetic header can write
+    /// <c>typedef LongJmpToken jmp_buf;</c> and have it parse —
+    /// without introducing non-C keywords into the grammar.
+    /// </summary>
+    public TypeNameRewriter(
+        ISyncIterator<Item> inner,
+        IEnumerable<string>? seedTypeNames = null) : base(inner)
     {
         // Resolve symbol ids by name from the generated grammar's definition.
         // Done once at construction so per-token dispatch stays O(1).
@@ -72,6 +85,16 @@ internal sealed class TypeNameRewriter : RewritingTokenStream
         _openParenSymbol = map["("];
         _closeParenSymbol = map[")"];
         _starSymbol = map["*"];
+
+        // Seed set lives separately from the dynamic set populated by
+        // user `typedef`s, so Reset() can clear the dynamic side without
+        // forgetting the predefined libc-class names.
+        _seedTypeNames = new HashSet<string>(StringComparer.Ordinal);
+        if (seedTypeNames is not null)
+        {
+            foreach (var name in seedTypeNames) { _seedTypeNames.Add(name); }
+        }
+        _typeNames = new HashSet<string>(_seedTypeNames, StringComparer.Ordinal);
     }
 
     protected override void ProcessToken(Item token)
@@ -204,7 +227,10 @@ internal sealed class TypeNameRewriter : RewritingTokenStream
 
     public override void Reset()
     {
+        // Restore to the seed-only state so predefined libc-class type
+        // names survive across reuse but per-TU typedef'd aliases don't.
         _typeNames.Clear();
+        foreach (var name in _seedTypeNames) { _typeNames.Add(name); }
         base.Reset();
     }
 }

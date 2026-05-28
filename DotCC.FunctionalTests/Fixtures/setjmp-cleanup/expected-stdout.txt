@@ -1,0 +1,11 @@
+layer1: enter
+layer2: enter
+layer3: ok x=5
+layer2: exit
+layer1: exit
+main: normal completion
+---
+layer1: enter
+layer2: enter
+layer3: bailing with -1
+main: caught error
