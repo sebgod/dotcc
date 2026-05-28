@@ -251,6 +251,28 @@ public sealed class CompilerTests
     }
 
     [Fact]
+    public void Include_stdint_h_typedefs_lower_to_using_aliases()
+    {
+        // <stdint.h> declares int8_t/int16_t/int32_t/int64_t + uint variants
+        // and size_t/intptr_t/etc. as typedefs over the primitive int family.
+        // The emitter lowers each `typedef T NAME;` to `using unsafe NAME = T;`
+        // at file scope; the embedded resource pipeline carries those into
+        // the emitted program. Spot-check the C# emit.
+        var src = WriteTemp("""
+            #include <stdint.h>
+            int main() { int32_t a = 42; uint64_t b = 1000; return (int)a + (int)b; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("using unsafe int32_t = int;");
+            emitted.ShouldContain("using unsafe uint64_t = ulong;");
+            emitted.ShouldContain("using unsafe size_t = ulong;");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Include_string_h_resolves_and_calls_typecheck()
     {
         // <string.h> is a real .h file under DotCC.Lib/include/ — the

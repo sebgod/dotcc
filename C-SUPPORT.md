@@ -216,6 +216,24 @@ Synthetic header at `DotCC.Lib/include/string.h` declares the surface; implement
 | `memset` | ✅ | `NativeMemory.Fill`; declared in `<string.h>`. |
 | `memchr` | ❌ | Find byte in buffer |
 
+### `stdint.h` (C99)
+
+Synthetic header at `DotCC.Lib/include/stdint.h` declares the fixed-width integer typedefs + limit macros. Each typedef lowers via the standard dotcc typedef path to a C# `using unsafe NAME = T;` alias at file scope. Fixture `stdint-fixed-widths/`.
+
+| Type | Status | Underlying C type → C# type |
+|---|---|---|
+| `int8_t` / `uint8_t` | ✅ | `signed char` / `unsigned char` → `sbyte` / `byte` |
+| `int16_t` / `uint16_t` | ✅ | `short` / `unsigned short` → `short` / `ushort` |
+| `int32_t` / `uint32_t` | ✅ | `int` / `unsigned int` → `int` / `uint` |
+| `int64_t` / `uint64_t` | ✅ | `long` / `unsigned long` → `long` / `ulong` |
+| `intptr_t` / `uintptr_t` | ✅ | `long` / `unsigned long` (LP64-style — dotcc's `long` is unconditionally 64-bit). Differs from MSVC-Windows's LLP64 where these are still 8 bytes but via `__int64`. Same observable behavior. |
+| `size_t` / `ptrdiff_t` | ✅ | `unsigned long` / `long`. |
+| `intmax_t` / `uintmax_t` | ✅ | `long` / `unsigned long`. |
+| `INT8_MIN` / `MAX`, `UINT8_MAX`, …, `INT64_MIN` / `MAX`, `UINT64_MAX` | ✅ | `#define` numeric literals — usable as integer constant expressions. |
+| `INTPTR_MIN` / `MAX`, `UINTPTR_MAX`, `SIZE_MAX`, `PTRDIFF_MIN` / `MAX`, `INTMAX_MIN` / `MAX`, `UINTMAX_MAX` | ✅ | All alias the `INT64`/`UINT64` macros (LP64). |
+| `int_least8_t` / `int_fast8_t` / etc. families | ❌ | C99-optional — rarely seen in modern code. Same shape as the fixed-width forms above when added. |
+| Format-string macros `PRId32` etc. | ❌ | Live in `<inttypes.h>` — separate header, not yet shipped. |
+
 ### `math.h`
 
 Every function exists as a `double` overload (routes to `System.Math`) **and** a `float` overload (routes to `System.MathF`); the explicit `…f`-suffix C99 forms (`sinf`, `cosf`, `sqrtf`, …) are wired alongside. Lives in `DotCC.Libc/MathLib.cs` as a `partial` extension of `Libc`. The same `.cs` file is **embedded into `DotCC.Lib.dll`** at build time (`<EmbeddedResource Include="..\DotCC.Libc\*.cs">`); `Compiler.LoadRuntimeBlock` splices it into every emitted program's type-decls section, and `using static Libc;` brings the methods into scope by bare name so user calls resolve through C# overload resolution. Single source of truth — no duplicated inline copy. Header lives at `DotCC.Lib/include/math.h` (also embedded — see "Synthetic system headers + runtime" below). Fixture `math-basic/` covers double-precision dispatch end-to-end with MSVC oracle validation.
@@ -304,7 +322,7 @@ Listed here so we don't relitigate them. All marked 🚫 above.
 
 ## Synthetic system headers + runtime
 
-dotcc ships its own copies of the C99 standard headers (`stdio.h`, `stdlib.h`, `stddef.h`, `stdbool.h`, `math.h`, `tgmath.h`, `string.h`) AND its libc implementations, both as **real files in source control**, both embedded into `DotCC.Lib.dll` so the compiler can serve them at emit time without any runtime disk I/O. Same model as clang's `lib/clang/<ver>/include/` tree, just loaded from the assembly manifest.
+dotcc ships its own copies of the C99 standard headers (`stdio.h`, `stdlib.h`, `stddef.h`, `stdbool.h`, `stdint.h`, `math.h`, `tgmath.h`, `string.h`) AND its libc implementations, both as **real files in source control**, both embedded into `DotCC.Lib.dll` so the compiler can serve them at emit time without any runtime disk I/O. Same model as clang's `lib/clang/<ver>/include/` tree, just loaded from the assembly manifest.
 
 **Two parallel embeddings (see `DotCC.Lib.csproj`):**
 
