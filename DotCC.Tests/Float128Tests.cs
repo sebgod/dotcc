@@ -431,6 +431,38 @@ public sealed class Float128Tests
     }
 
     [Fact]
+    public void Ieee_misc_functions_and_constants()
+    {
+        // Constants.
+        Float128.ToDouble(Float128.Pi).ShouldBe(Math.PI, 1e-15);
+        Float128.ToDouble(Float128.Tau).ShouldBe(Math.Tau, 1e-15);
+        Float128.ToDouble(Float128.E).ShouldBe(Math.E, 1e-15);
+        Float128.IsInfinity(Float128.MaxValue).ShouldBeFalse();
+        Float128.IsInfinity(Float128.BitIncrement(Float128.MaxValue)).ShouldBeTrue(); // nextUp(max)=inf
+
+        // ScaleB / ILogB.
+        Float128.ToDouble(Float128.ScaleB(Float128.FromDouble(3.0), 4)).ShouldBe(48.0);   // 3·2^4
+        Float128.ILogB(Float128.FromDouble(1.0)).ShouldBe(0);
+        Float128.ILogB(Float128.FromDouble(8.0)).ShouldBe(3);
+        Float128.ILogB(Float128.FromDouble(0.5)).ShouldBe(-1);
+
+        // IEEE remainder (nearest), distinct from fmod.
+        Float128.ToDouble(Float128.Ieee754Remainder(Float128.FromDouble(5.0), Float128.FromDouble(3.0))).ShouldBe(-1.0); // 5 - 2*3
+        Float128.ToDouble(Float128.Fmod(Float128.FromDouble(5.0), Float128.FromDouble(3.0))).ShouldBe(2.0);             // contrast
+
+        // nextUp/nextDown bracket the value.
+        (Float128.BitIncrement(Float128.One) > Float128.One).ShouldBeTrue();
+        (Float128.BitDecrement(Float128.One) < Float128.One).ShouldBeTrue();
+        Float128.ToDouble(Float128.BitIncrement(Float128.Zero)).ShouldBe(0.0); // smallest subnormal narrows to 0
+        Float128.IsNegative(Float128.BitDecrement(Float128.Zero)).ShouldBeTrue();
+
+        // RootN.
+        Float128.ToDouble(Float128.RootN(Float128.FromDouble(32.0), 5)).ShouldBe(2.0, 1e-13);
+        Float128.ToDouble(Float128.RootN(Float128.FromDouble(-32.0), 5)).ShouldBe(-2.0, 1e-13); // odd root of negative
+        Float128.IsNaN(Float128.RootN(Float128.FromDouble(-4.0), 2)).ShouldBeTrue();            // even root of negative
+    }
+
+    [Fact]
     public void Relational_operators_follow_ieee()
     {
         Float128 one = Float128.One, two = Float128.FromInt64(2);

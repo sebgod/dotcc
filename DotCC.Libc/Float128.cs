@@ -69,6 +69,16 @@ public readonly struct Float128 : IEquatable<Float128>, IComparable<Float128>
     // Quiet NaN: max exponent, MSB of the fraction set.
     public static Float128 NaN => new(Assemble(false, MaxBiasedExponent, UInt128.One << (MantissaBits - 1)));
 
+    /// <summary>Largest finite binary128 (exponent 0x7FFE, all fraction bits set).</summary>
+    private static UInt128 MaxFiniteBits => ((UInt128)(MaxBiasedExponent - 1) << ExponentShift) | MantissaMask;
+    public static Float128 MaxValue => new(MaxFiniteBits);
+    public static Float128 MinValue => new(MaxFiniteBits | (UInt128.One << SignShift));
+    /// <summary>Smallest positive subnormal (.NET <c>Epsilon</c> convention).</summary>
+    public static Float128 Epsilon => new(UInt128.One);
+    public static Float128 Pi => FromFixedSigned(FpPi);
+    public static Float128 Tau => FromFixedSigned(FpPi << 1);
+    public static Float128 E => Exp(One);
+
     // ── predicates ───────────────────────────────────────────────────────────
     public static bool IsNaN(Float128 v) => v.BiasedExponent == MaxBiasedExponent && v.TrailingSignificand != UInt128.Zero;
     public static bool IsInfinity(Float128 v) => v.BiasedExponent == MaxBiasedExponent && v.TrailingSignificand == UInt128.Zero;
@@ -599,6 +609,68 @@ public readonly struct Float128 : IEquatable<Float128>, IComparable<Float128>
         while (x * x * x > n) { x -= BigInteger.One; }
         while ((x + BigInteger.One) * (x + BigInteger.One) * (x + BigInteger.One) <= n) { x += BigInteger.One; }
         return x;
+    }
+
+    /// <summary>x · 2ⁿ (C <c>scalbn</c>), with overflow/underflow rounding.</summary>
+    public static Float128 ScaleB(Float128 x, int n)
+    {
+        if (IsNaN(x) || IsInfinity(x) || IsZero(x)) { return x; }
+        Decompose(x, out bool s, out BigInteger sig, out int q);
+        return RoundToBinary128(s, sig, q + n, extraSticky: false);
+    }
+
+    /// <summary>floor(log₂|x|) as an int (C <c>ilogb</c>). 0/NaN → int.MinValue,
+    /// inf → int.MaxValue.</summary>
+    public static int ILogB(Float128 x)
+    {
+        if (IsNaN(x) || IsZero(x)) { return int.MinValue; }
+        if (IsInfinity(x)) { return int.MaxValue; }
+        Decompose(x, out _, out BigInteger sig, out int q);
+        return q + (int)sig.GetBitLength() - 1;
+    }
+
+    /// <summary>IEEE remainder x − n·y, n = round-to-nearest-even(x/y). Exact.</summary>
+    public static Float128 Ieee754Remainder(Float128 x, Float128 y)
+    {
+        if (IsNaN(x) || IsNaN(y) || IsInfinity(x) || IsZero(y)) { return NaN; }
+        if (IsInfinity(y) || IsZero(x)) { return x; }
+        Decompose(x, out bool xs, out BigInteger mx, out int qx);
+        Decompose(y, out _, out BigInteger my, out int qy);
+        int c = Math.Min(qx, qy);
+        BigInteger bigX = (xs ? -mx : mx) << (qx - c);
+        BigInteger absY = my << (qy - c);
+        BigInteger n = BigInteger.DivRem(bigX, absY, out BigInteger rem);
+        BigInteger twice = BigInteger.Abs(rem) << 1;
+        if (twice > absY || (twice == absY && !n.IsEven)) { n += bigX.Sign >= 0 ? 1 : -1; }
+        BigInteger r = bigX - n * absY;
+        if (r.IsZero) { return xs ? NegativeZero : Zero; }
+        return RoundToBinary128(r.Sign < 0, BigInteger.Abs(r), c, extraSticky: false);
+    }
+
+    /// <summary>Next representable value toward +∞ (.NET <c>BitIncrement</c>).</summary>
+    public static Float128 BitIncrement(Float128 x)
+    {
+        if (IsNaN(x)) { return x; }
+        UInt128 signMask = UInt128.One << SignShift;
+        if (IsInfinity(x)) { return x.SignBit ? new Float128(signMask | MaxFiniteBits) : x; }
+        if (IsZero(x)) { return Epsilon; }
+        return x.SignBit ? new Float128(x._bits - 1) : new Float128(x._bits + 1);
+    }
+
+    /// <summary>Next representable value toward −∞ (.NET <c>BitDecrement</c>).</summary>
+    public static Float128 BitDecrement(Float128 x) => Negate(BitIncrement(Negate(x)));
+
+    /// <summary>n-th root x^(1/n). sqrt/cbrt for n=2/3; otherwise exp(log|x|/n)
+    /// with sign handling for odd roots of negatives.</summary>
+    public static Float128 RootN(Float128 x, int n)
+    {
+        if (n == 2) { return Sqrt(x); }
+        if (n == 3) { return Cbrt(x); }
+        if (IsNaN(x)) { return NaN; }
+        bool negBase = x.SignBit && !IsZero(x);
+        if (negBase && (n & 1) == 0) { return NaN; } // even root of a negative
+        Float128 mag = Pow(Abs(x), Divide(One, FromInt64(n)));
+        return (negBase && (n & 1) == 1) ? Negate(mag) : mag;
     }
 
     /// <summary>Integer floor-sqrt of a non-negative BigInteger (Newton's

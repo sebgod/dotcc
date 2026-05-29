@@ -252,6 +252,11 @@ public sealed class GccQuadOracleTests
         => AssertOpCloseToGcc(GccQuadOracle.Atan2, BuildPairsTrig(),
             c => Float128.Atan2(Float128.FromBits(c[0]), Float128.FromBits(c[1])).Bits, maxUlp: 3);
 
+    [Fact]
+    public void Float128_remainder_matches_gcc()  // exact ⇒ bit-exact
+        => AssertOpMatchesGcc(GccQuadOracle.Remainder, BuildPairs(),
+            c => Float128.Ieee754Remainder(Float128.FromBits(c[0]), Float128.FromBits(c[1])).Bits);
+
     private static List<UInt128[]> BuildTrigInputs()
     {
         var rng = new Random(0x517);
