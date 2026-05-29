@@ -138,7 +138,7 @@ If you change the grammar (`c.lalr.yaml`), the generated surface changes in lock
 | C | Emitted C# |
 |---|---|
 | `int` / `float` / `double` / `void` | `int` / `float` / `double` / `void` |
-| `_Float128` / `__float128` (C23) | `Float128` — MIT software IEEE-754 binary128 (`DotCC.Libc/Float128.cs`), clean-room, oracle-validated vs gcc. Arithmetic + int/`double` conversions via C# operators. |
+| `_Float128` / `__float128` (C23) | `Float128` — MIT software IEEE-754 binary128 (`DotCC.Libc/Float128.cs`), clean-room. Full arithmetic + the complete `<math.h>` surface (algebraic correctly-rounded; transcendentals via a BigInteger fixed-point core) — every op validated against gcc's binary128 (bit-exact where correctly-rounded, ≤2–4 ULP for transcendentals). `%Lf`/`%Le`/`%Lg` printing + decimal Parse; implements `IBinaryFloatingPointIeee754<Float128>`. |
 | `char` | `byte` (so `char*` arithmetic walks bytes) |
 | `T*` | `T*` (unsafe pointer) |
 | `"foo"` | `L("foo\0"u8)` — pinned UTF-8 RVA pointer via `MemoryMarshal.GetReference` |
