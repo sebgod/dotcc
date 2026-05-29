@@ -1516,6 +1516,92 @@ public sealed class CompilerTests
         finally { File.Delete(src); }
     }
 
+    // ---- shadowing fixes ---------------------------------------------------
+
+    [Fact]
+    public void Local_shadowing_an_enum_constant_resolves_to_the_local()
+    {
+        // A local/param named like an enum constant must emit the bare local
+        // name, NOT EnumName.Member (a const, not an lvalue).
+        var src = WriteTemp("""
+            enum E { X, Y };
+            int f(int X) { return X + Y; }
+            int main() {
+                int Y = 5;
+                Y = Y + 1;
+                return f(Y);
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            // The shadowing local `Y` is assigned (lvalue) — must be bare `Y`,
+            // never `E.Y`. The param `X` likewise stays bare inside f.
+            emitted.ShouldContain("Y = (Y + 1)");
+            emitted.ShouldNotContain("E.Y =");
+            // The genuine, un-shadowed enum use `Y` inside f still resolves to
+            // the enum constant.
+            emitted.ShouldContain("E.Y");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Local_shadowing_a_libc_builtin_name_is_a_plain_call()
+    {
+        // A function-pointer local named like a libc builtin must be called as
+        // an ordinary call, not lowered as the builtin. `setjmp` is the sharp
+        // case: without the guard its special-case returns a SetjmpCall marker
+        // that throws when used outside an if/else — so a plain `return
+        // setjmp(x)` would fail to emit at all.
+        var src = WriteTemp("""
+            typedef int (*fn)(int a);
+            int dbl(int x) { return x * 2; }
+            int main() {
+                fn setjmp = &dbl;
+                return setjmp(21);
+            }
+            """);
+        try
+        {
+            EmitContentShouldBePlainCall(src);
+        }
+        finally { File.Delete(src); }
+    }
+
+    private static void EmitContentShouldBePlainCall(string src)
+    {
+        var emitted = Compiler.EmitCSharp(new[] { src });  // must not throw
+        emitted.ShouldContain("setjmp(21)");
+        emitted.ShouldContain("return setjmp(21);");
+    }
+
+    [Fact]
+    public void Malloc_promote_interoperates_with_keyword_escaped_var_name()
+    {
+        // A promotable malloc'd pointer named with a C# keyword (`new`): the
+        // promoted decl, the `.` accesses, and the dropped free must all agree
+        // on the @-escaped name — the peephole maps are keyed by the raw name.
+        var src = WriteTemp("""
+            struct S { int x; };
+            int main() {
+                struct S* new = (struct S*)malloc(sizeof(struct S));
+                new->x = 7;
+                free(new);
+                return new->x;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("S @new = new S()");  // promoted + escaped
+            emitted.ShouldContain("(@new.x)");          // arrow -> dot, escaped
+            emitted.ShouldNotContain("@new->");          // no pointer arrow left
+            emitted.ShouldNotContain("S new = new S()"); // raw name never emitted
+        }
+        finally { File.Delete(src); }
+    }
+
     [Fact]
     public void Variadic_macro_with_named_params_plus_extras()
     {

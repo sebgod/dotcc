@@ -111,6 +111,32 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // functions can each declare `static int x`) and this reference rewrite.
     private readonly Dictionary<string, string> _fnStatics = new(StringComparer.Ordinal);
 
+    // ---- local/param names in the current function -----------------------
+    // Raw C names declared as ordinary identifiers (locals, params) in the
+    // function being emitted. Reset per function (StartFn), populated at each
+    // declaration site. Consulted by Visit(Var) so a local that SHADOWS an
+    // enumerator constant of the same name resolves to the local — not to the
+    // `EnumName.Member` rewrite, which would emit a non-lvalue and not compile.
+    // A flat per-function set (no block-scope stack), which is correct for all
+    // realistic code; the only miss is an enumerator referenced in an outer
+    // block AFTER a same-named inner-block local closed — a non-pattern. The
+    // declaration always reduces before later uses (statements reduce in source
+    // order), so the name is registered in time.
+    private readonly HashSet<string> _localNames = new(StringComparer.Ordinal);
+
+    // Parameter names stage here. Params reduce as part of the FnSig BEFORE
+    // StartFn establishes the function scope (and clears _localNames), so they
+    // can't be registered directly — StartFn drains this into _localNames once
+    // the scope exists, then the body's decls add to it live.
+    private readonly List<string> _pendingParams = new();
+
+    // Register a block-scope declared name for shadow resolution. No-op at file
+    // scope (globals can't share an enumerator's name in C anyway).
+    private void NoteLocal(string rawName)
+    {
+        if (_currentFunctionName is not null) { _localNames.Add(rawName); }
+    }
+
     // Decisions consumed by the emit pass (function name, variable name).
     private readonly IReadOnlySet<(string Fn, string Var)> _promotableIn;
     // Results produced by the analysis pass (finalised per function at FuncDef).
@@ -205,6 +231,10 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         // Fresh per-function scopes (no nested functions in C).
         _fnMalloc.Clear();
         _fnStatics.Clear();
+        _localNames.Clear();
+        // Adopt the params staged during this FnSig's ParamList reduction.
+        foreach (var p in _pendingParams) { _localNames.Add(p); }
+        _pendingParams.Clear();
         return new EmitContent.FnHeader(type, name, pars, isStatic);
     }
 
@@ -636,13 +666,13 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     public EmitContent Visit(C.FnsOne n) => T(n.Arg0);
 
     // Params
-    public EmitContent Visit(C.Param n) => $"{T(n.Arg0)} {Id(T(n.Arg1))}";
+    public EmitContent Visit(C.Param n) { _pendingParams.Add(T(n.Arg1)); return $"{T(n.Arg0)} {Id(T(n.Arg1))}"; }
     // C array-parameter decay: `T arr[]` / `T arr[N]` ≡ `T* arr` per
     // C99 §6.7.5.3p7. The size in the sized form is informational only —
     // we discard it (intentionally don't evaluate Arg3) since C semantics
     // give the call site no way to observe a mismatch anyway.
-    public EmitContent Visit(C.ParamArrayUnsized n) => $"{T(n.Arg0)}* {Id(T(n.Arg1))}";
-    public EmitContent Visit(C.ParamArraySized n) => $"{T(n.Arg0)}* {Id(T(n.Arg1))}";
+    public EmitContent Visit(C.ParamArrayUnsized n) { _pendingParams.Add(T(n.Arg1)); return $"{T(n.Arg0)}* {Id(T(n.Arg1))}"; }
+    public EmitContent Visit(C.ParamArraySized n) { _pendingParams.Add(T(n.Arg1)); return $"{T(n.Arg0)}* {Id(T(n.Arg1))}"; }
     public EmitContent Visit(C.ParamsCons n) => $"{T(n.Arg0)}, {T(n.Arg2)}";
     public EmitContent Visit(C.ParamsOne n) => T(n.Arg0);
     public EmitContent Visit(C.ParamsVararg n) => $"{T(n.Arg0)}, params object[] _va";
@@ -987,6 +1017,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     {
         var type = T(n.Arg0);
         var entries = DE(n.Arg1);
+        foreach (var e in entries) { NoteLocal(e.Name); }  // shadow resolution
 
         // malloc → stack-value peephole: only single-declarator
         // `S* p = (S*)malloc(sizeof(S));` is eligible. Record whether the
@@ -1005,7 +1036,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
                 // after explicit field writes in any promotable function (the
                 // usage analysis guarantees `->`-only access), so zero-init vs
                 // C's uninitialised malloc is unobservable.
-                return $"{structType} {entries[0].Name} = new {structType}()";
+                return $"{structType} {Id(entries[0].Name)} = new {structType}()";
             }
         }
 
@@ -1067,17 +1098,26 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // alloc, no GC pin) so arrays live in the same lifetime as locals — matches
     // C semantics for block-scoped automatic arrays. Pointer subscript `arr[i]`
     // works directly in C# unsafe contexts (it desugars to `*(arr + i)`).
-    public EmitContent Visit(C.DeclArr n) =>
-        $"{T(n.Arg0)}* {Id(T(n.Arg1))} = stackalloc {T(n.Arg0)}[{StripOuterParens(T(n.Arg3))}]";
+    public EmitContent Visit(C.DeclArr n)
+    {
+        NoteLocal(T(n.Arg1));
+        return $"{T(n.Arg0)}* {Id(T(n.Arg1))} = stackalloc {T(n.Arg0)}[{StripOuterParens(T(n.Arg3))}]";
+    }
 
     // C `T arr[N] = {1, 2, 3}` (or `T arr[] = {…}`) → C# `T* arr = stackalloc T[]{ 1, 2, 3 }`.
     // The explicit-size form ignores the size operand because C# infers it
     // from the initializer; both shapes share the same emit. ArgList arrives
     // as a typed EmitContent.Args (read via A()) — no sentinel decoding.
-    public EmitContent Visit(C.DeclArrInit n) =>
-        EmitArrInit(T(n.Arg0), T(n.Arg1), A(n.Arg7));
-    public EmitContent Visit(C.DeclArrInitImplicit n) =>
-        EmitArrInit(T(n.Arg0), T(n.Arg1), A(n.Arg6));
+    public EmitContent Visit(C.DeclArrInit n)
+    {
+        NoteLocal(T(n.Arg1));
+        return EmitArrInit(T(n.Arg0), T(n.Arg1), A(n.Arg7));
+    }
+    public EmitContent Visit(C.DeclArrInitImplicit n)
+    {
+        NoteLocal(T(n.Arg1));
+        return EmitArrInit(T(n.Arg0), T(n.Arg1), A(n.Arg6));
+    }
 
     private static string EmitArrInit(string type, string name, IReadOnlyList<string> args) =>
         $"{type}* {Id(name)} = stackalloc {type}[]{{ {string.Join(", ", args)} }}";
@@ -1091,6 +1131,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     {
         var type = T(n.Arg0);
         var name = T(n.Arg1);
+        NoteLocal(name);
         var members = IM(n.Arg4);  // typed InitMembers list
         return $"{type} {Id(name)} = new {type} {{ {string.Join(", ", members)} }}";
     }
@@ -1123,6 +1164,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     {
         var type = T(n.Arg0);
         var name = T(n.Arg1);
+        NoteLocal(name);
         var values = A(n.Arg4);  // typed EmitContent.Args — no sentinel split
 
         if (!_structFields.TryGetValue(type, out var fields))
@@ -1271,10 +1313,14 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         var member = Id(T(n.Arg2));
         // Count a `->` whose base is a malloc-candidate variable, and choose the
         // C# operator: a promoted stack value uses `.`, a low-level pointer `->`.
-        if (_currentFunctionName is string fn && _fnMalloc.TryGetValue(baseExpr, out var mv))
+        // The malloc maps are keyed by the RAW C name, but `baseExpr` is the
+        // emitted (possibly @-escaped) text — match on the unescaped name, emit
+        // with the escaped one.
+        var rawBase = Unescape(baseExpr);
+        if (_currentFunctionName is string fn && _fnMalloc.TryGetValue(rawBase, out var mv))
         {
             mv.ArrowRefs++;
-            if (_promotableIn.Contains((fn, baseExpr)))
+            if (_promotableIn.Contains((fn, rawBase)))
             {
                 return $"({baseExpr}.{member})";
             }
@@ -1293,6 +1339,15 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         var callee = T(n.Arg0);
         var argsContent = (EmitContent.Args)n.Arg2.Content;
         var args = argsContent.Values;  // strongly-typed arg list, no sentinel splitting
+        // A local/param that SHADOWS a libc builtin name (e.g. a function-pointer
+        // local named `printf` or `malloc`) is an ordinary call through that
+        // variable — skip the builtin lowering entirely. (_localNames is keyed by
+        // the raw C name; callee is the emitted, possibly @-escaped text.) For
+        // normal code no local is named after a builtin, so this never fires.
+        if (_localNames.Contains(Unescape(callee)))
+        {
+            return $"{callee}({string.Join(", ", args)})";
+        }
         // malloc(sizeof(S)) — emit a MallocSizeof marker (carrying the struct
         // type for the stack-promotion peephole and the verbatim low-level
         // text for the fallback). Recognised structurally: the sole argument
@@ -1306,11 +1361,14 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         // drop it entirely when `p` was promoted to a stack value (nothing to
         // free). Non-promotable / non-candidate frees fall through to a normal
         // call below.
-        if (callee == "free" && args.Count == 1
-            && _currentFunctionName is string fn && _fnMalloc.TryGetValue(args[0], out var fmv))
+        // Match the malloc maps on the RAW name (args[0] is the emitted,
+        // possibly @-escaped argument text).
+        var freeArg = args.Count == 1 ? Unescape(args[0]) : null;
+        if (callee == "free" && freeArg is not null
+            && _currentFunctionName is string fn && _fnMalloc.TryGetValue(freeArg, out var fmv))
         {
             fmv.FreeRefs++;
-            if (_promotableIn.Contains((fn, args[0]))) { return ""; }
+            if (_promotableIn.Contains((fn, freeArg))) { return ""; }
         }
         // setjmp(env) — return a SetjmpCall marker variant rather than
         // emit as a regular function call. The parent visitor (Equ for
@@ -1412,7 +1470,11 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         {
             return staticField;
         }
-        if (_enumerators.TryGetValue(name, out var enumName))
+        // An enumerator constant resolves to `EnumName.Member` — but only if no
+        // local/param of the same name shadows it. Without this guard a local
+        // named like an enum constant would emit the (non-lvalue) `EnumName.X`
+        // at every use and fail to compile.
+        if (!_localNames.Contains(name) && _enumerators.TryGetValue(name, out var enumName))
         {
             return $"{enumName}.{Id(name)}";
         }
@@ -1567,6 +1629,15 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     /// </summary>
     internal static string Id(string name) =>
         _csReservedKeywords.Contains(name) ? "@" + name : name;
+
+    /// <summary>
+    /// Inverse of <see cref="Id"/> for a single emitted identifier: strip a
+    /// leading <c>@</c> escape. Used when an emitted name (already escaped by
+    /// <see cref="Visit(C.Var)"/>) must be matched against a side table keyed
+    /// by the RAW C name (e.g. the malloc-promotion maps).
+    /// </summary>
+    private static string Unescape(string emitted) =>
+        emitted.Length > 0 && emitted[0] == '@' ? emitted.Substring(1) : emitted;
 
     private static string EscapeForUtf8Literal(string body)
     {
