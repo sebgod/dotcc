@@ -1,0 +1,5 @@
+LDBL_DIG depends on long double width, which is implementation-defined.
+gcc on Linux/arm64 uses 128-bit long double (LDBL_DIG=33); dotcc maps
+long double -> C# double (LDBL_DIG=15), matching MSVC where long double
+== double. The committed snapshot is the dotcc/MSVC value (15), so gcc
+can't match it on this platform. Not a dotcc bug — an ABI difference.
