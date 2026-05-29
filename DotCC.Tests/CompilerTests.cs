@@ -1195,15 +1195,24 @@ public sealed class CompilerTests
     }
 
     [Fact]
-    public void True_as_an_identifier_before_c23_still_parses()
+    public void True_is_an_identifier_pre_c23_but_a_keyword_constant_in_c23()
     {
-        // The whole point of the MinVersion gate: `int true = 5;` is valid
-        // pre-C23 code. Under c17 `true` must stay an ordinary identifier.
+        // The dialect gate, asserted by behaviour rather than by a (non-
+        // compilable) emit string: `int true = 5;` is valid pre-C23 C — `true`
+        // is an ordinary identifier, so it parses under c17. Under c23 `true`
+        // is a keyword constant, so using it as a declarator name is a parse
+        // error — which proves the rewriter gate actually flipped.
+        //
+        // (Pre-C23 it emits bare `true`, which is NOT C#-compilable as a
+        // variable name — the documented `true`/`false`/`null` residual edge:
+        // they can't be @-escaped because dotcc emits them as C# literals via
+        // the stdbool/NULL macro paths. That's orthogonal to the gate here.)
         var src = WriteTemp("int main() { int true = 5; return true; }");
         try
         {
-            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"));
-            emitted.ShouldContain("int true = 5;");
+            Should.NotThrow(() => Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17")));
+            Should.Throw<CompileException>(
+                () => Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23")));
         }
         finally { File.Delete(src); }
     }
@@ -1470,6 +1479,39 @@ public sealed class CompilerTests
             emitted.ShouldContain("thrd_create((&t), (&worker), (&mux))");
             // mtx_plain is the <threads.h> macro constant (0).
             emitted.ShouldContain("mtx_init((&mux), 0)");
+        }
+        finally { File.Delete(src); }
+    }
+
+    // ---- C#-keyword identifier escaping ------------------------------------
+    // C identifiers that are C# reserved keywords are @-escaped on emit, at
+    // both declaration and reference sites (consistent because the escape is a
+    // pure function of the name).
+
+    [Fact]
+    public void C_identifiers_that_are_csharp_keywords_are_escaped()
+    {
+        var src = WriteTemp("""
+            struct rec { int new; int lock; };
+            int object(int ref) { return ref * 2; }
+            int main() {
+                int new = 10;
+                int string = object(new);
+                struct rec ev;
+                ev.new = new;
+                return string + ev.lock;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("@new = 10");                 // keyword local decl
+            emitted.ShouldContain("@object(@new)");             // keyword fn call + arg ref
+            emitted.ShouldContain("int @object(int @ref)");     // keyword fn name + param decl
+            emitted.ShouldContain("@ref * 2");                  // keyword param ref
+            emitted.ShouldContain("public int @new;");          // keyword struct field decl
+            emitted.ShouldContain("(ev.@new)");                 // keyword member access
+            emitted.ShouldContain("int @string =");             // keyword local
         }
         finally { File.Delete(src); }
     }

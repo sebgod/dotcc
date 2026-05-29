@@ -3,9 +3,7 @@
  * interleaving, so the output is deterministic (and the gcc oracle, built with
  * -pthread, agrees). The mutex is a `main` local passed to the workers via the
  * thread arg — that keeps `&lock` a stack address (no static-field address-of),
- * while the counter is a file-scope global (only ++, never address-taken).
- * The mutex is named `mux`, not `lock`: `lock` is a C# keyword and dotcc does
- * not yet @-escape colliding C identifiers (see C-SUPPORT.md). */
+ * while the counter is a file-scope global (only ++, never address-taken). */
 #include <stdio.h>
 #include <stddef.h>
 #include <threads.h>

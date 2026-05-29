@@ -583,8 +583,11 @@ public static class Compiler
                 continue;
             }
             var argNames = ExtractArgNames(e.Params);
+            // EntryPoint keeps the raw C name (the exported C-ABI symbol); the
+            // C# wrapper method + the DotCcLib call escape any C#-keyword name.
+            var csName = CSharpEmitter.Id(e.Name);
             exportsBlock.Append($"    [UnmanagedCallersOnly(EntryPoint = \"{e.Name}\", CallConvs = new[] {{ typeof(CallConvCdecl) }})]\n");
-            exportsBlock.Append($"    public static unsafe {e.ReturnType} {e.Name}({e.Params}) => DotCcLib.{e.Name}({argNames});\n\n");
+            exportsBlock.Append($"    public static unsafe {e.ReturnType} {csName}({e.Params}) => DotCcLib.{csName}({argNames});\n\n");
         }
 
         return $$"""

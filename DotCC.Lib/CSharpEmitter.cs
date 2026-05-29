@@ -247,7 +247,10 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         _fnMalloc.Clear();
         _fnStatics.Clear();
         _currentFunctionName = null;  // exit function scope
-        return $"static unsafe {sig.Type} {sig.Name}({sig.Params})\n{body}";
+        // Escape the method name for C# emission; sig.Name stays raw above for
+        // the `main` check and the export list (the C-ABI EntryPoint keeps the
+        // real name). A call to this function escapes identically via Visit(Var).
+        return $"static unsafe {sig.Type} {Id(sig.Name)}({sig.Params})\n{body}";
     }
 
     public EmitContent Visit(C.FuncProto n)
@@ -340,7 +343,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
                 // (all zero-bits). No explicit initializer needed.
                 init = string.Empty;
             }
-            _globals.Append("    public static unsafe ").Append(type).Append(' ').Append(entry.Name).Append(init).Append(";\n");
+            _globals.Append("    public static unsafe ").Append(type).Append(' ').Append(Id(entry.Name)).Append(init).Append(";\n");
         }
     }
 
@@ -354,8 +357,8 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     public EmitContent Visit(C.StructMember n)
     {
         var fieldName = T(n.Arg1);
-        _pendingFields.Add(fieldName);
-        return $"public {T(n.Arg0)} {fieldName};\n";
+        _pendingFields.Add(fieldName);  // raw name — keyed lookups stay un-escaped
+        return $"public {T(n.Arg0)} {Id(fieldName)};\n";
     }
 
     private void DrainPendingFields(string typeName)
@@ -461,8 +464,8 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
                     next++;
                 }
             }
-            _enumerators[itemName] = enumName;
-            _structs.Append("    public const int ").Append(itemName).Append(" = ").Append(valueText).Append(";\n");
+            _enumerators[itemName] = enumName;  // raw key — Visit(Var) looks up by raw name
+            _structs.Append("    public const int ").Append(Id(itemName)).Append(" = ").Append(valueText).Append(";\n");
         }
         _structs.Append("}\n\n");
         return string.Empty;
@@ -633,13 +636,13 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     public EmitContent Visit(C.FnsOne n) => T(n.Arg0);
 
     // Params
-    public EmitContent Visit(C.Param n) => $"{T(n.Arg0)} {T(n.Arg1)}";
+    public EmitContent Visit(C.Param n) => $"{T(n.Arg0)} {Id(T(n.Arg1))}";
     // C array-parameter decay: `T arr[]` / `T arr[N]` ≡ `T* arr` per
     // C99 §6.7.5.3p7. The size in the sized form is informational only —
     // we discard it (intentionally don't evaluate Arg3) since C semantics
     // give the call site no way to observe a mismatch anyway.
-    public EmitContent Visit(C.ParamArrayUnsized n) => $"{T(n.Arg0)}* {T(n.Arg1)}";
-    public EmitContent Visit(C.ParamArraySized n) => $"{T(n.Arg0)}* {T(n.Arg1)}";
+    public EmitContent Visit(C.ParamArrayUnsized n) => $"{T(n.Arg0)}* {Id(T(n.Arg1))}";
+    public EmitContent Visit(C.ParamArraySized n) => $"{T(n.Arg0)}* {Id(T(n.Arg1))}";
     public EmitContent Visit(C.ParamsCons n) => $"{T(n.Arg0)}, {T(n.Arg2)}";
     public EmitContent Visit(C.ParamsOne n) => T(n.Arg0);
     public EmitContent Visit(C.ParamsVararg n) => $"{T(n.Arg0)}, params object[] _va";
@@ -959,12 +962,12 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // `goto label;` — C# accepts the same keyword + identifier syntax with
     // identical forward-reference semantics inside a method body, so the
     // lowering is verbatim.
-    public EmitContent Visit(C.StmtGoto n) => $"goto {T(n.Arg1)};\n";
+    public EmitContent Visit(C.StmtGoto n) => $"goto {Id(T(n.Arg1))};\n";
 
     // `label: Stmt` — emit the label followed by the body statement.
     // Whitespace shape: label on its own line for readability.
     public EmitContent Visit(C.StmtLabel n) =>
-        $"{T(n.Arg0)}:\n{T(n.Arg2)}";
+        $"{Id(T(n.Arg0))}:\n{T(n.Arg2)}";
 
     // Empty statement `;` — required pre-C23 if you want to label the end
     // of a block (`end: ;`). Emit as a bare semicolon; C# parses it as an
@@ -1058,14 +1061,14 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // struct), which matches the observable behavior of well-written C.
     private static string DeclEntriesToBlockScopeString(IReadOnlyList<EmitContent.DeclEntry> entries)
     {
-        return string.Join(", ", entries.Select(e => $"{e.Name} = {e.Init ?? "default"}"));
+        return string.Join(", ", entries.Select(e => $"{Id(e.Name)} = {e.Init ?? "default"}"));
     }
     // C `T arr[N]` → C# `T* arr = stackalloc T[N]`. Uses stackalloc (no heap
     // alloc, no GC pin) so arrays live in the same lifetime as locals — matches
     // C semantics for block-scoped automatic arrays. Pointer subscript `arr[i]`
     // works directly in C# unsafe contexts (it desugars to `*(arr + i)`).
     public EmitContent Visit(C.DeclArr n) =>
-        $"{T(n.Arg0)}* {T(n.Arg1)} = stackalloc {T(n.Arg0)}[{StripOuterParens(T(n.Arg3))}]";
+        $"{T(n.Arg0)}* {Id(T(n.Arg1))} = stackalloc {T(n.Arg0)}[{StripOuterParens(T(n.Arg3))}]";
 
     // C `T arr[N] = {1, 2, 3}` (or `T arr[] = {…}`) → C# `T* arr = stackalloc T[]{ 1, 2, 3 }`.
     // The explicit-size form ignores the size operand because C# infers it
@@ -1077,7 +1080,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         EmitArrInit(T(n.Arg0), T(n.Arg1), A(n.Arg6));
 
     private static string EmitArrInit(string type, string name, IReadOnlyList<string> args) =>
-        $"{type}* {name} = stackalloc {type}[]{{ {string.Join(", ", args)} }}";
+        $"{type}* {Id(name)} = stackalloc {type}[]{{ {string.Join(", ", args)} }}";
 
     // `Point p = { .x = 1, .y = 2 };` — designated initializer (C99). The
     // user named the fields directly so we don't need _structFields here:
@@ -1089,7 +1092,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         var type = T(n.Arg0);
         var name = T(n.Arg1);
         var members = IM(n.Arg4);  // typed InitMembers list
-        return $"{type} {name} = new {type} {{ {string.Join(", ", members)} }}";
+        return $"{type} {Id(name)} = new {type} {{ {string.Join(", ", members)} }}";
     }
 
     // MemberInitListOne / MemberInitListCons accumulate `.field = expr`
@@ -1107,7 +1110,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         combined.Add(next);
         return new EmitContent.InitMembers(combined);
     }
-    public EmitContent Visit(C.MemberInit n) => $"{T(n.Arg1)} = {T(n.Arg3)}";
+    public EmitContent Visit(C.MemberInit n) => $"{Id(T(n.Arg1))} = {T(n.Arg3)}";
 
     // `Point p = {1, 2};` — struct aggregate init. C# can't take positional
     // initializers on a struct, so we look up the struct's field names (from
@@ -1124,16 +1127,16 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
 
         if (!_structFields.TryGetValue(type, out var fields))
         {
-            return $"{type} {name} = default /* dotcc: unknown struct '{type}' for aggregate init */";
+            return $"{type} {Id(name)} = default /* dotcc: unknown struct '{type}' for aggregate init */";
         }
 
         var sb = new StringBuilder();
-        sb.Append(type).Append(' ').Append(name).Append(" = new ").Append(type).Append(" { ");
+        sb.Append(type).Append(' ').Append(Id(name)).Append(" = new ").Append(type).Append(" { ");
         var count = Math.Min(values.Count, fields.Count);
         for (var i = 0; i < count; i++)
         {
             if (i > 0) { sb.Append(", "); }
-            sb.Append(fields[i]).Append(" = ").Append(values[i]);
+            sb.Append(Id(fields[i])).Append(" = ").Append(values[i]);
         }
         sb.Append(" }");
         return sb.ToString();
@@ -1261,11 +1264,11 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // C# accepts both syntaxes in unsafe context (where all our user code
     // lives), so emit verbatim.
     public EmitContent Visit(C.MemberDot n) =>
-        $"({StripOuterParens(T(n.Arg0))}.{T(n.Arg2)})";
+        $"({StripOuterParens(T(n.Arg0))}.{Id(T(n.Arg2))})";
     public EmitContent Visit(C.MemberArrow n)
     {
         var baseExpr = StripOuterParens(T(n.Arg0));
-        var member = T(n.Arg2);
+        var member = Id(T(n.Arg2));
         // Count a `->` whose base is a malloc-candidate variable, and choose the
         // C# operator: a promoted stack value uses `.`, a low-level pointer `->`.
         if (_currentFunctionName is string fn && _fnMalloc.TryGetValue(baseExpr, out var mv))
@@ -1411,7 +1414,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         }
         if (_enumerators.TryGetValue(name, out var enumName))
         {
-            return $"{enumName}.{name}";
+            return $"{enumName}.{Id(name)}";
         }
         return MapBuiltin(name);
     }
@@ -1518,7 +1521,52 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     /// <c>using static Libc;</c> which brings the lowercase C-spelled
     /// methods directly into scope — so the remapping became unnecessary.
     /// </remarks>
-    private static string MapBuiltin(string name) => name;
+    private static string MapBuiltin(string name) => Id(name);
+
+    // ---- C#-keyword escaping --------------------------------------------
+    // A C identifier can be a C# reserved keyword (`new`, `lock`, `is`,
+    // `string`, `this`, `ref`, …) — all valid C names but illegal as bare C#
+    // identifiers. C# allows them when prefixed with `@`, so we escape any such
+    // name wherever a C identifier is emitted AS a C# identifier (declarators,
+    // references, params, fields, member access, labels, enum constants).
+    // Escaping is purely a function of the name, so a declaration and all its
+    // references escape identically — consistency is automatic. CRUCIALLY this
+    // is applied only at the *emit* point: structured data, side-table keys,
+    // and the static/malloc name-mangling all keep the RAW C name, so they
+    // never see an `@`.
+    private static readonly HashSet<string> _csReservedKeywords = new(StringComparer.Ordinal)
+    {
+        // NOTE: the literal keywords `true` / `false` / `null` are deliberately
+        // EXCLUDED. dotcc intentionally emits those as bare C# literals — they
+        // arrive here via <stdbool.h>'s `true`/`false`, the `NULL` → `null`
+        // macro, and the c23 keyword constants — and at Visit(Var) time a
+        // macro-supplied `true` is indistinguishable from a user variable named
+        // `true`. Escaping them would break the (common) literal path to fix
+        // the (rare) identifier path, so we keep them bare. `default` is also
+        // omitted: it's a C keyword (never a C identifier) and dotcc emits it
+        // for value-init.
+        "abstract", "as", "base", "bool", "break", "byte", "case", "catch",
+        "char", "checked", "class", "const", "continue", "decimal",
+        "delegate", "do", "double", "else", "enum", "event", "explicit",
+        "extern", "finally", "fixed", "float", "for", "foreach",
+        "goto", "if", "implicit", "in", "int", "interface", "internal", "is",
+        "lock", "long", "namespace", "new", "object", "operator", "out",
+        "override", "params", "private", "protected", "public", "readonly",
+        "ref", "return", "sbyte", "sealed", "short", "sizeof", "stackalloc",
+        "static", "string", "struct", "switch", "this", "throw", "try",
+        "typeof", "uint", "ulong", "unchecked", "unsafe", "ushort", "using",
+        "virtual", "void", "volatile", "while",
+    };
+
+    /// <summary>
+    /// Escape a C identifier for emission as a C# identifier: prefix it with
+    /// <c>@</c> when it collides with a C# reserved keyword, otherwise return
+    /// it unchanged. (Most C keywords here — <c>int</c>, <c>for</c>, … — can
+    /// never be C identifiers, so the rule fires only for the C#-only reserved
+    /// words like <c>new</c>/<c>lock</c>/<c>string</c>.)
+    /// </summary>
+    internal static string Id(string name) =>
+        _csReservedKeywords.Contains(name) ? "@" + name : name;
 
     private static string EscapeForUtf8Literal(string body)
     {
