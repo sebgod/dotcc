@@ -338,13 +338,13 @@ Synthetic header at `DotCC.Lib/include/assert.h` with the canonical `NDEBUG`-awa
 |---|---|---|---|
 | Variadic macros, mixed decls/code, designated init, restrict, complex types, VLA, `_Bool`, `inline`, `__func__`, line comments | C99 | various above | dotcc's baseline target |
 | `_Generic` | C11 | ❌ | Type-generic dispatch. Lower priority than it'd otherwise be: the most common use case (`tgmath.h`) is already covered by C#'s overload resolution on `Libc` — see the `tgmath.h` row above. |
-| `_Static_assert` / `static_assert` | C11 | ❌ | Compile-time check |
+| `_Static_assert` / `static_assert` | C11 | 🟡 | Parsed (file + block scope, both arities; lowercase promoted under `-std=c23`) but dropped to an inert comment, not evaluated — see the dedicated row above. |
 | `_Noreturn` / `noreturn` | C11 | ❌ | Cosmetic — emit `[DoesNotReturn]` |
 | Anonymous structs/unions | C11 | ❌ | Depends on `struct`/`union` |
 | `_Thread_local` / `thread_local` | C11 | ❌ | Lower to `[ThreadStatic]` |
 | `_Alignas`, `_Alignof` | C11 | ❌ | `[StructLayout(Pack=N)]` |
 | Bounds-checked interfaces (Annex K) | C11 | 🚫 | Almost no real C uses these |
-| `threads.h` | C11 | 🚫 | Use .NET threading directly when needed |
+| `threads.h` | C11 | 🟡 | Mapped onto .NET `System.Threading` (`DotCC.Libc/ThreadsLib.cs`). **v1 subset:** `thrd_create` / `thrd_join` / `thrd_yield`; `mtx_init` / `mtx_lock` / `mtx_trylock` / `mtx_unlock` / `mtx_destroy` (plain + recursive; timed acts as plain). `thrd_t` / `mtx_t` are blittable handle structs (seeded type names → `Libc.thrd_t` / `Libc.mtx_t`) so `thrd_t t; thrd_create(&t,…)` works; `thrd_start_t` lowers to `delegate*<void*,int>` and `&func` to the matching function pointer. A thread's `int` result is stashed and returned by `thrd_join` (a .NET `Thread` has no return channel). **Deferred:** `cnd_*` (condvars — .NET's `Monitor.Wait/Pulse` is bound to the lock object, not a standalone `cnd_t`), `tss_*` (no per-thread-exit TLS destructor in .NET), `call_once`, `thrd_current`/`thrd_equal`/`thrd_sleep`/`thrd_detach`/`thrd_exit`, `mtx_timedlock`. dotcc does **not** define `__STDC_NO_THREADS__`. Fixture `threads-counter/` (4 threads × 10000 increments under a mutex → 40000; gcc oracle built with `-pthread`). **Caveat:** a C identifier that collides with a C# keyword (`lock`, `new`, `is`, …) isn't `@`-escaped yet, so name the mutex `mux` not `lock`. This is a general dotcc gap (any C identifier matching a C# keyword), not threads-specific — a future fix is to `@`-escape such names on emit. |
 | `nullptr` / `true` / `false` constants | C23 | ✅ | First-class keyword constants under `-std=c23` (no `<stdbool.h>`/`<stddef.h>`), lowering to C# `null`/`true`/`false`. Promoted by `DialectKeywordRewriter`; pre-C23 they stay identifiers. See the type table above. |
 | `constexpr` | C23 | ❌ | Compile-time evaluation — useful for `enum`/`switch` |
 | `typeof`, `typeof_unqual` | C23 | ❌ | Type inference — useful for macros |
@@ -366,12 +366,11 @@ Listed here so we don't relitigate them. All marked 🚫 above.
 - **`signal.h`** — POSIX signal model doesn't map onto .NET.
 - **`gets`** — removed in C11; security disaster.
 - **Annex K bounds-checked interfaces** — almost no real-world C uses them.
-- **`threads.h` (C11)** — emitted code can call .NET threading directly.
 - **`_BitInt(N)`** — only well-defined for two widths on .NET; not worth the complexity.
 
 ## Synthetic system headers + runtime
 
-dotcc ships its own copies of the C99 standard headers (`stdio.h`, `stdlib.h`, `stddef.h`, `stdbool.h`, `stdint.h`, `limits.h`, `float.h`, `assert.h`, `ctype.h`, `setjmp.h`, `math.h`, `tgmath.h`, `string.h`) AND its libc implementations, both as **real files in source control**, both embedded into `DotCC.Lib.dll` so the compiler can serve them at emit time without any runtime disk I/O. Same model as clang's `lib/clang/<ver>/include/` tree, just loaded from the assembly manifest.
+dotcc ships its own copies of the C99/C11 standard headers (`stdio.h`, `stdlib.h`, `stddef.h`, `stdbool.h`, `stdint.h`, `limits.h`, `float.h`, `assert.h`, `ctype.h`, `setjmp.h`, `math.h`, `tgmath.h`, `string.h`, `threads.h`) AND its libc implementations, both as **real files in source control**, both embedded into `DotCC.Lib.dll` so the compiler can serve them at emit time without any runtime disk I/O. Same model as clang's `lib/clang/<ver>/include/` tree, just loaded from the assembly manifest.
 
 **Two parallel embeddings (see `DotCC.Lib.csproj`):**
 

@@ -1439,6 +1439,41 @@ public sealed class CompilerTests
         finally { File.Delete(src); }
     }
 
+    // ---- <threads.h> -------------------------------------------------------
+    // thrd_t / mtx_t are seeded type names (Libc structs); thrd_start_t is a
+    // function-pointer typedef; calls pass through to the Libc runtime.
+
+    [Fact]
+    public void Threads_header_types_and_calls_lower_to_libc()
+    {
+        var src = WriteTemp("""
+            #include <threads.h>
+            int worker(void* arg) { return 0; }
+            int main() {
+                mtx_t mux;
+                thrd_t t;
+                mtx_init(&mux, mtx_plain);
+                thrd_create(&t, &worker, &mux);
+                thrd_join(t, 0);
+                mtx_destroy(&mux);
+                return 0;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            // Opaque handles are the seeded Libc value structs, stack-allocated.
+            emitted.ShouldContain("thrd_t t");
+            emitted.ShouldContain("mtx_t mux");
+            // Function name → C# function pointer for thrd_create (the `&`
+            // operator wraps each operand in parens).
+            emitted.ShouldContain("thrd_create((&t), (&worker), (&mux))");
+            // mtx_plain is the <threads.h> macro constant (0).
+            emitted.ShouldContain("mtx_init((&mux), 0)");
+        }
+        finally { File.Delete(src); }
+    }
+
     [Fact]
     public void Variadic_macro_with_named_params_plus_extras()
     {

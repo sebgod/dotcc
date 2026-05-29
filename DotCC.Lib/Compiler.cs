@@ -146,6 +146,8 @@ public static class Compiler
     internal static readonly string[] PredefinedTypeNames =
     {
         "LongJmpToken", // <setjmp.h> — opaque jmp_buf target
+        "thrd_t",       // <threads.h> — opaque thread handle (Libc.thrd_t struct)
+        "mtx_t",        // <threads.h> — opaque mutex handle (Libc.mtx_t struct)
     };
 
     /// <summary>
@@ -476,6 +478,8 @@ public static class Compiler
             using System.IO;
             using System.Runtime.InteropServices;
             using System.Runtime.CompilerServices;
+            using System.Threading;
+            using System.Collections.Concurrent;
             using System.Text;
             // ---- DotCC.Libc runtime (embedded source) ----------------
             // The Libc class (declared at file end, spliced in from the
@@ -595,6 +599,8 @@ public static class Compiler
             using System.IO;
             using System.Runtime.InteropServices;
             using System.Runtime.CompilerServices;
+            using System.Threading;
+            using System.Collections.Concurrent;
             using System.Text;
             using static Libc;
             using static DotCcGlobals;

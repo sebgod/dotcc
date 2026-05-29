@@ -1,0 +1,3 @@
+MSVC's C11 <threads.h> support is recent and uneven across versions; rather
+than gate on a specific cl.exe build, the gcc oracle (-pthread) covers this
+fixture's threading semantics.
