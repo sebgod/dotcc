@@ -13,9 +13,13 @@
       4. Invokes its entry point with Console.Out redirected to a StringWriter.
       5. Asserts the captured stdout equals expected-stdout.txt.
 
-    No Process.Start anywhere — neither the frontend exe nor `dotnet run`.
-    Fast and deterministic; adding a new fixture is just dropping a folder
-    with .c + expected-stdout.txt into Fixtures/.
+    The fixture flow uses no Process.Start — neither the frontend exe nor
+    `dotnet run`. Fast and deterministic; adding a new fixture is just
+    dropping a folder with .c + expected-stdout.txt into Fixtures/.
+
+    The OPT-IN differential oracles (MsvcOracle → cl.exe, GccWslOracle and
+    GccQuadOracle → wsl.exe/gcc) do use Process.Start, but only when their
+    env-var gate is set; the always-on path stays subprocess-free.
   -->
 
   <PropertyGroup>
@@ -30,6 +34,9 @@
 
   <ItemGroup>
     <ProjectReference Include="..\DotCC.Lib\DotCC.Lib.csproj" />
+    <!-- For the Float128 differential oracle (GccQuadOracleTests), which diffs
+         our DotCC.Libc.Float128 against gcc's binary128 long double. -->
+    <ProjectReference Include="..\DotCC.Libc\DotCC.Libc.csproj" />
   </ItemGroup>
 
   <ItemGroup>

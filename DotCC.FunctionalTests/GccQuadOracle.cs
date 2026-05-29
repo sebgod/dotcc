@@ -1,0 +1,243 @@
+#nullable enable
+
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
+using System.Text;
+
+namespace DotCC.FunctionalTests;
+
+/// <summary>
+/// Bit-exact differential oracle for our <see cref="DotCC.Libc.Float128"/>,
+/// backed by gcc's <c>long double</c> — which is IEEE-754 binary128 on
+/// aarch64 Linux (and any target where <c>__LDBL_MANT_DIG__ == 113</c>). For a
+/// batch of operations on binary128 bit patterns, it generates a tiny C
+/// program, compiles + runs it once inside WSL, and parses each result back as
+/// raw bits. This is the authoritative reference for correctly-rounded
+/// binary128 — the role QuadrupleLib couldn't fill (its sqrt was ~5 digits and
+/// it mis-converted subnormals/Max).
+/// </summary>
+/// <remarks>
+/// <para>
+/// gcc, not libquadmath: on aarch64 there's no <c>&lt;quadmath.h&gt;</c>, but
+/// <c>long double</c> already IS binary128, so <c>+ − × ÷</c>, <c>sqrtl</c>,
+/// <c>fmal</c>, and the <c>…l</c> transcendentals operate at full quad
+/// precision via plain libm. A compile-time <c>#if __LDBL_MANT_DIG__ != 113</c>
+/// guard makes the oracle refuse to run on a target where <c>long double</c>
+/// is something else (e.g. x86 80-bit extended) rather than silently compare
+/// against the wrong format — <see cref="IsAvailable"/> probes for it and the
+/// tests skip when it's absent.
+/// </para>
+/// <para>
+/// Bit bridging: a binary128 value is two 64-bit words. We pass operands into
+/// C as <c>(hi, lo)</c> literals reassembled with <c>memcpy</c>, and read
+/// results back the same way — no float parsing/formatting in the loop, so the
+/// comparison is exact.
+/// </para>
+/// </remarks>
+internal static class GccQuadOracle
+{
+    /// <summary>
+    /// A binary128 operation to evaluate. <see cref="Expr"/> is a C expression
+    /// template using <c>{0}</c>, <c>{1}</c>, … for the operand placeholders
+    /// (each becomes a reconstructed <c>long double</c>). <see cref="Arity"/>
+    /// is the operand count; <see cref="ResultIsBinary128"/> selects whether
+    /// the result is printed as a 128-bit pattern or a 64-bit double.
+    /// </summary>
+    internal sealed record Op(int Arity, bool ResultIsBinary128, string Expr);
+
+    /// <summary>binary128 → double narrowing (correctly rounded).</summary>
+    internal static readonly Op NarrowToDouble = new(1, ResultIsBinary128: false, "(double)({0})");
+    // Arithmetic ops land as later bricks once Float128 implements them:
+    //   Add = new(2, true, "({0}) + ({1})"), Sqrt = new(1, true, "sqrtl({0})"), etc.
+
+    private static readonly object _initLock = new();
+    private static bool _initialised;
+    private static bool _available;
+
+    /// <summary>True if WSL has a gcc whose <c>long double</c> is binary128.</summary>
+    public static bool IsAvailable
+    {
+        get { EnsureInitialised(); return _available; }
+    }
+
+    /// <summary>
+    /// Narrow each binary128 input to <c>double</c> using gcc, returning the
+    /// raw <see cref="double"/> bit patterns.
+    /// </summary>
+    public static ulong[] NarrowToDouble64(IReadOnlyList<UInt128> inputs)
+    {
+        var cases = new List<UInt128[]>(inputs.Count);
+        foreach (var x in inputs) { cases.Add(new[] { x }); }
+        var lines = Run(NarrowToDouble, cases);
+        var result = new ulong[lines.Length];
+        for (int i = 0; i < lines.Length; i++)
+        {
+            result[i] = ulong.Parse(lines[i], NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Evaluate <paramref name="op"/> over every case (each case carries
+    /// <see cref="Op.Arity"/> operand bit patterns) and return the raw hex
+    /// result line per case (16 hex digits for a double result, 32 for a
+    /// binary128 result — high word first).
+    /// </summary>
+    private static string[] Run(Op op, IReadOnlyList<UInt128[]> cases)
+    {
+        EnsureInitialised();
+        if (!_available)
+        {
+            throw new InvalidOperationException("gcc binary128 oracle is not available on this host.");
+        }
+
+        var workDir = Path.Combine(Path.GetTempPath(), $"dotcc-quad-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(workDir);
+        try
+        {
+            File.WriteAllText(Path.Combine(workDir, "q.c"), GenerateSource(op, cases));
+            var wsl = ToWslPath(workDir);
+            var compile = RunWslBash($"cd '{wsl}' && gcc -std=c17 q.c -o q -lm");
+            if (compile.exit != 0)
+            {
+                throw new InvalidOperationException(
+                    $"gcc binary128 oracle: compile failed (exit {compile.exit}).\n{compile.stderr}");
+            }
+            var run = RunWslBash($"cd '{wsl}' && ./q");
+            if (run.exit != 0)
+            {
+                throw new InvalidOperationException(
+                    $"gcc binary128 oracle: run failed (exit {run.exit}).\n{run.stderr}");
+            }
+            var lines = run.stdout.Replace("\r", "").Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            if (lines.Length != cases.Count)
+            {
+                throw new InvalidOperationException(
+                    $"gcc binary128 oracle: expected {cases.Count} result lines, got {lines.Length}.");
+            }
+            return lines;
+        }
+        finally
+        {
+            try { Directory.Delete(workDir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    private static string GenerateSource(Op op, IReadOnlyList<UInt128[]> cases)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("#include <stdio.h>");
+        sb.AppendLine("#include <string.h>");
+        sb.AppendLine("#include <math.h>");
+        // Refuse to produce a misleading reference if long double isn't binary128.
+        sb.AppendLine("#if __LDBL_MANT_DIG__ != 113");
+        sb.AppendLine("#error \"long double is not IEEE-754 binary128 on this target\"");
+        sb.AppendLine("#endif");
+        sb.AppendLine("typedef unsigned long long u64;");
+        // Reassemble a long double from (hi, lo) — little-endian limbs.
+        sb.AppendLine("static long double ld(u64 hi, u64 lo){ u64 w[2]={lo,hi}; long double x; memcpy(&x,w,16); return x; }");
+        sb.AppendLine("int main(void){");
+        foreach (var operands in cases)
+        {
+            var args = new string[operands.Length];
+            for (int i = 0; i < operands.Length; i++)
+            {
+                args[i] = $"ld(0x{(ulong)(operands[i] >> 64):x16}ULL,0x{(ulong)operands[i]:x16}ULL)";
+            }
+            var expr = string.Format(CultureInfo.InvariantCulture, op.Expr, args);
+            if (op.ResultIsBinary128)
+            {
+                sb.AppendLine($"  {{ long double r = {expr}; u64 w[2]; memcpy(w,&r,16); printf(\"%016llx%016llx\\n\", w[1], w[0]); }}");
+            }
+            else
+            {
+                sb.AppendLine($"  {{ double r = {expr}; u64 b; memcpy(&b,&r,8); printf(\"%016llx\\n\", b); }}");
+            }
+        }
+        sb.AppendLine("  return 0;");
+        sb.AppendLine("}");
+        return sb.ToString();
+    }
+
+    // ── WSL plumbing ─────────────────────────────────────────────────────────
+    private static string ToWslPath(string windowsPath)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "wsl.exe",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        psi.ArgumentList.Add("wslpath");
+        psi.ArgumentList.Add("-a");
+        psi.ArgumentList.Add(windowsPath.Replace('\\', '/'));
+        using var proc = Process.Start(psi)
+            ?? throw new InvalidOperationException("failed to spawn wsl.exe for wslpath");
+        var outp = proc.StandardOutput.ReadToEnd().Trim();
+        proc.WaitForExit();
+        if (proc.ExitCode != 0 || outp.Length == 0)
+        {
+            throw new InvalidOperationException($"wslpath failed for '{windowsPath}'.");
+        }
+        return outp;
+    }
+
+    private static (string stdout, string stderr, int exit) RunWslBash(string command)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "wsl.exe",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8,
+        };
+        psi.ArgumentList.Add("bash");
+        psi.ArgumentList.Add("-lc");
+        psi.ArgumentList.Add(command);
+        using var proc = Process.Start(psi)
+            ?? throw new InvalidOperationException("failed to spawn wsl.exe");
+        var stdout = proc.StandardOutput.ReadToEnd();
+        var stderr = proc.StandardError.ReadToEnd();
+        proc.WaitForExit();
+        return (stdout, stderr, proc.ExitCode);
+    }
+
+    private static void EnsureInitialised()
+    {
+        if (_initialised) { return; }
+        lock (_initLock)
+        {
+            if (_initialised) { return; }
+            _initialised = true;
+            if (!OperatingSystem.IsWindows()) { return; }
+            try
+            {
+                // Probe: gcc present AND long double is binary128 (mant dig 113).
+                var workDir = Path.Combine(Path.GetTempPath(), $"dotcc-quad-probe-{Guid.NewGuid():N}");
+                Directory.CreateDirectory(workDir);
+                try
+                {
+                    File.WriteAllText(Path.Combine(workDir, "p.c"),
+                        "#include <stdio.h>\nint main(void){ printf(\"%d\\n\", (int)__LDBL_MANT_DIG__); return 0; }\n");
+                    var wsl = ToWslPath(workDir);
+                    var build = RunWslBash($"cd '{wsl}' && gcc -std=c17 p.c -o p && ./p");
+                    _available = build.exit == 0 && build.stdout.Replace("\r", "").Trim() == "113";
+                }
+                finally
+                {
+                    try { Directory.Delete(workDir, recursive: true); } catch { /* best effort */ }
+                }
+            }
+            catch
+            {
+                _available = false;
+            }
+        }
+    }
+}
