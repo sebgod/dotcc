@@ -1104,8 +1104,8 @@ public sealed class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23"));
-            // Promoted to `_Bool` → tsBool → C# `bool`.
-            emitted.ShouldContain("bool gt = (5 > 3);");
+            // Promoted to `_Bool` → tsBool → integer-typed Libc.CBool.
+            emitted.ShouldContain("CBool gt = (5 > 3);");
         }
         finally { File.Delete(src); }
     }
@@ -1132,7 +1132,7 @@ public sealed class CompilerTests
         // Regression: the rewriter sits AFTER macro expansion, so when the
         // header is included the `#define bool _Bool` macro has already fired
         // and the promotion table simply doesn't double-handle it. Including
-        // <stdbool.h> under c23 must still emit the same C# `bool`.
+        // <stdbool.h> under c23 must still emit the same `_Bool` (→ CBool).
         var src = WriteTemp("""
             #include <stdbool.h>
             int main() { bool gt = 5 > 3; return 0; }
@@ -1140,26 +1140,27 @@ public sealed class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23"));
-            emitted.ShouldContain("bool gt = (5 > 3);");
+            emitted.ShouldContain("CBool gt = (5 > 3);");
         }
         finally { File.Delete(src); }
     }
 
     // ---- DialectKeywordRewriter: C23 `true` / `false` / `nullptr` ---------
     // Same rule-2 model as `bool`: keyword constants under c23, ordinary
-    // identifiers (macro-supplied) before. Promoted onto dedicated TRUE /
-    // FALSE / NULLPTR terminals and lowered to C# `true` / `false` / `null`.
+    // identifiers (macro-supplied) before. `true`/`false` lower to the integer
+    // literals 1/0 (normalized through CBool); `nullptr` to C# `null`.
 
     [Fact]
     public void True_and_false_are_keyword_constants_under_c23()
     {
-        // No <stdbool.h> — under c23 the literals are first-class keywords.
+        // No <stdbool.h> — under c23 the literals are first-class keywords,
+        // lowering to integer 1/0 (stored into the CBool-typed locals).
         var src = WriteTemp("int main() { bool a = true; bool b = false; return 0; }");
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23"));
-            emitted.ShouldContain("bool a = true;");
-            emitted.ShouldContain("bool b = false;");
+            emitted.ShouldContain("CBool a = 1;");
+            emitted.ShouldContain("CBool b = 0;");
         }
         finally { File.Delete(src); }
     }

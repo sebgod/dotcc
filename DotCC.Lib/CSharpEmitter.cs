@@ -831,7 +831,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
 
         // Resolve. Order: _Bool first (mutually exclusive), then non-int
         // bases, then char (with signedness), then sized-int family.
-        if (boolCount == 1) { return "bool"; }
+        if (boolCount == 1) { return "CBool"; }
         if (float128Count == 1) { return "Float128"; }
         if (baseKw == "float")  { return "float"; }
         if (baseKw == "double") { return "double"; }
@@ -1541,8 +1541,14 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // literals lower to their C# spellings; `nullptr` matches <stddef.h>'s
     // `#define NULL null` lowering. Pre-C23 these spellings stay ID and reach
     // the macro-supplied values through `Visit(C.Var)` instead.
-    public EmitContent Visit(C.LitTrue n)    => "true";
-    public EmitContent Visit(C.LitFalse n)   => "false";
+    // C23 `true`/`false` lower to the integer literals 1/0 (normalized through
+    // CBool's int conversion when stored to a `_Bool`, and usable directly as
+    // ints — matching C, where `true`/`false` have value 1/0). Emitting them as
+    // ints (not the C# `true`/`false` keywords) is also what lets a user
+    // identifier spelled `true`/`false` be @-escaped: the keyword spelling now
+    // only ever reaches Visit(Var) when it's a real identifier.
+    public EmitContent Visit(C.LitTrue n)    => "1";
+    public EmitContent Visit(C.LitFalse n)   => "0";
     public EmitContent Visit(C.LitNullptr n) => "null";
 
     // `_Static_assert(expr [, "msg"]);` (C11; C23 lowercase `static_assert`
@@ -1598,24 +1604,25 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // never see an `@`.
     private static readonly HashSet<string> _csReservedKeywords = new(StringComparer.Ordinal)
     {
-        // NOTE: the literal keywords `true` / `false` / `null` are deliberately
-        // EXCLUDED. dotcc intentionally emits those as bare C# literals — they
-        // arrive here via <stdbool.h>'s `true`/`false`, the `NULL` → `null`
-        // macro, and the c23 keyword constants — and at Visit(Var) time a
-        // macro-supplied `true` is indistinguishable from a user variable named
-        // `true`. Escaping them would break the (common) literal path to fix
-        // the (rare) identifier path, so we keep them bare. `default` is also
-        // omitted: it's a C keyword (never a C identifier) and dotcc emits it
-        // for value-init.
+        // `true` and `false` ARE escaped: they now lower to the integer
+        // literals 1/0 (via <stdbool.h> and the c23 LitTrue/LitFalse path), so
+        // the spelling `true`/`false` only ever reaches Visit(Var) as a real
+        // user identifier — safe to @-escape. `null` is still EXCLUDED: dotcc
+        // emits it as the bare C# `null` literal (the only expression that
+        // implicitly converts to any pointer type — see <stddef.h>'s
+        // `#define NULL null`), and a macro-supplied `null` is indistinguishable
+        // from a user variable named `null`, so a variable named `null` stays
+        // the lone residual edge. `default` is also omitted: it's a C keyword
+        // (never a C identifier) and dotcc emits it for value-init.
         "abstract", "as", "base", "bool", "break", "byte", "case", "catch",
         "char", "checked", "class", "const", "continue", "decimal",
         "delegate", "do", "double", "else", "enum", "event", "explicit",
-        "extern", "finally", "fixed", "float", "for", "foreach",
+        "extern", "false", "finally", "fixed", "float", "for", "foreach",
         "goto", "if", "implicit", "in", "int", "interface", "internal", "is",
         "lock", "long", "namespace", "new", "object", "operator", "out",
         "override", "params", "private", "protected", "public", "readonly",
         "ref", "return", "sbyte", "sealed", "short", "sizeof", "stackalloc",
-        "static", "string", "struct", "switch", "this", "throw", "try",
+        "static", "string", "struct", "switch", "this", "throw", "true", "try",
         "typeof", "uint", "ulong", "unchecked", "unsafe", "ushort", "using",
         "virtual", "void", "volatile", "while",
     };
