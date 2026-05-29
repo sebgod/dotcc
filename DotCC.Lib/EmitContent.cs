@@ -49,7 +49,39 @@ public abstract record EmitContent
     /// <c>DeclArrInit</c> for printf specialization and array initializer
     /// lowering. Each element is the already-emitted C# code for one arg.
     /// </summary>
-    public sealed record Args(IReadOnlyList<string> Values) : EmitContent;
+    /// <param name="Values">The already-emitted C# code for each argument.</param>
+    /// <param name="SoleArg">When the list has exactly one element, the raw
+    /// <see cref="EmitContent"/> that element reduced to (before it was
+    /// rendered into <paramref name="Values"/>). Lets a single-argument call
+    /// inspect its argument structurally — used by <c>Visit(Call)</c> to spot
+    /// <c>malloc(sizeof(T))</c> (the sole arg is a <see cref="SizeofType"/>)
+    /// without re-parsing the emitted string. Null for multi-arg lists.</param>
+    public sealed record Args(IReadOnlyList<string> Values, EmitContent? SoleArg = null) : EmitContent;
+
+    /// <summary>
+    /// AST marker for <c>sizeof(T)</c> over a named type. Produced by
+    /// <c>Visit(SizeofType)</c>; rendered back to <c>sizeof(T)</c> by <c>T()</c>
+    /// in every ordinary context. Its only structural consumer is the
+    /// single-arg <c>malloc</c> recognition in <c>Visit(Call)</c>, which reads
+    /// the type name to seed a <see cref="MallocSizeof"/> marker.
+    /// </summary>
+    public sealed record SizeofType(string TypeName) : EmitContent;
+
+    /// <summary>
+    /// AST marker for a <c>malloc(sizeof(S))</c> allocation (optionally wrapped
+    /// in a matching <c>(S*)</c> cast — <c>Visit(Cast)</c> propagates the marker
+    /// through). Produced by <c>Visit(Call)</c>; consumed structurally by
+    /// <c>Visit(DeclItemInit)</c> to register a stack-promotion candidate. In
+    /// any other context it renders, via <c>T()</c>, to <see cref="LowLevelText"/>
+    /// — the exact low-level allocation expression (including the cast) — so
+    /// non-promoted uses are byte-identical to the un-analysed emit.
+    /// </summary>
+    /// <param name="StructType">The C# struct type name <c>S</c> (from the
+    /// <c>sizeof</c>), used to verify the declared pointer type matches and to
+    /// emit the promoted <c>S p = new S();</c> form.</param>
+    /// <param name="LowLevelText">The verbatim low-level allocation expression
+    /// for the non-promoted path.</param>
+    public sealed record MallocSizeof(string StructType, string LowLevelText) : EmitContent;
 
     /// <summary>
     /// Enumerator items in an <c>enum</c> body — each entry is either
@@ -123,7 +155,13 @@ public abstract record EmitContent
     /// reference types like <c>LongJmpToken</c> with <c>new T()</c> instead
     /// of letting them default to <c>null</c>.
     /// </summary>
-    public sealed record DeclEntry(string Name, string? Init);
+    /// <param name="MallocStructType">Non-null when <see cref="Init"/> is a
+    /// <c>malloc(sizeof(S))</c> allocation (see <see cref="MallocSizeof"/>):
+    /// the struct type <c>S</c>. Lets <c>Visit(Decl)</c> emit the promoted
+    /// stack form <c>S name = new S();</c> when the variable qualifies, while
+    /// still carrying the low-level allocation in <see cref="Init"/> for the
+    /// fallback.</param>
+    public sealed record DeclEntry(string Name, string? Init, string? MallocStructType = null);
 
     /// <summary>
     /// Accumulator for an init-declarator list. <c>declItem</c>/<c>declItemInit</c>

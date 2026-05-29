@@ -1291,6 +1291,88 @@ public sealed class CompilerTests
         finally { File.Delete(src); }
     }
 
+    // ---- malloc/free → stack-value peephole --------------------------------
+    // `S* p = (S*)malloc(sizeof(S))` used only via `->` and freed in the same
+    // function (no escape) lowers to a stack struct value `S p = new S();`,
+    // `->` becomes `.`, and the free() is dropped. Any escaping use disqualifies.
+
+    [Fact]
+    public void Malloc_struct_used_only_via_arrow_and_freed_is_promoted()
+    {
+        var src = WriteTemp("""
+            struct Point { int x; int y; };
+            int main() {
+                struct Point* p = (struct Point*)malloc(sizeof(struct Point));
+                p->x = 3;
+                p->y = 4;
+                free(p);
+                return p->x;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            // Stack value, not a heap allocation.
+            emitted.ShouldContain("Point p = new Point()");
+            // Arrow accesses lowered to `.` (the binop wrapper adds parens:
+            // `(p.x) = 3`), and the pointer `->` form is gone for this var.
+            emitted.ShouldContain("(p.x)");
+            emitted.ShouldContain("(p.y)");
+            emitted.ShouldNotContain("p->");
+            // The user's cast-malloc is gone (the runtime still *defines*
+            // malloc/free, but `(Point*)malloc` is unique to user code).
+            emitted.ShouldNotContain("(Point*)malloc");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Malloc_struct_that_escapes_via_return_is_not_promoted()
+    {
+        // `p` is returned (escapes the function), so the stack-value rewrite
+        // would dangle — dotcc must keep the low-level heap form.
+        var src = WriteTemp("""
+            struct Node { int v; struct Node* next; };
+            struct Node* make(int v) {
+                struct Node* p = (struct Node*)malloc(sizeof(struct Node));
+                p->v = v;
+                return p;
+            }
+            int main() { return make(5)->v; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("(Node*)malloc");   // low-level kept
+            emitted.ShouldContain("p->v");            // arrow kept (pointer)
+            emitted.ShouldNotContain("new Node()");   // not promoted
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Malloc_struct_without_matching_free_is_not_promoted()
+    {
+        // No free() — the plan requires a matching free in the same function.
+        // Without it we keep the heap form (changing lifetime silently would be
+        // surprising), so no promotion.
+        var src = WriteTemp("""
+            struct Box { int n; };
+            int main() {
+                struct Box* b = (struct Box*)malloc(sizeof(struct Box));
+                b->n = 9;
+                return b->n;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("(Box*)malloc");
+            emitted.ShouldNotContain("new Box()");
+        }
+        finally { File.Delete(src); }
+    }
+
     [Fact]
     public void Variadic_macro_with_named_params_plus_extras()
     {

@@ -51,6 +51,11 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
             throw new CompileException(
                 "setjmp(env) == 0 / != 0 comparison can only appear as the condition " +
                 "of an `if/else`. See <setjmp.h>."),
+        // sizeof / malloc markers render to their ordinary low-level text in
+        // every context except the one structural consumer that pattern-matches
+        // the variant (malloc recognition in Call; promotion in DeclItemInit).
+        EmitContent.SizeofType st => $"sizeof({st.TypeName})",
+        EmitContent.MallocSizeof ms => ms.LowLevelText,
         _ => throw new InvalidCastException(
             $"expected EmitContent.Text or string, got {it.Content?.GetType().FullName ?? "null"}"),
     };
@@ -73,6 +78,43 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // Read by Visit(Var) so `__func__` resolves directly to the enclosing
     // function's name — no placeholder-string substitution.
     private string? _currentFunctionName;
+
+    // ---- malloc/free → stack-value peephole -----------------------------
+    // Per-function usage of `S* p = (S*)malloc(sizeof(S))` candidates, keyed
+    // by variable name; reset on each function entry (StartFn). A candidate is
+    // *promotable* — rewritable to a stack value `S p = new S();` — iff every
+    // reference to it is either the base of a `->` access or the argument of a
+    // matching `free(p)` (so it never escapes: not returned, not passed to a
+    // function, not address-taken, not pointer-arithmetic'd, not compared), and
+    // a matching free exists. The decision needs the WHOLE function body, but
+    // the pipeline is single-pass bottom-up SDT — the declaration reduces before
+    // its later uses. So Compiler.EmitCSharp runs two passes: an analysis pass
+    // populates `_promotableOut`, then the emit pass is seeded with that set via
+    // `_promotableIn` and consults it locally at each node.
+    private sealed class MallocVar
+    {
+        public string StructType = "";  // S, from sizeof(S)
+        public bool TypeMatches;        // declared type was exactly S*
+        public int TotalRefs;           // every Visit(Var) of this name
+        public int ArrowRefs;           // uses as the base of `->`
+        public int FreeRefs;            // free(p) calls
+    }
+    private readonly Dictionary<string, MallocVar> _fnMalloc = new(StringComparer.Ordinal);
+
+    // Decisions consumed by the emit pass (function name, variable name).
+    private readonly IReadOnlySet<(string Fn, string Var)> _promotableIn;
+    // Results produced by the analysis pass (finalised per function at FuncDef).
+    private readonly HashSet<(string Fn, string Var)> _promotableOut = new();
+    public IReadOnlySet<(string Fn, string Var)> PromotableMallocVars => _promotableOut;
+
+    /// <param name="promotable">The promotable (function, var) set from the
+    /// analysis pass. Null/empty (the default, used by the analysis pass
+    /// itself) means no promotion — every malloc decl emits its low-level
+    /// form, which is exactly what the analysis pass discards.</param>
+    public CSharpEmitter(IReadOnlySet<(string Fn, string Var)>? promotable = null)
+    {
+        _promotableIn = promotable ?? new HashSet<(string, string)>();
+    }
 
     public int MainArity { get; private set; } = -1;
 
@@ -150,6 +192,8 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         // whole point of the FnSig split. Any __func__ inside the body
         // resolves to this directly at Var-visit time.
         _currentFunctionName = name;
+        // Fresh malloc-candidate scope per function (no nested functions in C).
+        _fnMalloc.Clear();
         return new EmitContent.FnHeader(type, name, pars, isStatic);
     }
 
@@ -172,6 +216,24 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
             MainArity = string.IsNullOrEmpty(sig.Params) ? 0 : CountCommas(sig.Params) + 1;
         }
         else if (!sig.IsStatic) { _exports.Add(new Export(sig.Name, sig.Type, sig.Params)); }
+        // Finalise stack-promotion decisions for this function: a candidate is
+        // promotable iff its declared type matched `S*`, it's freed at least
+        // once, and every reference is accounted for as either a `->` base or a
+        // free arg (TotalRefs == ArrowRefs + FreeRefs — no escaping use).
+        foreach (var (varName, mv) in _fnMalloc)
+        {
+            if (mv.TypeMatches && mv.FreeRefs >= 1
+                && mv.TotalRefs == mv.ArrowRefs + mv.FreeRefs
+                // Only promote genuine struct types — the plan is "stack struct
+                // value". A scalar like `int*` can't reach here via `->` anyway,
+                // but the gate keeps a degenerate malloc+free of a scalar from
+                // lowering to a confusing `int p = new int();`.
+                && _structFields.ContainsKey(mv.StructType))
+            {
+                _promotableOut.Add((sig.Name, varName));
+            }
+        }
+        _fnMalloc.Clear();
         _currentFunctionName = null;  // exit function scope
         return $"static unsafe {sig.Type} {sig.Name}({sig.Params})\n{body}";
     }
@@ -863,7 +925,34 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // (`int x = 5;`), and multi-declarator (`int x, y, z;`,
     // `int x = 1, y = 2;`) forms. C# accepts the same `int x, y = 5, z;`
     // syntax so the lowering is verbatim.
-    public EmitContent Visit(C.Decl n) => $"{T(n.Arg0)} {DeclEntriesToBlockScopeString(DE(n.Arg1))}";
+    public EmitContent Visit(C.Decl n)
+    {
+        var type = T(n.Arg0);
+        var entries = DE(n.Arg1);
+
+        // malloc → stack-value peephole: only single-declarator
+        // `S* p = (S*)malloc(sizeof(S));` is eligible. Record whether the
+        // declared type matched `S*` (needed by the analysis pass) and, in the
+        // emit pass, swap the heap allocation for a stack value when the
+        // variable was found promotable.
+        if (entries.Count == 1 && entries[0].MallocStructType is string structType
+            && _currentFunctionName is string fn)
+        {
+            var typeMatches = type.Replace(" ", "") == structType + "*";
+            if (_fnMalloc.TryGetValue(entries[0].Name, out var mv)) { mv.TypeMatches = typeMatches; }
+            if (typeMatches && _promotableIn.Contains((fn, entries[0].Name)))
+            {
+                // `new S()` value-initialises (zero) the struct on the stack —
+                // no native heap alloc, matching free dropped. Reads happen
+                // after explicit field writes in any promotable function (the
+                // usage analysis guarantees `->`-only access), so zero-init vs
+                // C's uninitialised malloc is unobservable.
+                return $"{structType} {entries[0].Name} = new {structType}()";
+            }
+        }
+
+        return $"{type} {DeclEntriesToBlockScopeString(entries)}";
+    }
 
     // DeclItemList: structured accumulator of (name, init?) pairs.
     // Returning a typed DeclEntries instead of a pre-joined string lets
@@ -889,8 +978,22 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // initializer (file scope, value types — C# zero-inits class fields).
     public EmitContent Visit(C.DeclItem n) =>
         new EmitContent.DeclEntries(new[] { new EmitContent.DeclEntry(T(n.Arg0), null) });
-    public EmitContent Visit(C.DeclItemInit n) =>
-        new EmitContent.DeclEntries(new[] { new EmitContent.DeclEntry(T(n.Arg0), T(n.Arg2)) });
+    public EmitContent Visit(C.DeclItemInit n)
+    {
+        var name = T(n.Arg0);
+        // `S* p = (S*)malloc(sizeof(S))` — the init reduced to a MallocSizeof
+        // marker. Register the variable as a stack-promotion candidate for
+        // this function and remember the struct type on the entry so Visit(Decl)
+        // can emit the promoted form. T() renders the marker's low-level text
+        // for the (default) non-promoted path.
+        string? mallocType = null;
+        if (n.Arg2.Content is EmitContent.MallocSizeof ms && _currentFunctionName is not null)
+        {
+            mallocType = ms.StructType;
+            if (!_fnMalloc.ContainsKey(name)) { _fnMalloc[name] = new MallocVar { StructType = ms.StructType }; }
+        }
+        return new EmitContent.DeclEntries(new[] { new EmitContent.DeclEntry(name, T(n.Arg2), mallocType) });
+    }
 
     // Join structured DeclEntries into the block-scope C# multi-declarator
     // form: `name = default, name = expr, ...`. Block scope can't omit the
@@ -1070,7 +1173,20 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     public EmitContent Visit(C.Mul n) => $"({T(n.Arg0)} * {T(n.Arg2)})";
     public EmitContent Visit(C.Div n) => $"({T(n.Arg0)} / {T(n.Arg2)})";
     public EmitContent Visit(C.Mod n) => $"({T(n.Arg0)} % {T(n.Arg2)})";
-    public EmitContent Visit(C.Cast n) => $"(({T(n.Arg1)}){T(n.Arg3)})";
+    public EmitContent Visit(C.Cast n)
+    {
+        var castType = T(n.Arg1);
+        // `(S*)malloc(sizeof(S))` — propagate the MallocSizeof marker through a
+        // matching pointer cast so the enclosing declaration can still recognise
+        // it. The marker's low-level text grows to include the cast, so the
+        // non-promoted path is byte-identical to before.
+        if (n.Arg3.Content is EmitContent.MallocSizeof ms
+            && castType.Replace(" ", "") == ms.StructType + "*")
+        {
+            return new EmitContent.MallocSizeof(ms.StructType, $"(({castType}){ms.LowLevelText})");
+        }
+        return $"(({castType}){T(n.Arg3)})";
+    }
     public EmitContent Visit(C.Deref n) => $"(*{T(n.Arg1)})";
     public EmitContent Visit(C.AddrOf n) => $"(&{T(n.Arg1)})";
     public EmitContent Visit(C.Neg n) => $"(-{T(n.Arg1)})";
@@ -1091,17 +1207,53 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // lives), so emit verbatim.
     public EmitContent Visit(C.MemberDot n) =>
         $"({StripOuterParens(T(n.Arg0))}.{T(n.Arg2)})";
-    public EmitContent Visit(C.MemberArrow n) =>
-        $"({StripOuterParens(T(n.Arg0))}->{T(n.Arg2)})";
+    public EmitContent Visit(C.MemberArrow n)
+    {
+        var baseExpr = StripOuterParens(T(n.Arg0));
+        var member = T(n.Arg2);
+        // Count a `->` whose base is a malloc-candidate variable, and choose the
+        // C# operator: a promoted stack value uses `.`, a low-level pointer `->`.
+        if (_currentFunctionName is string fn && _fnMalloc.TryGetValue(baseExpr, out var mv))
+        {
+            mv.ArrowRefs++;
+            if (_promotableIn.Contains((fn, baseExpr)))
+            {
+                return $"({baseExpr}.{member})";
+            }
+        }
+        return $"({baseExpr}->{member})";
+    }
 
     // `sizeof(Type)` — emit C# sizeof. Valid in unsafe contexts for any
-    // unmanaged type (which all our types are).
-    public EmitContent Visit(C.SizeofType n) => $"sizeof({T(n.Arg2)})";
+    // unmanaged type (which all our types are). Returns a structured marker so
+    // a single-arg malloc can recognise `malloc(sizeof(S))` structurally; T()
+    // renders it back to `sizeof(S)` everywhere else.
+    public EmitContent Visit(C.SizeofType n) => new EmitContent.SizeofType(T(n.Arg2));
 
     public EmitContent Visit(C.Call n)
     {
         var callee = T(n.Arg0);
-        var args = A(n.Arg2);  // strongly-typed arg list, no sentinel splitting
+        var argsContent = (EmitContent.Args)n.Arg2.Content;
+        var args = argsContent.Values;  // strongly-typed arg list, no sentinel splitting
+        // malloc(sizeof(S)) — emit a MallocSizeof marker (carrying the struct
+        // type for the stack-promotion peephole and the verbatim low-level
+        // text for the fallback). Recognised structurally: the sole argument
+        // reduced to a SizeofType marker, no string parsing.
+        if (callee == "malloc" && args.Count == 1
+            && argsContent.SoleArg is EmitContent.SizeofType sz)
+        {
+            return new EmitContent.MallocSizeof(sz.TypeName, $"malloc({args[0]})");
+        }
+        // free(p) — count it against the candidate `p` and, in the emit pass,
+        // drop it entirely when `p` was promoted to a stack value (nothing to
+        // free). Non-promotable / non-candidate frees fall through to a normal
+        // call below.
+        if (callee == "free" && args.Count == 1
+            && _currentFunctionName is string fn && _fnMalloc.TryGetValue(args[0], out var fmv))
+        {
+            fmv.FreeRefs++;
+            if (_promotableIn.Contains((fn, args[0]))) { return ""; }
+        }
         // setjmp(env) — return a SetjmpCall marker variant rather than
         // emit as a regular function call. The parent visitor (Equ for
         // `setjmp(env) == 0` or StmtIfElse for the bare condition)
@@ -1165,7 +1317,9 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         return new EmitContent.Args(combined);
     }
 
-    public EmitContent Visit(C.ArgsOne n) => new EmitContent.Args(new[] { T(n.Arg0) });
+    // SoleArg keeps the single argument's structured Content alongside its
+    // rendered text, so a one-arg call (malloc) can inspect it structurally.
+    public EmitContent Visit(C.ArgsOne n) => new EmitContent.Args(new[] { T(n.Arg0) }, n.Arg0.Content as EmitContent);
 
     // Variable reference. Three emit-time rewrites:
     //   - `__func__` → `L("name\0"u8)` using `_currentFunctionName` (set
@@ -1177,6 +1331,12 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     public EmitContent Visit(C.Var n)
     {
         var name = T(n.Arg0);
+        // Count every reference to a malloc candidate. The promotion check
+        // (in FuncDef) requires TotalRefs == ArrowRefs + FreeRefs, so any use
+        // that isn't a `->` base or a free arg (return, function arg, address-of,
+        // pointer arithmetic, comparison, reassignment) tips the balance and
+        // disqualifies the variable — exactly the escapes we must not promote.
+        if (_fnMalloc.TryGetValue(name, out var mv)) { mv.TotalRefs++; }
         if (name == "__func__")
         {
             // `_currentFunctionName` is the enclosing function being

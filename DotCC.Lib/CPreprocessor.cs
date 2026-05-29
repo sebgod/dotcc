@@ -36,6 +36,7 @@ internal sealed class CPreprocessor : C.IPreprocessor
 {
     private readonly Dictionary<string, LexRule[]> _lexerTable;
     private readonly Dictionary<string, string> _files;
+    private readonly System.IO.TextWriter _diag;
     private readonly Dictionary<string, MacroDef> _macros = new(StringComparer.Ordinal);
     // `#pragma once` machinery + active filename for `__FILE__`. The same
     // `_currentlyIncluding` field tracks both: it names the file the
@@ -73,10 +74,16 @@ internal sealed class CPreprocessor : C.IPreprocessor
     public CPreprocessor(
         Dictionary<string, LexRule[]> lexerTable,
         Dictionary<string, string> files,
-        IEnumerable<string> predefines)
+        IEnumerable<string> predefines,
+        bool quiet = false)
     {
         _lexerTable = lexerTable;
         _files = files;
+        // Diagnostics sink. The analysis (first) pass of the two-pass emit runs
+        // quiet so its #warning / #include-resolution messages don't print
+        // twice; the real emit pass uses stderr as usual. (A fatal #error still
+        // throws in either pass — see OnError.)
+        _diag = quiet ? System.IO.TextWriter.Null : Console.Error;
         var symMap = new Dictionary<string, int>(StringComparer.Ordinal);
         foreach (var sym in C.Definition.SymbolNames)
         {
@@ -160,7 +167,7 @@ internal sealed class CPreprocessor : C.IPreprocessor
         }
         if (!_files.TryGetValue(name, out var source))
         {
-            Console.Error.WriteLine($"dotcc: #include '{name}' not resolvable (not in -I dirs or system headers)");
+            _diag.WriteLine($"dotcc: #include '{name}' not resolvable (not in -I dirs or system headers)");
             return Array.Empty<Item>();
         }
         // First-time include of this file: scan the source text for a
@@ -361,11 +368,11 @@ internal sealed class CPreprocessor : C.IPreprocessor
     /// the byte lexer treats angle brackets and dots as separate operators
     /// — we just concatenate the inner token content back into a filename).
     /// </summary>
-    private static string? ResolveIncludeName(IReadOnlyList<Item> args)
+    private string? ResolveIncludeName(IReadOnlyList<Item> args)
     {
         if (args.Count == 0)
         {
-            Console.Error.WriteLine("dotcc: #include with no argument");
+            _diag.WriteLine("dotcc: #include with no argument");
             return null;
         }
 
@@ -389,7 +396,7 @@ internal sealed class CPreprocessor : C.IPreprocessor
             return sb.ToString();
         }
 
-        Console.Error.WriteLine($"dotcc: #include arg is not a recognized form (got {args.Count} tokens; expected `\"foo.h\"` or `<foo.h>`)");
+        _diag.WriteLine($"dotcc: #include arg is not a recognized form (got {args.Count} tokens; expected `\"foo.h\"` or `<foo.h>`)");
         return null;
     }
 
@@ -397,13 +404,13 @@ internal sealed class CPreprocessor : C.IPreprocessor
     {
         if (args.Count < 1)
         {
-            Console.Error.WriteLine("dotcc: #define with no name");
+            _diag.WriteLine("dotcc: #define with no name");
             return Array.Empty<Item>();
         }
         var name = (string)args[0].Content;
         if (string.IsNullOrEmpty(name))
         {
-            Console.Error.WriteLine("dotcc: #define name is empty");
+            _diag.WriteLine("dotcc: #define name is empty");
             return Array.Empty<Item>();
         }
 
@@ -436,7 +443,7 @@ internal sealed class CPreprocessor : C.IPreprocessor
             }
             if (pos >= args.Count)
             {
-                Console.Error.WriteLine($"dotcc: #define {name}(…) missing closing ')'");
+                _diag.WriteLine($"dotcc: #define {name}(…) missing closing ')'");
                 return Array.Empty<Item>();
             }
             var body = args.Skip(pos + 1).ToList();
@@ -562,7 +569,7 @@ internal sealed class CPreprocessor : C.IPreprocessor
     /// </summary>
     public IEnumerable<Item> OnWarning(IReadOnlyList<Item> args)
     {
-        Console.Error.WriteLine($"dotcc: #warning: {JoinArgs(args)}");
+        _diag.WriteLine($"dotcc: #warning: {JoinArgs(args)}");
         return Array.Empty<Item>();
     }
 

@@ -166,18 +166,20 @@ public static class Compiler
         CDialect? dialect = null)
     {
         var includeMap = BuildIncludeMap(inputPaths, includeDirs);
-        var emitter = new CSharpEmitter();
-        var parser = C.BuildParser(emitter);
         var lexerTable = C.BuildLexer();
         var activeDialect = dialect ?? CDialect.Default;
         var seededDefines = SeedDialectDefines(activeDialect, defines);
 
-        var allFunctions = new StringBuilder();
-        var mainArity = -1;
-        foreach (var unitPath in inputPaths)
+        // Build the lexer → preprocessor → rewriter → parser pipeline for one
+        // translation unit and parse it with the given (visitor-bound) parser.
+        // Factored out because the two-pass emit (see below) parses every unit
+        // twice: once with an analysis visitor, once with the emit visitor.
+        // `quiet` suppresses the preprocessor's diagnostics on the analysis
+        // pass so #warning / #include messages don't print twice.
+        Item ParseUnit(string unitPath, global::LALR.CC.Parser parser, bool quiet)
         {
             var source = File.ReadAllText(unitPath);
-            var pre = new CPreprocessor(lexerTable, includeMap, seededDefines);
+            var pre = new CPreprocessor(lexerTable, includeMap, seededDefines, quiet);
             pre.SetActiveFilename(Path.GetFileName(unitPath));
             using var lexer = BytesLexer.FromString(source, lexerTable);
             using var preproc = C.WrapPreprocessor(lexer, pre);
@@ -217,6 +219,35 @@ public static class Compiler
             {
                 throw new CompileException($"parse failed in {Path.GetFileName(unitPath)}: {result}");
             }
+            return result;
+        }
+
+        // Pass 1 — analysis. Parse every unit with a throwaway emitter purely
+        // to collect the malloc → stack-value promotion set: which
+        // `S* p = (S*)malloc(sizeof(S))` locals are used only through `->` and
+        // a matching free(), per function. The decision needs the whole
+        // function body, but the pipeline is single-pass bottom-up SDT (the
+        // decl reduces before its later uses), so a second pass is the clean
+        // way to make the verdict available at the decl. The emitted C# here is
+        // discarded — only PromotableMallocVars is kept.
+        var analyzer = new CSharpEmitter();
+        var analyzeParser = C.BuildParser(analyzer);
+        foreach (var unitPath in inputPaths)
+        {
+            ParseUnit(unitPath, analyzeParser, quiet: true);
+        }
+
+        // Pass 2 — emit. Seed the real emitter with the promotion set so each
+        // node decides locally: a promotable decl emits `S p = new S();`, its
+        // `->` accesses emit `.`, and its free() is dropped.
+        var emitter = new CSharpEmitter(analyzer.PromotableMallocVars);
+        var emitParser = C.BuildParser(emitter);
+
+        var allFunctions = new StringBuilder();
+        var mainArity = -1;
+        foreach (var unitPath in inputPaths)
+        {
+            var result = ParseUnit(unitPath, emitParser, quiet: false);
 
             if (allFunctions.Length > 0) { allFunctions.AppendLine(); }
             // The visitor's IVisitor<EmitContent> returns a discriminated
