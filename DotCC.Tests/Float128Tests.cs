@@ -185,4 +185,35 @@ public sealed class Float128Tests
         Float128.Multiply(Float128.FromDouble(-1.0), Float128.Zero).Bits.ShouldBe(Float128.NegativeZero.Bits);
         Float128.Multiply(Float128.FromDouble(-1.0), Float128.NegativeZero).Bits.ShouldBe(Float128.Zero.Bits);
     }
+
+    [Fact]
+    public void Operators_and_conversions_behave_like_a_numeric_type()
+    {
+        // Implicit int/long widening (the `Float128 x = 3;` shape the emitter
+        // produces for C integer literals), operators, explicit narrowing.
+        Float128 a = 3;          // int → long → Float128 (implicit)
+        Float128 b = 4;
+        ((int)(a * a + b * b)).ShouldBe(25);   // 9 + 16
+        ((int)(a - b)).ShouldBe(-1);
+        ((int)(-a)).ShouldBe(-3);
+
+        Float128 d = 2.5;        // double widening (implicit)
+        ((double)d).ShouldBe(2.5);
+        ((double)(d + d)).ShouldBe(5.0);
+
+        // long round-trip and truncation toward zero.
+        ((long)(Float128)9_000_000_000L).ShouldBe(9_000_000_000L);
+        ((long)(Float128)2.9).ShouldBe(2L);
+        ((long)(Float128)(-2.9)).ShouldBe(-2L);
+    }
+
+    [Fact]
+    public void Integer_conversions_handle_edges()
+    {
+        ((long)Float128.FromInt64(long.MaxValue)).ShouldBe(long.MaxValue);
+        ((long)Float128.FromInt64(long.MinValue)).ShouldBe(long.MinValue);
+        Float128.ToInt64(Float128.NaN).ShouldBe(0L);
+        Float128.ToInt64(Float128.PositiveInfinity).ShouldBe(long.MaxValue);
+        Float128.ToInt64(Float128.NegativeInfinity).ShouldBe(long.MinValue);
+    }
 }

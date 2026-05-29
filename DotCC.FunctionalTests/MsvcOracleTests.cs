@@ -81,6 +81,17 @@ public sealed class MsvcOracleTests
                 $"MSVC oracle not available on this host (vswhere didn't find a VC install).");
         }
 
+        // Per-fixture opt-out: a `no-msvc-oracle.txt` sidecar marks a fixture
+        // MSVC can't build — e.g. `_Float128`, which cl.exe doesn't implement
+        // at all. The file's contents are the human-readable reason. (Mirror
+        // of the gcc oracle's `no-gcc-oracle.txt`.)
+        var msvcSkipMarker = Path.Combine(dir, "no-msvc-oracle.txt");
+        if (File.Exists(msvcSkipMarker))
+        {
+            Assert.Skip($"fixture '{name}' opts out of the MSVC oracle: " +
+                File.ReadAllText(msvcSkipMarker).Trim());
+        }
+
         var match = FixtureRunner.Discover().Single(f => f.name == name);
 
         // dotcc path: emit C# (csproj-shaped — Roslyn doesn't want the

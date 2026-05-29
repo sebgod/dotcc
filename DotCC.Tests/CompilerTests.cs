@@ -189,6 +189,43 @@ public sealed class CompilerTests
     }
 
     [Fact]
+    public void Float128_keyword_lowers_to_Float128_type()
+    {
+        var src = WriteTemp("int main() { _Float128 x = 3; return (int)x; }");
+        try
+        {
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("Float128 x = 3;");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Gnu_float128_spelling_is_an_alias()
+    {
+        // `__float128` (the GNU spelling) lexes to the same type as `_Float128`.
+        // gcc only defines it on x86, so the aarch64 gcc oracle can't cover it;
+        // this asserts dotcc accepts it and lowers identically.
+        var src = WriteTemp("int main() { __float128 x = 3; return (int)x; }");
+        try
+        {
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("Float128 x = 3;");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Float128_combined_with_other_specifier_throws()
+    {
+        var src = WriteTemp("int main() { unsigned _Float128 x = 0; return 0; }");
+        try
+        {
+            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
+                .Message.ShouldContain("`_Float128` cannot be combined");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Float_with_size_modifier_throws()
     {
         var src = WriteTemp("int main() { long float x = 0; return 0; }");

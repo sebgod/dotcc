@@ -578,6 +578,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     public EmitContent Visit(C.TsUnsigned n) => Spec("unsigned");
     public EmitContent Visit(C.TsSigned n)   => Spec("signed");
     public EmitContent Visit(C.TsBool n)     => Spec("_Bool");
+    public EmitContent Visit(C.TsFloat128 n) => Spec("Float128");
 
     public EmitContent Visit(C.TypeSpecListOne n)  => S(n.Arg0) is var specs
         ? new EmitContent.SpecList(specs) : throw new InvalidOperationException();
@@ -613,6 +614,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         var shortCount = 0;
         var longCount = 0;
         var boolCount = 0;
+        var float128Count = 0;
         string? baseKw = null;
         var baseCount = 0;
         var baseConflict = false;
@@ -626,6 +628,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
                 case "short":    shortCount++; break;
                 case "long":     longCount++; break;
                 case "_Bool":    boolCount++; break;
+                case "Float128": float128Count++; break;
                 case "int":
                 case "char":
                 case "float":
@@ -644,6 +647,12 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         {
             throw new CompileException(
                 $"`_Bool` cannot be combined with other type specifiers (got `{PrettySpecs(specs)}`)");
+        }
+        if (float128Count > 0 && (float128Count > 1 || boolCount > 0 || baseKw is not null
+            || unsignedCount > 0 || signedCount > 0 || shortCount > 0 || longCount > 0))
+        {
+            throw new CompileException(
+                $"`_Float128` cannot be combined with other type specifiers (got `{PrettySpecs(specs)}`)");
         }
         if (unsignedCount > 0 && signedCount > 0)
         {
@@ -697,6 +706,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         // Resolve. Order: _Bool first (mutually exclusive), then non-int
         // bases, then char (with signedness), then sized-int family.
         if (boolCount == 1) { return "bool"; }
+        if (float128Count == 1) { return "Float128"; }
         if (baseKw == "float")  { return "float"; }
         if (baseKw == "double") { return "double"; }
         if (baseKw == "void")   { return "void"; }

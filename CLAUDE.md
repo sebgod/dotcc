@@ -138,6 +138,7 @@ If you change the grammar (`c.lalr.yaml`), the generated surface changes in lock
 | C | Emitted C# |
 |---|---|
 | `int` / `float` / `double` / `void` | `int` / `float` / `double` / `void` |
+| `_Float128` / `__float128` (C23) | `Float128` — MIT software IEEE-754 binary128 (`DotCC.Libc/Float128.cs`), clean-room, oracle-validated vs gcc. Arithmetic + int/`double` conversions via C# operators. |
 | `char` | `byte` (so `char*` arithmetic walks bytes) |
 | `T*` | `T*` (unsafe pointer) |
 | `"foo"` | `L("foo\0"u8)` — pinned UTF-8 RVA pointer via `MemoryMarshal.GetReference` |
@@ -191,7 +192,7 @@ This is intentionally **the same shape as compiler test suites generally** — g
 | **`DOTCC_RUN_MSVC_ORACLE=1`** | CI on Windows agents; pre-merge gate | cl.exe runs per fixture; asserts MSVC's output equals both dotcc's emit AND the committed `expected-stdout.txt`. Surfaces drift between the snapshot and live MSVC (e.g. compiler-version behavior change). |
 | **`DOTCC_REGEN_BASELINE=1`** | After intentional behavior change in dotcc; new fixture bootstrap | Same as run mode, but when MSVC's output differs from `expected-stdout.txt` the file is rewritten in-place at the **source path** (resolved by walking up from `AppContext.BaseDirectory` to the `DotCC.FunctionalTests.csproj` root). Review + commit the diff. |
 
-In all opt-in modes, if MSVC isn't available on the host (non-Windows or no VS install), tests skip with a clear message rather than fail.
+In all opt-in modes, if MSVC isn't available on the host (non-Windows or no VS install), tests skip with a clear message rather than fail. A fixture can opt out of just the MSVC oracle with a **`no-msvc-oracle.txt`** sidecar (symmetric with the gcc oracle's `no-gcc-oracle.txt`); its contents are the skip reason. Used by `float128-basic`, since cl.exe has no `_Float128`.
 
 **gcc oracle (`GccWslOracleTests.cs`).** A second, independent reference compiler — gcc, run inside WSL (`wsl.exe bash -lc "gcc -std=c17 … -o … -lm && ./…"`, sources bridged to `/mnt/…` via `wslpath`). Same snapshot model as the MSVC oracle: it asserts gcc still agrees with the committed `expected-stdout.txt` AND dotcc's emit. Its value is covering ground MSVC can't — e.g. MSVC's C frontend rejects the C23 bare `bool` keyword even under `/std:clatest` (there's no `/std:c23` at all), whereas gcc accepts it under `-std=c2x`. Opt-in via **`DOTCC_RUN_GCC_ORACLE=1`**; add **`DOTCC_REGEN_BASELINE=1`** alongside it to refresh the baseline from gcc (regen here requires the gcc run flag too, so a plain `DOTCC_REGEN_BASELINE=1` — which drives the MSVC oracle — doesn't silently hand baseline authority to gcc). Skips cleanly when `wsl.exe`/gcc isn't reachable. A fixture can opt out of just this oracle by dropping a **`no-gcc-oracle.txt`** sidecar whose contents are the skip reason — used by `float-limits`, where `LDBL_DIG` depends on the ABI's `long double` width (128-bit on Linux/arm64 → 33; dotcc maps `long double` → C# `double` → 15, matching MSVC, which is the committed snapshot).
 

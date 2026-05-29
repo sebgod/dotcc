@@ -405,6 +405,45 @@ public readonly struct Float128 : IEquatable<Float128>
         return RoundToBinary128(sign, ma * mb, qa + qb, extraSticky: false);
     }
 
+    // ── integer conversions ─────────────────────────────────────────────────
+    /// <summary>Exact widening from a 64-bit integer (every long fits in the
+    /// 113-bit significand).</summary>
+    public static Float128 FromInt64(long v)
+    {
+        if (v == 0) { return Zero; }
+        return RoundToBinary128(v < 0, BigInteger.Abs((BigInteger)v), 0, extraSticky: false);
+    }
+
+    /// <summary>Narrow to a 64-bit integer, truncating toward zero (C cast
+    /// semantics). NaN → 0; out-of-range / infinities saturate to the long
+    /// bounds (the C standard leaves these cases undefined).</summary>
+    public static long ToInt64(Float128 v)
+    {
+        if (IsNaN(v)) { return 0; }
+        if (IsInfinity(v)) { return v.SignBit ? long.MinValue : long.MaxValue; }
+        if (IsZero(v)) { return 0; }
+        Decompose(v, out bool sign, out BigInteger sig, out int q);
+        BigInteger ival = q >= 0 ? sig << q : sig >> -q; // drop fraction → toward zero
+        if (sign) { ival = -ival; }
+        if (ival > long.MaxValue) { return long.MaxValue; }
+        if (ival < long.MinValue) { return long.MinValue; }
+        return (long)ival;
+    }
+
+    // ── operators & conversions (so emitted C# `_Float128` code Just Works) ──
+    public static Float128 operator +(Float128 a, Float128 b) => Add(a, b);
+    public static Float128 operator -(Float128 a, Float128 b) => Subtract(a, b);
+    public static Float128 operator *(Float128 a, Float128 b) => Multiply(a, b);
+    public static Float128 operator -(Float128 a) => Negate(a);
+    public static Float128 operator +(Float128 a) => a;
+
+    // C widening conversions are implicit; narrowing ones explicit.
+    public static implicit operator Float128(long v) => FromInt64(v);
+    public static implicit operator Float128(double d) => FromDouble(d);
+    public static explicit operator double(Float128 v) => ToDouble(v);
+    public static explicit operator long(Float128 v) => ToInt64(v);
+    public static explicit operator int(Float128 v) => (int)ToInt64(v);
+
     // ── comparison (IEEE: NaN unordered, +0 == -0) ───────────────────────────
     public bool Equals(Float128 other)
     {

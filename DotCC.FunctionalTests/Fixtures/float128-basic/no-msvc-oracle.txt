@@ -1,0 +1,3 @@
+MSVC's cl.exe does not implement the C23 `_Float128` type (no /std option
+enables it), so it cannot compile this fixture. dotcc lowers `_Float128`
+to its software binary128; gcc (aarch64) provides the oracle parity.

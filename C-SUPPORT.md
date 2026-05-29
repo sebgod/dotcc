@@ -47,7 +47,8 @@ Source of truth for the grammar: `DotCC.Lib/c.lalr.yaml`. Source of truth for th
 | `signed` / `unsigned` qualifiers | ✅ | Free-order with the size and base keywords (the grammar uses a real-compiler-shape `TypeSpec` accumulator, not enumerated combinations). `unsigned char` → `byte`, `signed char` → `sbyte`. |
 | `float` | ✅ | C# `float` |
 | `double` | ✅ | C# `double` |
-| `long double` | 🚫 | No C# equivalent |
+| `long double` | 🚫 | Mapped to `double` (== `double`, matching MSVC); for true 128-bit precision use `_Float128`. The `LDBL_*` macros alias the `DBL_*` values. |
+| `_Float128` / `__float128` (C23) | ✅ | IEEE-754 **binary128**, lowered to the MIT software `DotCC.Libc.Float128` (clean-room, validated bit-for-bit against gcc's binary128). Standalone base type (no sign/size modifiers; `unsigned _Float128` etc. throw). Arithmetic `+ − *` and int/`double` conversions wired via C# operators; `/`, relational ops, `sqrt`/fma and `%Lf`/full-precision printing are follow-ons. `__float128` is the GNU spelling (accepted by dotcc; gcc only defines it on x86, so the aarch64 gcc oracle covers `_Float128`). Fixture `float128-basic/`; MSVC's cl.exe has no `_Float128`, so that fixture opts out of the MSVC oracle. |
 | `void` | ✅ | C# `void`; only valid as return type or `void*` |
 | `_Bool` / `bool` (C99 stdbool.h) | ✅ | `_Bool` is a TypeSpec keyword; resolves to C# `bool`. Synthetic `stdbool.h` defines `bool` → `_Bool`, `true`/`false` self-substitute (pass through as C# bool literals), and `__bool_true_false_are_defined`. PrintfBuilder gains `Arg(bool)` routing through `int` so `%d` formats as 1/0. Combinations with sign/size specifiers (`unsigned _Bool` etc.) throw `CompileException`. Fixture `bool-stdbool/`. Under **`-std=c23`** `bool` is a first-class keyword: `DialectKeywordRewriter` promotes bare `bool` → `_Bool` with no `<stdbool.h>` include needed (pre-C23 it stays an ordinary identifier, so the macro path and old code using `bool` as a name both keep working). `true`/`false`/`nullptr` as C23 keywords are not yet promoted — still `<stdbool.h>` macros. |
 | Pointer types `T*`, `T**`, … | ✅ | Composes left-to-right via `TypePtr` production |
@@ -346,6 +347,7 @@ Synthetic header at `DotCC.Lib/include/assert.h` with the canonical `NDEBUG`-awa
 | `constexpr` | C23 | ❌ | Compile-time evaluation — useful for `enum`/`switch` |
 | `typeof`, `typeof_unqual` | C23 | ❌ | Type inference — useful for macros |
 | `[[attribute]]` syntax | C23 | ❌ | Map common ones (`[[noreturn]]`, `[[deprecated]]`) to `[DoesNotReturn]` etc. |
+| `_Float128` / `__float128` | C23 | ✅ | IEEE-754 binary128 via the MIT software `DotCC.Libc.Float128` (oracle-validated vs gcc). See the type table above. |
 | `_BitInt(N)` | C23 | 🚫 | No C# equivalent; .NET 7+ `Int128`/`UInt128` only |
 | `#embed` | C23 | ❌ | Embed file bytes — could lower to `byte[]` literal |
 | `auto` (type inference) | C23 | 🚫 | Conflicts with C's old `auto` storage class; C# already has `var` if user wants this |

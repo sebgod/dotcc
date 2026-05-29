@@ -228,6 +228,9 @@ symbols:
   # lowering is just `e1, e2, e3` verbatim. Full C-style comma operator
   # in arbitrary expression position needs more work — see C-SUPPORT.md.
   - CommaExprList  # 135
+  - '_Float128'    # 136 keyword (C23 optional type) — IEEE-754 binary128.
+                   #     GNU spelling `__float128` lexes to this same symbol.
+                   #     Lowers to DotCC.Libc.Float128 (software quad).
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -399,6 +402,7 @@ productions:
       - { lhs: TypeSpec, rhs: ['unsigned'], action: tsUnsigned }
       - { lhs: TypeSpec, rhs: ['signed'],   action: tsSigned }
       - { lhs: TypeSpec, rhs: ['_Bool'],    action: tsBool }
+      - { lhs: TypeSpec, rhs: ['_Float128'], action: tsFloat128 }
 
   - derivation: none
     rules:
@@ -762,6 +766,12 @@ lexer:
     # than identifier. C99 reserves the underscore-uppercase prefix; the
     # nicer `bool` lives in <stdbool.h> as a #define that expands here.
     - { symbol: '_Bool',    match: '_Bool' }
+    # C23 `_Float128` and its GNU alias `__float128` both lex to the one
+    # `_Float128` grammar symbol. Underscore-uppercase prefix is reserved, so
+    # no dialect gating needed — like `_Bool`, these are always keywords.
+    # Before the ID rule (longest-match ties resolve first-rule-wins).
+    - { symbol: '_Float128', match: '_Float128' }
+    - { symbol: '_Float128', match: '__float128' }
     - { symbol: 'if',     match: 'if' }
     - { symbol: 'else',   match: 'else' }
     - { symbol: 'while',  match: 'while' }
