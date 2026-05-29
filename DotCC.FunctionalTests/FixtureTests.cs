@@ -29,7 +29,8 @@ public sealed class FixtureTests
             inputPaths: match.sources,
             includeDirs: new[] { dir },
             defines: null,
-            fileBased: false);  // csproj-shaped shell — Roslyn doesn't want the #:property header
+            fileBased: false,  // csproj-shaped shell — Roslyn doesn't want the #:property header
+            dialect: CDialect.Parse(match.std));
 
         var stdout = FixtureRunner.CompileAndRun(emitted, args: System.Array.Empty<string>());
 

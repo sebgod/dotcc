@@ -231,6 +231,14 @@ symbols:
   - '_Float128'    # 136 keyword (C23 optional type) — IEEE-754 binary128.
                    #     GNU spelling `__float128` lexes to this same symbol.
                    #     Lowers to DotCC.Libc.Float128 (software quad).
+  # C23 predefined constants. These terminals have NO lexer rule on purpose:
+  # `true` / `false` / `nullptr` are ordinary identifiers in pre-C23 dialects
+  # (`int true = 5;` is valid C99), so they must lex as ID and only be
+  # promoted onto these terminals by DialectKeywordRewriter under -std=c23.
+  # A lexer rule would make them unconditional keywords and break old code.
+  - 'TRUE'         # 137 keyword constant (C23) — `true`,  lowers to C# `true`.
+  - 'FALSE'        # 138 keyword constant (C23) — `false`, lowers to C# `false`.
+  - 'NULLPTR'      # 139 keyword constant (C23) — `nullptr`, lowers to C# `null`.
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -702,6 +710,14 @@ productions:
       # but is conventionally assigned to char/byte; we lower to `(byte)'a'`
       # since our `char` is `byte`. Escape processing happens in the visitor.
       - { lhs: Primary, rhs: [CHAR],        action: chr }
+      # C23 keyword constants. The terminals only ever arrive here via
+      # DialectKeywordRewriter's c23 promotion (no lexer rule), so these
+      # productions are unreachable under < c23 — pre-C23 `true`/`false`/
+      # `nullptr` stay ID and route through `Primary -> ID` (action var),
+      # where <stdbool.h>/<stddef.h> macros supply the value.
+      - { lhs: Primary, rhs: ['TRUE'],      action: litTrue }
+      - { lhs: Primary, rhs: ['FALSE'],     action: litFalse }
+      - { lhs: Primary, rhs: ['NULLPTR'],   action: litNullptr }
       - { lhs: Primary, rhs: ['(', E, ')'], action: paren }
 
   - derivation: leftmost

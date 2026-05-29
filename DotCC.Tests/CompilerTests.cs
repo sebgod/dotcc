@@ -1145,6 +1145,69 @@ public sealed class CompilerTests
         finally { File.Delete(src); }
     }
 
+    // ---- DialectKeywordRewriter: C23 `true` / `false` / `nullptr` ---------
+    // Same rule-2 model as `bool`: keyword constants under c23, ordinary
+    // identifiers (macro-supplied) before. Promoted onto dedicated TRUE /
+    // FALSE / NULLPTR terminals and lowered to C# `true` / `false` / `null`.
+
+    [Fact]
+    public void True_and_false_are_keyword_constants_under_c23()
+    {
+        // No <stdbool.h> — under c23 the literals are first-class keywords.
+        var src = WriteTemp("int main() { bool a = true; bool b = false; return 0; }");
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23"));
+            emitted.ShouldContain("bool a = true;");
+            emitted.ShouldContain("bool b = false;");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Nullptr_is_a_keyword_constant_under_c23()
+    {
+        // No <stddef.h> — under c23 `nullptr` is the null pointer constant,
+        // lowered to C# `null` (matching the <stddef.h> `#define NULL null`).
+        var src = WriteTemp("int main() { int* p = nullptr; return 0; }");
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23"));
+            emitted.ShouldContain("p = null;");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Nullptr_is_an_identifier_before_c23()
+    {
+        // Pre-C23 with no header: `nullptr` is an unknown identifier, not a
+        // keyword — `int* p = nullptr;` references an undeclared name. dotcc
+        // emits it verbatim as `nullptr` (the gate didn't promote it to the
+        // NULLPTR terminal, so it never reaches the `null` lowering).
+        var src = WriteTemp("int main() { int* p = nullptr; return 0; }");
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"));
+            emitted.ShouldContain("p = nullptr;");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void True_as_an_identifier_before_c23_still_parses()
+    {
+        // The whole point of the MinVersion gate: `int true = 5;` is valid
+        // pre-C23 code. Under c17 `true` must stay an ordinary identifier.
+        var src = WriteTemp("int main() { int true = 5; return true; }");
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"));
+            emitted.ShouldContain("int true = 5;");
+        }
+        finally { File.Delete(src); }
+    }
+
     [Fact]
     public void Variadic_macro_with_named_params_plus_extras()
     {

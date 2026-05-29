@@ -64,10 +64,12 @@ internal static class GccWslOracle
     /// <summary>
     /// Compile <paramref name="csources"/> with gcc into a Linux binary and
     /// run it, returning captured stdout. Compilation + run happen in
-    /// <paramref name="workDir"/> (created if missing). Throws on gcc failure
-    /// or non-zero program exit with the captured diagnostics in the message.
+    /// <paramref name="workDir"/> (created if missing). <paramref name="std"/>
+    /// is the gcc <c>-std=</c> value (defaults to <see cref="DefaultStd"/>;
+    /// the caller maps dotcc's dialect to gcc's spelling). Throws on gcc
+    /// failure or non-zero program exit with the captured diagnostics.
     /// </summary>
-    public static string CompileAndRun(string[] csources, string workDir, string[]? runArgs = null)
+    public static string CompileAndRun(string[] csources, string workDir, string std = DefaultStd, string[]? runArgs = null)
     {
         EnsureInitialised();
         if (!_available)
@@ -101,7 +103,7 @@ internal static class GccWslOracle
         // ── gcc compile ──  (-lm so the math fixtures link; harmless otherwise)
         var sourceList = string.Join(' ', localNames);
         var compileCmd =
-            $"cd '{wslWorkDir}' && gcc -std={DefaultStd} {sourceList} -o {binName} -lm";
+            $"cd '{wslWorkDir}' && gcc -std={std} {sourceList} -o {binName} -lm";
         var (compileOut, compileErr, compileExit) = RunWsl(compileCmd);
         if (compileExit != 0)
         {

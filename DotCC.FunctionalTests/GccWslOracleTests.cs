@@ -98,16 +98,18 @@ public sealed class GccWslOracleTests
             inputPaths: match.sources,
             includeDirs: new[] { dir },
             defines: null,
-            fileBased: false);
+            fileBased: false,
+            dialect: CDialect.Parse(match.std));
         var dotccOut = FixtureRunner.CompileAndRun(emitted, Array.Empty<string>())
             .ReplaceLineEndings("\n").TrimEnd('\n');
 
         // gcc path: copy sources to an isolated work dir, build with gcc in
-        // WSL, run, capture stdout.
+        // WSL, run, capture stdout. The fixture's dialect maps to gcc's
+        // -std= flag (c23 → c2x, the spelling gcc accepts).
         var workDir = Path.Combine(
             Path.GetTempPath(),
             $"dotcc-gcc-{name}-{Guid.NewGuid():N}");
-        var gccOut = GccWslOracle.CompileAndRun(match.sources, workDir)
+        var gccOut = GccWslOracle.CompileAndRun(match.sources, workDir, GccStdFor(match.std))
             .ReplaceLineEndings("\n").TrimEnd('\n');
 
         // dotcc must match gcc byte-for-byte. A divergence means dotcc's
@@ -138,6 +140,20 @@ public sealed class GccWslOracleTests
             $"Committed expected-stdout.txt for '{name}' no longer matches gcc's live output. " +
             $"Re-run with {RunGccEnv}=1 {RegenBaselineEnv}=1 to refresh the baseline.");
     }
+
+    /// <summary>
+    /// Map dotcc's dialect name to the <c>-std=</c> spelling gcc accepts.
+    /// dotcc uses the ISO names (<c>c90</c>/<c>c99</c>/<c>c11</c>/<c>c17</c>/
+    /// <c>c18</c>/<c>c23</c>); gcc spells the newest one <c>c2x</c> on the
+    /// versions we target (and <c>c18</c> as <c>c17</c>). Everything else maps
+    /// through unchanged.
+    /// </summary>
+    private static string GccStdFor(string dotccStd) => dotccStd switch
+    {
+        "c23" => "c2x",
+        "c18" => "c17",
+        _ => dotccStd,
+    };
 
     /// <summary>
     /// Resolve the source-tree path to a fixture's <c>expected-stdout.txt</c>

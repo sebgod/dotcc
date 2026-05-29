@@ -29,9 +29,11 @@ internal static class FixtureRunner
     /// <summary>
     /// Discover fixtures: each subdir of <c>Fixtures/</c> next to the test
     /// assembly that contains at least one <c>.c</c> file and an
-    /// <c>expected-stdout.txt</c> sidecar.
+    /// <c>expected-stdout.txt</c> sidecar. An optional <c>std.txt</c> sidecar
+    /// (contents e.g. <c>c23</c>) selects the dialect for that fixture;
+    /// absent, it defaults to dotcc's default (<c>c17</c>).
     /// </summary>
-    public static IEnumerable<(string name, string dir, string[] sources, string expectedStdout)> Discover()
+    public static IEnumerable<(string name, string dir, string[] sources, string expectedStdout, string std)> Discover()
     {
         var root = Path.Combine(AppContext.BaseDirectory, "Fixtures");
         if (!Directory.Exists(root)) { yield break; }
@@ -40,7 +42,9 @@ internal static class FixtureRunner
             var sources = Directory.EnumerateFiles(dir, "*.c").OrderBy(p => p, StringComparer.Ordinal).ToArray();
             var expectedPath = Path.Combine(dir, "expected-stdout.txt");
             if (sources.Length == 0 || !File.Exists(expectedPath)) { continue; }
-            yield return (Path.GetFileName(dir), dir, sources, File.ReadAllText(expectedPath));
+            var stdPath = Path.Combine(dir, "std.txt");
+            var std = File.Exists(stdPath) ? File.ReadAllText(stdPath).Trim() : "c17";
+            yield return (Path.GetFileName(dir), dir, sources, File.ReadAllText(expectedPath), std);
         }
     }
 

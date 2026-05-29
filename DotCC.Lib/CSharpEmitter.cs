@@ -1250,6 +1250,15 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
 
     public EmitContent Visit(C.Paren n) => $"({T(n.Arg1)})";
 
+    // C23 keyword constants (only reached under -std=c23, via the rewriter's
+    // ID->terminal promotion). `_Bool` lowers to C# `bool`, so the boolean
+    // literals lower to their C# spellings; `nullptr` matches <stddef.h>'s
+    // `#define NULL null` lowering. Pre-C23 these spellings stay ID and reach
+    // the macro-supplied values through `Visit(C.Var)` instead.
+    public EmitContent Visit(C.LitTrue n)    => "true";
+    public EmitContent Visit(C.LitFalse n)   => "false";
+    public EmitContent Visit(C.LitNullptr n) => "null";
+
     /// <summary>
     /// Identity for now — kept as a seam in case future grammar features
     /// need to remap a C identifier to a different C# name before emit.

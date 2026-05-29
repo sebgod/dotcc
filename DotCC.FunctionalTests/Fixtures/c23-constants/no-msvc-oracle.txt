@@ -1,0 +1,3 @@
+MSVC's C frontend has no -std:c23 and rejects the bare C23 keyword
+constants (`bool`/`true`/`false`/`nullptr`) without <stdbool.h>/<stddef.h>.
+The gcc oracle (-std=c2x) covers this fixture instead.

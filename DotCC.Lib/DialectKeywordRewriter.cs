@@ -72,6 +72,16 @@ internal sealed class DialectKeywordRewriter : RewritingTokenStream
             // parsing, AND lets <stdbool.h>'s `#define bool _Bool` macro do
             // the job when the header is included. One gate, both directions.
             ["bool"] = (23, map["_Bool"], "_Bool"),
+
+            // C23 predefined constants — first-class keywords with no header.
+            // Pre-C23 they are <stdbool.h>/<stddef.h> macros (or plain
+            // identifiers), so the MinVersion gate keeps old code parsing and
+            // lets the macro path win when a header is included. Each promotes
+            // onto a dedicated grammar terminal (TRUE/FALSE/NULLPTR) that has
+            // no lexer rule, so this rewriter is the only way they appear.
+            ["true"]    = (23, map["TRUE"],    "true"),
+            ["false"]   = (23, map["FALSE"],   "false"),
+            ["nullptr"] = (23, map["NULLPTR"], "nullptr"),
         };
     }
 
