@@ -69,6 +69,10 @@ internal static class GccQuadOracle
     internal static readonly Op Round = new(1, ResultIsBinary128: true, "rintl({0})"); // default mode = ties-even
     internal static readonly Op CopySign = new(2, ResultIsBinary128: true, "copysignl({0}, {1})");
     internal static readonly Op Fmod = new(2, ResultIsBinary128: true, "fmodl({0}, {1})");
+    // Correctly-rounded by us, but glibc's aren't, so compared within a ULP
+    // tolerance rather than bit-exact.
+    internal static readonly Op Cbrt = new(1, ResultIsBinary128: true, "cbrtl({0})");
+    internal static readonly Op Hypot = new(2, ResultIsBinary128: true, "hypotl({0}, {1})");
 
     /// <summary>
     /// Evaluate a binary128-result op over each case (operand bit patterns) and

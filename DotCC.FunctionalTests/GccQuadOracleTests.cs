@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Numerics;
 using DotCC.Libc;
 using Shouldly;
 using Xunit;
@@ -117,6 +118,28 @@ public sealed class GccQuadOracleTests
         => AssertOpMatchesGcc(GccQuadOracle.Fmod, BuildPairs(),
             c => Float128.Fmod(Float128.FromBits(c[0]), Float128.FromBits(c[1])).Bits);
 
+    // cbrt/hypot: we round correctly, but glibc's cbrtl/hypotl aren't
+    // guaranteed correctly-rounded — so compare within a small ULP tolerance.
+    [Fact]
+    public void Float128_cbrt_close_to_gcc()
+        => AssertOpCloseToGcc(GccQuadOracle.Cbrt, BuildUnary(),
+            c => Float128.Cbrt(Float128.FromBits(c[0])).Bits, maxUlp: 2);
+
+    [Fact]
+    public void Float128_hypot_close_to_gcc()
+    {
+        // Exclude hypot(±inf, NaN): C99 Annex F.10.4.3 says this is +inf "even
+        // if y is NaN" (which dotcc returns), but this glibc returns NaN — an
+        // implementation divergence on a corner the standard pins to +inf.
+        var cases = BuildPairs().FindAll(c =>
+            !((IsInf(c[0]) && IsQuadNan(c[1])) || (IsQuadNan(c[0]) && IsInf(c[1]))));
+        AssertOpCloseToGcc(GccQuadOracle.Hypot, cases,
+            c => Float128.Hypot(Float128.FromBits(c[0]), Float128.FromBits(c[1])).Bits, maxUlp: 2);
+    }
+
+    private static bool IsInf(UInt128 b)
+        => ((b >> 112) & 0x7FFF) == 0x7FFF && (b & ((UInt128.One << 112) - 1)) == 0;
+
     /// <summary>
     /// Run a binary128-result op over <paramref name="cases"/> (each carrying
     /// the op's operand bit patterns) and assert our result equals gcc's
@@ -152,6 +175,55 @@ public sealed class GccQuadOracleTests
         mismatches.ShouldBeEmpty(
             $"{mismatches.Count}/{cases.Count} results diverge from gcc:\n" +
             string.Join("\n", mismatches.Count > 20 ? mismatches.GetRange(0, 20) : mismatches));
+    }
+
+    /// <summary>Like <see cref="AssertOpMatchesGcc"/> but allows up to
+    /// <paramref name="maxUlp"/> representable steps of difference — for
+    /// functions where our result is correctly rounded but gcc's may not be.</summary>
+    private static void AssertOpCloseToGcc(
+        GccQuadOracle.Op op, IReadOnlyList<UInt128[]> cases, Func<UInt128[], UInt128> ours, int maxUlp)
+    {
+        if (!RunRequested)
+        {
+            Assert.Skip($"gcc binary128 oracle is opt-in. Set {RunGccEnv}=1 to run it.");
+        }
+        if (!GccQuadOracle.IsAvailable)
+        {
+            Assert.Skip($"{RunGccEnv} requested but no WSL gcc with binary128 long double on this host.");
+        }
+
+        var gcc = GccQuadOracle.ComputeBinary128(op, cases);
+        var mismatches = new List<string>();
+        for (int i = 0; i < cases.Count; i++)
+        {
+            UInt128 mine = ours(cases[i]);
+            UInt128 theirs = gcc[i];
+            bool mineNan = IsQuadNan(mine), theirsNan = IsQuadNan(theirs);
+            if (mineNan && theirsNan) { continue; }
+            if (mineNan != theirsNan)
+            {
+                mismatches.Add($"NaN mismatch: ours=0x{Hex(mine)} gcc=0x{Hex(theirs)}");
+                continue;
+            }
+            BigInteger ulp = BigInteger.Abs(TotalOrder(mine) - TotalOrder(theirs));
+            if (ulp > maxUlp)
+            {
+                string ops = string.Join(" ", Array.ConvertAll(cases[i], x => "0x" + Hex(x)));
+                mismatches.Add($"in=[{ops}]  ours=0x{Hex(mine)}  gcc=0x{Hex(theirs)}  ulp={ulp}");
+            }
+        }
+        mismatches.ShouldBeEmpty(
+            $"{mismatches.Count}/{cases.Count} results exceed {maxUlp} ULP from gcc:\n" +
+            string.Join("\n", mismatches.Count > 20 ? mismatches.GetRange(0, 20) : mismatches));
+    }
+
+    /// <summary>Signed total-order index of a binary128 bit pattern (sign-
+    /// magnitude → monotonic integer), so |Δindex| counts representable steps.</summary>
+    private static BigInteger TotalOrder(UInt128 b)
+    {
+        UInt128 mag = b & ((UInt128.One << 127) - 1);
+        BigInteger m = ((BigInteger)(ulong)(mag >> 64) << 64) | (ulong)mag;
+        return (b >> 127) != 0 ? -m : m;
     }
 
     private static List<UInt128[]> BuildUnary()

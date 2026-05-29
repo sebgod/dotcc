@@ -304,6 +304,33 @@ public sealed class Float128Tests
         Float128.ToDouble(Float128.Round(v)).ShouldBe(round);
     }
 
+    [Theory]
+    [InlineData(8.0, 2.0)]
+    [InlineData(27.0, 3.0)]
+    [InlineData(-8.0, -2.0)]     // cbrt preserves sign
+    [InlineData(0.125, 0.5)]
+    [InlineData(1000.0, 10.0)]
+    public void Cbrt_basic_cases(double x, double expected)
+        => Float128.ToDouble(Float128.Cbrt(Float128.FromDouble(x))).ShouldBe(expected, 1e-13);
+
+    [Theory]
+    [InlineData(3.0, 4.0, 5.0)]
+    [InlineData(5.0, 12.0, 13.0)]
+    [InlineData(0.0, 7.0, 7.0)]
+    public void Hypot_basic_cases(double x, double y, double expected)
+        => Float128.ToDouble(Float128.Hypot(Float128.FromDouble(x), Float128.FromDouble(y))).ShouldBe(expected, 1e-13);
+
+    [Fact]
+    public void Cbrt_and_Hypot_special_values()
+    {
+        Float128.Cbrt(Float128.NegativeZero).Bits.ShouldBe(Float128.NegativeZero.Bits);
+        // cbrt(-inf) = -inf (infinite and negative).
+        Float128.IsInfinity(Float128.Cbrt(Float128.NegativeInfinity)).ShouldBeTrue();
+        Float128.IsNegative(Float128.Cbrt(Float128.NegativeInfinity)).ShouldBeTrue();
+        Float128.IsInfinity(Float128.Hypot(Float128.PositiveInfinity, Float128.NaN)).ShouldBeTrue(); // hypot(inf,nan)=inf
+        Float128.IsNaN(Float128.Hypot(Float128.NaN, Float128.One)).ShouldBeTrue();
+    }
+
     [Fact]
     public void CopySign_and_Fmod()
     {

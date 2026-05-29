@@ -552,6 +552,55 @@ public readonly struct Float128 : IEquatable<Float128>, IComparable<Float128>
         return RoundToBinary128(s, r, c, extraSticky: false); // r exact ⇒ identity
     }
 
+    public static Float128 Cbrt(Float128 x)
+    {
+        if (IsNaN(x)) { return NaN; }
+        if (IsZero(x) || IsInfinity(x)) { return x; } // cbrt(±0)=±0, cbrt(±inf)=±inf
+        bool s = x.SignBit;                            // cbrt preserves sign
+        Decompose(x, out _, out BigInteger m, out int q);
+        // Make q a multiple of 3 so value = cbrt(m')·2^(q'/3).
+        while ((((q % 3) + 3) % 3) != 0) { m <<= 1; q--; }
+        int k = 130 - (int)m.GetBitLength() / 3;
+        BigInteger n = m << (3 * k);
+        BigInteger c = ICbrt(n);
+        return RoundToBinary128(s, c, q / 3 - k, extraSticky: c * c * c != n);
+    }
+
+    public static Float128 Hypot(Float128 x, Float128 y)
+    {
+        if (IsInfinity(x) || IsInfinity(y)) { return PositiveInfinity; } // even if other is NaN
+        if (IsNaN(x) || IsNaN(y)) { return NaN; }
+        if (IsZero(x)) { return Abs(y); }
+        if (IsZero(y)) { return Abs(x); }
+        Decompose(x, out _, out BigInteger mx, out int qx);
+        Decompose(y, out _, out BigInteger my, out int qy);
+        // x² + y² computed EXACTLY at a common exponent, then correctly-rounded
+        // sqrt — so hypot itself is correctly rounded.
+        int c = Math.Min(2 * qx, 2 * qy);
+        BigInteger sum = ((mx * mx) << (2 * qx - c)) + ((my * my) << (2 * qy - c));
+        if ((c & 1) != 0) { sum <<= 1; c--; }          // even exponent for sqrt
+        int k = 130 - (int)sum.GetBitLength() / 2;
+        BigInteger n = sum << (2 * k);
+        BigInteger sq = ISqrt(n);
+        return RoundToBinary128(false, sq, c / 2 - k, extraSticky: sq * sq != n);
+    }
+
+    /// <summary>Integer floor-cube-root of a non-negative BigInteger.</summary>
+    private static BigInteger ICbrt(BigInteger n)
+    {
+        if (n <= BigInteger.Zero) { return BigInteger.Zero; }
+        BigInteger x = BigInteger.One << (((int)n.GetBitLength() + 2) / 3);
+        while (true)
+        {
+            BigInteger x2 = (2 * x + n / (x * x)) / 3;
+            if (x2 >= x) { break; }
+            x = x2;
+        }
+        while (x * x * x > n) { x -= BigInteger.One; }
+        while ((x + BigInteger.One) * (x + BigInteger.One) * (x + BigInteger.One) <= n) { x += BigInteger.One; }
+        return x;
+    }
+
     /// <summary>Integer floor-sqrt of a non-negative BigInteger (Newton's
     /// method with a correcting clamp).</summary>
     private static BigInteger ISqrt(BigInteger n)
