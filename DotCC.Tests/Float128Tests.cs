@@ -265,6 +265,31 @@ public sealed class Float128Tests
     }
 
     [Fact]
+    public void Fixed_formatting_matches_printf_f()
+    {
+        Float128.FromDouble(1.5).ToFixedString(3).ShouldBe("1.500");
+        Float128.One.ToFixedString(2).ShouldBe("1.00");
+        Float128.FromInt64(-25).ToFixedString(0).ShouldBe("-25");
+        Float128.FromDouble(1234.5).ToFixedString(1).ShouldBe("1234.5");
+        Float128.Zero.ToFixedString(2).ShouldBe("0.00");
+        Float128.FromDouble(0.5).ToFixedString(0).ShouldBe("0");      // round-half-to-even → 0
+        Float128.FromDouble(1.5).ToFixedString(0).ShouldBe("2");      // ties-to-even → 2
+        Float128.IsNaN(Float128.NaN) .ShouldBeTrue();
+        Float128.NaN.ToFixedString(2).ShouldBe("nan");
+        Float128.NegativeInfinity.ToFixedString(2).ShouldBe("-inf");
+    }
+
+    [Fact]
+    public void Scientific_and_general_formatting()
+    {
+        Float128.FromDouble(0.5).ToScientificString(2, upper: false).ShouldBe("5.00e-01");
+        Float128.FromDouble(1234.5).ToScientificString(4, upper: false).ShouldBe("1.2345e+03");
+        Float128.FromInt64(100000).ToGeneralString(3, upper: false).ShouldBe("1e+05");
+        Float128.FromDouble(1234.5).ToGeneralString(6, upper: false).ShouldBe("1234.5");
+        Float128.FromDouble(0.0001).ToGeneralString(6, upper: false).ShouldBe("0.0001");
+    }
+
+    [Fact]
     public void Relational_operators_follow_ieee()
     {
         Float128 one = Float128.One, two = Float128.FromInt64(2);

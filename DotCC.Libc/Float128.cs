@@ -596,5 +596,113 @@ public readonly struct Float128 : IEquatable<Float128>, IComparable<Float128>
         return meNaN ? -1 : 1;
     }
 
-    public override string ToString() => ToDouble(this).ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+    // ── decimal formatting (correctly rounded via BigInteger) ────────────────
+    // Backs printf %Lf / %Le / %Lg. value = (-1)^sign · sig · 2^q exactly, so
+    // |value|·10^power is the exact rational sig·2^q·10^power; we round it to a
+    // nearest integer (ties-to-even) and lay the digits out. No double round-trip.
+
+    /// <summary>round(|value| · 10^<paramref name="power"/>) to nearest, ties-even.
+    /// Finite, non-NaN values only.</summary>
+    private BigInteger AbsScaledByPow10(int power)
+    {
+        Decompose(this, out _, out BigInteger m, out int q);
+        BigInteger num = m, den = BigInteger.One;
+        if (power >= 0) { num *= BigInteger.Pow(10, power); } else { den *= BigInteger.Pow(10, -power); }
+        if (q >= 0) { num <<= q; } else { den <<= -q; }
+        BigInteger quo = BigInteger.DivRem(num, den, out BigInteger rem);
+        BigInteger twiceRem = rem << 1;
+        if (twiceRem > den || (twiceRem == den && !quo.IsEven)) { quo += BigInteger.One; }
+        return quo;
+    }
+
+    /// <summary>Estimated floor(log10(|value|)) from the binary exponent; the
+    /// scientific formatter corrects any ±1 error against the actual digits.</summary>
+    private int EstimateExp10()
+    {
+        Decompose(this, out _, out BigInteger m, out int q);
+        double approxLog2 = (q + m.GetBitLength() - 1);
+        return (int)Math.Floor(approxLog2 * 0.30102999566398114); // log10(2)
+    }
+
+    /// <summary>printf <c>%f</c>: fixed notation with <paramref name="prec"/>
+    /// fractional digits. Leading <c>-</c> only; the caller adds <c>+</c>/space.</summary>
+    public string ToFixedString(int prec)
+    {
+        if (IsNaN(this)) { return "nan"; }
+        if (IsInfinity(this)) { return SignBit ? "-inf" : "inf"; }
+        BigInteger n = AbsScaledByPow10(prec);
+        string digits = n.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        string body;
+        if (prec == 0)
+        {
+            body = digits;
+        }
+        else
+        {
+            if (digits.Length <= prec) { digits = new string('0', prec - digits.Length + 1) + digits; }
+            int split = digits.Length - prec;
+            body = digits[..split] + "." + digits[split..];
+        }
+        return SignBit && n != BigInteger.Zero ? "-" + body : body;
+    }
+
+    /// <summary>printf <c>%e</c>: scientific with <paramref name="prec"/>
+    /// fractional digits (so prec+1 significant digits).</summary>
+    public string ToScientificString(int prec, bool upper)
+    {
+        if (IsNaN(this)) { return upper ? "NAN" : "nan"; }
+        if (IsInfinity(this)) { return (SignBit ? "-" : "") + (upper ? "INF" : "inf"); }
+        char e = upper ? 'E' : 'e';
+        if (IsZero(this))
+        {
+            string mant0 = prec == 0 ? "0" : "0." + new string('0', prec);
+            return (SignBit ? "-" : "") + mant0 + e + "+00";
+        }
+        int exp = EstimateExp10();
+        BigInteger s = AbsScaledByPow10(prec - exp);
+        string ds = s.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        // Correct a ±1 estimate so we land on exactly prec+1 digits.
+        if (ds.Length == prec + 2) { exp++; s = AbsScaledByPow10(prec - exp); ds = s.ToString(); }
+        else if (ds.Length == prec) { exp--; s = AbsScaledByPow10(prec - exp); ds = s.ToString(); }
+        string mant = prec == 0 ? ds : ds[..1] + "." + ds[1..];
+        string expStr = (exp < 0 ? "-" : "+") + Math.Abs(exp).ToString("D2", System.Globalization.CultureInfo.InvariantCulture);
+        return (SignBit ? "-" : "") + mant + e + expStr;
+    }
+
+    /// <summary>printf <c>%g</c>: shortest of <c>%e</c>/<c>%f</c> for
+    /// <paramref name="prec"/> significant digits, trailing zeros stripped.</summary>
+    public string ToGeneralString(int prec, bool upper)
+    {
+        if (IsNaN(this)) { return upper ? "NAN" : "nan"; }
+        if (IsInfinity(this)) { return (SignBit ? "-" : "") + (upper ? "INF" : "inf"); }
+        if (prec == 0) { prec = 1; }
+        int exp = IsZero(this) ? 0 : EstimateExp10();
+        // Refine exp via the rounded significant digits (handles the ±1 estimate).
+        if (!IsZero(this))
+        {
+            BigInteger probe = AbsScaledByPow10(prec - 1 - exp);
+            int len = probe.ToString().Length;
+            if (len == prec + 1) { exp++; } else if (len == prec - 1) { exp--; }
+        }
+        string s = (exp < -4 || exp >= prec)
+            ? ToScientificString(prec - 1, upper)
+            : ToFixedString(prec - 1 - exp);
+        return StripTrailingZeros(s, upper);
+    }
+
+    private static string StripTrailingZeros(string s, bool upper)
+    {
+        int e = s.IndexOf(upper ? 'E' : 'e');
+        string mant = e < 0 ? s : s[..e];
+        string suffix = e < 0 ? "" : s[e..];
+        if (mant.Contains('.'))
+        {
+            mant = mant.TrimEnd('0').TrimEnd('.');
+        }
+        return mant + suffix;
+    }
+
+    /// <summary>Full-precision round-trippable form (36 significant digits is
+    /// more than binary128's ~34, then trailing zeros trimmed).</summary>
+    public override string ToString() => ToGeneralString(36, upper: false);
 }

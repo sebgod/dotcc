@@ -102,6 +102,34 @@ public unsafe ref struct PrintfBuilder
     public PrintfBuilder Arg(float v) => Arg((double)v);
 
     /// <summary>
+    /// <c>_Float128</c> (binary128). The <c>L</c> length modifier is parsed and
+    /// ignored by <see cref="ParseSpec"/> (this overload already carries the
+    /// type), so <c>%Lf</c>/<c>%Le</c>/<c>%Lg</c> route here and format at full
+    /// quad precision via <see cref="Float128"/>'s own correctly-rounded
+    /// decimal conversion — no narrowing to double.
+    /// </summary>
+    public PrintfBuilder Arg(Float128 v)
+    {
+        var spec = ConsumeUntilSpec();
+        var prec = spec.Precision >= 0 ? spec.Precision : 6;
+        bool nonNeg = !Float128.IsNegative(v) && !Float128.IsNaN(v);
+        string s = spec.Conv switch
+        {
+            (byte)'d' or (byte)'i' => Float128.ToInt64(v).ToString(CultureInfo.InvariantCulture),
+            (byte)'e' => v.ToScientificString(prec, upper: false),
+            (byte)'E' => v.ToScientificString(prec, upper: true),
+            (byte)'g' => v.ToGeneralString(spec.Precision >= 0 ? prec : 6, upper: false),
+            (byte)'G' => v.ToGeneralString(spec.Precision >= 0 ? prec : 6, upper: true),
+            (byte)'F' => v.ToFixedString(prec).ToUpperInvariant(), // INF/NAN
+            _ => v.ToFixedString(prec),                            // 'f' and fallback
+        };
+        if (spec.Plus && nonNeg) { s = "+" + s; }
+        else if (spec.Space && nonNeg) { s = " " + s; }
+        _w.Write(ApplyWidth(s, spec));
+        return this;
+    }
+
+    /// <summary>
     /// <c>bool</c> → 1/0 for <c>%d</c> and friends. Without this overload,
     /// C# would route <c>_w.Write(bool)</c> to the <c>Boolean.ToString()</c>
     /// form ("True"/"False"), which is wrong for C printf semantics.

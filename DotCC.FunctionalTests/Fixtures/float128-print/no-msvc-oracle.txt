@@ -1,0 +1,3 @@
+MSVC cl.exe has no _Float128 (and no %Lf for it), so it cannot build
+this fixture. dotcc prints _Float128 via %Lf using its software binary128
+formatter; gcc (aarch64, where long double == _Float128) is the oracle.
