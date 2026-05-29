@@ -1,0 +1,271 @@
+#nullable enable
+
+using System;
+
+namespace DotCC.Libc;
+
+/// <summary>
+/// IEEE-754 <b>binary128</b> (quadruple precision) — dotcc's MIT, self-contained
+/// software <c>_Float128</c> / <c>__float128</c> backing type. Implemented
+/// clean-room from the IEEE-754 spec (not ported from any LGPL source).
+/// </summary>
+/// <remarks>
+/// Layout (a single 128-bit value, low limb first in <see cref="UInt128"/>):
+/// <list type="bullet">
+///   <item>bit 127      — sign</item>
+///   <item>bits 126..112 — biased exponent (15 bits, bias 16383)</item>
+///   <item>bits 111..0   — trailing significand (112 bits; the leading 1 is
+///         implicit for normals, giving 113 bits of precision → ~33.9 decimal
+///         digits, <c>LDBL_DIG = 33</c> on platforms where this is
+///         <c>long double</c>)</item>
+/// </list>
+/// This file is Stage 1a: representation, constants, predicates, exact
+/// <c>double</c>→binary128 widening, correctly-rounded binary128→<c>double</c>
+/// narrowing, sign ops, and IEEE comparison. Correctly-rounded arithmetic
+/// (+ − × ÷ √ fma) and the generic-math interface surface land in later
+/// stages, validated bit-for-bit against gcc's <c>long double</c> (binary128)
+/// oracle.
+/// </remarks>
+public readonly struct Float128 : IEquatable<Float128>
+{
+    private const int MantissaBits = 112;       // stored fraction bits
+    private const int ExponentBits = 15;
+    private const int ExponentBias = 16383;
+    private const int MaxBiasedExponent = 0x7FFF; // 32767 → inf/NaN
+    private const int SignShift = 127;
+    private const int ExponentShift = 112;
+
+    // The 112-bit fraction mask and the implicit-leading-bit position.
+    private static readonly UInt128 MantissaMask = (UInt128.One << MantissaBits) - 1;
+    private static readonly UInt128 ImplicitBit = UInt128.One << MantissaBits;
+
+    private readonly UInt128 _bits;
+
+    private Float128(UInt128 bits) => _bits = bits;
+
+    /// <summary>Reinterpret a raw 128-bit pattern as a binary128 value.</summary>
+    public static Float128 FromBits(UInt128 bits) => new(bits);
+
+    /// <summary>The raw IEEE-754 binary128 bit pattern.</summary>
+    public UInt128 Bits => _bits;
+
+    // ── field decomposition ────────────────────────────────────────────────
+    private bool SignBit => (_bits >> SignShift) != UInt128.Zero;
+    private int BiasedExponent => (int)((_bits >> ExponentShift) & (UInt128)MaxBiasedExponent);
+    private UInt128 TrailingSignificand => _bits & MantissaMask;
+
+    private static UInt128 Assemble(bool sign, int biasedExp, UInt128 trailing)
+        => ((sign ? UInt128.One : UInt128.Zero) << SignShift)
+         | (((UInt128)(uint)biasedExp & (UInt128)MaxBiasedExponent) << ExponentShift)
+         | (trailing & MantissaMask);
+
+    // ── constants ──────────────────────────────────────────────────────────
+    public static Float128 Zero => new(UInt128.Zero);
+    public static Float128 NegativeZero => new(UInt128.One << SignShift);
+    public static Float128 One => new(Assemble(false, ExponentBias, UInt128.Zero));
+    public static Float128 PositiveInfinity => new(Assemble(false, MaxBiasedExponent, UInt128.Zero));
+    public static Float128 NegativeInfinity => new(Assemble(true, MaxBiasedExponent, UInt128.Zero));
+    // Quiet NaN: max exponent, MSB of the fraction set.
+    public static Float128 NaN => new(Assemble(false, MaxBiasedExponent, UInt128.One << (MantissaBits - 1)));
+
+    // ── predicates ───────────────────────────────────────────────────────────
+    public static bool IsNaN(Float128 v) => v.BiasedExponent == MaxBiasedExponent && v.TrailingSignificand != UInt128.Zero;
+    public static bool IsInfinity(Float128 v) => v.BiasedExponent == MaxBiasedExponent && v.TrailingSignificand == UInt128.Zero;
+    public static bool IsFinite(Float128 v) => v.BiasedExponent != MaxBiasedExponent;
+    public static bool IsZero(Float128 v) => (v._bits & ~(UInt128.One << SignShift)) == UInt128.Zero;
+    public static bool IsNegative(Float128 v) => v.SignBit;
+
+    // ── sign ops ─────────────────────────────────────────────────────────────
+    public static Float128 Negate(Float128 v) => new(v._bits ^ (UInt128.One << SignShift));
+    public static Float128 Abs(Float128 v) => new(v._bits & ~(UInt128.One << SignShift));
+
+    // ── double (binary64) → binary128 : always EXACT (no rounding) ───────────
+    // binary128 has strictly more exponent range and precision than binary64,
+    // so every double — normal, subnormal, zero, inf, NaN — maps exactly.
+    public static Float128 FromDouble(double d)
+    {
+        ulong b = BitConverter.DoubleToUInt64Bits(d);
+        bool sign = (b >> 63) != 0;
+        int exp = (int)((b >> 52) & 0x7FF);   // biased binary64 exponent
+        ulong frac = b & 0x000F_FFFF_FFFF_FFFFUL; // 52-bit fraction
+
+        if (exp == 0x7FF)
+        {
+            // inf / NaN. Preserve a NaN payload (widened into the high fraction
+            // bits) and the quiet bit; map infinity to infinity.
+            if (frac == 0) { return sign ? NegativeInfinity : PositiveInfinity; }
+            UInt128 widenedNaN = (UInt128)frac << (MantissaBits - 52);
+            return new(Assemble(sign, MaxBiasedExponent, widenedNaN));
+        }
+        if (exp == 0)
+        {
+            // Zero or binary64 subnormal. A double subnormal is a binary128
+            // NORMAL (its magnitude is far inside binary128's normal range),
+            // so normalise: shift the leading set bit of the 52-bit fraction
+            // up to the implicit position. (This is the case naive libraries
+            // get wrong.)
+            if (frac == 0) { return sign ? NegativeZero : Zero; }
+            int msb = 63 - System.Numerics.BitOperations.LeadingZeroCount(frac); // 0..51
+            // Unbiased value exponent of a double subnormal: frac * 2^-1074,
+            // normalised to 1.f * 2^(msb-1074).
+            int unbiased = msb - 1074;
+            int biased128 = unbiased + ExponentBias;
+            // Drop the leading bit, left-align the remaining fraction to 112 bits.
+            ulong fracNoLead = frac & ~(1UL << msb);
+            UInt128 trailing = (UInt128)fracNoLead << (MantissaBits - msb);
+            return new(Assemble(sign, biased128, trailing));
+        }
+        // Normal binary64: rebias the exponent, left-align the 52-bit fraction
+        // into the 112-bit field.
+        int biased = (exp - 1023) + ExponentBias;
+        UInt128 trailing128 = (UInt128)frac << (MantissaBits - 52); // <<60
+        return new(Assemble(sign, biased, trailing128));
+    }
+
+    // ── binary128 → double (binary64) : correctly rounded (nearest, ties even) ─
+    public static double ToDouble(Float128 v)
+    {
+        bool sign = v.SignBit;
+        ulong signBit = sign ? (1UL << 63) : 0;
+        int exp = v.BiasedExponent;
+        UInt128 trailing = v.TrailingSignificand;
+
+        if (exp == MaxBiasedExponent)
+        {
+            if (trailing == UInt128.Zero)
+            {
+                return sign ? double.NegativeInfinity : double.PositiveInfinity;
+            }
+            // NaN — narrow the payload from the top fraction bits, keep it quiet.
+            ulong payload = (ulong)(trailing >> (MantissaBits - 52)) & 0x000F_FFFF_FFFF_FFFFUL;
+            return BitConverter.UInt64BitsToDouble(signBit | 0x7FF0_0000_0000_0000UL | (1UL << 51) | payload);
+        }
+
+        if (exp == 0)
+        {
+            // binary128 zero or subnormal. The largest binary128 subnormal
+            // (~2^-16383) is astronomically smaller than the smallest double
+            // subnormal (~2^-1074), so everything here narrows to signed zero.
+            return BitConverter.UInt64BitsToDouble(signBit);
+        }
+
+        // Normal binary128. Full significand = implicit 1 + 112 trailing bits.
+        int unbiased = exp - ExponentBias;
+        UInt128 significand = ImplicitBit | trailing; // 113 significant bits
+
+        // Target a binary64 with an implicit-1 significand of 53 bits. The
+        // double's unbiased exponent must land in [-1022, 1023] for a normal;
+        // below that we build a subnormal; above, we overflow to infinity.
+        if (unbiased > 1023)
+        {
+            return sign ? double.NegativeInfinity : double.PositiveInfinity;
+        }
+
+        // Round the 113-bit significand to a binary64 significand,
+        // round-to-nearest, ties-to-even. For a normal double we keep 53 bits
+        // (1 implicit + 52); for a subnormal we shift further so the value
+        // scales at the pinned 2^-1022 exponent.
+        int dropBits;          // low significand bits discarded
+        int doubleBiasedExp;   // binary64 biased exponent (0 ⇒ subnormal target)
+        if (unbiased >= -1022)
+        {
+            dropBits = MantissaBits - 52;       // 60 → keep 53 bits
+            doubleBiasedExp = unbiased + 1023;
+        }
+        else
+        {
+            int extra = -1022 - unbiased;        // ≥ 1
+            dropBits = (MantissaBits - 52) + extra;
+            doubleBiasedExp = 0;
+            if (dropBits >= 114)
+            {
+                // Below half the smallest subnormal → ±0 (round bit lies beyond
+                // the 113-bit significand). dropBits == 113 still rounds.
+                return BitConverter.UInt64BitsToDouble(signBit);
+            }
+        }
+
+        UInt128 rounded = RoundShiftRight(significand, dropBits);
+        ulong fracOut;
+        int finalExp;
+        if (doubleBiasedExp == 0)
+        {
+            // Subnormal target. Rounding can lift it to the smallest normal
+            // when the (implicit) bit 52 becomes set — that bit IS the normal's
+            // implicit 1, so the exponent steps to 1 with a zero fraction.
+            if ((rounded >> 52) != UInt128.Zero)
+            {
+                finalExp = 1;
+                fracOut = (ulong)(rounded & ((UInt128.One << 52) - 1));
+            }
+            else
+            {
+                finalExp = 0;
+                fracOut = (ulong)rounded;
+            }
+        }
+        else if ((rounded >> 53) != UInt128.Zero)
+        {
+            // Normal significand carried past 2^53 (e.g. 1.11..1 + 1ulp): the
+            // exponent advances and the fraction resets to zero.
+            finalExp = doubleBiasedExp + 1;
+            fracOut = 0;
+            if (finalExp >= 0x7FF)
+            {
+                return sign ? double.NegativeInfinity : double.PositiveInfinity;
+            }
+        }
+        else
+        {
+            finalExp = doubleBiasedExp;
+            fracOut = (ulong)(rounded & ((UInt128.One << 52) - 1)); // strip implicit 1
+        }
+
+        ulong bits = signBit | ((ulong)finalExp << 52) | fracOut;
+        return BitConverter.UInt64BitsToDouble(bits);
+    }
+
+    /// <summary>
+    /// Shift <paramref name="value"/> right by <paramref name="shift"/> bits with
+    /// round-to-nearest, ties-to-even on the discarded low bits. The returned
+    /// value may be one bit wider than <c>value &gt;&gt; shift</c> when rounding
+    /// carries; the caller inspects the top bit to adjust the exponent.
+    /// </summary>
+    private static UInt128 RoundShiftRight(UInt128 value, int shift)
+    {
+        if (shift <= 0) { return value; }
+
+        UInt128 kept = value >> shift;
+        UInt128 roundBitMask = UInt128.One << (shift - 1);
+        bool roundBit = (value & roundBitMask) != UInt128.Zero;
+        bool sticky = (value & (roundBitMask - 1)) != UInt128.Zero;
+
+        if (roundBit && (sticky || (kept & UInt128.One) != UInt128.Zero))
+        {
+            kept += UInt128.One;
+        }
+        return kept;
+    }
+
+    // ── comparison (IEEE: NaN unordered, +0 == -0) ───────────────────────────
+    public bool Equals(Float128 other)
+    {
+        if (IsNaN(this) || IsNaN(other)) { return false; }
+        if (IsZero(this) && IsZero(other)) { return true; } // +0 == -0
+        return _bits == other._bits;
+    }
+
+    public override bool Equals(object? obj) => obj is Float128 f && Equals(f);
+
+    // Hash on the canonicalised bit pattern so +0/-0 collide; NaNs hash by bits.
+    public override int GetHashCode()
+    {
+        if (IsZero(this)) { return 0; }
+        return _bits.GetHashCode();
+    }
+
+    public static bool operator ==(Float128 a, Float128 b) => a.Equals(b);
+    public static bool operator !=(Float128 a, Float128 b) => !a.Equals(b);
+
+    public override string ToString() => ToDouble(this).ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+}

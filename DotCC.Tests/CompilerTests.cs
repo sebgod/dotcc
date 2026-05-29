@@ -816,9 +816,14 @@ public sealed class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
+            // The exact initializer — `a` is absent (C# defaults it to 0). The
+            // precise match below already proves `a` isn't emitted; we avoid a
+            // bare ShouldNotContain("a = ") because that scans the whole file
+            // including the spliced runtime, where `a = ` legitimately occurs
+            // (e.g. `int extra = ...` in the embedded Float128 source).
             emitted.ShouldContain("new Pair { b = 99 }");
-            // The `.a` field is absent from the initializer — C# defaults it to 0.
-            emitted.ShouldNotContain("a = ");
+            emitted.ShouldNotContain("{ b = 99, a");
+            emitted.ShouldNotContain("a = 0, b = 99");
         }
         finally { File.Delete(src); }
     }
