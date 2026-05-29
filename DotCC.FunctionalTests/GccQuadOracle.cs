@@ -50,8 +50,33 @@ internal static class GccQuadOracle
 
     /// <summary>binary128 → double narrowing (correctly rounded).</summary>
     internal static readonly Op NarrowToDouble = new(1, ResultIsBinary128: false, "(double)({0})");
-    // Arithmetic ops land as later bricks once Float128 implements them:
-    //   Add = new(2, true, "({0}) + ({1})"), Sqrt = new(1, true, "sqrtl({0})"), etc.
+    /// <summary>binary128 addition (correctly rounded).</summary>
+    internal static readonly Op Add = new(2, ResultIsBinary128: true, "({0}) + ({1})");
+    /// <summary>binary128 subtraction (correctly rounded).</summary>
+    internal static readonly Op Subtract = new(2, ResultIsBinary128: true, "({0}) - ({1})");
+    // More land as Float128 implements them: Mul "({0})*({1})", Div "({0})/({1})",
+    // Sqrt "sqrtl({0})", Fma "fmal({0},{1},{2})".
+
+    /// <summary>
+    /// Evaluate a binary128-result op over each case (operand bit patterns) and
+    /// return the result bit patterns.
+    /// </summary>
+    public static UInt128[] ComputeBinary128(Op op, IReadOnlyList<UInt128[]> cases)
+    {
+        if (!op.ResultIsBinary128)
+        {
+            throw new ArgumentException("op does not produce a binary128 result", nameof(op));
+        }
+        var lines = Run(op, cases);
+        var result = new UInt128[lines.Length];
+        for (int i = 0; i < lines.Length; i++)
+        {
+            var hi = ulong.Parse(lines[i].AsSpan(0, 16), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+            var lo = ulong.Parse(lines[i].AsSpan(16, 16), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+            result[i] = ((UInt128)hi << 64) | lo;
+        }
+        return result;
+    }
 
     private static readonly object _initLock = new();
     private static bool _initialised;

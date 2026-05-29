@@ -119,4 +119,43 @@ public sealed class Float128Tests
         Float128.ToDouble(Float128.Abs(Float128.Negate(x))).ShouldBe(3.5);
         Float128.ToDouble(Float128.Abs(x)).ShouldBe(3.5);
     }
+
+    [Theory]
+    [InlineData(1.0, 1.0, 2.0)]
+    [InlineData(1.0, 2.0, 3.0)]
+    [InlineData(0.5, 0.5, 1.0)]
+    [InlineData(0.1, 0.2, 0.30000000000000004)] // matches binary64's 0.1+0.2 once narrowed
+    [InlineData(-2.5, 1.5, -1.0)]
+    [InlineData(1e18, 1.0, 1e18)] // +1 is far below half a ulp at 1e18 → narrows back to 1e18
+    [InlineData(3.0, -3.0, 0.0)]
+    [InlineData(1234.5, -1000.25, 234.25)]
+    public void Add_basic_cases_round_trip_through_double(double a, double b, double expected)
+    {
+        // Operands chosen so the binary128 sum narrows back to the expected
+        // double exactly (full validation vs gcc is the oracle's job).
+        Float128 sum = Float128.Add(Float128.FromDouble(a), Float128.FromDouble(b));
+        Float128.ToDouble(sum).ShouldBe(expected);
+    }
+
+    [Fact]
+    public void Add_special_values_follow_ieee()
+    {
+        var inf = Float128.PositiveInfinity;
+        var ninf = Float128.NegativeInfinity;
+        Float128.IsInfinity(Float128.Add(inf, Float128.One)).ShouldBeTrue();
+        Float128.IsNaN(Float128.Add(inf, ninf)).ShouldBeTrue();   // inf + -inf = NaN
+        Float128.IsNaN(Float128.Add(Float128.NaN, Float128.One)).ShouldBeTrue();
+        // -0 + -0 = -0; +0 + -0 = +0.
+        Float128.Add(Float128.NegativeZero, Float128.NegativeZero).Bits.ShouldBe(Float128.NegativeZero.Bits);
+        Float128.Add(Float128.Zero, Float128.NegativeZero).Bits.ShouldBe(Float128.Zero.Bits);
+        // x + (-x) = +0.
+        Float128.Add(Float128.One, Float128.Negate(Float128.One)).Bits.ShouldBe(Float128.Zero.Bits);
+    }
+
+    [Fact]
+    public void Subtract_is_add_of_negation()
+    {
+        Float128 r = Float128.Subtract(Float128.FromDouble(10.0), Float128.FromDouble(3.5));
+        Float128.ToDouble(r).ShouldBe(6.5);
+    }
 }

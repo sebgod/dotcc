@@ -64,6 +64,95 @@ public sealed class GccQuadOracleTests
             string.Join("\n", mismatches.Count > 20 ? mismatches.GetRange(0, 20) : mismatches));
     }
 
+    [Fact]
+    public void Float128_addition_matches_gcc()
+    {
+        if (!RunRequested)
+        {
+            Assert.Skip($"gcc binary128 oracle is opt-in. Set {RunGccEnv}=1 to run it.");
+        }
+        if (!GccQuadOracle.IsAvailable)
+        {
+            Assert.Skip($"{RunGccEnv} requested but no WSL gcc with binary128 long double on this host.");
+        }
+
+        var pairs = BuildPairs();
+        var gcc = GccQuadOracle.ComputeBinary128(GccQuadOracle.Add, pairs);
+
+        var mismatches = new List<string>();
+        for (int i = 0; i < pairs.Count; i++)
+        {
+            UInt128 ours = Float128.Add(Float128.FromBits(pairs[i][0]), Float128.FromBits(pairs[i][1])).Bits;
+            UInt128 theirs = gcc[i];
+            if (IsQuadNan(ours) && IsQuadNan(theirs)) { continue; } // NaN payloads may differ
+            if (ours != theirs)
+            {
+                mismatches.Add(
+                    $"a=0x{Hex(pairs[i][0])} b=0x{Hex(pairs[i][1])}  ours=0x{Hex(ours)}  gcc=0x{Hex(theirs)}");
+            }
+        }
+
+        mismatches.ShouldBeEmpty(
+            $"{mismatches.Count}/{pairs.Count} binary128 additions diverge from gcc:\n" +
+            string.Join("\n", mismatches.Count > 20 ? mismatches.GetRange(0, 20) : mismatches));
+    }
+
+    private static string Hex(UInt128 x) => $"{(ulong)(x >> 64):x16}{(ulong)x:x16}";
+
+    private static bool IsQuadNan(UInt128 b)
+        => ((b >> 112) & 0x7FFF) == 0x7FFF && (b & ((UInt128.One << 112) - 1)) != 0;
+
+    private static List<UInt128[]> BuildPairs()
+    {
+        var rng = new Random(0xADD);
+        var pool = BuildInputs();
+        var pairs = new List<UInt128[]>();
+
+        // Every edge value against a few others (inf±inf, x+0, 0+0, 1-1, …).
+        for (int i = 0; i < 13; i++)            // the explicit edges from BuildInputs
+        {
+            for (int j = 0; j < 13; j++) { pairs.Add(new[] { pool[i], pool[j] }); }
+        }
+
+        // Random normal-range pairs → rounding on the aligned sum.
+        for (int i = 0; i < 3000; i++)
+        {
+            pairs.Add(new[]
+            {
+                Bits(rng.Next(2) == 1, rng.Next(-1000, 1001), RandFraction(rng)),
+                Bits(rng.Next(2) == 1, rng.Next(-1000, 1001), RandFraction(rng)),
+            });
+        }
+        // Near-cancellation: b ≈ -a with a perturbed low mantissa → catastrophic
+        // cancellation + renormalisation.
+        for (int i = 0; i < 1500; i++)
+        {
+            int e = rng.Next(-1000, 1001);
+            bool s = rng.Next(2) == 1;
+            UInt128 fa = RandFraction(rng);
+            UInt128 fb = fa ^ ((UInt128)(ulong)rng.NextInt64() & 0xFFFF); // tweak low bits
+            pairs.Add(new[] { Bits(s, e, fa), Bits(!s, e, fb) });
+        }
+        // Widely separated exponents → smaller operand collapses to sticky.
+        for (int i = 0; i < 1500; i++)
+        {
+            pairs.Add(new[]
+            {
+                Bits(rng.Next(2) == 1, rng.Next(900, 1001), RandFraction(rng)),
+                Bits(rng.Next(2) == 1, rng.Next(-1001, -900), RandFraction(rng)),
+            });
+        }
+        // Fully random patterns (subnormals, inf, NaN, extremes).
+        for (int i = 0; i < 1000; i++)
+        {
+            pairs.Add(new[] { RandBits(rng), RandBits(rng) });
+        }
+        return pairs;
+    }
+
+    private static UInt128 RandBits(Random rng)
+        => ((UInt128)(ulong)rng.NextInt64() << 64) | (ulong)rng.NextInt64();
+
     private static bool IsNanBits(ulong b)
         => (b & 0x7FF0_0000_0000_0000UL) == 0x7FF0_0000_0000_0000UL
         && (b & 0x000F_FFFF_FFFF_FFFFUL) != 0;

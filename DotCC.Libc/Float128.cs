@@ -1,6 +1,7 @@
 #nullable enable
 
 using System;
+using System.Numerics;
 
 namespace DotCC.Libc;
 
@@ -105,7 +106,7 @@ public readonly struct Float128 : IEquatable<Float128>
             // up to the implicit position. (This is the case naive libraries
             // get wrong.)
             if (frac == 0) { return sign ? NegativeZero : Zero; }
-            int msb = 63 - System.Numerics.BitOperations.LeadingZeroCount(frac); // 0..51
+            int msb = 63 - BitOperations.LeadingZeroCount(frac); // 0..51
             // Unbiased value exponent of a double subnormal: frac * 2^-1074,
             // normalised to 1.f * 2^(msb-1074).
             int unbiased = msb - 1074;
@@ -246,6 +247,144 @@ public readonly struct Float128 : IEquatable<Float128>
         }
         return kept;
     }
+
+    // ── arithmetic ───────────────────────────────────────────────────────────
+    // Correctness-first: the value of each finite operand is the exact rational
+    // `sig * 2^q` (sig a non-negative integer significand), so add/sub/mul are
+    // computed EXACTLY with BigInteger and then rounded once via
+    // RoundToBinary128. This is the reference shape; a later brick can swap the
+    // BigInteger core for pure UInt128 math, guarded bit-for-bit by the gcc
+    // binary128 oracle. Rounding is round-to-nearest, ties-to-even.
+
+    private const int MinNormalExponent = 1 - ExponentBias;           // -16382
+    // Quantum exponent of an integer significand: value = sigInt * 2^q.
+    private const int SubnormalQuantum = MinNormalExponent - MantissaBits; // -16494
+
+    private static BigInteger ToBig(UInt128 x)
+        => ((BigInteger)(ulong)(x >> 64) << 64) | (ulong)x;
+
+    private static UInt128 ToU128(BigInteger b)
+        => ((UInt128)(ulong)((b >> 64) & ulong.MaxValue) << 64) | (ulong)(b & ulong.MaxValue);
+
+    /// <summary>Decompose a FINITE value into (sign, integer significand, quantum
+    /// exponent q) such that value = (-1)^sign · sig · 2^q. Callers handle NaN /
+    /// inf / zero before this.</summary>
+    private static void Decompose(Float128 v, out bool sign, out BigInteger sig, out int q)
+    {
+        sign = v.SignBit;
+        int e = v.BiasedExponent;
+        UInt128 trailing = v.TrailingSignificand;
+        if (e == 0)
+        {
+            sig = ToBig(trailing);          // subnormal (or zero)
+            q = SubnormalQuantum;
+        }
+        else
+        {
+            sig = ToBig(ImplicitBit | trailing); // normal: implicit 1 + fraction
+            q = e - ExponentBias - MantissaBits;
+        }
+    }
+
+    /// <summary>
+    /// Round the exact value (-1)^<paramref name="sign"/> · <paramref name="mag"/>
+    /// · 2^<paramref name="q"/> (mag ≥ 0) to binary128, nearest-ties-to-even.
+    /// <paramref name="extraSticky"/> marks a non-zero residual below mag's LSB
+    /// (e.g. a division remainder), nudging exact-half cases upward.
+    /// </summary>
+    private static Float128 RoundToBinary128(bool sign, BigInteger mag, int q, bool extraSticky)
+    {
+        UInt128 signMask = sign ? (UInt128.One << SignShift) : UInt128.Zero;
+        if (mag.IsZero)
+        {
+            return new Float128(signMask); // signed zero
+        }
+
+        int bitlen = (int)mag.GetBitLength();
+        int unbiased = q + bitlen - 1;            // exponent of the leading bit
+        int biased = unbiased + ExponentBias;
+
+        if (biased >= MaxBiasedExponent)           // overflow → ±inf
+        {
+            return new Float128(signMask | ((UInt128)MaxBiasedExponent << ExponentShift));
+        }
+
+        if (biased >= 1)
+        {
+            // Normal target: keep 113 significand bits (implicit 1 + 112).
+            BigInteger kept = RoundToBits(mag, bitlen - (MantissaBits + 1), extraSticky);
+            if ((int)kept.GetBitLength() == MantissaBits + 2)
+            {
+                // Rounding carried 1.11..1 → 10.00..0: drop a bit, bump exponent.
+                kept >>= 1;
+                biased++;
+                if (biased >= MaxBiasedExponent)
+                {
+                    return new Float128(signMask | ((UInt128)MaxBiasedExponent << ExponentShift));
+                }
+            }
+            UInt128 trailing = ToU128(kept) & MantissaMask;   // strip implicit 1
+            return new Float128(signMask | ((UInt128)(uint)biased << ExponentShift) | trailing);
+        }
+
+        // Subnormal / underflow target: value goes on the fixed 2^SubnormalQuantum
+        // grid, exponent field 0. frac = round(mag · 2^(q - SubnormalQuantum)).
+        BigInteger frac = RoundToBits(mag, SubnormalQuantum - q, extraSticky);
+        if ((int)frac.GetBitLength() >= MantissaBits + 1)
+        {
+            // Rounded up into the smallest normal (frac == 2^112): exponent 1, frac 0.
+            return new Float128(signMask | (UInt128.One << ExponentShift));
+        }
+        return new Float128(signMask | (ToU128(frac) & MantissaMask)); // exp field 0
+    }
+
+    /// <summary>
+    /// Drop the low <paramref name="dropBits"/> bits of <paramref name="mag"/>
+    /// with round-to-nearest, ties-to-even (a non-empty residual carried in
+    /// <paramref name="extraSticky"/> counts toward the tie). A non-positive
+    /// drop is an exact left shift. The result may be one bit wider on carry.
+    /// </summary>
+    private static BigInteger RoundToBits(BigInteger mag, int dropBits, bool extraSticky)
+    {
+        if (dropBits <= 0) { return mag << -dropBits; }
+        BigInteger kept = mag >> dropBits;
+        BigInteger rem = mag - (kept << dropBits);
+        BigInteger half = BigInteger.One << (dropBits - 1);
+        bool roundUp = rem > half
+            || (rem == half && (extraSticky || !kept.IsEven));
+        return roundUp ? kept + BigInteger.One : kept;
+    }
+
+    public static Float128 Add(Float128 a, Float128 b)
+    {
+        // NaN propagates.
+        if (IsNaN(a) || IsNaN(b)) { return NaN; }
+        if (IsInfinity(a))
+        {
+            // inf + (-inf) is invalid → NaN; otherwise the infinity wins.
+            if (IsInfinity(b) && a.SignBit != b.SignBit) { return NaN; }
+            return a;
+        }
+        if (IsInfinity(b)) { return b; }
+        if (IsZero(a) && IsZero(b))
+        {
+            // -0 + -0 = -0; every other zero combination is +0 (round-nearest).
+            return (a.SignBit && b.SignBit) ? NegativeZero : Zero;
+        }
+        if (IsZero(a)) { return b; }
+        if (IsZero(b)) { return a; }
+
+        Decompose(a, out bool sa, out BigInteger ma, out int qa);
+        Decompose(b, out bool sb, out BigInteger mb, out int qb);
+        int common = Math.Min(qa, qb);
+        BigInteger ia = (sa ? -ma : ma) << (qa - common);
+        BigInteger ib = (sb ? -mb : mb) << (qb - common);
+        BigInteger sum = ia + ib;
+        if (sum.IsZero) { return Zero; } // exact cancellation → +0 in round-nearest
+        return RoundToBinary128(sum.Sign < 0, BigInteger.Abs(sum), common, extraSticky: false);
+    }
+
+    public static Float128 Subtract(Float128 a, Float128 b) => Add(a, Negate(b));
 
     // ── comparison (IEEE: NaN unordered, +0 == -0) ───────────────────────────
     public bool Equals(Float128 other)

@@ -441,6 +441,7 @@ public static class Compiler
             // </auto-generated>
             using System;
             using System.Globalization;
+            using System.Numerics;
             using System.IO;
             using System.Runtime.InteropServices;
             using System.Runtime.CompilerServices;
@@ -559,6 +560,7 @@ public static class Compiler
             // </auto-generated>
             using System;
             using System.Globalization;
+            using System.Numerics;
             using System.IO;
             using System.Runtime.InteropServices;
             using System.Runtime.CompilerServices;
