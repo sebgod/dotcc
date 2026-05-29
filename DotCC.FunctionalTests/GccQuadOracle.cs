@@ -62,6 +62,13 @@ internal static class GccQuadOracle
     internal static readonly Op Sqrt = new(1, ResultIsBinary128: true, "sqrtl({0})");
     /// <summary>binary128 fused multiply-add (single rounding).</summary>
     internal static readonly Op Fma = new(3, ResultIsBinary128: true, "fmal({0}, {1}, {2})");
+    // Exact integral / algebraic ops (correctly rounded ⇒ bit-exact vs gcc).
+    internal static readonly Op Floor = new(1, ResultIsBinary128: true, "floorl({0})");
+    internal static readonly Op Ceiling = new(1, ResultIsBinary128: true, "ceill({0})");
+    internal static readonly Op Truncate = new(1, ResultIsBinary128: true, "truncl({0})");
+    internal static readonly Op Round = new(1, ResultIsBinary128: true, "rintl({0})"); // default mode = ties-even
+    internal static readonly Op CopySign = new(2, ResultIsBinary128: true, "copysignl({0}, {1})");
+    internal static readonly Op Fmod = new(2, ResultIsBinary128: true, "fmodl({0}, {1})");
 
     /// <summary>
     /// Evaluate a binary128-result op over each case (operand bit patterns) and

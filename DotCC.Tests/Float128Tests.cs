@@ -289,6 +289,31 @@ public sealed class Float128Tests
         Float128.FromDouble(0.0001).ToGeneralString(6, upper: false).ShouldBe("0.0001");
     }
 
+    [Theory]
+    [InlineData(2.7, 2.0, 3.0, 2.0, 3.0)]      // floor, ceil, trunc, round
+    [InlineData(-2.7, -3.0, -2.0, -2.0, -3.0)]
+    [InlineData(2.5, 2.0, 3.0, 2.0, 2.0)]      // round ties-to-even → 2
+    [InlineData(3.5, 3.0, 4.0, 3.0, 4.0)]      // ties-to-even → 4
+    [InlineData(5.0, 5.0, 5.0, 5.0, 5.0)]      // integral
+    public void Integral_functions(double x, double floor, double ceil, double trunc, double round)
+    {
+        Float128 v = Float128.FromDouble(x);
+        Float128.ToDouble(Float128.Floor(v)).ShouldBe(floor);
+        Float128.ToDouble(Float128.Ceiling(v)).ShouldBe(ceil);
+        Float128.ToDouble(Float128.Truncate(v)).ShouldBe(trunc);
+        Float128.ToDouble(Float128.Round(v)).ShouldBe(round);
+    }
+
+    [Fact]
+    public void CopySign_and_Fmod()
+    {
+        Float128.ToDouble(Float128.CopySign(Float128.FromDouble(3.0), Float128.FromDouble(-1.0))).ShouldBe(-3.0);
+        Float128.ToDouble(Float128.CopySign(Float128.FromDouble(-3.0), Float128.FromDouble(1.0))).ShouldBe(3.0);
+        Float128.ToDouble(Float128.Fmod(Float128.FromDouble(7.5), Float128.FromDouble(2.0))).ShouldBe(1.5);
+        Float128.ToDouble(Float128.Fmod(Float128.FromDouble(-7.5), Float128.FromDouble(2.0))).ShouldBe(-1.5);
+        Float128.IsNaN(Float128.Fmod(Float128.FromDouble(1.0), Float128.Zero)).ShouldBeTrue();
+    }
+
     [Fact]
     public void Relational_operators_follow_ieee()
     {

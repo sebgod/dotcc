@@ -488,6 +488,70 @@ public readonly struct Float128 : IEquatable<Float128>, IComparable<Float128>
         return RoundToBinary128(sum.Sign < 0, BigInteger.Abs(sum), common, extraSticky: false);
     }
 
+    // ── exact integral / algebraic functions (correctly rounded ⇒ bit-exact) ─
+    public static Float128 Truncate(Float128 x)
+    {
+        if (IsNaN(x) || IsInfinity(x) || IsZero(x)) { return x; }
+        Decompose(x, out bool s, out BigInteger m, out int q);
+        if (q >= 0) { return x; }                    // already integral
+        int shift = -q;
+        if (shift >= (int)m.GetBitLength()) { return s ? NegativeZero : Zero; } // |x| < 1
+        return RoundToBinary128(s, m >> shift, 0, extraSticky: false); // drop fraction → toward 0
+    }
+
+    public static Float128 Floor(Float128 x)
+    {
+        if (IsNaN(x) || IsInfinity(x) || IsZero(x)) { return x; }
+        Float128 t = Truncate(x);
+        // Negative non-integers truncate up (toward 0), so step down to -inf.
+        return (x.SignBit && t != x) ? Subtract(t, One) : t;
+    }
+
+    public static Float128 Ceiling(Float128 x)
+    {
+        if (IsNaN(x) || IsInfinity(x) || IsZero(x)) { return x; }
+        Float128 t = Truncate(x);
+        return (!x.SignBit && t != x) ? Add(t, One) : t;
+    }
+
+    /// <summary>Round to nearest integer, ties-to-even (matches C <c>rintl</c>
+    /// under the default rounding mode).</summary>
+    public static Float128 Round(Float128 x)
+    {
+        if (IsNaN(x) || IsInfinity(x) || IsZero(x)) { return x; }
+        Decompose(x, out bool s, out BigInteger m, out int q);
+        if (q >= 0) { return x; }
+        int shift = -q;
+        int bits = (int)m.GetBitLength();
+        if (shift > bits) { return s ? NegativeZero : Zero; } // |x| < 0.5
+        BigInteger kept = m >> shift;
+        BigInteger rem = m - (kept << shift);
+        BigInteger half = BigInteger.One << (shift - 1);
+        if (rem > half || (rem == half && !kept.IsEven)) { kept += BigInteger.One; }
+        return kept.IsZero ? (s ? NegativeZero : Zero) : RoundToBinary128(s, kept, 0, false);
+    }
+
+    /// <summary>Magnitude of <paramref name="x"/>, sign of <paramref name="y"/>.</summary>
+    public static Float128 CopySign(Float128 x, Float128 y)
+    {
+        UInt128 signMask = UInt128.One << SignShift;
+        return new Float128((x._bits & ~signMask) | (y._bits & signMask));
+    }
+
+    /// <summary>C <c>fmod</c>: x − trunc(x/y)·y, sign of x. Exact (no rounding).</summary>
+    public static Float128 Fmod(Float128 x, Float128 y)
+    {
+        if (IsNaN(x) || IsNaN(y) || IsInfinity(x) || IsZero(y)) { return NaN; }
+        if (IsInfinity(y) || IsZero(x)) { return x; }
+        bool s = x.SignBit;
+        Decompose(x, out _, out BigInteger mx, out int qx);
+        Decompose(y, out _, out BigInteger my, out int qy);
+        int c = Math.Min(qx, qy);
+        BigInteger r = (mx << (qx - c)) % (my << (qy - c));   // exact remainder
+        if (r.IsZero) { return s ? NegativeZero : Zero; }
+        return RoundToBinary128(s, r, c, extraSticky: false); // r exact ⇒ identity
+    }
+
     /// <summary>Integer floor-sqrt of a non-negative BigInteger (Newton's
     /// method with a correcting clamp).</summary>
     private static BigInteger ISqrt(BigInteger n)

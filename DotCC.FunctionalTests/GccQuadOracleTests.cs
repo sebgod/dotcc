@@ -90,6 +90,33 @@ public sealed class GccQuadOracleTests
             c => Float128.FusedMultiplyAdd(
                 Float128.FromBits(c[0]), Float128.FromBits(c[1]), Float128.FromBits(c[2])).Bits);
 
+    // Exact integral / algebraic functions — bit-exact vs gcc.
+    [Fact]
+    public void Float128_floor_matches_gcc()
+        => AssertOpMatchesGcc(GccQuadOracle.Floor, BuildUnary(), c => Float128.Floor(Float128.FromBits(c[0])).Bits);
+
+    [Fact]
+    public void Float128_ceiling_matches_gcc()
+        => AssertOpMatchesGcc(GccQuadOracle.Ceiling, BuildUnary(), c => Float128.Ceiling(Float128.FromBits(c[0])).Bits);
+
+    [Fact]
+    public void Float128_truncate_matches_gcc()
+        => AssertOpMatchesGcc(GccQuadOracle.Truncate, BuildUnary(), c => Float128.Truncate(Float128.FromBits(c[0])).Bits);
+
+    [Fact]
+    public void Float128_round_matches_gcc()
+        => AssertOpMatchesGcc(GccQuadOracle.Round, BuildUnary(), c => Float128.Round(Float128.FromBits(c[0])).Bits);
+
+    [Fact]
+    public void Float128_copysign_matches_gcc()
+        => AssertOpMatchesGcc(GccQuadOracle.CopySign, BuildPairs(),
+            c => Float128.CopySign(Float128.FromBits(c[0]), Float128.FromBits(c[1])).Bits);
+
+    [Fact]
+    public void Float128_fmod_matches_gcc()
+        => AssertOpMatchesGcc(GccQuadOracle.Fmod, BuildPairs(),
+            c => Float128.Fmod(Float128.FromBits(c[0]), Float128.FromBits(c[1])).Bits);
+
     /// <summary>
     /// Run a binary128-result op over <paramref name="cases"/> (each carrying
     /// the op's operand bit patterns) and assert our result equals gcc's
