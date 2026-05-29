@@ -2,6 +2,8 @@
 
 Running tracker of what dotcc's grammar and libc cover today. Update this when a feature lands (add the fixture / test reference in **Notes**), when one moves from ❌ to 🟡 to ✅, or when something is decided out of scope (🚫 with reason).
 
+**Default dialect: `c17`.** Select otherwise with `-std=<dialect>` (`c90`/`c99`/`c11`/`c17`/`c18`/`c23`) — see the CLI flag table in CLAUDE.md. v1 scope: `-std=` predefines `__STDC_VERSION__` (and friends) so headers can branch via `#if __STDC_VERSION__ >= …L`. The parser itself is dialect-agnostic — `//` comments, `_Bool`, designated initializers, and other "modern" constructs are accepted regardless of `-std=`. Year tags below (`C99` / `C11` / `C23`) are descriptive, not enforcement gates.
+
 **Legend**
 
 | Marker | Meaning |

@@ -54,10 +54,14 @@ internal static class Program
         {
             Description = "Produce a shared library (NativeAOT-publishable, with [UnmanagedCallersOnly] exports for non-static C functions).",
         };
+        var stdOpt = new Option<string?>("-std")
+        {
+            Description = "C dialect: c90/c99/c11/c17/c18/c23. Default: c17.",
+        };
 
         var root = new RootCommand("dotcc — a C compiler frontend that transpiles to .NET 10 / C# 14.")
         {
-            inputArg, outOpt, emitOpt, preprocessOpt, includeOpt, defineOpt, compileOpt, sharedOpt,
+            inputArg, outOpt, emitOpt, preprocessOpt, includeOpt, defineOpt, compileOpt, sharedOpt, stdOpt,
         };
 
         root.SetAction(parse =>
@@ -70,10 +74,22 @@ internal static class Program
             var defines = parse.GetValue(defineOpt) ?? Array.Empty<string>();
             var compileFlag = parse.GetValue(compileOpt);
             var sharedFlag = parse.GetValue(sharedOpt);
+            var stdValue = parse.GetValue(stdOpt);
 
             if (inputs.Length == 0)
             {
                 Console.Error.WriteLine("dotcc: error: no input files");
+                return 1;
+            }
+
+            CDialect dialect;
+            try
+            {
+                dialect = stdValue is null ? CDialect.Default : CDialect.Parse(stdValue);
+            }
+            catch (FormatException ex)
+            {
+                Console.Error.WriteLine($"dotcc: error: {ex.Message}");
                 return 1;
             }
 
@@ -85,7 +101,7 @@ internal static class Program
                 emit = EmitKind.Build;
             }
 
-            return Run(inputs, output, emit, preprocessOnly, includes, defines, sharedFlag);
+            return Run(inputs, output, emit, preprocessOnly, includes, defines, sharedFlag, dialect);
         });
 
         return root.Parse(args).Invoke();
@@ -100,11 +116,12 @@ internal static class Program
         bool preprocessOnly,
         string[] includeDirs,
         string[] defines,
-        bool libraryMode)
+        bool libraryMode,
+        CDialect dialect)
     {
         if (preprocessOnly)
         {
-            Compiler.Preprocess(inputPaths, Console.Out, includeDirs, defines);
+            Compiler.Preprocess(inputPaths, Console.Out, includeDirs, defines, dialect);
             return 0;
         }
 
@@ -116,7 +133,8 @@ internal static class Program
                 includeDirs,
                 defines,
                 fileBased: emit == EmitKind.Csharp && !libraryMode,
-                libraryMode: libraryMode);
+                libraryMode: libraryMode,
+                dialect: dialect);
         }
         catch (CompileException ex)
         {

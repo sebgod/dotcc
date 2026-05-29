@@ -110,10 +110,20 @@ If you change the grammar (`c.lalr.yaml`), the generated surface changes in lock
 | `--emit=build` | As `csproj`, then run `dotnet build -c Release` in the output dir. |
 | `-E` | Preprocess only — dump the post-`#include`/`#define` token stream to stdout. No parsing. |
 | `-I <dir>` | Add header search directory. Repeatable. Auto-includes each `<input>.c`'s directory. |
-| `-D NAME[=VALUE]` | Predefine a macro. Repeatable. v1 stores empty body (defined-as-marker only); rich expansions go inside a header. |
+| `-D NAME[=VALUE]` | Predefine a macro. Repeatable. With `=VALUE`, the right-hand side is lexed through the same byte lexer the parser uses, so use-site substitution behaves like an in-source `#define`. Without `=`, the macro is a defined-as-marker (empty body). |
 | `-c` | Compile to .NET assembly (no native publish). Clang-shaped alias for `--emit=build`. |
 | `-shared` | Produce a shared library: csproj configured for `<NativeLib>Shared</NativeLib>` + `<PublishAot>true</PublishAot>`, non-static C functions exported via `[UnmanagedCallersOnly(EntryPoint = "name", CallConvs = …CallConvCdecl…)]`. `main` not required. Run `dotnet publish -c Release -r <RID>` in the output dir to produce the actual native `.dll`/`.so`/`.dylib`. |
+| `-std=<dialect>` | C dialect: `c90`/`c99`/`c11`/`c17`/`c18`/`c23`. Default: `c17`. v1 effect is predefined macros only — `__STDC_VERSION__` gets the right per-dialect value (omitted for `c90` per spec) so synthetic / user headers can `#if __STDC_VERSION__ >= 199901L`-gate. The parser is dialect-agnostic; `//` comments, `_Bool`, and other "modern" constructs are accepted regardless. `c89` is omitted in favor of the canonical `c90` (same standard, ISO renumbering only); no `gnu*` variants — dotcc implements no GNU extensions, so the parallel toggle would be dead surface. |
 | (no inputs) | Error and exit non-zero — same as clang. |
+
+**Predefined macros (seeded by every compile, in addition to any `-D` predefines):**
+
+| Macro | Value | Notes |
+|---|---|---|
+| `__STDC__` | `1` | Always defined — hosted-conforming compiler indicator. |
+| `__STDC_HOSTED__` | `1` | We are hosted; `<stdio.h>` and friends exist. |
+| `__STDC_VERSION__` | `199901L` / `201112L` / `201710L` / `202311L` | Set per `-std=`; **undefined** under `-std=c90`. |
+| `__dotcc__` | `1` | Compiler identification — analogous to `__clang__` / `__GNUC__`. |
 
 **Library mode (`-shared`) emit shape**: user functions land in `internal static class DotCcLib { … }` so calls between them resolve as direct C# method invocations (the `[UnmanagedCallersOnly]` attribute prohibits managed-call sites — wrappers can only be invoked through a function pointer). Each non-static C function gets a matching `public static …` wrapper in `public static class DotCcExports` annotated with `[UnmanagedCallersOnly]`; NativeAOT publish inlines the wrapper trampoline. C `static` functions stay internal — no export wrapper. Varargs functions are skipped from exports (C# `params object[]` isn't a valid `UnmanagedCallersOnly` signature).
 

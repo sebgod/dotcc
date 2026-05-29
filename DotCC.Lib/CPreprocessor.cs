@@ -86,14 +86,39 @@ internal sealed class CPreprocessor : C.IPreprocessor
         _stringSymbolId = symMap["STRING"];
         foreach (var d in predefines)
         {
-            // -D NAME or -D NAME=VALUE. Stored body is empty (defined-as-marker)
-            // for now — richer expansions need an in-stream lex pass to
-            // construct Items; users should write a `#define` inside a header
-            // for those cases.
+            // -D NAME           → defined-as-marker (empty body)
+            // -D NAME=VALUE     → lex VALUE through the same byte lexer the
+            //                     parser uses, so the substitution is a real
+            //                     token sequence. This is what makes
+            //                     `__STDC_VERSION__=201710L` work as the
+            //                     LHS of `#if __STDC_VERSION__ >= 199901L`
+            //                     (the conditional-expression evaluator
+            //                     pre-expands object-like macros via
+            //                     Rewrite). It also makes user-supplied
+            //                     `-D X=42` substitute as `42` at use site
+            //                     instead of disappearing.
             var eq = d.IndexOf('=');
             var name = eq < 0 ? d : d[..eq];
-            _macros[name] = new MacroDef(name, Params: null, Body: Array.Empty<Item>());
+            var body = eq < 0 || eq == d.Length - 1
+                ? Array.Empty<Item>()
+                : LexMacroValue(d[(eq + 1)..]);
+            _macros[name] = new MacroDef(name, Params: null, Body: body);
         }
+    }
+
+    /// <summary>
+    /// Lex a <c>-D NAME=VALUE</c> right-hand side into the matching token
+    /// sequence. Whitespace is dropped by the grammar's lexer rules, so
+    /// <c>"1 + 2"</c> yields three tokens just like an in-source body.
+    /// Returns empty on lex failure rather than throwing — the frontend
+    /// already validated <c>-D</c> at parse time.
+    /// </summary>
+    private Item[] LexMacroValue(string text)
+    {
+        using var lex = BytesLexer.FromString(text, _lexerTable);
+        var list = new List<Item>();
+        while (lex.MoveNext()) { list.Add(lex.Current); }
+        return list.ToArray();
     }
 
     /// <summary>

@@ -162,19 +162,21 @@ public static class Compiler
         IReadOnlyList<string>? includeDirs = null,
         IReadOnlyList<string>? defines = null,
         bool fileBased = true,
-        bool libraryMode = false)
+        bool libraryMode = false,
+        CDialect? dialect = null)
     {
         var includeMap = BuildIncludeMap(inputPaths, includeDirs);
         var emitter = new CSharpEmitter();
         var parser = C.BuildParser(emitter);
         var lexerTable = C.BuildLexer();
+        var seededDefines = SeedDialectDefines(dialect ?? CDialect.Default, defines);
 
         var allFunctions = new StringBuilder();
         var mainArity = -1;
         foreach (var unitPath in inputPaths)
         {
             var source = File.ReadAllText(unitPath);
-            var pre = new CPreprocessor(lexerTable, includeMap, defines ?? Array.Empty<string>());
+            var pre = new CPreprocessor(lexerTable, includeMap, seededDefines);
             pre.SetActiveFilename(Path.GetFileName(unitPath));
             using var lexer = BytesLexer.FromString(source, lexerTable);
             using var preproc = C.WrapPreprocessor(lexer, pre);
@@ -240,15 +242,17 @@ public static class Compiler
         IReadOnlyList<string> inputPaths,
         TextWriter output,
         IReadOnlyList<string>? includeDirs = null,
-        IReadOnlyList<string>? defines = null)
+        IReadOnlyList<string>? defines = null,
+        CDialect? dialect = null)
     {
         var includeMap = BuildIncludeMap(inputPaths, includeDirs);
         var lexerTable = C.BuildLexer();
+        var seededDefines = SeedDialectDefines(dialect ?? CDialect.Default, defines);
         foreach (var unitPath in inputPaths)
         {
             output.WriteLine($"# {unitPath}");
             var source = File.ReadAllText(unitPath);
-            var pre = new CPreprocessor(lexerTable, includeMap, defines ?? Array.Empty<string>());
+            var pre = new CPreprocessor(lexerTable, includeMap, seededDefines);
             pre.SetActiveFilename(Path.GetFileName(unitPath));
             using var lexer = BytesLexer.FromString(source, lexerTable);
             using var preproc = C.WrapPreprocessor(lexer, pre);
@@ -309,6 +313,35 @@ public static class Compiler
               </PropertyGroup>
             </Project>
             """;
+    }
+
+    /// <summary>
+    /// Build the predefined-macro list for the given dialect, prepended to
+    /// any user <c>-D</c> defines. Names follow the C standard: always
+    /// <c>__STDC__=1</c> and <c>__STDC_HOSTED__=1</c>; <c>__STDC_VERSION__</c>
+    /// is set only for C95+ modes (C89/C90 leaves it undefined per the
+    /// standard). User defines win on collision — they come later in the
+    /// list, and <see cref="CPreprocessor"/>'s loop overwrites prior entries
+    /// in the macro table.
+    /// </summary>
+    private static string[] SeedDialectDefines(CDialect dialect, IReadOnlyList<string>? userDefines)
+    {
+        var seeded = new List<string>(4 + (userDefines?.Count ?? 0))
+        {
+            "__STDC__=1",
+            "__STDC_HOSTED__=1",
+            // Compiler identification — analogous to clang's `__clang__`
+            // and gcc's `__GNUC__`. User code can `#ifdef __dotcc__` to
+            // branch on the compiler identity in mixed-source projects.
+            "__dotcc__=1",
+        };
+        var stdcVersion = dialect.StdcVersionLiteral;
+        if (stdcVersion is not null)
+        {
+            seeded.Add($"__STDC_VERSION__={stdcVersion}");
+        }
+        if (userDefines is not null) { seeded.AddRange(userDefines); }
+        return seeded.ToArray();
     }
 
     private static Dictionary<string, string> BuildIncludeMap(

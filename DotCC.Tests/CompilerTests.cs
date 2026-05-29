@@ -873,6 +873,180 @@ public sealed class CompilerTests
         finally { File.Delete(src); }
     }
 
+    // ---- -std= dialect selection -----------------------------------------
+    // The dialect drives which __STDC_* macros are predefined. v1 scope:
+    // headers and user code can branch on __STDC_VERSION__; the parser is
+    // dialect-agnostic.
+
+    [Fact]
+    public void Default_dialect_seeds_STDC_VERSION_to_C17_value()
+    {
+        // No -std= → CDialect.Default (c17). __STDC_VERSION__ = 201710L.
+        var src = WriteTemp("""
+            int main() { return __STDC_VERSION__; }
+            """);
+        try
+        {
+            using var sw = new StringWriter();
+            Compiler.Preprocess(new[] { src }, sw);
+            var dumped = sw.ToString();
+            // Macro substitution replaces the use-site identifier with the
+            // numeric literal. Body lexed by the preprocessor so the L
+            // suffix survives as part of the NUM token.
+            dumped.ShouldNotContain("__STDC_VERSION__");
+            dumped.ShouldContain("201710L");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void C99_dialect_sets_STDC_VERSION_to_199901L()
+    {
+        var src = WriteTemp("""
+            int main() { return __STDC_VERSION__; }
+            """);
+        try
+        {
+            using var sw = new StringWriter();
+            Compiler.Preprocess(new[] { src }, sw, dialect: CDialect.Parse("c99"));
+            var dumped = sw.ToString();
+            dumped.ShouldContain("199901L");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void C11_dialect_sets_STDC_VERSION_to_201112L()
+    {
+        var src = WriteTemp("int main() { return __STDC_VERSION__; }");
+        try
+        {
+            using var sw = new StringWriter();
+            Compiler.Preprocess(new[] { src }, sw, dialect: CDialect.Parse("c11"));
+            sw.ToString().ShouldContain("201112L");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void C23_dialect_sets_STDC_VERSION_to_202311L()
+    {
+        var src = WriteTemp("int main() { return __STDC_VERSION__; }");
+        try
+        {
+            using var sw = new StringWriter();
+            Compiler.Preprocess(new[] { src }, sw, dialect: CDialect.Parse("c23"));
+            sw.ToString().ShouldContain("202311L");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void C90_dialect_leaves_STDC_VERSION_undefined()
+    {
+        // C90: per the standard, __STDC__ is 1 but __STDC_VERSION__
+        // is undefined. An `#if __STDC_VERSION__` evaluates the unresolved
+        // identifier to 0, so the FALSE branch wins.
+        var src = WriteTemp("""
+            #if __STDC_VERSION__ >= 199901L
+            #define MODERN 1
+            #else
+            #define MODERN 0
+            #endif
+            int main() { return MODERN; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"));
+            emitted.ShouldContain("return 0;");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void C99_dialect_makes_if_STDC_VERSION_GE_C99_take_true_branch()
+    {
+        // The whole point of seeding __STDC_VERSION__ with a real value:
+        // header guards like `#if __STDC_VERSION__ >= 199901L` need to
+        // evaluate correctly. The preprocessor's conditional-expression
+        // evaluator pre-expands object-like macros via Rewrite, then
+        // strips the L suffix and compares as long.
+        var src = WriteTemp("""
+            #if __STDC_VERSION__ >= 199901L
+            #define MODERN 1
+            #else
+            #define MODERN 0
+            #endif
+            int main() { return MODERN; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c99"));
+            emitted.ShouldContain("return 1;");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void STDC_and_STDC_HOSTED_are_always_seeded()
+    {
+        // __STDC__ and __STDC_HOSTED__ are dialect-independent — every
+        // conforming hosted compiler defines both as 1.
+        var src = WriteTemp("""
+            int main() {
+                int a = __STDC__;
+                int b = __STDC_HOSTED__;
+                return a + b;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"));
+            emitted.ShouldNotContain("__STDC__");
+            emitted.ShouldNotContain("__STDC_HOSTED__");
+            // Two `= 1` assignments survive.
+            emitted.ShouldContain("a = 1");
+            emitted.ShouldContain("b = 1");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void User_D_NAME_VALUE_now_substitutes_value_at_use_site()
+    {
+        // The value-bearing -D path was previously a defined-as-marker only.
+        // The CPreprocessor now lexes the RHS into the macro body, so use
+        // sites see the actual literal.
+        var src = WriteTemp("int main() { return ANSWER; }");
+        try
+        {
+            using var sw = new StringWriter();
+            Compiler.Preprocess(new[] { src }, sw, defines: new[] { "ANSWER=42" });
+            sw.ToString().ShouldContain(" 42 ");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Unknown_std_value_throws_via_Parse()
+    {
+        // FormatException (not ArgumentException) so the frontend's
+        // `dotcc: error: …` line doesn't carry the parameter-name
+        // decoration that ArgumentException.Message tacks on.
+        Should.Throw<System.FormatException>(() => CDialect.Parse("c42"))
+            .Message.ShouldContain("c42");
+    }
+
+    [Fact]
+    public void CDialect_Name_round_trips_known_values()
+    {
+        CDialect.Parse("c99").Name.ShouldBe("c99");
+        CDialect.Parse("c17").Name.ShouldBe("c17");
+        // c18 is a clang alias that normalizes to c17 (same standard year).
+        CDialect.Parse("c18").Name.ShouldBe("c17");
+        CDialect.Default.Name.ShouldBe("c17");
+    }
+
     [Fact]
     public void Variadic_macro_with_named_params_plus_extras()
     {
