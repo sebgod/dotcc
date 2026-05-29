@@ -216,4 +216,67 @@ public sealed class Float128Tests
         Float128.ToInt64(Float128.PositiveInfinity).ShouldBe(long.MaxValue);
         Float128.ToInt64(Float128.NegativeInfinity).ShouldBe(long.MinValue);
     }
+
+    [Theory]
+    [InlineData(6.0, 2.0, 3.0)]
+    [InlineData(1.0, 4.0, 0.25)]
+    [InlineData(-9.0, 3.0, -3.0)]
+    [InlineData(7.0, 2.0, 3.5)]
+    public void Divide_basic_cases(double a, double b, double expected)
+        => Float128.ToDouble(Float128.Divide(Float128.FromDouble(a), Float128.FromDouble(b))).ShouldBe(expected);
+
+    [Fact]
+    public void Divide_special_values_follow_ieee()
+    {
+        Float128.IsInfinity(Float128.Divide(Float128.One, Float128.Zero)).ShouldBeTrue();   // 1/0 = inf
+        Float128.IsNaN(Float128.Divide(Float128.Zero, Float128.Zero)).ShouldBeTrue();         // 0/0 = NaN
+        Float128.IsNaN(Float128.Divide(Float128.PositiveInfinity, Float128.PositiveInfinity)).ShouldBeTrue();
+        Float128.ToDouble(Float128.Divide(Float128.FromDouble(-1.0), Float128.Zero)).ShouldBe(double.NegativeInfinity);
+    }
+
+    [Theory]
+    [InlineData(4.0, 2.0)]
+    [InlineData(9.0, 3.0)]
+    [InlineData(2.0, 1.4142135623730951)]   // sqrt(2) narrowed to double
+    [InlineData(0.25, 0.5)]
+    [InlineData(1e300, 1e150)]
+    public void Sqrt_basic_cases(double x, double expected)
+        => Float128.ToDouble(Float128.Sqrt(Float128.FromDouble(x))).ShouldBe(expected);
+
+    [Fact]
+    public void Sqrt_special_values()
+    {
+        Float128.Sqrt(Float128.Zero).Bits.ShouldBe(Float128.Zero.Bits);
+        Float128.Sqrt(Float128.NegativeZero).Bits.ShouldBe(Float128.NegativeZero.Bits); // sqrt(-0) = -0
+        Float128.IsNaN(Float128.Sqrt(Float128.FromDouble(-1.0))).ShouldBeTrue();
+        Float128.IsInfinity(Float128.Sqrt(Float128.PositiveInfinity)).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Fma_is_single_rounding()
+    {
+        // 2*3 + 4 = 10.
+        Float128.ToDouble(Float128.FusedMultiplyAdd(
+            Float128.FromDouble(2.0), Float128.FromDouble(3.0), Float128.FromDouble(4.0))).ShouldBe(10.0);
+        // The product is exact (no intermediate rounding) before the add.
+        Float128 a = Float128.FromInt64(3), b = Float128.FromInt64(5), c = Float128.FromInt64(-15);
+        Float128.IsZero(Float128.FusedMultiplyAdd(a, b, c)).ShouldBeTrue(); // 15 - 15 = 0
+        Float128.IsNaN(Float128.FusedMultiplyAdd(Float128.Zero, Float128.PositiveInfinity, Float128.One)).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Relational_operators_follow_ieee()
+    {
+        Float128 one = Float128.One, two = Float128.FromInt64(2);
+        (one < two).ShouldBeTrue();
+        (two < one).ShouldBeFalse();
+        (one <= one).ShouldBeTrue();
+        (two > one).ShouldBeTrue();
+        (Float128.Negate(two) < Float128.Negate(one)).ShouldBeTrue(); // -2 < -1
+        (Float128.NegativeInfinity < Float128.PositiveInfinity).ShouldBeTrue();
+        // NaN is unordered: every relational operator is false.
+        (Float128.NaN < one).ShouldBeFalse();
+        (Float128.NaN >= one).ShouldBeFalse();
+        (one < Float128.NaN).ShouldBeFalse();
+    }
 }

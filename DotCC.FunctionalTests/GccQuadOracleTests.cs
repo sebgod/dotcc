@@ -66,19 +66,37 @@ public sealed class GccQuadOracleTests
 
     [Fact]
     public void Float128_addition_matches_gcc()
-        => AssertBinaryOpMatchesGcc(GccQuadOracle.Add,
-            (a, b) => Float128.Add(Float128.FromBits(a), Float128.FromBits(b)).Bits);
+        => AssertOpMatchesGcc(GccQuadOracle.Add, BuildPairs(),
+            c => Float128.Add(Float128.FromBits(c[0]), Float128.FromBits(c[1])).Bits);
 
     [Fact]
     public void Float128_multiplication_matches_gcc()
-        => AssertBinaryOpMatchesGcc(GccQuadOracle.Multiply,
-            (a, b) => Float128.Multiply(Float128.FromBits(a), Float128.FromBits(b)).Bits);
+        => AssertOpMatchesGcc(GccQuadOracle.Multiply, BuildPairs(),
+            c => Float128.Multiply(Float128.FromBits(c[0]), Float128.FromBits(c[1])).Bits);
+
+    [Fact]
+    public void Float128_division_matches_gcc()
+        => AssertOpMatchesGcc(GccQuadOracle.Divide, BuildPairs(),
+            c => Float128.Divide(Float128.FromBits(c[0]), Float128.FromBits(c[1])).Bits);
+
+    [Fact]
+    public void Float128_sqrt_matches_gcc()
+        => AssertOpMatchesGcc(GccQuadOracle.Sqrt, BuildUnary(),
+            c => Float128.Sqrt(Float128.FromBits(c[0])).Bits);
+
+    [Fact]
+    public void Float128_fma_matches_gcc()
+        => AssertOpMatchesGcc(GccQuadOracle.Fma, BuildTriples(),
+            c => Float128.FusedMultiplyAdd(
+                Float128.FromBits(c[0]), Float128.FromBits(c[1]), Float128.FromBits(c[2])).Bits);
 
     /// <summary>
-    /// Run a binary128-result binary op over <see cref="BuildPairs"/> and assert
-    /// our result equals gcc's bit-for-bit (NaN payloads excepted).
+    /// Run a binary128-result op over <paramref name="cases"/> (each carrying
+    /// the op's operand bit patterns) and assert our result equals gcc's
+    /// bit-for-bit (NaN payloads excepted).
     /// </summary>
-    private static void AssertBinaryOpMatchesGcc(GccQuadOracle.Op op, Func<UInt128, UInt128, UInt128> ours)
+    private static void AssertOpMatchesGcc(
+        GccQuadOracle.Op op, IReadOnlyList<UInt128[]> cases, Func<UInt128[], UInt128> ours)
     {
         if (!RunRequested)
         {
@@ -89,25 +107,68 @@ public sealed class GccQuadOracleTests
             Assert.Skip($"{RunGccEnv} requested but no WSL gcc with binary128 long double on this host.");
         }
 
-        var pairs = BuildPairs();
-        var gcc = GccQuadOracle.ComputeBinary128(op, pairs);
+        var gcc = GccQuadOracle.ComputeBinary128(op, cases);
 
         var mismatches = new List<string>();
-        for (int i = 0; i < pairs.Count; i++)
+        for (int i = 0; i < cases.Count; i++)
         {
-            UInt128 mine = ours(pairs[i][0], pairs[i][1]);
+            UInt128 mine = ours(cases[i]);
             UInt128 theirs = gcc[i];
             if (IsQuadNan(mine) && IsQuadNan(theirs)) { continue; } // NaN payloads may differ
             if (mine != theirs)
             {
-                mismatches.Add(
-                    $"a=0x{Hex(pairs[i][0])} b=0x{Hex(pairs[i][1])}  ours=0x{Hex(mine)}  gcc=0x{Hex(theirs)}");
+                string ops = string.Join(" ", Array.ConvertAll(cases[i], x => "0x" + Hex(x)));
+                mismatches.Add($"in=[{ops}]  ours=0x{Hex(mine)}  gcc=0x{Hex(theirs)}");
             }
         }
 
         mismatches.ShouldBeEmpty(
-            $"{mismatches.Count}/{pairs.Count} results diverge from gcc:\n" +
+            $"{mismatches.Count}/{cases.Count} results diverge from gcc:\n" +
             string.Join("\n", mismatches.Count > 20 ? mismatches.GetRange(0, 20) : mismatches));
+    }
+
+    private static List<UInt128[]> BuildUnary()
+    {
+        var list = new List<UInt128[]>();
+        foreach (var x in BuildInputs()) { list.Add(new[] { x }); }
+        return list;
+    }
+
+    private static List<UInt128[]> BuildTriples()
+    {
+        var rng = new Random(0xF3A);
+        var triples = new List<UInt128[]>();
+        // Normal-range triples → exercise the exact-product + exact-add path.
+        for (int i = 0; i < 3000; i++)
+        {
+            triples.Add(new[]
+            {
+                Bits(rng.Next(2) == 1, rng.Next(-500, 501), RandFraction(rng)),
+                Bits(rng.Next(2) == 1, rng.Next(-500, 501), RandFraction(rng)),
+                Bits(rng.Next(2) == 1, rng.Next(-500, 501), RandFraction(rng)),
+            });
+        }
+        // fma's whole point: a·b and c nearly cancel, so the un-rounded product
+        // matters. c ≈ -(a·b).
+        for (int i = 0; i < 1500; i++)
+        {
+            int ea = rng.Next(-200, 201), eb = rng.Next(-200, 201);
+            UInt128 fa = RandFraction(rng), fb = RandFraction(rng);
+            bool sa = rng.Next(2) == 1, sb = rng.Next(2) == 1;
+            // Approximate product exponent for an opposing c.
+            triples.Add(new[]
+            {
+                Bits(sa, ea, fa),
+                Bits(sb, eb, fb),
+                Bits(!(sa ^ sb), ea + eb, RandFraction(rng)),
+            });
+        }
+        // Fully random (inf/nan/zero/subnormal mixes).
+        for (int i = 0; i < 1000; i++)
+        {
+            triples.Add(new[] { RandBits(rng), RandBits(rng), RandBits(rng) });
+        }
+        return triples;
     }
 
     private static string Hex(UInt128 x) => $"{(ulong)(x >> 64):x16}{(ulong)x:x16}";

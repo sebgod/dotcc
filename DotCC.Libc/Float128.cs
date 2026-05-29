@@ -27,7 +27,7 @@ namespace DotCC.Libc;
 /// stages, validated bit-for-bit against gcc's <c>long double</c> (binary128)
 /// oracle.
 /// </remarks>
-public readonly struct Float128 : IEquatable<Float128>
+public readonly struct Float128 : IEquatable<Float128>, IComparable<Float128>
 {
     private const int MantissaBits = 112;       // stored fraction bits
     private const int ExponentBits = 15;
@@ -405,6 +405,106 @@ public readonly struct Float128 : IEquatable<Float128>
         return RoundToBinary128(sign, ma * mb, qa + qb, extraSticky: false);
     }
 
+    public static Float128 Divide(Float128 a, Float128 b)
+    {
+        bool sign = a.SignBit ^ b.SignBit;
+        if (IsNaN(a) || IsNaN(b)) { return NaN; }
+        if (IsInfinity(a))
+        {
+            if (IsInfinity(b)) { return NaN; }       // inf / inf
+            return sign ? NegativeInfinity : PositiveInfinity;
+        }
+        if (IsInfinity(b)) { return sign ? NegativeZero : Zero; } // finite / inf
+        if (IsZero(b))
+        {
+            if (IsZero(a)) { return NaN; }           // 0 / 0
+            return sign ? NegativeInfinity : PositiveInfinity;    // x / 0
+        }
+        if (IsZero(a)) { return sign ? NegativeZero : Zero; }
+
+        Decompose(a, out _, out BigInteger ma, out int qa);
+        Decompose(b, out _, out BigInteger mb, out int qb);
+        // Quotient with ~130 significant bits + an exact remainder for sticky.
+        // P keeps the scaled numerator wide enough that floor-division yields a
+        // quotient with round room regardless of the operands' bit lengths.
+        int p = 130 - (int)ma.GetBitLength() + (int)mb.GetBitLength();
+        BigInteger num = ma << p;
+        BigInteger q = BigInteger.DivRem(num, mb, out BigInteger r);
+        return RoundToBinary128(sign, q, qa - qb - p, extraSticky: r != BigInteger.Zero);
+    }
+
+    public static Float128 Sqrt(Float128 x)
+    {
+        if (IsNaN(x)) { return NaN; }
+        if (IsZero(x)) { return x; }                 // sqrt(±0) = ±0
+        if (x.SignBit) { return NaN; }               // sqrt(negative) = NaN
+        if (IsInfinity(x)) { return PositiveInfinity; }
+
+        Decompose(x, out _, out BigInteger m, out int q);
+        // Make the radicand exponent even so value = sqrt(m·2^q) factors as
+        // sqrt(m')·2^(q'/2) with q' even.
+        if ((q & 1) != 0) { m <<= 1; q -= 1; }
+        // Scale up by 2^(2k) so floor(sqrt(·)) has ~130 bits, then sqrt.
+        int k = 130 - (int)m.GetBitLength() / 2;
+        BigInteger n = m << (2 * k);
+        BigInteger s = ISqrt(n);                      // floor(sqrt(n))
+        bool inexact = s * s != n;                    // residual ⇒ sticky
+        // value = sqrt(n)·2^(q/2 - k); sqrt(n) ∈ [s, s+1) ⇒ mag s, sticky inexact.
+        return RoundToBinary128(false, s, q / 2 - k, extraSticky: inexact);
+    }
+
+    public static Float128 FusedMultiplyAdd(Float128 a, Float128 b, Float128 c)
+    {
+        if (IsNaN(a) || IsNaN(b) || IsNaN(c)) { return NaN; }
+        bool sp = a.SignBit ^ b.SignBit;             // sign of the a·b product
+        bool aInf = IsInfinity(a), bInf = IsInfinity(b);
+        bool aZero = IsZero(a), bZero = IsZero(b);
+        if ((aInf && bZero) || (aZero && bInf)) { return NaN; } // 0·inf invalid
+        if (aInf || bInf)
+        {
+            // Product is a signed infinity; adding an opposite infinity is NaN.
+            if (IsInfinity(c) && c.SignBit != sp) { return NaN; }
+            return sp ? NegativeInfinity : PositiveInfinity;
+        }
+        if (IsInfinity(c)) { return c; }             // finite·finite + inf = inf
+        if (aZero || bZero)
+        {
+            // Product is ±0; result is that signed zero combined with c.
+            return Add(sp ? NegativeZero : Zero, c);
+        }
+
+        Decompose(a, out _, out BigInteger ma, out int qa);
+        Decompose(b, out _, out BigInteger mb, out int qb);
+        BigInteger mp = ma * mb;                      // EXACT product significand
+        int qp = qa + qb;
+        if (IsZero(c)) { return RoundToBinary128(sp, mp, qp, extraSticky: false); }
+
+        Decompose(c, out bool sc, out BigInteger mc, out int qc);
+        int common = Math.Min(qp, qc);
+        BigInteger ip = (sp ? -mp : mp) << (qp - common);
+        BigInteger ic = (sc ? -mc : mc) << (qc - common);
+        BigInteger sum = ip + ic;                     // EXACT a·b + c
+        if (sum.IsZero) { return Zero; }
+        return RoundToBinary128(sum.Sign < 0, BigInteger.Abs(sum), common, extraSticky: false);
+    }
+
+    /// <summary>Integer floor-sqrt of a non-negative BigInteger (Newton's
+    /// method with a correcting clamp).</summary>
+    private static BigInteger ISqrt(BigInteger n)
+    {
+        if (n <= BigInteger.Zero) { return BigInteger.Zero; }
+        BigInteger x = BigInteger.One << (((int)n.GetBitLength() + 1) / 2);
+        while (true)
+        {
+            BigInteger y = (x + n / x) >> 1;
+            if (y >= x) { break; }
+            x = y;
+        }
+        while (x * x > n) { x -= BigInteger.One; }
+        while ((x + BigInteger.One) * (x + BigInteger.One) <= n) { x += BigInteger.One; }
+        return x;
+    }
+
     // ── integer conversions ─────────────────────────────────────────────────
     /// <summary>Exact widening from a 64-bit integer (every long fits in the
     /// 113-bit significand).</summary>
@@ -434,8 +534,15 @@ public readonly struct Float128 : IEquatable<Float128>
     public static Float128 operator +(Float128 a, Float128 b) => Add(a, b);
     public static Float128 operator -(Float128 a, Float128 b) => Subtract(a, b);
     public static Float128 operator *(Float128 a, Float128 b) => Multiply(a, b);
+    public static Float128 operator /(Float128 a, Float128 b) => Divide(a, b);
     public static Float128 operator -(Float128 a) => Negate(a);
     public static Float128 operator +(Float128 a) => a;
+
+    // Relational operators (IEEE: a NaN operand makes every one false).
+    public static bool operator <(Float128 a, Float128 b) => Compare(a, b) is int c && c < 0;
+    public static bool operator >(Float128 a, Float128 b) => Compare(a, b) is int c && c > 0;
+    public static bool operator <=(Float128 a, Float128 b) => Compare(a, b) is int c && c <= 0;
+    public static bool operator >=(Float128 a, Float128 b) => Compare(a, b) is int c && c >= 0;
 
     // C widening conversions are implicit; narrowing ones explicit.
     public static implicit operator Float128(long v) => FromInt64(v);
@@ -463,6 +570,31 @@ public readonly struct Float128 : IEquatable<Float128>
 
     public static bool operator ==(Float128 a, Float128 b) => a.Equals(b);
     public static bool operator !=(Float128 a, Float128 b) => !a.Equals(b);
+
+    /// <summary>IEEE ordering: −1 / 0 / +1, or <c>null</c> when unordered (a
+    /// NaN operand). +0 and −0 compare equal.</summary>
+    private static int? Compare(Float128 a, Float128 b)
+    {
+        if (IsNaN(a) || IsNaN(b)) { return null; }
+        if (IsZero(a) && IsZero(b)) { return 0; }      // +0 == -0
+        if (a.SignBit != b.SignBit) { return a.SignBit ? -1 : 1; } // negatives < positives
+        // Same sign: the low 127 bits (exponent then mantissa) are monotonic in
+        // magnitude. For negatives, larger magnitude means smaller value.
+        UInt128 magMask = ~(UInt128.One << SignShift);
+        int cmp = (a._bits & magMask).CompareTo(b._bits & magMask);
+        return a.SignBit ? -cmp : cmp;
+    }
+
+    /// <summary>Total-order comparison for sorting (.NET <see cref="IComparable{T}"/>
+    /// convention: NaN sorts below everything and equal to itself), distinct
+    /// from the IEEE relational operators where NaN is unordered.</summary>
+    public int CompareTo(Float128 other)
+    {
+        if (Compare(this, other) is int c) { return c; }
+        bool meNaN = IsNaN(this), otherNaN = IsNaN(other);
+        if (meNaN && otherNaN) { return 0; }
+        return meNaN ? -1 : 1;
+    }
 
     public override string ToString() => ToDouble(this).ToString("R", System.Globalization.CultureInfo.InvariantCulture);
 }
