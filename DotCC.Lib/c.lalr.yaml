@@ -344,6 +344,11 @@ productions:
       # comma-separated init-declarator semantics stay in lockstep
       # between file-scope and block-scope declarations.
       - { lhs: Fn, rhs: [Type, DeclItemList, ';'], action: globalDeclList }
+      # File-scope `static T x;` — internal linkage + static storage duration.
+      # In dotcc's single-program model internal-vs-external linkage is a no-op
+      # for variables (they're never exported), so this lowers exactly like a
+      # plain global: a field in DotCcGlobals. The `static` keyword is consumed.
+      - { lhs: Fn, rhs: ['static', Type, DeclItemList, ';'], action: globalStaticDeclList }
 
       # `_Static_assert(expr, "msg");` (C11) and `_Static_assert(expr);`
       # (C23, message optional). File-scope form. Compile-time only — no
@@ -483,6 +488,14 @@ productions:
       # matches C convention and C# requirement.
       - { lhs: Stmt, rhs: ['switch', '(', E, ')', Block], action: stmtSwitch }
       - { lhs: Stmt, rhs: [Decl, ';'],                    action: stmtDecl }
+      # Block-scope `static T x;` / `static T x = C;` — static storage
+      # duration, function-local visibility. Lowers to a mangled static field
+      # in DotCcGlobals (one instance, persists across calls), with uses inside
+      # the function rewritten to the mangled name. Scalars + plain (no-init)
+      # structs via `Type DeclItemList`; static arrays / aggregate-init statics
+      # aren't covered (their `stackalloc` lowering doesn't compose with static
+      # lifetime) — those keep their own `Decl` shapes and so won't match here.
+      - { lhs: Stmt, rhs: ['static', Type, DeclItemList, ';'], action: stmtStaticDecl }
       - { lhs: Stmt, rhs: [E, ';'],                        action: stmtExpr }
       - { lhs: Stmt, rhs: [Block] }
       # `goto label ;` and `label : Stmt` — direct lowering, C# accepts

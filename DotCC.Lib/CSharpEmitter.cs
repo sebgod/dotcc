@@ -101,6 +101,16 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     }
     private readonly Dictionary<string, MallocVar> _fnMalloc = new(StringComparer.Ordinal);
 
+    // ---- function-static locals -----------------------------------------
+    // Maps a block-scope `static` variable's source name to the mangled
+    // DotCcGlobals field name it lowered to (e.g. counter →
+    // __static_tick_counter). Reset per function (StartFn), consulted by
+    // Visit(Var) to rewrite in-function references to the global. A static's
+    // single instance + persist-across-calls + once-init semantics fall out of
+    // C#'s static field for free; the only work is name-mangling (so two
+    // functions can each declare `static int x`) and this reference rewrite.
+    private readonly Dictionary<string, string> _fnStatics = new(StringComparer.Ordinal);
+
     // Decisions consumed by the emit pass (function name, variable name).
     private readonly IReadOnlySet<(string Fn, string Var)> _promotableIn;
     // Results produced by the analysis pass (finalised per function at FuncDef).
@@ -192,8 +202,9 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         // whole point of the FnSig split. Any __func__ inside the body
         // resolves to this directly at Var-visit time.
         _currentFunctionName = name;
-        // Fresh malloc-candidate scope per function (no nested functions in C).
+        // Fresh per-function scopes (no nested functions in C).
         _fnMalloc.Clear();
+        _fnStatics.Clear();
         return new EmitContent.FnHeader(type, name, pars, isStatic);
     }
 
@@ -234,6 +245,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
             }
         }
         _fnMalloc.Clear();
+        _fnStatics.Clear();
         _currentFunctionName = null;  // exit function scope
         return $"static unsafe {sig.Type} {sig.Name}({sig.Params})\n{body}";
     }
@@ -287,10 +299,30 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // null env would silently break setjmp/longjmp dispatch.
     public EmitContent Visit(C.GlobalDeclList n)
     {
-        var rawType = T(n.Arg0);
+        EmitGlobalFields(T(n.Arg0), DE(n.Arg1));
+        return string.Empty;
+    }
+
+    // File-scope `static T x;`. Internal linkage is a no-op for variables in
+    // dotcc's single-program model (they're never exported), so it lowers
+    // exactly like a plain global — the `static` keyword (Arg0) is consumed.
+    public EmitContent Visit(C.GlobalStaticDeclList n)
+    {
+        EmitGlobalFields(T(n.Arg1), DE(n.Arg2));
+        return string.Empty;
+    }
+
+    // Emit one `public static unsafe` field per init-declarator into the
+    // DotCcGlobals side channel. `rawType` runs through QualifyPredefinedTypeName
+    // so e.g. `jmp_buf`/`LongJmpToken` resolve at class-member position; ref
+    // types get an auto `= new T()` for the no-init form (see GlobalDeclList's
+    // original notes). Shared by file-scope globals AND function-static
+    // locals (which pass already-mangled names).
+    private void EmitGlobalFields(string rawType, IReadOnlyList<EmitContent.DeclEntry> entries)
+    {
         var type = QualifyPredefinedTypeName(rawType);
         var isRefType = IsPredefinedRefTypeName(rawType) || _refTypeAliases.Contains(rawType);
-        foreach (var entry in DE(n.Arg1))
+        foreach (var entry in entries)
         {
             string init;
             if (entry.Init is { } userInit)
@@ -310,7 +342,6 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
             }
             _globals.Append("    public static unsafe ").Append(type).Append(' ').Append(entry.Name).Append(init).Append(";\n");
         }
-        return string.Empty;
     }
 
     public EmitContent Visit(C.MembersCons n) => T(n.Arg0) + T(n.Arg1);
@@ -901,6 +932,30 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         $"default:\n{T(n.Arg2)}";
     public EmitContent Visit(C.StmtDecl n) => $"{T(n.Arg0)};\n";
 
+    // Block-scope `static T x [= C];`. Each declarator becomes a mangled
+    // `public static unsafe` field in DotCcGlobals (static storage duration,
+    // persists across calls, initialised once — all native to a C# static
+    // field), and we register name→mangled so Visit(Var) rewrites in-function
+    // uses. The statement itself emits nothing into the function body — the
+    // storage lives in the globals class, not as a local. C requires static
+    // initialisers to be constant expressions, so the field initialiser (which
+    // also runs exactly once) is an exact match.
+    public EmitContent Visit(C.StmtStaticDecl n)
+    {
+        var type = T(n.Arg1);
+        var entries = DE(n.Arg2);
+        var fn = _currentFunctionName ?? "fn";
+        var mangled = new List<EmitContent.DeclEntry>(entries.Count);
+        foreach (var e in entries)
+        {
+            var name = $"__static_{fn}_{e.Name}";
+            _fnStatics[e.Name] = name;
+            mangled.Add(new EmitContent.DeclEntry(name, e.Init));
+        }
+        EmitGlobalFields(type, mangled);
+        return string.Empty;
+    }
+
     // `goto label;` — C# accepts the same keyword + identifier syntax with
     // identical forward-reference semantics inside a method body, so the
     // lowering is verbatim.
@@ -1347,6 +1402,12 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
             var fn = _currentFunctionName
                 ?? throw new CompileException("`__func__` used outside any function definition");
             return $"L(\"{fn}\\0\"u8)";
+        }
+        // A block-scope `static` local shadows any global/enumerator of the
+        // same name within this function — rewrite to its mangled global field.
+        if (_fnStatics.TryGetValue(name, out var staticField))
+        {
+            return staticField;
         }
         if (_enumerators.TryGetValue(name, out var enumName))
         {

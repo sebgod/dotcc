@@ -1373,6 +1373,72 @@ public sealed class CompilerTests
         finally { File.Delete(src); }
     }
 
+    // ---- static storage duration -------------------------------------------
+    // Block-scope `static` locals lower to mangled DotCcGlobals static fields
+    // (one instance, persists across calls), with in-function references
+    // rewritten to the mangled name. File-scope `static` is a passthrough to a
+    // plain global (internal linkage is a no-op for non-exported variables).
+
+    [Fact]
+    public void Function_static_lowers_to_mangled_global_field()
+    {
+        var src = WriteTemp("""
+            int next_id(void) {
+                static int counter = 0;
+                counter++;
+                return counter;
+            }
+            int main() { return next_id(); }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            // The static became a mangled field initialised once...
+            emitted.ShouldContain("__static_next_id_counter = 0");
+            // ...and in-function references resolve to it.
+            emitted.ShouldContain("__static_next_id_counter++");
+            // The declaration emits no in-body local of the source name.
+            emitted.ShouldNotContain("int counter = 0");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Same_named_function_statics_are_mangled_per_function()
+    {
+        // Two functions each with `static int counter` must not collide.
+        var src = WriteTemp("""
+            int a(void) { static int counter = 1; return ++counter; }
+            int b(void) { static int counter = 2; return ++counter; }
+            int main() { return a() + b(); }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("__static_a_counter = 1");
+            emitted.ShouldContain("__static_b_counter = 2");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void File_scope_static_lowers_like_a_plain_global()
+    {
+        // `static` at file scope is internal linkage — a no-op for a variable
+        // in dotcc's single-program model; it lowers to a DotCcGlobals field
+        // under its own (un-mangled) name, the keyword simply consumed.
+        var src = WriteTemp("""
+            static int g = 7;
+            int main() { return g; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("public static unsafe int g = 7;");
+        }
+        finally { File.Delete(src); }
+    }
+
     [Fact]
     public void Variadic_macro_with_named_params_plus_extras()
     {
