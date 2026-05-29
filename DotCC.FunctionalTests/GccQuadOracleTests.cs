@@ -66,6 +66,19 @@ public sealed class GccQuadOracleTests
 
     [Fact]
     public void Float128_addition_matches_gcc()
+        => AssertBinaryOpMatchesGcc(GccQuadOracle.Add,
+            (a, b) => Float128.Add(Float128.FromBits(a), Float128.FromBits(b)).Bits);
+
+    [Fact]
+    public void Float128_multiplication_matches_gcc()
+        => AssertBinaryOpMatchesGcc(GccQuadOracle.Multiply,
+            (a, b) => Float128.Multiply(Float128.FromBits(a), Float128.FromBits(b)).Bits);
+
+    /// <summary>
+    /// Run a binary128-result binary op over <see cref="BuildPairs"/> and assert
+    /// our result equals gcc's bit-for-bit (NaN payloads excepted).
+    /// </summary>
+    private static void AssertBinaryOpMatchesGcc(GccQuadOracle.Op op, Func<UInt128, UInt128, UInt128> ours)
     {
         if (!RunRequested)
         {
@@ -77,23 +90,23 @@ public sealed class GccQuadOracleTests
         }
 
         var pairs = BuildPairs();
-        var gcc = GccQuadOracle.ComputeBinary128(GccQuadOracle.Add, pairs);
+        var gcc = GccQuadOracle.ComputeBinary128(op, pairs);
 
         var mismatches = new List<string>();
         for (int i = 0; i < pairs.Count; i++)
         {
-            UInt128 ours = Float128.Add(Float128.FromBits(pairs[i][0]), Float128.FromBits(pairs[i][1])).Bits;
+            UInt128 mine = ours(pairs[i][0], pairs[i][1]);
             UInt128 theirs = gcc[i];
-            if (IsQuadNan(ours) && IsQuadNan(theirs)) { continue; } // NaN payloads may differ
-            if (ours != theirs)
+            if (IsQuadNan(mine) && IsQuadNan(theirs)) { continue; } // NaN payloads may differ
+            if (mine != theirs)
             {
                 mismatches.Add(
-                    $"a=0x{Hex(pairs[i][0])} b=0x{Hex(pairs[i][1])}  ours=0x{Hex(ours)}  gcc=0x{Hex(theirs)}");
+                    $"a=0x{Hex(pairs[i][0])} b=0x{Hex(pairs[i][1])}  ours=0x{Hex(mine)}  gcc=0x{Hex(theirs)}");
             }
         }
 
         mismatches.ShouldBeEmpty(
-            $"{mismatches.Count}/{pairs.Count} binary128 additions diverge from gcc:\n" +
+            $"{mismatches.Count}/{pairs.Count} results diverge from gcc:\n" +
             string.Join("\n", mismatches.Count > 20 ? mismatches.GetRange(0, 20) : mismatches));
     }
 

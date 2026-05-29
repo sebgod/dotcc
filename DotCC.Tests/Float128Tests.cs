@@ -158,4 +158,31 @@ public sealed class Float128Tests
         Float128 r = Float128.Subtract(Float128.FromDouble(10.0), Float128.FromDouble(3.5));
         Float128.ToDouble(r).ShouldBe(6.5);
     }
+
+    [Theory]
+    [InlineData(2.0, 3.0, 6.0)]
+    [InlineData(-2.0, 3.0, -6.0)]
+    [InlineData(-2.0, -3.0, 6.0)]
+    [InlineData(0.5, 0.5, 0.25)]
+    [InlineData(1.5, 1.5, 2.25)]
+    [InlineData(1.25, 1.25, 1.5625)]      // all exact in binary
+    [InlineData(2e10, 3e10, 6e20)]        // exact integer product, narrows back exactly
+    [InlineData(123.0, 0.0, 0.0)]
+    public void Multiply_basic_cases_round_trip_through_double(double a, double b, double expected)
+    {
+        Float128 p = Float128.Multiply(Float128.FromDouble(a), Float128.FromDouble(b));
+        Float128.ToDouble(p).ShouldBe(expected);
+    }
+
+    [Fact]
+    public void Multiply_special_values_follow_ieee()
+    {
+        var inf = Float128.PositiveInfinity;
+        Float128.IsNaN(Float128.Multiply(inf, Float128.Zero)).ShouldBeTrue();   // inf * 0 = NaN
+        Float128.IsInfinity(Float128.Multiply(inf, Float128.FromDouble(2.0))).ShouldBeTrue();
+        Float128.IsNaN(Float128.Multiply(Float128.NaN, Float128.One)).ShouldBeTrue();
+        // Sign of zero from sign of factors.
+        Float128.Multiply(Float128.FromDouble(-1.0), Float128.Zero).Bits.ShouldBe(Float128.NegativeZero.Bits);
+        Float128.Multiply(Float128.FromDouble(-1.0), Float128.NegativeZero).Bits.ShouldBe(Float128.Zero.Bits);
+    }
 }

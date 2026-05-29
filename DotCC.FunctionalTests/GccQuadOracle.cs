@@ -54,7 +54,9 @@ internal static class GccQuadOracle
     internal static readonly Op Add = new(2, ResultIsBinary128: true, "({0}) + ({1})");
     /// <summary>binary128 subtraction (correctly rounded).</summary>
     internal static readonly Op Subtract = new(2, ResultIsBinary128: true, "({0}) - ({1})");
-    // More land as Float128 implements them: Mul "({0})*({1})", Div "({0})/({1})",
+    /// <summary>binary128 multiplication (correctly rounded).</summary>
+    internal static readonly Op Multiply = new(2, ResultIsBinary128: true, "({0}) * ({1})");
+    // More land as Float128 implements them: Div "({0})/({1})",
     // Sqrt "sqrtl({0})", Fma "fmal({0},{1},{2})".
 
     /// <summary>

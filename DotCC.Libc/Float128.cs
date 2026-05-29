@@ -386,6 +386,25 @@ public readonly struct Float128 : IEquatable<Float128>
 
     public static Float128 Subtract(Float128 a, Float128 b) => Add(a, Negate(b));
 
+    public static Float128 Multiply(Float128 a, Float128 b)
+    {
+        bool sign = a.SignBit ^ b.SignBit;
+        if (IsNaN(a) || IsNaN(b)) { return NaN; }
+        if (IsInfinity(a) || IsInfinity(b))
+        {
+            // inf · 0 is invalid → NaN; otherwise the product is a signed inf.
+            if (IsZero(a) || IsZero(b)) { return NaN; }
+            return sign ? NegativeInfinity : PositiveInfinity;
+        }
+        if (IsZero(a) || IsZero(b)) { return sign ? NegativeZero : Zero; }
+
+        Decompose(a, out _, out BigInteger ma, out int qa);
+        Decompose(b, out _, out BigInteger mb, out int qb);
+        // Exact product significand; round once. (qa+qb can't overflow int —
+        // both are within ±~16500.)
+        return RoundToBinary128(sign, ma * mb, qa + qb, extraSticky: false);
+    }
+
     // ── comparison (IEEE: NaN unordered, +0 == -0) ───────────────────────────
     public bool Equals(Float128 other)
     {
