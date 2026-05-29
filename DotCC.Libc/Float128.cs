@@ -1,6 +1,7 @@
 #nullable enable
 
 using System;
+using System.Globalization;
 using System.Numerics;
 
 namespace DotCC.Libc;
@@ -27,7 +28,8 @@ namespace DotCC.Libc;
 /// stages, validated bit-for-bit against gcc's <c>long double</c> (binary128)
 /// oracle.
 /// </remarks>
-public readonly struct Float128 : IEquatable<Float128>, IComparable<Float128>
+public readonly struct Float128 : IEquatable<Float128>, IComparable<Float128>,
+    IBinaryFloatingPointIeee754<Float128>, IMinMaxValue<Float128>
 {
     private const int MantissaBits = 112;       // stored fraction bits
     private const int ExponentBits = 15;
@@ -1405,4 +1407,256 @@ public readonly struct Float128 : IEquatable<Float128>, IComparable<Float128>
     /// <summary>Full-precision round-trippable form (36 significant digits is
     /// more than binary128's ~34, then trailing zeros trimmed).</summary>
     public override string ToString() => ToGeneralString(36, upper: false);
+
+    // ── IBinaryFloatingPointIeee754 plumbing ─────────────────────────────────
+    // The math/value members live above; this section is the structural surface
+    // the generic-math interface requires (identities, bitwise ops, parsing,
+    // formatting, conversions, byte serialization). dotcc itself lowers C math
+    // to direct method calls — this is for idiomatic .NET generic-math interop.
+
+    static int INumberBase<Float128>.Radix => 2;
+    public static Float128 AdditiveIdentity => Zero;
+    public static Float128 MultiplicativeIdentity => One;
+    public static Float128 NegativeOne => FromInt64(-1);
+    public static Float128 AllBitsSet => new(~UInt128.Zero);
+
+    public static bool IsCanonical(Float128 v) => true;
+    public static bool IsComplexNumber(Float128 v) => false;
+    public static bool IsImaginaryNumber(Float128 v) => false;
+    public static bool IsRealNumber(Float128 v) => !IsNaN(v);
+    public static bool IsPositiveInfinity(Float128 v) => IsInfinity(v) && !v.SignBit;
+    public static bool IsNegativeInfinity(Float128 v) => IsInfinity(v) && v.SignBit;
+
+    public static bool IsPow2(Float128 v)
+    {
+        if (v.SignBit || !IsFinite(v) || IsZero(v)) { return false; }
+        Decompose(v, out _, out BigInteger sig, out _);
+        return (sig & (sig - BigInteger.One)) == BigInteger.Zero; // single bit set
+    }
+
+    public static Float128 MaxMagnitudeNumber(Float128 a, Float128 b)
+        => IsNaN(a) ? b : IsNaN(b) ? a : MaxMagnitude(a, b);
+    public static Float128 MinMagnitudeNumber(Float128 a, Float128 b)
+        => IsNaN(a) ? b : IsNaN(b) ? a : MinMagnitude(a, b);
+
+    public static Float128 Log(Float128 x, Float128 newBase) => Divide(Log(x), Log(newBase));
+
+    // Bitwise / increment / decrement / modulus operators.
+    public static Float128 operator &(Float128 a, Float128 b) => new(a._bits & b._bits);
+    public static Float128 operator |(Float128 a, Float128 b) => new(a._bits | b._bits);
+    public static Float128 operator ^(Float128 a, Float128 b) => new(a._bits ^ b._bits);
+    public static Float128 operator ~(Float128 v) => new(~v._bits);
+    public static Float128 operator ++(Float128 v) => Add(v, One);
+    public static Float128 operator --(Float128 v) => Subtract(v, One);
+    public static Float128 operator %(Float128 a, Float128 b) => Fmod(a, b);
+
+    public int CompareTo(object? obj)
+        => obj is null ? 1 : obj is Float128 f ? CompareTo(f)
+         : throw new ArgumentException("Object must be a Float128.", nameof(obj));
+
+    public static Float128 Round(Float128 v, int digits, MidpointRounding mode)
+    {
+        if (!IsFinite(v)) { return v; }
+        if (digits == 0) { return RoundToInteger(v, mode); }
+        Float128 scale = Pow(FromInt64(10), FromInt64(digits));
+        return Divide(RoundToInteger(Multiply(v, scale), mode), scale);
+    }
+
+    private static Float128 RoundToInteger(Float128 v, MidpointRounding mode) => mode switch
+    {
+        MidpointRounding.ToZero => Truncate(v),
+        MidpointRounding.ToNegativeInfinity => Floor(v),
+        MidpointRounding.ToPositiveInfinity => Ceiling(v),
+        MidpointRounding.AwayFromZero => RoundHalfAway(v),
+        _ => Round(v),                                   // ToEven
+    };
+
+    private static Float128 RoundHalfAway(Float128 x)
+    {
+        if (IsNaN(x) || IsInfinity(x) || IsZero(x)) { return x; }
+        Decompose(x, out bool s, out BigInteger m, out int q);
+        if (q >= 0) { return x; }
+        int shift = -q, bits = (int)m.GetBitLength();
+        if (shift > bits) { return s ? NegativeZero : Zero; } // |x| < 0.5
+        BigInteger kept = m >> shift;
+        if (m - (kept << shift) >= (BigInteger.One << (shift - 1))) { kept += BigInteger.One; }
+        return kept.IsZero ? (s ? NegativeZero : Zero) : RoundToBinary128(s, kept, 0, false);
+    }
+
+    // IEEE field serialization (value = significand · 2^exponent).
+    int IFloatingPoint<Float128>.GetExponentByteCount() => sizeof(short);
+    int IFloatingPoint<Float128>.GetExponentShortestBitLength()
+        => 32 - System.Numerics.BitOperations.LeadingZeroCount((uint)Math.Abs(FieldExponent()));
+    int IFloatingPoint<Float128>.GetSignificandByteCount() => 16;
+    int IFloatingPoint<Float128>.GetSignificandBitLength() => 113;
+
+    private int FieldExponent()
+    {
+        if (!IsFinite(this) || IsZero(this)) { return 0; }
+        Decompose(this, out _, out _, out int q);
+        return q;
+    }
+    private UInt128 FieldSignificand()
+    {
+        if (BiasedExponent is 0 or MaxBiasedExponent) { return TrailingSignificand; }
+        return ImplicitBit | TrailingSignificand;
+    }
+
+    bool IFloatingPoint<Float128>.TryWriteExponentBigEndian(Span<byte> dst, out int written)
+        => TryWriteShort(dst, out written, bigEndian: true);
+    bool IFloatingPoint<Float128>.TryWriteExponentLittleEndian(Span<byte> dst, out int written)
+        => TryWriteShort(dst, out written, bigEndian: false);
+    bool IFloatingPoint<Float128>.TryWriteSignificandBigEndian(Span<byte> dst, out int written)
+        => TryWriteU128(dst, out written, bigEndian: true);
+    bool IFloatingPoint<Float128>.TryWriteSignificandLittleEndian(Span<byte> dst, out int written)
+        => TryWriteU128(dst, out written, bigEndian: false);
+
+    private bool TryWriteShort(Span<byte> dst, out int written, bool bigEndian)
+    {
+        written = 0;
+        if (dst.Length < sizeof(short)) { return false; }
+        short e = (short)FieldExponent();
+        if (bigEndian) { dst[0] = (byte)(e >> 8); dst[1] = (byte)e; }
+        else { dst[0] = (byte)e; dst[1] = (byte)(e >> 8); }
+        written = sizeof(short);
+        return true;
+    }
+    private bool TryWriteU128(Span<byte> dst, out int written, bool bigEndian)
+    {
+        written = 0;
+        if (dst.Length < 16) { return false; }
+        UInt128 s = FieldSignificand();
+        for (int i = 0; i < 16; i++)
+        {
+            dst[bigEndian ? 15 - i : i] = (byte)(s >> (8 * i));
+        }
+        written = 16;
+        return true;
+    }
+
+    // ── parsing (decimal → binary128, correctly rounded) ─────────────────────
+    public static Float128 Parse(string s, IFormatProvider? provider) => Parse(s.AsSpan(), NumberStyles.Float | NumberStyles.AllowThousands, provider);
+    public static Float128 Parse(string s, NumberStyles style, IFormatProvider? provider) => Parse(s.AsSpan(), style, provider);
+    public static Float128 Parse(ReadOnlySpan<char> s, IFormatProvider? provider) => Parse(s, NumberStyles.Float | NumberStyles.AllowThousands, provider);
+    public static Float128 Parse(ReadOnlySpan<char> s, NumberStyles style, IFormatProvider? provider)
+        => TryParse(s, style, provider, out var r) ? r : throw new FormatException($"'{s.ToString()}' is not a valid Float128.");
+
+    public static bool TryParse(string? s, IFormatProvider? provider, out Float128 result)
+        => TryParse(s.AsSpan(), NumberStyles.Float | NumberStyles.AllowThousands, provider, out result);
+    public static bool TryParse(string? s, NumberStyles style, IFormatProvider? provider, out Float128 result)
+        => TryParse(s.AsSpan(), style, provider, out result);
+    public static bool TryParse(ReadOnlySpan<char> s, IFormatProvider? provider, out Float128 result)
+        => TryParse(s, NumberStyles.Float | NumberStyles.AllowThousands, provider, out result);
+
+    public static bool TryParse(ReadOnlySpan<char> s, NumberStyles style, IFormatProvider? provider, out Float128 result)
+    {
+        result = Zero;
+        s = s.Trim();
+        if (s.IsEmpty) { return false; }
+        bool neg = false;
+        if (s[0] is '+' or '-') { neg = s[0] == '-'; s = s[1..]; }
+        if (s.Equals("inf", StringComparison.OrdinalIgnoreCase) || s.Equals("infinity", StringComparison.OrdinalIgnoreCase))
+        {
+            result = neg ? NegativeInfinity : PositiveInfinity;
+            return true;
+        }
+        if (s.Equals("nan", StringComparison.OrdinalIgnoreCase)) { result = NaN; return true; }
+
+        BigInteger mant = BigInteger.Zero;
+        int decExp = 0;
+        bool any = false, dot = false;
+        int i = 0;
+        for (; i < s.Length; i++)
+        {
+            char ch = s[i];
+            if (ch is >= '0' and <= '9') { mant = mant * 10 + (ch - '0'); any = true; if (dot) { decExp--; } }
+            else if (ch == '.' && !dot) { dot = true; }
+            else if (ch is 'e' or 'E') { break; }
+            else { return false; }
+        }
+        if (!any) { return false; }
+        if (i < s.Length)                                // exponent part
+        {
+            var exp = s[(i + 1)..];
+            if (!int.TryParse(exp, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out int e10)) { return false; }
+            decExp += e10;
+        }
+        result = DecimalToBinary128(neg, mant, decExp);
+        return true;
+    }
+
+    private static Float128 DecimalToBinary128(bool neg, BigInteger mant, int exp10)
+    {
+        if (mant.IsZero) { return neg ? NegativeZero : Zero; }
+        if (exp10 >= 0)
+        {
+            return RoundToBinary128(neg, mant * BigInteger.Pow(10, exp10), 0, extraSticky: false);
+        }
+        int e = -exp10;
+        int g = 160 + (int)Math.Ceiling(e * 3.321928094887362);   // ~log2(10) bits per decimal place + margin
+        BigInteger q = BigInteger.DivRem(mant << g, BigInteger.Pow(10, e), out BigInteger r);
+        return RoundToBinary128(neg, q, -g, extraSticky: r != BigInteger.Zero);
+    }
+
+    // ── formatting ───────────────────────────────────────────────────────────
+    public string ToString(string? format, IFormatProvider? provider)
+    {
+        if (string.IsNullOrEmpty(format)) { return ToString(); }
+        char kind = char.ToUpperInvariant(format[0]);
+        int prec = format.Length > 1 && int.TryParse(format[1..], out int p) ? p : (kind == 'G' ? 36 : 6);
+        bool upper = char.IsUpper(format[0]);
+        return kind switch
+        {
+            'F' => ToFixedString(prec),
+            'E' => ToScientificString(prec, upper),
+            _ => ToGeneralString(prec, upper),           // 'G' and fallback
+        };
+    }
+
+    public bool TryFormat(Span<char> dst, out int written, ReadOnlySpan<char> format, IFormatProvider? provider)
+    {
+        string s = ToString(format.IsEmpty ? null : format.ToString(), provider);
+        if (s.Length > dst.Length) { written = 0; return false; }
+        s.AsSpan().CopyTo(dst);
+        written = s.Length;
+        return true;
+    }
+
+    // ── generic numeric conversions ──────────────────────────────────────────
+    static bool INumberBase<Float128>.TryConvertFromChecked<TOther>(TOther value, out Float128 result) => TryConvertFrom(value, out result);
+    static bool INumberBase<Float128>.TryConvertFromSaturating<TOther>(TOther value, out Float128 result) => TryConvertFrom(value, out result);
+    static bool INumberBase<Float128>.TryConvertFromTruncating<TOther>(TOther value, out Float128 result) => TryConvertFrom(value, out result);
+
+    private static bool TryConvertFrom<TOther>(TOther value, out Float128 result) where TOther : INumberBase<TOther>
+    {
+        // Float128 is wider than every primitive numeric type, so widening is
+        // exact and checked/saturating/truncating coincide.
+        if (typeof(TOther) == typeof(double)) { result = FromDouble((double)(object)value!); return true; }
+        if (typeof(TOther) == typeof(float)) { result = FromDouble((float)(object)value!); return true; }
+        if (typeof(TOther) == typeof(Half)) { result = FromDouble((double)(Half)(object)value!); return true; }
+        if (typeof(TOther) == typeof(long)) { result = FromInt64((long)(object)value!); return true; }
+        if (typeof(TOther) == typeof(int)) { result = FromInt64((int)(object)value!); return true; }
+        if (typeof(TOther) == typeof(short)) { result = FromInt64((short)(object)value!); return true; }
+        if (typeof(TOther) == typeof(sbyte)) { result = FromInt64((sbyte)(object)value!); return true; }
+        if (typeof(TOther) == typeof(ulong)) { result = RoundToBinary128(false, (BigInteger)(ulong)(object)value!, 0, false); return true; }
+        if (typeof(TOther) == typeof(uint)) { result = FromInt64((uint)(object)value!); return true; }
+        if (typeof(TOther) == typeof(ushort)) { result = FromInt64((ushort)(object)value!); return true; }
+        if (typeof(TOther) == typeof(byte)) { result = FromInt64((byte)(object)value!); return true; }
+        result = Zero;
+        return false;
+    }
+
+    static bool INumberBase<Float128>.TryConvertToChecked<TOther>(Float128 value, out TOther result) => TryConvertTo(value, out result);
+    static bool INumberBase<Float128>.TryConvertToSaturating<TOther>(Float128 value, out TOther result) => TryConvertTo(value, out result);
+    static bool INumberBase<Float128>.TryConvertToTruncating<TOther>(Float128 value, out TOther result) => TryConvertTo(value, out result);
+
+    private static bool TryConvertTo<TOther>(Float128 value, out TOther result) where TOther : INumberBase<TOther>
+    {
+        if (typeof(TOther) == typeof(double)) { result = (TOther)(object)ToDouble(value); return true; }
+        if (typeof(TOther) == typeof(float)) { result = (TOther)(object)(float)ToDouble(value); return true; }
+        if (typeof(TOther) == typeof(long)) { result = (TOther)(object)ToInt64(value); return true; }
+        if (typeof(TOther) == typeof(int)) { result = (TOther)(object)(int)ToInt64(value); return true; }
+        result = default!;
+        return false;
+    }
 }

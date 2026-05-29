@@ -1,6 +1,7 @@
 #nullable enable
 
 using System;
+using System.Numerics;
 using DotCC.Libc;
 using Shouldly;
 using Xunit;
@@ -489,6 +490,39 @@ public sealed class Float128Tests
         Float128.Sign(Float128.FromDouble(-3.0)).ShouldBe(-1);
         Float128.Sign(Float128.Zero).ShouldBe(0);
         Should.Throw<ArithmeticException>(() => Float128.Sign(Float128.NaN));
+    }
+
+    // Generic helpers — only compile if Float128 satisfies the interfaces.
+    private static T GenericSum<T>(T a, T b) where T : INumberBase<T> => a + b;
+    private static T GenericSqrt<T>(T x) where T : IRootFunctions<T> => T.Sqrt(x);
+    private static T GenericHypot<T>(T a, T b) where T : IRootFunctions<T> => T.Hypot(a, b);
+    private static T GenericPiTimesE<T>() where T : IFloatingPointIeee754<T> => T.Pi * T.E;
+
+    [Fact]
+    public void Works_through_IBinaryFloatingPointIeee754()
+    {
+        Float128.ToDouble(GenericSum(Float128.One, Float128.FromInt64(2))).ShouldBe(3.0);
+        Float128.ToDouble(GenericSqrt(Float128.FromInt64(2))).ShouldBe(Math.Sqrt(2.0), 1e-15);
+        Float128.ToDouble(GenericHypot(Float128.FromInt64(3), Float128.FromInt64(4))).ShouldBe(5.0, 1e-15);
+        Float128.ToDouble(GenericPiTimesE<Float128>()).ShouldBe(Math.PI * Math.E, 1e-14);
+        // Static-virtual constants/predicates via the interface contract.
+        Float128.IsNaN(Float128.NaN).ShouldBeTrue();
+        Float128.ToDouble(Float128.MaxValue).ShouldBe(double.PositiveInfinity); // > double range
+    }
+
+    [Fact]
+    public void Parse_and_format_round_trip()
+    {
+        Float128.ToDouble(Float128.Parse("3.14159265358979", null)).ShouldBe(3.14159265358979, 1e-15);
+        Float128.ToDouble(Float128.Parse("1.5e10", null)).ShouldBe(1.5e10);
+        Float128.ToDouble(Float128.Parse("-0.001", null)).ShouldBe(-0.001, 1e-18);
+        Float128.IsInfinity(Float128.Parse("inf", null)).ShouldBeTrue();
+        Float128.IsNaN(Float128.Parse("NaN", null)).ShouldBeTrue();
+        // Full-precision round-trip: format a quad value with > 34 sig digits,
+        // parse it back, and require bit-for-bit equality.
+        Float128 x = Float128.Divide(Float128.One, Float128.FromInt64(3));
+        Float128.Parse(x.ToString("E45", null), null).Bits.ShouldBe(x.Bits);
+        Float128.TryParse("not a number", null, out _).ShouldBeFalse();
     }
 
     [Fact]
