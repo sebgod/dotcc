@@ -463,6 +463,35 @@ public sealed class Float128Tests
     }
 
     [Fact]
+    public void Pi_scaled_and_misc_generic_math()
+    {
+        Float128.ToDouble(Float128.SinPi(Float128.FromDouble(0.5))).ShouldBe(1.0, 1e-30);
+        Float128.IsZero(Float128.SinPi(Float128.FromInt64(3))).ShouldBeTrue();   // exact 0 at integers
+        Float128.ToDouble(Float128.CosPi(Float128.FromInt64(2))).ShouldBe(1.0, 1e-30);
+        Float128.ToDouble(Float128.Exp2M1(Float128.FromDouble(3.0))).ShouldBe(7.0, 1e-13);   // 2^3-1
+        Float128.ToDouble(Float128.Log2P1(Float128.FromDouble(7.0))).ShouldBe(3.0, 1e-14);   // log2(8)
+        Float128.ToDouble(Float128.DegreesToRadians(Float128.FromInt64(180))).ShouldBe(Math.PI, 1e-15);
+        Float128.ToDouble(Float128.RadiansToDegrees(Float128.Pi)).ShouldBe(180.0, 1e-13);
+
+        // Predicates.
+        Float128.IsNormal(Float128.One).ShouldBeTrue();
+        Float128.IsSubnormal(Float128.Epsilon).ShouldBeTrue();
+        Float128.IsInteger(Float128.FromInt64(5)).ShouldBeTrue();
+        Float128.IsInteger(Float128.FromDouble(5.5)).ShouldBeFalse();
+        Float128.IsEvenInteger(Float128.FromInt64(4)).ShouldBeTrue();
+        Float128.IsOddInteger(Float128.FromInt64(3)).ShouldBeTrue();
+
+        // Min/Max/Clamp/Sign.
+        Float128.ToDouble(Float128.Max(Float128.One, Float128.FromInt64(2))).ShouldBe(2.0);
+        Float128.IsNaN(Float128.Max(Float128.NaN, Float128.One)).ShouldBeTrue();          // NaN-propagating
+        Float128.ToDouble(Float128.MaxNumber(Float128.NaN, Float128.One)).ShouldBe(1.0);  // NaN-ignoring
+        Float128.ToDouble(Float128.Clamp(Float128.FromInt64(5), Float128.Zero, Float128.One)).ShouldBe(1.0);
+        Float128.Sign(Float128.FromDouble(-3.0)).ShouldBe(-1);
+        Float128.Sign(Float128.Zero).ShouldBe(0);
+        Should.Throw<ArithmeticException>(() => Float128.Sign(Float128.NaN));
+    }
+
+    [Fact]
     public void Relational_operators_follow_ieee()
     {
         Float128 one = Float128.One, two = Float128.FromInt64(2);

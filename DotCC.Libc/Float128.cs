@@ -1226,6 +1226,76 @@ public readonly struct Float128 : IEquatable<Float128>, IComparable<Float128>
         return Multiply(Subtract(Log1p(x), Log1p(Negate(x))), FromDouble(0.5));
     }
 
+    // ── π-scaled trig, base-2/10 m1/p1 variants, misc (generic-math surface) ─
+    private static Float128 Ln2 => FromFixedSigned(FpLn2);
+    private static Float128 Ln10 => FromFixedSigned(FpLn10);
+
+    public static (Float128 Sin, Float128 Cos) SinCos(Float128 x) => (Sin(x), Cos(x));
+
+    public static Float128 SinPi(Float128 x)   // sin(πx); exact 0 at integers
+    {
+        if (IsNaN(x) || IsInfinity(x)) { return NaN; }
+        Float128 n = Round(x), r = Subtract(x, n);     // r ∈ [−½, ½]
+        Float128 s = Sin(Multiply(Pi, r));
+        return IsOddInteger(n) ? Negate(s) : s;
+    }
+
+    public static Float128 CosPi(Float128 x)   // cos(πx)
+    {
+        if (IsNaN(x) || IsInfinity(x)) { return NaN; }
+        Float128 n = Round(x), r = Subtract(x, n);
+        Float128 c = Cos(Multiply(Pi, r));
+        return IsOddInteger(n) ? Negate(c) : c;
+    }
+
+    public static Float128 TanPi(Float128 x) => Divide(SinPi(x), CosPi(x));
+    public static Float128 AsinPi(Float128 x) => Divide(Asin(x), Pi);
+    public static Float128 AcosPi(Float128 x) => Divide(Acos(x), Pi);
+    public static Float128 AtanPi(Float128 x) => Divide(Atan(x), Pi);
+    public static Float128 Atan2Pi(Float128 y, Float128 x) => Divide(Atan2(y, x), Pi);
+    public static (Float128 SinPi, Float128 CosPi) SinCosPi(Float128 x) => (SinPi(x), CosPi(x));
+
+    public static Float128 Exp2M1(Float128 x) => Expm1(Multiply(x, Ln2));   // 2^x − 1
+    public static Float128 Exp10M1(Float128 x) => Expm1(Multiply(x, Ln10)); // 10^x − 1
+    public static Float128 Log2P1(Float128 x) => Divide(Log1p(x), Ln2);     // log2(1+x)
+    public static Float128 Log10P1(Float128 x) => Divide(Log1p(x), Ln10);   // log10(1+x)
+
+    public static Float128 DegreesToRadians(Float128 x) => Divide(Multiply(x, Pi), FromInt64(180));
+    public static Float128 RadiansToDegrees(Float128 x) => Divide(Multiply(x, FromInt64(180)), Pi);
+    public static Float128 ReciprocalEstimate(Float128 x) => Divide(One, x);
+    public static Float128 ReciprocalSqrtEstimate(Float128 x) => Divide(One, Sqrt(x));
+
+    // ── value predicates ─────────────────────────────────────────────────────
+    public static bool IsNormal(Float128 v) => v.BiasedExponent is not (0 or MaxBiasedExponent);
+    public static bool IsSubnormal(Float128 v) => v.BiasedExponent == 0 && !IsZero(v);
+    public static bool IsInteger(Float128 v) => IsFinite(v) && v.Equals(Truncate(v));
+    public static bool IsEvenInteger(Float128 v) => IsInteger(v) && IsZero(Fmod(v, FromInt64(2)));
+    public static bool IsOddInteger(Float128 v) => IsInteger(v) && !IsZero(Fmod(v, FromInt64(2)));
+    public static bool IsPositive(Float128 v) => !v.SignBit;
+
+    // ── min / max / clamp / sign ─────────────────────────────────────────────
+    public static Float128 Max(Float128 a, Float128 b)        // NaN-propagating
+        => IsNaN(a) || IsNaN(b) ? NaN : (a < b || (IsZero(a) && IsZero(b) && a.SignBit) ? b : a);
+    public static Float128 Min(Float128 a, Float128 b)
+        => IsNaN(a) || IsNaN(b) ? NaN : (a < b || (IsZero(a) && IsZero(b) && b.SignBit) ? a : b);
+    public static Float128 MaxNumber(Float128 a, Float128 b)  // NaN-ignoring
+        => IsNaN(a) ? b : IsNaN(b) ? a : Max(a, b);
+    public static Float128 MinNumber(Float128 a, Float128 b)
+        => IsNaN(a) ? b : IsNaN(b) ? a : Min(a, b);
+    public static Float128 MaxMagnitude(Float128 a, Float128 b)
+        => IsNaN(a) || IsNaN(b) ? NaN : (Abs(a) < Abs(b) ? b : Abs(b) < Abs(a) ? a : Max(a, b));
+    public static Float128 MinMagnitude(Float128 a, Float128 b)
+        => IsNaN(a) || IsNaN(b) ? NaN : (Abs(b) < Abs(a) ? b : Abs(a) < Abs(b) ? a : Min(a, b));
+    public static Float128 Clamp(Float128 v, Float128 lo, Float128 hi)
+        => v < lo ? lo : v > hi ? hi : v;
+    /// <summary>−1 / 0 / +1 (NaN throws, matching .NET <c>INumber.Sign</c>).</summary>
+    public static int Sign(Float128 v)
+    {
+        if (IsNaN(v)) { throw new ArithmeticException("Sign of NaN is undefined."); }
+        if (IsZero(v)) { return 0; }
+        return v.SignBit ? -1 : 1;
+    }
+
     // ── decimal formatting (correctly rounded via BigInteger) ────────────────
     // Backs printf %Lf / %Le / %Lg. value = (-1)^sign · sig · 2^q exactly, so
     // |value|·10^power is the exact rational sig·2^q·10^power; we round it to a
