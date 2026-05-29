@@ -385,6 +385,28 @@ public sealed class Float128Tests
     }
 
     [Fact]
+    public void Hyperbolic_functions_basic()
+    {
+        Float128.ToDouble(Float128.Sinh(Float128.Zero)).ShouldBe(0.0);
+        Float128.ToDouble(Float128.Sinh(Float128.One)).ShouldBe(Math.Sinh(1.0), 1e-14);
+        Float128.ToDouble(Float128.Cosh(Float128.Zero)).ShouldBe(1.0);
+        Float128.ToDouble(Float128.Cosh(Float128.One)).ShouldBe(Math.Cosh(1.0), 1e-14);
+        Float128.ToDouble(Float128.Tanh(Float128.One)).ShouldBe(Math.Tanh(1.0), 1e-14);
+        Float128.ToDouble(Float128.Tanh(Float128.FromDouble(50.0))).ShouldBe(1.0);   // saturates
+        Float128.ToDouble(Float128.Tanh(Float128.FromDouble(-50.0))).ShouldBe(-1.0);
+        // Inverses round-trip.
+        Float128.ToDouble(Float128.Asinh(Float128.Sinh(Float128.FromDouble(2.0)))).ShouldBe(2.0, 1e-13);
+        Float128.ToDouble(Float128.Acosh(Float128.Cosh(Float128.FromDouble(2.0)))).ShouldBe(2.0, 1e-13);
+        Float128.ToDouble(Float128.Atanh(Float128.Tanh(Float128.FromDouble(0.5)))).ShouldBe(0.5, 1e-14);
+        // Specials.
+        Float128.IsInfinity(Float128.Cosh(Float128.PositiveInfinity)).ShouldBeTrue();
+        Float128.ToDouble(Float128.Tanh(Float128.PositiveInfinity)).ShouldBe(1.0);
+        Float128.IsNaN(Float128.Acosh(Float128.Zero)).ShouldBeTrue();      // x<1
+        Float128.IsNaN(Float128.Atanh(Float128.FromDouble(2.0))).ShouldBeTrue(); // |x|>1
+        (Float128.ToDouble(Float128.Atanh(Float128.One)) == double.PositiveInfinity).ShouldBeTrue();
+    }
+
+    [Fact]
     public void Relational_operators_follow_ieee()
     {
         Float128 one = Float128.One, two = Float128.FromInt64(2);

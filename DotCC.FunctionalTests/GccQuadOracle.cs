@@ -83,6 +83,12 @@ internal static class GccQuadOracle
     internal static readonly Op Log10 = new(1, ResultIsBinary128: true, "log10l({0})");
     internal static readonly Op Log1p = new(1, ResultIsBinary128: true, "log1pl({0})");
     internal static readonly Op Pow = new(2, ResultIsBinary128: true, "powl({0}, {1})");
+    internal static readonly Op Sinh = new(1, ResultIsBinary128: true, "sinhl({0})");
+    internal static readonly Op Cosh = new(1, ResultIsBinary128: true, "coshl({0})");
+    internal static readonly Op Tanh = new(1, ResultIsBinary128: true, "tanhl({0})");
+    internal static readonly Op Asinh = new(1, ResultIsBinary128: true, "asinhl({0})");
+    internal static readonly Op Acosh = new(1, ResultIsBinary128: true, "acoshl({0})");
+    internal static readonly Op Atanh = new(1, ResultIsBinary128: true, "atanhl({0})");
 
     /// <summary>
     /// Evaluate a binary128-result op over each case (operand bit patterns) and

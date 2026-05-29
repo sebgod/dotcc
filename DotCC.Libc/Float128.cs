@@ -930,6 +930,64 @@ public readonly struct Float128 : IEquatable<Float128>, IComparable<Float128>
         return (xNeg && yOdd) ? Negate(mag) : mag;
     }
 
+    // ── hyperbolic functions (composed on exp/expm1/log1p/sqrt) ──────────────
+    public static Float128 Sinh(Float128 x)
+    {
+        if (IsNaN(x) || IsInfinity(x) || IsZero(x)) { return x; }
+        // (expm1(x) − expm1(−x))/2 — opposite signs, so no cancellation near 0.
+        return Multiply(Subtract(Expm1(x), Expm1(Negate(x))), FromDouble(0.5));
+    }
+
+    public static Float128 Cosh(Float128 x)
+    {
+        if (IsNaN(x)) { return NaN; }
+        if (IsInfinity(x)) { return PositiveInfinity; }
+        return Multiply(Add(Exp(x), Exp(Negate(x))), FromDouble(0.5));
+    }
+
+    public static Float128 Tanh(Float128 x)
+    {
+        if (IsNaN(x)) { return NaN; }
+        if (IsInfinity(x)) { return x.SignBit ? Negate(One) : One; }
+        if (IsZero(x)) { return x; }
+        // tanh = expm1(2x) / (expm1(2x) + 2).
+        Float128 e2 = Expm1(Multiply(FromInt64(2), x));
+        if (IsInfinity(e2)) { return One; }            // x large positive ⇒ +1
+        return Divide(e2, Add(e2, FromInt64(2)));
+    }
+
+    public static Float128 Asinh(Float128 x)
+    {
+        if (IsNaN(x) || IsInfinity(x) || IsZero(x)) { return x; } // odd; ±inf→±inf
+        Float128 ax = Abs(x);
+        // asinh(x) = log1p(|x| + |x|²/(1 + sqrt(1+|x|²))), sign-applied.
+        Float128 axsq = Multiply(ax, ax);
+        Float128 u = Add(ax, Divide(axsq, Add(Sqrt(Add(axsq, One)), One)));
+        Float128 r = Log1p(u);
+        return x.SignBit ? Negate(r) : r;
+    }
+
+    public static Float128 Acosh(Float128 x)
+    {
+        if (IsNaN(x)) { return NaN; }
+        if (x < One) { return NaN; }                   // domain x ≥ 1 (incl. negatives)
+        if (IsInfinity(x)) { return PositiveInfinity; }
+        // acosh(x) = log1p((x−1) + sqrt((x−1)(x+1))), accurate near x = 1.
+        Float128 xm1 = Subtract(x, One);
+        return Log1p(Add(xm1, Sqrt(Multiply(xm1, Add(x, One)))));
+    }
+
+    public static Float128 Atanh(Float128 x)
+    {
+        if (IsNaN(x)) { return NaN; }
+        if (IsZero(x)) { return x; }
+        Float128 ax = Abs(x);
+        if (ax == One) { return x.SignBit ? NegativeInfinity : PositiveInfinity; }
+        if (ax > One) { return NaN; }
+        // atanh(x) = (log1p(x) − log1p(−x))/2.
+        return Multiply(Subtract(Log1p(x), Log1p(Negate(x))), FromDouble(0.5));
+    }
+
     // ── decimal formatting (correctly rounded via BigInteger) ────────────────
     // Backs printf %Lf / %Le / %Lg. value = (-1)^sign · sig · 2^q exactly, so
     // |value|·10^power is the exact rational sig·2^q·10^power; we round it to a

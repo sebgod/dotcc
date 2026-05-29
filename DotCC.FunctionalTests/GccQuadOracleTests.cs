@@ -185,6 +185,72 @@ public sealed class GccQuadOracleTests
         => AssertOpCloseToGcc(GccQuadOracle.Pow, BuildPowInputs(),
             c => Float128.Pow(Float128.FromBits(c[0]), Float128.FromBits(c[1])).Bits, maxUlp: 2);
 
+    [Fact]
+    public void Float128_sinh_close_to_gcc()
+        => AssertOpCloseToGcc(GccQuadOracle.Sinh, BuildExpInputs(),
+            c => Float128.Sinh(Float128.FromBits(c[0])).Bits, maxUlp: 3);
+
+    [Fact]
+    public void Float128_cosh_close_to_gcc()
+        => AssertOpCloseToGcc(GccQuadOracle.Cosh, BuildExpInputs(),
+            c => Float128.Cosh(Float128.FromBits(c[0])).Bits, maxUlp: 3);
+
+    [Fact]
+    public void Float128_tanh_close_to_gcc()
+        => AssertOpCloseToGcc(GccQuadOracle.Tanh, BuildExpInputs(),
+            c => Float128.Tanh(Float128.FromBits(c[0])).Bits, maxUlp: 3);
+
+    [Fact]
+    public void Float128_asinh_close_to_gcc()
+        => AssertOpCloseToGcc(GccQuadOracle.Asinh, BuildHyperInputs(),
+            c => Float128.Asinh(Float128.FromBits(c[0])).Bits, maxUlp: 3);
+
+    [Fact]
+    public void Float128_acosh_close_to_gcc()
+        => AssertOpCloseToGcc(GccQuadOracle.Acosh, BuildAcoshInputs(),
+            c => Float128.Acosh(Float128.FromBits(c[0])).Bits, maxUlp: 3);
+
+    [Fact]
+    public void Float128_atanh_close_to_gcc()
+        => AssertOpCloseToGcc(GccQuadOracle.Atanh, BuildAtanhInputs(),
+            c => Float128.Atanh(Float128.FromBits(c[0])).Bits, maxUlp: 3);
+
+    // asinh: any real; sample exponents -30..30, both signs.
+    private static List<UInt128[]> BuildHyperInputs()
+    {
+        var rng = new Random(0xA51);
+        var list = new List<UInt128[]>();
+        for (int i = 0; i < 3000; i++)
+        {
+            list.Add(new[] { Bits(rng.Next(2) == 1, rng.Next(-30, 31), RandFraction(rng)) });
+        }
+        return list;
+    }
+
+    // acosh: x ≥ 1 (exponents 0..40, sign clear; 1.0 gives 0).
+    private static List<UInt128[]> BuildAcoshInputs()
+    {
+        var rng = new Random(0xAC0);
+        var list = new List<UInt128[]> { new[] { Bits(false, 0, UInt128.Zero) } };
+        for (int i = 0; i < 3000; i++)
+        {
+            list.Add(new[] { Bits(false, rng.Next(0, 40), RandFraction(rng)) });
+        }
+        return list;
+    }
+
+    // atanh: |x| < 1 (exponents -50..-1, both signs).
+    private static List<UInt128[]> BuildAtanhInputs()
+    {
+        var rng = new Random(0xA74);
+        var list = new List<UInt128[]>();
+        for (int i = 0; i < 3000; i++)
+        {
+            list.Add(new[] { Bits(rng.Next(2) == 1, rng.Next(-50, 0), RandFraction(rng)) });
+        }
+        return list;
+    }
+
     // log1p over x > -1, spanning small |x| (the atanh path) and larger.
     private static List<UInt128[]> BuildLog1pInputs()
     {
