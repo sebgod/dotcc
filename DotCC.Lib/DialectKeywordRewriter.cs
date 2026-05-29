@@ -82,6 +82,14 @@ internal sealed class DialectKeywordRewriter : RewritingTokenStream
             ["true"]    = (23, map["TRUE"],    "true"),
             ["false"]   = (23, map["FALSE"],   "false"),
             ["nullptr"] = (23, map["NULLPTR"], "nullptr"),
+
+            // C23 makes `static_assert` a first-class keyword (the C11 form is
+            // `_Static_assert`, with the lowercase macro living in <assert.h>).
+            // Promote onto the existing `_Static_assert` grammar terminal under
+            // c23; pre-C23 it stays an ID and the <assert.h> macro path (if any)
+            // applies. The `_Static_assert` spelling itself is always a keyword
+            // (lexer rule), needing no promotion.
+            ["static_assert"] = (23, map["_Static_assert"], "_Static_assert"),
         };
     }
 

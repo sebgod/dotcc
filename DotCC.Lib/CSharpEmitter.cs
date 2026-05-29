@@ -1259,6 +1259,33 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     public EmitContent Visit(C.LitFalse n)   => "false";
     public EmitContent Visit(C.LitNullptr n) => "null";
 
+    // `_Static_assert(expr [, "msg"]);` (C11; C23 lowercase `static_assert`
+    // and message-optional form). A compile-time-only construct with no
+    // observable runtime behaviour, so for any program where the assertion
+    // holds the correct emit is *nothing*. dotcc has no constant evaluator
+    // yet, so we don't verify the condition — we drop it to a self-delimiting
+    // block comment (carrying the message for traceability) and let Roslyn
+    // compile the rest. This is observably equivalent to clang for every valid
+    // program; a *false* static_assert that clang would reject is silently
+    // accepted (documented limitation in C-SUPPORT.md). Works at both file
+    // scope (Fn) and block scope (Stmt) — the comment is inert in either.
+    public EmitContent Visit(C.StaticAssert n)          => StaticAssertComment(T(n.Arg4));
+    public EmitContent Visit(C.StaticAssertNoMsg n)     => StaticAssertComment(null);
+    public EmitContent Visit(C.StaticAssertStmt n)      => StaticAssertComment(T(n.Arg4));
+    public EmitContent Visit(C.StaticAssertStmtNoMsg n) => StaticAssertComment(null);
+
+    /// <summary>
+    /// Render a dropped <c>_Static_assert</c> as an inert block comment.
+    /// <paramref name="rawMsg"/> is the raw STRING lexeme (quotes included) or
+    /// null for the C23 message-less form. Any <c>*/</c> in the message is
+    /// neutralised so it can't close the comment early.
+    /// </summary>
+    private static string StaticAssertComment(string? rawMsg)
+    {
+        var tail = rawMsg is null ? "" : ": " + rawMsg.Replace("*/", "* /");
+        return $"/* static_assert (compile-time, not evaluated){tail} */";
+    }
+
     /// <summary>
     /// Identity for now — kept as a seam in case future grammar features
     /// need to remap a C identifier to a different C# name before emit.

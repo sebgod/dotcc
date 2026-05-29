@@ -1208,6 +1208,89 @@ public sealed class CompilerTests
         finally { File.Delete(src); }
     }
 
+    // ---- _Static_assert / static_assert -----------------------------------
+    // `_Static_assert` is a C11 keyword (always reserved). The C23 lowercase
+    // `static_assert` is promoted onto it by the rewriter under -std=c23.
+    // Compile-time only: dotcc parses it and drops it to an inert comment.
+
+    [Fact]
+    public void Static_assert_file_scope_emits_a_comment_not_a_call()
+    {
+        // C11 two-arg form at file scope — always a keyword, so no -std needed.
+        var src = WriteTemp("""
+            _Static_assert(1, "always true");
+            int main() { return 0; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("static_assert (compile-time, not evaluated): \"always true\"");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Static_assert_block_scope_and_message_optional_c23_form()
+    {
+        // Block scope + the C23 message-less arity. `_Static_assert` is a
+        // keyword in every dialect, so this parses even under the default c17.
+        var src = WriteTemp("""
+            int main() {
+                _Static_assert(sizeof(int) >= 2, "int too small");
+                _Static_assert(1);
+                return 0;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("static_assert (compile-time, not evaluated): \"int too small\"");
+            emitted.ShouldContain("static_assert (compile-time, not evaluated) */");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Lowercase_static_assert_is_a_keyword_under_c23()
+    {
+        // C23 promotes lowercase `static_assert` onto the `_Static_assert`
+        // terminal — same comment lowering, no <assert.h> needed.
+        var src = WriteTemp("""
+            int main() {
+                static_assert(1 + 1 == 2, "math works");
+                return 0;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23"));
+            emitted.ShouldContain("static_assert (compile-time, not evaluated): \"math works\"");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Lowercase_static_assert_is_a_plain_call_before_c23()
+    {
+        // Pre-C23 with no <assert.h> macro, `static_assert` is an ordinary
+        // identifier: `static_assert(1, "x")` parses as a function-call
+        // expression statement, NOT the keyword declaration. The gate didn't
+        // promote it, so it is emitted verbatim as a call (not the comment).
+        var src = WriteTemp("""
+            int main() {
+                static_assert(1, "x");
+                return 0;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"));
+            emitted.ShouldContain("static_assert");
+            emitted.ShouldNotContain("compile-time, not evaluated");
+        }
+        finally { File.Delete(src); }
+    }
+
     [Fact]
     public void Variadic_macro_with_named_params_plus_extras()
     {

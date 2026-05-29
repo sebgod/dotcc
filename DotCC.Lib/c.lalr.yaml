@@ -239,6 +239,12 @@ symbols:
   - 'TRUE'         # 137 keyword constant (C23) — `true`,  lowers to C# `true`.
   - 'FALSE'        # 138 keyword constant (C23) — `false`, lowers to C# `false`.
   - 'NULLPTR'      # 139 keyword constant (C23) — `nullptr`, lowers to C# `null`.
+  # `_Static_assert` (C11) — compile-time assertion declaration. As a
+  # `_Capital_` keyword it is reserved in every dialect, so it always lexes
+  # as a keyword (rule 3). The C23 lowercase spelling `static_assert` is
+  # promoted onto this terminal by DialectKeywordRewriter under -std=c23
+  # (rule 2). Both file-scope (Fn) and block-scope (Stmt) positions.
+  - '_Static_assert' # 140 keyword (C11)
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -338,6 +344,13 @@ productions:
       # comma-separated init-declarator semantics stay in lockstep
       # between file-scope and block-scope declarations.
       - { lhs: Fn, rhs: [Type, DeclItemList, ';'], action: globalDeclList }
+
+      # `_Static_assert(expr, "msg");` (C11) and `_Static_assert(expr);`
+      # (C23, message optional). File-scope form. Compile-time only — no
+      # observable runtime behaviour — so the visitor lowers it to a comment
+      # (see Visit(C.StaticAssert)); valid programs emit nothing.
+      - { lhs: Fn, rhs: ['_Static_assert', '(', E, ',', STRING, ')', ';'], action: staticAssert }
+      - { lhs: Fn, rhs: ['_Static_assert', '(', E, ')', ';'],              action: staticAssertNoMsg }
 
   - derivation: leftmost
     rules:
@@ -481,6 +494,10 @@ productions:
       - { lhs: Stmt, rhs: ['case', E, ':', Stmt],          action: caseLabel }
       - { lhs: Stmt, rhs: ['default', ':', Stmt],          action: defaultLabel }
       - { lhs: Stmt, rhs: [';'],                           action: stmtEmpty }
+      # Block-scope `_Static_assert` — same two arities as the file-scope
+      # form above. Lowers to a comment (compile-time only).
+      - { lhs: Stmt, rhs: ['_Static_assert', '(', E, ',', STRING, ')', ';'], action: staticAssertStmt }
+      - { lhs: Stmt, rhs: ['_Static_assert', '(', E, ')', ';'],              action: staticAssertStmtNoMsg }
 
   # MemberList: one or more `Type ID ;` declarations inside a struct body.
   - derivation: leftmost
@@ -788,6 +805,10 @@ lexer:
     # Before the ID rule (longest-match ties resolve first-rule-wins).
     - { symbol: '_Float128', match: '_Float128' }
     - { symbol: '_Float128', match: '__float128' }
+    # `_Static_assert` (C11) — always a keyword (reserved underscore-uppercase
+    # prefix). The C23 lowercase `static_assert` is promoted onto this terminal
+    # by DialectKeywordRewriter; it has no lexer rule of its own (rule 2).
+    - { symbol: '_Static_assert', match: '_Static_assert' }
     - { symbol: 'if',     match: 'if' }
     - { symbol: 'else',   match: 'else' }
     - { symbol: 'while',  match: 'while' }
