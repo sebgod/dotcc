@@ -73,6 +73,9 @@ internal static class GccQuadOracle
     // tolerance rather than bit-exact.
     internal static readonly Op Cbrt = new(1, ResultIsBinary128: true, "cbrtl({0})");
     internal static readonly Op Hypot = new(2, ResultIsBinary128: true, "hypotl({0}, {1})");
+    // Transcendentals — high-precision here, ~correctly rounded; gcc within tolerance.
+    internal static readonly Op Exp = new(1, ResultIsBinary128: true, "expl({0})");
+    internal static readonly Op Log = new(1, ResultIsBinary128: true, "logl({0})");
 
     /// <summary>
     /// Evaluate a binary128-result op over each case (operand bit patterns) and

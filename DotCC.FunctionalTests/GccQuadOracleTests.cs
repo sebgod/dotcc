@@ -140,6 +140,40 @@ public sealed class GccQuadOracleTests
     private static bool IsInf(UInt128 b)
         => ((b >> 112) & 0x7FFF) == 0x7FFF && (b & ((UInt128.One << 112) - 1)) == 0;
 
+    [Fact]
+    public void Float128_exp_close_to_gcc()
+        => AssertOpCloseToGcc(GccQuadOracle.Exp, BuildExpInputs(),
+            c => Float128.Exp(Float128.FromBits(c[0])).Bits, maxUlp: 2);
+
+    [Fact]
+    public void Float128_log_close_to_gcc()
+        => AssertOpCloseToGcc(GccQuadOracle.Log, BuildLogInputs(),
+            c => Float128.Log(Float128.FromBits(c[0])).Bits, maxUlp: 2);
+
+    // exp over a non-overflowing range (|x| ≲ 700): exponents -40..9, both signs.
+    private static List<UInt128[]> BuildExpInputs()
+    {
+        var rng = new Random(0xE7B);
+        var list = new List<UInt128[]> { new[] { UInt128.Zero }, new[] { Bits(false, 0, UInt128.Zero) } };
+        for (int i = 0; i < 4000; i++)
+        {
+            list.Add(new[] { Bits(rng.Next(2) == 1, rng.Next(-40, 10), RandFraction(rng)) });
+        }
+        return list;
+    }
+
+    // log over positive values across the full exponent range (sign bit clear).
+    private static List<UInt128[]> BuildLogInputs()
+    {
+        var rng = new Random(0x106);
+        var list = new List<UInt128[]> { new[] { Bits(false, 0, UInt128.Zero) } }; // 1.0 → 0
+        for (int i = 0; i < 4000; i++)
+        {
+            list.Add(new[] { Bits(false, rng.Next(-1000, 1001), RandFraction(rng)) });
+        }
+        return list;
+    }
+
     /// <summary>
     /// Run a binary128-result op over <paramref name="cases"/> (each carrying
     /// the op's operand bit patterns) and assert our result equals gcc's

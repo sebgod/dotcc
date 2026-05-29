@@ -342,6 +342,24 @@ public sealed class Float128Tests
     }
 
     [Fact]
+    public void Exp_and_Log_basic()
+    {
+        Float128.ToDouble(Float128.Exp(Float128.Zero)).ShouldBe(1.0);
+        Float128.ToDouble(Float128.Exp(Float128.One)).ShouldBe(Math.E, 1e-15);
+        Float128.ToDouble(Float128.Log(Float128.One)).ShouldBe(0.0);
+        Float128.ToDouble(Float128.Log(Float128.FromDouble(Math.E))).ShouldBe(1.0, 1e-15);
+        Float128.ToDouble(Float128.Exp(Float128.FromDouble(2.0))).ShouldBe(Math.Exp(2.0), 1e-13);
+        Float128.ToDouble(Float128.Log(Float128.FromDouble(1000.0))).ShouldBe(Math.Log(1000.0), 1e-13);
+        // Round-trip: log(exp(x)) ≈ x.
+        Float128.ToDouble(Float128.Log(Float128.Exp(Float128.FromDouble(3.25)))).ShouldBe(3.25, 1e-13);
+        // Specials.
+        Float128.IsInfinity(Float128.Exp(Float128.PositiveInfinity)).ShouldBeTrue();
+        Float128.IsZero(Float128.Exp(Float128.NegativeInfinity)).ShouldBeTrue();
+        Float128.IsNaN(Float128.Log(Float128.FromDouble(-1.0))).ShouldBeTrue();
+        (Float128.ToDouble(Float128.Log(Float128.Zero)) == double.NegativeInfinity).ShouldBeTrue();
+    }
+
+    [Fact]
     public void Relational_operators_follow_ieee()
     {
         Float128 one = Float128.One, two = Float128.FromInt64(2);

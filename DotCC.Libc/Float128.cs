@@ -709,6 +709,107 @@ public readonly struct Float128 : IEquatable<Float128>, IComparable<Float128>
         return meNaN ? -1 : 1;
     }
 
+    // ── transcendentals (high-precision BigInteger fixed-point) ──────────────
+    // Computed in a fixed-point format with FpBits fraction bits (well beyond
+    // binary128's 113), then rounded to binary128. The ~80 guard bits make the
+    // final rounding correct to far better than 1 ULP for essentially all
+    // inputs — and since glibc's own transcendentals aren't correctly rounded,
+    // these are validated against gcc within a small ULP tolerance, not bit-
+    // exact. (Argument reduction keeps the series arguments small; the result
+    // is irrational so a definite sticky direction can't be claimed — the guard
+    // bits carry the rounding instead.)
+    private const int FpBits = 192;
+    private static readonly BigInteger FpOne = BigInteger.One << FpBits;
+    private static readonly BigInteger FpLn2 = ComputeLn2();
+
+    private static BigInteger FpMul(BigInteger a, BigInteger b) => (a * b) >> FpBits;
+
+    /// <summary>round(a / b) to nearest, ties away (b &gt; 0; a signed).</summary>
+    private static BigInteger DivNearest(BigInteger a, BigInteger b)
+    {
+        BigInteger q = BigInteger.DivRem(a, b, out BigInteger r);
+        BigInteger twice = BigInteger.Abs(r) << 1;
+        if (twice >= b) { q += a.Sign >= 0 ? BigInteger.One : BigInteger.MinusOne; }
+        return q;
+    }
+
+    /// <summary>Exact value (-1)^neg · mag · 2^q as a fixed-point integer
+    /// round(value · 2^FpBits).</summary>
+    private static BigInteger ToFixed(bool neg, BigInteger mag, int q)
+    {
+        int shift = q + FpBits;
+        BigInteger r = shift >= 0 ? mag << shift : DivNearest(mag, BigInteger.One << -shift);
+        return neg ? -r : r;
+    }
+
+    /// <summary>atanh(t) in fixed-point: t + t³/3 + t⁵/5 + … (|t| small).</summary>
+    private static BigInteger FpAtanh(BigInteger t)
+    {
+        BigInteger tsq = FpMul(t, t);
+        BigInteger term = t, acc = t;
+        int n = 1;
+        while (true)
+        {
+            term = FpMul(term, tsq);
+            if (term == BigInteger.Zero) { break; }
+            acc += term / (2 * n + 1);
+            n++;
+        }
+        return acc;
+    }
+
+    private static BigInteger ComputeLn2() => 2 * FpAtanh((BigInteger.One << FpBits) / 3);
+
+    /// <summary>exp(r) in fixed-point for small |r| (≤ ln2/2) via Taylor series.</summary>
+    private static BigInteger FpExpSmall(BigInteger r)
+    {
+        BigInteger term = FpOne, acc = FpOne;
+        int n = 1;
+        while (n < 200)
+        {
+            term = FpMul(term, r) / n;       // term *= r/n
+            if (term == BigInteger.Zero) { break; }
+            acc += term;
+            n++;
+        }
+        return acc;                           // ≈ exp(r) · 2^FpBits, positive
+    }
+
+    public static Float128 Exp(Float128 x)
+    {
+        if (IsNaN(x)) { return NaN; }
+        if (IsInfinity(x)) { return x.SignBit ? Zero : PositiveInfinity; }
+        if (IsZero(x)) { return One; }
+
+        Decompose(x, out bool s, out BigInteger sig, out int q);
+        BigInteger xFixed = ToFixed(s, sig, q);
+        BigInteger k = DivNearest(xFixed, FpLn2);          // round(x / ln2)
+        if (k > 20000) { return PositiveInfinity; }
+        if (k < -20000) { return Zero; }
+        BigInteger rFixed = xFixed - k * FpLn2;            // |r| ≤ ln2/2
+        BigInteger expR = FpExpSmall(rFixed);              // exp(r)·2^FpBits
+        // exp(x) = 2^k · exp(r) = expR · 2^(k − FpBits).
+        return RoundToBinary128(false, expR, (int)k - FpBits, extraSticky: false);
+    }
+
+    public static Float128 Log(Float128 x)
+    {
+        if (IsNaN(x) || x.SignBit) { return IsZero(x) ? NegativeInfinity : NaN; } // log(-0)=-inf, log(<0)=NaN
+        if (IsZero(x)) { return NegativeInfinity; }
+        if (IsInfinity(x)) { return PositiveInfinity; }
+
+        Decompose(x, out _, out BigInteger sig, out int q);
+        int bitlen = (int)sig.GetBitLength();
+        int e = q + bitlen - 1;                            // x = m · 2^e, m ∈ [1,2)
+        BigInteger mFixed = sig << (FpBits - bitlen + 1);  // m · 2^FpBits
+        // log(m) = 2·atanh((m−1)/(m+1)), with t small for m ∈ [1,2).
+        BigInteger num = mFixed - FpOne, den = mFixed + FpOne;
+        BigInteger t = (num << FpBits) / den;
+        BigInteger logx = (BigInteger)e * FpLn2 + 2 * FpAtanh(t);
+        if (logx.IsZero) { return Zero; }                  // log(1) = +0
+        return RoundToBinary128(logx.Sign < 0, BigInteger.Abs(logx), -FpBits, extraSticky: false);
+    }
+
     // ── decimal formatting (correctly rounded via BigInteger) ────────────────
     // Backs printf %Lf / %Le / %Lg. value = (-1)^sign · sig · 2^q exactly, so
     // |value|·10^power is the exact rational sig·2^q·10^power; we round it to a
