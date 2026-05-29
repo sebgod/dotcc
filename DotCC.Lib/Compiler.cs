@@ -169,7 +169,8 @@ public static class Compiler
         var emitter = new CSharpEmitter();
         var parser = C.BuildParser(emitter);
         var lexerTable = C.BuildLexer();
-        var seededDefines = SeedDialectDefines(dialect ?? CDialect.Default, defines);
+        var activeDialect = dialect ?? CDialect.Default;
+        var seededDefines = SeedDialectDefines(activeDialect, defines);
 
         var allFunctions = new StringBuilder();
         var mainArity = -1;
@@ -185,6 +186,14 @@ public static class Compiler
             // its own RewritingTokenStream subclass after the preprocessor
             // populated the macro table.
             using var macroExp = new MacroExpander(preproc, pre);
+            // DialectKeywordRewriter: dialect-aware keyword promotion (rule 2
+            // of the gating model). Promotes identifier-spelled keywords
+            // (e.g. C23 `bool`) onto their grammar terminal only when the
+            // active dialect makes them first-class. Sits AFTER macro
+            // expansion (so an included header's `#define bool _Bool` wins and
+            // the table simply doesn't fire) and BEFORE the typedef rewriter
+            // (so e.g. `typedef bool MyBool;` under c23 sees `_Bool`).
+            using var dialectRewriter = new DialectKeywordRewriter(macroExp, activeDialect);
             // TypeNameRewriter: the C lexer hack. Promotes ID → TYPE_NAME for
             // any name previously bound by a `typedef`. Sits AFTER macro
             // expansion (so expanded names can also trigger typedef
@@ -192,7 +201,7 @@ public static class Compiler
             // set of C#-side libc classes that user code reaches by name
             // through synthetic-header typedefs (e.g. <setjmp.h>'s
             // `typedef LongJmpToken jmp_buf;`).
-            using var typeRewriter = new TypeNameRewriter(macroExp, PredefinedTypeNames);
+            using var typeRewriter = new TypeNameRewriter(dialectRewriter, PredefinedTypeNames);
             using var tokens = new SyncLATokenIterator(typeRewriter);
 
             Item result;

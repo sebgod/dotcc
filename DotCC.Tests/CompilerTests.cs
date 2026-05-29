@@ -1047,6 +1047,62 @@ public sealed class CompilerTests
         CDialect.Default.Name.ShouldBe("c17");
     }
 
+    // ---- DialectKeywordRewriter: C23 `bool` promotion ---------------------
+    // C23 makes `bool` a first-class keyword (no <stdbool.h> needed). The
+    // rewriter promotes the bare `bool` ID onto the existing `_Bool` terminal,
+    // but ONLY under -std=c23 — pre-C23 `bool` must stay an ordinary
+    // identifier so the <stdbool.h> macro path keeps working and valid old
+    // code that uses `bool` as a name still parses.
+
+    [Fact]
+    public void Bool_is_a_keyword_under_c23_without_stdbool_include()
+    {
+        // No `#include <stdbool.h>` — under c23 bare `bool` is the type.
+        var src = WriteTemp("int main() { bool gt = 5 > 3; return 0; }");
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23"));
+            // Promoted to `_Bool` → tsBool → C# `bool`.
+            emitted.ShouldContain("bool gt = (5 > 3);");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Bool_is_not_a_keyword_before_c23()
+    {
+        // Same source under the default c17 dialect: `bool` is NOT a keyword
+        // and there's no <stdbool.h> include, so it's an unknown identifier —
+        // `bool gt` is two adjacent IDs and the parse fails. This is the gate
+        // working: we don't promote below the dialect's MinVersion.
+        var src = WriteTemp("int main() { bool gt = 5 > 3; return 0; }");
+        try
+        {
+            Should.Throw<CompileException>(
+                () => Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17")));
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Bool_via_stdbool_macro_still_works_under_c23()
+    {
+        // Regression: the rewriter sits AFTER macro expansion, so when the
+        // header is included the `#define bool _Bool` macro has already fired
+        // and the promotion table simply doesn't double-handle it. Including
+        // <stdbool.h> under c23 must still emit the same C# `bool`.
+        var src = WriteTemp("""
+            #include <stdbool.h>
+            int main() { bool gt = 5 > 3; return 0; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23"));
+            emitted.ShouldContain("bool gt = (5 > 3);");
+        }
+        finally { File.Delete(src); }
+    }
+
     [Fact]
     public void Variadic_macro_with_named_params_plus_extras()
     {
