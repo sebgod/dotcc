@@ -930,6 +930,172 @@ public readonly struct Float128 : IEquatable<Float128>, IComparable<Float128>
         return (xNeg && yOdd) ? Negate(mag) : mag;
     }
 
+    // ── trigonometric functions (fixed-point, π range reduction) ─────────────
+    private static readonly BigInteger FpPi = ComputePi();
+    private static readonly BigInteger FpHalfPi = FpPi >> 1;
+
+    // Machin: π = 16·atan(1/5) − 4·atan(1/239).
+    private static BigInteger ComputePi()
+        => 16 * FpAtan(FpOne / 5) - 4 * FpAtan(FpOne / 239);
+
+    /// <summary>fixed-point sqrt of a fixed-point value (a·2⁻ᶠᵖᴮⁱᵗˢ ⇒ √a·2⁻ᶠᵖᴮⁱᵗˢ).</summary>
+    private static BigInteger FpSqrt(BigInteger aFixed) => ISqrt(aFixed << FpBits);
+
+    /// <summary>atan(t) in fixed-point for any t: halve the argument via
+    /// atan(t)=2·atan(t/(1+√(1+t²))) until small, sum the (alternating) series,
+    /// then scale back by 2ᵏ.</summary>
+    private static BigInteger FpAtan(BigInteger t)
+    {
+        int k = 0;
+        BigInteger tt = t;
+        while (BigInteger.Abs(tt) > (FpOne >> 4))      // until |tt| ≤ 1/16
+        {
+            BigInteger s = FpSqrt(FpOne + FpMul(tt, tt));
+            tt = (tt << FpBits) / (FpOne + s);
+            k++;
+        }
+        BigInteger tsq = FpMul(tt, tt), term = tt, acc = tt;
+        int sign = -1;
+        for (int n = 1; n < 200; n++)
+        {
+            term = FpMul(term, tsq);
+            BigInteger c = term / (2 * n + 1);
+            if (c == BigInteger.Zero) { break; }
+            acc += sign * c;
+            sign = -sign;
+        }
+        return acc << k;
+    }
+
+    /// <summary>(sin r, cos r) in fixed-point for |r| ≤ π/4 via Taylor series.</summary>
+    private static (BigInteger Sin, BigInteger Cos) FpSinCos(BigInteger r)
+    {
+        BigInteger rsq = FpMul(r, r);
+        BigInteger sinAcc = r, cosAcc = FpOne, termS = r, termC = FpOne;
+        for (int k = 1; k < 100; k++)
+        {
+            termC = -FpMul(termC, rsq) / ((BigInteger)(2 * k - 1) * (2 * k));
+            termS = -FpMul(termS, rsq) / ((BigInteger)(2 * k) * (2 * k + 1));
+            cosAcc += termC;
+            sinAcc += termS;
+            if (termC == BigInteger.Zero && termS == BigInteger.Zero) { break; }
+        }
+        return (sinAcc, cosAcc);
+    }
+
+    // Reduce x (fixed) to quadrant k mod 4 and r ∈ [−π/4, π/4]; return sin/cos of r.
+    private static (int Quadrant, BigInteger Sin, BigInteger Cos) ReduceTrig(BigInteger xFixed)
+    {
+        BigInteger k = DivNearest(xFixed, FpHalfPi);
+        BigInteger r = xFixed - k * FpHalfPi;          // |r| ≤ π/4
+        var (sin, cos) = FpSinCos(r);
+        int quad = (int)(((k % 4) + 4) % 4);
+        return (quad, sin, cos);
+    }
+
+    private static Float128 FromFixedSigned(BigInteger v)
+        => v.IsZero ? Zero : RoundToBinary128(v.Sign < 0, BigInteger.Abs(v), -FpBits, false);
+
+    public static Float128 Sin(Float128 x)
+    {
+        if (IsNaN(x) || IsInfinity(x)) { return NaN; }
+        if (IsZero(x)) { return x; }
+        Decompose(x, out bool s, out BigInteger sig, out int q);
+        var (quad, sin, cos) = ReduceTrig(ToFixed(s, sig, q));
+        return FromFixedSigned(quad switch { 0 => sin, 1 => cos, 2 => -sin, _ => -cos });
+    }
+
+    public static Float128 Cos(Float128 x)
+    {
+        if (IsNaN(x) || IsInfinity(x)) { return NaN; }
+        if (IsZero(x)) { return One; }
+        Decompose(x, out bool s, out BigInteger sig, out int q);
+        var (quad, sin, cos) = ReduceTrig(ToFixed(s, sig, q));
+        return FromFixedSigned(quad switch { 0 => cos, 1 => -sin, 2 => -cos, _ => sin });
+    }
+
+    public static Float128 Tan(Float128 x)
+    {
+        if (IsNaN(x) || IsInfinity(x)) { return NaN; }
+        if (IsZero(x)) { return x; }
+        Decompose(x, out bool s, out BigInteger sig, out int q);
+        var (quad, sin, cos) = ReduceTrig(ToFixed(s, sig, q));
+        // tan repeats every quadrant as sin/cos with a swap+sign on odd quadrants.
+        BigInteger num = (quad & 1) == 0 ? sin : cos;
+        BigInteger den = (quad & 1) == 0 ? cos : -sin;
+        if (den.IsZero) { return num.Sign < 0 ? NegativeInfinity : PositiveInfinity; }
+        return FromFixedSigned((num << FpBits) / den);
+    }
+
+    public static Float128 Atan(Float128 x)
+    {
+        if (IsNaN(x)) { return NaN; }
+        if (IsZero(x)) { return x; }
+        if (IsInfinity(x)) { return FromFixedSigned(x.SignBit ? -FpHalfPi : FpHalfPi); }
+        Decompose(x, out bool s, out BigInteger sig, out int q);
+        return FromFixedSigned(FpAtan(ToFixed(s, sig, q)));
+    }
+
+    public static Float128 Asin(Float128 x)
+    {
+        if (IsNaN(x)) { return NaN; }
+        if (IsZero(x)) { return x; }
+        Float128 ax = Abs(x);
+        if (ax > One) { return NaN; }
+        if (ax == One) { return FromFixedSigned(x.SignBit ? -FpHalfPi : FpHalfPi); }
+        // asin(x) = atan(x / sqrt(1 − x²)).
+        Decompose(x, out bool s, out BigInteger sig, out int q);
+        BigInteger xf = ToFixed(s, sig, q);
+        BigInteger denom = FpSqrt(FpOne - FpMul(xf, xf));
+        return FromFixedSigned(FpAtan((xf << FpBits) / denom));
+    }
+
+    public static Float128 Acos(Float128 x)
+    {
+        if (IsNaN(x)) { return NaN; }
+        Float128 ax = Abs(x);
+        if (ax > One) { return NaN; }
+        // acos(x) = π/2 − asin(x), formed in fixed-point.
+        Decompose(x, out bool s, out BigInteger sig, out int q);
+        BigInteger xf = ToFixed(s, sig, q);
+        BigInteger asin = ax == One
+            ? (x.SignBit ? -FpHalfPi : FpHalfPi)
+            : FpAtan((xf << FpBits) / FpSqrt(FpOne - FpMul(xf, xf)));
+        return FromFixedSigned(FpHalfPi - asin);
+    }
+
+    public static Float128 Atan2(Float128 y, Float128 x)
+    {
+        if (IsNaN(y) || IsNaN(x)) { return NaN; }
+        bool ys = y.SignBit, xs = x.SignBit;
+        if (IsZero(y))
+        {
+            // atan2(±0, x): x≥0 (incl. +inf) → ±0; x<0 (incl. −inf) → ±π.
+            if (!xs) { return y; }
+            return FromFixedSigned(ys ? -FpPi : FpPi);
+        }
+        if (IsZero(x)) { return FromFixedSigned(ys ? -FpHalfPi : FpHalfPi); }
+        if (IsInfinity(x) || IsInfinity(y))
+        {
+            // Standard atan2 infinity lattice.
+            if (IsInfinity(x) && IsInfinity(y))
+            {
+                BigInteger oct = xs ? (3 * FpPi) >> 2 : FpPi >> 2; // 3π/4 or π/4
+                return FromFixedSigned(ys ? -oct : oct);
+            }
+            if (IsInfinity(y)) { return FromFixedSigned(ys ? -FpHalfPi : FpHalfPi); }
+            // x infinite, y finite: x>0 → ±0, x<0 → ±π.
+            return xs ? FromFixedSigned(ys ? -FpPi : FpPi) : (ys ? NegativeZero : Zero);
+        }
+        // Finite, nonzero. base = atan(y/x); adjust by quadrant of x.
+        Decompose(y, out bool yds, out BigInteger ysig, out int yq);
+        Decompose(x, out bool xds, out BigInteger xsig, out int xq);
+        BigInteger yf = ToFixed(yds, ysig, yq), xf = ToFixed(xds, xsig, xq);
+        BigInteger atanRatio = FpAtan((yf << FpBits) / xf);
+        if (!xs) { return FromFixedSigned(atanRatio); }           // x>0
+        return FromFixedSigned(ys ? atanRatio - FpPi : atanRatio + FpPi); // x<0
+    }
+
     // ── hyperbolic functions (composed on exp/expm1/log1p/sqrt) ──────────────
     public static Float128 Sinh(Float128 x)
     {

@@ -407,6 +407,30 @@ public sealed class Float128Tests
     }
 
     [Fact]
+    public void Trig_functions_basic()
+    {
+        Float128.ToDouble(Float128.Sin(Float128.Zero)).ShouldBe(0.0);
+        Float128.ToDouble(Float128.Sin(Float128.FromDouble(1.0))).ShouldBe(Math.Sin(1.0), 1e-14);
+        Float128.ToDouble(Float128.Cos(Float128.Zero)).ShouldBe(1.0);
+        Float128.ToDouble(Float128.Cos(Float128.FromDouble(1.0))).ShouldBe(Math.Cos(1.0), 1e-14);
+        Float128.ToDouble(Float128.Tan(Float128.FromDouble(1.0))).ShouldBe(Math.Tan(1.0), 1e-13);
+        // sin²+cos² = 1.
+        Float128 a = Float128.FromDouble(0.7);
+        Float128 s = Float128.Sin(a), c = Float128.Cos(a);
+        Float128.ToDouble(Float128.Add(Float128.Multiply(s, s), Float128.Multiply(c, c))).ShouldBe(1.0, 1e-30);
+        // Inverses.
+        Float128.ToDouble(Float128.Atan(Float128.FromDouble(1.0))).ShouldBe(Math.Atan(1.0), 1e-14);
+        Float128.ToDouble(Float128.Asin(Float128.FromDouble(0.5))).ShouldBe(Math.Asin(0.5), 1e-14);
+        Float128.ToDouble(Float128.Acos(Float128.FromDouble(0.5))).ShouldBe(Math.Acos(0.5), 1e-14);
+        Float128.ToDouble(Float128.Atan2(Float128.FromDouble(1.0), Float128.FromDouble(1.0))).ShouldBe(Math.PI / 4, 1e-14);
+        Float128.ToDouble(Float128.Atan2(Float128.FromDouble(1.0), Float128.FromDouble(-1.0))).ShouldBe(3 * Math.PI / 4, 1e-14);
+        // Specials.
+        Float128.IsNaN(Float128.Sin(Float128.PositiveInfinity)).ShouldBeTrue();
+        Float128.IsNaN(Float128.Asin(Float128.FromDouble(2.0))).ShouldBeTrue();
+        Float128.ToDouble(Float128.Atan(Float128.PositiveInfinity)).ShouldBe(Math.PI / 2, 1e-14);
+    }
+
+    [Fact]
     public void Relational_operators_follow_ieee()
     {
         Float128 one = Float128.One, two = Float128.FromInt64(2);

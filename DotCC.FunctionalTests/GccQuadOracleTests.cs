@@ -215,6 +215,69 @@ public sealed class GccQuadOracleTests
         => AssertOpCloseToGcc(GccQuadOracle.Atanh, BuildAtanhInputs(),
             c => Float128.Atanh(Float128.FromBits(c[0])).Bits, maxUlp: 3);
 
+    // sin/cos/tan over a moderate range (exponents −20..20): 192-bit π keeps
+    // the argument reduction accurate there (huge-argument reduction needs more).
+    [Fact]
+    public void Float128_sin_close_to_gcc()
+        => AssertOpCloseToGcc(GccQuadOracle.Sin, BuildTrigInputs(),
+            c => Float128.Sin(Float128.FromBits(c[0])).Bits, maxUlp: 3);
+
+    [Fact]
+    public void Float128_cos_close_to_gcc()
+        => AssertOpCloseToGcc(GccQuadOracle.Cos, BuildTrigInputs(),
+            c => Float128.Cos(Float128.FromBits(c[0])).Bits, maxUlp: 3);
+
+    [Fact]
+    public void Float128_tan_close_to_gcc()
+        => AssertOpCloseToGcc(GccQuadOracle.Tan, BuildTrigInputs(),
+            c => Float128.Tan(Float128.FromBits(c[0])).Bits, maxUlp: 4);
+
+    [Fact]
+    public void Float128_atan_close_to_gcc()
+        => AssertOpCloseToGcc(GccQuadOracle.Atan, BuildHyperInputs(),
+            c => Float128.Atan(Float128.FromBits(c[0])).Bits, maxUlp: 3);
+
+    [Fact]
+    public void Float128_asin_close_to_gcc()
+        => AssertOpCloseToGcc(GccQuadOracle.Asin, BuildAtanhInputs(), // |x| < 1
+            c => Float128.Asin(Float128.FromBits(c[0])).Bits, maxUlp: 3);
+
+    [Fact]
+    public void Float128_acos_close_to_gcc()
+        => AssertOpCloseToGcc(GccQuadOracle.Acos, BuildAtanhInputs(), // |x| < 1
+            c => Float128.Acos(Float128.FromBits(c[0])).Bits, maxUlp: 3);
+
+    [Fact]
+    public void Float128_atan2_close_to_gcc()
+        => AssertOpCloseToGcc(GccQuadOracle.Atan2, BuildPairsTrig(),
+            c => Float128.Atan2(Float128.FromBits(c[0]), Float128.FromBits(c[1])).Bits, maxUlp: 3);
+
+    private static List<UInt128[]> BuildTrigInputs()
+    {
+        var rng = new Random(0x517);
+        var list = new List<UInt128[]>();
+        for (int i = 0; i < 3000; i++)
+        {
+            list.Add(new[] { Bits(rng.Next(2) == 1, rng.Next(-20, 21), RandFraction(rng)) });
+        }
+        return list;
+    }
+
+    private static List<UInt128[]> BuildPairsTrig()
+    {
+        var rng = new Random(0xA72);
+        var list = new List<UInt128[]>();
+        for (int i = 0; i < 3000; i++)
+        {
+            list.Add(new[]
+            {
+                Bits(rng.Next(2) == 1, rng.Next(-20, 21), RandFraction(rng)),
+                Bits(rng.Next(2) == 1, rng.Next(-20, 21), RandFraction(rng)),
+            });
+        }
+        return list;
+    }
+
     // asinh: any real; sample exponents -30..30, both signs.
     private static List<UInt128[]> BuildHyperInputs()
     {

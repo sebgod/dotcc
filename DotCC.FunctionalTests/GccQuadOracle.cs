@@ -89,6 +89,13 @@ internal static class GccQuadOracle
     internal static readonly Op Asinh = new(1, ResultIsBinary128: true, "asinhl({0})");
     internal static readonly Op Acosh = new(1, ResultIsBinary128: true, "acoshl({0})");
     internal static readonly Op Atanh = new(1, ResultIsBinary128: true, "atanhl({0})");
+    internal static readonly Op Sin = new(1, ResultIsBinary128: true, "sinl({0})");
+    internal static readonly Op Cos = new(1, ResultIsBinary128: true, "cosl({0})");
+    internal static readonly Op Tan = new(1, ResultIsBinary128: true, "tanl({0})");
+    internal static readonly Op Atan = new(1, ResultIsBinary128: true, "atanl({0})");
+    internal static readonly Op Asin = new(1, ResultIsBinary128: true, "asinl({0})");
+    internal static readonly Op Acos = new(1, ResultIsBinary128: true, "acosl({0})");
+    internal static readonly Op Atan2 = new(2, ResultIsBinary128: true, "atan2l({0}, {1})");
 
     /// <summary>
     /// Evaluate a binary128-result op over each case (operand bit patterns) and
