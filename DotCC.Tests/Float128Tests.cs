@@ -360,6 +360,31 @@ public sealed class Float128Tests
     }
 
     [Fact]
+    public void Exp_log_family_and_pow_basic()
+    {
+        Float128.ToDouble(Float128.Exp2(Float128.FromDouble(10.0))).ShouldBe(1024.0);
+        Float128.ToDouble(Float128.Exp10(Float128.FromDouble(3.0))).ShouldBe(1000.0, 1e-12);
+        Float128.ToDouble(Float128.Log2(Float128.FromDouble(8.0))).ShouldBe(3.0, 1e-15);
+        Float128.ToDouble(Float128.Log10(Float128.FromDouble(1000.0))).ShouldBe(3.0, 1e-15);
+        Float128.ToDouble(Float128.Expm1(Float128.Zero)).ShouldBe(0.0);
+        Float128.ToDouble(Float128.Expm1(Float128.FromDouble(1.0))).ShouldBe(Math.E - 1.0, 1e-14);
+        Float128.ToDouble(Float128.Log1p(Float128.Zero)).ShouldBe(0.0);
+        Float128.ToDouble(Float128.Log1p(Float128.FromDouble(1.0))).ShouldBe(Math.Log(2.0), 1e-15);
+        // Negative x → atanh of a negative argument (regression: BigInteger >>
+        // floors, so the series must terminate on the contribution, not term).
+        Float128.ToDouble(Float128.Log1p(Float128.FromDouble(-0.25))).ShouldBe(Math.Log(0.75), 1e-15);
+
+        // pow.
+        Float128.ToDouble(Float128.Pow(Float128.FromDouble(2.0), Float128.FromDouble(10.0))).ShouldBe(1024.0);
+        Float128.ToDouble(Float128.Pow(Float128.FromDouble(9.0), Float128.FromDouble(0.5))).ShouldBe(3.0, 1e-14);
+        Float128.ToDouble(Float128.Pow(Float128.FromDouble(-2.0), Float128.FromDouble(3.0))).ShouldBe(-8.0); // odd int
+        Float128.ToDouble(Float128.Pow(Float128.FromDouble(-2.0), Float128.FromDouble(2.0))).ShouldBe(4.0);  // even int
+        Float128.IsNaN(Float128.Pow(Float128.FromDouble(-2.0), Float128.FromDouble(0.5))).ShouldBeTrue();    // neg base, frac exp
+        Float128.ToDouble(Float128.Pow(Float128.FromDouble(5.0), Float128.Zero)).ShouldBe(1.0);              // x^0 = 1
+        Float128.ToDouble(Float128.Pow(Float128.One, Float128.NaN)).ShouldBe(1.0);                            // 1^NaN = 1
+    }
+
+    [Fact]
     public void Relational_operators_follow_ieee()
     {
         Float128 one = Float128.One, two = Float128.FromInt64(2);

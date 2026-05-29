@@ -76,6 +76,13 @@ internal static class GccQuadOracle
     // Transcendentals — high-precision here, ~correctly rounded; gcc within tolerance.
     internal static readonly Op Exp = new(1, ResultIsBinary128: true, "expl({0})");
     internal static readonly Op Log = new(1, ResultIsBinary128: true, "logl({0})");
+    internal static readonly Op Exp2 = new(1, ResultIsBinary128: true, "exp2l({0})");
+    internal static readonly Op Exp10 = new(1, ResultIsBinary128: true, "exp10l({0})");
+    internal static readonly Op Expm1 = new(1, ResultIsBinary128: true, "expm1l({0})");
+    internal static readonly Op Log2 = new(1, ResultIsBinary128: true, "log2l({0})");
+    internal static readonly Op Log10 = new(1, ResultIsBinary128: true, "log10l({0})");
+    internal static readonly Op Log1p = new(1, ResultIsBinary128: true, "log1pl({0})");
+    internal static readonly Op Pow = new(2, ResultIsBinary128: true, "powl({0}, {1})");
 
     /// <summary>
     /// Evaluate a binary128-result op over each case (operand bit patterns) and
@@ -174,6 +181,7 @@ internal static class GccQuadOracle
     private static string GenerateSource(Op op, IReadOnlyList<UInt128[]> cases)
     {
         var sb = new StringBuilder();
+        sb.AppendLine("#define _GNU_SOURCE"); // declares the GNU `exp10l` etc.
         sb.AppendLine("#include <stdio.h>");
         sb.AppendLine("#include <string.h>");
         sb.AppendLine("#include <math.h>");

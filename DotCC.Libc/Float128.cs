@@ -721,6 +721,7 @@ public readonly struct Float128 : IEquatable<Float128>, IComparable<Float128>
     private const int FpBits = 192;
     private static readonly BigInteger FpOne = BigInteger.One << FpBits;
     private static readonly BigInteger FpLn2 = ComputeLn2();
+    private static readonly BigInteger FpLn10 = ComputeLn10();
 
     private static BigInteger FpMul(BigInteger a, BigInteger b) => (a * b) >> FpBits;
 
@@ -747,18 +748,23 @@ public readonly struct Float128 : IEquatable<Float128>, IComparable<Float128>
     {
         BigInteger tsq = FpMul(t, t);
         BigInteger term = t, acc = t;
-        int n = 1;
-        while (true)
+        // Terminate on the CONTRIBUTION reaching zero, not `term`: BigInteger
+        // `>>` floors, so for negative t a tiny `term` sticks at −1 and never
+        // hits 0 — `term/(2n+1)` does truncate to 0. (200-iteration backstop.)
+        for (int n = 1; n < 200; n++)
         {
             term = FpMul(term, tsq);
-            if (term == BigInteger.Zero) { break; }
-            acc += term / (2 * n + 1);
-            n++;
+            BigInteger contribution = term / (2 * n + 1);
+            if (contribution == BigInteger.Zero) { break; }
+            acc += contribution;
         }
         return acc;
     }
 
     private static BigInteger ComputeLn2() => 2 * FpAtanh((BigInteger.One << FpBits) / 3);
+
+    // ln10 = ln(2^3 · 1.25) = 3·ln2 + ln(1.25), ln(1.25) = 2·atanh(1/9).
+    private static BigInteger ComputeLn10() => 3 * FpLn2 + 2 * FpAtanh((BigInteger.One << FpBits) / 9);
 
     /// <summary>exp(r) in fixed-point for small |r| (≤ ln2/2) via Taylor series.</summary>
     private static BigInteger FpExpSmall(BigInteger r)
@@ -775,39 +781,153 @@ public readonly struct Float128 : IEquatable<Float128>, IComparable<Float128>
         return acc;                           // ≈ exp(r) · 2^FpBits, positive
     }
 
+    /// <summary>exp(arg·2⁻ᶠᵖᴮⁱᵗˢ) → binary128, via range reduction k·ln2 + r.</summary>
+    private static Float128 ExpOfFixed(BigInteger arg)
+    {
+        BigInteger k = DivNearest(arg, FpLn2);             // round(arg / ln2)
+        if (k > 20000) { return PositiveInfinity; }
+        if (k < -20000) { return Zero; }
+        BigInteger r = arg - k * FpLn2;                    // |r| ≤ ln2/2
+        return RoundToBinary128(false, FpExpSmall(r), (int)k - FpBits, extraSticky: false);
+    }
+
+    /// <summary>log(x)·2ᶠᵖᴮⁱᵗˢ for finite positive x. x = m·2ᵉ, m ∈ [1,2);
+    /// log = e·ln2 + 2·atanh((m−1)/(m+1)).</summary>
+    private static BigInteger FpLogFixed(Float128 x)
+    {
+        Decompose(x, out _, out BigInteger sig, out int q);
+        int bitlen = (int)sig.GetBitLength();
+        int e = q + bitlen - 1;
+        BigInteger mFixed = sig << (FpBits - bitlen + 1);
+        BigInteger t = ((mFixed - FpOne) << FpBits) / (mFixed + FpOne);
+        return (BigInteger)e * FpLn2 + 2 * FpAtanh(t);
+    }
+
     public static Float128 Exp(Float128 x)
     {
         if (IsNaN(x)) { return NaN; }
         if (IsInfinity(x)) { return x.SignBit ? Zero : PositiveInfinity; }
         if (IsZero(x)) { return One; }
+        Decompose(x, out bool s, out BigInteger sig, out int q);
+        return ExpOfFixed(ToFixed(s, sig, q));
+    }
 
+    public static Float128 Exp2(Float128 x)   // 2^x = exp(x·ln2)
+    {
+        if (IsNaN(x)) { return NaN; }
+        if (IsInfinity(x)) { return x.SignBit ? Zero : PositiveInfinity; }
+        if (IsZero(x)) { return One; }
+        Decompose(x, out bool s, out BigInteger sig, out int q);
+        return ExpOfFixed(FpMul(ToFixed(s, sig, q), FpLn2));
+    }
+
+    public static Float128 Exp10(Float128 x)  // 10^x = exp(x·ln10)
+    {
+        if (IsNaN(x)) { return NaN; }
+        if (IsInfinity(x)) { return x.SignBit ? Zero : PositiveInfinity; }
+        if (IsZero(x)) { return One; }
+        Decompose(x, out bool s, out BigInteger sig, out int q);
+        return ExpOfFixed(FpMul(ToFixed(s, sig, q), FpLn10));
+    }
+
+    public static Float128 Expm1(Float128 x)  // exp(x) − 1, accurate near 0
+    {
+        if (IsNaN(x)) { return NaN; }
+        if (IsInfinity(x)) { return x.SignBit ? Negate(One) : PositiveInfinity; }
+        if (IsZero(x)) { return x; }
         Decompose(x, out bool s, out BigInteger sig, out int q);
         BigInteger xFixed = ToFixed(s, sig, q);
-        BigInteger k = DivNearest(xFixed, FpLn2);          // round(x / ln2)
+        BigInteger k = DivNearest(xFixed, FpLn2);
+        if (k == BigInteger.Zero)
+        {
+            // |x| ≤ ln2/2: form exp(x)−1 in fixed-point (no cancellation loss).
+            BigInteger d = FpExpSmall(xFixed) - FpOne;
+            return d.IsZero ? Zero : RoundToBinary128(d.Sign < 0, BigInteger.Abs(d), -FpBits, false);
+        }
         if (k > 20000) { return PositiveInfinity; }
-        if (k < -20000) { return Zero; }
-        BigInteger rFixed = xFixed - k * FpLn2;            // |r| ≤ ln2/2
-        BigInteger expR = FpExpSmall(rFixed);              // exp(r)·2^FpBits
-        // exp(x) = 2^k · exp(r) = expR · 2^(k − FpBits).
-        return RoundToBinary128(false, expR, (int)k - FpBits, extraSticky: false);
+        if (k < -20000) { return Negate(One); }            // exp→0 ⇒ expm1→−1
+        return Subtract(ExpOfFixed(xFixed), One);
     }
 
     public static Float128 Log(Float128 x)
     {
-        if (IsNaN(x) || x.SignBit) { return IsZero(x) ? NegativeInfinity : NaN; } // log(-0)=-inf, log(<0)=NaN
+        if (IsNaN(x) || x.SignBit) { return IsZero(x) ? NegativeInfinity : NaN; }
         if (IsZero(x)) { return NegativeInfinity; }
         if (IsInfinity(x)) { return PositiveInfinity; }
+        BigInteger lf = FpLogFixed(x);
+        return lf.IsZero ? Zero : RoundToBinary128(lf.Sign < 0, BigInteger.Abs(lf), -FpBits, false);
+    }
 
-        Decompose(x, out _, out BigInteger sig, out int q);
-        int bitlen = (int)sig.GetBitLength();
-        int e = q + bitlen - 1;                            // x = m · 2^e, m ∈ [1,2)
-        BigInteger mFixed = sig << (FpBits - bitlen + 1);  // m · 2^FpBits
-        // log(m) = 2·atanh((m−1)/(m+1)), with t small for m ∈ [1,2).
-        BigInteger num = mFixed - FpOne, den = mFixed + FpOne;
-        BigInteger t = (num << FpBits) / den;
-        BigInteger logx = (BigInteger)e * FpLn2 + 2 * FpAtanh(t);
-        if (logx.IsZero) { return Zero; }                  // log(1) = +0
-        return RoundToBinary128(logx.Sign < 0, BigInteger.Abs(logx), -FpBits, extraSticky: false);
+    public static Float128 Log2(Float128 x)   // log(x)/ln2
+    {
+        if (IsNaN(x) || x.SignBit) { return IsZero(x) ? NegativeInfinity : NaN; }
+        if (IsZero(x)) { return NegativeInfinity; }
+        if (IsInfinity(x)) { return PositiveInfinity; }
+        BigInteger l2 = DivNearest(FpLogFixed(x) << FpBits, FpLn2);
+        return l2.IsZero ? Zero : RoundToBinary128(l2.Sign < 0, BigInteger.Abs(l2), -FpBits, false);
+    }
+
+    public static Float128 Log10(Float128 x)  // log(x)/ln10
+    {
+        if (IsNaN(x) || x.SignBit) { return IsZero(x) ? NegativeInfinity : NaN; }
+        if (IsZero(x)) { return NegativeInfinity; }
+        if (IsInfinity(x)) { return PositiveInfinity; }
+        BigInteger l10 = DivNearest(FpLogFixed(x) << FpBits, FpLn10);
+        return l10.IsZero ? Zero : RoundToBinary128(l10.Sign < 0, BigInteger.Abs(l10), -FpBits, false);
+    }
+
+    public static Float128 Log1p(Float128 x)  // log(1+x), accurate near 0
+    {
+        if (IsNaN(x)) { return NaN; }
+        if (IsInfinity(x)) { return x.SignBit ? NaN : PositiveInfinity; }
+        if (IsZero(x)) { return x; }
+        Float128 negOne = Negate(One);
+        if (x <= negOne) { return x == negOne ? NegativeInfinity : NaN; }
+        // For |x| < 1/2, log(1+x) = 2·atanh(x/(2+x)) keeps full precision near 0.
+        if (Abs(x) < FromDouble(0.5))
+        {
+            Decompose(x, out bool s, out BigInteger sig, out int q);
+            BigInteger xFixed = ToFixed(s, sig, q);
+            BigInteger t = (xFixed << FpBits) / (2 * FpOne + xFixed);
+            BigInteger lf = 2 * FpAtanh(t);
+            return lf.IsZero ? Zero : RoundToBinary128(lf.Sign < 0, BigInteger.Abs(lf), -FpBits, false);
+        }
+        return Log(Add(x, One));
+    }
+
+    public static Float128 Pow(Float128 x, Float128 y)
+    {
+        if (IsZero(y)) { return One; }                     // pow(anything, ±0) = 1
+        if (x == One) { return One; }                      // pow(1, anything) = 1
+        if (IsNaN(x) || IsNaN(y)) { return NaN; }
+
+        bool yInt = y.Equals(Truncate(y));
+        bool yOdd = yInt && Fmod(Abs(y), FromInt64(2)) == One;
+        bool xNeg = x.SignBit;
+
+        if (IsZero(x))
+        {
+            if (y.SignBit) { return (xNeg && yOdd) ? NegativeInfinity : PositiveInfinity; }
+            return (xNeg && yOdd) ? NegativeZero : Zero;
+        }
+        if (IsInfinity(y))
+        {
+            Float128 ax = Abs(x);
+            if (ax == One) { return One; }                 // pow(±1, ±inf) = 1
+            return (ax > One) != y.SignBit ? PositiveInfinity : Zero;
+        }
+        if (IsInfinity(x))
+        {
+            if (y.SignBit) { return (xNeg && yOdd) ? NegativeZero : Zero; }
+            return (xNeg && yOdd) ? NegativeInfinity : PositiveInfinity;
+        }
+        if (xNeg && !yInt) { return NaN; }                 // negative base, non-integer exponent
+
+        // |x|^y = exp(y · log|x|).
+        Decompose(y, out bool ys, out BigInteger ysig, out int yq);
+        BigInteger arg = FpMul(ToFixed(ys, ysig, yq), FpLogFixed(Abs(x)));
+        Float128 mag = ExpOfFixed(arg);
+        return (xNeg && yOdd) ? Negate(mag) : mag;
     }
 
     // ── decimal formatting (correctly rounded via BigInteger) ────────────────

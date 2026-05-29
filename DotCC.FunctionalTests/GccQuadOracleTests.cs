@@ -150,6 +150,84 @@ public sealed class GccQuadOracleTests
         => AssertOpCloseToGcc(GccQuadOracle.Log, BuildLogInputs(),
             c => Float128.Log(Float128.FromBits(c[0])).Bits, maxUlp: 2);
 
+    [Fact]
+    public void Float128_exp2_close_to_gcc()
+        => AssertOpCloseToGcc(GccQuadOracle.Exp2, BuildExpInputs(),
+            c => Float128.Exp2(Float128.FromBits(c[0])).Bits, maxUlp: 2);
+
+    [Fact]
+    public void Float128_exp10_close_to_gcc()
+        => AssertOpCloseToGcc(GccQuadOracle.Exp10, BuildExpInputs(),
+            c => Float128.Exp10(Float128.FromBits(c[0])).Bits, maxUlp: 2);
+
+    [Fact]
+    public void Float128_expm1_close_to_gcc()
+        => AssertOpCloseToGcc(GccQuadOracle.Expm1, BuildExpInputs(),
+            c => Float128.Expm1(Float128.FromBits(c[0])).Bits, maxUlp: 2);
+
+    [Fact]
+    public void Float128_log2_close_to_gcc()
+        => AssertOpCloseToGcc(GccQuadOracle.Log2, BuildLogInputs(),
+            c => Float128.Log2(Float128.FromBits(c[0])).Bits, maxUlp: 2);
+
+    [Fact]
+    public void Float128_log10_close_to_gcc()
+        => AssertOpCloseToGcc(GccQuadOracle.Log10, BuildLogInputs(),
+            c => Float128.Log10(Float128.FromBits(c[0])).Bits, maxUlp: 2);
+
+    [Fact]
+    public void Float128_log1p_close_to_gcc()
+        => AssertOpCloseToGcc(GccQuadOracle.Log1p, BuildLog1pInputs(),
+            c => Float128.Log1p(Float128.FromBits(c[0])).Bits, maxUlp: 2);
+
+    [Fact]
+    public void Float128_pow_close_to_gcc()
+        => AssertOpCloseToGcc(GccQuadOracle.Pow, BuildPowInputs(),
+            c => Float128.Pow(Float128.FromBits(c[0]), Float128.FromBits(c[1])).Bits, maxUlp: 2);
+
+    // log1p over x > -1, spanning small |x| (the atanh path) and larger.
+    private static List<UInt128[]> BuildLog1pInputs()
+    {
+        var rng = new Random(0x1B1);
+        var list = new List<UInt128[]>();
+        for (int i = 0; i < 2500; i++) // small |x|: exponents down to -60
+        {
+            list.Add(new[] { Bits(rng.Next(2) == 1, rng.Next(-60, 0), RandFraction(rng)) });
+        }
+        for (int i = 0; i < 1500; i++) // larger positive x
+        {
+            list.Add(new[] { Bits(false, rng.Next(0, 200), RandFraction(rng)) });
+        }
+        return list;
+    }
+
+    // pow(x, y): positive bases over moderate exponents so the result stays finite.
+    private static List<UInt128[]> BuildPowInputs()
+    {
+        var rng = new Random(0x70E);
+        var list = new List<UInt128[]>();
+        for (int i = 0; i < 4000; i++)
+        {
+            list.Add(new[]
+            {
+                Bits(false, rng.Next(-30, 31), RandFraction(rng)),   // base > 0
+                Bits(rng.Next(2) == 1, rng.Next(-6, 7), RandFraction(rng)), // small exponent
+            });
+        }
+        // Integer exponents on negative bases (sign handling).
+        for (int i = 0; i < 500; i++)
+        {
+            list.Add(new[]
+            {
+                Bits(true, rng.Next(-10, 11), RandFraction(rng)),
+                FromInt(rng.Next(-5, 6)),
+            });
+        }
+        return list;
+    }
+
+    private static UInt128 FromInt(int n) => Float128.FromInt64(n).Bits;
+
     // exp over a non-overflowing range (|x| ≲ 700): exponents -40..9, both signs.
     private static List<UInt128[]> BuildExpInputs()
     {
