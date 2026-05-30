@@ -1,0 +1,698 @@
+#nullable enable
+
+using System;
+using System.Collections.Generic;
+using System.Text;
+using LALR.CC.LexicalGrammar;
+
+namespace DotCC;
+
+internal sealed partial class CSharpEmitter
+{
+    // Expressions — paren-heavy to stay precedence-safe.
+    public EmitContent Visit(C.Assign n)
+    {
+        // `c = E`: an enum-typed lvalue takes an int→enum cast on a non-matching
+        // source; a non-enum lvalue (`x = c`) decays an enum source to int. The
+        // assignment expression's value carries the lvalue's enum type.
+        var lhsEnum = EnumOf(n.Arg0);
+        var rhs = T(n.Arg2);
+        var rhsEnum = EnumOf(n.Arg2);
+        if (lhsEnum is not null)
+        {
+            if (rhsEnum != lhsEnum) { rhs = $"({lhsEnum})({rhs})"; }
+            return new EmitContent.Text($"({T(n.Arg0)} = {rhs})", lhsEnum);
+        }
+        if (rhsEnum is not null) { rhs = $"(int)({rhs})"; }
+        return $"({T(n.Arg0)} = {rhs})";
+    }
+    // `lhs OP= rhs`. C#'s enum compound-assign is unreliable (`enum |= int`,
+    // `enum *= int` are errors), so when the lvalue is enum-typed we expand to
+    // the explicit `lhs = (Enum)((int)lhs OP rhs)` form — the lvalue is assumed
+    // side-effect-free, which holds for the simple variables C enum/flags code
+    // uses. Otherwise keep `OP=`, decaying an enum rhs to int (`x += c` would be
+    // `int += enum` → C# error).
+    private string CompoundAssign(Item lhsIt, string op, Item rhsIt)
+    {
+        var lhs = T(lhsIt);
+        var rhs = IntDecay(rhsIt);
+        if (EnumOf(lhsIt) is { } e) { return $"({lhs} = ({e})((int){lhs} {op} {rhs}))"; }
+        return $"({lhs} {op}= {rhs})";
+    }
+    public EmitContent Visit(C.AddAssign n) => CompoundAssign(n.Arg0, "+", n.Arg2);
+    public EmitContent Visit(C.SubAssign n) => CompoundAssign(n.Arg0, "-", n.Arg2);
+    public EmitContent Visit(C.MulAssign n) => CompoundAssign(n.Arg0, "*", n.Arg2);
+    public EmitContent Visit(C.DivAssign n) => CompoundAssign(n.Arg0, "/", n.Arg2);
+    public EmitContent Visit(C.ModAssign n) => CompoundAssign(n.Arg0, "%", n.Arg2);
+    // Logical `||` and `&&` — wrap each operand with Cond.B so the C-truthy
+    // conversion works for int / double / pointer AND bool (when the
+    // operand is already a comparison result like `a == NULL`). The
+    // previous `!= 0` form broke when an operand was bool because
+    // `bool != 0` isn't a valid C# expression.
+    // `&&` / `||` likewise yield C `int` 0/1 — same CBool wrap so the result is
+    // usable as an int (`int flag = a && b;`). Operands keep their Cond.B truthy
+    // conversion; the bool the C# `&&`/`||` produces is cast to CBool.
+    public EmitContent Visit(C.Lor n) =>
+        $"((CBool)({CondOf(n.Arg0)} || {CondOf(n.Arg2)}))";
+    public EmitContent Visit(C.Land n) =>
+        $"((CBool)({CondOf(n.Arg0)} && {CondOf(n.Arg2)}))";
+    // Equality: same CBool wrap on the textual fallback. The setjmp path returns
+    // a SetjmpCheckZero variant consumed directly by StmtIfElse (a conditional
+    // context), so it must NOT be wrapped. Enum operands decay to int.
+    public EmitContent Visit(C.Eq n) => MaybeSetjmpCompare(n.Arg0, n.Arg2, isEquals: true)
+        ?? (EmitContent)$"((CBool)({IntDecay(n.Arg0)} == {IntDecay(n.Arg2)}))";
+    public EmitContent Visit(C.Neq n) => MaybeSetjmpCompare(n.Arg0, n.Arg2, isEquals: false)
+        ?? (EmitContent)$"((CBool)({IntDecay(n.Arg0)} != {IntDecay(n.Arg2)}))";
+
+    /// <summary>
+    /// If one side of an <c>==</c>/<c>!=</c> comparison is a
+    /// <see cref="EmitContent.SetjmpCall"/> and the other is the
+    /// literal <c>0</c>, return a <see cref="EmitContent.SetjmpCheckZero"/>
+    /// variant for the enclosing <c>StmtIfElse</c> to consume. Otherwise
+    /// return null so the caller falls back to the normal textual emit.
+    /// </summary>
+    private static EmitContent? MaybeSetjmpCompare(Item left, Item right, bool isEquals)
+    {
+        if (left.Content is EmitContent.SetjmpCall lsj && IsLiteralZero(right))
+        {
+            return new EmitContent.SetjmpCheckZero(lsj.EnvName, TruthyOnFirstCall: isEquals);
+        }
+        if (right.Content is EmitContent.SetjmpCall rsj && IsLiteralZero(left))
+        {
+            return new EmitContent.SetjmpCheckZero(rsj.EnvName, TruthyOnFirstCall: isEquals);
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// True when <paramref name="it"/> is the literal integer <c>0</c>.
+    /// Accepts the raw lexer token (NUM "0") and the visitor-produced
+    /// <c>EmitContent.Text("0")</c>; rejects everything else including
+    /// <c>0.0</c>, <c>(0)</c> (which would be a parenthesised primary),
+    /// and any constant expression that happens to evaluate to zero.
+    /// </summary>
+    private static bool IsLiteralZero(Item it) => it.Content switch
+    {
+        EmitContent.Text { Value: "0" } => true,
+        string s => s == "0",
+        _ => false,
+    };
+    // Relational operators yield C `int` 0/1, NOT a bool — `int x = a > b;`,
+    // `(a>0)+(b>0)`, `return a<b;` from an int function, and `printf("%d", a==b)`
+    // are all legal C. C# `<`/`>`/… produce `bool`, which can't land in those
+    // int positions, so we cast the result to `CBool` (the integer-typed _Bool
+    // value): CBool→int carries it into arithmetic/assignment/args/return, and a
+    // `Cond.B(CBool)` overload carries it into conditional positions. Nested
+    // comparisons (`(a>b)==(c>d)`) resolve via CBool→int on both operands.
+    public EmitContent Visit(C.Lt n) => $"((CBool)({IntDecay(n.Arg0)} < {IntDecay(n.Arg2)}))";
+    public EmitContent Visit(C.Gt n) => $"((CBool)({IntDecay(n.Arg0)} > {IntDecay(n.Arg2)}))";
+    public EmitContent Visit(C.Le n) => $"((CBool)({IntDecay(n.Arg0)} <= {IntDecay(n.Arg2)}))";
+    public EmitContent Visit(C.Ge n) => $"((CBool)({IntDecay(n.Arg0)} >= {IntDecay(n.Arg2)}))";
+    // Bitwise — same precedence and semantics in C# (binary `& | ^ << >>`,
+    // unary `~`). The visitor just emits the C# operator verbatim.
+    public EmitContent Visit(C.BOr n)  => $"({IntDecay(n.Arg0)} | {IntDecay(n.Arg2)})";
+    public EmitContent Visit(C.BXor n) => $"({IntDecay(n.Arg0)} ^ {IntDecay(n.Arg2)})";
+    public EmitContent Visit(C.BAnd n) => $"({IntDecay(n.Arg0)} & {IntDecay(n.Arg2)})";
+    public EmitContent Visit(C.Shl n)  => $"({IntDecay(n.Arg0)} << {IntDecay(n.Arg2)})";
+    public EmitContent Visit(C.Shr n)  => $"({IntDecay(n.Arg0)} >> {IntDecay(n.Arg2)})";
+    public EmitContent Visit(C.BNot n) => $"(~{IntDecay(n.Arg1)})";
+
+    // Logical NOT: lower to `(Cond.B(E) ? 0 : 1)` so the result is int,
+    // matching C's `!x` yielding 0 or 1 (never a bool). Cond.B picks the
+    // right truthy overload based on E's type (int/double/pointer/bool).
+    public EmitContent Visit(C.LNot n) => $"({CondOf(n.Arg1)} ? 0 : 1)";
+
+    // Ternary `c ? a : b` — Cond.B wraps the C-truthy condition. The two
+    // branches need a common C# type; the user is responsible for keeping
+    // them compatible (matches the C constraint that the branches share
+    // arithmetic conversions).
+    public EmitContent Visit(C.Ternary n) =>
+        $"({CondOf(n.Arg0)} ? {T(n.Arg2)} : {T(n.Arg4)})";
+    public EmitContent Visit(C.AndAssign n) => CompoundAssign(n.Arg0, "&", n.Arg2);
+    public EmitContent Visit(C.OrAssign n)  => CompoundAssign(n.Arg0, "|", n.Arg2);
+    public EmitContent Visit(C.XorAssign n) => CompoundAssign(n.Arg0, "^", n.Arg2);
+    public EmitContent Visit(C.ShlAssign n) => CompoundAssign(n.Arg0, "<<", n.Arg2);
+    public EmitContent Visit(C.ShrAssign n) => CompoundAssign(n.Arg0, ">>", n.Arg2);
+
+    public EmitContent Visit(C.Add n) => $"({IntDecay(n.Arg0)} + {IntDecay(n.Arg2)})";
+    public EmitContent Visit(C.Sub n) => $"({IntDecay(n.Arg0)} - {IntDecay(n.Arg2)})";
+    public EmitContent Visit(C.Mul n) => $"({IntDecay(n.Arg0)} * {IntDecay(n.Arg2)})";
+    public EmitContent Visit(C.Div n) => $"({IntDecay(n.Arg0)} / {IntDecay(n.Arg2)})";
+    public EmitContent Visit(C.Mod n) => $"({IntDecay(n.Arg0)} % {IntDecay(n.Arg2)})";
+    public EmitContent Visit(C.Cast n)
+    {
+        var castType = T(n.Arg1);
+        // `(S*)malloc(sizeof(S))` — propagate the MallocSizeof marker through a
+        // matching pointer cast so the enclosing declaration can still recognise
+        // it. The marker's low-level text grows to include the cast, so the
+        // non-promoted path is byte-identical to before.
+        if (n.Arg3.Content is EmitContent.MallocSizeof ms
+            && castType.Replace(" ", "") == ms.StructType + "*")
+        {
+            return new EmitContent.MallocSizeof(ms.StructType, $"(({castType}){ms.LowLevelText})");
+        }
+        // A cast to an enum type yields an enum value (C# allows int→enum and
+        // enum→enum casts directly); tag it so downstream consumers reconcile.
+        // Also carry the cast's type for sizeof (`sizeof((char)x)` == 1).
+        return new EmitContent.Text($"(({castType}){T(n.Arg3)})",
+            _enumTags.Contains(castType) ? castType : null, new CType.Sized(castType));
+    }
+    // `*p` / `p[i]` synthesize the element/pointee type for sizeof.
+    public EmitContent Visit(C.Deref n)
+    {
+        var ty = TyOf(n.Arg1);
+        // `*p` where p is a pointer-to-array (`int (*p)[3]`) is the pointed-to
+        // ARRAY, which decays to the same flat pointer — so emit the base
+        // unchanged (typed as the array), not a C# `*p` (which would deref to
+        // the first element). `(*p)[i]` then strides like the array.
+        if (ty is CType.PtrToArr pta) { return Typed(StripOuterParens(T(n.Arg1)), pta.Inner); }
+        return Typed($"(*{T(n.Arg1)})", ty?.ElementType());
+    }
+    public EmitContent Visit(C.AddrOf n) => $"(&{T(n.Arg1)})";
+    public EmitContent Visit(C.Neg n) => $"(-{IntDecay(n.Arg1)})";
+    // Prefix ++/-- — strip outer parens of operand to avoid CS0131 on a
+    // parenthesised lvalue. `(x)++` would parse as post-inc on a parens
+    // expression, but C# accepts `++x` directly. Enum-ness propagates (C# ++/--
+    // work on enums) so a `c++` value used in an int slot still gets decayed.
+    public EmitContent Visit(C.PreInc n) => new EmitContent.Text($"(++{StripOuterParens(T(n.Arg1))})", EnumOf(n.Arg1));
+    public EmitContent Visit(C.PreDec n) => new EmitContent.Text($"(--{StripOuterParens(T(n.Arg1))})", EnumOf(n.Arg1));
+    // Postfix ++/-- — same stripping; emit `x++` rather than `(x)++`.
+    public EmitContent Visit(C.PostInc n) => new EmitContent.Text($"({StripOuterParens(T(n.Arg0))}++)", EnumOf(n.Arg0));
+    public EmitContent Visit(C.PostDec n) => new EmitContent.Text($"({StripOuterParens(T(n.Arg0))}--)", EnumOf(n.Arg0));
+    // Subscript `expr[i]`. For a 1-D array / pointer it's an ordinary C#
+    // pointer subscript (matching C). For a MULTI-dimensional array, dotcc
+    // flattened the storage, so a PARTIAL index (more dimensions remain) is
+    // pointer arithmetic: `a[i]` is `a + i*stride`, where stride is the element
+    // count of the remaining sub-array; a FULL index (last dimension) is the
+    // ordinary subscript. The base is NOT outer-paren-stripped (a partial-index
+    // base like `(a + i*3)` must keep its parens so the next `[…]` binds to the
+    // whole expression, not the trailing operand). An enum index decays to int.
+    public EmitContent Visit(C.Subscript n)
+    {
+        var baseTy = TyOf(n.Arg0);
+        var baseText = T(n.Arg0);
+        var idx = StripOuterParens(IntDecay(n.Arg2));
+        if (baseTy is CType.Arr { Element: CType.Arr } arr)
+        {
+            return Typed($"({baseText} + ({idx}) * {FlatSize(arr.Element)})", arr.Element);
+        }
+        // Pointer-to-array `int (*p)[3]`: `p[k]` is `p + k*stride` yielding the
+        // pointed-to array — same flat pointer arithmetic as a multi-dim partial
+        // index.
+        if (baseTy is CType.PtrToArr pta)
+        {
+            return Typed($"({baseText} + ({idx}) * {FlatSize(pta.Inner)})", pta.Inner);
+        }
+        return Typed($"({baseText}[{idx}])", baseTy?.ElementType());
+    }
+
+    // Number of scalar elements in a (possibly nested) array CType — the flat
+    // stride of a multi-dim array's sub-array. Scalars/pointers count as 1.
+    private static int FlatSize(CType t) => t switch
+    {
+        CType.Arr a => a.Count * FlatSize(a.Element),
+        _ => 1,
+    };
+
+    // Member access — `.` on a struct value, `->` on a struct pointer.
+    // C# accepts both syntaxes in unsafe context (where all our user code
+    // lives), so emit verbatim.
+    public EmitContent Visit(C.MemberDot n) =>
+        $"({StripOuterParens(T(n.Arg0))}.{Id(T(n.Arg2))})";
+    public EmitContent Visit(C.MemberArrow n)
+    {
+        var baseExpr = StripOuterParens(T(n.Arg0));
+        var member = Id(T(n.Arg2));
+        // Count a `->` whose base is a malloc-candidate variable, and choose the
+        // C# operator: a promoted stack value uses `.`, a low-level pointer `->`.
+        // The malloc maps are keyed by the RAW C name, but `baseExpr` is the
+        // emitted (possibly @-escaped) text — match on the unescaped name, emit
+        // with the escaped one.
+        var rawBase = Unescape(baseExpr);
+        if (_currentFunctionName is string fn && _fnMalloc.TryGetValue(rawBase, out var mv))
+        {
+            mv.ArrowRefs++;
+            if (_promotableIn.Contains((fn, rawBase)))
+            {
+                return $"({baseExpr}.{member})";
+            }
+        }
+        return $"({baseExpr}->{member})";
+    }
+
+    // `sizeof(Type)` — emit C# sizeof. Valid in unsafe contexts for any
+    // unmanaged type (which all our types are). Returns a structured marker so
+    // a single-arg malloc can recognise `malloc(sizeof(S))` structurally; T()
+    // renders it back to `sizeof(S)` everywhere else.
+    public EmitContent Visit(C.SizeofType n) => new EmitContent.SizeofType(T(n.Arg2));
+
+    // `sizeof expr` — read the operand's synthesized CType (propagated up by the
+    // expression visitors) and emit its byte size. Arrays compute
+    // `count * sizeof(element)` (the C# pointer-lowering makes C# sizeof wrong);
+    // everything else defers to C# `sizeof(type)`. The result is itself an int
+    // (size_t in C). If the operand's type wasn't synthesized, fail clearly
+    // rather than emit a wrong size.
+    public EmitContent Visit(C.SizeofExpr n)
+    {
+        var t = TyOf(n.Arg1)
+            ?? throw new CompileException(
+                "`sizeof` of this expression isn't supported yet — dotcc resolves sizeof of a "
+                + "variable, array, subscript, dereference, cast, literal, or call result. "
+                + "Use `sizeof(Type)` if you can.");
+        return Typed(SizeofText(t), new CType.Sized("int"));
+    }
+
+    // C# expression for the byte size of a CType. An array is count*sizeof(elem)
+    // (recursive for nested arrays); anything else is a direct C# `sizeof(T)`.
+    private static string SizeofText(CType t) => t switch
+    {
+        CType.Arr a => $"({a.Count} * {SizeofText(a.Element)})",
+        CType.Sized s => $"sizeof({s.CsType})",
+        // A pointer-to-array is a pointer: its size is the pointer size, NOT the
+        // pointed-to array's size.
+        CType.PtrToArr => "sizeof(void*)",
+        _ => throw new CompileException("internal: unknown CType in sizeof"),
+    };
+
+    // A bare function name used as a value (e.g. a call argument) decays to its
+    // address in C (function-to-pointer conversion). C# requires the explicit
+    // `&`, so prepend it — that's what lets `qsort(…, compare)` (bare name) pass
+    // a function-pointer argument. Guarded so a local/param shadowing a function
+    // name is left alone.
+    private string DecayFnName(string argText)
+    {
+        var raw = Unescape(argText);
+        return !_localNames.Contains(raw) && _fnReturnTypes.ContainsKey(raw) ? "&" + argText : argText;
+    }
+
+    public EmitContent Visit(C.Call n)
+    {
+        var callee = T(n.Arg0);
+        var argsContent = (EmitContent.Args)n.Arg2.Content;
+        var args = argsContent.Values;  // strongly-typed arg list, no sentinel splitting
+        // A local/param that SHADOWS a libc builtin name (e.g. a function-pointer
+        // local named `printf` or `malloc`) is an ordinary call through that
+        // variable — skip the builtin lowering entirely. (_localNames is keyed by
+        // the raw C name; callee is the emitted, possibly @-escaped text.) For
+        // normal code no local is named after a builtin, so this never fires.
+        if (_localNames.Contains(Unescape(callee)))
+        {
+            return $"{callee}({string.Join(", ", args.Select(DecayFnName))})";
+        }
+        // malloc(sizeof(S)) — emit a MallocSizeof marker (carrying the struct
+        // type for the stack-promotion peephole and the verbatim low-level
+        // text for the fallback). Recognised structurally: the sole argument
+        // reduced to a SizeofType marker, no string parsing.
+        if (callee == "malloc" && args.Count == 1
+            && argsContent.SoleArg is EmitContent.SizeofType sz)
+        {
+            return new EmitContent.MallocSizeof(sz.TypeName, $"malloc({args[0]})");
+        }
+        // free(p) — count it against the candidate `p` and, in the emit pass,
+        // drop it entirely when `p` was promoted to a stack value (nothing to
+        // free). Non-promotable / non-candidate frees fall through to a normal
+        // call below.
+        // Match the malloc maps on the RAW name (args[0] is the emitted,
+        // possibly @-escaped argument text).
+        var freeArg = args.Count == 1 ? Unescape(args[0]) : null;
+        if (callee == "free" && freeArg is not null
+            && _currentFunctionName is string fn && _fnMalloc.TryGetValue(freeArg, out var fmv))
+        {
+            fmv.FreeRefs++;
+            if (_promotableIn.Contains((fn, freeArg))) { return ""; }
+        }
+        // setjmp(env) — return a SetjmpCall marker variant rather than
+        // emit as a regular function call. The parent visitor (Equ for
+        // `setjmp(env) == 0` or StmtIfElse for the bare condition)
+        // recognises the variant and rewrites the surrounding if/else
+        // into a try/catch shape. Any other context lets the variant
+        // escape to T(), which throws CompileException — setjmp is a
+        // non-local-jump primitive, not a regular call.
+        if (callee == "setjmp" && args.Count == 1)
+        {
+            return new EmitContent.SetjmpCall(args[0]);
+        }
+        // printf-family fluent lowering. C `printf("%d %s", x, s)` → C#
+        // `printf(L("%d %s\0"u8)).Arg(x).Arg(s).Done()` — works around
+        // `params object[]` not accepting raw pointers. The callee name
+        // arrives unmapped (post-MapBuiltin-as-identity) so we match the
+        // C spelling. `fprintf(stream, fmt, …)` follows the same shape
+        // but with the stream as the first call arg.
+        // A varargs `%d` slot takes a C int; an enum argument is a C int too,
+        // but `.Arg(int)` won't bind a C# enum — decay enum args to (int).
+        var argEnums = argsContent.ArgEnums;
+        string VarArg(int i) => argEnums is { } ae && ae[i] is not null ? $"(int){args[i]}" : args[i];
+        if (callee == "printf")
+        {
+            var sb = new StringBuilder();
+            sb.Append("printf(").Append(args[0]).Append(')');
+            for (int i = 1; i < args.Count; i++)
+            {
+                sb.Append(".Arg(").Append(VarArg(i)).Append(')');
+            }
+            sb.Append(".Done()");
+            return sb.ToString();
+        }
+        if (callee == "fprintf" && args.Count >= 2)
+        {
+            var sb = new StringBuilder();
+            sb.Append("fprintf(").Append(args[0]).Append(", ").Append(args[1]).Append(')');
+            for (int i = 2; i < args.Count; i++)
+            {
+                sb.Append(".Arg(").Append(VarArg(i)).Append(')');
+            }
+            sb.Append(".Done()");
+            return sb.ToString();
+        }
+        var callText = $"{callee}({string.Join(", ", args.Select(DecayFnName))})";
+        // Tag the result with the callee's return type: the enum type drives
+        // int↔enum reconciliation at the call site, and the CType lets sizeof of
+        // a call result resolve.
+        if (_fnReturnTypes.TryGetValue(Unescape(callee), out var rt))
+        {
+            return new EmitContent.Text(callText, _enumTags.Contains(rt) ? rt : null, new CType.Sized(rt));
+        }
+        return callText;
+    }
+
+    public EmitContent Visit(C.CallNoArgs n)
+    {
+        var callee = T(n.Arg0);
+        if (callee == "printf") { return "printf(L(\"\\0\"u8)).Done()"; }
+        return $"{callee}()";
+    }
+
+    // ArgsCons (`ArgList → E ',' ArgList`) prepends the new expression
+    // (Arg0, Text) onto the recursively-built ArgList (Arg2, Args).
+    // ArgsOne wraps the single E into a one-element Args list.
+    // Call / DeclArrInit / DeclArrInitImplicit consume via A() — no
+    // sentinel splitting, no encoded strings.
+    public EmitContent Visit(C.ArgsCons n)
+    {
+        var head = T(n.Arg0);
+        var tailArgs = (EmitContent.Args)n.Arg2.Content;
+        var tail = tailArgs.Values;
+        var combined = new List<string>(tail.Count + 1) { head };
+        combined.AddRange(tail);
+        // Carry per-arg enum types so the printf path can decay enum→int.
+        var enums = new List<string?>(tail.Count + 1) { EnumOf(n.Arg0) };
+        enums.AddRange(tailArgs.ArgEnums ?? new string?[tail.Count]);
+        return new EmitContent.Args(combined, ArgEnums: enums);
+    }
+
+    // SoleArg keeps the single argument's structured Content alongside its
+    // rendered text, so a one-arg call (malloc) can inspect it structurally.
+    public EmitContent Visit(C.ArgsOne n) =>
+        new EmitContent.Args(new[] { T(n.Arg0) }, n.Arg0.Content as EmitContent, new[] { EnumOf(n.Arg0) });
+
+    // Variable reference. Three emit-time rewrites:
+    //   - `__func__` → `L("name\0"u8)` using `_currentFunctionName` (set
+    //     by the enclosing FnSig action before this Var visit runs —
+    //     LALR bottom-up, FnSig fully reduces before Block descends);
+    //   - enumerator → `EnumName.Member` so bare `Red` lands as `Color.Red`;
+    //   - builtin name → BCL helper for `malloc` / `free` / `printf`.
+    // Otherwise pass the identifier through verbatim.
+    public EmitContent Visit(C.Var n)
+    {
+        var name = T(n.Arg0);
+        // Count every reference to a malloc candidate. The promotion check
+        // (in FuncDef) requires TotalRefs == ArrowRefs + FreeRefs, so any use
+        // that isn't a `->` base or a free arg (return, function arg, address-of,
+        // pointer arithmetic, comparison, reassignment) tips the balance and
+        // disqualifies the variable — exactly the escapes we must not promote.
+        if (_fnMalloc.TryGetValue(name, out var mv)) { mv.TotalRefs++; }
+        if (name == "__func__")
+        {
+            Gate(1999, "__func__", n.Arg0);  // C99 predefined identifier
+            // `_currentFunctionName` is the enclosing function being
+            // reduced. If it's null we're outside any function (illegal
+            // C use of __func__) — emit a sentinel so Roslyn surfaces the
+            // bug as an undefined-identifier diagnostic rather than us
+            // silently producing wrong code.
+            var fn = _currentFunctionName
+                ?? throw new CompileException("`__func__` used outside any function definition");
+            return Typed($"L(\"{fn}\\0\"u8)", new CType.Sized("byte*"));
+        }
+        // A block-scope `static` local shadows any global/enumerator of the
+        // same name within this function — rewrite to its mangled global field.
+        if (_fnStatics.TryGetValue(name, out var staticField))
+        {
+            return staticField;
+        }
+        // An enumerator constant resolves to `EnumName.Member` — but only if no
+        // local/param of the same name shadows it. Without this guard a local
+        // named like an enum constant would emit the (non-lvalue) `EnumName.X`
+        // at every use and fail to compile.
+        if (!_localNames.Contains(name) && _enumerators.TryGetValue(name, out var enumName))
+        {
+            return new EmitContent.Text($"{enumName}.{Id(name)}", enumName, new CType.Sized(enumName));
+        }
+        // An enum-typed variable read is itself enum-valued — tag it so consuming
+        // nodes insert the int↔enum casts C# requires (`int x = c`, `c & MASK`,
+        // …). Also carry the full CType (incl. array element+count) for sizeof.
+        // Locals/params win over globals (shadowing). If a scope frame renamed
+        // this local (block-shadow alpha-rename), emit the renamed identifier;
+        // otherwise it's a global / function / builtin → raw name through
+        // MapBuiltin. CType / enum lookups stay keyed by the RAW name.
+        var resolved = ResolveLocal(name);
+        var mapped = resolved is not null ? Id(resolved) : MapBuiltin(name);
+        var cty = VarCType(name);
+        var enumTag = cty is CType.Sized sz && _enumTags.Contains(sz.CsType) ? sz.CsType : null;
+        return new EmitContent.Text(mapped, enumTag, cty);
+    }
+
+    // Synthesize a variable's CType from the symbol tables — array info first
+    // (arrays lower to pointers, so this is the only place element+count
+    // survive), then the plain local/global type. Null for builtins / unknowns.
+    private CType? VarCType(string name)
+    {
+        if (_localArrayInfo.TryGetValue(name, out var la)) { return la; }
+        if (_globalArrayInfo.TryGetValue(name, out var ga)) { return ga; }
+        if (_localTypes.TryGetValue(name, out var lt)) { return new CType.Sized(lt); }
+        if (_globalTypes.TryGetValue(name, out var gt)) { return new CType.Sized(gt); }
+        return null;
+    }
+    // Integer literal. Decimal and hex (`0x…`) pass through (C# accepts both
+    // verbatim); binary (`0b…`, C23) passes through too (C# has `0b`) but is
+    // gated. A `0`-prefixed OCTAL constant (`0755`) is the one form C# can't
+    // take literally — a leading `0` is plain decimal in C#, so `0755` would
+    // silently mean 755 instead of 493. dotcc converts it to its value. C
+    // suffixes (u/U/l/L, incl. the C99 `ll`) are normalised to C#'s (no `ll` —
+    // both `l` and `ll` mean 64-bit `long` in C#).
+    public EmitContent Visit(C.Num n)
+    {
+        var raw = T(n.Arg0);
+        // Split trailing C suffix (u/U/l/L) off the digits. `ls` counts l/L
+        // (>=2 is the C99 `long long` suffix); the suffix also fixes the
+        // literal's type for sizeof.
+        var end = raw.Length;
+        var ls = 0;
+        var hasU = false;
+        while (end > 0 && (raw[end - 1] is 'u' or 'U' or 'l' or 'L'))
+        {
+            if (raw[end - 1] is 'l' or 'L') { ls++; } else { hasU = true; }
+            end--;
+        }
+        var digits = raw[..end];
+        // C23 digit separators (`1'000'000`) — strip the `'`s before parsing the
+        // value; C# uses `_` and doesn't need them at all. The lexer only allows
+        // a `'` between two digits, so removal is unambiguous.
+        if (digits.IndexOf('\'') >= 0)
+        {
+            Gate(2023, "digit separators in a numeric literal", n.Arg0);  // C23
+            digits = digits.Replace("'", "");
+        }
+        if (_dialectGate is not null && ls >= 2) { Gate(1999, "`long long` (ll) integer suffix", n.Arg0); }
+        var ct = ls > 0 ? (hasU ? "ulong" : "long") : (hasU ? "uint" : "int");
+
+        string valueText;
+        if (digits.Length >= 2 && digits[0] == '0' && (digits[1] is 'x' or 'X'))
+        {
+            valueText = digits + CsIntSuffix(hasU, ls);          // hex — C# accepts 0x… verbatim
+        }
+        else if (digits.Length >= 2 && digits[0] == '0' && (digits[1] is 'b' or 'B'))
+        {
+            Gate(2023, "binary integer literal (`0b`)", n.Arg0);  // C23
+            valueText = digits + CsIntSuffix(hasU, ls);          // binary — C# accepts 0b… verbatim
+        }
+        else if (digits.Length >= 2 && digits[0] == '0')
+        {
+            // C octal (`0`-prefix). Convert to its value and emit decimal, since
+            // C# would read the leading 0 as a no-op and the literal as decimal.
+            foreach (var d in digits)
+            {
+                if (d is < '0' or > '7')
+                {
+                    throw new CompileException($"invalid digit '{d}' in octal constant `{raw}`");
+                }
+            }
+            ulong value;
+            try { value = Convert.ToUInt64(digits, 8); }
+            catch (OverflowException) { throw new CompileException($"octal constant `{raw}` is too large"); }
+            valueText = value.ToString(System.Globalization.CultureInfo.InvariantCulture) + CsIntSuffix(hasU, ls);
+        }
+        else
+        {
+            valueText = digits + CsIntSuffix(hasU, ls);          // decimal
+        }
+        return Typed(valueText, new CType.Sized(ct));
+    }
+
+    // Map a C integer suffix (any u/U + any l/L) to C#'s canonical form. C# has
+    // no `ll` (both `l` and `ll` are 64-bit `long`), so any number of l's → "L".
+    private static string CsIntSuffix(bool hasU, int lCount) => (hasU, lCount) switch
+    {
+        (false, 0) => "",
+        (true, 0)  => "u",
+        (false, _) => "L",     // any l's → long
+        (true, _)  => "UL",    // u + any l's → ulong
+    };
+    public EmitContent Visit(C.Flt n)
+    {
+        var raw = T(n.Arg0);
+        var isFloat = raw.Length > 0 && (raw[^1] is 'f' or 'F');
+        return Typed(raw, new CType.Sized(isFloat ? "float" : "double"));
+    }
+
+    // Adjacent string literals concatenate (C translation phase 6). strSeqOne/
+    // Cons collect each segment's inner body (quotes stripped, escapes intact);
+    // Visit(C.Str) decodes + emits once.
+    public EmitContent Visit(C.StrSeqOne n) =>
+        new EmitContent.StrParts(new[] { StripStrQuotes(T(n.Arg0)) });
+    public EmitContent Visit(C.StrSeqCons n)
+    {
+        var prev = ((EmitContent.StrParts)n.Arg0.Content).Bodies;
+        var combined = new List<string>(prev.Count + 1);
+        combined.AddRange(prev);
+        combined.Add(StripStrQuotes(T(n.Arg1)));
+        return new EmitContent.StrParts(combined);
+    }
+
+    public EmitContent Visit(C.Str n)
+    {
+        // Decode each segment's C escapes to bytes INDEPENDENTLY, then
+        // concatenate — so a `\x…` in one segment can't greedily eat the next
+        // segment's leading hex digit. Emit one greedy-safe u8 literal; the
+        // CType length is the decoded byte count + 1 for the NUL.
+        var parts = (EmitContent.StrParts)n.Arg0.Content;
+        var items = new List<StrItem>();
+        foreach (var body in parts.Bodies) { DecodeCStringBody(body, items); }
+        var (escaped, byteLen) = EmitU8(items);
+        return Typed($"L(\"{escaped}\\0\"u8)", new CType.Arr(new CType.Sized("byte"), byteLen + 1));
+    }
+
+    // C char literal — type `int`, but our `char` is `byte`. Decode the escape
+    // (or plain char) to its byte value: a plain printable ASCII char stays
+    // readable as `(byte)'c'`, everything else (named/octal/hex escape, control)
+    // lowers to `(byte)N`. sizeof('a') is sizeof(int) per C.
+    public EmitContent Visit(C.Chr n)
+    {
+        var raw = T(n.Arg0);
+        if (raw is null || raw.Length < 3) { return Typed("(byte)0", new CType.Sized("int")); }
+        var body = raw[1..^1];
+        var i = 0;
+        var item = DecodeEscapeOrChar(body, ref i);
+        string text;
+        if (!item.IsByte && item.Value is >= 0x20 and <= 0x7E && item.Value != '\'' && item.Value != '\\')
+        {
+            text = $"(byte)'{(char)item.Value}'";
+        }
+        else
+        {
+            text = $"(byte){(item.IsByte ? item.Value : item.Value & 0xFF)}";
+        }
+        return Typed(text, new CType.Sized("int"));
+    }
+
+    // Comma operator (`Expr → Expr ',' E`). Accumulate operands left-to-right
+    // into a CommaSeq; the value/statement lowering happens at the consumer
+    // (Paren / StmtExpr) since C# has no comma operator.
+    public EmitContent Visit(C.CommaOp n)
+    {
+        var ops = n.Arg0.Content is EmitContent.CommaSeq cs
+            ? new List<string>(cs.Operands)
+            : new List<string> { T(n.Arg0) };
+        ops.Add(T(n.Arg2));
+        return new EmitContent.CommaSeq(ops);
+    }
+
+    public EmitContent Visit(C.Paren n)
+    {
+        // Comma operator in value position: C# has no comma operator, but a
+        // tuple evaluates its elements left-to-right and yields them all, so
+        // `(a, b, c).Item3` reproduces "evaluate a, b, c in order, value is c".
+        // (≤7 operands — ValueTuple's direct ItemN range; longer chains don't
+        // occur in real code, so fail clearly rather than emit a wrong shape.)
+        // Pointer/void operands can't go in a C# tuple — those reach Roslyn as a
+        // type error rather than a silent miscompile, which is the safe failure.
+        if (n.Arg1.Content is EmitContent.CommaSeq seq)
+        {
+            if (seq.Operands.Count > 7)
+            {
+                throw new CompileException(
+                    "comma-operator chains longer than 7 operands aren't supported");
+            }
+            var joined = string.Join(", ", seq.Operands.Select(StripOuterParens));
+            return $"({joined}).Item{seq.Operands.Count}";
+        }
+        return new EmitContent.Text($"({T(n.Arg1)})", EnumOf(n.Arg1), TyOf(n.Arg1));
+    }
+
+    // C23 keyword constants (only reached under -std=c23, via the rewriter's
+    // ID->terminal promotion). `_Bool` lowers to C# `bool`, so the boolean
+    // literals lower to their C# spellings; `nullptr` matches <stddef.h>'s
+    // `#define NULL null` lowering. Pre-C23 these spellings stay ID and reach
+    // the macro-supplied values through `Visit(C.Var)` instead.
+    // C23 `true`/`false` lower to the integer literals 1/0 (normalized through
+    // CBool's int conversion when stored to a `_Bool`, and usable directly as
+    // ints — matching C, where `true`/`false` have value 1/0). Emitting them as
+    // ints (not the C# `true`/`false` keywords) is also what lets a user
+    // identifier spelled `true`/`false` be @-escaped: the keyword spelling now
+    // only ever reaches Visit(Var) when it's a real identifier.
+    public EmitContent Visit(C.LitTrue n)    => "1";
+    public EmitContent Visit(C.LitFalse n)   => "0";
+    public EmitContent Visit(C.LitNullptr n) => "null";
+
+    // `_Static_assert(expr [, "msg"]);` (C11; C23 lowercase `static_assert`
+    // and message-optional form). A compile-time-only construct with no
+    // observable runtime behaviour, so for any program where the assertion
+    // holds the correct emit is *nothing*. dotcc has no constant evaluator
+    // yet, so we don't verify the condition — we drop it to a self-delimiting
+    // block comment (carrying the message for traceability) and let Roslyn
+    // compile the rest. This is observably equivalent to clang for every valid
+    // program; a *false* static_assert that clang would reject is silently
+    // accepted (documented limitation in C-SUPPORT.md). Works at both file
+    // scope (Fn) and block scope (Stmt) — the comment is inert in either.
+    // `_Static_assert` (and the C23 lowercase `static_assert` promoted onto it)
+    // is a C11 feature — gate under < c11. Arg0 is the `_Static_assert` token.
+    public EmitContent Visit(C.StaticAssert n)          { Gate(2011, "_Static_assert", n.Arg0); return StaticAssertComment(T(n.Arg4)); }
+    public EmitContent Visit(C.StaticAssertNoMsg n)     { Gate(2011, "_Static_assert", n.Arg0); return StaticAssertComment(null); }
+    public EmitContent Visit(C.StaticAssertStmt n)      { Gate(2011, "_Static_assert", n.Arg0); return StaticAssertComment(T(n.Arg4)); }
+    public EmitContent Visit(C.StaticAssertStmtNoMsg n) { Gate(2011, "_Static_assert", n.Arg0); return StaticAssertComment(null); }
+
+    /// <summary>
+    /// Render a dropped <c>_Static_assert</c> as an inert block comment.
+    /// <paramref name="rawMsg"/> is the raw STRING lexeme (quotes included) or
+    /// null for the C23 message-less form. Any <c>*/</c> in the message is
+    /// neutralised so it can't close the comment early.
+    /// </summary>
+    private static string StaticAssertComment(string? rawMsg)
+    {
+        var tail = rawMsg is null ? "" : ": " + rawMsg.Replace("*/", "* /");
+        return $"/* static_assert (compile-time, not evaluated){tail} */";
+    }
+
+    /// <summary>
+    /// Identity for now — kept as a seam in case future grammar features
+    /// need to remap a C identifier to a different C# name before emit.
+    /// </summary>
+    /// <remarks>
+    /// Previously this remapped <c>printf → Printf</c>, <c>malloc → Malloc</c>,
+    /// <c>free → Free</c> to reach BuildShell's top-level (uppercase) helper
+    /// functions. After the DotCC.Libc unification, the emitted shell has
+    /// <c>using static Libc;</c> which brings the lowercase C-spelled
+    /// methods directly into scope — so the remapping became unnecessary.
+    /// </remarks>
+    private static string MapBuiltin(string name) => Id(name);
+
+}
