@@ -34,13 +34,13 @@ internal sealed class DialectGate
     /// <summary>
     /// Flag <paramref name="feature"/> when the active dialect is older than
     /// the standard that introduced it. <paramref name="introducedEra"/> is the
-    /// ISO year of that standard (use <see cref="CDialect.Era"/> values: 1999 /
-    /// 2011 / 2023). <paramref name="line"/> is the source line (0 = unknown).
-    /// No-op once a dialect is new enough.
+    /// ISO year of that standard (matches <see cref="CDialect.Version"/>, which
+    /// is keyed by year: 1999 / 2011 / 2023). <paramref name="line"/> is the
+    /// source line (0 = unknown). No-op once a dialect is new enough.
     /// </summary>
     public void RequireMin(int introducedEra, string feature, int line)
     {
-        if (_dialect.Era >= introducedEra) { return; }
+        if (_dialect.Version >= introducedEra) { return; }
         var where = line > 0 ? $" (line {line})" : "";
         _diagnostics.Add(
             $"`{feature}` is a {EraName(introducedEra)} feature, not available under -std={_dialect.Name}{where}");

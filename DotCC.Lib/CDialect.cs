@@ -23,6 +23,14 @@ namespace DotCC;
 /// is dialect-agnostic — <c>//</c> comments are accepted regardless of
 /// the requested standard, and there is no <c>-pedantic</c> equivalent.
 /// </remarks>
+/// <param name="Version">The ISO publication year of the standard
+/// (1990 / 1999 / 2011 / 2017 / 2023). Keyed by year on purpose so it is
+/// <b>monotonic</b> across the C timeline — any "is this dialect at least as
+/// new as standard X" comparison (dialect gating, rule-2 keyword promotion) is
+/// a plain <c>Version &gt;= year</c>. (An earlier design keyed it by the short
+/// <c>90/99/11/17/23</c> suffix, which sorts <c>c11</c> below <c>c99</c> and
+/// quietly broke such comparisons; the user-facing <c>cNN</c> spelling now
+/// lives only in <see cref="Name"/>, decoupled from the ordering value.)</param>
 public readonly record struct CDialect(int Version)
 {
     /// <summary>
@@ -30,18 +38,18 @@ public readonly record struct CDialect(int Version)
     /// is "C11 with the bug-fix wording" — a modern but stable baseline
     /// that doesn't reject any feature the grammar already accepts.
     /// </summary>
-    public static CDialect Default { get; } = new(Version: 17);
+    public static CDialect Default { get; } = new(Version: 2017);
 
     /// <summary>
     /// Display name in clang shape (e.g. <c>"c90"</c>, <c>"c17"</c>).
     /// </summary>
     public string Name => "c" + Version switch
     {
-        90 => "90",
-        99 => "99",
-        11 => "11",
-        17 => "17",
-        23 => "23",
+        1990 => "90",
+        1999 => "99",
+        2011 => "11",
+        2017 => "17",
+        2023 => "23",
         _ => Version.ToString(System.Globalization.CultureInfo.InvariantCulture),
     };
 
@@ -52,40 +60,22 @@ public readonly record struct CDialect(int Version)
     /// </summary>
     public string? StdcVersionLiteral => Version switch
     {
-        90 => null,
-        99 => "199901L",
-        11 => "201112L",
-        17 => "201710L",
-        23 => "202311L",
+        1990 => null,
+        1999 => "199901L",
+        2011 => "201112L",
+        2017 => "201710L",
+        2023 => "202311L",
         _ => null,
-    };
-
-    /// <summary>
-    /// Chronological ordering key — the ISO publication year (1990 / 1999 /
-    /// 2011 / 2017 / 2023). <see cref="Version"/> is deliberately NOT monotonic
-    /// across the C timeline (<c>c11</c>'s 11 sorts below <c>c99</c>'s 99), so
-    /// any "is this dialect at least as new as standard X" comparison MUST use
-    /// <c>Era</c>, never <c>Version</c>. Used by dialect gating to decide
-    /// whether a feature introduced in a given standard is available.
-    /// </summary>
-    public int Era => Version switch
-    {
-        90 => 1990,
-        99 => 1999,
-        11 => 2011,
-        17 => 2017,
-        23 => 2023,
-        _ => Version,
     };
 
     private static readonly Dictionary<string, CDialect> _byName = new(StringComparer.Ordinal)
     {
-        ["c90"] = new(90),
-        ["c99"] = new(99),
-        ["c11"] = new(11),
-        ["c17"] = new(17),
-        ["c18"] = new(17), // clang alias — same content as c17
-        ["c23"] = new(23),
+        ["c90"] = new(1990),
+        ["c99"] = new(1999),
+        ["c11"] = new(2011),
+        ["c17"] = new(2017),
+        ["c18"] = new(2017), // clang alias — same content as c17
+        ["c23"] = new(2023),
     };
 
     /// <summary>

@@ -44,11 +44,12 @@ internal sealed class DialectKeywordRewriter : RewritingTokenStream
 
     /// <summary>
     /// Promotion table, keyed by identifier spelling. <c>MinVersion</c> is the
-    /// first C dialect (89/99/11/17/23) in which the spelling is a keyword;
+    /// ISO year (<see cref="CDialect.Version"/>: 1990 / 1999 / 2011 / 2017 /
+    /// 2023) of the first C standard in which the spelling is a keyword;
     /// <c>TargetSymbol</c> / <c>TargetText</c> are the terminal the parser
-    /// should see. Data, not code — append a row per new keyword as the C23
-    /// (and later C2y) surface lands. The target terminal must already exist
-    /// in the grammar for the row to be useful.
+    /// should see. <c>Version</c> is keyed by year, so the gate is a plain
+    /// monotonic <c>Version &gt;= MinVersion</c>. Data, not code — append a row
+    /// per new keyword. The target terminal must already exist in the grammar.
     /// </summary>
     private readonly Dictionary<string, (int MinVersion, int TargetSymbol, string TargetText)> _promotions;
 
@@ -71,7 +72,7 @@ internal sealed class DialectKeywordRewriter : RewritingTokenStream
             // gate keeps valid old code that uses `bool` as an identifier
             // parsing, AND lets <stdbool.h>'s `#define bool _Bool` macro do
             // the job when the header is included. One gate, both directions.
-            ["bool"] = (23, map["_Bool"], "_Bool"),
+            ["bool"] = (2023, map["_Bool"], "_Bool"),
 
             // C23 predefined constants — first-class keywords with no header.
             // Pre-C23 they are <stdbool.h>/<stddef.h> macros (or plain
@@ -79,9 +80,9 @@ internal sealed class DialectKeywordRewriter : RewritingTokenStream
             // lets the macro path win when a header is included. Each promotes
             // onto a dedicated grammar terminal (TRUE/FALSE/NULLPTR) that has
             // no lexer rule, so this rewriter is the only way they appear.
-            ["true"]    = (23, map["TRUE"],    "true"),
-            ["false"]   = (23, map["FALSE"],   "false"),
-            ["nullptr"] = (23, map["NULLPTR"], "nullptr"),
+            ["true"]    = (2023, map["TRUE"],    "true"),
+            ["false"]   = (2023, map["FALSE"],   "false"),
+            ["nullptr"] = (2023, map["NULLPTR"], "nullptr"),
 
             // C23 makes `static_assert` a first-class keyword (the C11 form is
             // `_Static_assert`, with the lowercase macro living in <assert.h>).
@@ -89,7 +90,7 @@ internal sealed class DialectKeywordRewriter : RewritingTokenStream
             // c23; pre-C23 it stays an ID and the <assert.h> macro path (if any)
             // applies. The `_Static_assert` spelling itself is always a keyword
             // (lexer rule), needing no promotion.
-            ["static_assert"] = (23, map["_Static_assert"], "_Static_assert"),
+            ["static_assert"] = (2023, map["_Static_assert"], "_Static_assert"),
         };
     }
 
