@@ -50,7 +50,12 @@ public abstract record EmitContent
     /// non-enum value stored into an enum-typed slot is wrapped <c>(Enum)</c>.
     /// Only set by expression nodes that produce an enum value (enum var read,
     /// enumerator ref, and the transparent wrappers that propagate it).</param>
-    public sealed record Text(string Value, string? EnumType = null) : EmitContent;
+    /// <param name="Ty">The expression's synthesized <see cref="CType"/>, or
+    /// null. Propagated up by expression visitors so a consumer (today
+    /// <c>sizeof expr</c>) can compute a size — see <see cref="CType"/>. Distinct
+    /// from <paramref name="EnumType"/>, which drives _Bool/enum coercion; this
+    /// carries the full size shape (incl. array element + count).</param>
+    public sealed record Text(string Value, string? EnumType = null, CType? Ty = null) : EmitContent;
 
     /// <summary>
     /// Accumulator for declaration-specifier sequences (<c>int</c>,

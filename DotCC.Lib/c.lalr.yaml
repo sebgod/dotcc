@@ -749,9 +749,14 @@ productions:
       - { lhs: Unary, rhs: ['(', Type, ')', Unary], action: cast }
       # `sizeof(Type)` — emits C# `sizeof(T)` which works for unmanaged types
       # in unsafe context. All dotcc structs are unmanaged (only primitive
-      # and pointer fields) so this is always valid. The expression form
-      # `sizeof expr` is deferred — needs type inference to lower correctly.
+      # and pointer fields) so this is always valid.
       - { lhs: Unary, rhs: ['sizeof', '(', Type, ')'], action: sizeofType }
+      # `sizeof expr` — the operand's synthesized CType (propagated up through
+      # EmitContent) gives the size. Conflict-free with `sizeof ( Type )`: the
+      # TypeNameRewriter has already split `sizeof ( ID )` (parenthesized expr,
+      # ID is not a TYPE_NAME) from `sizeof ( int )` / `sizeof ( typedefName )`
+      # before the parser ever sees them — same lexer hack the cast rule relies on.
+      - { lhs: Unary, rhs: ['sizeof', Unary], action: sizeofExpr }
       - { lhs: Unary, rhs: [Postfix] }
 
   - derivation: leftmost

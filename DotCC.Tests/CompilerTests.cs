@@ -1277,6 +1277,63 @@ public sealed class CompilerTests
         finally { File.Delete(src); }
     }
 
+    // ---- sizeof of an EXPRESSION (the type-synthesis layer) ---------------
+    // The operand's synthesized CType drives the size: arrays compute
+    // count*sizeof(element) (the C# pointer-lowering makes C# sizeof wrong);
+    // everything else defers to C# sizeof(type).
+
+    [Fact]
+    public void Sizeof_array_length_idiom_lowers_to_count_times_elemsize()
+    {
+        var src = WriteTemp("int main() { int a[5]; int n = sizeof(a) / sizeof(a[0]); return n; }");
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            // sizeof(a) → 5*sizeof(int); sizeof(a[0]) → element type int.
+            emitted.ShouldContain("((5 * sizeof(int)) / sizeof(int))");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Sizeof_resolves_literals_casts_and_strings()
+    {
+        var src = WriteTemp(
+            "int main() { int c = sizeof('a'); int d = sizeof((char)'a'); int s = sizeof(\"hello\"); return c + d + s; }");
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("int c = sizeof(int);");      // C char-literal is int
+            emitted.ShouldContain("int d = sizeof(byte);");     // cast to char → byte
+            emitted.ShouldContain("int s = (6 * sizeof(byte));");// "hello" = 5 chars + NUL
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Sizeof_type_form_is_unchanged()
+    {
+        var src = WriteTemp("int main() { int b = sizeof(int); return b; }");
+        try
+        {
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("int b = sizeof(int);");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Sizeof_of_unsupported_operand_fails_clearly()
+    {
+        // No struct-field-type tracking yet → sizeof(s.field) can't resolve.
+        var src = WriteTemp("struct P { int x; }; int main() { struct P p; int n = sizeof(p.x); return n; }");
+        try
+        {
+            var ex = Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }));
+            ex.Message.ShouldContain("sizeof");
+        }
+        finally { File.Delete(src); }
+    }
+
     [Fact]
     public void Pedantic_errors_collects_all_violations_at_once()
     {

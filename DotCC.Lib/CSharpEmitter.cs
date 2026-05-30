@@ -88,6 +88,12 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     /// <summary>The C# enum type an expression child produced, or null.</summary>
     private static string? EnumOf(Item it) => it.Content is EmitContent.Text { EnumType: { } e } ? e : null;
 
+    /// <summary>The synthesized <see cref="CType"/> a child propagated, or null.</summary>
+    private static CType? TyOf(Item it) => it.Content is EmitContent.Text { Ty: { } t } ? t : null;
+
+    /// <summary>Build a Text result carrying a synthesized type (for sizeof).</summary>
+    private static EmitContent Typed(string text, CType? ty) => new EmitContent.Text(text, null, ty);
+
     /// <summary>Read an operand's text, decaying an enum value to its `int`
     /// underlying so it can take part in a C int operation.</summary>
     private static string IntDecay(Item it) => EnumOf(it) is null ? T(it) : $"(int){T(it)}";
@@ -166,6 +172,15 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // EmitGlobalFields; consulted by Visit(Var) for globals referenced inside
     // functions (after the per-function _localTypes miss).
     private readonly Dictionary<string, string> _globalTypes = new(StringComparer.Ordinal);
+
+    // Array variable name → (C# element type, element count). Arrays lower to a
+    // C# pointer (stackalloc), so this is the ONLY place the element type +
+    // extent survive — needed for `sizeof(arr)` = count * sizeof(element).
+    // _localArrayInfo is per-function (reset in StartFn); _globalArrayInfo is
+    // TU-lifetime for file-scope arrays. A decayed-pointer param array is NOT
+    // recorded here (it's a genuine pointer for sizeof).
+    private readonly Dictionary<string, (string ElemType, int Count)> _localArrayInfo = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (string ElemType, int Count)> _globalArrayInfo = new(StringComparer.Ordinal);
 
     // Parameter names stage here. Params reduce as part of the FnSig BEFORE
     // StartFn establishes the function scope (and clears _localNames), so they
@@ -299,6 +314,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         _fnStatics.Clear();
         _localNames.Clear();
         _localTypes.Clear();
+        _localArrayInfo.Clear();
         // Adopt the params staged during this FnSig's ParamList reduction.
         foreach (var p in _pendingParams) { _localNames.Add(p.Name); _localTypes[p.Name] = p.Type; }
         _pendingParams.Clear();
@@ -426,8 +442,11 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         var isRefType = IsPredefinedRefTypeName(rawType) || _refTypeAliases.Contains(rawType);
         foreach (var entry in entries)
         {
-            // Track global var → type for enum-typing of references inside functions.
-            if (_enumTags.Contains(rawType)) { _globalTypes[entry.Name] = rawType; }
+            // Track global var → type, consulted by Visit(Var) for enum coercion
+            // (gated on _enumTags there) AND by sizeof. Stored unconditionally so
+            // `sizeof(globalScalar)` resolves; non-enum types simply never match
+            // the _enumTags check, so this is safe.
+            _globalTypes[entry.Name] = rawType;
             string init;
             if (entry.Init is not null)
             {
@@ -1307,23 +1326,48 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // works directly in C# unsafe contexts (it desugars to `*(arr + i)`).
     public EmitContent Visit(C.DeclArr n)
     {
-        NoteLocal(T(n.Arg1));
-        return $"{T(n.Arg0)}* {Id(T(n.Arg1))} = stackalloc {T(n.Arg0)}[{StripOuterParens(T(n.Arg3))}]";
+        var name = T(n.Arg1);
+        var elem = T(n.Arg0);
+        var sizeText = StripOuterParens(T(n.Arg3));
+        NoteLocal(name);
+        // Record element + count so `sizeof(arr)` can compute count*sizeof(elem)
+        // — only when the size is a literal int (a non-literal extent can't be a
+        // compile-time sizeof anyway).
+        if (int.TryParse(sizeText, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var count))
+        {
+            NoteLocalArray(name, elem, count);
+        }
+        return $"{elem}* {Id(name)} = stackalloc {elem}[{sizeText}]";
     }
 
     // C `T arr[N] = {1, 2, 3}` (or `T arr[] = {…}`) → C# `T* arr = stackalloc T[]{ 1, 2, 3 }`.
     // The explicit-size form ignores the size operand because C# infers it
     // from the initializer; both shapes share the same emit. ArgList arrives
-    // as a typed EmitContent.Args (read via A()) — no sentinel decoding.
+    // as a typed EmitContent.Args (read via A()) — no sentinel decoding. The
+    // element count for sizeof is the initializer length.
     public EmitContent Visit(C.DeclArrInit n)
     {
-        NoteLocal(T(n.Arg1));
-        return EmitArrInit(T(n.Arg0), T(n.Arg1), A(n.Arg7));
+        var name = T(n.Arg1);
+        var args = A(n.Arg7);
+        NoteLocal(name);
+        NoteLocalArray(name, T(n.Arg0), args.Count);
+        return EmitArrInit(T(n.Arg0), name, args);
     }
     public EmitContent Visit(C.DeclArrInitImplicit n)
     {
-        NoteLocal(T(n.Arg1));
-        return EmitArrInit(T(n.Arg0), T(n.Arg1), A(n.Arg6));
+        var name = T(n.Arg1);
+        var args = A(n.Arg6);
+        NoteLocal(name);
+        NoteLocalArray(name, T(n.Arg0), args.Count);
+        return EmitArrInit(T(n.Arg0), name, args);
+    }
+
+    // Record a block-scope array's element type + count for sizeof. No-op at
+    // file scope (globals handled in EmitGlobalFields; not yet array-aware).
+    private void NoteLocalArray(string rawName, string elemType, int count)
+    {
+        if (_currentFunctionName is not null) { _localArrayInfo[rawName] = (elemType, count); }
     }
 
     private static string EmitArrInit(string type, string name, IReadOnlyList<string> args) =>
@@ -1551,10 +1595,12 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         }
         // A cast to an enum type yields an enum value (C# allows int→enum and
         // enum→enum casts directly); tag it so downstream consumers reconcile.
+        // Also carry the cast's type for sizeof (`sizeof((char)x)` == 1).
         return new EmitContent.Text($"(({castType}){T(n.Arg3)})",
-            _enumTags.Contains(castType) ? castType : null);
+            _enumTags.Contains(castType) ? castType : null, new CType.Sized(castType));
     }
-    public EmitContent Visit(C.Deref n) => $"(*{T(n.Arg1)})";
+    // `*p` / `p[i]` synthesize the element/pointee type for sizeof.
+    public EmitContent Visit(C.Deref n) => Typed($"(*{T(n.Arg1)})", TyOf(n.Arg1)?.ElementType());
     public EmitContent Visit(C.AddrOf n) => $"(&{T(n.Arg1)})";
     public EmitContent Visit(C.Neg n) => $"(-{IntDecay(n.Arg1)})";
     // Prefix ++/-- — strip outer parens of operand to avoid CS0131 on a
@@ -1569,7 +1615,8 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // Subscript `expr[i]` — emit as-is; C# pointer subscript matches C semantics.
     // An enum index decays to int (C# can't index with an enum).
     public EmitContent Visit(C.Subscript n) =>
-        $"({StripOuterParens(T(n.Arg0))}[{StripOuterParens(IntDecay(n.Arg2))}])";
+        Typed($"({StripOuterParens(T(n.Arg0))}[{StripOuterParens(IntDecay(n.Arg2))}])",
+            TyOf(n.Arg0)?.ElementType());
 
     // Member access — `.` on a struct value, `->` on a struct pointer.
     // C# accepts both syntaxes in unsafe context (where all our user code
@@ -1602,6 +1649,31 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // a single-arg malloc can recognise `malloc(sizeof(S))` structurally; T()
     // renders it back to `sizeof(S)` everywhere else.
     public EmitContent Visit(C.SizeofType n) => new EmitContent.SizeofType(T(n.Arg2));
+
+    // `sizeof expr` — read the operand's synthesized CType (propagated up by the
+    // expression visitors) and emit its byte size. Arrays compute
+    // `count * sizeof(element)` (the C# pointer-lowering makes C# sizeof wrong);
+    // everything else defers to C# `sizeof(type)`. The result is itself an int
+    // (size_t in C). If the operand's type wasn't synthesized, fail clearly
+    // rather than emit a wrong size.
+    public EmitContent Visit(C.SizeofExpr n)
+    {
+        var t = TyOf(n.Arg1)
+            ?? throw new CompileException(
+                "`sizeof` of this expression isn't supported yet — dotcc resolves sizeof of a "
+                + "variable, array, subscript, dereference, cast, literal, or call result. "
+                + "Use `sizeof(Type)` if you can.");
+        return Typed(SizeofText(t), new CType.Sized("int"));
+    }
+
+    // C# expression for the byte size of a CType. An array is count*sizeof(elem)
+    // (recursive for nested arrays); anything else is a direct C# `sizeof(T)`.
+    private static string SizeofText(CType t) => t switch
+    {
+        CType.Arr a => $"({a.Count} * {SizeofText(a.Element)})",
+        CType.Sized s => $"sizeof({s.CsType})",
+        _ => throw new CompileException("internal: unknown CType in sizeof"),
+    };
 
     public EmitContent Visit(C.Call n)
     {
@@ -1683,11 +1755,12 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
             return sb.ToString();
         }
         var callText = $"{callee}({string.Join(", ", args)})";
-        // Tag the result with the callee's enum return type so a consuming
-        // context reconciles (decay in an int slot, no cast in an enum slot).
-        if (_fnReturnTypes.TryGetValue(Unescape(callee), out var rt) && _enumTags.Contains(rt))
+        // Tag the result with the callee's return type: the enum type drives
+        // int↔enum reconciliation at the call site, and the CType lets sizeof of
+        // a call result resolve.
+        if (_fnReturnTypes.TryGetValue(Unescape(callee), out var rt))
         {
-            return new EmitContent.Text(callText, rt);
+            return new EmitContent.Text(callText, _enumTags.Contains(rt) ? rt : null, new CType.Sized(rt));
         }
         return callText;
     }
@@ -1748,7 +1821,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
             // silently producing wrong code.
             var fn = _currentFunctionName
                 ?? throw new CompileException("`__func__` used outside any function definition");
-            return $"L(\"{fn}\\0\"u8)";
+            return Typed($"L(\"{fn}\\0\"u8)", new CType.Sized("byte*"));
         }
         // A block-scope `static` local shadows any global/enumerator of the
         // same name within this function — rewrite to its mangled global field.
@@ -1762,18 +1835,28 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         // at every use and fail to compile.
         if (!_localNames.Contains(name) && _enumerators.TryGetValue(name, out var enumName))
         {
-            return new EmitContent.Text($"{enumName}.{Id(name)}", enumName);
+            return new EmitContent.Text($"{enumName}.{Id(name)}", enumName, new CType.Sized(enumName));
         }
         // An enum-typed variable read is itself enum-valued — tag it so consuming
         // nodes insert the int↔enum casts C# requires (`int x = c`, `c & MASK`,
-        // …). Locals/params win over globals (shadowing).
+        // …). Also carry the full CType (incl. array element+count) for sizeof.
+        // Locals/params win over globals (shadowing).
         var mapped = MapBuiltin(name);
-        if ((_localTypes.TryGetValue(name, out var vt) || _globalTypes.TryGetValue(name, out vt))
-            && _enumTags.Contains(vt))
-        {
-            return new EmitContent.Text(mapped, vt);
-        }
-        return mapped;
+        var cty = VarCType(name);
+        var enumTag = cty is CType.Sized sz && _enumTags.Contains(sz.CsType) ? sz.CsType : null;
+        return new EmitContent.Text(mapped, enumTag, cty);
+    }
+
+    // Synthesize a variable's CType from the symbol tables — array info first
+    // (arrays lower to pointers, so this is the only place element+count
+    // survive), then the plain local/global type. Null for builtins / unknowns.
+    private CType? VarCType(string name)
+    {
+        if (_localArrayInfo.TryGetValue(name, out var la)) { return new CType.Arr(new CType.Sized(la.ElemType), la.Count); }
+        if (_globalArrayInfo.TryGetValue(name, out var ga)) { return new CType.Arr(new CType.Sized(ga.ElemType), ga.Count); }
+        if (_localTypes.TryGetValue(name, out var lt)) { return new CType.Sized(lt); }
+        if (_globalTypes.TryGetValue(name, out var gt)) { return new CType.Sized(gt); }
+        return null;
     }
     // Integer literal — pass-through for unsuffixed; normalize C suffixes
     // (u/U/l/L/ll/LL/ul/ull, case-insensitive, order-insensitive) to C#'s
@@ -1782,18 +1865,17 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     public EmitContent Visit(C.Num n)
     {
         var raw = T(n.Arg0);
-        // The `ll`/`LL`/`ull`/`ULL` suffix (>= 2 consecutive Ls) is the C99
-        // `long long` integer-literal suffix — gate under < c99.
-        if (_dialectGate is not null)
+        // Scan the suffix: count `l`/`L` (>=2 is the C99 `long long` suffix) and
+        // note `u`/`U`. The suffix also fixes the literal's type for sizeof.
+        var ls = 0;
+        var hasU = false;
+        for (int i = raw.Length - 1; i >= 0 && (raw[i] is 'l' or 'L' or 'u' or 'U'); i--)
         {
-            var ls = 0;
-            for (int i = raw.Length - 1; i >= 0 && (raw[i] is 'l' or 'L' or 'u' or 'U'); i--)
-            {
-                if (raw[i] is 'l' or 'L') { ls++; }
-            }
-            if (ls >= 2) { Gate(1999, "`long long` (ll) integer suffix", n.Arg0); }
+            if (raw[i] is 'l' or 'L') { ls++; } else { hasU = true; }
         }
-        return NormalizeIntSuffix(raw);
+        if (_dialectGate is not null && ls >= 2) { Gate(1999, "`long long` (ll) integer suffix", n.Arg0); }
+        var ct = ls > 0 ? (hasU ? "ulong" : "long") : (hasU ? "uint" : "int");
+        return Typed(NormalizeIntSuffix(raw), new CType.Sized(ct));
     }
 
     private static string NormalizeIntSuffix(string raw)
@@ -1822,14 +1904,28 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
             (true, _)  => digits + "UL",    // u + any l's → ulong
         };
     }
-    public EmitContent Visit(C.Flt n) => T(n.Arg0);
+    public EmitContent Visit(C.Flt n)
+    {
+        var raw = T(n.Arg0);
+        var isFloat = raw.Length > 0 && (raw[^1] is 'f' or 'F');
+        return Typed(raw, new CType.Sized(isFloat ? "float" : "double"));
+    }
 
     public EmitContent Visit(C.Str n)
     {
         var raw = T(n.Arg0);
-        if (raw is null || raw.Length < 2) { return "L(\"\\0\"u8)"; }
+        if (raw is null || raw.Length < 2) { return Typed("L(\"\\0\"u8)", new CType.Arr(new CType.Sized("byte"), 1)); }
         var body = raw[1..^1];
-        return $"L(\"{EscapeForUtf8Literal(body)}\\0\"u8)";
+        // sizeof("…") is the C char[] size: decoded length + 1 for the NUL.
+        // char→byte in dotcc, so element size is 1. Backslash escapes count as
+        // one char (correct for \n \t \\ \" \0 …; multi-byte \xNN is approximate).
+        var len = 1;
+        for (int i = 0; i < body.Length; i++)
+        {
+            if (body[i] == '\\' && i + 1 < body.Length) { i++; }
+            len++;
+        }
+        return Typed($"L(\"{EscapeForUtf8Literal(body)}\\0\"u8)", new CType.Arr(new CType.Sized("byte"), len));
     }
 
     // `'a'`, `'\n'`, `'\\'` etc. — C char literal. Our `char` is C# `byte`,
@@ -1841,10 +1937,12 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         var raw = T(n.Arg0);
         if (raw is null || raw.Length < 3) { return "(byte)0"; }
         var body = raw[1..^1];
-        return $"(byte)'{body}'";
+        // A C character constant has type `int`, so sizeof('a') == sizeof(int).
+        // (The emitted VALUE is `(byte)'X'`, but the sizeof TYPE is int.)
+        return Typed($"(byte)'{body}'", new CType.Sized("int"));
     }
 
-    public EmitContent Visit(C.Paren n) => new EmitContent.Text($"({T(n.Arg1)})", EnumOf(n.Arg1));
+    public EmitContent Visit(C.Paren n) => new EmitContent.Text($"({T(n.Arg1)})", EnumOf(n.Arg1), TyOf(n.Arg1));
 
     // C23 keyword constants (only reached under -std=c23, via the rewriter's
     // ID->terminal promotion). `_Bool` lowers to C# `bool`, so the boolean
