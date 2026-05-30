@@ -345,6 +345,34 @@ public sealed class CompilerTests
     }
 
     [Fact]
+    public void Digit_separators_are_stripped()
+    {
+        // C23 `1'000'000` — the quotes are stripped (C# uses `_`, doesn't need
+        // them). Works in decimal, hex, and binary.
+        var src = WriteTemp("int main() { int m = 1'000'000; int h = 0xFF'FF; return m + h; }");
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("int m = 1000000");
+            emitted.ShouldContain("int h = 0xFFFF");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Digit_separators_gated_as_c23_under_pedantic()
+    {
+        var src = WriteTemp("int main() { return 1'000; }");
+        try
+        {
+            Should.Throw<CompileException>(() =>
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"), pedanticErrors: true))
+                .Message.ShouldContain("digit separator");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Float128_keyword_lowers_to_Float128_type()
     {
         var src = WriteTemp("int main() { _Float128 x = 3; return (int)x; }");

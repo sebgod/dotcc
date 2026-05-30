@@ -2033,6 +2033,14 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
             end--;
         }
         var digits = raw[..end];
+        // C23 digit separators (`1'000'000`) — strip the `'`s before parsing the
+        // value; C# uses `_` and doesn't need them at all. The lexer only allows
+        // a `'` between two digits, so removal is unambiguous.
+        if (digits.IndexOf('\'') >= 0)
+        {
+            Gate(2023, "digit separators in a numeric literal", n.Arg0);  // C23
+            digits = digits.Replace("'", "");
+        }
         if (_dialectGate is not null && ls >= 2) { Gate(1999, "`long long` (ll) integer suffix", n.Arg0); }
         var ct = ls > 0 ? (hasU ? "ulong" : "long") : (hasU ? "uint" : "int");
 
