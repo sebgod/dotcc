@@ -945,6 +945,27 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         return $"{type} {Id(name)}";
     }
     private int _unnamedParamSeq;
+
+    // Function-pointer parameter — `int (*cmp)(int, int)`. Lowers to a
+    // `delegate*<args…, ret>` parameter (return type last, as C# requires).
+    public EmitContent Visit(C.ParamFnPtr n)        => ParamFnPtr(T(n.Arg0), T(n.Arg3), T(n.Arg6));
+    public EmitContent Visit(C.ParamFnPtrNoArgs n)  => ParamFnPtr(T(n.Arg0), T(n.Arg3), "");
+
+    private EmitContent ParamFnPtr(string ret, string name, string pars)
+    {
+        // The fn-ptr TYPE's own params just staged into _pendingParams (each
+        // inner Param visit appended one) — they belong to the pointed-to type,
+        // not the enclosing function. Pop them off the end and stage the fn-ptr
+        // parameter itself instead.
+        var innerCount = pars.Length == 0 ? 0 : pars.Split(',').Length;
+        for (var k = 0; k < innerCount && _pendingParams.Count > 0; k++)
+        {
+            _pendingParams.RemoveAt(_pendingParams.Count - 1);
+        }
+        var type = pars.Length == 0 ? $"delegate*<{ret}>" : $"delegate*<{StripParamNames(pars)}, {ret}>";
+        _pendingParams.Add((name, type));
+        return $"{type} {Id(name)}";
+    }
     // C array-parameter decay: `T arr[]` / `T arr[N]` ≡ `T* arr` per
     // C99 §6.7.5.3p7. The size in the sized form is informational only —
     // we discard it (intentionally don't evaluate Arg3) since C semantics
@@ -2080,6 +2101,17 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         _ => throw new CompileException("internal: unknown CType in sizeof"),
     };
 
+    // A bare function name used as a value (e.g. a call argument) decays to its
+    // address in C (function-to-pointer conversion). C# requires the explicit
+    // `&`, so prepend it — that's what lets `qsort(…, compare)` (bare name) pass
+    // a function-pointer argument. Guarded so a local/param shadowing a function
+    // name is left alone.
+    private string DecayFnName(string argText)
+    {
+        var raw = Unescape(argText);
+        return !_localNames.Contains(raw) && _fnReturnTypes.ContainsKey(raw) ? "&" + argText : argText;
+    }
+
     public EmitContent Visit(C.Call n)
     {
         var callee = T(n.Arg0);
@@ -2092,7 +2124,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         // normal code no local is named after a builtin, so this never fires.
         if (_localNames.Contains(Unescape(callee)))
         {
-            return $"{callee}({string.Join(", ", args)})";
+            return $"{callee}({string.Join(", ", args.Select(DecayFnName))})";
         }
         // malloc(sizeof(S)) — emit a MallocSizeof marker (carrying the struct
         // type for the stack-promotion peephole and the verbatim low-level
@@ -2159,7 +2191,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
             sb.Append(".Done()");
             return sb.ToString();
         }
-        var callText = $"{callee}({string.Join(", ", args)})";
+        var callText = $"{callee}({string.Join(", ", args.Select(DecayFnName))})";
         // Tag the result with the callee's return type: the enum type drives
         // int↔enum reconciliation at the call site, and the CType lets sizeof of
         // a call result resolve.

@@ -345,6 +345,25 @@ public sealed class CompilerTests
     }
 
     [Fact]
+    public void Fnptr_parameter_lowers_to_delegate_ptr_and_decays_bare_arg()
+    {
+        var src = WriteTemp("""
+            int add(int a, int b) { return a + b; }
+            int apply(int (*op)(int, int), int x, int y) { return op(x, y); }
+            int main() { return apply(add, 2, 3); }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            // fn-ptr param → delegate*; the pointed-to type's params don't leak
+            emitted.ShouldContain("apply(delegate*<int, int, int> op, int x, int y)");
+            // bare function-name arg decays to its address
+            emitted.ShouldContain("apply(&add, 2, 3)");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Unnamed_parameters_are_synthesized()
     {
         // C allows abstract (unnamed) params; C# needs names — synthesize them.

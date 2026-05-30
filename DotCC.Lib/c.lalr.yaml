@@ -462,6 +462,12 @@ productions:
       # so we drop it entirely and emit a pointer parameter.
       - { lhs: Param, rhs: [Type, ID, '[', ']'],     action: paramArrayUnsized }
       - { lhs: Param, rhs: [Type, ID, '[', E, ']'],  action: paramArraySized }
+      # Function-pointer parameter — `void qsort(…, int (*cmp)(const void*, const void*))`.
+      # Same `( * ID ) ( … )` shape as the local fn-ptr declarator; lowers to a
+      # `delegate*<args…, ret>` parameter. (The typedef'd form `Comparator cmp`
+      # also works.) Disambiguated from `Type ID …` by the `(` after Type.
+      - { lhs: Param, rhs: [Type, '(', '*', ID, ')', '(', ParamList, ')'], action: paramFnPtr }
+      - { lhs: Param, rhs: [Type, '(', '*', ID, ')', '(', ')'],            action: paramFnPtrNoArgs }
 
   # Type — the "declarator type" non-terminal. Most C type forms reduce to
   # this via TypeSpecList (the C-standard declaration-specifier sequence:
