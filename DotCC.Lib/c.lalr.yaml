@@ -300,6 +300,13 @@ symbols:
   # future optimization could map a `restrict` parameter to a by-ref / no-alias
   # hint. GNU `__restrict` / `__restrict__` lex to this same token.
   - 'restrict'     # 151 keyword (C99) — pointer qualifier
+  # `auto` — reserved in every C dialect, two meanings disambiguated by context:
+  # (1) pre-C23 storage-class (`auto int x;`) — redundant (the default for a
+  # block local), so dropped; (2) C23 type inference (`auto x = E;`) — deduce
+  # from the initializer, lowered to C# `var`. After `auto`, a plain `ID` (not a
+  # TYPE_NAME) → inference; a type keyword / TYPE_NAME / struct|union|enum →
+  # storage class. The C23 inference meaning is dialect-gated; the keyword is C89.
+  - 'auto'         # 152 keyword
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -661,6 +668,13 @@ productions:
       # one element. The Type prefix is shared across all comma-separated
       # items, matching real C (where `int x, y;` declares two `int`s).
       - { lhs: Decl, rhs: [Type, DeclItemList], action: decl }
+      # `auto` declarations (block scope). C23 type inference `auto x = E;` →
+      # C# `var` (a plain ID after `auto`); pre-C23 storage-class `auto int x …`
+      # → drop the `auto` (a type keyword / TYPE_NAME after `auto`). Disjoint
+      # via the lexer hack (ID vs TYPE_NAME) + the fact that a Type never starts
+      # with a plain ID.
+      - { lhs: Decl, rhs: ['auto', ID, '=', E],       action: declAutoInfer }
+      - { lhs: Decl, rhs: ['auto', Type, DeclItemList], action: declAutoStorage }
       # Stack-allocated array: `int arr[N]`. Lowers to `int* arr = stackalloc int[N]`
       # so subscript and pointer arithmetic both work naturally in C# `unsafe`
       # blocks. Size must be a compile-time constant or an int expression
@@ -1018,6 +1032,7 @@ lexer:
     - { symbol: 'union',    match: 'union' }
     - { symbol: 'static',   match: 'static' }
     - { symbol: 'extern',   match: 'extern' }
+    - { symbol: 'auto',     match: 'auto' }
 
     # Multi-char operators. Longest-match handles `==` vs `=`, `<=` vs `<`, etc.
     # so the ordering doesn't strictly matter — listed multi-char first for

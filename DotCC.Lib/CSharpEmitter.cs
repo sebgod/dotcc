@@ -1429,10 +1429,35 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // (`int x = 5;`), and multi-declarator (`int x, y, z;`,
     // `int x = 1, y = 2;`) forms. C# accepts the same `int x, y = 5, z;`
     // syntax so the lowering is verbatim.
-    public EmitContent Visit(C.Decl n)
+    public EmitContent Visit(C.Decl n) => EmitDecl(T(n.Arg0), DE(n.Arg1));
+
+    // Pre-C23 `auto` storage class — `auto int x = i;`. `auto` means "automatic
+    // storage duration", which is already the default for a block-scope local,
+    // so it's redundant: drop it and emit the declaration exactly as if the
+    // `auto` weren't there. (C89, no dialect gate.)
+    public EmitContent Visit(C.DeclAutoStorage n) => EmitDecl(T(n.Arg1), DE(n.Arg2));
+
+    // C23 `auto` type inference — `auto x = E;` deduces x's type from the
+    // initializer, exactly like C# `var` (and C++ `auto`, and gcc's older
+    // `__auto_type`). So lower straight to `var x = E;` and let Roslyn infer.
+    // Requires an initializer and no other type specifier (the grammar enforces
+    // both). Gated as C23 under -pedantic; the `auto` keyword itself is C89.
+    public EmitContent Visit(C.DeclAutoInfer n)
     {
-        var type = T(n.Arg0);
-        var entries = DE(n.Arg1);
+        Gate(2023, "`auto` type inference", n.Arg0);  // C23
+        var name = T(n.Arg1);
+        var init = T(n.Arg3);
+        NoteLocal(name);
+        // Record the inferred type when the initializer's CType is a plain
+        // scalar, so `sizeof(x)` and enum coercion still resolve; arrays/unknown
+        // just leave it untracked (C# `var` still compiles).
+        if (_currentFunctionName is not null && TyOf(n.Arg3) is CType.Sized sz) { _localTypes[name] = sz.CsType; }
+        return $"var {Id(DeclareLocal(name))} = {init}";
+    }
+
+    private EmitContent EmitDecl(string type, IReadOnlyList<EmitContent.DeclEntry> entriesIn)
+    {
+        var entries = entriesIn;
         // Register name + declared type for shadow resolution and enum typing,
         // and assign each declarator its (possibly renamed) C# identifier. Raw
         // names stay in `entries` for the side-table logic below; `renamed`

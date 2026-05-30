@@ -226,6 +226,48 @@ public sealed class CompilerTests
         finally { File.Delete(src); }
     }
 
+    // ---- auto (C23 inference + pre-C23 storage class) -------------------
+
+    [Fact]
+    public void Auto_type_inference_lowers_to_var()
+    {
+        var src = WriteTemp("int main() { auto x = 5; auto y = 3.14; return x; }");
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("var x = 5");
+            emitted.ShouldContain("var y = 3.14");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Auto_storage_class_is_dropped()
+    {
+        // Pre-C23 `auto int x` — redundant storage class, dropped → `int x`.
+        var src = WriteTemp("int main() { auto int z = 7; return z; }");
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("int z = 7");
+            emitted.ShouldNotContain("var z");   // not the inference form
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Auto_inference_gated_as_c23_under_pedantic()
+    {
+        var src = WriteTemp("int main() { auto x = 5; return x; }");
+        try
+        {
+            Should.Throw<CompileException>(() =>
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"), pedanticErrors: true))
+                .Message.ShouldContain("`auto` type inference");
+        }
+        finally { File.Delete(src); }
+    }
+
     // ---- restrict (and qualifier after *) -------------------------------
 
     [Fact]
