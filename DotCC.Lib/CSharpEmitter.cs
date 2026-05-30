@@ -1996,52 +1996,73 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         if (_globalTypes.TryGetValue(name, out var gt)) { return new CType.Sized(gt); }
         return null;
     }
-    // Integer literal — pass-through for unsuffixed; normalize C suffixes
-    // (u/U/l/L/ll/LL/ul/ull, case-insensitive, order-insensitive) to C#'s
-    // equivalents (no `ll` form — both `l` and `ll` mean 64-bit `long` in
-    // C#, since C# `long` is unconditionally 64-bit).
+    // Integer literal. Decimal and hex (`0x…`) pass through (C# accepts both
+    // verbatim); binary (`0b…`, C23) passes through too (C# has `0b`) but is
+    // gated. A `0`-prefixed OCTAL constant (`0755`) is the one form C# can't
+    // take literally — a leading `0` is plain decimal in C#, so `0755` would
+    // silently mean 755 instead of 493. dotcc converts it to its value. C
+    // suffixes (u/U/l/L, incl. the C99 `ll`) are normalised to C#'s (no `ll` —
+    // both `l` and `ll` mean 64-bit `long` in C#).
     public EmitContent Visit(C.Num n)
     {
         var raw = T(n.Arg0);
-        // Scan the suffix: count `l`/`L` (>=2 is the C99 `long long` suffix) and
-        // note `u`/`U`. The suffix also fixes the literal's type for sizeof.
+        // Split trailing C suffix (u/U/l/L) off the digits. `ls` counts l/L
+        // (>=2 is the C99 `long long` suffix); the suffix also fixes the
+        // literal's type for sizeof.
+        var end = raw.Length;
         var ls = 0;
         var hasU = false;
-        for (int i = raw.Length - 1; i >= 0 && (raw[i] is 'l' or 'L' or 'u' or 'U'); i--)
+        while (end > 0 && (raw[end - 1] is 'u' or 'U' or 'l' or 'L'))
         {
-            if (raw[i] is 'l' or 'L') { ls++; } else { hasU = true; }
+            if (raw[end - 1] is 'l' or 'L') { ls++; } else { hasU = true; }
+            end--;
         }
+        var digits = raw[..end];
         if (_dialectGate is not null && ls >= 2) { Gate(1999, "`long long` (ll) integer suffix", n.Arg0); }
         var ct = ls > 0 ? (hasU ? "ulong" : "long") : (hasU ? "uint" : "int");
-        return Typed(NormalizeIntSuffix(raw), new CType.Sized(ct));
+
+        string valueText;
+        if (digits.Length >= 2 && digits[0] == '0' && (digits[1] is 'x' or 'X'))
+        {
+            valueText = digits + CsIntSuffix(hasU, ls);          // hex — C# accepts 0x… verbatim
+        }
+        else if (digits.Length >= 2 && digits[0] == '0' && (digits[1] is 'b' or 'B'))
+        {
+            Gate(2023, "binary integer literal (`0b`)", n.Arg0);  // C23
+            valueText = digits + CsIntSuffix(hasU, ls);          // binary — C# accepts 0b… verbatim
+        }
+        else if (digits.Length >= 2 && digits[0] == '0')
+        {
+            // C octal (`0`-prefix). Convert to its value and emit decimal, since
+            // C# would read the leading 0 as a no-op and the literal as decimal.
+            foreach (var d in digits)
+            {
+                if (d is < '0' or > '7')
+                {
+                    throw new CompileException($"invalid digit '{d}' in octal constant `{raw}`");
+                }
+            }
+            ulong value;
+            try { value = Convert.ToUInt64(digits, 8); }
+            catch (OverflowException) { throw new CompileException($"octal constant `{raw}` is too large"); }
+            valueText = value.ToString(System.Globalization.CultureInfo.InvariantCulture) + CsIntSuffix(hasU, ls);
+        }
+        else
+        {
+            valueText = digits + CsIntSuffix(hasU, ls);          // decimal
+        }
+        return Typed(valueText, new CType.Sized(ct));
     }
 
-    private static string NormalizeIntSuffix(string raw)
+    // Map a C integer suffix (any u/U + any l/L) to C#'s canonical form. C# has
+    // no `ll` (both `l` and `ll` are 64-bit `long`), so any number of l's → "L".
+    private static string CsIntSuffix(bool hasU, int lCount) => (hasU, lCount) switch
     {
-        if (string.IsNullOrEmpty(raw)) { return raw; }
-        var end = raw.Length;
-        while (end > 0 && (raw[end - 1] is 'u' or 'U' or 'l' or 'L')) { end--; }
-        if (end == raw.Length) { return raw; }
-        var digits = raw[..end];
-        var suffix = raw[end..];
-        var hasU = false;
-        var lCount = 0;
-        foreach (var c in suffix)
-        {
-            if (c is 'u' or 'U') { hasU = true; }
-            else if (c is 'l' or 'L') { lCount++; }
-        }
-        // C# suffix mapping: u → uint/ulong (compiler-chosen), L → long,
-        // UL → ulong. C# accepts both lowercase and uppercase; we emit the
-        // C# canonical uppercase form for readability.
-        return (hasU, lCount) switch
-        {
-            (false, 0) => digits,           // unreachable (no suffix removed)
-            (true, 0)  => digits + "u",
-            (false, _) => digits + "L",     // any number of l's → long
-            (true, _)  => digits + "UL",    // u + any l's → ulong
-        };
-    }
+        (false, 0) => "",
+        (true, 0)  => "u",
+        (false, _) => "L",     // any l's → long
+        (true, _)  => "UL",    // u + any l's → ulong
+    };
     public EmitContent Visit(C.Flt n)
     {
         var raw = T(n.Arg0);

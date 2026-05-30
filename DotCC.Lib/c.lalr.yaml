@@ -999,11 +999,19 @@ lexer:
     # suffix is present. The Num visitor normalizes C suffixes (l/ll/ul/ull/
     # case-insensitive) to C# equivalents (L/UL).
     - { symbol: NUM,    match: '0[xX][0-9a-fA-F]+[uUlL]+' }
+    # C23 binary literal, suffixed form (`0b1010ul`). Before the decimal rule so
+    # longest-match picks the full `0b…` over a bare leading `0`. C# accepts the
+    # `0b` syntax verbatim, so the Num visitor passes it through (gated as C23).
+    - { symbol: NUM,    match: '0[bB][01]+[uUlL]+' }
     - { symbol: NUM,    match: '[0-9]+[uUlL]+' }
     # Hex literal — listed before NUM so longest-match (`0xFF` > `0`) picks
     # it. C# accepts the same `0x`-prefixed syntax, so the Num visitor just
     # passes the raw content through unchanged.
     - { symbol: NUM,    match: '0[xX][0-9a-fA-F]+' }
+    - { symbol: NUM,    match: '0[bB][01]+' }
+    # Decimal — also matches a C `0`-prefixed OCTAL constant (`0755`); C# has no
+    # octal literal syntax (a leading 0 there is just decimal), so the Num
+    # visitor converts the octal value rather than emit it verbatim.
     - { symbol: NUM,    match: '[0-9]+' }
     - { symbol: ID,     match: '[a-zA-Z_][a-zA-Z_0-9]*' }
 

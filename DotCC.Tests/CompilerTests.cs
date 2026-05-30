@@ -226,6 +226,75 @@ public sealed class CompilerTests
         finally { File.Delete(src); }
     }
 
+    // ---- octal (0-prefix) + binary (0b) integer literals ----------------
+
+    [Fact]
+    public void Octal_literal_converts_to_its_value()
+    {
+        // C# has no octal syntax (a leading 0 is plain decimal), so `0755`
+        // must be converted to 493, not emitted verbatim (which would mean 755).
+        var src = WriteTemp("int main() { int a = 0644; int b = 0755; return a + b; }");
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("int a = 420");   // 0644 octal
+            emitted.ShouldContain("int b = 493");   // 0755 octal
+            emitted.ShouldNotContain("0644");
+            emitted.ShouldNotContain("0755");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Octal_zero_and_suffix_are_handled()
+    {
+        var src = WriteTemp("int main() { int z = 0; long b = 0777777L; return z; }");
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("int z = 0;");           // 0 stays 0
+            emitted.ShouldContain("long b = 262143L");     // octal + L suffix
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Invalid_octal_digit_throws()
+    {
+        var src = WriteTemp("int main() { int x = 0789; return x; }");
+        try
+        {
+            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
+                .Message.ShouldContain("invalid digit '8' in octal constant");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Binary_literal_passes_through()
+    {
+        // C# accepts `0b` natively, so the binary literal is emitted verbatim.
+        var src = WriteTemp("int main() { return 0b1011; }");
+        try
+        {
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("return 0b1011;");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Binary_literal_gated_as_c23_under_pedantic()
+    {
+        var src = WriteTemp("int main() { return 0b101; }");
+        try
+        {
+            Should.Throw<CompileException>(() =>
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"), pedanticErrors: true))
+                .Message.ShouldContain("binary integer literal");
+        }
+        finally { File.Delete(src); }
+    }
+
     [Fact]
     public void Float128_keyword_lowers_to_Float128_type()
     {
