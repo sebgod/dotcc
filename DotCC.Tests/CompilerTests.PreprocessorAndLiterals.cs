@@ -877,6 +877,45 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Empty_initializer_zero_inits_scalar_struct_array_and_compound()
+    {
+        // C23 `{}` — universal zero-init. Scalar/struct → `= default`; sized
+        // array → zeroed stackalloc (C# zeroes stackalloc); `(T){}` → default(T).
+        var src = WriteTemp("""
+            struct Point { int x; int y; };
+            int main() {
+                int n = {};
+                struct Point p = {};
+                int a[4] = {};
+                struct Point q = (struct Point){};
+                return n + p.x + a[0] + q.y;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("int n = default");
+            emitted.ShouldContain("Point p = default");
+            emitted.ShouldContain("stackalloc int[4]");
+            emitted.ShouldContain("default(Point)");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Empty_initializer_gated_as_c23_under_pedantic()
+    {
+        var src = WriteTemp("struct S { int a; }; int main() { struct S s = {}; return s.a; }");
+        try
+        {
+            Should.Throw<CompileException>(() =>
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"), pedanticErrors: true))
+                .Message.ShouldContain("empty initializer");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Anonymous_typedef_struct_emits_struct_under_alias()
     {
         // `typedef struct { … } Name;` (no tag) — the common idiom. dotcc emits

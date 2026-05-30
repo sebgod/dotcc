@@ -156,11 +156,13 @@ internal sealed partial class CSharpEmitter
     // `a[i][j]` to flat pointer arithmetic. stackalloc keeps the array in the
     // same lifetime as locals (no heap, no GC pin), matching C automatics.
     // ArrDims (Arg2) carries the dimension expression texts, outer→inner.
-    public EmitContent Visit(C.DeclArr n)
+    public EmitContent Visit(C.DeclArr n) => EmitArrDecl(T(n.Arg0), T(n.Arg1), A(n.Arg2));
+
+    // `T name[dims]` with no initializer (or an empty `= {}` one) → a zeroed
+    // `stackalloc`. C# zero-initialises stackalloc by default, so this is also
+    // exactly the lowering for the C23 empty-array-initializer form.
+    private EmitContent EmitArrDecl(string elem, string name, IReadOnlyList<string> dims)
     {
-        var elem = T(n.Arg0);
-        var name = T(n.Arg1);
-        var dims = A(n.Arg2);
         NoteLocal(name);
         var emitted = DeclareLocal(name);
 
@@ -193,6 +195,23 @@ internal sealed partial class CSharpEmitter
         for (var i = sizes.Count - 1; i >= 0; i--) { cty = new CType.Arr(cty, sizes[i]); total *= sizes[i]; }
         NoteLocalArray(name, cty);
         return $"{elem}* {Id(emitted)} = stackalloc {elem}[{total}]";
+    }
+
+    // `T x = {};` (C23 empty initializer) — zero-init a scalar/struct/pointer.
+    // Routed through EmitDecl as a `default` initializer so it picks up scope
+    // renaming, type tracking, and enum reconciliation for free.
+    public EmitContent Visit(C.DeclEmptyInit n)
+    {
+        Gate(2023, "empty initializer", n.Arg0);  // C23
+        return EmitDecl(T(n.Arg0), new[] { new EmitContent.DeclEntry(T(n.Arg1), "default") });
+    }
+
+    // `T a[N] = {};` (C23 empty initializer) — a zeroed array. Identical to the
+    // no-initializer array decl (C# zeroes stackalloc), so share EmitArrDecl.
+    public EmitContent Visit(C.DeclArrEmptyInit n)
+    {
+        Gate(2023, "empty initializer", n.Arg0);  // C23
+        return EmitArrDecl(T(n.Arg0), T(n.Arg1), A(n.Arg2));
     }
 
     // C `T arr[N] = {1, 2, 3}` (or `T arr[] = {…}`) → C# `T* arr = stackalloc T[]{ 1, 2, 3 }`.
@@ -619,6 +638,15 @@ internal sealed partial class CSharpEmitter
         var type = T(n.Arg1);
         var members = IM(n.Arg4);  // typed InitMembers list
         return Typed($"new {type} {{ {string.Join(", ", members)} }}", new CType.Sized(type));
+    }
+
+    // `(Type){}` — empty compound literal (C23). A zero-valued unnamed object.
+    // `default(Type)` is universal: scalar, struct, union, pointer all zero.
+    public EmitContent Visit(C.CompoundLitEmpty n)
+    {
+        Gate(2023, "empty initializer", n.Arg1);  // C23 (empty {} is the C23 part)
+        var type = T(n.Arg1);
+        return Typed($"default({type})", new CType.Sized(type));
     }
 
 }

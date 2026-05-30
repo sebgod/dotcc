@@ -766,6 +766,12 @@ productions:
       # emit time. LALR(1)-distinguished from the positional form by the
       # leading `.` after `{`.
       - { lhs: Decl, rhs: [Type, ID, '=', '{', MemberInitList, '}'], action: declStructDesignated }
+      # Empty initializer (C23): `T x = {};` / `T a[N] = {};` — zero-initialize.
+      # Conflict-free with the `{ … }` forms above: after `= {`, a `}` lookahead
+      # selects these (InitList/MemberInitList both require ≥1 element). Scalars/
+      # structs lower to `= default`; sized arrays to a zeroed `stackalloc`.
+      - { lhs: Decl, rhs: [Type, ID, '=', '{', '}'],          action: declEmptyInit }
+      - { lhs: Decl, rhs: [Type, ID, ArrDims, '=', '{', '}'], action: declArrEmptyInit }
 
   # ArrDims — one or more `[ E ]` array dimensions, left-recursive.
   - derivation: leftmost
@@ -940,6 +946,10 @@ productions:
       # designated splits on the `.` after `{`, exactly like the Decl forms.
       - { lhs: Unary, rhs: ['(', Type, ')', '{', InitList, '}'],       action: compoundLit }
       - { lhs: Unary, rhs: ['(', Type, ')', '{', MemberInitList, '}'], action: compoundLitDesignated }
+      # Empty compound literal `(Type){}` (C23) — a zero-valued unnamed object.
+      # Lowers to `default(Type)`, which is universal (works for scalar, struct,
+      # union, pointer). The `}` after `{` keeps it disjoint from the two above.
+      - { lhs: Unary, rhs: ['(', Type, ')', '{', '}'],                 action: compoundLitEmpty }
       # `sizeof(Type)` — emits C# `sizeof(T)` which works for unmanaged types
       # in unsafe context. All dotcc structs are unmanaged (only primitive
       # and pointer fields) so this is always valid.

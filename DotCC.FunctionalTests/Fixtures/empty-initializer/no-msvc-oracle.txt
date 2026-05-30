@@ -1,0 +1,1 @@
+MSVC has no C23 frontend (no /std:c23); empty {} initializer is rejected.
