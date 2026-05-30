@@ -1057,12 +1057,37 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
                 $"duplicate `{baseKw}` specifier (got `{PrettySpecs(specs)}`)");
         }
 
-        // float / double / void don't take signedness or size modifiers.
-        if ((baseKw is "float" or "double" or "void")
-            && (unsignedCount > 0 || signedCount > 0 || shortCount > 0 || longCount > 0))
+        // `float` / `void` take no size or sign modifiers. `double` takes the
+        // single size modifier C allows on a real type — `long double` — which
+        // dotcc lowers to C# `double`. The CLI is dotcc's target "ABI", and
+        // `double` is the widest IEEE float it offers: there's no wider managed
+        // type to map to and no hardware `long double` width (x87 80-bit,
+        // aarch64 binary128) to chase, since we emit IL, not native code. This
+        // mirrors dotcc's existing `long long` → C# `long` collapse (both
+        // 64-bit on the CLI) — a documented narrowing on platforms whose native
+        // `long double` is wider; `_Float128` remains the route to true 128-bit.
+        // `double` still rejects `short`, sign, and a second `long`.
+        if (baseKw is "float" or "void")
         {
-            throw new CompileException(
-                $"`{baseKw}` cannot take size or sign modifiers (got `{PrettySpecs(specs)}`)");
+            if (unsignedCount > 0 || signedCount > 0 || shortCount > 0 || longCount > 0)
+            {
+                throw new CompileException(
+                    $"`{baseKw}` cannot take size or sign modifiers (got `{PrettySpecs(specs)}`)");
+            }
+        }
+        else if (baseKw == "double")
+        {
+            if (unsignedCount > 0 || signedCount > 0 || shortCount > 0)
+            {
+                throw new CompileException(
+                    $"`double` cannot take sign or `short` modifiers (got `{PrettySpecs(specs)}`)");
+            }
+            if (longCount > 1)
+            {
+                throw new CompileException(
+                    $"`long long double` is not a valid type (got `{PrettySpecs(specs)}`)");
+            }
+            // longCount == 1 → `long double`, accepted; resolves to `double` below.
         }
 
         // Resolve. Order: _Bool first (mutually exclusive), then non-int
@@ -1070,7 +1095,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         if (boolCount == 1) { return "CBool"; }
         if (float128Count == 1) { return "Float128"; }
         if (baseKw == "float")  { return "float"; }
-        if (baseKw == "double") { return "double"; }
+        if (baseKw == "double") { return "double"; }  // incl. `long double`
         if (baseKw == "void")   { return "void"; }
         if (baseKw == "char")
         {

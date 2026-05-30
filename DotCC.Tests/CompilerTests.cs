@@ -189,6 +189,44 @@ public sealed class CompilerTests
     }
 
     [Fact]
+    public void Long_double_lowers_to_double()
+    {
+        // `long double` → C# `double` (the CLI's widest IEEE float), mirroring
+        // `long long` → `long`. A documented narrowing vs. wider native ABIs.
+        var src = WriteTemp("int main() { long double x = 1.5; return (int)x; }");
+        try
+        {
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("double x = 1.5;");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Long_long_double_is_rejected()
+    {
+        // C allows only a single `long` on `double`; `long long double` is invalid.
+        var src = WriteTemp("int main() { long long double x = 0; return 0; }");
+        try
+        {
+            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
+                .Message.ShouldContain("`long long double` is not a valid type");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Short_double_is_rejected()
+    {
+        var src = WriteTemp("int main() { short double x = 0; return 0; }");
+        try
+        {
+            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
+                .Message.ShouldContain("`double` cannot take sign or `short` modifiers");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Float128_keyword_lowers_to_Float128_type()
     {
         var src = WriteTemp("int main() { _Float128 x = 3; return (int)x; }");
