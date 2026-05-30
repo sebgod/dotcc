@@ -407,6 +407,11 @@ productions:
       # has no separate tag namespace) plus an empty alias for the tag form
       # when they differ.
       - { lhs: Fn, rhs: ['typedef', 'struct', ID, '{', MemberList, '}', ID, ';'], action: typedefStruct }
+      # `typedef struct { MemberList } ID ;` — ANONYMOUS (tagless) struct + alias,
+      # the most common typedef-struct idiom in real C. Conflict-free with the
+      # tagged form above: after `typedef struct`, an ID lookahead → tagged, a `{`
+      # lookahead → tagless. Same emit as typedefStruct, minus the tag binding.
+      - { lhs: Fn, rhs: ['typedef', 'struct', '{', MemberList, '}', ID, ';'], action: typedefStructAnon }
       # Function-pointer typedef: `typedef Ret (*Name)(args);`. Lowers to
       # C# `using unsafe Name = delegate*<args..., Ret>;`. The standalone
       # form `int (*fn)(int);` is famously hard to LALR-parse due to the

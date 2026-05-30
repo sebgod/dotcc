@@ -877,6 +877,25 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Anonymous_typedef_struct_emits_struct_under_alias()
+    {
+        // `typedef struct { … } Name;` (no tag) — the common idiom. dotcc emits
+        // the C# struct under the alias name and binds the alias as a type-name
+        // so later `Name x;` parses as a declaration (the lexer hack).
+        var src = WriteTemp("""
+            typedef struct { int x; int y; } Point;
+            int main() { Point p = {3, 4}; return p.x + p.y; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("unsafe struct Point");
+            emitted.ShouldContain("new Point { x = 3, y = 4 }");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Forward_struct_decl_emits_nothing_and_does_not_break_later_definition()
     {
         // `struct Node;` declares the tag without a body. C# types hoist,

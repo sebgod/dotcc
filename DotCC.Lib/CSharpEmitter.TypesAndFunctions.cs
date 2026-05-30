@@ -586,6 +586,23 @@ internal sealed partial class CSharpEmitter
         return string.Empty;
     }
 
+    // `typedef struct { MemberList } ID ;` — anonymous (tagless) struct + alias.
+    // Same as TypedefStruct minus the tag: emit the C# struct under the alias
+    // name and index its fields under the alias only (there's no `struct Tag`
+    // form to bind). The trailing ID before `;` is what TypeNameRewriter binds
+    // as the typedef-name, so later `Alias x;` lexes as a declaration.
+    public EmitContent Visit(C.TypedefStructAnon n)
+    {
+        var members = T(n.Arg3);
+        var alias = T(n.Arg5);
+        _structFields[alias] = new List<string>(_pendingFields);
+        _pendingFields.Clear();
+        _structs.Append("unsafe struct ").Append(alias).Append("\n{\n");
+        _structs.Append(IndentEach(members));
+        _structs.Append("}\n\n");
+        return string.Empty;
+    }
+
     public EmitContent Visit(C.FnsCons n) =>
         T(n.Arg0) + ((T(n.Arg0)).Length > 0 ? "\n\n" : "") + T(n.Arg1);
 
