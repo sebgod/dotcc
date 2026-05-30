@@ -279,6 +279,11 @@ symbols:
   # expression statement `Expr ;` — so commas in call arguments / initializers
   # (which stay on `E`) remain separators, not operators.
   - Expr           # 147
+  # `extern` storage class (C89). On a variable it DECLARES without defining
+  # (storage lives in another translation unit); on a function it's the default
+  # linkage (redundant). dotcc emits nothing for an extern declaration /
+  # prototype and emits normally for an extern function definition.
+  - 'extern'       # 148 keyword (C89)
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -388,6 +393,18 @@ productions:
       # for variables (they're never exported), so this lowers exactly like a
       # plain global: a field in DotCcGlobals. The `static` keyword is consumed.
       - { lhs: Fn, rhs: ['static', Type, DeclItemList, ';'], action: globalStaticDeclList }
+
+      # `extern` declarations. An extern function prototype (`extern T f(args);`)
+      # and an extern variable declaration (`extern T x;`) DECLARE without
+      # defining — emit nothing (the definition / storage lives in another TU).
+      # An extern function DEFINITION (`extern T f(args) { … }`) is just a normal
+      # definition (extern is the default function linkage). FnSig is reused for
+      # the function forms; the variable form mirrors globalDeclList. After
+      # `extern Type ID`, lookahead `(` → FnSig, else → DeclItemList — the same
+      # split the non-extern `FnSig` vs `Type DeclItemList` rules already use.
+      - { lhs: Fn, rhs: ['extern', FnSig, ';'],              action: externFnProto }
+      - { lhs: Fn, rhs: ['extern', FnSig, Block],            action: externFnDef }
+      - { lhs: Fn, rhs: ['extern', Type, DeclItemList, ';'], action: externVarDecl }
 
       # `_Static_assert(expr, "msg");` (C11) and `_Static_assert(expr);`
       # (C23, message optional). File-scope form. Compile-time only — no
@@ -928,6 +945,7 @@ lexer:
     - { symbol: 'enum',     match: 'enum' }
     - { symbol: 'union',    match: 'union' }
     - { symbol: 'static',   match: 'static' }
+    - { symbol: 'extern',   match: 'extern' }
 
     # Multi-char operators. Longest-match handles `==` vs `=`, `<=` vs `<`, etc.
     # so the ordering doesn't strictly matter — listed multi-char first for

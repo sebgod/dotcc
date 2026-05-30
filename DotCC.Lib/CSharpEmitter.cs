@@ -407,10 +407,41 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // set `_currentFunctionName` for the body's Var visits to consume.
     // Now we do the bookkeeping (MainArity, exports list) and emit/clear.
 
-    public EmitContent Visit(C.FuncDef n)
+    public EmitContent Visit(C.FuncDef n) => EmitFuncDef(FH(n.Arg0), T(n.Arg1));
+
+    // `extern T f(args) { … }` — an extern function DEFINITION. `extern` is the
+    // default linkage for functions, so this is identical to a plain definition;
+    // share the emit (bookkeeping, exports, malloc-promotion finalize, emit).
+    public EmitContent Visit(C.ExternFnDef n) => EmitFuncDef(FH(n.Arg1), T(n.Arg2));
+
+    // `extern T f(args);` — an extern function PROTOTYPE. Emits nothing (C#
+    // methods hoist), but must unwind the FnSig state StartFn set, exactly like
+    // a plain prototype.
+    public EmitContent Visit(C.ExternFnProto n)
     {
-        var sig = FH(n.Arg0);
-        var body = T(n.Arg1);
+        _currentFunctionName = null;
+        _currentFunctionReturnType = null;
+        _fnMalloc.Clear();
+        _fnStatics.Clear();
+        _scopes.Clear();
+        _usedLocalNames.Clear();
+        return string.Empty;
+    }
+
+    // `extern T x;` / `extern T a, b;` — extern VARIABLE declarations. These
+    // declare without defining: the storage lives in another translation unit
+    // (or another file in this program), so emit NO field — emitting one would
+    // double-define against the real definition. Register each name's type so
+    // same-file references still resolve as globals.
+    public EmitContent Visit(C.ExternVarDecl n)
+    {
+        var type = T(n.Arg1);
+        foreach (var e in DE(n.Arg2)) { _globalTypes[e.Name] = type; }
+        return string.Empty;
+    }
+
+    private EmitContent EmitFuncDef(EmitContent.FnHeader sig, string body)
+    {
         // Bookkeeping: `main` records arity (0 when params are empty,
         // CountCommas+1 otherwise — `int main()` is arity 0, not 1);
         // non-static non-main goes on the exports list for library-mode

@@ -226,6 +226,64 @@ public sealed class CompilerTests
         finally { File.Delete(src); }
     }
 
+    // ---- extern -----------------------------------------------------------
+
+    [Fact]
+    public void Extern_variable_declaration_emits_no_field()
+    {
+        // `extern int x;` declares without defining — no storage emitted. The
+        // real definition (`int x = 5;`) emits the single field.
+        var src = WriteTemp("""
+            extern int x;
+            int x = 5;
+            int main() { return x; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            // exactly one field for x (from the definition, not the extern decl)
+            var fieldCount = emitted.Split("unsafe int x").Length - 1;
+            fieldCount.ShouldBe(1);
+            emitted.ShouldContain("int x = 5");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Extern_function_prototype_emits_nothing()
+    {
+        // `extern int f(int);` is a prototype — emits nothing (C# methods hoist).
+        var src = WriteTemp("""
+            extern int f(int x);
+            int f(int x) { return x + 1; }
+            int main() { return f(41); }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("static unsafe int f(int x)");
+            // only one definition of f, not a stray prototype artifact
+            (emitted.Split("int f(int x)").Length - 1).ShouldBe(1);
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Extern_function_definition_emits_the_function()
+    {
+        // `extern T f(...) { ... }` — extern is the default function linkage, so
+        // this is a normal definition.
+        var src = WriteTemp("""
+            extern int twice(int x) { return x * 2; }
+            int main() { return twice(21); }
+            """);
+        try
+        {
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("static unsafe int twice(int x)");
+        }
+        finally { File.Delete(src); }
+    }
+
     // ---- comma operator -------------------------------------------------
 
     [Fact]
