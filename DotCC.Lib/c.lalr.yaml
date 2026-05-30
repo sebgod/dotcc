@@ -311,6 +311,15 @@ symbols:
   # `{ … }` group. Lets InitList build a recursive InitNode tree so nested
   # aggregate initializers (`{{1,2},{3,4}}`) keep their structure.
   - InitElem       # 153
+  # `inline` (C99) — function specifier. Spelled like an ordinary identifier and
+  # reserved only in C99+, so it has NO lexer rule (same as `bool`/`true`):
+  # DialectKeywordRewriter promotes the ID → this terminal under -std >= c99,
+  # leaving `inline` a usable identifier pre-C99. Parsed as a TypeSpec so it
+  # composes with the existing static/extern prefixes (`inline int f()`,
+  # `static inline int f()`, `extern inline int f()`); ResolveTypeSpec drops it
+  # from the resolved type and the FnSig path turns it into a
+  # [MethodImpl(MethodImplOptions.AggressiveInlining)] on the emitted method.
+  - 'inline'       # 154 keyword (C99) — function specifier
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -535,6 +544,10 @@ productions:
       # Type qualifiers — parsed as specifiers, dropped at resolution.
       - { lhs: TypeSpec, rhs: ['const'],    action: tsConst }
       - { lhs: TypeSpec, rhs: ['volatile'], action: tsVolatile }
+      # Function specifier — `inline` (C99). Parsed in the specifier run; dropped
+      # from the resolved type, but TypeFromSpec flags it so the FnSig path emits
+      # a [MethodImpl(AggressiveInlining)]. (Promoted from ID by the dialect rewriter.)
+      - { lhs: TypeSpec, rhs: ['inline'],   action: tsInline }
 
   - derivation: none
     rules:

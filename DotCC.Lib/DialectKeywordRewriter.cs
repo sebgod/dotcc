@@ -84,6 +84,13 @@ internal sealed class DialectKeywordRewriter : RewritingTokenStream
             ["false"]   = (2023, map["FALSE"],   "false"),
             ["nullptr"] = (2023, map["NULLPTR"], "nullptr"),
 
+            // C99 makes `inline` a function specifier. Pre-C99 it's an ordinary
+            // identifier (`int inline;` is valid C89), so promote onto the
+            // `inline` grammar terminal (no lexer rule) only from the C99 era on
+            // — covering c99/c11/c17/c23, the default c17 included. The FnSig
+            // path turns the flagged type into a [MethodImpl(AggressiveInlining)].
+            ["inline"] = (1999, map["inline"], "inline"),
+
             // C23 makes `static_assert` a first-class keyword (the C11 form is
             // `_Static_assert`, with the lowercase macro living in <assert.h>).
             // Promote onto the existing `_Static_assert` grammar terminal under

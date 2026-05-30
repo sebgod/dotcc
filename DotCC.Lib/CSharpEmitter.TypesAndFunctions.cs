@@ -16,19 +16,19 @@ internal sealed partial class CSharpEmitter
     // reduction to combine with the body.
 
     public EmitContent Visit(C.FnSig n)  // Type ID ( ParamList )
-        => StartFn(type: T(n.Arg0), name: T(n.Arg1), pars: T(n.Arg3), isStatic: false);
+        => StartFn(type: T(n.Arg0), name: T(n.Arg1), pars: T(n.Arg3), isStatic: false, isInline: InlineOf(n.Arg0));
     public EmitContent Visit(C.FnSigNoArgs n)  // Type ID ( )
-        => StartFn(type: T(n.Arg0), name: T(n.Arg1), pars: "", isStatic: false);
+        => StartFn(type: T(n.Arg0), name: T(n.Arg1), pars: "", isStatic: false, isInline: InlineOf(n.Arg0));
     public EmitContent Visit(C.FnSigVoidArgs n)  // Type ID ( void )
-        => StartFn(type: T(n.Arg0), name: T(n.Arg1), pars: "", isStatic: false);
+        => StartFn(type: T(n.Arg0), name: T(n.Arg1), pars: "", isStatic: false, isInline: InlineOf(n.Arg0));
     public EmitContent Visit(C.FnSigStatic n)  // static Type ID ( ParamList )
-        => StartFn(type: T(n.Arg1), name: T(n.Arg2), pars: T(n.Arg4), isStatic: true);
+        => StartFn(type: T(n.Arg1), name: T(n.Arg2), pars: T(n.Arg4), isStatic: true, isInline: InlineOf(n.Arg1));
     public EmitContent Visit(C.FnSigStaticNoArgs n)  // static Type ID ( )
-        => StartFn(type: T(n.Arg1), name: T(n.Arg2), pars: "", isStatic: true);
+        => StartFn(type: T(n.Arg1), name: T(n.Arg2), pars: "", isStatic: true, isInline: InlineOf(n.Arg1));
     public EmitContent Visit(C.FnSigStaticVoidArgs n)  // static Type ID ( void )
-        => StartFn(type: T(n.Arg1), name: T(n.Arg2), pars: "", isStatic: true);
+        => StartFn(type: T(n.Arg1), name: T(n.Arg2), pars: "", isStatic: true, isInline: InlineOf(n.Arg1));
 
-    private EmitContent.FnHeader StartFn(string type, string name, string pars, bool isStatic)
+    private EmitContent.FnHeader StartFn(string type, string name, string pars, bool isStatic, bool isInline = false)
     {
         // Set the active-function name BEFORE Block reduces — this is the
         // whole point of the FnSig split. Any __func__ inside the body
@@ -58,7 +58,7 @@ internal sealed partial class CSharpEmitter
             DeclareLocal(p.Name);
         }
         _pendingParams.Clear();
-        return new EmitContent.FnHeader(type, name, pars, isStatic);
+        return new EmitContent.FnHeader(type, name, pars, isStatic, isInline);
     }
 
     // ---- Function definition / prototype --------------------------------
@@ -140,7 +140,11 @@ internal sealed partial class CSharpEmitter
         // Escape the method name for C# emission; sig.Name stays raw above for
         // the `main` check and the export list (the C-ABI EntryPoint keeps the
         // real name). A call to this function escapes identically via Visit(Var).
-        return $"static unsafe {sig.Type} {Id(sig.Name)}({sig.Params})\n{body}";
+        // A C99 `inline` specifier maps to AggressiveInlining — a real JIT hint,
+        // the faithful lowering of C's "please inline this" (attributes on local
+        // functions are legal C# 9+; the shell already imports CompilerServices).
+        var attr = sig.IsInline ? "[MethodImpl(MethodImplOptions.AggressiveInlining)]\n" : "";
+        return $"{attr}static unsafe {sig.Type} {Id(sig.Name)}({sig.Params})\n{body}";
     }
 
     public EmitContent Visit(C.FuncProto n)
@@ -675,6 +679,10 @@ internal sealed partial class CSharpEmitter
     // equivalent). `const char *p` lowers exactly like `char *p`.
     public EmitContent Visit(C.TsConst n)    => Spec("const");
     public EmitContent Visit(C.TsVolatile n) => Spec("volatile");
+    // Function specifier — accumulated in the spec list like a qualifier, but
+    // (unlike const/volatile) it is NOT silently dropped: TypeFromSpec detects
+    // it and flags the resolved Type so the FnSig path emits AggressiveInlining.
+    public EmitContent Visit(C.TsInline n)   => Spec("inline");
 
     public EmitContent Visit(C.TypeSpecListOne n)  => S(n.Arg0) is var specs
         ? new EmitContent.SpecList(specs) : throw new InvalidOperationException();
@@ -692,20 +700,31 @@ internal sealed partial class CSharpEmitter
     public EmitContent Visit(C.TypeFromSpec n)
     {
         var specs = S(n.Arg0);
+        // `inline` (C99) needs NO DialectGate: unlike `_Bool`/`long long` (always
+        // lexed as keywords, so they reach here under any -std and `-pedantic`
+        // rejects them), `inline` is rule-2 promoted by DialectKeywordRewriter
+        // only from the C99 era on. Under c90 it stays an identifier, so
+        // `inline int f()` is a parse error before this point — the dialect
+        // rejection is structural, and a Gate(1999, …) here could never fire.
         // Dialect gates for type-specifier features (once per resolved type,
         // with a source line). `_Bool`/`long long` are C99; `_Float128` is C23.
-        if (_dialectGate is not null)
+        var hasInline = false;
+        var longs = 0;
+        foreach (var s in specs)
         {
-            var longs = 0;
-            foreach (var s in specs)
+            if (s == "inline") { hasInline = true; }
+            else if (_dialectGate is not null)
             {
                 if (s == "_Bool") { Gate(1999, "_Bool", n.Arg0); }
                 else if (s == "Float128") { Gate(2023, "_Float128 / __float128", n.Arg0); }
                 else if (s == "long") { longs++; }
             }
-            if (longs >= 2) { Gate(1999, "long long", n.Arg0); }
         }
-        return ResolveTypeSpec(specs);
+        if (_dialectGate is not null && longs >= 2) { Gate(1999, "long long", n.Arg0); }
+        var resolved = ResolveTypeSpec(specs);
+        // Carry the inline flag up on the Type so the FnSig visitor can read it;
+        // the resolved type string itself never mentions inline.
+        return hasInline ? new EmitContent.Text(resolved, Inline: true) : (EmitContent)resolved;
     }
 
     /// <summary>

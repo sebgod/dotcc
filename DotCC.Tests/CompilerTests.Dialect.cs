@@ -514,4 +514,80 @@ public sealed partial class CompilerTests
         finally { File.Delete(src); }
     }
 
+    // ---- DialectKeywordRewriter: C99 `inline` promotion -------------------
+    // C99 makes `inline` a function specifier. The rewriter promotes the bare
+    // `inline` ID onto the `inline` terminal, but ONLY from the C99 era on
+    // (c99/c11/c17/c23 — the default c17 included). Pre-C99 `inline` stays an
+    // ordinary identifier. The flagged Type makes the FnSig path emit a
+    // [MethodImpl(MethodImplOptions.AggressiveInlining)] on the method.
+
+    [Fact]
+    public void Inline_function_emits_aggressive_inlining_attribute()
+    {
+        var src = WriteTemp("inline int sq(int x) { return x * x; } int main() { return sq(4); }");
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"));
+            // The attribute lands immediately before the method, and the method
+            // is otherwise an ordinary static unsafe local function.
+            emitted.ShouldContain("[MethodImpl(MethodImplOptions.AggressiveInlining)]\nstatic unsafe int sq(int x)");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Static_and_extern_inline_both_get_the_attribute()
+    {
+        var src = WriteTemp("""
+            static inline int cube(int x) { return x * x * x; }
+            extern inline long add(long a, long b) { return a + b; }
+            int main() { return cube(2) + (int)add(1, 2); }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"));
+            emitted.ShouldContain("[MethodImpl(MethodImplOptions.AggressiveInlining)]\nstatic unsafe int cube(int x)");
+            emitted.ShouldContain("[MethodImpl(MethodImplOptions.AggressiveInlining)]\nstatic unsafe long add(long a, long b)");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Non_inline_function_has_no_attribute()
+    {
+        // Guard against the attribute leaking onto ordinary functions.
+        var src = WriteTemp("int plain(int x) { return x; } int main() { return plain(0); }");
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"));
+            emitted.ShouldContain("static unsafe int plain(int x)");
+            emitted.ShouldNotContain("[MethodImpl(MethodImplOptions.AggressiveInlining)]\nstatic unsafe int plain");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Inline_is_an_identifier_pre_c99_but_a_keyword_from_c99()
+    {
+        // `int inline = 5;` is valid C89 — `inline` is an ordinary identifier,
+        // so it parses under c90 (and emits a variable named `inline`, which is
+        // not a C# keyword so it needs no escaping). From c99 on `inline` is a
+        // keyword, so using it as a declarator name is a parse error — proving
+        // the rewriter's version gate flipped. CDialect.Version is keyed by year
+        // (1990/1999/2011/2017/2023), so c11/c17/c23 all correctly reject it via
+        // a plain monotonic `Version >= 1999`.
+        var src = WriteTemp("int main() { int inline = 5; return inline; }");
+        try
+        {
+            Should.NotThrow(() => Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90")));
+            Should.Throw<CompileException>(
+                () => Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c99")));
+            Should.Throw<CompileException>(
+                () => Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17")));
+            Should.Throw<CompileException>(
+                () => Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23")));
+        }
+        finally { File.Delete(src); }
+    }
+
 }

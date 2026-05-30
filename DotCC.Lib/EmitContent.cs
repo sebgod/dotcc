@@ -55,7 +55,12 @@ public abstract record EmitContent
     /// <c>sizeof expr</c>) can compute a size — see <see cref="CType"/>. Distinct
     /// from <paramref name="EnumType"/>, which drives _Bool/enum coercion; this
     /// carries the full size shape (incl. array element + count).</param>
-    public sealed record Text(string Value, string? EnumType = null, CType? Ty = null) : EmitContent;
+    /// <param name="Inline">True when this is a <c>Type</c> result whose specifier
+    /// run included the C99 <c>inline</c> function specifier. Read by the
+    /// <c>FnSig</c> visitors so the emitted method gets a
+    /// <c>[MethodImpl(MethodImplOptions.AggressiveInlining)]</c>. Dropped from the
+    /// resolved type itself (C# has no per-type inline keyword).</param>
+    public sealed record Text(string Value, string? EnumType = null, CType? Ty = null, bool Inline = false) : EmitContent;
 
     /// <summary>
     /// Accumulator for declaration-specifier sequences (<c>int</c>,
@@ -140,7 +145,8 @@ public abstract record EmitContent
         string Type,
         string Name,
         string Params,
-        bool IsStatic) : EmitContent;
+        bool IsStatic,
+        bool IsInline = false) : EmitContent;
 
     /// <summary>
     /// AST marker for a <c>setjmp(env)</c> call. Emitted by

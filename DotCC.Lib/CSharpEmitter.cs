@@ -91,6 +91,10 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     /// <summary>The synthesized <see cref="CType"/> a child propagated, or null.</summary>
     private static CType? TyOf(Item it) => it.Content is EmitContent.Text { Ty: { } t } ? t : null;
 
+    /// <summary>True when this <c>Type</c> child carried a C99 <c>inline</c>
+    /// function specifier (so the enclosing function gets AggressiveInlining).</summary>
+    private static bool InlineOf(Item it) => it.Content is EmitContent.Text { Inline: true };
+
     /// <summary>Build a Text result carrying a synthesized type (for sizeof).</summary>
     private static EmitContent Typed(string text, CType? ty) => new EmitContent.Text(text, null, ty);
 
@@ -286,8 +290,9 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     }
 
     // Flag a construct introduced by a standard newer than the active dialect.
-    // `introducedEra` is the ISO year (CDialect.Era: 1999 / 2011 / 2023). The
-    // source line comes from the construct's first token. No-op when not gating.
+    // `introducedEra` is the ISO year (matches CDialect.Version, keyed by year:
+    // 1999 / 2011 / 2023). Source line from the construct's first token. No-op
+    // when not gating.
     private void Gate(int introducedEra, string feature, Item at)
         => _dialectGate?.RequireMin(introducedEra, feature, at.Position.Line);
 
