@@ -1332,10 +1332,25 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // of a block (`end: ;`). Emit as a bare semicolon; C# parses it as an
     // empty statement too.
     public EmitContent Visit(C.StmtEmpty n) => ";\n";
-    public EmitContent Visit(C.StmtExpr n) =>
+    public EmitContent Visit(C.StmtExpr n)
+    {
+        // Comma operator as a statement (`a, b, c;`): the result is discarded
+        // and C has a sequence point at each comma, so emit each operand as its
+        // own statement. (C# has no comma operator, and `(a, b).Item2;` isn't a
+        // valid statement-expression — CS0201 — so the tuple form can't be used
+        // here.) An operand that isn't a valid C# statement-expression (a bare
+        // value with no side effect) reaches Roslyn as CS0201 — the same loud
+        // failure C# gives such pointless code.
+        if (n.Arg0.Content is EmitContent.CommaSeq seq)
+        {
+            var sb = new StringBuilder();
+            foreach (var op in seq.Operands) { sb.Append(StripOuterParens(op)).Append(";\n"); }
+            return sb.ToString();
+        }
         // CS0201: bare parenthesized assignment isn't a statement. Peel the
         // outer parens that our binop emitters wrap on.
-        $"{StripOuterParens(T(n.Arg0))};\n";
+        return $"{StripOuterParens(T(n.Arg0))};\n";
+    }
 
     // Declarations
     // `Type DeclItemList` — covers single (`int x;`), single-with-init
@@ -2101,7 +2116,39 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         return Typed($"(byte)'{body}'", new CType.Sized("int"));
     }
 
-    public EmitContent Visit(C.Paren n) => new EmitContent.Text($"({T(n.Arg1)})", EnumOf(n.Arg1), TyOf(n.Arg1));
+    // Comma operator (`Expr → Expr ',' E`). Accumulate operands left-to-right
+    // into a CommaSeq; the value/statement lowering happens at the consumer
+    // (Paren / StmtExpr) since C# has no comma operator.
+    public EmitContent Visit(C.CommaOp n)
+    {
+        var ops = n.Arg0.Content is EmitContent.CommaSeq cs
+            ? new List<string>(cs.Operands)
+            : new List<string> { T(n.Arg0) };
+        ops.Add(T(n.Arg2));
+        return new EmitContent.CommaSeq(ops);
+    }
+
+    public EmitContent Visit(C.Paren n)
+    {
+        // Comma operator in value position: C# has no comma operator, but a
+        // tuple evaluates its elements left-to-right and yields them all, so
+        // `(a, b, c).Item3` reproduces "evaluate a, b, c in order, value is c".
+        // (≤7 operands — ValueTuple's direct ItemN range; longer chains don't
+        // occur in real code, so fail clearly rather than emit a wrong shape.)
+        // Pointer/void operands can't go in a C# tuple — those reach Roslyn as a
+        // type error rather than a silent miscompile, which is the safe failure.
+        if (n.Arg1.Content is EmitContent.CommaSeq seq)
+        {
+            if (seq.Operands.Count > 7)
+            {
+                throw new CompileException(
+                    "comma-operator chains longer than 7 operands aren't supported");
+            }
+            var joined = string.Join(", ", seq.Operands.Select(StripOuterParens));
+            return $"({joined}).Item{seq.Operands.Count}";
+        }
+        return new EmitContent.Text($"({T(n.Arg1)})", EnumOf(n.Arg1), TyOf(n.Arg1));
+    }
 
     // C23 keyword constants (only reached under -std=c23, via the rewriter's
     // ID->terminal promotion). `_Bool` lowers to C# `bool`, so the boolean

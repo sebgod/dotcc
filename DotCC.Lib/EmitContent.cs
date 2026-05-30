@@ -200,4 +200,16 @@ public abstract record EmitContent
     /// produce a single-entry list; <c>declItemListCons</c> concatenates.
     /// </summary>
     public sealed record DeclEntries(IReadOnlyList<DeclEntry> Entries) : EmitContent;
+
+    /// <summary>
+    /// A C comma-operator chain (<c>a, b, c</c>) — the operand texts in
+    /// source order. Produced by <c>Visit(C.CommaOp)</c> off the full-expression
+    /// <c>Expr</c> tier, which only reaches two consumers: <c>Visit(C.Paren)</c>
+    /// (value context — lowers to a tuple <c>(a, b, c).Item3</c>, since C#'s
+    /// tuple evaluates elements left-to-right and C# has no comma operator) and
+    /// <c>Visit(C.StmtExpr)</c> (statement context — the result is discarded, so
+    /// each operand becomes its own statement). Because <c>Expr</c> is used
+    /// nowhere else, this variant can't escape to a <c>T()</c> that expects code.
+    /// </summary>
+    public sealed record CommaSeq(IReadOnlyList<string> Operands) : EmitContent;
 }

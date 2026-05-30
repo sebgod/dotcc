@@ -226,6 +226,55 @@ public sealed class CompilerTests
         finally { File.Delete(src); }
     }
 
+    // ---- comma operator -------------------------------------------------
+
+    [Fact]
+    public void Comma_operator_value_form_lowers_to_tuple()
+    {
+        // `(a, b, c)` → `(a, b, c).Item3` — C# tuples evaluate left-to-right
+        // and C# has no comma operator.
+        var src = WriteTemp("int main() { int a=0,b=0; int x = (a = 1, b = 2, a + b); return x; }");
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("(a = 1, b = 2, a + b).Item3");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Comma_operator_statement_form_splits_into_statements()
+    {
+        // `a = 1, b = 2;` (result discarded) → two sequential statements.
+        var src = WriteTemp("int main() { int a=0,b=0; a = 1, b = 2; return a + b; }");
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("a = 1;");
+            emitted.ShouldContain("b = 2;");
+            emitted.ShouldNotContain(".Item2");   // not the tuple form in stmt position
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Call_argument_commas_stay_separators()
+    {
+        // A comma in a call argument list is a separator, NOT the comma
+        // operator — `f(a, b)` is two args, no tuple.
+        var src = WriteTemp("""
+            int add(int x, int y) { return x + y; }
+            int main() { return add(2, 3); }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("add(2, 3)");
+            emitted.ShouldNotContain(".Item2");
+        }
+        finally { File.Delete(src); }
+    }
+
     // ---- octal (0-prefix) + binary (0b) integer literals ----------------
 
     [Fact]

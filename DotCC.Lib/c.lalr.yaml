@@ -271,6 +271,14 @@ symbols:
   # rejects as CS0136) can be alpha-renamed apart. See CSharpEmitter's
   # PushScope / DeclareLocal / ResolveLocal.
   - ScopeEnter     # 146 marker non-terminal (epsilon)
+  # Expr — the full-expression tier (the comma operator), one level BELOW
+  # assignment (`E`). `Expr → Expr ',' E` is C's comma operator: lowest
+  # precedence, left-associative, evaluate each operand left-to-right, value is
+  # the last. Used ONLY where C's grammar uses `expression` rather than
+  # `assignment-expression` — the parenthesized primary `( Expr )` and the
+  # expression statement `Expr ;` — so commas in call arguments / initializers
+  # (which stay on `E`) remain separators, not operators.
+  - Expr           # 147
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -543,7 +551,10 @@ productions:
       # aren't covered (their `stackalloc` lowering doesn't compose with static
       # lifetime) — those keep their own `Decl` shapes and so won't match here.
       - { lhs: Stmt, rhs: ['static', Type, DeclItemList, ';'], action: stmtStaticDecl }
-      - { lhs: Stmt, rhs: [E, ';'],                        action: stmtExpr }
+      # Expression statement uses the full `Expr` tier so `a, b;` (comma
+      # operator, result discarded) parses; the visitor splits it into
+      # sequential statements.
+      - { lhs: Stmt, rhs: [Expr, ';'],                     action: stmtExpr }
       - { lhs: Stmt, rhs: [Block] }
       # `goto label ;` and `label : Stmt` — direct lowering, C# accepts
       # identical syntax (and the same forward-reference semantics inside
@@ -654,6 +665,15 @@ productions:
   - derivation: none
     rules:
       - { lhs: MemberInit, rhs: ['.', ID, '=', E], action: memberInit }
+
+  # Comma operator — the full-expression tier above assignment. Left-assoc,
+  # lowest precedence. `Expr → E` is the no-comma passthrough; `Expr → Expr , E`
+  # is the operator. Only `( Expr )` (Primary) and `Expr ;` (stmtExpr) use Expr,
+  # so call-argument / initializer commas (on `E`) stay separators.
+  - derivation: leftmost
+    rules:
+      - { lhs: Expr, rhs: [Expr, ',', E], action: commaOp }
+      - { lhs: Expr, rhs: [E] }
 
   # Assignment (incl. compound) is right-associative — all E rules share the
   # rightmost group so on lookahead `=`/`+=`/... at state `[..LOr]` the
@@ -812,7 +832,10 @@ productions:
       - { lhs: Primary, rhs: ['TRUE'],      action: litTrue }
       - { lhs: Primary, rhs: ['FALSE'],     action: litFalse }
       - { lhs: Primary, rhs: ['NULLPTR'],   action: litNullptr }
-      - { lhs: Primary, rhs: ['(', E, ')'], action: paren }
+      # Parenthesized expression uses the full `Expr` tier, so `( a, b )` is the
+      # comma operator. (Cast `( Type ) Unary` still disambiguates by the first
+      # token after `(`; function calls use `ArgList`, not `Expr`.)
+      - { lhs: Primary, rhs: ['(', Expr, ')'], action: paren }
 
   - derivation: leftmost
     rules:
