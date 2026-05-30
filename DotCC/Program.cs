@@ -58,10 +58,19 @@ internal static class Program
         {
             Description = "C dialect: c90/c99/c11/c17/c18/c23. Default: c17.",
         };
+        var pedanticOpt = new Option<bool>("-pedantic")
+        {
+            Description = "Warn on language features newer than the selected -std (e.g. // comments are not gated, but designated initializers under c90 warn).",
+        };
+        var pedanticErrorsOpt = new Option<bool>("-pedantic-errors")
+        {
+            Description = "Like -pedantic, but treat the dialect violations as errors (non-zero exit).",
+        };
 
         var root = new RootCommand("dotcc — a C compiler frontend that transpiles to .NET 10 / C# 14.")
         {
             inputArg, outOpt, emitOpt, preprocessOpt, includeOpt, defineOpt, compileOpt, sharedOpt, stdOpt,
+            pedanticOpt, pedanticErrorsOpt,
         };
 
         root.SetAction(parse =>
@@ -75,6 +84,8 @@ internal static class Program
             var compileFlag = parse.GetValue(compileOpt);
             var sharedFlag = parse.GetValue(sharedOpt);
             var stdValue = parse.GetValue(stdOpt);
+            var pedanticFlag = parse.GetValue(pedanticOpt);
+            var pedanticErrorsFlag = parse.GetValue(pedanticErrorsOpt);
 
             if (inputs.Length == 0)
             {
@@ -101,7 +112,7 @@ internal static class Program
                 emit = EmitKind.Build;
             }
 
-            return Run(inputs, output, emit, preprocessOnly, includes, defines, sharedFlag, dialect);
+            return Run(inputs, output, emit, preprocessOnly, includes, defines, sharedFlag, dialect, pedanticFlag, pedanticErrorsFlag);
         });
 
         return root.Parse(args).Invoke();
@@ -117,7 +128,9 @@ internal static class Program
         string[] includeDirs,
         string[] defines,
         bool libraryMode,
-        CDialect dialect)
+        CDialect dialect,
+        bool pedantic,
+        bool pedanticErrors)
     {
         if (preprocessOnly)
         {
@@ -134,7 +147,9 @@ internal static class Program
                 defines,
                 fileBased: emit == EmitKind.Csharp && !libraryMode,
                 libraryMode: libraryMode,
-                dialect: dialect);
+                dialect: dialect,
+                pedantic: pedantic,
+                pedanticErrors: pedanticErrors);
         }
         catch (CompileException ex)
         {

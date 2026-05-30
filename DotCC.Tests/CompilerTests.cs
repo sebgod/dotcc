@@ -1197,6 +1197,70 @@ public sealed class CompilerTests
         ((int)(Libc.CBool)false).ShouldBe(0);
     }
 
+    // ---- Dialect gating (-pedantic / -pedantic-errors) --------------------
+    // dotcc parses the union of all dialects; the gate REJECTS input features
+    // that postdate the selected -std (gcc -pedantic-errors model). Opt-in:
+    // plain -std= stays permissive. Output lowering is unaffected.
+
+    [Fact]
+    public void Dialect_gate_is_off_by_default()
+    {
+        // _Bool is a C99 feature; under c90 WITHOUT pedantic it must still emit.
+        var src = WriteTemp("int main() { _Bool b = 1; return (int)b; }");
+        try
+        {
+            Should.NotThrow(() => Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90")));
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Theory]
+    [InlineData("int main() { _Bool b = 1; return 0; }", "c90", "_Bool", "C99")]
+    [InlineData("int main() { long long x = 5; return (int)x; }", "c90", "long long", "C99")]
+    [InlineData("int main() { for (int i = 0; i < 3; i++) {} return 0; }", "c90", "for", "C99")]
+    [InlineData("_Static_assert(1, \"ok\");\nint main() { return 0; }", "c99", "_Static_assert", "C11")]
+    [InlineData("enum Color : unsigned char { Red };\nint main() { return 0; }", "c17", "enum", "C23")]
+    public void Pedantic_errors_rejects_too_new_feature(string body, string std, string featureNeedle, string stdNeedle)
+    {
+        var src = WriteTemp(body);
+        try
+        {
+            var ex = Should.Throw<CompileException>(() =>
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse(std), pedanticErrors: true));
+            ex.Message.ShouldContain(featureNeedle);
+            ex.Message.ShouldContain(stdNeedle);
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Pedantic_errors_allows_feature_at_its_own_standard()
+    {
+        // _Bool under c99 (its own standard) must NOT be gated.
+        var src = WriteTemp("int main() { _Bool b = 1; return (int)b; }");
+        try
+        {
+            Should.NotThrow(() =>
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c99"), pedanticErrors: true));
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Pedantic_errors_collects_all_violations_at_once()
+    {
+        // Two distinct C99 features under c90 — both must appear in one error.
+        var src = WriteTemp("int main() { _Bool b = 1; long long x = 5; return (int)b + (int)x; }");
+        try
+        {
+            var ex = Should.Throw<CompileException>(() =>
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), pedanticErrors: true));
+            ex.Message.ShouldContain("_Bool");
+            ex.Message.ShouldContain("long long");
+        }
+        finally { File.Delete(src); }
+    }
+
     // ---- Relational / logical operators yield C `int` 0/1 -----------------
     // They lower to CBool so the result is usable in any integer position
     // (assignment, arithmetic, argument, return) — not just conditionals.

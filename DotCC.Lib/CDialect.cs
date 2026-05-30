@@ -60,6 +60,24 @@ public readonly record struct CDialect(int Version)
         _ => null,
     };
 
+    /// <summary>
+    /// Chronological ordering key — the ISO publication year (1990 / 1999 /
+    /// 2011 / 2017 / 2023). <see cref="Version"/> is deliberately NOT monotonic
+    /// across the C timeline (<c>c11</c>'s 11 sorts below <c>c99</c>'s 99), so
+    /// any "is this dialect at least as new as standard X" comparison MUST use
+    /// <c>Era</c>, never <c>Version</c>. Used by dialect gating to decide
+    /// whether a feature introduced in a given standard is available.
+    /// </summary>
+    public int Era => Version switch
+    {
+        90 => 1990,
+        99 => 1999,
+        11 => 2011,
+        17 => 2017,
+        23 => 2023,
+        _ => Version,
+    };
+
     private static readonly Dictionary<string, CDialect> _byName = new(StringComparer.Ordinal)
     {
         ["c90"] = new(90),

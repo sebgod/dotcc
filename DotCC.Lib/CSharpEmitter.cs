@@ -189,10 +189,22 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     /// analysis pass. Null/empty (the default, used by the analysis pass
     /// itself) means no promotion — every malloc decl emits its low-level
     /// form, which is exactly what the analysis pass discards.</param>
-    public CSharpEmitter(IReadOnlySet<(string Fn, string Var)>? promotable = null)
+    // Dialect-gating sink. Non-null ONLY on the emit pass under -pedantic; null
+    // on the analysis pass and on the default permissive path — so gates are a
+    // no-op unless gating is requested, and each violation is collected once.
+    private readonly DialectGate? _dialectGate;
+
+    public CSharpEmitter(IReadOnlySet<(string Fn, string Var)>? promotable = null, DialectGate? dialectGate = null)
     {
         _promotableIn = promotable ?? new HashSet<(string, string)>();
+        _dialectGate = dialectGate;
     }
+
+    // Flag a construct introduced by a standard newer than the active dialect.
+    // `introducedEra` is the ISO year (CDialect.Era: 1999 / 2011 / 2023). The
+    // source line comes from the construct's first token. No-op when not gating.
+    private void Gate(int introducedEra, string feature, Item at)
+        => _dialectGate?.RequireMin(introducedEra, feature, at.Position.Line);
 
     public int MainArity { get; private set; } = -1;
 
@@ -530,7 +542,11 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // (byte/sbyte/short/ushort/int/uint/long/ulong), each of which is a valid C#
     // enum base, so it passes straight through as the base. rhs indices:
     // enum(0) ID(1) :(2) Type(3) {(4) EnumList(5) }(6) ;(7).
-    public EmitContent Visit(C.EnumDefTyped n) => EmitEnum(T(n.Arg1), EI(n.Arg5), T(n.Arg3));
+    public EmitContent Visit(C.EnumDefTyped n)
+    {
+        Gate(2023, "enum with fixed underlying type (`enum : T`)", n.Arg0);  // C23
+        return EmitEnum(T(n.Arg1), EI(n.Arg5), T(n.Arg3));
+    }
 
     // Shared by plain `enum Name { … }` (base int) and the C23 fixed-underlying
     // form `enum Name : T { … }` (base = mapped C# integral type).
@@ -794,7 +810,24 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         return new EmitContent.SpecList(combined);
     }
 
-    public EmitContent Visit(C.TypeFromSpec n) => ResolveTypeSpec(S(n.Arg0));
+    public EmitContent Visit(C.TypeFromSpec n)
+    {
+        var specs = S(n.Arg0);
+        // Dialect gates for type-specifier features (once per resolved type,
+        // with a source line). `_Bool`/`long long` are C99; `_Float128` is C23.
+        if (_dialectGate is not null)
+        {
+            var longs = 0;
+            foreach (var s in specs)
+            {
+                if (s == "_Bool") { Gate(1999, "_Bool", n.Arg0); }
+                else if (s == "Float128") { Gate(2023, "_Float128 / __float128", n.Arg0); }
+                else if (s == "long") { longs++; }
+            }
+            if (longs >= 2) { Gate(1999, "long long", n.Arg0); }
+        }
+        return ResolveTypeSpec(specs);
+    }
 
     /// <summary>
     /// Resolve a declaration-specifier marker string (concatenated by
@@ -1005,8 +1038,11 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // here is the LHS (`int i = 0` form); the StripOuterParens on the
     // incr keeps the emitter from wrapping `i++` in extra parens that C#
     // rejects in for-clause position.
-    public EmitContent Visit(C.StmtForDecl n) =>
-        $"for ({T(n.Arg2)}; {CondOf(n.Arg4)}; {T(n.Arg6)}) {T(n.Arg8)}";
+    public EmitContent Visit(C.StmtForDecl n)
+    {
+        Gate(1999, "declaration in `for` initializer", n.Arg0);  // C99
+        return $"for ({T(n.Arg2)}; {CondOf(n.Arg4)}; {T(n.Arg6)}) {T(n.Arg8)}";
+    }
     public EmitContent Visit(C.StmtForExpr n) =>
         $"for ({T(n.Arg2)}; {CondOf(n.Arg4)}; {T(n.Arg6)}) {T(n.Arg8)}";
 
@@ -1241,6 +1277,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // from declaration order (C99 allows it; C# does too).
     public EmitContent Visit(C.DeclStructDesignated n)
     {
+        Gate(1999, "designated initializers", n.Arg0);  // C99
         var type = T(n.Arg0);
         var name = T(n.Arg1);
         NoteLocal(name);
@@ -1629,6 +1666,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         if (_fnMalloc.TryGetValue(name, out var mv)) { mv.TotalRefs++; }
         if (name == "__func__")
         {
+            Gate(1999, "__func__", n.Arg0);  // C99 predefined identifier
             // `_currentFunctionName` is the enclosing function being
             // reduced. If it's null we're outside any function (illegal
             // C use of __func__) — emit a sentinel so Roslyn surfaces the
@@ -1667,7 +1705,22 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // (u/U/l/L/ll/LL/ul/ull, case-insensitive, order-insensitive) to C#'s
     // equivalents (no `ll` form — both `l` and `ll` mean 64-bit `long` in
     // C#, since C# `long` is unconditionally 64-bit).
-    public EmitContent Visit(C.Num n) => NormalizeIntSuffix(T(n.Arg0));
+    public EmitContent Visit(C.Num n)
+    {
+        var raw = T(n.Arg0);
+        // The `ll`/`LL`/`ull`/`ULL` suffix (>= 2 consecutive Ls) is the C99
+        // `long long` integer-literal suffix — gate under < c99.
+        if (_dialectGate is not null)
+        {
+            var ls = 0;
+            for (int i = raw.Length - 1; i >= 0 && (raw[i] is 'l' or 'L' or 'u' or 'U'); i--)
+            {
+                if (raw[i] is 'l' or 'L') { ls++; }
+            }
+            if (ls >= 2) { Gate(1999, "`long long` (ll) integer suffix", n.Arg0); }
+        }
+        return NormalizeIntSuffix(raw);
+    }
 
     private static string NormalizeIntSuffix(string raw)
     {
@@ -1744,10 +1797,12 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // program; a *false* static_assert that clang would reject is silently
     // accepted (documented limitation in C-SUPPORT.md). Works at both file
     // scope (Fn) and block scope (Stmt) — the comment is inert in either.
-    public EmitContent Visit(C.StaticAssert n)          => StaticAssertComment(T(n.Arg4));
-    public EmitContent Visit(C.StaticAssertNoMsg n)     => StaticAssertComment(null);
-    public EmitContent Visit(C.StaticAssertStmt n)      => StaticAssertComment(T(n.Arg4));
-    public EmitContent Visit(C.StaticAssertStmtNoMsg n) => StaticAssertComment(null);
+    // `_Static_assert` (and the C23 lowercase `static_assert` promoted onto it)
+    // is a C11 feature — gate under < c11. Arg0 is the `_Static_assert` token.
+    public EmitContent Visit(C.StaticAssert n)          { Gate(2011, "_Static_assert", n.Arg0); return StaticAssertComment(T(n.Arg4)); }
+    public EmitContent Visit(C.StaticAssertNoMsg n)     { Gate(2011, "_Static_assert", n.Arg0); return StaticAssertComment(null); }
+    public EmitContent Visit(C.StaticAssertStmt n)      { Gate(2011, "_Static_assert", n.Arg0); return StaticAssertComment(T(n.Arg4)); }
+    public EmitContent Visit(C.StaticAssertStmtNoMsg n) { Gate(2011, "_Static_assert", n.Arg0); return StaticAssertComment(null); }
 
     /// <summary>
     /// Render a dropped <c>_Static_assert</c> as an inert block comment.

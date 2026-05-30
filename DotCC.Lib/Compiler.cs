@@ -165,7 +165,9 @@ public static class Compiler
         IReadOnlyList<string>? defines = null,
         bool fileBased = true,
         bool libraryMode = false,
-        CDialect? dialect = null)
+        CDialect? dialect = null,
+        bool pedantic = false,
+        bool pedanticErrors = false)
     {
         var includeMap = BuildIncludeMap(inputPaths, includeDirs);
         var lexerTable = C.BuildLexer();
@@ -242,7 +244,12 @@ public static class Compiler
         // Pass 2 — emit. Seed the real emitter with the promotion set so each
         // node decides locally: a promotable decl emits `S p = new S();`, its
         // `->` accesses emit `.`, and its free() is dropped.
-        var emitter = new CSharpEmitter(analyzer.PromotableMallocVars);
+        // Dialect gating (the `-pedantic` rejection layer) collects on this pass
+        // only — never the analysis pass — so each violation is reported once.
+        // Null gate on the default permissive path keeps every Gate() a no-op.
+        var gateOn = pedantic || pedanticErrors;
+        var dialectGate = gateOn ? new DialectGate(activeDialect) : null;
+        var emitter = new CSharpEmitter(analyzer.PromotableMallocVars, dialectGate);
         var emitParser = C.BuildParser(emitter);
 
         var allFunctions = new StringBuilder();
@@ -270,6 +277,25 @@ public static class Compiler
         if (!libraryMode && mainArity < 0)
         {
             throw new CompileException("no `main` function defined in any translation unit.");
+        }
+
+        // Flush dialect-gating diagnostics (collect-all). `-pedantic-errors`
+        // fails the compile with every violation listed; `-pedantic` alone
+        // warns to stderr and continues (same channel CPreprocessor uses for
+        // #warning). Plain `-std=` never gets here — the gate is null.
+        if (dialectGate is not null && dialectGate.HasAny)
+        {
+            if (pedanticErrors)
+            {
+                // The frontend prefixes "dotcc: ", so the message lines start at
+                // "error: " (the first line then reads "dotcc: error: …").
+                throw new CompileException(
+                    string.Join("\n", dialectGate.Diagnostics.Select(d => "error: " + d)));
+            }
+            foreach (var d in dialectGate.Diagnostics)
+            {
+                Console.Error.WriteLine("dotcc: warning: " + d);
+            }
         }
 
         return BuildShell(mainArity, allFunctions.ToString(), emitter.StructDecls, emitter.UsingAliases, emitter.Globals, fileBased, libraryMode, emitter.Exports);
