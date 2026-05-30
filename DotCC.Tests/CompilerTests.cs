@@ -226,6 +226,26 @@ public sealed class CompilerTests
         finally { File.Delete(src); }
     }
 
+    // ---- bit-fields -----------------------------------------------------
+
+    [Fact]
+    public void Bitfield_lowers_to_full_field_width_dropped()
+    {
+        var src = WriteTemp("""
+            struct Flags { unsigned ready : 1; unsigned : 2; unsigned mode : 3; };
+            int main() { struct Flags f; f.ready = 1; f.mode = 5; return f.mode; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("public uint ready;");   // named bit-field → full field
+            emitted.ShouldContain("public uint mode;");
+            emitted.ShouldContain("bit-field :1");          // width recorded in a comment
+            emitted.ShouldNotContain("public uint  ;");     // anonymous padding → nothing
+        }
+        finally { File.Delete(src); }
+    }
+
     // ---- multi-dimensional arrays ---------------------------------------
 
     [Fact]

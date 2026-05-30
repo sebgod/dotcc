@@ -603,6 +603,23 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         return $"public {T(n.Arg0)} {Id(fieldName)};\n";
     }
 
+    // Named bit-field `Type ID : width ;`. C# has no bit-fields, so dotcc emits
+    // a FULL field of the declared type and DROPS the width (lossy lowering):
+    // correct for values that fit the width — the common case — but it does NOT
+    // truncate / wrap on overflow, and the struct's size & layout differ from C.
+    // A faithful packed lowering (backing storage + masked accessors) is future
+    // work. Documented in C-SUPPORT.md.
+    public EmitContent Visit(C.StructBitField n)
+    {
+        var fieldName = T(n.Arg1);
+        _pendingFields.Add(fieldName);
+        return $"public {T(n.Arg0)} {Id(fieldName)}; // C bit-field :{StripOuterParens(T(n.Arg3))} (width dropped)\n";
+    }
+
+    // Anonymous bit-field `Type : width ;` — pure padding/alignment in C, with
+    // no accessible member. Nothing to emit.
+    public EmitContent Visit(C.StructAnonBitField n) => string.Empty;
+
     private void DrainPendingFields(string typeName)
     {
         _structFields[typeName] = new List<string>(_pendingFields);

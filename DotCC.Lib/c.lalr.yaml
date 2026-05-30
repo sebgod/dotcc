@@ -607,6 +607,14 @@ productions:
   - derivation: none
     rules:
       - { lhs: Member, rhs: [Type, ID, ';'], action: structMember }
+      # Bit-fields `Type ID : width ;` and anonymous padding `Type : width ;`.
+      # C# has no bit-fields; dotcc lowers a named bit-field to a FULL field of
+      # the declared type (the width is dropped — see structBitField), and an
+      # anonymous bit-field (padding) to nothing. After `Type ID`, lookahead `:`
+      # selects the bit-field over the plain member (`;`); after a bare `Type`,
+      # `:` selects the anonymous form.
+      - { lhs: Member, rhs: [Type, ID, ':', E, ';'], action: structBitField }
+      - { lhs: Member, rhs: [Type, ':', E, ';'],     action: structAnonBitField }
 
   # EnumList / EnumItem — enumerator body for `enum Name { … }`.
   - derivation: leftmost
