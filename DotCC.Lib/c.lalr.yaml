@@ -694,6 +694,14 @@ productions:
       # the same shape.
       - { lhs: Decl, rhs: [Type, ID, '[', E, ']', '=', '{', InitList, '}'], action: declArrInit }
       - { lhs: Decl, rhs: [Type, ID, '[', ']', '=', '{', InitList, '}'], action: declArrInitImplicit }
+      # `char s[] = "…"` / `char s[N] = "…"` — char array initialized from a
+      # string literal (C89). Decodes the string to bytes and stackalloc's a
+      # MUTABLE copy (a bare string literal is a pinned read-only RVA; a char[]
+      # is writable). StringSeq → adjacent literals concatenate; the sized form
+      # zero-pads to N. Conflict-free with the `{ … }` forms above: after `=`,
+      # `{` → brace init, a STRING → these.
+      - { lhs: Decl, rhs: [Type, ID, '[', ']', '=', StringSeq],    action: declCharArrStr }
+      - { lhs: Decl, rhs: [Type, ID, '[', E, ']', '=', StringSeq], action: declCharArrStrSized }
       # Struct aggregate initializer: `Point p = {1, 2};`. The visitor looks
       # up the struct's field names from a side map populated by StructDef /
       # TypedefStruct / UnionDef, then emits `Point p = new Point { x = 1,

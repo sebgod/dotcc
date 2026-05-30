@@ -1632,6 +1632,75 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         return EmitArrInit(T(n.Arg0), DeclareLocal(name), args);
     }
 
+    // `char s[] = "…"` — char array from a string literal (C89). Decode the
+    // string to its bytes and `stackalloc` a MUTABLE copy with a trailing NUL
+    // (a bare string literal is a pinned read-only RVA; `char[]` is writable).
+    // Byte values (incl. > 0x7F) are fine here — it's a byte array, not a u8
+    // literal, so no UTF-8 re-encoding limitation.
+    public EmitContent Visit(C.DeclCharArrStr n)  // Type ID [ ] = StringSeq
+    {
+        var elem = T(n.Arg0);
+        var name = T(n.Arg1);
+        var bytes = DecodeStrPartsToBytes(n.Arg5);
+        NoteLocal(name);
+        NoteLocalArray(name, new CType.Arr(new CType.Sized(elem), bytes.Count + 1));
+        return EmitCharArr(elem, DeclareLocal(name), bytes, bytes.Count + 1);
+    }
+    public EmitContent Visit(C.DeclCharArrStrSized n)  // Type ID [ E ] = StringSeq
+    {
+        var elem = T(n.Arg0);
+        var name = T(n.Arg1);
+        var sizeText = StripOuterParens(T(n.Arg3));
+        var bytes = DecodeStrPartsToBytes(n.Arg6);
+        NoteLocal(name);
+        var total = bytes.Count + 1;
+        if (int.TryParse(sizeText, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var n2))
+        {
+            total = n2;  // explicit size: C zero-pads (or truncates) to N
+            NoteLocalArray(name, new CType.Arr(new CType.Sized(elem), n2));
+        }
+        else { NoteLocalArray(name, new CType.Arr(new CType.Sized(elem), total)); }
+        return EmitCharArr(elem, DeclareLocal(name), bytes, total);
+    }
+
+    // Emit `T* name = stackalloc T[]{ b0, b1, …, 0 [, padding 0s] }` for a char
+    // array of `total` elements: the decoded string bytes, a NUL terminator,
+    // then zero-padding up to `total` (C zero-fills the unspecified tail). If
+    // the string + NUL already exceeds `total`, C drops the NUL — emit just the
+    // first `total` bytes (no terminator), matching C.
+    private static string EmitCharArr(string elem, string name, List<int> bytes, int total)
+    {
+        var values = new List<int>(System.Math.Max(total, bytes.Count + 1));
+        values.AddRange(bytes);
+        values.Add(0);                                   // NUL terminator
+        while (values.Count < total) { values.Add(0); }  // zero-pad to N
+        if (values.Count > total) { values = values.GetRange(0, total); }  // truncate (no NUL)
+        return $"{elem}* {Id(name)} = stackalloc {elem}[]{{ {string.Join(", ", values)} }}";
+    }
+
+    // Decode a StringSeq's segments to a flat byte list (escapes decoded; source
+    // chars UTF-8-encoded). Unlike the u8-literal path, high bytes are fine here
+    // — the destination is a byte array.
+    private static List<int> DecodeStrPartsToBytes(Item strSeq)
+    {
+        var parts = (EmitContent.StrParts)strSeq.Content;
+        var items = new List<StrItem>();
+        foreach (var body in parts.Bodies) { DecodeCStringBody(body, items); }
+        var bytes = new List<int>(items.Count);
+        foreach (var it in items)
+        {
+            if (it.IsByte) { bytes.Add(it.Value & 0xFF); }
+            else
+            {
+                var ch = (char)it.Value;
+                if (ch < 0x80) { bytes.Add(ch); }
+                else { foreach (var b in System.Text.Encoding.UTF8.GetBytes(ch.ToString())) { bytes.Add(b); } }
+            }
+        }
+        return bytes;
+    }
+
     // Function-pointer local declarator: `int (*fp)(int) [= E]` → C#
     // `delegate*<int, int> fp [= …]`. C# puts the return type LAST in the type
     // arg list (opposite of C). The fn-ptr TYPE's parameters reduce through the

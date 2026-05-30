@@ -226,6 +226,32 @@ public sealed class CompilerTests
         finally { File.Delete(src); }
     }
 
+    // ---- char array initialized from a string literal -------------------
+
+    [Fact]
+    public void Char_array_string_init_emits_mutable_byte_copy()
+    {
+        var src = WriteTemp("int main() { char s[] = \"hi\"; s[0] = 'H'; return s[0]; }");
+        try
+        {
+            // mutable stackalloc copy: 'h','i',NUL
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("stackalloc byte[]{ 104, 105, 0 }");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Char_array_string_init_sized_zero_pads()
+    {
+        var src = WriteTemp("int main() { char buf[5] = \"hi\"; return buf[4]; }");
+        try
+        {
+            // size 5: 'h','i',NUL, then zero-padded to 5
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("stackalloc byte[]{ 104, 105, 0, 0, 0 }");
+        }
+        finally { File.Delete(src); }
+    }
+
     // ---- auto (C23 inference + pre-C23 storage class) -------------------
 
     [Fact]
