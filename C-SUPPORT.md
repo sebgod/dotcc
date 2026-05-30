@@ -189,8 +189,10 @@ The runtime surface dotcc-emitted programs link against. Each function routes to
 | `malloc`, `free` | ✅ | `NativeMemory.Alloc` / `Free` |
 | `calloc`, `realloc` | ❌ | `NativeMemory.AllocZeroed` / `Realloc` |
 | `exit`, `abort`, `_Exit` | ❌ | `Environment.Exit` / `Environment.FailFast` |
-| `atoi`, `atol`, `atof` | ❌ | `int.Parse` / `long.Parse` / `double.Parse` (invariant culture) |
-| `strtol`, `strtod`, `strtoul`, `strtoll` (C99) | ❌ | Same with error-position out param |
+| `atof` | ✅ | `strtod(s, NULL)` — leading-double parse. Fixture `strtod-parse/`. |
+| `atoi`, `atol` | ❌ | `int.Parse` / `long.Parse` (invariant culture) |
+| `strtod` | ✅ | Parses a leading double (sign / decimal / `e`-exponent / C99 `inf`/`nan`), skips leading whitespace, sets `endptr` to the first unconsumed byte (so a buffer of numbers can be walked); `double.Parse(NumberStyles.Float, invariant)` core. Fixture `strtod-parse/`; `LibcTests`. |
+| `strtol`, `strtoul`, `strtoll` (C99) | ❌ | Integer forms with error-position out param + base. |
 | `abs`, `labs`, `llabs` (C99) | ❌ | `Math.Abs` |
 | `rand`, `srand` | ❌ | Thread-local `Random` to match C's process-global seeding |
 | `qsort`, `bsearch` | ❌ | Generic compare-callback; AOT-clean via function pointers |

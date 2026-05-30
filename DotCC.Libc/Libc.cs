@@ -1,9 +1,11 @@
 #nullable enable
 
 using System;
+using System.Globalization;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace DotCC.Libc;
 
@@ -76,6 +78,96 @@ public static unsafe partial class Libc
     {
         Buffer.MemoryCopy(src, dst, count, count);
         return dst;
+    }
+
+    // ---------------------------------------------------------------------
+    // String → number conversions (<stdlib.h>)
+    // ---------------------------------------------------------------------
+
+    /// <summary>
+    /// <c>strtod(nptr, endptr)</c> — parse a leading floating-point number from
+    /// the C string <paramref name="nptr"/> (skipping leading whitespace), set
+    /// <paramref name="endptr"/> (if non-null) to the first unconsumed byte, and
+    /// return the value. Handles optional sign, decimal point, <c>e</c>/<c>E</c>
+    /// exponent, and C99 <c>inf</c>/<c>infinity</c>/<c>nan</c> (case-insensitive).
+    /// No conversion → returns 0 and leaves <c>*endptr == nptr</c>, per C.
+    /// </summary>
+    public static double strtod(byte* nptr, byte** endptr)
+    {
+        byte* p = nptr;
+        // Skip leading whitespace (C "C"-locale isspace: ' ' \t \n \v \f \r).
+        while (*p == (byte)' ' || (*p >= 9 && *p <= 13)) { p++; }
+        byte* start = p;
+
+        bool neg = false;
+        if (*p == (byte)'+' || *p == (byte)'-') { neg = *p == (byte)'-'; p++; }
+
+        if (MatchCI(p, "inf"))
+        {
+            p += 3;
+            if (MatchCI(p, "inity")) { p += 5; }
+            if (endptr != null) { *endptr = p; }
+            return neg ? double.NegativeInfinity : double.PositiveInfinity;
+        }
+        if (MatchCI(p, "nan"))
+        {
+            p += 3;
+            if (*p == (byte)'(')   // optional (n-char-sequence)
+            {
+                while (*p != 0 && *p != (byte)')') { p++; }
+                if (*p == (byte)')') { p++; }
+            }
+            if (endptr != null) { *endptr = p; }
+            return double.NaN;
+        }
+
+        // Decimal mantissa: digits, optional '.', digits.
+        bool sawDigit = false;
+        while (*p >= (byte)'0' && *p <= (byte)'9') { p++; sawDigit = true; }
+        if (*p == (byte)'.')
+        {
+            p++;
+            while (*p >= (byte)'0' && *p <= (byte)'9') { p++; sawDigit = true; }
+        }
+        // Optional exponent — only consumed if followed by digits.
+        if (sawDigit && (*p == (byte)'e' || *p == (byte)'E'))
+        {
+            byte* e = p + 1;
+            if (*e == (byte)'+' || *e == (byte)'-') { e++; }
+            if (*e >= (byte)'0' && *e <= (byte)'9')
+            {
+                p = e;
+                while (*p >= (byte)'0' && *p <= (byte)'9') { p++; }
+            }
+        }
+
+        if (!sawDigit)
+        {
+            if (endptr != null) { *endptr = nptr; }   // no conversion
+            return 0.0;
+        }
+
+        var s = Encoding.ASCII.GetString(start, (int)(p - start));
+        double val = double.Parse(s, NumberStyles.Float, CultureInfo.InvariantCulture);
+        if (endptr != null) { *endptr = p; }
+        return val;
+    }
+
+    /// <summary>
+    /// <c>atof(nptr)</c> — <c>strtod(nptr, NULL)</c>: parse a leading double,
+    /// ignoring where it ends. No error reporting (matches C).
+    /// </summary>
+    public static double atof(byte* nptr) => strtod(nptr, null);
+
+    /// <summary>Case-insensitive ASCII prefix match of a lowercase literal.</summary>
+    private static bool MatchCI(byte* p, string lower)
+    {
+        for (int i = 0; i < lower.Length; i++)
+        {
+            byte b = p[i];
+            if (b == 0 || (b | 0x20) != lower[i]) { return false; }
+        }
+        return true;
     }
 
     // ---------------------------------------------------------------------

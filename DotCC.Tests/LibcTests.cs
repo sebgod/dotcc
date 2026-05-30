@@ -293,6 +293,51 @@ public sealed unsafe class LibcTests
     }
 
     // -----------------------------------------------------------------
+    // strtod / atof
+    // -----------------------------------------------------------------
+
+    [Fact]
+    public void strtod_parses_a_plain_double() =>
+        strtod(L("3.14\0"u8), null).ShouldBe(3.14, 1e-12);
+
+    [Fact]
+    public void strtod_handles_whitespace_sign_exponent_and_trailing_junk() =>
+        strtod(L("  -2.5e3xyz\0"u8), null).ShouldBe(-2500.0, 1e-9);
+
+    [Fact]
+    public void strtod_sets_endptr_to_first_unconsumed_byte()
+    {
+        byte* s = L("1.5 2.25\0"u8);
+        byte* end;
+        double a = strtod(s, &end);
+        double b = strtod(end, &end);
+        a.ShouldBe(1.5, 1e-12);
+        b.ShouldBe(2.25, 1e-12);
+        (*end).ShouldBe((byte)0);   // walked to the NUL terminator
+    }
+
+    [Fact]
+    public void strtod_no_conversion_returns_zero_and_endptr_at_start()
+    {
+        byte* s = L("abc\0"u8);
+        byte* end;
+        strtod(s, &end).ShouldBe(0.0);
+        ((nint)end).ShouldBe((nint)s);   // *endptr == nptr per C
+    }
+
+    [Fact]
+    public void strtod_parses_inf_and_nan()
+    {
+        strtod(L("inf\0"u8), null).ShouldBe(double.PositiveInfinity);
+        strtod(L("-INFINITY\0"u8), null).ShouldBe(double.NegativeInfinity);
+        double.IsNaN(strtod(L("nan\0"u8), null)).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void atof_is_strtod_without_endptr() =>
+        atof(L("42\0"u8)).ShouldBe(42.0);
+
+    // -----------------------------------------------------------------
     // helpers
     // -----------------------------------------------------------------
 
