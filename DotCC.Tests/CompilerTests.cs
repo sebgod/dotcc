@@ -226,6 +226,41 @@ public sealed class CompilerTests
         finally { File.Delete(src); }
     }
 
+    // ---- function-pointer declarator + unnamed params ------------------
+
+    [Fact]
+    public void Fnptr_local_declarator_lowers_to_delegate_ptr()
+    {
+        // `int (*op)(int, int) = add;` → `delegate*<int, int, int> op = &add;`
+        // (return type last in C#; bare function name gets the C# `&`).
+        var src = WriteTemp("""
+            int add(int a, int b) { return a + b; }
+            int main() { int (*op)(int, int) = add; return op(2, 3); }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("delegate*<int, int, int> op = &add");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Unnamed_parameters_are_synthesized()
+    {
+        // C allows abstract (unnamed) params; C# needs names — synthesize them.
+        var src = WriteTemp("""
+            int f(int, int) { return 0; }
+            int main() { return f(1, 2); }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("int f(int _p");   // synthesized param names
+        }
+        finally { File.Delete(src); }
+    }
+
     // ---- bit-fields -----------------------------------------------------
 
     [Fact]

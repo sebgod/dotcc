@@ -931,6 +931,20 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
 
     // Params
     public EmitContent Visit(C.Param n) { _pendingParams.Add((T(n.Arg1), T(n.Arg0))); return $"{T(n.Arg0)} {Id(T(n.Arg1))}"; }
+    // Unnamed (abstract) parameter — `int f(int, char*)` or a function-pointer
+    // type's params. C# requires a parameter name, so synthesize a unique one
+    // (`_p0`, `_p1`, …). The counter only needs to be unique within a list and
+    // deterministic across the analysis/emit passes — a monotonic counter is
+    // both. For a fn-ptr type the name is dropped by StripParamNames; for a real
+    // prototype/definition the body can't reference it (matching C).
+    public EmitContent Visit(C.ParamUnnamed n)
+    {
+        var type = T(n.Arg0);
+        var name = "_p" + _unnamedParamSeq++;
+        _pendingParams.Add((name, type));
+        return $"{type} {Id(name)}";
+    }
+    private int _unnamedParamSeq;
     // C array-parameter decay: `T arr[]` / `T arr[N]` ≡ `T* arr` per
     // C99 §6.7.5.3p7. The size in the sized form is informational only —
     // we discard it (intentionally don't evaluate Arg3) since C semantics
@@ -1583,6 +1597,34 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         NoteLocal(name);
         NoteLocalArray(name, new CType.Arr(new CType.Sized(T(n.Arg0)), args.Count));
         return EmitArrInit(T(n.Arg0), DeclareLocal(name), args);
+    }
+
+    // Function-pointer local declarator: `int (*fp)(int) [= E]` → C#
+    // `delegate*<int, int> fp [= …]`. C# puts the return type LAST in the type
+    // arg list (opposite of C). The fn-ptr TYPE's parameters reduce through the
+    // Param visitors and stage into _pendingParams — discard them (only an
+    // FnSig's StartFn should adopt staged params; see TypedefFnPtr). A bare
+    // function-name initializer (`= f`, which C decays to a pointer) is given
+    // the `&` C# requires; an explicit `&f` passes through.
+    public EmitContent Visit(C.DeclFnPtr n)            => EmitFnPtrLocal(T(n.Arg0), T(n.Arg3), T(n.Arg6), null);
+    public EmitContent Visit(C.DeclFnPtrNoArgs n)      => EmitFnPtrLocal(T(n.Arg0), T(n.Arg3), "",        null);
+    public EmitContent Visit(C.DeclFnPtrInit n)        => EmitFnPtrLocal(T(n.Arg0), T(n.Arg3), T(n.Arg6), n.Arg9);
+    public EmitContent Visit(C.DeclFnPtrNoArgsInit n)  => EmitFnPtrLocal(T(n.Arg0), T(n.Arg3), "",        n.Arg8);
+
+    private EmitContent EmitFnPtrLocal(string ret, string name, string pars, Item? init)
+    {
+        _pendingParams.Clear();
+        NoteLocal(name);
+        var type = pars.Length == 0
+            ? $"delegate*<{ret}>"
+            : $"delegate*<{StripParamNames(pars)}, {ret}>";
+        if (_currentFunctionName is not null) { _localTypes[name] = type; }
+        var emitted = DeclareLocal(name);
+        if (init is null) { return $"{type} {Id(emitted)} = default"; }
+        var initText = T(init);
+        // `= f` (C decays a function to its address) needs `&f` in C#.
+        if (_fnReturnTypes.ContainsKey(Unescape(initText))) { initText = "&" + initText; }
+        return $"{type} {Id(emitted)} = {initText}";
     }
 
     // ArrDims — the `[D1][D2]…` dimension list of a multi-dimensional array

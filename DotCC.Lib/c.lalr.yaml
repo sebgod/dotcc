@@ -436,6 +436,12 @@ productions:
   - derivation: none
     rules:
       - { lhs: Param, rhs: [Type, ID], action: param }
+      # Unnamed (abstract) parameter — `int f(int, char*)`, and the params of a
+      # function-pointer type `int (*fp)(int, int)`. C allows a name-less
+      # parameter in declarations / function-pointer types; the visitor
+      # synthesizes a unique C# name (C# requires one). Disambiguated from the
+      # named form by lookahead: `Type ID` → named, `Type` then `,`/`)` → unnamed.
+      - { lhs: Param, rhs: [Type], action: paramUnnamed }
       # C array-parameter decay (C99 §6.7.5.3p7): `T arr[]` and `T arr[N]`
       # in a function-parameter position are equivalent to `T* arr` — the
       # array silently decays to a pointer at the function-type boundary.
@@ -668,6 +674,15 @@ productions:
       # positional form). Single-declarator only (like declArr*) since the
       # lowering rewrites the initializer shape.
       - { lhs: Decl, rhs: [Type, ID, '=', '{', InitList, '}'], action: declStructInit }
+      # Function-pointer declarator (block scope): `int (*fp)(int) [= E];`. The
+      # `( * ID )` shape — paren, star, name, paren — distinguishes it from every
+      # other declarator (which start `Type ID`), so it's conflict-free. Lowers
+      # to a C# `delegate*<args…, ret>` local. (The typedef'd form — `typedef
+      # int (*Cmp)(int); Cmp fp;` — also works and is often cleaner.)
+      - { lhs: Decl, rhs: [Type, '(', '*', ID, ')', '(', ParamList, ')'],            action: declFnPtr }
+      - { lhs: Decl, rhs: [Type, '(', '*', ID, ')', '(', ')'],                       action: declFnPtrNoArgs }
+      - { lhs: Decl, rhs: [Type, '(', '*', ID, ')', '(', ParamList, ')', '=', E],    action: declFnPtrInit }
+      - { lhs: Decl, rhs: [Type, '(', '*', ID, ')', '(', ')', '=', E],               action: declFnPtrNoArgsInit }
       # Designated initializer (C99): `Point p = { .x = 1, .y = 2 };`. The
       # user names the fields directly — no _structFields lookup needed at
       # emit time. LALR(1)-distinguished from the positional form by the
