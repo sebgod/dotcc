@@ -379,7 +379,7 @@ miscompiles** — every gap below fails at parse/lex time or is explicitly flagg
 - 🟡 Compound literals — `(struct S){…}` ✅ (struct/union, positional + designated); `(int[]){…}` / `(int){…}` ⛔ (array/scalar, need an abstract array declarator — fails loudly). See the Types table.
 - ✅ Array designators `[2] = 5` — `int a[5] = {[2]=9, [4]=1}` (1-D scalar; dense zero-filled compile-time build, running cursor + reorder + implicit-size; struct/nested-designated still ⛔). Gated C99; fixture `array-designators/`.
 - ✅ Hex float literals `0x1.8p3` — parsed + converted to a decimal value (see the Lexical table).
-- ⛔ `_Complex` / `_Imaginary`.
+- ⛔ `_Complex` / `_Imaginary` — **achievable, not out of scope**: `double _Complex` maps cleanly to `System.Numerics.Complex` (arithmetic, the imaginary unit `I`, and the `<complex.h>` surface — `creal`/`cimag`/`cabs`/`carg`/`conj`/`csqrt`/`cexp`/…). `float _Complex` widens to `Complex` (double-backed; documented precision note). `_Imaginary` stays niche (rarely implemented even by gcc). On the roadmap.
 - ⛔ Flexible array members `struct { int n; int data[]; }`.
 - 🚫 VLAs — out of scope (rare, optional since C11, managed-runtime mismatch). A 1-D runtime extent incidentally lowers to `stackalloc`, but it's not a pursued feature.
 - ✅ `inline` — function specifier → `[MethodImpl(AggressiveInlining)]` (see the Declarations table).
