@@ -582,6 +582,15 @@ internal sealed partial class CSharpEmitter
         var parts = (EmitContent.StrParts)n.Arg0.Content;
         var items = new List<StrItem>();
         foreach (var body in parts.Bodies) { DecodeCStringBody(body, items); }
+        // A decoded escape byte > 0x7F (`"\xff"`, `"\377"`) can't be one byte in
+        // a C# u8 literal — C# UTF-8-encodes \x80+ into two bytes. Route those
+        // strings to a constant byte-array (RVA-backed, see EmitByteArray) so the
+        // exact C bytes survive; keep the readable u8 literal for everything else.
+        if (items.Exists(it => it.IsByte && it.Value > 0x7F))
+        {
+            var (arr, alen) = EmitByteArray(items);
+            return Typed($"L({arr})", new CType.Arr(new CType.Sized("byte"), alen + 1));
+        }
         var (escaped, byteLen) = EmitU8(items);
         return Typed($"L(\"{escaped}\\0\"u8)", new CType.Arr(new CType.Sized("byte"), byteLen + 1));
     }

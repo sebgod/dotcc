@@ -554,15 +554,32 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
-    public void High_byte_string_escape_fails_loudly()
+    public void High_byte_string_escape_lowers_to_byte_array()
     {
-        // A decoded escape byte > 0x7F can't be one byte in a C# u8 literal —
-        // fail clearly rather than silently UTF-8-encode it to two bytes.
-        var src = WriteTemp("int puts(char*s); int main() { return puts(\"\\xff\"); }");
+        // A decoded escape byte > 0x7F can't be one byte in a C# u8 literal (C#
+        // UTF-8-encodes \x80+ into two bytes), so dotcc emits the string as a
+        // constant byte-array preserving the exact C bytes. Roslyn RVA-optimizes
+        // `new byte[]{consts}` in ReadOnlySpan position, so L() still pins a
+        // fixed-address pointer. Mixed escape + ASCII, NUL-terminated. (`Z`
+        // separates the escape from ASCII: C's `\x` is greedy and would fold a
+        // trailing hex digit into the escape, so a non-hex char is used here.)
+        var src = WriteTemp("int puts(char*s); int main() { return puts(\"\\xffZ\"); }");
         try
         {
-            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
-                .Message.ShouldContain("> 0x7F");
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("L(new byte[]{ 0xFF, 0x5A, 0 })");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Octal_high_byte_string_escape_lowers_to_byte_array()
+    {
+        // `\377` (octal 255) is also > 0x7F — same byte-array lowering.
+        var src = WriteTemp("int puts(char*s); int main() { return puts(\"\\377\"); }");
+        try
+        {
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("L(new byte[]{ 0xFF, 0 })");
         }
         finally { File.Delete(src); }
     }

@@ -474,7 +474,8 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // bytes become a named escape or `\xHH`, and a `\xHH` is never left next to
     // a literal hex digit (C# would greedily fold it into the escape). A decoded
     // escape byte > 0x7F can't be one byte in a u8 literal (C# UTF-8-encodes
-    // `\x80`+ as multi-byte), so fail loudly rather than miscompile.
+    // `\x80`+ as multi-byte); Visit(C.Str) routes such strings to EmitByteArray
+    // before reaching here, so the guard below is defensive (should never fire).
     private static (string Escaped, int ByteLen) EmitU8(List<StrItem> items)
     {
         var sb = new StringBuilder(items.Count + 8);
@@ -511,9 +512,11 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
                 int b = it.Value;
                 if (b > 0x7F)
                 {
+                    // Defensive: Visit(C.Str) sends high-byte strings to the
+                    // byte-array path, so this should be unreachable.
                     throw new CompileException(
-                        $"string escape byte 0x{b:X2} > 0x7F isn't representable in a UTF-8 literal yet "
-                        + "(dotcc emits string data as a C# u8 literal).");
+                        $"string escape byte 0x{b:X2} > 0x7F reached the u8-literal path "
+                        + "(expected the byte-array lowering) — please report this.");
                 }
                 len += 1;
                 switch (b)
@@ -528,6 +531,36 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
             }
         }
         return (sb.ToString(), len);
+    }
+
+    // Build the EXACT C byte sequence as a C# constant byte-array initializer
+    // (`new byte[]{ 0xHH, …, 0 }`, NUL-terminated). Used when a decoded escape
+    // byte > 0x7F can't ride a u8 literal (C# would UTF-8 re-encode `\x80`+ into
+    // two bytes). Each decoded escape byte goes in verbatim; a source char is
+    // expanded to its UTF-8 bytes (matching C's UTF-8 source encoding, exactly
+    // as the u8 path does). Roslyn lowers `new byte[]{consts}` in a
+    // ReadOnlySpan<byte> position to an RVA blob — fixed address, no allocation,
+    // no GC move — so L()'s pinned pointer stays valid for the program lifetime,
+    // identical to the u8-literal case. Returns the initializer text and the
+    // byte length (excluding the NUL the caller accounts for).
+    private static (string Text, int ByteLen) EmitByteArray(List<StrItem> items)
+    {
+        var bytes = new List<int>(items.Count + 1);
+        foreach (var it in items)
+        {
+            if (it.IsByte) { bytes.Add(it.Value & 0xFF); }
+            else
+            {
+                foreach (var u in System.Text.Encoding.UTF8.GetBytes(((char)it.Value).ToString()))
+                {
+                    bytes.Add(u);
+                }
+            }
+        }
+        var sb = new StringBuilder("new byte[]{ ");
+        foreach (var b in bytes) { sb.Append("0x").Append(b.ToString("X2")).Append(", "); }
+        sb.Append("0 }");  // NUL terminator
+        return (sb.ToString(), bytes.Count);
     }
 
     private static int CountCommas(string s)
