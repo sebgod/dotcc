@@ -95,6 +95,10 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     /// function specifier (so the enclosing function gets AggressiveInlining).</summary>
     private static bool InlineOf(Item it) => it.Content is EmitContent.Text { Inline: true };
 
+    /// <summary>True when this <c>Type</c> child carried a C11 <c>_Noreturn</c>
+    /// function specifier (so the enclosing function gets [DoesNotReturn]).</summary>
+    private static bool NoreturnOf(Item it) => it.Content is EmitContent.Text { Noreturn: true };
+
     /// <summary>Build a Text result carrying a synthesized type (for sizeof).</summary>
     private static EmitContent Typed(string text, CType? ty) => new EmitContent.Text(text, null, ty);
 

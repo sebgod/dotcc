@@ -590,4 +590,55 @@ public sealed partial class CompilerTests
         finally { File.Delete(src); }
     }
 
+    // ---- _Noreturn (C11) / noreturn (C23) ---------------------------------
+
+    [Fact]
+    public void Noreturn_function_emits_does_not_return_attribute()
+    {
+        // `_Noreturn` is always a keyword (reserved underscore-uppercase). The
+        // body is an infinite loop so the emitted [DoesNotReturn] is honest.
+        var src = WriteTemp("_Noreturn void die(void) { for (;;) {} } int main() { return 0; }");
+        try
+        {
+            Compiler.EmitCSharp(new[] { src })
+                .ShouldContain("[System.Diagnostics.CodeAnalysis.DoesNotReturn]\nstatic unsafe void die()");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Noreturn_gated_as_c11_under_pedantic()
+    {
+        var src = WriteTemp("_Noreturn void die(void) { for (;;) {} } int main() { return 0; }");
+        try
+        {
+            Should.Throw<CompileException>(() =>
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), pedanticErrors: true))
+                .Message.ShouldContain("_Noreturn");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Lowercase_noreturn_is_an_identifier_pre_c23_but_a_keyword_in_c23()
+    {
+        // Lowercase `noreturn` is a C23 keyword (promoted onto _Noreturn). Pre-C23
+        // it's an ordinary identifier, so it can name a variable; under c23 that
+        // same use is a parse error — proving the rewriter's era gate.
+        var asVar = WriteTemp("int main() { int noreturn = 5; return noreturn; }");
+        var asKeyword = WriteTemp("noreturn void die(void) { for (;;) {} } int main() { return 0; }");
+        try
+        {
+            Should.NotThrow(() => Compiler.EmitCSharp(new[] { asVar }, dialect: CDialect.Parse("c17")));
+            Should.Throw<CompileException>(
+                () => Compiler.EmitCSharp(new[] { asVar }, dialect: CDialect.Parse("c23")));
+            // And the keyword form: works under c23, parse error pre-C23.
+            Compiler.EmitCSharp(new[] { asKeyword }, dialect: CDialect.Parse("c23"))
+                .ShouldContain("[System.Diagnostics.CodeAnalysis.DoesNotReturn]");
+            Should.Throw<CompileException>(
+                () => Compiler.EmitCSharp(new[] { asKeyword }, dialect: CDialect.Parse("c17")));
+        }
+        finally { File.Delete(asVar); File.Delete(asKeyword); }
+    }
+
 }

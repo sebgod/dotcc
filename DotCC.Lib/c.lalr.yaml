@@ -320,6 +320,14 @@ symbols:
   # from the resolved type and the FnSig path turns it into a
   # [MethodImpl(MethodImplOptions.AggressiveInlining)] on the emitted method.
   - 'inline'       # 154 keyword (C99) — function specifier
+  # `_Noreturn` (C11) — function specifier saying control never returns. A
+  # `_Capital_` keyword (always reserved, has a lexer rule). The lowercase C23
+  # spelling `noreturn` is promoted onto this terminal by DialectKeywordRewriter
+  # under c23. Parsed as a TypeSpec (like `inline`); the FnSig path turns it into
+  # a [DoesNotReturn] on the emitted method. Gated C11 under -pedantic. The
+  # lowercase `noreturn` (C23) is promoted onto this terminal by the dialect
+  # rewriter — no separate symbol, same as `bool` → `_Bool`.
+  - '_Noreturn'    # 155 keyword (C11) — function specifier
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -553,6 +561,9 @@ productions:
       # from the resolved type, but TypeFromSpec flags it so the FnSig path emits
       # a [MethodImpl(AggressiveInlining)]. (Promoted from ID by the dialect rewriter.)
       - { lhs: TypeSpec, rhs: ['inline'],   action: tsInline }
+      # `_Noreturn` (C11) — function specifier → [DoesNotReturn]. Same TypeSpec
+      # treatment as inline; TypeFromSpec flags it and the FnSig path emits it.
+      - { lhs: TypeSpec, rhs: ['_Noreturn'], action: tsNoreturn }
 
   - derivation: none
     rules:
@@ -1092,6 +1103,10 @@ lexer:
     # prefix). The C23 lowercase `static_assert` is promoted onto this terminal
     # by DialectKeywordRewriter; it has no lexer rule of its own (rule 2).
     - { symbol: '_Static_assert', match: '_Static_assert' }
+    # `_Noreturn` (C11) — always a keyword (reserved underscore-uppercase). The
+    # C23 lowercase `noreturn` is promoted onto this terminal by the dialect
+    # rewriter (rule 2), so it has no lexer rule of its own.
+    - { symbol: '_Noreturn', match: '_Noreturn' }
     - { symbol: 'if',     match: 'if' }
     - { symbol: 'else',   match: 'else' }
     - { symbol: 'while',  match: 'while' }

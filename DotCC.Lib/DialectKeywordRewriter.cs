@@ -98,6 +98,12 @@ internal sealed class DialectKeywordRewriter : RewritingTokenStream
             // applies. The `_Static_assert` spelling itself is always a keyword
             // (lexer rule), needing no promotion.
             ["static_assert"] = (2023, map["_Static_assert"], "_Static_assert"),
+
+            // C23 makes `noreturn` a first-class keyword (the C11 form is
+            // `_Noreturn`; the lowercase macro lived in <stdnoreturn.h>). Promote
+            // onto the existing `_Noreturn` terminal under c23; pre-C23 it stays
+            // an ID. The `_Noreturn` spelling itself is always a keyword.
+            ["noreturn"] = (2023, map["_Noreturn"], "_Noreturn"),
         };
     }
 

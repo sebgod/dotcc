@@ -2,7 +2,7 @@
 
 Running tracker of what dotcc's grammar and libc cover today. Update this when a feature lands (add the fixture / test reference in **Notes**), when one moves from ❌ to 🟡 to ✅, or when something is decided out of scope (🚫 with reason).
 
-**Default dialect: `c17`.** Select otherwise with `-std=<dialect>` (`c90`/`c99`/`c11`/`c17`/`c18`/`c23`) — see the CLI flag table in CLAUDE.md. `-std=` predefines `__STDC_VERSION__` (and friends) so headers can branch via `#if __STDC_VERSION__ >= …L`, and drives rule-2 keyword promotion (`inline` becomes a keyword ≥c99; `bool`/`true`/`false`/`nullptr` only ≥c23 — gated on the monotonic `CDialect.Version`, which is keyed by ISO year). **By itself `-std=` stays permissive** — the parser is dialect-agnostic, so `//` comments, `_Bool`, designated initializers etc. are accepted regardless. **`-pedantic` / `-pedantic-errors` opt into the *rejection* gate** (gcc model): features newer than the selected `-std=` are diagnosed as warnings / errors. So the year tags below (`C99` / `C11` / `C23`) are descriptive for the default path, and become enforcement gates under `-pedantic`. Gated today: `_Bool` / `long long` / `ll`-suffix / designated init / `for`-init decl / `__func__` / variadic macros / mixed declarations-and-statements / compound literals (C99), `_Static_assert` (C11), `enum : T` / `_Float128` / `#warning` / empty initializer `{}` (C23). Not gated: `//` comments (universal extension); K&R definitions are moot (not parsed) and VLAs are out of scope. Always-modern *output* is unaffected by `-std=` — dotcc emits real C# enums etc. regardless of input dialect.
+**Default dialect: `c17`.** Select otherwise with `-std=<dialect>` (`c90`/`c99`/`c11`/`c17`/`c18`/`c23`) — see the CLI flag table in CLAUDE.md. `-std=` predefines `__STDC_VERSION__` (and friends) so headers can branch via `#if __STDC_VERSION__ >= …L`, and drives rule-2 keyword promotion (`inline` becomes a keyword ≥c99; `bool`/`true`/`false`/`nullptr`/`noreturn` only ≥c23 — gated on the monotonic `CDialect.Version`, which is keyed by ISO year). **By itself `-std=` stays permissive** — the parser is dialect-agnostic, so `//` comments, `_Bool`, designated initializers etc. are accepted regardless. **`-pedantic` / `-pedantic-errors` opt into the *rejection* gate** (gcc model): features newer than the selected `-std=` are diagnosed as warnings / errors. So the year tags below (`C99` / `C11` / `C23`) are descriptive for the default path, and become enforcement gates under `-pedantic`. Gated today: `_Bool` / `long long` / `ll`-suffix / designated init / `for`-init decl / `__func__` / variadic macros / mixed declarations-and-statements / compound literals (C99), `_Static_assert` / `_Noreturn` (C11), `enum : T` / `_Float128` / `#warning` / empty initializer `{}` (C23). Not gated: `//` comments (universal extension); K&R definitions are moot (not parsed) and VLAs are out of scope. Always-modern *output* is unaffected by `-std=` — dotcc emits real C# enums etc. regardless of input dialect.
 
 **Legend**
 
@@ -346,7 +346,7 @@ Synthetic header at `DotCC.Lib/include/assert.h` with the canonical `NDEBUG`-awa
 | Variadic macros, mixed decls/code, designated init, `restrict`, `_Bool`, `__func__`, `inline`, line comments | C99 | various above | dotcc's baseline target (VLAs 🚫, complex types not yet — see rows above) |
 | `_Generic` | C11 | ❌ | Type-generic dispatch. Lower priority than it'd otherwise be: the most common use case (`tgmath.h`) is already covered by C#'s overload resolution on `Libc` — see the `tgmath.h` row above. |
 | `_Static_assert` / `static_assert` | C11 | 🟡 | Parsed (file + block scope, both arities; lowercase promoted under `-std=c23`) but dropped to an inert comment, not evaluated — see the dedicated row above. |
-| `_Noreturn` / `noreturn` | C11 | ❌ | Cosmetic — emit `[DoesNotReturn]` |
+| `_Noreturn` / `noreturn` | C11 | ✅ | Function specifier → `[System.Diagnostics.CodeAnalysis.DoesNotReturn]` on the emitted method — a real C# flow-analysis hint (not cosmetic), the faithful lowering of "control never comes back". Same `TypeSpec` plumbing as `inline` (`tsNoreturn` → flagged on the `Type` → `FnHeader.IsNoreturn` → attribute in `EmitFuncDef`); composes with `static`/`extern`/`inline`. `_Noreturn` is always a keyword (`_Capital_`, lexer rule); the lowercase C23 `noreturn` is promoted onto it by `DialectKeywordRewriter` (≥c23; pre-C23 it stays an identifier). Gated C11 under `-pedantic`. Fixture `noreturn-specifier/` (gcc-oracle-validated). Note: a Roslyn-recognizable no-return body (`for(;;)` → `for(;true;)`, constant condition) avoids a CS8763 "method returns" warning. |
 | Anonymous structs/unions | C11 | ❌ | Depends on `struct`/`union` |
 | `_Thread_local` / `thread_local` | C11 | ❌ | Lower to `[ThreadStatic]` |
 | `_Alignas`, `_Alignof` | C11 | ❌ | `[StructLayout(Pack=N)]` |
@@ -386,7 +386,7 @@ miscompiles** — every gap below fails at parse/lex time or is explicitly flagg
 **C11**
 - ⛔ `_Generic` (generic selection).
 - ⛔ Anonymous `struct` / `union` members.
-- ⛔ `_Alignas` / `_Alignof`, `_Atomic`, `_Noreturn`, `_Thread_local`.
+- ⛔ `_Alignas` / `_Alignof`, `_Atomic`, `_Thread_local`. (`_Noreturn` ✅ — see the Beyond-C99 table.)
 - ⛔ String/char encoding prefixes `u"…"` / `U"…"` / `u8"…"` / `L"…"` (dotcc is UTF-8-native; the prefix syntax isn't parsed).
 
 **C23**

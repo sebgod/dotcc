@@ -16,19 +16,19 @@ internal sealed partial class CSharpEmitter
     // reduction to combine with the body.
 
     public EmitContent Visit(C.FnSig n)  // Type ID ( ParamList )
-        => StartFn(type: T(n.Arg0), name: T(n.Arg1), pars: T(n.Arg3), isStatic: false, isInline: InlineOf(n.Arg0));
+        => StartFn(type: T(n.Arg0), name: T(n.Arg1), pars: T(n.Arg3), isStatic: false, isInline: InlineOf(n.Arg0), isNoreturn: NoreturnOf(n.Arg0));
     public EmitContent Visit(C.FnSigNoArgs n)  // Type ID ( )
-        => StartFn(type: T(n.Arg0), name: T(n.Arg1), pars: "", isStatic: false, isInline: InlineOf(n.Arg0));
+        => StartFn(type: T(n.Arg0), name: T(n.Arg1), pars: "", isStatic: false, isInline: InlineOf(n.Arg0), isNoreturn: NoreturnOf(n.Arg0));
     public EmitContent Visit(C.FnSigVoidArgs n)  // Type ID ( void )
-        => StartFn(type: T(n.Arg0), name: T(n.Arg1), pars: "", isStatic: false, isInline: InlineOf(n.Arg0));
+        => StartFn(type: T(n.Arg0), name: T(n.Arg1), pars: "", isStatic: false, isInline: InlineOf(n.Arg0), isNoreturn: NoreturnOf(n.Arg0));
     public EmitContent Visit(C.FnSigStatic n)  // static Type ID ( ParamList )
-        => StartFn(type: T(n.Arg1), name: T(n.Arg2), pars: T(n.Arg4), isStatic: true, isInline: InlineOf(n.Arg1));
+        => StartFn(type: T(n.Arg1), name: T(n.Arg2), pars: T(n.Arg4), isStatic: true, isInline: InlineOf(n.Arg1), isNoreturn: NoreturnOf(n.Arg1));
     public EmitContent Visit(C.FnSigStaticNoArgs n)  // static Type ID ( )
-        => StartFn(type: T(n.Arg1), name: T(n.Arg2), pars: "", isStatic: true, isInline: InlineOf(n.Arg1));
+        => StartFn(type: T(n.Arg1), name: T(n.Arg2), pars: "", isStatic: true, isInline: InlineOf(n.Arg1), isNoreturn: NoreturnOf(n.Arg1));
     public EmitContent Visit(C.FnSigStaticVoidArgs n)  // static Type ID ( void )
-        => StartFn(type: T(n.Arg1), name: T(n.Arg2), pars: "", isStatic: true, isInline: InlineOf(n.Arg1));
+        => StartFn(type: T(n.Arg1), name: T(n.Arg2), pars: "", isStatic: true, isInline: InlineOf(n.Arg1), isNoreturn: NoreturnOf(n.Arg1));
 
-    private EmitContent.FnHeader StartFn(string type, string name, string pars, bool isStatic, bool isInline = false)
+    private EmitContent.FnHeader StartFn(string type, string name, string pars, bool isStatic, bool isInline = false, bool isNoreturn = false)
     {
         // Set the active-function name BEFORE Block reduces — this is the
         // whole point of the FnSig split. Any __func__ inside the body
@@ -58,7 +58,7 @@ internal sealed partial class CSharpEmitter
             DeclareLocal(p.Name);
         }
         _pendingParams.Clear();
-        return new EmitContent.FnHeader(type, name, pars, isStatic, isInline);
+        return new EmitContent.FnHeader(type, name, pars, isStatic, isInline, isNoreturn);
     }
 
     // ---- Function definition / prototype --------------------------------
@@ -140,10 +140,14 @@ internal sealed partial class CSharpEmitter
         // Escape the method name for C# emission; sig.Name stays raw above for
         // the `main` check and the export list (the C-ABI EntryPoint keeps the
         // real name). A call to this function escapes identically via Visit(Var).
-        // A C99 `inline` specifier maps to AggressiveInlining — a real JIT hint,
-        // the faithful lowering of C's "please inline this" (attributes on local
-        // functions are legal C# 9+; the shell already imports CompilerServices).
-        var attr = sig.IsInline ? "[MethodImpl(MethodImplOptions.AggressiveInlining)]\n" : "";
+        // Function specifiers → C# attributes (faithful lowerings, not cosmetic;
+        // attributes on local functions are legal C# 9+). C99 `inline` →
+        // AggressiveInlining (a real JIT hint); C11 `_Noreturn` → [DoesNotReturn]
+        // (informs C# flow analysis). The shell imports CompilerServices;
+        // DoesNotReturn is fully qualified so no extra using is needed.
+        var attr = "";
+        if (sig.IsInline) { attr += "[MethodImpl(MethodImplOptions.AggressiveInlining)]\n"; }
+        if (sig.IsNoreturn) { attr += "[System.Diagnostics.CodeAnalysis.DoesNotReturn]\n"; }
         return $"{attr}static unsafe {sig.Type} {Id(sig.Name)}({sig.Params})\n{body}";
     }
 
@@ -700,6 +704,9 @@ internal sealed partial class CSharpEmitter
     // (unlike const/volatile) it is NOT silently dropped: TypeFromSpec detects
     // it and flags the resolved Type so the FnSig path emits AggressiveInlining.
     public EmitContent Visit(C.TsInline n)   => Spec("inline");
+    // `_Noreturn` (C11) — same handling as inline: accumulated, dropped from the
+    // resolved type, flagged by TypeFromSpec so the FnSig path emits [DoesNotReturn].
+    public EmitContent Visit(C.TsNoreturn n) => Spec("_Noreturn");
 
     public EmitContent Visit(C.TypeSpecListOne n)  => S(n.Arg0) is var specs
         ? new EmitContent.SpecList(specs) : throw new InvalidOperationException();
@@ -726,10 +733,12 @@ internal sealed partial class CSharpEmitter
         // Dialect gates for type-specifier features (once per resolved type,
         // with a source line). `_Bool`/`long long` are C99; `_Float128` is C23.
         var hasInline = false;
+        var hasNoreturn = false;
         var longs = 0;
         foreach (var s in specs)
         {
             if (s == "inline") { hasInline = true; }
+            else if (s == "_Noreturn") { hasNoreturn = true; if (_dialectGate is not null) { Gate(2011, "_Noreturn", n.Arg0); } }
             else if (_dialectGate is not null)
             {
                 if (s == "_Bool") { Gate(1999, "_Bool", n.Arg0); }
@@ -739,9 +748,11 @@ internal sealed partial class CSharpEmitter
         }
         if (_dialectGate is not null && longs >= 2) { Gate(1999, "long long", n.Arg0); }
         var resolved = ResolveTypeSpec(specs);
-        // Carry the inline flag up on the Type so the FnSig visitor can read it;
-        // the resolved type string itself never mentions inline.
-        return hasInline ? new EmitContent.Text(resolved, Inline: true) : (EmitContent)resolved;
+        // Carry the inline / _Noreturn flags up on the Type so the FnSig visitor
+        // can read them; the resolved type string itself never mentions either.
+        return hasInline || hasNoreturn
+            ? new EmitContent.Text(resolved, Inline: hasInline, Noreturn: hasNoreturn)
+            : (EmitContent)resolved;
     }
 
     /// <summary>

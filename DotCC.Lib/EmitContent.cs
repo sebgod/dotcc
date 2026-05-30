@@ -60,7 +60,10 @@ public abstract record EmitContent
     /// <c>FnSig</c> visitors so the emitted method gets a
     /// <c>[MethodImpl(MethodImplOptions.AggressiveInlining)]</c>. Dropped from the
     /// resolved type itself (C# has no per-type inline keyword).</param>
-    public sealed record Text(string Value, string? EnumType = null, CType? Ty = null, bool Inline = false) : EmitContent;
+    /// <param name="Noreturn">True when the specifier run included the C11
+    /// <c>_Noreturn</c> function specifier — the emitted method gets a
+    /// <c>[DoesNotReturn]</c>. Same flow as <paramref name="Inline"/>.</param>
+    public sealed record Text(string Value, string? EnumType = null, CType? Ty = null, bool Inline = false, bool Noreturn = false) : EmitContent;
 
     /// <summary>
     /// Accumulator for declaration-specifier sequences (<c>int</c>,
@@ -146,7 +149,8 @@ public abstract record EmitContent
         string Name,
         string Params,
         bool IsStatic,
-        bool IsInline = false) : EmitContent;
+        bool IsInline = false,
+        bool IsNoreturn = false) : EmitContent;
 
     /// <summary>
     /// AST marker for a <c>setjmp(env)</c> call. Emitted by
