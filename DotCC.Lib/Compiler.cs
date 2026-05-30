@@ -180,10 +180,10 @@ public static class Compiler
         // twice: once with an analysis visitor, once with the emit visitor.
         // `quiet` suppresses the preprocessor's diagnostics on the analysis
         // pass so #warning / #include messages don't print twice.
-        Item ParseUnit(string unitPath, global::LALR.CC.Parser parser, bool quiet)
+        Item ParseUnit(string unitPath, global::LALR.CC.Parser parser, bool quiet, DialectGate? gate = null)
         {
             var source = File.ReadAllText(unitPath);
-            var pre = new CPreprocessor(lexerTable, includeMap, seededDefines, quiet);
+            var pre = new CPreprocessor(lexerTable, includeMap, seededDefines, quiet, gate);
             pre.SetActiveFilename(Path.GetFileName(unitPath));
             using var lexer = BytesLexer.FromString(source, lexerTable);
             using var preproc = C.WrapPreprocessor(lexer, pre);
@@ -256,7 +256,9 @@ public static class Compiler
         var mainArity = -1;
         foreach (var unitPath in inputPaths)
         {
-            var result = ParseUnit(unitPath, emitParser, quiet: false);
+            // Emit pass carries the dialect gate (null on the analysis pass) so
+            // preprocessor-era gates (variadic macros, #warning) collect once.
+            var result = ParseUnit(unitPath, emitParser, quiet: false, gate: dialectGate);
 
             if (allFunctions.Length > 0) { allFunctions.AppendLine(); }
             // The visitor's IVisitor<EmitContent> returns a discriminated

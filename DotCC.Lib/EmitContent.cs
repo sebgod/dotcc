@@ -32,6 +32,16 @@ public abstract record EmitContent
     /// </summary>
     public static implicit operator EmitContent(string s) => new Text(s);
 
+    /// <summary>
+    /// A statement that is a DECLARATION (<c>Decl ;</c>). Renders to its
+    /// <see cref="Value"/> like any text (via <c>T()</c>), but the marker lets
+    /// the enclosing <c>StmtList</c>/<c>Block</c> reductions tell declarations
+    /// from statements — needed only by the C90 mixed-declarations dialect gate
+    /// (a declaration that follows a non-declaration in the same block). When
+    /// gating is off the marker is simply rendered as text and ignored.
+    /// </summary>
+    public sealed record DeclStmtMarker(string Value) : EmitContent;
+
     /// <summary>Plain C# source code text — by far the most common variant.</summary>
     /// <param name="EnumType">Non-null when this expression lowered to a value
     /// of a C# <c>enum</c> type (the enum's name). Carried so a consuming node

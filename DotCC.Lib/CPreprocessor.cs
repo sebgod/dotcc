@@ -71,14 +71,22 @@ internal sealed class CPreprocessor : C.IPreprocessor
     private readonly int _numSymbolId;
     private readonly int _stringSymbolId;
 
+    // Dialect-gating sink for preprocessor-era features (variadic macros C99,
+    // #warning C23). Non-null only on the emit pass under -pedantic — null on
+    // the analysis pass and the default path, so each gate is a no-op and a
+    // violation is collected once. See DialectGate.
+    private readonly DialectGate? _gate;
+
     public CPreprocessor(
         Dictionary<string, LexRule[]> lexerTable,
         Dictionary<string, string> files,
         IEnumerable<string> predefines,
-        bool quiet = false)
+        bool quiet = false,
+        DialectGate? gate = null)
     {
         _lexerTable = lexerTable;
         _files = files;
+        _gate = gate;
         // Diagnostics sink. The analysis (first) pass of the two-pass emit runs
         // quiet so its #warning / #include-resolution messages don't print
         // twice; the real emit pass uses stderr as usual. (A fatal #error still
@@ -446,6 +454,8 @@ internal sealed class CPreprocessor : C.IPreprocessor
                 _diag.WriteLine($"dotcc: #define {name}(…) missing closing ')'");
                 return Array.Empty<Item>();
             }
+            // Variadic macros (`#define LOG(fmt, ...)`) are a C99 feature.
+            if (isVariadic) { _gate?.RequireMin(1999, "variadic macro", args[0].Position.Line); }
             var body = args.Skip(pos + 1).ToList();
             _macros[name] = new MacroDef(name, paramNames, body, isVariadic);
             return Array.Empty<Item>();
@@ -569,6 +579,8 @@ internal sealed class CPreprocessor : C.IPreprocessor
     /// </summary>
     public IEnumerable<Item> OnWarning(IReadOnlyList<Item> args)
     {
+        // `#warning` was a long-standing extension, standardized in C23.
+        _gate?.RequireMin(2023, "#warning directive", args.Count > 0 ? args[0].Position.Line : 0);
         _diag.WriteLine($"dotcc: #warning: {JoinArgs(args)}");
         return Array.Empty<Item>();
     }

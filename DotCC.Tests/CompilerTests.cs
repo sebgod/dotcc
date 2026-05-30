@@ -1220,6 +1220,9 @@ public sealed class CompilerTests
     [InlineData("int main() { for (int i = 0; i < 3; i++) {} return 0; }", "c90", "for", "C99")]
     [InlineData("_Static_assert(1, \"ok\");\nint main() { return 0; }", "c99", "_Static_assert", "C11")]
     [InlineData("enum Color : unsigned char { Red };\nint main() { return 0; }", "c17", "enum", "C23")]
+    [InlineData("#define LOG(fmt, ...) fmt\nint main() { return 0; }", "c90", "variadic macro", "C99")]
+    [InlineData("#warning hi\nint main() { return 0; }", "c17", "#warning", "C23")]
+    [InlineData("int main() { int x = 1; x = x + 1; int y = 2; return x + y; }", "c90", "mixed declarations", "C99")]
     public void Pedantic_errors_rejects_too_new_feature(string body, string std, string featureNeedle, string stdNeedle)
     {
         var src = WriteTemp(body);
@@ -1242,6 +1245,34 @@ public sealed class CompilerTests
         {
             Should.NotThrow(() =>
                 Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c99"), pedanticErrors: true));
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Mixed_decl_gate_does_not_flag_a_nested_block_leading_decl()
+    {
+        // A declaration at the START of a nested block, even after a statement
+        // in the OUTER block, is legal C90 (the nested block is its own scope).
+        // The per-block accumulator must not raise a false positive here.
+        var src = WriteTemp("int main() { int n = 0; n++; { int y = 2; n += y; } return n; }");
+        try
+        {
+            Should.NotThrow(() =>
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), pedanticErrors: true));
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Mixed_decl_gate_allows_all_declarations_first()
+    {
+        // Declarations before any statement is the canonical C90-legal shape.
+        var src = WriteTemp("int main() { int x = 1; int y = 2; x++; return x + y; }");
+        try
+        {
+            Should.NotThrow(() =>
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), pedanticErrors: true));
         }
         finally { File.Delete(src); }
     }

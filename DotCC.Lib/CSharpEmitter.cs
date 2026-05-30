@@ -37,6 +37,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     private static string T(Item it) => it.Content switch
     {
         EmitContent.Text t => t.Value,
+        EmitContent.DeclStmtMarker d => d.Value,
         string s => s,
         // setjmp variants must be consumed by Visit(Eq)/Visit(Neq) or
         // Visit(StmtIfElse). Reaching T() means setjmp showed up in a
@@ -205,6 +206,15 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // source line comes from the construct's first token. No-op when not gating.
     private void Gate(int introducedEra, string feature, Item at)
         => _dialectGate?.RequireMin(introducedEra, feature, at.Position.Line);
+
+    // C90 mixed-declarations gate accumulator (only touched when gating). As a
+    // block's StmtList reduces, `_blkContainsDecl` tracks whether the sub-list
+    // built so far holds a declaration and `_blkOutOfOrder` whether a declaration
+    // follows a non-declaration in it. A single pair suffices despite nesting: a
+    // nested block's StmtList + Block reduce fully before any outer stmtsOne
+    // resets these for the outer scope. Read once per block at Visit(Block).
+    private bool _blkContainsDecl;
+    private bool _blkOutOfOrder;
 
     public int MainArity { get; private set; } = -1;
 
@@ -963,10 +973,42 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         string.Join(" ", specs);
 
     // Block / statements
-    public EmitContent Visit(C.Block n) => "{\n" + IndentEach(T(n.Arg1)) + "}\n";
+    public EmitContent Visit(C.Block n)
+    {
+        // C90 forbids a declaration after a statement in a block (mixed
+        // declarations and code is C99). The StmtList reductions below set
+        // _blkOutOfOrder for this block; report it once here. n.Arg0 is `{`.
+        if (_dialectGate is not null && _blkOutOfOrder)
+        {
+            Gate(1999, "mixed declarations and statements", n.Arg0);
+        }
+        return "{\n" + IndentEach(T(n.Arg1)) + "}\n";
+    }
     public EmitContent Visit(C.BlockEmpty n) => "{ }\n";
-    public EmitContent Visit(C.StmtsCons n) => T(n.Arg0) + T(n.Arg1);
-    public EmitContent Visit(C.StmtsOne n) => T(n.Arg0);
+    // StmtList builds right-to-left (Arg0 = this statement, Arg1 = the rest).
+    // Track, for the C90 mixed-declarations gate, whether the sub-list holds a
+    // declaration and whether a declaration follows a non-declaration in it.
+    public EmitContent Visit(C.StmtsCons n)
+    {
+        if (_dialectGate is not null)
+        {
+            var thisIsDecl = n.Arg0.Content is EmitContent.DeclStmtMarker;
+            // Arg0 precedes the rest: a non-decl here with a decl later is mixed.
+            if (!thisIsDecl && _blkContainsDecl) { _blkOutOfOrder = true; }
+            _blkContainsDecl = thisIsDecl || _blkContainsDecl;
+        }
+        return T(n.Arg0) + T(n.Arg1);
+    }
+    public EmitContent Visit(C.StmtsOne n)
+    {
+        if (_dialectGate is not null)
+        {
+            // Rightmost statement — starts a fresh per-block accumulator.
+            _blkContainsDecl = n.Arg0.Content is EmitContent.DeclStmtMarker;
+            _blkOutOfOrder = false;
+        }
+        return T(n.Arg0);
+    }
     // Conditions are wrapped with B(...) so int- and pointer-valued conditions
     // (`while (1)`, `if (p)`, `for (...; n; ...)`) typecheck. The B overloads
     // live in BuildShell — see Compiler.BuildShell.
@@ -1087,7 +1129,10 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         $"case {T(n.Arg1)}:\n{T(n.Arg3)}";
     public EmitContent Visit(C.DefaultLabel n) =>
         $"default:\n{T(n.Arg2)}";
-    public EmitContent Visit(C.StmtDecl n) => $"{T(n.Arg0)};\n";
+    // Tagged as a declaration statement so the C90 mixed-declarations gate can
+    // distinguish it from a non-declaration in the enclosing block. Renders to
+    // the same text everywhere (T() unwraps the marker).
+    public EmitContent Visit(C.StmtDecl n) => new EmitContent.DeclStmtMarker($"{T(n.Arg0)};\n");
 
     // Block-scope `static T x [= C];`. Each declarator becomes a mangled
     // `public static unsafe` field in DotCcGlobals (static storage duration,
