@@ -35,13 +35,26 @@ public abstract record CType
     public sealed record Arr(CType Element, int Count) : CType;
 
     /// <summary>
+    /// A pointer to an array — <c>int (*p)[3]</c>, whose pointee is the array
+    /// <see cref="Inner"/>. It's a genuine POINTER (so its <c>sizeof</c> is the
+    /// pointer size, not the array size), but it SUBSCRIPTS / dereferences with
+    /// the array's stride: <c>p[k]</c> is <c>p + k*FlatSize(Inner)</c> and
+    /// yields <see cref="Inner"/>. dotcc lowers it to a flat C# pointer (same as
+    /// a multi-dimensional array minus the outer extent), reusing the multidim
+    /// subscript machinery.
+    /// </summary>
+    public sealed record PtrToArr(CType Inner) : CType;
+
+    /// <summary>
     /// The element type of an indexable/dereferenceable type: an array's
-    /// element, or one pointer level peeled off a <see cref="Sized"/> pointer
-    /// (<c>int*</c> → <c>int</c>). Null when the type isn't indexable.
+    /// element, one pointer level peeled off a <see cref="Sized"/> pointer
+    /// (<c>int*</c> → <c>int</c>), or the pointed-to array of a
+    /// <see cref="PtrToArr"/> (<c>*p</c> / <c>p[k]</c>). Null when not indexable.
     /// </summary>
     public CType? ElementType() => this switch
     {
         Arr a => a.Element,
+        PtrToArr p => p.Inner,
         Sized s when s.CsType.EndsWith("*", System.StringComparison.Ordinal)
             => new Sized(s.CsType[..^1].TrimEnd()),
         _ => null,

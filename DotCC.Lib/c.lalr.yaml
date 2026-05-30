@@ -724,6 +724,14 @@ productions:
       - { lhs: Decl, rhs: [Type, '(', '*', ID, ')', '(', ')'],                       action: declFnPtrNoArgs }
       - { lhs: Decl, rhs: [Type, '(', '*', ID, ')', '(', ParamList, ')', '=', E],    action: declFnPtrInit }
       - { lhs: Decl, rhs: [Type, '(', '*', ID, ')', '(', ')', '=', E],               action: declFnPtrNoArgsInit }
+      # Pointer-to-array declarator: `int (*p)[3] [= E];` — p is a pointer to an
+      # array of 3 (e.g. a row pointer into a 2-D array). Same `( * ID )` shape as
+      # the fn-ptr declarator but with `[dims]` instead of `(params)` after the
+      # `)`, so the `[` vs `(` lookahead keeps them disjoint. Lowers to a flat C#
+      # pointer that subscripts with the array's stride (reuses the multi-dim
+      # machinery); `sizeof` of it is the pointer size.
+      - { lhs: Decl, rhs: [Type, '(', '*', ID, ')', ArrDims],          action: declPtrToArr }
+      - { lhs: Decl, rhs: [Type, '(', '*', ID, ')', ArrDims, '=', E],  action: declPtrToArrInit }
       # Designated initializer (C99): `Point p = { .x = 1, .y = 2 };`. The
       # user names the fields directly — no _structFields lookup needed at
       # emit time. LALR(1)-distinguished from the positional form by the

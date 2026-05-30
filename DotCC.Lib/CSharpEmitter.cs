@@ -1734,6 +1734,39 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     public EmitContent Visit(C.DeclFnPtrInit n)        => EmitFnPtrLocal(T(n.Arg0), T(n.Arg3), T(n.Arg6), n.Arg9);
     public EmitContent Visit(C.DeclFnPtrNoArgsInit n)  => EmitFnPtrLocal(T(n.Arg0), T(n.Arg3), "",        n.Arg8);
 
+    // Pointer-to-array declarator: `int (*p)[3] [= E]` → C# `int* p [= …]`. p is
+    // a flat pointer that subscripts with the array's stride (CType.PtrToArr),
+    // reusing the multi-dim subscript machinery; its `sizeof` is the pointer
+    // size. The init (commonly a 2-D array variable, itself a flat `int*`) lowers
+    // verbatim. Arg5 is the bracket dims (ArrDims), Arg7 the optional init.
+    public EmitContent Visit(C.DeclPtrToArr n)     => EmitPtrToArr(T(n.Arg0), T(n.Arg3), A(n.Arg5), null);
+    public EmitContent Visit(C.DeclPtrToArrInit n) => EmitPtrToArr(T(n.Arg0), T(n.Arg3), A(n.Arg5), n.Arg7);
+
+    private EmitContent EmitPtrToArr(string elem, string name, IReadOnlyList<string> dims, Item? init)
+    {
+        NoteLocal(name);
+        // Build the pointed-to array CType from the (literal) bracket dims and
+        // record `p` as a pointer-to-that, so subscripting strides correctly.
+        var sizes = new List<int>(dims.Count);
+        foreach (var d in dims)
+        {
+            if (int.TryParse(d, System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out var v)) { sizes.Add(v); }
+            else { sizes.Clear(); break; }
+        }
+        if (sizes.Count == 0)
+        {
+            throw new CompileException(
+                $"pointer-to-array `{name}` needs constant array dimensions");
+        }
+        CType inner = new CType.Sized(elem);
+        for (var i = sizes.Count - 1; i >= 0; i--) { inner = new CType.Arr(inner, sizes[i]); }
+        NoteLocalArray(name, new CType.PtrToArr(inner));
+        var emitted = DeclareLocal(name);
+        var initText = init is null ? "default" : DecayFnName(T(init));
+        return $"{elem}* {Id(emitted)} = {initText}";
+    }
+
     private EmitContent EmitFnPtrLocal(string ret, string name, string pars, Item? init)
     {
         _pendingParams.Clear();
@@ -2004,7 +2037,16 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
             _enumTags.Contains(castType) ? castType : null, new CType.Sized(castType));
     }
     // `*p` / `p[i]` synthesize the element/pointee type for sizeof.
-    public EmitContent Visit(C.Deref n) => Typed($"(*{T(n.Arg1)})", TyOf(n.Arg1)?.ElementType());
+    public EmitContent Visit(C.Deref n)
+    {
+        var ty = TyOf(n.Arg1);
+        // `*p` where p is a pointer-to-array (`int (*p)[3]`) is the pointed-to
+        // ARRAY, which decays to the same flat pointer — so emit the base
+        // unchanged (typed as the array), not a C# `*p` (which would deref to
+        // the first element). `(*p)[i]` then strides like the array.
+        if (ty is CType.PtrToArr pta) { return Typed(StripOuterParens(T(n.Arg1)), pta.Inner); }
+        return Typed($"(*{T(n.Arg1)})", ty?.ElementType());
+    }
     public EmitContent Visit(C.AddrOf n) => $"(&{T(n.Arg1)})";
     public EmitContent Visit(C.Neg n) => $"(-{IntDecay(n.Arg1)})";
     // Prefix ++/-- — strip outer parens of operand to avoid CS0131 on a
@@ -2032,6 +2074,13 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         if (baseTy is CType.Arr { Element: CType.Arr } arr)
         {
             return Typed($"({baseText} + ({idx}) * {FlatSize(arr.Element)})", arr.Element);
+        }
+        // Pointer-to-array `int (*p)[3]`: `p[k]` is `p + k*stride` yielding the
+        // pointed-to array — same flat pointer arithmetic as a multi-dim partial
+        // index.
+        if (baseTy is CType.PtrToArr pta)
+        {
+            return Typed($"({baseText} + ({idx}) * {FlatSize(pta.Inner)})", pta.Inner);
         }
         return Typed($"({baseText}[{idx}])", baseTy?.ElementType());
     }
@@ -2098,6 +2147,9 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     {
         CType.Arr a => $"({a.Count} * {SizeofText(a.Element)})",
         CType.Sized s => $"sizeof({s.CsType})",
+        // A pointer-to-array is a pointer: its size is the pointer size, NOT the
+        // pointed-to array's size.
+        CType.PtrToArr => "sizeof(void*)",
         _ => throw new CompileException("internal: unknown CType in sizeof"),
     };
 

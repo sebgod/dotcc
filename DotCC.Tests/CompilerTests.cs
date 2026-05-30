@@ -399,6 +399,39 @@ public sealed class CompilerTests
         finally { File.Delete(src); }
     }
 
+    // ---- pointer-to-array declarator ------------------------------------
+
+    [Fact]
+    public void Ptr_to_array_lowers_to_flat_pointer_with_stride()
+    {
+        var src = WriteTemp("""
+            int main() {
+                int a[2][3];
+                int (*p)[3] = a;
+                return p[1][2];
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("int* p = a");          // flat pointer
+            emitted.ShouldContain("(p + (1) * 3)[2]");    // strides by the array size
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Ptr_to_array_sizeof_is_pointer_size()
+    {
+        var src = WriteTemp("int main() { int a[2][3]; int (*p)[3] = a; return (int)sizeof(p); }");
+        try
+        {
+            // pointer, not array → sizeof(void*); deref decays to the base pointer
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("sizeof(void*)");
+        }
+        finally { File.Delete(src); }
+    }
+
     // ---- multi-dimensional arrays ---------------------------------------
 
     [Fact]
