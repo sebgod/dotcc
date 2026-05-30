@@ -226,6 +226,37 @@ public sealed class CompilerTests
         finally { File.Delete(src); }
     }
 
+    // ---- restrict (and qualifier after *) -------------------------------
+
+    [Fact]
+    public void Restrict_qualifier_is_dropped_after_star()
+    {
+        var src = WriteTemp("""
+            void copy(int *restrict dst, const int *restrict src, int n) {
+                for (int i = 0; i < n; i++) dst[i] = src[i];
+            }
+            int main() { return 0; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            // Both restrict qualifiers dropped; `const int *restrict` → `int*`.
+            emitted.ShouldContain("void copy(int* dst, int* src, int n)");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Const_after_star_parses_and_drops()
+    {
+        var src = WriteTemp("int main() { int x = 1; int * const p = &x; return *p; }");
+        try
+        {
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("int* p = (&x)");
+        }
+        finally { File.Delete(src); }
+    }
+
     // ---- function-pointer declarator + unnamed params ------------------
 
     [Fact]

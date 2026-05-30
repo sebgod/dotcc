@@ -961,6 +961,14 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // ResolveTypeSpec, matching how real C compilers handle the
     // free-order specifier sequence.
     public EmitContent Visit(C.TypePtr n) => $"{T(n.Arg0)}*";
+    // `T * const` / `T * volatile` / `T * restrict` — a qualifier after the
+    // pointer star. dotcc has no C# equivalent (no readonly locals, no aliasing
+    // model), so the qualifier is dropped: the type is just the pointer. (A
+    // future optimization could turn a `restrict` parameter into a by-ref /
+    // no-alias hint.)
+    public EmitContent Visit(C.TypePtrQualConst n)    => $"{T(n.Arg0)}*";
+    public EmitContent Visit(C.TypePtrQualVolatile n) => $"{T(n.Arg0)}*";
+    public EmitContent Visit(C.TypePtrQualRestrict n) => $"{T(n.Arg0)}*";
 
     // Each TypeSpec keyword maps to its own bracketed marker — `<int>`,
     // `<unsigned>`, `<_Bool>` etc. Bracketing makes the markers

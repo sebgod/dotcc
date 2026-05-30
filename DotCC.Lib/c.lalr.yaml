@@ -295,6 +295,11 @@ symbols:
   # dotcc flattens a multi-dim array to a 1-D `stackalloc` and rewrites
   # `a[i][j]` to flat pointer arithmetic (C# stackalloc is 1-D).
   - ArrDims        # 150
+  # `restrict` (C99) — a pointer-only type qualifier (`int *restrict p`). dotcc
+  # has no aliasing model, so it's parsed and DROPPED (like const/volatile); a
+  # future optimization could map a `restrict` parameter to a by-ref / no-alias
+  # hint. GNU `__restrict` / `__restrict__` lex to this same token.
+  - 'restrict'     # 151 keyword (C99) — pointer qualifier
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -460,6 +465,14 @@ productions:
   - derivation: leftmost
     rules:
       - { lhs: Type, rhs: [Type, '*'],   action: typePtr }
+      # Pointer qualifiers after `*` — `int * const p`, `int *restrict p`,
+      # `int * volatile p`. No C# equivalent (no readonly locals, no aliasing
+      # model), so they parse and are DROPPED: the pointer type is unchanged.
+      # Conflict-free: after `Type '*'`, only these qualifier tokens shift here;
+      # any other lookahead reduces the plain `Type '*'` pointer.
+      - { lhs: Type, rhs: [Type, '*', 'const'],    action: typePtrQualConst }
+      - { lhs: Type, rhs: [Type, '*', 'volatile'], action: typePtrQualVolatile }
+      - { lhs: Type, rhs: [Type, '*', 'restrict'], action: typePtrQualRestrict }
       - { lhs: Type, rhs: [TypeSpecList], action: typeFromSpec }
       # `struct ID` as a type reference — used in declarations, parameters,
       # casts, sizeof. The visitor emits just `ID` since C# doesn't require
@@ -967,6 +980,11 @@ lexer:
     - { symbol: 'signed',   match: 'signed' }
     - { symbol: 'const',    match: 'const' }
     - { symbol: 'volatile', match: 'volatile' }
+    # `restrict` + its GNU spellings, all the same token. __restrict__ before
+    # __restrict (longest-match) before restrict.
+    - { symbol: 'restrict', match: '__restrict__' }
+    - { symbol: 'restrict', match: '__restrict' }
+    - { symbol: 'restrict', match: 'restrict' }
     - { symbol: 'goto',     match: 'goto' }
     # `_Bool` must come BEFORE the ID rule so it lexes as a keyword rather
     # than identifier. C99 reserves the underscore-uppercase prefix; the
