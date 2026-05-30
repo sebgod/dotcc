@@ -226,6 +226,44 @@ public sealed class CompilerTests
         finally { File.Delete(src); }
     }
 
+    // ---- multi-dimensional arrays ---------------------------------------
+
+    [Fact]
+    public void Multidim_array_flattens_to_one_stackalloc()
+    {
+        var src = WriteTemp("int main() { int a[2][3]; a[0][0] = 1; return a[0][0]; }");
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("int* a = stackalloc int[6]");   // 2*3 flattened
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Multidim_subscript_uses_flat_pointer_arithmetic()
+    {
+        // a[i][j] → (a + i*stride)[j], stride = inner dimension.
+        var src = WriteTemp("int main() { int a[2][3]; int i=1,j=2; return a[i][j]; }");
+        try
+        {
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("(a + (i) * 3)[j]");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Multidim_array_needs_constant_dimensions()
+    {
+        var src = WriteTemp("int main() { int n = 3; int a[2][n]; a[0][0]=1; return 0; }");
+        try
+        {
+            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
+                .Message.ShouldContain("constant dimensions");
+        }
+        finally { File.Delete(src); }
+    }
+
     // ---- string / char escapes + adjacent concatenation ----------------
 
     [Fact]

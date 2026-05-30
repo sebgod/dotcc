@@ -173,14 +173,16 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // functions (after the per-function _localTypes miss).
     private readonly Dictionary<string, string> _globalTypes = new(StringComparer.Ordinal);
 
-    // Array variable name → (C# element type, element count). Arrays lower to a
-    // C# pointer (stackalloc), so this is the ONLY place the element type +
-    // extent survive — needed for `sizeof(arr)` = count * sizeof(element).
-    // _localArrayInfo is per-function (reset in StartFn); _globalArrayInfo is
-    // TU-lifetime for file-scope arrays. A decayed-pointer param array is NOT
-    // recorded here (it's a genuine pointer for sizeof).
-    private readonly Dictionary<string, (string ElemType, int Count)> _localArrayInfo = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, (string ElemType, int Count)> _globalArrayInfo = new(StringComparer.Ordinal);
+    // Array variable name → its full array CType. Arrays lower to a C# pointer
+    // (stackalloc / flattened for multi-dim), so this is the ONLY place the
+    // element type + extent(s) survive — needed for `sizeof(arr)` and for
+    // rewriting a multi-dim subscript `a[i][j]` to flat pointer arithmetic. A
+    // 1-D array is `Arr(Sized(elem), N)`; `int a[2][3]` is the nested
+    // `Arr(Arr(Sized(elem), 3), 2)`. _localArrayInfo is per-function (reset in
+    // StartFn); _globalArrayInfo is TU-lifetime. A decayed-pointer param array
+    // is NOT recorded (it's a genuine pointer for sizeof).
+    private readonly Dictionary<string, CType> _localArrayInfo = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, CType> _globalArrayInfo = new(StringComparer.Ordinal);
 
     // Parameter names stage here. Params reduce as part of the FnSig BEFORE
     // StartFn establishes the function scope (and clears _localNames), so they
@@ -1499,25 +1501,49 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     {
         return string.Join(", ", entries.Select(e => $"{Id(e.Name)} = {e.Init ?? "default"}"));
     }
-    // C `T arr[N]` → C# `T* arr = stackalloc T[N]`. Uses stackalloc (no heap
-    // alloc, no GC pin) so arrays live in the same lifetime as locals — matches
-    // C semantics for block-scoped automatic arrays. Pointer subscript `arr[i]`
-    // works directly in C# unsafe contexts (it desugars to `*(arr + i)`).
+    // C `T arr[D1][D2]…` → C# `T* arr = stackalloc T[D1*D2*…]`. C# stackalloc is
+    // 1-D, so a multi-dimensional array is FLATTENED to a single contiguous
+    // block (matching C's row-major layout); the subscript visitor rewrites
+    // `a[i][j]` to flat pointer arithmetic. stackalloc keeps the array in the
+    // same lifetime as locals (no heap, no GC pin), matching C automatics.
+    // ArrDims (Arg2) carries the dimension expression texts, outer→inner.
     public EmitContent Visit(C.DeclArr n)
     {
-        var name = T(n.Arg1);
         var elem = T(n.Arg0);
-        var sizeText = StripOuterParens(T(n.Arg3));
+        var name = T(n.Arg1);
+        var dims = A(n.Arg2);
         NoteLocal(name);
-        // Record element + count so `sizeof(arr)` can compute count*sizeof(elem)
-        // — only when the size is a literal int (a non-literal extent can't be a
-        // compile-time sizeof anyway). Array info stays keyed by the RAW name.
-        if (int.TryParse(sizeText, System.Globalization.NumberStyles.Integer,
-                System.Globalization.CultureInfo.InvariantCulture, out var count))
+        var emitted = DeclareLocal(name);
+
+        // Try every dimension as a literal int.
+        var sizes = new List<int>(dims.Count);
+        foreach (var d in dims)
         {
-            NoteLocalArray(name, elem, count);
+            if (int.TryParse(d, System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out var v)) { sizes.Add(v); }
+            else { sizes.Clear(); break; }
         }
-        return $"{elem}* {Id(DeclareLocal(name))} = stackalloc {elem}[{sizeText}]";
+
+        if (sizes.Count == 0)
+        {
+            // A non-literal extent. 1-D runtime size (VLA-ish) lowers directly
+            // to `stackalloc T[expr]`; multi-dim with a non-constant dimension
+            // can't be flattened at compile time — reject clearly.
+            if (dims.Count != 1)
+            {
+                throw new CompileException(
+                    $"multi-dimensional array `{name}` needs constant dimensions");
+            }
+            return $"{elem}* {Id(emitted)} = stackalloc {elem}[{StripOuterParens(dims[0])}]";
+        }
+
+        // Build the nested CType (outer→inner) + total element count, record it
+        // (keyed by RAW name), and flatten the allocation.
+        CType cty = new CType.Sized(elem);
+        var total = 1;
+        for (var i = sizes.Count - 1; i >= 0; i--) { cty = new CType.Arr(cty, sizes[i]); total *= sizes[i]; }
+        NoteLocalArray(name, cty);
+        return $"{elem}* {Id(emitted)} = stackalloc {elem}[{total}]";
     }
 
     // C `T arr[N] = {1, 2, 3}` (or `T arr[] = {…}`) → C# `T* arr = stackalloc T[]{ 1, 2, 3 }`.
@@ -1530,7 +1556,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         var name = T(n.Arg1);
         var args = A(n.Arg7);
         NoteLocal(name);
-        NoteLocalArray(name, T(n.Arg0), args.Count);
+        NoteLocalArray(name, new CType.Arr(new CType.Sized(T(n.Arg0)), args.Count));
         return EmitArrInit(T(n.Arg0), DeclareLocal(name), args);
     }
     public EmitContent Visit(C.DeclArrInitImplicit n)
@@ -1538,15 +1564,31 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         var name = T(n.Arg1);
         var args = A(n.Arg6);
         NoteLocal(name);
-        NoteLocalArray(name, T(n.Arg0), args.Count);
+        NoteLocalArray(name, new CType.Arr(new CType.Sized(T(n.Arg0)), args.Count));
         return EmitArrInit(T(n.Arg0), DeclareLocal(name), args);
     }
 
-    // Record a block-scope array's element type + count for sizeof. No-op at
-    // file scope (globals handled in EmitGlobalFields; not yet array-aware).
-    private void NoteLocalArray(string rawName, string elemType, int count)
+    // ArrDims — the `[D1][D2]…` dimension list of a multi-dimensional array
+    // declarator. Produces the dimension expression texts (outer→inner) as an
+    // Args list for Visit(C.DeclArr) to flatten. `[` E `]`: E is Arg1 (one) /
+    // Arg2 (cons).
+    public EmitContent Visit(C.ArrDimsOne n) =>
+        new EmitContent.Args(new[] { StripOuterParens(T(n.Arg1)) });
+    public EmitContent Visit(C.ArrDimsCons n)
     {
-        if (_currentFunctionName is not null) { _localArrayInfo[rawName] = (elemType, count); }
+        var prev = A(n.Arg0);
+        var combined = new List<string>(prev.Count + 1);
+        combined.AddRange(prev);
+        combined.Add(StripOuterParens(T(n.Arg2)));
+        return new EmitContent.Args(combined);
+    }
+
+    // Record a block-scope array's full CType for sizeof / multi-dim subscript
+    // rewriting. No-op at file scope (globals handled in EmitGlobalFields; not
+    // yet array-aware).
+    private void NoteLocalArray(string rawName, CType arrayType)
+    {
+        if (_currentFunctionName is not null) { _localArrayInfo[rawName] = arrayType; }
     }
 
     private static string EmitArrInit(string type, string name, IReadOnlyList<string> args) =>
@@ -1792,11 +1834,33 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // Postfix ++/-- — same stripping; emit `x++` rather than `(x)++`.
     public EmitContent Visit(C.PostInc n) => new EmitContent.Text($"({StripOuterParens(T(n.Arg0))}++)", EnumOf(n.Arg0));
     public EmitContent Visit(C.PostDec n) => new EmitContent.Text($"({StripOuterParens(T(n.Arg0))}--)", EnumOf(n.Arg0));
-    // Subscript `expr[i]` — emit as-is; C# pointer subscript matches C semantics.
-    // An enum index decays to int (C# can't index with an enum).
-    public EmitContent Visit(C.Subscript n) =>
-        Typed($"({StripOuterParens(T(n.Arg0))}[{StripOuterParens(IntDecay(n.Arg2))}])",
-            TyOf(n.Arg0)?.ElementType());
+    // Subscript `expr[i]`. For a 1-D array / pointer it's an ordinary C#
+    // pointer subscript (matching C). For a MULTI-dimensional array, dotcc
+    // flattened the storage, so a PARTIAL index (more dimensions remain) is
+    // pointer arithmetic: `a[i]` is `a + i*stride`, where stride is the element
+    // count of the remaining sub-array; a FULL index (last dimension) is the
+    // ordinary subscript. The base is NOT outer-paren-stripped (a partial-index
+    // base like `(a + i*3)` must keep its parens so the next `[…]` binds to the
+    // whole expression, not the trailing operand). An enum index decays to int.
+    public EmitContent Visit(C.Subscript n)
+    {
+        var baseTy = TyOf(n.Arg0);
+        var baseText = T(n.Arg0);
+        var idx = StripOuterParens(IntDecay(n.Arg2));
+        if (baseTy is CType.Arr { Element: CType.Arr } arr)
+        {
+            return Typed($"({baseText} + ({idx}) * {FlatSize(arr.Element)})", arr.Element);
+        }
+        return Typed($"({baseText}[{idx}])", baseTy?.ElementType());
+    }
+
+    // Number of scalar elements in a (possibly nested) array CType — the flat
+    // stride of a multi-dim array's sub-array. Scalars/pointers count as 1.
+    private static int FlatSize(CType t) => t switch
+    {
+        CType.Arr a => a.Count * FlatSize(a.Element),
+        _ => 1,
+    };
 
     // Member access — `.` on a struct value, `->` on a struct pointer.
     // C# accepts both syntaxes in unsafe context (where all our user code
@@ -2036,8 +2100,8 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // survive), then the plain local/global type. Null for builtins / unknowns.
     private CType? VarCType(string name)
     {
-        if (_localArrayInfo.TryGetValue(name, out var la)) { return new CType.Arr(new CType.Sized(la.ElemType), la.Count); }
-        if (_globalArrayInfo.TryGetValue(name, out var ga)) { return new CType.Arr(new CType.Sized(ga.ElemType), ga.Count); }
+        if (_localArrayInfo.TryGetValue(name, out var la)) { return la; }
+        if (_globalArrayInfo.TryGetValue(name, out var ga)) { return ga; }
         if (_localTypes.TryGetValue(name, out var lt)) { return new CType.Sized(lt); }
         if (_globalTypes.TryGetValue(name, out var gt)) { return new CType.Sized(gt); }
         return null;

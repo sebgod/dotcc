@@ -290,6 +290,11 @@ symbols:
   # decodes each segment's escapes independently and concatenates the bytes
   # (so a `\x…` escape never greedily eats the next segment's leading digit).
   - StringSeq      # 149
+  # ArrDims — the `[D1][D2]…` dimension list of an array declarator. One or more
+  # `[ E ]`; left-recursive so a multi-dimensional array folds into one list.
+  # dotcc flattens a multi-dim array to a 1-D `stackalloc` and rewrites
+  # `a[i][j]` to flat pointer arithmetic (C# stackalloc is 1-D).
+  - ArrDims        # 150
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -635,7 +640,12 @@ productions:
       # — same constraint C and C# both enforce. Kept as a single-declarator
       # rule because the lowering rewrites the type (T → T*) and the
       # initializer (= stackalloc) — doesn't compose with peers in one decl.
-      - { lhs: Decl, rhs: [Type, ID, '[', E, ']'], action: declArr }
+      # `int arr[N]` (1-D) and `int a[D1][D2]…` (multi-dim). ArrDims collects
+      # the dimensions; the visitor flattens a multi-dim array to a single
+      # `stackalloc`. Conflict-free with the `… '[' E ']' '=' '{' … }'` init
+      # forms below: `=` is not in FOLLOW(ArrDims), so at `Type ID [ E ]` the
+      # parser shifts `=` (init form) or reduces ArrDims (`[`/`;`/`,` lookahead).
+      - { lhs: Decl, rhs: [Type, ID, ArrDims], action: declArr }
       # Array with aggregate initializer: `int arr[N] = {1, 2, 3}` (sized) or
       # `int arr[] = {1, 2, 3}` (size derived from init). Both lower to
       # `T* arr = stackalloc T[]{ 1, 2, 3 }`. We reuse ArgList for the brace
@@ -655,6 +665,12 @@ productions:
       # emit time. LALR(1)-distinguished from the positional form by the
       # leading `.` after `{`.
       - { lhs: Decl, rhs: [Type, ID, '=', '{', MemberInitList, '}'], action: declStructDesignated }
+
+  # ArrDims — one or more `[ E ]` array dimensions, left-recursive.
+  - derivation: leftmost
+    rules:
+      - { lhs: ArrDims, rhs: [ArrDims, '[', E, ']'], action: arrDimsCons }
+      - { lhs: ArrDims, rhs: ['[', E, ']'],          action: arrDimsOne }
 
   # DeclItemList: comma-separated list of declarators sharing a leading Type.
   - derivation: leftmost
