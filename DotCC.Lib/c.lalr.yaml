@@ -825,6 +825,13 @@ productions:
     rules:
       - { lhs: InitElem, rhs: [E],                  action: initElemExpr }
       - { lhs: InitElem, rhs: ['{', InitList, '}'], action: initElemNest }
+      # Array designator (C99): `[index] = value` inside an array initializer,
+      # e.g. `int a[5] = {[2] = 9, [4] = 1}`. Conflict-free: `[` can't begin an
+      # expression, so the lookahead after `{`/`,` cleanly picks this over the
+      # positional `E` element. The emitter builds a dense, zero-filled array;
+      # 1-D constant-index scalar arrays only (nested/struct designators fail
+      # loudly). Distinct from struct designators (`.field =`, MemberInitList).
+      - { lhs: InitElem, rhs: ['[', E, ']', '=', E], action: initElemDesignated }
 
   - derivation: none
     rules:

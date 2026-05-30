@@ -231,6 +231,10 @@ internal sealed partial class CSharpEmitter
         NoteLocal(name);
         var emitted = DeclareLocal(name);
         var sizes = ParseDims(dims);
+        if (HasDesignators(group))
+        {
+            return EmitDesignatedArray(elem, emitted, name, group, sizes.Count == 1 ? sizes[0] : -1, sizes.Count);
+        }
         if (_structFields.ContainsKey(elem))
         {
             NoteLocalArray(name, new CType.Arr(new CType.Sized(elem), sizes.Count == 1 ? sizes[0] : group.Items.Count));
@@ -254,6 +258,10 @@ internal sealed partial class CSharpEmitter
         var group = (EmitContent.InitGroup)n.Arg6.Content;
         NoteLocal(name);
         var emitted = DeclareLocal(name);
+        if (HasDesignators(group))
+        {
+            return EmitDesignatedArray(elem, emitted, name, group, -1, 1);  // implicit: size from max index
+        }
         if (_structFields.ContainsKey(elem))
         {
             NoteLocalArray(name, new CType.Arr(new CType.Sized(elem), group.Items.Count));
@@ -452,6 +460,13 @@ internal sealed partial class CSharpEmitter
     // list reduces to one InitGroup.
     public EmitContent Visit(C.InitElemExpr n) => new EmitContent.InitLeaf(T(n.Arg0));
     public EmitContent Visit(C.InitElemNest n) => (EmitContent.InitGroup)n.Arg1.Content;
+    // `[index] = value` array designator (C99). Index/value captured as text;
+    // the decl visitor places the value at the (constant) index in a dense array.
+    public EmitContent Visit(C.InitElemDesignated n)
+    {
+        Gate(1999, "array designators", n.Arg0);  // C99
+        return new EmitContent.InitDesignated(T(n.Arg1), T(n.Arg4));
+    }
     public EmitContent Visit(C.InitListOne n) =>
         new EmitContent.InitGroup(new[] { (EmitContent.InitNode)n.Arg0.Content });
     public EmitContent Visit(C.InitListCons n)
@@ -476,6 +491,65 @@ internal sealed partial class CSharpEmitter
             else { throw new CompileException("a nested brace initializer isn't valid here"); }
         }
         return vals;
+    }
+
+    // True if a brace initializer contains any C99 array designator (`[i] = v`).
+    private static bool HasDesignators(EmitContent.InitGroup g)
+    {
+        foreach (var it in g.Items) { if (it is EmitContent.InitDesignated) { return true; } }
+        return false;
+    }
+
+    // Emit a 1-D scalar array with C99 array designators into a dense, zero-filled
+    // `stackalloc`. A designator `[i] = v` sets the cursor to `i`; an undesignated
+    // element fills the current cursor; both advance it (later writes to the same
+    // index win, per C). `declaredSize` is the array's constant size, or -1 to
+    // derive it from the highest index touched (the implicit `[]` form). Scalar
+    // only — a struct/nested value or a non-constant index fails loudly.
+    private EmitContent EmitDesignatedArray(
+        string elem, string emitted, string name, EmitContent.InitGroup group, int declaredSize, int dimCount)
+    {
+        if (dimCount > 1)
+        {
+            throw new CompileException($"array designators on `{name}` are only supported for 1-D arrays");
+        }
+        if (_structFields.ContainsKey(elem))
+        {
+            throw new CompileException($"array designators on a struct array (`{name}`) aren't supported yet");
+        }
+        var slots = new Dictionary<int, string>();
+        var cursor = 0;
+        var maxIndex = -1;
+        foreach (var it in group.Items)
+        {
+            switch (it)
+            {
+                case EmitContent.InitDesignated d:
+                    if (!int.TryParse(d.Index, System.Globalization.NumberStyles.Integer,
+                            System.Globalization.CultureInfo.InvariantCulture, out cursor) || cursor < 0)
+                    {
+                        throw new CompileException($"array designator `[{d.Index}]` must be a constant non-negative integer");
+                    }
+                    slots[cursor] = d.Value;
+                    break;
+                case EmitContent.InitLeaf l:
+                    slots[cursor] = l.Value;
+                    break;
+                default:
+                    throw new CompileException($"nested/aggregate values aren't supported with array designators (`{name}`)");
+            }
+            if (cursor > maxIndex) { maxIndex = cursor; }
+            cursor++;
+        }
+        var size = declaredSize >= 0 ? declaredSize : maxIndex + 1;
+        if (maxIndex >= size)
+        {
+            throw new CompileException($"array designator index {maxIndex} is out of bounds for `{name}[{size}]`");
+        }
+        var output = new List<string>(size);
+        for (var i = 0; i < size; i++) { output.Add(slots.TryGetValue(i, out var v) ? v : "0"); }
+        NoteLocalArray(name, new CType.Arr(new CType.Sized(elem), size));
+        return $"{elem}* {Id(emitted)} = stackalloc {elem}[]{{ {string.Join(", ", output)} }}";
     }
 
     // Parse a dimension-text list to literal ints; empty if any isn't a literal.

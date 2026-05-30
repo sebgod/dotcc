@@ -917,6 +917,43 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Array_designators_build_a_dense_zero_filled_array()
+    {
+        // C99 `[i] = v`. dotcc flattens to a dense stackalloc: a designator sets
+        // the cursor, an undesignated element fills the current slot, both
+        // advance it (later writes win). Implicit `[]` size = max index + 1.
+        var src = WriteTemp("""
+            int main() {
+                int a[5] = {[2] = 9, [4] = 1};
+                int b[6] = {[1] = 10, 20, 30, [0] = 5};
+                int c[] = {[3] = 7};
+                return a[2] + b[0] + c[3];
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("stackalloc int[]{ 0, 0, 9, 0, 1 }");
+            emitted.ShouldContain("stackalloc int[]{ 5, 10, 20, 30, 0, 0 }");
+            emitted.ShouldContain("stackalloc int[]{ 0, 0, 0, 7 }");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Array_designator_gated_as_c99_under_pedantic()
+    {
+        var src = WriteTemp("int main() { int a[3] = {[1] = 5}; return a[1]; }");
+        try
+        {
+            Should.Throw<CompileException>(() =>
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), pedanticErrors: true))
+                .Message.ShouldContain("array designators");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Empty_initializer_zero_inits_scalar_struct_array_and_compound()
     {
         // C23 `{}` — universal zero-init. Scalar/struct → `= default`; sized

@@ -245,4 +245,10 @@ public abstract record EmitContent
     public abstract record InitNode : EmitContent;
     public sealed record InitLeaf(string Value) : InitNode;
     public sealed record InitGroup(IReadOnlyList<InitNode> Items) : InitNode;
+    /// <summary>A C99 array designator element <c>[Index] = Value</c> inside an
+    /// array initializer. <paramref name="Index"/> is the designator expression
+    /// text (must resolve to a constant int); <paramref name="Value"/> is the
+    /// scalar value text. The decl visitor places it at that index in a dense,
+    /// zero-filled array.</summary>
+    public sealed record InitDesignated(string Index, string Value) : InitNode;
 }
