@@ -222,4 +222,17 @@ public abstract record EmitContent
     /// escape never greedily consumes the next segment's leading hex digit.
     /// </summary>
     public sealed record StrParts(IReadOnlyList<string> Bodies) : EmitContent;
+
+    /// <summary>
+    /// A brace-initializer element — recursive, so nested aggregate initializers
+    /// (<c>{{1,2},{3,4}}</c> for a 2-D array or a struct array) keep their group
+    /// structure. A <see cref="InitLeaf"/> is a scalar expression; a
+    /// <see cref="InitGroup"/> is a <c>{ … }</c> brace group (and the whole
+    /// <c>InitList</c> reduces to one). The decl visitors interpret the tree
+    /// against the target type: a scalar multi-dim array flattens it with C's
+    /// per-dimension zero-fill; a struct array maps each group to <c>new T{…}</c>.
+    /// </summary>
+    public abstract record InitNode : EmitContent;
+    public sealed record InitLeaf(string Value) : InitNode;
+    public sealed record InitGroup(IReadOnlyList<InitNode> Items) : InitNode;
 }

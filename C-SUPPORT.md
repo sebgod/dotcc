@@ -55,7 +55,7 @@ Source of truth for the grammar: `DotCC.Lib/c.lalr.yaml`. Source of truth for th
 | `true` / `false` / `nullptr` (C23 keywords) | ✅ | Under **`-std=c23`** these are first-class keyword constants — `DialectKeywordRewriter` promotes them onto dedicated `TRUE`/`FALSE`/`NULLPTR` grammar terminals (no lexer rule — same rule-2 gating as `bool`), lowering to the integer literals `1`/`0` (normalized through `CBool` when stored to a `_Bool`) and C# `null`, with no `<stdbool.h>`/`<stddef.h>` include. Pre-C23 they stay ordinary identifiers; since `true`/`false` no longer emit as C# keywords, a variable named `true`/`false` is correctly `@`-escaped (`int true = 5;` → `int @true = 5;` — fixture `keyword-true-false-ident/`). Fixture `c23-constants/` (gcc oracle under `-std=c2x`; opts out of MSVC, which has no C23 frontend). |
 | Pointer types `T*`, `T**`, … | ✅ | Composes left-to-right via `TypePtr` production |
 | Array decl `T arr[N]` | ✅ | Lowered to `T* arr = stackalloc T[N]` so block-scoped automatic arrays match C's lifetime + subscript semantics; fixture `array-sum/`. A non-constant 1-D extent (`int a[n]`) lowers to `stackalloc T[n]` (VLA-ish). |
-| Multi-dimensional array `T a[D1][D2]…` | ✅ | C# `stackalloc` is 1-D, so dotcc **flattens** to one contiguous block `stackalloc T[D1*D2*…]` (row-major, like C) via the `ArrDims` dimension list, tracking the shape as a nested `CType.Arr`. A **partial** subscript `a[i]` (dimensions remain) rewrites to `a + i*stride` (stride = element count of the remaining sub-array); a **full** subscript `a[i][j]` is the flat element. The nested `sizeof` length idiom works (`sizeof(a)/sizeof(a[0])` = rows, `sizeof(a[0])/sizeof(a[0][0])` = cols). All dimensions must be compile-time constants (a non-constant multi-dim extent errors clearly). Fixture `multidim-array/`. **Gap:** nested-brace initializers (`int m[2][2] = {{1,2},{3,4}}`) aren't supported yet — initialize via loops, or use a flat `int m[4] = {…}`. |
+| Multi-dimensional array `T a[D1][D2]…` | ✅ | C# `stackalloc` is 1-D, so dotcc **flattens** to one contiguous block `stackalloc T[D1*D2*…]` (row-major, like C) via the `ArrDims` dimension list, tracking the shape as a nested `CType.Arr`. A **partial** subscript `a[i]` (dimensions remain) rewrites to `a + i*stride` (stride = element count of the remaining sub-array); a **full** subscript `a[i][j]` is the flat element. The nested `sizeof` length idiom works (`sizeof(a)/sizeof(a[0])` = rows, `sizeof(a[0])/sizeof(a[0][0])` = cols). All dimensions must be compile-time constants (a non-constant multi-dim extent errors clearly). **Nested-brace initializers** (`int m[2][2] = {{1,2},{3,4}}`) work — see the initializer row below. Fixture `multidim-array/`. |
 | Array param decay `T arr[]` / `T arr[N]` | ✅ | Both forms lower to `T* arr` per C99 §6.7.5.3p7. The size in the sized form is informational only (C compilers don't enforce it at call sites). Fixture `array-param-decay/` |
 | Variable-length arrays (C99) | 🚫 | Out of scope — rarely used in practice, made *optional* in C11/C17, and a poor fit for a managed runtime (unbounded stack growth, no `alloca`-style guarantees). Idiomatic code uses `malloc`. A non-constant 1-D extent (`int a[n]`) still *incidentally* lowers to `stackalloc T[n]` as a side effect of the ordinary array lowering, but that's not a guaranteed feature — multi-dim VLAs and `sizeof` of a VLA aren't supported, and a multi-dim non-constant extent errors. |
 | `struct` declaration | ✅ | Lowered to `unsafe struct ID { public T field; … }`; fields public to match C accessibility. Emitted via a visitor side channel into the type-decl section (C# requires types after top-level statements). Fixture `struct-point/` |
@@ -371,9 +371,8 @@ error (fails loudly — safe, never a wrong answer) · 🟡 partial · ❌ roadm
 (would-implement) · 🚫 deliberately out of scope. **There are no known silent
 miscompiles** — every gap below fails at parse/lex time or is explicitly flagged.
 
-**C89 / C90** — essentially complete.
-- ⛔ Nested-brace aggregate initializers `int m[2][2] = {{1,2},{3,4}}`, `struct P pts[] = {{…},{…}}` (the brace-elision / per-dimension zero-fill rules are subtle; tracked separately).
-- 🚫 K&R function definitions; `register` storage class. (`auto` ✅ — storage-class dropped, C23 inference → `var`.)
+**C89 / C90** — **complete** (every parseable C89 syntax feature is supported).
+- 🚫 K&R function definitions; `register` storage class. (`auto` ✅ — storage-class dropped, C23 inference → `var`.) Nested-brace init handles the regular fully-flat and fully-nested shapes with C's zero-fill; irregular *mixed* brace/scalar elision raises a clear error rather than miscompile.
 
 **C99**
 - ⛔ Compound literals `(int[]){1,2,3}`, `(struct S){…}`.
@@ -381,7 +380,6 @@ miscompiles** — every gap below fails at parse/lex time or is explicitly flagg
 - ⛔ Hex float literals `0x1.8p3`.
 - ⛔ `_Complex` / `_Imaginary`.
 - ⛔ Flexible array members `struct { int n; int data[]; }`.
-- ⛔ Nested-brace multi-dim initializers `int m[2][2] = {{1,2},{3,4}}` (bare multi-dim decl + access work).
 - 🚫 VLAs — out of scope (rare, optional since C11, managed-runtime mismatch). A 1-D runtime extent incidentally lowers to `stackalloc`, but it's not a pursued feature.
 - ❌ `inline` (cosmetic — could emit `[MethodImpl(AggressiveInlining)]`).
 

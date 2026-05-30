@@ -1636,21 +1636,49 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // from the initializer; both shapes share the same emit. ArgList arrives
     // as a typed EmitContent.Args (read via A()) — no sentinel decoding. The
     // element count for sizeof is the initializer length.
+    // `T arr[dims] = { … }` (sized, 1-D or multi-dim). Arg2 = ArrDims,
+    // Arg5 = InitList (an InitGroup tree). A struct element → an array of
+    // `new T{…}`; a scalar element → flattened (with C's per-dim zero-fill).
     public EmitContent Visit(C.DeclArrInit n)
     {
+        var elem = T(n.Arg0);
         var name = T(n.Arg1);
-        var args = A(n.Arg7);
+        var dims = A(n.Arg2);
+        var group = (EmitContent.InitGroup)n.Arg5.Content;
         NoteLocal(name);
-        NoteLocalArray(name, new CType.Arr(new CType.Sized(T(n.Arg0)), args.Count));
-        return EmitArrInit(T(n.Arg0), DeclareLocal(name), args);
+        var emitted = DeclareLocal(name);
+        var sizes = ParseDims(dims);
+        if (_structFields.ContainsKey(elem))
+        {
+            NoteLocalArray(name, new CType.Arr(new CType.Sized(elem), sizes.Count == 1 ? sizes[0] : group.Items.Count));
+            return EmitStructArrayInit(elem, emitted, group);
+        }
+        if (sizes.Count == 0)
+        {
+            throw new CompileException($"array `{name}` with a brace initializer needs constant dimensions");
+        }
+        var flat = FlattenScalarInit(group, sizes);
+        CType cty = new CType.Sized(elem);
+        for (var i = sizes.Count - 1; i >= 0; i--) { cty = new CType.Arr(cty, sizes[i]); }
+        NoteLocalArray(name, cty);
+        return $"{elem}* {Id(emitted)} = stackalloc {elem}[]{{ {string.Join(", ", flat)} }}";
     }
+    // `T arr[] = { … }` (implicit 1-D size, derived from the initializer).
     public EmitContent Visit(C.DeclArrInitImplicit n)
     {
+        var elem = T(n.Arg0);
         var name = T(n.Arg1);
-        var args = A(n.Arg6);
+        var group = (EmitContent.InitGroup)n.Arg6.Content;
         NoteLocal(name);
-        NoteLocalArray(name, new CType.Arr(new CType.Sized(T(n.Arg0)), args.Count));
-        return EmitArrInit(T(n.Arg0), DeclareLocal(name), args);
+        var emitted = DeclareLocal(name);
+        if (_structFields.ContainsKey(elem))
+        {
+            NoteLocalArray(name, new CType.Arr(new CType.Sized(elem), group.Items.Count));
+            return EmitStructArrayInit(elem, emitted, group);
+        }
+        var vals = Leaves(group);  // implicit-size scalar array is 1-D (flat leaves)
+        NoteLocalArray(name, new CType.Arr(new CType.Sized(elem), vals.Count));
+        return $"{elem}* {Id(emitted)} = stackalloc {elem}[]{{ {string.Join(", ", vals)} }}";
     }
 
     // `char s[] = "…"` — char array from a string literal (C89). Decode the
@@ -1667,21 +1695,16 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         NoteLocalArray(name, new CType.Arr(new CType.Sized(elem), bytes.Count + 1));
         return EmitCharArr(elem, DeclareLocal(name), bytes, bytes.Count + 1);
     }
-    public EmitContent Visit(C.DeclCharArrStrSized n)  // Type ID [ E ] = StringSeq
+    public EmitContent Visit(C.DeclCharArrStrSized n)  // Type ID ArrDims = StringSeq
     {
         var elem = T(n.Arg0);
         var name = T(n.Arg1);
-        var sizeText = StripOuterParens(T(n.Arg3));
-        var bytes = DecodeStrPartsToBytes(n.Arg6);
+        var bytes = DecodeStrPartsToBytes(n.Arg4);
         NoteLocal(name);
+        var sizes = ParseDims(A(n.Arg2));
         var total = bytes.Count + 1;
-        if (int.TryParse(sizeText, System.Globalization.NumberStyles.Integer,
-                System.Globalization.CultureInfo.InvariantCulture, out var n2))
-        {
-            total = n2;  // explicit size: C zero-pads (or truncates) to N
-            NoteLocalArray(name, new CType.Arr(new CType.Sized(elem), n2));
-        }
-        else { NoteLocalArray(name, new CType.Arr(new CType.Sized(elem), total)); }
+        if (sizes.Count > 0) { total = 1; foreach (var s in sizes) { total *= s; } }  // explicit: zero-pad to N
+        NoteLocalArray(name, new CType.Arr(new CType.Sized(elem), total));
         return EmitCharArr(elem, DeclareLocal(name), bytes, total);
     }
 
@@ -1806,9 +1829,6 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         if (_currentFunctionName is not null) { _localArrayInfo[rawName] = arrayType; }
     }
 
-    private static string EmitArrInit(string type, string name, IReadOnlyList<string> args) =>
-        $"{type}* {Id(name)} = stackalloc {type}[]{{ {string.Join(", ", args)} }}";
-
     // `Point p = { .x = 1, .y = 2 };` — designated initializer (C99). The
     // user named the fields directly so we don't need _structFields here:
     // the MemberInitList already emits `field = value` pairs in the right
@@ -1843,18 +1863,126 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     public EmitContent Visit(C.MemberInitListTrail n) => (EmitContent.InitMembers)n.Arg0.Content;
     public EmitContent Visit(C.MemberInit n) => $"{Id(T(n.Arg1))} = {T(n.Arg3)}";
 
-    // InitList — brace-initializer elements (optional trailing comma).
-    // Left-recursive; produces the same Args payload the init visitors read.
-    public EmitContent Visit(C.InitListOne n) => new EmitContent.Args(new[] { T(n.Arg0) });
+    // InitList / InitElem — a brace initializer as a recursive InitNode tree so
+    // nested aggregate initializers (`{{1,2},{3,4}}`) keep their structure. An
+    // element is a scalar (InitLeaf) or a nested group (InitGroup); the whole
+    // list reduces to one InitGroup.
+    public EmitContent Visit(C.InitElemExpr n) => new EmitContent.InitLeaf(T(n.Arg0));
+    public EmitContent Visit(C.InitElemNest n) => (EmitContent.InitGroup)n.Arg1.Content;
+    public EmitContent Visit(C.InitListOne n) =>
+        new EmitContent.InitGroup(new[] { (EmitContent.InitNode)n.Arg0.Content });
     public EmitContent Visit(C.InitListCons n)
     {
-        var prev = ((EmitContent.Args)n.Arg0.Content).Values;
-        var combined = new List<string>(prev.Count + 1);
+        var prev = ((EmitContent.InitGroup)n.Arg0.Content).Items;
+        var combined = new List<EmitContent.InitNode>(prev.Count + 1);
         combined.AddRange(prev);
-        combined.Add(T(n.Arg2));
-        return new EmitContent.Args(combined);
+        combined.Add((EmitContent.InitNode)n.Arg2.Content);
+        return new EmitContent.InitGroup(combined);
     }
-    public EmitContent Visit(C.InitListTrail n) => (EmitContent.Args)n.Arg0.Content;
+    public EmitContent Visit(C.InitListTrail n) => (EmitContent.InitGroup)n.Arg0.Content;
+
+    // ---- brace-initializer interpretation -------------------------------
+    // The immediate items of a group as leaf value strings; throws on a nested
+    // group (for 1-D / single-struct contexts that don't nest).
+    private static List<string> Leaves(EmitContent.InitGroup g)
+    {
+        var vals = new List<string>(g.Items.Count);
+        foreach (var it in g.Items)
+        {
+            if (it is EmitContent.InitLeaf leaf) { vals.Add(leaf.Value); }
+            else { throw new CompileException("a nested brace initializer isn't valid here"); }
+        }
+        return vals;
+    }
+
+    // Parse a dimension-text list to literal ints; empty if any isn't a literal.
+    private static List<int> ParseDims(IReadOnlyList<string> dims)
+    {
+        var sizes = new List<int>(dims.Count);
+        foreach (var d in dims)
+        {
+            if (int.TryParse(d, System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out var v)) { sizes.Add(v); }
+            else { sizes.Clear(); break; }
+        }
+        return sizes;
+    }
+
+    // Flatten a (possibly nested) SCALAR array initializer against `dims`,
+    // applying C's per-dimension zero-fill, to exactly product(dims) values.
+    // Handles the two regular shapes — fully-flat (`{1,2,3,4,5,6}`) and
+    // fully-nested (`{{1,2,3},{4,5,6}}`); an irregular/mixed shape raises a clear
+    // error rather than miscompile (C's full brace-elision rules aren't modelled).
+    private static List<string> FlattenScalarInit(EmitContent.InitGroup g, IReadOnlyList<int> dims)
+    {
+        var total = 1;
+        foreach (var d in dims) { total *= d; }
+        var output = new List<string>(total);
+        if (g.Items.All(it => it is EmitContent.InitLeaf))
+        {
+            foreach (var it in g.Items) { output.Add(((EmitContent.InitLeaf)it).Value); }
+            if (output.Count > total) { throw new CompileException("too many initializers for array"); }
+        }
+        else
+        {
+            FlattenNested(g, dims, 0, output);
+        }
+        while (output.Count < total) { output.Add("0"); }  // zero-fill the tail
+        return output;
+    }
+
+    private static void FlattenNested(EmitContent.InitNode node, IReadOnlyList<int> dims, int dimIdx, List<string> output)
+    {
+        if (node is not EmitContent.InitGroup g)
+        {
+            throw new CompileException("irregular nested array initializer (mixed braces and scalars)");
+        }
+        if (g.Items.Count > dims[dimIdx]) { throw new CompileException("too many initializers for an array dimension"); }
+        if (dimIdx == dims.Count - 1)
+        {
+            foreach (var it in g.Items)
+            {
+                if (it is EmitContent.InitLeaf leaf) { output.Add(leaf.Value); }
+                else { throw new CompileException("irregular nested array initializer"); }
+            }
+            for (var k = g.Items.Count; k < dims[dimIdx]; k++) { output.Add("0"); }
+        }
+        else
+        {
+            var subSize = 1;
+            for (var i = dimIdx + 1; i < dims.Count; i++) { subSize *= dims[i]; }
+            foreach (var it in g.Items) { FlattenNested(it, dims, dimIdx + 1, output); }
+            for (var k = g.Items.Count; k < dims[dimIdx]; k++)
+            {
+                for (var z = 0; z < subSize; z++) { output.Add("0"); }
+            }
+        }
+    }
+
+    // Emit a struct-array initializer: each top-level group → `new T { f = v, … }`.
+    private string EmitStructArrayInit(string structType, string name, EmitContent.InitGroup g)
+    {
+        var fields = _structFields[structType];
+        var elems = new List<string>(g.Items.Count);
+        foreach (var it in g.Items)
+        {
+            if (it is not EmitContent.InitGroup grp)
+            {
+                throw new CompileException($"each element of a `{structType}` array initializer must be a `{{ … }}` group");
+            }
+            var vals = Leaves(grp);
+            var sb = new StringBuilder("new ").Append(structType).Append(" { ");
+            var count = System.Math.Min(vals.Count, fields.Count);
+            for (var i = 0; i < count; i++)
+            {
+                if (i > 0) { sb.Append(", "); }
+                sb.Append(Id(fields[i])).Append(" = ").Append(vals[i]);
+            }
+            sb.Append(" }");
+            elems.Add(sb.ToString());
+        }
+        return $"{structType}* {Id(name)} = stackalloc {structType}[]{{ {string.Join(", ", elems)} }}";
+    }
 
     // `Point p = {1, 2};` — struct aggregate init. C# can't take positional
     // initializers on a struct, so we look up the struct's field names (from
@@ -1869,7 +1997,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         var name = T(n.Arg1);
         NoteLocal(name);
         var emittedName = DeclareLocal(name);
-        var values = A(n.Arg4);  // typed EmitContent.Args — no sentinel split
+        var values = Leaves((EmitContent.InitGroup)n.Arg4.Content);  // positional field values
 
         if (!_structFields.TryGetValue(type, out var fields))
         {

@@ -307,6 +307,10 @@ symbols:
   # TYPE_NAME) → inference; a type keyword / TYPE_NAME / struct|union|enum →
   # storage class. The C23 inference meaning is dialect-gated; the keyword is C89.
   - 'auto'         # 152 keyword
+  # InitElem — one brace-initializer element: a scalar expression or a nested
+  # `{ … }` group. Lets InitList build a recursive InitNode tree so nested
+  # aggregate initializers (`{{1,2},{3,4}}`) keep their structure.
+  - InitElem       # 153
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -698,16 +702,23 @@ productions:
       # `T* arr = stackalloc T[]{ 1, 2, 3 }`. We reuse ArgList for the brace
       # contents — it's a comma-separated expression list, which is exactly
       # the same shape.
-      - { lhs: Decl, rhs: [Type, ID, '[', E, ']', '=', '{', InitList, '}'], action: declArrInit }
+      # Array with a brace initializer. The sized form uses ArrDims, so it covers
+      # 1-D AND multi-dimensional / nested initializers (`int m[2][3] = {{…},{…}}`,
+      # and struct arrays `struct P pts[2] = {{…},{…}}`); the visitor flattens a
+      # scalar multi-dim init (with C's per-dimension zero-fill) or maps each
+      # group to `new T{…}` for a struct array. The implicit-size `[]` form is
+      # 1-D (size derived from the initializer).
+      - { lhs: Decl, rhs: [Type, ID, ArrDims, '=', '{', InitList, '}'], action: declArrInit }
       - { lhs: Decl, rhs: [Type, ID, '[', ']', '=', '{', InitList, '}'], action: declArrInitImplicit }
       # `char s[] = "…"` / `char s[N] = "…"` — char array initialized from a
       # string literal (C89). Decodes the string to bytes and stackalloc's a
       # MUTABLE copy (a bare string literal is a pinned read-only RVA; a char[]
       # is writable). StringSeq → adjacent literals concatenate; the sized form
       # zero-pads to N. Conflict-free with the `{ … }` forms above: after `=`,
-      # `{` → brace init, a STRING → these.
-      - { lhs: Decl, rhs: [Type, ID, '[', ']', '=', StringSeq],    action: declCharArrStr }
-      - { lhs: Decl, rhs: [Type, ID, '[', E, ']', '=', StringSeq], action: declCharArrStrSized }
+      # `{` → brace init, a STRING → these. Sized form via ArrDims (shares the
+      # dim reduction with declArrInit).
+      - { lhs: Decl, rhs: [Type, ID, '[', ']', '=', StringSeq],  action: declCharArrStr }
+      - { lhs: Decl, rhs: [Type, ID, ArrDims, '=', StringSeq],   action: declCharArrStrSized }
       # Struct aggregate initializer: `Point p = {1, 2};`. The visitor looks
       # up the struct's field names from a side map populated by StructDef /
       # TypedefStruct / UnionDef, then emits `Point p = new Point { x = 1,
@@ -765,13 +776,20 @@ productions:
       - { lhs: MemberInitList, rhs: [MemberInitList, ','], action: memberInitListTrail }
 
   # InitList — brace-initializer element list with an optional trailing comma.
-  # Left-recursive (clean trailing-comma); produces the same Args payload as
-  # ArgList so the init Decl visitors consume it via A() unchanged.
+  # Left-recursive (clean trailing-comma). An element (InitElem) is a scalar
+  # expression OR a nested `{ … }` group, so the whole list reduces to a
+  # recursive InitNode tree (an InitGroup) — nested aggregate initializers like
+  # `{{1,2},{3,4}}` keep their structure for the decl visitors to interpret.
   - derivation: leftmost
     rules:
-      - { lhs: InitList, rhs: [E], action: initListOne }
-      - { lhs: InitList, rhs: [InitList, ',', E], action: initListCons }
+      - { lhs: InitList, rhs: [InitElem], action: initListOne }
+      - { lhs: InitList, rhs: [InitList, ',', InitElem], action: initListCons }
       - { lhs: InitList, rhs: [InitList, ','], action: initListTrail }
+
+  - derivation: none
+    rules:
+      - { lhs: InitElem, rhs: [E],                  action: initElemExpr }
+      - { lhs: InitElem, rhs: ['{', InitList, '}'], action: initElemNest }
 
   - derivation: none
     rules:

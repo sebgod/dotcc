@@ -399,6 +399,47 @@ public sealed class CompilerTests
         finally { File.Delete(src); }
     }
 
+    // ---- nested-brace aggregate initializers ----------------------------
+
+    [Fact]
+    public void Nested_array_init_flattens_with_zero_fill()
+    {
+        var src = WriteTemp("int main() { int part[2][3] = {{1},{4,5}}; return part[1][2]; }");
+        try
+        {
+            // partial nested → per-row zero-fill: {1,0,0, 4,5,0}
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("stackalloc int[]{ 1, 0, 0, 4, 5, 0 }");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Flat_init_of_multidim_array_works()
+    {
+        // brace elision: a flat list fills row-major.
+        var src = WriteTemp("int main() { int m[2][3] = {1,2,3,4,5,6}; return m[1][2]; }");
+        try
+        {
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("stackalloc int[]{ 1, 2, 3, 4, 5, 6 }");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Struct_array_init_maps_each_group_to_new_struct()
+    {
+        var src = WriteTemp("""
+            struct P { int x; int y; };
+            int main() { struct P pts[2] = {{10,20},{30,40}}; return pts[1].x; }
+            """);
+        try
+        {
+            Compiler.EmitCSharp(new[] { src })
+                .ShouldContain("stackalloc P[]{ new P { x = 10, y = 20 }, new P { x = 30, y = 40 } }");
+        }
+        finally { File.Delete(src); }
+    }
+
     // ---- pointer-to-array declarator ------------------------------------
 
     [Fact]
