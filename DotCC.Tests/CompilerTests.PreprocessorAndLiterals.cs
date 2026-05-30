@@ -811,6 +811,72 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Compound_literal_positional_lowers_to_object_creation()
+    {
+        // C99 `(Point){3, 4}` — an unnamed struct object in expression position.
+        // Lowers to C# `new Point { x = 3, y = 4 }` (same field-name lookup as
+        // aggregate init). Here it's a call argument, which an aggregate init
+        // can't be — proving it's an expression, not just a decl initializer.
+        var src = WriteTemp("""
+            struct Point { int x; int y; };
+            int sumpt(struct Point p) { return p.x + p.y; }
+            int main() { return sumpt((struct Point){3, 4}); }
+            """);
+        try
+        {
+            Compiler.EmitCSharp(new[] { src })
+                .ShouldContain("sumpt(new Point { x = 3, y = 4 })");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Compound_literal_designated_lowers_to_object_creation()
+    {
+        var src = WriteTemp("""
+            struct Point { int x; int y; };
+            int main() { struct Point p; p = (struct Point){ .x = 5, .y = 6 }; return p.x; }
+            """);
+        try
+        {
+            Compiler.EmitCSharp(new[] { src })
+                .ShouldContain("new Point { x = 5, y = 6 }");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Compound_literal_gated_as_c99_under_pedantic()
+    {
+        var src = WriteTemp("""
+            struct Point { int x; int y; };
+            int sumpt(struct Point p) { return p.x; }
+            int main() { return sumpt((struct Point){1, 2}); }
+            """);
+        try
+        {
+            Should.Throw<CompileException>(() =>
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), pedanticErrors: true))
+                .Message.ShouldContain("compound literals");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Compound_literal_of_non_struct_type_fails_loudly()
+    {
+        // Scalar/array compound literals (`(int){5}`, `(int[]){…}`) aren't
+        // supported — fail with a clear message rather than emit something wrong.
+        var src = WriteTemp("int f(int x) { return x; } int main() { return f((int){5}); }");
+        try
+        {
+            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
+                .Message.ShouldContain("only supported for struct/union");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Forward_struct_decl_emits_nothing_and_does_not_break_later_definition()
     {
         // `struct Node;` declares the tag without a body. C# types hoist,

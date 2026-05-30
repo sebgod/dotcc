@@ -580,4 +580,45 @@ internal sealed partial class CSharpEmitter
         return sb.ToString();
     }
 
+    // `(Point){1, 2}` — C99 compound literal (positional). An unnamed object of
+    // struct/union type, usable in any expression position (init, argument,
+    // return, …). Lowers to a C# object-creation `new Point { x = 1, y = 2 }`,
+    // reusing the same field-name lookup as DeclStructInit. Carries the struct's
+    // CType up so the result can flow into casts / sizeof / further use. A
+    // non-struct Type (e.g. `(int[]){…}` — not parseable anyway — or a typedef'd
+    // primitive) fails loudly rather than emit something wrong.
+    public EmitContent Visit(C.CompoundLit n)
+    {
+        Gate(1999, "compound literals", n.Arg1);  // C99
+        var type = T(n.Arg1);
+        var values = Leaves((EmitContent.InitGroup)n.Arg4.Content);  // positional field values
+        if (!_structFields.TryGetValue(type, out var fields))
+        {
+            throw new CompileException(
+                $"compound literal `({type}){{ … }}` is only supported for struct/union types "
+                + "(array/scalar compound literals aren't supported yet)");
+        }
+        var sb = new StringBuilder("new ").Append(type).Append(" { ");
+        var count = Math.Min(values.Count, fields.Count);
+        for (var i = 0; i < count; i++)
+        {
+            if (i > 0) { sb.Append(", "); }
+            sb.Append(Id(fields[i])).Append(" = ").Append(values[i]);
+        }
+        sb.Append(" }");
+        return Typed(sb.ToString(), new CType.Sized(type));
+    }
+
+    // `(Point){ .x = 1, .y = 2 }` — designated compound literal (C99). The user
+    // named the fields, so (like DeclStructDesignated) no _structFields lookup
+    // is needed; the MemberInitList already emits `field = value` pairs in C#
+    // object-initializer shape. Omitted fields zero-fill (C99 / C# default).
+    public EmitContent Visit(C.CompoundLitDesignated n)
+    {
+        Gate(1999, "compound literals", n.Arg1);  // C99
+        var type = T(n.Arg1);
+        var members = IM(n.Arg4);  // typed InitMembers list
+        return Typed($"new {type} {{ {string.Join(", ", members)} }}", new CType.Sized(type));
+    }
+
 }

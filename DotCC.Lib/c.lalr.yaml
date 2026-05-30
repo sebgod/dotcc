@@ -925,6 +925,16 @@ productions:
       - { lhs: Unary, rhs: ['++', Unary], action: preInc }
       - { lhs: Unary, rhs: ['--', Unary], action: preDec }
       - { lhs: Unary, rhs: ['(', Type, ')', Unary], action: cast }
+      # Compound literal (C99) — `(Type){ init }`. An unnamed object of `Type`
+      # initialized by the brace list, usable in any expression position. Lowers
+      # to a C# object-creation `new Type { field = val, … }` (struct/union only —
+      # the Type grammar has no abstract array declarator, so `(int[]){…}` is out
+      # of scope and fails loudly). Conflict-free with the cast above: after
+      # `( Type )` the `{` lookahead is not in FIRST(Unary), so the parser shifts
+      # into the compound literal; with anything else it's a cast. Positional vs
+      # designated splits on the `.` after `{`, exactly like the Decl forms.
+      - { lhs: Unary, rhs: ['(', Type, ')', '{', InitList, '}'],       action: compoundLit }
+      - { lhs: Unary, rhs: ['(', Type, ')', '{', MemberInitList, '}'], action: compoundLitDesignated }
       # `sizeof(Type)` — emits C# `sizeof(T)` which works for unmanaged types
       # in unsafe context. All dotcc structs are unmanaged (only primitive
       # and pointer fields) so this is always valid.
