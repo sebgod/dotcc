@@ -360,6 +360,46 @@ Synthetic header at `DotCC.Lib/include/assert.h` with the canonical `NDEBUG`-awa
 | `#embed` | C23 | ❌ | Embed file bytes — could lower to `byte[]` literal |
 | `auto` (type inference) | C23 | 🚫 | Conflicts with C's old `auto` storage class; C# already has `var` if user wants this |
 
+## Remaining syntax gaps, by dialect
+
+A consolidated quick-reference of C *syntax* (grammar) not yet supported, grouped
+by the standard that introduced it. The detailed per-feature rows above are the
+source of truth; this is the at-a-glance roadmap. **Severity:** ⛔ parse/lex
+error (fails loudly — safe, never a wrong answer) · 🟡 partial · ❌ roadmap
+(would-implement) · 🚫 deliberately out of scope. **There are no known silent
+miscompiles** — every gap below fails at parse/lex time or is explicitly flagged.
+
+**C89 / C90**
+- ⛔ Pointer-to-array declarator `int (*p)[3]` (awkward in the flattened-array model).
+- ⛔ Standalone function-pointer *parameter* `void qsort(…, int (*cmp)(…))` — use the `typedef`'d form (the standalone *local* declarator IS supported).
+- 🚫 K&R function definitions; `auto` / `register` storage classes.
+
+**C99**
+- ⛔ Compound literals `(int[]){1,2,3}`, `(struct S){…}`.
+- ⛔ Array designators `[2] = 5` (struct designators `.x = 5` work).
+- ⛔ Hex float literals `0x1.8p3`.
+- ⛔ `_Complex` / `_Imaginary`.
+- ⛔ Flexible array members `struct { int n; int data[]; }`.
+- ⛔ Nested-brace multi-dim initializers `int m[2][2] = {{1,2},{3,4}}` (bare multi-dim decl + access work).
+- 🟡 VLAs — a 1-D runtime extent lowers to `stackalloc T[n]`; multi-dim / `sizeof` of a VLA are incomplete.
+- ❌ `inline` (cosmetic — could emit `[MethodImpl(AggressiveInlining)]`).
+
+**C11**
+- ⛔ `_Generic` (generic selection).
+- ⛔ Anonymous `struct` / `union` members.
+- ⛔ `_Alignas` / `_Alignof`, `_Atomic`, `_Noreturn`, `_Thread_local`.
+- ⛔ String/char encoding prefixes `u"…"` / `U"…"` / `u8"…"` / `L"…"` (dotcc is UTF-8-native; the prefix syntax isn't parsed).
+
+**C23**
+- ⛔ `_BitInt(N)`, `typeof` / `typeof_unqual`, `constexpr`.
+- ⛔ `[[attributes]]` (`[[nodiscard]]`, `[[maybe_unused]]`, …).
+- ⛔ Empty initializer `{}`.
+- ⛔ `#elifdef` / `#elifndef`, `#embed`.
+
+**Cross-dialect**
+- ⛔ String literal with a high-byte escape `"\xff"` / `"\377"` (> 0x7F can't be one byte in a C# `u8` literal — fails loudly rather than miscompile).
+- ⛔ Float literal suffix `1.5L` (the `long double` *type* works; only the literal suffix doesn't lex).
+
 ## Out of scope (won't implement)
 
 Listed here so we don't relitigate them. All marked 🚫 above.
