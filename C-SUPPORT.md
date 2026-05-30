@@ -105,7 +105,7 @@ Source of truth for the grammar: `DotCC.Lib/c.lalr.yaml`. Source of truth for th
 |---|---|---|
 | Expression statement `expr;` | ✅ | `stmtExpr` |
 | Declaration statement `int x;`, `int x = 0;` | ✅ | `stmtDecl` |
-| Block `{ … }` | ✅ | `block` / `blockEmpty` |
+| Block `{ … }` | ✅ | `block` / `blockEmpty`. **Block-scope local shadowing** is handled: C lets two same-named locals live in nested-vs-enclosing block scopes (e.g. a `v` inside an `if` block and a separate `v` in the function body, in either textual order), but C# rejects the pair as **CS0136**. dotcc alpha-renames the collision — a scope stack (raw name → emitted C# name) maps each declaration, and a colliding one gets a fresh `name__k`; references resolve through the stack so each use binds to the right declaration. The block-entry hook is an epsilon marker non-terminal `ScopeEnter` reduced just after `{` (and after a `for (` decl header, so a `for (int i …)` that shadows an outer `i` is also renamed apart); the matching pop is the `block` / `stmtForDecl` action. Params keep their spelling — a nested local that collides with a param is the one renamed. Fixture `calc/` (a recursive-descent evaluator whose `factor()` has the canonical inner-vs-body `v` collision). |
 | `if` / `if`–`else` | ✅ | Dangling-else resolved by `rightmost` precedence group |
 | `while (e) stmt` | ✅ | `stmtWhile` |
 | `do { … } while (e);` | ✅ | `Stmt → 'do' Stmt 'while' '(' E ')' ';'`. Cond wrapped with `Cond.B(...)` like other loops. Fixture `small-ops/` |

@@ -195,6 +195,73 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         if (_currentFunctionName is not null) { _localNames.Add(rawName); }
     }
 
+    // ---- block-scope local renaming (CS0136 avoidance) -------------------
+    // C lets two same-named locals live in nested-vs-enclosing block scopes —
+    // e.g. a `v` inside an `if` block AND a separate `v` in the function body
+    // (in EITHER textual order). C# rejects that (CS0136: a name in a nested
+    // scope can't shadow one in an enclosing scope, regardless of order). Since
+    // CS0136 is purely a name-collision rule, we alpha-rename on the fly: a
+    // scope stack maps each raw C name to the unique C# identifier it was
+    // emitted as, and a per-function used-name set drives a uniquifier so a
+    // colliding declaration gets a fresh `name__k`. References (Visit(Var))
+    // resolve through the stack innermost→outermost, so each use binds to the
+    // declaration it does in C. Frames are pushed at block entry (the
+    // `ScopeEnter` marker after `{`, and after a `for (` decl header) and popped
+    // at the matching block / stmtForDecl action; params occupy the function's
+    // outermost frame (StartFn) and always keep their raw name — a nested local
+    // that collides with a param is the one renamed.
+    //
+    // The rename rides purely the emitted text: every side table (_localTypes,
+    // _fnMalloc, _enumerators, array info, …) stays keyed by the RAW C name, so
+    // type synthesis / malloc promotion / enum typing are unaffected.
+    private readonly List<Dictionary<string, string>> _scopes = new();
+    private readonly HashSet<string> _usedLocalNames = new(StringComparer.Ordinal);
+
+    private void PushScope() => _scopes.Add(new Dictionary<string, string>(StringComparer.Ordinal));
+    private void PopScope() { if (_scopes.Count > 0) { _scopes.RemoveAt(_scopes.Count - 1); } }
+
+    /// <summary>
+    /// Declare a local/param in the current (innermost) scope; returns the
+    /// UN-escaped C# identifier to emit for it. The raw name is reused as-is
+    /// the first time it appears in a function; a later collision (shadowing
+    /// or reuse across scopes) gets a fresh <c>name__k</c> that dodges every
+    /// identifier already used in the function. No-op (returns the raw name)
+    /// at file scope, where there's no frame.
+    /// </summary>
+    private string DeclareLocal(string rawName)
+    {
+        if (_scopes.Count == 0) { return rawName; }
+        var emitted = rawName;
+        if (_usedLocalNames.Contains(rawName))
+        {
+            var k = 1;
+            while (_usedLocalNames.Contains(emitted = $"{rawName}__{k}")) { k++; }
+        }
+        _usedLocalNames.Add(emitted);
+        _scopes[^1][rawName] = emitted;
+        return emitted;
+    }
+
+    /// <summary>
+    /// Resolve a reference's raw name to the C# identifier its binding
+    /// declaration was emitted as, searching the scope stack innermost →
+    /// outermost. Null when the name isn't a local/param in scope (so the
+    /// caller falls back to the raw name → global / function / builtin).
+    /// </summary>
+    private string? ResolveLocal(string rawName)
+    {
+        for (var i = _scopes.Count - 1; i >= 0; i--)
+        {
+            if (_scopes[i].TryGetValue(rawName, out var emitted)) { return emitted; }
+        }
+        return null;
+    }
+
+    // Block-entry hook (`ScopeEnter → ε`, reduced just after `{` / `for (`).
+    // Opens a fresh local-name frame; the matching block / stmtForDecl action
+    // pops it.
+    public EmitContent Visit(C.ScopeEnter n) { PushScope(); return string.Empty; }
+
     // Decisions consumed by the emit pass (function name, variable name).
     private readonly IReadOnlySet<(string Fn, string Var)> _promotableIn;
     // Results produced by the analysis pass (finalised per function at FuncDef).
@@ -315,8 +382,21 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         _localNames.Clear();
         _localTypes.Clear();
         _localArrayInfo.Clear();
-        // Adopt the params staged during this FnSig's ParamList reduction.
-        foreach (var p in _pendingParams) { _localNames.Add(p.Name); _localTypes[p.Name] = p.Type; }
+        // Fresh local-renaming state, then open the function's outermost frame
+        // (the parameter scope). The body's `{` opens a nested frame inside it.
+        _scopes.Clear();
+        _usedLocalNames.Clear();
+        PushScope();
+        // Adopt the params staged during this FnSig's ParamList reduction. Each
+        // is registered in the param frame with its RAW name (params keep their
+        // spelling — DeclareLocal returns the raw name while the used-set is
+        // empty), so a nested local that collides is the one that gets renamed.
+        foreach (var p in _pendingParams)
+        {
+            _localNames.Add(p.Name);
+            _localTypes[p.Name] = p.Type;
+            DeclareLocal(p.Name);
+        }
         _pendingParams.Clear();
         return new EmitContent.FnHeader(type, name, pars, isStatic);
     }
@@ -361,6 +441,11 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         _fnStatics.Clear();
         _currentFunctionName = null;  // exit function scope
         _currentFunctionReturnType = null;
+        // Drop the parameter frame (the body block already popped its own); a
+        // clean stack between functions means file-scope references resolve as
+        // globals, not against a stale frame.
+        _scopes.Clear();
+        _usedLocalNames.Clear();
         // Escape the method name for C# emission; sig.Name stays raw above for
         // the `main` check and the export list (the C-ABI EntryPoint keeps the
         // real name). A call to this function escapes identically via Visit(Var).
@@ -371,9 +456,12 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     {
         // Prototypes emit nothing — C# methods hoist. We still need to
         // unwind the FnSig's _currentFunctionName since the body wasn't
-        // visited but the name was set.
+        // visited but the name was set, and drop the param frame StartFn pushed
+        // (no body Block ran to pop a nested one).
         _currentFunctionName = null;
         _currentFunctionReturnType = null;
+        _scopes.Clear();
+        _usedLocalNames.Clear();
         return string.Empty;
     }
 
@@ -721,6 +809,12 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         var name = T(n.Arg4);
         var pars = T(n.Arg7);
         var typesOnly = StripParamNames(pars);
+        // A function-pointer TYPE's parameters aren't real parameters of any
+        // function definition — but the Param visitors still staged them into
+        // _pendingParams. Discard them: only an FnSig's StartFn should adopt
+        // staged params, and leaking these would corrupt the next function's
+        // parameter scope (its names + local-rename used-set).
+        _pendingParams.Clear();
         _aliasNames.Add(name);
         _aliases.Append("using unsafe ").Append(name).Append(" = delegate*<")
             .Append(typesOnly).Append(", ").Append(ret).Append(">;\n");
@@ -1001,14 +1095,17 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     {
         // C90 forbids a declaration after a statement in a block (mixed
         // declarations and code is C99). The StmtList reductions below set
-        // _blkOutOfOrder for this block; report it once here. n.Arg0 is `{`.
+        // _blkOutOfOrder for this block; report it once here. n.Arg0 is `{`,
+        // Arg1 is the ScopeEnter marker, Arg2 the StmtList.
         if (_dialectGate is not null && _blkOutOfOrder)
         {
             Gate(1999, "mixed declarations and statements", n.Arg0);
         }
-        return "{\n" + IndentEach(T(n.Arg1)) + "}\n";
+        var body = "{\n" + IndentEach(T(n.Arg2)) + "}\n";
+        PopScope();  // close the frame ScopeEnter opened after `{`
+        return body;
     }
-    public EmitContent Visit(C.BlockEmpty n) => "{ }\n";
+    public EmitContent Visit(C.BlockEmpty n) { PopScope(); return "{ }\n"; }
     // StmtList builds right-to-left (Arg0 = this statement, Arg1 = the rest).
     // Track, for the C90 mixed-declarations gate, whether the sub-list holds a
     // declaration and whether a declaration follows a non-declaration in it.
@@ -1113,8 +1210,13 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     public EmitContent Visit(C.ForPostEmpty n) => "";
     public EmitContent Visit(C.StmtForDecl n)
     {
+        // ScopeEnter (Arg2) opened the for-init frame after `(`; indices below
+        // are shifted by one accordingly. Decl=Arg3, ForCond=Arg5, ForPost=Arg7,
+        // body=Arg9. Pop the frame once the whole statement is built.
         Gate(1999, "declaration in `for` initializer", n.Arg0);  // C99
-        return $"for ({T(n.Arg2)}; {T(n.Arg4)}; {T(n.Arg6)}) {T(n.Arg8)}";
+        var s = $"for ({T(n.Arg3)}; {T(n.Arg5)}; {T(n.Arg7)}) {T(n.Arg9)}";
+        PopScope();
+        return s;
     }
     public EmitContent Visit(C.StmtForExpr n) =>
         $"for ({T(n.Arg2)}; {T(n.Arg4)}; {T(n.Arg6)}) {T(n.Arg8)}";
@@ -1219,11 +1321,16 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     {
         var type = T(n.Arg0);
         var entries = DE(n.Arg1);
-        // Register name + declared type for shadow resolution and enum typing.
+        // Register name + declared type for shadow resolution and enum typing,
+        // and assign each declarator its (possibly renamed) C# identifier. Raw
+        // names stay in `entries` for the side-table logic below; `renamed`
+        // maps raw → emitted for the actual C# text.
+        var renamed = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var e in entries)
         {
             NoteLocal(e.Name);
             if (_currentFunctionName is not null) { _localTypes[e.Name] = type; }
+            renamed[e.Name] = DeclareLocal(e.Name);
         }
 
         // malloc → stack-value peephole: only single-declarator
@@ -1243,13 +1350,14 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
                 // after explicit field writes in any promotable function (the
                 // usage analysis guarantees `->`-only access), so zero-init vs
                 // C's uninitialised malloc is unobservable.
-                return $"{structType} {Id(entries[0].Name)} = new {structType}()";
+                return $"{structType} {Id(renamed[entries[0].Name])} = new {structType}()";
             }
         }
 
         // Reconcile each initializer's enum-ness with the declared type
-        // (`Color c = 2` → `(Color)(2)`; `int x = c` → `(int)(c)`).
-        entries = entries.Select(e => e with { Init = ReconcileEnumInit(type, e) }).ToList();
+        // (`Color c = 2` → `(Color)(2)`; `int x = c` → `(int)(c)`), then swap in
+        // the (possibly renamed) declarator name for emission.
+        entries = entries.Select(e => e with { Init = ReconcileEnumInit(type, e), Name = renamed[e.Name] }).ToList();
         return $"{type} {DeclEntriesToBlockScopeString(entries)}";
     }
 
@@ -1332,13 +1440,13 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         NoteLocal(name);
         // Record element + count so `sizeof(arr)` can compute count*sizeof(elem)
         // — only when the size is a literal int (a non-literal extent can't be a
-        // compile-time sizeof anyway).
+        // compile-time sizeof anyway). Array info stays keyed by the RAW name.
         if (int.TryParse(sizeText, System.Globalization.NumberStyles.Integer,
                 System.Globalization.CultureInfo.InvariantCulture, out var count))
         {
             NoteLocalArray(name, elem, count);
         }
-        return $"{elem}* {Id(name)} = stackalloc {elem}[{sizeText}]";
+        return $"{elem}* {Id(DeclareLocal(name))} = stackalloc {elem}[{sizeText}]";
     }
 
     // C `T arr[N] = {1, 2, 3}` (or `T arr[] = {…}`) → C# `T* arr = stackalloc T[]{ 1, 2, 3 }`.
@@ -1352,7 +1460,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         var args = A(n.Arg7);
         NoteLocal(name);
         NoteLocalArray(name, T(n.Arg0), args.Count);
-        return EmitArrInit(T(n.Arg0), name, args);
+        return EmitArrInit(T(n.Arg0), DeclareLocal(name), args);
     }
     public EmitContent Visit(C.DeclArrInitImplicit n)
     {
@@ -1360,7 +1468,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         var args = A(n.Arg6);
         NoteLocal(name);
         NoteLocalArray(name, T(n.Arg0), args.Count);
-        return EmitArrInit(T(n.Arg0), name, args);
+        return EmitArrInit(T(n.Arg0), DeclareLocal(name), args);
     }
 
     // Record a block-scope array's element type + count for sizeof. No-op at
@@ -1385,7 +1493,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         var name = T(n.Arg1);
         NoteLocal(name);
         var members = IM(n.Arg4);  // typed InitMembers list
-        return $"{type} {Id(name)} = new {type} {{ {string.Join(", ", members)} }}";
+        return $"{type} {Id(DeclareLocal(name))} = new {type} {{ {string.Join(", ", members)} }}";
     }
 
     // MemberInitListOne / MemberInitListCons accumulate `.field = expr`
@@ -1432,15 +1540,16 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         var type = T(n.Arg0);
         var name = T(n.Arg1);
         NoteLocal(name);
+        var emittedName = DeclareLocal(name);
         var values = A(n.Arg4);  // typed EmitContent.Args — no sentinel split
 
         if (!_structFields.TryGetValue(type, out var fields))
         {
-            return $"{type} {Id(name)} = default /* dotcc: unknown struct '{type}' for aggregate init */";
+            return $"{type} {Id(emittedName)} = default /* dotcc: unknown struct '{type}' for aggregate init */";
         }
 
         var sb = new StringBuilder();
-        sb.Append(type).Append(' ').Append(Id(name)).Append(" = new ").Append(type).Append(" { ");
+        sb.Append(type).Append(' ').Append(Id(emittedName)).Append(" = new ").Append(type).Append(" { ");
         var count = Math.Min(values.Count, fields.Count);
         for (var i = 0; i < count; i++)
         {
@@ -1840,8 +1949,12 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         // An enum-typed variable read is itself enum-valued — tag it so consuming
         // nodes insert the int↔enum casts C# requires (`int x = c`, `c & MASK`,
         // …). Also carry the full CType (incl. array element+count) for sizeof.
-        // Locals/params win over globals (shadowing).
-        var mapped = MapBuiltin(name);
+        // Locals/params win over globals (shadowing). If a scope frame renamed
+        // this local (block-shadow alpha-rename), emit the renamed identifier;
+        // otherwise it's a global / function / builtin → raw name through
+        // MapBuiltin. CType / enum lookups stay keyed by the RAW name.
+        var resolved = ResolveLocal(name);
+        var mapped = resolved is not null ? Id(resolved) : MapBuiltin(name);
         var cty = VarCType(name);
         var enumTag = cty is CType.Sized sz && _enumTags.Contains(sz.CsType) ? sz.CsType : null;
         return new EmitContent.Text(mapped, enumTag, cty);

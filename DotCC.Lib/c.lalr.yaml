@@ -262,6 +262,15 @@ symbols:
   # never on `,`). Produces the same Args payload, so the init visitors read it
   # via A() unchanged.
   - InitList       # 145 non-terminal: brace-init element list (trailing comma OK)
+  # ScopeEnter — an epsilon marker reduced immediately after a block's `{`
+  # (and after a `for (` that introduces a declaration). It has no surface
+  # syntax; its sole purpose is to give the emitter a "scope opened" hook in
+  # the bottom-up SDT — the Block / stmtForDecl action is the matching "scope
+  # closed" hook. The visitor pushes a fresh local-name frame so C's block
+  # shadowing (two same-name locals in nested-vs-enclosing scopes, which C#
+  # rejects as CS0136) can be alpha-renamed apart. See CSharpEmitter's
+  # PushScope / DeclareLocal / ResolveLocal.
+  - ScopeEnter     # 146 marker non-terminal (epsilon)
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -457,8 +466,12 @@ productions:
 
   - derivation: none
     rules:
-      - { lhs: Block, rhs: ['{', StmtList, '}'], action: block }
-      - { lhs: Block, rhs: ['{', '}'],            action: blockEmpty }
+      # ScopeEnter fires right after `{` (before the body reduces), giving the
+      # emitter a block-entry hook for local-scope tracking. The matching pop is
+      # the block / blockEmpty action.
+      - { lhs: Block, rhs: ['{', ScopeEnter, StmtList, '}'], action: block }
+      - { lhs: Block, rhs: ['{', ScopeEnter, '}'],            action: blockEmpty }
+      - { lhs: ScopeEnter, rhs: [], action: scopeEnter }
 
   - derivation: leftmost
     rules:
@@ -486,7 +499,10 @@ productions:
       # `Cond.B(...)`-wrapped condition (or `true` when empty); ForPost the
       # update text (or empty). `for (int i …)` (decl init) is the C99 form the
       # dialect gate flags under -std=c90.
-      - { lhs: Stmt, rhs: ['for', '(', Decl, ';', ForCond, ';', ForPost, ')', Stmt], action: stmtForDecl }
+      # ScopeEnter after `for (` opens a scope for the init declaration (which
+      # in C scopes to the whole for-statement, body included) so a `for (int i …)`
+      # that shadows an outer `i` is renamed apart. Matching pop is stmtForDecl.
+      - { lhs: Stmt, rhs: ['for', '(', ScopeEnter, Decl, ';', ForCond, ';', ForPost, ')', Stmt], action: stmtForDecl }
       - { lhs: Stmt, rhs: ['for', '(', CommaExprList, ';', ForCond, ';', ForPost, ')', Stmt], action: stmtForExpr }
       - { lhs: Stmt, rhs: ['for', '(', ';', ForCond, ';', ForPost, ')', Stmt], action: stmtForNoInit }
       - { lhs: ForCond, rhs: [E], action: forCondExpr }

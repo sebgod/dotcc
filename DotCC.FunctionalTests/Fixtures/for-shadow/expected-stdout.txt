@@ -1,0 +1,6 @@
+inner sum = 10
+outer i = 100
+body i = 7
+body i = 7
+body i = 7
+outer i still = 100

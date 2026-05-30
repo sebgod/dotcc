@@ -1871,4 +1871,99 @@ public sealed class CompilerTests
         }
         finally { File.Delete(src); }
     }
+
+    // ---- block-scope local shadow renaming (CS0136 avoidance) -----------
+
+    [Fact]
+    public void Shadowed_local_in_nested_then_enclosing_scope_is_renamed_apart()
+    {
+        // C lets a `v` in the inner block and a separate `v` in the function
+        // body coexist (the inner reduces FIRST), but C# rejects the pair as
+        // CS0136. dotcc keeps the first-seen `v` and renames the later one.
+        var src = WriteTemp("""
+            int f(int c) {
+                if (c) { int v = 1; return v; }
+                int v = 2;
+                return v;
+            }
+            int main() { return f(0); }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            // Inner block keeps `v`; the function-body decl is renamed to v__1,
+            // and its `return` resolves to the renamed name.
+            emitted.ShouldContain("int v = 1");
+            emitted.ShouldContain("int v__1 = 2");
+            emitted.ShouldContain("return v__1;");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Nested_local_shadowing_a_param_renames_the_local_not_the_param()
+    {
+        // A param `x` and a nested-block local `x` — valid C, CS0136 in C#.
+        // The param keeps its spelling (signature unchanged); the inner local
+        // is the one renamed, and references resolve to the right binding.
+        var src = WriteTemp("""
+            int f(int x) {
+                { int x = 9; return x; }
+            }
+            int main() { return f(3); }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("int f(int x)");   // param keeps its name
+            emitted.ShouldContain("int x__1 = 9");    // inner local renamed
+            emitted.ShouldContain("return x__1;");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Unshadowed_locals_keep_their_names()
+    {
+        // No collision → no renaming. Distinct names stay verbatim.
+        var src = WriteTemp("""
+            int main() {
+                int a = 1;
+                int b = 2;
+                return a + b;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("int a = 1");
+            emitted.ShouldContain("int b = 2");
+            emitted.ShouldNotContain("a__1");
+            emitted.ShouldNotContain("b__1");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Fnptr_typedef_params_do_not_leak_into_next_function()
+    {
+        // Regression: a `typedef int (*Cmp)(int a, int b);` runs the Param
+        // visitors for a/b, but a typedef has no function scope to adopt them.
+        // They must not leak into the next function's parameter scope (which
+        // would rename its real `a`/`b` params and dangle their references).
+        var src = WriteTemp("""
+            typedef int (*Cmp)(int a, int b);
+            int ascending(int a, int b) { return a - b; }
+            int main() { return ascending(2, 5); }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("int ascending(int a, int b)");
+            emitted.ShouldContain("return (a - b);");
+            emitted.ShouldNotContain("a__1");
+            emitted.ShouldNotContain("b__1");
+        }
+        finally { File.Delete(src); }
+    }
 }
