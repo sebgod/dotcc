@@ -21,7 +21,14 @@
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">
-    <DebugType>none</DebugType>
+    <!--
+      Symbols only: a portable .pdb sidecar (not embedded in the DLL, not shipped).
+      Release IL stays fully optimized and AOT ignores managed PDBs for the native
+      image, but the sidecar lets coverlet instrument our own assemblies, so the
+      XPlat Code Coverage collector measures DotCC.Lib / DotCC.Libc rather than
+      only the LALR.CC dependency (which always ships its own PDB).
+    -->
+    <DebugType>portable</DebugType>
   </PropertyGroup>
 
   <!--
