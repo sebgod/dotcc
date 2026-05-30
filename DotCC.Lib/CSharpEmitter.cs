@@ -1196,14 +1196,20 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // operand is already a comparison result like `a == NULL`). The
     // previous `!= 0` form broke when an operand was bool because
     // `bool != 0` isn't a valid C# expression.
+    // `&&` / `||` likewise yield C `int` 0/1 — same CBool wrap so the result is
+    // usable as an int (`int flag = a && b;`). Operands keep their Cond.B truthy
+    // conversion; the bool the C# `&&`/`||` produces is cast to CBool.
     public EmitContent Visit(C.Lor n) =>
-        $"(Cond.B({T(n.Arg0)}) || Cond.B({T(n.Arg2)}))";
+        $"((CBool)(Cond.B({T(n.Arg0)}) || Cond.B({T(n.Arg2)})))";
     public EmitContent Visit(C.Land n) =>
-        $"(Cond.B({T(n.Arg0)}) && Cond.B({T(n.Arg2)}))";
+        $"((CBool)(Cond.B({T(n.Arg0)}) && Cond.B({T(n.Arg2)})))";
+    // Equality: same CBool wrap on the textual fallback. The setjmp path returns
+    // a SetjmpCheckZero variant consumed directly by StmtIfElse (a conditional
+    // context), so it must NOT be wrapped.
     public EmitContent Visit(C.Eq n) => MaybeSetjmpCompare(n.Arg0, n.Arg2, isEquals: true)
-        ?? (EmitContent)$"({T(n.Arg0)} == {T(n.Arg2)})";
+        ?? (EmitContent)$"((CBool)({T(n.Arg0)} == {T(n.Arg2)}))";
     public EmitContent Visit(C.Neq n) => MaybeSetjmpCompare(n.Arg0, n.Arg2, isEquals: false)
-        ?? (EmitContent)$"({T(n.Arg0)} != {T(n.Arg2)})";
+        ?? (EmitContent)$"((CBool)({T(n.Arg0)} != {T(n.Arg2)}))";
 
     /// <summary>
     /// If one side of an <c>==</c>/<c>!=</c> comparison is a
@@ -1238,10 +1244,17 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         string s => s == "0",
         _ => false,
     };
-    public EmitContent Visit(C.Lt n) => $"({T(n.Arg0)} < {T(n.Arg2)})";
-    public EmitContent Visit(C.Gt n) => $"({T(n.Arg0)} > {T(n.Arg2)})";
-    public EmitContent Visit(C.Le n) => $"({T(n.Arg0)} <= {T(n.Arg2)})";
-    public EmitContent Visit(C.Ge n) => $"({T(n.Arg0)} >= {T(n.Arg2)})";
+    // Relational operators yield C `int` 0/1, NOT a bool — `int x = a > b;`,
+    // `(a>0)+(b>0)`, `return a<b;` from an int function, and `printf("%d", a==b)`
+    // are all legal C. C# `<`/`>`/… produce `bool`, which can't land in those
+    // int positions, so we cast the result to `CBool` (the integer-typed _Bool
+    // value): CBool→int carries it into arithmetic/assignment/args/return, and a
+    // `Cond.B(CBool)` overload carries it into conditional positions. Nested
+    // comparisons (`(a>b)==(c>d)`) resolve via CBool→int on both operands.
+    public EmitContent Visit(C.Lt n) => $"((CBool)({T(n.Arg0)} < {T(n.Arg2)}))";
+    public EmitContent Visit(C.Gt n) => $"((CBool)({T(n.Arg0)} > {T(n.Arg2)}))";
+    public EmitContent Visit(C.Le n) => $"((CBool)({T(n.Arg0)} <= {T(n.Arg2)}))";
+    public EmitContent Visit(C.Ge n) => $"((CBool)({T(n.Arg0)} >= {T(n.Arg2)}))";
     // Bitwise — same precedence and semantics in C# (binary `& | ^ << >>`,
     // unary `~`). The visitor just emits the C# operator verbatim.
     public EmitContent Visit(C.BOr n)  => $"({T(n.Arg0)} | {T(n.Arg2)})";

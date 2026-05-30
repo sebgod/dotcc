@@ -537,6 +537,9 @@ public static class Compiler
                 public static bool B(int x) => x != 0;
                 public static bool B(double x) => x != 0;
                 public static unsafe bool B(void* p) => p != null;
+                // Relational / logical results lower to CBool (C's int 0/1);
+                // unwrap to bool for the conditional position they sit in.
+                public static bool B(CBool b) => (int)b != 0;
             }
 
             {{runtimeBlock}}
@@ -642,6 +645,9 @@ public static class Compiler
                 public static bool B(int x) => x != 0;
                 public static bool B(double x) => x != 0;
                 public static unsafe bool B(void* p) => p != null;
+                // Relational / logical results lower to CBool (C's int 0/1);
+                // unwrap to bool for the conditional position they sit in.
+                public static bool B(CBool b) => (int)b != 0;
             }
 
             {{runtimeBlock}}

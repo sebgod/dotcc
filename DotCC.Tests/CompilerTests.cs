@@ -1104,10 +1104,10 @@ public sealed class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23"));
-            // Promoted to `_Bool` → tsBool → integer-typed Libc.CBool. The bool
-            // result lands in the CBool slot via CBool's implicit conversions —
-            // no emitter rewrite at the store.
-            emitted.ShouldContain("CBool gt = (5 > 3);");
+            // Promoted to `_Bool` → tsBool → integer-typed Libc.CBool. The
+            // relational `5 > 3` itself lowers to CBool (C's int-valued result),
+            // and lands in the CBool slot via CBool's implicit conversions.
+            emitted.ShouldContain("CBool gt = ((CBool)(5 > 3));");
         }
         finally { File.Delete(src); }
     }
@@ -1142,7 +1142,7 @@ public sealed class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23"));
-            emitted.ShouldContain("CBool gt = (5 > 3);");
+            emitted.ShouldContain("CBool gt = ((CBool)(5 > 3));");
         }
         finally { File.Delete(src); }
     }
@@ -1195,6 +1195,24 @@ public sealed class CompilerTests
         ((int)(Libc.CBool)3.14).ShouldBe(1);   // double store also normalizes
         ((int)(Libc.CBool)true).ShouldBe(1);
         ((int)(Libc.CBool)false).ShouldBe(0);
+    }
+
+    // ---- Relational / logical operators yield C `int` 0/1 -----------------
+    // They lower to CBool so the result is usable in any integer position
+    // (assignment, arithmetic, argument, return) — not just conditionals.
+    [Fact]
+    public void Relational_and_logical_results_lower_to_CBool()
+    {
+        var src = WriteTemp(
+            "int main() { int a=5,b=3; int x = a > b; int f = a && b; int e = (a == b); return 0; }");
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("int x = ((CBool)(a > b));");          // relational
+            emitted.ShouldContain("(CBool)(Cond.B(a) && Cond.B(b))");    // logical &&
+            emitted.ShouldContain("(CBool)(a == b)");                    // equality
+        }
+        finally { File.Delete(src); }
     }
 
     [Fact]

@@ -81,9 +81,9 @@ Source of truth for the grammar: `DotCC.Lib/c.lalr.yaml`. Source of truth for th
 | Arithmetic `+ - * /` | ✅ | `Add`/`Mul` productions |
 | Modulo `%` | ✅ | At `Mul` precedence; fixture `fizzbuzz/` |
 | Unary `+ - *` (deref) `&` (addrof) | ✅ | `Unary` productions |
-| Logical `&& \|\|` | ✅ | At `LAnd` / `LOr` precedence |
+| Logical `&& \|\|` | ✅ | At `LAnd` / `LOr` precedence. Result lowers to `CBool` (C's int 0/1), so `int f = a && b;` works — see Comparison row. |
 | Logical `!` (unary not) | ✅ | `Unary → '!' Unary` lowers to `(Cond.B(E) ? 0 : 1)` so the result is `int` (matching C's `!x` yielding 0 or 1, not bool). Fixture `small-ops/` |
-| Comparison `< > <= >= == !=` | ✅ | `Rel` and `Equ` productions |
+| Comparison `< > <= >= == !=` | ✅ | `Rel` and `Equ` productions. In C these yield **`int` 0/1**, not bool, so the result must be usable in any integer position (`int x = a > b;`, `(a>0)+(b>0)`, `return a==b;` from an int function, `printf("%d", a<b)`). C# `<`/`==` produce `bool`, so dotcc casts the result to `CBool` (CBool→int carries it into value positions; a `Cond.B(CBool)` overload carries it into conditionals; nested comparisons like `(a>b)==(c>d)` resolve via CBool→int on both operands). Same wrap on `&&`/`\|\|`. Fixture `comparison-as-int/`. |
 | Bitwise `& \| ^ << >>` | ✅ | `BOr` / `BXor` / `BAnd` / `Shift` non-terminals inserted at proper C precedence; fixture `bitwise/` |
 | Bitwise `~` (unary) | ✅ | `bNot` action in `Unary`; fixture `bitwise/` |
 | Assignment `=` | ✅ | Right-associative via `rightmost` precedence group |
