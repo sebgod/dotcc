@@ -551,12 +551,54 @@ internal sealed partial class CSharpEmitter
     {
         var raw = T(n.Arg0);
         var last = raw.Length > 0 ? raw[^1] : '\0';
+        // Hex float literal (C99) — `0x1.8p3`. C# has no hex-float literal, so
+        // parse the value and emit it as a decimal double/float (the L is dropped
+        // → double; the f → float). Gated C99.
+        if (raw.Length > 1 && raw[0] == '0' && (raw[1] is 'x' or 'X'))
+        {
+            Gate(1999, "hex float literal", n.Arg0);
+            var isFlt = last is 'f' or 'F';
+            var body = (last is 'f' or 'F' or 'l' or 'L') ? raw[..^1] : raw;
+            var val = ParseHexFloat(body);
+            var lit = val.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+            if (isFlt) { return Typed(lit + "f", new CType.Sized("float")); }
+            // A bare integer-valued literal would be `int` in C#; force `double`.
+            if (lit.IndexOf('.') < 0 && lit.IndexOf('E') < 0 && lit.IndexOf('e') < 0) { lit += ".0"; }
+            return Typed(lit, new CType.Sized("double"));
+        }
         // `f`/`F` → C# `float` (passes through verbatim — C# accepts the suffix).
         if (last is 'f' or 'F') { return Typed(raw, new CType.Sized("float")); }
         // `l`/`L` → C `long double`, which dotcc maps to C# `double`. C# has no
         // float `L` suffix, so strip it and emit a bare double literal.
         if (last is 'l' or 'L') { return Typed(raw[..^1], new CType.Sized("double")); }
         return Typed(raw, new CType.Sized("double"));
+    }
+
+    // Parse a C hex float literal body (suffix already stripped): `0xH.HpE`,
+    // where the integer/fraction parts are hex and the `p` exponent is a signed
+    // decimal power of two. Mirrors C's value computation: (hex mantissa) * 2^exp.
+    // Exactly-representable constants round-trip; extreme exponents could differ
+    // from gcc by an ULP via Math.Pow — acceptable for literal constants.
+    private static double ParseHexFloat(string s)
+    {
+        var i = 2;  // skip 0x / 0X
+        double mant = 0;
+        while (i < s.Length && Uri.IsHexDigit(s[i])) { mant = mant * 16 + HexVal(s[i]); i++; }
+        if (i < s.Length && s[i] == '.')
+        {
+            i++;
+            var scale = 1.0 / 16;
+            while (i < s.Length && Uri.IsHexDigit(s[i])) { mant += HexVal(s[i]) * scale; scale /= 16; i++; }
+        }
+        var exp = 0;
+        var sign = 1;
+        if (i < s.Length && (s[i] is 'p' or 'P'))
+        {
+            i++;
+            if (i < s.Length && (s[i] is '+' or '-')) { if (s[i] == '-') { sign = -1; } i++; }
+            while (i < s.Length && s[i] is >= '0' and <= '9') { exp = exp * 10 + (s[i] - '0'); i++; }
+        }
+        return mant * System.Math.Pow(2, sign * exp);
     }
 
     // Adjacent string literals concatenate (C translation phase 6). strSeqOne/

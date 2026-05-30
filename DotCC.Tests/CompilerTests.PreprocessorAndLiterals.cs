@@ -81,6 +81,46 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Hex_float_literals_convert_to_decimal_values()
+    {
+        // C# has no hex-float literal, so dotcc parses `0xH.HpE` and emits the
+        // decimal value: `0x1.8p3` = 1.5*2^3 = 12, `0x1p-1` = 0.5, `0x.8p1` = 1,
+        // `0x1.4p2f` = 5 (float). Integer-valued doubles get a `.0` so they stay
+        // double in C#.
+        var src = WriteTemp("""
+            int main() {
+                double a = 0x1.8p3;
+                double b = 0x1p-1;
+                double c = 0x.8p1;
+                float  d = 0x1.4p2f;
+                return 0;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("double a = 12.0;");
+            emitted.ShouldContain("double b = 0.5;");
+            emitted.ShouldContain("double c = 1.0;");
+            emitted.ShouldContain("float d = 5f;");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Hex_float_literal_gated_as_c99_under_pedantic()
+    {
+        var src = WriteTemp("int main() { double x = 0x1.8p3; return (int)x; }");
+        try
+        {
+            Should.Throw<CompileException>(() =>
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), pedanticErrors: true))
+                .Message.ShouldContain("hex float literal");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Binary_literal_passes_through()
     {
         // C# accepts `0b` natively, so the binary literal is emitted verbatim.

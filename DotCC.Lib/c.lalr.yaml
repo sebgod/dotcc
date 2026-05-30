@@ -1218,6 +1218,15 @@ lexer:
     - { symbol: CHAR,   match: '''\\[0-7][0-7]''' }
     - { symbol: CHAR,   match: '''\\[abefnrtv0-7\\''"?]''' }
     - { symbol: CHAR,   match: '''[^''\\]''' }
+    # Hex float literals (C99) — `0x1.8p3`, `0x1p-4`, `0x.8p1`. The binary
+    # exponent `p`/`P` is MANDATORY (disambiguates from a hex int, which never has
+    # `p`), so longest-match cleanly separates `0x1p4` (hex float) from `0x1`
+    # (hex int) with no tie. C# has NO hex-float literal, so these are FLOAT
+    # tokens that Visit(C.Flt) parses + converts to a decimal `double` value.
+    # Three rules for the int-part / fraction-part variations.
+    - { symbol: FLOAT,  match: '0[xX][0-9a-fA-F]+\.[0-9a-fA-F]*[pP][+\-]?[0-9]+[fFlL]?' }
+    - { symbol: FLOAT,  match: '0[xX][0-9a-fA-F]*\.[0-9a-fA-F]+[pP][+\-]?[0-9]+[fFlL]?' }
+    - { symbol: FLOAT,  match: '0[xX][0-9a-fA-F]+[pP][+\-]?[0-9]+[fFlL]?' }
     - { symbol: FLOAT,  match: '[0-9]+\.[0-9]+([eE][+\-]?[0-9]+)?[fFlL]' }
     - { symbol: FLOAT,  match: '[0-9]+\.[0-9]+([eE][+\-]?[0-9]+)?' }
     # Integer literals — with optional C int-suffix (u/U/l/L combinations).
