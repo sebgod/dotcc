@@ -33,7 +33,14 @@ public abstract record EmitContent
     public static implicit operator EmitContent(string s) => new Text(s);
 
     /// <summary>Plain C# source code text — by far the most common variant.</summary>
-    public sealed record Text(string Value) : EmitContent;
+    /// <param name="EnumType">Non-null when this expression lowered to a value
+    /// of a C# <c>enum</c> type (the enum's name). Carried so a consuming node
+    /// can insert the int↔enum casts C# requires but C doesn't: an enum operand
+    /// of an arithmetic/bitwise/relational op decays to <c>(int)</c>, and a
+    /// non-enum value stored into an enum-typed slot is wrapped <c>(Enum)</c>.
+    /// Only set by expression nodes that produce an enum value (enum var read,
+    /// enumerator ref, and the transparent wrappers that propagate it).</param>
+    public sealed record Text(string Value, string? EnumType = null) : EmitContent;
 
     /// <summary>
     /// Accumulator for declaration-specifier sequences (<c>int</c>,
@@ -56,7 +63,12 @@ public abstract record EmitContent
     /// inspect its argument structurally — used by <c>Visit(Call)</c> to spot
     /// <c>malloc(sizeof(T))</c> (the sole arg is a <see cref="SizeofType"/>)
     /// without re-parsing the emitted string. Null for multi-arg lists.</param>
-    public sealed record Args(IReadOnlyList<string> Values, EmitContent? SoleArg = null) : EmitContent;
+    /// <param name="ArgEnums">Per-argument enum type (aligned with
+    /// <paramref name="Values"/>), or null entry for a non-enum argument. Lets
+    /// the printf-family fluent lowering decay an enum argument to <c>(int)</c>
+    /// (a C enum is an int in a varargs `%d` slot, but C#'s <c>.Arg(int)</c>
+    /// won't bind an enum). Null when no argument was enum-typed.</param>
+    public sealed record Args(IReadOnlyList<string> Values, EmitContent? SoleArg = null, IReadOnlyList<string?>? ArgEnums = null) : EmitContent;
 
     /// <summary>
     /// AST marker for <c>sizeof(T)</c> over a named type. Produced by
@@ -161,7 +173,12 @@ public abstract record EmitContent
     /// stack form <c>S name = new S();</c> when the variable qualifies, while
     /// still carrying the low-level allocation in <see cref="Init"/> for the
     /// fallback.</param>
-    public sealed record DeclEntry(string Name, string? Init, string? MallocStructType = null);
+    /// <param name="InitEnumType">The C# enum type the initializer expression
+    /// produced, or null. Carried so <c>Visit(Decl)</c> / <c>EmitGlobalFields</c>
+    /// can insert the int↔enum cast C# needs when the declared type and the
+    /// initializer disagree (`Color c = 2` → <c>(Color)2</c>; `int x = c` →
+    /// <c>(int)c</c>) — the enum tag is lost once the init is rendered to text.</param>
+    public sealed record DeclEntry(string Name, string? Init, string? MallocStructType = null, string? InitEnumType = null);
 
     /// <summary>
     /// Accumulator for an init-declarator list. <c>declItem</c>/<c>declItemInit</c>

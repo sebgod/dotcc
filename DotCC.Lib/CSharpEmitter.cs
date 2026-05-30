@@ -73,11 +73,41 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     /// block-scope declarations both flow through this).</summary>
     private static IReadOnlyList<EmitContent.DeclEntry> DE(Item it) => ((EmitContent.DeclEntries)it.Content).Entries;
 
+    // ---- enum typing helpers --------------------------------------------
+    // C enums are plain ints in every expression; C# enums are a distinct type
+    // with asymmetric operator rules (enum±int → enum, but enum&int / enum*int /
+    // enum==int are all errors). To keep C semantics with no surprises, an
+    // enum-typed operand of any arithmetic/bitwise/relational/shift operator is
+    // decayed to `(int)` here, so the operation is pure int arithmetic and its
+    // result is int (never enum). Enum-ness therefore only flows from leaves
+    // (enum var read, enumerator ref) through transparent wrappers (paren, cast,
+    // ++/--, ternary, comma, assign); the casts below are inserted at the typed
+    // sinks (decl/assign/return/arg/index/printf/Cond.B).
+
+    /// <summary>The C# enum type an expression child produced, or null.</summary>
+    private static string? EnumOf(Item it) => it.Content is EmitContent.Text { EnumType: { } e } ? e : null;
+
+    /// <summary>Read an operand's text, decaying an enum value to its `int`
+    /// underlying so it can take part in a C int operation.</summary>
+    private static string IntDecay(Item it) => EnumOf(it) is null ? T(it) : $"(int){T(it)}";
+
+    /// <summary>Wrap a child as a C-truthy condition (`Cond.B(...)`), decaying an
+    /// enum first — `Cond.B` has int/double/pointer/bool overloads but not enum,
+    /// so `if (color)` must become `Cond.B((int)color)`.</summary>
+    private static string CondOf(Item it) => $"Cond.B({IntDecay(it)})";
+
     // Name of the function currently being reduced. Set by each fnSig*
     // action; cleared by funcDef/funcProto when the enclosing Fn finishes.
     // Read by Visit(Var) so `__func__` resolves directly to the enclosing
     // function's name — no placeholder-string substitution.
     private string? _currentFunctionName;
+
+    // Emitted C# return type of the function being reduced (set in StartFn,
+    // cleared at FuncDef/FuncProto). Read by Visit(StmtReturn) to reconcile a
+    // returned value's enum-ness with the declared return type: `return c;` from
+    // an int function decays the enum to int; `return 2;` from an enum function
+    // casts the int to the enum.
+    private string? _currentFunctionReturnType;
 
     // ---- malloc/free → stack-value peephole -----------------------------
     // Per-function usage of `S* p = (S*)malloc(sizeof(S))` candidates, keyed
@@ -124,11 +154,23 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // order), so the name is registered in time.
     private readonly HashSet<string> _localNames = new(StringComparer.Ordinal);
 
+    // Declared C# type of each local/param in the current function (raw name →
+    // type string, e.g. "Color"). Built live alongside _localNames; consulted by
+    // Visit(Var) to tag an enum-typed variable read as enum so consumers cast.
+    // Reset per function (StartFn). File-scope globals' types live in
+    // _globalTypes (TU-lifetime).
+    private readonly Dictionary<string, string> _localTypes = new(StringComparer.Ordinal);
+
+    // File-scope (global) variable name → C# type, TU-lifetime. Populated by
+    // EmitGlobalFields; consulted by Visit(Var) for globals referenced inside
+    // functions (after the per-function _localTypes miss).
+    private readonly Dictionary<string, string> _globalTypes = new(StringComparer.Ordinal);
+
     // Parameter names stage here. Params reduce as part of the FnSig BEFORE
     // StartFn establishes the function scope (and clears _localNames), so they
     // can't be registered directly — StartFn drains this into _localNames once
     // the scope exists, then the body's decls add to it live.
-    private readonly List<string> _pendingParams = new();
+    private readonly List<(string Name, string Type)> _pendingParams = new();
 
     // Register a block-scope declared name for shadow resolution. No-op at file
     // scope (globals can't share an enumerator's name in C anyway).
@@ -228,12 +270,15 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         // whole point of the FnSig split. Any __func__ inside the body
         // resolves to this directly at Var-visit time.
         _currentFunctionName = name;
+        _currentFunctionReturnType = type;
+        _fnReturnTypes[name] = type;
         // Fresh per-function scopes (no nested functions in C).
         _fnMalloc.Clear();
         _fnStatics.Clear();
         _localNames.Clear();
+        _localTypes.Clear();
         // Adopt the params staged during this FnSig's ParamList reduction.
-        foreach (var p in _pendingParams) { _localNames.Add(p); }
+        foreach (var p in _pendingParams) { _localNames.Add(p.Name); _localTypes[p.Name] = p.Type; }
         _pendingParams.Clear();
         return new EmitContent.FnHeader(type, name, pars, isStatic);
     }
@@ -277,6 +322,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         _fnMalloc.Clear();
         _fnStatics.Clear();
         _currentFunctionName = null;  // exit function scope
+        _currentFunctionReturnType = null;
         // Escape the method name for C# emission; sig.Name stays raw above for
         // the `main` check and the export list (the C-ABI EntryPoint keeps the
         // real name). A call to this function escapes identically via Visit(Var).
@@ -289,6 +335,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         // unwind the FnSig's _currentFunctionName since the body wasn't
         // visited but the name was set.
         _currentFunctionName = null;
+        _currentFunctionReturnType = null;
         return string.Empty;
     }
 
@@ -357,10 +404,13 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         var isRefType = IsPredefinedRefTypeName(rawType) || _refTypeAliases.Contains(rawType);
         foreach (var entry in entries)
         {
+            // Track global var → type for enum-typing of references inside functions.
+            if (_enumTags.Contains(rawType)) { _globalTypes[entry.Name] = rawType; }
             string init;
-            if (entry.Init is { } userInit)
+            if (entry.Init is not null)
             {
-                init = $" = {userInit}";
+                // Reconcile enum-ness against the declared type (same as block scope).
+                init = $" = {ReconcileEnumInit(rawType, entry)}";
             }
             else if (isRefType)
             {
@@ -401,10 +451,10 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // generated struct decl shares the same name.
     public EmitContent Visit(C.TypeStruct n) => T(n.Arg1);
 
-    // `enum ID` as a type reference — lowers to plain `int` because we emit
-    // enumerators as `const int` rather than a C# enum (so the bare names
-    // are usable like C's int constants without explicit casts).
-    public EmitContent Visit(C.TypeEnum n) => "int";
+    // `enum ID` as a type reference — emit the enum tag name (a real C# enum
+    // type shares it). The enum-typing synthesis inserts int↔enum casts at use
+    // sites; the `struct`/`union` keyword likewise drops in usage position.
+    public EmitContent Visit(C.TypeEnum n) => T(n.Arg1);
 
     // `union ID` as a type reference — emit just the ID. The
     // [StructLayout(LayoutKind.Explicit)] struct declaration shares the name.
@@ -440,6 +490,19 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // the source-level convenience of writing the bare name.
     private readonly Dictionary<string, string> _enumerators = new(StringComparer.Ordinal);
 
+    // Set of enum tag names (the `Color` in `enum Color { … }`). Populated by
+    // Visit(EnumDef); consulted to decide whether a variable's declared type is
+    // an enum (so a read of it is enum-typed) and whether a `(T)` cast targets
+    // an enum. TU-lifetime (enums are file-scope).
+    private readonly HashSet<string> _enumTags = new(StringComparer.Ordinal);
+
+    // Function (raw C name) → emitted C# return type, TU-lifetime. Populated at
+    // each FnSig (StartFn); consulted by Visit(Call) to tag a call's result with
+    // its enum type when the callee returns an enum, so the result reconciles in
+    // a consuming context (e.g. `int x = next(c)` decays, `Color d = next(c)`
+    // needs no cast). Misses only a call placed before the callee's definition.
+    private readonly Dictionary<string, string> _fnReturnTypes = new(StringComparer.Ordinal);
+
     // Struct/union/typedef-struct field-name tracker. Same precedent as
     // `_enumerators`: visitor-time symbol table. StructMember pushes each
     // field's name onto `_pendingFields` during child-visit; the enclosing
@@ -450,19 +513,31 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     private readonly List<string> _pendingFields = new();
     private readonly Dictionary<string, List<string>> _structFields = new(StringComparer.Ordinal);
 
-    // `enum Name { A, B = 5, C } ;` — emit a `static class Name { public const
-    // int A = …; … }` into the type-decl side channel. `static class` + `const
-    // int` (rather than a real C# `enum`) avoids the awkward enum-to-int casts
-    // every use site would otherwise need: `Color.Red` is already `int 0`,
-    // usable directly as a C function arg, printf operand, switch case, etc.
-    // Auto-numbering: each item with no explicit initializer takes `prev + 1`;
-    // the first such item is 0. Returns empty so the function-emit stream
-    // stays free of type decls (which C# requires AFTER top-level statements).
-    public EmitContent Visit(C.EnumDef n)
+    // `enum Name { A, B = 5, C } ;` — emit a real C# `enum Name : int { … }`
+    // into the type-decl side channel. A genuine enum (not the old `static class
+    // { const int }`) preserves the C type name and makes `switch`/`case`,
+    // type-safe params, and ToString work; the int↔enum casts C requires but C#
+    // doesn't (`int x = c`, `c & MASK`, `Color c = 2`) are inserted by the
+    // enum-typing synthesis at the consuming nodes. Enum members are compile-time
+    // constants in C#, so `case Red:` and `int a[Blue]` still work. C# enum
+    // auto-numbering matches C (start 0, prev+1), but we emit each resolved value
+    // explicitly so a non-literal initializer (`1 << 2`, `A + 1`) round-trips.
+    // Returns empty — type decls live in the side channel, after statements.
+    public EmitContent Visit(C.EnumDef n) => EmitEnum(T(n.Arg1), EI(n.Arg3), "int");
+
+    // C23 `enum Name : Type { … }` — the fixed underlying type. The Type
+    // non-terminal already resolves an integer specifier to a C# integral type
+    // (byte/sbyte/short/ushort/int/uint/long/ulong), each of which is a valid C#
+    // enum base, so it passes straight through as the base. rhs indices:
+    // enum(0) ID(1) :(2) Type(3) {(4) EnumList(5) }(6) ;(7).
+    public EmitContent Visit(C.EnumDefTyped n) => EmitEnum(T(n.Arg1), EI(n.Arg5), T(n.Arg3));
+
+    // Shared by plain `enum Name { … }` (base int) and the C23 fixed-underlying
+    // form `enum Name : T { … }` (base = mapped C# integral type).
+    private EmitContent EmitEnum(string enumName, IReadOnlyList<string> items, string baseType)
     {
-        var enumName = T(n.Arg1);
-        var items = EI(n.Arg3);  // typed EmitContent.EnumItems — no sentinel split
-        _structs.Append("static class ").Append(enumName).Append("\n{\n");
+        _enumTags.Add(enumName);
+        _structs.Append("enum ").Append(enumName).Append(" : ").Append(baseType).Append("\n{\n");
         var next = 0L;
         foreach (var raw in items)
         {
@@ -495,7 +570,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
                 }
             }
             _enumerators[itemName] = enumName;  // raw key — Visit(Var) looks up by raw name
-            _structs.Append("    public const int ").Append(Id(itemName)).Append(" = ").Append(valueText).Append(";\n");
+            _structs.Append("    ").Append(Id(itemName)).Append(" = ").Append(valueText).Append(",\n");
         }
         _structs.Append("}\n\n");
         return string.Empty;
@@ -666,13 +741,13 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     public EmitContent Visit(C.FnsOne n) => T(n.Arg0);
 
     // Params
-    public EmitContent Visit(C.Param n) { _pendingParams.Add(T(n.Arg1)); return $"{T(n.Arg0)} {Id(T(n.Arg1))}"; }
+    public EmitContent Visit(C.Param n) { _pendingParams.Add((T(n.Arg1), T(n.Arg0))); return $"{T(n.Arg0)} {Id(T(n.Arg1))}"; }
     // C array-parameter decay: `T arr[]` / `T arr[N]` ≡ `T* arr` per
     // C99 §6.7.5.3p7. The size in the sized form is informational only —
     // we discard it (intentionally don't evaluate Arg3) since C semantics
     // give the call site no way to observe a mismatch anyway.
-    public EmitContent Visit(C.ParamArrayUnsized n) { _pendingParams.Add(T(n.Arg1)); return $"{T(n.Arg0)}* {Id(T(n.Arg1))}"; }
-    public EmitContent Visit(C.ParamArraySized n) { _pendingParams.Add(T(n.Arg1)); return $"{T(n.Arg0)}* {Id(T(n.Arg1))}"; }
+    public EmitContent Visit(C.ParamArrayUnsized n) { _pendingParams.Add((T(n.Arg1), T(n.Arg0) + "*")); return $"{T(n.Arg0)}* {Id(T(n.Arg1))}"; }
+    public EmitContent Visit(C.ParamArraySized n) { _pendingParams.Add((T(n.Arg1), T(n.Arg0) + "*")); return $"{T(n.Arg0)}* {Id(T(n.Arg1))}"; }
     public EmitContent Visit(C.ParamsCons n) => $"{T(n.Arg0)}, {T(n.Arg2)}";
     public EmitContent Visit(C.ParamsOne n) => T(n.Arg0);
     public EmitContent Visit(C.ParamsVararg n) => $"{T(n.Arg0)}, params object[] _va";
@@ -874,7 +949,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
                 "setjmp(env) in an `if` condition requires a matching `else` clause; " +
                 "see the supported patterns in <setjmp.h>'s header comment.");
         }
-        return $"if (Cond.B({T(n.Arg2)})) {T(n.Arg4)}";
+        return $"if ({CondOf(n.Arg2)}) {T(n.Arg4)}";
     }
 
     public EmitContent Visit(C.StmtIfElse n)
@@ -904,7 +979,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
                 return EmitSetjmpRewrite(scz.EnvName, tryBody, catchBody);
 
             default:
-                return $"if (Cond.B({T(n.Arg2)})) {T(n.Arg4)}else {T(n.Arg6)}";
+                return $"if ({CondOf(n.Arg2)}) {T(n.Arg4)}else {T(n.Arg6)}";
         }
     }
 
@@ -917,13 +992,13 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         $"try {tryBody}" +
         $"catch (Libc.LongJmpException __jmp) when (__jmp.Token == {envName}) " +
         $"{{ var __longjmp_value = __jmp.Value; {catchBody} }}";
-    public EmitContent Visit(C.StmtWhile n) => $"while (Cond.B({T(n.Arg2)})) {T(n.Arg4)}";
+    public EmitContent Visit(C.StmtWhile n) => $"while ({CondOf(n.Arg2)}) {T(n.Arg4)}";
 
     // `do Stmt while (E) ;` — body runs at least once. C# accepts the same
     // shape; only the condition needs Cond.B wrapping. Note the trailing
     // semicolon is required in both C and C#.
     public EmitContent Visit(C.StmtDoWhile n) =>
-        $"do {T(n.Arg1)}while (Cond.B({T(n.Arg4)}));\n";
+        $"do {T(n.Arg1)}while ({CondOf(n.Arg4)});\n";
 
     // `for (Decl; E; E) Stmt` — emit C#'s for verbatim. C# accepts the same
     // shape; the init declaration scopes to the loop body. The init Decl
@@ -931,9 +1006,9 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // incr keeps the emitter from wrapping `i++` in extra parens that C#
     // rejects in for-clause position.
     public EmitContent Visit(C.StmtForDecl n) =>
-        $"for ({T(n.Arg2)}; Cond.B({T(n.Arg4)}); {T(n.Arg6)}) {T(n.Arg8)}";
+        $"for ({T(n.Arg2)}; {CondOf(n.Arg4)}; {T(n.Arg6)}) {T(n.Arg8)}";
     public EmitContent Visit(C.StmtForExpr n) =>
-        $"for ({T(n.Arg2)}; Cond.B({T(n.Arg4)}); {T(n.Arg6)}) {T(n.Arg8)}";
+        $"for ({T(n.Arg2)}; {CondOf(n.Arg4)}; {T(n.Arg6)}) {T(n.Arg8)}";
 
     // Comma-separated expression list used in for-init / for-update.
     // C# accepts `for (i=0, j=10; …; i++, j--)` natively, so we just
@@ -943,7 +1018,20 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // update still emit identically to before.
     public EmitContent Visit(C.CommaExprOne n) => StripOuterParens(T(n.Arg0));
     public EmitContent Visit(C.CommaExprCons n) => $"{T(n.Arg0)}, {StripOuterParens(T(n.Arg2))}";
-    public EmitContent Visit(C.StmtReturn n) => $"return {T(n.Arg1)};\n";
+    public EmitContent Visit(C.StmtReturn n)
+    {
+        // Reconcile the returned value's enum-ness with the declared return type
+        // (same rule as a decl/assignment sink): enum fn ← non-matching value
+        // gets `(Enum)`, non-enum fn ← enum value decays to `(int)`.
+        var text = T(n.Arg1);
+        var exprEnum = EnumOf(n.Arg1);
+        if (_currentFunctionReturnType is { } ret)
+        {
+            if (_enumTags.Contains(ret)) { if (exprEnum != ret) { text = $"({ret})({text})"; } }
+            else if (exprEnum is not null) { text = $"(int)({text})"; }
+        }
+        return $"return {text};\n";
+    }
     public EmitContent Visit(C.StmtReturnVoid n) => "return;\n";
     public EmitContent Visit(C.StmtBreak n) => "break;\n";
     public EmitContent Visit(C.StmtContinue n) => "continue;\n";
@@ -1017,7 +1105,12 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     {
         var type = T(n.Arg0);
         var entries = DE(n.Arg1);
-        foreach (var e in entries) { NoteLocal(e.Name); }  // shadow resolution
+        // Register name + declared type for shadow resolution and enum typing.
+        foreach (var e in entries)
+        {
+            NoteLocal(e.Name);
+            if (_currentFunctionName is not null) { _localTypes[e.Name] = type; }
+        }
 
         // malloc → stack-value peephole: only single-declarator
         // `S* p = (S*)malloc(sizeof(S));` is eligible. Record whether the
@@ -1040,7 +1133,26 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
             }
         }
 
+        // Reconcile each initializer's enum-ness with the declared type
+        // (`Color c = 2` → `(Color)(2)`; `int x = c` → `(int)(c)`).
+        entries = entries.Select(e => e with { Init = ReconcileEnumInit(type, e) }).ToList();
         return $"{type} {DeclEntriesToBlockScopeString(entries)}";
+    }
+
+    // Reconcile a declared type with an initializer's enum-ness, inserting the
+    // int↔enum cast C# requires when they disagree (C lets enums and ints flow
+    // freely; C# doesn't). Returns the maybe-wrapped init; null passes through.
+    private string? ReconcileEnumInit(string declType, EmitContent.DeclEntry e)
+    {
+        if (e.Init is not { } init) { return null; }
+        if (_enumTags.Contains(declType))
+        {
+            // Enum-typed slot: cast a non-matching source (int→enum, or a
+            // different enum). A source already of this enum needs nothing.
+            return e.InitEnumType == declType ? init : $"({declType})({init})";
+        }
+        // Non-enum slot fed an enum value: decay to int (int→numeric is implicit).
+        return e.InitEnumType is null ? init : $"(int)({init})";
     }
 
     // DeclItemList: structured accumulator of (name, init?) pairs.
@@ -1081,7 +1193,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
             mallocType = ms.StructType;
             if (!_fnMalloc.ContainsKey(name)) { _fnMalloc[name] = new MallocVar { StructType = ms.StructType }; }
         }
-        return new EmitContent.DeclEntries(new[] { new EmitContent.DeclEntry(name, T(n.Arg2), mallocType) });
+        return new EmitContent.DeclEntries(new[] { new EmitContent.DeclEntry(name, T(n.Arg2), mallocType, EnumOf(n.Arg2)) });
     }
 
     // Join structured DeclEntries into the block-scope C# multi-declarator
@@ -1185,12 +1297,40 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     }
 
     // Expressions — paren-heavy to stay precedence-safe.
-    public EmitContent Visit(C.Assign n) => $"({T(n.Arg0)} = {T(n.Arg2)})";
-    public EmitContent Visit(C.AddAssign n) => $"({T(n.Arg0)} += {T(n.Arg2)})";
-    public EmitContent Visit(C.SubAssign n) => $"({T(n.Arg0)} -= {T(n.Arg2)})";
-    public EmitContent Visit(C.MulAssign n) => $"({T(n.Arg0)} *= {T(n.Arg2)})";
-    public EmitContent Visit(C.DivAssign n) => $"({T(n.Arg0)} /= {T(n.Arg2)})";
-    public EmitContent Visit(C.ModAssign n) => $"({T(n.Arg0)} %= {T(n.Arg2)})";
+    public EmitContent Visit(C.Assign n)
+    {
+        // `c = E`: an enum-typed lvalue takes an int→enum cast on a non-matching
+        // source; a non-enum lvalue (`x = c`) decays an enum source to int. The
+        // assignment expression's value carries the lvalue's enum type.
+        var lhsEnum = EnumOf(n.Arg0);
+        var rhs = T(n.Arg2);
+        var rhsEnum = EnumOf(n.Arg2);
+        if (lhsEnum is not null)
+        {
+            if (rhsEnum != lhsEnum) { rhs = $"({lhsEnum})({rhs})"; }
+            return new EmitContent.Text($"({T(n.Arg0)} = {rhs})", lhsEnum);
+        }
+        if (rhsEnum is not null) { rhs = $"(int)({rhs})"; }
+        return $"({T(n.Arg0)} = {rhs})";
+    }
+    // `lhs OP= rhs`. C#'s enum compound-assign is unreliable (`enum |= int`,
+    // `enum *= int` are errors), so when the lvalue is enum-typed we expand to
+    // the explicit `lhs = (Enum)((int)lhs OP rhs)` form — the lvalue is assumed
+    // side-effect-free, which holds for the simple variables C enum/flags code
+    // uses. Otherwise keep `OP=`, decaying an enum rhs to int (`x += c` would be
+    // `int += enum` → C# error).
+    private string CompoundAssign(Item lhsIt, string op, Item rhsIt)
+    {
+        var lhs = T(lhsIt);
+        var rhs = IntDecay(rhsIt);
+        if (EnumOf(lhsIt) is { } e) { return $"({lhs} = ({e})((int){lhs} {op} {rhs}))"; }
+        return $"({lhs} {op}= {rhs})";
+    }
+    public EmitContent Visit(C.AddAssign n) => CompoundAssign(n.Arg0, "+", n.Arg2);
+    public EmitContent Visit(C.SubAssign n) => CompoundAssign(n.Arg0, "-", n.Arg2);
+    public EmitContent Visit(C.MulAssign n) => CompoundAssign(n.Arg0, "*", n.Arg2);
+    public EmitContent Visit(C.DivAssign n) => CompoundAssign(n.Arg0, "/", n.Arg2);
+    public EmitContent Visit(C.ModAssign n) => CompoundAssign(n.Arg0, "%", n.Arg2);
     // Logical `||` and `&&` — wrap each operand with Cond.B so the C-truthy
     // conversion works for int / double / pointer AND bool (when the
     // operand is already a comparison result like `a == NULL`). The
@@ -1200,16 +1340,16 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // usable as an int (`int flag = a && b;`). Operands keep their Cond.B truthy
     // conversion; the bool the C# `&&`/`||` produces is cast to CBool.
     public EmitContent Visit(C.Lor n) =>
-        $"((CBool)(Cond.B({T(n.Arg0)}) || Cond.B({T(n.Arg2)})))";
+        $"((CBool)({CondOf(n.Arg0)} || {CondOf(n.Arg2)}))";
     public EmitContent Visit(C.Land n) =>
-        $"((CBool)(Cond.B({T(n.Arg0)}) && Cond.B({T(n.Arg2)})))";
+        $"((CBool)({CondOf(n.Arg0)} && {CondOf(n.Arg2)}))";
     // Equality: same CBool wrap on the textual fallback. The setjmp path returns
     // a SetjmpCheckZero variant consumed directly by StmtIfElse (a conditional
-    // context), so it must NOT be wrapped.
+    // context), so it must NOT be wrapped. Enum operands decay to int.
     public EmitContent Visit(C.Eq n) => MaybeSetjmpCompare(n.Arg0, n.Arg2, isEquals: true)
-        ?? (EmitContent)$"((CBool)({T(n.Arg0)} == {T(n.Arg2)}))";
+        ?? (EmitContent)$"((CBool)({IntDecay(n.Arg0)} == {IntDecay(n.Arg2)}))";
     public EmitContent Visit(C.Neq n) => MaybeSetjmpCompare(n.Arg0, n.Arg2, isEquals: false)
-        ?? (EmitContent)$"((CBool)({T(n.Arg0)} != {T(n.Arg2)}))";
+        ?? (EmitContent)$"((CBool)({IntDecay(n.Arg0)} != {IntDecay(n.Arg2)}))";
 
     /// <summary>
     /// If one side of an <c>==</c>/<c>!=</c> comparison is a
@@ -1251,41 +1391,41 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // value): CBool→int carries it into arithmetic/assignment/args/return, and a
     // `Cond.B(CBool)` overload carries it into conditional positions. Nested
     // comparisons (`(a>b)==(c>d)`) resolve via CBool→int on both operands.
-    public EmitContent Visit(C.Lt n) => $"((CBool)({T(n.Arg0)} < {T(n.Arg2)}))";
-    public EmitContent Visit(C.Gt n) => $"((CBool)({T(n.Arg0)} > {T(n.Arg2)}))";
-    public EmitContent Visit(C.Le n) => $"((CBool)({T(n.Arg0)} <= {T(n.Arg2)}))";
-    public EmitContent Visit(C.Ge n) => $"((CBool)({T(n.Arg0)} >= {T(n.Arg2)}))";
+    public EmitContent Visit(C.Lt n) => $"((CBool)({IntDecay(n.Arg0)} < {IntDecay(n.Arg2)}))";
+    public EmitContent Visit(C.Gt n) => $"((CBool)({IntDecay(n.Arg0)} > {IntDecay(n.Arg2)}))";
+    public EmitContent Visit(C.Le n) => $"((CBool)({IntDecay(n.Arg0)} <= {IntDecay(n.Arg2)}))";
+    public EmitContent Visit(C.Ge n) => $"((CBool)({IntDecay(n.Arg0)} >= {IntDecay(n.Arg2)}))";
     // Bitwise — same precedence and semantics in C# (binary `& | ^ << >>`,
     // unary `~`). The visitor just emits the C# operator verbatim.
-    public EmitContent Visit(C.BOr n)  => $"({T(n.Arg0)} | {T(n.Arg2)})";
-    public EmitContent Visit(C.BXor n) => $"({T(n.Arg0)} ^ {T(n.Arg2)})";
-    public EmitContent Visit(C.BAnd n) => $"({T(n.Arg0)} & {T(n.Arg2)})";
-    public EmitContent Visit(C.Shl n)  => $"({T(n.Arg0)} << {T(n.Arg2)})";
-    public EmitContent Visit(C.Shr n)  => $"({T(n.Arg0)} >> {T(n.Arg2)})";
-    public EmitContent Visit(C.BNot n) => $"(~{T(n.Arg1)})";
+    public EmitContent Visit(C.BOr n)  => $"({IntDecay(n.Arg0)} | {IntDecay(n.Arg2)})";
+    public EmitContent Visit(C.BXor n) => $"({IntDecay(n.Arg0)} ^ {IntDecay(n.Arg2)})";
+    public EmitContent Visit(C.BAnd n) => $"({IntDecay(n.Arg0)} & {IntDecay(n.Arg2)})";
+    public EmitContent Visit(C.Shl n)  => $"({IntDecay(n.Arg0)} << {IntDecay(n.Arg2)})";
+    public EmitContent Visit(C.Shr n)  => $"({IntDecay(n.Arg0)} >> {IntDecay(n.Arg2)})";
+    public EmitContent Visit(C.BNot n) => $"(~{IntDecay(n.Arg1)})";
 
     // Logical NOT: lower to `(Cond.B(E) ? 0 : 1)` so the result is int,
     // matching C's `!x` yielding 0 or 1 (never a bool). Cond.B picks the
     // right truthy overload based on E's type (int/double/pointer/bool).
-    public EmitContent Visit(C.LNot n) => $"(Cond.B({T(n.Arg1)}) ? 0 : 1)";
+    public EmitContent Visit(C.LNot n) => $"({CondOf(n.Arg1)} ? 0 : 1)";
 
     // Ternary `c ? a : b` — Cond.B wraps the C-truthy condition. The two
     // branches need a common C# type; the user is responsible for keeping
     // them compatible (matches the C constraint that the branches share
     // arithmetic conversions).
     public EmitContent Visit(C.Ternary n) =>
-        $"(Cond.B({T(n.Arg0)}) ? {T(n.Arg2)} : {T(n.Arg4)})";
-    public EmitContent Visit(C.AndAssign n) => $"({T(n.Arg0)} &= {T(n.Arg2)})";
-    public EmitContent Visit(C.OrAssign n)  => $"({T(n.Arg0)} |= {T(n.Arg2)})";
-    public EmitContent Visit(C.XorAssign n) => $"({T(n.Arg0)} ^= {T(n.Arg2)})";
-    public EmitContent Visit(C.ShlAssign n) => $"({T(n.Arg0)} <<= {T(n.Arg2)})";
-    public EmitContent Visit(C.ShrAssign n) => $"({T(n.Arg0)} >>= {T(n.Arg2)})";
+        $"({CondOf(n.Arg0)} ? {T(n.Arg2)} : {T(n.Arg4)})";
+    public EmitContent Visit(C.AndAssign n) => CompoundAssign(n.Arg0, "&", n.Arg2);
+    public EmitContent Visit(C.OrAssign n)  => CompoundAssign(n.Arg0, "|", n.Arg2);
+    public EmitContent Visit(C.XorAssign n) => CompoundAssign(n.Arg0, "^", n.Arg2);
+    public EmitContent Visit(C.ShlAssign n) => CompoundAssign(n.Arg0, "<<", n.Arg2);
+    public EmitContent Visit(C.ShrAssign n) => CompoundAssign(n.Arg0, ">>", n.Arg2);
 
-    public EmitContent Visit(C.Add n) => $"({T(n.Arg0)} + {T(n.Arg2)})";
-    public EmitContent Visit(C.Sub n) => $"({T(n.Arg0)} - {T(n.Arg2)})";
-    public EmitContent Visit(C.Mul n) => $"({T(n.Arg0)} * {T(n.Arg2)})";
-    public EmitContent Visit(C.Div n) => $"({T(n.Arg0)} / {T(n.Arg2)})";
-    public EmitContent Visit(C.Mod n) => $"({T(n.Arg0)} % {T(n.Arg2)})";
+    public EmitContent Visit(C.Add n) => $"({IntDecay(n.Arg0)} + {IntDecay(n.Arg2)})";
+    public EmitContent Visit(C.Sub n) => $"({IntDecay(n.Arg0)} - {IntDecay(n.Arg2)})";
+    public EmitContent Visit(C.Mul n) => $"({IntDecay(n.Arg0)} * {IntDecay(n.Arg2)})";
+    public EmitContent Visit(C.Div n) => $"({IntDecay(n.Arg0)} / {IntDecay(n.Arg2)})";
+    public EmitContent Visit(C.Mod n) => $"({IntDecay(n.Arg0)} % {IntDecay(n.Arg2)})";
     public EmitContent Visit(C.Cast n)
     {
         var castType = T(n.Arg1);
@@ -1298,22 +1438,27 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         {
             return new EmitContent.MallocSizeof(ms.StructType, $"(({castType}){ms.LowLevelText})");
         }
-        return $"(({castType}){T(n.Arg3)})";
+        // A cast to an enum type yields an enum value (C# allows int→enum and
+        // enum→enum casts directly); tag it so downstream consumers reconcile.
+        return new EmitContent.Text($"(({castType}){T(n.Arg3)})",
+            _enumTags.Contains(castType) ? castType : null);
     }
     public EmitContent Visit(C.Deref n) => $"(*{T(n.Arg1)})";
     public EmitContent Visit(C.AddrOf n) => $"(&{T(n.Arg1)})";
-    public EmitContent Visit(C.Neg n) => $"(-{T(n.Arg1)})";
+    public EmitContent Visit(C.Neg n) => $"(-{IntDecay(n.Arg1)})";
     // Prefix ++/-- — strip outer parens of operand to avoid CS0131 on a
     // parenthesised lvalue. `(x)++` would parse as post-inc on a parens
-    // expression, but C# accepts `++x` directly.
-    public EmitContent Visit(C.PreInc n) => $"(++{StripOuterParens(T(n.Arg1))})";
-    public EmitContent Visit(C.PreDec n) => $"(--{StripOuterParens(T(n.Arg1))})";
+    // expression, but C# accepts `++x` directly. Enum-ness propagates (C# ++/--
+    // work on enums) so a `c++` value used in an int slot still gets decayed.
+    public EmitContent Visit(C.PreInc n) => new EmitContent.Text($"(++{StripOuterParens(T(n.Arg1))})", EnumOf(n.Arg1));
+    public EmitContent Visit(C.PreDec n) => new EmitContent.Text($"(--{StripOuterParens(T(n.Arg1))})", EnumOf(n.Arg1));
     // Postfix ++/-- — same stripping; emit `x++` rather than `(x)++`.
-    public EmitContent Visit(C.PostInc n) => $"({StripOuterParens(T(n.Arg0))}++)";
-    public EmitContent Visit(C.PostDec n) => $"({StripOuterParens(T(n.Arg0))}--)";
+    public EmitContent Visit(C.PostInc n) => new EmitContent.Text($"({StripOuterParens(T(n.Arg0))}++)", EnumOf(n.Arg0));
+    public EmitContent Visit(C.PostDec n) => new EmitContent.Text($"({StripOuterParens(T(n.Arg0))}--)", EnumOf(n.Arg0));
     // Subscript `expr[i]` — emit as-is; C# pointer subscript matches C semantics.
+    // An enum index decays to int (C# can't index with an enum).
     public EmitContent Visit(C.Subscript n) =>
-        $"({StripOuterParens(T(n.Arg0))}[{StripOuterParens(T(n.Arg2))}])";
+        $"({StripOuterParens(T(n.Arg0))}[{StripOuterParens(IntDecay(n.Arg2))}])";
 
     // Member access — `.` on a struct value, `->` on a struct pointer.
     // C# accepts both syntaxes in unsafe context (where all our user code
@@ -1400,13 +1545,17 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         // arrives unmapped (post-MapBuiltin-as-identity) so we match the
         // C spelling. `fprintf(stream, fmt, …)` follows the same shape
         // but with the stream as the first call arg.
+        // A varargs `%d` slot takes a C int; an enum argument is a C int too,
+        // but `.Arg(int)` won't bind a C# enum — decay enum args to (int).
+        var argEnums = argsContent.ArgEnums;
+        string VarArg(int i) => argEnums is { } ae && ae[i] is not null ? $"(int){args[i]}" : args[i];
         if (callee == "printf")
         {
             var sb = new StringBuilder();
             sb.Append("printf(").Append(args[0]).Append(')');
             for (int i = 1; i < args.Count; i++)
             {
-                sb.Append(".Arg(").Append(args[i]).Append(')');
+                sb.Append(".Arg(").Append(VarArg(i)).Append(')');
             }
             sb.Append(".Done()");
             return sb.ToString();
@@ -1417,12 +1566,19 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
             sb.Append("fprintf(").Append(args[0]).Append(", ").Append(args[1]).Append(')');
             for (int i = 2; i < args.Count; i++)
             {
-                sb.Append(".Arg(").Append(args[i]).Append(')');
+                sb.Append(".Arg(").Append(VarArg(i)).Append(')');
             }
             sb.Append(".Done()");
             return sb.ToString();
         }
-        return $"{callee}({string.Join(", ", args)})";
+        var callText = $"{callee}({string.Join(", ", args)})";
+        // Tag the result with the callee's enum return type so a consuming
+        // context reconciles (decay in an int slot, no cast in an enum slot).
+        if (_fnReturnTypes.TryGetValue(Unescape(callee), out var rt) && _enumTags.Contains(rt))
+        {
+            return new EmitContent.Text(callText, rt);
+        }
+        return callText;
     }
 
     public EmitContent Visit(C.CallNoArgs n)
@@ -1440,15 +1596,20 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     public EmitContent Visit(C.ArgsCons n)
     {
         var head = T(n.Arg0);
-        var tail = A(n.Arg2);
+        var tailArgs = (EmitContent.Args)n.Arg2.Content;
+        var tail = tailArgs.Values;
         var combined = new List<string>(tail.Count + 1) { head };
         combined.AddRange(tail);
-        return new EmitContent.Args(combined);
+        // Carry per-arg enum types so the printf path can decay enum→int.
+        var enums = new List<string?>(tail.Count + 1) { EnumOf(n.Arg0) };
+        enums.AddRange(tailArgs.ArgEnums ?? new string?[tail.Count]);
+        return new EmitContent.Args(combined, ArgEnums: enums);
     }
 
     // SoleArg keeps the single argument's structured Content alongside its
     // rendered text, so a one-arg call (malloc) can inspect it structurally.
-    public EmitContent Visit(C.ArgsOne n) => new EmitContent.Args(new[] { T(n.Arg0) }, n.Arg0.Content as EmitContent);
+    public EmitContent Visit(C.ArgsOne n) =>
+        new EmitContent.Args(new[] { T(n.Arg0) }, n.Arg0.Content as EmitContent, new[] { EnumOf(n.Arg0) });
 
     // Variable reference. Three emit-time rewrites:
     //   - `__func__` → `L("name\0"u8)` using `_currentFunctionName` (set
@@ -1489,9 +1650,18 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         // at every use and fail to compile.
         if (!_localNames.Contains(name) && _enumerators.TryGetValue(name, out var enumName))
         {
-            return $"{enumName}.{Id(name)}";
+            return new EmitContent.Text($"{enumName}.{Id(name)}", enumName);
         }
-        return MapBuiltin(name);
+        // An enum-typed variable read is itself enum-valued — tag it so consuming
+        // nodes insert the int↔enum casts C# requires (`int x = c`, `c & MASK`,
+        // …). Locals/params win over globals (shadowing).
+        var mapped = MapBuiltin(name);
+        if ((_localTypes.TryGetValue(name, out var vt) || _globalTypes.TryGetValue(name, out vt))
+            && _enumTags.Contains(vt))
+        {
+            return new EmitContent.Text(mapped, vt);
+        }
+        return mapped;
     }
     // Integer literal — pass-through for unsuffixed; normalize C suffixes
     // (u/U/l/L/ll/LL/ul/ull, case-insensitive, order-insensitive) to C#'s
@@ -1547,7 +1717,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         return $"(byte)'{body}'";
     }
 
-    public EmitContent Visit(C.Paren n) => $"({T(n.Arg1)})";
+    public EmitContent Visit(C.Paren n) => new EmitContent.Text($"({T(n.Arg1)})", EnumOf(n.Arg1));
 
     // C23 keyword constants (only reached under -std=c23, via the rewriter's
     // ID->terminal promotion). `_Bool` lowers to C# `bool`, so the boolean

@@ -307,6 +307,11 @@ productions:
       # semantics). The visitor auto-numbers items that have no explicit
       # value: each unnumbered item is `previous + 1`, starting at 0.
       - { lhs: Fn, rhs: ['enum', ID, '{', EnumList, '}', ';'], action: enumDef }
+      # C23 enum with an explicit fixed underlying type: `enum Name : Type { … } ;`.
+      # The Type is an integer type-specifier; it lowers to a real C# enum whose
+      # base is the mapped integral type (`unsigned char` → `byte`, `int` → `int`,
+      # …). After `enum ID`, a `:` is unambiguous — Type is never followed by `:`.
+      - { lhs: Fn, rhs: ['enum', ID, ':', Type, '{', EnumList, '}', ';'], action: enumDefTyped }
       # Union declaration: `union Name { Type f1; Type f2; … } ;`. Reuses
       # the struct MemberList. Lowers to a C# struct with
       # [StructLayout(LayoutKind.Explicit)] and [FieldOffset(0)] on every

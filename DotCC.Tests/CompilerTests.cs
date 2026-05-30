@@ -1598,6 +1598,48 @@ public sealed class CompilerTests
     }
 
     [Fact]
+    public void Enum_lowers_to_a_real_csharp_enum_with_int_casts()
+    {
+        // `enum Color { … }` → a real C# `enum Color : int`; enum↔int flows get
+        // the casts C# requires (C lets them mix freely): `int n = c` decays to
+        // (int), `c + 1` decays the enum operand, `enum Color e = 2` casts (Color).
+        var src = WriteTemp("""
+            enum Color { Red, Green, Blue = 5 };
+            int main() {
+                enum Color c = Green;
+                int n = c;
+                int m = c + 1;
+                enum Color e = 2;
+                return n + m + e;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("enum Color : int");     // real C# enum, not const-int
+            emitted.ShouldContain("Color c = Color.Green;");// enum = enum, no cast
+            emitted.ShouldContain("int n = (int)(c);");     // enum → int decay
+            emitted.ShouldContain("int m = ((int)c + 1);"); // enum operand decays in +
+            emitted.ShouldContain("Color e = (Color)(2);"); // int → enum cast
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void C23_enum_with_underlying_type_maps_the_base()
+    {
+        // C23 `enum Name : Type` → C# `enum Name : <mapped base>` (unsigned char → byte).
+        var src = WriteTemp("enum Color : unsigned char { Red, Green, Blue = 200 };\nint main() { return 0; }");
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23"));
+            emitted.ShouldContain("enum Color : byte");
+            emitted.ShouldContain("Blue = 200,");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Local_shadowing_a_libc_builtin_name_is_a_plain_call()
     {
         // A function-pointer local named like a libc builtin must be called as
