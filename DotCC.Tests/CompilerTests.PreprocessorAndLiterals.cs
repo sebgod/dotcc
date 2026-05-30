@@ -54,6 +54,33 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Float_literal_suffixes_lower_correctly()
+    {
+        // `f`/`F` → C# float (verbatim). `l`/`L` → C long double, which dotcc
+        // maps to C# double; C# has no float `L` suffix, so it's stripped and a
+        // bare double literal is emitted. The `long double` *type* already maps
+        // to `double`, so the variable types line up.
+        var src = WriteTemp("""
+            int main() {
+                long double a = 1.5L;
+                double b = 2.5l;
+                float c = 3.25f;
+                double d = 6.0e2L;
+                return 0;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("double a = 1.5;");      // L stripped
+            emitted.ShouldContain("double b = 2.5;");      // lowercase l stripped
+            emitted.ShouldContain("float c = 3.25f;");     // f kept
+            emitted.ShouldContain("double d = 6.0e2;");    // suffix after exponent
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Binary_literal_passes_through()
     {
         // C# accepts `0b` natively, so the binary literal is emitted verbatim.

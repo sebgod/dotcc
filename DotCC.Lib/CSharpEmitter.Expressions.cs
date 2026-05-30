@@ -550,8 +550,13 @@ internal sealed partial class CSharpEmitter
     public EmitContent Visit(C.Flt n)
     {
         var raw = T(n.Arg0);
-        var isFloat = raw.Length > 0 && (raw[^1] is 'f' or 'F');
-        return Typed(raw, new CType.Sized(isFloat ? "float" : "double"));
+        var last = raw.Length > 0 ? raw[^1] : '\0';
+        // `f`/`F` → C# `float` (passes through verbatim — C# accepts the suffix).
+        if (last is 'f' or 'F') { return Typed(raw, new CType.Sized("float")); }
+        // `l`/`L` → C `long double`, which dotcc maps to C# `double`. C# has no
+        // float `L` suffix, so strip it and emit a bare double literal.
+        if (last is 'l' or 'L') { return Typed(raw[..^1], new CType.Sized("double")); }
+        return Typed(raw, new CType.Sized("double"));
     }
 
     // Adjacent string literals concatenate (C translation phase 6). strSeqOne/

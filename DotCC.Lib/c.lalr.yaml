@@ -1154,10 +1154,11 @@ lexer:
     # Literals. FLOAT BEFORE NUM so longest-match picks float for `123.5`
     # (NUM would match just `123` otherwise). FLOAT requires a mandatory
     # decimal point to disambiguate cleanly from NUM — `123` is INT, `123.0`
-    # is FLOAT. Suffixed form `123.5f` / `123.5F` first (longest match);
-    # un-suffixed second. Both passthrough to C# numeric literal syntax,
-    # which accepts `f`/`F`. (Real C also accepts `L` for long double; we
-    # skip that since C# has no `L` suffix on floats.)
+    # is FLOAT. Suffixed form `123.5f` / `123.5F` / `123.5l` / `123.5L` first
+    # (longest match); un-suffixed second. `f`/`F` passes through to C# verbatim
+    # (C# accepts the float suffix). `l`/`L` is C's long-double suffix — C# has
+    # no float `L` suffix, so Visit(C.Flt) strips it and emits a bare `double`
+    # literal (mirroring dotcc's `long double` → C# `double` type mapping).
     # STRING used both by #include args and as in-expression literals via
     # the `Primary -> STRING` production. Pattern:
     #   open quote, then ( escape-pair OR any-non-quote-non-backslash )* , then close quote.
@@ -1177,7 +1178,7 @@ lexer:
     - { symbol: CHAR,   match: '''\\[0-7][0-7]''' }
     - { symbol: CHAR,   match: '''\\[abefnrtv0-7\\''"?]''' }
     - { symbol: CHAR,   match: '''[^''\\]''' }
-    - { symbol: FLOAT,  match: '[0-9]+\.[0-9]+([eE][+\-]?[0-9]+)?[fF]' }
+    - { symbol: FLOAT,  match: '[0-9]+\.[0-9]+([eE][+\-]?[0-9]+)?[fFlL]' }
     - { symbol: FLOAT,  match: '[0-9]+\.[0-9]+([eE][+\-]?[0-9]+)?' }
     # Integer literals — with optional C int-suffix (u/U/l/L combinations).
     # Suffixed variants listed FIRST so longest-match picks them when the
