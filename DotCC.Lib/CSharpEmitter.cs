@@ -2124,35 +2124,54 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         return Typed(raw, new CType.Sized(isFloat ? "float" : "double"));
     }
 
-    public EmitContent Visit(C.Str n)
+    // Adjacent string literals concatenate (C translation phase 6). strSeqOne/
+    // Cons collect each segment's inner body (quotes stripped, escapes intact);
+    // Visit(C.Str) decodes + emits once.
+    public EmitContent Visit(C.StrSeqOne n) =>
+        new EmitContent.StrParts(new[] { StripStrQuotes(T(n.Arg0)) });
+    public EmitContent Visit(C.StrSeqCons n)
     {
-        var raw = T(n.Arg0);
-        if (raw is null || raw.Length < 2) { return Typed("L(\"\\0\"u8)", new CType.Arr(new CType.Sized("byte"), 1)); }
-        var body = raw[1..^1];
-        // sizeof("…") is the C char[] size: decoded length + 1 for the NUL.
-        // char→byte in dotcc, so element size is 1. Backslash escapes count as
-        // one char (correct for \n \t \\ \" \0 …; multi-byte \xNN is approximate).
-        var len = 1;
-        for (int i = 0; i < body.Length; i++)
-        {
-            if (body[i] == '\\' && i + 1 < body.Length) { i++; }
-            len++;
-        }
-        return Typed($"L(\"{EscapeForUtf8Literal(body)}\\0\"u8)", new CType.Arr(new CType.Sized("byte"), len));
+        var prev = ((EmitContent.StrParts)n.Arg0.Content).Bodies;
+        var combined = new List<string>(prev.Count + 1);
+        combined.AddRange(prev);
+        combined.Add(StripStrQuotes(T(n.Arg1)));
+        return new EmitContent.StrParts(combined);
     }
 
-    // `'a'`, `'\n'`, `'\\'` etc. — C char literal. Our `char` is C# `byte`,
-    // so we lower to `(byte)'X'` where X is the unescaped char value.
-    // Pass the C escape sequence through to C#'s char literal syntax —
-    // both languages accept `\n`, `\t`, `\\`, `\'`, `\"`, `\0`, `\r`.
+    public EmitContent Visit(C.Str n)
+    {
+        // Decode each segment's C escapes to bytes INDEPENDENTLY, then
+        // concatenate — so a `\x…` in one segment can't greedily eat the next
+        // segment's leading hex digit. Emit one greedy-safe u8 literal; the
+        // CType length is the decoded byte count + 1 for the NUL.
+        var parts = (EmitContent.StrParts)n.Arg0.Content;
+        var items = new List<StrItem>();
+        foreach (var body in parts.Bodies) { DecodeCStringBody(body, items); }
+        var (escaped, byteLen) = EmitU8(items);
+        return Typed($"L(\"{escaped}\\0\"u8)", new CType.Arr(new CType.Sized("byte"), byteLen + 1));
+    }
+
+    // C char literal — type `int`, but our `char` is `byte`. Decode the escape
+    // (or plain char) to its byte value: a plain printable ASCII char stays
+    // readable as `(byte)'c'`, everything else (named/octal/hex escape, control)
+    // lowers to `(byte)N`. sizeof('a') is sizeof(int) per C.
     public EmitContent Visit(C.Chr n)
     {
         var raw = T(n.Arg0);
-        if (raw is null || raw.Length < 3) { return "(byte)0"; }
+        if (raw is null || raw.Length < 3) { return Typed("(byte)0", new CType.Sized("int")); }
         var body = raw[1..^1];
-        // A C character constant has type `int`, so sizeof('a') == sizeof(int).
-        // (The emitted VALUE is `(byte)'X'`, but the sizeof TYPE is int.)
-        return Typed($"(byte)'{body}'", new CType.Sized("int"));
+        var i = 0;
+        var item = DecodeEscapeOrChar(body, ref i);
+        string text;
+        if (!item.IsByte && item.Value is >= 0x20 and <= 0x7E && item.Value != '\'' && item.Value != '\\')
+        {
+            text = $"(byte)'{(char)item.Value}'";
+        }
+        else
+        {
+            text = $"(byte){(item.IsByte ? item.Value : item.Value & 0xFF)}";
+        }
+        return Typed(text, new CType.Sized("int"));
     }
 
     // Comma operator (`Expr → Expr ',' E`). Accumulate operands left-to-right
@@ -2301,28 +2320,123 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     private static string Unescape(string emitted) =>
         emitted.Length > 0 && emitted[0] == '@' ? emitted.Substring(1) : emitted;
 
-    private static string EscapeForUtf8Literal(string body)
+    // ---- C string/char escape decoding ----------------------------------
+    // One element of a decoded body: either a literal source character (to be
+    // UTF-8 encoded by the C# u8 literal) or a decoded escape byte (0–255).
+    private readonly record struct StrItem(bool IsByte, int Value);
+
+    private static string StripStrQuotes(string raw) =>
+        raw is { Length: >= 2 } ? raw[1..^1] : "";
+
+    // Decode the char or escape sequence starting at body[i], advancing i past
+    // it. Handles the named escapes, GNU `\e`, 1–3-digit octal, and greedy
+    // `\xNN` hex — each to its byte value; an unknown escape yields the char.
+    private static StrItem DecodeEscapeOrChar(string body, ref int i)
     {
-        var sb = new StringBuilder(body.Length);
-        for (int i = 0; i < body.Length; i++)
+        char c = body[i];
+        if (c != '\\' || i + 1 >= body.Length) { i++; return new StrItem(false, c); }
+        i++;                  // consume the backslash
+        char e = body[i];
+        i++;                  // consume the escape selector (octal/hex re-advance below)
+        switch (e)
         {
-            var c = body[i];
-            if (c == '\\' && i + 1 < body.Length)
+            case 'n':  return new StrItem(true, 0x0A);
+            case 't':  return new StrItem(true, 0x09);
+            case 'r':  return new StrItem(true, 0x0D);
+            case '\\': return new StrItem(true, 0x5C);
+            case '"':  return new StrItem(true, 0x22);
+            case '\'': return new StrItem(true, 0x27);
+            case '?':  return new StrItem(true, 0x3F);
+            case 'a':  return new StrItem(true, 0x07);
+            case 'b':  return new StrItem(true, 0x08);
+            case 'f':  return new StrItem(true, 0x0C);
+            case 'v':  return new StrItem(true, 0x0B);
+            case 'e':  return new StrItem(true, 0x1B);  // GNU \e (ESC)
+            case 'x':
             {
-                sb.Append('\\').Append(body[i + 1]);
-                i++;
-                continue;
+                int val = 0, cnt = 0;
+                while (i < body.Length && Uri.IsHexDigit(body[i])) { val = val * 16 + HexVal(body[i]); i++; cnt++; }
+                if (cnt == 0) { throw new CompileException("`\\x` used with no following hex digits"); }
+                return new StrItem(true, val & 0xFF);
             }
-            switch (c)
+            case >= '0' and <= '7':
             {
-                case '\n': sb.Append("\\n"); break;
-                case '\r': sb.Append("\\r"); break;
-                case '\t': sb.Append("\\t"); break;
-                case '"': sb.Append("\\\""); break;
-                default: sb.Append(c); break;
+                int val = e - '0', cnt = 1;
+                while (i < body.Length && cnt < 3 && body[i] is >= '0' and <= '7') { val = val * 8 + (body[i] - '0'); i++; cnt++; }
+                return new StrItem(true, val & 0xFF);
+            }
+            default: return new StrItem(false, e);  // unknown escape → the char itself
+        }
+    }
+
+    private static void DecodeCStringBody(string body, List<StrItem> into)
+    {
+        var i = 0;
+        while (i < body.Length) { into.Add(DecodeEscapeOrChar(body, ref i)); }
+    }
+
+    private static int HexVal(char c) => c <= '9' ? c - '0' : char.ToLowerInvariant(c) - 'a' + 10;
+
+    // Re-emit decoded items as a greedy-safe C# u8-literal body, returning the
+    // escaped text and byte length. Source chars pass through (the u8 literal
+    // UTF-8-encodes them — matching C's UTF-8 source bytes); decoded escape
+    // bytes become a named escape or `\xHH`, and a `\xHH` is never left next to
+    // a literal hex digit (C# would greedily fold it into the escape). A decoded
+    // escape byte > 0x7F can't be one byte in a u8 literal (C# UTF-8-encodes
+    // `\x80`+ as multi-byte), so fail loudly rather than miscompile.
+    private static (string Escaped, int ByteLen) EmitU8(List<StrItem> items)
+    {
+        var sb = new StringBuilder(items.Count + 8);
+        var len = 0;
+        var prevHex = false;
+        foreach (var it in items)
+        {
+            if (!it.IsByte)
+            {
+                char ch = (char)it.Value;
+                if (ch < 0x80)
+                {
+                    len += 1;
+                    if (ch == '"') { sb.Append("\\\""); prevHex = false; }
+                    else if (ch == '\\') { sb.Append("\\\\"); prevHex = false; }
+                    else if (ch is >= (char)0x20 and <= (char)0x7E)
+                    {
+                        if (prevHex && Uri.IsHexDigit(ch)) { sb.Append("\\x").Append(((int)ch).ToString("X2")); prevHex = true; }
+                        else { sb.Append(ch); prevHex = false; }
+                    }
+                    else { sb.Append("\\x").Append(((int)ch).ToString("X2")); prevHex = true; }
+                }
+                else
+                {
+                    // Non-ASCII source char → emit literally; the u8 literal
+                    // UTF-8-encodes it (matches C's UTF-8 source bytes).
+                    len += System.Text.Encoding.UTF8.GetByteCount(ch.ToString());
+                    sb.Append(ch);
+                    prevHex = false;
+                }
+            }
+            else
+            {
+                int b = it.Value;
+                if (b > 0x7F)
+                {
+                    throw new CompileException(
+                        $"string escape byte 0x{b:X2} > 0x7F isn't representable in a UTF-8 literal yet "
+                        + "(dotcc emits string data as a C# u8 literal).");
+                }
+                len += 1;
+                switch (b)
+                {
+                    case 0x0A: sb.Append("\\n"); prevHex = false; break;
+                    case 0x0D: sb.Append("\\r"); prevHex = false; break;
+                    case 0x09: sb.Append("\\t"); prevHex = false; break;
+                    case 0x22: sb.Append("\\\""); prevHex = false; break;
+                    case 0x5C: sb.Append("\\\\"); prevHex = false; break;
+                    default: sb.Append("\\x").Append(b.ToString("X2")); prevHex = true; break;
+                }
             }
         }
-        return sb.ToString();
+        return (sb.ToString(), len);
     }
 
     private static int CountCommas(string s)

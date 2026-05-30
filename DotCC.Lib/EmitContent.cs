@@ -212,4 +212,14 @@ public abstract record EmitContent
     /// nowhere else, this variant can't escape to a <c>T()</c> that expects code.
     /// </summary>
     public sealed record CommaSeq(IReadOnlyList<string> Operands) : EmitContent;
+
+    /// <summary>
+    /// A run of adjacent string literals (C concatenates them: <c>"a" "b"</c>
+    /// is <c>"ab"</c>). Carries each segment's inner body (escapes intact, no
+    /// surrounding quotes). Produced by <c>strSeqOne</c>/<c>strSeqCons</c> and
+    /// consumed by <c>Visit(C.Str)</c>, which decodes each segment's C escapes
+    /// independently and concatenates the resulting bytes — so a <c>\x…</c>
+    /// escape never greedily consumes the next segment's leading hex digit.
+    /// </summary>
+    public sealed record StrParts(IReadOnlyList<string> Bodies) : EmitContent;
 }

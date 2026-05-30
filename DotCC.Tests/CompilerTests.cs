@@ -226,6 +226,62 @@ public sealed class CompilerTests
         finally { File.Delete(src); }
     }
 
+    // ---- string / char escapes + adjacent concatenation ----------------
+
+    [Fact]
+    public void Octal_and_hex_char_escapes_decode_to_byte_value()
+    {
+        var src = WriteTemp("int main() { char a = '\\033'; char b = '\\x41'; return a + b; }");
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("(byte)27");   // \033 octal
+            emitted.ShouldContain("(byte)65");   // \x41 hex
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Adjacent_string_literals_concatenate()
+    {
+        var src = WriteTemp("""
+            int puts(char *s);
+            int main() { char *s = "Hello, " "world" "!"; return puts(s); }
+            """);
+        try
+        {
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("L(\"Hello, world!\\0\"u8)");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Octal_string_escapes_emit_greedy_safe_hex()
+    {
+        // C# u8 has no octal escape, and its \x is greedy — so octal escapes
+        // become \-delimited \xHH (each followed by the next \x, never a digit).
+        var src = WriteTemp("int puts(char*s); int main() { return puts(\"\\063\\064\\065\"); }");
+        try
+        {
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("L(\"\\x33\\x34\\x35\\0\"u8)");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void High_byte_string_escape_fails_loudly()
+    {
+        // A decoded escape byte > 0x7F can't be one byte in a C# u8 literal —
+        // fail clearly rather than silently UTF-8-encode it to two bytes.
+        var src = WriteTemp("int puts(char*s); int main() { return puts(\"\\xff\"); }");
+        try
+        {
+            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
+                .Message.ShouldContain("> 0x7F");
+        }
+        finally { File.Delete(src); }
+    }
+
     // ---- extern -----------------------------------------------------------
 
     [Fact]

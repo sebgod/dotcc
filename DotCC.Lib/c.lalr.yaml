@@ -284,6 +284,12 @@ symbols:
   # linkage (redundant). dotcc emits nothing for an extern declaration /
   # prototype and emits normally for an extern function definition.
   - 'extern'       # 148 keyword (C89)
+  # StringSeq — one or more adjacent string literals. C concatenates adjacent
+  # string literals into a single literal (translation phase 6): `"a" "b"` is
+  # `"ab"`. Left-recursive so any run folds into one Primary; the visitor
+  # decodes each segment's escapes independently and concatenates the bytes
+  # (so a `\x…` escape never greedily eats the next segment's leading digit).
+  - StringSeq      # 149
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -836,7 +842,9 @@ productions:
       - { lhs: Primary, rhs: [ID],          action: var }
       - { lhs: Primary, rhs: [NUM],         action: num }
       - { lhs: Primary, rhs: [FLOAT],       action: flt }
-      - { lhs: Primary, rhs: [STRING],      action: str }
+      # Adjacent string literals concatenate (`"a" "b"` → `"ab"`). StringSeq
+      # folds the run; `str` decodes + emits once.
+      - { lhs: Primary, rhs: [StringSeq],   action: str }
       # `'a'`, `'\n'` etc. — C char literal. In C the value has type int
       # but is conventionally assigned to char/byte; we lower to `(byte)'a'`
       # since our `char` is `byte`. Escape processing happens in the visitor.
@@ -858,6 +866,13 @@ productions:
     rules:
       - { lhs: ArgList, rhs: [E, ',', ArgList], action: argsCons }
       - { lhs: ArgList, rhs: [E],                action: argsOne }
+
+  # Adjacent string-literal concatenation. Left-recursive: a run of `STRING`
+  # tokens folds into one StringSeq, which `Primary → StringSeq` lowers.
+  - derivation: leftmost
+    rules:
+      - { lhs: StringSeq, rhs: [StringSeq, STRING], action: strSeqCons }
+      - { lhs: StringSeq, rhs: [STRING],             action: strSeqOne }
 
 lexer:
   root:
@@ -1026,12 +1041,16 @@ lexer:
     # Relies on alternation `|` in IRxParser, added upstream in LALR.CC.
     - { symbol: STRING, match: '"(\\["\\nrtbf0v''/aex0-9]|[^"\\])*"' }
     # Char literal: IRx has no `.` (any-char) operator — it parses `.` as
-    # literal. Use a char class on the inner byte instead. Two rules so the
-    # escape form (4 bytes) outranks the plain form (3 bytes) by
-    # longest-match. The class on rule 1 lists every escape char we accept;
-    # rule 2 matches any non-quote, non-backslash byte. Visitor decodes the
-    # escape at emit time and lowers to `(byte)'X'`.
-    - { symbol: CHAR,   match: '''\\[nrtbf0\\''"]''' }
+    # literal. Use a char class on the inner byte instead. Rules are longest-
+    # match, so the multi-byte escape forms (hex `'\xNN'`, 2/3-digit octal
+    # `'\NN'`/`'\NNN'`) precede the single-escape and plain forms. The simple-
+    # escape class covers the named escapes (\a \b \e \f \n \r \t \v \0 \\ \' \"
+    # \?) AND single-digit octal (\0–\7). The Chr visitor decodes the escape to
+    # its byte value and lowers to `(byte)N` (or `(byte)'c'` for a plain char).
+    - { symbol: CHAR,   match: '''\\x[0-9a-fA-F]+''' }
+    - { symbol: CHAR,   match: '''\\[0-7][0-7][0-7]''' }
+    - { symbol: CHAR,   match: '''\\[0-7][0-7]''' }
+    - { symbol: CHAR,   match: '''\\[abefnrtv0-7\\''"?]''' }
     - { symbol: CHAR,   match: '''[^''\\]''' }
     - { symbol: FLOAT,  match: '[0-9]+\.[0-9]+([eE][+\-]?[0-9]+)?[fF]' }
     - { symbol: FLOAT,  match: '[0-9]+\.[0-9]+([eE][+\-]?[0-9]+)?' }
