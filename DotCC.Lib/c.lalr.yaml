@@ -245,6 +245,23 @@ symbols:
   # promoted onto this terminal by DialectKeywordRewriter under -std=c23
   # (rule 2). Both file-scope (Fn) and block-scope (Stmt) positions.
   - '_Static_assert' # 140 keyword (C11)
+  # Type qualifiers. dotcc has no C# equivalent (no `readonly` locals, no
+  # volatile-access model for the unsafe pointer form), so they parse as
+  # declaration specifiers and are DROPPED by ResolveTypeSpec — `const char *p`
+  # lowers exactly like `char *p`. Both are C90, so no dialect gate.
+  - 'const'        # 141 type qualifier (C90)
+  - 'volatile'     # 142 type qualifier (C90)
+  # Optional for-loop clauses — each may be empty (`for (;;)`). ForCond empty
+  # means "always true"; ForPost empty means no update step.
+  - ForCond        # 143 non-terminal: for-condition (E or empty)
+  - ForPost        # 144 non-terminal: for-update (CommaExprList or empty)
+  # Initializer-element list with an OPTIONAL TRAILING COMMA (`{1, 2, 3,}` —
+  # C90-legal). Separate from the call-argument `ArgList` (right-recursive,
+  # where a trailing comma is illegal): this one is LEFT-recursive so the
+  # trailing-comma rule is conflict-free (`InitList → E` reduces only on `}`,
+  # never on `,`). Produces the same Args payload, so the init visitors read it
+  # via A() unchanged.
+  - InitList       # 145 non-terminal: brace-init element list (trailing comma OK)
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -434,6 +451,9 @@ productions:
       - { lhs: TypeSpec, rhs: ['signed'],   action: tsSigned }
       - { lhs: TypeSpec, rhs: ['_Bool'],    action: tsBool }
       - { lhs: TypeSpec, rhs: ['_Float128'], action: tsFloat128 }
+      # Type qualifiers — parsed as specifiers, dropped at resolution.
+      - { lhs: TypeSpec, rhs: ['const'],    action: tsConst }
+      - { lhs: TypeSpec, rhs: ['volatile'], action: tsVolatile }
 
   - derivation: none
     rules:
@@ -460,13 +480,19 @@ productions:
       # `do Stmt while (E) ;` — runs the body at least once. Cond is
       # wrapped with Cond.B like the other loop conditions.
       - { lhs: Stmt, rhs: ['do', Stmt, 'while', '(', E, ')', ';'], action: stmtDoWhile }
-      # for-loop with declaration init: `for (int i = 0; i < n; i++) stmt`.
-      # Two productions covering the two common init shapes (decl vs expr).
-      # Init/cond/incr are all required for now — empty clauses (`for (;;)`)
-      # come later. The condition `E` becomes a bool in C# because all our
-      # comparison/logical visitors already emit bool-yielding form.
-      - { lhs: Stmt, rhs: ['for', '(', Decl, ';', E, ';', CommaExprList, ')', Stmt], action: stmtForDecl }
-      - { lhs: Stmt, rhs: ['for', '(', CommaExprList, ';', E, ';', CommaExprList, ')', Stmt], action: stmtForExpr }
+      # for-loop. Three init shapes (decl / expr / empty) × optional cond /
+      # update via the nullable ForCond / ForPost non-terminals — so `for (;;)`,
+      # `for (i=0;;i++)`, `for (; i<n; )` etc. all parse. ForCond produces the
+      # `Cond.B(...)`-wrapped condition (or `true` when empty); ForPost the
+      # update text (or empty). `for (int i …)` (decl init) is the C99 form the
+      # dialect gate flags under -std=c90.
+      - { lhs: Stmt, rhs: ['for', '(', Decl, ';', ForCond, ';', ForPost, ')', Stmt], action: stmtForDecl }
+      - { lhs: Stmt, rhs: ['for', '(', CommaExprList, ';', ForCond, ';', ForPost, ')', Stmt], action: stmtForExpr }
+      - { lhs: Stmt, rhs: ['for', '(', ';', ForCond, ';', ForPost, ')', Stmt], action: stmtForNoInit }
+      - { lhs: ForCond, rhs: [E], action: forCondExpr }
+      - { lhs: ForCond, rhs: [],  action: forCondEmpty }
+      - { lhs: ForPost, rhs: [CommaExprList], action: forPostExprs }
+      - { lhs: ForPost, rhs: [],              action: forPostEmpty }
       # Comma-separated expression list. Used in for-init / for-update so
       # `for (i=0, j=10; …; i++, j--)` parses. C lets the comma operator
       # appear in arbitrary expression contexts too; that more general
@@ -565,15 +591,15 @@ productions:
       # `T* arr = stackalloc T[]{ 1, 2, 3 }`. We reuse ArgList for the brace
       # contents — it's a comma-separated expression list, which is exactly
       # the same shape.
-      - { lhs: Decl, rhs: [Type, ID, '[', E, ']', '=', '{', ArgList, '}'], action: declArrInit }
-      - { lhs: Decl, rhs: [Type, ID, '[', ']', '=', '{', ArgList, '}'], action: declArrInitImplicit }
+      - { lhs: Decl, rhs: [Type, ID, '[', E, ']', '=', '{', InitList, '}'], action: declArrInit }
+      - { lhs: Decl, rhs: [Type, ID, '[', ']', '=', '{', InitList, '}'], action: declArrInitImplicit }
       # Struct aggregate initializer: `Point p = {1, 2};`. The visitor looks
       # up the struct's field names from a side map populated by StructDef /
       # TypedefStruct / UnionDef, then emits `Point p = new Point { x = 1,
       # y = 2 };` — C# requires named members in object initializers (no
       # positional form). Single-declarator only (like declArr*) since the
       # lowering rewrites the initializer shape.
-      - { lhs: Decl, rhs: [Type, ID, '=', '{', ArgList, '}'], action: declStructInit }
+      - { lhs: Decl, rhs: [Type, ID, '=', '{', InitList, '}'], action: declStructInit }
       # Designated initializer (C99): `Point p = { .x = 1, .y = 2 };`. The
       # user names the fields directly — no _structFields lookup needed at
       # emit time. LALR(1)-distinguished from the positional form by the
@@ -591,11 +617,23 @@ productions:
       - { lhs: DeclItem, rhs: [ID], action: declItem }
       - { lhs: DeclItem, rhs: [ID, '=', E], action: declItemInit }
 
-  # MemberInitList — one or more `.field = E` items, comma-separated.
+  # MemberInitList — one or more `.field = E` items, comma-separated, optional
+  # trailing comma (`{ .x = 1, .y = 2, }`). Left-recursive, so the trailing-
+  # comma rule is conflict-free.
   - derivation: leftmost
     rules:
       - { lhs: MemberInitList, rhs: [MemberInit], action: memberInitListOne }
       - { lhs: MemberInitList, rhs: [MemberInitList, ',', MemberInit], action: memberInitListCons }
+      - { lhs: MemberInitList, rhs: [MemberInitList, ','], action: memberInitListTrail }
+
+  # InitList — brace-initializer element list with an optional trailing comma.
+  # Left-recursive (clean trailing-comma); produces the same Args payload as
+  # ArgList so the init Decl visitors consume it via A() unchanged.
+  - derivation: leftmost
+    rules:
+      - { lhs: InitList, rhs: [E], action: initListOne }
+      - { lhs: InitList, rhs: [InitList, ',', E], action: initListCons }
+      - { lhs: InitList, rhs: [InitList, ','], action: initListTrail }
 
   - derivation: none
     rules:
@@ -812,6 +850,8 @@ lexer:
     - { symbol: 'long',     match: 'long' }
     - { symbol: 'unsigned', match: 'unsigned' }
     - { symbol: 'signed',   match: 'signed' }
+    - { symbol: 'const',    match: 'const' }
+    - { symbol: 'volatile', match: 'volatile' }
     - { symbol: 'goto',     match: 'goto' }
     # `_Bool` must come BEFORE the ID rule so it lexes as a keyword rather
     # than identifier. C99 reserves the underscore-uppercase prefix; the

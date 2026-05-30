@@ -806,6 +806,11 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     public EmitContent Visit(C.TsSigned n)   => Spec("signed");
     public EmitContent Visit(C.TsBool n)     => Spec("_Bool");
     public EmitContent Visit(C.TsFloat128 n) => Spec("Float128");
+    // Type qualifiers — accumulate into the spec list but ResolveTypeSpec's
+    // switch has no case for them, so they're silently dropped (C# has no
+    // equivalent). `const char *p` lowers exactly like `char *p`.
+    public EmitContent Visit(C.TsConst n)    => Spec("const");
+    public EmitContent Visit(C.TsVolatile n) => Spec("volatile");
 
     public EmitContent Visit(C.TypeSpecListOne n)  => S(n.Arg0) is var specs
         ? new EmitContent.SpecList(specs) : throw new InvalidOperationException();
@@ -1080,13 +1085,22 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // here is the LHS (`int i = 0` form); the StripOuterParens on the
     // incr keeps the emitter from wrapping `i++` in extra parens that C#
     // rejects in for-clause position.
+    // for-loop clauses. ForCond produces the already-Cond.B-wrapped condition
+    // (or C# `true` when empty); ForPost the update text (or empty). So the
+    // Stmt productions just splice the pieces — no CondOf here.
+    public EmitContent Visit(C.ForCondExpr n)  => CondOf(n.Arg0);
+    public EmitContent Visit(C.ForCondEmpty n) => "true";
+    public EmitContent Visit(C.ForPostExprs n) => T(n.Arg0);
+    public EmitContent Visit(C.ForPostEmpty n) => "";
     public EmitContent Visit(C.StmtForDecl n)
     {
         Gate(1999, "declaration in `for` initializer", n.Arg0);  // C99
-        return $"for ({T(n.Arg2)}; {CondOf(n.Arg4)}; {T(n.Arg6)}) {T(n.Arg8)}";
+        return $"for ({T(n.Arg2)}; {T(n.Arg4)}; {T(n.Arg6)}) {T(n.Arg8)}";
     }
     public EmitContent Visit(C.StmtForExpr n) =>
-        $"for ({T(n.Arg2)}; {CondOf(n.Arg4)}; {T(n.Arg6)}) {T(n.Arg8)}";
+        $"for ({T(n.Arg2)}; {T(n.Arg4)}; {T(n.Arg6)}) {T(n.Arg8)}";
+    public EmitContent Visit(C.StmtForNoInit n) =>
+        $"for (; {T(n.Arg3)}; {T(n.Arg5)}) {T(n.Arg7)}";
 
     // Comma-separated expression list used in for-init / for-update.
     // C# accepts `for (i=0, j=10; …; i++, j--)` natively, so we just
@@ -1345,7 +1359,22 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         combined.Add(next);
         return new EmitContent.InitMembers(combined);
     }
+    // Trailing comma in a designated initializer — the list is unchanged.
+    public EmitContent Visit(C.MemberInitListTrail n) => (EmitContent.InitMembers)n.Arg0.Content;
     public EmitContent Visit(C.MemberInit n) => $"{Id(T(n.Arg1))} = {T(n.Arg3)}";
+
+    // InitList — brace-initializer elements (optional trailing comma).
+    // Left-recursive; produces the same Args payload the init visitors read.
+    public EmitContent Visit(C.InitListOne n) => new EmitContent.Args(new[] { T(n.Arg0) });
+    public EmitContent Visit(C.InitListCons n)
+    {
+        var prev = ((EmitContent.Args)n.Arg0.Content).Values;
+        var combined = new List<string>(prev.Count + 1);
+        combined.AddRange(prev);
+        combined.Add(T(n.Arg2));
+        return new EmitContent.Args(combined);
+    }
+    public EmitContent Visit(C.InitListTrail n) => (EmitContent.Args)n.Arg0.Content;
 
     // `Point p = {1, 2};` — struct aggregate init. C# can't take positional
     // initializers on a struct, so we look up the struct's field names (from

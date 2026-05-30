@@ -3,6 +3,7 @@
 using System;
 using System.CommandLine;
 using System.IO;
+using System.Linq;
 using System.Text;
 
 namespace DotCC;
@@ -72,10 +73,24 @@ internal static class Program
             inputArg, outOpt, emitOpt, preprocessOpt, includeOpt, defineOpt, compileOpt, sharedOpt, stdOpt,
             pedanticOpt, pedanticErrorsOpt,
         };
+        // Accept-and-ignore unknown flags (-Wall, -O2, -g, -f*, -m*, …) instead
+        // of erroring out, so dotcc survives being driven by ./configure / make,
+        // which pass a grab-bag of gcc/clang flags dotcc doesn't model. Unknown
+        // tokens land in parse.UnmatchedTokens; we warn once and carry on.
+        root.TreatUnmatchedTokensAsErrors = false;
 
         root.SetAction(parse =>
         {
-            var inputs = parse.GetValue(inputArg) ?? Array.Empty<string>();
+            var rawInputs = parse.GetValue(inputArg) ?? Array.Empty<string>();
+            // A string[] argument greedily swallows unknown `-`-prefixed flags
+            // (gcc/clang noise like -Wall/-O2/-g), so partition them out of the
+            // input-file list and warn rather than trying to open them as files.
+            // (Unmatched value-less options also land here via UnmatchedTokens.)
+            foreach (var tok in rawInputs.Where(t => t.StartsWith('-')).Concat(parse.UnmatchedTokens))
+            {
+                Console.Error.WriteLine($"dotcc: warning: ignoring unsupported option '{tok}'");
+            }
+            var inputs = rawInputs.Where(t => !t.StartsWith('-')).ToArray();
             var output = parse.GetValue(outOpt);
             var emit = parse.GetValue(emitOpt);
             var preprocessOnly = parse.GetValue(preprocessOpt);
