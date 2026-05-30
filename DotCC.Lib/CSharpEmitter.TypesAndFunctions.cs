@@ -298,10 +298,57 @@ internal sealed partial class CSharpEmitter
         return T(n.Arg2);  // inner member lines, inlined into the parent
     }
 
+    // Epsilon marker before an anonymous union's inner member list — snapshot how
+    // many fields the parent already had, so AnonUnionMember can slice off exactly
+    // the inner union's fields.
+    public EmitContent Visit(C.MemberMark n)
+    {
+        _memberMarks.Push(_pendingFields.Count);
+        return string.Empty;
+    }
+
+    // Anonymous union member (C11): `union { … };` with no name. Its fields must
+    // OVERLAP, so they can't inline like an anon struct. Lift them into a generated
+    // nested [StructLayout(Explicit)] type, add one synthetic field of it to the
+    // parent, and register each inner field as PROMOTED to that synth field — so
+    // member access rewrites `o.i` → `o.<synth>.i` (see MemberDot/MemberArrow).
+    public EmitContent Visit(C.AnonUnionMember n)
+    {
+        Gate(2011, "anonymous struct/union members", n.Arg0);  // C11
+        var innerLines = T(n.Arg3);  // MemberList lines (public T f;\n …)
+        var snapshot = _memberMarks.Count > 0 ? _memberMarks.Pop() : _pendingFields.Count;
+        // The inner union's field names are _pendingFields[snapshot..]: they are
+        // NOT direct parent fields, so lift them out and register as promoted.
+        var innerNames = new List<string>();
+        for (var i = snapshot; i < _pendingFields.Count; i++) { innerNames.Add(_pendingFields[i]); }
+        if (snapshot < _pendingFields.Count) { _pendingFields.RemoveRange(snapshot, _pendingFields.Count - snapshot); }
+
+        var id = _anonAggCounter++;
+        var nestedType = $"__AnonU{id}";
+        var synth = $"__anon{id}";
+        EmitExplicitUnionType(nestedType, innerLines);
+        _pendingFields.Add(synth);  // the one real parent field
+        foreach (var fld in innerNames) { _pendingPromotions.Add((fld, synth)); }
+        return $"public {nestedType} {synth};\n";
+    }
+
     private void DrainPendingFields(string typeName)
     {
         _structFields[typeName] = new List<string>(_pendingFields);
         _pendingFields.Clear();
+        DrainPromotions(typeName);
+    }
+
+    // Move the anon-union promotions collected while building this aggregate into
+    // _promotedFields under its type name. Called from every field-draining path
+    // (StructDef / UnionDef via DrainPendingFields, and the typedef-struct forms).
+    private void DrainPromotions(string typeName)
+    {
+        if (_pendingPromotions.Count == 0) { return; }
+        var map = _promotedFields.TryGetValue(typeName, out var existing)
+            ? existing : (_promotedFields[typeName] = new Dictionary<string, string>(StringComparer.Ordinal));
+        foreach (var (field, synth) in _pendingPromotions) { map[field] = synth; }
+        _pendingPromotions.Clear();
     }
     // `struct ID` as a type reference — emit just the ID. C# doesn't use the
     // `struct` keyword in usage position (only in declaration), and the
@@ -326,18 +373,25 @@ internal sealed partial class CSharpEmitter
         var name = T(n.Arg1);
         var members = T(n.Arg3);
         DrainPendingFields(name);
+        EmitExplicitUnionType(name, members);
+        return string.Empty;
+    }
+
+    // Emit a C# struct with [StructLayout(Explicit)] + [FieldOffset(0)] on each
+    // member (overlapping storage = C union). `memberLines` are `public T NAME;`
+    // lines from StructMember. Shared by `union` defs and the nested type a C11
+    // anonymous-union member lifts its fields into.
+    private void EmitExplicitUnionType(string name, string memberLines)
+    {
         _structs.Append("[global::System.Runtime.InteropServices.StructLayout(global::System.Runtime.InteropServices.LayoutKind.Explicit)]\n");
         _structs.Append("unsafe struct ").Append(name).Append("\n{\n");
-        // Members come in as `public T NAME;\n` lines from StructMember;
-        // inject [FieldOffset(0)] before each `public` declaration.
-        foreach (var line in members.Split('\n'))
+        foreach (var line in memberLines.Split('\n'))
         {
             if (line.Length == 0) { continue; }
             _structs.Append("    [global::System.Runtime.InteropServices.FieldOffset(0)] ");
             _structs.Append(line).Append('\n');
         }
         _structs.Append("}\n\n");
-        return string.Empty;
     }
 
     // Map from enumerator name → containing enum name. Populated by
@@ -369,6 +423,19 @@ internal sealed partial class CSharpEmitter
     // (C# has no positional-init form for structs — it needs named members).
     private readonly List<string> _pendingFields = new();
     private readonly Dictionary<string, List<string>> _structFields = new(StringComparer.Ordinal);
+
+    // Anonymous-union-member machinery. An anon `union { … };` member lifts its
+    // inner fields into a generated nested explicit-layout type; those fields are
+    // PROMOTED (accessed as `parent.field`, not `parent.synth.field`, in C). We
+    // record, per containing aggregate, each promoted field → the synthetic field
+    // name that holds the nested union, and rewrite member access accordingly.
+    // _memberMarks: _pendingFields-count snapshots from MemberMark (epsilon), so
+    // AnonUnionMember can isolate just its inner fields. _pendingPromotions: the
+    // promotions for the aggregate currently being built, drained at DrainPending.
+    private readonly Stack<int> _memberMarks = new();
+    private int _anonAggCounter;
+    private readonly List<(string Field, string Synth)> _pendingPromotions = new();
+    private readonly Dictionary<string, Dictionary<string, string>> _promotedFields = new(StringComparer.Ordinal);
 
     // `enum Name { A, B = 5, C } ;` — emit a real C# `enum Name : int { … }`
     // into the type-decl side channel. A genuine enum (not the old `static class
@@ -592,6 +659,8 @@ internal sealed partial class CSharpEmitter
         _structFields[alias] = fields;
         if (tag != alias) { _structFields[tag] = fields; }
         _pendingFields.Clear();
+        DrainPromotions(alias);
+        if (tag != alias && _promotedFields.TryGetValue(alias, out var aliasProm)) { _promotedFields[tag] = aliasProm; }
         _structs.Append("unsafe struct ").Append(alias).Append("\n{\n");
         _structs.Append(IndentEach(members));
         _structs.Append("}\n\n");
@@ -613,6 +682,7 @@ internal sealed partial class CSharpEmitter
         var alias = T(n.Arg5);
         _structFields[alias] = new List<string>(_pendingFields);
         _pendingFields.Clear();
+        DrainPromotions(alias);
         _structs.Append("unsafe struct ").Append(alias).Append("\n{\n");
         _structs.Append(IndentEach(members));
         _structs.Append("}\n\n");

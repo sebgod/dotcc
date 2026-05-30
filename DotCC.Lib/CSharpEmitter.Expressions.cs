@@ -217,27 +217,47 @@ internal sealed partial class CSharpEmitter
     // Member access — `.` on a struct value, `->` on a struct pointer.
     // C# accepts both syntaxes in unsafe context (where all our user code
     // lives), so emit verbatim.
-    public EmitContent Visit(C.MemberDot n) =>
-        $"({StripOuterParens(T(n.Arg0))}.{Id(T(n.Arg2))})";
+    public EmitContent Visit(C.MemberDot n)
+    {
+        var baseExpr = StripOuterParens(T(n.Arg0));
+        var field = T(n.Arg2);
+        // A C11 anonymous-union field is reached through the synthetic field that
+        // holds the nested union (`o.i` → `o.__anonN.i`).
+        if (PromotedSynth(n.Arg0, field) is string synth) { return $"({baseExpr}.{synth}.{Id(field)})"; }
+        return $"({baseExpr}.{Id(field)})";
+    }
     public EmitContent Visit(C.MemberArrow n)
     {
         var baseExpr = StripOuterParens(T(n.Arg0));
-        var member = Id(T(n.Arg2));
+        var field = T(n.Arg2);
+        var member = Id(field);
         // Count a `->` whose base is a malloc-candidate variable, and choose the
         // C# operator: a promoted stack value uses `.`, a low-level pointer `->`.
         // The malloc maps are keyed by the RAW C name, but `baseExpr` is the
         // emitted (possibly @-escaped) text — match on the unescaped name, emit
         // with the escaped one.
+        var op = "->";
         var rawBase = Unescape(baseExpr);
         if (_currentFunctionName is string fn && _fnMalloc.TryGetValue(rawBase, out var mv))
         {
             mv.ArrowRefs++;
-            if (_promotableIn.Contains((fn, rawBase)))
-            {
-                return $"({baseExpr}.{member})";
-            }
+            if (_promotableIn.Contains((fn, rawBase))) { op = "."; }
         }
-        return $"({baseExpr}->{member})";
+        // Anonymous-union field promotion: reach the synth field through the base
+        // (with the chosen operator), then `.field` on the value.
+        if (PromotedSynth(n.Arg0, field) is string synth) { return $"({baseExpr}{op}{synth}.{member})"; }
+        return $"({baseExpr}{op}{member})";
+    }
+
+    // If `field` is a C11 anonymous-union field promoted from `baseItem`'s struct
+    // type, return the synthetic field name that holds the nested union; else null.
+    // The base's struct type comes from its synthesized CType (a struct var carries
+    // CType.Sized("S"); a struct pointer CType.Sized("S*") — peel the `*`).
+    private string? PromotedSynth(Item baseItem, string field)
+    {
+        if (TyOf(baseItem) is not CType.Sized s) { return null; }
+        var t = s.CsType.TrimEnd('*');
+        return _promotedFields.TryGetValue(t, out var pf) && pf.TryGetValue(field, out var synth) ? synth : null;
     }
 
     // `sizeof(Type)` — emit C# sizeof. Valid in unsafe contexts for any

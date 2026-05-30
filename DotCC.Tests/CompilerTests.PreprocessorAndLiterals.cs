@@ -1015,6 +1015,45 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Anonymous_union_member_lifts_to_nested_type_and_rewrites_access()
+    {
+        // C11 anonymous union member: fields overlap, so they're lifted into a
+        // generated nested explicit-layout type with a synthetic field, and
+        // `v.i` rewrites to `v.__anon0.i`. `tag`/`extra` stay direct fields.
+        var src = WriteTemp("""
+            struct Value { int tag; union { int i; double d; }; int extra; };
+            int main() { struct Value v; v.i = 42; v.tag = 0; return v.i + v.tag; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("unsafe struct __AnonU0");                 // nested union type
+            emitted.ShouldContain("FieldOffset(0)] public int i;");          // overlapping
+            emitted.ShouldContain("FieldOffset(0)] public double d;");
+            emitted.ShouldContain("public __AnonU0 __anon0;");               // synth field in Value
+            emitted.ShouldContain("(v.__anon0.i)");                          // promoted access rewrite
+            emitted.ShouldContain("(v.tag)");                                // direct field unchanged
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Anonymous_union_member_resolves_promoted_access_through_pointer()
+    {
+        var src = WriteTemp("""
+            struct V { int tag; union { int i; float f; }; };
+            int get(struct V *p) { return p->i; }
+            int main() { struct V v; v.i = 3; return get(&v); }
+            """);
+        try
+        {
+            // The pointer base's CType (V*) is peeled to V to resolve the promotion.
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("(p->__anon0.i)");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Anonymous_struct_member_gated_as_c11_under_pedantic()
     {
         var src = WriteTemp("struct S { int a; struct { int b; }; }; int main() { struct S s; s.b = 1; return s.b; }");

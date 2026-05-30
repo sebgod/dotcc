@@ -328,6 +328,12 @@ symbols:
   # lowercase `noreturn` (C23) is promoted onto this terminal by the dialect
   # rewriter — no separate symbol, same as `bool` → `_Bool`.
   - '_Noreturn'    # 155 keyword (C11) — function specifier
+  # MemberMark — epsilon marker (same trick as ScopeEnter) reduced right after an
+  # anonymous `union {`. It snapshots _pendingFields.Count so the anon-union
+  # visitor can isolate exactly the inner union's fields (to lift them into a
+  # generated nested type + register them as promoted) without disturbing the
+  # parent's other fields.
+  - MemberMark     # 156 marker non-terminal (epsilon)
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -688,6 +694,14 @@ productions:
       # free: after `struct`, a `{` lookahead picks this; an `ID` is a named-type
       # member (`struct Foo x;`). C11-gated.
       - { lhs: Member, rhs: ['struct', '{', MemberList, '}', ';'], action: anonStructMember }
+      # Anonymous union member (C11): `union { … };`. Its fields must OVERLAP, so
+      # (unlike the struct case) they can't just inline. The emitter lifts the
+      # inner fields into a generated nested [StructLayout(Explicit)] type, adds a
+      # single synthetic field of it to the parent, and rewrites promoted accesses
+      # (`o.i` → `o.__anonN.i`) at member-access time. MemberMark (epsilon) marks
+      # where the inner fields begin so they can be isolated from the parent's.
+      - { lhs: Member, rhs: ['union', '{', MemberMark, MemberList, '}', ';'], action: anonUnionMember }
+      - { lhs: MemberMark, rhs: [], action: memberMark }
 
   # EnumList / EnumItem — enumerator body for `enum Name { … }`.
   - derivation: leftmost
