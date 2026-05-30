@@ -993,6 +993,41 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Anonymous_struct_member_promotes_fields_into_parent()
+    {
+        // C11 anonymous struct member — its fields are promoted. For a struct
+        // (sequential) that's an inline: x, y become real fields of Outer, so
+        // `o.x` works verbatim and the layout matches C.
+        var src = WriteTemp("""
+            struct Outer { int tag; struct { int x; int y; }; int z; };
+            int main() { struct Outer o; o.x = 10; return o.x; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            // The inner fields land directly in the struct body, in declaration order.
+            emitted.ShouldContain("public int tag;");
+            emitted.ShouldContain("public int x;");
+            emitted.ShouldContain("public int y;");
+            emitted.ShouldContain("public int z;");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Anonymous_struct_member_gated_as_c11_under_pedantic()
+    {
+        var src = WriteTemp("struct S { int a; struct { int b; }; }; int main() { struct S s; s.b = 1; return s.b; }");
+        try
+        {
+            Should.Throw<CompileException>(() =>
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c99"), pedanticErrors: true))
+                .Message.ShouldContain("anonymous struct/union");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Anonymous_typedef_struct_emits_struct_under_alias()
     {
         // `typedef struct { … } Name;` (no tag) — the common idiom. dotcc emits

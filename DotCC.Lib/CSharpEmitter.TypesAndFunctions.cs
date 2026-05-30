@@ -286,6 +286,18 @@ internal sealed partial class CSharpEmitter
     // no accessible member. Nothing to emit.
     public EmitContent Visit(C.StructAnonBitField n) => string.Empty;
 
+    // Anonymous struct member (C11): `struct { … };` with no name. Its fields are
+    // promoted into the enclosing aggregate's namespace. For a struct (sequential,
+    // no overlap) promotion == inlining: emit the inner member lines directly, so
+    // they become real fields of the parent (and `s.x` works verbatim, no rewrite).
+    // The inner StructMembers already pushed their names to _pendingFields, which
+    // is exactly right — they ARE direct parent fields.
+    public EmitContent Visit(C.AnonStructMember n)
+    {
+        Gate(2011, "anonymous struct/union members", n.Arg0);  // C11
+        return T(n.Arg2);  // inner member lines, inlined into the parent
+    }
+
     private void DrainPendingFields(string typeName)
     {
         _structFields[typeName] = new List<string>(_pendingFields);

@@ -680,6 +680,14 @@ productions:
       # `:` selects the anonymous form.
       - { lhs: Member, rhs: [Type, ID, ':', E, ';'], action: structBitField }
       - { lhs: Member, rhs: [Type, ':', E, ';'],     action: structAnonBitField }
+      # Anonymous struct member (C11): `struct { … };` with no member name. Its
+      # fields are PROMOTED into the enclosing aggregate's namespace (`s.x`). For
+      # a struct (sequential, no overlap) that's exactly an inline of the inner
+      # fields — so dotcc emits the inner member lines directly into the parent
+      # and they become real parent fields (no access rewrite needed). Conflict-
+      # free: after `struct`, a `{` lookahead picks this; an `ID` is a named-type
+      # member (`struct Foo x;`). C11-gated.
+      - { lhs: Member, rhs: ['struct', '{', MemberList, '}', ';'], action: anonStructMember }
 
   # EnumList / EnumItem — enumerator body for `enum Name { … }`.
   - derivation: leftmost
