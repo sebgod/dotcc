@@ -16,10 +16,17 @@ namespace DotCC.Libc;
 /// <c>bool</c> in <c>&lt;stdbool.h&gt;</c> is a macro for <c>_Bool</c>;
 /// <c>true</c>/<c>false</c> lower to the integer literals <c>1</c>/<c>0</c>
 /// (which normalize through the <c>int</c> conversion). <c>sizeof(_Bool)</c>
-/// is 1, matching C. The one case the conversions can't cover is
-/// <c>_Bool b = somePointer;</c> — C# forbids user-defined conversions
-/// involving pointer types — so a pointer-initialised <c>_Bool</c> is the lone
-/// unsupported form (rare; would need an explicit <c>!= NULL</c>).
+/// is 1, matching C. Pointer stores — <c>_Bool b = somePointer;</c>, meaning
+/// <c>somePointer != NULL</c> — are covered by the <c>void*</c> conversion
+/// below: a typed <c>T*</c> reaches it through the standard <c>T* → void*</c>
+/// implicit conversion, so the chain is one standard + one user-defined
+/// conversion (which C# permits). The earlier belief that C# forbids
+/// pointer-involving user-defined conversions was wrong — only conversions
+/// to/from a *generic type parameter* or interface are restricted, not
+/// pointers. Because the conversion lives on the type, EVERY store position
+/// (decl init, assignment, argument to a <c>_Bool</c> param, struct/array
+/// element, <c>return</c> in a <c>_Bool</c> function) coerces uniformly with
+/// no emitter rewrite.
 /// </remarks>
 public readonly struct CBool
 {
@@ -29,7 +36,12 @@ public readonly struct CBool
     // Store-normalization: any nonzero scalar becomes 1 (C's _Bool conversion).
     public static implicit operator CBool(int x) => new((byte)(x != 0 ? 1 : 0));
     public static implicit operator CBool(long x) => new((byte)(x != 0 ? 1 : 0));
+    public static implicit operator CBool(double x) => new((byte)(x != 0 ? 1 : 0));
     public static implicit operator CBool(bool b) => new((byte)(b ? 1 : 0));
+    // Pointer store: `_Bool b = p;` is `p != NULL`. A typed `T*` arrives here
+    // via the standard `T* → void*` conversion (one standard + one user-defined
+    // step — allowed). float reaches the `double` overload the same way.
+    public static unsafe implicit operator CBool(void* p) => new((byte)(p != null ? 1 : 0));
 
     // Reads back as int 0/1 — drives arithmetic, comparison, return, args, %d.
     public static implicit operator int(CBool b) => b._v;

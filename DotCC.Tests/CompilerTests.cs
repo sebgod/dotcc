@@ -1104,7 +1104,9 @@ public sealed class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23"));
-            // Promoted to `_Bool` → tsBool → integer-typed Libc.CBool.
+            // Promoted to `_Bool` → tsBool → integer-typed Libc.CBool. The bool
+            // result lands in the CBool slot via CBool's implicit conversions —
+            // no emitter rewrite at the store.
             emitted.ShouldContain("CBool gt = (5 > 3);");
         }
         finally { File.Delete(src); }
@@ -1163,6 +1165,36 @@ public sealed class CompilerTests
             emitted.ShouldContain("CBool b = 0;");
         }
         finally { File.Delete(src); }
+    }
+
+    // ---- CBool: pointer store coerces to truthiness (the `_Bool b = ptr;`
+    // case) — verified directly against the runtime type, since the whole
+    // point is that the coercion lives on CBool's implicit operators, not in
+    // the emitter. C# permits a user-defined conversion from `void*`; a typed
+    // `T*` reaches it via the standard `T* → void*` conversion.
+    [Fact]
+    public unsafe void CBool_converts_a_pointer_to_its_truthiness()
+    {
+        int n = 7;
+        int* live = &n;
+        int* dead = null;
+        // int* -> void* (standard) -> CBool (user-defined): one of each, allowed.
+        Libc.CBool a = live;
+        Libc.CBool b = dead;
+        Libc.CBool c = (void*)0;
+        ((int)a).ShouldBe(1);   // non-null -> 1
+        ((int)b).ShouldBe(0);   // NULL     -> 0
+        ((int)c).ShouldBe(0);
+    }
+
+    [Fact]
+    public void CBool_normalizes_scalars_to_zero_or_one()
+    {
+        ((int)(Libc.CBool)5).ShouldBe(1);      // any nonzero int -> 1
+        ((int)(Libc.CBool)0).ShouldBe(0);
+        ((int)(Libc.CBool)3.14).ShouldBe(1);   // double store also normalizes
+        ((int)(Libc.CBool)true).ShouldBe(1);
+        ((int)(Libc.CBool)false).ShouldBe(0);
     }
 
     [Fact]
