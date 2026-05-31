@@ -148,6 +148,9 @@ public static class Compiler
         "LongJmpToken", // <setjmp.h> — opaque jmp_buf target
         "thrd_t",       // <threads.h> — opaque thread handle (Libc.thrd_t struct)
         "mtx_t",        // <threads.h> — opaque mutex handle (Libc.mtx_t struct)
+        "div_t",        // <stdlib.h> — div() result (Libc.div_t struct)
+        "ldiv_t",       // <stdlib.h> — ldiv() result (Libc.ldiv_t struct)
+        "lldiv_t",      // <stdlib.h> — lldiv() result (Libc.lldiv_t struct)
     };
 
     /// <summary>

@@ -1,0 +1,11 @@
+atoi = 42
+atol = -123
+atoll = 10000000000
+strtol hex = 26, rest = ' rest'
+strtol oct = 511
+strtol bin = 5
+strtoul = 4294967295
+abs = 5, labs = 100000, llabs = 10000000000
+div = 3 r 2
+ldiv = -3 r -2
+lldiv = 14285714285 r 5

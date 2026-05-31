@@ -1,0 +1,5 @@
+sorted: 1 2 3 5 7 8 9
+bsearch 8 -> found
+bsearch 4 -> missing
+bsearch 1 -> found
+bsearch 9 -> found
