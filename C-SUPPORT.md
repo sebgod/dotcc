@@ -15,6 +15,24 @@ Running tracker of what dotcc's grammar and libc cover today. Update this when a
 
 Source of truth for the grammar: `DotCC.Lib/c.lalr.yaml`. Source of truth for the visitor lowering: `DotCC.Lib/CSharpEmitter.cs`. Source of truth for the runtime: `DotCC.Libc/`. When you flip a row's status, mention the fixture so the table can be re-validated by inspection.
 
+## Coverage at a glance
+
+Bird's-eye scorecard — the detailed per-area tables below are the source of truth; this just rolls them up. **dotcc covers essentially all of C89/C99, and most of C11/C23 that maps cleanly onto .NET.** Output is always modern C# regardless of input dialect.
+
+| Area | Standing | Covered | Gaps / out of scope |
+|---|---|---|---|
+| **Lexical** | ✅ Complete | every comment, identifier, integer (dec/hex/octal/binary, `u`/`l` suffixes, digit separators), float (incl. hex-float and the `L` suffix), char, and string (adjacent concatenation, high-byte) form | 🚫 wide string/char literals, trigraphs, digraphs |
+| **Types** | ✅ Near-complete | `int`…`long long`, `float`/`double`/`long double`, `_Complex`, `_Float128`, pointers, arrays (multi-dim, decay, ptr-to-array), `struct`/`union`/`enum`/`typedef`, function pointers, `const`/`volatile`/`restrict`, `sizeof(type)` + `sizeof expr` | 🟡 bit-fields (unpacked), array compound literals (init position only) · 🚫 VLAs, `_BitInt(N)` |
+| **Operators** | ✅ Near-complete | all arithmetic / relational / logical / bitwise / assignment / compound-assignment, `++`/`--`, ternary, comma, `sizeof`, cast, call, `.`/`->`, subscript | ❌ `_Generic`, `_Alignof` |
+| **Statements** | ✅ Complete | `if`/`else`, `switch`/`case`, `while`, `do`/`while`, `for` (all clauses optional), `break`, `continue`, `return`, `goto`+labels, blocks (with shadow-renaming), empty stmt | — |
+| **Declarations** | ✅ Near-complete | function defs + prototypes, multi-declarators, initializer lists (positional / designated / empty / nested), `inline`, `_Noreturn`, `static`/`extern`/`auto`, mixed decls-and-statements | 🟡 `register` (dropped) · ❌ `_Thread_local`, `_Alignas`, `constexpr`, `[[attributes]]` |
+| **Preprocessor** | ✅ Near-complete | `#include` (both forms), object + function-like macros (`##`, `#`, variadic), full `#if` constant-expr eval, `#ifdef`/`#else`/`#elif`/`#endif`, `#error`/`#warning`, `__FILE__`/`__LINE__`/`__func__`, multiple-include optimization | 🟡 `#pragma` (only `once`) · 🚫 `#line` · ❌ `#elifdef`/`#elifndef`, `#embed` |
+| **libc (19 headers)** | ✅ Near-complete | stdio (incl. real `FILE*` file I/O), stdlib, string, math + tgmath, ctype, time (scalar + `struct tm` calendar + `_r`), errno, assert, complex, inttypes, iso646, stdint, limits, float, stddef, stdbool | 🟡 threads (subset), setjmp (`if/else` shapes) · 🚫 signal, Annex K |
+
+**C11 / C23 specifically** — ✅ done: `_Bool`/`bool`, `true`/`false`/`nullptr`, `typeof`, `auto` inference, `_Float128`, empty initializer `{}`, anonymous struct/union members, `_Noreturn`, binary + digit-separator literals, `<threads.h>` subset. ❌ roadmap: `_Generic`, `_Alignas`/`_Alignof`, `_Atomic`, `_Thread_local`, `constexpr`, `[[attributes]]`, `#embed`/`#elifdef`. 🚫 out of scope: `_BitInt(N)`, wide literals, trigraphs/digraphs.
+
+**No known silent miscompiles** — every gap fails loudly at parse/lex time, and `-pedantic` turns dialect violations into diagnostics.
+
 ## Lexical
 
 | Feature | Status | Notes |
@@ -103,7 +121,7 @@ Source of truth for the grammar: `DotCC.Lib/c.lalr.yaml`. Source of truth for th
 | Subscript `arr[i]` | ✅ | Emitted as-is in C# unsafe context (pointer subscript matches C semantics); fixture `array-sum/` |
 | Cast `(T)expr` | ✅ | `Unary -> '(' Type ')' Unary` |
 | Call `f(a, b)`, `f()` | ✅ | `Postfix` productions |
-| Member access `.` / `->` | ❌ | Depends on `struct` |
+| Member access `.` / `->` | ✅ | Both lowered verbatim (C# accepts `->` on pointers in unsafe context). See the `struct` member-access row in the Types table; fixture `struct-point/`. |
 | `_Alignof` (C11) | ❌ | C11 — low priority |
 | `_Generic` (C11) | ❌ | C11 type-generic dispatch — complex; low priority |
 
