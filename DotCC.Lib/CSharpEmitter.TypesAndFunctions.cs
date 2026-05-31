@@ -364,6 +364,26 @@ internal sealed partial class CSharpEmitter
     // [StructLayout(LayoutKind.Explicit)] struct declaration shares the name.
     public EmitContent Visit(C.TypeUnion n) => T(n.Arg1);
 
+    // `typeof(type)` (C23) — yields the operand type directly. (typeof_unqual is
+    // folded onto the same terminal: dotcc already drops const/volatile.)
+    public EmitContent Visit(C.TypeofType n) => T(n.Arg2);
+
+    // `typeof(expr)` (C23) — yields the expression's type. Read the operand's
+    // synthesized CType (the same layer `sizeof expr` uses): a Sized type (every
+    // scalar, pointer, enum, struct value) gives its C# name directly. Array /
+    // pointer-to-array operands don't have a clean C# type name (dotcc lowers a C
+    // array to a `stackalloc` pointer), and an un-synthesized type (e.g. an
+    // arithmetic result dotcc doesn't type yet) leaves the slot null — both fail
+    // loudly rather than emit a wrong type.
+    public EmitContent Visit(C.TypeofExpr n)
+    {
+        if (TyOf(n.Arg2) is CType.Sized s) { return s.CsType; }
+        throw new CompileException(
+            "typeof(expr): cannot determine the expression's type — only variables, "
+            + "literals, casts, and simple expressions whose scalar/pointer/struct "
+            + "type dotcc tracks are supported (arrays and untyped results aren't yet)");
+    }
+
     // `union Name { Type f1; Type f2; … } ;` — emit a C# struct with
     // [StructLayout(LayoutKind.Explicit)] and [FieldOffset(0)] on each
     // member, giving C's overlapping-storage semantics. Reuses the

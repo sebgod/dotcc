@@ -340,6 +340,11 @@ symbols:
   # `System.Numerics.Complex` (double-backed — `float _Complex` widens, a
   # documented precision note). The lowercase `complex` is a <complex.h> macro.
   - '_Complex'     # 157 keyword (C99) — complex type specifier
+  # `typeof` (C23) — yields the type of an expression or type. Spelled like an
+  # identifier, reserved only in C23, so NO lexer rule: DialectKeywordRewriter
+  # promotes `typeof` (and `typeof_unqual`, treated identically — dotcc drops
+  # qualifiers) onto this terminal under c23; pre-C23 it stays an identifier.
+  - 'typeof'       # 158 keyword (C23) — typeof operator
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -540,6 +545,15 @@ productions:
       # `union ID` as a type reference — emits just the ID (the generated
       # union-struct decl shares the same name, like `struct ID`).
       - { lhs: Type, rhs: ['union', ID], action: typeUnion }
+      # `typeof(expr)` / `typeof(type)` (C23) — yields a type. The expr form reads
+      # the operand's synthesized CType (same layer `sizeof expr` uses); the type
+      # form just unwraps. Conflict-free the same way `sizeof` splits: the
+      # TYPE_NAME lexer hack routes `typeof(ID)` to the expr form (ID is a value)
+      # vs `typeof(TypeName)` / `typeof(int)` to the type form. `typeof` (and
+      # `typeof_unqual`, which dotcc treats identically since it drops qualifiers)
+      # is rule-2 promoted onto this terminal under c23.
+      - { lhs: Type, rhs: ['typeof', '(', E, ')'],    action: typeofExpr }
+      - { lhs: Type, rhs: ['typeof', '(', Type, ')'], action: typeofType }
 
   # TypeSpecList — accumulator of declaration-specifier keywords. Free
   # order: `long unsigned int` and `unsigned int long` and `int unsigned

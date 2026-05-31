@@ -620,6 +620,53 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Typeof_yields_expression_and_type_operand_types()
+    {
+        // C23 typeof: expr form reads the operand's CType; type form unwraps.
+        var src = WriteTemp("""
+            int main() {
+                int x = 5;
+                typeof(x) y = 1;
+                typeof(int) z = 2;
+                double d = 0.0;
+                typeof(d) e = 0.0;
+                int *p = &x;
+                typeof(p) q = p;
+                return y + z + (int)e + *q;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23"));
+            emitted.ShouldContain("int y = 1;");
+            emitted.ShouldContain("int z = 2;");
+            emitted.ShouldContain("double e = 0.0;");
+            emitted.ShouldContain("int* q = p;");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Typeof_is_an_identifier_pre_c23_but_a_keyword_in_c23()
+    {
+        // Pre-C23 `typeof` is an ordinary identifier; under c23 it's the operator,
+        // so using it as a declarator name is a parse error (rule-2 gate).
+        var asVar = WriteTemp("int main() { int typeof = 5; return typeof; }");
+        var asKeyword = WriteTemp("int main() { int x = 1; typeof(x) y = 2; return x + y; }");
+        try
+        {
+            Should.NotThrow(() => Compiler.EmitCSharp(new[] { asVar }, dialect: CDialect.Parse("c17")));
+            Should.Throw<CompileException>(
+                () => Compiler.EmitCSharp(new[] { asVar }, dialect: CDialect.Parse("c23")));
+            // The operator form: works under c23, parse error pre-C23.
+            Should.NotThrow(() => Compiler.EmitCSharp(new[] { asKeyword }, dialect: CDialect.Parse("c23")));
+            Should.Throw<CompileException>(
+                () => Compiler.EmitCSharp(new[] { asKeyword }, dialect: CDialect.Parse("c17")));
+        }
+        finally { File.Delete(asVar); File.Delete(asKeyword); }
+    }
+
+    [Fact]
     public void Lowercase_noreturn_is_an_identifier_pre_c23_but_a_keyword_in_c23()
     {
         // Lowercase `noreturn` is a C23 keyword (promoted onto _Noreturn). Pre-C23

@@ -1,0 +1,1 @@
+MSVC's C frontend doesn't support standard C23 typeof (only the __typeof__ extension in recent builds).

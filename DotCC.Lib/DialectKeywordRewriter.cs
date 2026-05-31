@@ -104,6 +104,12 @@ internal sealed class DialectKeywordRewriter : RewritingTokenStream
             // onto the existing `_Noreturn` terminal under c23; pre-C23 it stays
             // an ID. The `_Noreturn` spelling itself is always a keyword.
             ["noreturn"] = (2023, map["_Noreturn"], "_Noreturn"),
+
+            // C23 `typeof` / `typeof_unqual` — yield a type. Both promote onto the
+            // `typeof` terminal (dotcc drops qualifiers, so typeof_unqual behaves
+            // identically). Pre-C23 they stay ordinary identifiers.
+            ["typeof"]        = (2023, map["typeof"], "typeof"),
+            ["typeof_unqual"] = (2023, map["typeof"], "typeof"),
         };
     }
 
