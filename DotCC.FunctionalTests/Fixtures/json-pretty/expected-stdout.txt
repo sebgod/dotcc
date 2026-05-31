@@ -1,0 +1,14 @@
+{
+  "name": "dotcc",
+  "version": 3,
+  "langs": [
+    "C",
+    "C#"
+  ],
+  "flags": {
+    "aot": true,
+    "unsafe": true
+  },
+  "ratio": 1.5,
+  "nothing": null
+}
