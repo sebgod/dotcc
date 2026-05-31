@@ -226,7 +226,11 @@ internal sealed partial class CSharpEmitter
         // A C11 anonymous-union field is reached through the synthetic field that
         // holds the nested union (`o.i` → `o.__anonN.i`).
         if (PromotedSynth(n.Arg0, field) is string synth) { return $"({baseExpr}.{synth}.{Id(field)})"; }
-        return $"({baseExpr}.{Id(field)})";
+        var text = $"({baseExpr}.{Id(field)})";
+        // An enum-typed field reads as enum-typed (decays in operators, reconciles
+        // at sinks) — same EnumType machinery as an enum variable.
+        if (FieldEnum(n.Arg0, field) is string e) { return new EmitContent.Text(text, e, new CType.Sized(e)); }
+        return text;
     }
     public EmitContent Visit(C.MemberArrow n)
     {
@@ -248,7 +252,9 @@ internal sealed partial class CSharpEmitter
         // Anonymous-union field promotion: reach the synth field through the base
         // (with the chosen operator), then `.field` on the value.
         if (PromotedSynth(n.Arg0, field) is string synth) { return $"({baseExpr}{op}{synth}.{member})"; }
-        return $"({baseExpr}{op}{member})";
+        var text = $"({baseExpr}{op}{member})";
+        if (FieldEnum(n.Arg0, field) is string e) { return new EmitContent.Text(text, e, new CType.Sized(e)); }
+        return text;
     }
 
     // If `field` is a C11 anonymous-union field promoted from `baseItem`'s struct
@@ -260,6 +266,16 @@ internal sealed partial class CSharpEmitter
         if (TyOf(baseItem) is not CType.Sized s) { return null; }
         var t = s.CsType.TrimEnd('*');
         return _promotedFields.TryGetValue(t, out var pf) && pf.TryGetValue(field, out var synth) ? synth : null;
+    }
+
+    // The enum type of `field` on the struct that `baseItem`'s CType names (a
+    // struct value carries CType.Sized("S"), a pointer CType.Sized("S*") — peel
+    // the `*`), or null. Same base-type resolution as PromotedSynth.
+    private string? FieldEnum(Item baseItem, string field)
+    {
+        if (TyOf(baseItem) is not CType.Sized s) { return null; }
+        var t = s.CsType.TrimEnd('*');
+        return _structFieldEnums.TryGetValue(t, out var fe) && fe.TryGetValue(field, out var e) ? e : null;
     }
 
     // `sizeof(Type)` — emit C# sizeof. Valid in unsafe contexts for any

@@ -402,6 +402,30 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Enum_typed_struct_field_is_enum_typed_on_read_and_write()
+    {
+        // A struct field of enum type reads as enum-typed (decays in operators,
+        // reconciles at sinks) — the common tagged-union/tag-field idiom.
+        var src = WriteTemp("""
+            enum Color { Red, Green, Blue };
+            struct Pixel { enum Color c; int v; };
+            int classify(struct Pixel *p) {
+                if (p->c == Green) { return 1; }   /* both sides decay to int */
+                p->c = Blue;                        /* RHS stays enum, no bogus (int) decay */
+                return 0;
+            }
+            int main() { return 0; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("(int)(p->c) == (int)Color.Green"); // field read decays in ==
+            emitted.ShouldContain("(p->c) = Color.Blue");             // assignment reconciles to enum
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void C23_enum_with_underlying_type_maps_the_base()
     {
         // C23 `enum Name : Type` → C# `enum Name : <mapped base>` (unsigned char → byte).

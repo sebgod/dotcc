@@ -264,9 +264,13 @@ internal sealed partial class CSharpEmitter
     // by struct name for the aggregate-init lookup later.
     public EmitContent Visit(C.StructMember n)
     {
+        var fieldType = T(n.Arg0);
         var fieldName = T(n.Arg1);
         _pendingFields.Add(fieldName);  // raw name — keyed lookups stay un-escaped
-        return $"public {T(n.Arg0)} {Id(fieldName)};\n";
+        // An enum-typed field is remembered so a `s.field` / `p->field` read can
+        // be tagged enum-typed (see FieldEnum / the member-access visitors).
+        if (_enumTags.Contains(fieldType)) { _pendingFieldEnumMap[fieldName] = fieldType; }
+        return $"public {fieldType} {Id(fieldName)};\n";
     }
 
     // Named bit-field `Type ID : width ;`. C# has no bit-fields, so dotcc emits
@@ -419,6 +423,7 @@ internal sealed partial class CSharpEmitter
     {
         _structFields[typeName] = new List<string>(_pendingFields);
         _pendingFields.Clear();
+        DrainFieldEnums(typeName);
         DrainPromotions(typeName);
     }
 
@@ -531,6 +536,28 @@ internal sealed partial class CSharpEmitter
     // (C# has no positional-init form for structs — it needs named members).
     private readonly List<string> _pendingFields = new();
     private readonly Dictionary<string, List<string>> _structFields = new(StringComparer.Ordinal);
+
+    // Per-struct enum-typed fields: structType → (fieldName → enum type name).
+    // Lets a member access of an enum field be enum-typed (so it decays in
+    // operators and reconciles at sinks, exactly like an enum variable) —
+    // closing the "struct enum field isn't enum-typed on read" gap. Populated
+    // by StructMember into _pendingFieldEnumMap, drained per struct.
+    private readonly Dictionary<string, Dictionary<string, string>> _structFieldEnums = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _pendingFieldEnumMap = new(StringComparer.Ordinal);
+
+    // Snapshot the pending enum-field map onto each of the type's names and
+    // reset it for the next struct body.
+    private void DrainFieldEnums(params string[] typeNames)
+    {
+        if (_pendingFieldEnumMap.Count > 0)
+        {
+            foreach (var tn in typeNames)
+            {
+                _structFieldEnums[tn] = new Dictionary<string, string>(_pendingFieldEnumMap, StringComparer.Ordinal);
+            }
+            _pendingFieldEnumMap.Clear();
+        }
+    }
 
     // Anonymous-union-member machinery. An anon `union { … };` member lifts its
     // inner fields into a generated nested explicit-layout type; those fields are
@@ -767,6 +794,7 @@ internal sealed partial class CSharpEmitter
         _structFields[alias] = fields;
         if (tag != alias) { _structFields[tag] = fields; }
         _pendingFields.Clear();
+        DrainFieldEnums(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainPromotions(alias);
         if (tag != alias && _promotedFields.TryGetValue(alias, out var aliasProm)) { _promotedFields[tag] = aliasProm; }
         _structs.Append("unsafe struct ").Append(alias).Append("\n{\n");
@@ -790,6 +818,7 @@ internal sealed partial class CSharpEmitter
         var alias = T(n.Arg5);
         _structFields[alias] = new List<string>(_pendingFields);
         _pendingFields.Clear();
+        DrainFieldEnums(alias);
         DrainPromotions(alias);
         _structs.Append("unsafe struct ").Append(alias).Append("\n{\n");
         _structs.Append(IndentEach(members));
