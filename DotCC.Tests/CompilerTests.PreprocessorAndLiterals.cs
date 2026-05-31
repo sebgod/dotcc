@@ -756,7 +756,9 @@ public sealed partial class CompilerTests
             emitted.ShouldContain("hello");
             emitted.ShouldContain("world");
             // STR shouldn't survive — the call expanded into a string literal.
-            emitted.ShouldNotContain("STR(");
+            // Case-sensitive: the macro is upper-case `STR`, whereas the spliced
+            // libc runtime block legitimately contains lower-case `strstr(` etc.
+            emitted.ShouldNotContain("STR(", Case.Sensitive);
         }
         finally { File.Delete(src); }
     }
