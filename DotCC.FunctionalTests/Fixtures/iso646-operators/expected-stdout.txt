@@ -1,0 +1,11 @@
+and ok
+or ok
+not ok
+not_eq ok
+bitand = 2
+bitor = 7
+xor = 5
+compl = -1
+and_eq = 8
+or_eq = 5
+xor_eq = 4
