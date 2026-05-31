@@ -185,6 +185,76 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Complex_type_lowers_to_System_Numerics_Complex()
+    {
+        // `float`/`double`/`long double` _Complex all map to .NET's Complex
+        // (double-backed; float/long-double widen — documented).
+        var src = WriteTemp("""
+            int main() {
+                double _Complex a;
+                float _Complex b;
+                long double _Complex c;
+                return 0;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("Complex a = default");
+            emitted.ShouldContain("Complex b = default");
+            emitted.ShouldContain("Complex c = default");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Complex_requires_a_floating_base()
+    {
+        var src = WriteTemp("int main() { int _Complex x; return 0; }");
+        try
+        {
+            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
+                .Message.ShouldContain("`_Complex` requires a `float`, `double`, or `long double` base");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Complex_imaginary_unit_and_complex_h_resolve()
+    {
+        // `I` chains through the <complex.h> macros to the imaginary-unit
+        // property; the functions resolve via `using static Libc`.
+        var src = WriteTemp("""
+            #include <complex.h>
+            int main() {
+                double _Complex z = 1.0 + 2.0 * I;
+                return (int)creal(conj(z));
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("__dotcc_complex_I");   // I → _Complex_I → property
+            emitted.ShouldContain("conj(z)");
+            emitted.ShouldContain("creal(");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Complex_gated_as_c99_under_pedantic()
+    {
+        var src = WriteTemp("int main() { double _Complex z; return 0; }");
+        try
+        {
+            Should.Throw<CompileException>(() =>
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), pedanticErrors: true))
+                .Message.ShouldContain("_Complex");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Gnu_float128_spelling_is_an_alias()
     {
         // `__float128` (the GNU spelling) lexes to the same type as `_Float128`.

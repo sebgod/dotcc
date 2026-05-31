@@ -334,6 +334,12 @@ symbols:
   # generated nested type + register them as promoted) without disturbing the
   # parent's other fields.
   - MemberMark     # 156 marker non-terminal (epsilon)
+  # `_Complex` (C99) — complex-number type specifier. A `_Capital_` keyword
+  # (always reserved, lexer rule). Combines with a float base (`float _Complex`,
+  # `double _Complex`, `long double _Complex`) and lowers to .NET's
+  # `System.Numerics.Complex` (double-backed — `float _Complex` widens, a
+  # documented precision note). The lowercase `complex` is a <complex.h> macro.
+  - '_Complex'     # 157 keyword (C99) — complex type specifier
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -570,6 +576,9 @@ productions:
       # `_Noreturn` (C11) — function specifier → [DoesNotReturn]. Same TypeSpec
       # treatment as inline; TypeFromSpec flags it and the FnSig path emits it.
       - { lhs: TypeSpec, rhs: ['_Noreturn'], action: tsNoreturn }
+      # `_Complex` (C99) — complex type spec; resolves (with a float base) to
+      # System.Numerics.Complex in ResolveTypeSpec.
+      - { lhs: TypeSpec, rhs: ['_Complex'], action: tsComplex }
 
   - derivation: none
     rules:
@@ -1136,6 +1145,9 @@ lexer:
     # C23 lowercase `noreturn` is promoted onto this terminal by the dialect
     # rewriter (rule 2), so it has no lexer rule of its own.
     - { symbol: '_Noreturn', match: '_Noreturn' }
+    # `_Complex` (C99) — always a keyword (reserved underscore-uppercase). The
+    # lowercase `complex` is a <complex.h> macro, not a keyword.
+    - { symbol: '_Complex', match: '_Complex' }
     - { symbol: 'if',     match: 'if' }
     - { symbol: 'else',   match: 'else' }
     - { symbol: 'while',  match: 'while' }

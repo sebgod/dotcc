@@ -789,6 +789,9 @@ internal sealed partial class CSharpEmitter
     // `_Noreturn` (C11) — same handling as inline: accumulated, dropped from the
     // resolved type, flagged by TypeFromSpec so the FnSig path emits [DoesNotReturn].
     public EmitContent Visit(C.TsNoreturn n) => Spec("_Noreturn");
+    // `_Complex` (C99) — accumulated; ResolveTypeSpec maps a float base + _Complex
+    // to System.Numerics.Complex.
+    public EmitContent Visit(C.TsComplex n) => Spec("_Complex");
 
     public EmitContent Visit(C.TypeSpecListOne n)  => S(n.Arg0) is var specs
         ? new EmitContent.SpecList(specs) : throw new InvalidOperationException();
@@ -825,6 +828,7 @@ internal sealed partial class CSharpEmitter
             {
                 if (s == "_Bool") { Gate(1999, "_Bool", n.Arg0); }
                 else if (s == "Float128") { Gate(2023, "_Float128 / __float128", n.Arg0); }
+                else if (s == "_Complex") { Gate(1999, "_Complex", n.Arg0); }
                 else if (s == "long") { longs++; }
             }
         }
@@ -857,6 +861,7 @@ internal sealed partial class CSharpEmitter
         var longCount = 0;
         var boolCount = 0;
         var float128Count = 0;
+        var complexCount = 0;
         string? baseKw = null;
         var baseCount = 0;
         var baseConflict = false;
@@ -871,6 +876,7 @@ internal sealed partial class CSharpEmitter
                 case "long":     longCount++; break;
                 case "_Bool":    boolCount++; break;
                 case "Float128": float128Count++; break;
+                case "_Complex": complexCount++; break;
                 case "int":
                 case "char":
                 case "float":
@@ -936,6 +942,19 @@ internal sealed partial class CSharpEmitter
             throw new CompileException(
                 $"duplicate `{baseKw}` specifier (got `{PrettySpecs(specs)}`)");
         }
+        if (complexCount > 0)
+        {
+            // `_Complex` requires a floating base (`float`/`double`/`long double`)
+            // and no sign/short/_Bool/_Float128. (`long double _Complex` is the
+            // [long, double, _Complex] form — allowed via the double base.)
+            if (complexCount > 1 || baseKw is not ("float" or "double")
+                || boolCount > 0 || float128Count > 0
+                || unsignedCount > 0 || signedCount > 0 || shortCount > 0)
+            {
+                throw new CompileException(
+                    $"`_Complex` requires a `float`, `double`, or `long double` base (got `{PrettySpecs(specs)}`)");
+            }
+        }
 
         // `float` / `void` take no size or sign modifiers. `double` takes the
         // single size modifier C allows on a real type — `long double` — which
@@ -974,6 +993,9 @@ internal sealed partial class CSharpEmitter
         // bases, then char (with signedness), then sized-int family.
         if (boolCount == 1) { return "CBool"; }
         if (float128Count == 1) { return "Float128"; }
+        // Any `<float> _Complex` → System.Numerics.Complex (double-backed). The
+        // shell imports System.Numerics, so the bare name resolves.
+        if (complexCount == 1) { return "Complex"; }
         if (baseKw == "float")  { return "float"; }
         if (baseKw == "double") { return "double"; }  // incl. `long double`
         if (baseKw == "void")   { return "void"; }
