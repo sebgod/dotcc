@@ -382,7 +382,7 @@ public sealed partial class CompilerTests
     // ---- bit-fields -----------------------------------------------------
 
     [Fact]
-    public void Bitfield_lowers_to_full_field_width_dropped()
+    public void Bitfield_lowers_to_masked_accessor_property()
     {
         var src = WriteTemp("""
             struct Flags { unsigned ready : 1; unsigned : 2; unsigned mode : 3; };
@@ -391,10 +391,15 @@ public sealed partial class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("public uint ready;");   // named bit-field → full field
-            emitted.ShouldContain("public uint mode;");
-            emitted.ShouldContain("bit-field :1");          // width recorded in a comment
-            emitted.ShouldNotContain("public uint  ;");     // anonymous padding → nothing
+            // Named bit-field → private backing field + masked accessor property.
+            emitted.ShouldContain("__bf_ready");
+            emitted.ShouldContain("public uint ready {");
+            emitted.ShouldContain("& 1UL");                 // 1-bit store mask
+            emitted.ShouldContain("public uint mode {");
+            emitted.ShouldContain("& 7UL");                 // 3-bit store mask
+            // Anonymous bit-field (`unsigned : 2;`, padding) → no accessible member.
+            emitted.ShouldNotContain("public uint  {");
+            emitted.ShouldNotContain("public uint  ;");
         }
         finally { File.Delete(src); }
     }

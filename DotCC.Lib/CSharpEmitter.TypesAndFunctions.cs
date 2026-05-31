@@ -270,16 +270,55 @@ internal sealed partial class CSharpEmitter
     }
 
     // Named bit-field `Type ID : width ;`. C# has no bit-fields, so dotcc emits
-    // a FULL field of the declared type and DROPS the width (lossy lowering):
-    // correct for values that fit the width — the common case — but it does NOT
-    // truncate / wrap on overflow, and the struct's size & layout differ from C.
-    // A faithful packed lowering (backing storage + masked accessors) is future
-    // work. Documented in C-SUPPORT.md.
+    // a private backing field of the declared type plus a public accessor
+    // PROPERTY that masks to the width on store and sign-extends on read — so
+    // the VALUE semantics are faithful (`f.x = 8` with `x:3` wraps to 0; a
+    // signed `x:3 = 5` reads back as -3). The struct's size & layout still
+    // differ from C (each field is its own word — bit packing is implementation-
+    // defined and gcc≠MSVC, so it couldn't match both oracles anyway); only the
+    // values are guaranteed. A non-integer base type (`_Bool`) or a non-literal
+    // width falls back to the old lossy full-field form. Documented in C-SUPPORT.
     public EmitContent Visit(C.StructBitField n)
     {
+        var csType = StripOuterParens(T(n.Arg0));
         var fieldName = T(n.Arg1);
         _pendingFields.Add(fieldName);
-        return $"public {T(n.Arg0)} {Id(fieldName)}; // C bit-field :{StripOuterParens(T(n.Arg3))} (width dropped)\n";
+        var widthText = StripOuterParens(T(n.Arg3));
+        if (TryEmitMaskedBitField(csType, fieldName, widthText, out var emitted)) { return emitted; }
+        // Fallback: full field, width dropped (correct only for in-range values).
+        return $"public {csType} {Id(fieldName)}; // C bit-field :{widthText} (width dropped — non-maskable)\n";
+    }
+
+    // Build the backing-field + masked-accessor-property pair for a bit-field.
+    // Returns false (→ caller falls back) for a non-literal width or a base type
+    // that isn't a plain C# integer.
+    private bool TryEmitMaskedBitField(string csType, string name, string widthText, out string emitted)
+    {
+        emitted = string.Empty;
+        if (!int.TryParse(widthText, out int w) || w <= 0 || w > 64) { return false; }
+        bool signed;
+        switch (csType)
+        {
+            case "int": case "long": case "short": case "sbyte": signed = true; break;
+            case "uint": case "ulong": case "ushort": case "byte": signed = false; break;
+            default: return false; // _Bool/CBool, enum, typedef, … → lossy fallback
+        }
+        ulong mask = w >= 64 ? ulong.MaxValue : (1UL << w) - 1UL;
+        ulong high = 1UL << (w - 1);
+        var backing = $"__bf_{name}";
+        var id = Id(name);
+        // Store: keep the low `w` bits (`(ulong)value` sign-extends a signed
+        // source first, so the kept bits are right either way), then cast back.
+        var store = $"{backing} = unchecked(({csType})((ulong)value & {mask}UL));";
+        // Read: unsigned returns the backing directly; signed sign-extends when
+        // the field's top bit is set (OR in the bits above the width).
+        var read = signed
+            ? $"((ulong){backing} & {high}UL) != 0 ? unchecked(({csType})((ulong){backing} | ~{mask}UL)) : {backing}"
+            : backing;
+        emitted =
+            $"private {csType} {backing}; // C bit-field :{w}\n" +
+            $"public {csType} {id} {{ get => {read}; set => {store} }}\n";
+        return true;
     }
 
     // Anonymous bit-field `Type : width ;` — pure padding/alignment in C, with
@@ -452,7 +491,12 @@ internal sealed partial class CSharpEmitter
         foreach (var line in memberLines.Split('\n'))
         {
             if (line.Length == 0) { continue; }
-            _structs.Append("    [global::System.Runtime.InteropServices.FieldOffset(0)] ");
+            // [FieldOffset] is legal only on storage (fields), not on a bit-field's
+            // accessor PROPERTY (a `{ get; set; }` line) — that holds no storage and
+            // its backing field already carries the offset. Pass property lines
+            // through unattributed.
+            if (!line.Contains('{')) { _structs.Append("    [global::System.Runtime.InteropServices.FieldOffset(0)] "); }
+            else { _structs.Append("    "); }
             _structs.Append(line).Append('\n');
         }
         _structs.Append("}\n\n");
