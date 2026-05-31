@@ -31,6 +31,8 @@ Bird's-eye scorecard — the detailed per-area tables below are the source of tr
 
 **C11 / C23 specifically** — ✅ done: `_Bool`/`bool`, `true`/`false`/`nullptr`, `typeof`, `auto` inference, `_Float128`, empty initializer `{}`, anonymous struct/union members, `_Noreturn`, binary + digit-separator literals, `<threads.h>` subset. ❌ roadmap: `_Generic`, `_Alignas`/`_Alignof`, `_Atomic`, `_Thread_local`, `constexpr`, `[[attributes]]`, `#embed`/`#elifdef`. 🚫 out of scope: `_BitInt(N)`, wide literals, trigraphs/digraphs.
 
+🟡 entries in the last column are **implemented but partial** — they work for the common case and fail loudly outside it (see the per-area table for the caveat); they are *not* missing. E.g. `setjmp`/`longjmp` handles the standard `if (setjmp(env)) …` idiom (and multi-frame unwind), just not `switch (setjmp(…))` or value-capture.
+
 **No known silent miscompiles** — every gap fails loudly at parse/lex time, and `-pedantic` turns dialect violations into diagnostics.
 
 ## Lexical
