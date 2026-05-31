@@ -126,7 +126,11 @@ public static class Compiler
         {
             var trimmed = rawLine.TrimStart();
             if (trimmed.StartsWith("#nullable", StringComparison.Ordinal)) { continue; }
-            if (trimmed.StartsWith("using ", StringComparison.Ordinal)) { continue; }
+            // Strip file-scope `using` DIRECTIVES only — these sit at column 0.
+            // An indented `using ` is a statement (`using var x = …;` /
+            // `using (…)`) inside a method body and must be kept, so match the
+            // raw (un-trimmed) line, not the trimmed one.
+            if (rawLine.StartsWith("using ", StringComparison.Ordinal)) { continue; }
             if (trimmed.StartsWith("namespace ", StringComparison.Ordinal)) { continue; }
             sb.Append(rawLine).Append('\n');
         }
