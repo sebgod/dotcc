@@ -34,7 +34,7 @@ dotnet test DotCC.Tests/DotCC.Tests.csproj             # unit tests only
 dotnet test DotCC.FunctionalTests/DotCC.FunctionalTests.csproj   # functional fixtures only
 
 dotnet run --project DotCC -c Release -- examples/hello/main.c examples/hello/math.c -o build/
-dotnet run --project DotCC -c Release -- --emit=csharp examples/hello/main.c examples/hello/math.c > out.cs
+dotnet run --project DotCC -c Release -- --emit=file examples/hello/main.c examples/hello/math.c > out.cs
                                                        # single .NET 10 file-based program with #:property AllowUnsafeBlocks
 dotnet run --project DotCC -c Release -- --emit=build examples/hello/main.c examples/hello/math.c -o build/
                                                        # write Program.cs + csproj, then `dotnet build -c Release` in -o dir
@@ -105,11 +105,13 @@ If you change the grammar (`c.lalr.yaml`), the generated surface changes in lock
 
 | Flag | Meaning |
 |---|---|
-| `dotcc <a.c> <b.c>` | Compile translation units. Default: write `Program.cs + dotcc-out.csproj` to `./a.out-cs/`. |
-| `-o <dir>` | Output directory for csproj/build modes. |
-| `--emit=csharp` | Write a single .NET 10 file-based program (`#:property AllowUnsafeBlocks=true`) to stdout. Pipe to a `.cs`, then `dotnet run <file>`. |
+| `dotcc <a.c> <b.c>` | Compile translation units (whole-program). Default: write `Program.cs + dotcc-out.csproj` to `./a.out-cs/`. **`.cs` inputs are treated as object fragments → link them** (see `--emit=obj`). |
+| `-o <path>` | Output. A directory for csproj/build; a file for `file`/`obj`. **Inferred when omitted** (`obj` → `<src>.cs`, csproj/build → `./a.out-cs/`, file → stdout). |
+| `--emit=file` | Write a single .NET 10 file-based program (`#:property AllowUnsafeBlocks=true`). To `-o <file>` if given, else stdout (pipe to a `.cs`, then `dotnet run <file>`). (Renamed from `--emit=csharp` — every mode emits C#, so the name now describes the *artifact*: a single runnable file.) |
 | `--emit=csproj` | Default — write `Program.cs` + paired csproj to `-o` dir. |
 | `--emit=build` | As `csproj`, then run `dotnet build -c Release` in the output dir. |
+| `--emit=obj` | **Separate compilation.** Compile ONE `.c` to a `.cs` object fragment (the TU's emitted C# — functions + its type decls + globals — no shell/runtime; the LTO-style intermediate). Link by passing the `.cs` objects back: `dotcc a.cs b.cs -o app` merges them (deduping shared types) and wraps in the shell. This is what a CMake/make toolchain drives per file (`examples/cmake-demo/`). |
+| **`-o` ⇄ `--emit` inference** | When one is omitted it's inferred from the other: `-o foo.cs` (no `--emit`) ⇒ `file`; `-o <dir>` ⇒ `csproj`; `--emit=obj` with no `-o` ⇒ `<src>.cs`. An explicit `--emit` always wins; `obj` is never inferred (ask for it). |
 | `-E` | Preprocess only — dump the post-`#include`/`#define` token stream to stdout. No parsing. |
 | `-I <dir>` | Add header search directory. Repeatable. Auto-includes each `<input>.c`'s directory. |
 | `-D NAME[=VALUE]` | Predefine a macro. Repeatable. With `=VALUE`, the right-hand side is lexed through the same byte lexer the parser uses, so use-site substitution behaves like an in-source `#define`. Without `=`, the macro is a defined-as-marker (empty body). |

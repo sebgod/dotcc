@@ -30,7 +30,7 @@ internal static class Program
         };
         var emitOpt = new Option<EmitKind>("--emit")
         {
-            Description = "csproj: write Program.cs + .csproj. csharp: emit a single .NET 10 file-based program to stdout. build: like csproj, then `dotnet build`.",
+            Description = "csproj: write Program.cs + .csproj. file: emit a single .NET 10 file-based program to stdout. build: like csproj, then `dotnet build`. obj: compile one .c to a .cs object fragment (link .cs objects to a program).",
             DefaultValueFactory = _ => EmitKind.Csproj,
         };
         var preprocessOpt = new Option<bool>("-E")
@@ -127,13 +127,23 @@ internal static class Program
                 emit = EmitKind.Build;
             }
 
+            // Infer the emit kind from the -o shape when none was chosen
+            // (symmetric with the -o inference below): `-o foo.cs` means a single
+            // file-based program; a directory-ish path stays csproj. `obj` is
+            // never inferred — you ask for it with --emit=obj (or -c).
+            if (emit == EmitKind.Csproj && output is not null
+                && output.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
+            {
+                emit = EmitKind.File;
+            }
+
             return Run(inputs, output, emit, preprocessOnly, includes, defines, sharedFlag, dialect, pedanticFlag, pedanticErrorsFlag);
         });
 
         return root.Parse(args).Invoke();
     }
 
-    private enum EmitKind { Csproj, Csharp, Build }
+    private enum EmitKind { Csproj, File, Build, Obj }
 
     private static int Run(
         string[] inputPaths,
@@ -153,18 +163,50 @@ internal static class Program
             return 0;
         }
 
+        // Separate compilation: `--emit=obj a.c -o a.cs` compiles ONE translation
+        // unit to a `.cs` object fragment (no shell/runtime); a later link step
+        // merges objects. This is what a CMake/make toolchain calls per file.
+        if (emit == EmitKind.Obj)
+        {
+            if (inputPaths.Length != 1)
+            {
+                Console.Error.WriteLine("dotcc: --emit=obj compiles one .c at a time");
+                return 2;
+            }
+            // Infer -o from the source when omitted: `foo.c` → `foo.cs` in the
+            // current dir (clang's `cc -c foo.c` → `foo.o` convention).
+            var objOut = outputPath ?? Path.ChangeExtension(Path.GetFileName(inputPaths[0]), ".cs");
+            try
+            {
+                var frag = Compiler.EmitObject(inputPaths[0], includeDirs, defines, dialect, pedantic, pedanticErrors);
+                File.WriteAllText(objOut, frag);
+                return 0;
+            }
+            catch (CompileException ex)
+            {
+                Console.Error.WriteLine($"dotcc: {ex.Message}");
+                return 2;
+            }
+        }
+
         string program;
         try
         {
-            program = Compiler.EmitCSharp(
-                inputPaths,
-                includeDirs,
-                defines,
-                fileBased: emit == EmitKind.Csharp && !libraryMode,
-                libraryMode: libraryMode,
-                dialect: dialect,
-                pedantic: pedantic,
-                pedanticErrors: pedanticErrors);
+            // Inputs that are all `.cs` are object fragments → link them; `.c`
+            // inputs are sources → whole-program compile (the default).
+            var linking = inputPaths.Length > 0
+                && System.Array.TrueForAll(inputPaths, p => p.EndsWith(".cs", System.StringComparison.OrdinalIgnoreCase));
+            program = linking
+                ? Compiler.LinkObjects(inputPaths, fileBased: emit == EmitKind.File && !libraryMode, libraryMode: libraryMode)
+                : Compiler.EmitCSharp(
+                    inputPaths,
+                    includeDirs,
+                    defines,
+                    fileBased: emit == EmitKind.File && !libraryMode,
+                    libraryMode: libraryMode,
+                    dialect: dialect,
+                    pedantic: pedantic,
+                    pedanticErrors: pedanticErrors);
         }
         catch (CompileException ex)
         {
@@ -175,8 +217,18 @@ internal static class Program
         var outDir = outputPath ?? "a.out-cs";
         switch (emit)
         {
-            case EmitKind.Csharp:
-                Console.WriteLine(program);
+            case EmitKind.File:
+                // A single file-based program: write to -o when given (the
+                // `-o foo.cs` inference), else to stdout (pipe-to-a-.cs).
+                if (outputPath is not null)
+                {
+                    File.WriteAllText(outputPath, program);
+                    Console.Error.WriteLine($"dotcc: wrote {outputPath}");
+                }
+                else
+                {
+                    Console.WriteLine(program);
+                }
                 return 0;
 
             case EmitKind.Csproj:

@@ -178,7 +178,8 @@ public static class Compiler
         bool libraryMode = false,
         CDialect? dialect = null,
         bool pedantic = false,
-        bool pedanticErrors = false)
+        bool pedanticErrors = false,
+        bool asObject = false)
     {
         var includeMap = BuildIncludeMap(inputPaths, includeDirs);
         var lexerTable = C.BuildLexer();
@@ -285,9 +286,10 @@ public static class Compiler
         }
 
         // Library mode doesn't need a `main` — the produced .dll is consumed
-        // through its [UnmanagedCallersOnly] exports. Exe mode still requires
-        // one entry point to dispatch to.
-        if (!libraryMode && mainArity < 0)
+        // through its [UnmanagedCallersOnly] exports. Object mode (a single TU
+        // compiled with `--emit=obj`) likewise needn't have one (it links later).
+        // Exe mode still requires one entry point to dispatch to.
+        if (!asObject && !libraryMode && mainArity < 0)
         {
             throw new CompileException("no `main` function defined in any translation unit.");
         }
@@ -311,7 +313,137 @@ public static class Compiler
             }
         }
 
+        // Separate-compilation object: serialize this TU's emitted pieces into a
+        // `.cs` fragment (no shell, no runtime) for a later link step to merge.
+        if (asObject)
+        {
+            return SerializeFragment(allFunctions.ToString(), emitter.TypeDecls, emitter.UsingAliases, emitter.Globals, mainArity);
+        }
+
         return BuildShell(mainArity, allFunctions.ToString(), emitter.StructDecls, emitter.UsingAliases, emitter.Globals, fileBased, libraryMode, emitter.Exports);
+    }
+
+    // ---- separate compilation (`--emit=obj` + link) -------------------------
+    // dotcc normally whole-program-compiles all TUs in one pass. To slot into a
+    // build system (CMake/make) that compiles each `.c` to an object then links,
+    // we split: `EmitObject` emits one TU's C# fragment (the LTO-style
+    // intermediate), `LinkObjects` merges fragments — deduping shared types —
+    // and wraps them in the shell + runtime exactly as whole-program emit does.
+
+    // Marker lines delimiting a `.cs` object fragment. Comment-prefixed so a
+    // fragment is still (almost) valid C#, and so the markers can't collide with
+    // real emitted code.
+    private const string FragMain   = "//!!dotcc-obj main:";
+    private const string FragType   = "//!!dotcc-obj type:";
+    private const string FragSect   = "//!!dotcc-obj section:"; // aliases|globals|functions
+
+    /// <summary>Emit a single translation unit as a `.cs` object fragment.</summary>
+    public static string EmitObject(
+        string inputPath,
+        IReadOnlyList<string>? includeDirs = null,
+        IReadOnlyList<string>? defines = null,
+        CDialect? dialect = null,
+        bool pedantic = false,
+        bool pedanticErrors = false)
+        => EmitCSharp(new[] { inputPath }, includeDirs, defines,
+                      fileBased: false, libraryMode: false, dialect, pedantic, pedanticErrors, asObject: true);
+
+    private static string SerializeFragment(
+        string functions, IReadOnlyDictionary<string, string> typeDecls, string aliases, string globals, int mainArity)
+    {
+        var sb = new StringBuilder();
+        sb.Append("// dotcc object fragment — link with `dotcc <objs> -o <out>`.\n");
+        sb.Append(FragMain).Append(mainArity).Append('\n');
+        // Types are tagged by name so the link step can union them across TUs.
+        foreach (var (name, text) in typeDecls)
+        {
+            sb.Append(FragType).Append(name).Append('\n').Append(text);
+        }
+        sb.Append(FragSect).Append("aliases\n").Append(aliases);
+        sb.Append(FragSect).Append("globals\n").Append(globals);
+        sb.Append(FragSect).Append("functions\n").Append(functions);
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Link `.cs` object fragments (from <see cref="EmitObject"/>) into one
+    /// program: concatenate functions, union types/aliases/globals (deduping a
+    /// shared header's declarations), then wrap in the shell + runtime.
+    /// </summary>
+    public static string LinkObjects(
+        IReadOnlyList<string> objectPaths, bool fileBased = true, bool libraryMode = false)
+    {
+        var typeByName = new Dictionary<string, string>(StringComparer.Ordinal); // first wins
+        var typeOrder = new List<string>();
+        var aliasLines = new List<string>();
+        var aliasSeen = new HashSet<string>(StringComparer.Ordinal);
+        var globalLines = new List<string>();
+        var globalSeen = new HashSet<string>(StringComparer.Ordinal);
+        var functions = new StringBuilder();
+        var mainArity = -1;
+
+        foreach (var path in objectPaths)
+        {
+            var text = File.ReadAllText(path).ReplaceLineEndings("\n");
+            // Walk the fragment line by line, routing into the current bucket.
+            string section = "";            // "type:<name>" | "aliases" | "globals" | "functions"
+            var buf = new StringBuilder();
+            void FlushType()
+            {
+                if (section.StartsWith("type:", StringComparison.Ordinal))
+                {
+                    var name = section["type:".Length..];
+                    if (!typeByName.ContainsKey(name)) { typeByName[name] = buf.ToString(); typeOrder.Add(name); }
+                }
+                buf.Clear();
+            }
+            foreach (var line in text.Split('\n'))
+            {
+                if (line.StartsWith(FragMain, StringComparison.Ordinal))
+                {
+                    if (int.TryParse(line[FragMain.Length..], out var m) && m >= 0) { mainArity = m; }
+                }
+                else if (line.StartsWith(FragType, StringComparison.Ordinal))
+                {
+                    FlushType();
+                    section = "type:" + line[FragType.Length..];
+                }
+                else if (line.StartsWith(FragSect, StringComparison.Ordinal))
+                {
+                    FlushType();
+                    section = line[FragSect.Length..];
+                }
+                else if (section.StartsWith("type:", StringComparison.Ordinal))
+                {
+                    buf.Append(line).Append('\n');
+                }
+                else if (section == "aliases")
+                {
+                    if (line.Length > 0 && aliasSeen.Add(line)) { aliasLines.Add(line); }
+                }
+                else if (section == "globals")
+                {
+                    if (line.Length > 0 && globalSeen.Add(line)) { globalLines.Add(line); }
+                }
+                else if (section == "functions")
+                {
+                    functions.Append(line).Append('\n');
+                }
+            }
+            FlushType();
+        }
+
+        if (!libraryMode && mainArity < 0)
+        {
+            throw new CompileException("no `main` function defined in any linked object.");
+        }
+
+        var structDecls = new StringBuilder();
+        foreach (var name in typeOrder) { structDecls.Append(typeByName[name]); }
+        var aliasText = aliasLines.Count > 0 ? string.Join("\n", aliasLines) + "\n" : "";
+        var globalText = globalLines.Count > 0 ? string.Join("\n", globalLines) + "\n" : "";
+        return BuildShell(mainArity, functions.ToString(), structDecls.ToString(), aliasText, globalText,
+                          fileBased, libraryMode, System.Array.Empty<CSharpEmitter.Export>());
     }
 
     /// <summary>

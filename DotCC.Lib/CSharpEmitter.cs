@@ -325,6 +325,14 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     public string StructDecls => _structs.ToString();
     public void ResetStructDecls() => _structs.Clear();
 
+    // Per-name copy of the type declarations, in emit order. Whole-program emit
+    // uses _structs (above) unchanged; separate compilation (`--emit=obj`) reads
+    // this so the link step can union types by name across translation units
+    // (a shared header's struct appears in every TU's object). Populated
+    // alongside each _structs append.
+    private readonly Dictionary<string, string> _typeDecls = new(StringComparer.Ordinal);
+    public IReadOnlyDictionary<string, string> TypeDecls => _typeDecls;
+
     // Side channel for file-scope variable declarations. Real C uses
     // these for globals visible across functions (`jmp_buf env;` for
     // setjmp, FILE* logs, opt parsers, etc.). C# top-level local

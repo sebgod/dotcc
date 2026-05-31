@@ -513,6 +513,29 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Separate_compilation_objects_link_into_one_program()
+    {
+        // `--emit=obj` per TU → fragments; LinkObjects merges them (deduping the
+        // shared struct) and wraps in the shell, exactly like whole-program emit.
+        var a = WriteTemp("struct P { int x; }; int side(void) { struct P p; p.x = 1; return p.x; }");
+        var b = WriteTemp("struct P { int x; }; int main(void) { return side(); }");
+        var objA = Path.Combine(Path.GetTempPath(), $"dotcc-obj-{System.Guid.NewGuid():N}.cs");
+        var objB = Path.Combine(Path.GetTempPath(), $"dotcc-obj-{System.Guid.NewGuid():N}.cs");
+        try
+        {
+            File.WriteAllText(objA, Compiler.EmitObject(a));
+            File.WriteAllText(objB, Compiler.EmitObject(b));
+            var program = Compiler.LinkObjects(new[] { objA, objB });
+            // Shared struct deduped to one; both functions present; entry wired.
+            System.Text.RegularExpressions.Regex.Matches(program, @"unsafe struct P\b").Count.ShouldBe(1);
+            program.ShouldContain("side(");
+            program.ShouldContain("static unsafe int main(");
+            program.ShouldContain("return main();");  // arity-0 entry dispatch
+        }
+        finally { File.Delete(a); File.Delete(b); File.Delete(objA); File.Delete(objB); }
+    }
+
+    [Fact]
     public void Variadic_macro_with_named_params_plus_extras()
     {
         // Named param `level` + variadic extras. `level` substitutes

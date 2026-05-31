@@ -176,9 +176,9 @@ internal sealed partial class CSharpEmitter
         DrainPendingFields(name);  // always — clears _pendingFields for the next struct
         if (_emittedTypes.Add(name))
         {
-            _structs.Append("unsafe struct ").Append(name).Append("\n{\n");
-            _structs.Append(IndentEach(members));
-            _structs.Append("}\n\n");
+            var declText = "unsafe struct " + name + "\n{\n" + IndentEach(members) + "}\n\n";
+            _structs.Append(declText);
+            _typeDecls[name] = declText;
         }
         return string.Empty;
     }
@@ -495,8 +495,9 @@ internal sealed partial class CSharpEmitter
     private void EmitExplicitUnionType(string name, string memberLines)
     {
         if (!_emittedTypes.Add(name)) { return; } // already emitted (shared header across TUs)
-        _structs.Append("[global::System.Runtime.InteropServices.StructLayout(global::System.Runtime.InteropServices.LayoutKind.Explicit)]\n");
-        _structs.Append("unsafe struct ").Append(name).Append("\n{\n");
+        var sb = new StringBuilder();
+        sb.Append("[global::System.Runtime.InteropServices.StructLayout(global::System.Runtime.InteropServices.LayoutKind.Explicit)]\n");
+        sb.Append("unsafe struct ").Append(name).Append("\n{\n");
         foreach (var line in memberLines.Split('\n'))
         {
             if (line.Length == 0) { continue; }
@@ -504,11 +505,14 @@ internal sealed partial class CSharpEmitter
             // accessor PROPERTY (a `{ get; set; }` line) — that holds no storage and
             // its backing field already carries the offset. Pass property lines
             // through unattributed.
-            if (!line.Contains('{')) { _structs.Append("    [global::System.Runtime.InteropServices.FieldOffset(0)] "); }
-            else { _structs.Append("    "); }
-            _structs.Append(line).Append('\n');
+            if (!line.Contains('{')) { sb.Append("    [global::System.Runtime.InteropServices.FieldOffset(0)] "); }
+            else { sb.Append("    "); }
+            sb.Append(line).Append('\n');
         }
-        _structs.Append("}\n\n");
+        sb.Append("}\n\n");
+        var unionText = sb.ToString();
+        _structs.Append(unionText);
+        _typeDecls[name] = unionText;
     }
 
     // Map from enumerator name → containing enum name. Populated by
@@ -615,7 +619,8 @@ internal sealed partial class CSharpEmitter
         // Duplicate definition (same enum from a header included by 2 TUs): the
         // first call populated _enumTags/_enumerators; skip re-emitting the type.
         if (!_emittedTypes.Add(enumName)) { return string.Empty; }
-        _structs.Append("enum ").Append(enumName).Append(" : ").Append(baseType).Append("\n{\n");
+        var sb = new StringBuilder();
+        sb.Append("enum ").Append(enumName).Append(" : ").Append(baseType).Append("\n{\n");
         var next = 0L;
         foreach (var raw in items)
         {
@@ -648,9 +653,12 @@ internal sealed partial class CSharpEmitter
                 }
             }
             _enumerators[itemName] = enumName;  // raw key — Visit(Var) looks up by raw name
-            _structs.Append("    ").Append(Id(itemName)).Append(" = ").Append(valueText).Append(",\n");
+            sb.Append("    ").Append(Id(itemName)).Append(" = ").Append(valueText).Append(",\n");
         }
-        _structs.Append("}\n\n");
+        sb.Append("}\n\n");
+        var enumText = sb.ToString();
+        _structs.Append(enumText);
+        _typeDecls[enumName] = enumText;
         return string.Empty;
     }
 
@@ -818,9 +826,9 @@ internal sealed partial class CSharpEmitter
         if (tag != alias && _promotedFields.TryGetValue(alias, out var aliasProm)) { _promotedFields[tag] = aliasProm; }
         if (_emittedTypes.Add(alias))
         {
-            _structs.Append("unsafe struct ").Append(alias).Append("\n{\n");
-            _structs.Append(IndentEach(members));
-            _structs.Append("}\n\n");
+            var declText = "unsafe struct " + alias + "\n{\n" + IndentEach(members) + "}\n\n";
+            _structs.Append(declText);
+            _typeDecls[alias] = declText;
         }
         if (tag != alias && _aliasNames.Add(tag))
         {
@@ -844,9 +852,9 @@ internal sealed partial class CSharpEmitter
         DrainPromotions(alias);
         if (_emittedTypes.Add(alias))
         {
-            _structs.Append("unsafe struct ").Append(alias).Append("\n{\n");
-            _structs.Append(IndentEach(members));
-            _structs.Append("}\n\n");
+            var declText = "unsafe struct " + alias + "\n{\n" + IndentEach(members) + "}\n\n";
+            _structs.Append(declText);
+            _typeDecls[alias] = declText;
         }
         return string.Empty;
     }
