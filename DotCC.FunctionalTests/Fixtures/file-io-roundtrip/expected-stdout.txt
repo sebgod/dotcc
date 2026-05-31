@@ -1,0 +1,3 @@
+read: 42 hello
+read: second line
+size=21 eof=1

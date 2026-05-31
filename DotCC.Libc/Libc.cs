@@ -211,21 +211,15 @@ public static unsafe partial class Libc
     // ---------------------------------------------------------------------
     // I/O — streams, fprintf, printf, puts, fputs
     //
-    // FILE* in C is opaque; we model it as a managed `TextWriter`. `stdout`
-    // and `stderr` are the obvious BCL writers. `fprintf` is the underlying
-    // primitive; `printf` is `fprintf(stdout, ...)`. `puts` is
-    // `fputs(stdout, s)` plus a newline. This shape mirrors how the actual
-    // C standard library factors them.
+    // A C `FILE*` is a genuine pointer to an opaque `FILE` struct (see
+    // FileLib.cs); `stdin`/`stdout`/`stderr` and `fopen` all hand back a
+    // `FILE*`. `fprintf` is the underlying primitive; `printf` is
+    // `fprintf(stdout, ...)`. `puts` is `fputs(s, stdout)` plus a newline.
+    // The formatted-I/O builders bind a TextWriter/TextReader, which the FILE
+    // supplies (WriterFor/ReaderFor) — so PrintfBuilder/ScanfReader are
+    // FILE-agnostic. This mirrors how the actual C standard library factors
+    // them. (stdin/stdout/stderr live in FileLib.cs alongside the FILE type.)
     // ---------------------------------------------------------------------
-
-    /// <summary>Standard output stream. Maps to <see cref="Console.Out"/>.</summary>
-    public static TextWriter stdout => Console.Out;
-
-    /// <summary>Standard error stream. Maps to <see cref="Console.Error"/>.</summary>
-    public static TextWriter stderr => Console.Error;
-
-    /// <summary>Standard input stream. Maps to <see cref="Console.In"/>.</summary>
-    public static TextReader stdin => Console.In;
 
     /// <summary>
     /// <c>fprintf(stream, fmt)</c> — the primitive. Start a fluent format
@@ -238,10 +232,12 @@ public static unsafe partial class Libc
     /// <remarks>
     /// Fluent rather than <c>params object[]</c> because raw pointers can't
     /// be boxed. The builder is a <c>ref struct</c> so it stays stack-only
-    /// and zero-alloc.
+    /// and zero-alloc. The <c>FILE*</c> resolves to the right text sink via
+    /// <see cref="WriterFor"/> (console → Console.Out/Error, resolved live so
+    /// redirection holds; file → an unbuffered UTF-8 writer over the stream).
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static PrintfBuilder fprintf(TextWriter stream, byte* fmt) => new(stream, fmt);
+    public static PrintfBuilder fprintf(FILE* stream, byte* fmt) => new(WriterFor(stream), fmt);
 
     /// <summary><c>printf(fmt)</c> ≡ <c>fprintf(stdout, fmt)</c>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -257,28 +253,30 @@ public static unsafe partial class Libc
     /// C standard — only <c>puts</c> appends one). Returns a non-negative
     /// byte count on success.
     /// </summary>
-    public static int fputs(byte* s, TextWriter stream)
+    public static int fputs(byte* s, FILE* stream)
     {
+        var w = WriterFor(stream);
         if (s == null)
         {
-            stream.Write("(null)");
+            w.Write("(null)");
             return 6;
         }
         int len = strlen(s);
-        stream.Write(System.Text.Encoding.UTF8.GetString(s, len));
+        // For a file-backed stream WriterFor returns an unbuffered UTF-8
+        // writer, so decode→write round-trips back to the original bytes.
+        w.Write(System.Text.Encoding.UTF8.GetString(s, len));
         return len;
     }
 
     /// <summary>
-    /// <c>puts(s)</c> ≡ <c>fputs(s, stdout)</c> + newline. Returns
-    /// <c>len + newline-bytes</c> on success (matches real C's
-    /// "non-negative count on success" contract).
+    /// <c>puts(s)</c> ≡ <c>fputs(s, stdout)</c> + a <c>'\n'</c>. Returns a
+    /// non-negative byte count on success (real C's contract).
     /// </summary>
     public static int puts(byte* s)
     {
         int n = fputs(s, stdout);
-        stdout.WriteLine();
-        return n + Environment.NewLine.Length;
+        WriteByteTo(stdout, (byte)'\n');
+        return n + 1;
     }
 
     /// <summary>
@@ -309,7 +307,7 @@ public static unsafe partial class Libc
     /// returns the count of successful matches.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static ScanfReader fscanf(TextReader stream, byte* fmt) => new(stream, fmt);
+    public static ScanfReader fscanf(FILE* stream, byte* fmt) => new(ReaderFor(stream), fmt);
 
     /// <summary><c>scanf(fmt)</c> ≡ <c>fscanf(stdin, fmt)</c>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

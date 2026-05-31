@@ -52,30 +52,45 @@ public sealed unsafe class LibcStdioCharTests
     }
 
     [Fact]
-    public void fgetc_and_getc_read_stream()
+    public void fgetc_and_getc_read_stdin()
     {
-        var r = new StringReader("xy");
-        fgetc(r).ShouldBe((int)'x');
-        getc(r).ShouldBe((int)'y');
-        fgetc(r).ShouldBe(-1);
+        var prev = Console.In;
+        Console.SetIn(new StringReader("xy"));
+        try
+        {
+            fgetc(stdin).ShouldBe((int)'x');
+            getc(stdin).ShouldBe((int)'y');
+            fgetc(stdin).ShouldBe(-1);
+        }
+        finally { Console.SetIn(prev); }
     }
 
     [Fact]
     public void fgets_keeps_newline_and_stops()
     {
-        var r = new StringReader("hello\nworld");
-        byte* buf = stackalloc byte[32];
-        Cstr(fgets(buf, 32, r)).ShouldBe("hello\n");
-        Cstr(fgets(buf, 32, r)).ShouldBe("world");
-        ((nint)fgets(buf, 32, r)).ShouldBe((nint)0);   // EOF, nothing read
+        var prev = Console.In;
+        Console.SetIn(new StringReader("hello\nworld"));
+        try
+        {
+            byte* buf = stackalloc byte[32];
+            Cstr(fgets(buf, 32, stdin)).ShouldBe("hello\n");
+            Cstr(fgets(buf, 32, stdin)).ShouldBe("world");
+            ((nint)fgets(buf, 32, stdin)).ShouldBe((nint)0);   // EOF, nothing read
+        }
+        finally { Console.SetIn(prev); }
     }
 
     [Fact]
     public void fgets_respects_size_limit()
     {
-        var r = new StringReader("abcdef");
-        byte* buf = stackalloc byte[4];
-        Cstr(fgets(buf, 4, r)).ShouldBe("abc");          // at most n-1 = 3 bytes
+        var prev = Console.In;
+        Console.SetIn(new StringReader("abcdef"));
+        try
+        {
+            byte* buf = stackalloc byte[4];
+            Cstr(fgets(buf, 4, stdin)).ShouldBe("abc");          // at most n-1 = 3 bytes
+        }
+        finally { Console.SetIn(prev); }
     }
 
     // ---- errno / strerror / perror ----

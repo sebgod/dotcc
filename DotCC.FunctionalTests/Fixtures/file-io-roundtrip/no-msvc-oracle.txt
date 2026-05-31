@@ -1,0 +1,5 @@
+MSVC's tmpfile() creates the temp file in the drive root (C:\) and typically
+needs elevation, so it fails/flakes on CI agents; it also flags tmpfile() as
+deprecated (-D_CRT_SECURE_NO_WARNINGS would be needed). The gcc/glibc oracle
+covers this fixture against a real C library, and the in-process FixtureTests
+validate dotcc's own emit.

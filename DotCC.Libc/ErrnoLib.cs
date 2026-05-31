@@ -131,9 +131,9 @@ public static unsafe partial class Libc
         if (s != null && *s != 0)
         {
             fputs(s, stderr);
-            stderr.Write(": ");
+            WriterFor(stderr).Write(": ");
         }
         fputs(strerror(errno), stderr);
-        stderr.Write('\n');
+        WriteByteTo(stderr, (byte)'\n');
     }
 }

@@ -3,24 +3,30 @@
 
 /* dotcc's <stdio.h> — declares the standard I/O surface so the parser
    knows the signatures. The actual implementations live in
-   DotCC.Libc.Libc (printf, fprintf, puts, scanf, sprintf, putchar, …),
+   DotCC.Libc.Libc (printf, fprintf, fopen, fread, puts, putchar, …),
    and are inlined into every emitted program by Compiler.BuildShell
    until DotCC.Libc ships as a NuGet package.
 
-   Note on FILE*: dotcc models a C `FILE*` as a managed System.IO
-   TextWriter (output streams) / TextReader (input streams) rather than a
-   single `FILE` type. The stream-taking functions (fprintf, fputs,
-   fscanf, fputc/fgetc/putc/getc/fgets) therefore aren't declared here —
-   they resolve through `using static Libc;` at C# overload-resolution
-   time, exactly as fprintf has always done. Only the FILE-free entries
-   are declared below. Full file I/O (fopen/fread/fwrite/fseek) is a
-   separate, larger effort tracked in C-SUPPORT.md. */
+   FILE model: dotcc keeps `FILE` an opaque struct (Libc.FILE) and lets
+   `FILE*` stay a genuine pointer — so NULL, ==, and `if (fp)` all work
+   through the normal pointer machinery, no special-casing. The `FILE`
+   name is pre-registered (Compiler.PredefinedTypeNames) so it needs no
+   typedef here. stdin/stdout/stderr are FILE* and resolve through
+   `using static Libc;`; their text routes through Console.In/Out/Error
+   (so redirection is honored), while fopen'd streams wrap a real file.
+   stdin/stdout/stderr/fopen/fprintf/fputs/fputc/fgetc/fgets/fscanf all
+   resolve at C# overload-resolution time and so aren't re-declared. */
 
 #ifndef NULL
 #define NULL null
 #endif
 
 #define EOF (-1)
+
+/* fseek origins. */
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
 
 /* Formatted output (to stdout / a buffer). */
 int printf(char* fmt, ...);
@@ -37,6 +43,23 @@ int puts(char* s);
 /* Character I/O on stdin / stdout. */
 int putchar(int c);
 int getchar(void);
+
+/* File streams (FILE* is a real pointer to the opaque Libc.FILE). */
+FILE* fopen(const char* path, const char* mode);
+FILE* freopen(const char* path, const char* mode, FILE* stream);
+FILE* tmpfile(void);
+int fclose(FILE* stream);
+int fflush(FILE* stream);
+int fread(void* ptr, int size, int nmemb, FILE* stream);
+int fwrite(void* ptr, int size, int nmemb, FILE* stream);
+int fseek(FILE* stream, long offset, int whence);
+long ftell(FILE* stream);
+void rewind(FILE* stream);
+int feof(FILE* stream);
+int ferror(FILE* stream);
+void clearerr(FILE* stream);
+int remove(const char* path);
+int rename(const char* oldp, const char* newp);
 
 /* Error reporting (uses errno; see <errno.h>). */
 void perror(char* s);

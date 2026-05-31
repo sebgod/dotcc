@@ -97,6 +97,19 @@ public sealed partial class CompilerTests
     // function (no escape) lowers to a stack struct value `S p = new S();`,
     // `->` becomes `.`, and the free() is dropped. Any escaping use disqualifies.
 
+    /// <summary>
+    /// The user/shell portion of the emitted file — everything before the
+    /// spliced DotCC.Libc runtime block. Use this for "this token must NOT
+    /// appear" checks: the runtime legitimately contains <c>-&gt;</c>
+    /// (e.g. <c>fp-&gt;_slot</c> in FileLib), which would false-trip a
+    /// whole-file substring scan.
+    /// </summary>
+    private static string UserPortion(string emitted)
+    {
+        int i = emitted.IndexOf("// ---- Embedded DotCC.Libc runtime", StringComparison.Ordinal);
+        return i < 0 ? emitted : emitted[..i];
+    }
+
     [Fact]
     public void Malloc_struct_used_only_via_arrow_and_freed_is_promoted()
     {
@@ -119,7 +132,7 @@ public sealed partial class CompilerTests
             // `(p.x) = 3`), and the pointer `->` form is gone for this var.
             emitted.ShouldContain("(p.x)");
             emitted.ShouldContain("(p.y)");
-            emitted.ShouldNotContain("p->");
+            UserPortion(emitted).ShouldNotContain("p->");
             // The user's cast-malloc is gone (the runtime still *defines*
             // malloc/free, but `(Point*)malloc` is unique to user code).
             emitted.ShouldNotContain("(Point*)malloc");
@@ -452,7 +465,7 @@ public sealed partial class CompilerTests
             var emitted = Compiler.EmitCSharp(new[] { src });
             emitted.ShouldContain("S @new = new S()");  // promoted + escaped
             emitted.ShouldContain("(@new.x)");          // arrow -> dot, escaped
-            emitted.ShouldNotContain("@new->");          // no pointer arrow left
+            UserPortion(emitted).ShouldNotContain("@new->"); // no pointer arrow left
             emitted.ShouldNotContain("S new = new S()"); // raw name never emitted
         }
         finally { File.Delete(src); }

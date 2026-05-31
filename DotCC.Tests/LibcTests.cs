@@ -124,12 +124,9 @@ public sealed unsafe class LibcTests
             .ShouldBe("100%");
 
     [Fact]
-    public void fprintf_routes_to_given_writer()
-    {
-        using var sw = new StringWriter();
-        fprintf(sw, L("hello %d\0"u8)).Arg(7).Done();
-        sw.ToString().ShouldBe("hello 7");
-    }
+    public void fprintf_to_stdout_routes_to_stdout() =>
+        CaptureStdout(() => fprintf(stdout, L("hello %d\0"u8)).Arg(7).Done())
+            .ShouldBe("hello 7");
 
     [Fact]
     public void fprintf_to_stderr_writes_to_stderr_not_stdout()
@@ -160,12 +157,9 @@ public sealed unsafe class LibcTests
             .ShouldBe("line\n");
 
     [Fact]
-    public void fputs_writes_without_newline()
-    {
-        using var sw = new StringWriter();
-        fputs(L("noNl\0"u8), sw);
-        sw.ToString().ShouldBe("noNl");
-    }
+    public void fputs_writes_without_newline() =>
+        CaptureStdout(() => fputs(L("noNl\0"u8), stdout))
+            .ShouldBe("noNl");
 
     // -----------------------------------------------------------------
     // sprintf / snprintf
@@ -281,15 +275,20 @@ public sealed unsafe class LibcTests
     }
 
     [Fact]
-    public void fscanf_reads_from_provided_reader()
+    public void fscanf_reads_from_stdin()
     {
-        using var sr = new StringReader("100 2.71");
-        int n = 0;
-        double f = 0;
-        var matched = fscanf(sr, L("%d %f\0"u8)).Read(&n).Read(&f).Done();
-        matched.ShouldBe(2);
-        n.ShouldBe(100);
-        f.ShouldBe(2.71);
+        var prev = Console.In;
+        Console.SetIn(new StringReader("100 2.71"));
+        try
+        {
+            int n = 0;
+            double f = 0;
+            var matched = fscanf(stdin, L("%d %f\0"u8)).Read(&n).Read(&f).Done();
+            matched.ShouldBe(2);
+            n.ShouldBe(100);
+            f.ShouldBe(2.71);
+        }
+        finally { Console.SetIn(prev); }
     }
 
     // -----------------------------------------------------------------

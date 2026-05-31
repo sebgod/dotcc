@@ -156,6 +156,9 @@ public static class Compiler
         "ldiv_t",       // <stdlib.h> — ldiv() result (Libc.ldiv_t struct)
         "lldiv_t",      // <stdlib.h> — lldiv() result (Libc.lldiv_t struct)
         "imaxdiv_t",    // <inttypes.h> — imaxdiv() result (Libc.imaxdiv_t struct)
+        "FILE",         // <stdio.h> — opaque stream handle; FILE* stays a real
+                        // pointer-to-struct (Libc.FILE), so NULL/==/if(fp) all
+                        // work through the normal pointer machinery.
     };
 
     /// <summary>
@@ -515,6 +518,7 @@ public static class Compiler
             using System.Runtime.InteropServices;
             using System.Runtime.CompilerServices;
             using System.Threading;
+            using System.Collections.Generic;
             using System.Collections.Concurrent;
             using System.Text;
             // ---- DotCC.Libc runtime (embedded source) ----------------
@@ -642,6 +646,7 @@ public static class Compiler
             using System.Runtime.InteropServices;
             using System.Runtime.CompilerServices;
             using System.Threading;
+            using System.Collections.Generic;
             using System.Collections.Concurrent;
             using System.Text;
             using static Libc;

@@ -170,26 +170,29 @@ The runtime surface dotcc-emitted programs link against. Each function routes to
 
 ### `stdio.h`
 
+**FILE model.** A C `FILE` is a tiny opaque struct (`Libc.FILE`, one slot index) and `FILE*` stays a **genuine pointer** — so `NULL`, `==`, and `if (fp)` work through the normal pointer machinery with no emitter special-casing (`FILE` is seeded in `Compiler.PredefinedTypeNames`, like `div_t`). The slot indexes a managed table (`FileSlot`): slots 0/1/2 are `stdin`/`stdout`/`stderr` and route text through `Console.In`/`Out`/`Error` **resolved per call** (so redirection / the functional harness's capture are honored — never the raw OS handle); `fopen`'d slots wrap a `FileStream` (binary, seekable). `freopen` swaps a slot's backing while keeping the same `FILE*` identity — the standard way (C99 7.19.5.4) to point `stdin`/`stdout` at a file. Implementations in `FileLib.cs`; unit tests `LibcFileTests.cs`; fixture `file-io-roundtrip/`.
+
 | Function | Status | Notes |
 |---|---|---|
 | `printf` | ✅ | Fluent `PrintfBuilder`; specs `%d %i %x %X %c %f %e %g %s %%` |
-| `fprintf` | ✅ | Primitive; takes `TextWriter stream` (the C# stand-in for `FILE*`) |
+| `fprintf` | ✅ | Primitive; takes `FILE* stream`. `PrintfBuilder` binds the `FILE`'s `TextWriter` (`WriterFor`) so it stays FILE-agnostic |
 | `sprintf` | ✅ | Writes formatted output into `byte*`, NUL-terminates |
 | `snprintf` | ✅ | Bounded sprintf; returns count-that-would-have-been-written per C99 |
-| `scanf`, `fscanf`, `sscanf` | ✅ | `ScanfReader`; specs `%d %i %f %e %g %s %c` |
-| `puts`, `fputs` | ✅ | `puts` adds newline; `fputs` doesn't |
-| `getchar`, `fgetc`, `getc` | ✅ | `TextReader.Read()`; return the byte (0..255) or `EOF` (-1). Fixture: stdin-reading ones unit-tested via `StringReader` (`LibcStdioCharTests.cs`). |
-| `putchar`, `fputc`, `putc` | ✅ | Write one byte to a `TextWriter`; return the byte. ASCII-exact (a byte >127 maps to the same-valued UTF-16 unit, not assembled into a UTF-8 sequence — use `printf`/`fputs` for non-ASCII). Fixture `stdio-putchar/`. |
+| `scanf`, `fscanf`, `sscanf` | ✅ | `ScanfReader`; specs `%d %i %f %e %g %s %c`. `fscanf` takes `FILE*` (binds the `FILE`'s `TextReader` via `ReaderFor`) |
+| `puts`, `fputs` | ✅ | `puts` adds a `'\n'`; `fputs` doesn't. `fputs` takes `FILE*` |
+| `getchar`, `fgetc`, `getc` | ✅ | Take `FILE*`; return the byte (0..255) or `EOF` (-1). Byte-exact on a file-backed stream; through `Console.In` on stdin. `LibcStdioCharTests.cs`. |
+| `putchar`, `fputc`, `putc` | ✅ | Take `FILE*`; return the byte. Byte-exact to a file; to a console stream ASCII-exact (a byte >127 maps to the same-valued UTF-16 unit — use `printf`/`fputs` for non-ASCII console text). Fixture `stdio-putchar/`. |
 | `gets` | 🚫 | Removed in C11 — never add |
-| `fgets` | ✅ | Read ≤ n-1 bytes into a `byte*` buffer, stopping after a kept newline or at EOF, then NUL-terminate; returns NULL at EOF-before-any-byte. Unit-tested via `StringReader`. |
-| `fopen`, `fclose` | ❌ | Wrap `File.Open` returning a managed-FILE handle (likely a small class) |
-| `fread`, `fwrite` | ❌ | Wraps `Stream.Read`/`Write` |
-| `fseek`, `ftell`, `rewind` | ❌ | `Stream.Seek` / `Stream.Position` |
-| `feof`, `ferror`, `clearerr` | ❌ | Track via the managed-FILE handle |
+| `fgets` | ✅ | `FILE*`; read ≤ n-1 bytes into a `byte*` buffer, stopping after a kept newline or at EOF, then NUL-terminate; returns NULL at EOF-before-any-byte. |
+| `fopen`, `fclose`, `freopen` | ✅ | `fopen` maps the C mode string (`r`/`w`/`a` + `+`, `b` ignored) to `FileStream`; returns `FILE*` or `null`+`errno`. `freopen` reassociates a handle in place (keeps `FILE*` identity). |
+| `fread`, `fwrite` | ✅ | Byte-exact element I/O over the backing stream; `fread` returns a short count + sets EOF at end. |
+| `fseek`, `ftell`, `rewind` | ✅ | `Stream.Seek`/`Position` with `SEEK_SET/CUR/END`; a console (non-seekable) stream returns the error result and sets `errno` = ESPIPE — conformant. |
+| `feof`, `ferror`, `clearerr` | ✅ | EOF/error indicators on the slot. |
 | `perror` | ✅ | `"<s>: <strerror(errno)>\n"` to stderr (the prefix omitted for a null/empty `s`). Lives in `ErrnoLib.cs`. |
-| `remove`, `rename` | ❌ | `File.Delete` / `File.Move` |
-| `tmpfile`, `tmpnam` | ❌ | Wrap `Path.GetTempFileName` |
-| `setbuf`, `setvbuf` | 🚫 | No equivalent control over `Console` buffering |
+| `remove`, `rename` | ✅ | `File.Delete` / `File.Move`; 0 on success, -1+`errno` on failure. |
+| `tmpfile` | ✅ | Anonymous read/write temp file, `DeleteOnClose`. `tmpnam` not added (insecure; `tmpfile` is the safe primitive). |
+| `fflush` | ✅ | Flushes the file's writer; `fflush(NULL)` flushes the console streams. |
+| `setbuf`, `setvbuf` | 🚫 | No equivalent control over `Console`/`Stream` buffering |
 
 ### `stdlib.h`
 
@@ -465,9 +468,9 @@ A real C compiler has to be driveable by feature-detection tooling. The autoconf
 | Probe shape | Outcome | Why |
 |---|---|---|
 | `AC_CHECK_HEADERS([stdio.h])` / `[stdlib.h]` / `[stddef.h]` / `[stdbool.h]` / `[math.h]` / `[tgmath.h]` / `[string.h]` / `[ctype.h]` / `[errno.h]` / `[time.h]` / `[inttypes.h]` / `[iso646.h]` | ✅ HAVE_X=1 | Resolved via embedded synthetic headers under `DotCC.Lib/include/`. |
-| `AC_CHECK_FUNCS([printf])` / `[malloc]` / `[free]` / `[strlen]` / `[strcmp]` / `[strcpy]` / `[memset]` / `[memcpy]` / `[sin]` / `[cos]` / `[sqrt]` / `[pow]` / `[atoi]` / `[strtol]` / `[strchr]` / `[strstr]` / `[strtok]` / `[abs]` / `[qsort]` / `[bsearch]` / `[getenv]` / `[system]` / `[putchar]` / `[strerror]` / `[time]` / `[clock]` / `[strtoimax]` / … | ✅ HAVE_X=1 | Declared in our synthetic headers; the probe links because `using static Libc;` makes them resolvable in the emitted C#. |
+| `AC_CHECK_FUNCS([printf])` / `[malloc]` / `[free]` / `[strlen]` / `[strcmp]` / `[strcpy]` / `[memset]` / `[memcpy]` / `[sin]` / `[cos]` / `[sqrt]` / `[pow]` / `[atoi]` / `[strtol]` / `[strchr]` / `[strstr]` / `[strtok]` / `[abs]` / `[qsort]` / `[bsearch]` / `[getenv]` / `[system]` / `[putchar]` / `[strerror]` / `[time]` / `[clock]` / `[strtoimax]` / `[fopen]` / `[fread]` / `[fwrite]` / `[fseek]` / `[fclose]` / `[remove]` / `[rename]` / `[tmpfile]` / … | ✅ HAVE_X=1 | Declared in our synthetic headers; the probe links because `using static Libc;` makes them resolvable in the emitted C#. |
 | `AC_CHECK_HEADERS([unistd.h])` | ❌ HAVE_X=0 | Not (yet) embedded — autoconf will correctly route to fallback code paths. |
-| `AC_CHECK_FUNCS([fopen])` / `[fread])` / `[fwrite])` / `[localtime])` / `[strftime])` | ❌ HAVE_X=0 | Not declared yet — see the ❌ rows in the libc tables above. As features land, probes flip from ❌ to ✅ automatically. |
+| `AC_CHECK_FUNCS([localtime])` / `[strftime])` / `[mktime])` | ❌ HAVE_X=0 | The `struct tm` calendar family — not declared yet (see the ❌ row in the `time.h` table). As features land, probes flip from ❌ to ✅ automatically. |
 
 **Probes that need workarounds:**
 
