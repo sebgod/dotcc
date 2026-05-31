@@ -192,10 +192,13 @@ internal static class Program
         string program;
         try
         {
-            // Inputs that are all `.cs` are object fragments → link them; `.c`
-            // inputs are sources → whole-program compile (the default).
+            // A `.c` input is a source (→ whole-program compile, the default);
+            // anything else is a dotcc object fragment (→ link). The object
+            // suffix is the build system's choice — CMake's `Generic` platform
+            // names them `.obj`, gcc-style `.o`, dotcc-by-hand `.cs` — so we key
+            // off "not a .c source" rather than a fixed object extension.
             var linking = inputPaths.Length > 0
-                && System.Array.TrueForAll(inputPaths, p => p.EndsWith(".cs", System.StringComparison.OrdinalIgnoreCase));
+                && System.Array.TrueForAll(inputPaths, p => !p.EndsWith(".c", System.StringComparison.OrdinalIgnoreCase));
             program = linking
                 ? Compiler.LinkObjects(inputPaths, fileBased: emit == EmitKind.File && !libraryMode, libraryMode: libraryMode)
                 : Compiler.EmitCSharp(

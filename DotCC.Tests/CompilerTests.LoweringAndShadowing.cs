@@ -513,6 +513,29 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Generated_files_carry_a_dotcc_magic_header()
+    {
+        // Every dotcc-generated .cs starts with a machine-checkable marker so a
+        // file can be classified at a glance (program vs object).
+        var src = WriteTemp("int main() { return 0; }");
+        try
+        {
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("//!dotcc program");
+            Compiler.EmitObject(src).ShouldContain("//!dotcc object");
+            // Linking a program (not an object) fails with a clear message.
+            var prog = Path.Combine(Path.GetTempPath(), $"dotcc-prog-{System.Guid.NewGuid():N}.cs");
+            File.WriteAllText(prog, Compiler.EmitCSharp(new[] { src }));
+            try
+            {
+                Should.Throw<CompileException>(() => Compiler.LinkObjects(new[] { prog }))
+                    .Message.ShouldContain("not a dotcc object");
+            }
+            finally { File.Delete(prog); }
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Separate_compilation_objects_link_into_one_program()
     {
         // `--emit=obj` per TU → fragments; LinkObjects merges them (deduping the
