@@ -700,9 +700,16 @@ internal sealed partial class CSharpEmitter
         var values = Leaves((EmitContent.InitGroup)n.Arg4.Content);  // positional field values
         if (!_structFields.TryGetValue(type, out var fields))
         {
+            // Scalar / pointer / enum compound literal `(int){5}` — an unnamed
+            // object of that type with exactly one initializer; lower to a cast
+            // of the value. (Array compound literals take a separate production.)
+            if (values.Count == 1)
+            {
+                return Typed($"(({type})({values[0]}))", new CType.Sized(type));
+            }
             throw new CompileException(
-                $"compound literal `({type}){{ … }}` is only supported for struct/union types "
-                + "(array/scalar compound literals aren't supported yet)");
+                $"compound literal `({type}){{ … }}` of a non-struct type needs exactly one "
+                + $"initializer (got {values.Count})");
         }
         var sb = new StringBuilder("new ").Append(type).Append(" { ");
         var count = Math.Min(values.Count, fields.Count);

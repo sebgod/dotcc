@@ -994,15 +994,26 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
-    public void Compound_literal_of_non_struct_type_fails_loudly()
+    public void Scalar_compound_literal_lowers_to_a_cast()
     {
-        // Scalar/array compound literals (`(int){5}`, `(int[]){…}`) aren't
-        // supported — fail with a clear message rather than emit something wrong.
+        // `(int){5}` — an unnamed scalar object; lowers to a cast of the value.
         var src = WriteTemp("int f(int x) { return x; } int main() { return f((int){5}); }");
         try
         {
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("f(((int)(5)))");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Scalar_compound_literal_rejects_multiple_initializers()
+    {
+        // A non-struct compound literal must have exactly one initializer.
+        var src = WriteTemp("int main() { return (int){1, 2}; }");
+        try
+        {
             Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
-                .Message.ShouldContain("only supported for struct/union");
+                .Message.ShouldContain("needs exactly one initializer");
         }
         finally { File.Delete(src); }
     }
