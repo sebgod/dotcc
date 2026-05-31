@@ -116,7 +116,7 @@ public abstract record EmitContent
     /// emit the promoted <c>S p = new S();</c> form.</param>
     /// <param name="LowLevelText">The verbatim low-level allocation expression
     /// for the non-promoted path.</param>
-    public sealed record MallocSizeof(string StructType, string LowLevelText) : EmitContent;
+    public sealed record MallocSizeof(string StructType, string LowLevelText, bool AlreadyCast = false) : EmitContent;
 
     /// <summary>
     /// Enumerator items in an <c>enum</c> body — each entry is either
@@ -203,7 +203,7 @@ public abstract record EmitContent
     /// can insert the int↔enum cast C# needs when the declared type and the
     /// initializer disagree (`Color c = 2` → <c>(Color)2</c>; `int x = c` →
     /// <c>(int)c</c>) — the enum tag is lost once the init is rendered to text.</param>
-    public sealed record DeclEntry(string Name, string? Init, string? MallocStructType = null, string? InitEnumType = null);
+    public sealed record DeclEntry(string Name, string? Init, string? MallocStructType = null, string? InitEnumType = null, bool InitIsVoidPtr = false);
 
     /// <summary>
     /// Accumulator for an init-declarator list. <c>declItem</c>/<c>declItemInit</c>

@@ -149,7 +149,9 @@ internal sealed partial class CSharpEmitter
         if (n.Arg3.Content is EmitContent.MallocSizeof ms
             && castType.Replace(" ", "") == ms.StructType + "*")
         {
-            return new EmitContent.MallocSizeof(ms.StructType, $"(({castType}){ms.LowLevelText})");
+            // AlreadyCast: the low-level text now carries the `(S*)` cast, so the
+            // decl-init reconcile must NOT add another (unlike the cast-less form).
+            return new EmitContent.MallocSizeof(ms.StructType, $"(({castType}){ms.LowLevelText})", AlreadyCast: true);
         }
         // A cast to an enum type yields an enum value (C# allows int→enum and
         // enum→enum casts directly); tag it so downstream consumers reconcile.

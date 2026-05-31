@@ -195,7 +195,7 @@ The runtime surface dotcc-emitted programs link against. Each function routes to
 
 | Function | Status | Notes |
 |---|---|---|
-| `malloc`, `free` | ✅ | `NativeMemory.Alloc` / `Free` |
+| `malloc`, `free` | ✅ | `NativeMemory.Alloc` / `Free`. **Cast-less assignment** `T *p = malloc(…)` (no explicit `(T*)`) works — `void*`→`T*` is implicit in C but needs a cast in C#, so dotcc inserts it when a `void*`-typed initializer lands in a pointer-typed declaration. Fixture `malloc-no-cast/`. |
 | `calloc`, `realloc` | ❌ | `NativeMemory.AllocZeroed` / `Realloc` |
 | `exit`, `abort`, `_Exit` | ❌ | `Environment.Exit` / `Environment.FailFast` |
 | `atof` | ✅ | `strtod(s, NULL)` — leading-double parse. Fixture `strtod-parse/`. |

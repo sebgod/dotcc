@@ -89,6 +89,13 @@ internal sealed partial class CSharpEmitter
     private string? ReconcileEnumInit(string declType, EmitContent.DeclEntry e)
     {
         if (e.Init is not { } init) { return null; }
+        // void* → T* : implicit in C, explicit in C#. A cast-less `T* p =
+        // malloc(...)` (or any void*-returning initializer) lands here; insert
+        // the `(T*)` the C# compiler requires. Skipped for `void* p = …` itself.
+        if (e.InitIsVoidPtr && declType.EndsWith("*", StringComparison.Ordinal) && declType != "void*")
+        {
+            return $"({declType})({init})";
+        }
         if (_enumTags.Contains(declType))
         {
             // Enum-typed slot: cast a non-matching source (int→enum, or a
@@ -137,7 +144,13 @@ internal sealed partial class CSharpEmitter
             mallocType = ms.StructType;
             if (!_fnMalloc.ContainsKey(name)) { _fnMalloc[name] = new MallocVar { StructType = ms.StructType }; }
         }
-        return new EmitContent.DeclEntries(new[] { new EmitContent.DeclEntry(name, T(n.Arg2), mallocType, EnumOf(n.Arg2)) });
+        // A `void*` initializer (malloc/calloc/… or a bare `malloc(sizeof(S))`
+        // marker without an explicit cast) needs a `(T*)` cast in C# — implicit
+        // in C, explicit in C#. EmitDecl inserts it when the declared type is a
+        // pointer. (A MallocSizeof that's AlreadyCast carries its own cast.)
+        var initVoidPtr = (n.Arg2.Content is EmitContent.MallocSizeof m && !m.AlreadyCast)
+            || TyOf(n.Arg2) is CType.Sized { CsType: "void*" };
+        return new EmitContent.DeclEntries(new[] { new EmitContent.DeclEntry(name, T(n.Arg2), mallocType, EnumOf(n.Arg2), initVoidPtr) });
     }
 
     // Join structured DeclEntries into the block-scope C# multi-declarator

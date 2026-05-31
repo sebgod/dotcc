@@ -152,6 +152,28 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Cast_less_malloc_gets_an_inserted_pointer_cast()
+    {
+        // `T* p = malloc(...)` (no `(T*)`) is valid C (void* → T* is implicit) but
+        // C# needs the cast. dotcc inserts it when a void*-typed initializer lands
+        // in a pointer-typed declaration. Complex-arg malloc (void* call) and an
+        // escaping struct malloc (stays a heap pointer) both get the cast.
+        var src = WriteTemp("""
+            #include <stdlib.h>
+            struct Box { int v; };
+            struct Box* make(int v) { struct Box* b = malloc(sizeof(struct Box)); b->v = v; return b; }
+            int main() { int* a = malloc(4 * sizeof(int)); a[0] = 1; return a[0] + make(2)->v; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("int* a = (int*)(");        // void* call cast-inserted
+            emitted.ShouldContain("(Box*)(malloc(sizeof(Box)))");  // escaping struct malloc cast-inserted
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Malloc_struct_without_matching_free_is_not_promoted()
     {
         // No free() — the plan requires a matching free in the same function.
