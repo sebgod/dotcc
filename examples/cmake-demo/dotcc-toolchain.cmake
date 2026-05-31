@@ -22,8 +22,12 @@ set(CMAKE_C_COMPILER_FORCED TRUE)         # dotcc has no native ABI — skip the
 set(CMAKE_C_OUTPUT_EXTENSION ".cs")       # objects are `.cs` fragments (the MSVC `.obj` / gcc `.o` slot)
 
 # Compile one TU → a `.cs` object fragment.
+#   <DEFINES>  → -DNAME=VAL …  (target_compile_definitions / add_definitions)
+#   <INCLUDES> → -I/abs/dir …  (target_include_directories / include_directories)
+# dotcc is clang-shaped, so CMake's default glued spellings (`-I/abs/path`,
+# `-DNAME=VAL`) parse as-is — no CMAKE_INCLUDE_FLAG_SEP_C tweak needed.
 set(CMAKE_C_COMPILE_OBJECT
-    "<CMAKE_C_COMPILER> ${DOTCC_DLL} --emit=obj <SOURCE> -o <OBJECT>")
+    "<CMAKE_C_COMPILER> ${DOTCC_DLL} --emit=obj <DEFINES> <INCLUDES> <SOURCE> -o <OBJECT>")
 
 # Link the `.cs` objects → a runnable target (helper builds the assembly and
 # writes a `dotnet`-launcher at <TARGET>, so `ctest`/`./<target>` just works).

@@ -13,6 +13,9 @@ rm -rf "$GEN"
 # `.cs` inputs → dotcc links them; --emit=build produces the assembly.
 dotnet "$DLL" "$@" --emit=build -o "$GEN" 1>&2
 
-APP_DLL="$GEN/bin/Release/net10.0/dotcc-out.dll"
+# Embed an ABSOLUTE dll path so the launcher works from any cwd (ctest runs it
+# from the build dir, a shell may run it from elsewhere — a real linked exe
+# isn't cwd-dependent, so neither is ours).
+APP_DLL="$(realpath "$GEN/bin/Release/net10.0/dotcc-out.dll")"
 printf '#!/bin/bash\nexec dotnet "%s" "$@"\n' "$APP_DLL" > "$TARGET"
 chmod +x "$TARGET"
