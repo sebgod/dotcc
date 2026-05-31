@@ -151,6 +151,7 @@ public static class Compiler
         "div_t",        // <stdlib.h> — div() result (Libc.div_t struct)
         "ldiv_t",       // <stdlib.h> — ldiv() result (Libc.ldiv_t struct)
         "lldiv_t",      // <stdlib.h> — lldiv() result (Libc.lldiv_t struct)
+        "imaxdiv_t",    // <inttypes.h> — imaxdiv() result (Libc.imaxdiv_t struct)
     };
 
     /// <summary>

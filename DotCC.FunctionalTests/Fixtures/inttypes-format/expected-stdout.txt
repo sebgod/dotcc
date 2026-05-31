@@ -1,0 +1,7 @@
+PRId64 = 9000000000
+PRIu32 = 4000000000
+PRIx32 = ff
+PRIdPTR = 123456789012
+imaxabs = 42
+imaxdiv = 3 r 2
+strtoimax = 123456789
