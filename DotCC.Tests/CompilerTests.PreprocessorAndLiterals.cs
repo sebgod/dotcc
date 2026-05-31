@@ -973,6 +973,27 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Array_compound_literal_lowers_to_stackalloc()
+    {
+        // C99 `(int[]){…}` / `(int[N]){…}` → stackalloc. Implicit `[]` takes the
+        // initializer length; sized zero-fills to N. Valid in init position.
+        var src = WriteTemp("""
+            int main() {
+                int *p = (int[]){10, 20, 30};
+                int *q = (int[5]){1, 2};
+                return p[0] + q[0];
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("stackalloc int[]{ 10, 20, 30 }");
+            emitted.ShouldContain("stackalloc int[]{ 1, 2, 0, 0, 0 }");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Compound_literal_of_non_struct_type_fails_loudly()
     {
         // Scalar/array compound literals (`(int){5}`, `(int[]){…}`) aren't

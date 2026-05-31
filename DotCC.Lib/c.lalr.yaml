@@ -1013,6 +1013,15 @@ productions:
       # Lowers to `default(Type)`, which is universal (works for scalar, struct,
       # union, pointer). The `}` after `{` keeps it disjoint from the two above.
       - { lhs: Unary, rhs: ['(', Type, ')', '{', '}'],                 action: compoundLitEmpty }
+      # Array compound literal (C99) — `(int[]){1,2,3}` / `(int[3]){1,2}`. The
+      # abstract array declarator is scoped to this context (not the general Type)
+      # to avoid grammar conflicts. Conflict-free with the cast / struct-compound
+      # forms above: after `( Type`, a `[` lookahead selects these. Lowers to
+      # `stackalloc T[]{ … }`, which is a valid expression in initializer position
+      # (`T* p = (int[]){…}`); other positions (call arg, return) can't escape a
+      # stackalloc to a pointer in C# and surface as a Roslyn error (documented).
+      - { lhs: Unary, rhs: ['(', Type, ArrDims, ')', '{', InitList, '}'], action: compoundLitArr }
+      - { lhs: Unary, rhs: ['(', Type, '[', ']', ')', '{', InitList, '}'], action: compoundLitArrImplicit }
       # `sizeof(Type)` — emits C# `sizeof(T)` which works for unmanaged types
       # in unsafe context. All dotcc structs are unmanaged (only primitive
       # and pointer fields) so this is always valid.

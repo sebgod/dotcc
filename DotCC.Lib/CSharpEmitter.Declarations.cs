@@ -723,4 +723,37 @@ internal sealed partial class CSharpEmitter
         return Typed($"default({type})", new CType.Sized(type));
     }
 
+    // `(int[3]){1,2,3}` — sized array compound literal (C99).
+    public EmitContent Visit(C.CompoundLitArr n)
+    {
+        Gate(1999, "compound literals", n.Arg1);
+        return ArrayCompoundLit(T(n.Arg1), ParseDims(A(n.Arg2)), (EmitContent.InitGroup)n.Arg5.Content);
+    }
+    // `(int[]){1,2,3}` — implicit-size array compound literal (C99).
+    public EmitContent Visit(C.CompoundLitArrImplicit n)
+    {
+        Gate(1999, "compound literals", n.Arg1);
+        return ArrayCompoundLit(T(n.Arg1), new List<int>(), (EmitContent.InitGroup)n.Arg6.Content);
+    }
+
+    // Array compound literal → a `stackalloc T[]{ … }` expression. Valid in
+    // initializer position (`T* p = (int[]){…}`); other positions can't escape a
+    // stackalloc to a pointer in C# (Roslyn error — documented). Scalar element
+    // types only for now; sized forms zero-fill to the declared length (C
+    // semantics), implicit `[]` takes the initializer's length.
+    private EmitContent ArrayCompoundLit(string elem, List<int> sizes, EmitContent.InitGroup group)
+    {
+        if (_structFields.ContainsKey(elem))
+        {
+            throw new CompileException("array compound literals of a struct element type aren't supported yet");
+        }
+        if (HasDesignators(group))
+        {
+            throw new CompileException("array designators inside a compound literal aren't supported yet");
+        }
+        var vals = sizes.Count > 0 ? FlattenScalarInit(group, sizes) : Leaves(group);
+        return Typed($"stackalloc {elem}[]{{ {string.Join(", ", vals)} }}",
+            new CType.Arr(new CType.Sized(elem), vals.Count));
+    }
+
 }
