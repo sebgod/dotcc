@@ -326,14 +326,19 @@ Synthetic header + implementations in `DotCC.Libc/CTypeLib.cs`. All predicates i
 
 | Function | Status | Notes |
 |---|---|---|
-Scalar surface in `DotCC.Libc/TimeLib.cs`; `time_t` / `clock_t` lower to C# `long` via plain typedefs in the synthetic header. Fixture `time-basic/` (deterministic: difftime of constants + monotonicity/sanity `if`s, both oracles); `LibcTimeInttypesTests.cs`.
+Scalar surface in `DotCC.Libc/TimeLib.cs` (`time_t`/`clock_t` → C# `long` via header typedefs); the `struct tm` calendar family in `CalendarLib.cs`. Fixtures `time-basic/` (deterministic difftime/monotonicity) and `time-calendar/` (gmtime → strftime/asctime, both oracles); `LibcTimeInttypesTests.cs` + `LibcCalendarTests.cs`.
+
+**`struct tm`.** No special mechanism was needed: C spells the type `struct tm`, which dotcc already parses via the `struct ID` rule (`typeStruct`) and emits as the bare tag `tm`, resolving to the runtime `Libc.tm` through `using static Libc;` — exactly like a user struct. `tm` is **not** seeded in `PredefinedTypeNames` (that would make it a `TYPE_NAME` and break the `struct`-keyword parse), and the synthetic header **doesn't** define the body (that would emit a second, colliding `tm`). All-`int` fields keep `tm` unmanaged, so `struct tm *` stays a real pointer. The earlier "struct-tag seeding" worry was unfounded.
 
 | Function | Status | Notes |
 |---|---|---|
 | `time` | ✅ | `DateTimeOffset.UtcNow.ToUnixTimeSeconds`; stores through the arg when non-null. |
 | `clock`, `CLOCKS_PER_SEC` | ✅ | `Environment.TickCount64` (monotonic ms — wall, not CPU time); `CLOCKS_PER_SEC`=1000, so `(clock()-start)/(double)CLOCKS_PER_SEC` gives elapsed seconds. Avoids pulling `System.Diagnostics.Process` into the runtime block. |
 | `difftime` | ✅ | `(double)(end - beginning)`. |
-| `localtime`, `gmtime`, `mktime`, `strftime`, `asctime`, `ctime` | ❌ | The `struct tm` calendar family — deferred. Needs `struct tm` to resolve to a shared runtime type (struct-**tag** seeding; the existing `PredefinedTypeNames` seeds bare names like `jmp_buf`, but C code spells this one `struct tm`). Larger piece; lower priority. |
+| `gmtime`, `localtime` | ✅ | Break a `time_t` down into `struct tm` (UTC / host-local). Return a pointer into a reused thread-local `tm` (C's "overwritten by a later call"). `gmtime` is machine-independent — use it for reproducible output. |
+| `mktime` | ✅ | Local broken-down time → `time_t`; normalizes the `tm` in place (folds out-of-range fields, fills `tm_wday`/`tm_yday`). `(time_t)-1` if not representable. |
+| `asctime`, `ctime` | ✅ | Canonical `"Www Mmm dd hh:mm:ss yyyy\n"` (C locale) into a reused thread-local buffer; `ctime` = `asctime(localtime(...))`. |
+| `strftime` | ✅ | C-locale specifiers `%Y %y %C %m %d %e %H %I %M %S %p %A %a %B %b %h %j %w %u %F %T %R %D %n %t %%`; returns bytes written or 0 if it wouldn't fit (`max` is the C `size_t`, threaded as `int`). |
 
 ### `iso646.h` (C95)
 
@@ -470,7 +475,7 @@ A real C compiler has to be driveable by feature-detection tooling. The autoconf
 | `AC_CHECK_HEADERS([stdio.h])` / `[stdlib.h]` / `[stddef.h]` / `[stdbool.h]` / `[math.h]` / `[tgmath.h]` / `[string.h]` / `[ctype.h]` / `[errno.h]` / `[time.h]` / `[inttypes.h]` / `[iso646.h]` | ✅ HAVE_X=1 | Resolved via embedded synthetic headers under `DotCC.Lib/include/`. |
 | `AC_CHECK_FUNCS([printf])` / `[malloc]` / `[free]` / `[strlen]` / `[strcmp]` / `[strcpy]` / `[memset]` / `[memcpy]` / `[sin]` / `[cos]` / `[sqrt]` / `[pow]` / `[atoi]` / `[strtol]` / `[strchr]` / `[strstr]` / `[strtok]` / `[abs]` / `[qsort]` / `[bsearch]` / `[getenv]` / `[system]` / `[putchar]` / `[strerror]` / `[time]` / `[clock]` / `[strtoimax]` / `[fopen]` / `[fread]` / `[fwrite]` / `[fseek]` / `[fclose]` / `[remove]` / `[rename]` / `[tmpfile]` / … | ✅ HAVE_X=1 | Declared in our synthetic headers; the probe links because `using static Libc;` makes them resolvable in the emitted C#. |
 | `AC_CHECK_HEADERS([unistd.h])` | ❌ HAVE_X=0 | Not (yet) embedded — autoconf will correctly route to fallback code paths. |
-| `AC_CHECK_FUNCS([localtime])` / `[strftime])` / `[mktime])` | ❌ HAVE_X=0 | The `struct tm` calendar family — not declared yet (see the ❌ row in the `time.h` table). As features land, probes flip from ❌ to ✅ automatically. |
+| `AC_CHECK_FUNCS([localtime])` / `[gmtime])` / `[mktime])` / `[strftime])` / `[asctime])` / `[ctime])` | ✅ HAVE_X=1 | The `struct tm` calendar family — declared in `<time.h>`, resolvable via `using static Libc;`. |
 
 **Probes that need workarounds:**
 

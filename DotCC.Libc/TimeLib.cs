@@ -11,9 +11,8 @@ namespace DotCC.Libc;
 /// </summary>
 /// <remarks>
 /// The <c>struct tm</c> calendar family (<c>localtime</c> / <c>gmtime</c> /
-/// <c>mktime</c> / <c>strftime</c> / <c>asctime</c> / <c>ctime</c>) is not yet
-/// implemented — it needs <c>struct tm</c> to resolve to a shared C# type
-/// (struct-tag seeding), which is a larger piece tracked in C-SUPPORT.md.
+/// <c>mktime</c> / <c>strftime</c> / <c>asctime</c> / <c>ctime</c>) lives in
+/// <c>CalendarLib.cs</c>.
 ///
 /// <para><c>clock()</c> returns a monotonic millisecond counter
 /// (<see cref="Environment.TickCount64"/>) rather than true CPU time, with
