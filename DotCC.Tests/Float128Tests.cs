@@ -531,7 +531,9 @@ public sealed class Float128Tests
         Float128 one = Float128.One, two = Float128.FromInt64(2);
         (one < two).ShouldBeTrue();
         (two < one).ShouldBeFalse();
+#pragma warning disable CS1718 // intentional self-comparison: checks `<=` reflexivity (x <= x)
         (one <= one).ShouldBeTrue();
+#pragma warning restore CS1718
         (two > one).ShouldBeTrue();
         (Float128.Negate(two) < Float128.Negate(one)).ShouldBeTrue(); // -2 < -1
         (Float128.NegativeInfinity < Float128.PositiveInfinity).ShouldBeTrue();
