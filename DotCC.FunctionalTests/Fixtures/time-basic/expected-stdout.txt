@@ -1,0 +1,4 @@
+difftime = 600.0
+time monotonic
+time after 2001
+clock nonneg
