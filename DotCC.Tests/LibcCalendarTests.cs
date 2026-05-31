@@ -110,6 +110,30 @@ public sealed unsafe class LibcCalendarTests
     }
 
     [Fact]
+    public void gmtime_r_fills_caller_buffer_and_two_results_coexist()
+    {
+        long a = 0;                 // 1970-01-01
+        long b = 1_700_000_000;     // 2023-11-14
+        tm ta, tb;
+        gmtime_r(&a, &ta);
+        gmtime_r(&b, &tb);
+        // Distinct caller buffers — neither clobbers the other (the whole point
+        // of the _r form vs the shared-buffer gmtime).
+        (ta.tm_year + 1900).ShouldBe(1970);
+        (tb.tm_year + 1900).ShouldBe(2023);
+    }
+
+    [Fact]
+    public void asctime_r_writes_caller_buffer()
+    {
+        long t = 0;
+        tm g;
+        gmtime_r(&t, &g);
+        byte* buf = stackalloc byte[32];
+        Cstr(asctime_r(&g, buf)).ShouldBe("Thu Jan  1 00:00:00 1970\n");
+    }
+
+    [Fact]
     public void mktime_normalizes_out_of_range_fields()
     {
         // tm_mon = 13 (Feb of the next year), tm_mday = 32 (→ Mar 4).

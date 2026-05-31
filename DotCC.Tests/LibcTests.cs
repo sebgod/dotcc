@@ -124,6 +124,27 @@ public sealed unsafe class LibcTests
             .ShouldBe("100%");
 
     [Fact]
+    public void printf_o_formats_unsigned_octal() =>
+        CaptureStdout(() => printf(L("%o %o %o\0"u8)).Arg(8).Arg(64).Arg(0).Done())
+            .ShouldBe("10 100 0");
+
+    [Fact]
+    public void printf_hash_o_forces_leading_zero() =>
+        CaptureStdout(() => printf(L("%#o %#o\0"u8)).Arg(8).Arg(0).Done())
+            .ShouldBe("010 0"); // 0 already has a leading zero
+
+    [Fact]
+    public void printf_o_treats_int_as_unsigned() =>
+        // -1 → 0xFFFFFFFF → 37777777777 (32-bit unsigned octal), matching C.
+        CaptureStdout(() => printf(L("%o\0"u8)).Arg(-1).Done())
+            .ShouldBe("37777777777");
+
+    [Fact]
+    public void printf_llo_formats_unsigned_64bit_octal() =>
+        CaptureStdout(() => printf(L("%llo\0"u8)).Arg(64L).Done())
+            .ShouldBe("100");
+
+    [Fact]
     public void fprintf_to_stdout_routes_to_stdout() =>
         CaptureStdout(() => fprintf(stdout, L("hello %d\0"u8)).Arg(7).Done())
             .ShouldBe("hello 7");

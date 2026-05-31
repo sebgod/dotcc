@@ -52,7 +52,25 @@ public unsafe ref struct PrintfBuilder
         public bool Zero;
         public bool Plus;
         public bool Space;
+        public bool Alt;   // the `#` flag (e.g. %#o forces a leading 0)
     }
+
+    /// <summary>Format <paramref name="v"/> as unsigned octal (no prefix). C's
+    /// <c>%o</c> treats the argument as unsigned, so callers widen the bit
+    /// pattern (e.g. <c>(uint)</c> / <c>(ulong)</c>) before calling.</summary>
+    private static string FormatOctal(ulong v)
+    {
+        if (v == 0) { return "0"; }
+        Span<char> buf = stackalloc char[22]; // 64-bit octal is ≤ 22 digits
+        int i = buf.Length;
+        while (v != 0) { buf[--i] = (char)('0' + (int)(v & 7)); v >>= 3; }
+        return new string(buf[i..]);
+    }
+
+    /// <summary>Apply the <c>#</c> flag to an octal string: force a leading
+    /// zero unless it already has one.</summary>
+    private static string AltOctal(string s, Spec spec) =>
+        spec.Alt && s.Length > 0 && s[0] != '0' ? "0" + s : s;
 
     public PrintfBuilder Arg(int v)
     {
@@ -68,6 +86,7 @@ public unsafe ref struct PrintfBuilder
                 break;
             case (byte)'x': s = v.ToString("x", ci); break;
             case (byte)'X': s = v.ToString("X", ci); break;
+            case (byte)'o': s = AltOctal(FormatOctal((uint)v), spec); break; // unsigned 32-bit
             case (byte)'c': _w.Write((char)v); return this;
             case (byte)'f': case (byte)'e': case (byte)'g':
                 // Integer formatted via the float path — same precision rules apply.
@@ -155,6 +174,7 @@ public unsafe ref struct PrintfBuilder
                 break;
             case (byte)'x': s = v.ToString("x", ci); break;
             case (byte)'X': s = v.ToString("X", ci); break;
+            case (byte)'o': s = AltOctal(FormatOctal((ulong)v), spec); break; // unsigned 64-bit
             case (byte)'f': case (byte)'e': case (byte)'g':
                 s = FormatFloat((double)v, spec, ci);
                 break;
@@ -177,6 +197,7 @@ public unsafe ref struct PrintfBuilder
                 break;
             case (byte)'x': s = v.ToString("x", ci); break;
             case (byte)'X': s = v.ToString("X", ci); break;
+            case (byte)'o': s = AltOctal(FormatOctal(v), spec); break;
             default: s = v.ToString(ci); break;
         }
         _w.Write(ApplyWidth(s, spec));
@@ -276,7 +297,7 @@ public unsafe ref struct PrintfBuilder
                 case (byte)'+': s.Plus = true; _fmt++; continue;
                 case (byte)' ': s.Space = true; _fmt++; continue;
                 case (byte)'0': s.Zero = true; _fmt++; continue;
-                case (byte)'#': _fmt++; continue;
+                case (byte)'#': s.Alt = true; _fmt++; continue;
             }
             break;
         }

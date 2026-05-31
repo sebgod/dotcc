@@ -174,7 +174,7 @@ The runtime surface dotcc-emitted programs link against. Each function routes to
 
 | Function | Status | Notes |
 |---|---|---|
-| `printf` | ✅ | Fluent `PrintfBuilder`; specs `%d %i %x %X %c %f %e %g %s %%` |
+| `printf` | ✅ | Fluent `PrintfBuilder`; specs `%d %i %o %x %X %u %c %f %e %g %s %%` (`%o` is unsigned octal, with the `#` flag forcing a leading 0) |
 | `fprintf` | ✅ | Primitive; takes `FILE* stream`. `PrintfBuilder` binds the `FILE`'s `TextWriter` (`WriterFor`) so it stays FILE-agnostic |
 | `sprintf` | ✅ | Writes formatted output into `byte*`, NUL-terminates |
 | `snprintf` | ✅ | Bounded sprintf; returns count-that-would-have-been-written per C99 |
@@ -339,6 +339,7 @@ Scalar surface in `DotCC.Libc/TimeLib.cs` (`time_t`/`clock_t` → C# `long` via 
 | `mktime` | ✅ | Local broken-down time → `time_t`; normalizes the `tm` in place (folds out-of-range fields, fills `tm_wday`/`tm_yday`). `(time_t)-1` if not representable. |
 | `asctime`, `ctime` | ✅ | Canonical `"Www Mmm dd hh:mm:ss yyyy\n"` (C locale) into a reused thread-local buffer; `ctime` = `asctime(localtime(...))`. |
 | `strftime` | ✅ | C-locale specifiers `%Y %y %C %m %d %e %H %I %M %S %p %A %a %B %b %h %j %w %u %F %T %R %D %n %t %%`; returns bytes written or 0 if it wouldn't fit (`max` is the C `size_t`, threaded as `int`). |
+| `gmtime_r`, `localtime_r`, `asctime_r`, `ctime_r` (POSIX) | ✅ | The reentrant primitives (caller-owned buffer); the plain forms above are thin wrappers that supply a `[ThreadStatic]` buffer — the "reentrant by default" rule. `asctime_r`/`ctime_r` need a ≥26-byte buffer. |
 
 ### `iso646.h` (C95)
 
@@ -351,7 +352,7 @@ Synthetic header at `DotCC.Lib/include/inttypes.h` (includes `<stdint.h>`); func
 | Item | Status | Notes |
 |---|---|---|
 | `PRId*` / `PRIi*` / `PRIu*` / `PRIx*` / `PRIX*` (8/16/32/64/MAX/PTR) | ✅ | Length modifiers per LP64: none for 8/16/32 (varargs-promoted), `ll` for 64/MAX/PTR. Used via adjacent string-literal concatenation (`"%" PRId64`), which dotcc supports. dotcc's printf builder strips the `l`/`ll` modifier and formats by the actual arg type. |
-| `PRIo*` (octal) | 🟡 | Macros defined for source compatibility, but dotcc's printf doesn't format `%o` yet (prints decimal) — separate printf gap, not an inttypes one. |
+| `PRIo*` (octal) | ✅ | dotcc's printf now formats `%o` as unsigned octal (`#` → leading 0); PRIo8/16/32/64/MAX/PTR all work. Fixture `printf-octal/`. |
 | `SCNd*` / `SCNi*` / `SCNu*` / `SCNx*` / `SCNo*` | ✅ | scanf counterparts, defined for the same width set. |
 | `imaxabs`, `imaxdiv` | ✅ | `intmax_t` abs / div; `imaxdiv_t` result struct (seeded via `PredefinedTypeNames`). |
 | `strtoimax`, `strtoumax` | ✅ | `strtoll` / `strtoull` on `intmax_t` (== `long` on dotcc). |

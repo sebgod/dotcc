@@ -39,4 +39,12 @@ char* asctime(struct tm* t);
 char* ctime(time_t* timer);
 int strftime(char* s, int max, char* fmt, struct tm* t);
 
+/* Reentrant variants (POSIX): the caller owns the output buffer. These are
+   the primitives; the plain forms above wrap them with a thread-local buffer.
+   asctime_r/ctime_r require buf to hold at least 26 bytes. */
+struct tm* gmtime_r(time_t* timer, struct tm* result);
+struct tm* localtime_r(time_t* timer, struct tm* result);
+char* asctime_r(struct tm* t, char* buf);
+char* ctime_r(time_t* timer, char* buf);
+
 #endif

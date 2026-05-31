@@ -90,36 +90,50 @@ public static unsafe partial class Libc
         t->tm_isdst = isdst;
     }
 
-    /// <summary><c>gmtime(timer)</c> — break <c>*timer</c> (Unix seconds) down to
-    /// UTC. Returns a pointer to a reused thread-local <c>tm</c>, or <c>null</c>
-    /// if <paramref name="timer"/> is null or out of range.</summary>
-    public static tm* gmtime(long* timer)
+    // Reentrant primitives (POSIX *_r): the caller owns the output buffer, so
+    // there's no shared state at all. The plain gmtime/localtime/asctime/ctime
+    // are thin wrappers that supply a [ThreadStatic] buffer — the project's
+    // "reentrant by default" rule (so e.g. two live asctime results need the _r
+    // form, since the plain one reuses a single buffer the next call clobbers).
+
+    /// <summary><c>gmtime_r(timer, result)</c> (POSIX) — break <c>*timer</c>
+    /// (Unix seconds) down into the caller-provided <paramref name="result"/>
+    /// (UTC). Returns <paramref name="result"/>, or <c>null</c> on bad/out-of-range
+    /// input.</summary>
+    public static tm* gmtime_r(long* timer, tm* result)
     {
-        if (timer == null) { return null; }
+        if (timer == null || result == null) { return null; }
         try
         {
-            var dt = DateTimeOffset.FromUnixTimeSeconds(*timer).UtcDateTime;
-            var t = TmBuf();
-            FillTm(t, dt, 0);
-            return t;
+            FillTm(result, DateTimeOffset.FromUnixTimeSeconds(*timer).UtcDateTime, 0);
+            return result;
         }
         catch (ArgumentOutOfRangeException) { return null; }
     }
 
-    /// <summary><c>localtime(timer)</c> — like <see cref="gmtime"/> but in the
-    /// host's local time zone (sets <c>tm_isdst</c>).</summary>
-    public static tm* localtime(long* timer)
+    /// <summary><c>localtime_r(timer, result)</c> (POSIX) — like
+    /// <see cref="gmtime_r"/> but in the host's local time zone (sets
+    /// <c>tm_isdst</c>).</summary>
+    public static tm* localtime_r(long* timer, tm* result)
     {
-        if (timer == null) { return null; }
+        if (timer == null || result == null) { return null; }
         try
         {
             var local = DateTimeOffset.FromUnixTimeSeconds(*timer).ToLocalTime().DateTime;
-            var t = TmBuf();
-            FillTm(t, local, TimeZoneInfo.Local.IsDaylightSavingTime(local) ? 1 : 0);
-            return t;
+            FillTm(result, local, TimeZoneInfo.Local.IsDaylightSavingTime(local) ? 1 : 0);
+            return result;
         }
         catch (ArgumentOutOfRangeException) { return null; }
     }
+
+    /// <summary><c>gmtime(timer)</c> — UTC broken-down time into a reused
+    /// thread-local buffer (overwritten by a later call). Machine-independent —
+    /// prefer it for reproducible output. Wraps <see cref="gmtime_r"/>.</summary>
+    public static tm* gmtime(long* timer) => gmtime_r(timer, TmBuf());
+
+    /// <summary><c>localtime(timer)</c> — local broken-down time into a reused
+    /// thread-local buffer. Wraps <see cref="localtime_r"/>.</summary>
+    public static tm* localtime(long* timer) => localtime_r(timer, TmBuf());
 
     /// <summary>
     /// <c>mktime(t)</c> — interpret <paramref name="t"/> as local broken-down
@@ -148,28 +162,45 @@ public static unsafe partial class Libc
         catch (ArgumentOutOfRangeException) { return -1; }
     }
 
+    // Canonical 26-char form "Www Mmm dd hh:mm:ss yyyy\n" + NUL; the reused
+    // buffer is sized generously so even a 10-digit year can't overflow it.
+    private static byte* AscBuf() => _ascBuf != null ? _ascBuf : (_ascBuf = (byte*)NativeMemory.Alloc(64));
+
     /// <summary>
-    /// <c>asctime(t)</c> — fixed 26-char form
-    /// <c>"Www Mmm dd hh:mm:ss yyyy\n"</c> (C locale), into a reused thread-local
-    /// buffer. Matches the standard <c>"%.3s %.3s%3d %.2d:%.2d:%.2d %d\n"</c>.
+    /// <c>asctime_r(t, buf)</c> (POSIX) — write the fixed
+    /// <c>"Www Mmm dd hh:mm:ss yyyy\n"</c> form (C locale) into the
+    /// caller-provided <paramref name="buf"/> (must hold at least 26 bytes) and
+    /// return it. Matches the standard <c>"%.3s %.3s%3d %.2d:%.2d:%.2d %d\n"</c>.
     /// </summary>
-    public static byte* asctime(tm* t)
+    public static byte* asctime_r(tm* t, byte* buf)
     {
-        if (t == null) { return null; }
+        if (t == null || buf == null) { return null; }
         string s = string.Format(CultureInfo.InvariantCulture,
             "{0} {1}{2,3} {3:D2}:{4:D2}:{5:D2} {6}\n",
             _wdayAbbr[Wd(t)], _monAbbr[Mo(t)], t->tm_mday,
             t->tm_hour, t->tm_min, t->tm_sec, 1900 + t->tm_year);
         var bytes = Encoding.ASCII.GetBytes(s);
-        // 26 covers the canonical width; allow headroom for >4-digit years.
-        if (_ascBuf == null) { _ascBuf = (byte*)NativeMemory.Alloc(64); }
-        int n = Math.Min(bytes.Length, 63);
-        for (int i = 0; i < n; i++) { _ascBuf[i] = bytes[i]; }
-        _ascBuf[n] = 0;
-        return _ascBuf;
+        for (int i = 0; i < bytes.Length; i++) { buf[i] = bytes[i]; }
+        buf[bytes.Length] = 0;
+        return buf;
     }
 
-    /// <summary><c>ctime(timer)</c> ≡ <c>asctime(localtime(timer))</c>.</summary>
+    /// <summary><c>asctime(t)</c> — like <see cref="asctime_r"/> into a reused
+    /// thread-local buffer (overwritten by a later call).</summary>
+    public static byte* asctime(tm* t) => asctime_r(t, AscBuf());
+
+    /// <summary><c>ctime_r(timer, buf)</c> (POSIX) ≡
+    /// <c>asctime_r(localtime_r(timer, &amp;tmp), buf)</c> with a private
+    /// <paramref name="tmp"/> — fully reentrant.</summary>
+    public static byte* ctime_r(long* timer, byte* buf)
+    {
+        tm tmp;
+        if (localtime_r(timer, &tmp) == null) { return null; }
+        return asctime_r(&tmp, buf);
+    }
+
+    /// <summary><c>ctime(timer)</c> ≡ <c>asctime(localtime(timer))</c> — both
+    /// using the thread-local buffers.</summary>
     public static byte* ctime(long* timer) => asctime(localtime(timer));
 
     /// <summary>

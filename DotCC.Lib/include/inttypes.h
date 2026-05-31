@@ -11,9 +11,8 @@
    modifier. (dotcc's printf builder parses and strips the l/ll modifier
    and formats by the actual argument type, so either spelling is safe.)
 
-   Note: %o (octal) output isn't supported by dotcc's printf yet, so the
-   PRIo* macros are defined for source compatibility but print decimal if
-   used — see C-SUPPORT.md. The d/i/u/x/X families work. */
+   The d/i/o/u/x/X families all work (dotcc's printf formats %o as unsigned
+   octal, including the `#` flag for a leading 0). */
 
 #include <stdint.h>
 
