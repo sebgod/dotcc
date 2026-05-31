@@ -209,7 +209,7 @@ Implementations: `malloc`/`free`/`strtod`/`atof` in `Libc.cs`, the rest in `Stdl
 | `rand`, `srand`, `RAND_MAX` | ✅ | Thread-local `Random` (reentrant; seeded as `srand(1)` until set). `RAND_MAX`=32767 (C minimum / MSVC value). Sequences are NOT byte-compatible with gcc/MSVC PRNGs — only the contract (range, per-seed determinism) holds, so no cross-oracle fixture. `srand` takes a wide int so any C integer arg widens in without a cast. |
 | `qsort`, `bsearch` | ✅ | Generic, AOT-clean via a `delegate*` comparator (dotcc decays a bare comparator name to `&cmp`). `qsort` is an in-place insertion sort (O(n²), correct); `bsearch` is a standard binary search. Fixture `qsort-bsearch/`. |
 | `getenv` | ✅ | `Environment.GetEnvironmentVariable`; returns a pointer into a reused thread-local native buffer (C's "may be overwritten" contract). |
-| `system` | ❌ | `Process.Start` — deliberately deferred: would pull `System.Diagnostics.Process` into the runtime block spliced into *every* emitted program, for a rarely-needed function. |
+| `system` | ✅ | Spawns the host command interpreter (`cmd.exe /c …` on Windows, `/bin/sh -c …` elsewhere) via `Process.Start` with `UseShellExecute=false`; returns the child exit code (-1 on launch failure). `system(NULL)` returns nonzero (a processor is available). This is the only libc entry that touches `System.Diagnostics.Process` — which lives in the shared framework (no extra dependency) and, being AOT-analyzer-clean here, is dropped by the NativeAOT trimmer in programs that never call `system()`, so unconditional splicing costs unused programs nothing. Unit-tested in `LibcStdlibTests` (real child + exit code); fixture `system-call/` covers the `system(NULL)` probe only — a child process inherits the real OS stdout, which the in-process Roslyn harness (Console.Out redirect) can't capture. |
 
 ### `string.h`
 
@@ -465,9 +465,9 @@ A real C compiler has to be driveable by feature-detection tooling. The autoconf
 | Probe shape | Outcome | Why |
 |---|---|---|
 | `AC_CHECK_HEADERS([stdio.h])` / `[stdlib.h]` / `[stddef.h]` / `[stdbool.h]` / `[math.h]` / `[tgmath.h]` / `[string.h]` / `[ctype.h]` / `[errno.h]` / `[time.h]` / `[inttypes.h]` / `[iso646.h]` | ✅ HAVE_X=1 | Resolved via embedded synthetic headers under `DotCC.Lib/include/`. |
-| `AC_CHECK_FUNCS([printf])` / `[malloc]` / `[free]` / `[strlen]` / `[strcmp]` / `[strcpy]` / `[memset]` / `[memcpy]` / `[sin]` / `[cos]` / `[sqrt]` / `[pow]` / `[atoi]` / `[strtol]` / `[strchr]` / `[strstr]` / `[strtok]` / `[abs]` / `[qsort]` / `[bsearch]` / `[getenv]` / `[putchar]` / `[strerror]` / `[time]` / `[clock]` / `[strtoimax]` / … | ✅ HAVE_X=1 | Declared in our synthetic headers; the probe links because `using static Libc;` makes them resolvable in the emitted C#. |
+| `AC_CHECK_FUNCS([printf])` / `[malloc]` / `[free]` / `[strlen]` / `[strcmp]` / `[strcpy]` / `[memset]` / `[memcpy]` / `[sin]` / `[cos]` / `[sqrt]` / `[pow]` / `[atoi]` / `[strtol]` / `[strchr]` / `[strstr]` / `[strtok]` / `[abs]` / `[qsort]` / `[bsearch]` / `[getenv]` / `[system]` / `[putchar]` / `[strerror]` / `[time]` / `[clock]` / `[strtoimax]` / … | ✅ HAVE_X=1 | Declared in our synthetic headers; the probe links because `using static Libc;` makes them resolvable in the emitted C#. |
 | `AC_CHECK_HEADERS([unistd.h])` | ❌ HAVE_X=0 | Not (yet) embedded — autoconf will correctly route to fallback code paths. |
-| `AC_CHECK_FUNCS([fopen])` / `[fread])` / `[fwrite])` / `[system])` / `[localtime])` / `[strftime])` | ❌ HAVE_X=0 | Not declared yet — see the ❌ rows in the libc tables above. As features land, probes flip from ❌ to ✅ automatically. |
+| `AC_CHECK_FUNCS([fopen])` / `[fread])` / `[fwrite])` / `[localtime])` / `[strftime])` | ❌ HAVE_X=0 | Not declared yet — see the ❌ rows in the libc tables above. As features land, probes flip from ❌ to ✅ automatically. |
 
 **Probes that need workarounds:**
 

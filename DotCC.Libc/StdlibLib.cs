@@ -276,6 +276,56 @@ public static unsafe partial class Libc
     /// <see cref="Environment.FailFast(string)"/>.</summary>
     public static void abort() => Environment.FailFast("abort() called");
 
+    /// <summary>
+    /// <c>system(command)</c> — hand <paramref name="command"/> to the host
+    /// command interpreter and return its exit status. With a null command,
+    /// returns nonzero (a command processor is available). On a launch failure
+    /// returns -1, matching the C library.
+    /// </summary>
+    /// <remarks>
+    /// Backed by <see cref="System.Diagnostics.Process"/>, the only libc entry
+    /// that spawns a child process. It costs nothing in programs that don't call
+    /// it: <c>Process</c> ships in the shared framework (no extra dependency),
+    /// and under NativeAOT the trimmer drops this method — and <c>Process</c>
+    /// with it — when nothing reaches it. The interpreter matches the platform's
+    /// CRT: <c>cmd.exe /c …</c> on Windows, <c>/bin/sh -c …</c> elsewhere. We set
+    /// <c>UseShellExecute = false</c> with an explicit executable, which keeps
+    /// the call AOT-analyzer-clean (no <c>[RequiresUnreferencedCode]</c> path).
+    /// </remarks>
+    public static int system(byte* command)
+    {
+        // C: system(NULL) probes for a command processor — we always have one.
+        if (command == null) { return 1; }
+        var cmd = Encoding.UTF8.GetString(command, strlen(command));
+        var psi = new System.Diagnostics.ProcessStartInfo { UseShellExecute = false };
+        if (OperatingSystem.IsWindows())
+        {
+            // Mirror the MSVC CRT: ComSpec (cmd.exe) with /c, the whole string
+            // handed to cmd verbatim so cmd does the parsing (system's contract).
+            psi.FileName = Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe";
+            psi.Arguments = "/c " + cmd;
+        }
+        else
+        {
+            // POSIX: /bin/sh -c "<command>" — ArgumentList keeps the command a
+            // single argv entry so the shell, not .NET, splits it.
+            psi.FileName = "/bin/sh";
+            psi.ArgumentList.Add("-c");
+            psi.ArgumentList.Add(cmd);
+        }
+        try
+        {
+            using var proc = System.Diagnostics.Process.Start(psi);
+            if (proc == null) { return -1; }
+            proc.WaitForExit();
+            return proc.ExitCode;
+        }
+        catch
+        {
+            return -1; // couldn't launch the interpreter
+        }
+    }
+
     // ---------------------------------------------------------------------
     // Generic sort / search (function-pointer comparator)
     // ---------------------------------------------------------------------

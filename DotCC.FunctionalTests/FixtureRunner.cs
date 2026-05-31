@@ -70,6 +70,12 @@ internal static class FixtureRunner
             .Select(a => MetadataReference.CreateFromFile(a.Location))
             .Cast<MetadataReference>()
             .ToList();
+        // The spliced DotCC.Libc runtime block references
+        // System.Diagnostics.Process (for system()). It's type-forwarded and
+        // isn't in the harvested set above, so add it explicitly (dedup by
+        // path). At AOT publish / `dotnet run` this is free — the full
+        // framework ref set already includes it.
+        AddReferenceByType(refs, typeof(System.Diagnostics.Process));
 
         var options = new CSharpCompilationOptions(
             OutputKind.ConsoleApplication,
@@ -133,6 +139,23 @@ internal static class FixtureRunner
             }
         }
         return captured.ToString();
+    }
+
+    /// <summary>
+    /// Append the assembly that defines <paramref name="type"/> to the Roslyn
+    /// reference set, unless a reference with the same file path is already
+    /// present. Used to pull in type-forwarded framework assemblies (e.g.
+    /// System.Diagnostics.Process, referenced by the spliced runtime block for
+    /// system()) that <c>AppDomain.GetAssemblies()</c> doesn't surface.
+    /// </summary>
+    internal static void AddReferenceByType(List<MetadataReference> refs, Type type)
+    {
+        var loc = type.Assembly.Location;
+        if (string.IsNullOrEmpty(loc)) { return; }
+        bool present = refs.Any(r =>
+            r is PortableExecutableReference pe &&
+            string.Equals(pe.FilePath, loc, StringComparison.OrdinalIgnoreCase));
+        if (!present) { refs.Add(MetadataReference.CreateFromFile(loc)); }
     }
 
     private static string StripFileBasedHeader(string source)

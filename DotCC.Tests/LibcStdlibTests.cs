@@ -181,4 +181,28 @@ public sealed unsafe class LibcStdlibTests
     [Fact]
     public void getenv_missing_returns_null() =>
         ((nint)getenv(L("DOTCC_DEFINITELY_UNSET_XYZ\0"u8))).ShouldBe((nint)0);
+
+    [Fact]
+    public void system_null_probes_for_a_command_processor() =>
+        // C: system(NULL) returns nonzero iff a command interpreter is available.
+        system(null).ShouldNotBe(0);
+
+    [Fact]
+    public void system_returns_the_child_exit_code()
+    {
+        // Spawns the real interpreter, so guard on platform: `cmd /c exit N`
+        // (Windows) / `sh -c "exit N"` (POSIX) both yield exit status N. The
+        // child's stdout goes to the inherited console — fine for a return-code
+        // assertion (we don't capture it here).
+        if (OperatingSystem.IsWindows())
+        {
+            system(L("exit 7\0"u8)).ShouldBe(7);
+            system(L("rem\0"u8)).ShouldBe(0); // no-op → success
+        }
+        else
+        {
+            system(L("exit 7\0"u8)).ShouldBe(7);
+            system(L("true\0"u8)).ShouldBe(0);
+        }
+    }
 }
