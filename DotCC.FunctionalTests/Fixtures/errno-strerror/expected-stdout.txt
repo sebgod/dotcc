@@ -1,0 +1,6 @@
+errno start = 0
+ERANGE = 34: Numerical result out of range
+EDOM = 33: Numerical argument out of domain
+EINVAL: Invalid argument
+ENOENT: No such file or directory
+strerror(0): Success

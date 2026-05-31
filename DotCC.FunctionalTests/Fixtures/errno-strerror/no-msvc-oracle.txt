@@ -1,0 +1,1 @@
+MSVC CRT strerror wording differs from glibc/dotcc (e.g. "Result too large" vs "Numerical result out of range").
