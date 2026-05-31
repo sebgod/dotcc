@@ -709,6 +709,15 @@ productions:
       # `:` selects the anonymous form.
       - { lhs: Member, rhs: [Type, ID, ':', E, ';'], action: structBitField }
       - { lhs: Member, rhs: [Type, ':', E, ';'],     action: structAnonBitField }
+      # Array members. Sized `T name[N];` (C89) and the flexible array member
+      # `T name[];` (C99 — an incomplete array as the last member, sized at
+      # malloc time). Both lower to a C# fixed-size buffer `public fixed T
+      # name[N];` (the FAM uses [1], which over-allocates by one element — the
+      # `malloc(sizeof(S)+n*sizeof(T))` idiom stays safe). Fixed buffers allow
+      # only primitive element types (struct/pointer/_Bool elements fail loudly).
+      # After `Type ID [`, a `]` selects the FAM, an `E` the sized form.
+      - { lhs: Member, rhs: [Type, ID, '[', E, ']', ';'], action: structArrMember }
+      - { lhs: Member, rhs: [Type, ID, '[', ']', ';'],    action: structFlexArrMember }
       # Anonymous struct member (C11): `struct { … };` with no member name. Its
       # fields are PROMOTED into the enclosing aggregate's namespace (`s.x`). For
       # a struct (sequential, no overlap) that's exactly an inline of the inner

@@ -286,6 +286,50 @@ internal sealed partial class CSharpEmitter
     // no accessible member. Nothing to emit.
     public EmitContent Visit(C.StructAnonBitField n) => string.Empty;
 
+    // C# fixed-size buffers (`fixed T name[N];`) accept only these primitive
+    // element types — used for both sized array members and the flexible array
+    // member. dotcc's `char` is `byte`; `_Bool` (CBool), pointers, structs, and
+    // enums aren't allowed and fail loudly.
+    private static readonly HashSet<string> _fixedBufferElemTypes = new(StringComparer.Ordinal)
+    { "byte", "sbyte", "short", "ushort", "int", "uint", "long", "ulong", "float", "double" };
+
+    // Sized array member `T name[N];` (C89) → a C# fixed-size buffer.
+    public EmitContent Visit(C.StructArrMember n)
+    {
+        var elem = T(n.Arg0);
+        var name = T(n.Arg1);
+        var size = StripOuterParens(T(n.Arg3));
+        if (!_fixedBufferElemTypes.Contains(elem))
+        {
+            throw new CompileException(
+                $"array member `{name}[]` of element type `{elem}` isn't supported — a C# fixed-size "
+                + "buffer allows only primitive element types (not struct / pointer / _Bool / enum)");
+        }
+        _pendingFields.Add(name);
+        return $"public fixed {elem} {Id(name)}[{size}];\n";
+    }
+
+    // Flexible array member `T name[];` (C99) — an incomplete array as the last
+    // struct member, sized at allocation time. Lowered to a one-element fixed
+    // buffer: the field sits at the right offset and `s->name[i]` indexes into
+    // the malloc'd tail verbatim. `sizeof(S)` is one element larger than C's
+    // (C's FAM is zero-size), so `malloc(sizeof(S) + n*sizeof(T))` over-allocates
+    // by one element — harmless. Should be the last member (as in valid C).
+    public EmitContent Visit(C.StructFlexArrMember n)
+    {
+        Gate(1999, "flexible array member", n.Arg0);  // C99
+        var elem = T(n.Arg0);
+        var name = T(n.Arg1);
+        if (!_fixedBufferElemTypes.Contains(elem))
+        {
+            throw new CompileException(
+                $"flexible array member `{name}[]` of element type `{elem}` isn't supported — a C# "
+                + "fixed-size buffer allows only primitive element types (not struct / pointer / _Bool / enum)");
+        }
+        _pendingFields.Add(name);
+        return $"public fixed {elem} {Id(name)}[1]; // C99 flexible array member (sized at allocation)\n";
+    }
+
     // Anonymous struct member (C11): `struct { … };` with no name. Its fields are
     // promoted into the enclosing aggregate's namespace. For a struct (sequential,
     // no overlap) promotion == inlining: emit the inner member lines directly, so

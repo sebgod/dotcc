@@ -1084,6 +1084,52 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Array_members_lower_to_fixed_buffers()
+    {
+        // Sized `T name[N];` (C89) and the C99 flexible array member `T name[];`
+        // both lower to a C# fixed-size buffer. The FAM uses [1] (over-allocates
+        // by one element — the malloc idiom stays safe).
+        var src = WriteTemp("""
+            struct Vec { int len; int data[]; };
+            struct Grid { int rows; int cells[4]; };
+            int main() { struct Grid g; g.cells[0] = 1; return g.cells[0]; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("public fixed int data[1];");    // FAM → [1]
+            emitted.ShouldContain("public fixed int cells[4];");   // sized
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Flexible_array_member_gated_as_c99_under_pedantic()
+    {
+        var src = WriteTemp("struct S { int n; int data[]; }; int main() { return 0; }");
+        try
+        {
+            Should.Throw<CompileException>(() =>
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), pedanticErrors: true))
+                .Message.ShouldContain("flexible array member");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Array_member_of_non_primitive_element_fails_loudly()
+    {
+        // C# fixed-size buffers allow only primitive element types.
+        var src = WriteTemp("struct P { int x; }; struct S { int n; struct P items[4]; }; int main() { return 0; }");
+        try
+        {
+            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
+                .Message.ShouldContain("fixed-size buffer allows only primitive");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Anonymous_struct_member_promotes_fields_into_parent()
     {
         // C11 anonymous struct member — its fields are promoted. For a struct
