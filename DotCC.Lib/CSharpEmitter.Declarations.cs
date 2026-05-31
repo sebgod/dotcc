@@ -530,6 +530,16 @@ internal sealed partial class CSharpEmitter
         {
             throw new CompileException($"array designators on a struct array (`{name}`) aren't supported yet");
         }
+        var output = DesignatedValues(elem, group, declaredSize);
+        NoteLocalArray(name, new CType.Arr(new CType.Sized(elem), output.Count));
+        return $"{elem}* {Id(emitted)} = stackalloc {elem}[]{{ {string.Join(", ", output)} }}";
+    }
+
+    // Build the dense, zero-filled value list for a 1-D scalar array with C99
+    // array designators (the body of EmitDesignatedArray, shared with the
+    // array-compound-literal form). Callers do the struct/dim guards.
+    private List<string> DesignatedValues(string elem, EmitContent.InitGroup group, int declaredSize)
+    {
         var slots = new Dictionary<int, string>();
         var cursor = 0;
         var maxIndex = -1;
@@ -549,7 +559,7 @@ internal sealed partial class CSharpEmitter
                     slots[cursor] = l.Value;
                     break;
                 default:
-                    throw new CompileException($"nested/aggregate values aren't supported with array designators (`{name}`)");
+                    throw new CompileException("nested/aggregate values aren't supported with array designators");
             }
             if (cursor > maxIndex) { maxIndex = cursor; }
             cursor++;
@@ -557,12 +567,11 @@ internal sealed partial class CSharpEmitter
         var size = declaredSize >= 0 ? declaredSize : maxIndex + 1;
         if (maxIndex >= size)
         {
-            throw new CompileException($"array designator index {maxIndex} is out of bounds for `{name}[{size}]`");
+            throw new CompileException($"array designator index {maxIndex} is out of bounds for [{size}]");
         }
         var output = new List<string>(size);
         for (var i = 0; i < size; i++) { output.Add(slots.TryGetValue(i, out var v) ? v : "0"); }
-        NoteLocalArray(name, new CType.Arr(new CType.Sized(elem), size));
-        return $"{elem}* {Id(emitted)} = stackalloc {elem}[]{{ {string.Join(", ", output)} }}";
+        return output;
     }
 
     // Parse a dimension-text list to literal ints; empty if any isn't a literal.
@@ -629,8 +638,10 @@ internal sealed partial class CSharpEmitter
         }
     }
 
-    // Emit a struct-array initializer: each top-level group → `new T { f = v, … }`.
-    private string EmitStructArrayInit(string structType, string name, EmitContent.InitGroup g)
+    // Build each top-level group of a struct-array initializer into a C#
+    // object-creation `new T { f = v, … }`. Shared by the decl form and the
+    // array-compound-literal form.
+    private List<string> StructArrayElems(string structType, EmitContent.InitGroup g)
     {
         var fields = _structFields[structType];
         var elems = new List<string>(g.Items.Count);
@@ -651,8 +662,12 @@ internal sealed partial class CSharpEmitter
             sb.Append(" }");
             elems.Add(sb.ToString());
         }
-        return $"{structType}* {Id(name)} = stackalloc {structType}[]{{ {string.Join(", ", elems)} }}";
+        return elems;
     }
+
+    // Emit a struct-array initializer: each top-level group → `new T { f = v, … }`.
+    private string EmitStructArrayInit(string structType, string name, EmitContent.InitGroup g) =>
+        $"{structType}* {Id(name)} = stackalloc {structType}[]{{ {string.Join(", ", StructArrayElems(structType, g))} }}";
 
     // `Point p = {1, 2};` — struct aggregate init. C# can't take positional
     // initializers on a struct, so we look up the struct's field names (from
@@ -763,15 +778,28 @@ internal sealed partial class CSharpEmitter
     // semantics), implicit `[]` takes the initializer's length.
     private EmitContent ArrayCompoundLit(string elem, List<int> sizes, EmitContent.InitGroup group)
     {
+        List<string> vals;
         if (_structFields.ContainsKey(elem))
         {
-            throw new CompileException("array compound literals of a struct element type aren't supported yet");
+            // Struct-element array compound literal `(struct P[]){{1,2},{3,4}}`.
+            if (HasDesignators(group))
+            {
+                throw new CompileException("array designators on a struct element type aren't supported yet");
+            }
+            vals = StructArrayElems(elem, group);
         }
-        if (HasDesignators(group))
+        else if (HasDesignators(group))
         {
-            throw new CompileException("array designators inside a compound literal aren't supported yet");
+            // Designated array compound literal `(int[]){[2]=9, [4]=1}`.
+            vals = DesignatedValues(elem, group, sizes.Count > 0 ? sizes[0] : -1);
         }
-        var vals = sizes.Count > 0 ? FlattenScalarInit(group, sizes) : Leaves(group);
+        else
+        {
+            vals = sizes.Count > 0 ? FlattenScalarInit(group, sizes) : Leaves(group);
+        }
+        // A `stackalloc` expression is valid in initializer position
+        // (`T* p = (int[]){…}`); other positions can't escape it to a pointer in
+        // C# (Roslyn error — needs statement hoisting; documented in C-SUPPORT).
         return Typed($"stackalloc {elem}[]{{ {string.Join(", ", vals)} }}",
             new CType.Arr(new CType.Sized(elem), vals.Count));
     }

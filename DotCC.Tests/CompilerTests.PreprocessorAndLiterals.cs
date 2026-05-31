@@ -996,6 +996,28 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Array_compound_literal_struct_elements_and_designators()
+    {
+        // Struct-element form → `new T{…}` elements; designated form → dense
+        // zero-fill. Both in initializer position.
+        var src = WriteTemp("""
+            struct P { int x; int y; };
+            int main() {
+                struct P *pts = (struct P[]){ {1, 2}, {3, 4} };
+                int *g = (int[]){ [2] = 9, [4] = 1 };
+                return pts[0].x + g[2];
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("stackalloc P[]{ new P { x = 1, y = 2 }, new P { x = 3, y = 4 } }");
+            emitted.ShouldContain("stackalloc int[]{ 0, 0, 9, 0, 1 }");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Scalar_compound_literal_lowers_to_a_cast()
     {
         // `(int){5}` — an unnamed scalar object; lowers to a cast of the value.
