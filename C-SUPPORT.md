@@ -178,15 +178,15 @@ The runtime surface dotcc-emitted programs link against. Each function routes to
 | `snprintf` | ✅ | Bounded sprintf; returns count-that-would-have-been-written per C99 |
 | `scanf`, `fscanf`, `sscanf` | ✅ | `ScanfReader`; specs `%d %i %f %e %g %s %c` |
 | `puts`, `fputs` | ✅ | `puts` adds newline; `fputs` doesn't |
-| `getchar`, `fgetc`, `getc` | ❌ | Trivial — wrap `Console.In.Read()` |
-| `putchar`, `fputc`, `putc` | ❌ | Trivial — wrap `Console.Write(char)` |
+| `getchar`, `fgetc`, `getc` | ✅ | `TextReader.Read()`; return the byte (0..255) or `EOF` (-1). Fixture: stdin-reading ones unit-tested via `StringReader` (`LibcStdioCharTests.cs`). |
+| `putchar`, `fputc`, `putc` | ✅ | Write one byte to a `TextWriter`; return the byte. ASCII-exact (a byte >127 maps to the same-valued UTF-16 unit, not assembled into a UTF-8 sequence — use `printf`/`fputs` for non-ASCII). Fixture `stdio-putchar/`. |
 | `gets` | 🚫 | Removed in C11 — never add |
-| `fgets` | ❌ | Read line into `byte*` buffer with cap |
+| `fgets` | ✅ | Read ≤ n-1 bytes into a `byte*` buffer, stopping after a kept newline or at EOF, then NUL-terminate; returns NULL at EOF-before-any-byte. Unit-tested via `StringReader`. |
 | `fopen`, `fclose` | ❌ | Wrap `File.Open` returning a managed-FILE handle (likely a small class) |
 | `fread`, `fwrite` | ❌ | Wraps `Stream.Read`/`Write` |
 | `fseek`, `ftell`, `rewind` | ❌ | `Stream.Seek` / `Stream.Position` |
 | `feof`, `ferror`, `clearerr` | ❌ | Track via the managed-FILE handle |
-| `perror` | ❌ | Wrap with `Console.Error.WriteLine` |
+| `perror` | ✅ | `"<s>: <strerror(errno)>\n"` to stderr (the prefix omitted for a null/empty `s`). Lives in `ErrnoLib.cs`. |
 | `remove`, `rename` | ❌ | `File.Delete` / `File.Move` |
 | `tmpfile`, `tmpnam` | ❌ | Wrap `Path.GetTempFileName` |
 | `setbuf`, `setvbuf` | 🚫 | No equivalent control over `Console` buffering |
@@ -195,42 +195,45 @@ The runtime surface dotcc-emitted programs link against. Each function routes to
 
 | Function | Status | Notes |
 |---|---|---|
+Implementations: `malloc`/`free`/`strtod`/`atof` in `Libc.cs`, the rest in `StdlibLib.cs`. Fixtures `stdlib-core/` (conversions + arithmetic + div) and `qsort-bsearch/`; overflow→errno, calloc/realloc, RNG determinism, getenv in `LibcStdlibTests.cs`.
+
 | `malloc`, `free` | ✅ | `NativeMemory.Alloc` / `Free`. **Cast-less assignment** `T *p = malloc(…)` (no explicit `(T*)`) works — `void*`→`T*` is implicit in C but needs a cast in C#, so dotcc inserts it when a `void*`-typed initializer lands in a pointer-typed declaration. Fixture `malloc-no-cast/`. |
-| `calloc`, `realloc` | ❌ | `NativeMemory.AllocZeroed` / `Realloc` |
-| `exit`, `abort`, `_Exit` | ❌ | `Environment.Exit` / `Environment.FailFast` |
+| `calloc`, `realloc` | ✅ | `NativeMemory.AllocZeroed` / `Realloc`. |
+| `exit`, `_Exit`, `abort` | ✅ | `Environment.Exit` / `FailFast`. (No `atexit` handler registry yet.) Not fixtured — would terminate the in-process Roslyn test host; the emit/compile path is covered indirectly. |
 | `atof` | ✅ | `strtod(s, NULL)` — leading-double parse. Fixture `strtod-parse/`. |
-| `atoi`, `atol` | ❌ | `int.Parse` / `long.Parse` (invariant culture) |
+| `atoi`, `atol`, `atoll` (C99) | ✅ | `strtoll(s, NULL, 10)` cores; `atoi` narrows to int. |
 | `strtod` | ✅ | Parses a leading double (sign / decimal / `e`-exponent / C99 `inf`/`nan`), skips leading whitespace, sets `endptr` to the first unconsumed byte (so a buffer of numbers can be walked); `double.Parse(NumberStyles.Float, invariant)` core. Fixture `strtod-parse/`; `LibcTests`. |
-| `strtol`, `strtoul`, `strtoll` (C99) | ❌ | Integer forms with error-position out param + base. |
-| `abs`, `labs`, `llabs` (C99) | ❌ | `Math.Abs` |
-| `rand`, `srand` | ❌ | Thread-local `Random` to match C's process-global seeding |
-| `qsort`, `bsearch` | ❌ | Generic compare-callback; AOT-clean via function pointers |
-| `getenv` | ❌ | `Environment.GetEnvironmentVariable` |
-| `system` | ❌ | `Process.Start` (frontend exe is fine with this; emitted programs maybe) |
-| `div`, `ldiv`, `lldiv` | ❌ | Quotient + remainder struct |
+| `strtol`, `strtoll` (C99), `strtoul`, `strtoull` (C99) | ✅ | Base 0/2..36 with `0x`/`0` prefix auto-detect, sign, `endptr` out-param, and ERANGE-clamp on overflow (`errno` set). Signed/unsigned 64-bit cores (dotcc's `long`==`long long`). |
+| `abs`, `labs`, `llabs` (C99) | ✅ | `n < 0 ? -n : n` (unchecked — INT_MIN wraps like C UB, doesn't throw like `Math.Abs`). |
+| `div`, `ldiv`, `lldiv` | ✅ | `div_t`/`ldiv_t`/`lldiv_t` result structs (seeded via `Compiler.PredefinedTypeNames`). Truncate toward zero per C99. |
+| `rand`, `srand`, `RAND_MAX` | ✅ | Thread-local `Random` (reentrant; seeded as `srand(1)` until set). `RAND_MAX`=32767 (C minimum / MSVC value). Sequences are NOT byte-compatible with gcc/MSVC PRNGs — only the contract (range, per-seed determinism) holds, so no cross-oracle fixture. `srand` takes a wide int so any C integer arg widens in without a cast. |
+| `qsort`, `bsearch` | ✅ | Generic, AOT-clean via a `delegate*` comparator (dotcc decays a bare comparator name to `&cmp`). `qsort` is an in-place insertion sort (O(n²), correct); `bsearch` is a standard binary search. Fixture `qsort-bsearch/`. |
+| `getenv` | ✅ | `Environment.GetEnvironmentVariable`; returns a pointer into a reused thread-local native buffer (C's "may be overwritten" contract). |
+| `system` | ❌ | `Process.Start` — deliberately deferred: would pull `System.Diagnostics.Process` into the runtime block spliced into *every* emitted program, for a rarely-needed function. |
 
 ### `string.h`
 
-Synthetic header at `DotCC.Lib/include/string.h` declares the surface; implementations live in `DotCC.Libc.Libc`. Fixture `string-h-basic/` exercises every declared function end-to-end with MSVC oracle validation.
+Synthetic header at `DotCC.Lib/include/string.h` declares the surface; implementations live in `DotCC.Libc.Libc` (strlen/strcmp/strcpy + the mem trio in `Libc.cs`; everything else in `StringLib.cs`). Fixtures `string-h-basic/` (the originals) and `string-h-extended/` exercise the surface end-to-end with both oracles; `strtok_r`/`memmove`-overlap/`strncpy`-padding edge cases are unit-tested in `LibcStringExtTests.cs`.
 
 | Function | Status | Notes |
 |---|---|---|
 | `strlen` | ✅ | Pointer loop; declared in `<string.h>`. Returns `int` (dotcc-specific — real C returns `size_t`; portable code should cast). |
 | `strcmp` | ✅ | Pointer loop; declared in `<string.h>`. |
-| `strncmp` | ❌ | Bounded `strcmp` |
+| `strncmp` | ✅ | Bounded `strcmp`; stops at a mismatch or shared NUL within `n`. |
 | `strcpy` | ✅ | Pointer loop; declared in `<string.h>`. |
-| `strncpy` | ❌ | Bounded `strcpy` |
-| `strcat`, `strncat` | ❌ | Append to NUL-terminated dst |
-| `strchr`, `strrchr` | ❌ | Find char in NUL-terminated string |
-| `strstr` | ❌ | Find substring |
-| `strtok_r` (POSIX) / `strtok_s` (C11 Annex K) | ❌ | **The reentrant primitive — implement this first.** Takes an explicit `char **saveptr` so multiple concurrent calls don't clobber each other. dotcc should default to the reentrant shape across the libc surface (no hidden static state). |
-| `strtok` | ❌ | C89 stateful form (static internal cursor → not thread-safe, can't be called recursively). When added, expose as a thin wrapper around `strtok_r` with a `[ThreadStatic]` saveptr — same shape as glibc, but documented as "use `strtok_r` if you can". |
-| `strerror` | ❌ | Map errno to message |
-| `memcmp` | ❌ | Trivial — `Span.SequenceCompareTo` |
+| `strncpy` | ✅ | Bounded copy with NUL-padding when src is short, and the classic "no terminator when src fills n" behaviour faithfully reproduced. |
+| `strcat`, `strncat` | ✅ | Append to NUL-terminated dst; `strncat` always re-terminates after at most `n` bytes. |
+| `strchr`, `strrchr` | ✅ | First / last occurrence of a byte; the terminating NUL is part of the string (`strchr(s,0)` finds it). |
+| `strstr` | ✅ | First substring occurrence; empty needle returns the haystack. |
+| `strspn`, `strcspn`, `strpbrk` | ✅ | Span of accepted / rejected leading bytes; `strpbrk` finds the first byte in a set. |
+| `strtok_r` (POSIX) | ✅ | The reentrant primitive — explicit `char **saveptr`, no hidden state. Destructive (writes NULs into the source buffer), skips leading/consecutive delimiters. The dotcc-default reentrant shape. |
+| `strtok` | ✅ | C89 stateful form — a thin wrapper over `strtok_r` with a `[ThreadStatic]` saveptr (so distinct threads don't clobber each other, unlike real C's process-global cursor). Docs steer users to `strtok_r`. |
+| `strerror` | ✅ | Maps errno → message (modeled on glibc wording). Returns a pinned RVA literal pointer — no allocation. Lives in `ErrnoLib.cs`. |
+| `memcmp` | ✅ | Byte compare of `n` bytes; returns the unsigned-char difference of the first mismatch. |
 | `memcpy` | ✅ | `Buffer.MemoryCopy`; declared in `<string.h>`. |
-| `memmove` | ❌ | Same as memcpy but overlap-safe; `Buffer.MemoryCopy` is overlap-safe so add as an alias |
+| `memmove` | ✅ | Overlap-safe copy (`Buffer.MemoryCopy` is overlap-safe). |
 | `memset` | ✅ | `NativeMemory.Fill`; declared in `<string.h>`. |
-| `memchr` | ❌ | Find byte in buffer |
+| `memchr` | ✅ | First occurrence of a byte within `n` bytes, or NULL. |
 
 ### `stdint.h` (C99)
 
@@ -338,7 +341,7 @@ Synthetic header at `DotCC.Lib/include/assert.h` with the canonical `NDEBUG`-awa
 
 | Header | Status | Notes |
 |---|---|---|
-| `errno.h` (errno, perror) | 🟡 | Thread-local int; map common values to BCL exceptions |
+| `errno.h` (errno, strerror, perror) | ✅ | `errno` is a thread-local `int` exposed as a settable property (emitted code references the bare name via `using static Libc;`, so `errno = 0;` and `if (errno == ERANGE)` both work). The E\* numbers (EDOM/ERANGE/EILSEQ + the common POSIX set) match the Linux/glibc asm-generic values and are mirrored as numeric `#define`s in `<errno.h>`. `strerror` maps them to glibc-style messages (pinned RVA literals, no alloc); `perror` prints `"<s>: <msg>\n"` to stderr. Set by `strtol`/`strtoul` on overflow. Fixture `errno-strerror/` (gcc/glibc oracle; opts out of MSVC, whose CRT wording differs); `LibcStdioCharTests.cs` covers errno/strerror/perror directly. Lives in `DotCC.Libc/ErrnoLib.cs`. |
 | `signal.h` | 🚫 | Out of scope — managed runtimes don't model POSIX signals usefully |
 | `setjmp.h` (`setjmp`/`longjmp`) | 🟡 | Implemented via .NET exceptions. `longjmp(env, val)` throws a tagged `LongJmpException` carrying the env token + value; the emitter recognises `if (setjmp(env) == 0) {normal} else {recovery}` and `if (setjmp(env)) {recovery} else {normal}` patterns in user code and rewrites the `if/else` into `try / catch when (__jmp.Token == env)`. **Bonus over real C**: `finally` blocks DO run on the unwind (.NET exception semantics) — strictly better than real `longjmp`'s silent-skip behavior. **Limitation**: only the two recognised `if/else` shapes work. Other forms (`switch (setjmp(env))`, raw value capture into a variable, `setjmp` outside `if/else` conditions) raise `CompileException`. `jmp_buf` lowers to the predefined C# type `Libc.LongJmpToken` via the TypeNameRewriter seed list — no fake keywords in the grammar. Fixture `setjmp-cleanup/` exercises a 3-deep frame unwind. |
 
@@ -416,7 +419,7 @@ Listed here so we don't relitigate them. All marked 🚫 above.
 
 ## Synthetic system headers + runtime
 
-dotcc ships its own copies of the C99/C11 standard headers (`stdio.h`, `stdlib.h`, `stddef.h`, `stdbool.h`, `stdint.h`, `limits.h`, `float.h`, `assert.h`, `ctype.h`, `setjmp.h`, `math.h`, `tgmath.h`, `string.h`, `threads.h`, `complex.h`) AND its libc implementations, both as **real files in source control**, both embedded into `DotCC.Lib.dll` so the compiler can serve them at emit time without any runtime disk I/O. Same model as clang's `lib/clang/<ver>/include/` tree, just loaded from the assembly manifest.
+dotcc ships its own copies of the C99/C11 standard headers (`stdio.h`, `stdlib.h`, `stddef.h`, `stdbool.h`, `stdint.h`, `limits.h`, `float.h`, `assert.h`, `ctype.h`, `errno.h`, `setjmp.h`, `math.h`, `tgmath.h`, `string.h`, `threads.h`, `complex.h`) AND its libc implementations, both as **real files in source control**, both embedded into `DotCC.Lib.dll` so the compiler can serve them at emit time without any runtime disk I/O. Same model as clang's `lib/clang/<ver>/include/` tree, just loaded from the assembly manifest.
 
 **Two parallel embeddings (see `DotCC.Lib.csproj`):**
 
@@ -425,7 +428,7 @@ dotcc ships its own copies of the C99/C11 standard headers (`stdio.h`, `stdlib.h
 | `DotCC.Lib/include/*.h` | `DotCC.SystemHeaders.<filename>` | `Compiler.LoadEmbeddedSystemHeaders` | Preprocessor: resolves `#include <math.h>` etc. against the embedded files |
 | `..\DotCC.Libc\*.cs` | `DotCC.Runtime.<filename>` | `Compiler.LoadRuntimeBlock` | `BuildShell`: splices the runtime source into the emitted program's type-decls section |
 
-The runtime embedding is what makes dotcc's emit **single-source-of-truth**. The `.cs` files under `DotCC.Libc/` (`Libc.cs`, `MathLib.cs`, `PrintfBuilder.cs`, `ScanfReader.cs`, `SprintfBuilder.cs`) compile into `DotCC.Libc.dll` for unit testing AND are loaded from the manifest at emit time. `LoadRuntimeBlock` strips file-scope artifacts (`#nullable enable`, `using` directives, `namespace DotCC.Libc;`) so the contained class declarations land cleanly at file scope in the emitted program. Every emitted file then has `using static Libc;` at the top, which brings `printf` / `malloc` / `sin` / `cos` / `sqrt` / etc. into scope by bare name.
+The runtime embedding is what makes dotcc's emit **single-source-of-truth**. The `.cs` files under `DotCC.Libc/` (`Libc.cs`, `StringLib.cs`, `StdlibLib.cs`, `StdioLib.cs`, `ErrnoLib.cs`, `MathLib.cs`, `ComplexLib.cs`, `CTypeLib.cs`, `AssertLib.cs`, `SetJmpLib.cs`, `ThreadsLib.cs`, `PrintfBuilder.cs`, `ScanfReader.cs`, `SprintfBuilder.cs`, …; picked up by a `*.cs` glob) compile into `DotCC.Libc.dll` for unit testing AND are loaded from the manifest at emit time. `LoadRuntimeBlock` strips file-scope artifacts (`#nullable enable`, `using` directives, `namespace DotCC.Libc;`) so the contained class declarations land cleanly at file scope in the emitted program. Every emitted file then has `using static Libc;` at the top, which brings `printf` / `malloc` / `sin` / `cos` / `sqrt` / etc. into scope by bare name.
 
 **Header guards use the standard glibc/MSVC convention** (`_STDIO_H`, `_MATH_H`, …) rather than a dotcc-specific prefix, so portable code that does `#ifdef _MATH_H` to detect whether the header has been pulled in works correctly.
 
@@ -441,10 +444,10 @@ A real C compiler has to be driveable by feature-detection tooling. The autoconf
 
 | Probe shape | Outcome | Why |
 |---|---|---|
-| `AC_CHECK_HEADERS([stdio.h])` / `[stdlib.h]` / `[stddef.h]` / `[stdbool.h]` / `[math.h]` / `[tgmath.h]` | ✅ HAVE_X=1 | Resolved via embedded synthetic headers under `DotCC.Lib/include/`. |
-| `AC_CHECK_FUNCS([printf])` / `[malloc]` / `[free]` / `[strlen]` / `[strcmp]` / `[strcpy]` / `[memset]` / `[memcpy]` / `[sin]` / `[cos]` / `[sqrt]` / `[pow]` / … | ✅ HAVE_X=1 | Declared in our synthetic headers; the probe links because `using static Libc;` makes them resolvable in the emitted C#. |
-| `AC_CHECK_HEADERS([unistd.h])` / `[errno.h]` / `[string.h]` / `[time.h]` / `[ctype.h]` | ❌ HAVE_X=0 | Not (yet) embedded — autoconf will correctly route to fallback code paths. |
-| `AC_CHECK_FUNCS([fopen])` / `[atoi]` / `[strchr]` / `[strstr]` / `[abs]` | ❌ HAVE_X=0 | Not declared yet — see the ❌ rows in the libc tables above. As features land, probes flip from ❌ to ✅ automatically. |
+| `AC_CHECK_HEADERS([stdio.h])` / `[stdlib.h]` / `[stddef.h]` / `[stdbool.h]` / `[math.h]` / `[tgmath.h]` / `[string.h]` / `[ctype.h]` / `[errno.h]` | ✅ HAVE_X=1 | Resolved via embedded synthetic headers under `DotCC.Lib/include/`. |
+| `AC_CHECK_FUNCS([printf])` / `[malloc]` / `[free]` / `[strlen]` / `[strcmp]` / `[strcpy]` / `[memset]` / `[memcpy]` / `[sin]` / `[cos]` / `[sqrt]` / `[pow]` / `[atoi]` / `[strtol]` / `[strchr]` / `[strstr]` / `[strtok]` / `[abs]` / `[qsort]` / `[bsearch]` / `[getenv]` / `[putchar]` / `[strerror]` / … | ✅ HAVE_X=1 | Declared in our synthetic headers; the probe links because `using static Libc;` makes them resolvable in the emitted C#. |
+| `AC_CHECK_HEADERS([unistd.h])` / `[time.h]` | ❌ HAVE_X=0 | Not (yet) embedded — autoconf will correctly route to fallback code paths. |
+| `AC_CHECK_FUNCS([fopen])` / `[fread])` / `[fwrite])` / `[system])` / `[time])` | ❌ HAVE_X=0 | Not declared yet — see the ❌ rows in the libc tables above. As features land, probes flip from ❌ to ✅ automatically. |
 
 **Probes that need workarounds:**
 
