@@ -251,7 +251,7 @@ Synthetic header at `DotCC.Lib/include/stdint.h` declares the fixed-width intege
 | `INT8_MIN` / `MAX`, `UINT8_MAX`, …, `INT64_MIN` / `MAX`, `UINT64_MAX` | ✅ | `#define` numeric literals — usable as integer constant expressions. |
 | `INTPTR_MIN` / `MAX`, `UINTPTR_MAX`, `SIZE_MAX`, `PTRDIFF_MIN` / `MAX`, `INTMAX_MIN` / `MAX`, `UINTMAX_MAX` | ✅ | All alias the `INT64`/`UINT64` macros (LP64). |
 | `int_least8_t` / `int_fast8_t` / etc. families | ❌ | C99-optional — rarely seen in modern code. Same shape as the fixed-width forms above when added. |
-| Format-string macros `PRId32` etc. | ❌ | Live in `<inttypes.h>` — separate header, not yet shipped. |
+| Format-string macros `PRId32` etc. | ✅ | Live in `<inttypes.h>` (now shipped — see its section below). |
 
 ### `limits.h`
 
@@ -323,10 +323,30 @@ Synthetic header + implementations in `DotCC.Libc/CTypeLib.cs`. All predicates i
 
 | Function | Status | Notes |
 |---|---|---|
-| `time` | ❌ | `DateTimeOffset.UtcNow.ToUnixTimeSeconds` |
-| `clock`, `CLOCKS_PER_SEC` | ❌ | `Environment.TickCount64` or `Stopwatch` |
-| `difftime` | ❌ | Subtraction |
-| `localtime`, `gmtime`, `mktime`, `strftime`, `asctime`, `ctime` | ❌ | DateTime mapping is non-trivial; lower priority |
+Scalar surface in `DotCC.Libc/TimeLib.cs`; `time_t` / `clock_t` lower to C# `long` via plain typedefs in the synthetic header. Fixture `time-basic/` (deterministic: difftime of constants + monotonicity/sanity `if`s, both oracles); `LibcTimeInttypesTests.cs`.
+
+| Function | Status | Notes |
+|---|---|---|
+| `time` | ✅ | `DateTimeOffset.UtcNow.ToUnixTimeSeconds`; stores through the arg when non-null. |
+| `clock`, `CLOCKS_PER_SEC` | ✅ | `Environment.TickCount64` (monotonic ms — wall, not CPU time); `CLOCKS_PER_SEC`=1000, so `(clock()-start)/(double)CLOCKS_PER_SEC` gives elapsed seconds. Avoids pulling `System.Diagnostics.Process` into the runtime block. |
+| `difftime` | ✅ | `(double)(end - beginning)`. |
+| `localtime`, `gmtime`, `mktime`, `strftime`, `asctime`, `ctime` | ❌ | The `struct tm` calendar family — deferred. Needs `struct tm` to resolve to a shared runtime type (struct-**tag** seeding; the existing `PredefinedTypeNames` seeds bare names like `jmp_buf`, but C code spells this one `struct tm`). Larger piece; lower priority. |
+
+### `iso646.h` (C95)
+
+Pure preprocessor header at `DotCC.Lib/include/iso646.h` — no runtime. Each alternative spelling is an object-like macro substituting the punctuation token (`and`→`&&`, `not_eq`→`!=`, `bitand`→`&`, …), so it expands before the parser runs; no grammar change. The full set: `and` `and_eq` `bitand` `bitor` `compl` `not` `not_eq` `or` `or_eq` `xor` `xor_eq`. Fixture `iso646-operators/` (both oracles — the tokens aren't C keywords, only header-provided, so gcc `-std=c17` and MSVC both need the `#include`).
+
+### `inttypes.h` (C99)
+
+Synthetic header at `DotCC.Lib/include/inttypes.h` (includes `<stdint.h>`); functions in `DotCC.Libc/InttypesLib.cs`. Fixture `inttypes-format/`; `LibcTimeInttypesTests.cs`.
+
+| Item | Status | Notes |
+|---|---|---|
+| `PRId*` / `PRIi*` / `PRIu*` / `PRIx*` / `PRIX*` (8/16/32/64/MAX/PTR) | ✅ | Length modifiers per LP64: none for 8/16/32 (varargs-promoted), `ll` for 64/MAX/PTR. Used via adjacent string-literal concatenation (`"%" PRId64`), which dotcc supports. dotcc's printf builder strips the `l`/`ll` modifier and formats by the actual arg type. |
+| `PRIo*` (octal) | 🟡 | Macros defined for source compatibility, but dotcc's printf doesn't format `%o` yet (prints decimal) — separate printf gap, not an inttypes one. |
+| `SCNd*` / `SCNi*` / `SCNu*` / `SCNx*` / `SCNo*` | ✅ | scanf counterparts, defined for the same width set. |
+| `imaxabs`, `imaxdiv` | ✅ | `intmax_t` abs / div; `imaxdiv_t` result struct (seeded via `PredefinedTypeNames`). |
+| `strtoimax`, `strtoumax` | ✅ | `strtoll` / `strtoull` on `intmax_t` (== `long` on dotcc). |
 
 ### `assert.h`
 
@@ -419,7 +439,7 @@ Listed here so we don't relitigate them. All marked 🚫 above.
 
 ## Synthetic system headers + runtime
 
-dotcc ships its own copies of the C99/C11 standard headers (`stdio.h`, `stdlib.h`, `stddef.h`, `stdbool.h`, `stdint.h`, `limits.h`, `float.h`, `assert.h`, `ctype.h`, `errno.h`, `setjmp.h`, `math.h`, `tgmath.h`, `string.h`, `threads.h`, `complex.h`) AND its libc implementations, both as **real files in source control**, both embedded into `DotCC.Lib.dll` so the compiler can serve them at emit time without any runtime disk I/O. Same model as clang's `lib/clang/<ver>/include/` tree, just loaded from the assembly manifest.
+dotcc ships its own copies of the C95/C99/C11 standard headers (`stdio.h`, `stdlib.h`, `stddef.h`, `stdbool.h`, `stdint.h`, `inttypes.h`, `limits.h`, `float.h`, `assert.h`, `ctype.h`, `errno.h`, `iso646.h`, `setjmp.h`, `time.h`, `math.h`, `tgmath.h`, `string.h`, `threads.h`, `complex.h`) AND its libc implementations, both as **real files in source control**, both embedded into `DotCC.Lib.dll` so the compiler can serve them at emit time without any runtime disk I/O. Same model as clang's `lib/clang/<ver>/include/` tree, just loaded from the assembly manifest.
 
 **Two parallel embeddings (see `DotCC.Lib.csproj`):**
 
@@ -428,7 +448,7 @@ dotcc ships its own copies of the C99/C11 standard headers (`stdio.h`, `stdlib.h
 | `DotCC.Lib/include/*.h` | `DotCC.SystemHeaders.<filename>` | `Compiler.LoadEmbeddedSystemHeaders` | Preprocessor: resolves `#include <math.h>` etc. against the embedded files |
 | `..\DotCC.Libc\*.cs` | `DotCC.Runtime.<filename>` | `Compiler.LoadRuntimeBlock` | `BuildShell`: splices the runtime source into the emitted program's type-decls section |
 
-The runtime embedding is what makes dotcc's emit **single-source-of-truth**. The `.cs` files under `DotCC.Libc/` (`Libc.cs`, `StringLib.cs`, `StdlibLib.cs`, `StdioLib.cs`, `ErrnoLib.cs`, `MathLib.cs`, `ComplexLib.cs`, `CTypeLib.cs`, `AssertLib.cs`, `SetJmpLib.cs`, `ThreadsLib.cs`, `PrintfBuilder.cs`, `ScanfReader.cs`, `SprintfBuilder.cs`, …; picked up by a `*.cs` glob) compile into `DotCC.Libc.dll` for unit testing AND are loaded from the manifest at emit time. `LoadRuntimeBlock` strips file-scope artifacts (`#nullable enable`, `using` directives, `namespace DotCC.Libc;`) so the contained class declarations land cleanly at file scope in the emitted program. Every emitted file then has `using static Libc;` at the top, which brings `printf` / `malloc` / `sin` / `cos` / `sqrt` / etc. into scope by bare name.
+The runtime embedding is what makes dotcc's emit **single-source-of-truth**. The `.cs` files under `DotCC.Libc/` (`Libc.cs`, `StringLib.cs`, `StdlibLib.cs`, `StdioLib.cs`, `ErrnoLib.cs`, `TimeLib.cs`, `InttypesLib.cs`, `MathLib.cs`, `ComplexLib.cs`, `CTypeLib.cs`, `AssertLib.cs`, `SetJmpLib.cs`, `ThreadsLib.cs`, `PrintfBuilder.cs`, `ScanfReader.cs`, `SprintfBuilder.cs`, …; picked up by a `*.cs` glob) compile into `DotCC.Libc.dll` for unit testing AND are loaded from the manifest at emit time. `LoadRuntimeBlock` strips file-scope artifacts (`#nullable enable`, `using` directives, `namespace DotCC.Libc;`) so the contained class declarations land cleanly at file scope in the emitted program. Every emitted file then has `using static Libc;` at the top, which brings `printf` / `malloc` / `sin` / `cos` / `sqrt` / etc. into scope by bare name.
 
 **Header guards use the standard glibc/MSVC convention** (`_STDIO_H`, `_MATH_H`, …) rather than a dotcc-specific prefix, so portable code that does `#ifdef _MATH_H` to detect whether the header has been pulled in works correctly.
 
@@ -444,10 +464,10 @@ A real C compiler has to be driveable by feature-detection tooling. The autoconf
 
 | Probe shape | Outcome | Why |
 |---|---|---|
-| `AC_CHECK_HEADERS([stdio.h])` / `[stdlib.h]` / `[stddef.h]` / `[stdbool.h]` / `[math.h]` / `[tgmath.h]` / `[string.h]` / `[ctype.h]` / `[errno.h]` | ✅ HAVE_X=1 | Resolved via embedded synthetic headers under `DotCC.Lib/include/`. |
-| `AC_CHECK_FUNCS([printf])` / `[malloc]` / `[free]` / `[strlen]` / `[strcmp]` / `[strcpy]` / `[memset]` / `[memcpy]` / `[sin]` / `[cos]` / `[sqrt]` / `[pow]` / `[atoi]` / `[strtol]` / `[strchr]` / `[strstr]` / `[strtok]` / `[abs]` / `[qsort]` / `[bsearch]` / `[getenv]` / `[putchar]` / `[strerror]` / … | ✅ HAVE_X=1 | Declared in our synthetic headers; the probe links because `using static Libc;` makes them resolvable in the emitted C#. |
-| `AC_CHECK_HEADERS([unistd.h])` / `[time.h]` | ❌ HAVE_X=0 | Not (yet) embedded — autoconf will correctly route to fallback code paths. |
-| `AC_CHECK_FUNCS([fopen])` / `[fread])` / `[fwrite])` / `[system])` / `[time])` | ❌ HAVE_X=0 | Not declared yet — see the ❌ rows in the libc tables above. As features land, probes flip from ❌ to ✅ automatically. |
+| `AC_CHECK_HEADERS([stdio.h])` / `[stdlib.h]` / `[stddef.h]` / `[stdbool.h]` / `[math.h]` / `[tgmath.h]` / `[string.h]` / `[ctype.h]` / `[errno.h]` / `[time.h]` / `[inttypes.h]` / `[iso646.h]` | ✅ HAVE_X=1 | Resolved via embedded synthetic headers under `DotCC.Lib/include/`. |
+| `AC_CHECK_FUNCS([printf])` / `[malloc]` / `[free]` / `[strlen]` / `[strcmp]` / `[strcpy]` / `[memset]` / `[memcpy]` / `[sin]` / `[cos]` / `[sqrt]` / `[pow]` / `[atoi]` / `[strtol]` / `[strchr]` / `[strstr]` / `[strtok]` / `[abs]` / `[qsort]` / `[bsearch]` / `[getenv]` / `[putchar]` / `[strerror]` / `[time]` / `[clock]` / `[strtoimax]` / … | ✅ HAVE_X=1 | Declared in our synthetic headers; the probe links because `using static Libc;` makes them resolvable in the emitted C#. |
+| `AC_CHECK_HEADERS([unistd.h])` | ❌ HAVE_X=0 | Not (yet) embedded — autoconf will correctly route to fallback code paths. |
+| `AC_CHECK_FUNCS([fopen])` / `[fread])` / `[fwrite])` / `[system])` / `[localtime])` / `[strftime])` | ❌ HAVE_X=0 | Not declared yet — see the ❌ rows in the libc tables above. As features land, probes flip from ❌ to ✅ automatically. |
 
 **Probes that need workarounds:**
 
