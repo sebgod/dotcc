@@ -496,6 +496,23 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Struct_shared_across_translation_units_is_emitted_once()
+    {
+        // Two TUs each define `struct P` (as a shared header would). Whole-program
+        // emit must dedup the C# type — otherwise CS0101 "already contains a
+        // definition for 'P'". (Real bug found via the CMake multi-file demo.)
+        var a = WriteTemp("struct P { int x; }; int side(void) { struct P p; p.x = 1; return p.x; }");
+        var b = WriteTemp("struct P { int x; }; int main(void) { struct P p; p.x = 2; return p.x; }");
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { a, b });
+            System.Text.RegularExpressions.Regex.Matches(emitted, @"unsafe struct P\b").Count
+                .ShouldBe(1);
+        }
+        finally { File.Delete(a); File.Delete(b); }
+    }
+
+    [Fact]
     public void Variadic_macro_with_named_params_plus_extras()
     {
         // Named param `level` + variadic extras. `level` substitutes

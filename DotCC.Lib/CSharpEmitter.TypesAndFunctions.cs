@@ -173,10 +173,13 @@ internal sealed partial class CSharpEmitter
     {
         var name = T(n.Arg1);
         var members = T(n.Arg3);
-        DrainPendingFields(name);
-        _structs.Append("unsafe struct ").Append(name).Append("\n{\n");
-        _structs.Append(IndentEach(members));
-        _structs.Append("}\n\n");
+        DrainPendingFields(name);  // always — clears _pendingFields for the next struct
+        if (_emittedTypes.Add(name))
+        {
+            _structs.Append("unsafe struct ").Append(name).Append("\n{\n");
+            _structs.Append(IndentEach(members));
+            _structs.Append("}\n\n");
+        }
         return string.Empty;
     }
 
@@ -491,6 +494,7 @@ internal sealed partial class CSharpEmitter
     // anonymous-union member lifts its fields into.
     private void EmitExplicitUnionType(string name, string memberLines)
     {
+        if (!_emittedTypes.Add(name)) { return; } // already emitted (shared header across TUs)
         _structs.Append("[global::System.Runtime.InteropServices.StructLayout(global::System.Runtime.InteropServices.LayoutKind.Explicit)]\n");
         _structs.Append("unsafe struct ").Append(name).Append("\n{\n");
         foreach (var line in memberLines.Split('\n'))
@@ -544,6 +548,14 @@ internal sealed partial class CSharpEmitter
     // by StructMember into _pendingFieldEnumMap, drained per struct.
     private readonly Dictionary<string, Dictionary<string, string>> _structFieldEnums = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _pendingFieldEnumMap = new(StringComparer.Ordinal);
+
+    // C# type names already emitted into the type-decls section. Emitter-lifetime
+    // (NOT reset per function): when several translation units `#include` the same
+    // header, each TU re-parses the shared `struct`/`union`/`enum`/typedef, so the
+    // emit would otherwise produce duplicate C# types (CS0101). The side tables
+    // (_structFields/_enumTags/…) are populated by the first definition and stay
+    // valid; only the duplicate C# text is suppressed.
+    private readonly HashSet<string> _emittedTypes = new(StringComparer.Ordinal);
 
     // Snapshot the pending enum-field map onto each of the type's names and
     // reset it for the next struct body.
@@ -600,6 +612,9 @@ internal sealed partial class CSharpEmitter
     private EmitContent EmitEnum(string enumName, IReadOnlyList<string> items, string baseType)
     {
         _enumTags.Add(enumName);
+        // Duplicate definition (same enum from a header included by 2 TUs): the
+        // first call populated _enumTags/_enumerators; skip re-emitting the type.
+        if (!_emittedTypes.Add(enumName)) { return string.Empty; }
         _structs.Append("enum ").Append(enumName).Append(" : ").Append(baseType).Append("\n{\n");
         var next = 0L;
         foreach (var raw in items)
@@ -745,9 +760,11 @@ internal sealed partial class CSharpEmitter
         // staged params, and leaking these would corrupt the next function's
         // parameter scope (its names + local-rename used-set).
         _pendingParams.Clear();
-        _aliasNames.Add(name);
-        _aliases.Append("using unsafe ").Append(name).Append(" = delegate*<")
-            .Append(typesOnly).Append(", ").Append(ret).Append(">;\n");
+        if (_aliasNames.Add(name))  // dedup across TUs (shared header)
+        {
+            _aliases.Append("using unsafe ").Append(name).Append(" = delegate*<")
+                .Append(typesOnly).Append(", ").Append(ret).Append(">;\n");
+        }
         return string.Empty;
     }
 
@@ -755,9 +772,11 @@ internal sealed partial class CSharpEmitter
     {
         var ret = T(n.Arg1);
         var name = T(n.Arg4);
-        _aliasNames.Add(name);
-        _aliases.Append("using unsafe ").Append(name).Append(" = delegate*<")
-            .Append(ret).Append(">;\n");
+        if (_aliasNames.Add(name))  // dedup across TUs (shared header)
+        {
+            _aliases.Append("using unsafe ").Append(name).Append(" = delegate*<")
+                .Append(ret).Append(">;\n");
+        }
         return string.Empty;
     }
 
@@ -797,9 +816,12 @@ internal sealed partial class CSharpEmitter
         DrainFieldEnums(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainPromotions(alias);
         if (tag != alias && _promotedFields.TryGetValue(alias, out var aliasProm)) { _promotedFields[tag] = aliasProm; }
-        _structs.Append("unsafe struct ").Append(alias).Append("\n{\n");
-        _structs.Append(IndentEach(members));
-        _structs.Append("}\n\n");
+        if (_emittedTypes.Add(alias))
+        {
+            _structs.Append("unsafe struct ").Append(alias).Append("\n{\n");
+            _structs.Append(IndentEach(members));
+            _structs.Append("}\n\n");
+        }
         if (tag != alias && _aliasNames.Add(tag))
         {
             _aliases.Append("using unsafe ").Append(tag).Append(" = ").Append(alias).Append(";\n");
@@ -820,9 +842,12 @@ internal sealed partial class CSharpEmitter
         _pendingFields.Clear();
         DrainFieldEnums(alias);
         DrainPromotions(alias);
-        _structs.Append("unsafe struct ").Append(alias).Append("\n{\n");
-        _structs.Append(IndentEach(members));
-        _structs.Append("}\n\n");
+        if (_emittedTypes.Add(alias))
+        {
+            _structs.Append("unsafe struct ").Append(alias).Append("\n{\n");
+            _structs.Append(IndentEach(members));
+            _structs.Append("}\n\n");
+        }
         return string.Empty;
     }
 
