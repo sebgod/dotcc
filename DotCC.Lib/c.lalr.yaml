@@ -621,6 +621,19 @@ productions:
       # visitor emits the type-name string verbatim (it's already the
       # C# type identifier we want).
       - { lhs: Type, rhs: [TYPE_NAME], action: typeName }
+      # A declaration-specifier RUN (function-specifiers / qualifiers like
+      # `inline` / `_Noreturn`) immediately preceding a typedef-name:
+      # `inline Table *f()` and — via the FnSig `static` prefix — Lua's
+      # `l_sinline OpCode g()` = `static inline OpCode g()`. The spec-list can't
+      # itself absorb a TYPE_NAME (a typedef-name is the separate `Type → TYPE_NAME`
+      # production, not a TypeSpec), so compose them here: the TYPE_NAME is the base
+      # type and the spec-list contributes ONLY its inline/_Noreturn flags (a builtin
+      # keyword in that run would be invalid C — `int Table` — and is dropped at
+      # resolution). `const` never reaches here (QualifierStripper deletes it);
+      # `volatile`/`_Atomic` are leading Type PREFIXES, so `volatile Table` already
+      # parses via typeVolatile. Conflict-free: a bare TYPE_NAME still reduces via
+      # `Type → TYPE_NAME`; only a TypeSpecList *followed by* a TYPE_NAME shifts here.
+      - { lhs: Type, rhs: [TypeSpecList, TYPE_NAME], action: typeSpecThenName }
       # `volatile T` — a LEADING type qualifier, modelled as a Type PREFIX (not a
       # TypeSpec). This is the unlock for faithful volatile: `const`/`volatile`
       # used to be TypeSpecs (tsConst/tsVolatile), which is exactly what made

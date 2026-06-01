@@ -984,6 +984,26 @@ internal sealed partial class CSharpEmitter
         return name;
     }
 
+    // `TypeSpecList TYPE_NAME` — a function-specifier / qualifier run preceding a
+    // typedef-name (`inline Table *f()`, `static inline OpCode g()`). The TYPE_NAME
+    // is the base type; the spec-list contributes only its inline / _Noreturn flags.
+    // Any real type keyword in the run (invalid C — `int Table`) is dropped. Mirrors
+    // Visit(C.TypeName) for the _Atomic-typedef-alias resolution. See the grammar note.
+    public EmitContent Visit(C.TypeSpecThenName n)
+    {
+        var specs = S(n.Arg0);
+        var hasInline = false;
+        var hasNoreturn = false;
+        foreach (var s in specs)
+        {
+            if (s == "inline") { hasInline = true; }
+            else if (s == "_Noreturn") { hasNoreturn = true; if (_dialectGate is not null) { Gate(2011, "_Noreturn", n.Arg0); } }
+        }
+        var name = T(n.Arg1);
+        var atomic = _atomicTypedefs.TryGetValue(name, out var under);
+        return new EmitContent.Text(atomic ? under! : name, Inline: hasInline, Noreturn: hasNoreturn, Atomic: atomic);
+    }
+
     // `volatile T` (leading qualifier prefix). Drop the qualifier from the emitted
     // C# type string — there is no C# type-level `volatile` — but FLAG the Type so
     // the decl/member visitors record the declared name/field as volatile (see
@@ -1342,9 +1362,16 @@ internal sealed partial class CSharpEmitter
         // grammar's `(volatile T)*` binding — volatile binds to the base, then `*`,
         // matching C (`volatile int *p` is pointer-to-volatile-int, not a volatile
         // pointer; the latter is the `int * volatile p` ptr-qual form).
-        var pointeeVolatile = VolatileOf(n.Arg0)
-            || (n.Arg0.Content as EmitContent.Text)?.VolatilePointee == true;
-        return pointeeVolatile ? new EmitContent.Text(text, VolatilePointee: true) : (EmitContent)text;
+        var inner = n.Arg0.Content as EmitContent.Text;
+        var pointeeVolatile = VolatileOf(n.Arg0) || inner?.VolatilePointee == true;
+        // Carry the return-type's function-specifier flags forward through pointer
+        // levels: a pointer-returning `inline`/`_Noreturn` function (`inline Table
+        // *f()`) keeps its [MethodImpl]/[DoesNotReturn] — the flag rides the Type.
+        var inline = inner?.Inline == true;
+        var noreturn = inner?.Noreturn == true;
+        return (pointeeVolatile || inline || noreturn)
+            ? new EmitContent.Text(text, Inline: inline, Noreturn: noreturn, VolatilePointee: pointeeVolatile)
+            : (EmitContent)text;
     }
     // `T * const` / `T * volatile` / `T * restrict` — a qualifier after the
     // pointer star. dotcc has no C# equivalent (no readonly locals, no aliasing

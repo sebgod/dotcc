@@ -569,6 +569,47 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Inline_before_typedef_name_return_keeps_attribute()
+    {
+        // Lua's `l_sinline Table *gettable(...)` → `static inline Table *…`. A
+        // function-specifier run preceding a typedef-name return type used to fail
+        // to parse (a TYPE_NAME is a separate Type production, not a TypeSpec, so
+        // the spec-list couldn't absorb it). The composed `Type → TypeSpecList
+        // TYPE_NAME` production keeps the inline flag — even through a `*` return.
+        var src = WriteTemp("""
+            typedef struct { int v; } Cell;
+            static inline Cell *bump(Cell *c) { c->v += 1; return c; }
+            inline Cell make(int x) { Cell c; c.v = x; return c; }
+            int main(void) { Cell c; c.v = 0; return bump(&c)->v + make(1).v; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"));
+            emitted.ShouldContain("[MethodImpl(MethodImplOptions.AggressiveInlining)]\nstatic unsafe Cell* bump(Cell* c)");
+            emitted.ShouldContain("[MethodImpl(MethodImplOptions.AggressiveInlining)]\nstatic unsafe Cell make(int x)");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Noreturn_before_typedef_name_return_keeps_attribute()
+    {
+        // `_Noreturn` is always a keyword; preceding a typedef-named return type it
+        // composes the same way and keeps [DoesNotReturn]. (`Status` is a typedef.)
+        var src = WriteTemp("""
+            typedef int Status;
+            _Noreturn Status die(void) { for (;;) {} }
+            int main(void) { return 0; }
+            """);
+        try
+        {
+            Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"))
+                .ShouldContain("[System.Diagnostics.CodeAnalysis.DoesNotReturn]\nstatic unsafe Status die()");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Inline_is_an_identifier_pre_c99_but_a_keyword_from_c99()
     {
         // `int inline = 5;` is valid C89 — `inline` is an ordinary identifier,

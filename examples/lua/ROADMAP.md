@@ -232,7 +232,23 @@ partial layout walk bails here (the target field's type `Node` has unknown
 alignment). A real `offsetof`-as-constant capability is its own feature; tracked,
 not attempted in 4p.
 
-### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (13 / 20 objects)
+### ✅ Phase 4q — function-specifier run before a typedef-name return (`l_sinline`)
+`lapi` and `lcode` failed on `l_sinline Table *gettable(...)` — `l_sinline`
+expands to `static inline`, and the declaration-specifier sequence `[static]
+inline <typedef-name>` couldn't form a Type: a typedef-name is the separate
+`Type → TYPE_NAME` production, not a `TypeSpec`, so the spec-list (`inline`)
+couldn't absorb it. New `Type → TypeSpecList TYPE_NAME` production
+(`typeSpecThenName`) composes them — the TYPE_NAME is the base type, the
+spec-list contributes only its `inline`/`_Noreturn` flags — and `typePtr` now
+carries those flags forward so a pointer-returning `inline` keeps its
+`[MethodImpl(AggressiveInlining)]` (a pre-existing latent drop, also fixed).
+Conflict-free (a bare TYPE_NAME still reduces via `Type → TYPE_NAME`; only a
+spec-list *followed by* a TYPE_NAME shifts into the new rule). **Core probe
+13/20 → 14/20** (lapi). Fixture `inline-typedef-return/` (gcc-oracle-validated);
+unit tests in `CompilerTests.Dialect` (`Inline_before_typedef_name_*`,
+`Noreturn_before_typedef_name_*`).
+
+### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (14 / 20 objects)
 - Iterate the 20 core TUs via `probe.sh`; fix each parse/emit gap as it surfaces.
   One commit per coherent gap, each with a minimal fixture (dotcc tradition:
   never fix Lua-specifically — reduce to a small reproducer + fixture).
@@ -248,12 +264,11 @@ not attempted in 4p.
   `typedef enum { … } Name;` (4h, ltm.h's `TMS`), and **multi-declarator members
   + per-declarator pointers** (4i, `struct CallInfo *previous, *next;`).
   **`lctype.c` + `lopcodes.c` emit full objects.** ✅
-- **Current frontier** (13/20 emit objects: `lctype`, `ldebug`, `ldump`, `lgc`,
-  `lmem`, `lobject`, `lopcodes`, `lstate`, `lstring`, `ltm`, `lundump`, `lvm`,
-  `lzio`). The 7 remaining failures are **diverse per-TU gaps**:
-  - `unexpected 'unsigned'` (lcode), `unexpected ','` (llex:371), `unexpected '{'`
-    (lparser:1349), `unexpected 'TYPE_NAME'` (lapi:753, lcode:1442), `unexpected
-    'ID'` (lfunc:70) — six parse walls across five TUs.
+- **Current frontier** (14/20 emit objects: `lapi`, `lctype`, `ldebug`, `ldump`,
+  `lgc`, `lmem`, `lobject`, `lopcodes`, `lstate`, `lstring`, `ltm`, `lundump`,
+  `lvm`, `lzio`). The 6 remaining failures are **diverse per-TU gaps**:
+  - `unexpected '{'` (lcode:1698, lparser:1349), `unexpected ','` (llex:371),
+    `unexpected 'ID'` (lfunc:70) — four parse walls across four TUs.
   - `setjmp`-in-`if`-without-`else` (ldo).
   - `array member padding needs constant dimension(s)` (ltable) — the deferred
     `offsetof`-as-array-bound case (needs a compile-time layout model; see 4p).
