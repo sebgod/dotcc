@@ -52,8 +52,19 @@ internal sealed class TypeNameRewriter : RewritingTokenStream
     private readonly int _openParenSymbol;
     private readonly int _closeParenSymbol;
     private readonly int _starSymbol;
+    private readonly int _structSymbol;
+    private readonly int _unionSymbol;
+    private readonly int _enumSymbol;
     private readonly HashSet<string> _typeNames;
     private readonly HashSet<string> _seedTypeNames;
+
+    // True when the previous token forwarded through ProcessToken was a
+    // `struct` / `union` / `enum` keyword — so the NEXT ID is a tag, not a
+    // typedef-name, and must not be promoted to TYPE_NAME. C keeps tags in a
+    // separate namespace, so a tag may legally collide with a typedef-name (the
+    // `typedef struct lua_State lua_State;` idiom). Reset across the typedef
+    // path (its body is consumed wholesale, ending at `;`).
+    private bool _afterTagKeyword;
 
     /// <summary>
     /// Construct a rewriter over <paramref name="inner"/>, optionally
@@ -85,6 +96,9 @@ internal sealed class TypeNameRewriter : RewritingTokenStream
         _openParenSymbol = map["("];
         _closeParenSymbol = map[")"];
         _starSymbol = map["*"];
+        _structSymbol = map["struct"];
+        _unionSymbol = map["union"];
+        _enumSymbol = map["enum"];
 
         // Seed set lives separately from the dynamic set populated by
         // user `typedef`s, so Reset() can clear the dynamic side without
@@ -99,11 +113,23 @@ internal sealed class TypeNameRewriter : RewritingTokenStream
 
     protected override void ProcessToken(Item token)
     {
+        // Did a struct/union/enum keyword just go by? Snapshot it, then update
+        // the flag for the next token from THIS token's identity.
+        var afterTag = _afterTagKeyword;
+        _afterTagKeyword = token.ID == _structSymbol
+            || token.ID == _unionSymbol
+            || token.ID == _enumSymbol;
+
         // Promote a known typedef-name ID to TYPE_NAME so the parser routes it
         // through `Type -> TYPE_NAME`. The original ID's content (the
-        // identifier string) and source position carry over.
+        // identifier string) and source position carry over. EXCEPT right after
+        // a `struct`/`union`/`enum` keyword: there the ID is a TAG (a distinct C
+        // namespace that may collide with a typedef-name), so leave it as ID —
+        // otherwise `struct lua_State { … }` / `struct lua_State *p` would feed a
+        // TYPE_NAME where the grammar wants a plain ID.
         if (token.ID == _idSymbol
             && token.Content is string name
+            && !afterTag
             && _typeNames.Contains(name))
         {
             Emit(new Item(_typeNameSymbol, name, token.Position));
@@ -175,8 +201,15 @@ internal sealed class TypeNameRewriter : RewritingTokenStream
         for (var i = 0; i < body.Count; i++)
         {
             var t = body[i];
+            // Same tag rule as ProcessToken: an ID right after struct/union/enum
+            // is a tag, never a typedef-name — don't promote it (covers e.g.
+            // `typedef struct PriorAlias NewName;`).
+            var afterTag = i > 0 && (body[i - 1].ID == _structSymbol
+                || body[i - 1].ID == _unionSymbol
+                || body[i - 1].ID == _enumSymbol);
             if (i != aliasIndex
                 && t.ID == _idSymbol
+                && !afterTag
                 && t.Content is string s
                 && _typeNames.Contains(s)
                 && s != aliasName)
@@ -188,6 +221,10 @@ internal sealed class TypeNameRewriter : RewritingTokenStream
                 Emit(t);
             }
         }
+
+        // The typedef body was consumed wholesale (it ended at `;`), so the next
+        // ProcessToken token is not after a tag keyword.
+        _afterTagKeyword = false;
     }
 
     private string? FindAliasName(List<Item> body)
@@ -231,6 +268,7 @@ internal sealed class TypeNameRewriter : RewritingTokenStream
         // names survive across reuse but per-TU typedef'd aliases don't.
         _typeNames.Clear();
         foreach (var name in _seedTypeNames) { _typeNames.Add(name); }
+        _afterTagKeyword = false;
         base.Reset();
     }
 }
