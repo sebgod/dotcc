@@ -117,22 +117,25 @@ TU hits it via `lua.h`); dotcc has block-scope arrays but not global ones.
 - Iterate the 20 core TUs via `probe.sh`; fix each parse/emit gap as it surfaces.
   One commit per coherent gap, each with a minimal fixture (dotcc tradition:
   never fix Lua-specifically — reduce to a small reproducer + fixture).
-- **Walls cleared** (each a committed dotcc feature + fixture): `const`/`volatile`
+- **Walls cleared** (each a committed dotcc feature + fixture) — the
+  **declarator/grammar walls in Lua's core are now exhausted**: `const`/`volatile`
   before a typedef-name/tag (4a), `typedef struct Foo Foo;` tag-vs-typedef
   namespace (4b), file-scope array declarations (4c), parenthesized function-name
   declarator `T (name)(args)` (4d, lua.h's `LUA_API` idiom), `typedef union { … }
   Name;` (4e), named nested aggregate members `struct { … } name;` incl. the
-  **tagged** `struct Tag { … } name;` (4f + 4g, `StackValue.tbc` / `Node.u`),
+  **tagged** `struct Tag { … } name;` (4f, `StackValue.tbc` / `Node.u`),
   **struct-hack arrays of non-primitive element type** via C# 12 `[InlineArray]`
-  + element-pointer access (4g, `UValue uv[1]` / `UpVal *upvals[1]`), and
-  `typedef enum { … } Name;` (4h, ltm.h's `TMS`). **`lctype.c` + `lopcodes.c`
-  emit full objects.** ✅
-- **Current wall** (`lstate.h:190`, ~18 remaining TUs): **multi-declarator struct
-  members + per-declarator pointers** — `struct CallInfo *previous, *next;`. Two
-  general gaps: a struct member is single-declarator (`Type ID ;`) only, AND a
-  declarator list (block/file/struct) has no per-declarator `*` (`int *a, *b;`
-  fails even at block scope). Needs a declarator-with-its-own-pointer-level model
-  shared across scopes (4i, next).
+  + element-pointer access (4g, `UValue uv[1]` / `UpVal *upvals[1]`),
+  `typedef enum { … } Name;` (4h, ltm.h's `TMS`), and **multi-declarator members
+  + per-declarator pointers** (4i, `struct CallInfo *previous, *next;`).
+  **`lctype.c` + `lopcodes.c` emit full objects.** ✅
+- **Current wall** (`lstate.h:131`, ~18 remaining TUs) — a **category shift from
+  grammar to MISSING LIBC SURFACE**: `volatile l_signalT trap;` →
+  `sig_atomic_t trap;`, and dotcc has no synthetic `<signal.h>` so `sig_atomic_t`
+  isn't a known type. Plus `<locale.h>` (lobject.c / loslib). The fix is
+  synthetic-header / libc-stub work (Phase 3 territory — `signal.h`'s
+  `sig_atomic_t`, `locale.h`), NOT more grammar. Likely unblocks several TUs at
+  once (4j / Phase 3, next).
 - Watch items: `lvm.c` dispatch loop (may use a jump table / labels-as-values —
   GNU `&&label`, which is **out of scope**; Lua has an ANSI fallback `#if`-gated
   on `__GNUC__`, which dotcc doesn't define → we get the portable `switch`).
