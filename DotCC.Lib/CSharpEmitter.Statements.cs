@@ -54,17 +54,29 @@ internal sealed partial class CSharpEmitter
     // live in BuildShell — see Compiler.BuildShell.
     public EmitContent Visit(C.StmtIf n)
     {
-        // setjmp in an `if` without an `else` can't be locally rewritten
-        // — there's no "normal path" to put in the try block. Fail with
-        // a clear hint; the user should add an else branch.
-        if (n.Arg2.Content is EmitContent.SetjmpCall
-            or EmitContent.SetjmpCheckZero)
+        // setjmp in an `if` WITHOUT an `else` — the missing branch is simply
+        // empty. The try/catch rewrite still applies; the absent side becomes an
+        // empty block. This is Lua's `LUAI_TRY` shape: `if (setjmp((c)->b) == 0)
+        // ((f)(L, ud));` ≡ run f under a longjmp guard, swallow the unwind.
+        switch (n.Arg2.Content)
         {
-            throw new CompileException(
-                "setjmp(env) in an `if` condition requires a matching `else` clause; " +
-                "see the supported patterns in <setjmp.h>'s header comment.");
+            case EmitContent.SetjmpCall sj:
+                // `if (setjmp(env)) recovery;` — setjmp is truthy only on the
+                // longjmp re-entry, so the body is recovery and the normal path
+                // (the absent else) is empty: try { } catch { recovery }.
+                return EmitSetjmpRewrite(sj.EnvName, tryBody: "", catchBody: T(n.Arg4));
+
+            case EmitContent.SetjmpCheckZero scz:
+                // `if (setjmp(env) == 0) normal;` → try { normal } catch { }
+                // `if (setjmp(env) != 0) recovery;` → try { } catch { recovery }
+                var (tryBody, catchBody) = scz.TruthyOnFirstCall
+                    ? (T(n.Arg4), "")
+                    : ("", T(n.Arg4));
+                return EmitSetjmpRewrite(scz.EnvName, tryBody, catchBody);
+
+            default:
+                return $"if ({CondOf(n.Arg2)}) {T(n.Arg4)}";
         }
-        return $"if ({CondOf(n.Arg2)}) {T(n.Arg4)}";
     }
 
     public EmitContent Visit(C.StmtIfElse n)
@@ -103,10 +115,20 @@ internal sealed partial class CSharpEmitter
     /// <c>setjmp/longjmp</c> idiom. The <c>when</c> filter matches on
     /// the env-token identity so nested setjmps stay disambiguated.
     /// </summary>
-    private static string EmitSetjmpRewrite(string envName, string tryBody, string catchBody) =>
-        $"try {tryBody}" +
-        $"catch (Libc.LongJmpException __jmp) when (__jmp.Token == {envName}) " +
-        $"{{ var __longjmp_value = __jmp.Value; {catchBody} }}";
+    private static string EmitSetjmpRewrite(string envName, string tryBody, string catchBody)
+    {
+        // An empty branch (the no-else `Visit(StmtIf)` case) becomes an empty
+        // block. Only bind `__longjmp_value` when there's recovery code that
+        // could read it — an empty catch needs no binding (and binding it would
+        // leave an unused local).
+        var tb = string.IsNullOrWhiteSpace(tryBody) ? "{ }\n" : tryBody;
+        var catchInner = string.IsNullOrWhiteSpace(catchBody)
+            ? "{ }"
+            : $"{{ var __longjmp_value = __jmp.Value; {catchBody} }}";
+        return $"try {tb}" +
+            $"catch (Libc.LongJmpException __jmp) when (__jmp.Token == {envName}) " +
+            catchInner;
+    }
     public EmitContent Visit(C.StmtWhile n) => $"while ({CondOf(n.Arg2)}) {T(n.Arg4)}";
 
     // `do Stmt while (E) ;` — body runs at least once. C# accepts the same

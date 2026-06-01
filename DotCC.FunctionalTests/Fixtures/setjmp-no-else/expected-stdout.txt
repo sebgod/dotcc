@@ -1,0 +1,8 @@
+worker: enter 5
+worker: done 5
+guard: completed
+guard: after
+===
+worker: enter -1
+worker: bailing
+guard: after

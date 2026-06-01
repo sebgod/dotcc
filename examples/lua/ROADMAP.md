@@ -262,6 +262,20 @@ star RUN before `/` is the terminator, never the body. **Core probe 14/20 →
 15/20** (lfunc). Pure lexer fix — could only help, no regressions. Fixture
 `block-comment-close/` (gcc-oracle-validated); unit tests `BlockCommentTests`.
 
+### ✅ Phase 4s — `setjmp` in an `if` without an `else` (Lua's `LUAI_TRY`)
+ldo failed on `#define LUAI_TRY(L,c,f,ud) if (setjmp((c)->b) == 0) ((f)(L, ud))`
+— dotcc's setjmp→try/catch rewrite required a matching `else` and rejected the
+no-else form. But the missing branch is simply empty: `if (setjmp(env) == 0)
+STMT;` ≡ `try { STMT } catch (matching) { }` (swallow the unwind, continue),
+and `if (setjmp(env)) STMT;` ≡ `try { } catch (matching) { STMT }`. Extended
+`Visit(C.StmtIf)` to apply the same rewrite with an empty block for the absent
+side (and `EmitSetjmpRewrite` now skips the unused `__longjmp_value` binding
+when the catch is empty). This **advances ldo past the setjmp wall** to a
+follow-on `sizeof(*(p.dyd.actvar.arr))` gap (sizeof of a deref through a 3-level
+member chain — a CType-layer depth limit, tracked below), so the probe still
+reads 15/20, but the setjmp restriction is gone. Fixture `setjmp-no-else/`
+(gcc-oracle-validated); unit tests `SetjmpNoElseTests` (3).
+
 ### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (15 / 20 objects)
 - Iterate the 20 core TUs via `probe.sh`; fix each parse/emit gap as it surfaces.
   One commit per coherent gap, each with a minimal fixture (dotcc tradition:
@@ -289,7 +303,11 @@ star RUN before `/` is the terminator, never the body. **Core probe 14/20 →
     nor a captured-pointer lambda; a correct lowering needs context-sensitive
     comma handling (push the non-last operands into statement position), which is
     an architectural change, not a one-line grammar fix. Tracked.
-  - `setjmp`-in-`if`-without-`else` (ldo).
+  - `sizeof(*(p.dyd.actvar.arr))` (ldo) — `sizeof` of a deref through a 3-level
+    member chain. The CType layer resolves `sizeof(p->f)` and short chains; this
+    deeper `a.b.c.d`-then-deref needs each intermediate field's struct type
+    tracked so the pointer can be peeled. (setjmp-no-else, phase 4s, already
+    cleared ldo's first wall.)
   - `array member padding needs constant dimension(s)` (ltable) — the deferred
     `offsetof`-as-array-bound case (needs a compile-time layout model; see 4p).
 - Watch items: `lvm.c` dispatch loop (may use a jump table / labels-as-values —
