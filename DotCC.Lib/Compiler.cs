@@ -102,7 +102,20 @@ public static class Compiler
         foreach (var (fileName, content) in pieces)
         {
             sb.AppendLine($"// ---- {fileName} ----");
+            // The DotCC.Libc sources are all `#nullable enable`, but
+            // StripFileScopeArtifacts removed that file-scope directive (with
+            // the usings/namespace) so the types concatenate cleanly into the
+            // emitted file's type-decls region. Re-establish a per-file
+            // nullable context with an explicit enable/restore pair (push/pop):
+            // the original `?`-annotated signatures keep their meaning and the
+            // emitted program compiles warning-free even though its project
+            // sets <Nullable>disable</Nullable> (without this, every annotation
+            // in the runtime trips CS8669 — "nullable annotation outside a
+            // #nullable context"). `restore` (not `disable`) is the pop — it
+            // returns the context to that project default.
+            sb.AppendLine("#nullable enable");
             sb.AppendLine(StripFileScopeArtifacts(content));
+            sb.AppendLine("#nullable restore");
         }
         return sb.ToString();
     }
