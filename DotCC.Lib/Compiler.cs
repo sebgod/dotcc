@@ -228,6 +228,15 @@ public static class Compiler
             // the table simply doesn't fire) and BEFORE the typedef rewriter
             // (so e.g. `typedef bool MyBool;` under c23 sees `_Bool`).
             using var dialectRewriter = new DialectKeywordRewriter(macroExp, activeDialect);
+            // QualifierStripper: delete `const` / `volatile` tokens. dotcc drops
+            // both qualifiers semantically anyway; removing them here (rather than
+            // in the grammar) is what lets `const <typedef-name>` / `const struct
+            // X` / east-const / multi-qualifier runs parse — a qualifier before a
+            // TYPE_NAME or tag has no production and adding one is LALR-ambiguous.
+            // Sits AFTER macro expansion (a macro expanding to `const` is handled)
+            // and BEFORE the typedef rewriter (so `typedef const int Foo;`
+            // registers `Foo` from a normalized stream).
+            using var qualStripper = new QualifierStripper(dialectRewriter);
             // TypeNameRewriter: the C lexer hack. Promotes ID → TYPE_NAME for
             // any name previously bound by a `typedef`. Sits AFTER macro
             // expansion (so expanded names can also trigger typedef
@@ -235,7 +244,7 @@ public static class Compiler
             // set of C#-side libc classes that user code reaches by name
             // through synthetic-header typedefs (e.g. <setjmp.h>'s
             // `typedef LongJmpToken jmp_buf;`).
-            using var typeRewriter = new TypeNameRewriter(dialectRewriter, PredefinedTypeNames);
+            using var typeRewriter = new TypeNameRewriter(qualStripper, PredefinedTypeNames);
             using var tokens = new SyncLATokenIterator(typeRewriter);
 
             Item result;

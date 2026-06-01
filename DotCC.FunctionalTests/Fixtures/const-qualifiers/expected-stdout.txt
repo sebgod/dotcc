@@ -1,0 +1,4 @@
+sumx=13
+firsty=20
+area=42
+k=5
