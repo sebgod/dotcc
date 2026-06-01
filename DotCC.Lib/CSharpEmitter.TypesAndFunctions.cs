@@ -421,6 +421,10 @@ internal sealed partial class CSharpEmitter
         {
             _pendingFields.Add(name);
             _pendingFixedBufferFields.Add(name);  // decays to a pointer (offsetof)
+            // A 1-D fixed buffer carries its Arr CType (multi-dim is handled by
+            // _structMultiDimMembers), so `sizeof(s.buf)` is count*sizeof(elem),
+            // not the decayed pointer size. (`s.buf[i]` rides ElementType.)
+            if (dims.Count == 1) { _pendingFieldTypeMap[name] = new CType.Arr(new CType.Sized(elem), total); }
             return $"public fixed {elem} {Id(name)}[{totalText}];\n";
         }
         return EmitInlineArrayMember(elem, name, totalText, record1D: dims.Count < 2);

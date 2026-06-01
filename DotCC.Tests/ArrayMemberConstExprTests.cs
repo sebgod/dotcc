@@ -90,6 +90,43 @@ public sealed class ArrayMemberConstExprTests
     }
 
     [Fact]
+    public void cast_of_constant_bound_folds()
+    {
+        // Lua's `char space[BUFVFS]` where `BUFVFS = cast_uint(LUA_IDSIZE + …)` =
+        // `((unsigned int)(219))`. A cast of an integer constant to an integer type
+        // stays a constant expression, so the bound folds to the literal.
+        var src = WriteTemp("""
+            #define WIDEN(x) ((unsigned int)(x))
+            struct S { char space[WIDEN(10 + 6)]; };
+            int main(void) { struct S s; s.space[0] = 1; return 0; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("fixed byte space[16]");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void sizeof_of_one_dim_array_member_is_count_times_element()
+    {
+        // `sizeof(s.buf)` of a 1-D array member must be count*sizeof(element), not
+        // the decayed pointer size — the member carries its Arr CType. Lua's
+        // `buff->buffsize = sizeof(buff->space)`.
+        var src = WriteTemp("""
+            struct S { int buf[5]; };
+            int main(void) { struct S s; return (int)sizeof(s.buf); }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("(5 * sizeof(int))");   // not sizeof(int*) == 8
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void non_primitive_element_with_enum_bound_uses_inline_array()
     {
         // A pointer element still takes the [InlineArray] path, but the enum-constant

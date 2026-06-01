@@ -202,9 +202,22 @@ internal sealed partial class CSharpEmitter
         // A cast to an enum type yields an enum value (C# allows int→enum and
         // enum→enum casts directly); tag it so downstream consumers reconcile.
         // Also carry the cast's type for sizeof (`sizeof((char)x)` == 1).
+        // A cast of an integer CONSTANT to an integer type stays a constant
+        // expression — keep the folded value so it can be an array bound (Lua's
+        // `char space[cast_uint(LUA_IDSIZE + … )]` → `char space[(uint)(219)]`).
+        var constInt = IsIntegerCsType(castType) ? ConstOfItem(n.Arg3) : null;
         return new EmitContent.Text($"(({castType}){T(n.Arg3)})",
-            _enumTags.Contains(castType) ? castType : null, new CType.Sized(castType));
+            _enumTags.Contains(castType) ? castType : null, new CType.Sized(castType), ConstInt: constInt);
     }
+
+    // The C# integer types dotcc lowers C integer types to — a cast to one of
+    // these preserves an integer-constant operand's compile-time value.
+    private static bool IsIntegerCsType(string csType) => csType.Trim() switch
+    {
+        "byte" or "sbyte" or "short" or "ushort" or "int" or "uint"
+            or "long" or "ulong" or "nint" or "nuint" => true,
+        _ => false,
+    };
     // `*p` / `p[i]` synthesize the element/pointee type for sizeof.
     public EmitContent Visit(C.Deref n)
     {

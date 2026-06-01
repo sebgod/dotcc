@@ -212,7 +212,27 @@ lstate, lundump). Fixture `sizeof-member/` (gcc-oracle-validated); unit tests
 `SizeofMemberTests` (incl. a guard that an unsynthesizable `sizeof(a*b)` still
 fails loudly). The one remaining `sizeof`-expr gap is non-additive arithmetic.
 
-### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (12 / 20 objects)
+### ✅ Phase 4p — cast-of-constant array-member bound + 1-D array-member sizeof
+`lobject` failed on `char space[BUFVFS]` where `BUFVFS = cast_uint(LUA_IDSIZE +
+…)` = `((unsigned int)(219))` — the member-bound const-folder (4k) didn't see
+through a cast. Now a cast of an integer constant to an integer type keeps its
+folded `ConstInt` (Visit(C.Cast) → IsIntegerCsType), so the bound folds to the
+literal a `fixed`/`[InlineArray]` needs. lobject then hit a second wall —
+`sizeof(buff->space)` of a 1-D fixed-buffer member gave the decayed pointer size;
+now a 1-D array member records its `Arr` CType (in `_pendingFieldTypeMap`), so
+`sizeof(s.buf)` is `count * sizeof(element)`. **Core probe 12/20 → 13/20**
+(lobject). Fixture `array-member-cast-dim/` (gcc-oracle-validated); unit tests in
+`ArrayMemberConstExprTests`.
+
+**Deferred — ltable's `char padding[offsetof(Limbox_aux, follows_pNode)]`:** the
+array bound is an `offsetof`, which dotcc lowers to a RUNTIME helper, not a
+compile-time constant. Folding it needs a compile-time struct-layout/alignment
+model — but dotcc deliberately delegates layout to the C# runtime, and even a
+partial layout walk bails here (the target field's type `Node` has unknown
+alignment). A real `offsetof`-as-constant capability is its own feature; tracked,
+not attempted in 4p.
+
+### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (13 / 20 objects)
 - Iterate the 20 core TUs via `probe.sh`; fix each parse/emit gap as it surfaces.
   One commit per coherent gap, each with a minimal fixture (dotcc tradition:
   never fix Lua-specifically — reduce to a small reproducer + fixture).
@@ -228,16 +248,15 @@ fails loudly). The one remaining `sizeof`-expr gap is non-additive arithmetic.
   `typedef enum { … } Name;` (4h, ltm.h's `TMS`), and **multi-declarator members
   + per-declarator pointers** (4i, `struct CallInfo *previous, *next;`).
   **`lctype.c` + `lopcodes.c` emit full objects.** ✅
-- **Current frontier** (12/20 emit objects: `lctype`, `ldebug`, `ldump`, `lgc`,
-  `lmem`, `lopcodes`, `lstate`, `lstring`, `ltm`, `lundump`, `lvm`, `lzio`). The
-  shared-header, macro, static-local-array, and `sizeof`-expr walls are cleared;
-  the 8 remaining failures are **diverse per-TU gaps**:
-  - `array member needs constant dimension(s)` (lobject `space`, ltable `padding`)
-    — a struct array-member whose dimension dotcc can't fold to a constant.
+- **Current frontier** (13/20 emit objects: `lctype`, `ldebug`, `ldump`, `lgc`,
+  `lmem`, `lobject`, `lopcodes`, `lstate`, `lstring`, `ltm`, `lundump`, `lvm`,
+  `lzio`). The 7 remaining failures are **diverse per-TU gaps**:
   - `unexpected 'unsigned'` (lcode), `unexpected ','` (llex:371), `unexpected '{'`
     (lparser:1349), `unexpected 'TYPE_NAME'` (lapi:753, lcode:1442), `unexpected
-    'ID'` (lfunc:70).
+    'ID'` (lfunc:70) — six parse walls across five TUs.
   - `setjmp`-in-`if`-without-`else` (ldo).
+  - `array member padding needs constant dimension(s)` (ltable) — the deferred
+    `offsetof`-as-array-bound case (needs a compile-time layout model; see 4p).
 - Watch items: `lvm.c` dispatch loop (may use a jump table / labels-as-values —
   GNU `&&label`, which is **out of scope**; Lua has an ANSI fallback `#if`-gated
   on `__GNUC__`, which dotcc doesn't define → we get the portable `switch`).
