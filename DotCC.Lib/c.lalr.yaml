@@ -801,6 +801,15 @@ productions:
       # struct { …; unsigned short delta; } tbc; }` is the motivating case.
       - { lhs: Member, rhs: ['struct', '{', MemberMark, MemberList, '}', ID, ';'], action: namedNestedStruct }
       - { lhs: Member, rhs: ['union', '{', MemberMark, MemberList, '}', ID, ';'], action: namedNestedUnion }
+      # TAGGED named nested aggregates `struct Tag { … } name;` / `union Tag { … }
+      # name;` — define a nested tag type AND a member of it. In C a nested tag
+      # lives at the ENCLOSING (file) scope, so dotcc emits the type under the tag
+      # name (`Tag`) and the member as a field of it. Lua's `union Node { struct
+      # NodeKey { … } u; }` is the motivating case. Conflict-free: after `struct
+      # ID`, a `{` lookahead shifts here (`{` ∉ FOLLOW(Type), so `struct Foo x;`
+      # still reduces `struct Foo` → Type for the plain member).
+      - { lhs: Member, rhs: ['struct', ID, '{', MemberMark, MemberList, '}', ID, ';'], action: namedNestedTaggedStruct }
+      - { lhs: Member, rhs: ['union', ID, '{', MemberMark, MemberList, '}', ID, ';'], action: namedNestedTaggedUnion }
       - { lhs: MemberMark, rhs: [], action: memberMark }
 
   # EnumList / EnumItem — enumerator body for `enum Name { … }`.

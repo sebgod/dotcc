@@ -226,6 +226,16 @@ internal sealed partial class CSharpEmitter
         // A C11 anonymous-union field is reached through the synthetic field that
         // holds the nested union (`o.i` → `o.__anonN.i`).
         if (PromotedSynth(n.Arg0, field) is string synth) { return $"({baseExpr}.{synth}.{Id(field)})"; }
+        // An [InlineArray] member decays to its element pointer (like a C array):
+        // `((T*)&s.field)`. Subscript / further decay then ride the ordinary
+        // pointer paths (over-indexing into the malloc'd tail, which the
+        // bounds-checked InlineArray indexer would reject); the InlineArr CType
+        // carries count for sizeof.
+        if (FieldInlineArr(n.Arg0, field) is { } ia)
+        {
+            return Typed($"(({ia.Elem}*)&{baseExpr}.{Id(field)})",
+                new CType.InlineArr(new CType.Sized(ia.Elem), ia.Count));
+        }
         var text = $"({baseExpr}.{Id(field)})";
         // An enum-typed field reads as enum-typed (decays in operators, reconciles
         // at sinks) — same EnumType machinery as an enum variable.
@@ -252,6 +262,14 @@ internal sealed partial class CSharpEmitter
         // Anonymous-union field promotion: reach the synth field through the base
         // (with the chosen operator), then `.field` on the value.
         if (PromotedSynth(n.Arg0, field) is string synth) { return $"({baseExpr}{op}{synth}.{member})"; }
+        // [InlineArray] member → decay to the element pointer (`((T*)&p->field)`),
+        // mirroring the MemberDot case. `->` binds tighter than `&`, so the
+        // address-of grabs the field.
+        if (FieldInlineArr(n.Arg0, field) is { } ia)
+        {
+            return Typed($"(({ia.Elem}*)&{baseExpr}{op}{member})",
+                new CType.InlineArr(new CType.Sized(ia.Elem), ia.Count));
+        }
         var text = $"({baseExpr}{op}{member})";
         if (FieldEnum(n.Arg0, field) is string e) { return new EmitContent.Text(text, e, new CType.Sized(e)); }
         return text;
@@ -276,6 +294,17 @@ internal sealed partial class CSharpEmitter
         if (TyOf(baseItem) is not CType.Sized s) { return null; }
         var t = s.CsType.TrimEnd('*');
         return _structFieldEnums.TryGetValue(t, out var fe) && fe.TryGetValue(field, out var e) ? e : null;
+    }
+
+    // (element C# type, count) of `field` if it's an [InlineArray] member of the
+    // struct that baseItem's CType names, else null. Same base-type resolution as
+    // FieldEnum. Used to decay such a field access to the element pointer.
+    private (string Elem, int Count)? FieldInlineArr(Item baseItem, string field)
+    {
+        if (TyOf(baseItem) is not CType.Sized s) { return null; }
+        var t = s.CsType.TrimEnd('*');
+        return _structInlineArrFields.TryGetValue(t, out var m) && m.TryGetValue(field, out var info)
+            ? info : null;
     }
 
     // `sizeof(Type)` — emit C# sizeof. Valid in unsafe contexts for any
@@ -321,6 +350,9 @@ internal sealed partial class CSharpEmitter
     private static string SizeofText(CType t) => t switch
     {
         CType.Arr a => $"({a.Count} * {SizeofText(a.Element)})",
+        // An inline-array member's size is count*sizeof(element), like a C array
+        // (NOT the lowered [InlineArray] wrapper's C# sizeof).
+        CType.InlineArr ia => $"({ia.Count} * {SizeofText(ia.Element)})",
         CType.Sized s => $"sizeof({s.CsType})",
         // A pointer-to-array is a pointer: its size is the pointer size, NOT the
         // pointed-to array's size.

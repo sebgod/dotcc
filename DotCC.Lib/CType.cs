@@ -35,6 +35,18 @@ public abstract record CType
     public sealed record Arr(CType Element, int Count) : CType;
 
     /// <summary>
+    /// A struct/union MEMBER that is an inline fixed-size array of non-primitive
+    /// element type, lowered to a C# <c>[InlineArray]</c> field. Unlike
+    /// <see cref="Arr"/> (a C array lowered to a <c>T*</c> pointer, which indexes
+    /// directly), an InlineArray field's value IS the buffer struct, so faithful
+    /// indexing / decay goes through the field's ADDRESS: <c>field[i]</c> lowers
+    /// to <c>((Element*)&amp;field)[i]</c> (over-indexing into a malloc'd tail —
+    /// which the bounds-checked InlineArray indexer would reject). Its C
+    /// <c>sizeof</c> is <c>Count * sizeof(Element)</c>, like <see cref="Arr"/>.
+    /// </summary>
+    public sealed record InlineArr(CType Element, int Count) : CType;
+
+    /// <summary>
     /// A pointer to an array — <c>int (*p)[3]</c>, whose pointee is the array
     /// <see cref="Inner"/>. It's a genuine POINTER (so its <c>sizeof</c> is the
     /// pointer size, not the array size), but it SUBSCRIPTS / dereferences with
@@ -54,6 +66,7 @@ public abstract record CType
     public CType? ElementType() => this switch
     {
         Arr a => a.Element,
+        InlineArr ia => ia.Element,
         PtrToArr p => p.Inner,
         Sized s when s.CsType.EndsWith("*", System.StringComparison.Ordinal)
             => new Sized(s.CsType[..^1].TrimEnd()),

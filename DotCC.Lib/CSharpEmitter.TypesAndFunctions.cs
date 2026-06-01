@@ -348,20 +348,22 @@ internal sealed partial class CSharpEmitter
     private static readonly HashSet<string> _fixedBufferElemTypes = new(StringComparer.Ordinal)
     { "byte", "sbyte", "short", "ushort", "int", "uint", "long", "ulong", "float", "double" };
 
-    // Sized array member `T name[N];` (C89) → a C# fixed-size buffer.
+    // Sized array member `T name[N];` (C89). A primitive element → a C# `fixed`
+    // buffer (no bounds check, decays to a pointer — exactly the struct-hack
+    // semantics). A NON-primitive element (struct / union / pointer / enum) can't
+    // be a `fixed` buffer, so it lowers to a C# 12 `[InlineArray(N)]` synth type
+    // — the inline-storage equivalent that accepts any unmanaged element type.
     public EmitContent Visit(C.StructArrMember n)
     {
         var elem = T(n.Arg0);
         var name = T(n.Arg1);
         var size = StripOuterParens(T(n.Arg3));
-        if (!_fixedBufferElemTypes.Contains(elem))
+        if (_fixedBufferElemTypes.Contains(elem))
         {
-            throw new CompileException(
-                $"array member `{name}[]` of element type `{elem}` isn't supported — a C# fixed-size "
-                + "buffer allows only primitive element types (not struct / pointer / _Bool / enum)");
+            _pendingFields.Add(name);
+            return $"public fixed {elem} {Id(name)}[{size}];\n";
         }
-        _pendingFields.Add(name);
-        return $"public fixed {elem} {Id(name)}[{size}];\n";
+        return EmitInlineArrayMember(elem, name, size);
     }
 
     // Flexible array member `T name[];` (C99) — an incomplete array as the last
@@ -375,14 +377,72 @@ internal sealed partial class CSharpEmitter
         Gate(1999, "flexible array member", n.Arg0);  // C99
         var elem = T(n.Arg0);
         var name = T(n.Arg1);
-        if (!_fixedBufferElemTypes.Contains(elem))
+        // Primitive element → a 1-element `fixed` buffer (over-indexes into the
+        // malloc'd tail with no bounds check — the struct-hack idiom). A
+        // non-primitive element uses a 1-element [InlineArray] instead (the same
+        // single-slot-at-the-right-offset trick, for any unmanaged element type).
+        if (_fixedBufferElemTypes.Contains(elem))
+        {
+            _pendingFields.Add(name);
+            return $"public fixed {elem} {Id(name)}[1]; // C99 flexible array member (sized at allocation)\n";
+        }
+        return EmitInlineArrayMember(elem, name, "1");
+    }
+
+    // Set of synthesized [InlineArray] element types already emitted, so the
+    // nested type decl is written once per (element, count) shape.
+    private readonly HashSet<string> _inlineArrayTypes = new(StringComparer.Ordinal);
+
+    // Per-aggregate map of fieldName → (element C# type, count) for members
+    // lowered to an [InlineArray] synth type. Drained into _structInlineArrFields
+    // under the aggregate's name (like _pendingFieldEnumMap → _structFieldEnums),
+    // so member-access of such a field can rewrite a subscript to faithful
+    // pointer arithmetic (over-indexing into the malloc'd tail, which the
+    // bounds-checked InlineArray indexer would reject).
+    private readonly Dictionary<string, (string Elem, int Count)> _pendingInlineArrFields = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Dictionary<string, (string Elem, int Count)>> _structInlineArrFields =
+        new(StringComparer.Ordinal);
+
+    // Emit a non-primitive array member `T name[N];` as a C# 12 [InlineArray(N)]
+    // field. C# `fixed` buffers reject non-primitive elements; an [InlineArray]
+    // gives the same N inline elements at the field's offset for any UNMANAGED
+    // element type (struct / union / pointer / enum). The wrapper type holds one
+    // instance field (the element-0 marker); the attribute makes it an N-element
+    // inline buffer. `&field` is the address of element 0, so faithful access
+    // (subscript / decay) goes through pointer arithmetic — see the member-access
+    // visitors — which also restores the struct-hack over-indexing that `fixed`
+    // gave for free (the InlineArray indexer itself is bounds-checked).
+    private EmitContent EmitInlineArrayMember(string elem, string name, string sizeText)
+    {
+        if (!int.TryParse(sizeText, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var count) || count < 1)
         {
             throw new CompileException(
-                $"flexible array member `{name}[]` of element type `{elem}` isn't supported — a C# "
-                + "fixed-size buffer allows only primitive element types (not struct / pointer / _Bool / enum)");
+                $"array member `{name}[{sizeText}]` of element type `{elem}` needs a constant size >= 1 "
+                + "(it lowers to a C# [InlineArray], which requires a literal length)");
+        }
+        // The wrapper's storage element only needs the right BYTE SIZE: access
+        // always goes through `(elem*)&field` pointer arithmetic (see the
+        // member-access visitors), never the InlineArray indexer. So a POINTER
+        // element is stored as `nint` (pointer-sized, and a valid InlineArray
+        // element — a `T*` element triggers CS9184, since a pointer type isn't a
+        // valid type argument). Struct/union/enum elements store as themselves.
+        // The REAL element type is recorded for access + sizeof either way.
+        var isPtr = elem.EndsWith("*", System.StringComparison.Ordinal);
+        var storage = isPtr ? "nint" : elem;
+        // Sanitize the element type into a valid identifier fragment (`UpVal*` →
+        // `UpVal_p`) for the synth wrapper type name; dedup by (element, count).
+        var tag = elem.Replace("*", "_p").Replace(" ", "_");
+        var wrapper = $"__ia_{tag}_{count}";
+        if (_inlineArrayTypes.Add(wrapper))
+        {
+            _structs.Append("[global::System.Runtime.CompilerServices.InlineArray(").Append(count).Append(")]\n");
+            _structs.Append("unsafe struct ").Append(wrapper).Append("\n{\n    private ").Append(storage)
+                .Append(" __e0;\n}\n\n");
         }
         _pendingFields.Add(name);
-        return $"public fixed {elem} {Id(name)}[1]; // C99 flexible array member (sized at allocation)\n";
+        _pendingInlineArrFields[name] = (elem, count);
+        return $"public {wrapper} {Id(name)};\n";
     }
 
     // Anonymous struct member (C11): `struct { … };` with no name. Its fields are
@@ -446,14 +506,22 @@ internal sealed partial class CSharpEmitter
     public EmitContent Visit(C.NamedNestedStruct n) => EmitNamedNestedAggregate(T(n.Arg3), T(n.Arg5), union: false);
     public EmitContent Visit(C.NamedNestedUnion n)  => EmitNamedNestedAggregate(T(n.Arg3), T(n.Arg5), union: true);
 
-    private EmitContent EmitNamedNestedAggregate(string innerLines, string fieldName, bool union)
+    // Tagged named nested aggregate `struct Tag { … } name;` — the type takes the
+    // TAG name (a nested tag lives at the enclosing/file scope in C), so later
+    // `struct Tag` references resolve to it. Member name is the trailing ID.
+    public EmitContent Visit(C.NamedNestedTaggedStruct n) => EmitNamedNestedAggregate(T(n.Arg4), T(n.Arg6), union: false, typeName: T(n.Arg1));
+    public EmitContent Visit(C.NamedNestedTaggedUnion n)  => EmitNamedNestedAggregate(T(n.Arg4), T(n.Arg6), union: true,  typeName: T(n.Arg1));
+
+    private EmitContent EmitNamedNestedAggregate(string innerLines, string fieldName, bool union, string? typeName = null)
     {
         var snapshot = _memberMarks.Count > 0 ? _memberMarks.Pop() : _pendingFields.Count;
         var innerNames = new List<string>();
         for (var i = snapshot; i < _pendingFields.Count; i++) { innerNames.Add(_pendingFields[i]); }
         if (snapshot < _pendingFields.Count) { _pendingFields.RemoveRange(snapshot, _pendingFields.Count - snapshot); }
-        var id = _anonAggCounter++;
-        var nestedType = union ? $"__NestU{id}" : $"__NestS{id}";
+        // Tagged → the C# type is the tag name (and `struct Tag` references it);
+        // anonymous → a synthesized unique name.
+        var nestedType = typeName ?? (union ? $"__NestU{_anonAggCounter}" : $"__NestS{_anonAggCounter}");
+        if (typeName is null) { _anonAggCounter++; }
         if (union) { EmitExplicitUnionType(nestedType, innerLines); }
         else { EmitSequentialStructType(nestedType, innerLines); }
         _structFields[nestedType] = innerNames;  // so `o.name.inner` resolves its fields
@@ -477,6 +545,7 @@ internal sealed partial class CSharpEmitter
         _structFields[typeName] = new List<string>(_pendingFields);
         _pendingFields.Clear();
         DrainFieldEnums(typeName);
+        DrainInlineArrFields(typeName);
         DrainPromotions(typeName);
     }
 
@@ -622,6 +691,22 @@ internal sealed partial class CSharpEmitter
                 _structFieldEnums[tn] = new Dictionary<string, string>(_pendingFieldEnumMap, StringComparer.Ordinal);
             }
             _pendingFieldEnumMap.Clear();
+        }
+    }
+
+    // Drain the pending InlineArray-member map under each aggregate name (same
+    // shape as DrainFieldEnums), so a member-access of such a field can later
+    // rewrite its subscript to pointer arithmetic.
+    private void DrainInlineArrFields(params string[] typeNames)
+    {
+        if (_pendingInlineArrFields.Count > 0)
+        {
+            foreach (var tn in typeNames)
+            {
+                _structInlineArrFields[tn] =
+                    new Dictionary<string, (string, int)>(_pendingInlineArrFields, StringComparer.Ordinal);
+            }
+            _pendingInlineArrFields.Clear();
         }
     }
 
@@ -872,6 +957,7 @@ internal sealed partial class CSharpEmitter
         if (tag != alias) { _structFields[tag] = fields; }
         _pendingFields.Clear();
         DrainFieldEnums(tag != alias ? new[] { alias, tag } : new[] { alias });
+        DrainInlineArrFields(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainPromotions(alias);
         if (tag != alias && _promotedFields.TryGetValue(alias, out var aliasProm)) { _promotedFields[tag] = aliasProm; }
         if (_emittedTypes.Add(alias))
@@ -899,6 +985,7 @@ internal sealed partial class CSharpEmitter
         _structFields[alias] = new List<string>(_pendingFields);
         _pendingFields.Clear();
         DrainFieldEnums(alias);
+        DrainInlineArrFields(alias);
         DrainPromotions(alias);
         if (_emittedTypes.Add(alias))
         {
@@ -923,6 +1010,7 @@ internal sealed partial class CSharpEmitter
         if (tag != alias) { _structFields[tag] = fields; }
         _pendingFields.Clear();
         DrainFieldEnums(tag != alias ? new[] { alias, tag } : new[] { alias });
+        DrainInlineArrFields(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainPromotions(alias);
         if (tag != alias && _promotedFields.TryGetValue(alias, out var aliasProm)) { _promotedFields[tag] = aliasProm; }
         EmitExplicitUnionType(alias, members);
@@ -942,6 +1030,7 @@ internal sealed partial class CSharpEmitter
         _structFields[alias] = new List<string>(_pendingFields);
         _pendingFields.Clear();
         DrainFieldEnums(alias);
+        DrainInlineArrFields(alias);
         DrainPromotions(alias);
         EmitExplicitUnionType(alias, members);
         return string.Empty;

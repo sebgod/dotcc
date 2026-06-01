@@ -1152,14 +1152,17 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
-    public void Array_member_of_non_primitive_element_fails_loudly()
+    public void Array_member_of_non_primitive_element_uses_inline_array()
     {
-        // C# fixed-size buffers allow only primitive element types.
+        // C# `fixed` buffers allow only primitive elements, so a struct-element
+        // array member lowers to a C# 12 [InlineArray] instead (see Phase 4g /
+        // StructHackArrayTests). This used to throw; it's now supported.
         var src = WriteTemp("struct P { int x; }; struct S { int n; struct P items[4]; }; int main() { return 0; }");
         try
         {
-            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
-                .Message.ShouldContain("fixed-size buffer allows only primitive");
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("InlineArray(4)");
+            emitted.ShouldContain("P __e0;");
         }
         finally { File.Delete(src); }
     }

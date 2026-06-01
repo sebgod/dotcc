@@ -1,0 +1,1 @@
+sub=3 decay=6 ptr=20 sz=8
