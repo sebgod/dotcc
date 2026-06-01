@@ -14,13 +14,13 @@ internal sealed partial class CSharpEmitter
     // (`int x = 5;`), and multi-declarator (`int x, y, z;`,
     // `int x = 1, y = 2;`) forms. C# accepts the same `int x, y = 5, z;`
     // syntax so the lowering is verbatim.
-    public EmitContent Visit(C.Decl n) => EmitDecl(T(n.Arg0), DE(n.Arg1), VolatileOf(n.Arg0), VolatilePointeeOf(n.Arg0));
+    public EmitContent Visit(C.Decl n) => EmitDecl(T(n.Arg0), DE(n.Arg1), VolatileOf(n.Arg0), VolatilePointeeOf(n.Arg0), AtomicOf(n.Arg0));
 
     // Pre-C23 `auto` storage class — `auto int x = i;`. `auto` means "automatic
     // storage duration", which is already the default for a block-scope local,
     // so it's redundant: drop it and emit the declaration exactly as if the
     // `auto` weren't there. (C89, no dialect gate.)
-    public EmitContent Visit(C.DeclAutoStorage n) => EmitDecl(T(n.Arg1), DE(n.Arg2), VolatileOf(n.Arg1), VolatilePointeeOf(n.Arg1));
+    public EmitContent Visit(C.DeclAutoStorage n) => EmitDecl(T(n.Arg1), DE(n.Arg2), VolatileOf(n.Arg1), VolatilePointeeOf(n.Arg1), AtomicOf(n.Arg1));
 
     // C23 `auto` type inference — `auto x = E;` deduces x's type from the
     // initializer, exactly like C# `var` (and C++ `auto`, and gcc's older
@@ -40,7 +40,7 @@ internal sealed partial class CSharpEmitter
         return $"var {Id(DeclareLocal(name))} = {init}";
     }
 
-    private EmitContent EmitDecl(string type, IReadOnlyList<EmitContent.DeclEntry> entries, bool isVolatile = false, bool isVolatilePointee = false)
+    private EmitContent EmitDecl(string type, IReadOnlyList<EmitContent.DeclEntry> entries, bool isVolatile = false, bool isVolatilePointee = false, bool isAtomic = false)
     {
         // Per-declarator type. The FIRST declarator uses `type` verbatim (its
         // `*`s were absorbed into Type by the greedy `Type → Type *` rule); a
@@ -62,7 +62,12 @@ internal sealed partial class CSharpEmitter
             // A volatile local of eligible scalar type → record it so reads/writes
             // lower to Volatile.Read/Write (a pointer declarator is pointer-to-
             // volatile, phase V2). Keyed by raw name like _localTypes.
-            if (isVolatile && _currentFunctionName is not null && IsVolatileEligible(Eff(i)))
+            // _Atomic wins over volatile when both qualify (atomic ops fence).
+            if (isAtomic && _currentFunctionName is not null && IsAtomicEligible(Eff(i)))
+            {
+                _localAtomic.Add(e.Name);
+            }
+            else if (isVolatile && _currentFunctionName is not null && IsVolatileEligible(Eff(i)))
             {
                 _localVolatile.Add(e.Name);
             }

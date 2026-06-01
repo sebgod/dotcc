@@ -52,6 +52,7 @@ internal sealed partial class CSharpEmitter
         _localTypes.Clear();
         _localVolatile.Clear();
         _localVolatilePointee.Clear();
+        _localAtomic.Clear();
         _localArrayInfo.Clear();
         // Fresh local-renaming state, then open the function's outermost frame
         // (the parameter scope). The body's `{` opens a nested frame inside it.
@@ -73,8 +74,10 @@ internal sealed partial class CSharpEmitter
         // their raw spelling, so these keys match the recorded names).
         foreach (var pn in _pendingVolatileParams) { _localVolatile.Add(pn); }
         foreach (var pn in _pendingVolatilePointeeParams) { _localVolatilePointee.Add(pn); }
+        foreach (var pn in _pendingAtomicParams) { _localAtomic.Add(pn); }
         _pendingVolatileParams.Clear();
         _pendingVolatilePointeeParams.Clear();
+        _pendingAtomicParams.Clear();
         return new EmitContent.FnHeader(type, name, pars, isStatic, isInline, isNoreturn);
     }
 
@@ -287,6 +290,7 @@ internal sealed partial class CSharpEmitter
         var type = T(n.Arg0);
         var isVolatile = VolatileOf(n.Arg0);
         var isVolatilePointee = VolatilePointeeOf(n.Arg0);
+        var isAtomic = AtomicOf(n.Arg0);
         var entries = DE(n.Arg1);
         // Per-declarator type, same rule as EmitDecl: first uses Type, a
         // subsequent one with its own `*`s uses stripStars(Type) + that many.
@@ -300,9 +304,10 @@ internal sealed partial class CSharpEmitter
             // An enum-typed field is remembered so a `s.field` / `p->field` read
             // can be tagged enum-typed (see FieldEnum / the member-access visitors).
             if (_enumTags.Contains(fieldType)) { _pendingFieldEnumMap[e.Name] = fieldType; }
-            // A volatile field of eligible scalar type → record it so member access
-            // lowers to Volatile.Read/Write.
-            if (isVolatile && IsVolatileEligible(fieldType)) { _pendingVolatileFields.Add(e.Name); }
+            // An atomic / volatile field of eligible scalar type → record it so
+            // member access lowers to Atomic.* / Volatile.Read/Write (atomic wins).
+            if (isAtomic && IsAtomicEligible(fieldType)) { _pendingAtomicFields[e.Name] = fieldType; }
+            else if (isVolatile && IsVolatileEligible(fieldType)) { _pendingVolatileFields.Add(e.Name); }
             // A pointer-to-volatile field (`volatile int *p;`) → `s.p[i]` / `*s.p`
             // fence (phase V2).
             if (isVolatilePointee && VolatilePointeeEligible(fieldType) is not null) { _pendingVolatilePointeeFields.Add(e.Name); }
@@ -573,6 +578,7 @@ internal sealed partial class CSharpEmitter
         DrainFieldEnums(typeName);
         DrainInlineArrFields(typeName);
         DrainVolatileFields(typeName);
+        DrainAtomicFields(typeName);
         DrainVolatilePointeeFields(typeName);
         DrainPromotions(typeName);
     }
@@ -884,6 +890,27 @@ internal sealed partial class CSharpEmitter
             : new EmitContent.Text(text, Volatile: true);
     }
 
+    // `_Atomic T` / `_Atomic(T)` (C11) — leading/parenthesized atomic specifier.
+    // Drop the qualifier from the emitted C# type (no C#-level atomic type) but flag
+    // the Type atomic; the decl/member visitors record the name/field so reads/writes
+    // lower to the seq-cst Atomic.* helpers (see CSharpEmitter.Atomic). C11-gated.
+    public EmitContent Visit(C.TypeAtomic n)
+    {
+        Gate(2011, "_Atomic", n.Arg0);  // C11
+        var text = T(n.Arg1);
+        return n.Arg1.Content is EmitContent.Text inner
+            ? inner with { Atomic = true }
+            : new EmitContent.Text(text, Atomic: true);
+    }
+    public EmitContent Visit(C.TypeAtomicParen n)
+    {
+        Gate(2011, "_Atomic", n.Arg0);  // C11
+        var text = T(n.Arg2);
+        return n.Arg2.Content is EmitContent.Text inner
+            ? inner with { Atomic = true }
+            : new EmitContent.Text(text, Atomic: true);
+    }
+
     // `typedef Type ID ;` — register an `using unsafe Alias = Type;` line in
     // the aliases side channel. Suppressed when Alias == Type (e.g.
     // `typedef struct Foo Foo;` where Type already lowers to `Foo`) since
@@ -1024,6 +1051,7 @@ internal sealed partial class CSharpEmitter
         DrainFieldEnums(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainInlineArrFields(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainVolatileFields(tag != alias ? new[] { alias, tag } : new[] { alias });
+        DrainAtomicFields(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainVolatilePointeeFields(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainPromotions(alias);
         if (tag != alias && _promotedFields.TryGetValue(alias, out var aliasProm)) { _promotedFields[tag] = aliasProm; }
@@ -1054,6 +1082,7 @@ internal sealed partial class CSharpEmitter
         DrainFieldEnums(alias);
         DrainInlineArrFields(alias);
         DrainVolatileFields(alias);
+        DrainAtomicFields(alias);
         DrainVolatilePointeeFields(alias);
         DrainPromotions(alias);
         if (_emittedTypes.Add(alias))
@@ -1081,6 +1110,7 @@ internal sealed partial class CSharpEmitter
         DrainFieldEnums(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainInlineArrFields(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainVolatileFields(tag != alias ? new[] { alias, tag } : new[] { alias });
+        DrainAtomicFields(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainVolatilePointeeFields(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainPromotions(alias);
         if (tag != alias && _promotedFields.TryGetValue(alias, out var aliasProm)) { _promotedFields[tag] = aliasProm; }
@@ -1103,6 +1133,7 @@ internal sealed partial class CSharpEmitter
         DrainFieldEnums(alias);
         DrainInlineArrFields(alias);
         DrainVolatileFields(alias);
+        DrainAtomicFields(alias);
         DrainVolatilePointeeFields(alias);
         DrainPromotions(alias);
         EmitExplicitUnionType(alias, members);

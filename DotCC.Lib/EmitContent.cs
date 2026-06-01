@@ -80,7 +80,15 @@ public abstract record EmitContent
     /// when the pointee Type was volatile) AND carried on a pointer-valued
     /// expression (a read of such a pointer) — so a dereference / subscript of it
     /// (<c>*p</c>, <c>p[i]</c>) yields a volatile lvalue and fences. Phase V2.</param>
-    public sealed record Text(string Value, string? EnumType = null, CType? Ty = null, bool Inline = false, bool Noreturn = false, bool Volatile = false, string? VolatileLValue = null, bool VolatilePointee = false) : EmitContent;
+    /// <param name="Atomic">True when this is a <c>Type</c> result that was
+    /// <c>_Atomic</c>-qualified (C11). Like <paramref name="Volatile"/> but the
+    /// access lowers to seq-cst <c>Atomic.*</c> (Interlocked-backed) calls. The
+    /// decl/member visitors record the name/field so reads/writes lower accordingly.</param>
+    /// <param name="AtomicLValue">Non-null when this EXPRESSION is an atomic lvalue:
+    /// <paramref name="Value"/> already holds the seq-cst read (<c>Atomic.Load(ref X)</c>)
+    /// and this carries the bare lvalue <c>X</c>. A write-context parent emits the
+    /// matching <c>Atomic.Store</c>/<c>Atomic.AddFetch</c>/… instead of the read.</param>
+    public sealed record Text(string Value, string? EnumType = null, CType? Ty = null, bool Inline = false, bool Noreturn = false, bool Volatile = false, string? VolatileLValue = null, bool VolatilePointee = false, bool Atomic = false, string? AtomicLValue = null) : EmitContent;
 
     /// <summary>
     /// Accumulator for declaration-specifier sequences (<c>int</c>,

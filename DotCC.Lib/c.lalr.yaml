@@ -356,6 +356,12 @@ symbols:
   # calls (rewritten by name in the emitter).
   - 'va_arg'       # 159 builtin (C99 <stdarg.h>) — `va_arg(ap, Type)`
   - DeclItemTail   # 160 non-terminal: a non-first init-declarator (may have its own `*`s)
+  # `_Atomic` (C11) — type qualifier/specifier. Like `volatile`, a leading Type
+  # PREFIX (`Type → '_Atomic' Type`) plus the C11 parenthesized type-specifier
+  # form `_Atomic(T)`; carries an Atomic flag the emitter lowers to seq-cst
+  # Interlocked-backed access. A `_Capital_` keyword — reserved in every dialect,
+  # so always lexed (the FEATURE is gated C11 in the visitor).
+  - '_Atomic'      # 161 keyword (C11) — atomic type qualifier/specifier
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -624,6 +630,14 @@ productions:
       # East/mid `int volatile` is not accepted (was silently stripped before);
       # leading is the universal form and the only one Lua / real code uses.
       - { lhs: Type, rhs: ['volatile', Type], action: typeVolatile }
+      # `_Atomic T` (C11) — leading atomic qualifier, same Type-prefix shape as
+      # `volatile`. Flags the Type atomic; the emitter lowers reads/writes of an
+      # atomic lvalue to seq-cst Interlocked-backed access (see CSharpEmitter).
+      # The C11 parenthesized type-specifier form `_Atomic(T)` is conflict-free
+      # with the prefix — the `(` lookahead splits them (a Type never starts with
+      # `(`), like `sizeof`/`typeof`.
+      - { lhs: Type, rhs: ['_Atomic', Type], action: typeAtomic }
+      - { lhs: Type, rhs: ['_Atomic', '(', Type, ')'], action: typeAtomicParen }
       # `enum ID` as a type reference. Lowers to plain `int` in C# since
       # enumerators are emitted as `const int` constants (not a C# enum).
       - { lhs: Type, rhs: ['enum', ID], action: typeEnum }
@@ -1303,6 +1317,9 @@ lexer:
     # C23 lowercase `noreturn` is promoted onto this terminal by the dialect
     # rewriter (rule 2), so it has no lexer rule of its own.
     - { symbol: '_Noreturn', match: '_Noreturn' }
+    # `_Atomic` (C11) — always a keyword (reserved underscore-uppercase). Both the
+    # qualifier `_Atomic T` and the type-specifier `_Atomic(T)` use this token.
+    - { symbol: '_Atomic', match: '_Atomic' }
     # `_Complex` (C99) — always a keyword (reserved underscore-uppercase). The
     # lowercase `complex` is a <complex.h> macro, not a keyword.
     - { symbol: '_Complex', match: '_Complex' }

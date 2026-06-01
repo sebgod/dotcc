@@ -162,7 +162,10 @@ internal sealed partial class CSharpEmitter
 
     private void NoteVolatileParam(Item typeItem, string typeString, string name)
     {
-        if (VolatileOf(typeItem) && IsVolatileEligible(typeString)) { _pendingVolatileParams.Add(name); }
+        // _Atomic wins over volatile when both qualify the same param (atomic ops
+        // already fence). Pointer-to-volatile is independent.
+        if (AtomicOf(typeItem) && IsAtomicEligible(typeString)) { _pendingAtomicParams.Add(name); }
+        else if (VolatileOf(typeItem) && IsVolatileEligible(typeString)) { _pendingVolatileParams.Add(name); }
         else if (VolatilePointeeOf(typeItem) && VolatilePointeeEligible(typeString) is not null) { _pendingVolatilePointeeParams.Add(name); }
     }
 }
