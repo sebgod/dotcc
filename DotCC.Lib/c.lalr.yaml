@@ -1309,12 +1309,19 @@ lexer:
     - { symbol: '#',        match: '#' }
 
     # Block comments — must precede the `/` operator rule so the slash isn't
-    # eaten first. The regex avoids alternation (IRx has no `|`):
-    #   /\*  [^*]*  ( \* [^/] [^*]* )*  \*+ /
-    # = `/*` then non-stars then (single `*` not followed by `/` then more
-    # non-stars)* then one-or-more `*` then `/`. Classic C-comment regex
-    # rendered without alternation; handles `/**/`, `/* x */`, `/** comment **/`.
-    - { symbol: BLOCK_COMMENT, match: '/\*[^*]*(\*[^/][^*]*)*\*+/', action: ignore }
+    # eaten first. The canonical C-comment regex (alternation is supported since
+    # LALR.CC ≥ 4.0.0, including inside a repetition — same as the STRING rule):
+    #   /\*  ( [^*] | \*+ [^*/] )*  \*+ /
+    # = `/*` then a body of (a non-star, OR a run of stars NOT followed by `*`/`/`)*
+    # then the terminator: one-or-more stars then `/`. The `\*+[^*/]` arm is the
+    # crux — a star RUN before `/` belongs to the terminator, never the body, so
+    # `**/` closes the comment. The earlier `(\*[^/][^*]*)*` form (which assumed no
+    # alternation) mis-scanned `**/`: it ate the first `*` as `\*`, the second as
+    # `[^/]`, then the `/` fell into `[^*]*`, so the comment ran on to the NEXT
+    # `*/` — silently swallowing whatever lay between (Lua's doc-comment close
+    # style `**/` is pervasive, e.g. lfunc.c's `newupval`). Handles `/**/`,
+    # `/* x */`, `/** c **/`, `/*\n**…\n**/`.
+    - { symbol: BLOCK_COMMENT, match: '/\*([^*]|\*+[^*/])*\*+/', action: ignore }
 
     # Line comments. Ignored.
     - { symbol: LINE_COMMENT, match: '//[^\n]*', action: ignore }

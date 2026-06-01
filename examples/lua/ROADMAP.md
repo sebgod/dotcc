@@ -248,7 +248,21 @@ spec-list *followed by* a TYPE_NAME shifts into the new rule). **Core probe
 unit tests in `CompilerTests.Dialect` (`Inline_before_typedef_name_*`,
 `Noreturn_before_typedef_name_*`).
 
-### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (14 / 20 objects)
+### ✅ Phase 4r — block comments closed with `**/` (lexer regex fix)
+`lfunc` failed with `unexpected 'ID'` at top-level state — the parser thought
+the `newupval` function had ended mid-body. Root cause was the lexer: the
+`BLOCK_COMMENT` regex `/\*[^*]*(\*[^/][^*]*)*\*+/` mis-scanned a `**/` close —
+it ate the first star as `\*`, the second as `[^/]`, then the `/` fell into
+`[^*]*`, so the terminator was missed and the comment ran on to the NEXT `*/`.
+Lua closes doc comments with `**/` (`/*\n** …\n**/`), so the comment from one
+doc block ran through the function signature + several body lines to the next
+inline `/* … */`, silently deleting them. Replaced with the canonical regex
+`/\*([^*]|\*+[^*/])*\*+/` (alternation, supported since LALR.CC ≥ 4.0.0) — a
+star RUN before `/` is the terminator, never the body. **Core probe 14/20 →
+15/20** (lfunc). Pure lexer fix — could only help, no regressions. Fixture
+`block-comment-close/` (gcc-oracle-validated); unit tests `BlockCommentTests`.
+
+### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (15 / 20 objects)
 - Iterate the 20 core TUs via `probe.sh`; fix each parse/emit gap as it surfaces.
   One commit per coherent gap, each with a minimal fixture (dotcc tradition:
   never fix Lua-specifically — reduce to a small reproducer + fixture).
@@ -264,11 +278,17 @@ unit tests in `CompilerTests.Dialect` (`Inline_before_typedef_name_*`,
   `typedef enum { … } Name;` (4h, ltm.h's `TMS`), and **multi-declarator members
   + per-declarator pointers** (4i, `struct CallInfo *previous, *next;`).
   **`lctype.c` + `lopcodes.c` emit full objects.** ✅
-- **Current frontier** (14/20 emit objects: `lapi`, `lctype`, `ldebug`, `ldump`,
-  `lgc`, `lmem`, `lobject`, `lopcodes`, `lstate`, `lstring`, `ltm`, `lundump`,
-  `lvm`, `lzio`). The 6 remaining failures are **diverse per-TU gaps**:
-  - `unexpected '{'` (lcode:1698, lparser:1349), `unexpected ','` (llex:371),
-    `unexpected 'ID'` (lfunc:70) — four parse walls across four TUs.
+- **Current frontier** (15/20 emit objects: `lapi`, `lctype`, `ldebug`, `ldump`,
+  `lfunc`, `lgc`, `lmem`, `lobject`, `lopcodes`, `lstate`, `lstring`, `ltm`,
+  `lundump`, `lvm`, `lzio`). The 5 remaining failures are **diverse per-TU gaps**:
+  - `unexpected '{'` (lcode:1698, lparser:1349) — `static const struct { … }`
+    anonymous-struct-typed initialized declarations across two TUs.
+  - `unexpected ','` (llex:371) — the comma operator in a `while` controlling
+    expression. **Deferred**: the operand is a void side-effect
+    (`cast_void(save_and_next(ls))`), and a void call can't be a C# tuple element
+    nor a captured-pointer lambda; a correct lowering needs context-sensitive
+    comma handling (push the non-last operands into statement position), which is
+    an architectural change, not a one-line grammar fix. Tracked.
   - `setjmp`-in-`if`-without-`else` (ldo).
   - `array member padding needs constant dimension(s)` (ltable) — the deferred
     `offsetof`-as-array-bound case (needs a compile-time layout model; see 4p).
