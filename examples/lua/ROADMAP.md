@@ -135,19 +135,28 @@ needs a primitive keyword, not the alias). **Cleared both `extra_[sizeof(void*)]
 (lstate.h) and `tmname[TM_N]` (lstate.h).** Fixture `array-member-constexpr/`; unit
 tests `ArrayMemberConstExprTests`.
 
-### ⬜ Phase 4l — multi-dimensional struct array member; anonymous file-scope enum
-The probe's NEW walls (18/20), both in early headers:
-- **`TString *strcache[STRCACHE_N][STRCACHE_M];`** (lstate.h:368) — a 2-D struct
-  array MEMBER. dotcc handles multi-dim block-scope arrays (flattened `stackalloc`)
-  but the struct-Member grammar is 1-D only → parse error on the second `[`. Needs a
-  multi-dim member production + the same flatten-to-`fixed[product]`/`[InlineArray]`
-  lowering (with the multi-dim subscript rewrite already used for locals).
-- **`enum { A, B, C, N };`** (anonymous file-scope enum) — dotcc requires a tag after
-  `enum` (`enum E { … }`). An untagged enum-as-constants definition is common
-  (`lopcodes.h`/`lparser.h`); needs an `enum { … } ;` production that emits the
-  enumerators as constants without a named C# enum type. **Next.**
+### 🟦 Phase 4l — multi-dimensional struct array member (✅); diverse next walls
+- ✅ **Multi-dimensional struct array member** (`TString *strcache[N][M]`, lstate.h):
+  the `Member` grammar now uses `ArrDims` (1-D *and* N-D); a multi-dim member
+  flattens to one `fixed T[N*M]` / `[InlineArray(N*M)]` and `s.grid[i][j]` rewrites
+  to flat pointer striding (the local multi-dim path). ArrDims also folds each
+  dimension (const-expr 4k), so `[sizeof(x)]`/`[ENUM]`/`[2*K]` dims work everywhere.
+  Fixture `multidim-member/`; unit tests `MultiDimMemberTests`. **This cleared the
+  last shared-header wall** — the core probe jumped **2/20 → 4/20** (`lctype`,
+  `lopcodes`, `lmem`, `lzio` now emit objects) and the remaining failures are no
+  longer one universal wall but **per-TU gaps**:
+  - `unexpected 'TYPE_NAME'` (≈9 TUs, a shared decl form — likely a function-pointer
+    typedef or a declarator dotcc doesn't parse yet) — the new most-common wall.
+  - `unexpected 'unsigned'` (lcode/llex), `unexpected 'union'` (ldebug),
+    `unexpected '['` (lobject/ltm — another array form).
+  - `sizeof` of an unsupported expression (ldump); a `setjmp`-in-`if`-without-`else`
+    shape (ldo).
+- ⬜ **Anonymous file-scope `enum { … };`** — dotcc requires a tag; an untagged
+  enum-as-constants definition is common (`lopcodes.h`/`lparser.h`). Needs an
+  `enum { … } ;` production emitting the enumerators as constants with no named type.
+- **Next:** triage the diverse per-TU walls (start with the ≈9-TU `TYPE_NAME` one).
 
-### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (2 / 20 objects)
+### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (4 / 20 objects)
 - Iterate the 20 core TUs via `probe.sh`; fix each parse/emit gap as it surfaces.
   One commit per coherent gap, each with a minimal fixture (dotcc tradition:
   never fix Lua-specifically — reduce to a small reproducer + fixture).

@@ -823,8 +823,12 @@ productions:
       # name[N];` (the FAM uses [1], which over-allocates by one element — the
       # `malloc(sizeof(S)+n*sizeof(T))` idiom stays safe). Fixed buffers allow
       # only primitive element types (struct/pointer/_Bool elements fail loudly).
-      # After `Type ID [`, a `]` selects the FAM, an `E` the sized form.
-      - { lhs: Member, rhs: [Type, ID, '[', E, ']', ';'], action: structArrMember }
+      # After `Type ID [`, a `]` selects the FAM, an `E` the sized form. The sized
+      # form uses ArrDims (`[E]` or `[E][E]…`), so a MULTI-DIMENSIONAL member
+      # `T grid[N][M];` parses too — it flattens to one `fixed T grid[N*M]` /
+      # `[InlineArray(N*M)]` and `s.grid[i][j]` rewrites to flat striding (the same
+      # machinery block-scope multi-dim arrays use).
+      - { lhs: Member, rhs: [Type, ID, ArrDims, ';'],     action: structArrMember }
       - { lhs: Member, rhs: [Type, ID, '[', ']', ';'],    action: structFlexArrMember }
       # Nested aggregate members. All four forms carry a MemberMark (epsilon)
       # right after the `{` to snapshot where the inner fields begin, so a

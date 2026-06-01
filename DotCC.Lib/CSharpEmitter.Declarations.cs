@@ -489,16 +489,24 @@ internal sealed partial class CSharpEmitter
     // declarator. Produces the dimension expression texts (outer→inner) as an
     // Args list for Visit(C.DeclArr) to flatten. `[` E `]`: E is Arg1 (one) /
     // Arg2 (cons).
+    // Each dimension is folded to its literal value when it's a constant expression
+    // (`[sizeof(void*)]` → `8`, `[N]` enum → `4`, `[2*K]` → `6`), so the array
+    // visitors (block-scope, global, struct member) get literal dims to flatten/size.
     public EmitContent Visit(C.ArrDimsOne n) =>
-        new EmitContent.Args(new[] { StripOuterParens(T(n.Arg1)) });
+        new EmitContent.Args(new[] { FoldedDim(n.Arg1) });
     public EmitContent Visit(C.ArrDimsCons n)
     {
         var prev = A(n.Arg0);
         var combined = new List<string>(prev.Count + 1);
         combined.AddRange(prev);
-        combined.Add(StripOuterParens(T(n.Arg2)));
+        combined.Add(FoldedDim(n.Arg2));
         return new EmitContent.Args(combined);
     }
+
+    // A dimension expression as a literal when foldable, else its raw text.
+    private string FoldedDim(Item dim) => ConstOfItem(dim) is int v
+        ? v.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        : StripOuterParens(T(dim));
 
     // Record a block-scope array's full CType for sizeof / multi-dim subscript
     // rewriting. No-op at file scope (globals handled in EmitGlobalFields; not

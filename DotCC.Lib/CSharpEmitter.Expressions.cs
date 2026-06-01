@@ -288,6 +288,15 @@ internal sealed partial class CSharpEmitter
         // A C11 anonymous-union field is reached through the synthetic field that
         // holds the nested union (`o.i` → `o.__anonN.i`).
         if (PromotedSynth(n.Arg0, field) is string synth) { return $"({baseExpr}.{synth}.{Id(field)})"; }
+        // A MULTI-dim array member decays to a flat element pointer tagged with its
+        // strided CType, so `s.grid[i][j]` rewrites to flat pointer arithmetic. An
+        // [InlineArray]-backed one goes through `(Elem*)&field`; a `fixed`-buffer one
+        // is the field itself (decays to a pointer in unsafe context).
+        if (FieldMultiDim(n.Arg0, field) is { } md)
+        {
+            var acc = md.IsInline ? $"(({md.Elem}*)&{baseExpr}.{Id(field)})" : $"{baseExpr}.{Id(field)}";
+            return Typed(acc, md.Arr);
+        }
         // An [InlineArray] member decays to its element pointer (like a C array):
         // `((T*)&s.field)`. Subscript / further decay then ride the ordinary
         // pointer paths (over-indexing into the malloc'd tail, which the
@@ -332,6 +341,13 @@ internal sealed partial class CSharpEmitter
         // Anonymous-union field promotion: reach the synth field through the base
         // (with the chosen operator), then `.field` on the value.
         if (PromotedSynth(n.Arg0, field) is string synth) { return $"({baseExpr}{op}{synth}.{member})"; }
+        // MULTI-dim array member → flat element pointer tagged with its strided CType
+        // (so `p->grid[i][j]` strides), mirroring MemberDot.
+        if (FieldMultiDim(n.Arg0, field) is { } md)
+        {
+            var acc = md.IsInline ? $"(({md.Elem}*)&{baseExpr}{op}{member})" : $"{baseExpr}{op}{member}";
+            return Typed(acc, md.Arr);
+        }
         // [InlineArray] member → decay to the element pointer (`((T*)&p->field)`),
         // mirroring the MemberDot case. `->` binds tighter than `&`, so the
         // address-of grabs the field.
@@ -379,6 +395,18 @@ internal sealed partial class CSharpEmitter
         if (TyOf(baseItem) is not CType.Sized s) { return null; }
         var t = s.CsType.TrimEnd('*');
         return _structInlineArrFields.TryGetValue(t, out var m) && m.TryGetValue(field, out var info)
+            ? info : null;
+    }
+
+    // (element, InlineArray-backed?, strided CType) of `field` if it's a MULTI-dim
+    // array member of the struct baseItem's CType names, else null. Same base-type
+    // resolution as FieldInlineArr. Used to decay a multi-dim member to a flat
+    // pointer tagged with its multi-dim CType (so `s.f[i][j]` strides).
+    private (string Elem, bool IsInline, CType Arr)? FieldMultiDim(Item baseItem, string field)
+    {
+        if (TyOf(baseItem) is not CType.Sized s) { return null; }
+        var t = s.CsType.TrimEnd('*');
+        return _structMultiDimMembers.TryGetValue(t, out var m) && m.TryGetValue(field, out var info)
             ? info : null;
     }
 

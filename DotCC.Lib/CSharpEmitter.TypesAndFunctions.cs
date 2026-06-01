@@ -393,15 +393,31 @@ internal sealed partial class CSharpEmitter
         // literal.
         var elem = ResolveTypedef(T(n.Arg0));
         var name = T(n.Arg1);
-        var size = ConstOfItem(n.Arg3) is int sz
-            ? sz.ToString(System.Globalization.CultureInfo.InvariantCulture)
-            : StripOuterParens(T(n.Arg3));
+        // ArrDims folded each dimension to a literal (`[sizeof(void*)]` → 8, `[N]` →
+        // enum value). A member can't be a true VLA, so a non-constant dim is an error.
+        var dims = ParseDims(A(n.Arg2));
+        if (dims.Count == 0)
+        {
+            throw new CompileException($"array member `{name}` needs constant dimension(s)");
+        }
+        var total = 1;
+        foreach (var d in dims) { total *= d; }
+        var totalText = total.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        // A MULTI-dimensional member flattens to one buffer; record the strided
+        // access CType (`Arr(Arr(elem, dn), …)`) so `s.grid[i][j]` rewrites to flat
+        // pointer arithmetic — the same multi-dim subscript path block-scope arrays use.
+        if (dims.Count >= 2)
+        {
+            CType arr = new CType.Sized(elem);
+            for (var i = dims.Count - 1; i >= 0; i--) { arr = new CType.Arr(arr, dims[i]); }
+            _pendingMultiDimMembers[name] = (elem, !_fixedBufferElemTypes.Contains(elem), arr);
+        }
         if (_fixedBufferElemTypes.Contains(elem))
         {
             _pendingFields.Add(name);
-            return $"public fixed {elem} {Id(name)}[{size}];\n";
+            return $"public fixed {elem} {Id(name)}[{totalText}];\n";
         }
-        return EmitInlineArrayMember(elem, name, size);
+        return EmitInlineArrayMember(elem, name, totalText, record1D: dims.Count < 2);
     }
 
     // Flexible array member `T name[];` (C99) — an incomplete array as the last
@@ -441,6 +457,15 @@ internal sealed partial class CSharpEmitter
     private readonly Dictionary<string, Dictionary<string, (string Elem, int Count)>> _structInlineArrFields =
         new(StringComparer.Ordinal);
 
+    // Per-aggregate map for MULTI-dimensional array members: fieldName → (element C#
+    // type, whether it's [InlineArray]-backed vs a `fixed` buffer, the strided
+    // multi-dim CType). The member-access visitors decay it to a flat pointer tagged
+    // with the CType so `s.grid[i][j]` rewrites to flat striding. Drained alongside
+    // the 1-D inline-array map (DrainInlineArrFields).
+    private readonly Dictionary<string, (string Elem, bool IsInline, CType Arr)> _pendingMultiDimMembers = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Dictionary<string, (string Elem, bool IsInline, CType Arr)>> _structMultiDimMembers =
+        new(StringComparer.Ordinal);
+
     // Emit a non-primitive array member `T name[N];` as a C# 12 [InlineArray(N)]
     // field. C# `fixed` buffers reject non-primitive elements; an [InlineArray]
     // gives the same N inline elements at the field's offset for any UNMANAGED
@@ -450,7 +475,7 @@ internal sealed partial class CSharpEmitter
     // (subscript / decay) goes through pointer arithmetic — see the member-access
     // visitors — which also restores the struct-hack over-indexing that `fixed`
     // gave for free (the InlineArray indexer itself is bounds-checked).
-    private EmitContent EmitInlineArrayMember(string elem, string name, string sizeText)
+    private EmitContent EmitInlineArrayMember(string elem, string name, string sizeText, bool record1D = true)
     {
         if (!int.TryParse(sizeText, System.Globalization.NumberStyles.Integer,
                 System.Globalization.CultureInfo.InvariantCulture, out var count) || count < 1)
@@ -479,7 +504,9 @@ internal sealed partial class CSharpEmitter
                 .Append(" __e0;\n}\n\n");
         }
         _pendingFields.Add(name);
-        _pendingInlineArrFields[name] = (elem, count);
+        // 1-D members record (elem, count) for the single-subscript decay; a multi-dim
+        // member records its strided CType separately (_pendingMultiDimMembers).
+        if (record1D) { _pendingInlineArrFields[name] = (elem, count); }
         return $"public {wrapper} {Id(name)};\n";
     }
 
@@ -753,6 +780,15 @@ internal sealed partial class CSharpEmitter
                     new Dictionary<string, (string, int)>(_pendingInlineArrFields, StringComparer.Ordinal);
             }
             _pendingInlineArrFields.Clear();
+        }
+        if (_pendingMultiDimMembers.Count > 0)
+        {
+            foreach (var tn in typeNames)
+            {
+                _structMultiDimMembers[tn] =
+                    new Dictionary<string, (string, bool, CType)>(_pendingMultiDimMembers, StringComparer.Ordinal);
+            }
+            _pendingMultiDimMembers.Clear();
         }
     }
 
