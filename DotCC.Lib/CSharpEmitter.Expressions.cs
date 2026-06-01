@@ -219,7 +219,15 @@ internal sealed partial class CSharpEmitter
     // `&x` — the address of the object, NOT a read of it. For a volatile lvalue,
     // use the bare lvalue (not the Volatile.Read form). The resulting C `volatile
     // T*` lowers to a plain `T*` (dotcc has no volatile pointer type).
-    public EmitContent Visit(C.AddrOf n) => $"(&{ALValueOf(n.Arg1) ?? VLValueOf(n.Arg1) ?? T(n.Arg1)})";
+    public EmitContent Visit(C.AddrOf n)
+    {
+        var lv = ALValueOf(n.Arg1) ?? VLValueOf(n.Arg1) ?? T(n.Arg1);
+        // `&E` synthesizes a pointer CType (E's type + `*`), so a consumer can read
+        // the pointee — e.g. the <stdatomic.h> lowering casts the value arg of
+        // `atomic_store(&x, v)` to `x`'s type. Also makes `sizeof(&x)` resolve.
+        CType? ptrTy = TyOf(n.Arg1) is CType.Sized s ? new CType.Sized(s.CsType + "*") : null;
+        return new EmitContent.Text($"(&{lv})", Ty: ptrTy);
+    }
     public EmitContent Visit(C.Neg n) => $"(-{IntDecay(n.Arg1)})";
     // Prefix ++/-- — strip outer parens of operand to avoid CS0131 on a
     // parenthesised lvalue. `(x)++` would parse as post-inc on a parens
@@ -449,6 +457,10 @@ internal sealed partial class CSharpEmitter
         {
             return $"{callee}({string.Join(", ", args.Select(DecayFnName))})";
         }
+        // <stdatomic.h> generic functions (atomic_load / atomic_fetch_add /
+        // atomic_compare_exchange / atomic_flag_* / atomic_thread_fence / …) — lower
+        // by name onto the seq-cst Atomic.* helpers. Returns null for any other name.
+        if (LowerAtomicCall(callee, argsContent) is { } atomicCall) { return atomicCall; }
         // malloc(sizeof(S)) — emit a MallocSizeof marker (carrying the struct
         // type for the stack-promotion peephole and the verbatim low-level
         // text for the fallback). Recognised structurally: the sole argument
@@ -559,13 +571,17 @@ internal sealed partial class CSharpEmitter
         // Carry per-arg enum types so the printf path can decay enum→int.
         var enums = new List<string?>(tail.Count + 1) { EnumOf(n.Arg0) };
         enums.AddRange(tailArgs.ArgEnums ?? new string?[tail.Count]);
-        return new EmitContent.Args(combined, ArgEnums: enums);
+        // Carry per-arg CTypes (the <stdatomic.h> lowering reads the first arg's
+        // pointer type to cast the value arg to the pointee).
+        var types = new List<CType?>(tail.Count + 1) { TyOf(n.Arg0) };
+        types.AddRange(tailArgs.ArgTypes ?? new CType?[tail.Count]);
+        return new EmitContent.Args(combined, ArgEnums: enums, ArgTypes: types);
     }
 
     // SoleArg keeps the single argument's structured Content alongside its
     // rendered text, so a one-arg call (malloc) can inspect it structurally.
     public EmitContent Visit(C.ArgsOne n) =>
-        new EmitContent.Args(new[] { T(n.Arg0) }, n.Arg0.Content as EmitContent, new[] { EnumOf(n.Arg0) });
+        new EmitContent.Args(new[] { T(n.Arg0) }, n.Arg0.Content as EmitContent, new[] { EnumOf(n.Arg0) }, new[] { TyOf(n.Arg0) });
 
     // Variable reference. Three emit-time rewrites:
     //   - `__func__` → `L("name\0"u8)` using `_currentFunctionName` (set

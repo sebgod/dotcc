@@ -1,0 +1,3 @@
+MSVC's C frontend needs /experimental:c11atomics for _Atomic / <stdatomic.h>
+(off by default, unavailable on older toolsets). gcc -std=c17 handles the full
+<stdatomic.h> surface, so the gcc oracle validates this fixture.

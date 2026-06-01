@@ -117,4 +117,97 @@ public sealed class AtomicTests
         }
         finally { File.Delete(src); }
     }
+
+    // ---- <stdatomic.h> generic functions (phase A2) -----------------------
+
+    [Fact]
+    public void stdatomic_functions_lower_onto_Atomic_helpers()
+    {
+        var src = WriteTemp("""
+            #include <stdatomic.h>
+            int main(void) {
+                atomic_int x;
+                atomic_init(&x, 1);
+                int a = atomic_load(&x);
+                atomic_store(&x, 9);
+                int b = atomic_fetch_add(&x, 2);
+                int c = atomic_exchange(&x, 4);
+                return a + b + c;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("Atomic.Load(ref *((&x)))");
+            emitted.ShouldContain("Atomic.Store(ref *((&x)), (int)(9))");
+            emitted.ShouldContain("Atomic.FetchAdd(ref *((&x)), (int)(2))");
+            emitted.ShouldContain("Atomic.Exchange(ref *((&x)), (int)(4))");
+            // atomic_init is a plain (non-atomic) store.
+            emitted.ShouldContain("*((&x)) = ((int)(1))");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void compare_exchange_returns_cbool_and_explicit_ignores_order()
+    {
+        var src = WriteTemp("""
+            #include <stdatomic.h>
+            int main(void) {
+                atomic_int x; atomic_store(&x, 1);
+                int e = 1;
+                _Bool ok = atomic_compare_exchange_strong_explicit(
+                    &x, &e, 2, memory_order_seq_cst, memory_order_relaxed);
+                return ok;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            // _explicit stripped, the two memory_order args ignored; expected is a ref.
+            emitted.ShouldContain("(CBool)Atomic.CompareExchange(ref *((&x)), ref *((&e)), (int)(2))");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void atomic_flag_and_fences()
+    {
+        var src = WriteTemp("""
+            #include <stdatomic.h>
+            int main(void) {
+                atomic_flag f = ATOMIC_FLAG_INIT;
+                _Bool was = atomic_flag_test_and_set(&f);
+                atomic_flag_clear(&f);
+                atomic_thread_fence(memory_order_seq_cst);
+                return was;
+            }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("(CBool)(Atomic.Exchange(ref *((&f)), 1) != 0)");
+            emitted.ShouldContain("Atomic.Store(ref *((&f)), 0)");
+            emitted.ShouldContain("Atomic.ThreadFence()");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void atomic_int_typedef_is_treated_as_atomic()
+    {
+        var src = WriteTemp("""
+            #include <stdatomic.h>
+            int main(void) { atomic_int n = 0; n = 5; return n; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            // the typedef lowers to the underlying int, and the var is atomic.
+            emitted.ShouldContain("int n = 0");
+            emitted.ShouldContain("Atomic.Store(ref n, (int)(5))");
+            emitted.ShouldContain("Atomic.Load(ref n)");
+        }
+        finally { File.Delete(src); }
+    }
 }

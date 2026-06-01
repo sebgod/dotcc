@@ -116,7 +116,12 @@ public abstract record EmitContent
     /// the printf-family fluent lowering decay an enum argument to <c>(int)</c>
     /// (a C enum is an int in a varargs `%d` slot, but C#'s <c>.Arg(int)</c>
     /// won't bind an enum). Null when no argument was enum-typed.</param>
-    public sealed record Args(IReadOnlyList<string> Values, EmitContent? SoleArg = null, IReadOnlyList<string?>? ArgEnums = null) : EmitContent;
+    /// <param name="ArgTypes">Per-argument synthesized <see cref="CType"/> (aligned
+    /// with <paramref name="Values"/>), or null entry when unknown. Lets a call that
+    /// needs an argument's type without re-deriving it — e.g. the <c>&lt;stdatomic.h&gt;</c>
+    /// lowering reads <c>atomic_store(&amp;x, v)</c>'s first-arg pointer type to cast
+    /// <c>v</c> to the pointee. Null when no argument carried a type.</param>
+    public sealed record Args(IReadOnlyList<string> Values, EmitContent? SoleArg = null, IReadOnlyList<string?>? ArgEnums = null, IReadOnlyList<CType?>? ArgTypes = null) : EmitContent;
 
     /// <summary>
     /// AST marker for <c>sizeof(T)</c> over a named type. Produced by

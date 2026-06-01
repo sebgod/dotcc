@@ -125,4 +125,105 @@ internal sealed partial class CSharpEmitter
         var ct = (TyOf(operand) as CType.Sized)?.CsType ?? "int";
         return $"Atomic.{helper}(ref {alv}, ({ct})1)";
     }
+
+    // ---- <stdatomic.h> atomic typedefs ------------------------------------
+    // `typedef _Atomic T atomic_X;` records the alias → underlying C# type here, and
+    // Visit(TypeName) returns the underlying with the Atomic flag set, so `atomic_int
+    // x;` is treated exactly like `_Atomic int x;`. (No `using` alias is emitted —
+    // uses lower straight to the underlying type.)
+    private readonly Dictionary<string, string> _atomicTypedefs = new(StringComparer.Ordinal);
+
+    // ---- <stdatomic.h> generic functions ----------------------------------
+    // C11's atomic_* "generic functions" are type-generic (via _Generic) in a real
+    // header; dotcc intercepts them by NAME in Visit(C.Call) and lowers onto the
+    // seq-cst Atomic.* helpers. The first argument is always a pointer to the atomic
+    // object — `ref *(arg0)` is the location, and arg0's pointer CType gives the
+    // pointee type (to cast value args, since C's int→uint/float conversions aren't
+    // implicit in C#). The `_explicit` variants carry trailing memory_order args
+    // which we ignore (every order we honour maps to a full barrier — the safe
+    // over-approximation, same as volatile). Returns null when `callee` isn't an
+    // atomic builtin, so Visit(C.Call) falls through to the normal call path.
+    private EmitContent? LowerAtomicCall(string callee, EmitContent.Args ac)
+    {
+        if (!callee.StartsWith("atomic_", StringComparison.Ordinal)) { return null; }
+        var args = ac.Values;
+        var types = ac.ArgTypes;
+        // Drop an `_explicit` suffix — the logic is identical; trailing memory_order
+        // args are simply never referenced (we index by position).
+        var name = callee.EndsWith("_explicit", StringComparison.Ordinal)
+            ? callee[..^"_explicit".Length] : callee;
+
+        // Pointee C# type of arg0 (a `T*`), or null if undeterminable.
+        string? Pointee() =>
+            types is not null && types.Count > 0 && types[0] is CType.Sized s
+            && s.CsType.EndsWith("*", StringComparison.Ordinal)
+                ? s.CsType[..^1].TrimEnd() : null;
+        // The atomic object as a ref-able location: `*(arg0)`.
+        string Obj() => $"*({args[0]})";
+        // True if the pointee has a lock-free Atomic.* primitive.
+        bool Eligible() => Pointee() is string p && IsAtomicEligible(p);
+        CompileException Unsupported(string why) => new(
+            $"`{callee}` on a non-lock-free type isn't supported ({why}); dotcc's atomic "
+            + "primitives cover 4-/8-byte int/uint/long/ulong/nint/nuint/float/double");
+
+        switch (name)
+        {
+            case "atomic_load":
+                return Eligible()
+                    ? Typed($"Atomic.Load(ref {Obj()})", new CType.Sized(Pointee()!))
+                    : Typed($"({Obj()})", Pointee() is string lp ? new CType.Sized(lp) : null);
+
+            case "atomic_store":
+            case "atomic_init":  // init is a (non-atomic) plain store in C anyway
+                if (name == "atomic_init" || !Eligible()) { return $"({Obj()} = ({Cast(Pointee(), args[1])}))"; }
+                return $"Atomic.Store(ref {Obj()}, {Cast(Pointee(), args[1])})";
+
+            case "atomic_exchange":
+                if (!Eligible()) { throw Unsupported("exchange needs a lock-free primitive"); }
+                return Typed($"Atomic.Exchange(ref {Obj()}, {Cast(Pointee(), args[1])})", new CType.Sized(Pointee()!));
+
+            case "atomic_compare_exchange_strong":
+            case "atomic_compare_exchange_weak":
+                if (!Eligible()) { throw Unsupported("compare-exchange needs a lock-free primitive"); }
+                // bool result → CBool (usable as a C int / in conditions). expected
+                // (arg1) is a pointer; desired (arg2) casts to the pointee type.
+                return $"((CBool)Atomic.CompareExchange(ref {Obj()}, ref *({args[1]}), {Cast(Pointee(), args[2])}))";
+
+            case "atomic_fetch_add": return Rmw("FetchAdd", Pointee(), args, Eligible(), Unsupported);
+            case "atomic_fetch_sub": return Rmw("FetchSub", Pointee(), args, Eligible(), Unsupported);
+            case "atomic_fetch_or":  return Rmw("FetchOr",  Pointee(), args, Eligible(), Unsupported);
+            case "atomic_fetch_and": return Rmw("FetchAnd", Pointee(), args, Eligible(), Unsupported);
+            case "atomic_fetch_xor": return Rmw("FetchXor", Pointee(), args, Eligible(), Unsupported);
+
+            // atomic_flag — dotcc models the flag as an int (see <stdatomic.h>).
+            case "atomic_flag_test_and_set":
+                return $"((CBool)(Atomic.Exchange(ref {Obj()}, 1) != 0))";
+            case "atomic_flag_clear":
+                return $"Atomic.Store(ref {Obj()}, 0)";
+
+            case "atomic_thread_fence": return "Atomic.ThreadFence()";
+            case "atomic_signal_fence": return "Atomic.SignalFence()";
+
+            // Our eligible atomics are always lock-free; report 1 (true). A
+            // non-eligible (lock-based-in-C) object reports 0.
+            case "atomic_is_lock_free":
+                return Typed(Eligible() ? "1" : "0", new CType.Sized("int"));
+
+            default:
+                return null;  // not an atomic builtin we recognise → normal call
+        }
+    }
+
+    // `(pointee)(arg)` — cast a value arg to the atomic's element type so the generic
+    // Atomic.* call infers T and C's implicit conversions are honoured. Falls back to
+    // the bare arg when the pointee type is unknown.
+    private static string Cast(string? pointee, string arg) =>
+        pointee is null ? arg : $"({pointee})({arg})";
+
+    private EmitContent Rmw(string helper, string? pointee, IReadOnlyList<string> args, bool eligible, Func<string, CompileException> unsupported)
+    {
+        if (!eligible) { throw unsupported($"{helper} needs a lock-free primitive"); }
+        // Fetch* returns the OLD value (the C atomic_fetch_* result), typed as the pointee.
+        return Typed($"Atomic.{helper}(ref *({args[0]}), {Cast(pointee, args[1])})", new CType.Sized(pointee!));
+    }
 }

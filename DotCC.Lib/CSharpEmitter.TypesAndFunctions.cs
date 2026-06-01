@@ -871,7 +871,14 @@ internal sealed partial class CSharpEmitter
     // typedef'd name. The Content is the raw identifier string; emit it
     // verbatim since the using-alias (or struct decl) we emitted for the
     // typedef already binds that name in C#'s namespace.
-    public EmitContent Visit(C.TypeName n) => T(n.Arg0);
+    public EmitContent Visit(C.TypeName n)
+    {
+        var name = T(n.Arg0);
+        // An `_Atomic` typedef alias (atomic_int, …) resolves to its underlying C#
+        // type WITH the Atomic flag, so a decl using the alias lowers like `_Atomic T`.
+        if (_atomicTypedefs.TryGetValue(name, out var under)) { return new EmitContent.Text(under, Atomic: true); }
+        return name;
+    }
 
     // `volatile T` (leading qualifier prefix). Drop the qualifier from the emitted
     // C# type string — there is no C# type-level `volatile` — but FLAG the Type so
@@ -923,6 +930,11 @@ internal sealed partial class CSharpEmitter
         var rawType = T(n.Arg1);
         var type = QualifyPredefinedTypeName(rawType);
         var alias = T(n.Arg2);
+        // `typedef _Atomic T Alias;` (e.g. <stdatomic.h>'s atomic_int) — record the
+        // alias → underlying C# type and emit NO `using` alias: a use of `Alias`
+        // resolves to the underlying type WITH the Atomic flag (Visit(TypeName)), so
+        // `atomic_int x;` is treated exactly like `_Atomic int x;`.
+        if (AtomicOf(n.Arg1)) { _atomicTypedefs[alias] = type; return string.Empty; }
         // If the alias resolves (directly or transitively) to a predefined
         // reference type, record the alias so GlobalVar can auto-init
         // instances. `jmp_buf` → `LongJmpToken` is the canonical case.
