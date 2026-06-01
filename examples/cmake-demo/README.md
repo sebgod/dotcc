@@ -37,7 +37,7 @@ real work (merge the objects, dedup types from shared headers, build).
 
 | stage | rule (`dotcc-toolchain.cmake`) | dotcc |
 |---|---|---|
-| compile `<src>` → `<obj>` | `CMAKE_C_COMPILE_OBJECT` | `dotcc --emit=obj <DEFINES> <INCLUDES> <src> -o <obj>` |
+| compile `<src>` → `<obj>` | `CMAKE_C_COMPILE_OBJECT` | `dotcc --emit=obj <DEFINES> <INCLUDES> -MD -MT <obj> -MF <obj>.d <src> -o <obj>` |
 | link `<objs>` → `<exe>` | `CMAKE_C_LINK_EXECUTABLE` | `dotcc <objs> --emit=build` + a `dotnet` launcher at `<exe>` |
 
 Detection is skipped (`CMAKE_C_COMPILER_FORCED` — dotcc has no native ABI to
@@ -47,6 +47,28 @@ probe), and the "executable" CMake links is a tiny launcher that runs the built
 The object suffix is whatever CMake's platform picks (`.obj` here, like MSVC) —
 dotcc keys "is this an object to link?" off "not a `.c` source", not a fixed
 extension, exactly because the suffix is the build system's call.
+
+## Incremental rebuilds (header dependency tracking)
+
+dotcc emits a gcc/Make-format `.d` dependency file (clang's `-MD`) listing each
+TU plus every header it `#include`s, so CMake's compiler-driven dependency
+scanning recompiles a unit when one of its headers changes. The toolchain wires
+it with `CMAKE_C_DEPFILE_FORMAT gcc` and the inline `-MD -MT <DEP_TARGET> -MF
+<DEP_FILE>` flags. With the Ninja generator (which relies *solely* on the
+compiler's depfile — `deps = gcc`):
+
+```sh
+cmake -S . -B build -G Ninja --toolchain dotcc-toolchain.cmake -DDOTCC_DLL=…
+cmake --build build          # builds geom.c + main.c, links
+cmake --build build          # → "ninja: no work to do."
+touch geom.h                 # both TUs #include it
+cmake --build build          # → recompiles BOTH geom.c AND main.c
+```
+
+Synthetic system headers (`<stdio.h>` &c.) carry no on-disk path and are
+omitted — there's nothing for the build tool to stat. `-MMD` additionally drops
+angle-bracket (`<...>`) headers; the scan honors `#if`/`#ifdef`, so a header
+behind a false branch isn't a dependency.
 
 ## What's threaded — and what isn't (honest)
 

@@ -497,6 +497,113 @@ public static class Compiler
     }
 
     /// <summary>
+    /// Build a Make-format dependency rule for one translation unit — the
+    /// <c>-MD</c> / <c>-MMD</c> depfile contents. The rule lists
+    /// <paramref name="targets"/> as the rule target(s) and the source plus
+    /// every <c>#include</c>d header (transitively) as prerequisites, so
+    /// CMake / Ninja / make can track header→TU dependencies and recompile a
+    /// unit when any header it pulls in changes.
+    /// </summary>
+    /// <param name="includeSystemHeaders">When false (<c>-MMD</c>), drop
+    /// headers included via the angle <c>&lt;...&gt;</c> form. When true
+    /// (<c>-MD</c>), keep them — though the synthetic system headers carry no
+    /// disk path and so never appear regardless.</param>
+    /// <remarks>
+    /// Runs a focused preprocess-only pass (it drives the same lexer →
+    /// preprocessor → macro-expander pipeline the compile uses, then discards
+    /// the tokens) purely to collect the include set. Conditional compilation
+    /// is honoured — a header behind a false <c>#if</c> is not listed. Only
+    /// headers that resolve to a real on-disk file become prerequisites;
+    /// embedded synthetic headers (no path) are skipped, since there is
+    /// nothing for the build tool to stat.
+    /// </remarks>
+    public static string EmitDependencyRule(
+        string sourcePath,
+        IReadOnlyList<string> targets,
+        bool includeSystemHeaders,
+        IReadOnlyList<string>? includeDirs = null,
+        IReadOnlyList<string>? defines = null,
+        CDialect? dialect = null)
+    {
+        var (content, paths) = BuildIncludeMaps(new[] { sourcePath }, includeDirs);
+        var lexerTable = C.BuildLexer();
+        var seededDefines = SeedDialectDefines(dialect ?? CDialect.Default, defines);
+
+        var source = File.ReadAllText(sourcePath);
+        var pre = new CPreprocessor(lexerTable, content, seededDefines, quiet: true);
+        pre.SetActiveFilename(Path.GetFileName(sourcePath));
+        using (var lexer = BytesLexer.FromString(source, lexerTable))
+        using (var preproc = C.WrapPreprocessor(lexer, pre))
+        using (var macroExp = new MacroExpander(preproc, pre))
+        {
+            // Drain — every #include the preprocessor reaches (respecting
+            // #if/#ifdef conditionals) fires OnInclude, which records the
+            // header in pre.IncludedHeaders.
+            while (macroExp.MoveNext()) { /* tokens discarded; we only want the include set */ }
+        }
+
+        var prereqs = new List<string> { sourcePath };
+        foreach (var (name, isSystem) in pre.IncludedHeaders)
+        {
+            if (isSystem && !includeSystemHeaders) { continue; }   // -MMD: drop <...> headers
+            if (paths.TryGetValue(name, out var path)) { prereqs.Add(path); }
+            // else: a synthetic/embedded header with no disk path — nothing to stat.
+        }
+        return FormatDependencyRule(targets, prereqs);
+    }
+
+    /// <summary>
+    /// Render a Make dependency rule: <c>target...: prereq...</c> with one
+    /// prerequisite per line, joined by <c> \</c> line continuations.
+    /// Paths are normalized to forward slashes (the canonical form make /
+    /// ninja / CMake all accept on Windows, and the only safe one given
+    /// backslash is Make's escape character) and make-special characters
+    /// (space, <c>#</c>, <c>$</c>) are escaped.
+    /// </summary>
+    private static string FormatDependencyRule(IReadOnlyList<string> targets, IReadOnlyList<string> prereqs)
+    {
+        var sb = new StringBuilder();
+        for (var i = 0; i < targets.Count; i++)
+        {
+            if (i > 0) { sb.Append(' '); }
+            sb.Append(EscapeMakePath(targets[i]));
+        }
+        sb.Append(':');
+        foreach (var p in prereqs)
+        {
+            sb.Append(" \\\n  ").Append(EscapeMakePath(p));
+        }
+        sb.Append('\n');
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Normalize separators to <c>/</c> and escape the characters Make treats
+    /// specially in a prerequisite list (<c>space</c>, <c>#</c>, <c>$</c>).
+    /// </summary>
+    private static string EscapeMakePath(string path)
+    {
+        var sb = new StringBuilder(path.Length + 8);
+        foreach (var c in path.Replace('\\', '/'))
+        {
+            switch (c)
+            {
+                case ' ':
+                case '#':
+                    sb.Append('\\').Append(c);
+                    break;
+                case '$':
+                    sb.Append("$$");
+                    break;
+                default:
+                    sb.Append(c);
+                    break;
+            }
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
     /// Build the csproj scaffold paired with the non-file-based shell from
     /// <see cref="EmitCSharp"/>. The frontend exe writes both into the output
     /// dir for the default csproj/build modes. When <paramref name="libraryMode"/>
@@ -574,10 +681,26 @@ public static class Compiler
     private static Dictionary<string, string> BuildIncludeMap(
         IReadOnlyList<string> inputPaths,
         IReadOnlyList<string>? includeDirs)
+        => BuildIncludeMaps(inputPaths, includeDirs).Content;
+
+    /// <summary>
+    /// Resolve headers: scan every <c>-I</c> directory + every <c>.h</c>
+    /// alongside each <c>.c</c> + the synthetic system headers. Returns both
+    /// the <c>name → content</c> map the preprocessor reads AND a
+    /// <c>name → on-disk path</c> map used to render dependency files
+    /// (<c>-MD</c>/<c>-MMD</c>). Last-wins (in the same dir order) so a user
+    /// <c>-I</c> overrides a system header, and the two maps stay consistent.
+    /// The synthetic system headers are embedded resources with no disk path,
+    /// so they appear only in <c>Content</c> — never in <c>Paths</c>; that is
+    /// exactly what keeps them out of the dependency file (nothing for
+    /// make/ninja to stat).
+    /// </summary>
+    private static (Dictionary<string, string> Content, Dictionary<string, string> Paths) BuildIncludeMaps(
+        IReadOnlyList<string> inputPaths,
+        IReadOnlyList<string>? includeDirs)
     {
-        // Resolve headers: scan every -I directory + every .h alongside each .c
-        // + synthetic system headers. Last-wins so user -I overrides system.
-        var includeMap = new Dictionary<string, string>(SystemHeaders, StringComparer.Ordinal);
+        var content = new Dictionary<string, string>(SystemHeaders, StringComparer.Ordinal);
+        var paths = new Dictionary<string, string>(StringComparer.Ordinal);
         var dirs = (includeDirs ?? Array.Empty<string>())
             .Concat(inputPaths.Select(p => Path.GetDirectoryName(Path.GetFullPath(p)) ?? "."))
             .Distinct(StringComparer.OrdinalIgnoreCase);
@@ -586,10 +709,12 @@ public static class Compiler
             if (!Directory.Exists(dir)) { continue; }
             foreach (var hpath in Directory.EnumerateFiles(dir, "*.h"))
             {
-                includeMap[Path.GetFileName(hpath)] = File.ReadAllText(hpath);
+                var fileName = Path.GetFileName(hpath);
+                content[fileName] = File.ReadAllText(hpath);
+                paths[fileName] = hpath;
             }
         }
-        return includeMap;
+        return (content, paths);
     }
 
     internal static string BuildShell(

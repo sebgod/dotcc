@@ -67,11 +67,28 @@ internal static class Program
         {
             Description = "Like -pedantic, but treat the dialect violations as errors (non-zero exit).",
         };
+        var mdOpt = new Option<bool>("-MD")
+        {
+            Description = "Write a Make-format dependency file (.d) listing the TU + every #included header, alongside compilation.",
+        };
+        var mmdOpt = new Option<bool>("-MMD")
+        {
+            Description = "Like -MD, but omit system (<...>) headers from the dependency file.",
+        };
+        var mfOpt = new Option<string?>("-MF")
+        {
+            Description = "Dependency-file output path (with -MD/-MMD). Defaults to the object/source name with a .d extension.",
+        };
+        var mtOpt = new Option<string[]>("-MT")
+        {
+            Description = "Set the target name(s) of the emitted dependency rule. Repeatable. Defaults to the output object.",
+            AllowMultipleArgumentsPerToken = false,
+        };
 
         var root = new RootCommand("dotcc — a C compiler frontend that transpiles to .NET 10 / C# 14.")
         {
             inputArg, outOpt, emitOpt, preprocessOpt, includeOpt, defineOpt, compileOpt, sharedOpt, stdOpt,
-            pedanticOpt, pedanticErrorsOpt,
+            pedanticOpt, pedanticErrorsOpt, mdOpt, mmdOpt, mfOpt, mtOpt,
         };
         // Accept-and-ignore unknown flags (-Wall, -O2, -g, -f*, -m*, …) instead
         // of erroring out, so dotcc survives being driven by ./configure / make,
@@ -101,6 +118,10 @@ internal static class Program
             var stdValue = parse.GetValue(stdOpt);
             var pedanticFlag = parse.GetValue(pedanticOpt);
             var pedanticErrorsFlag = parse.GetValue(pedanticErrorsOpt);
+            var mdFlag = parse.GetValue(mdOpt);
+            var mmdFlag = parse.GetValue(mmdOpt);
+            var depFile = parse.GetValue(mfOpt);
+            var depTargets = parse.GetValue(mtOpt) ?? Array.Empty<string>();
 
             if (inputs.Length == 0)
             {
@@ -137,7 +158,8 @@ internal static class Program
                 emit = EmitKind.File;
             }
 
-            return Run(inputs, output, emit, preprocessOnly, includes, defines, sharedFlag, dialect, pedanticFlag, pedanticErrorsFlag);
+            return Run(inputs, output, emit, preprocessOnly, includes, defines, sharedFlag, dialect, pedanticFlag, pedanticErrorsFlag,
+                       mdFlag, mmdFlag, depFile, depTargets);
         });
 
         return root.Parse(args).Invoke();
@@ -155,7 +177,11 @@ internal static class Program
         bool libraryMode,
         CDialect dialect,
         bool pedantic,
-        bool pedanticErrors)
+        bool pedanticErrors,
+        bool genDeps,
+        bool genDepsNoSystem,
+        string? depFile,
+        string[] depTargets)
     {
         if (preprocessOnly)
         {
@@ -180,25 +206,36 @@ internal static class Program
             {
                 var frag = Compiler.EmitObject(inputPaths[0], includeDirs, defines, dialect, pedantic, pedanticErrors);
                 File.WriteAllText(objOut, frag);
-                return 0;
             }
             catch (CompileException ex)
             {
                 Console.Error.WriteLine($"dotcc: {ex.Message}");
                 return 2;
             }
+            // -MD/-MMD: write the header-dependency rule for this TU. The
+            // object IS the rule target by default (gcc's `foo.o → foo.d`
+            // convention, here `foo.cs → foo.d`); -MT / -MF override both.
+            if (genDeps || genDepsNoSystem)
+            {
+                return WriteDependencyFiles(
+                    new[] { inputPaths[0] }, includeSystem: !genDepsNoSystem, depFile, depTargets,
+                    defaultTargetFor: _ => objOut,
+                    defaultDepPathFor: _ => Path.ChangeExtension(objOut, ".d"),
+                    includeDirs, defines, dialect);
+            }
+            return 0;
         }
 
+        // A `.c` input is a source (→ whole-program compile, the default);
+        // anything else is a dotcc object fragment (→ link). The object
+        // suffix is the build system's choice — CMake's `Generic` platform
+        // names them `.obj`, gcc-style `.o`, dotcc-by-hand `.cs` — so we key
+        // off "not a .c source" rather than a fixed object extension.
+        var linking = inputPaths.Length > 0
+            && System.Array.TrueForAll(inputPaths, p => !p.EndsWith(".c", System.StringComparison.OrdinalIgnoreCase));
         string program;
         try
         {
-            // A `.c` input is a source (→ whole-program compile, the default);
-            // anything else is a dotcc object fragment (→ link). The object
-            // suffix is the build system's choice — CMake's `Generic` platform
-            // names them `.obj`, gcc-style `.o`, dotcc-by-hand `.cs` — so we key
-            // off "not a .c source" rather than a fixed object extension.
-            var linking = inputPaths.Length > 0
-                && System.Array.TrueForAll(inputPaths, p => !p.EndsWith(".c", System.StringComparison.OrdinalIgnoreCase));
             program = linking
                 ? Compiler.LinkObjects(inputPaths, fileBased: emit == EmitKind.File && !libraryMode, libraryMode: libraryMode)
                 : Compiler.EmitCSharp(
@@ -215,6 +252,21 @@ internal static class Program
         {
             Console.Error.WriteLine($"dotcc: {ex.Message}");
             return 2;
+        }
+
+        // -MD/-MMD outside obj mode: write one dependency rule per `.c` source
+        // (a pure link has no source to scan, so it's skipped). Default target
+        // and depfile follow gcc's source-basename `.cs`/`.d` convention; a
+        // single -MF names the file when there's one source.
+        if (!linking && (genDeps || genDepsNoSystem))
+        {
+            var sources = inputPaths.Where(p => p.EndsWith(".c", StringComparison.OrdinalIgnoreCase)).ToArray();
+            var rc = WriteDependencyFiles(
+                sources, includeSystem: !genDepsNoSystem, depFile, depTargets,
+                defaultTargetFor: s => Path.ChangeExtension(Path.GetFileName(s), ".cs"),
+                defaultDepPathFor: s => Path.ChangeExtension(Path.GetFileName(s), ".d"),
+                includeDirs, defines, dialect);
+            if (rc != 0) { return rc; }
         }
 
         var outDir = outputPath ?? "a.out-cs";
@@ -265,5 +317,44 @@ internal static class Program
             default:
                 return 1;
         }
+    }
+
+    /// <summary>
+    /// Write a Make-format dependency file (<c>-MD</c>/<c>-MMD</c>) for each
+    /// source. The rule target(s) come from <c>-MT</c> (or
+    /// <paramref name="defaultTargetFor"/>); the output path from a single
+    /// <c>-MF</c> (or <paramref name="defaultDepPathFor"/>). With multiple
+    /// sources and no <c>-MF</c>, each gets its own default <c>.d</c> so the
+    /// rules don't clobber one another.
+    /// </summary>
+    private static int WriteDependencyFiles(
+        string[] sourcePaths,
+        bool includeSystem,
+        string? depFile,
+        string[] depTargets,
+        Func<string, string> defaultTargetFor,
+        Func<string, string> defaultDepPathFor,
+        string[] includeDirs,
+        string[] defines,
+        CDialect dialect)
+    {
+        foreach (var src in sourcePaths)
+        {
+            var targets = depTargets.Length > 0 ? depTargets : new[] { defaultTargetFor(src) };
+            var path = depFile is not null && sourcePaths.Length == 1
+                ? depFile
+                : defaultDepPathFor(src);
+            try
+            {
+                var rule = Compiler.EmitDependencyRule(src, targets, includeSystem, includeDirs, defines, dialect);
+                File.WriteAllText(path, rule);
+            }
+            catch (CompileException ex)
+            {
+                Console.Error.WriteLine($"dotcc: {ex.Message}");
+                return 2;
+            }
+        }
+        return 0;
     }
 }
