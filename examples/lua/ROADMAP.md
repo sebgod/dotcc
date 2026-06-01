@@ -194,7 +194,25 @@ objects; `lobject` advanced past the `[` to a struct-member-dimension wall).
 Fixture `static-local-array/` (gcc-oracle-validated); unit tests
 `StaticLocalArrayTests`.
 
-### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (9 / 20 objects)
+### ✅ Phase 4o — `sizeof` of an expression through member access / pointer arith
+Three TUs failed on `sizeof(expr)` where the operand flowed through a struct
+member, pointer arithmetic, or a comma — the CType layer (roadmap item 6) didn't
+type those nodes. Extended it on three fronts: (1) **member access** (`s.f` /
+`p->f`) now carries the field's recorded CType (new `_structFieldTypes`, drained
+per struct like `_structFieldEnums`; a typedef'd pointer field resolves to its
+pointee so a deref/subscript peels the `*`), unlocking `sizeof(p->f)`, nested
+chains `sizeof(p->in.g)`, `sizeof(*p->f)`, `sizeof(p->f[i])`, and `lstate`'s
+`sizeof(*(L->stack.p))`; (2) **additive pointer arithmetic** (`p ± n`) carries the
+decayed pointer type (`ArithFold` → `PtrArithType`/`DecayToPointer`), unlocking
+`ldump`'s `sizeof((buff + DIBS - n)[0])`; (3) a **value-context comma** carries its
+last operand's type (`CommaSeq.LastType`), unlocking `lundump`'s
+`sizeof(getstr(o)[0])`. Plus an unfoldable-dimension local array now records its
+decayed `elem*` so the element still resolves. **Core probe 9/20 → 12/20** (ldump,
+lstate, lundump). Fixture `sizeof-member/` (gcc-oracle-validated); unit tests
+`SizeofMemberTests` (incl. a guard that an unsynthesizable `sizeof(a*b)` still
+fails loudly). The one remaining `sizeof`-expr gap is non-additive arithmetic.
+
+### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (12 / 20 objects)
 - Iterate the 20 core TUs via `probe.sh`; fix each parse/emit gap as it surfaces.
   One commit per coherent gap, each with a minimal fixture (dotcc tradition:
   never fix Lua-specifically — reduce to a small reproducer + fixture).
@@ -210,17 +228,15 @@ Fixture `static-local-array/` (gcc-oracle-validated); unit tests
   `typedef enum { … } Name;` (4h, ltm.h's `TMS`), and **multi-declarator members
   + per-declarator pointers** (4i, `struct CallInfo *previous, *next;`).
   **`lctype.c` + `lopcodes.c` emit full objects.** ✅
-- **Current frontier** (9/20 emit objects: `lctype`, `ldebug`, `lgc`, `lmem`,
-  `lopcodes`, `lstring`, `ltm`, `lvm`, `lzio`). The shared-header, macro, and
-  static-local-array walls are cleared; the 11 remaining failures are **diverse
-  per-TU gaps**, no single dominant cause:
-  - `sizeof` of an unsupported expression (ldump, lstate, lundump — the CType
-    layer gap from roadmap item 6) — **3 TUs, now the most common**.
+- **Current frontier** (12/20 emit objects: `lctype`, `ldebug`, `ldump`, `lgc`,
+  `lmem`, `lopcodes`, `lstate`, `lstring`, `ltm`, `lundump`, `lvm`, `lzio`). The
+  shared-header, macro, static-local-array, and `sizeof`-expr walls are cleared;
+  the 8 remaining failures are **diverse per-TU gaps**:
   - `array member needs constant dimension(s)` (lobject `space`, ltable `padding`)
     — a struct array-member whose dimension dotcc can't fold to a constant.
-  - `unexpected 'unsigned'` (lcode), `unexpected ','` (llex), `unexpected '{'`
-    (lparser), `unexpected 'TYPE_NAME'` (lapi:753, lcode:1442), `unexpected 'ID'`
-    (lfunc:70).
+  - `unexpected 'unsigned'` (lcode), `unexpected ','` (llex:371), `unexpected '{'`
+    (lparser:1349), `unexpected 'TYPE_NAME'` (lapi:753, lcode:1442), `unexpected
+    'ID'` (lfunc:70).
   - `setjmp`-in-`if`-without-`else` (ldo).
 - Watch items: `lvm.c` dispatch loop (may use a jump table / labels-as-values —
   GNU `&&label`, which is **out of scope**; Lua has an ANSI fallback `#if`-gated

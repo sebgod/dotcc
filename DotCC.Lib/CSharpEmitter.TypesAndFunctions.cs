@@ -301,6 +301,11 @@ internal sealed partial class CSharpEmitter
             var e = entries[i];
             var fieldType = i == 0 ? type : baseTy + new string('*', e.Stars);
             _pendingFields.Add(e.Name);  // raw name — keyed lookups stay un-escaped
+            // Record the field's CType so a `s.field` / `p->field` read carries it
+            // (enabling sizeof of a member, of `*member` / `member[i]`, and nested
+            // member chains). A typedef'd pointer alias resolves to its underlying
+            // (`StkId` → `StackValue*`) so a deref/subscript can peel the `*`.
+            _pendingFieldTypeMap[e.Name] = new CType.Sized(ResolveTypedef(fieldType));
             // An enum-typed field is remembered so a `s.field` / `p->field` read
             // can be tagged enum-typed (see FieldEnum / the member-access visitors).
             if (_enumTags.Contains(fieldType)) { _pendingFieldEnumMap[e.Name] = fieldType; }
@@ -619,6 +624,7 @@ internal sealed partial class CSharpEmitter
         _structFields[typeName] = new List<string>(_pendingFields);
         _pendingFields.Clear();
         DrainFieldEnums(typeName);
+        DrainFieldTypes(typeName);
         DrainInlineArrFields(typeName);
         DrainVolatileFields(typeName);
         DrainAtomicFields(typeName);
@@ -754,6 +760,15 @@ internal sealed partial class CSharpEmitter
     private readonly Dictionary<string, Dictionary<string, string>> _structFieldEnums = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _pendingFieldEnumMap = new(StringComparer.Ordinal);
 
+    // Per-struct/union field CType, so a member access `s.field` / `p->field`
+    // carries the field's type — enabling `sizeof` of a member (and of `*member`
+    // / `member[i]`) and nested member chains (`L->stack.p`). Populated by
+    // StructMemberList into _pendingFieldTypeMap, drained per struct (same shape
+    // as _structFieldEnums). Only scalar/pointer/struct-valued fields; array
+    // members carry their shape via _structMultiDimMembers / _structInlineArrFields.
+    private readonly Dictionary<string, Dictionary<string, CType>> _structFieldTypes = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, CType> _pendingFieldTypeMap = new(StringComparer.Ordinal);
+
     // C# type names already emitted into the type-decls section. Emitter-lifetime
     // (NOT reset per function): when several translation units `#include` the same
     // header, each TU re-parses the shared `struct`/`union`/`enum`/typedef, so the
@@ -773,6 +788,20 @@ internal sealed partial class CSharpEmitter
                 _structFieldEnums[tn] = new Dictionary<string, string>(_pendingFieldEnumMap, StringComparer.Ordinal);
             }
             _pendingFieldEnumMap.Clear();
+        }
+    }
+
+    // Snapshot the pending field-CType map onto each of the type's names and
+    // reset it for the next aggregate body (same shape as DrainFieldEnums).
+    private void DrainFieldTypes(params string[] typeNames)
+    {
+        if (_pendingFieldTypeMap.Count > 0)
+        {
+            foreach (var tn in typeNames)
+            {
+                _structFieldTypes[tn] = new Dictionary<string, CType>(_pendingFieldTypeMap, StringComparer.Ordinal);
+            }
+            _pendingFieldTypeMap.Clear();
         }
     }
 
@@ -1135,6 +1164,7 @@ internal sealed partial class CSharpEmitter
         if (tag != alias) { _structFields[tag] = fields; }
         _pendingFields.Clear();
         DrainFieldEnums(tag != alias ? new[] { alias, tag } : new[] { alias });
+        DrainFieldTypes(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainInlineArrFields(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainVolatileFields(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainAtomicFields(tag != alias ? new[] { alias, tag } : new[] { alias });
@@ -1166,6 +1196,7 @@ internal sealed partial class CSharpEmitter
         _structFields[alias] = new List<string>(_pendingFields);
         _pendingFields.Clear();
         DrainFieldEnums(alias);
+        DrainFieldTypes(alias);
         DrainInlineArrFields(alias);
         DrainVolatileFields(alias);
         DrainAtomicFields(alias);
@@ -1194,6 +1225,7 @@ internal sealed partial class CSharpEmitter
         if (tag != alias) { _structFields[tag] = fields; }
         _pendingFields.Clear();
         DrainFieldEnums(tag != alias ? new[] { alias, tag } : new[] { alias });
+        DrainFieldTypes(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainInlineArrFields(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainVolatileFields(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainAtomicFields(tag != alias ? new[] { alias, tag } : new[] { alias });
@@ -1217,6 +1249,7 @@ internal sealed partial class CSharpEmitter
         _structFields[alias] = new List<string>(_pendingFields);
         _pendingFields.Clear();
         DrainFieldEnums(alias);
+        DrainFieldTypes(alias);
         DrainInlineArrFields(alias);
         DrainVolatileFields(alias);
         DrainAtomicFields(alias);

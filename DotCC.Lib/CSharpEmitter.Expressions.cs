@@ -315,11 +315,13 @@ internal sealed partial class CSharpEmitter
         var text = $"({baseExpr}.{Id(field)})";
         // A pointer-to-volatile field — `s.p` carries the VolatilePointee tag so
         // `*s.p` / `s.p[i]` fence (phase V2).
-        if (FieldVolatilePointee(n.Arg0, field)) { return new EmitContent.Text(text, VolatilePointee: true); }
+        if (FieldVolatilePointee(n.Arg0, field)) { return new EmitContent.Text(text, Ty: FieldCType(n.Arg0, field), VolatilePointee: true); }
         // An enum-typed field reads as enum-typed (decays in operators, reconciles
         // at sinks) — same EnumType machinery as an enum variable.
         if (FieldEnum(n.Arg0, field) is string e) { return new EmitContent.Text(text, e, new CType.Sized(e)); }
-        return text;
+        // Plain scalar/pointer/struct field — carry its CType so sizeof of the
+        // member (and of `*field` / `field[i]`) and nested member chains resolve.
+        return Typed(text, FieldCType(n.Arg0, field));
     }
     public EmitContent Visit(C.MemberArrow n)
     {
@@ -361,9 +363,10 @@ internal sealed partial class CSharpEmitter
         if (FieldVolatile(n.Arg0, field)) { return VolatileReadOf($"{baseExpr}{op}{member}", null, null); }
         var text = $"({baseExpr}{op}{member})";
         // Pointer-to-volatile field — tag so `*p->q` / `p->q[i]` fence (phase V2).
-        if (FieldVolatilePointee(n.Arg0, field)) { return new EmitContent.Text(text, VolatilePointee: true); }
+        if (FieldVolatilePointee(n.Arg0, field)) { return new EmitContent.Text(text, Ty: FieldCType(n.Arg0, field), VolatilePointee: true); }
         if (FieldEnum(n.Arg0, field) is string e) { return new EmitContent.Text(text, e, new CType.Sized(e)); }
-        return text;
+        // Plain field — carry its CType (see MemberDot).
+        return Typed(text, FieldCType(n.Arg0, field));
     }
 
     // If `field` is a C11 anonymous-union field promoted from `baseItem`'s struct
@@ -385,6 +388,18 @@ internal sealed partial class CSharpEmitter
         if (TyOf(baseItem) is not CType.Sized s) { return null; }
         var t = s.CsType.TrimEnd('*');
         return _structFieldEnums.TryGetValue(t, out var fe) && fe.TryGetValue(field, out var e) ? e : null;
+    }
+
+    // The CType of `field` on the struct/union that baseItem's CType names (a
+    // struct value carries CType.Sized("S"), a pointer CType.Sized("S*") — peel
+    // the `*`), or null. Same base-type resolution as FieldEnum. Lets a plain
+    // member access carry its field's type so `sizeof(s.f)`, `sizeof(*p->f)`,
+    // `sizeof(p->f[i])`, and nested chains (`L->stack.p`) resolve.
+    private CType? FieldCType(Item baseItem, string field)
+    {
+        if (TyOf(baseItem) is not CType.Sized s) { return null; }
+        var t = s.CsType.TrimEnd('*');
+        return _structFieldTypes.TryGetValue(t, out var ft) && ft.TryGetValue(field, out var cty) ? cty : null;
     }
 
     // (element C# type, count) of `field` if it's an [InlineArray] member of the
@@ -942,7 +957,8 @@ internal sealed partial class CSharpEmitter
             ? new List<string>(cs.Operands)
             : new List<string> { T(n.Arg0) };
         ops.Add(T(n.Arg2));
-        return new EmitContent.CommaSeq(ops);
+        // The comma expression's value (and type) is its LAST operand.
+        return new EmitContent.CommaSeq(ops, TyOf(n.Arg2));
     }
 
     public EmitContent Visit(C.Paren n)
@@ -962,7 +978,9 @@ internal sealed partial class CSharpEmitter
                     "comma-operator chains longer than 7 operands aren't supported");
             }
             var joined = string.Join(", ", seq.Operands.Select(StripOuterParens));
-            return $"({joined}).Item{seq.Operands.Count}";
+            // Carry the comma expression's type (its last operand's) so a value-
+            // context tuple composes under sizeof / deref / subscript.
+            return Typed($"({joined}).Item{seq.Operands.Count}", seq.LastType);
         }
         // Propagate the volatile-lvalue and pointee-volatile tags through the parens
         // so `(x) = …` / `&(x)` see the write/address context and `(*p)` / `(p)[i]`

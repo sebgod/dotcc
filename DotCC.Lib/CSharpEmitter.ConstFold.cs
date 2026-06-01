@@ -42,8 +42,37 @@ internal sealed partial class CSharpEmitter
 
     // Wrap an arithmetic op's emitted text with a folded ConstInt when both
     // operands are integer constants (else null — the text is still correct).
+    // Additive pointer arithmetic (`p + n` / `p - n`) also carries the (decayed)
+    // pointer type, so `(p + n)[0]` / `*(p + n)` resolve under sizeof.
     private EmitContent ArithFold(string text, Item a, string op, Item b) =>
-        new EmitContent.Text(text, ConstInt: FoldBinary(ConstOfItem(a), op, ConstOfItem(b)));
+        new EmitContent.Text(text, Ty: PtrArithType(a, op, b),
+            ConstInt: FoldBinary(ConstOfItem(a), op, ConstOfItem(b)));
+
+    // The result type of additive pointer arithmetic. `p ± int` yields a pointer
+    // of the same element type as `p` (an array operand decays to its element
+    // pointer, so `(arr + n)[k]` strides correctly); `p - q` (both pointers) is a
+    // ptrdiff (integer), so we don't claim a pointer type there. Only `+`/`-`
+    // (the C ops with pointer semantics) — `*`/`/`/`%` never produce a pointer.
+    private CType? PtrArithType(Item a, string op, Item b)
+    {
+        if (op != "+" && op != "-") { return null; }
+        var ta = DecayToPointer(TyOf(a));
+        var tb = DecayToPointer(TyOf(b));
+        if (ta is not null && tb is not null) { return null; }  // ptr ± ptr → difference
+        return ta ?? tb;
+    }
+
+    // Decay an indexable CType to the pointer it becomes in arithmetic: an array
+    // `T[N]` (or [InlineArray]) → `T*`; an existing pointer stays; a PtrToArr
+    // stays (it subscripts with the array stride); a scalar isn't a pointer → null.
+    private static CType? DecayToPointer(CType? t) => t switch
+    {
+        CType.Sized s when s.CsType.EndsWith("*", System.StringComparison.Ordinal) => s,
+        CType.Arr a => a.Element is CType.Sized es ? new CType.Sized(es.CsType + "*") : a,
+        CType.InlineArr ia => ia.Element is CType.Sized es ? new CType.Sized(es.CsType + "*") : ia,
+        CType.PtrToArr => t,
+        _ => null,
+    };
 
     // Byte size of a synthesized CType for `sizeof expr` folding — array is
     // count*sizeof(element) (the same shape SizeofText emits textually).

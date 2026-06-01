@@ -263,8 +263,11 @@ public abstract record EmitContent
     /// <c>Visit(C.StmtExpr)</c> (statement context — the result is discarded, so
     /// each operand becomes its own statement). Because <c>Expr</c> is used
     /// nowhere else, this variant can't escape to a <c>T()</c> that expects code.
+    /// <para><c>LastType</c> carries the synthesized CType of the final operand
+    /// (the value of the whole comma expression in C), so a value-context tuple
+    /// can be typed — e.g. <c>sizeof((a, p->field)[0])</c> resolves.</para>
     /// </summary>
-    public sealed record CommaSeq(IReadOnlyList<string> Operands) : EmitContent;
+    public sealed record CommaSeq(IReadOnlyList<string> Operands, CType? LastType = null) : EmitContent;
 
     /// <summary>
     /// A run of adjacent string literals (C concatenates them: <c>"a" "b"</c>

@@ -418,8 +418,10 @@ public sealed partial class CompilerTests
     [Fact]
     public void Sizeof_of_unsupported_operand_fails_clearly()
     {
-        // No struct-field-type tracking yet → sizeof(s.field) can't resolve.
-        var src = WriteTemp("struct P { int x; }; int main() { struct P p; int n = sizeof(p.x); return n; }");
+        // A non-additive arithmetic result has no pointer/array type, so its
+        // sizeof can't be synthesized — dotcc must fail loudly. (Member access,
+        // pointer arithmetic, and comma ARE now resolved — see SizeofMemberTests.)
+        var src = WriteTemp("int main() { int a = 3, b = 4; int n = sizeof(a * b); return n; }");
         try
         {
             var ex = Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }));

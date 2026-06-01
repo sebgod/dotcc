@@ -265,6 +265,11 @@ internal sealed partial class CSharpEmitter
                 throw new CompileException(
                     $"multi-dimensional array `{name}` needs constant dimensions");
             }
+            // The exact count isn't a literal, but the element type is known and a
+            // C array decays to a pointer in value contexts — record the decayed
+            // `elem*` so subscript / pointer-arith / `sizeof((a+n)[0])` resolve the
+            // element (only direct `sizeof(a)`, which needs the count, stays unknown).
+            if (_currentFunctionName is not null) { _localTypes[name] = elem + "*"; }
             return $"{elem}* {Id(emitted)} = stackalloc {elem}[{StripOuterParens(dims[0])}]";
         }
 
