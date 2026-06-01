@@ -868,6 +868,44 @@ internal sealed partial class CSharpEmitter
         return string.Empty;
     }
 
+    // `typedef union Tag { MemberList } Alias ;` — union definition + alias.
+    // The union counterpart of TypedefStruct: index fields under the alias (and
+    // the tag, if different), emit the [StructLayout(Explicit)] union struct
+    // under the alias, and bind the tag as a using-alias when it differs.
+    public EmitContent Visit(C.TypedefUnion n)
+    {
+        var tag = T(n.Arg2);
+        var members = T(n.Arg4);
+        var alias = T(n.Arg6);
+        var fields = new List<string>(_pendingFields);
+        _structFields[alias] = fields;
+        if (tag != alias) { _structFields[tag] = fields; }
+        _pendingFields.Clear();
+        DrainFieldEnums(tag != alias ? new[] { alias, tag } : new[] { alias });
+        DrainPromotions(alias);
+        if (tag != alias && _promotedFields.TryGetValue(alias, out var aliasProm)) { _promotedFields[tag] = aliasProm; }
+        EmitExplicitUnionType(alias, members);
+        if (tag != alias && _aliasNames.Add(tag))
+        {
+            _aliases.Append("using unsafe ").Append(tag).Append(" = ").Append(alias).Append(";\n");
+        }
+        return string.Empty;
+    }
+
+    // `typedef union { MemberList } Alias ;` — anonymous (tagless) union + alias.
+    // Same as TypedefUnion minus the tag binding.
+    public EmitContent Visit(C.TypedefUnionAnon n)
+    {
+        var members = T(n.Arg3);
+        var alias = T(n.Arg5);
+        _structFields[alias] = new List<string>(_pendingFields);
+        _pendingFields.Clear();
+        DrainFieldEnums(alias);
+        DrainPromotions(alias);
+        EmitExplicitUnionType(alias, members);
+        return string.Empty;
+    }
+
     public EmitContent Visit(C.FnsCons n) =>
         T(n.Arg0) + ((T(n.Arg0)).Length > 0 ? "\n\n" : "") + T(n.Arg1);
 

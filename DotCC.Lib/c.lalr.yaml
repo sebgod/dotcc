@@ -455,6 +455,14 @@ productions:
       # tagged form above: after `typedef struct`, an ID lookahead → tagged, a `{`
       # lookahead → tagless. Same emit as typedefStruct, minus the tag binding.
       - { lhs: Fn, rhs: ['typedef', 'struct', '{', MemberList, '}', ID, ';'], action: typedefStructAnon }
+      # `typedef union ID { MemberList } ID ;` and `typedef union { MemberList } ID ;`
+      # — the union counterparts of the two struct forms above (Lua's core value
+      # representation: `typedef union Value { … } Value;` in lobject.h). Same
+      # tagged-vs-anonymous `ID` / `{` lookahead split. The emitted C# is a
+      # [StructLayout(Explicit)] + [FieldOffset(0)] struct (overlapping storage =
+      # C union), exactly like a plain `union ID { … };` def (unionDef).
+      - { lhs: Fn, rhs: ['typedef', 'union', ID, '{', MemberList, '}', ID, ';'], action: typedefUnion }
+      - { lhs: Fn, rhs: ['typedef', 'union', '{', MemberList, '}', ID, ';'], action: typedefUnionAnon }
       # Function-pointer typedef: `typedef Ret (*Name)(args);`. Lowers to
       # C# `using unsafe Name = delegate*<args..., Ret>;`. The standalone
       # form `int (*fn)(int);` is famously hard to LALR-parse due to the
