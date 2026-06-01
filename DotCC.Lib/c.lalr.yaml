@@ -779,21 +779,28 @@ productions:
       # After `Type ID [`, a `]` selects the FAM, an `E` the sized form.
       - { lhs: Member, rhs: [Type, ID, '[', E, ']', ';'], action: structArrMember }
       - { lhs: Member, rhs: [Type, ID, '[', ']', ';'],    action: structFlexArrMember }
-      # Anonymous struct member (C11): `struct { … };` with no member name. Its
-      # fields are PROMOTED into the enclosing aggregate's namespace (`s.x`). For
-      # a struct (sequential, no overlap) that's exactly an inline of the inner
-      # fields — so dotcc emits the inner member lines directly into the parent
-      # and they become real parent fields (no access rewrite needed). Conflict-
-      # free: after `struct`, a `{` lookahead picks this; an `ID` is a named-type
-      # member (`struct Foo x;`). C11-gated.
-      - { lhs: Member, rhs: ['struct', '{', MemberList, '}', ';'], action: anonStructMember }
-      # Anonymous union member (C11): `union { … };`. Its fields must OVERLAP, so
-      # (unlike the struct case) they can't just inline. The emitter lifts the
-      # inner fields into a generated nested [StructLayout(Explicit)] type, adds a
-      # single synthetic field of it to the parent, and rewrites promoted accesses
-      # (`o.i` → `o.__anonN.i`) at member-access time. MemberMark (epsilon) marks
-      # where the inner fields begin so they can be isolated from the parent's.
+      # Nested aggregate members. All four forms carry a MemberMark (epsilon)
+      # right after the `{` to snapshot where the inner fields begin, so a
+      # consumer can isolate them from the parent's. The NAMED-vs-anonymous split
+      # is the trailing `ID` before `;` (a clean shift decision after `}`), and
+      # struct-vs-union by the keyword — no epsilon conflict.
+      #
+      # ANONYMOUS struct (C11) `struct { … };` — fields PROMOTED into the parent's
+      # namespace (`s.x`). Sequential, no overlap, so promotion == inline: emit
+      # the inner lines directly as parent fields (no access rewrite).
+      - { lhs: Member, rhs: ['struct', '{', MemberMark, MemberList, '}', ';'], action: anonStructMember }
+      # ANONYMOUS union (C11) `union { … };` — fields must OVERLAP, so they can't
+      # inline. Lift them into a generated nested [StructLayout(Explicit)] type,
+      # add one synthetic field of it to the parent, and rewrite promoted accesses
+      # (`o.i` → `o.__anonN.i`) at member-access time.
       - { lhs: Member, rhs: ['union', '{', MemberMark, MemberList, '}', ';'], action: anonUnionMember }
+      # NAMED nested aggregates `struct { … } name;` / `union { … } name;` — NOT
+      # promoted: `name` is a real field of a synthesized nested type, accessed as
+      # `o.name.inner`. The struct nested type is sequential, the union one gets
+      # the explicit-layout treatment. Lua's `union StackValue { TValue val;
+      # struct { …; unsigned short delta; } tbc; }` is the motivating case.
+      - { lhs: Member, rhs: ['struct', '{', MemberMark, MemberList, '}', ID, ';'], action: namedNestedStruct }
+      - { lhs: Member, rhs: ['union', '{', MemberMark, MemberList, '}', ID, ';'], action: namedNestedUnion }
       - { lhs: MemberMark, rhs: [], action: memberMark }
 
   # EnumList / EnumItem — enumerator body for `enum Name { … }`.

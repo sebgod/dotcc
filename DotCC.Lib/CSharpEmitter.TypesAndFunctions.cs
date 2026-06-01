@@ -394,7 +394,11 @@ internal sealed partial class CSharpEmitter
     public EmitContent Visit(C.AnonStructMember n)
     {
         Gate(2011, "anonymous struct/union members", n.Arg0);  // C11
-        return T(n.Arg2);  // inner member lines, inlined into the parent
+        // MemberMark pushed a snapshot; an anon struct INLINES (its fields stay
+        // in the parent's _pendingFields as direct parent fields), so just
+        // discard the mark to keep the stack balanced and emit the inner lines.
+        if (_memberMarks.Count > 0) { _memberMarks.Pop(); }
+        return T(n.Arg3);  // inner member lines, inlined into the parent
     }
 
     // Epsilon marker before an anonymous union's inner member list — snapshot how
@@ -429,6 +433,43 @@ internal sealed partial class CSharpEmitter
         _pendingFields.Add(synth);  // the one real parent field
         foreach (var fld in innerNames) { _pendingPromotions.Add((fld, synth)); }
         return $"public {nestedType} {synth};\n";
+    }
+
+    // Named nested aggregate member `struct { … } name;` / `union { … } name;` —
+    // a real field `name` of a SYNTHESIZED nested type, accessed as `o.name.inner`
+    // (NOT promoted, unlike the anonymous forms). The struct synth type is
+    // sequential; the union one gets the [StructLayout(Explicit)] treatment. The
+    // inner fields are sliced off _pendingFields (they belong to the nested type,
+    // not the parent) and registered under the synth type so `o.name.inner`
+    // resolves; only `name` joins the parent's fields. Valid since C89 (the
+    // member is named), so no dialect gate — unlike the anonymous C11 forms.
+    public EmitContent Visit(C.NamedNestedStruct n) => EmitNamedNestedAggregate(T(n.Arg3), T(n.Arg5), union: false);
+    public EmitContent Visit(C.NamedNestedUnion n)  => EmitNamedNestedAggregate(T(n.Arg3), T(n.Arg5), union: true);
+
+    private EmitContent EmitNamedNestedAggregate(string innerLines, string fieldName, bool union)
+    {
+        var snapshot = _memberMarks.Count > 0 ? _memberMarks.Pop() : _pendingFields.Count;
+        var innerNames = new List<string>();
+        for (var i = snapshot; i < _pendingFields.Count; i++) { innerNames.Add(_pendingFields[i]); }
+        if (snapshot < _pendingFields.Count) { _pendingFields.RemoveRange(snapshot, _pendingFields.Count - snapshot); }
+        var id = _anonAggCounter++;
+        var nestedType = union ? $"__NestU{id}" : $"__NestS{id}";
+        if (union) { EmitExplicitUnionType(nestedType, innerLines); }
+        else { EmitSequentialStructType(nestedType, innerLines); }
+        _structFields[nestedType] = innerNames;  // so `o.name.inner` resolves its fields
+        _pendingFields.Add(fieldName);           // the named field IS a parent field
+        return $"public {nestedType} {Id(fieldName)};\n";
+    }
+
+    // Emit a plain (sequential-layout) `unsafe struct name { … }` — the body
+    // shape StructDef produces, factored out for the named-nested-struct synth
+    // type. Deduped by name across TUs via _emittedTypes.
+    private void EmitSequentialStructType(string name, string memberLines)
+    {
+        if (!_emittedTypes.Add(name)) { return; }
+        var declText = "unsafe struct " + name + "\n{\n" + IndentEach(memberLines) + "}\n\n";
+        _structs.Append(declText);
+        _typeDecls[name] = declText;
     }
 
     private void DrainPendingFields(string typeName)
