@@ -113,7 +113,7 @@ TU hits it via `lua.h`); dotcc has block-scope arrays but not global ones.
   `LC_ALL/COLLATE/CTYPE/MONETARY/NUMERIC/TIME` macros.
 - Exit: `loslib.c`'s `os_setlocale` compiles; `localeconv()->decimal_point` works.
 
-### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (all 20 PARSE; 1 / 20 objects)
+### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (2 / 20 objects)
 - Iterate the 20 core TUs via `probe.sh`; fix each parse/emit gap as it surfaces.
   One commit per coherent gap, each with a minimal fixture (dotcc tradition:
   never fix Lua-specifically — reduce to a small reproducer + fixture).
@@ -121,17 +121,18 @@ TU hits it via `lua.h`); dotcc has block-scope arrays but not global ones.
   before a typedef-name/tag (4a), `typedef struct Foo Foo;` tag-vs-typedef
   namespace (4b), file-scope array declarations (4c), parenthesized function-name
   declarator `T (name)(args)` (4d, lua.h's `LUA_API` idiom), `typedef union { … }
-  Name;` (4e, `Value`/`StackValue`), named nested aggregate members `struct { … }
-  name;` (4f, `StackValue.tbc`). **All 20 core TUs now PARSE**; `lctype.c` emits a
-  full object. ✅ — that exhausted the parse-level walls.
-- **Current wall** (the *first emit-level* one; all 19 remaining TUs hit it
-  identically, via `lobject.h`): **struct-hack trailing arrays of non-primitive
-  element type** — `UValue uv[1]` (Udata), `TValue upvalue[1]` (CClosure),
-  `UpVal *upvals[1]` (LClosure). C# `fixed` buffers only allow primitive elements.
-  Needs: emit the field as inline storage at the right offset + rewrite
-  `obj->arr[i]` over-indexing into the malloc'd tail (`(&obj->arr)[i]`) + the
-  array→pointer decay (4g, next — a bigger lift than the parser fixes, touching
-  the emitter's member-access / subscript / decay paths).
+  Name;` (4e), named nested aggregate members `struct { … } name;` incl. the
+  **tagged** `struct Tag { … } name;` (4f + 4g, `StackValue.tbc` / `Node.u`),
+  **struct-hack arrays of non-primitive element type** via C# 12 `[InlineArray]`
+  + element-pointer access (4g, `UValue uv[1]` / `UpVal *upvals[1]`), and
+  `typedef enum { … } Name;` (4h, ltm.h's `TMS`). **`lctype.c` + `lopcodes.c`
+  emit full objects.** ✅
+- **Current wall** (`lstate.h:190`, ~18 remaining TUs): **multi-declarator struct
+  members + per-declarator pointers** — `struct CallInfo *previous, *next;`. Two
+  general gaps: a struct member is single-declarator (`Type ID ;`) only, AND a
+  declarator list (block/file/struct) has no per-declarator `*` (`int *a, *b;`
+  fails even at block scope). Needs a declarator-with-its-own-pointer-level model
+  shared across scopes (4i, next).
 - Watch items: `lvm.c` dispatch loop (may use a jump table / labels-as-values —
   GNU `&&label`, which is **out of scope**; Lua has an ANSI fallback `#if`-gated
   on `__GNUC__`, which dotcc doesn't define → we get the portable `switch`).
