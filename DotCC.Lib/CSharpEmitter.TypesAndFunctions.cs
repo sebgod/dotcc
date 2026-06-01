@@ -415,6 +415,7 @@ internal sealed partial class CSharpEmitter
         if (_fixedBufferElemTypes.Contains(elem))
         {
             _pendingFields.Add(name);
+            _pendingFixedBufferFields.Add(name);  // decays to a pointer (offsetof)
             return $"public fixed {elem} {Id(name)}[{totalText}];\n";
         }
         return EmitInlineArrayMember(elem, name, totalText, record1D: dims.Count < 2);
@@ -438,6 +439,7 @@ internal sealed partial class CSharpEmitter
         if (_fixedBufferElemTypes.Contains(elem))
         {
             _pendingFields.Add(name);
+            _pendingFixedBufferFields.Add(name);  // decays to a pointer (offsetof)
             return $"public fixed {elem} {Id(name)}[1]; // C99 flexible array member (sized at allocation)\n";
         }
         return EmitInlineArrayMember(elem, name, "1");
@@ -456,6 +458,13 @@ internal sealed partial class CSharpEmitter
     private readonly Dictionary<string, (string Elem, int Count)> _pendingInlineArrFields = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Dictionary<string, (string Elem, int Count)>> _structInlineArrFields =
         new(StringComparer.Ordinal);
+
+    // Per-aggregate set of fields lowered to a C# `fixed` buffer (primitive array
+    // member). offsetof needs to know: a fixed buffer DECAYS to a pointer, so its
+    // address is `(byte*)t.field` (no `&`), whereas a regular field / [InlineArray]
+    // wrapper uses `&t.field`. Drained alongside the inline-array map.
+    private readonly HashSet<string> _pendingFixedBufferFields = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, HashSet<string>> _structFixedBufferMembers = new(StringComparer.Ordinal);
 
     // Per-aggregate map for MULTI-dimensional array members: fieldName → (element C#
     // type, whether it's [InlineArray]-backed vs a `fixed` buffer, the strided
@@ -789,6 +798,14 @@ internal sealed partial class CSharpEmitter
                     new Dictionary<string, (string, bool, CType)>(_pendingMultiDimMembers, StringComparer.Ordinal);
             }
             _pendingMultiDimMembers.Clear();
+        }
+        if (_pendingFixedBufferFields.Count > 0)
+        {
+            foreach (var tn in typeNames)
+            {
+                _structFixedBufferMembers[tn] = new HashSet<string>(_pendingFixedBufferFields, StringComparer.Ordinal);
+            }
+            _pendingFixedBufferFields.Clear();
         }
     }
 

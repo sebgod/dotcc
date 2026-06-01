@@ -450,6 +450,46 @@ internal sealed partial class CSharpEmitter
         return new EmitContent.Text(SizeofText(t), Ty: new CType.Sized("int"), ConstInt: SizeofConstOfCType(t));
     }
 
+    // `offsetof(Type, member)` (C89) — the byte offset of `member` within `Type`.
+    // C# has no compile-time offsetof, and the C `&((T*)0)->m` trick faults at
+    // runtime (C# null-checks the `->` deref, even in unsafe). The only reliable
+    // form is a REAL instance + address subtraction (`(byte*)&t.m - (byte*)&t`), so
+    // dotcc generates a tiny helper per (Type, member) using a stack `default`
+    // instance and calls it. `&t.field` of a stack local needs no `fixed`, and the
+    // field is referenced by name (no MemberArrow rewrite) so an array/[InlineArray]
+    // member yields its offset, not its decayed element pointer. Result is size_t.
+    public EmitContent Visit(C.OffsetofExpr n)
+    {
+        var type = T(n.Arg2);
+        var rawMember = T(n.Arg4);
+        var member = Id(rawMember);
+        var key = IdentFrag(type) + "__" + IdentFrag(rawMember);
+        if (_offsetofKeys.Add(key))
+        {
+            // A `fixed` buffer member DECAYS to a pointer (its address is `t.field`);
+            // a regular field / [InlineArray] wrapper uses `&t.field`. Resolve the
+            // struct's fixed-buffer set via the type name (or its tag/alias).
+            var isFixed = _structFixedBufferMembers.TryGetValue(type, out var fb) && fb.Contains(rawMember);
+            var addr = isFixed ? $"(byte*)__t.{member}" : $"(byte*)&__t.{member}";
+            // Partial class so each helper can be appended independently (C# merges).
+            _structs.Append("static unsafe partial class __Offsets\n{\n    internal static ulong ")
+                .Append(key).Append("() { ").Append(type).Append(" __t = default; return (ulong)(")
+                .Append(addr).Append(" - (byte*)&__t); }\n}\n\n");
+        }
+        return Typed($"__Offsets.{key}()", new CType.Sized("ulong"));
+    }
+
+    // Set of emitted offsetof helper keys (dedup — one helper per Type+member).
+    private readonly HashSet<string> _offsetofKeys = new(System.StringComparer.Ordinal);
+
+    // Sanitize a type/member name into a C# identifier fragment for a helper name.
+    private static string IdentFrag(string s)
+    {
+        var sb = new StringBuilder(s.Length);
+        foreach (var c in s) { sb.Append(char.IsLetterOrDigit(c) ? c : '_'); }
+        return sb.ToString();
+    }
+
     // C# expression for the byte size of a CType. An array is count*sizeof(elem)
     // (recursive for nested arrays); anything else is a direct C# `sizeof(T)`.
     private static string SizeofText(CType t) => t switch

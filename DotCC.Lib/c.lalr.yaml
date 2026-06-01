@@ -362,6 +362,11 @@ symbols:
   # Interlocked-backed access. A `_Capital_` keyword — reserved in every dialect,
   # so always lexed (the FEATURE is gated C11 in the visitor).
   - '_Atomic'      # 161 keyword (C11) — atomic type qualifier/specifier
+  # `offsetof(Type, member)` (C89 <stddef.h>). Normally a macro, but its standard
+  # `&((T*)0)->m` expansion would hit dotcc's array-member access rewrite, so dotcc
+  # treats it as a builtin (like va_arg) — a dedicated grammar production that emits
+  # the raw field-address offset. NOT #defined in the synthetic <stddef.h>.
+  - 'offsetof'     # 162 builtin (C89 <stddef.h>) — offsetof(Type, member)
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -1191,6 +1196,12 @@ productions:
       # with the unique `va_arg` terminal, so it's conflict-free with the call
       # rules above. Lowered to `(Type)ap.Next()` / `(Type)ap.NextPtr()`.
       - { lhs: Postfix, rhs: ['va_arg', '(', E, ',', Type, ')'], action: vaArgExpr }
+      # `offsetof(Type, member)` — the byte offset of `member` in `Type`. The
+      # TYPE_NAME lexer hack lets the first operand be a Type (so a bare typedef-name
+      # there is fine, unlike a value arg). Member is a single field ID (the common
+      # form; `a.b` / `arr[i]` designators aren't supported). Emits a raw field
+      # address through a null `Type*` — see Visit(C.OffsetofExpr).
+      - { lhs: Postfix, rhs: ['offsetof', '(', Type, ',', ID, ')'], action: offsetofExpr }
       # Postfix ++/-- — left-associative (chained `x++` then `++` is illegal
       # in C and C# both; the grammar permits but the downstream compiler
       # diagnoses).
@@ -1342,6 +1353,7 @@ lexer:
     # `va_arg` builtin — exact match; longest-match still lets `va_argX` lex as
     # an ordinary ID (the ID rule matches the longer run).
     - { symbol: 'va_arg',   match: 'va_arg' }
+    - { symbol: 'offsetof', match: 'offsetof' }
     - { symbol: 'typedef',  match: 'typedef' }
     - { symbol: 'do',       match: 'do' }
     - { symbol: 'enum',     match: 'enum' }
