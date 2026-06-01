@@ -909,7 +909,12 @@ internal sealed partial class CSharpEmitter
     public EmitContent Visit(C.ParamArraySized n) { _pendingParams.Add((T(n.Arg1), T(n.Arg0) + "*")); return $"{T(n.Arg0)}* {Id(T(n.Arg1))}"; }
     public EmitContent Visit(C.ParamsCons n) => $"{T(n.Arg0)}, {T(n.Arg2)}";
     public EmitContent Visit(C.ParamsOne n) => T(n.Arg0);
-    public EmitContent Visit(C.ParamsVararg n) => $"{T(n.Arg0)}, params object[] _va";
+    // A C variadic function `T f(fixed…, ...)` lowers to a trailing
+    // `params VaArg[] _va`. VaArg (a Libc value type with implicit conversions
+    // from every C arg type, pointers included) lets C# overload resolution
+    // marshal each variadic actual at the call site with no boxing — object[]
+    // couldn't carry raw pointers. va_start/va_arg/va_end read back through it.
+    public EmitContent Visit(C.ParamsVararg n) => $"{T(n.Arg0)}, params VaArg[] _va";
 
     // Types — pointer composition + tag types stay direct; everything that
     // accumulates declaration specifiers (signed/unsigned, short/long, int/

@@ -345,6 +345,13 @@ symbols:
   # promotes `typeof` (and `typeof_unqual`, treated identically — dotcc drops
   # qualifiers) onto this terminal under c23; pre-C23 it stays an identifier.
   - 'typeof'       # 158 keyword (C23) — typeof operator
+  # `va_arg` (<stdarg.h>) — its SECOND operand is a TYPE, not an expression, so
+  # it cannot be an ordinary macro/call; recognised as a builtin with its own
+  # production (exactly as clang/gcc implement __builtin_va_arg). Has a lexer
+  # rule, so the spelling `va_arg` is reserved when in use — acceptable, like
+  # `sizeof`. va_start/va_end/va_copy take only expressions and stay ordinary
+  # calls (rewritten by name in the emitter).
+  - 'va_arg'       # 159 builtin (C99 <stdarg.h>) — `va_arg(ap, Type)`
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -1047,6 +1054,11 @@ productions:
     rules:
       - { lhs: Postfix, rhs: [Postfix, '(', ArgList, ')'], action: call }
       - { lhs: Postfix, rhs: [Postfix, '(', ')'],            action: callNoArgs }
+      # `va_arg(ap, Type)` (<stdarg.h>) — dedicated production because the second
+      # operand is a TYPE (same reason `sizeof(Type)` has its own rule). Starts
+      # with the unique `va_arg` terminal, so it's conflict-free with the call
+      # rules above. Lowered to `(Type)ap.Next()` / `(Type)ap.NextPtr()`.
+      - { lhs: Postfix, rhs: ['va_arg', '(', E, ',', Type, ')'], action: vaArgExpr }
       # Postfix ++/-- — left-associative (chained `x++` then `++` is illegal
       # in C and C# both; the grammar permits but the downstream compiler
       # diagnoses).
@@ -1192,6 +1204,9 @@ lexer:
     - { symbol: 'default',  match: 'default' }
     - { symbol: 'struct',   match: 'struct' }
     - { symbol: 'sizeof',   match: 'sizeof' }
+    # `va_arg` builtin — exact match; longest-match still lets `va_argX` lex as
+    # an ordinary ID (the ID rule matches the longer run).
+    - { symbol: 'va_arg',   match: 'va_arg' }
     - { symbol: 'typedef',  match: 'typedef' }
     - { symbol: 'do',       match: 'do' }
     - { symbol: 'enum',     match: 'enum' }

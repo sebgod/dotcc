@@ -165,6 +165,7 @@ public static class Compiler
     internal static readonly string[] PredefinedTypeNames =
     {
         "LongJmpToken", // <setjmp.h> — opaque jmp_buf target
+        "VaList",       // <stdarg.h> — va_list cursor (Libc.VaList value type)
         "thrd_t",       // <threads.h> — opaque thread handle (Libc.thrd_t struct)
         "mtx_t",        // <threads.h> — opaque mutex handle (Libc.mtx_t struct)
         "div_t",        // <stdlib.h> — div() result (Libc.div_t struct)
@@ -952,7 +953,7 @@ public static class Compiler
         var exportsBlock = new StringBuilder();
         foreach (var e in exports)
         {
-            if (e.Params.Contains("params object[]", StringComparison.Ordinal))
+            if (e.Params.Contains("params VaArg[]", StringComparison.Ordinal))
             {
                 exportsBlock.Append($"    // dotcc: '{e.Name}' has varargs — not exported (no UnmanagedCallersOnly support).\n");
                 continue;

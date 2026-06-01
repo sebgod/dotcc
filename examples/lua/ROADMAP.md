@@ -77,7 +77,19 @@ block-scope arrays but not global ones yet.
 - Exit: the minimal repro and `luaconf.h` lex clean; re-probe to expose the next wall.
 </details>
 
-### ⬜ Phase 2 — `stdarg.h` + variadic functions
+### ✅ Phase 2 — `stdarg.h` + variadic functions  ← DONE
+Landed: variadic `...` lowers to `params VaArg[] _va`; `VaArg`/`VaList` runtime
+(nested in `Libc`); synthetic `stdarg.h`; `va_start`/`va_arg`/`va_end`/`va_copy`
+emitter support (`va_arg` via a dedicated grammar production + terminal, the
+others rewritten by name). `VaArg`'s implicit/explicit conversions carry
+pointers with no boxing and give C's default promotions for free; `VaList` is a
+value type so forwarding + `va_copy` work by struct copy. Fixture `varargs/` +
+`VarargTests`; C-SUPPORT updated. Next wall (Phase 4): **`lua.h:157
+extern const char lua_ident[];`** — a **file-scope array declaration** (every
+TU hits it via `lua.h`); dotcc has block-scope arrays but not global ones.
+
+<details><summary>original plan</summary>
+
 - Grammar: accept trailing `...` in a function **definition/prototype** param
   list (variadic *macros* already work); `va_list` as a type.
 - Runtime/lowering (open design — pick in this phase):
@@ -92,6 +104,7 @@ block-scope arrays but not global ones yet.
   `stdarg.h` maps the names.
 - Tests: fixtures `varargs-sum/`, `varargs-vprintf/` (forward a va_list). C-SUPPORT.
 - Exit: a hand-written variadic fn + a v-forwarding fn compile and run correctly.
+</details>
 
 ### ⬜ Phase 3 — `locale.h` (C locale)
 - Synthetic `locale.h` + `DotCC.Libc/LocaleLib.cs`: `setlocale` (accepts, returns

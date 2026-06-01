@@ -284,6 +284,22 @@ internal sealed partial class CSharpEmitter
     // renders it back to `sizeof(S)` everywhere else.
     public EmitContent Visit(C.SizeofType n) => new EmitContent.SizeofType(T(n.Arg2));
 
+    // `va_arg(ap, T)` (<stdarg.h>, C89) — read the next variadic argument as T.
+    // Scalars: `(T)ap.Next()` — VaArg's explicit conversion to T fires, and a
+    // typedef alias (e.g. `size_t` → `ulong`) resolves through C#, so no
+    // per-typedef knowledge is needed here. Pointers: `(T)ap.NextPtr()` —
+    // NextPtr returns void*, then a standard (T*) pointer cast. Tagged with its
+    // CType so a va_arg result composes (e.g. under sizeof).
+    public EmitContent Visit(C.VaArgExpr n)
+    {
+        var ap = T(n.Arg2);
+        var ty = T(n.Arg4);
+        var expr = ty.EndsWith("*", System.StringComparison.Ordinal)
+            ? $"({ty}){ap}.NextPtr()"
+            : $"({ty}){ap}.Next()";
+        return Typed(expr, new CType.Sized(ty));
+    }
+
     // `sizeof expr` — read the operand's synthesized CType (propagated up by the
     // expression visitors) and emit its byte size. Arrays compute
     // `count * sizeof(element)` (the C# pointer-lowering makes C# sizeof wrong);
@@ -370,6 +386,18 @@ internal sealed partial class CSharpEmitter
         {
             return new EmitContent.SetjmpCall(args[0]);
         }
+        // <stdarg.h> variadic-access builtins. va_start/va_end/va_copy take only
+        // expressions, so they parse as ordinary calls and are rewritten here by
+        // name; va_arg (whose 2nd operand is a TYPE) has its own grammar
+        // production + visitor. `_va` is the params array a variadic function's
+        // ParamsVararg emit synthesizes (see Visit(C.ParamsVararg)).
+        //   va_start(ap, last) -> ap = new VaList(_va)   (last is unused — the
+        //                         array already holds exactly the variadic args)
+        //   va_copy(dst, src)  -> dst = src              (VaList is a value type)
+        //   va_end(ap)         -> ap.End()               (no-op)
+        if (callee == "va_start" && args.Count == 2) { return $"{args[0]} = new VaList(_va)"; }
+        if (callee == "va_copy" && args.Count == 2) { return $"{args[0]} = {args[1]}"; }
+        if (callee == "va_end" && args.Count == 1) { return $"{args[0]}.End()"; }
         // printf-family fluent lowering. C `printf("%d %s", x, s)` → C#
         // `printf(L("%d %s\0"u8)).Arg(x).Arg(s).Done()` — works around
         // `params object[]` not accepting raw pointers. The callee name
