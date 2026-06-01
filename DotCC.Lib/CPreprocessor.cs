@@ -65,6 +65,17 @@ internal sealed class CPreprocessor : C.IPreprocessor
     // optimization can be asserted observable without resorting to timing.
     internal int IncludeOptimizationHits { get; private set; }
 
+    // Dependency tracking for -MD/-MMD depfiles: every header actually
+    // `#include`d (transitively — recursive includes share this instance), in
+    // first-seen order, paired with whether it arrived via the angle `<...>`
+    // (system) or quoted `"..."` form. The angle flag is what -MMD keys on to
+    // drop system headers. Only resolvable headers are recorded — an
+    // unresolvable name is not a real build input. Populated in OnInclude;
+    // read by Compiler.EmitDependencyRule after draining the stream.
+    private readonly List<(string Name, bool IsSystem)> _includes = new();
+    private readonly HashSet<string> _includeSeen = new(StringComparer.Ordinal);
+    internal IReadOnlyList<(string Name, bool IsSystem)> IncludedHeaders => _includes;
+
     // Symbol ids resolved once for the predefined-identifier substitutions
     // in `Rewrite`. `__FILE__` synthesizes a STRING token; `__LINE__`
     // synthesizes a NUM token with the use site's line number.
@@ -155,8 +166,18 @@ internal sealed class CPreprocessor : C.IPreprocessor
 
     public IEnumerable<Item> OnInclude(IReadOnlyList<Item> args)
     {
-        var name = ResolveIncludeName(args);
+        var name = ResolveIncludeName(args, out var isSystem);
         if (name is null) { return Array.Empty<Item>(); }
+        // Dependency tracking (-MD/-MMD): record every resolvable header once,
+        // in first-seen order, BEFORE the pragma-once / include-guard
+        // short-circuits below. Those short-circuits only fire for files we've
+        // already opened (hence already in `_files`), so recording here still
+        // captures a header that's pulled in many times. A name that resolves
+        // to no known file is skipped — it isn't a real build input.
+        if (_files.ContainsKey(name) && _includeSeen.Add(name))
+        {
+            _includes.Add((name, isSystem));
+        }
         if (_pragmaOnceFiles.Contains(name))
         {
             // Already processed via `#pragma once` — drop the include body.
@@ -376,8 +397,11 @@ internal sealed class CPreprocessor : C.IPreprocessor
     /// the byte lexer treats angle brackets and dots as separate operators
     /// — we just concatenate the inner token content back into a filename).
     /// </summary>
-    private string? ResolveIncludeName(IReadOnlyList<Item> args)
+    /// <remarks><paramref name="isSystem"/> reports the angle form, which
+    /// <c>-MMD</c> uses to drop system headers from the dependency file.</remarks>
+    private string? ResolveIncludeName(IReadOnlyList<Item> args, out bool isSystem)
     {
+        isSystem = false;
         if (args.Count == 0)
         {
             _diag.WriteLine("dotcc: #include with no argument");
@@ -396,6 +420,7 @@ internal sealed class CPreprocessor : C.IPreprocessor
             && args[0].Content is string open && open == "<"
             && args[^1].Content is string close && close == ">")
         {
+            isSystem = true;
             var sb = new System.Text.StringBuilder();
             for (var i = 1; i < args.Count - 1; i++)
             {
