@@ -245,10 +245,13 @@ symbols:
   # promoted onto this terminal by DialectKeywordRewriter under -std=c23
   # (rule 2). Both file-scope (Fn) and block-scope (Stmt) positions.
   - '_Static_assert' # 140 keyword (C11)
-  # Type qualifiers. dotcc has no C# equivalent (no `readonly` locals, no
-  # volatile-access model for the unsafe pointer form), so they parse as
-  # declaration specifiers and are DROPPED by ResolveTypeSpec — `const char *p`
-  # lowers exactly like `char *p`. Both are C90, so no dialect gate.
+  # Type qualifiers (both C90, no dialect gate). `const` is token-stripped by
+  # QualifierStripper and parses as a dropped specifier (tsConst) — const-
+  # correctness is a future feature; `const char *p` lowers like `char *p`.
+  # `volatile` is NOT stripped: it's a leading Type PREFIX (`Type → 'volatile'
+  # Type`) that carries a flag into faithful `Volatile.Read`/`Write` access-site
+  # lowering (see CSharpEmitter). `* volatile` (volatile pointer) is the separate
+  # typePtrQualVolatile production.
   - 'const'        # 141 type qualifier (C90)
   - 'volatile'     # 142 type qualifier (C90)
   # Optional for-loop clauses — each may be empty (`for (;;)`). ForCond empty
@@ -607,6 +610,20 @@ productions:
       # visitor emits the type-name string verbatim (it's already the
       # C# type identifier we want).
       - { lhs: Type, rhs: [TYPE_NAME], action: typeName }
+      # `volatile T` — a LEADING type qualifier, modelled as a Type PREFIX (not a
+      # TypeSpec). This is the unlock for faithful volatile: `const`/`volatile`
+      # used to be TypeSpecs (tsConst/tsVolatile), which is exactly what made
+      # `volatile MyT` ambiguous (spec-list vs prefix) and forced token-stripping.
+      # As a prefix it's NOT a TypeSpec, so there's no spec-list-vs-prefix
+      # ambiguity, and ONE production covers every Type position (decl, member,
+      # param, cast, return) — no per-form blow-up. The visitor drops the qualifier
+      # from the emitted type string but flags the Type volatile, which the
+      # decl/member visitors record so reads/writes of the lvalue lower to
+      # `Volatile.Read`/`Volatile.Write` (see CSharpEmitter). `const` stays
+      # token-stripped (erased) — const-correctness is a separate future feature.
+      # East/mid `int volatile` is not accepted (was silently stripped before);
+      # leading is the universal form and the only one Lua / real code uses.
+      - { lhs: Type, rhs: ['volatile', Type], action: typeVolatile }
       # `enum ID` as a type reference. Lowers to plain `int` in C# since
       # enumerators are emitted as `const int` constants (not a C# enum).
       - { lhs: Type, rhs: ['enum', ID], action: typeEnum }
@@ -648,9 +665,13 @@ productions:
       - { lhs: TypeSpec, rhs: ['signed'],   action: tsSigned }
       - { lhs: TypeSpec, rhs: ['_Bool'],    action: tsBool }
       - { lhs: TypeSpec, rhs: ['_Float128'], action: tsFloat128 }
-      # Type qualifiers — parsed as specifiers, dropped at resolution.
+      # `const` type qualifier — parsed as a specifier, dropped at resolution
+      # (const-correctness is a future feature; `const char *p` lowers like
+      # `char *p`). NOTE: `volatile` is NOT a TypeSpec — it's a leading Type
+      # PREFIX (`Type → 'volatile' Type`, action typeVolatile) so it can carry a
+      # flag into faithful `Volatile.Read`/`Write` lowering. Keeping it a TypeSpec
+      # too would make `volatile MyT` ambiguous (spec-list vs prefix).
       - { lhs: TypeSpec, rhs: ['const'],    action: tsConst }
-      - { lhs: TypeSpec, rhs: ['volatile'], action: tsVolatile }
       # Function specifier — `inline` (C99). Parsed in the specifier run; dropped
       # from the resolved type, but TypeFromSpec flags it so the FnSig path emits
       # a [MethodImpl(AggressiveInlining)]. (Promoted from ID by the dialect rewriter.)

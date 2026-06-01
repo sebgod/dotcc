@@ -50,6 +50,7 @@ internal sealed partial class CSharpEmitter
         _fnStatics.Clear();
         _localNames.Clear();
         _localTypes.Clear();
+        _localVolatile.Clear();
         _localArrayInfo.Clear();
         // Fresh local-renaming state, then open the function's outermost frame
         // (the parameter scope). The body's `{` opens a nested frame inside it.
@@ -277,6 +278,7 @@ internal sealed partial class CSharpEmitter
     public EmitContent Visit(C.StructMemberList n)
     {
         var type = T(n.Arg0);
+        var isVolatile = VolatileOf(n.Arg0);
         var entries = DE(n.Arg1);
         // Per-declarator type, same rule as EmitDecl: first uses Type, a
         // subsequent one with its own `*`s uses stripStars(Type) + that many.
@@ -290,6 +292,10 @@ internal sealed partial class CSharpEmitter
             // An enum-typed field is remembered so a `s.field` / `p->field` read
             // can be tagged enum-typed (see FieldEnum / the member-access visitors).
             if (_enumTags.Contains(fieldType)) { _pendingFieldEnumMap[e.Name] = fieldType; }
+            // A volatile field of eligible scalar type → record it so member access
+            // lowers to Volatile.Read/Write (a pointer declarator is pointer-to-
+            // volatile, phase V2 — the pointer itself isn't volatile, so skip it).
+            if (isVolatile && IsVolatileEligible(fieldType)) { _pendingVolatileFields.Add(e.Name); }
             sb.Append("public ").Append(fieldType).Append(' ').Append(Id(e.Name)).Append(";\n");
         }
         return sb.ToString();
@@ -556,6 +562,7 @@ internal sealed partial class CSharpEmitter
         _pendingFields.Clear();
         DrainFieldEnums(typeName);
         DrainInlineArrFields(typeName);
+        DrainVolatileFields(typeName);
         DrainPromotions(typeName);
     }
 
@@ -849,6 +856,23 @@ internal sealed partial class CSharpEmitter
     // typedef already binds that name in C#'s namespace.
     public EmitContent Visit(C.TypeName n) => T(n.Arg0);
 
+    // `volatile T` (leading qualifier prefix). Drop the qualifier from the emitted
+    // C# type string — there is no C# type-level `volatile` — but FLAG the Type so
+    // the decl/member visitors record the declared name/field as volatile (see
+    // EmitDecl / StructMemberList). Reads/writes of a volatile lvalue then lower to
+    // Volatile.Read/Volatile.Write at the access site (Var / MemberDot / MemberArrow
+    // + the write-context parents). Preserve any inner flags (inline/noreturn/Ty)
+    // — they don't co-occur with volatile in practice, but a Type prefix shouldn't
+    // silently drop them. (Pointer-to-volatile — `volatile int *p` — attaches the
+    // flag to the outer pointer for now; the pointee-fencing case is phase V2.)
+    public EmitContent Visit(C.TypeVolatile n)
+    {
+        var text = T(n.Arg1);
+        return n.Arg1.Content is EmitContent.Text inner
+            ? inner with { Volatile = true }
+            : new EmitContent.Text(text, Volatile: true);
+    }
+
     // `typedef Type ID ;` — register an `using unsafe Alias = Type;` line in
     // the aliases side channel. Suppressed when Alias == Type (e.g.
     // `typedef struct Foo Foo;` where Type already lowers to `Foo`) since
@@ -988,6 +1012,7 @@ internal sealed partial class CSharpEmitter
         _pendingFields.Clear();
         DrainFieldEnums(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainInlineArrFields(tag != alias ? new[] { alias, tag } : new[] { alias });
+        DrainVolatileFields(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainPromotions(alias);
         if (tag != alias && _promotedFields.TryGetValue(alias, out var aliasProm)) { _promotedFields[tag] = aliasProm; }
         if (_emittedTypes.Add(alias))
@@ -1016,6 +1041,7 @@ internal sealed partial class CSharpEmitter
         _pendingFields.Clear();
         DrainFieldEnums(alias);
         DrainInlineArrFields(alias);
+        DrainVolatileFields(alias);
         DrainPromotions(alias);
         if (_emittedTypes.Add(alias))
         {
@@ -1041,6 +1067,7 @@ internal sealed partial class CSharpEmitter
         _pendingFields.Clear();
         DrainFieldEnums(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainInlineArrFields(tag != alias ? new[] { alias, tag } : new[] { alias });
+        DrainVolatileFields(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainPromotions(alias);
         if (tag != alias && _promotedFields.TryGetValue(alias, out var aliasProm)) { _promotedFields[tag] = aliasProm; }
         EmitExplicitUnionType(alias, members);
@@ -1061,6 +1088,7 @@ internal sealed partial class CSharpEmitter
         _pendingFields.Clear();
         DrainFieldEnums(alias);
         DrainInlineArrFields(alias);
+        DrainVolatileFields(alias);
         DrainPromotions(alias);
         EmitExplicitUnionType(alias, members);
         return string.Empty;
@@ -1159,11 +1187,11 @@ internal sealed partial class CSharpEmitter
     public EmitContent Visit(C.TsSigned n)   => Spec("signed");
     public EmitContent Visit(C.TsBool n)     => Spec("_Bool");
     public EmitContent Visit(C.TsFloat128 n) => Spec("Float128");
-    // Type qualifiers — accumulate into the spec list but ResolveTypeSpec's
-    // switch has no case for them, so they're silently dropped (C# has no
-    // equivalent). `const char *p` lowers exactly like `char *p`.
+    // `const` type qualifier — accumulates into the spec list but ResolveTypeSpec
+    // has no case for it, so it's silently dropped (C# has no equivalent).
+    // `const char *p` lowers exactly like `char *p`. (`volatile` is NOT a TypeSpec
+    // — it's the leading `Type → 'volatile' Type` prefix; see Visit(TypeVolatile).)
     public EmitContent Visit(C.TsConst n)    => Spec("const");
-    public EmitContent Visit(C.TsVolatile n) => Spec("volatile");
     // Function specifier — accumulated in the spec list like a qualifier, but
     // (unlike const/volatile) it is NOT silently dropped: TypeFromSpec detects
     // it and flags the resolved Type so the FnSig path emits AggressiveInlining.

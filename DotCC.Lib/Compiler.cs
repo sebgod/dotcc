@@ -228,14 +228,16 @@ public static class Compiler
             // the table simply doesn't fire) and BEFORE the typedef rewriter
             // (so e.g. `typedef bool MyBool;` under c23 sees `_Bool`).
             using var dialectRewriter = new DialectKeywordRewriter(macroExp, activeDialect);
-            // QualifierStripper: delete `const` / `volatile` tokens. dotcc drops
-            // both qualifiers semantically anyway; removing them here (rather than
-            // in the grammar) is what lets `const <typedef-name>` / `const struct
-            // X` / east-const / multi-qualifier runs parse — a qualifier before a
-            // TYPE_NAME or tag has no production and adding one is LALR-ambiguous.
-            // Sits AFTER macro expansion (a macro expanding to `const` is handled)
-            // and BEFORE the typedef rewriter (so `typedef const int Foo;`
-            // registers `Foo` from a normalized stream).
+            // QualifierStripper: delete `const` tokens. dotcc drops `const`
+            // semantically (const-correctness is a future feature); removing it
+            // here (rather than in the grammar) is what lets `const <typedef-name>`
+            // / `const struct X` / east-const / multi-qualifier runs parse — a
+            // qualifier before a TYPE_NAME or tag has no production and adding one
+            // is LALR-ambiguous. `volatile` is NOT stripped — it parses as a Type
+            // prefix so the emitter can lower it to Volatile.Read/Write. Sits AFTER
+            // macro expansion (a macro expanding to `const` is handled) and BEFORE
+            // the typedef rewriter (so `typedef const int Foo;` registers `Foo`
+            // from a normalized stream).
             using var qualStripper = new QualifierStripper(dialectRewriter);
             // TypeNameRewriter: the C lexer hack. Promotes ID → TYPE_NAME for
             // any name previously bound by a `typedef`. Sits AFTER macro

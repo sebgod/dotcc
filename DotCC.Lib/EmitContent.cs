@@ -63,7 +63,19 @@ public abstract record EmitContent
     /// <param name="Noreturn">True when the specifier run included the C11
     /// <c>_Noreturn</c> function specifier — the emitted method gets a
     /// <c>[DoesNotReturn]</c>. Same flow as <paramref name="Inline"/>.</param>
-    public sealed record Text(string Value, string? EnumType = null, CType? Ty = null, bool Inline = false, bool Noreturn = false) : EmitContent;
+    /// <param name="Volatile">True when this is a <c>Type</c> result that was
+    /// <c>volatile</c>-qualified (the leading <c>Type → 'volatile' Type</c>
+    /// prefix). The qualifier is dropped from <paramref name="Value"/> (the C#
+    /// type string), but the flag lets the decl/member visitors record the
+    /// declared name/field as volatile so its accesses lower to
+    /// <c>Volatile.Read</c>/<c>Volatile.Write</c>.</param>
+    /// <param name="VolatileLValue">Non-null when this EXPRESSION is a volatile
+    /// lvalue: <paramref name="Value"/> already holds the read form
+    /// (<c>Volatile.Read(ref X)</c>) and this carries the bare lvalue text
+    /// <c>X</c>. A write-context parent (assignment, compound-assign, <c>++</c>/
+    /// <c>--</c>, <c>&amp;</c>) reads it to emit the write form
+    /// (<c>Volatile.Write(ref X, …)</c>) / the bare address instead of the read.</param>
+    public sealed record Text(string Value, string? EnumType = null, CType? Ty = null, bool Inline = false, bool Noreturn = false, bool Volatile = false, string? VolatileLValue = null) : EmitContent;
 
     /// <summary>
     /// Accumulator for declaration-specifier sequences (<c>int</c>,

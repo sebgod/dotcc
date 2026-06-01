@@ -12,6 +12,17 @@ internal sealed partial class CSharpEmitter
     // Expressions — paren-heavy to stay precedence-safe.
     public EmitContent Visit(C.Assign n)
     {
+        // A volatile lvalue stores through Volatile.Write(ref lv, rhs). (Volatile
+        // is eligible-scalar only, never enum, so the enum reconcile below doesn't
+        // apply — but still decay an enum *source*.) Volatile.Write returns void,
+        // so this is a statement-position store; assignment-as-rvalue with a
+        // volatile LHS isn't supported (documented).
+        if (VLValueOf(n.Arg0) is string vlv)
+        {
+            var wrhs = T(n.Arg2);
+            if (EnumOf(n.Arg2) is not null) { wrhs = $"(int)({wrhs})"; }
+            return VolatileWriteOf(vlv, wrhs);
+        }
         // `c = E`: an enum-typed lvalue takes an int→enum cast on a non-matching
         // source; a non-enum lvalue (`x = c`) decays an enum source to int. The
         // assignment expression's value carries the lvalue's enum type.
@@ -36,8 +47,22 @@ internal sealed partial class CSharpEmitter
     {
         var lhs = T(lhsIt);
         var rhs = IntDecay(rhsIt);
+        // Volatile lvalue: `lhs` is already the fenced read `Volatile.Read(ref lv)`,
+        // so expand `lv OP= rhs` to a fenced read-modify-write.
+        if (VLValueOf(lhsIt) is string vlv) { return VolatileWriteOf(vlv, $"{lhs} {op} {rhs}"); }
         if (EnumOf(lhsIt) is { } e) { return $"({lhs} = ({e})((int){lhs} {op} {rhs}))"; }
         return $"({lhs} {op}= {rhs})";
+    }
+
+    // `++x` / `x++` (and `--`) on a volatile lvalue → a fenced read-modify-write
+    // `Volatile.Write(ref lv, Volatile.Read(ref lv) ± 1)` (`T(operand)` is already
+    // the fenced read). Pre/post produce the same store (the expression VALUE
+    // differs, but a volatile inc/dec is virtually always a statement — documented).
+    // Returns null for a non-volatile operand so the caller keeps the plain form.
+    private EmitContent? VolatileStep(Item operand, string op)
+    {
+        if (VLValueOf(operand) is string lv) { return VolatileWriteOf(lv, $"{T(operand)} {op} 1"); }
+        return null;
     }
     public EmitContent Visit(C.AddAssign n) => CompoundAssign(n.Arg0, "+", n.Arg2);
     public EmitContent Visit(C.SubAssign n) => CompoundAssign(n.Arg0, "-", n.Arg2);
@@ -170,17 +195,20 @@ internal sealed partial class CSharpEmitter
         if (ty is CType.PtrToArr pta) { return Typed(StripOuterParens(T(n.Arg1)), pta.Inner); }
         return Typed($"(*{T(n.Arg1)})", ty?.ElementType());
     }
-    public EmitContent Visit(C.AddrOf n) => $"(&{T(n.Arg1)})";
+    // `&x` — the address of the object, NOT a read of it. For a volatile lvalue,
+    // use the bare lvalue (not the Volatile.Read form). The resulting C `volatile
+    // T*` lowers to a plain `T*` (dotcc has no volatile pointer type).
+    public EmitContent Visit(C.AddrOf n) => $"(&{VLValueOf(n.Arg1) ?? T(n.Arg1)})";
     public EmitContent Visit(C.Neg n) => $"(-{IntDecay(n.Arg1)})";
     // Prefix ++/-- — strip outer parens of operand to avoid CS0131 on a
     // parenthesised lvalue. `(x)++` would parse as post-inc on a parens
     // expression, but C# accepts `++x` directly. Enum-ness propagates (C# ++/--
     // work on enums) so a `c++` value used in an int slot still gets decayed.
-    public EmitContent Visit(C.PreInc n) => new EmitContent.Text($"(++{StripOuterParens(T(n.Arg1))})", EnumOf(n.Arg1));
-    public EmitContent Visit(C.PreDec n) => new EmitContent.Text($"(--{StripOuterParens(T(n.Arg1))})", EnumOf(n.Arg1));
+    public EmitContent Visit(C.PreInc n) => VolatileStep(n.Arg1, "+") ?? (EmitContent)new EmitContent.Text($"(++{StripOuterParens(T(n.Arg1))})", EnumOf(n.Arg1));
+    public EmitContent Visit(C.PreDec n) => VolatileStep(n.Arg1, "-") ?? (EmitContent)new EmitContent.Text($"(--{StripOuterParens(T(n.Arg1))})", EnumOf(n.Arg1));
     // Postfix ++/-- — same stripping; emit `x++` rather than `(x)++`.
-    public EmitContent Visit(C.PostInc n) => new EmitContent.Text($"({StripOuterParens(T(n.Arg0))}++)", EnumOf(n.Arg0));
-    public EmitContent Visit(C.PostDec n) => new EmitContent.Text($"({StripOuterParens(T(n.Arg0))}--)", EnumOf(n.Arg0));
+    public EmitContent Visit(C.PostInc n) => VolatileStep(n.Arg0, "+") ?? (EmitContent)new EmitContent.Text($"({StripOuterParens(T(n.Arg0))}++)", EnumOf(n.Arg0));
+    public EmitContent Visit(C.PostDec n) => VolatileStep(n.Arg0, "-") ?? (EmitContent)new EmitContent.Text($"({StripOuterParens(T(n.Arg0))}--)", EnumOf(n.Arg0));
     // Subscript `expr[i]`. For a 1-D array / pointer it's an ordinary C#
     // pointer subscript (matching C). For a MULTI-dimensional array, dotcc
     // flattened the storage, so a PARTIAL index (more dimensions remain) is
@@ -236,6 +264,10 @@ internal sealed partial class CSharpEmitter
             return Typed($"(({ia.Elem}*)&{baseExpr}.{Id(field)})",
                 new CType.InlineArr(new CType.Sized(ia.Elem), ia.Count));
         }
+        // A volatile (eligible scalar) field reads through Volatile.Read(ref s.f);
+        // the bare lvalue is tagged for a write-context parent (a volatile field is
+        // never enum-typed — enums aren't Volatile-eligible — so no enum tag).
+        if (FieldVolatile(n.Arg0, field)) { return VolatileReadOf($"{baseExpr}.{Id(field)}", null, null); }
         var text = $"({baseExpr}.{Id(field)})";
         // An enum-typed field reads as enum-typed (decays in operators, reconciles
         // at sinks) — same EnumType machinery as an enum variable.
@@ -270,6 +302,8 @@ internal sealed partial class CSharpEmitter
             return Typed($"(({ia.Elem}*)&{baseExpr}{op}{member})",
                 new CType.InlineArr(new CType.Sized(ia.Elem), ia.Count));
         }
+        // A volatile (eligible scalar) field reads through Volatile.Read(ref p->f).
+        if (FieldVolatile(n.Arg0, field)) { return VolatileReadOf($"{baseExpr}{op}{member}", null, null); }
         var text = $"({baseExpr}{op}{member})";
         if (FieldEnum(n.Arg0, field) is string e) { return new EmitContent.Text(text, e, new CType.Sized(e)); }
         return text;
@@ -556,6 +590,10 @@ internal sealed partial class CSharpEmitter
         var mapped = resolved is not null ? Id(resolved) : MapBuiltin(name);
         var cty = VarCType(name);
         var enumTag = cty is CType.Sized sz && _enumTags.Contains(sz.CsType) ? sz.CsType : null;
+        // A volatile variable reads through Volatile.Read(ref …); the bare lvalue
+        // (the emitted identifier) is tagged so a write-context parent — assignment,
+        // compound-assign, ++/--, & — emits Volatile.Write / the bare address instead.
+        if (IsVolatileVar(name)) { return VolatileReadOf(mapped, enumTag, cty); }
         return new EmitContent.Text(mapped, enumTag, cty);
     }
 
@@ -789,7 +827,10 @@ internal sealed partial class CSharpEmitter
             var joined = string.Join(", ", seq.Operands.Select(StripOuterParens));
             return $"({joined}).Item{seq.Operands.Count}";
         }
-        return new EmitContent.Text($"({T(n.Arg1)})", EnumOf(n.Arg1), TyOf(n.Arg1));
+        // Propagate a volatile-lvalue tag through the parens so `(x) = …` /
+        // `&(x)` still see the write/address context (the bare lvalue is unchanged
+        // by parenthesisation).
+        return new EmitContent.Text($"({T(n.Arg1)})", EnumOf(n.Arg1), TyOf(n.Arg1), VolatileLValue: VLValueOf(n.Arg1));
     }
 
     // C23 keyword constants (only reached under -std=c23, via the rewriter's

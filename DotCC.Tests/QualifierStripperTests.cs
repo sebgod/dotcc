@@ -9,12 +9,12 @@ namespace DotCC.Tests;
 
 /// <summary>
 /// Unit tests for <see cref="QualifierStripper"/> — the token-level removal of
-/// <c>const</c>/<c>volatile</c>. The behaviourally interesting cases are the
-/// ones the grammar could not parse before the stripper (a qualifier in front
-/// of a typedef-name or a struct tag); we also assert that no qualifier leaks
-/// into the emitted C# (dotcc has no const/volatile representation). The full
-/// run-it-end-to-end check lives in the <c>const-qualifiers/</c> functional
-/// fixture.
+/// <c>const</c>. The behaviourally interesting cases are the ones the grammar
+/// could not parse before the stripper (a qualifier in front of a typedef-name
+/// or a struct tag); we also assert that no <c>const</c> leaks into the emitted
+/// C#. The full run-it-end-to-end check lives in the <c>const-qualifiers/</c>
+/// functional fixture. (<c>volatile</c> is no longer stripped — it lowers to
+/// <c>Volatile.Read</c>/<c>Volatile.Write</c>; see <see cref="VolatileTests"/>.)
 /// </summary>
 public sealed class QualifierStripperTests
 {
@@ -87,21 +87,6 @@ public sealed class QualifierStripperTests
             var emitted = Compiler.EmitCSharp(new[] { src });
             emitted.ShouldContain("static unsafe int area(");
             emitted.ShouldNotContain("const struct");
-        }
-        finally { File.Delete(src); }
-    }
-
-    [Fact]
-    public void volatile_local_is_dropped()
-    {
-        var src = WriteTemp("""
-            int main(void) { volatile int n = 3; return n; }
-            """);
-        try
-        {
-            var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("int n = 3");
-            emitted.ShouldNotContain("volatile int");
         }
         finally { File.Delete(src); }
     }
