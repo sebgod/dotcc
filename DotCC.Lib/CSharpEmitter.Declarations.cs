@@ -40,18 +40,25 @@ internal sealed partial class CSharpEmitter
         return $"var {Id(DeclareLocal(name))} = {init}";
     }
 
-    private EmitContent EmitDecl(string type, IReadOnlyList<EmitContent.DeclEntry> entriesIn)
+    private EmitContent EmitDecl(string type, IReadOnlyList<EmitContent.DeclEntry> entries)
     {
-        var entries = entriesIn;
-        // Register name + declared type for shadow resolution and enum typing,
-        // and assign each declarator its (possibly renamed) C# identifier. Raw
-        // names stay in `entries` for the side-table logic below; `renamed`
-        // maps raw → emitted for the actual C# text.
+        // Per-declarator type. The FIRST declarator uses `type` verbatim (its
+        // `*`s were absorbed into Type by the greedy `Type → Type *` rule); a
+        // SUBSEQUENT declarator with its own `*`s uses stripStars(type) + that
+        // many `*`s. So `int *a, *b;` gives both `int*`, `int *a, b;` gives
+        // `int*` then `int`.
+        var baseTy = StripTrailingStars(type);
+        string Eff(int i) => i == 0 ? type : baseTy + new string('*', entries[i].Stars);
+
+        // Register name + (effective) declared type for shadow resolution and
+        // enum typing, and assign each declarator its (possibly renamed) C#
+        // identifier. Raw names stay in `entries`; `renamed` maps raw → emitted.
         var renamed = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var e in entries)
+        for (var i = 0; i < entries.Count; i++)
         {
+            var e = entries[i];
             NoteLocal(e.Name);
-            if (_currentFunctionName is not null) { _localTypes[e.Name] = type; }
+            if (_currentFunctionName is not null) { _localTypes[e.Name] = Eff(i); }
             renamed[e.Name] = DeclareLocal(e.Name);
         }
 
@@ -76,11 +83,41 @@ internal sealed partial class CSharpEmitter
             }
         }
 
-        // Reconcile each initializer's enum-ness with the declared type
-        // (`Color c = 2` → `(Color)(2)`; `int x = c` → `(int)(c)`), then swap in
-        // the (possibly renamed) declarator name for emission.
-        entries = entries.Select(e => e with { Init = ReconcileEnumInit(type, e), Name = renamed[e.Name] }).ToList();
-        return $"{type} {DeclEntriesToBlockScopeString(entries)}";
+        // Uniform list (every declarator the same type — all single-declarator
+        // decls, and `int *a, *b;`): emit one C# multi-declarator. C# binds `*`
+        // to the type, so `T* a, b;` makes both `T*`, matching C when uniform.
+        var uniform = true;
+        for (var i = 1; i < entries.Count; i++) { if (Eff(i) != type) { uniform = false; break; } }
+        if (uniform)
+        {
+            // Reconcile each initializer's enum-ness with the declared type
+            // (`Color c = 2` → `(Color)(2)`; `int x = c` → `(int)(c)`), then swap
+            // in the (possibly renamed) declarator name for emission.
+            var joined = entries.Select(e => e with { Init = ReconcileEnumInit(type, e), Name = renamed[e.Name] }).ToList();
+            return $"{type} {DeclEntriesToBlockScopeString(joined)}";
+        }
+
+        // Non-uniform (`int *a, b;`): C binds `*` per-declarator but C# binds it
+        // to the type, so emit SEPARATE declarations, each with its own type.
+        var sb = new StringBuilder();
+        for (var i = 0; i < entries.Count; i++)
+        {
+            if (i > 0) { sb.Append("; "); }
+            var et = Eff(i);
+            sb.Append(et).Append(' ').Append(Id(renamed[entries[i].Name]))
+              .Append(" = ").Append(ReconcileEnumInit(et, entries[i]) ?? "default");
+        }
+        return sb.ToString();
+    }
+
+    // Strip trailing pointer stars (and any whitespace) from a lowered type
+    // string: `int*` → `int`, `char **` → `char`. The base for a multi-declarator
+    // list's subsequent declarators, which add their own `*`s.
+    private static string StripTrailingStars(string type)
+    {
+        var t = type.TrimEnd();
+        while (t.EndsWith("*", StringComparison.Ordinal)) { t = t[..^1].TrimEnd(); }
+        return t;
     }
 
     // Reconcile a declared type with an initializer's enum-ness, inserting the
@@ -151,6 +188,17 @@ internal sealed partial class CSharpEmitter
         var initVoidPtr = (n.Arg2.Content is EmitContent.MallocSizeof m && !m.AlreadyCast)
             || TyOf(n.Arg2) is CType.Sized { CsType: "void*" };
         return new EmitContent.DeclEntries(new[] { new EmitContent.DeclEntry(name, T(n.Arg2), mallocType, EnumOf(n.Arg2), initVoidPtr) });
+    }
+
+    // DeclItemTail — a non-first (post-comma) init-declarator. Plain → the inner
+    // DeclItem's entry unchanged (0 extra stars). Pointer → take the inner tail's
+    // single entry and add one pointer level (`int *a, *b;` → `b` gets Stars=1).
+    public EmitContent Visit(C.DeclItemTailPlain n) => (EmitContent.DeclEntries)n.Arg0.Content;
+    public EmitContent Visit(C.DeclItemTailPtr n)
+    {
+        var inner = DE(n.Arg1);
+        var e = inner[0];
+        return new EmitContent.DeclEntries(new[] { e with { Stars = e.Stars + 1 } });
     }
 
     // Join structured DeclEntries into the block-scope C# multi-declarator

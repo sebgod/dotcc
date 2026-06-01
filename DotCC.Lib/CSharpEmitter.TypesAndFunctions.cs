@@ -274,15 +274,25 @@ internal sealed partial class CSharpEmitter
     // requires `public` in C#. Field names also pushed onto _pendingFields
     // so the enclosing StructDef / TypedefStruct / UnionDef can index them
     // by struct name for the aggregate-init lookup later.
-    public EmitContent Visit(C.StructMember n)
+    public EmitContent Visit(C.StructMemberList n)
     {
-        var fieldType = T(n.Arg0);
-        var fieldName = T(n.Arg1);
-        _pendingFields.Add(fieldName);  // raw name — keyed lookups stay un-escaped
-        // An enum-typed field is remembered so a `s.field` / `p->field` read can
-        // be tagged enum-typed (see FieldEnum / the member-access visitors).
-        if (_enumTags.Contains(fieldType)) { _pendingFieldEnumMap[fieldName] = fieldType; }
-        return $"public {fieldType} {Id(fieldName)};\n";
+        var type = T(n.Arg0);
+        var entries = DE(n.Arg1);
+        // Per-declarator type, same rule as EmitDecl: first uses Type, a
+        // subsequent one with its own `*`s uses stripStars(Type) + that many.
+        var baseTy = StripTrailingStars(type);
+        var sb = new StringBuilder();
+        for (var i = 0; i < entries.Count; i++)
+        {
+            var e = entries[i];
+            var fieldType = i == 0 ? type : baseTy + new string('*', e.Stars);
+            _pendingFields.Add(e.Name);  // raw name — keyed lookups stay un-escaped
+            // An enum-typed field is remembered so a `s.field` / `p->field` read
+            // can be tagged enum-typed (see FieldEnum / the member-access visitors).
+            if (_enumTags.Contains(fieldType)) { _pendingFieldEnumMap[e.Name] = fieldType; }
+            sb.Append("public ").Append(fieldType).Append(' ').Append(Id(e.Name)).Append(";\n");
+        }
+        return sb.ToString();
     }
 
     // Named bit-field `Type ID : width ;`. C# has no bit-fields, so dotcc emits

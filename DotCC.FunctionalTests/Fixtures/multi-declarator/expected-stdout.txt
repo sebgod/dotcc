@@ -1,0 +1,1 @@
+xy=3 ab=3 cd=100 link=3 mixed=30,10,30

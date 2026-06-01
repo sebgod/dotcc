@@ -352,6 +352,7 @@ symbols:
   # `sizeof`. va_start/va_end/va_copy take only expressions and stay ordinary
   # calls (rewritten by name in the emitter).
   - 'va_arg'       # 159 builtin (C99 <stdarg.h>) — `va_arg(ap, Type)`
+  - DeclItemTail   # 160 non-terminal: a non-first init-declarator (may have its own `*`s)
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -767,7 +768,12 @@ productions:
 
   - derivation: none
     rules:
-      - { lhs: Member, rhs: [Type, ID, ';'], action: structMember }
+      # A plain member is a full multi-declarator list: `int x;`, `int a, b;`,
+      # `struct CallInfo *previous, *next;` (per-declarator `*`s via DeclItemTail).
+      # Reuses the same DeclItemList as block/file-scope declarations. Conflict-
+      # free with the bitfield/array forms below: after `Type ID`, `:`/`[` shift
+      # those, while `;`/`,` stay on the DeclItem path (neither is in FOLLOW).
+      - { lhs: Member, rhs: [Type, DeclItemList, ';'], action: structMemberList }
       # Bit-fields `Type ID : width ;` and anonymous padding `Type : width ;`.
       # C# has no bit-fields; dotcc lowers a named bit-field to a FULL field of
       # the declared type (the width is dropped — see structBitField), and an
@@ -931,12 +937,23 @@ productions:
   - derivation: leftmost
     rules:
       - { lhs: DeclItemList, rhs: [DeclItem], action: declItemListOne }
-      - { lhs: DeclItemList, rhs: [DeclItemList, ',', DeclItem], action: declItemListCons }
+      # SUBSEQUENT (post-comma) declarators are `DeclItemTail`, which may carry
+      # its OWN leading `*`s (`int *a, *b;` → `b` is a pointer too). This is
+      # conflict-free where a first-position `*` would not be: after a `,` there
+      # is no `Type` non-terminal in scope to extend, so a `*` there is
+      # unambiguously a per-declarator pointer (the FIRST declarator's `*`s were
+      # already absorbed into the declaration's Type by `Type → Type *`).
+      - { lhs: DeclItemList, rhs: [DeclItemList, ',', DeclItemTail], action: declItemListCons }
 
   - derivation: none
     rules:
       - { lhs: DeclItem, rhs: [ID], action: declItem }
       - { lhs: DeclItem, rhs: [ID, '=', E], action: declItemInit }
+      # A tail (non-first) init-declarator: a plain DeclItem, or one or more `*`
+      # prefixes adding pointer levels onto the shared base type. The emitter
+      # computes the tail's type as stripStars(Type) + Stars*'*'.
+      - { lhs: DeclItemTail, rhs: [DeclItem],          action: declItemTailPlain }
+      - { lhs: DeclItemTail, rhs: ['*', DeclItemTail], action: declItemTailPtr }
 
   # MemberInitList — one or more `.field = E` items, comma-separated, optional
   # trailing comma (`{ .x = 1, .y = 2, }`). Left-recursive, so the trailing-

@@ -203,7 +203,14 @@ public abstract record EmitContent
     /// can insert the int↔enum cast C# needs when the declared type and the
     /// initializer disagree (`Color c = 2` → <c>(Color)2</c>; `int x = c` →
     /// <c>(int)c</c>) — the enum tag is lost once the init is rendered to text.</param>
-    public sealed record DeclEntry(string Name, string? Init, string? MallocStructType = null, string? InitEnumType = null, bool InitIsVoidPtr = false);
+    /// <param name="Stars">Extra pointer levels this declarator adds ON TOP of
+    /// the shared base type — for a per-declarator pointer in a multi-declarator
+    /// list (`int *a, *b;` → the second entry has Stars=1). Only the SUBSEQUENT
+    /// (post-comma) declarators carry stars; the first declarator's stars were
+    /// absorbed into the declaration's Type by the greedy `Type → Type *` rule,
+    /// so its Stars is 0 and it uses Type verbatim. The emitter computes each
+    /// declarator's type as (first ? Type : stripStars(Type) + Stars*'*').</param>
+    public sealed record DeclEntry(string Name, string? Init, string? MallocStructType = null, string? InitEnumType = null, bool InitIsVoidPtr = false, int Stars = 0);
 
     /// <summary>
     /// Accumulator for an init-declarator list. <c>declItem</c>/<c>declItemInit</c>
