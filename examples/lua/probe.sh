@@ -31,7 +31,8 @@ for tu in $UNITS; do
         printf "%-12s \033[32m%-6s\033[0m\n" "$tu" "OK"
         pass=$((pass+1))
     else
-        first=$(echo "$err" | grep -m1 -iE "parse failed|lex failed|error" | sed 's/^dotcc: //' | cut -c1-110)
+        first=$(echo "$err" | grep -m1 -iE "parse failed|lex failed|error|isn't supported|not supported|unsupported" | sed 's/^dotcc: //' | cut -c1-110)
+        [ -z "$first" ] && first=$(echo "$err" | grep -m1 . | sed 's/^dotcc: //' | cut -c1-110)
         printf "%-12s \033[31m%-6s\033[0m %s\n" "$tu" "FAIL" "$first"
         fail=$((fail+1))
     fi

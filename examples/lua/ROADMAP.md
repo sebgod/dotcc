@@ -113,21 +113,25 @@ TU hits it via `lua.h`); dotcc has block-scope arrays but not global ones.
   `LC_ALL/COLLATE/CTYPE/MONETARY/NUMERIC/TIME` macros.
 - Exit: `loslib.c`'s `os_setlocale` compiles; `localeconv()->decimal_point` works.
 
-### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (1 / 20 objects)
+### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (all 20 PARSE; 1 / 20 objects)
 - Iterate the 20 core TUs via `probe.sh`; fix each parse/emit gap as it surfaces.
   One commit per coherent gap, each with a minimal fixture (dotcc tradition:
   never fix Lua-specifically — reduce to a small reproducer + fixture).
-- **Walls cleared so far** (each a committed dotcc feature + fixture): `const`/
-  `volatile` before a typedef-name/tag (4a), `typedef struct Foo Foo;` tag-vs-
-  typedef namespace (4b), file-scope array declarations (4c), parenthesized
-  function-name declarator `T (name)(args)` (4d, lua.h's `LUA_API` idiom),
-  `typedef union { … } Name;` (4e, lobject.h's `Value`/`StackValue`).
-  `lctype.c` now emits an object. ✅
-- **Current wall** (every remaining TU, via `lobject.h:148`): a **named nested
-  aggregate member** — `struct { TValuefields; unsigned short delta; } tbc;`
-  inside `union StackValue`. dotcc handles ANONYMOUS nested members
-  (`struct { … };`, C11) but not a NAMED one (`struct { … } field;`): needs a
-  synthesized nested C# type + a field of it + `o.tbc.delta` access (4f, next).
+- **Walls cleared** (each a committed dotcc feature + fixture): `const`/`volatile`
+  before a typedef-name/tag (4a), `typedef struct Foo Foo;` tag-vs-typedef
+  namespace (4b), file-scope array declarations (4c), parenthesized function-name
+  declarator `T (name)(args)` (4d, lua.h's `LUA_API` idiom), `typedef union { … }
+  Name;` (4e, `Value`/`StackValue`), named nested aggregate members `struct { … }
+  name;` (4f, `StackValue.tbc`). **All 20 core TUs now PARSE**; `lctype.c` emits a
+  full object. ✅ — that exhausted the parse-level walls.
+- **Current wall** (the *first emit-level* one; all 19 remaining TUs hit it
+  identically, via `lobject.h`): **struct-hack trailing arrays of non-primitive
+  element type** — `UValue uv[1]` (Udata), `TValue upvalue[1]` (CClosure),
+  `UpVal *upvals[1]` (LClosure). C# `fixed` buffers only allow primitive elements.
+  Needs: emit the field as inline storage at the right offset + rewrite
+  `obj->arr[i]` over-indexing into the malloc'd tail (`(&obj->arr)[i]`) + the
+  array→pointer decay (4g, next — a bigger lift than the parser fixes, touching
+  the emitter's member-access / subscript / decay paths).
 - Watch items: `lvm.c` dispatch loop (may use a jump table / labels-as-values —
   GNU `&&label`, which is **out of scope**; Lua has an ANSI fallback `#if`-gated
   on `__GNUC__`, which dotcc doesn't define → we get the portable `switch`).
