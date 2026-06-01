@@ -154,9 +154,27 @@ tests `ArrayMemberConstExprTests`.
 - ⬜ **Anonymous file-scope `enum { … };`** — dotcc requires a tag; an untagged
   enum-as-constants definition is common (`lopcodes.h`/`lparser.h`). Needs an
   `enum { … } ;` production emitting the enumerators as constants with no named type.
-- **Next:** triage the diverse per-TU walls (start with the ≈9-TU `TYPE_NAME` one).
+- **Next:** triage the remaining diverse per-TU walls (4m cleared the biggest, the
+  `TYPE_NAME` cluster; what's left is `unsigned`/`union`/`[`/`{`/`sizeof`/`setjmp`).
 
-### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (4 / 20 objects)
+### ✅ Phase 4m — MacroExpander argument prescan (the `TYPE_NAME` cluster)
+The ≈9-TU `TYPE_NAME` wall was **two causes**: a missing `offsetof` builtin (cleared,
+its own commit) and — the larger half, in `lua_tolstring`'s string accessors — a
+**MacroExpander rescan bug**. dotcc substituted RAW argument tokens into a macro body
+and leaned on the single shared rescan hide set to expand them; per C11 §6.10.3.1 an
+argument that isn't a `#`/`##` operand must be **fully macro-expanded in the call-site
+context BEFORE substitution**. The reduced trap is `getstr(tsvalue(o))`: the body of
+`rawgetshrstr` re-uses `cast`, which the argument `tsvalue(o)` also expands to — so the
+outer `cast` painted the hide set and the argument's inner `cast(GCU*,…)` was left
+literal, parsing as a type name in expression position. Fix: `Substitute` now pre-expands
+each argument once (cached, so a parameter used N times costs one expansion) in a fresh
+copy of the call-site hide set, and the regular-substitution path uses the pre-expanded
+form; `#`/`##` keep the raw tokens. **Core probe jumped 4/20 → 7/20** (`lstring`, `lvm`,
+`ldebug` now emit objects; `lapi`/`lparser`/`lundump` advanced past the macro wall to
+new, unrelated walls). Fixture `macro-arg-prescan/` (gcc-oracle-validated = 24); unit
+tests `Function_macro_arg_prescan_*` in `CompilerTests.PreprocessorAndLiterals`.
+
+### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (7 / 20 objects)
 - Iterate the 20 core TUs via `probe.sh`; fix each parse/emit gap as it surfaces.
   One commit per coherent gap, each with a minimal fixture (dotcc tradition:
   never fix Lua-specifically — reduce to a small reproducer + fixture).
@@ -172,13 +190,17 @@ tests `ArrayMemberConstExprTests`.
   `typedef enum { … } Name;` (4h, ltm.h's `TMS`), and **multi-declarator members
   + per-declarator pointers** (4i, `struct CallInfo *previous, *next;`).
   **`lctype.c` + `lopcodes.c` emit full objects.** ✅
-- **Current wall** (`lstate.h:131`, ~18 remaining TUs) — a **category shift from
-  grammar to MISSING LIBC SURFACE**: `volatile l_signalT trap;` →
-  `sig_atomic_t trap;`, and dotcc has no synthetic `<signal.h>` so `sig_atomic_t`
-  isn't a known type. Plus `<locale.h>` (lobject.c / loslib). The fix is
-  synthetic-header / libc-stub work (Phase 3 territory — `signal.h`'s
-  `sig_atomic_t`, `locale.h`), NOT more grammar. Likely unblocks several TUs at
-  once (4j / Phase 3, next).
+- **Current frontier** (7/20 emit objects: `lctype`, `ldebug`, `lmem`, `lopcodes`,
+  `lstring`, `lvm`, `lzio`). The shared-header and macro walls are cleared; the 13
+  remaining failures are now **diverse per-TU gaps**, no single dominant cause:
+  - `unexpected '['` (lobject:38, ltm:39, lgc:1171) — an array form not yet parsed.
+  - `unexpected 'unsigned'` (lcode), `unexpected ','` (llex), `unexpected '{'`
+    (lparser), `unexpected 'TYPE_NAME'` (lapi:753, lcode:1442 — *new* sites, past
+    the macro wall).
+  - `sizeof` of an unsupported expression (ldump, lstate, lundump — the CType layer
+    gap from roadmap item 6).
+  - `setjmp`-in-`if`-without-`else` (ldo); `array member padding needs constant
+    dimension(s)` (ltable).
 - Watch items: `lvm.c` dispatch loop (may use a jump table / labels-as-values —
   GNU `&&label`, which is **out of scope**; Lua has an ANSI fallback `#if`-gated
   on `__GNUC__`, which dotcc doesn't define → we get the portable `switch`).

@@ -833,6 +833,74 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Function_macro_arg_prescan_expands_nested_macro_call()
+    {
+        // C11 §6.10.3.1 argument prescan: an argument that is itself a
+        // macro call must be FULLY expanded (in the call-site context)
+        // BEFORE it's substituted into the body. The trap — reduced from
+        // Lua's `getstr(tsvalue(o))` — is a macro whose body re-uses the
+        // SAME macro (`cast`) that the argument also expands to. Without
+        // prescan, `cast` lands on the hide set while the body's own
+        // `cast(...)` is being rescanned, suppressing the argument's inner
+        // `cast` and leaving it literal in the stream (which then parses as
+        // a type name in expression position).
+        var src = WriteTemp("""
+            #define cast(t,e) ((t)(e))
+            #define gco2ts(x) cast(GCU*, (x))
+            #define check_exp(c,e) (c, (e))
+            #define tsvalue(o) check_exp(((o)->tt)==4, gco2ts((o)->gc))
+            #define rawgetshrstr(ts) (cast(char*, (ts)))
+            #define getstr(ts) rawgetshrstr(ts)
+            char* f(void* o) { return getstr(tsvalue(o)); }
+            """);
+        try
+        {
+            using var sw = new StringWriter();
+            Compiler.Preprocess(new[] { src }, sw);
+            var dumped = sw.ToString();
+            // Every macro must be gone — none left literal in the stream.
+            dumped.ShouldNotContain("cast");
+            dumped.ShouldNotContain("check_exp");
+            dumped.ShouldNotContain("gco2ts");
+            dumped.ShouldNotContain("tsvalue");
+            dumped.ShouldNotContain("getstr");
+            // The fully-expanded casts surface as their target types.
+            dumped.ShouldContain("GCU");
+            dumped.ShouldContain("char");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Function_macro_arg_prescan_reused_param_expands_every_occurrence()
+    {
+        // Multi-use: when a parameter appears N times in the body, the
+        // pre-expanded argument must be substituted (and fully expanded)
+        // at every occurrence — not just the first. Both `cast(...)` uses
+        // here wrap the same argument `gco2ts(o)`; both must collapse, with
+        // no `cast`/`gco2ts` surviving and the target type appearing twice.
+        var src = WriteTemp("""
+            #define cast(t,e) ((t)(e))
+            #define gco2ts(x) cast(GCU*, (x))
+            #define both(p) (cast(int, p) + cast(long, p))
+            int g(void* o) { return both(gco2ts(o)); }
+            """);
+        try
+        {
+            using var sw = new StringWriter();
+            Compiler.Preprocess(new[] { src }, sw);
+            var dumped = sw.ToString();
+            dumped.ShouldNotContain("cast");
+            dumped.ShouldNotContain("gco2ts");
+            dumped.ShouldNotContain("both");
+            // The reused arg expanded at BOTH occurrences → two `GCU` casts.
+            var gcuCount = dumped.Split("GCU").Length - 1;
+            gcuCount.ShouldBe(2);
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Predefined_FILE_expands_to_string_literal_of_active_filename()
     {
         var src = WriteTemp("""

@@ -77,8 +77,12 @@ internal sealed class MacroExpander : RewritingTokenStream
                 if (next.ID == _openParenSymbol)
                 {
                     var args = CollectArgsFromStream();
+                    // Argument prescan runs in the call-site context — at the
+                    // raw token stream that's an empty hide set. The body
+                    // rescan then runs with the macro's own name hidden
+                    // (classical rescan rule).
+                    var substituted = Substitute(macro, args, new HashSet<string>(StringComparer.Ordinal));
                     var hiding = new HashSet<string>(StringComparer.Ordinal) { name };
-                    var substituted = Substitute(macro, args);
                     EmitRange(ExpandTokenList(substituted, hiding));
                     return;
                 }
@@ -119,8 +123,15 @@ internal sealed class MacroExpander : RewritingTokenStream
                         var (args, endIdx) = CollectArgsFromList(tokens, i + 2);
                         if (endIdx >= 0)
                         {
+                            // Prescan the arguments in the CURRENT (call-site)
+                            // hide set, BEFORE painting this macro's name on —
+                            // so the argument's own macros expand as if they
+                            // sat at the call site, not under this macro's
+                            // (and its body's) hide set. Then rescan the
+                            // substituted body with `name` added.
+                            var substituted = Substitute(macro, args,
+                                new HashSet<string>(hiding, StringComparer.Ordinal));
                             hiding.Add(name);
-                            var substituted = Substitute(macro, args);
                             result.AddRange(ExpandTokenList(substituted, hiding));
                             hiding.Remove(name);
                             i = endIdx + 1;
@@ -252,9 +263,21 @@ internal sealed class MacroExpander : RewritingTokenStream
     /// Missing args expand to nothing; extras beyond the formal count are
     /// dropped (non-variadic) or accumulated into <c>__VA_ARGS__</c>
     /// (variadic).
+    /// <para>
+    /// <paramref name="callSiteHiding"/> is the hide set active where the
+    /// macro was invoked. Per C11 §6.10.3.1, an argument that is NOT an
+    /// operand of <c>#</c>/<c>##</c> is replaced by the FULLY MACRO-EXPANDED
+    /// form of the argument — and that expansion happens in the call-site
+    /// context, not under this macro's (yet-to-be-added) hide set. We
+    /// pre-expand each argument once and cache it, so a parameter used N
+    /// times in the body costs a single expansion.
+    /// </para>
     /// </summary>
-    private List<Item> Substitute(MacroDef macro, List<List<Item>> args)
+    private List<Item> Substitute(MacroDef macro, List<List<Item>> args, HashSet<string> callSiteHiding)
     {
+        // RAW argument lists, keyed by formal-parameter name. Used verbatim
+        // by `#` (stringify) and `##` (paste), which operate on UNexpanded
+        // arguments.
         var paramMap = new Dictionary<string, IReadOnlyList<Item>>(StringComparer.Ordinal);
         for (var i = 0; i < macro.Params!.Count; i++)
         {
@@ -276,6 +299,18 @@ internal sealed class MacroExpander : RewritingTokenStream
                 extras.AddRange(args[i]);
             }
             paramMap[VaArgsName] = extras;
+        }
+
+        // Argument prescan: the pre-expanded form of each argument, used for
+        // ordinary parameter substitution. Each argument is expanded in a
+        // fresh COPY of the call-site hide set so the per-argument expansion
+        // can't leak hide-set mutations into its siblings or the body walk.
+        var paramMapExpanded = new Dictionary<string, IReadOnlyList<Item>>(StringComparer.Ordinal);
+        foreach (var kv in paramMap)
+        {
+            paramMapExpanded[kv.Key] = ExpandTokenList(
+                kv.Value,
+                new HashSet<string>(callSiteHiding, StringComparer.Ordinal));
         }
 
         var body = macro.Body;
@@ -311,11 +346,12 @@ internal sealed class MacroExpander : RewritingTokenStream
                 continue;
             }
 
-            // Regular param substitution (also covers __VA_ARGS__ since
-            // we bound it in paramMap above).
+            // Regular param substitution — uses the PRE-EXPANDED argument
+            // (C11 §6.10.3.1 argument prescan). Also covers __VA_ARGS__
+            // since we bound it in paramMapExpanded above.
             if (bt.ID == _idSymbol
                 && bt.Content is string pname2
-                && paramMap.TryGetValue(pname2, out var argTokens))
+                && paramMapExpanded.TryGetValue(pname2, out var argTokens))
             {
                 result.AddRange(argTokens);
                 continue;
