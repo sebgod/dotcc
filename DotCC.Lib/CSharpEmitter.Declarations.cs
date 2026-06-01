@@ -317,14 +317,22 @@ internal sealed partial class CSharpEmitter
     // then zero-padding up to `total` (C zero-fills the unspecified tail). If
     // the string + NUL already exceeds `total`, C drops the NUL — emit just the
     // first `total` bytes (no terminator), matching C.
-    private static string EmitCharArr(string elem, string name, List<int> bytes, int total)
+    private static string EmitCharArr(string elem, string name, List<int> bytes, int total) =>
+        $"{elem}* {Id(name)} = stackalloc {elem}[]{{ {string.Join(", ", BuildCharArrValues(bytes, total))} }}";
+
+    // Build the element list for a char array of `total` slots: the decoded
+    // string bytes, a NUL terminator, then zero-padding up to `total` (C
+    // zero-fills the unspecified tail). If string + NUL already exceeds `total`,
+    // C drops the NUL — keep just the first `total` bytes. Shared by the
+    // block-scope (stackalloc) and file-scope (GlobalArrayFrom) char-array paths.
+    private static List<int> BuildCharArrValues(List<int> bytes, int total)
     {
         var values = new List<int>(System.Math.Max(total, bytes.Count + 1));
         values.AddRange(bytes);
         values.Add(0);                                   // NUL terminator
         while (values.Count < total) { values.Add(0); }  // zero-pad to N
         if (values.Count > total) { values = values.GetRange(0, total); }  // truncate (no NUL)
-        return $"{elem}* {Id(name)} = stackalloc {elem}[]{{ {string.Join(", ", values)} }}";
+        return values;
     }
 
     // Decode a StringSeq's segments to a flat byte list (escapes decoded; source

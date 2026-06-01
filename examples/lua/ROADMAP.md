@@ -5,8 +5,9 @@ run a real Lua script on .NET, end-to-end. Lua is ~24k lines of dense, portable
 C99 — the canonical "serious C program" — so it's both the proof and the
 forcing function for the next round of dotcc features.
 
-**Target:** Lua `5.5.1` (github.com/lua/lua, pinned). Source is fetched, not
-vendored (MIT, but large) — see the harness in Phase 0.
+**Target:** Lua `5.5.0` (github.com/lua/lua, pinned — the current 5.5 release;
+there is no 5.5.1 tag yet). Source is fetched, not vendored (MIT, but large) —
+see the harness in Phase 0.
 
 **Library target = `liblua`** (Lua's `CORE_O` + `lauxlib` + `LIB_O`), built as a
 dotcc `-shared` library, then driven by a small custom `main` through the C API.
@@ -46,12 +47,12 @@ shape — which is exactly Lua's `LUAI_TRY` macro. So the scary parts are covere
 
 Legend: ⬜ not started · 🟦 in progress · ✅ done.
 
-### ⬜ Phase 0 — Harness & baseline probe
-- `examples/lua/fetch.sh` — clone Lua at the pinned tag into a gitignored
-  `lua-src/` (don't vendor).
-- `examples/lua/probe.sh` — run `dotcc --emit=obj` over every core TU, print a
-  pass/fail table. This is the moving scoreboard for Phases 4–5.
-- Exit: probe runs and reports the Phase-1 blocker uniformly across TUs.
+### ✅ Phase 0 — Harness & baseline probe  ← DONE
+- `examples/lua/fetch.sh` — shallow-clones Lua `v5.5.0` into a gitignored
+  `lua-src/` (don't vendor). Re-runnable; bump `LUA_TAG` to update.
+- `examples/lua/probe.sh` — runs `dotcc --emit=obj -I lua-src` over every core
+  TU (add `all` for the lib TUs too) and prints a pass/fail table with the first
+  error per TU. This is the moving scoreboard for Phases 4–5.
 
 ### ✅ Phase 1 — Line continuation (translation phase 2)  ← DONE
 Landed: `Compiler.SpliceLineContinuations` splices `\`+LF/CRLF at every source
@@ -112,12 +113,19 @@ TU hits it via `lua.h`); dotcc has block-scope arrays but not global ones.
   `LC_ALL/COLLATE/CTYPE/MONETARY/NUMERIC/TIME` macros.
 - Exit: `loslib.c`'s `os_setlocale` compiles; `localeconv()->decimal_point` works.
 
-### ⬜ Phase 4 — Core VM TUs (CORE_O)
-- Iterate the 20 core TUs via `probe.sh`; fix each parse/emit gap as it surfaces
-  (genuinely unknown today — could be macro edge cases, declarator forms, large
-  static tables, computed-goto in `lvm.c`, etc.). One commit per coherent gap,
-  each with a minimal fixture (dotcc tradition: never fix Lua-specifically —
-  reduce to a small reproducer + fixture).
+### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (1 / 20 objects)
+- Iterate the 20 core TUs via `probe.sh`; fix each parse/emit gap as it surfaces.
+  One commit per coherent gap, each with a minimal fixture (dotcc tradition:
+  never fix Lua-specifically — reduce to a small reproducer + fixture).
+- **Walls cleared so far** (each a committed dotcc feature + fixture): `const`/
+  `volatile` before a typedef-name/tag (4a), `typedef struct Foo Foo;` tag-vs-
+  typedef namespace (4b), file-scope array declarations (4c), parenthesized
+  function-name declarator `T (name)(args)` (4d, lua.h's `LUA_API` idiom).
+  `lctype.c` now emits an object. ✅
+- **Current wall** (every remaining TU, via `lobject.h:49`): **`typedef union
+  Value { … } Value;`** — the union form of `typedef`-with-body. dotcc has the
+  `struct` forms (`typedefStruct`/`typedefStructAnon`) but not the `union` ones
+  (4e, next).
 - Watch items: `lvm.c` dispatch loop (may use a jump table / labels-as-values —
   GNU `&&label`, which is **out of scope**; Lua has an ANSI fallback `#if`-gated
   on `__GNUC__`, which dotcc doesn't define → we get the portable `switch`).

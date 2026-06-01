@@ -378,6 +378,17 @@ productions:
       - { lhs: FnSig, rhs: ['static', Type, ID, '(', ParamList, ')'], action: fnSigStatic }
       - { lhs: FnSig, rhs: ['static', Type, ID, '(', ')'],            action: fnSigStaticNoArgs }
       - { lhs: FnSig, rhs: ['static', Type, ID, '(', 'void', ')'],    action: fnSigStaticVoidArgs }
+      # Parenthesized function-name declarator: `T (name)(args)` ≡ `T name(args)`.
+      # The parens are pure grouping around the declarator name. Lua wraps every
+      # public API name this way in lua.h prototypes — `LUA_API lua_State
+      # *(lua_newstate)(...)` — to stop a same-named function-like macro from
+      # being expanded at the declaration. Strip the parens; same FnHeader as the
+      # bare forms. Disjoint from the fn-pointer declarators (`Type ( * ID ) …`)
+      # by the `ID` vs `*` right after the first `(`. Covers `extern FnSig ;`
+      # (the lua.h case), `FnSig ;`, and `FnSig Block` for free.
+      - { lhs: FnSig, rhs: [Type, '(', ID, ')', '(', ParamList, ')'], action: fnSigParen }
+      - { lhs: FnSig, rhs: [Type, '(', ID, ')', '(', ')'],            action: fnSigParenNoArgs }
+      - { lhs: FnSig, rhs: [Type, '(', ID, ')', '(', 'void', ')'],    action: fnSigParenVoidArgs }
 
   - derivation: none
     rules:
@@ -478,6 +489,41 @@ productions:
       - { lhs: Fn, rhs: ['extern', FnSig, ';'],              action: externFnProto }
       - { lhs: Fn, rhs: ['extern', FnSig, Block],            action: externFnDef }
       - { lhs: Fn, rhs: ['extern', Type, DeclItemList, ';'], action: externVarDecl }
+
+      # File-scope ARRAY declarations. A C file-scope array has static storage
+      # duration and decays to a pointer; dotcc lowers each to a `T*` field in
+      # DotCcGlobals backed by a pinned, rooted managed array (Libc.GlobalArray*),
+      # so the SAME `T*` shape + subscript / sizeof machinery that block-scope
+      # `stackalloc` arrays use applies (the global's CType is recorded in
+      # _globalArrayInfo). These mirror the block-scope `Decl → Type ID …` array
+      # forms but emit a global field instead of a stackalloc local.
+      # Conflict-free with `globalDeclList` (`Type DeclItemList ;`) and `FnSig`:
+      # after `Type ID` a `[` lookahead enters these forms, while `,`/`;`/`=`
+      # stays on the DeclItem path and `(` goes to FnSig (`[` ∉ FOLLOW(DeclItem)).
+      # The `[ ]` (implicit size) vs `ArrDims` (`[ E ]…`, sized) split mirrors the
+      # block-scope grammar exactly; after `… = `, `{` selects the brace form and
+      # a STRING the char-array-from-string form.
+      - { lhs: Fn, rhs: [Type, ID, ArrDims, ';'],                           action: globalArr }
+      - { lhs: Fn, rhs: [Type, ID, '[', ']', ';'],                          action: globalArrIncomplete }
+      - { lhs: Fn, rhs: [Type, ID, ArrDims, '=', '{', InitList, '}', ';'],  action: globalArrInit }
+      - { lhs: Fn, rhs: [Type, ID, '[', ']', '=', '{', InitList, '}', ';'], action: globalArrInitImplicit }
+      - { lhs: Fn, rhs: [Type, ID, ArrDims, '=', StringSeq, ';'],           action: globalCharArrStrSized }
+      - { lhs: Fn, rhs: [Type, ID, '[', ']', '=', StringSeq, ';'],          action: globalCharArrStr }
+      # `static` file-scope arrays — internal linkage is a no-op (never exported),
+      # so each lowers identically to its plain counterpart; `static` is consumed.
+      - { lhs: Fn, rhs: ['static', Type, ID, ArrDims, ';'],                           action: globalStaticArr }
+      - { lhs: Fn, rhs: ['static', Type, ID, '[', ']', ';'],                          action: globalStaticArrIncomplete }
+      - { lhs: Fn, rhs: ['static', Type, ID, ArrDims, '=', '{', InitList, '}', ';'],  action: globalStaticArrInit }
+      - { lhs: Fn, rhs: ['static', Type, ID, '[', ']', '=', '{', InitList, '}', ';'], action: globalStaticArrInitImplicit }
+      - { lhs: Fn, rhs: ['static', Type, ID, ArrDims, '=', StringSeq, ';'],           action: globalStaticCharArrStrSized }
+      - { lhs: Fn, rhs: ['static', Type, ID, '[', ']', '=', StringSeq, ';'],          action: globalStaticCharArrStr }
+      # `extern` array DECLARATIONS — declare without defining (the storage lives
+      # in another TU), so emit no field; just register the name's type so same-TU
+      # references resolve. Sized and incomplete forms (the latter is lua.h's
+      # `extern const char lua_ident[];`). No init form (extern + init is a
+      # definition, vanishingly rare — left unsupported).
+      - { lhs: Fn, rhs: ['extern', Type, ID, ArrDims, ';'],  action: externArr }
+      - { lhs: Fn, rhs: ['extern', Type, ID, '[', ']', ';'], action: externArrIncomplete }
 
       # `_Static_assert(expr, "msg");` (C11) and `_Static_assert(expr);`
       # (C23, message optional). File-scope form. Compile-time only — no

@@ -27,6 +27,15 @@ internal sealed partial class CSharpEmitter
         => StartFn(type: T(n.Arg1), name: T(n.Arg2), pars: "", isStatic: true, isInline: InlineOf(n.Arg1), isNoreturn: NoreturnOf(n.Arg1));
     public EmitContent Visit(C.FnSigStaticVoidArgs n)  // static Type ID ( void )
         => StartFn(type: T(n.Arg1), name: T(n.Arg2), pars: "", isStatic: true, isInline: InlineOf(n.Arg1), isNoreturn: NoreturnOf(n.Arg1));
+    // Parenthesized function name `T (name)(args)` — the parens are pure grouping
+    // around the declarator name (Lua's macro-guard idiom), so the name is Arg2
+    // (inside the parens) and the rest is identical to the bare FnSig forms.
+    public EmitContent Visit(C.FnSigParen n)  // Type ( ID ) ( ParamList )
+        => StartFn(type: T(n.Arg0), name: T(n.Arg2), pars: T(n.Arg5), isStatic: false, isInline: InlineOf(n.Arg0), isNoreturn: NoreturnOf(n.Arg0));
+    public EmitContent Visit(C.FnSigParenNoArgs n)  // Type ( ID ) ( )
+        => StartFn(type: T(n.Arg0), name: T(n.Arg2), pars: "", isStatic: false, isInline: InlineOf(n.Arg0), isNoreturn: NoreturnOf(n.Arg0));
+    public EmitContent Visit(C.FnSigParenVoidArgs n)  // Type ( ID ) ( void )
+        => StartFn(type: T(n.Arg0), name: T(n.Arg2), pars: "", isStatic: false, isInline: InlineOf(n.Arg0), isNoreturn: NoreturnOf(n.Arg0));
 
     private EmitContent.FnHeader StartFn(string type, string name, string pars, bool isStatic, bool isInline = false, bool isNoreturn = false)
     {
