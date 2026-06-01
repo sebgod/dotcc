@@ -107,11 +107,34 @@ TU hits it via `lua.h`); dotcc has block-scope arrays but not global ones.
 - Exit: a hand-written variadic fn + a v-forwarding fn compile and run correctly.
 </details>
 
-### ⬜ Phase 3 — `locale.h` (C locale)
-- Synthetic `locale.h` + `DotCC.Libc/LocaleLib.cs`: `setlocale` (accepts, returns
-  `"C"`), `struct lconv` + `localeconv` (C-locale values: `.` decimal point, etc.),
-  `LC_ALL/COLLATE/CTYPE/MONETARY/NUMERIC/TIME` macros.
-- Exit: `loslib.c`'s `os_setlocale` compiles; `localeconv()->decimal_point` works.
+### 🟦 Phase 3 — `signal.h` + `locale.h` (missing libc surface)
+- ✅ **`signal.h` (header-only)** — `typedef int sig_atomic_t;` + `SIG_DFL`/`SIG_IGN`/
+  `SIG_ERR` + the six C-standard signal numbers. This is all the CORE/lib need
+  (Lua's `volatile sig_atomic_t trap;`); the `signal()`/`raise()` FUNCTIONS are
+  only in `lua.c` (deferred — they'll be backed by .NET's `PosixSignalRegistration`,
+  the SIGINT/SIGTERM "terminal" signals, handler-sets-a-volatile-flag idiom). Landed
+  with the faithful-`volatile` lowering, so `volatile sig_atomic_t` now both parses
+  AND fences. Fixture `sig-atomic/`. **Cleared the `lstate.h:131` wall** — the
+  probe's universal failure is now a new one (below).
+- ⬜ **`locale.h`** — Synthetic `locale.h` + `DotCC.Libc/LocaleLib.cs`: `setlocale`
+  (accepts, returns `"C"`), `struct lconv` + `localeconv` (C-locale values: `.`
+  decimal point, etc.), `LC_ALL/COLLATE/CTYPE/MONETARY/NUMERIC/TIME` macros. Exit:
+  `loslib.c`'s `os_setlocale` compiles; `localeconv()->decimal_point` works. (Won't
+  move the core scoreboard until the array-member wall below clears — it's needed
+  by `lobject.c`/`loslib.c` regardless.)
+
+### ⬜ Phase 4k — constant-expression array-member size (`T a[sizeof(X)]`)
+The probe's NEW universal wall (18/20 core TUs): a struct array member sized by a
+**`sizeof`-expression** — Lua's `lobject.h` `lu_byte extra_[sizeof(void*)]`
+(GCObject alignment padding). dotcc's array-member lowering (sized `fixed`/
+`[InlineArray]`) currently requires a LITERAL size; `sizeof(void*)` is a constant
+*expression* (= 8). Needs a small compile-time evaluator for `sizeof(Type)` (and
+`sizeof(Type)`-arithmetic) in array-member bounds — the CType layer already knows
+the sizes; it just has to fold the constant. Also surfaced: `lu_byte` (a typedef
+for `unsigned char` → `byte`) isn't matched as a primitive fixed-buffer element
+(the alias `lu_byte`, not `byte`, reaches the member visitor) — so it takes the
+`[InlineArray]` path; resolving the typedef to its primitive would route it to the
+plain `fixed byte` buffer. Both are needed to clear this wall. **Next.**
 
 ### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (2 / 20 objects)
 - Iterate the 20 core TUs via `probe.sh`; fix each parse/emit gap as it surfaces.
