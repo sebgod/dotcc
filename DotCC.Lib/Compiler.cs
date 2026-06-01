@@ -61,7 +61,9 @@ public static class Compiler
             using var stream = asm.GetManifestResourceStream(name)
                 ?? throw new InvalidOperationException($"missing embedded header resource: {name}");
             using var reader = new StreamReader(stream);
-            map[fileName] = reader.ReadToEnd();
+            // Splice line continuations here so the synthetic headers (some of
+            // which use multi-line macros) lex like any other source.
+            map[fileName] = SpliceLineContinuations(reader.ReadToEnd());
         }
         return map;
     }
@@ -207,7 +209,7 @@ public static class Compiler
         // pass so #warning / #include messages don't print twice.
         Item ParseUnit(string unitPath, global::LALR.CC.Parser parser, bool quiet, DialectGate? gate = null)
         {
-            var source = File.ReadAllText(unitPath);
+            var source = SpliceLineContinuations(File.ReadAllText(unitPath));
             var pre = new CPreprocessor(lexerTable, includeMap, seededDefines, quiet, gate);
             pre.SetActiveFilename(Path.GetFileName(unitPath));
             using var lexer = BytesLexer.FromString(source, lexerTable);
@@ -243,6 +245,14 @@ public static class Compiler
             catch (global::LALR.CC.ParseErrorException ex)
             {
                 throw new CompileException($"parse failed in {Path.GetFileName(unitPath)}: {ex.Message}", ex);
+            }
+            catch (global::LALR.CC.LexicalGrammar.LexerException ex)
+            {
+                // A byte the lexer can't tokenize (e.g. a stray `\` that wasn't a
+                // line continuation, an illegal control char). Surface it as the
+                // same stable CompileException as a parse failure rather than
+                // letting the raw LexerException escape unhandled.
+                throw new CompileException($"lex failed in {Path.GetFileName(unitPath)}: {ex.Message}", ex);
             }
             if (result.IsError)
             {
@@ -491,7 +501,7 @@ public static class Compiler
         foreach (var unitPath in inputPaths)
         {
             output.WriteLine($"# {unitPath}");
-            var source = File.ReadAllText(unitPath);
+            var source = SpliceLineContinuations(File.ReadAllText(unitPath));
             var pre = new CPreprocessor(lexerTable, includeMap, seededDefines);
             pre.SetActiveFilename(Path.GetFileName(unitPath));
             using var lexer = BytesLexer.FromString(source, lexerTable);
@@ -499,11 +509,18 @@ public static class Compiler
             // -E mode also routes through MacroExpander so function-like
             // macro expansion is visible in the dumped token stream.
             using var macroExp = new MacroExpander(preproc, pre);
-            while (macroExp.MoveNext())
+            try
             {
-                var t = macroExp.Current;
-                output.Write(t.Content is string s ? s : t.Content?.ToString());
-                output.Write(' ');
+                while (macroExp.MoveNext())
+                {
+                    var t = macroExp.Current;
+                    output.Write(t.Content is string s ? s : t.Content?.ToString());
+                    output.Write(' ');
+                }
+            }
+            catch (global::LALR.CC.LexicalGrammar.LexerException ex)
+            {
+                throw new CompileException($"lex failed in {Path.GetFileName(unitPath)}: {ex.Message}", ex);
             }
             output.WriteLine();
         }
@@ -542,7 +559,7 @@ public static class Compiler
         var lexerTable = C.BuildLexer();
         var seededDefines = SeedDialectDefines(dialect ?? CDialect.Default, defines);
 
-        var source = File.ReadAllText(sourcePath);
+        var source = SpliceLineContinuations(File.ReadAllText(sourcePath));
         var pre = new CPreprocessor(lexerTable, content, seededDefines, quiet: true);
         pre.SetActiveFilename(Path.GetFileName(sourcePath));
         using (var lexer = BytesLexer.FromString(source, lexerTable))
@@ -552,7 +569,14 @@ public static class Compiler
             // Drain — every #include the preprocessor reaches (respecting
             // #if/#ifdef conditionals) fires OnInclude, which records the
             // header in pre.IncludedHeaders.
-            while (macroExp.MoveNext()) { /* tokens discarded; we only want the include set */ }
+            try
+            {
+                while (macroExp.MoveNext()) { /* tokens discarded; we only want the include set */ }
+            }
+            catch (global::LALR.CC.LexicalGrammar.LexerException ex)
+            {
+                throw new CompileException($"lex failed in {Path.GetFileName(sourcePath)}: {ex.Message}", ex);
+            }
         }
 
         var prereqs = new List<string> { sourcePath };
@@ -691,6 +715,29 @@ public static class Compiler
         return seeded.ToArray();
     }
 
+    /// <summary>
+    /// C translation phase 2: splice out backslash-newline line continuations
+    /// (a <c>\</c> immediately followed by a newline) so the byte lexer never
+    /// sees the stray <c>\</c>. Handles both <c>\</c>+LF and <c>\</c>+CRLF.
+    /// Applied to every source string before it reaches the lexer — the
+    /// translation unit AND every header (user + synthetic). .NET's
+    /// <see cref="string.Replace(string,string)"/> is sequential and
+    /// non-overlapping, so <c>\\</c> at end of line (an escaped backslash)
+    /// correctly leaves a single <c>\</c>.
+    /// </summary>
+    /// <remarks>
+    /// Caveat: this collapses physical lines, so <c>__LINE__</c> and error
+    /// line numbers drift for lines following a continuation. Acceptable for
+    /// now (diagnostics only); a faithful logical→physical line map is future
+    /// work. The fast path returns the input untouched when it has no
+    /// backslash at all (the common case), so non-macro-heavy code pays
+    /// nothing.
+    /// </remarks>
+    internal static string SpliceLineContinuations(string source)
+        => source.IndexOf('\\') < 0
+            ? source
+            : source.Replace("\\\r\n", string.Empty).Replace("\\\n", string.Empty);
+
     private static Dictionary<string, string> BuildIncludeMap(
         IReadOnlyList<string> inputPaths,
         IReadOnlyList<string>? includeDirs)
@@ -723,7 +770,7 @@ public static class Compiler
             foreach (var hpath in Directory.EnumerateFiles(dir, "*.h"))
             {
                 var fileName = Path.GetFileName(hpath);
-                content[fileName] = File.ReadAllText(hpath);
+                content[fileName] = SpliceLineContinuations(File.ReadAllText(hpath));
                 paths[fileName] = hpath;
             }
         }
