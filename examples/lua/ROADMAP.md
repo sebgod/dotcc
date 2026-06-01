@@ -154,8 +154,9 @@ tests `ArrayMemberConstExprTests`.
 - ⬜ **Anonymous file-scope `enum { … };`** — dotcc requires a tag; an untagged
   enum-as-constants definition is common (`lopcodes.h`/`lparser.h`). Needs an
   `enum { … } ;` production emitting the enumerators as constants with no named type.
-- **Next:** triage the remaining diverse per-TU walls (4m cleared the biggest, the
-  `TYPE_NAME` cluster; what's left is `unsigned`/`union`/`[`/`{`/`sizeof`/`setjmp`).
+- **Next:** triage the remaining diverse per-TU walls (4m cleared the `TYPE_NAME`
+  cluster, 4n the `[` cluster; what's left is led by the `sizeof`-of-expression gap
+  — see the current frontier in Phase 4 below).
 
 ### ✅ Phase 4m — MacroExpander argument prescan (the `TYPE_NAME` cluster)
 The ≈9-TU `TYPE_NAME` wall was **two causes**: a missing `offsetof` builtin (cleared,
@@ -174,7 +175,26 @@ form; `#`/`##` keep the raw tokens. **Core probe jumped 4/20 → 7/20** (`lstrin
 new, unrelated walls). Fixture `macro-arg-prescan/` (gcc-oracle-validated = 24); unit
 tests `Function_macro_arg_prescan_*` in `CompilerTests.PreprocessorAndLiterals`.
 
-### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (7 / 20 objects)
+### ✅ Phase 4n — block-scope `static` arrays (the `[` cluster)
+Three TUs failed with `unexpected '['` at a local declaration — all the same form:
+a **block-scope `static` array** (`static const lu_byte log_2[256] = {…}` in
+lobject, `static const lu_byte nextage[]` in lgc, `static const char *const
+luaT_eventname[]` in ltm). The grammar's `stmtStaticDecl` only covered the scalar
+`static T DeclItemList ;` shape, so the array suffix after the name was rejected.
+Added five Stmt productions mirroring the file-scope `globalStatic*` set; a local
+static array has the SAME static storage duration as a file-scope one, so each
+lowers identically — a pinned global field under a function-mangled name
+(`__static_{fn}_{name}`), with in-function uses rewritten via `_fnStatics`. Also
+fixed a **pre-existing latent bug** the parse-only probe never caught: an array OF
+POINTERS (`const char *const names[]`, both file- and block-scope) emitted
+`GlobalArrayFrom<byte*>(new byte*[]{…})` — invalid C# twice over (CS0306/CS0611,
+pointer types can't be generic args or array elements). Now stored as a pinned
+`nint[]` reinterpreted as `T**`. **Core probe 7/20 → 9/20** (`lgc`, `ltm` emit
+objects; `lobject` advanced past the `[` to a struct-member-dimension wall).
+Fixture `static-local-array/` (gcc-oracle-validated); unit tests
+`StaticLocalArrayTests`.
+
+### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (9 / 20 objects)
 - Iterate the 20 core TUs via `probe.sh`; fix each parse/emit gap as it surfaces.
   One commit per coherent gap, each with a minimal fixture (dotcc tradition:
   never fix Lua-specifically — reduce to a small reproducer + fixture).
@@ -190,17 +210,18 @@ tests `Function_macro_arg_prescan_*` in `CompilerTests.PreprocessorAndLiterals`.
   `typedef enum { … } Name;` (4h, ltm.h's `TMS`), and **multi-declarator members
   + per-declarator pointers** (4i, `struct CallInfo *previous, *next;`).
   **`lctype.c` + `lopcodes.c` emit full objects.** ✅
-- **Current frontier** (7/20 emit objects: `lctype`, `ldebug`, `lmem`, `lopcodes`,
-  `lstring`, `lvm`, `lzio`). The shared-header and macro walls are cleared; the 13
-  remaining failures are now **diverse per-TU gaps**, no single dominant cause:
-  - `unexpected '['` (lobject:38, ltm:39, lgc:1171) — an array form not yet parsed.
+- **Current frontier** (9/20 emit objects: `lctype`, `ldebug`, `lgc`, `lmem`,
+  `lopcodes`, `lstring`, `ltm`, `lvm`, `lzio`). The shared-header, macro, and
+  static-local-array walls are cleared; the 11 remaining failures are **diverse
+  per-TU gaps**, no single dominant cause:
+  - `sizeof` of an unsupported expression (ldump, lstate, lundump — the CType
+    layer gap from roadmap item 6) — **3 TUs, now the most common**.
+  - `array member needs constant dimension(s)` (lobject `space`, ltable `padding`)
+    — a struct array-member whose dimension dotcc can't fold to a constant.
   - `unexpected 'unsigned'` (lcode), `unexpected ','` (llex), `unexpected '{'`
-    (lparser), `unexpected 'TYPE_NAME'` (lapi:753, lcode:1442 — *new* sites, past
-    the macro wall).
-  - `sizeof` of an unsupported expression (ldump, lstate, lundump — the CType layer
-    gap from roadmap item 6).
-  - `setjmp`-in-`if`-without-`else` (ldo); `array member padding needs constant
-    dimension(s)` (ltable).
+    (lparser), `unexpected 'TYPE_NAME'` (lapi:753, lcode:1442), `unexpected 'ID'`
+    (lfunc:70).
+  - `setjmp`-in-`if`-without-`else` (ldo).
 - Watch items: `lvm.c` dispatch loop (may use a jump table / labels-as-values —
   GNU `&&label`, which is **out of scope**; Lua has an ANSI fallback `#if`-gated
   on `__GNUC__`, which dotcc doesn't define → we get the portable `switch`).

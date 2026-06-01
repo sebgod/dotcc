@@ -686,9 +686,14 @@ internal sealed partial class CSharpEmitter
         }
         // A block-scope `static` local shadows any global/enumerator of the
         // same name within this function — rewrite to its mangled global field.
+        // A static-local ARRAY carries its element+count CType (registered under
+        // the mangled name in _globalArrayInfo) so subscript/sizeof resolve just
+        // as for any array; a static scalar has none to attach (unchanged).
         if (_fnStatics.TryGetValue(name, out var staticField))
         {
-            return staticField;
+            return _globalArrayInfo.TryGetValue(staticField, out var staticCty)
+                ? new EmitContent.Text(staticField, null, staticCty)
+                : staticField;
         }
         // An enumerator constant resolves to `EnumName.Member` — but only if no
         // local/param of the same name shadows it. Without this guard a local

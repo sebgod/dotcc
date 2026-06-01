@@ -66,6 +66,47 @@ internal sealed partial class CSharpEmitter
         return cty;
     }
 
+    // Emit the `public static unsafe <T>* NAME = …;` field for a pinned global
+    // array initialized from flat element values. A POINTER element type
+    // (`byte*` from `char *`, a struct-pointer, …) can be neither a C# generic
+    // type argument nor an array element (CS0306 / CS0611), so the array of
+    // pointers is stored as a pinned `nint[]` (pointer-width) with each value
+    // cast to `nint`, and the field reinterprets the base as `T**`. A scalar /
+    // struct element uses the obvious `GlobalArrayFrom<T>` directly.
+    private void AppendGlobalArrayFromValues<TVal>(string name, string elemCs, IReadOnlyList<TVal> values)
+    {
+        if (elemCs.EndsWith('*'))
+        {
+            // Only the brace-init path produces pointer-element values, and those
+            // are always emitted string fragments (`L("…"u8)`); char-array (byte)
+            // values are scalar so never reach this branch.
+            var ptrVals = new List<string>(values.Count);
+            foreach (var v in values) { ptrVals.Add($"(nint)({v})"); }
+            _globals.Append("    public static unsafe ").Append(elemCs).Append("* ").Append(Id(name))
+                .Append(" = (").Append(elemCs).Append("*)Libc.GlobalArrayFrom<nint>(new nint[]{ ")
+                .Append(string.Join(", ", ptrVals)).Append(" });\n");
+            return;
+        }
+        var elem = QualifyPredefinedTypeName(elemCs);
+        _globals.Append("    public static unsafe ").Append(elem).Append("* ").Append(Id(name))
+            .Append(" = Libc.GlobalArrayFrom<").Append(elem).Append(">(new ").Append(elem)
+            .Append("[]{ ").Append(string.Join(", ", values)).Append(" });\n");
+    }
+
+    // As above, for a zeroed array of `lengthExpr` elements (no initializer).
+    private void AppendGlobalArrayZeroed(string name, string elemCs, string lengthExpr)
+    {
+        if (elemCs.EndsWith('*'))
+        {
+            _globals.Append("    public static unsafe ").Append(elemCs).Append("* ").Append(Id(name))
+                .Append(" = (").Append(elemCs).Append("*)Libc.GlobalArrayZeroed<nint>(").Append(lengthExpr).Append(");\n");
+            return;
+        }
+        var elem = QualifyPredefinedTypeName(elemCs);
+        _globals.Append("    public static unsafe ").Append(elem).Append("* ").Append(Id(name))
+            .Append(" = Libc.GlobalArrayZeroed<").Append(elem).Append(">(").Append(lengthExpr).Append(");\n");
+    }
+
     // `T a[dims];` → a pinned zeroed global array. All-literal dims give a known
     // total + a full CType for sizeof; a single non-literal extent (`[N+2]` after
     // macro expansion, `[ENUM_CONST]`) is passed straight through as the runtime
@@ -92,9 +133,7 @@ internal sealed partial class CSharpEmitter
         {
             throw new CompileException($"file-scope array `{name}` needs constant dimensions");
         }
-        var elem = QualifyPredefinedTypeName(elemCs);
-        _globals.Append("    public static unsafe ").Append(elem).Append("* ").Append(Id(name))
-            .Append(" = Libc.GlobalArrayZeroed<").Append(elem).Append(">(").Append(lengthExpr).Append(");\n");
+        AppendGlobalArrayZeroed(name, elemCs, lengthExpr);
         return string.Empty;
     }
 
@@ -141,10 +180,7 @@ internal sealed partial class CSharpEmitter
             cty = new CType.Arr(new CType.Sized(elemCs), values.Count);
         }
         _globalArrayInfo[name] = cty;
-        var elem = QualifyPredefinedTypeName(elemCs);
-        _globals.Append("    public static unsafe ").Append(elem).Append("* ").Append(Id(name))
-            .Append(" = Libc.GlobalArrayFrom<").Append(elem).Append(">(new ").Append(elem)
-            .Append("[]{ ").Append(string.Join(", ", values)).Append(" });\n");
+        AppendGlobalArrayFromValues(name, elemCs, values);
         return string.Empty;
     }
 
@@ -158,10 +194,7 @@ internal sealed partial class CSharpEmitter
         if (sizes.Count > 0) { total = 1; foreach (var s in sizes) { total *= s; } }  // explicit: pad to N
         var values = BuildCharArrValues(bytes, total);
         _globalArrayInfo[name] = new CType.Arr(new CType.Sized(elemCs), values.Count);
-        var elem = QualifyPredefinedTypeName(elemCs);
-        _globals.Append("    public static unsafe ").Append(elem).Append("* ").Append(Id(name))
-            .Append(" = Libc.GlobalArrayFrom<").Append(elem).Append(">(new ").Append(elem)
-            .Append("[]{ ").Append(string.Join(", ", values)).Append(" });\n");
+        AppendGlobalArrayFromValues(name, elemCs, values);
         return string.Empty;
     }
 
@@ -185,4 +218,39 @@ internal sealed partial class CSharpEmitter
         _globalTypes[name] = elemCs + "*";
         return string.Empty;
     }
+
+    // ---- block-scope `static` array declarations ------------------------
+    //
+    // A C local `static` array has the SAME static storage duration as a
+    // file-scope array — one instance, initialised once, persisting across
+    // calls — differing only in visibility. dotcc lowers it identically: a
+    // pinned global field in DotCcGlobals (the GlobalArray* helpers), under a
+    // name mangled by enclosing function so two functions' same-named static
+    // tables don't collide. The raw name is registered in _fnStatics so
+    // Visit(Var) rewrites in-function uses to the mangled field — exactly the
+    // scalar static-local path (stmtStaticDecl). The file-scope EmitGlobalArr*
+    // helpers are reused verbatim: a global field is already what a local
+    // static needs. Common as read-only lookup tables (`static const lu_byte
+    // tab[] = {…}`, Lua's lobject/ltm/lgc).
+
+    private string MangleStaticLocal(string raw)
+    {
+        var mangled = $"__static_{_currentFunctionName ?? "fn"}_{raw}";
+        _fnStatics[raw] = mangled;
+        return mangled;
+    }
+
+    // `static T a[dims];` — zeroed.
+    public EmitContent Visit(C.StmtStaticArr n) =>
+        EmitGlobalArrZeroed(T(n.Arg1), MangleStaticLocal(T(n.Arg2)), A(n.Arg3));
+    // `static T a[dims] = { … }` / `static T a[] = { … }`.
+    public EmitContent Visit(C.StmtStaticArrInit n) =>
+        EmitGlobalArrInit(T(n.Arg1), MangleStaticLocal(T(n.Arg2)), A(n.Arg3), Group(n.Arg6));
+    public EmitContent Visit(C.StmtStaticArrInitImplicit n) =>
+        EmitGlobalArrInit(T(n.Arg1), MangleStaticLocal(T(n.Arg2)), NoDims, Group(n.Arg7));
+    // `static T a[dims] = "…"` / `static T a[] = "…"`.
+    public EmitContent Visit(C.StmtStaticCharArrStrSized n) =>
+        EmitGlobalCharArrStr(T(n.Arg1), MangleStaticLocal(T(n.Arg2)), n.Arg5, A(n.Arg3));
+    public EmitContent Visit(C.StmtStaticCharArrStr n) =>
+        EmitGlobalCharArrStr(T(n.Arg1), MangleStaticLocal(T(n.Arg2)), n.Arg6, NoDims);
 }

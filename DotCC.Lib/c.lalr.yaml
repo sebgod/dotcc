@@ -777,10 +777,22 @@ productions:
       # duration, function-local visibility. Lowers to a mangled static field
       # in DotCcGlobals (one instance, persists across calls), with uses inside
       # the function rewritten to the mangled name. Scalars + plain (no-init)
-      # structs via `Type DeclItemList`; static arrays / aggregate-init statics
-      # aren't covered (their `stackalloc` lowering doesn't compose with static
-      # lifetime) — those keep their own `Decl` shapes and so won't match here.
+      # structs via `Type DeclItemList`.
       - { lhs: Stmt, rhs: ['static', Type, DeclItemList, ';'], action: stmtStaticDecl }
+      # Block-scope `static` ARRAYS. A local static array has the SAME static
+      # storage duration as a file-scope array, so each lowers identically to
+      # its `globalStatic*` file-scope counterpart — a pinned global field in
+      # DotCcGlobals (`Libc.GlobalArray*`) under a mangled name — with in-function
+      # uses rewritten to the mangled name (via `_fnStatics`, same as the scalar
+      # case). Common as read-only lookup tables (`static const lu_byte tab[] =
+      # {…}`). Disjoint from `static Type DeclItemList ;` on the `[` lookahead
+      # after the name (DeclItemList has no array suffix), exactly like the
+      # file-scope pair `globalStaticDeclList` / `globalStaticArr*`.
+      - { lhs: Stmt, rhs: ['static', Type, ID, ArrDims, ';'],                           action: stmtStaticArr }
+      - { lhs: Stmt, rhs: ['static', Type, ID, ArrDims, '=', '{', InitList, '}', ';'],  action: stmtStaticArrInit }
+      - { lhs: Stmt, rhs: ['static', Type, ID, '[', ']', '=', '{', InitList, '}', ';'], action: stmtStaticArrInitImplicit }
+      - { lhs: Stmt, rhs: ['static', Type, ID, ArrDims, '=', StringSeq, ';'],           action: stmtStaticCharArrStrSized }
+      - { lhs: Stmt, rhs: ['static', Type, ID, '[', ']', '=', StringSeq, ';'],          action: stmtStaticCharArrStr }
       # Expression statement uses the full `Expr` tier so `a, b;` (comma
       # operator, result discarded) parses; the visitor splits it into
       # sequential statements.
