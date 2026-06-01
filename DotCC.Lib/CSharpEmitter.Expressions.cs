@@ -193,6 +193,9 @@ internal sealed partial class CSharpEmitter
         // unchanged (typed as the array), not a C# `*p` (which would deref to
         // the first element). `(*p)[i]` then strides like the array.
         if (ty is CType.PtrToArr pta) { return Typed(StripOuterParens(T(n.Arg1)), pta.Inner); }
+        // Pointer-to-volatile: `*p` is a volatile lvalue → fenced read, tagged for a
+        // write-context parent (`*p = x` → Volatile.Write(ref *p, x)). Phase V2.
+        if (VolatilePointeeOf(n.Arg1)) { return VolatileReadOf($"*{T(n.Arg1)}", null, ty?.ElementType()); }
         return Typed($"(*{T(n.Arg1)})", ty?.ElementType());
     }
     // `&x` — the address of the object, NOT a read of it. For a volatile lvalue,
@@ -233,6 +236,8 @@ internal sealed partial class CSharpEmitter
         {
             return Typed($"({baseText} + ({idx}) * {FlatSize(pta.Inner)})", pta.Inner);
         }
+        // Pointer-to-volatile: `p[i]` is a volatile lvalue → fenced (phase V2).
+        if (VolatilePointeeOf(n.Arg0)) { return VolatileReadOf($"{baseText}[{idx}]", null, baseTy?.ElementType()); }
         return Typed($"({baseText}[{idx}])", baseTy?.ElementType());
     }
 
@@ -269,6 +274,9 @@ internal sealed partial class CSharpEmitter
         // never enum-typed — enums aren't Volatile-eligible — so no enum tag).
         if (FieldVolatile(n.Arg0, field)) { return VolatileReadOf($"{baseExpr}.{Id(field)}", null, null); }
         var text = $"({baseExpr}.{Id(field)})";
+        // A pointer-to-volatile field — `s.p` carries the VolatilePointee tag so
+        // `*s.p` / `s.p[i]` fence (phase V2).
+        if (FieldVolatilePointee(n.Arg0, field)) { return new EmitContent.Text(text, VolatilePointee: true); }
         // An enum-typed field reads as enum-typed (decays in operators, reconciles
         // at sinks) — same EnumType machinery as an enum variable.
         if (FieldEnum(n.Arg0, field) is string e) { return new EmitContent.Text(text, e, new CType.Sized(e)); }
@@ -305,6 +313,8 @@ internal sealed partial class CSharpEmitter
         // A volatile (eligible scalar) field reads through Volatile.Read(ref p->f).
         if (FieldVolatile(n.Arg0, field)) { return VolatileReadOf($"{baseExpr}{op}{member}", null, null); }
         var text = $"({baseExpr}{op}{member})";
+        // Pointer-to-volatile field — tag so `*p->q` / `p->q[i]` fence (phase V2).
+        if (FieldVolatilePointee(n.Arg0, field)) { return new EmitContent.Text(text, VolatilePointee: true); }
         if (FieldEnum(n.Arg0, field) is string e) { return new EmitContent.Text(text, e, new CType.Sized(e)); }
         return text;
     }
@@ -594,6 +604,9 @@ internal sealed partial class CSharpEmitter
         // (the emitted identifier) is tagged so a write-context parent — assignment,
         // compound-assign, ++/--, & — emits Volatile.Write / the bare address instead.
         if (IsVolatileVar(name)) { return VolatileReadOf(mapped, enumTag, cty); }
+        // A pointer-to-volatile read carries the VolatilePointee tag so a deref /
+        // subscript of it (`*p`, `p[i]`) fences (phase V2).
+        if (IsVolatilePointeeVar(name)) { return new EmitContent.Text(mapped, enumTag, cty, VolatilePointee: true); }
         return new EmitContent.Text(mapped, enumTag, cty);
     }
 
@@ -827,10 +840,11 @@ internal sealed partial class CSharpEmitter
             var joined = string.Join(", ", seq.Operands.Select(StripOuterParens));
             return $"({joined}).Item{seq.Operands.Count}";
         }
-        // Propagate a volatile-lvalue tag through the parens so `(x) = …` /
-        // `&(x)` still see the write/address context (the bare lvalue is unchanged
-        // by parenthesisation).
-        return new EmitContent.Text($"({T(n.Arg1)})", EnumOf(n.Arg1), TyOf(n.Arg1), VolatileLValue: VLValueOf(n.Arg1));
+        // Propagate the volatile-lvalue and pointee-volatile tags through the parens
+        // so `(x) = …` / `&(x)` see the write/address context and `(*p)` / `(p)[i]`
+        // still fence (the bare lvalue / pointee-ness is unchanged by parenthesising).
+        return new EmitContent.Text($"({T(n.Arg1)})", EnumOf(n.Arg1), TyOf(n.Arg1),
+            VolatileLValue: VLValueOf(n.Arg1), VolatilePointee: VolatilePointeeOf(n.Arg1));
     }
 
     // C23 keyword constants (only reached under -std=c23, via the rewriter's

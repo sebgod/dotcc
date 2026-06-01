@@ -51,6 +51,7 @@ internal sealed partial class CSharpEmitter
         _localNames.Clear();
         _localTypes.Clear();
         _localVolatile.Clear();
+        _localVolatilePointee.Clear();
         _localArrayInfo.Clear();
         // Fresh local-renaming state, then open the function's outermost frame
         // (the parameter scope). The body's `{` opens a nested frame inside it.
@@ -68,6 +69,12 @@ internal sealed partial class CSharpEmitter
             DeclareLocal(p.Name);
         }
         _pendingParams.Clear();
+        // Adopt volatile / pointer-to-volatile param qualifications (params keep
+        // their raw spelling, so these keys match the recorded names).
+        foreach (var pn in _pendingVolatileParams) { _localVolatile.Add(pn); }
+        foreach (var pn in _pendingVolatilePointeeParams) { _localVolatilePointee.Add(pn); }
+        _pendingVolatileParams.Clear();
+        _pendingVolatilePointeeParams.Clear();
         return new EmitContent.FnHeader(type, name, pars, isStatic, isInline, isNoreturn);
     }
 
@@ -279,6 +286,7 @@ internal sealed partial class CSharpEmitter
     {
         var type = T(n.Arg0);
         var isVolatile = VolatileOf(n.Arg0);
+        var isVolatilePointee = VolatilePointeeOf(n.Arg0);
         var entries = DE(n.Arg1);
         // Per-declarator type, same rule as EmitDecl: first uses Type, a
         // subsequent one with its own `*`s uses stripStars(Type) + that many.
@@ -293,9 +301,11 @@ internal sealed partial class CSharpEmitter
             // can be tagged enum-typed (see FieldEnum / the member-access visitors).
             if (_enumTags.Contains(fieldType)) { _pendingFieldEnumMap[e.Name] = fieldType; }
             // A volatile field of eligible scalar type → record it so member access
-            // lowers to Volatile.Read/Write (a pointer declarator is pointer-to-
-            // volatile, phase V2 — the pointer itself isn't volatile, so skip it).
+            // lowers to Volatile.Read/Write.
             if (isVolatile && IsVolatileEligible(fieldType)) { _pendingVolatileFields.Add(e.Name); }
+            // A pointer-to-volatile field (`volatile int *p;`) → `s.p[i]` / `*s.p`
+            // fence (phase V2).
+            if (isVolatilePointee && VolatilePointeeEligible(fieldType) is not null) { _pendingVolatilePointeeFields.Add(e.Name); }
             sb.Append("public ").Append(fieldType).Append(' ').Append(Id(e.Name)).Append(";\n");
         }
         return sb.ToString();
@@ -563,6 +573,7 @@ internal sealed partial class CSharpEmitter
         DrainFieldEnums(typeName);
         DrainInlineArrFields(typeName);
         DrainVolatileFields(typeName);
+        DrainVolatilePointeeFields(typeName);
         DrainPromotions(typeName);
     }
 
@@ -1013,6 +1024,7 @@ internal sealed partial class CSharpEmitter
         DrainFieldEnums(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainInlineArrFields(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainVolatileFields(tag != alias ? new[] { alias, tag } : new[] { alias });
+        DrainVolatilePointeeFields(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainPromotions(alias);
         if (tag != alias && _promotedFields.TryGetValue(alias, out var aliasProm)) { _promotedFields[tag] = aliasProm; }
         if (_emittedTypes.Add(alias))
@@ -1042,6 +1054,7 @@ internal sealed partial class CSharpEmitter
         DrainFieldEnums(alias);
         DrainInlineArrFields(alias);
         DrainVolatileFields(alias);
+        DrainVolatilePointeeFields(alias);
         DrainPromotions(alias);
         if (_emittedTypes.Add(alias))
         {
@@ -1068,6 +1081,7 @@ internal sealed partial class CSharpEmitter
         DrainFieldEnums(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainInlineArrFields(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainVolatileFields(tag != alias ? new[] { alias, tag } : new[] { alias });
+        DrainVolatilePointeeFields(tag != alias ? new[] { alias, tag } : new[] { alias });
         DrainPromotions(alias);
         if (tag != alias && _promotedFields.TryGetValue(alias, out var aliasProm)) { _promotedFields[tag] = aliasProm; }
         EmitExplicitUnionType(alias, members);
@@ -1089,6 +1103,7 @@ internal sealed partial class CSharpEmitter
         DrainFieldEnums(alias);
         DrainInlineArrFields(alias);
         DrainVolatileFields(alias);
+        DrainVolatilePointeeFields(alias);
         DrainPromotions(alias);
         EmitExplicitUnionType(alias, members);
         return string.Empty;
@@ -1100,7 +1115,14 @@ internal sealed partial class CSharpEmitter
     public EmitContent Visit(C.FnsOne n) => T(n.Arg0);
 
     // Params
-    public EmitContent Visit(C.Param n) { _pendingParams.Add((T(n.Arg1), T(n.Arg0))); return $"{T(n.Arg0)} {Id(T(n.Arg1))}"; }
+    public EmitContent Visit(C.Param n)
+    {
+        var type = T(n.Arg0);
+        var name = T(n.Arg1);
+        _pendingParams.Add((name, type));
+        NoteVolatileParam(n.Arg0, type, name);  // `volatile int x` / `volatile int *reg` param
+        return $"{type} {Id(name)}";
+    }
     // Unnamed (abstract) parameter — `int f(int, char*)` or a function-pointer
     // type's params. C# requires a parameter name, so synthesize a unique one
     // (`_p0`, `_p1`, …). The counter only needs to be unique within a list and
@@ -1156,7 +1178,20 @@ internal sealed partial class CSharpEmitter
     // char/float/double/void) goes through TypeSpec → TypeSpecList →
     // ResolveTypeSpec, matching how real C compilers handle the
     // free-order specifier sequence.
-    public EmitContent Visit(C.TypePtr n) => $"{T(n.Arg0)}*";
+    public EmitContent Visit(C.TypePtr n)
+    {
+        var text = $"{T(n.Arg0)}*";
+        // `volatile T *` — the POINTEE is volatile, so a deref/subscript of this
+        // pointer is a volatile lvalue (phase V2). The pointee-volatile flag rides
+        // forward as VolatilePointee; carry it through further pointer levels too
+        // (`volatile T **`). Reading the inner Type's Volatile flag here is the
+        // grammar's `(volatile T)*` binding — volatile binds to the base, then `*`,
+        // matching C (`volatile int *p` is pointer-to-volatile-int, not a volatile
+        // pointer; the latter is the `int * volatile p` ptr-qual form).
+        var pointeeVolatile = VolatileOf(n.Arg0)
+            || (n.Arg0.Content as EmitContent.Text)?.VolatilePointee == true;
+        return pointeeVolatile ? new EmitContent.Text(text, VolatilePointee: true) : (EmitContent)text;
+    }
     // `T * const` / `T * volatile` / `T * restrict` — a qualifier after the
     // pointer star. dotcc has no C# equivalent (no readonly locals, no aliasing
     // model), so the qualifier is dropped: the type is just the pointer. (A

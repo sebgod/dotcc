@@ -75,7 +75,12 @@ public abstract record EmitContent
     /// <c>X</c>. A write-context parent (assignment, compound-assign, <c>++</c>/
     /// <c>--</c>, <c>&amp;</c>) reads it to emit the write form
     /// (<c>Volatile.Write(ref X, …)</c>) / the bare address instead of the read.</param>
-    public sealed record Text(string Value, string? EnumType = null, CType? Ty = null, bool Inline = false, bool Noreturn = false, bool Volatile = false, string? VolatileLValue = null) : EmitContent;
+    /// <param name="VolatilePointee">True for a POINTER whose pointee is volatile
+    /// (<c>volatile int *p</c>). Set on the <c>Type</c> result (by <c>typePtr</c>
+    /// when the pointee Type was volatile) AND carried on a pointer-valued
+    /// expression (a read of such a pointer) — so a dereference / subscript of it
+    /// (<c>*p</c>, <c>p[i]</c>) yields a volatile lvalue and fences. Phase V2.</param>
+    public sealed record Text(string Value, string? EnumType = null, CType? Ty = null, bool Inline = false, bool Noreturn = false, bool Volatile = false, string? VolatileLValue = null, bool VolatilePointee = false) : EmitContent;
 
     /// <summary>
     /// Accumulator for declaration-specifier sequences (<c>int</c>,

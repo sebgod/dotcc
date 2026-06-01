@@ -14,13 +14,13 @@ internal sealed partial class CSharpEmitter
     // (`int x = 5;`), and multi-declarator (`int x, y, z;`,
     // `int x = 1, y = 2;`) forms. C# accepts the same `int x, y = 5, z;`
     // syntax so the lowering is verbatim.
-    public EmitContent Visit(C.Decl n) => EmitDecl(T(n.Arg0), DE(n.Arg1), VolatileOf(n.Arg0));
+    public EmitContent Visit(C.Decl n) => EmitDecl(T(n.Arg0), DE(n.Arg1), VolatileOf(n.Arg0), VolatilePointeeOf(n.Arg0));
 
     // Pre-C23 `auto` storage class — `auto int x = i;`. `auto` means "automatic
     // storage duration", which is already the default for a block-scope local,
     // so it's redundant: drop it and emit the declaration exactly as if the
     // `auto` weren't there. (C89, no dialect gate.)
-    public EmitContent Visit(C.DeclAutoStorage n) => EmitDecl(T(n.Arg1), DE(n.Arg2), VolatileOf(n.Arg1));
+    public EmitContent Visit(C.DeclAutoStorage n) => EmitDecl(T(n.Arg1), DE(n.Arg2), VolatileOf(n.Arg1), VolatilePointeeOf(n.Arg1));
 
     // C23 `auto` type inference — `auto x = E;` deduces x's type from the
     // initializer, exactly like C# `var` (and C++ `auto`, and gcc's older
@@ -40,7 +40,7 @@ internal sealed partial class CSharpEmitter
         return $"var {Id(DeclareLocal(name))} = {init}";
     }
 
-    private EmitContent EmitDecl(string type, IReadOnlyList<EmitContent.DeclEntry> entries, bool isVolatile = false)
+    private EmitContent EmitDecl(string type, IReadOnlyList<EmitContent.DeclEntry> entries, bool isVolatile = false, bool isVolatilePointee = false)
     {
         // Per-declarator type. The FIRST declarator uses `type` verbatim (its
         // `*`s were absorbed into Type by the greedy `Type → Type *` rule); a
@@ -65,6 +65,13 @@ internal sealed partial class CSharpEmitter
             if (isVolatile && _currentFunctionName is not null && IsVolatileEligible(Eff(i)))
             {
                 _localVolatile.Add(e.Name);
+            }
+            // A pointer-to-volatile local (`volatile int *p`) — `*p` / `p[i]` fence
+            // (phase V2). Per-declarator: `volatile int *p, *q` records both; a
+            // `q` with no `*` is a volatile scalar instead (handled above).
+            if (isVolatilePointee && _currentFunctionName is not null && VolatilePointeeEligible(Eff(i)) is not null)
+            {
+                _localVolatilePointee.Add(e.Name);
             }
             renamed[e.Name] = DeclareLocal(e.Name);
         }

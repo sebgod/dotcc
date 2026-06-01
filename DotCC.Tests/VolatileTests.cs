@@ -130,4 +130,61 @@ public sealed class VolatileTests
         }
         finally { File.Delete(src); }
     }
+
+    // ---- phase V2: pointer-to-volatile ------------------------------------
+
+    [Fact]
+    public void pointer_to_volatile_deref_and_subscript_fence()
+    {
+        // `volatile int *p` — `*p` and `p[i]` are volatile lvalues; the pointer
+        // object itself stays a plain `int*`.
+        var src = WriteTemp("""
+            int main(void) { int a[2]={0,0}; volatile int *p = a; *p = 5; p[1] = 7; return *p + p[1]; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("int* p =");                       // the pointer is plain
+            emitted.ShouldContain("Volatile.Write(ref *p, 5)");
+            emitted.ShouldContain("Volatile.Write(ref p[1], 7)");
+            emitted.ShouldContain("Volatile.Read(ref *p)");
+            emitted.ShouldContain("Volatile.Read(ref p[1])");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void volatile_pointer_parameter_fences_the_pointee()
+    {
+        // The MMIO idiom: a `volatile T *` function parameter.
+        var src = WriteTemp("""
+            static void poke(volatile int *reg, int v) { *reg = v; }
+            int main(void) { int m = 0; poke(&m, 9); return m; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("void poke(int* reg, int v)");
+            emitted.ShouldContain("Volatile.Write(ref *reg, v)");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void pointer_to_volatile_object_assignment_is_plain()
+    {
+        // Assigning the POINTER itself (not the pointee) is an ordinary pointer
+        // store — only `*p` / `p[i]` fence.
+        var src = WriteTemp("""
+            int main(void) { int a=0, b=0; volatile int *p = &a; p = &b; *p = 3; return b; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("p = (&b)");                       // plain pointer reassignment
+            emitted.ShouldNotContain("Volatile.Write(ref p,");       // not a fenced pointer store
+            emitted.ShouldContain("Volatile.Write(ref *p, 3)");      // but the pointee write fences
+        }
+        finally { File.Delete(src); }
+    }
 }
