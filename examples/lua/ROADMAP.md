@@ -120,12 +120,14 @@ TU hits it via `lua.h`); dotcc has block-scope arrays but not global ones.
 - **Walls cleared so far** (each a committed dotcc feature + fixture): `const`/
   `volatile` before a typedef-name/tag (4a), `typedef struct Foo Foo;` tag-vs-
   typedef namespace (4b), file-scope array declarations (4c), parenthesized
-  function-name declarator `T (name)(args)` (4d, lua.h's `LUA_API` idiom).
+  function-name declarator `T (name)(args)` (4d, lua.h's `LUA_API` idiom),
+  `typedef union { … } Name;` (4e, lobject.h's `Value`/`StackValue`).
   `lctype.c` now emits an object. ✅
-- **Current wall** (every remaining TU, via `lobject.h:49`): **`typedef union
-  Value { … } Value;`** — the union form of `typedef`-with-body. dotcc has the
-  `struct` forms (`typedefStruct`/`typedefStructAnon`) but not the `union` ones
-  (4e, next).
+- **Current wall** (every remaining TU, via `lobject.h:148`): a **named nested
+  aggregate member** — `struct { TValuefields; unsigned short delta; } tbc;`
+  inside `union StackValue`. dotcc handles ANONYMOUS nested members
+  (`struct { … };`, C11) but not a NAMED one (`struct { … } field;`): needs a
+  synthesized nested C# type + a field of it + `o.tbc.delta` access (4f, next).
 - Watch items: `lvm.c` dispatch loop (may use a jump table / labels-as-values —
   GNU `&&label`, which is **out of scope**; Lua has an ANSI fallback `#if`-gated
   on `__GNUC__`, which dotcc doesn't define → we get the portable `switch`).
