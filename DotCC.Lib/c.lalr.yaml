@@ -463,6 +463,12 @@ productions:
       # C union), exactly like a plain `union ID { … };` def (unionDef).
       - { lhs: Fn, rhs: ['typedef', 'union', ID, '{', MemberList, '}', ID, ';'], action: typedefUnion }
       - { lhs: Fn, rhs: ['typedef', 'union', '{', MemberList, '}', ID, ';'], action: typedefUnionAnon }
+      # `typedef enum Tag { EnumList } Alias ;` and `typedef enum { EnumList }
+      # Alias ;` — the enum counterparts (Lua's `typedef enum { TM_INDEX, … }
+      # TMS;` in ltm.h). Same tagged-vs-anonymous `ID` / `{` lookahead split as
+      # the struct/union forms. Lowers to a real C# `enum Alias : int { … }`.
+      - { lhs: Fn, rhs: ['typedef', 'enum', ID, '{', EnumList, '}', ID, ';'], action: typedefEnum }
+      - { lhs: Fn, rhs: ['typedef', 'enum', '{', EnumList, '}', ID, ';'], action: typedefEnumAnon }
       # Function-pointer typedef: `typedef Ret (*Name)(args);`. Lowers to
       # C# `using unsafe Name = delegate*<args..., Ret>;`. The standalone
       # form `int (*fn)(int);` is famously hard to LALR-parse due to the

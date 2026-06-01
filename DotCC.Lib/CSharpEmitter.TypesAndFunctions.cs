@@ -746,6 +746,26 @@ internal sealed partial class CSharpEmitter
         return EmitEnum(T(n.Arg1), EI(n.Arg5), T(n.Arg3));
     }
 
+    // `typedef enum { … } Alias ;` (anonymous) — emit the C# enum under the alias
+    // name (C# has no separate tag namespace). `typedef enum Tag { … } Alias ;`
+    // (tagged) — emit under the alias too, and bind `using Tag = Alias;` + mark
+    // Tag an enum tag, so later `enum Tag` references resolve. rhs indices —
+    // anon: enum(1) {(2) EnumList(3) }(4) Alias(5); tagged: enum(1) Tag(2) {(3)
+    // EnumList(4) }(5) Alias(6).
+    public EmitContent Visit(C.TypedefEnumAnon n) => EmitEnum(T(n.Arg5), EI(n.Arg3), "int");
+    public EmitContent Visit(C.TypedefEnum n)
+    {
+        var tag = T(n.Arg2);
+        var alias = T(n.Arg6);
+        var result = EmitEnum(alias, EI(n.Arg4), "int");
+        if (tag != alias)
+        {
+            _enumTags.Add(tag);
+            if (_aliasNames.Add(tag)) { _aliases.Append("using ").Append(tag).Append(" = ").Append(alias).Append(";\n"); }
+        }
+        return result;
+    }
+
     // Shared by plain `enum Name { … }` (base int) and the C23 fixed-underlying
     // form `enum Name : T { … }` (base = mapped C# integral type).
     private EmitContent EmitEnum(string enumName, IReadOnlyList<string> items, string baseType)
