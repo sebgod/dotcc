@@ -177,11 +177,14 @@ internal sealed partial class CSharpEmitter
     public EmitContent Visit(C.ShlAssign n) => CompoundAssign(n.Arg0, "<<", n.Arg2);
     public EmitContent Visit(C.ShrAssign n) => CompoundAssign(n.Arg0, ">>", n.Arg2);
 
-    public EmitContent Visit(C.Add n) => $"({IntDecay(n.Arg0)} + {IntDecay(n.Arg2)})";
-    public EmitContent Visit(C.Sub n) => $"({IntDecay(n.Arg0)} - {IntDecay(n.Arg2)})";
-    public EmitContent Visit(C.Mul n) => $"({IntDecay(n.Arg0)} * {IntDecay(n.Arg2)})";
-    public EmitContent Visit(C.Div n) => $"({IntDecay(n.Arg0)} / {IntDecay(n.Arg2)})";
-    public EmitContent Visit(C.Mod n) => $"({IntDecay(n.Arg0)} % {IntDecay(n.Arg2)})";
+    // Arithmetic — carries a folded ConstInt when both operands are constants, so
+    // an integer-constant-expression position (e.g. `T a[sizeof(x)/sizeof(x[0])]`)
+    // can use the literal value. ArithFold keeps the emitted text and tags the const.
+    public EmitContent Visit(C.Add n) => ArithFold($"({IntDecay(n.Arg0)} + {IntDecay(n.Arg2)})", n.Arg0, "+", n.Arg2);
+    public EmitContent Visit(C.Sub n) => ArithFold($"({IntDecay(n.Arg0)} - {IntDecay(n.Arg2)})", n.Arg0, "-", n.Arg2);
+    public EmitContent Visit(C.Mul n) => ArithFold($"({IntDecay(n.Arg0)} * {IntDecay(n.Arg2)})", n.Arg0, "*", n.Arg2);
+    public EmitContent Visit(C.Div n) => ArithFold($"({IntDecay(n.Arg0)} / {IntDecay(n.Arg2)})", n.Arg0, "/", n.Arg2);
+    public EmitContent Visit(C.Mod n) => ArithFold($"({IntDecay(n.Arg0)} % {IntDecay(n.Arg2)})", n.Arg0, "%", n.Arg2);
     public EmitContent Visit(C.Cast n)
     {
         var castType = T(n.Arg1);
@@ -414,7 +417,9 @@ internal sealed partial class CSharpEmitter
                 "`sizeof` of this expression isn't supported yet — dotcc resolves sizeof of a "
                 + "variable, array, subscript, dereference, cast, literal, or call result. "
                 + "Use `sizeof(Type)` if you can.");
-        return Typed(SizeofText(t), new CType.Sized("int"));
+        // Carry the folded byte size too, so `sizeof expr` works in an integer
+        // constant-expression position (e.g. an array bound).
+        return new EmitContent.Text(SizeofText(t), Ty: new CType.Sized("int"), ConstInt: SizeofConstOfCType(t));
     }
 
     // C# expression for the byte size of a CType. An array is count*sizeof(elem)
@@ -623,7 +628,8 @@ internal sealed partial class CSharpEmitter
         // at every use and fail to compile.
         if (!_localNames.Contains(name) && _enumerators.TryGetValue(name, out var enumName))
         {
-            return new EmitContent.Text($"{enumName}.{Id(name)}", enumName, new CType.Sized(enumName));
+            return new EmitContent.Text($"{enumName}.{Id(name)}", enumName, new CType.Sized(enumName),
+                ConstInt: _enumeratorValues.TryGetValue(name, out var ev) ? ev : null);
         }
         // An enum-typed variable read is itself enum-valued — tag it so consuming
         // nodes insert the int↔enum casts C# requires (`int x = c`, `c & MASK`,
@@ -694,14 +700,18 @@ internal sealed partial class CSharpEmitter
         var ct = ls > 0 ? (hasU ? "ulong" : "long") : (hasU ? "uint" : "int");
 
         string valueText;
+        int? constVal = null;  // folded integer value (for const-expression use, e.g. array bounds)
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
         if (digits.Length >= 2 && digits[0] == '0' && (digits[1] is 'x' or 'X'))
         {
             valueText = digits + CsIntSuffix(hasU, ls);          // hex — C# accepts 0x… verbatim
+            if (int.TryParse(digits[2..], System.Globalization.NumberStyles.HexNumber, inv, out var hv)) { constVal = hv; }
         }
         else if (digits.Length >= 2 && digits[0] == '0' && (digits[1] is 'b' or 'B'))
         {
             Gate(2023, "binary integer literal (`0b`)", n.Arg0);  // C23
             valueText = digits + CsIntSuffix(hasU, ls);          // binary — C# accepts 0b… verbatim
+            try { constVal = (int)Convert.ToUInt32(digits[2..], 2); } catch { /* not foldable */ }
         }
         else if (digits.Length >= 2 && digits[0] == '0')
         {
@@ -717,13 +727,15 @@ internal sealed partial class CSharpEmitter
             ulong value;
             try { value = Convert.ToUInt64(digits, 8); }
             catch (OverflowException) { throw new CompileException($"octal constant `{raw}` is too large"); }
-            valueText = value.ToString(System.Globalization.CultureInfo.InvariantCulture) + CsIntSuffix(hasU, ls);
+            valueText = value.ToString(inv) + CsIntSuffix(hasU, ls);
+            if (value <= int.MaxValue) { constVal = (int)value; }
         }
         else
         {
             valueText = digits + CsIntSuffix(hasU, ls);          // decimal
+            if (int.TryParse(digits, System.Globalization.NumberStyles.Integer, inv, out var dv)) { constVal = dv; }
         }
-        return Typed(valueText, new CType.Sized(ct));
+        return new EmitContent.Text(valueText, Ty: new CType.Sized(ct), ConstInt: constVal);
     }
 
     // Map a C integer suffix (any u/U + any l/L) to C#'s canonical form. C# has
@@ -884,7 +896,7 @@ internal sealed partial class CSharpEmitter
         // still fence (the bare lvalue / pointee-ness is unchanged by parenthesising).
         return new EmitContent.Text($"({T(n.Arg1)})", EnumOf(n.Arg1), TyOf(n.Arg1),
             VolatileLValue: VLValueOf(n.Arg1), VolatilePointee: VolatilePointeeOf(n.Arg1),
-            AtomicLValue: ALValueOf(n.Arg1));
+            AtomicLValue: ALValueOf(n.Arg1), ConstInt: ConstOfItem(n.Arg1));
     }
 
     // C23 keyword constants (only reached under -std=c23, via the rewriter's

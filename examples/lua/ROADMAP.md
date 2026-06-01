@@ -123,18 +123,29 @@ TU hits it via `lua.h`); dotcc has block-scope arrays but not global ones.
   move the core scoreboard until the array-member wall below clears — it's needed
   by `lobject.c`/`loslib.c` regardless.)
 
-### ⬜ Phase 4k — constant-expression array-member size (`T a[sizeof(X)]`)
-The probe's NEW universal wall (18/20 core TUs): a struct array member sized by a
-**`sizeof`-expression** — Lua's `lobject.h` `lu_byte extra_[sizeof(void*)]`
-(GCObject alignment padding). dotcc's array-member lowering (sized `fixed`/
-`[InlineArray]`) currently requires a LITERAL size; `sizeof(void*)` is a constant
-*expression* (= 8). Needs a small compile-time evaluator for `sizeof(Type)` (and
-`sizeof(Type)`-arithmetic) in array-member bounds — the CType layer already knows
-the sizes; it just has to fold the constant. Also surfaced: `lu_byte` (a typedef
-for `unsigned char` → `byte`) isn't matched as a primitive fixed-buffer element
-(the alias `lu_byte`, not `byte`, reaches the member visitor) — so it takes the
-`[InlineArray]` path; resolving the typedef to its primitive would route it to the
-plain `fixed byte` buffer. Both are needed to clear this wall. **Next.**
+### ✅ Phase 4k — constant-expression array-member size + typedef-element resolution
+Landed: a struct array-member bound that's an integer CONSTANT EXPRESSION is folded
+to the literal a C# `fixed[N]`/`[InlineArray(N)]` needs — a `sizeof` (`sizeof(void*)`
+→ 8), an enum constant (`tmname[TM_N]`), and `+ - * / % << >>` arithmetic over them,
+seen through parens (`EmitContent.Text.ConstInt`, folded by `ConstOfItem`/`SizeofConst`/
+`FoldBinary`; enum values captured in `_enumeratorValues`). Plus a typedef element
+resolves to its underlying primitive (`lu_byte`→`unsigned char`→`byte`, via
+`_typedefUnderlying`/`ResolveTypedef`) so it takes the `fixed byte` path (C# `fixed`
+needs a primitive keyword, not the alias). **Cleared both `extra_[sizeof(void*)]`
+(lstate.h) and `tmname[TM_N]` (lstate.h).** Fixture `array-member-constexpr/`; unit
+tests `ArrayMemberConstExprTests`.
+
+### ⬜ Phase 4l — multi-dimensional struct array member; anonymous file-scope enum
+The probe's NEW walls (18/20), both in early headers:
+- **`TString *strcache[STRCACHE_N][STRCACHE_M];`** (lstate.h:368) — a 2-D struct
+  array MEMBER. dotcc handles multi-dim block-scope arrays (flattened `stackalloc`)
+  but the struct-Member grammar is 1-D only → parse error on the second `[`. Needs a
+  multi-dim member production + the same flatten-to-`fixed[product]`/`[InlineArray]`
+  lowering (with the multi-dim subscript rewrite already used for locals).
+- **`enum { A, B, C, N };`** (anonymous file-scope enum) — dotcc requires a tag after
+  `enum` (`enum E { … }`). An untagged enum-as-constants definition is common
+  (`lopcodes.h`/`lparser.h`); needs an `enum { … } ;` production that emits the
+  enumerators as constants without a named C# enum type. **Next.**
 
 ### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (2 / 20 objects)
 - Iterate the 20 core TUs via `probe.sh`; fix each parse/emit gap as it surfaces.

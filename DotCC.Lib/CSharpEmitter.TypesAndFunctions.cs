@@ -386,9 +386,16 @@ internal sealed partial class CSharpEmitter
     // — the inline-storage equivalent that accepts any unmanaged element type.
     public EmitContent Visit(C.StructArrMember n)
     {
-        var elem = T(n.Arg0);
+        // Resolve a typedef element to its underlying primitive (`lu_byte` → `byte`),
+        // both for the fixed-buffer eligibility check and because C# `fixed` requires
+        // a primitive KEYWORD (it rejects the alias). Fold a constant-expression bound
+        // (`extra_[sizeof(void*)]` → `[8]`) — C# `fixed[N]`/`[InlineArray(N)]` need a
+        // literal.
+        var elem = ResolveTypedef(T(n.Arg0));
         var name = T(n.Arg1);
-        var size = StripOuterParens(T(n.Arg3));
+        var size = ConstOfItem(n.Arg3) is int sz
+            ? sz.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            : StripOuterParens(T(n.Arg3));
         if (_fixedBufferElemTypes.Contains(elem))
         {
             _pendingFields.Add(name);
@@ -406,7 +413,7 @@ internal sealed partial class CSharpEmitter
     public EmitContent Visit(C.StructFlexArrMember n)
     {
         Gate(1999, "flexible array member", n.Arg0);  // C99
-        var elem = T(n.Arg0);
+        var elem = ResolveTypedef(T(n.Arg0));  // `lu_byte` → `byte` for the fixed-buffer check
         var name = T(n.Arg1);
         // Primitive element → a 1-element `fixed` buffer (over-indexes into the
         // malloc'd tail with no bounds check — the struct-hack idiom). A
@@ -675,6 +682,11 @@ internal sealed partial class CSharpEmitter
     // the source-level convenience of writing the bare name.
     private readonly Dictionary<string, string> _enumerators = new(StringComparer.Ordinal);
 
+    // Enumerator name → its resolved integer value (when known — auto-numbered or a
+    // literal-valued enumerator). Lets an enumerator used as an integer constant
+    // expression fold to a literal (e.g. an array bound `T a[TM_N]`).
+    private readonly Dictionary<string, int> _enumeratorValues = new(StringComparer.Ordinal);
+
     // Set of enum tag names (the `Color` in `enum Color { … }`). Populated by
     // Visit(EnumDef); consulted to decide whether a variable's declared type is
     // an enum (so a read of it is enum-typed) and whether a `(T)` cast targets
@@ -816,9 +828,11 @@ internal sealed partial class CSharpEmitter
             var eq = raw.IndexOf('=');
             string itemName;
             string valueText;
+            long? value = null;  // the resolved integer value, when known
             if (eq < 0)
             {
                 itemName = raw;
+                value = next;
                 valueText = next.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 next++;
             }
@@ -832,6 +846,7 @@ internal sealed partial class CSharpEmitter
                 // verbatim and best-effort advance `next` by 1.
                 if (long.TryParse(expr, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsed))
                 {
+                    value = parsed;
                     valueText = parsed.ToString(System.Globalization.CultureInfo.InvariantCulture);
                     next = parsed + 1;
                 }
@@ -842,6 +857,9 @@ internal sealed partial class CSharpEmitter
                 }
             }
             _enumerators[itemName] = enumName;  // raw key — Visit(Var) looks up by raw name
+            // Remember the integer value so an enumerator used as an integer constant
+            // expression (e.g. an array bound `T a[TM_N]`) folds to a literal.
+            if (value is >= int.MinValue and <= int.MaxValue) { _enumeratorValues[itemName] = (int)value.Value; }
             sb.Append("    ").Append(Id(itemName)).Append(" = ").Append(valueText).Append(",\n");
         }
         sb.Append("}\n\n");
@@ -935,6 +953,9 @@ internal sealed partial class CSharpEmitter
         // resolves to the underlying type WITH the Atomic flag (Visit(TypeName)), so
         // `atomic_int x;` is treated exactly like `_Atomic int x;`.
         if (AtomicOf(n.Arg1)) { _atomicTypedefs[alias] = type; return string.Empty; }
+        // Record alias → underlying (chained) so the fixed-buffer-element check and
+        // sizeof folding can see through `typedef unsigned char lu_byte;` etc.
+        if (alias != type) { _typedefUnderlying[alias] = ResolveTypedef(type); }
         // If the alias resolves (directly or transitively) to a predefined
         // reference type, record the alias so GlobalVar can auto-init
         // instances. `jmp_buf` → `LongJmpToken` is the canonical case.

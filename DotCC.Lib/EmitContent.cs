@@ -88,7 +88,13 @@ public abstract record EmitContent
     /// <paramref name="Value"/> already holds the seq-cst read (<c>Atomic.Load(ref X)</c>)
     /// and this carries the bare lvalue <c>X</c>. A write-context parent emits the
     /// matching <c>Atomic.Store</c>/<c>Atomic.AddFetch</c>/… instead of the read.</param>
-    public sealed record Text(string Value, string? EnumType = null, CType? Ty = null, bool Inline = false, bool Noreturn = false, bool Volatile = false, string? VolatileLValue = null, bool VolatilePointee = false, bool Atomic = false, string? AtomicLValue = null) : EmitContent;
+    /// <param name="ConstInt">The expression's folded compile-time integer value, when
+    /// known — a literal, a <c>sizeof</c>, or arithmetic over them, propagated through
+    /// parentheses. Lets a consumer that needs an integer-constant-expression (e.g. an
+    /// array-member bound <c>T a[sizeof(void*)]</c>, which lowers to a C#
+    /// <c>fixed[N]</c>/<c>[InlineArray(N)]</c> requiring a literal) fold it. Null when
+    /// not a constant dotcc can fold.</param>
+    public sealed record Text(string Value, string? EnumType = null, CType? Ty = null, bool Inline = false, bool Noreturn = false, bool Volatile = false, string? VolatileLValue = null, bool VolatilePointee = false, bool Atomic = false, string? AtomicLValue = null, int? ConstInt = null) : EmitContent;
 
     /// <summary>
     /// Accumulator for declaration-specifier sequences (<c>int</c>,
