@@ -72,11 +72,22 @@ public sealed class SizeofMemberTests
     }
 
     [Fact]
+    public void integer_arithmetic_sizeof_resolves_to_common_type()
+    {
+        // An integer multiplicative result now carries its usual-arithmetic common
+        // type (phase 6i), so `sizeof(n * n)` is `sizeof(int)` — exactly C's
+        // semantics (the result of `int * int` is `int`).
+        var emitted = Compiler.EmitCSharp(new[] { WriteTemp(Probe("sizeof(n * n)")) });
+        emitted.ShouldContain("(int)sizeof(int)");
+    }
+
+    [Fact]
     public void unsynthesizable_sizeof_still_throws()
     {
-        // A multiplicative result has no pointer/array type — sizeof of it can't be
-        // resolved, so dotcc must still fail loudly (not silently emit a wrong size).
-        var src = WriteTemp(Probe("sizeof(n * n)"));
+        // A FLOATING multiplicative result has no synthesized type (the integer
+        // usual-arithmetic layer only types integer pairs), so sizeof of it must
+        // still fail loudly rather than silently emit a wrong size.
+        var src = WriteTemp(Probe("sizeof(p->in.d * p->in.d)"));
         Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
             .Message.ShouldContain("sizeof");
     }

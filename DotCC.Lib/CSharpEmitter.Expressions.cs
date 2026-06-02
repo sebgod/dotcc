@@ -115,9 +115,9 @@ internal sealed partial class CSharpEmitter
     // a SetjmpCheckZero variant consumed directly by StmtIfElse (a conditional
     // context), so it must NOT be wrapped. Enum operands decay to int.
     public EmitContent Visit(C.Eq n) => MaybeSetjmpCompare(n.Arg0, n.Arg2, isEquals: true)
-        ?? (EmitContent)$"((CBool)({IntDecay(n.Arg0)} == {IntDecay(n.Arg2)}))";
+        ?? (EmitContent)RelText(n.Arg0, "==", n.Arg2);
     public EmitContent Visit(C.Neq n) => MaybeSetjmpCompare(n.Arg0, n.Arg2, isEquals: false)
-        ?? (EmitContent)$"((CBool)({IntDecay(n.Arg0)} != {IntDecay(n.Arg2)}))";
+        ?? (EmitContent)RelText(n.Arg0, "!=", n.Arg2);
 
     /// <summary>
     /// If one side of an <c>==</c>/<c>!=</c> comparison is a
@@ -159,17 +159,43 @@ internal sealed partial class CSharpEmitter
     // value): CBool→int carries it into arithmetic/assignment/args/return, and a
     // `Cond.B(CBool)` overload carries it into conditional positions. Nested
     // comparisons (`(a>b)==(c>d)`) resolve via CBool→int on both operands.
-    public EmitContent Visit(C.Lt n) => $"((CBool)({IntDecay(n.Arg0)} < {IntDecay(n.Arg2)}))";
-    public EmitContent Visit(C.Gt n) => $"((CBool)({IntDecay(n.Arg0)} > {IntDecay(n.Arg2)}))";
-    public EmitContent Visit(C.Le n) => $"((CBool)({IntDecay(n.Arg0)} <= {IntDecay(n.Arg2)}))";
-    public EmitContent Visit(C.Ge n) => $"((CBool)({IntDecay(n.Arg0)} >= {IntDecay(n.Arg2)}))";
-    // Bitwise — same precedence and semantics in C# (binary `& | ^ << >>`,
-    // unary `~`). The visitor just emits the C# operator verbatim.
-    public EmitContent Visit(C.BOr n)  => $"({IntDecay(n.Arg0)} | {IntDecay(n.Arg2)})";
-    public EmitContent Visit(C.BXor n) => $"({IntDecay(n.Arg0)} ^ {IntDecay(n.Arg2)})";
-    public EmitContent Visit(C.BAnd n) => $"({IntDecay(n.Arg0)} & {IntDecay(n.Arg2)})";
-    public EmitContent Visit(C.Shl n)  => $"({IntDecay(n.Arg0)} << {IntDecay(n.Arg2)})";
-    public EmitContent Visit(C.Shr n)  => $"({IntDecay(n.Arg0)} >> {IntDecay(n.Arg2)})";
+    public EmitContent Visit(C.Lt n) => RelText(n.Arg0, "<", n.Arg2);
+    public EmitContent Visit(C.Gt n) => RelText(n.Arg0, ">", n.Arg2);
+    public EmitContent Visit(C.Le n) => RelText(n.Arg0, "<=", n.Arg2);
+    public EmitContent Visit(C.Ge n) => RelText(n.Arg0, ">=", n.Arg2);
+    // A relational / equality operator yields C `int` 0/1 (CBool), with operands
+    // reconciled per C's usual arithmetic conversions (so `size_t < int` doesn't
+    // trip CS0034). The CBool result carries into int positions and Cond.B alike.
+    private string RelText(Item a, string op, Item b)
+    {
+        var (sa, sb, _) = ReconcileInt(a, b);
+        return $"((CBool)({sa} {op} {sb}))";
+    }
+    // Bitwise — same precedence and semantics in C# (binary `& | ^`, shifts, and
+    // unary `~`). `& | ^` reconcile both operands per the usual arithmetic
+    // conversions (a `ulong & int` mask would otherwise be CS0034); the result is
+    // the common type. A SHIFT only reconciles its LEFT (value) operand — C# wants
+    // the shift COUNT as `int`, so a wide/unsigned count is cast down (ShiftText).
+    public EmitContent Visit(C.BOr n)  => BitText(n.Arg0, "|", n.Arg2);
+    public EmitContent Visit(C.BXor n) => BitText(n.Arg0, "^", n.Arg2);
+    public EmitContent Visit(C.BAnd n) => BitText(n.Arg0, "&", n.Arg2);
+    public EmitContent Visit(C.Shl n)  => ShiftText(n.Arg0, "<<", n.Arg2);
+    public EmitContent Visit(C.Shr n)  => ShiftText(n.Arg0, ">>", n.Arg2);
+    private EmitContent BitText(Item a, string op, Item b)
+    {
+        var (sa, sb, ty) = ReconcileInt(a, b);
+        return new EmitContent.Text($"({sa} {op} {sb})", Ty: ty);
+    }
+    // `v << n` / `v >> n` — C# requires the shift count to be `int` (or implicitly
+    // convertible to it), so a `long` / `ulong` / `uint` / native count is cast to
+    // `(int)` (CS0019 otherwise). The value operand keeps its type and width; the
+    // result is the value operand's type.
+    private EmitContent ShiftText(Item a, string op, Item b)
+    {
+        var count = IntDecay(b);
+        if (IntOperandType(b) is string ct && ct != "int") { count = $"(int)({count})"; }
+        return new EmitContent.Text($"({IntDecay(a)} {op} {count})", Ty: TyOf(a));
+    }
     public EmitContent Visit(C.BNot n) => $"(~{IntDecay(n.Arg1)})";
 
     // Logical NOT: lower to `(Cond.B(E) ? 0 : 1)` so the result is int,
@@ -198,7 +224,29 @@ internal sealed partial class CSharpEmitter
                        + $"else {VoidBranchStmt(n.Arg4)}";
             return new EmitContent.VoidCond($"({CondOf(n.Arg0)} ? {T(n.Arg2)} : {T(n.Arg4)})", ifStmt);
         }
-        return $"({CondOf(n.Arg0)} ? {T(n.Arg2)} : {T(n.Arg4)})";
+        // Tag the result with the arms' common integer type so the value flows into
+        // a containing operator's usual-arithmetic reconcile (`x + (cond ? sizeof(S)
+        // : 0)` — the ternary is int / size_t, not untyped). Non-integer arms leave
+        // it untyped.
+        return new EmitContent.Text(
+            $"({CondOf(n.Arg0)} ? {T(n.Arg2)} : {T(n.Arg4)})", Ty: TernaryResultType(n.Arg2, n.Arg4));
+    }
+
+    // The common integer type of a ternary's two arms, for the type-synthesis
+    // layer. Both arms integer → their usual-arithmetic common type. One arm a
+    // known integer and the other an integer CONSTANT (`cond ? sizeof(S) : 0`) →
+    // the typed arm's type (the constant converts to it). Otherwise null.
+    private CType? TernaryResultType(Item a, Item b)
+    {
+        var ta = IntOperandType(a);
+        var tb = IntOperandType(b);
+        if (ta is not null && tb is not null)
+        {
+            return IntCommonType(ta, tb) is string c ? new CType.Sized(c) : null;
+        }
+        if (ta is not null && ConstOfItem(b) is not null) { return new CType.Sized(ta); }
+        if (tb is not null && ConstOfItem(a) is not null) { return new CType.Sized(tb); }
+        return null;
     }
 
     // A ternary arm is void when it's a `(void)X` discard cast or a void-typed
@@ -228,11 +276,11 @@ internal sealed partial class CSharpEmitter
     // Arithmetic — carries a folded ConstInt when both operands are constants, so
     // an integer-constant-expression position (e.g. `T a[sizeof(x)/sizeof(x[0])]`)
     // can use the literal value. ArithFold keeps the emitted text and tags the const.
-    public EmitContent Visit(C.Add n) => ArithFold($"({IntDecay(n.Arg0)} + {IntDecay(n.Arg2)})", n.Arg0, "+", n.Arg2);
-    public EmitContent Visit(C.Sub n) => ArithFold($"({IntDecay(n.Arg0)} - {IntDecay(n.Arg2)})", n.Arg0, "-", n.Arg2);
-    public EmitContent Visit(C.Mul n) => ArithFold($"({IntDecay(n.Arg0)} * {IntDecay(n.Arg2)})", n.Arg0, "*", n.Arg2);
-    public EmitContent Visit(C.Div n) => ArithFold($"({IntDecay(n.Arg0)} / {IntDecay(n.Arg2)})", n.Arg0, "/", n.Arg2);
-    public EmitContent Visit(C.Mod n) => ArithFold($"({IntDecay(n.Arg0)} % {IntDecay(n.Arg2)})", n.Arg0, "%", n.Arg2);
+    public EmitContent Visit(C.Add n) => ArithFold(n.Arg0, "+", n.Arg2);
+    public EmitContent Visit(C.Sub n) => ArithFold(n.Arg0, "-", n.Arg2);
+    public EmitContent Visit(C.Mul n) => ArithFold(n.Arg0, "*", n.Arg2);
+    public EmitContent Visit(C.Div n) => ArithFold(n.Arg0, "/", n.Arg2);
+    public EmitContent Visit(C.Mod n) => ArithFold(n.Arg0, "%", n.Arg2);
     public EmitContent Visit(C.Cast n)
     {
         var castType = T(n.Arg1);

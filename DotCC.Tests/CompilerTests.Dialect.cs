@@ -418,10 +418,11 @@ public sealed partial class CompilerTests
     [Fact]
     public void Sizeof_of_unsupported_operand_fails_clearly()
     {
-        // A non-additive arithmetic result has no pointer/array type, so its
-        // sizeof can't be synthesized — dotcc must fail loudly. (Member access,
-        // pointer arithmetic, and comma ARE now resolved — see SizeofMemberTests.)
-        var src = WriteTemp("int main() { int a = 3, b = 4; int n = sizeof(a * b); return n; }");
+        // A FLOATING arithmetic result has no synthesized type (the integer
+        // usual-arithmetic layer only types integer pairs), so its sizeof can't be
+        // resolved — dotcc must fail loudly. (Member access, pointer arithmetic,
+        // comma, AND integer arithmetic ARE now resolved — see SizeofMemberTests.)
+        var src = WriteTemp("int main() { double a = 3, b = 4; int n = sizeof(a * b); return n; }");
         try
         {
             var ex = Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }));

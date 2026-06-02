@@ -547,13 +547,37 @@ new class of latent bugs the probe never could.
   enumerator case labels to `(int)` (the existing `IntDecay` enum-sink helper) —
   uniform int = pure C semantics, and a switch ON an enum keeps working. Fixture
   `enum-switch-int/`.
-- 🧱 **Phase 6i+ — the remaining deep walls** (~1340 errors):
-  - **C implicit conversions at stores/sinks (CS0266 ~114).** C allows implicit
-    narrowing (`lu_byte b = some_int;` → `int`→`byte`, 70) and signed→unsigned
-    (`int`→`ulong` 34, `long`→`ulong`) at assignment / init / return / arg; C#
-    requires an explicit cast. Needs the CType layer to insert the C-conversion
-    cast at the store position (mirrors the enum-sink reconcile). Also includes
-    integer `0` assigned to a pointer lvalue (should lower to `null`).
+- ✅ **Phase 6i — C integer-conversion layer** (509 → 342 so far). dotcc maps C's
+  integer types onto C# (`size_t`/`lua_Unsigned` → `ulong`, `lu_byte` → `byte`, …);
+  C# performs most of C's conversions implicitly but diverges where this layer
+  steps in. Landed in two pieces:
+  - **pt1 — `Cond.B` overload per numeric type** (CS0121 152 → 0). A controlling
+    expression of any integer type wraps in `Cond.B(...)`; the overload set was
+    only bool/int/double/void*/CBool, so a `byte`/`uint`/`long`/`ulong`/… argument
+    was ambiguous between a built-in numeric overload and the user-defined `CBool`
+    conversion. Added an exact overload per lowered numeric type (an exact match
+    beats the user-defined path). Fixture `cond-int-types/`.
+  - **pt2 — usual arithmetic conversions at binary operators** (CS0034 180 → 12;
+    CS0019 shifts 18 → 6). C# refuses to unify a 64-bit unsigned (`ulong`/`nuint`)
+    with a signed integer (CS0034), and widens `uint op int` to `long` where C
+    keeps `unsigned int`. dotcc computes C's common type (`ReconcileInt` /
+    `IntCommonType`) and, when it's unsigned, casts the signed operand to it
+    (C's wraparound conversion) — across `+ - * / %`, `& | ^`, and the relational /
+    equality ops; a shift casts its wide/unsigned COUNT to `int`. The result is
+    tagged with the common type so it propagates up nested expressions
+    (`(size_t)a + (uint)b * sizeof(T)`), through parens and ternary arms, and into
+    Cond.B / stores. Fixture `usual-arith-conv/`. *Residual 12 CS0034*: a
+    parenthesized `sizeof` loses its int-ness through the paren (Paren drops the
+    SizeofType marker); the principled fix is to type `sizeof` as `size_t` (wide
+    ripple — deferred).
+- 🧱 **Phase 6j+ — the remaining deep walls** (~340 errors):
+  - **C implicit conversions at stores/sinks (CS1503 ~210, CS0266 ~112).** C allows
+    implicit narrowing (`lu_byte b = some_int;` → `int`→`byte`) and signed→unsigned
+    (`int`→`ulong`) at assignment / init / return / call-ARG; C# requires an
+    explicit cast. The arithmetic layer (6i-pt2) now tags result types, so the next
+    step is to insert the C-conversion cast at the store position using the
+    declared lvalue / param / return type (mirrors the enum-sink reconcile). Also
+    includes integer `0` assigned to a pointer lvalue (should lower to `null`).
   - **Pointer / fn-ptr types as generic type arguments (74: CS0306).** A bare
     fn-ptr array (`GlobalArrayFrom<delegate*<…>>`) or a `lua_State*` type argument;
     fix is the `nint[]`-reinterpret already used for `byte**` arrays, extended to
@@ -562,8 +586,8 @@ new class of latent bugs the probe never could.
   - **Call through a parenthesized simple-member fn-ptr callee (CS0118).** `(r.func)(5)`
     reads as a cast in C#; strip the redundant callee parens (or call without them)
     when the inner expression is a member access / subscript.
-  - Long tail: CS1503 (~206), CS0034 (180) operator ambiguity, CS0121 (152)
-    ambiguous overloads, CS9060, … — triage next.
+  - Long tail: CS0163/CS8070 (switch fall-through — `default:` with no break),
+    CS1501, CS0193, CS9060, … — triage next.
 
 ### ⬜ Phase 7 — Stretch: standalone REPL / `luac`
 - Minimal `lua.c` (no readline/signal niceties) and/or `luac.c`.
