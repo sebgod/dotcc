@@ -492,24 +492,34 @@ new class of latent bugs the probe never could.
   primitive (`size_t`→`ulong`, `intptr_t`→`long`, `lu_byte`→`byte`). Also: a
   `(void)` fn-ptr parameter list now means NO parameters (`delegate*<void>`, not
   `delegate*<void, void>` = CS1536). Fixture `typedef-alias-resolve/`.
-- 🧱 **Phase 6d+ — the deep walls** (revealed once 6c unblocked full semantic
-  analysis of all 24k lines — ~5000 errors, dominated by a few SYSTEMIC root
-  causes, not 5000 independent bugs):
-  - **Emission model (~1500 errors: CS8801/CS8422/CS8787).** dotcc emits each C
-    function as a **top-level local function** in the implicit `Main`. That's fine
-    for small programs but breaks for Lua: top-level local functions can't be
-    referenced via `&fn` into function-pointer tables (Lua's `luaL_Reg` arrays),
-    can't be used from certain contexts (CS8801), and trip the static-local-function
-    `this`/`base` rule (CS8422). **Fix: emit user functions as `static` methods of a
-    class** (the `-shared` mode already does this with `DotCcLib`/`DotCcExports`) —
-    so whole-program/link mode should reuse that shape instead of top-level locals.
-  - **Pointer-valued comma expressions (~1000 errors: CS0306).** `(a, b)` in value
+- ✅ **Phase 6d — function emission model: top-level locals → class methods**
+  (cleared ~1200 errors: the whole CS8422 (898) + CS8801 (306) local-function
+  family; total ~5000 → ~3280). dotcc used to emit each C function as a **top-level
+  local function** in the implicit `Main` — fine for small programs, but a
+  top-level local function can't be addressed (`&fn`), stored in a function-pointer
+  table (Lua's `luaL_Reg`), or referenced from a file-scope initializer / several
+  C# contexts (CS8801/CS8422/CS8787). Now user functions are **`internal static`
+  methods of a `DotCcProgram` class** (globals stay in `DotCcGlobals`); `using
+  static DotCcProgram;` surfaces them by bare name everywhere, so the entry's
+  `main(...)` call, inter-function calls, and a file-scope `&fn` all resolve — `&fn`
+  across the class boundary works (using-static surfaces the method group, verified).
+  Behaviorally transparent: all examples (calc/factorial/hello) + 154 functional +
+  684 unit pass. Fixture `fnptr-table/`; unit tests `EmissionModelTests`.
+- 🧱 **Phase 6e+ — the remaining deep walls** (~3280 errors, still a few SYSTEMIC
+  causes, not independent bugs):
+  - **Pointer-valued comma expressions (~1000: CS0306).** `(a, b)` in value
     position lowers to a C# `ValueTuple` `(a, b).Item2`, but a **pointer** operand
     (`CClosure*`) can't be a tuple type argument. Needs a pointer-safe value-comma
-    lowering (a hoist like 6b's SeqExpr, or a helper).
-  - Plus a long tail (CS0149 method-name, CS0266/CS1503 conversions, CS0121
-    ambiguous overloads, …) — triage after the two systemic fixes, which should
-    collapse most of the count.
+    lowering (a hoist like 6b's SeqExpr, or a helper). Same CS0306 also hits a
+    file-scope **array of bare function pointers** (`GlobalArrayFrom<delegate*>`).
+  - **Function-name decay in initializers/more contexts (~300+: CS8787/CS0149).**
+    A bare function name where a function pointer is wanted needs `&fn`; dotcc adds
+    it for call args / decl-init but not yet for struct-field / array initializers
+    (the `luaL_Reg` `{ "name", func }` entries) — and a file-scope struct init with
+    a fn-ptr field currently errors (CS0246). [Tracked: restore the full
+    `fnptr-table/` fixture once these land.]
+  - Long tail: CS0266/CS1503 conversions, CS0121 ambiguous overloads, CS0034
+    operator ambiguity, … — triage after the systemic fixes collapse most of it.
 
 ### ⬜ Phase 7 — Stretch: standalone REPL / `luac`
 - Minimal `lua.c` (no readline/signal niceties) and/or `luac.c`.

@@ -808,6 +808,15 @@ public static class Compiler
         // <PackageReference Include="DotCC.Libc"> in scope.
         var runtimeBlock = _runtimeBlock.Value;
         var header = fileBased ? "#:property AllowUnsafeBlocks=true\n\n" : string.Empty;
+        // User functions live as STATIC METHODS of `DotCcProgram` (not top-level
+        // local functions). A top-level local function can't be addressed (`&fn`),
+        // stored in a function-pointer table (Lua's `luaL_Reg`), or referenced from
+        // several C# contexts (CS8801/CS8422/CS8787) — class methods can. The
+        // visitor's `static unsafe` becomes `internal static unsafe` so `using
+        // static DotCcProgram;` surfaces them by bare name everywhere (the entry's
+        // `main(...)` call, file-scope `&fn` initializers, and inter-function calls).
+        var indentedFns = IndentBlock(
+            emittedFnList.Replace("static unsafe ", "internal static unsafe "), "    ");
         var entry = mainArity switch
         {
             0 => "return main();",
@@ -876,13 +885,17 @@ public static class Compiler
             // <tgmath.h>'s _Generic macros do in real C; we get the
             // same dispatch for free without preprocessor machinery.
             using static Libc;
-            // ---- File-scope variables ---------------------------------
-            // C globals live as static fields of a `DotCcGlobals` class
-            // (declared at file end). `using static DotCcGlobals;` makes
-            // them visible by bare name in every function — C local
-            // functions can't capture top-level locals because they're
-            // emitted as `static`, hence the class indirection.
+            // ---- File-scope variables + user functions ----------------
+            // C globals are static fields of `DotCcGlobals`; user functions are
+            // static methods of `DotCcProgram` (both declared at file end).
+            // `using static` on both makes every global + function visible by bare
+            // name everywhere — functions call each other and read globals
+            // unqualified, the entry below calls `main(...)`, AND a file-scope
+            // initializer can take a function's address (`&fn`, the `luaL_Reg`-table
+            // idiom) by bare name across the class boundary (using-static surfaces
+            // the method group).
             using static DotCcGlobals;
+            using static DotCcProgram;
 
             // ---- typedef'd `using` aliases (C# 12+ permits `using unsafe X = Y;`
             //      at file scope, ahead of top-level statements). Empty when no
@@ -891,9 +904,14 @@ public static class Compiler
             {{entry}}
 
 
-            // ---- user functions (static unsafe local functions) ----
+            // ---- user functions (static methods of DotCcProgram; see the
+            //      `using static` note above — class methods, not top-level locals,
+            //      so `&fn` / function-pointer tables / cross-context refs work) ----
 
-            {{emittedFnList}}
+            static unsafe class DotCcProgram
+            {
+            {{indentedFns}}
+            }
 
             // ---- type declarations (must come last; C# requires top-level
             //      statements to precede type declarations) ----

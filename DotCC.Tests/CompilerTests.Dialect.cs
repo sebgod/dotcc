@@ -532,7 +532,7 @@ public sealed partial class CompilerTests
             var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"));
             // The attribute lands immediately before the method, and the method
             // is otherwise an ordinary static unsafe local function.
-            emitted.ShouldContain("[MethodImpl(MethodImplOptions.AggressiveInlining)]\nstatic unsafe int sq(int x)");
+            emitted.ShouldContain("[MethodImpl(MethodImplOptions.AggressiveInlining)]\n    internal static unsafe int sq(int x)");
         }
         finally { File.Delete(src); }
     }
@@ -548,8 +548,8 @@ public sealed partial class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"));
-            emitted.ShouldContain("[MethodImpl(MethodImplOptions.AggressiveInlining)]\nstatic unsafe int cube(int x)");
-            emitted.ShouldContain("[MethodImpl(MethodImplOptions.AggressiveInlining)]\nstatic unsafe long add(long a, long b)");
+            emitted.ShouldContain("[MethodImpl(MethodImplOptions.AggressiveInlining)]\n    internal static unsafe int cube(int x)");
+            emitted.ShouldContain("[MethodImpl(MethodImplOptions.AggressiveInlining)]\n    internal static unsafe long add(long a, long b)");
         }
         finally { File.Delete(src); }
     }
@@ -563,7 +563,7 @@ public sealed partial class CompilerTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"));
             emitted.ShouldContain("static unsafe int plain(int x)");
-            emitted.ShouldNotContain("[MethodImpl(MethodImplOptions.AggressiveInlining)]\nstatic unsafe int plain");
+            emitted.ShouldNotContain("[MethodImpl(MethodImplOptions.AggressiveInlining)]\n    internal static unsafe int plain");
         }
         finally { File.Delete(src); }
     }
@@ -585,8 +585,8 @@ public sealed partial class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"));
-            emitted.ShouldContain("[MethodImpl(MethodImplOptions.AggressiveInlining)]\nstatic unsafe Cell* bump(Cell* c)");
-            emitted.ShouldContain("[MethodImpl(MethodImplOptions.AggressiveInlining)]\nstatic unsafe Cell make(int x)");
+            emitted.ShouldContain("[MethodImpl(MethodImplOptions.AggressiveInlining)]\n    internal static unsafe Cell* bump(Cell* c)");
+            emitted.ShouldContain("[MethodImpl(MethodImplOptions.AggressiveInlining)]\n    internal static unsafe Cell make(int x)");
         }
         finally { File.Delete(src); }
     }
@@ -604,7 +604,7 @@ public sealed partial class CompilerTests
         try
         {
             Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"))
-                .ShouldContain("[System.Diagnostics.CodeAnalysis.DoesNotReturn]\nstatic unsafe Status die()");
+                .ShouldContain("[System.Diagnostics.CodeAnalysis.DoesNotReturn]\n    internal static unsafe Status die()");
         }
         finally { File.Delete(src); }
     }
@@ -644,7 +644,7 @@ public sealed partial class CompilerTests
         try
         {
             Compiler.EmitCSharp(new[] { src })
-                .ShouldContain("[System.Diagnostics.CodeAnalysis.DoesNotReturn]\nstatic unsafe void die()");
+                .ShouldContain("[System.Diagnostics.CodeAnalysis.DoesNotReturn]\n    internal static unsafe void die()");
         }
         finally { File.Delete(src); }
     }
