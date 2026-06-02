@@ -324,7 +324,26 @@ tag) → conflict-free with `struct ID` / `struct ID { … };`, AND — verified
 **Core probe 17/20 → 18/20** (lparser). Fixture `anon-struct-decl/` (gcc-oracle-
 validated); unit tests `AnonStructDeclTests` (4, incl. the typedef regression guard).
 
-### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (18 / 20 objects)
+### ✅ Phase 4w — comma operator in a controlling expression + `(void)` discard
+llex failed on `while (cast_void(save_and_next(ls)), lisxdigit(ls->current))` —
+the comma operator in a `while` controlling expression where a non-last operand
+is a VOID side-effect (`save_and_next` = `(save() /void/, next() /assignment/)`,
+wrapped in `(void)(…)`). A void operand can't be a C# tuple element, so the
+value-tuple lowering can't apply. Fix: (1) grammar — `if`/`while`/`do-while`/
+`switch` controlling expr `E` → `Expr` (comma tier). (2) A parenthesized comma
+now carries its raw operands forward (`EmitContent.Text.CommaOps`) alongside the
+value-tuple, so a discard context can recover them; `CommaOp` + `Paren` both
+flatten via `CommaOpsOf` (nested/redundant parens compose). (3) `(void)X` lowers
+to a DISCARD — a comma's operands as statements, or `_ = (value)` for a plain
+value. (4) The controlling-expr visitors, on a comma condition, lift the
+non-last operands into statements and test the last with `Cond.B`
+(`while (true) { S; if (!Cond.B(C)) break; BODY }`). Also made `StripOuterParens`
+iterate (a macro-parenthesized assignment `(i = i+1)` → `((i = (i+1)))` needs all
+redundant layers stripped to be a valid C# statement-expression). **Core probe
+18/20 → 19/20** (llex). Fixture `comma-void-control/` (gcc-oracle-validated);
+unit tests `CommaControlTests` (5).
+
+### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (19 / 20 objects)
 - Iterate the 20 core TUs via `probe.sh`; fix each parse/emit gap as it surfaces.
   One commit per coherent gap, each with a minimal fixture (dotcc tradition:
   never fix Lua-specifically — reduce to a small reproducer + fixture).
@@ -340,16 +359,12 @@ validated); unit tests `AnonStructDeclTests` (4, incl. the typedef regression gu
   `typedef enum { … } Name;` (4h, ltm.h's `TMS`), and **multi-declarator members
   + per-declarator pointers** (4i, `struct CallInfo *previous, *next;`).
   **`lctype.c` + `lopcodes.c` emit full objects.** ✅
-- **Current frontier** (18/20 emit objects — everything except `llex` and
-  `ltable`). The 2 remaining failures:
-  - `unexpected ','` (llex:371) — the comma operator in a `while` controlling
-    expression. **Deferred**: the operand is a void side-effect
-    (`cast_void(save_and_next(ls))`), and a void call can't be a C# tuple element
-    nor a captured-pointer lambda; a correct lowering needs context-sensitive
-    comma handling (push the non-last operands into statement position), which is
-    an architectural change, not a one-line grammar fix. Tracked.
+- **Current frontier** (19/20 emit objects — everything except `ltable`). The 1
+  remaining failure:
   - `array member padding needs constant dimension(s)` (ltable) — the deferred
-    `offsetof`-as-array-bound case (needs a compile-time layout model; see 4p).
+    `offsetof`-as-array-bound case (needs a compile-time struct-layout/alignment
+    model dotcc deliberately delegates to the .NET runtime; see 4p). This is the
+    one genuinely-deferred wall — its own capability, not a per-TU parse/emit gap.
 - Watch items: `lvm.c` dispatch loop (may use a jump table / labels-as-values —
   GNU `&&label`, which is **out of scope**; Lua has an ANSI fallback `#if`-gated
   on `__GNUC__`, which dotcc doesn't define → we get the portable `switch`).

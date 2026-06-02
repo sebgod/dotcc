@@ -94,7 +94,14 @@ public abstract record EmitContent
     /// array-member bound <c>T a[sizeof(void*)]</c>, which lowers to a C#
     /// <c>fixed[N]</c>/<c>[InlineArray(N)]</c> requiring a literal) fold it. Null when
     /// not a constant dotcc can fold.</param>
-    public sealed record Text(string Value, string? EnumType = null, CType? Ty = null, bool Inline = false, bool Noreturn = false, bool Volatile = false, string? VolatileLValue = null, bool VolatilePointee = false, bool Atomic = false, string? AtomicLValue = null, int? ConstInt = null) : EmitContent;
+    /// <param name="CommaOps">When this Text is a PARENTHESIZED comma expression
+    /// (<c>(a, b, c)</c>), <see cref="Value"/> is the value-context tuple form
+    /// (<c>(a, b, c).Item3</c>) but this carries the raw operand list so a DISCARD
+    /// context (a statement, a <c>(void)</c> cast, or a controlling expression that
+    /// only tests the last operand) can re-emit the operands as statements — where
+    /// a <c>void</c> side-effect operand is legal but a tuple element isn't. Null
+    /// for a non-comma expression.</param>
+    public sealed record Text(string Value, string? EnumType = null, CType? Ty = null, bool Inline = false, bool Noreturn = false, bool Volatile = false, string? VolatileLValue = null, bool VolatilePointee = false, bool Atomic = false, string? AtomicLValue = null, int? ConstInt = null, IReadOnlyList<string>? CommaOps = null) : EmitContent;
 
     /// <summary>
     /// Accumulator for declaration-specifier sequences (<c>int</c>,

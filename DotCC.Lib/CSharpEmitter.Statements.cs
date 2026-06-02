@@ -75,6 +75,14 @@ internal sealed partial class CSharpEmitter
                 return EmitSetjmpRewrite(scz.EnvName, tryBody, catchBody);
 
             default:
+                // `if (S1, …, C) THEN` — the controlling expression is a comma.
+                // Lift the side-effect operands into a wrapping block, test the
+                // last: `{ S1; …; if (Cond.B(C)) THEN }`.
+                if (CommaOpsOf(n.Arg2) is { Count: > 1 } ops)
+                {
+                    return $"{{\n{IndentEach(CommaLeadingStmts(ops))}"
+                        + $"if (Cond.B({StripOuterParens(ops[^1])})) {T(n.Arg4)}}}\n";
+                }
                 return $"if ({CondOf(n.Arg2)}) {T(n.Arg4)}";
         }
     }
@@ -106,6 +114,13 @@ internal sealed partial class CSharpEmitter
                 return EmitSetjmpRewrite(scz.EnvName, tryBody, catchBody);
 
             default:
+                // `if (S1, …, C) THEN else ELSE` — comma controlling expr: lift the
+                // side effects, test the last (the whole if-else stays in the block).
+                if (CommaOpsOf(n.Arg2) is { Count: > 1 } ops)
+                {
+                    return $"{{\n{IndentEach(CommaLeadingStmts(ops))}"
+                        + $"if (Cond.B({StripOuterParens(ops[^1])})) {T(n.Arg4)}else {T(n.Arg6)}}}\n";
+                }
                 return $"if ({CondOf(n.Arg2)}) {T(n.Arg4)}else {T(n.Arg6)}";
         }
     }
@@ -129,13 +144,39 @@ internal sealed partial class CSharpEmitter
             $"catch (Libc.LongJmpException __jmp) when (__jmp.Token == {envName}) " +
             catchInner;
     }
-    public EmitContent Visit(C.StmtWhile n) => $"while ({CondOf(n.Arg2)}) {T(n.Arg4)}";
+    public EmitContent Visit(C.StmtWhile n)
+    {
+        // `while (S1, …, Sk, C) BODY` — comma controlling expression. C re-evaluates
+        // the WHOLE expression each iteration (and on `continue`), so lift the
+        // side-effect operands to the top of the body and test the last:
+        //   while (true) { S1; …; Sk; if (!Cond.B(C)) break; BODY }
+        // A `continue` in BODY jumps to the loop top → re-runs S1…Sk, matching C.
+        // This is Lua's llex idiom `while (cast_void(save_and_next(ls)), lisxdigit(…))`.
+        if (CommaOpsOf(n.Arg2) is { Count: > 1 } ops)
+        {
+            return $"while (true) {{\n{IndentEach(CommaLeadingStmts(ops))}"
+                + $"if (!Cond.B({StripOuterParens(ops[^1])})) break;\n"
+                + $"{IndentEach(T(n.Arg4))}}}\n";
+        }
+        return $"while ({CondOf(n.Arg2)}) {T(n.Arg4)}";
+    }
 
     // `do Stmt while (E) ;` — body runs at least once. C# accepts the same
     // shape; only the condition needs Cond.B wrapping. Note the trailing
     // semicolon is required in both C and C#.
-    public EmitContent Visit(C.StmtDoWhile n) =>
-        $"do {T(n.Arg1)}while ({CondOf(n.Arg4)});\n";
+    public EmitContent Visit(C.StmtDoWhile n)
+    {
+        // `do BODY while (S1, …, C);` — comma controlling expr. Run the side
+        // effects after BODY each iteration, test the last. (Caveat: a `continue`
+        // in BODY jumps straight to the C# `while` test, skipping S1…Sk — a rare
+        // divergence from C for do-while-comma-with-continue; documented.)
+        if (CommaOpsOf(n.Arg4) is { Count: > 1 } ops)
+        {
+            return $"do {{\n{IndentEach(T(n.Arg1))}{IndentEach(CommaLeadingStmts(ops))}}}"
+                + $" while (Cond.B({StripOuterParens(ops[^1])}));\n";
+        }
+        return $"do {T(n.Arg1)}while ({CondOf(n.Arg4)});\n";
+    }
 
     // `for (Decl; E; E) Stmt` — emit C#'s for verbatim. C# accepts the same
     // shape; the init declaration scopes to the loop body. The init Decl
@@ -195,8 +236,17 @@ internal sealed partial class CSharpEmitter
     // that can appear anywhere inside the Block — including nested inside
     // a do-while or other control flow, enabling Duff's-device-shaped code.
     // C# accepts the same shape.
-    public EmitContent Visit(C.StmtSwitch n) =>
-        $"switch ({T(n.Arg2)}) {T(n.Arg4)}";
+    public EmitContent Visit(C.StmtSwitch n)
+    {
+        // `switch (S1, …, C) Block` — comma controlling expr: lift the side effects
+        // before the switch, switch on the last operand.
+        if (CommaOpsOf(n.Arg2) is { Count: > 1 } ops)
+        {
+            return $"{{\n{IndentEach(CommaLeadingStmts(ops))}"
+                + $"switch ({StripOuterParens(ops[^1])}) {T(n.Arg4)}}}\n";
+        }
+        return $"switch ({T(n.Arg2)}) {T(n.Arg4)}";
+    }
 
     // Statement-level case/default labels. Body is a single Stmt (which
     // may itself be another labeled stmt — `case 1: case 2: do_thing();`
@@ -257,10 +307,10 @@ internal sealed partial class CSharpEmitter
         // here.) An operand that isn't a valid C# statement-expression (a bare
         // value with no side effect) reaches Roslyn as CS0201 — the same loud
         // failure C# gives such pointless code.
-        if (n.Arg0.Content is EmitContent.CommaSeq seq)
+        if (CommaOpsOf(n.Arg0) is { } ops)
         {
             var sb = new StringBuilder();
-            foreach (var op in seq.Operands) { sb.Append(StripOuterParens(op)).Append(";\n"); }
+            foreach (var op in ops) { sb.Append(StripOuterParens(op)).Append(";\n"); }
             return sb.ToString();
         }
         // CS0201: bare parenthesized assignment isn't a statement. Peel the

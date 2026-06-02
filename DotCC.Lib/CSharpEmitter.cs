@@ -57,6 +57,12 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         // the variant (malloc recognition in Call; promotion in DeclItemInit).
         EmitContent.SizeofType st => $"sizeof({st.TypeName})",
         EmitContent.MallocSizeof ms => ms.LowLevelText,
+        // A bare comma sequence reaching a VALUE consumer (e.g. an unparenthesized
+        // comma used where a value is needed) lowers to the same `(a, b).ItemN`
+        // tuple a parenthesized `(a, b)` does. Discard consumers (StmtExpr / the
+        // controlling-expression visitors / `(void)` casts) special-case the
+        // CommaSeq BEFORE calling T(), so they never hit this path.
+        EmitContent.CommaSeq cs => CommaTupleText(cs.Operands),
         _ => throw new InvalidCastException(
             $"expected EmitContent.Text or string, got {it.Content?.GetType().FullName ?? "null"}"),
     };
@@ -582,16 +588,27 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         return count;
     }
 
+    // Strip ALL redundant outer paren layers (`((x))` → `x`). Iterating matters
+    // for a macro-parenthesized assignment used as a statement-expression:
+    // `step()` = `(i = i+1)` lowers to `((i = (i+1)))` (the assign emitter's parens
+    // plus the macro's), and a parenthesized assignment `(i = …);` is CS0201 in C#
+    // — only the bare assignment is a valid statement-expression. One pass would
+    // leave a layer; the loop reduces it to `i = (i+1)`.
     private static string StripOuterParens(string s)
     {
-        if (string.IsNullOrEmpty(s) || s.Length < 2 || s[0] != '(' || s[^1] != ')') { return s; }
-        var depth = 0;
-        for (var i = 0; i < s.Length - 1; i++)
+        while (s.Length >= 2 && s[0] == '(' && s[^1] == ')')
         {
-            if (s[i] == '(') { depth++; }
-            else if (s[i] == ')') { depth--; if (depth == 0) { return s; } }
+            var depth = 0;
+            var redundant = true;
+            for (var i = 0; i < s.Length - 1; i++)
+            {
+                if (s[i] == '(') { depth++; }
+                else if (s[i] == ')') { depth--; if (depth == 0) { redundant = false; break; } }
+            }
+            if (!redundant) { break; }
+            s = s.Substring(1, s.Length - 2);
         }
-        return s.Substring(1, s.Length - 2);
+        return s;
     }
 
     private static string IndentEach(string block)

@@ -748,16 +748,23 @@ productions:
   # have to share a group for the precedence resolution to apply.
   - derivation: rightmost
     rules:
-      - { lhs: Stmt, rhs: ['if', '(', E, ')', Stmt],             action: stmtIf }
-      - { lhs: Stmt, rhs: ['if', '(', E, ')', Stmt, 'else', Stmt], action: stmtIfElse }
+      # Controlling expression is the full comma-tier `Expr` — C's controlling
+      # expression of if/while/switch IS an `expression`, so `if (a, b)` evaluates
+      # `a` then tests `b`. A bare comma in this position has no C# comma operator,
+      # so the visitor lifts the non-last operands into statements and tests the
+      # last (Lua's `while (cast_void(save_and_next(ls)), lisxdigit(…))`). Conflict-
+      # free: the trailing `)` terminates the Expr, and the leading keyword splits
+      # it from a `( Expr )` paren-primary.
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', Stmt],             action: stmtIf }
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', Stmt, 'else', Stmt], action: stmtIfElse }
 
   # All other Stmt rules. Disjoint first sets — no S/R within this group.
   - derivation: none
     rules:
-      - { lhs: Stmt, rhs: ['while', '(', E, ')', Stmt], action: stmtWhile }
-      # `do Stmt while (E) ;` — runs the body at least once. Cond is
-      # wrapped with Cond.B like the other loop conditions.
-      - { lhs: Stmt, rhs: ['do', Stmt, 'while', '(', E, ')', ';'], action: stmtDoWhile }
+      - { lhs: Stmt, rhs: ['while', '(', Expr, ')', Stmt], action: stmtWhile }
+      # `do Stmt while (Expr) ;` — runs the body at least once. Cond is the
+      # comma-tier Expr (same lift-side-effects treatment as the other loops).
+      - { lhs: Stmt, rhs: ['do', Stmt, 'while', '(', Expr, ')', ';'], action: stmtDoWhile }
       # for-loop. Three init shapes (decl / expr / empty) × optional cond /
       # update via the nullable ForCond / ForPost non-terminals — so `for (;;)`,
       # `for (i=0;;i++)`, `for (; i<n; )` etc. all parse. ForCond produces the
@@ -798,7 +805,7 @@ productions:
       # statements. C# accepts the same shape (case labels anywhere inside
       # the switch block). User still writes `break;` per case clause —
       # matches C convention and C# requirement.
-      - { lhs: Stmt, rhs: ['switch', '(', E, ')', Block], action: stmtSwitch }
+      - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', Block], action: stmtSwitch }
       - { lhs: Stmt, rhs: [Decl, ';'],                    action: stmtDecl }
       # Block-scope `static T x;` / `static T x = C;` — static storage
       # duration, function-local visibility. Lowers to a mangled static field

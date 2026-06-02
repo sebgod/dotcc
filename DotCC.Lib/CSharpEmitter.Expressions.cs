@@ -188,6 +188,28 @@ internal sealed partial class CSharpEmitter
     public EmitContent Visit(C.Cast n)
     {
         var castType = T(n.Arg1);
+        // `(void)X` — a discard. C# has no void cast, and the value is thrown away,
+        // so lower to a DISCARD: the operand's side effects, as statements. If X is
+        // a comma (`(void)(save(), next())`, via the cast_void(save_and_next) idiom
+        // in Lua's llex), each operand becomes a statement; a plain value becomes a
+        // `_ = (X)` discard-assignment. Returned as a CommaSeq so an enclosing comma
+        // flattens it (CommaOp splices a CommaSeq operand) and a statement / loop
+        // controlling position emits the operands as statements. (`(void)voidcall()`
+        // — a void value — would make `_ = …` invalid and fail loudly; rare.)
+        if (castType.Trim() == "void")
+        {
+            // Discard operands: a comma's operands (all discarded — it's void), or
+            // a `_ = (X)` discard-assignment for a plain value. Carried as CommaOps
+            // on a Text so an enclosing paren/comma keeps them (CommaOp + Paren both
+            // flatten via CommaOpsOf) and a statement / controlling position emits
+            // them. The Value is the (invalid-in-C#) literal void cast: it's never
+            // legitimately reached — a void expression can't be value-used in C — so
+            // if some context did read it, Roslyn errors loudly rather than silently.
+            var discard = CommaOpsOf(n.Arg3) is { } ops
+                ? new List<string>(ops)
+                : new List<string> { $"_ = ({T(n.Arg3)})" };
+            return new EmitContent.Text($"((void)({T(n.Arg3)}))", CommaOps: discard);
+        }
         // `(S*)malloc(sizeof(S))` — propagate the MallocSizeof marker through a
         // matching pointer cast so the enclosing declaration can still recognise
         // it. The marker's low-level text grows to include the cast, so the
@@ -966,12 +988,56 @@ internal sealed partial class CSharpEmitter
     // (Paren / StmtExpr) since C# has no comma operator.
     public EmitContent Visit(C.CommaOp n)
     {
-        var ops = n.Arg0.Content is EmitContent.CommaSeq cs
-            ? new List<string>(cs.Operands)
-            : new List<string> { T(n.Arg0) };
-        ops.Add(T(n.Arg2));
+        // Flatten each side's own comma operands (a raw CommaSeq, or a
+        // parenthesized comma / `(void)` discard carrying CommaOps) so a nested
+        // comma `(a, b), c` / `a, (b, c)` becomes the flat [a, b, c] — the leading
+        // operands are side effects, the last is the value.
+        var ops = new List<string>();
+        if (CommaOpsOf(n.Arg0) is { } left) { ops.AddRange(left); } else { ops.Add(T(n.Arg0)); }
+        if (CommaOpsOf(n.Arg2) is { } right) { ops.AddRange(right); } else { ops.Add(T(n.Arg2)); }
         // The comma expression's value (and type) is its LAST operand.
         return new EmitContent.CommaSeq(ops, TyOf(n.Arg2));
+    }
+
+    // The value-context form of a comma sequence: a C# tuple yields all elements
+    // in order and the `.ItemN` picks the last (the comma's value). Requires
+    // non-void operands (a void operand can't be a tuple element — that reaches
+    // Roslyn as a loud error, never a silent miscompile). ≤7 operands.
+    private static string CommaTupleText(IReadOnlyList<string> ops)
+    {
+        if (ops.Count > 7)
+        {
+            throw new CompileException(
+                "comma-operator chains longer than 7 operands aren't supported");
+        }
+        var joined = string.Join(", ", ops.Select(StripOuterParens));
+        return $"({joined}).Item{ops.Count}";
+    }
+
+    // The raw comma operands an Item carries, whether it's a bare comma sequence
+    // (`a, b` — a CommaSeq straight from CommaOp) or a PARENTHESIZED one (`(a, b)`
+    // — a Text carrying CommaOps, value being the tuple). Null for a non-comma.
+    // Lets a discard context (statement / `(void)` cast / controlling expression)
+    // recover the operands and emit them as statements.
+    private static IReadOnlyList<string>? CommaOpsOf(Item it) => it.Content switch
+    {
+        EmitContent.CommaSeq cs => cs.Operands,
+        EmitContent.Text { CommaOps: { } ops } => ops,
+        _ => null,
+    };
+
+    // Emit the leading (all-but-last) operands of a comma sequence as discard
+    // statements — the C semantics of a comma's non-last operands (evaluated for
+    // side effects, value discarded). A void operand (a void call, or a `(void)`
+    // cast that lowered to its operands) is legal here, unlike in the tuple form.
+    private static string CommaLeadingStmts(IReadOnlyList<string> ops)
+    {
+        var sb = new System.Text.StringBuilder();
+        for (var i = 0; i < ops.Count - 1; i++)
+        {
+            sb.Append(StripOuterParens(ops[i])).Append(";\n");
+        }
+        return sb.ToString();
     }
 
     public EmitContent Visit(C.Paren n)
@@ -985,22 +1051,23 @@ internal sealed partial class CSharpEmitter
         // type error rather than a silent miscompile, which is the safe failure.
         if (n.Arg1.Content is EmitContent.CommaSeq seq)
         {
-            if (seq.Operands.Count > 7)
-            {
-                throw new CompileException(
-                    "comma-operator chains longer than 7 operands aren't supported");
-            }
-            var joined = string.Join(", ", seq.Operands.Select(StripOuterParens));
-            // Carry the comma expression's type (its last operand's) so a value-
-            // context tuple composes under sizeof / deref / subscript.
-            return Typed($"({joined}).Item{seq.Operands.Count}", seq.LastType);
+            // Value form is the tuple (consumers reach it via T()); ALSO carry the
+            // raw operands so a discard context (statement / `(void)` cast /
+            // controlling expression) can re-emit them as statements — where a void
+            // side-effect operand is legal but a tuple element isn't.
+            return new EmitContent.Text(CommaTupleText(seq.Operands),
+                Ty: seq.LastType, CommaOps: seq.Operands);
         }
         // Propagate the volatile-lvalue and pointee-volatile tags through the parens
         // so `(x) = …` / `&(x)` see the write/address context and `(*p)` / `(p)[i]`
         // still fence (the bare lvalue / pointee-ness is unchanged by parenthesising).
+        // Also carry CommaOps through a REDUNDANT paren (`((a, b))`, or the outer
+        // paren of `cast_void`'s `((void)(x))`) so a discard context still recovers
+        // the operands — a paren around a comma is still that comma.
         return new EmitContent.Text($"({T(n.Arg1)})", EnumOf(n.Arg1), TyOf(n.Arg1),
             VolatileLValue: VLValueOf(n.Arg1), VolatilePointee: VolatilePointeeOf(n.Arg1),
-            AtomicLValue: ALValueOf(n.Arg1), ConstInt: ConstOfItem(n.Arg1));
+            AtomicLValue: ALValueOf(n.Arg1), ConstInt: ConstOfItem(n.Arg1),
+            CommaOps: CommaOpsOf(n.Arg1));
     }
 
     // C23 keyword constants (only reached under -std=c23, via the rewriter's
