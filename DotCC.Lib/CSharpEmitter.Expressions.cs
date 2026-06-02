@@ -1462,6 +1462,36 @@ internal sealed partial class CSharpEmitter
     /// pointer <c>e</c>, nested in value position (so it can't be statement-hoisted).
     /// ≤7 operands.
     /// </summary>
+    /// <summary>
+    /// Render a hoisting comma (void leading operand) as an immediately-invoked
+    /// delegate for a value position that CAN'T lift statements (deep inside a
+    /// short-circuiting condition — hoisting there would change WHEN the side
+    /// effect runs). `((Func&lt;T&gt;)(() =&gt; { leadingStmts; return value; }))()`
+    /// preserves evaluation order in place. The captured locals may be pointers
+    /// (Lua's `lua_State* L`); modern C# allows that, and the immediate invoke
+    /// keeps them valid. A POINTER value can't be a `Func&lt;&gt;` type argument
+    /// (CS0306), so it round-trips through `nint`. NOTE: this allocates a delegate
+    /// (+ closure) per evaluation — see C-SUPPORT.md; the statement-sink hoist path
+    /// (assignment / return / expression statement) avoids it, and a future
+    /// optimization could hoist more positions or emit a local function.
+    /// </summary>
+    private string SeqExprDelegate(EmitContent.SeqExpr se)
+    {
+        var body = string.Concat(se.LeadingStmts);
+        // A POINTER value can be neither a tuple element nor a Func<> type argument
+        // (CS0306) — round-trip through nint (its pointer type is known here).
+        if (se.Ty is CType.Sized s && IsPointerCsType(s.CsType))
+        {
+            return $"(({s.CsType})((System.Func<nint>)(() => {{ {body}return (nint)({se.ValueExpr}); }}))())";
+        }
+        // Otherwise: run the leading statements in a fixed-`int` delegate (its return
+        // is ignored), then a tuple picks the value — so C# INFERS the value's type,
+        // and we needn't synthesize it (a void operand made the tuple impossible, but
+        // the VALUE is a normal expression). Captured locals may be pointers; the
+        // immediate invoke keeps them valid.
+        return $"(((System.Func<int>)(() => {{ {body}return 0; }}))(), {se.ValueExpr}).Item2";
+    }
+
     private string CommaTupleText(IReadOnlyList<string> ops, IReadOnlyList<CType?>? types = null)
     {
         if (ops.Count > 7)
@@ -1564,8 +1594,28 @@ internal sealed partial class CSharpEmitter
             // raw operands so a discard context (statement / `(void)` cast /
             // controlling expression) can re-emit them as statements — where a void
             // side-effect operand is legal but a tuple element isn't.
-            return new EmitContent.Text(CommaTupleText(seq.Operands, seq.OperandTypes),
-                Ty: seq.LastType, CommaOps: seq.Operands);
+            // When a NON-LAST operand is VOID (a `void` call — Lua's `(checktab(…),
+            // luaL_len(…))` / `(luaO_tostring(…), 1)`), it can't be a tuple element
+            // (CS8210), so the VALUE form instead becomes an immediately-invoked
+            // delegate (runs the leading operands, yields the last). CommaOps stays
+            // the raw operands, so a discard context never touches the delegate —
+            // only a genuine value consumer does. A void operand that's LAST makes
+            // the whole comma void; that only legitimately reaches a discard context
+            // (handled via CommaOps), so it stays out of the delegate guard.
+            var voidNonLast = seq.OperandTypes is { } ots && seq.Operands.Count >= 2
+                && ots.Take(seq.Operands.Count - 1).Any(t => t is CType.Sized { CsType: "void" });
+            string value;
+            if (voidNonLast)
+            {
+                var leading = seq.Operands.Take(seq.Operands.Count - 1)
+                    .Select(o => $"{StripOuterParens(o)};\n").ToList();
+                value = SeqExprDelegate(new EmitContent.SeqExpr(leading, seq.Operands[^1], seq.LastType));
+            }
+            else
+            {
+                value = CommaTupleText(seq.Operands, seq.OperandTypes);
+            }
+            return new EmitContent.Text(value, Ty: seq.LastType, CommaOps: seq.Operands);
         }
         // A redundant paren around a void-typed ternary stays void — Lua wraps the
         // barrier macro in parens (`(cond ? … : cast_void(0))`), and a nested arm is

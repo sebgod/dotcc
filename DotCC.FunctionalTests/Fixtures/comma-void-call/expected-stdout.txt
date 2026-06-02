@@ -1,0 +1,3 @@
+a=5 log=10
+ran log=110
+final log=110

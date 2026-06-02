@@ -45,17 +45,14 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         // VoidCond BEFORE calling T() and emit its if/else form instead.
         EmitContent.VoidCond vc => vc.Value,
         // A value-context comma needing statement hoisting (void leading operand)
-        // reached a consumer that can't lift statements (a function argument, a
-        // tuple element, …). The statement-level sinks (assignment / decl-init /
-        // return / expression-statement) special-case SeqExpr BEFORE T(); reaching
-        // here means a context dotcc can't hoist into — fail loudly, don't miscompile.
-        EmitContent.SeqExpr =>
-            throw new CompileException(
-                "a comma expression with a void leading operand (e.g. a bounds-check " +
-                "macro like Lua's `luaM_newvectorchecked`) is only supported where its " +
-                "statements can be hoisted — an assignment, declaration initializer, " +
-                "`return`, or expression statement. It can't be used as a function " +
-                "argument or other nested value position."),
+        // reached a consumer that can't lift statements — e.g. deep inside a
+        // short-circuiting condition (`A && (luaO_tostring(L,o), 1)`), where
+        // hoisting would run the side effect unconditionally and break C's
+        // short-circuit semantics. The statement-level sinks (assignment / return /
+        // expression statement) special-case SeqExpr BEFORE T() and keep the clean
+        // hoist; reaching here, emit an immediately-invoked delegate that runs the
+        // leading statements then yields the value — faithful in any value position.
+        EmitContent.SeqExpr se => SeqExprDelegate(se),
         string s => s,
         // setjmp variants must be consumed by Visit(Eq)/Visit(Neq) or
         // Visit(StmtIfElse). Reaching T() means setjmp showed up in a

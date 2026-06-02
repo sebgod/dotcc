@@ -720,8 +720,27 @@ new class of latent bugs the probe never could.
   shadowing LOCAL is a fixed variable, so its `&` stays the plain form. Fixture
   `addr-of-global/`; unit tests `AddrOfGlobalTests` (incl. a plain-local guard).
   Exposed 1 CS0306 behind a previously-CS0212 line (joins the tail).
-- 🧱 **Phase 6r+ — the remaining deep walls** (~42 errors):
-  - **CS1503 (~9), CS8210 (~7), CS0266/CS0034 tails, CS0159 (~5)** — a diverse
+- ✅ **Phase 6r — void-call leading a value-context comma (CS8210 7 → 0; total
+  42 → 35).** A comma `(voidcall, value)` — Lua's `(checktab(…), luaL_len(…))`,
+  `(luaO_tostring(L,o), 1)` — has a `void` leading operand, which can't be a C#
+  tuple element (CS8210). The existing void-handling only recognised a void guard
+  *ternary*, not a void *call*. The fix is surgical at the value-tuple build
+  (`Visit(C.Paren)`): when a non-last operand is void-typed, the VALUE form becomes
+  an immediately-invoked delegate `(((Func<int>)(() => { leading… return 0; }))(),
+  value).Item2` (a fixed-`int` delegate runs the side effects; a tuple picks the
+  value so C# infers its type — no value-type synthesis needed; a pointer value
+  round-trips through `nint`). The delegate preserves evaluation order **in place**,
+  so it's correct deep inside a short-circuiting `&&`/`||` where hoisting can't
+  reach. Crucially `CommaOps` still carries the raw operands, so discard /
+  statement / controlling / `(void)`-cast contexts split to plain statements as
+  before (no delegate in the hot lexer path — Lua's `(save(…), next(…))`). The
+  `T(SeqExpr)` value-render likewise delegates now (was a hard error). **Known
+  cost:** a delegate (+ closure) allocation per evaluation at the non-hoistable
+  sites — see the C-SUPPORT comma row; a future optimization could hoist more
+  positions or emit a local function. Fixture `comma-void-call/` (incl. a
+  short-circuit check); unit tests `CommaVoidCallTests`.
+- 🧱 **Phase 6s+ — the remaining deep walls** (~35 errors):
+  - **CS1503 (~9), CS0266/CS0034 tails, CS0159 (~5), CS0163 (~3)** — a diverse
     long tail to triage next.
   - **Call through a parenthesized simple-member fn-ptr callee (CS0118).** `(r.func)(5)`
     reads as a cast in C#; strip the redundant callee parens when the inner
