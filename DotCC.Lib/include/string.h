@@ -17,6 +17,7 @@
 int strlen(char* s);
 int strcmp(char* a, char* b);
 int strncmp(char* a, char* b, int n);
+int strcoll(char* a, char* b);
 char* strcpy(char* dst, char* src);
 char* strncpy(char* dst, char* src, int n);
 

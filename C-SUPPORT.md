@@ -222,11 +222,12 @@ The runtime surface dotcc-emitted programs link against. Each function routes to
 | `fread`, `fwrite` | ✅ | Byte-exact element I/O over the backing stream; `fread` returns a short count + sets EOF at end. |
 | `fseek`, `ftell`, `rewind` | ✅ | `Stream.Seek`/`Position` with `SEEK_SET/CUR/END`; a console (non-seekable) stream returns the error result and sets `errno` = ESPIPE — conformant. |
 | `feof`, `ferror`, `clearerr` | ✅ | EOF/error indicators on the slot. |
+| `ungetc` | ✅ | One byte of pushback (a `FileSlot.Pushback` honored by the byte reader, so `fgetc`/`getc`/`getchar`/`fgets` see it). C's single-char guarantee: a second `ungetc` (or pushing `EOF`) returns `EOF`. Clears EOF on success. Fixture `libc-frexp-ldexp-strcoll-ungetc/`. |
 | `perror` | ✅ | `"<s>: <strerror(errno)>\n"` to stderr (the prefix omitted for a null/empty `s`). Lives in `ErrnoLib.cs`. |
 | `remove`, `rename` | ✅ | `File.Delete` / `File.Move`; 0 on success, -1+`errno` on failure. |
-| `tmpfile` | ✅ | Anonymous read/write temp file, `DeleteOnClose`. `tmpnam` not added (insecure; `tmpfile` is the safe primitive). |
+| `tmpfile`, `tmpnam` | ✅ | `tmpfile`: anonymous read/write temp file, `DeleteOnClose`. `tmpnam`: a unique OS-temp path written into the caller's buffer (≥ `L_tmpnam`, bumped to 260 to hold a full path) or a shared internal buffer when `NULL`; not created on disk, per C. `tmpfile` remains the safe primitive. |
 | `fflush` | ✅ | Flushes the file's writer; `fflush(NULL)` flushes the console streams. |
-| `setbuf`, `setvbuf` | 🚫 | No equivalent control over `Console`/`Stream` buffering. (The mode macros `_IOFBF`/`_IOLBF`/`_IONBF` ARE defined — see the macros row — so a `setvbuf(fp, …, _IONBF, 0)` call parses; the function itself is unbacked.) |
+| `setvbuf` | 🟡 | Validated no-op: returns 0 for a valid stream + recognized mode (`_IOFBF`/`_IOLBF`/`_IONBF`), nonzero otherwise. The BCL owns `Console`/`Stream` buffering, so the requested mode and caller buffer aren't adopted — but the call is well-formed and conformant in its return contract. `setbuf` not added. Fixture `libc-frexp-ldexp-strcoll-ungetc/`. |
 | **Macros** `EOF`, `NULL`, `SEEK_SET/CUR/END`, `BUFSIZ`, `FILENAME_MAX`, `FOPEN_MAX`, `TMP_MAX`, `L_tmpnam`, `_IOFBF/_IOLBF/_IONBF` | ✅ | The standard `<stdio.h>` object-like macros (C99 7.21.1). The limit values are **implementation-defined** — dotcc picks ones satisfying the standard minima (`BUFSIZ` 8192 ≥ 256, `FOPEN_MAX` 16 ≥ 8, `TMP_MAX` 238328 ≥ 25). `BUFSIZ` as a **constant array bound** (Lua lauxlib's `char buff[BUFSIZ];`) folds through the const-expr layer to the literal a C# `fixed`-buffer needs. Fixture `stdio-limits/`, unit tests `StdioLimitsTests`. |
 
 ### `stdlib.h`
@@ -258,6 +259,7 @@ Synthetic header at `DotCC.Lib/include/string.h` declares the surface; implement
 | `strlen` | ✅ | Pointer loop; declared in `<string.h>`. Returns `int` (dotcc-specific — real C returns `size_t`; portable code should cast). |
 | `strcmp` | ✅ | Pointer loop; declared in `<string.h>`. |
 | `strncmp` | ✅ | Bounded `strcmp`; stops at a mismatch or shared NUL within `n`. |
+| `strcoll` | ✅ | Locale-aware compare; dotcc runs the "C" locale (byte order), so it's exactly `strcmp`. Used by Lua's `lvm.c` string ordering. |
 | `strcpy` | ✅ | Pointer loop; declared in `<string.h>`. |
 | `strncpy` | ✅ | Bounded copy with NUL-padding when src is short, and the classic "no terminator when src fills n" behaviour faithfully reproduced. |
 | `strcat`, `strncat` | ✅ | Append to NUL-terminated dst; `strncat` always re-terminates after at most `n` bytes. |
@@ -336,6 +338,7 @@ Every function exists as a `double` overload (routes to `System.Math`) **and** a
 | `sinh`, `cosh`, `tanh` (+ `…f`, C99) | ✅ | `Math.Sinh` / `MathF.Sinh` etc. |
 | `exp`, `log`, `log10`, `log2` (+ `…f`, C99) | ✅ | `Math.Exp` / `MathF.Exp` etc. |
 | `pow`, `sqrt`, `cbrt` (+ `…f`, C99) | ✅ | `Math.Pow` / `Sqrt` / `Cbrt` and MathF counterparts |
+| `frexp`, `ldexp` (+ `…f`) | ✅ | Mantissa/exponent split + recombine via `Math.ILogB`/`ScaleB` (and the `MathF` float overloads); `frexp` writes the exponent through its `int*`. Fixture `libc-frexp-ldexp-strcoll-ungetc/`. |
 | `ceil`, `floor`, `round`, `trunc` (+ `…f`, C99) | ✅ | `round` forced to `MidpointRounding.AwayFromZero` to match C99 (BCL default is banker's rounding, which diverges from MSVC). |
 | `fabs`, `fmod`, `fmin`, `fmax` (+ `…f`, C99) | ✅ | `Math.Abs` / native `%` for fmod (sign-of-x matches C99) / `Math.Min` / `Math.Max` |
 | `NAN`, `INFINITY`, `HUGE_VAL`, `HUGE_VALF` | ✅ | Properties on `Libc` returning `double.NaN` / `double.PositiveInfinity`. |

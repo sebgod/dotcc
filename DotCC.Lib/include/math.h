@@ -41,6 +41,10 @@ double log2(double x);  float log2f(float x);
 /* Power and roots. */
 double pow(double x, double y); float powf(float x, float y);
 double sqrt(double x);  float sqrtf(float x);
+
+/* Mantissa / exponent (C90). frexp writes the exponent through its pointer. */
+double frexp(double x, int* exp); float frexpf(float x, int* exp);
+double ldexp(double x, int exp);  float ldexpf(float x, int exp);
 double cbrt(double x);  float cbrtf(float x);
 
 /* Rounding (C99). */

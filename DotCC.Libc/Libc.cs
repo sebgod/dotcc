@@ -197,6 +197,13 @@ public static unsafe partial class Libc
     }
 
     /// <summary>
+    /// <c>strcoll(a, b)</c> — locale-aware string compare. dotcc runs the
+    /// <c>"C"</c> locale (see <see cref="LocaleLib"/>), where collation order is
+    /// plain byte order, so this is exactly <see cref="strcmp(byte*, byte*)"/>.
+    /// </summary>
+    public static int strcoll(byte* a, byte* b) => strcmp(a, b);
+
+    /// <summary>
     /// <c>strcpy(dst, src)</c> — copy NUL-terminated <paramref name="src"/>
     /// into <paramref name="dst"/>, including the terminating <c>0</c>.
     /// Returns <paramref name="dst"/>.

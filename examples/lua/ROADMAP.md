@@ -693,8 +693,21 @@ new class of latent bugs the probe never could.
   `fnptr-deref-call/` (local / param / struct-field); unit tests
   `FnPtrDerefCallTests` (incl. a data-pointer-deref guard). The cleared lines now
   reach arg-checking, surfacing 2 fn-ptr call-arg conversions in the CS1503 tail.
-- 🧱 **Phase 6p+ — the remaining deep walls** (~60 errors):
-  - **CS0103 (~10), CS0212 (~9), CS8210 (~7), CS1503/CS0266/CS0034 tails** — a
+- ✅ **Phase 6p — missing libc names (CS0103 10 → 0; total 60 → 50).** Six libc
+  functions Lua needs were neither declared in the synthetic headers nor
+  implemented in `DotCC.Libc`, so their calls emitted verbatim and failed at C#
+  compile: `frexp`/`ldexp` (mantissa/exponent, via `Math.ILogB`/`ScaleB` + the
+  `MathF` float overloads), `strcoll` (→ `strcmp`, since dotcc runs the "C"
+  locale), `ungetc` (one-byte pushback honored by `ReadByteFrom`; a `FileSlot.
+  Pushback` field), and `setvbuf` (validated no-op — the BCL owns buffering).
+  Each got a synthetic-header prototype (so call-args coerce) + a runtime impl.
+  `tmpnam` too (full OS temp path; `L_tmpnam` bumped 20 → 260 to hold it). The
+  last CS0103, `luaopen_package`, is the deliberately-excluded loadlib TU (dynamic
+  C-module loading) — stubbed in `driver.c` (our harness) to push an empty
+  `package` table. Fixture `libc-frexp-ldexp-strcoll-ungetc/`; unit tests
+  `LibcAddedSurfaceTests`.
+- 🧱 **Phase 6q+ — the remaining deep walls** (~50 errors):
+  - **CS0212 (~9), CS8210 (~7), CS1503/CS0266/CS0034 tails, CS0159 (~5)** — a
     diverse long tail to triage next.
   - **Call through a parenthesized simple-member fn-ptr callee (CS0118).** `(r.func)(5)`
     reads as a cast in C#; strip the redundant callee parens when the inner

@@ -223,6 +223,45 @@ public static unsafe partial class Libc
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static float powf(float x, float y) => MathF.Pow(x, y);
 
+    /// <summary>
+    /// <c>frexp(x, exp)</c> — split <paramref name="x"/> into a normalized mantissa
+    /// in [0.5, 1) (or 0) and an integer exponent such that <c>x = m·2^*exp</c>,
+    /// writing the exponent to <paramref name="exp"/>. Zero / NaN / infinity return
+    /// <paramref name="x"/> unchanged with <c>*exp = 0</c>. (<c>ilogb</c> gives
+    /// floor(log2|x|); frexp's mantissa range is [0.5,1), so the exponent is one
+    /// greater and the mantissa is <c>x</c> scaled back down by it.)
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static double frexp(double x, int* exp)
+    {
+        if (x == 0.0 || double.IsNaN(x) || double.IsInfinity(x)) { *exp = 0; return x; }
+        int e = Math.ILogB(x) + 1;
+        *exp = e;
+        return Math.ScaleB(x, -e);
+    }
+    /// <inheritdoc cref="frexp(double, int*)"/>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static float frexp(float x, int* exp)
+    {
+        if (x == 0f || float.IsNaN(x) || float.IsInfinity(x)) { *exp = 0; return x; }
+        int e = MathF.ILogB(x) + 1;
+        *exp = e;
+        return MathF.ScaleB(x, -e);
+    }
+    /// <summary><c>frexpf(x, exp)</c> — explicit single-precision <see cref="frexp(float, int*)"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static float frexpf(float x, int* exp) => frexp(x, exp);
+
+    /// <summary><c>ldexp(x, exp)</c> — <c>x·2^exp</c>, the inverse of <see cref="frexp(double, int*)"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static double ldexp(double x, int exp) => Math.ScaleB(x, exp);
+    /// <inheritdoc cref="ldexp(double, int)"/>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static float ldexp(float x, int exp) => MathF.ScaleB(x, exp);
+    /// <summary><c>ldexpf(x, exp)</c> — explicit single-precision <see cref="ldexp(float, int)"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static float ldexpf(float x, int exp) => MathF.ScaleB(x, exp);
+
     /// <summary><c>sqrt(x)</c> — square root.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static double sqrt(double x) => Math.Sqrt(x);

@@ -1,0 +1,5 @@
+frexp: 0.75 4
+ldexp: 12
+strcoll: 1 1
+ungetc: XXY
+setvbuf: 0

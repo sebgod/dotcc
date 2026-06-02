@@ -38,7 +38,9 @@
 #define FILENAME_MAX 4096
 #define FOPEN_MAX 16
 #define TMP_MAX 238328
-#define L_tmpnam 20
+/* Large enough to hold an OS temp-directory path + a random component (dotcc's
+   tmpnam returns a full path); keep in sync with LTmpnam in FileLib.cs. */
+#define L_tmpnam 260
 
 /* setvbuf buffering modes (C99 7.21.5.6). */
 #define _IOFBF 0
@@ -75,6 +77,9 @@ void rewind(FILE* stream);
 int feof(FILE* stream);
 int ferror(FILE* stream);
 void clearerr(FILE* stream);
+int ungetc(int c, FILE* stream);
+int setvbuf(FILE* stream, char* buf, int mode, int size);
+char* tmpnam(char* s);
 int remove(const char* path);
 int rename(const char* oldp, const char* newp);
 

@@ -60,6 +60,7 @@ public static unsafe partial class Libc
         public StreamFileReader? Reader; // lazy, file kind only
         public bool Eof;
         public bool Err;
+        public int Pushback = -1;       // one char pushed back by ungetc (-1 = none)
     }
 
     // Slots 0/1/2 are the std streams. fopen() appends (or reuses a freed slot).
@@ -141,6 +142,9 @@ public static unsafe partial class Libc
     {
         var s = Slot(f);
         if (s == null) { return -1; }
+        // A byte pushed back by ungetc is returned before touching the stream
+        // (covers fgetc / getc / getchar / fgets — the common ungetc consumers).
+        if (s.Pushback >= 0) { int p = s.Pushback; s.Pushback = -1; return p; }
         int r;
         if (s.Stream is { } st)
         {
@@ -374,6 +378,61 @@ public static unsafe partial class Libc
     {
         var slot = Slot(stream);
         if (slot != null) { slot.Eof = false; slot.Err = false; }
+    }
+
+    /// <summary>
+    /// <c>ungetc(c, stream)</c> — push one byte back so the next read on
+    /// <paramref name="stream"/> returns it (Lua's number/look-ahead lexing in
+    /// liolib leans on this). C guarantees a single character of pushback, so a
+    /// second <c>ungetc</c> with no intervening read fails — as does pushing
+    /// <c>EOF</c>. Clears the EOF indicator on success. Returns the pushed byte,
+    /// or <c>EOF</c> on failure. The byte is honored by <see cref="ReadByteFrom"/>
+    /// (fgetc / getc / getchar / fgets).
+    /// </summary>
+    public static int ungetc(int c, FILE* stream)
+    {
+        var slot = Slot(stream);
+        if (slot == null || c == -1 || slot.Pushback >= 0) { return -1; }
+        slot.Pushback = c & 0xFF;
+        slot.Eof = false;
+        return c & 0xFF;
+    }
+
+    /// <summary>
+    /// <c>setvbuf(stream, buf, mode, size)</c> — request a buffering mode
+    /// (<c>_IOFBF</c>=0 / <c>_IOLBF</c>=1 / <c>_IONBF</c>=2; see include/stdio.h).
+    /// dotcc's streams are managed and the BCL owns buffering, so this is a
+    /// validated no-op: returns 0 for a valid stream + recognized mode, nonzero
+    /// otherwise. The caller's buffer is never adopted.
+    /// </summary>
+    public static int setvbuf(FILE* stream, byte* buf, int mode, int size)
+    {
+        if (Slot(stream) == null || mode < 0 || mode > 2) { return -1; }
+        return 0;
+    }
+
+    // Shared buffer returned by tmpnam(NULL); kept in sync with L_tmpnam.
+    private static byte* _tmpnamBuf;
+
+    /// <summary>
+    /// <c>tmpnam(s)</c> — produce a unique temp-file name (NOT created on disk,
+    /// per C). Writes into <paramref name="s"/> (which must hold at least
+    /// <c>L_tmpnam</c> bytes) when non-NULL, else into a shared internal buffer;
+    /// returns that buffer, or <c>NULL</c> if no name fitting <c>L_tmpnam</c>
+    /// could be produced. Uses the OS temp directory + a random component.
+    /// </summary>
+    public static byte* tmpnam(byte* s)
+    {
+        const int LTmpnam = 260;  // keep in sync with L_tmpnam in include/stdio.h
+        var name = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        var bytes = Encoding.UTF8.GetBytes(name);
+        if (bytes.Length + 1 > LTmpnam) { return null; }
+        byte* dst = s != null ? s
+            : _tmpnamBuf != null ? _tmpnamBuf
+            : (_tmpnamBuf = (byte*)NativeMemory.Alloc((nuint)LTmpnam));
+        for (int i = 0; i < bytes.Length; i++) { dst[i] = bytes[i]; }
+        dst[bytes.Length] = 0;
+        return dst;
     }
 
     /// <summary><c>fflush(stream)</c> — flush buffered output. <c>fflush(NULL)</c>
