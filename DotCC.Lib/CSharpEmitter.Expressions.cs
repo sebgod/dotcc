@@ -420,6 +420,21 @@ internal sealed partial class CSharpEmitter
     // T*` lowers to a plain `T*` (dotcc has no volatile pointer type).
     public EmitContent Visit(C.AddrOf n)
     {
+        // `&global` / `&staticLocal` of a value type: the C# static field backing it
+        // is a MOVEABLE variable, so a bare `&field` is CS0212 ("address of unfixed
+        // expression") even though a C global's address is a stable constant. dotcc's
+        // globals are unmanaged value types stored in non-relocatable static storage,
+        // so the address IS stable; `Unsafe.AsPointer(ref field)` hands it back with
+        // no `fixed` block (which couldn't span the address escaping the function
+        // anyway — `return &absentkey;`). The Var visitor tags the operand + its type.
+        if (n.Arg1.Content is EmitContent.Text { AddrFixedType: { } ft })
+        {
+            var fieldLv = T(n.Arg1);
+            var ptr = QualifyPredefinedTypeName(ft) + "*";
+            return new EmitContent.Text(
+                $"(({ptr})System.Runtime.CompilerServices.Unsafe.AsPointer(ref {fieldLv}))",
+                Ty: new CType.Sized(ptr));
+        }
         var lv = ALValueOf(n.Arg1) ?? VLValueOf(n.Arg1) ?? T(n.Arg1);
         // `&E` synthesizes a pointer CType (E's type + `*`), so a consumer can read
         // the pointee — e.g. the <stdatomic.h> lowering casts the value arg of
@@ -1111,9 +1126,13 @@ internal sealed partial class CSharpEmitter
         // as for any array; a static scalar has none to attach (unchanged).
         if (_fnStatics.TryGetValue(name, out var staticField))
         {
+            // A static-local ARRAY is already a pointer (GlobalArrayFrom) — `&arr`
+            // is rare and untreated. A SCALAR/struct static-local is a static field,
+            // so tag its field type for `&` (CS0212 avoidance — see AddrFixedType).
             return _globalArrayInfo.TryGetValue(staticField, out var staticCty)
                 ? new EmitContent.Text(staticField, null, staticCty)
-                : staticField;
+                : new EmitContent.Text(staticField,
+                    AddrFixedType: _globalTypes.TryGetValue(staticField, out var sft) ? sft : null);
         }
         // An enumerator constant resolves to `EnumName.Member` — but only if no
         // local/param of the same name shadows it. Without this guard a local
@@ -1147,7 +1166,12 @@ internal sealed partial class CSharpEmitter
         // A pointer-to-volatile read carries the VolatilePointee tag so a deref /
         // subscript of it (`*p`, `p[i]`) fences (phase V2).
         if (IsVolatilePointeeVar(name)) { return new EmitContent.Text(mapped, enumTag, cty, VolatilePointee: true); }
-        return new EmitContent.Text(mapped, enumTag, cty);
+        // A file-scope global SCALAR/struct (not a local — `resolved` is null — and
+        // not a pinned array) lowers to a static field; tag its type so `&` of it
+        // routes through Unsafe.AsPointer (CS0212 avoidance — see AddrFixedType).
+        var addrFixed = resolved is null && !_globalArrayInfo.ContainsKey(name)
+            && _globalTypes.TryGetValue(name, out var gty) ? gty : null;
+        return new EmitContent.Text(mapped, enumTag, cty, AddrFixedType: addrFixed);
     }
 
     // Synthesize a variable's CType from the symbol tables — array info first

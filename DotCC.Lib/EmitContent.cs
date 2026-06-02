@@ -129,7 +129,14 @@ public abstract record EmitContent
     /// constant and rejects an out-of-range CONSTANT cast (CS0221). This flag lets
     /// an integer cast wrap such an operand in <c>unchecked(…)</c> — Lua's
     /// <c>cast_byte(~mask)</c>, <c>(size_t)-1</c>, <c>cast_int(MAX_SIZET/sizeof(t))</c>.</param>
-    public sealed record Text(string Value, string? EnumType = null, CType? Ty = null, bool Inline = false, bool Noreturn = false, bool Volatile = false, string? VolatileLValue = null, bool VolatilePointee = false, bool Atomic = false, string? AtomicLValue = null, int? ConstInt = null, IReadOnlyList<string>? CommaOps = null, bool VoidCast = false, bool Terminates = false, string? CaseLabelExpr = null, bool IsDefaultLabel = false, IReadOnlyList<StmtPiece>? BlockPieces = null, bool ConstExpr = false) : EmitContent;
+    /// <param name="AddrFixedType">Non-null when this Text is a bare reference to a
+    /// static-field-backed global / static-local of value type (its emitted field
+    /// type). Such a C# static field is a MOVEABLE variable, so <c>&amp;field</c> is
+    /// CS0212 — <see cref="Visit(C.AddrOf)"/> instead hands back its (stable) address
+    /// via <c>Unsafe.AsPointer(ref field)</c>. Set in <see cref="Visit(C.Var)"/> only
+    /// when the name resolves to a global (not a shadowing local, whose <c>&amp;</c>
+    /// is already legal).</param>
+    public sealed record Text(string Value, string? EnumType = null, CType? Ty = null, bool Inline = false, bool Noreturn = false, bool Volatile = false, string? VolatileLValue = null, bool VolatilePointee = false, bool Atomic = false, string? AtomicLValue = null, int? ConstInt = null, IReadOnlyList<string>? CommaOps = null, bool VoidCast = false, bool Terminates = false, string? CaseLabelExpr = null, bool IsDefaultLabel = false, IReadOnlyList<StmtPiece>? BlockPieces = null, bool ConstExpr = false, string? AddrFixedType = null) : EmitContent;
 
     /// <summary>
     /// One statement of a block, as the structured statement list (<see cref="StmtSeq"/>)

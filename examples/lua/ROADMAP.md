@@ -706,9 +706,23 @@ new class of latent bugs the probe never could.
   C-module loading) — stubbed in `driver.c` (our harness) to push an empty
   `package` table. Fixture `libc-frexp-ldexp-strcoll-ungetc/`; unit tests
   `LibcAddedSurfaceTests`.
-- 🧱 **Phase 6q+ — the remaining deep walls** (~50 errors):
-  - **CS0212 (~9), CS8210 (~7), CS1503/CS0266/CS0034 tails, CS0159 (~5)** — a
-    diverse long tail to triage next.
+- ✅ **Phase 6q — address-of a global / static-local (CS0212 9 → 0; total
+  50 → 42).** Lua takes the address of file-scope globals and function-static
+  sentinels — `&absentkey`, `&dummynode_`, `&<static-local>`. dotcc lowers these
+  to C# `static` fields, which the language classifies as MOVEABLE variables, so a
+  bare `&field` is CS0212 ("address of unfixed expression") — even though a C
+  global's address is a stable constant and a `fixed` block couldn't span the
+  address escaping the function (`return &absentkey;`). Since dotcc's globals are
+  unmanaged value types stored in non-relocatable static storage, the address IS
+  stable; `Visit(C.AddrOf)` now hands it back via
+  `(T*)Unsafe.AsPointer(ref field)`. `Visit(C.Var)` tags the operand (a new
+  `EmitContent.Text.AddrFixedType`) only when the name resolves to a global — a
+  shadowing LOCAL is a fixed variable, so its `&` stays the plain form. Fixture
+  `addr-of-global/`; unit tests `AddrOfGlobalTests` (incl. a plain-local guard).
+  Exposed 1 CS0306 behind a previously-CS0212 line (joins the tail).
+- 🧱 **Phase 6r+ — the remaining deep walls** (~42 errors):
+  - **CS1503 (~9), CS8210 (~7), CS0266/CS0034 tails, CS0159 (~5)** — a diverse
+    long tail to triage next.
   - **Call through a parenthesized simple-member fn-ptr callee (CS0118).** `(r.func)(5)`
     reads as a cast in C#; strip the redundant callee parens when the inner
     expression is a member access / subscript (the bare-identifier case landed in 6l).
