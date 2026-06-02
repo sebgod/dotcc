@@ -145,6 +145,11 @@ internal sealed partial class CSharpEmitter
     private string? ReconcileEnumInit(string declType, EmitContent.DeclEntry e)
     {
         if (e.Init is not { } init) { return null; }
+        // A bare function-name initializer decays to its address (`CFunc cf = dbl`
+        // → `&dbl`). The `(*fp)(…)` standalone declarator decays in EmitFnPtrLocal;
+        // a TYPEDEF'd fn-ptr variable comes through here, so decay it too (same
+        // rule as call args / aggregate inits — see DecayFnName).
+        init = DecayFnName(init);
         // void* → T* : implicit in C, explicit in C#. A cast-less `T* p =
         // malloc(...)` (or any void*-returning initializer) lands here; insert
         // the `(T*)` the C# compiler requires. Skipped for `void* p = …` itself.

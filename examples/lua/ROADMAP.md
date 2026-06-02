@@ -591,16 +591,31 @@ new class of latent bugs the probe never could.
     here — the unsigned-type set omitted `ulong`, so `int→ulong` was wrongly judged
     an implicit widening and silently *not* cast; the fix cleared the `int→ulong`
     stores (6i·3) AND args at once. Fixture `call-arg-conv/`.
-- 🧱 **Phase 6j+ — the remaining deep walls** (~195 errors):
-  - **Pointer / fn-ptr type as a generic type argument (CS0306 74)** — now the
-    leader (below). The integer-conversion long tail is small now: CS1503 (~14) /
-    CS0266 (~14) are deep untyped args/sinks, struct-field / array-element stores,
-    and integer `0`→pointer (should lower to `null`).
-  - **Pointer / fn-ptr types as generic type arguments (74: CS0306).** A bare
-    fn-ptr array (`GlobalArrayFrom<delegate*<…>>`) or a `lua_State*` type argument;
-    fix is the `nint[]`-reinterpret already used for `byte**` arrays, extended to
-    function-pointer elements. [Tracked: restore the full `fnptr-table/` fixture
-    once this lands — task #23.]
+- ✅ **Phase 6j — pointer / fn-ptr TYPEDEF + fn-ptr type in comma-tuples**
+  (CS0306 74 → 54; total 195 → 185). A comma operator in value position lowers to
+  a C# tuple `(a, b).ItemN`; a pointer operand can't be a `ValueTuple` type
+  argument (CS0306), so 6e round-tripped it through `nint`. But the detector only
+  matched a literal `T*` — it missed a pointer TYPEDEF (`StkId` → `StackValue*`)
+  and a function-pointer type/typedef (`delegate*<…>` / `lua_CFunction`), neither
+  of which ends in `*`. New `IsPointerCsType` (resolves the typedef chain +
+  consults `_pointerTypedefNames` + recognizes `delegate*<`) fixes both; the
+  nint-cast and cast-back use the original type name (round-trips via the using
+  alias). Required making `T` / `IntDecay` / `CondOf` / `CommaTupleText` instance
+  (they need `ResolveTypedef`). Also completed fn-name decay for a **typedef'd
+  fn-ptr decl-init** (`CFunc cf = dbl;` → `&dbl`; the `(*fp)()` declarator already
+  decayed). Fixture `comma-ptr-typedef/`. *Residual 54 CS0306*: comma-tuple
+  operands whose CType isn't synthesized (field chains like `(&v->val)->value_.f`
+  — a union member's fn-ptr type isn't propagated; same class as the enum-field
+  gap), plus the `(f)(L,ud)` fn-ptr call-through. The bare-fn-ptr-ARRAY case
+  (`GlobalArrayFrom<delegate*<…>>`, task #23) is separate — not in this residual.
+- 🧱 **Phase 6k+ — the remaining deep walls** (~185 errors):
+  - **CS0163 / CS8070 (~98) — switch fall-through.** C# forbids falling out of a
+    `case`/`default` without `break`/`return` (C allows it); needs a `break;`
+    inserted where C falls through, or the switch lowered differently.
+  - **Field-chain CType for union/struct members (residual CS0306 ~50).** Propagate
+    a member's pointer / fn-ptr type through `(&x)->u.f` so the comma-tuple (and
+    other type-directed paths) see it. Then the fn-ptr-ARRAY `GlobalArrayFrom`
+    (CS0306, task #23) extension.
   - **Call through a parenthesized simple-member fn-ptr callee (CS0118).** `(r.func)(5)`
     reads as a cast in C#; strip the redundant callee parens (or call without them)
     when the inner expression is a member access / subscript.

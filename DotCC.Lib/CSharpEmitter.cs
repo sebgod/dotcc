@@ -34,7 +34,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     /// both visit-produced <see cref="EmitContent.Text"/> wrappers AND
     /// raw lexer-token strings (terminals like <c>ID</c>/<c>NUM</c>
     /// arrive with the lexeme as a plain string).</summary>
-    private static string T(Item it) => it.Content switch
+    private string T(Item it) => it.Content switch
     {
         EmitContent.Text t => t.Value,
         EmitContent.DeclStmtMarker d => d.Value,
@@ -127,12 +127,12 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
 
     /// <summary>Read an operand's text, decaying an enum value to its `int`
     /// underlying so it can take part in a C int operation.</summary>
-    private static string IntDecay(Item it) => EnumOf(it) is null ? T(it) : $"(int){T(it)}";
+    private string IntDecay(Item it) => EnumOf(it) is null ? T(it) : $"(int){T(it)}";
 
     /// <summary>Wrap a child as a C-truthy condition (`Cond.B(...)`), decaying an
     /// enum first — `Cond.B` has int/double/pointer/bool overloads but not enum,
     /// so `if (color)` must become `Cond.B((int)color)`.</summary>
-    private static string CondOf(Item it) => $"Cond.B({IntDecay(it)})";
+    private string CondOf(Item it) => $"Cond.B({IntDecay(it)})";
 
     // Name of the function currently being reduced. Set by each fnSig*
     // action; cleared by funcDef/funcProto when the enclosing Fn finishes.

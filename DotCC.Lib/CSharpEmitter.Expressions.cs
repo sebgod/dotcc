@@ -1284,16 +1284,20 @@ internal sealed partial class CSharpEmitter
     /// pointer <c>e</c>, nested in value position (so it can't be statement-hoisted).
     /// ≤7 operands.
     /// </summary>
-    private static string CommaTupleText(IReadOnlyList<string> ops, IReadOnlyList<CType?>? types = null)
+    private string CommaTupleText(IReadOnlyList<string> ops, IReadOnlyList<CType?>? types = null)
     {
         if (ops.Count > 7)
         {
             throw new CompileException(
                 "comma-operator chains longer than 7 operands aren't supported");
         }
+        // A pointer-shaped operand (a raw `T*`, a function pointer `delegate*<…>`,
+        // OR a pointer / fn-ptr TYPEDEF — `StkId` → `StackValue*`, `lua_CFunction`
+        // → `delegate*<…>`) can't be a ValueTuple type argument; return the type
+        // name so it round-trips through nint. Null for a non-pointer operand.
         string? PtrAt(int i) =>
             types is { } t && i < t.Count && t[i] is CType.Sized { CsType: var cs }
-            && cs.EndsWith("*", StringComparison.Ordinal) ? cs : null;
+            && IsPointerCsType(cs) ? cs : null;
         var elems = new List<string>(ops.Count);
         for (var i = 0; i < ops.Count; i++)
         {
@@ -1302,6 +1306,25 @@ internal sealed partial class CSharpEmitter
         }
         var tuple = $"({string.Join(", ", elems)}).Item{ops.Count}";
         return PtrAt(ops.Count - 1) is { } lastPtr ? $"(({lastPtr})({tuple}))" : tuple;
+    }
+
+    // True when a lowered C# type is pointer-shaped — a raw object pointer (`T*`),
+    // a function pointer (`delegate*<…>`), or a typedef for either (a scalar
+    // pointer typedef resolves to `…*`; a fn-ptr typedef is registered in
+    // `_pointerTypedefNames`). Such a type can't be a ValueTuple / generic type
+    // argument (CS0306), so the comma-tuple lowering round-trips it through nint.
+    private bool IsPointerCsType(string cs)
+    {
+        if (cs.EndsWith("*", StringComparison.Ordinal)
+            || cs.StartsWith("delegate*", StringComparison.Ordinal)
+            || _pointerTypedefNames.Contains(cs))
+        {
+            return true;
+        }
+        var r = ResolveTypedef(cs);
+        return r.EndsWith("*", StringComparison.Ordinal)
+            || r.StartsWith("delegate*", StringComparison.Ordinal)
+            || _pointerTypedefNames.Contains(r);
     }
 
     /// <summary>
