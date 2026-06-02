@@ -1,6 +1,6 @@
 # Lua-on-dotcc — Session Handover
 
-**As of commit `2be636c` (Phase 6m).** This is a resume-from-here snapshot for the
+**As of commit `ddc6a06` (Phase 6n).** This is a resume-from-here snapshot for the
 ongoing effort to make **Lua 5.5.0 compile and run under dotcc** (the C→.NET 10/C#
 transpiler). For the full feature history see [`ROADMAP.md`](ROADMAP.md); for the
 language-feature matrix see [`../../C-SUPPORT.md`](../../C-SUPPORT.md). This file is
@@ -63,7 +63,7 @@ gcc-oracle in WSL needs the Windows path bridged: `WIN_PWD=$(pwd -W)` then
 
 ## Progress
 
-Whole-program link error count: **761 → 89** this run of sessions.
+Whole-program link error count: **761 → 72** this run of sessions.
 
 | Phase | What landed | Errors |
 |---|---|---|
@@ -71,28 +71,22 @@ Whole-program link error count: **761 → 89** this run of sessions.
 | 6j | pointer/fn-ptr typedefs recognised in comma-tuple values (`nint` round-trip) | |
 | 6k | C switch fall-through → `goto case` / `goto default` / trailing `break` (CS0163+CS8070) | 185 → 136 |
 | 6l | field-chain CType through pointer-typedef/aliased-struct bases + `(void)ptr` / `++ptr` discards + `(f)(args)` bare-name callee unwrap (CS0306 27→0) | 136 → 106 |
-| 6m | out-of-range constant integer casts wrapped in `unchecked` (CS0221 17→0) | 106 → **89** |
+| 6m | out-of-range constant integer casts wrapped in `unchecked` (CS0221 17→0) | 106 → 89 |
+| 6n | sprintf/snprintf fluent `.Arg(…).Done()` lowering + full `SprintfBuilder` Arg surface + `Arg(void*)` for `%p` (CS1501 15→0; 6 snprintf-`n` CS1503 cleared) | 89 → **72** |
 
-Tests currently green: **731 unit / 166 functional**.
+Tests currently green: **737 unit / 167 functional**.
 
-## Current wall — 89 errors
+## Current wall — 72 errors
 
 Histogram (deduped):
 
 ```
-15 CS1501   14 CS0193   10 CS0103    9 CS0212    7 CS8210
- 7 CS1503    6 CS0266    6 CS0034     5 CS0159    3 CS0163
- 2 CS9244    2 CS8183    1 CS0457     1 CS0029    1 CS0019
+14 CS0193   10 CS0103    9 CS0212    7 CS8210    7 CS1503
+ 6 CS0266    6 CS0034     5 CS0159    3 CS0163    2 CS8183
+ 1 CS0457    1 CS0029     1 CS0019
 ```
 
 Triage notes per family (file:line are into `build/Program.cs` after `link.sh all`):
-
-- **CS1501 (15) — `No overload for method 'snprintf' takes 4 arguments`** (e.g. 10588,
-  10591). The `snprintf(buf, n, fmt, …)` variadic isn't lowered to the fluent
-  builder the way `printf`/`fprintf`/`sprintf` are (see `Visit(C.Call)` in
-  `CSharpEmitter.Expressions.cs` — there's a `printf`/`fprintf` special-case; `snprintf`
-  needs the same `.Arg(…).Done()` shape, or a `SprintfBuilder`-style surface in
-  `DotCC.Libc`). **Likely the cleanest single next win** — one self-contained family.
 
 - **CS0193 (14) — `* or -> must be applied to a pointer`** (e.g. 10160, 10171). A
   type-lowering mismatch: something that should be a pointer lowered to a value (or
