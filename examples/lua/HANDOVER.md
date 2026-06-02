@@ -1,6 +1,6 @@
 # Lua-on-dotcc — Session Handover
 
-**As of commit `55285f5` (Phase 6q).** This is a resume-from-here snapshot for the
+**As of commit `c6fbc4f` (Phase 6r).** This is a resume-from-here snapshot for the
 ongoing effort to make **Lua 5.5.0 compile and run under dotcc** (the C→.NET 10/C#
 transpiler). For the full feature history see [`ROADMAP.md`](ROADMAP.md); for the
 language-feature matrix see [`../../C-SUPPORT.md`](../../C-SUPPORT.md). This file is
@@ -63,7 +63,7 @@ gcc-oracle in WSL needs the Windows path bridged: `WIN_PWD=$(pwd -W)` then
 
 ## Progress
 
-Whole-program link error count: **761 → 42** this run of sessions.
+Whole-program link error count: **761 → 35** this run of sessions.
 
 | Phase | What landed | Errors |
 |---|---|---|
@@ -75,26 +75,21 @@ Whole-program link error count: **761 → 42** this run of sessions.
 | 6n | sprintf/snprintf fluent `.Arg(…).Done()` lowering + full `SprintfBuilder` Arg surface + `Arg(void*)` for `%p` (CS1501 15→0; 6 snprintf-`n` CS1503 cleared) | 89 → 72 |
 | 6o | drop the `*` on a deref-call through a function pointer `(*fp)(args)` (CS0193 14→0) | 72 → 60 |
 | 6p | add `frexp`/`ldexp`/`strcoll`/`ungetc`/`setvbuf`/`tmpnam` libc surface + `luaopen_package` stub in driver.c (CS0103 10→0) | 60 → 50 |
-| 6q | address-of a global / static-local via `Unsafe.AsPointer(ref field)` (CS0212 9→0) | 50 → **42** |
+| 6q | address-of a global / static-local via `Unsafe.AsPointer(ref field)` (CS0212 9→0) | 50 → 42 |
+| 6r | void-call leading a value-context comma → in-place delegate (CS8210 7→0) | 42 → **35** |
 
-Tests currently green: **753 unit / 170 functional**.
+Tests currently green: **756 unit / 171 functional**.
 
-## Current wall — 42 errors
+## Current wall — 35 errors
 
 Histogram (deduped):
 
 ```
- 9 CS1503   7 CS8210   6 CS0266   6 CS0034   5 CS0159
- 3 CS0163   2 CS8183   1 CS0457   1 CS0306   1 CS0029   1 CS0019
+ 9 CS1503   6 CS0266   6 CS0034   5 CS0159   3 CS0163
+ 2 CS8183   1 CS0457   1 CS0306   1 CS0029   1 CS0019
 ```
 
 Triage notes per family (file:line are into `build/Program.cs` after `link.sh all`):
-
-- **CS8210 (7) — `tuple may not contain a value of type void`** (e.g. 16981,16982).
-  A comma-operator value-tuple where an operand is a `void` CALL (not a `(void)X`
-  cast — those already hoist). The void-leading-comma hoist (`SeqExpr`) doesn't reach
-  these because they're nested in value position. Extend the comma lowering: a void
-  *call* operand in a tuple needs the same treatment as the `(void)X` discard.
 
 - **CS1503 (9) / CS0266 (6) / CS0034 (6)** — residual integer-conversion tails the
   6i layer doesn't yet reach: `int→uint` at an arg (CS1503 11595 — arg 5; a callee
