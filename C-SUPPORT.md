@@ -29,7 +29,7 @@ Bird's-eye scorecard — the detailed per-area tables below are the source of tr
 | **Preprocessor** | ✅ Near-complete | `#include` (both forms), object + function-like macros (`##`, `#`, variadic), full `#if` constant-expr eval, `#ifdef`/`#else`/`#elif`/`#endif`, `#error`/`#warning`, `__FILE__`/`__LINE__`/`__func__`, multiple-include optimization | 🟡 `#pragma` (only `once`) · 🚫 `#line` · ❌ `#elifdef`/`#elifndef`, `#embed` |
 | **libc (22 headers)** | ✅ Near-complete | stdio (incl. real `FILE*` file I/O), stdlib, string, math + tgmath, ctype, time (scalar + `struct tm` calendar + `_r`), errno, assert, complex, inttypes, iso646, stdint, limits, float, stddef (NULL/size_t/ptrdiff_t), stdbool, **stdarg**, **locale** ("C"-locale shim) | 🟡 threads (subset), setjmp (`if` / `if-else` shapes), signal (`sig_atomic_t` + numbers; `signal()`/`raise()` deferred to the REPL phase) · 🚫 Annex K |
 
-**C11 / C23 specifically** — ✅ done: `_Bool`/`bool`, `true`/`false`/`nullptr`, `typeof`, `auto` inference, `_Float128`, empty initializer `{}`, anonymous struct/union members, `_Noreturn`, binary + digit-separator literals, `<threads.h>` subset. ❌ roadmap: `_Generic`, `_Alignas`/`_Alignof`, `_Atomic`, `_Thread_local`, `constexpr`, `[[attributes]]`, `#embed`/`#elifdef`. 🚫 out of scope: `_BitInt(N)`, wide literals, trigraphs/digraphs.
+**C11 / C23 specifically** — ✅ done: `_Bool`/`bool`, `true`/`false`/`nullptr`, `typeof`, `auto` inference, `_Atomic` + full `<stdatomic.h>`, `_Float128`, empty initializer `{}`, anonymous struct/union members, `_Noreturn`, binary + digit-separator literals; 🟡 partial: `_Static_assert`/`static_assert` (parsed, inert — not evaluated), `<threads.h>` subset. ❌ roadmap: `_Generic`, `_Alignas`/`_Alignof`, `_Thread_local`, `constexpr`, `[[attributes]]`, `#embed`/`#elifdef`. 🚫 out of scope: `_BitInt(N)`, wide literals, trigraphs/digraphs.
 
 🟡 entries in the last column are **implemented but partial** — they work for the common case and fail loudly outside it (see the per-area table for the caveat); they are *not* missing. E.g. `setjmp`/`longjmp` handles the standard `if (setjmp(env)) …` idiom (and multi-frame unwind), just not `switch (setjmp(…))` or value-capture.
 
@@ -453,7 +453,7 @@ miscompiles** — every gap below fails at parse/lex time or is explicitly flagg
 **C11**
 - ⛔ `_Generic` (generic selection).
 - ✅ Anonymous `struct` / `union` members — fields promoted into the parent (struct inlined; union lifted to a nested explicit-layout type + access rewrite). See the Beyond-C99 table.
-- ⛔ `_Alignas` / `_Alignof`, `_Atomic`, `_Thread_local`. (`_Noreturn` ✅ — see the Beyond-C99 table.)
+- ⛔ `_Alignas` / `_Alignof`, `_Thread_local`. (`_Atomic` + full `<stdatomic.h>` ✅, `_Noreturn` ✅, `_Static_assert`/`static_assert` 🟡 parsed-but-inert — see the Beyond-C99 table.)
 - ⛔ String/char encoding prefixes `u"…"` / `U"…"` / `u8"…"` / `L"…"` (dotcc is UTF-8-native; the prefix syntax isn't parsed).
 
 **C23**
@@ -464,6 +464,55 @@ miscompiles** — every gap below fails at parse/lex time or is explicitly flagg
 
 **Cross-dialect**
 - *(none currently — high-byte string escapes `"\xff"` / `"\377"` now lower to a constant byte-array; see the Lexical table.)*
+
+## Dialect gating (rewriter / grammar / visitor)
+
+How dotcc decides whether a feature is available under a given `-std=` — the
+model folded in from the former `HANDOVER-std-option.md`. `-std=` predefines
+`__STDC_VERSION__` and drives keyword promotion; by itself it stays
+**permissive** (the parser is a superset of every dialect), and `-pedantic` /
+`-pedantic-errors` turn the per-feature year tags into warnings / errors. Three
+layers carry the gating; the right one depends on the feature's *shape*:
+
+1. **Rewriter** (`DialectKeywordRewriter`) — a **new keyword spelled like an
+   identifier** (`bool`, `true`, `false`, `nullptr`, `static_assert`, `noreturn`,
+   `typeof`). These are *legal identifiers* in older dialects (`int true = 5;` is
+   valid C99), so the grammar can't always treat them as keywords — it would
+   parse-error on valid old code before the visitor runs. The `ID → keyword`
+   promotion itself carries the `MinVersion`: promoted at/above the introducing
+   standard, left an identifier below it (which also lets the pre-C23
+   `<stdbool.h>` / `<stddef.h>` macro supply the meaning). One `MinVersion` covers
+   both directions at once. (`inline` is the same shape, gated ≥c99.)
+2. **Grammar** (`c.lalr.yaml`) — **genuinely new syntax** that can't collide with
+   an identifier (`_BitInt(N)`, `typeof`, `_Generic`, `[[attributes]]`). Parsed
+   always (the superset); *availability* gated in the visitor.
+3. **Visitor** (`CSharpEmitter`, via `DialectGate`) — *restrictions*: a construct
+   the grammar accepts but an older `-std=` shouldn't (designated init / `long
+   long` under c90, …) becomes a `-pedantic` diagnostic. Also semantic *flips*
+   like C23 `auto` (storage class → type inference), branching on the threaded
+   `CDialect`.
+
+`_Capital_` keywords (`_Bool`, `_Static_assert`, `_Noreturn`, `_Atomic`,
+`_Alignas`, …) are reserved to the implementation in *every* dialect, so they
+**always lex as keywords**; their *availability* can still be visitor-gated. We
+deliberately keep dialect awareness OUT of LALR.CC itself — a single client
+doesn't justify the table-doubling; revisit only with a second
+standards-versioned client.
+
+**Residual keyword TODOs** (status mirrors the Beyond-C99 / dialect-gaps tables):
+- `_Thread_local` / `thread_local`, `_Alignas` / `alignas`, `_Alignof` / `alignof`
+  (C11) — **not built; weigh value first.** No faithful lowering in the current
+  emit shape: `[ThreadStatic]` is field-only (no per-local TLS), and there's no
+  per-local alignment hook on a `stackalloc`. They'd only stub.
+- `_Generic` (C11) — the common case (`tgmath.h`) is already covered by C#
+  overload resolution; low priority.
+- `constexpr` (C23) needs a const-eval pass; `_Decimal32/64/128` (C23) needs a
+  decimal runtime. `_BitInt(N)` is 🚫 (no faithful .NET width).
+- **Header-version hygiene** (cleanup) — `<stdbool.h>` / `<stdatomic.h>` /
+  `<stdalign.h>` / `<stdnoreturn.h>` macro bodies aren't yet gated on
+  `__STDC_VERSION__`. Benign today (under c23 the rewriter promotes the bare
+  keyword and the redundant macro is a no-op), but C23 makes those headers
+  vestigial, so gating the bodies is the faithful finish.
 
 ## Out of scope (won't implement)
 
