@@ -89,4 +89,32 @@ public sealed class PostfixBaseTests
             """);
         emitted.ShouldContain("a.b.c");
     }
+
+    [Fact]
+    public void postfix_incr_on_deref_keeps_parens()
+    {
+        // `(*p)++` increments the POINTEE. Dropping parens -> `*p++` = `*(p++)`,
+        // which increments the POINTER (wrong) and isn't a C# statement-expression
+        // (CS0201). Same compound-base rule as the `.`/`->` cases above.
+        var emitted = Emit("""
+            int main(void) { int n = 5; int *p = &n; (*p)++; (*p)--; return n; }
+            """);
+        // Statement context strips the redundant OUTER wrap, leaving the inner
+        // base-protecting parens: `(*p)++`, never `*p++` (= `*(p++)`).
+        emitted.ShouldContain("(*p)++");
+        emitted.ShouldContain("(*p)--");
+    }
+
+    [Fact]
+    public void genuine_pointer_post_increment_is_unwrapped()
+    {
+        // `*p++` (read `*p`, then advance the pointer — the common C idiom) is NOT
+        // a postfix-on-deref: the `++` applies to the bare pointer `p`, which stays
+        // unwrapped. Regression guard that the fix above didn't over-wrap.
+        var emitted = Emit("""
+            int main(void) { int a[2] = {1,2}; int *p = a; int x = *p++; return x; }
+            """);
+        emitted.ShouldContain("(p++)");
+        emitted.ShouldNotContain("(*p)++");
+    }
 }

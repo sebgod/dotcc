@@ -438,14 +438,46 @@ a general-C-completeness item (not Lua-specific). All cleared, 31/31:
   `LocalTypeDefTests`.
 - Exit: all lib TUs (except `loadlib`) emit objects. ✅ **Done — 31/31.**
 
-### ⬜ Phase 6 — Link & run (the payoff)
+### 🟦 Phase 6 — Link & run (the payoff)
 - Link every object as a dotcc `-shared` library (or whole-program with a custom
-  main). Write `examples/lua/runlua.c`: `luaL_newstate` → `luaL_openlibs` →
+  main). Write `examples/lua/driver.c`: `luaL_newstate` → `luaL_openlibs` →
   `luaL_dostring("print('hello from Lua on .NET')")` → close.
 - A `loadlib` stub provides `luaL_openlibs` without dynamic loading (drop the
   `package`/`require`-from-.so path).
 - Exit: a committed fixture runs a Lua script through dotcc-compiled Lua and
   asserts its stdout. **"Lua runs on .NET via dotcc."**
+
+**Harness:** `examples/lua/link.sh` whole-program-compiles all TUs + `driver.c`
+(`--emit=build` → Roslyn). Unlike `probe.sh` (`--emit=obj`, parse+emit only),
+this is the first time the MERGED emitted C# is actually COMPILED — surfacing a
+new class of latent bugs the probe never could.
+
+- 🟦 **Phase 6a — compile-shakeout emitter fixes.** The first whole-program build
+  (31 TUs + stub `main`) produced 128 C# errors in three families, each a genuine
+  latent emitter bug:
+  - ✅ **Void-typed ternary as a statement** (132 → 14 errors): Lua's GC
+    write-barriers `(cond ? luaC_barrier_(…) : cast_void(0));` — a `?:` whose
+    branches are void (a `(void)X` cast or a void call) can't be a C# expression.
+    Now lowered to an `if`/`else` statement (`EmitContent.VoidCond`), recursing for
+    nested void ternaries and propagating through redundant parens. Fixture
+    `void-ternary-stmt/`.
+  - ✅ **Braceless control-flow body that's a multi-statement comma** (cleared the
+    `'else' cannot start a statement` family): Lua's `luaL_addchar(B,c)` =
+    `((void)(…), (…))` as a braceless `if`/`else` body — the comma expands to
+    several statements, so it's block-wrapped to stay one statement. Fixture
+    `braceless-comma-body/`.
+  - ✅ **`setjmp` try-body bracing** (cleared the `{ expected` pair): `LUAI_TRY` =
+    `if (setjmp((c)->b) == 0) (f)(L, ud);` — the try BODY must be a block
+    (`try stmt;` is invalid C#). Fixture `setjmp-try-body/`.
+  - ✅ **Postfix `++`/`--` on a deref** (found via the void-ternary fixture's
+    helper): `(*p)++` must keep its parens — `*p++` is `*(p++)` (wrong + CS0201).
+    The postfix-`++` analogue of Phase 4y's `PostfixBase`. Fixture
+    `deref-incr-decr/`.
+- ⬜ **Phase 6b — value-context void-comma** (the remaining 14 errors): Lua's
+  `luaM_newvectorchecked` = `(luaM_checksize(…), luaM_newvector(…))` — a comma
+  whose leading operand is a noreturn void guard ternary, in VALUE position
+  (assigned). A void value can't be a C# tuple element, so this needs
+  statement-hoisting (`SeqExpr`) at the assignment / decl-init / return sink.
 
 ### ⬜ Phase 7 — Stretch: standalone REPL / `luac`
 - Minimal `lua.c` (no readline/signal niceties) and/or `luac.c`.

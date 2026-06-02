@@ -38,6 +38,11 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     {
         EmitContent.Text t => t.Value,
         EmitContent.DeclStmtMarker d => d.Value,
+        // A void-typed ternary reaching a VALUE consumer is invalid C (a void
+        // expression can't be value-used); render its (invalid-in-C#) ternary
+        // text so Roslyn errors loudly. Statement/body consumers special-case
+        // VoidCond BEFORE calling T() and emit its if/else form instead.
+        EmitContent.VoidCond vc => vc.Value,
         string s => s,
         // setjmp variants must be consumed by Visit(Eq)/Visit(Neq) or
         // Visit(StmtIfElse). Reaching T() means setjmp showed up in a

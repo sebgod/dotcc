@@ -169,8 +169,44 @@ internal sealed partial class CSharpEmitter
     // branches need a common C# type; the user is responsible for keeping
     // them compatible (matches the C constraint that the branches share
     // arithmetic conversions).
-    public EmitContent Visit(C.Ternary n) =>
-        $"({CondOf(n.Arg0)} ? {T(n.Arg2)} : {T(n.Arg4)})";
+    //
+    // VOID-typed ternary: if a branch is void (a `(void)X` discard cast or a
+    // void-typed nested ternary), the whole `?:` is void — C requires both arms
+    // void then. C# can't express that as an expression (a void call / `(void)`
+    // cast isn't a valid ternary arm), so lower to an `if`/`else` STATEMENT,
+    // carried as a VoidCond for the statement/loop-body context to emit. Each arm
+    // renders as a statement (a nested void ternary recurses; a comma / void-cast
+    // expands its discard operands; anything else — typically a void call — becomes
+    // `expr;`). Lua's GC write-barriers `(cond ? luaC_barrier_(…) : cast_void(0))`.
+    public EmitContent Visit(C.Ternary n)
+    {
+        if (IsVoidBranch(n.Arg2) || IsVoidBranch(n.Arg4))
+        {
+            var ifStmt = $"if ({CondOf(n.Arg0)}) {VoidBranchStmt(n.Arg2)}"
+                       + $"else {VoidBranchStmt(n.Arg4)}";
+            return new EmitContent.VoidCond($"({CondOf(n.Arg0)} ? {T(n.Arg2)} : {T(n.Arg4)})", ifStmt);
+        }
+        return $"({CondOf(n.Arg0)} ? {T(n.Arg2)} : {T(n.Arg4)})";
+    }
+
+    // A ternary arm is void when it's a `(void)X` discard cast or a void-typed
+    // nested ternary (VoidCond) — both have no C# value.
+    private static bool IsVoidBranch(Item it) =>
+        it.Content is EmitContent.VoidCond
+        || it.Content is EmitContent.Text { VoidCast: true };
+
+    // Render a ternary arm as a C# statement block. A nested void ternary uses its
+    // own if/else; a comma or `(void)X` cast expands its discard operands (each a
+    // statement); anything else (e.g. a void-returning call) becomes `expr;`. The
+    // block keeps a braceless enclosing `if`/`while`/`for` body well-formed.
+    private string VoidBranchStmt(Item it)
+    {
+        if (it.Content is EmitContent.VoidCond vc) { return $"{{\n{IndentEach(vc.IfStatement)}}}\n"; }
+        var stmts = CommaOpsOf(it) is { } ops
+            ? string.Concat(ops.Select(o => $"{StripOuterParens(o)};\n"))
+            : $"{StripOuterParens(T(it))};\n";
+        return $"{{\n{IndentEach(stmts)}}}\n";
+    }
     public EmitContent Visit(C.AndAssign n) => CompoundAssign(n.Arg0, "&", n.Arg2);
     public EmitContent Visit(C.OrAssign n)  => CompoundAssign(n.Arg0, "|", n.Arg2);
     public EmitContent Visit(C.XorAssign n) => CompoundAssign(n.Arg0, "^", n.Arg2);
@@ -208,7 +244,7 @@ internal sealed partial class CSharpEmitter
             var discard = CommaOpsOf(n.Arg3) is { } ops
                 ? new List<string>(ops)
                 : new List<string> { $"_ = ({T(n.Arg3)})" };
-            return new EmitContent.Text($"((void)({T(n.Arg3)}))", CommaOps: discard);
+            return new EmitContent.Text($"((void)({T(n.Arg3)}))", CommaOps: discard, VoidCast: true);
         }
         // `(S*)malloc(sizeof(S))` — propagate the MallocSizeof marker through a
         // matching pointer cast so the enclosing declaration can still recognise
@@ -273,9 +309,13 @@ internal sealed partial class CSharpEmitter
     // work on enums) so a `c++` value used in an int slot still gets decayed.
     public EmitContent Visit(C.PreInc n) => AtomicStep(n.Arg1, isPost: false, "+") ?? VolatileStep(n.Arg1, "+") ?? (EmitContent)new EmitContent.Text($"(++{StripOuterParens(T(n.Arg1))})", EnumOf(n.Arg1));
     public EmitContent Visit(C.PreDec n) => AtomicStep(n.Arg1, isPost: false, "-") ?? VolatileStep(n.Arg1, "-") ?? (EmitContent)new EmitContent.Text($"(--{StripOuterParens(T(n.Arg1))})", EnumOf(n.Arg1));
-    // Postfix ++/-- — same stripping; emit `x++` rather than `(x)++`.
-    public EmitContent Visit(C.PostInc n) => AtomicStep(n.Arg0, isPost: true, "+") ?? VolatileStep(n.Arg0, "+") ?? (EmitContent)new EmitContent.Text($"({StripOuterParens(T(n.Arg0))}++)", EnumOf(n.Arg0));
-    public EmitContent Visit(C.PostDec n) => AtomicStep(n.Arg0, isPost: true, "-") ?? VolatileStep(n.Arg0, "-") ?? (EmitContent)new EmitContent.Text($"({StripOuterParens(T(n.Arg0))}--)", EnumOf(n.Arg0));
+    // Postfix ++/-- — strip a fully-redundant wrap, but a COMPOUND base keeps its
+    // parens (PostfixBase): `(*p)++` must stay `((*p)++)`, not `(*p++)` (= `*(p++)`,
+    // wrong precedence AND not a statement-expression — CS0201). Same fix as the
+    // `.`/`->` postfix base (Phase 4y); a bare lvalue / member chain / index is
+    // unwrapped. Prefix ++/-- bind looser so `++*p` = `++(*p)` is already correct.
+    public EmitContent Visit(C.PostInc n) => AtomicStep(n.Arg0, isPost: true, "+") ?? VolatileStep(n.Arg0, "+") ?? (EmitContent)new EmitContent.Text($"({PostfixBase(StripOuterParens(T(n.Arg0)))}++)", EnumOf(n.Arg0));
+    public EmitContent Visit(C.PostDec n) => AtomicStep(n.Arg0, isPost: true, "-") ?? VolatileStep(n.Arg0, "-") ?? (EmitContent)new EmitContent.Text($"({PostfixBase(StripOuterParens(T(n.Arg0)))}--)", EnumOf(n.Arg0));
     // Subscript `expr[i]`. For a 1-D array / pointer it's an ordinary C#
     // pointer subscript (matching C). For a MULTI-dimensional array, dotcc
     // flattened the storage, so a PARTIAL index (more dimensions remain) is
@@ -1138,6 +1178,14 @@ internal sealed partial class CSharpEmitter
             return new EmitContent.Text(CommaTupleText(seq.Operands),
                 Ty: seq.LastType, CommaOps: seq.Operands);
         }
+        // A redundant paren around a void-typed ternary stays void — Lua wraps the
+        // barrier macro in parens (`(cond ? … : cast_void(0))`), and a nested arm is
+        // itself a parenthesised void ternary. Keep the VoidCond so the statement
+        // context (and an enclosing void ternary's IsVoidBranch) still recognise it.
+        if (n.Arg1.Content is EmitContent.VoidCond pvc)
+        {
+            return new EmitContent.VoidCond($"({pvc.Value})", pvc.IfStatement);
+        }
         // Propagate the volatile-lvalue and pointee-volatile tags through the parens
         // so `(x) = …` / `&(x)` see the write/address context and `(*p)` / `(p)[i]`
         // still fence (the bare lvalue / pointee-ness is unchanged by parenthesising).
@@ -1147,7 +1195,11 @@ internal sealed partial class CSharpEmitter
         return new EmitContent.Text($"({T(n.Arg1)})", EnumOf(n.Arg1), TyOf(n.Arg1),
             VolatileLValue: VLValueOf(n.Arg1), VolatilePointee: VolatilePointeeOf(n.Arg1),
             AtomicLValue: ALValueOf(n.Arg1), ConstInt: ConstOfItem(n.Arg1),
-            CommaOps: CommaOpsOf(n.Arg1));
+            CommaOps: CommaOpsOf(n.Arg1),
+            // Keep the `(void)X` discard-cast tag through redundant parens — Lua's
+            // `cast_void(x)` = `((void)(x))`, and a ternary arm is that wrapped again
+            // — so an enclosing void ternary's IsVoidBranch still recognises it.
+            VoidCast: n.Arg1.Content is EmitContent.Text { VoidCast: true });
     }
 
     // C23 keyword constants (only reached under -std=c23, via the rewriter's

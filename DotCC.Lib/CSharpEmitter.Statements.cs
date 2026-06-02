@@ -136,7 +136,11 @@ internal sealed partial class CSharpEmitter
         // block. Only bind `__longjmp_value` when there's recovery code that
         // could read it — an empty catch needs no binding (and binding it would
         // leave an unused local).
-        var tb = string.IsNullOrWhiteSpace(tryBody) ? "{ }\n" : tryBody;
+        // The try body must be a BLOCK — `try stmt;` is invalid C#. When the C
+        // then/else branch is a single (unbraced) statement (Lua's `LUAI_TRY` =
+        // `if (setjmp((c)->b) == 0) (f)(L, ud);`), wrap it; an already-braced block
+        // just nests harmlessly.
+        var tb = string.IsNullOrWhiteSpace(tryBody) ? "{ }\n" : $"{{ {tryBody} }}\n";
         var catchInner = string.IsNullOrWhiteSpace(catchBody)
             ? "{ }"
             : $"{{ var __longjmp_value = __jmp.Value; {catchBody} }}";
@@ -307,11 +311,23 @@ internal sealed partial class CSharpEmitter
         // here.) An operand that isn't a valid C# statement-expression (a bare
         // value with no side effect) reaches Roslyn as CS0201 — the same loud
         // failure C# gives such pointless code.
+        // A void-typed ternary used as a statement (Lua's GC write-barrier
+        // macros `(cond ? luaC_barrier_(…) : cast_void(0));`) → its if/else form.
+        // C# can't express the `?:` itself (a void call/cast isn't a valid arm).
+        if (n.Arg0.Content is EmitContent.VoidCond vc)
+        {
+            return $"{{\n{IndentEach(vc.IfStatement)}}}\n";
+        }
         if (CommaOpsOf(n.Arg0) is { } ops)
         {
             var sb = new StringBuilder();
             foreach (var op in ops) { sb.Append(StripOuterParens(op)).Append(";\n"); }
-            return sb.ToString();
+            // Wrap a MULTI-statement comma in a block so the whole comma stays ONE
+            // C# statement: a braceless enclosing `if`/`while`/`for` body would
+            // otherwise take only the first statement and the rest (plus any `else`)
+            // would detach. Lua's `luaL_addchar(B,c)` = `((void)(…), (…))` as a
+            // braceless `if`/`else` body is the motivating case.
+            return ops.Count > 1 ? $"{{\n{IndentEach(sb.ToString())}}}\n" : sb.ToString();
         }
         // CS0201: bare parenthesized assignment isn't a statement. Peel the
         // outer parens that our binop emitters wrap on.

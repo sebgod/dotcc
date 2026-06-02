@@ -101,7 +101,25 @@ public abstract record EmitContent
     /// only tests the last operand) can re-emit the operands as statements — where
     /// a <c>void</c> side-effect operand is legal but a tuple element isn't. Null
     /// for a non-comma expression.</param>
-    public sealed record Text(string Value, string? EnumType = null, CType? Ty = null, bool Inline = false, bool Noreturn = false, bool Volatile = false, string? VolatileLValue = null, bool VolatilePointee = false, bool Atomic = false, string? AtomicLValue = null, int? ConstInt = null, IReadOnlyList<string>? CommaOps = null) : EmitContent;
+    /// <param name="VoidCast">True when this Text is a <c>(void)X</c> discard cast
+    /// (C# has no void value). <see cref="CommaOps"/> already carries the discard
+    /// statement(s); this flag lets a ternary branch recognise a void arm so the
+    /// whole <c>?:</c> can be lowered to an <c>if</c>/<c>else</c> statement (a void
+    /// call / cast can't be a C# ternary arm). See <see cref="VoidCond"/>.</param>
+    public sealed record Text(string Value, string? EnumType = null, CType? Ty = null, bool Inline = false, bool Noreturn = false, bool Volatile = false, string? VolatileLValue = null, bool VolatilePointee = false, bool Atomic = false, string? AtomicLValue = null, int? ConstInt = null, IReadOnlyList<string>? CommaOps = null, bool VoidCast = false) : EmitContent;
+
+    /// <summary>
+    /// A VOID-TYPED conditional expression — a C ternary <c>c ? a : b</c> whose
+    /// branches are void (a <c>(void)X</c> discard cast or a void-returning call),
+    /// e.g. Lua's GC write-barrier macros <c>(cond ? luaC_barrier_(…) : cast_void(0))</c>
+    /// used as a statement. C# can't express such a <c>?:</c> as an expression (a
+    /// void call/cast isn't a valid ternary arm), so it has no value — only the
+    /// <see cref="IfStatement"/> form (an <c>if/else</c>, recursing for nested void
+    /// ternaries). A statement / loop-body context renders <see cref="IfStatement"/>;
+    /// the kept <see cref="Value"/> (the invalid ternary text) is never legitimately
+    /// value-used in C, so any context that did read it trips Roslyn loudly.
+    /// </summary>
+    public sealed record VoidCond(string Value, string IfStatement) : EmitContent;
 
     /// <summary>
     /// Accumulator for declaration-specifier sequences (<c>int</c>,
