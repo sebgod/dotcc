@@ -1,0 +1,5 @@
+42-hi
+wrote 5: abc99
+1234567890
+k=5 buf=hel
+x=7

@@ -664,8 +664,25 @@ new class of latent bugs the probe never could.
     wrap. A constant that *provably* fits stays bare (`(uint)(219)`), as does a
     runtime cast (it truncates silently). Fixture `const-cast-unchecked/`; unit
     tests `ConstCastUncheckedTests`.
-- 🧱 **Phase 6n+ — the remaining deep walls** (~89 errors):
-  - **CS1501 (~15), CS0193 (~14), CS0103 (~10), CS0212 (~9), CS8210 (~7),
+- ✅ **Phase 6n — `sprintf` / `snprintf` fluent lowering (CS1501 15 → 0; total
+  89 → 72).** `printf`/`fprintf` were lowered to the fluent `.Arg(…).Done()`
+  builder, but `sprintf`/`snprintf` weren't — so a variadic call overran the
+  2-/3-arg `SprintfBuilder` factory (CS1501). Three parts:
+  - **Emitter:** `Visit(C.Call)` now lowers `sprintf(dst, fmt, …)` →
+    `sprintf(dst, fmt).Arg(…).Done()` and `snprintf(dst, n, fmt, …)` likewise,
+    mirroring the `fprintf` case. `.Done()` is unconditional (a `SprintfBuilder`
+    left without it never copies). `snprintf`'s `int n` bound takes the
+    store-conversion cast for an unsigned/wider C operand (Lua's `sz - n`,
+    unsigned `maxitem`) — cleared the 6 `uint → int` CS1503 tails.
+  - **Runtime:** `SprintfBuilder` now mirrors `PrintfBuilder`'s full `Arg`
+    surface (added `long`/`uint`/`ulong`/`bool`/`Float128`); a missing overload
+    was a latent miscompile (a `long` bound to `Arg(float)`), not a compile error.
+  - **Both builders gained `Arg(void*)`** — `%p` with a `void*` / typed `T*`
+    couldn't bind (`void*` → `byte*` isn't implicit; `T*` → `void*` is). One
+    overload covers every typed pointer. Fixture `sprintf-snprintf/`; unit tests
+    `SprintfLoweringTests` + `LibcTests` (long/void* overloads).
+- 🧱 **Phase 6o+ — the remaining deep walls** (~72 errors):
+  - **CS0193 (~14), CS0103 (~10), CS0212 (~9), CS8210 (~7),
     CS1503/CS0266/CS0034 tails** — a diverse long tail to triage next.
   - **Call through a parenthesized simple-member fn-ptr callee (CS0118).** `(r.func)(5)`
     reads as a cast in C#; strip the redundant callee parens when the inner

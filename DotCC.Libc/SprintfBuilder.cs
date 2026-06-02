@@ -34,10 +34,20 @@ public unsafe ref struct SprintfBuilder
         _inner = new PrintfBuilder(_buf, fmt);
     }
 
-    public SprintfBuilder Arg(int v)    { _inner = _inner.Arg(v); return this; }
-    public SprintfBuilder Arg(double v) { _inner = _inner.Arg(v); return this; }
-    public SprintfBuilder Arg(float v)  { _inner = _inner.Arg(v); return this; }
-    public SprintfBuilder Arg(byte* v)  { _inner = _inner.Arg(v); return this; }
+    // Mirror PrintfBuilder's full Arg surface — SprintfBuilder is a thin wrapper
+    // over an inner PrintfBuilder, so every overload simply delegates. Missing an
+    // overload here is a latent miscompile, not a compile error: e.g. a `long`
+    // would bind to Arg(float) and format an integer as a float.
+    public SprintfBuilder Arg(int v)      { _inner = _inner.Arg(v); return this; }
+    public SprintfBuilder Arg(long v)     { _inner = _inner.Arg(v); return this; }
+    public SprintfBuilder Arg(uint v)     { _inner = _inner.Arg(v); return this; }
+    public SprintfBuilder Arg(ulong v)    { _inner = _inner.Arg(v); return this; }
+    public SprintfBuilder Arg(bool v)     { _inner = _inner.Arg(v); return this; }
+    public SprintfBuilder Arg(double v)   { _inner = _inner.Arg(v); return this; }
+    public SprintfBuilder Arg(float v)    { _inner = _inner.Arg(v); return this; }
+    public SprintfBuilder Arg(Float128 v) { _inner = _inner.Arg(v); return this; }
+    public SprintfBuilder Arg(byte* v)    { _inner = _inner.Arg(v); return this; }
+    public SprintfBuilder Arg(void* v)    { _inner = _inner.Arg(v); return this; }
 
     public int Done()
     {

@@ -242,6 +242,16 @@ public unsafe ref struct PrintfBuilder
     }
 
     /// <summary>
+    /// A <c>void*</c> (or any typed <c>T*</c>, which implicitly converts to
+    /// <c>void*</c>) argument — typically a <c>%p</c> spec. Reuses the
+    /// <see cref="Arg(byte*)"/> path (address-print for non-<c>%s</c> specs).
+    /// A dedicated overload is required because <c>void*</c> does NOT implicitly
+    /// convert to <c>byte*</c> in C#, so without it a <c>%p</c> pointer arg
+    /// fails to bind.
+    /// </summary>
+    public PrintfBuilder Arg(void* v) => Arg((byte*)v);
+
+    /// <summary>
     /// Flush the literal text remaining after the last consumed <c>%</c>
     /// spec. Returns <c>0</c> for simplicity — real C printf returns the
     /// byte count, which our callers don't currently consult.

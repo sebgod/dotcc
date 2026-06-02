@@ -959,6 +959,41 @@ internal sealed partial class CSharpEmitter
             sb.Append(".Done()");
             return sb.ToString();
         }
+        // sprintf / snprintf share the printf fluent shape but format into a
+        // caller buffer instead of a stream. The factory takes only the FIXED
+        // args (sprintf: dst, fmt — snprintf: dst, n, fmt); the variadic %-args
+        // become `.Arg(…)` and `.Done()` flushes into the buffer (returning the
+        // would-be byte count). `.Done()` is appended unconditionally — a
+        // SprintfBuilder left without it never copies — so this fires even with
+        // zero varargs (`sprintf(dst, fmt)` → `sprintf(dst, fmt).Done()`).
+        if (callee == "sprintf" && args.Count >= 2)
+        {
+            var sb = new StringBuilder();
+            sb.Append("sprintf(").Append(args[0]).Append(", ").Append(args[1]).Append(')');
+            for (int i = 2; i < args.Count; i++)
+            {
+                sb.Append(".Arg(").Append(VarArg(i)).Append(')');
+            }
+            sb.Append(".Done()");
+            return sb.ToString();
+        }
+        if (callee == "snprintf" && args.Count >= 3)
+        {
+            var sb = new StringBuilder();
+            // The factory's bound is `int n`, but C's `size_t n` arrives unsigned
+            // or wider at some call sites (Lua's `sz - n`, an unsigned `maxitem`),
+            // which C# won't narrow implicitly. Coerce the bound through the same
+            // store-conversion rule used for assignments.
+            var bound = CoerceStore(args[1], argsContent.ArgTypes is { } nt ? nt[1] : null,
+                argsContent.ArgConsts is { } nc ? nc[1] : null, "int", n.Arg0.Position.Line);
+            sb.Append("snprintf(").Append(args[0]).Append(", ").Append(bound).Append(", ").Append(args[2]).Append(')');
+            for (int i = 3; i < args.Count; i++)
+            {
+                sb.Append(".Arg(").Append(VarArg(i)).Append(')');
+            }
+            sb.Append(".Done()");
+            return sb.ToString();
+        }
         // Coerce each argument to the callee's parameter type — C's implicit
         // argument conversion (int↔unsigned / narrowing / enum↔int) that C#
         // rejects. Only fires for a callee with recorded fixed-param types (user

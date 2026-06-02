@@ -210,8 +210,8 @@ The runtime surface dotcc-emitted programs link against. Each function routes to
 |---|---|---|
 | `printf` | ✅ | Fluent `PrintfBuilder`; specs `%d %i %o %x %X %u %c %f %e %g %s %%` (`%o` is unsigned octal, with the `#` flag forcing a leading 0) |
 | `fprintf` | ✅ | Primitive; takes `FILE* stream`. `PrintfBuilder` binds the `FILE`'s `TextWriter` (`WriterFor`) so it stays FILE-agnostic |
-| `sprintf` | ✅ | Writes formatted output into `byte*`, NUL-terminates |
-| `snprintf` | ✅ | Bounded sprintf; returns count-that-would-have-been-written per C99 |
+| `sprintf` | ✅ | Fluent `SprintfBuilder` (same `.Arg(…).Done()` lowering as `printf`); writes formatted output into `byte*`, NUL-terminates. Fixture `sprintf-snprintf/`. |
+| `snprintf` | ✅ | Bounded `sprintf`; the `size_t n` bound is coerced to the builder's `int n` for an unsigned/wider operand. Returns count-that-would-have-been-written per C99. Fixture `sprintf-snprintf/`. |
 | `scanf`, `fscanf`, `sscanf` | ✅ | `ScanfReader`; specs `%d %i %f %e %g %s %c`. `fscanf` takes `FILE*` (binds the `FILE`'s `TextReader` via `ReaderFor`) |
 | `puts`, `fputs` | ✅ | `puts` adds a `'\n'`; `fputs` doesn't. `fputs` takes `FILE*` |
 | `getchar`, `fgetc`, `getc` | ✅ | Take `FILE*`; return the byte (0..255) or `EOF` (-1). Byte-exact on a file-backed stream; through `Console.In` on stdin. `LibcStdioCharTests.cs`. |

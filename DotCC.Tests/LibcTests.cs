@@ -239,6 +239,37 @@ public sealed unsafe class LibcTests
         finally { free(dst); }
     }
 
+    [Fact]
+    public void sprintf_long_arg_formats_as_integer()
+    {
+        // Regression for SprintfBuilder.Arg(long): before it existed, a long
+        // bound to Arg(float) and misformatted. A 10-digit value (beyond the
+        // int range) exercises the dedicated overload.
+        var dst = (byte*)malloc(32);
+        try
+        {
+            sprintf(dst, L("%ld\0"u8)).Arg(9999999999L).Done();
+            strcmp(dst, L("9999999999\0"u8)).ShouldBe(0);
+        }
+        finally { free(dst); }
+    }
+
+    [Fact]
+    public void sprintf_void_ptr_arg_prints_hex_address()
+    {
+        // %p with a void* — Arg(void*) routes to the byte* address-print path.
+        // A typed T* reaches it via the implicit T* -> void* conversion.
+        void* p = malloc(8);
+        var dst = (byte*)malloc(64);
+        try
+        {
+            sprintf(dst, L("%p\0"u8)).Arg(p).Done();
+            var got = System.Text.Encoding.ASCII.GetString(dst, strlen(dst));
+            got.ShouldBe(((System.IntPtr)p).ToString("X"));
+        }
+        finally { free(dst); free(p); }
+    }
+
     // -----------------------------------------------------------------
     // scanf / fscanf / sscanf
     // -----------------------------------------------------------------
