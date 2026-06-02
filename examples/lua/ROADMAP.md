@@ -276,7 +276,23 @@ member chain — a CType-layer depth limit, tracked below), so the probe still
 reads 15/20, but the setjmp restriction is gone. Fixture `setjmp-no-else/`
 (gcc-oracle-validated); unit tests `SetjmpNoElseTests` (3).
 
-### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (15 / 20 objects)
+### ✅ Phase 4t — `sizeof` through an anonymous-inline-struct member chain
+ldo's follow-on wall (after 4s) was `sizeof(*p.dyd.actvar.arr)` — `sizeof` of a
+deref through a 3-level member chain where `actvar` is an *anonymous* inline
+struct member of `Dyndata` (`struct { Vardesc *arr; int n; int size; } actvar;`).
+dotcc lowers such a member to a synthesized nested type (`__NestS0`), but
+`EmitNamedNestedAggregate` recorded only the synth type's field *names*, not
+their *types* — and didn't record the parent field's type either. So the CType
+chain dead-ended at `actvar` and `sizeof(*…arr)` couldn't resolve. Fixed: the
+inner fields' CTypes are sliced out of the pending (parent) map onto the synth
+type's own `_structFieldTypes` entry (the type analogue of slicing the inner
+NAMES off `_pendingFields`), and the parent field is recorded as `CType.Sized
+(synthType)`. Now `o.vec.arr` carries its type and the deref/subscript peels to
+the element. **Core probe 15/20 → 16/20** (ldo). Fixture
+`sizeof-nested-member-chain/` (gcc-oracle-validated); unit tests in
+`SizeofMemberTests` (3 added).
+
+### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (16 / 20 objects)
 - Iterate the 20 core TUs via `probe.sh`; fix each parse/emit gap as it surfaces.
   One commit per coherent gap, each with a minimal fixture (dotcc tradition:
   never fix Lua-specifically — reduce to a small reproducer + fixture).
@@ -292,22 +308,21 @@ reads 15/20, but the setjmp restriction is gone. Fixture `setjmp-no-else/`
   `typedef enum { … } Name;` (4h, ltm.h's `TMS`), and **multi-declarator members
   + per-declarator pointers** (4i, `struct CallInfo *previous, *next;`).
   **`lctype.c` + `lopcodes.c` emit full objects.** ✅
-- **Current frontier** (15/20 emit objects: `lapi`, `lctype`, `ldebug`, `ldump`,
-  `lfunc`, `lgc`, `lmem`, `lobject`, `lopcodes`, `lstate`, `lstring`, `ltm`,
-  `lundump`, `lvm`, `lzio`). The 5 remaining failures are **diverse per-TU gaps**:
-  - `unexpected '{'` (lcode:1698, lparser:1349) — `static const struct { … }`
-    anonymous-struct-typed initialized declarations across two TUs.
+- **Current frontier** (16/20 emit objects: `lapi`, `lctype`, `ldebug`, `ldo`,
+  `ldump`, `lfunc`, `lgc`, `lmem`, `lobject`, `lopcodes`, `lstate`, `lstring`,
+  `ltm`, `lundump`, `lvm`, `lzio`). The 4 remaining failures:
+  - `unexpected '{'` (lcode:1698, lparser:1349) — `static` struct/array AGGREGATE
+    initializers. lcode is a block-scope `static const expdesc ef = {VKINT, {0},
+    …}` (static struct init + a nested brace init for a union member — the latter
+    fails non-static too: "nested brace initializer isn't valid here"). lparser
+    is a file-scope `static const struct { … } X[N] = {…}` (anonymous-struct
+    TYPE as a declaration + init). Two related but distinct features.
   - `unexpected ','` (llex:371) — the comma operator in a `while` controlling
     expression. **Deferred**: the operand is a void side-effect
     (`cast_void(save_and_next(ls))`), and a void call can't be a C# tuple element
     nor a captured-pointer lambda; a correct lowering needs context-sensitive
     comma handling (push the non-last operands into statement position), which is
     an architectural change, not a one-line grammar fix. Tracked.
-  - `sizeof(*(p.dyd.actvar.arr))` (ldo) — `sizeof` of a deref through a 3-level
-    member chain. The CType layer resolves `sizeof(p->f)` and short chains; this
-    deeper `a.b.c.d`-then-deref needs each intermediate field's struct type
-    tracked so the pointer can be peeled. (setjmp-no-else, phase 4s, already
-    cleared ldo's first wall.)
   - `array member padding needs constant dimension(s)` (ltable) — the deferred
     `offsetof`-as-array-bound case (needs a compile-time layout model; see 4p).
 - Watch items: `lvm.c` dispatch loop (may use a jump table / labels-as-values —

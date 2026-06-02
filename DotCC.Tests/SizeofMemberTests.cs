@@ -80,4 +80,41 @@ public sealed class SizeofMemberTests
         Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
             .Message.ShouldContain("sizeof");
     }
+
+    // Chain through an ANONYMOUS inline struct member (Lua's
+    // `sizeof(*p.dyd.actvar.arr)`). The unnamed `struct { Elem *arr; … } vec;`
+    // member lowers to a synth nested type; dotcc records that type's field types
+    // and the parent field's type, so `o->vec.arr` carries CType and the deref /
+    // subscript resolves to the element size.
+    private const string NestDecls = """
+        struct Elem { int a; int b; };
+        struct Outer { struct { struct Elem *arr; int n; } vec; int tag; };
+        """;
+
+    private static string NestProbe(string expr) =>
+        $"{NestDecls}\nint probe(struct Outer *o) {{ return (int){expr}; }}\nint main(void) {{ return 0; }}\n";
+
+    [Fact]
+    public void sizeof_deref_through_anonymous_nested_member_chain()
+    {
+        // `sizeof(*o->vec.arr)` — chain Outer→vec(synth)→arr(Elem*), deref → Elem.
+        var emitted = Compiler.EmitCSharp(new[] { WriteTemp(NestProbe("sizeof(*o->vec.arr)")) });
+        emitted.ShouldContain("(int)sizeof(Elem)");
+    }
+
+    [Fact]
+    public void sizeof_subscript_through_anonymous_nested_member_chain()
+    {
+        var emitted = Compiler.EmitCSharp(new[] { WriteTemp(NestProbe("sizeof(o->vec.arr[0])")) });
+        emitted.ShouldContain("(int)sizeof(Elem)");
+    }
+
+    [Fact]
+    public void inner_field_type_resolves_under_synth_type_not_parent()
+    {
+        // The synth nested type owns its inner fields' types: `sizeof(o->vec.n)` is
+        // the int field of the synth type (not leaked to / from the parent Outer).
+        var emitted = Compiler.EmitCSharp(new[] { WriteTemp(NestProbe("sizeof(o->vec.n)")) });
+        emitted.ShouldContain("(int)sizeof(int)");
+    }
 }

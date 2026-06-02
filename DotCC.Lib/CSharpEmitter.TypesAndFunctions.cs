@@ -608,7 +608,26 @@ internal sealed partial class CSharpEmitter
         if (union) { EmitExplicitUnionType(nestedType, innerLines); }
         else { EmitSequentialStructType(nestedType, innerLines); }
         _structFields[nestedType] = innerNames;  // so `o.name.inner` resolves its fields
+        // Move the inner fields' CTypes from the pending (parent) map onto the
+        // nested type's own field-type map — the type analogue of slicing the
+        // inner NAMES off _pendingFields. Without this the inner types would
+        // wrongly drain into the PARENT, and `o.name.inner` would carry no type,
+        // so a chain through the member (`sizeof(*o.name.inner)`, Lua's
+        // `sizeof(*p.dyd.actvar.arr)`) couldn't resolve.
+        var innerTypes = new Dictionary<string, CType>(StringComparer.Ordinal);
+        foreach (var inner in innerNames)
+        {
+            if (_pendingFieldTypeMap.TryGetValue(inner, out var ity))
+            {
+                innerTypes[inner] = ity;
+                _pendingFieldTypeMap.Remove(inner);
+            }
+        }
+        if (innerTypes.Count > 0) { _structFieldTypes[nestedType] = innerTypes; }
         _pendingFields.Add(fieldName);           // the named field IS a parent field
+        // …and its type IS the synth nested type, so `o.name` carries CType.Sized
+        // (nestedType) and the next `.inner` resolves via _structFieldTypes.
+        _pendingFieldTypeMap[fieldName] = new CType.Sized(nestedType);
         return $"public {nestedType} {Id(fieldName)};\n";
     }
 
