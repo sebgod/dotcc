@@ -1,0 +1,5 @@
+set=C
+query=C
+dp=.
+dp0=46
+ts0=0

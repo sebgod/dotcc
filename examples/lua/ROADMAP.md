@@ -107,21 +107,28 @@ TU hits it via `lua.h`); dotcc has block-scope arrays but not global ones.
 - Exit: a hand-written variadic fn + a v-forwarding fn compile and run correctly.
 </details>
 
-### 🟦 Phase 3 — `signal.h` + `locale.h` (missing libc surface)
+### ✅ Phase 3 — `signal.h` + `locale.h` (missing libc surface)
 - ✅ **`signal.h` (header-only)** — `typedef int sig_atomic_t;` + `SIG_DFL`/`SIG_IGN`/
   `SIG_ERR` + the six C-standard signal numbers. This is all the CORE/lib need
   (Lua's `volatile sig_atomic_t trap;`); the `signal()`/`raise()` FUNCTIONS are
   only in `lua.c` (deferred — they'll be backed by .NET's `PosixSignalRegistration`,
   the SIGINT/SIGTERM "terminal" signals, handler-sets-a-volatile-flag idiom). Landed
   with the faithful-`volatile` lowering, so `volatile sig_atomic_t` now both parses
-  AND fences. Fixture `sig-atomic/`. **Cleared the `lstate.h:131` wall** — the
-  probe's universal failure is now a new one (below).
-- ⬜ **`locale.h`** — Synthetic `locale.h` + `DotCC.Libc/LocaleLib.cs`: `setlocale`
-  (accepts, returns `"C"`), `struct lconv` + `localeconv` (C-locale values: `.`
-  decimal point, etc.), `LC_ALL/COLLATE/CTYPE/MONETARY/NUMERIC/TIME` macros. Exit:
-  `loslib.c`'s `os_setlocale` compiles; `localeconv()->decimal_point` works. (Won't
-  move the core scoreboard until the array-member wall below clears — it's needed
-  by `lobject.c`/`loslib.c` regardless.)
+  AND fences. Fixture `sig-atomic/`. **Cleared the `lstate.h:131` wall.**
+- ✅ **`locale.h`** — Synthetic `locale.h` + `DotCC.Libc/LocaleLib.cs`. dotcc supports
+  the **"C" (== "POSIX") locale** (the standard's startup default, the only portable
+  one): `setlocale(cat, …)` accepts `NULL`/`""`/`"C"`/`"POSIX"` → `"C"`, else `NULL`
+  (category ignored — one locale); `localeconv()` → the "C" `struct lconv`
+  (`decimal_point` `"."`, every other string `""`, numerics `CHAR_MAX`); the six
+  `LC_*` macros. `struct lconv` is the runtime `Libc.lconv` (declared only there —
+  same `struct ID`→bare-tag pattern as `<time.h>`'s `tm`). Unblocks
+  `lua_getlocaledecpoint() = localeconv()->decimal_point[0]` (core `lobject.c` +
+  `lstrlib.c`/`liolib.c`) and `loslib.c`'s `os_setlocale`. Built as a general C90
+  completeness item (it was the only missing C90 baseline header). Fixture
+  `locale-c/` (gcc-oracle-validated); unit tests `LibcLocaleTests` (7).
+- (Companion fix this batch: `size_t`/`ptrdiff_t` moved from `<stdint.h>` to their
+  canonical `<stddef.h>` home; stdint includes stddef so both still resolve.
+  Fixture `stddef-types/`.)
 
 ### ✅ Phase 4k — constant-expression array-member size + typedef-element resolution
 Landed: a struct array-member bound that's an integer CONSTANT EXPRESSION is folded
