@@ -292,7 +292,24 @@ the element. **Core probe 15/20 → 16/20** (ldo). Fixture
 `sizeof-nested-member-chain/` (gcc-oracle-validated); unit tests in
 `SizeofMemberTests` (3 added).
 
-### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (16 / 20 objects)
+### ✅ Phase 4u — `static` struct aggregate init + nested-brace member init
+lcode failed on a block-scope `static const expdesc ef = {VKINT, {0}, NO_JUMP,
+NO_JUMP}` — two gaps at once. (1) No `static T x = {…}` production: block- and
+file-scope static decls only took a scalar `= E`, not a brace aggregate. Added
+`stmtStaticStructInit` / `globalStaticStructInit` (disjoint from the scalar
+`static Type DeclItemList` on the `{` after `=`, and from the static-array forms
+on the absence of `[`), lowering to a once-initialised DotCcGlobals field (block
+scope mangled + registered in `_fnStatics`, file scope verbatim). (2) Nested
+brace init was rejected ("a nested brace initializer isn't valid here") even
+non-static — the `{0}` initializes the union member `u`. Replaced the flat
+`Leaves` mapping in `DeclStructInit` with a recursive `StructInitExpr` that, for
+a nested brace, looks up the field's struct/union type (via `_structFieldTypes`
+— now populated for anonymous-inline members too, phase 4t) and recurses into
+`field = new <FieldType> { … }`; for a union that's the first member. **Core
+probe 16/20 → 17/20** (lcode). Fixture `static-struct-init/` (gcc-oracle-
+validated); unit tests `StaticStructInitTests` (4).
+
+### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (17 / 20 objects)
 - Iterate the 20 core TUs via `probe.sh`; fix each parse/emit gap as it surfaces.
   One commit per coherent gap, each with a minimal fixture (dotcc tradition:
   never fix Lua-specifically — reduce to a small reproducer + fixture).
@@ -308,15 +325,13 @@ the element. **Core probe 15/20 → 16/20** (ldo). Fixture
   `typedef enum { … } Name;` (4h, ltm.h's `TMS`), and **multi-declarator members
   + per-declarator pointers** (4i, `struct CallInfo *previous, *next;`).
   **`lctype.c` + `lopcodes.c` emit full objects.** ✅
-- **Current frontier** (16/20 emit objects: `lapi`, `lctype`, `ldebug`, `ldo`,
-  `ldump`, `lfunc`, `lgc`, `lmem`, `lobject`, `lopcodes`, `lstate`, `lstring`,
-  `ltm`, `lundump`, `lvm`, `lzio`). The 4 remaining failures:
-  - `unexpected '{'` (lcode:1698, lparser:1349) — `static` struct/array AGGREGATE
-    initializers. lcode is a block-scope `static const expdesc ef = {VKINT, {0},
-    …}` (static struct init + a nested brace init for a union member — the latter
-    fails non-static too: "nested brace initializer isn't valid here"). lparser
-    is a file-scope `static const struct { … } X[N] = {…}` (anonymous-struct
-    TYPE as a declaration + init). Two related but distinct features.
+- **Current frontier** (17/20 emit objects: `lapi`, `lcode`, `lctype`, `ldebug`,
+  `ldo`, `ldump`, `lfunc`, `lgc`, `lmem`, `lobject`, `lopcodes`, `lstate`,
+  `lstring`, `ltm`, `lundump`, `lvm`, `lzio`). The 3 remaining failures:
+  - `unexpected '{'` (lparser:1349) — a file-scope `static const struct { … }
+    X[N] = {…}`: an ANONYMOUS struct TYPE used directly as a declaration (not as
+    a member or typedef body) + array + init. A distinct feature from 4u's
+    static-aggregate-init (which handles *named* struct types).
   - `unexpected ','` (llex:371) — the comma operator in a `while` controlling
     expression. **Deferred**: the operand is a void side-effect
     (`cast_void(save_and_next(ls))`), and a void call can't be a C# tuple element

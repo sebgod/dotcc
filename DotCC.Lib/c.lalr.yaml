@@ -546,6 +546,12 @@ productions:
       - { lhs: Fn, rhs: ['static', Type, ID, '[', ']', '=', '{', InitList, '}', ';'], action: globalStaticArrInitImplicit }
       - { lhs: Fn, rhs: ['static', Type, ID, ArrDims, '=', StringSeq, ';'],           action: globalStaticCharArrStrSized }
       - { lhs: Fn, rhs: ['static', Type, ID, '[', ']', '=', StringSeq, ';'],          action: globalStaticCharArrStr }
+      # File-scope `static T x = { … };` — static struct/union AGGREGATE init, the
+      # file-scope twin of stmtStaticStructInit. Same emitter (a once-initialised
+      # DotCcGlobals field), just no name mangling. Disjoint from the array forms
+      # (no ArrDims / `[ ]`) and from `static Type DeclItemList ;` (the `{` after
+      # `=`), like the block-scope rule.
+      - { lhs: Fn, rhs: ['static', Type, ID, '=', '{', InitList, '}', ';'], action: globalStaticStructInit }
       # `extern` array DECLARATIONS — declare without defining (the storage lives
       # in another TU), so emit no field; just register the name's type so same-TU
       # references resolve. Sized and incomplete forms (the latter is lua.h's
@@ -806,6 +812,14 @@ productions:
       - { lhs: Stmt, rhs: ['static', Type, ID, '[', ']', '=', '{', InitList, '}', ';'], action: stmtStaticArrInitImplicit }
       - { lhs: Stmt, rhs: ['static', Type, ID, ArrDims, '=', StringSeq, ';'],           action: stmtStaticCharArrStrSized }
       - { lhs: Stmt, rhs: ['static', Type, ID, '[', ']', '=', StringSeq, ';'],          action: stmtStaticCharArrStr }
+      # Block-scope `static T x = { … };` — a static struct/union AGGREGATE
+      # initializer (Lua's `static const expdesc ef = {VKINT, {0}, NO_JUMP,
+      # NO_JUMP}`). Like the static-array forms, lowers to a once-initialised
+      # mangled field in DotCcGlobals. Disjoint from `static Type DeclItemList ;`
+      # (scalar `= E`) on the `{` lookahead after `=` — a DeclItem init `= E`
+      # can't start with `{`, so `= {` unambiguously selects this rule. Nested
+      # braces (a union/struct-typed field's init) are handled in the emitter.
+      - { lhs: Stmt, rhs: ['static', Type, ID, '=', '{', InitList, '}', ';'], action: stmtStaticStructInit }
       # Expression statement uses the full `Expr` tier so `a, b;` (comma
       # operator, result discarded) parses; the visitor splits it into
       # sequential statements.

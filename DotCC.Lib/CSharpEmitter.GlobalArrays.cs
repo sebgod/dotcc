@@ -253,4 +253,22 @@ internal sealed partial class CSharpEmitter
         EmitGlobalCharArrStr(T(n.Arg1), MangleStaticLocal(T(n.Arg2)), n.Arg5, A(n.Arg3));
     public EmitContent Visit(C.StmtStaticCharArrStr n) =>
         EmitGlobalCharArrStr(T(n.Arg1), MangleStaticLocal(T(n.Arg2)), n.Arg6, NoDims);
+
+    // `static T x = { … };` — a static struct/union AGGREGATE initializer, block
+    // scope (mangled, registered in _fnStatics) and file scope (verbatim name).
+    // Both lower to a once-initialised DotCcGlobals field whose initializer is
+    // the recursive object-init StructInitExpr builds (so a nested brace for a
+    // union/struct field becomes `field = new <FieldType> { … }`). A non-struct
+    // `T` (e.g. a scalar typedef the user braced) falls back to `default`.
+    public EmitContent Visit(C.StmtStaticStructInit n) =>
+        EmitStaticStructInit(T(n.Arg1), MangleStaticLocal(T(n.Arg2)), Group(n.Arg5));
+    public EmitContent Visit(C.GlobalStaticStructInit n) =>
+        EmitStaticStructInit(T(n.Arg1), T(n.Arg2), Group(n.Arg5));
+
+    private EmitContent EmitStaticStructInit(string type, string name, EmitContent.InitGroup group)
+    {
+        var init = _structFields.ContainsKey(type) ? StructInitExpr(type, group) : "default";
+        EmitGlobalFields(type, new[] { new EmitContent.DeclEntry(name, init) });
+        return string.Empty;
+    }
 }

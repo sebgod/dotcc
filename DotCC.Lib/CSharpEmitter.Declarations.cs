@@ -770,23 +770,74 @@ internal sealed partial class CSharpEmitter
         var name = T(n.Arg1);
         NoteLocal(name);
         var emittedName = DeclareLocal(name);
-        var values = Leaves((EmitContent.InitGroup)n.Arg4.Content);  // positional field values
-
-        if (!_structFields.TryGetValue(type, out var fields))
+        var group = (EmitContent.InitGroup)n.Arg4.Content;
+        if (!_structFields.ContainsKey(type))
         {
             return $"{type} {Id(emittedName)} = default /* dotcc: unknown struct '{type}' for aggregate init */";
         }
+        return $"{type} {Id(emittedName)} = {StructInitExpr(type, group)}";
+    }
 
-        var sb = new StringBuilder();
-        sb.Append(type).Append(' ').Append(Id(emittedName)).Append(" = new ").Append(type).Append(" { ");
-        var count = Math.Min(values.Count, fields.Count);
+    // Build a C# object-initializer for a positional struct/union aggregate
+    // initializer, recursing into nested brace groups for struct/union-typed
+    // fields. C's `{VKINT, {0}, NO_JUMP, NO_JUMP}` (Lua's `expdesc`) maps the
+    // nested `{0}` onto the union field `u` as `u = new <u's type> { ival = 0 }`
+    // — the union's first member, which is how a brace inits a union in C.
+    // Positional only; the field types come from _structFieldTypes (recorded for
+    // named, tagged, AND anonymous-inline aggregate members — see phase 4t).
+    private string StructInitExpr(string structType, EmitContent.InitGroup group)
+    {
+        if (!_structFields.TryGetValue(structType, out var fields))
+        {
+            throw new CompileException(
+                $"aggregate initializer for unknown struct/union '{structType}'");
+        }
+        var sb = new StringBuilder("new ").Append(structType).Append(" { ");
+        var count = Math.Min(group.Items.Count, fields.Count);
         for (var i = 0; i < count; i++)
         {
             if (i > 0) { sb.Append(", "); }
-            sb.Append(Id(fields[i])).Append(" = ").Append(values[i]);
+            var field = fields[i];
+            sb.Append(Id(field)).Append(" = ");
+            switch (group.Items[i])
+            {
+                case EmitContent.InitLeaf leaf:
+                    sb.Append(leaf.Value);
+                    break;
+                case EmitContent.InitGroup nested:
+                    // A nested brace → the field must be a struct/union type; recurse.
+                    var fieldType = NestedFieldStructType(structType, field);
+                    if (fieldType is null)
+                    {
+                        throw new CompileException(
+                            $"nested brace initializer for field '{field}' of '{structType}' "
+                            + "isn't supported (the field isn't a known struct/union type)");
+                    }
+                    sb.Append(StructInitExpr(fieldType, nested));
+                    break;
+                default:
+                    throw new CompileException(
+                        $"a designated initializer mixed into the positional aggregate init "
+                        + $"of '{structType}' isn't supported");
+            }
         }
         sb.Append(" }");
         return sb.ToString();
+    }
+
+    // The C# struct/union type name of `field` on `structType`, if the field's
+    // recorded CType (from _structFieldTypes) names a known aggregate; else null.
+    // Used to recurse a nested brace initializer into the field's type.
+    private string? NestedFieldStructType(string structType, string field)
+    {
+        if (_structFieldTypes.TryGetValue(structType, out var ft)
+            && ft.TryGetValue(field, out var cty)
+            && cty is CType.Sized s
+            && _structFields.ContainsKey(s.CsType))
+        {
+            return s.CsType;
+        }
+        return null;
     }
 
     // `(Point){1, 2}` — C99 compound literal (positional). An unnamed object of
