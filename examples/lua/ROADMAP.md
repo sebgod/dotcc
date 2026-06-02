@@ -524,16 +524,31 @@ new class of latent bugs the probe never could.
   `string-literal-L-collision/`. (A user type/var named `Libc` could still shadow
   `Libc.L` — the bulletproof fix is `global::Libc.L`; tracked as a broader
   `global::` hardening sweep, deferred.)
-- 🧱 **Phase 6g+ — the remaining deep walls** (~1520 errors):
-  - **Function-name decay in initializers (~312: CS8787).** A bare function name
-    where a function pointer is wanted needs `&fn`; dotcc adds it for call args /
-    decl-init but not yet for struct-field / array initializers (the `luaL_Reg`
-    `{ "name", func }` entries); a file-scope struct init with a fn-ptr field also
-    errors (CS0246). Includes the residual bare-fn-ptr-array CS0306 (74). [Tracked:
-    restore the full `fnptr-table/` fixture once these land.]
+- ✅ **Phase 6g — function-name decay in aggregate initializers + assignments**
+  (cleared CS8787 312 → 0). A bare function name used as a value decays to a
+  pointer-to-function (C §6.3.2.1); C# requires the explicit `&`. dotcc already
+  added it for call args and scalar fn-ptr decl-inits — extended it to the four
+  remaining value positions: struct-array element initializers (Lua's `luaL_Reg`
+  `{ "name", cfunc }` tables), C99 designated `.field =`, compound literals, and
+  plain assignments to a fn-ptr lvalue. `DecayFnName` also now sees through outer
+  parens (`(luaB_next)` → `&luaB_next`) while preserving `@`-escaping. Fixture
+  `fnptr-aggregate-init/`. (Latent gap surfaced: a direct call through a
+  parenthesized *simple-member* fn-ptr callee, `(r.func)(5)`, reads as a C# cast
+  → CS0118; rare in Lua — 2 sites — because a subscripted base `tbl[i].func(…)`
+  disqualifies the cast reading. The fixture reads the field into a local fn-ptr
+  first; the call-through case is below.)
+- 🧱 **Phase 6h+ — the remaining deep walls** (~1450 errors):
+  - **Pointer / fn-ptr types as generic type arguments (74: CS0306).** A bare
+    fn-ptr array (`GlobalArrayFrom<delegate*<…>>`) or a `lua_State*` type argument;
+    fix is the `nint[]`-reinterpret already used for `byte**` arrays, extended to
+    function-pointer elements. [Tracked: restore the full `fnptr-table/` fixture
+    once this lands — task #23.]
+  - **Call through a parenthesized simple-member fn-ptr callee (CS0118).** `(r.func)(5)`
+    reads as a cast in C#; strip the redundant callee parens (or call without them)
+    when the inner expression is a member access / subscript.
   - Long tail: CS0266 (~210 — incl. integer `0` assigned to a pointer lvalue, which
     should lower to `null`), CS1503 (~206), CS0034 (180) operator ambiguity, CS0121
-    (152) ambiguous overloads, CS9060, … — triage after the fn-decay fix.
+    (152) ambiguous overloads, CS9060, … — triage next.
 
 ### ⬜ Phase 7 — Stretch: standalone REPL / `luac`
 - Minimal `lua.c` (no readline/signal niceties) and/or `luac.c`.

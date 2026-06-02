@@ -553,7 +553,9 @@ internal sealed partial class CSharpEmitter
     }
     // Trailing comma in a designated initializer — the list is unchanged.
     public EmitContent Visit(C.MemberInitListTrail n) => (EmitContent.InitMembers)n.Arg0.Content;
-    public EmitContent Visit(C.MemberInit n) => $"{Id(T(n.Arg1))} = {T(n.Arg3)}";
+    // `.field = expr` — a bare function-name value decays to its address (`&f`),
+    // exactly as for a scalar fn-ptr init / call argument (see DecayFnName).
+    public EmitContent Visit(C.MemberInit n) => $"{Id(T(n.Arg1))} = {DecayFnName(T(n.Arg3))}";
 
     // InitList / InitElem — a brace initializer as a recursive InitNode tree so
     // nested aggregate initializers (`{{1,2},{3,4}}`) keep their structure. An
@@ -745,7 +747,9 @@ internal sealed partial class CSharpEmitter
             for (var i = 0; i < count; i++)
             {
                 if (i > 0) { sb.Append(", "); }
-                sb.Append(Id(fields[i])).Append(" = ").Append(vals[i]);
+                // A bare function-name element value (`{"add", add}`, Lua's
+                // luaL_Reg tables) decays to its address (`&add`).
+                sb.Append(Id(fields[i])).Append(" = ").Append(DecayFnName(vals[i]));
             }
             sb.Append(" }");
             elems.Add(sb.ToString());
@@ -802,7 +806,8 @@ internal sealed partial class CSharpEmitter
             switch (group.Items[i])
             {
                 case EmitContent.InitLeaf leaf:
-                    sb.Append(leaf.Value);
+                    // A bare function-name field value decays to its address (`&f`).
+                    sb.Append(DecayFnName(leaf.Value));
                     break;
                 case EmitContent.InitGroup nested:
                     // A nested brace → the field must be a struct/union type; recurse.
@@ -870,7 +875,8 @@ internal sealed partial class CSharpEmitter
         for (var i = 0; i < count; i++)
         {
             if (i > 0) { sb.Append(", "); }
-            sb.Append(Id(fields[i])).Append(" = ").Append(values[i]);
+            // A bare function-name field value decays to its address (`&f`).
+            sb.Append(Id(fields[i])).Append(" = ").Append(DecayFnName(values[i]));
         }
         sb.Append(" }");
         return Typed(sb.ToString(), new CType.Sized(type));

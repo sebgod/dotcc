@@ -47,7 +47,10 @@ internal sealed partial class CSharpEmitter
         // source; a non-enum lvalue (`x = c`) decays an enum source to int. The
         // assignment expression's value carries the lvalue's enum type.
         var lhsEnum = EnumOf(n.Arg0);
-        var rhs = T(n.Arg2);
+        // A bare function-name rhs (`fp = hookf;`, a fn-ptr lvalue) decays to its
+        // address. DecayFnName is a no-op for non-fn-name text, so the enum
+        // reconcile below is unaffected.
+        var rhs = DecayFnName(T(n.Arg2));
         var rhsEnum = EnumOf(n.Arg2);
         if (lhsEnum is not null)
         {
@@ -685,15 +688,19 @@ internal sealed partial class CSharpEmitter
         _ => throw new CompileException("internal: unknown CType in sizeof"),
     };
 
-    // A bare function name used as a value (e.g. a call argument) decays to its
-    // address in C (function-to-pointer conversion). C# requires the explicit
-    // `&`, so prepend it — that's what lets `qsort(…, compare)` (bare name) pass
-    // a function-pointer argument. Guarded so a local/param shadowing a function
-    // name is left alone.
+    // A bare function name used as a value (e.g. a call argument, a struct/array
+    // initializer element, an assignment rhs) decays to its address in C
+    // (function-to-pointer conversion). C# requires the explicit `&`, so prepend
+    // it — that's what lets `qsort(…, compare)` (bare name) pass a function-pointer
+    // argument. Outer parens are seen through (`(luaB_next)` → `&luaB_next`) but
+    // the emitted text's `@`-escaping is preserved (`@new` → `&@new`); the lookup
+    // is by the raw C name. Guarded so a local/param shadowing a function name is
+    // left alone.
     private string DecayFnName(string argText)
     {
-        var raw = Unescape(argText);
-        return !_localNames.Contains(raw) && _fnReturnTypes.ContainsKey(raw) ? "&" + argText : argText;
+        var inner = StripOuterParens(argText);
+        var raw = Unescape(inner);
+        return !_localNames.Contains(raw) && _fnReturnTypes.ContainsKey(raw) ? "&" + inner : argText;
     }
 
     public EmitContent Visit(C.Call n)
