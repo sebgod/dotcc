@@ -309,7 +309,22 @@ a nested brace, looks up the field's struct/union type (via `_structFieldTypes`
 probe 16/20 → 17/20** (lcode). Fixture `static-struct-init/` (gcc-oracle-
 validated); unit tests `StaticStructInitTests` (4).
 
-### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (17 / 20 objects)
+### ✅ Phase 4v — anonymous struct type in a declaration (`struct { … } x;`)
+lparser failed on its priority table `static const struct { lu_byte left;
+lu_byte right; } priority[] = {…}` — an UNNAMED `struct { … }` used directly as a
+declaration's type (not a typedef body or a struct member). New `Type → 'struct'
+'{' MemberMark MemberList '}'` (`typeAnonStruct`) synthesizes a name
+(`__NestS<N>`), emits the struct decl, records its fields/field-types (sliced off
+the pending map like the named-nested case), and returns the synth name as the
+Type — so the existing array + aggregate-init productions handle the rest for
+free (`__NestS0* priority = …`, each `{l,r}` → `new __NestS0 { left=l, right=r }`;
+the `sizeof(t)/sizeof(t[0])` idiom; block-scope vars). Keyed on `struct {` (no
+tag) → conflict-free with `struct ID` / `struct ID { … };`, AND — verified — with
+`typedef struct { … } Name;` (still lowers to a named `struct Name`, unaffected).
+**Core probe 17/20 → 18/20** (lparser). Fixture `anon-struct-decl/` (gcc-oracle-
+validated); unit tests `AnonStructDeclTests` (4, incl. the typedef regression guard).
+
+### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (18 / 20 objects)
 - Iterate the 20 core TUs via `probe.sh`; fix each parse/emit gap as it surfaces.
   One commit per coherent gap, each with a minimal fixture (dotcc tradition:
   never fix Lua-specifically — reduce to a small reproducer + fixture).
@@ -325,13 +340,8 @@ validated); unit tests `StaticStructInitTests` (4).
   `typedef enum { … } Name;` (4h, ltm.h's `TMS`), and **multi-declarator members
   + per-declarator pointers** (4i, `struct CallInfo *previous, *next;`).
   **`lctype.c` + `lopcodes.c` emit full objects.** ✅
-- **Current frontier** (17/20 emit objects: `lapi`, `lcode`, `lctype`, `ldebug`,
-  `ldo`, `ldump`, `lfunc`, `lgc`, `lmem`, `lobject`, `lopcodes`, `lstate`,
-  `lstring`, `ltm`, `lundump`, `lvm`, `lzio`). The 3 remaining failures:
-  - `unexpected '{'` (lparser:1349) — a file-scope `static const struct { … }
-    X[N] = {…}`: an ANONYMOUS struct TYPE used directly as a declaration (not as
-    a member or typedef body) + array + init. A distinct feature from 4u's
-    static-aggregate-init (which handles *named* struct types).
+- **Current frontier** (18/20 emit objects — everything except `llex` and
+  `ltable`). The 2 remaining failures:
   - `unexpected ','` (llex:371) — the comma operator in a `while` controlling
     expression. **Deferred**: the operand is a void side-effect
     (`cast_void(save_and_next(ls))`), and a void call can't be a C# tuple element

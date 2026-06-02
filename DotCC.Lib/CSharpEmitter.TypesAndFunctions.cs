@@ -595,6 +595,39 @@ internal sealed partial class CSharpEmitter
     public EmitContent Visit(C.NamedNestedTaggedStruct n) => EmitNamedNestedAggregate(T(n.Arg4), T(n.Arg6), union: false, typeName: T(n.Arg1));
     public EmitContent Visit(C.NamedNestedTaggedUnion n)  => EmitNamedNestedAggregate(T(n.Arg4), T(n.Arg6), union: true,  typeName: T(n.Arg1));
 
+    // Anonymous struct type at declaration scope (`struct { … } x;` / `static
+    // struct { … } tab[] = {…}`). Synthesize a name, emit the sequential struct
+    // decl, record its field names + types, and return the synth name as the Type
+    // — so the enclosing declaration composes through the ordinary Type-based
+    // productions (incl. arrays + aggregate init). Because this is a Type, it also
+    // SUBSUMES the anonymous named-nested-struct MEMBER form (`struct { … } m;`
+    // inside another struct): LALR routes that through here + structMemberList
+    // (which is strictly more capable — multi-declarator / per-declarator `*`),
+    // so the dedicated namedNestedStruct production handles only what this can't.
+    // Shares the `__NestS` synth-name family + counter with EmitNamedNestedAggregate.
+    public EmitContent Visit(C.TypeAnonStruct n)
+    {
+        var snapshot = _memberMarks.Count > 0 ? _memberMarks.Pop() : _pendingFields.Count;
+        var innerNames = new List<string>();
+        for (var i = snapshot; i < _pendingFields.Count; i++) { innerNames.Add(_pendingFields[i]); }
+        if (snapshot < _pendingFields.Count) { _pendingFields.RemoveRange(snapshot, _pendingFields.Count - snapshot); }
+        var nestedType = $"__NestS{_anonAggCounter}";
+        _anonAggCounter++;
+        EmitSequentialStructType(nestedType, T(n.Arg3));  // Arg3 = MemberList lines
+        _structFields[nestedType] = innerNames;
+        var innerTypes = new Dictionary<string, CType>(StringComparer.Ordinal);
+        foreach (var inner in innerNames)
+        {
+            if (_pendingFieldTypeMap.TryGetValue(inner, out var ity))
+            {
+                innerTypes[inner] = ity;
+                _pendingFieldTypeMap.Remove(inner);
+            }
+        }
+        if (innerTypes.Count > 0) { _structFieldTypes[nestedType] = innerTypes; }
+        return nestedType;
+    }
+
     private EmitContent EmitNamedNestedAggregate(string innerLines, string fieldName, bool union, string? typeName = null)
     {
         var snapshot = _memberMarks.Count > 0 ? _memberMarks.Pop() : _pendingFields.Count;

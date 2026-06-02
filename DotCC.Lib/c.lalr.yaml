@@ -622,6 +622,14 @@ productions:
       # casts, sizeof. The visitor emits just `ID` since C# doesn't require
       # the `struct` keyword in usage position (only at declaration).
       - { lhs: Type, rhs: ['struct', ID], action: typeStruct }
+      # Anonymous struct type at declaration scope — `struct { … } x;` /
+      # `static struct { … } tab[] = {…}` (Lua's lparser priority table). Unlike
+      # the named-nested-MEMBER forms this is a TYPE: synthesize a name, emit the
+      # struct decl, record its fields, and return the synth name so the enclosing
+      # declaration (array / init / …) composes via the ordinary Type productions.
+      # Keyed on `struct {` (no tag), disjoint from `struct ID` (typeStruct) and
+      # `struct ID { … } ;` (structDef).
+      - { lhs: Type, rhs: ['struct', '{', MemberMark, MemberList, '}'], action: typeAnonStruct }
       # `TYPE_NAME` — synthetic terminal injected by TypeNameRewriter for
       # any ID that's been seen on the LHS of a previous `typedef`. The
       # visitor emits the type-name string verbatim (it's already the
