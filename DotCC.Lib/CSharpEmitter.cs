@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using LALR.CC.LexicalGrammar;
 
@@ -80,6 +81,9 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         // controlling-expression visitors / `(void)` casts) special-case the
         // CommaSeq BEFORE calling T(), so they never hit this path.
         EmitContent.CommaSeq cs => CommaTupleText(cs.Operands, cs.OperandTypes),
+        // A structured statement list reaching a text consumer (only Block should,
+        // and it reads the pieces directly) joins its pieces' texts.
+        EmitContent.StmtSeq ss => string.Concat(ss.Pieces.Select(p => p.Text)),
         _ => throw new InvalidCastException(
             $"expected EmitContent.Text or string, got {it.Content?.GetType().FullName ?? "null"}"),
     };

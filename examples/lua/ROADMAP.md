@@ -608,19 +608,29 @@ new class of latent bugs the probe never could.
   — a union member's fn-ptr type isn't propagated; same class as the enum-field
   gap), plus the `(f)(L,ud)` fn-ptr call-through. The bare-fn-ptr-ARRAY case
   (`GlobalArrayFrom<delegate*<…>>`, task #23) is separate — not in this residual.
-- 🧱 **Phase 6k+ — the remaining deep walls** (~185 errors):
-  - **CS0163 / CS8070 (~98) — switch fall-through.** C# forbids falling out of a
-    `case`/`default` without `break`/`return` (C allows it); needs a `break;`
-    inserted where C falls through, or the switch lowered differently.
-  - **Field-chain CType for union/struct members (residual CS0306 ~50).** Propagate
+- ✅ **Phase 6k — switch fall-through (`goto case` / trailing `break`)** (CS0163
+  50 → 0, CS8070 48 → 0; total 185 → 136). C lets a case section fall into the
+  next when it doesn't end in `break`/`return`/…; C# forbids implicit fall-through
+  (CS0163) and forbids the final case falling out (CS8070). dotcc now carries the
+  block's statement list as a **structured `StmtSeq`** (pieces with control-flow
+  facts — is-this-a-`case`/`default`-label + does-it-terminate) instead of joining
+  to text immediately; `StmtSwitch` groups the pieces into case sections and, for
+  a section whose last piece doesn't terminate, inserts the explicit jump C
+  performs — `goto case <next>;` / `goto default;`, or a trailing `break;` on the
+  final section. The right-recursive `StmtList` reduces tail-first, so the whole
+  body (every case below) is known when the switch reduces — no separate pass. The
+  jump statements / labels / blocks tag `Terminates`; stacked labels and
+  already-terminating sections are left alone. Fixture `switch-fallthrough/`.
+- 🧱 **Phase 6l+ — the remaining deep walls** (~136 errors):
+  - **Field-chain CType for union/struct members (residual CS0306 ~54).** Propagate
     a member's pointer / fn-ptr type through `(&x)->u.f` so the comma-tuple (and
-    other type-directed paths) see it. Then the fn-ptr-ARRAY `GlobalArrayFrom`
-    (CS0306, task #23) extension.
+    other type-directed paths) see it; plus the `(f)(L,ud)` fn-ptr call-through and
+    the fn-ptr-ARRAY `GlobalArrayFrom` (task #23) extension.
+  - **CS0221 (~34), CS1501 (~30), CS0193 (~28), CS0103 (~20), CS0212, CS8210,
+    CS1503/CS0266/CS0034 tails** — a diverse long tail to triage next.
   - **Call through a parenthesized simple-member fn-ptr callee (CS0118).** `(r.func)(5)`
-    reads as a cast in C#; strip the redundant callee parens (or call without them)
-    when the inner expression is a member access / subscript.
-  - Long tail: CS0163/CS8070 (switch fall-through — `default:` with no break),
-    CS1501, CS0193, CS9060, … — triage next.
+    reads as a cast in C#; strip the redundant callee parens when the inner
+    expression is a member access / subscript.
 
 ### ⬜ Phase 7 — Stretch: standalone REPL / `luac`
 - Minimal `lua.c` (no readline/signal niceties) and/or `luac.c`.

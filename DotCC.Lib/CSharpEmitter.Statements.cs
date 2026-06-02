@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using LALR.CC.LexicalGrammar;
 
@@ -20,13 +21,25 @@ internal sealed partial class CSharpEmitter
         {
             Gate(1999, "mixed declarations and statements", n.Arg0);
         }
-        var body = "{\n" + IndentEach(T(n.Arg2)) + "}\n";
+        // The StmtList reduces to a structured StmtSeq (pieces not yet joined) so a
+        // switch body can group case sections and insert fall-through jumps. Join
+        // the pieces here for the ordinary block; carry the pieces (+ whether the
+        // block's last statement terminates) so an enclosing switch / block can use
+        // them.
+        var seq = (EmitContent.StmtSeq)n.Arg2.Content;
+        var bodyText = string.Concat(seq.Pieces.Select(p => p.Text));
+        var body = "{\n" + IndentEach(bodyText) + "}\n";
         PopScope();  // close the frame ScopeEnter opened after `{`
-        return body;
+        return new EmitContent.Text(body,
+            Terminates: seq.Pieces.Count > 0 && seq.Pieces[^1].Terminates,
+            BlockPieces: seq.Pieces);
     }
     public EmitContent Visit(C.BlockEmpty n) { PopScope(); return "{ }\n"; }
-    // StmtList builds right-to-left (Arg0 = this statement, Arg1 = the rest).
-    // Track, for the C90 mixed-declarations gate, whether the sub-list holds a
+    // StmtList builds right-to-left (Arg0 = this statement, Arg1 = the rest), so
+    // the tail is fully reduced when each cons fires. Accumulate a structured
+    // StmtSeq of pieces (text + control-flow facts) rather than joining to text —
+    // the switch fall-through analysis needs the per-statement structure. Also
+    // track, for the C90 mixed-declarations gate, whether the sub-list holds a
     // declaration and whether a declaration follows a non-declaration in it.
     public EmitContent Visit(C.StmtsCons n)
     {
@@ -37,7 +50,12 @@ internal sealed partial class CSharpEmitter
             if (!thisIsDecl && _blkContainsDecl) { _blkOutOfOrder = true; }
             _blkContainsDecl = thisIsDecl || _blkContainsDecl;
         }
-        return T(n.Arg0) + T(n.Arg1);
+        var rest = (EmitContent.StmtSeq)n.Arg1.Content;
+        var pieces = new List<EmitContent.StmtPiece>(rest.Pieces.Count + 1) { PieceOf(n.Arg0) };
+        pieces.AddRange(rest.Pieces);
+        // The sequence's last piece is the tail's (head is prepended), so the
+        // whole list terminates iff the tail does.
+        return new EmitContent.StmtSeq(pieces, rest.Terminates);
     }
     public EmitContent Visit(C.StmtsOne n)
     {
@@ -47,8 +65,21 @@ internal sealed partial class CSharpEmitter
             _blkContainsDecl = n.Arg0.Content is EmitContent.DeclStmtMarker;
             _blkOutOfOrder = false;
         }
-        return T(n.Arg0);
+        var piece = PieceOf(n.Arg0);
+        return new EmitContent.StmtSeq(new[] { piece }, piece.Terminates);
     }
+
+    // Build a StmtPiece from one statement: its emitted text plus the control-flow
+    // facts (terminates? is it a case/default label?) the switch analysis reads.
+    // A statement that isn't a tagged Text (a DeclStmtMarker, a bare string) is a
+    // plain, non-terminating, non-label piece.
+    private EmitContent.StmtPiece PieceOf(Item it) =>
+        it.Content is EmitContent.Text t
+            ? new EmitContent.StmtPiece(T(it), t.Terminates, t.CaseLabelExpr, t.IsDefaultLabel)
+            : new EmitContent.StmtPiece(T(it));
+
+    // True when a statement provably ends control flow at its end.
+    private static bool TerminatesOf(Item it) => it.Content is EmitContent.Text { Terminates: true };
     // Conditions are wrapped with B(...) so int- and pointer-valued conditions
     // (`while (1)`, `if (p)`, `for (...; n; ...)`) typecheck. The B overloads
     // live in BuildShell — see Compiler.BuildShell.
@@ -223,7 +254,9 @@ internal sealed partial class CSharpEmitter
         // the leading statements, then return the value.
         if (n.Arg1.Content is EmitContent.SeqExpr se)
         {
-            return $"{{\n{IndentEach(string.Concat(se.LeadingStmts))}return {se.ValueExpr};\n}}\n";
+            return new EmitContent.Text(
+                $"{{\n{IndentEach(string.Concat(se.LeadingStmts))}return {se.ValueExpr};\n}}\n",
+                Terminates: true);
         }
         // Reconcile the returned value's enum-ness with the declared return type
         // (same rule as a decl/assignment sink): enum fn ← non-matching value
@@ -239,11 +272,13 @@ internal sealed partial class CSharpEmitter
             // width-narrowing). Enum sources already decayed to int above.
             else { text = CoerceStore(text, TyOf(n.Arg1), ConstOfItem(n.Arg1), ret, n.Arg1.Position.Line); }
         }
-        return $"return {text};\n";
+        return new EmitContent.Text($"return {text};\n", Terminates: true);
     }
-    public EmitContent Visit(C.StmtReturnVoid n) => "return;\n";
-    public EmitContent Visit(C.StmtBreak n) => "break;\n";
-    public EmitContent Visit(C.StmtContinue n) => "continue;\n";
+    // The jump statements end control flow — tagged Terminates so a switch case
+    // section ending in one needs NO fall-through goto (see Visit(C.StmtSwitch)).
+    public EmitContent Visit(C.StmtReturnVoid n) => new EmitContent.Text("return;\n", Terminates: true);
+    public EmitContent Visit(C.StmtBreak n) => new EmitContent.Text("break;\n", Terminates: true);
+    public EmitContent Visit(C.StmtContinue n) => new EmitContent.Text("continue;\n", Terminates: true);
 
     // switch (E) Block — switch body is a plain Block. `case X:` and
     // `default:` are statement-level labels (see CaseLabel/DefaultLabel)
@@ -257,7 +292,7 @@ internal sealed partial class CSharpEmitter
         if (CommaOpsOf(n.Arg2) is { Count: > 1 } ops)
         {
             return $"{{\n{IndentEach(CommaLeadingStmts(ops))}"
-                + $"switch ({StripOuterParens(ops[^1])}) {T(n.Arg4)}}}\n";
+                + $"switch ({StripOuterParens(ops[^1])}) {SwitchBody(n.Arg4)}}}\n";
         }
         // A C `switch` is int-semantic (the controlling expression is integer-
         // promoted, case labels converted to that type), but dotcc lowers enums to
@@ -265,7 +300,49 @@ internal sealed partial class CSharpEmitter
         // `switch(Enum) { case (int)… }`. Decay an enum-typed subject to (int) so
         // it matches the (int)-decayed enumerator case labels below (uniform int =
         // pure C semantics). A non-enum subject is untouched.
-        return $"switch ({IntDecay(n.Arg2)}) {T(n.Arg4)}";
+        return $"switch ({IntDecay(n.Arg2)}) {SwitchBody(n.Arg4)}";
+    }
+
+    // Emit a switch body, handling C fall-through. C lets a case section fall into
+    // the next case when it doesn't end in break/return/…; C# forbids that
+    // (CS0163), and forbids the final case falling out of the switch (CS8070). The
+    // block's statement pieces are grouped into case sections (a `case`/`default`
+    // label piece + the plain pieces up to the next label); a section whose LAST
+    // piece doesn't terminate gets an explicit `goto case <nextLabel>;` /
+    // `goto default;` (or a trailing `break;` for the final section) — exactly the
+    // jump C's implicit fall-through performs. Stacked labels (`case A: case B:`,
+    // nested in one piece) and sections that already terminate are left alone. A
+    // body that isn't a piece-carrying block (an empty `{ }`) emits verbatim.
+    private string SwitchBody(Item blockItem)
+    {
+        if (blockItem.Content is not EmitContent.Text { BlockPieces: { } pieces } || pieces.Count == 0)
+        {
+            return T(blockItem);
+        }
+        var labels = new List<int>();
+        for (var i = 0; i < pieces.Count; i++)
+        {
+            if (pieces[i].CaseLabelExpr is not null || pieces[i].IsDefaultLabel) { labels.Add(i); }
+        }
+        if (labels.Count == 0) { return T(blockItem); }
+        var texts = pieces.Select(p => p.Text).ToList();
+        for (var k = 0; k < labels.Count; k++)
+        {
+            // Section k spans [labels[k] .. next label); its last piece is the one
+            // C would fall out of.
+            var sectionEnd = k + 1 < labels.Count ? labels[k + 1] : pieces.Count;
+            var last = sectionEnd - 1;
+            if (pieces[last].Terminates) { continue; }   // already ends control flow
+            string jump;
+            if (k + 1 < labels.Count)
+            {
+                var next = pieces[labels[k + 1]];
+                jump = next.IsDefaultLabel ? "goto default;\n" : $"goto case {next.CaseLabelExpr};\n";
+            }
+            else { jump = "break;\n"; }   // final section: C falls out, C# needs break
+            texts[last] += jump;
+        }
+        return "{\n" + IndentEach(string.Concat(texts)) + "}\n";
     }
 
     // Statement-level case/default labels. Body is a single Stmt (which
@@ -274,10 +351,18 @@ internal sealed partial class CSharpEmitter
     // (int) constant value so it matches the int-decayed switch subject; a label
     // that's already an int constant expression is untouched (an enum operand of a
     // `case A | B:` expression already decayed at the operator).
-    public EmitContent Visit(C.CaseLabel n) =>
-        $"case {IntDecay(n.Arg1)}:\n{T(n.Arg3)}";
+    public EmitContent Visit(C.CaseLabel n)
+    {
+        var label = IntDecay(n.Arg1);
+        // Carry the label expr (for the matching `goto case <label>;`) and whether
+        // the labeled statement terminates (so the fall-through pass knows if this
+        // is the section's terminating piece).
+        return new EmitContent.Text($"case {label}:\n{T(n.Arg3)}",
+            CaseLabelExpr: label, Terminates: TerminatesOf(n.Arg3));
+    }
     public EmitContent Visit(C.DefaultLabel n) =>
-        $"default:\n{T(n.Arg2)}";
+        new EmitContent.Text($"default:\n{T(n.Arg2)}",
+            IsDefaultLabel: true, Terminates: TerminatesOf(n.Arg2));
     // Tagged as a declaration statement so the C90 mixed-declarations gate can
     // distinguish it from a non-declaration in the enclosing block. Renders to
     // the same text everywhere (T() unwraps the marker).
@@ -310,7 +395,7 @@ internal sealed partial class CSharpEmitter
     // `goto label;` — C# accepts the same keyword + identifier syntax with
     // identical forward-reference semantics inside a method body, so the
     // lowering is verbatim.
-    public EmitContent Visit(C.StmtGoto n) => $"goto {Id(T(n.Arg1))};\n";
+    public EmitContent Visit(C.StmtGoto n) => new EmitContent.Text($"goto {Id(T(n.Arg1))};\n", Terminates: true);
 
     // `label: Stmt` — emit the label followed by the body statement.
     // Whitespace shape: label on its own line for readability.

@@ -106,7 +106,39 @@ public abstract record EmitContent
     /// statement(s); this flag lets a ternary branch recognise a void arm so the
     /// whole <c>?:</c> can be lowered to an <c>if</c>/<c>else</c> statement (a void
     /// call / cast can't be a C# ternary arm). See <see cref="VoidCond"/>.</param>
-    public sealed record Text(string Value, string? EnumType = null, CType? Ty = null, bool Inline = false, bool Noreturn = false, bool Volatile = false, string? VolatileLValue = null, bool VolatilePointee = false, bool Atomic = false, string? AtomicLValue = null, int? ConstInt = null, IReadOnlyList<string>? CommaOps = null, bool VoidCast = false) : EmitContent;
+    /// <param name="Terminates">True when this statement provably ends control flow
+    /// at its end — <c>break</c> / <c>return</c> / <c>continue</c> / <c>goto</c>, a
+    /// block whose last statement does, or a case-label wrapping one. Drives the
+    /// switch fall-through analysis: a case section whose last piece does NOT
+    /// terminate falls into the next case in C, so dotcc inserts a <c>goto case</c>
+    /// / <c>goto default</c> / trailing <c>break</c> (C# forbids implicit
+    /// fall-through — CS0163 / CS8070).</param>
+    /// <param name="CaseLabelExpr">The label expression of a <c>case X:</c>
+    /// statement (the emitted <c>X</c>), null otherwise. Lets the switch analysis
+    /// find section boundaries and form the matching <c>goto case X;</c>.</param>
+    /// <param name="IsDefaultLabel">True for a <c>default:</c> statement.</param>
+    /// <param name="BlockPieces">When this Text is a <c>{ … }</c> block, its
+    /// statement pieces (un-joined), so a switch whose body is this block can group
+    /// case sections and insert fall-through jumps without re-parsing text.</param>
+    public sealed record Text(string Value, string? EnumType = null, CType? Ty = null, bool Inline = false, bool Noreturn = false, bool Volatile = false, string? VolatileLValue = null, bool VolatilePointee = false, bool Atomic = false, string? AtomicLValue = null, int? ConstInt = null, IReadOnlyList<string>? CommaOps = null, bool VoidCast = false, bool Terminates = false, string? CaseLabelExpr = null, bool IsDefaultLabel = false, IReadOnlyList<StmtPiece>? BlockPieces = null) : EmitContent;
+
+    /// <summary>
+    /// One statement of a block, as the structured statement list (<see cref="StmtSeq"/>)
+    /// carries it: the emitted (un-indented) text plus the control-flow facts the
+    /// switch fall-through analysis needs. <see cref="CaseLabelExpr"/> non-null (or
+    /// <see cref="IsDefaultLabel"/>) marks a section start; <see cref="Terminates"/>
+    /// marks a statement that ends control flow.
+    /// </summary>
+    public sealed record StmtPiece(string Text, bool Terminates = false, string? CaseLabelExpr = null, bool IsDefaultLabel = false);
+
+    /// <summary>
+    /// A block's statement list before it is joined into <c>{ … }</c> — the
+    /// right-recursive <c>StmtList</c> reduces tail-first, so by the time the list
+    /// is whole every statement (including the ones below a given <c>case</c>) is
+    /// known. <see cref="Block"/> joins it; <see cref="StmtSeq.Terminates"/> is the
+    /// last piece's (used to propagate termination through nested blocks).
+    /// </summary>
+    public sealed record StmtSeq(IReadOnlyList<StmtPiece> Pieces, bool Terminates) : EmitContent;
 
     /// <summary>
     /// A VOID-TYPED conditional expression — a C ternary <c>c ? a : b</c> whose
