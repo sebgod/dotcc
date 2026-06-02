@@ -681,9 +681,21 @@ new class of latent bugs the probe never could.
     couldn't bind (`void*` → `byte*` isn't implicit; `T*` → `void*` is). One
     overload covers every typed pointer. Fixture `sprintf-snprintf/`; unit tests
     `SprintfLoweringTests` + `LibcTests` (long/void* overloads).
-- 🧱 **Phase 6o+ — the remaining deep walls** (~72 errors):
-  - **CS0193 (~14), CS0103 (~10), CS0212 (~9), CS8210 (~7),
-    CS1503/CS0266/CS0034 tails** — a diverse long tail to triage next.
+- ✅ **Phase 6o — deref-call through a function pointer (CS0193 14 → 0; total
+  72 → 60).** Lua calls fn pointers pervasively via the deref form `(*fp)(args)`
+  — `(*g->frealloc)(…)`, `(*ci->u.c.k)(…)`, `(*cf)(L)`. In C, `*fp` on a function
+  pointer is a no-op (the function decays straight back to the pointer), so it's
+  identical to `fp(args)`; but C# calls function pointers directly and rejects
+  `*fp` (CS0193). `Visit(C.Deref)` now drops the deref when the operand's CType
+  is a function pointer — a bare `delegate*<…>` or a fn-ptr typedef (matched via
+  `_pointerTypedefNames`, since those typedefs are `using` aliases, not in
+  `_typedefUnderlying`). A DATA pointer's `*p` stays a real dereference. Fixture
+  `fnptr-deref-call/` (local / param / struct-field); unit tests
+  `FnPtrDerefCallTests` (incl. a data-pointer-deref guard). The cleared lines now
+  reach arg-checking, surfacing 2 fn-ptr call-arg conversions in the CS1503 tail.
+- 🧱 **Phase 6p+ — the remaining deep walls** (~60 errors):
+  - **CS0103 (~10), CS0212 (~9), CS8210 (~7), CS1503/CS0266/CS0034 tails** — a
+    diverse long tail to triage next.
   - **Call through a parenthesized simple-member fn-ptr callee (CS0118).** `(r.func)(5)`
     reads as a cast in C#; strip the redundant callee parens when the inner
     expression is a member access / subscript (the bare-identifier case landed in 6l).

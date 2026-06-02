@@ -404,6 +404,12 @@ internal sealed partial class CSharpEmitter
         // unchanged (typed as the array), not a C# `*p` (which would deref to
         // the first element). `(*p)[i]` then strides like the array.
         if (ty is CType.PtrToArr pta) { return Typed(StripOuterParens(T(n.Arg1)), pta.Inner); }
+        // `*fp` where fp is a FUNCTION pointer is a C no-op: the "function" value
+        // decays straight back to the pointer (`(*fp)(args)` ≡ `fp(args)`). C#
+        // function pointers are called directly and reject `*fp` (CS0193), so emit
+        // the operand unchanged, keeping its fn-ptr type. A DATA pointer's `*p`
+        // stays a real dereference below. Lua leans on `(*f)(L)` pervasively.
+        if (ty is CType.Sized fp && IsFnPtrCsType(fp.CsType)) { return Typed(T(n.Arg1), ty); }
         // Pointer-to-volatile: `*p` is a volatile lvalue → fenced read, tagged for a
         // write-context parent (`*p = x` → Volatile.Write(ref *p, x)). Phase V2.
         if (VolatilePointeeOf(n.Arg1)) { return VolatileReadOf($"*{T(n.Arg1)}", null, ty?.ElementType()); }
@@ -1474,6 +1480,20 @@ internal sealed partial class CSharpEmitter
             || r.StartsWith("delegate*", StringComparison.Ordinal)
             || _pointerTypedefNames.Contains(r);
     }
+
+    // True when a lowered C# type is a FUNCTION pointer specifically — a bare
+    // `delegate*<…>` or a typedef that resolves to one (`lua_CFunction` →
+    // `delegate*<lua_State*, int>`). Distinct from IsPointerCsType, which also
+    // matches data pointers: `*p` on a data pointer is a real dereference, but on
+    // a function pointer it's a C no-op (the function decays back to the pointer).
+    private bool IsFnPtrCsType(string cs) =>
+        cs.StartsWith("delegate*", StringComparison.Ordinal)
+        // A fn-ptr typedef (`lua_CFunction`, `BinOp`) is a `using` alias, NOT in
+        // _typedefUnderlying — its name is registered in _pointerTypedefNames. A
+        // simple-typedef CHAIN onto one resolves first, then is looked up there.
+        || _pointerTypedefNames.Contains(cs)
+        || _pointerTypedefNames.Contains(ResolveTypedef(cs))
+        || ResolveTypedef(cs).StartsWith("delegate*", StringComparison.Ordinal);
 
     /// <summary>
     /// The raw comma operands an Item carries, whether it's a bare comma sequence
