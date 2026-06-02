@@ -195,7 +195,8 @@ public static class Compiler
         CDialect? dialect = null,
         bool pedantic = false,
         bool pedanticErrors = false,
-        bool asObject = false)
+        bool asObject = false,
+        bool warnConversion = false)
     {
         var includeMap = BuildIncludeMap(inputPaths, includeDirs);
         var lexerTable = C.BuildLexer();
@@ -296,7 +297,9 @@ public static class Compiler
         // Null gate on the default permissive path keeps every Gate() a no-op.
         var gateOn = pedantic || pedanticErrors;
         var dialectGate = gateOn ? new DialectGate(activeDialect) : null;
-        var emitter = new CSharpEmitter(analyzer.PromotableMallocVars, dialectGate);
+        // -Wconversion narrowing sink — opt-in, emit-pass only (see ConversionGate).
+        var conversionGate = warnConversion ? new ConversionGate() : null;
+        var emitter = new CSharpEmitter(analyzer.PromotableMallocVars, dialectGate, conversionGate);
         var emitParser = C.BuildParser(emitter);
 
         var allFunctions = new StringBuilder();
@@ -343,6 +346,16 @@ public static class Compiler
                     string.Join("\n", dialectGate.Diagnostics.Select(d => "error: " + d)));
             }
             foreach (var d in dialectGate.Diagnostics)
+            {
+                Console.Error.WriteLine("dotcc: warning: " + d);
+            }
+        }
+
+        // Flush -Wconversion narrowing diagnostics (warnings only — opt-in). Same
+        // stderr channel as the dialect gate; never fatal.
+        if (conversionGate is not null)
+        {
+            foreach (var d in conversionGate.Diagnostics)
             {
                 Console.Error.WriteLine("dotcc: warning: " + d);
             }

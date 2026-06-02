@@ -310,10 +310,20 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // no-op unless gating is requested, and each violation is collected once.
     private readonly DialectGate? _dialectGate;
 
-    public CSharpEmitter(IReadOnlySet<(string Fn, string Var)>? promotable = null, DialectGate? dialectGate = null)
+    // -Wconversion sink. Non-null ONLY on the emit pass when -Wconversion is set;
+    // null otherwise — so the narrowing-store check (CoerceStore) is a no-op on the
+    // default path and collects each store once. (The cast it inserts to satisfy
+    // C# is emitted regardless of the gate — only the WARNING is gated.)
+    private readonly ConversionGate? _conversionGate;
+
+    public CSharpEmitter(
+        IReadOnlySet<(string Fn, string Var)>? promotable = null,
+        DialectGate? dialectGate = null,
+        ConversionGate? conversionGate = null)
     {
         _promotableIn = promotable ?? new HashSet<(string, string)>();
         _dialectGate = dialectGate;
+        _conversionGate = conversionGate;
     }
 
     // Flag a construct introduced by a standard newer than the active dialect.

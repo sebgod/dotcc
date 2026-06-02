@@ -547,10 +547,10 @@ new class of latent bugs the probe never could.
   enumerator case labels to `(int)` (the existing `IntDecay` enum-sink helper) —
   uniform int = pure C semantics, and a switch ON an enum keeps working. Fixture
   `enum-switch-int/`.
-- ✅ **Phase 6i — C integer-conversion layer** (509 → 342 so far). dotcc maps C's
-  integer types onto C# (`size_t`/`lua_Unsigned` → `ulong`, `lu_byte` → `byte`, …);
-  C# performs most of C's conversions implicitly but diverges where this layer
-  steps in. Landed in two pieces:
+- ✅ **Phase 6i — C integer-conversion layer** (509 → 305). dotcc maps C's integer
+  types onto C# (`size_t`/`lua_Unsigned` → `ulong`, `lu_byte` → `byte`, …); C#
+  performs most of C's conversions implicitly but diverges where this layer steps
+  in. Landed in three pieces:
   - **pt1 — `Cond.B` overload per numeric type** (CS0121 152 → 0). A controlling
     expression of any integer type wraps in `Cond.B(...)`; the overload set was
     only bool/int/double/void*/CBool, so a `byte`/`uint`/`long`/`ulong`/… argument
@@ -570,14 +570,24 @@ new class of latent bugs the probe never could.
     parenthesized `sizeof` loses its int-ness through the paren (Paren drops the
     SizeofType marker); the principled fix is to type `sizeof` as `size_t` (wide
     ripple — deferred).
-- 🧱 **Phase 6j+ — the remaining deep walls** (~340 errors):
-  - **C implicit conversions at stores/sinks (CS1503 ~210, CS0266 ~112).** C allows
-    implicit narrowing (`lu_byte b = some_int;` → `int`→`byte`) and signed→unsigned
-    (`int`→`ulong`) at assignment / init / return / call-ARG; C# requires an
-    explicit cast. The arithmetic layer (6i-pt2) now tags result types, so the next
-    step is to insert the C-conversion cast at the store position using the
-    declared lvalue / param / return type (mirrors the enum-sink reconcile). Also
-    includes integer `0` assigned to a pointer lvalue (should lower to `null`).
+  - **pt3 — store conversions + `-Wconversion`** (CS0266 112 → 38). C allows an
+    implicit narrowing / sign-incompatible conversion at a store (init / assignment
+    / return); C# requires an explicit cast. dotcc coerces the value to the target
+    type (`CoerceStore`), inserting `(target)(value)` exactly when C# wouldn't
+    convert implicitly — an out-of-range CONSTANT gets `unchecked(...)` (else
+    CS0221), a constant that FITS gets nothing (C#'s implicit constant conversion,
+    like C). New opt-in flag **`-Wconversion`** (off by default, like gcc/clang)
+    warns at each width-NARROWING store via a `ConversionGate` collector flushed to
+    stderr (the same channel as the dialect gate). Fixture `narrowing-store/`.
+    *Remaining CS0266 (~38) / CS1503 (~210) need other store sinks — call ARGUMENTS
+    (param-type tracking), struct-field / array-element stores, and `0`→pointer
+    (→ `null`).*
+- 🧱 **Phase 6j+ — the remaining deep walls** (~305 errors):
+  - **Conversions at call arguments + remaining sinks (CS1503 ~210, CS0266 ~38).**
+    The store-coercion (6i·3) covers init / assignment / return; call ARGUMENTS need
+    callee param-type tracking (no `_fnParamTypes` map yet), and struct-field /
+    array-element stores need the lvalue type at those sinks. Also integer `0`
+    assigned to a pointer lvalue (should lower to `null`).
   - **Pointer / fn-ptr types as generic type arguments (74: CS0306).** A bare
     fn-ptr array (`GlobalArrayFrom<delegate*<…>>`) or a `lua_State*` type argument;
     fix is the `nint[]`-reinterpret already used for `byte**` arrays, extended to

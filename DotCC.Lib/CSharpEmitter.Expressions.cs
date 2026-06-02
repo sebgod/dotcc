@@ -58,6 +58,14 @@ internal sealed partial class CSharpEmitter
             return new EmitContent.Text($"({T(n.Arg0)} = {rhs})", lhsEnum);
         }
         if (rhsEnum is not null) { rhs = $"(int)({rhs})"; }
+        // A narrowing / sign-incompatible store into an integer lvalue takes the
+        // C-conversion cast C# requires (`b = i;` where b is lu_byte) — and
+        // -Wconversion flags a width-narrowing. Source type is the rhs's; an enum
+        // rhs already decayed to int above, so its non-integer CType is skipped.
+        else if (TyOf(n.Arg0) is CType.Sized lt)
+        {
+            rhs = CoerceStore(rhs, TyOf(n.Arg2), ConstOfItem(n.Arg2), lt.CsType, n.Arg0.Position.Line);
+        }
         return $"({T(n.Arg0)} = {rhs})";
     }
     // `lhs OP= rhs`. C#'s enum compound-assign is unreliable (`enum |= int`,

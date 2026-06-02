@@ -67,6 +67,10 @@ internal static class Program
         {
             Description = "Like -pedantic, but treat the dialect violations as errors (non-zero exit).",
         };
+        var wconversionOpt = new Option<bool>("-Wconversion")
+        {
+            Description = "Warn on implicit integer conversions that narrow (a wider value stored into a narrower type, e.g. int -> unsigned char). Off by default, like gcc/clang -Wconversion.",
+        };
         var mdOpt = new Option<bool>("-MD")
         {
             Description = "Write a Make-format dependency file (.d) listing the TU + every #included header, alongside compilation.",
@@ -88,7 +92,7 @@ internal static class Program
         var root = new RootCommand("dotcc — a C compiler frontend that transpiles to .NET 10 / C# 14.")
         {
             inputArg, outOpt, emitOpt, preprocessOpt, includeOpt, defineOpt, compileOpt, sharedOpt, stdOpt,
-            pedanticOpt, pedanticErrorsOpt, mdOpt, mmdOpt, mfOpt, mtOpt,
+            pedanticOpt, pedanticErrorsOpt, wconversionOpt, mdOpt, mmdOpt, mfOpt, mtOpt,
         };
         // Accept-and-ignore unknown flags (-Wall, -O2, -g, -f*, -m*, …) instead
         // of erroring out, so dotcc survives being driven by ./configure / make,
@@ -118,6 +122,7 @@ internal static class Program
             var stdValue = parse.GetValue(stdOpt);
             var pedanticFlag = parse.GetValue(pedanticOpt);
             var pedanticErrorsFlag = parse.GetValue(pedanticErrorsOpt);
+            var wconversionFlag = parse.GetValue(wconversionOpt);
             var mdFlag = parse.GetValue(mdOpt);
             var mmdFlag = parse.GetValue(mmdOpt);
             var depFile = parse.GetValue(mfOpt);
@@ -159,7 +164,7 @@ internal static class Program
             }
 
             return Run(inputs, output, emit, preprocessOnly, includes, defines, sharedFlag, dialect, pedanticFlag, pedanticErrorsFlag,
-                       mdFlag, mmdFlag, depFile, depTargets);
+                       mdFlag, mmdFlag, depFile, depTargets, wconversionFlag);
         });
 
         return root.Parse(args).Invoke();
@@ -181,7 +186,8 @@ internal static class Program
         bool genDeps,
         bool genDepsNoSystem,
         string? depFile,
-        string[] depTargets)
+        string[] depTargets,
+        bool warnConversion = false)
     {
         if (preprocessOnly)
         {
@@ -246,7 +252,8 @@ internal static class Program
                     libraryMode: libraryMode,
                     dialect: dialect,
                     pedantic: pedantic,
-                    pedanticErrors: pedanticErrors);
+                    pedanticErrors: pedanticErrors,
+                    warnConversion: warnConversion);
         }
         catch (CompileException ex)
         {

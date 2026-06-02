@@ -143,6 +143,79 @@ internal sealed partial class CSharpEmitter
         common is "uint" or "ulong" or "nuint"
         && operandType is "sbyte" or "short" or "int" or "long" or "nint";
 
+    // ---- store conversions (init / assignment / return) -------------------
+    // C allows an implicit integer conversion at a store even when it narrows or
+    // changes signedness; C# requires an explicit cast (CS0266). dotcc coerces the
+    // value to the target type, inserting `(target)(value)` exactly when C# would
+    // NOT convert implicitly. A width-NARROWING store (target holds fewer bytes
+    // than the source — `lu_byte b = some_int;`) is additionally recorded with the
+    // -Wconversion gate (off by default, opt-in like gcc/clang -Wconversion).
+    private string CoerceStore(string value, CType? sourceTy, int? constValue, string targetCs, int line)
+    {
+        if (sourceTy is not CType.Sized s) { return value; }
+        var src = ResolveTypedef(s.CsType);
+        var tgt = ResolveTypedef(targetCs);
+        if (!IsIntegerCsType(src) || !IsIntegerCsType(tgt) || src == tgt) { return value; }
+        // A constant that FITS the target needs no cast and is no narrowing — C#'s
+        // implicit constant conversion accepts `byte b = 5;` / `uint u = 0;`, and
+        // gcc -Wconversion only warns when the constant is OUT of range.
+        if (constValue is int cv && ConstFitsTarget(cv, tgt)) { return value; }
+        if (CsImplicitInt(src, tgt)) { return value; }   // C# widens for free
+        // C# rejects this conversion (CS0266); insert the cast C allows implicitly.
+        // Warn only when it's a genuine width-narrowing (the user-facing meaning of
+        // "narrowing") — a same-width sign change (int↔uint) is not flagged.
+        if (IntWidth(tgt) is int tw && IntWidth(src) is int sw && tw < sw)
+        {
+            _conversionGate?.Narrowing(s.CsType, targetCs, _currentFunctionName, line);
+        }
+        // Reaching here with a known constant means it did NOT fit (the fit guard
+        // returned early otherwise) — a C# constant cast out of range is a compile
+        // error (CS0221) unless wrapped in `unchecked`. Runtime casts truncate
+        // unchecked by default, so a non-constant value needs no wrapper.
+        return constValue is not null
+            ? $"unchecked(({targetCs})({value}))"
+            : $"({targetCs})({value})";
+    }
+
+    // Byte width of a lowered C# integer type (the LP64 model — long/pointer = 8).
+    private static int? IntWidth(string t) => t switch
+    {
+        "byte" or "sbyte" => 1,
+        "short" or "ushort" => 2,
+        "int" or "uint" => 4,
+        "long" or "ulong" or "nint" or "nuint" => 8,
+        _ => null,
+    };
+
+    // Whether an integer CONSTANT value fits the target type's range — C#'s
+    // implicit constant-expression conversion accepts these with no cast (and a
+    // fitting constant is no narrowing). The value arrives as `int` (ConstInt), so
+    // any 32-bit-or-wider signed target trivially fits, and an unsigned ≥32-bit
+    // target fits any non-negative value.
+    private static bool ConstFitsTarget(int v, string tgt) => tgt switch
+    {
+        "byte" => v >= 0 && v <= 255,
+        "sbyte" => v >= -128 && v <= 127,
+        "short" => v >= -32768 && v <= 32767,
+        "ushort" => v >= 0 && v <= 65535,
+        "int" or "long" or "nint" => true,
+        "uint" or "ulong" or "nuint" => v >= 0,
+        _ => false,
+    };
+
+    // True when C# IMPLICITLY converts integer `src` to `tgt` (the value range of
+    // src ⊆ tgt): an unsigned source fits any strictly-wider type; a signed source
+    // fits only a strictly-wider SIGNED type. Equal types are handled by the
+    // caller. Conservative — it never claims an implicit conversion that doesn't
+    // exist (a false "no" just yields a harmless redundant cast, never a CS0266).
+    private static bool CsImplicitInt(string src, string tgt)
+    {
+        if (IntWidth(src) is not int sw || IntWidth(tgt) is not int tw) { return false; }
+        var srcUnsigned = src is "byte" or "ushort" or "uint" or "nuint";
+        var tgtUnsigned = tgt is "byte" or "ushort" or "uint" or "nuint";
+        return srcUnsigned ? tw > sw : (!tgtUnsigned && tw > sw);
+    }
+
     // The result type of additive pointer arithmetic. `p ± int` yields a pointer
     // of the same element type as `p` (an array operand decays to its element
     // pointer, so `(arr + n)[k]` strides correctly); `p - q` (both pointers) is a

@@ -234,6 +234,10 @@ internal sealed partial class CSharpEmitter
         {
             if (_enumTags.Contains(ret)) { if (exprEnum != ret) { text = $"({ret})({text})"; } }
             else if (exprEnum is not null) { text = $"(int)({text})"; }
+            // A narrowing / sign-incompatible return into an integer return type
+            // takes the C-conversion cast C# requires (-Wconversion flags a
+            // width-narrowing). Enum sources already decayed to int above.
+            else { text = CoerceStore(text, TyOf(n.Arg1), ConstOfItem(n.Arg1), ret, n.Arg1.Position.Line); }
         }
         return $"return {text};\n";
     }

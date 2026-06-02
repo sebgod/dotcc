@@ -285,7 +285,7 @@ public abstract record EmitContent
     /// absorbed into the declaration's Type by the greedy `Type → Type *` rule,
     /// so its Stars is 0 and it uses Type verbatim. The emitter computes each
     /// declarator's type as (first ? Type : stripStars(Type) + Stars*'*').</param>
-    public sealed record DeclEntry(string Name, string? Init, string? MallocStructType = null, string? InitEnumType = null, bool InitIsVoidPtr = false, int Stars = 0);
+    public sealed record DeclEntry(string Name, string? Init, string? MallocStructType = null, string? InitEnumType = null, bool InitIsVoidPtr = false, int Stars = 0, CType? InitType = null, int InitLine = 0, int? InitConst = null);
 
     /// <summary>
     /// Accumulator for an init-declarator list. <c>declItem</c>/<c>declItemInit</c>

@@ -159,7 +159,11 @@ internal sealed partial class CSharpEmitter
             return e.InitEnumType == declType ? init : $"({declType})({init})";
         }
         // Non-enum slot fed an enum value: decay to int (int→numeric is implicit).
-        return e.InitEnumType is null ? init : $"(int)({init})";
+        if (e.InitEnumType is not null) { return $"(int)({init})"; }
+        // Plain integer store: a narrowing / sign-incompatible initializer takes the
+        // C-conversion cast C# requires (and -Wconversion flags a width-narrowing).
+        // `byte b = i;`, `int x = (long)y;`, Lua's `lu_byte` fields fed wider ints.
+        return CoerceStore(init, e.InitType, e.InitConst, declType, e.InitLine);
     }
 
     // DeclItemList: structured accumulator of (name, init?) pairs.
@@ -206,7 +210,9 @@ internal sealed partial class CSharpEmitter
         // pointer. (A MallocSizeof that's AlreadyCast carries its own cast.)
         var initVoidPtr = (n.Arg2.Content is EmitContent.MallocSizeof m && !m.AlreadyCast)
             || TyOf(n.Arg2) is CType.Sized { CsType: "void*" };
-        return new EmitContent.DeclEntries(new[] { new EmitContent.DeclEntry(name, T(n.Arg2), mallocType, EnumOf(n.Arg2), initVoidPtr) });
+        return new EmitContent.DeclEntries(new[] { new EmitContent.DeclEntry(
+            name, T(n.Arg2), mallocType, EnumOf(n.Arg2), initVoidPtr,
+            InitType: TyOf(n.Arg2), InitLine: n.Arg2.Position.Line, InitConst: ConstOfItem(n.Arg2)) });
     }
 
     // DeclItemTail — a non-first (post-comma) init-declarator. Plain → the inner
