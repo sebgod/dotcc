@@ -305,8 +305,14 @@ public abstract record EmitContent
     /// <para><c>LastType</c> carries the synthesized CType of the final operand
     /// (the value of the whole comma expression in C), so a value-context tuple
     /// can be typed — e.g. <c>sizeof((a, p->field)[0])</c> resolves.</para>
+    /// <para><c>OperandTypes</c> carries each operand's CType (parallel to
+    /// <c>Operands</c>, may hold nulls / be null) so the value-tuple lowering can
+    /// cast a POINTER operand to <c>nint</c> — a pointer can't be a <c>ValueTuple</c>
+    /// type argument (CS0306) — and cast the result back when the last operand is a
+    /// pointer. Lua's <c>check_exp(c,e)</c> = <c>(lua_assert(c), e)</c> where
+    /// <c>e</c> is a pointer is the motivating case.</para>
     /// </summary>
-    public sealed record CommaSeq(IReadOnlyList<string> Operands, CType? LastType = null) : EmitContent;
+    public sealed record CommaSeq(IReadOnlyList<string> Operands, CType? LastType = null, IReadOnlyList<CType?>? OperandTypes = null) : EmitContent;
 
     /// <summary>
     /// A run of adjacent string literals (C concatenates them: <c>"a" "b"</c>

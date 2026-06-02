@@ -1131,56 +1131,83 @@ internal sealed partial class CSharpEmitter
         if (parts.Take(parts.Count - 1).Any(p => p.IsVoid))
         {
             var leading = parts.Take(parts.Count - 1).Select(p => p.Stmt).ToList();
-            return new EmitContent.SeqExpr(leading, parts[^1].Value, TyOf(n.Arg2));
+            return new EmitContent.SeqExpr(leading, parts[^1].Value, parts[^1].Ty ?? TyOf(n.Arg2));
         }
-        // The comma expression's value (and type) is its LAST operand.
-        return new EmitContent.CommaSeq(parts.Select(p => p.Value).ToList(), TyOf(n.Arg2));
+        // The comma expression's value (and type) is its LAST operand. Carry each
+        // operand's CType so the value-tuple can nint-cast pointer operands.
+        return new EmitContent.CommaSeq(
+            parts.Select(p => p.Value).ToList(), TyOf(n.Arg2),
+            parts.Select(p => p.Ty).ToList());
     }
 
     /// <summary>
     /// Flatten a comma operand into parts, each carrying a VALUE form (for the tuple
-    /// path), a STATEMENT form (for the discard / hoist path), and whether it's VOID
-    /// (a guard ternary with no C# value — forces the hoisting SeqExpr path). Flattens
-    /// nested commas (a raw CommaSeq, a parenthesised comma's CommaOps, or a SeqExpr).
+    /// path), a STATEMENT form (for the discard / hoist path), whether it's VOID
+    /// (a guard ternary with no C# value — forces the hoisting SeqExpr path), and the
+    /// operand's CType (for the pointer-nint-cast in the tuple). Flattens nested
+    /// commas (a raw CommaSeq, a parenthesised comma's CommaOps, or a SeqExpr).
     /// </summary>
-    private List<(string Value, string Stmt, bool IsVoid)> CommaParts(Item it)
+    private List<(string Value, string Stmt, bool IsVoid, CType? Ty)> CommaParts(Item it)
     {
         // A void guard ternary: its statement form is the if/else; no value form.
         if (it.Content is EmitContent.VoidCond vc)
         {
-            return new() { (vc.Value, vc.IfStatement, true) };
+            return new() { (vc.Value, vc.IfStatement, true, (CType?)null) };
         }
         // A nested hoist: its leading statements (already statement strings) + its value.
         if (it.Content is EmitContent.SeqExpr se)
         {
-            var ps = se.LeadingStmts.Select(s => (s, s, false)).ToList();
-            ps.Add((se.ValueExpr, $"{StripOuterParens(se.ValueExpr)};\n", false));
+            var ps = se.LeadingStmts.Select(s => (s, s, false, (CType?)null)).ToList();
+            ps.Add((se.ValueExpr, $"{StripOuterParens(se.ValueExpr)};\n", false, se.Ty));
             return ps;
         }
-        // A flattenable comma (raw CommaSeq / parenthesised comma): value-capable operands.
+        // A nested comma sequence — carry its per-operand types through.
+        if (it.Content is EmitContent.CommaSeq cs)
+        {
+            return cs.Operands.Select((o, i) =>
+                (o, $"{StripOuterParens(o)};\n", false,
+                 cs.OperandTypes is { } ot && i < ot.Count ? ot[i] : null)).ToList();
+        }
+        // A parenthesised comma (Text carrying CommaOps): operand strings only; the
+        // Text's own CType is the LAST operand's, so type just that one.
         if (CommaOpsOf(it) is { } ops)
         {
-            return ops.Select(o => (o, $"{StripOuterParens(o)};\n", false)).ToList();
+            var ty = TyOf(it);
+            return ops.Select((o, i) =>
+                (o, $"{StripOuterParens(o)};\n", false, i == ops.Count - 1 ? ty : null)).ToList();
         }
         var t = T(it);
-        return new() { (t, $"{StripOuterParens(t)};\n", false) };
+        return new() { (t, $"{StripOuterParens(t)};\n", false, TyOf(it)) };
     }
 
     /// <summary>
-    /// The value-context form of a comma sequence: a C# tuple yields all elements
-    /// in order and the <c>.ItemN</c> picks the last (the comma's value). Requires
-    /// non-void operands (a void operand can't be a tuple element — that reaches
-    /// Roslyn as a loud error, never a silent miscompile). ≤7 operands.
+    /// The value-context form of a comma sequence: a C# tuple yields all elements in
+    /// order and the <c>.ItemN</c> picks the last (the comma's value). A POINTER
+    /// operand can't be a <c>ValueTuple</c> type argument (CS0306), so it's cast to
+    /// <c>nint</c> (pointer-width, round-trips) for the tuple; when the LAST operand
+    /// (the comma's value) is a pointer, the <c>.ItemN</c> is cast back to that
+    /// pointer type. Lua's <c>check_exp(c, e)</c> = <c>(lua_assert(c), e)</c> with a
+    /// pointer <c>e</c>, nested in value position (so it can't be statement-hoisted).
+    /// ≤7 operands.
     /// </summary>
-    private static string CommaTupleText(IReadOnlyList<string> ops)
+    private static string CommaTupleText(IReadOnlyList<string> ops, IReadOnlyList<CType?>? types = null)
     {
         if (ops.Count > 7)
         {
             throw new CompileException(
                 "comma-operator chains longer than 7 operands aren't supported");
         }
-        var joined = string.Join(", ", ops.Select(StripOuterParens));
-        return $"({joined}).Item{ops.Count}";
+        string? PtrAt(int i) =>
+            types is { } t && i < t.Count && t[i] is CType.Sized { CsType: var cs }
+            && cs.EndsWith("*", StringComparison.Ordinal) ? cs : null;
+        var elems = new List<string>(ops.Count);
+        for (var i = 0; i < ops.Count; i++)
+        {
+            var op = StripOuterParens(ops[i]);
+            elems.Add(PtrAt(i) is not null ? $"(nint)({op})" : op);
+        }
+        var tuple = $"({string.Join(", ", elems)}).Item{ops.Count}";
+        return PtrAt(ops.Count - 1) is { } lastPtr ? $"(({lastPtr})({tuple}))" : tuple;
     }
 
     /// <summary>
@@ -1228,7 +1255,7 @@ internal sealed partial class CSharpEmitter
             // raw operands so a discard context (statement / `(void)` cast /
             // controlling expression) can re-emit them as statements — where a void
             // side-effect operand is legal but a tuple element isn't.
-            return new EmitContent.Text(CommaTupleText(seq.Operands),
+            return new EmitContent.Text(CommaTupleText(seq.Operands, seq.OperandTypes),
                 Ty: seq.LastType, CommaOps: seq.Operands);
         }
         // A redundant paren around a void-typed ternary stays void — Lua wraps the

@@ -112,6 +112,27 @@ public sealed class StatementLoweringTests
     }
 
     [Fact]
+    public void value_context_pointer_comma_casts_through_nint()
+    {
+        // `(discard, ptr)` nested in value position: a pointer can't be a C#
+        // ValueTuple element (CS0306), so pointer operands cast to nint for the
+        // tuple and the value casts back to the pointer type.
+        var emitted = Emit("""
+            struct N { int v; struct N *next; };
+            int main(void) {
+                struct N a; a.v = 7; a.next = (struct N*)0;
+                struct N *p = &a;
+                struct N *q = ((void)(0), p);   /* (discard, ptr) value */
+                return q->v;
+            }
+            """);
+        // pointer value operand cast to nint inside the tuple, result cast back
+        emitted.ShouldContain("(nint)(p)");
+        emitted.ShouldContain(").Item2)");
+        emitted.ShouldContain("(N*)((");   // the cast-back to the pointer type
+    }
+
+    [Fact]
     public void setjmp_try_body_is_braced()
     {
         // `if (setjmp(env) == 0) stmt;` — the try BODY must be a block (`try stmt;`

@@ -79,7 +79,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         // tuple a parenthesized `(a, b)` does. Discard consumers (StmtExpr / the
         // controlling-expression visitors / `(void)` casts) special-case the
         // CommaSeq BEFORE calling T(), so they never hit this path.
-        EmitContent.CommaSeq cs => CommaTupleText(cs.Operands),
+        EmitContent.CommaSeq cs => CommaTupleText(cs.Operands, cs.OperandTypes),
         _ => throw new InvalidCastException(
             $"expected EmitContent.Text or string, got {it.Content?.GetType().FullName ?? "null"}"),
     };

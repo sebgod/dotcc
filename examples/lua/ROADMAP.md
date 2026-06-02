@@ -505,21 +505,29 @@ new class of latent bugs the probe never could.
   across the class boundary works (using-static surfaces the method group, verified).
   Behaviorally transparent: all examples (calc/factorial/hello) + 154 functional +
   684 unit pass. Fixture `fnptr-table/`; unit tests `EmissionModelTests`.
-- 🧱 **Phase 6e+ — the remaining deep walls** (~3280 errors, still a few SYSTEMIC
-  causes, not independent bugs):
-  - **Pointer-valued comma expressions (~1000: CS0306).** `(a, b)` in value
-    position lowers to a C# `ValueTuple` `(a, b).Item2`, but a **pointer** operand
-    (`CClosure*`) can't be a tuple type argument. Needs a pointer-safe value-comma
-    lowering (a hoist like 6b's SeqExpr, or a helper). Same CS0306 also hits a
-    file-scope **array of bare function pointers** (`GlobalArrayFrom<delegate*>`).
-  - **Function-name decay in initializers/more contexts (~300+: CS8787/CS0149).**
-    A bare function name where a function pointer is wanted needs `&fn`; dotcc adds
-    it for call args / decl-init but not yet for struct-field / array initializers
-    (the `luaL_Reg` `{ "name", func }` entries) — and a file-scope struct init with
-    a fn-ptr field currently errors (CS0246). [Tracked: restore the full
-    `fnptr-table/` fixture once these land.]
-  - Long tail: CS0266/CS1503 conversions, CS0121 ambiguous overloads, CS0034
-    operator ambiguity, … — triage after the systemic fixes collapse most of it.
+- ✅ **Phase 6e — pointer-valued comma expressions** (cleared CS0306 1006 → 74;
+  total ~3280 → ~2350). `(a, b)` in value position lowers to a C# `ValueTuple`
+  `(a, b).Item2`, but a **pointer** operand can't be a tuple type argument (CS0306)
+  — Lua's `check_exp(c, e)` = `(lua_assert(c), e)` with a pointer `e`, nested in
+  value position (inside a cast / member access / `&`) so it can't be statement-
+  hoisted like 6b. Now `CommaSeq` carries per-operand `CType`s, and the value-tuple
+  casts a pointer operand to `nint` (pointer-width, round-trips) and casts the
+  `.ItemN` back to the pointer type when the value is a pointer. Fixture
+  `comma-pointer-value/`. (Residual 74 CS0306 = bare fn-ptr arrays /
+  untyped-pointer operands — fold into the items below.)
+- 🧱 **Phase 6f+ — the remaining deep walls** (~2350 errors):
+  - **CS0149 (840) "method name expected"** — now the largest; a call through
+    something dotcc emits as a non-method (likely function-pointer-table / decayed
+    fn-name call sites). Triage next.
+  - **Function-name decay in initializers (~312: CS8787/CS0149).** A bare function
+    name where a function pointer is wanted needs `&fn`; dotcc adds it for call
+    args / decl-init but not yet for struct-field / array initializers (the
+    `luaL_Reg` `{ "name", func }` entries); a file-scope struct init with a fn-ptr
+    field also errors (CS0246). Includes the bare-fn-ptr-array CS0306. [Tracked:
+    restore the full `fnptr-table/` fixture once these land.]
+  - Long tail: CS0266 (208 — incl. integer `0` assigned to a pointer lvalue, which
+    should lower to `null`), CS1503 (204), CS0034 (180) operator ambiguity, CS0121
+    (152) ambiguous overloads, … — triage after the systemic fixes.
 
 ### ⬜ Phase 7 — Stretch: standalone REPL / `luac`
 - Minimal `lua.c` (no readline/signal niceties) and/or `luac.c`.
