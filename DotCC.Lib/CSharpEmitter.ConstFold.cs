@@ -23,6 +23,17 @@ internal sealed partial class CSharpEmitter
         _ => null,
     };
 
+    // Whether an expression Item is a C compile-time CONSTANT expression — true even
+    // when ConstOfItem can't fold its value (a uint-modular / ulong-wide constant
+    // exceeds the 32-bit int fold). A `sizeof` marker is inherently constant. Used by
+    // the integer-cast lowering to wrap an out-of-range CONSTANT cast in `unchecked`.
+    private bool IsConstExpr(Item it) => it.Content switch
+    {
+        EmitContent.SizeofType => true,
+        EmitContent.Text t => t.ConstExpr,
+        _ => false,
+    };
+
     // Byte size of a C# type for `sizeof` folding (64-bit target — matches dotcc's
     // <stdint.h> model: `long`/pointer = 8). Returns null for an aggregate/unknown
     // type whose layout dotcc can't fold (the caller then keeps the textual form).
@@ -49,9 +60,12 @@ internal sealed partial class CSharpEmitter
     private EmitContent ArithFold(Item a, string op, Item b)
     {
         var (sa, sb, rty) = ReconcileInt(a, b);
+        // Constant when both operands are — even if the value is too wide to fold
+        // (a pointer-arith result is never a constant, so exclude that case).
+        var constExpr = PtrArithType(a, op, b) is null && IsConstExpr(a) && IsConstExpr(b);
         return new EmitContent.Text($"({sa} {op} {sb})",
             Ty: PtrArithType(a, op, b) ?? rty,
-            ConstInt: FoldBinary(ConstOfItem(a), op, ConstOfItem(b)));
+            ConstInt: FoldBinary(ConstOfItem(a), op, ConstOfItem(b)), ConstExpr: constExpr);
     }
 
     // ---- C usual arithmetic conversions (§6.3.1.8) ------------------------
@@ -266,7 +280,9 @@ internal sealed partial class CSharpEmitter
         _ => null,
     };
 
-    // Fold `a OP b` of two known constants (used by the arithmetic visitors).
+    // Fold `a OP b` of two known constants (used by the arithmetic / bitwise /
+    // shift visitors). Bitwise `& | ^` join the arithmetic + shift set so a folded
+    // bitmask (Lua's `~(1 << TM)` / `MASK & ~bit`) reaches the cast range-check.
     private static int? FoldBinary(int? a, string op, int? b)
     {
         if (a is not int x || b is not int y) { return null; }
@@ -279,9 +295,22 @@ internal sealed partial class CSharpEmitter
             "%" when y != 0 => x % y,
             "<<" => x << y,
             ">>" => x >> y,
+            "&" => x & y,
+            "|" => x | y,
+            "^" => x ^ y,
             _ => null,
         };
     }
+
+    // Whether a 32-bit `int` fold faithfully represents the C value of an operation
+    // whose (reconciled) result type is `t`: only a SIGNED type no wider than int.
+    // A wider or unsigned result would mis-fold in `int` — `~(size_t)0` is
+    // `ulong`-max, not `-1`; `1u << 31` is 2³¹, not `int.MinValue` — so those carry
+    // NO ConstInt (the emitted text is still correct, Roslyn folds it; dotcc just
+    // doesn't track the value, which only feeds array bounds and cast range checks,
+    // both of which prefer "unknown" over "wrong"). `null` (an untyped literal like
+    // `1`) is foldable — it's an `int`.
+    private static bool IntFoldable(string? t) => t is null or "sbyte" or "short" or "int";
 
     // ---- typedef → underlying primitive resolution ------------------------
     // `typedef unsigned char lu_byte;` records lu_byte → "byte" here (chained, so

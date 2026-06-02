@@ -192,7 +192,13 @@ internal sealed partial class CSharpEmitter
     private EmitContent BitText(Item a, string op, Item b)
     {
         var (sa, sb, ty) = ReconcileInt(a, b);
-        return new EmitContent.Text($"({sa} {op} {sb})", Ty: ty);
+        // Fold a constant bitmask only when the result stays a signed ≤32-bit int
+        // (so the int fold matches C — see IntFoldable), so `~(1 << TM)` etc. reach
+        // the cast range-check; a wider/unsigned result carries no const.
+        var fold = IntFoldable((ty as CType.Sized)?.CsType)
+            ? FoldBinary(ConstOfItem(a), op, ConstOfItem(b)) : null;
+        return new EmitContent.Text($"({sa} {op} {sb})", Ty: ty, ConstInt: fold,
+            ConstExpr: IsConstExpr(a) && IsConstExpr(b));
     }
     // `v << n` / `v >> n` — C# requires the shift count to be `int` (or implicitly
     // convertible to it), so a `long` / `ulong` / `uint` / native count is cast to
@@ -202,14 +208,28 @@ internal sealed partial class CSharpEmitter
     {
         var count = IntDecay(b);
         if (IntOperandType(b) is string ct && ct != "int") { count = $"(int)({count})"; }
-        return new EmitContent.Text($"({IntDecay(a)} {op} {count})", Ty: TyOf(a));
+        // Fold `1 << K` (Lua's tag-bit masks) only when the value operand stays a
+        // signed ≤32-bit int, so a folded mask reaches the cast range-check.
+        var fold = IntFoldable(IntOperandType(a))
+            ? FoldBinary(ConstOfItem(a), op, ConstOfItem(b)) : null;
+        return new EmitContent.Text($"({IntDecay(a)} {op} {count})", Ty: TyOf(a), ConstInt: fold,
+            ConstExpr: IsConstExpr(a) && IsConstExpr(b));
     }
-    public EmitContent Visit(C.BNot n) => $"(~{IntDecay(n.Arg1)})";
+    // `~c` folds to a (usually negative) constant — Lua's `cast_byte(~mask)` —
+    // only when the operand is a signed ≤32-bit int (so the int fold matches C);
+    // the folded value lets the enclosing cast wrap an out-of-range store in
+    // `unchecked` (CS0221). A wider/unsigned operand (`~(size_t)0`) carries no const.
+    public EmitContent Visit(C.BNot n)
+    {
+        var fold = ConstOfItem(n.Arg1) is int v && IntFoldable(IntOperandType(n.Arg1)) ? ~v : (int?)null;
+        return new EmitContent.Text($"(~{IntDecay(n.Arg1)})", ConstInt: fold, ConstExpr: IsConstExpr(n.Arg1));
+    }
 
     // Logical NOT: lower to `(Cond.B(E) ? 0 : 1)` so the result is int,
     // matching C's `!x` yielding 0 or 1 (never a bool). Cond.B picks the
     // right truthy overload based on E's type (int/double/pointer/bool).
-    public EmitContent Visit(C.LNot n) => $"({CondOf(n.Arg1)} ? 0 : 1)";
+    public EmitContent Visit(C.LNot n) =>
+        new EmitContent.Text($"({CondOf(n.Arg1)} ? 0 : 1)", ConstExpr: IsConstExpr(n.Arg1));
 
     // Ternary `c ? a : b` — Cond.B wraps the C-truthy condition. The two
     // branches need a common C# type; the user is responsible for keeping
@@ -343,9 +363,28 @@ internal sealed partial class CSharpEmitter
         // A cast of an integer CONSTANT to an integer type stays a constant
         // expression — keep the folded value so it can be an array bound (Lua's
         // `char space[cast_uint(LUA_IDSIZE + … )]` → `char space[(uint)(219)]`).
-        var constInt = IsIntegerCsType(castType) ? ConstOfItem(n.Arg3) : null;
-        return new EmitContent.Text($"(({castType}){T(n.Arg3)})",
-            _enumTags.Contains(castType) ? castType : null, new CType.Sized(castType), ConstInt: constInt);
+        // Resolve the target through typedefs first, so an aliased integer cast
+        // (`lu_byte` → byte, `size_t` → ulong) is recognised too.
+        var resolvedCast = ResolveTypedef(castType);
+        var constInt = IsIntegerCsType(resolvedCast) ? ConstOfItem(n.Arg3) : null;
+        var operandConst = IsConstExpr(n.Arg3);
+        var castText = $"(({castType}){T(n.Arg3)})";
+        // A constant cast OUT of the target integer type's range is a compile error
+        // in C# (CS0221) unless wrapped in `unchecked` — Lua's `cast_byte(~mask)`
+        // folds to a negative int, `(size_t)-1` to a huge unsigned, `cast_int(
+        // MAX_SIZET/sizeof(t))` to a wide ulong. A runtime (non-constant) cast
+        // truncates silently, so only a CONSTANT operand needs wrapping — and only
+        // when it isn't provably in range (a fitting folded value stays bare, so
+        // `(uint)(219)` keeps clean output). The fold misses uint-modular / ulong
+        // values (ConstInt null), so the ConstExpr flag — true even then — gates it.
+        if (IsIntegerCsType(resolvedCast) && operandConst
+            && !(constInt is int cval && ConstFitsTarget(cval, resolvedCast)))
+        {
+            castText = $"unchecked({castText})";
+        }
+        return new EmitContent.Text(castText,
+            _enumTags.Contains(castType) ? castType : null, new CType.Sized(castType),
+            ConstInt: constInt, ConstExpr: operandConst);
     }
 
     // The C# integer types dotcc lowers C integer types to — a cast to one of
@@ -382,7 +421,13 @@ internal sealed partial class CSharpEmitter
         CType? ptrTy = TyOf(n.Arg1) is CType.Sized s ? new CType.Sized(s.CsType + "*") : null;
         return new EmitContent.Text($"(&{lv})", Ty: ptrTy);
     }
-    public EmitContent Visit(C.Neg n) => $"(-{IntDecay(n.Arg1)})";
+    // Unary minus folds for the same reason as `~` — `(size_t)(-1)` / `(byte)(-2)`
+    // need the folded value so the enclosing cast can wrap it in `unchecked`.
+    public EmitContent Visit(C.Neg n)
+    {
+        var fold = ConstOfItem(n.Arg1) is int v && IntFoldable(IntOperandType(n.Arg1)) ? -v : (int?)null;
+        return new EmitContent.Text($"(-{IntDecay(n.Arg1)})", ConstInt: fold, ConstExpr: IsConstExpr(n.Arg1));
+    }
     // Prefix ++/-- — strip outer parens of operand to avoid CS0131 on a
     // parenthesised lvalue. `(x)++` would parse as post-inc on a parens
     // expression, but C# accepts `++x` directly. Enum-ness propagates (C# ++/--
@@ -722,8 +767,9 @@ internal sealed partial class CSharpEmitter
                 + "variable, array, subscript, dereference, cast, literal, or call result. "
                 + "Use `sizeof(Type)` if you can.");
         // Carry the folded byte size too, so `sizeof expr` works in an integer
-        // constant-expression position (e.g. an array bound).
-        return new EmitContent.Text(SizeofText(t), Ty: new CType.Sized("int"), ConstInt: SizeofConstOfCType(t));
+        // constant-expression position (e.g. an array bound). `sizeof` is constant.
+        return new EmitContent.Text(SizeofText(t), Ty: new CType.Sized("int"),
+            ConstInt: SizeofConstOfCType(t), ConstExpr: true);
     }
 
     // `offsetof(Type, member)` (C89) — the byte offset of `member` within `Type`.
@@ -1034,8 +1080,10 @@ internal sealed partial class CSharpEmitter
         // at every use and fail to compile.
         if (!_localNames.Contains(name) && _enumerators.TryGetValue(name, out var enumName))
         {
+            // An enumerator is a compile-time constant (ConstExpr), so a cast chain
+            // through it (`(int)TMS.TM_EQ + 1`) stays constant for the cast wrap.
             return new EmitContent.Text($"{enumName}.{Id(name)}", enumName, new CType.Sized(enumName),
-                ConstInt: _enumeratorValues.TryGetValue(name, out var ev) ? ev : null);
+                ConstInt: _enumeratorValues.TryGetValue(name, out var ev) ? ev : null, ConstExpr: true);
         }
         // An enum-typed variable read is itself enum-valued — tag it so consuming
         // nodes insert the int↔enum casts C# requires (`int x = c`, `c & MASK`,
@@ -1141,7 +1189,11 @@ internal sealed partial class CSharpEmitter
             valueText = digits + CsIntSuffix(hasU, ls);          // decimal
             if (int.TryParse(digits, System.Globalization.NumberStyles.Integer, inv, out var dv)) { constVal = dv; }
         }
-        return new EmitContent.Text(valueText, Ty: new CType.Sized(ct), ConstInt: constVal);
+        // A numeric literal is always a constant expression (ConstExpr), even when
+        // its value exceeds the 32-bit int fold and ConstInt is null (e.g. a large
+        // `0xFFFFFFFF` / `4294967295u`) — so an out-of-range cast of it wraps in
+        // `unchecked` rather than tripping CS0221.
+        return new EmitContent.Text(valueText, Ty: new CType.Sized(ct), ConstInt: constVal, ConstExpr: true);
     }
 
     // Map a C integer suffix (any u/U + any l/L) to C#'s canonical form. C# has
@@ -1263,7 +1315,9 @@ internal sealed partial class CSharpEmitter
         {
             text = $"(byte){(item.IsByte ? item.Value : item.Value & 0xFF)}";
         }
-        return Typed(text, new CType.Sized("int"));
+        // A char constant is a compile-time constant; carry its value + ConstExpr.
+        return new EmitContent.Text(text, Ty: new CType.Sized("int"),
+            ConstInt: item.IsByte ? item.Value : item.Value & 0xFF, ConstExpr: true);
     }
 
     // Comma operator (`Expr → Expr ',' E`). Accumulate operands left-to-right
@@ -1462,7 +1516,10 @@ internal sealed partial class CSharpEmitter
             // Keep the `(void)X` discard-cast tag through redundant parens — Lua's
             // `cast_void(x)` = `((void)(x))`, and a ternary arm is that wrapped again
             // — so an enclosing void ternary's IsVoidBranch still recognises it.
-            VoidCast: n.Arg1.Content is EmitContent.Text { VoidCast: true });
+            VoidCast: n.Arg1.Content is EmitContent.Text { VoidCast: true },
+            // A paren around a constant expression is still constant (so a cast of a
+            // parenthesised constant — Lua's `cast_byte((~mask))` — wraps correctly).
+            ConstExpr: IsConstExpr(n.Arg1));
     }
 
     // C23 keyword constants (only reached under -std=c23, via the rewriter's

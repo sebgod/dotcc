@@ -644,9 +644,29 @@ new class of latent bugs the probe never could.
     → `f(L, ud)` (which also routes it through the `_localNames` shadow path).
 
     Fixture `fnptr-field-comma/`; unit tests `FieldChainCommaTests`.
-- 🧱 **Phase 6m+ — the remaining deep walls** (~106 errors):
-  - **CS0221 (~17), CS1501 (~15), CS0193 (~14), CS0103 (~10), CS0212 (~9),
-    CS8210 (~7), CS1503/CS0266/CS0034 tails** — a diverse long tail to triage next.
+- ✅ **Phase 6m — out-of-range constant casts wrapped in `unchecked` (CS0221
+  17 → 0; total 106 → 89).** C truncates an out-of-range integer CONSTANT cast
+  (mod 2^width); C# rejects it (CS0221) unless wrapped in `unchecked(...)`. dotcc
+  wraps an integer cast whose operand is a constant expression that isn't provably
+  in range — Lua's pervasive `cast_byte(~mask)` (a bit-clear; `~(1<<6)` folds to
+  −65), `(size_t)-1`, and `cast_int(MAX_SIZET/sizeof(t))`. Two parts:
+  - **Value fold for `~` / unary `-` / `& | ^` / `<< >>`** — these carry their
+    folded `ConstInt` now (only when the result stays a signed ≤32-bit `int`, so
+    the int fold matches C — a wider/unsigned result like `~(size_t)0` would
+    mis-fold), so `Visit(C.Cast)` sees the value and wraps when it's out of range
+    (resolving the target through typedefs, so `lu_byte`/`size_t` casts count).
+  - **`ConstExpr` flag** on `EmitContent.Text` — true when an expression is a C
+    compile-time constant *independent of whether the value folds*. dotcc can't
+    fold a uint-modular shift (`(~0u)<<3`) or a ulong-wide divide
+    (`MAX_SIZET/sizeof`) into a 32-bit int, but they're still constants C# rejects
+    out-of-range — so the flag (propagated through literals, enumerators, sizeof,
+    and every arithmetic / bitwise / shift / unary / cast / paren node) gates the
+    wrap. A constant that *provably* fits stays bare (`(uint)(219)`), as does a
+    runtime cast (it truncates silently). Fixture `const-cast-unchecked/`; unit
+    tests `ConstCastUncheckedTests`.
+- 🧱 **Phase 6n+ — the remaining deep walls** (~89 errors):
+  - **CS1501 (~15), CS0193 (~14), CS0103 (~10), CS0212 (~9), CS8210 (~7),
+    CS1503/CS0266/CS0034 tails** — a diverse long tail to triage next.
   - **Call through a parenthesized simple-member fn-ptr callee (CS0118).** `(r.func)(5)`
     reads as a cast in C#; strip the redundant callee parens when the inner
     expression is a member access / subscript (the bare-identifier case landed in 6l).

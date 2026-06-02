@@ -120,7 +120,16 @@ public abstract record EmitContent
     /// <param name="BlockPieces">When this Text is a <c>{ … }</c> block, its
     /// statement pieces (un-joined), so a switch whose body is this block can group
     /// case sections and insert fall-through jumps without re-parsing text.</param>
-    public sealed record Text(string Value, string? EnumType = null, CType? Ty = null, bool Inline = false, bool Noreturn = false, bool Volatile = false, string? VolatileLValue = null, bool VolatilePointee = false, bool Atomic = false, string? AtomicLValue = null, int? ConstInt = null, IReadOnlyList<string>? CommaOps = null, bool VoidCast = false, bool Terminates = false, string? CaseLabelExpr = null, bool IsDefaultLabel = false, IReadOnlyList<StmtPiece>? BlockPieces = null) : EmitContent;
+    /// <param name="ConstExpr">True when this expression is a C compile-time CONSTANT
+    /// expression (a literal, enumerator, <c>sizeof</c>, or arithmetic / bitwise /
+    /// shift / unary / cast over them) — independent of whether <see cref="ConstInt"/>
+    /// holds its folded value. dotcc only folds values that fit a 32-bit signed
+    /// <c>int</c> (so a <c>uint</c>-modular or <c>ulong</c>-wide constant leaves
+    /// <see cref="ConstInt"/> null), but C# still treats the whole thing as a
+    /// constant and rejects an out-of-range CONSTANT cast (CS0221). This flag lets
+    /// an integer cast wrap such an operand in <c>unchecked(…)</c> — Lua's
+    /// <c>cast_byte(~mask)</c>, <c>(size_t)-1</c>, <c>cast_int(MAX_SIZET/sizeof(t))</c>.</param>
+    public sealed record Text(string Value, string? EnumType = null, CType? Ty = null, bool Inline = false, bool Noreturn = false, bool Volatile = false, string? VolatileLValue = null, bool VolatilePointee = false, bool Atomic = false, string? AtomicLValue = null, int? ConstInt = null, IReadOnlyList<string>? CommaOps = null, bool VoidCast = false, bool Terminates = false, string? CaseLabelExpr = null, bool IsDefaultLabel = false, IReadOnlyList<StmtPiece>? BlockPieces = null, bool ConstExpr = false) : EmitContent;
 
     /// <summary>
     /// One statement of a block, as the structured statement list (<see cref="StmtSeq"/>)
