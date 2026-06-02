@@ -408,10 +408,35 @@ already followed this not-over-stripped rule.) Fixture `ptr-arith-arrow/`
   on `__GNUC__`, which dotcc doesn't define → we get the portable `switch`).
 - Exit: all 20 core TUs emit objects. ✅ **Done.**
 
-### ⬜ Phase 5 — Standard library TUs (lauxlib + LIB_O − loadlib)
-- Same loop for `lauxlib` + the 10 lib TUs. `liolib.c`/`loslib.c` lean on stdio
-  + a few `os`/`time` calls — extend the synthetic libc as needed.
-- Exit: all lib TUs (except `loadlib`) emit objects.
+### ✅ Phase 5 — Standard library TUs (lauxlib + LIB_O − loadlib)  ← ✅ COMPLETE (31 / 31 objects)
+The library TUs came in almost free off the core work — `dotcc --emit=obj` over
+`lauxlib` + the 10 lib TUs started at **29/31**, with only three small gaps, each
+a general-C-completeness item (not Lua-specific). All cleared, 31/31:
+- ✅ **Phase 5a — `<stdio.h>` implementation-defined limit macros.** `lauxlib`
+  failed on `char buff[BUFSIZ];` (a struct member) — `BUFSIZ` wasn't defined in
+  the synthetic `<stdio.h>`. Added the standard limit + buffering-mode macros
+  (`BUFSIZ`/`FILENAME_MAX`/`FOPEN_MAX`/`TMP_MAX`/`L_tmpnam`/`_IOFBF`/`_IOLBF`/
+  `_IONBF`, C99 7.21.1) with values satisfying the standard minima; `BUFSIZ` now
+  folds as a constant array bound. **Cleared `lauxlib`.** Fixture `stdio-limits/`;
+  unit tests `StdioLimitsTests`.
+- ✅ **Phase 5b — anonymous `union` type in a declaration.** `lstrlib` failed on
+  its native-endianness probe `static const union { int dummy; char little; }
+  nativeendian = {1};` — an unnamed `union { … }` used directly as a declaration's
+  type (the union counterpart of the anon-struct-type, Phase 4v). New `Type →
+  'union' '{' MemberMark MemberList '}'` (`typeAnonUnion`) synthesizes a name,
+  emits an explicit-layout struct, returns the synth name as the Type. **Advanced
+  `lstrlib`** past line 1413. Fixture `anon-union-decl/`; unit tests
+  `AnonUnionDeclTests`.
+- ✅ **Phase 5c — block-scope (local) aggregate type definitions.** `lstrlib`
+  then failed on `struct cD { char c; union { LUAI_MAXALIGN; } u; };` — a
+  `struct`/`union`/`enum` defined *inside a function body* as a statement. A type
+  has no storage, so each new `Stmt → 'struct'/'union'/'enum' ID '{' … '}' ';'`
+  production (`stmtStructDef`/`stmtUnionDef`/`stmtEnumDef` + the C23 `enum : T`
+  variant) hoists the type into the top-level section (deduped by tag) and emits
+  nothing at the statement — delegating to the same emit as the `Fn`-level defs.
+  **Cleared `lstrlib`** — probe 31/31. Fixture `local-type-def/`; unit tests
+  `LocalTypeDefTests`.
+- Exit: all lib TUs (except `loadlib`) emit objects. ✅ **Done — 31/31.**
 
 ### ⬜ Phase 6 — Link & run (the payoff)
 - Link every object as a dotcc `-shared` library (or whole-program with a custom

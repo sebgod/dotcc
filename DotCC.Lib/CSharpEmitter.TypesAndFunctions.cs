@@ -189,10 +189,13 @@ internal sealed partial class CSharpEmitter
     // is marked `unsafe` so it can legally contain pointer fields; all our
     // C structs are by definition unmanaged (no GC refs in their fields)
     // so this is sound.
-    public EmitContent Visit(C.StructDef n)
+    public EmitContent Visit(C.StructDef n) => EmitTopLevelStructDef(T(n.Arg1), T(n.Arg3));
+
+    // The `struct Tag { … };` emit, shared by the file-scope (StructDef) and
+    // block-scope (StmtStructDef) productions — a type has no storage, so a local
+    // definition hoists into the same top-level section, deduped by tag.
+    private EmitContent EmitTopLevelStructDef(string name, string members)
     {
-        var name = T(n.Arg1);
-        var members = T(n.Arg3);
         DrainPendingFields(name);  // always — clears _pendingFields for the next struct
         if (_emittedTypes.Add(name))
         {
@@ -605,15 +608,25 @@ internal sealed partial class CSharpEmitter
     // (which is strictly more capable — multi-declarator / per-declarator `*`),
     // so the dedicated namedNestedStruct production handles only what this can't.
     // Shares the `__NestS` synth-name family + counter with EmitNamedNestedAggregate.
-    public EmitContent Visit(C.TypeAnonStruct n)
+    public EmitContent Visit(C.TypeAnonStruct n) => EmitAnonAggregateType(T(n.Arg3), union: false);
+
+    // Anonymous union type at declaration scope (`union { … } v;` /
+    // `static const union { … } v = {…}` — Lua lstrlib's native-endianness probe).
+    // Same shape as TypeAnonStruct but explicit-layout (overlapping) storage; the
+    // synth name is recorded in _unionTypes (by EmitExplicitUnionType) so the layout
+    // model treats it as a union, and a brace init targets the first member.
+    public EmitContent Visit(C.TypeAnonUnion n) => EmitAnonAggregateType(T(n.Arg3), union: true);
+
+    private EmitContent EmitAnonAggregateType(string memberLines, bool union)
     {
         var snapshot = _memberMarks.Count > 0 ? _memberMarks.Pop() : _pendingFields.Count;
         var innerNames = new List<string>();
         for (var i = snapshot; i < _pendingFields.Count; i++) { innerNames.Add(_pendingFields[i]); }
         if (snapshot < _pendingFields.Count) { _pendingFields.RemoveRange(snapshot, _pendingFields.Count - snapshot); }
-        var nestedType = $"__NestS{_anonAggCounter}";
+        var nestedType = (union ? "__NestU" : "__NestS") + _anonAggCounter;
         _anonAggCounter++;
-        EmitSequentialStructType(nestedType, T(n.Arg3));  // Arg3 = MemberList lines
+        if (union) { EmitExplicitUnionType(nestedType, memberLines); }
+        else { EmitSequentialStructType(nestedType, memberLines); }
         _structFields[nestedType] = innerNames;
         var innerTypes = new Dictionary<string, CType>(StringComparer.Ordinal);
         foreach (var inner in innerNames)
@@ -737,13 +750,29 @@ internal sealed partial class CSharpEmitter
     // [StructLayout(LayoutKind.Explicit)] and [FieldOffset(0)] on each
     // member, giving C's overlapping-storage semantics. Reuses the
     // MemberList parsed for struct (one `Type ID ;` per member).
-    public EmitContent Visit(C.UnionDef n)
+    public EmitContent Visit(C.UnionDef n) => EmitTopLevelUnionDef(T(n.Arg1), T(n.Arg3));
+
+    // Shared by the file-scope (UnionDef) and block-scope (StmtUnionDef) union
+    // definitions — same hoist-and-dedup as the struct case.
+    private EmitContent EmitTopLevelUnionDef(string name, string members)
     {
-        var name = T(n.Arg1);
-        var members = T(n.Arg3);
         DrainPendingFields(name);
         EmitExplicitUnionType(name, members);
         return string.Empty;
+    }
+
+    // Block-scope (local) aggregate type definitions — `struct/union/enum Tag {
+    // … };` used as a statement (see the `stmt*Def` grammar productions). A type
+    // has no storage, so each delegates to the SAME emit as its file-scope
+    // counterpart: the type hoists into the top-level type section (deduped by
+    // tag) and the statement itself emits nothing.
+    public EmitContent Visit(C.StmtStructDef n) => EmitTopLevelStructDef(T(n.Arg1), T(n.Arg3));
+    public EmitContent Visit(C.StmtUnionDef n)  => EmitTopLevelUnionDef(T(n.Arg1), T(n.Arg3));
+    public EmitContent Visit(C.StmtEnumDef n)   => EmitEnum(T(n.Arg1), EI(n.Arg3), "int");
+    public EmitContent Visit(C.StmtEnumDefTyped n)
+    {
+        Gate(2023, "enum with fixed underlying type (`enum : T`)", n.Arg0);  // C23
+        return EmitEnum(T(n.Arg1), EI(n.Arg5), T(n.Arg3));
     }
 
     // Emit a C# struct with [StructLayout(Explicit)] + [FieldOffset(0)] on each

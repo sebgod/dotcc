@@ -676,6 +676,16 @@ productions:
       # `union ID` as a type reference — emits just the ID (the generated
       # union-struct decl shares the same name, like `struct ID`).
       - { lhs: Type, rhs: ['union', ID], action: typeUnion }
+      # Anonymous union type at declaration scope — `union { … } x;` /
+      # `static const union { … } v = {…}` (Lua lstrlib's native-endianness probe
+      # `static const union { int dummy; char little; } nativeendian = {1};`). The
+      # union counterpart of typeAnonStruct: synthesize a name, emit the
+      # explicit-layout (overlapping) union decl, record its fields, and return the
+      # synth name as the Type so the enclosing declaration composes via the ordinary
+      # Type productions (incl. the brace aggregate init, which targets the FIRST
+      # union member). Keyed on `union {` (no tag) → disjoint from `union ID`
+      # (typeUnion) and the anon/named-nested-union MEMBER forms (different context).
+      - { lhs: Type, rhs: ['union', '{', MemberMark, MemberList, '}'], action: typeAnonUnion }
       # `typeof(expr)` / `typeof(type)` (C23) — yields a type. The expr form reads
       # the operand's synthesized CType (same layer `sizeof expr` uses); the type
       # form just unwraps. Conflict-free the same way `sizeof` splits: the
@@ -835,6 +845,22 @@ productions:
       # can't start with `{`, so `= {` unambiguously selects this rule. Nested
       # braces (a union/struct-typed field's init) are handled in the emitter.
       - { lhs: Stmt, rhs: ['static', Type, ID, '=', '{', InitList, '}', ';'], action: stmtStaticStructInit }
+      # Block-scope (local) AGGREGATE TYPE DEFINITIONS — `struct Tag { … };`,
+      # `union Tag { … };`, `enum Tag { … };` (and the C23 fixed-underlying-type
+      # `enum Tag : Type { … };`) used as a STATEMENT. C lets a type be defined
+      # inside a function body (Lua lstrlib's `struct cD { char c; union {
+      # LUAI_MAXALIGN; } u; };`, a local alignment probe). A type has no storage,
+      # so each lowers IDENTICALLY to its file-scope counterpart — the type is
+      # hoisted into the top-level type-decls section (deduped by tag) and the
+      # statement itself emits nothing. The visitors delegate to the same emit as
+      # the `Fn`-level structDef/unionDef/enumDef. Disjoint from `Stmt → Decl ;`
+      # (a `struct ID x;` declaration) on the `{` lookahead after the tag — exactly
+      # the shift/reduce the file-scope pair already resolves. (Combined def+decl
+      # `struct Tag { … } v;` is not supported here, matching file scope.)
+      - { lhs: Stmt, rhs: ['struct', ID, '{', MemberList, '}', ';'],            action: stmtStructDef }
+      - { lhs: Stmt, rhs: ['union', ID, '{', MemberList, '}', ';'],             action: stmtUnionDef }
+      - { lhs: Stmt, rhs: ['enum', ID, '{', EnumList, '}', ';'],                action: stmtEnumDef }
+      - { lhs: Stmt, rhs: ['enum', ID, ':', Type, '{', EnumList, '}', ';'],     action: stmtEnumDefTyped }
       # Expression statement uses the full `Expr` tier so `a, b;` (comma
       # operator, result discarded) parses; the visitor splits it into
       # sequential statements.
