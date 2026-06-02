@@ -1,6 +1,6 @@
 # Lua-on-dotcc — Session Handover
 
-**As of commit `ddc6a06` (Phase 6n).** This is a resume-from-here snapshot for the
+**As of commit `55285f5` (Phase 6q).** This is a resume-from-here snapshot for the
 ongoing effort to make **Lua 5.5.0 compile and run under dotcc** (the C→.NET 10/C#
 transpiler). For the full feature history see [`ROADMAP.md`](ROADMAP.md); for the
 language-feature matrix see [`../../C-SUPPORT.md`](../../C-SUPPORT.md). This file is
@@ -63,7 +63,7 @@ gcc-oracle in WSL needs the Windows path bridged: `WIN_PWD=$(pwd -W)` then
 
 ## Progress
 
-Whole-program link error count: **761 → 72** this run of sessions.
+Whole-program link error count: **761 → 42** this run of sessions.
 
 | Phase | What landed | Errors |
 |---|---|---|
@@ -72,38 +72,23 @@ Whole-program link error count: **761 → 72** this run of sessions.
 | 6k | C switch fall-through → `goto case` / `goto default` / trailing `break` (CS0163+CS8070) | 185 → 136 |
 | 6l | field-chain CType through pointer-typedef/aliased-struct bases + `(void)ptr` / `++ptr` discards + `(f)(args)` bare-name callee unwrap (CS0306 27→0) | 136 → 106 |
 | 6m | out-of-range constant integer casts wrapped in `unchecked` (CS0221 17→0) | 106 → 89 |
-| 6n | sprintf/snprintf fluent `.Arg(…).Done()` lowering + full `SprintfBuilder` Arg surface + `Arg(void*)` for `%p` (CS1501 15→0; 6 snprintf-`n` CS1503 cleared) | 89 → **72** |
+| 6n | sprintf/snprintf fluent `.Arg(…).Done()` lowering + full `SprintfBuilder` Arg surface + `Arg(void*)` for `%p` (CS1501 15→0; 6 snprintf-`n` CS1503 cleared) | 89 → 72 |
+| 6o | drop the `*` on a deref-call through a function pointer `(*fp)(args)` (CS0193 14→0) | 72 → 60 |
+| 6p | add `frexp`/`ldexp`/`strcoll`/`ungetc`/`setvbuf`/`tmpnam` libc surface + `luaopen_package` stub in driver.c (CS0103 10→0) | 60 → 50 |
+| 6q | address-of a global / static-local via `Unsafe.AsPointer(ref field)` (CS0212 9→0) | 50 → **42** |
 
-Tests currently green: **737 unit / 167 functional**.
+Tests currently green: **753 unit / 170 functional**.
 
-## Current wall — 72 errors
+## Current wall — 42 errors
 
 Histogram (deduped):
 
 ```
-14 CS0193   10 CS0103    9 CS0212    7 CS8210    7 CS1503
- 6 CS0266    6 CS0034     5 CS0159    3 CS0163    2 CS8183
- 1 CS0457    1 CS0029     1 CS0019
+ 9 CS1503   7 CS8210   6 CS0266   6 CS0034   5 CS0159
+ 3 CS0163   2 CS8183   1 CS0457   1 CS0306   1 CS0029   1 CS0019
 ```
 
 Triage notes per family (file:line are into `build/Program.cs` after `link.sh all`):
-
-- **CS0193 (14) — `* or -> must be applied to a pointer`** (e.g. 10160, 10171). A
-  type-lowering mismatch: something that should be a pointer lowered to a value (or
-  the reverse). Inspect the emitted lines and trace the C — probably a field / cast /
-  typedef whose CType resolves to a non-pointer where a `->`/`*` is applied.
-
-- **CS0103 (10) — missing libc names.** Exactly: **`frexp`, `ldexp`, `setvbuf`,
-  `strcoll`, `tmpnam`, `ungetc`, `luaopen_package`.** The first six are libc surface
-  to add in `DotCC.Libc` (MathLib for frexp/ldexp; the stdio/string ones in `Libc.cs`).
-  `luaopen_package` is the `loadlib` TU we deliberately excluded (dynamic loading) —
-  expect it to need a stub or exclusion in `driver.c`/the link set.
-
-- **CS0212 (9) — `take the address of an unfixed expression`** (e.g. 14048, 14309).
-  `&expr` of a managed-heap-rooted thing (a global array field, or a managed value)
-  needs a `fixed` block, or the lowering should hand back an already-pinned pointer.
-  Look at which `&` sites trip it — probably `&global[i]` / `&someField` where the
-  base is a pinned managed array (the `GlobalArrayFrom`/`stackalloc` distinction).
 
 - **CS8210 (7) — `tuple may not contain a value of type void`** (e.g. 16981,16982).
   A comma-operator value-tuple where an operand is a `void` CALL (not a `(void)X`
@@ -111,14 +96,15 @@ Triage notes per family (file:line are into `build/Program.cs` after `link.sh al
   these because they're nested in value position. Extend the comma lowering: a void
   *call* operand in a tuple needs the same treatment as the `(void)X` discard.
 
-- **CS1503 (7) / CS0266 (6) / CS0034 (6)** — residual integer-conversion tails the
+- **CS1503 (9) / CS0266 (6) / CS0034 (6)** — residual integer-conversion tails the
   6i layer doesn't yet reach: `int→uint` at an arg (CS1503 11595 — arg 5; a callee
   whose param type isn't being coerced, maybe a fn-ptr-typed param or a not-recorded
-  signature), `CBool→byte` and `int→ulong` at stores (CS0266 — struct-field/element
-  stores aren't coerced yet, the documented gap), and `ulong / int` ambiguous (CS0034
-  16013 — a parenthesised `sizeof` losing its int-ness through the paren, the
-  documented usual-arith-conv gap). These want the conversion layer extended to
-  struct-field/element stores and to type `sizeof` as `size_t`.
+  signature; 2 of these were unmasked by 6o once the fn-ptr deref-calls compiled),
+  `CBool→byte` and `int→ulong` at stores (CS0266 — struct-field/element stores aren't
+  coerced yet, the documented gap), and `ulong / int` ambiguous (CS0034 16013 — a
+  parenthesised `sizeof` losing its int-ness through the paren, the documented
+  usual-arith-conv gap). These want the conversion layer extended to struct-field/
+  element stores and to type `sizeof` as `size_t`.
 
 - **CS0159 (5) — `No such label 'ret'`** (e.g. 19510, 19543). A `goto ret;` where the
   `ret:` label is out of scope in the emitted C# — likely a label inside a block that
@@ -127,8 +113,10 @@ Triage notes per family (file:line are into `build/Program.cs` after `link.sh al
 
 - **CS0163 (3)** — residual switch fall-through the 6k analysis missed (a case section
   whose terminating-ness wasn't detected — maybe an `if/else` where both arms return,
-  or a fall-through through an empty stacked label). **CS9244 / CS8183 / CS0457 /
-  CS0029 / CS0019** — long-tail singletons, look individually.
+  or a fall-through through an empty stacked label). **CS8183 / CS0457 / CS0306 /
+  CS0029 / CS0019** — long-tail singletons, look individually. The CS0306 was unmasked
+  by 6q (a previously-CS0212 `&global` line that now compiles feeds a context — likely
+  a comma-tuple — wanting the `nint` round-trip).
 
 ## Pending / deferred tasks
 
