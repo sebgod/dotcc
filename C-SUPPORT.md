@@ -279,7 +279,7 @@ Synthetic header at `DotCC.Lib/include/stdint.h` declares the fixed-width intege
 | `int32_t` / `uint32_t` | ✅ | `int` / `unsigned int` → `int` / `uint` |
 | `int64_t` / `uint64_t` | ✅ | `long` / `unsigned long` → `long` / `ulong` |
 | `intptr_t` / `uintptr_t` | ✅ | `long` / `unsigned long` (LP64-style — dotcc's `long` is unconditionally 64-bit). Differs from MSVC-Windows's LLP64 where these are still 8 bytes but via `__int64`. Same observable behavior. |
-| `size_t` / `ptrdiff_t` | ✅ | `unsigned long` / `long`. |
+| `size_t` / `ptrdiff_t` | ✅ | `unsigned long` / `long`. **Defined in `<stddef.h>`** (their canonical C home, C90 7.17), which `<stdint.h>` `#include`s — so code reaching for them through either header resolves them. Fixture `stddef-types/`. |
 | `intmax_t` / `uintmax_t` | ✅ | `long` / `unsigned long`. |
 | `INT8_MIN` / `MAX`, `UINT8_MAX`, …, `INT64_MIN` / `MAX`, `UINT64_MAX` | ✅ | `#define` numeric literals — usable as integer constant expressions. |
 | `INTPTR_MIN` / `MAX`, `UINTPTR_MAX`, `SIZE_MAX`, `PTRDIFF_MIN` / `MAX`, `INTMAX_MIN` / `MAX`, `UINTMAX_MAX` | ✅ | All alias the `INT64`/`UINT64` macros (LP64). |

@@ -17,7 +17,14 @@
    matches Linux's LP64 model, NOT MSVC-Windows's LLP64. Code that
    round-trips intptr_t through long on dotcc behaves like Linux glibc.
    Programs that hard-depend on MSVC's `long`-is-32-bit may need
-   adjustments. */
+   adjustments.
+
+   size_t / ptrdiff_t are NOT stdint types — they live in <stddef.h>, their
+   canonical C home. We include it so code that reaches for them through
+   <stdint.h> (common in practice) still resolves them; the SIZE_MAX /
+   PTRDIFF_MAX limit macros below pair with those <stddef.h> types. */
+
+#include <stddef.h>
 
 typedef signed char int8_t;
 typedef unsigned char uint8_t;
@@ -30,8 +37,6 @@ typedef unsigned long uint64_t;
 
 typedef long intptr_t;
 typedef unsigned long uintptr_t;
-typedef unsigned long size_t;
-typedef long ptrdiff_t;
 typedef long intmax_t;
 typedef unsigned long uintmax_t;
 
