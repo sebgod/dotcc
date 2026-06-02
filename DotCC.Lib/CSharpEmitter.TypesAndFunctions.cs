@@ -752,6 +752,7 @@ internal sealed partial class CSharpEmitter
     // anonymous-union member lifts its fields into.
     private void EmitExplicitUnionType(string name, string memberLines)
     {
+        _unionTypes.Add(name);  // record kind even when the text is deduped (layout model)
         if (!_emittedTypes.Add(name)) { return; } // already emitted (shared header across TUs)
         var sb = new StringBuilder();
         sb.Append("[global::System.Runtime.InteropServices.StructLayout(global::System.Runtime.InteropServices.LayoutKind.Explicit)]\n");
@@ -1180,6 +1181,7 @@ internal sealed partial class CSharpEmitter
         var name = T(n.Arg4);
         var pars = T(n.Arg7);
         var typesOnly = StripParamNames(pars);
+        _pointerTypedefNames.Add(name);  // a function pointer sizes to 8/8 (layout model)
         // A function-pointer TYPE's parameters aren't real parameters of any
         // function definition — but the Param visitors still staged them into
         // _pendingParams. Discard them: only an FnSig's StartFn should adopt
@@ -1198,6 +1200,7 @@ internal sealed partial class CSharpEmitter
     {
         var ret = T(n.Arg1);
         var name = T(n.Arg4);
+        _pointerTypedefNames.Add(name);  // a function pointer sizes to 8/8 (layout model)
         if (_aliasNames.Add(name))  // dedup across TUs (shared header)
         {
             _aliases.Append("using unsafe ").Append(name).Append(" = delegate*<")
@@ -1309,6 +1312,7 @@ internal sealed partial class CSharpEmitter
         DrainPromotions(alias);
         if (tag != alias && _promotedFields.TryGetValue(alias, out var aliasProm)) { _promotedFields[tag] = aliasProm; }
         EmitExplicitUnionType(alias, members);
+        if (tag != alias) { _unionTypes.Add(tag); }  // the tag names the same union (layout model)
         if (tag != alias && _aliasNames.Add(tag))
         {
             _aliases.Append("using unsafe ").Append(tag).Append(" = ").Append(alias).Append(";\n");

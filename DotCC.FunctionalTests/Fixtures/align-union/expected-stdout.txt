@@ -1,0 +1,5 @@
+offsetof = 8
+sizeof Limbox = 8
+sizeof Node = 24
+lastfree value = 30
+node[2] value = 20

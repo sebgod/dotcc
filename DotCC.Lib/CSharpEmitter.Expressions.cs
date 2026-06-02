@@ -318,7 +318,7 @@ internal sealed partial class CSharpEmitter
     // lives), so emit verbatim.
     public EmitContent Visit(C.MemberDot n)
     {
-        var baseExpr = StripOuterParens(T(n.Arg0));
+        var baseExpr = PostfixBase(StripOuterParens(T(n.Arg0)));
         var field = T(n.Arg2);
         // A C11 anonymous-union field is reached through the synthetic field that
         // holds the nested union (`o.i` → `o.__anonN.i`).
@@ -360,7 +360,13 @@ internal sealed partial class CSharpEmitter
     }
     public EmitContent Visit(C.MemberArrow n)
     {
-        var baseExpr = StripOuterParens(T(n.Arg0));
+        // A COMPOUND base (e.g. `(p - 1)` from Lua's `getlastfree`) must keep
+        // parens so `->` binds to the whole expression, not its trailing operand
+        // (`p - 1->f` parses as `p - (1->f)`). Strip redundant outers for the
+        // malloc-key match, then re-wrap for emit when the base isn't a bare
+        // primary. (Subscript follows the same not-over-stripped rule.)
+        var stripped = StripOuterParens(T(n.Arg0));
+        var baseExpr = PostfixBase(stripped);
         var field = T(n.Arg2);
         var member = Id(field);
         // Count a `->` whose base is a malloc-candidate variable, and choose the
@@ -369,7 +375,7 @@ internal sealed partial class CSharpEmitter
         // emitted (possibly @-escaped) text — match on the unescaped name, emit
         // with the escaped one.
         var op = "->";
-        var rawBase = Unescape(baseExpr);
+        var rawBase = Unescape(stripped);
         if (_currentFunctionName is string fn && _fnMalloc.TryGetValue(rawBase, out var mv))
         {
             mv.ArrowRefs++;
@@ -402,6 +408,61 @@ internal sealed partial class CSharpEmitter
         if (FieldEnum(n.Arg0, field) is string e) { return new EmitContent.Text(text, e, new CType.Sized(e)); }
         // Plain field — carry its CType (see MemberDot).
         return Typed(text, FieldCType(n.Arg0, field));
+    }
+
+    // The operand of a postfix `.`/`->` must be a primary/postfix expression.
+    // After StripOuterParens a COMPOUND base (a top-level binary/ternary op, a
+    // leading unary op, or a leading cast) has lost the parens that made the
+    // member operator bind to the whole thing — re-wrap it. A bare identifier,
+    // member chain (`a.b->c`), call (`f(x)`), or index (`a[i]`) is left as-is, so
+    // clean output and the malloc-promote keying (which matches the unwrapped
+    // name) are preserved.
+    private static string PostfixBase(string s) => NeedsPostfixWrap(s) ? $"({s})" : s;
+
+    private static bool NeedsPostfixWrap(string s)
+    {
+        s = s.Trim();
+        if (s.Length == 0) { return false; }
+        var c0 = s[0];
+        // Leading unary operator (`*p`, `&x`, `-n`, `!b`, `~m`).
+        if (c0 is '*' or '&' or '-' or '+' or '!' or '~') { return true; }
+        // A surviving leading `(` (StripOuterParens already removed a fully
+        // redundant wrap) is a cast `(T)x` or a paren-group with a suffix —
+        // either binds looser than a postfix op, so wrap.
+        if (c0 == '(') { return true; }
+        // A top-level (depth-0) operator other than the member ops `.` / `->`
+        // means a binary/ternary expression. Skip string/char-literal contents
+        // (an emitted expr can contain `L("…")`).
+        var depth = 0;
+        for (var i = 0; i < s.Length; i++)
+        {
+            var c = s[i];
+            if (c == '"' || c == '\'') { i = SkipCsLiteral(s, i, c); continue; }
+            if (c is '(' or '[' or '{') { depth++; }
+            else if (c is ')' or ']' or '}') { depth--; }
+            else if (depth == 0)
+            {
+                if (c == '-' && i + 1 < s.Length && s[i + 1] == '>') { i++; continue; }  // `->`
+                if (c == '.') { continue; }                                               // `.`
+                if (c is '+' or '-' or '*' or '/' or '%' or '<' or '>' or '='
+                      or '!' or '&' or '|' or '^' or '?' or ':' or '~') { return true; }
+            }
+        }
+        return false;
+    }
+
+    // Index of the closing quote of a C# string/char literal starting at `start`
+    // (the caller's loop `++` then moves past it); honors `\` escapes.
+    private static int SkipCsLiteral(string s, int start, char quote)
+    {
+        var i = start + 1;
+        while (i < s.Length)
+        {
+            if (s[i] == '\\') { i += 2; continue; }
+            if (s[i] == quote) { return i; }
+            i++;
+        }
+        return i;
     }
 
     // If `field` is a C11 anonymous-union field promoted from `baseItem`'s struct
@@ -513,6 +574,19 @@ internal sealed partial class CSharpEmitter
         var type = T(n.Arg2);
         var rawMember = T(n.Arg4);
         var member = Id(rawMember);
+        // Prefer a compile-time CONSTANT when dotcc can model the struct's layout.
+        // This is REQUIRED when offsetof feeds a constant position — e.g. Lua's
+        // `char padding[offsetof(Limbox_aux, follows_pNode)]` array-member bound,
+        // which lowers to a C# `fixed[N]` and needs a literal N. The folded value
+        // matches the C ABI / .NET blittable layout, so it agrees with the runtime
+        // form (used as the fallback below when the layout isn't modellable). The
+        // literal carries ConstInt so it can drive ParseDims / case labels / etc.
+        if (TryOffsetOf(type, rawMember) is int off)
+        {
+            return new EmitContent.Text(
+                off.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                Ty: new CType.Sized("ulong"), ConstInt: off);
+        }
         var key = IdentFrag(type) + "__" + IdentFrag(rawMember);
         if (_offsetofKeys.Add(key))
         {

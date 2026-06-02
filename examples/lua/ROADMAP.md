@@ -224,13 +224,13 @@ now a 1-D array member records its `Arr` CType (in `_pendingFieldTypeMap`), so
 (lobject). Fixture `array-member-cast-dim/` (gcc-oracle-validated); unit tests in
 `ArrayMemberConstExprTests`.
 
-**Deferred — ltable's `char padding[offsetof(Limbox_aux, follows_pNode)]`:** the
-array bound is an `offsetof`, which dotcc lowers to a RUNTIME helper, not a
-compile-time constant. Folding it needs a compile-time struct-layout/alignment
-model — but dotcc deliberately delegates layout to the C# runtime, and even a
-partial layout walk bails here (the target field's type `Node` has unknown
-alignment). A real `offsetof`-as-constant capability is its own feature; tracked,
-not attempted in 4p.
+**~~Deferred~~ → done in 4x — ltable's `char padding[offsetof(Limbox_aux,
+follows_pNode)]`:** the array bound is an `offsetof`, which dotcc lowered to a
+RUNTIME helper, not a compile-time constant. Folding it needs a compile-time
+struct-layout/alignment model. This was deferred here (4p) as its own
+capability, then **built in 4x**: a recursive layout walk computes the offset
+(`Node` resolves through the union/struct graph to alignment 8 → offsetof 8),
+matching the C ABI / .NET blittable layout. See Phase 4x.
 
 ### ✅ Phase 4q — function-specifier run before a typedef-name return (`l_sinline`)
 `lapi` and `lcode` failed on `l_sinline Table *gettable(...)` — `l_sinline`
@@ -343,7 +343,41 @@ redundant layers stripped to be a valid C# statement-expression). **Core probe
 18/20 → 19/20** (llex). Fixture `comma-void-control/` (gcc-oracle-validated);
 unit tests `CommaControlTests` (5).
 
-### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← IN PROGRESS (19 / 20 objects)
+### ✅ Phase 4x — compile-time `offsetof` via a struct-layout model
+ltable failed on `char padding[offsetof(Limbox_aux, follows_pNode)]` — an
+alignment-union trick where the array-member bound is an `offsetof`. dotcc had
+only a RUNTIME `offsetof` helper (a real-instance address subtraction), so it
+couldn't drive a C# `fixed[N]` literal. Fix: a recursive **struct/union layout
+model** (`CSharpEmitter.Layout.cs`) computing (size, align, member offset) with
+the standard C-ABI rules — which a .NET blittable struct (`Sequential`, natural
+alignment, no `Pack`) / union (`Explicit`, every member at offset 0) ALSO follows
+on the same platform, so the folded constant agrees with C# `sizeof`/.NET at
+runtime. `offsetof` now folds to a literal (carrying `ConstInt`) when the whole
+transitive type graph is modellable — primitives, pointers (incl.
+function-pointer typedefs → 8/8, tracked in `_pointerTypedefNames`), nested known
+aggregates (struct-vs-union tracked in `_unionTypes`), and 1-D arrays — and
+falls back to the runtime helper otherwise (a bit-field's packing is impl-defined
+and differs from C, so it bails — correctly). The 64-bit data model matches
+dotcc's `<stdint.h>` (pointer/`long` = 8). **Core probe 19/20 → 20/20** (ltable)
+— **the Lua core is complete.** Fixture `align-union/` (gcc-oracle-validated:
+offsetof 8 / sizeof Limbox 8 / sizeof Node 24, and the Limbox-before-node-array
+round-trip); unit tests `OffsetofTests` (7 — fold + helper fallback).
+
+### ✅ Phase 4y — postfix `.`/`->` on a compound base keeps its parens
+While validating 4x end-to-end, found a latent precedence bug: a member access
+whose base is a COMPOUND expression dropped the protecting parens —
+`(p - 1)->v` emitted as `p - 1->v` (parsed `p - (1->v)`, CS0193). The `.`/`->`
+visitors over-stripped the base. This is exactly the shape Lua's
+`getlastfree(t) = ((cast(Limbox*, (t)->node) - 1)->lastfree)` relies on — latent
+because the probe only `--emit=obj`s (no Roslyn compile), but it would break
+Phase 6's link-and-run. Fix: `PostfixBase` strips redundant outer parens (clean
+output, malloc-promote keying still matches the bare name) but RE-WRAPS a base
+with a top-level binary/ternary op, a leading unary, or a leading cast. A bare
+identifier / member chain (`a.b.c`) / call / index stays unwrapped. (Subscript
+already followed this not-over-stripped rule.) Fixture `ptr-arith-arrow/`
+(gcc-oracle-validated); unit tests `PostfixBaseTests` (5).
+
+### 🟦 Phase 4 — Core VM TUs (CORE_O)  ← ✅ COMPLETE (20 / 20 objects)
 - Iterate the 20 core TUs via `probe.sh`; fix each parse/emit gap as it surfaces.
   One commit per coherent gap, each with a minimal fixture (dotcc tradition:
   never fix Lua-specifically — reduce to a small reproducer + fixture).
@@ -359,16 +393,13 @@ unit tests `CommaControlTests` (5).
   `typedef enum { … } Name;` (4h, ltm.h's `TMS`), and **multi-declarator members
   + per-declarator pointers** (4i, `struct CallInfo *previous, *next;`).
   **`lctype.c` + `lopcodes.c` emit full objects.** ✅
-- **Current frontier** (19/20 emit objects — everything except `ltable`). The 1
-  remaining failure:
-  - `array member padding needs constant dimension(s)` (ltable) — the deferred
-    `offsetof`-as-array-bound case (needs a compile-time struct-layout/alignment
-    model dotcc deliberately delegates to the .NET runtime; see 4p). This is the
-    one genuinely-deferred wall — its own capability, not a per-TU parse/emit gap.
+- **Frontier: 20/20 — all core TUs emit objects.** ✅ The last wall (ltable's
+  `offsetof`-as-array-bound) fell to the struct-layout model (4x); the
+  `(p - 1)->m` precedence shape it depends on was fixed alongside (4y).
 - Watch items: `lvm.c` dispatch loop (may use a jump table / labels-as-values —
   GNU `&&label`, which is **out of scope**; Lua has an ANSI fallback `#if`-gated
   on `__GNUC__`, which dotcc doesn't define → we get the portable `switch`).
-- Exit: all 20 core TUs emit objects.
+- Exit: all 20 core TUs emit objects. ✅ **Done.**
 
 ### ⬜ Phase 5 — Standard library TUs (lauxlib + LIB_O − loadlib)
 - Same loop for `lauxlib` + the 10 lib TUs. `liolib.c`/`loslib.c` lean on stdio
