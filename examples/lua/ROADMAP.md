@@ -484,11 +484,32 @@ new class of latent bugs the probe never could.
   **The whole 31-TU program now compiles past the statement/expression layer** —
   remaining errors are missing typedef resolutions (`size_t`/`lu_byte`/… as bare
   type names) + a `void` parameter, the next wall (6c).
-- ⬜ **Phase 6c — whole-program type/symbol resolution**: ~20 CS0246 (typedef
-  names like `size_t`/`ptrdiff_t`/`lu_byte`/`lua_KContext` emitted as bare C#
-  type names rather than resolved aliases — likely a function-pointer-typedef /
-  merge-context issue) + 2 CS1536 (`void` parameter). These are semantic errors
-  that the earlier syntax errors had masked.
+- ✅ **Phase 6c — typedef resolution inside `using` alias bodies** (cleared the
+  CS0246/CS1536): a C# `using X = Y;` resolves Y IGNORING all other using-aliases,
+  so a scalar typedef-name in an alias body (an alias-of-alias `typedef intptr_t
+  lua_KContext;`, or a function-pointer typedef's `delegate*<…, size_t*, …>`) was
+  CS0246. `ResolveTypedefInType` now resolves scalar typedef-names there to their
+  primitive (`size_t`→`ulong`, `intptr_t`→`long`, `lu_byte`→`byte`). Also: a
+  `(void)` fn-ptr parameter list now means NO parameters (`delegate*<void>`, not
+  `delegate*<void, void>` = CS1536). Fixture `typedef-alias-resolve/`.
+- 🧱 **Phase 6d+ — the deep walls** (revealed once 6c unblocked full semantic
+  analysis of all 24k lines — ~5000 errors, dominated by a few SYSTEMIC root
+  causes, not 5000 independent bugs):
+  - **Emission model (~1500 errors: CS8801/CS8422/CS8787).** dotcc emits each C
+    function as a **top-level local function** in the implicit `Main`. That's fine
+    for small programs but breaks for Lua: top-level local functions can't be
+    referenced via `&fn` into function-pointer tables (Lua's `luaL_Reg` arrays),
+    can't be used from certain contexts (CS8801), and trip the static-local-function
+    `this`/`base` rule (CS8422). **Fix: emit user functions as `static` methods of a
+    class** (the `-shared` mode already does this with `DotCcLib`/`DotCcExports`) —
+    so whole-program/link mode should reuse that shape instead of top-level locals.
+  - **Pointer-valued comma expressions (~1000 errors: CS0306).** `(a, b)` in value
+    position lowers to a C# `ValueTuple` `(a, b).Item2`, but a **pointer** operand
+    (`CClosure*`) can't be a tuple type argument. Needs a pointer-safe value-comma
+    lowering (a hoist like 6b's SeqExpr, or a helper).
+  - Plus a long tail (CS0149 method-name, CS0266/CS1503 conversions, CS0121
+    ambiguous overloads, …) — triage after the two systemic fixes, which should
+    collapse most of the count.
 
 ### ⬜ Phase 7 — Stretch: standalone REPL / `luac`
 - Minimal `lua.c` (no readline/signal niceties) and/or `luac.c`.

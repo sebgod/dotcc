@@ -1134,8 +1134,14 @@ internal sealed partial class CSharpEmitter
     public EmitContent Visit(C.TypedefAlias n)
     {
         var rawType = T(n.Arg1);
-        var type = QualifyPredefinedTypeName(rawType);
         var alias = T(n.Arg2);
+        // Resolve the RHS through the scalar-typedef chain (size_t→nuint,
+        // intptr_t→nint, lu_byte→byte, …) BEFORE emitting the `using` alias: a
+        // `using X = Y;` directive resolves Y IGNORING all other using-aliases, so a
+        // scalar typedef-name on the RHS (`typedef intptr_t lua_KContext;`) would be
+        // CS0246. Struct names / predefined ref types aren't in the chain and pass
+        // through unchanged. See ResolveTypedefInType.
+        var type = QualifyPredefinedTypeName(ResolveTypedefInType(rawType));
         // `typedef _Atomic T Alias;` (e.g. <stdatomic.h>'s atomic_int) — record the
         // alias → underlying C# type and emit NO `using` alias: a use of `Alias`
         // resolves to the underlying type WITH the Atomic flag (Visit(TypeName)), so
@@ -1156,6 +1162,23 @@ internal sealed partial class CSharpEmitter
             _aliases.Append("using unsafe ").Append(alias).Append(" = ").Append(type).Append(";\n");
         }
         return string.Empty;
+    }
+
+    /// <summary>
+    /// Resolve a type-component string (possibly with trailing <c>*</c>s) through the
+    /// scalar-typedef chain to its underlying C# primitive — for use INSIDE a
+    /// <c>using</c> alias body (a scalar-typedef alias, a function-pointer typedef's
+    /// <c>delegate*&lt;…&gt;</c>), where C# resolves the RHS ignoring all other
+    /// using-aliases, so a scalar typedef-name (<c>size_t</c>, <c>intptr_t</c>,
+    /// <c>lu_byte</c>, …) would be a CS0246. Struct names and function-pointer
+    /// aliases aren't in the scalar chain and pass through unchanged.
+    /// </summary>
+    private string ResolveTypedefInType(string typeText)
+    {
+        var t = typeText.Trim();
+        var stars = 0;
+        while (t.EndsWith("*", StringComparison.Ordinal)) { stars++; t = t[..^1].TrimEnd(); }
+        return ResolveTypedef(t) + new string('*', stars);
     }
 
     /// <summary>
@@ -1206,10 +1229,13 @@ internal sealed partial class CSharpEmitter
     // from each "Type ID" chunk.
     public EmitContent Visit(C.TypedefFnPtr n)
     {
-        var ret = T(n.Arg1);
+        // Resolve scalar typedef-names in the delegate body (return + each param
+        // type) to their underlying primitive — a `delegate*<…>` is a `using` alias
+        // body, so `size_t`/`lua_KContext`/… would be CS0246 (see ResolveTypedefInType).
+        var ret = ResolveTypedefInType(T(n.Arg1));
         var name = T(n.Arg4);
         var pars = T(n.Arg7);
-        var typesOnly = StripParamNames(pars);
+        var typesOnly = string.Join(", ", StripParamNames(pars).Split(", ").Select(ResolveTypedefInType));
         _pointerTypedefNames.Add(name);  // a function pointer sizes to 8/8 (layout model)
         // A function-pointer TYPE's parameters aren't real parameters of any
         // function definition — but the Param visitors still staged them into
@@ -1219,15 +1245,19 @@ internal sealed partial class CSharpEmitter
         _pendingParams.Clear();
         if (_aliasNames.Add(name))  // dedup across TUs (shared header)
         {
+            // A `(void)` parameter list means NO parameters (not a void param) —
+            // `typedef void (*voidf)(void);` → `delegate*<void>`, not
+            // `delegate*<void, void>` (CS1536: void can't be a parameter type).
+            var body = typesOnly.Trim() == "void" ? ret : $"{typesOnly}, {ret}";
             _aliases.Append("using unsafe ").Append(name).Append(" = delegate*<")
-                .Append(typesOnly).Append(", ").Append(ret).Append(">;\n");
+                .Append(body).Append(">;\n");
         }
         return string.Empty;
     }
 
     public EmitContent Visit(C.TypedefFnPtrNoArgs n)
     {
-        var ret = T(n.Arg1);
+        var ret = ResolveTypedefInType(T(n.Arg1));
         var name = T(n.Arg4);
         _pointerTypedefNames.Add(name);  // a function pointer sizes to 8/8 (layout model)
         if (_aliasNames.Add(name))  // dedup across TUs (shared header)
