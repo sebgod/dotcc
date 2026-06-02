@@ -579,15 +579,23 @@ new class of latent bugs the probe never could.
     like C). New opt-in flag **`-Wconversion`** (off by default, like gcc/clang)
     warns at each width-NARROWING store via a `ConversionGate` collector flushed to
     stderr (the same channel as the dialect gate). Fixture `narrowing-store/`.
-    *Remaining CS0266 (~38) / CS1503 (~210) need other store sinks — call ARGUMENTS
-    (param-type tracking), struct-field / array-element stores, and `0`→pointer
-    (→ `null`).*
-- 🧱 **Phase 6j+ — the remaining deep walls** (~305 errors):
-  - **Conversions at call arguments + remaining sinks (CS1503 ~210, CS0266 ~38).**
-    The store-coercion (6i·3) covers init / assignment / return; call ARGUMENTS need
-    callee param-type tracking (no `_fnParamTypes` map yet), and struct-field /
-    array-element stores need the lvalue type at those sinks. Also integer `0`
-    assigned to a pointer lvalue (should lower to `null`).
+  - **pt4 — conversions at call arguments** (CS1503 210 → 14; total 305 → 195).
+    dotcc records each function's parameter types (`_fnParamTypes`, populated in
+    `StartFn` from the staged params) and coerces every argument to its parameter
+    (`CoerceArg` — the call-site twin of the store reconcile: enum↔int, then the
+    integer narrowing/sign cast). Only fires for callees with recorded fixed
+    params (user functions + the synthetic-header libc prototypes, which match the
+    emitted signatures); a variadic call's extra args and calls through fn-ptr
+    locals keep the plain decay. A `sizeof` argument is treated as `int` so it
+    coerces into a `size_t` parameter. **Found+fixed a latent `CsImplicitInt` bug**
+    here — the unsigned-type set omitted `ulong`, so `int→ulong` was wrongly judged
+    an implicit widening and silently *not* cast; the fix cleared the `int→ulong`
+    stores (6i·3) AND args at once. Fixture `call-arg-conv/`.
+- 🧱 **Phase 6j+ — the remaining deep walls** (~195 errors):
+  - **Pointer / fn-ptr type as a generic type argument (CS0306 74)** — now the
+    leader (below). The integer-conversion long tail is small now: CS1503 (~14) /
+    CS0266 (~14) are deep untyped args/sinks, struct-field / array-element stores,
+    and integer `0`→pointer (should lower to `null`).
   - **Pointer / fn-ptr types as generic type arguments (74: CS0306).** A bare
     fn-ptr array (`GlobalArrayFrom<delegate*<…>>`) or a `lua_State*` type argument;
     fix is the `nint[]`-reinterpret already used for `byte**` arrays, extended to

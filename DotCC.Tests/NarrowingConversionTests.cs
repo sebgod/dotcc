@@ -26,12 +26,15 @@ public sealed class NarrowingConversionTests
         return path;
     }
 
-    // Capture stderr around one EmitCSharp call. Methods within a test class run
-    // sequentially, so the Console.Error swap is contained to this class.
+    // Capture stderr around one EmitCSharp call. Console.Error is process-global
+    // and other test classes may run in parallel, so the writer is NOT disposed —
+    // a stray concurrent write lands in a still-live buffer (harmless) rather than
+    // throwing ObjectDisposedException in the other test. The assertions only look
+    // for our own `[-Wconversion]` text, which no other test emits.
     private static string EmitCapturingStderr(string src, bool warnConversion)
     {
         var prior = Console.Error;
-        using var sw = new StringWriter();
+        var sw = new StringWriter();
         Console.SetError(sw);
         try { Compiler.EmitCSharp(new[] { src }, warnConversion: warnConversion); }
         finally { Console.SetError(prior); }

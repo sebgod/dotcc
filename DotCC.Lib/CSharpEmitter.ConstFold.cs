@@ -177,6 +177,19 @@ internal sealed partial class CSharpEmitter
             : $"({targetCs})({value})";
     }
 
+    // Coerce a call argument to its parameter type — C's implicit argument
+    // conversion that C# rejects. Mirrors the store reconcile: an enum↔int mismatch
+    // (an enum parameter ← a non-matching value takes the enum cast; a non-enum
+    // parameter ← an enum value decays to int), else an integer narrowing /
+    // sign-incompatible argument takes the C-conversion cast (and -Wconversion
+    // flags a narrowing). Non-integer / matching types pass through.
+    private string CoerceArg(string arg, CType? argTy, string? argEnum, int? argConst, string paramCs, int line)
+    {
+        if (_enumTags.Contains(paramCs)) { return argEnum == paramCs ? arg : $"({paramCs})({arg})"; }
+        if (argEnum is not null) { return $"(int)({arg})"; }
+        return CoerceStore(arg, argTy, argConst, paramCs, line);
+    }
+
     // Byte width of a lowered C# integer type (the LP64 model — long/pointer = 8).
     private static int? IntWidth(string t) => t switch
     {
@@ -211,8 +224,8 @@ internal sealed partial class CSharpEmitter
     private static bool CsImplicitInt(string src, string tgt)
     {
         if (IntWidth(src) is not int sw || IntWidth(tgt) is not int tw) { return false; }
-        var srcUnsigned = src is "byte" or "ushort" or "uint" or "nuint";
-        var tgtUnsigned = tgt is "byte" or "ushort" or "uint" or "nuint";
+        var srcUnsigned = src is "byte" or "ushort" or "uint" or "ulong" or "nuint";
+        var tgtUnsigned = tgt is "byte" or "ushort" or "uint" or "ulong" or "nuint";
         return srcUnsigned ? tw > sw : (!tgtUnsigned && tw > sw);
     }
 

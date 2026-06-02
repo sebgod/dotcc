@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using LALR.CC.LexicalGrammar;
 
@@ -45,6 +46,10 @@ internal sealed partial class CSharpEmitter
         _currentFunctionName = name;
         _currentFunctionReturnType = type;
         _fnReturnTypes[name] = type;
+        // Record the parameter types (the staged params, in order) for call-site
+        // argument coercion. `_pendingParams` is consumed just below; capture it
+        // first. A void / no-arg signature records an empty list.
+        _fnParamTypes[name] = _pendingParams.Select(p => p.Type).ToList();
         // Fresh per-function scopes (no nested functions in C).
         _fnMalloc.Clear();
         _fnStatics.Clear();
@@ -827,6 +832,15 @@ internal sealed partial class CSharpEmitter
     // a consuming context (e.g. `int x = next(c)` decays, `Color d = next(c)`
     // needs no cast). Misses only a call placed before the callee's definition.
     private readonly Dictionary<string, string> _fnReturnTypes = new(StringComparer.Ordinal);
+
+    // Function (raw C name) → ordered emitted C# parameter types, TU-lifetime.
+    // Populated at each FnSig (StartFn) from the staged params; consulted by
+    // Visit(Call) to coerce each argument to its parameter type (C's implicit
+    // argument conversion — int↔unsigned/narrowing/enum — that C# rejects). Only
+    // FIXED params are recorded (a `...` isn't a param), so a variadic call's
+    // extra arguments are left uncoerced. Misses only a call placed before the
+    // callee's prototype (illegal in C99+, and Lua prototypes everything).
+    private readonly Dictionary<string, IReadOnlyList<string>> _fnParamTypes = new(StringComparer.Ordinal);
 
     // Struct/union/typedef-struct field-name tracker. Same precedent as
     // `_enumerators`: visitor-time symbol table. StructMember pushes each

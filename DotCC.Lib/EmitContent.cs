@@ -166,7 +166,12 @@ public abstract record EmitContent
     /// needs an argument's type without re-deriving it — e.g. the <c>&lt;stdatomic.h&gt;</c>
     /// lowering reads <c>atomic_store(&amp;x, v)</c>'s first-arg pointer type to cast
     /// <c>v</c> to the pointee. Null when no argument carried a type.</param>
-    public sealed record Args(IReadOnlyList<string> Values, EmitContent? SoleArg = null, IReadOnlyList<string?>? ArgEnums = null, IReadOnlyList<CType?>? ArgTypes = null) : EmitContent;
+    /// <param name="ArgConsts">Per-argument folded integer constant (aligned with
+    /// <paramref name="Values"/>), or null when the argument isn't a constant. Lets
+    /// the call-site argument coercion treat a constant that FITS the parameter as
+    /// needing no cast (and an out-of-range constant as needing <c>unchecked</c>),
+    /// mirroring the store-conversion rule.</param>
+    public sealed record Args(IReadOnlyList<string> Values, EmitContent? SoleArg = null, IReadOnlyList<string?>? ArgEnums = null, IReadOnlyList<CType?>? ArgTypes = null, IReadOnlyList<int?>? ArgConsts = null) : EmitContent;
 
     /// <summary>
     /// AST marker for <c>sizeof(T)</c> over a named type. Produced by

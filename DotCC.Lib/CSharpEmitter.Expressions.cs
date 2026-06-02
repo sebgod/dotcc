@@ -854,7 +854,28 @@ internal sealed partial class CSharpEmitter
             sb.Append(".Done()");
             return sb.ToString();
         }
-        var callText = $"{callee}({string.Join(", ", args.Select(DecayFnName))})";
+        // Coerce each argument to the callee's parameter type — C's implicit
+        // argument conversion (int↔unsigned / narrowing / enum↔int) that C#
+        // rejects. Only fires for a callee with recorded fixed-param types (user
+        // functions + synthetic-header libc prototypes, which match the emitted
+        // signatures); a variadic call's extra args (beyond the fixed params) keep
+        // the plain fn-name decay, as do calls through fn-ptr locals / unknowns.
+        var paramTypes = _fnParamTypes.TryGetValue(Unescape(callee), out var pts) ? pts : null;
+        var argTypes = argsContent.ArgTypes;
+        var argConsts = argsContent.ArgConsts;
+        var callLine = n.Arg0.Position.Line;
+        string EmitArg(int i)
+        {
+            var a = DecayFnName(args[i]);
+            if (paramTypes is not null && i < paramTypes.Count)
+            {
+                a = CoerceArg(a, argTypes is { } at ? at[i] : null,
+                    argEnums is { } ae2 ? ae2[i] : null,
+                    argConsts is { } ac ? ac[i] : null, paramTypes[i], callLine);
+            }
+            return a;
+        }
+        var callText = $"{callee}({string.Join(", ", Enumerable.Range(0, args.Count).Select(EmitArg))})";
         // Tag the result with the callee's return type: the enum type drives
         // int↔enum reconciliation at the call site, and the CType lets sizeof of
         // a call result resolve.
@@ -871,6 +892,12 @@ internal sealed partial class CSharpEmitter
         if (callee == "printf") { return "printf(Libc.L(\"\\0\"u8)).Done()"; }
         return $"{callee}()";
     }
+
+    // An argument's CType for call-site coercion: the synthesized type, or `int`
+    // for a bare `sizeof` (a SizeofType marker carries no CType but is C# `int`),
+    // so `f(sizeof(T))` into a `size_t` parameter reconciles like any int arg.
+    private CType? ArgTypeOf(Item it) =>
+        TyOf(it) ?? (IntOperandType(it) is string t ? new CType.Sized(t) : null);
 
     // ArgsCons (`ArgList → E ',' ArgList`) prepends the new expression
     // (Arg0, Text) onto the recursively-built ArgList (Arg2, Args).
@@ -889,15 +916,19 @@ internal sealed partial class CSharpEmitter
         enums.AddRange(tailArgs.ArgEnums ?? new string?[tail.Count]);
         // Carry per-arg CTypes (the <stdatomic.h> lowering reads the first arg's
         // pointer type to cast the value arg to the pointee).
-        var types = new List<CType?>(tail.Count + 1) { TyOf(n.Arg0) };
+        var types = new List<CType?>(tail.Count + 1) { ArgTypeOf(n.Arg0) };
         types.AddRange(tailArgs.ArgTypes ?? new CType?[tail.Count]);
-        return new EmitContent.Args(combined, ArgEnums: enums, ArgTypes: types);
+        // Carry per-arg integer constants for the call-site coercion (a fitting
+        // constant needs no cast; an out-of-range one needs `unchecked`).
+        var consts = new List<int?>(tail.Count + 1) { ConstOfItem(n.Arg0) };
+        consts.AddRange(tailArgs.ArgConsts ?? new int?[tail.Count]);
+        return new EmitContent.Args(combined, ArgEnums: enums, ArgTypes: types, ArgConsts: consts);
     }
 
     // SoleArg keeps the single argument's structured Content alongside its
     // rendered text, so a one-arg call (malloc) can inspect it structurally.
     public EmitContent Visit(C.ArgsOne n) =>
-        new EmitContent.Args(new[] { T(n.Arg0) }, n.Arg0.Content as EmitContent, new[] { EnumOf(n.Arg0) }, new[] { TyOf(n.Arg0) });
+        new EmitContent.Args(new[] { T(n.Arg0) }, n.Arg0.Content as EmitContent, new[] { EnumOf(n.Arg0) }, new[] { ArgTypeOf(n.Arg0) }, new[] { ConstOfItem(n.Arg0) });
 
     // Variable reference. Three emit-time rewrites:
     //   - `__func__` → `L("name\0"u8)` using `_currentFunctionName` (set
