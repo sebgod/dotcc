@@ -122,6 +122,20 @@ public abstract record EmitContent
     public sealed record VoidCond(string Value, string IfStatement) : EmitContent;
 
     /// <summary>
+    /// A value-context comma whose leading operand(s) can't be C# tuple elements —
+    /// a VOID operand (a void <see cref="VoidCond"/> guard ternary), e.g. Lua's
+    /// `luaM_newvectorchecked` = `(luaM_checksize(…), luaM_newvector(…))` assigned
+    /// to a pointer. C# can't sequence a void side-effect before a value in
+    /// expression position, so this carries the leading operands as STATEMENTS to
+    /// hoist plus the comma's <see cref="ValueExpr"/>. A statement-level sink
+    /// (assignment / decl-init / return / expression-statement) folds itself into
+    /// the value and emits <c>{ leadingStmts; sink(valueExpr); }</c>; a non-hoisting
+    /// value consumer (a function argument, etc.) can't lift statements, so
+    /// <c>T()</c> fails loudly rather than miscompile.
+    /// </summary>
+    public sealed record SeqExpr(IReadOnlyList<string> LeadingStmts, string ValueExpr, CType? Ty = null) : EmitContent;
+
+    /// <summary>
     /// Accumulator for declaration-specifier sequences (<c>int</c>,
     /// <c>unsigned</c>, <c>long</c>, etc.). <see cref="ResolveTypeSpec"/>
     /// turns this into a final <see cref="Text"/> with the resolved C#

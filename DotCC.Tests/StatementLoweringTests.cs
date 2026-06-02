@@ -80,6 +80,38 @@ public sealed class StatementLoweringTests
     }
 
     [Fact]
+    public void value_context_void_comma_hoists_at_assignment()
+    {
+        // `lhs = (voidguard, value)` — the void guard can't be a tuple element, so
+        // it hoists as a statement and the assignment becomes the value (SeqExpr).
+        var emitted = Emit("""
+            static void g(void) { }
+            int main(void) {
+                int x = 0;
+                int *p = &x;
+                p = ((1 > 2 ? g() : (void)(0)), p);
+                return *p;
+            }
+            """);
+        // the guard lowered to an if/else statement, hoisted before the assignment
+        emitted.ShouldContain("if (Cond.B(");
+        emitted.ShouldContain("p = ");
+        emitted.ShouldNotContain(").Item2");   // not a tuple — a void operand can't be one
+    }
+
+    [Fact]
+    public void value_context_void_comma_hoists_at_return()
+    {
+        var emitted = Emit("""
+            static void g(void) { }
+            int *pick(int *a) { return ((1 > 2 ? g() : (void)(0)), a); }
+            int main(void) { int x = 9; return *pick(&x); }
+            """);
+        emitted.ShouldContain("return a");
+        emitted.ShouldContain("if (Cond.B(");
+    }
+
+    [Fact]
     public void setjmp_try_body_is_braced()
     {
         // `if (setjmp(env) == 0) stmt;` — the try BODY must be a block (`try stmt;`

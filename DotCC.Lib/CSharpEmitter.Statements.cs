@@ -219,6 +219,12 @@ internal sealed partial class CSharpEmitter
     public EmitContent Visit(C.CommaExprCons n) => $"{T(n.Arg0)}, {StripOuterParens(T(n.Arg2))}";
     public EmitContent Visit(C.StmtReturn n)
     {
+        // `return (guard, value);` — a value-context comma needing hoisting: lift
+        // the leading statements, then return the value.
+        if (n.Arg1.Content is EmitContent.SeqExpr se)
+        {
+            return $"{{\n{IndentEach(string.Concat(se.LeadingStmts))}return {se.ValueExpr};\n}}\n";
+        }
         // Reconcile the returned value's enum-ness with the declared return type
         // (same rule as a decl/assignment sink): enum fn ← non-matching value
         // gets `(Enum)`, non-enum fn ← enum value decays to `(int)`.
@@ -317,6 +323,14 @@ internal sealed partial class CSharpEmitter
         if (n.Arg0.Content is EmitContent.VoidCond vc)
         {
             return $"{{\n{IndentEach(vc.IfStatement)}}}\n";
+        }
+        // A value-context comma needing hoisting reaches statement position (Lua's
+        // `f->code = luaM_newvectorchecked(…);`): emit the leading statements, then
+        // the value expression as a discard statement, all in one block.
+        if (n.Arg0.Content is EmitContent.SeqExpr se)
+        {
+            var body = string.Concat(se.LeadingStmts) + $"{StripOuterParens(se.ValueExpr)};\n";
+            return $"{{\n{IndentEach(body)}}}\n";
         }
         if (CommaOpsOf(n.Arg0) is { } ops)
         {

@@ -12,6 +12,15 @@ internal sealed partial class CSharpEmitter
     // Expressions — paren-heavy to stay precedence-safe.
     public EmitContent Visit(C.Assign n)
     {
+        // RHS is a value-context comma needing hoisting (Lua's `f->code =
+        // luaM_newvectorchecked(…)`): lift its leading statements and make the
+        // assignment itself the value. (The plain `lhs = value` form is used — the
+        // Lua cases are pointer stores, no enum/atomic/volatile reconcile needed.)
+        if (n.Arg2.Content is EmitContent.SeqExpr se)
+        {
+            return new EmitContent.SeqExpr(se.LeadingStmts,
+                $"({T(n.Arg0)} = {se.ValueExpr})", TyOf(n.Arg0));
+        }
         // An atomic lvalue stores seq-cst via Atomic.Store (which returns the stored
         // value, so `x = v` works as an rvalue too). Checked before volatile.
         if (ALValueOf(n.Arg0) is string alv)
@@ -224,6 +233,13 @@ internal sealed partial class CSharpEmitter
     public EmitContent Visit(C.Cast n)
     {
         var castType = T(n.Arg1);
+        // A cast over a value-context comma needing hoisting — keep the SeqExpr,
+        // wrapping the cast around its value (the leading statements ride along).
+        if (n.Arg3.Content is EmitContent.SeqExpr cse)
+        {
+            return new EmitContent.SeqExpr(cse.LeadingStmts, $"({castType})({cse.ValueExpr})",
+                new CType.Sized(castType));
+        }
         // `(void)X` — a discard. C# has no void cast, and the value is thrown away,
         // so lower to a DISCARD: the operand's side effects, as statements. If X is
         // a comma (`(void)(save(), next())`, via the cast_void(save_and_next) idiom
@@ -1106,11 +1122,48 @@ internal sealed partial class CSharpEmitter
         // parenthesized comma / `(void)` discard carrying CommaOps) so a nested
         // comma `(a, b), c` / `a, (b, c)` becomes the flat [a, b, c] — the leading
         // operands are side effects, the last is the value.
-        var ops = new List<string>();
-        if (CommaOpsOf(n.Arg0) is { } left) { ops.AddRange(left); } else { ops.Add(T(n.Arg0)); }
-        if (CommaOpsOf(n.Arg2) is { } right) { ops.AddRange(right); } else { ops.Add(T(n.Arg2)); }
+        var parts = CommaParts(n.Arg0);
+        parts.AddRange(CommaParts(n.Arg2));
+        // If a NON-LAST operand is VOID (a void guard ternary — no C# value form),
+        // the comma can't be a tuple. Hoist the leading operands as statements and
+        // keep the last as the value (Lua's `luaM_newvectorchecked`). Otherwise the
+        // ordinary value-tuple / discard-statements forms apply (a CommaSeq).
+        if (parts.Take(parts.Count - 1).Any(p => p.IsVoid))
+        {
+            var leading = parts.Take(parts.Count - 1).Select(p => p.Stmt).ToList();
+            return new EmitContent.SeqExpr(leading, parts[^1].Value, TyOf(n.Arg2));
+        }
         // The comma expression's value (and type) is its LAST operand.
-        return new EmitContent.CommaSeq(ops, TyOf(n.Arg2));
+        return new EmitContent.CommaSeq(parts.Select(p => p.Value).ToList(), TyOf(n.Arg2));
+    }
+
+    /// <summary>
+    /// Flatten a comma operand into parts, each carrying a VALUE form (for the tuple
+    /// path), a STATEMENT form (for the discard / hoist path), and whether it's VOID
+    /// (a guard ternary with no C# value — forces the hoisting SeqExpr path). Flattens
+    /// nested commas (a raw CommaSeq, a parenthesised comma's CommaOps, or a SeqExpr).
+    /// </summary>
+    private List<(string Value, string Stmt, bool IsVoid)> CommaParts(Item it)
+    {
+        // A void guard ternary: its statement form is the if/else; no value form.
+        if (it.Content is EmitContent.VoidCond vc)
+        {
+            return new() { (vc.Value, vc.IfStatement, true) };
+        }
+        // A nested hoist: its leading statements (already statement strings) + its value.
+        if (it.Content is EmitContent.SeqExpr se)
+        {
+            var ps = se.LeadingStmts.Select(s => (s, s, false)).ToList();
+            ps.Add((se.ValueExpr, $"{StripOuterParens(se.ValueExpr)};\n", false));
+            return ps;
+        }
+        // A flattenable comma (raw CommaSeq / parenthesised comma): value-capable operands.
+        if (CommaOpsOf(it) is { } ops)
+        {
+            return ops.Select(o => (o, $"{StripOuterParens(o)};\n", false)).ToList();
+        }
+        var t = T(it);
+        return new() { (t, $"{StripOuterParens(t)};\n", false) };
     }
 
     /// <summary>
@@ -1185,6 +1238,13 @@ internal sealed partial class CSharpEmitter
         if (n.Arg1.Content is EmitContent.VoidCond pvc)
         {
             return new EmitContent.VoidCond($"({pvc.Value})", pvc.IfStatement);
+        }
+        // A parenthesised value-context comma needing hoisting (Lua's
+        // `luaM_newvectorchecked` IS wrapped in parens) — keep the SeqExpr so the
+        // statement sink still recovers the leading statements + value.
+        if (n.Arg1.Content is EmitContent.SeqExpr pse)
+        {
+            return new EmitContent.SeqExpr(pse.LeadingStmts, $"({pse.ValueExpr})", pse.Ty);
         }
         // Propagate the volatile-lvalue and pointee-volatile tags through the parens
         // so `(x) = …` / `&(x)` see the write/address context and `(*p)` / `(p)[i]`

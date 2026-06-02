@@ -43,6 +43,18 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         // text so Roslyn errors loudly. Statement/body consumers special-case
         // VoidCond BEFORE calling T() and emit its if/else form instead.
         EmitContent.VoidCond vc => vc.Value,
+        // A value-context comma needing statement hoisting (void leading operand)
+        // reached a consumer that can't lift statements (a function argument, a
+        // tuple element, …). The statement-level sinks (assignment / decl-init /
+        // return / expression-statement) special-case SeqExpr BEFORE T(); reaching
+        // here means a context dotcc can't hoist into — fail loudly, don't miscompile.
+        EmitContent.SeqExpr =>
+            throw new CompileException(
+                "a comma expression with a void leading operand (e.g. a bounds-check " +
+                "macro like Lua's `luaM_newvectorchecked`) is only supported where its " +
+                "statements can be hoisted — an assignment, declaration initializer, " +
+                "`return`, or expression statement. It can't be used as a function " +
+                "argument or other nested value position."),
         string s => s,
         // setjmp variants must be consumed by Visit(Eq)/Visit(Neq) or
         // Visit(StmtIfElse). Reaching T() means setjmp showed up in a

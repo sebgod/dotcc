@@ -473,11 +473,22 @@ new class of latent bugs the probe never could.
     helper): `(*p)++` must keep its parens — `*p++` is `*(p++)` (wrong + CS0201).
     The postfix-`++` analogue of Phase 4y's `PostfixBase`. Fixture
     `deref-incr-decr/`.
-- ⬜ **Phase 6b — value-context void-comma** (the remaining 14 errors): Lua's
+- ✅ **Phase 6b — value-context void-comma** (cleared the 14): Lua's
   `luaM_newvectorchecked` = `(luaM_checksize(…), luaM_newvector(…))` — a comma
-  whose leading operand is a noreturn void guard ternary, in VALUE position
-  (assigned). A void value can't be a C# tuple element, so this needs
-  statement-hoisting (`SeqExpr`) at the assignment / decl-init / return sink.
+  whose leading operand is a void guard ternary, in VALUE position (assigned). A
+  void value can't be a C# tuple element, so `EmitContent.SeqExpr` carries the
+  leading operand(s) as statements + the comma's value, hoisted at the
+  statement-level sink (assignment / `return` / expression-statement) as
+  `{ leadingStmts; sink(value); }`. Propagates through Paren/Cast; a non-hoisting
+  value position (function arg, …) fails loudly. Fixture `comma-void-value/`.
+  **The whole 31-TU program now compiles past the statement/expression layer** —
+  remaining errors are missing typedef resolutions (`size_t`/`lu_byte`/… as bare
+  type names) + a `void` parameter, the next wall (6c).
+- ⬜ **Phase 6c — whole-program type/symbol resolution**: ~20 CS0246 (typedef
+  names like `size_t`/`ptrdiff_t`/`lu_byte`/`lua_KContext` emitted as bare C#
+  type names rather than resolved aliases — likely a function-pointer-typedef /
+  merge-context issue) + 2 CS1536 (`void` parameter). These are semantic errors
+  that the earlier syntax errors had masked.
 
 ### ⬜ Phase 7 — Stretch: standalone REPL / `luac`
 - Minimal `lua.c` (no readline/signal niceties) and/or `luac.c`.
