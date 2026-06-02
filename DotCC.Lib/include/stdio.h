@@ -28,6 +28,23 @@
 #define SEEK_CUR 1
 #define SEEK_END 2
 
+/* Implementation-defined limits (C99 7.21.1). The exact values are
+   impl-defined — portable code must treat them as opaque constants —
+   so dotcc just picks reasonable ones that satisfy the standard's
+   minima (BUFSIZ >= 256, FOPEN_MAX >= 8, TMP_MAX >= 25). BUFSIZ is the
+   default stream buffer size; code like Lua's `char buff[BUFSIZ]` only
+   needs it to fold to a constant array bound. */
+#define BUFSIZ 8192
+#define FILENAME_MAX 4096
+#define FOPEN_MAX 16
+#define TMP_MAX 238328
+#define L_tmpnam 20
+
+/* setvbuf buffering modes (C99 7.21.5.6). */
+#define _IOFBF 0
+#define _IOLBF 1
+#define _IONBF 2
+
 /* Formatted output (to stdout / a buffer). */
 int printf(char* fmt, ...);
 int sprintf(char* dst, char* fmt, ...);

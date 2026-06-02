@@ -1,0 +1,6 @@
+buff>=256: 1
+FOPEN_MAX>=8: 1
+TMP_MAX>=25: 1
+FILENAME_MAX>0: 1
+L_tmpnam>0: 1
+modes distinct: 1

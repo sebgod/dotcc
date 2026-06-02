@@ -222,7 +222,8 @@ The runtime surface dotcc-emitted programs link against. Each function routes to
 | `remove`, `rename` | ✅ | `File.Delete` / `File.Move`; 0 on success, -1+`errno` on failure. |
 | `tmpfile` | ✅ | Anonymous read/write temp file, `DeleteOnClose`. `tmpnam` not added (insecure; `tmpfile` is the safe primitive). |
 | `fflush` | ✅ | Flushes the file's writer; `fflush(NULL)` flushes the console streams. |
-| `setbuf`, `setvbuf` | 🚫 | No equivalent control over `Console`/`Stream` buffering |
+| `setbuf`, `setvbuf` | 🚫 | No equivalent control over `Console`/`Stream` buffering. (The mode macros `_IOFBF`/`_IOLBF`/`_IONBF` ARE defined — see the macros row — so a `setvbuf(fp, …, _IONBF, 0)` call parses; the function itself is unbacked.) |
+| **Macros** `EOF`, `NULL`, `SEEK_SET/CUR/END`, `BUFSIZ`, `FILENAME_MAX`, `FOPEN_MAX`, `TMP_MAX`, `L_tmpnam`, `_IOFBF/_IOLBF/_IONBF` | ✅ | The standard `<stdio.h>` object-like macros (C99 7.21.1). The limit values are **implementation-defined** — dotcc picks ones satisfying the standard minima (`BUFSIZ` 8192 ≥ 256, `FOPEN_MAX` 16 ≥ 8, `TMP_MAX` 238328 ≥ 25). `BUFSIZ` as a **constant array bound** (Lua lauxlib's `char buff[BUFSIZ];`) folds through the const-expr layer to the literal a C# `fixed`-buffer needs. Fixture `stdio-limits/`, unit tests `StdioLimitsTests`. |
 
 ### `stdlib.h`
 
