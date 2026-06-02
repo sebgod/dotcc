@@ -1,0 +1,3 @@
+bool-keyword
+1 0
+def=1
