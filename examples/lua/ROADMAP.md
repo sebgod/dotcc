@@ -537,7 +537,23 @@ new class of latent bugs the probe never could.
   → CS0118; rare in Lua — 2 sites — because a subscripted base `tbl[i].func(…)`
   disqualifies the cast reading. The fixture reads the field into a local fn-ptr
   first; the call-through case is below.)
-- 🧱 **Phase 6h+ — the remaining deep walls** (~1450 errors):
+- ✅ **Phase 6h — enum case labels / switch subject reconcile to int** (cleared
+  the CS0266 `RESERVED`→`int` chunk, 96 → 0; CS0266 210 → 114). A C `switch` is
+  int-semantic — the controlling expression is integer-promoted and case labels
+  are converted to that type — so Lua's lexer switches a plain-`int` token field
+  against `enum RESERVED` member labels (`case TK_NAME:`). dotcc lowers enums to
+  real C# enums, which reject both `switch(int){ case Enum.X }` and
+  `switch(Enum){ case (int)… }`. Fix: decay an enum-typed switch subject AND
+  enumerator case labels to `(int)` (the existing `IntDecay` enum-sink helper) —
+  uniform int = pure C semantics, and a switch ON an enum keeps working. Fixture
+  `enum-switch-int/`.
+- 🧱 **Phase 6i+ — the remaining deep walls** (~1340 errors):
+  - **C implicit conversions at stores/sinks (CS0266 ~114).** C allows implicit
+    narrowing (`lu_byte b = some_int;` → `int`→`byte`, 70) and signed→unsigned
+    (`int`→`ulong` 34, `long`→`ulong`) at assignment / init / return / arg; C#
+    requires an explicit cast. Needs the CType layer to insert the C-conversion
+    cast at the store position (mirrors the enum-sink reconcile). Also includes
+    integer `0` assigned to a pointer lvalue (should lower to `null`).
   - **Pointer / fn-ptr types as generic type arguments (74: CS0306).** A bare
     fn-ptr array (`GlobalArrayFrom<delegate*<…>>`) or a `lua_State*` type argument;
     fix is the `nint[]`-reinterpret already used for `byte**` arrays, extended to
@@ -546,9 +562,8 @@ new class of latent bugs the probe never could.
   - **Call through a parenthesized simple-member fn-ptr callee (CS0118).** `(r.func)(5)`
     reads as a cast in C#; strip the redundant callee parens (or call without them)
     when the inner expression is a member access / subscript.
-  - Long tail: CS0266 (~210 — incl. integer `0` assigned to a pointer lvalue, which
-    should lower to `null`), CS1503 (~206), CS0034 (180) operator ambiguity, CS0121
-    (152) ambiguous overloads, CS9060, … — triage next.
+  - Long tail: CS1503 (~206), CS0034 (180) operator ambiguity, CS0121 (152)
+    ambiguous overloads, CS9060, … — triage next.
 
 ### ⬜ Phase 7 — Stretch: standalone REPL / `luac`
 - Minimal `lua.c` (no readline/signal niceties) and/or `luac.c`.

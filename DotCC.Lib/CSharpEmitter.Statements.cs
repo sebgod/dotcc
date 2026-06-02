@@ -255,14 +255,23 @@ internal sealed partial class CSharpEmitter
             return $"{{\n{IndentEach(CommaLeadingStmts(ops))}"
                 + $"switch ({StripOuterParens(ops[^1])}) {T(n.Arg4)}}}\n";
         }
-        return $"switch ({T(n.Arg2)}) {T(n.Arg4)}";
+        // A C `switch` is int-semantic (the controlling expression is integer-
+        // promoted, case labels converted to that type), but dotcc lowers enums to
+        // real C# enums — and C# rejects `switch(int) { case Enum.X: }` AND
+        // `switch(Enum) { case (int)… }`. Decay an enum-typed subject to (int) so
+        // it matches the (int)-decayed enumerator case labels below (uniform int =
+        // pure C semantics). A non-enum subject is untouched.
+        return $"switch ({IntDecay(n.Arg2)}) {T(n.Arg4)}";
     }
 
     // Statement-level case/default labels. Body is a single Stmt (which
     // may itself be another labeled stmt — `case 1: case 2: do_thing();`
-    // chains naturally).
+    // chains naturally). An enumerator case label (`case TK_NAME:`) decays to its
+    // (int) constant value so it matches the int-decayed switch subject; a label
+    // that's already an int constant expression is untouched (an enum operand of a
+    // `case A | B:` expression already decayed at the operator).
     public EmitContent Visit(C.CaseLabel n) =>
-        $"case {T(n.Arg1)}:\n{T(n.Arg3)}";
+        $"case {IntDecay(n.Arg1)}:\n{T(n.Arg3)}";
     public EmitContent Visit(C.DefaultLabel n) =>
         $"default:\n{T(n.Arg2)}";
     // Tagged as a declaration statement so the C90 mixed-declarations gate can
