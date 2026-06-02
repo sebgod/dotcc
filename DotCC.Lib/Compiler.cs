@@ -939,6 +939,23 @@ public static class Compiler
                 public static bool B(int x) => x != 0;
                 public static bool B(double x) => x != 0;
                 public static unsafe bool B(void* p) => p != null;
+                // A C scalar of ANY integer/float type is truthy when non-zero;
+                // emit one exact overload per lowered numeric type. Without these,
+                // a `byte`/`uint`/`long`/`ulong`/… argument (e.g. Lua's `lu_byte`
+                // `allowhook`) is convertible to BOTH a built-in numeric overload
+                // AND `CBool` (via a one-step user-defined conversion), so the call
+                // is ambiguous (CS0121). An exact match beats the user-defined
+                // CBool path, so each type resolves unambiguously.
+                public static bool B(uint x) => x != 0;
+                public static bool B(long x) => x != 0;
+                public static bool B(ulong x) => x != 0;
+                public static bool B(nint x) => x != 0;
+                public static bool B(nuint x) => x != 0;
+                public static bool B(sbyte x) => x != 0;
+                public static bool B(byte x) => x != 0;
+                public static bool B(short x) => x != 0;
+                public static bool B(ushort x) => x != 0;
+                public static bool B(float x) => x != 0;
                 // Relational / logical results lower to CBool (C's int 0/1);
                 // unwrap to bool for the conditional position they sit in.
                 public static bool B(CBool b) => (int)b != 0;
@@ -1049,6 +1066,23 @@ public static class Compiler
                 public static bool B(int x) => x != 0;
                 public static bool B(double x) => x != 0;
                 public static unsafe bool B(void* p) => p != null;
+                // A C scalar of ANY integer/float type is truthy when non-zero;
+                // emit one exact overload per lowered numeric type. Without these,
+                // a `byte`/`uint`/`long`/`ulong`/… argument (e.g. Lua's `lu_byte`
+                // `allowhook`) is convertible to BOTH a built-in numeric overload
+                // AND `CBool` (via a one-step user-defined conversion), so the call
+                // is ambiguous (CS0121). An exact match beats the user-defined
+                // CBool path, so each type resolves unambiguously.
+                public static bool B(uint x) => x != 0;
+                public static bool B(long x) => x != 0;
+                public static bool B(ulong x) => x != 0;
+                public static bool B(nint x) => x != 0;
+                public static bool B(nuint x) => x != 0;
+                public static bool B(sbyte x) => x != 0;
+                public static bool B(byte x) => x != 0;
+                public static bool B(short x) => x != 0;
+                public static bool B(ushort x) => x != 0;
+                public static bool B(float x) => x != 0;
                 // Relational / logical results lower to CBool (C's int 0/1);
                 // unwrap to bool for the conditional position they sit in.
                 public static bool B(CBool b) => (int)b != 0;
