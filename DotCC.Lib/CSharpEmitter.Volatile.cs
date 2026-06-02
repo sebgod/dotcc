@@ -83,7 +83,7 @@ internal sealed partial class CSharpEmitter
     private bool FieldVolatile(Item baseItem, string field)
     {
         if (TyOf(baseItem) is not CType.Sized s) { return false; }
-        var t = s.CsType.TrimEnd('*');
+        var t = StructKeyOf(s.CsType);
         return _structVolatileFields.TryGetValue(t, out var set) && set.Contains(field);
     }
 
@@ -147,7 +147,7 @@ internal sealed partial class CSharpEmitter
     private bool FieldVolatilePointee(Item baseItem, string field)
     {
         if (TyOf(baseItem) is not CType.Sized s) { return false; }
-        var t = s.CsType.TrimEnd('*');
+        var t = StructKeyOf(s.CsType);
         return _structVolatilePointeeFields.TryGetValue(t, out var set) && set.Contains(field);
     }
 

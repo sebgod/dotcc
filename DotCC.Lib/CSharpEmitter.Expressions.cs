@@ -319,7 +319,12 @@ internal sealed partial class CSharpEmitter
             var discard = CommaOpsOf(n.Arg3) is { } ops
                 ? new List<string>(ops)
                 : new List<string> { $"_ = ({T(n.Arg3)})" };
-            return new EmitContent.Text($"((void)({T(n.Arg3)}))", CommaOps: discard, VoidCast: true);
+            // Carry the discarded operand's CType (the `_ = (X)` form's type is X's).
+            // When this `(void)X` is a comma operand reaching the value-tuple path, a
+            // POINTER X (`(void)L`, `(void)(p->f)`) can't be a ValueTuple element, so
+            // CommaTupleText nint-casts it — but only if it knows the operand's type.
+            return new EmitContent.Text($"((void)({T(n.Arg3)}))", Ty: TyOf(n.Arg3),
+                CommaOps: discard, VoidCast: true);
         }
         // `(S*)malloc(sizeof(S))` — propagate the MallocSizeof marker through a
         // matching pointer cast so the enclosing declaration can still recognise
@@ -382,15 +387,18 @@ internal sealed partial class CSharpEmitter
     // parenthesised lvalue. `(x)++` would parse as post-inc on a parens
     // expression, but C# accepts `++x` directly. Enum-ness propagates (C# ++/--
     // work on enums) so a `c++` value used in an int slot still gets decayed.
-    public EmitContent Visit(C.PreInc n) => AtomicStep(n.Arg1, isPost: false, "+") ?? VolatileStep(n.Arg1, "+") ?? (EmitContent)new EmitContent.Text($"(++{StripOuterParens(T(n.Arg1))})", EnumOf(n.Arg1));
-    public EmitContent Visit(C.PreDec n) => AtomicStep(n.Arg1, isPost: false, "-") ?? VolatileStep(n.Arg1, "-") ?? (EmitContent)new EmitContent.Text($"(--{StripOuterParens(T(n.Arg1))})", EnumOf(n.Arg1));
+    // `++x` / `--x` carry the operand's CType (pointer increment yields the same
+    // pointer type; integer the same int) so a pointer result reaching the comma
+    // value-tuple is nint-cast (Lua's `(void)(++mode)` discard with a `char*` mode).
+    public EmitContent Visit(C.PreInc n) => AtomicStep(n.Arg1, isPost: false, "+") ?? VolatileStep(n.Arg1, "+") ?? (EmitContent)new EmitContent.Text($"(++{StripOuterParens(T(n.Arg1))})", EnumOf(n.Arg1), TyOf(n.Arg1));
+    public EmitContent Visit(C.PreDec n) => AtomicStep(n.Arg1, isPost: false, "-") ?? VolatileStep(n.Arg1, "-") ?? (EmitContent)new EmitContent.Text($"(--{StripOuterParens(T(n.Arg1))})", EnumOf(n.Arg1), TyOf(n.Arg1));
     // Postfix ++/-- — strip a fully-redundant wrap, but a COMPOUND base keeps its
     // parens (PostfixBase): `(*p)++` must stay `((*p)++)`, not `(*p++)` (= `*(p++)`,
     // wrong precedence AND not a statement-expression — CS0201). Same fix as the
     // `.`/`->` postfix base (Phase 4y); a bare lvalue / member chain / index is
     // unwrapped. Prefix ++/-- bind looser so `++*p` = `++(*p)` is already correct.
-    public EmitContent Visit(C.PostInc n) => AtomicStep(n.Arg0, isPost: true, "+") ?? VolatileStep(n.Arg0, "+") ?? (EmitContent)new EmitContent.Text($"({PostfixBase(StripOuterParens(T(n.Arg0)))}++)", EnumOf(n.Arg0));
-    public EmitContent Visit(C.PostDec n) => AtomicStep(n.Arg0, isPost: true, "-") ?? VolatileStep(n.Arg0, "-") ?? (EmitContent)new EmitContent.Text($"({PostfixBase(StripOuterParens(T(n.Arg0)))}--)", EnumOf(n.Arg0));
+    public EmitContent Visit(C.PostInc n) => AtomicStep(n.Arg0, isPost: true, "+") ?? VolatileStep(n.Arg0, "+") ?? (EmitContent)new EmitContent.Text($"({PostfixBase(StripOuterParens(T(n.Arg0)))}++)", EnumOf(n.Arg0), TyOf(n.Arg0));
+    public EmitContent Visit(C.PostDec n) => AtomicStep(n.Arg0, isPost: true, "-") ?? VolatileStep(n.Arg0, "-") ?? (EmitContent)new EmitContent.Text($"({PostfixBase(StripOuterParens(T(n.Arg0)))}--)", EnumOf(n.Arg0), TyOf(n.Arg0));
     // Subscript `expr[i]`. For a 1-D array / pointer it's an ordinary C#
     // pointer subscript (matching C). For a MULTI-dimensional array, dotcc
     // flattened the storage, so a PARTIAL index (more dimensions remain) is
@@ -587,7 +595,7 @@ internal sealed partial class CSharpEmitter
     private string? PromotedSynth(Item baseItem, string field)
     {
         if (TyOf(baseItem) is not CType.Sized s) { return null; }
-        var t = s.CsType.TrimEnd('*');
+        var t = StructKeyOf(s.CsType);
         return _promotedFields.TryGetValue(t, out var pf) && pf.TryGetValue(field, out var synth) ? synth : null;
     }
 
@@ -597,7 +605,7 @@ internal sealed partial class CSharpEmitter
     private string? FieldEnum(Item baseItem, string field)
     {
         if (TyOf(baseItem) is not CType.Sized s) { return null; }
-        var t = s.CsType.TrimEnd('*');
+        var t = StructKeyOf(s.CsType);
         return _structFieldEnums.TryGetValue(t, out var fe) && fe.TryGetValue(field, out var e) ? e : null;
     }
 
@@ -609,8 +617,50 @@ internal sealed partial class CSharpEmitter
     private CType? FieldCType(Item baseItem, string field)
     {
         if (TyOf(baseItem) is not CType.Sized s) { return null; }
-        var t = s.CsType.TrimEnd('*');
+        var t = StructKeyOf(s.CsType);
         return _structFieldTypes.TryGetValue(t, out var ft) && ft.TryGetValue(field, out var cty) ? cty : null;
+    }
+
+    // The struct/union name whose members a base of C# type `cs` exposes. A base
+    // may be a struct VALUE (`TValue`), a spelled-out pointer (`TValue*` → peel to
+    // `TValue`), a POINTER TYPEDEF (Lua's `StkId` → resolve to `StackValue*` →
+    // peel to `StackValue`), or a pointer to an aliased struct (`LStream*` → peel
+    // to `LStream` → resolve to `luaL_Stream`). The star can appear EITHER on the
+    // spelled type OR inside a typedef target, so peel-stars and resolve-typedef
+    // must alternate: each hop trims trailing `*`, returns on a known aggregate,
+    // else resolves one typedef level. `_structFieldTypes` is keyed under every
+    // aggregate name (tag + typedef), so its key set is the reliable
+    // "is this a known aggregate" oracle shared by every field side-table
+    // (FieldEnum / FieldAtomic / FieldVolatile / …). Bounded against any cycle.
+    // True when `s` is a single C# identifier (optionally @-escaped) — no dots,
+    // operators, parens, or whitespace. Used to recognise a redundantly
+    // parenthesised bare-name callee so the cast-ambiguous `(f)(args)` can be
+    // unwrapped to `f(args)`.
+    private static bool IsSimpleIdentifier(string s)
+    {
+        s = s.Trim();
+        if (s.Length == 0) { return false; }
+        var i = s[0] == '@' ? 1 : 0;
+        if (i >= s.Length || !(char.IsLetter(s[i]) || s[i] == '_')) { return false; }
+        for (i++; i < s.Length; i++)
+        {
+            if (!(char.IsLetterOrDigit(s[i]) || s[i] == '_')) { return false; }
+        }
+        return true;
+    }
+
+    private string StructKeyOf(string cs)
+    {
+        var t = cs;
+        for (var i = 0; i < 8; i++)
+        {
+            t = t.TrimEnd('*');
+            if (_structFieldTypes.ContainsKey(t)) { return t; }
+            var resolved = ResolveTypedef(t);
+            if (resolved == t) { return t; }
+            t = resolved;
+        }
+        return t.TrimEnd('*');
     }
 
     // (element C# type, count) of `field` if it's an [InlineArray] member of the
@@ -619,7 +669,7 @@ internal sealed partial class CSharpEmitter
     private (string Elem, int Count)? FieldInlineArr(Item baseItem, string field)
     {
         if (TyOf(baseItem) is not CType.Sized s) { return null; }
-        var t = s.CsType.TrimEnd('*');
+        var t = StructKeyOf(s.CsType);
         return _structInlineArrFields.TryGetValue(t, out var m) && m.TryGetValue(field, out var info)
             ? info : null;
     }
@@ -631,7 +681,7 @@ internal sealed partial class CSharpEmitter
     private (string Elem, bool IsInline, CType Arr)? FieldMultiDim(Item baseItem, string field)
     {
         if (TyOf(baseItem) is not CType.Sized s) { return null; }
-        var t = s.CsType.TrimEnd('*');
+        var t = StructKeyOf(s.CsType);
         return _structMultiDimMembers.TryGetValue(t, out var m) && m.TryGetValue(field, out var info)
             ? info : null;
     }
@@ -762,6 +812,15 @@ internal sealed partial class CSharpEmitter
     public EmitContent Visit(C.Call n)
     {
         var callee = T(n.Arg0);
+        // A PARENTHESIZED simple-identifier callee — Lua's `(f)(L, ud)` direct
+        // fn-ptr call (its `LUAI_TRY` macro spells the call as `((f)(L, ud))`) —
+        // is cast-ambiguous in C#: `(f)` parses as a cast and `(L, ud)` becomes a
+        // ValueTuple (CS0306). The parens are redundant around a bare name, so
+        // strip them; the result parses as the invocation it is. Stripping also
+        // lets the `_localNames` shadow check below see the bare name. A COMPOUND
+        // callee (`(*f)`, `(a ? b : c)`) keeps its parens — there the precedence
+        // matters and there's no cast-ambiguity (a leading `*`/`?` can't be a type).
+        if (IsSimpleIdentifier(StripOuterParens(callee))) { callee = StripOuterParens(callee); }
         var argsContent = (EmitContent.Args)n.Arg2.Content;
         var args = argsContent.Values;  // strongly-typed arg list, no sentinel splitting
         // A local/param that SHADOWS a libc builtin name (e.g. a function-pointer

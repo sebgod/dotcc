@@ -75,7 +75,7 @@ internal sealed partial class CSharpEmitter
     private string? FieldAtomic(Item baseItem, string field)
     {
         if (TyOf(baseItem) is not CType.Sized s) { return null; }
-        var t = s.CsType.TrimEnd('*');
+        var t = StructKeyOf(s.CsType);
         return _structAtomicFields.TryGetValue(t, out var m) && m.TryGetValue(field, out var ct) ? ct : null;
     }
 

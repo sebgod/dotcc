@@ -621,16 +621,36 @@ new class of latent bugs the probe never could.
   body (every case below) is known when the switch reduces — no separate pass. The
   jump statements / labels / blocks tag `Terminates`; stacked labels and
   already-terminating sections are left alone. Fixture `switch-fallthrough/`.
-- 🧱 **Phase 6l+ — the remaining deep walls** (~136 errors):
-  - **Field-chain CType for union/struct members (residual CS0306 ~54).** Propagate
-    a member's pointer / fn-ptr type through `(&x)->u.f` so the comma-tuple (and
-    other type-directed paths) see it; plus the `(f)(L,ud)` fn-ptr call-through and
-    the fn-ptr-ARRAY `GlobalArrayFrom` (task #23) extension.
-  - **CS0221 (~34), CS1501 (~30), CS0193 (~28), CS0103 (~20), CS0212, CS8210,
-    CS1503/CS0266/CS0034 tails** — a diverse long tail to triage next.
+- ✅ **Phase 6l — field-chain CType + fn-ptr call-through (CS0306 27 → 0;
+  total 136 → 106).** Four root-cause fixes feeding the comma-tuple's pointer
+  detection, all converging on "synthesize the operand's type so the tuple can
+  `nint`-cast a pointer":
+  - **Pointer-typedef field base.** The Field* helpers (`FieldCType` /
+    `FieldEnum` / `FieldAtomic` / `FieldVolatile[Pointee]` / `FieldInlineArr` /
+    `FieldMultiDim` / `PromotedSynth`) keyed the struct-field tables off
+    `s.CsType.TrimEnd('*')` — which misses a base that's a *pointer typedef*
+    (`StkId` → `StackValue*`) or a pointer to an *aliased* struct (`LStream*` →
+    `luaL_Stream`). A shared `StructKeyOf` now alternately peels `*` and resolves
+    typedefs to the underlying aggregate, so `((&(func->val))->value_).f` finds
+    `f`'s `lua_CFunction` type and the tuple `nint`-casts it.
+  - **`(void)X` discard carries X's CType.** A `(void)ptr` comma operand
+    (Lua's `check_exp` lead) was untyped, so a pointer discard wasn't
+    `nint`-cast. The void-cast Text now carries `Ty: TyOf(operand)`.
+  - **`++p` / `p++` carry the operand's pointer type**, so a discarded pointer
+    increment (`(void)(++mode)`) `nint`-casts.
+  - **Parenthesised bare-name callee unwrap.** Lua's `LUAI_TRY` spells a direct
+    fn-ptr call as `((f)(L, ud))`; C# reads `(f)(…)` as a cast (→ tuple, CS0306).
+    `Visit(C.Call)` strips the redundant parens around a simple-identifier callee
+    → `f(L, ud)` (which also routes it through the `_localNames` shadow path).
+
+    Fixture `fnptr-field-comma/`; unit tests `FieldChainCommaTests`.
+- 🧱 **Phase 6m+ — the remaining deep walls** (~106 errors):
+  - **CS0221 (~17), CS1501 (~15), CS0193 (~14), CS0103 (~10), CS0212 (~9),
+    CS8210 (~7), CS1503/CS0266/CS0034 tails** — a diverse long tail to triage next.
   - **Call through a parenthesized simple-member fn-ptr callee (CS0118).** `(r.func)(5)`
     reads as a cast in C#; strip the redundant callee parens when the inner
-    expression is a member access / subscript.
+    expression is a member access / subscript (the bare-identifier case landed in 6l).
+  - The fn-ptr-ARRAY `GlobalArrayFrom` (task #23) extension.
 
 ### ⬜ Phase 7 — Stretch: standalone REPL / `luac`
 - Minimal `lua.c` (no readline/signal niceties) and/or `luac.c`.
