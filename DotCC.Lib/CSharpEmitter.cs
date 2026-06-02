@@ -588,12 +588,16 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         return count;
     }
 
-    // Strip ALL redundant outer paren layers (`((x))` → `x`). Iterating matters
-    // for a macro-parenthesized assignment used as a statement-expression:
-    // `step()` = `(i = i+1)` lowers to `((i = (i+1)))` (the assign emitter's parens
-    // plus the macro's), and a parenthesized assignment `(i = …);` is CS0201 in C#
-    // — only the bare assignment is a valid statement-expression. One pass would
-    // leave a layer; the loop reduces it to `i = (i+1)`.
+    /// <summary>
+    /// Strip ALL redundant outer paren layers (<c>((x))</c> → <c>x</c>). Iterating
+    /// matters for a macro-parenthesized assignment used as a statement-expression:
+    /// <c>step()</c> = <c>(i = i+1)</c> lowers to <c>((i = (i+1)))</c> (the assign
+    /// emitter's parens plus the macro's), and a parenthesized assignment
+    /// <c>(i = …);</c> is CS0201 in C# — only the bare assignment is a valid
+    /// statement-expression. One pass would leave a layer; the loop reduces it to
+    /// <c>i = (i+1)</c>. A paren whose match closes before the end (<c>(a)(b)</c>,
+    /// <c>(a) + (b)</c>) is NOT redundant and is left intact.
+    /// </summary>
     private static string StripOuterParens(string s)
     {
         while (s.Length >= 2 && s[0] == '(' && s[^1] == ')')

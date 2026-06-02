@@ -999,10 +999,12 @@ internal sealed partial class CSharpEmitter
         return new EmitContent.CommaSeq(ops, TyOf(n.Arg2));
     }
 
-    // The value-context form of a comma sequence: a C# tuple yields all elements
-    // in order and the `.ItemN` picks the last (the comma's value). Requires
-    // non-void operands (a void operand can't be a tuple element — that reaches
-    // Roslyn as a loud error, never a silent miscompile). ≤7 operands.
+    /// <summary>
+    /// The value-context form of a comma sequence: a C# tuple yields all elements
+    /// in order and the <c>.ItemN</c> picks the last (the comma's value). Requires
+    /// non-void operands (a void operand can't be a tuple element — that reaches
+    /// Roslyn as a loud error, never a silent miscompile). ≤7 operands.
+    /// </summary>
     private static string CommaTupleText(IReadOnlyList<string> ops)
     {
         if (ops.Count > 7)
@@ -1014,11 +1016,13 @@ internal sealed partial class CSharpEmitter
         return $"({joined}).Item{ops.Count}";
     }
 
-    // The raw comma operands an Item carries, whether it's a bare comma sequence
-    // (`a, b` — a CommaSeq straight from CommaOp) or a PARENTHESIZED one (`(a, b)`
-    // — a Text carrying CommaOps, value being the tuple). Null for a non-comma.
-    // Lets a discard context (statement / `(void)` cast / controlling expression)
-    // recover the operands and emit them as statements.
+    /// <summary>
+    /// The raw comma operands an Item carries, whether it's a bare comma sequence
+    /// (<c>a, b</c> — a CommaSeq straight from CommaOp) or a PARENTHESIZED one
+    /// (<c>(a, b)</c> — a Text carrying CommaOps, value being the tuple). Null for
+    /// a non-comma. Lets a discard context (statement / <c>(void)</c> cast /
+    /// controlling expression) recover the operands and emit them as statements.
+    /// </summary>
     private static IReadOnlyList<string>? CommaOpsOf(Item it) => it.Content switch
     {
         EmitContent.CommaSeq cs => cs.Operands,
@@ -1026,10 +1030,12 @@ internal sealed partial class CSharpEmitter
         _ => null,
     };
 
-    // Emit the leading (all-but-last) operands of a comma sequence as discard
-    // statements — the C semantics of a comma's non-last operands (evaluated for
-    // side effects, value discarded). A void operand (a void call, or a `(void)`
-    // cast that lowered to its operands) is legal here, unlike in the tuple form.
+    /// <summary>
+    /// Emit the leading (all-but-last) operands of a comma sequence as discard
+    /// statements — the C semantics of a comma's non-last operands (evaluated for
+    /// side effects, value discarded). A void operand (a void call, or a <c>(void)</c>
+    /// cast that lowered to its operands) is legal here, unlike in the tuple form.
+    /// </summary>
     private static string CommaLeadingStmts(IReadOnlyList<string> ops)
     {
         var sb = new System.Text.StringBuilder();
