@@ -515,19 +515,25 @@ new class of latent bugs the probe never could.
   `.ItemN` back to the pointer type when the value is a pointer. Fixture
   `comma-pointer-value/`. (Residual 74 CS0306 = bare fn-ptr arrays /
   untyped-pointer operands — fold into the items below.)
-- 🧱 **Phase 6f+ — the remaining deep walls** (~2350 errors):
-  - **CS0149 (840) "method name expected"** — now the largest; a call through
-    something dotcc emits as a non-method (likely function-pointer-table / decayed
-    fn-name call sites). Triage next.
-  - **Function-name decay in initializers (~312: CS8787/CS0149).** A bare function
-    name where a function pointer is wanted needs `&fn`; dotcc adds it for call
-    args / decl-init but not yet for struct-field / array initializers (the
-    `luaL_Reg` `{ "name", func }` entries); a file-scope struct init with a fn-ptr
-    field also errors (CS0246). Includes the bare-fn-ptr-array CS0306. [Tracked:
+- ✅ **Phase 6f — string-literal helper collision with a user `L`** (cleared
+  CS0149 840 → 0; total ~2350 → ~1520). CS0149 "method name expected" wasn't the
+  function-decay cluster as guessed — it was the string-literal helper `L(...)`
+  being SHADOWED by Lua's ubiquitous `lua_State *L` parameter, so `L("…")` tried
+  to "call" the variable `L`. The four string-literal emit points now emit the
+  helper QUALIFIED as `Libc.L(...)`, which a user `L` can't shadow. Fixture
+  `string-literal-L-collision/`. (A user type/var named `Libc` could still shadow
+  `Libc.L` — the bulletproof fix is `global::Libc.L`; tracked as a broader
+  `global::` hardening sweep, deferred.)
+- 🧱 **Phase 6g+ — the remaining deep walls** (~1520 errors):
+  - **Function-name decay in initializers (~312: CS8787).** A bare function name
+    where a function pointer is wanted needs `&fn`; dotcc adds it for call args /
+    decl-init but not yet for struct-field / array initializers (the `luaL_Reg`
+    `{ "name", func }` entries); a file-scope struct init with a fn-ptr field also
+    errors (CS0246). Includes the residual bare-fn-ptr-array CS0306 (74). [Tracked:
     restore the full `fnptr-table/` fixture once these land.]
-  - Long tail: CS0266 (208 — incl. integer `0` assigned to a pointer lvalue, which
-    should lower to `null`), CS1503 (204), CS0034 (180) operator ambiguity, CS0121
-    (152) ambiguous overloads, … — triage after the systemic fixes.
+  - Long tail: CS0266 (~210 — incl. integer `0` assigned to a pointer lvalue, which
+    should lower to `null`), CS1503 (~206), CS0034 (180) operator ambiguity, CS0121
+    (152) ambiguous overloads, CS9060, … — triage after the fn-decay fix.
 
 ### ⬜ Phase 7 — Stretch: standalone REPL / `luac`
 - Minimal `lua.c` (no readline/signal niceties) and/or `luac.c`.

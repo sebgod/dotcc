@@ -805,7 +805,7 @@ internal sealed partial class CSharpEmitter
     public EmitContent Visit(C.CallNoArgs n)
     {
         var callee = T(n.Arg0);
-        if (callee == "printf") { return "printf(L(\"\\0\"u8)).Done()"; }
+        if (callee == "printf") { return "printf(Libc.L(\"\\0\"u8)).Done()"; }
         return $"{callee}()";
     }
 
@@ -862,7 +862,7 @@ internal sealed partial class CSharpEmitter
             // silently producing wrong code.
             var fn = _currentFunctionName
                 ?? throw new CompileException("`__func__` used outside any function definition");
-            return Typed($"L(\"{fn}\\0\"u8)", new CType.Sized("byte*"));
+            return Typed($"Libc.L(\"{fn}\\0\"u8)", new CType.Sized("byte*"));
         }
         // A block-scope `static` local shadows any global/enumerator of the
         // same name within this function — rewrite to its mangled global field.
@@ -1084,10 +1084,10 @@ internal sealed partial class CSharpEmitter
         if (items.Exists(it => it.IsByte && it.Value > 0x7F))
         {
             var (arr, alen) = EmitByteArray(items);
-            return Typed($"L({arr})", new CType.Arr(new CType.Sized("byte"), alen + 1));
+            return Typed($"Libc.L({arr})", new CType.Arr(new CType.Sized("byte"), alen + 1));
         }
         var (escaped, byteLen) = EmitU8(items);
-        return Typed($"L(\"{escaped}\\0\"u8)", new CType.Arr(new CType.Sized("byte"), byteLen + 1));
+        return Typed($"Libc.L(\"{escaped}\\0\"u8)", new CType.Arr(new CType.Sized("byte"), byteLen + 1));
     }
 
     // C char literal — type `int`, but our `char` is `byte`. Decode the escape

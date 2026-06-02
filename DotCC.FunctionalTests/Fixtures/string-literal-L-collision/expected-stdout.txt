@@ -1,0 +1,2 @@
+start 7
+L=42 msg=hi

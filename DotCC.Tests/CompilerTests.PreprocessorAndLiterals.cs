@@ -1378,4 +1378,26 @@ public sealed partial class CompilerTests
         finally { File.Delete(src); }
     }
 
+    [Fact]
+    public void String_literal_helper_is_qualified_so_a_user_L_cannot_shadow_it()
+    {
+        // The string-literal helper is `Libc.L`. Lua's ubiquitous `lua_State *L`
+        // parameter would shadow a BARE `L(...)`, making `L("…")` try to call the
+        // variable `L` (CS0149). Emitting `Libc.L(...)` (qualified) avoids that.
+        var src = WriteTemp("""
+            int show(int L) { return (int)"hi"[L - L]; }
+            int main(void) { int L = 0; return show(L) + (int)"x"[L]; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            // The user's two literals lower to the QUALIFIED helper, so the `L`
+            // parameter/local can't capture them. (A bare `L("hi"…)` would be
+            // CS0149 against the `int L`.)
+            emitted.ShouldContain("Libc.L(\"hi\\0\"u8)");
+            emitted.ShouldContain("Libc.L(\"x\\0\"u8)");
+        }
+        finally { File.Delete(src); }
+    }
+
 }
