@@ -63,7 +63,7 @@ gcc-oracle in WSL needs the Windows path bridged: `WIN_PWD=$(pwd -W)` then
 
 ## Progress
 
-Whole-program link error count: **761 → 19** this run of sessions.
+Whole-program link error count: **761 → 13** this run of sessions.
 
 | Phase | What landed | Errors |
 |---|---|---|
@@ -81,55 +81,56 @@ Whole-program link error count: **761 → 19** this run of sessions.
 | 6t | C null-pointer constant `0` → `null` at pointer store/return/arg (CoerceStore) | 24 → 22 |
 | 6u | fn-ptr vs bare-fn-name compare → cast decayed `&fn` to the other operand's type (CS0019→0) | 22 → 21 |
 | 6v | comparison / logical (`&&`/`||`/`!`) results tagged `int` so narrower-int stores coerce (CS0266 2) | 21 → **19** |
+| 6w | scope field-type map per nesting level (luaL_Buffer nested-fields clobber — CS1503/CS0266 partial); rewrite `goto label`→`goto case` for labels at case starts (CS0159 ×2, l_tforloop/l_tforcall); propagate `Terminates` through `StmtLabel`; VaArg byte operator (CS0457) | 19 → **13** |
 
-Tests currently green: **760 unit / 175 functional**.
+Tests currently green: **762 unit / 175 functional**.
 
-## Current wall — 19 errors
+## Current wall — 13 errors
 
 Histogram (deduped):
 
 ```
- 5 CS0159   4 CS1503   3 CS0163   2 CS8183   1 CS0457
- 1 CS0306   1 CS0266   1 CS0034   1 CS0029
+ 3 CS1503   3 CS0159   2 CS8183   2 CS0163   1 CS0306
+ 1 CS0266   1 CS0034   1 CS0029
 ```
 
 Triage notes per family (file:line are into `build/Program.cs` after `link.sh all`):
 
-- **CS0159 (5) — `No such label` for `ret` / `l_tforcall` / `l_tforloop`** (19513,
-  19546, 19566, 19715, 19783). These are `luaV_execute`'s VM-dispatch labels. C
-  allows `goto` INTO a block; C# does not (only out of / within). The labels live
-  inside `switch`-case `{ }` blocks (needed for per-case locals), and the gotos
-  target them from OTHER cases — `goto l_tforloop` from `case OP_TFORCALL` jumps
-  into `case OP_TFORLOOP`'s block. **Hard, structural.** The targets coincide with
-  a case START, so the likely fix is to rewrite `goto <label>` → `goto case <X>`
-  when the label is the first thing in case X (dotcc's 6k already emits `goto case`
-  for fall-through); `ret` is trickier (jump to shared return handling — may need
-  the label hoisted to the switch/loop scope that encloses all the gotos).
+- **CS0159 (3) — `No such label` for `ret`** (19513, 19546, 19566). These are
+  `luaV_execute`'s shared return-handler label `ret` inside `case OP_RETURN`'s brace
+  block, targeted by `goto ret` from OTHER cases (OP_TAILCALL etc.). The `l_tforloop`
+  / `l_tforcall` labels were fixed in 6w (they're at case starts → `goto case`). `ret`
+  is NOT at a case start — it needs the label body HOISTED above/outside the switch.
+  **Structural fix needed:** in SwitchBody, detect labels that are cross-case goto
+  targets but not at case starts, then extract the label+body to the switch's enclosing
+  scope. The label hoisting was prototyped but caused brace corruption in other switches
+  (lstrlib's `match` function); needs a more precise extraction that preserves case
+  structure.
 
-- **CS1503 (4) / CS0266 (1)** — conversion residue. **ROOT-CAUSED:** `B->size = …`
-  (L20599) and `memcpy(…, B->n * sizeof)` (L20505) don't coerce because
-  `luaL_Buffer`'s outer field types (`size_t n`, `char *b`) are LOST from
-  `_structFieldTypes`. Mechanism: `luaL_Buffer` has a NAMED member
-  `union { LUAI_MAXALIGN; char b[…]; } init;` whose inner fields include `n`
-  (`lua_Number`, from the `LUAI_MAXALIGN` macro) and `b` (`char[]`) — the SAME
-  names as the outer `n`/`b`. `_pendingFields` is a range-sliced LIST (handles dup
-  names fine), but `_pendingFieldTypeMap` is a flat NAME-keyed dict, so when the
-  union's inner `n`/`b` are visited they CLOBBER the parent's entries; then
-  `EmitNamedNestedAggregate` drains those keys into the nested type's map and
-  removes them — deleting the parent's `n`/`b` types entirely. **Fix:** scope the
-  field-type map per nesting level (a stack mirroring `_memberMarks` / the
-  `_pendingFields` range-slice), so a nested field's type can't overwrite a parent
-  field's. Minimal repro: `/tmp/lb2.c` (a struct with `size_t n; char *b;` then
-  `union { double n; char b[32]; } init;` — `B->n * sizeof` emits without the
-  `(int)` cast). `luaL_prepbuffsize(&b, (int)(16*sizeof(void*)))` (L22715/41,
-  `int→size_t` arg) is likely the same family or a `_fnParamTypes` forward-ref.
+- **CS1503 (3) / CS0266 (1) / CS0034 (1) / CS0029 (1)** — int↔ulong conversion residue.
+  LUAL_BUFFERSIZE is `((int)(16 * sizeof(void*) * sizeof(lua_Number)))` (int cast in
+  the macro), but `luaL_prepbuffsize`'s second param is `size_t` (= ulong). The
+  `CoerceArg` path should add `(ulong)` but `ArgTypes` may not be populated for the
+  argument. Also CS0034 (`ulong += int`) and CS0029 (int→ulong in ternary) are
+  residual mixed-type expressions. **Fix:** investigate why `_fnParamTypes` /
+  `ArgTypes` isn't flowing for `luaL_prepbuffsize`; add missing coercions.
 
-- **CS0163 (3)** — residual switch fall-through 6k missed (a case whose
-  terminating-ness wasn't detected — e.g. an `if/else` where both arms return, or a
-  fall-through through an empty stacked label). **CS0034 (1)** — a residual
-  `ulong/int` not on a sizeof. **CS8183 (2) / CS0457 / CS0306 / CS0029** — long-tail
-  singletons, look individually (CS0306 unmasked by 6q: a `&global` now compiling
-  feeds a comma-tuple wanting the `nint` round-trip).
+- **CS8183 (2)** — `_ = (luaP_isOT);` / `_ = (luaP_isIT);` (4745-4746). Bare function
+  names as discard RHS: `DecayFnName` prefixes `&`, but C# can't infer the discard
+  type from a method group. **Fix:** emit cast to function pointer type.
+
+- **CS0163 (2)** — residual switch fall-through gaps (19519, 19549 — OP_RETURN,
+  OP_RETURN0). The case bodies end with `goto ret;` (which targets `ret:` in the same
+  case OP_RETURN block), but the block's `Terminates` flag isn't propagating through
+  all the layers. **Fix:** trace why `StmtLabel`→block→case termination chain isn't
+  working for these specific cases.
+
+- **CS0306 (1)** — `UpVal*` as type argument to `Unsafe.AsPointer<T>()` at
+  `getupvalref` (2703). C# forbids pointer types as generic type arguments. The global
+  `__static_getupvalref_nullup` is `UpVal*`; taking its address produces `UpVal**`.
+  `AsPointer<T>` can't handle `T=UpVal*`, and `&staticField` gives CS0212. **Fix:**
+  needs a different address-of pattern for pointer-typed globals (maybe `fixed`-based
+  accessor, or change the global's declared type).
 
 ## Pending / deferred tasks
 
