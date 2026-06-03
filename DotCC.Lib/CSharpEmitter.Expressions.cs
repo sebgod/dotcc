@@ -232,8 +232,11 @@ internal sealed partial class CSharpEmitter
     // result is the value operand's type.
     private EmitContent ShiftText(Item a, string op, Item b)
     {
-        var count = IntDecay(b);
-        if (IntOperandType(b) is string ct && ct != "int") { count = $"(int)({count})"; }
+        // C# requires the shift count to be int (or implicitly int-convertible).
+        // C promotes small types to int for shift counts; dotcc always casts to
+        // int to avoid CS0019 (uint >> uint). The redundant `(int)` on an already-
+        // int count is harmless verbosity.
+        var count = $"(int)({IntDecay(b)})";
         // Fold `1 << K` (Lua's tag-bit masks) only when the value operand stays a
         // signed ≤32-bit int, so a folded mask reaches the cast range-check.
         var fold = IntFoldable(IntOperandType(a))
