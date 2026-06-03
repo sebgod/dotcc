@@ -38,6 +38,7 @@ public readonly struct VaArg
     // FROM each C argument type (applied at the call site by C# on each
     // variadic actual). char/short → int and float → double happen via the
     // standard implicit conversion before reaching these (C's promotions).
+    public static implicit operator VaArg(byte v) => new(v, 0);
     public static implicit operator VaArg(int v) => new(v, 0);
     public static implicit operator VaArg(uint v) => new(v, 0);
     public static implicit operator VaArg(long v) => new(v, 0);
