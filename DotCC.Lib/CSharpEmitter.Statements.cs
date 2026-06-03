@@ -329,6 +329,53 @@ internal sealed partial class CSharpEmitter
     // `goto default;` (or a trailing `break;` for the final section) — exactly the
     // jump C's implicit fall-through performs. Stacked labels (`case A: case B:`,
     // nested in one piece) and sections that already terminate are left alone. A
+    /// <summary>
+    /// Like <see cref="string.Replace(string,string)"/> but skips occurrences
+    /// inside nested <c>switch</c> blocks, where a goto-to-default rewrite
+    /// would target the wrong switch (C# scopes <c>goto default;</c> to the
+    /// innermost enclosing switch).
+    /// </summary>
+    private static string ReplaceOutsideNestedSwitches(string text, string from, string to)
+    {
+        // Quick check first: if there's nothing to replace or no nested switches, use fast path.
+        if (!text.Contains(from, StringComparison.Ordinal) || !text.Contains("switch", StringComparison.Ordinal))
+            return text.Replace(from, to);
+
+        var result = new System.Text.StringBuilder(text.Length);
+        var i = 0;
+        while (i < text.Length)
+        {
+            var nextSwitch = text.IndexOf("switch", i, StringComparison.Ordinal);
+            var nextFrom = text.IndexOf(from, i, StringComparison.Ordinal);
+            if (nextFrom < 0) { result.Append(text, i, text.Length - i); break; }
+            if (nextSwitch < 0 || nextFrom < nextSwitch)
+            {
+                // Replace this occurrence: it's before any nested switch.
+                result.Append(text, i, nextFrom - i);
+                result.Append(to);
+                i = nextFrom + from.Length;
+            }
+            else
+            {
+                // Append up to the nested switch; then skip the entire switch block.
+                result.Append(text, i, nextSwitch - i);
+                // Find the matching closing brace of the nested switch.
+                var depth = 0;
+                var j = nextSwitch;
+                var inSwitch = false;
+                while (j < text.Length)
+                {
+                    if (text[j] == '{') { depth++; inSwitch = true; }
+                    else if (text[j] == '}') { depth--; if (depth == 0 && inSwitch) { j++; break; } }
+                    j++;
+                }
+                result.Append(text, nextSwitch, j - nextSwitch);
+                i = j;
+            }
+        }
+        return result.ToString();
+    }
+
     // body that isn't a piece-carrying block (an empty `{ }`) emits verbatim.
     private string SwitchBody(Item blockItem)
     {
@@ -381,6 +428,11 @@ internal sealed partial class CSharpEmitter
         }
 
         // Rewrite `goto label;` → `goto case expr;` for labels mapped above.
+        // The replacement skips text inside nested switch blocks: in C#, `goto
+        // default;` inside a nested switch jumps to the *inner* switch's default
+        // case, not the outer label — so the inner goto must keep its named-label
+        // form. (Lua's lstrlib.c triggers this with `goto dflt;` inside an inner
+        // switch that targets a `dflt:` label on the outer `default:` case.)
         if (labelCaseMap.Count > 0)
         {
             for (var i = 0; i < texts.Count; i++)
@@ -389,7 +441,7 @@ internal sealed partial class CSharpEmitter
                 {
                     var from = $"goto {label};\n";
                     var to = caseExpr == "default" ? "goto default;\n" : $"goto case {caseExpr};\n";
-                    texts[i] = texts[i].Replace(from, to);
+                    texts[i] = ReplaceOutsideNestedSwitches(texts[i], from, to);
                 }
             }
         }
