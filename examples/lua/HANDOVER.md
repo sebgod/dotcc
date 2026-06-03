@@ -63,17 +63,26 @@ gcc-oracle in WSL needs the Windows path bridged: `WIN_PWD=$(pwd -W)` then
 
 ## Progress
 
-Whole-program link error count: **761 → 11** this run of sessions.
+Whole-program link error count: **761 → 0** this run of sessions.
 
-| Phase | What landed | Errors |
-|---|---|---|
-| 6i (×4) | C integer-conversion layer | 761 → ~185 |
-| 6j–6v | (see earlier handovers) | 185 → 19 |
-| 6w | scope field-type map per nesting level (luaL_Buffer); `goto label`→`goto case` for case-start labels; `Terminates` through `StmtLabel`; VaArg byte operator; void-cast fn-name as nint discard; `DecayFnName` on ternary arms | 19 → **11** |
+## Current wall — 0 errors
 
-Tests currently green: **762 unit / 175 functional**.
+The Lua link compiles cleanly: `0 Error(s)`, 335 warnings (harmless).
+All tests pass: 762 unit + 175 functional.
 
-## Current wall — 11 errors
+### Summary of fixes this session (19 → 0, 8 commits):
+
+| Commit | What |
+|--------|------|
+| `31a8fb6` | Scope field-type map per nesting level (luaL_Buffer) |
+| `1b2ec1d` | Rewrite `goto label` → `goto case` for case-start labels |
+| `a199e8f` | Propagate `Terminates` through `StmtLabel` |
+| `0f8b4d2` | VaArg byte implicit operator |
+| `7096fc9` | Void-cast fn-name → nint discard (CS8183 ×2) |
+| `c7e031e` | `DecayFnName` on ternary arms (fn-ptr decay) |
+| `2a81651` | Hoist cross-case `ret` label out of switch (CS0159 ×3, CS0163 ×2) |
+| `6b4bd90` | Compound assign sign-mismatch expansion (CS0034, CS0019) |
+| `6196f1d` | CoerceStore cast-expression fix + ternary arm coercion |
 
 Histogram (deduped):
 
