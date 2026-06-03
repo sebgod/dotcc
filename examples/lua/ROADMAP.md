@@ -766,10 +766,18 @@ new class of latent bugs the probe never could.
   `null-pointer-constant/`; unit tests `NullPointerConstantTests`. (NOTE: a
   pointer-vs-`0` COMPARISON `p == 0` is a separate gap — `int* == int` is CS0019;
   see the remaining tail.)
-- 🧱 **Phase 6u+ — the remaining deep walls** (~22 errors):
-  - **CS0159 (~5) labels, CS1503/CS0266 conversion residue (struct-field stores +
-    `luaL_Buffer` field-type recording), CS0163 (~3) switch fall-through,
-    singletons** (CS8183/CS0457/CS0306/CS0034/CS0029/CS0019).
+- ✅ **Phase 6u — function-pointer vs bare-fn-name comparison (CS0019 ×1; total
+  22 → 21).** `hook != hookf` — a fn-ptr compared to a bare function name. In C the
+  name decays to a function pointer; C#'s `&hookf` is an untyped method-group
+  address that can't be compared to a `delegate*`. `RelText` now decays a fn-name
+  comparison operand and casts the `&fn` to the OTHER operand's fn-ptr CType
+  (`hook != (lua_Hook)(&hookf)`). Fixture `fnptr-compare/`; unit test
+  `FnPtrCompareTests`.
+- 🧱 **Phase 6v+ — the remaining deep walls** (~21 errors):
+  - **CS0159 (~5) labels** (`goto` into a `switch`-case block in the Lua VM —
+    structural; likely `goto`→`goto case`), **CS1503/CS0266 conversion residue**
+    (struct-field stores + `luaL_Buffer` field-type recording + a CBool→byte store),
+    **CS0163 (~3) switch fall-through**, **singletons** (CS8183/CS0457/CS0306/CS0034/CS0029).
   - **Call through a parenthesized simple-member fn-ptr callee (CS0118).** `(r.func)(5)`
     reads as a cast in C#; strip the redundant callee parens when the inner
     expression is a member access / subscript (the bare-identifier case landed in 6l).

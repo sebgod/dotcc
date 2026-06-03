@@ -177,7 +177,28 @@ internal sealed partial class CSharpEmitter
     private string RelText(Item a, string op, Item b)
     {
         var (sa, sb, _) = ReconcileInt(a, b);
-        return $"((CBool)({sa} {op} {sb}))";
+        // A bare function name as a comparison operand (`hook != hookf`) is a
+        // function-to-pointer decay in C. C#'s `&fn` is a method-group address with
+        // no type of its own, so it can't be compared to a `delegate*` directly —
+        // cast it to the OTHER operand's fn-ptr type (`hook != (lua_Hook)(&hookf)`).
+        return $"((CBool)({DecayFnForCompare(a, sa, b)} {op} {DecayFnForCompare(b, sb, a)}))";
+    }
+
+    /// <summary>
+    /// If an operand's text <paramref name="s"/> decays to a function pointer
+    /// (<c>&amp;fn</c>), give it a type by casting to <paramref name="other"/>'s
+    /// fn-ptr CType — C#'s <c>&amp;method</c> is an untyped method-group address and
+    /// can't be compared to a <c>delegate*</c> on its own. A non-fn-name operand
+    /// passes through unchanged.
+    /// </summary>
+    private string DecayFnForCompare(Item operand, string s, Item other)
+    {
+        var decayed = DecayFnName(s);
+        if (decayed != s && TyOf(other) is CType.Sized ot && IsFnPtrCsType(ot.CsType))
+        {
+            return $"({ot.CsType})({decayed})";
+        }
+        return decayed;
     }
     // Bitwise — same precedence and semantics in C# (binary `& | ^`, shifts, and
     // unary `~`). `& | ^` reconcile both operands per the usual arithmetic
@@ -1542,11 +1563,14 @@ internal sealed partial class CSharpEmitter
             || _pointerTypedefNames.Contains(r);
     }
 
-    // True when a lowered C# type is a FUNCTION pointer specifically — a bare
-    // `delegate*<…>` or a typedef that resolves to one (`lua_CFunction` →
-    // `delegate*<lua_State*, int>`). Distinct from IsPointerCsType, which also
-    // matches data pointers: `*p` on a data pointer is a real dereference, but on
-    // a function pointer it's a C no-op (the function decays back to the pointer).
+    /// <summary>
+    /// True when a lowered C# type is a FUNCTION pointer specifically — a bare
+    /// <c>delegate*&lt;…&gt;</c> or a typedef that resolves to one (<c>lua_CFunction</c>
+    /// → <c>delegate*&lt;lua_State*, int&gt;</c>). Distinct from <see cref="IsPointerCsType"/>,
+    /// which also matches data pointers: <c>*p</c> on a data pointer is a real
+    /// dereference, but on a function pointer it's a C no-op (the function decays
+    /// back to the pointer).
+    /// </summary>
     private bool IsFnPtrCsType(string cs) =>
         cs.StartsWith("delegate*", StringComparison.Ordinal)
         // A fn-ptr typedef (`lua_CFunction`, `BinOp`) is a `using` alias, NOT in
