@@ -82,8 +82,8 @@ public sealed class CallArgConversionTests
             """);
         try
         {
-            // sizeof is C# `int`; passed to a size_t param it takes the cast.
-            Compiler.EmitCSharp(new[] { src }).ShouldContain("take((size_t)(sizeof(Big)))");
+            // sizeof is size_t (ulong) per C, matching the size_t param — no extra cast.
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("take((ulong)sizeof(Big))");
         }
         finally { File.Delete(src); }
     }

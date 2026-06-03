@@ -787,9 +787,13 @@ internal sealed partial class CSharpEmitter
                 "`sizeof` of this expression isn't supported yet — dotcc resolves sizeof of a "
                 + "variable, array, subscript, dereference, cast, literal, or call result. "
                 + "Use `sizeof(Type)` if you can.");
-        // Carry the folded byte size too, so `sizeof expr` works in an integer
-        // constant-expression position (e.g. an array bound). `sizeof` is constant.
-        return new EmitContent.Text(SizeofText(t), Ty: new CType.Sized("int"),
+        // `sizeof` yields `size_t` in C (an UNSIGNED type — `unsigned long` →
+        // `ulong` in dotcc's LP64 model, matching gcc/MSVC's 64-bit size_t and
+        // `offsetof` above). C#'s `sizeof` operator is `int`, so cast to ulong; the
+        // usual-arithmetic-conversion layer then reconciles `ulong / sizeof` as
+        // unsigned (it'd be CS0034 against a bare int). Carry the folded byte size
+        // so it still works in an integer constant-expression position (array bound).
+        return new EmitContent.Text($"(ulong){SizeofText(t)}", Ty: new CType.Sized("ulong"),
             ConstInt: SizeofConstOfCType(t), ConstExpr: true);
     }
 
@@ -910,7 +914,10 @@ internal sealed partial class CSharpEmitter
         if (callee == "malloc" && args.Count == 1
             && argsContent.SoleArg is EmitContent.SizeofType sz)
         {
-            return new EmitContent.MallocSizeof(sz.TypeName, $"malloc({args[0]})");
+            // Use the bare C# `sizeof(T)` (int) for the byte count — `malloc` takes
+            // `int`, and the rendered arg is now `(ulong)sizeof(T)` (sizeof is size_t),
+            // which wouldn't bind. The struct type is recorded for the stack-promote.
+            return new EmitContent.MallocSizeof(sz.TypeName, $"malloc(sizeof({sz.TypeName}))");
         }
         // free(p) — count it against the candidate `p` and, in the emit pass,
         // drop it entirely when `p` was promoted to a stack value (nothing to

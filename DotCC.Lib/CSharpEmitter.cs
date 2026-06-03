@@ -70,7 +70,9 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         // sizeof / malloc markers render to their ordinary low-level text in
         // every context except the one structural consumer that pattern-matches
         // the variant (malloc recognition in Call; promotion in DeclItemInit).
-        EmitContent.SizeofType st => $"sizeof({st.TypeName})",
+        // `sizeof(Type)` — C's result is `size_t` (unsigned), so cast C#'s int
+        // `sizeof` to ulong (dotcc's size_t). Matches Visit(C.SizeofExpr) + offsetof.
+        EmitContent.SizeofType st => $"(ulong)sizeof({st.TypeName})",
         EmitContent.MallocSizeof ms => ms.LowLevelText,
         // A bare comma sequence reaching a VALUE consumer (e.g. an unparenthesized
         // comma used where a value is needed) lowers to the same `(a, b).ItemN`
@@ -113,7 +115,15 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     private static string? EnumOf(Item it) => it.Content is EmitContent.Text { EnumType: { } e } ? e : null;
 
     /// <summary>The synthesized <see cref="CType"/> a child propagated, or null.</summary>
-    private static CType? TyOf(Item it) => it.Content is EmitContent.Text { Ty: { } t } ? t : null;
+    private static CType? TyOf(Item it) => it.Content switch
+    {
+        EmitContent.Text { Ty: { } t } => t,
+        // A bare `sizeof(Type)` marker is size_t (ulong); reporting it here lets a
+        // paren around it (`(sizeof(T))`) carry the type forward to the arithmetic
+        // reconcile, so `ulong / (sizeof(T))` isn't CS0034.
+        EmitContent.SizeofType => new CType.Sized("ulong"),
+        _ => null,
+    };
 
     /// <summary>True when this <c>Type</c> child carried a C99 <c>inline</c>
     /// function specifier (so the enclosing function gets AggressiveInlining).</summary>

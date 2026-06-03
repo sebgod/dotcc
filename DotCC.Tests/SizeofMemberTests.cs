@@ -38,21 +38,21 @@ public sealed class SizeofMemberTests
     public void member_field_sizeof_resolves_to_field_type()
     {
         var emitted = Compiler.EmitCSharp(new[] { WriteTemp(Probe("sizeof(p->in.d)")) });
-        emitted.ShouldContain("(int)sizeof(double)");   // nested member chain → double
+        emitted.ShouldContain("(int)(ulong)sizeof(double)");   // nested member chain → double
     }
 
     [Fact]
     public void pointer_member_subscript_sizeof_resolves_to_element()
     {
         var emitted = Compiler.EmitCSharp(new[] { WriteTemp(Probe("sizeof(p->code[0])")) });
-        emitted.ShouldContain("(int)sizeof(int)");      // int* element → int
+        emitted.ShouldContain("(int)(ulong)sizeof(int)");      // int* element → int
     }
 
     [Fact]
     public void deref_of_pointer_member_sizeof_resolves_to_pointee()
     {
         var emitted = Compiler.EmitCSharp(new[] { WriteTemp(Probe("sizeof(*p->code)")) });
-        emitted.ShouldContain("(int)sizeof(int)");
+        emitted.ShouldContain("(int)(ulong)sizeof(int)");
     }
 
     [Fact]
@@ -60,7 +60,7 @@ public sealed class SizeofMemberTests
     {
         // `(buf + n)[0]` — additive pointer arith carries buf's decayed (byte*) type.
         var emitted = Compiler.EmitCSharp(new[] { WriteTemp(Probe("sizeof((buf + n)[0])")) });
-        emitted.ShouldContain("(int)sizeof(byte)");     // char* element → byte
+        emitted.ShouldContain("(int)(ulong)sizeof(byte)");     // char* element → byte
     }
 
     [Fact]
@@ -68,7 +68,7 @@ public sealed class SizeofMemberTests
     {
         // The `getstr`-style shape: `((void)0, p->code)` — value is the last operand.
         var emitted = Compiler.EmitCSharp(new[] { WriteTemp(Probe("sizeof((((void)0), (p->code))[0])")) });
-        emitted.ShouldContain("(int)sizeof(int)");
+        emitted.ShouldContain("(int)(ulong)sizeof(int)");
     }
 
     [Fact]
@@ -78,7 +78,7 @@ public sealed class SizeofMemberTests
         // type (phase 6i), so `sizeof(n * n)` is `sizeof(int)` — exactly C's
         // semantics (the result of `int * int` is `int`).
         var emitted = Compiler.EmitCSharp(new[] { WriteTemp(Probe("sizeof(n * n)")) });
-        emitted.ShouldContain("(int)sizeof(int)");
+        emitted.ShouldContain("(int)(ulong)sizeof(int)");
     }
 
     [Fact]
@@ -110,14 +110,14 @@ public sealed class SizeofMemberTests
     {
         // `sizeof(*o->vec.arr)` — chain Outer→vec(synth)→arr(Elem*), deref → Elem.
         var emitted = Compiler.EmitCSharp(new[] { WriteTemp(NestProbe("sizeof(*o->vec.arr)")) });
-        emitted.ShouldContain("(int)sizeof(Elem)");
+        emitted.ShouldContain("(int)(ulong)sizeof(Elem)");
     }
 
     [Fact]
     public void sizeof_subscript_through_anonymous_nested_member_chain()
     {
         var emitted = Compiler.EmitCSharp(new[] { WriteTemp(NestProbe("sizeof(o->vec.arr[0])")) });
-        emitted.ShouldContain("(int)sizeof(Elem)");
+        emitted.ShouldContain("(int)(ulong)sizeof(Elem)");
     }
 
     [Fact]
@@ -126,6 +126,6 @@ public sealed class SizeofMemberTests
         // The synth nested type owns its inner fields' types: `sizeof(o->vec.n)` is
         // the int field of the synth type (not leaked to / from the parent Outer).
         var emitted = Compiler.EmitCSharp(new[] { WriteTemp(NestProbe("sizeof(o->vec.n)")) });
-        emitted.ShouldContain("(int)sizeof(int)");
+        emitted.ShouldContain("(int)(ulong)sizeof(int)");
     }
 }

@@ -739,9 +739,26 @@ new class of latent bugs the probe never could.
   sites — see the C-SUPPORT comma row; a future optimization could hoist more
   positions or emit a local function. Fixture `comma-void-call/` (incl. a
   short-circuit check); unit tests `CommaVoidCallTests`.
-- 🧱 **Phase 6s+ — the remaining deep walls** (~35 errors):
-  - **CS1503 (~9), CS0266/CS0034 tails, CS0159 (~5), CS0163 (~3)** — a diverse
-    long tail to triage next.
+- ✅ **Phase 6s — `sizeof` yields `size_t` (unsigned), not `int` (CS0034 6 → 1;
+  total 35 → 24).** C's `sizeof` is `size_t` — an UNSIGNED type, 64-bit on every
+  64-bit target (gcc/MSVC). dotcc had been tracking C#'s `sizeof` operator type
+  (`int`), so `MAX_SIZET / sizeof(T)` emitted `ulong / int` → CS0034 (no common
+  type in C#). Now `sizeof` lowers to `(ulong)sizeof(T)` (dotcc's `size_t` =
+  `unsigned long` = `ulong`, matching `offsetof`), tagged unsigned — so the
+  arithmetic reconcile sees `ulong / ulong`. Ripples handled: (a) `CoerceStore`
+  had a latent bug — it skipped the cast for a *fitting constant* assuming C#'s
+  implicit constant conversion, but that exists only FROM `int`, not from
+  `ulong`/`long` — so `int x = sizeof(T)` now correctly emits `(int)((ulong)
+  sizeof(T))`; the `unchecked` wrap is reserved for genuinely out-of-range
+  constants. (b) `malloc(sizeof(S))` emits the bare `sizeof(S)` (int) directly,
+  since `malloc` takes `int`. (c) the char-I/O libc functions (`fgetc`/`getc`/
+  `fgets`/`fputc`/`putc`/`fputs`) were never declared in synthetic `stdio.h` —
+  added their prototypes so dotcc knows the `int n` param and coerces a `size_t`
+  sizeof arg (Lua's `fgets(buf, sizeof(buf), fp)`). Fixture `sizeof-unsigned/`;
+  emit-shape unit tests across `CompilerTests.Dialect` / `SizeofMemberTests` /
+  `UsualArithConvTests` / `CallArgConversionTests` / `AnonStructDeclTests` updated.
+- 🧱 **Phase 6t+ — the remaining deep walls** (~24 errors):
+  - **CS1503 (~5), CS0159 (~5), CS0266 (~4), CS0163 (~3)** — a diverse long tail.
   - **Call through a parenthesized simple-member fn-ptr callee (CS0118).** `(r.func)(5)`
     reads as a cast in C#; strip the redundant callee parens when the inner
     expression is a member access / subscript (the bare-identifier case landed in 6l).

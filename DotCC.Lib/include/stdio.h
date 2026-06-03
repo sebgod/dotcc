@@ -58,10 +58,17 @@ int sscanf(char* src, char* fmt, ...);
 
 /* Whole-string output. */
 int puts(char* s);
+int fputs(char* s, FILE* stream);
 
-/* Character I/O on stdin / stdout. */
+/* Character I/O. Declared so dotcc knows the `int`/`FILE*` parameter types and
+   coerces arguments (e.g. a `size_t` sizeof passed to fgets's `int n`). */
 int putchar(int c);
 int getchar(void);
+int fputc(int c, FILE* stream);
+int putc(int c, FILE* stream);
+int fgetc(FILE* stream);
+int getc(FILE* stream);
+char* fgets(char* s, int n, FILE* stream);
 
 /* File streams (FILE* is a real pointer to the opaque Libc.FILE). */
 FILE* fopen(const char* path, const char* mode);

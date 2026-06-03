@@ -72,7 +72,7 @@ public sealed class AnonStructDeclTests
         try
         {
             Compiler.EmitCSharp(new[] { src })
-                .ShouldContain("(3 * sizeof(__NestS0)) / sizeof(__NestS0)");
+                .ShouldContain("(ulong)(3 * sizeof(__NestS0)) / (ulong)sizeof(__NestS0)");
         }
         finally { File.Delete(src); }
     }

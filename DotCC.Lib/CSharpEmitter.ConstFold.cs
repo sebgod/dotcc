@@ -90,7 +90,7 @@ internal sealed partial class CSharpEmitter
     // unknown) — those don't take the integer reconcile.
     private string? IntOperandType(Item it)
     {
-        if (it.Content is EmitContent.SizeofType) { return "int"; }  // C# sizeof is int
+        if (it.Content is EmitContent.SizeofType) { return "ulong"; }  // C `sizeof` is size_t
         if (TyOf(it) is CType.Sized s)
         {
             var r = ResolveTypedef(s.CsType);
@@ -170,10 +170,12 @@ internal sealed partial class CSharpEmitter
         var src = ResolveTypedef(s.CsType);
         var tgt = ResolveTypedef(targetCs);
         if (!IsIntegerCsType(src) || !IsIntegerCsType(tgt) || src == tgt) { return value; }
-        // A constant that FITS the target needs no cast and is no narrowing — C#'s
-        // implicit constant conversion accepts `byte b = 5;` / `uint u = 0;`, and
-        // gcc -Wconversion only warns when the constant is OUT of range.
-        if (constValue is int cv && ConstFitsTarget(cv, tgt)) { return value; }
+        // A constant that FITS the target needs no cast — BUT only when C# actually
+        // performs the implicit constant-expression conversion, which it does ONLY
+        // from a constant of type `int` (`byte b = 5;` / `uint u = 0;`). There is NO
+        // implicit constant conversion FROM `ulong`/`long` to a narrower/signed type,
+        // so a fitting `(ulong)sizeof(T)` still needs the explicit cast (CS0266).
+        if (src == "int" && constValue is int cv && ConstFitsTarget(cv, tgt)) { return value; }
         if (CsImplicitInt(src, tgt)) { return value; }   // C# widens for free
         // C# rejects this conversion (CS0266); insert the cast C allows implicitly.
         // Warn only when it's a genuine width-narrowing (the user-facing meaning of
@@ -182,11 +184,12 @@ internal sealed partial class CSharpEmitter
         {
             _conversionGate?.Narrowing(s.CsType, targetCs, _currentFunctionName, line);
         }
-        // Reaching here with a known constant means it did NOT fit (the fit guard
-        // returned early otherwise) — a C# constant cast out of range is a compile
-        // error (CS0221) unless wrapped in `unchecked`. Runtime casts truncate
-        // unchecked by default, so a non-constant value needs no wrapper.
-        return constValue is not null
+        // A C# constant cast that's OUT of the target range is a compile error
+        // (CS0221) unless wrapped in `unchecked`. A constant that DOES fit (reaching
+        // here only because the source type blocked the implicit conversion above,
+        // e.g. a fitting `ulong`→`int`) takes a plain cast; a runtime value truncates
+        // unchecked by default, so it needs no wrapper either.
+        return constValue is int cf && !ConstFitsTarget(cf, tgt)
             ? $"unchecked(({targetCs})({value}))"
             : $"({targetCs})({value})";
     }

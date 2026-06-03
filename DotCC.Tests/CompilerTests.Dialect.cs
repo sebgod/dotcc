@@ -383,8 +383,9 @@ public sealed partial class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            // sizeof(a) → 5*sizeof(int); sizeof(a[0]) → element type int.
-            emitted.ShouldContain("((5 * sizeof(int)) / sizeof(int))");
+            // sizeof(a) → 5*sizeof(int); sizeof(a[0]) → element int. Both are
+            // size_t (ulong) per C, so the division is unsigned (no CS0034).
+            emitted.ShouldContain("((ulong)(5 * sizeof(int)) / (ulong)sizeof(int))");
         }
         finally { File.Delete(src); }
     }
@@ -397,20 +398,23 @@ public sealed partial class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("int c = sizeof(int);");      // C char-literal is int
-            emitted.ShouldContain("int d = sizeof(byte);");     // cast to char → byte
-            emitted.ShouldContain("int s = (6 * sizeof(byte));");// "hello" = 5 chars + NUL
+            // `sizeof` is size_t (ulong); stored to an `int` it takes the int cast.
+            emitted.ShouldContain("int c = (int)((ulong)sizeof(int));");      // C char-literal is int
+            emitted.ShouldContain("int d = (int)((ulong)sizeof(byte));");     // cast to char → byte
+            emitted.ShouldContain("int s = (int)((ulong)(6 * sizeof(byte)));");// "hello" = 5 chars + NUL
         }
         finally { File.Delete(src); }
     }
 
     [Fact]
-    public void Sizeof_type_form_is_unchanged()
+    public void Sizeof_type_form_is_size_t()
     {
+        // `sizeof(Type)` is size_t (ulong) per C; assigned to `int b` it takes the
+        // int store-cast (C# has no implicit ulong→int conversion, even for a constant).
         var src = WriteTemp("int main() { int b = sizeof(int); return b; }");
         try
         {
-            Compiler.EmitCSharp(new[] { src }).ShouldContain("int b = sizeof(int);");
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("int b = (int)((ulong)sizeof(int));");
         }
         finally { File.Delete(src); }
     }

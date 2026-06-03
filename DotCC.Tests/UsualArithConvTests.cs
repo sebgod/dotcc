@@ -62,7 +62,8 @@ public sealed class UsualArithConvTests
     [Fact]
     public void ulong_divided_by_sizeof_reconciles()
     {
-        // The Lua array-cap idiom `MAX_SIZET / sizeof(T)` — `sizeof` is C# `int`.
+        // The Lua array-cap idiom `MAX_SIZET / sizeof(T)`. `sizeof` is size_t
+        // (ulong) per C, so `lim / sizeof` is ulong/ulong — unsigned, no CS0034.
         var src = WriteTemp("""
             #include <stddef.h>
             struct Big { double a, b, c; };
@@ -71,7 +72,7 @@ public sealed class UsualArithConvTests
             """);
         try
         {
-            Compiler.EmitCSharp(new[] { src }).ShouldContain("/ (ulong)(sizeof(Big))");
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("/ (ulong)sizeof(Big)");
         }
         finally { File.Delete(src); }
     }
