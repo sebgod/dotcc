@@ -116,9 +116,9 @@ internal sealed partial class CSharpEmitter
     // usable as an int (`int flag = a && b;`). Operands keep their Cond.B truthy
     // conversion; the bool the C# `&&`/`||` produces is cast to CBool.
     public EmitContent Visit(C.Lor n) =>
-        $"((CBool)({CondOf(n.Arg0)} || {CondOf(n.Arg2)}))";
+        new EmitContent.Text($"((CBool)({CondOf(n.Arg0)} || {CondOf(n.Arg2)}))", Ty: new CType.Sized("int"));
     public EmitContent Visit(C.Land n) =>
-        $"((CBool)({CondOf(n.Arg0)} && {CondOf(n.Arg2)}))";
+        new EmitContent.Text($"((CBool)({CondOf(n.Arg0)} && {CondOf(n.Arg2)}))", Ty: new CType.Sized("int"));
     // Equality: same CBool wrap on the textual fallback. The setjmp path returns
     // a SetjmpCheckZero variant consumed directly by StmtIfElse (a conditional
     // context), so it must NOT be wrapped. Enum operands decay to int.
@@ -174,14 +174,19 @@ internal sealed partial class CSharpEmitter
     // A relational / equality operator yields C `int` 0/1 (CBool), with operands
     // reconciled per C's usual arithmetic conversions (so `size_t < int` doesn't
     // trip CS0034). The CBool result carries into int positions and Cond.B alike.
-    private string RelText(Item a, string op, Item b)
+    private EmitContent.Text RelText(Item a, string op, Item b)
     {
         var (sa, sb, _) = ReconcileInt(a, b);
         // A bare function name as a comparison operand (`hook != hookf`) is a
         // function-to-pointer decay in C. C#'s `&fn` is a method-group address with
         // no type of its own, so it can't be compared to a `delegate*` directly —
         // cast it to the OTHER operand's fn-ptr type (`hook != (lua_Hook)(&hookf)`).
-        return $"((CBool)({DecayFnForCompare(a, sa, b)} {op} {DecayFnForCompare(b, sb, a)}))";
+        // Tag the result `int`: C makes a comparison `int` 0/1, so the conversion
+        // layer inserts the cast C# needs when it stores into a narrower/other
+        // integer (`lu_byte f = a < b;` → `(byte)((CBool)…)` via CBool→int→byte).
+        return new EmitContent.Text(
+            $"((CBool)({DecayFnForCompare(a, sa, b)} {op} {DecayFnForCompare(b, sb, a)}))",
+            Ty: new CType.Sized("int"));
     }
 
     /// <summary>
@@ -250,7 +255,7 @@ internal sealed partial class CSharpEmitter
     // matching C's `!x` yielding 0 or 1 (never a bool). Cond.B picks the
     // right truthy overload based on E's type (int/double/pointer/bool).
     public EmitContent Visit(C.LNot n) =>
-        new EmitContent.Text($"({CondOf(n.Arg1)} ? 0 : 1)", ConstExpr: IsConstExpr(n.Arg1));
+        new EmitContent.Text($"({CondOf(n.Arg1)} ? 0 : 1)", Ty: new CType.Sized("int"), ConstExpr: IsConstExpr(n.Arg1));
 
     // Ternary `c ? a : b` — Cond.B wraps the C-truthy condition. The two
     // branches need a common C# type; the user is responsible for keeping

@@ -773,11 +773,20 @@ new class of latent bugs the probe never could.
   comparison operand and casts the `&fn` to the OTHER operand's fn-ptr CType
   (`hook != (lua_Hook)(&hookf)`). Fixture `fnptr-compare/`; unit test
   `FnPtrCompareTests`.
-- 🧱 **Phase 6v+ — the remaining deep walls** (~21 errors):
+- ✅ **Phase 6v — comparison / logical results are `int` (CS0266 ×2; total
+  21 → 19).** A comparison (`a < b`) or logical (`&&`/`||`/`!`) result is C `int`
+  0/1, but dotcc lowered it to an untyped `(CBool)(…)` expression, so the
+  conversion layer couldn't insert a cast when it stored into a narrower integer
+  (`lu_byte f = a && b;` → CBool→byte → CS0266). `Visit(C.Lt/Gt/…/Eq/Neq)`
+  (`RelText`) and `Visit(C.Land/Lor/LNot)` now tag the result `CType int`, so the
+  store-conversion layer emits `(byte)((CBool)…)` (chaining CBool→int→byte). Fixture
+  `bool-result-to-byte/`; unit tests `BoolResultToByteTests`.
+- 🧱 **Phase 6w+ — the remaining deep walls** (~19 errors):
   - **CS0159 (~5) labels** (`goto` into a `switch`-case block in the Lua VM —
     structural; likely `goto`→`goto case`), **CS1503/CS0266 conversion residue**
-    (struct-field stores + `luaL_Buffer` field-type recording + a CBool→byte store),
-    **CS0163 (~3) switch fall-through**, **singletons** (CS8183/CS0457/CS0306/CS0034/CS0029).
+    (struct-field stores where the struct's field types aren't recorded —
+    `luaL_Buffer` with its `LUAI_MAXALIGN` union — + a forward-ref `_fnParamTypes`
+    case), **CS0163 (~3) switch fall-through**, **singletons** (CS8183/CS0457/CS0306/CS0034/CS0029).
   - **Call through a parenthesized simple-member fn-ptr callee (CS0118).** `(r.func)(5)`
     reads as a cast in C#; strip the redundant callee parens when the inner
     expression is a member access / subscript (the bare-identifier case landed in 6l).
