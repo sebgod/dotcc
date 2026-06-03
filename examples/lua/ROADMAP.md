@@ -757,8 +757,19 @@ new class of latent bugs the probe never could.
   sizeof arg (Lua's `fgets(buf, sizeof(buf), fp)`). Fixture `sizeof-unsigned/`;
   emit-shape unit tests across `CompilerTests.Dialect` / `SizeofMemberTests` /
   `UsualArithConvTests` / `CallArgConversionTests` / `AnonStructDeclTests` updated.
-- 🧱 **Phase 6t+ — the remaining deep walls** (~24 errors):
-  - **CS1503 (~5), CS0159 (~5), CS0266 (~4), CS0163 (~3)** — a diverse long tail.
+- ✅ **Phase 6t — null pointer constant `0` → `null` (CS1503/CS0266 ×2; total
+  24 → 22).** C's integer `0` used where a pointer is expected IS a null pointer
+  constant; C# won't implicitly convert `int` 0 to a pointer. `CoerceStore` (the
+  shared store/return/arg coercion) now emits `null` when the value is a constant
+  `0` and the target is a pointer type — `return 0;` from a `T*` function, `f(…,
+  0)` into a `char*` param. A non-pointer target is unaffected. Fixture
+  `null-pointer-constant/`; unit tests `NullPointerConstantTests`. (NOTE: a
+  pointer-vs-`0` COMPARISON `p == 0` is a separate gap — `int* == int` is CS0019;
+  see the remaining tail.)
+- 🧱 **Phase 6u+ — the remaining deep walls** (~22 errors):
+  - **CS0159 (~5) labels, CS1503/CS0266 conversion residue (struct-field stores +
+    `luaL_Buffer` field-type recording), CS0163 (~3) switch fall-through,
+    singletons** (CS8183/CS0457/CS0306/CS0034/CS0029/CS0019).
   - **Call through a parenthesized simple-member fn-ptr callee (CS0118).** `(r.func)(5)`
     reads as a cast in C#; strip the redundant callee parens when the inner
     expression is a member access / subscript (the bare-identifier case landed in 6l).

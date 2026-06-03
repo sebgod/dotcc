@@ -166,6 +166,12 @@ internal sealed partial class CSharpEmitter
     // -Wconversion gate (off by default, opt-in like gcc/clang -Wconversion).
     private string CoerceStore(string value, CType? sourceTy, int? constValue, string targetCs, int line)
     {
+        // C's null pointer constant — an integer `0` — becomes C# `null` when
+        // stored/passed/returned where a POINTER is expected (C# won't implicitly
+        // convert `int` 0 to a pointer; `return 0;` from a `T*` function, `f(…, 0)`
+        // into a `char*` param). Only a constant 0 qualifies (a runtime int isn't a
+        // null pointer constant), and only for a pointer target.
+        if (constValue == 0 && IsPointerCsType(targetCs)) { return "null"; }
         if (sourceTy is not CType.Sized s) { return value; }
         var src = ResolveTypedef(s.CsType);
         var tgt = ResolveTypedef(targetCs);
