@@ -1,6 +1,6 @@
 # Lua-on-dotcc — Session Handover
 
-**As of commit `c6fbc4f` (Phase 6r).** This is a resume-from-here snapshot for the
+**As of commit `05653dd` (Phase 6t).** This is a resume-from-here snapshot for the
 ongoing effort to make **Lua 5.5.0 compile and run under dotcc** (the C→.NET 10/C#
 transpiler). For the full feature history see [`ROADMAP.md`](ROADMAP.md); for the
 language-feature matrix see [`../../C-SUPPORT.md`](../../C-SUPPORT.md). This file is
@@ -63,7 +63,7 @@ gcc-oracle in WSL needs the Windows path bridged: `WIN_PWD=$(pwd -W)` then
 
 ## Progress
 
-Whole-program link error count: **761 → 35** this run of sessions.
+Whole-program link error count: **761 → 22** this run of sessions.
 
 | Phase | What landed | Errors |
 |---|---|---|
@@ -76,42 +76,53 @@ Whole-program link error count: **761 → 35** this run of sessions.
 | 6o | drop the `*` on a deref-call through a function pointer `(*fp)(args)` (CS0193 14→0) | 72 → 60 |
 | 6p | add `frexp`/`ldexp`/`strcoll`/`ungetc`/`setvbuf`/`tmpnam` libc surface + `luaopen_package` stub in driver.c (CS0103 10→0) | 60 → 50 |
 | 6q | address-of a global / static-local via `Unsafe.AsPointer(ref field)` (CS0212 9→0) | 50 → 42 |
-| 6r | void-call leading a value-context comma → in-place delegate (CS8210 7→0) | 42 → **35** |
+| 6r | void-call leading a value-context comma → in-place delegate (CS8210 7→0) | 42 → 35 |
+| 6s | `sizeof` yields `size_t` (ulong, unsigned), not `int` — fixes `MAX/sizeof` (CS0034 6→1); + CoerceStore ulong-const-cast bug, malloc bare-int sizeof, char-I/O prototypes | 35 → 24 |
+| 6t | C null-pointer constant `0` → `null` at pointer store/return/arg (CoerceStore) | 24 → **22** |
 
-Tests currently green: **756 unit / 171 functional**.
+Tests currently green: **759 unit / 173 functional**.
 
-## Current wall — 35 errors
+## Current wall — 22 errors
 
 Histogram (deduped):
 
 ```
- 9 CS1503   6 CS0266   6 CS0034   5 CS0159   3 CS0163
- 2 CS8183   1 CS0457   1 CS0306   1 CS0029   1 CS0019
+ 5 CS0159   4 CS1503   3 CS0266   3 CS0163   2 CS8183
+ 1 CS0457   1 CS0306   1 CS0034   1 CS0029   1 CS0019
 ```
 
 Triage notes per family (file:line are into `build/Program.cs` after `link.sh all`):
 
-- **CS1503 (9) / CS0266 (6) / CS0034 (6)** — residual integer-conversion tails the
-  6i layer doesn't yet reach: `int→uint` at an arg (CS1503 11595 — arg 5; a callee
-  whose param type isn't being coerced, maybe a fn-ptr-typed param or a not-recorded
-  signature; 2 of these were unmasked by 6o once the fn-ptr deref-calls compiled),
-  `CBool→byte` and `int→ulong` at stores (CS0266 — struct-field/element stores aren't
-  coerced yet, the documented gap), and `ulong / int` ambiguous (CS0034 16013 — a
-  parenthesised `sizeof` losing its int-ness through the paren, the documented
-  usual-arith-conv gap). These want the conversion layer extended to struct-field/
-  element stores and to type `sizeof` as `size_t`.
+- **CS0159 (5) — `No such label` for `ret` / `l_tforcall` / `l_tforloop`** (19513,
+  19546, 19566, 19715, 19783). These are `luaV_execute`'s VM-dispatch labels. C
+  allows `goto` INTO a block; C# does not (only out of / within). The labels live
+  inside `switch`-case `{ }` blocks (needed for per-case locals), and the gotos
+  target them from OTHER cases — `goto l_tforloop` from `case OP_TFORCALL` jumps
+  into `case OP_TFORLOOP`'s block. **Hard, structural.** The targets coincide with
+  a case START, so the likely fix is to rewrite `goto <label>` → `goto case <X>`
+  when the label is the first thing in case X (dotcc's 6k already emits `goto case`
+  for fall-through); `ret` is trickier (jump to shared return handling — may need
+  the label hoisted to the switch/loop scope that encloses all the gotos).
 
-- **CS0159 (5) — `No such label 'ret'`** (e.g. 19510, 19543). A `goto ret;` where the
-  `ret:` label is out of scope in the emitted C# — likely a label inside a block that
-  the emit moved, or a label emitted with a renamed/scoped identifier. Inspect the
-  block-scope label handling.
+- **CS1503 (4) / CS0266 (3)** — conversion residue, now mostly **struct-field
+  stores + field-type recording**: `B->size = …` (luaL_Buffer, L20599) and
+  `memcpy(…, B->n * sizeof)` (L20505) don't coerce because **luaL_Buffer's field
+  types aren't recorded** in `_structFieldTypes` (its `union { LUAI_MAXALIGN; char
+  b[…]; } init;` member likely defeats the recorder — a minimal repro of that union
+  shape would confirm). `bl->insidetbc = (CBool)…` (L11551) is a `CBool→byte`
+  store CoerceStore bails on (CBool isn't an integer type — needs a `(byte)` cast
+  via CBool's `→int` operator). `luaL_prepbuffsize(&b, (int)(16*sizeof(void*)))`
+  (L22715/41) is `int→size_t` at an arg — check why luaL_prepbuffsize's size_t param
+  isn't coercing (possibly a forward-reference: the call emitted before the proto
+  registered `_fnParamTypes`? a pre-pass to collect all fn signatures would fix it).
 
-- **CS0163 (3)** — residual switch fall-through the 6k analysis missed (a case section
-  whose terminating-ness wasn't detected — maybe an `if/else` where both arms return,
-  or a fall-through through an empty stacked label). **CS8183 / CS0457 / CS0306 /
-  CS0029 / CS0019** — long-tail singletons, look individually. The CS0306 was unmasked
-  by 6q (a previously-CS0212 `&global` line that now compiles feeds a context — likely
-  a comma-tuple — wanting the `nint` round-trip).
+- **CS0163 (3)** — residual switch fall-through 6k missed (a case whose
+  terminating-ness wasn't detected). **CS0019 (1)** — a pointer-vs-`0` COMPARISON
+  `p == 0` → `int* == int`; extend the 6t null-pointer handling to `==`/`!=` (when
+  one operand is a pointer and the other a constant 0, emit `null`). **CS0034 (1)**
+  — a residual `ulong/int` not on a sizeof. **CS8183 (2) / CS0457 / CS0306 / CS0029**
+  — long-tail singletons, look individually (CS0306 unmasked by 6q: a `&global` now
+  compiling feeds a comma-tuple wanting the `nint` round-trip).
 
 ## Pending / deferred tasks
 
