@@ -37,6 +37,14 @@ internal sealed partial class CSharpEmitter
         => StartFn(type: T(n.Arg0), name: T(n.Arg2), pars: "", isStatic: false, isInline: InlineOf(n.Arg0), isNoreturn: NoreturnOf(n.Arg0));
     public EmitContent Visit(C.FnSigParenVoidArgs n)  // Type ( ID ) ( void )
         => StartFn(type: T(n.Arg0), name: T(n.Arg2), pars: "", isStatic: false, isInline: InlineOf(n.Arg0), isNoreturn: NoreturnOf(n.Arg0));
+    // Function returning a function pointer: `Ret (*name(params))(trailing)`.
+    // The C# return type is `delegate*<trailing, Ret>`. Parameters stay as-is.
+    public EmitContent Visit(C.FnSigRetFnPtr n) =>
+        StartFn(type: EmitDelegatePtrType(n.Arg0, n.Arg9), name: T(n.Arg3), pars: T(n.Arg5), isStatic: false, isInline: InlineOf(n.Arg0), isNoreturn: NoreturnOf(n.Arg0));
+    public EmitContent Visit(C.FnSigRetFnPtrNoArgs n) =>
+        StartFn(type: $"delegate*<{ResolveTypedefInType(T(n.Arg0))}>", name: T(n.Arg3), pars: T(n.Arg5), isStatic: false, isInline: InlineOf(n.Arg0), isNoreturn: NoreturnOf(n.Arg0));
+    public EmitContent Visit(C.FnSigRetFnPtrVoid n) =>
+        StartFn(type: $"delegate*<{ResolveTypedefInType(T(n.Arg0))}>", name: T(n.Arg3), pars: T(n.Arg5), isStatic: false, isInline: InlineOf(n.Arg0), isNoreturn: NoreturnOf(n.Arg0));
 
     private EmitContent.FnHeader StartFn(string type, string name, string pars, bool isStatic, bool isInline = false, bool isNoreturn = false)
     {
@@ -740,6 +748,24 @@ internal sealed partial class CSharpEmitter
     // `union ID` as a type reference — emit just the ID. The
     // [StructLayout(LayoutKind.Explicit)] struct declaration shares the name.
     public EmitContent Visit(C.TypeUnion n) => T(n.Arg1);
+
+    // Abstract function-pointer type — `Ret (*)(params)`, used in casts and
+    // sizeof. Emitted as a C# delegate* type (return type last, as C# requires).
+    // E.g. `void (*)(int)` → `delegate*<int, void>`.
+    private string EmitDelegatePtrType(Item retItem, Item parsItem)
+    {
+        var ret = ResolveTypedefInType(T(retItem));
+        var pars = T(parsItem);
+        var typesOnly = string.Join(", ",
+            StripParamNames(pars).Split(", ", StringSplitOptions.RemoveEmptyEntries)
+                .Select(ResolveTypedefInType));
+        if (string.IsNullOrWhiteSpace(typesOnly) || typesOnly.Trim() == "void")
+            return $"delegate*<{ret}>";
+        return $"delegate*<{typesOnly}, {ret}>";
+    }
+    public EmitContent Visit(C.TypeFnPtr n) => new EmitContent.Text(EmitDelegatePtrType(n.Arg0, n.Arg5), Ty: new CType.Sized("nint"));
+    public EmitContent Visit(C.TypeFnPtrNoArgs n) => new EmitContent.Text($"delegate*<{ResolveTypedefInType(T(n.Arg0))}>", Ty: new CType.Sized("nint"));
+    public EmitContent Visit(C.TypeFnPtrVoid n) => new EmitContent.Text($"delegate*<{ResolveTypedefInType(T(n.Arg0))}>", Ty: new CType.Sized("nint"));
 
     // `typeof(type)` (C23) — yields the operand type directly. (typeof_unqual is
     // folded onto the same terminal: dotcc already drops const/volatile.)

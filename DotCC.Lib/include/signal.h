@@ -14,11 +14,13 @@
 /* Type for an object that can be accessed atomically from a signal handler. */
 typedef int sig_atomic_t;
 
-/* Special handler values (C90). Cast to the handler type per the standard; these
-   are only ever expanded at a `signal()` call site (deferred to the REPL phase). */
+/* Special handler values (C90). Cast to the handler type per the standard. */
 #define SIG_DFL ((void (*)(int))0)
 #define SIG_IGN ((void (*)(int))1)
 #define SIG_ERR ((void (*)(int))-1)
+
+/* C standard: void (*signal(int sig, void (*func)(int)))(int); */
+void (*signal(int sig, void (*func)(int)))(int);
 
 /* The six C-standard signal numbers (POSIX values). */
 #define SIGINT  2

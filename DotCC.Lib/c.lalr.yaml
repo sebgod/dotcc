@@ -404,6 +404,13 @@ productions:
       - { lhs: FnSig, rhs: [Type, '(', ID, ')', '(', ParamList, ')'], action: fnSigParen }
       - { lhs: FnSig, rhs: [Type, '(', ID, ')', '(', ')'],            action: fnSigParenNoArgs }
       - { lhs: FnSig, rhs: [Type, '(', ID, ')', '(', 'void', ')'],    action: fnSigParenVoidArgs }
+      # Function returning a function pointer: `Type (*name(params))(trailing)`.
+      # The `(*name(params))` is the declarator; `(trailing)` is the parameter
+      # list of the returned function pointer. E.g. `void (*signal(int, void(*)(int)))(int)`.
+      # Disjoint from fnSigParen by `*` right after the first `(`.
+      - { lhs: FnSig, rhs: [Type, '(', '*', ID, '(', ParamList, ')', ')', '(', ParamList, ')'], action: fnSigRetFnPtr }
+      - { lhs: FnSig, rhs: [Type, '(', '*', ID, '(', ParamList, ')', ')', '(', ')'],            action: fnSigRetFnPtrNoArgs }
+      - { lhs: FnSig, rhs: [Type, '(', '*', ID, '(', ParamList, ')', ')', '(', 'void', ')'],    action: fnSigRetFnPtrVoid }
 
   - derivation: none
     rules:
@@ -617,6 +624,13 @@ productions:
       - { lhs: Type, rhs: [Type, '*', 'const'],    action: typePtrQualConst }
       - { lhs: Type, rhs: [Type, '*', 'volatile'], action: typePtrQualVolatile }
       - { lhs: Type, rhs: [Type, '*', 'restrict'], action: typePtrQualRestrict }
+      # Abstract function-pointer type — `Type (*)(params)`, used in casts and
+      # sizeof. No identifier between `*` and `)` distinguishes these from the
+      # FnSig declarator forms (`Type (*ID)(params)`). Factored into three arity
+      # variants so the visitor doesn't need to destructure ParamList.
+      - { lhs: Type, rhs: [Type, '(', '*', ')', '(', ParamList, ')'], action: typeFnPtr }
+      - { lhs: Type, rhs: [Type, '(', '*', ')', '(', ')'],            action: typeFnPtrNoArgs }
+      - { lhs: Type, rhs: [Type, '(', '*', ')', '(', 'void', ')'],    action: typeFnPtrVoid }
       - { lhs: Type, rhs: [TypeSpecList], action: typeFromSpec }
       # `struct ID` as a type reference — used in declarations, parameters,
       # casts, sizeof. The visitor emits just `ID` since C# doesn't require

@@ -347,4 +347,27 @@ public static unsafe partial class Libc
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static byte* L(ReadOnlySpan<byte> u8) =>
         (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(u8));
+
+    // ── <signal.h> ─────────────────────────────────────────────────────
+
+    private static unsafe delegate*<int, void> _sigintHandler;
+
+    /// <summary><c>signal(sig, func)</c> — register a signal handler.
+    /// Only SIGINT (2) is supported; uses .NET
+    /// <see cref="Console.CancelKeyPress"/>.</summary>
+    public static unsafe delegate*<int, void> signal(
+        int sig, delegate*<int, void> func)
+    {
+        if (sig != 2) return null;
+        var prev = _sigintHandler;
+        if (func == null) { _sigintHandler = null; Console.CancelKeyPress -= OnSigint; }
+        else { _sigintHandler = func; Console.CancelKeyPress += OnSigint; }
+        return prev;
+    }
+    private static unsafe void OnSigint(object? sender, ConsoleCancelEventArgs e)
+    {
+        if (_sigintHandler == null) return;
+        _sigintHandler(2);
+        e.Cancel = true;
+    }
 }
