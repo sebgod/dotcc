@@ -297,8 +297,9 @@ internal sealed partial class CSharpEmitter
                 + $"switch ({StripOuterParens(ops[^1])}) {body}}}\n";
             if (_switchHoistedLabels is { Length: > 0 })
             {
-                result += "\n" + _switchHoistedLabels + "\n";
+                result += $"\ngoto __hoisted_{_switchHoistN};\n{_switchHoistedLabels}\n__hoisted_{_switchHoistN}: ;\n";
                 _switchHoistedLabels = null;
+                _switchHoistN++;
             }
             return result;
         }
@@ -312,8 +313,9 @@ internal sealed partial class CSharpEmitter
         var switchResult = $"switch ({IntDecay(n.Arg2)}) {switchBody}";
         if (_switchHoistedLabels is { Length: > 0 })
         {
-            switchResult += "\n" + _switchHoistedLabels + "\n";
+            switchResult += $"\ngoto __hoisted_{_switchHoistN};\n{_switchHoistedLabels}\n__hoisted_{_switchHoistN}: ;\n";
             _switchHoistedLabels = null;
+            _switchHoistN++;
         }
         return switchResult;
     }
@@ -454,6 +456,7 @@ internal sealed partial class CSharpEmitter
     // Hoisted labels extracted from SwitchBody — placed after the switch by
     // Visit(C.StmtSwitch) so they're reachable by `goto` from within any case.
     private string? _switchHoistedLabels;
+    private int _switchHoistN;  // unique suffix for hoisted-label barriers
 
     // Statement-level case/default labels. Body is a single Stmt (which
     // may itself be another labeled stmt — `case 1: case 2: do_thing();`
