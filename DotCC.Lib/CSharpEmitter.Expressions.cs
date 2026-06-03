@@ -12,6 +12,7 @@ internal sealed partial class CSharpEmitter
     // Expressions — paren-heavy to stay precedence-safe.
     public EmitContent Visit(C.Assign n)
     {
+        var lv = LValueOf(n.Arg0);
         // RHS is a value-context comma needing hoisting (Lua's `f->code =
         // luaM_newvectorchecked(…)`): lift its leading statements and make the
         // assignment itself the value. (The plain `lhs = value` form is used — the
@@ -19,7 +20,7 @@ internal sealed partial class CSharpEmitter
         if (n.Arg2.Content is EmitContent.SeqExpr se)
         {
             return new EmitContent.SeqExpr(se.LeadingStmts,
-                $"({T(n.Arg0)} = {se.ValueExpr})", TyOf(n.Arg0));
+                $"({lv} = {NintCoerceRhs(se.ValueExpr, n.Arg0)})", TyOf(n.Arg0));
         }
         // An atomic lvalue stores seq-cst via Atomic.Store (which returns the stored
         // value, so `x = v` works as an rvalue too). Checked before volatile.
@@ -55,7 +56,7 @@ internal sealed partial class CSharpEmitter
         if (lhsEnum is not null)
         {
             if (rhsEnum != lhsEnum) { rhs = $"({lhsEnum})({rhs})"; }
-            return new EmitContent.Text($"({T(n.Arg0)} = {rhs})", lhsEnum);
+            return new EmitContent.Text($"({lv} = {rhs})", lhsEnum);
         }
         if (rhsEnum is not null) { rhs = $"(int)({rhs})"; }
         // A narrowing / sign-incompatible store into an integer lvalue takes the
@@ -66,8 +67,14 @@ internal sealed partial class CSharpEmitter
         {
             rhs = CoerceStore(rhs, TyOf(n.Arg2), ConstOfItem(n.Arg2), lt.CsType, n.Arg0.Position.Line);
         }
-        return $"({T(n.Arg0)} = {rhs})";
+        return $"({lv} = {NintCoerceRhs(rhs, n.Arg0)})";
     }
+    // When the LHS is a nint-backed pointer global (has RawLValue), wrap the RHS
+    // in a (nint) cast — pointer → nint is explicit in C# (CS0266).
+    private static string NintCoerceRhs(string rhs, Item lhsItem) =>
+        (lhsItem.Content as EmitContent.Text)?.RawLValue is not null
+            ? $"(nint)({rhs})"
+            : rhs;
     // `lhs OP= rhs`. C#'s enum compound-assign is unreliable (`enum |= int`,
     // `enum *= int` are errors), so when the lvalue is enum-typed we expand to
     // the explicit `lhs = (Enum)((int)lhs OP rhs)` form — the lvalue is assumed
@@ -76,7 +83,8 @@ internal sealed partial class CSharpEmitter
     // `int += enum` → C# error).
     private string CompoundAssign(Item lhsIt, string op, Item rhsIt)
     {
-        var lhs = T(lhsIt);
+        var lv = LValueOf(lhsIt);       // write target (RawLValue for nint-backed ptr globals)
+        var lhs = T(lhsIt);             // read value   (cast expression for nint-backed ptr globals)
         var rhs = IntDecay(rhsIt);
         // Atomic lvalue: `lv op= rhs` → the seq-cst *Fetch helper returning the NEW
         // value (matching C's compound-assign expression value). Checked first.
@@ -88,7 +96,7 @@ internal sealed partial class CSharpEmitter
         // Volatile lvalue: `lhs` is already the fenced read `Volatile.Read(ref lv)`,
         // so expand `lv OP= rhs` to a fenced read-modify-write.
         if (VLValueOf(lhsIt) is string vlv) { return VolatileWriteOf(vlv, $"{lhs} {op} {rhs}"); }
-        if (EnumOf(lhsIt) is { } e) { return $"({lhs} = ({e})((int){lhs} {op} {rhs}))"; }
+        if (EnumOf(lhsIt) is { } e) { return $"({lv} = ({e})((int){lhs} {op} {rhs}))"; }
         // C# rejects compound assignment when the RHS can't be implicitly converted
         // to the LHS type (CS0034: ulong += int). C allows the implicit conversion,
         // so expand to `lhs = (T)(lhs op (T)rhs)` when the RHS needs an unsigned cast.
@@ -101,9 +109,10 @@ internal sealed partial class CSharpEmitter
             // For shifts, the count must be int (C# requirement); the expansion
             // bypasses ShiftText, so ensure the count is int-typed here.
             if (op is ">>" or "<<") { coerced = $"(int)({coerced})"; }
-            return $"({lhs} = ({lt.CsType})({lhs} {op} {coerced}))";
+            return $"({lv} = ({lt.CsType})({lhs} {op} {coerced}))";
         }
-        return $"({lhs} {op}= {rhs})";
+        return lv != lhs ? $"({lv} = {NintCoerceRhs($"({lhs} {op} {rhs})", lhsIt)})"
+                         : $"({lhs} {op}= {rhs})";
     }
 
     // `++x` / `x++` (and `--`) on a volatile lvalue → a fenced read-modify-write
@@ -497,12 +506,19 @@ internal sealed partial class CSharpEmitter
         {
             var fieldLv = T(n.Arg1);
             var ptr = QualifyPredefinedTypeName(ft) + "*";
-            // NOTE: when ft is itself a pointer (e.g. UpVal*), the emitted
-            // AsPointer(ref UpVal*_field) triggers CS0306 (pointer type as generic
-            // argument). A proper fix needs to avoid both CS0306 and CS0212 — see
-            // HANDOVER.md. For non-pointer ft, C# infers T correctly.
             return new EmitContent.Text(
                 $"(({ptr})System.Runtime.CompilerServices.Unsafe.AsPointer(ref {fieldLv}))",
+                Ty: new CType.Sized(ptr));
+        }
+        // Pointer-typed static global stored as nint (CS0306 avoidance): Var returns
+        // a cast expression `(T*)(field)` but stores the bare field name in RawLValue.
+        // AsPointer<nint>(ref field) compiles fine; cast the result to T**.
+        if (n.Arg1.Content is EmitContent.Text { RawLValue: { } rlv }
+            && _globalPtrTypes.TryGetValue(rlv, out var origPtrType))
+        {
+            var ptr = QualifyPredefinedTypeName(origPtrType) + "*";
+            return new EmitContent.Text(
+                $"(({ptr})System.Runtime.CompilerServices.Unsafe.AsPointer(ref {rlv}))",
                 Ty: new CType.Sized(ptr));
         }
         var lv = ALValueOf(n.Arg1) ?? VLValueOf(n.Arg1) ?? T(n.Arg1);
@@ -526,15 +542,15 @@ internal sealed partial class CSharpEmitter
     // `++x` / `--x` carry the operand's CType (pointer increment yields the same
     // pointer type; integer the same int) so a pointer result reaching the comma
     // value-tuple is nint-cast (Lua's `(void)(++mode)` discard with a `char*` mode).
-    public EmitContent Visit(C.PreInc n) => AtomicStep(n.Arg1, isPost: false, "+") ?? VolatileStep(n.Arg1, "+") ?? (EmitContent)new EmitContent.Text($"(++{StripOuterParens(T(n.Arg1))})", EnumOf(n.Arg1), TyOf(n.Arg1));
-    public EmitContent Visit(C.PreDec n) => AtomicStep(n.Arg1, isPost: false, "-") ?? VolatileStep(n.Arg1, "-") ?? (EmitContent)new EmitContent.Text($"(--{StripOuterParens(T(n.Arg1))})", EnumOf(n.Arg1), TyOf(n.Arg1));
+    public EmitContent Visit(C.PreInc n) => AtomicStep(n.Arg1, isPost: false, "+") ?? VolatileStep(n.Arg1, "+") ?? (EmitContent)new EmitContent.Text($"(++{StripOuterParens(LValueOf(n.Arg1))})", EnumOf(n.Arg1), TyOf(n.Arg1));
+    public EmitContent Visit(C.PreDec n) => AtomicStep(n.Arg1, isPost: false, "-") ?? VolatileStep(n.Arg1, "-") ?? (EmitContent)new EmitContent.Text($"(--{StripOuterParens(LValueOf(n.Arg1))})", EnumOf(n.Arg1), TyOf(n.Arg1));
     // Postfix ++/-- — strip a fully-redundant wrap, but a COMPOUND base keeps its
     // parens (PostfixBase): `(*p)++` must stay `((*p)++)`, not `(*p++)` (= `*(p++)`,
     // wrong precedence AND not a statement-expression — CS0201). Same fix as the
     // `.`/`->` postfix base (Phase 4y); a bare lvalue / member chain / index is
     // unwrapped. Prefix ++/-- bind looser so `++*p` = `++(*p)` is already correct.
-    public EmitContent Visit(C.PostInc n) => AtomicStep(n.Arg0, isPost: true, "+") ?? VolatileStep(n.Arg0, "+") ?? (EmitContent)new EmitContent.Text($"({PostfixBase(StripOuterParens(T(n.Arg0)))}++)", EnumOf(n.Arg0), TyOf(n.Arg0));
-    public EmitContent Visit(C.PostDec n) => AtomicStep(n.Arg0, isPost: true, "-") ?? VolatileStep(n.Arg0, "-") ?? (EmitContent)new EmitContent.Text($"({PostfixBase(StripOuterParens(T(n.Arg0)))}--)", EnumOf(n.Arg0), TyOf(n.Arg0));
+    public EmitContent Visit(C.PostInc n) => AtomicStep(n.Arg0, isPost: true, "+") ?? VolatileStep(n.Arg0, "+") ?? (EmitContent)new EmitContent.Text($"({PostfixBase(StripOuterParens(LValueOf(n.Arg0)))}++)", EnumOf(n.Arg0), TyOf(n.Arg0));
+    public EmitContent Visit(C.PostDec n) => AtomicStep(n.Arg0, isPost: true, "-") ?? VolatileStep(n.Arg0, "-") ?? (EmitContent)new EmitContent.Text($"({PostfixBase(StripOuterParens(LValueOf(n.Arg0)))}--)", EnumOf(n.Arg0), TyOf(n.Arg0));
     // Subscript `expr[i]`. For a 1-D array / pointer it's an ordinary C#
     // pointer subscript (matching C). For a MULTI-dimensional array, dotcc
     // flattened the storage, so a PARTIAL index (more dimensions remain) is
@@ -668,6 +684,16 @@ internal sealed partial class CSharpEmitter
         // Plain field — carry its CType (see MemberDot).
         return Typed(text, FieldCType(n.Arg0, field));
     }
+
+    // The lvalue of an expression — the bare identifier that can be assigned to
+    // or incremented. When the expression is a nint-backed pointer global (whose
+    // Var visitor wraps the read in a cast), this returns the bare nint field name
+    // so `++` / `--` / `=` operate on the field rather than the cast expression.
+    // Falls back to the plain text. (Callers that need paren-stripping apply
+    // StripOuterParens on top — this method does NOT strip, so arrow-lowered
+    // member-access parens like `(p.x)` survive.)
+    private string LValueOf(Item exprItem) =>
+        (exprItem.Content as EmitContent.Text)?.RawLValue ?? T(exprItem);
 
     // The operand of a postfix `.`/`->` must be a primary/postfix expression.
     // After StripOuterParens a COMPOUND base (a top-level binary/ternary op, a
@@ -1206,10 +1232,18 @@ internal sealed partial class CSharpEmitter
             // A static-local ARRAY is already a pointer (GlobalArrayFrom) — `&arr`
             // is rare and untreated. A SCALAR/struct static-local is a static field,
             // so tag its field type for `&` (CS0212 avoidance — see AddrFixedType).
-            return _globalArrayInfo.TryGetValue(staticField, out var staticCty)
-                ? new EmitContent.Text(staticField, null, staticCty)
-                : new EmitContent.Text(staticField,
-                    AddrFixedType: _globalTypes.TryGetValue(staticField, out var sft) ? sft : null);
+            if (_globalArrayInfo.TryGetValue(staticField, out var staticCty))
+                return new EmitContent.Text(staticField, null, staticCty);
+            // Pointer-typed static local stored as nint → emit cast on read and
+            // provide RawLValue so AddrOf can use the bare nint field with AsPointer.
+            if (_globalPtrTypes.TryGetValue(staticField, out var staticPtrTy))
+            {
+                var ptrTypeName = QualifyPredefinedTypeName(staticPtrTy);
+                return new EmitContent.Text($"({ptrTypeName})({staticField})",
+                    Ty: new CType.Sized(staticPtrTy), RawLValue: staticField);
+            }
+            return new EmitContent.Text(staticField,
+                AddrFixedType: _globalTypes.TryGetValue(staticField, out var sft) ? sft : null);
         }
         // An enumerator constant resolves to `EnumName.Member` — but only if no
         // local/param of the same name shadows it. Without this guard a local
@@ -1248,6 +1282,16 @@ internal sealed partial class CSharpEmitter
         // routes through Unsafe.AsPointer (CS0212 avoidance — see AddrFixedType).
         var addrFixed = resolved is null && !_globalArrayInfo.ContainsKey(name)
             && _globalTypes.TryGetValue(name, out var gty) ? gty : null;
+        // A pointer-typed global's field is emitted as `nint` (IntPtr) so that
+        // AsPointer<nint> compiles (CS0306 avoidance — pointer types are illegal
+        // generic type args). Reads cast from nint→T*; AddrOf / assignment use
+        // the RawLValue (the bare nint field name) instead of the cast text.
+        if (resolved is null && _globalPtrTypes.TryGetValue(name, out var ptrTy))
+        {
+            var ptrTypeName = QualifyPredefinedTypeName(ptrTy);
+            return new EmitContent.Text($"({ptrTypeName})({mapped})", enumTag, cty,
+                RawLValue: mapped);
+        }
         return new EmitContent.Text(mapped, enumTag, cty, AddrFixedType: addrFixed);
     }
 

@@ -258,6 +258,12 @@ internal sealed partial class CSharpEmitter
     {
         var type = QualifyPredefinedTypeName(rawType);
         var isRefType = IsPredefinedRefTypeName(rawType) || _refTypeAliases.Contains(rawType);
+        var isPtrType = rawType.EndsWith('*');
+        // Pointer-typed globals emit as `nint` (IntPtr) so that `&field` via
+        // Unsafe.AsPointer works: AsPointer<T> forbids T that is itself a
+        // pointer type (CS0306). nint has the same size as any pointer and
+        // implicit conversion from pointer types, so the semantics hold.
+        var emitType = isPtrType ? "nint" : type;
         foreach (var entry in entries)
         {
             // Track global var → type, consulted by Visit(Var) for enum coercion
@@ -265,11 +271,17 @@ internal sealed partial class CSharpEmitter
             // `sizeof(globalScalar)` resolves; non-enum types simply never match
             // the _enumTags check, so this is safe.
             _globalTypes[entry.Name] = rawType;
+            if (isPtrType) { _globalPtrTypes[entry.Name] = rawType; }
             string init;
             if (entry.Init is not null)
             {
                 // Reconcile enum-ness against the declared type (same as block scope).
-                init = $" = {ReconcileEnumInit(rawType, entry)}";
+                var initExpr = ReconcileEnumInit(rawType, entry);
+                // `nint` is a value type — `null` isn't valid for it. Replace with 0.
+                if (isPtrType && initExpr == "null") { initExpr = "0"; }
+                // Pointer→nint is explicit in C# — wrap non-null-pointer inits.
+                else if (isPtrType) { initExpr = $"(nint)({initExpr})"; }
+                init = $" = {initExpr}";
             }
             else if (isRefType)
             {
@@ -282,7 +294,7 @@ internal sealed partial class CSharpEmitter
                 // (all zero-bits). No explicit initializer needed.
                 init = string.Empty;
             }
-            _globals.Append("    public static unsafe ").Append(type).Append(' ').Append(Id(entry.Name)).Append(init).Append(";\n");
+            _globals.Append("    public static unsafe ").Append(emitType).Append(' ').Append(Id(entry.Name)).Append(init).Append(";\n");
         }
     }
 
@@ -1018,6 +1030,13 @@ internal sealed partial class CSharpEmitter
         var sb = new StringBuilder();
         sb.Append("enum ").Append(enumName).Append(" : ").Append(baseType).Append("\n{\n");
         var next = 0L;
+        // When the previous member's value expression can't be parsed as a literal
+        // integer (e.g. a macro `FIRST_RESERVED` expanding to `((255 + 1))`), dotcc
+        // can't compute the next auto-increment value. In that case we suppress
+        // explicit `= N` on subsequent members and let C# auto-increment from the
+        // expression — C# enum members auto-increment correctly from any compile-time
+        // constant, including parenthesised arithmetic.
+        var nextIsKnown = true;
         foreach (var raw in items)
         {
             var eq = raw.IndexOf('=');
@@ -1027,9 +1046,9 @@ internal sealed partial class CSharpEmitter
             if (eq < 0)
             {
                 itemName = raw;
-                value = next;
-                valueText = next.ToString(System.Globalization.CultureInfo.InvariantCulture);
-                next++;
+                value = nextIsKnown ? next : null;
+                valueText = nextIsKnown ? next.ToString(System.Globalization.CultureInfo.InvariantCulture) : "";
+                if (nextIsKnown) next++;
             }
             else
             {
@@ -1038,24 +1057,29 @@ internal sealed partial class CSharpEmitter
                 // When the explicit value is a literal int we use it as the
                 // numeric basis for downstream auto-numbering. If the
                 // expression isn't a plain literal (e.g. `1 << 2`), emit it
-                // verbatim and best-effort advance `next` by 1.
+                // verbatim; let C# handle auto-increment from it.
                 if (long.TryParse(expr, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsed))
                 {
                     value = parsed;
                     valueText = parsed.ToString(System.Globalization.CultureInfo.InvariantCulture);
                     next = parsed + 1;
+                    nextIsKnown = true;
                 }
                 else
                 {
                     valueText = expr;
                     next++;
+                    nextIsKnown = false;  // can't auto-increment from expr reliably
                 }
             }
             _enumerators[itemName] = enumName;  // raw key — Visit(Var) looks up by raw name
             // Remember the integer value so an enumerator used as an integer constant
             // expression (e.g. an array bound `T a[TM_N]`) folds to a literal.
             if (value is >= int.MinValue and <= int.MaxValue) { _enumeratorValues[itemName] = (int)value.Value; }
-            sb.Append("    ").Append(Id(itemName)).Append(" = ").Append(valueText).Append(",\n");
+            if (valueText.Length > 0)
+                sb.Append("    ").Append(Id(itemName)).Append(" = ").Append(valueText).Append(",\n");
+            else
+                sb.Append("    ").Append(Id(itemName)).Append(",\n");
         }
         sb.Append("}\n\n");
         var enumText = sb.ToString();

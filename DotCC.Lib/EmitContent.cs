@@ -136,7 +136,33 @@ public abstract record EmitContent
     /// via <c>Unsafe.AsPointer(ref field)</c>. Set in <see cref="Visit(C.Var)"/> only
     /// when the name resolves to a global (not a shadowing local, whose <c>&amp;</c>
     /// is already legal).</param>
-    public sealed record Text(string Value, string? EnumType = null, CType? Ty = null, bool Inline = false, bool Noreturn = false, bool Volatile = false, string? VolatileLValue = null, bool VolatilePointee = false, bool Atomic = false, string? AtomicLValue = null, int? ConstInt = null, IReadOnlyList<string>? CommaOps = null, bool VoidCast = false, bool Terminates = false, string? CaseLabelExpr = null, bool IsDefaultLabel = false, IReadOnlyList<StmtPiece>? BlockPieces = null, bool ConstExpr = false, string? AddrFixedType = null) : EmitContent;
+    /// <param name="RawLValue">Non-null when this Text represents an lvalue whose
+    /// bare identifier is <see cref="RawLValue"/> but the emitted <see cref="Value"/>
+    /// is a cast expression (e.g. a pointer-typed global stored as <c>nint</c> whose
+    /// read is <c>(T*)(field)</c>). <c>&amp;</c> and assignment visitors use this to
+    /// emit the bare lvalue instead of parsing it out of <see cref="Value"/>.</param>
+    public sealed record Text(
+        string Value,
+        string? EnumType = null,
+        CType? Ty = null,
+        bool Inline = false,
+        bool Noreturn = false,
+        bool Volatile = false,
+        string? VolatileLValue = null,
+        bool VolatilePointee = false,
+        bool Atomic = false,
+        string? AtomicLValue = null,
+        int? ConstInt = null,
+        IReadOnlyList<string>? CommaOps = null,
+        bool VoidCast = false,
+        bool Terminates = false,
+        string? CaseLabelExpr = null,
+        bool IsDefaultLabel = false,
+        IReadOnlyList<StmtPiece>? BlockPieces = null,
+        bool ConstExpr = false,
+        string? AddrFixedType = null,
+        string? RawLValue = null
+    ) : EmitContent;
 
     /// <summary>
     /// One statement of a block, as the structured statement list (<see cref="StmtSeq"/>)

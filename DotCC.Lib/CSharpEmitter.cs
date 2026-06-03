@@ -215,6 +215,14 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // functions (after the per-function _localTypes miss).
     private readonly Dictionary<string, string> _globalTypes = new(StringComparer.Ordinal);
 
+    // Pointer-typed file-scope globals whose emitted field type is `nint` (not
+    // the pointer type itself) so that `Unsafe.AsPointer(ref field)` compiles:
+    // AsPointer<T> requires T to not be a pointer type (CS0306). The lookup maps
+    // the raw C name → the original C# pointer type (e.g. "UpVal*"). Consulted
+    // by Visit(Var) to wrap reads in a (T*) cast and by Visit(AddrOf) to get the
+    // correct target pointer-type string for the AsPointer cast.
+    private readonly Dictionary<string, string> _globalPtrTypes = new(StringComparer.Ordinal);
+
     // Array variable name → its full array CType. Arrays lower to a C# pointer
     // (stackalloc / flattened for multi-dim), so this is the ONLY place the
     // element type + extent(s) survive — needed for `sizeof(arr)` and for
