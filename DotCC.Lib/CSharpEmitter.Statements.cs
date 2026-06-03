@@ -443,8 +443,11 @@ internal sealed partial class CSharpEmitter
                 var hoistBody = tail[..lastClose];    // label + body
                 var keepInCase = tail[lastClose..];    // closing brace + suffix
                 if (hoistBody.StartsWith('\n')) hoistBody = hoistBody[1..];
-                // Remove label body from case, add break
-                texts[i] = texts[i][..defIdx] + "break;\n" + keepInCase;
+                // Remove label body from case, add goto to reach the hoisted label.
+                // The case body before the label originally fell through to it;
+                // after hoisting we need an explicit goto. This also correctly
+                // terminates the case (no fall-through to the next C# case section).
+                texts[i] = texts[i][..defIdx] + "goto " + defLabel + ";\n" + keepInCase;
                 _switchHoistedLabels = (_switchHoistedLabels ?? "") + hoistBody;
                 break; // one label per piece
             }
