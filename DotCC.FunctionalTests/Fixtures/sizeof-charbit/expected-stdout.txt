@@ -1,0 +1,10 @@
+CHAR_BIT=8
+sizeof(int)=4
+sizeof(long)=8
+sizeof(long long)=8
+bits_int=32
+bits_long=64
+bits_longlong=64
+arr_len=64
+nbits=64
+neg_nbits=-64

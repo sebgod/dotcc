@@ -179,6 +179,7 @@ public static unsafe partial class Libc
             stream = new FileStream(p, fileMode, access,
                 access == FileAccess.Read ? FileShare.Read : FileShare.ReadWrite);
         }
+        catch (ArgumentException) { errno = EINVAL; return null; }
         catch (FileNotFoundException) { errno = ENOENT; return null; }
         catch (DirectoryNotFoundException) { errno = ENOENT; return null; }
         catch (UnauthorizedAccessException) { errno = EACCES; return null; }

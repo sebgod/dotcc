@@ -102,6 +102,68 @@ public static unsafe partial class Libc
         bool neg = false;
         if (*p == (byte)'+' || *p == (byte)'-') { neg = *p == (byte)'-'; p++; }
 
+        // C99 hex float: 0x<hex> [. <hex>] p[+-]<dec> — delegated to
+        // dotcc's own parser because .NET's double.Parse rejects 0x…p…
+        if (*p == (byte)'0' && (p[1] == (byte)'x' || p[1] == (byte)'X'))
+        {
+            p += 2; // skip 0x
+            // Integer part: required hex digits.
+            byte* afterInt = p;
+            while ((*afterInt >= (byte)'0' && *afterInt <= (byte)'9')
+                || (*afterInt >= (byte)'a' && *afterInt <= (byte)'f')
+                || (*afterInt >= (byte)'A' && *afterInt <= (byte)'F'))
+            { afterInt++; }
+            if (afterInt == p && *afterInt != (byte)'.')
+            {
+                // No hex digits at all — not a valid hex float, fall through
+                // to the decimal path (which will fail on the 'x').
+                goto decimal_path;
+            }
+            // Parse integer hex digits as a long significand.
+            long sig = 0; int fracHex = 0; bool sawHex = false; // fracHex = hex digits after '.'
+            while (p < afterInt)
+            {
+                sig = unchecked(sig * 16 + HexVal(*p)); p++; sawHex = true;
+            }
+            // Optional fractional part.
+            if (*p == (byte)'.')
+            {
+                p++;
+                while ((*p >= (byte)'0' && *p <= (byte)'9')
+                    || (*p >= (byte)'a' && *p <= (byte)'f')
+                    || (*p >= (byte)'A' && *p <= (byte)'F'))
+                {
+                    sig = unchecked(sig * 16 + HexVal(*p)); p++; fracHex++; sawHex = true;
+                }
+            }
+            if (!sawHex)
+            {
+                // No hex digits at all (e.g. "0x.") — not a valid number.
+                if (endptr != null) { *endptr = nptr; }
+                return 0.0;
+            }
+            // Binary exponent (C99 requires 'p'; Lua accepts hex floats without it).
+            int exp = 0;
+            if (*p == (byte)'p' || *p == (byte)'P')
+            {
+                p++;
+                bool expNeg = false;
+                if (*p == (byte)'+' || *p == (byte)'-') { expNeg = *p == (byte)'-'; p++; }
+                while (*p >= (byte)'0' && *p <= (byte)'9')
+                {
+                    exp = exp * 10 + (*p - (byte)'0'); p++;
+                }
+                if (expNeg) exp = -exp;
+            }
+            exp -= 4 * fracHex; // each fractional hex digit shifts 4 bits
+            // Compute: sig * 2^exp. ScaleB handles the power-of-two multiply
+            // and produces the correctly-rounded double result.
+            double hexVal = System.Math.ScaleB((double)sig, exp);
+            if (endptr != null) { *endptr = p; }
+            return neg ? -hexVal : hexVal;
+        }
+        decimal_path:
+
         if (MatchCI(p, "inf"))
         {
             p += 3;
@@ -158,6 +220,15 @@ public static unsafe partial class Libc
     /// ignoring where it ends. No error reporting (matches C).
     /// </summary>
     public static double atof(byte* nptr) => strtod(nptr, null);
+
+    /// <summary>Hex digit value (0-15).</summary>
+    private static int HexVal(byte b) => b switch
+    {
+        >= (byte)'0' and <= (byte)'9' => b - (byte)'0',
+        >= (byte)'a' and <= (byte)'f' => b - (byte)'a' + 10,
+        >= (byte)'A' and <= (byte)'F' => b - (byte)'A' + 10,
+        _ => 0,
+    };
 
     /// <summary>Case-insensitive ASCII prefix match of a lowercase literal.</summary>
     private static bool MatchCI(byte* p, string lower)

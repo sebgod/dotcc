@@ -19,8 +19,14 @@ internal sealed class SizeofFolder : RewritingTokenStream
     private static readonly HashSet<string> TypeKeywords = new(StringComparer.Ordinal)
     { "void", "char", "short", "int", "long", "float", "double", "signed", "unsigned", "_Bool" };
 
+    /// <summary>Cached byte-sizes of typedef names seen so far. Populated as
+    /// <c>typedef</c> declarations stream past; consulted during <see cref="EvalSizeof"/>
+    /// when a TYPE_NAME is encountered so the folder can still fold <c>sizeof(myint)</c>
+    /// to a NUM and avoid the parser's binary-op-after-sizeof conflict.</summary>
+    private readonly Dictionary<string, int> _typedefSizes = new(StringComparer.Ordinal);
+
     private readonly int _sizeofSym, _lparenSym, _rparenSym, _starSym, _numSym, _idSym, _typeNameSym;
-    private readonly int _structSym, _unionSym, _enumSym;
+    private readonly int _structSym, _unionSym, _enumSym, _typedefSym, _semiSym;
 
     public SizeofFolder(ISyncIterator<Item> inner) : base(inner)
     {
@@ -37,10 +43,47 @@ internal sealed class SizeofFolder : RewritingTokenStream
         _structSym = map.TryGetValue("struct", out var s) ? s : -1;
         _unionSym  = map.TryGetValue("union", out var u) ? u : -1;
         _enumSym   = map.TryGetValue("enum", out var e) ? e : -1;
+        _typedefSym = map.TryGetValue("typedef", out var td) ? td : -1;
+        _semiSym = map.TryGetValue(";", out var semi) ? semi : -1;
     }
 
     protected override void ProcessToken(Item token)
     {
+        // Track simple typedefs: `typedef <type> <name> ;`
+        // Record the name→size so `sizeof(name)` can fold to a NUM.
+        if (_typedefSym >= 0 && token.ID == _typedefSym)
+        {
+            Emit(token);
+            // Collect all tokens to the next `;`
+            var declTokens = new List<Item>();
+            while (TryReadNext(out var dt) && dt!.ID != _semiSym)
+                declTokens.Add(dt);
+            if (declTokens.Count >= 2)
+            {
+                // The new typedef name is the last non-trivial token before `;`
+                // (skipping trailing `)` from function-pointer declarators and
+                // `*` which can't be part of a typename). Simple heuristic:
+                // scan backward for the last ID/TYPE_NAME.
+                for (var i = declTokens.Count - 1; i >= 0; i--)
+                {
+                    if (declTokens[i].ID == _idSym || declTokens[i].ID == _typeNameSym)
+                    {
+                        var name = declTokens[i].Content?.ToString() ?? "";
+                        // Compute size from the type-specifier tokens before the name.
+                        var specTokens = declTokens.Take(i).ToList();
+                        var sz = EvalSizeof(specTokens);
+                        if (sz is int s) { _typedefSizes[name] = s; }
+                        break;
+                    }
+                }
+            }
+            foreach (var dt in declTokens) Emit(dt);
+            // Emit the `;` that ended the loop above (TryReadNext consumed it).
+            // Actually TryReadNext consumed the token — we need to emit it manually.
+            Emit(new Item(_semiSym, ";", token.Position));
+            return;
+        }
+
         if (token.ID != _sizeofSym) { Emit(token); return; }
 
         // Peek sizeof ( Type )
@@ -95,8 +138,12 @@ internal sealed class SizeofFolder : RewritingTokenStream
                     _ => null
                 };
             }
-            if (tokens[i].ID == _typeNameSym || tokens[i].ID == _structSym
-                || tokens[i].ID == _unionSym || tokens[i].ID == _enumSym)
+            if (tokens[i].ID == _typeNameSym)
+            {
+                var tn = tokens[i].Content?.ToString() ?? "";
+                return _typedefSizes.TryGetValue(tn, out var ts) ? ts : null;
+            }
+            if (tokens[i].ID == _structSym || tokens[i].ID == _unionSym || tokens[i].ID == _enumSym)
                 return null; // need layout info
         }
         return null;
