@@ -52,7 +52,15 @@ public unsafe ref struct SprintfBuilder
     public int Done()
     {
         _inner.Done();
-        var bytes = Encoding.UTF8.GetBytes(_buf.ToString());
+        // The PrintfBuilder writes Unicode chars to the StringWriter for
+        // %c (where the int value becomes a char). For values >127 this
+        // creates a multi-byte UTF-8 sequence when we want a single raw
+        // byte. ISO-8859-1 maps each char 0–255 to a single byte of the
+        // same value, which is exactly printf %c semantics (and all other
+        // printf output — literals, %d, %s, etc. — is ASCII, which both
+        // encodings handle identically).
+        var latin1 = System.Text.Encoding.GetEncoding(28591);
+        var bytes = latin1.GetBytes(_buf.ToString());
         int writeCount = _capacity < 0 ? bytes.Length : Math.Min(bytes.Length, _capacity);
         for (int i = 0; i < writeCount; i++) { _dst[i] = bytes[i]; }
         _dst[writeCount] = 0;

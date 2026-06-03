@@ -84,9 +84,10 @@ public unsafe ref struct PrintfBuilder
                 if (spec.Plus && v >= 0) { s = "+" + s; }
                 else if (spec.Space && v >= 0) { s = " " + s; }
                 break;
-            case (byte)'x': s = v.ToString("x", ci); break;
-            case (byte)'X': s = v.ToString("X", ci); break;
-            case (byte)'o': s = AltOctal(FormatOctal((uint)v), spec); break; // unsigned 32-bit
+            case (byte)'u': s = ((uint)v).ToString(ci); break; // unsigned bit pattern
+            case (byte)'x': s = (spec.Alt ? "0x" : "") + v.ToString("x", ci); break;
+            case (byte)'X': s = (spec.Alt ? "0X" : "") + v.ToString("X", ci); break;
+            case (byte)'o': s = AltOctal(FormatOctal((uint)v), spec); break; // # handled by AltOctal
             case (byte)'c': _w.Write((char)v); return this;
             case (byte)'f': case (byte)'e': case (byte)'g':
                 // Integer formatted via the float path — same precision rules apply.
@@ -108,6 +109,16 @@ public unsafe ref struct PrintfBuilder
             case (byte)'d': case (byte)'i':
                 s = ((int)v).ToString(ci);
                 break;
+            case (byte)'a':
+                s = FormatHexFloat(v, upper: false, ci, spec.Precision);
+                if (spec.Plus && !double.IsNegative(v) && v != 0.0) { s = "+" + s; }
+                else if (spec.Space && !double.IsNegative(v) && v != 0.0) { s = " " + s; }
+                break;
+            case (byte)'A':
+                s = FormatHexFloat(v, upper: true, ci, spec.Precision);
+                if (spec.Plus && !double.IsNegative(v) && v != 0.0) { s = "+" + s; }
+                else if (spec.Space && !double.IsNegative(v) && v != 0.0) { s = " " + s; }
+                break;
             case (byte)'f': case (byte)'e': case (byte)'g':
             default:
                 s = FormatFloat(v, spec, ci);
@@ -115,6 +126,99 @@ public unsafe ref struct PrintfBuilder
         }
         _w.Write(ApplyWidth(s, spec));
         return this;
+    }
+
+    /// <summary>Format a double as a C99 <c>%a</c> hex float (e.g.
+    /// <c>0x1.921fb54442d18p+1</c> for pi). The hex representation is
+    /// round-trippable (exact in both directions), which is exactly what
+    /// Lua's <c>quotefloat</c> needs for <c>%q</c>.</summary>
+    private static string FormatHexFloat(double v, bool upper, CultureInfo ci, int precision = -1)
+    {
+        if (double.IsNaN(v)) { return upper ? "NAN" : "nan"; }
+        if (double.IsInfinity(v))
+        {
+            var hex = upper ? "INF" : "inf";
+            return v < 0 ? "-" + hex : hex;
+        }
+        if (v == 0.0)
+        {
+            var sb0 = new System.Text.StringBuilder();
+            if (double.IsNegative(v)) { sb0.Append('-'); }
+            sb0.Append(upper ? "0X0" : "0x0");
+            if (precision > 0 || (precision < 0 && precision != 0))
+            {
+                sb0.Append('.');
+                int count = precision >= 0 ? precision : 1;
+                sb0.Append('0', count);
+            }
+            sb0.Append(upper ? "P+0" : "p+0");
+            return sb0.ToString();
+        }
+        bool neg = double.IsNegative(v);
+        if (neg) { v = -v; }
+        // Extract mantissa and exponent from the IEEE 754 representation
+        ulong bits = BitConverter.DoubleToUInt64Bits(v);
+        long biasedExp = (long)((bits >> 52) & 0x7FF);
+        ulong mantissa = bits & 0x000F_FFFF_FFFF_FFFF;
+        long exp;
+        if (biasedExp == 0)
+        {
+            exp = 1 - 1023;
+        }
+        else
+        {
+            mantissa |= 1UL << 52;
+            exp = biasedExp - 1023;
+        }
+        int firstNibble = (int)(mantissa >> 52);
+        ulong fracPart  = mantissa & 0x000F_FFFF_FFFF_FFFF;
+        // Build 13 hex fractional nibbles (52 bits / 4).
+        int[] nibbles = new int[13];
+        for (int i = 0; i < 13; i++)
+            nibbles[i] = (int)(fracPart >> (48 - i * 4)) & 0xF;
+        // If precision is specified, round to that many fractional hex digits.
+        int fullLen = 13;
+        while (fullLen > 0 && nibbles[fullLen - 1] == 0) { fullLen--; }
+        int outLen = precision >= 0 ? precision : fullLen;
+        if (outLen < 13)
+        {
+            // Round at position outLen.
+            int roundPos = outLen;
+            if (roundPos < 13 && nibbles[roundPos] >= 8)
+            {
+                // Round up: propagate carry.
+                int carry = 1;
+                for (int i = roundPos - 1; i >= 0 && carry > 0; i--)
+                {
+                    int vv = nibbles[i] + 1;
+                    nibbles[i] = vv & 0xF;
+                    carry = vv >> 4;
+                }
+                if (carry > 0)
+                {
+                    // Fraction overflowed into the integer part.
+                    firstNibble++;
+                    if (firstNibble >= 16) { firstNibble = 1; exp += 4; }
+                }
+            }
+        }
+        // Build the result string.
+        char toHex(int n) => n < 10 ? (char)('0' + n)
+            : upper ? (char)('A' + n - 10) : (char)('a' + n - 10);
+        var sb = new System.Text.StringBuilder(30);
+        if (neg) { sb.Append('-'); }
+        sb.Append(upper ? "0X" : "0x");
+        sb.Append(toHex(firstNibble));
+        if (outLen > 0)
+        {
+            sb.Append('.');
+            for (int i = 0; i < outLen; i++)
+                sb.Append(toHex(nibbles[i]));
+        }
+        sb.Append(upper ? 'P' : 'p');
+        sb.Append(exp >= 0 ? "+" : "");
+        sb.Append(exp.ToString(ci));
+        return sb.ToString();
     }
 
     /// <summary>Float gets promoted to double — real C vararg rule.</summary>
@@ -172,9 +276,10 @@ public unsafe ref struct PrintfBuilder
                 if (spec.Plus && v >= 0) { s = "+" + s; }
                 else if (spec.Space && v >= 0) { s = " " + s; }
                 break;
-            case (byte)'x': s = v.ToString("x", ci); break;
-            case (byte)'X': s = v.ToString("X", ci); break;
-            case (byte)'o': s = AltOctal(FormatOctal((ulong)v), spec); break; // unsigned 64-bit
+            case (byte)'u': s = ((ulong)v).ToString(ci); break; // unsigned bit pattern
+            case (byte)'x': s = (spec.Alt ? "0x" : "") + v.ToString("x", ci); break;
+            case (byte)'X': s = (spec.Alt ? "0X" : "") + v.ToString("X", ci); break;
+            case (byte)'o': s = AltOctal(FormatOctal((ulong)v), spec); break; // # handled by AltOctal
             case (byte)'f': case (byte)'e': case (byte)'g':
                 s = FormatFloat((double)v, spec, ci);
                 break;
