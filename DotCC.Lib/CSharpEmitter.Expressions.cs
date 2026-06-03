@@ -281,9 +281,11 @@ internal sealed partial class CSharpEmitter
         // Tag the result with the arms' common integer type so the value flows into
         // a containing operator's usual-arithmetic reconcile (`x + (cond ? sizeof(S)
         // : 0)` — the ternary is int / size_t, not untyped). Non-integer arms leave
-        // it untyped.
+        // it untyped. DecayFnName on each arm so a fn-name → fn-ptr decay happens
+        // before the ternary (both arms must be the same delegate type).
         return new EmitContent.Text(
-            $"({CondOf(n.Arg0)} ? {T(n.Arg2)} : {T(n.Arg4)})", Ty: TernaryResultType(n.Arg2, n.Arg4));
+            $"({CondOf(n.Arg0)} ? {DecayFnName(T(n.Arg2))} : {DecayFnName(T(n.Arg4))})",
+            Ty: TernaryResultType(n.Arg2, n.Arg4));
     }
 
     // The common integer type of a ternary's two arms, for the type-synthesis
