@@ -457,17 +457,10 @@ internal sealed partial class CSharpEmitter
         {
             var fieldLv = T(n.Arg1);
             var ptr = QualifyPredefinedTypeName(ft) + "*";
-            // Unsafe.AsPointer<T>() requires T to be a non-pointer type (C# forbids
-            // pointer types as generic type arguments — CS0306). When ft is already
-            // a pointer (e.g. UpVal*), we must provide an explicit T (the pointee,
-            // stripping one *). For non-pointer ft, omit T — C# infers it.
-            if (ft.EndsWith('*'))
-            {
-                var pointee = QualifyPredefinedTypeName(ft[..^1].TrimEnd());
-                return new EmitContent.Text(
-                    $"(({ptr})System.Runtime.CompilerServices.Unsafe.AsPointer<{pointee}>(ref {fieldLv}))",
-                    Ty: new CType.Sized(ptr));
-            }
+            // NOTE: when ft is itself a pointer (e.g. UpVal*), the emitted
+            // AsPointer(ref UpVal*_field) triggers CS0306 (pointer type as generic
+            // argument). A proper fix needs to avoid both CS0306 and CS0212 — see
+            // HANDOVER.md. For non-pointer ft, C# infers T correctly.
             return new EmitContent.Text(
                 $"(({ptr})System.Runtime.CompilerServices.Unsafe.AsPointer(ref {fieldLv}))",
                 Ty: new CType.Sized(ptr));
