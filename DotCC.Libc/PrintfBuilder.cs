@@ -80,11 +80,9 @@ public unsafe ref struct PrintfBuilder
         switch (spec.Conv)
         {
             case (byte)'d': case (byte)'i':
-                s = v.ToString(ci);
-                if (spec.Plus && v >= 0) { s = "+" + s; }
-                else if (spec.Space && v >= 0) { s = " " + s; }
+                s = PadInt(v, spec, ci);
                 break;
-            case (byte)'u': s = ((uint)v).ToString(ci); break; // unsigned bit pattern
+            case (byte)'u': s = PadInt((uint)v, spec, ci); break; // unsigned bit pattern
             case (byte)'x': s = (spec.Alt ? "0x" : "") + v.ToString("x", ci); break;
             case (byte)'X': s = (spec.Alt ? "0X" : "") + v.ToString("X", ci); break;
             case (byte)'o': s = AltOctal(FormatOctal((uint)v), spec); break; // # handled by AltOctal
@@ -126,6 +124,33 @@ public unsafe ref struct PrintfBuilder
         }
         _w.Write(ApplyWidth(s, spec));
         return this;
+    }
+
+    /// <summary>Apply precision to an integer or unsigned string.</summary>
+    private static string PadInt(long v, Spec spec, CultureInfo ci)
+    {
+        string sign = "";
+        ulong abs;
+        if (v < 0) { sign = "-"; abs = unchecked((ulong)(-v)); }
+        else if (spec.Plus) { sign = "+"; abs = (ulong)v; }
+        else if (spec.Space) { sign = " "; abs = (ulong)v; }
+        else { abs = (ulong)v; }
+        // Precision 0 with value 0 → empty string (C99 §7.21.6.1).
+        if (spec.Precision == 0 && abs == 0) return sign;
+        string s = abs.ToString(ci);
+        if (spec.Precision > s.Length)
+            s = s.PadLeft(spec.Precision, '0');
+        return sign + s;
+    }
+
+    private static string PadInt(ulong v, Spec spec, CultureInfo ci)
+    {
+        // Precision 0 with value 0 → empty string.
+        if (spec.Precision == 0 && v == 0) return "";
+        string s = v.ToString(ci);
+        if (spec.Precision > s.Length)
+            s = s.PadLeft(spec.Precision, '0');
+        return s;
     }
 
     /// <summary>Format a double as a C99 <c>%a</c> hex float (e.g.
@@ -272,11 +297,9 @@ public unsafe ref struct PrintfBuilder
         switch (spec.Conv)
         {
             case (byte)'d': case (byte)'i':
-                s = v.ToString(ci);
-                if (spec.Plus && v >= 0) { s = "+" + s; }
-                else if (spec.Space && v >= 0) { s = " " + s; }
+                s = PadInt(v, spec, ci);
                 break;
-            case (byte)'u': s = ((ulong)v).ToString(ci); break; // unsigned bit pattern
+            case (byte)'u': s = PadInt((ulong)v, spec, ci); break; // unsigned bit pattern
             case (byte)'x': s = (spec.Alt ? "0x" : "") + v.ToString("x", ci); break;
             case (byte)'X': s = (spec.Alt ? "0X" : "") + v.ToString("X", ci); break;
             case (byte)'o': s = AltOctal(FormatOctal((ulong)v), spec); break; // # handled by AltOctal
@@ -455,6 +478,9 @@ public unsafe ref struct PrintfBuilder
                 : v.ToString("G", ci),
             _ => v.ToString("F" + prec.ToString(ci), ci),
         };
+        // '#' flag for floats: force a decimal point even when precision is 0
+        // (e.g. %#.0f with value 100 → "100.")
+        if (spec.Alt && !s.Contains('.')) { s += "."; }
         if (spec.Plus && v >= 0) { s = "+" + s; }
         else if (spec.Space && v >= 0) { s = " " + s; }
         return s;
