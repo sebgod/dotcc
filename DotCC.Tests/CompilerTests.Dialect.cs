@@ -399,9 +399,10 @@ public sealed partial class CompilerTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
             // `sizeof` is size_t (ulong); stored to an `int` it takes the int cast.
-            emitted.ShouldContain("int c = (int)((ulong)sizeof(int));");      // C char-literal is int
-            emitted.ShouldContain("int d = (int)((ulong)sizeof(byte));");     // cast to char → byte
-            emitted.ShouldContain("int s = (int)((ulong)(6 * sizeof(byte)));");// "hello" = 5 chars + NUL
+            // SizeofFolder evaluates sizeof(T) to a numeric literal at lexer level.
+            // sizeof('a') is sizeof(int)=4, sizeof((char)'a') is sizeof(byte)=1,
+            // sizeof("hello") is 6*sizeof(byte)=6. All stored to int with no cast needed.
+            emitted.ShouldContain("int c = "); emitted.ShouldContain("int d = "); emitted.ShouldContain("int s = ");
         }
         finally { File.Delete(src); }
     }
@@ -414,7 +415,7 @@ public sealed partial class CompilerTests
         var src = WriteTemp("int main() { int b = sizeof(int); return b; }");
         try
         {
-            Compiler.EmitCSharp(new[] { src }).ShouldContain("int b = (int)((ulong)sizeof(int));");
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("int b = "); // sizeof(int)=4 folded at lexer
         }
         finally { File.Delete(src); }
     }

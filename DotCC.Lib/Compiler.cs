@@ -248,7 +248,11 @@ public static class Compiler
             // through synthetic-header typedefs (e.g. <setjmp.h>'s
             // `typedef LongJmpToken jmp_buf;`).
             using var typeRewriter = new TypeNameRewriter(qualStripper, PredefinedTypeNames);
-            using var tokens = new SyncLATokenIterator(typeRewriter);
+            // Fold sizeof(T) → number so sizeof(int)*8 → 4*8, avoiding an LALR
+            // conflict between ArrDims→[E] and Subscript→E[E] that drops
+            // binary operators after sizeof in all contexts.
+            using var sizeofFolder = new SizeofFolder(typeRewriter);
+            using var tokens = new SyncLATokenIterator(sizeofFolder);
 
             Item result;
             try
