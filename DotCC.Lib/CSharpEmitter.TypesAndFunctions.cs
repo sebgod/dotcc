@@ -313,7 +313,7 @@ internal sealed partial class CSharpEmitter
             // (enabling sizeof of a member, of `*member` / `member[i]`, and nested
             // member chains). A typedef'd pointer alias resolves to its underlying
             // (`StkId` → `StackValue*`) so a deref/subscript can peel the `*`.
-            _pendingFieldTypeMap[e.Name] = new CType.Sized(ResolveTypedef(fieldType));
+            _curFieldTypeScope[e.Name] = new CType.Sized(ResolveTypedef(fieldType));
             // An enum-typed field is remembered so a `s.field` / `p->field` read
             // can be tagged enum-typed (see FieldEnum / the member-access visitors).
             if (_enumTags.Contains(fieldType)) { _pendingFieldEnumMap[e.Name] = fieldType; }
@@ -432,7 +432,7 @@ internal sealed partial class CSharpEmitter
             // A 1-D fixed buffer carries its Arr CType (multi-dim is handled by
             // _structMultiDimMembers), so `sizeof(s.buf)` is count*sizeof(elem),
             // not the decayed pointer size. (`s.buf[i]` rides ElementType.)
-            if (dims.Count == 1) { _pendingFieldTypeMap[name] = new CType.Arr(new CType.Sized(elem), total); }
+            if (dims.Count == 1) { _curFieldTypeScope[name] = new CType.Arr(new CType.Sized(elem), total); }
             return $"public fixed {elem} {Id(name)}[{totalText}];\n";
         }
         return EmitInlineArrayMember(elem, name, totalText, record1D: dims.Count < 2);
@@ -549,6 +549,15 @@ internal sealed partial class CSharpEmitter
         // in the parent's _pendingFields as direct parent fields), so just
         // discard the mark to keep the stack balanced and emit the inner lines.
         if (_memberMarks.Count > 0) { _memberMarks.Pop(); }
+        // Merge inner scope's field types into parent (fields are inlined, so
+        // their types belong to the parent too). Without this the inner fields'
+        // CTypes would be lost — the inner scope is popped and discarded.
+        if (_pendingFieldTypeScopes.Count > 1)
+        {
+            var innerScope = _pendingFieldTypeScopes.Pop();
+            var parentScope = _pendingFieldTypeScopes.Peek();
+            foreach (var kv in innerScope) { parentScope[kv.Key] = kv.Value; }
+        }
         return T(n.Arg3);  // inner member lines, inlined into the parent
     }
 
@@ -558,6 +567,7 @@ internal sealed partial class CSharpEmitter
     public EmitContent Visit(C.MemberMark n)
     {
         _memberMarks.Push(_pendingFields.Count);
+        _pendingFieldTypeScopes.Push(new Dictionary<string, CType>(StringComparer.Ordinal));
         return string.Empty;
     }
 
@@ -583,6 +593,10 @@ internal sealed partial class CSharpEmitter
         EmitExplicitUnionType(nestedType, innerLines);
         _pendingFields.Add(synth);  // the one real parent field
         foreach (var fld in innerNames) { _pendingPromotions.Add((fld, synth)); }
+        // Pop the inner scope (pushed by MemberMark) and store field types under
+        // the nested type, so sizeof / member-access chains resolve through it.
+        var innerScope = _pendingFieldTypeScopes.Count > 1 ? _pendingFieldTypeScopes.Pop() : null;
+        if (innerScope is { Count: > 0 }) { _structFieldTypes[nestedType] = innerScope; }
         return $"public {nestedType} {synth};\n";
     }
 
@@ -633,16 +647,10 @@ internal sealed partial class CSharpEmitter
         if (union) { EmitExplicitUnionType(nestedType, memberLines); }
         else { EmitSequentialStructType(nestedType, memberLines); }
         _structFields[nestedType] = innerNames;
-        var innerTypes = new Dictionary<string, CType>(StringComparer.Ordinal);
-        foreach (var inner in innerNames)
-        {
-            if (_pendingFieldTypeMap.TryGetValue(inner, out var ity))
-            {
-                innerTypes[inner] = ity;
-                _pendingFieldTypeMap.Remove(inner);
-            }
-        }
-        if (innerTypes.Count > 0) { _structFieldTypes[nestedType] = innerTypes; }
+        // Pop the inner scope (pushed by MemberMark) — its entries are the inner
+        // fields' CTypes, now owned by the nested type.
+        var innerScope = _pendingFieldTypeScopes.Count > 1 ? _pendingFieldTypeScopes.Pop() : null;
+        if (innerScope is { Count: > 0 }) { _structFieldTypes[nestedType] = innerScope; }
         return nestedType;
     }
 
@@ -659,26 +667,16 @@ internal sealed partial class CSharpEmitter
         if (union) { EmitExplicitUnionType(nestedType, innerLines); }
         else { EmitSequentialStructType(nestedType, innerLines); }
         _structFields[nestedType] = innerNames;  // so `o.name.inner` resolves its fields
-        // Move the inner fields' CTypes from the pending (parent) map onto the
-        // nested type's own field-type map — the type analogue of slicing the
-        // inner NAMES off _pendingFields. Without this the inner types would
-        // wrongly drain into the PARENT, and `o.name.inner` would carry no type,
-        // so a chain through the member (`sizeof(*o.name.inner)`, Lua's
-        // `sizeof(*p.dyd.actvar.arr)`) couldn't resolve.
-        var innerTypes = new Dictionary<string, CType>(StringComparer.Ordinal);
-        foreach (var inner in innerNames)
-        {
-            if (_pendingFieldTypeMap.TryGetValue(inner, out var ity))
-            {
-                innerTypes[inner] = ity;
-                _pendingFieldTypeMap.Remove(inner);
-            }
-        }
-        if (innerTypes.Count > 0) { _structFieldTypes[nestedType] = innerTypes; }
+        // Pop the inner scope (pushed by MemberMark) — its entries are the inner
+        // fields' CTypes, isolated from the parent scope so same-named outer
+        // fields (like luaL_Buffer's n/b vs the inner union's n/b) aren't
+        // clobbered. The nested type now owns those CTypes.
+        var innerScope = _pendingFieldTypeScopes.Count > 1 ? _pendingFieldTypeScopes.Pop() : null;
+        if (innerScope is { Count: > 0 }) { _structFieldTypes[nestedType] = innerScope; }
         _pendingFields.Add(fieldName);           // the named field IS a parent field
         // …and its type IS the synth nested type, so `o.name` carries CType.Sized
         // (nestedType) and the next `.inner` resolves via _structFieldTypes.
-        _pendingFieldTypeMap[fieldName] = new CType.Sized(nestedType);
+        _curFieldTypeScope[fieldName] = new CType.Sized(nestedType);
         return $"public {nestedType} {Id(fieldName)};\n";
     }
 
@@ -863,11 +861,22 @@ internal sealed partial class CSharpEmitter
     // Per-struct/union field CType, so a member access `s.field` / `p->field`
     // carries the field's type — enabling `sizeof` of a member (and of `*member`
     // / `member[i]`) and nested member chains (`L->stack.p`). Populated by
-    // StructMemberList into _pendingFieldTypeMap, drained per struct (same shape
-    // as _structFieldEnums). Only scalar/pointer/struct-valued fields; array
-    // members carry their shape via _structMultiDimMembers / _structInlineArrFields.
+    // StructMemberList into the current scope of _pendingFieldTypeScopes, drained
+    // per struct (same shape as _structFieldEnums). The scope stack isolates
+    // nested aggregate members so inner fields (e.g. luaL_Buffer's inner union
+    // n/b) can't clobber same-named outer fields. Only scalar/pointer/struct-valued
+    // fields; array members carry their shape via _structMultiDimMembers /
+    // _structInlineArrFields.
     private readonly Dictionary<string, Dictionary<string, CType>> _structFieldTypes = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, CType> _pendingFieldTypeMap = new(StringComparer.Ordinal);
+    // Scoped stack of field-type maps, one per nesting level of aggregate members.
+    // MemberMark pushes a new scope; AnonStructMember/AnonUnionMember /
+    // EmitAnonAggregateType / EmitNamedNestedAggregate pop it. This prevents inner
+    // fields from clobbering outer fields with the same name — the flat-dict
+    // predecessor lost luaL_Buffer's outer n/b when the inner union's n/b were
+    // written and then removed. DrainFieldTypes drains the top (only) scope, which
+    // is the base scope once all nesting has been resolved.
+    private readonly Stack<Dictionary<string, CType>> _pendingFieldTypeScopes = new();
+    private Dictionary<string, CType> _curFieldTypeScope => _pendingFieldTypeScopes.Peek();
 
     // C# type names already emitted into the type-decls section. Emitter-lifetime
     // (NOT reset per function): when several translation units `#include` the same
@@ -895,13 +904,14 @@ internal sealed partial class CSharpEmitter
     // reset it for the next aggregate body (same shape as DrainFieldEnums).
     private void DrainFieldTypes(params string[] typeNames)
     {
-        if (_pendingFieldTypeMap.Count > 0)
+        var cur = _curFieldTypeScope;
+        if (cur.Count > 0)
         {
             foreach (var tn in typeNames)
             {
-                _structFieldTypes[tn] = new Dictionary<string, CType>(_pendingFieldTypeMap, StringComparer.Ordinal);
+                _structFieldTypes[tn] = new Dictionary<string, CType>(cur, StringComparer.Ordinal);
             }
-            _pendingFieldTypeMap.Clear();
+            cur.Clear();
         }
     }
 
@@ -944,8 +954,11 @@ internal sealed partial class CSharpEmitter
     // record, per containing aggregate, each promoted field → the synthetic field
     // name that holds the nested union, and rewrite member access accordingly.
     // _memberMarks: _pendingFields-count snapshots from MemberMark (epsilon), so
-    // AnonUnionMember can isolate just its inner fields. _pendingPromotions: the
-    // promotions for the aggregate currently being built, drained at DrainPending.
+    // AnonUnionMember can isolate just its inner fields. _pendingFieldTypeScopes
+    // mirrors the push/pop cadence (MemberMark pushes a scope; the consumers pop
+    // it) so inner-field types are isolated from same-named outer fields.
+    // _pendingPromotions: the promotions for the aggregate currently being built,
+    // drained at DrainPending.
     private readonly Stack<int> _memberMarks = new();
     private int _anonAggCounter;
     private readonly List<(string Field, string Synth)> _pendingPromotions = new();

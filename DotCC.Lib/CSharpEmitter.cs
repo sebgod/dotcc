@@ -335,6 +335,7 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
         _promotableIn = promotable ?? new HashSet<(string, string)>();
         _dialectGate = dialectGate;
         _conversionGate = conversionGate;
+        _pendingFieldTypeScopes.Push(new Dictionary<string, CType>(StringComparer.Ordinal));
     }
 
     // Flag a construct introduced by a standard newer than the active dialect.
