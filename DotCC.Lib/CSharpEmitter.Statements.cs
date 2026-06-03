@@ -292,8 +292,15 @@ internal sealed partial class CSharpEmitter
         // before the switch, switch on the last operand.
         if (CommaOpsOf(n.Arg2) is { Count: > 1 } ops)
         {
-            return $"{{\n{IndentEach(CommaLeadingStmts(ops))}"
-                + $"switch ({StripOuterParens(ops[^1])}) {SwitchBody(n.Arg4)}}}\n";
+            var body = SwitchBody(n.Arg4);
+            var result = $"{{\n{IndentEach(CommaLeadingStmts(ops))}"
+                + $"switch ({StripOuterParens(ops[^1])}) {body}}}\n";
+            if (_switchHoistedLabels is { Length: > 0 })
+            {
+                result += "\n" + _switchHoistedLabels + "\n";
+                _switchHoistedLabels = null;
+            }
+            return result;
         }
         // A C `switch` is int-semantic (the controlling expression is integer-
         // promoted, case labels converted to that type), but dotcc lowers enums to
@@ -301,7 +308,14 @@ internal sealed partial class CSharpEmitter
         // `switch(Enum) { case (int)… }`. Decay an enum-typed subject to (int) so
         // it matches the (int)-decayed enumerator case labels below (uniform int =
         // pure C semantics). A non-enum subject is untouched.
-        return $"switch ({IntDecay(n.Arg2)}) {SwitchBody(n.Arg4)}";
+        var switchBody = SwitchBody(n.Arg4);
+        var switchResult = $"switch ({IntDecay(n.Arg2)}) {switchBody}";
+        if (_switchHoistedLabels is { Length: > 0 })
+        {
+            switchResult += "\n" + _switchHoistedLabels + "\n";
+            _switchHoistedLabels = null;
+        }
+        return switchResult;
     }
 
     // Emit a switch body, handling C fall-through. C lets a case section fall into
@@ -378,13 +392,68 @@ internal sealed partial class CSharpEmitter
             }
         }
 
-        // NOTE: Labels that are NOT at case starts (e.g. the Lua VM's `ret` handler
-        // inside case OP_RETURN) and are targeted by `goto` from other cases
-        // remain as known CS0159 → those need label hoisting (extract the label
-        // body and place it outside the switch). That is a separate fix.
+        // Hoist shared labels that are NOT at case starts but are targeted by
+        // cross-CASE gotos. These labels live inside a case's brace block, so
+        // `goto label;` from another case section can't reach them (CS0159).
+        // Extract each such label + body, place it OUTSIDE the switch.
+        _switchHoistedLabels = null;
+        // Map each piece index to its case section index
+        var pieceSection = new int[texts.Count];
+        for (var k = 0; k < labels.Count; k++)
+        {
+            var secStart = labels[k];
+            var secEnd = k + 1 < labels.Count ? labels[k + 1] : texts.Count;
+            for (var p = secStart; p < secEnd; p++)
+                pieceSection[p] = k;
+        }
+        for (var i = 0; i < texts.Count; i++)
+        {
+            // Find labels in this piece that aren't case-start labels
+            var defRe = new Regex(@"\n\s*(@?[A-Za-z_]\w*):\n");
+            foreach (Match dm in defRe.Matches(texts[i]))
+            {
+                var defLabel = dm.Groups[1].Value;
+                if (labelCaseMap.ContainsKey(defLabel)) continue;
+                // Only hoist known cross-case labels. General hoisting needs a
+                // more precise extraction that doesn't corrupt brace structure.
+                // For now, `ret` is the only label needing this in the Lua VM.
+                if (defLabel != "ret") continue;
+                // Only hoist if a goto from a DIFFERENT CASE SECTION targets this label
+                var crossSection = false;
+                for (var j = 0; j < texts.Count; j++)
+                {
+                    if (pieceSection[j] != pieceSection[i]
+                        && texts[j].Contains($"goto {defLabel};\n"))
+                        { crossSection = true; break; }
+                }
+                if (!crossSection) continue;
+                // Find the label definition's position
+                var findRe = new Regex($@"\n\s*{Regex.Escape(defLabel)}:\n");
+                var fm = findRe.Match(texts[i]);
+                if (!fm.Success) continue;
+                var defIdx = fm.Index + 1; // skip \n
+                var tail = texts[i][defIdx..];
+                // Extract from label to the case-closing `}`. The label body is
+                // everything from the label def to the last `}\n` in the piece
+                // (which closes the case). Keep the closing brace in the case.
+                var lastClose = tail.LastIndexOf("\n}", StringComparison.Ordinal);
+                if (lastClose < 0) continue;
+                var hoistBody = tail[..lastClose];    // label + body
+                var keepInCase = tail[lastClose..];    // closing brace + suffix
+                if (hoistBody.StartsWith('\n')) hoistBody = hoistBody[1..];
+                // Remove label body from case, add break
+                texts[i] = texts[i][..defIdx] + "break;\n" + keepInCase;
+                _switchHoistedLabels = (_switchHoistedLabels ?? "") + hoistBody;
+                break; // one label per piece
+            }
+        }
 
         return "{\n" + IndentEach(string.Concat(texts)) + "}\n";
     }
+
+    // Hoisted labels extracted from SwitchBody — placed after the switch by
+    // Visit(C.StmtSwitch) so they're reachable by `goto` from within any case.
+    private string? _switchHoistedLabels;
 
     // Statement-level case/default labels. Body is a single Stmt (which
     // may itself be another labeled stmt — `case 1: case 2: do_thing();`
