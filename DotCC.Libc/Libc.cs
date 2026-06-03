@@ -119,13 +119,19 @@ public static unsafe partial class Libc
                 // to the decimal path (which will fail on the 'x').
                 goto decimal_path;
             }
-            // Parse hex digits into a double significand. A double (53-bit
-            // mantissa) can't overflow from hex digits, so we avoid the
-            // uint/ulong width limits that truncate 16-hex-digit values.
-            double sig = 0.0; int fracHex = 0; bool sawHex = false;
+            // Parse hex digits into a double significand. Cap the accumulator
+            // when it reaches ~1e250 to avoid overflow for very long digit
+            // runs (e.g. "0x3." + 1000 zeros; 3 × 16^1000 >> DBL_MAX).
+            // Beyond the cap we count the skipped digits and fold them into
+            // the binary exponent — they contribute nothing to the mantissa.
+            double sig = 0.0; int fracHex = 0; int skipped = 0; bool sawHex = false;
+            const double SigCap = 1e250;
             while (p < afterInt)
             {
-                sig = sig * 16.0 + HexVal(*p); p++; sawHex = true;
+                if (sig < SigCap)
+                    sig = sig * 16.0 + HexVal(*p);
+                else skipped++;
+                p++; sawHex = true;
             }
             // Optional fractional part.
             if (*p == (byte)'.')
@@ -135,7 +141,10 @@ public static unsafe partial class Libc
                     || (*p >= (byte)'a' && *p <= (byte)'f')
                     || (*p >= (byte)'A' && *p <= (byte)'F'))
                 {
-                    sig = sig * 16.0 + HexVal(*p); p++; fracHex++; sawHex = true;
+                    if (sig < SigCap)
+                        sig = sig * 16.0 + HexVal(*p);
+                    else skipped++;
+                    p++; fracHex++; sawHex = true;
                 }
             }
             if (!sawHex)
@@ -145,19 +154,32 @@ public static unsafe partial class Libc
                 return 0.0;
             }
             // Binary exponent (C99 requires 'p'; Lua accepts hex floats without it).
+            // If 'p' is present but not followed by a digit (or +/- digit), the
+            // parse stops *before* the 'p' (C11 7.22.1.3: the exponent must have
+            // at least one digit).
             int exp = 0;
             if (*p == (byte)'p' || *p == (byte)'P')
             {
+                byte* expStart = p;
                 p++;
                 bool expNeg = false;
                 if (*p == (byte)'+' || *p == (byte)'-') { expNeg = *p == (byte)'-'; p++; }
-                while (*p >= (byte)'0' && *p <= (byte)'9')
+                if (*p < (byte)'0' || *p > (byte)'9')
                 {
-                    exp = exp * 10 + (*p - (byte)'0'); p++;
+                    // No exponent digits — back up; the hex float ends before 'p'.
+                    p = expStart;
                 }
-                if (expNeg) exp = -exp;
+                else
+                {
+                    while (*p >= (byte)'0' && *p <= (byte)'9')
+                    {
+                        exp = exp * 10 + (*p - (byte)'0'); p++;
+                    }
+                    if (expNeg) exp = -exp;
+                }
             }
             exp -= 4 * fracHex; // each fractional hex digit shifts 4 bits
+            exp += 4 * skipped;  // cap-skipped digits: restore the exponent
             // Compute: sig * 2^exp. ScaleB handles the power-of-two multiply
             // and produces the correctly-rounded double result.
             double hexVal = System.Math.ScaleB(sig, exp);
