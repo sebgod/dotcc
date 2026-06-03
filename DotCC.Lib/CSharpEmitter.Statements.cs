@@ -441,7 +441,7 @@ internal sealed partial class CSharpEmitter
     // `label: Stmt` — emit the label followed by the body statement.
     // Whitespace shape: label on its own line for readability.
     public EmitContent Visit(C.StmtLabel n) =>
-        $"{Id(T(n.Arg0))}:\n{T(n.Arg2)}";
+        new EmitContent.Text($"{Id(T(n.Arg0))}:\n{T(n.Arg2)}", Terminates: TerminatesOf(n.Arg2));
 
     // Empty statement `;` — required pre-C23 if you want to label the end
     // of a block (`end: ;`). Emit as a bare semicolon; C# parses it as an
