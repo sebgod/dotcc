@@ -63,34 +63,22 @@ gcc-oracle in WSL needs the Windows path bridged: `WIN_PWD=$(pwd -W)` then
 
 ## Progress
 
-Whole-program link error count: **761 → 13** this run of sessions.
+Whole-program link error count: **761 → 11** this run of sessions.
 
 | Phase | What landed | Errors |
 |---|---|---|
-| 6i (×4) | C integer-conversion layer: `Cond.B` per-type overloads, usual arithmetic conversions at operators, store conversions + opt-in `-Wconversion`, call-arg coercion | 761 → ~185 |
-| 6j | pointer/fn-ptr typedefs recognised in comma-tuple values (`nint` round-trip) | |
-| 6k | C switch fall-through → `goto case` / `goto default` / trailing `break` (CS0163+CS8070) | 185 → 136 |
-| 6l | field-chain CType through pointer-typedef/aliased-struct bases + `(void)ptr` / `++ptr` discards + `(f)(args)` bare-name callee unwrap (CS0306 27→0) | 136 → 106 |
-| 6m | out-of-range constant integer casts wrapped in `unchecked` (CS0221 17→0) | 106 → 89 |
-| 6n | sprintf/snprintf fluent `.Arg(…).Done()` lowering + full `SprintfBuilder` Arg surface + `Arg(void*)` for `%p` (CS1501 15→0; 6 snprintf-`n` CS1503 cleared) | 89 → 72 |
-| 6o | drop the `*` on a deref-call through a function pointer `(*fp)(args)` (CS0193 14→0) | 72 → 60 |
-| 6p | add `frexp`/`ldexp`/`strcoll`/`ungetc`/`setvbuf`/`tmpnam` libc surface + `luaopen_package` stub in driver.c (CS0103 10→0) | 60 → 50 |
-| 6q | address-of a global / static-local via `Unsafe.AsPointer(ref field)` (CS0212 9→0) | 50 → 42 |
-| 6r | void-call leading a value-context comma → in-place delegate (CS8210 7→0) | 42 → 35 |
-| 6s | `sizeof` yields `size_t` (ulong, unsigned), not `int` — fixes `MAX/sizeof` (CS0034 6→1); + CoerceStore ulong-const-cast bug, malloc bare-int sizeof, char-I/O prototypes | 35 → 24 |
-| 6t | C null-pointer constant `0` → `null` at pointer store/return/arg (CoerceStore) | 24 → 22 |
-| 6u | fn-ptr vs bare-fn-name compare → cast decayed `&fn` to the other operand's type (CS0019→0) | 22 → 21 |
-| 6v | comparison / logical (`&&`/`||`/`!`) results tagged `int` so narrower-int stores coerce (CS0266 2) | 21 → **19** |
-| 6w | scope field-type map per nesting level (luaL_Buffer nested-fields clobber — CS1503/CS0266 partial); rewrite `goto label`→`goto case` for labels at case starts (CS0159 ×2, l_tforloop/l_tforcall); propagate `Terminates` through `StmtLabel`; VaArg byte operator (CS0457) | 19 → **13** |
+| 6i (×4) | C integer-conversion layer | 761 → ~185 |
+| 6j–6v | (see earlier handovers) | 185 → 19 |
+| 6w | scope field-type map per nesting level (luaL_Buffer); `goto label`→`goto case` for case-start labels; `Terminates` through `StmtLabel`; VaArg byte operator; void-cast fn-name as nint discard; `DecayFnName` on ternary arms | 19 → **11** |
 
 Tests currently green: **762 unit / 175 functional**.
 
-## Current wall — 13 errors
+## Current wall — 11 errors
 
 Histogram (deduped):
 
 ```
- 3 CS1503   3 CS0159   2 CS8183   2 CS0163   1 CS0306
+ 3 CS0159   2 CS1503   2 CS0163   1 CS0306
  1 CS0266   1 CS0034   1 CS0029
 ```
 
@@ -107,30 +95,29 @@ Triage notes per family (file:line are into `build/Program.cs` after `link.sh al
   (lstrlib's `match` function); needs a more precise extraction that preserves case
   structure.
 
-- **CS1503 (3) / CS0266 (1) / CS0034 (1) / CS0029 (1)** — int↔ulong conversion residue.
+- **CS1503 (2) / CS0266 (1) / CS0034 (1) / CS0029 (1)** — int↔ulong conversion residue.
   LUAL_BUFFERSIZE is `((int)(16 * sizeof(void*) * sizeof(lua_Number)))` (int cast in
   the macro), but `luaL_prepbuffsize`'s second param is `size_t` (= ulong). The
   `CoerceArg` path should add `(ulong)` but `ArgTypes` may not be populated for the
   argument. Also CS0034 (`ulong += int`) and CS0029 (int→ulong in ternary) are
   residual mixed-type expressions. **Fix:** investigate why `_fnParamTypes` /
-  `ArgTypes` isn't flowing for `luaL_prepbuffsize`; add missing coercions.
+  `ArgTypes` isn't flowing for `luaL_prepbuffsize`; add missing coercions. The CS1503
+  fn-ptr ternary was fixed in 6w by applying `DecayFnName` to ternary arms.
 
-- **CS8183 (2)** — `_ = (luaP_isOT);` / `_ = (luaP_isIT);` (4745-4746). Bare function
-  names as discard RHS: `DecayFnName` prefixes `&`, but C# can't infer the discard
-  type from a method group. **Fix:** emit cast to function pointer type.
-
-- **CS0163 (2)** — residual switch fall-through gaps (19519, 19549 — OP_RETURN,
-  OP_RETURN0). The case bodies end with `goto ret;` (which targets `ret:` in the same
-  case OP_RETURN block), but the block's `Terminates` flag isn't propagating through
-  all the layers. **Fix:** trace why `StmtLabel`→block→case termination chain isn't
-  working for these specific cases.
+- **CS0163 (2)** — residual switch fall-through gaps (OP_RETURN, OP_RETURN0). The case
+  bodies contain `goto ret;` → `ret:` (same case), with `ret:` body terminating via
+  `if/else` where both branches terminate. The `IfElse` visitor doesn't propagate
+  `Terminates` (returns a plain string), so the case appears non-terminating. A fix
+  was attempted but caused regressions — `TerminatesOf` on if/else branches has gaps
+  in the propagation chain. **Fix:** complete the `Terminates` chain through `IfElse`
+  and other compound statements.
 
 - **CS0306 (1)** — `UpVal*` as type argument to `Unsafe.AsPointer<T>()` at
   `getupvalref` (2703). C# forbids pointer types as generic type arguments. The global
   `__static_getupvalref_nullup` is `UpVal*`; taking its address produces `UpVal**`.
   `AsPointer<T>` can't handle `T=UpVal*`, and `&staticField` gives CS0212. **Fix:**
   needs a different address-of pattern for pointer-typed globals (maybe `fixed`-based
-  accessor, or change the global's declared type).
+  accessor, or change the global's declared type to `nint`).
 
 ## Pending / deferred tasks
 
