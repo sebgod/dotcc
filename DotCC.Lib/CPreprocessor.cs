@@ -212,6 +212,7 @@ internal sealed class CPreprocessor : C.IPreprocessor
         {
             using var subLexer = BytesLexer.FromString(source, _lexerTable);
             using var subPreproc = C.WrapPreprocessor(subLexer, this);
+            subPreproc.ExpandFuncMacro = ExpandFuncMacro;
             var tokens = new List<Item>();
             while (subPreproc.MoveNext()) { tokens.Add(subPreproc.Current); }
             return tokens;
@@ -565,6 +566,70 @@ internal sealed class CPreprocessor : C.IPreprocessor
             }
         }
         return result;
+    }
+
+    /// <summary>
+    /// Expand a function-like macro call in a <c>#if</c> / <c>#elif</c>
+    /// expression. Collects the argument tokens (already paren-stripped by
+    /// the caller), substitutes each formal parameter with its corresponding
+    /// actual argument text, then rescans the body for object-like macros
+    /// (e.g. <c>UINT_MAX</c> → <c>4294967295u</c>). Multi-arg macros are
+    /// split on commas at the top level of the arg list.
+    /// </summary>
+    public IEnumerable<Item> ExpandFuncMacro(string name, IReadOnlyList<Item> argTokens)
+    {
+        if (!_macros.TryGetValue(name, out var macro) || !macro.IsFunctionLike)
+        {
+            // Not a known function-like macro — emit name + args verbatim,
+            // though the evaluator will likely treat this as 0.
+            var list = new List<Item> { new Item(_numSymbolId, name, default) };
+            list.AddRange(argTokens);
+            return list;
+        }
+        // Split args on commas (top-level, paren-balanced).
+        var args = new List<List<Item>>();
+        var cur = new List<Item>();
+        var depth = 0;
+        foreach (var t in argTokens)
+        {
+            var ct = t.Content as string;
+            if (ct == "(") { depth++; cur.Add(t); }
+            else if (ct == ")") { depth--; cur.Add(t); }
+            else if (ct == "," && depth == 0) { args.Add(cur); cur = new List<Item>(); }
+            else { cur.Add(t); }
+        }
+        args.Add(cur);  // final arg
+
+        var parms = macro.Params!;
+        // Build param → body mapping. Each formal gets replaced by the
+        // actual-arg token list (one-to-one positional match).  Extras
+        // beyond named params go to __VA_ARGS__ for variadic macros.
+        var paramMap = new Dictionary<string, IReadOnlyList<Item>>(StringComparer.Ordinal);
+        for (var i = 0; i < parms.Count; i++)
+            paramMap[parms[i]] = i < args.Count ? args[i] : Array.Empty<Item>();
+        if (macro.IsVariadic)
+        {
+            var extras = new List<Item>();
+            for (var i = parms.Count; i < args.Count; i++)
+            {
+                if (i > parms.Count) extras.Add(new Item(0, ",", default));
+                extras.AddRange(args[i]);
+            }
+            paramMap["__VA_ARGS__"] = extras;
+        }
+
+        // Substitute: walk the body, replace each ID that matches a formal
+        // parameter with the corresponding actual-arg token list.
+        var body = new List<Item>();
+        foreach (var t in macro.Body)
+        {
+            if (t.Content is string text && paramMap.TryGetValue(text, out var replacement))
+                body.AddRange(replacement);
+            else
+                body.Add(t);
+        }
+        // Rescan for object-like macros (e.g. UINT_MAX in L_INTHASBITS).
+        return ExpandObjectLikeBody(body, new HashSet<string>(StringComparer.Ordinal) { name });
     }
 
     public bool IsDefined(string name) => name != null && _macros.ContainsKey(name);

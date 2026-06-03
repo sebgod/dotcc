@@ -216,6 +216,8 @@ public static class Compiler
             pre.SetActiveFilename(Path.GetFileName(unitPath));
             using var lexer = BytesLexer.FromString(source, lexerTable);
             using var preproc = C.WrapPreprocessor(lexer, pre);
+            // Enable function-like macro expansion in #if/#elif expressions.
+            preproc.ExpandFuncMacro = pre.ExpandFuncMacro;
             // MacroExpander: function-like macro expansion. Needs lookahead
             // for the `(`, which the Rewrite hook can't do — so it lives as
             // its own RewritingTokenStream subclass after the preprocessor
@@ -535,6 +537,7 @@ public static class Compiler
             pre.SetActiveFilename(Path.GetFileName(unitPath));
             using var lexer = BytesLexer.FromString(source, lexerTable);
             using var preproc = C.WrapPreprocessor(lexer, pre);
+            preproc.ExpandFuncMacro = pre.ExpandFuncMacro;
             // -E mode also routes through MacroExpander so function-like
             // macro expansion is visible in the dumped token stream.
             using var macroExp = new MacroExpander(preproc, pre);
@@ -591,8 +594,11 @@ public static class Compiler
         var source = SpliceLineContinuations(File.ReadAllText(sourcePath));
         var pre = new CPreprocessor(lexerTable, content, seededDefines, quiet: true);
         pre.SetActiveFilename(Path.GetFileName(sourcePath));
-        using (var lexer = BytesLexer.FromString(source, lexerTable))
-        using (var preproc = C.WrapPreprocessor(lexer, pre))
+        var lexer = BytesLexer.FromString(source, lexerTable);
+        var preproc = C.WrapPreprocessor(lexer, pre);
+        preproc.ExpandFuncMacro = pre.ExpandFuncMacro;
+        using (lexer)
+        using (preproc)
         using (var macroExp = new MacroExpander(preproc, pre))
         {
             // Drain — every #include the preprocessor reaches (respecting
