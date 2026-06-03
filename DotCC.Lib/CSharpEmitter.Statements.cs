@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using LALR.CC.LexicalGrammar;
 
 namespace DotCC;
@@ -342,6 +343,46 @@ internal sealed partial class CSharpEmitter
             else { jump = "break;\n"; }   // final section: C falls out, C# needs break
             texts[last] += jump;
         }
+        // Build label→case-expression map for labels that start a case section.
+        // In C, `goto label;` can jump into another case's block from a different
+        // case; C# forbids cross-section `goto` (CS0159) and requires `goto case X;`
+        // instead. The Lua VM dispatch loop relies on this heavily (l_tforloop,
+        // l_tforcall). A label that isn't at a case start (e.g. a shared `ret`
+        // handler) isn't mapped here — those need the label hoisted above the switch.
+        var labelCaseMap = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var piece in pieces)
+        {
+            if (!((piece.CaseLabelExpr is not null || piece.IsDefaultLabel) && piece.Text.Length > 0))
+                continue;
+            var casePrefix = piece.IsDefaultLabel ? "default:\n" : $"case {piece.CaseLabelExpr}:\n";
+            if (!piece.Text.StartsWith(casePrefix, StringComparison.Ordinal)) continue;
+            var afterCase = piece.Text[casePrefix.Length..];
+            var m = Regex.Match(afterCase, @"^\s*\{?\s*(@?[A-Za-z_]\w*):\n");
+            if (!m.Success) continue;
+            var labelName = m.Groups[1].Value;  // includes @ if it's a C# keyword
+            var caseExpr = piece.IsDefaultLabel ? "default" : piece.CaseLabelExpr!;
+            labelCaseMap[labelName] = caseExpr;
+        }
+
+        // Rewrite `goto label;` → `goto case expr;` for labels mapped above.
+        if (labelCaseMap.Count > 0)
+        {
+            for (var i = 0; i < texts.Count; i++)
+            {
+                foreach (var (label, caseExpr) in labelCaseMap)
+                {
+                    var from = $"goto {label};\n";
+                    var to = caseExpr == "default" ? "goto default;\n" : $"goto case {caseExpr};\n";
+                    texts[i] = texts[i].Replace(from, to);
+                }
+            }
+        }
+
+        // NOTE: Labels that are NOT at case starts (e.g. the Lua VM's `ret` handler
+        // inside case OP_RETURN) and are targeted by `goto` from other cases
+        // remain as known CS0159 → those need label hoisting (extract the label
+        // body and place it outside the switch). That is a separate fix.
+
         return "{\n" + IndentEach(string.Concat(texts)) + "}\n";
     }
 
