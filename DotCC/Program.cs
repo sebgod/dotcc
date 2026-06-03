@@ -277,6 +277,9 @@ internal static class Program
         }
 
         var outDir = outputPath ?? "a.out-cs";
+        // Assembly name: last component of -o path (clang convention: -o foo → foo.exe)
+        var asmName = Path.GetFileName(outDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        if (asmName.Length == 0) asmName = "a.out";
         switch (emit)
         {
             case EmitKind.File:
@@ -297,9 +300,10 @@ internal static class Program
             case EmitKind.Build:
             {
                 Directory.CreateDirectory(outDir);
+                var csprojFile = $"{asmName}.csproj";
                 File.WriteAllText(Path.Combine(outDir, "Program.cs"), program);
-                File.WriteAllText(Path.Combine(outDir, "dotcc-out.csproj"), Compiler.BuildGeneratedCsproj(libraryMode));
-                Console.Error.WriteLine($"dotcc: wrote {outDir}/Program.cs + dotcc-out.csproj");
+                File.WriteAllText(Path.Combine(outDir, csprojFile), Compiler.BuildGeneratedCsproj(libraryMode, asmName));
+                Console.Error.WriteLine($"dotcc: wrote {outDir}/Program.cs + {csprojFile}");
                 if (emit == EmitKind.Build)
                 {
                     var psi = new System.Diagnostics.ProcessStartInfo
@@ -314,8 +318,8 @@ internal static class Program
                     proc!.WaitForExit();
                     if (proc.ExitCode != 0) { return proc.ExitCode; }
                     var artifactNote = libraryMode
-                        ? $"managed .dll at {outDir}/bin/Release/net10.0/dotcc-out.dll. Run `dotnet publish -c Release` in {outDir}/ for the native shared library."
-                        : $"dotnet {outDir}/bin/Release/net10.0/dotcc-out.dll [args]";
+                        ? $"managed .dll at {outDir}/bin/Release/net10.0/{asmName}.dll. Run `dotnet publish -c Release` in {outDir}/ for the native shared library."
+                        : $"dotnet {outDir}/bin/Release/net10.0/{asmName}.dll [args]";
                     Console.Error.WriteLine($"dotcc: OK. {artifactNote}");
                 }
                 return 0;

@@ -37,7 +37,7 @@ lutf8lib loadlib lcorolib linit`
 | 2 | **`stdarg.h` + variadic *functions*** (`va_list`/`va_start`/`va_arg`/`va_end`) | 5 core files: `lobject.c` (`luaO_pushvfstring(…, va_list)`), `lapi.c`, `lauxlib.c`, `lcode.c`, `ldebug.c`. `va_arg` types seen: `size_t,int,char*,void*,l_uacInt,l_uacNumber(double)` | 🔴 fatal; real language + runtime feature |
 | 3 | **`locale.h`** missing | 6 files; only real use is `loslib.c` `os_setlocale` (`setlocale`, `LC_*`) + number parsing | 🟠 fatal for those TUs; thin C-locale shim suffices |
 | 4 | Deeper VM parse/emit gaps | unknown until #1–#3 land | ❓ |
-| 5 | Platform headers (`windows.h`,`unistd.h`,`dlfcn.h`,`readline/*`,`sys/*`,`signal.h`) | only `lua.c` + `loadlib.c` | 🟢 avoidable (defer those TUs) |
+| 5 | Platform headers (`windows.h`,`unistd.h`,`dlfcn.h`,`readline/*`,`sys/*`,`signal.h`) | only `lua.c` + `loadlib.c` | ✅ `signal.h` done (fn-ptr casts, SIGINT via Console.CancelKeyPress); others deferred |
 
 Already supported (verified against C-SUPPORT.md): struct/union/typedef/enum,
 function pointers, `goto`, bit-fields, `setjmp`/`longjmp` in the `if (setjmp())`
@@ -792,8 +792,32 @@ new class of latent bugs the probe never could.
     expression is a member access / subscript (the bare-identifier case landed in 6l).
   - The fn-ptr-ARRAY `GlobalArrayFrom` (task #23) extension.
 
-### ⬜ Phase 7 — Stretch: standalone REPL / `luac`
-- Minimal `lua.c` (no readline/signal niceties) and/or `luac.c`.
+### ✅ Phase 7 — Standalone REPL (`lua.c`) — DONE (2026-06-03)
+
+`lua.c` compiles and runs with 0 C# errors. Achieved:
+
+- **Abstract function-pointer types** in casts: `(void (*)(int))0` for `SIG_DFL`/`SIG_IGN`
+- **Functions returning function pointers**: `void (*signal(int, void(*)(int)))(int)` declarator
+- **`<signal.h>`**: `signal()` backed by `Console.CancelKeyPress` (SIGINT)
+- **Preprocessor `#if` function-like macros**: `L_INTHASBITS(SIZE_Bx)` evaluates correctly
+- **Enum auto-increment**: non-literal initializers (`((255+1))`) let C# auto-increment
+- **Switch label hoisting**: `ret:` label barrier + `goto ret` fall-through
+- **Delegate* array storage**: `PinFnPtrArray` (non-generic, CS0306 workaround)
+- **`argv[argc] = NULL`**: C-standard null sentinel in program shell
+- **`-o` naming**: `-o lua` produces `lua.exe` (clang convention)
+
+Interactive REPL, `-e` flag, and piped stdin all work:
+```
+$ echo 'print(2^10)' | dotcc-out
+Lua 5.5.0  Copyright (C) 1994-2025 Lua.org, PUC-Rio
+> 1024.0
+$ dotcc-out -e 'print(1+2)'
+3
+```
+
+Remaining: `luac` (bytecode compiler), `readline` integration for the interactive REPL.
+
+### ⬜ Phase 8 — Stretch: `luac`, full test suite parity
 
 ## Notes / decisions log
 - Never patch Lua's sources to suit dotcc — if Lua's C is standard, dotcc should
