@@ -119,11 +119,13 @@ public static unsafe partial class Libc
                 // to the decimal path (which will fail on the 'x').
                 goto decimal_path;
             }
-            // Parse integer hex digits as a long significand.
-            long sig = 0; int fracHex = 0; bool sawHex = false; // fracHex = hex digits after '.'
+            // Parse hex digits into a double significand. A double (53-bit
+            // mantissa) can't overflow from hex digits, so we avoid the
+            // uint/ulong width limits that truncate 16-hex-digit values.
+            double sig = 0.0; int fracHex = 0; bool sawHex = false;
             while (p < afterInt)
             {
-                sig = unchecked(sig * 16 + HexVal(*p)); p++; sawHex = true;
+                sig = sig * 16.0 + HexVal(*p); p++; sawHex = true;
             }
             // Optional fractional part.
             if (*p == (byte)'.')
@@ -133,7 +135,7 @@ public static unsafe partial class Libc
                     || (*p >= (byte)'a' && *p <= (byte)'f')
                     || (*p >= (byte)'A' && *p <= (byte)'F'))
                 {
-                    sig = unchecked(sig * 16 + HexVal(*p)); p++; fracHex++; sawHex = true;
+                    sig = sig * 16.0 + HexVal(*p); p++; fracHex++; sawHex = true;
                 }
             }
             if (!sawHex)
@@ -158,7 +160,7 @@ public static unsafe partial class Libc
             exp -= 4 * fracHex; // each fractional hex digit shifts 4 bits
             // Compute: sig * 2^exp. ScaleB handles the power-of-two multiply
             // and produces the correctly-rounded double result.
-            double hexVal = System.Math.ScaleB((double)sig, exp);
+            double hexVal = System.Math.ScaleB(sig, exp);
             if (endptr != null) { *endptr = p; }
             return neg ? -hexVal : hexVal;
         }
