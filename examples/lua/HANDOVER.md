@@ -106,17 +106,23 @@ Triage notes per family (file:line are into `build/Program.cs` after `link.sh al
   for fall-through); `ret` is trickier (jump to shared return handling — may need
   the label hoisted to the switch/loop scope that encloses all the gotos).
 
-- **CS1503 (4) / CS0266 (1)** — conversion residue, now mostly **`luaL_Buffer`
-  field-type recording**: `B->size = …` (L20599) and `memcpy(…, B->n * sizeof)`
-  (L20505) don't coerce because **luaL_Buffer's field types aren't recorded** in
-  `_structFieldTypes` — the BC repro in /tmp proves the recorder works for a SIMPLE
-  struct, so it's specifically `luaL_Buffer`'s `union { LUAI_MAXALIGN; char b[…]; }
-  init;` member defeating it (reproduce that union shape; fix the recorder). The
-  CBool→byte store (6v) and a forward-ref are no longer the issue here.
-  `luaL_prepbuffsize(&b, (int)(16*sizeof(void*)))` (L22715/41) is `int→size_t` at
-  an arg — check whether luaL_prepbuffsize's `size_t` param is recorded in
-  `_fnParamTypes` (it's defined in lauxlib.c; if the call is emitted before the
-  proto registers, a pre-pass collecting all fn signatures would fix it).
+- **CS1503 (4) / CS0266 (1)** — conversion residue. **ROOT-CAUSED:** `B->size = …`
+  (L20599) and `memcpy(…, B->n * sizeof)` (L20505) don't coerce because
+  `luaL_Buffer`'s outer field types (`size_t n`, `char *b`) are LOST from
+  `_structFieldTypes`. Mechanism: `luaL_Buffer` has a NAMED member
+  `union { LUAI_MAXALIGN; char b[…]; } init;` whose inner fields include `n`
+  (`lua_Number`, from the `LUAI_MAXALIGN` macro) and `b` (`char[]`) — the SAME
+  names as the outer `n`/`b`. `_pendingFields` is a range-sliced LIST (handles dup
+  names fine), but `_pendingFieldTypeMap` is a flat NAME-keyed dict, so when the
+  union's inner `n`/`b` are visited they CLOBBER the parent's entries; then
+  `EmitNamedNestedAggregate` drains those keys into the nested type's map and
+  removes them — deleting the parent's `n`/`b` types entirely. **Fix:** scope the
+  field-type map per nesting level (a stack mirroring `_memberMarks` / the
+  `_pendingFields` range-slice), so a nested field's type can't overwrite a parent
+  field's. Minimal repro: `/tmp/lb2.c` (a struct with `size_t n; char *b;` then
+  `union { double n; char b[32]; } init;` — `B->n * sizeof` emits without the
+  `(int)` cast). `luaL_prepbuffsize(&b, (int)(16*sizeof(void*)))` (L22715/41,
+  `int→size_t` arg) is likely the same family or a `_fnParamTypes` forward-ref.
 
 - **CS0163 (3)** — residual switch fall-through 6k missed (a case whose
   terminating-ness wasn't detected — e.g. an `if/else` where both arms return, or a
