@@ -70,7 +70,23 @@ Whole-program link error count: **761 → 0** this run of sessions.
 The Lua link compiles cleanly: `0 Error(s)`, 335 warnings (harmless).
 All tests pass: 762 unit + 175 functional.
 
-### Summary of fixes this session (19 → 0, 8 commits):
+## Next goal — run Lua
+
+The stub `driver.c` just does `return 0`. To actually exercise the emitted
+runtime, grow it into a real REPL / script runner:
+
+```
+luaL_newstate → luaL_openlibs → luaL_dostring("print('hello')") → lua_close
+```
+
+Expected new error classes once runtime paths are exercised:
+- Runtime crashes (NullReferenceException, IndexOutOfRangeException) — likely
+  from subtle emit bugs that compile fine but misbehave at runtime
+- Stdout mismatch vs gcc/oracle — semantic differences in the emitted code
+- GC / memory issues — dotcc lowers Lua's custom GC to .NET GC, interactions
+  may surface
+
+### Summary of fixes this session (19 → 0, 9 commits):
 
 | Commit | What |
 |--------|------|
