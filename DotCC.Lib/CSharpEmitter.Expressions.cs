@@ -362,9 +362,17 @@ internal sealed partial class CSharpEmitter
             // them. The Value is the (invalid-in-C#) literal void cast: it's never
             // legitimately reached — a void expression can't be value-used in C — so
             // if some context did read it, Roslyn errors loudly rather than silently.
+            // (void)fn — a bare function name cast to void is a C idiom to
+            // suppress "unused" warnings. C# doesn't need it, and `_ = &fn`
+            // can't infer the discard type (CS8183). Emit a comment-statement.
+            var inner = T(n.Arg3);
+            var decayed = DecayFnName(inner);
+            var discardExpr = decayed != inner
+                ? $"_ = (nint)0 /* {inner} */"   // fn-name: suppress via nint discard
+                : $"_ = ({inner})";               // regular value discard
             var discard = CommaOpsOf(n.Arg3) is { } ops
                 ? new List<string>(ops)
-                : new List<string> { $"_ = ({T(n.Arg3)})" };
+                : new List<string> { discardExpr };
             // Carry the discarded operand's CType (the `_ = (X)` form's type is X's).
             // When this `(void)X` is a comma operand reaching the value-tuple path, a
             // POINTER X (`(void)L`, `(void)(p->f)`) can't be a ValueTuple element, so
