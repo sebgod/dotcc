@@ -49,4 +49,19 @@ public static unsafe partial class Libc
         init.CopyTo(arr);
         return PinAndRoot(arr);
     }
+
+    // Pinned delegate* arrays + their GCHandles (delegate* can't be a generic arg).
+    private static readonly List<(GCHandle Handle, Array Arr)> _fnPtrArrays = new();
+
+    /// <summary>
+    /// Pin a delegate*-element array and return a stable void* to element 0.
+    /// The caller casts the result to the appropriate pointer type. The array
+    /// and its GCHandle are rooted for program lifetime.
+    /// </summary>
+    public static unsafe void* PinFnPtrArray(Array arr)
+    {
+        var handle = GCHandle.Alloc(arr, GCHandleType.Pinned);
+        lock (_fnPtrArrays) { _fnPtrArrays.Add((handle, arr)); }
+        return (void*)handle.AddrOfPinnedObject();
+    }
 }

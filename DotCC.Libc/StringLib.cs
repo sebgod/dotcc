@@ -28,16 +28,19 @@ public static unsafe partial class Libc
     /// <summary>
     /// <c>strncmp(a, b, n)</c> — lexicographic compare of at most
     /// <paramref name="n"/> bytes. Stops early at a mismatch or a shared NUL.
+    /// Takes <c>nuint</c> (C size_t) per the C standard. The <c>ulong</c>
+    /// overload is for callers that have dotcc's <c>size_t</c> (= ulong).
     /// </summary>
-    public static int strncmp(byte* a, byte* b, int n)
+    public static int strncmp(byte* a, byte* b, nuint n)
     {
-        for (int i = 0; i < n; i++)
+        for (nuint i = 0; i < n; i++)
         {
             if (a[i] != b[i]) { return a[i] - b[i]; }
             if (a[i] == 0) { return 0; }
         }
         return 0;
     }
+    public static int strncmp(byte* a, byte* b, ulong n) => strncmp(a, b, (nuint)n);
 
     /// <summary>
     /// <c>strncpy(dst, src, n)</c> — copy up to <paramref name="n"/> bytes from

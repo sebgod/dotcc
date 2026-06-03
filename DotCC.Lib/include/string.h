@@ -6,17 +6,14 @@
    DotCC.Libc/StringLib.cs (everything else), spliced into every emitted
    program via the embedded-resource runtime block (see CLAUDE.md for the
    architecture). The signatures here declare the surface so the parser
-   accepts `#include <string.h>` and knows the prototypes.
+   accepts `#include <string.h>` and knows the prototypes. */
 
-   Note: real C uses `size_t` for length arguments. dotcc maps that to
-   plain `int` (same as strlen returning int); portable code should cast.
-   When <stdint.h>'s `size_t` is threaded through these prototypes the
-   Libc methods' `int` parameters widen via implicit conversion. */
+#include <stddef.h>  /* size_t */
 
 /* Length / comparison / copy. */
 int strlen(char* s);
 int strcmp(char* a, char* b);
-int strncmp(char* a, char* b, int n);
+int strncmp(char* a, char* b, size_t n);
 int strcoll(char* a, char* b);
 char* strcpy(char* dst, char* src);
 char* strncpy(char* dst, char* src, int n);

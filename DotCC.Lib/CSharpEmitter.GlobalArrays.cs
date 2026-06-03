@@ -75,11 +75,22 @@ internal sealed partial class CSharpEmitter
     // struct element uses the obvious `GlobalArrayFrom<T>` directly.
     private void AppendGlobalArrayFromValues<TVal>(string name, string elemCs, IReadOnlyList<TVal> values)
     {
+        // delegate* and pointer types can't be generic type arguments (CS0306).
+        // delegate* typedefs are tracked in _pointerTypedefNames.
+        var isFnPtr = elemCs.StartsWith("delegate*") || _pointerTypedefNames.Contains(elemCs);
+        if (isFnPtr)
+        {
+            // Function-pointer arrays: use non-generic PinFnPtrArray since C#
+            // forbids delegate* as generic type arguments (CS0306).
+            var fnElem = ResolveTypedef(elemCs);
+            var fnDecayed = values.Select(v => DecayFnName(v?.ToString() ?? "null"));
+            _globals.Append("    public static unsafe ").Append(elemCs).Append("* ").Append(Id(name))
+                .Append(" = (").Append(elemCs).Append("*)Libc.PinFnPtrArray(new ").Append(fnElem)
+                .Append("[]{ ").Append(string.Join(", ", fnDecayed)).Append(" });\n");
+            return;
+        }
         if (elemCs.EndsWith('*'))
         {
-            // Only the brace-init path produces pointer-element values, and those
-            // are always emitted string fragments (`L("…"u8)`); char-array (byte)
-            // values are scalar so never reach this branch.
             var ptrVals = new List<string>(values.Count);
             foreach (var v in values) { ptrVals.Add($"(nint)({v})"); }
             _globals.Append("    public static unsafe ").Append(elemCs).Append("* ").Append(Id(name))
@@ -88,9 +99,10 @@ internal sealed partial class CSharpEmitter
             return;
         }
         var elem = QualifyPredefinedTypeName(elemCs);
+        var decayed = values.Select(v => DecayFnName(v?.ToString() ?? "null"));
         _globals.Append("    public static unsafe ").Append(elem).Append("* ").Append(Id(name))
             .Append(" = Libc.GlobalArrayFrom<").Append(elem).Append(">(new ").Append(elem)
-            .Append("[]{ ").Append(string.Join(", ", values)).Append(" });\n");
+            .Append("[]{ ").Append(string.Join(", ", decayed)).Append(" });\n");
     }
 
     // As above, for a zeroed array of `lengthExpr` elements (no initializer).

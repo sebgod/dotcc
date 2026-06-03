@@ -852,7 +852,8 @@ public static class Compiler
                     // .NET hands us only the user args, so synthesize argv[0] from the
                     // running assembly to match clang's vector layout.
                     int argc = args.Length + 1;
-                    byte** argv = (byte**)NativeMemory.Alloc((nuint)argc * (nuint)sizeof(byte*));
+                    // +1 for the C-standard NULL sentinel at argv[argc]
+                    byte** argv = (byte**)NativeMemory.Alloc((nuint)(argc + 1) * (nuint)sizeof(byte*));
                     static byte* EncodeUtf8Nul(string s)
                     {
                         var bytes = System.Text.Encoding.UTF8.GetBytes(s);
@@ -867,6 +868,7 @@ public static class Compiler
                     {
                         argv[i + 1] = EncodeUtf8Nul(args[i]);
                     }
+                    argv[argc] = null; // C standard: argv[argc] == NULL
                     try
                     {
                         return main(argc, argv);
