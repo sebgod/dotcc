@@ -89,6 +89,20 @@ internal sealed partial class CSharpEmitter
         // so expand `lv OP= rhs` to a fenced read-modify-write.
         if (VLValueOf(lhsIt) is string vlv) { return VolatileWriteOf(vlv, $"{lhs} {op} {rhs}"); }
         if (EnumOf(lhsIt) is { } e) { return $"({lhs} = ({e})((int){lhs} {op} {rhs}))"; }
+        // C# rejects compound assignment when the RHS can't be implicitly converted
+        // to the LHS type (CS0034: ulong += int). C allows the implicit conversion,
+        // so expand to `lhs = (T)(lhs op (T)rhs)` when the RHS needs an unsigned cast.
+        // ResolveTypedef is needed: the LHS type may be a typedef (size_t → ulong).
+        if (TyOf(lhsIt) is CType.Sized lt
+            && IntOperandType(rhsIt) is string rt
+            && NeedsUnsignedCast(rt, ResolveTypedef(lt.CsType)))
+        {
+            var coerced = CoerceStore(rhs, TyOf(rhsIt), ConstOfItem(rhsIt), lt.CsType, lhsIt.Position.Line);
+            // For shifts, the count must be int (C# requirement); the expansion
+            // bypasses ShiftText, so ensure the count is int-typed here.
+            if (op is ">>" or "<<") { coerced = $"(int)({coerced})"; }
+            return $"({lhs} = ({lt.CsType})({lhs} {op} {coerced}))";
+        }
         return $"({lhs} {op}= {rhs})";
     }
 
@@ -232,11 +246,11 @@ internal sealed partial class CSharpEmitter
     // result is the value operand's type.
     private EmitContent ShiftText(Item a, string op, Item b)
     {
-        // C# requires the shift count to be int (or implicitly int-convertible).
-        // C promotes small types to int for shift counts; dotcc always casts to
-        // int to avoid CS0019 (uint >> uint). The redundant `(int)` on an already-
-        // int count is harmless verbosity.
-        var count = $"(int)({IntDecay(b)})";
+        var count = IntDecay(b);
+        // C# requires the shift count to be int; C promotes small types to int.
+        // Only cast when the operand type is known to be non-int (uint, ulong, etc.);
+        // if type is untracked (null), trust the emitted text (the caller ensures it).
+        if (IntOperandType(b) is string ct && ct != "int") { count = $"(int)({count})"; }
         // Fold `1 << K` (Lua's tag-bit masks) only when the value operand stays a
         // signed ≤32-bit int, so a folded mask reaches the cast range-check.
         var fold = IntFoldable(IntOperandType(a))
