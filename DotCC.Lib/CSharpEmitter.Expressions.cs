@@ -300,9 +300,22 @@ internal sealed partial class CSharpEmitter
         // : 0)` — the ternary is int / size_t, not untyped). Non-integer arms leave
         // it untyped. DecayFnName on each arm so a fn-name → fn-ptr decay happens
         // before the ternary (both arms must be the same delegate type).
+        var commonTy = TernaryResultType(n.Arg2, n.Arg4);
+        var thenArm = DecayFnName(T(n.Arg2));
+        var elseArm = DecayFnName(T(n.Arg4));
+        // When the common type is unsigned (e.g. ulong) and an arm is signed (int),
+        // C# needs an explicit cast — the ternary doesn't implicitly convert arms
+        // the way binary operators do (CS0029: int→ulong in ternary).
+        if (commonTy is CType.Sized cts
+            && IntCommonType(IntOperandType(n.Arg2) ?? "", IntOperandType(n.Arg4) ?? "") is string common)
+        {
+            if (NeedsUnsignedCast(IntOperandType(n.Arg2) ?? "", common))
+                thenArm = $"({common})({thenArm})";
+            if (NeedsUnsignedCast(IntOperandType(n.Arg4) ?? "", common))
+                elseArm = $"({common})({elseArm})";
+        }
         return new EmitContent.Text(
-            $"({CondOf(n.Arg0)} ? {DecayFnName(T(n.Arg2))} : {DecayFnName(T(n.Arg4))})",
-            Ty: TernaryResultType(n.Arg2, n.Arg4));
+            $"({CondOf(n.Arg0)} ? {thenArm} : {elseArm})", Ty: commonTy);
     }
 
     // The common integer type of a ternary's two arms, for the type-synthesis

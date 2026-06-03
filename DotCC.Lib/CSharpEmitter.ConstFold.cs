@@ -181,7 +181,11 @@ internal sealed partial class CSharpEmitter
         // from a constant of type `int` (`byte b = 5;` / `uint u = 0;`). There is NO
         // implicit constant conversion FROM `ulong`/`long` to a narrower/signed type,
         // so a fitting `(ulong)sizeof(T)` still needs the explicit cast (CS0266).
-        if (src == "int" && constValue is int cv && ConstFitsTarget(cv, tgt)) { return value; }
+        // Also, C# does NOT apply implicit constant conversion to a CAST expression
+        // (e.g. `(int)(ulongExpr)` — the cast breaks the constant-ness for overload
+        // resolution), so skip this optimisation when the value contains parens/casts.
+        if (src == "int" && constValue is int cv && ConstFitsTarget(cv, tgt)
+            && !value.Contains('(')) { return value; }
         if (CsImplicitInt(src, tgt)) { return value; }   // C# widens for free
         // C# rejects this conversion (CS0266); insert the cast C allows implicitly.
         // Warn only when it's a genuine width-narrowing (the user-facing meaning of
