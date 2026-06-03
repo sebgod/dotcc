@@ -1,6 +1,6 @@
 # Lua-on-dotcc — Session Handover
 
-**As of commit `05653dd` (Phase 6t).** This is a resume-from-here snapshot for the
+**As of commit `a6b1a9d` (Phase 6v).** This is a resume-from-here snapshot for the
 ongoing effort to make **Lua 5.5.0 compile and run under dotcc** (the C→.NET 10/C#
 transpiler). For the full feature history see [`ROADMAP.md`](ROADMAP.md); for the
 language-feature matrix see [`../../C-SUPPORT.md`](../../C-SUPPORT.md). This file is
@@ -63,7 +63,7 @@ gcc-oracle in WSL needs the Windows path bridged: `WIN_PWD=$(pwd -W)` then
 
 ## Progress
 
-Whole-program link error count: **761 → 22** this run of sessions.
+Whole-program link error count: **761 → 19** this run of sessions.
 
 | Phase | What landed | Errors |
 |---|---|---|
@@ -78,17 +78,19 @@ Whole-program link error count: **761 → 22** this run of sessions.
 | 6q | address-of a global / static-local via `Unsafe.AsPointer(ref field)` (CS0212 9→0) | 50 → 42 |
 | 6r | void-call leading a value-context comma → in-place delegate (CS8210 7→0) | 42 → 35 |
 | 6s | `sizeof` yields `size_t` (ulong, unsigned), not `int` — fixes `MAX/sizeof` (CS0034 6→1); + CoerceStore ulong-const-cast bug, malloc bare-int sizeof, char-I/O prototypes | 35 → 24 |
-| 6t | C null-pointer constant `0` → `null` at pointer store/return/arg (CoerceStore) | 24 → **22** |
+| 6t | C null-pointer constant `0` → `null` at pointer store/return/arg (CoerceStore) | 24 → 22 |
+| 6u | fn-ptr vs bare-fn-name compare → cast decayed `&fn` to the other operand's type (CS0019→0) | 22 → 21 |
+| 6v | comparison / logical (`&&`/`||`/`!`) results tagged `int` so narrower-int stores coerce (CS0266 2) | 21 → **19** |
 
-Tests currently green: **759 unit / 173 functional**.
+Tests currently green: **760 unit / 175 functional**.
 
-## Current wall — 22 errors
+## Current wall — 19 errors
 
 Histogram (deduped):
 
 ```
- 5 CS0159   4 CS1503   3 CS0266   3 CS0163   2 CS8183
- 1 CS0457   1 CS0306   1 CS0034   1 CS0029   1 CS0019
+ 5 CS0159   4 CS1503   3 CS0163   2 CS8183   1 CS0457
+ 1 CS0306   1 CS0266   1 CS0034   1 CS0029
 ```
 
 Triage notes per family (file:line are into `build/Program.cs` after `link.sh all`):
@@ -104,25 +106,24 @@ Triage notes per family (file:line are into `build/Program.cs` after `link.sh al
   for fall-through); `ret` is trickier (jump to shared return handling — may need
   the label hoisted to the switch/loop scope that encloses all the gotos).
 
-- **CS1503 (4) / CS0266 (3)** — conversion residue, now mostly **struct-field
-  stores + field-type recording**: `B->size = …` (luaL_Buffer, L20599) and
-  `memcpy(…, B->n * sizeof)` (L20505) don't coerce because **luaL_Buffer's field
-  types aren't recorded** in `_structFieldTypes` (its `union { LUAI_MAXALIGN; char
-  b[…]; } init;` member likely defeats the recorder — a minimal repro of that union
-  shape would confirm). `bl->insidetbc = (CBool)…` (L11551) is a `CBool→byte`
-  store CoerceStore bails on (CBool isn't an integer type — needs a `(byte)` cast
-  via CBool's `→int` operator). `luaL_prepbuffsize(&b, (int)(16*sizeof(void*)))`
-  (L22715/41) is `int→size_t` at an arg — check why luaL_prepbuffsize's size_t param
-  isn't coercing (possibly a forward-reference: the call emitted before the proto
-  registered `_fnParamTypes`? a pre-pass to collect all fn signatures would fix it).
+- **CS1503 (4) / CS0266 (1)** — conversion residue, now mostly **`luaL_Buffer`
+  field-type recording**: `B->size = …` (L20599) and `memcpy(…, B->n * sizeof)`
+  (L20505) don't coerce because **luaL_Buffer's field types aren't recorded** in
+  `_structFieldTypes` — the BC repro in /tmp proves the recorder works for a SIMPLE
+  struct, so it's specifically `luaL_Buffer`'s `union { LUAI_MAXALIGN; char b[…]; }
+  init;` member defeating it (reproduce that union shape; fix the recorder). The
+  CBool→byte store (6v) and a forward-ref are no longer the issue here.
+  `luaL_prepbuffsize(&b, (int)(16*sizeof(void*)))` (L22715/41) is `int→size_t` at
+  an arg — check whether luaL_prepbuffsize's `size_t` param is recorded in
+  `_fnParamTypes` (it's defined in lauxlib.c; if the call is emitted before the
+  proto registers, a pre-pass collecting all fn signatures would fix it).
 
 - **CS0163 (3)** — residual switch fall-through 6k missed (a case whose
-  terminating-ness wasn't detected). **CS0019 (1)** — a pointer-vs-`0` COMPARISON
-  `p == 0` → `int* == int`; extend the 6t null-pointer handling to `==`/`!=` (when
-  one operand is a pointer and the other a constant 0, emit `null`). **CS0034 (1)**
-  — a residual `ulong/int` not on a sizeof. **CS8183 (2) / CS0457 / CS0306 / CS0029**
-  — long-tail singletons, look individually (CS0306 unmasked by 6q: a `&global` now
-  compiling feeds a comma-tuple wanting the `nint` round-trip).
+  terminating-ness wasn't detected — e.g. an `if/else` where both arms return, or a
+  fall-through through an empty stacked label). **CS0034 (1)** — a residual
+  `ulong/int` not on a sizeof. **CS8183 (2) / CS0457 / CS0306 / CS0029** — long-tail
+  singletons, look individually (CS0306 unmasked by 6q: a `&global` now compiling
+  feeds a comma-tuple wanting the `nint` round-trip).
 
 ## Pending / deferred tasks
 
