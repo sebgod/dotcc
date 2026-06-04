@@ -1,0 +1,4 @@
+sizeof(Value)=8
+sizeof(TValue)=16
+sizeof(TValue)*2=32
+sizeof(Value)+sizeof(lu_byte)=9
