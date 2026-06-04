@@ -237,6 +237,10 @@ public static unsafe partial class Libc
     {
         var slot = Slot(stream);
         if (slot == null) { return -1; }
+        // Invalidate the slot index BEFORE freeing, so a double-fclose on the
+        // same FILE* won't read freed memory and corrupt a different file's slot.
+        int savedSlot = stream->_slot;
+        stream->_slot = -1;
         CloseSlot(slot);
         // Free the native FILE struct (but never the cached std-stream structs).
         if (stream != _stdinP && stream != _stdoutP && stream != _stderrP)
