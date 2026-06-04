@@ -86,8 +86,8 @@ public unsafe ref struct PrintfBuilder
             case (byte)'x': s = (spec.Alt ? "0x" : "") + v.ToString("x", ci); break;
             case (byte)'X': s = (spec.Alt ? "0X" : "") + v.ToString("X", ci); break;
             case (byte)'o': s = AltOctal(FormatOctal((uint)v), spec); break; // # handled by AltOctal
-            case (byte)'c': _w.Write((char)v); return this;
-            case (byte)'f': case (byte)'e': case (byte)'g':
+            case (byte)'c': s = ((char)v).ToString(); break;
+            case (byte)'f': case (byte)'e': case (byte)'E': case (byte)'g': case (byte)'G':
                 // Integer formatted via the float path — same precision rules apply.
                 s = FormatFloat((double)v, spec, ci);
                 break;
@@ -117,7 +117,7 @@ public unsafe ref struct PrintfBuilder
                 if (spec.Plus && !double.IsNegative(v) && v != 0.0) { s = "+" + s; }
                 else if (spec.Space && !double.IsNegative(v) && v != 0.0) { s = " " + s; }
                 break;
-            case (byte)'f': case (byte)'e': case (byte)'g':
+            case (byte)'f': case (byte)'e': case (byte)'E': case (byte)'g': case (byte)'G':
             default:
                 s = FormatFloat(v, spec, ci);
                 break;
@@ -303,7 +303,7 @@ public unsafe ref struct PrintfBuilder
             case (byte)'x': s = (spec.Alt ? "0x" : "") + v.ToString("x", ci); break;
             case (byte)'X': s = (spec.Alt ? "0X" : "") + v.ToString("X", ci); break;
             case (byte)'o': s = AltOctal(FormatOctal((ulong)v), spec); break; // # handled by AltOctal
-            case (byte)'f': case (byte)'e': case (byte)'g':
+            case (byte)'f': case (byte)'e': case (byte)'E': case (byte)'g': case (byte)'G':
                 s = FormatFloat((double)v, spec, ci);
                 break;
             default: s = v.ToString(ci); break;
@@ -472,8 +472,12 @@ public unsafe ref struct PrintfBuilder
         var prec = spec.Precision >= 0 ? spec.Precision : 6;
         string s = spec.Conv switch
         {
-            (byte)'e' => v.ToString("E" + prec.ToString(ci), ci),
+            (byte)'e' => v.ToString("e" + prec.ToString(ci), ci),
+            (byte)'E' => v.ToString("E" + prec.ToString(ci), ci),
             (byte)'g' => spec.Precision >= 0
+                ? v.ToString("g" + prec.ToString(ci), ci)
+                : v.ToString("g", ci),
+            (byte)'G' => spec.Precision >= 0
                 ? v.ToString("G" + prec.ToString(ci), ci)
                 : v.ToString("G", ci),
             _ => v.ToString("F" + prec.ToString(ci), ci),
