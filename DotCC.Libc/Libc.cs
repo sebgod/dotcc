@@ -182,7 +182,7 @@ public static unsafe partial class Libc
             exp += 4 * skipped;  // cap-skipped digits: restore the exponent
             // Compute: sig * 2^exp. ScaleB handles the power-of-two multiply
             // and produces the correctly-rounded double result.
-            double hexVal = System.Math.ScaleB(sig, exp);
+            double hexVal = double.IsNaN(sig) ? sig : System.Math.ScaleB(sig, exp);
             if (endptr != null) { *endptr = p; }
             return neg ? -hexVal : hexVal;
         }

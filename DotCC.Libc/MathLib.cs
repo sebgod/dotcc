@@ -254,13 +254,13 @@ public static unsafe partial class Libc
 
     /// <summary><c>ldexp(x, exp)</c> — <c>x·2^exp</c>, the inverse of <see cref="frexp(double, int*)"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static double ldexp(double x, int exp) => Math.ScaleB(x, exp);
+    public static double ldexp(double x, int exp) => double.IsNaN(x) ? x : Math.ScaleB(x, exp);
     /// <inheritdoc cref="ldexp(double, int)"/>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static float ldexp(float x, int exp) => MathF.ScaleB(x, exp);
+    public static float ldexp(float x, int exp) => float.IsNaN(x) ? x : MathF.ScaleB(x, exp);
     /// <summary><c>ldexpf(x, exp)</c> — explicit single-precision <see cref="ldexp(float, int)"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static float ldexpf(float x, int exp) => MathF.ScaleB(x, exp);
+    public static float ldexpf(float x, int exp) => float.IsNaN(x) ? x : MathF.ScaleB(x, exp);
 
     /// <summary><c>sqrt(x)</c> — square root.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -343,7 +343,14 @@ public static unsafe partial class Libc
 
     /// <summary><c>fmod(x, y)</c> — floating-point remainder of <paramref name="x"/> / <paramref name="y"/>. Sign matches <paramref name="x"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static double fmod(double x, double y) => Math.IEEERemainder(x, y) is var r && r != 0 && Math.Sign(r) != Math.Sign(x) ? r + Math.CopySign(y, x) : x % y;
+    public static double fmod(double x, double y)
+    {
+        if (double.IsNaN(x) || double.IsNaN(y)) return double.NaN;
+        var r = Math.IEEERemainder(x, y);
+        if (r != 0 && SafeSign(r) != SafeSign(x)) r += Math.CopySign(y, x);
+        return r;
+    }
+    static int SafeSign(double v) => double.IsNaN(v) ? 0 : Math.Sign(v);
     /// <inheritdoc cref="fmod(double, double)"/>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static float fmod(float x, float y) => (float)fmod((double)x, (double)y);
