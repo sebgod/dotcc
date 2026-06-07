@@ -59,8 +59,12 @@ public sealed record Assign(BinOp? CompoundOp, CExpr Target, CExpr Value) : CExp
 
 /// <summary>A function call by name (the slice only calls named functions /
 /// libc builtins). <see cref="Builtin"/> marks a libc name that codegen lowers
-/// specially (printf-family fluent form).</summary>
-public sealed record Call(string Callee, IReadOnlyList<CExpr> Args, bool Builtin) : CExpr;
+/// specially (printf-family fluent form). <see cref="ParamTypes"/> is the
+/// resolved callee's fixed-parameter types (null when the callee has no known
+/// signature), used by codegen to coerce each argument to its parameter type —
+/// C's implicit conversion at a call, which C# requires made explicit.</summary>
+public sealed record Call(string Callee, IReadOnlyList<CExpr> Args, bool Builtin,
+    IReadOnlyList<CType>? ParamTypes = null) : CExpr;
 
 /// <summary>A call through a computed function-pointer expression — <c>(*fp)(x)</c>,
 /// <c>tbl[i](x)</c>, <c>s.fn(x)</c>. (A call of a named function or fn-ptr

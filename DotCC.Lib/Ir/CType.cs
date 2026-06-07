@@ -135,4 +135,45 @@ public abstract record CType
 
     /// <summary>The decayed type of a string literal: <c>char*</c> (i.e. <c>byte*</c>).</summary>
     public static CType CharPtr => new Pointer(Char);
+
+    // ---- conversions ----------------------------------------------------
+
+    /// <summary>
+    /// C's usual arithmetic conversions (§6.3.1.8): the common type two
+    /// arithmetic operands are converted to before a binary <c>+ - * / %</c>,
+    /// bitwise <c>&amp; | ^</c>, or relational/equality operator applies. Derived
+    /// structurally from operand width (<see cref="Prim.Bytes"/>) and signedness
+    /// (<see cref="Prim.Signed"/>) — there is no per-type table. For a
+    /// non-arithmetic operand the result is meaningless; callers resolve those
+    /// (pointer arithmetic, the relational <c>int</c> result) before calling
+    /// this, so it falls back to <see cref="Int"/>.
+    /// </summary>
+    public static CType UsualArithmetic(CType a, CType b)
+    {
+        if (a.Unqualified is not Prim pa || b.Unqualified is not Prim pb) { return Int; }
+
+        // Either operand floating → the wider floating operand wins (double
+        // outranks float); an integer operand doesn't participate further.
+        if (!pa.Integer || !pb.Integer)
+        {
+            if (pa.Integer) { return pb; }
+            if (pb.Integer) { return pa; }
+            return pa.Bytes >= pb.Bytes ? pa : pb;
+        }
+
+        // Integer promotion: a type of rank below `int` promotes to `int` (every
+        // such type — byte/sbyte/short/ushort — is representable in int).
+        static Prim Promote(Prim p) => p.Bytes < 4 ? (Prim)Int : p;
+        var x = Promote(pa);
+        var y = Promote(pb);
+
+        // Same signedness → the higher rank (wider) type.
+        if (x.Signed == y.Signed) { return x.Bytes >= y.Bytes ? x : y; }
+
+        // Mixed signedness: the unsigned operand wins unless the signed operand's
+        // rank is strictly greater (a wider signed type represents every value of
+        // the narrower unsigned type, so C keeps the result signed).
+        var (uns, sig) = x.Signed ? (y, x) : (x, y);
+        return sig.Bytes > uns.Bytes ? sig : uns;
+    }
 }

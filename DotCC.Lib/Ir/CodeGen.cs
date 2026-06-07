@@ -273,6 +273,12 @@ internal sealed class CodeGen
     private string Coerced(CExpr value, CType target) =>
         TryCoerceCast(value, target, out var t) ? t : Expr(value);
 
+    /// <summary>Coerce a call argument to its parameter type, falling back to the
+    /// argument rendered at assignment precedence (so a bare comma operator can't
+    /// be misread as an argument separator).</summary>
+    private string CoercedArg(CExpr value, CType target) =>
+        TryCoerceCast(value, target, out var t) ? t : Sub(value, PAssign);
+
     /// <summary>True (with the coerced text) when storing <paramref name="value"/>
     /// into <paramref name="target"/> needs an explicit C# cast C performs
     /// implicitly; false when the value stores as-is.</summary>
@@ -461,13 +467,17 @@ internal sealed class CodeGen
             case IndirectCall ic:
                 return ($"{Sub(ic.Callee, PPostfix)}({string.Join(", ", ic.Args.Select(a => Sub(a, PAssign)))})", PPostfix);
             case Paren p: return Render(p.Inner); // explicit C parens are redundant; precedence re-adds as needed
-            case Cast c: return ($"({c.Target.CsType}){Sub(c.Operand, PUnary)}", PUnary);
+            case Cast c: return RenderCast(c);
             case SizeOfExpr so:
-                // An array lowered to a pointer, so C#'s sizeof would measure the
-                // pointer — emit count * sizeof(element) instead (the true C size).
+                // C's `sizeof` yields `size_t` — unsigned, `ulong` in dotcc's
+                // model — but C#'s `sizeof` operator is `int`. Emit the `(ulong)`
+                // cast so the usual-arithmetic reconcile treats a sizeof-bearing
+                // expression as unsigned (a bare int would be CS0034 against a
+                // `ulong`). An array lowered to a pointer, so C# `sizeof` would
+                // measure the pointer — emit the true C size `count * sizeof(elem)`.
                 return so.Of is CType.Array { Count: { } n } arr
-                    ? ($"({n} * sizeof({arr.Element.CsType}))", PPrimary)
-                    : ($"sizeof({so.Of.CsType})", PPrimary);
+                    ? ($"((ulong)({n} * sizeof({arr.Element.CsType})))", PPrimary)
+                    : ($"((ulong)sizeof({so.Of.CsType}))", PPrimary);
             case Index ix: return ($"{Sub(ix.Base, PPostfix)}[{Expr(ix.Idx)}]", PPostfix);
             case Member m: return ($"{Sub(m.Base, PPostfix)}{(m.Arrow ? "->" : ".")}{DotCC.CSharpEmitter.Id(m.Field)}", PPostfix);
             case Call c: return (CallText(c), PPostfix);
@@ -529,25 +539,106 @@ internal sealed class CodeGen
             case BinOp.Eq or BinOp.Ne or BinOp.Lt or BinOp.Gt or BinOp.Le or BinOp.Ge:
                 {
                     var p = Prec(b.Op);
-                    return ($"((CBool)({Sub(b.Left, p)} {BinSym(b.Op)} {Sub(b.Right, p + 1)}))", PPrimary);
+                    var (l, r) = ReconcileOperands(b.Left, b.Right, p, p + 1);
+                    return ($"((CBool)({l} {BinSym(b.Op)} {r}))", PPrimary);
                 }
             case BinOp.LogAnd:
                 return ($"((CBool)(Cond.B({Expr(b.Left)}) && Cond.B({Expr(b.Right)})))", PPrimary);
             case BinOp.LogOr:
                 return ($"((CBool)(Cond.B({Expr(b.Left)}) || Cond.B({Expr(b.Right)})))", PPrimary);
+            case BinOp.Shl or BinOp.Shr:
+                {
+                    // A shift's operands are promoted INDEPENDENTLY (the right
+                    // operand doesn't join the left's type), so no reconcile.
+                    var p = Prec(b.Op);
+                    return ($"{Sub(b.Left, p)} {BinSym(b.Op)} {Sub(b.Right, p + 1)}", p);
+                }
             default:
                 {
                     // Left-associative: right operand at p+1 so same-precedence
                     // right children (`a - (b - c)`) keep their grouping.
                     var p = Prec(b.Op);
-                    return ($"{Sub(b.Left, p)} {BinSym(b.Op)} {Sub(b.Right, p + 1)}", p);
+                    var (l, r) = ReconcileOperands(b.Left, b.Right, p, p + 1);
+                    return ($"{l} {BinSym(b.Op)} {r}", p);
                 }
         }
     }
 
+    /// <summary>Render the two operands of an arithmetic / bitwise / relational
+    /// binary operator, inserting C's usual-arithmetic conversion cast only where
+    /// C# diverges from C. C# performs most of §6.3.1.8 implicitly; it diverges
+    /// when the common type is unsigned (C# has no implicit signed→unsigned
+    /// conversion — <c>ulong * int</c> is CS0034, <c>uint op int</c> would widen
+    /// to <c>long</c> instead of C's <c>uint</c>). The common type comes from the
+    /// type system (<see cref="CType.UsualArithmetic"/>); a per-operand cast is
+    /// emitted exactly when <see cref="CsImplicitInt"/> says C# wouldn't convert
+    /// it for free — so signed-only and float pairs stay untouched.</summary>
+    private (string Left, string Right) ReconcileOperands(CExpr left, CExpr right, int lp, int rp)
+    {
+        if (left.Type.Unqualified is CType.Prim { Integer: true } lt
+            && right.Type.Unqualified is CType.Prim { Integer: true } rt
+            && CType.UsualArithmetic(lt, rt) is CType.Prim common)
+        {
+            return (ReconcileOne(left, lt.CsName, common.CsName, lp),
+                    ReconcileOne(right, rt.CsName, common.CsName, rp));
+        }
+        return (Sub(left, lp), Sub(right, rp));
+    }
+
+    private string ReconcileOne(CExpr e, string from, string to, int p) =>
+        from != to && !CsImplicitInt(from, to)
+            ? $"({to})({Sub(e, PUnary)})"   // cast binds at PUnary — no outer parens needed
+            : Sub(e, p);
+
+    /// <summary>Render a cast. A constant-expression cast to a narrower / unsigned
+    /// integer type whose value C# can't prove in range is CS0221 unless wrapped
+    /// in <c>unchecked</c> (C# rejects only CONSTANT out-of-range casts; a runtime
+    /// cast truncates silently — Lua's <c>cast_byte(~mask)</c>, <c>(size_t)-1</c>,
+    /// <c>cast_int(MAX_SIZET / sizeof(t))</c>). A fitting folded constant stays
+    /// bare so common output keeps clean; an unfoldable constant expression (a
+    /// uint-modular shift, a ulong-wide divide) is wrapped on the
+    /// <see cref="IsConstExpr"/> flag alone.</summary>
+    private (string, int) RenderCast(Cast c)
+    {
+        var text = $"({c.Target.CsType}){Sub(c.Operand, PUnary)}";
+        if (c.Target.Unqualified is CType.Prim { Integer: true } pt
+            && IsConstExpr(c.Operand)
+            && !(TryConstInt(c.Operand, out var cv) && ConstFitsTarget(cv, pt.CsName)))
+        {
+            return ($"unchecked({text})", PPrimary);
+        }
+        return (text, PUnary);
+    }
+
+    /// <summary>True when <paramref name="e"/> is a C constant expression — only
+    /// literals, <c>sizeof</c>, and operators over constant operands; no variable
+    /// reads or calls. (Enum constants are already lowered to integer literals.)
+    /// Gates the <c>unchecked</c> wrapper above for constants the folder can't
+    /// reduce to a value.</summary>
+    private static bool IsConstExpr(CExpr e) => e switch
+    {
+        LitInt or LitFloat or SizeOfExpr => true,
+        Paren p => IsConstExpr(p.Inner),
+        Cast c => IsConstExpr(c.Operand),
+        Unary u => u.Op is UnOp.Plus or UnOp.Neg or UnOp.BitNot or UnOp.LogNot && IsConstExpr(u.Operand),
+        Binary { Op: not (BinOp.LogAnd or BinOp.LogOr) } b => IsConstExpr(b.Left) && IsConstExpr(b.Right),
+        CondExpr t => IsConstExpr(t.Cond) && IsConstExpr(t.Then) && IsConstExpr(t.Else),
+        _ => false,
+    };
+
     private string CallText(Call c)
     {
-        var a = c.Args.Select(x => Sub(x, PAssign)).ToList();
+        // Coerce each argument to its parameter type (C's implicit conversion at
+        // a call C# requires explicit) when the callee's signature is known; the
+        // variadic tail (index ≥ fixed-param count) and unknown-signature callees
+        // pass through unchanged.
+        var a = new List<string>(c.Args.Count);
+        for (var i = 0; i < c.Args.Count; i++)
+        {
+            a.Add(c.ParamTypes is { } pts && i < pts.Count
+                ? CoercedArg(c.Args[i], pts[i])
+                : Sub(c.Args[i], PAssign));
+        }
         if (c.Builtin)
         {
             // printf-family fluent lowering — matches the runtime contract:

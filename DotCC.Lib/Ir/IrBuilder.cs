@@ -931,7 +931,7 @@ internal sealed class IrBuilder
         // Result type: arithmetic arms reconcile per the usual conversions; else
         // take the then-arm's type (good enough until the coercion pass lands).
         var ty = then.Type.IsArithmetic && els.Type.IsArithmetic
-            ? ArithType(then.Type, els.Type) : then.Type;
+            ? CType.UsualArithmetic(then.Type, els.Type) : then.Type;
         return new CondExpr(cond, then, els) { Type = ty };
     }
 
@@ -969,25 +969,36 @@ internal sealed class IrBuilder
     {
         var le = BuildExpr(l);
         var re = BuildExpr(r);
-        return new Binary(op, le, re) { Type = ArithType(le.Type, re.Type) };
+        return new Binary(op, le, re) { Type = BinaryType(op, le.Type, re.Type) };
     }
 
     private CExpr Rel(BinOp op, Item l, Item r) =>
         new Binary(op, BuildExpr(l), BuildExpr(r)) { Type = CType.Int };
 
-    /// <summary>Simplified C usual arithmetic conversions: the wider/floating
-    /// operand type wins; integer promotion to at least <c>int</c>. Enough for
-    /// the slice — the full rule (incl. signedness ranking) lands with the
-    /// coercion pass.</summary>
-    private static CType ArithType(CType a, CType b)
+    /// <summary>The C type of a binary arithmetic/bitwise/shift expression's
+    /// result. Pointer arithmetic (<c>p + i</c> / <c>p - i</c>) yields the
+    /// (decayed) pointer type and <c>p - q</c> yields <c>ptrdiff_t</c> (a signed
+    /// 64-bit, <c>long</c> here); a shift yields its promoted left operand's type
+    /// (the right operand doesn't take part); everything else takes the usual
+    /// arithmetic conversions (<see cref="CType.UsualArithmetic"/>).</summary>
+    private static CType BinaryType(BinOp op, CType l, CType r)
     {
-        bool Float(CType t) => t is CType.Prim { Integer: false };
-        if (Float(a) || Float(b))
+        static CType Decay(CType t) => t.Unqualified switch
         {
-            return (a.SizeOf >= 8 || b.SizeOf >= 8) ? CType.Double : CType.Float;
+            CType.Array a => new CType.Pointer(a.Element),
+            var u => u,
+        };
+        var lPtr = l.Unqualified is CType.Pointer or CType.Array;
+        var rPtr = r.Unqualified is CType.Pointer or CType.Array;
+        if (op is BinOp.Add or BinOp.Sub && (lPtr || rPtr))
+        {
+            return lPtr && rPtr ? CType.Long : Decay(lPtr ? l : r);
         }
-        var wider = a.SizeOf >= b.SizeOf ? a : b;
-        return wider.SizeOf >= 8 ? wider : CType.Int;
+        if (op is BinOp.Shl or BinOp.Shr)
+        {
+            return l.Unqualified is CType.Prim { Integer: true, Bytes: < 4 } ? CType.Int : l.Unqualified;
+        }
+        return CType.UsualArithmetic(l, r);
     }
 
     private CExpr Asn(BinOp? op, Item l, Item r)
@@ -1036,9 +1047,11 @@ internal sealed class IrBuilder
         // A simple named callee — a function, a fn-ptr variable, or a libc builtin.
         if (TryCalleeName(calleeItem, out var name))
         {
-            var sym = _symbols.Resolve(name);
-            var ret = sym?.Type is CType.Func f ? f.Return : CType.Int;
-            return new Call(name, args, IsPrintfFamily(name)) { Type = ret };
+            // The resolved signature's parameter types drive call-argument
+            // coercion (C's implicit conversion at a call, e.g. `size_t` sizeof
+            // arg → `int` malloc param, or the int-0 null-pointer constant).
+            var fn = _symbols.Resolve(name)?.Type as CType.Func;
+            return new Call(name, args, IsPrintfFamily(name), fn?.Params) { Type = fn?.Return ?? CType.Int };
         }
 
         // Indirect call through a computed fn-ptr expression: `(*fp)(x)`,
