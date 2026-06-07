@@ -62,8 +62,31 @@ internal sealed class IrBuilder
             case C.ExternFnDef d: BuildFuncDef(d.Arg1, d.Arg2); break;
             case C.FuncProto p: RegisterProto(p.Arg0); break;
             case C.ExternFnProto p: RegisterProto(p.Arg1); break;
+            case C.GlobalDeclList g: BuildGlobalDecls(g.Arg0, g.Arg1, Storage.Static); break;
+            case C.GlobalStaticDeclList g: BuildGlobalDecls(g.Arg1, g.Arg2, Storage.Static); break;
+            // `extern T x;` declares the name + type for resolution but emits no
+            // field — the definition lives in another TU (dotcc whole-program model).
+            case C.ExternVarDecl g: BuildGlobalDecls(g.Arg1, g.Arg2, Storage.Extern); break;
             default: throw new IrUnsupportedException(TypeName(fn.Content));
         }
+    }
+
+    /// <summary>File-scope variable declaration. Each declarator becomes a
+    /// <c>DotCcGlobals</c> field (codegen emits <c>public static unsafe T name</c>);
+    /// an <c>extern</c> one is registered for resolution only (no field).</summary>
+    private void BuildGlobalDecls(Item typeItem, Item listItem, Storage storage)
+    {
+        WalkDeclList(ResolveType(typeItem), listItem, (name, initItem, type) =>
+        {
+            var sym = _symbols.Declare(new Symbol
+            {
+                Name = name, Kind = SymKind.Var, Type = type, Storage = storage, IsGlobal = true,
+            });
+            if (storage != Storage.Extern)
+            {
+                Globals.Add(new GlobalVar(sym, initItem is { } ii ? BuildExpr(ii) : null));
+            }
+        });
     }
 
     /// <summary>A prototype declares the function (so calls resolve + we know its
@@ -302,27 +325,56 @@ internal sealed class IrBuilder
     private DeclStmt BuildDecl(Item declItem)
     {
         if (declItem.Content is not C.Decl decl) { throw new IrUnsupportedException(TypeName(declItem.Content)); }
-        var baseType = ResolveType(decl.Arg0);
         var entries = new List<LocalDecl>();
+        WalkDeclList(ResolveType(decl.Arg0), decl.Arg1, (name, initItem, type) =>
+        {
+            var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type, Storage = Storage.Auto });
+            entries.Add(new LocalDecl(sym, initItem is { } ii ? BuildExpr(ii) : null));
+        });
+        return new DeclStmt(entries);
+    }
+
+    /// <summary>Walk a comma-separated init-declarator list, invoking
+    /// <paramref name="add"/> with each declarator's (name, initializer?, type).
+    /// The FIRST declarator's <c>*</c>s were greedily folded into
+    /// <paramref name="baseType"/> by the grammar's <c>Type → Type *</c> rule;
+    /// each subsequent declarator rebuilds its type from the pointer-stripped
+    /// element plus its own <c>*</c>s (so <c>int *a, b;</c> ⇒ a:int*, b:int).
+    /// Shared by local (<see cref="BuildDecl"/>) and file-scope declarations.</summary>
+    private void WalkDeclList(CType baseType, Item listItem, Action<string, Item?, CType> add)
+    {
+        var element = baseType;
+        while (element is CType.Pointer p) { element = p.Pointee; }
+        void WalkTail(Item it, int stars)
+        {
+            switch (it.Content)
+            {
+                case C.DeclItemTailPtr p: WalkTail(p.Arg1, stars + 1); break;
+                case C.DeclItem di: add(Tok(di.Arg0), null, WrapPtr(element, stars)); break;
+                case C.DeclItemInit di: add(Tok(di.Arg0), di.Arg2, WrapPtr(element, stars)); break;
+                default: throw new IrUnsupportedException(TypeName(it.Content));
+            }
+        }
         void Walk(Item it)
         {
             switch (it.Content)
             {
                 case C.DeclItemListCons c: Walk(c.Arg0); Walk(c.Arg2); break;
                 case C.DeclItemListOne o: Walk(o.Arg0); break;
-                case C.DeclItem di: AddEntry(Tok(di.Arg0), null); break;
-                case C.DeclItemInit di: AddEntry(Tok(di.Arg0), di.Arg2); break;
+                case C.DeclItem di: add(Tok(di.Arg0), null, baseType); break;
+                case C.DeclItemInit di: add(Tok(di.Arg0), di.Arg2, baseType); break;
+                case C.DeclItemTailPlain t: WalkTail(t.Arg0, 0); break;
+                case C.DeclItemTailPtr t: WalkTail(t.Arg1, 1); break;
                 default: throw new IrUnsupportedException(TypeName(it.Content));
             }
         }
-        void AddEntry(string name, Item? initItem)
-        {
-            var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = baseType, Storage = Storage.Auto });
-            var init = initItem is { } ii ? BuildExpr(ii) : null;
-            entries.Add(new LocalDecl(sym, init));
-        }
-        Walk(decl.Arg1);
-        return new DeclStmt(entries);
+        Walk(listItem);
+    }
+
+    private static CType WrapPtr(CType t, int stars)
+    {
+        for (var i = 0; i < stars; i++) { t = new CType.Pointer(t); }
+        return t;
     }
 
     private For BuildForDecl(C.StmtForDecl s)
