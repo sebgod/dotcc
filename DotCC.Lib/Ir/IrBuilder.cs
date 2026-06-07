@@ -331,18 +331,22 @@ internal sealed partial class IrBuilder
                 case C.StructMemberList sm:
                     WalkDeclList(sm.Arg0, sm.Arg1, (name, _, type) => fields.Add(new StructField(name, type)));
                     break;
-                // `T name[N];` — a fixed-size array member. The bound must be an
-                // integer constant expression (codegen lowers it to a C# `fixed`
-                // buffer). Multi-dimensional members are deferred.
+                // `T name[N]…;` — a fixed-size array member (codegen: a `fixed`
+                // buffer for a primitive element, an [InlineArray] wrapper for a
+                // non-primitive one). Multi-dimensional bounds give a nested array
+                // type so `s.m[i][j]` strides; bounds must be constant expressions.
                 case C.StructArrMember sm:
                 {
-                    var elem = ResolveType(sm.Arg0);
-                    var dims = BuildArrDims(sm.Arg2);
-                    if (dims.Count != 1) { throw new IrUnsupportedException("multi-dimensional struct member"); }
-                    if (ConstEval(dims[0]) is not { } cnt) { throw new IrUnsupportedException("non-constant struct array bound"); }
-                    fields.Add(new StructField(Tok(sm.Arg1), new CType.Array(elem, (int)cnt)));
+                    var dims = TryConstDims(sm.Arg2) ?? throw new IrUnsupportedException("non-constant struct array bound");
+                    fields.Add(new StructField(Tok(sm.Arg1), MakeArrayType(ResolveType(sm.Arg0), dims)));
                     break;
                 }
+                // C99 flexible array member `T name[];` — over-allocated at malloc
+                // time. Model as a 1-element array (the struct-hack [1] convention),
+                // so the member exists and access over-indexes into the tail.
+                case C.StructFlexArrMember sm:
+                    fields.Add(new StructField(Tok(sm.Arg1), new CType.Array(ResolveType(sm.Arg0), 1)));
+                    break;
                 default: throw new IrUnsupportedException(TypeName(m.Content));
             }
         }

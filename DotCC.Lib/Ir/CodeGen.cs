@@ -74,6 +74,7 @@ internal sealed class CodeGen
     /// <c>[FieldOffset(0)]</c> (C overlays all members at the same address).</summary>
     private static string StructText(StructTypeDef t)
     {
+        var wrappers = new StringBuilder();   // [InlineArray] wrapper types for non-primitive array members
         var sb = new StringBuilder();
         if (t.IsUnion)
         {
@@ -84,23 +85,33 @@ internal sealed class CodeGen
         {
             if (t.IsUnion) { sb.Append("    [System.Runtime.InteropServices.FieldOffset(0)]\n"); }
             // An array member is C-inline storage, not a pointer field. A primitive
-            // element lowers to a C# `fixed` buffer (inline, indexable); a
-            // non-primitive element (a pointer/struct array) needs an [InlineArray]
-            // wrapper, deferred.
-            if (f.Type.Unqualified is CType.Array { Count: { } n } arr)
+            // element lowers to a C# `fixed` buffer (inline, indexable, decays to a
+            // pointer with no bounds check — both for free, matching C). A
+            // non-primitive element (struct / pointer) can't be a `fixed` buffer, so
+            // it gets a generated [InlineArray] wrapper; access routes through the
+            // element pointer (see the Member case) to restore over-indexing + decay.
+            if (f.Type.Unqualified is CType.Array arr)
             {
-                if (!IsFixedBufferType(arr.Element.CsType))
+                var flat = arr.FlatElement;
+                var count = FlatCount(arr);
+                var fid = DotCC.CSharpEmitter.Id(f.Name);
+                if (IsFixedBufferType(flat.CsType))
                 {
-                    throw new IrUnsupportedException($"non-primitive array struct member '{f.Name}'");
+                    sb.Append("    public fixed ").Append(flat.CsType).Append(' ').Append(fid).Append('[').Append(count).Append("];\n");
                 }
-                sb.Append("    public fixed ").Append(arr.Element.CsType).Append(' ')
-                  .Append(DotCC.CSharpEmitter.Id(f.Name)).Append('[').Append(n).Append("];\n");
+                else
+                {
+                    var wrap = $"__IA_{t.Name}_{fid}";
+                    wrappers.Append("[System.Runtime.CompilerServices.InlineArray(").Append(count).Append(")]\nunsafe struct ")
+                        .Append(wrap).Append("\n{\n    public ").Append(flat.CsType).Append(" _e;\n}\n\n");
+                    sb.Append("    public ").Append(wrap).Append(' ').Append(fid).Append(";\n");
+                }
                 continue;
             }
             sb.Append("    public ").Append(f.Type.CsType).Append(' ').Append(DotCC.CSharpEmitter.Id(f.Name)).Append(";\n");
         }
         sb.Append("}\n\n");
-        return sb.ToString();
+        return wrappers.Append(sb).ToString();
     }
 
     /// <summary>C# permits a <c>fixed</c> buffer only of these primitive element
@@ -596,8 +607,16 @@ internal sealed class CodeGen
             }
             case Member m:
             {
-                var t = $"{Sub(m.Base, PPostfix)}{(m.Arrow ? "->" : ".")}{DotCC.CSharpEmitter.Id(m.Field)}";
-                return QualifiedRead(m, t, PPostfix);
+                var dot = $"{Sub(m.Base, PPostfix)}{(m.Arrow ? "->" : ".")}{DotCC.CSharpEmitter.Id(m.Field)}";
+                // A non-primitive array member is stored as an [InlineArray]; its
+                // access decays to the element pointer `(T*)&field` (C#'s InlineArray
+                // indexer bounds-checks, but a C array over-indexes into the tail),
+                // restoring both over-indexing and array→pointer decay.
+                if (m.Type.Unqualified is CType.Array arr && !IsFixedBufferType(arr.FlatElement.CsType))
+                {
+                    return ($"({m.Type.CsType})&{dot}", PUnary);
+                }
+                return QualifiedRead(m, dot, PPostfix);
             }
             case StructInit si: return (StructInitText(si), PPrimary);
             case StackArray sa:
