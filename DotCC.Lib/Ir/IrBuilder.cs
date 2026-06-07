@@ -95,6 +95,9 @@ internal sealed class IrBuilder
             case C.TypedefUnionAnon s: BuildStructDef(null, s.Arg3, Tok(s.Arg5), isUnion: true); break;
             // `struct Tag;` forward declaration — C# resolves order-independently.
             case C.StructFwd: break;
+            // `typedef Ret (*Name)(params);` — record Name → fn-ptr type.
+            case C.TypedefFnPtr t: _typedefs[Tok(t.Arg4)] = FnPtrType(t.Arg1, t.Arg7); break;
+            case C.TypedefFnPtrNoArgs t: _typedefs[Tok(t.Arg4)] = FnPtrType(t.Arg1, null); break;
             default: throw new IrUnsupportedException(TypeName(fn.Content));
         }
     }
@@ -190,6 +193,9 @@ internal sealed class IrBuilder
                 case C.ParamUnnamed p: acc.Add((ResolveType(p.Arg0), "_p" + unnamed++)); break;
                 case C.ParamArrayUnsized p: acc.Add((new CType.Pointer(ResolveType(p.Arg0)), Tok(p.Arg1))); break;
                 case C.ParamArraySized p: acc.Add((new CType.Pointer(ResolveType(p.Arg0)), Tok(p.Arg1))); break;
+                // Function-pointer parameter: `Ret (*name)(paramTypes)`.
+                case C.ParamFnPtr p: acc.Add((FnPtrType(p.Arg0, p.Arg6), Tok(p.Arg3))); break;
+                case C.ParamFnPtrNoArgs p: acc.Add((FnPtrType(p.Arg0, null), Tok(p.Arg3))); break;
                 default: throw new IrUnsupportedException(TypeName(it.Content));
             }
         }
@@ -317,6 +323,25 @@ internal sealed class IrBuilder
             foreach (var f in fields) { if (f.Name == field) { return f.Type; } }
         }
         return CType.Int;
+    }
+
+    /// <summary>Build a function-pointer type <c>Ret (*)(params)</c> →
+    /// <see cref="CType.Func"/> (codegen lowers it to <c>delegate*&lt;params, Ret&gt;</c>).
+    /// A lone <c>void</c> parameter list means no parameters.</summary>
+    private CType.Func FnPtrType(Item retItem, Item? paramListItem)
+    {
+        var ret = ResolveType(retItem);
+        var ptypes = new List<CType>();
+        var variadic = false;
+        if (paramListItem is { } pl)
+        {
+            var ps = BuildParams(pl, out variadic);
+            if (!(ps.Count == 1 && ps[0].Item1 is CType.VoidType))
+            {
+                foreach (var (t, _) in ps) { ptypes.Add(t); }
+            }
+        }
+        return new CType.Func(ret, ptypes, variadic);
     }
 
     // ---- types -----------------------------------------------------------
@@ -497,8 +522,20 @@ internal sealed class IrBuilder
         C.DeclArrEmptyInit d => BuildArrDecl(d.Arg0, d.Arg1, d.Arg2, null, implicitSize: false),
         C.DeclArrInit d => BuildArrDecl(d.Arg0, d.Arg1, d.Arg2, d.Arg5, implicitSize: false),
         C.DeclArrInitImplicit d => BuildArrDecl(d.Arg0, d.Arg1, null, d.Arg6, implicitSize: true),
+        // Local function-pointer variable: `Ret (*name)(params)` [= init].
+        C.DeclFnPtr d => BuildFnPtrLocal(d.Arg0, d.Arg3, d.Arg6, null),
+        C.DeclFnPtrNoArgs d => BuildFnPtrLocal(d.Arg0, d.Arg3, null, null),
+        C.DeclFnPtrInit d => BuildFnPtrLocal(d.Arg0, d.Arg3, d.Arg6, d.Arg9),
+        C.DeclFnPtrNoArgsInit d => BuildFnPtrLocal(d.Arg0, d.Arg3, null, d.Arg8),
         _ => throw new IrUnsupportedException(TypeName(it.Content)),
     };
+
+    private DeclStmt BuildFnPtrLocal(Item retItem, Item nameItem, Item? paramsItem, Item? initItem)
+    {
+        var type = FnPtrType(retItem, paramsItem);
+        var sym = _symbols.Declare(new Symbol { Name = Tok(nameItem), Kind = SymKind.Var, Type = type, Storage = Storage.Auto });
+        return new DeclStmt(new[] { new LocalDecl(sym, initItem is { } ii ? BuildExpr(ii) : null) });
+    }
 
     private DeclStmt BuildDecl(Item declItem)
     {
@@ -861,20 +898,40 @@ internal sealed class IrBuilder
 
     private CExpr BuildCall(Item calleeItem, Item? argList)
     {
-        var name = CalleeName(calleeItem);
         var args = new List<CExpr>();
         if (argList is { } al) { FlattenArgs(al, x => args.Add(BuildExpr(x))); }
-        var sym = _symbols.Resolve(name);
-        var ret = sym?.Type is CType.Func f ? f.Return : CType.Int;
-        return new Call(name, args, IsPrintfFamily(name)) { Type = ret };
+
+        // A simple named callee — a function, a fn-ptr variable, or a libc builtin.
+        if (TryCalleeName(calleeItem, out var name))
+        {
+            var sym = _symbols.Resolve(name);
+            var ret = sym?.Type is CType.Func f ? f.Return : CType.Int;
+            return new Call(name, args, IsPrintfFamily(name)) { Type = ret };
+        }
+
+        // Indirect call through a computed fn-ptr expression: `(*fp)(x)`,
+        // `tbl[i](x)`, `s.fn(x)`. `*fp` is a C no-op on a function pointer (C#
+        // calls it directly and rejects the deref), so peel a leading deref.
+        var callee = BuildExpr(calleeItem);
+        if (callee is Unary { Op: UnOp.Deref } u) { callee = u.Operand; }
+        var rty = callee.Type switch
+        {
+            CType.Func f2 => f2.Return,
+            CType.Pointer { Pointee: CType.Func f3 } => f3.Return,
+            _ => CType.Int,
+        };
+        return new IndirectCall(callee, args) { Type = rty };
     }
 
-    private string CalleeName(Item it) => it.Content switch
+    private bool TryCalleeName(Item it, out string name)
     {
-        C.Var v => Tok(v.Arg0),
-        C.Paren p => CalleeName(p.Arg1),
-        _ => throw new IrUnsupportedException("call through " + TypeName(it.Content)),
-    };
+        switch (it.Content)
+        {
+            case C.Var v: name = Tok(v.Arg0); return true;
+            case C.Paren p: return TryCalleeName(p.Arg1, out name);
+            default: name = ""; return false;
+        }
+    }
 
     private void FlattenArgs(Item it, Action<Item> onArg)
     {

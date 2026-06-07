@@ -62,6 +62,11 @@ public sealed record Assign(BinOp? CompoundOp, CExpr Target, CExpr Value) : CExp
 /// specially (printf-family fluent form).</summary>
 public sealed record Call(string Callee, IReadOnlyList<CExpr> Args, bool Builtin) : CExpr;
 
+/// <summary>A call through a computed function-pointer expression — <c>(*fp)(x)</c>,
+/// <c>tbl[i](x)</c>, <c>s.fn(x)</c>. (A call of a named function or fn-ptr
+/// variable uses <see cref="Call"/> instead.)</summary>
+public sealed record IndirectCall(CExpr Callee, IReadOnlyList<CExpr> Args) : CExpr;
+
 /// <summary>A cast (explicit or inserted by a coercion pass).</summary>
 public sealed record Cast(CType Target, CExpr Operand) : CExpr;
 
