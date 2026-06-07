@@ -608,6 +608,23 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     // no GC move — so L()'s pinned pointer stays valid for the program lifetime,
     // identical to the u8-literal case. Returns the initializer text and the
     // byte length (excluding the NUL the caller accounts for).
+    /// <summary>Decode adjacent C string-literal segments to their exact byte
+    /// values — UTF-8 for source chars, verbatim for escapes — EXCLUDING the NUL
+    /// terminator (the caller appends and zero-pads). Used by the IR to lower
+    /// <c>char s[] = "…"</c> to a mutable byte buffer.</summary>
+    internal static List<int> StringByteValues(IReadOnlyList<string> rawQuotedSegments)
+    {
+        var items = new List<StrItem>();
+        foreach (var seg in rawQuotedSegments) { DecodeCStringBody(StripStrQuotes(seg), items); }
+        var bytes = new List<int>(items.Count);
+        foreach (var it in items)
+        {
+            if (it.IsByte) { bytes.Add(it.Value & 0xFF); }
+            else { foreach (var u in System.Text.Encoding.UTF8.GetBytes(((char)it.Value).ToString())) { bytes.Add(u); } }
+        }
+        return bytes;
+    }
+
     private static (string Text, int ByteLen) EmitByteArray(List<StrItem> items)
     {
         var bytes = new List<int>(items.Count + 1);

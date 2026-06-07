@@ -698,6 +698,9 @@ internal sealed class IrBuilder
     private CStmt BuildDeclStmt(Item it) => it.Content switch
     {
         C.Decl => BuildDecl(it),
+        // `char s[] = "hi";` (implicit size) / `char buf[N] = "hi";` (explicit, zero-padded).
+        C.DeclCharArrStr d => BuildDeclCharArrStr(d.Arg0, d.Arg1, null, d.Arg5),
+        C.DeclCharArrStrSized d => BuildDeclCharArrStr(d.Arg0, d.Arg1, CharArrSize(d.Arg2), d.Arg4),
         C.DeclStructInit d => BuildDeclStructInit(d),
         C.DeclArr d => BuildArrDecl(d.Arg0, d.Arg1, d.Arg2, null, implicitSize: false),
         C.DeclArrEmptyInit d => BuildArrDecl(d.Arg0, d.Arg1, d.Arg2, null, implicitSize: false),
@@ -1278,7 +1281,31 @@ internal sealed class IrBuilder
 
     private CExpr BuildStr(Item it)
     {
-        var c = (C.Str)it.Content;
+        var segs = CollectStrSegments(((C.Str)it.Content).Arg0);
+        // A string literal has type char[N] (N = decoded bytes incl. NUL). It
+        // decays to char* in most contexts — but NOT under sizeof, which is why
+        // the array type is carried rather than the decayed pointer. The lowered
+        // C# (byte*) is identical either way, so value uses are unaffected.
+        var expr = DotCC.CSharpEmitter.EncodeStringLiteral(segs, out var byteLen);
+        return new LitStr(expr) { Type = new CType.Array(CType.Char, byteLen) };
+    }
+
+    /// <summary>The constant array bound of a char-array string declarator's
+    /// <c>ArrDims</c> (single dimension, constant-folded).</summary>
+    private int CharArrSize(Item arrDims)
+    {
+        var dims = BuildArrDims(arrDims);
+        if (dims.Count != 1 || ConstEval(dims[0]) is not { } n)
+        {
+            throw new IrUnsupportedException("char-array string init with a non-constant or multi-dimensional bound");
+        }
+        return (int)n;
+    }
+
+    /// <summary>Collect adjacent string-literal segments (raw quoted lexemes) of a
+    /// <c>StringSeq</c>, in source order.</summary>
+    private List<string> CollectStrSegments(Item strSeq)
+    {
         var segs = new List<string>();
         void Walk(Item node)
         {
@@ -1289,13 +1316,30 @@ internal sealed class IrBuilder
                 default: segs.Add(Tok(node)); break;
             }
         }
-        Walk(c.Arg0);
-        // A string literal has type char[N] (N = decoded bytes incl. NUL). It
-        // decays to char* in most contexts — but NOT under sizeof, which is why
-        // the array type is carried rather than the decayed pointer. The lowered
-        // C# (byte*) is identical either way, so value uses are unaffected.
-        var expr = DotCC.CSharpEmitter.EncodeStringLiteral(segs, out var byteLen);
-        return new LitStr(expr) { Type = new CType.Array(CType.Char, byteLen) };
+        Walk(strSeq);
+        return segs;
+    }
+
+    /// <summary><c>char s[] = "hi";</c> — a mutable char array initialised from a
+    /// string. Lowers to a byte stackalloc of the decoded bytes plus the NUL;
+    /// an explicit size zero-pads (or, exact-fit, may drop the NUL — C's rule).</summary>
+    private CStmt BuildDeclCharArrStr(Item typeItem, Item nameItem, int? explicitSize, Item strSeqItem)
+    {
+        var elem = ResolveType(typeItem);
+        var bytes = DotCC.CSharpEmitter.StringByteValues(CollectStrSegments(strSeqItem));
+        bytes.Add(0);                                   // NUL
+        var count = explicitSize ?? bytes.Count;
+        var inits = new List<CExpr>(count);
+        for (var i = 0; i < count; i++)
+        {
+            var v = i < bytes.Count ? bytes[i] : 0;     // zero-pad beyond the string
+            inits.Add(new LitInt(v.ToString(System.Globalization.CultureInfo.InvariantCulture), v) { Type = CType.Int });
+        }
+        var sym = _symbols.Declare(new Symbol
+        {
+            Name = Tok(nameItem), Kind = SymKind.Var, Type = new CType.Array(elem, count), Storage = Storage.Auto,
+        });
+        return new ArrayDecl(sym, elem, null, inits);
     }
 
     private CExpr BuildChr(C.Chr c)
