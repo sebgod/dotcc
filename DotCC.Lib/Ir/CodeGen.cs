@@ -332,6 +332,19 @@ internal sealed class CodeGen
     /// <summary>The fenced read of a volatile lvalue text — C's volatile read.</summary>
     private static string VolatileRead(string lv) => $"global::System.Threading.Volatile.Read(ref {lv})";
 
+    /// <summary>True when an lvalue's storage roots at a file-scope global / static
+    /// local — a C# static field, hence a moveable variable whose address must go
+    /// through <c>Unsafe.AsPointer</c> rather than a bare <c>&amp;</c> (CS0212). A
+    /// member through a pointer (<c>p-&gt;f</c>) or a pointer deref roots at the
+    /// pointee, not at the field, so those stay a plain <c>&amp;</c>.</summary>
+    private static bool RootsAtGlobal(CExpr e) => e switch
+    {
+        VarRef v => v.Sym.IsGlobal,
+        Paren p => RootsAtGlobal(p.Inner),
+        Member { Arrow: false } m => RootsAtGlobal(m.Base),
+        _ => false,
+    };
+
     /// <summary>The bare (un-fenced) C# text of an lvalue — for an assignment
     /// target, an <c>&amp;</c> operand, or the <c>ref</c> argument of
     /// Volatile.Read/Write, where the volatile-read wrap must NOT be applied.</summary>
@@ -661,6 +674,13 @@ internal sealed class CodeGen
             // &fn where fn is a function already decays to `&fn` in the VarRef
             // case — don't emit a second `&`.
             case UnOp.AddrOf when u.Operand is VarRef { Sym.Kind: SymKind.Func }: return Render(u.Operand);
+            // &global — a file-scope global / static local lowers to a C# static
+            // field, which is a MOVEABLE variable (`&field` is CS0212). Take its
+            // address via Unsafe.AsPointer: dotcc's globals are unmanaged value
+            // types in non-moving static storage, so the pointer is stable. (Lua
+            // leans on this: &absentkey, &dummynode_.)
+            case UnOp.AddrOf when RootsAtGlobal(u.Operand):
+                return ($"({u.Type.CsType})System.Runtime.CompilerServices.Unsafe.AsPointer(ref {BareLValue(u.Operand)})", PUnary);
             // BareLValue so `&` of a volatile lvalue takes the address, not the
             // address of a Volatile.Read(...) call.
             case UnOp.AddrOf: return ($"&{BareLValue(u.Operand)}", PUnary);
