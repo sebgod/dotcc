@@ -51,7 +51,16 @@ internal sealed class CodeGen
             }
         }
 
-        return new CodeGenResult(fns.ToString(), Structs: "", Aliases: "", Globals: "", mainArity, exports);
+        // File-scope variables → public static fields of DotCcGlobals (the shell
+        // surfaces them by bare name via `using static DotCcGlobals;`).
+        var globals = new StringBuilder();
+        foreach (var g in unit.Globals)
+        {
+            var init = g.Init is { } i ? " = " + cg.Expr(i) : "";
+            globals.Append($"    public static unsafe {g.Sym.Type.CsType} {g.Sym.CsName}{init};\n");
+        }
+
+        return new CodeGenResult(fns.ToString(), Structs: "", Aliases: "", globals.ToString(), mainArity, exports);
     }
 
     // ---- functions -------------------------------------------------------
@@ -79,7 +88,7 @@ internal sealed class CodeGen
                 sb.Append(pad).Append("}\n");
                 break;
             case DeclStmt d:
-                sb.Append(pad).Append(DeclInline(d)).Append(";\n");
+                EmitDeclStmt(sb, d, pad);
                 break;
             case ExprStmt e:
                 sb.Append(pad).Append(Expr(e.Expr)).Append(";\n");
@@ -136,6 +145,29 @@ internal sealed class CodeGen
     private void Nested(StringBuilder sb, CStmt s, int ind) =>
         Stmt(sb, s, s is Block ? ind : ind + 1);
 
+    /// <summary>Render a declaration in statement position. When every declarator
+    /// shares a C# type it's one C# declaration (<c>int a = 0, b = 1;</c>); when
+    /// the per-declarator types differ (C's <c>int *a, b;</c> — a is a pointer, b
+    /// is not — which C# can't express in one statement since <c>int* a, b</c>
+    /// makes both pointers) it splits into one statement per declarator.</summary>
+    private void EmitDeclStmt(StringBuilder sb, DeclStmt d, string pad)
+    {
+        if (d.Decls.Count == 0) { return; }
+        var firstCs = d.Decls[0].Sym.Type.CsType;
+        if (d.Decls.All(e => e.Sym.Type.CsType == firstCs))
+        {
+            sb.Append(pad).Append(DeclInline(d)).Append(";\n");
+            return;
+        }
+        foreach (var e in d.Decls)
+        {
+            var init = e.Init is { } i ? Expr(i) : "default";
+            sb.Append(pad).Append($"{e.Sym.Type.CsType} {e.Sym.CsName} = {init};\n");
+        }
+    }
+
+    // A single C# declaration (shared element type), used in statement position
+    // when all declarators agree and in `for`-initializer position.
     private string DeclInline(DeclStmt d)
     {
         var type = d.Decls.Count > 0 ? d.Decls[0].Sym.Type.CsType : "int";
