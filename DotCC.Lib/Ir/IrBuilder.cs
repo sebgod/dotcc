@@ -362,8 +362,32 @@ internal sealed class IrBuilder
         // `struct Tag` / `union Tag` as a type — the canonical C# struct name.
         C.TypeStruct t => new CType.Named(Tok(t.Arg1)),
         C.TypeUnion t => new CType.Named(Tok(t.Arg1)),
+        // Inline anonymous aggregate used as a type — `union { int i; float f; } u;`
+        // (a NAMED member/var of an unnamed aggregate). Synthesize a struct name.
+        C.TypeAnonStruct t => ResolveAnonAggregate(it, t.Arg3, isUnion: false),
+        C.TypeAnonUnion t => ResolveAnonAggregate(it, t.Arg3, isUnion: true),
         _ => throw new IrUnsupportedException(TypeName(it.Content)),
     };
+
+    /// <summary>Per-occurrence synthetic name for an inline anonymous aggregate
+    /// type, cached by source position so the same type item always resolves to
+    /// the same <see cref="CType.Named"/> (the field that holds it and every
+    /// member access agree on one synthesized struct).</summary>
+    private readonly Dictionary<SrcPos, CType> _anonAggregates = new();
+    private int _anonAggrSeq;
+
+    private CType ResolveAnonAggregate(Item typeItem, Item memberListItem, bool isUnion)
+    {
+        var pos = SrcPos.From(typeItem);
+        if (_anonAggregates.TryGetValue(pos, out var cached)) { return cached; }
+        var name = $"__Anon{_anonAggrSeq++}";
+        var named = new CType.Named(name);
+        _anonAggregates[pos] = named;
+        var fields = BuildStructFields(memberListItem);
+        _structFields[name] = fields;
+        Types.Add(new StructTypeDef(name, fields, isUnion));
+        return named;
+    }
 
     /// <summary>Resolve a type-name token: a user/library typedef resolves to its
     /// underlying type; an unknown name (a predefined opaque type like
