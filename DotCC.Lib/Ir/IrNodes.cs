@@ -139,6 +139,17 @@ public sealed record Goto(string Label) : CStmt;
 /// <summary>A labeled statement <c>name: body</c> (<see cref="Name"/> escaped).</summary>
 public sealed record Labeled(string Name, CStmt Body) : CStmt;
 
+/// <summary>The desugared form of a recognised <c>setjmp</c>/<c>longjmp</c> guard
+/// (<c>if (setjmp(env) [== 0]) THEN [else ELSE]</c>). Real C's "setjmp returns
+/// twice" has no structured-control-flow equivalent, so codegen lowers this to
+/// <c>env = new LongJmpToken(); try { TryBody } catch (LongJmpException __jmp)
+/// when (__jmp.Token == env) { CatchBody }</c>. <see cref="TryBody"/> is the path
+/// taken on setjmp's direct (zero) return; <see cref="CatchBody"/> is the longjmp
+/// re-entry path (null for the no-recovery swallow shape — Lua's <c>LUAI_TRY</c>).
+/// <see cref="Env"/> renders to the <c>jmp_buf</c> lvalue that is freshly armed
+/// and matched on, so nested setjmps stay disambiguated by token identity.</summary>
+public sealed record SetjmpGuard(CExpr Env, CStmt? TryBody, CStmt? CatchBody) : CStmt;
+
 // ---- declarations / translation unit ------------------------------------
 
 /// <summary>A local array declaration, lowered to a C# <c>stackalloc</c>.

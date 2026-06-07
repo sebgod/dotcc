@@ -164,6 +164,20 @@ internal sealed class CodeGen
                 sb.Append(pad).Append(lb.Name).Append(":\n");
                 Stmt(sb, lb.Body, ind);
                 break;
+            case SetjmpGuard sj:
+            {
+                // Arm this site with a FRESH token identity so the `when` filter
+                // disambiguates nested setjmps: a longjmp reads the SAME env (matches
+                // here), while one aimed at a different env carries a different token
+                // and propagates past this catch.
+                var env = Expr(sj.Env);
+                sb.Append(pad).Append($"{env} = new Libc.LongJmpToken();\n");
+                sb.Append(pad).Append("try\n");
+                GuardBody(sb, sj.TryBody, ind);
+                sb.Append(pad).Append($"catch (Libc.LongJmpException __jmp) when (__jmp.Token == {env})\n");
+                GuardBody(sb, sj.CatchBody, ind);
+                break;
+            }
             case For fr:
                 var init = fr.Init switch
                 {
@@ -185,6 +199,19 @@ internal sealed class CodeGen
     // (braces align under the controller); a single statement indents one level.
     private void Nested(StringBuilder sb, CStmt s, int ind) =>
         Stmt(sb, s, s is Block ? ind : ind + 1);
+
+    // Render a try/catch body for a SetjmpGuard. C# requires a braced block here
+    // (`try stmt;` is invalid), so a single (braceless) C statement is wrapped, and
+    // a null body (the no-recovery swallow shape) becomes an empty `{ }`.
+    private void GuardBody(StringBuilder sb, CStmt? body, int ind)
+    {
+        var pad = Pad(ind);
+        if (body is null) { sb.Append(pad).Append("{ }\n"); return; }
+        if (body is Block) { Stmt(sb, body, ind); return; }
+        sb.Append(pad).Append("{\n");
+        Stmt(sb, body, ind + 1);
+        sb.Append(pad).Append("}\n");
+    }
 
     /// <summary>Render a declaration in statement position. When every declarator
     /// shares a C# type it's one C# declaration (<c>int a = 0, b = 1;</c>); when

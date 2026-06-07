@@ -489,8 +489,19 @@ internal sealed class IrBuilder
             case C.StmtDecl d: return BuildDeclStmt(d.Arg0) with { Pos = pos };
             case C.StmtExpr e: return new ExprStmt(BuildExpr(e.Arg0)) { Pos = pos };
             case C.StmtEmpty: return new Block(System.Array.Empty<CStmt>()) { Pos = pos };
-            case C.StmtIf s: return new If(BuildExpr(s.Arg2), BuildStmt(s.Arg4), null) { Pos = pos };
-            case C.StmtIfElse s: return new If(BuildExpr(s.Arg2), BuildStmt(s.Arg4), BuildStmt(s.Arg6)) { Pos = pos };
+            case C.StmtIf s:
+            {
+                var cond = BuildExpr(s.Arg2);
+                var then = BuildStmt(s.Arg4);
+                return SetjmpGuardOf(cond, then, null, pos) ?? new If(cond, then, null) { Pos = pos };
+            }
+            case C.StmtIfElse s:
+            {
+                var cond = BuildExpr(s.Arg2);
+                var then = BuildStmt(s.Arg4);
+                var els = BuildStmt(s.Arg6);
+                return SetjmpGuardOf(cond, then, els, pos) ?? new If(cond, then, els) { Pos = pos };
+            }
             case C.StmtWhile s: return new While(BuildExpr(s.Arg2), BuildStmt(s.Arg4)) { Pos = pos };
             case C.StmtDoWhile s: return new DoWhile(BuildStmt(s.Arg1), BuildExpr(s.Arg4)) { Pos = pos };
             case C.StmtReturn s: return new Return(BuildExpr(s.Arg1)) { Pos = pos };
@@ -510,6 +521,69 @@ internal sealed class IrBuilder
             case C.StmtEnumDefTyped s: RegisterEnum(s.Arg5); return new Block(System.Array.Empty<CStmt>()) { Pos = pos };
             default: throw new IrUnsupportedException(TypeName(it.Content));
         }
+    }
+
+    /// <summary>Recognise the <c>setjmp</c>/<c>longjmp</c> guard idiom in an
+    /// <c>if</c> and desugar it to a <see cref="SetjmpGuard"/>. Returns null when
+    /// the condition is not a setjmp guard (the caller then builds a plain <see
+    /// cref="If"/>). Recognition runs on the already-built IR — never on emitted
+    /// text:
+    /// <list type="bullet">
+    ///   <item><c>if (setjmp(env)) recovery [else normal]</c> — setjmp is truthy
+    ///     ONLY on the longjmp re-entry, so the then-branch is the recovery.</item>
+    ///   <item><c>if (setjmp(env) == 0) normal [else recovery]</c> — the compare
+    ///     is true on the direct (zero) return, so the then-branch is normal.</item>
+    ///   <item><c>if (setjmp(env) != 0) recovery [else normal]</c> — the inverse.</item>
+    /// </list></summary>
+    private static CStmt? SetjmpGuardOf(CExpr cond, CStmt then, CStmt? els, SrcPos pos)
+    {
+        // Bare `if (setjmp(env)) …` — truthy only on the longjmp re-entry, so the
+        // then-branch is the recovery (catch) and the absent/else side is the
+        // normal (try) path.
+        if (IsSetjmpCall(cond, out var bareEnv))
+        {
+            return new SetjmpGuard(bareEnv, TryBody: els, CatchBody: then) { Pos = pos };
+        }
+        // `setjmp(env) == 0` / `!= 0`, either operand order.
+        if (cond is Binary { Op: BinOp.Eq or BinOp.Ne } b)
+        {
+            CExpr? env = null;
+            if (IsSetjmpCall(b.Left, out var e1) && IsZeroLit(b.Right)) { env = e1; }
+            else if (IsSetjmpCall(b.Right, out var e2) && IsZeroLit(b.Left)) { env = e2; }
+            if (env is not null)
+            {
+                // `== 0` is true on the direct (zero) return; `!= 0` is true on the
+                // re-entry. The "true on direct return" branch is the try (normal)
+                // body; the other is the catch (recovery).
+                var trueOnDirect = b.Op == BinOp.Eq;
+                var tryBody = trueOnDirect ? then : els;
+                var catchBody = trueOnDirect ? els : then;
+                return new SetjmpGuard(env, tryBody, catchBody) { Pos = pos };
+            }
+        }
+        return null;
+    }
+
+    /// <summary>True when <paramref name="e"/> is a direct call to <c>setjmp</c>
+    /// (parens peeled); yields the env-token argument expression.</summary>
+    private static bool IsSetjmpCall(CExpr e, out CExpr env)
+    {
+        while (e is Paren p) { e = p.Inner; }
+        if (e is Call { Callee: "setjmp", Args: { Count: 1 } a })
+        {
+            env = a[0];
+            return true;
+        }
+        env = null!;
+        return false;
+    }
+
+    /// <summary>True for the integer literal <c>0</c> (parens peeled) — the RHS of
+    /// a recognised <c>setjmp(env) == 0</c> guard.</summary>
+    private static bool IsZeroLit(CExpr e)
+    {
+        while (e is Paren p) { e = p.Inner; }
+        return e is LitInt { Value: 0 };
     }
 
     /// <summary>A declaration in statement position. The grammar wraps the
