@@ -129,13 +129,22 @@ public static unsafe partial class Libc
     // byte-oriented in C); for the console they go through Console.* as chars,
     // which is exactly correct for ASCII (matches dotcc's UTF-8-in-char* model).
 
-    internal static void WriteByteTo(FILE* f, byte b)
+    internal static bool WriteByteTo(FILE* f, byte b)
     {
         var s = Slot(f);
-        if (s == null) { return; }
+        if (s == null) { return false; }
         // Only file-backed slots carry a Stream; the console kinds have none.
-        if (s.Stream is { } st) { st.WriteByte(b); }
-        else { (s.Kind == FileSlot.K.Err ? Console.Error : Console.Out).Write((char)b); }
+        if (s.Stream is { } st)
+        {
+            // A read-only stream (file opened "r") can't be written — C's fputc/
+            // fwrite return EOF / a short count and set the error indicator rather
+            // than faulting. Mirror that instead of letting Stream.WriteByte throw.
+            if (!st.CanWrite) { errno = EBADF; s.Err = true; return false; }
+            st.WriteByte(b);
+            return true;
+        }
+        (s.Kind == FileSlot.K.Err ? Console.Error : Console.Out).Write((char)b);
+        return true;
     }
 
     internal static int ReadByteFrom(FILE* f)
@@ -148,6 +157,10 @@ public static unsafe partial class Libc
         int r;
         if (s.Stream is { } st)
         {
+            // A write-only stream (file opened "w"/"a") can't be read. C's fgetc
+            // returns EOF there but sets the ERROR indicator (not the EOF one), so
+            // file:read reports (nil, msg, errno) rather than a plain-EOF nil.
+            if (!st.CanRead) { errno = EBADF; s.Err = true; return -1; }
             r = (s.Reader ??= new StreamFileReader(st)).Read(); // shares the scanf pushback
         }
         else
@@ -492,8 +505,16 @@ public static unsafe partial class Libc
         if (size <= 0 || nmemb <= 0) { return 0; }
         var src = (byte*)ptr;
         long total = (long)size * nmemb;
-        for (long i = 0; i < total; i++) { WriteByteTo(stream, src[i]); }
-        return nmemb;
+        // Stop at the first byte that can't be written (e.g. a read-only stream):
+        // C's fwrite returns the count of COMPLETE elements written, and the
+        // partial element is lost. errno / the error indicator are set by
+        // WriteByteTo, so g_write's `numbytes < len` check reports the failure.
+        long written = 0;
+        for (; written < total; written++)
+        {
+            if (!WriteByteTo(stream, src[written])) { break; }
+        }
+        return (int)(written / size);
     }
 
     // ---------------------------------------------------------------------
@@ -598,13 +619,21 @@ public static unsafe partial class Libc
 
         public override int Peek()
         {
-            if (_pushed < 0) { _pushed = _s.ReadByte(); }
+            // A write-only stream (file opened "w"/"a") can't be read — C's fgetc
+            // returns EOF there (and sets the error indicator) rather than faulting,
+            // so report EOF instead of letting Stream.ReadByte throw.
+            if (_pushed < 0)
+            {
+                if (!_s.CanRead) { return -1; }
+                _pushed = _s.ReadByte();
+            }
             return _pushed;
         }
 
         public override int Read()
         {
             if (_pushed >= 0) { int r = _pushed; _pushed = -1; return r; }
+            if (!_s.CanRead) { return -1; }  // write-only stream → EOF, not a throw
             return _s.ReadByte();
         }
     }

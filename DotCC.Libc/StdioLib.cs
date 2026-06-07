@@ -22,10 +22,11 @@ public static unsafe partial class Libc
 {
     /// <summary><c>fputc(c, stream)</c> — write the byte
     /// <c>(unsigned char)<paramref name="c"/></c> to <paramref name="stream"/>;
-    /// return the byte written (as <c>int</c>).</summary>
+    /// return the byte written (as <c>int</c>), or <c>EOF</c> if the write failed
+    /// (e.g. a read-only stream — matches C, which sets the error indicator).</summary>
     public static int fputc(int c, FILE* stream)
     {
-        WriteByteTo(stream, (byte)c);
+        if (!WriteByteTo(stream, (byte)c)) { return -1; }   // EOF
         return c & 0xFF;
     }
 

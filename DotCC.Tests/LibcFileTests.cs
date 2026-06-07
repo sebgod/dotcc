@@ -158,4 +158,48 @@ public sealed unsafe class LibcFileTests
         }
         finally { Free(path); Free(path2); File.Delete(p); File.Delete(p2); }
     }
+
+    [Fact]
+    public void reading_a_write_only_file_returns_EOF_and_sets_ferror_not_a_throw()
+    {
+        // C's fgetc on a write-only stream returns EOF and sets the error
+        // indicator (it must NOT fault) — Lua's file:read relies on this to
+        // return (nil, msg, errno). Before the fix the .NET FileStream threw
+        // NotSupportedException, crashing the program.
+        var p = Path.Combine(Path.GetTempPath(), "dotcc_wo_" + Guid.NewGuid().ToString("N") + ".txt");
+        var path = C(p);
+        try
+        {
+            FILE* w = fopen(path, C("w"));
+            ((nint)w).ShouldNotBe((nint)0);
+            errno = 0;
+            fgetc(w).ShouldBe(-1);          // EOF, not a throw
+            ferror(w).ShouldNotBe(0);       // error indicator set
+            feof(w).ShouldBe(0);            // NOT end-of-file (it's an error)
+            fclose(w);
+        }
+        finally { Free(path); File.Delete(p); }
+    }
+
+    [Fact]
+    public void writing_a_read_only_file_returns_short_count_and_sets_ferror_not_a_throw()
+    {
+        // Symmetric: fwrite/fputc on a read-only stream return a short count / EOF
+        // and set the error indicator, rather than faulting.
+        var p = Path.Combine(Path.GetTempPath(), "dotcc_ro_" + Guid.NewGuid().ToString("N") + ".txt");
+        var path = C(p);
+        try
+        {
+            File.WriteAllText(p, "data");
+            FILE* r = fopen(path, C("r"));
+            ((nint)r).ShouldNotBe((nint)0);
+            byte* buf = stackalloc byte[4] { (byte)'a', (byte)'b', (byte)'c', (byte)'d' };
+            errno = 0;
+            fwrite(buf, 1, 4, r).ShouldBe(0);   // nothing written
+            fputc((byte)'x', r).ShouldBe(-1);   // EOF
+            ferror(r).ShouldNotBe(0);           // error indicator set
+            fclose(r);
+        }
+        finally { Free(path); File.Delete(p); }
+    }
 }
