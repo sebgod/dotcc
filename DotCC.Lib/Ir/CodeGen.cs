@@ -132,8 +132,24 @@ internal sealed class CodeGen
                     }
                 }
                 break;
+            case ExprStmt { Expr: CommaOp co }:
+                // A statement-level comma discards every operand's value — emit one
+                // statement per operand, braced so a braceless nested body (the body
+                // of `while (…) (a, b);`) stays a single statement.
+                sb.Append(pad).Append("{\n");
+                foreach (var item in co.Items) { sb.Append(Pad(ind + 1)).Append(RenderStmtExpr(item)).Append(";\n"); }
+                sb.Append(pad).Append("}\n");
+                break;
             case ExprStmt e:
-                sb.Append(pad).Append(Expr(e.Expr)).Append(";\n");
+                sb.Append(pad).Append(RenderStmtExpr(e.Expr)).Append(";\n");
+                break;
+            case Return { Value: CommaOp co } when co.Items.Count > 1:
+                // Hoist the leading (side-effect) operands as statements, then return
+                // the last — keeps a void leading operand out of any value form.
+                sb.Append(pad).Append("{\n");
+                for (var k = 0; k < co.Items.Count - 1; k++) { sb.Append(Pad(ind + 1)).Append(RenderStmtExpr(co.Items[k])).Append(";\n"); }
+                sb.Append(Pad(ind + 1)).Append($"return {Coerced(co.Items[^1], _currentRet)};\n");
+                sb.Append(pad).Append("}\n");
                 break;
             case Return r:
                 sb.Append(pad).Append(r.Value is null ? "return;" : $"return {Coerced(r.Value, _currentRet)};").Append('\n');
@@ -487,6 +503,8 @@ internal sealed class CodeGen
                 return ($"(Cond.B({Expr(t.Cond)}) ? {Expr(t.Then)} : {Expr(t.Else)})", PPrimary);
             case CommaSeq cs:
                 return (string.Join(", ", cs.Items.Select(it => Sub(it, PAssign))), PComma);
+            case CommaOp co:
+                return (CommaValue(co), PPrimary);
             case Assign a:
                 {
                     var op = a.CompoundOp is { } co ? BinSym(co) : "";
@@ -641,6 +659,68 @@ internal sealed class CodeGen
             sb.Append(DotCC.CSharpEmitter.Id(m.Name)).Append(" = ").Append(Coerced(m.Value, m.FieldType));
         }
         return sb.Append(" }").ToString();
+    }
+
+    // ---- comma operator --------------------------------------------------
+
+    /// <summary>True when a pointer-shaped type can't be a ValueTuple element or a
+    /// <c>Func&lt;&gt;</c> type argument (CS0306) — it must round-trip through
+    /// <c>nint</c> in those forms. Covers raw pointers, function pointers, and a
+    /// decayed array.</summary>
+    private static bool IsPointerType(CType t) => t.Unqualified is CType.Pointer or CType.Func or CType.Array;
+
+    /// <summary>Render a comma operand standing in statement position — for the
+    /// hoisted statement-comma and the leading operands of the delegate form. A
+    /// call / assignment / <c>++</c>/<c>--</c> is already a valid C#
+    /// statement-expression; any other (a discarded value, incl. a <c>(void)x</c>
+    /// the binder re-typed to void) is consumed by a discard so C# accepts it.</summary>
+    private string RenderStmtExpr(CExpr e) =>
+        IsStmtExpr(e) ? Expr(e) : $"_ = {Sub(e, PAssign)}";
+
+    private static bool IsStmtExpr(CExpr e) => e switch
+    {
+        Assign or Call or IndirectCall => true,
+        Unary u => u.Op is UnOp.PreInc or UnOp.PreDec or UnOp.PostInc or UnOp.PostDec,
+        Paren p => IsStmtExpr(p.Inner),
+        _ => false,
+    };
+
+    /// <summary>Render a value-context comma. With no <c>void</c> leading operand
+    /// (and ≤7 operands) a ValueTuple is enough — C# evaluates its elements
+    /// left-to-right and <c>.ItemN</c> picks the last (the comma's value). A
+    /// <c>void</c> leading operand (or an over-long chain) needs the
+    /// immediately-invoked delegate, the only form that both swallows a void
+    /// side effect and stays lazy inside a short-circuit.</summary>
+    private string CommaValue(CommaOp co)
+    {
+        var items = co.Items;
+        var leadingVoid = false;
+        for (var i = 0; i < items.Count - 1; i++)
+        {
+            if (items[i].Type.Unqualified is CType.VoidType) { leadingVoid = true; break; }
+        }
+        return !leadingVoid && items.Count <= 7 ? CommaTuple(items) : CommaDelegate(items);
+    }
+
+    private string CommaTuple(IReadOnlyList<CExpr> items)
+    {
+        // A pointer operand can't be a tuple type argument — cast it to nint for the
+        // tuple; if the VALUE (last) is a pointer, cast .ItemN back to its type.
+        var elems = items.Select(e =>
+            IsPointerType(e.Type) ? $"(nint)({Sub(e, PUnary)})" : Sub(e, PAssign));
+        var pick = $"({string.Join(", ", elems)}).Item{items.Count}";
+        return IsPointerType(items[^1].Type) ? $"(({items[^1].Type.CsType})({pick}))" : $"({pick})";
+    }
+
+    private string CommaDelegate(IReadOnlyList<CExpr> items)
+    {
+        var body = new StringBuilder();
+        for (var i = 0; i < items.Count - 1; i++) { body.Append(RenderStmtExpr(items[i])).Append("; "); }
+        var last = items[^1];
+        // A pointer value can't be a Func<> type argument either — round-trip nint.
+        return IsPointerType(last.Type)
+            ? $"(({last.Type.CsType})((System.Func<nint>)(() => {{ {body}return (nint)({Expr(last)}); }}))())"
+            : $"((System.Func<{last.Type.CsType}>)(() => {{ {body}return {Expr(last)}; }}))()";
     }
 
     private string CallText(Call c)

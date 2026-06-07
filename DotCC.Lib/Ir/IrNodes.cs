@@ -88,8 +88,18 @@ public sealed record Member(CExpr Base, string Field, bool Arrow) : CExpr;
 
 /// <summary>A comma-separated expression sequence used in <c>for</c>-init /
 /// <c>for</c>-update position (<c>i = 0, j = n</c>) — C# accepts the same list
-/// there. (The value-context comma operator is a separate, later concern.)</summary>
+/// there.</summary>
 public sealed record CommaSeq(IReadOnlyList<CExpr> Items) : CExpr;
+
+/// <summary>The C comma operator <c>e1, e2, …, eN</c> in value context: every
+/// operand is evaluated left-to-right and all but the last are discarded; the
+/// value and type are the last operand's. C# has no comma operator, so codegen
+/// picks a lowering by position: a statement-level comma becomes one statement
+/// per operand; a value-context comma becomes a left-to-right ValueTuple whose
+/// <c>.ItemN</c> picks the last (or, when a leading operand is <c>void</c> — a
+/// void call or a <c>(void)x</c> discard — an immediately-invoked delegate, the
+/// only form that keeps the side effects lazy inside a short-circuit).</summary>
+public sealed record CommaOp(IReadOnlyList<CExpr> Items) : CExpr;
 
 /// <summary><c>sizeof</c> — of a type (<c>sizeof(int)</c>) or, when synthesized
 /// from <c>sizeof expr</c>, of the operand's type. Codegen prints C#'s
