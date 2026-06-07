@@ -74,21 +74,31 @@ public abstract record CType
         public override int SizeOf => 1;
     }
 
-    /// <summary>A pointer. Lowers to the pointee's C# type plus <c>*</c>.</summary>
+    /// <summary>A pointer. Lowers to the pointee's C# type plus <c>*</c> — except a
+    /// pointer-TO-array, which (like the array itself) lowers to one flat pointer to
+    /// the innermost scalar (<c>int (*p)[3]</c> → <c>int*</c>, a row pointer that
+    /// subscripts with the array's stride).</summary>
     public sealed record Pointer(CType Pointee) : CType
     {
-        public override string CsType => Pointee.CsType + "*";
+        public override string CsType => Pointee is Array ? Pointee.CsType : Pointee.CsType + "*";
         public override int SizeOf => 8;
         public override bool IsInteger => false;
     }
 
-    /// <summary>A C array <c>T[N]</c>. Lowered to a C# pointer at use sites (it
-    /// decays), so <see cref="CsType"/> is the pointer form, but <see cref="SizeOf"/>
-    /// is the true aggregate size <c>N * sizeof(T)</c>.</summary>
+    /// <summary>A C array <c>T[N]</c> (the element may itself be an <see cref="Array"/>
+    /// for a multi-dimensional array). It decays to a pointer at use sites, and a
+    /// multi-dim array is stored as one flat buffer, so <see cref="CsType"/> collapses
+    /// any nesting to a single pointer to the innermost scalar (<c>int[2][3]</c> →
+    /// <c>int*</c>); <see cref="SizeOf"/> is the true aggregate size <c>N *
+    /// sizeof(element)</c> (recursing through the dimensions).</summary>
     public sealed record Array(CType Element, int? Count) : CType
     {
-        public override string CsType => Element.CsType + "*";
+        public override string CsType => FlatElement.CsType + "*";
         public override int SizeOf => Element.SizeOf * (Count ?? 0);
+
+        /// <summary>The innermost non-array element (peels all array dimensions) —
+        /// the flat scalar/struct the storage holds.</summary>
+        public CType FlatElement { get { var e = Element; while (e is Array a) { e = a.Element; } return e; } }
     }
 
     /// <summary>A function type. Not a value type in C; carried so a function

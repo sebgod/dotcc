@@ -564,10 +564,9 @@ internal sealed class CodeGen
                 // cast so the usual-arithmetic reconcile treats a sizeof-bearing
                 // expression as unsigned (a bare int would be CS0034 against a
                 // `ulong`). An array lowered to a pointer, so C# `sizeof` would
-                // measure the pointer — emit the true C size `count * sizeof(elem)`.
-                return so.Of is CType.Array { Count: { } n } arr
-                    ? ($"((ulong)({n} * sizeof({arr.Element.CsType})))", PPrimary)
-                    : ($"((ulong)sizeof({so.Of.CsType}))", PPrimary);
+                // measure the pointer — emit the true C size (recursing through the
+                // dimensions of a multi-dim array).
+                return ($"((ulong)({SizeofText(so.Of)}))", PPrimary);
             case OffsetOf o:
             {
                 // .NET has no offsetof operator, and the address-through-a-null
@@ -584,6 +583,14 @@ internal sealed class CodeGen
             }
             case Index ix:
             {
+                // A PARTIAL subscript of a multi-dimensional array — the result is
+                // still an array — decays to a flat row pointer: `base + idx*stride`,
+                // where stride is the number of flat scalar elements per row. A FULL
+                // subscript (scalar/struct result) indexes the flat pointer directly.
+                if (ix.Type.Unqualified is CType.Array)
+                {
+                    return ($"{Sub(ix.Base, PAdd)} + {Sub(ix.Idx, PMul)} * {FlatCount(ix.Type)}", PAdd);
+                }
                 var t = $"{Sub(ix.Base, PPostfix)}[{Expr(ix.Idx)}]";
                 return QualifiedRead(ix, t, PPostfix);
             }
@@ -688,6 +695,9 @@ internal sealed class CodeGen
             // BareLValue so `&` of a volatile lvalue takes the address, not the
             // address of a Volatile.Read(...) call.
             case UnOp.AddrOf: return ($"&{BareLValue(u.Operand)}", PUnary);
+            // *p where p is a pointer-TO-array: the pointed-to array decays right
+            // back to the (same) flat row pointer, so the deref is a no-op here.
+            case UnOp.Deref when u.Type.Unqualified is CType.Array: return (Sub(u.Operand, PUnary), PUnary);
             case UnOp.Deref: return QualifiedRead(u, $"*{Sub(u.Operand, PUnary)}", PUnary);
             case UnOp.PreInc: return ($"++{Sub(u.Operand, PUnary)}", PUnary);
             case UnOp.PreDec: return ($"--{Sub(u.Operand, PUnary)}", PUnary);
@@ -1074,6 +1084,18 @@ internal sealed class CodeGen
         BinOp.LogAnd => "&&", BinOp.LogOr => "||",
         _ => throw new IrUnsupportedException("binop " + op),
     };
+
+    /// <summary>The C# <c>sizeof</c> text for a type, recursing through array
+    /// dimensions (<c>int[2][3]</c> → <c>(2 * (3 * sizeof(int)))</c>). A struct
+    /// element bottoms out at C#'s <c>sizeof(T)</c> so the real aligned layout is
+    /// used; a scalar/pointer likewise.</summary>
+    private static string SizeofText(CType t) => t.Unqualified is CType.Array { Count: { } n } a
+        ? $"({n} * {SizeofText(a.Element)})"
+        : $"sizeof({t.CsType})";
+
+    /// <summary>The number of flat (innermost-scalar) elements an array type holds —
+    /// the stride, in elements, of one row when a multi-dim array is flattened.</summary>
+    private static int FlatCount(CType t) => t.Unqualified is CType.Array a ? (a.Count ?? 0) * FlatCount(a.Element) : 1;
 
     private static string Pad(int ind) => new string(' ', ind * 4);
 }
