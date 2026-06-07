@@ -1326,6 +1326,8 @@ internal sealed partial class IrBuilder
             // `sizeof expr` — the operand isn't evaluated, only its type measured.
             C.SizeofExpr s => new SizeOfExpr(BuildExpr(s.Arg1).Type) { Type = CType.SizeT },
             C.OffsetofExpr o => BuildOffsetof(o),
+            // `va_arg(ap, T)` — special syntax (its 2nd operand is a type).
+            C.VaArgExpr v => new VaArgGet(BuildExpr(v.Arg2), ResolveType(v.Arg4)) { Type = ResolveType(v.Arg4) },
             C.Call c => BuildCall(c.Arg0, c.Arg2),
             C.CallNoArgs c => BuildCall(c.Arg0, null),
             // C99/C23 compound literals — (T){…} struct/scalar, (T[]){…} array,
