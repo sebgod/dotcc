@@ -88,11 +88,15 @@ internal static class Program
             Description = "Set the target name(s) of the emitted dependency rule. Repeatable. Defaults to the output object.",
             AllowMultipleArgumentsPerToken = false,
         };
+        var irOpt = new Option<bool>("--ir")
+        {
+            Description = "Use the typed-IR backend (parse → typed IR → C#) instead of the legacy syntax-directed emitter. Experimental: covers a growing subset of C while the migration proceeds.",
+        };
 
         var root = new RootCommand("dotcc — a C compiler frontend that transpiles to .NET 10 / C# 14.")
         {
             inputArg, outOpt, emitOpt, preprocessOpt, includeOpt, defineOpt, compileOpt, sharedOpt, stdOpt,
-            pedanticOpt, pedanticErrorsOpt, wconversionOpt, mdOpt, mmdOpt, mfOpt, mtOpt,
+            pedanticOpt, pedanticErrorsOpt, wconversionOpt, mdOpt, mmdOpt, mfOpt, mtOpt, irOpt,
         };
         // Accept-and-ignore unknown flags (-Wall, -O2, -g, -f*, -m*, …) instead
         // of erroring out, so dotcc survives being driven by ./configure / make,
@@ -127,6 +131,7 @@ internal static class Program
             var mmdFlag = parse.GetValue(mmdOpt);
             var depFile = parse.GetValue(mfOpt);
             var depTargets = parse.GetValue(mtOpt) ?? Array.Empty<string>();
+            var irFlag = parse.GetValue(irOpt);
 
             if (inputs.Length == 0)
             {
@@ -164,7 +169,7 @@ internal static class Program
             }
 
             return Run(inputs, output, emit, preprocessOnly, includes, defines, sharedFlag, dialect, pedanticFlag, pedanticErrorsFlag,
-                       mdFlag, mmdFlag, depFile, depTargets, wconversionFlag);
+                       mdFlag, mmdFlag, depFile, depTargets, wconversionFlag, irFlag);
         });
 
         return root.Parse(args).Invoke();
@@ -187,7 +192,8 @@ internal static class Program
         bool genDepsNoSystem,
         string? depFile,
         string[] depTargets,
-        bool warnConversion = false)
+        bool warnConversion = false,
+        bool useIr = false)
     {
         if (preprocessOnly)
         {
@@ -253,7 +259,8 @@ internal static class Program
                     dialect: dialect,
                     pedantic: pedantic,
                     pedanticErrors: pedanticErrors,
-                    warnConversion: warnConversion);
+                    warnConversion: warnConversion,
+                    useIr: useIr);
         }
         catch (CompileException ex)
         {

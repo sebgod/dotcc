@@ -636,6 +636,27 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     }
 
     /// <summary>
+    /// Encode one or more adjacent C string-literal segments (each the RAW
+    /// quoted lexeme, e.g. <c>"a\n"</c>) to the lowered <c>Libc.L(…)</c>
+    /// expression — decoding escapes per-segment and concatenating, exactly as
+    /// <see cref="Visit(C.Str)"/> does. Exposed so the IR codegen
+    /// (<see cref="DotCC.Ir.CodeGen"/>) reuses this escape logic rather than
+    /// reimplementing it — single source of truth for string lowering.
+    /// </summary>
+    internal static string EncodeStringLiteral(IReadOnlyList<string> rawQuotedSegments)
+    {
+        var items = new List<StrItem>();
+        foreach (var seg in rawQuotedSegments) { DecodeCStringBody(StripStrQuotes(seg), items); }
+        if (items.Exists(it => it.IsByte && it.Value > 0x7F))
+        {
+            var (arr, _) = EmitByteArray(items);
+            return $"Libc.L({arr})";
+        }
+        var (escaped, _) = EmitU8(items);
+        return $"Libc.L(\"{escaped}\\0\"u8)";
+    }
+
+    /// <summary>
     /// Strip ALL redundant outer paren layers (<c>((x))</c> → <c>x</c>). Iterating
     /// matters for a macro-parenthesized assignment used as a statement-expression:
     /// <c>step()</c> = <c>(i = i+1)</c> lowers to <c>((i = (i+1)))</c> (the assign

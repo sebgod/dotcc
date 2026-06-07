@@ -196,7 +196,8 @@ public static class Compiler
         bool pedantic = false,
         bool pedanticErrors = false,
         bool asObject = false,
-        bool warnConversion = false)
+        bool warnConversion = false,
+        bool useIr = false)
     {
         var includeMap = BuildIncludeMap(inputPaths, includeDirs);
         var lexerTable = C.BuildLexer();
@@ -278,6 +279,39 @@ public static class Compiler
                 throw new CompileException($"parse failed in {Path.GetFileName(unitPath)}: {result}");
             }
             return result;
+        }
+
+        // ---- Typed-IR backend (--ir) -----------------------------------
+        // The strangler path: build a typed IR from the parse tree (via the
+        // identity visitor) and lower it to C#, instead of the bottom-up
+        // string emitter below. Grown incrementally against the behavioral
+        // fixture suite; the legacy two-pass stays the default until parity.
+        if (useIr)
+        {
+            var irBuilder = new Ir.IrBuilder();
+            var irParser = C.BuildParser(Ir.ParseTreeIdentityVisitor.Instance);
+            foreach (var unitPath in inputPaths)
+            {
+                var root = ParseUnit(unitPath, irParser, quiet: false);
+                irBuilder.AddUnit(root, Path.GetFileName(unitPath));
+            }
+            var irErrors = irBuilder.Diagnostics.Where(d => d.Severity == Ir.Severity.Error).ToList();
+            if (irErrors.Count > 0)
+            {
+                throw new CompileException(string.Join("\n", irErrors.Select(d => "error: " + d)));
+            }
+            foreach (var w in irBuilder.Diagnostics.Where(d => d.Severity == Ir.Severity.Warning))
+            {
+                Console.Error.WriteLine("dotcc: warning: " + w);
+            }
+            var cg = Ir.CodeGen.Run(irBuilder);
+            if (!asObject && !libraryMode && cg.MainArity < 0)
+            {
+                throw new CompileException("no `main` function defined in any translation unit.");
+            }
+            return asObject
+                ? SerializeFragment(cg.Functions, new Dictionary<string, string>(), cg.Aliases, cg.Globals, cg.MainArity)
+                : BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, fileBased, libraryMode, cg.Exports);
         }
 
         // Pass 1 — analysis. Parse every unit with a throwaway emitter purely
