@@ -56,7 +56,7 @@ internal sealed class CodeGen
         var globals = new StringBuilder();
         foreach (var g in unit.Globals)
         {
-            var init = g.Init is { } i ? " = " + cg.Expr(i) : "";
+            var init = g.Init is { } i ? " = " + cg.Coerced(i, g.Sym.Type) : "";
             globals.Append($"    public static unsafe {g.Sym.Type.CsType} {g.Sym.CsName}{init};\n");
         }
 
@@ -93,10 +93,11 @@ internal sealed class CodeGen
 
     private string Func(FuncDef fn)
     {
-        var ret = fn.Sym.Type is CType.Func f ? f.Return.CsType : "int";
+        var retTy = fn.Sym.Type is CType.Func f ? f.Return : CType.Int;
+        _currentRet = retTy;
         var ps = string.Join(", ", fn.Params.Select(p => $"{p.Type.CsType} {p.CsName}"));
         var sb = new StringBuilder();
-        sb.Append($"static unsafe {ret} {fn.Sym.CsName}({ps})\n");
+        sb.Append($"static unsafe {retTy.CsType} {fn.Sym.CsName}({ps})\n");
         Stmt(sb, fn.Body, 0);
         return sb.ToString();
     }
@@ -135,7 +136,7 @@ internal sealed class CodeGen
                 sb.Append(pad).Append(Expr(e.Expr)).Append(";\n");
                 break;
             case Return r:
-                sb.Append(pad).Append(r.Value is null ? "return;" : $"return {Expr(r.Value)};").Append('\n');
+                sb.Append(pad).Append(r.Value is null ? "return;" : $"return {Coerced(r.Value, _currentRet)};").Append('\n');
                 break;
             case Break: sb.Append(pad).Append("break;\n"); break;
             case Continue: sb.Append(pad).Append("continue;\n"); break;
@@ -256,6 +257,131 @@ internal sealed class CodeGen
         sb.Append(pad).Append("}\n");
     }
 
+    // ---- store coercions (decl init / assignment / return / global) -------
+    // C performs an implicit integer/pointer conversion at a store even when it
+    // narrows or changes signedness; C# requires the cast explicitly (CS0266).
+    // Mirrors the legacy CoerceStore (validated against the MSVC/gcc oracles):
+    // insert `(target)(value)` exactly when C# would NOT convert implicitly.
+
+    /// <summary>The lowered C# return type of the function currently being
+    /// rendered — the sink type for <c>return</c> coercion. Set per function in
+    /// <see cref="Func"/> (CodeGen renders functions one at a time).</summary>
+    private CType _currentRet = CType.Int;
+
+    /// <summary>Render <paramref name="value"/> for storage into a
+    /// <paramref name="target"/>-typed sink, inserting any cast C# needs.</summary>
+    private string Coerced(CExpr value, CType target) =>
+        TryCoerceCast(value, target, out var t) ? t : Expr(value);
+
+    /// <summary>True (with the coerced text) when storing <paramref name="value"/>
+    /// into <paramref name="target"/> needs an explicit C# cast C performs
+    /// implicitly; false when the value stores as-is.</summary>
+    private bool TryCoerceCast(CExpr value, CType target, out string text)
+    {
+        text = "";
+        var tgt = target.Unqualified;
+        var src = value.Type.Unqualified;
+
+        // C's null pointer constant — an integer constant 0 — becomes C# `null`
+        // where a POINTER is expected (C# won't convert int 0 to a pointer).
+        if (tgt is CType.Pointer && TryConstInt(value, out var z) && z == 0)
+        {
+            text = "null";
+            return true;
+        }
+        // void* → T* (e.g. malloc's result): C# makes T*→void* implicit but requires
+        // the reverse cast explicitly. Skip void*→void* (same type).
+        if (tgt is CType.Pointer && src is CType.Pointer { Pointee: CType.VoidType }
+            && tgt.CsType != src.CsType)
+        {
+            text = $"({tgt.CsType})({Expr(value)})";
+            return true;
+        }
+        // Integer narrowing / sign change C# won't do implicitly.
+        if (src is CType.Prim { Integer: true } && tgt is CType.Prim { Integer: true })
+        {
+            var s = src.CsType;
+            var t2 = tgt.CsType;
+            if (s == t2 || !IsIntegerCs(s) || !IsIntegerCs(t2)) { return false; }
+            // A bare int constant that fits the target needs no cast (C#'s implicit
+            // constant-expression conversion applies, but only from a literal int).
+            if (value is LitInt { Value: { } cv } && s == "int" && ConstFitsTarget(cv, t2))
+            {
+                return false;
+            }
+            if (CsImplicitInt(s, t2)) { return false; }   // C# widens for free
+            var cast = $"({t2})({Expr(value)})";
+            // An out-of-range CONSTANT cast is CS0221 unless wrapped in unchecked.
+            if (TryConstInt(value, out var k) && !ConstFitsTarget(k, t2))
+            {
+                cast = $"unchecked({cast})";
+            }
+            text = cast;
+            return true;
+        }
+        return false;
+    }
+
+    private static bool IsIntegerCs(string t) => IntWidth(t) is not null;
+
+    // Byte width of a lowered C# integer type (LP64 — long/pointer = 8).
+    private static int? IntWidth(string t) => t switch
+    {
+        "byte" or "sbyte" => 1,
+        "short" or "ushort" => 2,
+        "int" or "uint" => 4,
+        "long" or "ulong" or "nint" or "nuint" => 8,
+        _ => null,
+    };
+
+    // Whether an integer CONSTANT fits the target type's range (C#'s implicit
+    // constant-expression conversion accepts these with no cast).
+    private static bool ConstFitsTarget(long v, string tgt) => tgt switch
+    {
+        "byte" => v >= 0 && v <= 255,
+        "sbyte" => v >= -128 && v <= 127,
+        "short" => v >= -32768 && v <= 32767,
+        "ushort" => v >= 0 && v <= 65535,
+        "int" or "nint" => v >= int.MinValue && v <= int.MaxValue,
+        "long" => true,
+        "uint" => v >= 0 && v <= uint.MaxValue,
+        "ulong" or "nuint" => v >= 0,
+        _ => false,
+    };
+
+    // True when C# IMPLICITLY converts integer `src` to `tgt`: an unsigned source
+    // fits any strictly-wider type; a signed source fits only a strictly-wider
+    // SIGNED type. Equal types are handled by the caller. Conservative — never
+    // claims a conversion that doesn't exist (a false "no" is a harmless cast).
+    private static bool CsImplicitInt(string src, string tgt)
+    {
+        if (IntWidth(src) is not int sw || IntWidth(tgt) is not int tw) { return false; }
+        var srcUnsigned = src is "byte" or "ushort" or "uint" or "ulong" or "nuint";
+        var tgtUnsigned = tgt is "byte" or "ushort" or "uint" or "ulong" or "nuint";
+        return srcUnsigned ? tw > sw : (!tgtUnsigned && tw > sw);
+    }
+
+    // Fold a simple integer-constant expression (literal, parens, unary +/-/~) so a
+    // store coercion can range-check it for the unchecked / null-pointer rules.
+    private static bool TryConstInt(CExpr e, out long v)
+    {
+        switch (e)
+        {
+            case LitInt { Value: { } lv }: v = lv; return true;
+            case Paren p: return TryConstInt(p.Inner, out v);
+            case Unary u when TryConstInt(u.Operand, out var ov):
+                switch (u.Op)
+                {
+                    case UnOp.Neg: v = -ov; return true;
+                    case UnOp.Plus: v = ov; return true;
+                    case UnOp.BitNot: v = ~ov; return true;
+                }
+                break;
+        }
+        v = 0;
+        return false;
+    }
+
     /// <summary>Render a declaration in statement position. When every declarator
     /// shares a C# type it's one C# declaration (<c>int a = 0, b = 1;</c>); when
     /// the per-declarator types differ (C's <c>int *a, b;</c> — a is a pointer, b
@@ -272,7 +398,7 @@ internal sealed class CodeGen
         }
         foreach (var e in d.Decls)
         {
-            var init = e.Init is { } i ? Expr(i) : "default";
+            var init = e.Init is { } i ? Coerced(i, e.Sym.Type) : "default";
             sb.Append(pad).Append($"{e.Sym.Type.CsType} {e.Sym.CsName} = {init};\n");
         }
     }
@@ -283,7 +409,7 @@ internal sealed class CodeGen
     {
         var type = d.Decls.Count > 0 ? d.Decls[0].Sym.Type.CsType : "int";
         var parts = d.Decls.Select(e => e.Init is { } init
-            ? $"{e.Sym.CsName} = {Expr(init)}"
+            ? $"{e.Sym.CsName} = {Coerced(init, e.Sym.Type)}"
             : $"{e.Sym.CsName} = default");
         return $"{type} {string.Join(", ", parts)}";
     }
@@ -353,8 +479,14 @@ internal sealed class CodeGen
             case Assign a:
                 {
                     var op = a.CompoundOp is { } co ? BinSym(co) : "";
-                    // Right-associative: value at PAssign keeps `a = b = c` flat.
-                    return ($"{Sub(a.Target, PUnary)} {op}= {Sub(a.Value, PAssign)}", PAssign);
+                    // Right-associative: value at PAssign keeps `a = b = c` flat. A
+                    // plain `=` coerces the value to the target type (C narrowing /
+                    // sign / pointer conversions C# requires explicitly); a compound
+                    // `+=` already carries C#'s implicit narrowing back to the target.
+                    var rhs = a.CompoundOp is null && TryCoerceCast(a.Value, a.Target.Type, out var ct)
+                        ? ct
+                        : Sub(a.Value, PAssign);
+                    return ($"{Sub(a.Target, PUnary)} {op}= {rhs}", PAssign);
                 }
             case Unary u: return RenderUnary(u);
             case Binary b: return RenderBinary(b);
