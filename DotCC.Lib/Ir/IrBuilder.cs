@@ -347,6 +347,19 @@ internal sealed partial class IrBuilder
                 case C.StructFlexArrMember sm:
                     fields.Add(new StructField(Tok(sm.Arg1), new CType.Array(ResolveType(sm.Arg0), 1)));
                     break;
+                // `T name : W;` — a bit-field. Codegen lowers it to a backing field
+                // + a masked accessor property (value semantics; bit packing is
+                // implementation-defined, so the struct's layout/sizeof needn't match).
+                case C.StructBitField sm:
+                {
+                    var w = ConstEval(BuildExpr(sm.Arg3)) ?? throw new IrUnsupportedException("non-constant bit-field width");
+                    fields.Add(new StructField(Tok(sm.Arg1), ResolveType(sm.Arg0), (int)w));
+                    break;
+                }
+                // `T : W;` — an anonymous bit-field (padding). No accessible member;
+                // dotcc's value-only bit-field model drops it.
+                case C.StructAnonBitField:
+                    break;
                 default: throw new IrUnsupportedException(TypeName(m.Content));
             }
         }

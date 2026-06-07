@@ -246,8 +246,11 @@ public sealed record LocalDecl(Symbol Sym, CExpr? Init);
 /// builder's struct table so member access resolves a field's type.</summary>
 public sealed record StructTypeDef(string Name, IReadOnlyList<StructField> Fields, bool IsUnion);
 
-/// <summary>One field of a <see cref="StructTypeDef"/>.</summary>
-public readonly record struct StructField(string Name, CType Type);
+/// <summary>One field of a <see cref="StructTypeDef"/>. <see cref="BitWidth"/> is
+/// 0 for a normal field, or the declared width of a bit-field (lowered to a
+/// backing field + a masked/sign-extended accessor property — value semantics,
+/// since C bit packing is implementation-defined).</summary>
+public readonly record struct StructField(string Name, CType Type, int BitWidth = 0);
 
 /// <summary>A function parameter (or function-pointer parameter): its type and
 /// name. Used while building signatures — a named record rather than a loose
