@@ -306,7 +306,7 @@ internal sealed partial class IrBuilder
     private void BuildStructDef(string? tag, Item memberList, string? alias, bool isUnion)
     {
         var canonical = tag ?? alias ?? throw new IrUnsupportedException("struct with neither tag nor typedef name");
-        var fields = BuildStructFields(memberList);
+        var fields = BuildStructFields(memberList, canonical);
         if (_emittedTypes.Add(canonical))
         {
             _structFields[canonical] = fields;
@@ -316,10 +316,18 @@ internal sealed partial class IrBuilder
         if (alias is not null) { _typedefs[alias] = new CType.Named(canonical); }
     }
 
-    /// <summary>Parse a struct/union member list into (field, type) pairs. Scalar
-    /// and pointer members are supported; array / bit-field / anonymous members
-    /// are deferred (raise <see cref="IrUnsupportedException"/>).</summary>
-    private List<StructField> BuildStructFields(Item memberList)
+    /// <summary>Promoted (anonymous-aggregate) field map: per owning struct/union,
+    /// each promoted inner field name → (the hidden container field, the nested
+    /// aggregate's type name). A C11 anonymous <c>struct {…};</c> / <c>union {…};</c>
+    /// member lifts its fields into the parent — dotcc keeps them in a generated
+    /// nested type and rewrites <c>v.i</c> to <c>v.hidden.i</c> at access time.</summary>
+    private readonly Dictionary<string, Dictionary<string, (string Hidden, string Nested)>> _promoted = new(StringComparer.Ordinal);
+
+    /// <summary>Parse a struct/union member list into <see cref="StructField"/>s for
+    /// the <paramref name="owner"/> aggregate. Scalar/pointer, array (incl.
+    /// multi-dim / flexible / non-primitive), bit-field, and C11 anonymous
+    /// struct/union members are supported.</summary>
+    private List<StructField> BuildStructFields(Item memberList, string owner)
     {
         var fields = new List<StructField>();
         void Member(Item m)
@@ -331,6 +339,11 @@ internal sealed partial class IrBuilder
                 case C.StructMemberList sm:
                     WalkDeclList(sm.Arg0, sm.Arg1, (name, _, type) => fields.Add(new StructField(name, type)));
                     break;
+                // C11 anonymous struct/union member — its fields are promoted into
+                // the parent. Held in a generated nested aggregate + a hidden field;
+                // each inner name is recorded so `parent.inner` routes through it.
+                case C.AnonStructMember am: AddAnonMember(am.Arg3, owner, fields, isUnion: false); break;
+                case C.AnonUnionMember am: AddAnonMember(am.Arg3, owner, fields, isUnion: true); break;
                 // `T name[N]…;` — a fixed-size array member (codegen: a `fixed`
                 // buffer for a primitive element, an [InlineArray] wrapper for a
                 // non-primitive one). Multi-dimensional bounds give a nested array
@@ -365,6 +378,25 @@ internal sealed partial class IrBuilder
         }
         Member(memberList);
         return fields;
+    }
+
+    /// <summary>Add a C11 anonymous struct/union member: build it as a generated
+    /// nested aggregate type, add a hidden container field to the parent, and record
+    /// each inner field as promoted (so <c>parent.inner</c> rewrites to
+    /// <c>parent.hidden.inner</c> at access time, keeping the union's overlap /
+    /// the struct's sequential layout).</summary>
+    private void AddAnonMember(Item innerMemberList, string owner, List<StructField> parentFields, bool isUnion)
+    {
+        var nested = $"__Anon{_anonAggrSeq++}";
+        var innerFields = BuildStructFields(innerMemberList, nested);
+        _structFields[nested] = innerFields;
+        Types.Add(new StructTypeDef(nested, innerFields, isUnion));
+
+        var hidden = "__anon_" + nested;
+        parentFields.Add(new StructField(hidden, new CType.Named(nested)));
+
+        if (!_promoted.TryGetValue(owner, out var pm)) { _promoted[owner] = pm = new(StringComparer.Ordinal); }
+        foreach (var f in innerFields) { pm[f.Name] = (hidden, nested); }
     }
 
     /// <summary>The CType of <paramref name="field"/> read off the struct/union
@@ -450,7 +482,7 @@ internal sealed partial class IrBuilder
         var name = $"__Anon{_anonAggrSeq++}";
         var named = new CType.Named(name);
         _anonAggregates[pos] = named;
-        var fields = BuildStructFields(memberListItem);
+        var fields = BuildStructFields(memberListItem, name);
         _structFields[name] = fields;
         Types.Add(new StructTypeDef(name, fields, isUnion));
         return named;
@@ -1212,11 +1244,31 @@ internal sealed partial class IrBuilder
         return new Index(base_, idx) { Type = elem, IsLValue = true };
     }
 
-    private CExpr BuildMember(Item baseItem, Item fieldItem, bool arrow)
+    private CExpr BuildMember(Item baseItem, Item fieldItem, bool arrow) =>
+        BuildMemberAccess(BuildExpr(baseItem), Tok(fieldItem), arrow);
+
+    /// <summary>Build a member access, routing a promoted (anonymous-aggregate)
+    /// field through its hidden container: <c>v.i</c> on an aggregate whose <c>i</c>
+    /// came from an anonymous <c>struct/union {…};</c> becomes <c>v.hidden.i</c>.
+    /// Recurses so a field promoted through several nesting levels still resolves.</summary>
+    private CExpr BuildMemberAccess(CExpr base_, string field, bool arrow)
     {
-        var base_ = BuildExpr(baseItem);
-        var field = Tok(fieldItem);
+        if (StructCanonical(base_.Type) is { } canonical
+            && _promoted.TryGetValue(canonical, out var pm)
+            && pm.TryGetValue(field, out var p))
+        {
+            var hidden = new Member(base_, p.Hidden, arrow) { Type = new CType.Named(p.Nested), IsLValue = true };
+            return BuildMemberAccess(hidden, field, arrow: false);
+        }
         return new Member(base_, field, arrow) { Type = MemberType(base_, field), IsLValue = true };
+    }
+
+    /// <summary>The canonical struct/union name an expression's type names (pointer
+    /// levels peeled), or null if it isn't an aggregate.</summary>
+    private static string? StructCanonical(CType t)
+    {
+        while (t is CType.Pointer p) { t = p.Pointee; }
+        return (t.Unqualified as CType.Named)?.Name;
     }
 
     private CExpr BuildCast(C.Cast c)
