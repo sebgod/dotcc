@@ -519,6 +519,10 @@ internal sealed class IrBuilder
         return new Block(stmts);
     }
 
+    /// <summary>A statement that emits nothing (a hoisted local type definition,
+    /// a bare <c>;</c>). An empty block is dropped wholesale by codegen.</summary>
+    private static CStmt EmptyStmt(SrcPos pos) => new Block(System.Array.Empty<CStmt>()) { Pos = pos };
+
     private void FlattenStmts(Item it, Action<Item> onStmt)
     {
         switch (it.Content)
@@ -539,6 +543,13 @@ internal sealed class IrBuilder
             case C.StmtDecl d: return BuildDeclStmt(d.Arg0) with { Pos = pos };
             case C.StmtStaticDecl s: return BuildStmtStaticDecl(s) with { Pos = pos };
             case C.StmtStaticStructInit s: return BuildStmtStaticStructInit(s) with { Pos = pos };
+            // Block-scope aggregate TYPE definitions (`struct cD { … };` inside a
+            // function body — the block-scope enum forms are handled below). A
+            // type has no storage, so C allows this; dotcc hoists the definition
+            // into the top-level type section (deduped by tag, exactly as a
+            // file-scope definition) and the statement emits nothing.
+            case C.StmtStructDef s: BuildStructDef(Tok(s.Arg1), s.Arg3, null, isUnion: false); return EmptyStmt(pos);
+            case C.StmtUnionDef s: BuildStructDef(Tok(s.Arg1), s.Arg3, null, isUnion: true); return EmptyStmt(pos);
             case C.StmtExpr e: return new ExprStmt(BuildExpr(e.Arg0)) { Pos = pos };
             case C.StmtEmpty: return new Block(System.Array.Empty<CStmt>()) { Pos = pos };
             case C.StmtIf s:
