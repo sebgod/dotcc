@@ -1241,10 +1241,20 @@ internal sealed class IrBuilder
         }
 
         // Indirect call through a computed fn-ptr expression: `(*fp)(x)`,
-        // `tbl[i](x)`, `s.fn(x)`. `*fp` is a C no-op on a function pointer (C#
-        // calls it directly and rejects the deref), so peel a leading deref.
+        // `tbl[i](x)`, `s.fn(x)`. Dereferencing a function pointer is a C no-op
+        // that decays straight back to the pointer; C# calls fn-ptrs directly
+        // and rejects `*fp` (CS0193). Peel redundant parens, then any leading
+        // deref whose operand is itself a function pointer — repeatedly, so
+        // `(*(e.op))(x)` and the parenthesised `(*f)(x)` forms both reduce. A
+        // deref of a pointer-TO-fn-pointer is preserved: C# needs it to reach
+        // the callable value.
         var callee = BuildExpr(calleeItem);
-        if (callee is Unary { Op: UnOp.Deref } u) { callee = u.Operand; }
+        while (true)
+        {
+            if (callee is Paren pc) { callee = pc.Inner; continue; }
+            if (callee is Unary { Op: UnOp.Deref } u && IsFuncPtr(u.Operand.Type)) { callee = u.Operand; continue; }
+            break;
+        }
         var rty = callee.Type switch
         {
             CType.Func f2 => f2.Return,
@@ -1253,6 +1263,13 @@ internal sealed class IrBuilder
         };
         return new IndirectCall(callee, args) { Type = rty };
     }
+
+    /// <summary>True when <paramref name="t"/> is a function pointer (or a bare
+    /// function type) — the operand of a no-op call-site deref. Typedefs already
+    /// resolve to their underlying type at <c>ResolveType</c> time, so a plain
+    /// structural check on the unqualified type suffices.</summary>
+    private static bool IsFuncPtr(CType t) =>
+        t.Unqualified is CType.Pointer { Pointee: CType.Func } or CType.Func;
 
     private bool TryCalleeName(Item it, out string name)
     {
