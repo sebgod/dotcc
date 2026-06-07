@@ -596,6 +596,7 @@ internal sealed class CodeGen
             case StackArray sa:
                 return ($"stackalloc {sa.Element.CsType}[]{{ {string.Join(", ", sa.Elems.Select(Expr))} }}", PPrimary);
             case DefaultLit: return ($"default({e.Type.CsType})", PPrimary);
+            case PinnedArray pa: return (PinnedArrayText(pa), PPrimary);
             case Call c: return (CallText(c), PPostfix);
             case CondExpr t:
                 // Wrapped (atomic): C-truthy condition, arms isolated by `?`/`:`.
@@ -826,6 +827,36 @@ internal sealed class CodeGen
         CondExpr t => IsConstExpr(t.Cond) && IsConstExpr(t.Then) && IsConstExpr(t.Else),
         _ => false,
     };
+
+    /// <summary>Render a pinned global/static array's backing store. A scalar /
+    /// struct element uses the generic <c>GlobalArrayFrom&lt;T&gt;</c> /
+    /// <c>GlobalArrayZeroed&lt;T&gt;</c>; a pointer element (a C# generic type
+    /// argument can't be a pointer — CS0306) round-trips through a pinned
+    /// <c>nint[]</c> reinterpreted as <c>T**</c>; a function-pointer element uses
+    /// the non-generic <c>PinFnPtrArray</c> (delegate* can't be a type argument
+    /// either).</summary>
+    private string PinnedArrayText(PinnedArray pa)
+    {
+        var elemCs = pa.Element.CsType;
+        if (pa.Elems is null)
+        {
+            var count = pa.Count is { } c ? Expr(c) : "0";
+            return pa.Element.Unqualified is CType.Pointer
+                ? $"({elemCs}*)Libc.GlobalArrayZeroed<nint>({count})"
+                : $"Libc.GlobalArrayZeroed<{elemCs}>({count})";
+        }
+        if (pa.Element.Unqualified is CType.Func)
+        {
+            return $"({elemCs}*)Libc.PinFnPtrArray(new {elemCs}[]{{ {string.Join(", ", pa.Elems.Select(Expr))} }})";
+        }
+        if (pa.Element.Unqualified is CType.Pointer)
+        {
+            var ptr = string.Join(", ", pa.Elems.Select(e => $"(nint)({Expr(e)})"));
+            return $"({elemCs}*)Libc.GlobalArrayFrom<nint>(new nint[]{{ {ptr} }})";
+        }
+        var vals = string.Join(", ", pa.Elems.Select(e => Coerced(e, pa.Element)));
+        return $"Libc.GlobalArrayFrom<{elemCs}>(new {elemCs}[]{{ {vals} }})";
+    }
 
     /// <summary>Render a positional aggregate initializer as a C# object
     /// initializer — <c>new Point { x = 3, y = 4 }</c>. Each value is coerced to
