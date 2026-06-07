@@ -33,6 +33,11 @@ internal sealed class SizeofFolder : RewritingTokenStream
     private static readonly HashSet<string> TypeKeywords = new(StringComparer.Ordinal)
     { "void", "char", "short", "int", "long", "float", "double", "signed", "unsigned", "_Bool" };
 
+    /// <summary>Type qualifiers that may appear in a type-specifier operand of
+    /// <c>sizeof</c> (<c>sizeof(const char *)</c>) without making it an expression.</summary>
+    private static readonly HashSet<string> TypeQualifiers = new(StringComparer.Ordinal)
+    { "const", "volatile", "restrict", "_Atomic" };
+
     /// <summary>Cached byte-sizes of typedef names seen so far. Populated as
     /// <c>typedef</c> declarations stream past; consulted during <see cref="EvalSizeof"/>
     /// when a TYPE_NAME is encountered so the folder can still fold <c>sizeof(myint)</c>
@@ -153,6 +158,18 @@ internal sealed class SizeofFolder : RewritingTokenStream
     private int? EvalSizeof(List<Item> tokens)
     {
         if (tokens.Count == 0) return null;
+        // Only fold a sizeof whose operand is a PURE TYPE-SPECIFIER (keywords /
+        // TYPE_NAMEs / qualifiers / `struct`|`union`|`enum` + tag / `*`). An operand
+        // that is an EXPRESSION — a subscript, arithmetic, a parenthesised
+        // sub-expression, a plain variable, a nested `sizeof` — must NOT be folded,
+        // even when it happens to CONTAIN a type name. The classic trap is
+        // `sizeof((buff + DIBS - n)[0])` where `DIBS` macro-expands to
+        // `…sizeof(lua_Unsigned)…`: the backward scan below would latch onto that
+        // inner `lua_Unsigned` and fold the whole subscript to 8, so `dumpVector`'s
+        // `n * sizeof(elem)` writes 8× the bytes (Lua bytecode dump corruption →
+        // "truncated chunk" on load). Such operands are left for the parser's
+        // `sizeof expr` path, whose CType synthesis sizes them correctly.
+        if (!IsPureTypeSpecifier(tokens)) return null;
         // Count trailing * (pointers)
         var starCount = 0;
         var end = tokens.Count;
@@ -181,5 +198,31 @@ internal sealed class SizeofFolder : RewritingTokenStream
                 return null; // need layout info
         }
         return null;
+    }
+
+    /// <summary>
+    /// True when <paramref name="tokens"/> form a pure type-specifier — every token
+    /// is a type keyword, a TYPE_NAME, a qualifier, a <c>*</c>, a <c>struct</c>/
+    /// <c>union</c>/<c>enum</c> keyword, or the tag identifier right after one of
+    /// those. Any other token (a plain variable ID, a <c>(</c>/<c>[</c>, a number,
+    /// an operator) makes the operand an EXPRESSION, which must not be folded.
+    /// </summary>
+    private bool IsPureTypeSpecifier(List<Item> tokens)
+    {
+        var prevWasAggregate = false;  // previous token was struct/union/enum
+        foreach (var t in tokens)
+        {
+            var text = t.Content?.ToString() ?? "";
+            var isAggregate = t.ID == _structSym || t.ID == _unionSym || t.ID == _enumSym;
+            var ok = TypeKeywords.Contains(text)
+                || TypeQualifiers.Contains(text)
+                || t.ID == _starSym
+                || t.ID == _typeNameSym
+                || isAggregate
+                || (t.ID == _idSym && prevWasAggregate);  // the tag name
+            if (!ok) { return false; }
+            prevWasAggregate = isAggregate;
+        }
+        return true;
     }
 }

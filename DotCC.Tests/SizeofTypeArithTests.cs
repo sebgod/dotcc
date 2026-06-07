@@ -71,6 +71,31 @@ public sealed class SizeofTypeArithTests
     }
 
     [Fact]
+    public void sizeof_of_an_expression_containing_a_typename_is_not_folded()
+    {
+        // `sizeof((buf + K - n)[0])` is an EXPRESSION (subscript of pointer arith),
+        // not a type — even though `K` here macro-expands to something containing
+        // `sizeof(lua_Unsigned)`. The token-stream folder must NOT latch onto the
+        // buried `lua_Unsigned` and fold the whole subscript to 8; the element is
+        // `lu_byte` (1). This is the Lua bytecode-dump corruption (`dumpVarint`'s
+        // `dumpVector(D, buff + DIBS - n, n)` → `n * sizeof((…)[0])`).
+        var src = """
+            typedef unsigned char lu_byte;
+            typedef unsigned long long lua_Unsigned;
+            #define CHAR_BIT 8
+            #define DIBS ((int)(sizeof(lua_Unsigned) * CHAR_BIT) + 6) / 7
+            int probe(void) {
+                lu_byte buf[10]; unsigned n = 1;
+                return (int)(n * sizeof((buf + DIBS - n)[0]));
+            }
+            int main(void) { return 0; }
+            """;
+        var emitted = Compiler.EmitCSharp(new[] { WriteTemp(src) });
+        emitted.ShouldContain("sizeof(lu_byte)");      // element sized correctly (1)
+        emitted.ShouldNotContain("n * (uint)(8)");     // NOT mis-folded to 8
+    }
+
+    [Fact]
     public void malloc_sizeof_struct_peephole_is_not_wrapped()
     {
         // `malloc(sizeof(S))` is followed by `)`, not an operator, so the sizeof
