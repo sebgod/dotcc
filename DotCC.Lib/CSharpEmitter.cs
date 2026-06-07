@@ -644,15 +644,27 @@ internal sealed partial class CSharpEmitter : C.IVisitor<EmitContent>
     /// reimplementing it — single source of truth for string lowering.
     /// </summary>
     internal static string EncodeStringLiteral(IReadOnlyList<string> rawQuotedSegments)
+        => EncodeStringLiteral(rawQuotedSegments, out _);
+
+    /// <summary>
+    /// As <see cref="EncodeStringLiteral(IReadOnlyList{string})"/>, additionally
+    /// reporting <paramref name="byteLength"/> — the C array size of the literal
+    /// (decoded byte count INCLUDING the NUL terminator). That is exactly
+    /// <c>sizeof</c> of the string literal, which the IR uses to type a string as
+    /// <c>char[N]</c> (a string literal does NOT decay under <c>sizeof</c>).
+    /// </summary>
+    internal static string EncodeStringLiteral(IReadOnlyList<string> rawQuotedSegments, out int byteLength)
     {
         var items = new List<StrItem>();
         foreach (var seg in rawQuotedSegments) { DecodeCStringBody(StripStrQuotes(seg), items); }
         if (items.Exists(it => it.IsByte && it.Value > 0x7F))
         {
-            var (arr, _) = EmitByteArray(items);
+            var (arr, n) = EmitByteArray(items);
+            byteLength = n + 1;   // + NUL
             return $"Libc.L({arr})";
         }
-        var (escaped, _) = EmitU8(items);
+        var (escaped, len) = EmitU8(items);
+        byteLength = len + 1;     // + NUL
         return $"Libc.L(\"{escaped}\\0\"u8)";
     }
 
