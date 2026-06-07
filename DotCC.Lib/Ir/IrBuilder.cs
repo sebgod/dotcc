@@ -248,6 +248,7 @@ internal sealed class IrBuilder
     private static long? ConstEval(CExpr e) => e switch
     {
         LitInt i => i.Value,
+        SizeOfExpr s => s.Of.SizeOf,
         Paren p => ConstEval(p.Inner),
         Cast c => ConstEval(c.Operand),
         Unary u => u.Op switch
@@ -740,8 +741,11 @@ internal sealed class IrBuilder
 
         CType arrType;
         CExpr? countExpr = null;
-        if (dim is LitInt { Value: { } cnt })
+        if (dim is not null && ConstEval(dim) is { } cnt)
         {
+            // A constant-expression bound (a literal, or a folded ICE like
+            // `sizeof(long) * CHAR_BIT`) is a fixed-size array — sizeof(arr) and
+            // the array-length idiom need the count on the type.
             arrType = new CType.Array(elem, (int)cnt);
             countExpr = dim;
         }
@@ -1107,7 +1111,12 @@ internal sealed class IrBuilder
             }
         }
         Walk(c.Arg0);
-        return new LitStr(DotCC.CSharpEmitter.EncodeStringLiteral(segs)) { Type = CType.CharPtr };
+        // A string literal has type char[N] (N = decoded bytes incl. NUL). It
+        // decays to char* in most contexts — but NOT under sizeof, which is why
+        // the array type is carried rather than the decayed pointer. The lowered
+        // C# (byte*) is identical either way, so value uses are unaffected.
+        var expr = DotCC.CSharpEmitter.EncodeStringLiteral(segs, out var byteLen);
+        return new LitStr(expr) { Type = new CType.Array(CType.Char, byteLen) };
     }
 
     private CExpr BuildChr(C.Chr c)
