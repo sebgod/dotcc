@@ -145,6 +145,15 @@ public sealed record ArrayDecl(Symbol Sym, CType Element, CExpr? CountExpr, IRea
 /// <summary>A local variable declaration with optional initializer.</summary>
 public sealed record LocalDecl(Symbol Sym, CExpr? Init);
 
+/// <summary>A struct or union type definition. Codegen renders it into the
+/// top-level type-declarations section (a plain <c>unsafe struct</c>, or an
+/// explicit-layout one for a union). Field types are also registered in the
+/// builder's struct table so member access resolves a field's type.</summary>
+public sealed record StructTypeDef(string Name, IReadOnlyList<StructField> Fields, bool IsUnion);
+
+/// <summary>One field of a <see cref="StructTypeDef"/>.</summary>
+public readonly record struct StructField(string Name, CType Type);
+
 /// <summary>A function definition: signature symbol + parameter symbols + body.</summary>
 public sealed record FuncDef(Symbol Sym, IReadOnlyList<Symbol> Params, Block Body, bool Variadic);
 

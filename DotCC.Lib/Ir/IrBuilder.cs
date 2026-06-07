@@ -33,10 +33,15 @@ internal sealed class IrBuilder
     // SizeOf, no alias directive needed. Populated in declaration order, so a
     // chained typedef (`typedef size_t mysize;`) resolves through the table.
     private readonly Dictionary<string, CType> _typedefs = new(StringComparer.Ordinal);
+    // Struct/union name → its fields, so member access can resolve a field's
+    // type. Keyed by the canonical (tag, or anonymous-typedef alias) name.
+    private readonly Dictionary<string, List<StructField>> _structFields = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _emittedTypes = new(StringComparer.Ordinal);
     private string _file = "";
 
     public List<FuncDef> Functions { get; } = new();
     public List<GlobalVar> Globals { get; } = new();
+    public List<StructTypeDef> Types { get; } = new();
     public List<Diagnostic> Diagnostics { get; } = new();
 
     /// <summary>Walk one translation unit's parse tree, appending its functions
@@ -81,6 +86,15 @@ internal sealed class IrBuilder
             case C.EnumDefTyped e: RegisterEnum(e.Arg5); break;
             case C.TypedefEnum e: RegisterEnum(e.Arg4); _typedefs[Tok(e.Arg6)] = CType.Int; break;
             case C.TypedefEnumAnon e: RegisterEnum(e.Arg3); _typedefs[Tok(e.Arg5)] = CType.Int; break;
+            // struct/union definitions.
+            case C.StructDef s: BuildStructDef(Tok(s.Arg1), s.Arg3, null, isUnion: false); break;
+            case C.UnionDef s: BuildStructDef(Tok(s.Arg1), s.Arg3, null, isUnion: true); break;
+            case C.TypedefStruct s: BuildStructDef(Tok(s.Arg2), s.Arg4, Tok(s.Arg6), isUnion: false); break;
+            case C.TypedefUnion s: BuildStructDef(Tok(s.Arg2), s.Arg4, Tok(s.Arg6), isUnion: true); break;
+            case C.TypedefStructAnon s: BuildStructDef(null, s.Arg3, Tok(s.Arg5), isUnion: false); break;
+            case C.TypedefUnionAnon s: BuildStructDef(null, s.Arg3, Tok(s.Arg5), isUnion: true); break;
+            // `struct Tag;` forward declaration — C# resolves order-independently.
+            case C.StructFwd: break;
             default: throw new IrUnsupportedException(TypeName(fn.Content));
         }
     }
@@ -250,6 +264,61 @@ internal sealed class IrBuilder
         _ => null,
     };
 
+    // ---- structs / unions ------------------------------------------------
+
+    /// <summary>Define a struct/union. <paramref name="tag"/> is the C tag (null
+    /// for an anonymous <c>typedef struct {…} Alias</c>); <paramref name="alias"/>
+    /// the typedef name if any. Emits a C# struct under a canonical name, records
+    /// its fields for member-type resolution, and maps the typedef alias to it.</summary>
+    private void BuildStructDef(string? tag, Item memberList, string? alias, bool isUnion)
+    {
+        var canonical = tag ?? alias ?? throw new IrUnsupportedException("struct with neither tag nor typedef name");
+        var fields = BuildStructFields(memberList);
+        if (_emittedTypes.Add(canonical))
+        {
+            _structFields[canonical] = fields;
+            Types.Add(new StructTypeDef(canonical, fields, isUnion));
+        }
+        // `struct Tag` and the typedef alias both resolve to the canonical type.
+        if (alias is not null) { _typedefs[alias] = new CType.Named(canonical); }
+    }
+
+    /// <summary>Parse a struct/union member list into (field, type) pairs. Scalar
+    /// and pointer members are supported; array / bit-field / anonymous members
+    /// are deferred (raise <see cref="IrUnsupportedException"/>).</summary>
+    private List<StructField> BuildStructFields(Item memberList)
+    {
+        var fields = new List<StructField>();
+        void Member(Item m)
+        {
+            switch (m.Content)
+            {
+                case C.MembersCons c: Member(c.Arg0); Member(c.Arg1); break;
+                case C.MembersOne o: Member(o.Arg0); break;
+                case C.StructMemberList sm:
+                    WalkDeclList(ResolveType(sm.Arg0), sm.Arg1, (name, _, type) => fields.Add(new StructField(name, type)));
+                    break;
+                default: throw new IrUnsupportedException(TypeName(m.Content));
+            }
+        }
+        Member(memberList);
+        return fields;
+    }
+
+    /// <summary>The CType of <paramref name="field"/> read off the struct/union
+    /// that <paramref name="baseExpr"/>'s type names (pointer levels peeled), or
+    /// <see cref="CType.Int"/> when unknown (e.g. an as-yet-unregistered struct).</summary>
+    private CType MemberType(CExpr baseExpr, string field)
+    {
+        var t = baseExpr.Type;
+        while (t is CType.Pointer p) { t = p.Pointee; }
+        if (t is CType.Named n && _structFields.TryGetValue(n.Name, out var fields))
+        {
+            foreach (var f in fields) { if (f.Name == field) { return f.Type; } }
+        }
+        return CType.Int;
+    }
+
     // ---- types -----------------------------------------------------------
 
     private CType ResolveType(Item it) => it.Content switch
@@ -262,6 +331,9 @@ internal sealed class IrBuilder
         C.TypeName t => ResolveTypeName(Tok(t.Arg0)),
         // `enum Tag` as a type — dotcc lowers enums to plain int.
         C.TypeEnum => CType.Int,
+        // `struct Tag` / `union Tag` as a type — the canonical C# struct name.
+        C.TypeStruct t => new CType.Named(Tok(t.Arg1)),
+        C.TypeUnion t => new CType.Named(Tok(t.Arg1)),
         _ => throw new IrUnsupportedException(TypeName(it.Content)),
     };
 
@@ -711,11 +783,7 @@ internal sealed class IrBuilder
     {
         var base_ = BuildExpr(baseItem);
         var field = Tok(fieldItem);
-        // Field types need the struct-layout model (a later wave); until then the
-        // member's type is unknown. Codegen still emits `.`/`->` verbatim — which
-        // is valid C# in unsafe context — so member-access fixtures emit, but stay
-        // off the IR allow-list until their field types resolve.
-        return new Member(base_, field, arrow) { Type = CType.Int, IsLValue = true };
+        return new Member(base_, field, arrow) { Type = MemberType(base_, field), IsLValue = true };
     }
 
     private CExpr BuildCast(C.Cast c)

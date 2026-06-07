@@ -60,7 +60,33 @@ internal sealed class CodeGen
             globals.Append($"    public static unsafe {g.Sym.Type.CsType} {g.Sym.CsName}{init};\n");
         }
 
-        return new CodeGenResult(fns.ToString(), Structs: "", Aliases: "", globals.ToString(), mainArity, exports);
+        // struct/union type declarations → the top-level type-decls section.
+        var structs = new StringBuilder();
+        foreach (var t in unit.Types) { structs.Append(StructText(t)); }
+
+        return new CodeGenResult(fns.ToString(), structs.ToString(), Aliases: "", globals.ToString(), mainArity, exports);
+    }
+
+    // ---- type declarations -----------------------------------------------
+
+    /// <summary>Render a struct/union type. A union uses
+    /// <c>[StructLayout(LayoutKind.Explicit)]</c> with every field at
+    /// <c>[FieldOffset(0)]</c> (C overlays all members at the same address).</summary>
+    private static string StructText(StructTypeDef t)
+    {
+        var sb = new StringBuilder();
+        if (t.IsUnion)
+        {
+            sb.Append("[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit)]\n");
+        }
+        sb.Append("unsafe struct ").Append(t.Name).Append("\n{\n");
+        foreach (var f in t.Fields)
+        {
+            if (t.IsUnion) { sb.Append("    [System.Runtime.InteropServices.FieldOffset(0)]\n"); }
+            sb.Append("    public ").Append(f.Type.CsType).Append(' ').Append(DotCC.CSharpEmitter.Id(f.Name)).Append(";\n");
+        }
+        sb.Append("}\n\n");
+        return sb.ToString();
     }
 
     // ---- functions -------------------------------------------------------
