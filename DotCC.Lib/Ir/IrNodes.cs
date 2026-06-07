@@ -159,6 +159,11 @@ public sealed record StructTypeDef(string Name, IReadOnlyList<StructField> Field
 /// <summary>One field of a <see cref="StructTypeDef"/>.</summary>
 public readonly record struct StructField(string Name, CType Type);
 
+/// <summary>A function parameter (or function-pointer parameter): its type and
+/// name. Used while building signatures — a named record rather than a loose
+/// tuple so members read as <c>.Type</c> / <c>.Name</c>.</summary>
+public readonly record struct ParamInfo(CType Type, string Name);
+
 /// <summary>A function definition: signature symbol + parameter symbols + body.</summary>
 public sealed record FuncDef(Symbol Sym, IReadOnlyList<Symbol> Params, Block Body, bool Variadic);
 

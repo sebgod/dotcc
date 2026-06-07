@@ -164,7 +164,7 @@ internal sealed class IrBuilder
 
     // ---- function signatures --------------------------------------------
 
-    private readonly record struct FnSig(CType Return, string Name, List<(CType Type, string Name)> Params, bool Variadic, bool IsStatic);
+    private readonly record struct FnSig(CType Return, string Name, List<ParamInfo> Params, bool Variadic, bool IsStatic);
 
     private FnSig ExtractFnSig(Item it) => it.Content switch
     {
@@ -177,9 +177,9 @@ internal sealed class IrBuilder
         _ => throw new IrUnsupportedException(TypeName(it.Content)),
     };
 
-    private List<(CType, string)> BuildParams(Item paramList, out bool variadic)
+    private List<ParamInfo> BuildParams(Item paramList, out bool variadic)
     {
-        var acc = new List<(CType, string)>();
+        var acc = new List<ParamInfo>();
         var vararg = false;
         var unnamed = 0;
         void Walk(Item it)
@@ -189,13 +189,13 @@ internal sealed class IrBuilder
                 case C.ParamsCons c: Walk(c.Arg0); Walk(c.Arg2); break;
                 case C.ParamsOne o: Walk(o.Arg0); break;
                 case C.ParamsVararg v: Walk(v.Arg0); vararg = true; break;
-                case C.Param p: acc.Add((ResolveType(p.Arg0), Tok(p.Arg1))); break;
-                case C.ParamUnnamed p: acc.Add((ResolveType(p.Arg0), "_p" + unnamed++)); break;
-                case C.ParamArrayUnsized p: acc.Add((new CType.Pointer(ResolveType(p.Arg0)), Tok(p.Arg1))); break;
-                case C.ParamArraySized p: acc.Add((new CType.Pointer(ResolveType(p.Arg0)), Tok(p.Arg1))); break;
+                case C.Param p: acc.Add(new(ResolveType(p.Arg0), Tok(p.Arg1))); break;
+                case C.ParamUnnamed p: acc.Add(new(ResolveType(p.Arg0), "_p" + unnamed++)); break;
+                case C.ParamArrayUnsized p: acc.Add(new(new CType.Pointer(ResolveType(p.Arg0)), Tok(p.Arg1))); break;
+                case C.ParamArraySized p: acc.Add(new(new CType.Pointer(ResolveType(p.Arg0)), Tok(p.Arg1))); break;
                 // Function-pointer parameter: `Ret (*name)(paramTypes)`.
-                case C.ParamFnPtr p: acc.Add((FnPtrType(p.Arg0, p.Arg6), Tok(p.Arg3))); break;
-                case C.ParamFnPtrNoArgs p: acc.Add((FnPtrType(p.Arg0, null), Tok(p.Arg3))); break;
+                case C.ParamFnPtr p: acc.Add(new(FnPtrType(p.Arg0, p.Arg6), Tok(p.Arg3))); break;
+                case C.ParamFnPtrNoArgs p: acc.Add(new(FnPtrType(p.Arg0, null), Tok(p.Arg3))); break;
                 default: throw new IrUnsupportedException(TypeName(it.Content));
             }
         }
@@ -336,9 +336,9 @@ internal sealed class IrBuilder
         if (paramListItem is { } pl)
         {
             var ps = BuildParams(pl, out variadic);
-            if (!(ps.Count == 1 && ps[0].Item1 is CType.VoidType))
+            if (!(ps.Count == 1 && ps[0].Type is CType.VoidType))
             {
-                foreach (var (t, _) in ps) { ptypes.Add(t); }
+                foreach (var p in ps) { ptypes.Add(p.Type); }
             }
         }
         return new CType.Func(ret, ptypes, variadic);
