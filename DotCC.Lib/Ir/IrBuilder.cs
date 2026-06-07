@@ -389,6 +389,13 @@ internal sealed class IrBuilder
         // (a NAMED member/var of an unnamed aggregate). Synthesize a struct name.
         C.TypeAnonStruct t => ResolveAnonAggregate(it, t.Arg3, isUnion: false),
         C.TypeAnonUnion t => ResolveAnonAggregate(it, t.Arg3, isUnion: true),
+        // `TypeSpecList TYPE_NAME` — a function-specifier run (inline / _Noreturn)
+        // immediately preceding a typedef-name: `static inline Cell *bump(…)`,
+        // Lua's `l_sinline Table *gettable(…)`. The spec list contributes only the
+        // inline/_Noreturn flag, which the IR drops (it emits no MethodImpl hint —
+        // exactly as every other inline function is lowered), so the TYPE_NAME is
+        // the whole base type.
+        C.TypeSpecThenName t => ResolveTypeName(Tok(t.Arg1)),
         _ => throw new IrUnsupportedException(TypeName(it.Content)),
     };
 
