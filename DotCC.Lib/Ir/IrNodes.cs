@@ -153,6 +153,13 @@ public sealed record PinnedArray(CType Element, IReadOnlyList<CExpr>? Elems, CEx
 /// zero-fills a scalar, pointer, struct, or union uniformly.</summary>
 public sealed record DefaultLit : CExpr;
 
+/// <summary><c>va_arg(ap, T)</c> — pull the next variadic argument of type
+/// <see cref="Target"/> from the <see cref="Ap"/> cursor. Codegen lowers it to the
+/// matching <c>VaList</c> accessor (<c>(T)ap.Next()</c>, or <c>(T)ap.NextPtr()</c>
+/// for a pointer target). Special syntax — its second operand is a type — so it's
+/// a dedicated node rather than an ordinary call.</summary>
+public sealed record VaArgGet(CExpr Ap, CType Target) : CExpr;
+
 /// <summary>A parenthesized sub-expression — kept so codegen can preserve
 /// explicit grouping (precedence-driven parens come later).</summary>
 public sealed record Paren(CExpr Inner) : CExpr;

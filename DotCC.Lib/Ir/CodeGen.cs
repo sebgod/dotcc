@@ -43,7 +43,9 @@ internal sealed class CodeGen
             fns.Append(cg.Func(fn));
 
             if (fn.Sym.Name == "main") { mainArity = fn.Params.Count; }
-            else if (fn.Sym.Storage != Storage.Static)
+            // A variadic function's `params VaArg[]` tail isn't a valid
+            // [UnmanagedCallersOnly] signature, so it can't be exported.
+            else if (fn.Sym.Storage != Storage.Static && !fn.Variadic)
             {
                 var ret = fn.Sym.Type is CType.Func f ? f.Return.CsType : "int";
                 var ps = string.Join(", ", fn.Params.Select(p => $"{p.Type.CsType} {p.CsName}"));
@@ -160,6 +162,9 @@ internal sealed class CodeGen
         var retTy = fn.Sym.Type is CType.Func f ? f.Return : CType.Int;
         _currentRet = retTy;
         var ps = string.Join(", ", fn.Params.Select(p => $"{p.Type.CsType} {p.CsName}"));
+        // A variadic C function gets a trailing `params VaArg[] _va`; C# converts
+        // each variadic actual to a VaArg at the call site (carries pointers too).
+        if (fn.Variadic) { ps = ps.Length == 0 ? "params VaArg[] _va" : ps + ", params VaArg[] _va"; }
         var sb = new StringBuilder();
         sb.Append($"static unsafe {retTy.CsType} {fn.Sym.CsName}({ps})\n");
         Stmt(sb, fn.Body, 0);
@@ -655,6 +660,12 @@ internal sealed class CodeGen
                 return ($"stackalloc {sa.Element.CsType}[]{{ {string.Join(", ", sa.Elems.Select(Expr))} }}", PPrimary);
             case DefaultLit: return ($"default({e.Type.CsType})", PPrimary);
             case PinnedArray pa: return (PinnedArrayText(pa), PPrimary);
+            case VaArgGet va:
+                // va_arg(ap, T): a scalar reads via (T)ap.Next(); a pointer via
+                // (T)ap.NextPtr() (NextPtr returns void*, then a standard cast to T*).
+                return va.Target.Unqualified is CType.Pointer or CType.Func or CType.Array
+                    ? ($"({va.Target.CsType})({Sub(va.Ap, PPostfix)}.NextPtr())", PUnary)
+                    : ($"({va.Target.CsType})({Sub(va.Ap, PPostfix)}.Next())", PUnary);
             case Call c: return (CallText(c), PPostfix);
             case CondExpr t:
                 // Wrapped (atomic): C-truthy condition, arms isolated by `?`/`:`.
@@ -1075,9 +1086,23 @@ internal sealed class CodeGen
         }
     }
 
+    /// <summary>Lower the <c>&lt;stdarg.h&gt;</c> control macros onto the
+    /// <c>VaList</c> runtime: <c>va_start(ap, last)</c> → <c>ap = new VaList(_va)</c>
+    /// (the synthesized params array; <c>last</c> is ignored), <c>va_end(ap)</c> →
+    /// <c>ap.End()</c>, <c>va_copy(d, s)</c> → <c>d = s</c>. <c>va_arg</c> is a
+    /// dedicated node (its 2nd operand is a type). Null when not a va_* call.</summary>
+    private string? LowerVaCall(Call c) => c.Callee switch
+    {
+        "va_start" => $"{Expr(c.Args[0])} = new VaList(_va)",
+        "va_end" => $"{Sub(c.Args[0], PPostfix)}.End()",
+        "va_copy" => $"{Expr(c.Args[0])} = {Sub(c.Args[1], PAssign)}",
+        _ => null,
+    };
+
     private string CallText(Call c)
     {
         if (LowerAtomicCall(c) is { } atomic) { return atomic; }
+        if (LowerVaCall(c) is { } va) { return va; }
         // Coerce each argument to its parameter type (C's implicit conversion at
         // a call C# requires explicit) when the callee's signature is known; the
         // variadic tail (index ≥ fixed-param count) and unknown-signature callees
