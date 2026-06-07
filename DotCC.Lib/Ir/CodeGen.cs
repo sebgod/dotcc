@@ -102,6 +102,18 @@ internal sealed class CodeGen
                 sb.Append(pad).Append($"while (Cond.B({Expr(w.Cond)}))\n");
                 Nested(sb, w.Body, ind);
                 break;
+            case DoWhile dw:
+                sb.Append(pad).Append("do\n");
+                Nested(sb, dw.Body, ind);
+                sb.Append(pad).Append($"while (Cond.B({Expr(dw.Cond)}));\n");
+                break;
+            case Goto g:
+                sb.Append(pad).Append($"goto {g.Label};\n");
+                break;
+            case Labeled lb:
+                sb.Append(pad).Append(lb.Name).Append(":\n");
+                Stmt(sb, lb.Body, ind);
+                break;
             case For fr:
                 var init = fr.Init switch
                 {
@@ -134,45 +146,118 @@ internal sealed class CodeGen
     }
 
     // ---- expressions -----------------------------------------------------
+    //
+    // Precedence-driven printing (NOT paren-wrap-then-strip — that was string
+    // surgery on emitted text, the very coupling the IR exists to remove). Each
+    // node reports the precedence of its result via Render(); a child is
+    // parenthesized only when the surrounding context binds tighter than the
+    // child's own operator. So a statement-position expression renders with no
+    // spurious outer parens (`i++`, not `(i++)`) and nothing ever needs stripping.
 
-    private string Expr(CExpr e) => e switch
-    {
-        LitInt i => i.CsText,
-        LitFloat f => f.CsText,
-        LitStr s => s.CsExpr,
-        Raw r => r.CsText,
-        VarRef v => v.Sym.CsName,
-        Paren p => $"({Expr(p.Inner)})",
-        Unary u => UnaryText(u),
-        Binary b => $"{Expr(b.Left)} {BinSym(b.Op)} {Expr(b.Right)}",
-        Assign a => $"{Expr(a.Target)} {(a.CompoundOp is { } op ? BinSym(op) : "")}= {Expr(a.Value)}",
-        Call c => CallText(c),
-        Cast c => $"({c.Target.CsType}){Expr(c.Operand)}",
-        _ => throw new IrUnsupportedException("codegen expr " + e.GetType().Name),
-    };
+    // C operator precedences, higher = binds tighter. Match C's table so the
+    // emitted C# groups exactly as the C source did.
+    private const int PComma = 1, PAssign = 2, PCond = 3, PLogOr = 4, PLogAnd = 5,
+        PBitOr = 6, PBitXor = 7, PBitAnd = 8, PEq = 9, PRel = 10, PShift = 11,
+        PAdd = 12, PMul = 13, PUnary = 14, PPostfix = 15, PPrimary = 16;
 
-    private string UnaryText(Unary u)
+    /// <summary>Render <paramref name="e"/> for top-level (statement) position —
+    /// no outer parens.</summary>
+    private string Expr(CExpr e) => Render(e).Text;
+
+    /// <summary>Render <paramref name="e"/> as a sub-expression that must bind at
+    /// least as tightly as <paramref name="minPrec"/>; wrap it in parens only when
+    /// it doesn't.</summary>
+    private string Sub(CExpr e, int minPrec)
     {
-        var o = Expr(u.Operand);
-        return u.Op switch
+        var (text, prec) = Render(e);
+        return prec < minPrec ? $"({text})" : text;
+    }
+
+    /// <summary>Render an expression to (text, precedence-of-result). The text
+    /// carries NO redundant outer parens; callers add them via <see cref="Sub"/>
+    /// when their context needs them.</summary>
+    private (string Text, int Prec) Render(CExpr e)
+    {
+        switch (e)
         {
-            UnOp.Plus => "+" + o,
-            UnOp.Neg => "-" + o,
-            UnOp.BitNot => "~" + o,
-            UnOp.LogNot => "!" + o,
-            UnOp.AddrOf => "&" + o,
-            UnOp.Deref => "*" + o,
-            UnOp.PreInc => "++" + o,
-            UnOp.PreDec => "--" + o,
-            UnOp.PostInc => o + "++",
-            UnOp.PostDec => o + "--",
-            _ => throw new IrUnsupportedException("unary " + u.Op),
-        };
+            case LitInt i: return (i.CsText, PPrimary);
+            case LitFloat f: return (f.CsText, PPrimary);
+            case LitStr s: return (s.CsExpr, PPrimary);
+            case Raw r: return (r.CsText, PPrimary);
+            case VarRef v: return (v.Sym.CsName, PPrimary);
+            case Paren p: return Render(p.Inner); // explicit C parens are redundant; precedence re-adds as needed
+            case Cast c: return ($"({c.Target.CsType}){Sub(c.Operand, PUnary)}", PUnary);
+            case Index ix: return ($"{Sub(ix.Base, PPostfix)}[{Expr(ix.Idx)}]", PPostfix);
+            case Member m: return ($"{Sub(m.Base, PPostfix)}{(m.Arrow ? "->" : ".")}{DotCC.CSharpEmitter.Id(m.Field)}", PPostfix);
+            case Call c: return (CallText(c), PPostfix);
+            case CondExpr t:
+                // Wrapped (atomic): C-truthy condition, arms isolated by `?`/`:`.
+                return ($"(Cond.B({Expr(t.Cond)}) ? {Expr(t.Then)} : {Expr(t.Else)})", PPrimary);
+            case CommaSeq cs:
+                return (string.Join(", ", cs.Items.Select(it => Sub(it, PAssign))), PComma);
+            case Assign a:
+                {
+                    var op = a.CompoundOp is { } co ? BinSym(co) : "";
+                    // Right-associative: value at PAssign keeps `a = b = c` flat.
+                    return ($"{Sub(a.Target, PUnary)} {op}= {Sub(a.Value, PAssign)}", PAssign);
+                }
+            case Unary u: return RenderUnary(u);
+            case Binary b: return RenderBinary(b);
+            default: throw new IrUnsupportedException("codegen expr " + e.GetType().Name);
+        }
+    }
+
+    private (string, int) RenderUnary(Unary u)
+    {
+        switch (u.Op)
+        {
+            case UnOp.Plus: return ($"+{Sub(u.Operand, PUnary)}", PUnary);
+            case UnOp.Neg: return ($"-{Sub(u.Operand, PUnary)}", PUnary);
+            case UnOp.BitNot: return ($"~{Sub(u.Operand, PUnary)}", PUnary);
+            case UnOp.AddrOf: return ($"&{Sub(u.Operand, PUnary)}", PUnary);
+            case UnOp.Deref: return ($"*{Sub(u.Operand, PUnary)}", PUnary);
+            case UnOp.PreInc: return ($"++{Sub(u.Operand, PUnary)}", PUnary);
+            case UnOp.PreDec: return ($"--{Sub(u.Operand, PUnary)}", PUnary);
+            case UnOp.PostInc: return ($"{Sub(u.Operand, PPostfix)}++", PPostfix);
+            case UnOp.PostDec: return ($"{Sub(u.Operand, PPostfix)}--", PPostfix);
+            // C's `!x` yields int 0/1 (never bool); Cond.B picks the truthy overload.
+            // Wrapped → atomic.
+            case UnOp.LogNot: return ($"(Cond.B({Expr(u.Operand)}) ? 0 : 1)", PPrimary);
+            default: throw new IrUnsupportedException("unary " + u.Op);
+        }
+    }
+
+    // C relational / equality yields int 0/1, NOT bool — `int x = a < b;` is legal
+    // C. Lower the result to CBool (the integer-typed _Bool): CBool→int carries it
+    // into arithmetic positions, and Cond.B(CBool) into conditional ones. `&&`/`||`
+    // likewise yield int 0/1, with each operand taken through Cond.B for C-truthy.
+    // All three forms render fully wrapped, so they're atomic to a parent.
+    private (string, int) RenderBinary(Binary b)
+    {
+        switch (b.Op)
+        {
+            case BinOp.Eq or BinOp.Ne or BinOp.Lt or BinOp.Gt or BinOp.Le or BinOp.Ge:
+                {
+                    var p = Prec(b.Op);
+                    return ($"((CBool)({Sub(b.Left, p)} {BinSym(b.Op)} {Sub(b.Right, p + 1)}))", PPrimary);
+                }
+            case BinOp.LogAnd:
+                return ($"((CBool)(Cond.B({Expr(b.Left)}) && Cond.B({Expr(b.Right)})))", PPrimary);
+            case BinOp.LogOr:
+                return ($"((CBool)(Cond.B({Expr(b.Left)}) || Cond.B({Expr(b.Right)})))", PPrimary);
+            default:
+                {
+                    // Left-associative: right operand at p+1 so same-precedence
+                    // right children (`a - (b - c)`) keep their grouping.
+                    var p = Prec(b.Op);
+                    return ($"{Sub(b.Left, p)} {BinSym(b.Op)} {Sub(b.Right, p + 1)}", p);
+                }
+        }
     }
 
     private string CallText(Call c)
     {
-        var a = c.Args.Select(Expr).ToList();
+        var a = c.Args.Select(x => Sub(x, PAssign)).ToList();
         if (c.Builtin)
         {
             // printf-family fluent lowering — matches the runtime contract:
@@ -194,6 +279,22 @@ internal sealed class CodeGen
     }
 
     private static string Arg(List<string> a, int i) => i < a.Count ? a[i] : "";
+
+    /// <summary>The C precedence of a binary operator (see the P* constants).</summary>
+    private static int Prec(BinOp op) => op switch
+    {
+        BinOp.Mul or BinOp.Div or BinOp.Mod => PMul,
+        BinOp.Add or BinOp.Sub => PAdd,
+        BinOp.Shl or BinOp.Shr => PShift,
+        BinOp.Lt or BinOp.Gt or BinOp.Le or BinOp.Ge => PRel,
+        BinOp.Eq or BinOp.Ne => PEq,
+        BinOp.BitAnd => PBitAnd,
+        BinOp.BitXor => PBitXor,
+        BinOp.BitOr => PBitOr,
+        BinOp.LogAnd => PLogAnd,
+        BinOp.LogOr => PLogOr,
+        _ => PPrimary,
+    };
 
     private static string BinSym(BinOp op) => op switch
     {

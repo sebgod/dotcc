@@ -283,11 +283,18 @@ internal sealed class IrBuilder
             case C.StmtIf s: return new If(BuildExpr(s.Arg2), BuildStmt(s.Arg4), null) { Pos = pos };
             case C.StmtIfElse s: return new If(BuildExpr(s.Arg2), BuildStmt(s.Arg4), BuildStmt(s.Arg6)) { Pos = pos };
             case C.StmtWhile s: return new While(BuildExpr(s.Arg2), BuildStmt(s.Arg4)) { Pos = pos };
+            case C.StmtDoWhile s: return new DoWhile(BuildStmt(s.Arg1), BuildExpr(s.Arg4)) { Pos = pos };
             case C.StmtReturn s: return new Return(BuildExpr(s.Arg1)) { Pos = pos };
             case C.StmtReturnVoid: return new Return(null) { Pos = pos };
             case C.StmtBreak: return new Break { Pos = pos };
             case C.StmtContinue: return new Continue { Pos = pos };
             case C.StmtForDecl s: return BuildForDecl(s) with { Pos = pos };
+            case C.StmtForExpr s:
+                return new For(new ExprStmt(BuildCommaExpr(s.Arg2)), BuildForCond(s.Arg4), BuildForPost(s.Arg6), BuildStmt(s.Arg8)) { Pos = pos };
+            case C.StmtForNoInit s:
+                return new For(null, BuildForCond(s.Arg3), BuildForPost(s.Arg5), BuildStmt(s.Arg7)) { Pos = pos };
+            case C.StmtGoto s: return new Goto(DotCC.CSharpEmitter.Id(Tok(s.Arg1))) { Pos = pos };
+            case C.StmtLabel s: return new Labeled(DotCC.CSharpEmitter.Id(Tok(s.Arg0)), BuildStmt(s.Arg2)) { Pos = pos };
             default: throw new IrUnsupportedException(TypeName(it.Content));
         }
     }
@@ -341,15 +348,28 @@ internal sealed class IrBuilder
     private CExpr? BuildForPost(Item it) => it.Content switch
     {
         C.ForPostEmpty => null,
-        C.ForPostExprs e => BuildForPostExpr(e.Arg0),
+        C.ForPostExprs e => BuildCommaExpr(e.Arg0),
         _ => throw new IrUnsupportedException(TypeName(it.Content)),
     };
 
-    private CExpr BuildForPostExpr(Item it) => it.Content switch
+    /// <summary>A comma-separated expression list (for-init / for-update). One
+    /// expression passes through; several become a <see cref="CommaSeq"/> that
+    /// codegen renders as C#'s native <c>a, b</c> list in those positions.</summary>
+    private CExpr BuildCommaExpr(Item it)
     {
-        C.CommaExprOne o => BuildExpr(o.Arg0),
-        _ => throw new IrUnsupportedException(TypeName(it.Content)), // multi-expr post: later phase
-    };
+        var items = new List<CExpr>();
+        void Walk(Item node)
+        {
+            switch (node.Content)
+            {
+                case C.CommaExprCons c: Walk(c.Arg0); items.Add(BuildExpr(c.Arg2)); break;
+                case C.CommaExprOne o: items.Add(BuildExpr(o.Arg0)); break;
+                default: items.Add(BuildExpr(node)); break;
+            }
+        }
+        Walk(it);
+        return items.Count == 1 ? items[0] : new CommaSeq(items) { Type = items[^1].Type };
+    }
 
     // ---- expressions -----------------------------------------------------
 
@@ -388,6 +408,11 @@ internal sealed class IrBuilder
             C.MulAssign a => Asn(BinOp.Mul, a.Arg0, a.Arg2),
             C.DivAssign a => Asn(BinOp.Div, a.Arg0, a.Arg2),
             C.ModAssign a => Asn(BinOp.Mod, a.Arg0, a.Arg2),
+            C.AndAssign a => Asn(BinOp.BitAnd, a.Arg0, a.Arg2),
+            C.OrAssign a => Asn(BinOp.BitOr, a.Arg0, a.Arg2),
+            C.XorAssign a => Asn(BinOp.BitXor, a.Arg0, a.Arg2),
+            C.ShlAssign a => Asn(BinOp.Shl, a.Arg0, a.Arg2),
+            C.ShrAssign a => Asn(BinOp.Shr, a.Arg0, a.Arg2),
             C.PreInc u => Un(UnOp.PreInc, u.Arg1),
             C.PreDec u => Un(UnOp.PreDec, u.Arg1),
             C.PostInc u => Un(UnOp.PostInc, u.Arg0),
@@ -395,11 +420,67 @@ internal sealed class IrBuilder
             C.Neg u => Un(UnOp.Neg, u.Arg1),
             C.BNot u => Un(UnOp.BitNot, u.Arg1),
             C.LNot u => Un(UnOp.LogNot, u.Arg1),
+            C.Deref u => Un(UnOp.Deref, u.Arg1),
+            C.AddrOf u => Un(UnOp.AddrOf, u.Arg1),
+            C.Ternary t => BuildTernary(t),
+            C.Subscript s => BuildIndex(s),
+            C.MemberDot m => BuildMember(m.Arg0, m.Arg2, arrow: false),
+            C.MemberArrow m => BuildMember(m.Arg0, m.Arg2, arrow: true),
+            C.Cast c => BuildCast(c),
+            C.LitTrue => new LitInt("1", 1) { Type = CType.Int },
+            C.LitFalse => new LitInt("0", 0) { Type = CType.Int },
+            C.LitNullptr => new Raw("null") { Type = new CType.Pointer(CType.Void) },
             C.Call c => BuildCall(c.Arg0, c.Arg2),
             C.CallNoArgs c => BuildCall(c.Arg0, null),
             _ => throw new IrUnsupportedException(TypeName(it.Content)),
         };
         return e with { Pos = pos };
+    }
+
+    private CExpr BuildTernary(C.Ternary t)
+    {
+        var cond = BuildExpr(t.Arg0);
+        var then = BuildExpr(t.Arg2);
+        var els = BuildExpr(t.Arg4);
+        // Result type: arithmetic arms reconcile per the usual conversions; else
+        // take the then-arm's type (good enough until the coercion pass lands).
+        var ty = then.Type.IsArithmetic && els.Type.IsArithmetic
+            ? ArithType(then.Type, els.Type) : then.Type;
+        return new CondExpr(cond, then, els) { Type = ty };
+    }
+
+    private CExpr BuildIndex(C.Subscript s)
+    {
+        var base_ = BuildExpr(s.Arg0);
+        var idx = BuildExpr(s.Arg2);
+        var elem = base_.Type switch
+        {
+            CType.Pointer p => p.Pointee,
+            CType.Array a => a.Element,
+            _ => CType.Int,
+        };
+        return new Index(base_, idx) { Type = elem, IsLValue = true };
+    }
+
+    private CExpr BuildMember(Item baseItem, Item fieldItem, bool arrow)
+    {
+        var base_ = BuildExpr(baseItem);
+        var field = Tok(fieldItem);
+        // Field types need the struct-layout model (a later wave); until then the
+        // member's type is unknown. Codegen still emits `.`/`->` verbatim — which
+        // is valid C# in unsafe context — so member-access fixtures emit, but stay
+        // off the IR allow-list until their field types resolve.
+        return new Member(base_, field, arrow) { Type = CType.Int, IsLValue = true };
+    }
+
+    private CExpr BuildCast(C.Cast c)
+    {
+        var target = ResolveType(c.Arg1);
+        var operand = BuildExpr(c.Arg3);
+        // `(void)X` — C# has no void cast and the value is discarded; carry the
+        // operand through typed void so a statement position emits `X;`.
+        if (target is CType.VoidType) { return operand with { Type = CType.Void }; }
+        return new Cast(target, operand) { Type = target };
     }
 
     private CExpr Bin(BinOp op, Item l, Item r)
@@ -511,20 +592,44 @@ internal sealed class IrBuilder
 
     private CExpr BuildChr(C.Chr c)
     {
-        // C char constant has type int; our char is byte. Printable ASCII stays
-        // readable, everything else lowers to its numeric byte value.
+        // A C character constant has type int; emit its integer value (the simplest
+        // C-faithful lowering — `'A'` → `65`, `'\n'` → `10`). The value carries into
+        // byte/int sinks via C#'s constant conversions.
         var raw = Tok(c.Arg0);
-        if (raw is null || raw.Length < 3) { return new LitInt("(byte)0", 0) { Type = CType.Int }; }
-        var inner = raw[1..^1];
-        // Slice-simple: single printable char or a one-char escape we map directly.
-        string text = inner switch
+        if (raw is null || raw.Length < 3) { return new LitInt("0", 0) { Type = CType.Int }; }
+        var value = DecodeCharConstant(raw[1..^1]);
+        return new LitInt(value.ToString(System.Globalization.CultureInfo.InvariantCulture), value) { Type = CType.Int };
+    }
+
+    /// <summary>Decode the body of a C character constant (the chars between the
+    /// quotes) to its integer value: a single char, a named escape, a
+    /// <c>\xHH</c> hex escape, or a <c>\NNN</c> octal escape.</summary>
+    private static int DecodeCharConstant(string inner)
+    {
+        if (inner.Length == 0) { return 0; }
+        if (inner[0] != '\\') { return inner[0]; }
+        var esc = inner[1];
+        switch (esc)
         {
-            "\\n" => "(byte)10", "\\t" => "(byte)9", "\\r" => "(byte)13",
-            "\\0" => "(byte)0", "\\\\" => "(byte)92", "\\'" => "(byte)39",
-            _ when inner.Length == 1 && inner[0] is >= ' ' and <= '~' => $"(byte)'{inner}'",
-            _ => throw new IrUnsupportedException("char literal " + raw),
-        };
-        return new LitInt(text, null) { Type = CType.Int };
+            case 'n': return 10;
+            case 't': return 9;
+            case 'r': return 13;
+            case 'a': return 7;
+            case 'b': return 8;
+            case 'f': return 12;
+            case 'v': return 11;
+            case '0' when inner.Length == 2: return 0;
+            case '\\': return 92;
+            case '\'': return 39;
+            case '"': return 34;
+            case '?': return 63;
+            case 'x':
+                return Convert.ToInt32(inner[2..], 16);
+            case >= '0' and <= '7':
+                return Convert.ToInt32(inner[1..], 8);
+            default:
+                throw new IrUnsupportedException("char literal '" + inner + "'");
+        }
     }
 
     private CExpr BuildNum(C.Num n)

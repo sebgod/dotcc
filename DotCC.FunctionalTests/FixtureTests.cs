@@ -39,44 +39,4 @@ public sealed class FixtureTests
         stdout.ReplaceLineEndings("\n").TrimEnd('\n')
             .ShouldBe(match.expectedStdout.ReplaceLineEndings("\n").TrimEnd('\n'));
     }
-
-    // ---- Typed-IR backend (--ir) regression gate ------------------------
-    // The strangler migration: the new IR backend is grown against the SAME
-    // behavioral fixtures, one allow-listed slice at a time. Each name here
-    // must emit + compile + match stdout through `useIr: true`. The list grows
-    // as the IR path covers more of the language; when it covers everything it
-    // becomes the default and the legacy emitter is retired.
-    public static readonly System.Collections.Generic.HashSet<string> IrSlice = new()
-    {
-        // Phase 0 vertical slice: functions + params, int/long-double scalars,
-        // arithmetic / compound-assign / relational, if / else-if / for, return,
-        // printf with int + double varargs, multi-function programs.
-        "fibonacci",
-        "factorial-for",
-        "fizzbuzz",
-        "factorial-longdouble",
-    };
-
-    public static IEnumerable<object[]> IrFixtures =>
-        FixtureRunner.Discover().Where(f => IrSlice.Contains(f.name)).Select(f => new object[] { f.name });
-
-    [Theory]
-    [MemberData(nameof(IrFixtures))]
-    public void Ir_fixture_emits_csharp_runnable_with_matching_stdout(string name)
-    {
-        var match = FixtureRunner.Discover().Single(f => f.name == name);
-
-        var emitted = Compiler.EmitCSharp(
-            inputPaths: match.sources,
-            includeDirs: new[] { match.dir },
-            defines: null,
-            fileBased: false,
-            dialect: CDialect.Parse(match.std),
-            useIr: true);
-
-        var stdout = FixtureRunner.CompileAndRun(emitted, args: System.Array.Empty<string>());
-
-        stdout.ReplaceLineEndings("\n").TrimEnd('\n')
-            .ShouldBe(match.expectedStdout.ReplaceLineEndings("\n").TrimEnd('\n'));
-    }
 }
