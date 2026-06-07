@@ -651,6 +651,7 @@ internal sealed class IrBuilder
     private CStmt BuildDeclStmt(Item it) => it.Content switch
     {
         C.Decl => BuildDecl(it),
+        C.DeclStructInit d => BuildDeclStructInit(d),
         C.DeclArr d => BuildArrDecl(d.Arg0, d.Arg1, d.Arg2, null, implicitSize: false),
         C.DeclArrEmptyInit d => BuildArrDecl(d.Arg0, d.Arg1, d.Arg2, null, implicitSize: false),
         C.DeclArrInit d => BuildArrDecl(d.Arg0, d.Arg1, d.Arg2, d.Arg5, implicitSize: false),
@@ -811,6 +812,62 @@ internal sealed class IrBuilder
         C.InitElemExpr e => BuildExpr(e.Arg0),
         _ => throw new IrUnsupportedException(TypeName(it.Content)),
     };
+
+    /// <summary><c>struct Point p = {3, 4};</c> — a local declaration with a
+    /// positional aggregate initializer. Types the symbol as the struct and
+    /// builds a <see cref="StructInit"/> from the brace list.</summary>
+    private CStmt BuildDeclStructInit(C.DeclStructInit n)
+    {
+        var type = ResolveType(n.Arg0);
+        var init = BuildAggregateInit(type, n.Arg4);
+        var sym = _symbols.Declare(new Symbol { Name = Tok(n.Arg1), Kind = SymKind.Var, Type = type, Storage = Storage.Auto });
+        return new DeclStmt(new[] { new LocalDecl(sym, init) });
+    }
+
+    /// <summary>Build a positional struct/union aggregate initializer: zip the
+    /// brace-list elements onto the struct's fields in declaration order, a
+    /// nested brace recursing into a struct/union-typed field. A short list
+    /// leaves the trailing fields unset (their zero default — C's partial init).</summary>
+    private StructInit BuildAggregateInit(CType type, Item initListItem)
+    {
+        var canonical = (type.Unqualified as CType.Named)?.Name
+            ?? throw new IrUnsupportedException("aggregate initializer for a non-struct type");
+        if (!_structFields.TryGetValue(canonical, out var fields))
+        {
+            throw new IrUnsupportedException($"aggregate initializer for unknown struct/union '{canonical}'");
+        }
+        var elems = CollectInitElems(initListItem);
+        var members = new List<FieldInit>(System.Math.Min(elems.Count, fields.Count));
+        for (var i = 0; i < elems.Count && i < fields.Count; i++)
+        {
+            var field = fields[i];
+            CExpr value = elems[i].Content is C.InitElemNest nest
+                ? BuildAggregateInit(field.Type, nest.Arg1)   // nested brace → struct/union field
+                : BuildInitElem(elems[i]);
+            members.Add(new FieldInit(field.Name, field.Type, value));
+        }
+        return new StructInit(members) { Type = type };
+    }
+
+    /// <summary>Collect a brace-init list's elements as raw parse items (so the
+    /// caller can distinguish a scalar element from a nested <c>{ … }</c> group),
+    /// in source order.</summary>
+    private static List<Item> CollectInitElems(Item it)
+    {
+        var elems = new List<Item>();
+        void Walk(Item n)
+        {
+            switch (n.Content)
+            {
+                case C.InitListCons c: Walk(c.Arg0); elems.Add(c.Arg2); break;
+                case C.InitListTrail t: Walk(t.Arg0); break;
+                case C.InitListOne o: elems.Add(o.Arg0); break;
+                default: elems.Add(n); break;
+            }
+        }
+        Walk(it);
+        return elems;
+    }
 
     private For BuildForDecl(C.StmtForDecl s)
     {
