@@ -914,8 +914,75 @@ internal sealed class CodeGen
             : $"((System.Func<{last.Type.CsType}>)(() => {{ {body}return {Expr(last)}; }}))()";
     }
 
+    // ---- <stdatomic.h> generic functions ---------------------------------
+    // C11's atomic_* "generic functions" are type-generic in a real header; dotcc
+    // intercepts them by NAME and lowers onto the seq-cst Atomic.* helpers
+    // (DotCC.Libc/AtomicLib.cs). arg0 is always a pointer to the atomic object —
+    // `*(arg0)` is the location, and its pointee type casts the value args (C's
+    // int→uint/float conversions aren't implicit in C#). The `_explicit` variants'
+    // trailing memory_order args are ignored (every order maps to a full barrier —
+    // the safe over-approximation, same as volatile).
+
+    /// <summary>C# types Atomic.* covers (4-/8-byte unmanaged INumber scalars).</summary>
+    private static readonly HashSet<string> _atomicEligible = new(StringComparer.Ordinal)
+    {
+        "int", "uint", "long", "ulong", "nint", "nuint", "float", "double",
+    };
+
+    /// <summary>Lower a recognised <c>atomic_*</c> generic function to its
+    /// <c>Atomic.*</c> form, or null when <paramref name="c"/> isn't one (so the
+    /// normal call path runs).</summary>
+    private string? LowerAtomicCall(Call c)
+    {
+        if (!c.Callee.StartsWith("atomic_", StringComparison.Ordinal)) { return null; }
+        var args = c.Args;
+        var name = c.Callee.EndsWith("_explicit", StringComparison.Ordinal)
+            ? c.Callee[..^"_explicit".Length] : c.Callee;
+
+        // Pointee C# type of arg0 (a `T*`), or null if undeterminable.
+        string? Pointee() => args.Count > 0 && args[0].Type.Unqualified is CType.Pointer p
+            ? p.Pointee.Unqualified.CsType : null;
+        // The atomic object as a ref-able location: `*(arg0)`.
+        string Obj() => $"*({Expr(args[0])})";
+        bool Eligible() => Pointee() is string p && _atomicEligible.Contains(p);
+        // Cast a value arg to the element type so the generic Atomic.* call infers T.
+        string Cast(int i) => Pointee() is string p ? $"({p})({Expr(args[i])})" : Expr(args[i]);
+
+        switch (name)
+        {
+            case "atomic_load":
+                return Eligible() ? $"Atomic.Load(ref {Obj()})" : $"({Obj()})";
+            case "atomic_store":
+            case "atomic_init":   // init is a (non-atomic) plain store in C anyway
+                // The plain-store form is a bare assignment (void in C, so only ever
+                // in statement position) — no outer parens (CS0201 wraps `(x = y);`).
+                return name == "atomic_init" || !Eligible()
+                    ? $"{Obj()} = {Cast(1)}"
+                    : $"Atomic.Store(ref {Obj()}, {Cast(1)})";
+            case "atomic_exchange":
+                return $"Atomic.Exchange(ref {Obj()}, {Cast(1)})";
+            case "atomic_compare_exchange_strong":
+            case "atomic_compare_exchange_weak":
+                return $"((CBool)Atomic.CompareExchange(ref {Obj()}, ref *({Expr(args[1])}), {Cast(2)}))";
+            case "atomic_fetch_add": return $"Atomic.FetchAdd(ref {Obj()}, {Cast(1)})";
+            case "atomic_fetch_sub": return $"Atomic.FetchSub(ref {Obj()}, {Cast(1)})";
+            case "atomic_fetch_or":  return $"Atomic.FetchOr(ref {Obj()}, {Cast(1)})";
+            case "atomic_fetch_and": return $"Atomic.FetchAnd(ref {Obj()}, {Cast(1)})";
+            case "atomic_fetch_xor": return $"Atomic.FetchXor(ref {Obj()}, {Cast(1)})";
+            // atomic_flag — dotcc models the opaque flag as an int (see <stdatomic.h>).
+            case "atomic_flag_test_and_set": return $"((CBool)(Atomic.Exchange(ref {Obj()}, 1) != 0))";
+            case "atomic_flag_clear": return $"Atomic.Store(ref {Obj()}, 0)";
+            case "atomic_thread_fence": return "Atomic.ThreadFence()";
+            case "atomic_signal_fence": return "Atomic.SignalFence()";
+            // Our eligible atomics are always lock-free; report 1, else 0.
+            case "atomic_is_lock_free": return Eligible() ? "1" : "0";
+            default: return null;
+        }
+    }
+
     private string CallText(Call c)
     {
+        if (LowerAtomicCall(c) is { } atomic) { return atomic; }
         // Coerce each argument to its parameter type (C's implicit conversion at
         // a call C# requires explicit) when the callee's signature is known; the
         // variadic tail (index ≥ fixed-param count) and unknown-signature callees
