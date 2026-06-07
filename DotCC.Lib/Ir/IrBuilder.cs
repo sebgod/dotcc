@@ -100,6 +100,10 @@ internal sealed class IrBuilder
             case C.TypedefUnionAnon s: BuildStructDef(null, s.Arg3, Tok(s.Arg5), isUnion: true); break;
             // `struct Tag;` forward declaration — C# resolves order-independently.
             case C.StructFwd: break;
+            // `_Static_assert(expr[, "msg"]);` at file scope — a compile-time-only
+            // assertion. A valid program's assertion holds, so dotcc emits nothing
+            // (observably identical to gcc actually checking it). Both arities.
+            case C.StaticAssert: case C.StaticAssertNoMsg: break;
             // `typedef Ret (*Name)(params);` — record Name → fn-ptr type.
             case C.TypedefFnPtr t: _typedefs[Tok(t.Arg4)] = FnPtrType(t.Arg1, t.Arg7); break;
             case C.TypedefFnPtrNoArgs t: _typedefs[Tok(t.Arg4)] = FnPtrType(t.Arg1, null); break;
@@ -564,6 +568,9 @@ internal sealed class IrBuilder
             // file-scope definition) and the statement emits nothing.
             case C.StmtStructDef s: BuildStructDef(Tok(s.Arg1), s.Arg3, null, isUnion: false); return EmptyStmt(pos);
             case C.StmtUnionDef s: BuildStructDef(Tok(s.Arg1), s.Arg3, null, isUnion: true); return EmptyStmt(pos);
+            // Block-scope `_Static_assert(expr[, "msg"]);` — compile-time only,
+            // emits nothing (same as the file-scope forms). Both arities.
+            case C.StaticAssertStmt: case C.StaticAssertStmtNoMsg: return EmptyStmt(pos);
             case C.StmtExpr e: return new ExprStmt(BuildExpr(e.Arg0)) { Pos = pos };
             case C.StmtEmpty: return new Block(System.Array.Empty<CStmt>()) { Pos = pos };
             case C.StmtIf s:
