@@ -38,6 +38,9 @@ internal sealed class IrBuilder
     private readonly Dictionary<string, List<StructField>> _structFields = new(StringComparer.Ordinal);
     private readonly HashSet<string> _emittedTypes = new(StringComparer.Ordinal);
     private string _file = "";
+    // The name of the function currently being built — the value of the C99
+    // predefined identifier `__func__` inside its body.
+    private string _currentFnName = "";
 
     public List<FuncDef> Functions { get; } = new();
     public List<GlobalVar> Globals { get; } = new();
@@ -136,6 +139,7 @@ internal sealed class IrBuilder
         var funcSym = DeclareFunc(sig);
 
         _symbols.BeginFunction();
+        _currentFnName = sig.Name; // drives the `__func__` predefined identifier
         _symbols.EnterScope(); // parameter scope
         var paramSyms = new List<Symbol>(sig.Params.Count);
         foreach (var (pType, pName) in sig.Params)
@@ -1218,6 +1222,17 @@ internal sealed class IrBuilder
         if (sym is not null)
         {
             return new VarRef(sym) { Type = sym.Type, IsLValue = sym.Kind is SymKind.Var or SymKind.Param };
+        }
+        // `__func__` (C99 §6.4.2.2) — a predefined identifier implicitly declared
+        // at the start of every function body as `static const char __func__[] =
+        // "<name>";`. It is not a macro (the preprocessor never sees it), so it
+        // surfaces here as an unbound name; resolve it to a string literal of the
+        // enclosing function's name. (`__FILE__`/`__LINE__` ARE macros and are
+        // already expanded upstream by the preprocessor.)
+        if (name is "__func__" && _currentFnName.Length != 0)
+        {
+            var lit = DotCC.CSharpEmitter.EncodeStringLiteral(new[] { $"\"{_currentFnName}\"" }, out var fnLen);
+            return new LitStr(lit) { Type = new CType.Array(CType.Char, fnLen) };
         }
         // Unresolved (a macro-substituted token, a builtin not in a header). Emit
         // the escaped raw name verbatim and let Roslyn arbitrate. Slice code never
