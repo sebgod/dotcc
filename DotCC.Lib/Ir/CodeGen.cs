@@ -305,6 +305,24 @@ internal sealed class CodeGen
     /// <see cref="Func"/> (CodeGen renders functions one at a time).</summary>
     private CType _currentRet = CType.Int;
 
+    // ---- volatile access -------------------------------------------------
+
+    /// <summary>The fenced read of a volatile lvalue text — C's volatile read.</summary>
+    private static string VolatileRead(string lv) => $"global::System.Threading.Volatile.Read(ref {lv})";
+
+    /// <summary>The bare (un-fenced) C# text of an lvalue — for an assignment
+    /// target, an <c>&amp;</c> operand, or the <c>ref</c> argument of
+    /// Volatile.Read/Write, where the volatile-read wrap must NOT be applied.</summary>
+    private string BareLValue(CExpr e) => e switch
+    {
+        Paren p => BareLValue(p.Inner),
+        VarRef v => v.Sym.CsName,
+        Member m => $"{Sub(m.Base, PPostfix)}{(m.Arrow ? "->" : ".")}{DotCC.CSharpEmitter.Id(m.Field)}",
+        Index ix => $"{Sub(ix.Base, PPostfix)}[{Expr(ix.Idx)}]",
+        Unary { Op: UnOp.Deref } u => $"*{Sub(u.Operand, PUnary)}",
+        _ => Expr(e),
+    };
+
     /// <summary>Render <paramref name="value"/> for storage into a
     /// <paramref name="target"/>-typed sink, inserting any cast C# needs.</summary>
     private string Coerced(CExpr value, CType target) =>
@@ -500,6 +518,7 @@ internal sealed class CodeGen
             // needs the explicit `&` to form a delegate* (C allows the bare name).
             case VarRef v: return v.Sym.Kind == SymKind.Func
                 ? ($"&{v.Sym.CsName}", PUnary)
+                : v.Type.IsVolatile ? (VolatileRead(v.Sym.CsName), PPrimary)
                 : (v.Sym.CsName, PPrimary);
             case IndirectCall ic:
                 return ($"{Sub(ic.Callee, PPostfix)}({string.Join(", ", ic.Args.Select(a => Sub(a, PAssign)))})", PPostfix);
@@ -515,8 +534,16 @@ internal sealed class CodeGen
                 return so.Of is CType.Array { Count: { } n } arr
                     ? ($"((ulong)({n} * sizeof({arr.Element.CsType})))", PPrimary)
                     : ($"((ulong)sizeof({so.Of.CsType}))", PPrimary);
-            case Index ix: return ($"{Sub(ix.Base, PPostfix)}[{Expr(ix.Idx)}]", PPostfix);
-            case Member m: return ($"{Sub(m.Base, PPostfix)}{(m.Arrow ? "->" : ".")}{DotCC.CSharpEmitter.Id(m.Field)}", PPostfix);
+            case Index ix:
+            {
+                var t = $"{Sub(ix.Base, PPostfix)}[{Expr(ix.Idx)}]";
+                return ix.Type.IsVolatile ? (VolatileRead(t), PPrimary) : (t, PPostfix);
+            }
+            case Member m:
+            {
+                var t = $"{Sub(m.Base, PPostfix)}{(m.Arrow ? "->" : ".")}{DotCC.CSharpEmitter.Id(m.Field)}";
+                return m.Type.IsVolatile ? (VolatileRead(t), PPrimary) : (t, PPostfix);
+            }
             case StructInit si: return (StructInitText(si), PPrimary);
             case Call c: return (CallText(c), PPostfix);
             case CondExpr t:
@@ -526,6 +553,17 @@ internal sealed class CodeGen
                 return (string.Join(", ", cs.Items.Select(it => Sub(it, PAssign))), PComma);
             case CommaOp co:
                 return (CommaValue(co), PPrimary);
+            case Assign a when a.Target.Type.IsVolatile:
+                {
+                    // A volatile lvalue stores through Volatile.Write(ref lv, …); a
+                    // compound op is a fenced read-modify-write. (Returns void, so —
+                    // like the legacy — only valid in statement position.)
+                    var lv = BareLValue(a.Target);
+                    var stored = a.CompoundOp is { } cop
+                        ? $"{VolatileRead(lv)} {BinSym(cop)} {Sub(a.Value, Prec(cop) + 1)}"
+                        : Coerced(a.Value, a.Target.Type);
+                    return ($"global::System.Threading.Volatile.Write(ref {lv}, {stored})", PPrimary);
+                }
             case Assign a:
                 {
                     var op = a.CompoundOp is { } co ? BinSym(co) : "";
@@ -546,6 +584,14 @@ internal sealed class CodeGen
 
     private (string, int) RenderUnary(Unary u)
     {
+        // ++/-- of a volatile lvalue is a fenced read-modify-write (returns void —
+        // statement position only, like the legacy). Handled before the plain forms.
+        if (u.Op is UnOp.PreInc or UnOp.PreDec or UnOp.PostInc or UnOp.PostDec && u.Operand.Type.IsVolatile)
+        {
+            var lv = BareLValue(u.Operand);
+            var step = u.Op is UnOp.PreInc or UnOp.PostInc ? "+" : "-";
+            return ($"global::System.Threading.Volatile.Write(ref {lv}, {VolatileRead(lv)} {step} 1)", PPrimary);
+        }
         switch (u.Op)
         {
             case UnOp.Plus: return ($"+{Sub(u.Operand, PUnary)}", PUnary);
@@ -554,7 +600,9 @@ internal sealed class CodeGen
             // &fn where fn is a function already decays to `&fn` in the VarRef
             // case — don't emit a second `&`.
             case UnOp.AddrOf when u.Operand is VarRef { Sym.Kind: SymKind.Func }: return Render(u.Operand);
-            case UnOp.AddrOf: return ($"&{Sub(u.Operand, PUnary)}", PUnary);
+            // BareLValue so `&` of a volatile lvalue takes the address, not the
+            // address of a Volatile.Read(...) call.
+            case UnOp.AddrOf: return ($"&{BareLValue(u.Operand)}", PUnary);
             case UnOp.Deref: return ($"*{Sub(u.Operand, PUnary)}", PUnary);
             case UnOp.PreInc: return ($"++{Sub(u.Operand, PUnary)}", PUnary);
             case UnOp.PreDec: return ($"--{Sub(u.Operand, PUnary)}", PUnary);

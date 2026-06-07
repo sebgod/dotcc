@@ -367,6 +367,9 @@ internal sealed class IrBuilder
         C.TypePtr t => new CType.Pointer(ResolveType(t.Arg0)),
         C.TypePtrQualConst t => new CType.Pointer(ResolveType(t.Arg0)),
         C.TypePtrQualVolatile t => new CType.Pointer(ResolveType(t.Arg0)),
+        // `volatile T` — leading qualifier prefix. Carry the flag on the type;
+        // codegen fences reads/writes of a volatile scalar lvalue (Volatile.Read/Write).
+        C.TypeVolatile t => ResolveType(t.Arg1).WithQuals(TypeQual.Volatile),
         C.TypePtrQualRestrict t => new CType.Pointer(ResolveType(t.Arg0)),
         C.TypeName t => ResolveTypeName(Tok(t.Arg0)),
         // `enum Tag` as a type — dotcc lowers enums to plain int.
