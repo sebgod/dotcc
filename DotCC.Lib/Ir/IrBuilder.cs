@@ -27,6 +27,12 @@ public sealed class IrUnsupportedException : Exception
 internal sealed class IrBuilder
 {
     private readonly SymbolTable _symbols = new();
+    // Typedef name → its underlying type. Unlike the legacy emitter (which emits
+    // `using` aliases and resolves names textually), the IR resolves a typedef
+    // name straight to its CType — so `size_t x` becomes `ulong x` with the right
+    // SizeOf, no alias directive needed. Populated in declaration order, so a
+    // chained typedef (`typedef size_t mysize;`) resolves through the table.
+    private readonly Dictionary<string, CType> _typedefs = new(StringComparer.Ordinal);
     private string _file = "";
 
     public List<FuncDef> Functions { get; } = new();
@@ -67,6 +73,9 @@ internal sealed class IrBuilder
             // `extern T x;` declares the name + type for resolution but emits no
             // field — the definition lives in another TU (dotcc whole-program model).
             case C.ExternVarDecl g: BuildGlobalDecls(g.Arg1, g.Arg2, Storage.Extern); break;
+            // `typedef <type> <name>;` — record name → underlying type. Resolution
+            // (ResolveType's TypeName case) then sees through it everywhere.
+            case C.TypedefAlias t: _typedefs[Tok(t.Arg2)] = ResolveType(t.Arg1); break;
             default: throw new IrUnsupportedException(TypeName(fn.Content));
         }
     }
@@ -179,9 +188,16 @@ internal sealed class IrBuilder
         C.TypePtrQualConst t => new CType.Pointer(ResolveType(t.Arg0)),
         C.TypePtrQualVolatile t => new CType.Pointer(ResolveType(t.Arg0)),
         C.TypePtrQualRestrict t => new CType.Pointer(ResolveType(t.Arg0)),
-        C.TypeName t => new CType.Named(Tok(t.Arg0)),
+        C.TypeName t => ResolveTypeName(Tok(t.Arg0)),
         _ => throw new IrUnsupportedException(TypeName(it.Content)),
     };
+
+    /// <summary>Resolve a type-name token: a user/library typedef resolves to its
+    /// underlying type; an unknown name (a predefined opaque type like
+    /// <c>FILE</c> / <c>jmp_buf</c>'s target) stays a <see cref="CType.Named"/>
+    /// whose <c>CsType</c> is the name itself.</summary>
+    private CType ResolveTypeName(string name) =>
+        _typedefs.TryGetValue(name, out var t) ? t : new CType.Named(name);
 
     private List<string> CollectSpecs(Item it)
     {

@@ -95,4 +95,46 @@ public sealed class IrDiagnostic
     }
 
     private static string Trunc(string s) => s.Length > 100 ? s[..100] : s;
+
+    /// <summary>FAST tight-loop probe: only emits C# (parse → IR → codegen), no
+    /// Roslyn compile/run, so it returns in a couple of seconds. Buckets the
+    /// next blocking unsupported node / compile error per fixture. Use this while
+    /// growing node coverage; run the full <see cref="Ir_diagnostic_report"/>
+    /// (which also compiles + runs) at checkpoints to catch codegen bugs.
+    /// Run with: <c>dotnet test --filter Ir_emit_probe</c>.</summary>
+    [Fact]
+    public void Ir_emit_probe()
+    {
+        var ok = new List<string>();
+        var buckets = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        void Bucket(string key, string name)
+        {
+            if (!buckets.TryGetValue(key, out var l)) { buckets[key] = l = new(); }
+            l.Add(name);
+        }
+        foreach (var f in FixtureRunner.Discover().OrderBy(f => f.name, StringComparer.Ordinal))
+        {
+            try
+            {
+                Compiler.EmitCSharp(f.sources, new[] { f.dir }, null, fileBased: false, dialect: CDialect.Parse(f.std));
+                ok.Add(f.name);
+            }
+            catch (DotCC.Ir.IrUnsupportedException ex)
+            {
+                Bucket("UNSUPPORTED: " + ex.Message.Replace("--ir backend does not yet support: ", ""), f.name);
+            }
+            catch (CompileException ex) { Bucket("COMPILE: " + Trunc(ex.Message.Split('\n')[0]), f.name); }
+            catch (Exception ex) { Bucket("EMIT-EX: " + ex.GetType().Name + ": " + Trunc(ex.Message.Split('\n')[0]), f.name); }
+        }
+        var sb = new StringBuilder();
+        sb.AppendLine($"=== IR emit: {ok.Count} EMIT-OK / {ok.Count + buckets.Sum(b => b.Value.Count)} total ===");
+        sb.AppendLine();
+        foreach (var b in buckets.OrderByDescending(b => b.Value.Count))
+        {
+            sb.AppendLine($"[{b.Value.Count}] {b.Key}");
+            sb.AppendLine("      " + string.Join(", ", b.Value));
+        }
+        File.WriteAllText(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "ir-emit-probe.txt")), sb.ToString());
+        Console.WriteLine(sb.ToString());
+    }
 }
