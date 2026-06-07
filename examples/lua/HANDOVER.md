@@ -1,16 +1,47 @@
 # Lua-on-dotcc — Session Handover
 
-**As of commit `a6b1a9d` (Phase 6v).** This is a resume-from-here snapshot for the
-ongoing effort to make **Lua 5.5.0 compile and run under dotcc** (the C→.NET 10/C#
-transpiler). For the full feature history see [`ROADMAP.md`](ROADMAP.md); for the
-language-feature matrix see [`../../C-SUPPORT.md`](../../C-SUPPORT.md). This file is
-the "what's the wall right now and how do I attack it" view.
+**Status: the full official Lua 5.5 test suite passes.** Lua 5.5.0 compiles
+through dotcc (C→.NET 10/C# transpiler), links, and runs — and `testes/all.lua`
+(the upstream conformance runner, which dump/undumps every chunk to bytecode and
+back) completes with `final OK !!!`. All 28 individual test files pass under the
+`_U=true` user-test harness too. For the full feature history see
+[`ROADMAP.md`](ROADMAP.md); for the language-feature matrix see
+[`../../C-SUPPORT.md`](../../C-SUPPORT.md).
 
-## Mission
+## How to run the suite
 
-Get the whole Lua core + stdlib to **link and run on .NET** — ultimately
-`luaL_newstate → luaL_openlibs → luaL_dostring("print('hello from Lua on .NET')")`
-executing via the dotcc-emitted C#. We are in **Phase 6 — Link & run**.
+```bash
+# Build dotcc, then emit+build the standalone interpreter (core+lib+lua.c):
+dotnet build DotCC/DotCC.csproj -c Release
+cd examples/lua
+DLL=../../DotCC/bin/Release/net10.0/dotcc.dll; SRC=lua-src
+CORE="lapi lcode lctype ldebug ldo ldump lfunc lgc llex lmem lobject lopcodes lparser lstate lstring ltable ltm lundump lvm lzio"
+LIB="lauxlib lbaselib lcorolib ldblib liolib lmathlib loadlib loslib lstrlib ltablib lutf8lib linit"
+S=""; for t in $CORE $LIB; do S="$S $SRC/$t.c"; done
+dotnet "$DLL" --emit=build -I "$SRC" $S "$SRC/lua.c" -o build_lua
+LUA=build_lua/bin/Release/net10.0/build_lua.dll
+cd lua-src/testes && dotnet "$LUA" -e '_U=true' all.lua      # → final OK !!!
+```
+
+## Mission — DONE
+
+Get the whole Lua core + stdlib to link and run on .NET — `luaL_newstate →
+luaL_openlibs → luaL_dostring(...)`, the standalone REPL, AND the full test
+suite. Achieved. Remaining stretch: `luac` (standalone bytecode compiler exe;
+the dump/undump machinery it relies on already works), readline in the REPL, and
+the `T` internal C-API test library (the suite's `testC`-gated tests skip
+cleanly without it).
+
+## Fixes that closed the last gaps (2026-06-07 session)
+
+| Area | Fix |
+|------|-----|
+| C-stack overflow | Run the emitted entry on a 64 MB-stack thread — Lua's `LUAI_MAXCCALLS` guard now trips gracefully instead of a .NET stack overflow (`cstack.lua`). |
+| `sizeof(struct) * n` | Stop dropping `*`/`-`/`&` after a struct sizeof (grammar-ambiguity workaround in `SizeofFolder`). |
+| Bytecode dump | `SizeofFolder` only folds a sizeof of a PURE type, not an expression containing a typename — fixes `dumpVarint` corruption (`string.dump`/`load`, `calls`/`errors`/`db`). |
+| FILE wrong-mode I/O | Reading a write-only / writing a read-only FILE returns EOF/short-count + error indicator instead of throwing (`files.lua`). |
+| `/dev/null`, `/dev/full`, `remove()`, file sharing | Unix device shims, `remove()` ENOENT on missing file, permissive `FileShare` (`files.lua`). |
+| setjmp routing | Arm each setjmp site with a fresh token so a frame-skipping `longjmp` (`luaD_throwbaselevel`, `coroutine.close` on a running coroutine) reaches the right handler (`coroutine.lua`). |
 
 ## The working method (do NOT deviate)
 

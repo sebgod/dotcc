@@ -817,7 +817,25 @@ $ dotcc-out -e 'print(1+2)'
 
 Remaining: `luac` (bytecode compiler), `readline` integration for the interactive REPL.
 
-### ⬜ Phase 8 — Stretch: `luac`, full test suite parity
+### ✅ Phase 8 — Full test-suite parity — DONE (2026-06-07)
+
+The upstream Lua 5.5 test suite passes. `testes/all.lua` — the conformance
+runner that loads every chunk, dumps it to bytecode, undumps it, and runs the
+result — completes with `final OK !!!`. All 28 individual test files also pass
+under the `_U=true` user-test harness (run each as
+`build_lua … -e '_U=true' <file>.lua`). The last six gaps closed this session:
+
+| Test(s) | Root cause → fix |
+|---------|------------------|
+| `cstack.lua` (hard crash) | .NET's ~1 MB stack overflowed before Lua's `LUAI_MAXCCALLS` (200) guard could trip → **run the emitted entry on a 64 MB-stack thread** (`BuildShell`). |
+| sizeof regression fixture | `sizeof(struct) * n` dropped the operator (parsed as a cast inside the operand) → **`SizeofFolder` wraps an unfoldable struct sizeof in parens when `*`/`-`/`&` follows**. |
+| `calls`, `errors`, `db` | `string.dump`/`load` produced corrupt bytecode: `dumpVarint`'s `sizeof((buf+DIBS-n)[0])` mis-folded to 8 because `DIBS` contains `sizeof(lua_Unsigned)` → **`SizeofFolder` only folds a sizeof of a PURE type**, not an expression containing a typename. |
+| `files.lua` | (a) Reading a write-only / writing a read-only FILE threw instead of returning EOF/short-count + error indicator; (b) `/dev/null` & `/dev/full` unsupported; (c) `remove()` of a missing file wrongly succeeded; (d) Windows rejected concurrent read+write handles → **four FILE-layer fixes** in `FileLib.cs`. |
+| `coroutine.lua` (memory corruption) | `coroutine.close` on a running coroutine uses `luaD_throwbaselevel` to longjmp PAST intermediate handlers to the base, but every setjmp's `jmp_buf` field was null so the throw matched the nearest handler → **arm each setjmp site with a fresh `LongJmpToken`** so frame-skipping longjmps route correctly. |
+
+Remaining stretch: `luac` (standalone bytecode-compiler exe — the dump/undump it
+needs already works), `readline` in the interactive REPL, and the `T` internal
+C-API test library (the suite's `testC`-gated cases skip cleanly without it).
 
 ## Notes / decisions log
 - Never patch Lua's sources to suit dotcc — if Lua's C is standard, dotcc should
