@@ -176,7 +176,18 @@ internal sealed partial class CSharpEmitter
         var catchInner = string.IsNullOrWhiteSpace(catchBody)
             ? "{ }"
             : $"{{ var __longjmp_value = __jmp.Value; {catchBody} }}";
-        return $"try {tb}" +
+        // Arm this setjmp site with a FRESH token identity. The token must be
+        // unique and non-null so the `when` filter disambiguates nested setjmps:
+        // a `longjmp(env, …)` reads the SAME `env` (so it matches here), while a
+        // longjmp aimed at a DIFFERENT (e.g. outer / base) env carries a different
+        // token and propagates past this catch. Without it, an uninitialised
+        // `jmp_buf` field (Lua's `lua_longjmp lj = default;` → `lj.b == null`)
+        // makes every filter `Token == null`, so a base-level throw
+        // (`luaD_throwbaselevel`, used by `coroutine.close` on a running coroutine)
+        // is caught by the NEAREST handler instead of the base — resuming on an
+        // already-reset stack and corrupting memory.
+        return $"{envName} = new Libc.LongJmpToken();\n" +
+            $"try {tb}" +
             $"catch (Libc.LongJmpException __jmp) when (__jmp.Token == {envName}) " +
             catchInner;
     }

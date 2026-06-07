@@ -1,0 +1,3 @@
+armed
+outer handler
+done
