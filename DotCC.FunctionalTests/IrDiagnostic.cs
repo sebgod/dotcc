@@ -34,7 +34,7 @@ public sealed class IrDiagnostic
         // rest (they're recorded as blocked) — fix the one HANG and re-run.
         var lockPoisoned = false;
 
-        foreach (var f in FixtureRunner.Discover().OrderBy(f => f.name, StringComparer.Ordinal))
+        foreach (var f in FixtureRunner.Discover().Where(OnlyFilter).OrderBy(f => f.name, StringComparer.Ordinal))
         {
             string emitted;
             try
@@ -120,6 +120,19 @@ public sealed class IrDiagnostic
 
     private static string Trunc(string s) => s.Length > 100 ? s[..100] : s;
 
+    /// <summary>Optional fixture filter for fast iteration: set
+    /// <c>DOTCC_IR_ONLY=name1,name2</c> to run only those fixtures. Unset → all.</summary>
+    private static bool OnlyFilter((string name, string dir, string[] sources, string expectedStdout, string std) f)
+    {
+        var only = Environment.GetEnvironmentVariable("DOTCC_IR_ONLY");
+        if (string.IsNullOrWhiteSpace(only)) { return true; }
+        foreach (var n in only.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (string.Equals(n, f.name, StringComparison.Ordinal)) { return true; }
+        }
+        return false;
+    }
+
     /// <summary>FAST tight-loop probe: only emits C# (parse → IR → codegen), no
     /// Roslyn compile/run, so it returns in a couple of seconds. Buckets the
     /// next blocking unsupported node / compile error per fixture. Use this while
@@ -136,7 +149,7 @@ public sealed class IrDiagnostic
             if (!buckets.TryGetValue(key, out var l)) { buckets[key] = l = new(); }
             l.Add(name);
         }
-        foreach (var f in FixtureRunner.Discover().OrderBy(f => f.name, StringComparer.Ordinal))
+        foreach (var f in FixtureRunner.Discover().Where(OnlyFilter).OrderBy(f => f.name, StringComparer.Ordinal))
         {
             try
             {
