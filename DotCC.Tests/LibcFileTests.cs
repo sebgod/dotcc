@@ -202,4 +202,58 @@ public sealed unsafe class LibcFileTests
         }
         finally { Free(path); File.Delete(p); }
     }
+
+    [Fact]
+    public void remove_of_a_missing_file_fails_with_ENOENT()
+    {
+        // .NET's File.Delete is a silent no-op on a missing file; C's remove()
+        // must fail (Lua's os.remove of an already-deleted file returns an error).
+        var p = Path.Combine(Path.GetTempPath(), "dotcc_rm_" + Guid.NewGuid().ToString("N") + ".txt");
+        var path = C(p);
+        try
+        {
+            File.WriteAllText(p, "x");
+            remove(path).ShouldBe(0);       // first removal succeeds
+            errno = 0;
+            remove(path).ShouldBe(-1);      // second removal fails…
+            errno.ShouldBe(ENOENT);         // …with ENOENT
+        }
+        finally { Free(path); File.Delete(p); }
+    }
+
+    [Fact]
+    public void same_file_can_be_open_for_write_and_read_concurrently()
+    {
+        // Unix allows a file to have simultaneous read and write handles; Windows
+        // rejects it unless every handle shares permissively. fopen uses
+        // FileShare.ReadWrite|Delete so the pattern (Lua's files.lua buffer tests)
+        // works on Windows too.
+        var p = Path.Combine(Path.GetTempPath(), "dotcc_cc_" + Guid.NewGuid().ToString("N") + ".txt");
+        var path = C(p);
+        try
+        {
+            FILE* w = fopen(path, C("w"));
+            ((nint)w).ShouldNotBe((nint)0);
+            FILE* r = fopen(path, C("r"));      // must NOT fail with EIO
+            ((nint)r).ShouldNotBe((nint)0);
+            fclose(w); fclose(r);
+        }
+        finally { Free(path); File.Delete(p); }
+    }
+
+    [Fact]
+    public void dev_null_discards_writes_and_dev_full_fails_to_flush()
+    {
+        FILE* devnull = fopen(C("/dev/null"), C("w"));
+        ((nint)devnull).ShouldNotBe((nint)0);
+        fputc((byte)'x', devnull).ShouldBe((int)'x');   // accepted (discarded)
+        fflush(devnull).ShouldBe(0);                    // flush succeeds
+        fclose(devnull).ShouldBe(0);
+
+        FILE* devfull = fopen(C("/dev/full"), C("w"));
+        ((nint)devfull).ShouldNotBe((nint)0);
+        fputc((byte)'x', devfull).ShouldBe((int)'x');   // write accepted…
+        fflush(devfull).ShouldBe(-1);                   // …but flush fails (ENOSPC)
+        fclose(devfull).ShouldBe(0);
+    }
 }

@@ -187,16 +187,26 @@ public static unsafe partial class Libc
         var p = Encoding.UTF8.GetString(path, strlen(path));
         if (!ParseMode(mode, out var fileMode, out var access)) { errno = EINVAL; return null; }
         Stream stream;
-        try
+        // The well-known Unix device files, backed by synthetic streams so C code
+        // that uses them works on every host (on Windows the paths don't exist;
+        // even on Unix, /dev/full's "writes accepted, flush fails" needs the C
+        // stdio buffering dotcc doesn't have). /dev/null discards writes and reads
+        // EOF; /dev/full accepts writes but fails to flush (ENOSPC).
+        if (p == "/dev/null") { stream = Stream.Null; }
+        else if (p == "/dev/full") { stream = new FullDeviceStream(); }
+        else
         {
-            stream = new FileStream(p, fileMode, access,
-                access == FileAccess.Read ? FileShare.Read : FileShare.ReadWrite);
+            try
+            {
+                stream = new FileStream(p, fileMode, access,
+                    FileShare.ReadWrite | FileShare.Delete);  // Unix-like: allow concurrent open + unlink/rename
+            }
+            catch (ArgumentException) { errno = EINVAL; return null; }
+            catch (FileNotFoundException) { errno = ENOENT; return null; }
+            catch (DirectoryNotFoundException) { errno = ENOENT; return null; }
+            catch (UnauthorizedAccessException) { errno = EACCES; return null; }
+            catch (IOException) { errno = EIO; return null; }
         }
-        catch (ArgumentException) { errno = EINVAL; return null; }
-        catch (FileNotFoundException) { errno = ENOENT; return null; }
-        catch (DirectoryNotFoundException) { errno = ENOENT; return null; }
-        catch (UnauthorizedAccessException) { errno = EACCES; return null; }
-        catch (IOException) { errno = EIO; return null; }
         int slot = RegisterFileSlot(stream);
         var fp = (FILE*)NativeMemory.Alloc((nuint)sizeof(FILE));
         fp->_slot = slot;
@@ -223,7 +233,7 @@ public static unsafe partial class Libc
         try
         {
             newStream = new FileStream(p, fileMode, access,
-                access == FileAccess.Read ? FileShare.Read : FileShare.ReadWrite);
+                FileShare.ReadWrite | FileShare.Delete);  // Unix-like: allow concurrent open + unlink/rename
         }
         catch (FileNotFoundException) { errno = ENOENT; CloseSlot(slot); return null; }
         catch (DirectoryNotFoundException) { errno = ENOENT; CloseSlot(slot); return null; }
@@ -464,9 +474,21 @@ public static unsafe partial class Libc
             return 0;
         }
         var slot = Slot(stream);
-        if (slot?.Kind == FileSlot.K.File) { slot.Writer?.Flush(); slot.Stream?.Flush(); }
-        else if (slot?.Kind == FileSlot.K.Err) { Console.Error.Flush(); }
-        else { Console.Out.Flush(); }
+        try
+        {
+            if (slot?.Kind == FileSlot.K.File) { slot.Writer?.Flush(); slot.Stream?.Flush(); }
+            else if (slot?.Kind == FileSlot.K.Err) { Console.Error.Flush(); }
+            else { Console.Out.Flush(); }
+        }
+        catch (IOException)
+        {
+            // The device couldn't accept the buffered data (a full disk, or the
+            // synthetic /dev/full): C's fflush returns EOF and sets the error
+            // indicator so file:flush reports (nil, msg, errno).
+            errno = ENOSPC;
+            if (slot != null) { slot.Err = true; }
+            return -1;  // EOF
+        }
         return 0;
     }
 
@@ -524,7 +546,17 @@ public static unsafe partial class Libc
     /// <summary><c>remove(path)</c> — delete a file. 0 on success, -1 (errno) on failure.</summary>
     public static int remove(byte* path)
     {
-        try { File.Delete(Encoding.UTF8.GetString(path, strlen(path))); return 0; }
+        var p = Encoding.UTF8.GetString(path, strlen(path));
+        try
+        {
+            // .NET's File.Delete is a silent no-op on a missing file, but C's
+            // remove() fails with ENOENT — so check existence first (Lua relies on
+            // a second remove of the same file returning an error). remove() also
+            // unlinks an empty directory in C, so handle that too.
+            if (File.Exists(p)) { File.Delete(p); return 0; }
+            if (Directory.Exists(p)) { Directory.Delete(p); return 0; }
+            errno = ENOENT; return -1;
+        }
         catch (FileNotFoundException) { errno = ENOENT; return -1; }
         catch (DirectoryNotFoundException) { errno = ENOENT; return -1; }
         catch (IOException) { errno = EIO; return -1; }
@@ -608,6 +640,30 @@ public static unsafe partial class Libc
     /// ASCII <c>fscanf</c>; it deliberately does not decode multi-byte UTF-8
     /// (which would desync the byte position that <c>ftell</c> reports).
     /// </summary>
+    /// <summary>
+    /// Synthetic backing for the Unix <c>/dev/full</c> device: writes are accepted
+    /// (as if buffered into the kernel) but <c>Flush</c> always fails with a
+    /// "no space" <see cref="IOException"/> — which <see cref="fflush"/> turns into
+    /// an EOF result. Reads return EOF. <c>Dispose</c> never flushes (so
+    /// <c>fclose</c> on it still succeeds), matching what testes/files.lua expects.
+    /// </summary>
+    private sealed class FullDeviceStream : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanWrite => true;
+        public override bool CanSeek => false;
+        public override long Length => 0;
+        public override long Position { get => 0; set { } }
+        public override void Write(byte[] buffer, int offset, int count) { }  // accepted
+        public override void WriteByte(byte value) { }                        // accepted
+        public override int Read(byte[] buffer, int offset, int count) => 0;  // EOF
+        public override int ReadByte() => -1;                                 // EOF
+        public override void Flush() => throw new IOException("No space left on device");
+        public override long Seek(long offset, SeekOrigin origin) => 0;
+        public override void SetLength(long value) { }
+        protected override void Dispose(bool disposing) { /* never flushes / throws */ }
+    }
+
     internal sealed class StreamFileReader : TextReader
     {
         private readonly Stream _s;
