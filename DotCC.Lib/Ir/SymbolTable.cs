@@ -34,6 +34,10 @@ public sealed class Symbol
     public required SymKind Kind { get; init; }
     public required CType Type { get; init; }
     public Storage Storage { get; init; } = Storage.None;
+    /// <summary>For an <see cref="SymKind.EnumConst"/>: its integer value. C enums
+    /// lower to plain integer constants (dotcc emits the literal value at each
+    /// use), sidestepping C#'s enum-arithmetic restrictions.</summary>
+    public long ConstValue { get; init; }
     /// <summary>The emitted C# identifier (set by <see cref="SymbolTable.Declare"/>).</summary>
     public string CsName { get; set; } = "";
     /// <summary>True for a file-scope (global) symbol — codegen emits it as a
