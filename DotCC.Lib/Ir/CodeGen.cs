@@ -83,6 +83,16 @@ internal sealed class CodeGen
         sb.Append("unsafe struct ").Append(t.Name).Append("\n{\n");
         foreach (var f in t.Fields)
         {
+            // A bit-field lowers to a backing field + a masked accessor property:
+            // the store truncates to the field width, and a signed field
+            // sign-extends on read — matching C's value semantics (overflow wrap,
+            // negative signed fields). Layout/sizeof needn't match C (bit packing is
+            // implementation-defined), so each bit-field gets its own backing field.
+            if (f.BitWidth > 0)
+            {
+                sb.Append(BitFieldText(f, t.IsUnion));
+                continue;
+            }
             if (t.IsUnion) { sb.Append("    [System.Runtime.InteropServices.FieldOffset(0)]\n"); }
             // An array member is C-inline storage, not a pointer field. A primitive
             // element lowers to a C# `fixed` buffer (inline, indexable, decays to a
@@ -112,6 +122,28 @@ internal sealed class CodeGen
         }
         sb.Append("}\n\n");
         return wrappers.Append(sb).ToString();
+    }
+
+    /// <summary>Render a bit-field as a private backing field + a public accessor
+    /// property. The setter stores the value masked to the field width (C's modular
+    /// truncation); the getter masks (unsigned) or sign-extends through the
+    /// container width (signed) — so reads/writes carry C's exact value semantics.</summary>
+    private static string BitFieldText(StructField f, bool isUnion)
+    {
+        var bt = f.Type.CsType;                       // "uint" / "int" / …
+        var fid = DotCC.CSharpEmitter.Id(f.Name);
+        var backing = "__bf_" + fid;
+        var bits = f.Type.SizeOf * 8;                 // container width
+        var signed = (f.Type.Unqualified as CType.Prim)?.Signed ?? false;
+        var mask = (1UL << f.BitWidth) - 1;
+        var maskLit = signed ? mask.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                             : mask.ToString(System.Globalization.CultureInfo.InvariantCulture) + "u";
+        var offset = isUnion ? "    [System.Runtime.InteropServices.FieldOffset(0)]\n" : "";
+        var get = signed
+            ? $"({bt})({backing} << {bits - f.BitWidth} >> {bits - f.BitWidth})"   // sign-extend
+            : $"({bt})({backing} & {maskLit})";
+        return $"{offset}    private {bt} {backing};\n"
+             + $"    public {bt} {fid} {{ get => {get}; set => {backing} = ({bt})(value & {maskLit}); }}\n";
     }
 
     /// <summary>C# permits a <c>fixed</c> buffer only of these primitive element
