@@ -82,6 +82,12 @@ public sealed record Member(CExpr Base, string Field, bool Arrow) : CExpr;
 /// there. (The value-context comma operator is a separate, later concern.)</summary>
 public sealed record CommaSeq(IReadOnlyList<CExpr> Items) : CExpr;
 
+/// <summary><c>sizeof</c> — of a type (<c>sizeof(int)</c>) or, when synthesized
+/// from <c>sizeof expr</c>, of the operand's type. Codegen prints C#'s
+/// <c>sizeof(T)</c> for a scalar/struct, or <c>count * sizeof(elem)</c> for an
+/// array (which lowered to a pointer, so C#'s <c>sizeof</c> would be wrong).</summary>
+public sealed record SizeOfExpr(CType Of) : CExpr;
+
 /// <summary>A parenthesized sub-expression — kept so codegen can preserve
 /// explicit grouping (precedence-driven parens come later).</summary>
 public sealed record Paren(CExpr Inner) : CExpr;
@@ -129,6 +135,12 @@ public sealed record Goto(string Label) : CStmt;
 public sealed record Labeled(string Name, CStmt Body) : CStmt;
 
 // ---- declarations / translation unit ------------------------------------
+
+/// <summary>A local array declaration, lowered to a C# <c>stackalloc</c>.
+/// <see cref="Inits"/> non-null is the brace-initialized form
+/// (<c>stackalloc T[]{ … }</c>); otherwise <see cref="CountExpr"/> gives the
+/// dimension (<c>stackalloc T[n]</c>, C# zero-fills).</summary>
+public sealed record ArrayDecl(Symbol Sym, CType Element, CExpr? CountExpr, IReadOnlyList<CExpr>? Inits) : CStmt;
 
 /// <summary>A local variable declaration with optional initializer.</summary>
 public sealed record LocalDecl(Symbol Sym, CExpr? Init);

@@ -90,6 +90,21 @@ internal sealed class CodeGen
             case DeclStmt d:
                 EmitDeclStmt(sb, d, pad);
                 break;
+            case ArrayDecl a:
+                {
+                    var elemCs = a.Element.CsType;
+                    if (a.Inits is { } inits)
+                    {
+                        sb.Append(pad).Append($"{elemCs}* {a.Sym.CsName} = stackalloc {elemCs}[]{{ {string.Join(", ", inits.Select(Expr))} }};\n");
+                    }
+                    else
+                    {
+                        // No initializer → zeroed stackalloc of the given extent.
+                        var count = a.CountExpr is { } ce ? Expr(ce) : "0";
+                        sb.Append(pad).Append($"{elemCs}* {a.Sym.CsName} = stackalloc {elemCs}[{count}];\n");
+                    }
+                }
+                break;
             case ExprStmt e:
                 sb.Append(pad).Append(Expr(e.Expr)).Append(";\n");
                 break;
@@ -219,6 +234,12 @@ internal sealed class CodeGen
             case VarRef v: return (v.Sym.CsName, PPrimary);
             case Paren p: return Render(p.Inner); // explicit C parens are redundant; precedence re-adds as needed
             case Cast c: return ($"({c.Target.CsType}){Sub(c.Operand, PUnary)}", PUnary);
+            case SizeOfExpr so:
+                // An array lowered to a pointer, so C#'s sizeof would measure the
+                // pointer — emit count * sizeof(element) instead (the true C size).
+                return so.Of is CType.Array { Count: { } n } arr
+                    ? ($"({n} * sizeof({arr.Element.CsType}))", PPrimary)
+                    : ($"sizeof({so.Of.CsType})", PPrimary);
             case Index ix: return ($"{Sub(ix.Base, PPostfix)}[{Expr(ix.Idx)}]", PPostfix);
             case Member m: return ($"{Sub(m.Base, PPostfix)}{(m.Arrow ? "->" : ".")}{DotCC.CSharpEmitter.Id(m.Field)}", PPostfix);
             case Call c: return (CallText(c), PPostfix);
