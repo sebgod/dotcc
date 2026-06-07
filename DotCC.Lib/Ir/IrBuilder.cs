@@ -76,6 +76,11 @@ internal sealed class IrBuilder
             // `typedef <type> <name>;` — record name → underlying type. Resolution
             // (ResolveType's TypeName case) then sees through it everywhere.
             case C.TypedefAlias t: _typedefs[Tok(t.Arg2)] = ResolveType(t.Arg1); break;
+            // enum definitions — register the enumerators as integer constants.
+            case C.EnumDef e: RegisterEnum(e.Arg3); break;
+            case C.EnumDefTyped e: RegisterEnum(e.Arg5); break;
+            case C.TypedefEnum e: RegisterEnum(e.Arg4); _typedefs[Tok(e.Arg6)] = CType.Int; break;
+            case C.TypedefEnumAnon e: RegisterEnum(e.Arg3); _typedefs[Tok(e.Arg5)] = CType.Int; break;
             default: throw new IrUnsupportedException(TypeName(fn.Content));
         }
     }
@@ -179,6 +184,72 @@ internal sealed class IrBuilder
         return acc;
     }
 
+    // ---- enums -----------------------------------------------------------
+
+    /// <summary>Register an enum's enumerators as integer constants. Values
+    /// auto-increment from the previous (starting at 0), with explicit
+    /// <c>= expr</c> overriding (expr must be an integer constant expression).
+    /// dotcc lowers C enums to plain ints, so the enum tag itself is not a C#
+    /// type — references to an enumerator emit its literal value.</summary>
+    private void RegisterEnum(Item enumList)
+    {
+        long next = 0;
+        void Walk(Item it)
+        {
+            switch (it.Content)
+            {
+                case C.EnumListCons c: Walk(c.Arg0); Walk(c.Arg2); break;
+                case C.EnumListOne o: Walk(o.Arg0); break;
+                case C.EnumItem e: Add(Tok(e.Arg0), null); break;
+                case C.EnumItemInit e: Add(Tok(e.Arg0), e.Arg2); break;
+                default: throw new IrUnsupportedException(TypeName(it.Content));
+            }
+        }
+        void Add(string name, Item? valueItem)
+        {
+            if (valueItem is { } vi)
+            {
+                next = ConstEval(BuildExpr(vi))
+                    ?? throw new IrUnsupportedException("non-constant enum initializer for " + name);
+            }
+            _symbols.Declare(new Symbol
+            {
+                Name = name, Kind = SymKind.EnumConst, Type = CType.Int, ConstValue = next, IsGlobal = true,
+            });
+            next++;
+        }
+        Walk(enumList);
+    }
+
+    /// <summary>Evaluate an integer constant expression, or null if non-constant.
+    /// Covers the forms enum initializers and array bounds use (literals,
+    /// unary +/-/~, the binary arithmetic/shift/bitwise operators, parens,
+    /// integer casts, and already-resolved enum-constant literals).</summary>
+    private static long? ConstEval(CExpr e) => e switch
+    {
+        LitInt i => i.Value,
+        Paren p => ConstEval(p.Inner),
+        Cast c => ConstEval(c.Operand),
+        Unary u => u.Op switch
+        {
+            UnOp.Plus => ConstEval(u.Operand),
+            UnOp.Neg => ConstEval(u.Operand) is { } v ? -v : null,
+            UnOp.BitNot => ConstEval(u.Operand) is { } v ? ~v : null,
+            _ => null,
+        },
+        Binary b => ConstEval(b.Left) is { } l && ConstEval(b.Right) is { } r ? ApplyConstBin(b.Op, l, r) : null,
+        _ => null,
+    };
+
+    private static long? ApplyConstBin(BinOp op, long l, long r) => op switch
+    {
+        BinOp.Add => l + r, BinOp.Sub => l - r, BinOp.Mul => l * r,
+        BinOp.Div => r != 0 ? l / r : null, BinOp.Mod => r != 0 ? l % r : null,
+        BinOp.Shl => l << (int)r, BinOp.Shr => l >> (int)r,
+        BinOp.BitAnd => l & r, BinOp.BitOr => l | r, BinOp.BitXor => l ^ r,
+        _ => null,
+    };
+
     // ---- types -----------------------------------------------------------
 
     private CType ResolveType(Item it) => it.Content switch
@@ -189,6 +260,8 @@ internal sealed class IrBuilder
         C.TypePtrQualVolatile t => new CType.Pointer(ResolveType(t.Arg0)),
         C.TypePtrQualRestrict t => new CType.Pointer(ResolveType(t.Arg0)),
         C.TypeName t => ResolveTypeName(Tok(t.Arg0)),
+        // `enum Tag` as a type — dotcc lowers enums to plain int.
+        C.TypeEnum => CType.Int,
         _ => throw new IrUnsupportedException(TypeName(it.Content)),
     };
 
@@ -334,6 +407,10 @@ internal sealed class IrBuilder
                 return new For(null, BuildForCond(s.Arg3), BuildForPost(s.Arg5), BuildStmt(s.Arg7)) { Pos = pos };
             case C.StmtGoto s: return new Goto(DotCC.CSharpEmitter.Id(Tok(s.Arg1))) { Pos = pos };
             case C.StmtLabel s: return new Labeled(DotCC.CSharpEmitter.Id(Tok(s.Arg0)), BuildStmt(s.Arg2)) { Pos = pos };
+            // A block-scope enum definition has no storage — register its
+            // constants and emit nothing (an empty block).
+            case C.StmtEnumDef s: RegisterEnum(s.Arg3); return new Block(System.Array.Empty<CStmt>()) { Pos = pos };
+            case C.StmtEnumDefTyped s: RegisterEnum(s.Arg5); return new Block(System.Array.Empty<CStmt>()) { Pos = pos };
             default: throw new IrUnsupportedException(TypeName(it.Content));
         }
     }
@@ -699,6 +776,11 @@ internal sealed class IrBuilder
     {
         var name = Tok(v.Arg0);
         var sym = _symbols.Resolve(name);
+        if (sym is { Kind: SymKind.EnumConst })
+        {
+            // An enum constant lowers to its literal integer value.
+            return new LitInt(sym.ConstValue.ToString(System.Globalization.CultureInfo.InvariantCulture), sym.ConstValue) { Type = CType.Int };
+        }
         if (sym is not null)
         {
             return new VarRef(sym) { Type = sym.Type, IsLValue = sym.Kind is SymKind.Var or SymKind.Param };
