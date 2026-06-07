@@ -36,6 +36,9 @@ internal sealed partial class IrBuilder
     // Struct/union name → its fields, so member access can resolve a field's
     // type. Keyed by the canonical (tag, or anonymous-typedef alias) name.
     private readonly Dictionary<string, List<StructField>> _structFields = new(StringComparer.Ordinal);
+    // Whether each registered aggregate is a union — drives the compile-time layout
+    // model (offsetof folding) and is set alongside every _structFields entry.
+    private readonly Dictionary<string, bool> _structIsUnion = new(StringComparer.Ordinal);
     private readonly HashSet<string> _emittedTypes = new(StringComparer.Ordinal);
     private string _file = "";
     // The name of the function currently being built — the value of the C99
@@ -270,11 +273,14 @@ internal sealed partial class IrBuilder
     /// <summary>Evaluate an integer constant expression, or null if non-constant.
     /// Covers the forms enum initializers and array bounds use (literals,
     /// unary +/-/~, the binary arithmetic/shift/bitwise operators, parens,
-    /// integer casts, and already-resolved enum-constant literals).</summary>
-    private static long? ConstEval(CExpr e) => e switch
+    /// integer casts, <c>sizeof</c>, <c>offsetof</c>, and already-resolved
+    /// enum-constant literals). <c>sizeof</c>/<c>offsetof</c> of a user aggregate use
+    /// the compile-time layout model so they can size an array bound.</summary>
+    private long? ConstEval(CExpr e) => e switch
     {
         LitInt i => i.Value,
-        SizeOfExpr s => s.Of.SizeOf,
+        SizeOfExpr s => SizeOfConst(s.Of),
+        OffsetOf o => StructCanonical(o.StructType) is { } n ? OffsetOfConst(n, o.Member) : null,
         Paren p => ConstEval(p.Inner),
         Cast c => ConstEval(c.Operand),
         Unary u => u.Op switch
@@ -288,6 +294,12 @@ internal sealed partial class IrBuilder
         _ => null,
     };
 
+    /// <summary>The constant byte size of a type — the layout model for a user
+    /// aggregate (so the size is exact for an array bound), else the type's own
+    /// <see cref="CType.SizeOf"/>.</summary>
+    private long? SizeOfConst(CType t) =>
+        t.Unqualified is CType.Named n && _structFields.ContainsKey(n.Name) ? Layout(t).Size : t.SizeOf;
+
     private static long? ApplyConstBin(BinOp op, long l, long r) => op switch
     {
         BinOp.Add => l + r, BinOp.Sub => l - r, BinOp.Mul => l * r,
@@ -296,6 +308,69 @@ internal sealed partial class IrBuilder
         BinOp.BitAnd => l & r, BinOp.BitOr => l | r, BinOp.BitXor => l ^ r,
         _ => null,
     };
+
+    // ---- compile-time C-ABI layout (for offsetof / sizeof folding) --------
+    // The .NET blittable layout dotcc emits (sequential structs, explicit unions,
+    // natural alignment on this LP64 target) matches the C ABI for the types it
+    // models, so size/offset can be computed at compile time — which an array bound
+    // like `char padding[offsetof(T, m)]` requires (Lua's alignment-union trick).
+
+    /// <summary>The (size, alignment) in bytes of a type under the C ABI / .NET
+    /// blittable layout.</summary>
+    private (int Size, int Align) Layout(CType t)
+    {
+        switch (t.Unqualified)
+        {
+            case CType.Prim p: return (p.Bytes, p.Bytes);
+            case CType.Pointer or CType.Func: return (8, 8);
+            case CType.Array a:
+            {
+                var (es, ea) = Layout(a.FlatElement);
+                var count = 1;
+                for (CType c = a; c is CType.Array ca; c = ca.Element) { count *= ca.Count ?? 0; }
+                return (es * count, ea);
+            }
+            case CType.Named n: return LayoutAggregate(n.Name);
+            default: return (0, 1);
+        }
+    }
+
+    /// <summary>The (size, alignment) of a registered struct/union: sequential
+    /// fields each aligned up to their own alignment for a struct; all overlaid at 0
+    /// for a union. The total rounds up to the aggregate's alignment.</summary>
+    private (int Size, int Align) LayoutAggregate(string name)
+    {
+        if (!_structFields.TryGetValue(name, out var fields)) { return (0, 1); } // opaque/unknown
+        var isUnion = _structIsUnion.GetValueOrDefault(name);
+        int align = 1, size = 0, off = 0;
+        foreach (var f in fields)
+        {
+            var (fs, fa) = Layout(f.Type);
+            if (fa > align) { align = fa; }
+            if (isUnion) { if (fs > size) { size = fs; } }
+            else { off = RoundUp(off, fa) + fs; }
+        }
+        return (RoundUp(isUnion ? size : off, align), align);
+    }
+
+    /// <summary>The byte offset of <paramref name="member"/> within struct
+    /// <paramref name="structName"/> (0 for any union member), or null if unknown.</summary>
+    private int? OffsetOfConst(string structName, string member)
+    {
+        if (!_structFields.TryGetValue(structName, out var fields)) { return null; }
+        if (_structIsUnion.GetValueOrDefault(structName)) { return 0; }
+        var off = 0;
+        foreach (var f in fields)
+        {
+            var (fs, fa) = Layout(f.Type);
+            off = RoundUp(off, fa);
+            if (f.Name == member) { return off; }
+            off += fs;
+        }
+        return null;
+    }
+
+    private static int RoundUp(int v, int align) => align <= 1 ? v : (v + align - 1) / align * align;
 
     // ---- structs / unions ------------------------------------------------
 
@@ -310,6 +385,7 @@ internal sealed partial class IrBuilder
         if (_emittedTypes.Add(canonical))
         {
             _structFields[canonical] = fields;
+            _structIsUnion[canonical] = isUnion;
             Types.Add(new StructTypeDef(canonical, fields, isUnion));
         }
         // `struct Tag` and the typedef alias both resolve to the canonical type.
@@ -344,6 +420,13 @@ internal sealed partial class IrBuilder
                 // each inner name is recorded so `parent.inner` routes through it.
                 case C.AnonStructMember am: AddAnonMember(am.Arg3, owner, fields, isUnion: false); break;
                 case C.AnonUnionMember am: AddAnonMember(am.Arg3, owner, fields, isUnion: true); break;
+                // A NAMED member of a nested aggregate type — `struct {…} m;` /
+                // `struct Tag {…} m;` (and union forms). Define the (tagged or
+                // synthesized) type, then add `m` of that type — no promotion.
+                case C.NamedNestedStruct nm: AddNamedNested(null, nm.Arg3, Tok(nm.Arg5), fields, isUnion: false); break;
+                case C.NamedNestedUnion nm: AddNamedNested(null, nm.Arg3, Tok(nm.Arg5), fields, isUnion: true); break;
+                case C.NamedNestedTaggedStruct nm: AddNamedNested(Tok(nm.Arg1), nm.Arg4, Tok(nm.Arg6), fields, isUnion: false); break;
+                case C.NamedNestedTaggedUnion nm: AddNamedNested(Tok(nm.Arg1), nm.Arg4, Tok(nm.Arg6), fields, isUnion: true); break;
                 // `T name[N]…;` — a fixed-size array member (codegen: a `fixed`
                 // buffer for a primitive element, an [InlineArray] wrapper for a
                 // non-primitive one). Multi-dimensional bounds give a nested array
@@ -390,6 +473,7 @@ internal sealed partial class IrBuilder
         var nested = $"__Anon{_anonAggrSeq++}";
         var innerFields = BuildStructFields(innerMemberList, nested);
         _structFields[nested] = innerFields;
+        _structIsUnion[nested] = isUnion;
         Types.Add(new StructTypeDef(nested, innerFields, isUnion));
 
         var hidden = "__anon_" + nested;
@@ -397,6 +481,23 @@ internal sealed partial class IrBuilder
 
         if (!_promoted.TryGetValue(owner, out var pm)) { _promoted[owner] = pm = new(StringComparer.Ordinal); }
         foreach (var f in innerFields) { pm[f.Name] = (hidden, nested); }
+    }
+
+    /// <summary>Add a NAMED member of a nested aggregate type (<c>struct {…} m;</c>
+    /// or a tagged <c>struct Tag {…} m;</c>, and union forms). Defines the nested
+    /// type (under its tag, or a synthesized name) and adds <paramref name="member"/>
+    /// of that type — unlike an anonymous member, the fields are NOT promoted.</summary>
+    private void AddNamedNested(string? tag, Item innerMemberList, string member, List<StructField> parentFields, bool isUnion)
+    {
+        var typeName = tag ?? $"__Anon{_anonAggrSeq++}";
+        if (_emittedTypes.Add(typeName))
+        {
+            var inner = BuildStructFields(innerMemberList, typeName);
+            _structFields[typeName] = inner;
+            _structIsUnion[typeName] = isUnion;
+            Types.Add(new StructTypeDef(typeName, inner, isUnion));
+        }
+        parentFields.Add(new StructField(member, new CType.Named(typeName)));
     }
 
     /// <summary>The CType of <paramref name="field"/> read off the struct/union
@@ -484,6 +585,7 @@ internal sealed partial class IrBuilder
         _anonAggregates[pos] = named;
         var fields = BuildStructFields(memberListItem, name);
         _structFields[name] = fields;
+        _structIsUnion[name] = isUnion;
         Types.Add(new StructTypeDef(name, fields, isUnion));
         return named;
     }
