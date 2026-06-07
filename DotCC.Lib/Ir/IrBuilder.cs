@@ -90,6 +90,14 @@ internal sealed partial class IrBuilder
             case C.GlobalStaticArrInit g: BuildGlobalArr(g.Arg1, g.Arg2, g.Arg3, g.Arg6, null); break;
             case C.GlobalArrInitImplicit g: BuildGlobalArr(g.Arg0, g.Arg1, null, g.Arg6, null); break;
             case C.GlobalStaticArrInitImplicit g: BuildGlobalArr(g.Arg1, g.Arg2, null, g.Arg7, null); break;
+            // File-scope char arrays from a string literal.
+            case C.GlobalCharArrStr g: BuildGlobalCharArr(g.Arg0, g.Arg1, g.Arg5, null, null); break;
+            case C.GlobalCharArrStrSized g: BuildGlobalCharArr(g.Arg0, g.Arg1, g.Arg4, g.Arg2, null); break;
+            case C.GlobalStaticCharArrStr g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg6, null, null); break;
+            case C.GlobalStaticCharArrStrSized g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg5, g.Arg3, null); break;
+            // `extern T a[N];` / `extern T a[];` — declaration only (storage elsewhere).
+            case C.ExternArr g: BuildExternArr(g.Arg1, g.Arg2, g.Arg3); break;
+            case C.ExternArrIncomplete g: BuildExternArr(g.Arg1, g.Arg2, null); break;
             // `static T x = { … };` at file scope — a once-initialised struct/union field.
             case C.GlobalStaticStructInit g: BuildGlobalStructInit(g.Arg1, g.Arg2, g.Arg5); break;
             // `extern T x;` declares the name + type for resolution but emits no
@@ -203,6 +211,13 @@ internal sealed partial class IrBuilder
         C.FnSigParen n => new(ResolveType(n.Arg0), Tok(n.Arg2), BuildParams(n.Arg5, out var vp), vp, false),
         C.FnSigParenNoArgs n => new(ResolveType(n.Arg0), Tok(n.Arg2), new(), false, false),
         C.FnSigParenVoidArgs n => new(ResolveType(n.Arg0), Tok(n.Arg2), new(), false, false),
+        // Function returning a function pointer: `Ret (*name(params))(fnPtrParams)`
+        // (e.g. <signal.h>'s `void (*signal(int, void(*)(int)))(int)`). The result
+        // type is the function-pointer `Ret (*)(fnPtrParams)`; name + params are the
+        // outer declarator's.
+        C.FnSigRetFnPtr n => new(FnPtrType(n.Arg0, n.Arg9), Tok(n.Arg3), BuildParams(n.Arg5, out var vr), vr, false),
+        C.FnSigRetFnPtrNoArgs n => new(FnPtrType(n.Arg0, null), Tok(n.Arg3), BuildParams(n.Arg5, out var vrn), vrn, false),
+        C.FnSigRetFnPtrVoid n => new(FnPtrType(n.Arg0, null), Tok(n.Arg3), BuildParams(n.Arg5, out var vrv), vrv, false),
         _ => throw new IrUnsupportedException(TypeName(it.Content)),
     };
 
@@ -566,6 +581,11 @@ internal sealed partial class IrBuilder
         // exactly as every other inline function is lowered), so the TYPE_NAME is
         // the whole base type.
         C.TypeSpecThenName t => ResolveTypeName(Tok(t.Arg1)),
+        // C23 `typeof(expr)` / `typeof(type)` — the expr form reads the operand's
+        // synthesized CType (qualifiers dropped, as `typeof_unqual` does); the type
+        // form unwraps to that type. The expr isn't evaluated (only its type taken).
+        C.TypeofExpr t => BuildExpr(t.Arg2).Type.Unqualified,
+        C.TypeofType t => ResolveType(t.Arg2),
         _ => throw new IrUnsupportedException(TypeName(it.Content)),
     };
 

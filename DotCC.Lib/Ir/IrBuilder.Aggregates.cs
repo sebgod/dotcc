@@ -373,6 +373,14 @@ internal sealed partial class IrBuilder
             throw new IrUnsupportedException($"file-scope array '{name}' needs a constant size or an initializer");
         }
 
+        AddGlobalArray(name, arrType, init, csName);
+    }
+
+    /// <summary>Register a global-array symbol and its <see cref="GlobalVar"/>. A
+    /// non-null <paramref name="csName"/> marks a static local (mangled field name +
+    /// alias symbol); otherwise it's a file-scope name.</summary>
+    private void AddGlobalArray(string name, CType arrType, CExpr init, string? csName)
+    {
         if (csName is not null)
         {
             var sym = new Symbol { Name = name, Kind = SymKind.Var, Type = arrType, Storage = Storage.Static, IsGlobal = true, CsName = csName };
@@ -384,6 +392,39 @@ internal sealed partial class IrBuilder
             var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = arrType, Storage = Storage.Static, IsGlobal = true });
             Globals.Add(new GlobalVar(sym, init));
         }
+    }
+
+    /// <summary>A file-scope / static-local char array initialized from a string
+    /// literal (<c>char tag[] = "…"</c>) — a pinned byte array of the decoded bytes
+    /// plus the NUL, zero-padded to an explicit size (or truncated, C's rule).</summary>
+    private void BuildGlobalCharArr(Item typeItem, Item nameItem, Item strSeqItem, Item? dimsItem, string? csName)
+    {
+        var elem = ResolveType(typeItem);
+        var bytes = DotCC.CSharpEmitter.StringByteValues(CollectStrSegments(strSeqItem));
+        bytes.Add(0);   // NUL
+        var dims = dimsItem is { } di ? TryConstDims(di) : null;
+        var total = dims is { Count: >= 1 } ? dims.Aggregate(1, (a, b) => a * b) : bytes.Count;
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        var elems = new List<CExpr>(total);
+        for (var i = 0; i < total; i++)
+        {
+            var v = i < bytes.Count ? bytes[i] : 0;   // zero-pad beyond the string
+            elems.Add(new LitInt(v.ToString(inv), v) { Type = CType.Int });
+        }
+        AddGlobalArray(Tok(nameItem), new CType.Array(elem, total),
+            new PinnedArray(elem, elems, null) { Type = new CType.Pointer(elem) }, csName);
+    }
+
+    /// <summary>An <c>extern T a[N];</c> / <c>extern T a[];</c> declaration — storage
+    /// lives in another TU (or a later same-TU definition), so emit no field; just
+    /// register the name's type so same-TU references resolve (a sized extent keeps
+    /// the array type for <c>sizeof</c>; an incomplete one decays to a pointer).</summary>
+    private void BuildExternArr(Item typeItem, Item nameItem, Item? dimsItem)
+    {
+        var elem = ResolveType(typeItem);
+        var dims = dimsItem is { } di ? TryConstDims(di) : null;
+        var type = dims is { Count: >= 1 } ? MakeArrayType(elem, dims) : new CType.Pointer(elem);
+        _symbols.Declare(new Symbol { Name = Tok(nameItem), Kind = SymKind.Var, Type = type, Storage = Storage.Extern, IsGlobal = true });
     }
 
     /// <summary>A block-scope <c>static T a[…]</c> — a pinned global field under a
