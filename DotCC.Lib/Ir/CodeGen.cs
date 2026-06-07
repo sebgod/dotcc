@@ -593,6 +593,9 @@ internal sealed class CodeGen
                 return QualifiedRead(m, t, PPostfix);
             }
             case StructInit si: return (StructInitText(si), PPrimary);
+            case StackArray sa:
+                return ($"stackalloc {sa.Element.CsType}[]{{ {string.Join(", ", sa.Elems.Select(Expr))} }}", PPrimary);
+            case DefaultLit: return ($"default({e.Type.CsType})", PPrimary);
             case Call c: return (CallText(c), PPostfix);
             case CondExpr t:
                 // Wrapped (atomic): C-truthy condition, arms isolated by `?`/`:`.

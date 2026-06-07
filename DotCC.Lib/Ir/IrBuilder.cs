@@ -24,7 +24,7 @@ public sealed class IrUnsupportedException : Exception
 /// if/while/for/return/block. Out-of-slice nodes raise
 /// <see cref="IrUnsupportedException"/>.
 /// </summary>
-internal sealed class IrBuilder
+internal sealed partial class IrBuilder
 {
     private readonly SymbolTable _symbols = new();
     // Typedef name → its underlying type. Unlike the legacy emitter (which emits
@@ -746,6 +746,10 @@ internal sealed class IrBuilder
         C.DeclCharArrStr d => BuildDeclCharArrStr(d.Arg0, d.Arg1, null, d.Arg5),
         C.DeclCharArrStrSized d => BuildDeclCharArrStr(d.Arg0, d.Arg1, CharArrSize(d.Arg2), d.Arg4),
         C.DeclStructInit d => BuildDeclStructInit(d),
+        // `T x = { .field = … };` — C99 designated struct/union initializer.
+        C.DeclStructDesignated d => BuildLocalInit(d.Arg1, ResolveType(d.Arg0), BuildStructDesignated(ResolveType(d.Arg0), d.Arg4)),
+        // `T x = {};` — C23 empty initializer (zero value).
+        C.DeclEmptyInit d => BuildLocalInit(d.Arg1, ResolveType(d.Arg0), new DefaultLit { Type = ResolveType(d.Arg0) }),
         C.DeclArr d => BuildArrDecl(d.Arg0, d.Arg1, d.Arg2, null, implicitSize: false),
         C.DeclArrEmptyInit d => BuildArrDecl(d.Arg0, d.Arg1, d.Arg2, null, implicitSize: false),
         C.DeclArrInit d => BuildArrDecl(d.Arg0, d.Arg1, d.Arg2, d.Arg5, implicitSize: false),
@@ -941,32 +945,38 @@ internal sealed class IrBuilder
     {
         var elem = ResolveType(typeItem);
         var name = Tok(nameItem);
-        var inits = initItem is { } ii ? BuildInitList(ii) : null;
-
-        var dims = dimsItem is { } di ? BuildArrDims(di) : new List<CExpr>();
-        if (dims.Count > 1) { throw new IrUnsupportedException("multi-dimensional array"); }
-        var dim = dims.Count == 1 ? dims[0] : null;
+        var dims = dimsItem is { } di ? TryConstDims(di) : null;
 
         CType arrType;
         CExpr? countExpr = null;
-        if (dim is not null && ConstEval(dim) is { } cnt)
+        List<CExpr>? inits = null;
+        if (initItem is { } ii)
         {
-            // A constant-expression bound (a literal, or a folded ICE like
-            // `sizeof(long) * CHAR_BIT`) is a fixed-size array — sizeof(arr) and
-            // the array-length idiom need the count on the type.
-            arrType = new CType.Array(elem, (int)cnt);
-            countExpr = dim;
-        }
-        else if (inits is not null)
-        {
-            // Brace-initialized, dimension implicit or non-constant → count = #elems.
+            // Brace-initialized — the array interpreter resolves designators,
+            // struct elements, and per-dimension zero-fill into a dense list; a
+            // multi-dim array flattens to one stackalloc of product(dims).
+            inits = BuildArrayElems(elem, dims, ParseInitList(ii));
             arrType = new CType.Array(elem, inits.Count);
         }
-        else if (dim is not null)
+        else if (dims is { Count: >= 1 })
         {
-            // Runtime extent (VLA): C arrays decay to a pointer in value context.
+            // Fixed-size, no initializer (C# zero-fills a stackalloc). A multi-dim
+            // array flattens to one stackalloc of the product; sizeof(arr) and the
+            // array-length idiom read the count off the array type.
+            var total = 1;
+            foreach (var d in dims) { total *= d; }
+            arrType = new CType.Array(elem, total);
+            countExpr = new LitInt(total.ToString(System.Globalization.CultureInfo.InvariantCulture), total) { Type = CType.Int };
+        }
+        else if (dimsItem is { } di2 && BuildArrDims(di2) is { Count: 1 } runtimeDims)
+        {
+            // Runtime extent (VLA) — C arrays decay to a pointer in value context.
             arrType = new CType.Pointer(elem);
-            countExpr = dim;
+            countExpr = runtimeDims[0];
+        }
+        else if (dimsItem is { })
+        {
+            throw new IrUnsupportedException("multi-dimensional array with a non-constant dimension");
         }
         else
         {
@@ -995,86 +1005,28 @@ internal sealed class IrBuilder
         return dims;
     }
 
-    /// <summary>Flatten a brace initializer list to its scalar element
-    /// expressions. Nested / designated initializers are deferred.</summary>
-    private List<CExpr> BuildInitList(Item it)
-    {
-        var items = new List<CExpr>();
-        void Walk(Item n)
-        {
-            switch (n.Content)
-            {
-                case C.InitListCons c: Walk(c.Arg0); items.Add(BuildInitElem(c.Arg2)); break;
-                case C.InitListTrail t: Walk(t.Arg0); break; // trailing comma — no element
-                case C.InitListOne o: items.Add(BuildInitElem(o.Arg0)); break;
-                default: items.Add(BuildInitElem(n)); break;
-            }
-        }
-        Walk(it);
-        return items;
-    }
-
-    private CExpr BuildInitElem(Item it) => it.Content switch
-    {
-        C.InitElemExpr e => BuildExpr(e.Arg0),
-        _ => throw new IrUnsupportedException(TypeName(it.Content)),
-    };
-
     /// <summary><c>struct Point p = {3, 4};</c> — a local declaration with a
     /// positional aggregate initializer. Types the symbol as the struct and
     /// builds a <see cref="StructInit"/> from the brace list.</summary>
     private CStmt BuildDeclStructInit(C.DeclStructInit n)
     {
         var type = ResolveType(n.Arg0);
-        var init = BuildAggregateInit(type, n.Arg4);
-        var sym = _symbols.Declare(new Symbol { Name = Tok(n.Arg1), Kind = SymKind.Var, Type = type, Storage = Storage.Auto });
+        return BuildLocalInit(n.Arg1, type, BuildAggregateInit(type, n.Arg4));
+    }
+
+    /// <summary>Declare a single block local of <paramref name="type"/> with an
+    /// already-built initializer, as a one-declarator <see cref="DeclStmt"/>.</summary>
+    private DeclStmt BuildLocalInit(Item nameItem, CType type, CExpr init)
+    {
+        var sym = _symbols.Declare(new Symbol { Name = Tok(nameItem), Kind = SymKind.Var, Type = type, Storage = Storage.Auto });
         return new DeclStmt(new[] { new LocalDecl(sym, init) });
     }
 
-    /// <summary>Build a positional struct/union aggregate initializer: zip the
-    /// brace-list elements onto the struct's fields in declaration order, a
-    /// nested brace recursing into a struct/union-typed field. A short list
-    /// leaves the trailing fields unset (their zero default — C's partial init).</summary>
-    private StructInit BuildAggregateInit(CType type, Item initListItem)
-    {
-        var canonical = (type.Unqualified as CType.Named)?.Name
-            ?? throw new IrUnsupportedException("aggregate initializer for a non-struct type");
-        if (!_structFields.TryGetValue(canonical, out var fields))
-        {
-            throw new IrUnsupportedException($"aggregate initializer for unknown struct/union '{canonical}'");
-        }
-        var elems = CollectInitElems(initListItem);
-        var members = new List<FieldInit>(System.Math.Min(elems.Count, fields.Count));
-        for (var i = 0; i < elems.Count && i < fields.Count; i++)
-        {
-            var field = fields[i];
-            CExpr value = elems[i].Content is C.InitElemNest nest
-                ? BuildAggregateInit(field.Type, nest.Arg1)   // nested brace → struct/union field
-                : BuildInitElem(elems[i]);
-            members.Add(new FieldInit(field.Name, field.Type, value));
-        }
-        return new StructInit(members) { Type = type };
-    }
-
-    /// <summary>Collect a brace-init list's elements as raw parse items (so the
-    /// caller can distinguish a scalar element from a nested <c>{ … }</c> group),
-    /// in source order.</summary>
-    private static List<Item> CollectInitElems(Item it)
-    {
-        var elems = new List<Item>();
-        void Walk(Item n)
-        {
-            switch (n.Content)
-            {
-                case C.InitListCons c: Walk(c.Arg0); elems.Add(c.Arg2); break;
-                case C.InitListTrail t: Walk(t.Arg0); break;
-                case C.InitListOne o: elems.Add(o.Arg0); break;
-                default: elems.Add(n); break;
-            }
-        }
-        Walk(it);
-        return elems;
-    }
+    /// <summary>A positional struct/union aggregate initializer from an
+    /// <c>InitList</c> — shared by local, file-scope, and static-local struct
+    /// inits (see <see cref="BuildStructPositional"/>).</summary>
+    private StructInit BuildAggregateInit(CType type, Item initListItem) =>
+        BuildStructPositional(type, ParseInitList(initListItem));
 
     private For BuildForDecl(C.StmtForDecl s)
     {
@@ -1187,6 +1139,13 @@ internal sealed class IrBuilder
             C.OffsetofExpr o => BuildOffsetof(o),
             C.Call c => BuildCall(c.Arg0, c.Arg2),
             C.CallNoArgs c => BuildCall(c.Arg0, null),
+            // C99/C23 compound literals — (T){…} struct/scalar, (T[]){…} array,
+            // designated, and the C23 empty form.
+            C.CompoundLit c => BuildCompoundLit(c.Arg1, c.Arg4),
+            C.CompoundLitDesignated c => BuildCompoundLitDesignated(c.Arg1, c.Arg4),
+            C.CompoundLitEmpty c => BuildCompoundLitEmpty(c.Arg1),
+            C.CompoundLitArr c => BuildArrayCompoundLit(c.Arg1, c.Arg2, c.Arg5),
+            C.CompoundLitArrImplicit c => BuildArrayCompoundLit(c.Arg1, null, c.Arg6),
             C.CommaOp => BuildCommaOp(it),
             _ => throw new IrUnsupportedException(TypeName(it.Content)),
         };

@@ -130,6 +130,19 @@ public sealed record StructInit(IReadOnlyList<FieldInit> Members) : CExpr;
 /// the store), and the value expression.</summary>
 public readonly record struct FieldInit(string Name, CType FieldType, CExpr Value);
 
+/// <summary>An array aggregate as a value — a C99 array compound literal
+/// (<c>(int[]){1,2,3}</c>) or any array initializer. Codegen lowers it to a C#
+/// <c>stackalloc T[]{ … }</c>, valid in initializer position (a stackalloc can't
+/// escape to a pointer elsewhere in C#). <see cref="Elems"/> is the dense element
+/// list the builder already computed (designators resolved, dimensions
+/// zero-filled).</summary>
+public sealed record StackArray(CType Element, IReadOnlyList<CExpr> Elems) : CExpr;
+
+/// <summary>A C23 empty initializer (<c>{}</c> / <c>(T){}</c>) — a zero value of
+/// the carried <see cref="CExpr.Type"/>. Codegen emits <c>default(T)</c>, which
+/// zero-fills a scalar, pointer, struct, or union uniformly.</summary>
+public sealed record DefaultLit : CExpr;
+
 /// <summary>A parenthesized sub-expression — kept so codegen can preserve
 /// explicit grouping (precedence-driven parens come later).</summary>
 public sealed record Paren(CExpr Inner) : CExpr;
