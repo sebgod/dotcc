@@ -979,6 +979,7 @@ internal sealed class IrBuilder
             C.SizeofExpr s => new SizeOfExpr(BuildExpr(s.Arg1).Type) { Type = CType.SizeT },
             C.Call c => BuildCall(c.Arg0, c.Arg2),
             C.CallNoArgs c => BuildCall(c.Arg0, null),
+            C.CommaOp => BuildCommaOp(it),
             _ => throw new IrUnsupportedException(TypeName(it.Content)),
         };
         return e with { Pos = pos };
@@ -1024,6 +1025,22 @@ internal sealed class IrBuilder
         // operand through typed void so a statement position emits `X;`.
         if (target is CType.VoidType) { return operand with { Type = CType.Void }; }
         return new Cast(target, operand) { Type = target };
+    }
+
+    /// <summary>The value-context comma operator (<c>Expr → Expr ',' E</c>,
+    /// left-associative). Flatten nested commas into a single ordered operand
+    /// list — the leading operands are evaluated for side effects, the last is
+    /// the value (and type).</summary>
+    private CExpr BuildCommaOp(Item it)
+    {
+        var items = new List<CExpr>();
+        void Walk(Item node)
+        {
+            if (node.Content is C.CommaOp c) { Walk(c.Arg0); items.Add(BuildExpr(c.Arg2)); }
+            else { items.Add(BuildExpr(node)); }
+        }
+        Walk(it);
+        return new CommaOp(items) { Type = items[^1].Type, IsLValue = items[^1].IsLValue };
     }
 
     private CExpr Bin(BinOp op, Item l, Item r)
