@@ -107,6 +107,15 @@ public sealed record CommaOp(IReadOnlyList<CExpr> Items) : CExpr;
 /// array (which lowered to a pointer, so C#'s <c>sizeof</c> would be wrong).</summary>
 public sealed record SizeOfExpr(CType Of) : CExpr;
 
+/// <summary><c>offsetof(T, member)</c> — the byte offset of <paramref name="Member"/>
+/// within struct/union <paramref name="StructType"/>. Codegen computes it via the
+/// address-through-a-null-pointer idiom (<c>(nint)&amp;((T*)null)-&gt;m</c>), so it
+/// respects the real .NET blittable layout (alignment included).
+/// <see cref="MemberDecaysToPointer"/> is set when the member is a primitive
+/// <c>fixed</c>-buffer array, whose access already evaluates to its own address —
+/// so the <c>&amp;</c> is omitted (taking it would be CS0211).</summary>
+public sealed record OffsetOf(CType StructType, string Member, bool MemberDecaysToPointer) : CExpr;
+
 /// <summary>A positional struct/union aggregate initializer — lowered from
 /// <c>struct Point p = {3, 4}</c>. Codegen emits a C# object initializer
 /// <c>new Point { x = 3, y = 4 }</c>; <see cref="Members"/> pairs each supplied

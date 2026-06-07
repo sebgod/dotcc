@@ -106,7 +106,7 @@ internal sealed class CodeGen
     /// <summary>C# permits a <c>fixed</c> buffer only of these primitive element
     /// types — every other array member must go through an <c>[InlineArray]</c>
     /// wrapper instead.</summary>
-    private static bool IsFixedBufferType(string cs) => cs is
+    internal static bool IsFixedBufferType(string cs) => cs is
         "bool" or "byte" or "sbyte" or "short" or "ushort" or "int" or "uint"
         or "long" or "ulong" or "char" or "float" or "double";
 
@@ -555,6 +555,20 @@ internal sealed class CodeGen
                 return so.Of is CType.Array { Count: { } n } arr
                     ? ($"((ulong)({n} * sizeof({arr.Element.CsType})))", PPrimary)
                     : ($"((ulong)sizeof({so.Of.CsType}))", PPrimary);
+            case OffsetOf o:
+            {
+                // .NET has no offsetof operator, and the address-through-a-null
+                // idiom (`&((T*)null)->m`) FAULTS — C#'s `->` null-checks the base.
+                // Compute it from a stack `default` instance instead: the member's
+                // address minus the base address, honoring the real .NET blittable
+                // layout (alignment included). `__t` lives inside the lambda (not
+                // captured), so `&__t` needs no `fixed`. A primitive `fixed`-buffer
+                // member's access already yields its address (no `&`); a scalar
+                // member uses `&`.
+                var m = DotCC.CSharpEmitter.Id(o.Member);
+                var memberAddr = o.MemberDecaysToPointer ? $"(byte*)__t.{m}" : $"(byte*)&__t.{m}";
+                return ($"((System.Func<ulong>)(() => {{ {o.StructType.CsType} __t = default; return (ulong)({memberAddr} - (byte*)&__t); }}))()", PPrimary);
+            }
             case Index ix:
             {
                 var t = $"{Sub(ix.Base, PPostfix)}[{Expr(ix.Idx)}]";

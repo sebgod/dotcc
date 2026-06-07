@@ -1144,6 +1144,7 @@ internal sealed class IrBuilder
             C.SizeofType s => new SizeOfExpr(ResolveType(s.Arg2)) { Type = CType.SizeT },
             // `sizeof expr` — the operand isn't evaluated, only its type measured.
             C.SizeofExpr s => new SizeOfExpr(BuildExpr(s.Arg1).Type) { Type = CType.SizeT },
+            C.OffsetofExpr o => BuildOffsetof(o),
             C.Call c => BuildCall(c.Arg0, c.Arg2),
             C.CallNoArgs c => BuildCall(c.Arg0, null),
             C.CommaOp => BuildCommaOp(it),
@@ -1365,6 +1366,29 @@ internal sealed class IrBuilder
         name is "printf" or "fprintf" or "sprintf" or "snprintf";
 
     // ---- literals --------------------------------------------------------
+
+    /// <summary><c>offsetof(T, member)</c> — resolve the aggregate type and look
+    /// up the member's field type so codegen knows whether it is a primitive
+    /// <c>fixed</c>-buffer (whose access already yields its address, so no
+    /// <c>&amp;</c>). The actual offset is computed at runtime by the
+    /// null-pointer idiom in codegen, matching the .NET blittable layout.</summary>
+    private CExpr BuildOffsetof(C.OffsetofExpr n)
+    {
+        var structType = ResolveType(n.Arg2);
+        var member = Tok(n.Arg4);
+        var decays = false;
+        if ((structType.Unqualified as CType.Named)?.Name is { } canon
+            && _structFields.TryGetValue(canon, out var fields))
+        {
+            foreach (var f in fields)
+            {
+                if (f.Name != member) { continue; }
+                decays = f.Type.Unqualified is CType.Array a && CodeGen.IsFixedBufferType(a.Element.CsType);
+                break;
+            }
+        }
+        return new OffsetOf(structType, member, decays) { Type = CType.SizeT };
+    }
 
     private CExpr BuildStr(Item it)
     {
