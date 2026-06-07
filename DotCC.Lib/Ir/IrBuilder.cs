@@ -180,6 +180,13 @@ internal sealed class IrBuilder
         C.FnSigStatic n => new(ResolveType(n.Arg1), Tok(n.Arg2), BuildParams(n.Arg4, out var v1), v1, true),
         C.FnSigStaticNoArgs n => new(ResolveType(n.Arg1), Tok(n.Arg2), new(), false, true),
         C.FnSigStaticVoidArgs n => new(ResolveType(n.Arg1), Tok(n.Arg2), new(), false, true),
+        // Parenthesized declarator name `T (name)(args)` — identical to
+        // `T name(args)`; the parens are pure grouping around the name (public
+        // headers wrap API names so a same-named function-like macro can't expand
+        // at the declaration). Name is Arg2, the param list Arg5.
+        C.FnSigParen n => new(ResolveType(n.Arg0), Tok(n.Arg2), BuildParams(n.Arg5, out var vp), vp, false),
+        C.FnSigParenNoArgs n => new(ResolveType(n.Arg0), Tok(n.Arg2), new(), false, false),
+        C.FnSigParenVoidArgs n => new(ResolveType(n.Arg0), Tok(n.Arg2), new(), false, false),
         _ => throw new IrUnsupportedException(TypeName(it.Content)),
     };
 
