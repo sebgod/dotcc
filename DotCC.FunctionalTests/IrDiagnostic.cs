@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using DotCC;
 using Xunit;
 
@@ -28,6 +29,10 @@ public sealed class IrDiagnostic
             if (!buckets.TryGetValue(key, out var l)) { buckets[key] = l = new(); }
             l.Add(name);
         }
+        // Once a fixture hangs, its orphaned thread holds FixtureRunner's console
+        // lock forever, so every later fixture would block on it. Skip running the
+        // rest (they're recorded as blocked) — fix the one HANG and re-run.
+        var lockPoisoned = false;
 
         foreach (var f in FixtureRunner.Discover().OrderBy(f => f.name, StringComparer.Ordinal))
         {
@@ -58,22 +63,41 @@ public sealed class IrDiagnostic
                 continue;
             }
 
-            try
+            // Compile + run on a worker thread with a timeout: a miscompiled
+            // fixture can infinite-loop at runtime, which would otherwise hang the
+            // whole in-process diagnostic. On timeout the thread is orphaned (it
+            // holds FixtureRunner's console lock, so later fixtures cascade to
+            // HANG too — the FIRST alphabetical HANG is the real culprit).
+            if (lockPoisoned) { Bucket("SKIPPED (after an earlier HANG)", f.name); continue; }
+            string? stdout = null;
+            Exception? threadEx = null;
+            var worker = new Thread(() =>
             {
-                var stdout = FixtureRunner.CompileAndRun(emitted, Array.Empty<string>());
-                var got = stdout.ReplaceLineEndings("\n").TrimEnd('\n');
+                try { stdout = FixtureRunner.CompileAndRun(emitted, Array.Empty<string>()); }
+                catch (Exception e) { threadEx = e; }
+            }) { IsBackground = true };
+            worker.Start();
+            if (!worker.Join(TimeSpan.FromSeconds(6)))
+            {
+                Bucket("HANG (runtime loop / blocked)", f.name);
+                lockPoisoned = true;
+                continue;
+            }
+            if (threadEx is InvalidOperationException ioe && ioe.Message.StartsWith("Roslyn rejected"))
+            {
+                var firstErr = ioe.Message.Split('\n').Skip(1).FirstOrDefault(l => l.Contains("error CS")) ?? "";
+                Bucket("ROSLYN: " + Trunc(firstErr), f.name);
+            }
+            else if (threadEx is not null)
+            {
+                Bucket("RUNTIME-EX: " + threadEx.GetType().Name + ": " + Trunc(threadEx.Message.Split('\n')[0]), f.name);
+            }
+            else
+            {
+                var got = (stdout ?? "").ReplaceLineEndings("\n").TrimEnd('\n');
                 var want = f.expectedStdout.ReplaceLineEndings("\n").TrimEnd('\n');
                 if (got == want) { pass.Add(f.name); }
                 else { Bucket("STDOUT-MISMATCH", f.name); }
-            }
-            catch (InvalidOperationException ex) when (ex.Message.StartsWith("Roslyn rejected"))
-            {
-                var firstErr = ex.Message.Split('\n').Skip(1).FirstOrDefault(l => l.Contains("error CS")) ?? "";
-                Bucket("ROSLYN: " + Trunc(firstErr), f.name);
-            }
-            catch (Exception ex)
-            {
-                Bucket("RUNTIME-EX: " + ex.GetType().Name + ": " + Trunc(ex.Message.Split('\n')[0]), f.name);
             }
         }
 
