@@ -264,6 +264,30 @@ internal sealed partial class IrBuilder
     /// int literal to any scalar element type in an array initializer.</summary>
     private static LitInt Zero => new("0", 0) { Type = CType.Int };
 
+    /// <summary>Build the nested C array type from outer→inner dimensions
+    /// (<c>[2][3]</c> → <c>Array(Array(elem, 3), 2)</c>). The nesting is what lets a
+    /// partial subscript yield an inner array (and stride correctly); the storage
+    /// and <see cref="CType.CsType"/> still collapse to one flat pointer.</summary>
+    private static CType MakeArrayType(CType elem, IReadOnlyList<int> dims)
+    {
+        var t = elem;
+        for (var i = dims.Count - 1; i >= 0; i--) { t = new CType.Array(t, dims[i]); }
+        return t;
+    }
+
+    /// <summary>A pointer-to-array declaration <c>T (*p)[N]…</c> — a pointer whose
+    /// pointee is an array (a row pointer into a 2-D array). Lowered to a flat
+    /// pointer that strides by the array's extent; the type carries the nested array
+    /// pointee so subscript striding and <c>sizeof</c> resolve.</summary>
+    private DeclStmt BuildPtrToArr(Item typeItem, Item nameItem, Item dimsItem, Item? initItem)
+    {
+        var elem = ResolveType(typeItem);
+        var dims = TryConstDims(dimsItem) ?? throw new IrUnsupportedException("pointer-to-array needs constant dimensions");
+        var type = new CType.Pointer(MakeArrayType(elem, dims));
+        var sym = _symbols.Declare(new Symbol { Name = Tok(nameItem), Kind = SymKind.Var, Type = type, Storage = Storage.Auto });
+        return new DeclStmt(new[] { new LocalDecl(sym, initItem is { } ii ? BuildExpr(ii) : null) });
+    }
+
     /// <summary>The constant dimension sizes of an <c>ArrDims</c> node, or null when
     /// any dimension isn't an integer constant expression (a VLA-ish extent).</summary>
     private List<int>? TryConstDims(Item arrDims)
@@ -334,14 +358,14 @@ internal sealed partial class IrBuilder
         if (initItem is { } ii)
         {
             var elems = BuildArrayElems(elem, dims, ParseInitList(ii));
-            arrType = new CType.Array(elem, elems.Count);
+            arrType = dims is { Count: >= 1 } ? MakeArrayType(elem, dims) : new CType.Array(elem, elems.Count);
             init = new PinnedArray(elem, elems, null) { Type = new CType.Pointer(elem) };
         }
         else if (dims is { Count: >= 1 })
         {
             var total = 1;
             foreach (var d in dims) { total *= d; }
-            arrType = new CType.Array(elem, total);
+            arrType = MakeArrayType(elem, dims);
             init = new PinnedArray(elem, null, new LitInt(total.ToString(System.Globalization.CultureInfo.InvariantCulture), total) { Type = CType.Int }) { Type = new CType.Pointer(elem) };
         }
         else

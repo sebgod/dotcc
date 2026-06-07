@@ -768,6 +768,9 @@ internal sealed partial class IrBuilder
         C.DeclArrEmptyInit d => BuildArrDecl(d.Arg0, d.Arg1, d.Arg2, null, implicitSize: false),
         C.DeclArrInit d => BuildArrDecl(d.Arg0, d.Arg1, d.Arg2, d.Arg5, implicitSize: false),
         C.DeclArrInitImplicit d => BuildArrDecl(d.Arg0, d.Arg1, null, d.Arg6, implicitSize: true),
+        // Pointer-to-array `T (*p)[N]` [= init] — a row pointer (multi-dim machinery).
+        C.DeclPtrToArr d => BuildPtrToArr(d.Arg0, d.Arg3, d.Arg5, null),
+        C.DeclPtrToArrInit d => BuildPtrToArr(d.Arg0, d.Arg3, d.Arg5, d.Arg7),
         // Local function-pointer variable: `Ret (*name)(params)` [= init].
         C.DeclFnPtr d => BuildFnPtrLocal(d.Arg0, d.Arg3, d.Arg6, null),
         C.DeclFnPtrNoArgs d => BuildFnPtrLocal(d.Arg0, d.Arg3, null, null),
@@ -968,18 +971,19 @@ internal sealed partial class IrBuilder
         {
             // Brace-initialized — the array interpreter resolves designators,
             // struct elements, and per-dimension zero-fill into a dense list; a
-            // multi-dim array flattens to one stackalloc of product(dims).
+            // multi-dim array flattens to one stackalloc of product(dims). The
+            // symbol keeps the NESTED array type so a[i][j] strides correctly.
             inits = BuildArrayElems(elem, dims, ParseInitList(ii));
-            arrType = new CType.Array(elem, inits.Count);
+            arrType = dims is { Count: >= 1 } ? MakeArrayType(elem, dims) : new CType.Array(elem, inits.Count);
         }
         else if (dims is { Count: >= 1 })
         {
             // Fixed-size, no initializer (C# zero-fills a stackalloc). A multi-dim
             // array flattens to one stackalloc of the product; sizeof(arr) and the
-            // array-length idiom read the count off the array type.
+            // array-length idiom read the dimensions off the nested array type.
             var total = 1;
             foreach (var d in dims) { total *= d; }
-            arrType = new CType.Array(elem, total);
+            arrType = MakeArrayType(elem, dims);
             countExpr = new LitInt(total.ToString(System.Globalization.CultureInfo.InvariantCulture), total) { Type = CType.Int };
         }
         else if (dimsItem is { } di2 && BuildArrDims(di2) is { Count: 1 } runtimeDims)
