@@ -97,6 +97,20 @@ public sealed record CommaSeq(IReadOnlyList<CExpr> Items) : CExpr;
 /// array (which lowered to a pointer, so C#'s <c>sizeof</c> would be wrong).</summary>
 public sealed record SizeOfExpr(CType Of) : CExpr;
 
+/// <summary>A positional struct/union aggregate initializer — lowered from
+/// <c>struct Point p = {3, 4}</c>. Codegen emits a C# object initializer
+/// <c>new Point { x = 3, y = 4 }</c>; <see cref="Members"/> pairs each supplied
+/// field (in declaration order) with its value. Fields the brace list doesn't
+/// reach are omitted, so they take C#'s zero default — exactly C's partial-init
+/// rule. A nested brace over a struct/union-typed field is itself a
+/// <see cref="StructInit"/>.</summary>
+public sealed record StructInit(IReadOnlyList<FieldInit> Members) : CExpr;
+
+/// <summary>One member of a <see cref="StructInit"/>: the field name, its
+/// declared <see cref="FieldType"/> (so codegen coerces the value as C would at
+/// the store), and the value expression.</summary>
+public readonly record struct FieldInit(string Name, CType FieldType, CExpr Value);
+
 /// <summary>A parenthesized sub-expression — kept so codegen can preserve
 /// explicit grouping (precedence-driven parens come later).</summary>
 public sealed record Paren(CExpr Inner) : CExpr;

@@ -480,6 +480,7 @@ internal sealed class CodeGen
                     : ($"((ulong)sizeof({so.Of.CsType}))", PPrimary);
             case Index ix: return ($"{Sub(ix.Base, PPostfix)}[{Expr(ix.Idx)}]", PPostfix);
             case Member m: return ($"{Sub(m.Base, PPostfix)}{(m.Arrow ? "->" : ".")}{DotCC.CSharpEmitter.Id(m.Field)}", PPostfix);
+            case StructInit si: return (StructInitText(si), PPrimary);
             case Call c: return (CallText(c), PPostfix);
             case CondExpr t:
                 // Wrapped (atomic): C-truthy condition, arms isolated by `?`/`:`.
@@ -625,6 +626,22 @@ internal sealed class CodeGen
         CondExpr t => IsConstExpr(t.Cond) && IsConstExpr(t.Then) && IsConstExpr(t.Else),
         _ => false,
     };
+
+    /// <summary>Render a positional aggregate initializer as a C# object
+    /// initializer — <c>new Point { x = 3, y = 4 }</c>. Each value is coerced to
+    /// its field type (C's implicit store conversion); unsupplied trailing fields
+    /// are omitted, so C# zero-fills them (C's partial-init rule).</summary>
+    private string StructInitText(StructInit si)
+    {
+        var sb = new StringBuilder("new ").Append(si.Type.CsType).Append(" { ");
+        for (var i = 0; i < si.Members.Count; i++)
+        {
+            if (i > 0) { sb.Append(", "); }
+            var m = si.Members[i];
+            sb.Append(DotCC.CSharpEmitter.Id(m.Name)).Append(" = ").Append(Coerced(m.Value, m.FieldType));
+        }
+        return sb.Append(" }").ToString();
+    }
 
     private string CallText(Call c)
     {
