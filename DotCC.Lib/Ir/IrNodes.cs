@@ -150,6 +150,25 @@ public sealed record Labeled(string Name, CStmt Body) : CStmt;
 /// and matched on, so nested setjmps stay disambiguated by token identity.</summary>
 public sealed record SetjmpGuard(CExpr Env, CStmt? TryBody, CStmt? CatchBody) : CStmt;
 
+/// <summary>A C <c>switch (Subject) { … }</c>, lowered to a C# switch. The body is
+/// pre-grouped into <see cref="Sections"/> (the grammar parses <c>case E:</c> /
+/// <c>default:</c> as statement-level labels — possibly Duff's-device-nested — so
+/// the builder flattens and groups them). C lets a section fall into the next; C#
+/// forbids implicit fall-through (CS0163) and a final case falling out (CS8070),
+/// so codegen inserts the explicit jump C performs (<c>goto case</c> /
+/// <c>goto default</c> / a trailing <c>break</c>) on any section that doesn't
+/// already end control flow.</summary>
+public sealed record Switch(CExpr Subject, IReadOnlyList<SwitchSection> Sections) : CStmt;
+
+/// <summary>One case section: its (stacked) labels and the statements that follow
+/// up to the next label.</summary>
+public sealed record SwitchSection(IReadOnlyList<SwitchLabel> Labels, IReadOnlyList<CStmt> Body);
+
+/// <summary>A <c>case E:</c> (<see cref="CaseExpr"/> set) or <c>default:</c>
+/// (null) label. The case expression must be a constant per C# rules — enum
+/// constants already lowered to integer literals, so this holds.</summary>
+public readonly record struct SwitchLabel(CExpr? CaseExpr);
+
 // ---- declarations / translation unit ------------------------------------
 
 /// <summary>A local array declaration, lowered to a C# <c>stackalloc</c>.
