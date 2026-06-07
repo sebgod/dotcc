@@ -305,7 +305,29 @@ internal sealed class CodeGen
     /// <see cref="Func"/> (CodeGen renders functions one at a time).</summary>
     private CType _currentRet = CType.Int;
 
-    // ---- volatile access -------------------------------------------------
+    // ---- volatile / atomic access ----------------------------------------
+
+    /// <summary>Render a READ of an lvalue, fencing it when the lvalue's type is
+    /// qualified: atomic → seq-cst <c>Atomic.Load</c>, volatile →
+    /// <c>Volatile.Read</c>, neither → the bare text at its natural precedence.</summary>
+    private static (string, int) QualifiedRead(CExpr lv, string bare, int barePrec) =>
+        lv.Type.IsAtomic ? ($"Atomic.Load(ref {bare})", PPrimary)
+        : lv.Type.IsVolatile ? (VolatileRead(bare), PPrimary)
+        : (bare, barePrec);
+
+    /// <summary>The <c>Atomic.*Fetch</c> helper for a compound assignment / step
+    /// that returns the NEW value (C's <c>x op= n</c> result). Throws for an
+    /// operator with no lock-free primitive.</summary>
+    private static string AtomicFetchHelper(BinOp op, string csType) => op switch
+    {
+        BinOp.Add => "AddFetch",
+        BinOp.Sub => "SubFetch",
+        BinOp.BitAnd => "AndFetch",
+        BinOp.BitOr => "OrFetch",
+        BinOp.BitXor => "XorFetch",
+        _ => throw new IrUnsupportedException(
+            $"atomic compound assignment `{BinSym(op)}=` on `{csType}` (no lock-free primitive)"),
+    };
 
     /// <summary>The fenced read of a volatile lvalue text — C's volatile read.</summary>
     private static string VolatileRead(string lv) => $"global::System.Threading.Volatile.Read(ref {lv})";
@@ -518,8 +540,7 @@ internal sealed class CodeGen
             // needs the explicit `&` to form a delegate* (C allows the bare name).
             case VarRef v: return v.Sym.Kind == SymKind.Func
                 ? ($"&{v.Sym.CsName}", PUnary)
-                : v.Type.IsVolatile ? (VolatileRead(v.Sym.CsName), PPrimary)
-                : (v.Sym.CsName, PPrimary);
+                : QualifiedRead(v, v.Sym.CsName, PPrimary);
             case IndirectCall ic:
                 return ($"{Sub(ic.Callee, PPostfix)}({string.Join(", ", ic.Args.Select(a => Sub(a, PAssign)))})", PPostfix);
             case Paren p: return Render(p.Inner); // explicit C parens are redundant; precedence re-adds as needed
@@ -537,12 +558,12 @@ internal sealed class CodeGen
             case Index ix:
             {
                 var t = $"{Sub(ix.Base, PPostfix)}[{Expr(ix.Idx)}]";
-                return ix.Type.IsVolatile ? (VolatileRead(t), PPrimary) : (t, PPostfix);
+                return QualifiedRead(ix, t, PPostfix);
             }
             case Member m:
             {
                 var t = $"{Sub(m.Base, PPostfix)}{(m.Arrow ? "->" : ".")}{DotCC.CSharpEmitter.Id(m.Field)}";
-                return m.Type.IsVolatile ? (VolatileRead(t), PPrimary) : (t, PPostfix);
+                return QualifiedRead(m, t, PPostfix);
             }
             case StructInit si: return (StructInitText(si), PPrimary);
             case Call c: return (CallText(c), PPostfix);
@@ -553,6 +574,19 @@ internal sealed class CodeGen
                 return (string.Join(", ", cs.Items.Select(it => Sub(it, PAssign))), PComma);
             case CommaOp co:
                 return (CommaValue(co), PPrimary);
+            case Assign a when a.Target.Type.IsAtomic:
+                {
+                    // An atomic lvalue stores seq-cst (Atomic.Store, returns the stored
+                    // value); a compound op maps to the *Fetch helper that returns the
+                    // NEW value (C's `x op= n` result). The rhs is cast to the lvalue
+                    // type so the generic Atomic.* call infers one element type.
+                    var lv = BareLValue(a.Target);
+                    var cs = a.Target.Type.Unqualified.CsType;
+                    var text = a.CompoundOp is { } cop
+                        ? $"Atomic.{AtomicFetchHelper(cop, cs)}(ref {lv}, ({cs})({Sub(a.Value, PAssign)}))"
+                        : $"Atomic.Store(ref {lv}, ({cs})({Sub(a.Value, PAssign)}))";
+                    return (text, PPrimary);
+                }
             case Assign a when a.Target.Type.IsVolatile:
                 {
                     // A volatile lvalue stores through Volatile.Write(ref lv, …); a
@@ -584,6 +618,19 @@ internal sealed class CodeGen
 
     private (string, int) RenderUnary(Unary u)
     {
+        // ++/-- of an atomic lvalue is a seq-cst step: prefix yields the NEW value
+        // (AddFetch/SubFetch), postfix the OLD (FetchAdd/FetchSub) — matching C.
+        if (u.Op is UnOp.PreInc or UnOp.PreDec or UnOp.PostInc or UnOp.PostDec && u.Operand.Type.IsAtomic)
+        {
+            var lv = BareLValue(u.Operand);
+            var cs = u.Operand.Type.Unqualified.CsType;
+            var helper = u.Op switch
+            {
+                UnOp.PreInc => "AddFetch", UnOp.PreDec => "SubFetch",
+                UnOp.PostInc => "FetchAdd", _ => "FetchSub",
+            };
+            return ($"Atomic.{helper}(ref {lv}, ({cs})1)", PPrimary);
+        }
         // ++/-- of a volatile lvalue is a fenced read-modify-write (returns void —
         // statement position only, like the legacy). Handled before the plain forms.
         if (u.Op is UnOp.PreInc or UnOp.PreDec or UnOp.PostInc or UnOp.PostDec && u.Operand.Type.IsVolatile)
@@ -603,7 +650,7 @@ internal sealed class CodeGen
             // BareLValue so `&` of a volatile lvalue takes the address, not the
             // address of a Volatile.Read(...) call.
             case UnOp.AddrOf: return ($"&{BareLValue(u.Operand)}", PUnary);
-            case UnOp.Deref: return ($"*{Sub(u.Operand, PUnary)}", PUnary);
+            case UnOp.Deref: return QualifiedRead(u, $"*{Sub(u.Operand, PUnary)}", PUnary);
             case UnOp.PreInc: return ($"++{Sub(u.Operand, PUnary)}", PUnary);
             case UnOp.PreDec: return ($"--{Sub(u.Operand, PUnary)}", PUnary);
             case UnOp.PostInc: return ($"{Sub(u.Operand, PPostfix)}++", PPostfix);

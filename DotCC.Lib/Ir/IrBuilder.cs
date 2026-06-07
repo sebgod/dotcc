@@ -370,6 +370,10 @@ internal sealed class IrBuilder
         // `volatile T` — leading qualifier prefix. Carry the flag on the type;
         // codegen fences reads/writes of a volatile scalar lvalue (Volatile.Read/Write).
         C.TypeVolatile t => ResolveType(t.Arg1).WithQuals(TypeQual.Volatile),
+        // `_Atomic T` / `_Atomic(T)` (C11). Codegen lowers reads/writes of an atomic
+        // scalar lvalue to seq-cst Atomic.Load/Store/*Fetch (Interlocked-backed).
+        C.TypeAtomic t => ResolveType(t.Arg1).WithQuals(TypeQual.Atomic),
+        C.TypeAtomicParen t => ResolveType(t.Arg2).WithQuals(TypeQual.Atomic),
         C.TypePtrQualRestrict t => new CType.Pointer(ResolveType(t.Arg0)),
         C.TypeName t => ResolveTypeName(Tok(t.Arg0)),
         // `enum Tag` as a type — dotcc lowers enums to plain int.
