@@ -674,6 +674,15 @@ internal sealed class CodeGen
             case BinOp.Eq or BinOp.Ne or BinOp.Lt or BinOp.Gt or BinOp.Le or BinOp.Ge:
                 {
                     var p = Prec(b.Op);
+                    // Function-pointer comparison (`fp == fn`): a bare function
+                    // designator renders as the untyped method-group address
+                    // `&fn`, which C# can't compare without a target type
+                    // (CS0019). CmpOperand casts such an operand to its fn-ptr
+                    // type; integer operands keep usual-arithmetic reconcile.
+                    if (IsFnPtrType(b.Left.Type) || IsFnPtrType(b.Right.Type))
+                    {
+                        return ($"((CBool)({CmpOperand(b.Left, p)} {BinSym(b.Op)} {CmpOperand(b.Right, p + 1)}))", PPrimary);
+                    }
                     var (l, r) = ReconcileOperands(b.Left, b.Right, p, p + 1);
                     return ($"((CBool)({l} {BinSym(b.Op)} {r}))", PPrimary);
                 }
@@ -718,6 +727,26 @@ internal sealed class CodeGen
                     ReconcileOne(right, rt.CsName, common.CsName, rp));
         }
         return (Sub(left, lp), Sub(right, rp));
+    }
+
+    /// <summary>True when <paramref name="t"/> is a function pointer — in dotcc's
+    /// IR a fn-ptr is a bare <see cref="CType.Func"/> (its <c>CsType</c> is already
+    /// <c>delegate*&lt;…&gt;</c>); <c>Pointer(Func)</c> is tolerated for safety.</summary>
+    private static bool IsFnPtrType(CType t) =>
+        t.Unqualified is CType.Func or CType.Pointer { Pointee: CType.Func };
+
+    /// <summary>Render a comparison operand. A bare function designator
+    /// (<see cref="VarRef"/> of a function, possibly parenthesised) renders as the
+    /// method-group address <c>&amp;fn</c>, which C# leaves untyped until a target
+    /// type is supplied — a comparison has none, so cast it to its own function-
+    /// pointer type. Every other operand passes through unchanged.</summary>
+    private string CmpOperand(CExpr e, int p)
+    {
+        var inner = e;
+        while (inner is Paren pp) { inner = pp.Inner; }
+        return inner is VarRef { Sym.Kind: SymKind.Func }
+            ? $"({inner.Type.CsType})({Sub(e, PUnary)})"
+            : Sub(e, p);
     }
 
     private string ReconcileOne(CExpr e, string from, string to, int p) =>
