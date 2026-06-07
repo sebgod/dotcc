@@ -116,7 +116,7 @@ internal sealed class IrBuilder
     /// an <c>extern</c> one is registered for resolution only (no field).</summary>
     private void BuildGlobalDecls(Item typeItem, Item listItem, Storage storage)
     {
-        WalkDeclList(ResolveType(typeItem), listItem, (name, initItem, type) =>
+        WalkDeclList(typeItem, listItem, (name, initItem, type) =>
         {
             var sym = _symbols.Declare(new Symbol
             {
@@ -320,7 +320,7 @@ internal sealed class IrBuilder
                 case C.MembersCons c: Member(c.Arg0); Member(c.Arg1); break;
                 case C.MembersOne o: Member(o.Arg0); break;
                 case C.StructMemberList sm:
-                    WalkDeclList(ResolveType(sm.Arg0), sm.Arg1, (name, _, type) => fields.Add(new StructField(name, type)));
+                    WalkDeclList(sm.Arg0, sm.Arg1, (name, _, type) => fields.Add(new StructField(name, type)));
                     break;
                 // `T name[N];` — a fixed-size array member. The bound must be an
                 // integer constant expression (codegen lowers it to a C# `fixed`
@@ -767,7 +767,7 @@ internal sealed class IrBuilder
     /// in the function's scope. The statement itself emits nothing.</summary>
     private CStmt BuildStmtStaticDecl(C.StmtStaticDecl n)
     {
-        WalkDeclList(ResolveType(n.Arg1), n.Arg2, (name, initItem, type) =>
+        WalkDeclList(n.Arg1, n.Arg2, (name, initItem, type) =>
         {
             var sym = new Symbol
             {
@@ -832,7 +832,7 @@ internal sealed class IrBuilder
     private DeclStmt BuildDeclList(Item typeItem, Item listItem)
     {
         var entries = new List<LocalDecl>();
-        WalkDeclList(ResolveType(typeItem), listItem, (name, initItem, type) =>
+        WalkDeclList(typeItem, listItem, (name, initItem, type) =>
         {
             var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type, Storage = Storage.Auto });
             entries.Add(new LocalDecl(sym, initItem is { } ii ? BuildExpr(ii) : null));
@@ -859,10 +859,18 @@ internal sealed class IrBuilder
     /// each subsequent declarator rebuilds its type from the pointer-stripped
     /// element plus its own <c>*</c>s (so <c>int *a, b;</c> ⇒ a:int*, b:int).
     /// Shared by local (<see cref="BuildDecl"/>) and file-scope declarations.</summary>
-    private void WalkDeclList(CType baseType, Item listItem, Action<string, Item?, CType> add)
+    private void WalkDeclList(Item typeItem, Item listItem, Action<string, Item?, CType> add)
     {
+        var baseType = ResolveType(typeItem);
+        // Peel only the LITERAL trailing `*`s (the `Type → Type *` rule greedily
+        // folded them into baseType, but they bind to the FIRST declarator alone) —
+        // subsequent declarators rebuild from the stripped element plus their own
+        // `*`s (`int *a, b` ⇒ a:int*, b:int). Pointer-ness that came from a typedef
+        // base (`BoxPtr p, q` ⇒ both Box*) is NOT a literal star and stays in
+        // `element`, so every declarator keeps it.
+        var litStars = CountLiteralStars(typeItem);
         var element = baseType;
-        while (element is CType.Pointer p) { element = p.Pointee; }
+        for (var i = 0; i < litStars && element is CType.Pointer p; i++) { element = p.Pointee; }
         void WalkTail(Item it, int stars)
         {
             switch (it.Content)
@@ -898,6 +906,27 @@ internal sealed class IrBuilder
     {
         for (var i = 0; i < stars; i++) { t = new CType.Pointer(t); }
         return t;
+    }
+
+    /// <summary>Count the literal trailing <c>*</c>s on a type node (the
+    /// <c>Type → Type *</c> pointer-qualifier chain). Distinguishes a pointer
+    /// written with <c>*</c> in the source (binds to the first declarator only)
+    /// from one a typedef base contributes (binds to every declarator).</summary>
+    private static int CountLiteralStars(Item typeItem)
+    {
+        var n = 0;
+        var it = typeItem;
+        while (true)
+        {
+            switch (it.Content)
+            {
+                case C.TypePtr t: n++; it = t.Arg0; break;
+                case C.TypePtrQualConst t: n++; it = t.Arg0; break;
+                case C.TypePtrQualVolatile t: n++; it = t.Arg0; break;
+                case C.TypePtrQualRestrict t: n++; it = t.Arg0; break;
+                default: return n;
+            }
+        }
     }
 
     /// <summary>A local array declaration. Lowers to a C# <c>stackalloc</c>. A
