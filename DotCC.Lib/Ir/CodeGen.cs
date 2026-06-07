@@ -674,8 +674,20 @@ internal sealed class CodeGen
     /// call / assignment / <c>++</c>/<c>--</c> is already a valid C#
     /// statement-expression; any other (a discarded value, incl. a <c>(void)x</c>
     /// the binder re-typed to void) is consumed by a discard so C# accepts it.</summary>
-    private string RenderStmtExpr(CExpr e) =>
-        IsStmtExpr(e) ? Expr(e) : $"_ = {Sub(e, PAssign)}";
+    private string RenderStmtExpr(CExpr e)
+    {
+        // Outer parens never matter for a statement-expression (a macro body like
+        // `((c) ? a() : b())` arrives parenthesized) — strip them to see the shape.
+        while (e is Paren p) { e = p.Inner; }
+        // A void-typed conditional (`c ? voidA() : voidB()`) has no C# value form
+        // (CS0173) — in statement/discard position it IS an if/else. Arms recurse
+        // (a nested void `?:`); each arm renders in statement position too.
+        if (e is CondExpr ct && ct.Type.Unqualified is CType.VoidType)
+        {
+            return $"if (Cond.B({Expr(ct.Cond)})) {{ {RenderStmtExpr(ct.Then)}; }} else {{ {RenderStmtExpr(ct.Else)}; }}";
+        }
+        return IsStmtExpr(e) ? Expr(e) : $"_ = {Sub(e, PAssign)}";
+    }
 
     private static bool IsStmtExpr(CExpr e) => e switch
     {
