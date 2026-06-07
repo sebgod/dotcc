@@ -316,7 +316,7 @@ internal sealed class IrBuilder
         {
             case C.Block: return BuildBlock(it);
             case C.BlockEmpty: return BuildBlock(it);
-            case C.StmtDecl d: return BuildDecl(d.Arg0) with { Pos = pos };
+            case C.StmtDecl d: return BuildDeclStmt(d.Arg0) with { Pos = pos };
             case C.StmtExpr e: return new ExprStmt(BuildExpr(e.Arg0)) { Pos = pos };
             case C.StmtEmpty: return new Block(System.Array.Empty<CStmt>()) { Pos = pos };
             case C.StmtIf s: return new If(BuildExpr(s.Arg2), BuildStmt(s.Arg4), null) { Pos = pos };
@@ -337,6 +337,19 @@ internal sealed class IrBuilder
             default: throw new IrUnsupportedException(TypeName(it.Content));
         }
     }
+
+    /// <summary>A declaration in statement position. The grammar wraps the
+    /// concrete declaration kind (plain, array, fn-ptr, …) inside
+    /// <c>StmtDecl.Arg0</c>; dispatch on it.</summary>
+    private CStmt BuildDeclStmt(Item it) => it.Content switch
+    {
+        C.Decl => BuildDecl(it),
+        C.DeclArr d => BuildArrDecl(d.Arg0, d.Arg1, d.Arg2, null, implicitSize: false),
+        C.DeclArrEmptyInit d => BuildArrDecl(d.Arg0, d.Arg1, d.Arg2, null, implicitSize: false),
+        C.DeclArrInit d => BuildArrDecl(d.Arg0, d.Arg1, d.Arg2, d.Arg5, implicitSize: false),
+        C.DeclArrInitImplicit d => BuildArrDecl(d.Arg0, d.Arg1, null, d.Arg6, implicitSize: true),
+        _ => throw new IrUnsupportedException(TypeName(it.Content)),
+    };
 
     private DeclStmt BuildDecl(Item declItem)
     {
@@ -392,6 +405,90 @@ internal sealed class IrBuilder
         for (var i = 0; i < stars; i++) { t = new CType.Pointer(t); }
         return t;
     }
+
+    /// <summary>A local array declaration. Lowers to a C# <c>stackalloc</c>. A
+    /// constant dimension types the symbol as <see cref="CType.Array"/> (so
+    /// <c>sizeof(arr)</c> and the array-length idiom resolve); a runtime extent
+    /// (VLA-ish) decays to a pointer. Multi-dimensional arrays are deferred.</summary>
+    private ArrayDecl BuildArrDecl(Item typeItem, Item nameItem, Item? dimsItem, Item? initItem, bool implicitSize)
+    {
+        var elem = ResolveType(typeItem);
+        var name = Tok(nameItem);
+        var inits = initItem is { } ii ? BuildInitList(ii) : null;
+
+        var dims = dimsItem is { } di ? BuildArrDims(di) : new List<CExpr>();
+        if (dims.Count > 1) { throw new IrUnsupportedException("multi-dimensional array"); }
+        var dim = dims.Count == 1 ? dims[0] : null;
+
+        CType arrType;
+        CExpr? countExpr = null;
+        if (dim is LitInt { Value: { } cnt })
+        {
+            arrType = new CType.Array(elem, (int)cnt);
+            countExpr = dim;
+        }
+        else if (inits is not null)
+        {
+            // Brace-initialized, dimension implicit or non-constant → count = #elems.
+            arrType = new CType.Array(elem, inits.Count);
+        }
+        else if (dim is not null)
+        {
+            // Runtime extent (VLA): C arrays decay to a pointer in value context.
+            arrType = new CType.Pointer(elem);
+            countExpr = dim;
+        }
+        else
+        {
+            arrType = new CType.Pointer(elem);
+        }
+
+        var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = arrType, Storage = Storage.Auto });
+        return new ArrayDecl(sym, elem, countExpr, inits);
+    }
+
+    /// <summary>Collect the dimension expressions of an <c>ArrDims</c> node,
+    /// outer→inner.</summary>
+    private List<CExpr> BuildArrDims(Item it)
+    {
+        var dims = new List<CExpr>();
+        void Walk(Item n)
+        {
+            switch (n.Content)
+            {
+                case C.ArrDimsCons c: Walk(c.Arg0); dims.Add(BuildExpr(c.Arg2)); break;
+                case C.ArrDimsOne o: dims.Add(BuildExpr(o.Arg1)); break;
+                default: throw new IrUnsupportedException(TypeName(n.Content));
+            }
+        }
+        Walk(it);
+        return dims;
+    }
+
+    /// <summary>Flatten a brace initializer list to its scalar element
+    /// expressions. Nested / designated initializers are deferred.</summary>
+    private List<CExpr> BuildInitList(Item it)
+    {
+        var items = new List<CExpr>();
+        void Walk(Item n)
+        {
+            switch (n.Content)
+            {
+                case C.InitListCons c: Walk(c.Arg0); items.Add(BuildInitElem(c.Arg2)); break;
+                case C.InitListTrail t: Walk(t.Arg0); break; // trailing comma — no element
+                case C.InitListOne o: items.Add(BuildInitElem(o.Arg0)); break;
+                default: items.Add(BuildInitElem(n)); break;
+            }
+        }
+        Walk(it);
+        return items;
+    }
+
+    private CExpr BuildInitElem(Item it) => it.Content switch
+    {
+        C.InitElemExpr e => BuildExpr(e.Arg0),
+        _ => throw new IrUnsupportedException(TypeName(it.Content)),
+    };
 
     private For BuildForDecl(C.StmtForDecl s)
     {
@@ -498,6 +595,9 @@ internal sealed class IrBuilder
             C.LitTrue => new LitInt("1", 1) { Type = CType.Int },
             C.LitFalse => new LitInt("0", 0) { Type = CType.Int },
             C.LitNullptr => new Raw("null") { Type = new CType.Pointer(CType.Void) },
+            C.SizeofType s => new SizeOfExpr(ResolveType(s.Arg2)) { Type = CType.SizeT },
+            // `sizeof expr` — the operand isn't evaluated, only its type measured.
+            C.SizeofExpr s => new SizeOfExpr(BuildExpr(s.Arg1).Type) { Type = CType.SizeT },
             C.Call c => BuildCall(c.Arg0, c.Arg2),
             C.CallNoArgs c => BuildCall(c.Arg0, null),
             _ => throw new IrUnsupportedException(TypeName(it.Content)),
