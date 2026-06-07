@@ -257,7 +257,13 @@ internal sealed class CodeGen
             case LitFloat f: return (f.CsText, PPrimary);
             case LitStr s: return (s.CsExpr, PPrimary);
             case Raw r: return (r.CsText, PPrimary);
-            case VarRef v: return (v.Sym.CsName, PPrimary);
+            // A bare function name used as a value decays to its address — C#
+            // needs the explicit `&` to form a delegate* (C allows the bare name).
+            case VarRef v: return v.Sym.Kind == SymKind.Func
+                ? ($"&{v.Sym.CsName}", PUnary)
+                : (v.Sym.CsName, PPrimary);
+            case IndirectCall ic:
+                return ($"{Sub(ic.Callee, PPostfix)}({string.Join(", ", ic.Args.Select(a => Sub(a, PAssign)))})", PPostfix);
             case Paren p: return Render(p.Inner); // explicit C parens are redundant; precedence re-adds as needed
             case Cast c: return ($"({c.Target.CsType}){Sub(c.Operand, PUnary)}", PUnary);
             case SizeOfExpr so:
@@ -293,6 +299,9 @@ internal sealed class CodeGen
             case UnOp.Plus: return ($"+{Sub(u.Operand, PUnary)}", PUnary);
             case UnOp.Neg: return ($"-{Sub(u.Operand, PUnary)}", PUnary);
             case UnOp.BitNot: return ($"~{Sub(u.Operand, PUnary)}", PUnary);
+            // &fn where fn is a function already decays to `&fn` in the VarRef
+            // case — don't emit a second `&`.
+            case UnOp.AddrOf when u.Operand is VarRef { Sym.Kind: SymKind.Func }: return Render(u.Operand);
             case UnOp.AddrOf: return ($"&{Sub(u.Operand, PUnary)}", PUnary);
             case UnOp.Deref: return ($"*{Sub(u.Operand, PUnary)}", PUnary);
             case UnOp.PreInc: return ($"++{Sub(u.Operand, PUnary)}", PUnary);
