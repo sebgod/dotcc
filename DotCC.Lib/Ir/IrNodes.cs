@@ -65,6 +65,23 @@ public sealed record Call(string Callee, IReadOnlyList<CExpr> Args, bool Builtin
 /// <summary>A cast (explicit or inserted by a coercion pass).</summary>
 public sealed record Cast(CType Target, CExpr Operand) : CExpr;
 
+/// <summary>A conditional (ternary) expression <c>c ? a : b</c>. Codegen wraps
+/// the condition in <c>Cond.B(...)</c> for C-truthy semantics.</summary>
+public sealed record CondExpr(CExpr Cond, CExpr Then, CExpr Else) : CExpr;
+
+/// <summary>An array subscript <c>base[index]</c> — an lvalue.</summary>
+public sealed record Index(CExpr Base, CExpr Idx) : CExpr;
+
+/// <summary>A struct/union member access — <c>base.field</c> (<see cref="Arrow"/>
+/// false) or <c>base-&gt;field</c> (true). Both forms are legal C# in the unsafe
+/// context user code lives in, so codegen emits the operator verbatim.</summary>
+public sealed record Member(CExpr Base, string Field, bool Arrow) : CExpr;
+
+/// <summary>A comma-separated expression sequence used in <c>for</c>-init /
+/// <c>for</c>-update position (<c>i = 0, j = n</c>) — C# accepts the same list
+/// there. (The value-context comma operator is a separate, later concern.)</summary>
+public sealed record CommaSeq(IReadOnlyList<CExpr> Items) : CExpr;
+
 /// <summary>A parenthesized sub-expression — kept so codegen can preserve
 /// explicit grouping (precedence-driven parens come later).</summary>
 public sealed record Paren(CExpr Inner) : CExpr;
@@ -104,6 +121,12 @@ public sealed record For(CStmt? Init, CExpr? Cond, CExpr? Post, CStmt Body) : CS
 public sealed record Return(CExpr? Value) : CStmt;
 public sealed record Break : CStmt;
 public sealed record Continue : CStmt;
+
+/// <summary>A <c>goto label;</c>. <see cref="Label"/> is the already-escaped C# label.</summary>
+public sealed record Goto(string Label) : CStmt;
+
+/// <summary>A labeled statement <c>name: body</c> (<see cref="Name"/> escaped).</summary>
+public sealed record Labeled(string Name, CStmt Body) : CStmt;
 
 // ---- declarations / translation unit ------------------------------------
 

@@ -196,8 +196,7 @@ public static class Compiler
         bool pedantic = false,
         bool pedanticErrors = false,
         bool asObject = false,
-        bool warnConversion = false,
-        bool useIr = false)
+        bool warnConversion = false)
     {
         var includeMap = BuildIncludeMap(inputPaths, includeDirs);
         var lexerTable = C.BuildLexer();
@@ -281,134 +280,41 @@ public static class Compiler
             return result;
         }
 
-        // ---- Typed-IR backend (--ir) -----------------------------------
-        // The strangler path: build a typed IR from the parse tree (via the
-        // identity visitor) and lower it to C#, instead of the bottom-up
-        // string emitter below. Grown incrementally against the behavioral
-        // fixture suite; the legacy two-pass stays the default until parity.
-        if (useIr)
-        {
-            var irBuilder = new Ir.IrBuilder();
-            var irParser = C.BuildParser(Ir.ParseTreeIdentityVisitor.Instance);
-            foreach (var unitPath in inputPaths)
-            {
-                var root = ParseUnit(unitPath, irParser, quiet: false);
-                irBuilder.AddUnit(root, Path.GetFileName(unitPath));
-            }
-            var irErrors = irBuilder.Diagnostics.Where(d => d.Severity == Ir.Severity.Error).ToList();
-            if (irErrors.Count > 0)
-            {
-                throw new CompileException(string.Join("\n", irErrors.Select(d => "error: " + d)));
-            }
-            foreach (var w in irBuilder.Diagnostics.Where(d => d.Severity == Ir.Severity.Warning))
-            {
-                Console.Error.WriteLine("dotcc: warning: " + w);
-            }
-            var cg = Ir.CodeGen.Run(irBuilder);
-            if (!asObject && !libraryMode && cg.MainArity < 0)
-            {
-                throw new CompileException("no `main` function defined in any translation unit.");
-            }
-            return asObject
-                ? SerializeFragment(cg.Functions, new Dictionary<string, string>(), cg.Aliases, cg.Globals, cg.MainArity)
-                : BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, fileBased, libraryMode, cg.Exports);
-        }
-
-        // Pass 1 — analysis. Parse every unit with a throwaway emitter purely
-        // to collect the malloc → stack-value promotion set: which
-        // `S* p = (S*)malloc(sizeof(S))` locals are used only through `->` and
-        // a matching free(), per function. The decision needs the whole
-        // function body, but the pipeline is single-pass bottom-up SDT (the
-        // decl reduces before its later uses), so a second pass is the clean
-        // way to make the verdict available at the decl. The emitted C# here is
-        // discarded — only PromotableMallocVars is kept.
-        var analyzer = new CSharpEmitter();
-        var analyzeParser = C.BuildParser(analyzer);
+        // ---- Typed-IR backend ------------------------------------------
+        // dotcc compiles C → typed IR → low-level C#. The parse tree (yielded
+        // raw by the identity visitor) is bound to a typed AST by IrBuilder, then
+        // CodeGen prints it precedence-aware. This is the sole backend; the
+        // retired bottom-up string emitter (CSharpEmitter) is kept only for its
+        // shared Id / EncodeStringLiteral / Export helpers and as a reference.
+        // TODO(ir): port the remaining cross-cutting concerns the legacy two-pass
+        // owned — malloc→stack promotion, -pedantic dialect gating, -Wconversion
+        // narrowing — as IR passes over the typed tree.
+        var irBuilder = new Ir.IrBuilder();
+        var irParser = C.BuildParser(Ir.ParseTreeIdentityVisitor.Instance);
         foreach (var unitPath in inputPaths)
         {
-            ParseUnit(unitPath, analyzeParser, quiet: true);
+            var root = ParseUnit(unitPath, irParser, quiet: false);
+            irBuilder.AddUnit(root, Path.GetFileName(unitPath));
         }
-
-        // Pass 2 — emit. Seed the real emitter with the promotion set so each
-        // node decides locally: a promotable decl emits `S p = new S();`, its
-        // `->` accesses emit `.`, and its free() is dropped.
-        // Dialect gating (the `-pedantic` rejection layer) collects on this pass
-        // only — never the analysis pass — so each violation is reported once.
-        // Null gate on the default permissive path keeps every Gate() a no-op.
-        var gateOn = pedantic || pedanticErrors;
-        var dialectGate = gateOn ? new DialectGate(activeDialect) : null;
-        // -Wconversion narrowing sink — opt-in, emit-pass only (see ConversionGate).
-        var conversionGate = warnConversion ? new ConversionGate() : null;
-        var emitter = new CSharpEmitter(analyzer.PromotableMallocVars, dialectGate, conversionGate);
-        var emitParser = C.BuildParser(emitter);
-
-        var allFunctions = new StringBuilder();
-        var mainArity = -1;
-        foreach (var unitPath in inputPaths)
+        var irErrors = irBuilder.Diagnostics.Where(d => d.Severity == Ir.Severity.Error).ToList();
+        if (irErrors.Count > 0)
         {
-            // Emit pass carries the dialect gate (null on the analysis pass) so
-            // preprocessor-era gates (variadic macros, #warning) collect once.
-            var result = ParseUnit(unitPath, emitParser, quiet: false, gate: dialectGate);
-
-            if (allFunctions.Length > 0) { allFunctions.AppendLine(); }
-            // The visitor's IVisitor<EmitContent> returns a discriminated
-            // union; for the top-level FnList the result is always a Text
-            // variant carrying the concatenated function emit string.
-            allFunctions.Append(((EmitContent.Text)result.Content).Value);
-
-            if (emitter.MainArity >= 0)
-            {
-                mainArity = emitter.MainArity;
-                emitter.ResetMainArity();
-            }
+            throw new CompileException(string.Join("\n", irErrors.Select(d => "error: " + d)));
         }
-
-        // Library mode doesn't need a `main` — the produced .dll is consumed
-        // through its [UnmanagedCallersOnly] exports. Object mode (a single TU
-        // compiled with `--emit=obj`) likewise needn't have one (it links later).
-        // Exe mode still requires one entry point to dispatch to.
-        if (!asObject && !libraryMode && mainArity < 0)
+        foreach (var w in irBuilder.Diagnostics.Where(d => d.Severity == Ir.Severity.Warning))
+        {
+            Console.Error.WriteLine("dotcc: warning: " + w);
+        }
+        var cg = Ir.CodeGen.Run(irBuilder);
+        // Library mode doesn't need a `main` (the .dll is consumed through its
+        // exports); object mode links later. Exe mode requires an entry point.
+        if (!asObject && !libraryMode && cg.MainArity < 0)
         {
             throw new CompileException("no `main` function defined in any translation unit.");
         }
-
-        // Flush dialect-gating diagnostics (collect-all). `-pedantic-errors`
-        // fails the compile with every violation listed; `-pedantic` alone
-        // warns to stderr and continues (same channel CPreprocessor uses for
-        // #warning). Plain `-std=` never gets here — the gate is null.
-        if (dialectGate is not null && dialectGate.HasAny)
-        {
-            if (pedanticErrors)
-            {
-                // The frontend prefixes "dotcc: ", so the message lines start at
-                // "error: " (the first line then reads "dotcc: error: …").
-                throw new CompileException(
-                    string.Join("\n", dialectGate.Diagnostics.Select(d => "error: " + d)));
-            }
-            foreach (var d in dialectGate.Diagnostics)
-            {
-                Console.Error.WriteLine("dotcc: warning: " + d);
-            }
-        }
-
-        // Flush -Wconversion narrowing diagnostics (warnings only — opt-in). Same
-        // stderr channel as the dialect gate; never fatal.
-        if (conversionGate is not null)
-        {
-            foreach (var d in conversionGate.Diagnostics)
-            {
-                Console.Error.WriteLine("dotcc: warning: " + d);
-            }
-        }
-
-        // Separate-compilation object: serialize this TU's emitted pieces into a
-        // `.cs` fragment (no shell, no runtime) for a later link step to merge.
-        if (asObject)
-        {
-            return SerializeFragment(allFunctions.ToString(), emitter.TypeDecls, emitter.UsingAliases, emitter.Globals, mainArity);
-        }
-
-        return BuildShell(mainArity, allFunctions.ToString(), emitter.StructDecls, emitter.UsingAliases, emitter.Globals, fileBased, libraryMode, emitter.Exports);
+        return asObject
+            ? SerializeFragment(cg.Functions, new Dictionary<string, string>(), cg.Aliases, cg.Globals, cg.MainArity)
+            : BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, fileBased, libraryMode, cg.Exports);
     }
 
     // ---- separate compilation (`--emit=obj` + link) -------------------------
