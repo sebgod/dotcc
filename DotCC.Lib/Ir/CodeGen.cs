@@ -83,11 +83,32 @@ internal sealed class CodeGen
         foreach (var f in t.Fields)
         {
             if (t.IsUnion) { sb.Append("    [System.Runtime.InteropServices.FieldOffset(0)]\n"); }
+            // An array member is C-inline storage, not a pointer field. A primitive
+            // element lowers to a C# `fixed` buffer (inline, indexable); a
+            // non-primitive element (a pointer/struct array) needs an [InlineArray]
+            // wrapper, deferred.
+            if (f.Type.Unqualified is CType.Array { Count: { } n } arr)
+            {
+                if (!IsFixedBufferType(arr.Element.CsType))
+                {
+                    throw new IrUnsupportedException($"non-primitive array struct member '{f.Name}'");
+                }
+                sb.Append("    public fixed ").Append(arr.Element.CsType).Append(' ')
+                  .Append(DotCC.CSharpEmitter.Id(f.Name)).Append('[').Append(n).Append("];\n");
+                continue;
+            }
             sb.Append("    public ").Append(f.Type.CsType).Append(' ').Append(DotCC.CSharpEmitter.Id(f.Name)).Append(";\n");
         }
         sb.Append("}\n\n");
         return sb.ToString();
     }
+
+    /// <summary>C# permits a <c>fixed</c> buffer only of these primitive element
+    /// types — every other array member must go through an <c>[InlineArray]</c>
+    /// wrapper instead.</summary>
+    private static bool IsFixedBufferType(string cs) => cs is
+        "bool" or "byte" or "sbyte" or "short" or "ushort" or "int" or "uint"
+        or "long" or "ulong" or "char" or "float" or "double";
 
     // ---- functions -------------------------------------------------------
 

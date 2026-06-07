@@ -307,6 +307,18 @@ internal sealed class IrBuilder
                 case C.StructMemberList sm:
                     WalkDeclList(ResolveType(sm.Arg0), sm.Arg1, (name, _, type) => fields.Add(new StructField(name, type)));
                     break;
+                // `T name[N];` — a fixed-size array member. The bound must be an
+                // integer constant expression (codegen lowers it to a C# `fixed`
+                // buffer). Multi-dimensional members are deferred.
+                case C.StructArrMember sm:
+                {
+                    var elem = ResolveType(sm.Arg0);
+                    var dims = BuildArrDims(sm.Arg2);
+                    if (dims.Count != 1) { throw new IrUnsupportedException("multi-dimensional struct member"); }
+                    if (ConstEval(dims[0]) is not { } cnt) { throw new IrUnsupportedException("non-constant struct array bound"); }
+                    fields.Add(new StructField(Tok(sm.Arg1), new CType.Array(elem, (int)cnt)));
+                    break;
+                }
                 default: throw new IrUnsupportedException(TypeName(m.Content));
             }
         }
