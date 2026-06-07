@@ -481,6 +481,7 @@ internal sealed class IrBuilder
     {
         int u = 0, s = 0, sh = 0, lng = 0;
         var quals = TypeQual.None;
+        var isComplex = false;
         string? base_ = null;
         foreach (var k in specs)
         {
@@ -491,7 +492,9 @@ internal sealed class IrBuilder
                 case "short": sh++; break;
                 case "long": lng++; break;
                 case "const": quals |= TypeQual.Const; break;
-                case "inline" or "_Noreturn" or "_Complex": break; // ignored for type purposes here
+                // C99 _Complex — every width widens to the double-backed Complex.
+                case "_Complex": isComplex = true; break;
+                case "inline" or "_Noreturn": break; // ignored for type purposes here
                 case "void": base_ = "void"; break;
                 case "char": base_ = "char"; break;
                 case "int": base_ = "int"; break;
@@ -514,6 +517,7 @@ internal sealed class IrBuilder
                  : lng == 1 ? (u > 0 ? CType.ULong : CType.Long)
                  : (u > 0 ? CType.UInt : CType.Int),
         };
+        if (isComplex) { return CType.Complex.WithQuals(quals); }
         return t.WithQuals(quals);
     }
 
@@ -1265,6 +1269,9 @@ internal sealed class IrBuilder
     /// arithmetic conversions (<see cref="CType.UsualArithmetic"/>).</summary>
     private static CType BinaryType(BinOp op, CType l, CType r)
     {
+        // C99 _Complex (lowered to System.Numerics.Complex): arithmetic with a
+        // complex operand yields complex — its C# operators handle complex×real.
+        if (IsComplexType(l) || IsComplexType(r)) { return CType.Complex; }
         static CType Decay(CType t) => t.Unqualified switch
         {
             CType.Array a => new CType.Pointer(a.Element),
@@ -1321,6 +1328,13 @@ internal sealed class IrBuilder
         // surfaces here as an unbound name; resolve it to a string literal of the
         // enclosing function's name. (`__FILE__`/`__LINE__` ARE macros and are
         // already expanded upstream by the preprocessor.)
+        // The imaginary unit — <complex.h> expands `I` → `_Complex_I` →
+        // `__dotcc_complex_I`, a Libc static of System.Numerics.Complex surfaced by
+        // `using static Libc`. Type it complex so `a + b*I` propagates correctly.
+        if (name is "__dotcc_complex_I")
+        {
+            return new Raw("__dotcc_complex_I") { Type = CType.Complex };
+        }
         if (name is "__func__" && _currentFnName.Length != 0)
         {
             var lit = DotCC.CSharpEmitter.EncodeStringLiteral(new[] { $"\"{_currentFnName}\"" }, out var fnLen);
@@ -1377,6 +1391,11 @@ internal sealed class IrBuilder
     /// structural check on the unqualified type suffices.</summary>
     private static bool IsFuncPtr(CType t) =>
         t.Unqualified is CType.Pointer { Pointee: CType.Func } or CType.Func;
+
+    /// <summary>True when <paramref name="t"/> is the lowered C99 <c>_Complex</c>
+    /// type (<c>System.Numerics.Complex</c>).</summary>
+    private static bool IsComplexType(CType t) =>
+        t.Unqualified is CType.Named { Name: "System.Numerics.Complex" };
 
     private bool TryCalleeName(Item it, out string name)
     {
