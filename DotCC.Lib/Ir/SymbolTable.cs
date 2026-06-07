@@ -98,6 +98,17 @@ public sealed class SymbolTable
         return sym;
     }
 
+    /// <summary>Register a symbol whose <see cref="Symbol.CsName"/> is already
+    /// set, in the innermost scope, WITHOUT recomputing it — for a function-scope
+    /// <c>static</c> local, whose backing field is named (and made program-unique)
+    /// by the builder, not by the per-function rename here.</summary>
+    public Symbol DeclareAlias(Symbol sym)
+    {
+        _usedCsNames.Add(sym.CsName);
+        _scopes[^1][sym.Name] = sym;
+        return sym;
+    }
+
     /// <summary>Resolve a raw C name innermost → outermost, or null if unbound.</summary>
     public Symbol? Resolve(string name)
     {

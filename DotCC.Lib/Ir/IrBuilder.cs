@@ -75,6 +75,8 @@ internal sealed class IrBuilder
             case C.ExternFnProto p: RegisterProto(p.Arg1); break;
             case C.GlobalDeclList g: BuildGlobalDecls(g.Arg0, g.Arg1, Storage.Static); break;
             case C.GlobalStaticDeclList g: BuildGlobalDecls(g.Arg1, g.Arg2, Storage.Static); break;
+            // `static T x = { … };` at file scope — a once-initialised struct/union field.
+            case C.GlobalStaticStructInit g: BuildGlobalStructInit(g.Arg1, g.Arg2, g.Arg5); break;
             // `extern T x;` declares the name + type for resolution but emits no
             // field — the definition lives in another TU (dotcc whole-program model).
             case C.ExternVarDecl g: BuildGlobalDecls(g.Arg1, g.Arg2, Storage.Extern); break;
@@ -488,6 +490,8 @@ internal sealed class IrBuilder
             case C.Block: return BuildBlock(it);
             case C.BlockEmpty: return BuildBlock(it);
             case C.StmtDecl d: return BuildDeclStmt(d.Arg0) with { Pos = pos };
+            case C.StmtStaticDecl s: return BuildStmtStaticDecl(s) with { Pos = pos };
+            case C.StmtStaticStructInit s: return BuildStmtStaticStructInit(s) with { Pos = pos };
             case C.StmtExpr e: return new ExprStmt(BuildExpr(e.Arg0)) { Pos = pos };
             case C.StmtEmpty: return new Block(System.Array.Empty<CStmt>()) { Pos = pos };
             case C.StmtIf s:
@@ -663,6 +667,64 @@ internal sealed class IrBuilder
         C.DeclFnPtrNoArgsInit d => BuildFnPtrLocal(d.Arg0, d.Arg3, null, d.Arg8),
         _ => throw new IrUnsupportedException(TypeName(it.Content)),
     };
+
+    /// <summary>Per-translation-unit counter giving each function-scope
+    /// <c>static</c> local a program-unique backing-field name. The CS0136
+    /// per-function rename can't serve here — two functions' same-named statics
+    /// become two fields of the SAME <c>DotCcGlobals</c> class.</summary>
+    private int _staticLocalSeq;
+
+    /// <summary>A function-scope <c>static</c> local (<c>static int counter = 0;</c>).
+    /// Its storage is program-lifetime, so it lowers to a once-initialized static
+    /// field of <c>DotCcGlobals</c> (a <see cref="GlobalVar"/> with a mangled,
+    /// program-unique name); references resolve to that field via an alias symbol
+    /// in the function's scope. The statement itself emits nothing.</summary>
+    private CStmt BuildStmtStaticDecl(C.StmtStaticDecl n)
+    {
+        WalkDeclList(ResolveType(n.Arg1), n.Arg2, (name, initItem, type) =>
+        {
+            var sym = new Symbol
+            {
+                Name = name, Kind = SymKind.Var, Type = type,
+                Storage = Storage.Static, IsGlobal = true,
+                CsName = $"{DotCC.CSharpEmitter.Id(name)}__s{_staticLocalSeq++}",
+            };
+            Globals.Add(new GlobalVar(sym, initItem is { } ii ? BuildExpr(ii) : null));
+            _symbols.DeclareAlias(sym);
+        });
+        return new DeclStmt(System.Array.Empty<LocalDecl>());
+    }
+
+    /// <summary>File-scope <c>static T x = { … };</c> — a once-initialised
+    /// <c>DotCcGlobals</c> field with a positional aggregate initializer.</summary>
+    private void BuildGlobalStructInit(Item typeItem, Item nameItem, Item initListItem)
+    {
+        var type = ResolveType(typeItem);
+        var init = BuildAggregateInit(type, initListItem);
+        var sym = _symbols.Declare(new Symbol
+        {
+            Name = Tok(nameItem), Kind = SymKind.Var, Type = type, Storage = Storage.Static, IsGlobal = true,
+        });
+        Globals.Add(new GlobalVar(sym, init));
+    }
+
+    /// <summary>Block-scope <c>static T x = { … };</c> — like a global aggregate
+    /// init, but with a program-unique mangled name and an alias symbol so the
+    /// function body's references resolve to the hoisted field.</summary>
+    private CStmt BuildStmtStaticStructInit(C.StmtStaticStructInit n)
+    {
+        var type = ResolveType(n.Arg1);
+        var init = BuildAggregateInit(type, n.Arg5);
+        var sym = new Symbol
+        {
+            Name = Tok(n.Arg2), Kind = SymKind.Var, Type = type,
+            Storage = Storage.Static, IsGlobal = true,
+            CsName = $"{DotCC.CSharpEmitter.Id(Tok(n.Arg2))}__s{_staticLocalSeq++}",
+        };
+        Globals.Add(new GlobalVar(sym, init));
+        _symbols.DeclareAlias(sym);
+        return new DeclStmt(System.Array.Empty<LocalDecl>());
+    }
 
     private DeclStmt BuildFnPtrLocal(Item retItem, Item nameItem, Item? paramsItem, Item? initItem)
     {
