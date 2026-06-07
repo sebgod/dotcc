@@ -133,6 +133,11 @@ public abstract record CType
     /// <summary>C <c>size_t</c> — dotcc lowers it to C# <c>ulong</c>.</summary>
     public static readonly CType SizeT = ULong;
 
+    /// <summary>C99 <c>_Complex</c> — every width (<c>float</c>/<c>double</c>/<c>long
+    /// double</c> complex) lowers to .NET's double-backed
+    /// <c>System.Numerics.Complex</c>; its C# operators cover complex×real too.</summary>
+    public static readonly CType Complex = new Named("System.Numerics.Complex");
+
     /// <summary>The decayed type of a string literal: <c>char*</c> (i.e. <c>byte*</c>).</summary>
     public static CType CharPtr => new Pointer(Char);
 
