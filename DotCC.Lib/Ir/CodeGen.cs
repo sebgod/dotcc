@@ -164,6 +164,39 @@ internal sealed class CodeGen
                 sb.Append(pad).Append(lb.Name).Append(":\n");
                 Stmt(sb, lb.Body, ind);
                 break;
+            case Switch sw:
+            {
+                sb.Append(pad).Append($"switch ({Expr(sw.Subject)})\n");
+                sb.Append(pad).Append("{\n");
+                var inner = ind + 1;
+                var ipad = Pad(inner);
+                for (var si = 0; si < sw.Sections.Count; si++)
+                {
+                    var sec = sw.Sections[si];
+                    foreach (var lab in sec.Labels)
+                    {
+                        sb.Append(ipad).Append(lab.CaseExpr is { } ce ? $"case {Expr(ce)}:\n" : "default:\n");
+                    }
+                    foreach (var st in sec.Body) { Stmt(sb, st, inner + 1); }
+                    // C fall-through → the explicit C# jump. A section already ending
+                    // in break/return/… is left alone; otherwise it jumps to the next
+                    // section's first label (goto case / goto default), and the final
+                    // section gets a trailing break (C falls out, C# requires it).
+                    if (sec.Body.Count == 0 || !Terminates(sec.Body[^1]))
+                    {
+                        string jump;
+                        if (si + 1 < sw.Sections.Count)
+                        {
+                            var next = sw.Sections[si + 1].Labels[0];
+                            jump = next.CaseExpr is { } nce ? $"goto case {Expr(nce)};\n" : "goto default;\n";
+                        }
+                        else { jump = "break;\n"; }
+                        sb.Append(Pad(inner + 1)).Append(jump);
+                    }
+                }
+                sb.Append(pad).Append("}\n");
+                break;
+            }
             case SetjmpGuard sj:
             {
                 // Arm this site with a FRESH token identity so the `when` filter
@@ -199,6 +232,16 @@ internal sealed class CodeGen
     // (braces align under the controller); a single statement indents one level.
     private void Nested(StringBuilder sb, CStmt s, int ind) =>
         Stmt(sb, s, s is Block ? ind : ind + 1);
+
+    /// <summary>True when a statement provably ends control flow at its end, so a
+    /// switch section ending in it needs no synthetic fall-through jump.</summary>
+    private static bool Terminates(CStmt s) => s switch
+    {
+        Break or Continue or Return or Goto => true,
+        Block b => b.Stmts.Count > 0 && Terminates(b.Stmts[^1]),
+        If f => f.Else is { } e && Terminates(f.Then) && Terminates(e),
+        _ => false,
+    };
 
     // Render a try/catch body for a SetjmpGuard. C# requires a braced block here
     // (`try stmt;` is invalid), so a single (braceless) C statement is wrapped, and

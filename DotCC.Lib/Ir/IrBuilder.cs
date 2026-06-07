@@ -513,6 +513,7 @@ internal sealed class IrBuilder
                 return new For(new ExprStmt(BuildCommaExpr(s.Arg2)), BuildForCond(s.Arg4), BuildForPost(s.Arg6), BuildStmt(s.Arg8)) { Pos = pos };
             case C.StmtForNoInit s:
                 return new For(null, BuildForCond(s.Arg3), BuildForPost(s.Arg5), BuildStmt(s.Arg7)) { Pos = pos };
+            case C.StmtSwitch s: return BuildSwitch(s, pos);
             case C.StmtGoto s: return new Goto(DotCC.CSharpEmitter.Id(Tok(s.Arg1))) { Pos = pos };
             case C.StmtLabel s: return new Labeled(DotCC.CSharpEmitter.Id(Tok(s.Arg0)), BuildStmt(s.Arg2)) { Pos = pos };
             // A block-scope enum definition has no storage — register its
@@ -521,6 +522,63 @@ internal sealed class IrBuilder
             case C.StmtEnumDefTyped s: RegisterEnum(s.Arg5); return new Block(System.Array.Empty<CStmt>()) { Pos = pos };
             default: throw new IrUnsupportedException(TypeName(it.Content));
         }
+    }
+
+    /// <summary>Build a <see cref="Switch"/>. The grammar parses <c>case E:</c> /
+    /// <c>default:</c> as statement-level labels whose body is the following
+    /// statement (stacked labels nest: <c>case 0: case 1: stmt</c> is
+    /// <c>CaseLabel(0, CaseLabel(1, stmt))</c>), so the body is a flat statement
+    /// list with labels sprinkled in. Walk it, opening a new section whenever a
+    /// label follows body statements and stacking consecutive labels into one
+    /// section.</summary>
+    private CStmt BuildSwitch(C.StmtSwitch s, SrcPos pos)
+    {
+        var subject = BuildExpr(s.Arg2);
+        var raw = new List<Item>();
+        if (s.Arg4.Content is C.Block b) { FlattenStmts(b.Arg2, raw.Add); }
+
+        var sections = new List<SwitchSection>();
+        var labels = new List<SwitchLabel>();
+        var body = new List<CStmt>();
+        var open = false;   // a section has been started (≥1 label seen)
+
+        void Flush()
+        {
+            if (open) { sections.Add(new SwitchSection(labels, body)); }
+            labels = new List<SwitchLabel>();
+            body = new List<CStmt>();
+            open = false;
+        }
+
+        void Walk(Item it)
+        {
+            switch (it.Content)
+            {
+                case C.CaseLabel cl:
+                    if (body.Count > 0) { Flush(); }   // label after body → new section
+                    open = true;
+                    labels.Add(new SwitchLabel(BuildExpr(cl.Arg1)));
+                    Walk(cl.Arg3);
+                    break;
+                case C.DefaultLabel dl:
+                    if (body.Count > 0) { Flush(); }
+                    open = true;
+                    labels.Add(new SwitchLabel(null));
+                    Walk(dl.Arg2);
+                    break;
+                default:
+                    // A statement before the first case label is unreachable in C;
+                    // drop it (C# would reject it anyway).
+                    if (open) { body.Add(BuildStmt(it)); }
+                    break;
+            }
+        }
+
+        _symbols.EnterScope();
+        foreach (var it in raw) { Walk(it); }
+        Flush();
+        _symbols.ExitScope();
+        return new Switch(subject, sections) { Pos = pos };
     }
 
     /// <summary>Recognise the <c>setjmp</c>/<c>longjmp</c> guard idiom in an
