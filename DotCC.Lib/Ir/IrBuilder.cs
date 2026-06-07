@@ -810,7 +810,12 @@ internal sealed class IrBuilder
         {
             switch (it.Content)
             {
+                // `DeclItemTail → * DeclItemTail` (declItemTailPtr) — its child is
+                // itself a DeclItemTail, so it can be a further `*` level OR the
+                // terminal `DeclItemTailPlain` wrapping the DeclItem. Both recurse,
+                // accumulating the star count (`int *a, *b;` → b:int*).
                 case C.DeclItemTailPtr p: WalkTail(p.Arg1, stars + 1); break;
+                case C.DeclItemTailPlain t: WalkTail(t.Arg0, stars); break;
                 case C.DeclItem di: add(Tok(di.Arg0), null, WrapPtr(element, stars)); break;
                 case C.DeclItemInit di: add(Tok(di.Arg0), di.Arg2, WrapPtr(element, stars)); break;
                 default: throw new IrUnsupportedException(TypeName(it.Content));
