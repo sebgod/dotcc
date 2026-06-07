@@ -138,6 +138,16 @@ public readonly record struct FieldInit(string Name, CType FieldType, CExpr Valu
 /// zero-filled).</summary>
 public sealed record StackArray(CType Element, IReadOnlyList<CExpr> Elems) : CExpr;
 
+/// <summary>A file-scope / static-local array's backing store — a pinned, rooted
+/// managed array exposed as a stable <c>T*</c> (the <c>Libc.GlobalArray*</c>
+/// helpers). Unlike <see cref="StackArray"/> (a block-local <c>stackalloc</c>),
+/// this persists for the program lifetime. <see cref="Elems"/> is the dense
+/// initializer (null for a zeroed array, where <see cref="Count"/> gives the
+/// length). Codegen picks the helper by element kind: a pointer / function-pointer
+/// element can't be a C# generic type argument, so it round-trips through a pinned
+/// <c>nint[]</c> reinterpreted as <c>T**</c>.</summary>
+public sealed record PinnedArray(CType Element, IReadOnlyList<CExpr>? Elems, CExpr? Count) : CExpr;
+
 /// <summary>A C23 empty initializer (<c>{}</c> / <c>(T){}</c>) — a zero value of
 /// the carried <see cref="CExpr.Type"/>. Codegen emits <c>default(T)</c>, which
 /// zero-fills a scalar, pointer, struct, or union uniformly.</summary>

@@ -311,4 +311,63 @@ internal sealed partial class IrBuilder
         var elems = BuildArrayElems(elem, dims, ParseInitList(initListItem));
         return new StackArray(elem, elems) { Type = new CType.Array(elem, elems.Count) };
     }
+
+    // ---- file-scope / static-local arrays --------------------------------
+    // A C file-scope array (and a block-scope `static` array, which shares its
+    // static storage duration) persists for the program lifetime, so it can't be a
+    // block `stackalloc`. Both lower to a pinned global field (a PinnedArray init);
+    // a static local additionally gets a program-unique mangled name + an alias
+    // symbol so the function body's references resolve to that field.
+
+    /// <summary>Build a file-scope array <see cref="GlobalVar"/> (a pinned backing
+    /// store). When <paramref name="csName"/> is non-null this is a static local —
+    /// the field takes that mangled name and an alias symbol is registered so
+    /// in-function uses resolve to it; otherwise it's a file-scope name.</summary>
+    private void BuildGlobalArr(Item typeItem, Item nameItem, Item? dimsItem, Item? initItem, string? csName)
+    {
+        var elem = ResolveType(typeItem);
+        var name = Tok(nameItem);
+        var dims = dimsItem is { } di ? TryConstDims(di) : null;
+
+        CType arrType;
+        CExpr init;
+        if (initItem is { } ii)
+        {
+            var elems = BuildArrayElems(elem, dims, ParseInitList(ii));
+            arrType = new CType.Array(elem, elems.Count);
+            init = new PinnedArray(elem, elems, null) { Type = new CType.Pointer(elem) };
+        }
+        else if (dims is { Count: >= 1 })
+        {
+            var total = 1;
+            foreach (var d in dims) { total *= d; }
+            arrType = new CType.Array(elem, total);
+            init = new PinnedArray(elem, null, new LitInt(total.ToString(System.Globalization.CultureInfo.InvariantCulture), total) { Type = CType.Int }) { Type = new CType.Pointer(elem) };
+        }
+        else
+        {
+            throw new IrUnsupportedException($"file-scope array '{name}' needs a constant size or an initializer");
+        }
+
+        if (csName is not null)
+        {
+            var sym = new Symbol { Name = name, Kind = SymKind.Var, Type = arrType, Storage = Storage.Static, IsGlobal = true, CsName = csName };
+            Globals.Add(new GlobalVar(sym, init));
+            _symbols.DeclareAlias(sym);
+        }
+        else
+        {
+            var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = arrType, Storage = Storage.Static, IsGlobal = true });
+            Globals.Add(new GlobalVar(sym, init));
+        }
+    }
+
+    /// <summary>A block-scope <c>static T a[…]</c> — a pinned global field under a
+    /// program-unique mangled name, with the statement itself emitting nothing.</summary>
+    private CStmt BuildStaticLocalArr(Item typeItem, Item nameItem, Item? dimsItem, Item? initItem)
+    {
+        var csName = $"{DotCC.CSharpEmitter.Id(Tok(nameItem))}__s{_staticLocalSeq++}";
+        BuildGlobalArr(typeItem, nameItem, dimsItem, initItem, csName);
+        return new DeclStmt(System.Array.Empty<LocalDecl>());
+    }
 }

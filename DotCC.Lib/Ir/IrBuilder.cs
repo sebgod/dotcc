@@ -78,6 +78,15 @@ internal sealed partial class IrBuilder
             case C.ExternFnProto p: RegisterProto(p.Arg1); break;
             case C.GlobalDeclList g: BuildGlobalDecls(g.Arg0, g.Arg1, Storage.Static); break;
             case C.GlobalStaticDeclList g: BuildGlobalDecls(g.Arg1, g.Arg2, Storage.Static); break;
+            // File-scope arrays — pinned global backing store (plain and `static`
+            // lower identically; internal linkage is a no-op for a never-exported
+            // variable). Sized, brace-initialized, and implicit-`[]` forms.
+            case C.GlobalArr g: BuildGlobalArr(g.Arg0, g.Arg1, g.Arg2, null, null); break;
+            case C.GlobalStaticArr g: BuildGlobalArr(g.Arg1, g.Arg2, g.Arg3, null, null); break;
+            case C.GlobalArrInit g: BuildGlobalArr(g.Arg0, g.Arg1, g.Arg2, g.Arg5, null); break;
+            case C.GlobalStaticArrInit g: BuildGlobalArr(g.Arg1, g.Arg2, g.Arg3, g.Arg6, null); break;
+            case C.GlobalArrInitImplicit g: BuildGlobalArr(g.Arg0, g.Arg1, null, g.Arg6, null); break;
+            case C.GlobalStaticArrInitImplicit g: BuildGlobalArr(g.Arg1, g.Arg2, null, g.Arg7, null); break;
             // `static T x = { … };` at file scope — a once-initialised struct/union field.
             case C.GlobalStaticStructInit g: BuildGlobalStructInit(g.Arg1, g.Arg2, g.Arg5); break;
             // `extern T x;` declares the name + type for resolution but emits no
@@ -565,6 +574,11 @@ internal sealed partial class IrBuilder
             case C.StmtDecl d: return BuildDeclStmt(d.Arg0) with { Pos = pos };
             case C.StmtStaticDecl s: return BuildStmtStaticDecl(s) with { Pos = pos };
             case C.StmtStaticStructInit s: return BuildStmtStaticStructInit(s) with { Pos = pos };
+            // Block-scope `static` arrays — pinned global storage under a mangled
+            // name (same static storage duration as a file-scope array).
+            case C.StmtStaticArr s: return BuildStaticLocalArr(s.Arg1, s.Arg2, s.Arg3, null) with { Pos = pos };
+            case C.StmtStaticArrInit s: return BuildStaticLocalArr(s.Arg1, s.Arg2, s.Arg3, s.Arg6) with { Pos = pos };
+            case C.StmtStaticArrInitImplicit s: return BuildStaticLocalArr(s.Arg1, s.Arg2, null, s.Arg7) with { Pos = pos };
             // Block-scope aggregate TYPE definitions (`struct cD { … };` inside a
             // function body — the block-scope enum forms are handled below). A
             // type has no storage, so C allows this; dotcc hoists the definition
