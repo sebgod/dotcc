@@ -926,7 +926,26 @@ public static class Compiler
             //      at file scope, ahead of top-level statements). Empty when no
             //      `typedef` declarations were seen.
             {{usingAliases}}
+            // dotcc: run the program entry on a thread with a large stack. A native
+            // C program runs on a multi-megabyte stack (Linux defaults to ~8 MB), but
+            // .NET's default is ~1 MB — too shallow for deeply-recursive C. Lua's VM,
+            // for instance, guards recursion with LUAI_MAXCCALLS (200 nested C calls)
+            // on the assumption that 200 frames fit comfortably; on a 1 MB stack the
+            // emitted frames overflow at ~100 and crash the runtime before Lua can
+            // raise its own catchable "C stack overflow". Reserving 64 MB (virtual
+            // address space, not committed memory) restores the native headroom so
+            // such programs reach their own recursion guards and fault gracefully.
+            int __dotccExit = 0;
+            var __dotccThread = new System.Threading.Thread(
+                () => { __dotccExit = __DotCcEntry(); }, 64 * 1024 * 1024);
+            __dotccThread.Start();
+            __dotccThread.Join();
+            return __dotccExit;
+
+            int __DotCcEntry()
+            {
             {{entry}}
+            }
 
 
             // ---- user functions (static methods of DotCcProgram; see the
