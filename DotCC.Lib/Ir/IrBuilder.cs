@@ -702,6 +702,10 @@ internal sealed class IrBuilder
     private CStmt BuildDeclStmt(Item it) => it.Content switch
     {
         C.Decl => BuildDecl(it),
+        // `auto x = E;` (C23 type inference) and `auto Type x …` (redundant
+        // pre-C23 storage class). See BuildDeclAutoInfer / BuildDeclList.
+        C.DeclAutoInfer d => BuildDeclAutoInfer(d),
+        C.DeclAutoStorage d => BuildDeclList(d.Arg1, d.Arg2),
         // `char s[] = "hi";` (implicit size) / `char buf[N] = "hi";` (explicit, zero-padded).
         C.DeclCharArrStr d => BuildDeclCharArrStr(d.Arg0, d.Arg1, null, d.Arg5),
         C.DeclCharArrStrSized d => BuildDeclCharArrStr(d.Arg0, d.Arg1, CharArrSize(d.Arg2), d.Arg4),
@@ -786,13 +790,34 @@ internal sealed class IrBuilder
     private DeclStmt BuildDecl(Item declItem)
     {
         if (declItem.Content is not C.Decl decl) { throw new IrUnsupportedException(TypeName(declItem.Content)); }
+        return BuildDeclList(decl.Arg0, decl.Arg1);
+    }
+
+    /// <summary>Build a <c>Type DeclItemList</c> declaration into a
+    /// <see cref="DeclStmt"/>. Shared by the plain form (<c>int x, y;</c>) and the
+    /// redundant pre-C23 storage-class form (<c>auto int z;</c>), which differ
+    /// only in the dropped <c>auto</c> keyword.</summary>
+    private DeclStmt BuildDeclList(Item typeItem, Item listItem)
+    {
         var entries = new List<LocalDecl>();
-        WalkDeclList(ResolveType(decl.Arg0), decl.Arg1, (name, initItem, type) =>
+        WalkDeclList(ResolveType(typeItem), listItem, (name, initItem, type) =>
         {
             var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type, Storage = Storage.Auto });
             entries.Add(new LocalDecl(sym, initItem is { } ii ? BuildExpr(ii) : null));
         });
         return new DeclStmt(entries);
+    }
+
+    /// <summary>C23 type inference — <c>auto x = E;</c> deduces <c>x</c>'s type
+    /// from its initializer. The IR already synthesizes a <see cref="CType"/> on
+    /// every expression, so the declared symbol simply takes the initializer's
+    /// type and lowers like any scalar local (codegen prints the inferred C#
+    /// type). gcc <c>__auto_type</c> / C++ <c>auto</c> / C# <c>var</c> shape.</summary>
+    private DeclStmt BuildDeclAutoInfer(C.DeclAutoInfer n)
+    {
+        var init = BuildExpr(n.Arg3);
+        var sym = _symbols.Declare(new Symbol { Name = Tok(n.Arg1), Kind = SymKind.Var, Type = init.Type, Storage = Storage.Auto });
+        return new DeclStmt(new[] { new LocalDecl(sym, init) });
     }
 
     /// <summary>Walk a comma-separated init-declarator list, invoking
