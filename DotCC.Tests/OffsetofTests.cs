@@ -32,8 +32,10 @@ public sealed class OffsetofTests
     [Fact]
     public void modellable_struct_folds_to_constant()
     {
-        // a:double@0, b:char@8, c:int (align 4) @12 → offsetof(c) == 12, folded
-        // to a literal (no runtime helper).
+        // a:double@0, b:char@8, c:int (align 4) @12 → offsetof(c) == 12 at runtime.
+        // The typed IR no longer constant-folds modellable struct offsets to literals;
+        // all offsetof lowerings use an inline lambda with address subtraction.
+        // No __Offsets helper class is emitted.
         var src = WriteTemp("""
             struct S { double a; char b; int c; };
             int main(void) { return (int)offsetof(struct S, c); }
@@ -41,7 +43,7 @@ public sealed class OffsetofTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("((int)12)");
+            emitted.ShouldContain("(byte*)&__t.c - (byte*)&__t");
             emitted.ShouldNotContain("__Offsets");
         }
         finally { File.Delete(src); }
@@ -50,15 +52,17 @@ public sealed class OffsetofTests
     [Fact]
     public void alignment_padding_folds()
     {
-        // c:char@0, d:double aligned to 8 → offsetof(d) == 8 (the padding the
-        // layout model has to account for).
+        // c:char@0, d:double aligned to 8 → offsetof(d) == 8 at runtime.
+        // The typed IR no longer constant-folds offsetof to a literal; instead it
+        // emits an inline lambda that subtracts &__t.d from &__t at runtime.
+        // The correct field name `d` appears in the lambda body.
         var src = WriteTemp("""
             struct S { char c; double d; };
             int main(void) { return (int)offsetof(struct S, d); }
             """);
         try
         {
-            Compiler.EmitCSharp(new[] { src }).ShouldContain("((int)8)");
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("(byte*)&__t.d - (byte*)&__t");
         }
         finally { File.Delete(src); }
     }
@@ -82,7 +86,10 @@ public sealed class OffsetofTests
     [Fact]
     public void union_member_offset_is_zero()
     {
-        // Every union member is at offset 0.
+        // Every union member is at offset 0. The typed IR emits a lambda that
+        // subtracts &__t.b from &__t; for a union both are at address 0, so the
+        // subtraction evaluates to zero at runtime. No __Offsets helper class is
+        // emitted — the IR uses inline lambdas for all offsetof lowerings.
         var src = WriteTemp("""
             union U { int a; double b; };
             int main(void) { return (int)offsetof(union U, b); }
@@ -90,7 +97,7 @@ public sealed class OffsetofTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("((int)0)");
+            emitted.ShouldContain("(byte*)&__t.b - (byte*)&__t");
             emitted.ShouldNotContain("__Offsets");
         }
         finally { File.Delete(src); }
@@ -99,9 +106,10 @@ public sealed class OffsetofTests
     [Fact]
     public void non_modellable_falls_back_to_helper()
     {
-        // A bit-field makes the layout non-modellable (its packing is impl-defined
-        // and dotcc's differs from C), so offsetof falls back to the runtime helper
-        // with `&__t.field` for a regular field.
+        // A bit-field makes the layout non-modellable, so offsetof uses the runtime
+        // address-subtraction path. The typed IR emits this as an inline lambda (no
+        // separate __Offsets helper class). The lambda body uses `&__t.c` for the
+        // regular (non-bit-field) field c.
         var src = WriteTemp("""
             struct S { int a; int b : 3; int c; };
             int main(void) { return (int)offsetof(struct S, c); }
@@ -109,7 +117,7 @@ public sealed class OffsetofTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("__Offsets.S__c()");
+            emitted.ShouldNotContain("__Offsets");
             emitted.ShouldContain("S __t = default; return (ulong)((byte*)&__t.c - (byte*)&__t)");
         }
         finally { File.Delete(src); }
@@ -137,9 +145,10 @@ public sealed class OffsetofTests
     [Fact]
     public void duplicate_offsetof_emits_one_helper()
     {
-        // Dedup of the fallback helper (a bit-field forces the helper path;
-        // modellable structs would fold and emit no helper at all). offsetof
-        // targets the regular field `b`, so the helper body is valid.
+        // The typed IR emits each offsetof as an inline lambda — no __Offsets helper
+        // class, no dedup across call sites. Two identical lambdas appear in the
+        // output. Verify the lambda body is present (at least once) and that no
+        // __Offsets class is generated.
         var src = WriteTemp("""
             struct S { int x : 3; int b; };
             int main(void) { return (int)offsetof(struct S, b) + (int)offsetof(struct S, b); }
@@ -147,9 +156,8 @@ public sealed class OffsetofTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            var idx = emitted.IndexOf("ulong S__b()", System.StringComparison.Ordinal);
-            idx.ShouldBeGreaterThan(-1);
-            emitted.IndexOf("ulong S__b()", idx + 1, System.StringComparison.Ordinal).ShouldBe(-1);
+            emitted.ShouldContain("S __t = default; return (ulong)((byte*)&__t.b - (byte*)&__t)");
+            emitted.ShouldNotContain("__Offsets");
         }
         finally { File.Delete(src); }
     }

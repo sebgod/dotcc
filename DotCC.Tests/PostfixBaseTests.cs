@@ -110,11 +110,12 @@ public sealed class PostfixBaseTests
     {
         // `*p++` (read `*p`, then advance the pointer — the common C idiom) is NOT
         // a postfix-on-deref: the `++` applies to the bare pointer `p`, which stays
-        // unwrapped. Regression guard that the fix above didn't over-wrap.
+        // unwrapped. C# shares the same precedence, so the IR emits `*p++` directly.
+        // Regression guard that the fix above didn't over-wrap.
         var emitted = Emit("""
             int main(void) { int a[2] = {1,2}; int *p = a; int x = *p++; return x; }
             """);
-        emitted.ShouldContain("(p++)");
+        emitted.ShouldContain("*p++");
         emitted.ShouldNotContain("(*p)++");
     }
 }

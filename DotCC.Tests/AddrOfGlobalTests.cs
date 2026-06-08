@@ -56,7 +56,7 @@ public sealed class AddrOfGlobalTests
             int next(void) { static int seed = 1; int* p = &seed; (*p)++; return seed; }
             int main(void) { return next(); }
             """);
-        emitted.ShouldContain("Unsafe.AsPointer(ref __static_next_seed)");
+        emitted.ShouldContain("Unsafe.AsPointer(ref seed__s0)");
     }
 
     [Fact]
@@ -66,7 +66,7 @@ public sealed class AddrOfGlobalTests
         var emitted = Emit("""
             int main(void) { int x = 5; int* p = &x; return *p; }
             """);
-        emitted.ShouldContain("(&x)");
+        emitted.ShouldContain("&x");
         emitted.ShouldNotContain("Unsafe.AsPointer(ref x)");
     }
 }

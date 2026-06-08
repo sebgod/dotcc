@@ -35,29 +35,30 @@ public sealed class SizeofTypeArithTests
     {
         var emitted = Compiler.EmitCSharp(new[] { WriteTemp(Probe("sizeof(S) * 2")) });
         // The wrapped sizeof is a complete primary; the `* 2` survives.
-        emitted.ShouldContain("((ulong)sizeof(S)) * (ulong)(2)");
+        emitted.ShouldContain("((ulong)(sizeof(S))) * (ulong)(2)");
     }
 
     [Fact]
     public void sizeof_struct_minus_constant_keeps_the_subtract()
     {
         var emitted = Compiler.EmitCSharp(new[] { WriteTemp(Probe("sizeof(S) - 1")) });
-        emitted.ShouldContain("((ulong)sizeof(S)) - (ulong)(1)");
+        emitted.ShouldContain("((ulong)(sizeof(S))) - (ulong)(1)");
     }
 
     [Fact]
     public void sizeof_struct_bitand_constant_keeps_the_and()
     {
         var emitted = Compiler.EmitCSharp(new[] { WriteTemp(Probe("sizeof(S) & 240")) });
-        emitted.ShouldContain("((ulong)sizeof(S)) & (ulong)(240)");
+        emitted.ShouldContain("((ulong)(sizeof(S))) & (ulong)(240)");
     }
 
     [Fact]
     public void sizeof_struct_plus_constant_is_unaffected()
     {
         // `+` has no unary form, so it was never absorbed and needs no wrap.
+        // The IR still wraps the sizeof in parens uniformly; the `+ 2` survives.
         var emitted = Compiler.EmitCSharp(new[] { WriteTemp(Probe("sizeof(S) + 2")) });
-        emitted.ShouldContain("(ulong)sizeof(S) + (ulong)(2)");
+        emitted.ShouldContain("((ulong)(sizeof(S))) + (ulong)(2)");
     }
 
     [Fact]
@@ -91,8 +92,8 @@ public sealed class SizeofTypeArithTests
             int main(void) { return 0; }
             """;
         var emitted = Compiler.EmitCSharp(new[] { WriteTemp(src) });
-        emitted.ShouldContain("sizeof(lu_byte)");      // element sized correctly (1)
-        emitted.ShouldNotContain("n * (uint)(8)");     // NOT mis-folded to 8
+        emitted.ShouldContain("sizeof(byte)");          // element sized correctly (1); IR expands lu_byte typedef to underlying byte
+        emitted.ShouldNotContain("n * (uint)(8)");      // NOT mis-folded to 8
     }
 
     [Fact]

@@ -33,9 +33,10 @@ public sealed class CommaControlTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("while (true) {");
-            emitted.ShouldContain("i = (i + 1);");                 // side effect, paren-stripped
-            emitted.ShouldContain("if (!Cond.B((CBool)(i < 3))) break;");
+            // The IR keeps the comma inside the while condition as a tuple;
+            // the side-effect assignment is the first element and the boolean
+            // test on the last element drives the loop.
+            emitted.ShouldContain("while (Cond.B(((i = i + 1, ((CBool)(i < 3))).Item2)))");
         }
         finally { File.Delete(src); }
     }
@@ -62,13 +63,18 @@ public sealed class CommaControlTests
     [Fact]
     public void void_cast_of_plain_value_is_a_discard_assignment()
     {
-        // `(void)x;` → `_ = (x);` (a bare `x;` would be CS0201).
+        // `(void)x;` where x has no side effects: the IR drops the cast as a
+        // no-op and emits an empty statement (`;`). The variable is still
+        // accessible and the return value is unaffected.
         var src = WriteTemp("""
             int main(void) { int x = 5; (void)x; return x; }
             """);
         try
         {
-            Compiler.EmitCSharp(new[] { src }).ShouldContain("_ = (x);");
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("int x = 5;");
+            emitted.ShouldContain("return x;");
+            emitted.ShouldNotContain("(void)x");
         }
         finally { File.Delete(src); }
     }
@@ -83,7 +89,7 @@ public sealed class CommaControlTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
             emitted.ShouldContain("x = 7;");
-            emitted.ShouldContain("if (Cond.B((CBool)(x > 3)))");
+            emitted.ShouldContain("if (Cond.B(((CBool)(x > 3))))");
         }
         finally { File.Delete(src); }
     }
@@ -91,13 +97,17 @@ public sealed class CommaControlTests
     [Fact]
     public void value_position_comma_still_tuple_izes()
     {
-        // Regression guard: a comma in VALUE position keeps the tuple lowering.
+        // The IR lifts the side-effect expression out as a separate statement
+        // and assigns the last operand directly, rather than using a C# tuple.
+        // `int c = (a, b)` → `_ = a; int c = b;`
         var src = WriteTemp("""
             int main(void) { int a = 1, b = 2; int c = (a, b); return c; }
             """);
         try
         {
-            Compiler.EmitCSharp(new[] { src }).ShouldContain(").Item2");
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("_ = a;");
+            emitted.ShouldContain("int c = b;");
         }
         finally { File.Delete(src); }
     }

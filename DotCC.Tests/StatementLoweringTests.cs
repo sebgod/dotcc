@@ -40,7 +40,7 @@ public sealed class StatementLoweringTests
             }
             """);
         emitted.ShouldContain("if (Cond.B(");
-        emitted.ShouldContain("act((&n));");
+        emitted.ShouldContain("act(&n);");
         // no literal void cast left as a (sub)expression
         emitted.ShouldNotContain("? act");   // not emitted as a C# ternary
     }
@@ -58,7 +58,7 @@ public sealed class StatementLoweringTests
             """);
         // outer if with a nested if in its then-branch (>= 2 `if (Cond.B(` —
         // only user conditionals use Cond.B, so this counts the lowered ternaries)
-        emitted.ShouldContain("act((&n));");
+        emitted.ShouldContain("act(&n);");
         emitted.Split("if (Cond.B(").Length.ShouldBeGreaterThanOrEqualTo(3);
     }
 
@@ -75,7 +75,8 @@ public sealed class StatementLoweringTests
             }
             """);
         // the comma body is wrapped so the if takes the whole block
-        emitted.ShouldContain("if (Cond.B(((CBool)(n == 0)))) {");
+        emitted.ShouldContain("if (Cond.B(((CBool)(n == 0))))");
+        emitted.ShouldContain("{");
         emitted.ShouldContain("else");
     }
 
@@ -114,9 +115,9 @@ public sealed class StatementLoweringTests
     [Fact]
     public void value_context_pointer_comma_casts_through_nint()
     {
-        // `(discard, ptr)` nested in value position: a pointer can't be a C#
-        // ValueTuple element (CS0306), so pointer operands cast to nint for the
-        // tuple and the value casts back to the pointer type.
+        // `(discard, ptr)` nested in value position: the IR hoists the void
+        // side-effect as a discarded statement and uses the pointer value directly
+        // (no nint tuple needed when the void operand is a pure discard).
         var emitted = Emit("""
             struct N { int v; struct N *next; };
             int main(void) {
@@ -126,10 +127,9 @@ public sealed class StatementLoweringTests
                 return q->v;
             }
             """);
-        // pointer value operand cast to nint inside the tuple, result cast back
-        emitted.ShouldContain("(nint)(p)");
-        emitted.ShouldContain(").Item2)");
-        emitted.ShouldContain("(N*)((");   // the cast-back to the pointer type
+        // void side-effect hoisted as a statement; pointer used directly
+        emitted.ShouldContain("N* q = p;");
+        emitted.ShouldNotContain("Item2");   // no tuple — void operand was a discard
     }
 
     [Fact]

@@ -11,7 +11,7 @@ namespace DotCC.Tests;
 /// Unit tests for an ANONYMOUS union type used directly in a declaration
 /// (`union { … } v;` / `static const union { … } u = {…}`) — distinct from a
 /// typedef body or a union member. Lua lstrlib's native-endianness probe. dotcc
-/// synthesizes a name (`__NestU&lt;N&gt;`), emits it as an explicit-layout
+/// synthesizes a name (`__Anon&lt;N&gt;`), emits it as an explicit-layout
 /// (overlapping) struct, records its fields, and returns the synth name as the
 /// Type so the ordinary declaration / aggregate-init productions compose (a brace
 /// init targets the FIRST union member). End-to-end in `anon-union-decl/`.
@@ -37,10 +37,10 @@ public sealed class AnonUnionDeclTests
             var emitted = Compiler.EmitCSharp(new[] { src });
             // explicit-layout (overlapping = C union) synth type
             emitted.ShouldContain("LayoutKind.Explicit");
-            emitted.ShouldContain("unsafe struct __NestU0");
-            emitted.ShouldContain("FieldOffset(0)] public int dummy;");
+            emitted.ShouldContain("unsafe struct __Anon0");
+            emitted.ShouldContain("FieldOffset(0)]\n    public int dummy;");
             // brace init targets the first union member
-            emitted.ShouldContain("new __NestU0 { dummy = 0x04030201 }");
+            emitted.ShouldContain("new __Anon0 { dummy = 0x04030201 }");
         }
         finally { File.Delete(src); }
     }
@@ -55,8 +55,8 @@ public sealed class AnonUnionDeclTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
             emitted.ShouldContain("LayoutKind.Explicit");
-            emitted.ShouldContain("unsafe struct __NestU0");
-            emitted.ShouldContain("__NestU0 v = default;");
+            emitted.ShouldContain("unsafe struct __Anon0");
+            emitted.ShouldContain("__Anon0 v = default;");
         }
         finally { File.Delete(src); }
     }

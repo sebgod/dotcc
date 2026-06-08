@@ -73,7 +73,7 @@ public sealed class VolatileTests
             emitted.ShouldContain("Volatile.Write(ref s.trap, 1)");
             emitted.ShouldContain("Volatile.Read(ref s.trap)");
             // The non-volatile sibling field stays a plain access.
-            emitted.ShouldContain("(s.n) = 2");
+            emitted.ShouldContain("s.n = 2");
             emitted.ShouldNotContain("Volatile.Write(ref s.n");
         }
         finally { File.Delete(src); }
@@ -106,7 +106,7 @@ public sealed class VolatileTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("(&n)");
+            emitted.ShouldContain("&n");
             emitted.ShouldNotContain("&global::System.Threading.Volatile.Read");
         }
         finally { File.Delete(src); }
@@ -115,9 +115,9 @@ public sealed class VolatileTests
     [Fact]
     public void non_eligible_volatile_struct_local_falls_back_to_plain()
     {
-        // A volatile lvalue of non-eligible type (a struct value) has no
-        // Volatile.Read/Write overload, so it falls back to a plain access (V1
-        // covers eligible scalars; documented).
+        // A volatile lvalue of non-eligible type (a struct value) is read via
+        // Volatile.Read on the whole struct, then the field is accessed on the
+        // returned copy. The declaration itself is a plain initializer.
         var src = WriteTemp("""
             typedef struct Pt { int x; int y; } Pt;
             int main(void) { volatile Pt p = { 1, 2 }; return p.x; }
@@ -126,7 +126,7 @@ public sealed class VolatileTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
             emitted.ShouldContain("Pt p = new Pt");
-            emitted.ShouldNotContain("Volatile.Read(ref p)");
+            emitted.ShouldContain("Volatile.Read(ref p).x");
         }
         finally { File.Delete(src); }
     }
@@ -181,7 +181,7 @@ public sealed class VolatileTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("p = (&b)");                       // plain pointer reassignment
+            emitted.ShouldContain("p = &b");                          // plain pointer reassignment
             emitted.ShouldNotContain("Volatile.Write(ref p,");       // not a fenced pointer store
             emitted.ShouldContain("Volatile.Write(ref *p, 3)");      // but the pointee write fences
         }

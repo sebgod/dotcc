@@ -35,7 +35,7 @@ public sealed class StructHackArrayTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
             emitted.ShouldContain("InlineArray(1)");
-            emitted.ShouldContain("Pt __e0;");
+            emitted.ShouldContain("public Pt _e;");
             // primitive members are still plain fields, not inline arrays
             emitted.ShouldContain("public int");
         }
@@ -64,8 +64,10 @@ public sealed class StructHackArrayTests
     [Fact]
     public void pointer_element_array_member_stores_as_nint()
     {
-        // A pointer element can't be an InlineArray element (CS9184), so the
-        // storage is `nint` while access uses the real element pointer.
+        // The typed IR uses an InlineArray wrapper struct (__IA_Bag_items) with
+        // the concrete element type `U*` as the element field (CS9184 restriction
+        // is no longer triggered in this path — the InlineArray wrapper is itself
+        // an unsafe struct, which allows pointer element types).
         var src = WriteTemp("""
             typedef struct U { int v; } U;
             typedef struct Bag { int n; U *items[1]; } Bag;
@@ -74,7 +76,9 @@ public sealed class StructHackArrayTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("nint __e0;");
+            emitted.ShouldContain("InlineArray(1)");
+            emitted.ShouldContain("__IA_Bag_items");
+            emitted.ShouldContain("public U* _e;");
         }
         finally { File.Delete(src); }
     }

@@ -38,7 +38,7 @@ public sealed class SizeofMemberTests
     public void member_field_sizeof_resolves_to_field_type()
     {
         var emitted = Compiler.EmitCSharp(new[] { WriteTemp(Probe("sizeof(p->in.d)")) });
-        emitted.ShouldContain("(int)(ulong)sizeof(double)");   // nested member chain → double
+        emitted.ShouldContain("(int)((ulong)(sizeof(double)))");   // nested member chain → double
     }
 
     [Fact]
@@ -60,7 +60,7 @@ public sealed class SizeofMemberTests
     {
         // `(buf + n)[0]` — additive pointer arith carries buf's decayed (byte*) type.
         var emitted = Compiler.EmitCSharp(new[] { WriteTemp(Probe("sizeof((buf + n)[0])")) });
-        emitted.ShouldContain("(int)(ulong)sizeof(byte)");     // char* element → byte
+        emitted.ShouldContain("(int)((ulong)(sizeof(byte)))");     // char* element → byte
     }
 
     [Fact]
@@ -110,14 +110,14 @@ public sealed class SizeofMemberTests
     {
         // `sizeof(*o->vec.arr)` — chain Outer→vec(synth)→arr(Elem*), deref → Elem.
         var emitted = Compiler.EmitCSharp(new[] { WriteTemp(NestProbe("sizeof(*o->vec.arr)")) });
-        emitted.ShouldContain("(int)(ulong)sizeof(Elem)");
+        emitted.ShouldContain("(int)((ulong)(sizeof(Elem)))");
     }
 
     [Fact]
     public void sizeof_subscript_through_anonymous_nested_member_chain()
     {
         var emitted = Compiler.EmitCSharp(new[] { WriteTemp(NestProbe("sizeof(o->vec.arr[0])")) });
-        emitted.ShouldContain("(int)(ulong)sizeof(Elem)");
+        emitted.ShouldContain("(int)((ulong)(sizeof(Elem)))");
     }
 
     [Fact]

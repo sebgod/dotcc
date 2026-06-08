@@ -50,8 +50,8 @@ public sealed class NarrowingConversionTests
             """);
         try
         {
-            // int → u8 (byte) narrowing: the C# cast C requires is inserted.
-            Compiler.EmitCSharp(new[] { src }).ShouldContain("u8 b = (u8)(big)");
+            // int → u8 (byte) narrowing: the IR expands u8 → byte and the cast is inserted.
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("byte b = (byte)(big)");
         }
         finally { File.Delete(src); }
     }
@@ -66,7 +66,8 @@ public sealed class NarrowingConversionTests
         try
         {
             // 5 fits a byte → C#'s implicit constant conversion accepts it; no cast.
-            Compiler.EmitCSharp(new[] { src }).ShouldContain("u8 b = 5;");
+            // The IR expands u8 → byte.
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("byte b = 5;");
         }
         finally { File.Delete(src); }
     }
@@ -110,7 +111,8 @@ public sealed class NarrowingConversionTests
             """);
         try
         {
-            Compiler.EmitCSharp(new[] { src }).ShouldContain("b = (u8)(big)");
+            // The IR expands u8 → byte; cast form is (byte)(big).
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("b = (byte)(big)");
         }
         finally { File.Delete(src); }
     }

@@ -138,12 +138,12 @@ public sealed class AtomicTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("Atomic.Load(ref *((&x)))");
-            emitted.ShouldContain("Atomic.Store(ref *((&x)), (int)(9))");
-            emitted.ShouldContain("Atomic.FetchAdd(ref *((&x)), (int)(2))");
-            emitted.ShouldContain("Atomic.Exchange(ref *((&x)), (int)(4))");
+            emitted.ShouldContain("Atomic.Load(ref *(&x))");
+            emitted.ShouldContain("Atomic.Store(ref *(&x), (int)(9))");
+            emitted.ShouldContain("Atomic.FetchAdd(ref *(&x), (int)(2))");
+            emitted.ShouldContain("Atomic.Exchange(ref *(&x), (int)(4))");
             // atomic_init is a plain (non-atomic) store.
-            emitted.ShouldContain("*((&x)) = ((int)(1))");
+            emitted.ShouldContain("*(&x) = (int)(1)");
         }
         finally { File.Delete(src); }
     }
@@ -165,7 +165,7 @@ public sealed class AtomicTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
             // _explicit stripped, the two memory_order args ignored; expected is a ref.
-            emitted.ShouldContain("(CBool)Atomic.CompareExchange(ref *((&x)), ref *((&e)), (int)(2))");
+            emitted.ShouldContain("(CBool)Atomic.CompareExchange(ref *(&x), ref *(&e), (int)(2))");
         }
         finally { File.Delete(src); }
     }
@@ -186,8 +186,8 @@ public sealed class AtomicTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("(CBool)(Atomic.Exchange(ref *((&f)), 1) != 0)");
-            emitted.ShouldContain("Atomic.Store(ref *((&f)), 0)");
+            emitted.ShouldContain("(CBool)(Atomic.Exchange(ref *(&f), 1) != 0)");
+            emitted.ShouldContain("Atomic.Store(ref *(&f), 0)");
             emitted.ShouldContain("Atomic.ThreadFence()");
         }
         finally { File.Delete(src); }

@@ -77,7 +77,7 @@ public sealed class VarargTests
             var emitted = Compiler.EmitCSharp(new[] { src });
             emitted.ShouldContain("params VaArg[] _va");
             emitted.ShouldContain("new VaList(_va)");
-            emitted.ShouldContain("(int)ap.Next()");
+            emitted.ShouldContain("(int)(ap.Next())");
             emitted.ShouldContain("ap.End()");
         }
         finally { File.Delete(src); }
@@ -101,7 +101,7 @@ public sealed class VarargTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
             // Pointer va_arg goes through NextPtr() + a (byte*) cast.
-            emitted.ShouldContain("(byte*)ap.NextPtr()");
+            emitted.ShouldContain("(byte*)(ap.NextPtr())");
         }
         finally { File.Delete(src); }
     }

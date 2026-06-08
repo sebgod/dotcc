@@ -38,7 +38,7 @@ public sealed class UsualArithConvTests
         try
         {
             // size_t -> ulong; the int operand takes the C conversion to ulong.
-            Compiler.EmitCSharp(new[] { src }).ShouldContain("(n * (ulong)(i))");
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("n * (ulong)(i)");
         }
         finally { File.Delete(src); }
     }
@@ -54,7 +54,7 @@ public sealed class UsualArithConvTests
         {
             // C: `unsigned * int` is `unsigned`; C# would widen to `long`. dotcc
             // casts the int to uint so the result is genuinely uint.
-            Compiler.EmitCSharp(new[] { src }).ShouldContain("(u * (uint)(i))");
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("u * (uint)(i)");
         }
         finally { File.Delete(src); }
     }
@@ -72,7 +72,7 @@ public sealed class UsualArithConvTests
             """);
         try
         {
-            Compiler.EmitCSharp(new[] { src }).ShouldContain("/ (ulong)sizeof(Big)");
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("/ ((ulong)(sizeof(Big)))");
         }
         finally { File.Delete(src); }
     }
@@ -104,7 +104,7 @@ public sealed class UsualArithConvTests
         {
             // int + long is fine in C# (both signed) — no cast injected.
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("(a + b)");
+            emitted.ShouldContain("a + b");
             emitted.ShouldNotContain("(long)(a)");
         }
         finally { File.Delete(src); }
@@ -121,7 +121,7 @@ public sealed class UsualArithConvTests
             """);
         try
         {
-            Compiler.EmitCSharp(new[] { src }).ShouldContain("(v << (int)(n))");
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("v << (int)(n)");
         }
         finally { File.Delete(src); }
     }

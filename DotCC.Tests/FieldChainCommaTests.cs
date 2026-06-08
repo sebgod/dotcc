@@ -9,21 +9,13 @@ namespace DotCC.Tests;
 
 /// <summary>
 /// Type synthesis through struct/union FIELD chains, and the contexts that
-/// consume it. dotcc lowers C's comma operator to a C# value-tuple, and a
-/// pointer / function-pointer can't be a <c>ValueTuple</c> element (CS0306) — so
-/// it's round-tripped through <c>nint</c>, which requires knowing the operand's
-/// type. Three feeds into that detection are exercised here:
-/// <list type="bullet">
-/// <item>a field reached through a POINTER-TYPEDEF base (Lua's <c>StkId</c> →
-/// <c>StackValue*</c>) — <c>StructKeyOf</c> resolves the typedef before peeling
-/// the pointer, so the member's type is found;</item>
-/// <item>a <c>(void)X</c> discard of a pointer in a comma — the discard carries
-/// its operand's CType;</item>
-/// <item>a pointer pre/post-increment — <c>++p</c> has the operand's pointer
-/// type.</item>
-/// </list>
-/// Plus the parenthesised bare-name callee unwrap (<c>(f)(x)</c> → <c>f(x)</c>),
-/// which avoids C#'s cast-ambiguity. End-to-end in <c>fnptr-field-comma/</c>.
+/// consume it. The typed IR lifts comma operators in statement / return position
+/// into separate statements, so side-effect operands (including void casts and
+/// pointer increments) become plain statements and the last operand is returned or
+/// assigned directly — no tuple or <c>nint</c> round-trip. These tests verify
+/// that lift, plus the parenthesised bare-name callee unwrap
+/// (<c>(f)(x)</c> → <c>f(x)</c>), which avoids C#'s cast-ambiguity. End-to-end
+/// in <c>fnptr-field-comma/</c>.
 /// </summary>
 public sealed class FieldChainCommaTests
 {
@@ -55,10 +47,10 @@ public sealed class FieldChainCommaTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            // The fn-ptr member is cast to nint for the tuple element, and the
-            // .Item result is cast back to the CFunc fn-ptr typedef.
-            emitted.ShouldContain("(nint)(b->v.fn)");
-            emitted.ShouldContain("((CFunc)((_ = (0), (nint)(b->v.fn)).Item2))");
+            // The IR lifts the comma: `(void)0` becomes `_ = 0` (discarded int);
+            // the fn-ptr member is returned directly — no tuple or nint round-trip.
+            emitted.ShouldContain("_ = 0;");
+            emitted.ShouldContain("return b->v.fn;");
         }
         finally { File.Delete(src); }
     }
@@ -86,8 +78,9 @@ public sealed class FieldChainCommaTests
     [Fact]
     public void void_discard_of_pointer_increment_in_comma_is_nint_cast()
     {
-        // `(void)(++m)` discards a `char*` pre-increment as a comma operand; the
-        // discard must carry the pointer type so the tuple element nint-casts it.
+        // `(void)(++m)` discards a `char*` pre-increment as a comma operand; the IR
+        // lifts the side-effect to a plain statement and returns the last operand
+        // directly — no tuple or nint cast needed.
         var src = WriteTemp($$"""
             int discard_ptr(char *m) { return ((void)(++m), 1); }
             int main(void) { return 0; }
@@ -95,7 +88,8 @@ public sealed class FieldChainCommaTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("(nint)(_ = (((++m))))");
+            emitted.ShouldContain("++m;");
+            emitted.ShouldContain("return 1;");
         }
         finally { File.Delete(src); }
     }
