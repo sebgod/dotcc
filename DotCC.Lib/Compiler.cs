@@ -284,11 +284,11 @@ public static class Compiler
         // dotcc compiles C → typed IR → low-level C#. The parse tree (yielded
         // raw by the identity visitor) is bound to a typed AST by IrBuilder, then
         // CodeGen prints it precedence-aware. This is the sole backend; the
-        // retired bottom-up string emitter (CSharpEmitter) is kept only for its
-        // shared Id / EncodeStringLiteral / Export helpers and as a reference.
+        // retired bottom-up string emitter is gone — its shared identifier /
+        // string-literal / export helpers live on in EmitHelpers.
         // TODO(ir): port the remaining cross-cutting concerns the legacy two-pass
-        // owned — malloc→stack promotion, -pedantic dialect gating, -Wconversion
-        // narrowing — as IR passes over the typed tree.
+        // owned — malloc→stack promotion, -pedantic emit-pass dialect gating,
+        // -Wconversion narrowing — as IR passes over the typed tree.
         var irBuilder = new Ir.IrBuilder();
         var irParser = C.BuildParser(Ir.ParseTreeIdentityVisitor.Instance);
         foreach (var unitPath in inputPaths)
@@ -451,7 +451,7 @@ public static class Compiler
         var aliasText = aliasLines.Count > 0 ? string.Join("\n", aliasLines) + "\n" : "";
         var globalText = globalLines.Count > 0 ? string.Join("\n", globalLines) + "\n" : "";
         return BuildShell(mainArity, functions.ToString(), structDecls.ToString(), aliasText, globalText,
-                          fileBased, libraryMode, System.Array.Empty<CSharpEmitter.Export>());
+                          fileBased, libraryMode, System.Array.Empty<EmitHelpers.Export>());
     }
 
     /// <summary>
@@ -760,7 +760,7 @@ public static class Compiler
         string globals,
         bool fileBased,
         bool libraryMode,
-        IReadOnlyList<CSharpEmitter.Export> exports)
+        IReadOnlyList<EmitHelpers.Export> exports)
     {
         if (libraryMode)
         {
@@ -961,7 +961,7 @@ public static class Compiler
         string structDecls,
         string usingAliases,
         string globals,
-        IReadOnlyList<CSharpEmitter.Export> exports)
+        IReadOnlyList<EmitHelpers.Export> exports)
     {
         // Same embedded DotCC.Libc runtime block as exe mode — the
         // library and exe shells share the same set of stdlib functions;
@@ -991,7 +991,7 @@ public static class Compiler
             var argNames = ExtractArgNames(e.Params);
             // EntryPoint keeps the raw C name (the exported C-ABI symbol); the
             // C# wrapper method + the DotCcLib call escape any C#-keyword name.
-            var csName = CSharpEmitter.Id(e.Name);
+            var csName = EmitHelpers.Id(e.Name);
             exportsBlock.Append($"    [UnmanagedCallersOnly(EntryPoint = \"{e.Name}\", CallConvs = new[] {{ typeof(CallConvCdecl) }})]\n");
             exportsBlock.Append($"    public static unsafe {e.ReturnType} {csName}({e.Params}) => DotCcLib.{csName}({argNames});\n\n");
         }

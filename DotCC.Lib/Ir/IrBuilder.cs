@@ -813,8 +813,8 @@ internal sealed partial class IrBuilder
             case C.StmtForNoInit s:
                 return new For(null, BuildForCond(s.Arg3), BuildForPost(s.Arg5), BuildStmt(s.Arg7)) { Pos = pos };
             case C.StmtSwitch s: return BuildSwitch(s, pos);
-            case C.StmtGoto s: return new Goto(DotCC.CSharpEmitter.Id(Tok(s.Arg1))) { Pos = pos };
-            case C.StmtLabel s: return new Labeled(DotCC.CSharpEmitter.Id(Tok(s.Arg0)), BuildStmt(s.Arg2)) { Pos = pos };
+            case C.StmtGoto s: return new Goto(DotCC.EmitHelpers.Id(Tok(s.Arg1))) { Pos = pos };
+            case C.StmtLabel s: return new Labeled(DotCC.EmitHelpers.Id(Tok(s.Arg0)), BuildStmt(s.Arg2)) { Pos = pos };
             // A block-scope enum definition has no storage — register its
             // constants and emit nothing (an empty block).
             case C.StmtEnumDef s: RegisterEnum(s.Arg3); return new Block(System.Array.Empty<CStmt>()) { Pos = pos };
@@ -995,7 +995,7 @@ internal sealed partial class IrBuilder
             {
                 Name = name, Kind = SymKind.Var, Type = type,
                 Storage = Storage.Static, IsGlobal = true,
-                CsName = $"{DotCC.CSharpEmitter.Id(name)}__s{_staticLocalSeq++}",
+                CsName = $"{DotCC.EmitHelpers.Id(name)}__s{_staticLocalSeq++}",
             };
             Globals.Add(new GlobalVar(sym, initItem is { } ii ? BuildExpr(ii) : null));
             _symbols.DeclareAlias(sym);
@@ -1027,7 +1027,7 @@ internal sealed partial class IrBuilder
         {
             Name = Tok(n.Arg2), Kind = SymKind.Var, Type = type,
             Storage = Storage.Static, IsGlobal = true,
-            CsName = $"{DotCC.CSharpEmitter.Id(Tok(n.Arg2))}__s{_staticLocalSeq++}",
+            CsName = $"{DotCC.EmitHelpers.Id(Tok(n.Arg2))}__s{_staticLocalSeq++}",
         };
         Globals.Add(new GlobalVar(sym, init));
         _symbols.DeclareAlias(sym);
@@ -1556,13 +1556,13 @@ internal sealed partial class IrBuilder
         }
         if (name is "__func__" && _currentFnName.Length != 0)
         {
-            var lit = DotCC.CSharpEmitter.EncodeStringLiteral(new[] { $"\"{_currentFnName}\"" }, out var fnLen);
+            var lit = DotCC.EmitHelpers.EncodeStringLiteral(new[] { $"\"{_currentFnName}\"" }, out var fnLen);
             return new LitStr(lit) { Type = new CType.Array(CType.Char, fnLen) };
         }
         // Unresolved (a macro-substituted token, a builtin not in a header). Emit
         // the escaped raw name verbatim and let Roslyn arbitrate. Slice code never
         // hits this; it's a safety net during incremental growth.
-        return new Raw(DotCC.CSharpEmitter.Id(name)) { Type = CType.Int };
+        return new Raw(DotCC.EmitHelpers.Id(name)) { Type = CType.Int };
     }
 
     private CExpr BuildCall(Item calleeItem, Item? argList)
@@ -1671,7 +1671,7 @@ internal sealed partial class IrBuilder
         // decays to char* in most contexts — but NOT under sizeof, which is why
         // the array type is carried rather than the decayed pointer. The lowered
         // C# (byte*) is identical either way, so value uses are unaffected.
-        var expr = DotCC.CSharpEmitter.EncodeStringLiteral(segs, out var byteLen);
+        var expr = DotCC.EmitHelpers.EncodeStringLiteral(segs, out var byteLen);
         return new LitStr(expr) { Type = new CType.Array(CType.Char, byteLen) };
     }
 
@@ -1711,7 +1711,7 @@ internal sealed partial class IrBuilder
     private CStmt BuildDeclCharArrStr(Item typeItem, Item nameItem, int? explicitSize, Item strSeqItem)
     {
         var elem = ResolveType(typeItem);
-        var bytes = DotCC.CSharpEmitter.StringByteValues(CollectStrSegments(strSeqItem));
+        var bytes = DotCC.EmitHelpers.StringByteValues(CollectStrSegments(strSeqItem));
         bytes.Add(0);                                   // NUL
         var count = explicitSize ?? bytes.Count;
         var inits = new List<CExpr>(count);

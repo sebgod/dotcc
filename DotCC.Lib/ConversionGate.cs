@@ -15,7 +15,7 @@ namespace DotCC;
 /// opt-in via <c>-Wconversion</c> — because narrowing diagnostics are noisy.
 /// </summary>
 /// <remarks>
-/// Constructed (and threaded into the emit-pass <see cref="CSharpEmitter"/>) only
+/// Constructed (and threaded into the emit pass) only
 /// when <c>-Wconversion</c> is set, so it is a no-op on the default path. Wired
 /// into the EMIT pass only — never the analysis pass — so each store is reported
 /// once. Identical messages (e.g. the same inlined header store seen across many

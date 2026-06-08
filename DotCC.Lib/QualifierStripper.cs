@@ -10,8 +10,7 @@ namespace DotCC;
 /// <summary>
 /// Strips the C type qualifier <c>const</c> from the token stream as a
 /// <see cref="RewritingTokenStream"/>. dotcc has no C# representation for it —
-/// <c>const char *p</c> lowers exactly like <c>char *p</c> (see the <c>TsConst</c>
-/// note in <see cref="CSharpEmitter"/>) — so rather than thread <c>const</c>
+/// <c>const char *p</c> lowers exactly like <c>char *p</c> — so rather than thread <c>const</c>
 /// productions through every type position in the grammar, we delete the token
 /// before the parser ever sees it. (Const-correctness — diagnosing writes through
 /// a <c>const</c> lvalue — is a wanted future feature that would instead preserve

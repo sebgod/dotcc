@@ -14,7 +14,7 @@ namespace DotCC;
 /// regardless of input dialect.
 /// </summary>
 /// <remarks>
-/// Constructed (and threaded into the emit-pass <c>CSharpEmitter</c>) only when
+/// Constructed (and threaded into the emit pass) only when
 /// <c>-pedantic</c> / <c>-pedantic-errors</c> is set, so it is a no-op on the
 /// default permissive path. It is wired into the EMIT pass only — never the
 /// analysis pass — so each violation is reported exactly once. Severity (warn
