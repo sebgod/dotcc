@@ -58,6 +58,15 @@ internal sealed class CodeGen
         var globals = new StringBuilder();
         foreach (var g in unit.Globals)
         {
+            // A pointer/fn-ptr global whose address is taken (or that is volatile/
+            // atomic) is stored as `nint` so Unsafe.AsPointer / Volatile.* accept it
+            // (CS0306) — the init pointer value is cast to nint, reads cast back.
+            if (g.Sym.StoreAsNint)
+            {
+                var ninit = g.Init is { } i0 ? $" = (nint)({cg.Coerced(i0, g.Sym.Type)})" : "";
+                globals.Append($"    public static unsafe nint {g.Sym.CsName}{ninit};\n");
+                continue;
+            }
             var init = g.Init is { } i ? " = " + cg.Coerced(i, g.Sym.Type) : "";
             globals.Append($"    public static unsafe {g.Sym.Type.CsType} {g.Sym.CsName}{init};\n");
         }
@@ -454,6 +463,10 @@ internal sealed class CodeGen
     /// <c>Volatile.Read</c>, neither → the bare text at its natural precedence.</summary>
     private static (string, int) QualifiedRead(CExpr lv, string bare, int barePrec) =>
         lv.Type.IsAtomic ? ($"Atomic.Load(ref {bare})", PPrimary)
+        // A pointer/fn-ptr volatile lvalue can't be a Volatile.Read<T> type arg
+        // (CS0306): reinterpret its slot as `nint` through its address, cast back.
+        : lv.Type.IsVolatile && lv.Type.IsPointerLowered
+            ? ($"({lv.Type.Unqualified.CsType}){VolatileRead($"*(nint*)&{bare}")}", PUnary)
         : lv.Type.IsVolatile ? (VolatileRead(bare), PPrimary)
         : (bare, barePrec);
 
@@ -484,6 +497,17 @@ internal sealed class CodeGen
         VarRef v => v.Sym.IsGlobal,
         Paren p => RootsAtGlobal(p.Inner),
         Member { Arrow: false } m => RootsAtGlobal(m.Base),
+        _ => false,
+    };
+
+    /// <summary>True when an lvalue is a pointer global whose backing field codegen
+    /// declared as <c>nint</c> (its address was taken — see
+    /// <see cref="Symbol.StoreAsNint"/>); such a slot is reinterpreted directly,
+    /// not through its address.</summary>
+    private static bool StoredAsNint(CExpr e) => e switch
+    {
+        VarRef v => v.Sym.StoreAsNint,
+        Paren p => StoredAsNint(p.Inner),
         _ => false,
     };
 
@@ -693,6 +717,14 @@ internal sealed class CodeGen
             case Raw r: return (r.CsText, PPrimary);
             // A bare function name used as a value decays to its address — C#
             // needs the explicit `&` to form a delegate* (C allows the bare name).
+            // A pointer global stored as `nint` (its address was taken): a value read
+            // fences through Volatile/Atomic on the nint field, then casts back to the
+            // pointer type. Assignment targets / `&` / ref-args use BareLValue (raw
+            // field), so they never hit this read-cast.
+            case VarRef { Sym.StoreAsNint: true } v:
+                return v.Type.IsAtomic ? ($"({v.Type.CsType})Atomic.Load(ref {v.Sym.CsName})", PUnary)
+                     : v.Type.IsVolatile ? ($"({v.Type.CsType}){VolatileRead(v.Sym.CsName)}", PUnary)
+                     : ($"({v.Type.CsType}){v.Sym.CsName}", PUnary);
             case VarRef v: return v.Sym.Kind == SymKind.Func
                 ? ($"&{v.Sym.CsName}", PUnary)
                 : QualifiedRead(v, v.Sym.CsName, PPrimary);
@@ -798,10 +830,35 @@ internal sealed class CodeGen
                     // compound op is a fenced read-modify-write. (Returns void, so —
                     // like the legacy — only valid in statement position.)
                     var lv = BareLValue(a.Target);
+                    // A pointer/fn-ptr volatile target can't be a Volatile.Write<T>
+                    // type arg (CS0306): reinterpret the slot as `nint` (a global
+                    // stored-as-nint already IS a nint field; otherwise via address)
+                    // and cast the stored value to nint.
+                    if (a.Target.Type.IsPointerLowered)
+                    {
+                        var pty = a.Target.Type.Unqualified.CsType;
+                        var slot = StoredAsNint(a.Target) ? lv : $"*(nint*)&{lv}";
+                        var pstored = a.CompoundOp is { } pcop
+                            ? $"({pty}){VolatileRead(slot)} {BinSym(pcop)} {Sub(a.Value, Prec(pcop) + 1)}"
+                            : Coerced(a.Value, a.Target.Type);
+                        return ($"global::System.Threading.Volatile.Write(ref {slot}, (nint)({pstored}))", PPrimary);
+                    }
                     var stored = a.CompoundOp is { } cop
                         ? $"{VolatileRead(lv)} {BinSym(cop)} {Sub(a.Value, Prec(cop) + 1)}"
                         : Coerced(a.Value, a.Target.Type);
                     return ($"global::System.Threading.Volatile.Write(ref {lv}, {stored})", PPrimary);
+                }
+            case Assign a when StoredAsNint(a.Target):
+                {
+                    // A pointer global stored as `nint`: write the raw field and cast
+                    // the value to nint (a value read of the field would re-add a `(T)`
+                    // cast, which isn't assignable). A compound op reads back as `(T)`.
+                    var lv = BareLValue(a.Target);
+                    var pty = a.Target.Type.Unqualified.CsType;
+                    var val = a.CompoundOp is { } cop
+                        ? $"({pty}){lv} {BinSym(cop)} {Sub(a.Value, Prec(cop) + 1)}"
+                        : Coerced(a.Value, a.Target.Type);
+                    return ($"{lv} = (nint)({val})", PAssign);
                 }
             case Assign a:
                 {

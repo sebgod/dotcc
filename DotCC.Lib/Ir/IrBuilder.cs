@@ -1495,6 +1495,14 @@ internal sealed partial class IrBuilder
     private CExpr Un(UnOp op, Item operand)
     {
         var oe = BuildExpr(operand);
+        // Taking the address of a pointer/fn-ptr-typed GLOBAL can't go through
+        // Unsafe.AsPointer<T> (T may not be a pointer — CS0306). Mark the symbol so
+        // codegen declares its backing field as `nint` and casts on every use.
+        if (op == UnOp.AddrOf && Unparen(oe) is VarRef { Sym: { IsGlobal: true, Kind: SymKind.Var } gsym }
+            && gsym.Type.IsPointerLowered)
+        {
+            gsym.StoreAsNint = true;
+        }
         CType t = op switch
         {
             UnOp.LogNot => CType.Int,
@@ -1504,6 +1512,9 @@ internal sealed partial class IrBuilder
         };
         return new Unary(op, oe) { Type = t, IsLValue = op == UnOp.Deref };
     }
+
+    /// <summary>Peel redundant <see cref="Paren"/> wrappers to reach the inner expr.</summary>
+    private static CExpr Unparen(CExpr e) => e is Paren p ? Unparen(p.Inner) : e;
 
     private CExpr BuildVar(C.Var v)
     {
