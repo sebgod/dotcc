@@ -155,6 +155,12 @@ public sealed record StackArray(CType Element, IReadOnlyList<CExpr> Elems) : CEx
 /// <c>nint[]</c> reinterpreted as <c>T**</c>.</summary>
 public sealed record PinnedArray(CType Element, IReadOnlyList<CExpr>? Elems, CExpr? Count) : CExpr;
 
+/// <summary>The stack-value replacement for a promoted <c>malloc</c> — the
+/// malloc→stack peephole rewrites <c>T* p = (T*)malloc(sizeof(T))</c> (used only
+/// via <c>-&gt;</c> and freed, never escaping) to <c>T p = new T()</c>. Codegen
+/// emits <c>new {CsType}()</c> (a zero-initialized struct value).</summary>
+public sealed record StackNew(CType StructType) : CExpr;
+
 /// <summary>A C23 empty initializer (<c>{}</c> / <c>(T){}</c>) — a zero value of
 /// the carried <see cref="CExpr.Type"/>. Codegen emits <c>default(T)</c>, which
 /// zero-fills a scalar, pointer, struct, or union uniformly.</summary>

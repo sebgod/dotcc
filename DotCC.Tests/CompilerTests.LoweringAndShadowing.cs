@@ -152,10 +152,10 @@ public sealed partial class CompilerTests
             var emitted = Compiler.EmitCSharp(new[] { src });
             // Stack value, not a heap allocation.
             emitted.ShouldContain("Point p = new Point()");
-            // Arrow accesses lowered to `.` (the binop wrapper adds parens:
-            // `(p.x) = 3`), and the pointer `->` form is gone for this var.
-            emitted.ShouldContain("(p.x)");
-            emitted.ShouldContain("(p.y)");
+            // Arrow accesses lowered to `.` (precedence-driven, no spurious parens),
+            // and the pointer `->` form is gone for this var.
+            emitted.ShouldContain("p.x = 3");
+            emitted.ShouldContain("p.y = 4");
             UserPortion(emitted).ShouldNotContain("p->");
             // The user's cast-malloc is gone (the runtime still *defines*
             // malloc/free, but `(Point*)malloc` is unique to user code).
@@ -517,7 +517,7 @@ public sealed partial class CompilerTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
             emitted.ShouldContain("S @new = new S()");  // promoted + escaped
-            emitted.ShouldContain("(@new.x)");          // arrow -> dot, escaped
+            emitted.ShouldContain("@new.x = 7");        // arrow -> dot, escaped
             UserPortion(emitted).ShouldNotContain("@new->"); // no pointer arrow left
             emitted.ShouldNotContain("S new = new S()"); // raw name never emitted
         }
