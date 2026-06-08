@@ -37,6 +37,10 @@ internal sealed partial class IrBuilder
     // Whether each registered aggregate is a union — drives the compile-time layout
     // model (offsetof folding) and is set alongside every _structFields entry.
     private readonly Dictionary<string, bool> _structIsUnion = new(StringComparer.Ordinal);
+    // Enum tag → its resolved CType.Enum, so `enum Tag` as a type resolves to the
+    // real enum (not plain int). Anonymous-but-typedef'd enums are reached through
+    // _typedefs instead (the alias maps to the same CType.Enum).
+    private readonly Dictionary<string, CType.Enum> _enumTypes = new(StringComparer.Ordinal);
     private readonly HashSet<string> _emittedTypes = new(StringComparer.Ordinal);
     private string _file = "";
     // The name of the function currently being built — the value of the C99
@@ -46,6 +50,7 @@ internal sealed partial class IrBuilder
     public List<FuncDef> Functions { get; } = new();
     public List<GlobalVar> Globals { get; } = new();
     public List<StructTypeDef> Types { get; } = new();
+    public List<EnumTypeDef> Enums { get; } = new();
     public List<Diagnostic> Diagnostics { get; } = new();
 
     /// <summary>Walk one translation unit's parse tree, appending its functions
@@ -116,11 +121,12 @@ internal sealed partial class IrBuilder
             // `typedef <type> <name>;` — record name → underlying type. Resolution
             // (ResolveType's TypeName case) then sees through it everywhere.
             case C.TypedefAlias t: _typedefs[Tok(t.Arg2)] = ResolveType(t.Arg1); break;
-            // enum definitions — register the enumerators as integer constants.
-            case C.EnumDef e: RegisterEnum(e.Arg3); break;
-            case C.EnumDefTyped e: RegisterEnum(e.Arg5); break;
-            case C.TypedefEnum e: RegisterEnum(e.Arg4); _typedefs[Tok(e.Arg6)] = CType.Int; break;
-            case C.TypedefEnumAnon e: RegisterEnum(e.Arg3); _typedefs[Tok(e.Arg5)] = CType.Int; break;
+            // enum definitions — register a real C# enum (tagged/typedef'd) or, for
+            // an anonymous un-typedef'd enum, plain int constants.
+            case C.EnumDef e: RegisterEnum(Tok(e.Arg1), null, e.Arg3); break;
+            case C.EnumDefTyped e: RegisterEnum(Tok(e.Arg1), e.Arg3, e.Arg5); break;
+            case C.TypedefEnum e: _typedefs[Tok(e.Arg6)] = RegisterEnum(Tok(e.Arg2), null, e.Arg4, Tok(e.Arg6)); break;
+            case C.TypedefEnumAnon e: _typedefs[Tok(e.Arg5)] = RegisterEnum(null, null, e.Arg3, Tok(e.Arg5)); break;
             // struct/union definitions.
             case C.StructDef s: BuildStructDef(Tok(s.Arg1), s.Arg3, null, isUnion: false); break;
             case C.UnionDef s: BuildStructDef(Tok(s.Arg1), s.Arg3, null, isUnion: true); break;
@@ -260,13 +266,25 @@ internal sealed partial class IrBuilder
 
     // ---- enums -----------------------------------------------------------
 
-    /// <summary>Register an enum's enumerators as integer constants. Values
-    /// auto-increment from the previous (starting at 0), with explicit
-    /// <c>= expr</c> overriding (expr must be an integer constant expression).
-    /// dotcc lowers C enums to plain ints, so the enum tag itself is not a C#
-    /// type — references to an enumerator emit its literal value.</summary>
-    private void RegisterEnum(Item enumList)
+    /// <summary>Register an enum definition. Enumerator values auto-increment from
+    /// the previous (starting at 0), with an explicit <c>= expr</c> overriding (a
+    /// constant integer expression). A TAGGED or TYPEDEF-named enum becomes a real
+    /// C# enum: each enumerator is a <see cref="SymKind.EnumConst"/> typed AS the
+    /// enum (so it renders <c>EnumName.Member</c> and decays to its underlying int
+    /// only at C's plain-int contexts), and an <see cref="EnumTypeDef"/> is emitted.
+    /// An ANONYMOUS, un-typedef'd enum has no C# name, so its enumerators stay plain
+    /// int constants (named constants) rather than synthesizing a type. Returns the
+    /// enum's <see cref="CType"/> — the <see cref="CType.Enum"/>, or
+    /// <see cref="CType.Int"/> for the anonymous form — so a typedef caller can alias
+    /// the name to it.</summary>
+    private CType RegisterEnum(string? tag, Item? baseType, Item enumList, string? typedefName = null)
     {
+        var underlying = baseType is { } bt ? ResolveType(bt) : CType.Int;
+        // The C# enum name: the tag, else the typedef alias; anonymous + un-typedef'd
+        // ⇒ null ⇒ plain int constants.
+        var enumName = tag ?? typedefName;
+        CType.Enum? enumType = enumName is null ? null : new CType.Enum(enumName, underlying);
+        var members = new List<EnumMember>();
         long next = 0;
         void Walk(Item it)
         {
@@ -288,11 +306,19 @@ internal sealed partial class IrBuilder
             }
             _symbols.Declare(new Symbol
             {
-                Name = name, Kind = SymKind.EnumConst, Type = CType.Int, ConstValue = next, IsGlobal = true,
+                Name = name, Kind = SymKind.EnumConst,
+                Type = (CType?)enumType ?? CType.Int, ConstValue = next, IsGlobal = true,
             });
+            if (enumType is not null) { members.Add(new EnumMember(name, next)); }
             next++;
         }
         Walk(enumList);
+        if (enumType is not null)
+        {
+            if (tag is not null) { _enumTypes[tag] = enumType; }
+            if (Enums.All(e => e.Name != enumName)) { Enums.Add(new EnumTypeDef(enumName!, underlying, members)); }
+        }
+        return (CType?)enumType ?? CType.Int;
     }
 
     /// <summary>Evaluate an integer constant expression, or null if non-constant.
@@ -304,6 +330,7 @@ internal sealed partial class IrBuilder
     private long? ConstEval(CExpr e) => e switch
     {
         LitInt i => i.Value,
+        EnumConstRef ec => ec.Sym.ConstValue,
         SizeOfExpr s => SizeOfConst(s.Of),
         OffsetOf o => StructCanonical(o.StructType) is { } n ? OffsetOfConst(n, o.Member) : null,
         Paren p => ConstEval(p.Inner),
@@ -575,8 +602,9 @@ internal sealed partial class IrBuilder
         C.TypeAtomicParen t => ResolveType(t.Arg2).WithQuals(TypeQual.Atomic),
         C.TypePtrQualRestrict t => new CType.Pointer(ResolveType(t.Arg0)),
         C.TypeName t => ResolveTypeName(Tok(t.Arg0)),
-        // `enum Tag` as a type — dotcc lowers enums to plain int.
-        C.TypeEnum => CType.Int,
+        // `enum Tag` as a type — the registered real C# enum, or plain int if the
+        // tag is unknown (forward/opaque) or names an anonymous int-constant enum.
+        C.TypeEnum te => _enumTypes.TryGetValue(Tok(te.Arg1), out var et) ? et : CType.Int,
         // `struct Tag` / `union Tag` as a type — the canonical C# struct name.
         C.TypeStruct t => new CType.Named(Tok(t.Arg1)),
         C.TypeUnion t => new CType.Named(Tok(t.Arg1)),
@@ -815,8 +843,8 @@ internal sealed partial class IrBuilder
             case C.StmtLabel s: return new Labeled(DotCC.EmitHelpers.Id(Tok(s.Arg0)), BuildStmt(s.Arg2)) { Pos = pos };
             // A block-scope enum definition has no storage — register its
             // constants and emit nothing (an empty block).
-            case C.StmtEnumDef s: RegisterEnum(s.Arg3); return new Block(System.Array.Empty<CStmt>()) { Pos = pos };
-            case C.StmtEnumDefTyped s: RegisterEnum(s.Arg5); return new Block(System.Array.Empty<CStmt>()) { Pos = pos };
+            case C.StmtEnumDef s: RegisterEnum(Tok(s.Arg1), null, s.Arg3); return new Block(System.Array.Empty<CStmt>()) { Pos = pos };
+            case C.StmtEnumDefTyped s: RegisterEnum(Tok(s.Arg1), s.Arg3, s.Arg5); return new Block(System.Array.Empty<CStmt>()) { Pos = pos };
             default: throw new IrUnsupportedException(TypeName(it.Content));
         }
     }
@@ -1532,8 +1560,11 @@ internal sealed partial class IrBuilder
         var sym = _symbols.Resolve(name);
         if (sym is { Kind: SymKind.EnumConst })
         {
-            // An enum constant lowers to its literal integer value.
-            return new LitInt(sym.ConstValue.ToString(System.Globalization.CultureInfo.InvariantCulture), sym.ConstValue) { Type = CType.Int };
+            // An enumerator of a real (named) enum renders as EnumName.Member; one of
+            // an anonymous int-constant enum lowers to its literal integer value.
+            return sym.Type.Unqualified is CType.Enum
+                ? new EnumConstRef(sym) { Type = sym.Type }
+                : new LitInt(sym.ConstValue.ToString(System.Globalization.CultureInfo.InvariantCulture), sym.ConstValue) { Type = CType.Int };
         }
         if (sym is not null)
         {
