@@ -22,6 +22,13 @@ internal interface ITarget
     /// spelling (e.g. C's <c>unsigned long</c> → C# <c>ulong</c>; a C array, which
     /// decays to a pointer, → <c>T*</c>).</summary>
     string RenderType(CType t);
+
+    /// <summary>Render an integer literal — its neutral digit core plus whatever
+    /// suffix this target spells for the literal's integer type.</summary>
+    string RenderIntLit(LitInt lit);
+
+    /// <summary>Render a floating-point literal in this target's syntax.</summary>
+    string RenderFloatLit(LitFloat lit);
 }
 
 /// <summary>
@@ -47,6 +54,23 @@ internal sealed class CSharpTarget : ITarget
         CType.Enum e => e.Name,
         _ => throw new IrUnsupportedException("C# target cannot render type " + t.GetType().Name),
     };
+
+    public string RenderIntLit(LitInt lit) => lit.Digits + IntSuffix(lit.Type);
+
+    /// <summary>The C# integer-literal suffix for a type: <c>u</c> (uint), <c>L</c>
+    /// (long), <c>UL</c> (ulong), none (int / narrower) — reproducing exactly what
+    /// the builder used to append before the suffix moved behind this seam.</summary>
+    private static string IntSuffix(CType t) => t.Unqualified is CType.Prim { Integer: true } p
+        ? (p.Signed, p.Bytes >= 8) switch
+        {
+            (true, false) => "",
+            (false, false) => "u",
+            (true, true) => "L",
+            (false, true) => "UL",
+        }
+        : "";
+
+    public string RenderFloatLit(LitFloat lit) => lit.Text;
 
     /// <summary>Map a C primitive (keyed on its canonical C name) to the C# type it
     /// lowers to. <c>char</c>→<c>byte</c> so <c>char*</c> arithmetic walks bytes;

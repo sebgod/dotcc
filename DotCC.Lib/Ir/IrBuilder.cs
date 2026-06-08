@@ -1450,7 +1450,7 @@ internal sealed partial class IrBuilder
             C.Cast c => BuildCast(c),
             C.LitTrue => new LitInt("1", 1) { Type = CType.Int },
             C.LitFalse => new LitInt("0", 0) { Type = CType.Int },
-            C.LitNullptr => new Raw("null") { Type = new CType.Pointer(CType.Void) },
+            C.LitNullptr => new NullPtr { Type = new CType.Pointer(CType.Void) },
             C.SizeofType s => new SizeOfExpr(ResolveType(s.Arg2)) { Type = CType.SizeT },
             // `sizeof expr` — the operand isn't evaluated, only its type measured.
             C.SizeofExpr s => new SizeOfExpr(BuildExpr(s.Arg1).Type) { Type = CType.SizeT },
@@ -1658,7 +1658,7 @@ internal sealed partial class IrBuilder
         // `using static Libc`. Type it complex so `a + b*I` propagates correctly.
         if (name is "__dotcc_complex_I")
         {
-            return new Raw("__dotcc_complex_I") { Type = CType.Complex };
+            return new NameRef("__dotcc_complex_I") { Type = CType.Complex };
         }
         if (name is "__func__" && _currentFnName.Length != 0)
         {
@@ -1666,10 +1666,10 @@ internal sealed partial class IrBuilder
             DotCC.EmitHelpers.EncodeStringLiteral(fnSegs, out var fnLen);
             return new LitStr(fnSegs) { Type = new CType.Array(CType.Char, fnLen) };
         }
-        // Unresolved (a macro-substituted token, a builtin not in a header). Emit
-        // the escaped raw name verbatim and let Roslyn arbitrate. Slice code never
-        // hits this; it's a safety net during incremental growth.
-        return new Raw(DotCC.EmitHelpers.Id(name)) { Type = CType.Int };
+        // Unresolved (a macro-substituted token, a builtin not in a header). Surface
+        // the raw name; the backend escapes it and lets its compiler arbitrate. Slice
+        // code never hits this; it's a safety net during incremental growth.
+        return new NameRef(name) { Type = CType.Int };
     }
 
     private CExpr BuildCall(Item calleeItem, Item? argList)
@@ -1890,17 +1890,18 @@ internal sealed partial class IrBuilder
             end--;
         }
         var digits = raw[..end].Replace("'", "");
-        var suffix = (hasU, ls) switch { (false, 0) => "", (true, 0) => "u", (false, _) => "L", _ => "UL" };
+        // The literal's numeric CORE (suffix-free); the backend re-adds a target
+        // suffix from the CType derived below. Octal normalises to decimal here.
         var inv = System.Globalization.CultureInfo.InvariantCulture;
         string text; long? val = null;
         if (digits.Length >= 2 && digits[0] == '0' && digits[1] is 'x' or 'X')
         {
-            text = digits + suffix;
+            text = digits;
             if (long.TryParse(digits[2..], System.Globalization.NumberStyles.HexNumber, inv, out var hv)) { val = hv; }
         }
         else if (digits.Length >= 2 && digits[0] == '0' && digits[1] is 'b' or 'B')
         {
-            text = digits + suffix;
+            text = digits;
             try { val = Convert.ToInt64(digits[2..], 2); } catch { }
         }
         else if (digits.Length >= 2 && digits[0] == '0')
@@ -1912,12 +1913,12 @@ internal sealed partial class IrBuilder
                 if (c is < '0' or > '7') { throw new DotCC.CompileException($"invalid digit '{c}' in octal constant '{raw}'"); }
             }
             var value = Convert.ToUInt64(digits, 8);
-            text = value.ToString(inv) + suffix;
+            text = value.ToString(inv);
             if (value <= long.MaxValue) { val = (long)value; }
         }
         else
         {
-            text = digits + suffix;
+            text = digits;
             if (long.TryParse(digits, inv, out var dv)) { val = dv; }
         }
         var ct = ls > 0 ? (hasU ? CType.ULong : CType.Long) : (hasU ? CType.UInt : CType.Int);
