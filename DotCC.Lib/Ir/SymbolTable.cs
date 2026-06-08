@@ -47,13 +47,14 @@ public sealed class Symbol
     /// <c>DotCcGlobals</c> field rather than a block local.</summary>
     public bool IsGlobal { get; init; }
 
-    /// <summary>Set when a pointer/fn-ptr-typed global has its address taken (or is
-    /// volatile/atomic-accessed): its backing field is declared <c>nint</c> and codegen
-    /// casts on every read/write/address-of. C# forbids a pointer type as the <c>T</c>
-    /// of <c>Unsafe.AsPointer&lt;T&gt;</c> / <c>Volatile.*&lt;T&gt;</c> (CS0306), and a
-    /// moveable static field can't take a bare <c>&amp;</c> (CS0212); a <c>nint</c> field
-    /// satisfies both. See <see cref="CType.IsPointerLowered"/>.</summary>
-    public bool StoreAsNint { get; set; }
+    /// <summary>The C-level fact that this (global) symbol's address is taken
+    /// somewhere. A pure semantic flag — the backend decides what it implies. The
+    /// C# backend uses it (together with <see cref="CType.IsPointerLowered"/>) to
+    /// store a pointer/fn-ptr global as <c>nint</c> instead of a pointer field: C#
+    /// forbids a pointer type as the <c>T</c> of <c>Unsafe.AsPointer&lt;T&gt;</c> /
+    /// <c>Volatile.*&lt;T&gt;</c> (CS0306) and can't take a bare <c>&amp;</c> of a
+    /// moveable static field (CS0212); a <c>nint</c> field satisfies both.</summary>
+    public bool AddressTaken { get; set; }
 }
 
 /// <summary>

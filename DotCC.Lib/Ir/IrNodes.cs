@@ -40,9 +40,12 @@ public sealed record LitInt(string CsText, long? Value) : CExpr;
 /// <summary>A floating constant, lowered to its C# literal text.</summary>
 public sealed record LitFloat(string CsText) : CExpr;
 
-/// <summary>A string literal, already lowered to the full <c>Libc.L("…"u8)</c>
-/// (or byte-array) expression text.</summary>
-public sealed record LitStr(string CsExpr) : CExpr;
+/// <summary>A string literal — the raw adjacent quoted C segments (e.g.
+/// <c>["\"a\\n\"", "\"b\""]</c>), NOT yet encoded. The backend decodes the C
+/// escapes and emits its own representation (the C# backend: <c>Libc.L("…"u8)</c>
+/// or a byte-array); keeping the IR free of target text is what lets a different
+/// backend lower the same literal differently.</summary>
+public sealed record LitStr(IReadOnlyList<string> Segments) : CExpr;
 
 /// <summary>A reference to a resolved variable / parameter / function.</summary>
 public sealed record VarRef(Symbol Sym) : CExpr;

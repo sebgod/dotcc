@@ -1602,13 +1602,13 @@ internal sealed partial class IrBuilder
     private CExpr Un(UnOp op, Item operand)
     {
         var oe = BuildExpr(operand);
-        // Taking the address of a pointer/fn-ptr-typed GLOBAL can't go through
-        // Unsafe.AsPointer<T> (T may not be a pointer — CS0306). Mark the symbol so
-        // codegen declares its backing field as `nint` and casts on every use.
-        if (op == UnOp.AddrOf && Unparen(oe) is VarRef { Sym: { IsGlobal: true, Kind: SymKind.Var } gsym }
-            && gsym.Type.IsPointerLowered)
+        // Record the C-level fact that a global's address is taken. The backend
+        // decides what that implies — for a pointer/fn-ptr-typed global it means the
+        // backing field must be `nint` (a pointer T can't be Unsafe.AsPointer<T> —
+        // CS0306), but that nint choice is the backend's, not the IR's.
+        if (op == UnOp.AddrOf && Unparen(oe) is VarRef { Sym: { IsGlobal: true, Kind: SymKind.Var } gsym })
         {
-            gsym.StoreAsNint = true;
+            gsym.AddressTaken = true;
         }
         CType t = op switch
         {
@@ -1662,8 +1662,9 @@ internal sealed partial class IrBuilder
         }
         if (name is "__func__" && _currentFnName.Length != 0)
         {
-            var lit = DotCC.EmitHelpers.EncodeStringLiteral(new[] { $"\"{_currentFnName}\"" }, out var fnLen);
-            return new LitStr(lit) { Type = new CType.Array(CType.Char, fnLen) };
+            var fnSegs = new[] { $"\"{_currentFnName}\"" };
+            DotCC.EmitHelpers.EncodeStringLiteral(fnSegs, out var fnLen);
+            return new LitStr(fnSegs) { Type = new CType.Array(CType.Char, fnLen) };
         }
         // Unresolved (a macro-substituted token, a builtin not in a header). Emit
         // the escaped raw name verbatim and let Roslyn arbitrate. Slice code never
@@ -1775,10 +1776,11 @@ internal sealed partial class IrBuilder
         var segs = CollectStrSegments(((C.Str)it.Content).Arg0);
         // A string literal has type char[N] (N = decoded bytes incl. NUL). It
         // decays to char* in most contexts — but NOT under sizeof, which is why
-        // the array type is carried rather than the decayed pointer. The lowered
-        // C# (byte*) is identical either way, so value uses are unaffected.
-        var expr = DotCC.EmitHelpers.EncodeStringLiteral(segs, out var byteLen);
-        return new LitStr(expr) { Type = new CType.Array(CType.Char, byteLen) };
+        // the array type is carried rather than the decayed pointer. The byte
+        // length is decoded here for the TYPE; the backend re-decodes the segments
+        // to emit the literal text (the IR carries no target text).
+        DotCC.EmitHelpers.EncodeStringLiteral(segs, out var byteLen);
+        return new LitStr(segs) { Type = new CType.Array(CType.Char, byteLen) };
     }
 
     /// <summary>The constant array bound of a char-array string declarator's
