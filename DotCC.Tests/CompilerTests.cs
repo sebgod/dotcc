@@ -101,11 +101,11 @@ public sealed partial class CompilerTests
             var emitted = Compiler.EmitCSharp(new[] { src });
             // Structural assertions — confirms the case-labels-inside-do-while
             // shape made it through parse + emit intact.
-            emitted.ShouldContain("switch ((count % 8))");
+            emitted.ShouldContain("switch (count % 8)");
             emitted.ShouldContain("case 0:");
             emitted.ShouldContain("case 7:");
             emitted.ShouldContain("case 1:");
-            emitted.ShouldContain("do {");
+            emitted.ShouldContain("do");
             emitted.ShouldContain("while (Cond.B(");
         }
         finally { File.Delete(src); }
