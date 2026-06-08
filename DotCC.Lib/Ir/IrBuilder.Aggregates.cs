@@ -400,7 +400,7 @@ internal sealed partial class IrBuilder
     private void BuildGlobalCharArr(Item typeItem, Item nameItem, Item strSeqItem, Item? dimsItem, string? csName)
     {
         var elem = ResolveType(typeItem);
-        var bytes = DotCC.CSharpEmitter.StringByteValues(CollectStrSegments(strSeqItem));
+        var bytes = DotCC.EmitHelpers.StringByteValues(CollectStrSegments(strSeqItem));
         bytes.Add(0);   // NUL
         var dims = dimsItem is { } di ? TryConstDims(di) : null;
         var total = dims is { Count: >= 1 } ? dims.Aggregate(1, (a, b) => a * b) : bytes.Count;
@@ -431,7 +431,7 @@ internal sealed partial class IrBuilder
     /// program-unique mangled name, with the statement itself emitting nothing.</summary>
     private CStmt BuildStaticLocalArr(Item typeItem, Item nameItem, Item? dimsItem, Item? initItem)
     {
-        var csName = $"{DotCC.CSharpEmitter.Id(Tok(nameItem))}__s{_staticLocalSeq++}";
+        var csName = $"{DotCC.EmitHelpers.Id(Tok(nameItem))}__s{_staticLocalSeq++}";
         BuildGlobalArr(typeItem, nameItem, dimsItem, initItem, csName);
         return new DeclStmt(System.Array.Empty<LocalDecl>());
     }
@@ -440,7 +440,7 @@ internal sealed partial class IrBuilder
     /// array under a mangled name (the statement emits nothing).</summary>
     private CStmt BuildStaticLocalCharArr(Item typeItem, Item nameItem, Item strSeqItem, Item? dimsItem)
     {
-        var csName = $"{DotCC.CSharpEmitter.Id(Tok(nameItem))}__s{_staticLocalSeq++}";
+        var csName = $"{DotCC.EmitHelpers.Id(Tok(nameItem))}__s{_staticLocalSeq++}";
         BuildGlobalCharArr(typeItem, nameItem, strSeqItem, dimsItem, csName);
         return new DeclStmt(System.Array.Empty<LocalDecl>());
     }

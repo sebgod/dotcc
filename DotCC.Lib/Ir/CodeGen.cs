@@ -9,9 +9,8 @@ namespace DotCC.Ir;
 
 /// <summary>
 /// The six outputs <see cref="DotCC.Compiler.BuildShell"/> /
-/// <c>SerializeFragment</c> consume — produced by the IR backend exactly as the
-/// legacy <see cref="DotCC.CSharpEmitter"/> exposes them, so the shell is reused
-/// verbatim.
+/// <c>SerializeFragment</c> consume — produced by the IR backend in the exact
+/// shape the shell expects, so the shell is reused verbatim.
 /// </summary>
 internal sealed record CodeGenResult(
     string Functions,
@@ -19,7 +18,7 @@ internal sealed record CodeGenResult(
     string Aliases,
     string Globals,
     int MainArity,
-    IReadOnlyList<DotCC.CSharpEmitter.Export> Exports);
+    IReadOnlyList<DotCC.EmitHelpers.Export> Exports);
 
 /// <summary>
 /// Lowers the typed IR to low-level unsafe C# text. Deliberately DUMB: every
@@ -34,7 +33,7 @@ internal sealed class CodeGen
     {
         var cg = new CodeGen();
         var fns = new StringBuilder();
-        var exports = new List<DotCC.CSharpEmitter.Export>();
+        var exports = new List<DotCC.EmitHelpers.Export>();
         var mainArity = -1;
 
         foreach (var fn in unit.Functions)
@@ -49,7 +48,7 @@ internal sealed class CodeGen
             {
                 var ret = fn.Sym.Type is CType.Func f ? f.Return.CsType : "int";
                 var ps = string.Join(", ", fn.Params.Select(p => $"{p.Type.CsType} {p.CsName}"));
-                exports.Add(new DotCC.CSharpEmitter.Export(fn.Sym.Name, ret, ps));
+                exports.Add(new DotCC.EmitHelpers.Export(fn.Sym.Name, ret, ps));
             }
         }
 
@@ -115,7 +114,7 @@ internal sealed class CodeGen
             {
                 var flat = arr.FlatElement;
                 var count = FlatCount(arr);
-                var fid = DotCC.CSharpEmitter.Id(f.Name);
+                var fid = DotCC.EmitHelpers.Id(f.Name);
                 if (IsFixedBufferType(flat.CsType))
                 {
                     sb.Append("    public fixed ").Append(flat.CsType).Append(' ').Append(fid).Append('[').Append(count).Append("];\n");
@@ -129,7 +128,7 @@ internal sealed class CodeGen
                 }
                 continue;
             }
-            sb.Append("    public ").Append(f.Type.CsType).Append(' ').Append(DotCC.CSharpEmitter.Id(f.Name)).Append(";\n");
+            sb.Append("    public ").Append(f.Type.CsType).Append(' ').Append(DotCC.EmitHelpers.Id(f.Name)).Append(";\n");
         }
         sb.Append("}\n\n");
         return wrappers.Append(sb).ToString();
@@ -142,7 +141,7 @@ internal sealed class CodeGen
     private static string BitFieldText(StructField f, bool isUnion)
     {
         var bt = f.Type.CsType;                       // "uint" / "int" / …
-        var fid = DotCC.CSharpEmitter.Id(f.Name);
+        var fid = DotCC.EmitHelpers.Id(f.Name);
         var backing = "__bf_" + fid;
         var bits = f.Type.SizeOf * 8;                 // container width
         var signed = (f.Type.Unqualified as CType.Prim)?.Signed ?? false;
@@ -700,7 +699,7 @@ internal sealed class CodeGen
     {
         Paren p => BareLValue(p.Inner),
         VarRef v => v.Sym.CsName,
-        Member m => $"{Sub(m.Base, PPostfix)}{(m.Arrow ? "->" : ".")}{DotCC.CSharpEmitter.Id(m.Field)}",
+        Member m => $"{Sub(m.Base, PPostfix)}{(m.Arrow ? "->" : ".")}{DotCC.EmitHelpers.Id(m.Field)}",
         Index ix => $"{Sub(ix.Base, PPostfix)}[{Expr(ix.Idx)}]",
         Unary { Op: UnOp.Deref } u => $"*{Sub(u.Operand, PUnary)}",
         _ => Expr(e),
@@ -933,7 +932,7 @@ internal sealed class CodeGen
                 // captured), so `&__t` needs no `fixed`. A primitive `fixed`-buffer
                 // member's access already yields its address (no `&`); a scalar
                 // member uses `&`.
-                var m = DotCC.CSharpEmitter.Id(o.Member);
+                var m = DotCC.EmitHelpers.Id(o.Member);
                 var memberAddr = o.MemberDecaysToPointer ? $"(byte*)__t.{m}" : $"(byte*)&__t.{m}";
                 return ($"((System.Func<ulong>)(() => {{ {o.StructType.CsType} __t = default; return (ulong)({memberAddr} - (byte*)&__t); }}))()", PPrimary);
             }
@@ -952,7 +951,7 @@ internal sealed class CodeGen
             }
             case Member m:
             {
-                var dot = $"{Sub(m.Base, PPostfix)}{(m.Arrow ? "->" : ".")}{DotCC.CSharpEmitter.Id(m.Field)}";
+                var dot = $"{Sub(m.Base, PPostfix)}{(m.Arrow ? "->" : ".")}{DotCC.EmitHelpers.Id(m.Field)}";
                 // A non-primitive array member is stored as an [InlineArray]; its
                 // access decays to the element pointer `(T*)&field` (C#'s InlineArray
                 // indexer bounds-checks, but a C array over-indexes into the tail),
@@ -1324,7 +1323,7 @@ internal sealed class CodeGen
         {
             if (i > 0) { sb.Append(", "); }
             var m = si.Members[i];
-            sb.Append(DotCC.CSharpEmitter.Id(m.Name)).Append(" = ").Append(Coerced(m.Value, m.FieldType));
+            sb.Append(DotCC.EmitHelpers.Id(m.Name)).Append(" = ").Append(Coerced(m.Value, m.FieldType));
         }
         return sb.Append(" }").ToString();
     }
@@ -1554,7 +1553,7 @@ internal sealed class CodeGen
             sb.Append(".Done()");
             return sb.ToString();
         }
-        return $"{DotCC.CSharpEmitter.Id(c.Callee)}({string.Join(", ", a)})";
+        return $"{DotCC.EmitHelpers.Id(c.Callee)}({string.Join(", ", a)})";
     }
 
     private static string Arg(List<string> a, int i) => i < a.Count ? a[i] : "";

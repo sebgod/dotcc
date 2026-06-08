@@ -86,7 +86,7 @@ public sealed class SymbolTable
     /// used in the function gets a fresh <c>name__k</c>.</summary>
     public Symbol Declare(Symbol sym)
     {
-        var escaped = DotCC.CSharpEmitter.Id(sym.Name);
+        var escaped = DotCC.EmitHelpers.Id(sym.Name);
         if (AtFileScope || sym.Kind is SymKind.Func or SymKind.Param)
         {
             sym.CsName = escaped;
