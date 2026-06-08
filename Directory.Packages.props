@@ -6,7 +6,7 @@
     <!-- LALR.CC runtime + bundled source generator (ships YamlDotNet in the
          analyzer payload, so consumers need no extra dance — the same
          package handles both the runtime API and the *.lalr.yaml generator). -->
-    <PackageVersion Include="SharpAstro.LALR.CC" Version="4.0.0" />
+    <PackageVersion Include="SharpAstro.LALR.CC" Version="4.1.0" />
 
     <!-- Build-time only: needed in sibling mode so the source generator can
          resolve YamlDotNet from the analyzer host. Unused (and not pulled)
