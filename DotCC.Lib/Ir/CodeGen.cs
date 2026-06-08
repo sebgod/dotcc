@@ -330,46 +330,20 @@ internal sealed class CodeGen
                 sb.Append(pad).Append($"while (Cond.B({Expr(dw.Cond)}));\n");
                 break;
             case Goto g:
-                sb.Append(pad).Append($"goto {g.Label};\n");
+                // A cross-section goto to a label that starts another case section
+                // can't be a plain label-goto (C# can't jump into a sibling case —
+                // CS0159); it renders as `goto case <V>` via the active switch's map.
+                sb.Append(pad).Append(
+                    _gotoCaseMap is { } gm && gm.TryGetValue(g.Label, out var jc) ? jc : $"goto {g.Label};")
+                  .Append('\n');
                 break;
             case Labeled lb:
                 sb.Append(pad).Append(lb.Name).Append(":\n");
                 Stmt(sb, lb.Body, ind);
                 break;
             case Switch sw:
-            {
-                var subj = Hoist(sb, pad, () => Expr(sw.Subject));
-                sb.Append(pad).Append($"switch ({subj})\n");
-                sb.Append(pad).Append("{\n");
-                var inner = ind + 1;
-                var ipad = Pad(inner);
-                for (var si = 0; si < sw.Sections.Count; si++)
-                {
-                    var sec = sw.Sections[si];
-                    foreach (var lab in sec.Labels)
-                    {
-                        sb.Append(ipad).Append(lab.CaseExpr is { } ce ? $"case {Expr(ce)}:\n" : "default:\n");
-                    }
-                    foreach (var st in sec.Body) { Stmt(sb, st, inner + 1); }
-                    // C fall-through → the explicit C# jump. A section already ending
-                    // in break/return/… is left alone; otherwise it jumps to the next
-                    // section's first label (goto case / goto default), and the final
-                    // section gets a trailing break (C falls out, C# requires it).
-                    if (sec.Body.Count == 0 || !Terminates(sec.Body[^1]))
-                    {
-                        string jump;
-                        if (si + 1 < sw.Sections.Count)
-                        {
-                            var next = sw.Sections[si + 1].Labels[0];
-                            jump = next.CaseExpr is { } nce ? $"goto case {Expr(nce)};\n" : "goto default;\n";
-                        }
-                        else { jump = "break;\n"; }
-                        sb.Append(Pad(inner + 1)).Append(jump);
-                    }
-                }
-                sb.Append(pad).Append("}\n");
+                RenderSwitch(sb, sw, ind, pad);
                 break;
-            }
             case SetjmpGuard sj:
             {
                 // Arm this site with a FRESH token identity so the `when` filter
@@ -401,6 +375,167 @@ internal sealed class CodeGen
         }
     }
 
+    // ---- switch + cross-case label control flow --------------------------
+
+    /// <summary>The active switch's section-start labels, mapped to the
+    /// <c>goto case &lt;V&gt;;</c> a cross-section goto to that label renders as
+    /// (C# can't jump into a sibling case — CS0159). Replaced (not merged) around a
+    /// nested switch so an inner goto to an OUTER label stays a plain label-goto,
+    /// which is valid because the outer label is in an enclosing block.</summary>
+    private Dictionary<string, string>? _gotoCaseMap;
+
+    /// <summary>Unique-suffix counter for the synthetic skip-over labels emitted
+    /// after a switch with hoisted shared-handler tails.</summary>
+    private int _switchPastSeq;
+
+    /// <summary>Render a C <c>switch</c> to C#, reconciling two label-scope
+    /// mismatches the Lua VM dispatch loop relies on:
+    /// <list type="bullet">
+    /// <item>A label at a section START (<c>l_tforcall:</c>/<c>l_tforloop:</c>):
+    /// a cross-section <c>goto</c> to it becomes <c>goto case &lt;V&gt;</c>.</item>
+    /// <item>A label NOT at a section start that a sibling case jumps to (a shared
+    /// handler like <c>ret:</c>): C# can't jump into the middle of another case, so
+    /// the labeled tail is HOISTED out of the switch into the enclosing block — a
+    /// plain <c>goto L</c> then reaches it from anywhere — guarded by a skip-goto so
+    /// normal switch exit doesn't fall into it.</item>
+    /// </list></summary>
+    private void RenderSwitch(StringBuilder sb, Switch sw, int ind, string pad)
+    {
+        var subj = Hoist(sb, pad, () => Expr(sw.Subject));
+
+        // A C case section `case X: { … }` parses as one wrapping Block; the labels
+        // we reconcile (ret/l_tforcall/…) live INSIDE it. Work on each section's
+        // EFFECTIVE statement list (the block's contents when it's a lone block, else
+        // the body itself) — see-through unwrap for analysis + hoisting, while the
+        // braces are restored in rendering to keep the case's block scope.
+        IReadOnlyList<CStmt> Eff(SwitchSection s) =>
+            s.Body is [Block b] ? b.Stmts : s.Body;
+
+        // Per-section TOP-LEVEL labels (the granularity we can hoist / `goto case`),
+        // plus the case-value a section-start label maps to.
+        var labelSection = new Dictionary<string, int>(StringComparer.Ordinal);
+        var startLabel = new Dictionary<string, string>(StringComparer.Ordinal);
+        for (var si = 0; si < sw.Sections.Count; si++)
+        {
+            var eff = Eff(sw.Sections[si]);
+            for (var p = 0; p < eff.Count; p++)
+            {
+                if (eff[p] is Labeled l) { labelSection[l.Name] = si; }
+            }
+            if (eff.Count > 0 && eff[0] is Labeled lb0)
+            {
+                var first = sw.Sections[si].Labels[0];
+                startLabel[lb0.Name] = first.CaseExpr is { } ce ? $"goto case {Expr(ce)};" : "goto default;";
+            }
+        }
+
+        // A non-start label targeted from a DIFFERENT section must be hoisted.
+        var hoist = new HashSet<string>(StringComparer.Ordinal);
+        for (var si = 0; si < sw.Sections.Count; si++)
+        {
+            foreach (var tgt in GotoTargets(sw.Sections[si].Body))
+            {
+                if (labelSection.TryGetValue(tgt, out var ds) && ds != si && !startLabel.ContainsKey(tgt))
+                {
+                    hoist.Add(tgt);
+                }
+            }
+        }
+
+        var saved = _gotoCaseMap;
+        _gotoCaseMap = startLabel.Count > 0 ? startLabel : null;
+
+        var hoisted = new List<IReadOnlyList<CStmt>>();
+        sb.Append(pad).Append($"switch ({subj})\n").Append(pad).Append("{\n");
+        var inner = ind + 1;
+        var ipad = Pad(inner);
+        for (var si = 0; si < sw.Sections.Count; si++)
+        {
+            var sec = sw.Sections[si];
+            foreach (var lab in sec.Labels)
+            {
+                sb.Append(ipad).Append(lab.CaseExpr is { } ce ? $"case {Expr(ce)}:\n" : "default:\n");
+            }
+            var eff = Eff(sec);
+            var wrapped = sec.Body is [Block];
+            // Split the section at the first hoisted shared-handler label: the head
+            // renders in place + a `goto L` to reach the handler; the tail (label +
+            // the rest of the section) moves out after the switch.
+            var cut = -1;
+            for (var p = 0; p < eff.Count; p++)
+            {
+                if (eff[p] is Labeled lp && hoist.Contains(lp.Name)) { cut = p; break; }
+            }
+            var head = cut < 0 ? eff : eff.Take(cut).ToList();
+            // Body indent: one deeper inside the restored braces.
+            var bodyInd = wrapped ? inner + 2 : inner + 1;
+            if (wrapped) { sb.Append(Pad(inner + 1)).Append("{\n"); }
+            foreach (var st in head) { Stmt(sb, st, bodyInd); }
+            if (cut >= 0)
+            {
+                hoisted.Add(eff.Skip(cut).ToList());
+                sb.Append(Pad(bodyInd)).Append($"goto {((Labeled)eff[cut]).Name};\n");
+            }
+            if (wrapped) { sb.Append(Pad(inner + 1)).Append("}\n"); }
+            // Synthesize C's fall-through jump when the section doesn't end control
+            // flow (goto case / goto default / a trailing break C falls out of).
+            // A wrapped block whose contents terminate also terminates.
+            var terminates = cut >= 0 || (head.Count > 0 && Terminates(head[^1]));
+            if (!terminates)
+            {
+                string jump;
+                if (si + 1 < sw.Sections.Count)
+                {
+                    var next = sw.Sections[si + 1].Labels[0];
+                    jump = next.CaseExpr is { } nce ? $"goto case {Expr(nce)};\n" : "goto default;\n";
+                }
+                else { jump = "break;\n"; }
+                sb.Append(Pad(inner + 1)).Append(jump);
+            }
+        }
+        sb.Append(pad).Append("}\n");
+        _gotoCaseMap = saved;
+
+        // Hoisted shared handlers: placed after the switch (so a plain `goto L`
+        // reaches them from any case), skipped on normal switch exit.
+        if (hoisted.Count > 0)
+        {
+            var past = $"__sw_past_{_switchPastSeq++}";
+            sb.Append(pad).Append($"goto {past};\n");
+            foreach (var grp in hoisted)
+            {
+                foreach (var st in grp) { Stmt(sb, st, ind); }
+                if (grp.Count == 0 || !Terminates(grp[^1])) { sb.Append(pad).Append($"goto {past};\n"); }
+            }
+            sb.Append(pad).Append($"{past}: ;\n");
+        }
+    }
+
+    /// <summary>All <c>goto</c> targets reachable within a section body, descending
+    /// through ordinary nested statements but NOT into a nested <c>switch</c> (whose
+    /// labels belong to its own scope).</summary>
+    private static IEnumerable<string> GotoTargets(IReadOnlyList<CStmt> body)
+    {
+        var acc = new List<string>();
+        foreach (var s in body) { CollectGotos(s, acc); }
+        return acc;
+    }
+
+    private static void CollectGotos(CStmt s, List<string> acc)
+    {
+        switch (s)
+        {
+            case Goto g: acc.Add(g.Label); break;
+            case Labeled l: CollectGotos(l.Body, acc); break;
+            case Block b: foreach (var x in b.Stmts) { CollectGotos(x, acc); } break;
+            case If f: CollectGotos(f.Then, acc); if (f.Else is { } e) { CollectGotos(e, acc); } break;
+            case While w: CollectGotos(w.Body, acc); break;
+            case DoWhile d: CollectGotos(d.Body, acc); break;
+            case For fr: CollectGotos(fr.Body, acc); break;
+            default: break;   // Switch: a goto inside it targets its own labels
+        }
+    }
+
     // Render a sub-statement of if/while/for: a block keeps the parent indent; a
     // single statement indents one level. If that statement HOISTED comma side
     // effects (emitting preceding statements), it's wrapped in a block so they don't
@@ -429,6 +564,7 @@ internal sealed class CodeGen
         Break or Continue or Return or Goto => true,
         Block b => b.Stmts.Count > 0 && Terminates(b.Stmts[^1]),
         If f => f.Else is { } e && Terminates(f.Then) && Terminates(e),
+        Labeled l => Terminates(l.Body),
         _ => false,
     };
 
