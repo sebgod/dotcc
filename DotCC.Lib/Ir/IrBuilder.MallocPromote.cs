@@ -51,7 +51,7 @@ internal sealed partial class IrBuilder
         if (call is not Call { Callee: "malloc", Args: { Count: 1 } args }) { return false; }
         var arg = Unparen(args[0]);
         if (arg is Cast ac) { arg = Unparen(ac.Operand); }
-        if (arg is not SizeOfExpr so || so.Of.Unqualified.CsType != pt.Unqualified.CsType) { return false; }
+        if (arg is not SizeOfExpr so || !so.Of.Unqualified.Equals(pt.Unqualified)) { return false; }
         pointee = pt;
         return true;
     }

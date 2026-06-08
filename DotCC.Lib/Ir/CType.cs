@@ -26,17 +26,18 @@ public enum TypeQual
 /// <summary>
 /// A real C type. Unlike the legacy <see cref="DotCC.CType"/> (a sizeof-only
 /// helper threaded through emitted strings), this is the spine of the IR: every
-/// <see cref="CExpr"/> carries one, name resolution attaches one to every
-/// <see cref="Symbol"/>, and <see cref="CodeGen"/> reads <see cref="CsType"/> to
-/// print the lowered C#. Qualifiers ride along via <see cref="Quals"/>.
+/// <see cref="CExpr"/> carries one and name resolution attaches one to every
+/// <see cref="Symbol"/>. The type is target-NEUTRAL — it spells no output
+/// language. A backend's <see cref="ITarget.RenderType"/> projects it onto its
+/// own surface spelling (the C# backend's <see cref="CSharpTarget"/>:
+/// <c>unsigned long</c> → <c>ulong</c>, <c>T[]</c> → <c>T*</c>, …); for
+/// diagnostics, <see cref="Describe"/> gives a source-C spelling. Qualifiers ride
+/// along via <see cref="Quals"/>.
 /// </summary>
 public abstract record CType
 {
     /// <summary>Qualifiers applied to this type (const/volatile/_Atomic/restrict).</summary>
     public TypeQual Quals { get; init; } = TypeQual.None;
-
-    /// <summary>The lowered C# type string <see cref="CodeGen"/> emits.</summary>
-    public abstract string CsType { get; }
 
     /// <summary>C <c>sizeof</c> in bytes (ILP32-pointer-on-64 model: pointers are 8).</summary>
     public abstract int SizeOf { get; }
@@ -60,14 +61,29 @@ public abstract record CType
     /// <summary>Drop all qualifiers (the unqualified shape, for comparisons/casts).</summary>
     public CType Unqualified => Quals == TypeQual.None ? this : this with { Quals = TypeQual.None };
 
+    /// <summary>A human-readable source-C spelling of this type, for diagnostics.
+    /// Target-neutral — built from the type's own canonical names, NOT from any
+    /// output-language projection (that is the backend's <see cref="ITarget.RenderType"/>).</summary>
+    public string Describe() => this switch
+    {
+        Prim p => p.Name,
+        VoidType => "void",
+        Pointer ptr => ptr.Pointee.Describe() + "*",
+        Array a => a.Element.Describe() + "[" + (a.Count?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "") + "]",
+        Func f => f.Return.Describe() + "(*)(" + string.Join(", ", f.Params.Select(p => p.Describe())) + ")",
+        Named n => n.Name,
+        Enum e => "enum " + e.Name,
+        _ => GetType().Name,
+    };
+
     // ---- the kinds -------------------------------------------------------
 
-    /// <summary>A scalar (arithmetic) type — integer or floating. <see cref="CsType"/>
-    /// is the exact lowered C# primitive; <see cref="Signed"/> distinguishes
-    /// signedness for integer conversions.</summary>
-    public sealed record Prim(string Name, string CsName, int Bytes, bool Integer, bool Signed) : CType
+    /// <summary>A scalar (arithmetic) type — integer or floating. <see cref="Name"/>
+    /// is the canonical C spelling, doubling as the stable identity a backend's
+    /// type-mapper keys on; <see cref="Signed"/> distinguishes signedness for
+    /// integer conversions and <see cref="Bytes"/> gives the width.</summary>
+    public sealed record Prim(string Name, int Bytes, bool Integer, bool Signed) : CType
     {
-        public override string CsType => CsName;
         public override int SizeOf => Bytes;
         public override bool IsInteger => Integer;
         public override bool IsArithmetic => true;
@@ -77,30 +93,27 @@ public abstract record CType
     /// we report 1 to match gcc's extension rather than throw).</summary>
     public sealed record VoidType : CType
     {
-        public override string CsType => "void";
         public override int SizeOf => 1;
     }
 
-    /// <summary>A pointer. Lowers to the pointee's C# type plus <c>*</c> — except a
-    /// pointer-TO-array, which (like the array itself) lowers to one flat pointer to
-    /// the innermost scalar (<c>int (*p)[3]</c> → <c>int*</c>, a row pointer that
-    /// subscripts with the array's stride).</summary>
+    /// <summary>A pointer to <see cref="Pointee"/>. (The C# backend lowers it to the
+    /// pointee's type plus <c>*</c> — except a pointer-TO-array, which like the array
+    /// itself collapses to one flat pointer to the innermost scalar, <c>int (*p)[3]</c>
+    /// → <c>int*</c>, a row pointer subscripted with the array's stride.)</summary>
     public sealed record Pointer(CType Pointee) : CType
     {
-        public override string CsType => Pointee is Array ? Pointee.CsType : Pointee.CsType + "*";
         public override int SizeOf => 8;
         public override bool IsInteger => false;
     }
 
     /// <summary>A C array <c>T[N]</c> (the element may itself be an <see cref="Array"/>
     /// for a multi-dimensional array). It decays to a pointer at use sites, and a
-    /// multi-dim array is stored as one flat buffer, so <see cref="CsType"/> collapses
-    /// any nesting to a single pointer to the innermost scalar (<c>int[2][3]</c> →
+    /// multi-dim array is stored as one flat buffer, so the C# backend collapses any
+    /// nesting to a single pointer to the innermost scalar (<c>int[2][3]</c> →
     /// <c>int*</c>); <see cref="SizeOf"/> is the true aggregate size <c>N *
     /// sizeof(element)</c> (recursing through the dimensions).</summary>
     public sealed record Array(CType Element, int? Count) : CType
     {
-        public override string CsType => FlatElement.CsType + "*";
         public override int SizeOf => Element.SizeOf * (Count ?? 0);
 
         /// <summary>The innermost non-array element (peels all array dimensions) —
@@ -113,18 +126,16 @@ public abstract record CType
     /// call-site coercion and diagnostics.</summary>
     public sealed record Func(CType Return, IReadOnlyList<CType> Params, bool Variadic) : CType
     {
-        public override string CsType =>
-            $"delegate*<{string.Join(", ", Params.Select(p => p.CsType).Append(Return.CsType))}>";
         public override int SizeOf => 8;
     }
 
     /// <summary>A named type the IR doesn't model structurally yet (a typedef
-    /// target / opaque libc struct like <c>FILE</c>). <see cref="CsType"/> is the
-    /// spelling codegen emits; size is unknown (0) until struct layout lands in a
-    /// later phase.</summary>
+    /// target / opaque libc struct like <c>FILE</c>). <see cref="Name"/> is the
+    /// spelling the backend emits verbatim — a residual leak for the few names whose
+    /// spelling differs per target (<c>Float128</c>, <c>System.Numerics.Complex</c>);
+    /// size is unknown (0) until struct layout lands in a later phase.</summary>
     public sealed record Named(string Name) : CType
     {
-        public override string CsType => Name;
         public override int SizeOf => 0;
     }
 
@@ -140,7 +151,6 @@ public abstract record CType
     /// instead (named constants) rather than synthesizing a type.</summary>
     public sealed record Enum(string Name, CType Underlying) : CType
     {
-        public override string CsType => Name;
         public override int SizeOf => Underlying.SizeOf;
         public override bool IsInteger => true;
         public override bool IsArithmetic => true;
@@ -149,21 +159,21 @@ public abstract record CType
     // ---- well-known instances -------------------------------------------
 
     public static readonly CType Void = new VoidType();
-    public static readonly CType Bool = new Prim("_Bool", "CBool", 1, true, false);
-    public static readonly CType Char = new Prim("char", "byte", 1, true, true);
-    public static readonly CType SChar = new Prim("signed char", "sbyte", 1, true, true);
-    public static readonly CType UChar = new Prim("unsigned char", "byte", 1, true, false);
-    public static readonly CType Short = new Prim("short", "short", 2, true, true);
-    public static readonly CType UShort = new Prim("unsigned short", "ushort", 2, true, false);
-    public static readonly CType Int = new Prim("int", "int", 4, true, true);
-    public static readonly CType UInt = new Prim("unsigned int", "uint", 4, true, false);
-    public static readonly CType Long = new Prim("long", "long", 8, true, true);
-    public static readonly CType ULong = new Prim("unsigned long", "ulong", 8, true, false);
-    public static readonly CType LongLong = new Prim("long long", "long", 8, true, true);
-    public static readonly CType ULongLong = new Prim("unsigned long long", "ulong", 8, true, false);
-    public static readonly CType Float = new Prim("float", "float", 4, false, true);
-    public static readonly CType Double = new Prim("double", "double", 8, false, true);
-    public static readonly CType LongDouble = new Prim("long double", "double", 8, false, true);
+    public static readonly CType Bool = new Prim("_Bool", 1, true, false);
+    public static readonly CType Char = new Prim("char", 1, true, true);
+    public static readonly CType SChar = new Prim("signed char", 1, true, true);
+    public static readonly CType UChar = new Prim("unsigned char", 1, true, false);
+    public static readonly CType Short = new Prim("short", 2, true, true);
+    public static readonly CType UShort = new Prim("unsigned short", 2, true, false);
+    public static readonly CType Int = new Prim("int", 4, true, true);
+    public static readonly CType UInt = new Prim("unsigned int", 4, true, false);
+    public static readonly CType Long = new Prim("long", 8, true, true);
+    public static readonly CType ULong = new Prim("unsigned long", 8, true, false);
+    public static readonly CType LongLong = new Prim("long long", 8, true, true);
+    public static readonly CType ULongLong = new Prim("unsigned long long", 8, true, false);
+    public static readonly CType Float = new Prim("float", 4, false, true);
+    public static readonly CType Double = new Prim("double", 8, false, true);
+    public static readonly CType LongDouble = new Prim("long double", 8, false, true);
 
     /// <summary>C <c>size_t</c> — dotcc lowers it to C# <c>ulong</c>.</summary>
     public static readonly CType SizeT = ULong;

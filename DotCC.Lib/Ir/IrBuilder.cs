@@ -679,7 +679,7 @@ internal sealed partial class IrBuilder
     /// <summary>Resolve a type-name token: a user/library typedef resolves to its
     /// underlying type; an unknown name (a predefined opaque type like
     /// <c>FILE</c> / <c>jmp_buf</c>'s target) stays a <see cref="CType.Named"/>
-    /// whose <c>CsType</c> is the name itself.</summary>
+    /// whose spelling the backend emits verbatim.</summary>
     private CType ResolveTypeName(string name) =>
         _typedefs.TryGetValue(name, out var t) ? t : new CType.Named(name);
 

@@ -29,6 +29,16 @@ internal sealed record CodeGenResult(
 /// </summary>
 internal sealed class CodeGen
 {
+    /// <summary>The backend's lexical projection of the neutral IR — currently the
+    /// type-spelling map (<see cref="ITarget"/>, the seam a second target slots
+    /// into). The statement / expression emitter in this class is still the
+    /// C#-specific one.</summary>
+    private readonly ITarget _target = new CSharpTarget();
+
+    /// <summary>Project a neutral <see cref="CType"/> onto the target's type
+    /// spelling — replaces the type model's old baked-in <c>CsType</c> property.</summary>
+    private string Cs(CType t) => _target.RenderType(t);
+
     public static CodeGenResult Run(IrBuilder unit, DotCC.ConversionGate? convGate = null)
     {
         var cg = new CodeGen { _convGate = convGate };
@@ -47,8 +57,8 @@ internal sealed class CodeGen
             // [UnmanagedCallersOnly] signature, so it can't be exported.
             else if (fn.Sym.Storage != Storage.Static && !fn.Variadic)
             {
-                var ret = fn.Sym.Type is CType.Func f ? f.Return.CsType : "int";
-                var ps = string.Join(", ", fn.Params.Select(p => $"{p.Type.CsType} {p.CsName}"));
+                var ret = fn.Sym.Type is CType.Func f ? cg.Cs(f.Return) : "int";
+                var ps = string.Join(", ", fn.Params.Select(p => $"{cg.Cs(p.Type)} {p.CsName}"));
                 exports.Add(new DotCC.EmitHelpers.Export(fn.Sym.Name, ret, ps));
             }
         }
@@ -69,13 +79,13 @@ internal sealed class CodeGen
                 continue;
             }
             var init = g.Init is { } i ? " = " + cg.Coerced(i, g.Sym.Type) : "";
-            globals.Append($"    public static unsafe {g.Sym.Type.CsType} {g.Sym.CsName}{init};\n");
+            globals.Append($"    public static unsafe {cg.Cs(g.Sym.Type)} {g.Sym.CsName}{init};\n");
         }
 
         // struct/union/enum type declarations → the top-level type-decls section.
         var structs = new StringBuilder();
-        foreach (var t in unit.Types) { structs.Append(StructText(t)); }
-        foreach (var en in unit.Enums) { structs.Append(EnumText(en)); }
+        foreach (var t in unit.Types) { structs.Append(cg.StructText(t)); }
+        foreach (var en in unit.Enums) { structs.Append(cg.EnumText(en)); }
 
         return new CodeGenResult(fns.ToString(), structs.ToString(), Aliases: "", globals.ToString(), mainArity, exports);
     }
@@ -85,7 +95,7 @@ internal sealed class CodeGen
     /// <summary>Render a struct/union type. A union uses
     /// <c>[StructLayout(LayoutKind.Explicit)]</c> with every field at
     /// <c>[FieldOffset(0)]</c> (C overlays all members at the same address).</summary>
-    private static string StructText(StructTypeDef t)
+    private string StructText(StructTypeDef t)
     {
         var wrappers = new StringBuilder();   // [InlineArray] wrapper types for non-primitive array members
         var sb = new StringBuilder();
@@ -118,20 +128,20 @@ internal sealed class CodeGen
                 var flat = arr.FlatElement;
                 var count = FlatCount(arr);
                 var fid = DotCC.EmitHelpers.Id(f.Name);
-                if (IsFixedBufferType(flat.CsType))
+                if (IsFixedBufferType(Cs(flat)))
                 {
-                    sb.Append("    public fixed ").Append(flat.CsType).Append(' ').Append(fid).Append('[').Append(count).Append("];\n");
+                    sb.Append("    public fixed ").Append(Cs(flat)).Append(' ').Append(fid).Append('[').Append(count).Append("];\n");
                 }
                 else
                 {
                     var wrap = $"__IA_{t.Name}_{fid}";
                     wrappers.Append("[System.Runtime.CompilerServices.InlineArray(").Append(count).Append(")]\nunsafe struct ")
-                        .Append(wrap).Append("\n{\n    public ").Append(flat.CsType).Append(" _e;\n}\n\n");
+                        .Append(wrap).Append("\n{\n    public ").Append(Cs(flat)).Append(" _e;\n}\n\n");
                     sb.Append("    public ").Append(wrap).Append(' ').Append(fid).Append(";\n");
                 }
                 continue;
             }
-            sb.Append("    public ").Append(f.Type.CsType).Append(' ').Append(DotCC.EmitHelpers.Id(f.Name)).Append(";\n");
+            sb.Append("    public ").Append(Cs(f.Type)).Append(' ').Append(DotCC.EmitHelpers.Id(f.Name)).Append(";\n");
         }
         sb.Append("}\n\n");
         return wrappers.Append(sb).ToString();
@@ -140,10 +150,10 @@ internal sealed class CodeGen
     /// <summary>Render a C enum as a real C# <c>enum Name : underlying { … }</c>.
     /// The explicit <c>: underlying</c> matches C's int default (or a C23 fixed
     /// base); each enumerator carries its (auto-incremented or explicit) value.</summary>
-    private static string EnumText(EnumTypeDef e)
+    private string EnumText(EnumTypeDef e)
     {
         var sb = new StringBuilder();
-        sb.Append("enum ").Append(e.Name).Append(" : ").Append(e.Underlying.CsType).Append("\n{\n");
+        sb.Append("enum ").Append(e.Name).Append(" : ").Append(Cs(e.Underlying)).Append("\n{\n");
         foreach (var m in e.Members)
         {
             sb.Append("    ").Append(DotCC.EmitHelpers.Id(m.Name)).Append(" = ")
@@ -169,9 +179,9 @@ internal sealed class CodeGen
     /// property. The setter stores the value masked to the field width (C's modular
     /// truncation); the getter masks (unsigned) or sign-extends through the
     /// container width (signed) — so reads/writes carry C's exact value semantics.</summary>
-    private static string BitFieldText(StructField f, bool isUnion)
+    private string BitFieldText(StructField f, bool isUnion)
     {
-        var bt = f.Type.CsType;                       // "uint" / "int" / …
+        var bt = Cs(f.Type);                       // "uint" / "int" / …
         var fid = DotCC.EmitHelpers.Id(f.Name);
         var backing = "__bf_" + fid;
         var bits = f.Type.SizeOf * 8;                 // container width
@@ -200,12 +210,12 @@ internal sealed class CodeGen
     {
         var retTy = fn.Sym.Type is CType.Func f ? f.Return : CType.Int;
         _currentRet = retTy;
-        var ps = string.Join(", ", fn.Params.Select(p => $"{p.Type.CsType} {p.CsName}"));
+        var ps = string.Join(", ", fn.Params.Select(p => $"{Cs(p.Type)} {p.CsName}"));
         // A variadic C function gets a trailing `params VaArg[] _va`; C# converts
         // each variadic actual to a VaArg at the call site (carries pointers too).
         if (fn.Variadic) { ps = ps.Length == 0 ? "params VaArg[] _va" : ps + ", params VaArg[] _va"; }
         var sb = new StringBuilder();
-        sb.Append($"static unsafe {retTy.CsType} {fn.Sym.CsName}({ps})\n");
+        sb.Append($"static unsafe {Cs(retTy)} {fn.Sym.CsName}({ps})\n");
         Stmt(sb, fn.Body, 0);
         return sb.ToString();
     }
@@ -288,7 +298,7 @@ internal sealed class CodeGen
             }
             case ArrayDecl a:
                 {
-                    var elemCs = a.Element.CsType;
+                    var elemCs = Cs(a.Element);
                     if (a.Inits is { } inits)
                     {
                         sb.Append(pad).Append($"{elemCs}* {a.Sym.CsName} = stackalloc {elemCs}[]{{ {string.Join(", ", inits.Select(Expr))} }};\n");
@@ -686,12 +696,12 @@ internal sealed class CodeGen
     /// <summary>Render a READ of an lvalue, fencing it when the lvalue's type is
     /// qualified: atomic → seq-cst <c>Atomic.Load</c>, volatile →
     /// <c>Volatile.Read</c>, neither → the bare text at its natural precedence.</summary>
-    private static (string, int) QualifiedRead(CExpr lv, string bare, int barePrec) =>
+    private (string, int) QualifiedRead(CExpr lv, string bare, int barePrec) =>
         lv.Type.IsAtomic ? ($"Atomic.Load(ref {bare})", PPrimary)
         // A pointer/fn-ptr volatile lvalue can't be a Volatile.Read<T> type arg
         // (CS0306): reinterpret its slot as `nint` through its address, cast back.
         : lv.Type.IsVolatile && lv.Type.IsPointerLowered
-            ? ($"({lv.Type.Unqualified.CsType}){VolatileRead($"*(nint*)&{bare}")}", PUnary)
+            ? ($"({Cs(lv.Type.Unqualified)}){VolatileRead($"*(nint*)&{bare}")}", PUnary)
         : lv.Type.IsVolatile ? (VolatileRead(bare), PPrimary)
         : (bare, barePrec);
 
@@ -784,30 +794,30 @@ internal sealed class CodeGen
         // Enum sink: C lets an integer (or a different enum) store into an enum
         // freely; C# needs the cast explicit — `(EnumName)(value)`. A value already
         // of the same enum stores as-is.
-        if (tgt is CType.Enum te && src.CsType != te.CsType && (src.IsArithmetic || src is CType.Enum))
+        if (tgt is CType.Enum te && Cs(src) != Cs(te) && (src.IsArithmetic || src is CType.Enum))
         {
-            text = $"({te.CsType})({Sub(value, PUnary)})";
+            text = $"({Cs(te)})({Sub(value, PUnary)})";
             return true;
         }
         // Enum source into an integer sink: C# requires the explicit `(int)` decay.
         if (tgt is CType.Prim { Integer: true } && src is CType.Enum)
         {
-            text = $"({tgt.CsType})({Sub(value, PUnary)})";
+            text = $"({Cs(tgt)})({Sub(value, PUnary)})";
             return true;
         }
         // void* → T* (e.g. malloc's result): C# makes T*→void* implicit but requires
         // the reverse cast explicitly. Skip void*→void* (same type).
         if (tgt is CType.Pointer && src is CType.Pointer { Pointee: CType.VoidType }
-            && tgt.CsType != src.CsType)
+            && Cs(tgt) != Cs(src))
         {
-            text = $"({tgt.CsType})({Expr(value)})";
+            text = $"({Cs(tgt)})({Expr(value)})";
             return true;
         }
         // Integer narrowing / sign change C# won't do implicitly.
         if (src is CType.Prim { Integer: true } && tgt is CType.Prim { Integer: true })
         {
-            var s = src.CsType;
-            var t2 = tgt.CsType;
+            var s = Cs(src);
+            var t2 = Cs(tgt);
             if (s == t2 || !IsIntegerCs(s) || !IsIntegerCs(t2)) { return false; }
             // A bare int constant that fits the target needs no cast (C#'s implicit
             // constant-expression conversion applies, but only from a literal int).
@@ -903,8 +913,8 @@ internal sealed class CodeGen
     private void EmitDeclStmt(StringBuilder sb, DeclStmt d, string pad)
     {
         if (d.Decls.Count == 0) { return; }
-        var firstCs = d.Decls[0].Sym.Type.CsType;
-        if (d.Decls.All(e => e.Sym.Type.CsType == firstCs))
+        var firstCs = Cs(d.Decls[0].Sym.Type);
+        if (d.Decls.All(e => Cs(e.Sym.Type) == firstCs))
         {
             sb.Append(pad).Append(DeclInline(d)).Append(";\n");
             return;
@@ -912,7 +922,7 @@ internal sealed class CodeGen
         foreach (var e in d.Decls)
         {
             var init = e.Init is { } i ? Coerced(i, e.Sym.Type) : "default";
-            sb.Append(pad).Append($"{e.Sym.Type.CsType} {e.Sym.CsName} = {init};\n");
+            sb.Append(pad).Append($"{Cs(e.Sym.Type)} {e.Sym.CsName} = {init};\n");
         }
     }
 
@@ -920,7 +930,7 @@ internal sealed class CodeGen
     // when all declarators agree and in `for`-initializer position.
     private string DeclInline(DeclStmt d)
     {
-        var type = d.Decls.Count > 0 ? d.Decls[0].Sym.Type.CsType : "int";
+        var type = d.Decls.Count > 0 ? Cs(d.Decls[0].Sym.Type) : "int";
         var parts = d.Decls.Select(e => e.Init is { } init
             ? $"{e.Sym.CsName} = {Coerced(init, e.Sym.Type)}"
             : $"{e.Sym.CsName} = default");
@@ -967,7 +977,7 @@ internal sealed class CodeGen
             case LitStr s: return (DotCC.EmitHelpers.EncodeStringLiteral(s.Segments), PPrimary);
             case Raw r: return (r.CsText, PPrimary);
             // An enumerator of a real enum: EnumName.Member (member access).
-            case EnumConstRef ec: return ($"{ec.Sym.Type.Unqualified.CsType}.{DotCC.EmitHelpers.Id(ec.Sym.Name)}", PPostfix);
+            case EnumConstRef ec: return ($"{Cs(ec.Sym.Type.Unqualified)}.{DotCC.EmitHelpers.Id(ec.Sym.Name)}", PPostfix);
             // A bare function name used as a value decays to its address — C#
             // needs the explicit `&` to form a delegate* (C allows the bare name).
             // A pointer global stored as `nint` (its address was taken): a value read
@@ -975,9 +985,9 @@ internal sealed class CodeGen
             // pointer type. Assignment targets / `&` / ref-args use BareLValue (raw
             // field), so they never hit this read-cast.
             case VarRef v when NintStorage(v.Sym):
-                return v.Type.IsAtomic ? ($"({v.Type.CsType})Atomic.Load(ref {v.Sym.CsName})", PUnary)
-                     : v.Type.IsVolatile ? ($"({v.Type.CsType}){VolatileRead(v.Sym.CsName)}", PUnary)
-                     : ($"({v.Type.CsType}){v.Sym.CsName}", PUnary);
+                return v.Type.IsAtomic ? ($"({Cs(v.Type)})Atomic.Load(ref {v.Sym.CsName})", PUnary)
+                     : v.Type.IsVolatile ? ($"({Cs(v.Type)}){VolatileRead(v.Sym.CsName)}", PUnary)
+                     : ($"({Cs(v.Type)}){v.Sym.CsName}", PUnary);
             case VarRef v: return v.Sym.Kind == SymKind.Func
                 ? ($"&{v.Sym.CsName}", PUnary)
                 : QualifiedRead(v, v.Sym.CsName, PPrimary);
@@ -1007,9 +1017,9 @@ internal sealed class CodeGen
                 var m = DotCC.EmitHelpers.Id(o.Member);
                 // A member that lowers to a C# `fixed` buffer (primitive-element
                 // array) already yields its own address — no `&` (would be CS0211).
-                var decays = o.MemberType?.Unqualified is CType.Array fa && IsFixedBufferType(fa.Element.CsType);
+                var decays = o.MemberType?.Unqualified is CType.Array fa && IsFixedBufferType(Cs(fa.Element));
                 var memberAddr = decays ? $"(byte*)__t.{m}" : $"(byte*)&__t.{m}";
-                return ($"((System.Func<ulong>)(() => {{ {o.StructType.CsType} __t = default; return (ulong)({memberAddr} - (byte*)&__t); }}))()", PPrimary);
+                return ($"((System.Func<ulong>)(() => {{ {Cs(o.StructType)} __t = default; return (ulong)({memberAddr} - (byte*)&__t); }}))()", PPrimary);
             }
             case Index ix:
             {
@@ -1031,25 +1041,25 @@ internal sealed class CodeGen
                 // access decays to the element pointer `(T*)&field` (C#'s InlineArray
                 // indexer bounds-checks, but a C array over-indexes into the tail),
                 // restoring both over-indexing and array→pointer decay.
-                if (m.Type.Unqualified is CType.Array arr && !IsFixedBufferType(arr.FlatElement.CsType))
+                if (m.Type.Unqualified is CType.Array arr && !IsFixedBufferType(Cs(arr.FlatElement)))
                 {
-                    return ($"({m.Type.CsType})&{dot}", PUnary);
+                    return ($"({Cs(m.Type)})&{dot}", PUnary);
                 }
                 return QualifiedRead(m, dot, PPostfix);
             }
             case StructInit si: return (StructInitText(si), PPrimary);
             case StackArray sa:
-                return ($"stackalloc {sa.Element.CsType}[]{{ {string.Join(", ", sa.Elems.Select(Expr))} }}", PPrimary);
-            case DefaultLit: return ($"default({e.Type.CsType})", PPrimary);
+                return ($"stackalloc {Cs(sa.Element)}[]{{ {string.Join(", ", sa.Elems.Select(Expr))} }}", PPrimary);
+            case DefaultLit: return ($"default({Cs(e.Type)})", PPrimary);
             // A promoted malloc → a zero-initialized stack struct value.
-            case StackNew sn: return ($"new {sn.StructType.CsType}()", PPrimary);
+            case StackNew sn: return ($"new {Cs(sn.StructType)}()", PPrimary);
             case PinnedArray pa: return (PinnedArrayText(pa), PPrimary);
             case VaArgGet va:
                 // va_arg(ap, T): a scalar reads via (T)ap.Next(); a pointer via
                 // (T)ap.NextPtr() (NextPtr returns void*, then a standard cast to T*).
                 return va.Target.Unqualified is CType.Pointer or CType.Func or CType.Array
-                    ? ($"({va.Target.CsType})({Sub(va.Ap, PPostfix)}.NextPtr())", PUnary)
-                    : ($"({va.Target.CsType})({Sub(va.Ap, PPostfix)}.Next())", PUnary);
+                    ? ($"({Cs(va.Target)})({Sub(va.Ap, PPostfix)}.NextPtr())", PUnary)
+                    : ($"({Cs(va.Target)})({Sub(va.Ap, PPostfix)}.Next())", PUnary);
             case Call c: return (CallText(c), PPostfix);
             case CondExpr t:
                 // C-truthy condition, arms isolated by `?`/`:`. The arms are
@@ -1060,8 +1070,8 @@ internal sealed class CodeGen
                 // `cond ? sizeT : intExpr` → the int arm casts to the ulong result).
                 {
                     string Arm(CExpr a) => NoHoist(() =>
-                        t.Type.IsArithmetic && a.Type.IsArithmetic && a.Type.Unqualified.CsType != t.Type.CsType
-                            ? $"({t.Type.CsType})({Sub(a, PUnary)})"
+                        t.Type.IsArithmetic && a.Type.IsArithmetic && Cs(a.Type.Unqualified) != Cs(t.Type)
+                            ? $"({Cs(t.Type)})({Sub(a, PUnary)})"
                             : Expr(a));
                     return ($"(Cond.B({Expr(DecayEnum(t.Cond))}) ? {Arm(t.Then)} : {Arm(t.Else)})", PPrimary);
                 }
@@ -1085,7 +1095,7 @@ internal sealed class CodeGen
                     // NEW value (C's `x op= n` result). The rhs is cast to the lvalue
                     // type so the generic Atomic.* call infers one element type.
                     var lv = BareLValue(a.Target);
-                    var cs = a.Target.Type.Unqualified.CsType;
+                    var cs = Cs(a.Target.Type.Unqualified);
                     var text = a.CompoundOp is { } cop
                         ? $"Atomic.{AtomicFetchHelper(cop, cs)}(ref {lv}, ({cs})({Sub(a.Value, PAssign)}))"
                         : $"Atomic.Store(ref {lv}, ({cs})({Sub(a.Value, PAssign)}))";
@@ -1103,7 +1113,7 @@ internal sealed class CodeGen
                     // and cast the stored value to nint.
                     if (a.Target.Type.IsPointerLowered)
                     {
-                        var pty = a.Target.Type.Unqualified.CsType;
+                        var pty = Cs(a.Target.Type.Unqualified);
                         var slot = StoredAsNint(a.Target) ? lv : $"*(nint*)&{lv}";
                         var pstored = a.CompoundOp is { } pcop
                             ? $"({pty}){VolatileRead(slot)} {BinSym(pcop)} {Sub(a.Value, Prec(pcop) + 1)}"
@@ -1121,7 +1131,7 @@ internal sealed class CodeGen
                     // the value to nint (a value read of the field would re-add a `(T)`
                     // cast, which isn't assignable). A compound op reads back as `(T)`.
                     var lv = BareLValue(a.Target);
-                    var pty = a.Target.Type.Unqualified.CsType;
+                    var pty = Cs(a.Target.Type.Unqualified);
                     var val = a.CompoundOp is { } cop
                         ? $"({pty}){lv} {BinSym(cop)} {Sub(a.Value, Prec(cop) + 1)}"
                         : Coerced(a.Value, a.Target.Type);
@@ -1146,9 +1156,9 @@ internal sealed class CodeGen
                         // and C# otherwise reports CS0034). When the common type is wider
                         // than the target (`short op= int`) C#'s own compound-assign
                         // narrowing handles it, so leave the RHS alone.
-                        var tt = a.Target.Type.Unqualified.CsType;
+                        var tt = Cs(a.Target.Type.Unqualified);
                         var common = CType.UsualArithmetic(a.Target.Type, a.Value.Type);
-                        if (common.CsType == tt && tt != a.Value.Type.Unqualified.CsType)
+                        if (Cs(common) == tt && tt != Cs(a.Value.Type.Unqualified))
                         {
                             rhs = $"({tt})({Sub(a.Value, PUnary)})";
                         }
@@ -1175,7 +1185,7 @@ internal sealed class CodeGen
         if (u.Op is UnOp.PreInc or UnOp.PreDec or UnOp.PostInc or UnOp.PostDec && u.Operand.Type.IsAtomic)
         {
             var lv = BareLValue(u.Operand);
-            var cs = u.Operand.Type.Unqualified.CsType;
+            var cs = Cs(u.Operand.Type.Unqualified);
             var helper = u.Op switch
             {
                 UnOp.PreInc => "AddFetch", UnOp.PreDec => "SubFetch",
@@ -1207,7 +1217,7 @@ internal sealed class CodeGen
             // types in non-moving static storage, so the pointer is stable. (Lua
             // leans on this: &absentkey, &dummynode_.)
             case UnOp.AddrOf when RootsAtGlobal(u.Operand):
-                return ($"({u.Type.CsType})System.Runtime.CompilerServices.Unsafe.AsPointer(ref {BareLValue(u.Operand)})", PUnary);
+                return ($"({Cs(u.Type)})System.Runtime.CompilerServices.Unsafe.AsPointer(ref {BareLValue(u.Operand)})", PUnary);
             // BareLValue so `&` of a volatile lvalue takes the address, not the
             // address of a Volatile.Read(...) call.
             case UnOp.AddrOf: return ($"&{BareLValue(u.Operand)}", PUnary);
@@ -1267,7 +1277,7 @@ internal sealed class CodeGen
                     // shift count to be `int`, so cast a non-int count (C allows any
                     // integer; the count is always small).
                     var p = Prec(b.Op);
-                    var right = b.Right.Type.Unqualified is CType.Prim { CsName: "int" }
+                    var right = b.Right.Type.Unqualified is CType.Prim { Name: "int" }
                         ? Sub(b.Right, p + 1)
                         : $"(int)({Expr(b.Right)})";
                     return ($"{Sub(b.Left, p)} {BinSym(b.Op)} {right}", p);
@@ -1298,14 +1308,14 @@ internal sealed class CodeGen
             && right.Type.Unqualified is CType.Prim { Integer: true } rt
             && CType.UsualArithmetic(lt, rt) is CType.Prim common)
         {
-            return (ReconcileOne(left, lt.CsName, common.CsName, lp),
-                    ReconcileOne(right, rt.CsName, common.CsName, rp));
+            return (ReconcileOne(left, Cs(lt), Cs(common), lp),
+                    ReconcileOne(right, Cs(rt), Cs(common), rp));
         }
         return (Sub(left, lp), Sub(right, rp));
     }
 
     /// <summary>True when <paramref name="t"/> is a function pointer — in dotcc's
-    /// IR a fn-ptr is a bare <see cref="CType.Func"/> (its <c>CsType</c> is already
+    /// IR a fn-ptr is a bare <see cref="CType.Func"/> (the C# backend renders it as a
     /// <c>delegate*&lt;…&gt;</c>); <c>Pointer(Func)</c> is tolerated for safety.</summary>
     private static bool IsFnPtrType(CType t) =>
         t.Unqualified is CType.Func or CType.Pointer { Pointee: CType.Func };
@@ -1320,7 +1330,7 @@ internal sealed class CodeGen
         var inner = e;
         while (inner is Paren pp) { inner = pp.Inner; }
         return inner is VarRef { Sym.Kind: SymKind.Func }
-            ? $"({inner.Type.CsType})({Sub(e, PUnary)})"
+            ? $"({Cs(inner.Type)})({Sub(e, PUnary)})"
             : Sub(e, p);
     }
 
@@ -1339,10 +1349,10 @@ internal sealed class CodeGen
     /// <see cref="IsConstExpr"/> flag alone.</summary>
     private (string, int) RenderCast(Cast c)
     {
-        var text = $"({c.Target.CsType}){Sub(c.Operand, PUnary)}";
+        var text = $"({Cs(c.Target)}){Sub(c.Operand, PUnary)}";
         if (c.Target.Unqualified is CType.Prim { Integer: true } pt
             && IsConstExpr(c.Operand)
-            && !(TryConstInt(c.Operand, out var cv) && ConstFitsTarget(cv, pt.CsName)))
+            && !(TryConstInt(c.Operand, out var cv) && ConstFitsTarget(cv, Cs(pt))))
         {
             return ($"unchecked({text})", PPrimary);
         }
@@ -1373,7 +1383,7 @@ internal sealed class CodeGen
     /// either).</summary>
     private string PinnedArrayText(PinnedArray pa)
     {
-        var elemCs = pa.Element.CsType;
+        var elemCs = Cs(pa.Element);
         if (pa.Elems is null)
         {
             var count = pa.Count is { } c ? Expr(c) : "0";
@@ -1400,7 +1410,7 @@ internal sealed class CodeGen
     /// are omitted, so C# zero-fills them (C's partial-init rule).</summary>
     private string StructInitText(StructInit si)
     {
-        var sb = new StringBuilder("new ").Append(si.Type.CsType).Append(" { ");
+        var sb = new StringBuilder("new ").Append(Cs(si.Type)).Append(" { ");
         for (var i = 0; i < si.Members.Count; i++)
         {
             if (i > 0) { sb.Append(", "); }
@@ -1510,7 +1520,7 @@ internal sealed class CodeGen
         var elems = items.Select(e =>
             IsPointerType(e.Type) ? $"(nint)({Sub(e, PUnary)})" : Sub(e, PAssign));
         var pick = $"({string.Join(", ", elems)}).Item{items.Count}";
-        return IsPointerType(items[^1].Type) ? $"(({items[^1].Type.CsType})({pick}))" : $"({pick})";
+        return IsPointerType(items[^1].Type) ? $"(({Cs(items[^1].Type)})({pick}))" : $"({pick})";
     }
 
     private string CommaDelegate(IReadOnlyList<CExpr> items)
@@ -1520,8 +1530,8 @@ internal sealed class CodeGen
         var last = items[^1];
         // A pointer value can't be a Func<> type argument either — round-trip nint.
         return IsPointerType(last.Type)
-            ? $"(({last.Type.CsType})((System.Func<nint>)(() => {{ {body}return (nint)({Expr(last)}); }}))())"
-            : $"((System.Func<{last.Type.CsType}>)(() => {{ {body}return {Expr(last)}; }}))()";
+            ? $"(({Cs(last.Type)})((System.Func<nint>)(() => {{ {body}return (nint)({Expr(last)}); }}))())"
+            : $"((System.Func<{Cs(last.Type)}>)(() => {{ {body}return {Expr(last)}; }}))()";
     }
 
     // ---- <stdatomic.h> generic functions ---------------------------------
@@ -1551,7 +1561,7 @@ internal sealed class CodeGen
 
         // Pointee C# type of arg0 (a `T*`), or null if undeterminable.
         string? Pointee() => args.Count > 0 && args[0].Type.Unqualified is CType.Pointer p
-            ? p.Pointee.Unqualified.CsType : null;
+            ? Cs(p.Pointee.Unqualified) : null;
         // The atomic object as a ref-able location: `*(arg0)`.
         string Obj() => $"*({Expr(args[0])})";
         bool Eligible() => Pointee() is string p && _atomicEligible.Contains(p);
@@ -1685,9 +1695,9 @@ internal sealed class CodeGen
     /// dimensions (<c>int[2][3]</c> → <c>(2 * (3 * sizeof(int)))</c>). A struct
     /// element bottoms out at C#'s <c>sizeof(T)</c> so the real aligned layout is
     /// used; a scalar/pointer likewise.</summary>
-    private static string SizeofText(CType t) => t.Unqualified is CType.Array { Count: { } n } a
+    private string SizeofText(CType t) => t.Unqualified is CType.Array { Count: { } n } a
         ? $"({n} * {SizeofText(a.Element)})"
-        : $"sizeof({t.CsType})";
+        : $"sizeof({Cs(t)})";
 
     /// <summary>The number of flat (innermost-scalar) elements an array type holds —
     /// the stride, in elements, of one row when a multi-dim array is flattened.</summary>
