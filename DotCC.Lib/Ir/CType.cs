@@ -128,6 +128,24 @@ public abstract record CType
         public override int SizeOf => 0;
     }
 
+    /// <summary>A C <c>enum</c> with a name (its tag, or the typedef alias for an
+    /// anonymous-but-typedef'd enum). Lowers to a real C# <c>enum Name : underlying</c>
+    /// — the typed IR knows statically when an operand is enum-typed, so codegen can
+    /// decay it to <see cref="Underlying"/> at C's plain-int contexts (arithmetic,
+    /// conditions, switch) and recast at enum-typed sinks. In C an enum IS an integer
+    /// type, so it reports <see cref="IsInteger"/>/<see cref="IsArithmetic"/> true;
+    /// because it is not a <see cref="Prim"/>, <see cref="UsualArithmetic"/> already
+    /// collapses any enum operand to <see cref="Int"/> (the decay). An anonymous,
+    /// un-typedef'd enum has no C# name, so its enumerators stay plain int constants
+    /// instead (named constants) rather than synthesizing a type.</summary>
+    public sealed record Enum(string Name, CType Underlying) : CType
+    {
+        public override string CsType => Name;
+        public override int SizeOf => Underlying.SizeOf;
+        public override bool IsInteger => true;
+        public override bool IsArithmetic => true;
+    }
+
     // ---- well-known instances -------------------------------------------
 
     public static readonly CType Void = new VoidType();

@@ -70,9 +70,10 @@ internal sealed class CodeGen
             globals.Append($"    public static unsafe {g.Sym.Type.CsType} {g.Sym.CsName}{init};\n");
         }
 
-        // struct/union type declarations → the top-level type-decls section.
+        // struct/union/enum type declarations → the top-level type-decls section.
         var structs = new StringBuilder();
         foreach (var t in unit.Types) { structs.Append(StructText(t)); }
+        foreach (var en in unit.Enums) { structs.Append(EnumText(en)); }
 
         return new CodeGenResult(fns.ToString(), structs.ToString(), Aliases: "", globals.ToString(), mainArity, exports);
     }
@@ -133,6 +134,34 @@ internal sealed class CodeGen
         sb.Append("}\n\n");
         return wrappers.Append(sb).ToString();
     }
+
+    /// <summary>Render a C enum as a real C# <c>enum Name : underlying { … }</c>.
+    /// The explicit <c>: underlying</c> matches C's int default (or a C23 fixed
+    /// base); each enumerator carries its (auto-incremented or explicit) value.</summary>
+    private static string EnumText(EnumTypeDef e)
+    {
+        var sb = new StringBuilder();
+        sb.Append("enum ").Append(e.Name).Append(" : ").Append(e.Underlying.CsType).Append("\n{\n");
+        foreach (var m in e.Members)
+        {
+            sb.Append("    ").Append(DotCC.EmitHelpers.Id(m.Name)).Append(" = ")
+              .Append(m.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append(",\n");
+        }
+        sb.Append("}\n\n");
+        return sb.ToString();
+    }
+
+    /// <summary>In C an enum IS an integer type — it participates in arithmetic,
+    /// bitwise, shift, relational, condition and switch contexts as its underlying
+    /// integer. C# allows only a few enum operators, so decay an enum-typed operand
+    /// to <see cref="CType.Enum.Underlying"/> before it reaches such a context (a
+    /// <c>(int)EnumName.Member</c> cast). Recasting at enum-typed SINKS is the
+    /// inverse, handled by <see cref="TryCoerceCast"/>. A non-enum operand passes
+    /// through unchanged.</summary>
+    private static CExpr DecayEnum(CExpr e) =>
+        e.Type.Unqualified is CType.Enum en
+            ? new Cast(en.Underlying, e) { Type = en.Underlying, Pos = e.Pos }
+            : e;
 
     /// <summary>Render a bit-field as a private backing field + a public accessor
     /// property. The setter stores the value masked to the field width (C's modular
@@ -330,7 +359,7 @@ internal sealed class CodeGen
             case Continue: sb.Append(pad).Append("continue;\n"); break;
             case If f:
                 // The condition is evaluated once, so a value comma in it can hoist.
-                var ifc = Hoist(sb, pad, () => Expr(f.Cond));
+                var ifc = Hoist(sb, pad, () => Expr(DecayEnum(f.Cond)));
                 sb.Append(pad).Append($"if (Cond.B({ifc}))\n");
                 Nested(sb, f.Then, ind);
                 if (f.Else is { } els)
@@ -340,13 +369,13 @@ internal sealed class CodeGen
                 }
                 break;
             case While w:
-                sb.Append(pad).Append($"while (Cond.B({Expr(w.Cond)}))\n");
+                sb.Append(pad).Append($"while (Cond.B({Expr(DecayEnum(w.Cond))}))\n");
                 WithNormalBreak(() => Nested(sb, w.Body, ind));
                 break;
             case DoWhile dw:
                 sb.Append(pad).Append("do\n");
                 WithNormalBreak(() => Nested(sb, dw.Body, ind));
-                sb.Append(pad).Append($"while (Cond.B({Expr(dw.Cond)}));\n");
+                sb.Append(pad).Append($"while (Cond.B({Expr(DecayEnum(dw.Cond))}));\n");
                 break;
             case Goto g:
                 // A cross-section goto to a label that starts another case section
@@ -384,7 +413,7 @@ internal sealed class CodeGen
                     ExprStmt e => Expr(e.Expr),
                     _ => "",
                 };
-                var cond = fr.Cond is null ? "" : $"Cond.B({Expr(fr.Cond)})";
+                var cond = fr.Cond is null ? "" : $"Cond.B({Expr(DecayEnum(fr.Cond))})";
                 var post = fr.Post is null ? "" : Expr(fr.Post);
                 sb.Append(pad).Append($"for ({init}; {cond}; {post})\n");
                 WithNormalBreak(() => Nested(sb, fr.Body, ind));
@@ -438,7 +467,10 @@ internal sealed class CodeGen
     /// </list></summary>
     private void RenderSwitch(StringBuilder sb, Switch sw, int ind, string pad)
     {
-        var subj = Hoist(sb, pad, () => Expr(sw.Subject));
+        // C's switch is int-semantic. An enum subject / enumerator case label decays
+        // to its underlying int so the governing type is uniform — a plain int switch
+        // may carry enumerator labels and vice versa (C# rejects the mixed forms).
+        var subj = Hoist(sb, pad, () => Expr(DecayEnum(sw.Subject)));
 
         // A C case section `case X: { … }` parses as one wrapping Block; the labels
         // we reconcile (ret/l_tforcall/…) live INSIDE it. Work on each section's
@@ -462,7 +494,7 @@ internal sealed class CodeGen
             if (eff.Count > 0 && eff[0] is Labeled lb0)
             {
                 var first = sw.Sections[si].Labels[0];
-                startLabel[lb0.Name] = first.CaseExpr is { } ce ? $"goto case {Expr(ce)};" : "goto default;";
+                startLabel[lb0.Name] = first.CaseExpr is { } ce ? $"goto case {Expr(DecayEnum(ce))};" : "goto default;";
             }
         }
 
@@ -495,7 +527,7 @@ internal sealed class CodeGen
             var sec = sw.Sections[si];
             foreach (var lab in sec.Labels)
             {
-                sb.Append(ipad).Append(lab.CaseExpr is { } ce ? $"case {Expr(ce)}:\n" : "default:\n");
+                sb.Append(ipad).Append(lab.CaseExpr is { } ce ? $"case {Expr(DecayEnum(ce))}:\n" : "default:\n");
             }
             var eff = Eff(sec);
             var wrapped = sec.Body is [Block];
@@ -528,7 +560,7 @@ internal sealed class CodeGen
                 if (si + 1 < sw.Sections.Count)
                 {
                     var next = sw.Sections[si + 1].Labels[0];
-                    jump = next.CaseExpr is { } nce ? $"goto case {Expr(nce)};\n" : "goto default;\n";
+                    jump = next.CaseExpr is { } nce ? $"goto case {Expr(DecayEnum(nce))};\n" : "goto default;\n";
                 }
                 else { jump = "break;\n"; }
                 sb.Append(Pad(inner + 1)).Append(jump);
@@ -732,6 +764,20 @@ internal sealed class CodeGen
             text = "null";
             return true;
         }
+        // Enum sink: C lets an integer (or a different enum) store into an enum
+        // freely; C# needs the cast explicit — `(EnumName)(value)`. A value already
+        // of the same enum stores as-is.
+        if (tgt is CType.Enum te && src.CsType != te.CsType && (src.IsArithmetic || src is CType.Enum))
+        {
+            text = $"({te.CsType})({Sub(value, PUnary)})";
+            return true;
+        }
+        // Enum source into an integer sink: C# requires the explicit `(int)` decay.
+        if (tgt is CType.Prim { Integer: true } && src is CType.Enum)
+        {
+            text = $"({tgt.CsType})({Sub(value, PUnary)})";
+            return true;
+        }
         // void* → T* (e.g. malloc's result): C# makes T*→void* implicit but requires
         // the reverse cast explicitly. Skip void*→void* (same type).
         if (tgt is CType.Pointer && src is CType.Pointer { Pointee: CType.VoidType }
@@ -811,6 +857,7 @@ internal sealed class CodeGen
         switch (e)
         {
             case LitInt { Value: { } lv }: v = lv; return true;
+            case EnumConstRef ec: v = ec.Sym.ConstValue; return true;
             case Paren p: return TryConstInt(p.Inner, out v);
             case Unary u when TryConstInt(u.Operand, out var ov):
                 switch (u.Op)
@@ -896,6 +943,8 @@ internal sealed class CodeGen
             case LitFloat f: return (f.CsText, PPrimary);
             case LitStr s: return (s.CsExpr, PPrimary);
             case Raw r: return (r.CsText, PPrimary);
+            // An enumerator of a real enum: EnumName.Member (member access).
+            case EnumConstRef ec: return ($"{ec.Sym.Type.Unqualified.CsType}.{DotCC.EmitHelpers.Id(ec.Sym.Name)}", PPostfix);
             // A bare function name used as a value decays to its address — C#
             // needs the explicit `&` to form a delegate* (C allows the bare name).
             // A pointer global stored as `nint` (its address was taken): a value read
@@ -944,9 +993,9 @@ internal sealed class CodeGen
                 // subscript (scalar/struct result) indexes the flat pointer directly.
                 if (ix.Type.Unqualified is CType.Array)
                 {
-                    return ($"{Sub(ix.Base, PAdd)} + {Sub(ix.Idx, PMul)} * {FlatCount(ix.Type)}", PAdd);
+                    return ($"{Sub(ix.Base, PAdd)} + {Sub(DecayEnum(ix.Idx), PMul)} * {FlatCount(ix.Type)}", PAdd);
                 }
-                var t = $"{Sub(ix.Base, PPostfix)}[{Expr(ix.Idx)}]";
+                var t = $"{Sub(ix.Base, PPostfix)}[{Expr(DecayEnum(ix.Idx))}]";
                 return QualifiedRead(ix, t, PPostfix);
             }
             case Member m:
@@ -986,7 +1035,7 @@ internal sealed class CodeGen
                         t.Type.IsArithmetic && a.Type.IsArithmetic && a.Type.Unqualified.CsType != t.Type.CsType
                             ? $"({t.Type.CsType})({Sub(a, PUnary)})"
                             : Expr(a));
-                    return ($"(Cond.B({Expr(t.Cond)}) ? {Arm(t.Then)} : {Arm(t.Else)})", PPrimary);
+                    return ($"(Cond.B({Expr(DecayEnum(t.Cond))}) ? {Arm(t.Then)} : {Arm(t.Else)})", PPrimary);
                 }
             case CommaSeq cs:
                 return (string.Join(", ", cs.Items.Select(it => Sub(it, PAssign))), PComma);
@@ -1116,9 +1165,11 @@ internal sealed class CodeGen
         }
         switch (u.Op)
         {
-            case UnOp.Plus: return ($"+{Sub(u.Operand, PUnary)}", PUnary);
-            case UnOp.Neg: return ($"-{Sub(u.Operand, PUnary)}", PUnary);
-            case UnOp.BitNot: return ($"~{Sub(u.Operand, PUnary)}", PUnary);
+            // C's unary arithmetic treats an enum as its underlying int — decay it
+            // (`-EnumName.Member` is invalid C#).
+            case UnOp.Plus: return ($"+{Sub(DecayEnum(u.Operand), PUnary)}", PUnary);
+            case UnOp.Neg: return ($"-{Sub(DecayEnum(u.Operand), PUnary)}", PUnary);
+            case UnOp.BitNot: return ($"~{Sub(DecayEnum(u.Operand), PUnary)}", PUnary);
             // &fn where fn is a function already decays to `&fn` in the VarRef
             // case — don't emit a second `&`.
             case UnOp.AddrOf when u.Operand is VarRef { Sym.Kind: SymKind.Func }: return Render(u.Operand);
@@ -1140,9 +1191,9 @@ internal sealed class CodeGen
             case UnOp.PreDec: return ($"--{Sub(u.Operand, PUnary)}", PUnary);
             case UnOp.PostInc: return ($"{Sub(u.Operand, PPostfix)}++", PPostfix);
             case UnOp.PostDec: return ($"{Sub(u.Operand, PPostfix)}--", PPostfix);
-            // C's `!x` yields int 0/1 (never bool); Cond.B picks the truthy overload.
-            // Wrapped → atomic.
-            case UnOp.LogNot: return ($"(Cond.B({Expr(u.Operand)}) ? 0 : 1)", PPrimary);
+            // C's `!x` yields int 0/1 (never bool); Cond.B picks the truthy overload
+            // (no enum overload — decay an enum operand first). Wrapped → atomic.
+            case UnOp.LogNot: return ($"(Cond.B({Expr(DecayEnum(u.Operand))}) ? 0 : 1)", PPrimary);
             default: throw new IrUnsupportedException("unary " + u.Op);
         }
     }
@@ -1154,6 +1205,9 @@ internal sealed class CodeGen
     // All three forms render fully wrapped, so they're atomic to a parent.
     private (string, int) RenderBinary(Binary b)
     {
+        // C treats an enum operand as its underlying integer in every binary
+        // context; C# allows few enum operators, so decay each operand first.
+        b = b with { Left = DecayEnum(b.Left), Right = DecayEnum(b.Right) };
         switch (b.Op)
         {
             case BinOp.Eq or BinOp.Ne or BinOp.Lt or BinOp.Gt or BinOp.Le or BinOp.Ge:
@@ -1173,7 +1227,8 @@ internal sealed class CodeGen
                 }
             case BinOp.LogAnd:
                 // The right operand is short-circuited — render it WITHOUT hoisting so
-                // a comma there stays conditional (the left always evaluates).
+                // a comma there stays conditional (the left always evaluates). (Operands
+                // already enum-decayed at the top, so Cond.B picks an int overload.)
                 return ($"((CBool)(Cond.B({Expr(b.Left)}) && Cond.B({NoHoist(() => Expr(b.Right))})))", PPrimary);
             case BinOp.LogOr:
                 return ($"((CBool)(Cond.B({Expr(b.Left)}) || Cond.B({NoHoist(() => Expr(b.Right))})))", PPrimary);
@@ -1267,13 +1322,12 @@ internal sealed class CodeGen
     }
 
     /// <summary>True when <paramref name="e"/> is a C constant expression — only
-    /// literals, <c>sizeof</c>, and operators over constant operands; no variable
-    /// reads or calls. (Enum constants are already lowered to integer literals.)
-    /// Gates the <c>unchecked</c> wrapper above for constants the folder can't
-    /// reduce to a value.</summary>
+    /// literals, enum constants, <c>sizeof</c>, and operators over constant
+    /// operands; no variable reads or calls. Gates the <c>unchecked</c> wrapper
+    /// above for constants the folder can't reduce to a value.</summary>
     private static bool IsConstExpr(CExpr e) => e switch
     {
-        LitInt or LitFloat or SizeOfExpr => true,
+        LitInt or LitFloat or SizeOfExpr or EnumConstRef => true,
         Paren p => IsConstExpr(p.Inner),
         Cast c => IsConstExpr(c.Operand),
         Unary u => u.Op is UnOp.Plus or UnOp.Neg or UnOp.BitNot or UnOp.LogNot && IsConstExpr(u.Operand),
@@ -1532,9 +1586,12 @@ internal sealed class CodeGen
         var a = new List<string>(c.Args.Count);
         for (var i = 0; i < c.Args.Count; i++)
         {
+            // A known parameter coerces the arg to its type; a variadic-tail or
+            // unknown-signature arg takes C's default argument promotions — notably
+            // an enum decays to its underlying int (C# has no enum→int for `.Arg`).
             a.Add(c.ParamTypes is { } pts && i < pts.Count
                 ? CoercedArg(c.Args[i], pts[i])
-                : Sub(c.Args[i], PAssign));
+                : Sub(DecayEnum(c.Args[i]), PAssign));
         }
         if (c.Builtin)
         {

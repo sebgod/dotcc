@@ -47,6 +47,13 @@ public sealed record LitStr(string CsExpr) : CExpr;
 /// <summary>A reference to a resolved variable / parameter / function.</summary>
 public sealed record VarRef(Symbol Sym) : CExpr;
 
+/// <summary>A reference to an enumerator of a real (named) C# enum — renders as
+/// <c>EnumName.Member</c>. <see cref="Symbol.ConstValue"/> carries the integer
+/// value for constant-expression contexts (array bounds, case labels). An
+/// enumerator of an anonymous, un-typedef'd enum has no enum type, so the builder
+/// emits a plain <see cref="LitInt"/> for it instead.</summary>
+public sealed record EnumConstRef(Symbol Sym) : CExpr;
+
 /// <summary>A unary operation.</summary>
 public sealed record Unary(UnOp Op, CExpr Operand) : CExpr;
 
@@ -232,8 +239,9 @@ public sealed record Switch(CExpr Subject, IReadOnlyList<SwitchSection> Sections
 public sealed record SwitchSection(IReadOnlyList<SwitchLabel> Labels, IReadOnlyList<CStmt> Body);
 
 /// <summary>A <c>case E:</c> (<see cref="CaseExpr"/> set) or <c>default:</c>
-/// (null) label. The case expression must be a constant per C# rules — enum
-/// constants already lowered to integer literals, so this holds.</summary>
+/// (null) label. The case expression must be a constant per C# rules — an integer
+/// literal, or an enumerator which codegen decays to <c>(int)EnumName.Member</c>
+/// (still a constant), matching the int-decayed switch subject.</summary>
 public readonly record struct SwitchLabel(CExpr? CaseExpr);
 
 // ---- declarations / translation unit ------------------------------------
@@ -258,6 +266,15 @@ public sealed record StructTypeDef(string Name, IReadOnlyList<StructField> Field
 /// backing field + a masked/sign-extended accessor property — value semantics,
 /// since C bit packing is implementation-defined).</summary>
 public readonly record struct StructField(string Name, CType Type, int BitWidth = 0);
+
+/// <summary>A C <c>enum</c> type definition (tagged or typedef-named). Codegen
+/// renders it into the top-level type-declarations section as a real
+/// <c>enum Name : Underlying { … }</c>. <see cref="Members"/> pairs each
+/// enumerator with its (auto-incremented or explicit) integer value.</summary>
+public sealed record EnumTypeDef(string Name, CType Underlying, IReadOnlyList<EnumMember> Members);
+
+/// <summary>One enumerator of an <see cref="EnumTypeDef"/>: its C name and value.</summary>
+public readonly record struct EnumMember(string Name, long Value);
 
 /// <summary>A function parameter (or function-pointer parameter): its type and
 /// name. Used while building signatures — a named record rather than a loose
