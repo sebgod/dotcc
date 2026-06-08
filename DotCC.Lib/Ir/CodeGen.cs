@@ -58,7 +58,7 @@ internal sealed class CodeGen
             else if (fn.Sym.Storage != Storage.Static && !fn.Variadic)
             {
                 var ret = fn.Sym.Type is CType.Func f ? cg.Cs(f.Return) : "int";
-                var ps = string.Join(", ", fn.Params.Select(p => $"{cg.Cs(p.Type)} {p.CsName}"));
+                var ps = string.Join(", ", fn.Params.Select(p => $"{cg.Cs(p.Type)} {p.TargetName}"));
                 exports.Add(new DotCC.EmitHelpers.Export(fn.Sym.Name, ret, ps));
             }
         }
@@ -75,11 +75,11 @@ internal sealed class CodeGen
             if (NintStorage(g.Sym))
             {
                 var ninit = g.Init is { } i0 ? $" = (nint)({cg.Coerced(i0, g.Sym.Type)})" : "";
-                globals.Append($"    public static unsafe nint {g.Sym.CsName}{ninit};\n");
+                globals.Append($"    public static unsafe nint {g.Sym.TargetName}{ninit};\n");
                 continue;
             }
             var init = g.Init is { } i ? " = " + cg.Coerced(i, g.Sym.Type) : "";
-            globals.Append($"    public static unsafe {cg.Cs(g.Sym.Type)} {g.Sym.CsName}{init};\n");
+            globals.Append($"    public static unsafe {cg.Cs(g.Sym.Type)} {g.Sym.TargetName}{init};\n");
         }
 
         // struct/union/enum type declarations → the top-level type-decls section.
@@ -210,12 +210,12 @@ internal sealed class CodeGen
     {
         var retTy = fn.Sym.Type is CType.Func f ? f.Return : CType.Int;
         _currentRet = retTy;
-        var ps = string.Join(", ", fn.Params.Select(p => $"{Cs(p.Type)} {p.CsName}"));
+        var ps = string.Join(", ", fn.Params.Select(p => $"{Cs(p.Type)} {p.TargetName}"));
         // A variadic C function gets a trailing `params VaArg[] _va`; C# converts
         // each variadic actual to a VaArg at the call site (carries pointers too).
         if (fn.Variadic) { ps = ps.Length == 0 ? "params VaArg[] _va" : ps + ", params VaArg[] _va"; }
         var sb = new StringBuilder();
-        sb.Append($"static unsafe {Cs(retTy)} {fn.Sym.CsName}({ps})\n");
+        sb.Append($"static unsafe {Cs(retTy)} {fn.Sym.TargetName}({ps})\n");
         Stmt(sb, fn.Body, 0);
         return sb.ToString();
     }
@@ -301,13 +301,13 @@ internal sealed class CodeGen
                     var elemCs = Cs(a.Element);
                     if (a.Inits is { } inits)
                     {
-                        sb.Append(pad).Append($"{elemCs}* {a.Sym.CsName} = stackalloc {elemCs}[]{{ {string.Join(", ", inits.Select(Expr))} }};\n");
+                        sb.Append(pad).Append($"{elemCs}* {a.Sym.TargetName} = stackalloc {elemCs}[]{{ {string.Join(", ", inits.Select(Expr))} }};\n");
                     }
                     else
                     {
                         // No initializer → zeroed stackalloc of the given extent.
                         var count = a.CountExpr is { } ce ? Expr(ce) : "0";
-                        sb.Append(pad).Append($"{elemCs}* {a.Sym.CsName} = stackalloc {elemCs}[{count}];\n");
+                        sb.Append(pad).Append($"{elemCs}* {a.Sym.TargetName} = stackalloc {elemCs}[{count}];\n");
                     }
                 }
                 break;
@@ -757,7 +757,7 @@ internal sealed class CodeGen
     private string BareLValue(CExpr e) => e switch
     {
         Paren p => BareLValue(p.Inner),
-        VarRef v => v.Sym.CsName,
+        VarRef v => v.Sym.TargetName,
         Member m => $"{Sub(m.Base, PPostfix)}{(m.Arrow ? "->" : ".")}{DotCC.EmitHelpers.Id(m.Field)}",
         Index ix => $"{Sub(ix.Base, PPostfix)}[{Expr(ix.Idx)}]",
         Unary { Op: UnOp.Deref } u => $"*{Sub(u.Operand, PUnary)}",
@@ -922,7 +922,7 @@ internal sealed class CodeGen
         foreach (var e in d.Decls)
         {
             var init = e.Init is { } i ? Coerced(i, e.Sym.Type) : "default";
-            sb.Append(pad).Append($"{Cs(e.Sym.Type)} {e.Sym.CsName} = {init};\n");
+            sb.Append(pad).Append($"{Cs(e.Sym.Type)} {e.Sym.TargetName} = {init};\n");
         }
     }
 
@@ -932,8 +932,8 @@ internal sealed class CodeGen
     {
         var type = d.Decls.Count > 0 ? Cs(d.Decls[0].Sym.Type) : "int";
         var parts = d.Decls.Select(e => e.Init is { } init
-            ? $"{e.Sym.CsName} = {Coerced(init, e.Sym.Type)}"
-            : $"{e.Sym.CsName} = default");
+            ? $"{e.Sym.TargetName} = {Coerced(init, e.Sym.Type)}"
+            : $"{e.Sym.TargetName} = default");
         return $"{type} {string.Join(", ", parts)}";
     }
 
@@ -985,12 +985,12 @@ internal sealed class CodeGen
             // pointer type. Assignment targets / `&` / ref-args use BareLValue (raw
             // field), so they never hit this read-cast.
             case VarRef v when NintStorage(v.Sym):
-                return v.Type.IsAtomic ? ($"({Cs(v.Type)})Atomic.Load(ref {v.Sym.CsName})", PUnary)
-                     : v.Type.IsVolatile ? ($"({Cs(v.Type)}){VolatileRead(v.Sym.CsName)}", PUnary)
-                     : ($"({Cs(v.Type)}){v.Sym.CsName}", PUnary);
+                return v.Type.IsAtomic ? ($"({Cs(v.Type)})Atomic.Load(ref {v.Sym.TargetName})", PUnary)
+                     : v.Type.IsVolatile ? ($"({Cs(v.Type)}){VolatileRead(v.Sym.TargetName)}", PUnary)
+                     : ($"({Cs(v.Type)}){v.Sym.TargetName}", PUnary);
             case VarRef v: return v.Sym.Kind == SymKind.Func
-                ? ($"&{v.Sym.CsName}", PUnary)
-                : QualifiedRead(v, v.Sym.CsName, PPrimary);
+                ? ($"&{v.Sym.TargetName}", PUnary)
+                : QualifiedRead(v, v.Sym.TargetName, PPrimary);
             case IndirectCall ic:
                 return ($"{Sub(ic.Callee, PPostfix)}({string.Join(", ", ic.Args.Select(a => Sub(a, PAssign)))})", PPostfix);
             case Paren p: return Render(p.Inner); // explicit C parens are redundant; precedence re-adds as needed
