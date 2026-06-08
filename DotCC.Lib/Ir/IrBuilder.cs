@@ -8,8 +8,11 @@ namespace DotCC.Ir;
 
 /// <summary>Thrown when the IR builder meets a parse-tree node it doesn't yet
 /// lower. Carries the node type name so the backend fails loudly on an
-/// unsupported construct rather than silently miscompiling.</summary>
-public sealed class IrUnsupportedException : Exception
+/// unsupported construct rather than silently miscompiling. A subclass of
+/// <see cref="DotCC.CompileException"/> so callers catch the one public
+/// compile-error type regardless of whether the cause was a parse error, an
+/// invalid type, or an unsupported construct.</summary>
+public sealed class IrUnsupportedException : DotCC.CompileException
 {
     public IrUnsupportedException(string node) : base($"dotcc does not yet support: {node}") { }
 }
@@ -52,6 +55,24 @@ internal sealed partial class IrBuilder
     public List<StructTypeDef> Types { get; } = new();
     public List<EnumTypeDef> Enums { get; } = new();
     public List<Diagnostic> Diagnostics { get; } = new();
+
+    // Dialect-gating sink (the emit-pass half of -pedantic). Non-null only under
+    // -pedantic / -pedantic-errors; the builder calls RequireMin at each construct
+    // that postdates the selected -std=, mirroring the legacy emit-pass gate. A C
+    // feature is structurally accepted by the one union grammar regardless of
+    // dialect, so this is the rejection layer — and a pure no-op on the default path.
+    private readonly DotCC.DialectGate? _gate;
+
+    public IrBuilder(DotCC.DialectGate? gate = null) => _gate = gate;
+
+    /// <summary>Flag a feature introduced in <paramref name="era"/> (ISO year) when
+    /// the active dialect predates it. No-op when the gate is off or new enough.</summary>
+    private void Gate(int era, string feature, Item it) => _gate?.RequireMin(era, feature, it.Position.Line);
+    private void Gate(int era, string feature, SrcPos pos) => _gate?.RequireMin(era, feature, pos.Line);
+    /// <summary>Gate a feature, then return an already-built value — for gating in
+    /// expression-bodied switch arms (the value is built eagerly; gating only
+    /// records, so evaluation order is irrelevant).</summary>
+    private T Gated<T>(int era, string feature, Item it, T value) { Gate(era, feature, it); return value; }
 
     /// <summary>Walk one translation unit's parse tree, appending its functions
     /// / globals to the accumulated lists (file-scope symbols persist across
@@ -139,7 +160,7 @@ internal sealed partial class IrBuilder
             // `_Static_assert(expr[, "msg"]);` at file scope — a compile-time-only
             // assertion. A valid program's assertion holds, so dotcc emits nothing
             // (observably identical to gcc actually checking it). Both arities.
-            case C.StaticAssert: case C.StaticAssertNoMsg: break;
+            case C.StaticAssert: case C.StaticAssertNoMsg: Gate(2011, "_Static_assert", fn); break;
             // `typedef Ret (*Name)(params);` — record Name → fn-ptr type.
             case C.TypedefFnPtr t: _typedefs[Tok(t.Arg4)] = FnPtrType(t.Arg1, t.Arg7); break;
             case C.TypedefFnPtrNoArgs t: _typedefs[Tok(t.Arg4)] = FnPtrType(t.Arg1, null); break;
@@ -280,6 +301,7 @@ internal sealed partial class IrBuilder
     private CType RegisterEnum(string? tag, Item? baseType, Item enumList, string? typedefName = null)
     {
         var underlying = baseType is { } bt ? ResolveType(bt) : CType.Int;
+        if (baseType is { } baseItem) { Gate(2023, "enum with a fixed underlying type", baseItem); }
         // The C# enum name: the tag, else the typedef alias; anonymous + un-typedef'd
         // ⇒ null ⇒ plain int constants.
         var enumName = tag ?? typedefName;
@@ -470,8 +492,8 @@ internal sealed partial class IrBuilder
                 // C11 anonymous struct/union member — its fields are promoted into
                 // the parent. Held in a generated nested aggregate + a hidden field;
                 // each inner name is recorded so `parent.inner` routes through it.
-                case C.AnonStructMember am: AddAnonMember(am.Arg3, owner, fields, isUnion: false); break;
-                case C.AnonUnionMember am: AddAnonMember(am.Arg3, owner, fields, isUnion: true); break;
+                case C.AnonStructMember am: Gate(2011, "anonymous struct/union member", m); AddAnonMember(am.Arg3, owner, fields, isUnion: false); break;
+                case C.AnonUnionMember am: Gate(2011, "anonymous struct/union member", m); AddAnonMember(am.Arg3, owner, fields, isUnion: true); break;
                 // A NAMED member of a nested aggregate type — `struct {…} m;` /
                 // `struct Tag {…} m;` (and union forms). Define the (tagged or
                 // synthesized) type, then add `m` of that type — no promotion.
@@ -493,6 +515,7 @@ internal sealed partial class IrBuilder
                 // time. Model as a 1-element array (the struct-hack [1] convention),
                 // so the member exists and access over-indexes into the tail.
                 case C.StructFlexArrMember sm:
+                    Gate(1999, "flexible array member", m);
                     fields.Add(new StructField(Tok(sm.Arg1), new CType.Array(ResolveType(sm.Arg0), 1)));
                     break;
                 // `T name : W;` — a bit-field. Codegen lowers it to a backing field
@@ -589,7 +612,7 @@ internal sealed partial class IrBuilder
 
     private CType ResolveType(Item it) => it.Content switch
     {
-        C.TypeFromSpec t => ResolveSpecs(CollectSpecs(t.Arg0)),
+        C.TypeFromSpec t => ResolveSpecs(CollectSpecs(t.Arg0), SrcPos.From(it)),
         C.TypePtr t => new CType.Pointer(ResolveType(t.Arg0)),
         C.TypePtrQualConst t => new CType.Pointer(ResolveType(t.Arg0)),
         C.TypePtrQualVolatile t => new CType.Pointer(ResolveType(t.Arg0)),
@@ -598,8 +621,8 @@ internal sealed partial class IrBuilder
         C.TypeVolatile t => ResolveType(t.Arg1).WithQuals(TypeQual.Volatile),
         // `_Atomic T` / `_Atomic(T)` (C11). Codegen lowers reads/writes of an atomic
         // scalar lvalue to seq-cst Atomic.Load/Store/*Fetch (Interlocked-backed).
-        C.TypeAtomic t => ResolveType(t.Arg1).WithQuals(TypeQual.Atomic),
-        C.TypeAtomicParen t => ResolveType(t.Arg2).WithQuals(TypeQual.Atomic),
+        C.TypeAtomic t => AtomicType(ResolveType(t.Arg1), it),
+        C.TypeAtomicParen t => AtomicType(ResolveType(t.Arg2), it),
         C.TypePtrQualRestrict t => new CType.Pointer(ResolveType(t.Arg0)),
         C.TypeName t => ResolveTypeName(Tok(t.Arg0)),
         // `enum Tag` as a type — the registered real C# enum, or plain int if the
@@ -700,9 +723,17 @@ internal sealed partial class IrBuilder
     /// Order-insensitive; covers the slice (int/char/short/long/long long with
     /// signedness, float/double/long double, void, _Bool). <c>const</c> sets the
     /// qualifier (though the legacy QualifierStripper removes it pre-parse today).</summary>
-    private static CType ResolveSpecs(List<string> specs)
+    /// <summary>Apply the <c>_Atomic</c> qualifier (C11), flagging it under an
+    /// older -std=.</summary>
+    private CType AtomicType(CType inner, Item it)
     {
-        int u = 0, s = 0, sh = 0, lng = 0;
+        Gate(2011, "_Atomic", it);
+        return inner.WithQuals(TypeQual.Atomic);
+    }
+
+    private CType ResolveSpecs(List<string> specs, SrcPos pos)
+    {
+        int u = 0, s = 0, sh = 0, lng = 0, baseCount = 0;
         var quals = TypeQual.None;
         var isComplex = false;
         string? base_ = null;
@@ -718,15 +749,47 @@ internal sealed partial class IrBuilder
                 // C99 _Complex — every width widens to the double-backed Complex.
                 case "_Complex": isComplex = true; break;
                 case "inline" or "_Noreturn": break; // ignored for type purposes here
-                case "void": base_ = "void"; break;
-                case "char": base_ = "char"; break;
-                case "int": base_ = "int"; break;
-                case "float": base_ = "float"; break;
-                case "double": base_ = "double"; break;
-                case "_Bool": base_ = "_Bool"; break;
-                case "Float128": base_ = "Float128"; break;
+                case "void": base_ = "void"; baseCount++; break;
+                case "char": base_ = "char"; baseCount++; break;
+                case "int": base_ = "int"; baseCount++; break;
+                case "float": base_ = "float"; baseCount++; break;
+                case "double": base_ = "double"; baseCount++; break;
+                case "_Bool": base_ = "_Bool"; baseCount++; break;
+                case "Float128": base_ = "Float128"; baseCount++; break;
             }
         }
+
+        // Reject the ill-formed specifier multisets the C standard forbids (the
+        // legacy emitter diagnosed these; the messages match its/clang's intent).
+        // A purely permissive resolver would silently mis-type `long long long` or
+        // `short double`. Order matters only for which message a multi-error combo
+        // reports first.
+        if (u >= 1 && s >= 1) { throw new DotCC.CompileException("cannot combine `signed` and `unsigned`"); }
+        if (u >= 2) { throw new DotCC.CompileException("duplicate `unsigned`"); }
+        if (s >= 2) { throw new DotCC.CompileException("duplicate `signed`"); }
+        if (sh >= 1 && lng >= 1) { throw new DotCC.CompileException("cannot combine `short` and `long`"); }
+        if (sh >= 2) { throw new DotCC.CompileException("duplicate `short`"); }
+        if (lng >= 3) { throw new DotCC.CompileException("more than two `long` in a type"); }
+        if (baseCount >= 2) { throw new DotCC.CompileException("multiple base types in a declaration"); }
+        if (base_ == "_Bool" && (u > 0 || s > 0 || sh > 0 || lng > 0 || isComplex))
+        { throw new DotCC.CompileException("`_Bool` cannot be combined with other type specifiers"); }
+        if (base_ == "Float128" && (u > 0 || s > 0 || sh > 0 || lng > 0 || isComplex))
+        { throw new DotCC.CompileException("`_Float128` cannot be combined with other type specifiers"); }
+        if (base_ == "float" && (u > 0 || s > 0 || sh > 0 || lng > 0))
+        { throw new DotCC.CompileException("`float` cannot take size or sign modifiers"); }
+        if (base_ == "double" && lng >= 2)
+        { throw new DotCC.CompileException("`long long double` is not a valid type"); }
+        if (base_ == "double" && (u > 0 || s > 0 || sh > 0))
+        { throw new DotCC.CompileException("`double` cannot take sign or `short` modifiers"); }
+        if (isComplex && base_ is not ("float" or "double"))
+        { throw new DotCC.CompileException("`_Complex` requires a `float`, `double`, or `long double` base"); }
+
+        // Dialect gates: type-spec features newer than the selected -std=.
+        if (specs.Contains("_Noreturn")) { Gate(2011, "_Noreturn", pos); }
+        if (base_ == "_Bool") { Gate(1999, "_Bool", pos); }
+        if (lng >= 2) { Gate(1999, "long long", pos); }
+        if (isComplex) { Gate(1999, "_Complex", pos); }
+
         CType t = base_ switch
         {
             "void" => CType.Void,
@@ -753,7 +816,15 @@ internal sealed partial class IrBuilder
         {
             case C.Block b:
                 _symbols.EnterScope();
-                FlattenStmts(b.Arg2, x => stmts.Add(BuildStmt(x)));
+                // C90 requires all declarations to precede statements in a block; a
+                // declaration after a statement ("mixed declarations") is C99+.
+                var sawNonDecl = false;
+                FlattenStmts(b.Arg2, x =>
+                {
+                    if (x.Content is C.StmtDecl) { if (sawNonDecl) { Gate(1999, "mixed declarations and code", x); } }
+                    else { sawNonDecl = true; }
+                    stmts.Add(BuildStmt(x));
+                });
                 _symbols.ExitScope();
                 break;
             case C.BlockEmpty:
@@ -986,7 +1057,7 @@ internal sealed partial class IrBuilder
         // `T x = { .field = … };` — C99 designated struct/union initializer.
         C.DeclStructDesignated d => BuildLocalInit(d.Arg1, ResolveType(d.Arg0), BuildStructDesignated(ResolveType(d.Arg0), d.Arg4)),
         // `T x = {};` — C23 empty initializer (zero value).
-        C.DeclEmptyInit d => BuildLocalInit(d.Arg1, ResolveType(d.Arg0), new DefaultLit { Type = ResolveType(d.Arg0) }),
+        C.DeclEmptyInit d => Gated(2023, "empty initializer", d.Arg1, BuildLocalInit(d.Arg1, ResolveType(d.Arg0), new DefaultLit { Type = ResolveType(d.Arg0) })),
         C.DeclArr d => BuildArrDecl(d.Arg0, d.Arg1, d.Arg2, null, implicitSize: false),
         C.DeclArrEmptyInit d => BuildArrDecl(d.Arg0, d.Arg1, d.Arg2, null, implicitSize: false),
         C.DeclArrInit d => BuildArrDecl(d.Arg0, d.Arg1, d.Arg2, d.Arg5, implicitSize: false),
@@ -1095,6 +1166,7 @@ internal sealed partial class IrBuilder
     /// type). gcc <c>__auto_type</c> / C++ <c>auto</c> / C# <c>var</c> shape.</summary>
     private DeclStmt BuildDeclAutoInfer(C.DeclAutoInfer n)
     {
+        Gate(2023, "auto` type inference", n.Arg1);
         var init = BuildExpr(n.Arg3);
         var sym = _symbols.Declare(new Symbol { Name = Tok(n.Arg1), Kind = SymKind.Var, Type = init.Type, Storage = Storage.Auto });
         return new DeclStmt(new[] { new LocalDecl(sym, init) });
@@ -1274,6 +1346,7 @@ internal sealed partial class IrBuilder
         // for ( <decl> ; <cond> ; <post> ) <body> — Arg2 is the ScopeEnter epsilon;
         // Decl=Arg3, ForCond=Arg5, ForPost=Arg7, body=Arg9 (see legacy StmtForDecl).
         _symbols.EnterScope();
+        Gate(1999, "for-loop initializer declaration", s.Arg3);
         var init = BuildDecl(s.Arg3);
         var cond = BuildForCond(s.Arg5);
         var post = BuildForPost(s.Arg7);
@@ -1323,7 +1396,7 @@ internal sealed partial class IrBuilder
         CExpr e = it.Content switch
         {
             C.Num n => BuildNum(n),
-            C.Flt f => new LitFloat(LowerFloat(Tok(f.Arg0))) { Type = CType.Double },
+            C.Flt f => BuildFloat(f),
             C.Str => BuildStr(it),
             C.Chr c => BuildChr(c),
             C.Var v => BuildVar(v),
@@ -1384,11 +1457,11 @@ internal sealed partial class IrBuilder
             C.CallNoArgs c => BuildCall(c.Arg0, null),
             // C99/C23 compound literals — (T){…} struct/scalar, (T[]){…} array,
             // designated, and the C23 empty form.
-            C.CompoundLit c => BuildCompoundLit(c.Arg1, c.Arg4),
-            C.CompoundLitDesignated c => BuildCompoundLitDesignated(c.Arg1, c.Arg4),
-            C.CompoundLitEmpty c => BuildCompoundLitEmpty(c.Arg1),
-            C.CompoundLitArr c => BuildArrayCompoundLit(c.Arg1, c.Arg2, c.Arg5),
-            C.CompoundLitArrImplicit c => BuildArrayCompoundLit(c.Arg1, null, c.Arg6),
+            C.CompoundLit c => Gated(1999, "compound literals", c.Arg1, BuildCompoundLit(c.Arg1, c.Arg4)),
+            C.CompoundLitDesignated c => Gated(1999, "compound literals", c.Arg1, BuildCompoundLitDesignated(c.Arg1, c.Arg4)),
+            C.CompoundLitEmpty c => Gated(2023, "empty initializer", c.Arg1, BuildCompoundLitEmpty(c.Arg1)),
+            C.CompoundLitArr c => Gated(1999, "compound literals", c.Arg1, BuildArrayCompoundLit(c.Arg1, c.Arg2, c.Arg5)),
+            C.CompoundLitArrImplicit c => Gated(1999, "compound literals", c.Arg1, BuildArrayCompoundLit(c.Arg1, null, c.Arg6)),
             C.CommaOp => BuildCommaOp(it),
             _ => throw new IrUnsupportedException(TypeName(it.Content)),
         };
@@ -1801,6 +1874,8 @@ internal sealed partial class IrBuilder
     private CExpr BuildNum(C.Num n)
     {
         var raw = Tok(n.Arg0);
+        if (raw.Contains('\'')) { Gate(2023, "digit separator", n.Arg0); }
+        if (raw.Length >= 2 && raw[0] == '0' && raw[1] is 'b' or 'B') { Gate(2023, "binary integer literal", n.Arg0); }
         // Strip C integer suffix (u/U/l/L).
         var end = raw.Length;
         int ls = 0; var hasU = false;
@@ -1836,6 +1911,15 @@ internal sealed partial class IrBuilder
         }
         var ct = ls > 0 ? (hasU ? CType.ULong : CType.Long) : (hasU ? CType.UInt : CType.Int);
         return new LitInt(text, val) { Type = ct };
+    }
+
+    /// <summary>Build a floating-point literal, gating the C99 hex-float form
+    /// (<c>0x1.8p3</c>) under an older -std=.</summary>
+    private CExpr BuildFloat(C.Flt f)
+    {
+        var raw = Tok(f.Arg0);
+        if (raw.Length >= 2 && raw[0] == '0' && raw[1] is 'x' or 'X') { Gate(1999, "hex float literal", f.Arg0); }
+        return new LitFloat(LowerFloat(raw)) { Type = CType.Double };
     }
 
     private static string LowerFloat(string raw)

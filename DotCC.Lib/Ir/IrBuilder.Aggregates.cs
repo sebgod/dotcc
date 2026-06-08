@@ -52,10 +52,10 @@ internal sealed partial class IrBuilder
     {
         C.InitElemExpr e => new InitVal(BuildExpr(e.Arg0)),
         C.InitElemNest nest => new InitGroup(ParseInitList(nest.Arg1)),
-        C.InitElemDesignated d => new InitAt(
+        C.InitElemDesignated d => Gated(1999, "array designators", it, new InitAt(
             ConstEval(BuildExpr(d.Arg1)) is { } ix && ix >= 0 ? (int)ix
                 : throw new IrUnsupportedException("array designator index must be a constant non-negative integer"),
-            BuildExpr(d.Arg4)),
+            BuildExpr(d.Arg4))),
         _ => new InitVal(BuildExpr(it)),
     };
 
