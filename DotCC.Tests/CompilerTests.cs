@@ -257,12 +257,14 @@ public sealed partial class CompilerTests
     [Fact]
     public void Auto_type_inference_lowers_to_var()
     {
+        // The typed IR resolves `auto` to the concrete inferred type rather than
+        // emitting `var`. `auto x = 5` → `int x = 5`; `auto y = 3.14` → `double y = 3.14`.
         var src = WriteTemp("int main() { auto x = 5; auto y = 3.14; return x; }");
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("var x = 5");
-            emitted.ShouldContain("var y = 3.14");
+            emitted.ShouldContain("int x = 5");
+            emitted.ShouldContain("double y = 3.14");
         }
         finally { File.Delete(src); }
     }
@@ -320,7 +322,8 @@ public sealed partial class CompilerTests
         var src = WriteTemp("int main() { int x = 1; int * const p = &x; return *p; }");
         try
         {
-            Compiler.EmitCSharp(new[] { src }).ShouldContain("int* p = (&x)");
+            // The typed IR emits the initializer without an extra paren layer.
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("int* p = &x");
         }
         finally { File.Delete(src); }
     }
@@ -394,9 +397,9 @@ public sealed partial class CompilerTests
             // Named bit-field → private backing field + masked accessor property.
             emitted.ShouldContain("__bf_ready");
             emitted.ShouldContain("public uint ready {");
-            emitted.ShouldContain("& 1UL");                 // 1-bit store mask
+            emitted.ShouldContain("& 1u");                  // 1-bit store mask
             emitted.ShouldContain("public uint mode {");
-            emitted.ShouldContain("& 7UL");                 // 3-bit store mask
+            emitted.ShouldContain("& 7u");                  // 3-bit store mask
             // Anonymous bit-field (`unsigned : 2;`, padding) → no accessible member.
             emitted.ShouldNotContain("public uint  {");
             emitted.ShouldNotContain("public uint  ;");
@@ -461,7 +464,7 @@ public sealed partial class CompilerTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
             emitted.ShouldContain("int* p = a");          // flat pointer
-            emitted.ShouldContain("(p + (1) * 3)[2]");    // strides by the array size
+            emitted.ShouldContain("(p + 1 * 3)[2]");      // strides by the array size
         }
         finally { File.Delete(src); }
     }
@@ -472,8 +475,8 @@ public sealed partial class CompilerTests
         var src = WriteTemp("int main() { int a[2][3]; int (*p)[3] = a; return (int)sizeof(p); }");
         try
         {
-            // pointer, not array → sizeof(void*); deref decays to the base pointer
-            Compiler.EmitCSharp(new[] { src }).ShouldContain("sizeof(void*)");
+            // pointer, not array → sizeof(int*); deref decays to the base pointer
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("sizeof(int*)");
         }
         finally { File.Delete(src); }
     }
@@ -499,7 +502,7 @@ public sealed partial class CompilerTests
         var src = WriteTemp("int main() { int a[2][3]; int i=1,j=2; return a[i][j]; }");
         try
         {
-            Compiler.EmitCSharp(new[] { src }).ShouldContain("(a + (i) * 3)[j]");
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("(a + i * 3)[j]");
         }
         finally { File.Delete(src); }
     }
@@ -511,7 +514,7 @@ public sealed partial class CompilerTests
         try
         {
             Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
-                .Message.ShouldContain("constant dimensions");
+                .Message.ShouldContain("non-constant dimension");
         }
         finally { File.Delete(src); }
     }
@@ -521,12 +524,14 @@ public sealed partial class CompilerTests
     [Fact]
     public void Octal_and_hex_char_escapes_decode_to_byte_value()
     {
+        // The typed IR assigns the decoded value directly to the `byte` local;
+        // no redundant `(byte)` cast is needed at the initializer.
         var src = WriteTemp("int main() { char a = '\\033'; char b = '\\x41'; return a + b; }");
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("(byte)27");   // \033 octal
-            emitted.ShouldContain("(byte)65");   // \x41 hex
+            emitted.ShouldContain("byte a = 27");   // \033 octal decoded
+            emitted.ShouldContain("byte b = 65");   // \x41 hex decoded
         }
         finally { File.Delete(src); }
     }
@@ -652,13 +657,21 @@ public sealed partial class CompilerTests
     [Fact]
     public void Comma_operator_value_form_lowers_to_tuple()
     {
-        // `(a, b, c)` → `(a, b, c).Item3` — C# tuples evaluate left-to-right
-        // and C# has no comma operator.
+        // The typed IR LIFTS value-context comma operators to sequential
+        // statements rather than emitting a C# tuple. `int x = (a=1, b=2, a+b)`
+        // lowers to: `a = 1;` / `b = 2;` / `int x = a + b;` — the last operand
+        // becomes the actual initializer.
         var src = WriteTemp("int main() { int a=0,b=0; int x = (a = 1, b = 2, a + b); return x; }");
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("(a = 1, b = 2, a + b).Item3");
+            // Side-effect subexpressions lifted to statements:
+            emitted.ShouldContain("a = 1;");
+            emitted.ShouldContain("b = 2;");
+            // The final value forms the initializer:
+            emitted.ShouldContain("int x = a + b;");
+            // Tuple form never produced:
+            emitted.ShouldNotContain(".Item3");
         }
         finally { File.Delete(src); }
     }

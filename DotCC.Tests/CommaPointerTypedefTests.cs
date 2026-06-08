@@ -8,14 +8,12 @@ using Xunit;
 namespace DotCC.Tests;
 
 /// <summary>
-/// A comma operator in value position lowers to a C# tuple <c>(a, b).ItemN</c>.
-/// A pointer / function-pointer operand can't be a <c>ValueTuple</c> type
-/// argument (CS0306), so dotcc round-trips it through <c>nint</c>. The pointer
-/// detection (<c>IsPointerCsType</c>) recognizes not just a literal <c>T*</c> but
-/// also a pointer TYPEDEF (<c>NodeRef</c> → <c>Node*</c>, like Lua's
-/// <c>StkId</c>) and a function-pointer type / typedef (<c>delegate*&lt;…&gt;</c> /
-/// <c>CFunc</c>, like <c>lua_CFunction</c>) — neither ends in a literal <c>*</c>.
-/// End-to-end in the <c>comma-ptr-typedef/</c> fixture.
+/// The typed IR lifts a comma operator in init/value position into statements:
+/// side-effect operands become standalone statements and the last operand is
+/// assigned directly, avoiding the C# tuple / nint round-trip entirely. These
+/// tests verify the lifted lowering for pointer typedef, fn-ptr typedef, and
+/// plain int operands, and that fn-ptr typedefs decay bare function names to
+/// their address. End-to-end in the <c>comma-ptr-typedef/</c> fixture.
 /// </summary>
 public sealed class CommaPointerTypedefTests
 {
@@ -47,9 +45,10 @@ public sealed class CommaPointerTypedefTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            // NodeRef (-> Node*) operand cast to nint for the tuple, result cast back.
-            emitted.ShouldContain("(g = 1, (nint)(np)).Item2");
-            emitted.ShouldContain("((NodeRef)((g = 1, (nint)(np)).Item2))");
+            // The IR lifts the comma: the side-effect is emitted as a statement
+            // and the pointer value is assigned directly (no tuple/nint round-trip).
+            emitted.ShouldContain("g = 1;");
+            emitted.ShouldContain("Node* p = np;");
         }
         finally { File.Delete(src); }
     }
@@ -68,9 +67,10 @@ public sealed class CommaPointerTypedefTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            // CFunc (a fn-ptr typedef) operand round-trips through nint too.
-            emitted.ShouldContain("(g = 2, (nint)(cf)).Item2");
-            emitted.ShouldContain("((CFunc)((g = 2, (nint)(cf)).Item2))");
+            // The IR lifts the comma: the side-effect is a statement; the
+            // fn-ptr value is assigned directly (no tuple/nint round-trip).
+            emitted.ShouldContain("g = 2;");
+            emitted.ShouldContain("delegate*<int, int> f = cf;");
         }
         finally { File.Delete(src); }
     }
@@ -87,7 +87,9 @@ public sealed class CommaPointerTypedefTests
             """);
         try
         {
-            Compiler.EmitCSharp(new[] { src }).ShouldContain("CFunc cf = &dbl");
+            // The IR expands the fn-ptr typedef to its underlying delegate* type;
+            // the function name still decays to its address (&dbl).
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("delegate*<int, int> cf = &dbl");
         }
         finally { File.Delete(src); }
     }
@@ -100,9 +102,10 @@ public sealed class CommaPointerTypedefTests
             """);
         try
         {
-            // An int comma value stays a plain tuple element — no nint round-trip.
+            // An int comma value is lifted as a statement; no nint round-trip.
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("(g = 1, x).Item2");
+            emitted.ShouldContain("g = 1;");
+            emitted.ShouldContain("int v = x;");
             emitted.ShouldNotContain("(nint)(x)");
         }
         finally { File.Delete(src); }

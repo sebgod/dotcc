@@ -38,8 +38,8 @@ public sealed class StaticStructInitTests
             var emitted = Compiler.EmitCSharp(new[] { src });
             // Lowered to a once-init static field, mangled by function, and the
             // body use rewrites to the mangled name.
-            emitted.ShouldContain("public static unsafe P __static_f_p = new P { x = 10, y = 20 };");
-            emitted.ShouldContain("__static_f_p.x");
+            emitted.ShouldContain("public static unsafe P p__s0 = new P { x = 10, y = 20 };");
+            emitted.ShouldContain("p__s0.x");
         }
         finally { File.Delete(src); }
     }
@@ -75,7 +75,7 @@ public sealed class StaticStructInitTests
             var emitted = Compiler.EmitCSharp(new[] { src });
             emitted.ShouldContain("kind = 7");
             emitted.ShouldContain("{ i = 42 }");   // the union's first member
-            emitted.ShouldContain("extra = (-1)");
+            emitted.ShouldContain("extra = -1");
         }
         finally { File.Delete(src); }
     }

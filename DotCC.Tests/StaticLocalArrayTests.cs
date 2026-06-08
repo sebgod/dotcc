@@ -11,7 +11,7 @@ namespace DotCC.Tests;
 /// Unit tests for block-scope <c>static</c> array declarations. A C local
 /// static array has the same static storage duration as a file-scope array, so
 /// dotcc lowers it to a pinned global field (<c>Libc.GlobalArray*</c>) under a
-/// function-mangled name (<c>__static_{fn}_{name}</c>), with in-function uses
+/// sequentially-suffixed name (<c>{name}__s{N}</c>), with in-function uses
 /// rewritten to that field — exactly the scalar static-local path. An array OF
 /// POINTERS is stored as a pinned <c>nint[]</c> reinterpreted as <c>T**</c>
 /// because C# forbids pointer types as generic type arguments / array elements
@@ -41,9 +41,9 @@ public sealed class StaticLocalArrayTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
             // Hoisted to a mangled pinned global field…
-            emitted.ShouldContain("__static_f_tab = Libc.GlobalArrayFrom<byte>(new byte[]{ 0, 1, 2, 3 })");
+            emitted.ShouldContain("tab__s0 = Libc.GlobalArrayFrom<byte>(new byte[]{ 0, 1, 2, 3 })");
             // …and the in-function use rewrites to that field.
-            emitted.ShouldContain("(__static_f_tab[x])");
+            emitted.ShouldContain("tab__s0[x]");
         }
         finally { File.Delete(src); }
     }
@@ -61,7 +61,7 @@ public sealed class StaticLocalArrayTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("__static_f_tab = Libc.GlobalArrayFrom<int>(new int[]{ 10, 20, 30 })");
+            emitted.ShouldContain("tab__s0 = Libc.GlobalArrayFrom<int>(new int[]{ 10, 20, 30 })");
         }
         finally { File.Delete(src); }
     }
@@ -81,7 +81,7 @@ public sealed class StaticLocalArrayTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("byte** __static_name_names = (byte**)Libc.GlobalArrayFrom<nint>(new nint[]{ (nint)(Libc.L(\"a\\0\"u8)), (nint)(Libc.L(\"b\\0\"u8)) })");
+            emitted.ShouldContain("names__s0 = (byte**)Libc.GlobalArrayFrom<nint>(new nint[]{ (nint)(Libc.L(\"a\\0\"u8)), (nint)(Libc.L(\"b\\0\"u8)) })");
             emitted.ShouldNotContain("GlobalArrayFrom<byte*>");
             emitted.ShouldNotContain("new byte*[]");
         }
@@ -99,9 +99,9 @@ public sealed class StaticLocalArrayTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            // Mangled per enclosing function → two distinct fields.
-            emitted.ShouldContain("__static_f_t = Libc.GlobalArrayFrom<int>(new int[]{ 1, 2 })");
-            emitted.ShouldContain("__static_g_t = Libc.GlobalArrayFrom<int>(new int[]{ 3, 4 })");
+            // Mangled per declaration order → two distinct fields.
+            emitted.ShouldContain("t__s0 = Libc.GlobalArrayFrom<int>(new int[]{ 1, 2 })");
+            emitted.ShouldContain("t__s1 = Libc.GlobalArrayFrom<int>(new int[]{ 3, 4 })");
         }
         finally { File.Delete(src); }
     }

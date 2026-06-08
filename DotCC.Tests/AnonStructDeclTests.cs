@@ -11,7 +11,7 @@ namespace DotCC.Tests;
 /// Unit tests for an ANONYMOUS struct type used directly in a declaration
 /// (`struct { … } x;` / `static const struct { … } tab[] = {…}`) — distinct from
 /// a typedef body or a struct member. Lua's lparser.c priority table. dotcc
-/// synthesizes a name (`__NestS&lt;N&gt;`), emits the struct decl, records its
+/// synthesizes a name (`__Anon&lt;N&gt;`), emits the struct decl, records its
 /// fields, and returns the synth name as the Type so the ordinary array /
 /// aggregate-init productions compose. End-to-end in `anon-struct-decl/`.
 /// </summary>
@@ -37,10 +37,10 @@ public sealed class AnonStructDeclTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("unsafe struct __NestS0");
+            emitted.ShouldContain("unsafe struct __Anon0");
             // array of the synth struct, elements as positional object-inits
-            emitted.ShouldContain("new __NestS0 { left = 10, right = 10 }");
-            emitted.ShouldContain("new __NestS0 { left = 14, right = 13 }");
+            emitted.ShouldContain("new __Anon0 { left = 10, right = 10 }");
+            emitted.ShouldContain("new __Anon0 { left = 14, right = 13 }");
         }
         finally { File.Delete(src); }
     }
@@ -54,8 +54,8 @@ public sealed class AnonStructDeclTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("unsafe struct __NestS0");
-            emitted.ShouldContain("__NestS0 pt = new __NestS0 { a = 5, b = 6 }");
+            emitted.ShouldContain("unsafe struct __Anon0");
+            emitted.ShouldContain("__Anon0 pt = new __Anon0 { a = 5, b = 6 }");
         }
         finally { File.Delete(src); }
     }
@@ -72,7 +72,7 @@ public sealed class AnonStructDeclTests
         try
         {
             Compiler.EmitCSharp(new[] { src })
-                .ShouldContain("(ulong)(3 * sizeof(__NestS0)) / (ulong)sizeof(__NestS0)");
+                .ShouldContain("(ulong)((3 * sizeof(__Anon0)))) / ((ulong)(sizeof(__Anon0)))");
         }
         finally { File.Delete(src); }
     }
@@ -82,7 +82,7 @@ public sealed class AnonStructDeclTests
     {
         // Regression guard: the new anon-struct Type production must NOT capture
         // `typedef struct { … } Name;` — that still lowers to a named `struct Name`
-        // (via typedefStructAnon), not a synth `__NestS` + alias.
+        // (via typedefStructAnon), not a synth `__Anon` + alias.
         var src = WriteTemp("""
             typedef struct { int x; int y; } Point;
             int main(void) { Point p = {3, 4}; return p.x + p.y; }

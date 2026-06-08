@@ -9,11 +9,11 @@ namespace DotCC.Tests;
 
 /// <summary>
 /// Unit tests for a comma whose LEADING operand is a void CALL — `(voidcall, v)`.
-/// The void result can't be a C# tuple element (CS8210). In a value position that
-/// can't hoist statements (deep inside a short-circuiting condition), it lowers to
-/// an immediately-invoked delegate that runs the call then a tuple picks the value
-/// (so C# infers its type). A discard / statement context still splits to plain
-/// statements (via CommaOps), and a normal non-void comma stays the plain tuple.
+/// In a hoistable context (init / statement position) the typed IR lifts the call
+/// to a plain statement and assigns the last operand directly. In a value position
+/// that can't hoist (deep inside a short-circuiting condition), it still lowers to
+/// an immediately-invoked delegate that runs the call then returns the value. A
+/// normal non-void comma in init position is also lifted (no delegate, no tuple).
 /// End-to-end (incl. short-circuit) in the <c>comma-void-call/</c> fixture.
 /// </summary>
 public sealed class CommaVoidCallTests
@@ -33,10 +33,10 @@ public sealed class CommaVoidCallTests
             static void note(int* p) { (*p)++; }
             int main(void) { int log = 0; int* lp = &log; int a = (note(lp), 5); return a + log; }
             """);
-        // The void call runs inside a delegate; a tuple picks the value (type inferred).
-        emitted.ShouldContain("System.Func<int>)(() =>");
-        emitted.ShouldContain("note(lp)");
-        emitted.ShouldContain(").Item2");
+        // The IR lifts the comma: the void call is emitted as a statement and the
+        // value is assigned directly — no delegate wrapper needed.
+        emitted.ShouldContain("note(lp);");
+        emitted.ShouldContain("int a = 5;");
     }
 
     [Fact]
@@ -60,7 +60,9 @@ public sealed class CommaVoidCallTests
         var emitted = Emit("""
             int main(void) { int x = 1, y = 2; int z = (x, y); return z; }
             """);
-        emitted.ShouldContain("(x, y).Item2");
+        // The IR lifts the comma operands: side-effect discarded, value assigned directly.
+        emitted.ShouldContain("_ = x;");
+        emitted.ShouldContain("int z = y;");
         emitted.ShouldNotContain("System.Func");
     }
 }

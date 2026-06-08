@@ -53,9 +53,8 @@ public sealed class FnPtrDerefCallTests
             static int mul(int a, int b) { return a * b; }
             int main(void) { Holder h; h.op = mul; return (*(h.op))(4, 5); }
             """);
-        // The deref is gone; the field access is still invoked directly
-        // (paren nesting around the callee is irrelevant — the `*` is what matters).
-        emitted.ShouldContain(")(4, 5)");
+        // The deref is gone; the field access is invoked directly.
+        emitted.ShouldContain("h.op(4, 5)");
         emitted.ShouldNotContain("(*(h.op))");
     }
 

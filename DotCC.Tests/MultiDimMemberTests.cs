@@ -35,7 +35,7 @@ public sealed class MultiDimMemberTests
             var emitted = Compiler.EmitCSharp(new[] { src });
             // 2x3 → one fixed int[6]; access strides by the inner dim (3).
             emitted.ShouldContain("fixed int cells[6]");
-            emitted.ShouldContain("(g.cells + (1) * 3)[2]");
+            emitted.ShouldContain("(g.cells + 1 * 3)[2]");
         }
         finally { File.Delete(src); }
     }
@@ -50,9 +50,9 @@ public sealed class MultiDimMemberTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            // 2x2 → [InlineArray(4)] of pointer (stored nint); access via (byte**)&.
+            // 2x2 → [InlineArray(4)] of pointer (byte* element); access via (byte**)&.
             emitted.ShouldContain("InlineArray(4)");
-            emitted.ShouldContain("((byte**)&g.names) + (1) * 2)[1]");
+            emitted.ShouldContain("((byte**)&g.names + 1 * 2)[1]");
         }
         finally { File.Delete(src); }
     }
@@ -68,7 +68,7 @@ public sealed class MultiDimMemberTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("(p->m + (1) * 2)[0]");
+            emitted.ShouldContain("(p->m + 1 * 2)[0]");
         }
         finally { File.Delete(src); }
     }

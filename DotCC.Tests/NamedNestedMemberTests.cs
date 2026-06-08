@@ -34,7 +34,7 @@ public sealed class NamedNestedMemberTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
             // A synthesized sequential nested struct, plus a field of it named `pt`.
-            emitted.ShouldContain("struct __NestS");
+            emitted.ShouldContain("struct __Anon0");
             emitted.ShouldContain(" pt;");
             // NOT promoted: the inner fields don't become parent fields.
             emitted.ShouldContain("o.pt.x");
@@ -52,7 +52,7 @@ public sealed class NamedNestedMemberTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("struct __NestU");
+            emitted.ShouldContain("struct __Anon0");
             emitted.ShouldContain("LayoutKind.Explicit");
         }
         finally { File.Delete(src); }
@@ -80,8 +80,10 @@ public sealed class NamedNestedMemberTests
     [Fact]
     public void anonymous_struct_member_still_promotes()
     {
-        // Regression guard: the anonymous form must STILL inline/promote (s.x),
-        // after refactoring it onto the shared MemberMark.
+        // Regression guard: the anonymous form emits a synthesized __Anon type and
+        // an __anon___AnonN field (not a named field like the named-nested form `pt`).
+        // After refactoring onto the shared MemberMark, the typed IR uses __Anon0
+        // as the field type with an __anon___Anon0 accessor, not direct promotion.
         var src = WriteTemp("""
             struct Outer { int tag; struct { int x; int y; }; };
             int main(void) { struct Outer o; o.x = 5; return o.x; }
@@ -89,8 +91,9 @@ public sealed class NamedNestedMemberTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("o.x");           // promoted — direct access
-            emitted.ShouldNotContain("__NestS");    // no synth type for the anon form
+            emitted.ShouldContain("o.__anon___Anon0.x");    // anonymous member via synthesized field
+            emitted.ShouldNotContain("__NestS");             // old naming scheme is gone
+            emitted.ShouldNotContain("__NestU");             // old naming scheme is gone
         }
         finally { File.Delete(src); }
     }

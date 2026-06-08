@@ -35,8 +35,8 @@ public sealed class CallArgConversionTests
             """);
         try
         {
-            // int → size_t (ulong) is not implicit in C#; the arg takes the cast.
-            Compiler.EmitCSharp(new[] { src }).ShouldContain("take((size_t)(x))");
+            // int → size_t (ulong) is not implicit in C#; the IR expands size_t → ulong and the arg takes the cast.
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("take((ulong)(x))");
         }
         finally { File.Delete(src); }
     }
@@ -82,8 +82,8 @@ public sealed class CallArgConversionTests
             """);
         try
         {
-            // sizeof is size_t (ulong) per C, matching the size_t param — no extra cast.
-            Compiler.EmitCSharp(new[] { src }).ShouldContain("take((ulong)sizeof(Big))");
+            // sizeof is size_t (ulong) per C, matching the size_t param — cast inserted by arg coercion.
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("take(((ulong)(sizeof(Big))))");
         }
         finally { File.Delete(src); }
     }

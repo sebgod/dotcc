@@ -59,8 +59,9 @@ public sealed class TypedefUnionTests
     [Fact]
     public void tagged_union_binds_tag_as_alias_when_different()
     {
-        // `typedef union U_tag { … } U;` — the type emits under `U`, and `U_tag`
-        // becomes a using-alias so `union U_tag` references still resolve.
+        // `typedef union U_tag { … } U;` — the IR emits the struct under the tag
+        // name `U_tag` (the canonical struct name in the type table) so that
+        // `union U_tag` references in user code resolve directly.
         var src = WriteTemp("""
             typedef union U_tag { int a; int b; } U;
             int main(void) { union U_tag x; x.a = 7; return x.a; }
@@ -68,7 +69,8 @@ public sealed class TypedefUnionTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("using unsafe U_tag = U;");
+            emitted.ShouldContain("struct U_tag");
+            emitted.ShouldContain("LayoutKind.Explicit");
         }
         finally { File.Delete(src); }
     }

@@ -44,7 +44,7 @@ public sealed class ConstCastUncheckedTests
             lu_byte f(lu_byte v) { return v & (lu_byte)(~(1 << 6)); }
             int main(void) { return 0; }
             """);
-        emitted.ShouldContain("unchecked(((lu_byte)((~((1 << 6))))))");
+        emitted.ShouldContain("unchecked((byte)~(1 << 6))");
     }
 
     [Fact]
@@ -55,7 +55,7 @@ public sealed class ConstCastUncheckedTests
             unsigned long f(void) { return (unsigned long)(-1); }
             int main(void) { return 0; }
             """);
-        emitted.ShouldContain("unchecked(((ulong)((-1))))");
+        emitted.ShouldContain("unchecked((ulong)-1)");
     }
 
     [Fact]
@@ -69,7 +69,7 @@ public sealed class ConstCastUncheckedTests
             lu_byte f(void) { return (lu_byte)(~((~0u) << 3)); }
             int main(void) { return 0; }
             """);
-        emitted.ShouldContain("unchecked(((lu_byte)((~((((~0u)) << 3))))))");
+        emitted.ShouldContain("unchecked((byte)~(~0u << 3))");
     }
 
     [Fact]
@@ -80,8 +80,8 @@ public sealed class ConstCastUncheckedTests
             unsigned f(void) { return (unsigned)(219); }
             int main(void) { return 0; }
             """);
-        emitted.ShouldContain("((uint)(219))");
-        emitted.ShouldNotContain("unchecked(((uint)(219)))");
+        emitted.ShouldContain("(uint)219");
+        emitted.ShouldNotContain("unchecked((uint)219)");
     }
 
     [Fact]
@@ -95,7 +95,7 @@ public sealed class ConstCastUncheckedTests
             int f(int x) { return (int)((lu_byte)x); }
             int main(void) { return 0; }
             """);
-        emitted.ShouldContain("((int)(((lu_byte)x)))");
+        emitted.ShouldContain("(int)(byte)x");
         emitted.ShouldNotContain("unchecked(((lu_byte)x))");
     }
 }

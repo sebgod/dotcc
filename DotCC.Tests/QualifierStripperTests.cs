@@ -31,6 +31,7 @@ public sealed class QualifierStripperTests
         // `const <TYPE_NAME>` had no production — a qualifier can't prefix a
         // typedef-name in the grammar, and adding one is LALR-ambiguous. The
         // stripper removes the token so this reduces as a plain `MyInt` decl.
+        // The IR then expands `MyInt` to its underlying primitive `int`.
         var src = WriteTemp("""
             typedef int MyInt;
             int main(void) { const MyInt x = 5; return x; }
@@ -38,10 +39,10 @@ public sealed class QualifierStripperTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("MyInt");
-            // The qualifier is gone — no `const MyInt` (C# `const` has different
-            // semantics and a `const` field/local is not what we emit).
-            emitted.ShouldNotContain("const MyInt");
+            // Typedef expanded to primitive; no const qualifier on the local.
+            emitted.ShouldContain("int x = 5");
+            // The qualifier is gone — no `const` on the user's variable declaration.
+            emitted.ShouldNotContain("const int x");
         }
         finally { File.Delete(src); }
     }
