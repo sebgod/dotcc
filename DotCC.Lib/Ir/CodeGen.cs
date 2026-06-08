@@ -735,11 +735,15 @@ internal sealed class CodeGen
         _ => false,
     };
 
-    /// <summary>The C# backend's decision to store a pointer/fn-ptr-typed global as
-    /// an <c>nint</c> field: when its address is taken (the abstract
+    /// <summary>The C# backend's decision to store a pointer/fn-ptr-typed
+    /// <em>global</em> as an <c>nint</c> field: when its address is taken (the abstract
     /// <see cref="Symbol.AddressTaken"/> fact), a pointer T can't be the type arg of
-    /// Unsafe.AsPointer / Volatile.* (CS0306), so the slot is an <c>nint</c>.</summary>
-    private static bool NintStorage(Symbol s) => s.AddressTaken && s.Type.IsPointerLowered;
+    /// Unsafe.AsPointer / Volatile.* (CS0306) nor have a bare <c>&amp;</c> of a moveable
+    /// static field (CS0212), so the slot is an <c>nint</c>. The <see cref="Symbol.IsGlobal"/>
+    /// guard scopes this to file-scope/function-static fields: locals are emitted as real
+    /// pointers (no moveable-field/Unsafe constraints apply), so an address-taken local —
+    /// which now also carries the neutral fact — must NOT be reinterpreted as <c>nint</c>.</summary>
+    private static bool NintStorage(Symbol s) => s.AddressTaken && s.IsGlobal && s.Type.IsPointerLowered;
 
     /// <summary>True when an lvalue is a pointer global whose backing field codegen
     /// declared as <c>nint</c>; such a slot is reinterpreted directly, not through

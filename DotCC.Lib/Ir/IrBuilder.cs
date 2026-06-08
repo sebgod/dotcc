@@ -1611,13 +1611,16 @@ internal sealed partial class IrBuilder
     private CExpr Un(UnOp op, Item operand)
     {
         var oe = BuildExpr(operand);
-        // Record the C-level fact that a global's address is taken. The backend
-        // decides what that implies — for a pointer/fn-ptr-typed global it means the
-        // backing field must be `nint` (a pointer T can't be Unsafe.AsPointer<T> —
-        // CS0306), but that nint choice is the backend's, not the IR's.
-        if (op == UnOp.AddrOf && Unparen(oe) is VarRef { Sym: { IsGlobal: true, Kind: SymKind.Var } gsym })
+        // Record the target-neutral C fact that an object's address is taken (&x), for
+        // any var or param. Each backend decides what it implies: the C# backend stores
+        // an address-taken pointer GLOBAL as `nint` (a pointer T can't be
+        // Unsafe.AsPointer<T> — CS0306; see CodeGen.NintStorage), while the wat backend
+        // gives any address-taken local/param a linear-memory frame slot. Set here, at
+        // the one site every `&` node is built, so the fact is complete and no backend
+        // has to re-derive it by walking the tree.
+        if (op == UnOp.AddrOf && Unparen(oe) is VarRef { Sym: { Kind: SymKind.Var or SymKind.Param } sym })
         {
-            gsym.AddressTaken = true;
+            sym.AddressTaken = true;
         }
         CType t = op switch
         {

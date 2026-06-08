@@ -123,21 +123,20 @@ internal sealed class WatBackend
             _frame[s] = cursor;
             cursor += Math.Max(1, WasmSizeOf(s.Type));
         }
-        // The IR records Symbol.AddressTaken only for globals (the C# backend's nint
-        // decision keys on it for any VarRef, so widening it to locals would change
-        // C# codegen). The wat backend therefore finds address-taken locals/params
-        // itself — a missed case merely gates `&x` loudly, never miscompiles.
-        var addrTaken = new HashSet<Symbol>();
-        foreach (var s in fn.Body.Stmts) { ScanAddrTaken(s, addrTaken); }
+        // Symbol.AddressTaken is the IR's target-neutral "&x was taken" fact, set for
+        // every var/param at the one site every `&` is built. An address-taken
+        // local/param needs a real linear-memory address, so it gets a frame slot;
+        // arrays always do (they decay to a pointer). Every other scalar is a fast
+        // wasm value local.
         foreach (var p in fn.Params)
         {
-            if (addrTaken.Contains(p)) { Place(p); spillParams.Add(p); }
+            if (p.AddressTaken) { Place(p); spillParams.Add(p); }
         }
         var bodyLocals = new List<Symbol>();
         foreach (var s in fn.Body.Stmts) { CollectLocals(s, bodyLocals); }
         foreach (var loc in bodyLocals)
         {
-            if (addrTaken.Contains(loc) || loc.Type.Unqualified is CType.Array) { Place(loc); }
+            if (loc.AddressTaken || loc.Type.Unqualified is CType.Array) { Place(loc); }
             else { valueLocals.Add(loc); }
         }
         _frameSize = AlignUp(cursor, 8);
@@ -238,97 +237,6 @@ internal sealed class WatBackend
                 break;
         }
     }
-
-    /// <summary>Collect the symbols whose address is taken (<c>&amp;x</c>) anywhere in
-    /// a statement, so they get a linear-memory frame slot. Conservative by
-    /// construction: an un-scanned expression position simply doesn't mark its
-    /// symbols, and a later <c>&amp;</c> on one of them then fails loudly.</summary>
-    private static void ScanAddrTaken(CStmt s, HashSet<Symbol> taken)
-    {
-        switch (s)
-        {
-            case Block b:
-                foreach (var x in b.Stmts) { ScanAddrTaken(x, taken); }
-                break;
-            case DeclStmt d:
-                foreach (var ld in d.Decls) { if (ld.Init is { } init) { ScanAddrExpr(init, taken); } }
-                break;
-            case ArrayDecl ad:
-                if (ad.Inits is { } inits) { foreach (var el in inits) { ScanAddrExpr(el, taken); } }
-                break;
-            case ExprStmt es:
-                ScanAddrExpr(es.Expr, taken);
-                break;
-            case Return r:
-                if (r.Value is { } rv) { ScanAddrExpr(rv, taken); }
-                break;
-            case If iff:
-                ScanAddrExpr(iff.Cond, taken);
-                ScanAddrTaken(iff.Then, taken);
-                if (iff.Else is { } els) { ScanAddrTaken(els, taken); }
-                break;
-            case While w:
-                ScanAddrExpr(w.Cond, taken);
-                ScanAddrTaken(w.Body, taken);
-                break;
-            case DoWhile dw:
-                ScanAddrExpr(dw.Cond, taken);
-                ScanAddrTaken(dw.Body, taken);
-                break;
-            case For f:
-                if (f.Init is { } fi) { ScanAddrTaken(fi, taken); }
-                if (f.Cond is { } fc) { ScanAddrExpr(fc, taken); }
-                if (f.Post is { } fp) { ScanAddrExpr(fp, taken); }
-                ScanAddrTaken(f.Body, taken);
-                break;
-            default:
-                break;
-        }
-    }
-
-    private static void ScanAddrExpr(CExpr e, HashSet<Symbol> taken)
-    {
-        switch (e)
-        {
-            case Unary { Op: UnOp.AddrOf } ua:
-                if (Unparen(ua.Operand) is VarRef v && !v.Sym.IsGlobal) { taken.Add(v.Sym); }
-                ScanAddrExpr(ua.Operand, taken);
-                break;
-            case Unary u:
-                ScanAddrExpr(u.Operand, taken);
-                break;
-            case Binary b:
-                ScanAddrExpr(b.Left, taken);
-                ScanAddrExpr(b.Right, taken);
-                break;
-            case Assign a:
-                ScanAddrExpr(a.Target, taken);
-                ScanAddrExpr(a.Value, taken);
-                break;
-            case Index ix:
-                ScanAddrExpr(ix.Base, taken);
-                ScanAddrExpr(ix.Idx, taken);
-                break;
-            case Cast c:
-                ScanAddrExpr(c.Operand, taken);
-                break;
-            case Call call:
-                foreach (var arg in call.Args) { ScanAddrExpr(arg, taken); }
-                break;
-            case CondExpr ce:
-                ScanAddrExpr(ce.Cond, taken);
-                ScanAddrExpr(ce.Then, taken);
-                ScanAddrExpr(ce.Else, taken);
-                break;
-            case Paren p:
-                ScanAddrExpr(p.Inner, taken);
-                break;
-            default:
-                break;
-        }
-    }
-
-    private static CExpr Unparen(CExpr e) => e is Paren p ? Unparen(p.Inner) : e;
 
     // ---- statements ------------------------------------------------------
 
