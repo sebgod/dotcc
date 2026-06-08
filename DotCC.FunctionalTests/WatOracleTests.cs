@@ -47,6 +47,13 @@ public sealed class WatOracleTests
     [InlineData("int slen(char *p){ char *q=p; while(*q) q++; return (int)(q-p); } int main(void){ return slen(\"world\"); }", 5)]
     [InlineData("int at(char *s, int i){ return s[i]; } int main(void){ return at(\"ABCDE\", 3); }", 68)]
     [InlineData("int idx(char *s, char c){ int i=0; while(s[i]){ if(s[i]==c) return i; i++; } return -1; } int main(void){ return idx(\"abcd\", 'c'); }", 2)]
+    // shadow stack — address-of-local, stores through pointers, local arrays
+    [InlineData("int main(void){ int x=5; int *p=&x; *p=10; return x; }", 10)]
+    [InlineData("void swap(int*a,int*b){ int t=*a; *a=*b; *b=t; } int main(void){ int x=1,y=2; swap(&x,&y); return x*10+y; }", 21)]
+    [InlineData("int main(void){ int a[5]={1,2,3,4,5}; int s=0; for(int i=0;i<5;i++) s+=a[i]; return s; }", 15)]
+    [InlineData("int main(void){ int a[3]={5,5,5}; a[1]+=10; return a[0]+a[1]+a[2]; }", 25)]
+    [InlineData("int main(void){ int a[4]={4,2,3,1}; for(int i=0;i<4;i++) for(int j=0;j<3;j++) if(a[j]>a[j+1]){int t=a[j];a[j]=a[j+1];a[j+1]=t;} return a[0]*1000+a[1]*100+a[2]*10+a[3]; }", 1234)]
+    [InlineData("int dbl(int n){ int *p=&n; *p=*p*2; return n; } int main(void){ return dbl(4); }", 8)]
     public void Wat_program_returns_expected_value(string source, int expected)
     {
         if (!Requested)

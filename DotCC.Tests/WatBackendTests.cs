@@ -131,10 +131,31 @@ public sealed class WatBackendTests
     }
 
     [Fact]
-    public void address_of_local_is_gated_until_the_shadow_stack()
+    public void address_taken_local_lives_in_the_shadow_stack()
     {
-        // &x of a local needs a linear-memory frame; until that lands it fails loudly
-        // rather than miscompiling. (Reading through a pointer already works.)
-        Should.Throw<CompileException>(() => Wat("int main(void){ int x=0; int *p=&x; return *p; }"));
+        // &x forces x into a linear-memory frame slot off the $__sp shadow stack;
+        // *p = 10 is a store through that address.
+        var wat = Wat("int main(void){ int x=5; int *p=&x; *p=10; return x; }");
+        wat.ShouldContain("global $__sp");
+        wat.ShouldContain("$__fp");      // the saved frame pointer
+        wat.ShouldContain("i32.store");
+    }
+
+    [Fact]
+    public void local_array_is_frame_allocated_and_indexable()
+    {
+        var wat = Wat("int main(void){ int a[3]; a[0]=7; return a[0]; }");
+        wat.ShouldContain("global.get $__sp");
+        wat.ShouldContain("i32.store");
+        wat.ShouldContain("i32.load");
+    }
+
+    [Fact]
+    public void a_non_address_taken_scalar_stays_a_fast_wasm_local()
+    {
+        // No & and not an array → a plain value local, no shadow-stack frame.
+        var wat = Wat("int main(void){ int x = 41; return x + 1; }");
+        wat.ShouldContain("(local $x i32)");
+        wat.ShouldNotContain("$__fp");
     }
 }
