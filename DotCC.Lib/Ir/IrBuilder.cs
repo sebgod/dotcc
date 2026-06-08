@@ -63,7 +63,7 @@ internal sealed partial class IrBuilder
     // dialect, so this is the rejection layer — and a pure no-op on the default path.
     private readonly DotCC.DialectGate? _gate;
 
-    public IrBuilder(DotCC.DialectGate? gate = null) => _gate = gate;
+    internal IrBuilder(DotCC.DialectGate? gate = null) => _gate = gate;
 
     /// <summary>Flag a feature introduced in <paramref name="era"/> (ISO year) when
     /// the active dialect predates it. No-op when the gate is off or new enough.</summary>
@@ -207,7 +207,7 @@ internal sealed partial class IrBuilder
         {
             paramSyms.Add(_symbols.Declare(new Symbol { Name = pName, Kind = SymKind.Param, Type = pType }));
         }
-        var body = BuildBlock(block);
+        var body = PromoteMallocs(BuildBlock(block));
         _symbols.ExitScope();
 
         Functions.Add(new FuncDef(funcSym, paramSyms, body, sig.Variadic));

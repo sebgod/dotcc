@@ -1032,6 +1032,8 @@ internal sealed class CodeGen
             case StackArray sa:
                 return ($"stackalloc {sa.Element.CsType}[]{{ {string.Join(", ", sa.Elems.Select(Expr))} }}", PPrimary);
             case DefaultLit: return ($"default({e.Type.CsType})", PPrimary);
+            // A promoted malloc → a zero-initialized stack struct value.
+            case StackNew sn: return ($"new {sn.StructType.CsType}()", PPrimary);
             case PinnedArray pa: return (PinnedArrayText(pa), PPrimary);
             case VaArgGet va:
                 // va_arg(ap, T): a scalar reads via (T)ap.Next(); a pointer via
@@ -1603,6 +1605,14 @@ internal sealed class CodeGen
         var a = new List<string>(c.Args.Count);
         for (var i = 0; i < c.Args.Count; i++)
         {
+            // malloc's size arg: a bare `sizeof(T)` is already a C# int, so emit it
+            // directly — `malloc(sizeof(T))` — not the size_t-wrapped form
+            // `malloc((int)((ulong)(sizeof(T))))` the generic int-param coercion gives.
+            if (c.Callee == "malloc" && c.Args[i] is SizeOfExpr so)
+            {
+                a.Add(SizeofText(so.Of));
+                continue;
+            }
             // A known parameter coerces the arg to its type; a variadic-tail or
             // unknown-signature arg takes C's default argument promotions — notably
             // an enum decays to its underlying int (C# has no enum→int for `.Arg`).

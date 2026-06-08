@@ -32,7 +32,10 @@ public sealed class Symbol
 {
     public required string Name { get; init; }
     public required SymKind Kind { get; init; }
-    public required CType Type { get; init; }
+    /// <summary>The resolved C type. Settable so a post-build IR pass can retype a
+    /// symbol — the malloc→stack-value peephole demotes a <c>T*</c> local to the
+    /// value type <c>T</c> in place, so every shared <see cref="VarRef"/> sees it.</summary>
+    public required CType Type { get; set; }
     public Storage Storage { get; init; } = Storage.None;
     /// <summary>For an <see cref="SymKind.EnumConst"/>: its integer value. C enums
     /// lower to plain integer constants (dotcc emits the literal value at each
