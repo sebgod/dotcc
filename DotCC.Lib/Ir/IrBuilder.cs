@@ -1511,7 +1511,15 @@ internal sealed partial class IrBuilder
         {
             UnOp.LogNot => CType.Int,
             UnOp.AddrOf => new CType.Pointer(oe.Type),
-            UnOp.Deref => oe.Type is CType.Pointer p ? p.Pointee : oe.Type,
+            // *p → pointee; *arr (incl. a string literal, typed char[]) → its element
+            // (the array decays to a pointer first). *ptr-to-array stays the array,
+            // which codegen treats as a no-op decay back to the row pointer.
+            UnOp.Deref => oe.Type.Unqualified switch
+            {
+                CType.Pointer p => p.Pointee,
+                CType.Array a => a.Element,
+                _ => oe.Type,
+            },
             _ => oe.Type,
         };
         return new Unary(op, oe) { Type = t, IsLValue = op == UnOp.Deref };

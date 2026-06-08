@@ -322,7 +322,12 @@ internal sealed class CodeGen
                     sb.Append(pad).Append($"return {rv};\n");
                 }
                 break;
-            case Break: sb.Append(pad).Append("break;\n"); break;
+            case Break:
+                // Inside a switch tail HOISTED out of its switch (see RenderSwitch), a
+                // `break` that meant "leave the switch" must instead skip to the point
+                // just past the switch — otherwise it would escape the enclosing loop.
+                sb.Append(pad).Append(_breakAsGoto is { } bt ? $"goto {bt};\n" : "break;\n");
+                break;
             case Continue: sb.Append(pad).Append("continue;\n"); break;
             case If f:
                 // The condition is evaluated once, so a value comma in it can hoist.
@@ -337,11 +342,11 @@ internal sealed class CodeGen
                 break;
             case While w:
                 sb.Append(pad).Append($"while (Cond.B({Expr(w.Cond)}))\n");
-                Nested(sb, w.Body, ind);
+                WithNormalBreak(() => Nested(sb, w.Body, ind));
                 break;
             case DoWhile dw:
                 sb.Append(pad).Append("do\n");
-                Nested(sb, dw.Body, ind);
+                WithNormalBreak(() => Nested(sb, dw.Body, ind));
                 sb.Append(pad).Append($"while (Cond.B({Expr(dw.Cond)}));\n");
                 break;
             case Goto g:
@@ -383,7 +388,7 @@ internal sealed class CodeGen
                 var cond = fr.Cond is null ? "" : $"Cond.B({Expr(fr.Cond)})";
                 var post = fr.Post is null ? "" : Expr(fr.Post);
                 sb.Append(pad).Append($"for ({init}; {cond}; {post})\n");
-                Nested(sb, fr.Body, ind);
+                WithNormalBreak(() => Nested(sb, fr.Body, ind));
                 break;
             default:
                 throw new IrUnsupportedException("codegen stmt " + s.GetType().Name);
@@ -399,9 +404,27 @@ internal sealed class CodeGen
     /// which is valid because the outer label is in an enclosing block.</summary>
     private Dictionary<string, string>? _gotoCaseMap;
 
+    /// <summary>When set, a <c>break</c> renders as <c>goto &lt;this&gt;</c> — used
+    /// while rendering a switch tail hoisted OUT of its switch, where a `break` that
+    /// meant "leave the switch" must skip to just past the switch rather than escape
+    /// the enclosing loop. Cleared inside a nested loop/switch (break resumes its
+    /// normal target there).</summary>
+    private string? _breakAsGoto;
+
     /// <summary>Unique-suffix counter for the synthetic skip-over labels emitted
     /// after a switch with hoisted shared-handler tails.</summary>
     private int _switchPastSeq;
+
+    /// <summary>Render with <c>break</c> bound to its normal target (loop/switch
+    /// exit) — used around a loop or switch body nested inside a hoisted switch tail,
+    /// where the surrounding <see cref="_breakAsGoto"/> redirection must not leak in.</summary>
+    private void WithNormalBreak(System.Action render)
+    {
+        var saved = _breakAsGoto;
+        _breakAsGoto = null;
+        render();
+        _breakAsGoto = saved;
+    }
 
     /// <summary>Render a C <c>switch</c> to C#, reconciling two label-scope
     /// mismatches the Lua VM dispatch loop relies on:
@@ -459,6 +482,10 @@ internal sealed class CodeGen
 
         var saved = _gotoCaseMap;
         _gotoCaseMap = startLabel.Count > 0 ? startLabel : null;
+        // Inside the sections, a `break` leaves THIS switch normally (clear any
+        // outer hoisted-tail break redirection — break is re-bound per construct).
+        var savedBreak = _breakAsGoto;
+        _breakAsGoto = null;
 
         var hoisted = new List<IReadOnlyList<CStmt>>();
         sb.Append(pad).Append($"switch ({subj})\n").Append(pad).Append("{\n");
@@ -512,11 +539,14 @@ internal sealed class CodeGen
         _gotoCaseMap = saved;
 
         // Hoisted shared handlers: placed after the switch (so a plain `goto L`
-        // reaches them from any case), skipped on normal switch exit.
+        // reaches them from any case), skipped on normal switch exit. A `break` in a
+        // hoisted tail meant "leave the switch" — now it must skip to past the switch
+        // (the handler runs OUTSIDE the switch), so it renders as `goto __sw_past`.
         if (hoisted.Count > 0)
         {
             var past = $"__sw_past_{_switchPastSeq++}";
             sb.Append(pad).Append($"goto {past};\n");
+            _breakAsGoto = past;
             foreach (var grp in hoisted)
             {
                 foreach (var st in grp) { Stmt(sb, st, ind); }
@@ -524,6 +554,7 @@ internal sealed class CodeGen
             }
             sb.Append(pad).Append($"{past}: ;\n");
         }
+        _breakAsGoto = savedBreak;
     }
 
     /// <summary>All <c>goto</c> targets reachable within a section body, descending
