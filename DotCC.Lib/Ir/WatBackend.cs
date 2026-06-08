@@ -31,6 +31,10 @@ internal sealed class WatBackend
     private readonly List<(string Brk, string Cont)> _loops = new();
     private int _labelSeq;
 
+    // Functions defined in this module (by raw C name) — a call to anything else is
+    // a library/undefined call, gated until linear memory + host imports land.
+    private readonly HashSet<string> _defined = new(System.StringComparer.Ordinal);
+
     public static string Run(IrBuilder unit) => new WatBackend().Module(unit);
 
     /// <summary>Emit the module shell: one <c>(func …)</c> per definition, plus an
@@ -40,6 +44,7 @@ internal sealed class WatBackend
     {
         Line("(module");
         _indent++;
+        foreach (var fn in unit.Functions) { _defined.Add(fn.Sym.Name); }
         var hasMain = false;
         foreach (var fn in unit.Functions)
         {
@@ -302,6 +307,9 @@ internal sealed class WatBackend
             case Cast c:
                 EmitCast(c);
                 break;
+            case Call call:
+                EmitCall(call);
+                break;
             case CondExpr ce:
                 EmitCond(ce.Cond);
                 Line($"if (result {ValType(ce.Type)})");
@@ -439,35 +447,64 @@ internal sealed class WatBackend
 
     private void EmitCast(Cast c)
     {
-        var to = c.Target.Unqualified;
-        if (to is CType.VoidType)
+        if (c.Target.Unqualified is CType.VoidType)
         {
             // (void)expr — evaluate for side effects, discard the value.
             EmitExpr(c.Operand);
             Line("drop");
             return;
         }
-        var toVt = ValType(c.Target);
-        var fromVt = ValType(c.Operand.Type);
         EmitExpr(c.Operand);
+        EmitConvert(c.Operand.Type, c.Target);
+    }
+
+    /// <summary>Convert the value on top of the stack from <paramref name="from"/> to
+    /// <paramref name="to"/> in place — the integer width/sign conversions C performs
+    /// implicitly at casts, call arguments and stores: i32↔i64 wrap/extend, then any
+    /// sub-word narrowing (see <see cref="NarrowI32"/>).</summary>
+    private void EmitConvert(CType from, CType to)
+    {
+        var toVt = ValType(to);
+        var fromVt = ValType(from);
         if (toVt == fromVt)
         {
-            NarrowI32(to);
-            return;
+            NarrowI32(to.Unqualified);
         }
-        if (toVt == "i64" && fromVt == "i32")
+        else if (toVt == "i64" && fromVt == "i32")
         {
-            Line(IsSignedInt(c.Operand.Type) ? "i64.extend_i32_s" : "i64.extend_i32_u");
+            Line(IsSignedInt(from) ? "i64.extend_i32_s" : "i64.extend_i32_u");
         }
         else if (toVt == "i32" && fromVt == "i64")
         {
             Line("i32.wrap_i64");
-            NarrowI32(to);
+            NarrowI32(to.Unqualified);
         }
         else
         {
-            throw new IrUnsupportedException($"the wat target does not yet support the cast {c.Operand.Type.Describe()} -> {c.Target.Describe()}");
+            throw new IrUnsupportedException($"the wat target does not yet support the conversion {from.Describe()} -> {to.Describe()}");
         }
+    }
+
+    /// <summary>A direct call. Each argument is coerced to its parameter type (the
+    /// implicit conversion C performs at a call); the callee must be a function
+    /// defined in this module — library calls (printf, malloc, …) need linear memory
+    /// and host imports, a later milestone. (The wat name legalizer escapes
+    /// identity, so the raw callee name is its <c>$</c>-name.)</summary>
+    private void EmitCall(Call c)
+    {
+        if (!_defined.Contains(c.Callee))
+        {
+            throw new IrUnsupportedException($"call to '{c.Callee}': library or undefined functions need linear memory + imports (milestone 2)");
+        }
+        for (var i = 0; i < c.Args.Count; i++)
+        {
+            EmitExpr(c.Args[i]);
+            if (c.ParamTypes is { } pts && i < pts.Count)
+            {
+                EmitConvert(c.Args[i].Type, pts[i]);
+            }
+        }
+        Line($"call ${c.Callee}");
     }
 
     /// <summary>After producing an i32, narrow it to a sub-word target type the way
