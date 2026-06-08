@@ -171,7 +171,51 @@ internal sealed class CodeGen
         return sb.ToString();
     }
 
-    // ---- statements ------------------------------------------------------
+    // ---- comma-operator statement hoisting -------------------------------
+    // A value-context comma `(e1, …, eN)` evaluates e1..e(N-1) for side effects and
+    // yields eN. Rather than an IIFE delegate (which can't take the address of a
+    // captured local — CS1686 — and can't carry a void operand), at a once-evaluated
+    // statement position the leading operands are HOISTED as statements emitted
+    // before the statement, and only eN stays in place. Loop conditions/posts
+    // (re-evaluated each iteration) keep the closure form, where hoisting is wrong.
+
+    /// <summary>Leading comma operands awaiting emission before the current statement
+    /// (populated while <see cref="_canHoist"/> is set).</summary>
+    private readonly List<string> _pending = new();
+    /// <summary>True while rendering a once-evaluated statement-level expression, so a
+    /// value comma hoists its leading operands instead of forming a closure.</summary>
+    private bool _canHoist;
+
+    private void FlushPending(StringBuilder sb, string pad)
+    {
+        foreach (var p in _pending) { sb.Append(pad).Append(p).Append(";\n"); }
+        _pending.Clear();
+    }
+
+    /// <summary>Render a statement-level expression with comma-hoisting enabled, emit
+    /// any hoisted leading statements, and return the (value) text for the statement.</summary>
+    private string Hoist(StringBuilder sb, string pad, System.Func<string> render)
+    {
+        var prev = _canHoist;
+        _canHoist = true;
+        var text = render();
+        _canHoist = prev;
+        FlushPending(sb, pad);
+        return text;
+    }
+
+    /// <summary>Render a sub-expression that is NOT always evaluated (the right
+    /// operand of <c>&amp;&amp;</c>/<c>||</c>, a ternary arm) with hoisting disabled —
+    /// a comma there must keep its side effect conditional (the inline closure form),
+    /// not lift it out where it would run unconditionally.</summary>
+    private string NoHoist(System.Func<string> render)
+    {
+        var prev = _canHoist;
+        _canHoist = false;
+        var text = render();
+        _canHoist = prev;
+        return text;
+    }
 
     private void Stmt(StringBuilder sb, CStmt s, int ind)
     {
@@ -184,8 +228,18 @@ internal sealed class CodeGen
                 sb.Append(pad).Append("}\n");
                 break;
             case DeclStmt d:
-                EmitDeclStmt(sb, d, pad);
+            {
+                // Render the declaration with hoisting enabled (a value-comma
+                // initializer hoists its side effects), then flush before the decl.
+                var tmp = new StringBuilder();
+                var prev = _canHoist;
+                _canHoist = true;
+                EmitDeclStmt(tmp, d, pad);
+                _canHoist = prev;
+                FlushPending(sb, pad);
+                sb.Append(tmp);
                 break;
+            }
             case ArrayDecl a:
                 {
                     var elemCs = a.Element.CsType;
@@ -201,32 +255,48 @@ internal sealed class CodeGen
                     }
                 }
                 break;
-            case ExprStmt { Expr: CommaOp co }:
+            case ExprStmt es:
+            {
                 // A statement-level comma discards every operand's value — emit one
-                // statement per operand, braced so a braceless nested body (the body
-                // of `while (…) (a, b);`) stays a single statement.
-                sb.Append(pad).Append("{\n");
-                foreach (var item in co.Items) { sb.Append(Pad(ind + 1)).Append(RenderStmtExpr(item)).Append(";\n"); }
-                sb.Append(pad).Append("}\n");
+                // statement per operand, BRACED so a braceless nested body (`if (c)
+                // (a, b); else …`, `while (…) (a, b);`) stays a single statement. Peel
+                // parens / a void cast (`(void)(a, b)`, `api_check`) to find the comma.
+                var inner = es.Expr;
+                while (inner is Paren pp) { inner = pp.Inner; }
+                if (inner is CondExpr { Type.Unqualified: CType.VoidType } ct)
+                {
+                    // A void-typed ternary in statement position is a real if/else
+                    // (CS0173 forbids a void `?:` value) — synthesize an If and recurse
+                    // so it nests/braces correctly and takes no trailing `;`.
+                    Stmt(sb, new If(ct.Cond, new ExprStmt(ct.Then), new ExprStmt(ct.Else)) { Pos = es.Pos }, ind);
+                }
+                else if (inner is CommaOp co)
+                {
+                    sb.Append(pad).Append("{\n");
+                    foreach (var item in co.Items) { sb.Append(Pad(ind + 1)).Append(RenderStmtExpr(item)).Append(";\n"); }
+                    sb.Append(pad).Append("}\n");
+                }
+                else
+                {
+                    var t = Hoist(sb, pad, () => RenderStmtExpr(es.Expr));
+                    sb.Append(pad).Append(t).Append(";\n");
+                }
                 break;
-            case ExprStmt e:
-                sb.Append(pad).Append(RenderStmtExpr(e.Expr)).Append(";\n");
-                break;
-            case Return { Value: CommaOp co } when co.Items.Count > 1:
-                // Hoist the leading (side-effect) operands as statements, then return
-                // the last — keeps a void leading operand out of any value form.
-                sb.Append(pad).Append("{\n");
-                for (var k = 0; k < co.Items.Count - 1; k++) { sb.Append(Pad(ind + 1)).Append(RenderStmtExpr(co.Items[k])).Append(";\n"); }
-                sb.Append(Pad(ind + 1)).Append($"return {Coerced(co.Items[^1], _currentRet)};\n");
-                sb.Append(pad).Append("}\n");
-                break;
+            }
             case Return r:
-                sb.Append(pad).Append(r.Value is null ? "return;" : $"return {Coerced(r.Value, _currentRet)};").Append('\n');
+                if (r.Value is null) { sb.Append(pad).Append("return;\n"); }
+                else
+                {
+                    var rv = Hoist(sb, pad, () => Coerced(r.Value, _currentRet));
+                    sb.Append(pad).Append($"return {rv};\n");
+                }
                 break;
             case Break: sb.Append(pad).Append("break;\n"); break;
             case Continue: sb.Append(pad).Append("continue;\n"); break;
             case If f:
-                sb.Append(pad).Append($"if (Cond.B({Expr(f.Cond)}))\n");
+                // The condition is evaluated once, so a value comma in it can hoist.
+                var ifc = Hoist(sb, pad, () => Expr(f.Cond));
+                sb.Append(pad).Append($"if (Cond.B({ifc}))\n");
                 Nested(sb, f.Then, ind);
                 if (f.Else is { } els)
                 {
@@ -252,7 +322,8 @@ internal sealed class CodeGen
                 break;
             case Switch sw:
             {
-                sb.Append(pad).Append($"switch ({Expr(sw.Subject)})\n");
+                var subj = Hoist(sb, pad, () => Expr(sw.Subject));
+                sb.Append(pad).Append($"switch ({subj})\n");
                 sb.Append(pad).Append("{\n");
                 var inner = ind + 1;
                 var ipad = Pad(inner);
@@ -314,10 +385,16 @@ internal sealed class CodeGen
         }
     }
 
-    // Render a sub-statement of if/while/for: a block keeps the parent indent
-    // (braces align under the controller); a single statement indents one level.
-    private void Nested(StringBuilder sb, CStmt s, int ind) =>
-        Stmt(sb, s, s is Block ? ind : ind + 1);
+    // Render a sub-statement of if/while/for. A braceless single statement is always
+    // wrapped in a block: it may HOIST comma side effects into preceding statements,
+    // which would otherwise leak out of the controller's single-statement body.
+    private void Nested(StringBuilder sb, CStmt s, int ind)
+    {
+        if (s is Block) { Stmt(sb, s, ind); return; }
+        sb.Append(Pad(ind)).Append("{\n");
+        Stmt(sb, s, ind + 1);
+        sb.Append(Pad(ind)).Append("}\n");
+    }
 
     /// <summary>True when a statement provably ends control flow at its end, so a
     /// switch section ending in it needs no synthetic fall-through jump.</summary>
@@ -668,11 +745,22 @@ internal sealed class CodeGen
                     : ($"({va.Target.CsType})({Sub(va.Ap, PPostfix)}.Next())", PUnary);
             case Call c: return (CallText(c), PPostfix);
             case CondExpr t:
-                // Wrapped (atomic): C-truthy condition, arms isolated by `?`/`:`.
-                return ($"(Cond.B({Expr(t.Cond)}) ? {Expr(t.Then)} : {Expr(t.Else)})", PPrimary);
+                // Wrapped (atomic): C-truthy condition, arms isolated by `?`/`:`. The
+                // arms are conditional, so they render without hoisting (the condition
+                // always evaluates and may hoist).
+                return ($"(Cond.B({Expr(t.Cond)}) ? {NoHoist(() => Expr(t.Then))} : {NoHoist(() => Expr(t.Else))})", PPrimary);
             case CommaSeq cs:
                 return (string.Join(", ", cs.Items.Select(it => Sub(it, PAssign))), PComma);
             case CommaOp co:
+                // At a hoistable statement position, push the leading (side-effect)
+                // operands as statements and become just the value operand (closure-
+                // free — no CS1686 on a captured local's address). Otherwise fall back
+                // to the inline tuple / IIFE value form.
+                if (_canHoist)
+                {
+                    for (var i = 0; i < co.Items.Count - 1; i++) { _pending.Add(RenderStmtExpr(co.Items[i])); }
+                    return Render(co.Items[^1]);
+                }
                 return (CommaValue(co), PPrimary);
             case Assign a when a.Target.Type.IsAtomic:
                 {
@@ -797,9 +885,11 @@ internal sealed class CodeGen
                     return ($"((CBool)({l} {BinSym(b.Op)} {r}))", PPrimary);
                 }
             case BinOp.LogAnd:
-                return ($"((CBool)(Cond.B({Expr(b.Left)}) && Cond.B({Expr(b.Right)})))", PPrimary);
+                // The right operand is short-circuited — render it WITHOUT hoisting so
+                // a comma there stays conditional (the left always evaluates).
+                return ($"((CBool)(Cond.B({Expr(b.Left)}) && Cond.B({NoHoist(() => Expr(b.Right))})))", PPrimary);
             case BinOp.LogOr:
-                return ($"((CBool)(Cond.B({Expr(b.Left)}) || Cond.B({Expr(b.Right)})))", PPrimary);
+                return ($"((CBool)(Cond.B({Expr(b.Left)}) || Cond.B({NoHoist(() => Expr(b.Right))})))", PPrimary);
             case BinOp.Shl or BinOp.Shr:
                 {
                     // A shift's operands are promoted INDEPENDENTLY (the right
@@ -964,6 +1054,12 @@ internal sealed class CodeGen
         // Outer parens never matter for a statement-expression (a macro body like
         // `((c) ? a() : b())` arrives parenthesized) — strip them to see the shape.
         while (e is Paren p) { e = p.Inner; }
+        // A comma in statement position discards every operand's value (the whole
+        // comma's value is unused here), so emit each operand as its own statement
+        // rather than a value tuple/delegate. This is also the ONLY correct lowering
+        // when the comma's value is void (`api_check` = `((void)l, lua_assert(...))`,
+        // `lua_lock` = `((void)0)`), where a Func<void>/tuple element is illegal C#.
+        if (e is CommaOp co) { return string.Join("; ", co.Items.Select(RenderStmtExpr)); }
         // A void-typed conditional (`c ? voidA() : voidB()`) has no C# value form
         // (CS0173) — in statement/discard position it IS an if/else. Arms recurse
         // (a nested void `?:`); each arm renders in statement position too.

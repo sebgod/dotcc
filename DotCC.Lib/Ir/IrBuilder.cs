@@ -63,12 +63,24 @@ internal sealed partial class IrBuilder
 
     private void FlattenFns(Item it, Action<Item> onFn)
     {
-        switch (it.Content)
+        // A translation unit with thousands of top-level declarations (Lua, with all
+        // its #included prototypes) nests FnsCons thousands deep — recursing would
+        // overflow dotcc's own stack. Flatten with an explicit stack (pushing the
+        // right child first so the left is processed first), preserving source order.
+        var stack = new Stack<Item>();
+        stack.Push(it);
+        var ordered = new List<Item>();
+        while (stack.Count > 0)
         {
-            case C.FnsCons c: FlattenFns(c.Arg0, onFn); FlattenFns(c.Arg1, onFn); break;
-            case C.FnsOne o: FlattenFns(o.Arg0, onFn); break;
-            default: onFn(it); break;
+            var n = stack.Pop();
+            switch (n.Content)
+            {
+                case C.FnsCons c: stack.Push(c.Arg1); stack.Push(c.Arg0); break;
+                case C.FnsOne o: stack.Push(o.Arg0); break;
+                default: ordered.Add(n); break;
+            }
         }
+        foreach (var f in ordered) { onFn(f); }
     }
 
     private void BuildTopLevel(Item fn)
@@ -586,6 +598,11 @@ internal sealed partial class IrBuilder
         // form unwraps to that type. The expr isn't evaluated (only its type taken).
         C.TypeofExpr t => BuildExpr(t.Arg2).Type.Unqualified,
         C.TypeofType t => ResolveType(t.Arg2),
+        // A function-pointer type `Ret (*)(params)` — abstract declarator (a cast
+        // target, a typedef target, a sizeof operand): lowers to CType.Func.
+        C.TypeFnPtr t => FnPtrType(t.Arg0, t.Arg5),
+        C.TypeFnPtrNoArgs t => FnPtrType(t.Arg0, null),
+        C.TypeFnPtrVoid t => FnPtrType(t.Arg0, null),
         _ => throw new IrUnsupportedException(TypeName(it.Content)),
     };
 
@@ -727,11 +744,17 @@ internal sealed partial class IrBuilder
 
     private void FlattenStmts(Item it, Action<Item> onStmt)
     {
-        switch (it.Content)
+        // Iterative walk of the statement list (a large function body — Lua's
+        // luaV_execute — would otherwise recurse one frame per statement).
+        while (true)
         {
-            case C.StmtsCons c: onStmt(c.Arg0); FlattenStmts(c.Arg1, onStmt); break;
-            case C.StmtsOne o: onStmt(o.Arg0); break;
-            default: onStmt(it); break;
+            switch (it.Content)
+            {
+                case C.StmtsCons c: onStmt(c.Arg0); it = c.Arg1; continue;
+                case C.StmtsOne o: onStmt(o.Arg0); break;
+                default: onStmt(it); break;
+            }
+            break;
         }
     }
 
@@ -750,6 +773,9 @@ internal sealed partial class IrBuilder
             case C.StmtStaticArr s: return BuildStaticLocalArr(s.Arg1, s.Arg2, s.Arg3, null) with { Pos = pos };
             case C.StmtStaticArrInit s: return BuildStaticLocalArr(s.Arg1, s.Arg2, s.Arg3, s.Arg6) with { Pos = pos };
             case C.StmtStaticArrInitImplicit s: return BuildStaticLocalArr(s.Arg1, s.Arg2, null, s.Arg7) with { Pos = pos };
+            // Block-scope `static char a[] = "…"` / sized — pinned global char array.
+            case C.StmtStaticCharArrStr s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg6, null) with { Pos = pos };
+            case C.StmtStaticCharArrStrSized s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg5, s.Arg3) with { Pos = pos };
             // Block-scope aggregate TYPE definitions (`struct cD { … };` inside a
             // function body — the block-scope enum forms are handled below). A
             // type has no storage, so C allows this; dotcc hoists the definition

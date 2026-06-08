@@ -435,4 +435,13 @@ internal sealed partial class IrBuilder
         BuildGlobalArr(typeItem, nameItem, dimsItem, initItem, csName);
         return new DeclStmt(System.Array.Empty<LocalDecl>());
     }
+
+    /// <summary>A block-scope <c>static char a[] = "…"</c> — a pinned global char
+    /// array under a mangled name (the statement emits nothing).</summary>
+    private CStmt BuildStaticLocalCharArr(Item typeItem, Item nameItem, Item strSeqItem, Item? dimsItem)
+    {
+        var csName = $"{DotCC.CSharpEmitter.Id(Tok(nameItem))}__s{_staticLocalSeq++}";
+        BuildGlobalCharArr(typeItem, nameItem, strSeqItem, dimsItem, csName);
+        return new DeclStmt(System.Array.Empty<LocalDecl>());
+    }
 }
