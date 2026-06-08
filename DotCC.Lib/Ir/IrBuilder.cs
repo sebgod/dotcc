@@ -794,7 +794,7 @@ internal sealed partial class IrBuilder
         {
             "void" => CType.Void,
             "_Bool" => CType.Bool,
-            "Float128" => new CType.Named("Float128"),
+            "Float128" => CType.Float128,
             "float" => CType.Float,
             "double" => lng >= 1 ? CType.LongDouble : CType.Double,
             "char" => u > 0 ? CType.UChar : s > 0 ? CType.SChar : CType.Char,
@@ -1718,10 +1718,10 @@ internal sealed partial class IrBuilder
     private static bool IsFuncPtr(CType t) =>
         t.Unqualified is CType.Pointer { Pointee: CType.Func } or CType.Func;
 
-    /// <summary>True when <paramref name="t"/> is the lowered C99 <c>_Complex</c>
-    /// type (<c>System.Numerics.Complex</c>).</summary>
+    /// <summary>True when <paramref name="t"/> is the C99 <c>_Complex</c> type —
+    /// recognised structurally, independent of any target spelling.</summary>
     private static bool IsComplexType(CType t) =>
-        t.Unqualified is CType.Named { Name: "System.Numerics.Complex" };
+        t.Unqualified is CType.ComplexType;
 
     private bool TryCalleeName(Item it, out string name)
     {

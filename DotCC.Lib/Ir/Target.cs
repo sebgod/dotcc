@@ -52,6 +52,8 @@ internal sealed class CSharpTarget : ITarget
         CType.Func f => $"delegate*<{string.Join(", ", f.Params.Select(RenderType).Append(RenderType(f.Return)))}>",
         CType.Named n => n.Name,
         CType.Enum e => e.Name,
+        CType.ComplexType => "System.Numerics.Complex",
+        CType.Float128Type => "Float128",
         _ => throw new IrUnsupportedException("C# target cannot render type " + t.GetType().Name),
     };
 
