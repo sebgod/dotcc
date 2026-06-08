@@ -67,13 +67,13 @@ public sealed record Binary(BinOp Op, CExpr Left, CExpr Right) : CExpr;
 /// <c>=</c>, or the arithmetic/bitwise op for a compound assignment (<c>+=</c>).</summary>
 public sealed record Assign(BinOp? CompoundOp, CExpr Target, CExpr Value) : CExpr;
 
-/// <summary>A function call by name (the slice only calls named functions /
-/// libc builtins). <see cref="Builtin"/> marks a libc name that codegen lowers
-/// specially (printf-family fluent form). <see cref="ParamTypes"/> is the
-/// resolved callee's fixed-parameter types (null when the callee has no known
-/// signature), used by codegen to coerce each argument to its parameter type —
-/// C's implicit conversion at a call, which C# requires made explicit.</summary>
-public sealed record Call(string Callee, IReadOnlyList<CExpr> Args, bool Builtin,
+/// <summary>A function call by name (a named function or libc builtin).
+/// <see cref="ParamTypes"/> is the resolved callee's fixed-parameter types (null
+/// when the callee has no known signature), used by the backend to coerce each
+/// argument to its parameter type — C's implicit conversion at a call, which C#
+/// requires made explicit. How a particular libc name renders (e.g. printf's
+/// fluent form) is the backend's decision, keyed off <see cref="Callee"/>.</summary>
+public sealed record Call(string Callee, IReadOnlyList<CExpr> Args,
     IReadOnlyList<CType>? ParamTypes = null) : CExpr;
 
 /// <summary>A call through a computed function-pointer expression — <c>(*fp)(x)</c>,
@@ -121,10 +121,11 @@ public sealed record SizeOfExpr(CType Of) : CExpr;
 /// within struct/union <paramref name="StructType"/>. Codegen computes it via the
 /// address-through-a-null-pointer idiom (<c>(nint)&amp;((T*)null)-&gt;m</c>), so it
 /// respects the real .NET blittable layout (alignment included).
-/// <see cref="MemberDecaysToPointer"/> is set when the member is a primitive
-/// <c>fixed</c>-buffer array, whose access already evaluates to its own address —
-/// so the <c>&amp;</c> is omitted (taking it would be CS0211).</summary>
-public sealed record OffsetOf(CType StructType, string Member, bool MemberDecaysToPointer) : CExpr;
+/// <see cref="MemberType"/> is the member's declared type (null if the struct/field
+/// isn't modelled) — a neutral fact from which the backend decides rendering: an
+/// array member that lowers to a C# <c>fixed</c> buffer already evaluates to its own
+/// address, so the backend omits the <c>&amp;</c> (taking it would be CS0211).</summary>
+public sealed record OffsetOf(CType StructType, string Member, CType? MemberType) : CExpr;
 
 /// <summary>A positional struct/union aggregate initializer — lowered from
 /// <c>struct Point p = {3, 4}</c>. Codegen emits a C# object initializer
@@ -216,10 +217,12 @@ public sealed record Return(CExpr? Value) : CStmt;
 public sealed record Break : CStmt;
 public sealed record Continue : CStmt;
 
-/// <summary>A <c>goto label;</c>. <see cref="Label"/> is the already-escaped C# label.</summary>
+/// <summary>A <c>goto label;</c>. <see cref="Label"/> is the RAW C label name; the
+/// backend escapes it for emission (C# keyword collisions).</summary>
 public sealed record Goto(string Label) : CStmt;
 
-/// <summary>A labeled statement <c>name: body</c> (<see cref="Name"/> escaped).</summary>
+/// <summary>A labeled statement <c>name: body</c> (<see cref="Name"/> is the RAW C
+/// label name; the backend escapes it for emission).</summary>
 public sealed record Labeled(string Name, CStmt Body) : CStmt;
 
 /// <summary>The desugared form of a recognised <c>setjmp</c>/<c>longjmp</c> guard

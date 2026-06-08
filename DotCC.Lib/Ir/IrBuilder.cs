@@ -914,8 +914,8 @@ internal sealed partial class IrBuilder
             // BuildSwitch handles the top-level ones; a nested one reaches here.
             case C.CaseLabel cl: return new CaseLabelStmt(BuildExpr(cl.Arg1), BuildStmt(cl.Arg3)) { Pos = pos };
             case C.DefaultLabel dl: return new CaseLabelStmt(null, BuildStmt(dl.Arg2)) { Pos = pos };
-            case C.StmtGoto s: return new Goto(DotCC.EmitHelpers.Id(Tok(s.Arg1))) { Pos = pos };
-            case C.StmtLabel s: return new Labeled(DotCC.EmitHelpers.Id(Tok(s.Arg0)), BuildStmt(s.Arg2)) { Pos = pos };
+            case C.StmtGoto s: return new Goto(Tok(s.Arg1)) { Pos = pos };
+            case C.StmtLabel s: return new Labeled(Tok(s.Arg0), BuildStmt(s.Arg2)) { Pos = pos };
             // A block-scope enum definition has no storage — register its
             // constants and emit nothing (an empty block).
             case C.StmtEnumDef s: RegisterEnum(Tok(s.Arg1), null, s.Arg3); return new Block(System.Array.Empty<CStmt>()) { Pos = pos };
@@ -1684,7 +1684,7 @@ internal sealed partial class IrBuilder
             // coercion (C's implicit conversion at a call, e.g. `size_t` sizeof
             // arg → `int` malloc param, or the int-0 null-pointer constant).
             var fn = _symbols.Resolve(name)?.Type as CType.Func;
-            return new Call(name, args, IsPrintfFamily(name), fn?.Params) { Type = fn?.Return ?? CType.Int };
+            return new Call(name, args, fn?.Params) { Type = fn?.Return ?? CType.Int };
         }
 
         // Indirect call through a computed fn-ptr expression: `(*fp)(x)`,
@@ -1743,9 +1743,6 @@ internal sealed partial class IrBuilder
         }
     }
 
-    private static bool IsPrintfFamily(string name) =>
-        name is "printf" or "fprintf" or "sprintf" or "snprintf";
-
     // ---- literals --------------------------------------------------------
 
     /// <summary><c>offsetof(T, member)</c> — resolve the aggregate type and look
@@ -1757,18 +1754,20 @@ internal sealed partial class IrBuilder
     {
         var structType = ResolveType(n.Arg2);
         var member = Tok(n.Arg4);
-        var decays = false;
+        // Record the member's declared type (a neutral fact); the backend decides
+        // whether its layout makes the member's access self-addressing.
+        CType? memberType = null;
         if ((structType.Unqualified as CType.Named)?.Name is { } canon
             && _structFields.TryGetValue(canon, out var fields))
         {
             foreach (var f in fields)
             {
                 if (f.Name != member) { continue; }
-                decays = f.Type.Unqualified is CType.Array a && CodeGen.IsFixedBufferType(a.Element.CsType);
+                memberType = f.Type;
                 break;
             }
         }
-        return new OffsetOf(structType, member, decays) { Type = CType.SizeT };
+        return new OffsetOf(structType, member, memberType) { Type = CType.SizeT };
     }
 
     private CExpr BuildStr(Item it)

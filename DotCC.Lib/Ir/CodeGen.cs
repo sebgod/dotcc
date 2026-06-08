@@ -190,7 +190,7 @@ internal sealed class CodeGen
     /// <summary>C# permits a <c>fixed</c> buffer only of these primitive element
     /// types — every other array member must go through an <c>[InlineArray]</c>
     /// wrapper instead.</summary>
-    internal static bool IsFixedBufferType(string cs) => cs is
+    private static bool IsFixedBufferType(string cs) => cs is
         "bool" or "byte" or "sbyte" or "short" or "ushort" or "int" or "uint"
         or "long" or "ulong" or "char" or "float" or "double";
 
@@ -384,11 +384,11 @@ internal sealed class CodeGen
                 // can't be a plain label-goto (C# can't jump into a sibling case —
                 // CS0159); it renders as `goto case <V>` via the active switch's map.
                 sb.Append(pad).Append(
-                    _gotoCaseMap is { } gm && gm.TryGetValue(g.Label, out var jc) ? jc : $"goto {g.Label};")
+                    _gotoCaseMap is { } gm && gm.TryGetValue(g.Label, out var jc) ? jc : $"goto {DotCC.EmitHelpers.Id(g.Label)};")
                   .Append('\n');
                 break;
             case Labeled lb:
-                sb.Append(pad).Append(lb.Name).Append(":\n");
+                sb.Append(pad).Append(DotCC.EmitHelpers.Id(lb.Name)).Append(":\n");
                 Stmt(sb, lb.Body, ind);
                 break;
             case CaseLabelStmt cls:
@@ -555,7 +555,7 @@ internal sealed class CodeGen
             if (cut >= 0)
             {
                 hoisted.Add(eff.Skip(cut).ToList());
-                sb.Append(Pad(bodyInd)).Append($"goto {((Labeled)eff[cut]).Name};\n");
+                sb.Append(Pad(bodyInd)).Append($"goto {DotCC.EmitHelpers.Id(((Labeled)eff[cut]).Name)};\n");
             }
             if (wrapped) { sb.Append(Pad(inner + 1)).Append("}\n"); }
             // Synthesize C's fall-through jump when the section doesn't end control
@@ -1005,7 +1005,10 @@ internal sealed class CodeGen
                 // member's access already yields its address (no `&`); a scalar
                 // member uses `&`.
                 var m = DotCC.EmitHelpers.Id(o.Member);
-                var memberAddr = o.MemberDecaysToPointer ? $"(byte*)__t.{m}" : $"(byte*)&__t.{m}";
+                // A member that lowers to a C# `fixed` buffer (primitive-element
+                // array) already yields its own address — no `&` (would be CS0211).
+                var decays = o.MemberType?.Unqualified is CType.Array fa && IsFixedBufferType(fa.Element.CsType);
+                var memberAddr = decays ? $"(byte*)__t.{m}" : $"(byte*)&__t.{m}";
                 return ($"((System.Func<ulong>)(() => {{ {o.StructType.CsType} __t = default; return (ulong)({memberAddr} - (byte*)&__t); }}))()", PPrimary);
             }
             case Index ix:
@@ -1626,7 +1629,7 @@ internal sealed class CodeGen
                 ? CoercedArg(c.Args[i], pts[i])
                 : Sub(DecayEnum(c.Args[i]), PAssign));
         }
-        if (c.Builtin)
+        if (IsPrintfFamily(c.Callee))
         {
             // printf-family fluent lowering — matches the runtime contract:
             // printf(fmt).Arg(x).Arg(y).Done()  /  fprintf(stream, fmt)…  etc.
@@ -1645,6 +1648,11 @@ internal sealed class CodeGen
         }
         return $"{DotCC.EmitHelpers.Id(c.Callee)}({string.Join(", ", a)})";
     }
+
+    /// <summary>The libc names the C# backend lowers to the fluent
+    /// <c>printf(fmt).Arg(x).Done()</c> form (variadic format functions).</summary>
+    private static bool IsPrintfFamily(string callee) =>
+        callee is "printf" or "fprintf" or "sprintf" or "snprintf";
 
     private static string Arg(List<string> a, int i) => i < a.Count ? a[i] : "";
 
