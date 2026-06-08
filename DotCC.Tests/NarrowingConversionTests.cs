@@ -128,7 +128,8 @@ public sealed class NarrowingConversionTests
         {
             var stderr = EmitCapturingStderr(src, warnConversion: true);
             stderr.ShouldContain("[-Wconversion]");
-            stderr.ShouldContain("from `int` to `lu_byte`");
+            // The typed IR resolves the `lu_byte` typedef to its underlying `byte`.
+            stderr.ShouldContain("from `int` to `byte`");
         }
         finally { File.Delete(src); }
     }

@@ -423,17 +423,16 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
-    public void Sizeof_of_unsupported_operand_fails_clearly()
+    public void Sizeof_of_floating_arithmetic_resolves_to_result_size()
     {
-        // A FLOATING arithmetic result has no synthesized type (the integer
-        // usual-arithmetic layer only types integer pairs), so its sizeof can't be
-        // resolved — dotcc must fail loudly. (Member access, pointer arithmetic,
-        // comma, AND integer arithmetic ARE now resolved — see SizeofMemberTests.)
+        // The typed IR types EVERY expression (the legacy type-synthesis layer only
+        // typed integer pairs and had to fail loudly here). A floating arithmetic
+        // result is its operand type, so `sizeof(a * b)` for doubles resolves to
+        // `sizeof(double)`.
         var src = WriteTemp("int main() { double a = 3, b = 4; int n = sizeof(a * b); return n; }");
         try
         {
-            var ex = Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }));
-            ex.Message.ShouldContain("sizeof");
+            Compiler.EmitCSharp(new[] { src }).ShouldContain("sizeof(double)");
         }
         finally { File.Delete(src); }
     }

@@ -82,14 +82,13 @@ public sealed class SizeofMemberTests
     }
 
     [Fact]
-    public void unsynthesizable_sizeof_still_throws()
+    public void floating_member_arithmetic_sizeof_resolves_to_result_size()
     {
-        // A FLOATING multiplicative result has no synthesized type (the integer
-        // usual-arithmetic layer only types integer pairs), so sizeof of it must
-        // still fail loudly rather than silently emit a wrong size.
+        // The typed IR types every expression (the legacy integer-only synthesis
+        // threw here). A FLOATING multiplicative result is its operand type, so
+        // sizeof of it resolves to that type's size — `double * double` → sizeof(double).
         var src = WriteTemp(Probe("sizeof(p->in.d * p->in.d)"));
-        Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
-            .Message.ShouldContain("sizeof");
+        Compiler.EmitCSharp(new[] { src }).ShouldContain("sizeof(double)");
     }
 
     // Chain through an ANONYMOUS inline struct member (Lua's
