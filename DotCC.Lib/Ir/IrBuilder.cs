@@ -7,22 +7,20 @@ using Item = global::LALR.CC.LexicalGrammar.Item;
 namespace DotCC.Ir;
 
 /// <summary>Thrown when the IR builder meets a parse-tree node it doesn't yet
-/// lower. Carries the node type name so the <c>--ir</c> backend fails loudly on
-/// an out-of-slice construct (and so such a fixture stays off the IR allow-list)
-/// rather than silently miscompiling.</summary>
+/// lower. Carries the node type name so the backend fails loudly on an
+/// unsupported construct rather than silently miscompiling.</summary>
 public sealed class IrUnsupportedException : Exception
 {
-    public IrUnsupportedException(string node) : base($"--ir backend does not yet support: {node}") { }
+    public IrUnsupportedException(string node) : base($"dotcc does not yet support: {node}") { }
 }
 
 /// <summary>
 /// Builds the typed IR from the raw LALR parse tree (driven by
 /// <see cref="ParseTreeIdentityVisitor"/>). A TOP-DOWN recursive walk with full
 /// scope/type context — the opposite of the legacy bottom-up string emitter.
-/// Phase 0 covers a vertical slice: functions, scalar/pointer types, arithmetic
-/// / relational / logical / assignment expressions, calls (incl. printf), and
-/// if/while/for/return/block. Out-of-slice nodes raise
-/// <see cref="IrUnsupportedException"/>.
+/// This is the sole backend: it covers the whole C surface dotcc supports.
+/// A parse-tree node it doesn't yet lower raises
+/// <see cref="IrUnsupportedException"/> (fail loudly, never silently miscompile).
 /// </summary>
 internal sealed partial class IrBuilder
 {
