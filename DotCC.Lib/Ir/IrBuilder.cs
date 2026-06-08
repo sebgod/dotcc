@@ -910,6 +910,10 @@ internal sealed partial class IrBuilder
             case C.StmtForNoInit s:
                 return new For(null, BuildForCond(s.Arg3), BuildForPost(s.Arg5), BuildStmt(s.Arg7)) { Pos = pos };
             case C.StmtSwitch s: return BuildSwitch(s, pos);
+            // A case/default label NESTED in a switch body statement (Duff's device).
+            // BuildSwitch handles the top-level ones; a nested one reaches here.
+            case C.CaseLabel cl: return new CaseLabelStmt(BuildExpr(cl.Arg1), BuildStmt(cl.Arg3)) { Pos = pos };
+            case C.DefaultLabel dl: return new CaseLabelStmt(null, BuildStmt(dl.Arg2)) { Pos = pos };
             case C.StmtGoto s: return new Goto(DotCC.EmitHelpers.Id(Tok(s.Arg1))) { Pos = pos };
             case C.StmtLabel s: return new Labeled(DotCC.EmitHelpers.Id(Tok(s.Arg0)), BuildStmt(s.Arg2)) { Pos = pos };
             // A block-scope enum definition has no storage — register its
@@ -1900,6 +1904,12 @@ internal sealed partial class IrBuilder
         }
         else if (digits.Length >= 2 && digits[0] == '0')
         {
+            // Octal. Validate each digit (C rejects `08`/`09`); Convert.ToUInt64
+            // base 8 would otherwise throw a raw FormatException.
+            foreach (var c in digits)
+            {
+                if (c is < '0' or > '7') { throw new DotCC.CompileException($"invalid digit '{c}' in octal constant '{raw}'"); }
+            }
             var value = Convert.ToUInt64(digits, 8);
             text = value.ToString(inv) + suffix;
             if (value <= long.MaxValue) { val = (long)value; }

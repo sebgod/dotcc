@@ -29,9 +29,9 @@ internal sealed record CodeGenResult(
 /// </summary>
 internal sealed class CodeGen
 {
-    public static CodeGenResult Run(IrBuilder unit)
+    public static CodeGenResult Run(IrBuilder unit, DotCC.ConversionGate? convGate = null)
     {
-        var cg = new CodeGen();
+        var cg = new CodeGen { _convGate = convGate };
         var fns = new StringBuilder();
         var exports = new List<DotCC.EmitHelpers.Export>();
         var mainArity = -1;
@@ -39,6 +39,7 @@ internal sealed class CodeGen
         foreach (var fn in unit.Functions)
         {
             if (fns.Length > 0) { fns.Append("\n\n"); }
+            cg._currentFnName = fn.Sym.Name;
             fns.Append(cg.Func(fn));
 
             if (fn.Sym.Name == "main") { mainArity = fn.Params.Count; }
@@ -389,6 +390,12 @@ internal sealed class CodeGen
                 sb.Append(pad).Append(lb.Name).Append(":\n");
                 Stmt(sb, lb.Body, ind);
                 break;
+            case CaseLabelStmt cls:
+                // A case/default label nested in a switch-body statement (Duff's
+                // device) — printed verbatim (structurally faithful; C# rejects it).
+                sb.Append(pad).Append(cls.CaseExpr is { } cse ? $"case {Expr(DecayEnum(cse))}:\n" : "default:\n");
+                Stmt(sb, cls.Body, ind);
+                break;
             case Switch sw:
                 RenderSwitch(sb, sw, ind, pad);
                 break;
@@ -668,6 +675,10 @@ internal sealed class CodeGen
     /// rendered — the sink type for <c>return</c> coercion. Set per function in
     /// <see cref="Func"/> (CodeGen renders functions one at a time).</summary>
     private CType _currentRet = CType.Int;
+    // -Wconversion sink (off unless -Wconversion). The narrowing decision is made
+    // here in TryCoerceCast, so this is the natural place to record the warning.
+    private DotCC.ConversionGate? _convGate;
+    private string? _currentFnName;
 
     // ---- volatile / atomic access ----------------------------------------
 
@@ -799,6 +810,12 @@ internal sealed class CodeGen
                 return false;
             }
             if (CsImplicitInt(s, t2)) { return false; }   // C# widens for free
+            // -Wconversion: a genuine width narrowing (wider→narrower) may lose data.
+            // A same-width sign change is -Wsign-conversion (out of scope), not flagged.
+            if (_convGate != null && IntWidth(t2) is int tw && IntWidth(s) is int sw && tw < sw)
+            {
+                _convGate.Narrowing(s, t2, _currentFnName, value.Pos.Line);
+            }
             var cast = $"({t2})({Expr(value)})";
             // An out-of-range CONSTANT cast is CS0221 unless wrapped in unchecked.
             if (TryConstInt(value, out var k) && !ConstFitsTarget(k, t2))
