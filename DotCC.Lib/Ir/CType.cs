@@ -47,6 +47,13 @@ public abstract record CType
     public bool IsVolatile => (Quals & TypeQual.Volatile) != 0;
     public bool IsAtomic => (Quals & TypeQual.Atomic) != 0;
 
+    /// <summary>True when this type lowers to a C# pointer (<c>T*</c>) or function
+    /// pointer (<c>delegate*&lt;…&gt;</c>). Neither is a legal generic type argument,
+    /// so any <c>Unsafe.AsPointer&lt;T&gt;</c> / <c>Volatile.*&lt;T&gt;</c> /
+    /// <c>Atomic.*&lt;T&gt;</c> access to such an lvalue must reinterpret its storage
+    /// as <c>nint</c> first (CS0306).</summary>
+    public bool IsPointerLowered => Unqualified is Pointer or Func;
+
     /// <summary>Return a copy of this type with the given qualifiers OR-ed in.</summary>
     public CType WithQuals(TypeQual add) => add == TypeQual.None ? this : this with { Quals = Quals | add };
 

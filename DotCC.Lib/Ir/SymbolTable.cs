@@ -43,6 +43,14 @@ public sealed class Symbol
     /// <summary>True for a file-scope (global) symbol — codegen emits it as a
     /// <c>DotCcGlobals</c> field rather than a block local.</summary>
     public bool IsGlobal { get; init; }
+
+    /// <summary>Set when a pointer/fn-ptr-typed global has its address taken (or is
+    /// volatile/atomic-accessed): its backing field is declared <c>nint</c> and codegen
+    /// casts on every read/write/address-of. C# forbids a pointer type as the <c>T</c>
+    /// of <c>Unsafe.AsPointer&lt;T&gt;</c> / <c>Volatile.*&lt;T&gt;</c> (CS0306), and a
+    /// moveable static field can't take a bare <c>&amp;</c> (CS0212); a <c>nint</c> field
+    /// satisfies both. See <see cref="CType.IsPointerLowered"/>.</summary>
+    public bool StoreAsNint { get; set; }
 }
 
 /// <summary>
