@@ -32,13 +32,18 @@ public abstract record CExpr
     public bool IsLValue { get; init; }
 }
 
-/// <summary>An integer constant. <see cref="CsText"/> is the already-lowered C#
-/// literal (octal converted, suffix normalised); <see cref="Value"/> is the
-/// folded value when it fits a long (for const-expression contexts).</summary>
-public sealed record LitInt(string CsText, long? Value) : CExpr;
+/// <summary>An integer constant. <see cref="Digits"/> is the target-neutral
+/// numeric core — the source digits with octal normalised to decimal and the
+/// suffix stripped; the backend re-adds a target suffix from <see cref="CExpr.Type"/>
+/// via <see cref="ITarget.RenderIntLit"/>. <see cref="Value"/> is the folded value
+/// when it fits a long (for const-expression contexts).</summary>
+public sealed record LitInt(string Digits, long? Value) : CExpr;
 
-/// <summary>A floating constant, lowered to its C# literal text.</summary>
-public sealed record LitFloat(string CsText) : CExpr;
+/// <summary>A floating constant. <see cref="Text"/> is the target-neutral decimal
+/// spelling (a hex-float normalised to round-trippable decimal; a long-double
+/// suffix dropped, an <c>f</c> kept); the backend emits it via
+/// <see cref="ITarget.RenderFloatLit"/>.</summary>
+public sealed record LitFloat(string Text) : CExpr;
 
 /// <summary>A string literal — the raw adjacent quoted C segments (e.g.
 /// <c>["\"a\\n\"", "\"b\""]</c>), NOT yet encoded. The backend decodes the C
@@ -181,11 +186,16 @@ public sealed record VaArgGet(CExpr Ap, CType Target) : CExpr;
 /// explicit grouping (precedence-driven parens come later).</summary>
 public sealed record Paren(CExpr Inner) : CExpr;
 
-/// <summary>Escape hatch: a pre-rendered C# fragment. Used when the builder
-/// resolves something to verbatim text it has no richer node for yet (an
-/// unresolved builtin name, a macro-substituted literal). Kept rare — every use
-/// is a candidate for a real node later.</summary>
-public sealed record Raw(string CsText) : CExpr;
+/// <summary>The null pointer constant (C23 <c>nullptr</c>). A typed node rather
+/// than a literal so the backend spells it per target (the C# backend: <c>null</c>).</summary>
+public sealed record NullPtr : CExpr;
+
+/// <summary>A bare identifier the binder left unresolved — a runtime/library symbol
+/// surfaced by name (the <c>&lt;complex.h&gt;</c> imaginary unit), or an
+/// incremental-growth safety net for a name not in any header. Carries the RAW
+/// source name; the backend escapes it for emission. (Replaces the old verbatim-C#
+/// <c>Raw</c> escape hatch — the IR no longer carries output-language text.)</summary>
+public sealed record NameRef(string RawName) : CExpr;
 
 // ---- statements ---------------------------------------------------------
 

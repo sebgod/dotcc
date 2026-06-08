@@ -972,10 +972,12 @@ internal sealed class CodeGen
     {
         switch (e)
         {
-            case LitInt i: return (i.CsText, PPrimary);
-            case LitFloat f: return (f.CsText, PPrimary);
+            case LitInt i: return (_target.RenderIntLit(i), PPrimary);
+            case LitFloat f: return (_target.RenderFloatLit(f), PPrimary);
             case LitStr s: return (DotCC.EmitHelpers.EncodeStringLiteral(s.Segments), PPrimary);
-            case Raw r: return (r.CsText, PPrimary);
+            case NullPtr: return ("null", PPrimary);
+            // A bare unresolved identifier: the backend escapes the raw name.
+            case NameRef nr: return (DotCC.EmitHelpers.Id(nr.RawName), PPrimary);
             // An enumerator of a real enum: EnumName.Member (member access).
             case EnumConstRef ec: return ($"{Cs(ec.Sym.Type.Unqualified)}.{DotCC.EmitHelpers.Id(ec.Sym.Name)}", PPostfix);
             // A bare function name used as a value decays to its address — C#
@@ -1500,7 +1502,7 @@ internal sealed class CodeGen
     {
         // A volatile/atomic read is itself an observable access — never drop it.
         _ when e.Type.IsVolatile || e.Type.IsAtomic => false,
-        LitInt or LitFloat or LitStr or Raw or DefaultLit or VarRef or SizeOfExpr or OffsetOf => true,
+        LitInt or LitFloat or LitStr or NullPtr or NameRef or DefaultLit or VarRef or SizeOfExpr or OffsetOf => true,
         Paren p => IsPure(p.Inner),
         Cast c => IsPure(c.Operand),
         Member m => IsPure(m.Base),
