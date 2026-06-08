@@ -35,6 +35,10 @@ internal sealed class WatBackend
     // a library/undefined call, gated until linear memory + host imports land.
     private readonly HashSet<string> _defined = new(System.StringComparer.Ordinal);
 
+    // The current function's return type, so `return E` coerces E to it — like every
+    // store position, the IR leaves this implicit conversion for the backend.
+    private CType _currentRet = CType.Int;
+
     public static string Run(IrBuilder unit) => new WatBackend().Module(unit);
 
     /// <summary>Emit the module shell: one <c>(func …)</c> per definition, plus an
@@ -70,6 +74,7 @@ internal sealed class WatBackend
         _labelSeq = 0;
 
         var ret = fn.Sym.Type is CType.Func f ? f.Return : CType.Int;
+        _currentRet = ret;
         var ps = string.Concat(fn.Params.Select(p => $" (param ${p.TargetName} {_wat.RenderType(p.Type)})"));
         var result = ret.Unqualified is CType.VoidType ? "" : $" (result {_wat.RenderType(ret)})";
         Line($"(func ${fn.Sym.TargetName}{ps}{result}");
@@ -148,6 +153,7 @@ internal sealed class WatBackend
                     if (ld.Init is { } init)
                     {
                         EmitExpr(init);
+                        EmitConvert(init.Type, ld.Sym.Type);   // store coercion (the IR leaves it to us)
                         Line($"local.set ${ld.Sym.TargetName}");
                     }
                     // No initializer: wasm zero-inits the local. (Reading an
@@ -162,7 +168,11 @@ internal sealed class WatBackend
                 break;
 
             case Return r:
-                if (r.Value is { } v) { EmitExpr(v); }
+                if (r.Value is { } v)
+                {
+                    EmitExpr(v);
+                    EmitConvert(v.Type, _currentRet);   // coerce to the declared return type
+                }
                 Line("return");
                 break;
 
@@ -315,10 +325,12 @@ internal sealed class WatBackend
                 Line($"if (result {ValType(ce.Type)})");
                 _indent++;
                 EmitExpr(ce.Then);
+                EmitConvert(ce.Then.Type, ce.Type);
                 _indent--;
                 Line("else");
                 _indent++;
                 EmitExpr(ce.Else);
+                EmitConvert(ce.Else.Type, ce.Type);
                 _indent--;
                 Line("end");
                 break;
@@ -430,17 +442,24 @@ internal sealed class WatBackend
             throw new IrUnsupportedException("the wat target supports assignment to local variables only (milestone 1)");
         }
         var name = vr.Sym.TargetName;
+        CType produced;
         if (a.CompoundOp is { } cop)
         {
-            // a OP= v  ≡  a = a OP v
+            // a OP= v  ≡  a = a OP v, with both sides promoted to the arithmetic type.
+            var common = CType.UsualArithmetic(vr.Type, a.Value.Type);
             Line($"local.get ${name}");
+            EmitConvert(vr.Type, common);
             EmitExpr(a.Value);
-            Line(IntBinOp(cop, CType.UsualArithmetic(vr.Type, a.Value.Type)));
+            EmitConvert(a.Value.Type, common);
+            Line(IntBinOp(cop, common));
+            produced = common;
         }
         else
         {
             EmitExpr(a.Value);
+            produced = a.Value.Type;
         }
+        EmitConvert(produced, vr.Type);   // narrow/extend the result to the lvalue type
         // tee stores AND leaves the value — C assignment is an expression.
         Line($"local.tee ${name}");
     }
