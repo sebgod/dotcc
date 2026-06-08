@@ -33,6 +33,10 @@ internal static class Program
             Description = "csproj: write Program.cs + .csproj. file: emit a single .NET 10 file-based program to stdout. build: like csproj, then `dotnet build`. obj: compile one .c to a .cs object fragment (link .cs objects to a program).",
             DefaultValueFactory = _ => EmitKind.Csproj,
         };
+        var targetOpt = new Option<string?>("--target")
+        {
+            Description = "Output target (the M in N×M): cs (C#, default) or wat (WebAssembly text). wat emits a .wat module to -o, else stdout.",
+        };
         var preprocessOpt = new Option<bool>("-E")
         {
             Description = "Run the preprocessor only; emit the post-#include/#define token stream to stdout.",
@@ -90,7 +94,7 @@ internal static class Program
         };
         var root = new RootCommand("dotcc — a C compiler frontend that transpiles to .NET 10 / C# 14.")
         {
-            inputArg, outOpt, emitOpt, preprocessOpt, includeOpt, defineOpt, compileOpt, sharedOpt, stdOpt,
+            inputArg, outOpt, emitOpt, targetOpt, preprocessOpt, includeOpt, defineOpt, compileOpt, sharedOpt, stdOpt,
             pedanticOpt, pedanticErrorsOpt, wconversionOpt, mdOpt, mmdOpt, mfOpt, mtOpt,
         };
         // Accept-and-ignore unknown flags (-Wall, -O2, -g, -f*, -m*, …) instead
@@ -113,6 +117,7 @@ internal static class Program
             var inputs = rawInputs.Where(t => !t.StartsWith('-')).ToArray();
             var output = parse.GetValue(outOpt);
             var emit = parse.GetValue(emitOpt);
+            var target = parse.GetValue(targetOpt);
             var preprocessOnly = parse.GetValue(preprocessOpt);
             var includes = parse.GetValue(includeOpt) ?? Array.Empty<string>();
             var defines = parse.GetValue(defineOpt) ?? Array.Empty<string>();
@@ -162,7 +167,7 @@ internal static class Program
                 emit = EmitKind.File;
             }
 
-            return Run(inputs, output, emit, preprocessOnly, includes, defines, sharedFlag, dialect, pedanticFlag, pedanticErrorsFlag,
+            return Run(inputs, output, emit, target, preprocessOnly, includes, defines, sharedFlag, dialect, pedanticFlag, pedanticErrorsFlag,
                        mdFlag, mmdFlag, depFile, depTargets, wconversionFlag);
         });
 
@@ -175,6 +180,7 @@ internal static class Program
         string[] inputPaths,
         string? outputPath,
         EmitKind emit,
+        string? target,
         bool preprocessOnly,
         string[] includeDirs,
         string[] defines,
@@ -192,6 +198,18 @@ internal static class Program
         {
             Compiler.Preprocess(inputPaths, Console.Out, includeDirs, defines, dialect);
             return 0;
+        }
+
+        if (target is not null
+            && !target.Equals("cs", StringComparison.OrdinalIgnoreCase)
+            && !target.Equals("wat", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.Error.WriteLine($"dotcc: error: unknown --target '{target}' (expected cs or wat)");
+            return 1;
+        }
+        if (string.Equals(target, "wat", StringComparison.OrdinalIgnoreCase))
+        {
+            return RunWat(inputPaths, outputPath, includeDirs, defines, dialect, pedantic, pedanticErrors);
         }
 
         // Separate compilation: `--emit=obj a.c -o a.cs` compiles ONE translation
@@ -327,6 +345,48 @@ internal static class Program
             default:
                 return 1;
         }
+    }
+
+    /// <summary>
+    /// Compile the <c>.c</c> inputs to a WebAssembly-text module and write it to
+    /// <c>-o</c> (else stdout). Whole-program, like the default C# path; linking of
+    /// pre-compiled wasm objects isn't a thing yet (milestone-2+).
+    /// </summary>
+    private static int RunWat(
+        string[] inputPaths,
+        string? outputPath,
+        string[] includeDirs,
+        string[] defines,
+        CDialect dialect,
+        bool pedantic,
+        bool pedanticErrors)
+    {
+        var sources = inputPaths.Where(p => p.EndsWith(".c", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (sources.Length == 0)
+        {
+            Console.Error.WriteLine("dotcc: error: --target=wat needs .c source input");
+            return 1;
+        }
+        string wat;
+        try
+        {
+            wat = Compiler.EmitWat(sources, includeDirs, defines, dialect, pedantic, pedanticErrors);
+        }
+        catch (CompileException ex)
+        {
+            Console.Error.WriteLine($"dotcc: {ex.Message}");
+            return 2;
+        }
+        if (outputPath is not null)
+        {
+            File.WriteAllText(outputPath, wat);
+            Console.Error.WriteLine($"dotcc: wrote {outputPath}");
+        }
+        else
+        {
+            Console.WriteLine(wat);
+        }
+        return 0;
     }
 
     /// <summary>

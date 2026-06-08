@@ -131,3 +131,47 @@ internal sealed class CSharpNameLegalizer : INameLegalizer
     public bool ForbidsShadowing => true;
     public string Uniquify(string escaped, int collision) => $"{escaped}__{collision}";
 }
+
+/// <summary>
+/// The WebAssembly-text backend's type projection — the first second consumer of
+/// <see cref="ITarget"/>, and the one that proves the seam generalises past C#.
+/// WebAssembly has only four value types, so C's whole integer zoo collapses by
+/// width onto <c>i32</c>/<c>i64</c> (LP64: <c>long</c> and every address are
+/// 64-bit), and its narrower types (<c>char</c>/<c>short</c>/<c>_Bool</c>) ride in
+/// an <c>i32</c> with explicit masking at the narrowing points the emitter inserts
+/// — where the C# backend got distinct storage types for free. (Milestone 1 is the
+/// integer slice; floating-point and pointers raise <see cref="IrUnsupportedException"/>
+/// until the float and linear-memory phases land.)
+/// </summary>
+internal sealed class WatTarget : ITarget
+{
+    public string RenderType(CType t) => t.Unqualified switch
+    {
+        CType.Prim p => RenderPrim(p),
+        // An enum is its integer underlying type on the wasm stack.
+        CType.Enum e => RenderType(e.Underlying),
+        // Addresses are linear-memory offsets (wasm32: i32). Pointer/array support
+        // itself arrives with linear memory in milestone 2 — gated before then.
+        CType.Pointer or CType.Func or CType.Array => "i32",
+        CType.VoidType => throw new IrUnsupportedException("void has no wasm value type"),
+        _ => throw new IrUnsupportedException("wat target cannot render type " + t.Describe()),
+    };
+
+    /// <summary>A C primitive → its wasm value type: integers narrower than 8 bytes
+    /// live in <c>i32</c>, 8-byte integers in <c>i64</c>. Floating-point is gated
+    /// until milestone 1.5.</summary>
+    private static string RenderPrim(CType.Prim p)
+    {
+        if (!p.Integer)
+        {
+            throw new IrUnsupportedException("floating-point unsupported on wat target (milestone 1)");
+        }
+        return p.Bytes <= 4 ? "i32" : "i64";
+    }
+
+    /// <summary><c>i32.const</c>/<c>i64.const</c> take a bare integer — no C suffix,
+    /// the literal's width is carried by the instruction's own type prefix.</summary>
+    public string RenderIntLit(LitInt lit) => lit.Digits;
+
+    public string RenderFloatLit(LitFloat lit) => lit.Text;
+}

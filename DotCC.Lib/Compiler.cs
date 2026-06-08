@@ -360,6 +360,27 @@ public static class Compiler
             : BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, fileBased, libraryMode, cg.Exports);
     }
 
+    /// <summary>
+    /// Compile <paramref name="inputPaths"/> to a WebAssembly-text (<c>.wat</c>)
+    /// module — the second output target. Shares the whole front-end with
+    /// <see cref="EmitCSharp"/> through <see cref="BuildIr"/>; only the backend
+    /// projection differs (<see cref="Ir.WatBackend"/> instead of
+    /// <see cref="Ir.CodeGen"/> + <see cref="BuildShell"/>). Milestone 1 emits the
+    /// freestanding integer slice; constructs outside it raise
+    /// <see cref="CompileException"/> (an <see cref="Ir.IrUnsupportedException"/>).
+    /// </summary>
+    public static string EmitWat(
+        IReadOnlyList<string> inputPaths,
+        IReadOnlyList<string>? includeDirs = null,
+        IReadOnlyList<string>? defines = null,
+        CDialect? dialect = null,
+        bool pedantic = false,
+        bool pedanticErrors = false)
+    {
+        var irBuilder = BuildIr(inputPaths, includeDirs, defines, dialect, pedantic, pedanticErrors);
+        return Ir.WatBackend.Run(irBuilder);
+    }
+
     // ---- separate compilation (`--emit=obj` + link) -------------------------
     // dotcc normally whole-program-compiles all TUs in one pass. To slot into a
     // build system (CMake/make) that compiles each `.c` to an object then links,
