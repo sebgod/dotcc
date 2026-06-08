@@ -73,6 +73,8 @@ public abstract record CType
         Func f => f.Return.Describe() + "(*)(" + string.Join(", ", f.Params.Select(p => p.Describe())) + ")",
         Named n => n.Name,
         Enum e => "enum " + e.Name,
+        ComplexType => "_Complex",
+        Float128Type => "_Float128",
         _ => GetType().Name,
     };
 
@@ -132,8 +134,8 @@ public abstract record CType
     /// <summary>A named type the IR doesn't model structurally yet (a typedef
     /// target / opaque libc struct like <c>FILE</c>). <see cref="Name"/> is the
     /// spelling the backend emits verbatim — a residual leak for the few names whose
-    /// spelling differs per target (<c>Float128</c>, <c>System.Numerics.Complex</c>);
-    /// size is unknown (0) until struct layout lands in a later phase.</summary>
+    /// spelling differs per target (e.g. <c>Float128</c>); size is unknown (0) until
+    /// struct layout lands in a later phase.</summary>
     public sealed record Named(string Name) : CType
     {
         public override int SizeOf => 0;
@@ -154,6 +156,29 @@ public abstract record CType
         public override int SizeOf => Underlying.SizeOf;
         public override bool IsInteger => true;
         public override bool IsArithmetic => true;
+    }
+
+    /// <summary>C99 <c>_Complex</c> — a complex number. dotcc lowers every width
+    /// (<c>float</c>/<c>double</c>/<c>long double</c> complex) to one double-backed
+    /// complex, so the element width is intentionally erased here; the backend spells
+    /// it (the C# backend: <c>System.Numerics.Complex</c>). Complex arithmetic is
+    /// recognised structurally (<c>is ComplexType</c>) and routed before the usual
+    /// arithmetic conversions, so — like the prior <c>Named</c> lowering — it reports
+    /// <see cref="IsArithmetic"/> false and an unmodelled size (0).</summary>
+    public sealed record ComplexType : CType
+    {
+        public override int SizeOf => 0;
+    }
+
+    /// <summary>C23 <c>_Float128</c> / <c>__float128</c> — a 128-bit IEEE float. dotcc
+    /// lowers it to a software binary128 type the backend spells (the C# backend:
+    /// <c>Float128</c>, a <c>DotCC.Libc</c> value type). Like the prior <c>Named</c>
+    /// lowering it is NOT modelled as a <see cref="Prim"/> — its arithmetic rides the
+    /// backend type's operators — so size/arithmetic stay unmodelled (a correctness
+    /// follow-up, preserved here for a no-behaviour-change neutralization).</summary>
+    public sealed record Float128Type : CType
+    {
+        public override int SizeOf => 0;
     }
 
     // ---- well-known instances -------------------------------------------
@@ -178,10 +203,12 @@ public abstract record CType
     /// <summary>C <c>size_t</c> — dotcc lowers it to C# <c>ulong</c>.</summary>
     public static readonly CType SizeT = ULong;
 
-    /// <summary>C99 <c>_Complex</c> — every width (<c>float</c>/<c>double</c>/<c>long
-    /// double</c> complex) lowers to .NET's double-backed
-    /// <c>System.Numerics.Complex</c>; its C# operators cover complex×real too.</summary>
-    public static readonly CType Complex = new Named("System.Numerics.Complex");
+    /// <summary>C99 <c>_Complex</c> — every width lowers to one double-backed complex
+    /// (see <see cref="ComplexType"/>); the backend's operators cover complex×real too.</summary>
+    public static readonly CType Complex = new ComplexType();
+
+    /// <summary>C23 <c>_Float128</c> — software binary128. See <see cref="Float128Type"/>.</summary>
+    public static readonly CType Float128 = new Float128Type();
 
     /// <summary>The decayed type of a string literal: <c>char*</c> (i.e. <c>byte*</c>).</summary>
     public static CType CharPtr => new Pointer(Char);
