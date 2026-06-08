@@ -383,7 +383,7 @@ internal sealed partial class IrBuilder
     {
         if (csName is not null)
         {
-            var sym = new Symbol { Name = name, Kind = SymKind.Var, Type = arrType, Storage = Storage.Static, IsGlobal = true, CsName = csName };
+            var sym = new Symbol { Name = name, Kind = SymKind.Var, Type = arrType, Storage = Storage.Static, IsGlobal = true, TargetName = csName };
             Globals.Add(new GlobalVar(sym, init));
             _symbols.DeclareAlias(sym);
         }
@@ -431,7 +431,7 @@ internal sealed partial class IrBuilder
     /// program-unique mangled name, with the statement itself emitting nothing.</summary>
     private CStmt BuildStaticLocalArr(Item typeItem, Item nameItem, Item? dimsItem, Item? initItem)
     {
-        var csName = $"{DotCC.EmitHelpers.Id(Tok(nameItem))}__s{_staticLocalSeq++}";
+        var csName = $"{_symbols.Escape(Tok(nameItem))}__s{_staticLocalSeq++}";
         BuildGlobalArr(typeItem, nameItem, dimsItem, initItem, csName);
         return new DeclStmt(System.Array.Empty<LocalDecl>());
     }
@@ -440,7 +440,7 @@ internal sealed partial class IrBuilder
     /// array under a mangled name (the statement emits nothing).</summary>
     private CStmt BuildStaticLocalCharArr(Item typeItem, Item nameItem, Item strSeqItem, Item? dimsItem)
     {
-        var csName = $"{DotCC.EmitHelpers.Id(Tok(nameItem))}__s{_staticLocalSeq++}";
+        var csName = $"{_symbols.Escape(Tok(nameItem))}__s{_staticLocalSeq++}";
         BuildGlobalCharArr(typeItem, nameItem, strSeqItem, dimsItem, csName);
         return new DeclStmt(System.Array.Empty<LocalDecl>());
     }

@@ -1096,7 +1096,7 @@ internal sealed partial class IrBuilder
             {
                 Name = name, Kind = SymKind.Var, Type = type,
                 Storage = Storage.Static, IsGlobal = true,
-                CsName = $"{DotCC.EmitHelpers.Id(name)}__s{_staticLocalSeq++}",
+                TargetName = $"{_symbols.Escape(name)}__s{_staticLocalSeq++}",
             };
             Globals.Add(new GlobalVar(sym, initItem is { } ii ? BuildExpr(ii) : null));
             _symbols.DeclareAlias(sym);
@@ -1128,7 +1128,7 @@ internal sealed partial class IrBuilder
         {
             Name = Tok(n.Arg2), Kind = SymKind.Var, Type = type,
             Storage = Storage.Static, IsGlobal = true,
-            CsName = $"{DotCC.EmitHelpers.Id(Tok(n.Arg2))}__s{_staticLocalSeq++}",
+            TargetName = $"{_symbols.Escape(Tok(n.Arg2))}__s{_staticLocalSeq++}",
         };
         Globals.Add(new GlobalVar(sym, init));
         _symbols.DeclareAlias(sym);
