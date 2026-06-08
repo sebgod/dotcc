@@ -58,10 +58,11 @@ internal sealed class CodeGen
         var globals = new StringBuilder();
         foreach (var g in unit.Globals)
         {
-            // A pointer/fn-ptr global whose address is taken (or that is volatile/
-            // atomic) is stored as `nint` so Unsafe.AsPointer / Volatile.* accept it
-            // (CS0306) — the init pointer value is cast to nint, reads cast back.
-            if (g.Sym.StoreAsNint)
+            // A pointer/fn-ptr global whose address is taken is stored as `nint` so
+            // Unsafe.AsPointer / Volatile.* accept it (CS0306) — the init pointer
+            // value is cast to nint, reads cast back. (Backend decision from the
+            // abstract AddressTaken fact.)
+            if (NintStorage(g.Sym))
             {
                 var ninit = g.Init is { } i0 ? $" = (nint)({cg.Coerced(i0, g.Sym.Type)})" : "";
                 globals.Append($"    public static unsafe nint {g.Sym.CsName}{ninit};\n");
@@ -724,13 +725,18 @@ internal sealed class CodeGen
         _ => false,
     };
 
+    /// <summary>The C# backend's decision to store a pointer/fn-ptr-typed global as
+    /// an <c>nint</c> field: when its address is taken (the abstract
+    /// <see cref="Symbol.AddressTaken"/> fact), a pointer T can't be the type arg of
+    /// Unsafe.AsPointer / Volatile.* (CS0306), so the slot is an <c>nint</c>.</summary>
+    private static bool NintStorage(Symbol s) => s.AddressTaken && s.Type.IsPointerLowered;
+
     /// <summary>True when an lvalue is a pointer global whose backing field codegen
-    /// declared as <c>nint</c> (its address was taken — see
-    /// <see cref="Symbol.StoreAsNint"/>); such a slot is reinterpreted directly,
-    /// not through its address.</summary>
+    /// declared as <c>nint</c>; such a slot is reinterpreted directly, not through
+    /// its address.</summary>
     private static bool StoredAsNint(CExpr e) => e switch
     {
-        VarRef v => v.Sym.StoreAsNint,
+        VarRef v => NintStorage(v.Sym),
         Paren p => StoredAsNint(p.Inner),
         _ => false,
     };
@@ -958,7 +964,7 @@ internal sealed class CodeGen
         {
             case LitInt i: return (i.CsText, PPrimary);
             case LitFloat f: return (f.CsText, PPrimary);
-            case LitStr s: return (s.CsExpr, PPrimary);
+            case LitStr s: return (DotCC.EmitHelpers.EncodeStringLiteral(s.Segments), PPrimary);
             case Raw r: return (r.CsText, PPrimary);
             // An enumerator of a real enum: EnumName.Member (member access).
             case EnumConstRef ec: return ($"{ec.Sym.Type.Unqualified.CsType}.{DotCC.EmitHelpers.Id(ec.Sym.Name)}", PPostfix);
@@ -968,7 +974,7 @@ internal sealed class CodeGen
             // fences through Volatile/Atomic on the nint field, then casts back to the
             // pointer type. Assignment targets / `&` / ref-args use BareLValue (raw
             // field), so they never hit this read-cast.
-            case VarRef { Sym.StoreAsNint: true } v:
+            case VarRef v when NintStorage(v.Sym):
                 return v.Type.IsAtomic ? ($"({v.Type.CsType})Atomic.Load(ref {v.Sym.CsName})", PUnary)
                      : v.Type.IsVolatile ? ($"({v.Type.CsType}){VolatileRead(v.Sym.CsName)}", PUnary)
                      : ($"({v.Type.CsType}){v.Sym.CsName}", PUnary);
