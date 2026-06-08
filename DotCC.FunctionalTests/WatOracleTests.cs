@@ -41,6 +41,12 @@ public sealed class WatOracleTests
     [InlineData("int main(void){ int x=4; return x>3 ? x+5 : x-5; }", 9)]
     [InlineData("int main(void){ long a=5,b=6; return (int)(a*b); }", 30)]
     [InlineData("int is_even(int n); int is_odd(int n){ return n==0?0:is_even(n-1);} int is_even(int n){ return n==0?1:is_odd(n-1);} int main(void){ return is_even(10); }", 1)]
+    // milestone 2 — linear memory, string data segments, pointer load/arithmetic
+    [InlineData("int main(void){ char *s = \"ABC\"; return s[0] + s[2]; }", 132)]
+    [InlineData("int main(void){ char *s = \"hello\"; int n=0; while(*s){ n++; s++; } return n; }", 5)]
+    [InlineData("int slen(char *p){ char *q=p; while(*q) q++; return (int)(q-p); } int main(void){ return slen(\"world\"); }", 5)]
+    [InlineData("int at(char *s, int i){ return s[i]; } int main(void){ return at(\"ABCDE\", 3); }", 68)]
+    [InlineData("int idx(char *s, char c){ int i=0; while(s[i]){ if(s[i]==c) return i; i++; } return -1; } int main(void){ return idx(\"abcd\", 'c'); }", 2)]
     public void Wat_program_returns_expected_value(string source, int expected)
     {
         if (!Requested)

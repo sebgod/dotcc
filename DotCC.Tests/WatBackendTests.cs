@@ -112,8 +112,29 @@ public sealed class WatBackendTests
     }
 
     [Fact]
-    public void pointer_use_is_rejected_in_milestone_1()
+    public void string_literal_lowers_to_a_data_segment_and_loads_bytes()
     {
+        var wat = Wat("int main(void){ char *s = \"hi\"; return s[0]; }");
+        wat.ShouldContain("(memory 1)");
+        wat.ShouldContain("(data (i32.const 1024)");
+        wat.ShouldContain("i32.load8_s");   // a char read
+    }
+
+    [Fact]
+    public void pointer_index_scales_by_the_element_size()
+    {
+        // An int* subscript multiplies the index by sizeof(int)=4 before the load.
+        var wat = Wat("int at(int *a){ return a[3]; } int main(void){ return 0; }");
+        wat.ShouldContain("i32.const 4");
+        wat.ShouldContain("i32.mul");
+        wat.ShouldContain("i32.load");
+    }
+
+    [Fact]
+    public void address_of_local_is_gated_until_the_shadow_stack()
+    {
+        // &x of a local needs a linear-memory frame; until that lands it fails loudly
+        // rather than miscompiling. (Reading through a pointer already works.)
         Should.Throw<CompileException>(() => Wat("int main(void){ int x=0; int *p=&x; return *p; }"));
     }
 }
