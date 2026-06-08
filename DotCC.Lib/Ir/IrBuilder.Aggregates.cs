@@ -267,7 +267,7 @@ internal sealed partial class IrBuilder
     /// <summary>Build the nested C array type from outer→inner dimensions
     /// (<c>[2][3]</c> → <c>Array(Array(elem, 3), 2)</c>). The nesting is what lets a
     /// partial subscript yield an inner array (and stride correctly); the storage
-    /// and <see cref="CType.CsType"/> still collapse to one flat pointer.</summary>
+    /// and the backend's flat-pointer projection still collapse to one pointer.</summary>
     private static CType MakeArrayType(CType elem, IReadOnlyList<int> dims)
     {
         var t = elem;
@@ -316,7 +316,7 @@ internal sealed partial class IrBuilder
         }
         var items = ParseInitList(initListItem);
         if (items is [InitVal one]) { return new Cast(type, one.Value) { Type = type }; }
-        throw new IrUnsupportedException($"compound literal of non-aggregate type '{type.CsType}' needs exactly one value");
+        throw new IrUnsupportedException($"compound literal of non-aggregate type '{type.Describe()}' needs exactly one value");
     }
 
     private CExpr BuildCompoundLitDesignated(Item typeItem, Item memberList) =>
