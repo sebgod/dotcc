@@ -288,9 +288,24 @@ internal sealed class CodeGen
                 }
                 else if (inner is CommaOp co)
                 {
-                    sb.Append(pad).Append("{\n");
-                    foreach (var item in co.Items) { sb.Append(Pad(ind + 1)).Append(RenderStmtExpr(item)).Append(";\n"); }
-                    sb.Append(pad).Append("}\n");
+                    // The comma's value is discarded, so each operand is a statement;
+                    // pure operands are dropped (no effect). All pure → an empty stmt.
+                    var effects = co.Items.Where(it => !IsPure(it)).ToList();
+                    if (effects.Count == 0) { sb.Append(pad).Append(";\n"); }
+                    else
+                    {
+                        sb.Append(pad).Append("{\n");
+                        foreach (var item in effects) { sb.Append(Pad(ind + 1)).Append(RenderStmtExpr(item)).Append(";\n"); }
+                        sb.Append(pad).Append("}\n");
+                    }
+                }
+                else if (IsPure(inner))
+                {
+                    // A pure expression statement is a no-op in C — e.g.
+                    // `(void)luaP_isOT;` suppressing an unused-function warning. Emit an
+                    // empty statement: there's nothing to evaluate, and a discard of
+                    // `&fn` can't even infer a type (CS8183).
+                    sb.Append(pad).Append(";\n");
                 }
                 else
                 {
@@ -930,10 +945,19 @@ internal sealed class CodeGen
                     : ($"({va.Target.CsType})({Sub(va.Ap, PPostfix)}.Next())", PUnary);
             case Call c: return (CallText(c), PPostfix);
             case CondExpr t:
-                // Wrapped (atomic): C-truthy condition, arms isolated by `?`/`:`. The
-                // arms are conditional, so they render without hoisting (the condition
-                // always evaluates and may hoist).
-                return ($"(Cond.B({Expr(t.Cond)}) ? {NoHoist(() => Expr(t.Then))} : {NoHoist(() => Expr(t.Else))})", PPrimary);
+                // C-truthy condition, arms isolated by `?`/`:`. The arms are
+                // conditional, so they render without hoisting (the condition always
+                // evaluates and may hoist). C reconciles arithmetic arms to a common
+                // type (the usual conversions — CondExpr.Type); C# requires both arms
+                // to already share a type, so an arm that differs is cast to it (e.g.
+                // `cond ? sizeT : intExpr` → the int arm casts to the ulong result).
+                {
+                    string Arm(CExpr a) => NoHoist(() =>
+                        t.Type.IsArithmetic && a.Type.IsArithmetic && a.Type.Unqualified.CsType != t.Type.CsType
+                            ? $"({t.Type.CsType})({Sub(a, PUnary)})"
+                            : Expr(a));
+                    return ($"(Cond.B({Expr(t.Cond)}) ? {Arm(t.Then)} : {Arm(t.Else)})", PPrimary);
+                }
             case CommaSeq cs:
                 return (string.Join(", ", cs.Items.Select(it => Sub(it, PAssign))), PComma);
             case CommaOp co:
@@ -996,17 +1020,40 @@ internal sealed class CodeGen
                         : Coerced(a.Value, a.Target.Type);
                     return ($"{lv} = (nint)({val})", PAssign);
                 }
+            case Assign { CompoundOp: { } cop } a:
+                {
+                    // C's `x op= y` evaluates `x op y` under the usual arithmetic
+                    // conversions, then stores back into x. C# applies the store-back
+                    // narrowing implicitly, but rejects the *operation* when the operand
+                    // types don't share one (e.g. `ulong op= int` — CS0034, since dotcc
+                    // types strlen et al. as int). Cast the RHS to the common type — but
+                    // only when that common type isn't already the RHS's (so `short +=
+                    // int` keeps the int and lets C# narrow), and never for a shift
+                    // (whose count is independent) or pointer/non-arithmetic arithmetic.
+                    var rhs = Sub(a.Value, PAssign);
+                    if (cop is not (BinOp.Shl or BinOp.Shr)
+                        && a.Target.Type.IsArithmetic && a.Value.Type.IsArithmetic)
+                    {
+                        // Cast the RHS to the target type only when the TARGET dominates
+                        // the usual conversions (e.g. `ulong op= int` — C widens the int,
+                        // and C# otherwise reports CS0034). When the common type is wider
+                        // than the target (`short op= int`) C#'s own compound-assign
+                        // narrowing handles it, so leave the RHS alone.
+                        var tt = a.Target.Type.Unqualified.CsType;
+                        var common = CType.UsualArithmetic(a.Target.Type, a.Value.Type);
+                        if (common.CsType == tt && tt != a.Value.Type.Unqualified.CsType)
+                        {
+                            rhs = $"({tt})({Sub(a.Value, PUnary)})";
+                        }
+                    }
+                    return ($"{Sub(a.Target, PUnary)} {BinSym(cop)}= {rhs}", PAssign);
+                }
             case Assign a:
                 {
-                    var op = a.CompoundOp is { } co ? BinSym(co) : "";
-                    // Right-associative: value at PAssign keeps `a = b = c` flat. A
-                    // plain `=` coerces the value to the target type (C narrowing /
-                    // sign / pointer conversions C# requires explicitly); a compound
-                    // `+=` already carries C#'s implicit narrowing back to the target.
-                    var rhs = a.CompoundOp is null && TryCoerceCast(a.Value, a.Target.Type, out var ct)
-                        ? ct
-                        : Sub(a.Value, PAssign);
-                    return ($"{Sub(a.Target, PUnary)} {op}= {rhs}", PAssign);
+                    // Plain `=` coerces the value to the target type (C narrowing /
+                    // sign / pointer conversions C# requires explicitly).
+                    var rhs = TryCoerceCast(a.Value, a.Target.Type, out var ct) ? ct : Sub(a.Value, PAssign);
+                    return ($"{Sub(a.Target, PUnary)} = {rhs}", PAssign);
                 }
             case Unary u: return RenderUnary(u);
             case Binary b: return RenderBinary(b);
@@ -1301,7 +1348,20 @@ internal sealed class CodeGen
     /// side effect and stays lazy inside a short-circuit.</summary>
     private string CommaValue(CommaOp co)
     {
+        // Shed leading operands with no side effects (e.g. the `(void)0` an
+        // asserts-off `lua_assert`/`check_exp` leaves behind): they don't change the
+        // comma's value, and dropping them often collapses the chain to its value
+        // operand alone — sidestepping the tuple/IIFE entirely (and the CS1686 the
+        // IIFE hits when the value operand takes a local's address).
         var items = co.Items;
+        if (items.Count > 1)
+        {
+            var kept = new List<CExpr>();
+            for (var i = 0; i < items.Count - 1; i++) { if (!IsPure(items[i])) { kept.Add(items[i]); } }
+            kept.Add(items[^1]);
+            items = kept;
+        }
+        if (items.Count == 1) { return $"({Expr(items[0])})"; }
         var leadingVoid = false;
         for (var i = 0; i < items.Count - 1; i++)
         {
@@ -1309,6 +1369,27 @@ internal sealed class CodeGen
         }
         return !leadingVoid && items.Count <= 7 ? CommaTuple(items) : CommaDelegate(items);
     }
+
+    /// <summary>True when an expression has no side effects — so a non-final comma
+    /// operand can be dropped without changing observable behavior. Conservative:
+    /// reads (literals, variables, member/index/deref), pure operators, sizeof and
+    /// address-of are pure; calls, assignments, and ++/-- are not.</summary>
+    private static bool IsPure(CExpr e) => e switch
+    {
+        // A volatile/atomic read is itself an observable access — never drop it.
+        _ when e.Type.IsVolatile || e.Type.IsAtomic => false,
+        LitInt or LitFloat or LitStr or Raw or DefaultLit or VarRef or SizeOfExpr or OffsetOf => true,
+        Paren p => IsPure(p.Inner),
+        Cast c => IsPure(c.Operand),
+        Member m => IsPure(m.Base),
+        Index ix => IsPure(ix.Base) && IsPure(ix.Idx),
+        Unary u => u.Op is not (UnOp.PreInc or UnOp.PreDec or UnOp.PostInc or UnOp.PostDec)
+                   && IsPure(u.Operand),
+        Binary b => IsPure(b.Left) && IsPure(b.Right),
+        CondExpr t => IsPure(t.Cond) && IsPure(t.Then) && IsPure(t.Else),
+        CommaOp co => co.Items.All(IsPure),
+        _ => false,   // Call / IndirectCall / Assign / StructInit / VaArgGet / …
+    };
 
     private string CommaTuple(IReadOnlyList<CExpr> items)
     {

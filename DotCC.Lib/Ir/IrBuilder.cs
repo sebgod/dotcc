@@ -1374,10 +1374,14 @@ internal sealed partial class IrBuilder
         var cond = BuildExpr(t.Arg0);
         var then = BuildExpr(t.Arg2);
         var els = BuildExpr(t.Arg4);
-        // Result type: arithmetic arms reconcile per the usual conversions; else
-        // take the then-arm's type (good enough until the coercion pass lands).
-        var ty = then.Type.IsArithmetic && els.Type.IsArithmetic
-            ? CType.UsualArithmetic(then.Type, els.Type) : then.Type;
+        // Result type: arithmetic arms reconcile per the usual conversions; if either
+        // arm is a pointer/array/function the result is THAT (C: `cond ? ptr : NULL`
+        // is the pointer type, not the null constant's int) — else the then-arm's type.
+        static bool IsPtrish(CType t) => t.Unqualified is CType.Pointer or CType.Array or CType.Func;
+        var ty = then.Type.IsArithmetic && els.Type.IsArithmetic ? CType.UsualArithmetic(then.Type, els.Type)
+               : IsPtrish(then.Type) ? then.Type
+               : IsPtrish(els.Type) ? els.Type
+               : then.Type;
         return new CondExpr(cond, then, els) { Type = ty };
     }
 
