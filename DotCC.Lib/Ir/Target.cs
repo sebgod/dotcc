@@ -175,3 +175,20 @@ internal sealed class WatTarget : ITarget
 
     public string RenderFloatLit(LitFloat lit) => lit.Text;
 }
+
+/// <summary>The WebAssembly-text backend's identifier policy — the seam's second
+/// <see cref="INameLegalizer"/>, and the one that answers the question the C#-only
+/// design left open. A wasm <c>$</c>-name accepts every C identifier character
+/// as-is and lives in its own namespace (no reserved words to dodge), so
+/// <see cref="Escape"/> is identity — the <c>$</c> sigil is wat syntax the backend
+/// prepends, not part of the stored name. But wasm locals are flat and
+/// function-scoped, so a C inner-block variable shadowing an outer one must be
+/// renamed: <see cref="ForbidsShadowing"/> is true, the SAME answer as C# for a
+/// different reason (flat namespace, not CS0136) — confirming the shadow rule
+/// belongs to policy, and the table's neutral mechanism needs no per-target change.</summary>
+internal sealed class WatNameLegalizer : INameLegalizer
+{
+    public string Escape(string rawName) => rawName;
+    public bool ForbidsShadowing => true;
+    public string Uniquify(string escaped, int collision) => $"{escaped}__{collision}";
+}

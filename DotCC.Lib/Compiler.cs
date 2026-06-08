@@ -193,7 +193,8 @@ public static class Compiler
         IReadOnlyList<string>? defines,
         CDialect? dialect,
         bool pedantic,
-        bool pedanticErrors)
+        bool pedanticErrors,
+        Ir.INameLegalizer? names = null)
     {
         var includeMap = BuildIncludeMap(inputPaths, includeDirs);
         var lexerTable = C.BuildLexer();
@@ -290,7 +291,7 @@ public static class Compiler
         // parse (preprocessor-era) and IR build (emit-pass), then flush as warnings
         // (-pedantic) or one collected error (-pedantic-errors). Off by default.
         var gate = (pedantic || pedanticErrors) ? new DialectGate(activeDialect) : null;
-        var irBuilder = new Ir.IrBuilder(gate);
+        var irBuilder = new Ir.IrBuilder(gate, names);
         var irParser = C.BuildParser(Ir.ParseTreeIdentityVisitor.Instance);
         foreach (var unitPath in inputPaths)
         {
@@ -377,7 +378,7 @@ public static class Compiler
         bool pedantic = false,
         bool pedanticErrors = false)
     {
-        var irBuilder = BuildIr(inputPaths, includeDirs, defines, dialect, pedantic, pedanticErrors);
+        var irBuilder = BuildIr(inputPaths, includeDirs, defines, dialect, pedantic, pedanticErrors, new Ir.WatNameLegalizer());
         return Ir.WatBackend.Run(irBuilder);
     }
 

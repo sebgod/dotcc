@@ -27,7 +27,7 @@ public sealed class IrUnsupportedException : DotCC.CompileException
 /// </summary>
 internal sealed partial class IrBuilder
 {
-    private readonly SymbolTable _symbols = new();
+    private readonly SymbolTable _symbols;
     // Typedef name → its underlying type. Unlike the legacy emitter (which emits
     // `using` aliases and resolves names textually), the IR resolves a typedef
     // name straight to its CType — so `size_t x` becomes `ulong x` with the right
@@ -63,7 +63,16 @@ internal sealed partial class IrBuilder
     // dialect, so this is the rejection layer — and a pure no-op on the default path.
     private readonly DotCC.DialectGate? _gate;
 
-    internal IrBuilder(DotCC.DialectGate? gate = null) => _gate = gate;
+    /// <param name="names">The target's identifier policy, threaded into the
+    /// symbol table so <see cref="Symbol.TargetName"/> is escaped/uniquified for the
+    /// backend that will consume this IR (C# by default; the wat backend injects its
+    /// own so names are wasm-legal and flat-local shadowing is resolved). Neutral
+    /// mechanism stays in <see cref="SymbolTable"/>; only the policy varies.</param>
+    internal IrBuilder(DotCC.DialectGate? gate = null, INameLegalizer? names = null)
+    {
+        _gate = gate;
+        _symbols = new SymbolTable(names);
+    }
 
     /// <summary>Flag a feature introduced in <paramref name="era"/> (ISO year) when
     /// the active dialect predates it. No-op when the gate is off or new enough.</summary>
