@@ -286,14 +286,18 @@ public static class Compiler
         // CodeGen prints it precedence-aware. This is the sole backend; the
         // retired bottom-up string emitter is gone — its shared identifier /
         // string-literal / export helpers live on in EmitHelpers.
-        // TODO(ir): port the remaining cross-cutting concerns the legacy two-pass
-        // owned — malloc→stack promotion, -pedantic emit-pass dialect gating,
-        // -Wconversion narrowing — as IR passes over the typed tree.
-        var irBuilder = new Ir.IrBuilder();
+        // TODO(ir): port the remaining cross-cutting concern the legacy two-pass
+        // owned that the IR doesn't yet — malloc→stack promotion — as an IR pass.
+        //
+        // -pedantic dialect gating: collect features that postdate -std= during
+        // parse (preprocessor-era) and IR build (emit-pass), then flush as warnings
+        // (-pedantic) or one collected error (-pedantic-errors). Off by default.
+        var gate = (pedantic || pedanticErrors) ? new DialectGate(activeDialect) : null;
+        var irBuilder = new Ir.IrBuilder(gate);
         var irParser = C.BuildParser(Ir.ParseTreeIdentityVisitor.Instance);
         foreach (var unitPath in inputPaths)
         {
-            var root = ParseUnit(unitPath, irParser, quiet: false);
+            var root = ParseUnit(unitPath, irParser, quiet: false, gate);
             irBuilder.AddUnit(root, Path.GetFileName(unitPath));
         }
         var irErrors = irBuilder.Diagnostics.Where(d => d.Severity == Ir.Severity.Error).ToList();
@@ -304,6 +308,16 @@ public static class Compiler
         foreach (var w in irBuilder.Diagnostics.Where(d => d.Severity == Ir.Severity.Warning))
         {
             Console.Error.WriteLine("dotcc: warning: " + w);
+        }
+        // Flush dialect-gate diagnostics: -pedantic-errors collects all into one
+        // CompileException (collect-all, fail once); -pedantic warns and continues.
+        if (gate is { HasAny: true })
+        {
+            if (pedanticErrors)
+            {
+                throw new CompileException(string.Join("\n", gate.Diagnostics.Select(d => "error: " + d)));
+            }
+            foreach (var d in gate.Diagnostics) { Console.Error.WriteLine("dotcc: warning: " + d); }
         }
         var cg = Ir.CodeGen.Run(irBuilder);
         // Library mode doesn't need a `main` (the .dll is consumed through its
@@ -1119,12 +1133,15 @@ public static class Compiler
 }
 
 /// <summary>
-/// Thrown by <see cref="Compiler.EmitCSharp"/> on parse failure or when no
-/// <c>main</c> is defined across the supplied translation units. The
-/// frontend exe catches and maps to a non-zero exit code with a clang-shaped
-/// diagnostic; tests assert on the message.
+/// The stable public compile-error surface of <see cref="Compiler.EmitCSharp"/>:
+/// thrown on parse/lex failure, an invalid type-specifier combination, a
+/// dialect-gate violation under <c>-pedantic-errors</c>, an unsupported construct
+/// (<see cref="DotCC.Ir.IrUnsupportedException"/>, a subclass), or when no
+/// <c>main</c> is defined. The frontend exe catches it and maps to a non-zero exit
+/// code with a clang-shaped diagnostic; tests assert on the message. Not sealed so
+/// the IR layer can specialize it while callers still catch the one base type.
 /// </summary>
-public sealed class CompileException : Exception
+public class CompileException : Exception
 {
     public CompileException(string message) : base(message) { }
     public CompileException(string message, Exception inner) : base(message, inner) { }
