@@ -238,6 +238,16 @@ public sealed record Switch(CExpr Subject, IReadOnlyList<SwitchSection> Sections
 /// up to the next label.</summary>
 public sealed record SwitchSection(IReadOnlyList<SwitchLabel> Labels, IReadOnlyList<CStmt> Body);
 
+/// <summary>A <c>case E:</c> / <c>default:</c> label that appears NESTED inside
+/// another statement of a switch body rather than at the switch's top level —
+/// Duff's device (<c>case 7:</c> interleaved into a <c>do…while</c>). The grammar
+/// accepts a case/default label anywhere; <see cref="Switch"/> only models the
+/// top-level sections, so a nested one becomes this free-standing labeled
+/// statement. Codegen prints it verbatim as <c>case E:</c> / <c>default:</c>
+/// followed by <see cref="Body"/> — structurally faithful (C# rejects a case
+/// label inside a nested block, which is the known Duff's limitation).</summary>
+public sealed record CaseLabelStmt(CExpr? CaseExpr, CStmt Body) : CStmt;
+
 /// <summary>A <c>case E:</c> (<see cref="CaseExpr"/> set) or <c>default:</c>
 /// (null) label. The case expression must be a constant per C# rules — an integer
 /// literal, or an enumerator which codegen decays to <c>(int)EnumName.Member</c>

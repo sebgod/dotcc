@@ -319,7 +319,14 @@ public static class Compiler
             }
             foreach (var d in gate.Diagnostics) { Console.Error.WriteLine("dotcc: warning: " + d); }
         }
-        var cg = Ir.CodeGen.Run(irBuilder);
+        // -Wconversion: collect narrowing-conversion warnings during codegen, then
+        // flush to stderr. Off by default (no gate → no checks).
+        var convGate = warnConversion ? new ConversionGate() : null;
+        var cg = Ir.CodeGen.Run(irBuilder, convGate);
+        if (convGate is { HasAny: true })
+        {
+            foreach (var d in convGate.Diagnostics) { Console.Error.WriteLine("dotcc: warning: " + d); }
+        }
         // Library mode doesn't need a `main` (the .dll is consumed through its
         // exports); object mode links later. Exe mode requires an entry point.
         if (!asObject && !libraryMode && cg.MainArity < 0)
