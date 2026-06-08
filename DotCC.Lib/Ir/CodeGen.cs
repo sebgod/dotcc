@@ -186,10 +186,17 @@ internal sealed class CodeGen
     /// value comma hoists its leading operands instead of forming a closure.</summary>
     private bool _canHoist;
 
+    /// <summary>Bumped each time hoisted statements are actually emitted — lets
+    /// <see cref="Nested"/> tell whether a braceless body hoisted (and so must be
+    /// braced to keep the hoisted statements inside the controller).</summary>
+    private int _hoistedCount;
+
     private void FlushPending(StringBuilder sb, string pad)
     {
+        if (_pending.Count == 0) { return; }
         foreach (var p in _pending) { sb.Append(pad).Append(p).Append(";\n"); }
         _pending.Clear();
+        _hoistedCount++;
     }
 
     /// <summary>Render a statement-level expression with comma-hoisting enabled, emit
@@ -385,15 +392,25 @@ internal sealed class CodeGen
         }
     }
 
-    // Render a sub-statement of if/while/for. A braceless single statement is always
-    // wrapped in a block: it may HOIST comma side effects into preceding statements,
-    // which would otherwise leak out of the controller's single-statement body.
+    // Render a sub-statement of if/while/for: a block keeps the parent indent; a
+    // single statement indents one level. If that statement HOISTED comma side
+    // effects (emitting preceding statements), it's wrapped in a block so they don't
+    // leak out of the controller's single-statement body — but ONLY then, so a plain
+    // body (or a label, which a `goto` must still reach) keeps its bare form.
     private void Nested(StringBuilder sb, CStmt s, int ind)
     {
         if (s is Block) { Stmt(sb, s, ind); return; }
-        sb.Append(Pad(ind)).Append("{\n");
-        Stmt(sb, s, ind + 1);
-        sb.Append(Pad(ind)).Append("}\n");
+        var before = _hoistedCount;
+        var tmp = new StringBuilder();
+        Stmt(tmp, s, ind + 1);
+        if (_hoistedCount != before)
+        {
+            sb.Append(Pad(ind)).Append("{\n").Append(tmp).Append(Pad(ind)).Append("}\n");
+        }
+        else
+        {
+            sb.Append(tmp);
+        }
     }
 
     /// <summary>True when a statement provably ends control flow at its end, so a
@@ -892,10 +909,15 @@ internal sealed class CodeGen
                 return ($"((CBool)(Cond.B({Expr(b.Left)}) || Cond.B({NoHoist(() => Expr(b.Right))})))", PPrimary);
             case BinOp.Shl or BinOp.Shr:
                 {
-                    // A shift's operands are promoted INDEPENDENTLY (the right
-                    // operand doesn't join the left's type), so no reconcile.
+                    // A shift's operands are promoted INDEPENDENTLY (the right operand
+                    // doesn't join the left's type), so no reconcile. C# requires the
+                    // shift count to be `int`, so cast a non-int count (C allows any
+                    // integer; the count is always small).
                     var p = Prec(b.Op);
-                    return ($"{Sub(b.Left, p)} {BinSym(b.Op)} {Sub(b.Right, p + 1)}", p);
+                    var right = b.Right.Type.Unqualified is CType.Prim { CsName: "int" }
+                        ? Sub(b.Right, p + 1)
+                        : $"(int)({Expr(b.Right)})";
+                    return ($"{Sub(b.Left, p)} {BinSym(b.Op)} {right}", p);
                 }
             default:
                 {
