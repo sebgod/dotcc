@@ -18,9 +18,11 @@ namespace DotCC.Ir;
 /// their address is taken (or they're arrays), in a linear-memory shadow stack.
 /// <para>Milestones: 1 = the freestanding integer slice. 2 = the runtime track —
 /// linear memory, string-literal data segments, pointer load/store/arithmetic, the
-/// shadow stack for address-taken locals and arrays (this commit). I/O via WASI and
-/// malloc follow. Anything still outside the slice (floats, structs, goto/switch,
-/// varargs, library calls) raises <see cref="IrUnsupportedException"/>.</para>
+/// shadow stack for address-taken locals and arrays, and byte-level stdout
+/// (<c>putchar</c>/<c>puts</c> over the WASI <c>fd_write</c> import). printf
+/// formatting and malloc follow. Anything still outside the slice (floats, structs,
+/// goto/switch, varargs, other library calls) raises
+/// <see cref="IrUnsupportedException"/>.</para>
 /// </summary>
 internal sealed class WatBackend
 {
@@ -28,6 +30,13 @@ internal sealed class WatBackend
     // data grows UP from a 1 KiB null guard. Small programs never collide.
     private const int StackTop = 65536;
     private const int DataBase = 1024;
+    // A 16-byte I/O scratch block at the top of the null-guard page (just below the
+    // string data at DataBase): a single WASI iovec (ptr | len), the fd_write
+    // nwritten result slot, and a 1-byte char buffer. No real C object lives in the
+    // guard, so reusing its tail is safe.
+    //   IoScratch+0  iovec.ptr   IoScratch+8   nwritten
+    //   IoScratch+4  iovec.len   IoScratch+12  1-byte char buffer
+    private const int IoScratch = DataBase - 16;
 
     private readonly ITarget _wat = new WatTarget();
     private readonly StringBuilder _sb = new();
@@ -58,6 +67,17 @@ internal sealed class WatBackend
     private readonly List<(int Offset, string Hex)> _strData = new();
     private int _dataEnd = DataBase;
 
+    // The I/O runtime (milestone 2): byte-level stdout via the WASI fd_write import,
+    // emitted lazily — only the primitives a program actually calls. They're spelled
+    // as hand-written wat rather than compiled-from-C because each bottoms out at a
+    // host syscall (like real libc's putchar); the broader libc, and printf's
+    // formatting, can move to compiled-from-C later. A name here is only the wat
+    // runtime's if the program didn't define its own (user definitions win, via
+    // _defined).
+    private static readonly HashSet<string> RuntimeFns =
+        new(StringComparer.Ordinal) { "putchar", "puts" };
+    private readonly HashSet<string> _runtimeUsed = new(StringComparer.Ordinal);
+
     private WatBackend() { _out = _sb; }
 
     public static string Run(IrBuilder unit) => new WatBackend().Module(unit);
@@ -77,16 +97,26 @@ internal sealed class WatBackend
             if (fn.Sym.Name == "main") { hasMain = true; }
         }
         var funcs = _sb.ToString();
+        var usesIo = _runtimeUsed.Count > 0;
 
         var m = new StringBuilder();
         m.Append("(module\n");
-        m.Append("  (memory 1)\n");
+        if (usesIo)
+        {
+            // WASI fd_write — imports must precede every defined function (it takes
+            // the lowest function index). Brings in I/O without a bespoke host ABI.
+            m.Append("  (import \"wasi_snapshot_preview1\" \"fd_write\" (func $fd_write (param i32 i32 i32 i32) (result i32)))\n");
+        }
+        // Export the memory only when the WASI shim needs to read iovecs out of it;
+        // non-I/O modules keep the byte-identical plain `(memory 1)`.
+        m.Append(usesIo ? "  (memory (export \"memory\") 1)\n" : "  (memory 1)\n");
         m.Append($"  (global $__sp (mut i32) (i32.const {StackTop}))\n");
         foreach (var (off, hex) in _strData)
         {
             m.Append("  (data (i32.const ").Append(off).Append(") \"").Append(hex).Append("\")\n");
         }
         m.Append(funcs);
+        m.Append(RuntimeFuncDefs());
         if (hasMain) { m.Append("  (export \"main\" (func $main))\n"); }
         m.Append(")\n");
         return m.ToString();
@@ -749,7 +779,13 @@ internal sealed class WatBackend
     {
         if (!_defined.Contains(c.Callee))
         {
-            throw new IrUnsupportedException($"call to '{c.Callee}': library or undefined functions need host imports (milestone 2 I/O)");
+            // A handful of libc names are backed by the hand-written wat I/O runtime
+            // (emitted on demand from RuntimeFuncDefs); the rest still fail loud.
+            if (RuntimeFns.Contains(c.Callee)) { _runtimeUsed.Add(c.Callee); }
+            else
+            {
+                throw new IrUnsupportedException($"call to '{c.Callee}': library or undefined functions need host imports (only putchar/puts are wired so far; printf is a later step)");
+            }
         }
         for (var i = 0; i < c.Args.Count; i++)
         {
@@ -830,6 +866,102 @@ internal sealed class WatBackend
         _dataEnd += bytes.Count + 1;
         _strings[key] = offset;
         return offset;
+    }
+
+    /// <summary>Hand-written wat for the I/O runtime primitives the program used,
+    /// each wrapping the WASI <c>fd_write</c> import to write to fd 1 (stdout)
+    /// through the fixed <see cref="IoScratch"/> iovec/char block. <c>putchar</c>
+    /// writes one byte and returns it (as <c>unsigned char</c>); <c>puts</c> writes
+    /// the NUL-terminated string then a newline and returns 0 (C99 7.21.7.10).
+    /// Emitted after the user functions, so their indices are stable. Whitespace is
+    /// insignificant in wat — the layout here is purely for readability.</summary>
+    private string RuntimeFuncDefs()
+    {
+        var sb = new StringBuilder();
+        if (_runtimeUsed.Contains("putchar"))
+        {
+            sb.Append($$"""
+  (func $putchar (param $c i32) (result i32)
+    i32.const {{IoScratch + 12}}   ;; char buffer = (unsigned char)c
+    local.get $c
+    i32.store8
+    i32.const {{IoScratch}}        ;; iovec.ptr = char buffer
+    i32.const {{IoScratch + 12}}
+    i32.store
+    i32.const {{IoScratch + 4}}    ;; iovec.len = 1
+    i32.const 1
+    i32.store
+    i32.const 1                  ;; fd_write(1, iovec, 1, &nwritten)
+    i32.const {{IoScratch}}
+    i32.const 1
+    i32.const {{IoScratch + 8}}
+    call $fd_write
+    drop
+    local.get $c                 ;; return (unsigned char)c
+    i32.const 255
+    i32.and
+  )
+
+""");
+        }
+        if (_runtimeUsed.Contains("puts"))
+        {
+            sb.Append($$"""
+  (func $puts (param $s i32) (result i32)
+    (local $p i32)
+    (local $len i32)
+    local.get $s                 ;; len = strlen(s)
+    local.set $p
+    block $done
+      loop $scan
+        local.get $p
+        i32.load8_u
+        i32.eqz
+        br_if $done
+        local.get $p
+        i32.const 1
+        i32.add
+        local.set $p
+        br $scan
+      end
+    end
+    local.get $p
+    local.get $s
+    i32.sub
+    local.set $len
+    i32.const {{IoScratch}}        ;; iovec = (s, len); write the body
+    local.get $s
+    i32.store
+    i32.const {{IoScratch + 4}}
+    local.get $len
+    i32.store
+    i32.const 1
+    i32.const {{IoScratch}}
+    i32.const 1
+    i32.const {{IoScratch + 8}}
+    call $fd_write
+    drop
+    i32.const {{IoScratch + 12}}   ;; iovec = ("\n", 1); write the newline
+    i32.const 10
+    i32.store8
+    i32.const {{IoScratch}}
+    i32.const {{IoScratch + 12}}
+    i32.store
+    i32.const {{IoScratch + 4}}
+    i32.const 1
+    i32.store
+    i32.const 1
+    i32.const {{IoScratch}}
+    i32.const 1
+    i32.const {{IoScratch + 8}}
+    call $fd_write
+    drop
+    i32.const 0                  ;; success (non-negative)
+  )
+
+""");
+        }
+        return sb.ToString();
     }
 
     /// <summary>The scratch value-local for a store of type <paramref name="t"/>

@@ -107,8 +107,50 @@ public sealed class WatBackendTests
     [Fact]
     public void library_call_is_rejected_not_miscompiled()
     {
-        // printf needs linear memory + host imports (milestone 2): fail loudly.
+        // printf needs format-string lowering (a later step): still fail loudly,
+        // even though putchar/puts are now wired.
         Should.Throw<CompileException>(() => Wat("int main(void){ printf(\"hi\"); return 0; }"));
+    }
+
+    [Fact]
+    public void putchar_emits_the_fd_write_import_and_runtime_function()
+    {
+        // Byte-level stdout: a WASI fd_write import (exported memory so the host can
+        // read the iovec), the call, and the hand-written runtime definition.
+        var wat = Wat("int main(void){ putchar('A'); return 0; }");
+        wat.ShouldContain("(import \"wasi_snapshot_preview1\" \"fd_write\"");
+        wat.ShouldContain("(memory (export \"memory\") 1)");
+        wat.ShouldContain("call $putchar");
+        wat.ShouldContain("(func $putchar (param $c i32) (result i32)");
+    }
+
+    [Fact]
+    public void puts_emits_an_inline_strlen_loop_and_runtime_function()
+    {
+        var wat = Wat("int main(void){ puts(\"hi\"); return 0; }");
+        wat.ShouldContain("(func $puts (param $s i32) (result i32)");
+        wat.ShouldContain("loop $scan");      // the inline strlen
+        wat.ShouldContain("call $fd_write");
+    }
+
+    [Fact]
+    public void io_runtime_is_emitted_only_on_demand()
+    {
+        // No I/O → byte-identical plain memory, no import, no runtime functions.
+        var wat = Wat("int main(void){ return 7; }");
+        wat.ShouldNotContain("fd_write");
+        wat.ShouldNotContain("export \"memory\"");
+        wat.ShouldContain("(memory 1)");
+    }
+
+    [Fact]
+    public void a_user_defined_runtime_name_wins_over_the_builtin()
+    {
+        // The program supplies its own puts → call it directly, no import, no
+        // hand-written runtime puts spliced in.
+        var wat = Wat("int puts(char *s){ return 0; } int main(void){ return puts(\"x\"); }");
+        wat.ShouldNotContain("fd_write");
+        wat.ShouldContain("call $puts");
     }
 
     [Fact]

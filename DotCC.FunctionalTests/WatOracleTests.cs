@@ -63,6 +63,27 @@ public sealed class WatOracleTests
         RunWat(source).ShouldBe(expected);
     }
 
+    // Byte-level stdout (putchar/puts over the WASI fd_write import). A second oracle
+    // mode: instead of main()'s return value, capture what the program writes to fd 1
+    // and assert the exact bytes. The node shim provides the fd_write import and reads
+    // the iovecs out of the module's exported memory.
+    [Theory]
+    [InlineData("int main(void){ puts(\"hello\"); return 0; }", "hello\n")]
+    [InlineData("int main(void){ putchar('A'); putchar('B'); putchar('\\n'); return 0; }", "AB\n")]
+    [InlineData("int main(void){ puts(\"line1\"); puts(\"line2\"); return 0; }", "line1\nline2\n")]
+    [InlineData("int main(void){ puts(\"hi\"); putchar('!'); return 0; }", "hi\n!")]
+    [InlineData("void greet(char *s){ puts(s); } int main(void){ greet(\"hi\"); greet(\"yo\"); return 0; }", "hi\nyo\n")]
+    [InlineData("int main(void){ char *s = \"abc\"; while(*s) putchar(*s++); return 0; }", "abc")]
+    [InlineData("int main(void){ for(int i=0;i<3;i++) putchar('0'+i); return 0; }", "012")]
+    public void Wat_program_writes_expected_stdout(string source, string expected)
+    {
+        if (!Requested)
+        {
+            Assert.Skip($"set {RunEnv}=1 to run the wat execution oracle (needs wabt's wat2wasm + node on PATH).");
+        }
+        RunWatStdout(source).ShouldBe(expected);
+    }
+
     /// <summary>EmitWat → wat2wasm → node, returning <c>main()</c>'s value.</summary>
     private static int RunWat(string source)
     {
@@ -81,6 +102,45 @@ public sealed class WatOracleTests
                 ".catch(e=>{console.error(e);process.exit(1);});";
             var output = Exec("node", "-e", js, wasm);
             return int.Parse(output.Trim(), CultureInfo.InvariantCulture);
+        }
+        finally
+        {
+            foreach (var f in new[] { c, wat, wasm }) { try { File.Delete(f); } catch { /* best effort */ } }
+        }
+    }
+
+    /// <summary>EmitWat → wat2wasm → node with a WASI <c>fd_write</c> shim, returning
+    /// the bytes the program wrote to fd 1 (stdout). The shim reads each iovec out of
+    /// the module's exported memory, accumulates fd-1 writes, and reports the byte
+    /// count back through <c>nwritten</c> — the minimal slice of WASI putchar/puts
+    /// need. The captured bytes are what the test asserts (not main's return value).</summary>
+    private static string RunWatStdout(string source)
+    {
+        var stem = Path.Combine(Path.GetTempPath(), $"dotcc-wat-{Guid.NewGuid():N}");
+        string c = stem + ".c", wat = stem + ".wat", wasm = stem + ".wasm";
+        File.WriteAllText(c, source);
+        try
+        {
+            File.WriteAllText(wat, Compiler.EmitWat(new[] { c }));
+            Exec("wat2wasm", wat, "-o", wasm);
+            const string js =
+                "const fs=require('fs');" +
+                "let inst; const out=[];" +
+                "const fd_write=(fd,iovs,iovsLen,nwrittenPtr)=>{" +
+                "const dv=new DataView(inst.exports.memory.buffer);" +
+                "const bytes=new Uint8Array(inst.exports.memory.buffer);" +
+                "let written=0;" +
+                "for(let i=0;i<iovsLen;i++){" +
+                "const ptr=dv.getUint32(iovs+i*8,true);" +
+                "const len=dv.getUint32(iovs+i*8+4,true);" +
+                "for(let j=0;j<len;j++){ if(fd===1) out.push(bytes[ptr+j]); }" +
+                "written+=len;}" +
+                "dv.setUint32(nwrittenPtr,written,true);return 0;};" +
+                "WebAssembly.instantiate(fs.readFileSync(process.argv[1]),{wasi_snapshot_preview1:{fd_write}})" +
+                ".then(r=>{inst=r.instance;inst.exports.main();" +
+                "process.stdout.write(Buffer.from(out).toString('latin1'));})" +
+                ".catch(e=>{console.error(e);process.exit(1);});";
+            return Exec("node", "-e", js, wasm);
         }
         finally
         {
