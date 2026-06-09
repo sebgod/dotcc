@@ -75,6 +75,17 @@ public sealed class WatOracleTests
     [InlineData("void greet(char *s){ puts(s); } int main(void){ greet(\"hi\"); greet(\"yo\"); return 0; }", "hi\nyo\n")]
     [InlineData("int main(void){ char *s = \"abc\"; while(*s) putchar(*s++); return 0; }", "abc")]
     [InlineData("int main(void){ for(int i=0;i<3;i++) putchar('0'+i); return 0; }", "012")]
+    // printf — string-literal format expanded at compile time
+    [InlineData("int main(void){ printf(\"hello\\n\"); return 0; }", "hello\n")]
+    [InlineData("int main(void){ printf(\"n=%d\\n\", 42); return 0; }", "n=42\n")]
+    [InlineData("int main(void){ printf(\"%d+%d=%d\\n\", 2, 3, 2+3); return 0; }", "2+3=5\n")]
+    [InlineData("int main(void){ printf(\"%d\\n\", -7); return 0; }", "-7\n")]
+    [InlineData("int main(void){ printf(\"%u\\n\", 4000000000u); return 0; }", "4000000000\n")]
+    [InlineData("int main(void){ printf(\"hex=%x cap=%X oct=%o\\n\", 255, 255, 64); return 0; }", "hex=ff cap=FF oct=100\n")]
+    [InlineData("int main(void){ printf(\"%s %s%c\\n\", \"hello\", \"world\", '!'); return 0; }", "hello world!\n")]
+    [InlineData("int main(void){ printf(\"100%% done\\n\"); return 0; }", "100% done\n")]
+    [InlineData("int main(void){ long a = 100000, b = 100000; printf(\"%ld\\n\", a*b); return 0; }", "10000000000\n")]
+    [InlineData("int main(void){ for(int i=1;i<=3;i++) printf(\"[%d]\", i*i); return 0; }", "[1][4][9]")]
     public void Wat_program_writes_expected_stdout(string source, string expected)
     {
         if (!Requested)

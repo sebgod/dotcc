@@ -18,10 +18,11 @@ namespace DotCC.Ir;
 /// their address is taken (or they're arrays), in a linear-memory shadow stack.
 /// <para>Milestones: 1 = the freestanding integer slice. 2 = the runtime track —
 /// linear memory, string-literal data segments, pointer load/store/arithmetic, the
-/// shadow stack for address-taken locals and arrays, and byte-level stdout
-/// (<c>putchar</c>/<c>puts</c> over the WASI <c>fd_write</c> import). printf
-/// formatting and malloc follow. Anything still outside the slice (floats, structs,
-/// goto/switch, varargs, other library calls) raises
+/// shadow stack for address-taken locals and arrays, and stdout: <c>putchar</c>/
+/// <c>puts</c> plus a string-literal <c>printf</c> expanded inline at the call site
+/// (integer/char/string conversions), all over the WASI <c>fd_write</c> import.
+/// Wider printf (width/precision/floats) and malloc follow. Anything still outside
+/// the slice (floats, structs, goto/switch, varargs, other library calls) raises
 /// <see cref="IrUnsupportedException"/>.</para>
 /// </summary>
 internal sealed class WatBackend
@@ -37,6 +38,11 @@ internal sealed class WatBackend
     //   IoScratch+0  iovec.ptr   IoScratch+8   nwritten
     //   IoScratch+4  iovec.len   IoScratch+12  1-byte char buffer
     private const int IoScratch = DataBase - 16;
+    // A 32-byte number-formatting scratch buffer just below the I/O block: the
+    // integer→ASCII helpers fill it from the end (an i64 is ≤ 22 octal / 20 decimal
+    // / 16 hex digits), then write the slice. Still inside the null guard.
+    private const int NumBuf = DataBase - 48;
+    private const int NumBufEnd = NumBuf + 32;
 
     private readonly ITarget _wat = new WatTarget();
     private readonly StringBuilder _sb = new();
@@ -70,13 +76,35 @@ internal sealed class WatBackend
     // The I/O runtime (milestone 2): byte-level stdout via the WASI fd_write import,
     // emitted lazily — only the primitives a program actually calls. They're spelled
     // as hand-written wat rather than compiled-from-C because each bottoms out at a
-    // host syscall (like real libc's putchar); the broader libc, and printf's
-    // formatting, can move to compiled-from-C later. A name here is only the wat
+    // host syscall (like real libc's putchar); a fuller libc can move to
+    // compiled-from-C later. A directly-called name (putchar/puts) is only the wat
     // runtime's if the program didn't define its own (user definitions win, via
-    // _defined).
+    // _defined). printf is not a runtime function: a string-literal printf is
+    // expanded inline at the call site (EmitPrintf), calling the integer/string
+    // formatting helpers below.
     private static readonly HashSet<string> RuntimeFns =
         new(StringComparer.Ordinal) { "putchar", "puts" };
+    // The runtime helpers/functions the module needs, including those reached only
+    // through printf expansion. Closed over dependencies by NeedRuntime.
     private readonly HashSet<string> _runtimeUsed = new(StringComparer.Ordinal);
+
+    /// <summary>Mark a runtime helper as needed, pulling in its dependencies. Every
+    /// helper ultimately writes through <c>$__write</c> (the WASI sink), so any
+    /// non-empty set means the fd_write import + exported memory are emitted.</summary>
+    private void NeedRuntime(string name)
+    {
+        if (!_runtimeUsed.Add(name)) { return; }
+        switch (name)
+        {
+            case "puts": NeedRuntime("__put_str"); NeedRuntime("__write"); break;
+            case "putchar": NeedRuntime("__write"); break;
+            case "__put_str": NeedRuntime("__write"); break;
+            case "__put_i64_dec": NeedRuntime("__put_u64_dec"); NeedRuntime("__write"); break;
+            case "__put_u64_dec": NeedRuntime("__write"); break;
+            case "__put_u64_hex": NeedRuntime("__write"); break;
+            case "__put_u64_oct": NeedRuntime("__write"); break;
+        }
+    }
 
     private WatBackend() { _out = _sb; }
 
@@ -777,14 +805,18 @@ internal sealed class WatBackend
 
     private void EmitCall(Call c)
     {
+        // A string-literal printf is expanded inline (no $printf function); a
+        // user-defined printf, if any, wins and routes through the generic path.
+        if (c.Callee == "printf" && !_defined.Contains("printf")) { EmitPrintf(c); return; }
+
         if (!_defined.Contains(c.Callee))
         {
             // A handful of libc names are backed by the hand-written wat I/O runtime
             // (emitted on demand from RuntimeFuncDefs); the rest still fail loud.
-            if (RuntimeFns.Contains(c.Callee)) { _runtimeUsed.Add(c.Callee); }
+            if (RuntimeFns.Contains(c.Callee)) { NeedRuntime(c.Callee); }
             else
             {
-                throw new IrUnsupportedException($"call to '{c.Callee}': library or undefined functions need host imports (only putchar/puts are wired so far; printf is a later step)");
+                throw new IrUnsupportedException($"call to '{c.Callee}': library or undefined functions need host imports (putchar/puts/printf are wired so far)");
             }
         }
         for (var i = 0; i < c.Args.Count; i++)
@@ -796,6 +828,115 @@ internal sealed class WatBackend
             }
         }
         Line($"call ${c.Callee}");
+    }
+
+    /// <summary>Expand a <c>printf</c> with a string-literal format at compile time:
+    /// the format is parsed (<see cref="PrintfFormat"/>, the same grammar as the
+    /// runtime PrintfBuilder) into literal runs and conversions, and each is lowered
+    /// to a direct write or a formatting-helper call. This sidesteps a wat varargs
+    /// ABI entirely — every argument is consumed positionally here. A runtime
+    /// (non-literal) format, or a conversion the helpers don't cover yet, fails loud.
+    /// The result is C's char count, which we don't track (it's rarely consulted, and
+    /// the C# backend's Done() also returns 0) — so the expression leaves 0.</summary>
+    private void EmitPrintf(Call c)
+    {
+        if (c.Args.Count == 0 || c.Args[0] is not LitStr fmt)
+        {
+            throw new IrUnsupportedException("the wat target only supports printf with a string-literal format (a runtime-format printf needs a compiled-from-C runtime)");
+        }
+        var bytes = DotCC.EmitHelpers.StringByteValues(fmt.Segments);
+        var argIdx = 1;
+        foreach (var seg in PrintfFormat.Parse(bytes))
+        {
+            if (seg.Literal is { } literal)
+            {
+                NeedRuntime("__write");
+                Line($"i32.const {InternBytes(literal)}");
+                Line($"i32.const {literal.Count}");
+                Line("call $__write");
+                continue;
+            }
+            if (argIdx >= c.Args.Count)
+            {
+                throw new IrUnsupportedException("printf has more conversions than arguments");
+            }
+            EmitConversion(seg.Conversion!.Value, c.Args[argIdx]);
+            argIdx++;
+        }
+        // C evaluates every argument even if the format references fewer; preserve any
+        // side effects of the unconsumed tail, then discard the values.
+        for (; argIdx < c.Args.Count; argIdx++)
+        {
+            EmitExpr(c.Args[argIdx]);
+            if (c.Args[argIdx].Type.Unqualified is not CType.VoidType) { Line("drop"); }
+        }
+        Line("i32.const 0");
+    }
+
+    /// <summary>Lower one printf conversion: write its argument formatted per the
+    /// conversion char. Integer conversions widen the argument to i64 and route to a
+    /// formatting helper; <c>%c</c>/<c>%s</c> reuse putchar / a string write. Width,
+    /// precision and flags aren't implemented yet (fail loud); floats and <c>%p</c>
+    /// wait on float/pointer-print support.</summary>
+    private void EmitConversion(PrintfFormat.Spec spec, CExpr arg)
+    {
+        if (spec.HasFormatting)
+        {
+            throw new IrUnsupportedException($"the wat target does not yet support printf width/precision/flags (in '%{spec.Conv}')");
+        }
+        switch (spec.Conv)
+        {
+            case 'c':
+                NeedRuntime("putchar");
+                EmitExpr(arg);
+                if (ValType(arg.Type) == "i64") { Line("i32.wrap_i64"); }
+                Line("call $putchar");
+                Line("drop");
+                break;
+            case 's':
+                NeedRuntime("__put_str");
+                EmitExpr(arg);
+                Line("call $__put_str");
+                break;
+            case 'd': case 'i':
+                NeedRuntime("__put_i64_dec");
+                EmitIntArgAsI64(arg, signed: true);
+                Line("call $__put_i64_dec");
+                break;
+            case 'u':
+                NeedRuntime("__put_u64_dec");
+                EmitIntArgAsI64(arg, signed: false);
+                Line("call $__put_u64_dec");
+                break;
+            case 'x':
+                NeedRuntime("__put_u64_hex");
+                EmitIntArgAsI64(arg, signed: false);
+                Line("i32.const 97");   // 'a' — lower-case hex digits ≥ 10
+                Line("call $__put_u64_hex");
+                break;
+            case 'X':
+                NeedRuntime("__put_u64_hex");
+                EmitIntArgAsI64(arg, signed: false);
+                Line("i32.const 65");   // 'A' — upper-case hex digits ≥ 10
+                Line("call $__put_u64_hex");
+                break;
+            case 'o':
+                NeedRuntime("__put_u64_oct");
+                EmitIntArgAsI64(arg, signed: false);
+                Line("call $__put_u64_oct");
+                break;
+            default:
+                throw new IrUnsupportedException($"the wat target does not yet support the printf conversion '%{spec.Conv}' (floats and %p come later)");
+        }
+    }
+
+    /// <summary>Push a printf integer argument as an i64 for the formatting helpers:
+    /// an i32 is widened by the conversion's signedness (sign-extend for <c>%d</c>,
+    /// zero-extend for unsigned/hex/octal); an already-64-bit value passes through.</summary>
+    private void EmitIntArgAsI64(CExpr arg, bool signed)
+    {
+        EmitExpr(arg);
+        if (ValType(arg.Type) == "i32") { Line(signed ? "i64.extend_i32_s" : "i64.extend_i32_u"); }
     }
 
     // ---- addresses & memory ----------------------------------------------
@@ -852,9 +993,15 @@ internal sealed class WatBackend
         if (size != 1) { Line($"i32.const {size}"); Line("i32.mul"); }
     }
 
-    private int InternString(IReadOnlyList<string> segments)
+    private int InternString(IReadOnlyList<string> segments) =>
+        InternBytes(DotCC.EmitHelpers.StringByteValues(segments));
+
+    /// <summary>Intern a run of raw bytes into a NUL-terminated data segment and
+    /// return its address, deduplicating identical runs. The trailing NUL is
+    /// harmless for length-prefixed writes (printf literals) and required for the
+    /// string literals a C program treats as <c>char*</c>.</summary>
+    private int InternBytes(IReadOnlyList<int> bytes)
     {
-        var bytes = DotCC.EmitHelpers.StringByteValues(segments);
         var key = string.Join(",", bytes);
         if (_strings.TryGetValue(key, out var existing)) { return existing; }
 
@@ -868,28 +1015,27 @@ internal sealed class WatBackend
         return offset;
     }
 
-    /// <summary>Hand-written wat for the I/O runtime primitives the program used,
-    /// each wrapping the WASI <c>fd_write</c> import to write to fd 1 (stdout)
-    /// through the fixed <see cref="IoScratch"/> iovec/char block. <c>putchar</c>
-    /// writes one byte and returns it (as <c>unsigned char</c>); <c>puts</c> writes
-    /// the NUL-terminated string then a newline and returns 0 (C99 7.21.7.10).
-    /// Emitted after the user functions, so their indices are stable. Whitespace is
-    /// insignificant in wat — the layout here is purely for readability.</summary>
+    /// <summary>Hand-written wat for the I/O runtime helpers the program reached
+    /// (directly or through printf expansion). Everything bottoms out at
+    /// <c>$__write</c>, which drives the WASI <c>fd_write</c> import to fd 1 (stdout)
+    /// through the fixed <see cref="IoScratch"/> iovec; the integer formatters fill
+    /// <see cref="NumBuf"/> from the end and write the slice. Emitted after the user
+    /// functions, so their indices are stable. Whitespace is insignificant in wat —
+    /// the layout here is purely for readability.</summary>
     private string RuntimeFuncDefs()
     {
         var sb = new StringBuilder();
-        if (_runtimeUsed.Contains("putchar"))
+
+        // The core sink: write `len` bytes at `ptr` to fd 1 via one iovec.
+        if (_runtimeUsed.Contains("__write"))
         {
             sb.Append($$"""
-  (func $putchar (param $c i32) (result i32)
-    i32.const {{IoScratch + 12}}   ;; char buffer = (unsigned char)c
-    local.get $c
-    i32.store8
-    i32.const {{IoScratch}}        ;; iovec.ptr = char buffer
-    i32.const {{IoScratch + 12}}
+  (func $__write (param $ptr i32) (param $len i32)
+    i32.const {{IoScratch}}        ;; iovec = (ptr, len)
+    local.get $ptr
     i32.store
-    i32.const {{IoScratch + 4}}    ;; iovec.len = 1
-    i32.const 1
+    i32.const {{IoScratch + 4}}
+    local.get $len
     i32.store
     i32.const 1                  ;; fd_write(1, iovec, 1, &nwritten)
     i32.const {{IoScratch}}
@@ -897,6 +1043,52 @@ internal sealed class WatBackend
     i32.const {{IoScratch + 8}}
     call $fd_write
     drop
+  )
+
+""");
+        }
+
+        // Write a NUL-terminated string (no newline) — inline strlen + $__write.
+        if (_runtimeUsed.Contains("__put_str"))
+        {
+            sb.Append($$"""
+  (func $__put_str (param $p i32)
+    (local $q i32)
+    local.get $p
+    local.set $q
+    block $done
+      loop $scan
+        local.get $q
+        i32.load8_u
+        i32.eqz
+        br_if $done
+        local.get $q
+        i32.const 1
+        i32.add
+        local.set $q
+        br $scan
+      end
+    end
+    local.get $p
+    local.get $q
+    local.get $p
+    i32.sub
+    call $__write
+  )
+
+""");
+        }
+
+        if (_runtimeUsed.Contains("putchar"))
+        {
+            sb.Append($$"""
+  (func $putchar (param $c i32) (result i32)
+    i32.const {{IoScratch + 12}}   ;; char buffer = (unsigned char)c
+    local.get $c
+    i32.store8
+    i32.const {{IoScratch + 12}}
+    i32.const 1
+    call $__write
     local.get $c                 ;; return (unsigned char)c
     i32.const 255
     i32.and
@@ -904,63 +1096,187 @@ internal sealed class WatBackend
 
 """);
         }
+
         if (_runtimeUsed.Contains("puts"))
         {
             sb.Append($$"""
   (func $puts (param $s i32) (result i32)
-    (local $p i32)
-    (local $len i32)
-    local.get $s                 ;; len = strlen(s)
-    local.set $p
-    block $done
-      loop $scan
-        local.get $p
-        i32.load8_u
-        i32.eqz
-        br_if $done
-        local.get $p
-        i32.const 1
-        i32.add
-        local.set $p
-        br $scan
-      end
-    end
-    local.get $p
-    local.get $s
-    i32.sub
-    local.set $len
-    i32.const {{IoScratch}}        ;; iovec = (s, len); write the body
-    local.get $s
-    i32.store
-    i32.const {{IoScratch + 4}}
-    local.get $len
-    i32.store
-    i32.const 1
-    i32.const {{IoScratch}}
-    i32.const 1
-    i32.const {{IoScratch + 8}}
-    call $fd_write
-    drop
-    i32.const {{IoScratch + 12}}   ;; iovec = ("\n", 1); write the newline
+    local.get $s                 ;; the string, then a newline
+    call $__put_str
+    i32.const {{IoScratch + 12}}
     i32.const 10
     i32.store8
-    i32.const {{IoScratch}}
     i32.const {{IoScratch + 12}}
-    i32.store
-    i32.const {{IoScratch + 4}}
     i32.const 1
-    i32.store
-    i32.const 1
-    i32.const {{IoScratch}}
-    i32.const 1
-    i32.const {{IoScratch + 8}}
-    call $fd_write
-    drop
+    call $__write
     i32.const 0                  ;; success (non-negative)
   )
 
 """);
         }
+
+        // Unsigned decimal: a do-while that emits ≥ 1 digit (so 0 prints "0"),
+        // filling NumBuf from the end, then writes the slice.
+        if (_runtimeUsed.Contains("__put_u64_dec"))
+        {
+            sb.Append($$"""
+  (func $__put_u64_dec (param $v i64)
+    (local $p i32)
+    i32.const {{NumBufEnd}}
+    local.set $p
+    loop $lp
+      local.get $p
+      i32.const 1
+      i32.sub
+      local.set $p
+      local.get $p                 ;; NumBuf[--p] = '0' + v % 10
+      local.get $v
+      i64.const 10
+      i64.rem_u
+      i32.wrap_i64
+      i32.const 48
+      i32.add
+      i32.store8
+      local.get $v                 ;; v /= 10
+      i64.const 10
+      i64.div_u
+      local.set $v
+      local.get $v
+      i64.eqz
+      i32.eqz
+      br_if $lp
+    end
+    local.get $p
+    i32.const {{NumBufEnd}}
+    local.get $p
+    i32.sub
+    call $__write
+  )
+
+""");
+        }
+
+        // Signed decimal: emit '-' for a negative value, then its magnitude. The
+        // wrapping negate yields the right unsigned magnitude even for INT64_MIN.
+        if (_runtimeUsed.Contains("__put_i64_dec"))
+        {
+            sb.Append($$"""
+  (func $__put_i64_dec (param $v i64)
+    local.get $v
+    i64.const 0
+    i64.lt_s
+    if
+      i32.const {{IoScratch + 12}}
+      i32.const 45                 ;; '-'
+      i32.store8
+      i32.const {{IoScratch + 12}}
+      i32.const 1
+      call $__write
+      i64.const 0
+      local.get $v
+      i64.sub
+      local.set $v
+    end
+    local.get $v
+    call $__put_u64_dec
+  )
+
+""");
+        }
+
+        // Unsigned hex; $alpha is the ASCII base for digits ≥ 10 ('a' or 'A').
+        if (_runtimeUsed.Contains("__put_u64_hex"))
+        {
+            sb.Append($$"""
+  (func $__put_u64_hex (param $v i64) (param $alpha i32)
+    (local $p i32)
+    (local $d i32)
+    i32.const {{NumBufEnd}}
+    local.set $p
+    loop $lp
+      local.get $p
+      i32.const 1
+      i32.sub
+      local.set $p
+      local.get $v                 ;; d = v & 0xF
+      i64.const 15
+      i64.and
+      i32.wrap_i64
+      local.set $d
+      local.get $p
+      local.get $d
+      i32.const 10
+      i32.lt_u
+      if (result i32)
+        local.get $d
+        i32.const 48               ;; '0' + d
+        i32.add
+      else
+        local.get $d
+        i32.const 10
+        i32.sub
+        local.get $alpha           ;; alpha + (d - 10)
+        i32.add
+      end
+      i32.store8
+      local.get $v                 ;; v >>= 4 (logical)
+      i64.const 4
+      i64.shr_u
+      local.set $v
+      local.get $v
+      i64.eqz
+      i32.eqz
+      br_if $lp
+    end
+    local.get $p
+    i32.const {{NumBufEnd}}
+    local.get $p
+    i32.sub
+    call $__write
+  )
+
+""");
+        }
+
+        if (_runtimeUsed.Contains("__put_u64_oct"))
+        {
+            sb.Append($$"""
+  (func $__put_u64_oct (param $v i64)
+    (local $p i32)
+    i32.const {{NumBufEnd}}
+    local.set $p
+    loop $lp
+      local.get $p
+      i32.const 1
+      i32.sub
+      local.set $p
+      local.get $p                 ;; NumBuf[--p] = '0' + v & 7
+      local.get $v
+      i64.const 7
+      i64.and
+      i32.wrap_i64
+      i32.const 48
+      i32.add
+      i32.store8
+      local.get $v                 ;; v >>= 3
+      i64.const 3
+      i64.shr_u
+      local.set $v
+      local.get $v
+      i64.eqz
+      i32.eqz
+      br_if $lp
+    end
+    local.get $p
+    i32.const {{NumBufEnd}}
+    local.get $p
+    i32.sub
+    call $__write
+  )
+
+""");
+        }
+
         return sb.ToString();
     }
 

@@ -107,9 +107,43 @@ public sealed class WatBackendTests
     [Fact]
     public void library_call_is_rejected_not_miscompiled()
     {
-        // printf needs format-string lowering (a later step): still fail loudly,
-        // even though putchar/puts are now wired.
-        Should.Throw<CompileException>(() => Wat("int main(void){ printf(\"hi\"); return 0; }"));
+        // An unwired libc call (scanf needs host imports we don't emit) fails loudly
+        // rather than miscompiling.
+        Should.Throw<CompileException>(() => Wat("int main(void){ int x; scanf(\"%d\", &x); return 0; }"));
+    }
+
+    [Fact]
+    public void printf_with_a_string_literal_format_expands_inline()
+    {
+        // A string-literal printf is expanded at the call site — no $printf function,
+        // direct writes for literal runs, a formatting-helper call for the conversion.
+        var wat = Wat("int main(void){ printf(\"n=%d\\n\", 42); return 0; }");
+        wat.ShouldContain("(import \"wasi_snapshot_preview1\" \"fd_write\"");
+        wat.ShouldContain("call $__put_i64_dec");   // the %d conversion
+        wat.ShouldContain("call $__write");         // a literal run
+        wat.ShouldNotContain("call $printf");       // not a runtime function
+    }
+
+    [Fact]
+    public void printf_string_and_char_conversions_reuse_the_io_runtime()
+    {
+        var wat = Wat("int main(void){ printf(\"%s%c\", \"hi\", 33); return 0; }");
+        wat.ShouldContain("call $__put_str");
+        wat.ShouldContain("call $putchar");
+    }
+
+    [Fact]
+    public void printf_with_a_runtime_format_is_rejected()
+    {
+        // Only a string-literal format can be expanded at compile time.
+        Should.Throw<CompileException>(() => Wat("int main(void){ char *f = \"%d\"; printf(f, 1); return 0; }"));
+    }
+
+    [Fact]
+    public void printf_width_or_flags_are_rejected_for_now()
+    {
+        // Width/precision/flags aren't implemented yet — fail loud, don't ignore.
+        Should.Throw<CompileException>(() => Wat("int main(void){ printf(\"%5d\", 1); return 0; }"));
     }
 
     [Fact]
