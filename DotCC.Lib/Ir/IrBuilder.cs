@@ -1905,16 +1905,21 @@ internal sealed partial class IrBuilder
         // The literal's numeric CORE (suffix-free); the backend re-adds a target
         // suffix from the CType derived below. Octal normalises to decimal here.
         var inv = System.Globalization.CultureInfo.InvariantCulture;
-        string text; long? val = null;
+        // `mag` is the constant's unsigned 64-bit magnitude, used to pick its type per
+        // C99 6.4.4.1 (the first candidate type that can represent it). `val` is the
+        // signed-long view used by constant folding, left null when it doesn't fit.
+        string text; long? val = null; ulong mag = 0; bool magOk = false; var isDecimal = false;
         if (digits.Length >= 2 && digits[0] == '0' && digits[1] is 'x' or 'X')
         {
             text = digits;
+            magOk = ulong.TryParse(digits[2..], System.Globalization.NumberStyles.HexNumber, inv, out mag);
             if (long.TryParse(digits[2..], System.Globalization.NumberStyles.HexNumber, inv, out var hv)) { val = hv; }
         }
         else if (digits.Length >= 2 && digits[0] == '0' && digits[1] is 'b' or 'B')
         {
             text = digits;
-            try { val = Convert.ToInt64(digits[2..], 2); } catch { }
+            try { mag = Convert.ToUInt64(digits[2..], 2); magOk = true; } catch { }
+            if (magOk && mag <= long.MaxValue) { val = (long)mag; }
         }
         else if (digits.Length >= 2 && digits[0] == '0')
         {
@@ -1924,17 +1929,58 @@ internal sealed partial class IrBuilder
             {
                 if (c is < '0' or > '7') { throw new DotCC.CompileException($"invalid digit '{c}' in octal constant '{raw}'"); }
             }
-            var value = Convert.ToUInt64(digits, 8);
-            text = value.ToString(inv);
-            if (value <= long.MaxValue) { val = (long)value; }
+            mag = Convert.ToUInt64(digits, 8); magOk = true;
+            text = mag.ToString(inv);
+            if (mag <= long.MaxValue) { val = (long)mag; }
         }
         else
         {
             text = digits;
+            isDecimal = true;
+            magOk = ulong.TryParse(digits, System.Globalization.NumberStyles.None, inv, out mag);
             if (long.TryParse(digits, inv, out var dv)) { val = dv; }
         }
-        var ct = ls > 0 ? (hasU ? CType.ULong : CType.Long) : (hasU ? CType.UInt : CType.Int);
+        var ct = SelectIntType(isDecimal, hasU, ls > 0, mag, magOk);
         return new LitInt(text, val) { Type = ct };
+    }
+
+    /// <summary>The type of an integer constant per C99 6.4.4.1: the first type in
+    /// the constant's candidate list that can represent its <paramref name="mag"/>.
+    /// dotcc's model has only <c>int</c>/<c>unsigned</c> (32-bit) and
+    /// <c>long</c>/<c>unsigned long</c> (64-bit, also covering <c>long long</c>), so
+    /// the standard's lists collapse to those four. The key subtlety the
+    /// suffix-only choice missed: a value too big for <c>int</c> climbs to a wider
+    /// type — and a <em>hex/octal</em> constant may pick an unsigned type even with
+    /// no <c>u</c> suffix (a decimal one may not). If the magnitude couldn't be
+    /// parsed (overflow past 64 bits), fall back to the suffix-only choice.</summary>
+    private static CType SelectIntType(bool decimalBase, bool hasU, bool hasL, ulong mag, bool magOk)
+    {
+        if (!magOk)
+        {
+            return hasL ? (hasU ? CType.ULong : CType.Long) : (hasU ? CType.UInt : CType.Int);
+        }
+        var fitsInt = mag <= int.MaxValue;
+        var fitsUInt = mag <= uint.MaxValue;
+        var fitsLong = mag <= long.MaxValue;
+
+        if (hasU)
+        {
+            return !hasL && fitsUInt ? CType.UInt : CType.ULong;
+        }
+        if (hasL)
+        {
+            // Candidates: long, [unsigned long for hex/octal]. A signed-long value
+            // stays long; anything larger needs the unsigned 64-bit type.
+            return fitsLong ? CType.Long : CType.ULong;
+        }
+        if (decimalBase)
+        {
+            // Decimal, unsuffixed: int → long → (no further signed type). Past
+            // long.MaxValue C has no valid type; be lenient like gcc (unsigned long).
+            return fitsInt ? CType.Int : fitsLong ? CType.Long : CType.ULong;
+        }
+        // Hex/octal/binary, unsuffixed: unsigned types are candidates too.
+        return fitsInt ? CType.Int : fitsUInt ? CType.UInt : fitsLong ? CType.Long : CType.ULong;
     }
 
     /// <summary>Build a floating-point literal, gating the C99 hex-float form

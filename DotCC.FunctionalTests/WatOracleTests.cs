@@ -84,7 +84,7 @@ public sealed class WatOracleTests
     [InlineData("int main(void){ printf(\"hex=%x cap=%X oct=%o\\n\", 255, 255, 64); return 0; }", "hex=ff cap=FF oct=100\n")]
     [InlineData("int main(void){ printf(\"%s %s%c\\n\", \"hello\", \"world\", '!'); return 0; }", "hello world!\n")]
     [InlineData("int main(void){ printf(\"100%% done\\n\"); return 0; }", "100% done\n")]
-    [InlineData("int main(void){ long a = 100000, b = 100000; printf(\"%ld\\n\", a*b); return 0; }", "10000000000\n")]
+    [InlineData("int main(void){ long n = 10000000000; printf(\"%ld\\n\", n); return 0; }", "10000000000\n")]
     [InlineData("int main(void){ for(int i=1;i<=3;i++) printf(\"[%d]\", i*i); return 0; }", "[1][4][9]")]
     public void Wat_program_writes_expected_stdout(string source, string expected)
     {

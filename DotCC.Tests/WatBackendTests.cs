@@ -61,6 +61,16 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void an_over_int_decimal_literal_is_typed_long()
+    {
+        // C99 6.4.4.1: a decimal constant that doesn't fit `int` climbs to `long`, so
+        // it lowers to i64 — not a too-big `i32.const` (which wat2wasm rejects).
+        var wat = Wat("int main(void){ long n = 10000000000; return (int)(n % 7); }");
+        wat.ShouldContain("i64.const 10000000000");
+        wat.ShouldNotContain("i32.const 10000000000");
+    }
+
+    [Fact]
     public void locals_are_declared_before_the_body()
     {
         var wat = Wat("int main(void){ int x = 41; return x + 1; }");
