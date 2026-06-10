@@ -59,9 +59,10 @@ int printf(char* fmt, ...);
 int sprintf(char* dst, char* fmt, ...);
 int snprintf(char* dst, int n, char* fmt, ...);
 
-/* Formatted input (from stdin / a buffer). */
+/* Formatted input (from stdin / a buffer / a stream). */
 int scanf(char* fmt, ...);
 int sscanf(char* src, char* fmt, ...);
+int fscanf(FILE* stream, char* fmt, ...);
 
 /* Whole-string output. */
 int puts(char* s);
@@ -99,5 +100,9 @@ int rename(const char* oldp, const char* newp);
 
 /* Error reporting (uses errno; see <errno.h>). */
 void perror(char* s);
+
+/* POSIX: the fd behind a stream (dotcc FILE slots ARE the fds — 0/1/2 are
+   stdin/stdout/stderr, fopen'd streams take the next free slot). */
+int fileno(FILE* stream);
 
 #endif

@@ -299,6 +299,30 @@ public static unsafe partial class Libc
     public static int strcoll(byte* a, byte* b) => strcmp(a, b);
 
     /// <summary>
+    /// POSIX <c>strcasecmp(a, b)</c> — <see cref="strcmp(byte*, byte*)"/> with
+    /// ASCII case folded (the C-locale behavior; bytes ≥ 0x80 compare raw).
+    /// </summary>
+    public static int strcasecmp(byte* a, byte* b)
+    {
+        while (*a != 0 && Lower(*a) == Lower(*b)) { a++; b++; }
+        return Lower(*a) - Lower(*b);
+    }
+
+    /// <summary>POSIX <c>strncasecmp(a, b, n)</c> — at most <paramref name="n"/>
+    /// bytes of <see cref="strcasecmp"/>.</summary>
+    public static int strncasecmp(byte* a, byte* b, ulong n)
+    {
+        for (; n > 0; n--, a++, b++)
+        {
+            var d = Lower(*a) - Lower(*b);
+            if (d != 0 || *a == 0) { return d; }
+        }
+        return 0;
+    }
+
+    private static int Lower(byte c) => c >= 'A' && c <= 'Z' ? c + 32 : c;
+
+    /// <summary>
     /// <c>strcpy(dst, src)</c> — copy NUL-terminated <paramref name="src"/>
     /// into <paramref name="dst"/>, including the terminating <c>0</c>.
     /// Returns <paramref name="dst"/>.

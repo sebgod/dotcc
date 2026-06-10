@@ -129,10 +129,10 @@ public static unsafe partial class Libc
     // byte-oriented in C); for the console they go through Console.* as chars,
     // which is exactly correct for ASCII (matches dotcc's UTF-8-in-char* model).
 
-    internal static bool WriteByteTo(FILE* f, byte b)
+    internal static bool WriteByteTo(FILE* f, byte b) => Slot(f) is { } s && WriteByteSlot(s, b);
+
+    private static bool WriteByteSlot(FileSlot s, byte b)
     {
-        var s = Slot(f);
-        if (s == null) { return false; }
         // Only file-backed slots carry a Stream; the console kinds have none.
         if (s.Stream is { } st)
         {
@@ -147,10 +147,10 @@ public static unsafe partial class Libc
         return true;
     }
 
-    internal static int ReadByteFrom(FILE* f)
+    internal static int ReadByteFrom(FILE* f) => Slot(f) is { } s ? ReadByteSlot(s) : -1;
+
+    private static int ReadByteSlot(FileSlot s)
     {
-        var s = Slot(f);
-        if (s == null) { return -1; }
         // A byte pushed back by ungetc is returned before touching the stream
         // (covers fgetc / getc / getchar / fgets — the common ungetc consumers).
         if (s.Pushback >= 0) { int p = s.Pushback; s.Pushback = -1; return p; }
@@ -271,6 +271,66 @@ public static unsafe partial class Libc
             NativeMemory.Free(stream);
         }
         return 0;
+    }
+
+    /// <summary>
+    /// POSIX <c>fileno(stream)</c> — the fd behind a stream. dotcc's slot
+    /// indices ARE its fds (0/1/2 = std streams, fopen'd slots follow), so
+    /// this is just the stored index. -1 for NULL / a closed stream.
+    /// </summary>
+    public static int fileno(FILE* stream) => stream == null ? -1 : stream->_slot;
+
+    /// <summary>
+    /// POSIX <c>close(fd)</c> — close by fd. The slot-level half of
+    /// <see cref="fclose"/> (no <c>FILE*</c> to free — a caller holding one,
+    /// chibi's fd-port finalizer, frees it via <c>fclose</c> separately).
+    /// Closing 0/1/2 flushes and keeps the std stream usable, like fclose.
+    /// </summary>
+    public static int close(int fd)
+    {
+        var slot = SlotByFd(fd);
+        if (slot == null) { errno = EBADF; return -1; }
+        CloseSlot(slot);
+        return 0;
+    }
+
+    /// <summary>POSIX <c>read(fd, buf, count)</c> — byte-level fd read over the
+    /// slot's backing (file stream, or Console.In for fd 0).</summary>
+    public static long read(int fd, void* buf, ulong count)
+    {
+        var s = SlotByFd(fd);
+        if (s == null) { errno = EBADF; return -1; }
+        var dst = (byte*)buf;
+        long got = 0;
+        for (; (ulong)got < count; got++)
+        {
+            int b = ReadByteSlot(s);
+            if (b < 0) { break; }
+            dst[got] = (byte)b;
+        }
+        return got;
+    }
+
+    /// <summary>POSIX <c>write(fd, buf, count)</c> — byte-level fd write over the
+    /// slot's backing (file stream, or Console.Out/.Error for fds 1/2).</summary>
+    public static long write(int fd, void* buf, ulong count)
+    {
+        var s = SlotByFd(fd);
+        if (s == null) { errno = EBADF; return -1; }
+        var src = (byte*)buf;
+        long written = 0;
+        for (; (ulong)written < count; written++)
+        {
+            if (!WriteByteSlot(s, src[written])) { break; }
+        }
+        return written;
+    }
+
+    /// <summary>The open slot behind a POSIX fd (dotcc fds ARE slot indices),
+    /// or null. Shared by <c>close</c>/<c>read</c>/<c>write</c>/<c>fstat</c>.</summary>
+    private static FileSlot? SlotByFd(int fd)
+    {
+        lock (_filesLock) { return (uint)fd < (uint)_files.Count ? _files[fd] : null; }
     }
 
     private static void CloseSlot(FileSlot slot)

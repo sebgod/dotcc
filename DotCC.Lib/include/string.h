@@ -15,6 +15,10 @@ int strlen(char* s);
 int strcmp(char* a, char* b);
 int strncmp(char* a, char* b, size_t n);
 int strcoll(char* a, char* b);
+/* POSIX (home: <strings.h>; glibc exposes them here too, which is what
+   portable code relies on — chibi calls them with only <string.h>). */
+int strcasecmp(char* a, char* b);
+int strncasecmp(char* a, char* b, size_t n);
 char* strcpy(char* dst, char* src);
 char* strncpy(char* dst, char* src, int n);
 

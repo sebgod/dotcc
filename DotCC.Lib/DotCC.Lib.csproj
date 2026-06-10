@@ -60,6 +60,9 @@
        Assembly.GetManifestResourceStream. -->
   <ItemGroup>
     <EmbeddedResource Include="include\*.h" LogicalName="DotCC.SystemHeaders.%(Filename)%(Extension)" />
+    <!-- Subdirectory-qualified headers: the literal "sys/" in the logical name
+         is the include-map key, so `#include <sys/stat.h>` resolves. -->
+    <EmbeddedResource Include="include\sys\*.h" LogicalName="DotCC.SystemHeaders.sys/%(Filename)%(Extension)" />
   </ItemGroup>
 
   <!-- DotCC.Libc runtime sources, embedded as resources. These are the

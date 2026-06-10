@@ -53,8 +53,10 @@ double floor(double x); float floorf(float x);
 double round(double x); float roundf(float x);
 double trunc(double x); float truncf(float x);
 
-/* Absolute value, remainder, min/max (C99 for fmin/fmax). */
+/* Absolute value, remainder, min/max (C99 for fmin/fmax). The `l` variant is
+   the 64-bit `long double` dotcc models (= double). */
 double fabs(double x);          float fabsf(float x);
+long double fabsl(long double x);
 double fmod(double x, double y); float fmodf(float x, float y);
 double fmin(double x, double y); float fminf(float x, float y);
 double fmax(double x, double y); float fmaxf(float x, float y);

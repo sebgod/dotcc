@@ -16,10 +16,13 @@
 
 typedef long fd_set;
 
+#ifndef _DOTCC_STRUCT_TIMEVAL
+#define _DOTCC_STRUCT_TIMEVAL
 struct timeval {
     long tv_sec;
     long tv_usec;
 };
+#endif
 
 void FD_ZERO(fd_set *set);
 void FD_SET(int fd, fd_set *set);
@@ -30,5 +33,8 @@ int select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *errorfds, struct
 
 int usleep(unsigned int usec);
 int isatty(int fd);
+int close(int fd);
+long read(int fd, void *buf, unsigned long count);
+long write(int fd, void *buf, unsigned long count);
 
 #endif /* _UNISTD_H */

@@ -340,6 +340,10 @@ public static unsafe partial class Libc
     /// <summary><c>fabsf(x)</c> — explicit single-precision <see cref="fabs(float)"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static float fabsf(float x) => MathF.Abs(x);
+    /// <summary><c>fabsl(x)</c> — <c>long double</c> <see cref="fabs(double)"/>
+    /// (dotcc models long double as 64-bit, so this IS the double form).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static double fabsl(double x) => Math.Abs(x);
 
     /// <summary><c>fmod(x, y)</c> — floating-point remainder of <paramref name="x"/> / <paramref name="y"/>. Sign matches <paramref name="x"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

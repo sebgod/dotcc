@@ -74,6 +74,7 @@ public static unsafe partial class Libc
     public const int EDOM = 33;     // Numerical argument out of domain   (C std)
     public const int ERANGE = 34;   // Numerical result out of range      (C std)
     public const int EILSEQ = 84;   // Invalid or incomplete multibyte/wide char (C std)
+    public const int ENOTSOCK = 88; // Socket operation on non-socket (POSIX; PosixLib.shutdown)
 
     /// <summary>
     /// <c>strerror(errnum)</c> — map an error number to a human-readable message
