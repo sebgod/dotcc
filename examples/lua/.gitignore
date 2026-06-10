@@ -1,2 +1,2 @@
-lua-src/
+# lua-src/ is vendored in-repo now (so builds + CI need no network) — see fetch.sh.
 build*/
