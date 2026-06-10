@@ -129,7 +129,7 @@ public sealed class WatBackendTests
         // direct writes for literal runs, a formatting-helper call for the conversion.
         var wat = Wat("int main(void){ printf(\"n=%d\\n\", 42); return 0; }");
         wat.ShouldContain("(import \"wasi_snapshot_preview1\" \"fd_write\"");
-        wat.ShouldContain("call $__put_i64_dec");   // the %d conversion
+        wat.ShouldContain("call $__pf_int_s");      // the %d conversion
         wat.ShouldContain("call $__write");         // a literal run
         wat.ShouldNotContain("call $printf");       // not a runtime function
     }
@@ -138,8 +138,18 @@ public sealed class WatBackendTests
     public void printf_string_and_char_conversions_reuse_the_io_runtime()
     {
         var wat = Wat("int main(void){ printf(\"%s%c\", \"hi\", 33); return 0; }");
-        wat.ShouldContain("call $__put_str");
-        wat.ShouldContain("call $putchar");
+        wat.ShouldContain("call $__emit_str");
+        wat.ShouldContain("call $__emit_char");
+    }
+
+    [Fact]
+    public void printf_field_width_passes_the_constant_through_to_the_formatter()
+    {
+        // Width/precision/flags are compile-time constants from the literal format —
+        // resolved here (width 5, zero-pad mode 2) and handed to the formatter.
+        var wat = Wat("int main(void){ printf(\"%05d\", 42); return 0; }");
+        wat.ShouldContain("call $__pf_int_s");
+        wat.ShouldContain("i32.const 5");   // the width immediate
     }
 
     [Fact]
@@ -150,10 +160,11 @@ public sealed class WatBackendTests
     }
 
     [Fact]
-    public void printf_width_or_flags_are_rejected_for_now()
+    public void printf_unsupported_conversions_are_rejected()
     {
-        // Width/precision/flags aren't implemented yet — fail loud, don't ignore.
-        Should.Throw<CompileException>(() => Wat("int main(void){ printf(\"%5d\", 1); return 0; }"));
+        // The '#' flag and floats aren't wired yet — fail loud, don't miscompile.
+        Should.Throw<CompileException>(() => Wat("int main(void){ printf(\"%#x\", 255); return 0; }"));
+        Should.Throw<CompileException>(() => Wat("int main(void){ printf(\"%f\", 1.5); return 0; }"));
     }
 
     [Fact]

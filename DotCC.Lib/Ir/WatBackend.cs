@@ -96,13 +96,15 @@ internal sealed class WatBackend
         if (!_runtimeUsed.Add(name)) { return; }
         switch (name)
         {
-            case "puts": NeedRuntime("__put_str"); NeedRuntime("__write"); break;
-            case "putchar": NeedRuntime("__write"); break;
-            case "__put_str": NeedRuntime("__write"); break;
-            case "__put_i64_dec": NeedRuntime("__put_u64_dec"); NeedRuntime("__write"); break;
-            case "__put_u64_dec": NeedRuntime("__write"); break;
-            case "__put_u64_hex": NeedRuntime("__write"); break;
-            case "__put_u64_oct": NeedRuntime("__write"); break;
+            case "putchar": NeedRuntime("__putb"); break;
+            case "puts": NeedRuntime("__emit_str"); NeedRuntime("__putb"); break;
+            case "__putb": NeedRuntime("__write"); break;
+            case "__fill": NeedRuntime("__putb"); break;
+            case "__emit_str": NeedRuntime("__fill"); NeedRuntime("__write"); break;
+            case "__emit_char": NeedRuntime("__putb"); NeedRuntime("__fill"); break;
+            case "__pf_emit": NeedRuntime("__putb"); NeedRuntime("__fill"); NeedRuntime("__write"); break;
+            case "__pf_int_s": NeedRuntime("__fmt_radix"); NeedRuntime("__pf_emit"); break;
+            case "__pf_int_u": NeedRuntime("__fmt_radix"); NeedRuntime("__pf_emit"); break;
         }
     }
 
@@ -873,62 +875,92 @@ internal sealed class WatBackend
         Line("i32.const 0");
     }
 
-    /// <summary>Lower one printf conversion: write its argument formatted per the
-    /// conversion char. Integer conversions widen the argument to i64 and route to a
-    /// formatting helper; <c>%c</c>/<c>%s</c> reuse putchar / a string write. Width,
-    /// precision and flags aren't implemented yet (fail loud); floats and <c>%p</c>
-    /// wait on float/pointer-print support.</summary>
+    // The widest decimal/precision digit run the integer formatter can stage in
+    // NumBuf (an i64 is ≤ 20 digits; the rest is precision headroom).
+    private const int MaxNumDigits = 30;
+
+    /// <summary>Lower one printf conversion: push the argument (widened/wrapped as
+    /// the conversion needs) plus the field-formatting parameters resolved from the
+    /// (compile-time-constant) spec — width, precision, the justification/sign mode —
+    /// then call the matching runtime formatter. The runtime side does only what
+    /// genuinely depends on the value (digit generation, padding lengths); everything
+    /// the literal fixes is an immediate. <c>#</c>, floats and <c>%p</c> aren't
+    /// supported yet (fail loud).</summary>
     private void EmitConversion(PrintfFormat.Spec spec, CExpr arg)
     {
-        if (spec.HasFormatting)
+        if (spec.Alt)
         {
-            throw new IrUnsupportedException($"the wat target does not yet support printf width/precision/flags (in '%{spec.Conv}')");
+            throw new IrUnsupportedException($"the wat target does not yet support the printf '#' flag (in '%{spec.Conv}')");
         }
+        var width = spec.Width >= 0 ? spec.Width : 0;
         switch (spec.Conv)
         {
             case 'c':
-                NeedRuntime("putchar");
+                NeedRuntime("__emit_char");
                 EmitExpr(arg);
                 if (ValType(arg.Type) == "i64") { Line("i32.wrap_i64"); }
-                Line("call $putchar");
-                Line("drop");
+                Line($"i32.const {width}");
+                Line($"i32.const {(spec.Left ? 1 : 0)}");
+                Line("call $__emit_char");
                 break;
             case 's':
-                NeedRuntime("__put_str");
+                NeedRuntime("__emit_str");
                 EmitExpr(arg);
-                Line("call $__put_str");
+                Line($"i32.const {(spec.Precision >= 0 ? spec.Precision : -1)}");   // max chars
+                Line($"i32.const {width}");
+                Line($"i32.const {(spec.Left ? 1 : 0)}");
+                Line("call $__emit_str");
                 break;
             case 'd': case 'i':
-                NeedRuntime("__put_i64_dec");
+                NeedRuntime("__pf_int_s");
                 EmitIntArgAsI64(arg, signed: true);
-                Line("call $__put_i64_dec");
+                Line($"i32.const {(spec.Plus ? 43 : spec.Space ? 32 : 0)}");        // sign for non-negative
+                Line($"i32.const {IntMinDigits(spec)}");
+                Line($"i32.const {width}");
+                Line($"i32.const {IntMode(spec)}");
+                Line("call $__pf_int_s");
                 break;
-            case 'u':
-                NeedRuntime("__put_u64_dec");
-                EmitIntArgAsI64(arg, signed: false);
-                Line("call $__put_u64_dec");
-                break;
-            case 'x':
-                NeedRuntime("__put_u64_hex");
-                EmitIntArgAsI64(arg, signed: false);
-                Line("i32.const 97");   // 'a' — lower-case hex digits ≥ 10
-                Line("call $__put_u64_hex");
-                break;
-            case 'X':
-                NeedRuntime("__put_u64_hex");
-                EmitIntArgAsI64(arg, signed: false);
-                Line("i32.const 65");   // 'A' — upper-case hex digits ≥ 10
-                Line("call $__put_u64_hex");
-                break;
-            case 'o':
-                NeedRuntime("__put_u64_oct");
-                EmitIntArgAsI64(arg, signed: false);
-                Line("call $__put_u64_oct");
-                break;
+            case 'u': EmitUnsignedConv(arg, spec, 10, 0); break;
+            case 'x': EmitUnsignedConv(arg, spec, 16, 97); break;   // 'a'
+            case 'X': EmitUnsignedConv(arg, spec, 16, 65); break;   // 'A'
+            case 'o': EmitUnsignedConv(arg, spec, 8, 0); break;
             default:
                 throw new IrUnsupportedException($"the wat target does not yet support the printf conversion '%{spec.Conv}' (floats and %p come later)");
         }
     }
+
+    /// <summary>Lower an unsigned integer conversion (<c>%u</c>/<c>%x</c>/<c>%X</c>/
+    /// <c>%o</c>): the value is taken as its unsigned bit pattern; <c>+</c>/space don't
+    /// apply (C only signs signed conversions).</summary>
+    private void EmitUnsignedConv(CExpr arg, PrintfFormat.Spec spec, int radix, int alpha)
+    {
+        NeedRuntime("__pf_int_u");
+        EmitIntArgAsI64(arg, signed: false);
+        Line($"i64.const {radix}");
+        Line($"i32.const {alpha}");
+        Line($"i32.const {IntMinDigits(spec)}");
+        Line($"i32.const {(spec.Width >= 0 ? spec.Width : 0)}");
+        Line($"i32.const {IntMode(spec)}");
+        Line("call $__pf_int_u");
+    }
+
+    /// <summary>The minimum digit count for an integer conversion — the precision if
+    /// given, else 1. Bounded by the staging buffer.</summary>
+    private static int IntMinDigits(PrintfFormat.Spec spec)
+    {
+        var min = spec.Precision >= 0 ? spec.Precision : 1;
+        if (min > MaxNumDigits)
+        {
+            throw new IrUnsupportedException($"the wat target does not yet support printf precision > {MaxNumDigits} (in '%{spec.Conv}')");
+        }
+        return min;
+    }
+
+    /// <summary>The field-fill mode for an integer conversion: 1 = left-justify, 2 =
+    /// zero-pad, 0 = space-pad. The <c>0</c> flag is ignored when a precision is given
+    /// or with left-justify (C99 §7.21.6.1).</summary>
+    private static int IntMode(PrintfFormat.Spec spec) =>
+        spec.Left ? 1 : (spec.Zero && spec.Precision < 0 ? 2 : 0);
 
     /// <summary>Push a printf integer argument as an i64 for the formatting helpers:
     /// an i32 is widened by the conversion's signedness (sign-extend for <c>%d</c>,
@@ -1018,10 +1050,13 @@ internal sealed class WatBackend
     /// <summary>Hand-written wat for the I/O runtime helpers the program reached
     /// (directly or through printf expansion). Everything bottoms out at
     /// <c>$__write</c>, which drives the WASI <c>fd_write</c> import to fd 1 (stdout)
-    /// through the fixed <see cref="IoScratch"/> iovec; the integer formatters fill
-    /// <see cref="NumBuf"/> from the end and write the slice. Emitted after the user
-    /// functions, so their indices are stable. Whitespace is insignificant in wat —
-    /// the layout here is purely for readability.</summary>
+    /// through the fixed <see cref="IoScratch"/> iovec; <c>$__putb</c>/<c>$__fill</c>
+    /// are the single-byte / padding primitives. Integer conversions stage digits into
+    /// <see cref="NumBuf"/> (<c>$__fmt_radix</c>) and lay them out in a field
+    /// (<c>$__pf_emit</c>); <c>$__emit_str</c>/<c>$__emit_char</c> do the string/char
+    /// fields. Emitted after the user functions, so their indices are stable.
+    /// Whitespace is insignificant in wat — the layout here is purely for
+    /// readability.</summary>
     private string RuntimeFuncDefs()
     {
         var sb = new StringBuilder();
@@ -1048,32 +1083,42 @@ internal sealed class WatBackend
 """);
         }
 
-        // Write a NUL-terminated string (no newline) — inline strlen + $__write.
-        if (_runtimeUsed.Contains("__put_str"))
+        // Write one byte (the low 8 bits of $ch) through the IoScratch char slot.
+        if (_runtimeUsed.Contains("__putb"))
         {
             sb.Append($$"""
-  (func $__put_str (param $p i32)
-    (local $q i32)
-    local.get $p
-    local.set $q
+  (func $__putb (param $ch i32)
+    i32.const {{IoScratch + 12}}
+    local.get $ch
+    i32.store8
+    i32.const {{IoScratch + 12}}
+    i32.const 1
+    call $__write
+  )
+
+""");
+        }
+
+        // Write $ch repeated $n times (the field-padding primitive).
+        if (_runtimeUsed.Contains("__fill"))
+        {
+            sb.Append($$"""
+  (func $__fill (param $ch i32) (param $n i32)
     block $done
-      loop $scan
-        local.get $q
-        i32.load8_u
-        i32.eqz
+      loop $lp
+        local.get $n
+        i32.const 0
+        i32.le_s
         br_if $done
-        local.get $q
+        local.get $ch
+        call $__putb
+        local.get $n
         i32.const 1
-        i32.add
-        local.set $q
-        br $scan
+        i32.sub
+        local.set $n
+        br $lp
       end
     end
-    local.get $p
-    local.get $q
-    local.get $p
-    i32.sub
-    call $__write
   )
 
 """);
@@ -1083,12 +1128,8 @@ internal sealed class WatBackend
         {
             sb.Append($$"""
   (func $putchar (param $c i32) (result i32)
-    i32.const {{IoScratch + 12}}   ;; char buffer = (unsigned char)c
-    local.get $c
-    i32.store8
-    i32.const {{IoScratch + 12}}
-    i32.const 1
-    call $__write
+    local.get $c                 ;; write (unsigned char)c
+    call $__putb
     local.get $c                 ;; return (unsigned char)c
     i32.const 255
     i32.and
@@ -1101,177 +1142,319 @@ internal sealed class WatBackend
         {
             sb.Append($$"""
   (func $puts (param $s i32) (result i32)
-    local.get $s                 ;; the string, then a newline
-    call $__put_str
-    i32.const {{IoScratch + 12}}
+    local.get $s                 ;; the string (no cap, no field), then a newline
+    i32.const -1
+    i32.const 0
+    i32.const 0
+    call $__emit_str
     i32.const 10
-    i32.store8
-    i32.const {{IoScratch + 12}}
-    i32.const 1
-    call $__write
+    call $__putb
     i32.const 0                  ;; success (non-negative)
   )
 
 """);
         }
 
-        // Unsigned decimal: a do-while that emits ≥ 1 digit (so 0 prints "0"),
-        // filling NumBuf from the end, then writes the slice.
-        if (_runtimeUsed.Contains("__put_u64_dec"))
+        // Stage the digits of $v (radix $base, alpha base for digits ≥ 10) into NumBuf
+        // from the end, left-zero-padded to at least $min digits, and return the start
+        // pointer (length = NumBufEnd - ptr). A do-while emits ≥ 1 digit so 0 prints
+        // "0" — except the C99 corner where value 0 with precision 0 emits nothing.
+        if (_runtimeUsed.Contains("__fmt_radix"))
         {
             sb.Append($$"""
-  (func $__put_u64_dec (param $v i64)
-    (local $p i32)
+  (func $__fmt_radix (param $v i64) (param $base i64) (param $alpha i32) (param $min i32) (result i32)
+    (local $p i32) (local $d i32)
     i32.const {{NumBufEnd}}
     local.set $p
-    loop $lp
-      local.get $p
-      i32.const 1
-      i32.sub
-      local.set $p
-      local.get $p                 ;; NumBuf[--p] = '0' + v % 10
-      local.get $v
-      i64.const 10
-      i64.rem_u
-      i32.wrap_i64
-      i32.const 48
-      i32.add
-      i32.store8
-      local.get $v                 ;; v /= 10
-      i64.const 10
-      i64.div_u
-      local.set $v
-      local.get $v
-      i64.eqz
-      i32.eqz
-      br_if $lp
+    local.get $v                 ;; skip digit gen only when v==0 && min==0
+    i64.eqz
+    local.get $min
+    i32.eqz
+    i32.and
+    i32.eqz
+    if
+      loop $lp
+        local.get $p
+        i32.const 1
+        i32.sub
+        local.set $p
+        local.get $v             ;; d = v % base
+        local.get $base
+        i64.rem_u
+        i32.wrap_i64
+        local.set $d
+        local.get $p
+        local.get $d
+        i32.const 10
+        i32.lt_u
+        if (result i32)
+          local.get $d
+          i32.const 48           ;; '0' + d
+          i32.add
+        else
+          local.get $d
+          i32.const 10
+          i32.sub
+          local.get $alpha       ;; alpha + (d - 10)
+          i32.add
+        end
+        i32.store8
+        local.get $v             ;; v /= base
+        local.get $base
+        i64.div_u
+        local.set $v
+        local.get $v
+        i64.eqz
+        i32.eqz
+        br_if $lp
+      end
+    end
+    block $pdone                 ;; left-pad '0' until length ≥ min (precision)
+      loop $pad
+        i32.const {{NumBufEnd}}
+        local.get $p
+        i32.sub
+        local.get $min
+        i32.ge_s
+        br_if $pdone
+        local.get $p
+        i32.const 1
+        i32.sub
+        local.set $p
+        local.get $p
+        i32.const 48
+        i32.store8
+        br $pad
+      end
     end
     local.get $p
-    i32.const {{NumBufEnd}}
-    local.get $p
-    i32.sub
-    call $__write
   )
 
 """);
         }
 
-        // Signed decimal: emit '-' for a negative value, then its magnitude. The
-        // wrapping negate yields the right unsigned magnitude even for INT64_MIN.
-        if (_runtimeUsed.Contains("__put_i64_dec"))
+        // Write a staged number ($ptr,$len) into a field: optional $sign byte, then
+        // pad to $width per $mode (0 = space-pad right, 1 = left-justify, 2 = zero-pad).
+        if (_runtimeUsed.Contains("__pf_emit"))
         {
             sb.Append($$"""
-  (func $__put_i64_dec (param $v i64)
+  (func $__pf_emit (param $ptr i32) (param $len i32) (param $sign i32) (param $width i32) (param $mode i32)
+    (local $pad i32)
+    local.get $width             ;; pad = max(0, width - (signLen + len))
+    local.get $sign
+    i32.const 0
+    i32.ne
+    local.get $len
+    i32.add
+    i32.sub
+    local.set $pad
+    local.get $mode
+    i32.const 1
+    i32.eq
+    if                           ;; left: sign, body, spaces
+      local.get $sign
+      if
+        local.get $sign
+        call $__putb
+      end
+      local.get $ptr
+      local.get $len
+      call $__write
+      i32.const 32
+      local.get $pad
+      call $__fill
+    else
+      local.get $mode
+      i32.const 2
+      i32.eq
+      if                         ;; zero: sign, '0' pad, body
+        local.get $sign
+        if
+          local.get $sign
+          call $__putb
+        end
+        i32.const 48
+        local.get $pad
+        call $__fill
+        local.get $ptr
+        local.get $len
+        call $__write
+      else                       ;; right: spaces, sign, body
+        i32.const 32
+        local.get $pad
+        call $__fill
+        local.get $sign
+        if
+          local.get $sign
+          call $__putb
+        end
+        local.get $ptr
+        local.get $len
+        call $__write
+      end
+    end
+  )
+
+""");
+        }
+
+        // Signed decimal: resolve the sign ('-' for negative, else $posSign for a
+        // non-negative value), stage the magnitude (wrapping negate handles INT64_MIN),
+        // emit. base 10.
+        if (_runtimeUsed.Contains("__pf_int_s"))
+        {
+            sb.Append($$"""
+  (func $__pf_int_s (param $v i64) (param $posSign i32) (param $min i32) (param $width i32) (param $mode i32)
+    (local $sign i32) (local $ptr i32)
     local.get $v
     i64.const 0
     i64.lt_s
-    if
-      i32.const {{IoScratch + 12}}
-      i32.const 45                 ;; '-'
-      i32.store8
-      i32.const {{IoScratch + 12}}
-      i32.const 1
-      call $__write
+    if (result i32)
+      i32.const 45               ;; '-'
+    else
+      local.get $posSign
+    end
+    local.set $sign
+    local.get $v                 ;; mag = v<0 ? -v : v
+    i64.const 0
+    i64.lt_s
+    if (result i64)
       i64.const 0
       local.get $v
       i64.sub
-      local.set $v
+    else
+      local.get $v
     end
-    local.get $v
-    call $__put_u64_dec
+    i64.const 10
+    i32.const 0
+    local.get $min
+    call $__fmt_radix
+    local.set $ptr
+    local.get $ptr
+    i32.const {{NumBufEnd}}
+    local.get $ptr
+    i32.sub
+    local.get $sign
+    local.get $width
+    local.get $mode
+    call $__pf_emit
   )
 
 """);
         }
 
-        // Unsigned hex; $alpha is the ASCII base for digits ≥ 10 ('a' or 'A').
-        if (_runtimeUsed.Contains("__put_u64_hex"))
+        // Unsigned radix (10/16/8): no sign; stage the magnitude and emit.
+        if (_runtimeUsed.Contains("__pf_int_u"))
         {
             sb.Append($$"""
-  (func $__put_u64_hex (param $v i64) (param $alpha i32)
-    (local $p i32)
-    (local $d i32)
+  (func $__pf_int_u (param $mag i64) (param $base i64) (param $alpha i32) (param $min i32) (param $width i32) (param $mode i32)
+    (local $ptr i32)
+    local.get $mag
+    local.get $base
+    local.get $alpha
+    local.get $min
+    call $__fmt_radix
+    local.set $ptr
+    local.get $ptr
     i32.const {{NumBufEnd}}
-    local.set $p
-    loop $lp
-      local.get $p
-      i32.const 1
-      i32.sub
-      local.set $p
-      local.get $v                 ;; d = v & 0xF
-      i64.const 15
-      i64.and
-      i32.wrap_i64
-      local.set $d
-      local.get $p
-      local.get $d
-      i32.const 10
-      i32.lt_u
-      if (result i32)
-        local.get $d
-        i32.const 48               ;; '0' + d
+    local.get $ptr
+    i32.sub
+    i32.const 0                  ;; no sign
+    local.get $width
+    local.get $mode
+    call $__pf_emit
+  )
+
+""");
+        }
+
+        // Write a NUL-terminated string into a field: length is strlen capped at $max
+        // (-1 = uncapped, i.e. precision); pad to $width ($mode 1 = left, else space).
+        if (_runtimeUsed.Contains("__emit_str"))
+        {
+            sb.Append($$"""
+  (func $__emit_str (param $ptr i32) (param $max i32) (param $width i32) (param $mode i32)
+    (local $len i32) (local $q i32) (local $pad i32)
+    local.get $ptr
+    local.set $q
+    block $done
+      loop $scan
+        local.get $max           ;; stop at the precision cap, if any
+        i32.const 0
+        i32.ge_s
+        if
+          local.get $len
+          local.get $max
+          i32.ge_s
+          br_if $done
+        end
+        local.get $q
+        i32.load8_u
+        i32.eqz
+        br_if $done
+        local.get $q
+        i32.const 1
         i32.add
-      else
-        local.get $d
-        i32.const 10
-        i32.sub
-        local.get $alpha           ;; alpha + (d - 10)
+        local.set $q
+        local.get $len
+        i32.const 1
         i32.add
+        local.set $len
+        br $scan
       end
-      i32.store8
-      local.get $v                 ;; v >>= 4 (logical)
-      i64.const 4
-      i64.shr_u
-      local.set $v
-      local.get $v
-      i64.eqz
-      i32.eqz
-      br_if $lp
     end
-    local.get $p
-    i32.const {{NumBufEnd}}
-    local.get $p
+    local.get $width             ;; pad = max(0, width - len)
+    local.get $len
     i32.sub
-    call $__write
+    local.set $pad
+    local.get $mode
+    i32.const 1
+    i32.eq
+    if                           ;; left: body then spaces
+      local.get $ptr
+      local.get $len
+      call $__write
+      i32.const 32
+      local.get $pad
+      call $__fill
+    else                         ;; right: spaces then body
+      i32.const 32
+      local.get $pad
+      call $__fill
+      local.get $ptr
+      local.get $len
+      call $__write
+    end
   )
 
 """);
         }
 
-        if (_runtimeUsed.Contains("__put_u64_oct"))
+        // Write one char into a field of $width ($mode 1 = left, else space-pad).
+        if (_runtimeUsed.Contains("__emit_char"))
         {
             sb.Append($$"""
-  (func $__put_u64_oct (param $v i64)
-    (local $p i32)
-    i32.const {{NumBufEnd}}
-    local.set $p
-    loop $lp
-      local.get $p
+  (func $__emit_char (param $ch i32) (param $width i32) (param $mode i32)
+    local.get $mode
+    i32.const 1
+    i32.eq
+    if                           ;; left: char then spaces
+      local.get $ch
+      call $__putb
+      i32.const 32
+      local.get $width
       i32.const 1
       i32.sub
-      local.set $p
-      local.get $p                 ;; NumBuf[--p] = '0' + v & 7
-      local.get $v
-      i64.const 7
-      i64.and
-      i32.wrap_i64
-      i32.const 48
-      i32.add
-      i32.store8
-      local.get $v                 ;; v >>= 3
-      i64.const 3
-      i64.shr_u
-      local.set $v
-      local.get $v
-      i64.eqz
-      i32.eqz
-      br_if $lp
+      call $__fill
+    else                         ;; right: spaces then char
+      i32.const 32
+      local.get $width
+      i32.const 1
+      i32.sub
+      call $__fill
+      local.get $ch
+      call $__putb
     end
-    local.get $p
-    i32.const {{NumBufEnd}}
-    local.get $p
-    i32.sub
-    call $__write
   )
 
 """);

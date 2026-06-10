@@ -86,6 +86,15 @@ public sealed class WatOracleTests
     [InlineData("int main(void){ printf(\"100%% done\\n\"); return 0; }", "100% done\n")]
     [InlineData("int main(void){ long n = 10000000000; printf(\"%ld\\n\", n); return 0; }", "10000000000\n")]
     [InlineData("int main(void){ for(int i=1;i<=3;i++) printf(\"[%d]\", i*i); return 0; }", "[1][4][9]")]
+    // printf field formatting — width / precision / flags (compile-time constants)
+    [InlineData("int main(void){ printf(\"[%5d][%-5d]\", 42, 42); return 0; }", "[   42][42   ]")]
+    [InlineData("int main(void){ printf(\"[%05d][%05d]\", 42, -42); return 0; }", "[00042][-0042]")]
+    [InlineData("int main(void){ printf(\"[%+d][% d]\", 7, 7); return 0; }", "[+7][ 7]")]
+    [InlineData("int main(void){ printf(\"[%.3d][%5.3d][%05.3d]\", 42, 42, 42); return 0; }", "[042][  042][  042]")]
+    [InlineData("int main(void){ printf(\"[%8x][%08x]\", 255, 255); return 0; }", "[      ff][000000ff]")]
+    [InlineData("int main(void){ printf(\"[%10s][%-10s][%.3s]\", \"hi\", \"hi\", \"hello\"); return 0; }", "[        hi][hi        ][hel]")]
+    [InlineData("int main(void){ printf(\"[%3c][%-3c]\", 'x', 'x'); return 0; }", "[  x][x  ]")]
+    [InlineData("int main(void){ printf(\"[%.0d][%.0d]\", 0, 5); return 0; }", "[][5]")]
     public void Wat_program_writes_expected_stdout(string source, string expected)
     {
         if (!Requested)
