@@ -157,6 +157,9 @@ internal sealed class WatBackend
             // %a is an exact bit-dump (no big-integer / Dragon machinery); it only
             // needs the shared field-layout helper.
             case "__pf_a": NeedRuntime("__pf_emit"); break;
+            // %p reuses the unsigned-radix path for the "0x"+hex case and the field
+            // layout directly for the "(nil)" case.
+            case "__pf_p": NeedRuntime("__pf_int_u"); NeedRuntime("__pf_emit"); break;
             // The heap allocators: calloc/realloc are written in terms of malloc.
             // malloc itself has no helper deps (it uses the $__hp global + memory.grow);
             // free isn't a runtime function at all (it lowers to an inline drop).
@@ -1189,8 +1192,18 @@ internal sealed class WatBackend
             case 'e': case 'E': EmitFloatConv(arg, spec, spec.Conv); break;
             case 'g': case 'G': EmitFloatConv(arg, spec, spec.Conv); break;
             case 'a': case 'A': EmitFloatConv(arg, spec, spec.Conv); break;
+            case 'p':
+                // glibc-shaped pointer: "(nil)" for null, else "0x" + lowercase hex.
+                // No sign / precision / '#'; width + left-justify apply like a string.
+                NeedRuntime("__pf_p");
+                EmitExpr(arg);
+                if (ValType(arg.Type) == "i64") { Line("i32.wrap_i64"); }  // a wasm32 address is i32
+                Line($"i32.const {width}");
+                Line($"i32.const {(spec.Left ? 1 : 0)}");
+                Line("call $__pf_p");
+                break;
             default:
-                throw new IrUnsupportedException($"the wat target does not yet support the printf conversion '%{spec.Conv}' (%p comes later)");
+                throw new IrUnsupportedException($"the wat target does not yet support the printf conversion '%{spec.Conv}'");
         }
     }
 
@@ -2814,6 +2827,36 @@ internal sealed class WatBackend
     local.get $p i32.const {{FpEOut}} i32.sub
     local.get $sign local.get $width local.get $mode
     call $__pf_emit
+  )
+
+""");
+        }
+
+        // %p — a glibc-shaped pointer. A null pointer is the literal "(nil)"; otherwise
+        // it is "0x" + the address in lowercase hex (no leading zeros), which is exactly
+        // an unsigned hex with the "0x" alternate prefix — so reuse $__pf_int_u for that
+        // case and only the "(nil)" string needs hand-staging.
+        if (_runtimeUsed.Contains("__pf_p"))
+        {
+            sb.Append($$"""
+  (func $__pf_p (param $ptr i32) (param $width i32) (param $mode i32)
+    local.get $ptr i32.eqz
+    if                           ;; null → "(nil)"
+      i32.const {{NumBuf}} i32.const 40 i32.store8                  ;; '('
+      i32.const {{NumBuf}} i32.const 1 i32.add i32.const 110 i32.store8   ;; 'n'
+      i32.const {{NumBuf}} i32.const 2 i32.add i32.const 105 i32.store8   ;; 'i'
+      i32.const {{NumBuf}} i32.const 3 i32.add i32.const 108 i32.store8   ;; 'l'
+      i32.const {{NumBuf}} i32.const 4 i32.add i32.const 41 i32.store8    ;; ')'
+      i32.const {{NumBuf}} i32.const 5 i32.const 0 local.get $width local.get $mode
+      call $__pf_emit
+    else                         ;; "0x" + lowercase hex via the unsigned-radix path
+      local.get $ptr i64.extend_i32_u
+      i64.const 16 i32.const 97 i32.const 1     ;; base 16, 'a' alpha, min 1 digit
+      local.get $width local.get $mode
+      i32.const 30768                           ;; "0x" packed prefix ('0' | 'x'<<8)
+      i32.const 0                               ;; no forceZero
+      call $__pf_int_u
+    end
   )
 
 """);

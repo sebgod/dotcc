@@ -173,11 +173,18 @@ public sealed class WatBackendTests
     [Fact]
     public void printf_unsupported_conversions_are_rejected()
     {
-        // '#' on a d/i/u/c/s conversion (where C leaves it undefined) and %p aren't
-        // wired — fail loud, don't miscompile. (The uppercase float forms %E/%F/%G and
-        // the alternate hex/octal forms %#x/%#X/%#o are now supported.)
+        // '#' on a d/i/u/c/s conversion (where C leaves it undefined) and the
+        // unsupported %n still fail loud rather than miscompile. (%E/%F/%G, %#x/%#X/%#o,
+        // %a/%A and %p are all supported now.)
         Should.Throw<CompileException>(() => Wat("int main(void){ printf(\"%#d\", 255); return 0; }"));
-        Should.Throw<CompileException>(() => Wat("int main(void){ printf(\"%p\", \"x\"); return 0; }"));
+        Should.Throw<CompileException>(() => Wat("int main(void){ int n; printf(\"%n\", &n); return 0; }"));
+    }
+
+    [Fact]
+    public void printf_percent_p_routes_to_the_pointer_formatter()
+    {
+        // %p lowers to the glibc-shaped pointer helper ("(nil)" / "0x"+hex).
+        Wat("int main(void){ printf(\"%p\", (void*)0); return 0; }").ShouldContain("call $__pf_p");
     }
 
     [Fact]

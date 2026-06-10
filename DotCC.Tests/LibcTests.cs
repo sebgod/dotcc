@@ -257,17 +257,31 @@ public sealed unsafe class LibcTests
     [Fact]
     public void sprintf_void_ptr_arg_prints_hex_address()
     {
-        // %p with a void* — Arg(void*) routes to the byte* address-print path.
-        // A typed T* reaches it via the implicit T* -> void* conversion.
+        // %p with a void* — Arg(void*) routes to the byte* %p path. A typed T* reaches
+        // it via the implicit T* -> void* conversion. glibc-shaped: "0x" + the address
+        // in lowercase hex (matches clang/gcc and the wat backend).
         void* p = malloc(8);
         var dst = (byte*)malloc(64);
         try
         {
             sprintf(dst, L("%p\0"u8)).Arg(p).Done();
             var got = System.Text.Encoding.ASCII.GetString(dst, strlen(dst));
-            got.ShouldBe(((System.IntPtr)p).ToString("X"));
+            got.ShouldBe("0x" + ((ulong)p).ToString("x", System.Globalization.CultureInfo.InvariantCulture));
         }
         finally { free(dst); free(p); }
+    }
+
+    [Fact]
+    public void sprintf_null_ptr_with_percent_p_is_nil()
+    {
+        // A null pointer under %p is glibc's "(nil)" (distinct from %s's "(null)").
+        var dst = (byte*)malloc(16);
+        try
+        {
+            sprintf(dst, L("%p\0"u8)).Arg((void*)null).Done();
+            System.Text.Encoding.ASCII.GetString(dst, strlen(dst)).ShouldBe("(nil)");
+        }
+        finally { free(dst); }
     }
 
     // -----------------------------------------------------------------

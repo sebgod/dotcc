@@ -199,6 +199,10 @@ public sealed class WatOracleTests
     [InlineData("int main(void){ printf(\"%#.0a\", 1.0); return 0; }", "0x1.p+0")]                 // '#' forces the point
     [InlineData("int main(void){ printf(\"[%12a][%-12a]\", 1.0, 1.0); return 0; }", "[      0x1p+0][0x1p+0      ]")]
     [InlineData("int main(void){ printf(\"%a\", 5e-324); return 0; }", "0x0.0000000000001p-1022")] // smallest subnormal
+    // %p — glibc-shaped pointer (deterministic via integer-cast pointers): "0x"+lowercase
+    // hex for a nonzero address, "(nil)" for null; width / left-justify apply.
+    [InlineData("int main(void){ printf(\"%p %p %p\", (void*)255, (void*)0, (void*)0x1234); return 0; }", "0xff (nil) 0x1234")]
+    [InlineData("int main(void){ printf(\"[%10p][%-10p]\", (void*)255, (void*)255); return 0; }", "[      0xff][0xff      ]")]
     public void Wat_program_writes_expected_stdout(string source, string expected)
     {
         if (!Requested)
