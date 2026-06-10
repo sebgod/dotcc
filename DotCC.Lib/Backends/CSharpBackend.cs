@@ -5,14 +5,16 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 
-namespace DotCC.Ir;
+namespace DotCC.Backends;
+
+using DotCC.Ir;
 
 /// <summary>
 /// The six outputs <see cref="DotCC.Compiler.BuildShell"/> /
 /// <c>SerializeFragment</c> consume — produced by the IR backend in the exact
 /// shape the shell expects, so the shell is reused verbatim.
 /// </summary>
-internal sealed record CodeGenResult(
+internal sealed record CSharpBackendResult(
     string Functions,
     string Structs,
     string Aliases,
@@ -27,7 +29,7 @@ internal sealed record CodeGenResult(
 /// Phase 0 covers the vertical slice; it grows alongside the builder until the
 /// IR path reaches parity with the legacy emitter.
 /// </summary>
-internal sealed class CodeGen
+internal sealed class CSharpBackend
 {
     /// <summary>The backend's lexical projection of the neutral IR — currently the
     /// type-spelling map (<see cref="ITarget"/>, the seam a second target slots
@@ -39,9 +41,9 @@ internal sealed class CodeGen
     /// spelling — replaces the type model's old baked-in <c>CsType</c> property.</summary>
     private string Cs(CType t) => _target.RenderType(t);
 
-    public static CodeGenResult Run(IrBuilder unit, DotCC.ConversionGate? convGate = null)
+    public static CSharpBackendResult Run(IrBuilder unit, DotCC.ConversionGate? convGate = null)
     {
-        var cg = new CodeGen { _convGate = convGate };
+        var cg = new CSharpBackend { _convGate = convGate };
         var fns = new StringBuilder();
         var exports = new List<DotCC.EmitHelpers.Export>();
         var mainArity = -1;
@@ -87,7 +89,7 @@ internal sealed class CodeGen
         foreach (var t in unit.Types) { structs.Append(cg.StructText(t)); }
         foreach (var en in unit.Enums) { structs.Append(cg.EnumText(en)); }
 
-        return new CodeGenResult(fns.ToString(), structs.ToString(), Aliases: "", globals.ToString(), mainArity, exports);
+        return new CSharpBackendResult(fns.ToString(), structs.ToString(), Aliases: "", globals.ToString(), mainArity, exports);
     }
 
     // ---- type declarations -----------------------------------------------
@@ -689,7 +691,7 @@ internal sealed class CodeGen
 
     /// <summary>The lowered C# return type of the function currently being
     /// rendered — the sink type for <c>return</c> coercion. Set per function in
-    /// <see cref="Func"/> (CodeGen renders functions one at a time).</summary>
+    /// <see cref="Func"/> (the backend renders functions one at a time).</summary>
     private CType _currentRet = CType.Int;
     // -Wconversion sink (off unless -Wconversion). The narrowing decision is made
     // here in TryCoerceCast, so this is the natural place to record the warning.

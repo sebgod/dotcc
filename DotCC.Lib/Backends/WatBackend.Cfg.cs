@@ -3,7 +3,9 @@
 using System.Collections.Generic;
 using System.Linq;
 
-namespace DotCC.Ir;
+namespace DotCC.Backends;
+
+using DotCC.Ir;
 
 /// <summary>
 /// The control-flow-graph dispatch-loop lowering for functions that use

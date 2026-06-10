@@ -65,10 +65,12 @@ internal sealed partial class IrBuilder
 
     /// <param name="names">The target's identifier policy, threaded into the
     /// symbol table so <see cref="Symbol.TargetName"/> is escaped/uniquified for the
-    /// backend that will consume this IR (C# by default; the wat backend injects its
-    /// own so names are wasm-legal and flat-local shadowing is resolved). Neutral
-    /// mechanism stays in <see cref="SymbolTable"/>; only the policy varies.</param>
-    internal IrBuilder(DotCC.DialectGate? gate = null, INameLegalizer? names = null)
+    /// backend that will consume this IR (Compiler.BuildIr supplies the C# policy
+    /// unless the wat backend injects its own, so names are target-legal and
+    /// flat-local shadowing is resolved). Neutral mechanism stays in
+    /// <see cref="SymbolTable"/>; only the policy varies — and which policy applies
+    /// is the compiler's decision, keeping this namespace backend-free.</param>
+    internal IrBuilder(DotCC.DialectGate? gate, INameLegalizer names)
     {
         _gate = gate;
         _symbols = new SymbolTable(names);
@@ -1714,7 +1716,7 @@ internal sealed partial class IrBuilder
         // Record the target-neutral C fact that an object's address is taken (&x), for
         // any var or param. Each backend decides what it implies: the C# backend stores
         // an address-taken pointer GLOBAL as `nint` (a pointer T can't be
-        // Unsafe.AsPointer<T> — CS0306; see CodeGen.NintStorage), while the wat backend
+        // Unsafe.AsPointer<T> — CS0306; see CSharpBackend.NintStorage), while the wat backend
         // gives any address-taken local/param a linear-memory frame slot. Set here, at
         // the one site every `&` node is built, so the fact is complete and no backend
         // has to re-derive it by walking the tree.

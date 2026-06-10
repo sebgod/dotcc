@@ -29,7 +29,7 @@ public enum TypeQual
 /// <see cref="CExpr"/> carries one and name resolution attaches one to every
 /// <see cref="Symbol"/>. The type is target-NEUTRAL — it spells no output
 /// language. A backend's <see cref="ITarget.RenderType"/> projects it onto its
-/// own surface spelling (the C# backend's <see cref="CSharpTarget"/>:
+/// own surface spelling (the C# backend's <c>CSharpTarget</c>:
 /// <c>unsigned long</c> → <c>ulong</c>, <c>T[]</c> → <c>T*</c>, …); for
 /// diagnostics, <see cref="Describe"/> gives a source-C spelling. Qualifiers ride
 /// along via <see cref="Quals"/>.

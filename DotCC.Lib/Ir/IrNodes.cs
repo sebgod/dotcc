@@ -6,7 +6,7 @@ namespace DotCC.Ir;
 
 // ---- operators ----------------------------------------------------------
 
-/// <summary>Unary operators. <see cref="CodeGen"/> maps each to its C# form.</summary>
+/// <summary>Unary operators. The C# backend (<c>CSharpBackend</c>) maps each to its C# form.</summary>
 public enum UnOp { Plus, Neg, BitNot, LogNot, PreInc, PreDec, PostInc, PostDec, AddrOf, Deref }
 
 /// <summary>Binary operators (also reused as compound-assignment operators —

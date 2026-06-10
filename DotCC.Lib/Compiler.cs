@@ -281,7 +281,7 @@ public static class Compiler
         // ---- Typed-IR backend ------------------------------------------
         // dotcc compiles C → typed IR → low-level C#. The parse tree (yielded
         // raw by the identity visitor) is bound to a typed AST by IrBuilder, then
-        // CodeGen prints it precedence-aware. This is the sole backend; the
+        // CSharpBackend prints it precedence-aware. The wat backend is the peer; the
         // retired bottom-up string emitter is gone — its shared identifier /
         // string-literal / export helpers live on in EmitHelpers.
         // TODO(ir): port the remaining cross-cutting concern the legacy two-pass
@@ -291,7 +291,7 @@ public static class Compiler
         // parse (preprocessor-era) and IR build (emit-pass), then flush as warnings
         // (-pedantic) or one collected error (-pedantic-errors). Off by default.
         var gate = (pedantic || pedanticErrors) ? new DialectGate(activeDialect) : null;
-        var irBuilder = new Ir.IrBuilder(gate, names);
+        var irBuilder = new Ir.IrBuilder(gate, names ?? new Backends.CSharpNameLegalizer());
         var irParser = C.BuildParser(Ir.ParseTreeIdentityVisitor.Instance);
         foreach (var unitPath in inputPaths)
         {
@@ -345,7 +345,7 @@ public static class Compiler
         // -Wconversion: collect narrowing-conversion warnings during codegen, then
         // flush to stderr. Off by default (no gate → no checks).
         var convGate = warnConversion ? new ConversionGate() : null;
-        var cg = Ir.CodeGen.Run(irBuilder, convGate);
+        var cg = Backends.CSharpBackend.Run(irBuilder, convGate);
         if (convGate is { HasAny: true })
         {
             foreach (var d in convGate.Diagnostics) { Console.Error.WriteLine("dotcc: warning: " + d); }
@@ -366,7 +366,7 @@ public static class Compiler
     /// module — the second output target. Shares the whole front-end with
     /// <see cref="EmitCSharp"/> through <see cref="BuildIr"/>; only the backend
     /// projection differs (<see cref="Ir.WatBackend"/> instead of
-    /// <see cref="Ir.CodeGen"/> + <see cref="BuildShell"/>). Milestone 1 emits the
+    /// <see cref="Backends.CSharpBackend"/> + <see cref="BuildShell"/>). Milestone 1 emits the
     /// freestanding integer slice; constructs outside it raise
     /// <see cref="CompileException"/> (an <see cref="Ir.IrUnsupportedException"/>).
     /// </summary>
@@ -378,8 +378,8 @@ public static class Compiler
         bool pedantic = false,
         bool pedanticErrors = false)
     {
-        var irBuilder = BuildIr(inputPaths, includeDirs, defines, dialect, pedantic, pedanticErrors, new Ir.WatNameLegalizer());
-        return Ir.WatBackend.Run(irBuilder);
+        var irBuilder = BuildIr(inputPaths, includeDirs, defines, dialect, pedantic, pedanticErrors, new Backends.WatNameLegalizer());
+        return Backends.WatBackend.Run(irBuilder);
     }
 
     // ---- separate compilation (`--emit=obj` + link) -------------------------

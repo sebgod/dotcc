@@ -54,7 +54,7 @@ public sealed class Symbol
     /// (<c>&amp;x</c>) somewhere — set for any var or param at the single site every
     /// <c>&amp;</c> node is built (<see cref="IrBuilder"/>). A pure semantic flag; each
     /// backend decides what it implies. The C# backend stores an address-taken pointer
-    /// <em>global</em> as <c>nint</c> (see <c>CodeGen.NintStorage</c>); the wat backend
+    /// <em>global</em> as <c>nint</c> (see <c>CSharpBackend.NintStorage</c>); the wat backend
     /// gives any address-taken local/param a linear-memory frame slot.</summary>
     public bool AddressTaken { get; set; }
 }
@@ -74,17 +74,17 @@ public sealed class SymbolTable
     private readonly List<Dictionary<string, Symbol>> _scopes = new();
     // Identifiers already emitted in the CURRENT function — drives uniquification.
     private readonly HashSet<string> _usedNames = new(StringComparer.Ordinal);
-    // The target's identifier policy (escape + shadow rule). Defaults to C#; a
-    // second backend injects its own. The mechanism below stays target-neutral.
+    // The target's identifier policy (escape + shadow rule), always injected by
+    // the caller — which backend's policy applies is the COMPILER's decision
+    // (Compiler.BuildIr), so the neutral IR namespace never references a
+    // concrete backend. The mechanism below stays target-neutral.
     private readonly INameLegalizer _names;
 
-    public SymbolTable() : this(null) { }
-
     /// <summary>Construct over a specific identifier policy. Internal because the
-    /// policy type is a backend detail; the public parameterless ctor defaults to C#.</summary>
-    internal SymbolTable(INameLegalizer? names)
+    /// policy type is a backend detail.</summary>
+    internal SymbolTable(INameLegalizer names)
     {
-        _names = names ?? new CSharpNameLegalizer();
+        _names = names;
         _scopes.Add(new Dictionary<string, Symbol>(StringComparer.Ordinal)); // file scope
     }
 

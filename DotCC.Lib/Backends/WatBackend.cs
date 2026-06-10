@@ -5,13 +5,15 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 
-namespace DotCC.Ir;
+namespace DotCC.Backends;
+
+using DotCC.Ir;
 
 /// <summary>
 /// Lowers the typed IR to WebAssembly text (<c>.wat</c>) — the second backend
-/// behind <see cref="ITarget"/>, a peer of <see cref="CodeGen"/> rather than a
+/// behind <see cref="ITarget"/>, a peer of <see cref="CSharpBackend"/> rather than a
 /// rewrite of the pipeline (both consume the same <see cref="IrBuilder"/> via
-/// <see cref="DotCC.Compiler.BuildIr"/>). Where CodeGen prints precedence-driven
+/// <see cref="DotCC.Compiler.BuildIr"/>). Where CSharpBackend prints precedence-driven
 /// infix C#, this emits a post-order instruction stream for wasm's stack machine:
 /// an expression pushes its operands then its operator, statements lower to wasm's
 /// structured control flow, and lvalues live either in fast wasm locals or, when

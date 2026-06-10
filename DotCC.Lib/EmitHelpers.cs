@@ -8,7 +8,7 @@ namespace DotCC;
 
 /// <summary>
 /// Stateless C#-emission helpers shared by the typed-IR backend
-/// (<see cref="DotCC.Ir.IrBuilder"/> / <see cref="DotCC.Ir.CodeGen"/>) and the
+/// (<see cref="DotCC.Ir.IrBuilder"/> / <see cref="DotCC.Backends.CSharpBackend"/>) and the
 /// <see cref="Compiler"/> shell: C#-keyword escaping (<see cref="Id"/>),
 /// C string-literal decoding/encoding (<see cref="EncodeStringLiteral(IReadOnlyList{string})"/>
 /// / <see cref="StringByteValues"/>), and the <see cref="Export"/> descriptor for
@@ -249,7 +249,7 @@ internal static class EmitHelpers
     /// Encode one or more adjacent C string-literal segments (each the RAW
     /// quoted lexeme, e.g. <c>"a\n"</c>) to the lowered <c>Libc.L(…)</c>
     /// expression — decoding escapes per-segment and concatenating. Exposed so
-    /// the IR codegen (<see cref="DotCC.Ir.CodeGen"/>) reuses this escape logic
+    /// the C# backend (<see cref="DotCC.Backends.CSharpBackend"/>) reuses this escape logic
     /// rather than reimplementing it — single source of truth for string lowering.
     /// </summary>
     internal static string EncodeStringLiteral(IReadOnlyList<string> rawQuotedSegments)
