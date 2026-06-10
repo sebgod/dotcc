@@ -173,10 +173,10 @@ public sealed class WatBackendTests
     [Fact]
     public void printf_unsupported_conversions_are_rejected()
     {
-        // '#' on an integer conversion, the %e/%g floats (no formatter yet), and %p
-        // aren't wired — fail loud, don't miscompile.
+        // '#' on an integer conversion, the uppercase float forms, and %p aren't
+        // wired — fail loud, don't miscompile.
         Should.Throw<CompileException>(() => Wat("int main(void){ printf(\"%#x\", 255); return 0; }"));
-        Should.Throw<CompileException>(() => Wat("int main(void){ printf(\"%e\", 1.5); return 0; }"));
+        Should.Throw<CompileException>(() => Wat("int main(void){ printf(\"%E\", 1.5); return 0; }"));
         Should.Throw<CompileException>(() => Wat("int main(void){ printf(\"%p\", \"x\"); return 0; }"));
     }
 
@@ -212,6 +212,33 @@ public sealed class WatBackendTests
         wat.ShouldNotContain("__pf_f");
         wat.ShouldNotContain("__bnlen");
         wat.ShouldNotContain("__bn_mul");
+        wat.ShouldNotContain("__dragon");   // (__pf_e is a prefix of __pf_emit, so check $__dragon / $__r_cmp)
+        wat.ShouldNotContain("__r_cmp");
+    }
+
+    [Fact]
+    public void printf_percent_e_and_g_emit_the_dragon_formatter()
+    {
+        // %e/%g drive the scaled-Dragon digit generator over the region big-integer
+        // helpers — a different machine from %f's single-register bignum.
+        var e = Wat("int main(void){ printf(\"%e\", 1.5); return 0; }");
+        e.ShouldContain("call $__pf_e");
+        e.ShouldContain("(func $__dragon");
+        e.ShouldContain("(func $__r_cmp");
+        e.ShouldContain("(func $__r_sub");
+
+        var g = Wat("int main(void){ printf(\"%g\", 1.5); return 0; }");
+        g.ShouldContain("call $__pf_g");
+        g.ShouldContain("(func $__dragon");
+    }
+
+    [Fact]
+    public void printf_g_precision_zero_is_treated_as_one()
+    {
+        // C99: a %g precision of 0 is taken as 1 significant digit.
+        var wat = Wat("int main(void){ printf(\"%.0g\", 1.5); return 0; }");
+        wat.ShouldContain("i32.const 1");   // the precision immediate passed to $__pf_g
+        wat.ShouldContain("call $__pf_g");
     }
 
     [Fact]

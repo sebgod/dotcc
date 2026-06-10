@@ -58,13 +58,24 @@ internal sealed class WatBackend
     // f64 intermediate math would corrupt the last digit) and a decimal staging buffer
     // the digits are written into right-aligned, ending at FpDigEnd. The widest finite
     // double needs ~39 limbs and ~370 digits, both well within the reserved space.
-    private const int FpBig = 16;            // bignum limb array base ([16, 16+4*48))
+    private const int FpBig = 16;            // %f bignum limb array base ([16, 16+4*48))
     private const int FpBigLimbs = 48;       // capacity in u32 limbs
-    private const int FpDigEnd = 960;        // digits staged right-aligned, ending here
+    private const int FpDigEnd = 960;        // %f digits staged right-aligned, ending here
     // The maximum printf float precision (fractional digits) the formatter stages.
     // Beyond this the bignum/digit buffers could be overrun, so it fails loud rather
     // than miscompile — like MaxNumDigits for the integer conversions.
     private const int MaxFloatPrec = 60;
+    // Scratch for the %e/%g Dragon formatter. Two big-integer registers (numerator R
+    // and denominator S, each a length word + limbs) scaled into [1,10), a multiply
+    // scratch for the 10·S / 2·R comparisons, the significant-digit buffer, and the
+    // assembled output. Each conversion runs to completion before the next, so this
+    // may share the page with the %f scratch above (they're never live at once). The
+    // widest finite double needs ~40 limbs in R/S.
+    private const int FpR = 208;             // numerator region  ([208, 412): len + 50 limbs)
+    private const int FpS = 412;             // denominator region ([412, 616))
+    private const int FpMul = 616;           // 10·S / 2·R scratch ([616, 824): 51 limbs)
+    private const int FpEDig = 824;          // significant digits ([824, 888))
+    private const int FpEOut = 888;          // assembled "d.dddde+XX" ([888, 960))
 
     private readonly ITarget _wat = new WatTarget();
     private readonly StringBuilder _sb = new();
@@ -135,9 +146,14 @@ internal sealed class WatBackend
             case "__pf_emit": NeedRuntime("__putb"); NeedRuntime("__fill"); NeedRuntime("__write"); break;
             case "__pf_int_s": NeedRuntime("__fmt_radix"); NeedRuntime("__pf_emit"); break;
             case "__pf_int_u": NeedRuntime("__fmt_radix"); NeedRuntime("__pf_emit"); break;
-            // The printf float conversions: the formatter drives the big-integer helper
-            // block ("__bn") and lays the result out in a field via $__pf_emit.
+            // The printf float conversions: %f drives the big-integer helper block
+            // ("__bn"); %e/%g drive the scaled Dragon digit generator ("__dragon") over
+            // the region-based big-integer helpers ("__rbn"). All lay the result out in
+            // a field via $__pf_emit.
             case "__pf_f": NeedRuntime("__bn"); NeedRuntime("__pf_emit"); break;
+            case "__pf_e": NeedRuntime("__dragon"); NeedRuntime("__pf_emit"); break;
+            case "__pf_g": NeedRuntime("__dragon"); NeedRuntime("__pf_emit"); break;
+            case "__dragon": NeedRuntime("__rbn"); break;
             // The heap allocators: calloc/realloc are written in terms of malloc.
             // malloc itself has no helper deps (it uses the $__hp global + memory.grow);
             // free isn't a runtime function at all (it lowers to an inline drop).
@@ -1125,9 +1141,10 @@ internal sealed class WatBackend
     /// supported yet (fail loud).</summary>
     private void EmitConversion(PrintfFormat.Spec spec, CExpr arg)
     {
-        // The '#' alternate form is supported only for floats (force a decimal point);
-        // for the integer conversions it still fails loud rather than miscompile.
-        if (spec.Alt && spec.Conv != 'f')
+        // The '#' alternate form is supported only for the float conversions (force a
+        // decimal point; for %g, also keep trailing zeros); for the integer
+        // conversions it still fails loud rather than miscompile.
+        if (spec.Alt && spec.Conv is not ('f' or 'e' or 'g'))
         {
             throw new IrUnsupportedException($"the wat target does not yet support the printf '#' flag (in '%{spec.Conv}')");
         }
@@ -1163,11 +1180,11 @@ internal sealed class WatBackend
             case 'x': EmitUnsignedConv(arg, spec, 16, 97); break;   // 'a'
             case 'X': EmitUnsignedConv(arg, spec, 16, 65); break;   // 'A'
             case 'o': EmitUnsignedConv(arg, spec, 8, 0); break;
-            case 'f':
-                EmitFloatConv(arg, spec);
-                break;
+            case 'f': EmitFloatConv(arg, spec, 'f'); break;
+            case 'e': EmitFloatConv(arg, spec, 'e'); break;
+            case 'g': EmitFloatConv(arg, spec, 'g'); break;
             default:
-                throw new IrUnsupportedException($"the wat target does not yet support the printf conversion '%{spec.Conv}' (%e/%g and %p come later)");
+                throw new IrUnsupportedException($"the wat target does not yet support the printf conversion '%{spec.Conv}' (%E/%G and %p come later)");
         }
     }
 
@@ -1186,19 +1203,24 @@ internal sealed class WatBackend
         Line("call $__pf_int_u");
     }
 
-    /// <summary>Lower a floating <c>%f</c> conversion: push the value as an f64 (a
-    /// <c>float</c> argument is promoted, matching C's default argument promotion),
-    /// then the compile-time-constant field parameters, and call the runtime formatter
-    /// <c>$__pf_f</c>. The runtime forms the exact value × 10^precision as a big
-    /// integer and rounds once (round-half-to-even), so the digits match a real libc.</summary>
-    private void EmitFloatConv(CExpr arg, PrintfFormat.Spec spec)
+    /// <summary>Lower a floating <c>%f</c>/<c>%e</c>/<c>%g</c> conversion: push the
+    /// value as an f64 (a <c>float</c> argument is promoted, matching C's default
+    /// argument promotion), then the compile-time-constant field parameters, and call
+    /// the matching runtime formatter. Each forms the EXACT value with big-integer
+    /// arithmetic and rounds once (round-half-to-even), so the digits match a real
+    /// libc: <c>%f</c> via value × 10^precision, <c>%e</c>/<c>%g</c> via a scaled
+    /// Dragon digit generator. For <c>%g</c> the "precision" is significant digits
+    /// (C99: a precision of 0 is taken as 1).</summary>
+    private void EmitFloatConv(CExpr arg, PrintfFormat.Spec spec, char conv)
     {
         var prec = spec.Precision >= 0 ? spec.Precision : 6;   // C default precision is 6
+        if (conv == 'g' && prec == 0) { prec = 1; }            // %g: precision 0 means 1
         if (prec > MaxFloatPrec)
         {
             throw new IrUnsupportedException($"the wat target does not yet support printf float precision > {MaxFloatPrec} (in '%{spec.Conv}')");
         }
-        NeedRuntime("__pf_f");
+        var runtime = conv switch { 'e' => "__pf_e", 'g' => "__pf_g", _ => "__pf_f" };
+        NeedRuntime(runtime);
         EmitExpr(arg);
         var vt = ValType(arg.Type);
         if (vt == "f32") { Line("f64.promote_f32"); }
@@ -1211,7 +1233,7 @@ internal sealed class WatBackend
         Line($"i32.const {(spec.Width >= 0 ? spec.Width : 0)}");
         Line($"i32.const {FloatMode(spec)}");
         Line($"i32.const {(spec.Alt ? 1 : 0)}");                       // '#': always show a decimal point
-        Line("call $__pf_f");
+        Line($"call ${runtime}");
     }
 
     /// <summary>The field-fill mode for a float conversion: 1 = left-justify, 2 =
@@ -2096,6 +2118,467 @@ internal sealed class WatBackend
     local.get $sign
     local.get $width
     local.get $mode
+    call $__pf_emit
+  )
+
+""");
+        }
+
+        // ---- region big-integer for the %e/%g Dragon formatter ---------------------
+        // Two big-integers (numerator R, denominator S) scaled into [1,10) so each
+        // significant digit is R/S ∈ 0..9, obtained by repeated subtraction (no
+        // quotient estimation). Each region carries its limb count in its first word
+        // (so two can be live at once, unlike the single-global %f bignum); helpers
+        // take a base pointer. Lengths stay trimmed of leading zeros for $__r_cmp.
+        if (_runtimeUsed.Contains("__rbn"))
+        {
+            sb.Append("""
+  (func $__r_set (param $base i32) (param $v i64)   ;; region = v (v < 2^53)
+    local.get $base i32.const 4 i32.add local.get $v i32.wrap_i64 i32.store
+    local.get $base i32.const 8 i32.add local.get $v i64.const 32 i64.shr_u i32.wrap_i64 i32.store
+    local.get $base
+    local.get $v i64.const 4294967295 i64.gt_u
+    if (result i32) i32.const 2
+    else local.get $v i64.eqz if (result i32) i32.const 0 else i32.const 1 end end
+    i32.store
+  )
+
+  (func $__r_mul (param $base i32) (param $m i32)   ;; region *= m (small u32)
+    (local $i i32) (local $n i32) (local $carry i64) (local $p i64) (local $addr i32)
+    local.get $base i32.load local.set $n
+    i32.const 0 local.set $i
+    i64.const 0 local.set $carry
+    block $d loop $l
+      local.get $i local.get $n i32.ge_s br_if $d
+      local.get $base i32.const 4 i32.add local.get $i i32.const 2 i32.shl i32.add local.set $addr
+      local.get $addr i32.load i64.extend_i32_u
+      local.get $m i64.extend_i32_u
+      i64.mul
+      local.get $carry i64.add local.set $p
+      local.get $addr local.get $p i32.wrap_i64 i32.store
+      local.get $p i64.const 32 i64.shr_u local.set $carry
+      local.get $i i32.const 1 i32.add local.set $i
+      br $l
+    end end
+    local.get $carry i64.eqz i32.eqz
+    if
+      local.get $base i32.const 4 i32.add local.get $n i32.const 2 i32.shl i32.add
+      local.get $carry i32.wrap_i64 i32.store
+      local.get $n i32.const 1 i32.add local.set $n
+    end
+    local.get $base local.get $n i32.store
+  )
+
+  (func $__r_copy (param $dst i32) (param $src i32)
+    (local $i i32) (local $n i32)
+    local.get $src i32.load local.set $n
+    local.get $dst local.get $n i32.store
+    i32.const 0 local.set $i
+    block $d loop $l
+      local.get $i local.get $n i32.ge_s br_if $d
+      local.get $dst i32.const 4 i32.add local.get $i i32.const 2 i32.shl i32.add
+      local.get $src i32.const 4 i32.add local.get $i i32.const 2 i32.shl i32.add i32.load
+      i32.store
+      local.get $i i32.const 1 i32.add local.set $i
+      br $l
+    end end
+  )
+
+  (func $__r_cmp (param $a i32) (param $b i32) (result i32)   ;; -1 / 0 / 1
+    (local $na i32) (local $nb i32) (local $i i32) (local $va i32) (local $vb i32)
+    local.get $a i32.load local.set $na
+    local.get $b i32.load local.set $nb
+    local.get $na local.get $nb i32.gt_u if i32.const 1 return end
+    local.get $na local.get $nb i32.lt_u if i32.const -1 return end
+    local.get $na i32.const 1 i32.sub local.set $i
+    block $d loop $l
+      local.get $i i32.const 0 i32.lt_s br_if $d
+      local.get $a i32.const 4 i32.add local.get $i i32.const 2 i32.shl i32.add i32.load local.set $va
+      local.get $b i32.const 4 i32.add local.get $i i32.const 2 i32.shl i32.add i32.load local.set $vb
+      local.get $va local.get $vb i32.gt_u if i32.const 1 return end
+      local.get $va local.get $vb i32.lt_u if i32.const -1 return end
+      local.get $i i32.const 1 i32.sub local.set $i
+      br $l
+    end end
+    i32.const 0
+  )
+
+  (func $__r_sub (param $a i32) (param $b i32)   ;; a -= b  (a >= b)
+    (local $na i32) (local $nb i32) (local $i i32) (local $borrow i64) (local $diff i64) (local $bv i64) (local $addr i32)
+    local.get $a i32.load local.set $na
+    local.get $b i32.load local.set $nb
+    i64.const 0 local.set $borrow
+    i32.const 0 local.set $i
+    block $d loop $l
+      local.get $i local.get $na i32.ge_s br_if $d
+      local.get $a i32.const 4 i32.add local.get $i i32.const 2 i32.shl i32.add local.set $addr
+      local.get $i local.get $nb i32.lt_s
+      if (result i64)
+        local.get $b i32.const 4 i32.add local.get $i i32.const 2 i32.shl i32.add i32.load i64.extend_i32_u
+      else i64.const 0 end
+      local.set $bv
+      local.get $addr i32.load i64.extend_i32_u
+      local.get $bv i64.sub
+      local.get $borrow i64.sub
+      local.set $diff
+      local.get $addr
+      local.get $diff i64.const 4294967295 i64.and i32.wrap_i64
+      i32.store
+      local.get $diff i64.const 63 i64.shr_u i64.const 1 i64.and local.set $borrow
+      local.get $i i32.const 1 i32.add local.set $i
+      br $l
+    end end
+    block $td loop $tl                    ;; trim leading zero limbs
+      local.get $na i32.const 0 i32.le_s br_if $td
+      local.get $a i32.const 4 i32.add local.get $na i32.const 1 i32.sub i32.const 2 i32.shl i32.add i32.load
+      i32.eqz i32.eqz br_if $td
+      local.get $na i32.const 1 i32.sub local.set $na
+      br $tl
+    end end
+    local.get $a local.get $na i32.store
+  )
+
+""");
+        }
+
+        // The %e/%g significant-digit generator (scaled Dragon). Decompose v = M·2^E2,
+        // form R/S = |value| exactly, scale into [1,10) tracking the decimal exponent
+        // X, then emit `ndigits` digits (raw 0-9) into FpEDig by repeated subtraction,
+        // rounding the last digit half-to-even (a carry can ripple to a new leading
+        // digit, bumping X). Returns X; the caller (finite, nonzero) lays out the field.
+        if (_runtimeUsed.Contains("__dragon"))
+        {
+            sb.Append($$"""
+  (func $__dragon (param $v f64) (param $ndigits i32) (result i32)
+    (local $bits i64) (local $exp i32) (local $mant i64) (local $M i64) (local $E2 i32)
+    (local $X i32) (local $i i32) (local $d i32) (local $c i32) (local $lastOdd i32) (local $carry i32) (local $j i32)
+    local.get $v i64.reinterpret_f64 local.set $bits
+    local.get $bits i64.const 52 i64.shr_u i64.const 2047 i64.and i32.wrap_i64 local.set $exp
+    local.get $bits i64.const 4503599627370495 i64.and local.set $mant
+    local.get $exp i32.eqz
+    if
+      local.get $mant local.set $M
+      i32.const -1074 local.set $E2
+    else
+      local.get $mant i64.const 4503599627370496 i64.or local.set $M
+      local.get $exp i32.const 1075 i32.sub local.set $E2
+    end
+    i32.const {{FpR}} local.get $M call $__r_set      ;; R = M
+    i32.const {{FpS}} i64.const 1 call $__r_set       ;; S = 1
+    local.get $E2 i32.const 0 i32.ge_s
+    if                                                ;; R <<= E2
+      i32.const 0 local.set $i
+      block $ad loop $al
+        local.get $i local.get $E2 i32.ge_s br_if $ad
+        i32.const {{FpR}} i32.const 2 call $__r_mul
+        local.get $i i32.const 1 i32.add local.set $i
+        br $al
+      end end
+    else                                              ;; S <<= -E2
+      i32.const 0 local.set $i
+      block $bd loop $bl
+        local.get $i i32.const 0 local.get $E2 i32.sub i32.ge_s br_if $bd
+        i32.const {{FpS}} i32.const 2 call $__r_mul
+        local.get $i i32.const 1 i32.add local.set $i
+        br $bl
+      end end
+    end
+    i32.const 0 local.set $X
+    block $sd loop $sl                                 ;; while R < S: R *= 10, X--
+      i32.const {{FpR}} i32.const {{FpS}} call $__r_cmp i32.const 0 i32.ge_s br_if $sd
+      i32.const {{FpR}} i32.const 10 call $__r_mul
+      local.get $X i32.const 1 i32.sub local.set $X
+      br $sl
+    end end
+    block $ud loop $ul                                 ;; while R >= 10*S: S *= 10, X++
+      i32.const {{FpMul}} i32.const {{FpS}} call $__r_copy
+      i32.const {{FpMul}} i32.const 10 call $__r_mul
+      i32.const {{FpR}} i32.const {{FpMul}} call $__r_cmp i32.const 0 i32.lt_s br_if $ud
+      i32.const {{FpS}} i32.const 10 call $__r_mul
+      local.get $X i32.const 1 i32.add local.set $X
+      br $ul
+    end end
+    i32.const 0 local.set $i                           ;; generate ndigits digits
+    block $gd loop $gl
+      local.get $i local.get $ndigits i32.ge_s br_if $gd
+      i32.const 0 local.set $d
+      block $qd loop $ql
+        i32.const {{FpR}} i32.const {{FpS}} call $__r_cmp i32.const 0 i32.lt_s br_if $qd
+        i32.const {{FpR}} i32.const {{FpS}} call $__r_sub
+        local.get $d i32.const 1 i32.add local.set $d
+        br $ql
+      end end
+      i32.const {{FpEDig}} local.get $i i32.add local.get $d i32.store8
+      local.get $i i32.const 1 i32.add local.get $ndigits i32.lt_s
+      if i32.const {{FpR}} i32.const 10 call $__r_mul end   ;; ×10 for the next digit
+      local.get $i i32.const 1 i32.add local.set $i
+      br $gl
+    end end
+    i32.const {{FpEDig}} local.get $ndigits i32.const 1 i32.sub i32.add i32.load8_u
+    i32.const 1 i32.and local.set $lastOdd            ;; parity of the last emitted digit
+    i32.const {{FpMul}} i32.const {{FpR}} call $__r_copy      ;; compare 2*R vs S
+    i32.const {{FpMul}} i32.const 2 call $__r_mul
+    i32.const {{FpMul}} i32.const {{FpS}} call $__r_cmp local.set $c
+    local.get $c i32.const 0 i32.gt_s
+    local.get $c i32.eqz local.get $lastOdd i32.and
+    i32.or
+    if                                                ;; round half-to-even: bump the digits
+      i32.const 1 local.set $carry
+      local.get $ndigits i32.const 1 i32.sub local.set $j
+      block $rd loop $rl
+        local.get $carry i32.eqz br_if $rd
+        local.get $j i32.const 0 i32.lt_s br_if $rd
+        i32.const {{FpEDig}} local.get $j i32.add i32.load8_u i32.const 1 i32.add local.set $d
+        local.get $d i32.const 10 i32.eq
+        if
+          i32.const {{FpEDig}} local.get $j i32.add i32.const 0 i32.store8
+        else
+          i32.const {{FpEDig}} local.get $j i32.add local.get $d i32.store8
+          i32.const 0 local.set $carry
+        end
+        local.get $j i32.const 1 i32.sub local.set $j
+        br $rl
+      end end
+      local.get $carry
+      if                                              ;; carried out of the top: "1" + zeros, X++
+        i32.const {{FpEDig}} i32.const 1 i32.store8
+        local.get $X i32.const 1 i32.add local.set $X
+      end
+    end
+    local.get $X
+  )
+
+""");
+        }
+
+        // %e — "[-]d.ddde±XX". Handle sign / inf / nan / zero, then the Dragon digits
+        // and the exponent (signed, at least two digits). Field layout via $__pf_emit.
+        if (_runtimeUsed.Contains("__pf_e"))
+        {
+            sb.Append($$"""
+  (func $__pf_e (param $v f64) (param $prec i32) (param $posSign i32) (param $width i32) (param $mode i32) (param $alt i32)
+    (local $bits i64) (local $exp i32) (local $sign i32) (local $X i32) (local $p i32) (local $i i32) (local $ax i32)
+    local.get $v i64.reinterpret_f64 local.set $bits
+    local.get $bits i64.const 0 i64.lt_s
+    if (result i32) i32.const 45 else local.get $posSign end
+    local.set $sign
+    local.get $bits i64.const 52 i64.shr_u i64.const 2047 i64.and i32.wrap_i64 local.set $exp
+    local.get $exp i32.const 2047 i32.eq                ;; inf / nan
+    if
+      local.get $bits i64.const 4503599627370495 i64.and i64.eqz
+      if
+        i32.const {{FpEOut}} i32.const 105 i32.store8
+        i32.const {{FpEOut}} i32.const 1 i32.add i32.const 110 i32.store8
+        i32.const {{FpEOut}} i32.const 2 i32.add i32.const 102 i32.store8
+      else
+        i32.const {{FpEOut}} i32.const 110 i32.store8
+        i32.const {{FpEOut}} i32.const 1 i32.add i32.const 97 i32.store8
+        i32.const {{FpEOut}} i32.const 2 i32.add i32.const 110 i32.store8
+      end
+      i32.const {{FpEOut}} i32.const 3 local.get $sign local.get $width
+      local.get $mode i32.const 1 i32.eq if (result i32) i32.const 1 else i32.const 0 end
+      call $__pf_emit
+      return
+    end
+    local.get $bits i64.const 9223372036854775807 i64.and i64.eqz   ;; |v| == 0
+    if
+      i32.const 0 local.set $i                          ;; digits all zero, X = 0
+      block $zd loop $zl
+        local.get $i local.get $prec i32.gt_s br_if $zd
+        i32.const {{FpEDig}} local.get $i i32.add i32.const 0 i32.store8
+        local.get $i i32.const 1 i32.add local.set $i
+        br $zl
+      end end
+      i32.const 0 local.set $X
+    else
+      local.get $v local.get $prec i32.const 1 i32.add call $__dragon local.set $X
+    end
+    i32.const {{FpEOut}} local.set $p                    ;; assemble d.ddde±XX
+    local.get $p i32.const {{FpEDig}} i32.load8_u i32.const 48 i32.add i32.store8
+    local.get $p i32.const 1 i32.add local.set $p
+    local.get $prec i32.const 0 i32.gt_s local.get $alt i32.or
+    if
+      local.get $p i32.const 46 i32.store8
+      local.get $p i32.const 1 i32.add local.set $p
+    end
+    i32.const 1 local.set $i
+    block $fd loop $fl
+      local.get $i local.get $prec i32.gt_s br_if $fd
+      local.get $p i32.const {{FpEDig}} local.get $i i32.add i32.load8_u i32.const 48 i32.add i32.store8
+      local.get $p i32.const 1 i32.add local.set $p
+      local.get $i i32.const 1 i32.add local.set $i
+      br $fl
+    end end
+    local.get $p i32.const 101 i32.store8               ;; 'e'
+    local.get $p i32.const 1 i32.add local.set $p
+    local.get $X i32.const 0 i32.lt_s
+    if (result i32)
+      local.get $p i32.const 45 i32.store8 i32.const 0 local.get $X i32.sub
+    else
+      local.get $p i32.const 43 i32.store8 local.get $X
+    end
+    local.set $ax
+    local.get $p i32.const 1 i32.add local.set $p
+    local.get $ax i32.const 100 i32.ge_s               ;; exponent digits (>= 2)
+    if
+      local.get $p local.get $ax i32.const 100 i32.div_u i32.const 48 i32.add i32.store8
+      local.get $p i32.const 1 i32.add local.set $p
+    end
+    local.get $p local.get $ax i32.const 10 i32.div_u i32.const 10 i32.rem_u i32.const 48 i32.add i32.store8
+    local.get $p i32.const 1 i32.add local.set $p
+    local.get $p local.get $ax i32.const 10 i32.rem_u i32.const 48 i32.add i32.store8
+    local.get $p i32.const 1 i32.add local.set $p
+    i32.const {{FpEOut}}
+    local.get $p i32.const {{FpEOut}} i32.sub
+    local.get $sign local.get $width local.get $mode
+    call $__pf_emit
+  )
+
+""");
+        }
+
+        // %g — P significant digits, then choose %f-style (when -4 <= X < P) or
+        // %e-style presentation, stripping trailing zeros unless '#' (alt). Reuses the
+        // Dragon generator; shares the inf/nan/zero handling shape with %e.
+        if (_runtimeUsed.Contains("__pf_g"))
+        {
+            sb.Append($$"""
+  (func $__pf_g (param $v f64) (param $P i32) (param $posSign i32) (param $width i32) (param $mode i32) (param $alt i32)
+    (local $bits i64) (local $exp i32) (local $sign i32) (local $X i32) (local $p i32) (local $i i32) (local $ax i32) (local $ndig i32)
+    local.get $v i64.reinterpret_f64 local.set $bits
+    local.get $bits i64.const 0 i64.lt_s
+    if (result i32) i32.const 45 else local.get $posSign end
+    local.set $sign
+    local.get $bits i64.const 52 i64.shr_u i64.const 2047 i64.and i32.wrap_i64 local.set $exp
+    local.get $exp i32.const 2047 i32.eq                ;; inf / nan
+    if
+      local.get $bits i64.const 4503599627370495 i64.and i64.eqz
+      if
+        i32.const {{FpEOut}} i32.const 105 i32.store8
+        i32.const {{FpEOut}} i32.const 1 i32.add i32.const 110 i32.store8
+        i32.const {{FpEOut}} i32.const 2 i32.add i32.const 102 i32.store8
+      else
+        i32.const {{FpEOut}} i32.const 110 i32.store8
+        i32.const {{FpEOut}} i32.const 1 i32.add i32.const 97 i32.store8
+        i32.const {{FpEOut}} i32.const 2 i32.add i32.const 110 i32.store8
+      end
+      i32.const {{FpEOut}} i32.const 3 local.get $sign local.get $width
+      local.get $mode i32.const 1 i32.eq if (result i32) i32.const 1 else i32.const 0 end
+      call $__pf_emit
+      return
+    end
+    local.get $bits i64.const 9223372036854775807 i64.and i64.eqz   ;; |v| == 0
+    if
+      i32.const 0 local.set $i
+      block $zd loop $zl
+        local.get $i local.get $P i32.ge_s br_if $zd
+        i32.const {{FpEDig}} local.get $i i32.add i32.const 0 i32.store8
+        local.get $i i32.const 1 i32.add local.set $i
+        br $zl
+      end end
+      i32.const 0 local.set $X
+    else
+      local.get $v local.get $P call $__dragon local.set $X
+    end
+    local.get $P local.set $ndig                        ;; strip trailing zeros unless '#'
+    local.get $alt i32.eqz
+    if
+      block $kd loop $kl
+        local.get $ndig i32.const 1 i32.le_s br_if $kd
+        i32.const {{FpEDig}} local.get $ndig i32.const 1 i32.sub i32.add i32.load8_u i32.eqz i32.eqz br_if $kd
+        local.get $ndig i32.const 1 i32.sub local.set $ndig
+        br $kl
+      end end
+    end
+    i32.const {{FpEOut}} local.set $p
+    local.get $X i32.const -4 i32.ge_s local.get $X local.get $P i32.lt_s i32.and
+    if                                                  ;; ---- %f-style ----
+      local.get $X i32.const 0 i32.ge_s
+      if                                                ;; integer part = digits[0..X]
+        i32.const 0 local.set $i
+        block $id loop $il
+          local.get $i local.get $X i32.gt_s br_if $id
+          local.get $p
+          local.get $i local.get $ndig i32.lt_s
+          if (result i32) i32.const {{FpEDig}} local.get $i i32.add i32.load8_u i32.const 48 i32.add else i32.const 48 end
+          i32.store8
+          local.get $p i32.const 1 i32.add local.set $p
+          local.get $i i32.const 1 i32.add local.set $i
+          br $il
+        end end
+        local.get $ndig local.get $X i32.const 1 i32.add i32.gt_s local.get $alt i32.or
+        if                                              ;; fractional digits[X+1 ..]
+          local.get $p i32.const 46 i32.store8
+          local.get $p i32.const 1 i32.add local.set $p
+          local.get $X i32.const 1 i32.add local.set $i
+          block $jd loop $jl
+            local.get $i local.get $ndig i32.ge_s br_if $jd
+            local.get $p i32.const {{FpEDig}} local.get $i i32.add i32.load8_u i32.const 48 i32.add i32.store8
+            local.get $p i32.const 1 i32.add local.set $p
+            local.get $i i32.const 1 i32.add local.set $i
+            br $jl
+          end end
+        end
+      else                                              ;; X < 0: "0." + (-X-1) zeros + digits
+        local.get $p i32.const 48 i32.store8
+        local.get $p i32.const 1 i32.add i32.const 46 i32.store8
+        local.get $p i32.const 2 i32.add local.set $p
+        i32.const 0 local.set $i
+        block $ld loop $ll
+          local.get $i i32.const 0 local.get $X i32.sub i32.const 1 i32.sub i32.ge_s br_if $ld
+          local.get $p i32.const 48 i32.store8
+          local.get $p i32.const 1 i32.add local.set $p
+          local.get $i i32.const 1 i32.add local.set $i
+          br $ll
+        end end
+        i32.const 0 local.set $i
+        block $md loop $ml
+          local.get $i local.get $ndig i32.ge_s br_if $md
+          local.get $p i32.const {{FpEDig}} local.get $i i32.add i32.load8_u i32.const 48 i32.add i32.store8
+          local.get $p i32.const 1 i32.add local.set $p
+          local.get $i i32.const 1 i32.add local.set $i
+          br $ml
+        end end
+      end
+    else                                                ;; ---- %e-style ----
+      local.get $p i32.const {{FpEDig}} i32.load8_u i32.const 48 i32.add i32.store8
+      local.get $p i32.const 1 i32.add local.set $p
+      local.get $ndig i32.const 1 i32.gt_s local.get $alt i32.or
+      if
+        local.get $p i32.const 46 i32.store8
+        local.get $p i32.const 1 i32.add local.set $p
+        i32.const 1 local.set $i
+        block $ed loop $el
+          local.get $i local.get $ndig i32.ge_s br_if $ed
+          local.get $p i32.const {{FpEDig}} local.get $i i32.add i32.load8_u i32.const 48 i32.add i32.store8
+          local.get $p i32.const 1 i32.add local.set $p
+          local.get $i i32.const 1 i32.add local.set $i
+          br $el
+        end end
+      end
+      local.get $p i32.const 101 i32.store8
+      local.get $p i32.const 1 i32.add local.set $p
+      local.get $X i32.const 0 i32.lt_s
+      if (result i32)
+        local.get $p i32.const 45 i32.store8 i32.const 0 local.get $X i32.sub
+      else
+        local.get $p i32.const 43 i32.store8 local.get $X
+      end
+      local.set $ax
+      local.get $p i32.const 1 i32.add local.set $p
+      local.get $ax i32.const 100 i32.ge_s
+      if
+        local.get $p local.get $ax i32.const 100 i32.div_u i32.const 48 i32.add i32.store8
+        local.get $p i32.const 1 i32.add local.set $p
+      end
+      local.get $p local.get $ax i32.const 10 i32.div_u i32.const 10 i32.rem_u i32.const 48 i32.add i32.store8
+      local.get $p i32.const 1 i32.add local.set $p
+      local.get $p local.get $ax i32.const 10 i32.rem_u i32.const 48 i32.add i32.store8
+      local.get $p i32.const 1 i32.add local.set $p
+    end
+    i32.const {{FpEOut}}
+    local.get $p i32.const {{FpEOut}} i32.sub
+    local.get $sign local.get $width local.get $mode
     call $__pf_emit
   )
 

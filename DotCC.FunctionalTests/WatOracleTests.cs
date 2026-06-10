@@ -140,6 +140,24 @@ public sealed class WatOracleTests
     [InlineData("int main(void){ double x=10.0, y=3.0; printf(\"%.4f\", x/y); return 0; }", "3.3333")]
     [InlineData("int main(void){ printf(\"%.1f\", 1.0e20); return 0; }", "100000000000000000000.0")]
     [InlineData("int main(void){ printf(\"%.10f\", 0.1); return 0; }", "0.1000000000")]
+    // printf %e / %g — the scaled-Dragon formatter (significant digits + exponent),
+    // also correctly rounded against glibc/Python references.
+    [InlineData("int main(void){ printf(\"%e\", 1.5); return 0; }", "1.500000e+00")]
+    [InlineData("int main(void){ printf(\"%.2e\", 3.14159); return 0; }", "3.14e+00")]
+    [InlineData("int main(void){ printf(\"%.0e\", 9.99); return 0; }", "1e+01")]            // carry bumps the exponent
+    [InlineData("int main(void){ printf(\"%e\", -0.0); return 0; }", "-0.000000e+00")]
+    [InlineData("int main(void){ printf(\"%.3e\", 0.000123456); return 0; }", "1.235e-04")]
+    [InlineData("int main(void){ printf(\"%.0e\", 2.5); return 0; }", "2e+00")]              // round half to even
+    [InlineData("int main(void){ printf(\"%+.2e\", 3.14); return 0; }", "+3.14e+00")]
+    [InlineData("int main(void){ printf(\"%e\", 0.0); return 0; }", "0.000000e+00")]
+    [InlineData("int main(void){ printf(\"%g\", 1.5); return 0; }", "1.5")]
+    [InlineData("int main(void){ printf(\"%g\", 100.0); return 0; }", "100")]               // trailing zeros stripped
+    [InlineData("int main(void){ printf(\"%g %g\", 0.0001, 0.00001); return 0; }", "0.0001 1e-05")]   // %f/%e boundary
+    [InlineData("int main(void){ printf(\"%g\", 1234567.0); return 0; }", "1.23457e+06")]
+    [InlineData("int main(void){ printf(\"%.14g\", 2.0/3.0); return 0; }", "0.66666666666667")]   // Lua's default
+    [InlineData("int main(void){ printf(\"%#.3g\", 1.0); return 0; }", "1.00")]             // '#' keeps trailing zeros
+    [InlineData("int main(void){ printf(\"%g\", 0.0); return 0; }", "0")]
+    [InlineData("int main(void){ printf(\"%.3g\", 3.14159); return 0; }", "3.14")]
     public void Wat_program_writes_expected_stdout(string source, string expected)
     {
         if (!Requested)
