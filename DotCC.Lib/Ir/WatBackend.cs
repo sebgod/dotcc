@@ -1144,7 +1144,7 @@ internal sealed class WatBackend
         // The '#' alternate form is supported only for the float conversions (force a
         // decimal point; for %g, also keep trailing zeros); for the integer
         // conversions it still fails loud rather than miscompile.
-        if (spec.Alt && spec.Conv is not ('f' or 'e' or 'g'))
+        if (spec.Alt && spec.Conv is not ('f' or 'F' or 'e' or 'E' or 'g' or 'G'))
         {
             throw new IrUnsupportedException($"the wat target does not yet support the printf '#' flag (in '%{spec.Conv}')");
         }
@@ -1180,11 +1180,11 @@ internal sealed class WatBackend
             case 'x': EmitUnsignedConv(arg, spec, 16, 97); break;   // 'a'
             case 'X': EmitUnsignedConv(arg, spec, 16, 65); break;   // 'A'
             case 'o': EmitUnsignedConv(arg, spec, 8, 0); break;
-            case 'f': EmitFloatConv(arg, spec, 'f'); break;
-            case 'e': EmitFloatConv(arg, spec, 'e'); break;
-            case 'g': EmitFloatConv(arg, spec, 'g'); break;
+            case 'f': case 'F': EmitFloatConv(arg, spec, spec.Conv); break;
+            case 'e': case 'E': EmitFloatConv(arg, spec, spec.Conv); break;
+            case 'g': case 'G': EmitFloatConv(arg, spec, spec.Conv); break;
             default:
-                throw new IrUnsupportedException($"the wat target does not yet support the printf conversion '%{spec.Conv}' (%E/%G and %p come later)");
+                throw new IrUnsupportedException($"the wat target does not yet support the printf conversion '%{spec.Conv}' (%p comes later)");
         }
     }
 
@@ -1213,13 +1213,18 @@ internal sealed class WatBackend
     /// (C99: a precision of 0 is taken as 1).</summary>
     private void EmitFloatConv(CExpr arg, PrintfFormat.Spec spec, char conv)
     {
+        // Uppercase conversions (%F/%E/%G) differ only in casing: an 'E' exponent
+        // marker and uppercase INF/NAN. The runtime helper is the same one; an extra
+        // flag selects the case (it folds to lowercase − (upper << 5) at each letter).
+        var upper = conv is 'F' or 'E' or 'G';
+        var lc = char.ToLowerInvariant(conv);
         var prec = spec.Precision >= 0 ? spec.Precision : 6;   // C default precision is 6
-        if (conv == 'g' && prec == 0) { prec = 1; }            // %g: precision 0 means 1
+        if (lc == 'g' && prec == 0) { prec = 1; }              // %g: precision 0 means 1
         if (prec > MaxFloatPrec)
         {
             throw new IrUnsupportedException($"the wat target does not yet support printf float precision > {MaxFloatPrec} (in '%{spec.Conv}')");
         }
-        var runtime = conv switch { 'e' => "__pf_e", 'g' => "__pf_g", _ => "__pf_f" };
+        var runtime = lc switch { 'e' => "__pf_e", 'g' => "__pf_g", _ => "__pf_f" };
         NeedRuntime(runtime);
         EmitExpr(arg);
         var vt = ValType(arg.Type);
@@ -1233,6 +1238,7 @@ internal sealed class WatBackend
         Line($"i32.const {(spec.Width >= 0 ? spec.Width : 0)}");
         Line($"i32.const {FloatMode(spec)}");
         Line($"i32.const {(spec.Alt ? 1 : 0)}");                       // '#': always show a decimal point
+        Line($"i32.const {(upper ? 1 : 0)}");                          // uppercase 'E' / INF / NAN
         Line($"call ${runtime}");
     }
 
@@ -2007,10 +2013,11 @@ internal sealed class WatBackend
         if (_runtimeUsed.Contains("__pf_f"))
         {
             sb.Append($$"""
-  (func $__pf_f (param $v f64) (param $prec i32) (param $posSign i32) (param $width i32) (param $mode i32) (param $alt i32)
+  (func $__pf_f (param $v f64) (param $prec i32) (param $posSign i32) (param $width i32) (param $mode i32) (param $alt i32) (param $upper i32)
     (local $bits i64) (local $exp i32) (local $mant i64) (local $M i64) (local $E2 i32)
     (local $sign i32) (local $pos i32) (local $end i32) (local $i i32) (local $d i32)
-    (local $k i32) (local $bit i32) (local $half i32) (local $sticky i32)
+    (local $k i32) (local $bit i32) (local $half i32) (local $sticky i32) (local $uc i32)
+    local.get $upper i32.const 5 i32.shl local.set $uc     ;; 0 or 32: lowercase − $uc = uppercase
     local.get $v i64.reinterpret_f64 local.set $bits
     local.get $bits i64.const 0 i64.lt_s         ;; sign byte: '-' for a negative value
     if (result i32) i32.const 45 else local.get $posSign end
@@ -2021,14 +2028,14 @@ internal sealed class WatBackend
     if
       i32.const {{FpDigEnd - 3}} local.set $pos
       local.get $mant i64.eqz
-      if                                         ;; "inf"
-        local.get $pos i32.const 105 i32.store8
-        local.get $pos i32.const 1 i32.add i32.const 110 i32.store8
-        local.get $pos i32.const 2 i32.add i32.const 102 i32.store8
-      else                                       ;; "nan"
-        local.get $pos i32.const 110 i32.store8
-        local.get $pos i32.const 1 i32.add i32.const 97 i32.store8
-        local.get $pos i32.const 2 i32.add i32.const 110 i32.store8
+      if                                         ;; "inf" / "INF"
+        local.get $pos i32.const 105 local.get $uc i32.sub i32.store8
+        local.get $pos i32.const 1 i32.add i32.const 110 local.get $uc i32.sub i32.store8
+        local.get $pos i32.const 2 i32.add i32.const 102 local.get $uc i32.sub i32.store8
+      else                                       ;; "nan" / "NAN"
+        local.get $pos i32.const 110 local.get $uc i32.sub i32.store8
+        local.get $pos i32.const 1 i32.add i32.const 97 local.get $uc i32.sub i32.store8
+        local.get $pos i32.const 2 i32.add i32.const 110 local.get $uc i32.sub i32.store8
       end
       local.get $pos
       i32.const 3
@@ -2356,24 +2363,25 @@ internal sealed class WatBackend
         if (_runtimeUsed.Contains("__pf_e"))
         {
             sb.Append($$"""
-  (func $__pf_e (param $v f64) (param $prec i32) (param $posSign i32) (param $width i32) (param $mode i32) (param $alt i32)
-    (local $bits i64) (local $exp i32) (local $sign i32) (local $X i32) (local $p i32) (local $i i32) (local $ax i32)
+  (func $__pf_e (param $v f64) (param $prec i32) (param $posSign i32) (param $width i32) (param $mode i32) (param $alt i32) (param $upper i32)
+    (local $bits i64) (local $exp i32) (local $sign i32) (local $X i32) (local $p i32) (local $i i32) (local $ax i32) (local $uc i32)
+    local.get $upper i32.const 5 i32.shl local.set $uc  ;; 0 or 32: lowercase − $uc = uppercase
     local.get $v i64.reinterpret_f64 local.set $bits
     local.get $bits i64.const 0 i64.lt_s
     if (result i32) i32.const 45 else local.get $posSign end
     local.set $sign
     local.get $bits i64.const 52 i64.shr_u i64.const 2047 i64.and i32.wrap_i64 local.set $exp
-    local.get $exp i32.const 2047 i32.eq                ;; inf / nan
+    local.get $exp i32.const 2047 i32.eq                ;; inf / nan (INF / NAN when upper)
     if
       local.get $bits i64.const 4503599627370495 i64.and i64.eqz
       if
-        i32.const {{FpEOut}} i32.const 105 i32.store8
-        i32.const {{FpEOut}} i32.const 1 i32.add i32.const 110 i32.store8
-        i32.const {{FpEOut}} i32.const 2 i32.add i32.const 102 i32.store8
+        i32.const {{FpEOut}} i32.const 105 local.get $uc i32.sub i32.store8
+        i32.const {{FpEOut}} i32.const 1 i32.add i32.const 110 local.get $uc i32.sub i32.store8
+        i32.const {{FpEOut}} i32.const 2 i32.add i32.const 102 local.get $uc i32.sub i32.store8
       else
-        i32.const {{FpEOut}} i32.const 110 i32.store8
-        i32.const {{FpEOut}} i32.const 1 i32.add i32.const 97 i32.store8
-        i32.const {{FpEOut}} i32.const 2 i32.add i32.const 110 i32.store8
+        i32.const {{FpEOut}} i32.const 110 local.get $uc i32.sub i32.store8
+        i32.const {{FpEOut}} i32.const 1 i32.add i32.const 97 local.get $uc i32.sub i32.store8
+        i32.const {{FpEOut}} i32.const 2 i32.add i32.const 110 local.get $uc i32.sub i32.store8
       end
       i32.const {{FpEOut}} i32.const 3 local.get $sign local.get $width
       local.get $mode i32.const 1 i32.eq if (result i32) i32.const 1 else i32.const 0 end
@@ -2409,7 +2417,7 @@ internal sealed class WatBackend
       local.get $i i32.const 1 i32.add local.set $i
       br $fl
     end end
-    local.get $p i32.const 101 i32.store8               ;; 'e'
+    local.get $p i32.const 101 local.get $uc i32.sub i32.store8   ;; 'e' / 'E'
     local.get $p i32.const 1 i32.add local.set $p
     local.get $X i32.const 0 i32.lt_s
     if (result i32)
@@ -2443,24 +2451,25 @@ internal sealed class WatBackend
         if (_runtimeUsed.Contains("__pf_g"))
         {
             sb.Append($$"""
-  (func $__pf_g (param $v f64) (param $P i32) (param $posSign i32) (param $width i32) (param $mode i32) (param $alt i32)
-    (local $bits i64) (local $exp i32) (local $sign i32) (local $X i32) (local $p i32) (local $i i32) (local $ax i32) (local $ndig i32)
+  (func $__pf_g (param $v f64) (param $P i32) (param $posSign i32) (param $width i32) (param $mode i32) (param $alt i32) (param $upper i32)
+    (local $bits i64) (local $exp i32) (local $sign i32) (local $X i32) (local $p i32) (local $i i32) (local $ax i32) (local $ndig i32) (local $uc i32)
+    local.get $upper i32.const 5 i32.shl local.set $uc  ;; 0 or 32: lowercase − $uc = uppercase
     local.get $v i64.reinterpret_f64 local.set $bits
     local.get $bits i64.const 0 i64.lt_s
     if (result i32) i32.const 45 else local.get $posSign end
     local.set $sign
     local.get $bits i64.const 52 i64.shr_u i64.const 2047 i64.and i32.wrap_i64 local.set $exp
-    local.get $exp i32.const 2047 i32.eq                ;; inf / nan
+    local.get $exp i32.const 2047 i32.eq                ;; inf / nan (INF / NAN when upper)
     if
       local.get $bits i64.const 4503599627370495 i64.and i64.eqz
       if
-        i32.const {{FpEOut}} i32.const 105 i32.store8
-        i32.const {{FpEOut}} i32.const 1 i32.add i32.const 110 i32.store8
-        i32.const {{FpEOut}} i32.const 2 i32.add i32.const 102 i32.store8
+        i32.const {{FpEOut}} i32.const 105 local.get $uc i32.sub i32.store8
+        i32.const {{FpEOut}} i32.const 1 i32.add i32.const 110 local.get $uc i32.sub i32.store8
+        i32.const {{FpEOut}} i32.const 2 i32.add i32.const 102 local.get $uc i32.sub i32.store8
       else
-        i32.const {{FpEOut}} i32.const 110 i32.store8
-        i32.const {{FpEOut}} i32.const 1 i32.add i32.const 97 i32.store8
-        i32.const {{FpEOut}} i32.const 2 i32.add i32.const 110 i32.store8
+        i32.const {{FpEOut}} i32.const 110 local.get $uc i32.sub i32.store8
+        i32.const {{FpEOut}} i32.const 1 i32.add i32.const 97 local.get $uc i32.sub i32.store8
+        i32.const {{FpEOut}} i32.const 2 i32.add i32.const 110 local.get $uc i32.sub i32.store8
       end
       i32.const {{FpEOut}} i32.const 3 local.get $sign local.get $width
       local.get $mode i32.const 1 i32.eq if (result i32) i32.const 1 else i32.const 0 end
@@ -2556,7 +2565,7 @@ internal sealed class WatBackend
           br $el
         end end
       end
-      local.get $p i32.const 101 i32.store8
+      local.get $p i32.const 101 local.get $uc i32.sub i32.store8   ;; 'e' / 'E'
       local.get $p i32.const 1 i32.add local.set $p
       local.get $X i32.const 0 i32.lt_s
       if (result i32)

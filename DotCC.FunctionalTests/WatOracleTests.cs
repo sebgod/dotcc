@@ -169,6 +169,16 @@ public sealed class WatOracleTests
     [InlineData("int main(void){ printf(\"%#.3g\", 1.0); return 0; }", "1.00")]             // '#' keeps trailing zeros
     [InlineData("int main(void){ printf(\"%g\", 0.0); return 0; }", "0")]
     [InlineData("int main(void){ printf(\"%.3g\", 3.14159); return 0; }", "3.14")]
+    // uppercase float conversions — same digits as %e/%f/%g, an uppercase 'E'
+    // exponent and uppercase INF/NAN.
+    [InlineData("int main(void){ printf(\"%E\", 1.5); return 0; }", "1.500000E+00")]
+    [InlineData("int main(void){ printf(\"%.2E\", 31415.9); return 0; }", "3.14E+04")]
+    [InlineData("int main(void){ printf(\"%G\", 1234567.0); return 0; }", "1.23457E+06")]
+    [InlineData("int main(void){ printf(\"%G\", 100.0); return 0; }", "100")]
+    [InlineData("int main(void){ printf(\"%F\", 3.5); return 0; }", "3.500000")]
+    [InlineData("int main(void){ printf(\"%e|%E\", 1.0, 1.0); return 0; }", "1.000000e+00|1.000000E+00")]
+    [InlineData("int main(void){ double z=0.0; printf(\"%e %f %g\", 1.0/z, 1.0/z, 1.0/z); return 0; }", "inf inf inf")]
+    [InlineData("int main(void){ double z=0.0; printf(\"%E %F %G\", 1.0/z, 1.0/z, 1.0/z); return 0; }", "INF INF INF")]
     public void Wat_program_writes_expected_stdout(string source, string expected)
     {
         if (!Requested)

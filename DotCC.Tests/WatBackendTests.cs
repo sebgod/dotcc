@@ -173,11 +173,20 @@ public sealed class WatBackendTests
     [Fact]
     public void printf_unsupported_conversions_are_rejected()
     {
-        // '#' on an integer conversion, the uppercase float forms, and %p aren't
-        // wired — fail loud, don't miscompile.
+        // '#' on an integer conversion and %p aren't wired — fail loud, don't
+        // miscompile. (The uppercase float forms %E/%F/%G are now supported.)
         Should.Throw<CompileException>(() => Wat("int main(void){ printf(\"%#x\", 255); return 0; }"));
-        Should.Throw<CompileException>(() => Wat("int main(void){ printf(\"%E\", 1.5); return 0; }"));
         Should.Throw<CompileException>(() => Wat("int main(void){ printf(\"%p\", \"x\"); return 0; }"));
+    }
+
+    [Fact]
+    public void printf_uppercase_float_conversions_route_to_the_same_formatters()
+    {
+        // %E/%F/%G reuse the %e/%f/%g formatters with an extra uppercase flag (the
+        // last `i32.const` immediate before the call) selecting 'E' / INF / NAN.
+        Wat("int main(void){ printf(\"%E\", 1.5); return 0; }").ShouldContain("call $__pf_e");
+        Wat("int main(void){ printf(\"%G\", 1.5); return 0; }").ShouldContain("call $__pf_g");
+        Wat("int main(void){ printf(\"%F\", 1.5); return 0; }").ShouldContain("call $__pf_f");
     }
 
     [Fact]
