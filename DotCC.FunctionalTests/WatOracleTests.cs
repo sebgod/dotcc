@@ -122,6 +122,12 @@ public sealed class WatOracleTests
     [InlineData("int main(void){ printf(\"[%+d][% d]\", 7, 7); return 0; }", "[+7][ 7]")]
     [InlineData("int main(void){ printf(\"[%.3d][%5.3d][%05.3d]\", 42, 42, 42); return 0; }", "[042][  042][  042]")]
     [InlineData("int main(void){ printf(\"[%8x][%08x]\", 255, 255); return 0; }", "[      ff][000000ff]")]
+    // '#' alternate form on hex / octal: a 0x/0X prefix (suppressed for a zero value),
+    // a forced leading 0 for octal; the prefix sits before the zero-padding.
+    [InlineData("int main(void){ printf(\"%#x %#X %#o\", 255, 255, 64); return 0; }", "0xff 0XFF 0100")]
+    [InlineData("int main(void){ printf(\"%#x %#o\", 0, 0); return 0; }", "0 0")]
+    [InlineData("int main(void){ printf(\"[%#08x][%#8x][%-#8x]\", 255, 255, 255); return 0; }", "[0x0000ff][    0xff][0xff    ]")]
+    [InlineData("int main(void){ printf(\"[%#.4x][%#o]\", 255, 8); return 0; }", "[0x00ff][010]")]
     [InlineData("int main(void){ printf(\"[%10s][%-10s][%.3s]\", \"hi\", \"hi\", \"hello\"); return 0; }", "[        hi][hi        ][hel]")]
     [InlineData("int main(void){ printf(\"[%3c][%-3c]\", 'x', 'x'); return 0; }", "[  x][x  ]")]
     [InlineData("int main(void){ printf(\"[%.0d][%.0d]\", 0, 5); return 0; }", "[][5]")]

@@ -173,9 +173,10 @@ public sealed class WatBackendTests
     [Fact]
     public void printf_unsupported_conversions_are_rejected()
     {
-        // '#' on an integer conversion and %p aren't wired — fail loud, don't
-        // miscompile. (The uppercase float forms %E/%F/%G are now supported.)
-        Should.Throw<CompileException>(() => Wat("int main(void){ printf(\"%#x\", 255); return 0; }"));
+        // '#' on a d/i/u/c/s conversion (where C leaves it undefined) and %p aren't
+        // wired — fail loud, don't miscompile. (The uppercase float forms %E/%F/%G and
+        // the alternate hex/octal forms %#x/%#X/%#o are now supported.)
+        Should.Throw<CompileException>(() => Wat("int main(void){ printf(\"%#d\", 255); return 0; }"));
         Should.Throw<CompileException>(() => Wat("int main(void){ printf(\"%p\", \"x\"); return 0; }"));
     }
 
@@ -187,6 +188,16 @@ public sealed class WatBackendTests
         Wat("int main(void){ printf(\"%E\", 1.5); return 0; }").ShouldContain("call $__pf_e");
         Wat("int main(void){ printf(\"%G\", 1.5); return 0; }").ShouldContain("call $__pf_g");
         Wat("int main(void){ printf(\"%F\", 1.5); return 0; }").ShouldContain("call $__pf_f");
+    }
+
+    [Fact]
+    public void printf_hash_hex_packs_the_radix_prefix_into_the_sign_slot()
+    {
+        // %#x packs the "0x" prefix low-byte-first into the same i32 slot $__pf_emit
+        // reads a sign from: '0' | ('x' << 8) == 48 | (120 << 8) == 30768. %#X uses
+        // 'X' (88) → 48 | (88 << 8) == 22576.
+        Wat("int main(void){ printf(\"%#x\", 255); return 0; }").ShouldContain("i32.const 30768");
+        Wat("int main(void){ printf(\"%#X\", 255); return 0; }").ShouldContain("i32.const 22576");
     }
 
     [Fact]

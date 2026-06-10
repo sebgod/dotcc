@@ -1141,10 +1141,12 @@ internal sealed class WatBackend
     /// supported yet (fail loud).</summary>
     private void EmitConversion(PrintfFormat.Spec spec, CExpr arg)
     {
-        // The '#' alternate form is supported only for the float conversions (force a
-        // decimal point; for %g, also keep trailing zeros); for the integer
-        // conversions it still fails loud rather than miscompile.
-        if (spec.Alt && spec.Conv is not ('f' or 'F' or 'e' or 'E' or 'g' or 'G'))
+        // The '#' alternate form applies to the float conversions (force a decimal
+        // point; for %g, also keep trailing zeros) and to the hex/octal integer
+        // conversions (`0x`/`0X` prefix; a forced leading `0` for octal). For the
+        // remaining conversions where C leaves `#` undefined (d/i/u/c/s), it still
+        // fails loud rather than silently ignore the flag.
+        if (spec.Alt && spec.Conv is not ('f' or 'F' or 'e' or 'E' or 'g' or 'G' or 'x' or 'X' or 'o'))
         {
             throw new IrUnsupportedException($"the wat target does not yet support the printf '#' flag (in '%{spec.Conv}')");
         }
@@ -1190,9 +1192,26 @@ internal sealed class WatBackend
 
     /// <summary>Lower an unsigned integer conversion (<c>%u</c>/<c>%x</c>/<c>%X</c>/
     /// <c>%o</c>): the value is taken as its unsigned bit pattern; <c>+</c>/space don't
-    /// apply (C only signs signed conversions).</summary>
+    /// apply (C only signs signed conversions). With the <c>#</c> flag, <c>%x</c>/
+    /// <c>%X</c> get a packed <c>0x</c>/<c>0X</c> prefix (emitted in the sign position,
+    /// so zero-padding lands after it) and <c>%o</c> sets the force-leading-zero flag;
+    /// the runtime suppresses the prefix for a zero value, per C99.</summary>
     private void EmitUnsignedConv(CExpr arg, PrintfFormat.Spec spec, int radix, int alpha)
     {
+        // A 1–2 byte radix prefix packed low-byte-first into one i32 (the same slot
+        // $__pf_emit reads a sign from); 0 = none. Octal uses no string prefix — the
+        // leading `0` is a forced digit instead (forceZero).
+        var prefix = 0;
+        var forceZero = 0;
+        if (spec.Alt)
+        {
+            switch (spec.Conv)
+            {
+                case 'x': prefix = '0' | ('x' << 8); break;
+                case 'X': prefix = '0' | ('X' << 8); break;
+                case 'o': forceZero = 1; break;
+            }
+        }
         NeedRuntime("__pf_int_u");
         EmitIntArgAsI64(arg, signed: false);
         Line($"i64.const {radix}");
@@ -1200,6 +1219,8 @@ internal sealed class WatBackend
         Line($"i32.const {IntMinDigits(spec)}");
         Line($"i32.const {(spec.Width >= 0 ? spec.Width : 0)}");
         Line($"i32.const {IntMode(spec)}");
+        Line($"i32.const {prefix}");
+        Line($"i32.const {forceZero}");
         Line("call $__pf_int_u");
     }
 
@@ -1612,17 +1633,23 @@ internal sealed class WatBackend
 """);
         }
 
-        // Write a staged number ($ptr,$len) into a field: optional $sign byte, then
-        // pad to $width per $mode (0 = space-pad right, 1 = left-justify, 2 = zero-pad).
+        // Write a staged number ($ptr,$len) into a field, then pad to $width per $mode
+        // (0 = space-pad right, 1 = left-justify, 2 = zero-pad). $sign is a packed 1- or
+        // 2-byte PREFIX, low byte first: a sign ('-'/'+'/' ', high byte 0) for the
+        // signed/float paths, or the "0x"/"0X" radix prefix for `%#x`/`%#X` ('0' low,
+        // 'x'/'X' high); 0 = no prefix. The prefix is emitted in the sign position, so
+        // zero-padding lands after it ("0x0000ff", "-0042").
         if (_runtimeUsed.Contains("__pf_emit"))
         {
             sb.Append($$"""
   (func $__pf_emit (param $ptr i32) (param $len i32) (param $sign i32) (param $width i32) (param $mode i32)
-    (local $pad i32)
-    local.get $width             ;; pad = max(0, width - (signLen + len))
-    local.get $sign
-    i32.const 0
-    i32.ne
+    (local $pad i32) (local $lo i32) (local $hi i32) (local $plen i32)
+    local.get $sign i32.const 255 i32.and local.set $lo            ;; unpack the prefix bytes
+    local.get $sign i32.const 8 i32.shr_u i32.const 255 i32.and local.set $hi
+    local.get $lo i32.const 0 i32.ne
+    local.get $hi i32.const 0 i32.ne i32.add local.set $plen        ;; prefix length 0/1/2
+    local.get $width             ;; pad = max(0, width - (plen + len))
+    local.get $plen
     local.get $len
     i32.add
     i32.sub
@@ -1630,12 +1657,9 @@ internal sealed class WatBackend
     local.get $mode
     i32.const 1
     i32.eq
-    if                           ;; left: sign, body, spaces
-      local.get $sign
-      if
-        local.get $sign
-        call $__putb
-      end
+    if                           ;; left: prefix, body, spaces
+      local.get $lo if local.get $lo call $__putb end
+      local.get $hi if local.get $hi call $__putb end
       local.get $ptr
       local.get $len
       call $__write
@@ -1646,27 +1670,21 @@ internal sealed class WatBackend
       local.get $mode
       i32.const 2
       i32.eq
-      if                         ;; zero: sign, '0' pad, body
-        local.get $sign
-        if
-          local.get $sign
-          call $__putb
-        end
+      if                         ;; zero: prefix, '0' pad, body
+        local.get $lo if local.get $lo call $__putb end
+        local.get $hi if local.get $hi call $__putb end
         i32.const 48
         local.get $pad
         call $__fill
         local.get $ptr
         local.get $len
         call $__write
-      else                       ;; right: spaces, sign, body
+      else                       ;; right: spaces, prefix, body
         i32.const 32
         local.get $pad
         call $__fill
-        local.get $sign
-        if
-          local.get $sign
-          call $__putb
-        end
+        local.get $lo if local.get $lo call $__putb end
+        local.get $hi if local.get $hi call $__putb end
         local.get $ptr
         local.get $len
         call $__write
@@ -1722,11 +1740,14 @@ internal sealed class WatBackend
 """);
         }
 
-        // Unsigned radix (10/16/8): no sign; stage the magnitude and emit.
+        // Unsigned radix (10/16/8): no sign. Stage the magnitude, then for the `#`
+        // alternate form apply the `0x`/`0X` prefix ($pfx, suppressed for a zero value
+        // per C99) or, for octal, force a leading `0` digit ($forceZero) when the top
+        // digit isn't already zero. Emit through the shared field layout.
         if (_runtimeUsed.Contains("__pf_int_u"))
         {
             sb.Append($$"""
-  (func $__pf_int_u (param $mag i64) (param $base i64) (param $alpha i32) (param $min i32) (param $width i32) (param $mode i32)
+  (func $__pf_int_u (param $mag i64) (param $base i64) (param $alpha i32) (param $min i32) (param $width i32) (param $mode i32) (param $pfx i32) (param $forceZero i32)
     (local $ptr i32)
     local.get $mag
     local.get $base
@@ -1734,11 +1755,20 @@ internal sealed class WatBackend
     local.get $min
     call $__fmt_radix
     local.set $ptr
+    local.get $forceZero         ;; #o: prepend a '0' unless the result already starts with one
+    if
+      local.get $ptr i32.load8_u i32.const 48 i32.ne
+      if
+        local.get $ptr i32.const 1 i32.sub local.set $ptr
+        local.get $ptr i32.const 48 i32.store8
+      end
+    end
     local.get $ptr
     i32.const {{NumBufEnd}}
     local.get $ptr
     i32.sub
-    i32.const 0                  ;; no sign
+    local.get $mag i64.eqz       ;; #x/#X: the 0x prefix only on a nonzero value
+    if (result i32) i32.const 0 else local.get $pfx end
     local.get $width
     local.get $mode
     call $__pf_emit
