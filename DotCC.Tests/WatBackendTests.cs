@@ -112,6 +112,34 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void goto_using_function_lowers_to_a_cfg_dispatch_loop()
+    {
+        // A function with a label can't be emitted structurally; it becomes a CFG
+        // dispatch loop ($__disp + a br_table on $__lbl).
+        var wat = Wat("int f(int x){ int r=0; if(x<0) goto bad; r=x; return r; bad: return -1; } int main(void){ return f(-2); }");
+        wat.ShouldContain("loop $__disp");
+        wat.ShouldContain("br_table");
+        wat.ShouldContain("(local $__lbl i32)");
+    }
+
+    [Fact]
+    public void goto_free_function_keeps_the_structured_emit()
+    {
+        // No label -> no dispatch loop; the clean structured control flow is unchanged.
+        var wat = Wat("int main(void){ int s=0; for(int i=0;i<3;i++) s+=i; return s; }");
+        wat.ShouldNotContain("$__disp");
+        wat.ShouldNotContain("$__lbl");
+    }
+
+    [Fact]
+    public void switch_inside_a_goto_function_fails_loud()
+    {
+        // A switch in a function lowered via the CFG isn't modelled yet — fail loud.
+        Should.Throw<CompileException>(() => Wat(
+            "int f(int x){ if(x) goto l; return 0; l: switch(x){ case 1: return 1; default: return 2; } } int main(void){ return f(1); }"));
+    }
+
+    [Fact]
     public void switch_with_a_duffs_device_nested_case_fails_loud()
     {
         // A case label nested inside another statement (Duff's device) is unsupported

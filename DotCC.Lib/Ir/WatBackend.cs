@@ -29,7 +29,7 @@ namespace DotCC.Ir;
 /// outside the slice (structs, goto/switch, varargs, globals, other library calls)
 /// raises <see cref="IrUnsupportedException"/>.</para>
 /// </summary>
-internal sealed class WatBackend
+internal sealed partial class WatBackend
 {
     // Top of the shadow stack — it grows DOWN from the end of the first page; string
     // data grows UP from a 1 KiB null guard. Small programs never collide.
@@ -105,6 +105,9 @@ internal sealed class WatBackend
     // a saved store value (one per wasm value type) and a saved store address (i32)
     // for the read-modify-write of a compound assignment / ++/-- through memory.
     private bool _scratch32, _scratch64, _scratchF32, _scratchF64, _scratchAddr;
+    // The label/dispatch variable for the CFG dispatch-loop lowering of a function that
+    // uses goto/labels (see WatBackend.Cfg.cs). Declared only for such functions.
+    private bool _scratchLbl;
 
     // Interned string literals → linear-memory data segments.
     private readonly Dictionary<string, int> _strings = new(StringComparer.Ordinal);
@@ -258,6 +261,7 @@ internal sealed class WatBackend
         _frame.Clear();
         _frameSize = 0;
         _scratch32 = _scratch64 = _scratchF32 = _scratchF64 = _scratchAddr = false;
+        _scratchLbl = false;
 
         var ret = fn.Sym.Type is CType.Func f ? f.Return : CType.Int;
         _currentRet = ret;
@@ -317,8 +321,18 @@ internal sealed class WatBackend
                 Line(StoreInstr(p.Type));
             }
         }
-        foreach (var s in fn.Body.Stmts) { EmitStmt(s); }
-        EmitFnEnd(fn, ret);
+        // A function that uses goto/labels can't be lowered by the structured emitter
+        // (wasm has no arbitrary jump); route it through the CFG dispatch-loop instead.
+        // Goto-free functions keep the clean structured emit.
+        if (ContainsLabel(fn.Body.Stmts))
+        {
+            EmitViaCfg(fn, ret);
+        }
+        else
+        {
+            foreach (var s in fn.Body.Stmts) { EmitStmt(s); }
+            EmitFnEnd(fn, ret);
+        }
         _out = prev;
 
         foreach (var v in valueLocals) { Line($"(local ${v.TargetName} {_wat.RenderType(v.Type)})"); }
@@ -328,6 +342,7 @@ internal sealed class WatBackend
         if (_scratchF32) { Line("(local $__tf32 f32)"); }
         if (_scratchF64) { Line("(local $__tf64 f64)"); }
         if (_scratchAddr) { Line("(local $__taddr i32)"); }
+        if (_scratchLbl) { Line("(local $__lbl i32)"); }
         _out.Append(body);
 
         _indent--;

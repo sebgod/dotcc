@@ -83,6 +83,17 @@ public sealed class WatOracleTests
     [InlineData("long f(long x){ switch(x){ case 10000000000: return 1; default: return 0; } } int main(void){ return (int)f(10000000000); }", 1)]
     [InlineData("int main(void){ int t=0; for(int i=0;i<5;i++){ switch(i){ case 2: continue; case 4: break; default: t+=i; } t+=100; } return t; }", 404)]
     [InlineData("enum C{R,G=5,B}; int f(enum C c){ switch(c){ case R: return 1; case G: return 5; case B: return 6; } return -1; } int main(void){ return f(B); }", 6)]
+    // goto / labels — lowered via the CFG dispatch loop (correct for forward, backward,
+    // out-of-nested-loop, skip-init, and irreducible control flow).
+    [InlineData("int f(int x){ int r=0; if(x<0) goto fail; r=x*2; return r; fail: return -1; } int main(void){ return f(-3)+f(5); }", 9)]
+    [InlineData("int main(void){ int s=0,i=1; loop: if(i>5) goto done; s+=i; i++; goto loop; done: return s; }", 15)]
+    [InlineData("int main(void){ int found=-1; for(int i=0;i<5;i++){ for(int j=0;j<5;j++){ if(i*j==6){ found=i*10+j; goto out; } } } out: return found; }", 23)]
+    [InlineData("int main(void){ int a=5; if(1) goto end; a=99; end: return a; }", 5)]
+    [InlineData("int irr(int s){ int n=0; if(s==1) goto L2; L1: n+=1; if(n>20) goto d; L2: n+=10; if(n>20) goto d; goto L1; d: return n; } int main(void){ return irr(0)*100+irr(1); }", 2221)] // irreducible: irr(0)=22, irr(1)=21
+    // goto coexisting with a shadow-stack frame (array + &x) and with recursion (frame
+    // saved/restored per call): the dispatch loop runs after the one-time frame setup.
+    [InlineData("int f(int n){ int arr[4]; int x=7; int* px=&x; int i=0; loop: if(i>=n) goto done; arr[i]=i*i; i++; goto loop; done: { int s=*px; for(int k=0;k<n;k++) s+=arr[k]; return s; } } int main(void){ return f(4); }", 21)]
+    [InlineData("int sumrec(int n){ if(n<=0) goto base; return n+sumrec(n-1); base: return 0; } int main(void){ return sumrec(5); }", 15)]
     // decimal-float literal spellings without two digit runs around the point: a
     // point-free exponent (`1e10`/`1e-7` — the documented lexer gap), a leading dot
     // (`.5`), a trailing dot (`1.`), and a dot-before-exponent (`2.e3`).
@@ -115,6 +126,8 @@ public sealed class WatOracleTests
     [InlineData("int main(void){ for(int i=0;i<3;i++) putchar('0'+i); return 0; }", "012")]
     // switch fall-through, observed by what each iteration prints
     [InlineData("int main(void){ for(int i=0;i<4;i++){ switch(i){ case 0: putchar('a'); case 1: putchar('b'); break; default: putchar('x'); } } return 0; }", "abbxx")]
+    // goto loop, observed by what it prints
+    [InlineData("int main(void){ int i=0; again: putchar('0'+i); i++; if(i<3) goto again; putchar('\\n'); return 0; }", "012\n")]
     // printf — string-literal format expanded at compile time
     [InlineData("int main(void){ printf(\"hello\\n\"); return 0; }", "hello\n")]
     [InlineData("int main(void){ printf(\"n=%d\\n\", 42); return 0; }", "n=42\n")]
