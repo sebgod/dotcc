@@ -218,7 +218,10 @@ internal sealed class CSharpBackend
         if (fn.Variadic) { ps = ps.Length == 0 ? "params VaArg[] _va" : ps + ", params VaArg[] _va"; }
         var sb = new StringBuilder();
         sb.Append($"static unsafe {Cs(retTy)} {fn.Sym.TargetName}({ps})\n");
-        Stmt(sb, fn.Body, 0);
+        // C lets a goto jump INTO a nested block; C# scopes labels to their
+        // block. Hoist labeled tails until every goto is legal (no-op for the
+        // overwhelming majority of functions — see GotoScopeNormalizer).
+        Stmt(sb, GotoScopeNormalizer.Normalize(fn.Body), 0);
         return sb.ToString();
     }
 
