@@ -1827,20 +1827,25 @@ internal sealed class CSharpBackend
                 ? CoercedArg(c.Args[i], pts[i])
                 : Sub(DecayEnum(c.Args[i]), PAssign));
         }
-        if (IsPrintfFamily(c.Callee))
+        if (IsPrintfFamily(c.Callee) || IsScanfFamily(c.Callee))
         {
-            // printf-family fluent lowering — matches the runtime contract:
-            // printf(fmt).Arg(x).Arg(y).Done()  /  fprintf(stream, fmt)…  etc.
+            // Format-family fluent lowering — matches the runtime contract:
+            // printf(fmt).Arg(x).Arg(y).Done()  /  fprintf(stream, fmt)…  /
+            // sscanf(src, fmt).Read(p).Read(q).Done()  etc.
             var (fixedCount, head) = c.Callee switch
             {
                 "printf" => (1, $"printf({Arg(a, 0)})"),
                 "fprintf" => (2, $"fprintf({Arg(a, 0)}, {Arg(a, 1)})"),
                 "sprintf" => (2, $"sprintf({Arg(a, 0)}, {Arg(a, 1)})"),
                 "snprintf" => (3, $"snprintf({Arg(a, 0)}, {Arg(a, 1)}, {Arg(a, 2)})"),
+                "scanf" => (1, $"scanf({Arg(a, 0)})"),
+                "fscanf" => (2, $"fscanf({Arg(a, 0)}, {Arg(a, 1)})"),
+                "sscanf" => (2, $"sscanf({Arg(a, 0)}, {Arg(a, 1)})"),
                 _ => (a.Count, $"{c.Callee}({string.Join(", ", a)})"),
             };
+            var chain = IsScanfFamily(c.Callee) ? ".Read(" : ".Arg(";
             var sb = new StringBuilder(head);
-            for (var i = fixedCount; i < a.Count; i++) { sb.Append(".Arg(").Append(a[i]).Append(')'); }
+            for (var i = fixedCount; i < a.Count; i++) { sb.Append(chain).Append(a[i]).Append(')'); }
             sb.Append(".Done()");
             return sb.ToString();
         }
@@ -1851,6 +1856,11 @@ internal sealed class CSharpBackend
     /// <c>printf(fmt).Arg(x).Done()</c> form (variadic format functions).</summary>
     private static bool IsPrintfFamily(string callee) =>
         callee is "printf" or "fprintf" or "sprintf" or "snprintf";
+
+    /// <summary>The scanf side of the same lowering — fluent
+    /// <c>.Read(ptr)</c> chain into <c>ScanfReader</c>.</summary>
+    private static bool IsScanfFamily(string callee) =>
+        callee is "scanf" or "fscanf" or "sscanf";
 
     private static string Arg(List<string> a, int i) => i < a.Count ? a[i] : "";
 
