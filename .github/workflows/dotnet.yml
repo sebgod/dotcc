@@ -1,0 +1,115 @@
+name: ci
+
+# CI for dotcc — the C → .NET 10 / C# transpiler.
+#
+# Mirrors the SharpAstro org convention (see sharpastro/LALR.CC's dotnet.yml):
+# ubuntu-latest, setup-dotnet 10.0.x, and explicit restore → build --no-restore
+# → test --no-build as SEPARATE steps. Keeping build and the test host in
+# distinct, sequential processes structurally avoids the documented Windows
+# flake where a test host racing a concurrent build deadlocks on the
+# LALR.CC.dll copy lock. Linux runners don't hit the file-lock / process-warmup
+# races at all, which is why the whole org standardises on ubuntu-latest.
+#
+# dotcc ships no NuGet package, so there is no pack/publish job (unlike LALR.CC).
+#
+# In CI the sibling LALR.CC working copy is absent, so Directory.Build.props
+# auto-selects NuGet mode; we still pass -p:UseLocalLalrCc=false to pin that
+# intent (CLAUDE.md: "CI always builds the NuGet path").
+#
+# Jobs:
+#   build-test  — the required gate: Release build + unit suite + functional
+#                 fixtures. The opt-in differential oracles (MSVC / gcc-WSL /
+#                 gcc-quad / wat) skip cleanly here; the wat oracle, which is
+#                 this branch's whole point, gets its own job below.
+#   wat-oracle  — the --target=wat EXECUTION oracle: EmitWat → wat2wasm → node.
+#                 Pins + checksum-verifies wabt and pins Node so the run is
+#                 reproducible; asserts both tools are actually present (the
+#                 oracle skips silently when a tool is missing, so without this
+#                 guard a broken install would make the job pass without ever
+#                 running the oracle); and runs single-threaded (-parallel none)
+#                 so 50+ concurrent wat2wasm/node spawns can't contend. Correct
+#                 and non-flaky over fast.
+
+on:
+  push:
+    branches: [main, 'feat/**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# A newer push to the same ref cancels the in-flight run for it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore dotcc.sln
+
+      - name: Build (Release, NuGet path)
+        run: dotnet build dotcc.sln -c Release --no-restore --nologo -p:UseLocalLalrCc=false
+
+      - name: Unit tests
+        run: dotnet test DotCC.Tests/DotCC.Tests.csproj -c Release --no-build --nologo
+
+      - name: Functional tests (fixtures; opt-in oracles skip)
+        run: dotnet test DotCC.FunctionalTests/DotCC.FunctionalTests.csproj -c Release --no-build --nologo
+
+  wat-oracle:
+    runs-on: ubuntu-latest
+    env:
+      WABT_VERSION: '1.0.36'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install wabt ${{ env.WABT_VERSION }} (pinned + checksum-verified)
+        run: |
+          set -euo pipefail
+          base="https://github.com/WebAssembly/wabt/releases/download/${WABT_VERSION}"
+          asset="wabt-${WABT_VERSION}-ubuntu-20.04.tar.gz"
+          curl -fsSL "$base/$asset" -o "/tmp/$asset"
+          curl -fsSL "$base/$asset.sha256" -o "/tmp/$asset.sha256"
+          (cd /tmp && sha256sum -c "$asset.sha256")
+          tar -xzf "/tmp/$asset" -C /tmp
+          echo "/tmp/wabt-${WABT_VERSION}/bin" >> "$GITHUB_PATH"
+
+      - name: Verify toolchain present (fail rather than let the oracle skip)
+        run: |
+          set -euo pipefail
+          wat2wasm --version
+          node --version
+
+      - name: Restore
+        run: dotnet restore dotcc.sln
+
+      - name: Build (Release, NuGet path)
+        run: dotnet build dotcc.sln -c Release --no-restore --nologo -p:UseLocalLalrCc=false
+
+      - name: Wat execution oracle (single-threaded)
+        env:
+          DOTCC_RUN_WAT: '1'
+        run: >
+          dotnet test DotCC.FunctionalTests/DotCC.FunctionalTests.csproj
+          -c Release --no-build --nologo -- -parallel none
