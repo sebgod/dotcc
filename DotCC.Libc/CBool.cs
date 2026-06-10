@@ -46,5 +46,18 @@ public readonly struct CBool
     // Reads back as int 0/1 — drives arithmetic, comparison, return, args, %d.
     public static implicit operator int(CBool b) => b._v;
 
+    // Explicit reads at every integer width: C casts `(sexp_uint_t)boolexpr`
+    // (chibi's tag packing). The set must be EXHAUSTIVE — with only some
+    // widths defined, a cast to another width has several viable user-defined
+    // conversions and C# reports ambiguity (CS0457) instead of picking one;
+    // an exact-target operator always wins.
+    public static explicit operator byte(CBool b) => b._v;
+    public static explicit operator sbyte(CBool b) => (sbyte)b._v;
+    public static explicit operator short(CBool b) => b._v;
+    public static explicit operator ushort(CBool b) => b._v;
+    public static explicit operator uint(CBool b) => b._v;
+    public static explicit operator long(CBool b) => b._v;
+    public static explicit operator ulong(CBool b) => b._v;
+
     public override string ToString() => _v.ToString();
 }

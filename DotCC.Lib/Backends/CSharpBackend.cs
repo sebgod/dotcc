@@ -800,7 +800,9 @@ internal sealed class CSharpBackend
 
         // C's null pointer constant — an integer constant 0 — becomes C# `null`
         // where a POINTER is expected (C# won't convert int 0 to a pointer).
-        if (tgt is CType.Pointer && TryConstInt(value, out var z) && z == 0)
+        // A function pointer (bare CType.Func — lowered delegate*) is a pointer
+        // for this purpose too: chibi's opcode tables store NULL handlers.
+        if (tgt is CType.Pointer or CType.Func && TryConstInt(value, out var z) && z == 0)
         {
             text = "null";
             return true;
@@ -825,6 +827,20 @@ internal sealed class CSharpBackend
             && Cs(tgt) != Cs(src))
         {
             text = $"({Cs(tgt)})({Expr(value)})";
+            return true;
+        }
+        // Float-involved narrowing C# won't do implicitly but C converts at any
+        // store: double→float, floating→integer. Widenings (anything→double,
+        // integer→float) stay implicit in C# and pass through.
+        if (src is CType.Prim sp && tgt is CType.Prim tp && (!sp.Integer || !tp.Integer))
+        {
+            var s = Cs(src);
+            var t2 = Cs(tgt);
+            if (s == t2) { return false; }
+            var implicitOk = (t2 == "double" && (s == "float" || IsIntegerCs(s)))
+                          || (t2 == "float" && IsIntegerCs(s));
+            if (implicitOk) { return false; }
+            text = $"({t2})({Expr(value)})";
             return true;
         }
         // Integer narrowing / sign change C# won't do implicitly.
@@ -1163,7 +1179,13 @@ internal sealed class CSharpBackend
                 {
                     string Arm(CExpr a) => NoHoist(() =>
                         t.Type.IsArithmetic && a.Type.IsArithmetic && Cs(a.Type.Unqualified) != Cs(t.Type)
-                            ? $"({Cs(t.Type)})({Sub(a, PUnary)})"
+                            ? CoercionCast(a, Cs(t.Type))
+                            // A function-designator arm is an untyped method group
+                            // (`cond ? &strcasecmp : &strcmp` — chibi's fold-case
+                            // reader); C# needs both arms pinned to the common
+                            // fn-ptr type before the ternary (or a call) can bind.
+                            : IsFnPtrType(t.Type) && UnparenIsFunc(a)
+                            ? $"({Cs(t.Type)})({Expr(a)})"
                             : Expr(a));
                     return ($"(Cond.B({Expr(DecayEnum(t.Cond))}) ? {Arm(t.Then)} : {Arm(t.Else)})", PPrimary);
                 }
@@ -1243,16 +1265,23 @@ internal sealed class CSharpBackend
                     if (cop is not (BinOp.Shl or BinOp.Shr)
                         && a.Target.Type.IsArithmetic && a.Value.Type.IsArithmetic)
                     {
-                        // Cast the RHS to the target type only when the TARGET dominates
-                        // the usual conversions (e.g. `ulong op= int` — C widens the int,
-                        // and C# otherwise reports CS0034). When the common type is wider
-                        // than the target (`short op= int`) C#'s own compound-assign
-                        // narrowing handles it, so leave the RHS alone.
+                        // C#'s compound assignment only narrows the RESULT back when the
+                        // RHS is implicitly convertible to the target (12.21.4) — so
+                        // `int += long`, `long |= ulong`, `byte |= intExpr` are all
+                        // CS0266/CS0019 where C converts freely. Cast the RHS to the
+                        // target type: for the modular ops that land here (the shifts are
+                        // excluded above) truncate-first equals truncate-after, so C's
+                        // result is preserved. (Known hole: a compound `/=` or `%=` whose
+                        // RHS is wider than the target divides in the narrower type where
+                        // C divides wide-then-truncates — not yet observed in practice.)
                         var tt = Cs(a.Target.Type.Unqualified);
-                        var common = CType.UsualArithmetic(a.Target.Type, a.Value.Type);
-                        if (Cs(common) == tt && tt != Cs(a.Value.Type.Unqualified))
+                        var vt = Cs(a.Value.Type.Unqualified);
+                        var fits = CsImplicitInt(vt, tt)
+                            || (tt == "double" && (vt == "float" || IsIntegerCs(vt)))
+                            || (tt == "float" && IsIntegerCs(vt));
+                        if (tt != vt && !fits)
                         {
-                            rhs = $"({tt})({Sub(a.Value, PUnary)})";
+                            rhs = CoercionCast(a.Value, tt);
                         }
                     }
                     return ($"{Sub(a.Target, PUnary)} {BinSym(cop)}= {rhs}", PAssign);
@@ -1298,6 +1327,13 @@ internal sealed class CSharpBackend
             // C's unary arithmetic treats an enum as its underlying int — decay it
             // (`-EnumName.Member` is invalid C#).
             case UnOp.Plus: return ($"+{Sub(DecayEnum(u.Operand), PUnary)}", PUnary);
+            // Unary minus on an UNSIGNED operand is modular in C (2^N − x); C#
+            // rejects -ulong (CS0023) and silently widens -uint to long. Spell
+            // the modular subtraction out.
+            case UnOp.Neg when Cs(u.Operand.Type.Unqualified) is "ulong" or "nuint":
+                return ($"unchecked(0UL - {Sub(DecayEnum(u.Operand), PUnary)})", PPrimary);
+            case UnOp.Neg when Cs(u.Operand.Type.Unqualified) is "uint":
+                return ($"unchecked(0u - {Sub(DecayEnum(u.Operand), PUnary)})", PPrimary);
             case UnOp.Neg: return ($"-{Sub(DecayEnum(u.Operand), PUnary)}", PUnary);
             case UnOp.BitNot: return ($"~{Sub(DecayEnum(u.Operand), PUnary)}", PUnary);
             // &fn where fn is a function already decays to `&fn` in the VarRef
@@ -1412,6 +1448,22 @@ internal sealed class CSharpBackend
     private static bool IsFnPtrType(CType t) =>
         t.Unqualified is CType.Func or CType.Pointer { Pointee: CType.Func };
 
+    /// <summary>True when the expression (under parens / <c>&amp;</c>) is a bare
+    /// function designator — i.e. it renders as an untyped method group.</summary>
+    private static bool UnparenIsFunc(CExpr e)
+    {
+        while (true)
+        {
+            switch (e)
+            {
+                case Paren p: e = p.Inner; continue;
+                case Unary { Op: UnOp.AddrOf, Operand: { } o }: e = o; continue;
+                case VarRef { Sym.Kind: SymKind.Func }: return true;
+                default: return false;
+            }
+        }
+    }
+
     /// <summary>Render a comparison operand. A bare function designator
     /// (<see cref="VarRef"/> of a function, possibly parenthesised) renders as the
     /// method-group address <c>&amp;fn</c>, which C# leaves untyped until a target
@@ -1427,9 +1479,20 @@ internal sealed class CSharpBackend
     }
 
     private string ReconcileOne(CExpr e, string from, string to, int p) =>
-        from != to && !CsImplicitInt(from, to)
-            ? $"({to})({Sub(e, PUnary)})"   // cast binds at PUnary — no outer parens needed
-            : Sub(e, p);
+        from == to || CsImplicitInt(from, to) ? Sub(e, p) : CoercionCast(e, to);
+
+    /// <summary>An emitter-INSERTED conversion cast <c>(to)(e)</c> — usual-arithmetic
+    /// operand reconciliation, ternary-arm reconciliation. Applies the same CS0221
+    /// rule as <see cref="RenderCast"/>: a constant out of an integer target's range
+    /// (<c>x &amp; (ulong)(~1)</c>, <c>cond ? (ulong)(-1) : …</c> — chibi's tag masks)
+    /// must be wrapped in <c>unchecked</c>. Cast binds at PUnary — no outer parens.</summary>
+    private string CoercionCast(CExpr e, string to)
+    {
+        var text = $"({to})({Sub(e, PUnary)})";
+        return IsIntegerCs(to) && IsConstExpr(e) && !(TryConstInt(e, out var v) && ConstFitsTarget(v, to))
+            ? $"unchecked({text})"
+            : text;
+    }
 
     /// <summary>Render a cast. A constant-expression cast to a narrower / unsigned
     /// integer type whose value C# can't prove in range is CS0221 unless wrapped
@@ -1441,6 +1504,19 @@ internal sealed class CSharpBackend
     /// <see cref="IsConstExpr"/> flag alone.</summary>
     private (string, int) RenderCast(Cast c)
     {
+        // A C cast of a function designator — `(sexp_proc3)fn`, `(sexp)&fn`,
+        // chibi's opcode tables — reaches C# as a METHOD-GROUP cast, which only
+        // converts to the function's exactly-matching delegate* type (CS8757 on
+        // a different shape, CS8812 on an object pointer). Pin the group to its
+        // own type first; delegate*→delegate* and delegate*→T* are both legal
+        // explicit pointer conversions from there.
+        var des = c.Operand;
+        while (des is Paren dp) { des = dp.Inner; }
+        if (des is Unary { Op: UnOp.AddrOf, Operand: VarRef { Sym.Kind: SymKind.Func } } da) { des = da.Operand; }
+        if (des is VarRef { Sym.Kind: SymKind.Func } fv && Cs(c.Target) != Cs(fv.Type))
+        {
+            return ($"({Cs(c.Target)})({Cs(fv.Type)})&{fv.Sym.TargetName}", PUnary);
+        }
         var text = $"({Cs(c.Target)}){Sub(c.Operand, PUnary)}";
         if (c.Target.Unqualified is CType.Prim { Integer: true } pt
             && IsConstExpr(c.Operand)

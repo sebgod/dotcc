@@ -52,7 +52,7 @@ public sealed class TypedefAliasResolveTests
             typedef int (*reader)(size_t *sz, void *ud);
             int main(void) { reader r = 0; return r == 0; }
             """);
-        emitted.ShouldContain("delegate*<ulong*, void*, int> r = 0");
+        emitted.ShouldContain("delegate*<ulong*, void*, int> r = null");
         // the alias body must not carry the bare (unexpanded) size_t name
         emitted.ShouldNotContain("delegate*<size_t");
     }
@@ -67,7 +67,7 @@ public sealed class TypedefAliasResolveTests
             typedef void (*noargs)(void);
             int main(void) { noargs f = 0; return f == 0; }
             """);
-        emitted.ShouldContain("delegate*<void> f = 0");
+        emitted.ShouldContain("delegate*<void> f = null");
         emitted.ShouldNotContain("delegate*<void, void>");
     }
 }
