@@ -21,8 +21,9 @@ namespace DotCC.Ir;
 /// shadow stack for address-taken locals and arrays, and stdout: <c>putchar</c>/
 /// <c>puts</c> plus a string-literal <c>printf</c> expanded inline at the call site
 /// (integer/char/string conversions), all over the WASI <c>fd_write</c> import.
-/// Wider printf (width/precision/floats) and malloc follow. Anything still outside
-/// the slice (floats, structs, goto/switch, varargs, other library calls) raises
+/// Wider printf and a <c>malloc</c>/<c>free</c>/<c>calloc</c>/<c>realloc</c> bump
+/// allocator over linear memory have since landed; floats still follow. Anything
+/// still outside the slice (floats, structs, goto/switch, varargs, other library calls) raises
 /// <see cref="IrUnsupportedException"/>.</para>
 /// </summary>
 internal sealed class WatBackend
@@ -30,6 +31,10 @@ internal sealed class WatBackend
     // Top of the shadow stack — it grows DOWN from the end of the first page; string
     // data grows UP from a 1 KiB null guard. Small programs never collide.
     private const int StackTop = 65536;
+    // The heap lives ABOVE the shadow stack: $__hp bumps UP from here (the end of the
+    // initial page) and malloc grows linear memory on demand, while the stack grows
+    // DOWN from the same point inside page 1 — so the two never collide.
+    private const int HeapBase = StackTop;
     private const int DataBase = 1024;
     // A 16-byte I/O scratch block at the top of the null-guard page (just below the
     // string data at DataBase): a single WASI iovec (ptr | len), the fd_write
@@ -84,6 +89,11 @@ internal sealed class WatBackend
     // formatting helpers below.
     private static readonly HashSet<string> RuntimeFns =
         new(StringComparer.Ordinal) { "putchar", "puts" };
+    // The heap allocators, recognized in EmitCall like the printf family — library
+    // names backed by hand-written wat. Unlike the I/O runtime they pull no WASI
+    // import: malloc bumps the $__hp global and grows linear memory itself.
+    private static readonly HashSet<string> HeapFns =
+        new(StringComparer.Ordinal) { "malloc", "calloc", "realloc" };
     // The runtime helpers/functions the module needs, including those reached only
     // through printf expansion. Closed over dependencies by NeedRuntime.
     private readonly HashSet<string> _runtimeUsed = new(StringComparer.Ordinal);
@@ -108,6 +118,11 @@ internal sealed class WatBackend
             case "__pf_emit": NeedRuntime("__putb"); NeedRuntime("__fill"); NeedRuntime("__write"); break;
             case "__pf_int_s": NeedRuntime("__fmt_radix"); NeedRuntime("__pf_emit"); break;
             case "__pf_int_u": NeedRuntime("__fmt_radix"); NeedRuntime("__pf_emit"); break;
+            // The heap allocators: calloc/realloc are written in terms of malloc.
+            // malloc itself has no helper deps (it uses the $__hp global + memory.grow);
+            // free isn't a runtime function at all (it lowers to an inline drop).
+            case "calloc": NeedRuntime("malloc"); break;
+            case "realloc": NeedRuntime("malloc"); break;
         }
     }
 
@@ -130,7 +145,10 @@ internal sealed class WatBackend
             if (fn.Sym.Name == "main") { hasMain = true; }
         }
         var funcs = _sb.ToString();
-        var usesIo = _runtimeUsed.Count > 0;
+        // I/O pulls the WASI import + exported memory + sink globals; the heap only
+        // needs its bump-pointer global. A program can use either, both, or neither.
+        var usesHeap = _runtimeUsed.Contains("malloc");
+        var usesIo = _runtimeUsed.Any(n => !HeapFns.Contains(n));
 
         var m = new StringBuilder();
         m.Append("(module\n");
@@ -144,6 +162,12 @@ internal sealed class WatBackend
         // non-I/O modules keep the byte-identical plain `(memory 1)`.
         m.Append(usesIo ? "  (memory (export \"memory\") 1)\n" : "  (memory 1)\n");
         m.Append($"  (global $__sp (mut i32) (i32.const {StackTop}))\n");
+        if (usesHeap)
+        {
+            // The bump-allocation pointer: next free heap byte, growing UP from the end
+            // of the initial page (malloc grows linear memory past it on demand).
+            m.Append($"  (global $__hp (mut i32) (i32.const {HeapBase}))\n");
+        }
         if (usesIo)
         {
             // The output sink for the byte primitives: $__ob = -1 means fd 1 (printf);
@@ -826,6 +850,13 @@ internal sealed class WatBackend
         if (c.Callee == "sprintf" && !_defined.Contains("sprintf")) { EmitSprintf(c, bounded: false); return; }
         if (c.Callee == "snprintf" && !_defined.Contains("snprintf")) { EmitSprintf(c, bounded: true); return; }
 
+        // The heap allocators lower to calls into the hand-written bump allocator;
+        // free is a no-op drop. A user-defined one wins and routes through below.
+        if (c.Callee == "malloc" && !_defined.Contains("malloc")) { EmitHeapAlloc(c, "malloc", 1); return; }
+        if (c.Callee == "calloc" && !_defined.Contains("calloc")) { EmitHeapAlloc(c, "calloc", 2); return; }
+        if (c.Callee == "realloc" && !_defined.Contains("realloc")) { EmitHeapAlloc(c, "realloc", 2); return; }
+        if (c.Callee == "free" && !_defined.Contains("free")) { EmitFree(c); return; }
+
         if (!_defined.Contains(c.Callee))
         {
             // A handful of libc names are backed by the hand-written wat I/O runtime
@@ -845,6 +876,41 @@ internal sealed class WatBackend
             }
         }
         Line($"call ${c.Callee}");
+    }
+
+    /// <summary>Lower a heap allocator call (<c>malloc</c>/<c>calloc</c>/<c>realloc</c>)
+    /// to the hand-written bump allocator. Each argument is pushed as an i32: sizes
+    /// arrive as the <c>int</c> size_t stand-in, but a <c>sizeof</c> product is i64, so
+    /// wrap. The runtime function leaves the (i32) result pointer.</summary>
+    private void EmitHeapAlloc(Call c, string name, int argc)
+    {
+        if (c.Args.Count != argc)
+        {
+            throw new IrUnsupportedException($"the wat target expects {name} with {argc} argument(s)");
+        }
+        NeedRuntime(name);
+        foreach (var arg in c.Args)
+        {
+            EmitExpr(arg);
+            if (ValType(arg.Type) == "i64") { Line("i32.wrap_i64"); }
+        }
+        Line($"call ${name}");
+    }
+
+    /// <summary><c>free(p)</c> — a no-op for the bump allocator. Evaluate the argument
+    /// (for any side effects) and drop it; emit no call, so no <c>$free</c> exists.</summary>
+    private void EmitFree(Call c)
+    {
+        if (c.Args.Count != 1)
+        {
+            throw new IrUnsupportedException("the wat target expects free with 1 argument");
+        }
+        EmitExpr(c.Args[0]);
+        Line("drop");
+        // free returns void; but if it was implicitly declared (no <stdlib.h>) the IR
+        // types the call as int and the statement context will drop a "result" — leave
+        // one so the stack stays balanced. With the prototype, c.Type is void: no-op.
+        if (c.Type.Unqualified is not CType.VoidType) { Line($"{ValType(c.Type)}.const 0"); }
     }
 
     /// <summary>Expand a <c>printf</c> with a string-literal format at compile time —
@@ -1596,6 +1662,166 @@ internal sealed class WatBackend
       local.get $ch
       call $__putb
     end
+  )
+
+""");
+        }
+
+        // ---- heap: a bump allocator over the region above the shadow stack --------
+        // $__hp bumps UP from HeapBase (end of page 1); the stack grows DOWN inside
+        // page 1, so they never meet. Each block carries an i32 size header (payload at
+        // block+8, kept 8-aligned) so realloc can copy the old bytes; free never
+        // reclaims. malloc grows linear memory on demand and returns NULL if it can't.
+        if (_runtimeUsed.Contains("malloc"))
+        {
+            sb.Append("""
+  (func $malloc (param $n i32) (result i32)
+    (local $block i32) (local $end i32)
+    global.get $__hp
+    local.set $block             ;; block = heap pointer (8-aligned)
+    local.get $block             ;; end = block + 8 (header) + align8(n)
+    i32.const 8
+    i32.add
+    local.get $n
+    i32.const 7
+    i32.add
+    i32.const -8
+    i32.and
+    i32.add
+    local.set $end
+    block $enough                ;; grow linear memory if the bump would overrun it
+      local.get $end
+      memory.size
+      i32.const 16
+      i32.shl                    ;; current size in bytes (pages * 65536)
+      i32.le_u
+      br_if $enough
+      local.get $end             ;; grow by ceil((end - bytes) / 65536) pages
+      memory.size
+      i32.const 16
+      i32.shl
+      i32.sub
+      i32.const 65535
+      i32.add
+      i32.const 16
+      i32.shr_u
+      memory.grow
+      i32.const -1
+      i32.eq
+      if
+        i32.const 0              ;; grow failed → NULL
+        return
+      end
+    end
+    local.get $end
+    global.set $__hp             ;; commit the bump
+    local.get $block             ;; store the size header
+    local.get $n
+    i32.store
+    local.get $block             ;; return the payload pointer (block + 8)
+    i32.const 8
+    i32.add
+  )
+
+""");
+        }
+
+        if (_runtimeUsed.Contains("calloc"))
+        {
+            sb.Append("""
+  (func $calloc (param $nmemb i32) (param $size i32) (result i32)
+    (local $bytes i32) (local $p i32) (local $i i32)
+    local.get $nmemb
+    local.get $size
+    i32.mul
+    local.set $bytes
+    local.get $bytes
+    call $malloc
+    local.set $p
+    local.get $p                 ;; zero the payload when non-NULL
+    if
+      block $zdone
+        loop $zlp
+          local.get $i
+          local.get $bytes
+          i32.ge_u
+          br_if $zdone
+          local.get $p
+          local.get $i
+          i32.add
+          i32.const 0
+          i32.store8
+          local.get $i
+          i32.const 1
+          i32.add
+          local.set $i
+          br $zlp
+        end
+      end
+    end
+    local.get $p
+  )
+
+""");
+        }
+
+        if (_runtimeUsed.Contains("realloc"))
+        {
+            sb.Append("""
+  (func $realloc (param $p i32) (param $n i32) (result i32)
+    (local $np i32) (local $old i32) (local $cnt i32) (local $i i32)
+    local.get $p                 ;; realloc(NULL, n) == malloc(n)
+    i32.eqz
+    if
+      local.get $n
+      call $malloc
+      return
+    end
+    local.get $p                 ;; old payload size from the header
+    i32.const 8
+    i32.sub
+    i32.load
+    local.set $old
+    local.get $n                 ;; allocate the new block
+    call $malloc
+    local.set $np
+    local.get $np
+    i32.eqz
+    if
+      i32.const 0                ;; allocation failed → NULL (old block kept)
+      return
+    end
+    local.get $old               ;; cnt = min(old, n)
+    local.get $n
+    i32.lt_u
+    if (result i32)
+      local.get $old
+    else
+      local.get $n
+    end
+    local.set $cnt
+    block $cdone                 ;; copy cnt bytes old → new
+      loop $clp
+        local.get $i
+        local.get $cnt
+        i32.ge_u
+        br_if $cdone
+        local.get $np
+        local.get $i
+        i32.add
+        local.get $p
+        local.get $i
+        i32.add
+        i32.load8_u
+        i32.store8
+        local.get $i
+        i32.const 1
+        i32.add
+        local.set $i
+        br $clp
+      end
+    end
+    local.get $np
   )
 
 """);

@@ -54,6 +54,14 @@ public sealed class WatOracleTests
     [InlineData("int main(void){ int a[3]={5,5,5}; a[1]+=10; return a[0]+a[1]+a[2]; }", 25)]
     [InlineData("int main(void){ int a[4]={4,2,3,1}; for(int i=0;i<4;i++) for(int j=0;j<3;j++) if(a[j]>a[j+1]){int t=a[j];a[j]=a[j+1];a[j+1]=t;} return a[0]*1000+a[1]*100+a[2]*10+a[3]; }", 1234)]
     [InlineData("int dbl(int n){ int *p=&n; *p=*p*2; return n; } int main(void){ return dbl(4); }", 8)]
+    // milestone 2 — the heap: a bump allocator (malloc/free/calloc/realloc) over
+    // linear memory grown on demand above the shadow stack.
+    [InlineData("#include <stdlib.h>\nint main(void){ int *p = malloc(sizeof(int)); *p = 42; return *p; }", 42)]
+    [InlineData("#include <stdlib.h>\nint main(void){ int *a = malloc(5*sizeof(int)); for(int i=0;i<5;i++) a[i]=i*i; int s=0; for(int i=0;i<5;i++) s+=a[i]; return s; }", 30)]
+    [InlineData("#include <stdlib.h>\nint main(void){ int *x=malloc(sizeof(int)); int *y=malloc(sizeof(int)); *x=10; *y=20; return *x*100+*y; }", 1020)]
+    [InlineData("#include <stdlib.h>\nint main(void){ int *x=malloc(sizeof(int)); *x=5; free(x); int *y=malloc(sizeof(int)); *y=7; return *y; }", 7)]
+    [InlineData("#include <stdlib.h>\nint main(void){ int *a=calloc(3,sizeof(int)); a[0]+=1; a[1]+=2; a[2]+=3; return a[0]+a[1]+a[2]; }", 6)]
+    [InlineData("#include <stdlib.h>\nint main(void){ int *a=malloc(2*sizeof(int)); a[0]=11; a[1]=22; a=realloc(a,4*sizeof(int)); a[2]=33; a[3]=44; return a[0]+a[1]+a[2]+a[3]; }", 110)]
     public void Wat_program_returns_expected_value(string source, int expected)
     {
         if (!Requested)
@@ -100,6 +108,9 @@ public sealed class WatOracleTests
     [InlineData("int main(void){ char b[32]; sprintf(b, \"[%5d]\", 3); printf(\"%s\\n\", b); return 0; }", "[    3]\n")]
     [InlineData("int main(void){ char b[8]; int n = snprintf(b, 5, \"%d\", 123456); printf(\"%s,%d\\n\", b, n); return 0; }", "1234,6\n")]
     [InlineData("int main(void){ char z[1]; int q = snprintf(z, 0, \"abc\"); printf(\"q=%d\\n\", q); return 0; }", "q=3\n")]
+    // heap + I/O together: both runtimes coexist (bump pointer global, exported memory,
+    // the WASI import) in one module.
+    [InlineData("#include <stdlib.h>\nint main(void){ int *a=malloc(3*sizeof(int)); a[0]=1; a[1]=2; a[2]=3; printf(\"%d%d%d\\n\", a[0], a[1], a[2]); return 0; }", "123\n")]
     public void Wat_program_writes_expected_stdout(string source, string expected)
     {
         if (!Requested)

@@ -266,4 +266,65 @@ public sealed class WatBackendTests
         wat.ShouldContain("(local $x i32)");
         wat.ShouldNotContain("$__fp");
     }
+
+    [Fact]
+    public void malloc_emits_a_bump_allocator_with_a_heap_pointer_global()
+    {
+        // A non-struct malloc reaches the backend (the IR's malloc->stack peephole
+        // only fires for struct pointees) and lowers to the bump allocator: a
+        // heap-pointer global and a $malloc that grows linear memory. No I/O is used,
+        // so no fd_write import and the memory stays unexported.
+        var wat = Wat("#include <stdlib.h>\nint main(void){ int *p = malloc(sizeof(int)); *p = 42; return *p; }");
+        wat.ShouldContain("(global $__hp");
+        wat.ShouldContain("(func $malloc (param $n i32) (result i32)");
+        wat.ShouldContain("memory.grow");
+        wat.ShouldContain("call $malloc");
+        wat.ShouldNotContain("fd_write");
+        wat.ShouldNotContain("export \"memory\"");
+    }
+
+    [Fact]
+    public void free_lowers_to_a_drop_with_no_runtime_function()
+    {
+        // free is a no-op for the bump allocator: evaluate the argument and drop it,
+        // emitting no $free function (and no call to one).
+        var wat = Wat("#include <stdlib.h>\nint main(void){ int *p = malloc(sizeof(int)); *p = 1; free(p); return 0; }");
+        wat.ShouldContain("call $malloc");
+        wat.ShouldNotContain("(func $free");
+        wat.ShouldNotContain("call $free");
+    }
+
+    [Fact]
+    public void calloc_and_realloc_are_built_on_malloc()
+    {
+        var calloc = Wat("#include <stdlib.h>\nint main(void){ int *a = calloc(4, sizeof(int)); return a[0]; }");
+        calloc.ShouldContain("(func $calloc");
+        calloc.ShouldContain("(func $malloc");   // calloc bottoms out at malloc
+        calloc.ShouldContain("call $malloc");
+
+        var realloc = Wat("#include <stdlib.h>\nint main(void){ int *a = malloc(8); a = realloc(a, 16); return a[0]; }");
+        realloc.ShouldContain("(func $realloc");
+        realloc.ShouldContain("(func $malloc");
+    }
+
+    [Fact]
+    public void heap_runtime_is_emitted_only_on_demand()
+    {
+        // No heap use → no bump-pointer global, no allocator, no memory growth.
+        var wat = Wat("int main(void){ return 7; }");
+        wat.ShouldNotContain("$__hp");
+        wat.ShouldNotContain("$malloc");
+        wat.ShouldNotContain("memory.grow");
+    }
+
+    [Fact]
+    public void a_user_defined_malloc_wins_over_the_bump_allocator()
+    {
+        // The program supplies its own malloc → call it directly; no bump allocator
+        // (no $__hp global, no memory growth).
+        var wat = Wat("void *malloc(int n){ return 0; } int main(void){ void *p = malloc(4); return p == 0; }");
+        wat.ShouldContain("call $malloc");
+        wat.ShouldNotContain("(global $__hp");
+        wat.ShouldNotContain("memory.grow");
+    }
 }
