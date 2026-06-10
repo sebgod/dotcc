@@ -1727,6 +1727,11 @@ internal sealed partial class IrBuilder
         CType t = op switch
         {
             UnOp.LogNot => CType.Int,
+            // Unary + - ~ apply C's integer promotions (§6.3.1.1): `-sbyteField`
+            // is an INT — without this the store coercion can't see the C#-side
+            // promotion and a narrowing store (chibi's `sign = -sign`) misses
+            // its cast. inc/dec below keep the lvalue's own type.
+            UnOp.Plus or UnOp.Neg or UnOp.BitNot => CType.IntegerPromote(oe.Type),
             UnOp.AddrOf => new CType.Pointer(oe.Type),
             // *p → pointee; *arr (incl. a string literal, typed char[]) → its element
             // (the array decays to a pointer first). *ptr-to-array stays the array,
@@ -2114,7 +2119,9 @@ internal sealed partial class IrBuilder
     {
         var raw = Tok(f.Arg0);
         if (raw.Length >= 2 && raw[0] == '0' && raw[1] is 'x' or 'X') { Gate(1999, "hex float literal", f.Arg0); }
-        return new LitFloat(LowerFloat(raw)) { Type = CType.Double };
+        // §6.4.4.2: f/F suffix → float; otherwise double (long double IS double here).
+        var type = raw.Length > 0 && raw[^1] is 'f' or 'F' ? CType.Float : CType.Double;
+        return new LitFloat(LowerFloat(raw)) { Type = type };
     }
 
     private static string LowerFloat(string raw)

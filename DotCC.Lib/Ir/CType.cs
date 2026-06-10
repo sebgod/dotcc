@@ -225,6 +225,14 @@ public abstract record CType
     /// (pointer arithmetic, the relational <c>int</c> result) before calling
     /// this, so it falls back to <see cref="Int"/>.
     /// </summary>
+    /// <summary>C's integer promotions (§6.3.1.1): an integer type of rank below
+    /// <c>int</c> — <c>char</c>/<c>short</c>/<c>_Bool</c> and their unsigned
+    /// twins — promotes to <c>int</c> (all its values fit). Anything else passes
+    /// through. The type of unary <c>+ - ~</c>, and the first step of
+    /// <see cref="UsualArithmetic"/>.</summary>
+    public static CType IntegerPromote(CType t) =>
+        t.Unqualified is Prim { Integer: true, Bytes: < 4 } ? Int : t;
+
     public static CType UsualArithmetic(CType a, CType b)
     {
         if (a.Unqualified is not Prim pa || b.Unqualified is not Prim pb) { return Int; }

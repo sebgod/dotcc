@@ -506,9 +506,11 @@ public sealed class WatBackendTests
     public void float_literal_f_suffix_is_stripped_for_wat()
     {
         // wat carries the float width on the instruction prefix, so the C `f` suffix
-        // must be dropped (the literal is typed double / f64 regardless of the suffix).
+        // must be dropped. An f-suffixed literal is float (§6.4.4.2), so it lands as
+        // an f32.const promoted to f64 at the double-typed store — clang's lowering.
         var wat = Wat("int main(void){ double x = 1.5f; return (int)x; }");
-        wat.ShouldContain("f64.const 1.5");
+        wat.ShouldContain("f32.const 1.5");
+        wat.ShouldContain("f64.promote_f32");
         wat.ShouldNotContain("1.5f");
     }
 
