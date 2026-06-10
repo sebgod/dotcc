@@ -75,6 +75,15 @@ public sealed class WatOracleTests
     [InlineData("int main(void){ double a[3]={1.5,2.5,3.0}; double s=0; for(int i=0;i<3;i++) s+=a[i]; return (int)s; }", 7)]
     [InlineData("double sq(double x){ return x*x; } int main(void){ return (int)sq(3.0); }", 9)]
     [InlineData("int main(void){ double d=3.5; d++; return (int)d; }", 4)]
+    // decimal-float literal spellings without two digit runs around the point: a
+    // point-free exponent (`1e10`/`1e-7` — the documented lexer gap), a leading dot
+    // (`.5`), a trailing dot (`1.`), and a dot-before-exponent (`2.e3`).
+    [InlineData("int main(void){ double a=1e10; return (int)(a/1e9); }", 10)]
+    [InlineData("int main(void){ double t=1e-7; return (int)(t*1e8); }", 10)]
+    [InlineData("int main(void){ return (int)(.5 * 10); }", 5)]
+    [InlineData("int main(void){ return (int)(1. + 2.); }", 3)]
+    [InlineData("int main(void){ return (int)(2.e3); }", 2000)]
+    [InlineData("int main(void){ float f=1e3f; return (int)f; }", 1000)]
     public void Wat_program_returns_expected_value(string source, int expected)
     {
         if (!Requested)
@@ -140,6 +149,8 @@ public sealed class WatOracleTests
     [InlineData("int main(void){ double x=10.0, y=3.0; printf(\"%.4f\", x/y); return 0; }", "3.3333")]
     [InlineData("int main(void){ printf(\"%.1f\", 1.0e20); return 0; }", "100000000000000000000.0")]
     [InlineData("int main(void){ printf(\"%.10f\", 0.1); return 0; }", "0.1000000000")]
+    // point-free / dangling-dot literal spellings flow through to the formatter
+    [InlineData("int main(void){ printf(\"%.1f %.8f %.1f %.1f\", 1e10, 1e-7, .5, 1.); return 0; }", "10000000000.0 0.00000010 0.5 1.0")]
     // printf %e / %g — the scaled-Dragon formatter (significant digits + exponent),
     // also correctly rounded against glibc/Python references.
     [InlineData("int main(void){ printf(\"%e\", 1.5); return 0; }", "1.500000e+00")]

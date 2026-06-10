@@ -416,6 +416,30 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void decimal_float_literal_forms_render_as_legal_wat_consts()
+    {
+        // The C99 decimal-float spellings without two digit runs around the point:
+        // a point-free exponent (`1e10`), a leading dot (`.5`), a trailing dot (`1.`),
+        // and a dot-before-exponent (`2.e3`). wat's float-const grammar needs a digit
+        // before and after every point, so RenderFloatLit splices `0`s as needed —
+        // `.5`→`0.5`, `1.`→`1.0`, `2.e3`→`2.0e3` — while `1e10` passes straight through.
+        Wat("int main(void){ double a = 1e10;  return (int)(a/1e9); }").ShouldContain("f64.const 1e10");
+        Wat("int main(void){ double c = .5;    return (int)(c*10); }").ShouldContain("f64.const 0.5");
+        Wat("int main(void){ double d = 1.;    return (int)d; }").ShouldContain("f64.const 1.0");
+        Wat("int main(void){ double e = 2.e3;  return (int)e; }").ShouldContain("f64.const 2.0e3");
+    }
+
+    [Fact]
+    public void point_free_exponent_literal_is_a_float_not_an_int()
+    {
+        // `1e3` has no decimal point, so the mandatory-exponent FLOAT rule (not NUM)
+        // must claim it — it lowers to an f64 const, never an i32 one.
+        var wat = Wat("int main(void){ double d = 1e3; return (int)d; }");
+        wat.ShouldContain("f64.const 1e3");
+        wat.ShouldNotContain("i32.const 1000");
+    }
+
+    [Fact]
     public void float_type_uses_f32_storage_and_demotes_the_double_literal()
     {
         // `float` is f32; the double-typed literal demotes on the store into it.

@@ -176,15 +176,25 @@ internal sealed class WatTarget : ITarget
 
     /// <summary>Render a float constant for <c>f32.const</c>/<c>f64.const</c>. The
     /// neutral <see cref="LitFloat.Text"/> is a C/C# decimal spelling, which differs
-    /// from wat's literal syntax in two ways the const grammar rejects: a trailing
+    /// from wat's literal syntax in three ways the const grammar rejects: a trailing
     /// <c>f</c>/<c>F</c> suffix (wat carries the width on the instruction prefix, not
-    /// the literal) and a leading <c>.</c> (wat requires a digit before the point).
-    /// Exponent forms (<c>1E+21</c>) and bare integers (<c>1024</c>) are already legal.</summary>
+    /// the literal), a leading <c>.</c> (<c>.5</c> — wat requires a digit before the
+    /// point), and a trailing <c>.</c> (<c>1.</c> — wat requires a digit, or nothing,
+    /// after the point but not a dangling one). Exponent forms (<c>1E+21</c>, and now
+    /// the point-free <c>1e10</c>) and bare integers (<c>1024</c>) are already legal.</summary>
     public string RenderFloatLit(LitFloat lit)
     {
         var t = lit.Text;
         if (t.Length > 0 && t[^1] is 'f' or 'F') { t = t[..^1]; }
-        if (t.Length > 0 && t[0] == '.') { t = "0" + t; }
+        if (t.Length > 0 && t[0] == '.') { t = "0" + t; }   // .5 -> 0.5
+        // A `.` with no fractional digit after it — dangling at the end (`1.`) or
+        // sitting right before the exponent (`1.e5`) — is rejected by the wat
+        // float-const grammar; splice in a `0` so the point always has a digit.
+        var dot = t.IndexOf('.');
+        if (dot >= 0 && (dot + 1 == t.Length || t[dot + 1] is 'e' or 'E'))
+        {
+            t = t[..(dot + 1)] + "0" + t[(dot + 1)..];
+        }
         return t;
     }
 }
