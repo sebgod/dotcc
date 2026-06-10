@@ -44,6 +44,12 @@ internal sealed class CSharpBackend
     public static CSharpBackendResult Run(IrBuilder unit, DotCC.ConversionGate? convGate = null)
     {
         var cg = new CSharpBackend { _convGate = convGate };
+        // C tag namespace vs ordinary namespace: collect globals whose name an
+        // emitted struct/enum type will shadow, so reads qualify (GlobalName).
+        var typeNames = new HashSet<string>(unit.Types.Select(t => t.Name), StringComparer.Ordinal);
+        typeNames.UnionWith(unit.Enums.Select(e => e.Name));
+        cg._typeShadowedGlobals = new HashSet<string>(
+            unit.Globals.Select(g => g.Sym.TargetName).Where(typeNames.Contains), StringComparer.Ordinal);
         var fns = new StringBuilder();
         var exports = new List<DotCC.EmitHelpers.Export>();
         var mainArity = -1;
@@ -771,12 +777,26 @@ internal sealed class CSharpBackend
     private string BareLValue(CExpr e) => e switch
     {
         Paren p => BareLValue(p.Inner),
-        VarRef v => v.Sym.TargetName,
+        VarRef v => GlobalName(v.Sym),
         Member m => $"{Sub(m.Base, PPostfix)}{(m.Arrow ? "->" : ".")}{DotCC.EmitHelpers.Id(m.Field)}",
-        Index ix => $"{Sub(ix.Base, PPostfix)}[{Expr(ix.Idx)}]",
+        Index ix => $"{Sub(ix.Base, PPostfix)}[{Expr(DecayEnum(ix.Idx))}]",
         Unary { Op: UnOp.Deref } u => $"*{Sub(u.Operand, PUnary)}",
         _ => Expr(e),
     };
+
+    // Global field names shadowed by an emitted TYPE name — C keeps tags and
+    // ordinary identifiers in separate namespaces (`enum sexp_number_types` +
+    // `static int sexp_number_types[]` coexist; chibi bignum.c), but in C# the
+    // unqualified name resolves to the type (CS0119). Qualifying the field
+    // restores the ordinary-namespace reading.
+    private HashSet<string> _typeShadowedGlobals = new(StringComparer.Ordinal);
+
+    /// <summary>The spelling of a variable reference: the bare TargetName, or
+    /// <c>DotCcGlobals.</c>-qualified when an emitted type name shadows it.</summary>
+    private string GlobalName(Symbol s) =>
+        s.IsGlobal && _typeShadowedGlobals.Contains(s.TargetName)
+            ? "DotCcGlobals." + s.TargetName
+            : s.TargetName;
 
     /// <summary>Render <paramref name="value"/> for storage into a
     /// <paramref name="target"/>-typed sink, inserting any cast C# needs.</summary>
@@ -1098,7 +1118,7 @@ internal sealed class CSharpBackend
                      : ($"({Cs(v.Type)}){v.Sym.TargetName}", PUnary);
             case VarRef v: return v.Sym.Kind == SymKind.Func
                 ? ($"&{v.Sym.TargetName}", PUnary)
-                : QualifiedRead(v, v.Sym.TargetName, PPrimary);
+                : QualifiedRead(v, GlobalName(v.Sym), PPrimary);
             case IndirectCall ic:
                 return ($"{Sub(ic.Callee, PPostfix)}({string.Join(", ", ic.Args.Select(a => Sub(a, PAssign)))})", PPostfix);
             case Paren p: return Render(p.Inner); // explicit C parens are redundant; precedence re-adds as needed
