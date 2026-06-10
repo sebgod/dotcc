@@ -1,0 +1,68 @@
+name: lua
+
+# End-to-end integration: compile real-world C through dotcc and run it.
+#
+# This is the deepest correctness signal dotcc has — the full Lua 5.5 core +
+# stdlib + standalone interpreter transpiled C → .NET 10 / C#, Roslyn-compiled,
+# then exercised by Lua's own upstream conformance runner (testes/all.lua, which
+# dumps/undumps every chunk to bytecode and back). It is slower than the unit /
+# fixture gate, so it lives in its own workflow — but it still runs on every
+# push/PR (correctness over speed), plus nightly on main and on demand.
+#
+# Same org conventions as ci.yml: ubuntu-latest, setup-dotnet 10.0.x, NuGet
+# build path (sibling LALR.CC absent in CI). Success = the suite printing
+# "final OK !!!"; we grep for it explicitly (belt) on top of the interpreter's
+# own non-zero exit on failure (braces, via pipefail).
+
+on:
+  push:
+    branches: [main, 'feat/**']
+  pull_request:
+    branches: [main]
+  schedule:
+    # 03:17 UTC nightly (odd minute to dodge the top-of-hour scheduler crush).
+    # schedule fires on the default branch (main) only.
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lua-suite:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore dotcc.sln
+
+      - name: Build dotcc (Release, NuGet path)
+        run: dotnet build DotCC/DotCC.csproj -c Release --no-restore --nologo -p:UseLocalLalrCc=false
+
+      - name: Transpile + build the Lua interpreter, run the conformance suite
+        run: |
+          set -euo pipefail
+          cd examples/lua
+          DLL="$PWD/../../DotCC/bin/Release/net10.0/dotcc.dll"
+          SRC=lua-src
+          CORE="lapi lcode lctype ldebug ldo ldump lfunc lgc llex lmem lobject lopcodes lparser lstate lstring ltable ltm lundump lvm lzio"
+          LIB="lauxlib lbaselib lcorolib ldblib liolib lmathlib loadlib loslib lstrlib ltablib lutf8lib linit"
+          S=""
+          for t in $CORE $LIB; do S="$S $SRC/$t.c"; done
+          # dotcc emits Program.cs + csproj and runs `dotnet build` on it (--emit=build).
+          dotnet "$DLL" --emit=build -I "$SRC" $S "$SRC/lua.c" -o build_lua
+          LUA="$PWD/build_lua/bin/Release/net10.0/build_lua.dll"
+          # Lua's upstream runner. _U=true enables the user-test harness. The suite
+          # prints "final OK !!!" on success and the standalone driver exits non-zero
+          # on any failure; pipefail + grep make both into a hard gate.
+          cd lua-src/testes
+          dotnet "$LUA" -e '_U=true' all.lua | tee /tmp/lua-out.txt
+          grep -q 'final OK !!!' /tmp/lua-out.txt

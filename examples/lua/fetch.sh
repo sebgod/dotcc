@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Fetch the pinned Lua sources into a gitignored lua-src/ (we don't vendor —
-# Lua is MIT but large, and this is an example, not a dependency). Re-runnable.
+# (Re)pin the vendored Lua sources in lua-src/. The tree is now committed in-repo
+# (so builds and CI need no network); we just don't carry upstream's git history.
+# This clones the pinned tag and strips the nested .git, leaving a flat snapshot
+# to review and commit. Run it only to bump the pinned version.
 set -euo pipefail
 
 # Pinned tag. v5.5.0 is the current 5.5 release (the manual calls the series
@@ -9,12 +11,8 @@ LUA_TAG="${LUA_TAG:-v5.5.0}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST="$HERE/lua-src"
 
-if [ -d "$DEST/.git" ]; then
-    echo "lua-src already present ($(git -C "$DEST" describe --tags 2>/dev/null || echo unknown)); skipping clone."
-    exit 0
-fi
-
 rm -rf "$DEST"
 echo "Cloning lua/lua @ $LUA_TAG into $DEST ..."
 git clone --depth 1 --branch "$LUA_TAG" https://github.com/lua/lua.git "$DEST"
-echo "Done. $(ls "$DEST"/*.c | wc -l) .c files, $(ls "$DEST"/*.h | wc -l) headers."
+rm -rf "$DEST/.git"   # vendor a flat snapshot, not a nested repo
+echo "Done. $(ls "$DEST"/*.c | wc -l) .c files, $(ls "$DEST"/*.h | wc -l) headers. Review + commit."

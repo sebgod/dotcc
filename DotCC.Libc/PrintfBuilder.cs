@@ -354,6 +354,15 @@ public unsafe ref struct PrintfBuilder
                 s = s[..spec.Precision];
             }
         }
+        else if (spec.Conv == (byte)'p')
+        {
+            // glibc-shaped %p: a null pointer is "(nil)"; otherwise "0x" + the address
+            // in lowercase hex with no leading zeros. Matches clang/gcc (and the wat
+            // backend), so the same C program prints the same shape on both targets.
+            s = v == null
+                ? "(nil)"
+                : "0x" + ((ulong)v).ToString("x", CultureInfo.InvariantCulture);
+        }
         else if (v == null)
         {
             s = "(null)";
@@ -372,10 +381,10 @@ public unsafe ref struct PrintfBuilder
     /// <summary>
     /// A <c>void*</c> (or any typed <c>T*</c>, which implicitly converts to
     /// <c>void*</c>) argument — typically a <c>%p</c> spec. Reuses the
-    /// <see cref="Arg(byte*)"/> path (address-print for non-<c>%s</c> specs).
-    /// A dedicated overload is required because <c>void*</c> does NOT implicitly
-    /// convert to <c>byte*</c> in C#, so without it a <c>%p</c> pointer arg
-    /// fails to bind.
+    /// <see cref="Arg(byte*)"/> path (glibc-shaped <c>0x…</c>/<c>(nil)</c> for
+    /// <c>%p</c>, address-print for other non-<c>%s</c> specs). A dedicated overload
+    /// is required because <c>void*</c> does NOT implicitly convert to <c>byte*</c>
+    /// in C#, so without it a <c>%p</c> pointer arg fails to bind.
     /// </summary>
     public PrintfBuilder Arg(void* v) => Arg((byte*)v);
 

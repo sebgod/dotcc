@@ -50,13 +50,12 @@ public sealed class Symbol
     /// <c>DotCcGlobals</c> field rather than a block local.</summary>
     public bool IsGlobal { get; init; }
 
-    /// <summary>The C-level fact that this (global) symbol's address is taken
-    /// somewhere. A pure semantic flag — the backend decides what it implies. The
-    /// C# backend uses it (together with <see cref="CType.IsPointerLowered"/>) to
-    /// store a pointer/fn-ptr global as <c>nint</c> instead of a pointer field: C#
-    /// forbids a pointer type as the <c>T</c> of <c>Unsafe.AsPointer&lt;T&gt;</c> /
-    /// <c>Volatile.*&lt;T&gt;</c> (CS0306) and can't take a bare <c>&amp;</c> of a
-    /// moveable static field (CS0212); a <c>nint</c> field satisfies both.</summary>
+    /// <summary>The target-neutral C-level fact that this object's address is taken
+    /// (<c>&amp;x</c>) somewhere — set for any var or param at the single site every
+    /// <c>&amp;</c> node is built (<see cref="IrBuilder"/>). A pure semantic flag; each
+    /// backend decides what it implies. The C# backend stores an address-taken pointer
+    /// <em>global</em> as <c>nint</c> (see <c>CodeGen.NintStorage</c>); the wat backend
+    /// gives any address-taken local/param a linear-memory frame slot.</summary>
     public bool AddressTaken { get; set; }
 }
 

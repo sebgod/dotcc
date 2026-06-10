@@ -1,0 +1,14 @@
+# Line endings are governed HERE, not by core.autocrlf. .gitattributes overrides
+# core.autocrlf, so every contributor gets identical bytes regardless of platform
+# or local git config — set autocrlf to whatever you like, it no longer matters.
+#
+# Policy: git auto-detects text vs binary; every text file is stored AND checked
+# out as LF — including on Windows working trees. dotcc builds and CI-runs on
+# Linux, and a CRLF smudged into a bash script (`#!/usr/bin/env bash\r`) breaks
+# it under WSL/CI. LF everywhere closes that whole class of bug.
+* text=auto eol=lf
+
+# Scripts execute on Linux / WSL / CI runners — pin LF explicitly (intent + belt).
+*.sh  text eol=lf
+*.py  text eol=lf
+*.yml text eol=lf

@@ -178,25 +178,23 @@ public static class Compiler
     };
 
     /// <summary>
-    /// Compile <paramref name="inputPaths"/> to a single C# source string.
+    /// The target-neutral front half of the pipeline: lex, preprocess, parse and
+    /// bind every translation unit to the typed IR, flushing the source-level
+    /// diagnostics (IR errors/warnings and <c>-pedantic</c> dialect gating) along
+    /// the way. The result is the backend-agnostic <see cref="Ir.IrBuilder"/> a
+    /// backend then projects onto its own surface — <see cref="EmitCSharp"/> (C#)
+    /// today, a WebAssembly-text emitter next. Splitting the pipeline here is what
+    /// makes "one front-end, many targets" real rather than aspirational: every
+    /// backend consumes the same IR, none re-runs the parse.
     /// </summary>
-    /// <param name="libraryMode">When true (frontend's <c>-shared</c> flag),
-    /// emit a NativeAOT-publishable shared-library shell: user functions
-    /// live in <c>internal static class DotCcLib</c>, and non-static C
-    /// functions get a matching <c>[UnmanagedCallersOnly]</c> wrapper in
-    /// <c>public static class DotCcExports</c>. Otherwise emit the
-    /// standalone-executable shell with a <c>return main(…);</c> entry.</param>
-    public static string EmitCSharp(
+    private static Ir.IrBuilder BuildIr(
         IReadOnlyList<string> inputPaths,
-        IReadOnlyList<string>? includeDirs = null,
-        IReadOnlyList<string>? defines = null,
-        bool fileBased = true,
-        bool libraryMode = false,
-        CDialect? dialect = null,
-        bool pedantic = false,
-        bool pedanticErrors = false,
-        bool asObject = false,
-        bool warnConversion = false)
+        IReadOnlyList<string>? includeDirs,
+        IReadOnlyList<string>? defines,
+        CDialect? dialect,
+        bool pedantic,
+        bool pedanticErrors,
+        Ir.INameLegalizer? names = null)
     {
         var includeMap = BuildIncludeMap(inputPaths, includeDirs);
         var lexerTable = C.BuildLexer();
@@ -293,7 +291,7 @@ public static class Compiler
         // parse (preprocessor-era) and IR build (emit-pass), then flush as warnings
         // (-pedantic) or one collected error (-pedantic-errors). Off by default.
         var gate = (pedantic || pedanticErrors) ? new DialectGate(activeDialect) : null;
-        var irBuilder = new Ir.IrBuilder(gate);
+        var irBuilder = new Ir.IrBuilder(gate, names);
         var irParser = C.BuildParser(Ir.ParseTreeIdentityVisitor.Instance);
         foreach (var unitPath in inputPaths)
         {
@@ -319,6 +317,31 @@ public static class Compiler
             }
             foreach (var d in gate.Diagnostics) { Console.Error.WriteLine("dotcc: warning: " + d); }
         }
+        return irBuilder;
+    }
+
+    /// <summary>
+    /// Compile <paramref name="inputPaths"/> to a single C# source string.
+    /// </summary>
+    /// <param name="libraryMode">When true (frontend's <c>-shared</c> flag),
+    /// emit a NativeAOT-publishable shared-library shell: user functions
+    /// live in <c>internal static class DotCcLib</c>, and non-static C
+    /// functions get a matching <c>[UnmanagedCallersOnly]</c> wrapper in
+    /// <c>public static class DotCcExports</c>. Otherwise emit the
+    /// standalone-executable shell with a <c>return main(…);</c> entry.</param>
+    public static string EmitCSharp(
+        IReadOnlyList<string> inputPaths,
+        IReadOnlyList<string>? includeDirs = null,
+        IReadOnlyList<string>? defines = null,
+        bool fileBased = true,
+        bool libraryMode = false,
+        CDialect? dialect = null,
+        bool pedantic = false,
+        bool pedanticErrors = false,
+        bool asObject = false,
+        bool warnConversion = false)
+    {
+        var irBuilder = BuildIr(inputPaths, includeDirs, defines, dialect, pedantic, pedanticErrors);
         // -Wconversion: collect narrowing-conversion warnings during codegen, then
         // flush to stderr. Off by default (no gate → no checks).
         var convGate = warnConversion ? new ConversionGate() : null;
@@ -336,6 +359,27 @@ public static class Compiler
         return asObject
             ? SerializeFragment(cg.Functions, new Dictionary<string, string>(), cg.Aliases, cg.Globals, cg.MainArity)
             : BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, fileBased, libraryMode, cg.Exports);
+    }
+
+    /// <summary>
+    /// Compile <paramref name="inputPaths"/> to a WebAssembly-text (<c>.wat</c>)
+    /// module — the second output target. Shares the whole front-end with
+    /// <see cref="EmitCSharp"/> through <see cref="BuildIr"/>; only the backend
+    /// projection differs (<see cref="Ir.WatBackend"/> instead of
+    /// <see cref="Ir.CodeGen"/> + <see cref="BuildShell"/>). Milestone 1 emits the
+    /// freestanding integer slice; constructs outside it raise
+    /// <see cref="CompileException"/> (an <see cref="Ir.IrUnsupportedException"/>).
+    /// </summary>
+    public static string EmitWat(
+        IReadOnlyList<string> inputPaths,
+        IReadOnlyList<string>? includeDirs = null,
+        IReadOnlyList<string>? defines = null,
+        CDialect? dialect = null,
+        bool pedantic = false,
+        bool pedanticErrors = false)
+    {
+        var irBuilder = BuildIr(inputPaths, includeDirs, defines, dialect, pedantic, pedanticErrors, new Ir.WatNameLegalizer());
+        return Ir.WatBackend.Run(irBuilder);
     }
 
     // ---- separate compilation (`--emit=obj` + link) -------------------------

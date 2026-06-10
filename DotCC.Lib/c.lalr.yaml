@@ -1528,9 +1528,12 @@ lexer:
     - { symbol: '.',   match: '\.' }
 
     # Literals. FLOAT BEFORE NUM so longest-match picks float for `123.5`
-    # (NUM would match just `123` otherwise). FLOAT requires a mandatory
-    # decimal point to disambiguate cleanly from NUM — `123` is INT, `123.0`
-    # is FLOAT. Suffixed form `123.5f` / `123.5F` / `123.5l` / `123.5L` first
+    # (NUM would match just `123` otherwise). A decimal float is disambiguated
+    # from NUM by EITHER a decimal point (`123.0`, `1.`, `.5`) OR — for a bare
+    # digit sequence with no point — a MANDATORY exponent (`1e10`, `1e-7`); so
+    # `123` is INT, `123.0`/`123e4` are FLOAT. All C99 6.4.4.2 decimal-float
+    # spellings are accepted: `D.D`, `D.`, `.D`, and `De±E`, each with an
+    # optional `f`/`F`/`l`/`L` suffix. The `D.D` suffixed form is listed first
     # (longest match); un-suffixed second. `f`/`F` passes through to C# verbatim
     # (C# accepts the float suffix). `l`/`L` is C's long-double suffix — C# has
     # no float `L` suffix, so Visit(C.Flt) strips it and emits a bare `double`
@@ -1565,6 +1568,15 @@ lexer:
     - { symbol: FLOAT,  match: '0[xX][0-9a-fA-F]+[pP][+\-]?[0-9]+[fFlL]?' }
     - { symbol: FLOAT,  match: '[0-9]+\.[0-9]+([eE][+\-]?[0-9]+)?[fFlL]' }
     - { symbol: FLOAT,  match: '[0-9]+\.[0-9]+([eE][+\-]?[0-9]+)?' }
+    # `D.` (trailing dot) and `.D` (leading dot) fractional constants, plus the
+    # exponent-only form `De±E` — a digit sequence with NO point but a MANDATORY
+    # exponent (the one decimal float spelling without a `.`). The mandatory
+    # exponent on the last rule is exactly what keeps `123` an INT while `123e4`
+    # is a FLOAT. Each takes the optional f/F/l/L suffix. Listed after `D.D` so
+    # longest-match still prefers the fuller `1.5`/`1.5e3` spellings.
+    - { symbol: FLOAT,  match: '[0-9]+\.([eE][+\-]?[0-9]+)?[fFlL]?' }
+    - { symbol: FLOAT,  match: '\.[0-9]+([eE][+\-]?[0-9]+)?[fFlL]?' }
+    - { symbol: FLOAT,  match: '[0-9]+[eE][+\-]?[0-9]+[fFlL]?' }
     # Integer literals — with optional C int-suffix (u/U/l/L combinations).
     # Suffixed variants listed FIRST so longest-match picks them when the
     # suffix is present. The Num visitor normalizes C suffixes (l/ll/ul/ull/
