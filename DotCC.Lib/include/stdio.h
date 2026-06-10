@@ -21,6 +21,13 @@
 #define NULL null
 #endif
 
+/* off_t — POSIX (<sys/types.h>), but glibc's <stdio.h> exposes it and
+   portable code (chibi-scheme's gc_heap.h) relies on that. LP64: long. */
+#ifndef _OFF_T_DEFINED
+#define _OFF_T_DEFINED
+typedef long off_t;
+#endif
+
 #define EOF (-1)
 
 /* fseek origins. */
