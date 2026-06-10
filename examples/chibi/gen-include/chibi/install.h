@@ -1,0 +1,6 @@
+#define sexp_so_extension ".so"
+#define sexp_default_module_path "/usr/local/share/chibi:/usr/local/lib/chibi:/usr/local/share/snow:/usr/local/lib/snow"
+#define sexp_platform "linux"
+#define sexp_architecture "aarch64"
+#define sexp_version "0.12.0"
+#define sexp_release_name "magnesium"

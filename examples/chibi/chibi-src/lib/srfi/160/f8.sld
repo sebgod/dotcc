@@ -1,0 +1,73 @@
+
+(define-library (srfi 160 f8)
+  (export
+   make-f8vector
+   f8vector
+   list->f8vector
+   f8vector->list
+   f8?
+   f8vector?
+   f8vector-ref
+   f8vector-set!
+   f8vector-length
+   (rename uvector-unfold f8vector-unfold)
+   (rename uvector-unfold-right f8vector-unfold-right)
+   (rename vector-copy f8vector-copy)
+   (rename vector-reverse-copy f8vector-reverse-copy)
+   (rename vector-append f8vector-append)
+   (rename vector-concatenate f8vector-concatenate)
+   (rename vector-append-subvectors f8vector-append-subvectors)
+   (rename vector-empty? f8vector-empty?)
+   (rename vector= f8vector=)
+   (rename vector-take f8vector-take)
+   (rename vector-take-right f8vector-take-right)
+   (rename vector-drop f8vector-drop)
+   (rename vector-drop-right f8vector-drop-right)
+   (rename vector-segment f8vector-segment)
+   (rename vector-fold f8vector-fold)
+   (rename vector-fold-right f8vector-fold-right)
+   (rename vector-map f8vector-map)
+   (rename vector-map! f8vector-map!)
+   (rename vector-for-each f8vector-for-each)
+   (rename vector-count f8vector-count)
+   (rename vector-cumulate f8vector-cumulate)
+   (rename vector-take-while f8vector-take-while)
+   (rename vector-take-while-right f8vector-take-while-right)
+   (rename vector-drop-while f8vector-drop-while)
+   (rename vector-drop-while-right f8vector-drop-while-right)
+   (rename vector-index f8vector-index)
+   (rename vector-index-right f8vector-index-right)
+   (rename vector-skip f8vector-skip)
+   (rename vector-skip-right f8vector-skip-right)
+   (rename vector-binary-search f8vector-binary-search)
+   (rename vector-any f8vector-any)
+   (rename vector-every f8vector-every)
+   (rename vector-partition f8vector-partition)
+   (rename vector-filter f8vector-filter)
+   (rename vector-remove f8vector-remove)
+   (rename vector-swap! f8vector-swap!)
+   (rename vector-fill! f8vector-fill!)
+   (rename vector-reverse! f8vector-reverse!)
+   (rename vector-copy! f8vector-copy!)
+   (rename vector-reverse-copy! f8vector-reverse-copy!)
+   (rename reverse-vector->list reverse-f8vector->list)
+   (rename reverse-list->vector reverse-list->f8vector)
+   (rename uvector->vector f8vector->vector)
+   (rename vector->uvector vector->f8vector)
+   (rename make-vector-generator make-f8vector-generator)
+   (rename write-vector write-f8vector))
+  (import (except (scheme base)
+                  vector-append vector-copy vector-copy!
+                  vector-map vector-for-each)
+          (scheme write)
+          (srfi 160 mini))
+  (begin
+    (define uvector? f8vector?)
+    (define make-uvector make-f8vector)
+    (define vector f8vector)
+    (define uvector->list f8vector->list)
+    (define list->uvector list->f8vector)
+    (define uvector-length f8vector-length)
+    (define uvector-ref f8vector-ref)
+    (define uvector-set! f8vector-set!))
+  (include "uvector.scm"))

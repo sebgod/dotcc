@@ -1,0 +1,73 @@
+
+(define-library (srfi 160 f16)
+  (export
+   make-f16vector
+   f16vector
+   list->f16vector
+   f16vector->list
+   f16?
+   f16vector?
+   f16vector-ref
+   f16vector-set!
+   f16vector-length
+   (rename uvector-unfold f16vector-unfold)
+   (rename uvector-unfold-right f16vector-unfold-right)
+   (rename vector-copy f16vector-copy)
+   (rename vector-reverse-copy f16vector-reverse-copy)
+   (rename vector-append f16vector-append)
+   (rename vector-concatenate f16vector-concatenate)
+   (rename vector-append-subvectors f16vector-append-subvectors)
+   (rename vector-empty? f16vector-empty?)
+   (rename vector= f16vector=)
+   (rename vector-take f16vector-take)
+   (rename vector-take-right f16vector-take-right)
+   (rename vector-drop f16vector-drop)
+   (rename vector-drop-right f16vector-drop-right)
+   (rename vector-segment f16vector-segment)
+   (rename vector-fold f16vector-fold)
+   (rename vector-fold-right f16vector-fold-right)
+   (rename vector-map f16vector-map)
+   (rename vector-map! f16vector-map!)
+   (rename vector-for-each f16vector-for-each)
+   (rename vector-count f16vector-count)
+   (rename vector-cumulate f16vector-cumulate)
+   (rename vector-take-while f16vector-take-while)
+   (rename vector-take-while-right f16vector-take-while-right)
+   (rename vector-drop-while f16vector-drop-while)
+   (rename vector-drop-while-right f16vector-drop-while-right)
+   (rename vector-index f16vector-index)
+   (rename vector-index-right f16vector-index-right)
+   (rename vector-skip f16vector-skip)
+   (rename vector-skip-right f16vector-skip-right)
+   (rename vector-binary-search f16vector-binary-search)
+   (rename vector-any f16vector-any)
+   (rename vector-every f16vector-every)
+   (rename vector-partition f16vector-partition)
+   (rename vector-filter f16vector-filter)
+   (rename vector-remove f16vector-remove)
+   (rename vector-swap! f16vector-swap!)
+   (rename vector-fill! f16vector-fill!)
+   (rename vector-reverse! f16vector-reverse!)
+   (rename vector-copy! f16vector-copy!)
+   (rename vector-reverse-copy! f16vector-reverse-copy!)
+   (rename reverse-vector->list reverse-f16vector->list)
+   (rename reverse-list->vector reverse-list->f16vector)
+   (rename uvector->vector f16vector->vector)
+   (rename vector->uvector vector->f16vector)
+   (rename make-vector-generator make-f16vector-generator)
+   (rename write-vector write-f16vector))
+  (import (except (scheme base)
+                  vector-append vector-copy vector-copy!
+                  vector-map vector-for-each)
+          (scheme write)
+          (srfi 160 mini))
+  (begin
+    (define uvector? f16vector?)
+    (define make-uvector make-f16vector)
+    (define vector f16vector)
+    (define uvector->list f16vector->list)
+    (define list->uvector list->f16vector)
+    (define uvector-length f16vector-length)
+    (define uvector-ref f16vector-ref)
+    (define uvector-set! f16vector-set!))
+  (include "uvector.scm"))

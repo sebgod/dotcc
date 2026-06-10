@@ -1,0 +1,73 @@
+
+(define-library (chibi snow commands)
+  (export command/package
+          command/gen-key
+          command/reg-key
+          command/sign
+          command/verify
+          command/upload
+          command/implementations
+          command/index
+          command/git-index
+          command/install
+          command/install-dependencies
+          command/remove
+          command/search
+          command/show
+          command/status
+          command/srfi-list
+          command/update
+          command/upgrade)
+  (import (scheme base)
+          (scheme char)
+          (scheme eval)
+          (scheme file)
+          (scheme lazy)
+          (scheme load)
+          (scheme process-context)
+          (scheme time)
+          (scheme read)
+          (scheme write)
+          (srfi 1)
+          (srfi 27)
+          (srfi 95)
+          (srfi 166)
+          (srfi 166 columnar)
+          (chibi snow interface)
+          (chibi snow package)
+          (chibi snow utils)
+          (chibi ast)
+          (chibi bytevector)
+          (chibi config)
+          (chibi crypto md5)
+          (chibi crypto rsa)
+          (chibi crypto sha2)
+          (chibi doc)
+          (chibi filesystem)
+          (chibi io)
+          (chibi match)
+          (chibi modules)
+          (chibi net http)
+          (chibi process)
+          (chibi pathname)
+          (chibi regexp)
+          (chibi show pretty)
+          (chibi string)
+          (chibi sxml)
+          (chibi system)
+          (chibi tar)
+          (chibi temp-file)
+          (chibi uri)
+          (chibi zlib))
+  (cond-expand
+   ((library (srfi 151)) (import (srfi 151)))
+   ((library (srfi 33)) (import (srfi 33)))
+   (else (import (srfi 60))))
+  (cond-expand
+   ((library (chibi snow install))
+    (import (chibi snow install)))
+   (else
+    (begin
+      (define snow-module-directory "/usr/local/share/snow")
+      (define snow-binary-module-directory "/usr/local/lib/snow"))))
+  (include "commands.scm"))
