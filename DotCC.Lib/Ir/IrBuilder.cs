@@ -126,6 +126,20 @@ internal sealed partial class IrBuilder
             case C.ExternFnDef d: BuildFuncDef(d.Arg1, d.Arg2); break;
             case C.FuncProto p: RegisterProto(p.Arg0); break;
             case C.ExternFnProto p: RegisterProto(p.Arg1); break;
+            // A header-defined file-scope variable (chibi sexp.h's `static const
+            // unsigned char sexp_uvector_sizes[] = {…};`) re-arrives once per TU
+            // that includes the header. An identical re-definition is the same
+            // object — the first build's field + file-scope binding serve every
+            // TU, so skip it (mirrors BuildFuncDef's static-inline dedup; see
+            // AlreadySeenTopLevel for the per-TU-state caveat).
+            case C.GlobalDeclList or C.GlobalStaticDeclList
+                or C.GlobalArr or C.GlobalStaticArr
+                or C.GlobalArrInit or C.GlobalStaticArrInit
+                or C.GlobalArrInitImplicit or C.GlobalStaticArrInitImplicit
+                or C.GlobalCharArrStr or C.GlobalCharArrStrSized
+                or C.GlobalStaticCharArrStr or C.GlobalStaticCharArrStrSized
+                or C.GlobalStaticStructInit when AlreadySeenTopLevel(fn):
+                break;
             case C.GlobalDeclList g: BuildGlobalDecls(g.Arg0, g.Arg1, Storage.Static); break;
             case C.GlobalStaticDeclList g: BuildGlobalDecls(g.Arg1, g.Arg2, Storage.Static); break;
             // File-scope arrays — pinned global backing store (plain and `static`
@@ -188,6 +202,19 @@ internal sealed partial class IrBuilder
         }
     }
 
+    // Structural fingerprints of every file-scope variable definition built so
+    // far — the global-side twin of _fnDefSites (which needs per-site symbols;
+    // globals don't, because their file-scope binding persists across TUs).
+    private readonly HashSet<string> _seenTopLevelDefs = new(StringComparer.Ordinal);
+
+    /// <summary>True when an identical file-scope variable definition was already
+    /// built (same position-free structural dump = same post-expansion tokens,
+    /// i.e. the same header re-included by another TU). Caveat: C would give each
+    /// TU its OWN copy of a header-defined MUTABLE <c>static</c> variable; dotcc
+    /// merges them into one field. For the idiom that actually occurs (header
+    /// <c>static const</c> tables) the two are indistinguishable.</summary>
+    private bool AlreadySeenTopLevel(Item fn) => !_seenTopLevelDefs.Add(fn.ToString());
+
     /// <summary>File-scope variable declaration. Each declarator becomes a
     /// <c>DotCcGlobals</c> field (codegen emits <c>public static unsafe T name</c>);
     /// an <c>extern</c> one is registered for resolution only (no field).</summary>
@@ -220,10 +247,71 @@ internal sealed partial class IrBuilder
         DeclareFunc(sig);
     }
 
+    /// <summary>One already-built function DEFINITION: its parse subtrees (retained
+    /// so the structural fingerprint is computed lazily — only names that actually
+    /// collide across TUs pay for the <c>ToString</c>) and the symbol it bound.</summary>
+    private sealed class FnDefSite
+    {
+        public required Item Sig;
+        public required Item Block;
+        public required Symbol Sym;
+        public string? PrintCache;
+        /// <summary>Position-free structural dump of the definition — identical
+        /// text ⇔ the same post-expansion tokens, i.e. the same header re-included.</summary>
+        public string Print => PrintCache ??= Fingerprint(Sig, Block);
+    }
+
+    private static string Fingerprint(Item sig, Item block) => sig.ToString() + "" + block.ToString();
+
+    // Definitions seen so far, by C name — the whole-program merge's handling of
+    // C internal linkage. A `static` name may be defined in several TUs: an
+    // identical re-definition (a header-defined `static inline` re-included by
+    // the next TU) re-binds to the one emitted copy; a different body is a fresh
+    // per-TU function under a uniquified TargetName.
+    private readonly Dictionary<string, List<FnDefSite>> _fnDefSites = new(StringComparer.Ordinal);
+
     private void BuildFuncDef(Item fnSig, Item block)
     {
         var sig = ExtractFnSig(fnSig);
-        var funcSym = DeclareFunc(sig);
+        Symbol funcSym;
+        if (_fnDefSites.TryGetValue(sig.Name, out var sites))
+        {
+            var print = Fingerprint(fnSig, block);
+            foreach (var site in sites)
+            {
+                if (site.Print == print)
+                {
+                    // Identical re-definition: one emitted copy serves all TUs —
+                    // re-bind this TU's references to it and build nothing.
+                    _symbols.DeclareAlias(site.Sym);
+                    return;
+                }
+            }
+            if (!sig.IsStatic)
+            {
+                throw new IrUnsupportedException(
+                    $"duplicate definition of external function '{sig.Name}' (a real linker would reject this too)");
+            }
+            var paramTypes = new List<CType>(sig.Params.Count);
+            foreach (var (t, _) in sig.Params) { paramTypes.Add(t); }
+            funcSym = _symbols.DeclareAlias(new Symbol
+            {
+                Name = sig.Name,
+                Kind = SymKind.Func,
+                Type = new CType.Func(sig.Return, paramTypes, sig.Variadic),
+                Storage = Storage.Static,
+                IsGlobal = true,
+                // Program-unique: a TU defines a static name at most once, so the
+                // per-name site count suffices (same scheme as static locals' __s{n}).
+                TargetName = $"{_symbols.Escape(sig.Name)}__{sites.Count + 1}",
+            });
+            sites.Add(new FnDefSite { Sig = fnSig, Block = block, Sym = funcSym, PrintCache = print });
+        }
+        else
+        {
+            funcSym = DeclareFunc(sig);
+            _fnDefSites[sig.Name] = new List<FnDefSite> { new() { Sig = fnSig, Block = block, Sym = funcSym } };
+        }
 
         _symbols.BeginFunction();
         _currentFnName = sig.Name; // drives the `__func__` predefined identifier
