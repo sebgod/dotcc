@@ -519,7 +519,7 @@ internal sealed class CSharpBackend
             if (eff.Count > 0 && eff[0] is Labeled lb0)
             {
                 var first = sw.Sections[si].Labels[0];
-                startLabel[lb0.Name] = first.CaseExpr is { } ce ? $"goto case {Expr(DecayEnum(ce))};" : "goto default;";
+                startLabel[lb0.Name] = first.CaseExpr is { } ce ? $"goto case {CaseValue(ce, sw.Subject.Type)};" : "goto default;";
             }
         }
 
@@ -552,7 +552,7 @@ internal sealed class CSharpBackend
             var sec = sw.Sections[si];
             foreach (var lab in sec.Labels)
             {
-                sb.Append(ipad).Append(lab.CaseExpr is { } ce ? $"case {Expr(DecayEnum(ce))}:\n" : "default:\n");
+                sb.Append(ipad).Append(lab.CaseExpr is { } ce ? $"case {CaseValue(ce, sw.Subject.Type)}:\n" : "default:\n");
             }
             var eff = Eff(sec);
             var wrapped = sec.Body is [Block];
@@ -585,7 +585,7 @@ internal sealed class CSharpBackend
                 if (si + 1 < sw.Sections.Count)
                 {
                     var next = sw.Sections[si + 1].Labels[0];
-                    jump = next.CaseExpr is { } nce ? $"goto case {Expr(DecayEnum(nce))};\n" : "goto default;\n";
+                    jump = next.CaseExpr is { } nce ? $"goto case {CaseValue(nce, sw.Subject.Type)};\n" : "goto default;\n";
                 }
                 else { jump = "break;\n"; }
                 sb.Append(Pad(inner + 1)).Append(jump);
@@ -915,6 +915,82 @@ internal sealed class CSharpBackend
         v = 0;
         return false;
     }
+
+    /// <summary>Render one <c>case</c> value. C requires an integer constant
+    /// expression, but chibi spells immediates through pointer-cast macros
+    /// (<c>case (sexp_uint_t)SEXP_VOID:</c> with <c>SEXP_VOID =
+    /// ((sexp)((2&lt;&lt;8)+62))</c>) — rendered literally, the pointer cast is
+    /// non-constant C# (CS9135). When the expression contains a pointer cast,
+    /// fold it to its value (a pointer cast is value-preserving; an integer
+    /// cast truncates to its width) and emit the literal instead.</summary>
+    private string CaseValue(CExpr ce, CType subject)
+    {
+        if (ContainsPointerCast(ce) && FoldConst(ce, out var v))
+        {
+            var st = subject.Unqualified is CType.Prim { Integer: true } sp ? Cs(sp) : "long";
+            return $"unchecked(({st})({v.ToString(System.Globalization.CultureInfo.InvariantCulture)}))";
+        }
+        return Expr(DecayEnum(ce));
+    }
+
+    private static bool ContainsPointerCast(CExpr e) => e switch
+    {
+        Cast c => c.Target.Unqualified is CType.Pointer || ContainsPointerCast(c.Operand),
+        Paren p => ContainsPointerCast(p.Inner),
+        Unary u => ContainsPointerCast(u.Operand),
+        Binary b => ContainsPointerCast(b.Left) || ContainsPointerCast(b.Right),
+        _ => false,
+    };
+
+    /// <summary>Full constant fold over the case-label grammar (literals, enum
+    /// constants, unary <c>+ - ~</c>, the binary integer operators, casts) —
+    /// wider than <see cref="TryConstInt"/>, which deliberately stays cast-opaque
+    /// for the range-check rules.</summary>
+    private static bool FoldConst(CExpr e, out long v)
+    {
+        switch (e)
+        {
+            case LitInt { Value: { } lv }: v = lv; return true;
+            case EnumConstRef ec: v = ec.Sym.ConstValue; return true;
+            case Paren p: return FoldConst(p.Inner, out v);
+            case Cast c when FoldConst(c.Operand, out v):
+                if (c.Target.Unqualified is CType.Prim { Integer: true } tp) { v = TruncateTo(v, tp); }
+                return true; // pointer (and other reinterpret) casts preserve the value
+            case Unary u when FoldConst(u.Operand, out v):
+                switch (u.Op)
+                {
+                    case UnOp.Neg: v = -v; return true;
+                    case UnOp.Plus: return true;
+                    case UnOp.BitNot: v = ~v; return true;
+                }
+                break;
+            case Binary b when FoldConst(b.Left, out var l) && FoldConst(b.Right, out var r):
+                switch (b.Op)
+                {
+                    case BinOp.Add: v = l + r; return true;
+                    case BinOp.Sub: v = l - r; return true;
+                    case BinOp.Mul: v = l * r; return true;
+                    case BinOp.Div when r != 0: v = l / r; return true;
+                    case BinOp.Mod when r != 0: v = l % r; return true;
+                    case BinOp.Shl: v = l << (int)r; return true;
+                    case BinOp.Shr: v = l >> (int)r; return true;
+                    case BinOp.BitAnd: v = l & r; return true;
+                    case BinOp.BitOr: v = l | r; return true;
+                    case BinOp.BitXor: v = l ^ r; return true;
+                }
+                break;
+        }
+        v = 0;
+        return false;
+    }
+
+    private static long TruncateTo(long v, CType.Prim p) => p.Bytes switch
+    {
+        1 => p.Signed ? (sbyte)v : (byte)v,
+        2 => p.Signed ? (short)v : (ushort)v,
+        4 => p.Signed ? (int)v : (uint)v,
+        _ => v,
+    };
 
     /// <summary>Render a declaration in statement position. When every declarator
     /// shares a C# type it's one C# declaration (<c>int a = 0, b = 1;</c>); when

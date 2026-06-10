@@ -1093,6 +1093,11 @@ internal sealed partial class IrBuilder
         var labels = new List<SwitchLabel>();
         var body = new List<CStmt>();
         var open = false;   // a section has been started (≥1 label seen)
+        // goto labels fused onto a case label (`lbl: case 'Q': stmt` — legal C,
+        // both name the same statement; chibi main.c). C# requires the label
+        // AFTER the case labels, so they're deferred here and re-attached to the
+        // section's first statement (the same program point).
+        var pendingLabels = new List<string>();
 
         void Flush()
         {
@@ -1118,10 +1123,25 @@ internal sealed partial class IrBuilder
                     labels.Add(new SwitchLabel(null));
                     Walk(dl.Arg2);
                     break;
+                case C.StmtLabel ls when LeadsToCase(ls.Arg2):
+                    // Defer the goto label past the case labels it shares a
+                    // statement with; the next plain statement picks it up.
+                    pendingLabels.Add(Tok(ls.Arg0));
+                    Walk(ls.Arg2);
+                    break;
                 default:
                     // A statement before the first case label is unreachable in C;
                     // drop it (C# would reject it anyway).
-                    if (open) { body.Add(BuildStmt(it)); }
+                    if (open)
+                    {
+                        var st = BuildStmt(it);
+                        for (var i = pendingLabels.Count - 1; i >= 0; i--)
+                        {
+                            st = new Labeled(pendingLabels[i], st) { Pos = st.Pos };
+                        }
+                        pendingLabels.Clear();
+                        body.Add(st);
+                    }
                     break;
             }
         }
@@ -1132,6 +1152,17 @@ internal sealed partial class IrBuilder
         _symbols.ExitScope();
         return new Switch(subject, sections) { Pos = pos };
     }
+
+    /// <summary>True when a statement is a <c>case</c>/<c>default</c> label,
+    /// possibly under a stack of goto labels (<c>a: b: case 1: stmt</c>) — the
+    /// shape <see cref="BuildSwitch"/> must split so the goto labels land AFTER
+    /// the case labels in the emitted section (C# label placement).</summary>
+    private static bool LeadsToCase(Item it) => it.Content switch
+    {
+        C.CaseLabel or C.DefaultLabel => true,
+        C.StmtLabel ls => LeadsToCase(ls.Arg2),
+        _ => false,
+    };
 
     /// <summary>Recognise the <c>setjmp</c>/<c>longjmp</c> guard idiom in an
     /// <c>if</c> and desugar it to a <see cref="SetjmpGuard"/>. Returns null when
