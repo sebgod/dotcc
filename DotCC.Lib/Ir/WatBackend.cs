@@ -381,6 +381,9 @@ internal sealed partial class WatBackend
             case Block b:
                 foreach (var x in b.Stmts) { CollectLocals(x, acc); }
                 break;
+            case Seq q:
+                foreach (var x in q.Stmts) { CollectLocals(x, acc); }
+                break;
             case DeclStmt d:
                 foreach (var ld in d.Decls) { acc.Add(ld.Sym); }
                 break;
@@ -426,6 +429,13 @@ internal sealed partial class WatBackend
         {
             case Block b:
                 foreach (var inner in b.Stmts) { EmitStmt(inner); }
+                break;
+
+            // Brace-less sequence (multi-declarator decl that split into
+            // DeclStmt + ArrayDecl) — wat has no block scoping for locals
+            // anyway (CollectLocals hoists them), so emit flat like Block.
+            case Seq q:
+                foreach (var inner in q.Stmts) { EmitStmt(inner); }
                 break;
 
             case DeclStmt d:

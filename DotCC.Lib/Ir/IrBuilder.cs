@@ -151,6 +151,15 @@ internal sealed partial class IrBuilder
             // `typedef <type> <name>;` — record name → underlying type. Resolution
             // (ResolveType's TypeName case) then sees through it everywhere.
             case C.TypedefAlias t: _typedefs[Tok(t.Arg2)] = ResolveType(t.Arg1); break;
+            // `typedef T Name[N];` — the alias IS an array type. Bounds must be
+            // constant (same rule as struct array members); the registered
+            // CType.Array drives every use site: member → fixed buffer, param →
+            // pointer decay, sizeof → N*sizeof(T), local decl → stackalloc.
+            case C.TypedefArr t:
+                _typedefs[Tok(t.Arg2)] = MakeArrayType(
+                    ResolveType(t.Arg1),
+                    TryConstDims(t.Arg3) ?? throw new IrUnsupportedException("non-constant array typedef bound"));
+                break;
             // enum definitions — register a real C# enum (tagged/typedef'd) or, for
             // an anonymous un-typedef'd enum, plain int constants.
             case C.EnumDef e: RegisterEnum(Tok(e.Arg1), null, e.Arg3); break;
@@ -184,6 +193,12 @@ internal sealed partial class IrBuilder
     {
         WalkDeclList(typeItem, listItem, (name, initItem, type) =>
         {
+            // A file-scope array has its own productions (pinned GlobalArray
+            // lowering); an array TAIL here would silently become a plain field.
+            if (type.Unqualified is CType.Array)
+            {
+                throw new IrUnsupportedException("array declarator in a file-scope multi-declarator list (split it into its own declaration)");
+            }
             var sym = _symbols.Declare(new Symbol
             {
                 Name = name, Kind = SymKind.Var, Type = type, Storage = storage, IsGlobal = true,
@@ -279,8 +294,12 @@ internal sealed partial class IrBuilder
                 case C.ParamsCons c: Walk(c.Arg0); Walk(c.Arg2); break;
                 case C.ParamsOne o: Walk(o.Arg0); break;
                 case C.ParamsVararg v: Walk(v.Arg0); vararg = true; break;
-                case C.Param p: acc.Add(new(ResolveType(p.Arg0), Tok(p.Arg1))); break;
-                case C.ParamUnnamed p: acc.Add(new(ResolveType(p.Arg0), "_p" + unnamed++)); break;
+                // A param whose TYPE resolves to an array (an array-typedef
+                // alias like chibi's `sexp_abi_identifier_t`) decays to a
+                // pointer exactly like the explicit `T name[]` forms below
+                // (C99 §6.7.5.3p7 applies through a typedef too).
+                case C.Param p: acc.Add(new(DecayParam(ResolveType(p.Arg0)), Tok(p.Arg1))); break;
+                case C.ParamUnnamed p: acc.Add(new(DecayParam(ResolveType(p.Arg0)), "_p" + unnamed++)); break;
                 case C.ParamArrayUnsized p: acc.Add(new(new CType.Pointer(ResolveType(p.Arg0)), Tok(p.Arg1))); break;
                 case C.ParamArraySized p: acc.Add(new(new CType.Pointer(ResolveType(p.Arg0)), Tok(p.Arg1))); break;
                 // Function-pointer parameter: `Ret (*name)(paramTypes)`.
@@ -293,6 +312,13 @@ internal sealed partial class IrBuilder
         variadic = vararg;
         return acc;
     }
+
+    /// <summary>Array-to-pointer decay for a parameter type (C99 §6.7.5.3p7).
+    /// Only relevant when the type ARRIVES as an array — i.e. through an
+    /// array-typedef alias; the explicit <c>T name[]</c> productions decay at
+    /// their own case arms.</summary>
+    private static CType DecayParam(CType t)
+        => t is CType.Array a ? new CType.Pointer(a.Element) : t;
 
     // ---- enums -----------------------------------------------------------
 
@@ -323,6 +349,7 @@ internal sealed partial class IrBuilder
             {
                 case C.EnumListCons c: Walk(c.Arg0); Walk(c.Arg2); break;
                 case C.EnumListOne o: Walk(o.Arg0); break;
+                case C.EnumListTrail t: Walk(t.Arg0); break;  // trailing `,` — no member
                 case C.EnumItem e: Add(Tok(e.Arg0), null); break;
                 case C.EnumItemInit e: Add(Tok(e.Arg0), e.Arg2); break;
                 default: throw new IrUnsupportedException(TypeName(it.Content));
@@ -363,7 +390,7 @@ internal sealed partial class IrBuilder
         LitInt i => i.Value,
         EnumConstRef ec => ec.Sym.ConstValue,
         SizeOfExpr s => SizeOfConst(s.Of),
-        OffsetOf o => StructCanonical(o.StructType) is { } n ? OffsetOfConst(n, o.Member) : null,
+        OffsetOf o => StructCanonical(o.StructType) is { } n ? OffsetOfConstPath(n, o.Path) : null,
         Paren p => ConstEval(p.Inner),
         Cast c => ConstEval(c.Operand),
         Unary u => u.Op switch
@@ -434,6 +461,32 @@ internal sealed partial class IrBuilder
             else { off = RoundUp(off, fa) + fs; }
         }
         return (RoundUp(isUnion ? size : off, align), align);
+    }
+
+    /// <summary>The byte offset of a (possibly nested) member-designator within
+    /// struct <paramref name="structName"/> — per-level offsets summed, each
+    /// intermediate level resolved through its member's type. Null if any level
+    /// isn't modelled.</summary>
+    private int? OffsetOfConstPath(string structName, IReadOnlyList<string> path)
+    {
+        var total = 0;
+        var current = structName;
+        for (var i = 0; i < path.Count; i++)
+        {
+            var seg = path[i];
+            if (OffsetOfConst(current, seg) is not { } off
+                || !_structFields.TryGetValue(current, out var fields)) { return null; }
+            total += off;
+            if (i == path.Count - 1) { break; }   // final segment — no deeper level to name
+            CType? segType = null;
+            foreach (var f in fields)
+            {
+                if (f.Name == seg) { segType = f.Type; break; }
+            }
+            if ((segType?.Unqualified as CType.Named)?.Name is not { } next) { return null; }
+            current = next;
+        }
+        return total;
     }
 
     /// <summary>The byte offset of <paramref name="member"/> within struct
@@ -1101,6 +1154,13 @@ internal sealed partial class IrBuilder
     {
         WalkDeclList(n.Arg1, n.Arg2, (name, initItem, type) =>
         {
+            // A static-local ARRAY has its own production (pinned GlobalArray
+            // lowering under a mangled name); an array tail here would silently
+            // become a plain static field.
+            if (type.Unqualified is CType.Array)
+            {
+                throw new IrUnsupportedException("array declarator in a static-local multi-declarator list (split it into its own declaration)");
+            }
             var sym = new Symbol
             {
                 Name = name, Kind = SymKind.Var, Type = type,
@@ -1151,7 +1211,7 @@ internal sealed partial class IrBuilder
         return new DeclStmt(new[] { new LocalDecl(sym, initItem is { } ii ? BuildExpr(ii) : null) });
     }
 
-    private DeclStmt BuildDecl(Item declItem)
+    private CStmt BuildDecl(Item declItem)
     {
         if (declItem.Content is not C.Decl decl) { throw new IrUnsupportedException(TypeName(declItem.Content)); }
         return BuildDeclList(decl.Arg0, decl.Arg1);
@@ -1161,15 +1221,45 @@ internal sealed partial class IrBuilder
     /// <see cref="DeclStmt"/>. Shared by the plain form (<c>int x, y;</c>) and the
     /// redundant pre-C23 storage-class form (<c>auto int z;</c>), which differ
     /// only in the dropped <c>auto</c> keyword.</summary>
-    private DeclStmt BuildDeclList(Item typeItem, Item listItem)
+    private CStmt BuildDeclList(Item typeItem, Item listItem)
     {
-        var entries = new List<LocalDecl>();
+        // Most declarations are all-scalar → one DeclStmt (the historical shape).
+        // An ARRAY declarator in the list (`char *str=NULL, numbuf[LEN];`) lowers
+        // to its own ArrayDecl (stackalloc) interleaved in source order; the whole
+        // statement then becomes a brace-less Seq so the names share the enclosing
+        // scope.
+        var stmts = new List<CStmt>();
+        var scalars = new List<LocalDecl>();
+        void Flush()
+        {
+            if (scalars.Count > 0) { stmts.Add(new DeclStmt(scalars.ToArray())); scalars.Clear(); }
+        }
         WalkDeclList(typeItem, listItem, (name, initItem, type) =>
         {
+            if (type.Unqualified is CType.Array)
+            {
+                // Same lowering as a standalone fixed-size array decl: the symbol
+                // keeps the (possibly nested) array type so sizeof/the length idiom
+                // resolve; the stackalloc extent is the flattened product.
+                var total = 1;
+                var elem = type.Unqualified;
+                while (elem is CType.Array a)
+                {
+                    total *= a.Count ?? throw new IrUnsupportedException("unsized array in a multi-declarator tail");
+                    elem = a.Element;
+                }
+                var asym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type, Storage = Storage.Auto });
+                Flush();
+                stmts.Add(new ArrayDecl(asym, elem,
+                    new LitInt(total.ToString(System.Globalization.CultureInfo.InvariantCulture), total) { Type = CType.Int },
+                    null));
+                return;
+            }
             var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type, Storage = Storage.Auto });
-            entries.Add(new LocalDecl(sym, initItem is { } ii ? BuildExpr(ii) : null));
+            scalars.Add(new LocalDecl(sym, initItem is { } ii ? BuildExpr(ii) : null));
         });
-        return new DeclStmt(entries);
+        Flush();
+        return stmts.Count == 1 ? stmts[0] : new Seq(stmts);
     }
 
     /// <summary>C23 type inference — <c>auto x = E;</c> deduces <c>x</c>'s type
@@ -1216,6 +1306,14 @@ internal sealed partial class IrBuilder
                 case C.DeclItemTailPlain t: WalkTail(t.Arg0, stars); break;
                 case C.DeclItem di: add(Tok(di.Arg0), null, WrapPtr(element, stars)); break;
                 case C.DeclItemInit di: add(Tok(di.Arg0), di.Arg2, WrapPtr(element, stars)); break;
+                // `…, name[N]` — an array declarator in tail position. The type is
+                // an array OF the star-wrapped element (`int *a, *c[5];` → c is an
+                // array of int*); the consumer decides the lowering (local →
+                // ArrayDecl/stackalloc, struct member → fixed buffer).
+                case C.DeclItemTailArr a:
+                    add(Tok(a.Arg0), null, MakeArrayType(WrapPtr(element, stars),
+                        TryConstDims(a.Arg1) ?? throw new IrUnsupportedException("non-constant array bound in a multi-declarator tail")));
+                    break;
                 default: throw new IrUnsupportedException(TypeName(it.Content));
             }
         }
@@ -1229,6 +1327,7 @@ internal sealed partial class IrBuilder
                 case C.DeclItemInit di: add(Tok(di.Arg0), di.Arg2, baseType); break;
                 case C.DeclItemTailPlain t: WalkTail(t.Arg0, 0); break;
                 case C.DeclItemTailPtr t: WalkTail(t.Arg1, 1); break;
+                case C.DeclItemTailArr: WalkTail(it, 0); break;
                 default: throw new IrUnsupportedException(TypeName(it.Content));
             }
         }
@@ -1447,6 +1546,7 @@ internal sealed partial class IrBuilder
             C.PreDec u => Un(UnOp.PreDec, u.Arg1),
             C.PostInc u => Un(UnOp.PostInc, u.Arg0),
             C.PostDec u => Un(UnOp.PostDec, u.Arg0),
+            C.UPlus u => Un(UnOp.Plus, u.Arg1),
             C.Neg u => Un(UnOp.Neg, u.Arg1),
             C.BNot u => Un(UnOp.BitNot, u.Arg1),
             C.LNot u => Un(UnOp.LogNot, u.Arg1),
@@ -1765,21 +1865,44 @@ internal sealed partial class IrBuilder
     private CExpr BuildOffsetof(C.OffsetofExpr n)
     {
         var structType = ResolveType(n.Arg2);
-        var member = Tok(n.Arg4);
-        // Record the member's declared type (a neutral fact); the backend decides
-        // whether its layout makes the member's access self-addressing.
+        var path = CollectOffsetofPath(n.Arg4);
+        // Record the FINAL member's declared type (a neutral fact); the backend
+        // decides whether its layout makes the member's access self-addressing.
+        // Walk the path segment by segment: each intermediate segment must be a
+        // modelled struct/union member whose type names the next level.
         CType? memberType = null;
-        if ((structType.Unqualified as CType.Named)?.Name is { } canon
-            && _structFields.TryGetValue(canon, out var fields))
+        var canon = (structType.Unqualified as CType.Named)?.Name;
+        foreach (var seg in path)
         {
+            memberType = null;
+            if (canon is null || !_structFields.TryGetValue(canon, out var fields)) { break; }
             foreach (var f in fields)
             {
-                if (f.Name != member) { continue; }
+                if (f.Name != seg) { continue; }
                 memberType = f.Type;
                 break;
             }
+            canon = (memberType?.Unqualified as CType.Named)?.Name;
         }
-        return new OffsetOf(structType, member, memberType) { Type = CType.SizeT };
+        return new OffsetOf(structType, path, memberType) { Type = CType.SizeT };
+    }
+
+    /// <summary>Flatten an <c>OffsetofPath</c> parse tree (<c>ID ('.' ID)*</c>)
+    /// into its segment names, in source order.</summary>
+    private List<string> CollectOffsetofPath(Item it)
+    {
+        var segs = new List<string>();
+        void Walk(Item node)
+        {
+            switch (node.Content)
+            {
+                case C.OffsetofPathCons c: Walk(c.Arg0); segs.Add(Tok(c.Arg2)); break;
+                case C.OffsetofPathOne o: segs.Add(Tok(o.Arg0)); break;
+                default: throw new IrUnsupportedException(TypeName(node.Content));
+            }
+        }
+        Walk(it);
+        return segs;
     }
 
     private CExpr BuildStr(Item it)

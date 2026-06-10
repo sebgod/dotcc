@@ -244,6 +244,12 @@ internal sealed class ParseTreeIdentityVisitor : C.IVisitor<object>
     public object Visit(C.Mod node) => node;
     public object Visit(C.Deref node) => node;
     public object Visit(C.AddrOf node) => node;
+    public object Visit(C.UPlus node) => node;
+    public object Visit(C.TypedefArr node) => node;
+    public object Visit(C.EnumListTrail node) => node;
+    public object Visit(C.OffsetofPathOne node) => node;
+    public object Visit(C.DeclItemTailArr node) => node;
+    public object Visit(C.OffsetofPathCons node) => node;
     public object Visit(C.Neg node) => node;
     public object Visit(C.BNot node) => node;
     public object Visit(C.LNot node) => node;

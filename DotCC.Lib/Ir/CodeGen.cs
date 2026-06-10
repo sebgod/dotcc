@@ -283,6 +283,11 @@ internal sealed class CodeGen
                 foreach (var st in b.Stmts) { Stmt(sb, st, ind + 1); }
                 sb.Append(pad).Append("}\n");
                 break;
+            // Brace-less sequence — children share the ENCLOSING scope (a
+            // multi-declarator decl that split into DeclStmt + ArrayDecl).
+            case Seq q:
+                foreach (var st in q.Stmts) { Stmt(sb, st, ind); }
+                break;
             case DeclStmt d:
             {
                 // Render the declaration with hoisting enabled (a value-comma
@@ -1020,7 +1025,7 @@ internal sealed class CodeGen
                 // captured), so `&__t` needs no `fixed`. A primitive `fixed`-buffer
                 // member's access already yields its address (no `&`); a scalar
                 // member uses `&`.
-                var m = DotCC.EmitHelpers.Id(o.Member);
+                var m = string.Join(".", o.Path.Select(DotCC.EmitHelpers.Id));
                 // A member that lowers to a C# `fixed` buffer (primitive-element
                 // array) already yields its own address — no `&` (would be CS0211).
                 var decays = o.MemberType?.Unqualified is CType.Array fa && IsFixedBufferType(Cs(fa.Element));

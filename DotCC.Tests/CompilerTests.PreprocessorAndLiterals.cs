@@ -561,6 +561,33 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Subdirectory_qualified_include_resolves_against_include_dir()
+    {
+        // chibi-scheme's layout: headers live under include/chibi/, sources
+        // say `#include "chibi/sexp.h"` with `-I include`. The include map
+        // must register nested headers under their dir-relative path (with
+        // `/` separators), not just the bare filename.
+        var dir = Path.Combine(Path.GetTempPath(), $"dotcc-subinc-{System.Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(dir, "include", "chibi"));
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "include", "chibi", "sexp.h"), """
+                #define ANSWER 42
+                typedef int sexp_sint_t;
+                """);
+            var srcPath = Path.Combine(dir, "main.c");
+            File.WriteAllText(srcPath, """
+                #include "chibi/sexp.h"
+                int main() { sexp_sint_t x = ANSWER; return (int)x; }
+                """);
+            var emitted = Compiler.EmitCSharp(
+                new[] { srcPath }, includeDirs: new[] { Path.Combine(dir, "include") });
+            emitted.ShouldContain("42");
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    [Fact]
     public void Error_directive_aborts_compilation()
     {
         var src = WriteTemp("""

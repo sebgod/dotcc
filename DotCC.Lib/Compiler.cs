@@ -745,6 +745,18 @@ public static class Compiler
             // and gcc's `__GNUC__`. User code can `#ifdef __dotcc__` to
             // branch on the compiler identity in mixed-source projects.
             "__dotcc__=1",
+            // Data-model identification. dotcc IS an LP64 compiler by
+            // construction — `long` lowers to C# `long` (64-bit
+            // unconditionally, the documented widening of MSVC-Windows's
+            // 32-bit `long`) and pointers are 8 bytes (the <stdint.h> /
+            // offsetof layout model). Portable C decides its pointer-tagging
+            // and integer-width strategy from exactly these macros
+            // (chibi-scheme's SEXP_64_BIT probes __LP64__ et al.); without
+            // them it would mis-configure for 32-bit and miscompute at
+            // runtime, not just fail to compile.
+            "__LP64__=1",
+            "__SIZEOF_POINTER__=8",
+            "__SIZEOF_LONG__=8",
         };
         var stdcVersion = dialect.StdcVersionLiteral;
         if (stdcVersion is not null)
@@ -807,11 +819,21 @@ public static class Compiler
         foreach (var dir in dirs)
         {
             if (!Directory.Exists(dir)) { continue; }
-            foreach (var hpath in Directory.EnumerateFiles(dir, "*.h"))
+            foreach (var hpath in Directory.EnumerateFiles(dir, "*.h", SearchOption.AllDirectories))
             {
-                var fileName = Path.GetFileName(hpath);
-                content[fileName] = SpliceLineContinuations(File.ReadAllText(hpath));
-                paths[fileName] = hpath;
+                // A header directly in the dir registers under its bare name
+                // (`#include "lstate.h"`). A header in a SUBDIRECTORY registers
+                // under its dir-relative path with `/` separators, so the
+                // subdirectory-qualified include form resolves too:
+                // `-I include` + `#include "chibi/sexp.h"` → key `chibi/sexp.h`
+                // (chibi-scheme's layout; ditto <sys/types.h>-style trees).
+                // Depth-0 names keep the exact pre-recursion semantics — a
+                // nested header is deliberately NOT registered bare, matching
+                // gcc (it would not resolve `#include "sexp.h"` against `-I
+                // include` when the file is include/chibi/sexp.h).
+                var rel = Path.GetRelativePath(dir, hpath).Replace('\\', '/');
+                content[rel] = SpliceLineContinuations(File.ReadAllText(hpath));
+                paths[rel] = hpath;
             }
         }
         return (content, paths);

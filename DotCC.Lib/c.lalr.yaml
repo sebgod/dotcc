@@ -367,6 +367,10 @@ symbols:
   # treats it as a builtin (like va_arg) — a dedicated grammar production that emits
   # the raw field-address offset. NOT #defined in the synthetic <stddef.h>.
   - 'offsetof'     # 162 builtin (C89 <stddef.h>) — offsetof(Type, member)
+  # offsetof's member-designator may be a DOTTED PATH into nested members
+  # (C99 7.17: "member-designator") — `offsetof(struct S, value.type.f)`,
+  # chibi-scheme's sexp_offsetof. Array designators (`m[2]`) stay unsupported.
+  - OffsetofPath   # 163 non-terminal: ID ('.' ID)* inside offsetof
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -466,6 +470,15 @@ productions:
       # C# already infers usage from the underlying type and the lexer hack
       # has done its job at parse time.
       - { lhs: Fn, rhs: ['typedef', Type, ID, ';'], action: typedefAlias }
+      # `typedef T Name[N];` — a typedef of an ARRAY type (C89). The alias
+      # denotes `T[N]`: a variable of the alias type declares an array, a
+      # struct member becomes a fixed buffer, a parameter decays to `T*`, and
+      # `sizeof(Alias)` is `N*sizeof(T)` — all via registering the alias as
+      # CType.Array (the typed-IR sites already key on the resolved type).
+      # ArrDims (not a single `[E]`) so multi-dim aliases compose like array
+      # declarations. chibi-scheme: `typedef char sexp_abi_identifier_t[8];`.
+      # Conflict-free with typedefAlias: `[` vs `;` after the ID.
+      - { lhs: Fn, rhs: ['typedef', Type, ID, ArrDims, ';'], action: typedefArr }
       # `typedef struct ID { MemberList } ID ;` — struct definition + alias
       # in one go (the common C idiom). The trailing ID may differ from the
       # tag — the visitor emits the C# struct under the alias name (since C#
@@ -967,6 +980,11 @@ productions:
     rules:
       - { lhs: EnumList, rhs: [EnumItem], action: enumListOne }
       - { lhs: EnumList, rhs: [EnumList, ',', EnumItem], action: enumListCons }
+      # Trailing comma after the last enumerator (C99 §6.7.2.2) — ubiquitous in
+      # `#if`-composed enum bodies (chibi's `enum sexp_number_types { …,
+      # SEXP_NUM_CPX, };` where each tail member sits in its own conditional).
+      # Conflict-free: after the `,` a `}` reduces here, an ID shifts enumListCons.
+      - { lhs: EnumList, rhs: [EnumList, ','], action: enumListTrail }
 
   - derivation: none
     rules:
@@ -1092,6 +1110,13 @@ productions:
       # computes the tail's type as stripStars(Type) + Stars*'*'.
       - { lhs: DeclItemTail, rhs: [DeclItem],          action: declItemTailPlain }
       - { lhs: DeclItemTail, rhs: ['*', DeclItemTail], action: declItemTailPtr }
+      # An ARRAY declarator in tail (post-comma) position — `char *str=NULL,
+      # numbuf[LEN];` (chibi's sexp.c). Tail-only: a FIRST-position array has
+      # its own Stmt/Fn productions, and adding `DeclItem → ID ArrDims` there
+      # would collide with them. Composes with the `*` prefix rule (`int *a,
+      # *c[5];`). No initializer form (a brace-init array tail stays a loud
+      # parse error).
+      - { lhs: DeclItemTail, rhs: [ID, ArrDims],       action: declItemTailArr }
 
   # MemberInitList — one or more `.field = E` items, comma-separated, optional
   # trailing comma (`{ .x = 1, .y = 2, }`). Left-recursive, so the trailing-
@@ -1236,6 +1261,10 @@ productions:
       - { lhs: Unary, rhs: ['*',  Unary], action: deref }
       - { lhs: Unary, rhs: ['&',  Unary], action: addrOf }
       - { lhs: Unary, rhs: ['-',  Unary], action: neg }
+      # Unary plus (C89 §6.5.3.3) — value-preserving no-op beyond the integer
+      # promotions. Real code spells it for symmetry (`sexp_inc(ctx, +1)`,
+      # chibi's `(+1 | (x >> 63))` sign trick). Lowered to C#'s own unary `+`.
+      - { lhs: Unary, rhs: ['+',  Unary], action: uPlus }
       - { lhs: Unary, rhs: ['~',  Unary], action: bNot }
       # Logical `!` — C-truthy NOT. Lowers to `(Cond.B(E) ? 0 : 1)` so the
       # result is int (matching C: `!x` yields 0 or 1, never bool).
@@ -1290,12 +1319,15 @@ productions:
       # with the unique `va_arg` terminal, so it's conflict-free with the call
       # rules above. Lowered to `(Type)ap.Next()` / `(Type)ap.NextPtr()`.
       - { lhs: Postfix, rhs: ['va_arg', '(', E, ',', Type, ')'], action: vaArgExpr }
-      # `offsetof(Type, member)` — the byte offset of `member` in `Type`. The
-      # TYPE_NAME lexer hack lets the first operand be a Type (so a bare typedef-name
-      # there is fine, unlike a value arg). Member is a single field ID (the common
-      # form; `a.b` / `arr[i]` designators aren't supported). Emits a raw field
-      # address through a null `Type*` — see Visit(C.OffsetofExpr).
-      - { lhs: Postfix, rhs: ['offsetof', '(', Type, ',', ID, ')'], action: offsetofExpr }
+      # `offsetof(Type, member-designator)` — the byte offset of the member in
+      # `Type`. The TYPE_NAME lexer hack lets the first operand be a Type (so a
+      # bare typedef-name there is fine, unlike a value arg). The designator is
+      # a dotted path into nested members (C99 7.17) — a single ID is the
+      # common form, `value.type.f` walks nested structs/unions (chibi's
+      # sexp_offsetof). Array designators (`m[2]`) aren't supported.
+      - { lhs: Postfix, rhs: ['offsetof', '(', Type, ',', OffsetofPath, ')'], action: offsetofExpr }
+      - { lhs: OffsetofPath, rhs: [ID], action: offsetofPathOne }
+      - { lhs: OffsetofPath, rhs: [OffsetofPath, '.', ID], action: offsetofPathCons }
       # Postfix ++/-- — left-associative (chained `x++` then `++` is illegal
       # in C and C# both; the grammar permits but the downstream compiler
       # diagnoses).
@@ -1355,22 +1387,29 @@ lexer:
     # Order matters here too: `#ifndef` and `#ifdef` need to precede `#if`
     # since they share the prefix and on identical-length ambiguity the
     # earlier rule wins (and longest-match picks the longer string anyway).
-    - { symbol: '#ifndef',  match: '#ifndef' }
-    - { symbol: '#ifdef',   match: '#ifdef' }
+    # C allows whitespace between the `#` and the directive name (the classic
+    # indented-conditional style: `# ifdef FOO` / `#  define BAR 1`, pervasive
+    # in chibi-scheme's headers) — hence `#[ \t]*name`, not a literal. Residual
+    # edge (accepted): a #define BODY containing stringify-then-identifier
+    # where the identifier spells a directive name (`#define S(undef) # undef`)
+    # would mis-lex as the directive — real code never names a macro param
+    # after a directive keyword.
+    - { symbol: '#ifndef',  match: '#[ \t]*ifndef' }
+    - { symbol: '#ifdef',   match: '#[ \t]*ifdef' }
     # `#elif` before `#else` — they don't share a prefix but `#elif` and
     # `#endif` both start with `#e`; longest-match handles it.
-    - { symbol: '#elif',    match: '#elif' }
-    - { symbol: '#if',      match: '#if' }
-    - { symbol: '#else',    match: '#else' }
-    - { symbol: '#endif',   match: '#endif' }
-    - { symbol: '#include', match: '#include' }
-    - { symbol: '#define',  match: '#define' }
-    - { symbol: '#undef',   match: '#undef' }
+    - { symbol: '#elif',    match: '#[ \t]*elif' }
+    - { symbol: '#if',      match: '#[ \t]*if' }
+    - { symbol: '#else',    match: '#[ \t]*else' }
+    - { symbol: '#endif',   match: '#[ \t]*endif' }
+    - { symbol: '#include', match: '#[ \t]*include' }
+    - { symbol: '#define',  match: '#[ \t]*define' }
+    - { symbol: '#undef',   match: '#[ \t]*undef' }
     # `#warning` must precede `#pragma` if any prefix sharing; no shared
     # prefix here so order is just cosmetic.
-    - { symbol: '#pragma',  match: '#pragma' }
-    - { symbol: '#warning', match: '#warning' }
-    - { symbol: '#error',   match: '#error' }
+    - { symbol: '#pragma',  match: '#[ \t]*pragma' }
+    - { symbol: '#warning', match: '#[ \t]*warning' }
+    - { symbol: '#error',   match: '#[ \t]*error' }
     # In-body operators: `##` (token paste) must precede `#` (stringify)
     # so longest-match picks the two-char form first. Both come AFTER all
     # the directive rules so `#define` etc. still win on longer matches.

@@ -46,7 +46,8 @@ internal sealed class SizeofFolder : RewritingTokenStream
 
     private readonly int _sizeofSym, _lparenSym, _rparenSym, _starSym, _numSym, _idSym, _typeNameSym;
     private readonly int _structSym, _unionSym, _enumSym, _typedefSym, _semiSym;
-    private readonly int _minusSym, _ampSym;
+    private readonly int _minusSym, _ampSym, _plusSym;
+    private readonly int _lbrackSym, _rbrackSym;
 
     public SizeofFolder(ISyncIterator<Item> inner) : base(inner)
     {
@@ -59,6 +60,9 @@ internal sealed class SizeofFolder : RewritingTokenStream
         _starSym = map["*"];
         _minusSym = map["-"];
         _ampSym = map["&"];
+        _plusSym = map["+"];
+        _lbrackSym = map["["];
+        _rbrackSym = map["]"];
         _numSym  = map["NUM"];
         _idSym   = map["ID"];
         _typeNameSym = map["TYPE_NAME"];
@@ -94,7 +98,16 @@ internal sealed class SizeofFolder : RewritingTokenStream
                         // Compute size from the type-specifier tokens before the name.
                         var specTokens = declTokens.Take(i).ToList();
                         var sz = EvalSizeof(specTokens);
-                        if (sz is int s) { _typedefSizes[name] = s; }
+                        // An ARRAY typedef (`typedef char abi[8];`) has `[ N ]`
+                        // suffix tokens after the name — the alias's size is the
+                        // base size times each bound. A non-literal bound (an
+                        // enum constant, sizeof, …) leaves the alias uncached:
+                        // folding nothing is correct (the IR layer still
+                        // resolves the size), caching the BASE size is not.
+                        if (sz is int s && TryApplyArraySuffix(declTokens, i + 1, ref s))
+                        {
+                            _typedefSizes[name] = s;
+                        }
                         break;
                     }
                 }
@@ -135,14 +148,15 @@ internal sealed class SizeofFolder : RewritingTokenStream
         // Can't fold (struct/union/enum, or an aggregate typedef) — re-emit the
         // `sizeof ( Type )` tokens. Peek the token that follows: if it's an
         // operator that ALSO has a unary-prefix form (`*` deref, `-` negate, `&`
-        // address-of), the parser would absorb it into a cast inside the operand
-        // (`sizeof(S) * x` → `sizeof((S)*x)`, silently dropping `* x`). Wrap the
-        // sizeof in parens so it's a complete primary and the operator binds as a
-        // binary operator. A bare sizeof (anything else following — `)`, `;`, `+`,
-        // `|`, …) is left untouched so the malloc-sizeof peephole still sees it.
+        // address-of, `+` unary plus), the parser would absorb it into a cast
+        // inside the operand (`sizeof(S) * x` → `sizeof((S)*x)`, silently
+        // dropping `* x`). Wrap the sizeof in parens so it's a complete primary
+        // and the operator binds as a binary operator. A bare sizeof (anything
+        // else following — `)`, `;`, `|`, …) is left untouched so the
+        // malloc-sizeof peephole still sees it.
         var hasNext = TryReadNext(out var nextTok);
         var wrap = hasNext && (nextTok!.ID == _starSym || nextTok.ID == _minusSym
-            || nextTok.ID == _ampSym);
+            || nextTok.ID == _ampSym || nextTok.ID == _plusSym);
         if (wrap) { Emit(new Item(_lparenSym, "(", token.Position)); }
         Emit(token); Emit(lp);
         foreach (var x in typeTokens) Emit(x);
@@ -153,6 +167,30 @@ internal sealed class SizeofFolder : RewritingTokenStream
         // after a `sizeof(Type)` without an intervening operator — so emitting it
         // directly is safe.
         if (hasNext) { Emit(nextTok!); }
+    }
+
+    /// <summary>Fold a typedef declarator's array-bound suffix (tokens from
+    /// <paramref name="start"/> on) into <paramref name="size"/>. No suffix —
+    /// a plain alias — succeeds unchanged. Each `[ NUM ]` group multiplies;
+    /// any other suffix shape (non-literal bound, fn-ptr parens) fails so the
+    /// caller skips caching rather than caching a wrong size.</summary>
+    private bool TryApplyArraySuffix(List<Item> declTokens, int start, ref int size)
+    {
+        var i = start;
+        while (i < declTokens.Count)
+        {
+            if (declTokens[i].ID != _lbrackSym
+                || i + 2 >= declTokens.Count
+                || declTokens[i + 1].ID != _numSym
+                || declTokens[i + 2].ID != _rbrackSym
+                || !int.TryParse(declTokens[i + 1].Content?.ToString(), out var bound))
+            {
+                return false;
+            }
+            size *= bound;
+            i += 3;
+        }
+        return true;
     }
 
     private int? EvalSizeof(List<Item> tokens)

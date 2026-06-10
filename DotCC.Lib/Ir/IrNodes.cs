@@ -122,15 +122,19 @@ public sealed record CommaOp(IReadOnlyList<CExpr> Items) : CExpr;
 /// array (which lowered to a pointer, so C#'s <c>sizeof</c> would be wrong).</summary>
 public sealed record SizeOfExpr(CType Of) : CExpr;
 
-/// <summary><c>offsetof(T, member)</c> — the byte offset of <paramref name="Member"/>
+/// <summary><c>offsetof(T, member-designator)</c> — the byte offset of the member
 /// within struct/union <paramref name="StructType"/>. Codegen computes it via the
 /// address-through-a-null-pointer idiom (<c>(nint)&amp;((T*)null)-&gt;m</c>), so it
 /// respects the real .NET blittable layout (alignment included).
-/// <see cref="MemberType"/> is the member's declared type (null if the struct/field
-/// isn't modelled) — a neutral fact from which the backend decides rendering: an
-/// array member that lowers to a C# <c>fixed</c> buffer already evaluates to its own
-/// address, so the backend omits the <c>&amp;</c> (taking it would be CS0211).</summary>
-public sealed record OffsetOf(CType StructType, string Member, CType? MemberType) : CExpr;
+/// <see cref="Path"/> is the designator as segments — one field name in the
+/// common case, or a dotted walk into nested members (C99 7.17:
+/// <c>offsetof(struct S, value.type.f)</c>, chibi's <c>sexp_offsetof</c>).
+/// <see cref="MemberType"/> is the FINAL member's declared type (null if the
+/// struct/field isn't modelled) — a neutral fact from which the backend decides
+/// rendering: an array member that lowers to a C# <c>fixed</c> buffer already
+/// evaluates to its own address, so the backend omits the <c>&amp;</c> (taking it
+/// would be CS0211).</summary>
+public sealed record OffsetOf(CType StructType, IReadOnlyList<string> Path, CType? MemberType) : CExpr;
 
 /// <summary>A positional struct/union aggregate initializer — lowered from
 /// <c>struct Point p = {3, 4}</c>. Codegen emits a C# object initializer
@@ -207,6 +211,13 @@ public abstract record CStmt
 
 /// <summary>A brace block with its own lexical scope.</summary>
 public sealed record Block(IReadOnlyList<CStmt> Stmts) : CStmt;
+
+/// <summary>A flat statement sequence WITHOUT scope braces — one C statement that
+/// lowers to several target statements sharing the enclosing scope. Produced by a
+/// multi-declarator declaration whose items need different stmt kinds
+/// (<c>char *str=NULL, numbuf[LEN];</c> → a <see cref="DeclStmt"/> + an
+/// <see cref="ArrayDecl"/>); a <see cref="Block"/> would wrongly scope the names.</summary>
+public sealed record Seq(IReadOnlyList<CStmt> Stmts) : CStmt;
 
 /// <summary>One or more local declarations from a single declaration statement
 /// (<c>int a = 0, b;</c>).</summary>
