@@ -22,9 +22,12 @@ namespace DotCC.Ir;
 /// <c>puts</c> plus a string-literal <c>printf</c> expanded inline at the call site
 /// (integer/char/string conversions), all over the WASI <c>fd_write</c> import.
 /// Wider printf and a <c>malloc</c>/<c>free</c>/<c>calloc</c>/<c>realloc</c> bump
-/// allocator over linear memory have since landed; floats still follow. Anything
-/// still outside the slice (floats, structs, goto/switch, varargs, other library calls) raises
-/// <see cref="IrUnsupportedException"/>.</para>
+/// allocator over linear memory have since landed, and floating-point arithmetic now
+/// lowers (literals, <c>f32</c>/<c>f64</c> operators, int↔float and float↔float
+/// conversions, comparisons, loads/stores) — only the printf float CONVERSIONS
+/// (<c>%f</c>/<c>%e</c>/<c>%g</c>) still wait on a decimal formatter. Anything still
+/// outside the slice (structs, goto/switch, varargs, globals, other library calls)
+/// raises <see cref="IrUnsupportedException"/>.</para>
 /// </summary>
 internal sealed class WatBackend
 {
@@ -69,9 +72,9 @@ internal sealed class WatBackend
     private int _frameSize;
     private bool _hasFrame;
     // Scratch locals, declared only when used (the body buffer makes that possible):
-    // a saved store value (i32/i64) and a saved store address (i32) for the
-    // read-modify-write of a compound assignment through memory.
-    private bool _scratch32, _scratch64, _scratchAddr;
+    // a saved store value (one per wasm value type) and a saved store address (i32)
+    // for the read-modify-write of a compound assignment / ++/-- through memory.
+    private bool _scratch32, _scratch64, _scratchF32, _scratchF64, _scratchAddr;
 
     // Interned string literals → linear-memory data segments.
     private readonly Dictionary<string, int> _strings = new(StringComparer.Ordinal);
@@ -202,7 +205,7 @@ internal sealed class WatBackend
         _labelSeq = 0;
         _frame.Clear();
         _frameSize = 0;
-        _scratch32 = _scratch64 = _scratchAddr = false;
+        _scratch32 = _scratch64 = _scratchF32 = _scratchF64 = _scratchAddr = false;
 
         var ret = fn.Sym.Type is CType.Func f ? f.Return : CType.Int;
         _currentRet = ret;
@@ -270,6 +273,8 @@ internal sealed class WatBackend
         if (_hasFrame) { Line("(local $__fp i32)"); }
         if (_scratch32) { Line("(local $__t32 i32)"); }
         if (_scratch64) { Line("(local $__t64 i64)"); }
+        if (_scratchF32) { Line("(local $__tf32 f32)"); }
+        if (_scratchF64) { Line("(local $__tf64 f64)"); }
         if (_scratchAddr) { Line("(local $__taddr i32)"); }
         _out.Append(body);
 
@@ -507,6 +512,9 @@ internal sealed class WatBackend
             case LitInt n:
                 Line($"{ValType(e.Type)}.const {_wat.RenderIntLit(n)}");
                 break;
+            case LitFloat lf:
+                Line($"{ValType(e.Type)}.const {_wat.RenderFloatLit(lf)}");
+                break;
             case LitStr ls:
                 Line($"i32.const {InternString(ls.Segments)}");
                 break;
@@ -583,19 +591,35 @@ internal sealed class WatBackend
                 EmitExpr(u.Operand);
                 break;
             case UnOp.Neg:
-                Line($"{ValType(u.Operand.Type)}.const 0");
-                EmitExpr(u.Operand);
-                Line($"{ValType(u.Operand.Type)}.sub");
+            {
+                var vt = ValType(u.Operand.Type);
+                if (vt is "f32" or "f64")
+                {
+                    EmitExpr(u.Operand);
+                    Line($"{vt}.neg");   // correct sign of zero (0 - 0.0 would be +0.0)
+                }
+                else
+                {
+                    Line($"{vt}.const 0");
+                    EmitExpr(u.Operand);
+                    Line($"{vt}.sub");
+                }
                 break;
+            }
             case UnOp.BitNot:
                 EmitExpr(u.Operand);
                 Line($"{ValType(u.Operand.Type)}.const -1");
                 Line($"{ValType(u.Operand.Type)}.xor");
                 break;
             case UnOp.LogNot:
+            {
+                var vt = ValType(u.Operand.Type);
                 EmitExpr(u.Operand);
-                Line($"{ValType(u.Operand.Type)}.eqz");
+                if (vt is "f32" or "f64") { Line($"{vt}.const 0"); Line($"{vt}.eq"); }
+                else if (vt == "i64") { Line("i64.eqz"); }
+                else { Line("i32.eqz"); }
                 break;
+            }
             case UnOp.AddrOf:
                 // &lvalue — the address machinery (frame slot, *p, a[i]).
                 EmitAddress(u.Operand);
@@ -694,9 +718,34 @@ internal sealed class WatBackend
             return;
         }
 
+        // A shift is the exception to the usual-arithmetic rule: its result type is the
+        // PROMOTED LEFT operand's type (the right operand doesn't take part — C99
+        // 6.5.7), which the IR already recorded as b.Type. wasm requires both operands
+        // of shl/shr to share a type, so the count is coerced to the left's width too
+        // (its value is taken mod the width, so the coercion is value-preserving for
+        // any in-range count).
+        if (b.Op is BinOp.Shl or BinOp.Shr)
+        {
+            var resT = b.Type.Unqualified;
+            EmitExpr(b.Left);
+            EmitConvert(b.Left.Type, resT);
+            EmitExpr(b.Right);
+            EmitConvert(b.Right.Type, resT);
+            Line(IntBinOp(b.Op, resT));
+            return;
+        }
+
+        // Every other arithmetic / relational op: both operands take the usual
+        // arithmetic conversions to a common type first (the IR records each operand's
+        // own type but does NOT pre-insert the coercion). Converting here is what makes
+        // mixed-width integer ops (int + long) and any float op (double + int)
+        // type-check on the wasm stack.
+        var common = CType.UsualArithmetic(b.Left.Type, b.Right.Type);
         EmitExpr(b.Left);
+        EmitConvert(b.Left.Type, common);
         EmitExpr(b.Right);
-        Line(IntBinOp(b.Op, CType.UsualArithmetic(b.Left.Type, b.Right.Type)));
+        EmitConvert(b.Right.Type, common);
+        Line(ArithBinOp(b.Op, common));
     }
 
     /// <summary>Pointer +/- integer (scaled by the pointee size), pointer - pointer
@@ -753,7 +802,7 @@ internal sealed class WatBackend
                 EmitConvert(vr.Type, common);
                 EmitExpr(a.Value);
                 EmitConvert(a.Value.Type, common);
-                Line(IntBinOp(cop, common));
+                Line(ArithBinOp(cop, common));
                 produced = common;
             }
             else
@@ -786,7 +835,7 @@ internal sealed class WatBackend
             EmitConvert(tt, common);
             EmitExpr(a.Value);
             EmitConvert(a.Value.Type, common);
-            Line(IntBinOp(mop, common));
+            Line(ArithBinOp(mop, common));
             EmitConvert(common, tt);
             Line($"local.set {scratch}");
             Line("local.get $__taddr");
@@ -822,22 +871,54 @@ internal sealed class WatBackend
     {
         var toVt = ValType(to);
         var fromVt = ValType(from);
+        var toFloat = toVt is "f32" or "f64";
+        var fromFloat = fromVt is "f32" or "f64";
+
         if (toVt == fromVt)
         {
-            NarrowI32(to.Unqualified);
+            // Same wasm value type: only an integer may need a sub-word re-narrow
+            // (e.g. int -> char); float-to-same-float is a no-op.
+            if (!toFloat) { NarrowI32(to.Unqualified); }
         }
-        else if (toVt == "i64" && fromVt == "i32")
+        else if (!toFloat && !fromFloat)
         {
-            Line(IsSignedInt(from) ? "i64.extend_i32_s" : "i64.extend_i32_u");
+            // Integer width change.
+            if (toVt == "i64")
+            {
+                Line(IsSignedInt(from) ? "i64.extend_i32_s" : "i64.extend_i32_u");
+            }
+            else
+            {
+                Line("i32.wrap_i64");
+                NarrowI32(to.Unqualified);
+            }
         }
-        else if (toVt == "i32" && fromVt == "i64")
+        else if (toFloat && fromFloat)
         {
-            Line("i32.wrap_i64");
-            NarrowI32(to.Unqualified);
+            // float <-> double.
+            Line(toVt == "f64" ? "f64.promote_f32" : "f32.demote_f64");
+        }
+        else if (toFloat)
+        {
+            // integer -> float: convert by the SOURCE integer's signedness.
+            var sx = IsSignedInt(from) ? "s" : "u";
+            Line($"{toVt}.convert_{fromVt}_{sx}");
+        }
+        else if (to.Unqualified is CType.Prim { Name: "_Bool" })
+        {
+            // float -> _Bool is "x != 0" (any nonzero, including a fraction, is 1),
+            // NOT a truncation — `(_Bool)0.5` is 1.
+            Line($"{fromVt}.const 0");
+            Line($"{fromVt}.ne");
         }
         else
         {
-            throw new IrUnsupportedException($"the wat target does not yet support the conversion {from.Describe()} -> {to.Describe()}");
+            // float -> integer: truncate toward zero by the TARGET's signedness.
+            // The saturating form avoids a trap on NaN / out-of-range (C makes that
+            // value undefined; saturating is the benign, deterministic choice).
+            var sx = IsSignedInt(to) ? "s" : "u";
+            Line($"{toVt}.trunc_sat_{fromVt}_{sx}");
+            NarrowI32(to.Unqualified);
         }
     }
 
@@ -1834,12 +1915,44 @@ internal sealed class WatBackend
     /// (i32/i64), marking it for declaration.</summary>
     private string ScratchFor(CType t)
     {
-        if (ValType(t) == "i64") { _scratch64 = true; return "$__t64"; }
-        _scratch32 = true;
-        return "$__t32";
+        switch (ValType(t))
+        {
+            case "i64": _scratch64 = true; return "$__t64";
+            case "f32": _scratchF32 = true; return "$__tf32";
+            case "f64": _scratchF64 = true; return "$__tf64";
+            default: _scratch32 = true; return "$__t32";
+        }
     }
 
     // ---- helpers ---------------------------------------------------------
+
+    /// <summary>The wasm instruction for an arithmetic/relational binary op on a
+    /// common operand type — dispatching to the float or the integer instruction set.
+    /// Both operands have already been converted to <paramref name="operand"/>.</summary>
+    private string ArithBinOp(BinOp op, CType operand) =>
+        ValType(operand) is "f32" or "f64" ? FloatBinOp(op, operand) : IntBinOp(op, operand);
+
+    /// <summary>Float arithmetic and comparisons. wasm float compares have no
+    /// signedness suffix; there is no float remainder or bitwise/shift op (C forbids
+    /// <c>%</c> and the bitwise ops on floating operands — <c>fmod</c> is a call).</summary>
+    private string FloatBinOp(BinOp op, CType operand)
+    {
+        var vt = ValType(operand);
+        return op switch
+        {
+            BinOp.Add => $"{vt}.add",
+            BinOp.Sub => $"{vt}.sub",
+            BinOp.Mul => $"{vt}.mul",
+            BinOp.Div => $"{vt}.div",
+            BinOp.Eq => $"{vt}.eq",
+            BinOp.Ne => $"{vt}.ne",
+            BinOp.Lt => $"{vt}.lt",
+            BinOp.Gt => $"{vt}.gt",
+            BinOp.Le => $"{vt}.le",
+            BinOp.Ge => $"{vt}.ge",
+            _ => throw new IrUnsupportedException($"the wat target does not support floating-point operator {op}"),
+        };
+    }
 
     private string IntBinOp(BinOp op, CType operand)
     {
@@ -1883,8 +1996,9 @@ internal sealed class WatBackend
         var p = pointee.Unqualified;
         if (p is CType.Pointer or CType.Func) { return "i32.load"; }
         if (p is CType.Enum en) { return LoadInstr(en.Underlying); }
-        if (p is CType.Prim { Integer: true } prim)
+        if (p is CType.Prim prim)
         {
+            if (!prim.Integer) { return prim.Bytes <= 4 ? "f32.load" : "f64.load"; }
             return prim.Bytes switch
             {
                 1 => prim.Signed ? "i32.load8_s" : "i32.load8_u",
@@ -1902,8 +2016,9 @@ internal sealed class WatBackend
         var p = pointee.Unqualified;
         if (p is CType.Pointer or CType.Func) { return "i32.store"; }
         if (p is CType.Enum en) { return StoreInstr(en.Underlying); }
-        if (p is CType.Prim { Integer: true } prim)
+        if (p is CType.Prim prim)
         {
+            if (!prim.Integer) { return prim.Bytes <= 4 ? "f32.store" : "f64.store"; }
             return prim.Bytes switch
             {
                 1 => "i32.store8",
@@ -1960,13 +2075,19 @@ internal sealed class WatBackend
     private void EmitCond(CExpr c)
     {
         EmitExpr(c);
-        if (ValType(c.Type) == "i64") { Line("i64.const 0"); Line("i64.ne"); }
+        var vt = ValType(c.Type);
+        // An i32 already serves as a wasm condition; an i64 or a float must be reduced
+        // to an i32 truth value (x != 0).
+        if (vt is "f32" or "f64") { Line($"{vt}.const 0"); Line($"{vt}.ne"); }
+        else if (vt == "i64") { Line("i64.const 0"); Line("i64.ne"); }
     }
 
     private void EmitBool(CExpr c)
     {
         EmitExpr(c);
-        if (ValType(c.Type) == "i64") { Line("i64.const 0"); Line("i64.ne"); }
+        var vt = ValType(c.Type);
+        if (vt is "f32" or "f64") { Line($"{vt}.const 0"); Line($"{vt}.ne"); }
+        else if (vt == "i64") { Line("i64.const 0"); Line("i64.ne"); }
         else { Line("i32.const 0"); Line("i32.ne"); }
     }
 

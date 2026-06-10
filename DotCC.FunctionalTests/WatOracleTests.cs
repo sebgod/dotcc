@@ -62,6 +62,19 @@ public sealed class WatOracleTests
     [InlineData("#include <stdlib.h>\nint main(void){ int *x=malloc(sizeof(int)); *x=5; free(x); int *y=malloc(sizeof(int)); *y=7; return *y; }", 7)]
     [InlineData("#include <stdlib.h>\nint main(void){ int *a=calloc(3,sizeof(int)); a[0]+=1; a[1]+=2; a[2]+=3; return a[0]+a[1]+a[2]; }", 6)]
     [InlineData("#include <stdlib.h>\nint main(void){ int *a=malloc(2*sizeof(int)); a[0]=11; a[1]=22; a=realloc(a,4*sizeof(int)); a[2]=33; a[3]=44; return a[0]+a[1]+a[2]+a[3]; }", 110)]
+    // floating point — f64/f32 arithmetic observed by truncating the result to int
+    // (the oracle asserts main()'s int return).
+    [InlineData("int main(void){ return (int)(1.5 + 2.5); }", 4)]
+    [InlineData("int main(void){ return (int)(7.0/2.0 * 10); }", 35)]
+    [InlineData("int main(void){ int n=5; double d=2.5; return (int)(n*d); }", 12)]
+    [InlineData("int main(void){ return (int)(-2.9); }", -2)]                       // truncation toward zero
+    [InlineData("int main(void){ double a=1.5,b=2.5; return a<b ? 10 : 20; }", 10)]
+    [InlineData("int main(void){ float f=0.5f, g=0.25f; return (int)((f+g)*100); }", 75)]
+    [InlineData("int main(void){ double d=1.0; d+=2.5; d*=2.0; return (int)d; }", 7)]
+    [InlineData("int main(void){ double d=2.0; double *p=&d; *p+=0.5; return (int)(*p*10); }", 25)]
+    [InlineData("int main(void){ double a[3]={1.5,2.5,3.0}; double s=0; for(int i=0;i<3;i++) s+=a[i]; return (int)s; }", 7)]
+    [InlineData("double sq(double x){ return x*x; } int main(void){ return (int)sq(3.0); }", 9)]
+    [InlineData("int main(void){ double d=3.5; d++; return (int)d; }", 4)]
     public void Wat_program_returns_expected_value(string source, int expected)
     {
         if (!Requested)

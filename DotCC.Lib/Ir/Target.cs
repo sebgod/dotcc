@@ -139,9 +139,9 @@ internal sealed class CSharpNameLegalizer : INameLegalizer
 /// width onto <c>i32</c>/<c>i64</c> (LP64: <c>long</c> and every address are
 /// 64-bit), and its narrower types (<c>char</c>/<c>short</c>/<c>_Bool</c>) ride in
 /// an <c>i32</c> with explicit masking at the narrowing points the emitter inserts
-/// — where the C# backend got distinct storage types for free. (Milestone 1 is the
-/// integer slice; floating-point and pointers raise <see cref="IrUnsupportedException"/>
-/// until the float and linear-memory phases land.)
+/// — where the C# backend got distinct storage types for free. Floating-point maps
+/// onto the two wasm float types (<c>float</c>→<c>f32</c>, <c>double</c>→<c>f64</c>),
+/// and pointers/arrays onto <c>i32</c> linear-memory offsets (wasm32).
 /// </summary>
 internal sealed class WatTarget : ITarget
 {
@@ -158,13 +158,14 @@ internal sealed class WatTarget : ITarget
     };
 
     /// <summary>A C primitive → its wasm value type: integers narrower than 8 bytes
-    /// live in <c>i32</c>, 8-byte integers in <c>i64</c>. Floating-point is gated
-    /// until milestone 1.5.</summary>
+    /// live in <c>i32</c>, 8-byte integers in <c>i64</c>; <c>float</c> is <c>f32</c>
+    /// and <c>double</c>/<c>long double</c> are <c>f64</c> (dotcc models long double
+    /// as 64-bit).</summary>
     private static string RenderPrim(CType.Prim p)
     {
         if (!p.Integer)
         {
-            throw new IrUnsupportedException("floating-point unsupported on wat target (milestone 1)");
+            return p.Bytes <= 4 ? "f32" : "f64";
         }
         return p.Bytes <= 4 ? "i32" : "i64";
     }
@@ -173,7 +174,19 @@ internal sealed class WatTarget : ITarget
     /// the literal's width is carried by the instruction's own type prefix.</summary>
     public string RenderIntLit(LitInt lit) => lit.Digits;
 
-    public string RenderFloatLit(LitFloat lit) => lit.Text;
+    /// <summary>Render a float constant for <c>f32.const</c>/<c>f64.const</c>. The
+    /// neutral <see cref="LitFloat.Text"/> is a C/C# decimal spelling, which differs
+    /// from wat's literal syntax in two ways the const grammar rejects: a trailing
+    /// <c>f</c>/<c>F</c> suffix (wat carries the width on the instruction prefix, not
+    /// the literal) and a leading <c>.</c> (wat requires a digit before the point).
+    /// Exponent forms (<c>1E+21</c>) and bare integers (<c>1024</c>) are already legal.</summary>
+    public string RenderFloatLit(LitFloat lit)
+    {
+        var t = lit.Text;
+        if (t.Length > 0 && t[^1] is 'f' or 'F') { t = t[..^1]; }
+        if (t.Length > 0 && t[0] == '.') { t = "0" + t; }
+        return t;
+    }
 }
 
 /// <summary>The WebAssembly-text backend's identifier policy — the seam's second

@@ -327,4 +327,106 @@ public sealed class WatBackendTests
         wat.ShouldNotContain("(global $__hp");
         wat.ShouldNotContain("memory.grow");
     }
+
+    // ---- floating point --------------------------------------------------
+
+    [Fact]
+    public void double_literal_and_arithmetic_lower_to_f64_ops()
+    {
+        // A floating literal is an f64.const; arithmetic uses the f64 instruction set;
+        // the (int) cast truncates toward zero (saturating, so NaN/overflow can't trap).
+        var wat = Wat("int main(void){ return (int)(1.5 + 2.5); }");
+        wat.ShouldContain("f64.const 1.5");
+        wat.ShouldContain("f64.const 2.5");
+        wat.ShouldContain("f64.add");
+        wat.ShouldContain("i32.trunc_sat_f64_s");
+    }
+
+    [Fact]
+    public void float_literal_f_suffix_is_stripped_for_wat()
+    {
+        // wat carries the float width on the instruction prefix, so the C `f` suffix
+        // must be dropped (the literal is typed double / f64 regardless of the suffix).
+        var wat = Wat("int main(void){ double x = 1.5f; return (int)x; }");
+        wat.ShouldContain("f64.const 1.5");
+        wat.ShouldNotContain("1.5f");
+    }
+
+    [Fact]
+    public void float_type_uses_f32_storage_and_demotes_the_double_literal()
+    {
+        // `float` is f32; the double-typed literal demotes on the store into it.
+        var wat = Wat("int main(void){ float f = 1.5; return (int)f; }");
+        wat.ShouldContain("(local $f f32)");
+        wat.ShouldContain("f32.demote_f64");
+        wat.ShouldContain("i32.trunc_sat_f32_s");
+    }
+
+    [Fact]
+    public void int_promotes_to_double_in_a_mixed_expression()
+    {
+        // The int operand widens to f64 before the f64 add (usual arithmetic).
+        var wat = Wat("int main(void){ int n = 3; double d = 2.0; return (int)(d + n); }");
+        wat.ShouldContain("f64.convert_i32_s");
+        wat.ShouldContain("f64.add");
+    }
+
+    [Fact]
+    public void float_comparison_has_no_signedness_suffix()
+    {
+        var wat = Wat("int main(void){ double a = 1.5, b = 2.5; return a < b; }");
+        wat.ShouldContain("f64.lt");
+        wat.ShouldNotContain("f64.lt_s");
+        wat.ShouldNotContain("f64.lt_u");
+    }
+
+    [Fact]
+    public void float_truthiness_compares_against_zero()
+    {
+        // A float condition isn't a wasm i32; it reduces to (x != 0).
+        var wat = Wat("int main(void){ double d = 3.0; if (d) return 1; return 0; }");
+        wat.ShouldContain("f64.const 0");
+        wat.ShouldContain("f64.ne");
+    }
+
+    [Fact]
+    public void float_negation_uses_neg_for_a_correct_signed_zero()
+    {
+        // `f64.neg` (not `0 - x`, which would turn -0.0 into +0.0).
+        var wat = Wat("int main(void){ double d = 1.5; return (int)(-d); }");
+        wat.ShouldContain("f64.neg");
+    }
+
+    [Fact]
+    public void float_memory_lvalue_compound_assign_uses_a_float_scratch()
+    {
+        // An array element is a memory lvalue; `+=` on a double element
+        // read-modify-writes through the address, staging in an f64 scratch (not i32).
+        var wat = Wat("int main(void){ double a[2]; a[0] = 1.0; a[0] += 2.5; return (int)a[0]; }");
+        wat.ShouldContain("(local $__tf64 f64)");
+        wat.ShouldContain("f64.load");
+        wat.ShouldContain("f64.add");
+        wat.ShouldContain("f64.store");
+    }
+
+    [Fact]
+    public void mixed_width_integer_op_extends_the_narrower_operand()
+    {
+        // The IR doesn't pre-coerce binary operands, so the backend widens the int to
+        // i64 before the i64 op — without it the stack types wouldn't match.
+        var wat = Wat("int main(void){ long a = 5; int b = 3; return (int)(a + b); }");
+        wat.ShouldContain("i64.extend_i32_s");
+        wat.ShouldContain("i64.add");
+    }
+
+    [Fact]
+    public void shift_result_keeps_the_left_operand_width()
+    {
+        // C99 6.5.7: a shift's type is the promoted LEFT operand's, regardless of the
+        // count's type. `int << long` stays i32 — the i64 count is wrapped to i32.
+        var wat = Wat("int main(void){ int x = 1; long s = 2; return x << s; }");
+        wat.ShouldContain("i32.shl");
+        wat.ShouldNotContain("i64.shl");
+        wat.ShouldContain("i32.wrap_i64");
+    }
 }
