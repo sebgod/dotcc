@@ -85,7 +85,12 @@ internal sealed class WatBackend
     private StringBuilder _out;
     private int _indent;
 
-    private readonly List<(string Brk, string Cont)> _loops = new();
+    // Break/continue targets, modelling C's rules: `break` leaves the nearest
+    // enclosing loop OR switch, so both push here; `continue` only ever targets the
+    // nearest enclosing LOOP, so a switch does not push to it (a `continue` inside a
+    // switch body still steps the surrounding loop).
+    private readonly List<string> _breakTargets = new();
+    private readonly List<string> _contTargets = new();
     private int _labelSeq;
     private readonly HashSet<string> _defined = new(StringComparer.Ordinal);
     private CType _currentRet = CType.Int;
@@ -247,7 +252,8 @@ internal sealed class WatBackend
         {
             throw new IrUnsupportedException("variadic functions are not supported on the wat target");
         }
-        _loops.Clear();
+        _breakTargets.Clear();
+        _contTargets.Clear();
         _labelSeq = 0;
         _frame.Clear();
         _frameSize = 0;
@@ -380,6 +386,18 @@ internal sealed class WatBackend
                 if (f.Init is { } init) { CollectLocals(init, acc); }
                 CollectLocals(f.Body, acc);
                 break;
+            case Switch sw:
+                foreach (var sec in sw.Sections)
+                {
+                    foreach (var st in sec.Body) { CollectLocals(st, acc); }
+                }
+                break;
+            case Labeled lab:
+                CollectLocals(lab.Body, acc);
+                break;
+            case CaseLabelStmt cl:
+                CollectLocals(cl.Body, acc);
+                break;
             default:
                 break;
         }
@@ -465,20 +483,31 @@ internal sealed class WatBackend
                 break;
 
             case Break:
-                if (_loops.Count == 0)
+                if (_breakTargets.Count == 0)
                 {
-                    throw new IrUnsupportedException("`break` outside a loop is not supported on the wat target (switch is a later milestone)");
+                    throw new IrUnsupportedException("`break` outside a loop or switch");
                 }
-                Line($"br {_loops[^1].Brk}");
+                Line($"br {_breakTargets[^1]}");
                 break;
 
             case Continue:
-                if (_loops.Count == 0)
+                if (_contTargets.Count == 0)
                 {
-                    throw new IrUnsupportedException("`continue` outside a loop is not supported on the wat target");
+                    throw new IrUnsupportedException("`continue` outside a loop");
                 }
-                Line($"br {_loops[^1].Cont}");
+                Line($"br {_contTargets[^1]}");
                 break;
+
+            case Switch sw:
+                EmitSwitch(sw);
+                break;
+
+            case CaseLabelStmt:
+                throw new IrUnsupportedException("a case/default label nested inside another statement (Duff's device) is not supported on the wat target");
+
+            case Goto:
+            case Labeled:
+                throw new IrUnsupportedException("`goto` and labels are not yet supported on the wat target");
 
             default:
                 throw new IrUnsupportedException($"the wat target does not yet support the statement {s.GetType().Name}");
@@ -521,9 +550,11 @@ internal sealed class WatBackend
         }
         Line($"block {cont}");
         _indent++;
-        _loops.Add((brk, cont));
+        _breakTargets.Add(brk);
+        _contTargets.Add(cont);
         EmitStmt(body);
-        _loops.RemoveAt(_loops.Count - 1);
+        _contTargets.RemoveAt(_contTargets.Count - 1);
+        _breakTargets.RemoveAt(_breakTargets.Count - 1);
         _indent--;
         Line("end"); // $cont
         if (post is { } p)
@@ -544,6 +575,80 @@ internal sealed class WatBackend
         Line("end"); // $loop
         _indent--;
         Line("end"); // $brk
+    }
+
+    /// <summary>Lower a C <c>switch</c> into wasm's structured control flow. Each
+    /// section gets a nested <c>block</c>; the bodies are emitted in source order
+    /// between the blocks' <c>end</c>s, so on a matched branch control runs that
+    /// section's body and then FALLS THROUGH into the next — exactly C's semantics
+    /// (a <c>break</c> exits via the enclosing <c>$swbrk</c>). The innermost code is
+    /// the dispatch: the subject is evaluated once into a scratch local, then each
+    /// <c>case</c> value is compared against it and branches to that section's block;
+    /// if nothing matches it branches to <c>default</c>'s block, or past the whole
+    /// switch when there is no default. <c>continue</c> is deliberately untouched —
+    /// a switch does not push a continue target, so it still steps the enclosing loop.
+    /// <para>Dispatch is a comparison chain (correct for any, even sparse, case
+    /// values); a dense <c>br_table</c> is a possible later optimisation.</para></summary>
+    private void EmitSwitch(Switch sw)
+    {
+        var n = _labelSeq++;
+        var brk = $"$swbrk{n}";
+        var k = sw.Sections.Count;
+        var subjType = sw.Subject.Type;
+        var vt = ValType(subjType);
+        var subj = ScratchFor(subjType);          // subject is read once per case; cache it
+        EmitExpr(sw.Subject);
+        Line($"local.set {subj}");
+
+        var secLabel = new string[k];
+        var defaultIdx = -1;
+        for (var i = 0; i < k; i++)
+        {
+            secLabel[i] = $"$sw{n}_{i}";
+            foreach (var lab in sw.Sections[i].Labels)
+            {
+                if (lab.CaseExpr is null) { defaultIdx = i; }
+            }
+        }
+
+        // Open $swbrk, then the section blocks in REVERSE so section 0 is innermost:
+        // its body (emitted right after its `end`) comes first and falls into the rest.
+        Line($"block {brk}");
+        _indent++;
+        for (var i = k - 1; i >= 0; i--)
+        {
+            Line($"block {secLabel[i]}");
+            _indent++;
+        }
+
+        // Dispatch (innermost): subject == caseValue ? br to that section : try the next;
+        // fall through to default (or out of the switch) when nothing matches.
+        for (var i = 0; i < k; i++)
+        {
+            foreach (var lab in sw.Sections[i].Labels)
+            {
+                if (lab.CaseExpr is not { } ce) { continue; }   // 'default' resolved below
+                Line($"local.get {subj}");
+                EmitExpr(ce);
+                EmitConvert(ce.Type, subjType);
+                Line($"{vt}.eq");
+                Line($"br_if {secLabel[i]}");
+            }
+        }
+        Line(defaultIdx >= 0 ? $"br {secLabel[defaultIdx]}" : $"br {brk}");
+
+        // Close each section block in forward order, emitting its body right after the
+        // `end` (so it runs on a hit AND falls into the next section — C fall-through).
+        _breakTargets.Add(brk);
+        for (var i = 0; i < k; i++)
+        {
+            _indent--;
+            Line("end"); // $sw{n}_{i}
+            foreach (var st in sw.Sections[i].Body) { EmitStmt(st); }
+        }
+        _breakTargets.RemoveAt(_breakTargets.Count - 1);
+        _indent--;
+        Line("end"); // $swbrk
     }
 
     // ---- expressions (post-order onto the stack) -------------------------

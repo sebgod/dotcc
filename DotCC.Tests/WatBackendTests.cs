@@ -90,6 +90,37 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void switch_lowers_to_nested_blocks_with_a_comparison_dispatch()
+    {
+        // A $swbrk block wraps per-section blocks; the dispatch compares the (cached)
+        // subject to each case value and branches into the matching section.
+        var wat = Wat("int f(int x){ switch(x){ case 1: return 1; case 2: return 2; default: return 0; } } int main(void){ return f(2); }");
+        wat.ShouldContain("block $swbrk");
+        wat.ShouldContain("block $sw");
+        wat.ShouldContain("i32.eq");
+        wat.ShouldContain("br_if $sw");
+    }
+
+    [Fact]
+    public void break_in_a_switch_targets_the_switch_while_continue_targets_the_loop()
+    {
+        // A switch nested in a loop: `break` exits the switch ($swbrk), `continue`
+        // steps the loop ($cont) — the switch never captures continue.
+        var wat = Wat("int main(void){ int t=0; for(int i=0;i<3;i++){ switch(i){ case 0: continue; case 1: break; default: t++; } t+=10; } return t; }");
+        wat.ShouldContain("br $swbrk");   // the switch's break
+        wat.ShouldContain("br $cont");    // the switch's continue still steps the loop
+    }
+
+    [Fact]
+    public void switch_with_a_duffs_device_nested_case_fails_loud()
+    {
+        // A case label nested inside another statement (Duff's device) is unsupported
+        // on wat (as on the C# backend) — fail loud rather than miscompile.
+        Should.Throw<CompileException>(() => Wat(
+            "int main(void){ int n=4,i=0; switch(n%2){ case 0: do { i++; case 1: i++; } while(--n>0); } return i; }"));
+    }
+
+    [Fact]
     public void direct_call_emits_dollar_name_and_param_signature()
     {
         var wat = Wat("int add(int a,int b){ return a+b; } int main(void){ return add(3,4); }");

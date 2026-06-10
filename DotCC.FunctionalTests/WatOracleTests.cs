@@ -75,6 +75,14 @@ public sealed class WatOracleTests
     [InlineData("int main(void){ double a[3]={1.5,2.5,3.0}; double s=0; for(int i=0;i<3;i++) s+=a[i]; return (int)s; }", 7)]
     [InlineData("double sq(double x){ return x*x; } int main(void){ return (int)sq(3.0); }", 9)]
     [InlineData("int main(void){ double d=3.5; d++; return (int)d; }", 4)]
+    // switch / case / default — nested-block lowering, comparison dispatch, fall-through
+    [InlineData("int f(int x){ switch(x){ case 1: return 10; case 2: case 3: return 23; default: return -1; } } int main(void){ return f(3); }", 23)]
+    [InlineData("int f(int x){ int s=0; switch(x){ case 0: s+=1; case 1: s+=2; case 2: s+=4; break; default: s+=100; } return s; } int main(void){ return f(0); }", 7)]
+    [InlineData("int f(int x){ int r=-7; switch(x){ case 1: r=1; break; case 2: r=2; break; } return r; } int main(void){ return f(9); }", -7)]
+    [InlineData("int f(int x){ switch(x){ case -1: return 100; case -2: return 200; default: return 0; } } int main(void){ return f(-2); }", 200)]
+    [InlineData("long f(long x){ switch(x){ case 10000000000: return 1; default: return 0; } } int main(void){ return (int)f(10000000000); }", 1)]
+    [InlineData("int main(void){ int t=0; for(int i=0;i<5;i++){ switch(i){ case 2: continue; case 4: break; default: t+=i; } t+=100; } return t; }", 404)]
+    [InlineData("enum C{R,G=5,B}; int f(enum C c){ switch(c){ case R: return 1; case G: return 5; case B: return 6; } return -1; } int main(void){ return f(B); }", 6)]
     // decimal-float literal spellings without two digit runs around the point: a
     // point-free exponent (`1e10`/`1e-7` — the documented lexer gap), a leading dot
     // (`.5`), a trailing dot (`1.`), and a dot-before-exponent (`2.e3`).
@@ -105,6 +113,8 @@ public sealed class WatOracleTests
     [InlineData("void greet(char *s){ puts(s); } int main(void){ greet(\"hi\"); greet(\"yo\"); return 0; }", "hi\nyo\n")]
     [InlineData("int main(void){ char *s = \"abc\"; while(*s) putchar(*s++); return 0; }", "abc")]
     [InlineData("int main(void){ for(int i=0;i<3;i++) putchar('0'+i); return 0; }", "012")]
+    // switch fall-through, observed by what each iteration prints
+    [InlineData("int main(void){ for(int i=0;i<4;i++){ switch(i){ case 0: putchar('a'); case 1: putchar('b'); break; default: putchar('x'); } } return 0; }", "abbxx")]
     // printf — string-literal format expanded at compile time
     [InlineData("int main(void){ printf(\"hello\\n\"); return 0; }", "hello\n")]
     [InlineData("int main(void){ printf(\"n=%d\\n\", 42); return 0; }", "n=42\n")]
