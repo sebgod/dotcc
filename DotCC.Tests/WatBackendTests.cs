@@ -191,6 +191,17 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void printf_percent_a_emits_the_hex_float_formatter_without_bignum()
+    {
+        // %a is an exact IEEE-754 bit-dump, so it routes to $__pf_a and pulls in only
+        // the shared field layout — never the %f big-integer block or the %e/%g Dragon.
+        var wat = Wat("int main(void){ printf(\"%a\", 1.5); return 0; }");
+        wat.ShouldContain("call $__pf_a");
+        wat.ShouldNotContain("call $__dragon");
+        wat.ShouldNotContain("call $__bn_mul");
+    }
+
+    [Fact]
     public void printf_hash_hex_packs_the_radix_prefix_into_the_sign_slot()
     {
         // %#x packs the "0x" prefix low-byte-first into the same i32 slot $__pf_emit

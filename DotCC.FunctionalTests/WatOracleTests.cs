@@ -185,6 +185,20 @@ public sealed class WatOracleTests
     [InlineData("int main(void){ printf(\"%e|%E\", 1.0, 1.0); return 0; }", "1.000000e+00|1.000000E+00")]
     [InlineData("int main(void){ double z=0.0; printf(\"%e %f %g\", 1.0/z, 1.0/z, 1.0/z); return 0; }", "inf inf inf")]
     [InlineData("int main(void){ double z=0.0; printf(\"%E %F %G\", 1.0/z, 1.0/z, 1.0/z); return 0; }", "INF INF INF")]
+    // %a / %A — exact hexadecimal float (a direct IEEE-754 bit dump). Default precision
+    // emits every significant nibble (round-trippable); an explicit one rounds
+    // half-to-even, with the carry able to bump the leading digit / exponent.
+    [InlineData("int main(void){ printf(\"%a %a %a\", 1.0, 2.0, 0.5); return 0; }", "0x1p+0 0x1p+1 0x1p-1")]
+    [InlineData("int main(void){ printf(\"%a %a\", 3.0, -2.5); return 0; }", "0x1.8p+1 -0x1.4p+1")]
+    [InlineData("int main(void){ printf(\"%a\", 0.1); return 0; }", "0x1.999999999999ap-4")]
+    [InlineData("int main(void){ printf(\"%a %a\", 0.0, -0.0); return 0; }", "0x0p+0 -0x0p+0")]
+    [InlineData("int main(void){ printf(\"%A %A\", 1.0, 0.1); return 0; }", "0X1P+0 0X1.999999999999AP-4")]
+    [InlineData("int main(void){ printf(\"%.2a\", 3.14159); return 0; }", "0x1.92p+1")]
+    [InlineData("int main(void){ printf(\"%.0a %.0a\", 1.5, 2.5); return 0; }", "0x2p+0 0x1p+1")]   // round half to even
+    [InlineData("int main(void){ printf(\"%.1a\", 1.984375); return 0; }", "0x2.0p+0")]            // carry bumps the leading digit
+    [InlineData("int main(void){ printf(\"%#.0a\", 1.0); return 0; }", "0x1.p+0")]                 // '#' forces the point
+    [InlineData("int main(void){ printf(\"[%12a][%-12a]\", 1.0, 1.0); return 0; }", "[      0x1p+0][0x1p+0      ]")]
+    [InlineData("int main(void){ printf(\"%a\", 5e-324); return 0; }", "0x0.0000000000001p-1022")] // smallest subnormal
     public void Wat_program_writes_expected_stdout(string source, string expected)
     {
         if (!Requested)

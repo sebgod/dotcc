@@ -154,6 +154,9 @@ internal sealed class WatBackend
             case "__pf_e": NeedRuntime("__dragon"); NeedRuntime("__pf_emit"); break;
             case "__pf_g": NeedRuntime("__dragon"); NeedRuntime("__pf_emit"); break;
             case "__dragon": NeedRuntime("__rbn"); break;
+            // %a is an exact bit-dump (no big-integer / Dragon machinery); it only
+            // needs the shared field-layout helper.
+            case "__pf_a": NeedRuntime("__pf_emit"); break;
             // The heap allocators: calloc/realloc are written in terms of malloc.
             // malloc itself has no helper deps (it uses the $__hp global + memory.grow);
             // free isn't a runtime function at all (it lowers to an inline drop).
@@ -1146,7 +1149,7 @@ internal sealed class WatBackend
         // conversions (`0x`/`0X` prefix; a forced leading `0` for octal). For the
         // remaining conversions where C leaves `#` undefined (d/i/u/c/s), it still
         // fails loud rather than silently ignore the flag.
-        if (spec.Alt && spec.Conv is not ('f' or 'F' or 'e' or 'E' or 'g' or 'G' or 'x' or 'X' or 'o'))
+        if (spec.Alt && spec.Conv is not ('f' or 'F' or 'e' or 'E' or 'g' or 'G' or 'a' or 'A' or 'x' or 'X' or 'o'))
         {
             throw new IrUnsupportedException($"the wat target does not yet support the printf '#' flag (in '%{spec.Conv}')");
         }
@@ -1185,6 +1188,7 @@ internal sealed class WatBackend
             case 'f': case 'F': EmitFloatConv(arg, spec, spec.Conv); break;
             case 'e': case 'E': EmitFloatConv(arg, spec, spec.Conv); break;
             case 'g': case 'G': EmitFloatConv(arg, spec, spec.Conv); break;
+            case 'a': case 'A': EmitFloatConv(arg, spec, spec.Conv); break;
             default:
                 throw new IrUnsupportedException($"the wat target does not yet support the printf conversion '%{spec.Conv}' (%p comes later)");
         }
@@ -1224,28 +1228,33 @@ internal sealed class WatBackend
         Line("call $__pf_int_u");
     }
 
-    /// <summary>Lower a floating <c>%f</c>/<c>%e</c>/<c>%g</c> conversion: push the
-    /// value as an f64 (a <c>float</c> argument is promoted, matching C's default
+    /// <summary>Lower a floating <c>%f</c>/<c>%e</c>/<c>%g</c>/<c>%a</c> conversion: push
+    /// the value as an f64 (a <c>float</c> argument is promoted, matching C's default
     /// argument promotion), then the compile-time-constant field parameters, and call
-    /// the matching runtime formatter. Each forms the EXACT value with big-integer
-    /// arithmetic and rounds once (round-half-to-even), so the digits match a real
-    /// libc: <c>%f</c> via value × 10^precision, <c>%e</c>/<c>%g</c> via a scaled
+    /// the matching runtime formatter. The decimal forms each build the EXACT value with
+    /// big-integer arithmetic and round once (round-half-to-even), so the digits match a
+    /// real libc: <c>%f</c> via value × 10^precision, <c>%e</c>/<c>%g</c> via a scaled
     /// Dragon digit generator. For <c>%g</c> the "precision" is significant digits
-    /// (C99: a precision of 0 is taken as 1).</summary>
+    /// (C99: a precision of 0 is taken as 1). <c>%a</c> is exact by construction — a
+    /// direct dump of the IEEE-754 mantissa as hex nibbles — so it needs no big-integer
+    /// machinery; an unspecified precision (passed as -1) means "as many nibbles as the
+    /// value needs", and an explicit one rounds half-to-even.</summary>
     private void EmitFloatConv(CExpr arg, PrintfFormat.Spec spec, char conv)
     {
-        // Uppercase conversions (%F/%E/%G) differ only in casing: an 'E' exponent
-        // marker and uppercase INF/NAN. The runtime helper is the same one; an extra
-        // flag selects the case (it folds to lowercase − (upper << 5) at each letter).
-        var upper = conv is 'F' or 'E' or 'G';
+        // Uppercase conversions (%F/%E/%G/%A) differ only in casing: an 'E'/'P' marker
+        // and uppercase INF/NAN / hex digits. The runtime helper is the same one; an
+        // extra flag selects the case (it folds to lowercase − (upper << 5) per letter).
+        var upper = conv is 'F' or 'E' or 'G' or 'A';
         var lc = char.ToLowerInvariant(conv);
-        var prec = spec.Precision >= 0 ? spec.Precision : 6;   // C default precision is 6
+        // %a's default precision is "exact" (-1), not 6 — it never invents trailing
+        // zeros the way the decimal conversions do.
+        var prec = spec.Precision >= 0 ? spec.Precision : (lc == 'a' ? -1 : 6);
         if (lc == 'g' && prec == 0) { prec = 1; }              // %g: precision 0 means 1
         if (prec > MaxFloatPrec)
         {
             throw new IrUnsupportedException($"the wat target does not yet support printf float precision > {MaxFloatPrec} (in '%{spec.Conv}')");
         }
-        var runtime = lc switch { 'e' => "__pf_e", 'g' => "__pf_g", _ => "__pf_f" };
+        var runtime = lc switch { 'e' => "__pf_e", 'g' => "__pf_g", 'a' => "__pf_a", _ => "__pf_f" };
         NeedRuntime(runtime);
         EmitExpr(arg);
         var vt = ValType(arg.Type);
@@ -2615,6 +2624,192 @@ internal sealed class WatBackend
       local.get $p local.get $ax i32.const 10 i32.rem_u i32.const 48 i32.add i32.store8
       local.get $p i32.const 1 i32.add local.set $p
     end
+    i32.const {{FpEOut}}
+    local.get $p i32.const {{FpEOut}} i32.sub
+    local.get $sign local.get $width local.get $mode
+    call $__pf_emit
+  )
+
+""");
+        }
+
+        // %a / %A — the hexadecimal floating constant "[-]0x1.hhhp±d". Exact by
+        // construction: dump the IEEE-754 mantissa's 52 bits as 13 hex nibbles, the
+        // leading digit being the implicit bit (1 normal, 0 subnormal / zero). With no
+        // precision ($prec < 0) emit every nibble up to the last nonzero one (exact,
+        // round-trippable — what Lua's %q needs); an explicit precision rounds to that
+        // many nibbles, round-half-to-even, with the carry able to bump the leading
+        // digit and the binary exponent. $upper selects 0X/P/ABCDEF and INF/NAN.
+        if (_runtimeUsed.Contains("__pf_a"))
+        {
+            sb.Append($$"""
+  (func $__pf_a (param $v f64) (param $prec i32) (param $posSign i32) (param $width i32) (param $mode i32) (param $alt i32) (param $upper i32)
+    (local $bits i64) (local $exp i32) (local $mant i64) (local $sign i32) (local $first i32)
+    (local $p i32) (local $i i32) (local $n i32) (local $outLen i32) (local $full i32)
+    (local $uc i32) (local $hexb i32) (local $ax i32) (local $carry i32) (local $stick i32) (local $rp i32)
+    local.get $upper i32.const 5 i32.shl local.set $uc          ;; 0 or 32: lowercase − $uc = uppercase
+    i32.const 87 local.get $uc i32.sub local.set $hexb          ;; 'a'-10 (87) or 'A'-10 (55)
+    local.get $v i64.reinterpret_f64 local.set $bits
+    local.get $bits i64.const 0 i64.lt_s
+    if (result i32) i32.const 45 else local.get $posSign end
+    local.set $sign
+    local.get $bits i64.const 52 i64.shr_u i64.const 2047 i64.and i32.wrap_i64 local.set $exp   ;; biased exponent
+    local.get $bits i64.const 4503599627370495 i64.and local.set $mant                          ;; low 52 fraction bits
+    local.get $exp i32.const 2047 i32.eq                        ;; inf / nan (INF / NAN when upper)
+    if
+      local.get $mant i64.eqz
+      if
+        i32.const {{FpEOut}} i32.const 105 local.get $uc i32.sub i32.store8
+        i32.const {{FpEOut}} i32.const 1 i32.add i32.const 110 local.get $uc i32.sub i32.store8
+        i32.const {{FpEOut}} i32.const 2 i32.add i32.const 102 local.get $uc i32.sub i32.store8
+      else
+        i32.const {{FpEOut}} i32.const 110 local.get $uc i32.sub i32.store8
+        i32.const {{FpEOut}} i32.const 1 i32.add i32.const 97 local.get $uc i32.sub i32.store8
+        i32.const {{FpEOut}} i32.const 2 i32.add i32.const 110 local.get $uc i32.sub i32.store8
+      end
+      i32.const {{FpEOut}} i32.const 3 local.get $sign local.get $width
+      local.get $mode i32.const 1 i32.eq if (result i32) i32.const 1 else i32.const 0 end
+      call $__pf_emit
+      return
+    end
+    local.get $exp i32.eqz                                      ;; leading digit + unbiased exponent
+    if
+      i32.const 0 local.set $first i32.const -1022 local.set $exp        ;; subnormal: 0x0.…p-1022
+    else
+      i32.const 1 local.set $first local.get $exp i32.const 1023 i32.sub local.set $exp   ;; normal: 0x1.…
+    end
+    local.get $bits i64.const 9223372036854775807 i64.and i64.eqz        ;; |v| == 0 → 0x0p+0
+    if
+      i32.const 0 local.set $first i32.const 0 local.set $exp
+    end
+    i32.const 0 local.set $i                                    ;; 13 fraction nibbles: (mant >> (48-4i)) & 0xF
+    block $nd loop $nl
+      local.get $i i32.const 13 i32.ge_s br_if $nd
+      i32.const {{FpEDig}} local.get $i i32.add
+      local.get $mant
+      i64.const 48 local.get $i i64.extend_i32_s i64.const 4 i64.mul i64.sub
+      i64.shr_u i64.const 15 i64.and i32.wrap_i64
+      i32.store8
+      local.get $i i32.const 1 i32.add local.set $i
+      br $nl
+    end end
+    i32.const 13 local.set $full                                ;; trim trailing zero nibbles
+    block $td loop $tl
+      local.get $full i32.const 0 i32.le_s br_if $td
+      i32.const {{FpEDig}} local.get $full i32.const 1 i32.sub i32.add i32.load8_u i32.eqz i32.eqz br_if $td
+      local.get $full i32.const 1 i32.sub local.set $full
+      br $tl
+    end end
+    local.get $prec i32.const 0 i32.ge_s
+    if (result i32) local.get $prec else local.get $full end
+    local.set $outLen
+    local.get $outLen i32.const 13 i32.lt_s                     ;; round at $outLen when nibbles are dropped
+    if
+      local.get $outLen local.set $rp
+      i32.const {{FpEDig}} local.get $rp i32.add i32.load8_u local.set $n   ;; first dropped nibble
+      i32.const 0 local.set $carry
+      local.get $n i32.const 8 i32.gt_u
+      if
+        i32.const 1 local.set $carry
+      else
+        local.get $n i32.const 8 i32.eq
+        if
+          i32.const 0 local.set $stick                         ;; any nonzero nibble past $rp?
+          local.get $rp i32.const 1 i32.add local.set $i
+          block $sd loop $sl
+            local.get $i i32.const 13 i32.ge_s br_if $sd
+            i32.const {{FpEDig}} local.get $i i32.add i32.load8_u i32.eqz i32.eqz
+            if i32.const 1 local.set $stick end
+            local.get $i i32.const 1 i32.add local.set $i
+            br $sl
+          end end
+          local.get $stick
+          if
+            i32.const 1 local.set $carry                       ;; > half → up
+          else                                                 ;; exact half → round to even
+            local.get $rp i32.const 0 i32.gt_s
+            if (result i32) i32.const {{FpEDig}} local.get $rp i32.const 1 i32.sub i32.add i32.load8_u else local.get $first end
+            i32.const 1 i32.and local.set $carry
+          end
+        end
+      end
+      local.get $carry                                         ;; propagate the carry down the kept nibbles
+      if
+        local.get $rp i32.const 1 i32.sub local.set $i
+        block $cd loop $cl
+          local.get $carry i32.eqz br_if $cd
+          local.get $i i32.const 0 i32.lt_s br_if $cd
+          i32.const {{FpEDig}} local.get $i i32.add i32.load8_u i32.const 1 i32.add local.set $n
+          i32.const {{FpEDig}} local.get $i i32.add local.get $n i32.const 15 i32.and i32.store8
+          local.get $n i32.const 4 i32.shr_u local.set $carry
+          local.get $i i32.const 1 i32.sub local.set $i
+          br $cl
+        end end
+        local.get $carry                                       ;; carry into the leading digit
+        if
+          local.get $first i32.const 1 i32.add local.set $first
+          local.get $first i32.const 16 i32.ge_s
+          if
+            i32.const 1 local.set $first local.get $exp i32.const 4 i32.add local.set $exp
+          end
+        end
+      end
+    end
+    i32.const {{FpEOut}} local.set $p                           ;; assemble "0x" + digit + ".frac" + "p±d"
+    local.get $p i32.const 48 i32.store8
+    local.get $p i32.const 1 i32.add i32.const 120 local.get $uc i32.sub i32.store8   ;; 'x' / 'X'
+    local.get $p i32.const 2 i32.add local.set $p
+    local.get $p
+    local.get $first i32.const 10 i32.lt_u
+    if (result i32) local.get $first i32.const 48 i32.add else local.get $first local.get $hexb i32.add end
+    i32.store8
+    local.get $p i32.const 1 i32.add local.set $p
+    local.get $outLen i32.const 0 i32.gt_s local.get $alt i32.or
+    if
+      local.get $p i32.const 46 i32.store8                      ;; '.'
+      local.get $p i32.const 1 i32.add local.set $p
+      i32.const 0 local.set $i
+      block $fd loop $fl
+        local.get $i local.get $outLen i32.ge_s br_if $fd
+        local.get $i i32.const 13 i32.lt_s
+        if (result i32) i32.const {{FpEDig}} local.get $i i32.add i32.load8_u else i32.const 0 end
+        local.set $n
+        local.get $p
+        local.get $n i32.const 10 i32.lt_u
+        if (result i32) local.get $n i32.const 48 i32.add else local.get $n local.get $hexb i32.add end
+        i32.store8
+        local.get $p i32.const 1 i32.add local.set $p
+        local.get $i i32.const 1 i32.add local.set $i
+        br $fl
+      end end
+    end
+    local.get $p i32.const 112 local.get $uc i32.sub i32.store8   ;; 'p' / 'P'
+    local.get $p i32.const 1 i32.add local.set $p
+    local.get $exp i32.const 0 i32.lt_s                         ;; exponent sign + decimal (no leading zeros)
+    if (result i32)
+      local.get $p i32.const 45 i32.store8 i32.const 0 local.get $exp i32.sub
+    else
+      local.get $p i32.const 43 i32.store8 local.get $exp
+    end
+    local.set $ax
+    local.get $p i32.const 1 i32.add local.set $p
+    local.get $ax i32.const 1000 i32.ge_u
+    if
+      local.get $p local.get $ax i32.const 1000 i32.div_u i32.const 48 i32.add i32.store8
+      local.get $p i32.const 1 i32.add local.set $p
+    end
+    local.get $ax i32.const 100 i32.ge_u
+    if
+      local.get $p local.get $ax i32.const 100 i32.div_u i32.const 10 i32.rem_u i32.const 48 i32.add i32.store8
+      local.get $p i32.const 1 i32.add local.set $p
+    end
+    local.get $ax i32.const 10 i32.ge_u
+    if
+      local.get $p local.get $ax i32.const 10 i32.div_u i32.const 10 i32.rem_u i32.const 48 i32.add i32.store8
+      local.get $p i32.const 1 i32.add local.set $p
+    end
+    local.get $p local.get $ax i32.const 10 i32.rem_u i32.const 48 i32.add i32.store8
+    local.get $p i32.const 1 i32.add local.set $p
     i32.const {{FpEOut}}
     local.get $p i32.const {{FpEOut}} i32.sub
     local.get $sign local.get $width local.get $mode
