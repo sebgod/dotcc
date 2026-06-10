@@ -790,7 +790,7 @@ public static class Compiler
             ? source
             : source.Replace("\\\r\n", string.Empty).Replace("\\\n", string.Empty);
 
-    private static Dictionary<string, string> BuildIncludeMap(
+    private static IncludeMap BuildIncludeMap(
         IReadOnlyList<string> inputPaths,
         IReadOnlyList<string>? includeDirs)
         => BuildIncludeMaps(inputPaths, includeDirs).Content;
@@ -807,11 +807,12 @@ public static class Compiler
     /// exactly what keeps them out of the dependency file (nothing for
     /// make/ninja to stat).
     /// </summary>
-    private static (Dictionary<string, string> Content, Dictionary<string, string> Paths) BuildIncludeMaps(
+    private static (IncludeMap Content, Dictionary<string, string> Paths) BuildIncludeMaps(
         IReadOnlyList<string> inputPaths,
         IReadOnlyList<string>? includeDirs)
     {
-        var content = new Dictionary<string, string>(SystemHeaders, StringComparer.Ordinal);
+        var eager = new Dictionary<string, string>(SystemHeaders, StringComparer.Ordinal);
+        var lazy = new Dictionary<string, string>(StringComparer.Ordinal);
         var paths = new Dictionary<string, string>(StringComparer.Ordinal);
         var dirs = (includeDirs ?? Array.Empty<string>())
             .Concat(inputPaths.Select(p => Path.GetDirectoryName(Path.GetFullPath(p)) ?? "."))
@@ -832,11 +833,68 @@ public static class Compiler
                 // gcc (it would not resolve `#include "sexp.h"` against `-I
                 // include` when the file is include/chibi/sexp.h).
                 var rel = Path.GetRelativePath(dir, hpath).Replace('\\', '/');
-                content[rel] = SpliceLineContinuations(File.ReadAllText(hpath));
+                eager[rel] = SpliceLineContinuations(File.ReadAllText(hpath));
                 paths[rel] = hpath;
             }
+            // `*.c` registers too: `#include "opt/fcall.c"` (chibi vm.c) is the
+            // single-translation-unit composition idiom — a quoted include is a
+            // textual splice regardless of extension. Registered by PATH and
+            // read only on actual inclusion: an input's directory can hold many
+            // unrelated `.c` files (a temp dir, a whole source tree), and
+            // reading them all eagerly is wasted I/O — and a race against other
+            // processes' transient files.
+            foreach (var cpath in Directory.EnumerateFiles(dir, "*.c", SearchOption.AllDirectories))
+            {
+                var rel = Path.GetRelativePath(dir, cpath).Replace('\\', '/');
+                lazy[rel] = cpath;
+                paths[rel] = cpath;
+            }
         }
-        return (content, paths);
+        return (new IncludeMap(eager, lazy), paths);
+    }
+
+    /// <summary>
+    /// The preprocessor's <c>#include</c> resolution map. Header (<c>.h</c>)
+    /// content is loaded eagerly at map-build time (the historical behavior);
+    /// includable <c>.c</c> files are registered by path and read on first
+    /// actual inclusion, with the content cached. An unreadable lazy entry
+    /// (deleted/locked between scan and use) reports as unresolvable rather
+    /// than failing the compile.
+    /// </summary>
+    internal sealed class IncludeMap
+    {
+        private readonly Dictionary<string, string> _eager;
+        private readonly Dictionary<string, string> _lazyPaths;
+
+        internal IncludeMap(Dictionary<string, string> eager, Dictionary<string, string> lazyPaths)
+        {
+            _eager = eager;
+            _lazyPaths = lazyPaths;
+        }
+
+        /// <summary>All-eager map (no lazy entries) — test convenience.</summary>
+        internal IncludeMap(Dictionary<string, string> eager)
+            : this(eager, new Dictionary<string, string>(StringComparer.Ordinal)) { }
+
+        public bool ContainsKey(string name) => _eager.ContainsKey(name) || _lazyPaths.ContainsKey(name);
+
+        public bool TryGetValue(string name, out string content)
+        {
+            if (_eager.TryGetValue(name, out content!)) { return true; }
+            if (_lazyPaths.TryGetValue(name, out var path))
+            {
+                try
+                {
+                    content = SpliceLineContinuations(File.ReadAllText(path));
+                }
+                catch (IOException) { content = ""; return false; }
+                catch (UnauthorizedAccessException) { content = ""; return false; }
+                _eager[name] = content; // cache for the next TU in this compile
+                return true;
+            }
+            content = "";
+            return false;
+        }
     }
 
     internal static string BuildShell(

@@ -35,7 +35,7 @@ internal sealed record MacroDef(
 internal sealed class CPreprocessor : C.IPreprocessor
 {
     private readonly Dictionary<string, LexRule[]> _lexerTable;
-    private readonly Dictionary<string, string> _files;
+    private readonly Compiler.IncludeMap _files;
     private readonly System.IO.TextWriter _diag;
     private readonly Dictionary<string, MacroDef> _macros = new(StringComparer.Ordinal);
     // `#pragma once` machinery + active filename for `__FILE__`. The same
@@ -90,7 +90,7 @@ internal sealed class CPreprocessor : C.IPreprocessor
 
     public CPreprocessor(
         Dictionary<string, LexRule[]> lexerTable,
-        Dictionary<string, string> files,
+        Compiler.IncludeMap files,
         IEnumerable<string> predefines,
         bool quiet = false,
         DialectGate? gate = null)

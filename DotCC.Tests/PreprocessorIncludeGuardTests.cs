@@ -182,7 +182,7 @@ public sealed class PreprocessorIncludeGuardTests
             {
                 ["foo.h"] = File.ReadAllText(Path.Combine(dir, "foo.h")),
             };
-            var pre = new CPreprocessor(lexerTable, includeMap, System.Array.Empty<string>());
+            var pre = new CPreprocessor(lexerTable, new Compiler.IncludeMap(includeMap), System.Array.Empty<string>());
             pre.SetActiveFilename("main.c");
             using var lex = LALR.CC.LexicalGrammar.BytesLexer.FromString(File.ReadAllText(srcPath), lexerTable);
             using var wrap = C.WrapPreprocessor(lex, pre);
@@ -215,7 +215,7 @@ public sealed class PreprocessorIncludeGuardTests
             {
                 ["raw.h"] = File.ReadAllText(Path.Combine(dir, "raw.h")),
             };
-            var pre = new CPreprocessor(lexerTable, includeMap, System.Array.Empty<string>());
+            var pre = new CPreprocessor(lexerTable, new Compiler.IncludeMap(includeMap), System.Array.Empty<string>());
             pre.SetActiveFilename("main.c");
             using var lex = LALR.CC.LexicalGrammar.BytesLexer.FromString(File.ReadAllText(srcPath), lexerTable);
             using var wrap = C.WrapPreprocessor(lex, pre);
