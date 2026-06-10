@@ -52,6 +52,20 @@ internal sealed class WatBackend
     private const int NumBuf = DataBase - 48;
     private const int NumBufEnd = NumBuf + 32;
 
+    // Scratch for the printf float conversions (only touched when %f/%e/%g is used),
+    // carved from the free low part of the null-guard page (below NumBuf at 976). A
+    // little-endian u32 big-integer (the exact value × 10^precision is formed here —
+    // f64 intermediate math would corrupt the last digit) and a decimal staging buffer
+    // the digits are written into right-aligned, ending at FpDigEnd. The widest finite
+    // double needs ~39 limbs and ~370 digits, both well within the reserved space.
+    private const int FpBig = 16;            // bignum limb array base ([16, 16+4*48))
+    private const int FpBigLimbs = 48;       // capacity in u32 limbs
+    private const int FpDigEnd = 960;        // digits staged right-aligned, ending here
+    // The maximum printf float precision (fractional digits) the formatter stages.
+    // Beyond this the bignum/digit buffers could be overrun, so it fails loud rather
+    // than miscompile — like MaxNumDigits for the integer conversions.
+    private const int MaxFloatPrec = 60;
+
     private readonly ITarget _wat = new WatTarget();
     private readonly StringBuilder _sb = new();
     // The current output target. EmitFunc redirects it to a per-function body buffer
@@ -121,6 +135,9 @@ internal sealed class WatBackend
             case "__pf_emit": NeedRuntime("__putb"); NeedRuntime("__fill"); NeedRuntime("__write"); break;
             case "__pf_int_s": NeedRuntime("__fmt_radix"); NeedRuntime("__pf_emit"); break;
             case "__pf_int_u": NeedRuntime("__fmt_radix"); NeedRuntime("__pf_emit"); break;
+            // The printf float conversions: the formatter drives the big-integer helper
+            // block ("__bn") and lays the result out in a field via $__pf_emit.
+            case "__pf_f": NeedRuntime("__bn"); NeedRuntime("__pf_emit"); break;
             // The heap allocators: calloc/realloc are written in terms of malloc.
             // malloc itself has no helper deps (it uses the $__hp global + memory.grow);
             // free isn't a runtime function at all (it lowers to an inline drop).
@@ -152,6 +169,8 @@ internal sealed class WatBackend
         // needs its bump-pointer global. A program can use either, both, or neither.
         var usesHeap = _runtimeUsed.Contains("malloc");
         var usesIo = _runtimeUsed.Any(n => !HeapFns.Contains(n));
+        // The printf float formatter's big-integer needs a limb-count global.
+        var usesBn = _runtimeUsed.Contains("__bn");
 
         var m = new StringBuilder();
         m.Append("(module\n");
@@ -179,6 +198,11 @@ internal sealed class WatBackend
             m.Append("  (global $__ob (mut i32) (i32.const -1))\n");
             m.Append("  (global $__oend (mut i32) (i32.const 0))\n");
             m.Append("  (global $__ocount (mut i32) (i32.const 0))\n");
+        }
+        if (usesBn)
+        {
+            // Active limb count of the float formatter's big-integer at FpBig.
+            m.Append("  (global $__bnlen (mut i32) (i32.const 0))\n");
         }
         foreach (var (off, hex) in _strData)
         {
@@ -1101,7 +1125,9 @@ internal sealed class WatBackend
     /// supported yet (fail loud).</summary>
     private void EmitConversion(PrintfFormat.Spec spec, CExpr arg)
     {
-        if (spec.Alt)
+        // The '#' alternate form is supported only for floats (force a decimal point);
+        // for the integer conversions it still fails loud rather than miscompile.
+        if (spec.Alt && spec.Conv != 'f')
         {
             throw new IrUnsupportedException($"the wat target does not yet support the printf '#' flag (in '%{spec.Conv}')");
         }
@@ -1137,8 +1163,11 @@ internal sealed class WatBackend
             case 'x': EmitUnsignedConv(arg, spec, 16, 97); break;   // 'a'
             case 'X': EmitUnsignedConv(arg, spec, 16, 65); break;   // 'A'
             case 'o': EmitUnsignedConv(arg, spec, 8, 0); break;
+            case 'f':
+                EmitFloatConv(arg, spec);
+                break;
             default:
-                throw new IrUnsupportedException($"the wat target does not yet support the printf conversion '%{spec.Conv}' (floats and %p come later)");
+                throw new IrUnsupportedException($"the wat target does not yet support the printf conversion '%{spec.Conv}' (%e/%g and %p come later)");
         }
     }
 
@@ -1156,6 +1185,40 @@ internal sealed class WatBackend
         Line($"i32.const {IntMode(spec)}");
         Line("call $__pf_int_u");
     }
+
+    /// <summary>Lower a floating <c>%f</c> conversion: push the value as an f64 (a
+    /// <c>float</c> argument is promoted, matching C's default argument promotion),
+    /// then the compile-time-constant field parameters, and call the runtime formatter
+    /// <c>$__pf_f</c>. The runtime forms the exact value × 10^precision as a big
+    /// integer and rounds once (round-half-to-even), so the digits match a real libc.</summary>
+    private void EmitFloatConv(CExpr arg, PrintfFormat.Spec spec)
+    {
+        var prec = spec.Precision >= 0 ? spec.Precision : 6;   // C default precision is 6
+        if (prec > MaxFloatPrec)
+        {
+            throw new IrUnsupportedException($"the wat target does not yet support printf float precision > {MaxFloatPrec} (in '%{spec.Conv}')");
+        }
+        NeedRuntime("__pf_f");
+        EmitExpr(arg);
+        var vt = ValType(arg.Type);
+        if (vt == "f32") { Line("f64.promote_f32"); }
+        else if (vt != "f64")
+        {
+            throw new IrUnsupportedException($"printf '%{spec.Conv}' expects a floating-point argument on the wat target");
+        }
+        Line($"i32.const {prec}");
+        Line($"i32.const {(spec.Plus ? 43 : spec.Space ? 32 : 0)}");   // sign for a non-negative value
+        Line($"i32.const {(spec.Width >= 0 ? spec.Width : 0)}");
+        Line($"i32.const {FloatMode(spec)}");
+        Line($"i32.const {(spec.Alt ? 1 : 0)}");                       // '#': always show a decimal point
+        Line("call $__pf_f");
+    }
+
+    /// <summary>The field-fill mode for a float conversion: 1 = left-justify, 2 =
+    /// zero-pad, 0 = space-pad. Unlike the integer conversions, a precision does NOT
+    /// disable the <c>0</c> flag for floats (C99 §7.21.6.1); left-justify still wins.</summary>
+    private static int FloatMode(PrintfFormat.Spec spec) =>
+        spec.Left ? 1 : (spec.Zero ? 2 : 0);
 
     /// <summary>The minimum digit count for an integer conversion — the precision if
     /// given, else 1. Bounded by the staging buffer.</summary>
@@ -1743,6 +1806,297 @@ internal sealed class WatBackend
       local.get $ch
       call $__putb
     end
+  )
+
+""");
+        }
+
+        // ---- big integer for the printf float conversions --------------------------
+        // A little-endian u32 big-integer at FpBig with $__bnlen active limbs. The
+        // float formatter forms the EXACT value × 10^precision here and reads decimal
+        // digits back out — doing the conversion in f64 would lose the last digit, so
+        // correctly-rounded output (matching a real libc, round-half-to-even) needs
+        // exact integer arithmetic. Every op keeps $__bnlen trimmed of leading zeros.
+        if (_runtimeUsed.Contains("__bn"))
+        {
+            sb.Append($$"""
+  (func $__bn_set (param $v i64)         ;; bn = v  (v < 2^53 → 1-2 limbs)
+    i32.const {{FpBig}}
+    local.get $v
+    i32.wrap_i64
+    i32.store
+    i32.const {{FpBig + 4}}
+    local.get $v
+    i64.const 32
+    i64.shr_u
+    i32.wrap_i64
+    i32.store
+    local.get $v
+    i64.const 4294967295
+    i64.gt_u
+    if (result i32)
+      i32.const 2
+    else
+      local.get $v
+      i64.eqz
+      if (result i32) i32.const 0 else i32.const 1 end
+    end
+    global.set $__bnlen
+  )
+
+  (func $__bn_mul (param $m i32)         ;; bn *= m  (m a small u32)
+    (local $i i32) (local $n i32) (local $carry i64) (local $p i64) (local $addr i32)
+    global.get $__bnlen local.set $n
+    i32.const 0 local.set $i
+    i64.const 0 local.set $carry
+    block $done loop $lp
+      local.get $i local.get $n i32.ge_s br_if $done
+      i32.const {{FpBig}} local.get $i i32.const 2 i32.shl i32.add local.set $addr
+      local.get $addr i32.load i64.extend_i32_u
+      local.get $m i64.extend_i32_u
+      i64.mul
+      local.get $carry
+      i64.add
+      local.set $p                       ;; p = limb[i]*m + carry
+      local.get $addr
+      local.get $p i32.wrap_i64
+      i32.store                          ;; limb[i] = (u32)p
+      local.get $p i64.const 32 i64.shr_u local.set $carry
+      local.get $i i32.const 1 i32.add local.set $i
+      br $lp
+    end end
+    local.get $carry i64.eqz i32.eqz
+    if                                   ;; one more limb for the final carry
+      i32.const {{FpBig}} local.get $n i32.const 2 i32.shl i32.add
+      local.get $carry i32.wrap_i64
+      i32.store
+      local.get $n i32.const 1 i32.add local.set $n
+    end
+    local.get $n global.set $__bnlen
+  )
+
+  (func $__bn_add (param $a i32)         ;; bn += a (small) — used for the round-up
+    (local $i i32) (local $n i32) (local $carry i64) (local $sum i64) (local $addr i32)
+    global.get $__bnlen local.set $n
+    local.get $a i64.extend_i32_u local.set $carry
+    i32.const 0 local.set $i
+    block $done loop $lp
+      local.get $carry i64.eqz br_if $done
+      local.get $i local.get $n i32.ge_s
+      if                                 ;; ran past the top → append the carry limb
+        i32.const {{FpBig}} local.get $n i32.const 2 i32.shl i32.add
+        local.get $carry i32.wrap_i64
+        i32.store
+        local.get $n i32.const 1 i32.add local.set $n
+        i64.const 0 local.set $carry
+        br $done
+      end
+      i32.const {{FpBig}} local.get $i i32.const 2 i32.shl i32.add local.set $addr
+      local.get $addr i32.load i64.extend_i32_u
+      local.get $carry
+      i64.add
+      local.set $sum
+      local.get $addr
+      local.get $sum i32.wrap_i64
+      i32.store
+      local.get $sum i64.const 32 i64.shr_u local.set $carry
+      local.get $i i32.const 1 i32.add local.set $i
+      br $lp
+    end end
+    local.get $n global.set $__bnlen
+  )
+
+  (func $__bn_shr1 (result i32)          ;; bn >>= 1, returning the bit shifted out
+    (local $i i32) (local $n i32) (local $carry i32) (local $cur i32) (local $out i32) (local $addr i32)
+    global.get $__bnlen local.set $n
+    i32.const 0 local.set $out
+    local.get $n i32.const 0 i32.gt_s
+    if
+      i32.const {{FpBig}} i32.load i32.const 1 i32.and local.set $out
+    end
+    i32.const 0 local.set $carry
+    local.get $n i32.const 1 i32.sub local.set $i
+    block $done loop $lp
+      local.get $i i32.const 0 i32.lt_s br_if $done
+      i32.const {{FpBig}} local.get $i i32.const 2 i32.shl i32.add local.set $addr
+      local.get $addr i32.load local.set $cur
+      local.get $addr
+      local.get $cur i32.const 1 i32.shr_u
+      local.get $carry i32.const 31 i32.shl
+      i32.or
+      i32.store                          ;; limb[i] = (cur>>1) | (carry<<31)
+      local.get $cur i32.const 1 i32.and local.set $carry
+      local.get $i i32.const 1 i32.sub local.set $i
+      br $lp
+    end end
+    local.get $n i32.const 0 i32.gt_s    ;; trim a top limb that became 0
+    if
+      i32.const {{FpBig}} local.get $n i32.const 1 i32.sub i32.const 2 i32.shl i32.add
+      i32.load
+      i32.eqz
+      if local.get $n i32.const 1 i32.sub local.set $n end
+    end
+    local.get $n global.set $__bnlen
+    local.get $out
+  )
+
+  (func $__bn_divmod (param $d i32) (result i32)   ;; bn /= d, returns bn % d
+    (local $i i32) (local $n i32) (local $rem i64) (local $cur i64) (local $dd i64) (local $addr i32)
+    global.get $__bnlen local.set $n
+    local.get $d i64.extend_i32_u local.set $dd
+    i64.const 0 local.set $rem
+    local.get $n i32.const 1 i32.sub local.set $i
+    block $done loop $lp
+      local.get $i i32.const 0 i32.lt_s br_if $done
+      i32.const {{FpBig}} local.get $i i32.const 2 i32.shl i32.add local.set $addr
+      local.get $rem i64.const 32 i64.shl
+      local.get $addr i32.load i64.extend_i32_u
+      i64.or
+      local.set $cur                     ;; cur = (rem<<32) | limb[i]
+      local.get $addr
+      local.get $cur local.get $dd i64.div_u i32.wrap_i64
+      i32.store                          ;; limb[i] = cur / d
+      local.get $cur local.get $dd i64.rem_u local.set $rem
+      local.get $i i32.const 1 i32.sub local.set $i
+      br $lp
+    end end
+    block $tdone loop $tlp                ;; trim leading zero limbs
+      local.get $n i32.const 0 i32.le_s br_if $tdone
+      i32.const {{FpBig}} local.get $n i32.const 1 i32.sub i32.const 2 i32.shl i32.add
+      i32.load
+      i32.eqz i32.eqz
+      br_if $tdone
+      local.get $n i32.const 1 i32.sub local.set $n
+      br $tlp
+    end end
+    local.get $n global.set $__bnlen
+    local.get $rem i32.wrap_i64
+  )
+
+""");
+        }
+
+        // The %f formatter. Decompose the f64 as M·2^E2 (exact), form D = round(value
+        // × 10^prec) as a big integer — N = M·10^prec then either N<<E2 (E2≥0, exact)
+        // or round(N>>-E2) with round-half-to-even — and stage D's decimal digits with
+        // the point `prec` places from the right. The unsigned magnitude is then laid
+        // out in a field by $__pf_emit (sign + width + justify), exactly like the
+        // integer conversions. inf/nan are emitted as text (never zero-padded).
+        if (_runtimeUsed.Contains("__pf_f"))
+        {
+            sb.Append($$"""
+  (func $__pf_f (param $v f64) (param $prec i32) (param $posSign i32) (param $width i32) (param $mode i32) (param $alt i32)
+    (local $bits i64) (local $exp i32) (local $mant i64) (local $M i64) (local $E2 i32)
+    (local $sign i32) (local $pos i32) (local $end i32) (local $i i32) (local $d i32)
+    (local $k i32) (local $bit i32) (local $half i32) (local $sticky i32)
+    local.get $v i64.reinterpret_f64 local.set $bits
+    local.get $bits i64.const 0 i64.lt_s         ;; sign byte: '-' for a negative value
+    if (result i32) i32.const 45 else local.get $posSign end
+    local.set $sign
+    local.get $bits i64.const 52 i64.shr_u i64.const 2047 i64.and i32.wrap_i64 local.set $exp
+    local.get $bits i64.const 4503599627370495 i64.and local.set $mant   ;; mant = bits & ((1<<52)-1)
+    local.get $exp i32.const 2047 i32.eq         ;; inf / nan
+    if
+      i32.const {{FpDigEnd - 3}} local.set $pos
+      local.get $mant i64.eqz
+      if                                         ;; "inf"
+        local.get $pos i32.const 105 i32.store8
+        local.get $pos i32.const 1 i32.add i32.const 110 i32.store8
+        local.get $pos i32.const 2 i32.add i32.const 102 i32.store8
+      else                                       ;; "nan"
+        local.get $pos i32.const 110 i32.store8
+        local.get $pos i32.const 1 i32.add i32.const 97 i32.store8
+        local.get $pos i32.const 2 i32.add i32.const 110 i32.store8
+      end
+      local.get $pos
+      i32.const 3
+      local.get $sign
+      local.get $width
+      local.get $mode i32.const 1 i32.eq if (result i32) i32.const 1 else i32.const 0 end
+      call $__pf_emit
+      return
+    end
+    local.get $exp i32.eqz                        ;; M, E2 (subnormal vs normal)
+    if
+      local.get $mant local.set $M
+      i32.const -1074 local.set $E2
+    else
+      local.get $mant i64.const 4503599627370496 i64.or local.set $M     ;; mant | (1<<52)
+      local.get $exp i32.const 1075 i32.sub local.set $E2
+    end
+    local.get $M call $__bn_set                   ;; N = M * 10^prec
+    i32.const 0 local.set $i
+    block $md loop $ml
+      local.get $i local.get $prec i32.ge_s br_if $md
+      i32.const 10 call $__bn_mul
+      local.get $i i32.const 1 i32.add local.set $i
+      br $ml
+    end end
+    local.get $E2 i32.const 0 i32.ge_s
+    if                                            ;; D = N << E2 (exact): ×2, E2 times
+      i32.const 0 local.set $i
+      block $sd loop $sl
+        local.get $i local.get $E2 i32.ge_s br_if $sd
+        i32.const 2 call $__bn_mul
+        local.get $i i32.const 1 i32.add local.set $i
+        br $sl
+      end end
+    else                                          ;; D = round(N >> k), round-half-even
+      i32.const 0 local.get $E2 i32.sub local.set $k
+      i32.const 0 local.set $sticky
+      i32.const 0 local.set $half
+      i32.const 0 local.set $i
+      block $kd loop $kl
+        local.get $i local.get $k i32.ge_s br_if $kd
+        call $__bn_shr1 local.set $bit
+        local.get $i local.get $k i32.const 1 i32.sub i32.eq
+        if                                        ;; the top discarded bit is the "half" bit
+          local.get $bit local.set $half
+        else                                      ;; lower discarded bits feed "sticky"
+          local.get $sticky local.get $bit i32.or local.set $sticky
+        end
+        local.get $i i32.const 1 i32.add local.set $i
+        br $kl
+      end end
+      local.get $half                             ;; round up iff half && (sticky || odd)
+      if
+        local.get $sticky
+        i32.const {{FpBig}} i32.load i32.const 1 i32.and
+        i32.or
+        if i32.const 1 call $__bn_add end
+      end
+    end
+    i32.const {{FpDigEnd}} local.set $pos          ;; stage digits right-aligned, point at `prec`
+    i32.const {{FpDigEnd}} local.set $end
+    i32.const 0 local.set $i
+    block $dd loop $dl
+      local.get $i local.get $prec i32.eq
+      local.get $prec i32.const 0 i32.gt_s
+      i32.and
+      if
+        local.get $pos i32.const 1 i32.sub local.set $pos
+        local.get $pos i32.const 46 i32.store8   ;; '.'
+      end
+      i32.const 10 call $__bn_divmod local.set $d
+      local.get $pos i32.const 1 i32.sub local.set $pos
+      local.get $pos local.get $d i32.const 48 i32.add i32.store8
+      local.get $i i32.const 1 i32.add local.set $i
+      global.get $__bnlen                          ;; continue while bn != 0 OR i < prec+1
+      local.get $i local.get $prec i32.const 1 i32.add i32.lt_s
+      i32.or
+      br_if $dl
+    end end
+    local.get $alt local.get $prec i32.eqz i32.and ;; '#' with prec 0 → trailing point
+    if
+      local.get $end i32.const 46 i32.store8
+      local.get $end i32.const 1 i32.add local.set $end
+    end
+    local.get $pos
+    local.get $end local.get $pos i32.sub
+    local.get $sign
+    local.get $width
+    local.get $mode
+    call $__pf_emit
   )
 
 """);

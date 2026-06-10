@@ -124,6 +124,22 @@ public sealed class WatOracleTests
     // heap + I/O together: both runtimes coexist (bump pointer global, exported memory,
     // the WASI import) in one module.
     [InlineData("#include <stdlib.h>\nint main(void){ int *a=malloc(3*sizeof(int)); a[0]=1; a[1]=2; a[2]=3; printf(\"%d%d%d\\n\", a[0], a[1], a[2]); return 0; }", "123\n")]
+    // printf %f — a correctly-rounded (round-half-to-even) formatter over exact
+    // big-integer arithmetic. Expected strings are glibc/Python references; the digits
+    // match because the conversion never goes through lossy f64 math.
+    [InlineData("int main(void){ printf(\"%f\\n\", 1.5); return 0; }", "1.500000\n")]
+    [InlineData("int main(void){ printf(\"[%.2f]\", 3.14159); return 0; }", "[3.14]")]
+    [InlineData("int main(void){ printf(\"%.0f %.0f\", 2.5, 3.5); return 0; }", "2 4")]          // round half to even
+    [InlineData("int main(void){ printf(\"%.1f %.1f\", 0.25, 0.35); return 0; }", "0.2 0.3")]   // 0.35 is < 0.35 exactly
+    [InlineData("int main(void){ printf(\"[%8.2f][%-8.2f][%08.2f]\", 3.14, 3.14, -3.14); return 0; }", "[    3.14][3.14    ][-0003.14]")]
+    [InlineData("int main(void){ printf(\"%+.2f % .2f\", 3.0, 3.0); return 0; }", "+3.00  3.00")]
+    [InlineData("int main(void){ printf(\"%.3f\", 2.0/3.0); return 0; }", "0.667")]
+    [InlineData("int main(void){ printf(\"%f\", -0.0); return 0; }", "-0.000000")]
+    [InlineData("int main(void){ printf(\"%.0f\", 0.0); return 0; }", "0")]
+    [InlineData("int main(void){ printf(\"%#.0f\", 5.0); return 0; }", "5.")]
+    [InlineData("int main(void){ double x=10.0, y=3.0; printf(\"%.4f\", x/y); return 0; }", "3.3333")]
+    [InlineData("int main(void){ printf(\"%.1f\", 1.0e20); return 0; }", "100000000000000000000.0")]
+    [InlineData("int main(void){ printf(\"%.10f\", 0.1); return 0; }", "0.1000000000")]
     public void Wat_program_writes_expected_stdout(string source, string expected)
     {
         if (!Requested)

@@ -173,9 +173,45 @@ public sealed class WatBackendTests
     [Fact]
     public void printf_unsupported_conversions_are_rejected()
     {
-        // The '#' flag and floats aren't wired yet — fail loud, don't miscompile.
+        // '#' on an integer conversion, the %e/%g floats (no formatter yet), and %p
+        // aren't wired — fail loud, don't miscompile.
         Should.Throw<CompileException>(() => Wat("int main(void){ printf(\"%#x\", 255); return 0; }"));
-        Should.Throw<CompileException>(() => Wat("int main(void){ printf(\"%f\", 1.5); return 0; }"));
+        Should.Throw<CompileException>(() => Wat("int main(void){ printf(\"%e\", 1.5); return 0; }"));
+        Should.Throw<CompileException>(() => Wat("int main(void){ printf(\"%p\", \"x\"); return 0; }"));
+    }
+
+    [Fact]
+    public void printf_percent_f_emits_the_float_formatter_and_bignum_block()
+    {
+        // %f drives the hand-written formatter ($__pf_f) over the big-integer helper
+        // block; the value's bits are decomposed (reinterpret) rather than converted
+        // through f64, and the limb-count global is declared.
+        var wat = Wat("int main(void){ printf(\"%f\", 1.5); return 0; }");
+        wat.ShouldContain("call $__pf_f");
+        wat.ShouldContain("(func $__pf_f");
+        wat.ShouldContain("(func $__bn_mul");
+        wat.ShouldContain("(func $__bn_divmod");
+        wat.ShouldContain("(global $__bnlen");
+        wat.ShouldContain("i64.reinterpret_f64");
+    }
+
+    [Fact]
+    public void printf_float_default_precision_is_six()
+    {
+        // No explicit precision → C's default of 6, passed to the formatter as an immediate.
+        var wat = Wat("int main(void){ printf(\"%f\", 1.5); return 0; }");
+        wat.ShouldContain("i32.const 6");
+        wat.ShouldContain("call $__pf_f");
+    }
+
+    [Fact]
+    public void printf_float_runtime_is_emitted_only_on_demand()
+    {
+        // An integer-only printf pulls in none of the float machinery.
+        var wat = Wat("int main(void){ printf(\"%d\", 42); return 0; }");
+        wat.ShouldNotContain("__pf_f");
+        wat.ShouldNotContain("__bnlen");
+        wat.ShouldNotContain("__bn_mul");
     }
 
     [Fact]
