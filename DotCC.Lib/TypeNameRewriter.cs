@@ -52,6 +52,8 @@ internal sealed class TypeNameRewriter : RewritingTokenStream
     private readonly int _openParenSymbol;
     private readonly int _closeParenSymbol;
     private readonly int _starSymbol;
+    private readonly int _openBracketSymbol;
+    private readonly int _closeBracketSymbol;
     private readonly int _structSymbol;
     private readonly int _unionSymbol;
     private readonly int _enumSymbol;
@@ -96,6 +98,8 @@ internal sealed class TypeNameRewriter : RewritingTokenStream
         _openParenSymbol = map["("];
         _closeParenSymbol = map[")"];
         _starSymbol = map["*"];
+        _openBracketSymbol = map["["];
+        _closeBracketSymbol = map["]"];
         _structSymbol = map["struct"];
         _unionSymbol = map["union"];
         _enumSymbol = map["enum"];
@@ -173,10 +177,17 @@ internal sealed class TypeNameRewriter : RewritingTokenStream
             }
         }
 
-        // Identify the alias name: the last ID token at brace-depth zero
-        // before the terminating semicolon. Walk the body in reverse,
-        // tracking the same depth so we skip member-list identifiers.
-        var aliasName = FindAliasName(body);
+        // Identify the alias position: the `( * ID )` group of a fn-ptr
+        // typedef, else the last ID token at brace/paren-depth zero before
+        // the terminating semicolon. ONE discovery for both registration and
+        // emission — they used to disagree: registration knew the fn-ptr
+        // pattern but emission took "last ID in the body", which for
+        // `typedef sexp (*sexp_proc1)(sexp, sexp, sexp_sint_t);` is the
+        // PARAM `sexp_sint_t`, wrongly exempting it from TYPE_NAME promotion
+        // (chibi-scheme's procedure typedefs; Lua's fn-ptr typedef params are
+        // keyword types, which is why it never surfaced there).
+        var aliasIndex = FindAliasIndex(body);
+        var aliasName = aliasIndex >= 0 ? body[aliasIndex].Content as string : null;
         if (aliasName is not null)
         {
             _typeNames.Add(aliasName);
@@ -188,16 +199,6 @@ internal sealed class TypeNameRewriter : RewritingTokenStream
         // position itself stays as ID because we've identified it from the
         // raw token list, not from the promoted stream.
         Emit(typedefToken);
-        var aliasIndex = body.Count - 1;
-        // walk backward to find the trailing ID's index (alias position)
-        for (var i = body.Count - 1; i >= 0; i--)
-        {
-            if (body[i].ID == _idSymbol)
-            {
-                aliasIndex = i;
-                break;
-            }
-        }
         for (var i = 0; i < body.Count; i++)
         {
             var t = body[i];
@@ -227,7 +228,7 @@ internal sealed class TypeNameRewriter : RewritingTokenStream
         _afterTagKeyword = false;
     }
 
-    private string? FindAliasName(List<Item> body)
+    private int FindAliasIndex(List<Item> body)
     {
         // Function-pointer typedef has the alias INSIDE the first parenthesized
         // group: `typedef Ret (*Name)(args);`. The body has `( * ID )` at
@@ -239,27 +240,28 @@ internal sealed class TypeNameRewriter : RewritingTokenStream
                 && body[i + 2].ID == _idSymbol
                 && body[i + 3].ID == _closeParenSymbol)
             {
-                return body[i + 2].Content as string;
+                return i + 2;
             }
         }
 
         // Otherwise (simple alias / struct-with-tag / struct-with-body):
-        // reverse-walk for the last top-level ID. Skip anything inside braces
-        // OR parens — parens guard the param list of a fnptr typedef (handled
-        // above) and any nested expressions that aren't the alias position.
+        // reverse-walk for the last top-level ID. Skip anything inside braces,
+        // parens, OR brackets — parens guard the param list of a fnptr typedef
+        // (handled above); brackets guard an array-typedef bound (`typedef
+        // char buf[MAX];` must bind `buf`, not the bound identifier `MAX`).
         var depth = 0;
         for (var i = body.Count - 1; i >= 0; i--)
         {
             var t = body[i];
-            if (t.ID == _closeBraceSymbol || t.ID == _closeParenSymbol) { depth++; continue; }
-            if (t.ID == _openBraceSymbol  || t.ID == _openParenSymbol)  { depth--; continue; }
+            if (t.ID == _closeBraceSymbol || t.ID == _closeParenSymbol || t.ID == _closeBracketSymbol) { depth++; continue; }
+            if (t.ID == _openBraceSymbol  || t.ID == _openParenSymbol  || t.ID == _openBracketSymbol)  { depth--; continue; }
             if (depth != 0) { continue; }
-            if (t.ID == _idSymbol && t.Content is string s)
+            if (t.ID == _idSymbol && t.Content is string)
             {
-                return s;
+                return i;
             }
         }
-        return null;
+        return -1;
     }
 
     public override void Reset()
