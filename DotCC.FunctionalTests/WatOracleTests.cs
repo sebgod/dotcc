@@ -95,6 +95,11 @@ public sealed class WatOracleTests
     [InlineData("int main(void){ printf(\"[%10s][%-10s][%.3s]\", \"hi\", \"hi\", \"hello\"); return 0; }", "[        hi][hi        ][hel]")]
     [InlineData("int main(void){ printf(\"[%3c][%-3c]\", 'x', 'x'); return 0; }", "[  x][x  ]")]
     [InlineData("int main(void){ printf(\"[%.0d][%.0d]\", 0, 5); return 0; }", "[][5]")]
+    // sprintf / snprintf — same expansion, into a buffer instead of fd 1
+    [InlineData("int main(void){ char b[32]; int n = sprintf(b, \"%d-%s\", 7, \"ok\"); printf(\"%s|%d\\n\", b, n); return 0; }", "7-ok|4\n")]
+    [InlineData("int main(void){ char b[32]; sprintf(b, \"[%5d]\", 3); printf(\"%s\\n\", b); return 0; }", "[    3]\n")]
+    [InlineData("int main(void){ char b[8]; int n = snprintf(b, 5, \"%d\", 123456); printf(\"%s,%d\\n\", b, n); return 0; }", "1234,6\n")]
+    [InlineData("int main(void){ char z[1]; int q = snprintf(z, 0, \"abc\"); printf(\"q=%d\\n\", q); return 0; }", "q=3\n")]
     public void Wat_program_writes_expected_stdout(string source, string expected)
     {
         if (!Requested)

@@ -153,6 +153,17 @@ public sealed class WatBackendTests
     }
 
     [Fact]
+    public void sprintf_expands_inline_with_a_buffer_sink()
+    {
+        // sprintf points the output sink at the destination buffer, runs the shared
+        // expansion, then NUL-terminates — no $sprintf runtime function.
+        var wat = Wat("int main(void){ char b[16]; sprintf(b, \"%d\", 42); return 0; }");
+        wat.ShouldContain("global.set $__ob");     // sink aimed at the buffer
+        wat.ShouldContain("call $__sink_end");
+        wat.ShouldNotContain("call $sprintf");
+    }
+
+    [Fact]
     public void printf_with_a_runtime_format_is_rejected()
     {
         // Only a string-literal format can be expanded at compile time.

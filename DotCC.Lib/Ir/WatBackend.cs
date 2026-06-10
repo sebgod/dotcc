@@ -98,6 +98,9 @@ internal sealed class WatBackend
         {
             case "putchar": NeedRuntime("__putb"); break;
             case "puts": NeedRuntime("__emit_str"); NeedRuntime("__putb"); break;
+            // $__write and $__putb are mutually recursive (fd vs buffer sink), so each
+            // pulls the other — even a literal-only printf (just $__write) needs $__putb.
+            case "__write": NeedRuntime("__putb"); break;
             case "__putb": NeedRuntime("__write"); break;
             case "__fill": NeedRuntime("__putb"); break;
             case "__emit_str": NeedRuntime("__fill"); NeedRuntime("__write"); break;
@@ -141,6 +144,15 @@ internal sealed class WatBackend
         // non-I/O modules keep the byte-identical plain `(memory 1)`.
         m.Append(usesIo ? "  (memory (export \"memory\") 1)\n" : "  (memory 1)\n");
         m.Append($"  (global $__sp (mut i32) (i32.const {StackTop}))\n");
+        if (usesIo)
+        {
+            // The output sink for the byte primitives: $__ob = -1 means fd 1 (printf);
+            // otherwise it's a write cursor into linear memory (sprintf), bounded by
+            // $__oend, with $__ocount tracking the total chars the format produced.
+            m.Append("  (global $__ob (mut i32) (i32.const -1))\n");
+            m.Append("  (global $__oend (mut i32) (i32.const 0))\n");
+            m.Append("  (global $__ocount (mut i32) (i32.const 0))\n");
+        }
         foreach (var (off, hex) in _strData)
         {
             m.Append("  (data (i32.const ").Append(off).Append(") \"").Append(hex).Append("\")\n");
@@ -807,9 +819,12 @@ internal sealed class WatBackend
 
     private void EmitCall(Call c)
     {
-        // A string-literal printf is expanded inline (no $printf function); a
-        // user-defined printf, if any, wins and routes through the generic path.
+        // The printf family with a string-literal format is expanded inline (no
+        // runtime function); a user-defined one, if any, wins and routes through the
+        // generic path below.
         if (c.Callee == "printf" && !_defined.Contains("printf")) { EmitPrintf(c); return; }
+        if (c.Callee == "sprintf" && !_defined.Contains("sprintf")) { EmitSprintf(c, bounded: false); return; }
+        if (c.Callee == "snprintf" && !_defined.Contains("snprintf")) { EmitSprintf(c, bounded: true); return; }
 
         if (!_defined.Contains(c.Callee))
         {
@@ -832,22 +847,65 @@ internal sealed class WatBackend
         Line($"call ${c.Callee}");
     }
 
-    /// <summary>Expand a <c>printf</c> with a string-literal format at compile time:
-    /// the format is parsed (<see cref="PrintfFormat"/>, the same grammar as the
-    /// runtime PrintfBuilder) into literal runs and conversions, and each is lowered
-    /// to a direct write or a formatting-helper call. This sidesteps a wat varargs
-    /// ABI entirely — every argument is consumed positionally here. A runtime
-    /// (non-literal) format, or a conversion the helpers don't cover yet, fails loud.
-    /// The result is C's char count, which we don't track (it's rarely consulted, and
-    /// the C# backend's Done() also returns 0) — so the expression leaves 0.</summary>
+    /// <summary>Expand a <c>printf</c> with a string-literal format at compile time —
+    /// the common case. Output goes to fd 1 (the sink's default mode); the result is
+    /// C's char count, which we don't track (rarely consulted; the C# backend's
+    /// <c>Done()</c> also returns 0), so the expression leaves 0.</summary>
     private void EmitPrintf(Call c)
     {
-        if (c.Args.Count == 0 || c.Args[0] is not LitStr fmt)
+        var fmt = FormatLiteral(c, 0, "printf");
+        EmitFormatExpansion(fmt, c, firstArg: 1);
+        Line("i32.const 0");
+    }
+
+    /// <summary>Expand <c>sprintf</c>/<c>snprintf</c> with a string-literal format:
+    /// point the sink at the destination buffer (bounded by <c>dst + n</c> for
+    /// snprintf, effectively unbounded for sprintf), run the shared expansion so every
+    /// write lands in the buffer, then NUL-terminate and leave the char count (C's
+    /// return). No WASI write happens unless the program also prints elsewhere.</summary>
+    private void EmitSprintf(Call c, bool bounded)
+    {
+        var name = bounded ? "snprintf" : "sprintf";
+        var fmtIdx = bounded ? 2 : 1;
+        var fmt = FormatLiteral(c, fmtIdx, name);
+        NeedRuntime("__sink_end");
+
+        // Aim the sink at the buffer: $__ob = dst, $__oend = dst + n (or "infinite"),
+        // $__ocount = 0. Re-reading $__ob avoids a temp for dst in the bound.
+        EmitExpr(c.Args[0]);
+        if (ValType(c.Args[0].Type) == "i64") { Line("i32.wrap_i64"); }
+        Line("global.set $__ob");
+        if (bounded)
         {
-            throw new IrUnsupportedException("the wat target only supports printf with a string-literal format (a runtime-format printf needs a compiled-from-C runtime)");
+            Line("global.get $__ob");
+            EmitExpr(c.Args[1]);
+            if (ValType(c.Args[1].Type) == "i64") { Line("i32.wrap_i64"); }
+            Line("i32.add");
+            Line("global.set $__oend");
         }
+        else
+        {
+            Line("i32.const 2147483647");
+            Line("global.set $__oend");
+        }
+        Line("i32.const 0");
+        Line("global.set $__ocount");
+
+        EmitFormatExpansion(fmt, c, firstArg: fmtIdx + 1);
+        Line("call $__sink_end");   // NUL-terminate, restore fd mode, leave the count
+    }
+
+    /// <summary>The shared body of the printf-family expansion: parse the literal
+    /// format (<see cref="PrintfFormat"/>, the same grammar as the runtime
+    /// PrintfBuilder) and lower each segment — a literal run to a direct write, a
+    /// conversion to a formatting-helper call consuming the next argument. This
+    /// sidesteps a wat varargs ABI entirely (arguments are consumed positionally).
+    /// C evaluates every argument even past the last conversion, so the unconsumed
+    /// tail is still evaluated (for side effects) and dropped.</summary>
+    private void EmitFormatExpansion(LitStr fmt, Call c, int firstArg)
+    {
         var bytes = DotCC.EmitHelpers.StringByteValues(fmt.Segments);
-        var argIdx = 1;
+        var argIdx = firstArg;
         foreach (var seg in PrintfFormat.Parse(bytes))
         {
             if (seg.Literal is { } literal)
@@ -860,19 +918,27 @@ internal sealed class WatBackend
             }
             if (argIdx >= c.Args.Count)
             {
-                throw new IrUnsupportedException("printf has more conversions than arguments");
+                throw new IrUnsupportedException($"'{c.Callee}' has more conversions than arguments");
             }
             EmitConversion(seg.Conversion!.Value, c.Args[argIdx]);
             argIdx++;
         }
-        // C evaluates every argument even if the format references fewer; preserve any
-        // side effects of the unconsumed tail, then discard the values.
         for (; argIdx < c.Args.Count; argIdx++)
         {
             EmitExpr(c.Args[argIdx]);
             if (c.Args[argIdx].Type.Unqualified is not CType.VoidType) { Line("drop"); }
         }
-        Line("i32.const 0");
+    }
+
+    /// <summary>The format argument of a printf-family call, required to be a string
+    /// literal (so it can be expanded at compile time); otherwise fail loud.</summary>
+    private static LitStr FormatLiteral(Call c, int index, string name)
+    {
+        if (c.Args.Count <= index || c.Args[index] is not LitStr fmt)
+        {
+            throw new IrUnsupportedException($"the wat target only supports {name} with a string-literal format (a runtime format needs a compiled-from-C runtime)");
+        }
+        return fmt;
     }
 
     // The widest decimal/precision digit run the integer formatter can stage in
@@ -1061,39 +1127,92 @@ internal sealed class WatBackend
     {
         var sb = new StringBuilder();
 
-        // The core sink: write `len` bytes at `ptr` to fd 1 via one iovec.
+        // The core sink for a byte run. fd mode ($__ob == -1): one bulk fd_write.
+        // Buffer mode (sprintf): copy byte-by-byte through $__putb so the cursor,
+        // bound and count logic stays in one place.
         if (_runtimeUsed.Contains("__write"))
         {
             sb.Append($$"""
   (func $__write (param $ptr i32) (param $len i32)
-    i32.const {{IoScratch}}        ;; iovec = (ptr, len)
-    local.get $ptr
-    i32.store
-    i32.const {{IoScratch + 4}}
-    local.get $len
-    i32.store
-    i32.const 1                  ;; fd_write(1, iovec, 1, &nwritten)
-    i32.const {{IoScratch}}
-    i32.const 1
-    i32.const {{IoScratch + 8}}
-    call $fd_write
-    drop
+    (local $i i32)
+    global.get $__ob
+    i32.const -1
+    i32.eq
+    if                           ;; fd 1 — one iovec, one fd_write
+      i32.const {{IoScratch}}
+      local.get $ptr
+      i32.store
+      i32.const {{IoScratch + 4}}
+      local.get $len
+      i32.store
+      i32.const 1
+      i32.const {{IoScratch}}
+      i32.const 1
+      i32.const {{IoScratch + 8}}
+      call $fd_write
+      drop
+    else                         ;; buffer — copy each byte through $__putb
+      block $done
+        loop $lp
+          local.get $i
+          local.get $len
+          i32.ge_s
+          br_if $done
+          local.get $ptr
+          local.get $i
+          i32.add
+          i32.load8_u
+          call $__putb
+          local.get $i
+          i32.const 1
+          i32.add
+          local.set $i
+          br $lp
+        end
+      end
+    end
   )
 
 """);
         }
 
-        // Write one byte (the low 8 bits of $ch) through the IoScratch char slot.
+        // Write one byte (the low 8 bits of $ch). fd mode delegates the single byte to
+        // $__write; buffer mode stores at the cursor (reserving the final slot for the
+        // NUL), advances it within bounds, and always bumps the would-be count.
         if (_runtimeUsed.Contains("__putb"))
         {
             sb.Append($$"""
   (func $__putb (param $ch i32)
-    i32.const {{IoScratch + 12}}
-    local.get $ch
-    i32.store8
-    i32.const {{IoScratch + 12}}
-    i32.const 1
-    call $__write
+    global.get $__ob
+    i32.const -1
+    i32.eq
+    if                           ;; fd mode
+      i32.const {{IoScratch + 12}}
+      local.get $ch
+      i32.store8
+      i32.const {{IoScratch + 12}}
+      i32.const 1
+      call $__write
+    else                         ;; buffer mode
+      global.get $__ob           ;; store only if ob+1 < oend (keep room for NUL)
+      i32.const 1
+      i32.add
+      global.get $__oend
+      i32.lt_s
+      if
+        global.get $__ob
+        local.get $ch
+        i32.store8
+        global.get $__ob
+        i32.const 1
+        i32.add
+        global.set $__ob
+      end
+      global.get $__ocount       ;; count every byte (snprintf's would-be length)
+      i32.const 1
+      i32.add
+      global.set $__ocount
+    end
   )
 
 """);
@@ -1119,6 +1238,28 @@ internal sealed class WatBackend
         br $lp
       end
     end
+  )
+
+""");
+        }
+
+        // Close an sprintf buffer: NUL-terminate at the cursor (skipped when no room,
+        // i.e. snprintf size 0), restore fd mode, and return the would-be char count.
+        if (_runtimeUsed.Contains("__sink_end"))
+        {
+            sb.Append("""
+  (func $__sink_end (result i32)
+    global.get $__ob
+    global.get $__oend
+    i32.lt_s
+    if
+      global.get $__ob
+      i32.const 0
+      i32.store8
+    end
+    i32.const -1
+    global.set $__ob
+    global.get $__ocount
   )
 
 """);
