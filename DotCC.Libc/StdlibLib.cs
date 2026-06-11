@@ -263,6 +263,36 @@ public static unsafe partial class Libc
         return StashCString(Environment.GetEnvironmentVariable(key));
     }
 
+    private static byte** _environ;
+
+    /// <summary>POSIX <c>char **environ</c> — the whole process environment as a
+    /// NULL-terminated array of NUL-terminated <c>"NAME=value"</c> UTF-8 strings.
+    /// Built lazily from <see cref="Environment.GetEnvironmentVariables"/> and
+    /// cached (a one-shot snapshot — dotcc doesn't reflect later <c>setenv</c>
+    /// mutations through it, which is enough for the read-only iterators that use
+    /// it). SRFI-98's <c>get-environment-variables</c> walks it; surfaced by bare
+    /// name through <c>using static Libc</c> so a program's <c>extern char
+    /// **environ;</c> resolves here.</summary>
+    public static byte** environ => _environ != null ? _environ : (_environ = BuildEnviron());
+
+    private static byte** BuildEnviron()
+    {
+        var vars = Environment.GetEnvironmentVariables();
+        var arr = (byte**)NativeMemory.Alloc((nuint)(vars.Count + 1), (nuint)sizeof(byte*));
+        var i = 0;
+        foreach (System.Collections.DictionaryEntry e in vars)
+        {
+            var entry = $"{e.Key}={e.Value}";
+            var need = Encoding.UTF8.GetByteCount(entry) + 1;
+            var p = (byte*)NativeMemory.Alloc((nuint)need);
+            var n = Encoding.UTF8.GetBytes(entry, new Span<byte>(p, need));
+            p[n] = 0;
+            arr[i++] = p;
+        }
+        arr[i] = null;
+        return arr;
+    }
+
     /// <summary><c>exit(code)</c> — terminate the program with
     /// <paramref name="code"/>. Routes to <see cref="Environment.Exit(int)"/>.
     /// (dotcc does not yet run <c>atexit</c> handlers.)</summary>
