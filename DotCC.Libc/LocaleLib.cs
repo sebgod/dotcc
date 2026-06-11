@@ -74,6 +74,7 @@ public static unsafe partial class Libc
     // modify). Native memory so the pointer never moves; the string members
     // point at pinned UTF-8 RVA literals via L(...).
     private static lconv* _lconv;
+    private static readonly object _lconvLock = new();
 
     /// <summary><c>localeconv()</c> — the current locale's numeric/monetary
     /// formatting conventions. dotcc is always the "C" locale: decimal point
@@ -81,31 +82,39 @@ public static unsafe partial class Libc
     /// </summary>
     public static lconv* localeconv()
     {
-        if (_lconv == null)
+        // Double-checked lock: build into a LOCAL and publish to the field only
+        // when fully initialized, so concurrent first-callers (e.g. parallel
+        // test collections) never double-allocate or observe a half-filled
+        // struct — the returned pointer is stable for the process lifetime.
+        var existing = _lconv;
+        if (existing != null) { return existing; }
+        lock (_lconvLock)
         {
-            _lconv = (lconv*)NativeMemory.AllocZeroed((nuint)sizeof(lconv));
+            if (_lconv != null) { return _lconv; }
+            var p = (lconv*)NativeMemory.AllocZeroed((nuint)sizeof(lconv));
             byte* empty = L("\0"u8);
-            _lconv->decimal_point     = L(".\0"u8);
-            _lconv->thousands_sep     = empty;
-            _lconv->grouping          = empty;
-            _lconv->int_curr_symbol   = empty;
-            _lconv->currency_symbol   = empty;
-            _lconv->mon_decimal_point = empty;
-            _lconv->mon_thousands_sep = empty;
-            _lconv->mon_grouping      = empty;
-            _lconv->positive_sign     = empty;
-            _lconv->negative_sign     = empty;
+            p->decimal_point     = L(".\0"u8);
+            p->thousands_sep     = empty;
+            p->grouping          = empty;
+            p->int_curr_symbol   = empty;
+            p->currency_symbol   = empty;
+            p->mon_decimal_point = empty;
+            p->mon_thousands_sep = empty;
+            p->mon_grouping      = empty;
+            p->positive_sign     = empty;
+            p->negative_sign     = empty;
             // CHAR_MAX (255, dotcc's unsigned char) = "not available" in "C".
             const byte na = 255;
-            _lconv->int_frac_digits = na; _lconv->frac_digits = na;
-            _lconv->p_cs_precedes = na; _lconv->p_sep_by_space = na;
-            _lconv->n_cs_precedes = na; _lconv->n_sep_by_space = na;
-            _lconv->p_sign_posn = na; _lconv->n_sign_posn = na;
-            _lconv->int_p_cs_precedes = na; _lconv->int_n_cs_precedes = na;
-            _lconv->int_p_sep_by_space = na; _lconv->int_n_sep_by_space = na;
-            _lconv->int_p_sign_posn = na; _lconv->int_n_sign_posn = na;
+            p->int_frac_digits = na; p->frac_digits = na;
+            p->p_cs_precedes = na; p->p_sep_by_space = na;
+            p->n_cs_precedes = na; p->n_sep_by_space = na;
+            p->p_sign_posn = na; p->n_sign_posn = na;
+            p->int_p_cs_precedes = na; p->int_n_cs_precedes = na;
+            p->int_p_sep_by_space = na; p->int_n_sep_by_space = na;
+            p->int_p_sign_posn = na; p->int_n_sign_posn = na;
+            _lconv = p;       // publish only after fully built
+            return p;
         }
-        return _lconv;
     }
 
     /// <summary><c>setlocale(category, locale)</c> — select / query the locale.

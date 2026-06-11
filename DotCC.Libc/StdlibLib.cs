@@ -266,6 +266,7 @@ public static unsafe partial class Libc
     }
 
     private static byte** _environ;
+    private static readonly object _environLock = new();
 
     /// <summary>POSIX <c>char **environ</c> — the whole process environment as a
     /// NULL-terminated array of NUL-terminated <c>"NAME=value"</c> UTF-8 strings.
@@ -274,8 +275,22 @@ public static unsafe partial class Libc
     /// mutations through it, which is enough for the read-only iterators that use
     /// it). SRFI-98's <c>get-environment-variables</c> walks it; surfaced by bare
     /// name through <c>using static Libc</c> so a program's <c>extern char
-    /// **environ;</c> resolves here.</summary>
-    public static byte** environ => _environ != null ? _environ : (_environ = BuildEnviron());
+    /// **environ;</c> resolves here. Double-checked lock: concurrent first-callers
+    /// build one shared array, not two (parallel tests / a threaded program).</summary>
+    public static byte** environ
+    {
+        get
+        {
+            var existing = _environ;
+            if (existing != null) { return existing; }
+            lock (_environLock)
+            {
+                // `??=` isn't valid on a pointer type — explicit check.
+                if (_environ == null) { _environ = BuildEnviron(); }
+                return _environ;
+            }
+        }
+    }
 
     private static byte** BuildEnviron()
     {

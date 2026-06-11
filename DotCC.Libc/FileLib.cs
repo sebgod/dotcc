@@ -76,21 +76,32 @@ public static unsafe partial class Libc
     // can hand out a fixed FILE* for the program's lifetime.
     private static FILE* _stdinP, _stdoutP, _stderrP;
 
-    private static FILE* AllocStd(int slot)
+    // Thread-safe lazy init for the std-stream FILE*s: build under _filesLock
+    // and publish only the finished pointer, so concurrent first-callers (e.g.
+    // parallel test collections, or a multithreaded emitted program) hand out
+    // ONE stable FILE* per std stream rather than racing to allocate two.
+    private static FILE* StdStream(ref FILE* slotField, int slot)
     {
-        var p = (FILE*)NativeMemory.Alloc((nuint)sizeof(FILE));
-        p->_slot = slot;
-        return p;
+        var existing = slotField;
+        if (existing != null) { return existing; }
+        lock (_filesLock)
+        {
+            if (slotField != null) { return slotField; }
+            var p = (FILE*)NativeMemory.Alloc((nuint)sizeof(FILE));
+            p->_slot = slot;
+            slotField = p;       // publish only after _slot is set
+            return p;
+        }
     }
 
     /// <summary>Standard input stream (<c>FILE*</c>). Routes through <see cref="Console.In"/>.</summary>
-    public static FILE* stdin => _stdinP != null ? _stdinP : (_stdinP = AllocStd(0));
+    public static FILE* stdin => StdStream(ref _stdinP, 0);
 
     /// <summary>Standard output stream (<c>FILE*</c>). Routes through <see cref="Console.Out"/>.</summary>
-    public static FILE* stdout => _stdoutP != null ? _stdoutP : (_stdoutP = AllocStd(1));
+    public static FILE* stdout => StdStream(ref _stdoutP, 1);
 
     /// <summary>Standard error stream (<c>FILE*</c>). Routes through <see cref="Console.Error"/>.</summary>
-    public static FILE* stderr => _stderrP != null ? _stderrP : (_stderrP = AllocStd(2));
+    public static FILE* stderr => StdStream(ref _stderrP, 2);
 
     private static FileSlot? Slot(FILE* f)
     {
@@ -515,9 +526,18 @@ public static unsafe partial class Libc
         var name = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
         var bytes = Encoding.UTF8.GetBytes(name);
         if (bytes.Length + 1 > LTmpnam) { return null; }
-        byte* dst = s != null ? s
-            : _tmpnamBuf != null ? _tmpnamBuf
-            : (_tmpnamBuf = (byte*)NativeMemory.Alloc((nuint)LTmpnam));
+        // tmpnam(NULL) is non-reentrant by spec (shared buffer, overwritten by a
+        // later call), but the buffer's one-time ALLOCATION must still be
+        // race-free or two first-callers leak/clobber it. Guard just the alloc.
+        if (s == null && _tmpnamBuf == null)
+        {
+            lock (_filesLock)
+            {
+                // `??=` isn't valid on a pointer type — explicit check.
+                if (_tmpnamBuf == null) { _tmpnamBuf = (byte*)NativeMemory.Alloc((nuint)LTmpnam); }
+            }
+        }
+        byte* dst = s != null ? s : _tmpnamBuf;
         for (int i = 0; i < bytes.Length; i++) { dst[i] = bytes[i]; }
         dst[bytes.Length] = 0;
         return dst;
