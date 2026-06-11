@@ -7,8 +7,15 @@ name: ci
 # → test --no-build as SEPARATE steps. Keeping build and the test host in
 # distinct, sequential processes structurally avoids the documented Windows
 # flake where a test host racing a concurrent build deadlocks on the
-# LALR.CC.dll copy lock. Linux runners don't hit the file-lock / process-warmup
-# races at all, which is why the whole org standardises on ubuntu-latest.
+# LALR.CC.dll copy lock — which is why the org defaults to ubuntu-latest.
+#
+# dotcc additionally runs a windows-latest job (build-test-windows). dotcc's
+# libc runtime takes the OS-switch path in several primitives (link →
+# CreateHardLinkW, getppid → toolhelp snapshot, getrusage → GetProcessTimes +
+# psapi, kill → OpenProcess/TerminateProcess, …); those WINDOWS branches never
+# execute on a Linux runner, so without a Windows job they'd ship untested. The
+# Windows job reuses the same separate restore→build→test step structure, so it
+# stays clear of the LALR.CC.dll copy-lock flake the org switched away from.
 #
 # dotcc ships no NuGet package, so there is no pack/publish job (unlike LALR.CC).
 #
@@ -17,10 +24,12 @@ name: ci
 # intent (CLAUDE.md: "CI always builds the NuGet path").
 #
 # Jobs:
-#   build-test  — the required gate: Release build + unit suite + functional
-#                 fixtures. The opt-in differential oracles (MSVC / gcc-WSL /
-#                 gcc-quad / wat) skip cleanly here; the wat oracle, which is
-#                 this branch's whole point, gets its own job below.
+#   build-test          — the required Linux gate: Release build + unit suite +
+#                 functional fixtures. The opt-in differential oracles (MSVC /
+#                 gcc-WSL / gcc-quad / wat) skip cleanly here; the wat oracle,
+#                 which is this branch's whole point, gets its own job below.
+#   build-test-windows  — same build + unit + functional suite on windows-latest,
+#                 so the OS-switch Win32 branches in DotCC.Libc get real coverage.
 #   wat-oracle  — the --target=wat EXECUTION oracle: EmitWat → wat2wasm → node.
 #                 Pins + checksum-verifies wabt and pins Node so the run is
 #                 reproducible; asserts both tools are actually present (the
@@ -54,6 +63,32 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      - name: Restore
+        run: dotnet restore dotcc.sln
+
+      - name: Build (Release, NuGet path)
+        run: dotnet build dotcc.sln -c Release --no-restore --nologo -p:UseLocalLalrCc=false
+
+      - name: Unit tests
+        run: dotnet test DotCC.Tests/DotCC.Tests.csproj -c Release --no-build --nologo
+
+      - name: Functional tests (fixtures; opt-in oracles skip)
+        run: dotnet test DotCC.FunctionalTests/DotCC.FunctionalTests.csproj -c Release --no-build --nologo
+
+  build-test-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      # Same separate restore → build --no-restore → test --no-build structure
+      # as build-test: that's what keeps Windows clear of the test-host-vs-build
+      # LALR.CC.dll copy-lock deadlock the org switched to ubuntu to avoid.
       - name: Restore
         run: dotnet restore dotcc.sln
 
