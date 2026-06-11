@@ -265,6 +265,36 @@ public static unsafe partial class Libc
         return StashCString(Environment.GetEnvironmentVariable(key));
     }
 
+    /// <summary>POSIX <c>setenv(name, value, overwrite)</c> — add or change an
+    /// environment variable; returns 0 on success, -1 (EINVAL) if <paramref
+    /// name="name"/> is null/empty or contains <c>'='</c>. When <paramref
+    /// name="overwrite"/> is 0 and the name already exists the value is left
+    /// untouched. Routes to <see cref="Environment.SetEnvironmentVariable(string,string)"/>
+    /// (chibi's <c>(chibi ast)</c> env-cell support uses it).</summary>
+    public static int setenv(byte* name, byte* value, int overwrite)
+    {
+        if (name == null || *name == 0) { errno = EINVAL; return -1; }
+        var key = Encoding.UTF8.GetString(name, strlen(name));
+        if (key.IndexOf('=') >= 0) { errno = EINVAL; return -1; }
+        if (overwrite == 0 && Environment.GetEnvironmentVariable(key) != null) { return 0; }
+        Environment.SetEnvironmentVariable(key, value == null ? string.Empty : Encoding.UTF8.GetString(value, strlen(value)));
+        return 0;
+    }
+
+    /// <summary>POSIX <c>unsetenv(name)</c> — remove an environment variable;
+    /// returns 0 on success, -1 (EINVAL) if <paramref name="name"/> is null/empty
+    /// or contains <c>'='</c>. Removing an unset name is not an error. Routes to
+    /// <see cref="Environment.SetEnvironmentVariable(string,string)"/> with a null
+    /// value.</summary>
+    public static int unsetenv(byte* name)
+    {
+        if (name == null || *name == 0) { errno = EINVAL; return -1; }
+        var key = Encoding.UTF8.GetString(name, strlen(name));
+        if (key.IndexOf('=') >= 0) { errno = EINVAL; return -1; }
+        Environment.SetEnvironmentVariable(key, null);
+        return 0;
+    }
+
     private static byte** _environ;
     private static readonly object _environLock = new();
 

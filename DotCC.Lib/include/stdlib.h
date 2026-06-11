@@ -50,6 +50,8 @@ void srand(unsigned int seed);
 
 /* Environment + program control. */
 char* getenv(const char *name);
+int setenv(const char *name, const char *value, int overwrite);
+int unsetenv(const char *name);
 int system(const char *command);
 void exit(int code);
 void _Exit(int code);

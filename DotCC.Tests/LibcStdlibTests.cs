@@ -183,6 +183,30 @@ public sealed unsafe class LibcStdlibTests
         ((nint)getenv(L("DOTCC_DEFINITELY_UNSET_XYZ\0"u8))).ShouldBe((nint)0);
 
     [Fact]
+    public void setenv_sets_and_unsetenv_removes()
+    {
+        try
+        {
+            setenv(L("DOTCC_SETENV_VAR\0"u8), L("first\0"u8), 1).ShouldBe(0);
+            Cstr(getenv(L("DOTCC_SETENV_VAR\0"u8))).ShouldBe("first");
+            // overwrite == 0 leaves an existing value untouched ...
+            setenv(L("DOTCC_SETENV_VAR\0"u8), L("ignored\0"u8), 0).ShouldBe(0);
+            Cstr(getenv(L("DOTCC_SETENV_VAR\0"u8))).ShouldBe("first");
+            // ... overwrite != 0 replaces it.
+            setenv(L("DOTCC_SETENV_VAR\0"u8), L("second\0"u8), 1).ShouldBe(0);
+            Cstr(getenv(L("DOTCC_SETENV_VAR\0"u8))).ShouldBe("second");
+            unsetenv(L("DOTCC_SETENV_VAR\0"u8)).ShouldBe(0);
+            ((nint)getenv(L("DOTCC_SETENV_VAR\0"u8))).ShouldBe((nint)0);
+        }
+        finally { Environment.SetEnvironmentVariable("DOTCC_SETENV_VAR", null); }
+    }
+
+    [Fact]
+    public void setenv_rejects_a_name_with_equals() =>
+        // POSIX: name containing '=' is EINVAL.
+        setenv(L("BAD=NAME\0"u8), L("x\0"u8), 1).ShouldBe(-1);
+
+    [Fact]
     public void system_null_probes_for_a_command_processor() =>
         // C: system(NULL) returns nonzero iff a command interpreter is available.
         system(null).ShouldNotBe(0);
