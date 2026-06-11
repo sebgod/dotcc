@@ -2,6 +2,7 @@
 
 using System;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using Shouldly;
 using Xunit;
@@ -145,5 +146,32 @@ public sealed unsafe class LibcPosixFsTests
             errno.ShouldBe(ENOENT);
         }
         finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    // chown forwards to chown(2) on Unix; on Windows (no uid/gid model) it's a
+    // no-op success on an existing path. getuid/getgid are the raw OS calls used
+    // only to chown a file to ITS OWN owner — the one chown a non-root user is
+    // always allowed, so the test needs no privilege.
+    [DllImport("libc", EntryPoint = "getuid")] private static extern uint OsGetuid();
+    [DllImport("libc", EntryPoint = "getgid")] private static extern uint OsGetgid();
+
+    [Fact]
+    public void chown_to_self_succeeds_and_missing_path_fails()
+    {
+        var f = Path.GetTempFileName();
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                chown(C(f), 0, 0).ShouldBe(0);                  // no-op success on existing path
+            }
+            else
+            {
+                chown(C(f), OsGetuid(), OsGetgid()).ShouldBe(0); // chown to self is always permitted
+            }
+            chown(C(f + ".does-not-exist"), 0, 0).ShouldBe(-1);  // missing -> ENOENT
+            errno.ShouldBe(ENOENT);
+        }
+        finally { File.Delete(f); }
     }
 }

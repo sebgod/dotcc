@@ -363,15 +363,26 @@ public static unsafe partial class Libc
         return 0;
     }
 
-    /// <summary><c>chown(path, owner, group)</c> — no-op success (managed hosts
-    /// don't expose uid/gid changes portably); -1 (ENOENT) for a missing path.
-    /// Best-effort, mirroring <see cref="chmod"/>.</summary>
+    /// <summary><c>chown(path, owner, group)</c> — change file ownership. POSIX
+    /// <c>chown(2)</c> on Unix (faithful: a non-root caller can only chown to its
+    /// own uid/gid, else EPERM — a real result, not a faked 0). Windows has no
+    /// uid/gid model, so it's a no-op success on an existing path (-1 ENOENT if
+    /// the path is missing, matching what POSIX would report first).</summary>
     public static int chown(byte* path, uint owner, uint group)
     {
-        var p = Str(path);
-        if (!File.Exists(p) && !Directory.Exists(p)) { errno = ENOENT; return -1; }
-        return 0;
+        if (OperatingSystem.IsWindows())
+        {
+            var p = Str(path);
+            if (!File.Exists(p) && !Directory.Exists(p)) { errno = ENOENT; return -1; }
+            return 0;
+        }
+        if (PosixChown(path, owner, group) == 0) { return 0; }
+        errno = Marshal.GetLastPInvokeError();
+        return -1;
     }
+
+    [DllImport("libc", EntryPoint = "chown", SetLastError = true)]
+    private static extern int PosixChown(byte* path, uint owner, uint group);
 
     /// <summary><c>ftruncate(fd, length)</c> — resize the fd's backing file to
     /// <paramref name="length"/> bytes; 0 on success, -1 (EBADF/EINVAL).</summary>
