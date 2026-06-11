@@ -18,8 +18,9 @@ public sealed class IrUnsupportedException : DotCC.CompileException
 }
 
 /// <summary>
-/// Builds the typed IR from the raw LALR parse tree (driven by
-/// <see cref="ParseTreeIdentityVisitor"/>). A TOP-DOWN recursive walk with full
+/// Builds the typed IR from the raw LALR parse tree (driven by the
+/// LALR.CC-generated <see cref="C.IdentityVisitor"/>, which leaves each reduced
+/// <c>Item.Content</c> holding its raw grammar record). A TOP-DOWN recursive walk with full
 /// scope/type context — the opposite of the legacy bottom-up string emitter.
 /// This is the sole backend: it covers the whole C surface dotcc supports.
 /// A parse-tree node it doesn't yet lower raises

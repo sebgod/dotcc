@@ -292,7 +292,7 @@ public static class Compiler
         // (-pedantic) or one collected error (-pedantic-errors). Off by default.
         var gate = (pedantic || pedanticErrors) ? new DialectGate(activeDialect) : null;
         var irBuilder = new Ir.IrBuilder(gate, names ?? new Backends.CSharpNameLegalizer());
-        var irParser = C.BuildParser(Ir.ParseTreeIdentityVisitor.Instance);
+        var irParser = C.BuildParser(C.IdentityVisitor.Instance);
         foreach (var unitPath in inputPaths)
         {
             var root = ParseUnit(unitPath, irParser, quiet: false, gate);
