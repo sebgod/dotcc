@@ -174,4 +174,23 @@ public sealed unsafe class LibcPosixFsTests
         }
         finally { File.Delete(f); }
     }
+
+    [Fact]
+    public void mkfifo_creates_a_fifo_on_unix_else_EPERM()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "dotcc-fifo-" + Guid.NewGuid().ToString("N"));
+        if (OperatingSystem.IsWindows())
+        {
+            mkfifo(C(path), 0x1B6).ShouldBe(-1);   // 0666 -> EPERM (no FS FIFOs on Windows)
+            errno.ShouldBe(EPERM);
+            return;
+        }
+        try
+        {
+            mkfifo(C(path), 0x1B6).ShouldBe(0);    // 0666: created
+            mkfifo(C(path), 0x1B6).ShouldBe(-1);   // second time -> EEXIST (an object exists there)
+            errno.ShouldBe(EEXIST);
+        }
+        finally { unlink(C(path)); }
+    }
 }

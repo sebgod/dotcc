@@ -395,14 +395,20 @@ public static unsafe partial class Libc
         catch (IOException) { errno = EIO; return -1; }
     }
 
-    /// <summary><c>mkfifo(path, mode)</c> — named pipes have no portable .NET
-    /// API; fail with EPERM (honest). Defined so <c>(chibi filesystem)</c> links;
-    /// the R7RS suite never calls it.</summary>
+    /// <summary><c>mkfifo(path, mode)</c> — create a named pipe (FIFO). Forwards
+    /// to <c>mkfifo(3)</c> on POSIX. Windows named pipes aren't filesystem
+    /// objects (no <c>mkfifo</c> equivalent that a path-based open could reopen),
+    /// so on Windows it stays an honest EPERM.</summary>
     public static int mkfifo(byte* path, uint mode)
     {
-        errno = EPERM;
+        if (OperatingSystem.IsWindows()) { errno = EPERM; return -1; }
+        if (PosixMkfifo(path, mode) == 0) { return 0; }
+        errno = Marshal.GetLastPInvokeError();
         return -1;
     }
+
+    [DllImport("libc", EntryPoint = "mkfifo", SetLastError = true)]
+    private static extern int PosixMkfifo(byte* path, uint mode);
 
     /// <summary><c>pipe(pipefd)</c> — anonymous pipes aren't modeled in dotcc's
     /// FileSlot fd space; fail with EPERM. Defined so the module links; unused by
