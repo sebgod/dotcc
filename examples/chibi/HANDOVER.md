@@ -190,34 +190,42 @@ TRUE dynamic loading is a dotcc roadmap item, not a chibi blocker — see the
 today; the missing piece is an import mode resolving a plugin TU's unresolved
 externs as `[LibraryImport]` bindings against the host library.
 
-## KNOWN RUNTIME BUG — native heap corruption (pre-existing, the real phase-4 blocker)
+## RUNTIME BUGS
 
 chibi-via-dotcc **evaluates correctly** (`(+ 1 2)` → 3, `(srfi 69)` hash tables,
-`(srfi 98)` env vars all print right answers) but **corrupts the native heap**
-during the run. Two confirmed symptoms:
+`(srfi 98)` env vars all print right answers). Two runtime symptoms were seen;
+one is **fixed**, one is **still open**.
 
-- **Normal completion exits 127, not 0.** Not an exception (stderr is empty),
-  and not chibi's logic — instrumentation shows `main` correctly returns 0; the
-  process then aborts inside the shell's teardown `NativeMemory.Free(argv[i])`.
-  Skipping those frees makes it exit 0 cleanly. So the argv buffers (allocated
-  by dotcc via `NativeMemory.Alloc`) are intact when allocated but their heap
-  metadata is clobbered by run time — chibi's GC `malloc`/`free` share the same
-  NativeMemory/CRT heap, so an out-of-bounds write in chibi's heap trips the
-  allocator at free time.
-- **`(exit N)` faults** with `AccessViolationException` in `sexp_apply` — the
-  same corruption surfacing during execution rather than teardown.
+### FIXED — exit 127 on normal completion (was NOT heap corruption)
 
-Confirmed **pre-existing** (reproduces at the pre-static-clibs commit), so it is
-NOT from the phase-3 work; the earlier "boots and evals" runs were piped, which
-masked the exit code and the teardown abort. The reference gcc build exits 0 and
-runs `(exit)` fine, so this is a **dotcc miscompile**, almost certainly a
-struct-layout / pointer-arithmetic mismatch where chibi writes past an object
-(see the `sexp_sizeof` / FAM notes below). **This is the gate for phase 4** — a
-heap-corrupting runtime can't be trusted to run the R7RS suite even once the
-module chain (task #14) is closed. Debug by instrumenting chibi's allocation
-sizes (`sexp_sizeof` / `sexp_alloc_tagged`) against the actual .NET
-`sizeof`/layout of `sexp_struct`, or bisect with a guard-page / fill-pattern
-allocator.
+Root cause: the shell's 2-arg-`main` teardown freed the synthesized argv
+slot-by-slot. chibi's `-q` option handler does `argv[i--] = (char*)"-xchibi"`
+(`main.c`) — a legal in-C overwrite of an argv slot with a **string-literal
+pointer**. `NativeMemory.Free` on that non-heap pointer aborts the process → exit
+127 (after `main` correctly returned 0). The earlier "boots and evals" runs were
+piped (`| tail`), whose exit code won and masked it. The debug heap below was
+built to chase a suspected heap corruption here and found **none** across a full
+run — which correctly pointed the investigation away from the GC heap and at the
+argv array. Fixed in commit `df7e96a` (the emitted shell no longer frees argv,
+matching C's environment-owned-argv semantics); guarded by
+`EntryStackThreadTests.argv_is_never_freed_at_exit`.
+
+### OPEN — `(exit N)` faults with `AccessViolationException` in `sexp_apply`
+
+Separate from the argv bug and still open. `(exit N)` throws an
+`AccessViolationException` deep in `DotCcProgram.sexp_apply` during eval
+(`sexp_apply → sexp_eval_op → sexp_eval_string → run_main → main`). The reference
+gcc build runs `(exit)` fine, so this is a **dotcc miscompile** in the exit path.
+Note: a full run under the checked debug heap (now exposed as
+`-fsanitize=address`, or `DOTCC_DEBUG_HEAP=1` / `DOTCC_DEBUG_HEAP_SCAN=1` at
+runtime — see `C-SUPPORT.md`) reported **no** redzone overflow or bad free, which
+**weakens** the earlier "chibi writes past an object" struct-layout hypothesis.
+More likely a specific lowering bug on the exit primitive's control path
+(chibi's `exit` uses an exception/`longjmp`-shaped unwind through `sexp_apply`).
+Debug next by narrowing which `sexp_apply` opcode/primitive faults (instrument
+the call), and check the fn-ptr / varargs / `setjmp` lowering on that path before
+returning to the `sexp_sizeof` / FAM layout angle below. **This gates phase 4**
+(the R7RS suite, task #13) — it can't run cleanly while `(exit)` faults.
 
 ## Semantic risk notes (for the runtime phases)
 

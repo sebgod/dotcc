@@ -339,7 +339,8 @@ public static class Compiler
         bool pedantic = false,
         bool pedanticErrors = false,
         bool asObject = false,
-        bool warnConversion = false)
+        bool warnConversion = false,
+        bool debugHeap = false)
     {
         var irBuilder = BuildIr(inputPaths, includeDirs, defines, dialect, pedantic, pedanticErrors);
         // -Wconversion: collect narrowing-conversion warnings during codegen, then
@@ -358,7 +359,7 @@ public static class Compiler
         }
         return asObject
             ? SerializeFragment(cg.Functions, new Dictionary<string, string>(), cg.Aliases, cg.Globals, cg.MainArity)
-            : BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, fileBased, libraryMode, cg.Exports);
+            : BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, fileBased, libraryMode, cg.Exports, debugHeap);
     }
 
     /// <summary>
@@ -438,7 +439,7 @@ public static class Compiler
     /// shared header's declarations), then wrap in the shell + runtime.
     /// </summary>
     public static string LinkObjects(
-        IReadOnlyList<string> objectPaths, bool fileBased = true, bool libraryMode = false)
+        IReadOnlyList<string> objectPaths, bool fileBased = true, bool libraryMode = false, bool debugHeap = false)
     {
         var typeByName = new Dictionary<string, string>(StringComparer.Ordinal); // first wins
         var typeOrder = new List<string>();
@@ -516,7 +517,7 @@ public static class Compiler
         var aliasText = aliasLines.Count > 0 ? string.Join("\n", aliasLines) + "\n" : "";
         var globalText = globalLines.Count > 0 ? string.Join("\n", globalLines) + "\n" : "";
         return BuildShell(mainArity, functions.ToString(), structDecls.ToString(), aliasText, globalText,
-                          fileBased, libraryMode, System.Array.Empty<EmitHelpers.Export>());
+                          fileBased, libraryMode, System.Array.Empty<EmitHelpers.Export>(), debugHeap);
     }
 
     /// <summary>
@@ -905,7 +906,8 @@ public static class Compiler
         string globals,
         bool fileBased,
         bool libraryMode,
-        IReadOnlyList<EmitHelpers.Export> exports)
+        IReadOnlyList<EmitHelpers.Export> exports,
+        bool debugHeap = false)
     {
         if (libraryMode)
         {
@@ -916,6 +918,13 @@ public static class Compiler
         // <PackageReference Include="DotCC.Libc"> in scope.
         var runtimeBlock = _runtimeBlock.Value;
         var header = fileBased ? "#:property AllowUnsafeBlocks=true\n\n" : string.Empty;
+        // -fsanitize=address: flip the checked debug heap on before any user
+        // code (or the embedded runtime) allocates, so every malloc/free
+        // downstream carries the header + redzone the checked `free` validates.
+        // (DOTCC_DEBUG_HEAP=1 is the equivalent runtime override; see Libc.)
+        var debugHeapInit = debugHeap
+            ? "Libc.EnableDebugHeap(); // -fsanitize=address: checked malloc/free\n            "
+            : string.Empty;
         // User functions live as STATIC METHODS of `DotCcProgram` (not top-level
         // local functions). A top-level local function can't be addressed (`&fn`),
         // stored in a function-pointer table (Lua's `luaL_Reg`), or referenced from
@@ -1020,7 +1029,7 @@ public static class Compiler
             // raise its own catchable "C stack overflow". Reserving 64 MB (virtual
             // address space, not committed memory) restores the native headroom so
             // such programs reach their own recursion guards and fault gracefully.
-            int __dotccExit = 0;
+            {{debugHeapInit}}int __dotccExit = 0;
             var __dotccThread = new System.Threading.Thread(
                 () => { __dotccExit = __DotCcEntry(); }, 64 * 1024 * 1024);
             __dotccThread.Start();

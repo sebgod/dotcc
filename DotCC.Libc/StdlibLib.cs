@@ -192,13 +192,15 @@ public static unsafe partial class Libc
     /// <summary><c>calloc(n, size)</c> — allocate <c>n * size</c> zero-filled
     /// bytes. Routes to <see cref="NativeMemory.AllocZeroed(nuint, nuint)"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void* calloc(int n, int size) => NativeMemory.AllocZeroed((nuint)n, (nuint)size);
+    public static void* calloc(int n, int size) =>
+        _dbgHeap ? DbgAlloc((nuint)n * (nuint)size, true) : NativeMemory.AllocZeroed((nuint)n, (nuint)size);
 
     /// <summary><c>realloc(p, size)</c> — resize a prior allocation, preserving
     /// contents up to the smaller of old/new size. Routes to
     /// <see cref="NativeMemory.Realloc(void*, nuint)"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void* realloc(void* p, int size) => NativeMemory.Realloc(p, (nuint)size);
+    public static void* realloc(void* p, int size) =>
+        _dbgHeap ? DbgRealloc(p, (nuint)size) : NativeMemory.Realloc(p, (nuint)size);
 
     // ---------------------------------------------------------------------
     // Pseudo-random numbers

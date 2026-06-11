@@ -36,7 +36,7 @@ public static unsafe partial class Libc
     /// in user code if needed).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void* malloc(int size) => NativeMemory.Alloc((nuint)size);
+    public static void* malloc(int size) => _dbgHeap ? DbgAlloc((nuint)size, false) : NativeMemory.Alloc((nuint)size);
 
     /// <inheritdoc cref="malloc(int)"/>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -47,7 +47,165 @@ public static unsafe partial class Libc
     /// <see cref="malloc"/> to the heap. <c>free(NULL)</c> is a no-op.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void free(void* p) => NativeMemory.Free(p);
+    public static void free(void* p) { if (_dbgHeap) { DbgFree(p); } else { NativeMemory.Free(p); } }
+
+    // ---------------------------------------------------------------------
+    // Debug heap — a minimal AddressSanitizer for the native heap. Opt-in two
+    // ways, inert otherwise: compile with `-fsanitize=address` (the emitted
+    // shell calls EnableDebugHeap() before main), or set DOTCC_DEBUG_HEAP=1 at
+    // runtime (the no-recompile override). A self-describing block:
+    // [magic|size] header keeps the user pointer 32-aligned, and a trailing
+    // canary catches a write past the allocation. `free` validates both —
+    // flagging a bad/double free or an overflow with a managed stack trace at
+    // the offending call. Useful because dotcc's allocations and a guest
+    // runtime's own heap (e.g. chibi-scheme's GC arena) share this one process
+    // heap, so a single out-of-bounds write or invalid free anywhere corrupts
+    // everything downstream; the checked layout localizes it to the call site.
+    // ---------------------------------------------------------------------
+
+    /// <summary>When true, malloc/calloc/realloc/free route through the checked
+    /// block layout below. Turned on by compiling with <c>-fsanitize=address</c>
+    /// (the emitted shell calls <see cref="EnableDebugHeap"/> at startup) or by
+    /// setting <c>DOTCC_DEBUG_HEAP=1</c> at runtime (seeded here — the override
+    /// for an already-built program). Read on every malloc/free; the false path
+    /// is a single branch over the normal <see cref="NativeMemory"/> route.</summary>
+    internal static bool _dbgHeap =
+        System.Environment.GetEnvironmentVariable("DOTCC_DEBUG_HEAP") == "1";
+
+    /// <summary>Route subsequent malloc/calloc/realloc/free through the checked
+    /// debug heap. The emitted program shell calls this once at startup when the
+    /// program was compiled with <c>-fsanitize=address</c>. Must run before the
+    /// first allocation: a block taken from the plain heap carries no header or
+    /// canary, so the checked <c>free</c> would (correctly) reject it as an
+    /// invalid free.</summary>
+    public static void EnableDebugHeap() => _dbgHeap = true;
+    /// <summary>When also set, every alloc/free scans EVERY live block's redzone,
+    /// so an overflow is caught even on a block that is never freed (chibi's GC
+    /// heap / context object) — at the next allocation, not the offending write.</summary>
+    private static readonly bool _dbgScan =
+        System.Environment.GetEnvironmentVariable("DOTCC_DEBUG_HEAP_SCAN") == "1";
+    private const nuint _dbgHdr = 32;                       // 32-aligned user ptr
+    private const nuint _dbgRed = 32;                       // trailing redzone
+    private const ulong _dbgMagic = 0xD07CCA11ABCDEF01UL;
+    private const byte _dbgCanary = 0xAB;
+    // Live blocks are threaded through a singly-linked list in their headers
+    // (no managed collection — embed/AOT clean): header = [magic|size|next|pad].
+    private static byte* _dbgHead = null;
+    private static readonly object _dbgLock = new();
+
+    /// <summary>Allocate a checked block and return the user pointer.</summary>
+    internal static void* DbgAlloc(nuint size, bool zero)
+    {
+        if (_dbgScan) { DbgScanAll("alloc"); }
+        var basep = (byte*)NativeMemory.AlignedAlloc(_dbgHdr + size + _dbgRed, 32);
+        *(ulong*)basep = _dbgMagic;
+        *(nuint*)(basep + 8) = size;
+        var user = basep + _dbgHdr;
+        if (zero) { NativeMemory.Fill(user, size, 0); }
+        NativeMemory.Fill(user + size, _dbgRed, _dbgCanary);   // arm the redzone
+        if (_dbgScan)
+        {
+            lock (_dbgLock) { *(byte**)(basep + 16) = _dbgHead; _dbgHead = basep; }
+        }
+        return user;
+    }
+
+    /// <summary>Walk every live block and report the first whose trailing canary
+    /// has been overwritten — catching an overflow into a block that is never
+    /// freed. The trace points at the alloc/free where the scan ran (the size of
+    /// the corrupted block narrows down the writer).</summary>
+    private static void DbgScanAll(string where)
+    {
+        lock (_dbgLock)
+        {
+            for (var h = _dbgHead; h != null; h = *(byte**)(h + 16))
+            {
+                if (*(ulong*)h != _dbgMagic)
+                {
+                    System.Console.Error.WriteLine(
+                        $"[dotcc debug-heap] {where}-scan: corrupt header at 0x{(nuint)(h + _dbgHdr):x} (magic=0x{*(ulong*)h:x})\n{System.Environment.StackTrace}");
+                    return;
+                }
+                var size = *(nuint*)(h + 8);
+                var red = h + _dbgHdr + size;
+                for (nuint i = 0; i < _dbgRed; i++)
+                {
+                    if (red[i] != _dbgCanary)
+                    {
+                        System.Console.Error.WriteLine(
+                            $"[dotcc debug-heap] {where}-scan: write past {size}-byte block 0x{(nuint)(h + _dbgHdr):x} (redzone[{i}]=0x{red[i]:x2})\n{System.Environment.StackTrace}");
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>Unlink a block from the live-list (scan mode).</summary>
+    private static void DbgUnlink(byte* basep)
+    {
+        lock (_dbgLock)
+        {
+            if (_dbgHead == basep) { _dbgHead = *(byte**)(basep + 16); return; }
+            for (var h = _dbgHead; h != null; h = *(byte**)(h + 16))
+            {
+                if (*(byte**)(h + 16) == basep) { *(byte**)(h + 16) = *(byte**)(basep + 16); return; }
+            }
+        }
+    }
+
+    /// <summary>Validate a user pointer's header magic and trailing canary,
+    /// reporting (with a stack trace) a bad/double free or an overflow.</summary>
+    private static nuint DbgValidate(byte* user, string where, out bool ok)
+    {
+        var basep = user - _dbgHdr;
+        var magic = *(ulong*)basep;
+        if (magic != _dbgMagic)
+        {
+            System.Console.Error.WriteLine(
+                $"[dotcc debug-heap] {where}: invalid or double free of 0x{(nuint)user:x} (magic=0x{magic:x})\n{System.Environment.StackTrace}");
+            ok = false;
+            return 0;
+        }
+        var size = *(nuint*)(basep + 8);
+        var red = user + size;
+        for (nuint i = 0; i < _dbgRed; i++)
+        {
+            if (red[i] != _dbgCanary)
+            {
+                System.Console.Error.WriteLine(
+                    $"[dotcc debug-heap] {where}: write past end of {size}-byte block 0x{(nuint)user:x} (redzone[{i}]=0x{red[i]:x2})\n{System.Environment.StackTrace}");
+                break;
+            }
+        }
+        ok = true;
+        return size;
+    }
+
+    /// <summary>Checked counterpart of <see cref="free(void*)"/>.</summary>
+    internal static void DbgFree(void* p)
+    {
+        if (p == null) { return; }
+        if (_dbgScan) { DbgScanAll("free"); }
+        DbgValidate((byte*)p, "free", out var ok);
+        if (!ok) { return; }                       // leak rather than free a bad ptr
+        var basep = (byte*)p - _dbgHdr;
+        if (_dbgScan) { DbgUnlink(basep); }
+        *(ulong*)basep = 0xDEADBEEFDEADBEEFUL;     // poison so a double free is caught
+        NativeMemory.AlignedFree(basep);
+    }
+
+    /// <summary>Checked counterpart of <c>realloc</c>.</summary>
+    internal static void* DbgRealloc(void* p, nuint newSize)
+    {
+        if (p == null) { return DbgAlloc(newSize, false); }
+        var old = DbgValidate((byte*)p, "realloc", out var ok);
+        if (!ok) { return DbgAlloc(newSize, false); }
+        var np = DbgAlloc(newSize, false);
+        Buffer.MemoryCopy(p, np, newSize, old < newSize ? old : newSize);
+        DbgFree(p);
+        return np;
+    }
 
     /// <inheritdoc cref="free(void*)"/>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

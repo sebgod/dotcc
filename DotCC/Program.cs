@@ -75,6 +75,10 @@ internal static class Program
         {
             Description = "Warn on implicit integer conversions that narrow (a wider value stored into a narrower type, e.g. int -> unsigned char). Off by default, like gcc/clang -Wconversion.",
         };
+        var sanitizeOpt = new Option<string?>("-fsanitize")
+        {
+            Description = "Enable a sanitizer. Only 'address' is modeled: routes the emitted program's malloc/calloc/realloc/free through a checked debug heap (redzone overflow + bad/double-free detection, a heap-only subset of clang's -fsanitize=address). DOTCC_DEBUG_HEAP=1 is the runtime-override equivalent.",
+        };
         var mdOpt = new Option<bool>("-MD")
         {
             Description = "Write a Make-format dependency file (.d) listing the TU + every #included header, alongside compilation.",
@@ -95,7 +99,7 @@ internal static class Program
         var root = new RootCommand("dotcc — a C compiler frontend that transpiles to .NET 10 / C# 14.")
         {
             inputArg, outOpt, emitOpt, targetOpt, preprocessOpt, includeOpt, defineOpt, compileOpt, sharedOpt, stdOpt,
-            pedanticOpt, pedanticErrorsOpt, wconversionOpt, mdOpt, mmdOpt, mfOpt, mtOpt,
+            pedanticOpt, pedanticErrorsOpt, wconversionOpt, sanitizeOpt, mdOpt, mmdOpt, mfOpt, mtOpt,
         };
         // Accept-and-ignore unknown flags (-Wall, -O2, -g, -f*, -m*, …) instead
         // of erroring out, so dotcc survives being driven by ./configure / make,
@@ -127,6 +131,20 @@ internal static class Program
             var pedanticFlag = parse.GetValue(pedanticOpt);
             var pedanticErrorsFlag = parse.GetValue(pedanticErrorsOpt);
             var wconversionFlag = parse.GetValue(wconversionOpt);
+            // -fsanitize=address[,...]: enable the checked debug heap. Other
+            // sanitizers aren't modeled — warn and carry on rather than error
+            // (./configure probes sanitizers and shouldn't fail the build).
+            var sanitizeValue = parse.GetValue(sanitizeOpt);
+            var debugHeapFlag = false;
+            if (sanitizeValue is not null)
+            {
+                var kinds = sanitizeValue.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                debugHeapFlag = kinds.Contains("address");
+                foreach (var k in kinds.Where(k => k != "address"))
+                {
+                    Console.Error.WriteLine($"dotcc: warning: ignoring unsupported -fsanitize={k}");
+                }
+            }
             var mdFlag = parse.GetValue(mdOpt);
             var mmdFlag = parse.GetValue(mmdOpt);
             var depFile = parse.GetValue(mfOpt);
@@ -168,7 +186,7 @@ internal static class Program
             }
 
             return Run(inputs, output, emit, target, preprocessOnly, includes, defines, sharedFlag, dialect, pedanticFlag, pedanticErrorsFlag,
-                       mdFlag, mmdFlag, depFile, depTargets, wconversionFlag);
+                       mdFlag, mmdFlag, depFile, depTargets, wconversionFlag, debugHeapFlag);
         });
 
         return root.Parse(args).Invoke();
@@ -192,7 +210,8 @@ internal static class Program
         bool genDepsNoSystem,
         string? depFile,
         string[] depTargets,
-        bool warnConversion = false)
+        bool warnConversion = false,
+        bool debugHeap = false)
     {
         if (preprocessOnly)
         {
@@ -260,7 +279,7 @@ internal static class Program
         try
         {
             program = linking
-                ? Compiler.LinkObjects(inputPaths, fileBased: emit == EmitKind.File && !libraryMode, libraryMode: libraryMode)
+                ? Compiler.LinkObjects(inputPaths, fileBased: emit == EmitKind.File && !libraryMode, libraryMode: libraryMode, debugHeap: debugHeap)
                 : Compiler.EmitCSharp(
                     inputPaths,
                     includeDirs,
@@ -270,7 +289,8 @@ internal static class Program
                     dialect: dialect,
                     pedantic: pedantic,
                     pedanticErrors: pedanticErrors,
-                    warnConversion: warnConversion);
+                    warnConversion: warnConversion,
+                    debugHeap: debugHeap);
         }
         catch (CompileException ex)
         {
