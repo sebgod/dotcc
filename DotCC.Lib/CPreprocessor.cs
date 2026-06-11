@@ -213,8 +213,21 @@ internal sealed class CPreprocessor : C.IPreprocessor
             using var subLexer = BytesLexer.FromString(source, _lexerTable);
             using var subPreproc = C.WrapPreprocessor(subLexer, this);
             subPreproc.ExpandFuncMacro = ExpandFuncMacro;
+            // Expand function-like macros WITHIN the include, mirroring the
+            // top-level pipeline (where MacroExpander sits above the preprocessor).
+            // Without this, a macro the included file both DEFINES and #undefs —
+            // chibi's param.c is `#define _I(x) … / use(s) / #undef _I` — is
+            // removed from the table by its own trailing #undef while this
+            // OnInclude is still draining the body, so the single downstream
+            // MacroExpander (which only sees the already-drained include) finds
+            // `_I` undefined and leaves `_I(…)` raw → CS0103 in the emit. Expanding
+            // here, while the definition is still live, matches how the top-level
+            // #define→use→#undef token stream lazily expands each use before the
+            // #undef is reached. (A file that defines without undefining — e.g.
+            // opcodes.c's `_I` — worked either way; this fixes the undef case.)
+            using var subMacro = new MacroExpander(subPreproc, this);
             var tokens = new List<Item>();
-            while (subPreproc.MoveNext()) { tokens.Add(subPreproc.Current); }
+            while (subMacro.MoveNext()) { tokens.Add(subMacro.Current); }
             return tokens;
         }
         finally
