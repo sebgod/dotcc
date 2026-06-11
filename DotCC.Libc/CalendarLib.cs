@@ -55,6 +55,11 @@ public static unsafe partial class Libc
         public int tm_wday;
         public int tm_yday;
         public int tm_isdst;
+        // glibc/BSD extensions — chibi's (chibi time) reads them. dotcc reports
+        // UTC (tm_gmtoff = 0, tm_zone = "UTC") so broken-down time stays
+        // machine-independent; see FillTm.
+        public long tm_gmtoff;
+        public byte* tm_zone;
     }
 #pragma warning restore CS8981
 
@@ -88,6 +93,20 @@ public static unsafe partial class Libc
         t->tm_wday = (int)dt.DayOfWeek; // C# Sunday=0 matches C
         t->tm_yday = dt.DayOfYear - 1;  // C: 0-based
         t->tm_isdst = isdst;
+        t->tm_gmtoff = 0;               // UTC (see the struct comment)
+        t->tm_zone = _utcZone;
+    }
+
+    // A stable "UTC\0" buffer for tm_zone (allocated once; never freed — process
+    // lifetime). A real timezone abbreviation would vary; dotcc reports UTC.
+    private static byte* _utcZoneBuf;
+    private static byte* _utcZone =>
+        _utcZoneBuf != null ? _utcZoneBuf : (_utcZoneBuf = MakeUtcZone());
+    private static byte* MakeUtcZone()
+    {
+        var p = (byte*)NativeMemory.Alloc(4);
+        p[0] = (byte)'U'; p[1] = (byte)'T'; p[2] = (byte)'C'; p[3] = 0;
+        return p;
     }
 
     // Reentrant primitives (POSIX *_r): the caller owns the output buffer, so

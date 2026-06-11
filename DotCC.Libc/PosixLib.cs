@@ -119,6 +119,24 @@ public static unsafe partial class Libc
         return 0;
     }
 
+    /// <summary><c>settimeofday(tv, tz)</c> — a managed process can't set the
+    /// system clock; fail with EPERM (exactly what a non-root process gets).</summary>
+    public static int settimeofday(void* tv, void* tz)
+    {
+        errno = EPERM;
+        return -1;
+    }
+
+    /// <summary><c>getrusage(who, usage)</c> — dotcc has no portable per-process
+    /// CPU accounting; zero the <c>struct rusage</c> (144 bytes — see
+    /// include/sys/resource.h) and return success. A best-effort no-op like
+    /// <c>chmod</c>: CPU-time deltas read as 0, harmless for wall-clock callers.</summary>
+    public static int getrusage(int who, void* usage)
+    {
+        new Span<byte>(usage, 144).Clear();
+        return 0;
+    }
+
     // ---- <fcntl.h> ---------------------------------------------------------
 
     /// <summary><c>fcntl(fd, F_GETFL)</c> — no flags are ever set (0).</summary>

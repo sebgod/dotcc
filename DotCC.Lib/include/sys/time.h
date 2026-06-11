@@ -24,5 +24,7 @@ struct timezone {
 };
 
 int gettimeofday(struct timeval *tv, void *tz);
+/* settimeofday: a managed process can't set the system clock; fails EPERM. */
+int settimeofday(const struct timeval *tv, const struct timezone *tz);
 
 #endif /* _SYS_TIME_H */
