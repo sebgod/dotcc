@@ -12,9 +12,10 @@ namespace DotCC.Libc;
 /// in-process signal *handling*, so fork/exec/wait stay honest stubs that compile
 /// + let the module LOAD. The process *identity* and *targeting* primitives are
 /// faithful, though: <c>getpid</c>/<c>getppid</c> report the real OS pids, the
-/// <c>sigset_t</c> manipulators are real bitset ops, and <c>kill</c> forwards to
-/// the OS (POSIX <c>kill(2)</c> / Windows OpenProcess+TerminateProcess) so the
-/// portable <c>kill(pid, 0)</c> existence probe and a SIGKILL/SIGTERM are real.
+/// <c>sigset_t</c> manipulators are real bitset ops, and <c>kill</c> (with
+/// <c>raise</c> = <c>kill(getpid(), sig)</c>) forwards to the OS (POSIX
+/// <c>kill(2)</c> / Windows OpenProcess+TerminateProcess) so the portable
+/// <c>kill(pid, 0)</c> existence probe and a SIGKILL/SIGTERM are real.
 /// The R7RS suite uses
 /// command-line / exit / environment access, not fork/exec — so the
 /// stubs are never exercised by it (and fail loudly, EPERM/-1, if a program
@@ -209,8 +210,20 @@ public static unsafe partial class Libc
         return -1;
     }
 
-    /// <summary><c>raise(sig)</c> — no self-signal delivery on .NET; -1.</summary>
-    public static int raise(int sig) { errno = EPERM; return -1; }
+    /// <summary><c>raise(sig)</c> — send <paramref name="sig"/> to the calling
+    /// process. POSIX defines it as <c>kill(getpid(), sig)</c> for a
+    /// single-threaded program, which is exactly how dotcc lowers it, so it
+    /// inherits <see cref="kill"/>'s faithful per-OS behaviour (real delivery on
+    /// POSIX; existence-probe + terminate-class signals on Windows). SIGABRT is
+    /// special-cased to <c>abort()</c> so <c>raise(SIGABRT)</c> — what
+    /// <c>abort</c>/<c>assert</c> use — terminates abnormally on every OS,
+    /// including Windows where a bare signal number has no delivery path.
+    /// Returns 0 on success, nonzero on failure.</summary>
+    public static int raise(int sig)
+    {
+        if (sig == 6) { abort(); }   // SIGABRT — abnormal termination, never returns
+        return kill(getpid(), sig);
+    }
 
     /// <summary><c>sigaction(sig, act, oldact)</c> — accepted and ignored: the
     /// handler can't fire (the .NET runtime owns signals). Returns 0 so module

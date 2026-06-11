@@ -1,0 +1,4 @@
+MSVC has no <unistd.h> (no getpid/_POSIX_VERSION) and no <signal.h> kill(), so
+the fixture can't compile under cl.exe. The _POSIX_VERSION advertising is a
+dotcc-vs-glibc concern anyway; gcc on Linux x64+arm64 differential-tests that the
+#ifdef _POSIX_VERSION branch is taken and the gated kill(getpid(),0) works.

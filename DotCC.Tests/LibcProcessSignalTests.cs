@@ -90,6 +90,17 @@ public sealed unsafe class LibcProcessSignalTests
     }
 
     [Fact]
+    public void raise_signal_zero_succeeds_via_kill_self()
+    {
+        // raise(sig) is kill(getpid(), sig); sig 0 delivers nothing and succeeds,
+        // proving raise delegates to the faithful kill. The terminate-class
+        // signals (SIGABRT->abort, SIGTERM/SIGKILL->process death) can't be
+        // exercised in-process without killing the test host, so — same
+        // discipline as kill — we probe only the no-delivery path.
+        raise(0).ShouldBe(0);
+    }
+
+    [Fact]
     public void getrusage_reports_nonzero_monotonic_user_cpu_time()
     {
         const int RUSAGE_SELF = 0;
