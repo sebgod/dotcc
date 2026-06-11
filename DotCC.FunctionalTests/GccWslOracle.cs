@@ -8,33 +8,40 @@ using System.Text;
 namespace DotCC.FunctionalTests;
 
 /// <summary>
-/// Differential-testing oracle: compiles a C fixture with <c>gcc</c> inside
-/// WSL and runs the resulting Linux binary, so the test can assert that
-/// dotcc's emitted-C# output matches a real C compiler byte-for-byte. The
-/// companion to <see cref="MsvcOracle"/> — a second, independent reference
-/// compiler. Where MSVC's C frontend lags the standard (e.g. it rejects the
-/// C23 bare <c>bool</c> keyword even under <c>/std:clatest</c>), gcc tracks
-/// it, so this oracle can cover ground cl.exe can't.
+/// Differential-testing oracle: compiles a C fixture with <c>gcc</c> and runs
+/// the produced binary, so the test can assert that dotcc's emitted-C# output
+/// matches a real C compiler byte-for-byte. The companion to
+/// <see cref="MsvcOracle"/> — a second, independent reference compiler. Where
+/// MSVC's C frontend lags the standard (e.g. it rejects the C23 bare
+/// <c>bool</c> keyword even under <c>/std:clatest</c>), gcc tracks it, so this
+/// oracle can cover ground cl.exe can't.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Why WSL</b>: the primary dev/CI host here is Windows (win-arm64). gcc
-/// isn't a native Windows toolchain, but WSL ships a real Linux gcc one
-/// <c>wsl.exe</c> hop away. We shell out to <c>wsl.exe bash -lc "…"</c> rather
-/// than depend on MinGW/Cygwin so the reference really is mainline GNU C.
+/// <b>Where gcc lives — two transports, one code path.</b> On a Linux/macOS
+/// host (the CI <c>ubuntu-latest</c> / <c>ubuntu-24.04-arm</c> runners) gcc is
+/// native, so we invoke <c>bash -lc "…"</c> directly. On Windows (the
+/// maintainer's win-arm64 box) gcc isn't a native toolchain, but WSL ships a
+/// real Linux gcc one <c>wsl.exe</c> hop away, so we shell out to
+/// <c>wsl.exe bash -lc "…"</c> instead (mainline GNU C, not MinGW/Cygwin).
+/// <see cref="RunShell"/> picks the transport; everything above it is shared.
+/// This is what lets the gcc oracle run in CI on real Linux runners (x64 and
+/// arm64) — gcc is dotcc's closest ABI twin (LP64), so it needs the fewest
+/// per-fixture opt-outs.
 /// </para>
 /// <para>
-/// <b>Path bridging</b>: fixture sources live on the Windows filesystem. We
-/// copy them into an isolated Windows <c>workDir</c> (same as the MSVC
-/// oracle), then translate that directory to its <c>/mnt/…</c> form via
-/// <c>wslpath -a</c> and compile/run there. Tiny fixtures make the
+/// <b>Path handling</b>: fixture sources are copied into an isolated
+/// <c>workDir</c> (same as the MSVC oracle) and compiled/run there. On Linux
+/// that directory is already a native path; on Windows it lives on the Windows
+/// filesystem, so <see cref="ToShellPath"/> translates it to its
+/// <c>/mnt/…</c> form via <c>wslpath -a</c>. Tiny fixtures make any
 /// <c>/mnt</c> access cost irrelevant.
 /// </para>
 /// <para>
-/// <b>Availability</b>: <see cref="IsAvailable"/> is false on non-Windows
-/// hosts, when <c>wsl.exe</c> is absent, or when the default distro has no
-/// <c>gcc</c>. Tests skip rather than fail in that case — same posture as the
-/// MSVC oracle.
+/// <b>Availability</b>: <see cref="IsAvailable"/> is false when no <c>gcc</c>
+/// is reachable — no <c>gcc</c> on PATH on a Unix host, or (on Windows) no
+/// <c>wsl.exe</c> / no <c>gcc</c> in the default distro. Tests skip rather than
+/// fail in that case — same posture as the MSVC oracle.
 /// </para>
 /// </remarks>
 internal static class GccWslOracle
@@ -97,7 +104,7 @@ internal static class GccWslOracle
             }
         }
 
-        var wslWorkDir = ToWslPath(workDir);
+        var shellWorkDir = ToShellPath(workDir);
         const string binName = "gcc-oracle";
 
         // ── gcc compile ──  (-lm so the math fixtures link; harmless otherwise)
@@ -106,8 +113,8 @@ internal static class GccWslOracle
         // (harmless when unused; a no-op on glibc >= 2.34 where pthread folded
         // into libc, required on older glibc to link C11 threads).
         var compileCmd =
-            $"cd '{wslWorkDir}' && gcc -std={std} {sourceList} -o {binName} -lm -pthread";
-        var (compileOut, compileErr, compileExit) = RunWsl(compileCmd);
+            $"cd '{shellWorkDir}' && gcc -std={std} {sourceList} -o {binName} -lm -pthread";
+        var (compileOut, compileErr, compileExit) = RunShell(compileCmd);
         if (compileExit != 0)
         {
             throw new InvalidOperationException(
@@ -115,12 +122,12 @@ internal static class GccWslOracle
         }
 
         // ── run produced binary ──
-        var runCmd = $"cd '{wslWorkDir}' && ./{binName}";
+        var runCmd = $"cd '{shellWorkDir}' && ./{binName}";
         if (runArgs is not null)
         {
             foreach (var a in runArgs) { runCmd += " " + ShellQuote(a); }
         }
-        var (runOut, runErr, runExit) = RunWsl(runCmd);
+        var (runOut, runErr, runExit) = RunShell(runCmd);
         if (runExit != 0)
         {
             throw new InvalidOperationException(
@@ -130,14 +137,17 @@ internal static class GccWslOracle
     }
 
     /// <summary>
-    /// Translate a Windows path to its WSL <c>/mnt/…</c> form via
-    /// <c>wslpath -a</c>. Forward-slash the input first — <c>wslpath</c> wants
-    /// a clean absolute path and backslashes are ambiguous to the bridging
-    /// layer.
+    /// The working directory as the compile/run shell sees it. On a Unix host
+    /// the shell is native, so the (forward-slashed) path is used as-is. On
+    /// Windows the fixture lives on the Windows filesystem but gcc runs in WSL,
+    /// so translate to the <c>/mnt/…</c> form via <c>wslpath -a</c> (forward-
+    /// slash first — <c>wslpath</c> wants a clean absolute path; backslashes are
+    /// ambiguous to the bridging layer).
     /// </summary>
-    private static string ToWslPath(string windowsPath)
+    private static string ToShellPath(string workDir)
     {
-        var fwd = windowsPath.Replace('\\', '/');
+        var fwd = workDir.Replace('\\', '/');
+        if (!OperatingSystem.IsWindows()) { return fwd; }
         var psi = new ProcessStartInfo
         {
             FileName = "wsl.exe",
@@ -154,33 +164,42 @@ internal static class GccWslOracle
         proc.WaitForExit();
         if (proc.ExitCode != 0 || outp.Length == 0)
         {
-            throw new InvalidOperationException($"wslpath failed for '{windowsPath}'.");
+            throw new InvalidOperationException($"wslpath failed for '{workDir}'.");
         }
         return outp;
     }
 
     /// <summary>
-    /// Run a bash command line in the WSL default distro via
-    /// <c>wsl.exe bash -lc "&lt;cmd&gt;"</c> and return (stdout, stderr, exit).
-    /// A login shell (<c>-l</c>) so the distro's PATH picks up gcc the same way
-    /// an interactive user would.
+    /// Run a bash command line and return (stdout, stderr, exit). A login shell
+    /// (<c>-l</c>) so PATH picks up gcc the way an interactive user would. The
+    /// transport depends on the host: on Windows the reference gcc lives in WSL,
+    /// so we hop through <c>wsl.exe bash -lc "&lt;cmd&gt;"</c>; on Linux/macOS gcc
+    /// is native, so we invoke <c>/bin/bash -lc "&lt;cmd&gt;"</c> directly (no WSL,
+    /// no path translation). Same command string either way.
     /// </summary>
-    private static (string stdout, string stderr, int exit) RunWsl(string command)
+    private static (string stdout, string stderr, int exit) RunShell(string command)
     {
         var psi = new ProcessStartInfo
         {
-            FileName = "wsl.exe",
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,
         };
-        psi.ArgumentList.Add("bash");
+        if (OperatingSystem.IsWindows())
+        {
+            psi.FileName = "wsl.exe";
+            psi.ArgumentList.Add("bash");
+        }
+        else
+        {
+            psi.FileName = "/bin/bash";
+        }
         psi.ArgumentList.Add("-lc");
         psi.ArgumentList.Add(command);
         using var proc = Process.Start(psi)
-            ?? throw new InvalidOperationException("failed to spawn wsl.exe");
+            ?? throw new InvalidOperationException("failed to spawn the gcc oracle shell");
         var stdout = proc.StandardOutput.ReadToEnd();
         var stderr = proc.StandardError.ReadToEnd();
         proc.WaitForExit();
@@ -197,11 +216,13 @@ internal static class GccWslOracle
         {
             if (_initialised) { return; }
             _initialised = true;
-            // wsl.exe is a Windows host concept. Skip on other platforms.
-            if (!OperatingSystem.IsWindows()) { return; }
+            // Probe gcc through whichever transport this host uses (native bash
+            // on Unix, wsl.exe on Windows). If the spawn or the probe fails —
+            // no gcc on PATH, no wsl.exe, no distro gcc — leave _available
+            // false so IsAvailable is false and the tests skip cleanly.
             try
             {
-                var (outp, _, exit) = RunWsl("gcc -dumpfullversion");
+                var (outp, _, exit) = RunShell("gcc -dumpfullversion");
                 if (exit == 0 && outp.Trim().Length > 0)
                 {
                     _gccVersion = outp.Trim();
@@ -210,7 +231,6 @@ internal static class GccWslOracle
             }
             catch
             {
-                // Leave _available false — IsAvailable returns false and tests skip.
                 _available = false;
             }
         }

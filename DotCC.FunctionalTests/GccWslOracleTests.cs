@@ -72,8 +72,9 @@ public sealed class GccWslOracleTests
         if (!GccWslOracle.IsAvailable)
         {
             Assert.Skip(
-                $"{RunGccEnv} requested but gcc/WSL oracle not available on this host " +
-                $"(no wsl.exe, or the default distro has no gcc).");
+                $"{RunGccEnv} requested but no gcc is reachable on this host " +
+                $"(no gcc on PATH on a Unix host; or — on Windows — no wsl.exe / " +
+                $"no gcc in the default distro).");
         }
 
         // Per-fixture opt-out: a `no-gcc-oracle.txt` sidecar marks a fixture

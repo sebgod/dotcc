@@ -38,6 +38,14 @@ name: ci
 #                 run each fixture with MSVC and assert it matches dotcc's emit and
 #                 the committed snapshot. Can't run on Linux (no cl.exe). LP64-vs-
 #                 LLP64 / MSVC-C-mode-gap fixtures opt out via no-msvc-oracle.txt.
+#   gcc-oracle  — the gcc differential oracle, on NATIVE Linux gcc (matrix:
+#                 ubuntu-latest x64 + ubuntu-24.04-arm). The GccWslOracle now picks
+#                 its transport by host — native `bash`/`gcc` on Linux, `wsl.exe` on
+#                 the maintainer's Windows box — so the same oracle that runs locally
+#                 runs in CI here. gcc is dotcc's closest ABI twin (LP64), so it
+#                 needs the fewest opt-outs (long-double-width fixtures, e.g.
+#                 float-limits, opt out via no-gcc-oracle.txt). Both arches run so a
+#                 width/packing divergence on arm64 can't hide.
 #   wat-oracle  — the --target=wat EXECUTION oracle: EmitWat → wat2wasm → node.
 #                 Pins + checksum-verifies wabt and pins Node so the run is
 #                 reproducible; asserts both tools are actually present (the
@@ -226,3 +234,44 @@ jobs:
         run: >
           dotnet test DotCC.FunctionalTests/DotCC.FunctionalTests.csproj
           -c Release --no-build --nologo --filter "FullyQualifiedName~MsvcOracleTests"
+
+  gcc-oracle:
+    # Native Linux gcc on both arches. GccWslOracle.RunShell uses `bash -lc`
+    # directly here (the `wsl.exe` hop is the Windows-only branch), so the same
+    # oracle the maintainer runs locally runs in CI. fail-fast off so an arm64
+    # divergence doesn't cancel the x64 leg (and vice versa).
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    env:
+      DOTCC_RUN_GCC_ORACLE: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      # gcc ships on the ubuntu runner images; assert it rather than let the
+      # oracle skip silently (the wat/msvc guard philosophy — IsAvailable false
+      # would pass the job without comparing a single fixture).
+      - name: Verify gcc present (fail rather than let the oracle silently skip)
+        run: gcc --version
+
+      - name: Restore
+        run: dotnet restore dotcc.sln
+
+      - name: Build (Release, NuGet path)
+        run: dotnet build dotcc.sln -c Release --no-restore --nologo -p:UseLocalLalrCc=false
+
+      # gcc-per-fixture differential: asserts dotcc's emit matches gcc's real
+      # output AND the committed snapshot. Long-double-width fixtures opt out via
+      # no-gcc-oracle.txt sidecars.
+      - name: gcc differential oracle (native gcc per fixture)
+        run: >
+          dotnet test DotCC.FunctionalTests/DotCC.FunctionalTests.csproj
+          -c Release --no-build --nologo --filter "FullyQualifiedName~GccWslOracleTests"
