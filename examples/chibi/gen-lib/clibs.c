@@ -24,6 +24,10 @@
 #include "lib/chibi/time.c"
 #undef sexp_init_library
 
+#define sexp_init_library sexp_init_lib_srfi_18
+#include "lib/srfi/18/threads.c"
+#undef sexp_init_library
+
 #define sexp_init_library sexp_init_lib_scheme_time
 #include "lib/scheme/time.c"
 #undef sexp_init_library
@@ -44,6 +48,7 @@ struct sexp_library_entry_t sexp_static_libraries_array[] = {
   { "lib/chibi/filesystem", sexp_init_lib_chibi_filesystem },
   { "lib/srfi/39/param", sexp_init_lib_srfi_39 },
   { "lib/chibi/time", sexp_init_lib_chibi_time },
+  { "lib/srfi/18/threads", sexp_init_lib_srfi_18 },
   { "lib/scheme/time", sexp_init_lib_scheme_time },
   { "lib/srfi/98/env", sexp_init_lib_srfi_98 },
   { "lib/srfi/69/hash", sexp_init_lib_srfi_69 },

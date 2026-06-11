@@ -6,6 +6,11 @@
    <unistd.h>, which also exposes it transitively (the glibc behavior portable
    select() code relies on). */
 
+#ifndef _SUSECONDS_T_DEFINED
+#define _SUSECONDS_T_DEFINED
+typedef long suseconds_t;   /* the fractional-second field type of timeval */
+#endif
+
 #ifndef _DOTCC_STRUCT_TIMEVAL
 #define _DOTCC_STRUCT_TIMEVAL
 struct timeval {
