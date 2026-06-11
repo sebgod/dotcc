@@ -86,10 +86,17 @@ public static unsafe partial class Libc
         return 0;
     }
 
+    /// <summary><c>lstat(path, buf)</c> — like <see cref="stat"/> but does not
+    /// follow a final symlink. dotcc reports the same metadata either way (the
+    /// fields it fills don't distinguish), so this aliases <c>stat</c>.</summary>
+    public static int lstat(byte* path, void* buf) => stat(path, buf);
+
     private static void FillStat(void* buf, uint mode, long size, DateTime mtimeUtc)
     {
         var b = (byte*)buf;
-        new Span<byte>(b, 72).Clear();
+        // struct stat is 96 bytes after the appended st_rdev/st_blksize/st_blocks
+        // (see include/sys/stat.h) — clear all of it so those report 0.
+        new Span<byte>(b, 96).Clear();
         *(uint*)(b + StModeOff) = mode;
         *(long*)(b + StSizeOff) = size;
         var unix = new DateTimeOffset(mtimeUtc).ToUnixTimeSeconds();

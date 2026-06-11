@@ -52,6 +52,7 @@ void srand(unsigned int seed);
 char* getenv(const char *name);
 int setenv(const char *name, const char *value, int overwrite);
 int unsetenv(const char *name);
+char *realpath(const char *path, char *resolved_path);
 int system(const char *command);
 void exit(int code);
 void _Exit(int code);

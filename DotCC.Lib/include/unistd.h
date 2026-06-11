@@ -43,4 +43,25 @@ long read(int fd, void *buf, unsigned long count);
 long write(int fd, void *buf, unsigned long count);
 off_t lseek(int fd, off_t offset, int whence);
 
+/* access(path, mode) mode bits. */
+#define F_OK 0
+#define X_OK 1
+#define W_OK 2
+#define R_OK 4
+
+/* Directory + path operations (DotCC.Libc.PosixFsLib over System.IO). */
+int chdir(const char *path);
+char *getcwd(char *buf, unsigned long size);
+int rmdir(const char *path);
+int unlink(const char *path);
+int link(const char *oldpath, const char *newpath);
+int symlink(const char *target, const char *linkpath);
+long readlink(const char *path, char *buf, unsigned long bufsiz);
+int access(const char *path, int mode);
+int chown(const char *path, unsigned int owner, unsigned int group);
+int ftruncate(int fd, off_t length);
+int dup(int fd);
+int dup2(int oldfd, int newfd);
+int pipe(int *pipefd);
+
 #endif /* _UNISTD_H */
