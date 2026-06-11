@@ -190,6 +190,35 @@ TRUE dynamic loading is a dotcc roadmap item, not a chibi blocker — see the
 today; the missing piece is an import mode resolving a plugin TU's unresolved
 externs as `[LibraryImport]` bindings against the host library.
 
+## KNOWN RUNTIME BUG — native heap corruption (pre-existing, the real phase-4 blocker)
+
+chibi-via-dotcc **evaluates correctly** (`(+ 1 2)` → 3, `(srfi 69)` hash tables,
+`(srfi 98)` env vars all print right answers) but **corrupts the native heap**
+during the run. Two confirmed symptoms:
+
+- **Normal completion exits 127, not 0.** Not an exception (stderr is empty),
+  and not chibi's logic — instrumentation shows `main` correctly returns 0; the
+  process then aborts inside the shell's teardown `NativeMemory.Free(argv[i])`.
+  Skipping those frees makes it exit 0 cleanly. So the argv buffers (allocated
+  by dotcc via `NativeMemory.Alloc`) are intact when allocated but their heap
+  metadata is clobbered by run time — chibi's GC `malloc`/`free` share the same
+  NativeMemory/CRT heap, so an out-of-bounds write in chibi's heap trips the
+  allocator at free time.
+- **`(exit N)` faults** with `AccessViolationException` in `sexp_apply` — the
+  same corruption surfacing during execution rather than teardown.
+
+Confirmed **pre-existing** (reproduces at the pre-static-clibs commit), so it is
+NOT from the phase-3 work; the earlier "boots and evals" runs were piped, which
+masked the exit code and the teardown abort. The reference gcc build exits 0 and
+runs `(exit)` fine, so this is a **dotcc miscompile**, almost certainly a
+struct-layout / pointer-arithmetic mismatch where chibi writes past an object
+(see the `sexp_sizeof` / FAM notes below). **This is the gate for phase 4** — a
+heap-corrupting runtime can't be trusted to run the R7RS suite even once the
+module chain (task #14) is closed. Debug by instrumenting chibi's allocation
+sizes (`sexp_sizeof` / `sexp_alloc_tagged`) against the actual .NET
+`sizeof`/layout of `sexp_struct`, or bisect with a guard-page / fill-pattern
+allocator.
+
 ## Semantic risk notes (for the runtime phases)
 
 - chibi's GC is **precise with explicit root registration**
