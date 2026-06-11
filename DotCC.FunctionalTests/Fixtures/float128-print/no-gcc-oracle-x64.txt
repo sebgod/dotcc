@@ -1,0 +1,6 @@
+x86-64 gcc has no portable __float128 printf: its `long double` is the 80-bit
+x87 type, distinct from the 128-bit __float128, so the fixture's `%Lf` of a quad
+value prints "nan" rather than the digits. dotcc's Float128 (%Lf via its own
+BigInteger decimal formatter) is correct and matches arm64 gcc, where
+`long double` IS IEEE binary128 — so this fixture still runs (and validates) on
+the arm64 gcc-oracle leg. x64-only opt-out.

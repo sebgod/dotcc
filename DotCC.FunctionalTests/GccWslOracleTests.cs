@@ -3,6 +3,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using DotCC;
 using Shouldly;
 using Xunit;
@@ -89,6 +90,23 @@ public sealed class GccWslOracleTests
         {
             Assert.Skip($"fixture '{name}' opts out of the gcc oracle: " +
                 File.ReadAllText(gccSkipMarker).Trim());
+        }
+
+        // Arch-specific opt-out. Some divergences are tied to the gcc TARGET arch
+        // — which equals the runner arch, since the oracle compiles + runs gcc
+        // natively. The canonical case is x86-64 gcc's lack of a portable
+        // __float128 printf (its `long double` is 80-bit x87, a distinct type from
+        // __float128, so `%Lf` of a quad value prints nan), where dotcc's Float128
+        // %Lf is correct and matches arm64 gcc (whose `long double` IS binary128).
+        // A `no-gcc-oracle-<arch>.txt` sidecar skips on just that arch, keeping the
+        // differential live everywhere else. Arch token matches ProcessArchitecture
+        // (e.g. "x64", "arm64").
+        var arch = RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant();
+        var archSkipMarker = Path.Combine(dir, $"no-gcc-oracle-{arch}.txt");
+        if (File.Exists(archSkipMarker))
+        {
+            Assert.Skip($"fixture '{name}' opts out of the gcc oracle on {arch}: " +
+                File.ReadAllText(archSkipMarker).Trim());
         }
 
         var match = FixtureRunner.Discover().Single(f => f.name == name);
