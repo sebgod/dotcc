@@ -1208,8 +1208,26 @@ internal sealed class CSharpBackend
                 // to already share a type, so an arm that differs is cast to it (e.g.
                 // `cond ? sizeT : intExpr` → the int arm casts to the ulong result).
                 {
+                    // A comparison / logical arm is C-typed `int` but RENDERS as the
+                    // CBool value type (CBool→int carries it elsewhere). A plain-int
+                    // sibling then gives the two arms different C# types though their
+                    // CType agrees, so the arithmetic-mismatch coercion below (keyed on
+                    // CType) doesn't fire — and a target-typed `Cond.B(cond ? … : …)`
+                    // finds both Cond.B(int) and Cond.B(CBool) viable (CS0121). When the
+                    // arms differ in CBool-rendering, decay the CBool one to the int
+                    // result type so both arms share a C# type. (chibi srfi/69 hash.c:
+                    // `sexp_pointerp(o) ? (tag == SYMBOL) : !sexp_fixnump(o)`.)
+                    static bool CBoolRendered(CExpr e)
+                    {
+                        while (e is Paren p) { e = p.Inner; } // parens don't change the rendered type
+                        return e is Binary { Op: BinOp.Eq or BinOp.Ne or BinOp.Lt or BinOp.Gt
+                            or BinOp.Le or BinOp.Ge or BinOp.LogAnd or BinOp.LogOr };
+                    }
+                    var cboolMismatch = t.Type.IsArithmetic && CBoolRendered(t.Then) != CBoolRendered(t.Else);
                     string Arm(CExpr a) => NoHoist(() =>
-                        t.Type.IsArithmetic && a.Type.IsArithmetic && Cs(a.Type.Unqualified) != Cs(t.Type)
+                        cboolMismatch && CBoolRendered(a)
+                            ? CoercionCast(a, Cs(t.Type))
+                            : t.Type.IsArithmetic && a.Type.IsArithmetic && Cs(a.Type.Unqualified) != Cs(t.Type)
                             ? CoercionCast(a, Cs(t.Type))
                             // A function-designator arm is an untyped method group
                             // (`cond ? &strcasecmp : &strcmp` — chibi's fold-case
