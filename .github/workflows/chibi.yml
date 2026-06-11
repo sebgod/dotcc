@@ -1,0 +1,101 @@
+name: chibi
+
+# End-to-end integration: transpile chibi-scheme through dotcc and run its
+# conformance suite. The Scheme counterpart to lua.yml — after Lua 5.5, the
+# second real-world whole-program proof.
+#
+# chibi-scheme is the R7RS-small reference implementation (plain portable C).
+# This workflow transpiles its 9 core TUs C -> .NET 10 / C#, Roslyn-compiles
+# them, and runs the full upstream R7RS test suite (tests/r7rs-tests.scm),
+# asserting the dotcc-built interpreter's output is IDENTICAL to the committed
+# baseline-r7rs.txt (captured from the gcc reference build): 1225/1225 tests,
+# 18/18 subgroups. See examples/chibi/README.md for the campaign writeup.
+#
+# Generate-in-CI, don't commit generated files. Four of the C-stub modules the
+# suite imports (lib/chibi/{filesystem,io/io,process,time}.c) are NOT source —
+# chibi-ffi generates them from the committed .stub files during chibi's own
+# build, and upstream chibi's .gitignore (vendored verbatim) ignores them. So
+# this workflow builds the reference chibi-scheme with gcc (native on ubuntu)
+# to bootstrap the FFI tool, then `make`s exactly those four .c targets; dotcc's
+# link.sh finds them via -I chibi-src. (install.h and clibs.c, the other two
+# reference-build artifacts, ARE committed under gen-include/ and gen-lib/, so
+# they need no regeneration here.)
+#
+# Same org conventions as ci.yml: ubuntu-latest, setup-dotnet 10.0.x, NuGet
+# build path (sibling LALR.CC absent in CI). Like lua.yml it's heavier than the
+# unit/fixture gate, so it lives in its own workflow but still runs on every
+# push/PR (correctness over speed), plus nightly on main and on demand.
+
+on:
+  push:
+    branches: [main, 'feat/**']
+  pull_request:
+    branches: [main]
+  schedule:
+    # 03:43 UTC nightly (odd minute, offset from lua.yml's 03:17 so the two
+    # heavy suites don't collide). schedule fires on the default branch only.
+    - cron: '43 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  chibi-suite:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      # gcc + make ship on the ubuntu image; assert rather than fail obscurely
+      # mid-build. The reference chibi build needs both.
+      - name: Verify gcc + make present
+        run: |
+          gcc --version
+          make --version
+
+      - name: Restore
+        run: dotnet restore dotcc.sln
+
+      - name: Build dotcc (Release, NuGet path)
+        run: dotnet build DotCC/DotCC.csproj -c Release --no-restore --nologo -p:UseLocalLalrCc=false
+
+      # Generate the four chibi-ffi C stubs (gitignored — see the header). The
+      # stub targets depend on a built chibi-scheme, so bootstrap the reference
+      # interpreter first; `make lib/chibi/*.c` then runs chibi-ffi on each
+      # committed .stub. These land in chibi-src/lib, where link.sh's
+      # `-I chibi-src` resolves them.
+      - name: Generate chibi FFI stubs (reference gcc build)
+        run: |
+          set -euo pipefail
+          cd examples/chibi/chibi-src
+          make -j"$(nproc)" chibi-scheme
+          make lib/chibi/filesystem.c lib/chibi/io/io.c lib/chibi/process.c lib/chibi/time.c
+          ls -l lib/chibi/filesystem.c lib/chibi/io/io.c lib/chibi/process.c lib/chibi/time.c
+
+      # Transpile the 9 core TUs (link.sh: dotcc --emit=build -> Roslyn), then
+      # run the full R7RS suite through the dotcc-built interpreter and assert
+      # its output matches the committed gcc baseline byte-for-byte (timings +
+      # ANSI colour normalised out), plus a belt-and-braces grep for the 100%
+      # line.
+      - name: Transpile + build chibi, run the R7RS suite, diff vs baseline
+        run: |
+          set -euo pipefail
+          cd examples/chibi
+          bash link.sh
+          cd chibi-src
+          CHIBI_IGNORE_SYSTEM_PATH=1 CHIBI_MODULE_PATH=lib \
+            dotnet ../build/bin/Release/net10.0/build.dll tests/r7rs-tests.scm \
+            | tee /tmp/chibi-out.txt
+          # Normalise per-run noise (ANSI SGR codes, "in N.NN seconds" timings),
+          # then require the dotcc output to be IDENTICAL to the committed
+          # gcc-reference baseline.
+          norm() { sed -E 's/\x1b\[[0-9;]*m//g; s/ in [0-9.]+ seconds//g' "$1"; }
+          diff <(norm /tmp/chibi-out.txt) <(norm ../baseline-r7rs.txt)
+          grep -q '1225 out of 1225' /tmp/chibi-out.txt

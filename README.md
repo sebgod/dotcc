@@ -2,11 +2,14 @@
 
 [![ci](https://github.com/sebgod/dotcc/actions/workflows/dotnet.yml/badge.svg)](https://github.com/sebgod/dotcc/actions/workflows/dotnet.yml)
 [![lua](https://github.com/sebgod/dotcc/actions/workflows/lua.yml/badge.svg)](https://github.com/sebgod/dotcc/actions/workflows/lua.yml)
+[![chibi](https://github.com/sebgod/dotcc/actions/workflows/chibi.yml/badge.svg)](https://github.com/sebgod/dotcc/actions/workflows/chibi.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **dotcc** is a clang-like C compiler frontend that compiles C to **.NET 10 / C# 14** (AOT-clean, `unsafe` C#) — and, as a second backend, to **WebAssembly text** (`--target=wat`).
 
 It is real enough to compile the **full Lua 5.5 interpreter** — core, stdlib, and the standalone `lua` binary — into a .NET program that passes Lua's own upstream conformance suite (`testes/all.lua`, including bytecode dump/undump round-trips). That run is CI: every push transpiles Lua, Roslyn-compiles it, and greps for `final OK !!!`.
+
+And **chibi-scheme** — the R7RS-small reference implementation — transpiles the same way: its core runs the full `r7rs-tests.scm` suite with output **identical** to the gcc-built reference, **1225/1225 tests** across 18 subgroups. Also CI (`chibi.yml`), which even generates chibi's own FFI stubs from a reference build rather than committing them. Two independent real-world C programs, both green on every push.
 
 ```c
 #include <stdio.h>
@@ -86,7 +89,7 @@ The grammar lives in [`DotCC.Lib/c.lalr.yaml`](DotCC.Lib/c.lalr.yaml); a source 
 | `DotCC/` | The clang-shaped CLI (~150 lines, NativeAOT) |
 | `DotCC.Tests/` | Unit tests against inline C strings |
 | `DotCC.FunctionalTests/` | Golden fixtures: C in, Roslyn-compiled, stdout vs snapshot |
-| `examples/` | hello, calc, factorial, cmake-demo, smoke-lib — and Lua 5.5 |
+| `examples/` | hello, calc, factorial, cmake-demo, smoke-lib — and Lua 5.5 + chibi-scheme |
 
 ## Building and testing
 
