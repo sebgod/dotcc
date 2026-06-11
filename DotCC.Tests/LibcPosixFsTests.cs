@@ -90,4 +90,60 @@ public sealed unsafe class LibcPosixFsTests
         var missing = Path.Combine(Path.GetTempPath(), "dotcc-fs-missing-" + Guid.NewGuid().ToString("N"));
         unlink(C(missing)).ShouldBe(-1);
     }
+
+    // link() forwards to the real OS hard-link primitive (link(2) / CreateHardLinkW)
+    // behind an OperatingSystem switch — these exercise that on the host directly.
+
+    [Fact]
+    public void link_creates_a_real_hard_link_sharing_one_inode()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "dotcc-link-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var a = Path.Combine(dir, "a.txt");
+        var b = Path.Combine(dir, "b.txt");
+        try
+        {
+            File.WriteAllText(a, "hello");
+
+            link(C(a), C(b)).ShouldBe(0);
+            File.Exists(b).ShouldBeTrue();
+            File.ReadAllText(b).ShouldBe("hello");
+
+            // The defining property of a hard link (vs a copy): both names are
+            // ONE file. Rewriting through `a` is visible through `b`.
+            File.WriteAllText(a, "world");
+            File.ReadAllText(b).ShouldBe("world");
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    [Fact]
+    public void link_to_an_existing_target_fails_EEXIST()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "dotcc-link-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var a = Path.Combine(dir, "a.txt");
+        var b = Path.Combine(dir, "b.txt");
+        try
+        {
+            File.WriteAllText(a, "x");
+            File.WriteAllText(b, "y");          // target already exists
+            link(C(a), C(b)).ShouldBe(-1);
+            errno.ShouldBe(EEXIST);             // errno is [ThreadStatic] — safe to read here
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    [Fact]
+    public void link_with_missing_source_fails_ENOENT()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "dotcc-link-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            link(C(Path.Combine(dir, "nope.txt")), C(Path.Combine(dir, "b.txt"))).ShouldBe(-1);
+            errno.ShouldBe(ENOENT);
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
 }

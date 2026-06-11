@@ -18,11 +18,17 @@ namespace DotCC.Libc;
 /// </summary>
 /// <remarks>
 /// Mappings are faithful where .NET has the primitive (directory enumeration,
-/// create/delete, cwd, symlinks). Where it doesn't, the call is honest about it:
-/// <c>link</c> (hard links: no portable .NET API) fails with EPERM, and
-/// <c>flock</c> (advisory locks) is a success no-op — a single managed process
-/// never self-contends, and portable code already tolerates the absence of a
-/// cross-process guarantee. <c>chmod</c> is best-effort (Unix mode bits via
+/// create/delete, cwd, symlinks). Where .NET has no managed API but the OS does,
+/// the call forwards to the real primitive behind an <see cref="OperatingSystem"/>
+/// switch — <c>link</c> (hard links) routes to <c>link(2)</c> on POSIX and
+/// <c>CreateHardLinkW</c> on Windows. These P/Invokes are blittable
+/// (pointers + <c>int</c>), so <c>[DllImport]</c> emits a direct AOT-clean call
+/// with no marshalling stub, and — unlike <c>[LibraryImport]</c> — needs no
+/// source generator, so it survives the runtime-block splice into the functional
+/// tests' generator-less Roslyn compilation. <c>flock</c> (advisory locks) is a
+/// success no-op — a single managed process never self-contends, and portable
+/// code already tolerates the absence of a cross-process guarantee. <c>chmod</c>
+/// is best-effort (Unix mode bits via
 /// <see cref="File.SetUnixFileMode(string, UnixFileMode)"/> where the host
 /// supports it, else a no-op success).
 /// </remarks>
@@ -261,14 +267,57 @@ public static unsafe partial class Libc
         return n;
     }
 
-    /// <summary><c>link(oldpath, newpath)</c> — hard links have no portable .NET
-    /// API; fail with EPERM (honest: the operation isn't supported here). Defined
-    /// so <c>(chibi filesystem)</c> links; the R7RS suite never calls it.</summary>
+    /// <summary><c>link(oldpath, newpath)</c> — create a hard link
+    /// <paramref name="newpath"/> to the existing file <paramref name="oldpath"/>.
+    /// .NET has no managed hard-link API, so this forwards to the real OS
+    /// primitive: <c>link(2)</c> on POSIX, <c>CreateHardLinkW</c> on Windows.
+    /// 0 on success, -1 with <c>errno</c> set (EEXIST/ENOENT/EACCES/EXDEV/…) on
+    /// failure.</summary>
     public static int link(byte* oldpath, byte* newpath)
     {
-        errno = EPERM;
+        if (OperatingSystem.IsWindows())
+        {
+            // CreateHardLinkW(newLink, existingFile, NULL): note the argument
+            // order is the reverse of POSIX link(oldpath=existing, newpath=new).
+            // `fixed` on a managed string pins its (NUL-terminated) UTF-16
+            // buffer, so the W API gets a `char*` with no string marshalling —
+            // the signature stays blittable and AOT-clean.
+            var existing = Str(oldpath);
+            var newLink = Str(newpath);
+            fixed (char* e = existing)
+            fixed (char* n = newLink)
+            {
+                if (CreateHardLinkW(n, e, null) != 0) { return 0; }
+            }
+            errno = Win32ToErrno(Marshal.GetLastWin32Error());
+            return -1;
+        }
+        // POSIX link(2): the C strings pass straight through — already UTF-8 and
+        // NUL-terminated, exactly what the syscall wants.
+        if (PosixLink(oldpath, newpath) == 0) { return 0; }
+        errno = Marshal.GetLastPInvokeError();
         return -1;
     }
+
+    [DllImport("libc", EntryPoint = "link", SetLastError = true)]
+    private static extern int PosixLink(byte* oldpath, byte* newpath);
+
+    [DllImport("kernel32.dll", EntryPoint = "CreateHardLinkW", SetLastError = true)]
+    private static extern int CreateHardLinkW(char* lpFileName, char* lpExistingFileName, void* lpSecurityAttributes);
+
+    /// <summary>Map the handful of Win32 error codes the filesystem primitives
+    /// raise onto the matching POSIX <c>errno</c> value, so cross-platform C code
+    /// comparing <c>errno</c> against EEXIST/ENOENT/… behaves the same on Windows
+    /// as on Unix. Unmapped codes fall back to EPERM ("operation not
+    /// permitted").</summary>
+    private static int Win32ToErrno(int err) => err switch
+    {
+        2 or 3 => ENOENT,    // ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND
+        5 => EACCES,         // ERROR_ACCESS_DENIED
+        17 => EXDEV,         // ERROR_NOT_SAME_DEVICE
+        80 or 183 => EEXIST, // ERROR_FILE_EXISTS / ERROR_ALREADY_EXISTS
+        _ => EPERM,
+    };
 
     /// <summary><c>realpath(path, resolved)</c> — canonicalize an EXISTING path;
     /// writes into <paramref name="resolved"/> (or allocates when it's
