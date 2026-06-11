@@ -552,7 +552,51 @@ internal sealed class CSharpBackend
         var savedBreak = _breakAsGoto;
         _breakAsGoto = null;
 
-        var hoisted = new List<IReadOnlyList<CStmt>>();
+        // First index of a hoisted shared-handler label in a section's body (or -1).
+        int FirstHoistCut(IReadOnlyList<CStmt> e)
+        {
+            for (var p = 0; p < e.Count; p++)
+            {
+                if (e[p] is Labeled lp && hoist.Contains(lp.Name)) { return p; }
+            }
+            return -1;
+        }
+
+        // A hoisted tail that doesn't END control flow falls THROUGH (in C) into the
+        // next case. C# forbids falling from the out-of-switch hoisted region back
+        // into a case, so the successor section(s) — up to and including the first
+        // that ends control flow — are relocated WHOLESALE into the post-switch region
+        // right after the tail, their in-switch case redirected to a `goto`. (Lua's
+        // shared handlers all terminate, so this is inert there; chibi's
+        // `call_error_handler:` falls through into `case SEXP_OP_RAISE` — without this
+        // the raise/error-handler logic is skipped and the VM runs on corrupt.)
+        var relocWhole = new HashSet<int>();
+        for (var si = 0; si < sw.Sections.Count; si++)
+        {
+            var cut0 = FirstHoistCut(Eff(sw.Sections[si]));
+            if (cut0 < 0) { continue; }
+            var tail0 = Eff(sw.Sections[si]).Skip(cut0).ToList();
+            if (tail0.Count > 0 && Terminates(tail0[^1])) { continue; }
+            for (var t = si + 1; t < sw.Sections.Count; t++)
+            {
+                if (!relocWhole.Add(t)) { break; }
+                var te = Eff(sw.Sections[t]);
+                if (te.Count > 0 && Terminates(te[^1])) { break; }
+            }
+        }
+
+        // The post-switch region is non-empty exactly when some label is hoisted (a
+        // hoisted label lives in some section, so that section gets a cut). Allocate
+        // the skip-target id only then, so non-hoisting switches keep stable output.
+        var pastId = hoist.Count > 0 ? _switchPastSeq++ : -1;
+        var past = $"__sw_past_{pastId}";
+        string RelocLabel(int s) => $"__sw_reloc_{pastId}_{s}";
+
+        // Ordered post-switch segments: hoisted tails and relocated sections. Each
+        // carries an optional entry label (relocated sections, reached by the in-switch
+        // `case …: goto <label>`) and whether it FALLS THROUGH into the next segment (a
+        // tail flowing into its relocated successor) rather than skipping past.
+        var postSegments = new List<(string? Label, IReadOnlyList<CStmt> Body, bool Continue)>();
         sb.Append(pad).Append($"switch ({subj})\n").Append(pad).Append("{\n");
         var inner = ind + 1;
         var ipad = Pad(inner);
@@ -564,15 +608,20 @@ internal sealed class CSharpBackend
                 sb.Append(ipad).Append(lab.CaseExpr is { } ce ? $"case {CaseValue(ce, sw.Subject.Type)}:\n" : "default:\n");
             }
             var eff = Eff(sec);
+            // Relocated wholesale (a fall-through chain flows in): the in-switch case
+            // just jumps to its out-of-switch body; the body emits in the post-region.
+            if (relocWhole.Contains(si))
+            {
+                var contNext = !(eff.Count > 0 && Terminates(eff[^1])) && relocWhole.Contains(si + 1);
+                postSegments.Add((RelocLabel(si), eff, contNext));
+                sb.Append(ipad).Append($"goto {DotCC.EmitHelpers.Id(RelocLabel(si))};\n");
+                continue;
+            }
             var wrapped = sec.Body is [Block];
             // Split the section at the first hoisted shared-handler label: the head
             // renders in place + a `goto L` to reach the handler; the tail (label +
             // the rest of the section) moves out after the switch.
-            var cut = -1;
-            for (var p = 0; p < eff.Count; p++)
-            {
-                if (eff[p] is Labeled lp && hoist.Contains(lp.Name)) { cut = p; break; }
-            }
+            var cut = FirstHoistCut(eff);
             var head = cut < 0 ? eff : eff.Take(cut).ToList();
             // Body indent: one deeper inside the restored braces.
             var bodyInd = wrapped ? inner + 2 : inner + 1;
@@ -580,7 +629,11 @@ internal sealed class CSharpBackend
             foreach (var st in head) { Stmt(sb, st, bodyInd); }
             if (cut >= 0)
             {
-                hoisted.Add(eff.Skip(cut).ToList());
+                var tail = eff.Skip(cut).ToList();
+                // A tail that doesn't end control flow falls through to si+1, which we
+                // relocated just above — flow into that segment instead of `goto past`.
+                var contNext = !(tail.Count > 0 && Terminates(tail[^1])) && relocWhole.Contains(si + 1);
+                postSegments.Add((null, tail, contNext));
                 sb.Append(Pad(bodyInd)).Append($"goto {DotCC.EmitHelpers.Id(((Labeled)eff[cut]).Name)};\n");
             }
             if (wrapped) { sb.Append(Pad(inner + 1)).Append("}\n"); }
@@ -603,19 +656,20 @@ internal sealed class CSharpBackend
         sb.Append(pad).Append("}\n");
         _gotoCaseMap = saved;
 
-        // Hoisted shared handlers: placed after the switch (so a plain `goto L`
-        // reaches them from any case), skipped on normal switch exit. A `break` in a
-        // hoisted tail meant "leave the switch" — now it must skip to past the switch
-        // (the handler runs OUTSIDE the switch), so it renders as `goto __sw_past`.
-        if (hoisted.Count > 0)
+        // Hoisted shared handlers + relocated sections: placed after the switch (so a
+        // plain `goto L` reaches them from any case), skipped on normal switch exit. A
+        // `break` here meant "leave the switch" — now it must skip past the switch (the
+        // handler runs OUTSIDE it), so it renders as `goto __sw_past`. A segment marked
+        // Continue falls straight into the next (a tail into its relocated successor).
+        if (postSegments.Count > 0)
         {
-            var past = $"__sw_past_{_switchPastSeq++}";
             sb.Append(pad).Append($"goto {past};\n");
             _breakAsGoto = past;
-            foreach (var grp in hoisted)
+            foreach (var (label, body, cont) in postSegments)
             {
-                foreach (var st in grp) { Stmt(sb, st, ind); }
-                if (grp.Count == 0 || !Terminates(grp[^1])) { sb.Append(pad).Append($"goto {past};\n"); }
+                if (label != null) { sb.Append(pad).Append($"{DotCC.EmitHelpers.Id(label)}:\n"); }
+                foreach (var st in body) { Stmt(sb, st, ind); }
+                if (!cont && (body.Count == 0 || !Terminates(body[^1]))) { sb.Append(pad).Append($"goto {past};\n"); }
             }
             sb.Append(pad).Append($"{past}: ;\n");
         }

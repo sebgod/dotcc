@@ -193,8 +193,9 @@ externs as `[LibraryImport]` bindings against the host library.
 ## RUNTIME BUGS
 
 chibi-via-dotcc **evaluates correctly** (`(+ 1 2)` → 3, `(srfi 69)` hash tables,
-`(srfi 98)` env vars all print right answers). Two runtime symptoms were seen;
-one is **fixed**, one is **still open**.
+`(srfi 98)` env vars all print right answers; `call/cc` round-trips; raised
+errors report cleanly and exit 70). Two runtime symptoms were seen — **both now
+fixed**.
 
 ### FIXED — exit 127 on normal completion (was NOT heap corruption)
 
@@ -210,22 +211,41 @@ argv array. Fixed in commit `df7e96a` (the emitted shell no longer frees argv,
 matching C's environment-owned-argv semantics); guarded by
 `EntryStackThreadTests.argv_is_never_freed_at_exit`.
 
-### OPEN — `(exit N)` faults with `AccessViolationException` in `sexp_apply`
+### FIXED — `AccessViolationException` in `sexp_apply` (was NOT exit-specific)
 
-Separate from the argv bug and still open. `(exit N)` throws an
-`AccessViolationException` deep in `DotCcProgram.sexp_apply` during eval
-(`sexp_apply → sexp_eval_op → sexp_eval_string → run_main → main`). The reference
-gcc build runs `(exit)` fine, so this is a **dotcc miscompile** in the exit path.
-Note: a full run under the checked debug heap (now exposed as
-`-fsanitize=address`, or `DOTCC_DEBUG_HEAP=1` / `DOTCC_DEBUG_HEAP_SCAN=1` at
-runtime — see `C-SUPPORT.md`) reported **no** redzone overflow or bad free, which
-**weakens** the earlier "chibi writes past an object" struct-layout hypothesis.
-More likely a specific lowering bug on the exit primitive's control path
-(chibi's `exit` uses an exception/`longjmp`-shaped unwind through `sexp_apply`).
-Debug next by narrowing which `sexp_apply` opcode/primitive faults (instrument
-the call), and check the fn-ptr / varargs / `setjmp` lowering on that path before
-returning to the `sexp_sizeof` / FAM layout angle below. **This gates phase 4**
-(the R7RS suite, task #13) — it can't run cleanly while `(exit)` faults.
+Filed as "`(exit N)` faults", but the real cause was far broader: **every raised
+exception** crashed (`(display unbound-var)`, `(car 5)`, `(vector-ref v 99)` — and
+`(exit)`, whose `unwind` raises). A `switch`-lowering bug in the C# backend dropped
+a C **fall-through from a hoisted goto-label into the next case**.
+
+chibi's VM dispatch (`vm.c`) has:
+```c
+  switch (*ip++) {
+  case SEXP_OP_NOOP: break;
+  call_error_handler:        // jumped to from ~40 raise sites
+    <set exception.procedure/source>   // no break — FALLS THROUGH ...
+  case SEXP_OP_RAISE:        // ... into the propagate-to-handler logic
+    ...
+```
+C# has no implicit case fall-through and can't fall from an out-of-switch hoisted
+handler back into a `case`, so `RenderSwitch` hoists `call_error_handler:` out of
+the switch — but terminated it with `goto __sw_past` (skip past the switch) instead
+of continuing into `SEXP_OP_RAISE`. So a raised exception set its fields then
+`goto loop`'d to the **next opcode** with the exception still on the stack — the
+whole raise/error-handler path skipped, VM stack corrupt, AccessViolation on a
+later op. (The checked debug heap found no corruption precisely because the GC heap
+was fine — the bug was control flow, not memory.)
+
+Fix: `CSharpBackend.RenderSwitch` now relocates the fall-through *successor* case(s)
+wholesale into the post-switch region right after the hoisted handler (redirecting
+their in-switch `case` to a `goto`), preserving the fall-through. Lua's shared
+handlers all terminate, so it was inert there; chibi's `call_error_handler` is the
+first real fall-through-into-next-case in the wild. Guarded by the
+`switch-goto-fallthrough` functional fixture (gcc-oracle-validated). Now error
+reporting, `call/cc`, and `guard` all work; this **unblocks phase 4** (the R7RS
+suite exercises error handling heavily). `(exit N)` itself still needs the import
+chain (#14) to bind `exit`/`emergency-exit`; once bound it routes to C `exit(N)` →
+`Environment.Exit(N)` (exit-code propagation already verified end-to-end).
 
 ## Semantic risk notes (for the runtime phases)
 
