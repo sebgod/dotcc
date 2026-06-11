@@ -14,6 +14,15 @@ struct timeval {
 };
 #endif
 
+/* The obsolete second argument to gettimeofday. Modern glibc declares the
+   parameter `void *` and never fills it, but portable code still declares a
+   `struct timezone tz;` and passes `&tz` (chibi's scheme/time.c does) — so the
+   type must exist even though gettimeofday ignores it. */
+struct timezone {
+    int tz_minuteswest;
+    int tz_dsttime;
+};
+
 int gettimeofday(struct timeval *tv, void *tz);
 
 #endif /* _SYS_TIME_H */
