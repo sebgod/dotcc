@@ -1,0 +1,1 @@
+MSVC is LLP64 (long = 4 bytes); dotcc is LP64 (long = 8). sizeof(struct{long a,b;})+4 is 20 on dotcc vs 12 on MSVC — a deliberate data-model divergence.

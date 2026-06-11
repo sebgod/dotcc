@@ -1,0 +1,1 @@
+MSVC is LLP64 (long = 4 bytes); dotcc is LP64 (long = 8). sizeof(42L) is 4 on MSVC vs 8 on dotcc — a deliberate data-model divergence.

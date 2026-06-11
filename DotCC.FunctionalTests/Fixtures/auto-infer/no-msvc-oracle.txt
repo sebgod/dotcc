@@ -1,0 +1,1 @@
+MSVC C-mode C23 `auto` type inference is broken (prints a denormal for `auto y = 3.14`); dotcc infers correctly (3.14). MSVC cannot be the oracle for C23 auto.

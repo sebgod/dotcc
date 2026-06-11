@@ -1,0 +1,1 @@
+MSVC is LLP64 (long = 4 bytes); dotcc is LP64 (long = 8, matching Linux/gcc). sizeof(long)/CHAR_BIT*sizeof(long) deliberately differ (4/32 on MSVC vs 8/64 on dotcc).

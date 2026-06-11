@@ -1,0 +1,1 @@
+MSVC is LLP64 (unsigned long = 4 bytes); dotcc is LP64 (unsigned long = 8). (~0UL)/sizeof(int) cast to int is -1 on dotcc vs 1073741823 on MSVC — a deliberate data-model divergence (the fixture comment documents the LP64 reasoning).

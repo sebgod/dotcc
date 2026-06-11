@@ -1,0 +1,1 @@
+MSVC C mode rejects the C11 `_Noreturn` function specifier in this position (cl.exe error C2054); it cannot compile the fixture at all.

@@ -1,0 +1,1 @@
+MSVC is LLP64 (long = 4 bytes); the 1000000000000L literal overflows MSVC 32-bit long (prints -727379968) but fits dotcc LP64 64-bit long — a deliberate data-model divergence.

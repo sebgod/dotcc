@@ -1,0 +1,1 @@
+C leaves function-argument evaluation order unspecified. The three next_id() calls in one printf evaluate left-to-right on dotcc (1001 1002 1003) but right-to-left on MSVC (1003 1002 1001) — both conforming, neither is wrong.
