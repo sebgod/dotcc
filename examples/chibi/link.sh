@@ -25,7 +25,7 @@ for tu in $UNITS; do
     SRCS="$SRCS $SRC/$tu.c"
 done
 
-# Same configuration as probe.sh (see HANDOVER.md for the why of each -D).
+# Same configuration as probe.sh (see README.md for the why of each -D).
 FLAGS="-I $HERE/gen-include -I $SRC/include -D SEXP_USE_INTTYPES -D SEXP_USE_NTPGETTIME -D SEXP_USE_DL=0 -D SEXP_USE_POLL_PORT=0"
 
 # Phase 3 static clibs: SEXP_USE_STATIC_LIBS makes eval.c `#include "clibs.c"`,
@@ -33,7 +33,7 @@ FLAGS="-I $HERE/gen-include -I $SRC/include -D SEXP_USE_INTTYPES -D SEXP_USE_NTP
 # stub .c with a renamed sexp_init_library, and registers them in
 # sexp_static_libraries[]. So `(srfi 69)` / `(scheme time)` resolve through
 # sexp_find_static_library (a compiled-in table keyed by the module path)
-# instead of dlopen — no dynamism at all (see HANDOVER.md "Why static").
+# instead of dlopen — no dynamism at all (see README.md "Why static").
 #   =1 not a bare -D: features.h does `#if SEXP_USE_STATIC_LIBS` (empty breaks it).
 #   NO_INCLUDE=0: features.h defaults it to 1 (the extern-decl path, clibs.c as a
 #     separate TU); 0 selects the `#include "clibs.c"` path — what emscripten's

@@ -1,4 +1,4 @@
-# Lua-on-dotcc — Session Handover
+# Lua on dotcc — runbook & status
 
 **Status: the full official Lua 5.5 test suite passes.** Lua 5.5.0 compiles
 through dotcc (C→.NET 10/C# transpiler), links, and runs — and `testes/all.lua`
