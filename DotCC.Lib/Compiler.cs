@@ -954,15 +954,15 @@ public static class Compiler
                         argv[i + 1] = EncodeUtf8Nul(args[i]);
                     }
                     argv[argc] = null; // C standard: argv[argc] == NULL
-                    try
-                    {
-                        return main(argc, argv);
-                    }
-                    finally
-                    {
-                        for (int i = 0; i < argc; i++) { NativeMemory.Free(argv[i]); }
-                        NativeMemory.Free(argv);
-                    }
+                    // argv is deliberately NOT freed. In C the argument vector is
+                    // owned by the environment and lives for the whole process; a
+                    // program may legally mutate it — overwrite an entry with a
+                    // pointer it did NOT malloc (chibi's `-q` does `argv[i] =
+                    // "-xchibi"`, a string literal) or reassign argv itself — so the
+                    // original buffers can't be safely freed by slot here. Reclaiming
+                    // it as the process exits would be pointless anyway (the OS does
+                    // it); freeing a non-heap pointer aborts the run.
+                    return main(argc, argv);
                 }
                 """,
             _ => throw new InvalidOperationException(

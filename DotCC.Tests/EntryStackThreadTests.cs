@@ -45,4 +45,21 @@ public sealed class EntryStackThreadTests
         emitted.ShouldContain("64 * 1024 * 1024");
         emitted.ShouldContain("return main(argc, argv);");   // argv path preserved
     }
+
+    /// <summary>
+    /// The synthesized argv must NOT be freed at exit. In C the argument vector
+    /// is environment-owned: a program may legally overwrite a slot with a
+    /// pointer it never malloc'd (chibi-scheme's <c>-q</c> does
+    /// <c>argv[i] = "-xchibi"</c>, a string literal) or reassign <c>argv</c>
+    /// itself, so slot-by-slot freeing can hand <c>NativeMemory.Free</c> a
+    /// non-heap pointer and abort the whole process (the exit-127 chibi bug).
+    /// Guard the emitter shape so the teardown free can't be reintroduced.
+    /// </summary>
+    [Fact]
+    public void argv_is_never_freed_at_exit()
+    {
+        var emitted = Compiler.EmitCSharp(
+            new[] { WriteTemp("int main(int argc, char **argv) { return argc; }") });
+        emitted.ShouldNotContain("NativeMemory.Free(argv");
+    }
 }
