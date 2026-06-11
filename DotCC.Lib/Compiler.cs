@@ -797,6 +797,24 @@ public static class Compiler
         => BuildIncludeMaps(inputPaths, includeDirs).Content;
 
     /// <summary>
+    /// Recursive header/source scan options: recurse into subdirectories (so a
+    /// subdir-qualified include like <c>chibi/sexp.h</c> resolves) but SKIP
+    /// directories we can't read rather than throwing. An input file's own
+    /// directory is auto-added as a search dir, and on Linux that is often
+    /// <c>/tmp</c> (where the test suite writes its temp <c>.c</c>) — which
+    /// holds <c>systemd-private-*</c> subdirectories that are <c>chmod 700</c>
+    /// and owned by other users. The legacy <c>SearchOption.AllDirectories</c>
+    /// overload aborts the whole enumeration with
+    /// <see cref="UnauthorizedAccessException"/> on the first such directory;
+    /// <see cref="EnumerationOptions.IgnoreInaccessible"/> skips it instead.
+    /// </summary>
+    private static readonly EnumerationOptions RecursiveScan = new()
+    {
+        RecurseSubdirectories = true,
+        IgnoreInaccessible = true,
+    };
+
+    /// <summary>
     /// Resolve headers: scan every <c>-I</c> directory + every <c>.h</c>
     /// alongside each <c>.c</c> + the synthetic system headers. Returns both
     /// the <c>name → content</c> map the preprocessor reads AND a
@@ -821,7 +839,7 @@ public static class Compiler
         foreach (var dir in dirs)
         {
             if (!Directory.Exists(dir)) { continue; }
-            foreach (var hpath in Directory.EnumerateFiles(dir, "*.h", SearchOption.AllDirectories))
+            foreach (var hpath in Directory.EnumerateFiles(dir, "*.h", RecursiveScan))
             {
                 // A header directly in the dir registers under its bare name
                 // (`#include "lstate.h"`). A header in a SUBDIRECTORY registers
@@ -844,7 +862,7 @@ public static class Compiler
             // unrelated `.c` files (a temp dir, a whole source tree), and
             // reading them all eagerly is wasted I/O — and a race against other
             // processes' transient files.
-            foreach (var cpath in Directory.EnumerateFiles(dir, "*.c", SearchOption.AllDirectories))
+            foreach (var cpath in Directory.EnumerateFiles(dir, "*.c", RecursiveScan))
             {
                 var rel = Path.GetRelativePath(dir, cpath).Replace('\\', '/');
                 lazy[rel] = cpath;
