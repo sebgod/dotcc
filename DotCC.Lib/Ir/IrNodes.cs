@@ -77,9 +77,14 @@ public sealed record Assign(BinOp? CompoundOp, CExpr Target, CExpr Value) : CExp
 /// when the callee has no known signature), used by the backend to coerce each
 /// argument to its parameter type — C's implicit conversion at a call, which C#
 /// requires made explicit. How a particular libc name renders (e.g. printf's
-/// fluent form) is the backend's decision, keyed off <see cref="Callee"/>.</summary>
+/// fluent form) is the backend's decision, keyed off <see cref="Callee"/>.
+/// <see cref="CalleeSym"/> is the resolved callee symbol when the call binds to a
+/// user function (null for libc builtins / unresolved names); the backend emits
+/// its <see cref="Symbol.TargetName"/> so a TU-local <c>static</c> renamed out of
+/// the way (internal-linkage collision with an external of the same name) is
+/// called under its renamed identifier rather than the raw C name.</summary>
 public sealed record Call(string Callee, IReadOnlyList<CExpr> Args,
-    IReadOnlyList<CType>? ParamTypes = null) : CExpr;
+    IReadOnlyList<CType>? ParamTypes = null, Symbol? CalleeSym = null) : CExpr;
 
 /// <summary>A call through a computed function-pointer expression — <c>(*fp)(x)</c>,
 /// <c>tbl[i](x)</c>, <c>s.fn(x)</c>. (A call of a named function or fn-ptr

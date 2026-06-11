@@ -287,24 +287,61 @@ internal sealed partial class IrBuilder
                     return;
                 }
             }
-            if (!sig.IsStatic)
-            {
-                throw new IrUnsupportedException(
-                    $"duplicate definition of external function '{sig.Name}' (a real linker would reject this too)");
-            }
             var paramTypes = new List<CType>(sig.Params.Count);
             foreach (var (t, _) in sig.Params) { paramTypes.Add(t); }
-            funcSym = _symbols.DeclareAlias(new Symbol
+            if (sig.IsStatic)
             {
-                Name = sig.Name,
-                Kind = SymKind.Func,
-                Type = new CType.Func(sig.Return, paramTypes, sig.Variadic),
-                Storage = Storage.Static,
-                IsGlobal = true,
-                // Program-unique: a TU defines a static name at most once, so the
-                // per-name site count suffices (same scheme as static locals' __s{n}).
-                TargetName = $"{_symbols.Escape(sig.Name)}__{sites.Count + 1}",
-            });
+                // New definition has INTERNAL linkage: a fresh per-TU function
+                // under a uniquified TargetName.
+                funcSym = _symbols.DeclareAlias(new Symbol
+                {
+                    Name = sig.Name,
+                    Kind = SymKind.Func,
+                    Type = new CType.Func(sig.Return, paramTypes, sig.Variadic),
+                    Storage = Storage.Static,
+                    IsGlobal = true,
+                    // Program-unique: a TU defines a static name at most once, so the
+                    // per-name site count suffices (same scheme as static locals' __s{n}).
+                    TargetName = $"{_symbols.Escape(sig.Name)}__{sites.Count + 1}",
+                });
+            }
+            else
+            {
+                // New definition has EXTERNAL linkage — it owns the canonical global
+                // name. Legal only if every prior definition of this name was
+                // `static` (internal linkage, TU-local); two external definitions
+                // are a genuine multiple-definition link error. The motivating case
+                // is chibi's core `static sexp_string_hash` (sexp.c) coexisting with
+                // srfi/69's exported `sexp_string_hash` (hash.c, pulled into eval.c
+                // by the static-clibs include) — legal C the whole-program merge
+                // must not reject.
+                foreach (var site in sites)
+                {
+                    if (site.Sym.Storage != Storage.Static)
+                    {
+                        throw new IrUnsupportedException(
+                            $"duplicate definition of external function '{sig.Name}' (a real linker would reject this too)");
+                    }
+                }
+                // A prior `static` definition holds the canonical name (the first
+                // occurrence keeps it). It is TU-local, so move it aside to `__1`
+                // (never assigned by the static-uniquify scheme above, which starts
+                // at __2); its callers hold the Symbol, so the rename rides through.
+                // The external then claims the canonical name.
+                var canonical = _symbols.Escape(sig.Name);
+                foreach (var site in sites)
+                {
+                    if (site.Sym.TargetName == canonical) { site.Sym.TargetName = $"{canonical}__1"; }
+                }
+                funcSym = _symbols.Declare(new Symbol
+                {
+                    Name = sig.Name,
+                    Kind = SymKind.Func,
+                    Type = new CType.Func(sig.Return, paramTypes, sig.Variadic),
+                    Storage = Storage.None,
+                    IsGlobal = true,
+                });
+            }
             sites.Add(new FnDefSite { Sig = fnSig, Block = block, Sym = funcSym, PrintCache = print });
         }
         else
@@ -1920,9 +1957,13 @@ internal sealed partial class IrBuilder
         {
             // The resolved signature's parameter types drive call-argument
             // coercion (C's implicit conversion at a call, e.g. `size_t` sizeof
-            // arg → `int` malloc param, or the int-0 null-pointer constant).
-            var fn = _symbols.Resolve(name)?.Type as CType.Func;
-            return new Call(name, args, fn?.Params) { Type = fn?.Return ?? CType.Int };
+            // arg → `int` malloc param, or the int-0 null-pointer constant). The
+            // resolved symbol rides along so the backend emits its TargetName —
+            // matters only when a same-named static was renamed (see BuildFuncDef).
+            var sym = _symbols.Resolve(name);
+            var fn = sym?.Type as CType.Func;
+            var calleeSym = sym is { Kind: SymKind.Func } ? sym : null;
+            return new Call(name, args, fn?.Params, calleeSym) { Type = fn?.Return ?? CType.Int };
         }
 
         // Indirect call through a computed fn-ptr expression: `(*fp)(x)`,

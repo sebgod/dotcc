@@ -1849,7 +1849,13 @@ internal sealed class CSharpBackend
             sb.Append(".Done()");
             return sb.ToString();
         }
-        return $"{DotCC.EmitHelpers.Id(c.Callee)}({string.Join(", ", a)})";
+        // Emit the resolved symbol's TargetName when known — identical to
+        // Id(Callee) for every normal function (the C# legalizer's Escape IS
+        // EmitHelpers.Id), differing only for a static renamed out of the way of a
+        // same-named external (BuildFuncDef). Falls back to the escaped raw name
+        // for libc builtins / fn-ptr-variable / unresolved callees.
+        var target = c.CalleeSym?.TargetName ?? DotCC.EmitHelpers.Id(c.Callee);
+        return $"{target}({string.Join(", ", a)})";
     }
 
     /// <summary>The libc names the C# backend lowers to the fluent
