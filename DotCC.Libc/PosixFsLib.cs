@@ -376,10 +376,14 @@ public static unsafe partial class Libc
     private static string Str(byte* s) => s == null ? string.Empty : Encoding.UTF8.GetString(s, strlen(s));
 
     /// <summary>Apply Unix permission bits where the host supports them; ignore
-    /// failure (Windows, or a path that vanished) — chmod is best-effort.</summary>
+    /// failure (a path that vanished) — chmod is best-effort. On Windows there
+    /// are no Unix mode bits, so it's a no-op: <see cref="File.SetUnixFileMode(string, UnixFileMode)"/>
+    /// is unsupported there (the explicit OS guard both expresses that and
+    /// satisfies CA1416, rather than catching the PlatformNotSupportedException).</summary>
     private static void TrySetUnixMode(string path, int mode)
     {
+        if (OperatingSystem.IsWindows()) { return; }
         try { File.SetUnixFileMode(path, (UnixFileMode)(mode & 0xFFF)); }
-        catch { /* unsupported host / race — best-effort */ }
+        catch { /* a path that vanished mid-call — best-effort */ }
     }
 }
