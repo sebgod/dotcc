@@ -28,8 +28,16 @@ name: ci
 #                 functional fixtures. The opt-in differential oracles (MSVC /
 #                 gcc-WSL / gcc-quad / wat) skip cleanly here; the wat oracle,
 #                 which is this branch's whole point, gets its own job below.
-#   build-test-windows  — same build + unit + functional suite on windows-latest,
-#                 so the OS-switch Win32 branches in DotCC.Libc get real coverage.
+#   build-test-windows  — same build + unit + functional suite on windows-latest
+#                 (x64), so the OS-switch Win32 branches in DotCC.Libc get real
+#                 coverage.
+#   build-test-windows-arm64 — the same suite on windows-11-arm: win-arm64 is the
+#                 maintainer's dev arch, and exercises the blittable struct interop
+#                 (pointer width / struct packing) where arm64 could differ.
+#   msvc-oracle — the cl.exe differential oracle (windows-latest, x64): compile +
+#                 run each fixture with MSVC and assert it matches dotcc's emit and
+#                 the committed snapshot. Can't run on Linux (no cl.exe). LP64-vs-
+#                 LLP64 / MSVC-C-mode-gap fixtures opt out via no-msvc-oracle.txt.
 #   wat-oracle  — the --target=wat EXECUTION oracle: EmitWat → wat2wasm → node.
 #                 Pins + checksum-verifies wabt and pins Node so the run is
 #                 reproducible; asserts both tools are actually present (the
@@ -101,6 +109,33 @@ jobs:
       - name: Functional tests (fixtures; opt-in oracles skip)
         run: dotnet test DotCC.FunctionalTests/DotCC.FunctionalTests.csproj -c Release --no-build --nologo
 
+  build-test-windows-arm64:
+    runs-on: windows-11-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      # win-arm64 is the maintainer's dev arch. Same separate-steps structure as
+      # the x64 job. Covers the OS-switch Win32 branches AND the blittable struct
+      # interop (PROCESSENTRY32 nuint fields, fixed buffers) on arm64, where
+      # struct packing / pointer width could differ from x64.
+      - name: Restore
+        run: dotnet restore dotcc.sln
+
+      - name: Build (Release, NuGet path)
+        run: dotnet build dotcc.sln -c Release --no-restore --nologo -p:UseLocalLalrCc=false
+
+      - name: Unit tests
+        run: dotnet test DotCC.Tests/DotCC.Tests.csproj -c Release --no-build --nologo
+
+      - name: Functional tests (fixtures; opt-in oracles skip)
+        run: dotnet test DotCC.FunctionalTests/DotCC.FunctionalTests.csproj -c Release --no-build --nologo
+
   wat-oracle:
     runs-on: ubuntu-latest
     env:
@@ -148,3 +183,46 @@ jobs:
         run: >
           dotnet test DotCC.FunctionalTests/DotCC.FunctionalTests.csproj
           -c Release --no-build --nologo -- -parallel none
+
+  msvc-oracle:
+    runs-on: windows-latest
+    env:
+      DOTCC_RUN_MSVC_ORACLE: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      # Mirror MsvcOracle.ProbeVswhere exactly: the fixed-path vswhere (NOT PATH),
+      # the same -requires VC.Tools.x86.x64 query, and the vcvars64.bat existence
+      # check. If this passes, MsvcOracle.IsAvailable is true and the oracle runs
+      # for real — so the oracle can't pass by silently skipping every fixture
+      # (the failure mode the wat-oracle guard also guards against).
+      - name: Verify MSVC present (fail rather than let the oracle silently skip)
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere not found at $vswhere" }
+          $vc = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ([string]::IsNullOrWhiteSpace($vc)) { throw "vswhere found no VC.Tools.x86.x64 install" }
+          $vcvars = Join-Path $vc 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat missing at $vcvars" }
+          Write-Host "VC toolset at $vc"
+
+      - name: Restore
+        run: dotnet restore dotcc.sln
+
+      - name: Build (Release, NuGet path)
+        run: dotnet build dotcc.sln -c Release --no-restore --nologo -p:UseLocalLalrCc=false
+
+      # cl.exe-per-fixture differential: asserts dotcc's emit matches MSVC's real
+      # output AND the committed snapshot. LP64-vs-LLP64 / MSVC-C-mode-gap
+      # fixtures opt out via no-msvc-oracle.txt sidecars.
+      - name: MSVC differential oracle (cl.exe per fixture)
+        run: >
+          dotnet test DotCC.FunctionalTests/DotCC.FunctionalTests.csproj
+          -c Release --no-build --nologo --filter "FullyQualifiedName~MsvcOracleTests"
