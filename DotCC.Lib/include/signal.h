@@ -31,11 +31,13 @@ void (*signal(int sig, void (*func)(int)))(int);
 #define SIGTERM 15
 
 /* POSIX signal-set + sigaction surface (chibi's (chibi process)). dotcc can't
-   deliver POSIX signals on .NET — the runtime owns them — so sigaction /
-   sigprocmask / kill / raise are stubs that compile + load (a handler never
-   fires); the sigset_t manipulators are real bitset ops (DotCC.Libc's
-   ProcessSignalLib). Enough surface that (chibi process) parses, type-checks,
-   and loads; the R7RS suite drives command-line/exit, not signals. */
+   HANDLE POSIX signals in-process on .NET — the runtime owns delivery — so
+   sigaction / sigprocmask / raise are stubs that compile + load (a handler never
+   fires). kill is faithful, though: it forwards to the OS (POSIX kill(2) /
+   Windows OpenProcess+TerminateProcess), so the kill(pid, 0) existence probe and
+   a SIGKILL/SIGTERM are real; the sigset_t manipulators are real bitset ops
+   (DotCC.Libc's ProcessSignalLib). Enough surface that (chibi process) parses,
+   type-checks, and loads; the R7RS suite drives command-line/exit, not signals. */
 typedef unsigned long sigset_t;
 
 typedef struct {

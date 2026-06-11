@@ -9,10 +9,14 @@ namespace DotCC.Libc;
 /// The POSIX process-control and signal surface (<c>&lt;unistd.h&gt;</c>
 /// fork/exec, <c>&lt;sys/wait.h&gt;</c>, <c>&lt;signal.h&gt;</c>) chibi-scheme's
 /// <c>(chibi process)</c> binds to. .NET has no <c>fork</c> and the runtime owns
-/// signal delivery, so the process/signal entry points are honest stubs that
-/// compile + let the module LOAD; <c>getpid</c> is faithful and the
-/// <c>sigset_t</c> manipulators are real bitset ops. The R7RS suite uses
-/// command-line / exit / environment access, not fork/exec/signals — so the
+/// in-process signal *handling*, so fork/exec/wait stay honest stubs that compile
+/// + let the module LOAD. The process *identity* and *targeting* primitives are
+/// faithful, though: <c>getpid</c>/<c>getppid</c> report the real OS pids, the
+/// <c>sigset_t</c> manipulators are real bitset ops, and <c>kill</c> forwards to
+/// the OS (POSIX <c>kill(2)</c> / Windows OpenProcess+TerminateProcess) so the
+/// portable <c>kill(pid, 0)</c> existence probe and a SIGKILL/SIGTERM are real.
+/// The R7RS suite uses
+/// command-line / exit / environment access, not fork/exec — so the
 /// stubs are never exercised by it (and fail loudly, EPERM/-1, if a program
 /// does call them).
 /// </summary>
@@ -131,8 +135,79 @@ public static unsafe partial class Libc
 
     // ---- <signal.h> --------------------------------------------------------
 
-    /// <summary><c>kill(pid, sig)</c> — no signal delivery on .NET; EPERM.</summary>
-    public static int kill(int pid, int sig) { errno = EPERM; return -1; }
+    /// <summary><c>kill(pid, sig)</c> — send signal <paramref name="sig"/> to
+    /// process <paramref name="pid"/>. POSIX <c>kill(2)</c> is exact: the
+    /// <c>sig==0</c> existence/permission probe, real delivery, and the
+    /// ESRCH/EPERM/EINVAL <c>errno</c> are all the kernel's. Windows has no
+    /// signals, so we model the two portable idioms — <c>sig==0</c> becomes an
+    /// <c>OpenProcess</c> existence probe, and the terminating signals (SIGKILL 9
+    /// / SIGTERM 15 / SIGINT 2) route through <c>TerminateProcess</c>. Any other
+    /// signal has no Windows delivery mechanism (EINVAL), as does a
+    /// <paramref name="pid"/> &lt;= 0 (POSIX process-group / broadcast target,
+    /// unmodeled here).</summary>
+    public static int kill(int pid, int sig)
+    {
+        if (OperatingSystem.IsWindows()) { return WinKill(pid, sig); }
+        int rc = PosixKill(pid, sig);
+        // Surface the raw OS errno (our constants are the glibc asm-generic values).
+        if (rc != 0) { errno = Marshal.GetLastPInvokeError(); }
+        return rc;
+    }
+
+    [DllImport("libc", EntryPoint = "kill", SetLastError = true)]
+    private static extern int PosixKill(int pid, int sig);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint dwDesiredAccess, int bInheritHandle, uint dwProcessId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern int TerminateProcess(IntPtr hProcess, uint uExitCode);
+
+    /// <summary>Windows <c>kill</c>: no signals, so <c>sig 0</c> is an OpenProcess
+    /// existence/permission probe and the terminating signals route through
+    /// TerminateProcess. <c>errno</c> mirrors POSIX <c>kill(2)</c>: ESRCH for a
+    /// missing process, EPERM when it exists but the open is access-denied.</summary>
+    private static int WinKill(int pid, int sig)
+    {
+        const uint PROCESS_TERMINATE = 0x0001;
+        const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+        const int ERROR_ACCESS_DENIED = 5;
+
+        // POSIX pid <= 0 targets process groups / every process — not modeled here.
+        if (pid <= 0) { errno = EINVAL; return -1; }
+
+        if (sig == 0)
+        {
+            // Existence/permission probe only — no signal is sent.
+            IntPtr h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, (uint)pid);
+            if (h != IntPtr.Zero) { CloseHandle(h); return 0; }
+            errno = Marshal.GetLastPInvokeError() == ERROR_ACCESS_DENIED ? EPERM : ESRCH;
+            return -1;
+        }
+
+        // SIGKILL (9) / SIGTERM (15) / SIGINT (2): the deliverable "terminate" signals.
+        if (sig == 9 || sig == 15 || sig == 2)
+        {
+            IntPtr h = OpenProcess(PROCESS_TERMINATE, 0, (uint)pid);
+            if (h == IntPtr.Zero)
+            {
+                errno = Marshal.GetLastPInvokeError() == ERROR_ACCESS_DENIED ? EPERM : ESRCH;
+                return -1;
+            }
+            try
+            {
+                // 128 + signo is the conventional "killed by signal" exit code.
+                if (TerminateProcess(h, (uint)(128 + sig)) != 0) { return 0; }
+                errno = EPERM;
+                return -1;
+            }
+            finally { CloseHandle(h); }
+        }
+
+        // Any other signal has no Windows delivery mechanism.
+        errno = EINVAL;
+        return -1;
+    }
 
     /// <summary><c>raise(sig)</c> — no self-signal delivery on .NET; -1.</summary>
     public static int raise(int sig) { errno = EPERM; return -1; }

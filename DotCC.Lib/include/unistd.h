@@ -64,8 +64,8 @@ int dup(int fd);
 int dup2(int oldfd, int newfd);
 int pipe(int *pipefd);
 
-/* Process control (DotCC.Libc.ProcessSignalLib). getpid is faithful
-   (Environment.ProcessId); fork/exec/wait have no .NET primitive and fail. */
+/* Process control (DotCC.Libc.ProcessSignalLib). getpid/getppid are faithful
+   (real OS pids); fork/exec/wait have no .NET primitive and fail. */
 int getpid(void);
 int getppid(void);
 unsigned int sleep(unsigned int seconds);

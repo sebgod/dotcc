@@ -64,6 +64,31 @@ public sealed unsafe class LibcProcessSignalTests
         return p[0] * 1_000_000 + p[1];
     }
 
+    // ---- kill ---------------------------------------------------------------
+    // These exercise ONLY the sig==0 existence/permission probe — no signal is
+    // ever delivered, so there's nothing to clean up and no process is harmed.
+    // kill(getpid(), 0) is the one form chibi-style code actually uses.
+
+    [Fact]
+    public void kill_self_with_signal_zero_succeeds()
+    {
+        // sig 0 sends nothing; it only asks "does this pid exist and may I signal
+        // it?". Our own pid always answers yes on both OSes (POSIX kill(2) / the
+        // Windows OpenProcess probe), so the call returns 0.
+        kill(getpid(), 0).ShouldBe(0);
+    }
+
+    [Fact]
+    public void kill_nonexistent_pid_with_signal_zero_reports_no_such_process()
+    {
+        // A pid above any possible OS maximum (Linux pid_max tops out well below
+        // 2^31; an odd value like int.MaxValue is never a valid Windows pid
+        // either). The existence probe therefore fails with ESRCH on both OSes.
+        errno = 0;
+        kill(int.MaxValue, 0).ShouldBe(-1);
+        errno.ShouldBe(ESRCH);
+    }
+
     [Fact]
     public void getrusage_reports_nonzero_monotonic_user_cpu_time()
     {

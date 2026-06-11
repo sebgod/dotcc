@@ -1,0 +1,6 @@
+MSVC's CRT has no POSIX kill(): <signal.h> on Windows provides only signal()/
+raise(), and there is no <unistd.h> getpid() (it's _getpid() in <process.h>).
+The fixture therefore can't compile under cl.exe. dotcc's kill IS validated on
+Windows by the always-on functional run (WinKill via OpenProcess) and by the
+LibcProcessSignalTests unit tests; gcc on Linux x64+arm64 differential-tests the
+emitted semantics.
