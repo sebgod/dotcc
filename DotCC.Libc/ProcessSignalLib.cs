@@ -1,6 +1,7 @@
 #nullable enable
 
 using System;
+using System.Runtime.InteropServices;
 
 namespace DotCC.Libc;
 
@@ -22,9 +23,75 @@ public static unsafe partial class Libc
     /// <summary><c>getpid()</c> — the current process id (faithful).</summary>
     public static int getpid() => Environment.ProcessId;
 
-    /// <summary><c>getppid()</c> — parent process id. .NET exposes no portable
-    /// parent pid; report 0 (unknown). Best-effort, like the other stubs.</summary>
-    public static int getppid() => 0;
+    /// <summary><c>getppid()</c> — parent process id. POSIX <c>getppid(2)</c> is
+    /// exact. Windows has no direct API, so we scan the toolhelp process snapshot
+    /// for our own entry and read its parent field. Returns 0 if the parent can't
+    /// be determined (snapshot failed, or our entry isn't listed).</summary>
+    public static int getppid()
+    {
+        if (OperatingSystem.IsWindows()) { return WinGetParentPid(); }
+        return PosixGetppid();
+    }
+
+    [DllImport("libc", EntryPoint = "getppid")]
+    private static extern int PosixGetppid();
+
+    // ---- Windows parent-pid via the toolhelp process snapshot --------------
+    // A blittable PROCESSENTRY32W (primitives + a fixed WCHAR buffer) and the
+    // toolhelp APIs: no marshalling stub, so it stays AOT-clean and survives the
+    // runtime-block splice (same reasoning as link()'s [DllImport]).
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PROCESSENTRY32W
+    {
+        public uint dwSize;
+        public uint cntUsage;
+        public uint th32ProcessID;
+        public nuint th32DefaultHeapID;    // ULONG_PTR
+        public uint th32ModuleID;
+        public uint cntThreads;
+        public uint th32ParentProcessID;
+        public int pcPriClassBase;
+        public uint dwFlags;
+        public fixed char szExeFile[260];  // MAX_PATH
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr CreateToolhelp32Snapshot(uint dwFlags, uint th32ProcessID);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern int Process32FirstW(IntPtr hSnapshot, ref PROCESSENTRY32W lppe);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern int Process32NextW(IntPtr hSnapshot, ref PROCESSENTRY32W lppe);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern int CloseHandle(IntPtr hObject);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentProcessId();
+
+    /// <summary>Parent pid via the toolhelp snapshot: find our own pid's entry
+    /// and return its <c>th32ParentProcessID</c>. 0 if unavailable.</summary>
+    private static int WinGetParentPid()
+    {
+        const uint TH32CS_SNAPPROCESS = 0x00000002;
+        uint self = GetCurrentProcessId();
+        IntPtr snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap == IntPtr.Zero || snap == new IntPtr(-1)) { return 0; }
+        try
+        {
+            var pe = new PROCESSENTRY32W { dwSize = (uint)sizeof(PROCESSENTRY32W) };
+            if (Process32FirstW(snap, ref pe) == 0) { return 0; }
+            do
+            {
+                if (pe.th32ProcessID == self) { return (int)pe.th32ParentProcessID; }
+            }
+            while (Process32NextW(snap, ref pe) != 0);
+            return 0;
+        }
+        finally { CloseHandle(snap); }
+    }
 
     /// <summary><c>sleep(seconds)</c> — block the calling thread; returns 0 (no
     /// signal interrupts it on .NET, so the full interval always elapses).</summary>
