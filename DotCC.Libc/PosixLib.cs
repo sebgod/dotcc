@@ -2,6 +2,7 @@
 
 using System;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace DotCC.Libc;
@@ -127,15 +128,76 @@ public static unsafe partial class Libc
         return -1;
     }
 
-    /// <summary><c>getrusage(who, usage)</c> — dotcc has no portable per-process
-    /// CPU accounting; zero the <c>struct rusage</c> (144 bytes — see
-    /// include/sys/resource.h) and return success. A best-effort no-op like
-    /// <c>chmod</c>: CPU-time deltas read as 0, harmless for wall-clock callers.</summary>
+    /// <summary><c>getrusage(who, usage)</c> — per-process resource usage.
+    /// Forwards to <c>getrusage(2)</c> on POSIX. On Windows there's no single
+    /// rusage call, so we fill the same 144-byte Linux <c>struct rusage</c>
+    /// layout (see include/sys/resource.h — the emitted struct is identical on
+    /// every host) from GetProcessTimes (ru_utime/ru_stime, the CPU fields that
+    /// matter) and, best-effort, GetProcessMemoryInfo (ru_maxrss = peak working
+    /// set in KB, matching Linux's units); every other field stays 0.</summary>
     public static int getrusage(int who, void* usage)
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            if (PosixGetrusage(who, usage) == 0) { return 0; }
+            errno = Marshal.GetLastPInvokeError();
+            return -1;
+        }
+
+        // struct rusage as longs: [0]=ru_utime.tv_sec [1]=.tv_usec
+        // [2]=ru_stime.tv_sec [3]=.tv_usec [4]=ru_maxrss, rest 0.
         new Span<byte>(usage, 144).Clear();
+        long* ru = (long*)usage;
+        IntPtr self = GetCurrentProcess();   // pseudo-handle (-1); no close needed
+        if (GetProcessTimes(self, out _, out _, out long kernel100ns, out long user100ns))
+        {
+            (ru[0], ru[1]) = Ticks100nsToTimeval(user100ns);    // ru_utime
+            (ru[2], ru[3]) = Ticks100nsToTimeval(kernel100ns);  // ru_stime
+        }
+        var mem = new PROCESS_MEMORY_COUNTERS { cb = (uint)sizeof(PROCESS_MEMORY_COUNTERS) };
+        if (GetProcessMemoryInfo(self, ref mem, mem.cb))
+        {
+            ru[4] = (long)(mem.PeakWorkingSetSize / 1024);      // ru_maxrss in KB (Linux units)
+        }
         return 0;
     }
+
+    /// <summary>Split a Windows 100-ns FILETIME tick count into POSIX
+    /// <c>timeval</c> (seconds, microseconds).</summary>
+    private static (long Sec, long Usec) Ticks100nsToTimeval(long ticks100ns)
+    {
+        long usec = ticks100ns / 10;            // 100ns -> microseconds
+        return (usec / 1_000_000, usec % 1_000_000);
+    }
+
+    [DllImport("libc", EntryPoint = "getrusage", SetLastError = true)]
+    private static extern int PosixGetrusage(int who, void* usage);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetProcessTimes(
+        IntPtr hProcess, out long creation, out long exit, out long kernel, out long user);
+
+    // PROCESS_MEMORY_COUNTERS: cb + PageFaultCount are DWORD; the rest SIZE_T.
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PROCESS_MEMORY_COUNTERS
+    {
+        public uint cb;
+        public uint PageFaultCount;
+        public nuint PeakWorkingSetSize;
+        public nuint WorkingSetSize;
+        public nuint QuotaPeakPagedPoolUsage;
+        public nuint QuotaPagedPoolUsage;
+        public nuint QuotaPeakNonPagedPoolUsage;
+        public nuint QuotaNonPagedPoolUsage;
+        public nuint PagefileUsage;
+        public nuint PeakPagefileUsage;
+    }
+
+    [DllImport("psapi.dll", SetLastError = true)]
+    private static extern bool GetProcessMemoryInfo(IntPtr hProcess, ref PROCESS_MEMORY_COUNTERS counters, uint size);
 
     // ---- <fcntl.h> ---------------------------------------------------------
 
