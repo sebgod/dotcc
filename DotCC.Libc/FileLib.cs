@@ -337,6 +337,30 @@ public static unsafe partial class Libc
         return written;
     }
 
+    /// <summary>POSIX <c>lseek(fd, offset, whence)</c> — reposition an fd's
+    /// backing file stream; returns the resulting absolute offset, or -1 (ESPIPE)
+    /// on a non-seekable slot (a console stream). Unlike <c>fseek</c> it returns
+    /// the new offset, not 0. Used by chibi's <c>(chibi io)</c> custom ports.</summary>
+    public static long lseek(int fd, long offset, int whence)
+    {
+        var s = SlotByFd(fd);
+        if (s == null || s.Kind != FileSlot.K.File || s.Stream is not { CanSeek: true } st)
+        {
+            errno = ESPIPE;
+            return -1;
+        }
+        var origin = whence switch
+        {
+            SEEK_CUR => SeekOrigin.Current,
+            SEEK_END => SeekOrigin.End,
+            _ => SeekOrigin.Begin,
+        };
+        // A pending one-byte read-ahead would desync the position — drop it.
+        s.Reader?.ResetPushback();
+        try { var pos = st.Seek(offset, origin); s.Eof = false; return pos; }
+        catch (IOException) { errno = EIO; return -1; }
+    }
+
     /// <summary>The open slot behind a POSIX fd (dotcc fds ARE slot indices),
     /// or null. Shared by <c>close</c>/<c>read</c>/<c>write</c>/<c>fstat</c>.</summary>
     private static FileSlot? SlotByFd(int fd)

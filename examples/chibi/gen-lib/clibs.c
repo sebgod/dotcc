@@ -4,6 +4,10 @@
 #include "lib/chibi/ast.c"
 #undef sexp_init_library
 
+#define sexp_init_library sexp_init_lib_chibi_io
+#include "lib/chibi/io/io.c"
+#undef sexp_init_library
+
 #define sexp_init_library sexp_init_lib_scheme_time
 #include "lib/scheme/time.c"
 #undef sexp_init_library
@@ -19,6 +23,7 @@
 
 struct sexp_library_entry_t sexp_static_libraries_array[] = {
   { "lib/chibi/ast", sexp_init_lib_chibi_ast },
+  { "lib/chibi/io/io", sexp_init_lib_chibi_io },
   { "lib/scheme/time", sexp_init_lib_scheme_time },
   { "lib/srfi/98/env", sexp_init_lib_srfi_98 },
   { "lib/srfi/69/hash", sexp_init_lib_srfi_69 },

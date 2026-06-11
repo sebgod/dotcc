@@ -16,6 +16,11 @@
 
 typedef long fd_set;
 
+#ifndef _OFF_T_DEFINED
+#define _OFF_T_DEFINED
+typedef long off_t;
+#endif
+
 #ifndef _DOTCC_STRUCT_TIMEVAL
 #define _DOTCC_STRUCT_TIMEVAL
 struct timeval {
@@ -36,5 +41,6 @@ int isatty(int fd);
 int close(int fd);
 long read(int fd, void *buf, unsigned long count);
 long write(int fd, void *buf, unsigned long count);
+off_t lseek(int fd, off_t offset, int whence);
 
 #endif /* _UNISTD_H */
