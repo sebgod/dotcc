@@ -27,40 +27,54 @@ CHIBI_IGNORE_SYSTEM_PATH=1 CHIBI_MODULE_PATH=chibi-src/lib \
 The full boot loads `init-7.scm` + `meta-7.scm` — module system, reader, VM,
 GC, error backtraces all work.
 
-**Phase 3 — static clibs: MECHANISM PROVEN, module set in progress.** `.so`
-imports now resolve through chibi's compiled-in static table (no dlopen) —
-`SEXP_USE_STATIC_LIBS=1 SEXP_USE_STATIC_LIBS_NO_INCLUDE=0` makes `eval.c`
-`#include "clibs.c"` (captured into `gen-lib/`), which `#include`s each module's
-stub `.c` with a renamed `sexp_init_library`; `sexp_load_binary` falls back to
-`sexp_find_static_library`, a table keyed by the module path. Working today:
+**Phase 3 — static clibs: DONE.** `.so` imports resolve through chibi's
+compiled-in static table (no dlopen) — `SEXP_USE_STATIC_LIBS=1
+SEXP_USE_STATIC_LIBS_NO_INCLUDE=0` makes `eval.c` `#include "clibs.c"` (captured
+into `gen-lib/`), which `#include`s each module's stub `.c` with a renamed
+`sexp_init_library`; `sexp_load_binary` falls back to `sexp_find_static_library`,
+a table keyed by the module path.
 
-```bash
-bash link.sh    # 0 Roslyn errors (9 TUs + clibs.c + the stubs it #includes)
-cd chibi-src    # cwd must hold lib/ so the lookup path matches the table key
-CHIBI_IGNORE_SYSTEM_PATH=1 CHIBI_MODULE_PATH=lib dotnet \
-  ../build/bin/Release/net10.0/build.dll -q \
-  -e '(import (srfi 69))(define h (make-hash-table equal?))(hash-table-set! h 1 2)(display (hash-table-ref h 1))'   # → 2
-# (srfi 98) get-environment-variable / get-environment-variables also work.
-```
+`gen-lib/clibs.c` now registers the **full set** the R7RS suite needs:
+`chibi/ast`, `chibi/io/io`, `srfi/151/bit`, `chibi/filesystem`, `srfi/39/param`,
+`chibi/time`, `srfi/18/threads`, `chibi/process`, `scheme/time`, `srfi/98/env`,
+`srfi/69/hash`. The chibi-ffi-generated stubs (io/filesystem/time/process) are
+captured from the WSL reference build into the (gitignored) `lib/.../*.c` paths;
+`ast.c`/`hash.c`/`bit.c`/`param.c`/`threads.c`/`env.c` are upstream sources.
 
 **Key-match constraint:** `sexp_find_static_library` does `strncmp(file,
 entry->name, base_len)` — the table key (e.g. `lib/srfi/69/hash`, baked by
 genstatic under `CHIBI_MODULE_PATH=lib`) must be a prefix of the runtime lookup
 path. So run with **cwd=`chibi-src` and `CHIBI_MODULE_PATH=lib`** (an absolute
-or `chibi-src/lib` path would not match). Regenerate `gen-lib/clibs.c` the same
-way (see Layout).
+or `chibi-src/lib` path would not match).
 
-`gen-lib/clibs.c` currently registers `srfi/69`, `srfi/98`, `scheme/time` (all
-checked-in stubs, compile clean). `srfi/69` + `srfi/98` load and run.
-`scheme/time` compiles + registers but its IMPORT chain isn't closed yet:
-`(scheme time)` → `(scheme process-context)` → `(chibi process)`, which cascades
-into `(chibi io)` / `(chibi filesystem)` / threads — several chibi-ffi-GENERATED
-stubs (`.stub` → `.c`) plus more POSIX surface. That cascade is the bulk of the
-remaining phase-3 work.
+**Phase 4 — R7RS suite: DONE (2026-06-11).** dotcc-transpiled chibi-scheme runs
+the full `tests/r7rs-tests.scm` and its output is **IDENTICAL to the gcc-built
+`baseline-r7rs.txt`** (timings aside): **1225/1225 tests (100%), 18/18
+subgroups**.
 
-Phase 4 (R7RS suite vs `baseline-r7rs.txt`) is gated on closing that chain:
-`tests/r7rs-tests.scm`'s top-level `(import … (scheme time) (scheme
-process-context) …)` must all load before any test runs.
+```bash
+bash link.sh
+cd chibi-src
+CHIBI_IGNORE_SYSTEM_PATH=1 CHIBI_MODULE_PATH=lib \
+  dotnet ../build/bin/Release/net10.0/build.dll tests/r7rs-tests.scm
+# → 1225 out of 1225 (100.0%) tests passed. 18 out of 18 subgroups passed.
+# Compare (timings/ANSI normalized):
+#   diff <(sed -E 's/\x1b\[[0-9;]*m//g; s/ in [0-9.]+ seconds//g' OUT) \
+#        <(sed -E 's/\x1b\[[0-9;]*m//g; s/ in [0-9.]+ seconds//g' baseline-r7rs.txt)
+```
+
+The campaign goal is met: dotcc transpiles a real-world R7RS-small implementation
+to .NET and passes its own conformance suite, matching the reference compiler.
+
+**Closing the import chain (the bulk of phase 3→4) took:** registering each of
+the 11 modules above, plus the libc surface each needed (setenv/unsetenv, lseek,
+a full POSIX filesystem surface incl. `<dirent.h>` + `open`, getrusage / tm
+gmtoff+zone, `suseconds_t`, and a process/signal surface incl. `<sys/wait.h>` +
+sigaction) — and **two dotcc fixes**: the preprocessor `#define`-in-a-`#include`d-
+file-before-its-`#undef` bug (commit 204f708) and **function-pointer struct
+members** `Ret (*f)(args);` (e88a655, needed by `struct sigaction`). The
+fork/exec/wait/kill/signal entry points are honest stubs (no .NET primitive); see
+`~/.claude/.../memory` posix-stubs-portable for the OS-switch+P/Invoke follow-up.
 
 **Compiler gaps fixed for phase 3 (all upstreamed, suites green):**
 1. **Internal-linkage `static` vs same-name external** — core `static
@@ -159,22 +173,27 @@ repeated Roslyn errors across the merged program):
     `fileno`/`close`/`read`/`write`, `stat`/`fstat`, `gettimeofday`,
     `strcasecmp`/`strncasecmp`, `fabsl`, ENOTSOCK `shutdown` (PosixLib.cs).
 
-## Next milestones (the Lua playbook, phases 6+)
+## Milestones — ALL DONE (2026-06-11)
 
 1. ~~**Link harness**~~ DONE — see Status.
-2. ~~**Boot**~~ DONE (fell out of phase 2) — full init-7.scm/meta-7.scm boot,
-   stops only at the dlopen'd srfi stub.
-3. **Static clibs**: MECHANISM DONE (see Status — `clibs.c` via genstatic,
-   `SEXP_USE_STATIC_LIBS=1`/`NO_INCLUDE=0`; `srfi/69` + `srfi/98` load & run).
-   REMAINING: close the `(scheme time)` / `(scheme process-context)` import
-   chain — `(chibi process)` → `(chibi io)` / `(chibi filesystem)` / threads,
-   several **chibi-ffi-generated** stubs (`.stub` → `.c`, captured from WSL like
-   `gen-lib/clibs.c`) plus more POSIX surface. Add modules to `gen-lib/clibs.c`
-   one at a time and chase the per-stub dotcc gaps + missing libc functions.
-4. **R7RS suite**: `tests/r7rs-tests.scm` output `ShouldBe` `baseline-r7rs.txt`.
-   Gated on #3 — its top-level `(import …)` names `(scheme time)` and `(scheme
-   process-context)`, so the whole file fails to load until that chain closes.
-   Consider a `chibi.yml` workflow mirroring `lua.yml`.
+2. ~~**Boot**~~ DONE (fell out of phase 2) — full init-7.scm/meta-7.scm boot.
+3. ~~**Static clibs**~~ DONE — `gen-lib/clibs.c` registers all 11 modules the
+   R7RS suite needs (`chibi/ast,io,filesystem,time,process`, `srfi/151,39,18`,
+   `scheme/time`, `srfi/98,69`); the `(scheme time)`/`(scheme process-context)`
+   import chain is closed. Each module's libc gaps were filled (setenv, lseek,
+   POSIX filesystem incl. dirent+open, getrusage, tm gmtoff/zone, suseconds_t,
+   process/signal incl. sys/wait + sigaction); fork/exec/wait/kill/signal are
+   honest stubs (no .NET primitive — see the posix-stubs-portable memory).
+4. ~~**R7RS suite**~~ DONE — dotcc-chibi runs `tests/r7rs-tests.scm` →
+   **1225/1225 (100%), 18/18 subgroups, output IDENTICAL to `baseline-r7rs.txt`**
+   (timings aside). See the Status block for the run + diff recipe.
+
+**Still TODO — lock it in CI.** The R7RS pass is verified manually but not
+guarded by a test (the in-process functional path can't spawn the heavy chibi
+`link.sh` build / `Process.Start`). A `chibi.yml` GitHub workflow mirroring
+`lua.yml` (build dotcc → `link.sh` → run `r7rs-tests.scm` → diff vs
+`baseline-r7rs.txt`) would catch a regression. Until then, re-run the Status
+recipe after touching the preprocessor, the grammar, or PosixLib/PosixFsLib.
 
 **Why static, not dlopen (and the dlopen roadmap item).** `.so` loading is
 dynamic, but chibi's static-clibs mechanism removes the dynamism while keeping
