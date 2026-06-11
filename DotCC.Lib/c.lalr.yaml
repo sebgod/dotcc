@@ -942,6 +942,14 @@ productions:
       # machinery block-scope multi-dim arrays use).
       - { lhs: Member, rhs: [Type, ID, ArrDims, ';'],     action: structArrMember }
       - { lhs: Member, rhs: [Type, ID, '[', ']', ';'],    action: structFlexArrMember }
+      # Function-pointer member `Ret (*name)(params);` — the struct-member
+      # counterpart of the fn-ptr typedef/param forms (same `( * ID ) ( … )`
+      # declarator shape, so conflict-free: after `Type`, only the fn-ptr forms
+      # take `(`, the others take ID/`:`). Ubiquitous in callback tables / vtables
+      # (chibi's `struct sigaction { void (*sa_handler)(int); … }`). Lowers to a
+      # `delegate*` field via FnPtrType, like every other fn-ptr position.
+      - { lhs: Member, rhs: [Type, '(', '*', ID, ')', '(', ParamList, ')', ';'], action: structFnPtrMember }
+      - { lhs: Member, rhs: [Type, '(', '*', ID, ')', '(', ')', ';'],            action: structFnPtrMemberNoArgs }
       # Nested aggregate members. All four forms carry a MemberMark (epsilon)
       # right after the `{` to snapshot where the inner fields begin, so a
       # consumer can isolate them from the parent's. The NAMED-vs-anonymous split

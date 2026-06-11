@@ -707,6 +707,15 @@ internal sealed partial class IrBuilder
                     Gate(1999, "flexible array member", m);
                     fields.Add(new StructField(Tok(sm.Arg1), new CType.Array(ResolveType(sm.Arg0), 1)));
                     break;
+                // `Ret (*name)(params);` — a function-pointer member. Same
+                // FnPtrType lowering as the typedef/param fn-ptr forms (codegen
+                // emits a `delegate*` field).
+                case C.StructFnPtrMember sm:
+                    fields.Add(new StructField(Tok(sm.Arg3), FnPtrType(sm.Arg0, sm.Arg6)));
+                    break;
+                case C.StructFnPtrMemberNoArgs sm:
+                    fields.Add(new StructField(Tok(sm.Arg3), FnPtrType(sm.Arg0, null)));
+                    break;
                 // `T name : W;` — a bit-field. Codegen lowers it to a backing field
                 // + a masked accessor property (value semantics; bit packing is
                 // implementation-defined, so the struct's layout/sizeof needn't match).

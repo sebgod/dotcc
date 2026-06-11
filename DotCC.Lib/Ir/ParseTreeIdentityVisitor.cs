@@ -164,6 +164,8 @@ internal sealed class ParseTreeIdentityVisitor : C.IVisitor<object>
     public object Visit(C.StructAnonBitField node) => node;
     public object Visit(C.StructArrMember node) => node;
     public object Visit(C.StructFlexArrMember node) => node;
+    public object Visit(C.StructFnPtrMember node) => node;
+    public object Visit(C.StructFnPtrMemberNoArgs node) => node;
     public object Visit(C.AnonStructMember node) => node;
     public object Visit(C.AnonUnionMember node) => node;
     public object Visit(C.NamedNestedStruct node) => node;
