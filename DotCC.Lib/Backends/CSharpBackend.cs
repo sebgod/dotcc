@@ -1104,8 +1104,19 @@ internal sealed class CSharpBackend
             case NullPtr: return ("null", PPrimary);
             // A bare unresolved identifier: the backend escapes the raw name.
             case NameRef nr: return (DotCC.EmitHelpers.Id(nr.RawName), PPrimary);
-            // An enumerator of a real enum: EnumName.Member (member access).
-            case EnumConstRef ec: return ($"{Cs(ec.Sym.Type.Unqualified)}.{DotCC.EmitHelpers.Id(ec.Sym.Name)}", PPostfix);
+            // An enumerator of a real enum: EnumName.Member (member access). If a
+            // global variable shadows the enum TYPE name (C keeps `enum E` in the
+            // tag namespace and a variable `E` in the ordinary namespace; `using
+            // static DotCcGlobals` then binds the bare name to the variable —
+            // chibi's `enum sexp_opcode_names` vs its `const char** sexp_opcode_names`
+            // table), force the top-level type with `global::` so the enumerator
+            // resolves against the enum, not the field.
+            case EnumConstRef ec:
+            {
+                var enumTy = Cs(ec.Sym.Type.Unqualified);
+                if (_typeShadowedGlobals.Contains(enumTy)) { enumTy = "global::" + enumTy; }
+                return ($"{enumTy}.{DotCC.EmitHelpers.Id(ec.Sym.Name)}", PPostfix);
+            }
             // A bare function name used as a value decays to its address — C#
             // needs the explicit `&` to form a delegate* (C allows the bare name).
             // A pointer global stored as `nint` (its address was taken): a value read
