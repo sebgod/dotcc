@@ -24,7 +24,13 @@ internal sealed class CSharpTarget : ITarget
         CType.Pointer ptr => ptr.Pointee is CType.Array ? RenderType(ptr.Pointee) : RenderType(ptr.Pointee) + "*",
         // An array lowers to a single pointer to its innermost scalar.
         CType.Array a => RenderType(a.FlatElement) + "*",
-        CType.Func f => $"delegate*<{string.Join(", ", f.Params.Select(RenderType).Append(RenderType(f.Return)))}>",
+        // A native-call-conv fn-ptr (a dlsym'd address) lowers to an unmanaged cdecl
+        // delegate* so the JIT/AOT uses the C calling convention (matching the
+        // `-shared` exports' [UnmanagedCallersOnly(CallConvs=CallConvCdecl)]); the
+        // `CallConvCdecl` modifier resolves without a using. Default (managed) is
+        // unchanged — `&fn` of dotcc's own methods stays a managed delegate*.
+        CType.Func f => (f.IsNativeCallConv ? "delegate* unmanaged[Cdecl]<" : "delegate*<")
+            + string.Join(", ", f.Params.Select(RenderType).Append(RenderType(f.Return))) + ">",
         CType.Named n => n.Name,
         CType.Enum e => e.Name,
         CType.ComplexType => "System.Numerics.Complex",

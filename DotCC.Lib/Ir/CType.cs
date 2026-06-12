@@ -129,6 +129,32 @@ public abstract record CType
     public sealed record Func(CType Return, IReadOnlyList<CType> Params, bool Variadic) : CType
     {
         public override int SizeOf => 8;
+
+        /// <summary>True when this function-pointer type addresses NATIVE code (a
+        /// <c>dlsym</c>'d symbol or other unmanaged entry point) and must therefore be
+        /// called through a <c>delegate* unmanaged[Cdecl]&lt;…&gt;</c> rather than the
+        /// default managed <c>delegate*&lt;…&gt;</c>. It is a .NET ABI annotation, NOT
+        /// part of the C type identity — two <c>int(*)(int)</c> types are the same C
+        /// type whether or not one happens to point at native code — so it is excluded
+        /// from record equality / hashing (below) and is deliberately not a
+        /// <see cref="TypeQual"/> (those are C qualifiers that surface in
+        /// <see cref="Describe"/> / <see cref="Unqualified"/>).</summary>
+        public bool IsNativeCallConv { get; init; }
+
+        /// <summary>Equality excludes <see cref="IsNativeCallConv"/> (a .NET ABI
+        /// annotation, not C type identity) and otherwise replicates the synthesized
+        /// record behavior this replaces: <see cref="Params"/> compares structurally
+        /// via the default comparer (reference equality for a <c>List&lt;CType&gt;</c>),
+        /// plus <see cref="Return"/>, <see cref="Variadic"/> and the base
+        /// <see cref="CType.Quals"/>.</summary>
+        public bool Equals(Func? other) =>
+            other is not null
+            && Quals == other.Quals
+            && Variadic == other.Variadic
+            && EqualityComparer<IReadOnlyList<CType>>.Default.Equals(Params, other.Params)
+            && EqualityComparer<CType>.Default.Equals(Return, other.Return);
+
+        public override int GetHashCode() => HashCode.Combine(Quals, Variadic, Return);
     }
 
     /// <summary>A named type the IR doesn't model structurally yet (a typedef

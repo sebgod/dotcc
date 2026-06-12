@@ -1374,9 +1374,19 @@ internal sealed partial class IrBuilder
 
     private DeclStmt BuildFnPtrLocal(Item retItem, Item nameItem, Item? paramsItem, Item? initItem)
     {
-        var type = FnPtrType(retItem, paramsItem);
+        CType.Func type = FnPtrType(retItem, paramsItem);
+        var init = initItem is { } ii ? BuildExpr(ii) : null;
+        // Propagate a dlsym-sourced native calling-convention marker from the
+        // initializer onto the declared fn-ptr type, so the canonical idiom
+        //     int (*fn)(int) = (int(*)(int))dlsym(h, "add");  fn(5);
+        // calls `fn` through delegate* unmanaged[Cdecl]. Calls render unchanged —
+        // C# picks the calli convention from the variable's (now-native) type.
+        if (init?.Type is CType.Func { IsNativeCallConv: true } && !type.IsNativeCallConv)
+        {
+            type = type with { IsNativeCallConv = true };
+        }
         var sym = _symbols.Declare(new Symbol { Name = Tok(nameItem), Kind = SymKind.Var, Type = type, Storage = Storage.Auto });
-        return new DeclStmt(new[] { new LocalDecl(sym, initItem is { } ii ? BuildExpr(ii) : null) });
+        return new DeclStmt(new[] { new LocalDecl(sym, init) });
     }
 
     private CStmt BuildDecl(Item declItem)
@@ -1812,8 +1822,59 @@ internal sealed partial class IrBuilder
         // `(void)X` — C# has no void cast and the value is discarded; carry the
         // operand through typed void so a statement position emits `X;`.
         if (target is CType.VoidType) { return operand with { Type = CType.Void }; }
+        if (target is CType.Func ft)
+        {
+            // A cast of a dlsym() result DIRECTLY to a function-pointer type is
+            // POSIX's own idiom for invoking a loaded symbol. dlsym is the ONLY
+            // producer of native code addresses in a dotcc program, so mark the
+            // function type native-calling-convention here (→ delegate*
+            // unmanaged[Cdecl]). The marker rides the cast's Type, so the inline
+            // form `((T(*)(a))dlsym(h,"x"))(a)` already calls through the C
+            // convention; it also propagates onto a fn-ptr local's declared type in
+            // BuildFnPtrLocal. See include/dlfcn.h for the contract.
+            if (IsDlsymCall(c.Arg3))
+            {
+                var native = ft with { IsNativeCallConv = true };
+                return new Cast(native, operand) { Type = native };
+            }
+            // No-silent-miscompile guard: a cast to a fn-ptr type whose operand is a
+            // void*-typed value that is NOT a direct dlsym() call cannot be verified
+            // native — if that void* actually came from dlsym, the emitted (managed)
+            // call would use the wrong calling convention. Warn, but only once
+            // <dlfcn.h> is in scope (its `dlsym` prototype registered), so the
+            // legitimate managed void*-context fn-ptr idiom in non-dlfcn code stays
+            // silent.
+            if (DlfcnInScope && operand.Type.Unqualified is CType.Pointer { Pointee: CType.VoidType })
+            {
+                Diagnostics.Add(new Diagnostic(
+                    Severity.Warning,
+                    "cast of void* to a function-pointer type cannot be verified as native code; "
+                    + "if this pointer came from dlsym(), cast the dlsym() call directly so the call "
+                    + "uses the C calling convention",
+                    SrcPos.From(c.Arg3),
+                    _file));
+            }
+        }
         return new Cast(target, operand) { Type = target };
     }
+
+    /// <summary>True when <paramref name="it"/> (peeling redundant parens) is a
+    /// direct call to <c>dlsym</c> — the one native-code-address producer dotcc
+    /// recognises, so casting it to a function-pointer type marks that type
+    /// native (a <c>delegate* unmanaged[Cdecl]</c> call). See include/dlfcn.h.</summary>
+    private bool IsDlsymCall(Item it) => it.Content switch
+    {
+        C.Paren p => IsDlsymCall(p.Arg1),
+        C.Call call => TryCalleeName(call.Arg0, out var n) && n == "dlsym",
+        C.CallNoArgs call => TryCalleeName(call.Arg0, out var n) && n == "dlsym",
+        _ => false,
+    };
+
+    /// <summary>True once <c>&lt;dlfcn.h&gt;</c> is in scope — detected by its
+    /// <c>dlsym</c> prototype being registered (the synthetic header declares it).
+    /// Gates the void*→fn-ptr "cannot verify native" warning so the legitimate
+    /// managed void*-context fn-ptr idiom in non-dlfcn code stays silent.</summary>
+    private bool DlfcnInScope => _symbols.Resolve("dlsym") is { Kind: SymKind.Func };
 
     /// <summary>The value-context comma operator (<c>Expr → Expr ',' E</c>,
     /// left-associative). Flatten nested commas into a single ordered operand
