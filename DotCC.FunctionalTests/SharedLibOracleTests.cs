@@ -52,6 +52,46 @@ public sealed class SharedLibOracleTests
         }
         """;
 
+    // The dotcc-side consumer: a C program dotcc itself compiles (to a managed
+    // exe), which dlopens the published native .so (argv[1]) and resolves the same
+    // three exports via dlsym, casting each dlsym() result DIRECTLY to its function
+    // type — dotcc lowers those to `delegate* unmanaged[Cdecl]` so the calls meet
+    // the .so's `[UnmanagedCallersOnly]` cdecl exports. Output is byte-identical to
+    // the gcc consumer's, which is the round-trip proof.
+    //
+    // No dlclose here: this consumer is a *managed* (CoreCLR) program and the .so is
+    // a NativeAOT library carrying its OWN runtime. Unloading a NativeAOT runtime out
+    // from under a live managed host crashes at teardown — a CoreCLR+NativeAOT
+    // coexistence limit, NOT a dlfcn bug. dlclose IS exercised elsewhere: the gcc
+    // consumer dlcloses the same .so from pure-native code, and LibcDlfcnTests
+    // dlcloses system libraries (libc.so.6 / msvcrt.dll) cleanly. A real plugin host
+    // commonly keeps libraries loaded for the process lifetime anyway.
+    private const string DotccConsumerSource = """
+        #include <stdio.h>
+        #include <dlfcn.h>
+        int main(int argc, char **argv) {
+            if (argc < 2) { printf("usage: consumer <lib>\n"); return 2; }
+            void *h = dlopen(argv[1], RTLD_NOW);
+            if (h == NULL) { printf("dlopen failed: %s\n", dlerror()); return 1; }
+
+            int    (*add)(int, int)         = (int    (*)(int, int))      dlsym(h, "add");
+            int    (*double_it)(int)        = (int    (*)(int))           dlsym(h, "double_it");
+            double (*scale)(double, double) = (double (*)(double, double))dlsym(h, "scale");
+            if (add == NULL || double_it == NULL || scale == NULL) {
+                printf("dlsym failed: %s\n", dlerror());
+                return 1;
+            }
+
+            printf("add(2,3)=%d\n", add(2, 3));
+            printf("double_it(21)=%d\n", double_it(21));
+            printf("scale(2.5,4)=%g\n", scale(2.5, 4.0));
+            fflush(stdout);
+            return 0;
+        }
+        """;
+
+    private const string ExpectedOutput = "add(2,3)=5\ndouble_it(21)=42\nscale(2.5,4)=10";
+
     [Fact]
     public void native_shared_lib_is_callable_from_a_real_c_program()
     {
@@ -70,6 +110,29 @@ public sealed class SharedLibOracleTests
         var stdout = SharedLibOracle.PublishAndConsume(LibSource, ConsumerSource)
             .Replace("\r\n", "\n").Trim();
 
-        stdout.ShouldBe("add(2,3)=5\ndouble_it(21)=42\nscale(2.5,4)=10");
+        stdout.ShouldBe(ExpectedOutput);
+    }
+
+    [Fact]
+    public void native_shared_lib_is_callable_from_a_dotcc_program_via_dlopen()
+    {
+        if (!RunRequested)
+        {
+            Assert.Skip(
+                $"shared-lib oracle is opt-in. Set {RunEnv}=1 to compile a dotcc -shared " +
+                $"library, NativeAOT-publish it, then have a dotcc-compiled program dlopen it " +
+                $"and call its cdecl exports through dlsym — the dotcc-consumes-dotcc round-trip.");
+        }
+        if (!SharedLibOracle.IsAvailable)
+        {
+            Assert.Skip("shared-lib oracle unavailable: " + SharedLibOracle.Unavailable);
+        }
+
+        var stdout = SharedLibOracle.PublishAndConsumeViaDotcc(LibSource, DotccConsumerSource)
+            .Replace("\r\n", "\n").Trim();
+
+        // Identical to the gcc consumer's output: dotcc's dlsym'd unmanaged[Cdecl]
+        // call sites meet the .so's UnmanagedCallersOnly cdecl exports.
+        stdout.ShouldBe(ExpectedOutput);
     }
 }

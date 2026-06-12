@@ -1,0 +1,7 @@
+MSVC has no <dlfcn.h> — dlopen/dlsym/dlclose are POSIX, with no Win32 CRT
+equivalent under those names (the platform's loader API is LoadLibrary/
+GetProcAddress), so the fixture can't compile under cl.exe. dotcc's dlfcn IS
+validated on Windows by the always-on functional run (NativeLibrary loads
+msvcrt.dll in-process and the cdecl call into its strlen returns 5) and by the
+LibcDlfcnTests unit tests; gcc on Linux x64+arm64 differential-tests the emitted
+semantics (glibc folds dlopen into libc since 2.34, so no -ldl).

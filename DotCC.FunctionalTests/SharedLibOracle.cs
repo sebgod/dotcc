@@ -46,6 +46,12 @@ internal static class SharedLibOracle
     /// links it by full path).</summary>
     private const string AsmName = "dotccsharedlib";
 
+    /// <summary>Assembly name of the dotcc-emitted dlopen consumer (a plain managed
+    /// exe) in the dotcc-consumes-dotcc round-trip.</summary>
+    private const string ConsumerAsmName = "dotccdlconsumer";
+
+    private const string OutMarker = "__CONSUMER_STDOUT__";
+
     /// <summary>True if dotnet + gcc + clang (the NativeAOT linker) are all reachable.</summary>
     public static bool IsAvailable { get { EnsureInitialised(); return _available; } }
 
@@ -80,28 +86,107 @@ internal static class SharedLibOracle
         File.WriteAllText(Path.Combine(workDir, "consumer.c"), consumerCSource);
 
         // ── one shell script: publish → locate .so → link consumer → run ──
-        var shellWork = ToShellPath(workDir);
-        const string outMarker = "__CONSUMER_STDOUT__";
         var script =
-            $"set -e; cd '{shellWork}'; " +
-            "arch=$(uname -m); rid=linux-x64; [ \"$arch\" = aarch64 ] && rid=linux-arm64; " +
-            "if ! dotnet publish -c Release -r $rid >publish.log 2>&1; then echo PUBLISH_FAILED; tail -25 publish.log; exit 3; fi; " +
-            $"SO=$(find bin -name '{AsmName}.so' | head -1); " +
-            "if [ -z \"$SO\" ]; then echo NO_SO; find bin -name '*.so'; exit 4; fi; " +
-            "PUB=$(dirname \"$SO\"); " +
-            "if ! gcc consumer.c -o consumer \"$SO\" -Wl,-rpath,\"$PUB\" 2>gcc.log; then echo GCC_FAILED; cat gcc.log; exit 5; fi; " +
-            $"echo {outMarker}; ./consumer";
+            "set -e\n" +
+            "cd \"$(dirname \"$0\")\"\n" +
+            "arch=$(uname -m); rid=linux-x64; [ \"$arch\" = aarch64 ] && rid=linux-arm64\n" +
+            "if ! dotnet publish -c Release -r $rid >publish.log 2>&1; then echo PUBLISH_FAILED; tail -25 publish.log; exit 3; fi\n" +
+            $"SO=$(find bin -name '{AsmName}.so' | head -1)\n" +
+            "if [ -z \"$SO\" ]; then echo NO_SO; find bin -name '*.so'; exit 4; fi\n" +
+            "PUB=$(dirname \"$SO\")\n" +
+            "if ! gcc consumer.c -o consumer \"$SO\" -Wl,-rpath,\"$PUB\" 2>gcc.log; then echo GCC_FAILED; cat gcc.log; exit 5; fi\n" +
+            $"echo {OutMarker}\n./consumer\n";
 
-        var (stdout, stderr, exit) = RunShell(script);
-        if (exit != 0 || !stdout.Contains(outMarker))
+        return RunCapture(workDir, script);
+    }
+
+    /// <summary>
+    /// The dotcc-consumes-dotcc round-trip: library-mode-compile
+    /// <paramref name="libCSource"/> and NativeAOT-publish it to a native
+    /// <c>.so</c> (as above), then compile <paramref name="dotccConsumerCSource"/>
+    /// — a C program that <c>dlopen</c>s the <c>.so</c> and calls its exports via
+    /// <c>dlsym</c> — with dotcc to a managed exe, and run it passing the <c>.so</c>
+    /// path as <c>argv[1]</c>. Returns the consumer's stdout. This closes the loop
+    /// the gcc consumer leaves open: a dotcc-built program consuming a dotcc-built
+    /// native library, with dotcc's <c>delegate* unmanaged[Cdecl]</c> dlsym call
+    /// sites meeting the <c>[UnmanagedCallersOnly]</c> cdecl exports — convention
+    /// symmetry proven end-to-end.
+    /// </summary>
+    /// <remarks>lib and consumer live in sibling subdirectories so neither csproj's
+    /// recursive <c>**/*.cs</c> glob swallows the other's <c>Program.cs</c>.</remarks>
+    public static string PublishAndConsumeViaDotcc(string libCSource, string dotccConsumerCSource)
+    {
+        EnsureInitialised();
+        if (!_available)
+        {
+            throw new InvalidOperationException("shared-lib oracle is not available on this host.");
+        }
+
+        var workDir = Path.Combine(Path.GetTempPath(), "dotcc-sharedlib-dl-" + Guid.NewGuid().ToString("N"));
+        var libDir = Path.Combine(workDir, "lib");
+        var consDir = Path.Combine(workDir, "consumer");
+        Directory.CreateDirectory(libDir);
+        Directory.CreateDirectory(consDir);
+
+        // ── in-process: the -shared lib project (NativeAOT) ──
+        var libC = Path.Combine(libDir, "lib.c");
+        File.WriteAllText(libC, libCSource);
+        File.WriteAllText(Path.Combine(libDir, "Program.cs"),
+            Compiler.EmitCSharp(new[] { libC }, includeDirs: null, defines: null, fileBased: false, libraryMode: true));
+        File.WriteAllText(Path.Combine(libDir, AsmName + ".csproj"),
+            Compiler.BuildGeneratedCsproj(libraryMode: true, assemblyName: AsmName));
+
+        // ── in-process: the dotcc dlopen consumer (plain managed exe) ──
+        var consC = Path.Combine(consDir, "consumer.c");
+        File.WriteAllText(consC, dotccConsumerCSource);
+        File.WriteAllText(Path.Combine(consDir, "Program.cs"),
+            Compiler.EmitCSharp(new[] { consC }, includeDirs: null, defines: null, fileBased: false, libraryMode: false));
+        File.WriteAllText(Path.Combine(consDir, ConsumerAsmName + ".csproj"),
+            Compiler.BuildGeneratedCsproj(libraryMode: false, assemblyName: ConsumerAsmName));
+
+        // ── one shell script: publish lib → locate .so → build consumer → run it on the .so ──
+        // The consumer does NOT dlclose the .so: it is a managed (CoreCLR) program and
+        // the .so is a NativeAOT library with its own runtime — unloading it mid-process
+        // crashes at teardown (a CoreCLR+NativeAOT coexistence limit, not a dlfcn bug;
+        // see SharedLibOracleTests.DotccConsumerSource).
+        var script =
+            "set -e\n" +
+            "cd \"$(dirname \"$0\")\"\n" +
+            "arch=$(uname -m); rid=linux-x64; [ \"$arch\" = aarch64 ] && rid=linux-arm64\n" +
+            $"if ! dotnet publish 'lib/{AsmName}.csproj' -c Release -r $rid >publish.log 2>&1; then echo PUBLISH_FAILED; tail -25 publish.log; exit 3; fi\n" +
+            $"SO=$(find lib/bin -name '{AsmName}.so' | head -1)\n" +
+            "if [ -z \"$SO\" ]; then echo NO_SO; find lib/bin -name '*.so'; exit 4; fi\n" +
+            "SO=$(readlink -f \"$SO\")\n" +
+            $"if ! dotnet build 'consumer/{ConsumerAsmName}.csproj' -c Release -o consumer/out >build.log 2>&1; then echo BUILD_FAILED; tail -25 build.log; exit 5; fi\n" +
+            $"echo {OutMarker}\ndotnet \"consumer/out/{ConsumerAsmName}.dll\" \"$SO\"\n";
+
+        return RunCapture(workDir, script);
+    }
+
+    /// <summary>Write <paramref name="scriptBody"/> to <c>run.sh</c> in
+    /// <paramref name="workDir"/>, run it (<c>bash &lt;file&gt;</c>), and return the
+    /// consumer's own stdout — everything after the <see cref="OutMarker"/> line the
+    /// script echoes right before invoking the consumer (so publish/build chatter
+    /// before it is discarded). Throws with the full captured log on a non-zero exit
+    /// or a missing marker.</summary>
+    /// <remarks>The script runs from a FILE rather than inline (<c>bash -lc
+    /// '&lt;body&gt;'</c>): the inline form must survive .NET → <c>wsl.exe</c> → bash
+    /// argument quoting on the Windows dev box, which mangles the embedded
+    /// double-quotes the script needs (<c>[ "$x" = … ]</c>, <c>"$SO"</c>). A file path
+    /// carries none, so the transport is robust on both native bash (CI) and wsl.exe.</remarks>
+    private static string RunCapture(string workDir, string scriptBody)
+    {
+        var scriptPath = Path.Combine(workDir, "run.sh");
+        // LF endings so bash on Linux/WSL doesn't choke on CRs.
+        File.WriteAllText(scriptPath, scriptBody.Replace("\r\n", "\n"));
+        var (stdout, stderr, exit) = RunShell($"bash '{ToShellPath(scriptPath)}'");
+        if (exit != 0 || !stdout.Contains(OutMarker))
         {
             throw new InvalidOperationException(
                 $"shared-lib oracle failed (exit {exit}).\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}");
         }
-        // Everything after the marker line is the consumer's own stdout.
-        var idx = stdout.IndexOf(outMarker, StringComparison.Ordinal);
-        var after = stdout[(idx + outMarker.Length)..];
-        return after.TrimStart('\r', '\n');
+        var idx = stdout.IndexOf(OutMarker, StringComparison.Ordinal);
+        return stdout[(idx + OutMarker.Length)..].TrimStart('\r', '\n');
     }
 
     /// <summary>Working directory as the shell sees it (forward-slashed; on Windows
