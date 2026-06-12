@@ -70,12 +70,20 @@ internal static class FixtureRunner
             .Select(a => MetadataReference.CreateFromFile(a.Location))
             .Cast<MetadataReference>()
             .ToList();
-        // The spliced DotCC.Libc runtime block references
-        // System.Diagnostics.Process (for system()). It's type-forwarded and
-        // isn't in the harvested set above, so add it explicitly (dedup by
-        // path). At AOT publish / `dotnet run` this is free — the full
-        // framework ref set already includes it.
+        // The spliced DotCC.Libc runtime block references assemblies that aren't
+        // in the harvested set above (they may not be loaded into the test
+        // AppDomain yet, or are type-forwarded), so add them explicitly (dedup by
+        // path). At AOT publish / `dotnet run` this is free — the full framework
+        // ref set already includes them.
+        //   - System.Diagnostics.Process  -> system()
+        //   - System.Net.Sockets (Socket) -> SocketLib
+        //   - System.Net.Primitives (IPAddress/IPEndPoint) -> SocketLib
         AddReferenceByType(refs, typeof(System.Diagnostics.Process));
+        AddReferenceByType(refs, typeof(System.Net.Sockets.Socket));
+        AddReferenceByType(refs, typeof(System.Net.IPAddress));
+        // SocketException derives from System.ComponentModel.Win32Exception
+        // (Microsoft.Win32.Primitives) — needed so `catch (SocketException)` binds.
+        AddReferenceByType(refs, typeof(System.ComponentModel.Win32Exception));
 
         var options = new CSharpCompilationOptions(
             OutputKind.ConsoleApplication,

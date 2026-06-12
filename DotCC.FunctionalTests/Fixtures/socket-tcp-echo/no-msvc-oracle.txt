@@ -1,0 +1,5 @@
+MSVC has no POSIX sockets: <sys/socket.h>/<netinet/in.h>/<arpa/inet.h>/<unistd.h>
+don't exist, and Winsock needs WSAStartup + winsock2.h with different types. The
+fixture can't compile under cl.exe. dotcc's sockets are validated on Windows by
+the always-on functional run (System.Net.Sockets under the hood) and the
+LibcSocketTests unit tests; gcc on Linux x64+arm64 differential-tests the emit.

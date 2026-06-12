@@ -9,9 +9,10 @@ namespace DotCC.Libc;
 
 /// <summary>
 /// The thin-POSIX surface beyond <c>&lt;unistd.h&gt;</c>: <c>&lt;fcntl.h&gt;</c>,
-/// <c>&lt;poll.h&gt;</c>, <c>&lt;sys/stat.h&gt;</c>, <c>&lt;sys/socket.h&gt;</c>,
-/// <c>&lt;sys/time.h&gt;</c>. Present so portable Unix C (chibi-scheme's
-/// non-<c>_WIN32</c> path) compiles AND behaves honestly at runtime:
+/// <c>&lt;poll.h&gt;</c>, <c>&lt;sys/stat.h&gt;</c>, <c>&lt;sys/time.h&gt;</c>.
+/// (<c>&lt;sys/socket.h&gt;</c> is now real — see <c>SocketLib</c>.) Present so
+/// portable Unix C (chibi-scheme's non-<c>_WIN32</c> path) compiles AND behaves
+/// honestly at runtime:
 /// </summary>
 /// <remarks>
 /// <list type="bullet">
@@ -24,8 +25,6 @@ namespace DotCC.Libc;
 /// degrades to a blocking read (identical behavior for file-backed fds, the
 /// only kind DotCC.Libc creates).</item>
 /// <item><c>poll</c> claims every polled fd ready — true for file-backed fds.</item>
-/// <item><c>shutdown</c> always fails with -1: no fd is ever a socket, and
-/// that is exactly what a real libc returns for a non-socket fd.</item>
 /// </list>
 /// Struct-typed parameters (<c>struct stat*</c>, <c>struct pollfd*</c>,
 /// <c>struct timeval*</c>) arrive as <c>void*</c>: the C structs are declared
@@ -230,15 +229,5 @@ public static unsafe partial class Libc
             *(short*)(p + 6) = *(short*)(p + 4); // revents = events
         }
         return (int)nfds;
-    }
-
-    // ---- <sys/socket.h> ----------------------------------------------------
-
-    /// <summary><c>shutdown(fd, how)</c> — no dotcc fd is a socket; fail with
-    /// -1 exactly as a real libc does for a non-socket fd (ENOTSOCK).</summary>
-    public static int shutdown(int fd, int how)
-    {
-        errno = ENOTSOCK;
-        return -1;
     }
 }

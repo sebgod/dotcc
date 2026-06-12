@@ -3,6 +3,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -53,9 +54,10 @@ public static unsafe partial class Libc
     /// <summary>Managed backing for one open <see cref="FILE"/>.</summary>
     private sealed class FileSlot
     {
-        public enum K { In, Out, Err, File }
+        public enum K { In, Out, Err, File, Socket }
         public K Kind;
-        public Stream? Stream;          // null for the console kinds
+        public Stream? Stream;          // null for the console + socket kinds
+        public Socket? Socket;          // socket kind only (BSD sockets, SocketLib)
         public StreamFileWriter? Writer; // lazy, file kind only
         public StreamFileReader? Reader; // lazy, file kind only
         public bool Eof;
@@ -144,6 +146,8 @@ public static unsafe partial class Libc
 
     private static bool WriteByteSlot(FileSlot s, byte b)
     {
+        // Socket-backed fd: one byte onto the connection (fputc on an fdopen'd socket).
+        if (s.Kind == FileSlot.K.Socket) { return SocketWriteByte(s, b); }
         // Only file-backed slots carry a Stream; the console kinds have none.
         if (s.Stream is { } st)
         {
@@ -165,6 +169,8 @@ public static unsafe partial class Libc
         // A byte pushed back by ungetc is returned before touching the stream
         // (covers fgetc / getc / getchar / fgets — the common ungetc consumers).
         if (s.Pushback >= 0) { int p = s.Pushback; s.Pushback = -1; return p; }
+        // Socket-backed fd: one byte off the connection (fgetc on an fdopen'd socket).
+        if (s.Kind == FileSlot.K.Socket) { return SocketReadByte(s); }
         int r;
         if (s.Stream is { } st)
         {
@@ -311,6 +317,9 @@ public static unsafe partial class Libc
     {
         var s = SlotByFd(fd);
         if (s == null) { errno = EBADF; return -1; }
+        // A socket fd must return whatever is available NOW (up to count), not block
+        // for the full count like the file byte-loop below would — one Receive.
+        if (s.Kind == FileSlot.K.Socket) { return SocketRecvInto(s, buf, count, 0); }
         var dst = (byte*)buf;
         long got = 0;
         for (; (ulong)got < count; got++)
@@ -328,6 +337,9 @@ public static unsafe partial class Libc
     {
         var s = SlotByFd(fd);
         if (s == null) { errno = EBADF; return -1; }
+        // Socket fd: one Send of the whole buffer (the byte-loop below is for the
+        // file/console kinds whose backing has no bulk write).
+        if (s.Kind == FileSlot.K.Socket) { return SocketSendFrom(s, buf, count, 0); }
         var src = (byte*)buf;
         long written = 0;
         for (; (ulong)written < count; written++)
@@ -370,6 +382,19 @@ public static unsafe partial class Libc
 
     private static void CloseSlot(FileSlot slot)
     {
+        if (slot.Kind == FileSlot.K.Socket)
+        {
+            // close(sockfd): Dispose closes the handle (sending FIN for a connected
+            // TCP socket, like close(2)). Then the slot index is freed for reuse.
+            slot.Socket?.Dispose();
+            slot.Socket = null;
+            lock (_filesLock)
+            {
+                int idx = _files.IndexOf(slot);
+                if (idx >= 3) { _files[idx] = null; }
+            }
+            return;
+        }
         if (slot.Kind == FileSlot.K.File)
         {
             slot.Writer?.Flush();

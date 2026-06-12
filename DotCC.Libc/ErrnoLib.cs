@@ -74,7 +74,24 @@ public static unsafe partial class Libc
     public const int EDOM = 33;     // Numerical argument out of domain   (C std)
     public const int ERANGE = 34;   // Numerical result out of range      (C std)
     public const int EILSEQ = 84;   // Invalid or incomplete multibyte/wide char (C std)
-    public const int ENOTSOCK = 88; // Socket operation on non-socket (POSIX; PosixLib.shutdown)
+    // ---- socket/network errnos (Linux/glibc asm-generic values; SocketLib) ----
+    public const int ENOTSOCK = 88;        // Socket operation on non-socket
+    public const int EMSGSIZE = 90;        // Message too long
+    public const int EPROTONOSUPPORT = 93; // Protocol not supported
+    public const int EOPNOTSUPP = 95;      // Operation not supported on socket
+    public const int EAFNOSUPPORT = 97;    // Address family not supported
+    public const int EADDRINUSE = 98;      // Address already in use
+    public const int EADDRNOTAVAIL = 99;   // Cannot assign requested address
+    public const int ENETUNREACH = 101;    // Network is unreachable
+    public const int ECONNABORTED = 103;   // Software caused connection abort
+    public const int ECONNRESET = 104;     // Connection reset by peer
+    public const int ENOBUFS = 105;        // No buffer space available
+    public const int EISCONN = 106;        // Transport endpoint is already connected
+    public const int ENOTCONN = 107;       // Transport endpoint is not connected
+    public const int ETIMEDOUT = 110;      // Connection timed out
+    public const int ECONNREFUSED = 111;   // Connection refused
+    public const int EHOSTUNREACH = 113;   // No route to host
+    public const int EINPROGRESS = 115;    // Operation now in progress
 
     /// <summary>
     /// <c>strerror(errnum)</c> — map an error number to a human-readable message

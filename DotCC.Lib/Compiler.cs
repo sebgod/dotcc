@@ -1011,6 +1011,8 @@ public static class Compiler
             using System.Collections.Generic;
             using System.Collections.Concurrent;
             using System.Text;
+            using System.Net;
+            using System.Net.Sockets;
             // ---- DotCC.Libc runtime (embedded source) ----------------
             // The Libc class (declared at file end, spliced in from the
             // ../DotCC.Libc/*.cs sources) holds every libc function +
@@ -1185,6 +1187,8 @@ public static class Compiler
             using System.Collections.Generic;
             using System.Collections.Concurrent;
             using System.Text;
+            using System.Net;
+            using System.Net.Sockets;
             using static Libc;
             using static DotCcGlobals;
 
