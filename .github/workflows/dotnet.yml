@@ -54,6 +54,13 @@ name: ci
 #                 running the oracle); and runs single-threaded (-parallel none)
 #                 so 50+ concurrent wat2wasm/node spawns can't contend. Correct
 #                 and non-flaky over fast.
+#   shared-lib-oracle — the native shared-library round-trip oracle (ubuntu-latest):
+#                 dotcc -shared a C lib -> NativeAOT publish to a real .so -> a
+#                 hand-written C consumer links it and calls the [UnmanagedCallersOnly]
+#                 cdecl exports through the plain C ABI. The end-to-end proof that the
+#                 export ABI works from C; LibraryModeTests only checks the managed
+#                 export metadata. Installs clang + zlib1g-dev (the NativeAOT linker
+#                 deps); opt-in via DOTCC_RUN_SHARED_LIB_ORACLE=1.
 
 on:
   push:
@@ -275,3 +282,43 @@ jobs:
         run: >
           dotnet test DotCC.FunctionalTests/DotCC.FunctionalTests.csproj
           -c Release --no-build --nologo --filter "FullyQualifiedName~GccWslOracleTests"
+
+  shared-lib-oracle:
+    # Native shared-library round-trip: dotcc -shared -> NativeAOT publish to a
+    # real .so -> a hand-written C consumer links it and calls the cdecl exports.
+    # SharedLibOracle.RunShell uses `bash -lc` directly on Linux. NativeAOT needs
+    # clang + zlib (the ILC linker deps); gcc compiles the consumer.
+    runs-on: ubuntu-latest
+    env:
+      DOTCC_RUN_SHARED_LIB_ORACLE: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      # The NativeAOT linker is clang; zlib1g-dev is its runtime dep. gcc (the
+      # consumer compiler) ships on the runner. Install + assert so the oracle
+      # can't silently skip (IsAvailable false would pass the job without ever
+      # crossing the native boundary).
+      - name: Install NativeAOT + consumer toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang zlib1g-dev
+          clang --version && gcc --version
+
+      - name: Restore
+        run: dotnet restore dotcc.sln
+
+      - name: Build (Release, NuGet path)
+        run: dotnet build dotcc.sln -c Release --no-restore --nologo -p:UseLocalLalrCc=false
+
+      # -shared a C lib, NativeAOT-publish it, then link + run a real C consumer
+      # against the produced .so and assert its cdecl exports return the right values.
+      - name: Shared-library round-trip oracle (publish + real C consumer)
+        run: >
+          dotnet test DotCC.FunctionalTests/DotCC.FunctionalTests.csproj
+          -c Release --no-build --nologo --filter "FullyQualifiedName~SharedLibOracleTests"
