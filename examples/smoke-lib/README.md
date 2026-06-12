@@ -58,6 +58,11 @@ publishes the library and runs a C consumer against it on every push, so the
 native cdecl export ABI stays proven — not just the managed metadata
 (`LibraryModeTests`).
 
-> Consuming such a library *from another dotcc-compiled C program* (resolving its
-> `extern`s as managed calls into the native lib) needs dotcc's planned **import
-> mode** — see the `dlfcn.h` row in [`C-SUPPORT.md`](../../C-SUPPORT.md).
+> Consuming such a library *from another dotcc-compiled C program* works today via
+> **`<dlfcn.h>`**: a dotcc program can `dlopen` this `.so`, `dlsym` an export, and
+> call it through the C ABI — dotcc lowers a `dlsym` result cast directly to a
+> function type into a `delegate* unmanaged[Cdecl]<…>` so the call meets the
+> library's cdecl exports. That dotcc-consumes-dotcc round-trip is itself a
+> `shared-lib-oracle` test (see the `dlfcn.h` row in
+> [`C-SUPPORT.md`](../../C-SUPPORT.md)). Resolving a library's `extern`s *implicitly*
+> (linker-style, no `dlopen`) still needs dotcc's planned **import mode**.
