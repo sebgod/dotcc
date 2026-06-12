@@ -36,6 +36,8 @@ cd build && dotnet run
 
 Essentially **all of C89/C99, and most of C11/C23** that maps cleanly onto .NET: the full preprocessor (function-like macros, `##`/`#`, `#if` expression evaluation), structs/unions/enums/bit-fields, function pointers, `goto`, `setjmp`/`longjmp` (common shapes), `volatile` and `_Atomic` lowered faithfully, variadic functions with `<stdarg.h>`, and 22 libc headers — including real `FILE*` I/O, the complete `<math.h>`/`<tgmath.h>`, and a clean-room software **IEEE-754 binary128** for `_Float128` validated bit-for-bit against gcc.
 
+It also lowers a real POSIX surface onto the BCL: filesystem and process control, `getpid`/`getppid`/`kill`/`raise` forwarding to the host OS, C11 `<threads.h>`, and **BSD sockets** (`<sys/socket.h>`/`<netinet/in.h>`/`<arpa/inet.h>`) over `System.Net.Sockets` — blocking IPv4 TCP/UDP, the same code running on Linux *and* Windows (no Winsock split). dotcc advertises what it actually provides via `_POSIX_VERSION`, and defines no compile-time OS-identity macro (one binary picks the OS at runtime).
+
 The feature-by-feature tracker — every lexical form, type, operator, statement, libc function, and what's partial or out of scope — lives in **[C-SUPPORT.md](C-SUPPORT.md)**. There are no known silent miscompiles: every gap fails loudly at compile time.
 
 Out of scope by design: VLAs, wide string literals, trigraphs/digraphs, `_BitInt(N)`, GNU extensions.
@@ -101,7 +103,7 @@ dotnet test
 dotnet publish DotCC -c Release    # NativeAOT `dotcc` executable
 ```
 
-Every fixture in `DotCC.FunctionalTests/Fixtures/` is a folder of `.c` files plus an `expected-stdout.txt`; adding a test is dropping a folder. The committed snapshots are additionally re-validated against **real compilers** by opt-in differential oracles — MSVC (`DOTCC_RUN_MSVC_ORACLE=1`) and gcc-in-WSL (`DOTCC_RUN_GCC_ORACLE=1`) — so dotcc, MSVC, and gcc must all agree on each fixture's output. The `wat` backend has its own execution oracle in CI (wat2wasm + Node).
+Every fixture in `DotCC.FunctionalTests/Fixtures/` is a folder of `.c` files plus an `expected-stdout.txt`; adding a test is dropping a folder. The committed snapshots are additionally re-validated against **real compilers** by opt-in differential oracles — MSVC (`DOTCC_RUN_MSVC_ORACLE=1`) and gcc-in-WSL (`DOTCC_RUN_GCC_ORACLE=1`) — so dotcc, MSVC, and gcc must all agree on each fixture's output. The `wat` backend has its own execution oracle in CI (wat2wasm + Node), and a **shared-library round-trip oracle** (`DOTCC_RUN_SHARED_LIB_ORACLE=1`) NativeAOT-publishes a `-shared` library and calls its exports from a real C program — proving the native cdecl export ABI, not just the managed metadata. All run as dedicated CI jobs.
 
 ## License
 
