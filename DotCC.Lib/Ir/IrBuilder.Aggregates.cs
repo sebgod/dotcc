@@ -34,18 +34,52 @@ internal sealed partial class IrBuilder
     private List<Init> ParseInitList(Item initList)
     {
         var items = new List<Init>();
+        // A C23 #embed element expands IN PLACE to its file bytes as integer
+        // constants — so `{ #embed "f" }` fills a char array, `{ 1, #embed "f", 2 }`
+        // splices into a mixed list, and a non-char element type takes one int per
+        // byte. This single chokepoint serves every initializer-list shape; the
+        // const→RVA fast path then recognises a const char[] of constant bytes in
+        // the backend (string- and embed-init converge on the same node).
+        void AddElem(Init e)
+        {
+            if (e is InitVal { Value: EmbedData ed })
+            {
+                GuardEmbedSize(ed.Bytes.Count);
+                var inv = System.Globalization.CultureInfo.InvariantCulture;
+                foreach (var b in ed.Bytes)
+                {
+                    items.Add(new InitVal(new LitInt(b.ToString(inv), b) { Type = CType.Int }));
+                }
+            }
+            else { items.Add(e); }
+        }
         void Walk(Item n)
         {
             switch (n.Content)
             {
-                case C.InitListCons c: Walk(c.Arg0); items.Add(ParseInitElem(c.Arg2)); break;
+                case C.InitListCons c: Walk(c.Arg0); AddElem(ParseInitElem(c.Arg2)); break;
                 case C.InitListTrail t: Walk(t.Arg0); break;     // trailing comma — no element
-                case C.InitListOne o: items.Add(ParseInitElem(o.Arg0)); break;
-                default: items.Add(ParseInitElem(n)); break;
+                case C.InitListOne o: AddElem(ParseInitElem(o.Arg0)); break;
+                default: AddElem(ParseInitElem(n)); break;
             }
         }
         Walk(initList);
         return items;
+    }
+
+    /// <summary>Upper bound on a single <c>#embed</c>'s byte count. The bytes
+    /// ultimately materialise as a <c>new byte[]{…}</c> source-text literal, so
+    /// the ceiling is source-emit size, not runtime cost (the RVA blob is free at
+    /// runtime). Exceeding it is a loud error, never a silent truncation.</summary>
+    private const int MaxEmbedBytes = 4 * 1024 * 1024;
+
+    private static void GuardEmbedSize(int count)
+    {
+        if (count > MaxEmbedBytes)
+        {
+            throw new IrUnsupportedException(
+                $"#embed payload is {count} bytes, exceeding dotcc's {MaxEmbedBytes}-byte source-emit limit");
+        }
     }
 
     private Init ParseInitElem(Item it) => it.Content switch

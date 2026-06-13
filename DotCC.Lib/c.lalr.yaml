@@ -371,6 +371,18 @@ symbols:
   # (C99 7.17: "member-designator") — `offsetof(struct S, value.type.f)`,
   # chibi-scheme's sexp_offsetof. Array designators (`m[2]`) stay unsupported.
   - OffsetofPath   # 163 non-terminal: ID ('.' ID)* inside offsetof
+  # EMBED (C23 #embed) — a SYNTHETIC terminal with NO lexer rule. The `#embed`
+  # preprocessor directive (onEmbed) reads the named file's RAW bytes and emits
+  # exactly ONE EMBED Item carrying a content-hash key into the preprocessor's
+  # byte side-table — deliberately NOT the standard's comma-separated list of
+  # integer constants, which for a multi-MB file would explode into millions of
+  # tokens/AST nodes. The single carrier rides the existing char-array
+  # productions (the `'{' EMBED '}'` forms below) and lowers to an RVA blob
+  # (const) or a pinned writable array (non-const) — see CSharpBackend. Same
+  # injection pattern as TYPE_NAME/the sizeof fold: a terminal produced by an
+  # upstream stage, never lexed.
+  - EMBED          # 164 synthetic terminal (C23 #embed) — file-bytes carrier
+  - '#embed'       # 165 preprocessor directive (C23) — consumed before parsing
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -1371,6 +1383,19 @@ productions:
       - { lhs: Primary, rhs: ['TRUE'],      action: litTrue }
       - { lhs: Primary, rhs: ['FALSE'],     action: litFalse }
       - { lhs: Primary, rhs: ['NULLPTR'],   action: litNullptr }
+      # C23 `#embed`. The EMBED terminal is synthetic — only the onEmbed
+      # preprocessor handler produces it (no lexer rule), carrying a content-hash
+      # key into the byte side-table. Routing it through Primary (an expression)
+      # lets it ride EVERY existing initializer path with no new array/init
+      # productions: a char-array brace init `unsigned char d[]={#embed"f"}`
+      # (globalArrInitImplicit → InitList → InitElem → E → Primary → EMBED), a
+      # mixed list `{1,#embed"f",2}`, and a single-byte scalar `int x=#embed"b"`.
+      # The embed-ness is recognised STRUCTURALLY by the consumers in the IR
+      # (the array-init builders + the scalar-init path), which expand the bytes
+      # to a byte blob (char arrays, RVA when const) or to int constants
+      # (other element types / scalar), under the size guard. EMBED reaching any
+      # other expression position is rejected loudly in the IR.
+      - { lhs: Primary, rhs: ['EMBED'],     action: embed }
       # Parenthesized expression uses the full `Expr` tier, so `( a, b )` is the
       # comma operator. (Cast `( Type ) Unary` still disambiguates by the first
       # token after `(`; function calls use `ArgList`, not `Expr`.)
@@ -1411,6 +1436,7 @@ lexer:
     - { symbol: '#else',    match: '#[ \t]*else' }
     - { symbol: '#endif',   match: '#[ \t]*endif' }
     - { symbol: '#include', match: '#[ \t]*include' }
+    - { symbol: '#embed',   match: '#[ \t]*embed' }
     - { symbol: '#define',  match: '#[ \t]*define' }
     - { symbol: '#undef',   match: '#[ \t]*undef' }
     # `#warning` must precede `#pragma` if any prefix sharing; no shared
@@ -1670,6 +1696,7 @@ lexer:
 preprocessor:
   directives:
     '#include': onInclude
+    '#embed':   onEmbed
     '#define':  onDefine
     '#undef':   onUndef
     '#pragma':  onPragma

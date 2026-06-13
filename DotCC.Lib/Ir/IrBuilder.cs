@@ -116,10 +116,20 @@ internal sealed partial class IrBuilder
     /// flat-local shadowing is resolved). Neutral mechanism stays in
     /// <see cref="SymbolTable"/>; only the policy varies — and which policy applies
     /// is the compiler's decision, keeping this namespace backend-free.</param>
-    internal IrBuilder(DotCC.DialectGate? gate, INameLegalizer names)
+    /// <summary>C23 <c>#embed</c> payloads, keyed by the content-hash the
+    /// preprocessor's <c>OnEmbed</c> stamped onto each synthetic EMBED token.
+    /// <see cref="BuildEmbed"/> resolves the carrier back to its raw file bytes
+    /// here. Shared with the <see cref="CPreprocessor"/> that populated it
+    /// (Compiler.BuildIr threads one dictionary through both), so identical
+    /// embeds across TUs dedup by hash.</summary>
+    private readonly IReadOnlyDictionary<string, byte[]> _embeds;
+
+    internal IrBuilder(DotCC.DialectGate? gate, INameLegalizer names,
+        IReadOnlyDictionary<string, byte[]>? embeds = null)
     {
         _gate = gate;
         _symbols = new SymbolTable(names);
+        _embeds = embeds ?? new Dictionary<string, byte[]>();
     }
 
     /// <summary>Flag a feature introduced in <paramref name="era"/> (ISO year) when
@@ -281,7 +291,9 @@ internal sealed partial class IrBuilder
             if (storage != Storage.Extern)
             {
                 _definedGlobalNames.Add(name); // a real definition — satisfies any extern decl
-                Globals.Add(new GlobalVar(sym, initItem is { } ii ? BuildExpr(ii) : null));
+                CExpr? gInit = null;
+                if (initItem is { } ii) { gInit = BuildExpr(ii); EnsureNotEmbed(gInit); }
+                Globals.Add(new GlobalVar(sym, gInit));
             }
         });
     }
@@ -1407,7 +1419,9 @@ internal sealed partial class IrBuilder
                 Storage = Storage.Static, IsGlobal = true,
                 TargetName = $"{_symbols.Escape(name)}__s{_staticLocalSeq++}",
             };
-            Globals.Add(new GlobalVar(sym, initItem is { } ii ? BuildExpr(ii) : null));
+            CExpr? slInit = null;
+            if (initItem is { } ii) { slInit = BuildExpr(ii); EnsureNotEmbed(slInit); }
+            Globals.Add(new GlobalVar(sym, slInit));
             _symbols.DeclareAlias(sym);
         });
         return new DeclStmt(System.Array.Empty<LocalDecl>());
@@ -1506,7 +1520,9 @@ internal sealed partial class IrBuilder
                 return;
             }
             var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type, Storage = Storage.Auto });
-            scalars.Add(new LocalDecl(sym, initItem is { } ii ? BuildExpr(ii) : null));
+            CExpr? sInit = null;
+            if (initItem is { } ii) { sInit = BuildExpr(ii); EnsureNotEmbed(sInit); }
+            scalars.Add(new LocalDecl(sym, sInit));
         });
         Flush();
         return stmts.Count == 1 ? stmts[0] : new Seq(stmts);
@@ -1521,6 +1537,7 @@ internal sealed partial class IrBuilder
     {
         Gate(2023, "auto` type inference", n.Arg1);
         var init = BuildExpr(n.Arg3);
+        EnsureNotEmbed(init);
         var sym = _symbols.Declare(new Symbol { Name = Tok(n.Arg1), Kind = SymKind.Var, Type = init.Type, Storage = Storage.Auto });
         return new DeclStmt(new[] { new LocalDecl(sym, init) });
     }
@@ -1693,8 +1710,25 @@ internal sealed partial class IrBuilder
     /// already-built initializer, as a one-declarator <see cref="DeclStmt"/>.</summary>
     private DeclStmt BuildLocalInit(Item nameItem, CType type, CExpr init)
     {
+        EnsureNotEmbed(init);
         var sym = _symbols.Declare(new Symbol { Name = Tok(nameItem), Kind = SymKind.Var, Type = type, Storage = Storage.Auto });
         return new DeclStmt(new[] { new LocalDecl(sym, init) });
+    }
+
+    /// <summary>Reject a <c>#embed</c> that reached a scalar / non-brace-array
+    /// position. The carrier is only consumed (expanded to bytes) inside an
+    /// initializer list (<see cref="ParseInitList"/>); a bare <c>int x = #embed …</c>
+    /// or an arbitrary-expression use is a V1 cut, surfaced loudly here rather
+    /// than miscompiled.</summary>
+    private static void EnsureNotEmbed(CExpr e)
+    {
+        if (e is EmbedData)
+        {
+            throw new IrUnsupportedException(
+                "#embed is only supported as a brace initializer of an array, "
+                + "e.g. `unsigned char d[] = { #embed \"file\" };` "
+                + "(scalar, braceless, or arbitrary-expression #embed is not supported)");
+        }
     }
 
     /// <summary>A positional struct/union aggregate initializer from an
@@ -1760,6 +1794,7 @@ internal sealed partial class IrBuilder
             C.Num n => BuildNum(n),
             C.Flt f => BuildFloat(f),
             C.Str => BuildStr(it),
+            C.Embed em => BuildEmbed(em),
             C.Chr c => BuildChr(c),
             C.Var v => BuildVar(v),
             C.Paren p => BuildExpr(p.Arg1) is var inner ? new Paren(inner) { Type = inner.Type, IsLValue = inner.IsLValue } : throw new InvalidOperationException(),
@@ -2220,6 +2255,33 @@ internal sealed partial class IrBuilder
         }
         Walk(it);
         return segs;
+    }
+
+    /// <summary>Transient carrier for a C23 <c>#embed</c> payload — the named
+    /// file's raw bytes, resolved from the preprocessor side-table. It NEVER
+    /// reaches the backend: <see cref="ParseInitList"/> expands it to byte
+    /// constants in initializer position, and any other position is rejected
+    /// loudly (scalar / braceless / arbitrary-expression <c>#embed</c> is a V1
+    /// cut). Typed <c>char[N]</c> like a string literal so a sole-embed char
+    /// array sizes correctly before expansion.</summary>
+    internal sealed record EmbedData(IReadOnlyList<int> Bytes) : CExpr;
+
+    /// <summary>Lower a C23 <c>#embed</c> carrier (one synthetic EMBED token whose
+    /// content is the content-hash key) to an <see cref="EmbedData"/> over the
+    /// file bytes the preprocessor stashed. Gated C23.</summary>
+    private CExpr BuildEmbed(C.Embed em)
+    {
+        Gate(2023, "#embed", em.Arg0);
+        var key = Tok(em.Arg0);
+        if (key is null || !_embeds.TryGetValue(key, out var bytes))
+        {
+            // The carrier and the side-table are produced together in OnEmbed;
+            // a miss means an internal plumbing bug, not user error.
+            throw new IrUnsupportedException("internal: #embed payload not found for carrier token");
+        }
+        var ints = new int[bytes.Length];
+        for (var i = 0; i < bytes.Length; i++) { ints[i] = bytes[i]; }
+        return new EmbedData(ints) { Type = new CType.Array(CType.Char, bytes.Length) };
     }
 
     private CExpr BuildStr(Item it)

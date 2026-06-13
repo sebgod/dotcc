@@ -235,6 +235,10 @@ public static class Compiler
         var lexerTable = C.BuildLexer();
         var activeDialect = dialect ?? CDialect.Default;
         var seededDefines = SeedDialectDefines(activeDialect, defines);
+        // C23 #embed: one byte side-table shared by every TU's preprocessor (which
+        // populates it in OnEmbed) and the single IrBuilder (which resolves the
+        // carrier tokens back in BuildEmbed). Keyed by content hash → cross-TU dedup.
+        var embeds = new Dictionary<string, byte[]>(StringComparer.Ordinal);
 
         // Build the lexer → preprocessor → rewriter → parser pipeline for one
         // translation unit and parse it with the given (visitor-bound) parser.
@@ -245,7 +249,13 @@ public static class Compiler
         Item ParseUnit(string unitPath, global::LALR.CC.Parser parser, bool quiet, DialectGate? gate = null)
         {
             var source = SpliceLineContinuations(File.ReadAllText(unitPath));
-            var pre = new CPreprocessor(lexerTable, includeMap, seededDefines, quiet, gate);
+            // #embed search path: the TU's own directory first, then the -I dirs
+            // (first-wins, mirroring #include). Resolved on the filesystem since
+            // OnEmbed reads RAW bytes (distinct from the include text map).
+            var embedDirs = new List<string>();
+            if (Path.GetDirectoryName(unitPath) is { Length: > 0 } unitDir) { embedDirs.Add(unitDir); }
+            if (includeDirs is not null) { embedDirs.AddRange(includeDirs); }
+            var pre = new CPreprocessor(lexerTable, includeMap, seededDefines, quiet, gate, embedDirs, embeds);
             pre.SetActiveFilename(Path.GetFileName(unitPath));
             using var lexer = BytesLexer.FromString(source, lexerTable);
             using var preproc = C.WrapPreprocessor(lexer, pre);
@@ -326,7 +336,7 @@ public static class Compiler
         // parse (preprocessor-era) and IR build (emit-pass), then flush as warnings
         // (-pedantic) or one collected error (-pedantic-errors). Off by default.
         var gate = (pedantic || pedanticErrors) ? new DialectGate(activeDialect) : null;
-        var irBuilder = new Ir.IrBuilder(gate, names ?? new Backends.CSharpNameLegalizer());
+        var irBuilder = new Ir.IrBuilder(gate, names ?? new Backends.CSharpNameLegalizer(), embeds);
         var irParser = C.BuildParser(C.IdentityVisitor.Instance);
         foreach (var unitPath in inputPaths)
         {
@@ -1067,6 +1077,12 @@ public static class Compiler
             "__LP64__=1",
             "__SIZEOF_POINTER__=8",
             "__SIZEOF_LONG__=8",
+            // C23 #embed resource-status constants — the three values
+            // `__has_embed(...)` evaluates to, so code can compare against the
+            // named constant (`#if __has_embed("x") == __STDC_EMBED_FOUND__`).
+            "__STDC_EMBED_NOT_FOUND__=0",
+            "__STDC_EMBED_FOUND__=1",
+            "__STDC_EMBED_EMPTY__=2",
         };
         var stdcVersion = dialect.StdcVersionLiteral;
         if (stdcVersion is not null)

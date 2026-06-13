@@ -81,6 +81,17 @@ internal sealed class CPreprocessor : C.IPreprocessor
     // synthesizes a NUM token with the use site's line number.
     private readonly int _numSymbolId;
     private readonly int _stringSymbolId;
+    // Synthetic terminal for C23 #embed. OnEmbed emits one Item of this symbol
+    // per directive, carrying the content-hash key into _embeds (no lexer rule —
+    // the terminal is produced here, never scanned). See c.lalr.yaml's EMBED.
+    private readonly int _embedSymbolId;
+
+    // C23 #embed support. _embedDirs are the filesystem directories probed for an
+    // embedded file (the -I dirs + each TU's own dir); _embeds is the byte
+    // side-table OnEmbed writes and IrBuilder.BuildEmbed reads back, keyed by the
+    // content hash stamped on the carrier token (so identical embeds dedup).
+    private readonly IReadOnlyList<string> _embedDirs;
+    private readonly Dictionary<string, byte[]> _embeds;
 
     // Dialect-gating sink for preprocessor-era features (variadic macros C99,
     // #warning C23). Non-null only on the emit pass under -pedantic — null on
@@ -93,11 +104,15 @@ internal sealed class CPreprocessor : C.IPreprocessor
         Compiler.IncludeMap files,
         IEnumerable<string> predefines,
         bool quiet = false,
-        DialectGate? gate = null)
+        DialectGate? gate = null,
+        IReadOnlyList<string>? embedDirs = null,
+        Dictionary<string, byte[]>? embeds = null)
     {
         _lexerTable = lexerTable;
         _files = files;
         _gate = gate;
+        _embedDirs = embedDirs ?? Array.Empty<string>();
+        _embeds = embeds ?? new Dictionary<string, byte[]>(StringComparer.Ordinal);
         // Diagnostics sink. The analysis (first) pass of the two-pass emit runs
         // quiet so its #warning / #include-resolution messages don't print
         // twice; the real emit pass uses stderr as usual. (A fatal #error still
@@ -110,6 +125,7 @@ internal sealed class CPreprocessor : C.IPreprocessor
         }
         _numSymbolId = symMap["NUM"];
         _stringSymbolId = symMap["STRING"];
+        _embedSymbolId = symMap["EMBED"];
         foreach (var d in predefines)
         {
             // -D NAME           → defined-as-marker (empty body)
@@ -244,6 +260,187 @@ internal sealed class CPreprocessor : C.IPreprocessor
         {
             _currentlyIncluding = saved;
         }
+    }
+
+    /// <summary>
+    /// C23 <c>#embed "file"</c> / <c>#embed &lt;file&gt;</c>. Reads the named
+    /// file's RAW bytes and emits exactly ONE synthetic <c>EMBED</c> token whose
+    /// content is a content-hash key into the byte side-table — deliberately NOT
+    /// the standard's comma-separated list of integer constants, which for a
+    /// multi-MB file would explode into millions of tokens. The single carrier
+    /// rides the existing initializer-list productions and is expanded to byte
+    /// constants in the IR (<c>IrBuilder.ParseInitList</c>), where a
+    /// <c>const char[]</c> target lowers to a zero-copy RVA blob.
+    /// </summary>
+    /// <remarks>
+    /// V1 handles the simple <c>"name"</c> / <c>&lt;name&gt;</c> forms; the
+    /// parameter clauses (<c>limit(N)</c> / <c>if_empty(…)</c> / <c>prefix(…)</c>
+    /// / <c>suffix(…)</c>) warn and are ignored. Search path mirrors
+    /// <c>#include</c>: the <c>-I</c> dirs + the TU's own directory, first-wins.
+    /// </remarks>
+    public IEnumerable<Item> OnEmbed(IReadOnlyList<Item> args)
+    {
+        if (args.Count == 0)
+        {
+            _diag.WriteLine("dotcc: #embed with no argument");
+            return Array.Empty<Item>();
+        }
+        var name = ResolveEmbedName(args, out var paramStart);
+        if (name is null) { return Array.Empty<Item>(); }
+        ParseEmbedParams(args, paramStart, name, out var limit, out var ifEmpty);
+        var path = ResolveEmbedPath(name);
+        if (path is null)
+        {
+            _diag.WriteLine($"dotcc: #embed '{name}' not found (searched -I dirs and the source directory)");
+            return Array.Empty<Item>();
+        }
+        byte[] bytes;
+        try { bytes = System.IO.File.ReadAllBytes(path); }
+        catch (Exception ex)
+        {
+            _diag.WriteLine($"dotcc: #embed '{name}' could not be read: {ex.Message}");
+            return Array.Empty<Item>();
+        }
+        // limit(N): embed at most N leading bytes (C23); limit(0) → empty resource.
+        if (limit is { } lim && bytes.Length > lim) { bytes = bytes[..lim]; }
+        // An empty resource (0-byte file or limit(0)) expands to the if_empty
+        // replacement tokens when given, else to nothing (C23 §6.10.3.2).
+        if (bytes.Length == 0) { return ifEmpty ?? Array.Empty<Item>(); }
+        // Key by content hash: identical embeds across TUs share one side-table
+        // entry, and the key is stable + collision-free without a global counter.
+        var key = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes));
+        _embeds[key] = bytes;
+        return new[] { new Item(_embedSymbolId, key, args[0].Position) };
+    }
+
+    /// <summary>Extract the embed filename from its directive args (quoted or
+    /// angle form, like <c>#include</c>), reporting the index where the trailing
+    /// parameter clauses begin (<c>args.Count</c> when there are none).</summary>
+    private string? ResolveEmbedName(IReadOnlyList<Item> args, out int paramStart)
+    {
+        paramStart = args.Count;
+        // Quoted: `#embed "f"` [params…]
+        if (args[0].Content is string raw && raw.Length >= 2 && raw[0] == '"' && raw[^1] == '"')
+        {
+            paramStart = 1;
+            return raw[1..^1];
+        }
+        // Angle: `#embed <f>` [params…] — find the first '>' (the filename close).
+        if (args.Count >= 2 && args[0].Content is string open && open == "<")
+        {
+            var close = -1;
+            for (var i = 1; i < args.Count; i++)
+            {
+                if (args[i].Content as string == ">") { close = i; break; }
+            }
+            if (close < 0)
+            {
+                _diag.WriteLine("dotcc: #embed angle form missing closing '>'");
+                return null;
+            }
+            paramStart = close + 1;
+            var sb = new System.Text.StringBuilder();
+            for (var i = 1; i < close; i++) { sb.Append(args[i].Content?.ToString()); }
+            return sb.ToString();
+        }
+        _diag.WriteLine("dotcc: #embed arg is not a recognized form (expected \"file\" or <file>)");
+        return null;
+    }
+
+    /// <summary>Parse the C23 <c>#embed</c> parameter clauses (each
+    /// <c>name ( tokens… )</c>) following the filename. V1 honors <c>limit(N)</c>
+    /// (a non-negative integer literal) and <c>if_empty(tokens)</c> (substituted
+    /// when the resource is empty); <c>prefix</c>/<c>suffix</c> and any vendor
+    /// parameter warn and are ignored.</summary>
+    private void ParseEmbedParams(
+        IReadOnlyList<Item> args, int start, string name, out int? limit, out IReadOnlyList<Item>? ifEmpty)
+    {
+        limit = null;
+        ifEmpty = null;
+        var i = start;
+        while (i < args.Count)
+        {
+            var pname = args[i].Content as string;
+            if (pname is null || i + 1 >= args.Count || args[i + 1].Content as string != "(")
+            {
+                _diag.WriteLine($"dotcc: #embed '{name}': unrecognized parameter near '{pname}' — ignored");
+                return;
+            }
+            // Collect the balanced token run between the clause's parentheses.
+            var depth = 0;
+            var inner = new List<Item>();
+            var j = i + 1;
+            for (; j < args.Count; j++)
+            {
+                var t = args[j].Content as string;
+                if (t == "(") { depth++; if (depth == 1) { continue; } }
+                else if (t == ")") { depth--; if (depth == 0) { j++; break; } }
+                inner.Add(args[j]);
+            }
+            switch (pname)
+            {
+                case "limit":
+                    if (inner.Count == 1 && long.TryParse(inner[0].Content?.ToString(), out var n) && n >= 0)
+                    {
+                        limit = (int)Math.Min(n, int.MaxValue);
+                    }
+                    else
+                    {
+                        _diag.WriteLine($"dotcc: #embed '{name}': limit(...) expects a non-negative integer literal — ignored");
+                    }
+                    break;
+                case "if_empty":
+                    ifEmpty = inner;
+                    break;
+                case "prefix":
+                case "suffix":
+                    _diag.WriteLine($"dotcc: #embed '{name}': {pname}(...) is not yet supported — ignored");
+                    break;
+                default:
+                    _diag.WriteLine($"dotcc: #embed '{name}': unknown parameter '{pname}' — ignored");
+                    break;
+            }
+            i = j;
+        }
+    }
+
+    /// <summary>Probe the embed search dirs (then the name as-is) for an existing
+    /// file, returning the first hit's path or null — the same first-wins search
+    /// order as <c>#include</c>.</summary>
+    private string? ResolveEmbedPath(string name)
+    {
+        foreach (var dir in _embedDirs)
+        {
+            var p = System.IO.Path.Combine(dir, name);
+            if (System.IO.File.Exists(p)) { return p; }
+        }
+        return System.IO.File.Exists(name) ? name : null;
+    }
+
+    /// <summary>Evaluate <c>__has_embed("file")</c> (C23) for a <c>#if</c>: the
+    /// resource-status constant — <c>__STDC_EMBED_NOT_FOUND__</c> (0) when the
+    /// file doesn't resolve, <c>__STDC_EMBED_EMPTY__</c> (2) when it resolves but
+    /// is empty, else <c>__STDC_EMBED_FOUND__</c> (1). (V1 ignores embed
+    /// parameters in the probe; bare existence + emptiness is the common case.)</summary>
+    private int EvalHasEmbed(IReadOnlyList<Item> argTokens)
+    {
+        if (argTokens.Count == 0) { return 0; }
+        var name = ResolveEmbedName(argTokens, out _);
+        if (name is null) { return 0; }
+        var path = ResolveEmbedPath(name);
+        if (path is null) { return 0; }
+        try { return new System.IO.FileInfo(path).Length == 0 ? 2 : 1; }
+        catch { return 0; }
+    }
+
+    /// <summary>Evaluate <c>__has_include("hdr")</c> / <c>&lt;hdr&gt;</c> (C23 /
+    /// long-standing extension) for a <c>#if</c>: 1 when the header resolves
+    /// against the include map (synthetic system headers + <c>-I</c> dirs), else 0.</summary>
+    private bool EvalHasInclude(IReadOnlyList<Item> argTokens)
+    {
+        if (argTokens.Count == 0) { return false; }
+        var name = ResolveIncludeName(argTokens, out _);
+        return name is not null && _files.ContainsKey(name);
     }
 
     /// <summary>
@@ -601,6 +798,19 @@ internal sealed class CPreprocessor : C.IPreprocessor
     /// </summary>
     public IEnumerable<Item> ExpandFuncMacro(string name, IReadOnlyList<Item> argTokens)
     {
+        // C23 preprocessor operators usable in #if/#elif. The conditional
+        // evaluator routes any `IDENT ( args )` here (not just known macros), so
+        // we resolve __has_embed / __has_include to their integer result and let
+        // the evaluator fold the surrounding expression.
+        if (name == "__has_embed")
+        {
+            return new[] { new Item(_numSymbolId, EvalHasEmbed(argTokens).ToString(
+                System.Globalization.CultureInfo.InvariantCulture), default) };
+        }
+        if (name == "__has_include")
+        {
+            return new[] { new Item(_numSymbolId, EvalHasInclude(argTokens) ? "1" : "0", default) };
+        }
         if (!_macros.TryGetValue(name, out var macro) || !macro.IsFunctionLike)
         {
             // Not a known function-like macro — emit name + args verbatim,
