@@ -36,7 +36,7 @@ cd build && dotnet run
 
 Essentially **all of C89/C99, and most of C11/C23** that maps cleanly onto .NET: the full preprocessor (function-like macros, `##`/`#`, `#if` expression evaluation), structs/unions/enums/bit-fields, function pointers, `goto`, `setjmp`/`longjmp` (common shapes), `volatile` and `_Atomic` lowered faithfully, variadic functions with `<stdarg.h>`, and 22 libc headers — including real `FILE*` I/O, the complete `<math.h>`/`<tgmath.h>`, and a clean-room software **IEEE-754 binary128** for `_Float128` validated bit-for-bit against gcc.
 
-It also lowers a real POSIX surface onto the BCL: filesystem and process control, `getpid`/`getppid`/`kill`/`raise` forwarding to the host OS, C11 `<threads.h>`, **BSD sockets** (`<sys/socket.h>`/`<netinet/in.h>`/`<arpa/inet.h>`) over `System.Net.Sockets` — blocking IPv4 TCP/UDP, the same code running on Linux *and* Windows (no Winsock split) — and **dynamic loading** (`<dlfcn.h>`: `dlopen`/`dlsym`/`dlclose`/`dlerror`) over .NET's `NativeLibrary`, where a `dlsym` result cast directly to a function type is lowered to a `delegate* unmanaged[Cdecl]<…>` so the native call uses the C calling convention. dotcc advertises what it actually provides via `_POSIX_VERSION`, and defines no compile-time OS-identity macro (one binary picks the OS at runtime).
+It also lowers a real POSIX surface onto the BCL: filesystem and process control, `getpid`/`getppid`/`kill`/`raise` forwarding to the host OS, C11 `<threads.h>`, **BSD sockets** (`<sys/socket.h>`/`<netinet/in.h>`/`<arpa/inet.h>`) over `System.Net.Sockets` — blocking IPv4 TCP/UDP, the same code running on Linux *and* Windows (no Winsock split) — and **dynamic loading** (`<dlfcn.h>`: `dlopen`/`dlsym`/`dlclose`/`dlerror`) over .NET's `NativeLibrary`, where a `dlsym` result cast directly to a function type is lowered to a `delegate* unmanaged[Cdecl]<…>` so the native call uses the C calling convention. The same fn-ptr machinery backs implicit **`-l`/`-L` import mode** — an undefined, called prototype that isn't runtime-provided is bound to a prebuilt native library's export at startup (GOT-style, ld.so search order), with no `dlopen` in the source. dotcc advertises what it actually provides via `_POSIX_VERSION`, and defines no compile-time OS-identity macro (one binary picks the OS at runtime).
 
 The feature-by-feature tracker — every lexical form, type, operator, statement, libc function, and what's partial or out of scope — lives in **[C-SUPPORT.md](C-SUPPORT.md)**. There are no known silent miscompiles: every gap fails loudly at compile time.
 
@@ -55,6 +55,7 @@ dotcc a.cs b.cs -o app             # ...link object fragments back into a progra
 dotcc -E a.c                       # preprocess only
 dotcc a.c --target=wat -o a.wat    # WebAssembly text backend
 dotcc lib.c -shared                # native shared library via [UnmanagedCallersOnly] exports
+dotcc app.c -lfoo -L/path          # import mode: bind undefined prototypes to a prebuilt libfoo
 ```
 
 | Flag | Meaning |
@@ -68,6 +69,7 @@ dotcc lib.c -shared                # native shared library via [UnmanagedCallers
 | `-MD` `-MMD` `-MF` `-MT` | Make-style header dependency files (CMake/Ninja-ready) |
 | `-Wconversion` | Warn on implicit narrowing integer conversions |
 | `-shared` | Shared library: NativeAOT csproj exporting non-static functions C-callably |
+| `-l<name>` / `-L<dir>` | Import mode: bind undefined, called prototypes to a prebuilt native library's exports at startup (GOT-style; libc stays runtime-provided) |
 | `-E` | Preprocess only |
 
 Separate compilation means dotcc drops into existing build systems — `examples/cmake-demo/` drives it from CMake one file at a time.
