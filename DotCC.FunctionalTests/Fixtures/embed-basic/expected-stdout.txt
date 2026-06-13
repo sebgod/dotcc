@@ -1,0 +1,5 @@
+has-embed
+absent-ok
+size=11
+embed works
+head=5:embed

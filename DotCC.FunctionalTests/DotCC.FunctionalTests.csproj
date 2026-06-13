@@ -54,6 +54,8 @@
     <None Include="Fixtures\**\*.c" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\**\*.h" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\**\*.txt" CopyToOutputDirectory="PreserveNewest" />
+    <!-- C23 #embed data files (resolved next to the TU at compile time). -->
+    <None Include="Fixtures\**\*.bin" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
