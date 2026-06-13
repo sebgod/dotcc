@@ -50,6 +50,10 @@ internal static class SharedLibOracle
     /// exe) in the dotcc-consumes-dotcc round-trip.</summary>
     private const string ConsumerAsmName = "dotccdlconsumer";
 
+    /// <summary>Assembly name of the dotcc-emitted IMPORT-mode consumer (a managed exe
+    /// that binds the native lib's exports via <c>-l</c>, no <c>dlopen</c>).</summary>
+    private const string ImportConsumerAsmName = "dotccimportconsumer";
+
     private const string OutMarker = "__CONSUMER_STDOUT__";
 
     /// <summary>True if dotnet + gcc + clang (the NativeAOT linker) are all reachable.</summary>
@@ -159,6 +163,100 @@ internal static class SharedLibOracle
             "SO=$(readlink -f \"$SO\")\n" +
             $"if ! dotnet build 'consumer/{ConsumerAsmName}.csproj' -c Release -o consumer/out >build.log 2>&1; then echo BUILD_FAILED; tail -25 build.log; exit 5; fi\n" +
             $"echo {OutMarker}\ndotnet \"consumer/out/{ConsumerAsmName}.dll\" \"$SO\"\n";
+
+        return RunCapture(workDir, script);
+    }
+
+    /// <summary>
+    /// IMPORT-mode round-trip against a gcc-built shared library. <c>gcc -shared
+    /// -fPIC</c> compiles <paramref name="libCSource"/> to <c>lib&lt;importName&gt;.so</c>,
+    /// then dotcc compiles <paramref name="consumerCSource"/> (plain prototypes + calls,
+    /// no <c>dlopen</c>) with <c>-l&lt;importName&gt; -L&lt;workdir&gt;</c> to a managed exe
+    /// whose <c>DotCcImports.__BindAll()</c> binds those prototypes to the <c>.so</c>'s
+    /// exports at startup. Returns the consumer's stdout — proving the GOT-style binding
+    /// calls a real native library through the C ABI. No NativeAOT (the consumer is
+    /// managed; only the lib is native), so this needs just <c>dotnet</c> + <c>gcc</c>.
+    /// </summary>
+    public static string GccLibImportRoundTrip(string libCSource, string importName, string consumerCSource)
+    {
+        EnsureInitialised();
+        if (!_available) { throw new InvalidOperationException("shared-lib oracle is not available on this host."); }
+
+        var workDir = Path.Combine(Path.GetTempPath(), "dotcc-import-gcc-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workDir);
+
+        File.WriteAllText(Path.Combine(workDir, "mylib.c"), libCSource);
+        var consC = Path.Combine(workDir, "consumer.c");
+        File.WriteAllText(consC, consumerCSource);
+        // -L is the workdir AS THE SHELL/runtime sees it (a /mnt/… path on Windows),
+        // since the emitted -L string is baked into the program that runs under bash/WSL.
+        var imports = new ImportOptions(new[] { importName }, new[] { ToShellPath(workDir) }, Array.Empty<string>());
+        File.WriteAllText(Path.Combine(workDir, "Program.cs"),
+            Compiler.EmitCSharp(new[] { consC }, includeDirs: null, defines: null,
+                fileBased: false, libraryMode: false, imports: imports));
+        File.WriteAllText(Path.Combine(workDir, ImportConsumerAsmName + ".csproj"),
+            Compiler.BuildGeneratedCsproj(libraryMode: false, assemblyName: ImportConsumerAsmName));
+
+        var script =
+            "set -e\n" +
+            "cd \"$(dirname \"$0\")\"\n" +
+            $"if ! gcc -shared -fPIC mylib.c -o lib{importName}.so 2>gcc.log; then echo GCC_FAILED; cat gcc.log; exit 5; fi\n" +
+            $"if ! dotnet build '{ImportConsumerAsmName}.csproj' -c Release -o out >build.log 2>&1; then echo BUILD_FAILED; tail -25 build.log; exit 6; fi\n" +
+            $"echo {OutMarker}\ndotnet \"out/{ImportConsumerAsmName}.dll\"\n";
+
+        return RunCapture(workDir, script);
+    }
+
+    /// <summary>
+    /// IMPORT-mode dotcc-consumes-dotcc round-trip. NativeAOT-publishes
+    /// <paramref name="libCSource"/> (dotcc <c>-shared</c>) to <c>&lt;AsmName&gt;.so</c>,
+    /// copies it to the workdir, then dotcc compiles <paramref name="consumerCSource"/>
+    /// with <c>-l&lt;AsmName&gt; -L&lt;workdir&gt;</c> to a managed exe that binds the
+    /// exports GOT-style (no <c>dlopen</c> in the source — the implicit-linking twin of
+    /// the dlopen leg). The NativeAOT lib has no <c>lib</c> prefix, so the bind relies on
+    /// the loader's <c>&lt;name&gt;.so</c> name variant. Returns the consumer's stdout.
+    /// No <c>dlclose</c> is involved (import mode never unloads), so the CoreCLR↔NativeAOT
+    /// teardown crash that bars the dlopen leg from unloading doesn't apply here.
+    /// </summary>
+    public static string DotccLibImportRoundTrip(string libCSource, string consumerCSource)
+    {
+        EnsureInitialised();
+        if (!_available) { throw new InvalidOperationException("shared-lib oracle is not available on this host."); }
+
+        var workDir = Path.Combine(Path.GetTempPath(), "dotcc-import-dl-" + Guid.NewGuid().ToString("N"));
+        var libDir = Path.Combine(workDir, "lib");
+        var consDir = Path.Combine(workDir, "consumer");
+        Directory.CreateDirectory(libDir);
+        Directory.CreateDirectory(consDir);
+
+        // ── the -shared lib (NativeAOT) ──
+        var libC = Path.Combine(libDir, "lib.c");
+        File.WriteAllText(libC, libCSource);
+        File.WriteAllText(Path.Combine(libDir, "Program.cs"),
+            Compiler.EmitCSharp(new[] { libC }, includeDirs: null, defines: null, fileBased: false, libraryMode: true));
+        File.WriteAllText(Path.Combine(libDir, AsmName + ".csproj"),
+            Compiler.BuildGeneratedCsproj(libraryMode: true, assemblyName: AsmName));
+
+        // ── the import-mode consumer: -l<AsmName>, -L = workdir (where the .so is copied) ──
+        var consC = Path.Combine(consDir, "consumer.c");
+        File.WriteAllText(consC, consumerCSource);
+        var imports = new ImportOptions(new[] { AsmName }, new[] { ToShellPath(workDir) }, Array.Empty<string>());
+        File.WriteAllText(Path.Combine(consDir, "Program.cs"),
+            Compiler.EmitCSharp(new[] { consC }, includeDirs: null, defines: null,
+                fileBased: false, libraryMode: false, imports: imports));
+        File.WriteAllText(Path.Combine(consDir, ImportConsumerAsmName + ".csproj"),
+            Compiler.BuildGeneratedCsproj(libraryMode: false, assemblyName: ImportConsumerAsmName));
+
+        var script =
+            "set -e\n" +
+            "cd \"$(dirname \"$0\")\"\n" +
+            "arch=$(uname -m); rid=linux-x64; [ \"$arch\" = aarch64 ] && rid=linux-arm64\n" +
+            $"if ! dotnet publish 'lib/{AsmName}.csproj' -c Release -r $rid >publish.log 2>&1; then echo PUBLISH_FAILED; tail -25 publish.log; exit 3; fi\n" +
+            $"SO=$(find lib/bin -name '{AsmName}.so' | head -1)\n" +
+            "if [ -z \"$SO\" ]; then echo NO_SO; find lib/bin -name '*.so'; exit 4; fi\n" +
+            $"cp \"$(readlink -f \"$SO\")\" \"./{AsmName}.so\"\n" +
+            $"if ! dotnet build 'consumer/{ImportConsumerAsmName}.csproj' -c Release -o consumer/out >build.log 2>&1; then echo BUILD_FAILED; tail -25 build.log; exit 5; fi\n" +
+            $"echo {OutMarker}\ndotnet \"consumer/out/{ImportConsumerAsmName}.dll\"\n";
 
         return RunCapture(workDir, script);
     }

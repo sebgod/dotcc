@@ -317,8 +317,12 @@ jobs:
         run: dotnet build dotcc.sln -c Release --no-restore --nologo -p:UseLocalLalrCc=false
 
       # -shared a C lib, NativeAOT-publish it, then link + run a real C consumer
-      # against the produced .so and assert its cdecl exports return the right values.
-      - name: Shared-library round-trip oracle (publish + real C consumer)
+      # against the produced .so and assert its cdecl exports return the right
+      # values — plus the import-mode twin (NativeImportOracleTests): a dotcc
+      # program binds a gcc-built / dotcc-built .so's exports via -l/-L (no dlopen).
+      # `~` is a substring match; the new class name doesn't contain the old.
+      - name: Shared-library + native-import round-trip oracles
         run: >
           dotnet test DotCC.FunctionalTests/DotCC.FunctionalTests.csproj
-          -c Release --no-build --nologo --filter "FullyQualifiedName~SharedLibOracleTests"
+          -c Release --no-build --nologo
+          --filter "FullyQualifiedName~SharedLibOracleTests|FullyQualifiedName~NativeImportOracleTests"
