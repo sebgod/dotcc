@@ -109,6 +109,27 @@ public sealed class GccWslOracleTests
                 File.ReadAllText(archSkipMarker).Trim());
         }
 
+        // Minimum-gcc-version gate. A `min-gcc.txt` sidecar (contents = a major
+        // version number, e.g. `15`) marks a fixture whose C source needs a
+        // newer gcc than some hosts ship — the canonical case is C23 `#embed` /
+        // `__has_embed`, which gcc only implements from gcc 15. An older gcc
+        // rejects the directive outright (a compile error, not a divergence), so
+        // skip the differential where gcc is too old and keep it live wherever
+        // gcc is new enough. Unlike a blanket `no-gcc-oracle.txt`, this preserves
+        // the gcc cross-check on up-to-date hosts (and on CI once its runners
+        // ship gcc 15). The always-on FixtureTests still validates dotcc's emit.
+        var minGccMarker = Path.Combine(dir, "min-gcc.txt");
+        if (File.Exists(minGccMarker) &&
+            int.TryParse(File.ReadAllText(minGccMarker).Trim(), out var minMajor))
+        {
+            var hostMajor = GccMajor(GccWslOracle.GccVersion);
+            if (hostMajor < minMajor)
+            {
+                Assert.Skip($"fixture '{name}' needs gcc >= {minMajor} for its C23 " +
+                    $"features; host gcc is {GccWslOracle.GccVersion ?? "unknown"}.");
+            }
+        }
+
         var match = FixtureRunner.Discover().Single(f => f.name == name);
 
         // dotcc path: emit C# (csproj-shaped — Roslyn doesn't want the
@@ -158,6 +179,19 @@ public sealed class GccWslOracleTests
         snapshot.ShouldBe(gccOut,
             $"Committed expected-stdout.txt for '{name}' no longer matches gcc's live output. " +
             $"Re-run with {RunGccEnv}=1 {RegenBaselineEnv}=1 to refresh the baseline.");
+    }
+
+    /// <summary>
+    /// Parse gcc's major version from a <c>gcc -dumpfullversion</c> string
+    /// (e.g. <c>"13.3.0"</c> → 13). Returns 0 when null/unparseable, so any
+    /// <c>min-gcc.txt</c> gate skips conservatively on a gcc we can't read.
+    /// </summary>
+    private static int GccMajor(string? fullVersion)
+    {
+        if (string.IsNullOrEmpty(fullVersion)) { return 0; }
+        var dot = fullVersion.IndexOf('.');
+        var head = dot < 0 ? fullVersion : fullVersion[..dot];
+        return int.TryParse(head.Trim(), out var major) ? major : 0;
     }
 
     /// <summary>
