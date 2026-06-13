@@ -210,7 +210,17 @@ internal sealed class CPreprocessor : C.IPreprocessor
         _currentlyIncluding = name;
         try
         {
-            using var subLexer = BytesLexer.FromString(source, _lexerTable);
+            // Lex a synthetic system header in a reserved line band so every
+            // prototype it declares lands at Line >= SyntheticLineBase, flagging
+            // it FromSystemHeader (runtime-provided — never an `-l` import
+            // candidate). A user `-I` header that happens to share a synthetic
+            // name stays at line 1: IsSyntheticHeaderContent tests content
+            // identity, not just the name (clang's local-first rule already let
+            // the user file win the slot). User headers and `.c` splices: line 1.
+            var initialLine = Compiler.IsSyntheticHeaderContent(name, source)
+                ? Ir.SrcPos.SyntheticLineBase
+                : 1;
+            using var subLexer = BytesLexer.FromString(source, _lexerTable, initialLine: initialLine);
             using var subPreproc = C.WrapPreprocessor(subLexer, this);
             subPreproc.ExpandFuncMacro = ExpandFuncMacro;
             // Expand function-like macros WITHIN the include, mirroring the

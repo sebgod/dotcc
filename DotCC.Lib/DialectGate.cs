@@ -41,7 +41,7 @@ internal sealed class DialectGate
     public void RequireMin(int introducedEra, string feature, int line)
     {
         if (_dialect.Version >= introducedEra) { return; }
-        var where = line > 0 ? $" (line {line})" : "";
+        var where = line > 0 ? $" (line {Ir.SrcPos.DescribeLine(line)})" : "";
         _diagnostics.Add(
             $"`{feature}` is a {EraName(introducedEra)} feature, not available under -std={_dialect.Name}{where}");
     }

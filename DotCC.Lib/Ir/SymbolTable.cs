@@ -8,10 +8,32 @@ namespace DotCC.Ir;
 /// <summary>A source location, carried on IR nodes for diagnostics.</summary>
 public readonly record struct SrcPos(int Line, int Column)
 {
+    /// <summary>
+    /// Line numbers at or above this base belong to a synthetic system header's
+    /// reserved band: the <c>#include</c> sub-lexer starts an embedded header here
+    /// (via <c>BytesLexer</c>'s <c>initialLine</c>) so every prototype it declares is
+    /// distinguishable by position from the user's translation unit. Far above any
+    /// real source-line count (~1.05M), so a band line never collides with a user line.
+    /// </summary>
+    public const int SyntheticLineBase = 1 << 20;
+
+    /// <summary>True if this position lies in the synthetic-header band — i.e. the
+    /// token came from one of dotcc's embedded system headers, not user source.</summary>
+    public bool IsSystemHeader => Line >= SyntheticLineBase;
+
     public static SrcPos From(global::LALR.CC.LexicalGrammar.Item it) =>
         new(it.Position.Line, it.Position.Column);
 
-    public override string ToString() => $"{Line}:{Column}";
+    /// <summary>
+    /// Render a line number for a user-facing diagnostic, masking the synthetic band
+    /// so a message never prints a 1048576-based number: a band line shows as
+    /// <c>&lt;system header&gt;:N</c> (N = 1-based line within that header).
+    /// </summary>
+    public static string DescribeLine(int line) =>
+        line >= SyntheticLineBase ? $"<system header>:{line - SyntheticLineBase + 1}" : $"{line}";
+
+    public override string ToString() =>
+        Line >= SyntheticLineBase ? $"<system header>:{Line - SyntheticLineBase + 1}:{Column}" : $"{Line}:{Column}";
 }
 
 /// <summary>What a <see cref="Symbol"/> names.</summary>
@@ -49,6 +71,13 @@ public sealed class Symbol
     /// <summary>True for a file-scope (global) symbol — codegen emits it as a
     /// <c>DotCcGlobals</c> field rather than a block local.</summary>
     public bool IsGlobal { get; init; }
+
+    /// <summary>True when this symbol was declared in one of dotcc's synthetic system
+    /// headers (detected via the reserved line band — see <see cref="SrcPos.SyntheticLineBase"/>).
+    /// A proto-only function with this set is runtime-provided (libc, surfaced by
+    /// <c>using static Libc</c>), so import mode never treats it as an <c>-l</c> candidate;
+    /// a user-declared proto (band-free) IS importable.</summary>
+    public bool FromSystemHeader { get; init; }
 
     /// <summary>The target-neutral C-level fact that this object's address is taken
     /// (<c>&amp;x</c>) somewhere — set for any var or param at the single site every

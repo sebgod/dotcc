@@ -10,6 +10,28 @@ using LALR.CC.LexicalGrammar;
 namespace DotCC;
 
 /// <summary>
+/// Native-library import options for dotcc IMPORT MODE — the clang-shaped
+/// <c>-l&lt;name&gt;</c> / <c>-L&lt;dir&gt;</c> linking surface.
+/// <see cref="LinkLibraries"/> are dynamic libraries bound GOT-style at startup
+/// (the emitted <c>DotCcImports</c> function-pointer table); <see cref="LibraryDirs"/>
+/// are the <c>-L</c> search dirs; <see cref="StaticArchives"/> are <c>.a</c>/<c>.lib</c>
+/// inputs linked at NativeAOT publish. Empty by default — import mode is entirely opt-in,
+/// so a compile with no <c>-l</c> is byte-identical to before.
+/// </summary>
+public sealed record ImportOptions(
+    IReadOnlyList<string> LinkLibraries,
+    IReadOnlyList<string> LibraryDirs,
+    IReadOnlyList<string> StaticArchives)
+{
+    /// <summary>The no-imports default.</summary>
+    public static readonly ImportOptions Empty =
+        new(Array.Empty<string>(), Array.Empty<string>(), Array.Empty<string>());
+
+    /// <summary>True when any dynamic (<c>-l</c>) or static (<c>.a</c>/<c>.lib</c>) import was requested.</summary>
+    public bool HasAny => LinkLibraries.Count > 0 || StaticArchives.Count > 0;
+}
+
+/// <summary>
 /// Public compiler API. Two top-level entry points:
 /// <list type="bullet">
 ///   <item><see cref="EmitCSharp"/> — compile one or more <c>.c</c> translation
@@ -67,6 +89,19 @@ public static class Compiler
         }
         return map;
     }
+
+    /// <summary>
+    /// True iff <paramref name="content"/> is the body of one of dotcc's synthetic
+    /// system headers — NOT a user <c>-I</c> header that happens to share the name.
+    /// The include map seeds <see cref="SystemHeaders"/>'s string REFERENCES and a
+    /// user header on the path overwrites the slot with a freshly-read string, so
+    /// reference identity distinguishes the embedded original from a shadowing copy.
+    /// <see cref="CPreprocessor.OnInclude"/> uses this to lex synthetic headers in the
+    /// reserved line band (see <see cref="Ir.SrcPos.SyntheticLineBase"/>), which is what
+    /// flags every prototype they declare as runtime-provided rather than importable.
+    /// </summary>
+    internal static bool IsSyntheticHeaderContent(string name, string content)
+        => SystemHeaders.TryGetValue(name, out var sys) && ReferenceEquals(sys, content);
 
     /// <summary>
     /// Concatenated DotCC.Libc runtime source — the embedded <c>.cs</c>
@@ -340,7 +375,8 @@ public static class Compiler
         bool pedanticErrors = false,
         bool asObject = false,
         bool warnConversion = false,
-        bool debugHeap = false)
+        bool debugHeap = false,
+        ImportOptions? imports = null)
     {
         var irBuilder = BuildIr(inputPaths, includeDirs, defines, dialect, pedantic, pedanticErrors);
         // -Wconversion: collect narrowing-conversion warnings during codegen, then
@@ -351,6 +387,16 @@ public static class Compiler
         {
             foreach (var d in convGate.Diagnostics) { Console.Error.WriteLine("dotcc: warning: " + d); }
         }
+        // Import mode (-l): emit the GOT-style DotCcImports table for prototypes that
+        // resolve against a native library rather than the managed runtime. Only when
+        // dynamic libraries were requested and we're producing a program/lib — object
+        // fragments serialize import markers at link time instead (separate path).
+        var importsClass = "";
+        if (!asObject && imports is { LinkLibraries.Count: > 0 })
+        {
+            var candidates = ComputeImportCandidates(irBuilder, imports);
+            if (candidates.Count > 0) { importsClass = RenderImportsClass(candidates, imports, libraryMode); }
+        }
         // Library mode doesn't need a `main` (the .dll is consumed through its
         // exports); object mode links later. Exe mode requires an entry point.
         if (!asObject && !libraryMode && cg.MainArity < 0)
@@ -359,8 +405,109 @@ public static class Compiler
         }
         return asObject
             ? SerializeFragment(cg.Functions, new Dictionary<string, string>(), cg.Aliases, cg.Globals, cg.MainArity)
-            : BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, fileBased, libraryMode, cg.Exports, debugHeap);
+            : BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, fileBased, libraryMode, cg.Exports, debugHeap, importsClass);
     }
+
+    /// <summary>
+    /// Select the functions an import (<c>-l</c>) compile must bind against, emitting the
+    /// V1 scope-cut warnings to stderr (variadic / global-name collision / extern data).
+    /// Candidates are <see cref="Ir.IrBuilder.ProtoOnlyReferenced"/> (proto-only, called,
+    /// not from a synthetic header) minus those cuts. Sorted by name for deterministic emit.
+    /// </summary>
+    private static List<Ir.Symbol> ComputeImportCandidates(Ir.IrBuilder ir, ImportOptions imports)
+    {
+        var globalNames = new HashSet<string>(ir.Globals.Select(g => g.Sym.Name), StringComparer.Ordinal);
+        var result = new List<Ir.Symbol>();
+        foreach (var sym in ir.ProtoOnlyReferenced.Values.OrderBy(s => s.Name, StringComparer.Ordinal))
+        {
+            if (sym.Type is Ir.CType.Func { Variadic: true })
+            {
+                // A varargs signature has no fixed function-pointer form (same reason
+                // -shared can't export one), so it can't be a GOT field — warn + skip.
+                Console.Error.WriteLine(
+                    $"dotcc: warning: cannot import variadic function '{sym.Name}' (no fixed function-pointer signature) — skipped");
+                continue;
+            }
+            if (globalNames.Contains(sym.Name))
+            {
+                // A defined C global owns the name in the emitted program (C-shaped:
+                // the definition wins). Importing the same name would clash — skip it.
+                Console.Error.WriteLine(
+                    $"dotcc: warning: import candidate '{sym.Name}' collides with a defined global — skipped (the definition wins)");
+                continue;
+            }
+            result.Add(sym);
+        }
+        foreach (var name in ir.ExternDataReferenced)
+        {
+            Console.Error.WriteLine(
+                $"dotcc: warning: extern data import '{name}' is not supported (import mode binds functions only)");
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Render the <c>DotCcImports</c> GOT-style table: one function-pointer field per
+    /// candidate, named exactly like the C function so <c>using static DotCcImports</c>
+    /// surfaces it and existing call sites need no change. <c>__BindAll()</c> loads each
+    /// <c>-l</c> library (ld.so order) and binds each field to the FIRST library that
+    /// exports the symbol, throwing a clean <see cref="DllNotFoundException"/> on a miss.
+    /// In <paramref name="libraryMode"/> (<c>-shared</c>, no entry point) a static
+    /// constructor runs <c>__BindAll()</c> on first field touch; otherwise the exe shell
+    /// calls it from <c>__DotCcEntry()</c> before <c>main</c>. Fields render as
+    /// <c>delegate* unmanaged[Cdecl]&lt;…&gt;</c> via the native-call-conv marker, so the
+    /// invocation uses the C calling convention (same lowering as a directly-cast
+    /// <c>dlsym</c> result — see <c>CType.Func.IsNativeCallConv</c>).
+    /// </summary>
+    private static string RenderImportsClass(IReadOnlyList<Ir.Symbol> candidates, ImportOptions imports, bool libraryMode)
+    {
+        var target = new Backends.CSharpTarget();
+        var fieldTypes = new Dictionary<string, string>(StringComparer.Ordinal);
+        var sb = new StringBuilder();
+        sb.Append("// ---- native imports (`-l`) — GOT-style function-pointer table ----\n");
+        sb.Append("// Each field is bound once by __BindAll() (before main, or on first touch\n");
+        sb.Append("// in -shared mode) to the address the named symbol resolves to in the -l\n");
+        sb.Append("// libraries, searched in order — first that exports it wins (ld.so model).\n");
+        sb.Append("static unsafe class DotCcImports\n{\n");
+        foreach (var sym in candidates)
+        {
+            var ft = target.RenderType(((Ir.CType.Func)sym.Type) with { IsNativeCallConv = true });
+            fieldTypes[sym.Name] = ft;
+            sb.Append($"    internal static {ft} {EmitHelpers.Id(sym.Name)};\n");
+        }
+        sb.Append('\n');
+        if (libraryMode)
+        {
+            sb.Append("    static DotCcImports() => __BindAll(); // no entry point in -shared; bind on first field touch\n\n");
+        }
+        sb.Append("    internal static void __BindAll()\n    {\n");
+        sb.Append("        var __dirs = new string[] { ");
+        sb.Append(string.Join(", ", imports.LibraryDirs.Select(CsStringLiteral)));
+        sb.Append(" };\n");
+        sb.Append("        var __libs = new System.IntPtr[]\n        {\n");
+        foreach (var lib in imports.LinkLibraries)
+        {
+            sb.Append($"            NativeImports.LoadLibrary({CsStringLiteral(lib)}, __dirs),\n");
+        }
+        sb.Append("        };\n");
+        var libList = string.Join(", ", imports.LinkLibraries);
+        sb.Append("        void* __p;\n");
+        foreach (var sym in candidates)
+        {
+            // The NATIVE symbol looked up is the raw C name; the C# field name is the
+            // keyword-escaped form the call sites also emit (so they bind to this field).
+            sb.Append($"        if (!NativeImports.TryResolveExport(__libs, {CsStringLiteral(sym.Name)}, out __p))\n");
+            sb.Append($"            throw new System.DllNotFoundException(\"dotcc: undefined symbol '{sym.Name}' — not exported by any of: {libList}\");\n");
+            sb.Append($"        {EmitHelpers.Id(sym.Name)} = ({fieldTypes[sym.Name]})__p;\n");
+        }
+        sb.Append("    }\n}\n");
+        return sb.ToString();
+    }
+
+    /// <summary>Emit a C# string literal for an arbitrary path/name — escapes backslashes
+    /// (Windows <c>-L</c> paths) and double-quotes. Plain identifiers pass through unchanged.</summary>
+    private static string CsStringLiteral(string s)
+        => "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
 
     /// <summary>
     /// Compile <paramref name="inputPaths"/> to a WebAssembly-text (<c>.wat</c>)
@@ -998,12 +1145,18 @@ public static class Compiler
         bool fileBased,
         bool libraryMode,
         IReadOnlyList<EmitHelpers.Export> exports,
-        bool debugHeap = false)
+        bool debugHeap = false,
+        string importsClass = "")
     {
         if (libraryMode)
         {
-            return BuildLibraryShell(emittedFnList, structDecls, usingAliases, globals, exports);
+            return BuildLibraryShell(emittedFnList, structDecls, usingAliases, globals, exports, importsClass);
         }
+        // Import mode (-l): surface the GOT-style table by bare name, bind it before
+        // main, and splice the class into the type-decls section. All three collapse to
+        // nothing when no `-l` was given, so a normal compile is unchanged.
+        var importsUsing = importsClass.Length > 0 ? "\nusing static DotCcImports;" : "";
+        var importsBind = importsClass.Length > 0 ? "DotCcImports.__BindAll();\n" : "";
         // Embedded DotCC.Libc runtime block — spliced into the heredoc
         // below so the emitted .cs is self-contained even without a
         // <PackageReference Include="DotCC.Libc"> in scope.
@@ -1107,7 +1260,7 @@ public static class Compiler
             // idiom) by bare name across the class boundary (using-static surfaces
             // the method group).
             using static DotCcGlobals;
-            using static DotCcProgram;
+            using static DotCcProgram;{{importsUsing}}
 
             // ---- typedef'd `using` aliases (C# 12+ permits `using unsafe X = Y;`
             //      at file scope, ahead of top-level statements). Empty when no
@@ -1131,7 +1284,7 @@ public static class Compiler
 
             int __DotCcEntry()
             {
-            {{entry}}
+            {{importsBind}}{{entry}}
             }
 
 
@@ -1144,6 +1297,7 @@ public static class Compiler
             {{indentedFns}}
             }
 
+            {{importsClass}}
             // ---- type declarations (must come last; C# requires top-level
             //      statements to precede type declarations) ----
 
@@ -1208,8 +1362,13 @@ public static class Compiler
         string structDecls,
         string usingAliases,
         string globals,
-        IReadOnlyList<EmitHelpers.Export> exports)
+        IReadOnlyList<EmitHelpers.Export> exports,
+        string importsClass = "")
     {
+        // Import mode (-l) in a -shared lib: surface the GOT table by bare name and
+        // splice it. The class binds in a static constructor (no entry point here), so
+        // the first call through an imported fn-ptr triggers __BindAll(). Empty when no -l.
+        var importsUsing = importsClass.Length > 0 ? "\nusing static DotCcImports;" : "";
         // Same embedded DotCC.Libc runtime block as exe mode — the
         // library and exe shells share the same set of stdlib functions;
         // only the framing (DotCcLib + DotCcExports vs. top-level
@@ -1263,7 +1422,7 @@ public static class Compiler
             using System.Net;
             using System.Net.Sockets;
             using static Libc;
-            using static DotCcGlobals;
+            using static DotCcGlobals;{{importsUsing}}
 
             // ---- typedef'd `using` aliases (same as exe mode).
             {{usingAliases}}
@@ -1282,6 +1441,7 @@ public static class Compiler
             {
             {{exportsBlock}}}
 
+            {{importsClass}}
             // ---- Type declarations (top-level — same as exe mode). ----
             {{structDecls}}
 

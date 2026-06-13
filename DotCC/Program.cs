@@ -96,10 +96,20 @@ internal static class Program
             Description = "Set the target name(s) of the emitted dependency rule. Repeatable. Defaults to the output object.",
             AllowMultipleArgumentsPerToken = false,
         };
+        var linkOpt = new Option<string[]>("-l")
+        {
+            Description = "Link against a native library (import mode): an undefined, called prototype is bound to this library's export at startup. Repeatable; the glued -lfoo form is accepted too.",
+            AllowMultipleArgumentsPerToken = false,
+        };
+        var libDirOpt = new Option<string[]>("-L")
+        {
+            Description = "Add a directory to the native-library (-l) search path. Repeatable; the glued -L/dir form is accepted too.",
+            AllowMultipleArgumentsPerToken = false,
+        };
         var root = new RootCommand("dotcc — a C compiler frontend that transpiles to .NET 10 / C# 14.")
         {
             inputArg, outOpt, emitOpt, targetOpt, preprocessOpt, includeOpt, defineOpt, compileOpt, sharedOpt, stdOpt,
-            pedanticOpt, pedanticErrorsOpt, wconversionOpt, sanitizeOpt, mdOpt, mmdOpt, mfOpt, mtOpt,
+            pedanticOpt, pedanticErrorsOpt, wconversionOpt, sanitizeOpt, mdOpt, mmdOpt, mfOpt, mtOpt, linkOpt, libDirOpt,
         };
         // Accept-and-ignore unknown flags (-Wall, -O2, -g, -f*, -m*, …) instead
         // of erroring out, so dotcc survives being driven by ./configure / make,
@@ -110,15 +120,23 @@ internal static class Program
         root.SetAction(parse =>
         {
             var rawInputs = parse.GetValue(inputArg) ?? Array.Empty<string>();
+            var linkLibs = (parse.GetValue(linkOpt) ?? Array.Empty<string>()).ToList();
+            var libDirs = (parse.GetValue(libDirOpt) ?? Array.Empty<string>()).ToList();
             // A string[] argument greedily swallows unknown `-`-prefixed flags
             // (gcc/clang noise like -Wall/-O2/-g), so partition them out of the
             // input-file list and warn rather than trying to open them as files.
             // (Unmatched value-less options also land here via UnmatchedTokens.)
+            // FIRST harvest glued import flags (`-lfoo` / `-L/dir`): the spaced
+            // forms are consumed by the options above, but a glued one can land
+            // here as an unmatched token, and it must NOT be mistaken for noise.
             foreach (var tok in rawInputs.Where(t => t.StartsWith('-')).Concat(parse.UnmatchedTokens))
             {
-                Console.Error.WriteLine($"dotcc: warning: ignoring unsupported option '{tok}'");
+                if (tok.Length > 2 && tok.StartsWith("-l", StringComparison.Ordinal)) { linkLibs.Add(tok[2..]); }
+                else if (tok.Length > 2 && tok.StartsWith("-L", StringComparison.Ordinal)) { libDirs.Add(tok[2..]); }
+                else { Console.Error.WriteLine($"dotcc: warning: ignoring unsupported option '{tok}'"); }
             }
             var inputs = rawInputs.Where(t => !t.StartsWith('-')).ToArray();
+            var imports = new ImportOptions(linkLibs, libDirs, Array.Empty<string>());
             var output = parse.GetValue(outOpt);
             var emit = parse.GetValue(emitOpt);
             var target = parse.GetValue(targetOpt);
@@ -186,7 +204,7 @@ internal static class Program
             }
 
             return Run(inputs, output, emit, target, preprocessOnly, includes, defines, sharedFlag, dialect, pedanticFlag, pedanticErrorsFlag,
-                       mdFlag, mmdFlag, depFile, depTargets, wconversionFlag, debugHeapFlag);
+                       mdFlag, mmdFlag, depFile, depTargets, wconversionFlag, debugHeapFlag, imports);
         });
 
         return root.Parse(args).Invoke();
@@ -211,7 +229,8 @@ internal static class Program
         string? depFile,
         string[] depTargets,
         bool warnConversion = false,
-        bool debugHeap = false)
+        bool debugHeap = false,
+        ImportOptions? imports = null)
     {
         if (preprocessOnly)
         {
@@ -228,6 +247,10 @@ internal static class Program
         }
         if (string.Equals(target, "wat", StringComparison.OrdinalIgnoreCase))
         {
+            if (imports is { HasAny: true })
+            {
+                Console.Error.WriteLine("dotcc: warning: -l/-L native library imports are ignored for --target=wat");
+            }
             return RunWat(inputPaths, outputPath, includeDirs, defines, dialect, pedantic, pedanticErrors);
         }
 
@@ -290,7 +313,8 @@ internal static class Program
                     pedantic: pedantic,
                     pedanticErrors: pedanticErrors,
                     warnConversion: warnConversion,
-                    debugHeap: debugHeap);
+                    debugHeap: debugHeap,
+                    imports: imports);
         }
         catch (CompileException ex)
         {

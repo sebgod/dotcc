@@ -39,7 +39,7 @@ internal sealed class ConversionGate
     /// </summary>
     public void Narrowing(string srcType, string tgtType, string? function, int line)
     {
-        var where = line > 0 ? $" (line {line})" : "";
+        var where = line > 0 ? $" (line {Ir.SrcPos.DescribeLine(line)})" : "";
         var fn = function is not null ? $" in `{function}`" : "";
         var msg = $"implicit conversion from `{srcType}` to `{tgtType}` may lose data{fn}{where} [-Wconversion]";
         if (_seen.Add(msg)) { _diagnostics.Add(msg); }

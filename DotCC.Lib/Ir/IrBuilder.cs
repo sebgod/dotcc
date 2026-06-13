@@ -57,6 +57,51 @@ internal sealed partial class IrBuilder
     public List<EnumTypeDef> Enums { get; } = new();
     public List<Diagnostic> Diagnostics { get; } = new();
 
+    /// <summary>
+    /// Functions a native import (`-l`) library must resolve: declared by prototype,
+    /// defined in NO translation unit, actually called, and NOT from a synthetic
+    /// system header (those are runtime-provided via <c>using static Libc</c>, flagged
+    /// by the reserved line band). Variadic candidates ARE included — the emit pass
+    /// (<c>Compiler.ComputeImportCandidates</c>) warns and skips them, since a varargs
+    /// signature can't become a function pointer. Empty unless the program calls an
+    /// undefined non-system prototype; computed on demand (cheap, post-build).
+    /// </summary>
+    public IReadOnlyDictionary<string, Symbol> ProtoOnlyReferenced
+    {
+        get
+        {
+            var result = new Dictionary<string, Symbol>(StringComparer.Ordinal);
+            foreach (var (name, sym) in _protoOnlyFuncs)
+            {
+                if (!_referencedFuncs.Contains(name)) { continue; }
+                if (sym.FromSystemHeader) { continue; }
+                result[name] = sym;
+            }
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// Extern DATA objects (<c>extern int verbosity;</c>) referenced but defined in
+    /// NO translation unit — these would need a native data import, which V1 import
+    /// mode does not support, so the emit pass warns and skips them. Distinct from a
+    /// normal whole-program extern that another TU's definition satisfies. Sorted for
+    /// deterministic diagnostics.
+    /// </summary>
+    public IReadOnlyList<string> ExternDataReferenced
+    {
+        get
+        {
+            var result = new List<string>();
+            foreach (var name in _referencedExternData)
+            {
+                if (!_definedGlobalNames.Contains(name)) { result.Add(name); }
+            }
+            result.Sort(StringComparer.Ordinal);
+            return result;
+        }
+    }
+
     // Dialect-gating sink (the emit-pass half of -pedantic). Non-null only under
     // -pedantic / -pedantic-errors; the builder calls RequireMin at each construct
     // that postdates the selected -std=, mirroring the legacy emit-pass gate. A C
@@ -235,6 +280,7 @@ internal sealed partial class IrBuilder
             });
             if (storage != Storage.Extern)
             {
+                _definedGlobalNames.Add(name); // a real definition — satisfies any extern decl
                 Globals.Add(new GlobalVar(sym, initItem is { } ii ? BuildExpr(ii) : null));
             }
         });
@@ -245,7 +291,15 @@ internal sealed partial class IrBuilder
     private void RegisterProto(Item fnSig)
     {
         var sig = ExtractFnSig(fnSig);
-        DeclareFunc(sig);
+        // The reduction's position is its leftmost leaf token (LALR.CC propagates
+        // children[0].Position up), and the whole declaration lives in one file —
+        // so the band check is reliable without inspecting the name token.
+        var sym = DeclareFunc(sig, fromSystemHeader: fnSig.Position.Line >= SrcPos.SyntheticLineBase);
+        // Import-mode candidate tracking: a prototype not (yet) defined in any TU
+        // is a potential native `-l` import. A definition seen later retracts it
+        // (BuildFuncDef). System-header protos are flagged above and excluded at
+        // ProtoOnlyReferenced — they're runtime-provided via `using static Libc`.
+        if (!_fnDefSites.ContainsKey(sig.Name)) { _protoOnlyFuncs[sig.Name] = sym; }
     }
 
     /// <summary>One already-built function DEFINITION: its parse subtrees (retained
@@ -271,9 +325,26 @@ internal sealed partial class IrBuilder
     // per-TU function under a uniquified TargetName.
     private readonly Dictionary<string, List<FnDefSite>> _fnDefSites = new(StringComparer.Ordinal);
 
+    // ---- import-mode candidate tracking (native `-l` linking) ----------------
+    // _protoOnlyFuncs: functions DECLARED (prototype) but defined in NO translation
+    // unit — potential native imports. _referencedFuncs: every name actually called
+    // (a conservative superset; filtered by the proto-only set). A function that is
+    // proto-only AND referenced AND not from a synthetic header AND non-variadic is
+    // what an `-l` library must resolve. See ProtoOnlyReferenced.
+    private readonly Dictionary<string, Symbol> _protoOnlyFuncs = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _referencedFuncs = new(StringComparer.Ordinal);
+    // Extern DATA (`extern int x;`) read/written through its extern symbol, and the
+    // names some TU actually DEFINES. An extern referenced but defined nowhere would
+    // need a native data import — unsupported in V1 (the emit pass warns). See
+    // ExternDataReferenced.
+    private readonly HashSet<string> _referencedExternData = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _definedGlobalNames = new(StringComparer.Ordinal);
+
     private void BuildFuncDef(Item fnSig, Item block)
     {
         var sig = ExtractFnSig(fnSig);
+        // A definition means this name is no longer a pure prototype → not an import.
+        _protoOnlyFuncs.Remove(sig.Name);
         Symbol funcSym;
         if (_fnDefSites.TryGetValue(sig.Name, out var sites))
         {
@@ -347,7 +418,7 @@ internal sealed partial class IrBuilder
         }
         else
         {
-            funcSym = DeclareFunc(sig);
+            funcSym = DeclareFunc(sig, fromSystemHeader: fnSig.Position.Line >= SrcPos.SyntheticLineBase);
             _fnDefSites[sig.Name] = new List<FnDefSite> { new() { Sig = fnSig, Block = block, Sym = funcSym } };
         }
 
@@ -365,7 +436,7 @@ internal sealed partial class IrBuilder
         Functions.Add(new FuncDef(funcSym, paramSyms, body, sig.Variadic));
     }
 
-    private Symbol DeclareFunc(FnSig sig)
+    private Symbol DeclareFunc(FnSig sig, bool fromSystemHeader = false)
     {
         var existing = _symbols.Resolve(sig.Name);
         if (existing is { Kind: SymKind.Func }) { return existing; } // re-declaration (proto then def)
@@ -378,6 +449,7 @@ internal sealed partial class IrBuilder
             Type = new CType.Func(sig.Return, paramTypes, sig.Variadic),
             Storage = sig.IsStatic ? Storage.Static : Storage.None,
             IsGlobal = true,
+            FromSystemHeader = fromSystemHeader,
         });
     }
 
@@ -1991,6 +2063,10 @@ internal sealed partial class IrBuilder
         }
         if (sym is not null)
         {
+            // Import-mode: a read/write through an extern DATA symbol is a candidate
+            // native data import (resolved against another TU's definition, or — if
+            // none — warned as unsupported by the emit pass).
+            if (sym is { Kind: SymKind.Var, Storage: Storage.Extern }) { _referencedExternData.Add(sym.Name); }
             return new VarRef(sym) { Type = sym.Type, IsLValue = sym.Kind is SymKind.Var or SymKind.Param };
         }
         // `__func__` (C99 §6.4.2.2) — a predefined identifier implicitly declared
@@ -2026,6 +2102,9 @@ internal sealed partial class IrBuilder
         // A simple named callee — a function, a fn-ptr variable, or a libc builtin.
         if (TryCalleeName(calleeItem, out var name))
         {
+            // Import-mode: record every directly-called name (a conservative
+            // superset — intersected with the proto-only set at ProtoOnlyReferenced).
+            _referencedFuncs.Add(name);
             // The resolved signature's parameter types drive call-argument
             // coercion (C's implicit conversion at a call, e.g. `size_t` sizeof
             // arg → `int` malloc param, or the int-0 null-pointer constant). The
