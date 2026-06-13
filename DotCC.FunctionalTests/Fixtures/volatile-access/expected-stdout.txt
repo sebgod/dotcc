@@ -1,2 +1,2 @@
 flag=12 trap=5 count=5
-snapshot=12
+snapshot=12 east=105

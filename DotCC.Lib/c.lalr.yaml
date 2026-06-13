@@ -687,20 +687,28 @@ productions:
       # parses via typeVolatile. Conflict-free: a bare TYPE_NAME still reduces via
       # `Type → TYPE_NAME`; only a TypeSpecList *followed by* a TYPE_NAME shifts here.
       - { lhs: Type, rhs: [TypeSpecList, TYPE_NAME], action: typeSpecThenName }
-      # `volatile T` — a LEADING type qualifier, modelled as a Type PREFIX (not a
-      # TypeSpec). This is the unlock for faithful volatile: `const`/`volatile`
-      # used to be TypeSpecs (tsConst/tsVolatile), which is exactly what made
-      # `volatile MyT` ambiguous (spec-list vs prefix) and forced token-stripping.
-      # As a prefix it's NOT a TypeSpec, so there's no spec-list-vs-prefix
-      # ambiguity, and ONE production covers every Type position (decl, member,
-      # param, cast, return) — no per-form blow-up. The visitor drops the qualifier
-      # from the emitted type string but flags the Type volatile, which the
-      # decl/member visitors record so reads/writes of the lvalue lower to
-      # `Volatile.Read`/`Volatile.Write` (see CSharpEmitter). `const` stays
-      # token-stripped (erased) — const-correctness is a separate future feature.
-      # East/mid `int volatile` is not accepted (was silently stripped before);
-      # leading is the universal form and the only one Lua / real code uses.
+      # Type qualifiers `const` / `volatile` — modelled as Type PREFIX *and*
+      # POSTFIX (NOT TypeSpecs), so every position parses: west `const int` /
+      # `const MyT` / `const struct X`, east `int const` / `MyT const` /
+      # `struct X const`, and combinations `const volatile X` / `X const volatile`.
+      # Why not a TypeSpec: a qualifier that is BOTH a spec-list member and a Type
+      # prefix makes `volatile MyT` ambiguous (spec-list vs prefix) — the old bug
+      # that forced `const` to be token-stripped entirely. As pre+post on Type
+      # there is no spec-list involved, so no such ambiguity, and one shape covers
+      # every Type position (decl, member, param, cast, return) — no per-form
+      # blow-up. The visitor drops the qualifier from the emitted C# type string
+      # (C# has no C-`const` local and no aliasing model) but flags the CType:
+      # `const` drives the const-correctness check + the read-only-array RVA fast
+      # path; `volatile` drives `Volatile.Read`/`Volatile.Write` lowering.
+      # NOTE: pre+post on the SAME core (`volatile int volatile`) is grammatically
+      # ambiguous but semantically idempotent (Quals OR-in), so the enclosing
+      # precedence group resolves it deterministically. Interspersing a qualifier
+      # AMONG builtin keywords (`unsigned const long`) is NOT supported — west-of-
+      # run / east-of-run only (`const unsigned long` / `unsigned long const`).
+      - { lhs: Type, rhs: ['const',    Type], action: typeConstPre }
+      - { lhs: Type, rhs: [Type, 'const'],    action: typeConstPost }
       - { lhs: Type, rhs: ['volatile', Type], action: typeVolatile }
+      - { lhs: Type, rhs: [Type, 'volatile'], action: typeVolatilePost }
       # `_Atomic T` (C11) — leading atomic qualifier, same Type-prefix shape as
       # `volatile`. Flags the Type atomic; the emitter lowers reads/writes of an
       # atomic lvalue to seq-cst Interlocked-backed access (see CSharpEmitter).
@@ -760,13 +768,10 @@ productions:
       - { lhs: TypeSpec, rhs: ['signed'],   action: tsSigned }
       - { lhs: TypeSpec, rhs: ['_Bool'],    action: tsBool }
       - { lhs: TypeSpec, rhs: ['_Float128'], action: tsFloat128 }
-      # `const` type qualifier — parsed as a specifier, dropped at resolution
-      # (const-correctness is a future feature; `const char *p` lowers like
-      # `char *p`). NOTE: `volatile` is NOT a TypeSpec — it's a leading Type
-      # PREFIX (`Type → 'volatile' Type`, action typeVolatile) so it can carry a
-      # flag into faithful `Volatile.Read`/`Write` lowering. Keeping it a TypeSpec
-      # too would make `volatile MyT` ambiguous (spec-list vs prefix).
-      - { lhs: TypeSpec, rhs: ['const'],    action: tsConst }
+      # NOTE: `const` and `volatile` are NOT TypeSpecs — they're Type PREFIX +
+      # POSTFIX productions (see the `Type` group above), so they carry a CType
+      # qualifier flag and parse in every position without the spec-list-vs-prefix
+      # ambiguity that being a TypeSpec would reintroduce.
       # Function specifier — `inline` (C99). Parsed in the specifier run; dropped
       # from the resolved type, but TypeFromSpec flags it so the FnSig path emits
       # a [MethodImpl(AggressiveInlining)]. (Promoted from ID by the dialect rewriter.)

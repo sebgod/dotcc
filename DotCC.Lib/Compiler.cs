@@ -274,17 +274,6 @@ public static class Compiler
             // the table simply doesn't fire) and BEFORE the typedef rewriter
             // (so e.g. `typedef bool MyBool;` under c23 sees `_Bool`).
             using var dialectRewriter = new DialectKeywordRewriter(macroExp, activeDialect);
-            // QualifierStripper: delete `const` tokens. dotcc drops `const`
-            // semantically (const-correctness is a future feature); removing it
-            // here (rather than in the grammar) is what lets `const <typedef-name>`
-            // / `const struct X` / east-const / multi-qualifier runs parse — a
-            // qualifier before a TYPE_NAME or tag has no production and adding one
-            // is LALR-ambiguous. `volatile` is NOT stripped — it parses as a Type
-            // prefix so the emitter can lower it to Volatile.Read/Write. Sits AFTER
-            // macro expansion (a macro expanding to `const` is handled) and BEFORE
-            // the typedef rewriter (so `typedef const int Foo;` registers `Foo`
-            // from a normalized stream).
-            using var qualStripper = new QualifierStripper(dialectRewriter);
             // TypeNameRewriter: the C lexer hack. Promotes ID → TYPE_NAME for
             // any name previously bound by a `typedef`. Sits AFTER macro
             // expansion (so expanded names can also trigger typedef
@@ -292,7 +281,10 @@ public static class Compiler
             // set of C#-side libc classes that user code reaches by name
             // through synthetic-header typedefs (e.g. <setjmp.h>'s
             // `typedef LongJmpToken jmp_buf;`).
-            using var typeRewriter = new TypeNameRewriter(qualStripper, PredefinedTypeNames);
+            // (`const`/`volatile` used to be token-stripped here by a
+            // QualifierStripper stage; they now parse as Type prefix/postfix
+            // productions and carry a CType qualifier flag, so no stripping.)
+            using var typeRewriter = new TypeNameRewriter(dialectRewriter, PredefinedTypeNames);
             // Fold sizeof(T) → number so sizeof(int)*8 → 4*8, avoiding an LALR
             // conflict between ArrDims→[E] and Subscript→E[E] that drops
             // binary operators after sizeof in all contexts.

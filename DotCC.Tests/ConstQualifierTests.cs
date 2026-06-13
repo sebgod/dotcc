@@ -8,30 +8,31 @@ using Xunit;
 namespace DotCC.Tests;
 
 /// <summary>
-/// Unit tests for <see cref="QualifierStripper"/> — the token-level removal of
-/// <c>const</c>. The behaviourally interesting cases are the ones the grammar
-/// could not parse before the stripper (a qualifier in front of a typedef-name
-/// or a struct tag); we also assert that no <c>const</c> leaks into the emitted
-/// C#. The full run-it-end-to-end check lives in the <c>const-qualifiers/</c>
-/// functional fixture. (<c>volatile</c> is no longer stripped — it lowers to
-/// <c>Volatile.Read</c>/<c>Volatile.Write</c>; see <see cref="VolatileTests"/>.)
+/// Parse-and-lower tests for the <c>const</c> qualifier. <c>const</c> (and
+/// <c>volatile</c>) are no longer token-stripped — they parse as Type PREFIX +
+/// POSTFIX productions and flag the lowered <see cref="CType"/> (the flag drives
+/// the const-correctness check and the read-only-array RVA fast path). These
+/// assert the interesting positions PARSE (a qualifier before/after a typedef-name
+/// or struct tag, where the grammar once had no production) and that the emitter
+/// still drops the <c>const</c> keyword from the C# output — a C# local can't carry
+/// C's <c>const</c> (it allows runtime init), so the qualifier rides the CType, not
+/// the emitted text. The run-it-end-to-end check lives in the <c>const-qualifiers/</c>
+/// functional fixture; const-violation diagnosing lives in <c>ConstCheckTests</c>.
 /// </summary>
-public sealed class QualifierStripperTests
+public sealed class ConstQualifierTests
 {
     private static string WriteTemp(string body)
     {
-        var path = Path.Combine(Path.GetTempPath(), $"dotcc-qual-{System.Guid.NewGuid():N}.c");
+        var path = Path.Combine(Path.GetTempPath(), $"dotcc-const-{System.Guid.NewGuid():N}.c");
         File.WriteAllText(path, body);
         return path;
     }
 
     [Fact]
-    public void const_before_typedef_name_parses()
+    public void west_const_before_typedef_name_parses()
     {
-        // `const <TYPE_NAME>` had no production — a qualifier can't prefix a
-        // typedef-name in the grammar, and adding one is LALR-ambiguous. The
-        // stripper removes the token so this reduces as a plain `MyInt` decl.
-        // The IR then expands `MyInt` to its underlying primitive `int`.
+        // `const <TYPE_NAME>` — a qualifier prefixing a typedef-name. The typedef
+        // expands to its primitive; the emitter drops the const keyword.
         var src = WriteTemp("""
             typedef int MyInt;
             int main(void) { const MyInt x = 5; return x; }
@@ -39,10 +40,26 @@ public sealed class QualifierStripperTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            // Typedef expanded to primitive; no const qualifier on the local.
             emitted.ShouldContain("int x = 5");
-            // The qualifier is gone — no `const` on the user's variable declaration.
             emitted.ShouldNotContain("const int x");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void east_const_on_a_builtin_parses()
+    {
+        // `int const` — east-const on a builtin base, via the Type POSTFIX
+        // production. Same lowering as `const int`.
+        var src = WriteTemp("""
+            int main(void) { int const x = 7; return x; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("int x = 7");
+            emitted.ShouldNotContain("const int x");
+            emitted.ShouldNotContain("int const x");
         }
         finally { File.Delete(src); }
     }
@@ -51,7 +68,7 @@ public sealed class QualifierStripperTests
     public void const_volatile_and_east_const_on_typedef_pointer_parse()
     {
         // West `const volatile T*`, east `T const *`, and a const cast — all
-        // through a typedef-name. Pre-stripper these were parse errors.
+        // through a typedef-name.
         var src = WriteTemp("""
             typedef struct Pt { int x; int y; } Pt;
             static int sx(const volatile Pt *a, Pt const *b) { return a->x + b->y; }
@@ -64,9 +81,9 @@ public sealed class QualifierStripperTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
             emitted.ShouldContain("static unsafe int sx(");
-            // No qualifier survives onto the user's signature/cast (the spliced
-            // runtime block legitimately uses `const` for its own constants, so
-            // assert against the specific qualified spellings, not bare "const").
+            // No qualifier keyword survives onto the user's signature/cast (the
+            // spliced runtime block legitimately uses `const` for its own
+            // constants, so assert against the qualified spellings, not bare "const").
             emitted.ShouldNotContain("const volatile");
             emitted.ShouldNotContain("const Pt");
             emitted.ShouldNotContain("Pt const");

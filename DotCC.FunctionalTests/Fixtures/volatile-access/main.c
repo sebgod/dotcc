@@ -22,6 +22,9 @@ int main(void) {
     flag += 10;          /* fenced read-modify-write */
     flag++;              /* fenced ++ */
 
+    int volatile east = 100; /* east/postfix `int volatile` — same fenced lowering */
+    east += 5;               /* fenced read-modify-write through the postfix form */
+
     struct Ctl c;
     c.trap = 0;
     c.count = 0;
@@ -30,6 +33,6 @@ int main(void) {
 
     int snapshot = flag; /* Volatile.Read */
     printf("flag=%d trap=%d count=%d\n", flag, c.trap, c.count);
-    printf("snapshot=%d\n", snapshot);
+    printf("snapshot=%d east=%d\n", snapshot, east);
     return 0;
 }

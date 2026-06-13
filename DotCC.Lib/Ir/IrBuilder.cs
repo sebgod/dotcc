@@ -897,11 +897,21 @@ internal sealed partial class IrBuilder
     {
         C.TypeFromSpec t => ResolveSpecs(CollectSpecs(t.Arg0), SrcPos.From(it)),
         C.TypePtr t => new CType.Pointer(ResolveType(t.Arg0)),
-        C.TypePtrQualConst t => new CType.Pointer(ResolveType(t.Arg0)),
+        // `int * const p` — the POINTER is const (can't repoint); the pointee is
+        // unchanged. Flag the Pointer so `p = q` trips the const check while
+        // `*p = v` (pointee write) does not. `* volatile` / `* restrict` have no
+        // C# model, so they stay plain pointers (dropped).
+        C.TypePtrQualConst t => new CType.Pointer(ResolveType(t.Arg0)).WithQuals(TypeQual.Const),
         C.TypePtrQualVolatile t => new CType.Pointer(ResolveType(t.Arg0)),
-        // `volatile T` — leading qualifier prefix. Carry the flag on the type;
-        // codegen fences reads/writes of a volatile scalar lvalue (Volatile.Read/Write).
+        // `const T` / `T const` — leading or trailing const qualifier. Carries the
+        // flag on the type; drives the const-correctness check + read-only-array RVA.
+        C.TypeConstPre t => ResolveType(t.Arg1).WithQuals(TypeQual.Const),
+        C.TypeConstPost t => ResolveType(t.Arg0).WithQuals(TypeQual.Const),
+        // `volatile T` / `T volatile` — leading or trailing qualifier prefix. Carry
+        // the flag; codegen fences reads/writes of a volatile scalar lvalue
+        // (Volatile.Read/Write).
         C.TypeVolatile t => ResolveType(t.Arg1).WithQuals(TypeQual.Volatile),
+        C.TypeVolatilePost t => ResolveType(t.Arg0).WithQuals(TypeQual.Volatile),
         // `_Atomic T` / `_Atomic(T)` (C11). Codegen lowers reads/writes of an atomic
         // scalar lvalue to seq-cst Atomic.Load/Store/*Fetch (Interlocked-backed).
         C.TypeAtomic t => AtomicType(ResolveType(t.Arg1), it),
@@ -995,7 +1005,6 @@ internal sealed partial class IrBuilder
         C.TsSigned => "signed",
         C.TsBool => "_Bool",
         C.TsFloat128 => "Float128",
-        C.TsConst => "const",
         C.TsInline => "inline",
         C.TsNoreturn => "_Noreturn",
         C.TsComplex => "_Complex",
@@ -1004,8 +1013,9 @@ internal sealed partial class IrBuilder
 
     /// <summary>Resolve a declaration-specifier multiset to a <see cref="CType"/>.
     /// Order-insensitive; covers the slice (int/char/short/long/long long with
-    /// signedness, float/double/long double, void, _Bool). <c>const</c> sets the
-    /// qualifier (though the legacy QualifierStripper removes it pre-parse today).</summary>
+    /// signedness, float/double/long double, void, _Bool). Qualifiers
+    /// (<c>const</c>/<c>volatile</c>) are NOT specifiers — they're Type prefix/
+    /// postfix productions that flag the resolved <see cref="CType"/>.</summary>
     /// <summary>Apply the <c>_Atomic</c> qualifier (C11), flagging it under an
     /// older -std=.</summary>
     private CType AtomicType(CType inner, Item it)
@@ -1028,7 +1038,6 @@ internal sealed partial class IrBuilder
                 case "signed": s++; break;
                 case "short": sh++; break;
                 case "long": lng++; break;
-                case "const": quals |= TypeQual.Const; break;
                 // C99 _Complex — every width widens to the double-backed Complex.
                 case "_Complex": isComplex = true; break;
                 case "inline" or "_Noreturn": break; // ignored for type purposes here
