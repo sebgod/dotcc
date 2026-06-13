@@ -154,6 +154,44 @@ public sealed class ImportModeTests
         stderr.ShouldContain("extern data import 'foo_verbosity' is not supported");
     }
 
+    // ---- static archives (.a/.lib): DllImport stubs + csproj items ---------
+
+    private static ImportOptions Static(params string[] archivePaths)
+        => new(Array.Empty<string>(), Array.Empty<string>(), archivePaths);
+
+    [Fact]
+    public void static_archive_emits_dllimport_extern_stub()
+    {
+        var (emit, _) = EmitWithImports(
+            "#include \"blob.h\"\nint main(void){ return blob_size(3); }",
+            Static("/opt/libblob.a"), "blob.h", "int blob_size(int n);");
+        emit.ShouldContain("static unsafe class DotCcStaticImports");
+        emit.ShouldContain("DllImport(\"blob\"");              // libblob.a → "blob"
+        emit.ShouldContain("EntryPoint = \"blob_size\"");
+        emit.ShouldContain("internal static extern int blob_size(");
+        emit.ShouldContain("using static DotCcStaticImports;");
+        emit.ShouldNotContain("__BindAll");                    // static binds at the native link
+    }
+
+    [Fact]
+    public void static_archive_csproj_has_directpinvoke_and_nativelibrary()
+    {
+        var csproj = Compiler.BuildGeneratedCsproj(
+            libraryMode: false, assemblyName: "app", staticArchives: new[] { "/opt/libblob.a" });
+        csproj.ShouldContain("<PublishAot>true</PublishAot>");
+        csproj.ShouldContain("<DirectPInvoke Include=\"blob\" />");
+        csproj.ShouldContain("<NativeLibrary Include=\"/opt/libblob.a\" />");
+    }
+
+    [Fact]
+    public void mixing_static_and_dynamic_imports_throws()
+    {
+        var mixed = new ImportOptions(new[] { "foo" }, Array.Empty<string>(), new[] { "/opt/libblob.a" });
+        Should.Throw<CompileException>(() => EmitWithImports(
+            "#include \"blob.h\"\nint main(void){ return blob_size(3); }",
+            mixed, "blob.h", "int blob_size(int n);"));
+    }
+
     // ---- separate compilation: import/def markers + link-time resolution ----
 
     /// <summary>Emit one TU as an object fragment (with an optional user header alongside).</summary>

@@ -387,15 +387,29 @@ public static class Compiler
         {
             foreach (var d in convGate.Diagnostics) { Console.Error.WriteLine("dotcc: warning: " + d); }
         }
-        // Import mode (-l): emit the GOT-style DotCcImports table for prototypes that
-        // resolve against a native library rather than the managed runtime. Only when
-        // dynamic libraries were requested and we're producing a program/lib — object
-        // fragments serialize import markers at link time instead (separate path).
+        // Import mode: bind prototypes that resolve against a native library rather
+        // than the managed runtime. Dynamic (-l) → a GOT-style DotCcImports table bound
+        // at startup; static (.a/.lib) → [DllImport] extern stubs resolved at NativeAOT
+        // publish. Object fragments serialize markers at link time instead (separate path).
         var importsClass = "";
-        if (!asObject && imports is { LinkLibraries.Count: > 0 })
+        var importsAreStatic = false;
+        if (!asObject && imports is not null && imports.HasAny)
         {
+            if (imports.LinkLibraries.Count > 0 && imports.StaticArchives.Count > 0)
+            {
+                // Attribution across the static/dynamic boundary is unknowable without
+                // reading the archives — reject loudly rather than mis-bind (V1).
+                throw new CompileException(
+                    "mixing static archives (.a/.lib) and -l dynamic libraries in one compile is not yet supported");
+            }
+            importsAreStatic = imports.StaticArchives.Count > 0;
             var candidates = ComputeImportCandidates(irBuilder, imports);
-            if (candidates.Count > 0) { importsClass = RenderImportsClass(ImportFieldSpecs(candidates), imports, libraryMode); }
+            if (candidates.Count > 0)
+            {
+                importsClass = importsAreStatic
+                    ? RenderStaticImportsClass(candidates, imports)
+                    : RenderImportsClass(ImportFieldSpecs(candidates), imports, libraryMode);
+            }
         }
         // Library mode doesn't need a `main` (the .dll is consumed through its
         // exports); object mode links later. Exe mode requires an entry point.
@@ -418,7 +432,7 @@ public static class Compiler
             return SerializeFragment(cg.Functions, new Dictionary<string, string>(), cg.Aliases, cg.Globals, cg.MainArity,
                 objImports, objDefs);
         }
-        return BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, fileBased, libraryMode, cg.Exports, debugHeap, importsClass);
+        return BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, fileBased, libraryMode, cg.Exports, debugHeap, importsClass, importsAreStatic);
     }
 
     /// <summary>
@@ -543,6 +557,53 @@ public static class Compiler
     /// (Windows <c>-L</c> paths) and double-quotes. Plain identifiers pass through unchanged.</summary>
     private static string CsStringLiteral(string s)
         => "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+
+    /// <summary>The <c>[DllImport]</c> / <c>&lt;DirectPInvoke&gt;</c> library name for a static
+    /// archive path: the file name minus extension and the Unix <c>lib</c> prefix
+    /// (<c>/x/libmylib.a</c> → <c>mylib</c>, <c>mylib.lib</c> → <c>mylib</c>).</summary>
+    private static string StaticArchiveDllName(string archivePath)
+    {
+        var name = Path.GetFileNameWithoutExtension(archivePath);
+        return name.StartsWith("lib", StringComparison.Ordinal) ? name["lib".Length..] : name;
+    }
+
+    /// <summary>
+    /// Render <c>DotCcStaticImports</c>: a classic <c>[DllImport]</c> extern stub per
+    /// candidate (named like the C function — <c>using static</c> surfaces it, so call
+    /// sites are unchanged), resolved at NativeAOT publish against the linked archives
+    /// (the generated csproj's <c>&lt;DirectPInvoke&gt;</c>/<c>&lt;NativeLibrary&gt;</c> items).
+    /// <c>[DllImport]</c> not <c>[LibraryImport]</c>: no source generator, so it survives
+    /// the generator-less Roslyn compile in tests and matches DotCC.Libc's own pattern.
+    /// All stubs carry one conventional lib name — with multiple archives the native
+    /// linker resolves symbols across all of them regardless of which name a stub names.
+    /// <c>dotnet run</c> throws <see cref="DllNotFoundException"/> (inherent — static
+    /// linking needs <c>dotnet publish -r &lt;RID&gt;</c>).
+    /// </summary>
+    private static string RenderStaticImportsClass(IReadOnlyList<Ir.Symbol> candidates, ImportOptions imports)
+    {
+        var target = new Backends.CSharpTarget();
+        var libName = StaticArchiveDllName(imports.StaticArchives[0]);
+        const string dll = "System.Runtime.InteropServices.DllImport";
+        const string cdecl = "System.Runtime.InteropServices.CallingConvention.Cdecl";
+        var sb = new StringBuilder();
+        sb.Append("// ---- native imports (static .a/.lib) — DirectPInvoke extern stubs ----\n");
+        sb.Append("// Resolved at NativeAOT publish against the linked archives (the csproj's\n");
+        sb.Append("// <DirectPInvoke>/<NativeLibrary> items). `dotnet run` throws DllNotFound —\n");
+        sb.Append("// these need `dotnet publish -c Release -r <RID>`.\n");
+        sb.Append("static unsafe class DotCcStaticImports\n{\n");
+        foreach (var sym in candidates.OrderBy(s => s.Name, StringComparer.Ordinal))
+        {
+            var fn = (Ir.CType.Func)sym.Type;
+            var ret = target.RenderType(fn.Return);
+            var ps = string.Join(", ", fn.Params.Select((p, i) => $"{target.RenderType(p)} _p{i}"));
+            // EntryPoint = the raw C symbol; the C# method name is the keyword-escaped
+            // form the call sites emit (so a bare call binds to this extern).
+            sb.Append($"    [{dll}({CsStringLiteral(libName)}, EntryPoint = {CsStringLiteral(sym.Name)}, ExactSpelling = true, CallingConvention = {cdecl})]\n");
+            sb.Append($"    internal static extern {ret} {EmitHelpers.Id(sym.Name)}({ps});\n");
+        }
+        sb.Append("}\n");
+        return sb.ToString();
+    }
 
     /// <summary>
     /// Compile <paramref name="inputPaths"/> to a WebAssembly-text (<c>.wat</c>)
@@ -913,8 +974,32 @@ public static class Compiler
     /// so <c>dotnet publish</c> produces a C-callable native shared library
     /// (<c>.dll</c> / <c>.so</c> / <c>.dylib</c>).
     /// </summary>
-    public static string BuildGeneratedCsproj(bool libraryMode = false, string assemblyName = "dotcc-out")
+    public static string BuildGeneratedCsproj(
+        bool libraryMode = false, string assemblyName = "dotcc-out", IReadOnlyList<string>? staticArchives = null)
     {
+        // Static archives (.a/.lib): link them into the NativeAOT image. <DirectPInvoke>
+        // tells ILC to resolve the [DllImport] stubs statically; <NativeLibrary> hands
+        // the archive paths to the native linker. Forces PublishAot (static linking is
+        // a publish-only operation — there's no CoreCLR static-link step). Empty when
+        // no archive inputs were given.
+        var staticItems = "";
+        if (staticArchives is { Count: > 0 })
+        {
+            var sb = new StringBuilder();
+            sb.Append("  <PropertyGroup>\n    <PublishAot>true</PublishAot>\n  </PropertyGroup>\n");
+            sb.Append("  <ItemGroup>\n");
+            foreach (var name in staticArchives.Select(StaticArchiveDllName).Distinct(StringComparer.Ordinal))
+            {
+                sb.Append($"    <DirectPInvoke Include=\"{name}\" />\n");
+            }
+            foreach (var path in staticArchives)
+            {
+                sb.Append($"    <NativeLibrary Include=\"{path.Replace('\\', '/')}\" />\n");
+            }
+            sb.Append("  </ItemGroup>\n");
+            staticItems = sb.ToString();
+        }
+
         if (libraryMode)
         {
             return $"""
@@ -933,7 +1018,7 @@ public static class Compiler
                     <NativeLib>Shared</NativeLib>
                     <IsTrimmable>true</IsTrimmable>
                   </PropertyGroup>
-                </Project>
+                {staticItems}</Project>
                 """;
         }
         return $"""
@@ -947,7 +1032,7 @@ public static class Compiler
                 <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
                 <Nullable>disable</Nullable>
               </PropertyGroup>
-            </Project>
+            {staticItems}</Project>
             """;
     }
 
@@ -1223,17 +1308,20 @@ public static class Compiler
         bool libraryMode,
         IReadOnlyList<EmitHelpers.Export> exports,
         bool debugHeap = false,
-        string importsClass = "")
+        string importsClass = "",
+        bool importsAreStatic = false)
     {
         if (libraryMode)
         {
-            return BuildLibraryShell(emittedFnList, structDecls, usingAliases, globals, exports, importsClass);
+            return BuildLibraryShell(emittedFnList, structDecls, usingAliases, globals, exports, importsClass, importsAreStatic);
         }
-        // Import mode (-l): surface the GOT-style table by bare name, bind it before
-        // main, and splice the class into the type-decls section. All three collapse to
-        // nothing when no `-l` was given, so a normal compile is unchanged.
-        var importsUsing = importsClass.Length > 0 ? "\nusing static DotCcImports;" : "";
-        var importsBind = importsClass.Length > 0 ? "DotCcImports.__BindAll();\n" : "";
+        // Import mode: surface the import table by bare name and splice it into the
+        // type-decls section. A GOT (-l) table is bound before main; static [DllImport]
+        // stubs bind at the native link, so no startup call. All collapse to nothing
+        // when no import was requested, so a normal compile is unchanged.
+        var importsClassName = importsAreStatic ? "DotCcStaticImports" : "DotCcImports";
+        var importsUsing = importsClass.Length > 0 ? $"\nusing static {importsClassName};" : "";
+        var importsBind = (importsClass.Length > 0 && !importsAreStatic) ? "DotCcImports.__BindAll();\n" : "";
         // Embedded DotCC.Libc runtime block — spliced into the heredoc
         // below so the emitted .cs is self-contained even without a
         // <PackageReference Include="DotCC.Libc"> in scope.
@@ -1440,12 +1528,14 @@ public static class Compiler
         string usingAliases,
         string globals,
         IReadOnlyList<EmitHelpers.Export> exports,
-        string importsClass = "")
+        string importsClass = "",
+        bool importsAreStatic = false)
     {
-        // Import mode (-l) in a -shared lib: surface the GOT table by bare name and
-        // splice it. The class binds in a static constructor (no entry point here), so
-        // the first call through an imported fn-ptr triggers __BindAll(). Empty when no -l.
-        var importsUsing = importsClass.Length > 0 ? "\nusing static DotCcImports;" : "";
+        // Import mode in a -shared lib: surface the table by bare name and splice it. A
+        // GOT table binds in a static constructor (no entry point here); static [DllImport]
+        // stubs bind at the lib's own publish. Empty when no import was requested.
+        var importsUsing = importsClass.Length > 0
+            ? $"\nusing static {(importsAreStatic ? "DotCcStaticImports" : "DotCcImports")};" : "";
         // Same embedded DotCC.Libc runtime block as exe mode — the
         // library and exe shells share the same set of stdlib functions;
         // only the framing (DotCcLib + DotCcExports vs. top-level

@@ -94,4 +94,26 @@ public sealed class NativeImportOracleTests
         // binding meets the .so's [UnmanagedCallersOnly] cdecl exports either way.
         stdout.ShouldBe(ExpectedOutput);
     }
+
+    [Fact]
+    public void static_archive_is_linked_via_import_mode()
+    {
+        if (!RunRequested)
+        {
+            Assert.Skip(
+                $"native-import oracle is opt-in. Set {RunEnv}=1 to ar-build a static archive and " +
+                $"link it into a dotcc program via [DllImport]/<DirectPInvoke> at NativeAOT publish.");
+        }
+        if (!SharedLibOracle.IsAvailable)
+        {
+            Assert.Skip("shared-lib/import oracle unavailable: " + SharedLibOracle.Unavailable);
+        }
+
+        var stdout = SharedLibOracle.StaticArchiveImportRoundTrip(LibSource, ImportConsumerSource)
+            .Replace("\r\n", "\n").Trim();
+
+        // Same output as the dynamic legs: the static [DllImport] stubs resolve against
+        // the linked archive in the NativeAOT image.
+        stdout.ShouldBe(ExpectedOutput);
+    }
 }

@@ -261,6 +261,52 @@ internal static class SharedLibOracle
         return RunCapture(workDir, script);
     }
 
+    /// <summary>
+    /// IMPORT-mode round-trip against a STATIC archive. <c>gcc -c</c> + <c>ar rcs</c>
+    /// build <c>libmylib.a</c>, then dotcc compiles <paramref name="consumerCSource"/>
+    /// (plain prototypes + calls) with the archive as a direct input → <c>[DllImport]</c>
+    /// stubs + a csproj with <c>&lt;DirectPInvoke&gt;</c>/<c>&lt;NativeLibrary&gt;</c>, which
+    /// NativeAOT-publish links statically into a native exe. Runs the exe and returns its
+    /// stdout — the proof that static linking resolves the stubs against the archive.
+    /// (Static linking is publish-only; there's no <c>dotnet run</c> path.)
+    /// </summary>
+    public static string StaticArchiveImportRoundTrip(string libCSource, string consumerCSource)
+    {
+        EnsureInitialised();
+        if (!_available) { throw new InvalidOperationException("shared-lib oracle is not available on this host."); }
+
+        var workDir = Path.Combine(Path.GetTempPath(), "dotcc-import-static-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workDir);
+
+        File.WriteAllText(Path.Combine(workDir, "mylib.c"), libCSource);
+        var consC = Path.Combine(workDir, "consumer.c");
+        File.WriteAllText(consC, consumerCSource);
+        // The archive path AS THE SHELL/linker sees it (ar builds it there, publish links
+        // it there). dotcc derives the DllImport/<DirectPInvoke> name ("mylib") from the
+        // filename and writes <NativeLibrary Include="…/libmylib.a"> into the csproj.
+        var archivePath = ToShellPath(workDir) + "/libmylib.a";
+        var imports = new ImportOptions(Array.Empty<string>(), Array.Empty<string>(), new[] { archivePath });
+        File.WriteAllText(Path.Combine(workDir, "Program.cs"),
+            Compiler.EmitCSharp(new[] { consC }, includeDirs: null, defines: null,
+                fileBased: false, libraryMode: false, imports: imports));
+        File.WriteAllText(Path.Combine(workDir, ImportConsumerAsmName + ".csproj"),
+            Compiler.BuildGeneratedCsproj(libraryMode: false, assemblyName: ImportConsumerAsmName,
+                staticArchives: new[] { archivePath }));
+
+        var script =
+            "set -e\n" +
+            "cd \"$(dirname \"$0\")\"\n" +
+            "arch=$(uname -m); rid=linux-x64; [ \"$arch\" = aarch64 ] && rid=linux-arm64\n" +
+            "if ! gcc -c -fPIC mylib.c -o mylib.o 2>gcc.log; then echo GCC_FAILED; cat gcc.log; exit 5; fi\n" +
+            "if ! ar rcs libmylib.a mylib.o 2>ar.log; then echo AR_FAILED; cat ar.log; exit 6; fi\n" +
+            $"if ! dotnet publish '{ImportConsumerAsmName}.csproj' -c Release -r $rid >publish.log 2>&1; then echo PUBLISH_FAILED; tail -30 publish.log; exit 3; fi\n" +
+            $"EXE=$(find bin -type f -name '{ImportConsumerAsmName}' -path '*publish*' | head -1)\n" +
+            "if [ -z \"$EXE\" ]; then echo NO_EXE; find bin -path '*publish*' -type f; exit 4; fi\n" +
+            $"echo {OutMarker}\n\"$EXE\"\n";
+
+        return RunCapture(workDir, script);
+    }
+
     /// <summary>Write <paramref name="scriptBody"/> to <c>run.sh</c> in
     /// <paramref name="workDir"/>, run it (<c>bash &lt;file&gt;</c>), and return the
     /// consumer's own stdout — everything after the <see cref="OutMarker"/> line the

@@ -135,8 +135,14 @@ internal static class Program
                 else if (tok.Length > 2 && tok.StartsWith("-L", StringComparison.Ordinal)) { libDirs.Add(tok[2..]); }
                 else { Console.Error.WriteLine($"dotcc: warning: ignoring unsupported option '{tok}'"); }
             }
-            var inputs = rawInputs.Where(t => !t.StartsWith('-')).ToArray();
-            var imports = new ImportOptions(linkLibs, libDirs, Array.Empty<string>());
+            var allInputs = rawInputs.Where(t => !t.StartsWith('-')).ToArray();
+            // Static archives (.a/.lib) are link inputs, not translation units — partition
+            // them into the import options (absolute-pathed) rather than the source list.
+            static bool IsArchive(string p) =>
+                p.EndsWith(".a", StringComparison.OrdinalIgnoreCase) || p.EndsWith(".lib", StringComparison.OrdinalIgnoreCase);
+            var staticArchives = allInputs.Where(IsArchive).Select(Path.GetFullPath).ToArray();
+            var inputs = allInputs.Where(p => !IsArchive(p)).ToArray();
+            var imports = new ImportOptions(linkLibs, libDirs, staticArchives);
             var output = parse.GetValue(outOpt);
             var emit = parse.GetValue(emitOpt);
             var target = parse.GetValue(targetOpt);
@@ -232,6 +238,7 @@ internal static class Program
         bool debugHeap = false,
         ImportOptions? imports = null)
     {
+        imports ??= ImportOptions.Empty;
         if (preprocessOnly)
         {
             Compiler.Preprocess(inputPaths, Console.Out, includeDirs, defines, dialect);
@@ -363,8 +370,16 @@ internal static class Program
                 Directory.CreateDirectory(outDir);
                 var csprojFile = $"{asmName}.csproj";
                 File.WriteAllText(Path.Combine(outDir, "Program.cs"), program);
-                File.WriteAllText(Path.Combine(outDir, csprojFile), Compiler.BuildGeneratedCsproj(libraryMode, asmName));
+                File.WriteAllText(Path.Combine(outDir, csprojFile), Compiler.BuildGeneratedCsproj(libraryMode, asmName, imports.StaticArchives));
                 Console.Error.WriteLine($"dotcc: wrote {outDir}/Program.cs + {csprojFile}");
+                if (imports.StaticArchives.Count > 0)
+                {
+                    // Static archives link only at NativeAOT publish — even `--emit=build`
+                    // (dotnet build) leaves the [DllImport] stubs unresolved at runtime.
+                    Console.Error.WriteLine(
+                        $"dotcc: note: static native archives ({string.Join(", ", imports.StaticArchives)}) " +
+                        $"link at NativeAOT publish — run `dotnet publish -c Release -r <RID>` in {outDir}/");
+                }
                 if (emit == EmitKind.Build)
                 {
                     var psi = new System.Diagnostics.ProcessStartInfo
