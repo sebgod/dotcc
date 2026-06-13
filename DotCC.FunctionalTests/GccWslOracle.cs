@@ -86,7 +86,10 @@ internal static class GccWslOracle
         Directory.CreateDirectory(workDir);
 
         // Copy each source into workDir so includes resolve, mirroring the
-        // MSVC oracle. Also copy any sibling .h so #include "foo.h" works.
+        // MSVC oracle. Also copy any sibling .h (so #include "foo.h" works) and
+        // .bin (so C23 #embed "foo.bin" resolves) — both are name-relative to the
+        // TU dir, the same way dotcc resolves them; .bin matches the fixture
+        // convention + the DotCC.FunctionalTests.csproj embed-data copy glob.
         var localNames = new string[csources.Length];
         for (int i = 0; i < csources.Length; i++)
         {
@@ -98,9 +101,12 @@ internal static class GccWslOracle
         {
             var dir = Path.GetDirectoryName(src);
             if (dir is null) { continue; }
-            foreach (var hpath in Directory.EnumerateFiles(dir, "*.h"))
+            foreach (var pattern in new[] { "*.h", "*.bin" })
             {
-                File.Copy(hpath, Path.Combine(workDir, Path.GetFileName(hpath)), overwrite: true);
+                foreach (var aux in Directory.EnumerateFiles(dir, pattern))
+                {
+                    File.Copy(aux, Path.Combine(workDir, Path.GetFileName(aux)), overwrite: true);
+                }
             }
         }
 
