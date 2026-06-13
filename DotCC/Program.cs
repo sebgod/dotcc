@@ -302,7 +302,7 @@ internal static class Program
         try
         {
             program = linking
-                ? Compiler.LinkObjects(inputPaths, fileBased: emit == EmitKind.File && !libraryMode, libraryMode: libraryMode, debugHeap: debugHeap)
+                ? Compiler.LinkObjects(inputPaths, fileBased: emit == EmitKind.File && !libraryMode, libraryMode: libraryMode, debugHeap: debugHeap, imports: imports)
                 : Compiler.EmitCSharp(
                     inputPaths,
                     includeDirs,

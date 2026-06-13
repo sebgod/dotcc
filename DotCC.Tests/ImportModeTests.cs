@@ -153,4 +153,73 @@ public sealed class ImportModeTests
             Dynamic("foo"));
         stderr.ShouldContain("extern data import 'foo_verbosity' is not supported");
     }
+
+    // ---- separate compilation: import/def markers + link-time resolution ----
+
+    /// <summary>Emit one TU as an object fragment (with an optional user header alongside).</summary>
+    private static string EmitObjFragment(string tuC, string? headerName = null, string? headerBody = null)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"dotcc-im-obj-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var tuPath = Path.Combine(dir, "tu.c");
+            File.WriteAllText(tuPath, tuC);
+            if (headerName is not null) { File.WriteAllText(Path.Combine(dir, headerName), headerBody ?? ""); }
+            return Compiler.EmitObject(tuPath, includeDirs: new[] { dir });
+        }
+        finally { try { Directory.Delete(dir, recursive: true); } catch { /* best-effort */ } }
+    }
+
+    /// <summary>Write fragments to <c>.cs</c> files and link them with the given imports.</summary>
+    private static string Link(ImportOptions imports, params string[] fragments)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"dotcc-im-link-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var paths = new List<string>();
+            for (var i = 0; i < fragments.Length; i++)
+            {
+                var p = Path.Combine(dir, $"obj{i}.cs");
+                File.WriteAllText(p, fragments[i]);
+                paths.Add(p);
+            }
+            return Compiler.LinkObjects(paths, imports: imports);
+        }
+        finally { try { Directory.Delete(dir, recursive: true); } catch { /* best-effort */ } }
+    }
+
+    [Fact]
+    public void obj_fragment_carries_import_and_def_markers()
+    {
+        var frag = EmitObjFragment(
+            "#include \"blob.h\"\nint main(void){ return blob_size(3); }", "blob.h", "int blob_size(int n);");
+        // No -l is known at obj time, so the fragment records the candidate + its
+        // fn-ptr type and the names this TU defines, for the link step to resolve.
+        frag.ShouldContain("//!!dotcc-obj import:blob_size delegate* unmanaged[Cdecl]<int, int>");
+        frag.ShouldContain("//!!dotcc-obj def:main");
+    }
+
+    [Fact]
+    public void link_binds_an_unresolved_import_when_l_is_given()
+    {
+        var frag = EmitObjFragment(
+            "#include \"blob.h\"\nint main(void){ return blob_size(3); }", "blob.h", "int blob_size(int n);");
+        var linked = Link(Dynamic("blobby"), frag);
+        linked.ShouldContain("delegate* unmanaged[Cdecl]<int, int> blob_size");
+        linked.ShouldContain("NativeImports.LoadLibrary(\"blobby\", __dirs)");
+    }
+
+    [Fact]
+    public void link_definition_wins_over_import()
+    {
+        // One fragment calls blob_size (proto-only → import candidate); another DEFINES
+        // it. The definition resolves the name internally — no import emitted.
+        var consumer = EmitObjFragment(
+            "#include \"blob.h\"\nint main(void){ return blob_size(3); }", "blob.h", "int blob_size(int n);");
+        var definer = EmitObjFragment("int blob_size(int n){ return n + 1; }");
+        var linked = Link(Dynamic("blobby"), consumer, definer);
+        linked.ShouldNotContain("class DotCcImports");
+    }
 }

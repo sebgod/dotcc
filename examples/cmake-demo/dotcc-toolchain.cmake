@@ -43,5 +43,8 @@ set(CMAKE_C_COMPILE_OBJECT
 
 # Link the `.cs` objects → a runnable target (helper builds the assembly and
 # writes a `dotnet`-launcher at <TARGET>, so `ctest`/`./<target>` just works).
+# <LINK_LIBRARIES> carries target_link_libraries(...) entries — dotcc's import
+# mode binds an undefined prototype to a `-l`-named native library at link
+# (glued `-lfoo` parses as-is); the link helper forwards them via "$@".
 set(CMAKE_C_LINK_EXECUTABLE
-    "bash ${CMAKE_CURRENT_LIST_DIR}/dotcc-link.sh ${DOTCC_DLL} <TARGET> <OBJECTS>")
+    "bash ${CMAKE_CURRENT_LIST_DIR}/dotcc-link.sh ${DOTCC_DLL} <TARGET> <OBJECTS> <LINK_LIBRARIES>")

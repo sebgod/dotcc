@@ -395,7 +395,7 @@ public static class Compiler
         if (!asObject && imports is { LinkLibraries.Count: > 0 })
         {
             var candidates = ComputeImportCandidates(irBuilder, imports);
-            if (candidates.Count > 0) { importsClass = RenderImportsClass(candidates, imports, libraryMode); }
+            if (candidates.Count > 0) { importsClass = RenderImportsClass(ImportFieldSpecs(candidates), imports, libraryMode); }
         }
         // Library mode doesn't need a `main` (the .dll is consumed through its
         // exports); object mode links later. Exe mode requires an entry point.
@@ -403,9 +403,22 @@ public static class Compiler
         {
             throw new CompileException("no `main` function defined in any translation unit.");
         }
-        return asObject
-            ? SerializeFragment(cg.Functions, new Dictionary<string, string>(), cg.Aliases, cg.Globals, cg.MainArity)
-            : BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, fileBased, libraryMode, cg.Exports, debugHeap, importsClass);
+        if (asObject)
+        {
+            // Serialize THIS TU's import candidates (non-variadic ProtoOnlyReferenced —
+            // no `-l` is known yet, so no warnings/collision filtering; the link step
+            // decides) and the names it defines (functions + globals), so the linker
+            // can resolve cross-TU and bind the survivors. No -l filtering here.
+            var objImports = ImportFieldSpecs(
+                irBuilder.ProtoOnlyReferenced.Values
+                    .Where(s => s.Type is not Ir.CType.Func { Variadic: true }).ToList());
+            var objDefs = irBuilder.Functions.Select(f => f.Sym.Name)
+                .Concat(irBuilder.Globals.Select(g => g.Sym.Name))
+                .Distinct(StringComparer.Ordinal);
+            return SerializeFragment(cg.Functions, new Dictionary<string, string>(), cg.Aliases, cg.Globals, cg.MainArity,
+                objImports, objDefs);
+        }
+        return BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, fileBased, libraryMode, cg.Exports, debugHeap, importsClass);
     }
 
     /// <summary>
@@ -459,21 +472,43 @@ public static class Compiler
     /// invocation uses the C calling convention (same lowering as a directly-cast
     /// <c>dlsym</c> result — see <c>CType.Func.IsNativeCallConv</c>).
     /// </summary>
-    private static string RenderImportsClass(IReadOnlyList<Ir.Symbol> candidates, ImportOptions imports, bool libraryMode)
+    /// <summary>Map import-candidate symbols to <c>(C name, C# fn-ptr field type)</c> pairs —
+    /// the native-calling-convention <c>delegate* unmanaged[Cdecl]&lt;…&gt;</c> spelling. Sorted
+    /// by name for deterministic emit. This is the form <see cref="RenderImportsClass"/> consumes,
+    /// so the same renderer serves whole-program emit (from the IR) AND link-from-markers (from
+    /// <c>--emit=obj</c> fragments, where the IR is long gone — see <see cref="LinkObjects"/>).</summary>
+    private static List<(string Name, string FieldType)> ImportFieldSpecs(IReadOnlyList<Ir.Symbol> candidates)
     {
         var target = new Backends.CSharpTarget();
-        var fieldTypes = new Dictionary<string, string>(StringComparer.Ordinal);
+        return candidates
+            .Select(s => (s.Name, target.RenderType(((Ir.CType.Func)s.Type) with { IsNativeCallConv = true })))
+            .OrderBy(p => p.Name, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    /// <summary>
+    /// Render the <c>DotCcImports</c> GOT-style table from <c>(C name, fn-ptr field type)</c>
+    /// pairs: one field per candidate, named exactly like the C function so
+    /// <c>using static DotCcImports</c> surfaces it and existing call sites need no change.
+    /// <c>__BindAll()</c> loads each <c>-l</c> library (ld.so order) and binds each field to the
+    /// FIRST library that exports the symbol, throwing a clean <see cref="DllNotFoundException"/>
+    /// on a miss. In <paramref name="libraryMode"/> (<c>-shared</c>, no entry point) a static
+    /// constructor runs <c>__BindAll()</c> on first field touch; otherwise the exe shell calls it
+    /// from <c>__DotCcEntry()</c> before <c>main</c>. The field type is already the
+    /// <c>delegate* unmanaged[Cdecl]&lt;…&gt;</c> spelling (see <c>CType.Func.IsNativeCallConv</c>).
+    /// </summary>
+    private static string RenderImportsClass(
+        IReadOnlyList<(string Name, string FieldType)> fields, ImportOptions imports, bool libraryMode)
+    {
         var sb = new StringBuilder();
         sb.Append("// ---- native imports (`-l`) — GOT-style function-pointer table ----\n");
         sb.Append("// Each field is bound once by __BindAll() (before main, or on first touch\n");
         sb.Append("// in -shared mode) to the address the named symbol resolves to in the -l\n");
         sb.Append("// libraries, searched in order — first that exports it wins (ld.so model).\n");
         sb.Append("static unsafe class DotCcImports\n{\n");
-        foreach (var sym in candidates)
+        foreach (var (name, ft) in fields)
         {
-            var ft = target.RenderType(((Ir.CType.Func)sym.Type) with { IsNativeCallConv = true });
-            fieldTypes[sym.Name] = ft;
-            sb.Append($"    internal static {ft} {EmitHelpers.Id(sym.Name)};\n");
+            sb.Append($"    internal static {ft} {EmitHelpers.Id(name)};\n");
         }
         sb.Append('\n');
         if (libraryMode)
@@ -492,13 +527,13 @@ public static class Compiler
         sb.Append("        };\n");
         var libList = string.Join(", ", imports.LinkLibraries);
         sb.Append("        void* __p;\n");
-        foreach (var sym in candidates)
+        foreach (var (name, ft) in fields)
         {
             // The NATIVE symbol looked up is the raw C name; the C# field name is the
             // keyword-escaped form the call sites also emit (so they bind to this field).
-            sb.Append($"        if (!NativeImports.TryResolveExport(__libs, {CsStringLiteral(sym.Name)}, out __p))\n");
-            sb.Append($"            throw new System.DllNotFoundException(\"dotcc: undefined symbol '{sym.Name}' — not exported by any of: {libList}\");\n");
-            sb.Append($"        {EmitHelpers.Id(sym.Name)} = ({fieldTypes[sym.Name]})__p;\n");
+            sb.Append($"        if (!NativeImports.TryResolveExport(__libs, {CsStringLiteral(name)}, out __p))\n");
+            sb.Append($"            throw new System.DllNotFoundException(\"dotcc: undefined symbol '{name}' — not exported by any of: {libList}\");\n");
+            sb.Append($"        {EmitHelpers.Id(name)} = ({ft})__p;\n");
         }
         sb.Append("    }\n}\n");
         return sb.ToString();
@@ -543,6 +578,13 @@ public static class Compiler
     private const string FragMain   = "//!!dotcc-obj main:";
     private const string FragType   = "//!!dotcc-obj type:";
     private const string FragSect   = "//!!dotcc-obj section:"; // aliases|globals|functions
+    // Import mode in separate compilation: `-l` is known only at LINK time, so each
+    // fragment serializes its import CANDIDATES (proto-only, called, non-system,
+    // non-variadic — `import:<name> <cs-fn-ptr-type>`) and the names it DEFINES
+    // (`def:<name>`, functions + globals). The link step keeps a candidate iff no
+    // fragment defines it, then binds the survivors GOT-style (see LinkObjects).
+    private const string FragImport = "//!!dotcc-obj import:"; // import:<name> <delegate* unmanaged[Cdecl]<…>>
+    private const string FragDef    = "//!!dotcc-obj def:";    // def:<name> (this TU defines it)
 
     // The uniform "magic" first line every dotcc-generated `.cs` carries, so any
     // file can be classified at a glance:
@@ -564,11 +606,17 @@ public static class Compiler
                       fileBased: false, libraryMode: false, dialect, pedantic, pedanticErrors, asObject: true);
 
     private static string SerializeFragment(
-        string functions, IReadOnlyDictionary<string, string> typeDecls, string aliases, string globals, int mainArity)
+        string functions, IReadOnlyDictionary<string, string> typeDecls, string aliases, string globals, int mainArity,
+        IReadOnlyList<(string Name, string FieldType)> importSpecs, IEnumerable<string> defNames)
     {
         var sb = new StringBuilder();
         sb.Append(MagicObject).Append(" 1 — link with `dotcc <objs> -o <out>`.\n");
         sb.Append(FragMain).Append(mainArity).Append('\n');
+        // Import candidates + defined names, for the link step's resolution. Names
+        // have no spaces (C identifiers), so the type — which does (`delegate*
+        // unmanaged[Cdecl]<int, int>`) — is everything after the first space.
+        foreach (var (name, ft) in importSpecs) { sb.Append(FragImport).Append(name).Append(' ').Append(ft).Append('\n'); }
+        foreach (var d in defNames) { sb.Append(FragDef).Append(d).Append('\n'); }
         // Types are tagged by name so the link step can union them across TUs.
         foreach (var (name, text) in typeDecls)
         {
@@ -586,7 +634,8 @@ public static class Compiler
     /// shared header's declarations), then wrap in the shell + runtime.
     /// </summary>
     public static string LinkObjects(
-        IReadOnlyList<string> objectPaths, bool fileBased = true, bool libraryMode = false, bool debugHeap = false)
+        IReadOnlyList<string> objectPaths, bool fileBased = true, bool libraryMode = false, bool debugHeap = false,
+        ImportOptions? imports = null)
     {
         var typeByName = new Dictionary<string, string>(StringComparer.Ordinal); // first wins
         var typeOrder = new List<string>();
@@ -596,6 +645,10 @@ public static class Compiler
         var globalSeen = new HashSet<string>(StringComparer.Ordinal);
         var functions = new StringBuilder();
         var mainArity = -1;
+        // Import resolution across fragments: a candidate name → its fn-ptr type, and
+        // every name some fragment DEFINES. A candidate survives iff no fragment defines it.
+        var importSpecs = new Dictionary<string, string>(StringComparer.Ordinal);
+        var definedNames = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var path in objectPaths)
         {
@@ -623,6 +676,17 @@ public static class Compiler
                 if (line.StartsWith(FragMain, StringComparison.Ordinal))
                 {
                     if (int.TryParse(line[FragMain.Length..], out var m) && m >= 0) { mainArity = m; }
+                }
+                else if (line.StartsWith(FragImport, StringComparison.Ordinal))
+                {
+                    // import:<name> <type> — name is space-free, type is the rest.
+                    var rest = line[FragImport.Length..];
+                    var sp = rest.IndexOf(' ');
+                    if (sp > 0) { importSpecs[rest[..sp]] = rest[(sp + 1)..]; }
+                }
+                else if (line.StartsWith(FragDef, StringComparison.Ordinal))
+                {
+                    definedNames.Add(line[FragDef.Length..]);
                 }
                 else if (line.StartsWith(FragType, StringComparison.Ordinal))
                 {
@@ -663,8 +727,21 @@ public static class Compiler
         foreach (var name in typeOrder) { structDecls.Append(typeByName[name]); }
         var aliasText = aliasLines.Count > 0 ? string.Join("\n", aliasLines) + "\n" : "";
         var globalText = globalLines.Count > 0 ? string.Join("\n", globalLines) + "\n" : "";
+        // Import mode at link: bind the candidates no fragment defines (a name defined
+        // in any object — function or global — is resolved internally, not imported).
+        // Without `-l`, survivors stay unresolved → the same CS0103 as a normal link.
+        var importsClass = "";
+        if (imports is { LinkLibraries.Count: > 0 })
+        {
+            var survivors = importSpecs
+                .Where(kv => !definedNames.Contains(kv.Key))
+                .Select(kv => (kv.Key, kv.Value))
+                .OrderBy(p => p.Item1, StringComparer.Ordinal)
+                .ToList();
+            if (survivors.Count > 0) { importsClass = RenderImportsClass(survivors, imports, libraryMode); }
+        }
         return BuildShell(mainArity, functions.ToString(), structDecls.ToString(), aliasText, globalText,
-                          fileBased, libraryMode, System.Array.Empty<EmitHelpers.Export>(), debugHeap);
+                          fileBased, libraryMode, System.Array.Empty<EmitHelpers.Export>(), debugHeap, importsClass);
     }
 
     /// <summary>
