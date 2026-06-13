@@ -263,11 +263,27 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      # gcc ships on the ubuntu runner images; assert it rather than let the
-      # oracle skip silently (the wat/msvc guard philosophy — IsAvailable false
-      # would pass the job without comparing a single fixture).
-      - name: Verify gcc present (fail rather than let the oracle silently skip)
-        run: gcc --version
+      # #embed / __has_embed are C23 and gcc implements them only from gcc 15
+      # (GCC 15.1, Apr 2025); the stock runner images ship gcc 13. Install gcc 15
+      # from the toolchain PPA and make it the default `gcc` (the oracle invokes
+      # bare `gcc`), so the embed-basic C23 differential runs FOR REAL here
+      # instead of skipping via its min-gcc.txt gate. Assert the major is 15 —
+      # fail loudly rather than let an older gcc slip through and silently skip
+      # embed-basic (the same no-silent-skip philosophy as the wat/msvc presence
+      # guards). gcc 15 is a strict upgrade for every other fixture too (still
+      # LP64, dotcc's closest ABI twin).
+      - name: Install gcc 15 (C23 #embed) and make it the default gcc
+        run: |
+          set -euo pipefail
+          # add-apt-repository runs `apt update` itself on Ubuntu 24.04, so a
+          # separate update step would just re-refresh every mirror for nothing;
+          # --no-install-recommends trims extras we don't compile against.
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          sudo apt-get install -y --no-install-recommends gcc-15
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-15 100
+          gcc --version
+          major="$(gcc -dumpfullversion | cut -d. -f1)"
+          test "$major" -ge 15 || { echo "expected gcc >= 15, got $major"; exit 1; }
 
       - name: Restore
         run: dotnet restore dotcc.sln
