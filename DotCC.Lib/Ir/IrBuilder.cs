@@ -2050,12 +2050,34 @@ internal sealed partial class IrBuilder
     private CExpr Asn(BinOp? op, Item l, Item r)
     {
         var le = BuildExpr(l);
+        ReportConstWrite(le, SrcPos.From(l), "assignment of");
         return new Assign(op, le, BuildExpr(r)) { Type = le.Type, IsLValue = false };
+    }
+
+    /// <summary>Diagnose a write through a <c>const</c>-qualified lvalue (assignment
+    /// or <c>++</c>/<c>--</c>) as a hard error — writing to a const object is a C
+    /// constraint violation (gcc/clang reject it), and it is also what licenses the
+    /// read-only-array RVA lowering. The lvalue's own type carries the qualifier, so
+    /// this fires for a const variable, a write through a pointer-to-const
+    /// (<c>*p</c> where <c>p</c> is <c>const T*</c>), and a const array element.
+    /// Skipped when the write's position is in a system header (the user isn't to
+    /// blame for the runtime's own decls).</summary>
+    private void ReportConstWrite(CExpr target, SrcPos pos, string verb)
+    {
+        if (!target.Type.IsConst || pos.IsSystemHeader) { return; }
+        var what = Unparen(target) is VarRef v ? $"variable '{v.Sym.Name}'" : "location";
+        Diagnostics.Add(new Diagnostic(Severity.Error, $"{verb} read-only {what}", pos, _file));
     }
 
     private CExpr Un(UnOp op, Item operand)
     {
         var oe = BuildExpr(operand);
+        // ++/-- on a const lvalue is a write — same constraint violation as assignment.
+        if (op is UnOp.PreInc or UnOp.PostInc or UnOp.PreDec or UnOp.PostDec)
+        {
+            ReportConstWrite(oe, SrcPos.From(operand),
+                op is UnOp.PreInc or UnOp.PostInc ? "increment of" : "decrement of");
+        }
         // Record the target-neutral C fact that an object's address is taken (&x), for
         // any var or param. Each backend decides what it implies: the C# backend stores
         // an address-taken pointer GLOBAL as `nint` (a pointer T can't be
