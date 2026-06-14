@@ -361,6 +361,11 @@ internal sealed class CSharpBackend
     /// braced to keep the hoisted statements inside the controller).</summary>
     private int _hoistedCount;
 
+    /// <summary>Monotonic counter naming the block-local temps an array compound
+    /// literal hoists to (<c>__cl0</c>, <c>__cl1</c>, …) when it appears outside
+    /// initializer position. Unique within any function scope; never reset.</summary>
+    private int _clCounter;
+
     private void FlushPending(StringBuilder sb, string pad)
     {
         if (_pending.Count == 0) { return; }
@@ -1367,7 +1372,22 @@ internal sealed class CSharpBackend
             }
             case StructInit si: return (StructInitText(si), PPrimary);
             case StackArray sa:
-                return ($"stackalloc {Cs(sa.Element)}[]{{ {string.Join(", ", sa.Elems.Select(Expr))} }}", PPrimary);
+            {
+                // An array compound literal `(T[]){…}` is a `stackalloc` — directly
+                // assignable to a `T*` only in initializer position. To make it work
+                // in ANY expression position (call argument, return, …), hoist it to
+                // a block-local pointer temp — C's block-scoped automatic storage —
+                // and reference that temp. (Nested literals hoist first: their Expr
+                // runs while building this element list, so their temps precede this
+                // one in `_pending`.) Outside a hoistable context (e.g. a loop
+                // condition, re-evaluated each iteration) fall back to the inline
+                // stackalloc, which still binds in a pointer-initializer.
+                var lit = $"stackalloc {Cs(sa.Element)}[]{{ {string.Join(", ", sa.Elems.Select(Expr))} }}";
+                if (!_canHoist) { return (lit, PPrimary); }
+                var name = $"__cl{_clCounter++}";
+                _pending.Add($"{Cs(sa.Element)}* {name} = {lit}");
+                return (name, PPrimary);
+            }
             case DefaultLit: return ($"default({Cs(e.Type)})", PPrimary);
             // A promoted malloc → a zero-initialized stack struct value.
             case StackNew sn: return ($"new {Cs(sn.StructType)}()", PPrimary);

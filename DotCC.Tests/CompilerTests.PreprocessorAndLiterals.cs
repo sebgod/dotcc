@@ -1177,6 +1177,26 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Array_compound_literal_in_call_arg_hoists_to_temp()
+    {
+        // Outside initializer position a `(int[]){…}` can't bind a stackalloc to a
+        // pointer inline, so dotcc hoists it to a block-local pointer temp (C's
+        // block-scoped automatic storage) emitted BEFORE the statement, and passes
+        // the temp — so the array survives the call.
+        var src = WriteTemp("""
+            int sum3(int *a) { return a[0] + a[1] + a[2]; }
+            int main() { return sum3((int[]){10, 20, 30}); }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("int* __cl0 = stackalloc int[]{ 10, 20, 30 };");
+            emitted.ShouldContain("sum3(__cl0)");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Scalar_compound_literal_lowers_to_a_cast()
     {
         // `(int){5}` — an unnamed scalar object; lowers to a cast of the value.

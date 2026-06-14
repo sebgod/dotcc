@@ -1,0 +1,1 @@
+MSVC's C frontend has spotty C99 compound-literal support (same reason the array-compound-literal fixture opts out).
