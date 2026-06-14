@@ -64,6 +64,33 @@ just want its code to *run* on .NET. They're not exclusive, and they sequence
 differently. The backend axis (emit C# source vs. emit IL directly) interacts with
 this — see #5.
 
+### Grammar tractability — an LALR(1) parseability rubric
+
+For any **source** frontend (Route A), the first question is whether LALR.CC can
+chew the grammar. The honest framing: *almost any* language can be forced through an
+LALR(1) grammar **if you let the lexer cheat**. So the real axis is **how much
+violence the lexer/precedence layer does** before the context-free core is
+LALR(1)-clean — and dotcc's dividing line is concrete: **does the nastiness fit in a
+`RewritingTokenStream`?** That slot already absorbs the C typedef lexer-hack and
+dialect-keyword promotion; it equally absorbs INDENT/DEDENT injection, `>>`
+token-splitting, and contextual-keyword promotion. If the language's hard part fits
+there → cheap. If it needs the **symbol table mid-parse**, **backtracking**, or is
+genuinely **context-sensitive** → expensive (hand-RD) or impossible via LALR.
+
+| Tier | Cost | Languages |
+|---|---|---|
+| **1 — clean LALR(1)** | yacc/Bison-able as-is | Pascal · **C** (modulo the typedef lexer-hack + dangling-else precedence) · SQL (PostgreSQL/MySQL ship real Bison grammars) · PHP (`zend_language_parser.y` is Bison) · Lua · Go (`gc` was yacc through 1.4) · Scheme/Lisp (trivial) |
+| **2 — LALR(1) + bounded lexer hacks** | one `RewritingTokenStream` | Java (`>>`/`>>>` token-splitting) · Haskell (**GHC uses Happy/LALR**, with the off-side `parse-error(t)` feedback) · Ruby (Bison `parse.y`, but a lexer-state swamp) · Python (INDENT/DEDENT injection; LL/pgen-parsed for ~30 yrs, PEG only since 3.9) · **Zig — lands here but leans Tier 1, see below** |
+| **3 — fights LALR; wants backtracking / hand-RD** | speculative parse | C# (the `F(G<A,B>(7))` cast-vs-compare) · JavaScript (ASI + `/` regex-vs-divide + arrow lookahead) · Rust (turbofish, macro token-trees) · Swift (custom operators, trailing closures, heavy contextual disambiguation) · fixed-form Fortran (insignificant whitespace + no reserved words → not even tokenizable) |
+| **4 — not LALR(1) at all** | GLR / hand-RD only | **C++** (context-sensitive: `a<b>c`, most-vexing-parse, `typename` needs the symbol table mid-parse — GCC & Clang are both hand-RD) · Perl (provably undecidable — BEGIN blocks rewrite the grammar) |
+
+**Where the ideas land:** Python source (#1, Route A) is **Tier 2** — the
+INDENT/DEDENT rewriter drops it squarely in LALR.CC's wheelhouse; *genuinely cheap*.
+Swift source (#3a) is **Tier 3** — contextual disambiguation that wants backtracking
+LALR.CC doesn't give, which is the concrete reason #3b (compiled Wasm input) is the
+better Swift bet. Anything C++-shaped is **Tier 4** — reachable only through a
+compiled-input route (#5: IR, not grammar). And **Zig is the surprise** — see #2.
+
 ---
 
 ## 1. Python — own frontend + "pretend to be CPython" for native extensions
@@ -138,14 +165,84 @@ skeleton, *before* committing to the Python frontend.
 
 ## 2. Zig — IR-level `@cImport`, not translate-c
 
-Dropped for now (see memory `project_zig_frontend_plan.md`). Key recorded decision:
-`@cImport` should be **IR-level composition** with the existing C frontend, *not* a
-translate-c text pass — the C frontend lowers the imported headers to IR and the Zig
-frontend composes against that. This is the canonical example of the IR-composition
-multiplier and informs every other "language that needs to talk to C" frontend
-(Python extensions above, Swift C-interop below).
+Parked (full plan: `~/.claude/plans/dotcc-zig-frontend.md`, memory
+`project_zig_frontend_plan.md`). The recorded core decision still holds: `@cImport`
+is **IR-level composition** with the existing C frontend, *not* a translate-c text
+pass — the C frontend lowers the imported headers to IR and the Zig frontend composes
+against that. This is the canonical IR-composition multiplier and informs every other
+"language that needs to talk to C" frontend (Python extensions above, Swift C-interop
+below).
 
-**Status:** parked; plan preserved.
+**Parked on *semantics*, not *parsing* — and the grammar is cheaper than C's.** This
+is the correction worth recording. Zig sits in the rubric's Tier 2 but leans Tier 1,
+*below C*, because the one thing that forces C off the clean path — the typedef
+lexer-hack, where `Color * x;` is a decl-or-multiply depending on the **symbol
+table** — simply doesn't exist in Zig:
+
+- **No typedef / no type-vs-identifier ambiguity.** Types are ordinary `comptime`
+  values (`const T = struct {…};`), so there's never a "is this token a type?"
+  question mid-parse. No semantic feedback to the lexer.
+- **No preprocessor**, **no whitespace significance** (no INDENT/DEDENT), **no
+  contextual-keyword soup.** So Zig needs **zero `RewritingTokenStream` stages** —
+  not even the one C requires. A strictly lighter front than the C frontend we ship.
+- The only friction is mechanical PEG→LALR translation: a handful of bounded
+  shift/reduce conflicts (`|capture|` vs binary `|`, labeled blocks `label:`,
+  `.{…}` anon-init vs `{` block, expr-vs-stmt `if`/`switch`) that resolve with
+  precedence + one-token lookahead — **none need the symbol table.**
+
+So the M0 grammar spike the plan flagged as risk #1 is substantially **de-risked**:
+the v1 subset is *more* tractable than the C grammar already in production, not less.
+
+**The two real open items, and their status:**
+
+1. **The frontend seam (M0).** `ITarget` exists (the M-axis: `cs`, `wat`); there is
+   **no `IFrontend` yet** (verified — only `ITarget` in `Ir/Target.cs`). Extracting
+   it (C pipeline behind it, byte-identical) is pure refactoring but it is the genuine
+   **unstarted prerequisite** — nothing Zig happens before it.
+2. **comptime.** The plan scopes v1 comptime to **const-folding only**, and *that*
+   has a concrete, independently-valuable build-up path — see below.
+
+### Doing C23 `constexpr` first — the const-eval bridge to comptime ⭐
+
+**Is "const evaluation for C23" a thing?** Yes. C23 adds **`constexpr`** (N3096
+§6.7.1) — but for **objects only** (`constexpr int N = 8;`, `constexpr double k =
+1.5;`), *not* functions (unlike C++). A `constexpr` object is a named compile-time
+constant usable anywhere a constant expression is required (array bounds, `case`
+labels, enum init, further `constexpr`); its initializer must itself be constant and
+must convert without value change. It's spelled like an identifier, so it'd be gated
+the rule-2 way — `DialectKeywordRewriter` promotes it to a keyword only under
+`-std=c23` (exactly like `bool`/`true`/`nullptr`), per the no-fake-keywords rule.
+**dotcc has it as ❌ today** (`C-SUPPORT.md`).
+
+**Why doing it first helps Zig.** Zig comptime-v1 and C23 `constexpr` need the *same
+primitive*: evaluate an initializer to a value, bind it to a **named const symbol**,
+and resolve later references to that symbol in further constant contexts. dotcc's
+`ConstEval` (`IrBuilder.cs`) already folds expressions and resolves `EnumConstRef` —
+but it's **integer-only (`long?`)** and has **no general const-object binding**.
+`constexpr` forces exactly that generalization:
+
+- a `ConstObjRef`-style node (the analog of the existing `EnumConstRef`) so a folded
+  const flows back into `ConstEval` — *the same node Zig comptime const-bindings
+  resolve through*;
+- pushing `ConstEval` past `long?` toward **float** (C23 `constexpr` allows floating
+  constants; Zig has `comptime_float`) — a shared generalization either way.
+
+So: build the const-eval foundation **under a real, shipping C23 feature**, and the
+Zig comptime-v1 prerequisite falls out as a byproduct — a standalone C win that also
+retires open item #2. That's the "do it first" payoff, concretely.
+
+**Honest limit of the overlap.** C23 `constexpr` ≈ Zig comptime *v1* — declarative
+constant *objects* and folding. It is **not** full Zig comptime (Turing-complete
+compile-time *execution*: loops, function calls, type construction), which both the
+plan's v1 and `constexpr` deliberately leave out. So `constexpr`-first de-risks the
+**v1** comptime blocker, not full comptime — but v1 is exactly what the plan commits
+to, so that's the right-sized win.
+
+**Status:** parked, but **less parked than it was.** The IR was already designed to
+need zero generalization for v1; the grammar is now known to be cheaper than C's; and
+the comptime blocker has a real on-ramp via C23 `constexpr`. What remains genuinely
+unstarted is the M0 `IFrontend` seam. Recent struct/union/bit-field MSVC-faithful
+packing also quietly helps (extern-struct fidelity + the slice `{ptr,len}` fat-struct).
 
 ---
 
