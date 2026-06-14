@@ -81,7 +81,7 @@ genuinely **context-sensitive** → expensive (hand-RD) or impossible via LALR.
 |---|---|---|
 | **1 — clean LALR(1)** | yacc/Bison-able as-is | Pascal · **C** (modulo the typedef lexer-hack + dangling-else precedence) · SQL (PostgreSQL/MySQL ship real Bison grammars) · PHP (`zend_language_parser.y` is Bison) · Lua · Go (`gc` was yacc through 1.4) · Scheme/Lisp (trivial) |
 | **2 — LALR(1) + bounded lexer hacks** | one `RewritingTokenStream` | Java (`>>`/`>>>` token-splitting) · Haskell (**GHC uses Happy/LALR**, with the off-side `parse-error(t)` feedback) · Ruby (Bison `parse.y`, but a lexer-state swamp) · Python (INDENT/DEDENT injection; LL/pgen-parsed for ~30 yrs, PEG only since 3.9) · **Zig — lands here but leans Tier 1, see below** |
-| **3 — fights LALR; wants backtracking / hand-RD** | speculative parse | C# (the `F(G<A,B>(7))` cast-vs-compare) · JavaScript (ASI + `/` regex-vs-divide + arrow lookahead) · Rust (turbofish, macro token-trees) · Swift (custom operators, trailing closures, heavy contextual disambiguation) · fixed-form Fortran (insignificant whitespace + no reserved words → not even tokenizable) |
+| **3 — fights LALR; wants backtracking / hand-RD** | speculative parse | C# (the `F(G<A,B>(7))` cast-vs-compare) · JavaScript (ASI + `/` regex-vs-divide + arrow lookahead) · Rust (turbofish, macro token-trees) · Swift (custom operators, trailing closures, heavy contextual disambiguation) · **Mercury/Prolog** (operator-precedence term parser over a *runtime-mutable* `op/3` table — not a fixed grammar) · fixed-form Fortran (insignificant whitespace + no reserved words → not even tokenizable) |
 | **4 — not LALR(1) at all** | GLR / hand-RD only | **C++** (context-sensitive: `a<b>c`, most-vexing-parse, `typename` needs the symbol table mid-parse — GCC & Clang are both hand-RD) · Perl (provably undecidable — BEGIN blocks rewrite the grammar) |
 
 **Where the ideas land:** Python source (#1, Route A) is **Tier 2** — the
@@ -237,6 +237,56 @@ compile-time *execution*: loops, function calls, type construction), which both 
 plan's v1 and `constexpr` deliberately leave out. So `constexpr`-first de-risks the
 **v1** comptime blocker, not full comptime — but v1 is exactly what the plan commits
 to, so that's the right-sized win.
+
+### One allocator abstraction, shared by C *and* Zig
+
+The sharper goal (not "collapse Zig's allocators down to C's `malloc`", the inverse):
+make Zig's explicit-allocator model the **shared allocation substrate for *both*
+frontends**. Zig has **no global `malloc`** — allocation goes through an explicit
+`std.mem.Allocator` value (a `{ ptr: *anyopaque, vtable: *const VTable }` of
+`alloc`/`resize`/`free` fn-ptrs) threaded as a parameter. C keeps its single *implicit*
+allocator, but **under the hood that's just the one global/default instance of the same
+abstraction**: one `Allocator` surface in the `DotCC.Libc` runtime; C binds the default
+instance, Zig threads instances explicitly.
+
+**dotcc already 80% has this — it just isn't abstracted.** The `-fsanitize=address`
+debug heap (`DOTCC_DEBUG_HEAP=1`) *already* swaps C's `malloc`/`free` wholesale for a
+redzone/size-header implementation at startup. That swap **is** "pick a different
+allocator instance" — `c_allocator` vs the debug/GP allocator is the same operation in
+Zig. Formalize it into one abstraction and the debug heap, a future arena/region, and
+Zig's allocators are all just instances of one vtable.
+
+- **IR**: keep an allocator-aware allocate/free node — C lowers with the operand
+  *absent* (→ default instance), Zig with an explicit operand. The malloc→`stackalloc`
+  peephole still fires on the node *before* allocator binding, so it's unaffected.
+- **Runtime**: one `Allocator` — `NativeMemory` default · the ASan debug heap (already
+  built) · `ArenaAllocator` (bulk-free on `deinit`) · `FixedBufferAllocator` (bump
+  pointer over a `byte[]`/`stackalloc`). C's `-fsanitize=address` becomes "swap the
+  global instance," said properly.
+
+**Two honest wrinkles:**
+- **`free` signatures differ.** C's `free(void*)` is size-less; Zig's vtable `free`
+  takes the original length (Zig allocators don't store sizes). So the C default
+  instance must recover the size — which the debug heap *already* does (its `[magic|
+  size]` header) and size-less `NativeMemory.Free` doesn't need. The shared vtable
+  carries Zig's `(ptr, len, align)`; C binds through a size-tracking adapter.
+  Runtime-shim detail, no IR change.
+- **Keep C's `malloc` zero-overhead.** Routing every C `malloc` through a vtable adds
+  an indirect call. Mitigation: the default global instance is *statically known*, so
+  the C# backend devirtualizes to direct calls — the vtable hop appears only when a
+  non-default allocator is actually in play (Zig, or a C program that opts in).
+  AOT-clean.
+
+The realistic C-facing surface is **whole-program allocator selection** (as ASan is
+today), since C has no syntax to thread allocators per-call — but real C libraries take
+allocator callbacks (`lua_Alloc`, sqlite's `mem_methods`), and this abstraction is what
+those bind to. And it's *cleaner than C* on the Zig side: because the allocator is
+explicit in the source, a fixed-buffer/arena allocation is syntactically visible, so the
+malloc→`stackalloc` promotion (which in C must *recover* escape/ownership by analysis)
+gets the ownership hint for free. Memory stays in a `NativeMemory` arena **outside the
+GC** (as in 3b) — native blobs, never GC objects; Zig has no ARC, so no ARC-vs-GC
+tension. Net: unify C + Zig allocation, make the ASan swap principled and
+arena-extensible, and the Zig allocator story falls out for free.
 
 **Status:** parked, but **less parked than it was.** The IR was already designed to
 need zero generalization for v1; the grammar is now known to be cheaper than C's; and
@@ -438,11 +488,92 @@ much instruction/import surface a real module actually exercises.
 
 ---
 
+## 6. Mercury — Route B works, but the existing toolchain already wins
+
+**Motivation / context.** Mercury (`../mercury`, where I contribute — two live local
+branches: `dotnet10-csharp` and `agc-revival`) is a purely declarative,
+strongly-typed, strongly-**moded** logic/functional language. The Melbourne Mercury
+Compiler (`mmc`) is a mature production compiler with **multiple backends** — low-level
+C (LLDS), **high-level C** (`hlc`, the MLDS→C path), **Java**, and **C#** (the
+`csharp` grade). The two usual routes apply: parse Mercury directly, or consume `mmc`'s
+high-level-C output. This is the entry where the honest rubric answer is *"don't"* —
+and it's worth recording exactly why, because the reason is instructive.
+
+### Route A — parse Mercury directly (`mercury.lalr.yaml`): a non-starter
+
+Two walls, either of which is disqualifying:
+
+- **Grammar (Tier 3).** Mercury inherits Prolog's reader: an **operator-precedence
+  term parser driven by a runtime-mutable operator table** (`:- op(Prec, Type, Name)`
+  declarations *change the grammar* as the file is read). The token stream and the
+  base term grammar (functors, lists, terms) are LALR-able, but operator handling
+  wants an operator-precedence sub-parser beside the LALR core, not a fixed table —
+  it's not the clean fit a `RewritingTokenStream` gives.
+- **Semantics — the hardest target of any idea here.** Type inference + **mode
+  analysis** (instantiation states) + **determinism analysis**
+  (`det`/`semidet`/`multi`/`nondet`/`cc_*`/`failure`/`erroneous`) + the **logic
+  execution model** (unification, backtracking, nondeterminism via success/failure
+  continuations). Reimplementing that *is* reimplementing the core of `mmc` —
+  research-grade, far beyond the Python/Swift semantic poles. Toy-only.
+
+### Route B — `mmc --grade hlc → .c → dotcc`: technically the strongest Route B here
+
+`mercury.m → mmc --grade hlc.gc → C → dotcc C frontend → C#/.NET`. `mmc` does **all**
+the hard lowering (modes, determinism, nondet→continuations) and emits structured
+high-level C; dotcc just compiles the C. Because the semantic gap is the largest of
+any candidate, "let the source compiler do it" pays off most here in principle. But:
+
+- **You must shim the Mercury runtime + a GC.** The generated HLC links `runtime/`
+  (~5.2 MB, 66 `.c` files) and, in `hlc.gc`, **Boehm GC** (`boehm_gc/`, ~6.9 MB).
+  Compiling/shimming that through dotcc is the real cost — and **Boehm on .NET is a
+  conservative-GC horror** (stack/heap scanning, signals); the honest fallback is a
+  non-collecting `NativeMemory` arena, i.e. it leaks.
+- **`hlc.agc` is the cleaner-fit grade, and I recently revived it (`agc-revival`).**
+  Mercury's **accurate** GC (Cheney copy, forwarding pointers, type-info-guided) is a
+  far better match for a managed target than conservative Boehm, and the `agc-revival`
+  branch brings that accurate GC back and fixes the `hlc.agc` compile-to-C path. So
+  *if* any HLC route is viable, it's `hlc.agc`, not `hlc.gc`. Still a heavy runtime to
+  bring across.
+
+### The decisive point: Mercury already runs on .NET, and I'm modernizing that path
+
+`mmc`'s **`csharp` grade compiles Mercury straight to C#/.NET today** — purpose-built,
+semantics-aware, maintained. My `dotnet10-csharp` branch is pushing it onto **.NET 10 /
+C# 14**, emitting C# `record` DU types, and making it **NativeAOT-compatible**
+(reflection-free RTTI via an `MR_DuTerm` interface, `--csharp-aot`). So
+`mercury.m → mmc --grade csharp → .NET` is a *better* path to Mercury-on-.NET than
+either dotcc route — it's the existing toolchain, and it's actively getting better.
+This is the rubric's **"is the value unique vs. the language's own toolchain?"** axis
+answering a resounding **no**.
+
+### The one genuine dotcc niche: C `foreign_proc` unification via IR composition
+
+Where dotcc *could* add something the `csharp` grade structurally **cannot**: Mercury
+leans heavily on `pragma foreign_proc("C", …)` (runtime, stdlib, user code). The
+`csharp` grade needs **C#** foreign_procs — C foreign code does *not* come along; it
+must be rewritten. A dotcc HLC route, by contrast, runs the generated Mercury C **and**
+its C foreign_procs through one frontend into **one .NET IR** — the same IR-composition
+lever as `@cImport`. That's the unique, narrow value: *Mercury + its C foreign code,
+together, on .NET*, which the native csharp grade can't deliver. Also marginal: a
+single uniform NativeAOT artifact mixing Mercury + C + other dotcc frontends.
+
+**Status:** evaluated, value largely **pre-empted** — Mercury's best .NET path is the
+`csharp` grade I already maintain, not dotcc. The only distinct dotcc angle is
+C-foreign_proc-in-one-IR (and exercising the `hlc.agc` output on .NET as research).
+Recorded here as the deliberate *"existing toolchain wins"* case.
+
+---
+
 ## Cross-cutting notes
 
 - **IR composition is the recurring multiplier.** Python C-extensions, Zig
   `@cImport`, and Swift C-interop all reduce to "reuse the C frontend's IR." Invest
   there and several frontends get cheaper at once.
+- **One allocator abstraction is a second multiplier** (see #2). Reframing C's
+  `malloc` as the default instance of a shared `Allocator` (the abstraction Zig threads
+  explicitly) folds the existing `-fsanitize=address` debug heap, a future arena, and
+  Zig's allocators into one swappable vtable — a build-once that readies the Zig
+  frontend *and* makes the C debug-heap swap principled + arena-extensible.
 - **The native-interop trio** (`-shared` export, import mode, `dlfcn`) is the
   mechanism every "load/compile a native extension" story rides on.
 - **Recent struct-layout fidelity work** (MSVC-faithful struct + bit-field packing,
