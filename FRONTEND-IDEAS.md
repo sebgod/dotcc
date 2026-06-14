@@ -217,11 +217,40 @@ Rust, Zig, C, …) target .NET through dotcc, with the source compiler handling 
 the language semantics. The surface to support is then the small, well-defined
 Wasm instruction set + a tiny import/host ABI, not a whole language. See idea 5.
 
+**ARC: the strongest argument for 3b.** This route makes 3a's whole `deinit`
+three-tier problem *disappear*, because **swiftc resolves ARC before the Wasm
+exists.** ARC insertion + elision happens in SIL/the ARC optimizer, then IRGen emits
+explicit `swift_retain`/`swift_release` runtime calls and wires the deinit call onto
+the release-to-zero path — all before LLVM/Wasm. So by the time dotcc sees the
+module there is **no ARC semantic left to model**, only plain mechanism:
+- allocation → a runtime call; `retain`/`release` → calls that bump a refcount word
+  at a known offset; `deinit` → already emitted, already called on the zero path.
+
+dotcc therefore does **no escape analysis, no ownership reasoning, no
+using-vs-refcount-vs-finalizer choice** — it just executes loads/stores/branches/
+calls, and deterministic `deinit` timing is preserved for free. The work doesn't
+vanish, it **relocates and shrinks** to the Embedded Swift runtime functions, in one
+of two forms: **(a) bundled into the `.wasm`** (runtime linked in) → they're ordinary
+in-module functions and a refcount is just a memory word, so **ARC is invisible to
+dotcc**; or **(b) left as imports** → dotcc shims a small, *known* runtime ABI (a few
+functions over a refcounting allocator) — the libc-shim pattern it already lives in.
+
+The memory model is what makes it clean: in the Wasm, Swift objects live in **linear
+memory**, manually refcounted; dotcc lowers linear memory to a `NativeMemory`-style
+arena (`byte*`) *outside* the .NET GC — so Swift objects **never become GC objects**,
+they stay refcounted blobs exactly as native, and the "ARC vs non-deterministic GC"
+tension of 3a never arises. Trade-off: Swift code that *runs* in a sandboxed heap,
+not Swift objects that *integrate* first-class with C# objects. Note the symmetry —
+**3b's advantage is largest exactly where 3a is hardest (classes/ARC) and smallest
+where 3a is already trivial (pure value-type `Geometry`).**
+
 **Status:** idea. If Swift specifically is the goal, **3b (Swift→Wasm→dotcc→.NET)**
 is probably the shorter path than a source frontend; a source frontend only pays off
 if we want Swift *syntax* first-class in the dotcc world. Cheapest probe for 3b: take
 one Embedded `Geometry` function, `swiftc`-compile it to Wasm, and see how small the
-instruction/import surface actually is.
+instruction/import surface actually is — and whether the Embedded runtime comes
+bundled (case a) or as imports (case b). (Embedded-Swift-*to-Wasm* is an emerging
+toolchain combo, so that split is empirical; the ARC data-flow above holds either way.)
 
 ---
 
