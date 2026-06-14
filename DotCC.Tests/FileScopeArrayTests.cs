@@ -70,7 +70,7 @@ public sealed class FileScopeArrayTests
     }
 
     [Fact]
-    public void char_array_from_string_decodes_with_nul()
+    public void const_char_array_from_string_decodes_with_nul_and_uses_rva()
     {
         var src = WriteTemp("""
             static const char tag[] = "hi";
@@ -79,8 +79,27 @@ public sealed class FileScopeArrayTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            // 'h'=104, 'i'=105, NUL=0
-            emitted.ShouldContain("byte* tag = Libc.GlobalArrayFrom<byte>(new byte[]{ 104, 105, 0 })");
+            // 'h'=104, 'i'=105, NUL=0. A const byte array is read-only, so it lowers
+            // to the zero-copy RVA path (Libc.L over PE .rodata) rather than the
+            // writable GlobalArrayFrom POH copy.
+            emitted.ShouldContain("byte* tag = Libc.L(new byte[]{ 104, 105, 0 })");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void non_const_char_array_stays_writable_GlobalArrayFrom()
+    {
+        // Without const the array may be mutated (here it is), so it keeps the
+        // writable GlobalArrayFrom POH path — no RVA.
+        var src = WriteTemp("""
+            static char buf[] = "hi";
+            int main(void) { buf[0] = 'H'; return buf[0]; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("byte* buf = Libc.GlobalArrayFrom<byte>(new byte[]{ 104, 105, 0 })");
         }
         finally { File.Delete(src); }
     }

@@ -1672,6 +1672,20 @@ internal sealed class CSharpBackend
             return $"({elemCs}*)Libc.GlobalArrayFrom<nint>(new nint[]{{ {ptr} }})";
         }
         var vals = string.Join(", ", pa.Elems.Select(e => Coerced(e, pa.Element)));
+        // const-driven RVA: a const byte/char array (incl. a const #embed blob) is
+        // read-only, so point straight at the PE .rodata blob via Libc.L — the
+        // zero-copy string-literal path (Roslyn RVA-folds `new byte[]{consts}` in a
+        // ReadOnlySpan<byte> position: no alloc, no GC root, no startup copy) —
+        // instead of the writable GlobalArrayFrom POH copy. Both return byte*, so
+        // the global's type and every use are unchanged. Sound because writing to a
+        // const object is UB and the const-correctness check rejects in-source
+        // writes; reads / sizeof / address-of are unaffected. Byte element only for
+        // now (`char`/`unsigned char` → C# `byte`); a multi-byte const array keeps
+        // the writable path until a non-byte RVA fold lands.
+        if (pa.Element.IsConst && elemCs == "byte")
+        {
+            return $"Libc.L(new byte[]{{ {vals} }})";
+        }
         return $"Libc.GlobalArrayFrom<{elemCs}>(new {elemCs}[]{{ {vals} }})";
     }
 

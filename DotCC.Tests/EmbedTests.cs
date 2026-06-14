@@ -19,12 +19,13 @@ namespace DotCC.Tests;
 /// fixture.
 /// </summary>
 /// <remarks>
-/// V1 lowers a <c>#embed</c>'d char array onto the writable
-/// <c>GlobalArrayFrom&lt;byte&gt;</c> path (the bytes are still embedded in the
-/// assembly via Roslyn's RVA <c>InitializeArray</c>); zero-copy RVA is folded
-/// into the future const-correctness work (const is stripped pre-parse today, so
-/// it can't gate RVA). Tests pin distinctive byte sequences (0xDE 0xAD …) so a
-/// match can't collide with an unrelated constant in the spliced runtime block.
+/// A <c>const</c> <c>#embed</c>'d byte array lowers to the zero-copy RVA path
+/// (<c>Libc.L</c> over the PE <c>.rodata</c> blob — no startup copy), since writing
+/// to a const object is UB and the const-correctness check rejects in-source
+/// writes; a NON-const <c>#embed</c> array keeps the writable
+/// <c>GlobalArrayFrom&lt;byte&gt;</c> POH copy. Tests pin distinctive byte sequences
+/// (0xDE 0xAD …) so a match can't collide with an unrelated constant in the spliced
+/// runtime block.
 /// </remarks>
 public sealed class EmbedTests
 {
@@ -55,8 +56,9 @@ public sealed class EmbedTests
         finally { try { Directory.Delete(dir, recursive: true); } catch { /* best-effort */ } }
     }
 
-    // A `static const` char array gives a deterministic `GlobalArrayFrom<byte>(
-    // new byte[]{ … })` emit (block-auto arrays differ); the fixture covers runtime.
+    // A `static const` char array gives a deterministic backing-store emit
+    // (block-auto arrays differ); const → the zero-copy `Libc.L(new byte[]{ … })`
+    // RVA form. The fixture covers runtime.
     private const string FillTemplate = """
         int main(void) {
             static const unsigned char d[] = {
@@ -76,7 +78,9 @@ public sealed class EmbedTests
     {
         var (emit, _) = Fill(new byte[] { 0xDE, 0xAD, 0xBE, 0xEF });
         // One backing byte[] carrying exactly the file's bytes — not exploded.
-        emit.ShouldContain("GlobalArrayFrom<byte>(new byte[]{ 222, 173, 190, 239 }");
+        // The array is `const`, so it lowers to the zero-copy RVA path (Libc.L
+        // over PE .rodata), not the writable GlobalArrayFrom copy.
+        emit.ShouldContain("Libc.L(new byte[]{ 222, 173, 190, 239 }");
     }
 
     // ---- limit(N): embed only the first N bytes ----------------------------

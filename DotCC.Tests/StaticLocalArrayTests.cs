@@ -40,8 +40,9 @@ public sealed class StaticLocalArrayTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            // Hoisted to a mangled pinned global field…
-            emitted.ShouldContain("tab__s0 = Libc.GlobalArrayFrom<byte>(new byte[]{ 0, 1, 2, 3 })");
+            // Hoisted to a mangled global field; the array is `const`, so it takes
+            // the zero-copy RVA path (Libc.L over .rodata) rather than GlobalArrayFrom.
+            emitted.ShouldContain("tab__s0 = Libc.L(new byte[]{ 0, 1, 2, 3 })");
             // …and the in-function use rewrites to that field.
             emitted.ShouldContain("tab__s0[x]");
         }
