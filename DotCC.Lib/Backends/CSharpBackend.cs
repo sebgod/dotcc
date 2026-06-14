@@ -112,16 +112,22 @@ internal sealed class CSharpBackend
             sb.Append("[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit)]\n");
         }
         sb.Append("unsafe struct ").Append(t.Name).Append("\n{\n");
-        foreach (var f in t.Fields)
+        var bitUnitCounter = 0;
+        for (var fi = 0; fi < t.Fields.Count; )
         {
-            // A bit-field lowers to a backing field + a masked accessor property:
-            // the store truncates to the field width, and a signed field
-            // sign-extends on read — matching C's value semantics (overflow wrap,
-            // negative signed fields). Layout/sizeof needn't match C (bit packing is
-            // implementation-defined), so each bit-field gets its own backing field.
-            if (f.BitWidth > 0)
+            var f = t.Fields[fi];
+            // A run of consecutive bit-fields packs into MSVC-style storage units —
+            // one shared backing field per unit (so sizeof + member offsets match C)
+            // plus a masked/sign-extended accessor per named member (value semantics:
+            // overflow wraps, signed fields sign-extend on read). Consume the whole
+            // run at once so adjacent same-size fields share a unit.
+            if (f.IsBitField)
             {
-                sb.Append(BitFieldText(f, t.IsUnion));
+                var run = new List<StructField>();
+                var fj = fi;
+                while (fj < t.Fields.Count && t.Fields[fj].IsBitField) { run.Add(t.Fields[fj]); fj++; }
+                sb.Append(PackBitFieldRun(run, t.IsUnion, ref bitUnitCounter));
+                fi = fj;
                 continue;
             }
             if (t.IsUnion) { sb.Append("    [System.Runtime.InteropServices.FieldOffset(0)]\n"); }
@@ -147,9 +153,11 @@ internal sealed class CSharpBackend
                         .Append(wrap).Append("\n{\n    public ").Append(Cs(flat)).Append(" _e;\n}\n\n");
                     sb.Append("    public ").Append(wrap).Append(' ').Append(fid).Append(";\n");
                 }
+                fi++;
                 continue;
             }
             sb.Append("    public ").Append(Cs(f.Type)).Append(' ').Append(DotCC.EmitHelpers.Id(f.Name)).Append(";\n");
+            fi++;
         }
         sb.Append("}\n\n");
         return wrappers.Append(sb).ToString();
@@ -183,26 +191,128 @@ internal sealed class CSharpBackend
             ? new Cast(en.Underlying, e) { Type = en.Underlying, Pos = e.Pos }
             : e;
 
-    /// <summary>Render a bit-field as a private backing field + a public accessor
-    /// property. The setter stores the value masked to the field width (C's modular
-    /// truncation); the getter masks (unsigned) or sign-extends through the
-    /// container width (signed) — so reads/writes carry C's exact value semantics.</summary>
-    private string BitFieldText(StructField f, bool isUnion)
+    /// <summary>Pack a maximal run of consecutive bit-fields into MSVC-style storage
+    /// units and emit them. A unit is a single private backing field of the declared
+    /// integer type's size (so <c>sizeof</c> + member offsets match C's layout);
+    /// consecutive bit-fields of the SAME size share a unit, LSB-first, until it
+    /// fills (then a new unit starts), and a differing size or a zero-width member
+    /// (<c>int : 0;</c>) forces a fresh unit. Each NAMED member gets a masked /
+    /// sign-extended accessor property over its unit's backing field — value
+    /// semantics (modular store, signed sign-extension on read). Anonymous members
+    /// reserve bits but get no accessor. A union puts every unit at
+    /// <c>[FieldOffset(0)]</c> (all members overlay).</summary>
+    private string PackBitFieldRun(IReadOnlyList<StructField> run, bool isUnion, ref int unitCounter)
     {
-        var bt = Cs(f.Type);                       // "uint" / "int" / …
+        var units = new List<(int Bytes, List<(StructField F, int Off)> Members)>();
+        int curBytes = -1; List<(StructField, int)>? curMembers = null; var used = 0;
+        void Close()
+        {
+            if (curMembers is not null) { units.Add((curBytes, curMembers)); }
+            curMembers = null; curBytes = -1; used = 0;
+        }
+        foreach (var f in run)
+        {
+            var bytes = BitUnitBytes(f.Type);
+            var w = f.BitWidth!.Value;
+            if (w == 0) { Close(); continue; }       // zero-width → storage-unit boundary
+            if (curMembers is null || curBytes != bytes || used + w > bytes * 8)
+            {
+                Close();
+                curMembers = new List<(StructField, int)>();
+                curBytes = bytes;
+            }
+            curMembers.Add((f, used));
+            used += w;
+        }
+        Close();
+
+        var sb = new StringBuilder();
+        foreach (var (bytes, members) in units)
+        {
+            var id = "__bf" + unitCounter++;
+            var (ut, _) = BitStorage(bytes);
+            if (isUnion) { sb.Append("    [System.Runtime.InteropServices.FieldOffset(0)]\n"); }
+            sb.Append("    private ").Append(ut).Append(' ').Append(id).Append(";\n");
+            foreach (var (f, off) in members)
+            {
+                if (f.Name.Length == 0) { continue; }   // anonymous padding — no accessor
+                sb.Append(BitFieldAccessor(f, id, bytes, off));
+            }
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>The storage-unit size (bytes) for a bit-field — its declared integer
+    /// type's size (MSVC allocates a unit sized to the type); an enum bit-field uses
+    /// its underlying size. Falls back to 4 for an unexpected size.</summary>
+    private static int BitUnitBytes(CType t)
+    {
+        var b = t.SizeOf;
+        return b is 1 or 2 or 4 or 8 ? b : 4;
+    }
+
+    /// <summary>The unsigned C# storage type (and its bit width) for a bit-field unit
+    /// of the given byte size. Unsigned storage keeps the write-masking sign-clean;
+    /// each member's accessor re-applies its own signedness on read.</summary>
+    private static (string Cs, int Bits) BitStorage(int bytes) => bytes switch
+    {
+        1 => ("byte", 8),
+        2 => ("ushort", 16),
+        8 => ("ulong", 64),
+        _ => ("uint", 32),
+    };
+
+    /// <summary>Whether a bit-field's declared type is signed (drives sign-extension
+    /// on read). An enum bit-field follows its underlying type.</summary>
+    private static bool IsSignedBitField(CType t) => t.Unqualified switch
+    {
+        CType.Prim p => p.Signed,
+        CType.Enum e => IsSignedBitField(e.Underlying),
+        _ => false,
+    };
+
+    /// <summary>Emit a masked / sign-extended accessor property for one named
+    /// bit-field member living at bit <paramref name="off"/> of unit
+    /// <paramref name="unit"/> (an unsigned backing field of <paramref name="unitBytes"/>
+    /// bytes). The getter extracts the field's bits and (signed) sign-extends through
+    /// a same-width-or-wider math type; the setter clears the field's bit window and
+    /// ORs in the value truncated to the field width — exactly C's value semantics.</summary>
+    private string BitFieldAccessor(StructField f, string unit, int unitBytes, int off)
+    {
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        var bt = Cs(f.Type);                          // declared type spelling ("int" / "uint" / …)
         var fid = DotCC.EmitHelpers.Id(f.Name);
-        var backing = "__bf_" + fid;
-        var bits = f.Type.SizeOf * 8;                 // container width
-        var signed = (f.Type.Unqualified as CType.Prim)?.Signed ?? false;
-        var mask = (1UL << f.BitWidth) - 1;
-        var maskLit = signed ? mask.ToString(System.Globalization.CultureInfo.InvariantCulture)
-                             : mask.ToString(System.Globalization.CultureInfo.InvariantCulture) + "u";
-        var offset = isUnion ? "    [System.Runtime.InteropServices.FieldOffset(0)]\n" : "";
+        var (ut, ub) = BitStorage(unitBytes);         // unsigned backing type + its bit width
+        var w = f.BitWidth!.Value;
+        var signed = IsSignedBitField(f.Type);
+        var mw = ub <= 32 ? 32 : 64;                  // shift math is done in int/long (C# promotes < int)
+        var mtU = mw == 32 ? "uint" : "ulong";
+        var mtS = mw == 32 ? "int" : "long";
+        var unitAll = ub >= 64 ? ulong.MaxValue : (1UL << ub) - 1;
+        var mask = w >= 64 ? ulong.MaxValue : (1UL << w) - 1;
+        var clear = unitAll & ~((mask << off) & unitAll);
+        var maskLit = mask.ToString(inv) + (mw == 32 ? "u" : "UL");
+        var clearLit = LitForUnit(clear, unitBytes);
+        var extract = $"(({mtU})({unit} >> {off}) & {maskLit})";
         var get = signed
-            ? $"({bt})({backing} << {bits - f.BitWidth} >> {bits - f.BitWidth})"   // sign-extend
-            : $"({bt})({backing} & {maskLit})";
-        return $"{offset}    private {bt} {backing};\n"
-             + $"    public {bt} {fid} {{ get => {get}; set => {backing} = ({bt})(value & {maskLit}); }}\n";
+            ? $"({bt})((({mtS}){extract} << {mw - w}) >> {mw - w})"   // arithmetic shift sign-extends
+            : $"({bt})({extract})";
+        var set = $"{unit} = ({ut})(({unit} & {clearLit}) | (({ut})((({mtU})value & {maskLit}) << {off})));";
+        return $"    public {bt} {fid} {{ get => {get}; set => {set} }}\n";
+    }
+
+    /// <summary>Format an unsigned bit-mask literal in the right C# form for a unit's
+    /// storage type — 1/2-byte units take a bare (in-range, positive) <c>int</c>
+    /// literal, 4-byte a <c>u</c> suffix, 8-byte a <c>UL</c> suffix.</summary>
+    private static string LitForUnit(ulong v, int bytes)
+    {
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        return bytes switch
+        {
+            1 or 2 => v.ToString(inv),
+            4 => v.ToString(inv) + "u",
+            _ => v.ToString(inv) + "UL",
+        };
     }
 
     /// <summary>C# permits a <c>fixed</c> buffer only of these primitive element

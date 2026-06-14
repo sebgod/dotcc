@@ -317,10 +317,24 @@ public sealed record LocalDecl(Symbol Sym, CExpr? Init);
 public sealed record StructTypeDef(string Name, IReadOnlyList<StructField> Fields, bool IsUnion);
 
 /// <summary>One field of a <see cref="StructTypeDef"/>. <see cref="BitWidth"/> is
-/// 0 for a normal field, or the declared width of a bit-field (lowered to a
-/// backing field + a masked/sign-extended accessor property — value semantics,
-/// since C bit packing is implementation-defined).</summary>
-public readonly record struct StructField(string Name, CType Type, int BitWidth = 0);
+/// <c>null</c> for a normal field, or the declared width of a bit-field —
+/// including <c>0</c> for a zero-width anonymous bit-field (<c>int : 0;</c>),
+/// which forces the following bit-field onto a fresh storage unit. An anonymous
+/// bit-field (padding, <c>int : 3;</c>) carries an empty <see cref="Name"/>. The
+/// backend packs consecutive same-size bit-fields into one shared backing field
+/// (MSVC storage-unit layout) + masked/sign-extended accessor properties — so
+/// <c>sizeof</c> and member offsets match C's layout while reads/writes keep C's
+/// exact value semantics (modular truncation, signed sign-extension).</summary>
+public readonly record struct StructField(string Name, CType Type, int? BitWidth = null)
+{
+    /// <summary>True for any bit-field — named, anonymous, or zero-width.</summary>
+    public bool IsBitField => BitWidth is not null;
+
+    /// <summary>True for an anonymous bit-field (padding: a width but no name). It
+    /// reserves bits in the layout but has no accessible member, so positional
+    /// initializers skip it.</summary>
+    public bool IsAnonBitField => BitWidth is not null && Name.Length == 0;
+}
 
 /// <summary>A C <c>enum</c> type definition (tagged or typedef-named). Codegen
 /// renders it into the top-level type-declarations section as a real

@@ -1,2 +1,3 @@
 ready=1 mode=5 count=10 delta=-3
 ready=0 mode=5 count=1 delta=-3
+sizeof Flags=4 Wide=8 Zero=8

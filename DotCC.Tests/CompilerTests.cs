@@ -385,7 +385,7 @@ public sealed partial class CompilerTests
     // ---- bit-fields -----------------------------------------------------
 
     [Fact]
-    public void Bitfield_lowers_to_masked_accessor_property()
+    public void Bitfield_packs_same_size_fields_into_one_unit()
     {
         var src = WriteTemp("""
             struct Flags { unsigned ready : 1; unsigned : 2; unsigned mode : 3; };
@@ -394,15 +394,56 @@ public sealed partial class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            // Named bit-field → private backing field + masked accessor property.
-            emitted.ShouldContain("__bf_ready");
+            // Both same-size named bit-fields share ONE backing field (`__bf0`):
+            // packed MSVC-style so sizeof + offsets match C.
+            emitted.ShouldContain("private uint __bf0;");
+            emitted.ShouldNotContain("__bf1");               // everything fits in one unit
             emitted.ShouldContain("public uint ready {");
-            emitted.ShouldContain("& 1u");                  // 1-bit store mask
+            emitted.ShouldContain("& 1u");                   // 1-bit field mask
             emitted.ShouldContain("public uint mode {");
-            emitted.ShouldContain("& 7u");                  // 3-bit store mask
-            // Anonymous bit-field (`unsigned : 2;`, padding) → no accessible member.
+            emitted.ShouldContain("& 7u");                   // 3-bit field mask
+            // The anonymous `: 2;` padding shifts `mode` to bit 3 (no member emitted).
+            emitted.ShouldContain("(__bf0 >> 3)");
             emitted.ShouldNotContain("public uint  {");
             emitted.ShouldNotContain("public uint  ;");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Bitfield_starts_new_unit_when_field_does_not_fit()
+    {
+        // a:20 + b:20 = 40 bits > 32, so `b` can't share the first uint — it gets
+        // a second storage unit (MSVC: no straddling), making sizeof 8.
+        var src = WriteTemp("""
+            struct Wide { unsigned a : 20; unsigned b : 20; };
+            int main() { struct Wide w; w.a = 1; w.b = 2; return (int)sizeof(struct Wide); }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("private uint __bf0;");
+            emitted.ShouldContain("private uint __bf1;");    // b spills into a fresh unit
+            emitted.ShouldContain("(__bf1 >> 0)");           // b lives at offset 0 of unit 1
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Bitfield_signed_field_sign_extends_on_read()
+    {
+        var src = WriteTemp("""
+            struct S { int delta : 4; };
+            int main() { struct S s; s.delta = 13; return s.delta; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            // A signed bit-field reads back through an arithmetic shift pair that
+            // sign-extends the 4-bit value through int (so 0b1101 reads as -3).
+            emitted.ShouldContain("private uint __bf0;");
+            emitted.ShouldContain("public int delta {");
+            emitted.ShouldContain("<< 28) >> 28");           // sign-extend a 4-bit field in int
         }
         finally { File.Delete(src); }
     }

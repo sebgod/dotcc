@@ -835,19 +835,27 @@ internal sealed partial class IrBuilder
                 case C.StructFnPtrMemberNoArgs sm:
                     fields.Add(new StructField(Tok(sm.Arg3), FnPtrType(sm.Arg0, null)));
                     break;
-                // `T name : W;` — a bit-field. Codegen lowers it to a backing field
-                // + a masked accessor property (value semantics; bit packing is
-                // implementation-defined, so the struct's layout/sizeof needn't match).
+                // `T name : W;` — a bit-field. Codegen packs consecutive same-size
+                // bit-fields into one shared backing field (MSVC storage-unit layout)
+                // + a masked/sign-extended accessor property, so sizeof + offsets
+                // match C while reads/writes keep C's value semantics.
                 case C.StructBitField sm:
                 {
                     var w = ConstEval(BuildExpr(sm.Arg3)) ?? throw new IrUnsupportedException("non-constant bit-field width");
                     fields.Add(new StructField(Tok(sm.Arg1), ResolveType(sm.Arg0), (int)w));
                     break;
                 }
-                // `T : W;` — an anonymous bit-field (padding). No accessible member;
-                // dotcc's value-only bit-field model drops it.
-                case C.StructAnonBitField:
+                // `T : W;` — an anonymous bit-field (padding). Kept in the field list
+                // with an empty name and its width so the backend's packing reserves
+                // its bits (and a zero width forces the next field onto a fresh
+                // storage unit); it produces no accessible member and is skipped by
+                // positional initializers.
+                case C.StructAnonBitField sm:
+                {
+                    var w = ConstEval(BuildExpr(sm.Arg2)) ?? throw new IrUnsupportedException("non-constant anonymous bit-field width");
+                    fields.Add(new StructField("", ResolveType(sm.Arg0), (int)w));
                     break;
+                }
                 default: throw new IrUnsupportedException(TypeName(m.Content));
             }
         }

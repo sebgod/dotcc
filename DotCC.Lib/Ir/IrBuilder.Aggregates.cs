@@ -103,7 +103,9 @@ internal sealed partial class IrBuilder
     /// struct-array element builder converge.</summary>
     private StructInit BuildStructPositional(CType type, IReadOnlyList<Init> items)
     {
-        var fields = StructFieldsOf(type);
+        // Anonymous bit-fields (padding) take no initializer in C — drop them so the
+        // positional values land on the accessible members in declaration order.
+        var fields = StructFieldsOf(type).Where(f => !f.IsAnonBitField).ToList();
         var members = new List<FieldInit>(Math.Min(items.Count, fields.Count));
         for (var i = 0; i < items.Count && i < fields.Count; i++)
         {
