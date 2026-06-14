@@ -223,6 +223,16 @@ public abstract record CType
     /// carries real UTF-16. A distinct Prim (not <see cref="UShort"/>) so the backend
     /// can spell it <c>char</c> while keeping the unsigned-16-bit arithmetic identity.</summary>
     public static readonly CType Char16 = new Prim("char16_t", 2, true, false);
+
+    /// <summary>C <c>wchar_t</c> (<c>&lt;wchar.h&gt;</c>). dotcc commits to the
+    /// <em>MSVC-shaped</em> wchar_t — an unsigned 16-bit UTF-16 code unit — so it
+    /// lowers to C# <c>char</c> exactly like <see cref="Char16"/> (a documented ABI
+    /// choice, same flavour as dotcc's LP64 / little-endian commitments; on gcc/Linux
+    /// <c>wchar_t</c> is instead 32-bit, so the gcc oracle is opted out per fixture).
+    /// A <em>distinct</em> Prim (not <see cref="Char16"/>) for type fidelity in
+    /// diagnostics/<c>sizeof</c>; the backend renders both to <c>char</c>, so every
+    /// <c>char</c>-coercion rule applies unchanged.</summary>
+    public static readonly CType WChar = new Prim("wchar_t", 2, true, false);
     public static readonly CType Int = new Prim("int", 4, true, true);
     public static readonly CType UInt = new Prim("unsigned int", 4, true, false);
     public static readonly CType Long = new Prim("long", 8, true, true);

@@ -14,7 +14,7 @@
 
    NOT provided (out of scope — dotcc has no multibyte/locale conversion model):
    char32_t and the conversion functions mbrtoc16 / c16rtomb / mbrtoc32 /
-   c32rtomb. wchar_t is also unsupported (its width is platform-divergent —
-   16-bit on Windows, 32-bit elsewhere). */
+   c32rtomb. (wchar_t IS supported — see <wchar.h> — as dotcc's MSVC-shaped
+   16-bit wide type, the sibling of char16_t.) */
 
 #endif

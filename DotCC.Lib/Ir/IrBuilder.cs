@@ -145,6 +145,10 @@ internal sealed partial class IrBuilder
         // Char16 Prim (→ C# char) instead of the verbatim CType.Named fallback the
         // other seeded library names take.
         _typedefs["char16_t"] = CType.Char16;
+        // <wchar.h> wchar_t is likewise a pre-registered type name (not a real
+        // typedef) — seed it to the WChar Prim (→ C# char; dotcc's MSVC-shaped
+        // 16-bit wchar_t). See CType.WChar.
+        _typedefs["wchar_t"] = CType.WChar;
     }
 
     /// <summary>Flag a feature introduced in <paramref name="era"/> (ISO year) when
@@ -211,6 +215,8 @@ internal sealed partial class IrBuilder
                 or C.GlobalStaticCharArrStr or C.GlobalStaticCharArrStrSized
                 or C.GlobalU16CharArrStr or C.GlobalU16CharArrStrSized
                 or C.GlobalStaticU16CharArrStr or C.GlobalStaticU16CharArrStrSized
+                or C.GlobalWCharArrStr or C.GlobalWCharArrStrSized
+                or C.GlobalStaticWCharArrStr or C.GlobalStaticWCharArrStrSized
                 or C.GlobalStaticStructInit when AlreadySeenTopLevel(fn):
                 break;
             case C.GlobalDeclList g: BuildGlobalDecls(g.Arg0, g.Arg1, Storage.Static); break;
@@ -234,6 +240,11 @@ internal sealed partial class IrBuilder
             case C.GlobalU16CharArrStrSized g: BuildGlobalCharArr(g.Arg0, g.Arg1, g.Arg4, g.Arg2, null, u16: true); break;
             case C.GlobalStaticU16CharArrStr g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg6, null, null, u16: true); break;
             case C.GlobalStaticU16CharArrStrSized g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg5, g.Arg3, null, u16: true); break;
+            // wchar_t file-scope arrays from an L"…" literal (same shapes, 16-bit decode).
+            case C.GlobalWCharArrStr g: BuildGlobalCharArr(g.Arg0, g.Arg1, g.Arg5, null, null, u16: true); break;
+            case C.GlobalWCharArrStrSized g: BuildGlobalCharArr(g.Arg0, g.Arg1, g.Arg4, g.Arg2, null, u16: true); break;
+            case C.GlobalStaticWCharArrStr g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg6, null, null, u16: true); break;
+            case C.GlobalStaticWCharArrStrSized g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg5, g.Arg3, null, u16: true); break;
             // `extern T a[N];` / `extern T a[];` — declaration only (storage elsewhere).
             case C.ExternArr g: BuildExternArr(g.Arg1, g.Arg2, g.Arg3); break;
             case C.ExternArrIncomplete g: BuildExternArr(g.Arg1, g.Arg2, null); break;
@@ -1190,6 +1201,8 @@ internal sealed partial class IrBuilder
             case C.StmtStaticCharArrStrSized s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg5, s.Arg3) with { Pos = pos };
             case C.StmtStaticU16CharArrStr s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg6, null, u16: true) with { Pos = pos };
             case C.StmtStaticU16CharArrStrSized s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg5, s.Arg3, u16: true) with { Pos = pos };
+            case C.StmtStaticWCharArrStr s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg6, null, u16: true) with { Pos = pos };
+            case C.StmtStaticWCharArrStrSized s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg5, s.Arg3, u16: true) with { Pos = pos };
             // Block-scope aggregate TYPE definitions (`struct cD { … };` inside a
             // function body — the block-scope enum forms are handled below). A
             // type has no storage, so C allows this; dotcc hoists the definition
@@ -1412,6 +1425,8 @@ internal sealed partial class IrBuilder
         C.DeclCharArrStrSized d => BuildDeclCharArrStr(d.Arg0, d.Arg1, CharArrSize(d.Arg2), d.Arg4),
         C.DeclU16CharArrStr d => BuildDeclCharArrStr(d.Arg0, d.Arg1, null, d.Arg5, u16: true),
         C.DeclU16CharArrStrSized d => BuildDeclCharArrStr(d.Arg0, d.Arg1, CharArrSize(d.Arg2), d.Arg4, u16: true),
+        C.DeclWCharArrStr d => BuildDeclCharArrStr(d.Arg0, d.Arg1, null, d.Arg5, u16: true),
+        C.DeclWCharArrStrSized d => BuildDeclCharArrStr(d.Arg0, d.Arg1, CharArrSize(d.Arg2), d.Arg4, u16: true),
         C.DeclStructInit d => BuildDeclStructInit(d),
         // `T x = { .field = … };` — C99 designated struct/union initializer.
         C.DeclStructDesignated d => BuildLocalInit(d.Arg1, ResolveType(d.Arg0), BuildStructDesignated(ResolveType(d.Arg0), d.Arg4)),
@@ -1836,9 +1851,11 @@ internal sealed partial class IrBuilder
             C.Flt f => BuildFloat(f),
             C.Str => BuildStr(it),
             C.U16str => BuildU16Str(it),
+            C.Wstr => BuildWStr(it),
             C.Embed em => BuildEmbed(em),
             C.Chr c => BuildChr(c),
             C.U16chr c => BuildU16Chr(c),
+            C.Wchr c => BuildWChr(c),
             C.Var v => BuildVar(v),
             C.Paren p => BuildExpr(p.Arg1) is var inner ? new Paren(inner) { Type = inner.Type, IsLValue = inner.IsLValue } : throw new InvalidOperationException(),
             C.Add b => Bin(BinOp.Add, b.Arg0, b.Arg2),
@@ -2406,9 +2423,20 @@ internal sealed partial class IrBuilder
         // u"…" — a char16_t string literal: type char16_t[N] (N = code units incl.
         // NUL), decaying to char16_t* in use (like LitStr/char[N]). Element count is
         // the UTF-16 code-unit count + 1; the backend re-decodes for the literal text.
-        var segs = CollectU16StrSegments(((C.U16str)it.Content).Arg0);
+        var segs = CollectWideStrSegments(((C.U16str)it.Content).Arg0);
         var units = DotCC.EmitHelpers.StringU16Values(segs);
         return new LitU16Str(segs) { Type = new CType.Array(CType.Char16, units.Count + 1) };
+    }
+
+    private CExpr BuildWStr(Item it)
+    {
+        // L"…" — a wchar_t string literal. dotcc's wchar_t is the MSVC-shaped 16-bit
+        // UTF-16 type, so this lowers IDENTICALLY to u"…" (UTF-16 code units, pooled
+        // `Libc.L16`), reusing the LitU16Str node and the shared U16 decoder; only
+        // the element type differs (wchar_t vs char16_t — both render to C# char).
+        var segs = CollectWideStrSegments(((C.Wstr)it.Content).Arg0);
+        var units = DotCC.EmitHelpers.StringU16Values(segs);
+        return new LitU16Str(segs) { Type = new CType.Array(CType.WChar, units.Count + 1) };
     }
 
     /// <summary>The constant array bound of a char-array string declarator's
@@ -2441,21 +2469,26 @@ internal sealed partial class IrBuilder
         return segs;
     }
 
-    /// <summary>Collect adjacent <c>u"…"</c> segments of a <c>U16StringSeq</c>, in
-    /// source order, with the <c>u</c> prefix stripped so each is a plain quoted
-    /// lexeme the shared decoders (<c>StripStrQuotes</c>/<c>StringU16Values</c>)
-    /// accept unchanged.</summary>
-    private List<string> CollectU16StrSegments(Item strSeq)
+    /// <summary>Collect adjacent wide string-literal segments of a
+    /// <c>U16StringSeq</c> (<c>u"…"</c>) or a <c>WStringSeq</c> (<c>L"…"</c>), in
+    /// source order, with the encoding prefix (<c>u</c>/<c>L</c>) stripped so each
+    /// is a plain quoted lexeme the shared 16-bit decoder (<c>StringU16Values</c>)
+    /// accepts unchanged. char16_t and dotcc's MSVC-shaped 16-bit wchar_t decode
+    /// identically, so one collector serves both literal kinds.</summary>
+    private List<string> CollectWideStrSegments(Item strSeq)
     {
         var segs = new List<string>();
-        static string StripU(string raw) => raw.Length >= 1 && raw[0] == 'u' ? raw[1..] : raw;
+        static string StripPrefix(string raw) =>
+            raw.Length >= 1 && raw[0] is 'u' or 'L' ? raw[1..] : raw;
         void Walk(Item node)
         {
             switch (node.Content)
             {
-                case C.U16strSeqCons sc: Walk(sc.Arg0); segs.Add(StripU(Tok(sc.Arg1))); break;
-                case C.U16strSeqOne so: segs.Add(StripU(Tok(so.Arg0))); break;
-                default: segs.Add(StripU(Tok(node))); break;
+                case C.U16strSeqCons sc: Walk(sc.Arg0); segs.Add(StripPrefix(Tok(sc.Arg1))); break;
+                case C.U16strSeqOne so: segs.Add(StripPrefix(Tok(so.Arg0))); break;
+                case C.WstrSeqCons sc: Walk(sc.Arg0); segs.Add(StripPrefix(Tok(sc.Arg1))); break;
+                case C.WstrSeqOne so: segs.Add(StripPrefix(Tok(so.Arg0))); break;
+                default: segs.Add(StripPrefix(Tok(node))); break;
             }
         }
         Walk(strSeq);
@@ -2469,7 +2502,7 @@ internal sealed partial class IrBuilder
     {
         var elem = ResolveType(typeItem);
         var bytes = u16
-            ? DotCC.EmitHelpers.StringU16Values(CollectU16StrSegments(strSeqItem))
+            ? DotCC.EmitHelpers.StringU16Values(CollectWideStrSegments(strSeqItem))
             : DotCC.EmitHelpers.StringByteValues(CollectStrSegments(strSeqItem));
         bytes.Add(0);                                   // NUL
         var count = explicitSize ?? bytes.Count;
@@ -2512,6 +2545,19 @@ internal sealed partial class IrBuilder
         // char16_t-typed literal would otherwise pick up (→ uint, also not char-convertible).
         var inner = new LitInt(value.ToString(System.Globalization.CultureInfo.InvariantCulture), value) { Type = CType.Int };
         return new Cast(CType.Char16, inner) { Type = CType.Char16 };
+    }
+
+    private CExpr BuildWChr(C.Wchr c)
+    {
+        // L'x' — a wchar_t character constant (type wchar_t, not int). Same 16-bit
+        // decode + explicit-(char)-cast lowering as u'x' (see BuildU16Chr), just
+        // tagged wchar_t instead of char16_t (both render to C# char).
+        var raw = Tok(c.Arg0);   // L'x'
+        var lit0 = new LitInt("0", 0) { Type = CType.Int };
+        if (raw is null || raw.Length < 4) { return new Cast(CType.WChar, lit0) { Type = CType.WChar }; }
+        var value = DecodeCharConstant(raw[2..^1]);   // strip the `L'` prefix and `'`
+        var inner = new LitInt(value.ToString(System.Globalization.CultureInfo.InvariantCulture), value) { Type = CType.Int };
+        return new Cast(CType.WChar, inner) { Type = CType.WChar };
     }
 
     /// <summary>Decode the body of a C character constant (the chars between the

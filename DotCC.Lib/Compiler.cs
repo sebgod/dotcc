@@ -213,6 +213,8 @@ public static class Compiler
         "char16_t",     // <uchar.h> — C11 UTF-16 code unit. Unlike the names above
                         // (which resolve to a verbatim Libc type), char16_t is
                         // pre-seeded in IrBuilder._typedefs to CType.Char16 → C# char.
+        "wchar_t",      // <wchar.h> — likewise pre-seeded in IrBuilder._typedefs to
+                        // CType.WChar → C# char (dotcc's MSVC-shaped 16-bit wchar_t).
     };
 
     /// <summary>
@@ -1075,6 +1077,13 @@ public static class Compiler
             "__LP64__=1",
             "__SIZEOF_POINTER__=8",
             "__SIZEOF_LONG__=8",
+            // dotcc's wchar_t is the MSVC shape — an unsigned 16-bit UTF-16 code
+            // unit (→ C# char), NOT gcc/Linux's 32-bit wchar_t. Advertise the
+            // width so portable code that branches on __SIZEOF_WCHAR_T__ (or the
+            // __WCHAR_*__ range macros) configures for 2-byte wide chars.
+            "__SIZEOF_WCHAR_T__=2",
+            "__WCHAR_MIN__=0",
+            "__WCHAR_MAX__=0xffff",
             // C23 #embed resource-status constants — the three values
             // `__has_embed(...)` evaluates to, so code can compare against the
             // named constant (`#if __has_embed("x") == __STDC_EMBED_FOUND__`).

@@ -389,6 +389,13 @@ symbols:
   - U16STRING      # 166 char16_t string literal — u"…"
   - U16CHAR        # 167 char16_t char constant — u'x'
   - U16StringSeq   # 168 non-terminal: a run of adjacent u"…" literals
+  # wchar_t literals (<wchar.h>). `L"…"` is a wchar_t string (decays to wchar_t*
+  # → C# char*, dotcc's MSVC-shaped 16-bit wchar_t); `L'x'` is a wchar_t constant.
+  # Lexed by dedicated `L`-prefixed rules below; the unprefixed STRING/CHAR are
+  # unaffected (same shape as the U16 set above).
+  - WSTRING        # 169 wchar_t string literal — L"…"
+  - WCHAR          # 170 wchar_t char constant — L'x'
+  - WStringSeq     # 171 non-terminal: a run of adjacent L"…" literals
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -579,6 +586,9 @@ productions:
       # char16_t file-scope array from a u"…" literal (→ pinned char[] / GlobalArrayFrom).
       - { lhs: Fn, rhs: [Type, ID, ArrDims, '=', U16StringSeq, ';'],        action: globalU16CharArrStrSized }
       - { lhs: Fn, rhs: [Type, ID, '[', ']', '=', U16StringSeq, ';'],       action: globalU16CharArrStr }
+      # wchar_t file-scope array from an L"…" literal (same shapes, 16-bit decode).
+      - { lhs: Fn, rhs: [Type, ID, ArrDims, '=', WStringSeq, ';'],          action: globalWCharArrStrSized }
+      - { lhs: Fn, rhs: [Type, ID, '[', ']', '=', WStringSeq, ';'],         action: globalWCharArrStr }
       # `static` file-scope arrays — internal linkage is a no-op (never exported),
       # so each lowers identically to its plain counterpart; `static` is consumed.
       - { lhs: Fn, rhs: ['static', Type, ID, ArrDims, ';'],                           action: globalStaticArr }
@@ -589,6 +599,8 @@ productions:
       - { lhs: Fn, rhs: ['static', Type, ID, '[', ']', '=', StringSeq, ';'],          action: globalStaticCharArrStr }
       - { lhs: Fn, rhs: ['static', Type, ID, ArrDims, '=', U16StringSeq, ';'],         action: globalStaticU16CharArrStrSized }
       - { lhs: Fn, rhs: ['static', Type, ID, '[', ']', '=', U16StringSeq, ';'],        action: globalStaticU16CharArrStr }
+      - { lhs: Fn, rhs: ['static', Type, ID, ArrDims, '=', WStringSeq, ';'],           action: globalStaticWCharArrStrSized }
+      - { lhs: Fn, rhs: ['static', Type, ID, '[', ']', '=', WStringSeq, ';'],          action: globalStaticWCharArrStr }
       # File-scope `static T x = { … };` — static struct/union AGGREGATE init, the
       # file-scope twin of stmtStaticStructInit. Same emitter (a once-initialised
       # DotCcGlobals field), just no name mangling. Disjoint from the array forms
@@ -894,6 +906,8 @@ productions:
       - { lhs: Stmt, rhs: ['static', Type, ID, '[', ']', '=', StringSeq, ';'],          action: stmtStaticCharArrStr }
       - { lhs: Stmt, rhs: ['static', Type, ID, ArrDims, '=', U16StringSeq, ';'],         action: stmtStaticU16CharArrStrSized }
       - { lhs: Stmt, rhs: ['static', Type, ID, '[', ']', '=', U16StringSeq, ';'],        action: stmtStaticU16CharArrStr }
+      - { lhs: Stmt, rhs: ['static', Type, ID, ArrDims, '=', WStringSeq, ';'],           action: stmtStaticWCharArrStrSized }
+      - { lhs: Stmt, rhs: ['static', Type, ID, '[', ']', '=', WStringSeq, ';'],          action: stmtStaticWCharArrStr }
       # Block-scope `static T x = { … };` — a static struct/union AGGREGATE
       # initializer (Lua's `static const expdesc ef = {VKINT, {0}, NO_JUMP,
       # NO_JUMP}`). Like the static-array forms, lowers to a once-initialised
@@ -1088,6 +1102,9 @@ productions:
       # char16_t block-scope array from a u"…" literal (→ char* stackalloc copy).
       - { lhs: Decl, rhs: [Type, ID, '[', ']', '=', U16StringSeq], action: declU16CharArrStr }
       - { lhs: Decl, rhs: [Type, ID, ArrDims, '=', U16StringSeq],  action: declU16CharArrStrSized }
+      # wchar_t block-scope array from an L"…" literal (→ char* stackalloc copy).
+      - { lhs: Decl, rhs: [Type, ID, '[', ']', '=', WStringSeq], action: declWCharArrStr }
+      - { lhs: Decl, rhs: [Type, ID, ArrDims, '=', WStringSeq],  action: declWCharArrStrSized }
       # Struct aggregate initializer: `Point p = {1, 2};`. The visitor looks
       # up the struct's field names from a side map populated by StructDef /
       # TypedefStruct / UnionDef, then emits `Point p = new Point { x = 1,
@@ -1396,6 +1413,10 @@ productions:
       # Lowers to a stable, pooled `Libc.L16("…")` pointer (UTF-16). U16StringSeq
       # folds adjacent `u"a" u"b"`.
       - { lhs: Primary, rhs: [U16StringSeq], action: u16str }
+      # `L"…"` — wchar_t string literal (decays to wchar_t* → C# char*). Lowers
+      # identically to u"…" (16-bit UTF-16, pooled `Libc.L16("…")`); WStringSeq
+      # folds adjacent `L"a" L"b"`.
+      - { lhs: Primary, rhs: [WStringSeq],  action: wstr }
       # `'a'`, `'\n'` etc. — C char literal. In C the value has type int
       # but is conventionally assigned to char/byte; we lower to `(byte)'a'`
       # since our `char` is `byte`. Escape processing happens in the visitor.
@@ -1403,6 +1424,9 @@ productions:
       # `u'x'` — C11 char16_t char constant. Unlike a plain char constant (type
       # int), this has type char16_t; lowers to a char16_t-typed integer value.
       - { lhs: Primary, rhs: [U16CHAR],     action: u16chr }
+      # `L'x'` — wchar_t char constant (type wchar_t → C# char), lowered exactly
+      # like u'x'.
+      - { lhs: Primary, rhs: [WCHAR],       action: wchr }
       # C23 keyword constants. The terminals only ever arrive here via
       # DialectKeywordRewriter's c23 promotion (no lexer rule), so these
       # productions are unreachable under < c23 — pre-C23 `true`/`false`/
@@ -1447,6 +1471,13 @@ productions:
     rules:
       - { lhs: U16StringSeq, rhs: [U16StringSeq, U16STRING], action: u16strSeqCons }
       - { lhs: U16StringSeq, rhs: [U16STRING],               action: u16strSeqOne }
+
+  # Adjacent wchar_t string-literal concatenation — `L"a" L"b"` → one L-string.
+  # (Mixing prefixed + unprefixed, `L"a" "b"`, is deferred — out of V1 scope.)
+  - derivation: leftmost
+    rules:
+      - { lhs: WStringSeq, rhs: [WStringSeq, WSTRING], action: wstrSeqCons }
+      - { lhs: WStringSeq, rhs: [WSTRING],             action: wstrSeqOne }
 
 lexer:
   root:
@@ -1657,6 +1688,11 @@ lexer:
     # but the ordering makes the intent explicit. `u8"…"`/`U"…"`/`L"…"` are NOT
     # matched (out of scope) — they fall back to ID + STRING and parse-error.
     - { symbol: U16STRING, match: 'u"(\\["\\nrtbf0v''/aex0-9]|[^"\\])*"' }
+    # wchar_t string literal `L"…"` — same body as STRING with an `L` prefix.
+    # Listed before STRING; longest-match prefers `L"…"` over `L` + `"…"` (an
+    # identifier `L` can never be immediately followed by `"` in valid C).
+    # `u8"…"`/`U"…"` stay unmatched (out of scope) → ID + STRING → parse-error.
+    - { symbol: WSTRING, match: 'L"(\\["\\nrtbf0v''/aex0-9]|[^"\\])*"' }
     - { symbol: STRING, match: '"(\\["\\nrtbf0v''/aex0-9]|[^"\\])*"' }
     # C11 char16_t char constant `u'x'` — the five CHAR forms with a `u` prefix.
     - { symbol: U16CHAR, match: 'u''\\x[0-9a-fA-F]+''' }
@@ -1664,6 +1700,12 @@ lexer:
     - { symbol: U16CHAR, match: 'u''\\[0-7][0-7]''' }
     - { symbol: U16CHAR, match: 'u''\\[abefnrtv0-7\\''"?]''' }
     - { symbol: U16CHAR, match: 'u''[^''\\]''' }
+    # wchar_t char constant `L'x'` — the five CHAR forms with an `L` prefix.
+    - { symbol: WCHAR, match: 'L''\\x[0-9a-fA-F]+''' }
+    - { symbol: WCHAR, match: 'L''\\[0-7][0-7][0-7]''' }
+    - { symbol: WCHAR, match: 'L''\\[0-7][0-7]''' }
+    - { symbol: WCHAR, match: 'L''\\[abefnrtv0-7\\''"?]''' }
+    - { symbol: WCHAR, match: 'L''[^''\\]''' }
     # Char literal: IRx has no `.` (any-char) operator — it parses `.` as
     # literal. Use a char class on the inner byte instead. Rules are longest-
     # match, so the multi-byte escape forms (hex `'\xNN'`, 2/3-digit octal

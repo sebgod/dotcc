@@ -435,7 +435,7 @@ internal sealed partial class IrBuilder
     {
         var elem = ResolveType(typeItem);
         var bytes = u16
-            ? DotCC.EmitHelpers.StringU16Values(CollectU16StrSegments(strSeqItem))
+            ? DotCC.EmitHelpers.StringU16Values(CollectWideStrSegments(strSeqItem))
             : DotCC.EmitHelpers.StringByteValues(CollectStrSegments(strSeqItem));
         bytes.Add(0);   // NUL
         var dims = dimsItem is { } di ? TryConstDims(di) : null;
