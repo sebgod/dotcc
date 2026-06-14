@@ -45,4 +45,50 @@ typedef int wint_t;
 #define WCHAR_MAX 0xffff
 #endif
 
+/* Wide-string library — the 16-bit siblings of the <string.h> str and mem
+   functions. Implementations live in DotCC.Libc/WcharLib.cs, spliced into every emitted
+   program via the embedded-resource runtime block. As in <string.h>, the
+   signatures drop `const` (dotcc lowers both `wchar_t*` and `const wchar_t*` to
+   C# `char*`) and length-returning functions are declared `int`. */
+
+/* Length / comparison / copy. */
+int wcslen(wchar_t* s);
+int wcscmp(wchar_t* a, wchar_t* b);
+int wcsncmp(wchar_t* a, wchar_t* b, size_t n);
+int wcscoll(wchar_t* a, wchar_t* b);
+wchar_t* wcscpy(wchar_t* dst, wchar_t* src);
+wchar_t* wcsncpy(wchar_t* dst, wchar_t* src, size_t n);
+
+/* Concatenation. */
+wchar_t* wcscat(wchar_t* dst, wchar_t* src);
+wchar_t* wcsncat(wchar_t* dst, wchar_t* src, size_t n);
+
+/* Search. */
+wchar_t* wcschr(wchar_t* s, wchar_t c);
+wchar_t* wcsrchr(wchar_t* s, wchar_t c);
+wchar_t* wcsstr(wchar_t* haystack, wchar_t* needle);
+int wcsspn(wchar_t* s, wchar_t* accept);
+int wcscspn(wchar_t* s, wchar_t* reject);
+wchar_t* wcspbrk(wchar_t* s, wchar_t* accept);
+
+/* Tokenize — reentrant by signature (explicit wchar_t** save slot, unlike the
+   stateful narrow strtok). */
+wchar_t* wcstok(wchar_t* str, wchar_t* delim, wchar_t** saveptr);
+
+/* Wide memory — counts are in wchar_t units, not bytes. */
+wchar_t* wmemcpy(wchar_t* dst, wchar_t* src, size_t n);
+wchar_t* wmemmove(wchar_t* dst, wchar_t* src, size_t n);
+wchar_t* wmemset(wchar_t* dst, wchar_t c, size_t n);
+int wmemcmp(wchar_t* a, wchar_t* b, size_t n);
+wchar_t* wmemchr(wchar_t* s, wchar_t c, size_t n);
+
+/* Wide -> number (transcode the ASCII run + delegate to the byte cores). */
+long wcstol(wchar_t* nptr, wchar_t** endptr, int base);
+long wcstoll(wchar_t* nptr, wchar_t** endptr, int base);
+unsigned long wcstoul(wchar_t* nptr, wchar_t** endptr, int base);
+unsigned long wcstoull(wchar_t* nptr, wchar_t** endptr, int base);
+double wcstod(wchar_t* nptr, wchar_t** endptr);
+float wcstof(wchar_t* nptr, wchar_t** endptr);
+long double wcstold(wchar_t* nptr, wchar_t** endptr);
+
 #endif

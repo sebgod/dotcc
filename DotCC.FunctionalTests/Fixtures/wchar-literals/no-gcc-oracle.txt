@@ -1,0 +1,6 @@
+wchar_t is platform-divergent: dotcc commits to the MSVC shape (unsigned 16-bit
+UTF-16, sizeof == 2), but gcc/Linux's wchar_t is a 32-bit type (sizeof == 4). So
+`wsize=2` here, the L"…" code-unit storage, and the wide-string functions are
+validated against the MSVC oracle (also 16-bit) — gcc would print `wsize=4` and
+lay out the wide literals differently. This is a deliberate, documented ABI
+choice (see __SIZEOF_WCHAR_T__ and DotCC.Lib/include/wchar.h).

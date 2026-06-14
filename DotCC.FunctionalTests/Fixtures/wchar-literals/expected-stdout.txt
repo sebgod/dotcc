@@ -1,0 +1,13 @@
+wsize=2
+len=3 a=97 b=98 c=99
+z=90
+cat=98 len=6
+cmp=1 ncmp=0
+chr=1 rchr=3 str=2
+spn=4 cspn=4
+pbrk=1
+mem=120 120 cmp=0
+tol=42 rest=97
+toul=31 rest=33
+tod=7 rest=120
+hello=72 5

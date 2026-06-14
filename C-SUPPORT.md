@@ -54,7 +54,8 @@ Bird's-eye scorecard — the detailed per-area tables below are the source of tr
 | Char literal `'a'`, `'\n'`, `'\033'`, `'\x1b'` | ✅ | Five `CHAR` lexer rules (longest-match: hex `'\xNN'`, 3- and 2-digit octal, single-escape incl. 1-digit octal, plain). The visitor **decodes** the escape to its byte value: a plain printable char stays `(byte)'c'`, everything else (named escape, octal, hex, control) → `(byte)N`. Full escape set: `\a \b \e \f \n \r \t \v \0 \NNN \xNN \\ \' \" \?` (`\e` is the GNU ESC). Char bytes 0–255 all fine (it's a `(byte)` cast). Fixtures `small-ops/`, `string-char-escapes/`. |
 | String literal `"…"` + adjacent concatenation `"a" "b"` | ✅ | `STRING` token regex `"(\\["\\nrtbf0v'/aex0-9]\|[^"\\])*"` (open quote, then backslash-escapes or non-quote-non-backslash, then close). **Adjacent literals concatenate** (C phase 6) via a left-recursive `StringSeq` → one `Primary`. Each segment's escapes are **decoded independently** to bytes, then concatenated, then re-emitted as a single greedy-safe C# `u8` literal: named escapes (`\n \t \r \\ \"`), and everything else as `\xHH` — and a `\xHH` is never left adjacent to a literal hex digit (C#'s `\x` is greedy), so octal/hex escapes and `"\x1b" "abc"`-style boundaries are correct. Non-ASCII source chars pass through (the u8 literal UTF-8-encodes them, matching C's UTF-8 source bytes). Fixtures `string-escape-quotes/`, `string-char-escapes/`. **High bytes:** a decoded escape byte > 0x7F (`"\xff"`, `"\377"`) can't be a single byte in a u8 literal (C# UTF-8-encodes it to two), so such strings lower to a constant byte-array `L(new byte[]{ 0xFF, …, 0 })` carrying the exact C bytes — Roslyn RVA-optimizes a constant `byte[]` in `ReadOnlySpan<byte>` position, so `L()` still pins a fixed-address pointer (no alloc, no GC move), identical to the u8 case. All-ASCII strings keep the readable u8 literal. Fixture `string-high-byte-escapes/` (gcc-oracle-validated). Relies on IRx alternation in LALR.CC. |
 | `char16_t` + `u"…"` / `u'x'` literals (C11) | ✅ | `char16_t` (`<uchar.h>`) → C# `char` — a 16-bit UTF-16 code unit — so `char16_t*` walks 2 bytes and the type bridges to C# `string`/`Span<char>`. `u"…"` → a pooled, pinned `Libc.L16` `char*` (UTF-16, NUL-terminated); `u'x'` → a `char16_t`-typed value; `char16_t s[] = u"…"` copies to a `char` stackalloc (local) / `Libc.GlobalArrayFrom<char>` (global) / zero-copy RVA `Libc.L<char>` (const). Recognized via `Compiler.PredefinedTypeNames` (no fake keyword — see the [no-fake-keywords](#) principle). A narrowing store into a `char16_t` sink gets an explicit `(char)` cast (C# has no implicit `int`→`char`, even for constants). Unit tests `Char16Tests`; fixture `char16-literals/`. |
-| Wide / other prefixes `L"…"`, `U"…"`, `u8"…"`, `wchar_t`, `char32_t` | 🚫 | Out of scope. `wchar_t`'s width is platform-divergent (16-bit on Windows, 32-bit elsewhere); `char32_t`/UTF-32, `u8`, and `L`-wide add no value over dotcc's UTF-8-native strings. The `<uchar.h>` conversion functions (`mbrtoc16`/`c16rtomb`/`mbrtoc32`/`c32rtomb`) and mixed-prefix concatenation (`u"a" "b"`) are likewise not provided. |
+| `wchar_t` + `L"…"` / `L'x'` literals | ✅ | `wchar_t` (`<wchar.h>`) → C# `char` — dotcc's **MSVC-shaped 16-bit** wchar_t (a deliberate, documented ABI choice; `__SIZEOF_WCHAR_T__ == 2`). Lowers identically to `char16_t`: `L"…"` → a pooled `Libc.L16` `char*`, `L'x'` → a `wchar_t`-typed value, `wchar_t s[] = L"…"` → stackalloc / `GlobalArrayFrom<char>` / RVA `L<char>`. Recognized via `Compiler.PredefinedTypeNames` (no fake keyword). The full wide-string library (`wcs*`/`wmem*`/`wcsto*`) is provided — see the libc table. **gcc divergence:** gcc/Linux `wchar_t` is 32-bit, so the MSVC oracle (also 16-bit) validates fixtures and the gcc oracle is opted out (`no-gcc-oracle.txt`). Unit tests `WcharTests`/`LibcWcharTests`; fixture `wchar-literals/`. |
+| Other prefixes `U"…"`, `u8"…"`, `char32_t` | 🚫 | Out of scope. `char32_t`/UTF-32, `u8`, and the `<uchar.h>` conversion functions (`mbrtoc16`/`c16rtomb`/`mbrtoc32`/`c32rtomb`) add no value over dotcc's UTF-8-native strings / the supported 16-bit wide types. Mixed-prefix concatenation (`u"a" "b"`, `L"a" "b"`) is likewise not provided. |
 | Escape sequences `\n \t \\ \" \xNN` | ✅ | Recognized inside string literals (above) and char literals; passed verbatim into the C# UTF-8 literal so C# decodes them. |
 | Trigraphs `??=` etc. | 🚫 | Removed in C23; never useful |
 | Digraphs `<% %> :> :>` etc. | 🚫 | Same reasoning |
@@ -66,6 +67,7 @@ Bird's-eye scorecard — the detailed per-area tables below are the source of tr
 | `int` | ✅ | Lowered to C# `int` |
 | `char` | ✅ | Lowered to C# `byte` (so `char*` arithmetic walks bytes) |
 | `char16_t` (C11 `<uchar.h>`) | ✅ | Lowered to C# `char` — a 16-bit UTF-16 code unit (so `char16_t*` walks 2 bytes and bridges to `string`/`Span<char>`). Pre-registered in `PredefinedTypeNames`. With the `u"…"` / `u'x'` literals — see the Lexical table. A narrowing store needs an explicit `(char)` cast (no implicit `int`→`char` in C#, even for constants). |
+| `wchar_t` (`<wchar.h>`) | ✅ | Lowered to C# `char` — dotcc's **MSVC-shaped 16-bit** wchar_t (unsigned UTF-16, `sizeof == 2`, `__SIZEOF_WCHAR_T__ == 2`), the sibling of `char16_t`. A distinct `CType.WChar` Prim for type fidelity; renders to `char`, so every `char`-coercion rule applies unchanged. Pre-registered in `PredefinedTypeNames`. With `L"…"` / `L'x'` and the full `wcs*`/`wmem*`/`wcsto*` library. gcc's 32-bit wchar_t diverges by design (MSVC oracle validates). |
 | `short`, `unsigned short` | ✅ | `short` / `ushort`. Resolved via the `TypeSpecList` accumulator. |
 | `long`, `long long`, `unsigned long`, `unsigned long long` | ✅ | All map to C# `long` / `ulong` (64-bit unconditionally in C#). MSVC-Windows's 32-bit `long` quirk is silently widened — dotcc-documented choice. |
 | `signed` / `unsigned` qualifiers | ✅ | Free-order with the size and base keywords (the grammar uses a real-compiler-shape `TypeSpec` accumulator, not enumerated combinations). `unsigned char` → `byte`, `signed char` → `sbyte`. |
@@ -283,6 +285,24 @@ Synthetic header at `DotCC.Lib/include/string.h` declares the surface; implement
 | `memmove` | ✅ | Overlap-safe copy (`Buffer.MemoryCopy` is overlap-safe). |
 | `memset` | ✅ | `NativeMemory.Fill`; declared in `<string.h>`. |
 | `memchr` | ✅ | First occurrence of a byte within `n` bytes, or NULL. |
+
+### `wchar.h`
+
+Synthetic header at `DotCC.Lib/include/wchar.h`; implementations in `DotCC.Libc/WcharLib.cs`. dotcc's `wchar_t` is the **MSVC-shaped 16-bit** UTF-16 type (→ C# `char`; see the Types table), so each function is the direct 16-bit sibling of its `<string.h>` counterpart — a bare `char*` loop over NUL-terminated UTF-16. The numeric parsers don't reimplement the strtol/strtod grammar: they transcode the leading ASCII run into a scratch byte buffer and **delegate to the byte cores** (full C semantics — base 0/2-36, `errno`+clamp, hex floats, `inf`/`nan`), mapping the byte endptr back onto the wide pointer. Counts are in `wchar_t` units; length-returning functions return `int` (like `strlen`). Runtime tests `LibcWcharTests.cs`; fixture `wchar-literals/` (MSVC-oracle-validated, gcc opted out — see below).
+
+| Function(s) | Status | Notes |
+|---|---|---|
+| `wcslen` | ✅ | Code units before the first NUL. Returns `int`. |
+| `wcscmp`, `wcsncmp`, `wcscoll` | ✅ | Code-unit compare; `wcscoll` == `wcscmp` (C locale). |
+| `wcscpy`, `wcsncpy` | ✅ | `wcsncpy` reproduces the no-terminating-NUL-when-source-fills-`n` footgun. |
+| `wcscat`, `wcsncat` | ✅ | Append + re-terminate. |
+| `wcschr`, `wcsrchr`, `wcsstr` | ✅ | First / last / substring search. |
+| `wcsspn`, `wcscspn`, `wcspbrk` | ✅ | Accept/reject spans; first-in-set pointer. |
+| `wcstok` | ✅ | The C reentrant 3-arg form (explicit `wchar_t**` save slot) — no stateful 2-arg variant. |
+| `wmemcpy`, `wmemmove`, `wmemset`, `wmemcmp`, `wmemchr` | ✅ | Counts in `wchar_t` units; `wmemmove` overlap-safe. |
+| `wcstol`, `wcstoll`, `wcstoul`, `wcstoull` | ✅ | Transcode → byte `strtol`/`strtoul` cores; full base-0/2-36 + endptr + `errno` clamp. |
+| `wcstod`, `wcstof`, `wcstold` | ✅ | Transcode → byte `strtod`; `wcstof` narrows to `float`, `wcstold` == `double` (dotcc's `long double`). |
+| Wide formatted I/O (`wprintf`/`fwprintf`/`w*scanf`), wide input (`fgetws`/`getwc`), multibyte conversion (`mbrtowc`/`wcrtomb`) | 🚫 | Out of scope — see the not-supported list. |
 
 ### `stdint.h` (C99)
 
@@ -517,7 +537,7 @@ miscompiles** — every gap below fails at parse/lex time or is explicitly flagg
 - ⛔ `_Generic` (generic selection).
 - ✅ Anonymous `struct` / `union` members — fields promoted into the parent (struct inlined; union lifted to a nested explicit-layout type + access rewrite). See the Beyond-C99 table.
 - ⛔ `_Alignas` / `_Alignof`, `_Thread_local`. (`_Atomic` + full `<stdatomic.h>` ✅, `_Noreturn` ✅, `_Static_assert`/`static_assert` 🟡 parsed-but-inert — see the Beyond-C99 table.)
-- ✅ `char16_t` + the `u"…"` / `u'x'` prefixes (C11 `<uchar.h>`) — lower to C# `char` (UTF-16); see the Lexical/Types tables. ⛔ The other encoding prefixes `U"…"` (char32_t) / `u8"…"` / `L"…"` (wchar_t) stay unparsed.
+- ✅ `char16_t` (`u"…"`/`u'x'`) and `wchar_t` (`L"…"`/`L'x'`) — both lower to C# `char` (16-bit UTF-16); see the Lexical/Types tables. ⛔ The other encoding prefixes `U"…"` (char32_t) / `u8"…"` stay unparsed.
 
 **C23**
 - ⛔ `_BitInt(N)`, `constexpr`. (`typeof` / `typeof_unqual` ✅ — see the Beyond-C99 table.)
@@ -594,7 +614,7 @@ Listed here so we don't relitigate them. All marked 🚫 above.
 
 - **Variable-length arrays (VLAs)** — rarely used, made optional in C11, and a managed-runtime mismatch (unbounded stack growth). A 1-D runtime extent incidentally lowers to `stackalloc`, but full VLA support isn't pursued.
 - **Trigraphs / digraphs** — removed in C23, never useful.
-- **`wchar_t` / `char32_t` / `u8`-and-`L` literals / `wprintf`** — `wchar_t`'s width is platform-divergent (16-bit Windows / 32-bit elsewhere) and `char32_t`/`u8`/`L`-wide add no value over UTF-8-native strings. (`char16_t` + `u"…"`/`u'x'` ARE supported — it's the one wide type that maps cleanly onto C# `char`; see the Lexical table. The `<uchar.h>` conversion functions stay out of scope.)
+- **`char32_t` / `u8`-and-`U` literals / wide formatted & input I/O / multibyte conversion** — `char32_t`/UTF-32 and `u8`/`U`-wide add no value over UTF-8-native strings; wide formatted I/O (`wprintf`/`w*scanf` — the printf engine is UTF-8/`L(...)`-based, so a wide format needs a separate engine), wide *input* (`fgetws`/`getwc`), and the multibyte↔wide model (`mbrtowc`/`wcrtomb`/`mbstate_t`, plus `<uchar.h>`'s `mbrtoc16`/`c16rtomb`/…) all stay out of scope. (`wchar_t` AND `char16_t` — both 16-bit, mapping cleanly onto C# `char` — ARE supported, including the `wcs*`/`wmem*`/`wcsto*` wide-string library; see the Lexical/Types/libc tables. dotcc commits to the MSVC-shaped 16-bit `wchar_t` rather than treating its platform-divergent width as a blocker.)
 - **Asynchronous signal *delivery*** — the .NET runtime owns signal handling, so a C handler can't be invoked for an arbitrary POSIX/fault signal. The `<signal.h>` *surface* is still partially modeled (🟡): `SIGINT` routes to `Console.CancelKeyPress`, the `sigset_t` manipulators are faithful, and `kill`/`raise` forward to the OS (the existence probe, terminate-class signals, and `raise(SIGABRT)`→`abort()` are real); only `sigaction` stays an honest stub — see the `errno.h`/`signal.h` and POSIX-headers rows. It's only the general async-delivery model (running an installed C handler) that's out of scope.
 - **`gets`** — removed in C11; security disaster.
 - **Annex K bounds-checked interfaces** — almost no real-world C uses them.
