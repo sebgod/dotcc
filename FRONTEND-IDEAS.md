@@ -91,6 +91,42 @@ LALR.CC doesn't give, which is the concrete reason #3b (compiled Wasm input) is 
 better Swift bet. Anything C++-shaped is **Tier 4** — reachable only through a
 compiled-input route (#5: IR, not grammar). And **Zig is the surprise** — see #2.
 
+#### PEG / operator-precedence sources — and why LALR is an *implementation detail*
+
+Two ideas have grammars not specified as CFGs at all: Zig ships an official **PEG**,
+Mercury/Prolog uses an **operator-precedence** reader. Natural question: can we ingest
+PEG directly, or auto-translate PEG → LALR? The layered answer:
+
+- **A general, automatic PEG→LALR translator is impossible** — the classes are
+  *incomparable*, not nested. PEG recognizes some non-context-free languages (`aⁿbⁿcⁿ`
+  via predicates), so no CFG exists for those; and PEG is always unambiguous, so an
+  *inherently ambiguous* CFL has no PEG at all. There isn't even an algorithm to decide
+  whether a given PEG *is* context-free, let alone emit the CFG.
+- **The tame subset real language-PEGs live in transcribes semi-mechanically**, and two
+  formalism inversions make it clarifying: PEG forbids **left recursion** while LALR
+  prefers it (so you rewrite `e*`/right-recursion into the left-recursive rules LALR
+  wants), and PEG is never ambiguous while a CFG can be — so translation can *introduce*
+  conflicts, and **the PEG's ordered-choice priority is exactly the resolution hint**. A
+  "translator" is really *"make PEG's implicit ordering explicit as LALR.CC precedence
+  groups"* — which is just LALR.CC's existing conflict-driven workflow
+  (`GrammarConflictException` → add a precedence group). For one grammar (Zig), hand
+  transcription guided by those conflict errors is *less* work than any translator, and
+  faithful. Syntactic predicates `&`/`!` are the part that must move to the lexer /
+  `RewritingTokenStream` or be flagged.
+- **If PEG inputs ever became recurring, add a PEG *engine* (packrat) behind the
+  `IFrontend` seam, not a translator** — the worst option is the impossible-in-general,
+  lossy-in-practice middle path.
+
+That last point generalizes: **LALR(1) is an implementation detail of *how the C
+frontend happens to be built*, not an architectural commitment of dotcc.** The real
+contract is "a frontend produces typed IR" (`IFrontend`); the parser *technology* is a
+per-frontend choice downstream of that seam. LALR.CC is simply the cheapest, cleanest
+tool for C (and for the Tier 1–2 languages), so we use it — but a PEG engine, a
+hand-written recursive-descent parser, or an operator-precedence reader could equally
+feed the same IR for a language where LALR is the wrong fit. So this whole rubric is a
+*cost-if-you-build-on-LALR.CC* table, **not** a gate on which languages dotcc can host:
+Tier 3/4 languages aren't excluded, they just don't get to use the LALR.CC shortcut.
+
 ---
 
 ## 1. Python — own frontend + "pretend to be CPython" for native extensions
