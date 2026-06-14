@@ -625,6 +625,19 @@ public static unsafe partial class Libc
     public static byte* L(ReadOnlySpan<byte> u8) =>
         (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(u8));
 
+    /// <summary>
+    /// <c>L&lt;T&gt;(data)</c> — the multi-byte sibling of <see cref="L(ReadOnlySpan{byte})"/>:
+    /// return a constant RVA array literal's address as <c>T*</c>. Used by the
+    /// emitter to lower a read-only (<c>const</c>) non-byte array
+    /// (<c>const int tab[] = {…}</c>) to a pointer into the assembly's read-only
+    /// data section. Roslyn folds a <c>ReadOnlySpan&lt;T&gt;</c> over an
+    /// all-constant array to a fixed RVA blob (no allocation, no GC pin, program
+    /// lifetime). LP64 little-endian only — dotcc's target.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static T* L<T>(ReadOnlySpan<T> data) where T : unmanaged =>
+        (T*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(data));
+
     // ── <signal.h> ─────────────────────────────────────────────────────
 
     private static unsafe delegate*<int, void> _sigintHandler;

@@ -62,7 +62,8 @@ public sealed class StaticLocalArrayTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            emitted.ShouldContain("tab__s0 = Libc.GlobalArrayFrom<int>(new int[]{ 10, 20, 30 })");
+            // const → zero-copy RVA via the generic Libc.L<int>.
+            emitted.ShouldContain("tab__s0 = Libc.L<int>(new int[]{ 10, 20, 30 })");
         }
         finally { File.Delete(src); }
     }
@@ -100,9 +101,9 @@ public sealed class StaticLocalArrayTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
-            // Mangled per declaration order → two distinct fields.
-            emitted.ShouldContain("t__s0 = Libc.GlobalArrayFrom<int>(new int[]{ 1, 2 })");
-            emitted.ShouldContain("t__s1 = Libc.GlobalArrayFrom<int>(new int[]{ 3, 4 })");
+            // Mangled per declaration order → two distinct fields (const → RVA L<int>).
+            emitted.ShouldContain("t__s0 = Libc.L<int>(new int[]{ 1, 2 })");
+            emitted.ShouldContain("t__s1 = Libc.L<int>(new int[]{ 3, 4 })");
         }
         finally { File.Delete(src); }
     }

@@ -1672,22 +1672,32 @@ internal sealed class CSharpBackend
             return $"({elemCs}*)Libc.GlobalArrayFrom<nint>(new nint[]{{ {ptr} }})";
         }
         var vals = string.Join(", ", pa.Elems.Select(e => Coerced(e, pa.Element)));
-        // const-driven RVA: a const byte/char array (incl. a const #embed blob) is
+        // const-driven RVA: a const primitive array (incl. a const #embed blob) is
         // read-only, so point straight at the PE .rodata blob via Libc.L — the
-        // zero-copy string-literal path (Roslyn RVA-folds `new byte[]{consts}` in a
-        // ReadOnlySpan<byte> position: no alloc, no GC root, no startup copy) —
-        // instead of the writable GlobalArrayFrom POH copy. Both return byte*, so
-        // the global's type and every use are unchanged. Sound because writing to a
-        // const object is UB and the const-correctness check rejects in-source
-        // writes; reads / sizeof / address-of are unaffected. Byte element only for
-        // now (`char`/`unsigned char` → C# `byte`); a multi-byte const array keeps
-        // the writable path until a non-byte RVA fold lands.
-        if (pa.Element.IsConst && elemCs == "byte")
+        // zero-copy string-literal path (Roslyn RVA-folds an all-constant
+        // `new T[]{…}` in a ReadOnlySpan<T> position: no alloc, no GC root, no
+        // startup copy) — instead of the writable GlobalArrayFrom POH copy. Both
+        // forms return T*, so the global's type and every use are unchanged. Sound
+        // because writing to a const object is UB and the const-correctness check
+        // rejects in-source writes; reads / sizeof / address-of are unaffected.
+        // GUARD: only when every element is a compile-time constant — otherwise
+        // Roslyn allocates a transient heap array and L() would return a pointer
+        // into it (dangling). `byte` keeps the non-generic L (the string-literal
+        // form); other primitives use the generic L<T> (LP64 little-endian).
+        if (pa.Element.IsConst && pa.Element.Unqualified is CType.Prim && pa.Elems.All(IsRvaConstant))
         {
-            return $"Libc.L(new byte[]{{ {vals} }})";
+            return elemCs == "byte"
+                ? $"Libc.L(new byte[]{{ {vals} }})"
+                : $"Libc.L<{elemCs}>(new {elemCs}[]{{ {vals} }})";
         }
         return $"Libc.GlobalArrayFrom<{elemCs}>(new {elemCs}[]{{ {vals} }})";
     }
+
+    /// <summary>An array element that lowers to a C# compile-time constant — the
+    /// precondition for Roslyn to RVA-fold the backing <c>new T[]{…}</c> into the
+    /// PE data section (so <see cref="PinnedArrayText"/> can point at it via
+    /// <c>Libc.L</c>). Numeric literals only; anything else keeps the writable copy.</summary>
+    private static bool IsRvaConstant(CExpr e) => e is LitInt or LitFloat;
 
     /// <summary>Render a positional aggregate initializer as a C# object
     /// initializer — <c>new Point { x = 3, y = 4 }</c>. Each value is coerced to

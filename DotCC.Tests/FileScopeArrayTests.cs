@@ -105,6 +105,39 @@ public sealed class FileScopeArrayTests
     }
 
     [Fact]
+    public void const_multibyte_array_uses_generic_rva()
+    {
+        // A const non-byte primitive array RVAs through the generic Libc.L<T>
+        // (writing to it is UB / rejected by the check), all-constant elements
+        // so Roslyn folds the backing array into .rodata.
+        var src = WriteTemp("""
+            static const int tab[] = { 10, 20, 30 };
+            int main(void) { return tab[1]; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("int* tab = Libc.L<int>(new int[]{ 10, 20, 30 })");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void non_const_int_array_stays_writable_GlobalArrayFrom()
+    {
+        var src = WriteTemp("""
+            static int tab[] = { 10, 20, 30 };
+            int main(void) { tab[0] = 99; return tab[1]; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("int* tab = Libc.GlobalArrayFrom<int>(new int[]{ 10, 20, 30 })");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void extern_array_declaration_emits_no_field()
     {
         var src = WriteTemp("""
