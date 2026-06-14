@@ -27,6 +27,20 @@ public sealed class ConstCheckTests
         finally { File.Delete(path); }
     }
 
+    /// <summary>Emit and capture stderr (where const-discard warnings land). The
+    /// unit assembly is serialized (AssemblyInfo), so the process-global
+    /// <c>Console.Error</c> swap is race-free.</summary>
+    private static (string Emit, string Stderr) EmitWithStderr(string body)
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"dotcc-constck-{Guid.NewGuid():N}.c");
+        File.WriteAllText(path, body);
+        var prior = Console.Error;
+        var sw = new StringWriter();
+        Console.SetError(sw);
+        try { return (Compiler.EmitCSharp(new[] { path }), sw.ToString()); }
+        finally { Console.SetError(prior); File.Delete(path); }
+    }
+
     [Fact]
     public void assigning_to_a_const_variable_is_an_error()
     {
@@ -112,5 +126,59 @@ public sealed class ConstCheckTests
             int main(void) { int x = 5; x = 6; x++; return x; }
             """);
         emit.ShouldContain("static unsafe int main");
+    }
+
+    // ---- discard-qualifier warnings (gcc -Wdiscarded-qualifiers) -----------
+
+    [Fact]
+    public void passing_a_pointer_to_const_to_a_non_const_param_warns()
+    {
+        var (_, stderr) = EmitWithStderr("""
+            static int sink(char *p) { return p[0]; }
+            int main(void) { const char *q = "x"; return sink(q); }
+            """);
+        stderr.ShouldContain("discards 'const' qualifier");
+        stderr.ShouldContain("sink");
+    }
+
+    [Fact]
+    public void passing_a_pointer_to_const_to_a_const_param_is_fine()
+    {
+        var (_, stderr) = EmitWithStderr("""
+            static int sink(const char *p) { return p[0]; }
+            int main(void) { const char *q = "x"; return sink(q); }
+            """);
+        stderr.ShouldNotContain("discards");
+    }
+
+    [Fact]
+    public void an_explicit_cast_suppresses_the_discard_warning()
+    {
+        // Casting away const is the programmer's deliberate override — no warning.
+        var (_, stderr) = EmitWithStderr("""
+            static int sink(char *p) { return p[0]; }
+            int main(void) { const char *q = "x"; return sink((char *)q); }
+            """);
+        stderr.ShouldNotContain("discards");
+    }
+
+    [Fact]
+    public void passing_a_non_const_pointer_to_a_const_param_is_fine()
+    {
+        // Adding const is always allowed.
+        var (_, stderr) = EmitWithStderr("""
+            static int sink(const char *p) { return p[0]; }
+            int main(void) { char buf[2] = { 'x', 0 }; return sink(buf); }
+            """);
+        stderr.ShouldNotContain("discards");
+    }
+
+    [Fact]
+    public void assigning_a_pointer_to_const_to_a_plain_pointer_warns()
+    {
+        var (_, stderr) = EmitWithStderr("""
+            int main(void) { const char *q = "x"; char *p; p = q; return p[0]; }
+            """);
+        stderr.ShouldContain("discards 'const' qualifier");
     }
 }

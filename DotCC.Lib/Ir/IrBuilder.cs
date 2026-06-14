@@ -2051,7 +2051,11 @@ internal sealed partial class IrBuilder
     {
         var le = BuildExpr(l);
         ReportConstWrite(le, SrcPos.From(l), "assignment of");
-        return new Assign(op, le, BuildExpr(r)) { Type = le.Type, IsLValue = false };
+        var re = BuildExpr(r);
+        // Plain `p = q` losing a pointee const is a qualifier discard (compound
+        // assignment doesn't convert the RHS to the LHS pointer type).
+        if (op is null) { CheckQualifierDiscard(re, le.Type, SrcPos.From(l), "assignment"); }
+        return new Assign(op, le, re) { Type = le.Type, IsLValue = false };
     }
 
     /// <summary>Diagnose a write through a <c>const</c>-qualified lvalue (assignment
@@ -2068,6 +2072,31 @@ internal sealed partial class IrBuilder
         var what = Unparen(target) is VarRef v ? $"variable '{v.Sym.Name}'" : "location";
         Diagnostics.Add(new Diagnostic(Severity.Error, $"{verb} read-only {what}", pos, _file));
     }
+
+    /// <summary>Warn (gcc <c>-Wdiscarded-qualifiers</c>) when an IMPLICIT conversion
+    /// drops a <c>const</c> from a pointer's pointee — passing a <c>const T*</c>
+    /// where a <c>T*</c> is expected, or <c>p = q</c> with <c>p</c> a <c>T*</c> and
+    /// <c>q</c> a <c>const T*</c>. An explicit cast is the programmer's deliberate
+    /// override and is exempt, as is anything originating in a system header. Adding
+    /// const (<c>T*</c> → <c>const T*</c>) is always allowed.</summary>
+    private void CheckQualifierDiscard(CExpr value, CType target, SrcPos pos, string context)
+    {
+        if (pos.IsSystemHeader || Unparen(value) is Cast) { return; }
+        if (PointeeOf(value.Type) is { } sp && PointeeOf(target) is { } tp && sp.IsConst && !tp.IsConst)
+        {
+            Diagnostics.Add(new Diagnostic(Severity.Warning,
+                $"{context} discards 'const' qualifier from pointer target type", pos, _file));
+        }
+    }
+
+    /// <summary>The pointed-to / element type of a pointer or array, or null for a
+    /// non-indirect type — the level at which a pointer const-discard is judged.</summary>
+    private static CType? PointeeOf(CType t) => t.Unqualified switch
+    {
+        CType.Pointer p => p.Pointee,
+        CType.Array a => a.Element,
+        _ => null,
+    };
 
     private CExpr Un(UnOp op, Item operand)
     {
@@ -2178,6 +2207,17 @@ internal sealed partial class IrBuilder
             // matters only when a same-named static was renamed (see BuildFuncDef).
             var sym = _symbols.Resolve(name);
             var fn = sym?.Type as CType.Func;
+            // Passing a `const T*` where the parameter is a plain `T*` discards the
+            // pointee const (gcc -Wdiscarded-qualifiers). Only the fixed params are
+            // checked; a variadic tail has no declared type to compare against.
+            if (fn?.Params is { } ps)
+            {
+                var n = Math.Min(args.Count, ps.Count);
+                for (var i = 0; i < n; i++)
+                {
+                    CheckQualifierDiscard(args[i], ps[i], args[i].Pos, $"passing argument {i + 1} to '{name}'");
+                }
+            }
             var calleeSym = sym is { Kind: SymKind.Func } ? sym : null;
             return new Call(name, args, fn?.Params, calleeSym) { Type = fn?.Return ?? CType.Int };
         }
