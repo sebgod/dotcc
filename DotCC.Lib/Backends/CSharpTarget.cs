@@ -67,6 +67,7 @@ internal sealed class CSharpTarget : ITarget
         "unsigned char" => "byte",
         "short" => "short",
         "unsigned short" => "ushort",
+        "char16_t" => "char",   // C11 char16_t → C# char (both 16-bit UTF-16 code units)
         "int" => "int",
         "unsigned int" => "uint",
         "long" => "long",

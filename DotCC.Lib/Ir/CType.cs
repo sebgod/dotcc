@@ -216,6 +216,13 @@ public abstract record CType
     public static readonly CType UChar = new Prim("unsigned char", 1, true, false);
     public static readonly CType Short = new Prim("short", 2, true, true);
     public static readonly CType UShort = new Prim("unsigned short", 2, true, false);
+
+    /// <summary>C11 <c>char16_t</c> (<c>&lt;uchar.h&gt;</c>) — an unsigned 16-bit code
+    /// unit (<c>uint_least16_t</c>). dotcc lowers it to C# <c>char</c> (also a 16-bit
+    /// UTF-16 code unit), so <c>char16_t*</c> arithmetic walks 2 bytes and <c>u"…"</c>
+    /// carries real UTF-16. A distinct Prim (not <see cref="UShort"/>) so the backend
+    /// can spell it <c>char</c> while keeping the unsigned-16-bit arithmetic identity.</summary>
+    public static readonly CType Char16 = new Prim("char16_t", 2, true, false);
     public static readonly CType Int = new Prim("int", 4, true, true);
     public static readonly CType UInt = new Prim("unsigned int", 4, true, false);
     public static readonly CType Long = new Prim("long", 8, true, true);

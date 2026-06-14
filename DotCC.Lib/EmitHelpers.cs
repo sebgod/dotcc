@@ -86,8 +86,10 @@ internal static class EmitHelpers
 
     // Decode the char or escape sequence starting at body[i], advancing i past
     // it. Handles the named escapes, GNU `\e`, 1–3-digit octal, and greedy
-    // `\xNN` hex — each to its byte value; an unknown escape yields the char.
-    private static StrItem DecodeEscapeOrChar(string body, ref int i)
+    // `\xNN` hex — each to its value masked to <paramref name="escapeMask"/>
+    // (0xFF for a byte string, 0xFFFF for a char16_t string); an unknown escape
+    // yields the char.
+    private static StrItem DecodeEscapeOrChar(string body, ref int i, int escapeMask = 0xFF)
     {
         char c = body[i];
         if (c != '\\' || i + 1 >= body.Length) { i++; return new StrItem(false, c); }
@@ -113,22 +115,22 @@ internal static class EmitHelpers
                 int val = 0, cnt = 0;
                 while (i < body.Length && Uri.IsHexDigit(body[i])) { val = val * 16 + HexVal(body[i]); i++; cnt++; }
                 if (cnt == 0) { throw new CompileException("`\\x` used with no following hex digits"); }
-                return new StrItem(true, val & 0xFF);
+                return new StrItem(true, val & escapeMask);
             }
             case >= '0' and <= '7':
             {
                 int val = e - '0', cnt = 1;
                 while (i < body.Length && cnt < 3 && body[i] is >= '0' and <= '7') { val = val * 8 + (body[i] - '0'); i++; cnt++; }
-                return new StrItem(true, val & 0xFF);
+                return new StrItem(true, val & escapeMask);
             }
             default: return new StrItem(false, e);  // unknown escape → the char itself
         }
     }
 
-    private static void DecodeCStringBody(string body, List<StrItem> into)
+    private static void DecodeCStringBody(string body, List<StrItem> into, int escapeMask = 0xFF)
     {
         var i = 0;
-        while (i < body.Length) { into.Add(DecodeEscapeOrChar(body, ref i)); }
+        while (i < body.Length) { into.Add(DecodeEscapeOrChar(body, ref i, escapeMask)); }
     }
 
     private static int HexVal(char c) => c <= '9' ? c - '0' : char.ToLowerInvariant(c) - 'a' + 10;
@@ -275,5 +277,55 @@ internal static class EmitHelpers
         var (escaped, len) = EmitU8(items);
         byteLength = len + 1;     // + NUL
         return $"Libc.L(\"{escaped}\\0\"u8)";
+    }
+
+    // ---- char16_t (UTF-16) literals -------------------------------------
+    // A char16_t literal is a sequence of UTF-16 code units. A decoded source
+    // char's StrItem.Value is ALREADY a UTF-16 code unit (the .NET `char` read
+    // from the source — a non-BMP char arrives as a surrogate PAIR, i.e. two
+    // items, which is exactly correct UTF-16). An escape's value is taken at full
+    // 16-bit width (escapeMask 0xFFFF) rather than the byte path's 0xFF. So for
+    // char16_t the code unit is simply `it.Value` for both kinds — no UTF-8
+    // re-encoding (that's the byte path's job).
+
+    /// <summary>Decode adjacent <c>u"…"</c> segments (each already <c>u</c>-prefix
+    /// stripped to a plain quoted lexeme) to their UTF-16 code units, EXCLUDING the
+    /// NUL terminator (the caller appends / zero-pads). Used to lower
+    /// <c>char16_t s[] = u"…"</c> to a mutable C# <c>char</c> buffer.</summary>
+    internal static List<int> StringU16Values(IReadOnlyList<string> rawQuotedSegments)
+    {
+        var items = new List<StrItem>();
+        foreach (var seg in rawQuotedSegments) { DecodeCStringBody(StripStrQuotes(seg), items, 0xFFFF); }
+        var units = new List<int>(items.Count);
+        foreach (var it in items) { units.Add(it.Value & 0xFFFF); }
+        return units;
+    }
+
+    /// <summary>Encode adjacent <c>u"…"</c> segments to the lowered
+    /// <c>Libc.L16("…")</c> expression — a pooled, pinned <c>char*</c> (= char16_t*)
+    /// over UTF-16 data. The emitted C# string literal carries the same code units
+    /// plus a trailing NUL (<c> </c>), so the pointer is NUL-terminated like a
+    /// C string literal.</summary>
+    internal static string EncodeU16StringLiteral(IReadOnlyList<string> rawQuotedSegments)
+    {
+        var units = StringU16Values(rawQuotedSegments);
+        var sb = new StringBuilder("Libc.L16(\"");
+        foreach (var cu in units) { AppendCsStringChar(sb, cu); }
+        sb.Append("\\u0000\")");   // NUL terminator
+        return sb.ToString();
+    }
+
+    /// <summary>Append one UTF-16 code unit to a C# string-literal body: printable
+    /// ASCII verbatim (escaping <c>"</c> and <c>\</c>), everything else as the
+    /// unambiguous <c>\uXXXX</c> form.</summary>
+    private static void AppendCsStringChar(StringBuilder sb, int cu)
+    {
+        switch (cu)
+        {
+            case '"': sb.Append("\\\""); break;
+            case '\\': sb.Append("\\\\"); break;
+            case >= 0x20 and <= 0x7E: sb.Append((char)cu); break;
+            default: sb.Append("\\u").Append(cu.ToString("X4")); break;
+        }
     }
 }

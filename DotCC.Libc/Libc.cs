@@ -638,6 +638,35 @@ public static unsafe partial class Libc
     public static T* L<T>(ReadOnlySpan<T> data) where T : unmanaged =>
         (T*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(data));
 
+    // char16_t (UTF-16) string-literal pool. C# has no `u16` RVA literal (only the
+    // byte `u8` form), so a u"…" literal can't ride the zero-copy L(...) path.
+    // Instead pin its UTF-16 data on the Pinned Object Heap ONCE, cached per
+    // distinct literal — a program-lifetime pool, mirroring how C places string
+    // literals in .rodata. Pinning per use would leak a frame under a loop.
+    private static readonly System.Collections.Generic.Dictionary<string, IntPtr> _u16Literals =
+        new(StringComparer.Ordinal);
+
+    /// <summary><c>L16("…")</c> — return a stable <c>char*</c> (= char16_t*) to a
+    /// pinned, NUL-terminated copy of a C11 <c>u"…"</c> literal's UTF-16 data. The
+    /// argument is a C# string literal that already includes its trailing NUL char;
+    /// each distinct literal is pinned once on the POH and rooted for the program's
+    /// life (so the pointer never moves), exactly like <see cref="GlobalArrayFrom{T}"/>.</summary>
+    public static char* L16(string s)
+    {
+        lock (_u16Literals)
+        {
+            if (!_u16Literals.TryGetValue(s, out var p))
+            {
+                var arr = GC.AllocateUninitializedArray<char>(s.Length, pinned: true);
+                s.CopyTo(arr);
+                lock (_globalArrayRoots) { _globalArrayRoots.Add(arr); }
+                p = (IntPtr)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(arr));
+                _u16Literals[s] = p;
+            }
+            return (char*)p;
+        }
+    }
+
     // ── <signal.h> ─────────────────────────────────────────────────────
 
     private static unsafe delegate*<int, void> _sigintHandler;

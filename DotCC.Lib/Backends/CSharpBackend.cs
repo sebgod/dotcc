@@ -317,7 +317,10 @@ internal sealed class CSharpBackend
                     var elemCs = Cs(a.Element);
                     if (a.Inits is { } inits)
                     {
-                        sb.Append(pad).Append($"{elemCs}* {a.Sym.TargetName} = stackalloc {elemCs}[]{{ {string.Join(", ", inits.Select(Expr))} }};\n");
+                        // Coerce each element to the array's element type — a no-op
+                        // for byte/int arrays (constant fits), but a char16_t array's
+                        // `char` elements need the explicit (char) cast C# requires.
+                        sb.Append(pad).Append($"{elemCs}* {a.Sym.TargetName} = stackalloc {elemCs}[]{{ {string.Join(", ", inits.Select(e => Coerced(e, a.Element)))} }};\n");
                     }
                     else
                     {
@@ -950,11 +953,14 @@ internal sealed class CSharpBackend
 
     private static bool IsIntegerCs(string t) => IntWidth(t) is not null;
 
-    // Byte width of a lowered C# integer type (LP64 — long/pointer = 8).
+    // Byte width of a lowered C# integer type (LP64 — long/pointer = 8). C# `char`
+    // (the lowering of C11 char16_t) is a 16-bit numeric type — without it here the
+    // coercion machinery treats a char-typed sink as non-integer and SILENTLY DROPS
+    // the narrowing cast (CS0266 at C# compile time).
     private static int? IntWidth(string t) => t switch
     {
         "byte" or "sbyte" => 1,
-        "short" or "ushort" => 2,
+        "short" or "ushort" or "char" => 2,
         "int" or "uint" => 4,
         "long" or "ulong" or "nint" or "nuint" => 8,
         _ => null,
@@ -968,6 +974,9 @@ internal sealed class CSharpBackend
         "sbyte" => v >= -128 && v <= 127,
         "short" => v >= -32768 && v <= 32767,
         "ushort" => v >= 0 && v <= 65535,
+        // NOTE: C# `char` is intentionally ABSENT — unlike byte/short/ushort, C#
+        // has NO implicit int-constant→char conversion (§10.2.11 omits char), so a
+        // constant stored into a char16_t sink still needs an explicit (char) cast.
         "int" or "nint" => v >= int.MinValue && v <= int.MaxValue,
         "long" => true,
         "uint" => v >= 0 && v <= uint.MaxValue,
@@ -982,7 +991,12 @@ internal sealed class CSharpBackend
     private static bool CsImplicitInt(string src, string tgt)
     {
         if (IntWidth(src) is not int sw || IntWidth(tgt) is not int tw) { return false; }
-        var srcUnsigned = src is "byte" or "ushort" or "uint" or "ulong" or "nuint";
+        // C# never implicitly converts a (non-constant) integer TO `char`, so a store
+        // into a char16_t sink always needs an explicit cast. (Treating `char` as a
+        // plain unsigned source below may emit a harmless redundant `(ushort)` for the
+        // genuinely-implicit `char → ushort` — accepted, see the plan's honest limits.)
+        if (tgt is "char") { return false; }
+        var srcUnsigned = src is "byte" or "ushort" or "uint" or "ulong" or "nuint" or "char";
         var tgtUnsigned = tgt is "byte" or "ushort" or "uint" or "ulong" or "nuint";
         return srcUnsigned ? tw > sw : (!tgtUnsigned && tw > sw);
     }
@@ -1155,6 +1169,7 @@ internal sealed class CSharpBackend
             case LitInt i: return (_target.RenderIntLit(i), PPrimary);
             case LitFloat f: return (_target.RenderFloatLit(f), PPrimary);
             case LitStr s: return (DotCC.EmitHelpers.EncodeStringLiteral(s.Segments), PPrimary);
+            case LitU16Str s: return (DotCC.EmitHelpers.EncodeU16StringLiteral(s.Segments), PPrimary);
             case NullPtr: return ("null", PPrimary);
             // A bare unresolved identifier: the backend escapes the raw name.
             case NameRef nr: return (DotCC.EmitHelpers.Id(nr.RawName), PPrimary);

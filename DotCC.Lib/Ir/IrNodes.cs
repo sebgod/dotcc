@@ -52,6 +52,13 @@ public sealed record LitFloat(string Text) : CExpr;
 /// backend lower the same literal differently.</summary>
 public sealed record LitStr(IReadOnlyList<string> Segments) : CExpr;
 
+/// <summary>A C11 <c>char16_t</c> string literal (<c>u"…"</c>) — the raw adjacent
+/// quoted segments with the <c>u</c> prefix already stripped (so each is a plain
+/// <c>"…"</c> lexeme). Decays to <c>char16_t*</c> (C# <c>char*</c>). The backend
+/// lowers it to a pooled, pinned <c>Libc.L16("…")</c> pointer over UTF-16 data —
+/// the 16-bit-code-unit sibling of <see cref="LitStr"/>.</summary>
+public sealed record LitU16Str(IReadOnlyList<string> Segments) : CExpr;
+
 /// <summary>A reference to a resolved variable / parameter / function.</summary>
 public sealed record VarRef(Symbol Sym) : CExpr;
 

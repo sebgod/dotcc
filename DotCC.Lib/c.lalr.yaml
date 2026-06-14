@@ -383,6 +383,12 @@ symbols:
   # upstream stage, never lexed.
   - EMBED          # 164 synthetic terminal (C23 #embed) — file-bytes carrier
   - '#embed'       # 165 preprocessor directive (C23) — consumed before parsing
+  # C11 char16_t literals (<uchar.h>). `u"…"` is a char16_t string (decays to
+  # char16_t* → C# char*); `u'x'` is a char16_t constant. Lexed by dedicated
+  # `u`-prefixed rules below; the unprefixed STRING/CHAR are unaffected.
+  - U16STRING      # 166 char16_t string literal — u"…"
+  - U16CHAR        # 167 char16_t char constant — u'x'
+  - U16StringSeq   # 168 non-terminal: a run of adjacent u"…" literals
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -570,6 +576,9 @@ productions:
       - { lhs: Fn, rhs: [Type, ID, '[', ']', '=', '{', InitList, '}', ';'], action: globalArrInitImplicit }
       - { lhs: Fn, rhs: [Type, ID, ArrDims, '=', StringSeq, ';'],           action: globalCharArrStrSized }
       - { lhs: Fn, rhs: [Type, ID, '[', ']', '=', StringSeq, ';'],          action: globalCharArrStr }
+      # char16_t file-scope array from a u"…" literal (→ pinned char[] / GlobalArrayFrom).
+      - { lhs: Fn, rhs: [Type, ID, ArrDims, '=', U16StringSeq, ';'],        action: globalU16CharArrStrSized }
+      - { lhs: Fn, rhs: [Type, ID, '[', ']', '=', U16StringSeq, ';'],       action: globalU16CharArrStr }
       # `static` file-scope arrays — internal linkage is a no-op (never exported),
       # so each lowers identically to its plain counterpart; `static` is consumed.
       - { lhs: Fn, rhs: ['static', Type, ID, ArrDims, ';'],                           action: globalStaticArr }
@@ -578,6 +587,8 @@ productions:
       - { lhs: Fn, rhs: ['static', Type, ID, '[', ']', '=', '{', InitList, '}', ';'], action: globalStaticArrInitImplicit }
       - { lhs: Fn, rhs: ['static', Type, ID, ArrDims, '=', StringSeq, ';'],           action: globalStaticCharArrStrSized }
       - { lhs: Fn, rhs: ['static', Type, ID, '[', ']', '=', StringSeq, ';'],          action: globalStaticCharArrStr }
+      - { lhs: Fn, rhs: ['static', Type, ID, ArrDims, '=', U16StringSeq, ';'],         action: globalStaticU16CharArrStrSized }
+      - { lhs: Fn, rhs: ['static', Type, ID, '[', ']', '=', U16StringSeq, ';'],        action: globalStaticU16CharArrStr }
       # File-scope `static T x = { … };` — static struct/union AGGREGATE init, the
       # file-scope twin of stmtStaticStructInit. Same emitter (a once-initialised
       # DotCcGlobals field), just no name mangling. Disjoint from the array forms
@@ -881,6 +892,8 @@ productions:
       - { lhs: Stmt, rhs: ['static', Type, ID, '[', ']', '=', '{', InitList, '}', ';'], action: stmtStaticArrInitImplicit }
       - { lhs: Stmt, rhs: ['static', Type, ID, ArrDims, '=', StringSeq, ';'],           action: stmtStaticCharArrStrSized }
       - { lhs: Stmt, rhs: ['static', Type, ID, '[', ']', '=', StringSeq, ';'],          action: stmtStaticCharArrStr }
+      - { lhs: Stmt, rhs: ['static', Type, ID, ArrDims, '=', U16StringSeq, ';'],         action: stmtStaticU16CharArrStrSized }
+      - { lhs: Stmt, rhs: ['static', Type, ID, '[', ']', '=', U16StringSeq, ';'],        action: stmtStaticU16CharArrStr }
       # Block-scope `static T x = { … };` — a static struct/union AGGREGATE
       # initializer (Lua's `static const expdesc ef = {VKINT, {0}, NO_JUMP,
       # NO_JUMP}`). Like the static-array forms, lowers to a once-initialised
@@ -1072,6 +1085,9 @@ productions:
       # dim reduction with declArrInit).
       - { lhs: Decl, rhs: [Type, ID, '[', ']', '=', StringSeq],  action: declCharArrStr }
       - { lhs: Decl, rhs: [Type, ID, ArrDims, '=', StringSeq],   action: declCharArrStrSized }
+      # char16_t block-scope array from a u"…" literal (→ char* stackalloc copy).
+      - { lhs: Decl, rhs: [Type, ID, '[', ']', '=', U16StringSeq], action: declU16CharArrStr }
+      - { lhs: Decl, rhs: [Type, ID, ArrDims, '=', U16StringSeq],  action: declU16CharArrStrSized }
       # Struct aggregate initializer: `Point p = {1, 2};`. The visitor looks
       # up the struct's field names from a side map populated by StructDef /
       # TypedefStruct / UnionDef, then emits `Point p = new Point { x = 1,
@@ -1376,10 +1392,17 @@ productions:
       # Adjacent string literals concatenate (`"a" "b"` → `"ab"`). StringSeq
       # folds the run; `str` decodes + emits once.
       - { lhs: Primary, rhs: [StringSeq],   action: str }
+      # `u"…"` — C11 char16_t string literal (decays to char16_t* → C# char*).
+      # Lowers to a stable, pooled `Libc.L16("…")` pointer (UTF-16). U16StringSeq
+      # folds adjacent `u"a" u"b"`.
+      - { lhs: Primary, rhs: [U16StringSeq], action: u16str }
       # `'a'`, `'\n'` etc. — C char literal. In C the value has type int
       # but is conventionally assigned to char/byte; we lower to `(byte)'a'`
       # since our `char` is `byte`. Escape processing happens in the visitor.
       - { lhs: Primary, rhs: [CHAR],        action: chr }
+      # `u'x'` — C11 char16_t char constant. Unlike a plain char constant (type
+      # int), this has type char16_t; lowers to a char16_t-typed integer value.
+      - { lhs: Primary, rhs: [U16CHAR],     action: u16chr }
       # C23 keyword constants. The terminals only ever arrive here via
       # DialectKeywordRewriter's c23 promotion (no lexer rule), so these
       # productions are unreachable under < c23 — pre-C23 `true`/`false`/
@@ -1417,6 +1440,13 @@ productions:
     rules:
       - { lhs: StringSeq, rhs: [StringSeq, STRING], action: strSeqCons }
       - { lhs: StringSeq, rhs: [STRING],             action: strSeqOne }
+
+  # Adjacent char16_t string-literal concatenation — `u"a" u"b"` → one u-string.
+  # (Mixing prefixed + unprefixed, `u"a" "b"`, is deferred — out of V1 scope.)
+  - derivation: leftmost
+    rules:
+      - { lhs: U16StringSeq, rhs: [U16StringSeq, U16STRING], action: u16strSeqCons }
+      - { lhs: U16StringSeq, rhs: [U16STRING],               action: u16strSeqOne }
 
 lexer:
   root:
@@ -1622,7 +1652,18 @@ lexer:
     # IRxParser doesn't support `.` as wildcard, so the escape continuation
     # is an explicit character class of the C standard escape chars.
     # Relies on alternation `|` in IRxParser, added upstream in LALR.CC.
+    # C11 char16_t string literal `u"…"` — same body as STRING with a `u` prefix.
+    # Listed before STRING; longest-match already prefers `u"…"` over `u` + `"…"`,
+    # but the ordering makes the intent explicit. `u8"…"`/`U"…"`/`L"…"` are NOT
+    # matched (out of scope) — they fall back to ID + STRING and parse-error.
+    - { symbol: U16STRING, match: 'u"(\\["\\nrtbf0v''/aex0-9]|[^"\\])*"' }
     - { symbol: STRING, match: '"(\\["\\nrtbf0v''/aex0-9]|[^"\\])*"' }
+    # C11 char16_t char constant `u'x'` — the five CHAR forms with a `u` prefix.
+    - { symbol: U16CHAR, match: 'u''\\x[0-9a-fA-F]+''' }
+    - { symbol: U16CHAR, match: 'u''\\[0-7][0-7][0-7]''' }
+    - { symbol: U16CHAR, match: 'u''\\[0-7][0-7]''' }
+    - { symbol: U16CHAR, match: 'u''\\[abefnrtv0-7\\''"?]''' }
+    - { symbol: U16CHAR, match: 'u''[^''\\]''' }
     # Char literal: IRx has no `.` (any-char) operator — it parses `.` as
     # literal. Use a char class on the inner byte instead. Rules are longest-
     # match, so the multi-byte escape forms (hex `'\xNN'`, 2/3-digit octal

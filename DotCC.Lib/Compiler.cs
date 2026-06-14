@@ -210,6 +210,9 @@ public static class Compiler
         "FILE",         // <stdio.h> — opaque stream handle; FILE* stays a real
                         // pointer-to-struct (Libc.FILE), so NULL/==/if(fp) all
                         // work through the normal pointer machinery.
+        "char16_t",     // <uchar.h> — C11 UTF-16 code unit. Unlike the names above
+                        // (which resolve to a verbatim Libc type), char16_t is
+                        // pre-seeded in IrBuilder._typedefs to CType.Char16 → C# char.
     };
 
     /// <summary>
