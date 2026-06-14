@@ -229,7 +229,8 @@ public static class Compiler
         CDialect? dialect,
         bool pedantic,
         bool pedanticErrors,
-        Ir.INameLegalizer? names = null)
+        Ir.INameLegalizer? names = null,
+        bool warnDiscardedQualifiers = true)
     {
         var includeMap = BuildIncludeMap(inputPaths, includeDirs);
         var lexerTable = C.BuildLexer();
@@ -328,7 +329,7 @@ public static class Compiler
         // parse (preprocessor-era) and IR build (emit-pass), then flush as warnings
         // (-pedantic) or one collected error (-pedantic-errors). Off by default.
         var gate = (pedantic || pedanticErrors) ? new DialectGate(activeDialect) : null;
-        var irBuilder = new Ir.IrBuilder(gate, names ?? new Backends.CSharpNameLegalizer(), embeds);
+        var irBuilder = new Ir.IrBuilder(gate, names ?? new Backends.CSharpNameLegalizer(), embeds, warnDiscardedQualifiers);
         var irParser = C.BuildParser(C.IdentityVisitor.Instance);
         foreach (var unitPath in inputPaths)
         {
@@ -378,9 +379,11 @@ public static class Compiler
         bool asObject = false,
         bool warnConversion = false,
         bool debugHeap = false,
-        ImportOptions? imports = null)
+        ImportOptions? imports = null,
+        bool warnDiscardedQualifiers = true)
     {
-        var irBuilder = BuildIr(inputPaths, includeDirs, defines, dialect, pedantic, pedanticErrors);
+        var irBuilder = BuildIr(inputPaths, includeDirs, defines, dialect, pedantic, pedanticErrors,
+            warnDiscardedQualifiers: warnDiscardedQualifiers);
         // -Wconversion: collect narrowing-conversion warnings during codegen, then
         // flush to stderr. Off by default (no gate → no checks).
         var convGate = warnConversion ? new ConversionGate() : null;

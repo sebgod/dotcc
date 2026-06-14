@@ -50,6 +50,9 @@ internal sealed partial class IrBuilder
     // The name of the function currently being built — the value of the C99
     // predefined identifier `__func__` inside its body.
     private string _currentFnName = "";
+    // The declared return type of the function currently being built — lets a
+    // `return <const T*>` from a `T*`-returning function trip the const-discard check.
+    private CType? _currentRet;
 
     public List<FuncDef> Functions { get; } = new();
     public List<GlobalVar> Globals { get; } = new();
@@ -124,12 +127,19 @@ internal sealed partial class IrBuilder
     /// embeds across TUs dedup by hash.</summary>
     private readonly IReadOnlyDictionary<string, byte[]> _embeds;
 
+    // Whether to emit the const-discarding-pointer-conversion warning (gcc
+    // -Wdiscarded-qualifiers). On by default; `-Wno-discarded-qualifiers` clears it.
+    // Does NOT affect the write-to-const ERROR — that's a constraint violation, not
+    // a suppressible warning.
+    private readonly bool _warnDiscard;
+
     internal IrBuilder(DotCC.DialectGate? gate, INameLegalizer names,
-        IReadOnlyDictionary<string, byte[]>? embeds = null)
+        IReadOnlyDictionary<string, byte[]>? embeds = null, bool warnDiscardedQualifiers = true)
     {
         _gate = gate;
         _symbols = new SymbolTable(names);
         _embeds = embeds ?? new Dictionary<string, byte[]>();
+        _warnDiscard = warnDiscardedQualifiers;
     }
 
     /// <summary>Flag a feature introduced in <paramref name="era"/> (ISO year) when
@@ -292,7 +302,7 @@ internal sealed partial class IrBuilder
             {
                 _definedGlobalNames.Add(name); // a real definition — satisfies any extern decl
                 CExpr? gInit = null;
-                if (initItem is { } ii) { gInit = BuildExpr(ii); EnsureNotEmbed(gInit); }
+                if (initItem is { } ii) { gInit = BuildExpr(ii); EnsureNotEmbed(gInit); CheckQualifierDiscard(gInit, sym.Type, SrcPos.From(ii), "initialization"); }
                 Globals.Add(new GlobalVar(sym, gInit));
             }
         });
@@ -436,6 +446,7 @@ internal sealed partial class IrBuilder
 
         _symbols.BeginFunction();
         _currentFnName = sig.Name; // drives the `__func__` predefined identifier
+        _currentRet = (funcSym.Type as CType.Func)?.Return; // drives return const-discard
         _symbols.EnterScope(); // parameter scope
         var paramSyms = new List<Symbol>(sig.Params.Count);
         foreach (var (pType, pName) in sig.Params)
@@ -1192,7 +1203,12 @@ internal sealed partial class IrBuilder
             }
             case C.StmtWhile s: return new While(BuildExpr(s.Arg2), BuildStmt(s.Arg4)) { Pos = pos };
             case C.StmtDoWhile s: return new DoWhile(BuildStmt(s.Arg1), BuildExpr(s.Arg4)) { Pos = pos };
-            case C.StmtReturn s: return new Return(BuildExpr(s.Arg1)) { Pos = pos };
+            case C.StmtReturn s:
+            {
+                var rv = BuildExpr(s.Arg1);
+                if (_currentRet is { } rt) { CheckQualifierDiscard(rv, rt, pos, "return"); }
+                return new Return(rv) { Pos = pos };
+            }
             case C.StmtReturnVoid: return new Return(null) { Pos = pos };
             case C.StmtBreak: return new Break { Pos = pos };
             case C.StmtContinue: return new Continue { Pos = pos };
@@ -1429,7 +1445,7 @@ internal sealed partial class IrBuilder
                 TargetName = $"{_symbols.Escape(name)}__s{_staticLocalSeq++}",
             };
             CExpr? slInit = null;
-            if (initItem is { } ii) { slInit = BuildExpr(ii); EnsureNotEmbed(slInit); }
+            if (initItem is { } ii) { slInit = BuildExpr(ii); EnsureNotEmbed(slInit); CheckQualifierDiscard(slInit, sym.Type, SrcPos.From(ii), "initialization"); }
             Globals.Add(new GlobalVar(sym, slInit));
             _symbols.DeclareAlias(sym);
         });
@@ -1530,7 +1546,7 @@ internal sealed partial class IrBuilder
             }
             var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type, Storage = Storage.Auto });
             CExpr? sInit = null;
-            if (initItem is { } ii) { sInit = BuildExpr(ii); EnsureNotEmbed(sInit); }
+            if (initItem is { } ii) { sInit = BuildExpr(ii); EnsureNotEmbed(sInit); CheckQualifierDiscard(sInit, sym.Type, SrcPos.From(ii), "initialization"); }
             scalars.Add(new LocalDecl(sym, sInit));
         });
         Flush();
@@ -2081,7 +2097,7 @@ internal sealed partial class IrBuilder
     /// const (<c>T*</c> → <c>const T*</c>) is always allowed.</summary>
     private void CheckQualifierDiscard(CExpr value, CType target, SrcPos pos, string context)
     {
-        if (pos.IsSystemHeader || Unparen(value) is Cast) { return; }
+        if (!_warnDiscard || pos.IsSystemHeader || Unparen(value) is Cast) { return; }
         if (PointeeOf(value.Type) is { } sp && PointeeOf(target) is { } tp && sp.IsConst && !tp.IsConst)
         {
             Diagnostics.Add(new Diagnostic(Severity.Warning,

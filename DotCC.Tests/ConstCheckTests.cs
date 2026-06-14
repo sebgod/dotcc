@@ -29,15 +29,16 @@ public sealed class ConstCheckTests
 
     /// <summary>Emit and capture stderr (where const-discard warnings land). The
     /// unit assembly is serialized (AssemblyInfo), so the process-global
-    /// <c>Console.Error</c> swap is race-free.</summary>
-    private static (string Emit, string Stderr) EmitWithStderr(string body)
+    /// <c>Console.Error</c> swap is race-free. <paramref name="warnDiscard"/> toggles
+    /// the const-discard warning (the `-Wno-discarded-qualifiers` knob).</summary>
+    private static (string Emit, string Stderr) EmitWithStderr(string body, bool warnDiscard = true)
     {
         var path = Path.Combine(Path.GetTempPath(), $"dotcc-constck-{Guid.NewGuid():N}.c");
         File.WriteAllText(path, body);
         var prior = Console.Error;
         var sw = new StringWriter();
         Console.SetError(sw);
-        try { return (Compiler.EmitCSharp(new[] { path }), sw.ToString()); }
+        try { return (Compiler.EmitCSharp(new[] { path }, warnDiscardedQualifiers: warnDiscard), sw.ToString()); }
         finally { Console.SetError(prior); File.Delete(path); }
     }
 
@@ -180,5 +181,47 @@ public sealed class ConstCheckTests
             int main(void) { const char *q = "x"; char *p; p = q; return p[0]; }
             """);
         stderr.ShouldContain("discards 'const' qualifier");
+    }
+
+    [Fact]
+    public void initializing_a_plain_pointer_from_a_pointer_to_const_warns()
+    {
+        var (_, stderr) = EmitWithStderr("""
+            int main(void) { const char *q = "x"; char *p = q; return p[0]; }
+            """);
+        stderr.ShouldContain("discards 'const' qualifier");
+        stderr.ShouldContain("initialization");
+    }
+
+    [Fact]
+    public void returning_a_pointer_to_const_through_a_plain_pointer_warns()
+    {
+        var (_, stderr) = EmitWithStderr("""
+            static char *strip(const char *s) { return s; }
+            int main(void) { return strip("x")[0]; }
+            """);
+        stderr.ShouldContain("discards 'const' qualifier");
+        stderr.ShouldContain("return");
+    }
+
+    [Fact]
+    public void wno_discarded_qualifiers_suppresses_the_warning_but_not_the_error()
+    {
+        // -Wno-discarded-qualifiers silences the discard warning…
+        var (_, stderr) = EmitWithStderr("""
+            static int sink(char *p) { return p[0]; }
+            int main(void) { const char *q = "x"; return sink(q); }
+            """, warnDiscard: false);
+        stderr.ShouldNotContain("discards");
+
+        // …but a write-to-const stays a hard error regardless of the flag.
+        var path = Path.Combine(Path.GetTempPath(), $"dotcc-constck-{Guid.NewGuid():N}.c");
+        File.WriteAllText(path, "int main(void) { const int x = 5; x = 6; return x; }");
+        try
+        {
+            Should.Throw<CompileException>(() =>
+                Compiler.EmitCSharp(new[] { path }, warnDiscardedQualifiers: false));
+        }
+        finally { File.Delete(path); }
     }
 }

@@ -75,6 +75,10 @@ internal static class Program
         {
             Description = "Warn on implicit integer conversions that narrow (a wider value stored into a narrower type, e.g. int -> unsigned char). Off by default, like gcc/clang -Wconversion.",
         };
+        var wnoDiscardedQualifiersOpt = new Option<bool>("-Wno-discarded-qualifiers")
+        {
+            Description = "Suppress the warning for an implicit conversion that discards a const qualifier from a pointer's pointee (passing/assigning/returning a const T* where a T* is expected). On by default, like gcc -Wdiscarded-qualifiers. Does NOT affect the write-to-const error.",
+        };
         var sanitizeOpt = new Option<string?>("-fsanitize")
         {
             Description = "Enable a sanitizer. Only 'address' is modeled: routes the emitted program's malloc/calloc/realloc/free through a checked debug heap (redzone overflow + bad/double-free detection, a heap-only subset of clang's -fsanitize=address). DOTCC_DEBUG_HEAP=1 is the runtime-override equivalent.",
@@ -109,7 +113,7 @@ internal static class Program
         var root = new RootCommand("dotcc — a C compiler frontend that transpiles to .NET 10 / C# 14.")
         {
             inputArg, outOpt, emitOpt, targetOpt, preprocessOpt, includeOpt, defineOpt, compileOpt, sharedOpt, stdOpt,
-            pedanticOpt, pedanticErrorsOpt, wconversionOpt, sanitizeOpt, mdOpt, mmdOpt, mfOpt, mtOpt, linkOpt, libDirOpt,
+            pedanticOpt, pedanticErrorsOpt, wconversionOpt, wnoDiscardedQualifiersOpt, sanitizeOpt, mdOpt, mmdOpt, mfOpt, mtOpt, linkOpt, libDirOpt,
         };
         // Accept-and-ignore unknown flags (-Wall, -O2, -g, -f*, -m*, …) instead
         // of erroring out, so dotcc survives being driven by ./configure / make,
@@ -155,6 +159,7 @@ internal static class Program
             var pedanticFlag = parse.GetValue(pedanticOpt);
             var pedanticErrorsFlag = parse.GetValue(pedanticErrorsOpt);
             var wconversionFlag = parse.GetValue(wconversionOpt);
+            var warnDiscardedQualifiers = !parse.GetValue(wnoDiscardedQualifiersOpt);
             // -fsanitize=address[,...]: enable the checked debug heap. Other
             // sanitizers aren't modeled — warn and carry on rather than error
             // (./configure probes sanitizers and shouldn't fail the build).
@@ -210,7 +215,7 @@ internal static class Program
             }
 
             return Run(inputs, output, emit, target, preprocessOnly, includes, defines, sharedFlag, dialect, pedanticFlag, pedanticErrorsFlag,
-                       mdFlag, mmdFlag, depFile, depTargets, wconversionFlag, debugHeapFlag, imports);
+                       mdFlag, mmdFlag, depFile, depTargets, wconversionFlag, debugHeapFlag, imports, warnDiscardedQualifiers);
         });
 
         return root.Parse(args).Invoke();
@@ -236,7 +241,8 @@ internal static class Program
         string[] depTargets,
         bool warnConversion = false,
         bool debugHeap = false,
-        ImportOptions? imports = null)
+        ImportOptions? imports = null,
+        bool warnDiscardedQualifiers = true)
     {
         imports ??= ImportOptions.Empty;
         if (preprocessOnly)
@@ -320,6 +326,7 @@ internal static class Program
                     pedantic: pedantic,
                     pedanticErrors: pedanticErrors,
                     warnConversion: warnConversion,
+                    warnDiscardedQualifiers: warnDiscardedQualifiers,
                     debugHeap: debugHeap,
                     imports: imports);
         }
