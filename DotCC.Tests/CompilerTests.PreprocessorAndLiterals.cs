@@ -621,6 +621,66 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Line_directive_renumbers_LINE_macro()
+    {
+        // `#line 100` makes the FOLLOWING physical line logical line 100, so
+        // `__LINE__` on it expands to 100 (not its physical line number 2).
+        var src = WriteTemp("""
+            #line 100
+            int a = __LINE__;
+            """);
+        try
+        {
+            using var sw = new StringWriter();
+            Compiler.Preprocess(new[] { src }, sw);
+            var dumped = sw.ToString();
+            dumped.ShouldNotContain("__LINE__");
+            dumped.ShouldContain(" 100 ");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Line_directive_with_filename_overrides_FILE_macro()
+    {
+        // `#line N "file"` overrides __FILE__ for the following lines, and the
+        // line numbering continues from N (so line 2 is 50, line 3 is 51).
+        var src = WriteTemp("""
+            #line 50 "virtual.c"
+            const char *f = __FILE__;
+            int n = __LINE__;
+            """);
+        try
+        {
+            using var sw = new StringWriter();
+            Compiler.Preprocess(new[] { src }, sw);
+            var dumped = sw.ToString();
+            dumped.ShouldContain("virtual.c");
+            dumped.ShouldNotContain("__FILE__");
+            dumped.ShouldContain(" 51 ");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Line_directive_compiles_end_to_end()
+    {
+        // The renumbered __LINE__ must survive into a compilable program — it
+        // lowers to a plain integer constant.
+        var src = WriteTemp("""
+            #line 200
+            int main() { return __LINE__; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("static unsafe int main()");
+            emitted.ShouldContain("return 200;");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Function_macro_two_args_substitutes_each()
     {
         // The canonical example. `MAX(a, b)` should land at the call site

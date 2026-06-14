@@ -46,6 +46,20 @@ internal sealed class CPreprocessor : C.IPreprocessor
     // OnInclude handler saves+restores around its recursive sub-preprocess
     // so nested includes work correctly.
     private string? _currentlyIncluding;
+    // `#line` remapping (C89 §6.10.4). `#line N` makes the line FOLLOWING the
+    // directive logical line N, so __LINE__ on a token at physical line `phys`
+    // reports `phys + _lineDelta`. `#line N "file"` also overrides __FILE__ via
+    // _fileOverride — kept SEPARATE from _currentlyIncluding, which #pragma once
+    // and -MD dependency tracking still key on the real on-disk filename. Both
+    // are per-file: OnInclude saves/resets/restores them around a recursive
+    // #include so an includer's remap can't bleed into the included file (and
+    // vice versa). CHEAP IMPLEMENTATION — these feed only the user-observable
+    // __LINE__/__FILE__ macros; downstream diagnostics (parse errors,
+    // DialectGate, CompileException) still report PHYSICAL positions. Making
+    // those follow #line means threading the remap through the whole SrcPos
+    // chain downstream of the preprocessor — deferred. See C-SUPPORT.md's #line row.
+    private int _lineDelta;
+    private string? _fileOverride;
     private readonly HashSet<string> _pragmaOnceFiles = new(StringComparer.Ordinal);
     // Multiple-include optimization. After processing a file for the first
     // time we scan its raw text for the standard header-guard wrapping
@@ -223,7 +237,14 @@ internal sealed class CPreprocessor : C.IPreprocessor
             _fileGuards[name] = DetectControllingMacro(source);
         }
         var saved = _currentlyIncluding;
+        // A #line remap is per-file: the included file starts fresh (physical
+        // line 1, its own presumed name), so reset on entry and restore the
+        // includer's remap on exit.
+        var savedLineDelta = _lineDelta;
+        var savedFileOverride = _fileOverride;
         _currentlyIncluding = name;
+        _lineDelta = 0;
+        _fileOverride = null;
         try
         {
             // Lex a synthetic system header in a reserved line band so every
@@ -259,6 +280,8 @@ internal sealed class CPreprocessor : C.IPreprocessor
         finally
         {
             _currentlyIncluding = saved;
+            _lineDelta = savedLineDelta;
+            _fileOverride = savedFileOverride;
         }
     }
 
@@ -730,12 +753,16 @@ internal sealed class CPreprocessor : C.IPreprocessor
         {
             if (text == "__LINE__")
             {
-                var line = token.Position.Line.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                // Physical line as the byte-DFA lexer counted it, shifted by any
+                // active #line remap (_lineDelta is 0 when no #line is in effect).
+                var line = (token.Position.Line + _lineDelta).ToString(System.Globalization.CultureInfo.InvariantCulture);
                 return new[] { new Item(_numSymbolId, line, token.Position) };
             }
             if (text == "__FILE__")
             {
-                var name = _currentlyIncluding ?? string.Empty;
+                // A `#line N "file"` filename override wins over the real
+                // currently-including filename.
+                var name = _fileOverride ?? _currentlyIncluding ?? string.Empty;
                 // STRING tokens carry the raw lexeme including surrounding
                 // quotes — the visitor's Str() strips them and re-wraps in
                 // the u8 literal form.
@@ -883,6 +910,60 @@ internal sealed class CPreprocessor : C.IPreprocessor
             {
                 _pragmaOnceFiles.Add(_currentlyIncluding);
             }
+        }
+        return Array.Empty<Item>();
+    }
+
+    /// <summary>
+    /// <c>#line N</c> / <c>#line N "file"</c> (C89 §6.10.4). Renumbers the lines
+    /// that FOLLOW the directive: the next physical line becomes logical line
+    /// <paramref name="args"/>[0] (<c>N</c>), and an optional string literal
+    /// overrides the presumed filename.
+    /// </summary>
+    /// <remarks>
+    /// CHEAP IMPLEMENTATION — this honours the directive only for the two
+    /// user-observable macros it feeds: <c>__LINE__</c> (via <c>_lineDelta</c>)
+    /// and <c>__FILE__</c> (via <c>_fileOverride</c>). Compiler diagnostics —
+    /// parse errors, <see cref="DialectGate"/>, <see cref="CompileException"/> —
+    /// still report the PHYSICAL line/file; making them follow <c>#line</c> would
+    /// mean threading the remap through the whole <c>Ir.SrcPos</c> chain
+    /// downstream of the preprocessor, which is deferred (see the <c>#line</c>
+    /// row in C-SUPPORT.md). The operands are object-like-macro-expanded first,
+    /// per the standard; a malformed directive is reported and ignored rather
+    /// than fatal.
+    /// </remarks>
+    public IEnumerable<Item> OnLine(IReadOnlyList<Item> args)
+    {
+        if (args.Count == 0)
+        {
+            _diag.WriteLine("dotcc: #line: expected a line number");
+            return Array.Empty<Item>();
+        }
+        // The directive sits on this physical line (its first argument token's
+        // line). Macro expansion below may pull body tokens in from elsewhere
+        // (carrying the definition's position), so capture the use-site line FIRST.
+        var directivePhysLine = args[0].Position.Line;
+        // The standard says the arguments are macro-expanded before
+        // interpretation (`#define LN 100` then `#line LN`). Object-like
+        // expansion covers the digit-sequence + optional string-literal operands.
+        var expanded = ExpandObjectLikeBody(args, new HashSet<string>(StringComparer.Ordinal));
+        if (expanded.Count == 0 || expanded[0].Content is not string numText
+            || !int.TryParse(numText, System.Globalization.NumberStyles.None,
+                             System.Globalization.CultureInfo.InvariantCulture, out var logical)
+            || logical < 1)
+        {
+            _diag.WriteLine("dotcc: #line: expected a positive line number");
+            return Array.Empty<Item>();
+        }
+        // `#line N` makes the FOLLOWING physical line (directivePhysLine + 1)
+        // logical line N, so a token at physical `phys` reports
+        // `phys + (N - directivePhysLine - 1)`.
+        _lineDelta = logical - directivePhysLine - 1;
+        // Optional filename: a string literal token (carries its own quotes).
+        if (expanded.Count > 1 && expanded[1].Content is string fileText
+            && fileText.Length >= 2 && fileText[0] == '"' && fileText[^1] == '"')
+        {
+            _fileOverride = fileText[1..^1];
         }
         return Array.Empty<Item>();
     }

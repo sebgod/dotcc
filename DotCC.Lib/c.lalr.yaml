@@ -397,6 +397,12 @@ symbols:
   - WCHAR          # 170 wchar_t char constant — L'x'
   - WStringSeq     # 171 non-terminal: a run of adjacent L"…" literals
 
+  # `#line N` / `#line N "file"` (C89 §6.10.4). Renumbers __LINE__ and (with the
+  # optional filename) __FILE__ for the lines that follow. Consumed by the
+  # preprocessor (OnLine), never reaches the parser — appended here purely so the
+  # byte lexer has a terminal to emit. See the preprocessor: block at the bottom.
+  - '#line'        # 172 preprocessor directive — renumber __LINE__ / __FILE__
+
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
   # Item carries FnList's already-built C# source string.
@@ -1505,6 +1511,9 @@ lexer:
     - { symbol: '#embed',   match: '#[ \t]*embed' }
     - { symbol: '#define',  match: '#[ \t]*define' }
     - { symbol: '#undef',   match: '#[ \t]*undef' }
+    # `#line` shares the `#[ \t]*` prefix with the rest; no keyword-prefix
+    # collision (`line` vs the others), so longest-match + first-wins disambiguate.
+    - { symbol: '#line',    match: '#[ \t]*line' }
     # `#warning` must precede `#pragma` if any prefix sharing; no shared
     # prefix here so order is just cosmetic.
     - { symbol: '#pragma',  match: '#[ \t]*pragma' }
@@ -1787,6 +1796,7 @@ preprocessor:
     '#embed':   onEmbed
     '#define':  onDefine
     '#undef':   onUndef
+    '#line':    onLine
     '#pragma':  onPragma
     '#error':   onError
     '#warning': onWarning
