@@ -62,7 +62,10 @@ public static unsafe partial class Libc
         public StreamFileReader? Reader; // lazy, file kind only
         public bool Eof;
         public bool Err;
-        public int Pushback = -1;       // one char pushed back by ungetc (-1 = none)
+        public int Pushback = -1;       // one byte pushed back by ungetc (-1 = none)
+        public int PendingWide = -1;    // one wchar_t pending for the wide reader
+                                        // (a stashed low surrogate, or an ungetwc
+                                        // pushback); -1 = none. See ReadWideFrom.
     }
 
     // Slots 0/1/2 are the std streams. fopen() appends (or reuses a freed slot).
@@ -186,6 +189,52 @@ public static unsafe partial class Libc
         }
         if (r < 0) { s.Eof = true; return -1; }
         return r & 0xFF;
+    }
+
+    /// <summary>Read one <c>wchar_t</c> (a UTF-16 code unit) from <paramref name="f"/>,
+    /// decoding dotcc's narrow encoding (UTF-8) off the byte reader — the wide
+    /// counterpart of <see cref="ReadByteFrom"/>, byte-stream-consistent (it shares
+    /// the same underlying bytes and the <c>ungetc</c> pushback). A code point above
+    /// U+FFFF yields a UTF-16 surrogate pair: the high half is returned now and the
+    /// low half stashed in the slot for the next call. A malformed sequence yields
+    /// U+FFFD. Returns -1 (<c>WEOF</c>) at end of input. Also honors a wide pushback
+    /// set by <see cref="UngetWideTo"/>.</summary>
+    internal static int ReadWideFrom(FILE* f)
+    {
+        if (Slot(f) is not { } s) { return -1; }
+        if (s.PendingWide >= 0) { int p = s.PendingWide; s.PendingWide = -1; return p; }
+        int b0 = ReadByteSlot(s);
+        if (b0 < 0) { return -1; }
+        if (b0 < 0x80) { return b0; }
+        int n, cp;
+        if ((b0 & 0xE0) == 0xC0) { n = 1; cp = b0 & 0x1F; }
+        else if ((b0 & 0xF0) == 0xE0) { n = 2; cp = b0 & 0x0F; }
+        else if ((b0 & 0xF8) == 0xF0) { n = 3; cp = b0 & 0x07; }
+        else { return 0xFFFD; }                       // stray continuation / invalid lead
+        for (int i = 0; i < n; i++)
+        {
+            int b = ReadByteSlot(s);
+            if (b < 0 || (b & 0xC0) != 0x80) { return 0xFFFD; }   // truncated / invalid
+            cp = (cp << 6) | (b & 0x3F);
+        }
+        if (cp > 0xFFFF)
+        {
+            cp -= 0x10000;
+            s.PendingWide = 0xDC00 + (cp & 0x3FF);    // low surrogate returned next call
+            return 0xD800 + (cp >> 10);               // high surrogate now
+        }
+        return cp;
+    }
+
+    /// <summary>Push one <c>wchar_t</c> back so the next <see cref="ReadWideFrom"/>
+    /// returns it (the wide <c>ungetc</c>). Only one is held; pushing <c>WEOF</c> or
+    /// when one is already pending fails. Clears the slot's EOF flag.</summary>
+    internal static int UngetWideTo(FILE* f, int c)
+    {
+        if (c < 0 || Slot(f) is not { } s || s.PendingWide >= 0) { return -1; }
+        s.PendingWide = c & 0xFFFF;
+        s.Eof = false;
+        return c & 0xFFFF;
     }
 
     // ---------------------------------------------------------------------

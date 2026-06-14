@@ -389,6 +389,37 @@ public unsafe ref struct PrintfBuilder
     public PrintfBuilder Arg(void* v) => Arg((byte*)v);
 
     /// <summary>
+    /// A wide-string (<c>wchar_t*</c> = C# <c>char*</c>) argument — the wide
+    /// <c>%s</c> / <c>%ls</c> spec used by <c>wprintf</c>/<c>fwprintf</c>/<c>swprintf</c>
+    /// (whose format is transcoded to UTF-8, so the spec is parsed identically; only
+    /// the argument is UTF-16). Reads the NUL-terminated UTF-16 string and writes it,
+    /// honoring precision. Narrow <c>printf</c> never passes a <c>char*</c> (its
+    /// <c>%s</c> is a <c>byte*</c>), so this overload is wide-only.
+    /// </summary>
+    public PrintfBuilder Arg(char* v)
+    {
+        var spec = ConsumeUntilSpec();
+        string s;
+        if ((spec.Conv == (byte)'s' || spec.Conv == (byte)'S') && v != null)
+        {
+            int len = 0;
+            while (v[len] != 0) { len++; }
+            s = new string(v, 0, len);
+            if (spec.Precision >= 0 && spec.Precision < s.Length) { s = s[..spec.Precision]; }
+        }
+        else if (v == null)
+        {
+            s = "(null)";
+        }
+        else
+        {
+            s = ((System.IntPtr)v).ToString("X");
+        }
+        _w.Write(ApplyWidth(s, spec));
+        return this;
+    }
+
+    /// <summary>
     /// Flush the literal text remaining after the last consumed <c>%</c>
     /// spec. Returns <c>0</c> for simplicity — real C printf returns the
     /// byte count, which our callers don't currently consult.

@@ -21,14 +21,18 @@
    `#include <wchar.h>` resolves, declares the wide-string library, and documents
    the support.
 
-   NOT provided (out of scope): wide formatted I/O (wprintf / fwprintf / swprintf
-   and the w*scanf family — the printf engine is UTF-8/`L(...)`-based, so a wide
-   format needs a separate engine), and wide INPUT (fgetws / getwc / getwchar).
-   The multibyte<->wide conversion model (mbrtowc / wcrtomb / mbstate_t) is also
-   not provided — dotcc has no locale/multibyte machinery. char32_t stays out too
-   (see <uchar.h>). */
+   The wide-string library, wide character/line I/O, and wide formatted I/O are all
+   provided (see the prototypes below): dotcc's narrow encoding is UTF-8, so wide I/O
+   is a UTF-8<->UTF-16 conversion against the same byte streams <stdio.h> uses, and
+   the wide printf/scanf formats are transcoded to UTF-8 to reuse the byte engine.
+
+   NOT provided (out of scope): the explicit multibyte<->wide conversion model
+   (mbrtowc / wcrtomb / mbsrtowcs / mbstate_t and the <uchar.h> mbrtoc16/c16rtomb
+   family) — dotcc has no locale/multibyte machinery beyond the implicit UTF-8<->UTF-16
+   bridge. char32_t stays out too (see <uchar.h>). */
 
 #include <stddef.h>   /* size_t */
+#include <stdio.h>    /* FILE (for the wide stream I/O below) */
 
 /* wint_t — an integer type able to hold any wchar_t value plus WEOF. dotcc uses
    a plain (signed) int with WEOF == -1, mirroring how <stdio.h> models EOF, so
@@ -90,5 +94,28 @@ unsigned long wcstoull(wchar_t* nptr, wchar_t** endptr, int base);
 double wcstod(wchar_t* nptr, wchar_t** endptr);
 float wcstof(wchar_t* nptr, wchar_t** endptr);
 long double wcstold(wchar_t* nptr, wchar_t** endptr);
+
+/* Wide character / line I/O. dotcc's narrow encoding is UTF-8, so these convert
+   UTF-8<->UTF-16 against the same byte streams the <stdio.h> functions use. */
+wint_t   fputwc(wchar_t c, FILE* stream);
+wint_t   putwc(wchar_t c, FILE* stream);
+wint_t   putwchar(wchar_t c);
+int      fputws(wchar_t* s, FILE* stream);
+wint_t   fgetwc(FILE* stream);
+wint_t   getwc(FILE* stream);
+wint_t   getwchar(void);
+wint_t   ungetwc(wint_t c, FILE* stream);
+wchar_t* fgetws(wchar_t* s, int n, FILE* stream);
+
+/* Wide formatted I/O. The wide format is transcoded to UTF-8 and reuses the byte
+   printf/scanf engine; a wide %s/%c argument is a wchar_t*. swprintf bounds the
+   write to n wide chars including the NUL (returning negative on overflow, per C —
+   unlike snprintf). */
+int wprintf(wchar_t* fmt, ...);
+int fwprintf(FILE* stream, wchar_t* fmt, ...);
+int swprintf(wchar_t* s, size_t n, wchar_t* fmt, ...);
+int wscanf(wchar_t* fmt, ...);
+int fwscanf(FILE* stream, wchar_t* fmt, ...);
+int swscanf(wchar_t* src, wchar_t* fmt, ...);
 
 #endif

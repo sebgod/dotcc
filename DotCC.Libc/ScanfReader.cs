@@ -123,6 +123,31 @@ public unsafe ref struct ScanfReader
         return this;
     }
 
+    /// <summary>Wide <c>%s</c> / <c>%c</c> target — a <c>wchar_t*</c> (= C#
+    /// <c>char*</c>) for the <c>w*scanf</c> family. Mirrors <see cref="Read(byte*)"/>
+    /// but stores UTF-16 code units straight from the reader (no UTF-8 encoding —
+    /// the reader already yields UTF-16); <c>%s</c> stops at whitespace/EOF and
+    /// NUL-terminates, <c>%c</c> reads a single unit. Narrow <c>scanf</c> never
+    /// targets a <c>char*</c>, so this overload is wide-only.</summary>
+    public ScanfReader Read(char* dst)
+    {
+        var spec = ExpectSpec();
+        if (spec != (byte)'s' && spec != (byte)'c') { return this; }
+        if (spec != (byte)'c') { SkipInputWs(); }
+        int written = 0;
+        while (true)
+        {
+            int peek = _r.Peek();
+            if (peek == -1) { break; }
+            if (spec == (byte)'s' && char.IsWhiteSpace((char)peek)) { break; }
+            dst[written++] = (char)_r.Read();
+            if (spec == (byte)'c') { break; }
+        }
+        if (spec != (byte)'c') { dst[written] = '\0'; }
+        if (written > 0) { _matched++; }
+        return this;
+    }
+
     public int Done() => _matched;
 
     private byte ExpectSpec()

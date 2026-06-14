@@ -1963,6 +1963,15 @@ internal sealed class CSharpBackend
                 "scanf" => (1, $"scanf({Arg(a, 0)})"),
                 "fscanf" => (2, $"fscanf({Arg(a, 0)}, {Arg(a, 1)})"),
                 "sscanf" => (2, $"sscanf({Arg(a, 0)}, {Arg(a, 1)})"),
+                // Wide formatted I/O — the same fluent lowering; the runtime
+                // transcodes the wide format to UTF-8 and reuses the byte
+                // PrintfBuilder/ScanfReader (a wide %s/%c arg is a char*).
+                "wprintf" => (1, $"wprintf({Arg(a, 0)})"),
+                "fwprintf" => (2, $"fwprintf({Arg(a, 0)}, {Arg(a, 1)})"),
+                "swprintf" => (3, $"swprintf({Arg(a, 0)}, {Arg(a, 1)}, {Arg(a, 2)})"),
+                "wscanf" => (1, $"wscanf({Arg(a, 0)})"),
+                "fwscanf" => (2, $"fwscanf({Arg(a, 0)}, {Arg(a, 1)})"),
+                "swscanf" => (2, $"swscanf({Arg(a, 0)}, {Arg(a, 1)})"),
                 _ => (a.Count, $"{c.Callee}({string.Join(", ", a)})"),
             };
             var chain = IsScanfFamily(c.Callee) ? ".Read(" : ".Arg(";
@@ -1981,14 +1990,19 @@ internal sealed class CSharpBackend
     }
 
     /// <summary>The libc names the C# backend lowers to the fluent
-    /// <c>printf(fmt).Arg(x).Done()</c> form (variadic format functions).</summary>
+    /// <c>printf(fmt).Arg(x).Done()</c> form (variadic format functions) — narrow
+    /// plus the wide <c>w*printf</c> family (same lowering; the wide format is
+    /// transcoded to UTF-8 at runtime).</summary>
     private static bool IsPrintfFamily(string callee) =>
-        callee is "printf" or "fprintf" or "sprintf" or "snprintf";
+        callee is "printf" or "fprintf" or "sprintf" or "snprintf"
+               or "wprintf" or "fwprintf" or "swprintf";
 
     /// <summary>The scanf side of the same lowering — fluent
-    /// <c>.Read(ptr)</c> chain into <c>ScanfReader</c>.</summary>
+    /// <c>.Read(ptr)</c> chain into <c>ScanfReader</c> — narrow plus the wide
+    /// <c>w*scanf</c> family.</summary>
     private static bool IsScanfFamily(string callee) =>
-        callee is "scanf" or "fscanf" or "sscanf";
+        callee is "scanf" or "fscanf" or "sscanf"
+               or "wscanf" or "fwscanf" or "swscanf";
 
     private static string Arg(List<string> a, int i) => i < a.Count ? a[i] : "";
 

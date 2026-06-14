@@ -48,6 +48,7 @@ public unsafe ref struct SprintfBuilder
     public SprintfBuilder Arg(Float128 v) { _inner = _inner.Arg(v); return this; }
     public SprintfBuilder Arg(byte* v)    { _inner = _inner.Arg(v); return this; }
     public SprintfBuilder Arg(void* v)    { _inner = _inner.Arg(v); return this; }
+    public SprintfBuilder Arg(char* v)    { _inner = _inner.Arg(v); return this; }
 
     public int Done()
     {

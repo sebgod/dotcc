@@ -1,0 +1,6 @@
+wchar_t is platform-divergent: dotcc commits to the MSVC shape (16-bit UTF-16),
+but gcc/Linux's wchar_t is 32-bit. The wide I/O here (wprintf/swprintf/swscanf,
+putwchar/fputws) is validated against the MSVC oracle (also 16-bit); gcc lays out
+the L"…" literals and wchar_t buffers at 4 bytes/char. The visible output is ASCII
+and would likely coincide, but the ABI differs by design — see wchar.h and the
+wchar-literals fixture.

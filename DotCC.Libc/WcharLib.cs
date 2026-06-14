@@ -1,6 +1,7 @@
 #nullable enable
 
 using System;
+using System.IO;
 using System.Runtime.InteropServices;
 
 namespace DotCC.Libc;
@@ -21,11 +22,15 @@ namespace DotCC.Libc;
 /// 0/2-36, <c>errno</c>+clamp on overflow, hex floats, <c>inf</c>/<c>nan</c>),
 /// then map the byte endptr back onto the wide pointer.
 ///
-/// NOT provided (see <c>wchar.h</c>): wide formatted I/O (<c>wprintf</c> /
-/// <c>w*scanf</c>), wide input (<c>fgetws</c> / <c>getwc</c>), and the
-/// multibyte&lt;-&gt;wide conversion model (<c>mbrtowc</c> / <c>wcrtomb</c>).
-/// dotcc maps C <c>size_t</c> to <c>ulong</c>; length-returning functions narrow
-/// to <c>int</c> to match <see cref="Libc.strlen"/>.
+/// Wide character/line I/O (<c>fputwc</c>/<c>fgetwc</c>/<c>fputws</c>/<c>fgetws</c>/…)
+/// and wide formatted I/O (<c>wprintf</c>/<c>fwprintf</c>/<c>swprintf</c> and the
+/// <c>w*scanf</c> family) are provided too — see further down. Output goes through
+/// the stream's UTF-8 <c>TextWriter</c>; input assembles UTF-8 off the byte reader;
+/// the formatted family transcodes the wide format to UTF-8 and reuses the byte
+/// <see cref="PrintfBuilder"/>/<see cref="ScanfReader"/>. NOT provided: the explicit
+/// multibyte&lt;-&gt;wide conversion model (<c>mbrtowc</c> / <c>wcrtomb</c> /
+/// <c>mbstate_t</c>). dotcc maps C <c>size_t</c> to <c>ulong</c>; length-returning
+/// functions narrow to <c>int</c> to match <see cref="Libc.strlen"/>.
 /// </remarks>
 public static unsafe partial class Libc
 {
@@ -359,4 +364,153 @@ public static unsafe partial class Libc
     /// <summary><c>wcstold(nptr, endptr)</c> (C99) — parse a long double
     /// (== <c>double</c> on dotcc's model).</summary>
     public static double wcstold(char* nptr, char** endptr) => WcstodViaByte(nptr, endptr);
+
+    // ---------------------------------------------------------------------
+    // Wide character / line I/O
+    //
+    // dotcc's narrow encoding is UTF-8, so wide I/O is UTF-8<->UTF-16. Output
+    // goes through the stream's TextWriter (WriterFor) — the same unbuffered
+    // UTF-8 writer fprintf uses, so wide and narrow writes on one handle stay
+    // ordered. Input assembles UTF-8 off the byte reader (ReadWideFrom),
+    // byte-stream-consistent with fgetc/fgets (shared bytes + ungetc pushback).
+    // Wide FORMATTED I/O (wprintf / w*scanf) is handled by the emitter — see
+    // the printf/scanf fluent lowering — not here.
+    // ---------------------------------------------------------------------
+
+    /// <summary><c>fputwc(c, stream)</c> — write the wide character
+    /// <paramref name="c"/> (UTF-8-encoded) to <paramref name="stream"/>; returns
+    /// it, or <c>WEOF</c> on a non-output stream.</summary>
+    public static int fputwc(char c, FILE* stream)
+    {
+        WriterFor(stream).Write(c);
+        return c;
+    }
+
+    /// <summary><c>putwc(c, stream)</c> — identical to <see cref="fputwc"/>.</summary>
+    public static int putwc(char c, FILE* stream) => fputwc(c, stream);
+
+    /// <summary><c>putwchar(c)</c> ≡ <c>fputwc(c, stdout)</c>.</summary>
+    public static int putwchar(char c) => fputwc(c, stdout);
+
+    /// <summary><c>fputws(s, stream)</c> — write NUL-terminated wide string
+    /// <paramref name="s"/> (UTF-8-encoded) to <paramref name="stream"/>; no
+    /// newline (per C — only the never-standardised wide <c>puts</c> would add one).
+    /// Returns a non-negative value on success.</summary>
+    public static int fputws(char* s, FILE* stream)
+    {
+        if (s == null) { return -1; }
+        WriterFor(stream).Write(new string(s, 0, wcslen(s)));
+        return 0;
+    }
+
+    /// <summary><c>fgetwc(stream)</c> — read one wide character from
+    /// <paramref name="stream"/> (decoding a UTF-8 multibyte sequence; a code point
+    /// above U+FFFF arrives as two calls, the surrogate pair). Returns the code unit
+    /// (0..0xFFFF) or <c>WEOF</c> (-1) at end of input.</summary>
+    public static int fgetwc(FILE* stream) => ReadWideFrom(stream);
+
+    /// <summary><c>getwc(stream)</c> — identical to <see cref="fgetwc"/>.</summary>
+    public static int getwc(FILE* stream) => fgetwc(stream);
+
+    /// <summary><c>getwchar()</c> ≡ <c>fgetwc(stdin)</c>.</summary>
+    public static int getwchar() => fgetwc(stdin);
+
+    /// <summary><c>ungetwc(c, stream)</c> — push one wide character back so the next
+    /// <see cref="fgetwc"/> returns it. One pushback only; <c>WEOF</c> can't be
+    /// pushed. Returns <paramref name="c"/> or <c>WEOF</c> on failure.</summary>
+    public static int ungetwc(int c, FILE* stream) => UngetWideTo(stream, c);
+
+    /// <summary><c>fgetws(s, n, stream)</c> — read at most <c><paramref name="n"/>-1</c>
+    /// wide characters into <paramref name="s"/>, stopping after a newline (which is
+    /// kept) or at end of input, then NUL-terminate. Returns <paramref name="s"/>, or
+    /// <c>null</c> if end of input is hit before any character (the wide
+    /// <see cref="fgets"/>).</summary>
+    public static char* fgetws(char* s, int n, FILE* stream)
+    {
+        if (n <= 0) { return null; }
+        int i = 0;
+        while (i < n - 1)
+        {
+            int ch = ReadWideFrom(stream);
+            if (ch < 0)
+            {
+                if (i == 0) { return null; }   // EOF with nothing read
+                break;
+            }
+            s[i++] = (char)ch;
+            if (ch == '\n') { break; }
+        }
+        s[i] = '\0';
+        return s;
+    }
+
+    // ---------------------------------------------------------------------
+    // Wide formatted output (wprintf / fwprintf / swprintf)
+    //
+    // The emitter lowers these to the SAME fluent builder as printf/sprintf
+    // (see CSharpBackend's printf-family lowering). The wide format is
+    // transcoded to UTF-8 (so the byte PrintfBuilder parses the identical spec
+    // grammar); only a wide %s arg differs, handled by PrintfBuilder.Arg(char*).
+    // Wide formatted INPUT (w*scanf) lowers the same way to ScanfReader.
+    // ---------------------------------------------------------------------
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<IntPtr, IntPtr> _wideFmtToUtf8 =
+        new();
+
+    /// <summary>Transcode a wide (UTF-16) printf/scanf format to a pinned,
+    /// NUL-terminated UTF-8 <c>byte*</c> so the byte <see cref="PrintfBuilder"/> /
+    /// <see cref="ScanfReader"/> parses it unchanged. Pooled by the wide pointer — a
+    /// .rodata-style pool transcoded once per distinct literal (a format is ~always
+    /// an <c>L"…"</c> literal; a mutable runtime format reusing an address is
+    /// unsupported).</summary>
+    private static byte* WideFmtToUtf8(char* wfmt)
+    {
+        var key = (IntPtr)wfmt;
+        if (_wideFmtToUtf8.TryGetValue(key, out var hit)) { return (byte*)hit; }   // lock-free hot path
+        // Miss: transcode + allocate, then publish atomically with the value-taking
+        // GetOrAdd. Two threads racing the same new key both allocate; the loser
+        // frees its buffer (otherwise the dropped NativeMemory block would leak — the
+        // reason a value cache like this can't use the naive factory GetOrAdd).
+        var bytes = System.Text.Encoding.UTF8.GetBytes(new string(wfmt, 0, wcslen(wfmt)));
+        byte* buf = (byte*)NativeMemory.Alloc((nuint)bytes.Length + 1);
+        for (int i = 0; i < bytes.Length; i++) { buf[i] = bytes[i]; }
+        buf[bytes.Length] = 0;
+        var actual = _wideFmtToUtf8.GetOrAdd(key, (IntPtr)buf);
+        if (actual != (IntPtr)buf) { NativeMemory.Free(buf); }   // lost the race → free ours
+        return (byte*)actual;
+    }
+
+    /// <summary><c>wprintf(fmt, …)</c> — wide formatted output to stdout. The emitter
+    /// expands the variadic tail into the fluent <c>.Arg(…).Done()</c> chain.</summary>
+    public static PrintfBuilder wprintf(char* fmt) => new PrintfBuilder(WriterFor(stdout), WideFmtToUtf8(fmt));
+
+    /// <summary><c>fwprintf(stream, fmt, …)</c> — wide formatted output to a stream.</summary>
+    public static PrintfBuilder fwprintf(FILE* stream, char* fmt) => new PrintfBuilder(WriterFor(stream), WideFmtToUtf8(fmt));
+
+    /// <summary><c>swprintf(s, n, fmt, …)</c> — wide formatted output into
+    /// <paramref name="s"/>, at most <paramref name="n"/> wide chars including the
+    /// terminating NUL (returns a negative value if it doesn't fit — C's swprintf
+    /// contract, unlike snprintf).</summary>
+    public static WSprintfBuilder swprintf(char* s, ulong n, char* fmt) => new WSprintfBuilder(s, WideFmtToUtf8(fmt), (int)n);
+
+    // ---------------------------------------------------------------------
+    // Wide formatted input (wscanf / fwscanf / swscanf)
+    //
+    // The emitter lowers these to the same fluent .Read(ptr).Done() chain as
+    // scanf/sscanf. The wide format is transcoded to UTF-8 so the byte
+    // ScanfReader parses it unchanged; a wide %s/%c target is a char* (UTF-16),
+    // handled by ScanfReader.Read(char*). swscanf wraps its wide source string in
+    // a StringReader, exactly as sscanf does for a byte source.
+    // ---------------------------------------------------------------------
+
+    /// <summary><c>wscanf(fmt, …)</c> ≡ <c>fwscanf(stdin, fmt, …)</c>.</summary>
+    public static ScanfReader wscanf(char* fmt) => fwscanf(stdin, fmt);
+
+    /// <summary><c>fwscanf(stream, fmt, …)</c> — wide formatted input from a stream.</summary>
+    public static ScanfReader fwscanf(FILE* stream, char* fmt) => new ScanfReader(ReaderFor(stream), WideFmtToUtf8(fmt));
+
+    /// <summary><c>swscanf(src, fmt, …)</c> — wide formatted input from the wide
+    /// string <paramref name="src"/> (wrapped in a reader, like sscanf).</summary>
+    public static ScanfReader swscanf(char* src, char* fmt) =>
+        new ScanfReader(new StringReader(new string(src, 0, wcslen(src))), WideFmtToUtf8(fmt));
 }

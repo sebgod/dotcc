@@ -1,0 +1,6 @@
+d=42 ls=hi f=3.5
+fw=7
+A
+line
+swn=4 buf0=57 len=4
+got=2 a=123 w0=97
