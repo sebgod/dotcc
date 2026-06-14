@@ -643,7 +643,7 @@ public static unsafe partial class Libc
     // Instead pin its UTF-16 data on the Pinned Object Heap ONCE, cached per
     // distinct literal — a program-lifetime pool, mirroring how C places string
     // literals in .rodata. Pinning per use would leak a frame under a loop.
-    private static readonly System.Collections.Generic.Dictionary<string, IntPtr> _u16Literals =
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, IntPtr> _u16Literals =
         new(StringComparer.Ordinal);
 
     /// <summary><c>L16("…")</c> — return a stable <c>char*</c> (= char16_t*) to a
@@ -653,18 +653,18 @@ public static unsafe partial class Libc
     /// life (so the pointer never moves), exactly like <see cref="GlobalArrayFrom{T}"/>.</summary>
     public static char* L16(string s)
     {
-        lock (_u16Literals)
-        {
-            if (!_u16Literals.TryGetValue(s, out var p))
-            {
-                var arr = GC.AllocateUninitializedArray<char>(s.Length, pinned: true);
-                s.CopyTo(arr);
-                lock (_globalArrayRoots) { _globalArrayRoots.Add(arr); }
-                p = (IntPtr)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(arr));
-                _u16Literals[s] = p;
-            }
-            return (char*)p;
-        }
+        if (_u16Literals.TryGetValue(s, out var hit)) { return (char*)hit; }   // lock-free hot path
+        // Miss: pin a copy and publish atomically. Two threads racing the same new
+        // literal both pin; only the winner roots its array (so the pooled pointer
+        // stays valid for the program's life). The loser's array is unreferenced once
+        // we return — pinning prevents movement, not collection, so the GC reclaims
+        // it; nothing leaks.
+        var arr = GC.AllocateUninitializedArray<char>(s.Length, pinned: true);
+        s.CopyTo(arr);
+        var ptr = (IntPtr)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(arr));
+        var actual = _u16Literals.GetOrAdd(s, ptr);
+        if (actual == ptr) { lock (_globalArrayRoots) { _globalArrayRoots.Add(arr); } }
+        return (char*)actual;
     }
 
     // ── <signal.h> ─────────────────────────────────────────────────────
