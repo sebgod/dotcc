@@ -1296,6 +1296,11 @@ internal sealed class CSharpBackend
             case LitStr s: return (DotCC.EmitHelpers.EncodeStringLiteral(s.Segments), PPrimary);
             case LitU16Str s: return (DotCC.EmitHelpers.EncodeU16StringLiteral(s.Segments), PPrimary);
             case NullPtr: return ("null", PPrimary);
+            // Zig `a orelse b` over a value optional (`T?`) → C#'s `??` (single-eval left,
+            // lazy right). The right is coerced to the payload type so `maybe_u8 orelse 0`
+            // is `a ?? (byte)0`, not a `byte?`/`int` mismatch. Parenthesized → safe anywhere.
+            case NullCoalesce nc:
+                return ($"({Sub(nc.Left, PUnary)} ?? {Coerced(nc.Right, nc.Type)})", PPrimary);
             // A bare unresolved identifier: the backend escapes the raw name.
             case NameRef nr: return (DotCC.EmitHelpers.Id(nr.RawName), PPrimary);
             // An enumerator of a real enum: EnumName.Member (member access). If a

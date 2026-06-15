@@ -162,4 +162,31 @@ public sealed class ZigFrontendTests
         cs.ShouldContain("main(); return 0;"); // entry wiring: call for effect, exit 0
         cs.ShouldNotContain("return main();"); // NOT the int-main form
     }
+
+    [Fact]
+    public void Lowers_value_optional_to_csharp_nullable()
+    {
+        // A `?T` over a value type → C# Nullable<T> (`T?`): `null` is none, `.?` is
+        // `.Value` (panics on none), and `orelse` is the null-coalescing `??` — single
+        // evaluation of the left, lazy right, exactly Zig's semantics. No custom runtime.
+        var cs = EmitZig(
+            "pub fn main() u8 { const a: ?i32 = null; const b: ?i32 = 5; " +
+            "return @as(u8, (a orelse 0) + b.?); }\n");
+        cs.ShouldContain("int? a");   // ?i32 → C# int?
+        cs.ShouldContain("??");        // orelse → null-coalescing
+        cs.ShouldContain(".Value");    // .? → Nullable.Value (panics on none)
+    }
+
+    [Fact]
+    public void Lowers_optional_pointer_as_a_bare_nullable_pointer()
+    {
+        // A `?*T` is Zig's niche optional — lowered to a bare `T*` (null = none), so it
+        // reuses all the existing pointer machinery. `null` is the null pointer, and
+        // `orelse` becomes `p != null ? p : d` (C# `??` doesn't apply to pointers).
+        var cs = EmitZig(
+            "pub fn main() u8 { var x: u8 = 7; const p: ?*u8 = null; " +
+            "const r: *u8 = p orelse &x; return r.*; }\n");
+        cs.ShouldContain("byte* p");   // ?*u8 → bare byte* (the niche)
+        cs.ShouldContain("!= null");   // pointer orelse → null test
+    }
 }

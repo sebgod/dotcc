@@ -54,7 +54,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `c_char c_short c_ushort c_int c_uint c_long c_ulong c_longlong c_ulonglong` | ✅ | C-ABI types for `extern fn`, LP64-shaped |
 | `*T`, `*const T` | ✅ | pointer (pointee `const` rides as a type qualifier) |
 | `[*c]T`, `[*c]const T` | ✅ | C pointer (== C's `T*` / `const T*`) — printf's `[*c]const u8` format |
-| `?T` optional | 🚧 | parses; does not lower |
+| `?T` optional | ✅ | `?*T` → bare nullable `T*` (niche); `?T` over a value → C# `Nullable<T>`. `null`/`.?`/`orelse` below |
 | `[]T` slice | 🚧 | parses; the fat-struct lowering is not built |
 | `[N]T` array | 🚧 | parses; does not lower |
 | `E!T` error-union type | 🚧 | parses; treated as `T` |
@@ -89,10 +89,14 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | prefix `&` (address-of) | ✅ | `&x` → `*T`; a var/param operand is marked address-taken |
 | postfix `p.*` (deref), `a[i]` (index) | ✅ | pointer deref / subscript → the C `Unary(Deref)` / `Index` IR |
 | `@as(T, expr)` | ✅ | explicit-type cast → the C `Cast` IR (`@as(c_int, 42)` for a variadic arg) |
-| postfix `.field`, `.?`; prefix `try` | 🚧 | parse only — `.field` needs structs (Milestone E), `.?`/`try` need optionals/error unions (Milestone B) |
+| `null` literal | ✅ | optional none / null pointer (renders C# `null`) |
+| postfix `.?` (optional unwrap) | ✅ | value optional → `.Value` (panics on none); optional pointer → identity (V1: no null-check) |
+| `a orelse b` (value RHS) | ✅ | value optional → C# `??` (single-eval, lazy `b`); pointer → `a != null ? a : b` (simple LHS; `orelse return` is Milestone B2) |
+| postfix `.field`; prefix `try` | 🚧 | parse only — `.field` needs structs (Milestone E), `try` needs error unions (Milestone B2) |
 | other `@builtin(...)` (`@intCast`/`@ptrCast`/…) | 🚧 | parse only — Zig 0.16's forms are result-location-typed (single arg), needing context-type inference dotcc lacks |
 | `.enumLiteral` | 🚧 | parse only |
-| wrapping/saturating ops, `orelse`/`catch` | 🚫 | |
+| `catch` | 🚫 | error-union handling — Milestone B2 |
+| wrapping/saturating ops | 🚫 | |
 
 ## Lexer
 
@@ -158,4 +162,5 @@ rejects, not silently accept more.
   when no `zig` is on PATH). CI runs it on linux-x64 + windows-x64 against a
   pinned `zig 0.16.0`.
 - **Examples** — `examples/zig-hello`, `examples/zig-extern` (putchar),
-  `examples/zig-printf` (variadic printf).
+  `examples/zig-printf` (variadic printf), `examples/zig-optional` (`?T` / `null` /
+  `.?` / `orelse`).

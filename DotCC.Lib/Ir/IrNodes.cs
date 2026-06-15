@@ -206,6 +206,13 @@ public sealed record Paren(CExpr Inner) : CExpr;
 /// than a literal so the backend spells it per target (the C# backend: <c>null</c>).</summary>
 public sealed record NullPtr : CExpr;
 
+/// <summary>A Zig <c>a orelse b</c> over a VALUE optional (<c>?T</c> → C# <c>T?</c>):
+/// lowers to C#'s null-coalescing <c>a ?? b</c> — single-evaluation of the left, lazy
+/// right, exactly Zig's <c>orelse</c> semantics. (An optional-POINTER <c>orelse</c> uses
+/// a <see cref="CondExpr"/> instead — C# <c>??</c> doesn't apply to pointer types.) The C
+/// front-end never produces this; it is a Zig-lowering / C#-target construct.</summary>
+public sealed record NullCoalesce(CExpr Left, CExpr Right) : CExpr;
+
 /// <summary>A bare identifier the binder left unresolved — a runtime/library symbol
 /// surfaced by name (the <c>&lt;complex.h&gt;</c> imaginary unit), or an
 /// incremental-growth safety net for a name not in any header. Carries the RAW

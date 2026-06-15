@@ -320,9 +320,8 @@ internal sealed class ZigLowering
             case Zig.PreTry:      throw new IrUnsupportedException("zig `try` not lowered yet (needs error unions)");
 
             // Postfix deref `p.*` and subscript `a[i]` → the C Unary(Deref)/Index IR.
-            // Field access `.field` (Zig.Field) and optional-unwrap `.?` (Zig.Unwrap)
-            // stay deferred: `.field` needs struct field types (Milestone E), `.?` needs
-            // optionals (Milestone B).
+            // Field access `.field` (Zig.Field) stays deferred — it needs struct field
+            // types (Milestone E).
             case Zig.Deref d:
             {
                 var operand = LowerExpr(d.Arg0);
@@ -347,6 +346,20 @@ internal sealed class ZigLowering
                 return new DotCC.Ir.Index(baseExpr, idx) { Type = elem, IsLValue = true };
             }
 
+            // `.?` optional unwrap. A value optional (CType.Optional → C# `T?`) unwraps via
+            // `.Value` (panics on none, matching Zig's `.?`-on-null). An optional POINTER is
+            // a bare `T*`, so unwrapping is the identity (the non-null pointer is the same
+            // value). [V1: the pointer form does not runtime-check for null.]
+            case Zig.Unwrap u:
+            {
+                var operand = LowerExpr(u.Arg0);
+                if (operand.Type.Unqualified is CType.Optional opt)
+                {
+                    return new Member(operand, "Value", false) { Type = opt.Inner };
+                }
+                return operand;
+            }
+
             // `@as(T, expr)` — the explicit-type cast builtin → the C Cast IR (RenderCast).
             // Zig 0.16's `@intCast`/`@ptrCast` are result-location-typed (single arg, no
             // explicit target type), which needs the context-type inference dotcc lacks —
@@ -365,6 +378,37 @@ internal sealed class ZigLowering
                 }
                 var target = LowerType(bargs[0]);
                 return new Cast(target, LowerExpr(bargs[1])) { Type = target };
+            }
+
+            // `null` — reuse the C null-pointer node (renders C# `null`, valid for BOTH a
+            // pointer sink `T*` and a value-optional sink `T?`). In Zig `null` only appears
+            // at a typed sink, so the backend's store-coercion gives it the right form.
+            case Zig.NullLit: return new NullPtr { Type = new CType.Pointer(CType.Void) };
+
+            // `a orelse b`. A value optional → C#'s `??` (single-eval LHS, lazy RHS) via
+            // NullCoalesce. An optional POINTER → `a != null ? a : b` (C# `??` doesn't apply
+            // to pointers); the LHS is named twice there, so a non-trivial (side-effecting)
+            // left operand is rejected rather than silently double-evaluated. `orelse return`
+            // (a noreturn RHS) isn't expressible in the grammar yet — that's Milestone B2.
+            case Zig.OrElse o:
+            {
+                var left = LowerExpr(o.Arg0);
+                var right = LowerExpr(o.Arg2);
+                if (left.Type.Unqualified is CType.Optional opt)
+                {
+                    return new NullCoalesce(left, right) { Type = opt.Inner };
+                }
+                if (left.Type.Unqualified is CType.Pointer)
+                {
+                    if (!IsSimpleReeval(left))
+                    {
+                        throw new IrUnsupportedException(
+                            "zig `orelse` on a pointer with a non-trivial left operand not lowered yet (it would be double-evaluated)");
+                    }
+                    var notNull = new Binary(BinOp.Ne, left, new NullPtr { Type = new CType.Pointer(CType.Void) }) { Type = CType.Int };
+                    return new CondExpr(notNull, left, right) { Type = left.Type };
+                }
+                throw new IrUnsupportedException("zig `orelse` requires an optional left operand");
             }
 
             // call of a named function (bare-identifier callee).
@@ -465,6 +509,17 @@ internal sealed class ZigLowering
     /// (so `&(x)` still marks `x` AddressTaken). Mirrors <c>IrBuilder.Unparen</c>.</summary>
     private static CExpr Unparen(CExpr e) => e is Paren p ? Unparen(p.Inner) : e;
 
+    /// <summary>True for an expression with no side effects, safe to render more than once
+    /// — the pointer <c>orelse</c> lowers to <c>a != null ? a : b</c>, naming <c>a</c>
+    /// twice. Conservative: a var/param read, a literal, <c>null</c>, or a parenthesized
+    /// such; anything else (a call, an assignment) is rejected to avoid double evaluation.</summary>
+    private static bool IsSimpleReeval(CExpr e) => e switch
+    {
+        VarRef or NullPtr or LitInt or LitFloat => true,
+        Paren p => IsSimpleReeval(p.Inner),
+        _ => false,
+    };
+
     /// <summary>True if the expression is a comptime-only numeric value — an int/float
     /// literal, or arithmetic over such (Zig's <c>comptime_int</c>/<c>comptime_float</c>).
     /// These have no fixed-size ABI type, so Zig forbids passing them to a C-variadic.
@@ -503,8 +558,22 @@ internal sealed class ZigLowering
         Zig.TyPtrConst p   => new CType.Pointer(LowerType(p.Arg2).WithQuals(TypeQual.Const)),
         Zig.TyCPtr p       => new CType.Pointer(LowerType(p.Arg1)),
         Zig.TyCPtrConst p  => new CType.Pointer(LowerType(p.Arg2).WithQuals(TypeQual.Const)),
+        // `?T` optional. An optional POINTER `?*T` lowers to a bare nullable `T*` (Zig's
+        // own niche — null = none, zero cost; a non-optional `*T` loses its non-null
+        // guarantee, a documented leniency). A `?T` over a value type lowers to C#
+        // Nullable<T> via CType.Optional, so `null`/`.?`/`orelse` map to C#'s built-ins.
+        Zig.TyOptional opt => LowerOptional(opt.Arg1),
         _ => throw new IrUnsupportedException("zig type: " + (type.Content?.GetType().Name ?? "null")),
     };
+
+    /// <summary>Lower a Zig optional payload type: a pointer payload stays a bare nullable
+    /// pointer (the niche); any other payload is wrapped in <see cref="CType.Optional"/>
+    /// (→ C# <c>T?</c>).</summary>
+    private CType LowerOptional(Item innerType)
+    {
+        var inner = LowerType(innerType);
+        return inner.Unqualified is CType.Pointer ? inner : new CType.Optional(inner);
+    }
 
     /// <summary>Map a Zig primitive type name to its faithful C# lowering. The
     /// fixed-width integers carry real signedness (i8 → <c>sbyte</c>, u8 → <c>byte</c>,

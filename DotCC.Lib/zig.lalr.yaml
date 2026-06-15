@@ -119,6 +119,10 @@ symbols:
   # --- printf slice: variadic + C-pointer type (appended — never reorder) ---
   - '...'        # 77  variadic parameter pack (`fn(fixed, ...)`, extern fn only)
   - '[*c]'       # 78  C-pointer type prefix: `[*c]T` == C's `T*` (glued token)
+  # --- optionals (Milestone B1; appended — never reorder) ---
+  - OrElse       # 79  `a orelse b` — lowest-precedence binary (Expr -> OrElse -> BoolOr)
+  - 'orelse'     # 80  optional null-coalescing keyword
+  - 'null'       # 81  the null literal (optional none / null pointer)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -205,7 +209,16 @@ productions:
   # ===== expression cascade =====
   - derivation: none
     rules:
-      - { lhs: Expr, rhs: [BoolOr] }
+      - { lhs: Expr, rhs: [OrElse] }
+
+  # `a orelse b` — lowest-precedence binary level (below `or`), left-assoc. The RHS is
+  # BoolOr (a value expr); `orelse return` (a noreturn RHS) isn't expressible yet —
+  # `return` is a statement, not an expression — so the B1/B2 boundary is grammar-enforced.
+  # `catch` joins this same level in Milestone B2.
+  - derivation: leftmost
+    rules:
+      - { lhs: OrElse, rhs: [OrElse, 'orelse', BoolOr], action: orElse }
+      - { lhs: OrElse, rhs: [BoolOr] }
 
   # ===== slice 2a: control-flow as expression =====
   # A value-position expression is either an operator-expression (the cascade,
@@ -332,6 +345,7 @@ productions:
       - { lhs: Primary, rhs: ['(', Expr, ')'],      action: grouped }
       - { lhs: Primary, rhs: [BUILTIN, '(', ArgList, ')'], action: builtinCall }
       - { lhs: Primary, rhs: [BUILTIN, '(', ')'],           action: builtinCallNoArgs }
+      - { lhs: Primary, rhs: ['null'],              action: nullLit }
       - { lhs: Primary, rhs: ['.', IDENT],          action: enumLit }
 
   - derivation: leftmost
@@ -358,7 +372,9 @@ lexer:
     - { symbol: 'extern', match: 'extern' }
     - { symbol: 'and',    match: 'and' }
     - { symbol: 'or',     match: 'or' }
+    - { symbol: 'orelse', match: 'orelse' }
     - { symbol: 'try',    match: 'try' }
+    - { symbol: 'null',   match: 'null' }
 
     # Multi-char operators (longest-match handles overlaps; listed first for clarity).
     - { symbol: '==', match: '==' }

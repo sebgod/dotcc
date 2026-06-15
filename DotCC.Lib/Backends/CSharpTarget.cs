@@ -35,6 +35,9 @@ internal sealed class CSharpTarget : ITarget
         CType.Enum e => e.Name,
         CType.ComplexType => "System.Numerics.Complex",
         CType.Float128Type => "Float128",
+        // A Zig value optional `?T` → C# Nullable<T> (`T?`): null = none, `.?` = .Value,
+        // `orelse` = `??`. (An optional POINTER `?*T` is a bare nullable `T*`, never this.)
+        CType.Optional o => RenderType(o.Inner) + "?",
         _ => throw new IrUnsupportedException("C# target cannot render type " + t.GetType().Name),
     };
 

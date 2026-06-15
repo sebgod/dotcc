@@ -87,6 +87,13 @@ public sealed class ZigOracleTests
         // the same. No explicit `return;` needed (a void body falls off the end).
         new object[] { "void_main",
             "extern fn printf(format: [*c]const u8, ...) c_int;\npub fn main() void { _ = printf(\"void %d\\n\", @as(c_int, 7)); }\n", 0, "void 7" },
+        // OPTIONALS (Milestone B1). A `?*T` lowers to a bare nullable pointer (Zig's
+        // niche); `null` is none, `orelse` defaults, `.?`/deref unwraps.
+        new object[] { "optional_ptr",
+            "pub fn main() u8 { var x: u8 = 5; const p: ?*u8 = &x; const q: ?*u8 = null; return (p orelse &x).* + (q orelse &x).*; }\n", 10, "" },
+        // A `?T` over a value type → C# Nullable<T>: `orelse` is `??`, `.?` is `.Value`.
+        new object[] { "optional_value",
+            "pub fn main() u8 { const a: ?u8 = 40; const b: ?u8 = null; return (a orelse 0) + (b orelse 2); }\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
