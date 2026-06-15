@@ -114,6 +114,8 @@ symbols:
   # --- slice 2a: control-flow as expression (appended — never reorder) ---
   - RhsExpr      # 74  value-position expression: Expr | IfExpr (init/return/branch)
   - IfExpr       # 75  if (Expr) RhsExpr else RhsExpr — the if-expression
+  # --- extern fn FFI (appended — never reorder) ---
+  - 'extern'     # 76  extern fn prototype (libc FFI, linked with -lc)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -132,6 +134,11 @@ productions:
       - { lhs: Decl, rhs: ['pub', FnDef],  action: pubFn }
       - { lhs: Decl, rhs: [VarDecl] }
       - { lhs: Decl, rhs: ['pub', VarDecl], action: pubVar }
+      # extern fn PROTOTYPE — no body, ends with `;`; linked with -lc (PEG:
+      # `KEYWORD_extern STRINGLITERALSINGLE? FnProto SEMICOLON`). The `extern "c"`
+      # library-name string and a `!T` error-union return are deferred.
+      - { lhs: Decl, rhs: ['extern', 'fn', IDENT, '(', Params, ')', Type, ';'], action: externFnProto }
+      - { lhs: Decl, rhs: ['extern', 'fn', IDENT, '(', ')', Type, ';'],         action: externFnProtoNoArgs }
 
   # FnProto (subset): `fn name(params) RetType Block`. RetType may carry the
   # inferred-error-set leading `!` (`fn f() !void`), distinct from ErrUnion's
@@ -331,6 +338,7 @@ lexer:
     - { symbol: 'if',     match: 'if' }
     - { symbol: 'else',   match: 'else' }
     - { symbol: 'while',  match: 'while' }
+    - { symbol: 'extern', match: 'extern' }
     - { symbol: 'and',    match: 'and' }
     - { symbol: 'or',     match: 'or' }
     - { symbol: 'try',    match: 'try' }

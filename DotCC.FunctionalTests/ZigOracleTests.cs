@@ -43,37 +43,45 @@ public sealed class ZigOracleTests
         Environment.GetEnvironmentVariable(RunZigEnv) == "1";
 
     /// <summary>Each case: a self-contained Zig program + its expected process exit
-    /// code. They span the lowered surface — arithmetic, comparison, the
-    /// if-expression, if/while statements + assignment, a prefix op, and i64
-    /// parameters — so a divergence pins which feature drifted from real zig.</summary>
+    /// code + expected stdout (newline-normalized, trailing-newline-trimmed). They span
+    /// the lowered surface — arithmetic, comparison, the if-expression, if/while
+    /// statements + assignment, a prefix op, parameters, a function call (incl. forward
+    /// reference), and an `extern fn` libc call that produces real OUTPUT — so a
+    /// divergence pins which feature drifted from real zig.</summary>
     public static IEnumerable<object[]> Programs => new[]
     {
         new object[] { "arith",
-            "pub fn main() u8 { const x: u8 = 40; return x + 2; }\n", 42 },
+            "pub fn main() u8 { const x: u8 = 40; return x + 2; }\n", 42, "" },
         new object[] { "if_expr",
-            "pub fn main() u8 { const x: u8 = 40; const y: u8 = if (x > 10) x else 0; return y + 2; }\n", 42 },
+            "pub fn main() u8 { const x: u8 = 40; const y: u8 = if (x > 10) x else 0; return y + 2; }\n", 42, "" },
         new object[] { "if_stmt",
-            "pub fn main() u8 { var x: u8 = 0; if (3 > 2) { x = 42; } else { x = 1; } return x; }\n", 42 },
+            "pub fn main() u8 { var x: u8 = 0; if (3 > 2) { x = 42; } else { x = 1; } return x; }\n", 42, "" },
         new object[] { "while_sum",
-            "pub fn main() u8 { var i: u8 = 0; var sum: u8 = 0; while (i < 5) { sum = sum + i; i = i + 1; } return sum; }\n", 10 },
+            "pub fn main() u8 { var i: u8 = 0; var sum: u8 = 0; while (i < 5) { sum = sum + i; i = i + 1; } return sum; }\n", 10, "" },
         new object[] { "bitnot",
-            "pub fn main() u8 { const a: u8 = 0; const b: u8 = ~a; return b; }\n", 255 },
+            "pub fn main() u8 { const a: u8 = 0; const b: u8 = ~a; return b; }\n", 255, "" },
         // i64 parameters: `wide` is type-checked by dotcc's emit + Roslyn with the
         // wider signedness the UsualArithmetic fix preserves; main is the observable.
         new object[] { "i64_params",
-            "fn wide(a: i64, b: i64) i64 { return a * b; }\npub fn main() u8 { return 42; }\n", 42 },
+            "fn wide(a: i64, b: i64) i64 { return a * b; }\npub fn main() u8 { return 42; }\n", 42, "" },
         // A function CALL — main invokes a named function with arguments.
         new object[] { "call",
-            "fn add(a: u8, b: u8) u8 { return a + b; }\npub fn main() u8 { return add(40, 2); }\n", 42 },
+            "fn add(a: u8, b: u8) u8 { return a + b; }\npub fn main() u8 { return add(40, 2); }\n", 42, "" },
         // A FORWARD-referenced call — `add` is defined AFTER `main` (Zig has no
         // prototypes); the two-pass lowering must resolve it.
         new object[] { "call_forward",
-            "pub fn main() u8 { return add(40, 2); }\nfn add(a: u8, b: u8) u8 { return a + b; }\n", 42 },
+            "pub fn main() u8 { return add(40, 2); }\nfn add(a: u8, b: u8) u8 { return a + b; }\n", 42, "" },
+        // extern fn libc FFI: `putchar` from libc (linked -lc) produces real STDOUT.
+        // dotcc routes it by bare name to its Libc runtime; zig links the real libc.
+        new object[] { "extern_putchar",
+            "extern fn putchar(c: c_int) c_int;\npub fn main() u8 { _ = putchar(72); _ = putchar(105); _ = putchar(10); return 0; }\n", 0, "Hi" },
     };
+
+    private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
 
     [Theory]
     [MemberData(nameof(Programs))]
-    public void Dotcc_matches_zig_exit_code(string name, string program, int expectedExit)
+    public void Dotcc_matches_zig(string name, string program, int expectedExit, string expectedStdout)
     {
         if (!ZigRunRequested)
         {
@@ -92,10 +100,11 @@ public sealed class ZigOracleTests
         var zigPath = Path.Combine(Path.GetTempPath(), $"dotcc-zig-oracle-{name}-{Guid.NewGuid():N}.zig");
         File.WriteAllText(zigPath, program);
         int dotccExit;
+        string dotccStdout;
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { zigPath }, fileBased: false);
-            (_, dotccExit) = FixtureRunner.CompileAndRunCapturingExit(emitted, Array.Empty<string>());
+            (dotccStdout, dotccExit) = FixtureRunner.CompileAndRunCapturingExit(emitted, Array.Empty<string>());
         }
         finally { File.Delete(zigPath); }
 
@@ -108,10 +117,11 @@ public sealed class ZigOracleTests
         {
             var (zigStdout, zigExit) = ZigOracle.CompileAndRun(zigSrc, workDir);
 
-            // No I/O yet → stdout empty on both sides; the exit code is the observable.
+            // Both observables — exit code AND stdout — must agree with real zig.
             dotccExit.ShouldBe(zigExit, $"dotcc's Zig path diverges from real zig on '{name}' (exit code)");
             dotccExit.ShouldBe(expectedExit, $"'{name}' did not produce the expected exit code");
-            zigStdout.ShouldBeEmpty();
+            Norm(dotccStdout).ShouldBe(Norm(zigStdout), $"dotcc's Zig path diverges from real zig on '{name}' (stdout)");
+            Norm(dotccStdout).ShouldBe(expectedStdout, $"'{name}' did not produce the expected stdout");
         }
         finally
         {

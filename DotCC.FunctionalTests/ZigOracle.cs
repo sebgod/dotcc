@@ -103,8 +103,9 @@ internal static class ZigOracle
 
         var binName = OperatingSystem.IsWindows() ? "zig-oracle.exe" : "zig-oracle";
 
-        // ── zig compile ──
-        var (cOut, cErr, cExit) = RunProcess("zig", workDir, "build-exe", rootName, "-femit-bin=" + binName);
+        // ── zig compile ──  (-lc links libc so `extern fn` FFI — printf/putchar/… —
+        // resolves; harmless for a pure-Zig program, which simply doesn't use it.)
+        var (cOut, cErr, cExit) = RunProcess("zig", workDir, "build-exe", rootName, "-lc", "-femit-bin=" + binName);
         if (cExit != 0)
         {
             throw new InvalidOperationException(

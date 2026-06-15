@@ -51,19 +51,22 @@ internal sealed class ZigLowering
     {
         // Two passes so a call can forward-reference: Zig has no prototypes, and a
         // function may call one defined later in the file. Pass 1 declares every
-        // signature in the (global) scope; pass 2 lowers each body against them.
+        // signature in the (global) scope; pass 2 lowers each body against them. An
+        // `extern fn` prototype is declared in pass 1 too but has no body to lower.
         var entries = new List<(Symbol sym, List<(string name, CType type)> ps, Item body)>();
         foreach (var decl in Flatten(root))
         {
             var d = decl.Content is Zig.PubFn p ? p.Arg1 : decl;   // unwrap `pub`
-            entries.Add(d.Content switch
+            switch (d.Content)
             {
-                Zig.FnDef f          => DeclareFn(f.Arg1, f.Arg3, f.Arg5, f.Arg6),
-                Zig.FnDefNoArgs f    => DeclareFn(f.Arg1, null, f.Arg4, f.Arg5),
-                Zig.FnDefErr f       => DeclareFn(f.Arg1, f.Arg3, f.Arg6, f.Arg7),   // `!T` return — error union deferred, use T
-                Zig.FnDefNoArgsErr f => DeclareFn(f.Arg1, null, f.Arg5, f.Arg6),
-                _ => throw new IrUnsupportedException("zig top-level decl: " + (d.Content?.GetType().Name ?? "null")),
-            });
+                case Zig.ExternFnProto f:       DeclareExternFn(f.Arg2, f.Arg4, f.Arg6); break;  // extern fn IDENT ( Params ) Type ;
+                case Zig.ExternFnProtoNoArgs f: DeclareExternFn(f.Arg2, null, f.Arg5); break;     // extern fn IDENT ( ) Type ;
+                case Zig.FnDef f:          entries.Add(DeclareFn(f.Arg1, f.Arg3, f.Arg5, f.Arg6)); break;
+                case Zig.FnDefNoArgs f:    entries.Add(DeclareFn(f.Arg1, null, f.Arg4, f.Arg5)); break;
+                case Zig.FnDefErr f:       entries.Add(DeclareFn(f.Arg1, f.Arg3, f.Arg6, f.Arg7)); break;   // `!T` return — error union deferred, use T
+                case Zig.FnDefNoArgsErr f: entries.Add(DeclareFn(f.Arg1, null, f.Arg5, f.Arg6)); break;
+                default: throw new IrUnsupportedException("zig top-level decl: " + (d.Content?.GetType().Name ?? "null"));
+            }
         }
         foreach (var (sym, ps, body) in entries) { LowerFnBody(sym, ps, body); }
     }
@@ -100,6 +103,38 @@ internal sealed class ZigLowering
             IsGlobal = true,
         });
         return (funcSym, paramInfos, body);
+    }
+
+    /// <summary>Declare an <c>extern fn</c> prototype: a function symbol with no body
+    /// (so no <see cref="FuncDef"/>). <c>FromSystemHeader = true</c> marks it as
+    /// externally provided (libc, linked with <c>-lc</c>) — exactly the marker the C
+    /// frontend puts on a libc prototype — so <see cref="LowerCall"/> renders the call
+    /// by its bare name (no <c>CalleeSym</c>), routing it to dotcc's <c>Libc</c> runtime
+    /// the same way a C program's libc call does.</summary>
+    private void DeclareExternFn(Item nameTok, Item? paramsItem, Item retType)
+    {
+        var ret = LowerType(retType);
+        var paramTypes = new List<CType>();
+        if (paramsItem is not null)
+        {
+            foreach (var p in Flatten(paramsItem))
+            {
+                if (p.Content is not Zig.Param pm)
+                {
+                    throw new IrUnsupportedException("zig extern param: " + (p.Content?.GetType().Name ?? "null"));
+                }
+                paramTypes.Add(LowerType(pm.Arg2));
+            }
+        }
+        // Variadic (`...`) is deferred to the printf slice; extern protos here are fixed-arity.
+        _symbols.Declare(new Symbol
+        {
+            Name = Tok(nameTok),
+            Kind = SymKind.Func,
+            Type = new CType.Func(ret, paramTypes, false),
+            IsGlobal = true,
+            FromSystemHeader = true,
+        });
     }
 
     /// <summary>Pass 2: lower a function body. Params share the function's top scope
@@ -146,9 +181,15 @@ internal sealed class ZigLowering
             case Zig.StmtReturnVoid:    return new Return(null);
             case Zig.StmtExpr e:        return new ExprStmt(LowerExpr(e.Arg0));
 
-            // `x = value;`  → an assignment used as a statement.
+            // `x = value;`  → an assignment used as a statement. `_ = value;` is Zig's
+            // explicit DISCARD (it forbids ignoring a non-void result) — lower it to a
+            // bare expression statement, evaluated for its side effects.
             case Zig.StmtAssign a:
             {
+                if (a.Arg0.Content is Zig.Ident lhs && Tok(lhs.Arg0) == "_")
+                {
+                    return new ExprStmt(LowerExpr(a.Arg2));
+                }
                 var target = LowerExpr(a.Arg0);
                 var value = LowerExpr(a.Arg2);
                 return new ExprStmt(new Assign(null, target, value) { Type = target.Type });
@@ -275,7 +316,12 @@ internal sealed class ZigLowering
                 $"call to '{name}': expected {fn.Params.Count} argument(s), got {args.Count}");
         }
 
-        return new Call(name, args, fn.Params, sym) { Type = fn.Return };
+        // An extern/libc function (FromSystemHeader) renders by its bare name — no
+        // CalleeSym — so it binds to dotcc's Libc runtime (and printf/scanf hit the
+        // fluent builder), exactly as a C program's libc call does. A user Zig
+        // function carries its symbol so the (possibly legalized) target name is used.
+        var calleeSym = sym.FromSystemHeader ? null : sym;
+        return new Call(name, args, fn.Params, calleeSym) { Type = fn.Return };
     }
 
     /// <summary>Lower a binary op, synthesizing the result type the way the C# backend
@@ -336,6 +382,18 @@ internal sealed class ZigLowering
         "usize" => CType.ULong,  // LP64: pointer-width unsigned (== size_t)
         "f32" => CType.Float,
         "f64" => CType.Double,
+        // C-ABI types for `extern fn` libc FFI (LP64, matching dotcc's __LP64__ trio:
+        // `c_long`/`c_ulong` are 8 bytes). These map onto the same well-known prims the
+        // C frontend uses, so RenderType + the coercion tables already cover them.
+        "c_char" => CType.Char,
+        "c_short" => CType.Short,
+        "c_ushort" => CType.UShort,
+        "c_int" => CType.Int,
+        "c_uint" => CType.UInt,
+        "c_long" => CType.Long,
+        "c_ulong" => CType.ULong,
+        "c_longlong" => CType.LongLong,
+        "c_ulonglong" => CType.ULongLong,
         _ => throw new IrUnsupportedException($"zig type '{name}' not supported yet (slice)"),
     };
 

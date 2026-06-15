@@ -90,4 +90,16 @@ public sealed class ZigFrontendTests
         cs.ShouldContain("add(40, 2)");           // the call site (fitting constants aren't cast)
         cs.ShouldContain("add(byte a, byte b)");  // the callee signature
     }
+
+    [Fact]
+    public void Lowers_extern_fn_libc_call()
+    {
+        // `extern fn putchar(c: c_int) c_int;` declares a libc prototype (no body); the
+        // call routes by bare name to dotcc's Libc runtime — same as a C program's libc
+        // call. `_ = putchar(72);` is the Zig discard of a non-void result.
+        var cs = EmitZig(
+            "extern fn putchar(c: c_int) c_int;\n" +
+            "pub fn main() u8 { _ = putchar(72); return 0; }\n");
+        cs.ShouldContain("putchar(72)");   // the call site (libc fn, bare name)
+    }
 }
