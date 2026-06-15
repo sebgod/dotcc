@@ -305,8 +305,67 @@ internal sealed class ZigLowering
             case Zig.PreNeg p:    return Pre(UnOp.Neg, p.Arg1);
             case Zig.PreBitNot p: return Pre(UnOp.BitNot, p.Arg1);
             case Zig.PreNot p:    return Pre(UnOp.LogNot, p.Arg1);
-            case Zig.PreAddrOf:   throw new IrUnsupportedException("zig `&` address-of not lowered yet");
+            // Address-of `&x` → a `*T` pointer. Mark a var/param operand AddressTaken so
+            // the backend emits a moveable-variable pointer (mirrors IrBuilder.Un's
+            // single-site rule). `try` still needs error unions (Milestone B).
+            case Zig.PreAddrOf p:
+            {
+                var operand = LowerExpr(p.Arg1);
+                if (Unparen(operand) is VarRef { Sym: { Kind: SymKind.Var or SymKind.Param } s })
+                {
+                    s.AddressTaken = true;
+                }
+                return new Unary(UnOp.AddrOf, operand) { Type = new CType.Pointer(operand.Type) };
+            }
             case Zig.PreTry:      throw new IrUnsupportedException("zig `try` not lowered yet (needs error unions)");
+
+            // Postfix deref `p.*` and subscript `a[i]` → the C Unary(Deref)/Index IR.
+            // Field access `.field` (Zig.Field) and optional-unwrap `.?` (Zig.Unwrap)
+            // stay deferred: `.field` needs struct field types (Milestone E), `.?` needs
+            // optionals (Milestone B).
+            case Zig.Deref d:
+            {
+                var operand = LowerExpr(d.Arg0);
+                var pointee = operand.Type.Unqualified switch
+                {
+                    CType.Pointer p => p.Pointee,
+                    CType.Array a => a.Element,
+                    _ => operand.Type,
+                };
+                return new Unary(UnOp.Deref, operand) { Type = pointee, IsLValue = true };
+            }
+            case Zig.Index ix:
+            {
+                var baseExpr = LowerExpr(ix.Arg0);
+                var idx = LowerExpr(ix.Arg2);
+                var elem = baseExpr.Type switch
+                {
+                    CType.Pointer p => p.Pointee,
+                    CType.Array a => a.Element,
+                    _ => CType.Int,
+                };
+                return new DotCC.Ir.Index(baseExpr, idx) { Type = elem, IsLValue = true };
+            }
+
+            // `@as(T, expr)` — the explicit-type cast builtin → the C Cast IR (RenderCast).
+            // Zig 0.16's `@intCast`/`@ptrCast` are result-location-typed (single arg, no
+            // explicit target type), which needs the context-type inference dotcc lacks —
+            // deferred. arg0 is a type spelled as an expression (handled by LowerType).
+            case Zig.BuiltinCall b:
+            {
+                var bname = Tok(b.Arg0);
+                if (bname != "@as")
+                {
+                    throw new IrUnsupportedException($"zig builtin '{bname}' not lowered yet (only @as is supported)");
+                }
+                var bargs = Flatten(b.Arg2);
+                if (bargs.Count != 2)
+                {
+                    throw new IrUnsupportedException($"zig `@as` expects (type, value); got {bargs.Count} argument(s)");
+                }
+                var target = LowerType(bargs[0]);
+                return new Cast(target, LowerExpr(bargs[1])) { Type = target };
+            }
 
             // call of a named function (bare-identifier callee).
             case Zig.CallArgs c:   return LowerCall(c.Arg0, c.Arg2);
@@ -337,11 +396,9 @@ internal sealed class ZigLowering
             throw new IrUnsupportedException($"'{name}' is not a function (indirect / fn-ptr calls deferred)");
         }
 
-        var args = new List<CExpr>();
-        if (argListItem is not null)
-        {
-            foreach (var a in Flatten(argListItem)) { args.Add(LowerExpr(a)); }
-        }
+        var argItems = argListItem is null ? new List<Item>() : Flatten(argListItem);
+        var args = new List<CExpr>(argItems.Count);
+        foreach (var a in argItems) { args.Add(LowerExpr(a)); }
         // A variadic callee (printf) needs AT LEAST the fixed params; the rest are the
         // variadic tail. A fixed-arity callee needs an exact match.
         var arityOk = fn.Variadic ? args.Count >= fn.Params.Count : args.Count == fn.Params.Count;
@@ -349,6 +406,24 @@ internal sealed class ZigLowering
         {
             throw new IrUnsupportedException(
                 $"call to '{name}': expected {(fn.Variadic ? "at least " : "")}{fn.Params.Count} argument(s), got {args.Count}");
+        }
+        // Zig parity (the differential oracle caught dotcc being too lenient here): an
+        // untyped comptime numeric literal has no fixed-size ABI type, so Zig forbids
+        // passing it to a C-variadic — `printf("%d", 42)` is an error, `@as(c_int, 42)`
+        // (or any concretely-typed value) is required. Reject the variadic tail the same
+        // way, with zig's exact wording, via the same diagnostics channel C uses for
+        // constraint violations (write-to-const).
+        if (fn.Variadic)
+        {
+            for (var k = fn.Params.Count; k < argItems.Count; k++)
+            {
+                if (IsComptimeUntypedNumeric(argItems[k]))
+                {
+                    _ir.Diagnostics.Add(new Diagnostic(Severity.Error,
+                        "integer and float literals passed to variadic function must be casted to a fixed-size number type",
+                        SrcPos.From(argItems[k])));
+                }
+            }
         }
 
         // An extern/libc function (FromSystemHeader) renders by its bare name — no
@@ -385,6 +460,34 @@ internal sealed class ZigLowering
         var type = op == UnOp.LogNot ? CType.Int : CType.IntegerPromote(operand.Type);
         return new Unary(op, operand) { Type = type };
     }
+
+    /// <summary>Peel redundant <see cref="Paren"/> wrappers to reach the inner expr
+    /// (so `&(x)` still marks `x` AddressTaken). Mirrors <c>IrBuilder.Unparen</c>.</summary>
+    private static CExpr Unparen(CExpr e) => e is Paren p ? Unparen(p.Inner) : e;
+
+    /// <summary>True if the expression is a comptime-only numeric value — an int/float
+    /// literal, or arithmetic over such (Zig's <c>comptime_int</c>/<c>comptime_float</c>).
+    /// These have no fixed-size ABI type, so Zig forbids passing them to a C-variadic.
+    /// The moment a concrete-typed leaf appears (identifier, call, <c>@as</c>, deref,
+    /// index) the expression is typed and allowed across the variadic boundary.</summary>
+    private static bool IsComptimeUntypedNumeric(Item it) => it.Content switch
+    {
+        Zig.IntLit or Zig.FloatLit => true,
+        Zig.Grouped g   => IsComptimeUntypedNumeric(g.Arg1),
+        Zig.PreNeg p    => IsComptimeUntypedNumeric(p.Arg1),
+        Zig.PreBitNot p => IsComptimeUntypedNumeric(p.Arg1),
+        Zig.Add a    => IsComptimeUntypedNumeric(a.Arg0) && IsComptimeUntypedNumeric(a.Arg2),
+        Zig.Sub a    => IsComptimeUntypedNumeric(a.Arg0) && IsComptimeUntypedNumeric(a.Arg2),
+        Zig.Mul a    => IsComptimeUntypedNumeric(a.Arg0) && IsComptimeUntypedNumeric(a.Arg2),
+        Zig.DivOp a  => IsComptimeUntypedNumeric(a.Arg0) && IsComptimeUntypedNumeric(a.Arg2),
+        Zig.ModOp a  => IsComptimeUntypedNumeric(a.Arg0) && IsComptimeUntypedNumeric(a.Arg2),
+        Zig.BitAnd a => IsComptimeUntypedNumeric(a.Arg0) && IsComptimeUntypedNumeric(a.Arg2),
+        Zig.BitXor a => IsComptimeUntypedNumeric(a.Arg0) && IsComptimeUntypedNumeric(a.Arg2),
+        Zig.BitOr a  => IsComptimeUntypedNumeric(a.Arg0) && IsComptimeUntypedNumeric(a.Arg2),
+        Zig.Shl a    => IsComptimeUntypedNumeric(a.Arg0) && IsComptimeUntypedNumeric(a.Arg2),
+        Zig.Shr a    => IsComptimeUntypedNumeric(a.Arg0) && IsComptimeUntypedNumeric(a.Arg2),
+        _ => false,
+    };
 
     // ---- types -----------------------------------------------------------
 

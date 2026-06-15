@@ -36,7 +36,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | Parameters `name: Type` | ✅ | names + types ride into the C# signature; faithful signedness |
 | Forward references | ✅ | two-pass lowering (Zig has no prototypes) — a call may precede the callee |
 | `extern fn f(p: T) Ret;` | ✅ | libc/FFI prototype (no body); routed by bare name, linked with `-lc` |
-| `extern fn f(p: T, ...) Ret;` | ✅ | **variadic** extern (e.g. `printf`); `...` must be last + extern-only |
+| `extern fn f(p: T, ...) Ret;` | ✅ | **variadic** extern (e.g. `printf`); `...` must be last + extern-only. A variadic argument must have a fixed-size type — `printf("%d", @as(c_int, 42))`, never a bare `printf("%d", 42)` (rejected, matching real zig — see below) |
 | local `const`/`var` (typed or inferred) | ✅ | inside a function body |
 | `fn f() !T` (inferred-error return) | 🚧 | parses; the `!` is dropped and `T` is used (error unions deferred) |
 | top-level / global `const`/`var` | 🚫 | only function-local decls lower today |
@@ -86,9 +86,11 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | prefix `-` `~` `!` | ✅ | |
 | `if (c) a else b` (if-**expression**) | ✅ | → C# ternary |
 | function call `f(args)` | ✅ | intra-Zig + forward-ref + libc-by-bare-name (incl. variadic `printf`) |
-| prefix `&` (address-of), `try` | 🚧 | parse only (`try` needs error unions) |
-| postfix `.field` `.*` `.?` `[i]` | 🚧 | parse only (no struct/array/optional lowering yet) |
-| `@builtin(...)` (e.g. `@as`, `@intCast`) | 🚧 | parse only |
+| prefix `&` (address-of) | ✅ | `&x` → `*T`; a var/param operand is marked address-taken |
+| postfix `p.*` (deref), `a[i]` (index) | ✅ | pointer deref / subscript → the C `Unary(Deref)` / `Index` IR |
+| `@as(T, expr)` | ✅ | explicit-type cast → the C `Cast` IR (`@as(c_int, 42)` for a variadic arg) |
+| postfix `.field`, `.?`; prefix `try` | 🚧 | parse only — `.field` needs structs (Milestone E), `.?`/`try` need optionals/error unions (Milestone B) |
+| other `@builtin(...)` (`@intCast`/`@ptrCast`/…) | 🚧 | parse only — Zig 0.16's forms are result-location-typed (single arg), needing context-type inference dotcc lacks |
 | `.enumLiteral` | 🚧 | parse only |
 | wrapping/saturating ops, `orelse`/`catch` | 🚫 | |
 
@@ -128,6 +130,21 @@ pub fn add(a: c_int, b: c_int) c_int { return a + b; }
 Limits: `-shared` / `-l` import mode combined with a mixed set is not validated yet
 (single-language only); cross-language **struct/type sharing** is moot until the Zig
 front-end emits aggregates.
+
+## Strictness — dotcc tracks Zig where it matters
+
+dotcc lowers Zig onto the same C-shaped IR + C# backend as C, which is C-lenient by
+default (it silently inserts narrowing casts, applies C's default argument promotions,
+etc.). On top of that core the Zig front-end layers the few **Zig-specific strictness
+rules** the differential oracle proves we need — dotcc should reject what real `zig`
+rejects, not silently accept more.
+
+- **Variadic literals must be cast.** A bare integer/float literal is a `comptime_int` /
+  `comptime_float` (no fixed-size ABI type), so Zig forbids passing it to a C-variadic.
+  `printf("%d", 42)` is an error in both zig and dotcc; pass `@as(c_int, 42)`, a typed
+  value, or any expression with a concrete-typed leaf (`x`, `f()`, `a + x`). dotcc emits
+  zig's exact message through the same diagnostics channel C uses for constraint
+  violations. (This one was found by the CI oracle catching dotcc being too lenient.)
 
 ## Validation
 

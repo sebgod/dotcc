@@ -78,13 +78,15 @@ public sealed class ZigOracleTests
         // VARIADIC extern fn + a string literal: `printf` with `[*c]const u8` format
         // and a `...` pack. dotcc routes it through the printf-family fluent builder;
         // zig links real libc printf. The `%d` exercises the variadic-tail formatting.
+        // The `@as(c_int, …)` cast is REQUIRED: a bare literal has no fixed-size ABI
+        // type, so both zig AND dotcc reject `printf("%d", 42)` (variadic strictness).
         new object[] { "printf_fmt",
-            "extern fn printf(format: [*c]const u8, ...) c_int;\npub fn main() u8 { _ = printf(\"Hi %d\\n\", 42); return 0; }\n", 0, "Hi 42" },
+            "extern fn printf(format: [*c]const u8, ...) c_int;\npub fn main() u8 { _ = printf(\"Hi %d\\n\", @as(c_int, 42)); return 0; }\n", 0, "Hi 42" },
         // VOID-returning main (`pub fn main() void`) — idiomatic Zig with no exit code.
         // dotcc's shell calls it for effect and returns 0; real zig's start code does
         // the same. No explicit `return;` needed (a void body falls off the end).
         new object[] { "void_main",
-            "extern fn printf(format: [*c]const u8, ...) c_int;\npub fn main() void { _ = printf(\"void %d\\n\", 7); }\n", 0, "void 7" },
+            "extern fn printf(format: [*c]const u8, ...) c_int;\npub fn main() void { _ = printf(\"void %d\\n\", @as(c_int, 7)); }\n", 0, "void 7" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

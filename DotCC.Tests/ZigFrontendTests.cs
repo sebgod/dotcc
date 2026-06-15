@@ -110,13 +110,43 @@ public sealed class ZigFrontendTests
         // prototype. The `[*c]const u8` format param lowers to `byte*`, the `"…"`
         // literal to the same pooled `Libc.L(…)` pointer a C string gets, and the call
         // routes through the printf-family fluent builder: the format is the fixed arg,
-        // `42` rides the `.Arg(…)` variadic tail.
+        // and the variadic argument — `@as(c_int, 42)`, since a bare literal is rejected
+        // (see Rejects_… below) — rides the `.Arg(…)` tail as the cast value `(int)42`.
         var cs = EmitZig(
             "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
-            "pub fn main() u8 { _ = printf(\"Hi %d\\n\", 42); return 0; }\n");
+            "pub fn main() u8 { _ = printf(\"Hi %d\\n\", @as(c_int, 42)); return 0; }\n");
         cs.ShouldContain("printf(Libc.L(");   // format → pooled UTF-8 pointer, fluent head
-        cs.ShouldContain(".Arg(42)");          // the variadic argument
+        cs.ShouldContain(".Arg((int)42)");     // the variadic argument: @as(c_int, 42) → (int)42
         cs.ShouldContain(".Done()");           // builder terminator
+    }
+
+    [Fact]
+    public void Rejects_a_bare_literal_passed_to_a_variadic_function()
+    {
+        // Zig parity (the differential oracle caught dotcc being too lenient): an untyped
+        // comptime literal has no fixed-size ABI type, so it cannot cross a C-variadic
+        // boundary — real zig errors, and dotcc must too. `@as(c_int, 42)` (above) or any
+        // concretely-typed value is required. Locks the strictness in WITHOUT needing the
+        // (opt-in) oracle, so a future leniency regression fails the always-on suite.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "pub fn main() u8 { _ = printf(\"Hi %d\\n\", 42); return 0; }\n"));
+        ex.Message.ShouldContain("must be casted to a fixed-size number type");
+    }
+
+    [Fact]
+    public void Lowers_pointer_deref_index_and_address_of()
+    {
+        // The postfix/prefix ops on the pointer types we already have, each reusing the
+        // C IR: `p[i]` → Index, `px.*` → Unary(Deref), `&x` → Unary(AddrOf). A `[*c]const
+        // u8` param indexes like a C `const char*`; `&x` of a local takes its address and
+        // `px.*` reads back through it.
+        var cs = EmitZig(
+            "fn first(p: [*c]const u8) u8 { return p[0]; }\n" +
+            "pub fn main() u8 { var x: u8 = 7; const px: *u8 = &x; return px.* + first(\"hi\"); }\n");
+        cs.ShouldContain("p[0]");   // subscript on a C pointer → Index
+        cs.ShouldContain("&x");     // address-of a local → Unary(AddrOf)
+        cs.ShouldContain("*px");    // pointer deref `px.*` → Unary(Deref)
     }
 
     [Fact]
