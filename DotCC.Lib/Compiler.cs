@@ -218,10 +218,12 @@ public static class Compiler
     };
 
     /// <summary>
-    /// The C front-end behind the <see cref="Frontends.IFrontend"/> seam, kept as a
-    /// thin shim so the existing call sites stay unchanged. The resulting
-    /// <see cref="Ir.IrBuilder"/> is consumed by <see cref="EmitCSharp"/> (C#) and the
-    /// wat path alike — one front-end, many targets.
+    /// Dispatch the inputs to the right <see cref="Frontends.IFrontend"/> and return the
+    /// neutral <see cref="Ir.IrBuilder"/> the backends consume (<see cref="EmitCSharp"/>
+    /// / the wat path). A <c>.zig</c>-only translation set routes to the Zig front-end;
+    /// otherwise the C front-end. (Mixed <c>.c</c> + <c>.zig</c> — one IR module fed by
+    /// both — is deferred until the Zig frontend matures; see FRONTEND-IDEAS.md idea 2.)
+    /// Kept as a private shim so the existing call sites stay unchanged.
     /// </summary>
     private static Ir.IrBuilder BuildIr(
         IReadOnlyList<string> inputPaths,
@@ -232,8 +234,15 @@ public static class Compiler
         bool pedanticErrors,
         Ir.INameLegalizer? names = null,
         bool warnDiscardedQualifiers = true)
-        => new Frontends.CFrontend().BuildIr(new Frontends.FrontendRequest(
-            inputPaths, includeDirs, defines, dialect, pedantic, pedanticErrors, names, warnDiscardedQualifiers));
+    {
+        var request = new Frontends.FrontendRequest(
+            inputPaths, includeDirs, defines, dialect, pedantic, pedanticErrors, names, warnDiscardedQualifiers);
+        Frontends.IFrontend frontend =
+            inputPaths.Count > 0 && inputPaths.All(p => p.EndsWith(".zig", StringComparison.OrdinalIgnoreCase))
+                ? new Frontends.ZigFrontend()
+                : new Frontends.CFrontend();
+        return frontend.BuildIr(request);
+    }
 
     /// <summary>
     /// Compile <paramref name="inputPaths"/> to a single C# source string.

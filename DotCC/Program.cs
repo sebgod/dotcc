@@ -304,13 +304,16 @@ internal static class Program
             return 0;
         }
 
-        // A `.c` input is a source (→ whole-program compile, the default);
-        // anything else is a dotcc object fragment (→ link). The object
-        // suffix is the build system's choice — CMake's `Generic` platform
-        // names them `.obj`, gcc-style `.o`, dotcc-by-hand `.cs` — so we key
-        // off "not a .c source" rather than a fixed object extension.
+        // A `.c` (C) or `.zig` (Zig) input is a source (→ whole-program compile, the
+        // default); anything else is a dotcc object fragment (→ link). The object
+        // suffix is the build system's choice — CMake's `Generic` platform names them
+        // `.obj`, gcc-style `.o`, dotcc-by-hand `.cs` — so we key off "not a source"
+        // rather than a fixed object extension. (Compiler.EmitCSharp then dispatches
+        // by extension to the C or Zig front-end behind the IFrontend seam.)
         var linking = inputPaths.Length > 0
-            && System.Array.TrueForAll(inputPaths, p => !p.EndsWith(".c", System.StringComparison.OrdinalIgnoreCase));
+            && System.Array.TrueForAll(inputPaths, p =>
+                !p.EndsWith(".c", System.StringComparison.OrdinalIgnoreCase)
+                && !p.EndsWith(".zig", System.StringComparison.OrdinalIgnoreCase));
         string program;
         try
         {
