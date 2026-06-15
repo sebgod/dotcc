@@ -102,4 +102,20 @@ public sealed class ZigFrontendTests
             "pub fn main() u8 { _ = putchar(72); return 0; }\n");
         cs.ShouldContain("putchar(72)");   // the call site (libc fn, bare name)
     }
+
+    [Fact]
+    public void Lowers_variadic_printf_to_the_fluent_builder()
+    {
+        // `extern fn printf(format: [*c]const u8, ...) c_int;` — the variadic libc
+        // prototype. The `[*c]const u8` format param lowers to `byte*`, the `"…"`
+        // literal to the same pooled `Libc.L(…)` pointer a C string gets, and the call
+        // routes through the printf-family fluent builder: the format is the fixed arg,
+        // `42` rides the `.Arg(…)` variadic tail.
+        var cs = EmitZig(
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "pub fn main() u8 { _ = printf(\"Hi %d\\n\", 42); return 0; }\n");
+        cs.ShouldContain("printf(Libc.L(");   // format → pooled UTF-8 pointer, fluent head
+        cs.ShouldContain(".Arg(42)");          // the variadic argument
+        cs.ShouldContain(".Done()");           // builder terminator
+    }
 }

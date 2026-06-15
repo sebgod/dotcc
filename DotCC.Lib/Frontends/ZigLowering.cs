@@ -80,19 +80,14 @@ internal sealed class ZigLowering
         Item nameTok, Item? paramsItem, Item retType, Item body)
     {
         var ret = LowerType(retType);
-
-        // (name, type) for each parameter, in source order.
-        var paramInfos = new List<(string name, CType type)>();
-        if (paramsItem is not null)
+        var paramInfos = CollectParamInfos(paramsItem, out var variadic);
+        // Zig allows `...` ONLY in an extern prototype — a non-extern variadic fn is
+        // a compile error. Reject it the same way (faithful to Zig; our subset has no
+        // way to access varargs from a Zig body anyway).
+        if (variadic)
         {
-            foreach (var p in Flatten(paramsItem))
-            {
-                if (p.Content is not Zig.Param pm)
-                {
-                    throw new IrUnsupportedException("zig param: " + (p.Content?.GetType().Name ?? "null"));
-                }
-                paramInfos.Add((Tok(pm.Arg0), LowerType(pm.Arg2)));
-            }
+            throw new IrUnsupportedException(
+                $"function '{Tok(nameTok)}': a non-extern Zig function cannot be variadic (use `extern fn`)");
         }
 
         var funcSym = _symbols.Declare(new Symbol
@@ -105,33 +100,57 @@ internal sealed class ZigLowering
         return (funcSym, paramInfos, body);
     }
 
+    /// <summary>Collect a parameter list's <c>(name, type)</c> infos in source order,
+    /// detecting the variadic marker <c>...</c> (Zig's <c>DOT3</c> ParamDecl). The
+    /// marker carries no name/type, so it is excluded from the infos and instead sets
+    /// <paramref name="variadic"/>; it must be the LAST parameter (C / Zig both require
+    /// the fixed params to precede the pack).</summary>
+    private List<(string name, CType type)> CollectParamInfos(Item? paramsItem, out bool variadic)
+    {
+        variadic = false;
+        var infos = new List<(string name, CType type)>();
+        if (paramsItem is null) { return infos; }
+
+        var ps = Flatten(paramsItem);
+        for (var i = 0; i < ps.Count; i++)
+        {
+            switch (ps[i].Content)
+            {
+                case Zig.ParamVariadic:
+                    if (i != ps.Count - 1)
+                    {
+                        throw new IrUnsupportedException("zig `...` must be the final parameter");
+                    }
+                    variadic = true;
+                    break;
+                case Zig.Param pm:
+                    infos.Add((Tok(pm.Arg0), LowerType(pm.Arg2)));
+                    break;
+                default:
+                    throw new IrUnsupportedException("zig param: " + (ps[i].Content?.GetType().Name ?? "null"));
+            }
+        }
+        return infos;
+    }
+
     /// <summary>Declare an <c>extern fn</c> prototype: a function symbol with no body
     /// (so no <see cref="FuncDef"/>). <c>FromSystemHeader = true</c> marks it as
     /// externally provided (libc, linked with <c>-lc</c>) — exactly the marker the C
     /// frontend puts on a libc prototype — so <see cref="LowerCall"/> renders the call
     /// by its bare name (no <c>CalleeSym</c>), routing it to dotcc's <c>Libc</c> runtime
-    /// the same way a C program's libc call does.</summary>
+    /// the same way a C program's libc call does. A trailing <c>...</c> (the
+    /// <c>fn(fixed, ...)</c> form, e.g. printf) sets the function type's
+    /// <c>Variadic</c> flag: the fixed params still coerce at the call, while the
+    /// trailing args take C's default argument promotions.</summary>
     private void DeclareExternFn(Item nameTok, Item? paramsItem, Item retType)
     {
         var ret = LowerType(retType);
-        var paramTypes = new List<CType>();
-        if (paramsItem is not null)
-        {
-            foreach (var p in Flatten(paramsItem))
-            {
-                if (p.Content is not Zig.Param pm)
-                {
-                    throw new IrUnsupportedException("zig extern param: " + (p.Content?.GetType().Name ?? "null"));
-                }
-                paramTypes.Add(LowerType(pm.Arg2));
-            }
-        }
-        // Variadic (`...`) is deferred to the printf slice; extern protos here are fixed-arity.
+        var paramInfos = CollectParamInfos(paramsItem, out var variadic);
         _symbols.Declare(new Symbol
         {
             Name = Tok(nameTok),
             Kind = SymKind.Func,
-            Type = new CType.Func(ret, paramTypes, false),
+            Type = new CType.Func(ret, paramInfos.Select(p => p.type).ToList(), variadic),
             IsGlobal = true,
             FromSystemHeader = true,
         });
@@ -230,6 +249,19 @@ internal sealed class ZigLowering
                 return new LitInt(text, value) { Type = CType.Int };
             }
             case Zig.FloatLit f: return new LitFloat(Tok(f.Arg0)) { Type = CType.Double };
+
+            // A string literal. Zig's escape set overlaps C's for the common cases
+            // (`\n`/`\t`/`\\`/`\"`/`\xNN`), so we reuse the C string machinery: the raw
+            // quoted lexeme becomes a single LitStr segment, typed `char[N]` (decoded
+            // byte count incl. NUL) so it decays to `char*` exactly like a C literal —
+            // and the C# backend lowers it to the same pooled `Libc.L("…"u8)` pointer.
+            // (Zig's `\u{…}` and multiline `\\` strings are deferred.)
+            case Zig.StrLit s:
+            {
+                var segs = new List<string> { Tok(s.Arg0) };   // raw lexeme, quotes included
+                DotCC.EmitHelpers.EncodeStringLiteral(segs, out var byteLen);
+                return new LitStr(segs) { Type = new CType.Array(CType.Char, byteLen) };
+            }
             case Zig.Ident id:
             {
                 var name = Tok(id.Arg0);
@@ -310,10 +342,13 @@ internal sealed class ZigLowering
         {
             foreach (var a in Flatten(argListItem)) { args.Add(LowerExpr(a)); }
         }
-        if (args.Count != fn.Params.Count)
+        // A variadic callee (printf) needs AT LEAST the fixed params; the rest are the
+        // variadic tail. A fixed-arity callee needs an exact match.
+        var arityOk = fn.Variadic ? args.Count >= fn.Params.Count : args.Count == fn.Params.Count;
+        if (!arityOk)
         {
             throw new IrUnsupportedException(
-                $"call to '{name}': expected {fn.Params.Count} argument(s), got {args.Count}");
+                $"call to '{name}': expected {(fn.Variadic ? "at least " : "")}{fn.Params.Count} argument(s), got {args.Count}");
         }
 
         // An extern/libc function (FromSystemHeader) renders by its bare name — no
@@ -356,6 +391,15 @@ internal sealed class ZigLowering
     private CType LowerType(Item type) => type.Content switch
     {
         Zig.Ident id => LowerPrim(Tok(id.Arg0)),
+        // Pointer types. `*T` and the C-pointer `[*c]T` both lower to a plain
+        // `T*` (the C-pointer's null/arithmetic semantics ARE C's pointer). The
+        // pointee `const` rides as a TypeQual so const-correctness sees it; it
+        // doesn't change the C# spelling (`[*c]const u8` and `[*c]u8` are both
+        // `byte*`). `[*c]const u8` is exactly the type of printf's format param.
+        Zig.TyPointer p    => new CType.Pointer(LowerType(p.Arg1)),
+        Zig.TyPtrConst p   => new CType.Pointer(LowerType(p.Arg2).WithQuals(TypeQual.Const)),
+        Zig.TyCPtr p       => new CType.Pointer(LowerType(p.Arg1)),
+        Zig.TyCPtrConst p  => new CType.Pointer(LowerType(p.Arg2).WithQuals(TypeQual.Const)),
         _ => throw new IrUnsupportedException("zig type: " + (type.Content?.GetType().Name ?? "null")),
     };
 

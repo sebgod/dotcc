@@ -116,6 +116,9 @@ symbols:
   - IfExpr       # 75  if (Expr) RhsExpr else RhsExpr — the if-expression
   # --- extern fn FFI (appended — never reorder) ---
   - 'extern'     # 76  extern fn prototype (libc FFI, linked with -lc)
+  # --- printf slice: variadic + C-pointer type (appended — never reorder) ---
+  - '...'        # 77  variadic parameter pack (`fn(fixed, ...)`, extern fn only)
+  - '[*c]'       # 78  C-pointer type prefix: `[*c]T` == C's `T*` (glued token)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -158,6 +161,11 @@ productions:
   - derivation: none
     rules:
       - { lhs: Param, rhs: [IDENT, ':', Type], action: param }
+      # The variadic marker `...` is a parameter alternative (Zig's PEG: `ParamDecl
+      # <- ... / DOT3`), NOT a comma-suffix after the whole list — so `,` never enters
+      # FOLLOW(Params) and the paramsCons/paramsOne S/R stays clean. Grammar-accepted
+      # anywhere a Param is, but lowering enforces last-position + extern-only.
+      - { lhs: Param, rhs: ['...'], action: paramVariadic }
 
   # const/var, optionally type-annotated. Reused at top level (Decl) and inside
   # blocks (Stmt).
@@ -286,6 +294,15 @@ productions:
     rules:
       - { lhs: Type, rhs: ['?', Type],            action: tyOptional }
       - { lhs: Type, rhs: ['*', Type],            action: tyPointer }
+      # `*const T` and the C-pointer `[*c]T` / `[*c]const T`. The pointee `const`
+      # is grammatically tied to the pointer prefix (NOT a free-standing `const T`
+      # type prefix), so it can never be reached from the expression cascade — that
+      # would collide with a `const`-decl. `[*c]` is one glued lexer token, so it
+      # never clashes with the array `[Expr]` / slice `[]` forms. (`[*]T` many-item
+      # and `[*:s]T` sentinel pointers are deferred — printf needs only `[*c]`.)
+      - { lhs: Type, rhs: ['*', 'const', Type],    action: tyPtrConst }
+      - { lhs: Type, rhs: ['[*c]', Type],          action: tyCPtr }
+      - { lhs: Type, rhs: ['[*c]', 'const', Type], action: tyCPtrConst }
       - { lhs: Type, rhs: ['[', ']', Type],       action: tySlice }
       - { lhs: Type, rhs: ['[', Expr, ']', Type], action: tyArray }
       - { lhs: Type, rhs: [ErrUnion] }
@@ -352,6 +369,12 @@ lexer:
     - { symbol: '>>', match: '>>' }
     - { symbol: '.*', match: '\.\*' }
     - { symbol: '.?', match: '\.\?' }
+    # `...` (3 chars) before `.*`/`.?`/`.` — longest-match prefers it regardless of
+    # order, but listed here with the other multi-char operators for clarity.
+    - { symbol: '...', match: '\.\.\.' }
+    # `[*c]` — the C-pointer type prefix as ONE glued token (longest-match beats the
+    # single-char `[`); never appears in expression-index position, so no clash.
+    - { symbol: '[*c]', match: '\[\*c\]' }
 
     # Single-char operators / punctuation.
     - { symbol: '(', match: '\(' }

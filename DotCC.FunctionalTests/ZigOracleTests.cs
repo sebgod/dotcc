@@ -75,6 +75,11 @@ public sealed class ZigOracleTests
         // dotcc routes it by bare name to its Libc runtime; zig links the real libc.
         new object[] { "extern_putchar",
             "extern fn putchar(c: c_int) c_int;\npub fn main() u8 { _ = putchar(72); _ = putchar(105); _ = putchar(10); return 0; }\n", 0, "Hi" },
+        // VARIADIC extern fn + a string literal: `printf` with `[*c]const u8` format
+        // and a `...` pack. dotcc routes it through the printf-family fluent builder;
+        // zig links real libc printf. The `%d` exercises the variadic-tail formatting.
+        new object[] { "printf_fmt",
+            "extern fn printf(format: [*c]const u8, ...) c_int;\npub fn main() u8 { _ = printf(\"Hi %d\\n\", 42); return 0; }\n", 0, "Hi 42" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
