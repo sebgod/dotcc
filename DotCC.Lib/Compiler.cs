@@ -321,9 +321,9 @@ public static class Compiler
                 .Concat(irBuilder.Globals.Select(g => g.Sym.Name))
                 .Distinct(StringComparer.Ordinal);
             return SerializeFragment(cg.Functions, new Dictionary<string, string>(), cg.Aliases, cg.Globals, cg.MainArity,
-                objImports, objDefs);
+                objImports, objDefs, cg.MainReturnsVoid);
         }
-        return BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, fileBased, libraryMode, cg.Exports, debugHeap, importsClass, importsAreStatic);
+        return BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, fileBased, libraryMode, cg.Exports, debugHeap, importsClass, importsAreStatic, cg.MainReturnsVoid);
     }
 
     /// <summary>
@@ -528,6 +528,7 @@ public static class Compiler
     // fragment is still (almost) valid C#, and so the markers can't collide with
     // real emitted code.
     private const string FragMain   = "//!!dotcc-obj main:";
+    private const string FragMainVoid = "//!!dotcc-obj main-void:"; // 1 when main returns void
     private const string FragType   = "//!!dotcc-obj type:";
     private const string FragSect   = "//!!dotcc-obj section:"; // aliases|globals|functions
     // Import mode in separate compilation: `-l` is known only at LINK time, so each
@@ -559,11 +560,12 @@ public static class Compiler
 
     private static string SerializeFragment(
         string functions, IReadOnlyDictionary<string, string> typeDecls, string aliases, string globals, int mainArity,
-        IReadOnlyList<(string Name, string FieldType)> importSpecs, IEnumerable<string> defNames)
+        IReadOnlyList<(string Name, string FieldType)> importSpecs, IEnumerable<string> defNames, bool mainReturnsVoid = false)
     {
         var sb = new StringBuilder();
         sb.Append(MagicObject).Append(" 1 — link with `dotcc <objs> -o <out>`.\n");
         sb.Append(FragMain).Append(mainArity).Append('\n');
+        if (mainReturnsVoid) { sb.Append(FragMainVoid).Append("1").Append('\n'); }
         // Import candidates + defined names, for the link step's resolution. Names
         // have no spaces (C identifiers), so the type — which does (`delegate*
         // unmanaged[Cdecl]<int, int>`) — is everything after the first space.
@@ -597,6 +599,7 @@ public static class Compiler
         var globalSeen = new HashSet<string>(StringComparer.Ordinal);
         var functions = new StringBuilder();
         var mainArity = -1;
+        var mainReturnsVoid = false;
         // Import resolution across fragments: a candidate name → its fn-ptr type, and
         // every name some fragment DEFINES. A candidate survives iff no fragment defines it.
         var importSpecs = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -625,7 +628,13 @@ public static class Compiler
             }
             foreach (var line in text.Split('\n'))
             {
-                if (line.StartsWith(FragMain, StringComparison.Ordinal))
+                if (line.StartsWith(FragMainVoid, StringComparison.Ordinal))
+                {
+                    // `main-void:` and `main:` are disjoint markers (the char after
+                    // "main" differs: '-' vs ':'), so this branch and the next don't race.
+                    if (line[FragMainVoid.Length..].Trim() == "1") { mainReturnsVoid = true; }
+                }
+                else if (line.StartsWith(FragMain, StringComparison.Ordinal))
                 {
                     if (int.TryParse(line[FragMain.Length..], out var m) && m >= 0) { mainArity = m; }
                 }
@@ -693,7 +702,8 @@ public static class Compiler
             if (survivors.Count > 0) { importsClass = RenderImportsClass(survivors, imports, libraryMode); }
         }
         return BuildShell(mainArity, functions.ToString(), structDecls.ToString(), aliasText, globalText,
-                          fileBased, libraryMode, System.Array.Empty<EmitHelpers.Export>(), debugHeap, importsClass);
+                          fileBased, libraryMode, System.Array.Empty<EmitHelpers.Export>(), debugHeap, importsClass,
+                          importsAreStatic: false, mainReturnsVoid: mainReturnsVoid);
     }
 
     /// <summary>
@@ -1213,7 +1223,8 @@ public static class Compiler
         IReadOnlyList<EmitHelpers.Export> exports,
         bool debugHeap = false,
         string importsClass = "",
-        bool importsAreStatic = false)
+        bool importsAreStatic = false,
+        bool mainReturnsVoid = false)
     {
         if (libraryMode)
         {
@@ -1247,12 +1258,17 @@ public static class Compiler
         // `main(...)` call, file-scope `&fn` initializers, and inter-function calls).
         var indentedFns = IndentBlock(
             emittedFnList.Replace("static unsafe ", "internal static unsafe "), "    ");
+        // A `void`-returning main (Zig's `pub fn main() void`; also a non-standard
+        // `void main()` in C) can't be `return`ed from the int-typed entry, so it is
+        // called for effect and followed by `return 0;`. An int-returning main is
+        // returned directly as the process exit code.
+        static string Wrap(string call, bool isVoid) => isVoid ? $"{call}; return 0;" : $"return {call};";
         var entry = mainArity switch
         {
-            0 => "return main();",
-            1 => "return main(args.Length);",
+            0 => Wrap("main()", mainReturnsVoid),
+            1 => Wrap("main(args.Length)", mainReturnsVoid),
             2 =>
-                """
+                $$"""
                 unsafe
                 {
                     // Real C: argv[0] = program path, argv[1..] = user args, argc = total.
@@ -1284,7 +1300,7 @@ public static class Compiler
                     // original buffers can't be safely freed by slot here. Reclaiming
                     // it as the process exits would be pointless anyway (the OS does
                     // it); freeing a non-heap pointer aborts the run.
-                    return main(argc, argv);
+                    {{Wrap("main(argc, argv)", mainReturnsVoid)}}
                 }
                 """,
             _ => throw new InvalidOperationException(

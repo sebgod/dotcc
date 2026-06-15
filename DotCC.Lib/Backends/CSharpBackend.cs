@@ -20,7 +20,8 @@ internal sealed record CSharpBackendResult(
     string Aliases,
     string Globals,
     int MainArity,
-    IReadOnlyList<DotCC.EmitHelpers.Export> Exports);
+    IReadOnlyList<DotCC.EmitHelpers.Export> Exports,
+    bool MainReturnsVoid = false);
 
 /// <summary>
 /// Lowers the typed IR to low-level unsafe C# text. Deliberately DUMB: every
@@ -53,6 +54,7 @@ internal sealed class CSharpBackend
         var fns = new StringBuilder();
         var exports = new List<DotCC.EmitHelpers.Export>();
         var mainArity = -1;
+        var mainReturnsVoid = false;
 
         foreach (var fn in unit.Functions)
         {
@@ -60,7 +62,15 @@ internal sealed class CSharpBackend
             cg._currentFnName = fn.Sym.Name;
             fns.Append(cg.Func(fn));
 
-            if (fn.Sym.Name == "main") { mainArity = fn.Params.Count; }
+            if (fn.Sym.Name == "main")
+            {
+                mainArity = fn.Params.Count;
+                // A `void`-returning main (Zig's `pub fn main() void`, or a non-standard
+                // `void main()` in C) can't be `return`ed from the int-typed entry — the
+                // shell calls it for effect and returns 0 instead. Detect it here so the
+                // entry-wiring can choose the right form.
+                mainReturnsVoid = fn.Sym.Type is CType.Func f && f.Return.Unqualified is CType.VoidType;
+            }
             // A variadic function's `params VaArg[]` tail isn't a valid
             // [UnmanagedCallersOnly] signature, so it can't be exported.
             else if (fn.Sym.Storage != Storage.Static && !fn.Variadic)
@@ -95,7 +105,7 @@ internal sealed class CSharpBackend
         foreach (var t in unit.Types) { structs.Append(cg.StructText(t)); }
         foreach (var en in unit.Enums) { structs.Append(cg.EnumText(en)); }
 
-        return new CSharpBackendResult(fns.ToString(), structs.ToString(), Aliases: "", globals.ToString(), mainArity, exports);
+        return new CSharpBackendResult(fns.ToString(), structs.ToString(), Aliases: "", globals.ToString(), mainArity, exports, mainReturnsVoid);
     }
 
     // ---- type declarations -----------------------------------------------

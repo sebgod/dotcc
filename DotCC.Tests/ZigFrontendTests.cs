@@ -118,4 +118,18 @@ public sealed class ZigFrontendTests
         cs.ShouldContain(".Arg(42)");          // the variadic argument
         cs.ShouldContain(".Done()");           // builder terminator
     }
+
+    [Fact]
+    public void Lowers_void_returning_main()
+    {
+        // `pub fn main() void` — idiomatic Zig (no exit code). The shell can't
+        // `return main()` from its int-typed entry, so it calls main for effect and
+        // returns 0. main needs no explicit `return;` (a void body just falls off).
+        var cs = EmitZig(
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "pub fn main() void { _ = printf(\"ok\\n\"); }\n");
+        cs.ShouldContain("void main()");      // the function lowered with a void return
+        cs.ShouldContain("main(); return 0;"); // entry wiring: call for effect, exit 0
+        cs.ShouldNotContain("return main();"); // NOT the int-main form
+    }
 }

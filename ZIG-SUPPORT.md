@@ -30,6 +30,8 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | Feature | Status | Notes |
 |---|---|---|
 | `fn name(params) Ret { … }` | ✅ | top-level function definition |
+| `pub fn main() void` | ✅ | void-returning main — shell calls it for effect, returns 0 |
+| `pub fn main() u8` | ✅ | the `u8` return is the process exit code |
 | `pub fn …` | ✅ | `pub` unwrapped (visibility is a no-op in our single-module emit) |
 | Parameters `name: Type` | ✅ | names + types ride into the C# signature; faithful signedness |
 | Forward references | ✅ | two-pass lowering (Zig has no prototypes) — a call may precede the callee |
@@ -105,9 +107,6 @@ lists `.{…}`, `async`/`suspend`, inline assembly, destructuring assignment.
 
 ## Known limits
 
-- **`void` main** is unsupported: the shell wires `return main();`, so `main`
-  must return an integer (`pub fn main() u8 { … return 0; }`). A `main(); return 0;`
-  follow-up for `void` main is planned.
 - **Mixed `.c` + `.zig`** translation units in one invocation are not wired yet.
 
 ## Validation

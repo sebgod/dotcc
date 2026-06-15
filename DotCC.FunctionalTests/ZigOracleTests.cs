@@ -80,6 +80,11 @@ public sealed class ZigOracleTests
         // zig links real libc printf. The `%d` exercises the variadic-tail formatting.
         new object[] { "printf_fmt",
             "extern fn printf(format: [*c]const u8, ...) c_int;\npub fn main() u8 { _ = printf(\"Hi %d\\n\", 42); return 0; }\n", 0, "Hi 42" },
+        // VOID-returning main (`pub fn main() void`) — idiomatic Zig with no exit code.
+        // dotcc's shell calls it for effect and returns 0; real zig's start code does
+        // the same. No explicit `return;` needed (a void body falls off the end).
+        new object[] { "void_main",
+            "extern fn printf(format: [*c]const u8, ...) c_int;\npub fn main() void { _ = printf(\"void %d\\n\", 7); }\n", 0, "void 7" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
