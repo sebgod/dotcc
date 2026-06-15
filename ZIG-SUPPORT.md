@@ -105,9 +105,29 @@ program's libc call is handled. No `@cImport`, no header harvest.
 container decls (`struct`/`enum`/`union`/`opaque`), error sets, anonymous init
 lists `.{…}`, `async`/`suspend`, inline assembly, destructuring assignment.
 
-## Known limits
+## Mixed `.c` + `.zig` translation units
 
-- **Mixed `.c` + `.zig`** translation units in one invocation are not wired yet.
+A single invocation may mix C and Zig: `dotcc main.c helper.zig -o app`. Both
+groups lower into **one** IR module (the C group builds the module — preprocessor,
+structs, globals — and the Zig group lowers into it), so the program emits once and
+a call across the language boundary resolves at the C# level (every function is a
+`DotCcProgram` method called by bare name). Each side declares the other's functions
+the normal way — a C prototype (`int add(int, int);`) for a Zig function, an
+`extern fn` for a C function — and they link. C structs/enums are preserved.
+
+```c
+// helper.c
+int add(int a, int b);            // defined in add.zig
+int main(void){ return add(40, 2); }
+```
+```zig
+// add.zig
+pub fn add(a: c_int, b: c_int) c_int { return a + b; }
+```
+
+Limits: `-shared` / `-l` import mode combined with a mixed set is not validated yet
+(single-language only); cross-language **struct/type sharing** is moot until the Zig
+front-end emits aggregates.
 
 ## Validation
 

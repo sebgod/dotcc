@@ -220,10 +220,10 @@ public static class Compiler
     /// <summary>
     /// Dispatch the inputs to the right <see cref="Frontends.IFrontend"/> and return the
     /// neutral <see cref="Ir.IrBuilder"/> the backends consume (<see cref="EmitCSharp"/>
-    /// / the wat path). A <c>.zig</c>-only translation set routes to the Zig front-end;
-    /// otherwise the C front-end. (Mixed <c>.c</c> + <c>.zig</c> — one IR module fed by
-    /// both — is deferred until the Zig frontend matures; see FRONTEND-IDEAS.md idea 2.)
-    /// Kept as a private shim so the existing call sites stay unchanged.
+    /// / the wat path). A <c>.zig</c>-only set routes to the Zig front-end; an all-C set
+    /// to the C front-end; a MIXED <c>.c</c> + <c>.zig</c> set lowers both into one
+    /// shared module (see <see cref="BuildMixedIr"/>). Kept as a private shim so the
+    /// existing call sites stay unchanged.
     /// </summary>
     private static Ir.IrBuilder BuildIr(
         IReadOnlyList<string> inputPaths,
@@ -237,11 +237,50 @@ public static class Compiler
     {
         var request = new Frontends.FrontendRequest(
             inputPaths, includeDirs, defines, dialect, pedantic, pedanticErrors, names, warnDiscardedQualifiers);
-        Frontends.IFrontend frontend =
-            inputPaths.Count > 0 && inputPaths.All(p => p.EndsWith(".zig", StringComparison.OrdinalIgnoreCase))
-                ? new Frontends.ZigFrontend()
-                : new Frontends.CFrontend();
+        var anyZig = inputPaths.Any(IsZigSource);
+        var anyC = inputPaths.Any(p => !IsZigSource(p));
+        if (anyZig && anyC) { return BuildMixedIr(request); }
+        Frontends.IFrontend frontend = anyZig ? new Frontends.ZigFrontend() : new Frontends.CFrontend();
         return frontend.BuildIr(request);
+    }
+
+    private static bool IsZigSource(string path) => path.EndsWith(".zig", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Build ONE IR module from a mixed <c>.c</c> + <c>.zig</c> translation-unit set.
+    /// The C group is built first via <see cref="Frontends.CFrontend"/> (so its
+    /// preprocessor/dialect-gate machinery, struct/enum/global emission, and C
+    /// diagnostics all run normally); the Zig group then lowers INTO that same
+    /// <see cref="Ir.IrBuilder"/> through <see cref="Frontends.ZigFrontend.AddUnits"/>,
+    /// sharing the one name legalizer. The whole program therefore emits once down the
+    /// existing backend path — structs preserved — and a call across the language
+    /// boundary resolves at the C# level (every function is a <c>DotCcProgram</c>
+    /// method called by bare name), exactly as separate compilation already does. Only
+    /// the Zig group's diagnostics are flushed here (the C front-end already flushed
+    /// its own), so a C warning isn't printed twice.
+    /// </summary>
+    private static Ir.IrBuilder BuildMixedIr(Frontends.FrontendRequest request)
+    {
+        var sharedNames = request.Names ?? new Backends.CSharpNameLegalizer();
+        var cPaths = request.InputPaths.Where(p => !IsZigSource(p)).ToList();
+        var zigPaths = request.InputPaths.Where(IsZigSource).ToList();
+
+        var ir = new Frontends.CFrontend().BuildIr(request with { InputPaths = cPaths, Names = sharedNames });
+        var flushed = ir.Diagnostics.Count;     // C diagnostics already flushed by CFrontend
+        Frontends.ZigFrontend.AddUnits(ir, zigPaths, sharedNames);
+
+        // Flush ONLY the diagnostics the Zig lowering added (skip the already-flushed C ones).
+        var zigDiags = ir.Diagnostics.Skip(flushed).ToList();
+        var zigErrors = zigDiags.Where(d => d.Severity == Ir.Severity.Error).ToList();
+        if (zigErrors.Count > 0)
+        {
+            throw new CompileException(string.Join("\n", zigErrors.Select(d => "error: " + d)));
+        }
+        foreach (var w in zigDiags.Where(d => d.Severity == Ir.Severity.Warning))
+        {
+            Console.Error.WriteLine("dotcc: warning: " + w);
+        }
+        return ir;
     }
 
     /// <summary>

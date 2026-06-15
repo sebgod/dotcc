@@ -25,9 +25,31 @@ internal sealed class ZigFrontend : IFrontend
         var names = request.Names ?? new Backends.CSharpNameLegalizer();
         var ir = new IrBuilder(null, names, new Dictionary<string, byte[]>(StringComparer.Ordinal),
                                request.WarnDiscardedQualifiers);
-        var lexerTable = Zig.BuildLexer();
+        AddUnits(ir, request.InputPaths, names);
 
-        foreach (var path in request.InputPaths)
+        var errors = ir.Diagnostics.Where(d => d.Severity == Severity.Error).ToList();
+        if (errors.Count > 0)
+        {
+            throw new CompileException(string.Join("\n", errors.Select(d => "error: " + d)));
+        }
+        foreach (var w in ir.Diagnostics.Where(d => d.Severity == Severity.Warning))
+        {
+            Console.Error.WriteLine("dotcc: warning: " + w);
+        }
+        return ir;
+    }
+
+    /// <summary>Parse every <c>.zig</c> unit and lower it INTO <paramref name="ir"/>
+    /// (no builder creation, no diagnostic flush). Factored out of
+    /// <see cref="BuildIr"/> so a mixed <c>.c</c> + <c>.zig</c> whole-program build can
+    /// lower the Zig units into the C front-end's already-built <see cref="IrBuilder"/>
+    /// — one shared module, one emit (the C side's structs/enums/globals preserved),
+    /// cross-language calls resolving as bare-name <c>DotCcProgram</c> methods. The
+    /// caller owns diagnostic flushing.</summary>
+    internal static void AddUnits(IrBuilder ir, IReadOnlyList<string> paths, INameLegalizer names)
+    {
+        var lexerTable = Zig.BuildLexer();
+        foreach (var path in paths)
         {
             var source = File.ReadAllText(path);
             Item root;
@@ -52,16 +74,5 @@ internal sealed class ZigFrontend : IFrontend
             }
             new ZigLowering(ir, names).Lower(root);
         }
-
-        var errors = ir.Diagnostics.Where(d => d.Severity == Severity.Error).ToList();
-        if (errors.Count > 0)
-        {
-            throw new CompileException(string.Join("\n", errors.Select(d => "error: " + d)));
-        }
-        foreach (var w in ir.Diagnostics.Where(d => d.Severity == Severity.Warning))
-        {
-            Console.Error.WriteLine("dotcc: warning: " + w);
-        }
-        return ir;
     }
 }
