@@ -189,4 +189,59 @@ public sealed class ZigFrontendTests
         cs.ShouldContain("byte* p");   // ?*u8 → bare byte* (the niche)
         cs.ShouldContain("!= null");   // pointer orelse → null test
     }
+
+    [Fact]
+    public void Lowers_error_union_return_try_and_propagation()
+    {
+        // A `!u8` function (error-union return) lowers to `ErrUnion<byte>`: `return error.X`
+        // → `.Err(code)`, a plain `return e` → `.Ok(e)`. A caller's `try f()` lowers to
+        // `ErrUnion.Try(f())` (unwrap-or-propagate), and EVERY error-union body is wrapped in
+        // a `catch (ZigErrorReturn …)` that converts a propagated error back to an Err return
+        // — the exception-based early-return-out-of-an-expression, modeled on the setjmp lowering.
+        var cs = EmitZig(
+            "fn parse(x: u8) !u8 { if (x == 0) return error.Zero; return x + 1; }\n" +
+            "fn outer(x: u8) !u8 { const v = try parse(x); return v + 1; }\n" +
+            "pub fn main() u8 { return outer(40) catch 0; }\n");
+        cs.ShouldContain("ErrUnion<byte> parse");   // `!u8` return → ErrUnion<byte>
+        cs.ShouldContain("ErrUnion<byte>.Err(");     // `return error.Zero` → Err(code)
+        cs.ShouldContain("ErrUnion<byte>.Ok(");      // `return x + 1` → Ok(payload)
+        cs.ShouldContain("ErrUnion.Try(");           // `try parse(x)` → unwrap-or-propagate
+        cs.ShouldContain("catch (ZigErrorReturn");   // the per-function propagation boundary
+    }
+
+    [Fact]
+    public void Lowers_catch_to_the_catch_helper()
+    {
+        // `f() catch fallback` → `ErrUnion.Catch<P>(f(), fallback)` — the payload on success,
+        // else the (side-effect-free) fallback. The type argument is explicit so a fitting
+        // constant fallback (`catch 0`) converts to the payload rather than clashing as int.
+        var cs = EmitZig(
+            "fn parse(x: u8) !u8 { if (x == 0) return error.Zero; return x; }\n" +
+            "pub fn main() u8 { return parse(0) catch 0; }\n");
+        cs.ShouldContain("ErrUnion.Catch<byte>(");   // explicit payload type arg
+    }
+
+    [Fact]
+    public void Lowers_error_union_void()
+    {
+        // `!void` has no generic-over-void in C#, so it lowers to `ErrUnion<Unit>`. A body
+        // that falls off the end is a Zig success → a trailing `ErrUnion<Unit>.Ok(default)`.
+        var cs = EmitZig(
+            "fn check(x: u8) !void { if (x == 0) return error.Zero; }\n" +
+            "pub fn main() u8 { return 0; }\n");
+        cs.ShouldContain("ErrUnion<Unit> check");        // `!void` → ErrUnion<Unit>
+        cs.ShouldContain("ErrUnion<Unit>.Err(");          // `return error.Zero`
+        cs.ShouldContain("ErrUnion<Unit>.Ok(default)");   // fall-off success
+    }
+
+    [Fact]
+    public void Rejects_try_on_a_non_error_union_value()
+    {
+        // `try` is only meaningful on an error union; applying it to a plain value is a
+        // structural error (real zig: "expected error union type"). dotcc fails loudly
+        // rather than miscompiling. (IrUnsupportedException is a CompileException subclass.)
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 { const x: u8 = 5; return try x; }\n"));
+        ex.Message.ShouldContain("error-union");
+    }
 }

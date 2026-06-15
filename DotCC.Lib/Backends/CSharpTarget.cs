@@ -38,6 +38,9 @@ internal sealed class CSharpTarget : ITarget
         // A Zig value optional `?T` → C# Nullable<T> (`T?`): null = none, `.?` = .Value,
         // `orelse` = `??`. (An optional POINTER `?*T` is a bare nullable `T*`, never this.)
         CType.Optional o => RenderType(o.Inner) + "?",
+        // A Zig error union `E!T` → the runtime `ErrUnion<Payload>` value type. A `void`
+        // payload (`!void`) has no generic-over-void in C#, so it uses the `Unit` payload.
+        CType.ErrorUnion eu => "ErrUnion<" + (eu.Payload is CType.VoidType ? "Unit" : RenderType(eu.Payload)) + ">",
         _ => throw new IrUnsupportedException("C# target cannot render type " + t.GetType().Name),
     };
 

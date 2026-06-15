@@ -38,10 +38,34 @@ internal sealed class ZigLowering
     private readonly IrBuilder _ir;
     private readonly SymbolTable _symbols;
 
-    public ZigLowering(IrBuilder ir, INameLegalizer names)
+    /// <summary>The flat global error set: each distinct <c>error.Foo</c> name → a stable
+    /// non-zero code (0 is the success sentinel). Shared across the units of one build (the
+    /// caller passes one dictionary) so a given error name gets one code program-wide — V1
+    /// erases the error SET, so a single space suffices. See <see cref="ErrorCode"/>.</summary>
+    private readonly Dictionary<string, int> _errorCodes;
+
+    /// <summary>The return type of the function whose body is currently being lowered (null
+    /// outside a body / for a void-less return). When it is a <see cref="CType.ErrorUnion"/>,
+    /// <c>return</c> wraps its value as an error union (<see cref="LowerReturn"/>).</summary>
+    private CType? _currentFnRet;
+
+    public ZigLowering(IrBuilder ir, INameLegalizer names, Dictionary<string, int>? errorCodes = null)
     {
         _ir = ir;
         _symbols = new SymbolTable(names);
+        _errorCodes = errorCodes ?? new Dictionary<string, int>(System.StringComparer.Ordinal);
+    }
+
+    /// <summary>Resolve an error name to its stable code in the flat global error set,
+    /// assigning the next 1-based code on first sight (0 is reserved for success).</summary>
+    private int ErrorCode(string name)
+    {
+        if (!_errorCodes.TryGetValue(name, out var code))
+        {
+            code = _errorCodes.Count + 1;
+            _errorCodes[name] = code;
+        }
+        return code;
     }
 
     private static string Tok(Item it) => it.Content as string
@@ -63,8 +87,8 @@ internal sealed class ZigLowering
                 case Zig.ExternFnProtoNoArgs f: DeclareExternFn(f.Arg2, null, f.Arg5); break;     // extern fn IDENT ( ) Type ;
                 case Zig.FnDef f:          entries.Add(DeclareFn(f.Arg1, f.Arg3, f.Arg5, f.Arg6)); break;
                 case Zig.FnDefNoArgs f:    entries.Add(DeclareFn(f.Arg1, null, f.Arg4, f.Arg5)); break;
-                case Zig.FnDefErr f:       entries.Add(DeclareFn(f.Arg1, f.Arg3, f.Arg6, f.Arg7)); break;   // `!T` return — error union deferred, use T
-                case Zig.FnDefNoArgsErr f: entries.Add(DeclareFn(f.Arg1, null, f.Arg5, f.Arg6)); break;
+                case Zig.FnDefErr f:       entries.Add(DeclareFn(f.Arg1, f.Arg3, f.Arg6, f.Arg7, errUnion: true)); break;   // `!T` return → ErrorUnion(T)
+                case Zig.FnDefNoArgsErr f: entries.Add(DeclareFn(f.Arg1, null, f.Arg5, f.Arg6, errUnion: true)); break;
                 default: throw new IrUnsupportedException("zig top-level decl: " + (d.Content?.GetType().Name ?? "null"));
             }
         }
@@ -77,9 +101,12 @@ internal sealed class ZigLowering
     /// the global scope and bundle its body for pass 2. Declaring all signatures up
     /// front is what lets a call forward-reference a function defined later.</summary>
     private (Symbol sym, List<(string name, CType type)> ps, Item body) DeclareFn(
-        Item nameTok, Item? paramsItem, Item retType, Item body)
+        Item nameTok, Item? paramsItem, Item retType, Item body, bool errUnion = false)
     {
         var ret = LowerType(retType);
+        // A `!T` return (Zig's inferred error set) wraps the payload in an error union;
+        // V1 erases the set, so the leading `!` just marks the union (see CType.ErrorUnion).
+        if (errUnion) { ret = new CType.ErrorUnion(ret); }
         var paramInfos = CollectParamInfos(paramsItem, out var variadic);
         // Zig allows `...` ONLY in an extern prototype — a non-extern variadic fn is
         // a compile error. Reject it the same way (faithful to Zig; our subset has no
@@ -161,6 +188,7 @@ internal sealed class ZigLowering
     /// are declared inside the function scope before the body.</summary>
     private void LowerFnBody(Symbol funcSym, List<(string name, CType type)> paramInfos, Item body)
     {
+        _currentFnRet = (funcSym.Type as CType.Func)?.Return;
         _symbols.BeginFunction();
         _symbols.EnterScope();
         var paramSyms = paramInfos
@@ -196,8 +224,8 @@ internal sealed class ZigLowering
             case Zig.ConstDeclTyped d:  return DeclOf(d.Arg1, d.Arg3, d.Arg5);
             case Zig.VarDecl d:         return DeclOf(d.Arg1, null, d.Arg3);
             case Zig.VarDeclTyped d:    return DeclOf(d.Arg1, d.Arg3, d.Arg5);
-            case Zig.StmtReturn r:      return new Return(LowerExpr(r.Arg1));
-            case Zig.StmtReturnVoid:    return new Return(null);
+            case Zig.StmtReturn r:      return LowerReturn(r.Arg1);
+            case Zig.StmtReturnVoid:    return LowerReturnVoid();
             case Zig.StmtExpr e:        return new ExprStmt(LowerExpr(e.Arg0));
 
             // `x = value;`  → an assignment used as a statement. `_ = value;` is Zig's
@@ -234,6 +262,42 @@ internal sealed class ZigLowering
         var type = typeItem is not null ? LowerType(typeItem) : (init.Type ?? CType.Int);
         var sym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = type });
         return new DeclStmt(new List<LocalDecl> { new(sym, init) });
+    }
+
+    /// <summary>Lower <c>return e;</c>. In a <c>!T</c> function the value becomes an error
+    /// union: <c>return error.Foo;</c> → an <see cref="ErrUnionErr"/>; a value that is ALREADY
+    /// an error union (<c>return f();</c> where <c>f</c> returns <c>!U</c>) is returned as-is
+    /// (Zig doesn't auto-unwrap); any plain value is wrapped in an <see cref="ErrUnionOk"/>.
+    /// Outside an error-union function it is a plain <see cref="Return"/>.</summary>
+    private CStmt LowerReturn(Item valueItem)
+    {
+        if (_currentFnRet is CType.ErrorUnion eu)
+        {
+            if (IsErrorLit(valueItem, out var errName))
+            {
+                return new Return(new ErrUnionErr(ErrorCode(errName)) { Type = eu });
+            }
+            var v = LowerExpr(valueItem);
+            if (v.Type.Unqualified is CType.ErrorUnion) { return new Return(v); }
+            return new Return(new ErrUnionOk(v) { Type = eu });
+        }
+        return new Return(LowerExpr(valueItem));
+    }
+
+    /// <summary>Lower <c>return;</c>. In a <c>!void</c> function it is a success error union
+    /// with no payload (<c>ErrUnion&lt;Unit&gt;.Ok(default)</c>); otherwise a plain
+    /// <c>return;</c>.</summary>
+    private CStmt LowerReturnVoid() =>
+        _currentFnRet is CType.ErrorUnion eu
+            ? new Return(new ErrUnionOk(null) { Type = eu })
+            : new Return(null);
+
+    /// <summary>True when an item is an <c>error.Foo</c> literal, yielding the error name.</summary>
+    private static bool IsErrorLit(Item it, out string name)
+    {
+        if (it.Content is Zig.ErrorLit e) { name = Tok(e.Arg2); return true; }
+        name = "";
+        return false;
     }
 
     // ---- expressions -----------------------------------------------------
@@ -317,7 +381,18 @@ internal sealed class ZigLowering
                 }
                 return new Unary(UnOp.AddrOf, operand) { Type = new CType.Pointer(operand.Type) };
             }
-            case Zig.PreTry:      throw new IrUnsupportedException("zig `try` not lowered yet (needs error unions)");
+            // `try e` — unwrap the error union's payload, or propagate its error by throwing
+            // ZigErrorReturn (caught at the enclosing `!T` function's emitted try/catch — the
+            // backend's Func wrap). An expression, so it works in any position.
+            case Zig.PreTry p:
+            {
+                var inner = LowerExpr(p.Arg1);
+                if (inner.Type.Unqualified is not CType.ErrorUnion eu)
+                {
+                    throw new IrUnsupportedException("zig `try` requires an error-union operand");
+                }
+                return new ZigTry(inner) { Type = eu.Payload };
+            }
 
             // Postfix deref `p.*` and subscript `a[i]` → the C Unary(Deref)/Index IR.
             // Field access `.field` (Zig.Field) stays deferred — it needs struct field
@@ -410,6 +485,33 @@ internal sealed class ZigLowering
                 }
                 throw new IrUnsupportedException("zig `orelse` requires an optional left operand");
             }
+
+            // `a catch b` — the error union's payload on success, else the fallback `b` (no
+            // propagation). Lowers to the eager `ErrUnion.Catch(a, b)`; since C# evaluates `b`
+            // before the call, the fallback must be side-effect-free for that to match Zig's
+            // lazy form, so a non-trivial fallback is rejected (deferred) — mirrors the pointer
+            // `orelse` rule in B1. `catch |e| …` capture and `catch return` are deferred too.
+            case Zig.CatchOp c:
+            {
+                var union = LowerExpr(c.Arg0);
+                if (union.Type.Unqualified is not CType.ErrorUnion eu)
+                {
+                    throw new IrUnsupportedException("zig `catch` requires an error-union left operand");
+                }
+                var fallback = LowerExpr(c.Arg2);
+                if (!IsSimpleReeval(fallback))
+                {
+                    throw new IrUnsupportedException(
+                        "zig `catch` with a side-effecting fallback not lowered yet (only a literal / variable fallback; `catch |e| …` capture and `catch return` are deferred)");
+                }
+                return new ZigCatch(union, fallback) { Type = eu.Payload };
+            }
+
+            // A bare `error.Foo` value (type `anyerror`) — only `return error.Foo;` is lowered
+            // (handled in LowerReturn); a bare error value elsewhere needs error-set modelling.
+            case Zig.ErrorLit:
+                throw new IrUnsupportedException(
+                    "zig bare `error.X` value not lowered yet (only `return error.X;` in a `!T` function)");
 
             // call of a named function (bare-identifier callee).
             case Zig.CallArgs c:   return LowerCall(c.Arg0, c.Arg2);
@@ -563,6 +665,10 @@ internal sealed class ZigLowering
         // guarantee, a documented leniency). A `?T` over a value type lowers to C#
         // Nullable<T> via CType.Optional, so `null`/`.?`/`orelse` map to C#'s built-ins.
         Zig.TyOptional opt => LowerOptional(opt.Arg1),
+        // `E!T` error-union type → CType.ErrorUnion(T). V1 erases the error SET (Arg0, the
+        // Suffix naming the set), so `anyerror!T` and a named `E!T` lower identically — the
+        // payload is what the backend renders (`ErrUnion<T>`). See [[CType.ErrorUnion]].
+        Zig.ErrUnion eu => new CType.ErrorUnion(LowerType(eu.Arg2)),
         _ => throw new IrUnsupportedException("zig type: " + (type.Content?.GetType().Name ?? "null")),
     };
 

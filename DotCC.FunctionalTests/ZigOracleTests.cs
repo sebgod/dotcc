@@ -94,6 +94,29 @@ public sealed class ZigOracleTests
         // A `?T` over a value type → C# Nullable<T>: `orelse` is `??`, `.?` is `.Value`.
         new object[] { "optional_value",
             "pub fn main() u8 { const a: ?u8 = 40; const b: ?u8 = null; return (a orelse 0) + (b orelse 2); }\n", 42, "" },
+        // ERROR UNIONS (Milestone B2). A `!u8` returns an error union; `try` unwraps-or-
+        // propagates, `catch` supplies a fallback, `return error.X` is the error path.
+        // try success: parse(40)=41, outer unwraps + adds → Ok(42), `catch 0` passes it through.
+        new object[] { "errunion_try_ok",
+            "fn parse(x: u8) !u8 { if (x == 0) return error.Zero; return x + 1; }\n" +
+            "fn outer(x: u8) !u8 { const v = try parse(x); return v + 1; }\n" +
+            "pub fn main() u8 { return outer(40) catch 0; }\n", 42, "" },
+        // catch on the error path: parse(0) → error.Zero, so `catch 7` yields the fallback.
+        new object[] { "errunion_catch_err",
+            "fn parse(x: u8) !u8 { if (x == 0) return error.Zero; return x + 1; }\n" +
+            "pub fn main() u8 { return parse(0) catch 7; }\n", 7, "" },
+        // try PROPAGATION: parse(0) errors, `try` aborts `outer` with it (the exception-based
+        // early return), and main's `catch 5` handles the propagated error → 5.
+        new object[] { "errunion_propagate",
+            "fn parse(x: u8) !u8 { if (x == 0) return error.Zero; return x + 1; }\n" +
+            "fn outer(x: u8) !u8 { const v = try parse(x); return v + 1; }\n" +
+            "pub fn main() u8 { return outer(0) catch 5; }\n", 5, "" },
+        // `!void`: check() returns no payload; `try check(x);` propagates any error and
+        // discards the void success. check(5) is fine → run returns Ok(9) → `catch 0` → 9.
+        new object[] { "errunion_void",
+            "fn check(x: u8) !void { if (x == 0) return error.Zero; }\n" +
+            "fn run(x: u8) !u8 { try check(x); return 9; }\n" +
+            "pub fn main() u8 { return run(5) catch 0; }\n", 9, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

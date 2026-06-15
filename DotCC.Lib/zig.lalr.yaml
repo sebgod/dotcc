@@ -123,6 +123,9 @@ symbols:
   - OrElse       # 79  `a orelse b` — lowest-precedence binary (Expr -> OrElse -> BoolOr)
   - 'orelse'     # 80  optional null-coalescing keyword
   - 'null'       # 81  the null literal (optional none / null pointer)
+  # --- error unions (Milestone B2; appended — never reorder) ---
+  - 'catch'      # 82  `a catch b` — error-union handling (joins the OrElse level)
+  - 'error'      # 83  `error.Foo` error-value literal keyword
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -211,13 +214,14 @@ productions:
     rules:
       - { lhs: Expr, rhs: [OrElse] }
 
-  # `a orelse b` — lowest-precedence binary level (below `or`), left-assoc. The RHS is
-  # BoolOr (a value expr); `orelse return` (a noreturn RHS) isn't expressible yet —
-  # `return` is a statement, not an expression — so the B1/B2 boundary is grammar-enforced.
-  # `catch` joins this same level in Milestone B2.
+  # `a orelse b` / `a catch b` — lowest-precedence binary level (below `or`), left-assoc.
+  # The RHS is BoolOr (a value expr); `orelse return` / `catch return` (a noreturn RHS)
+  # isn't expressible — `return` is a statement, not an expression — so the value-vs-
+  # control-flow boundary stays grammar-enforced. `catch |e| …` payload-capture is deferred.
   - derivation: leftmost
     rules:
       - { lhs: OrElse, rhs: [OrElse, 'orelse', BoolOr], action: orElse }
+      - { lhs: OrElse, rhs: [OrElse, 'catch', BoolOr],  action: catchOp }
       - { lhs: OrElse, rhs: [BoolOr] }
 
   # ===== slice 2a: control-flow as expression =====
@@ -347,6 +351,11 @@ productions:
       - { lhs: Primary, rhs: [BUILTIN, '(', ')'],           action: builtinCallNoArgs }
       - { lhs: Primary, rhs: ['null'],              action: nullLit }
       - { lhs: Primary, rhs: ['.', IDENT],          action: enumLit }
+      # `error.Foo` — an error-value literal. `error` is a distinct keyword token, so this
+      # never collides with the `Suffix '.' IDENT` field access (which starts from a
+      # Primary/IDENT). V1: error SETS aren't modelled (`error{A,B}` decls deferred); a bare
+      # `error.Foo` is only meaningful in `return error.Foo;` within a `!T` function.
+      - { lhs: Primary, rhs: ['error', '.', IDENT], action: errorLit }
 
   - derivation: leftmost
     rules:
@@ -375,6 +384,8 @@ lexer:
     - { symbol: 'orelse', match: 'orelse' }
     - { symbol: 'try',    match: 'try' }
     - { symbol: 'null',   match: 'null' }
+    - { symbol: 'catch',  match: 'catch' }
+    - { symbol: 'error',  match: 'error' }
 
     # Multi-char operators (longest-match handles overlaps; listed first for clarity).
     - { symbol: '==', match: '==' }

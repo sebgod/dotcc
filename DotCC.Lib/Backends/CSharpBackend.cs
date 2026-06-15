@@ -347,7 +347,26 @@ internal sealed class CSharpBackend
         // C lets a goto jump INTO a nested block; C# scopes labels to their
         // block. Hoist labeled tails until every goto is legal (no-op for the
         // overwhelming majority of functions — see GotoScopeNormalizer).
-        Stmt(sb, GotoScopeNormalizer.Normalize(fn.Body), 0);
+        var body = GotoScopeNormalizer.Normalize(fn.Body);
+        // A Zig `!T` function (error-union return) wraps its body so a propagated
+        // `try` (ZigErrorReturn) converts back to an `Err` return — the exception-based
+        // early-return-out-of-an-expression, modeled on the setjmp lowering. A `!void`
+        // body that falls off the end is a Zig success, so it returns Ok(default).
+        if (retTy is CType.ErrorUnion eu)
+        {
+            var ts = eu.Payload is CType.VoidType ? "Unit" : Cs(eu.Payload);
+            sb.Append("{\n");
+            sb.Append(Pad(1)).Append("try\n");
+            Stmt(sb, body, 1);
+            sb.Append(Pad(1)).Append($"catch (ZigErrorReturn __e) {{ return ErrUnion<{ts}>.Err(__e.Code); }}\n");
+            if (eu.Payload is CType.VoidType && !Terminates(body))
+            {
+                sb.Append(Pad(1)).Append("return ErrUnion<Unit>.Ok(default);\n");
+            }
+            sb.Append("}\n");
+            return sb.ToString();
+        }
+        Stmt(sb, body, 0);
         return sb.ToString();
     }
 
@@ -1301,6 +1320,38 @@ internal sealed class CSharpBackend
             // is `a ?? (byte)0`, not a `byte?`/`int` mismatch. Parenthesized → safe anywhere.
             case NullCoalesce nc:
                 return ($"({Sub(nc.Left, PUnary)} ?? {Coerced(nc.Right, nc.Type)})", PPrimary);
+            // Zig error unions (Milestone B2). `return e;` in a `!T` fn → ErrUnion<P>.Ok(e);
+            // a `!void` success carries no payload (`return;` / fall-off) → Ok(default). The
+            // payload type rides on the node's CType.ErrorUnion, so the backend reads it back.
+            case ErrUnionOk ok:
+            {
+                var eu = (CType.ErrorUnion)ok.Type;
+                var ts = eu.Payload is CType.VoidType ? "Unit" : Cs(eu.Payload);
+                var arg = ok.Payload is null ? "default"
+                        : eu.Payload is CType.VoidType ? Expr(ok.Payload)  // a Unit-valued `try`-of-!void
+                        : Coerced(ok.Payload, eu.Payload);
+                return ($"ErrUnion<{ts}>.Ok({arg})", PPrimary);
+            }
+            // `return error.Foo;` → ErrUnion<P>.Err(code) (code from the flat global set).
+            case ErrUnionErr err:
+            {
+                var eu = (CType.ErrorUnion)err.Type;
+                var ts = eu.Payload is CType.VoidType ? "Unit" : Cs(eu.Payload);
+                return ($"ErrUnion<{ts}>.Err({err.Code})", PPrimary);
+            }
+            // `try e` → ErrUnion.Try(e): the payload on success, else throw ZigErrorReturn
+            // (caught at the enclosing `!T` function's emitted try/catch boundary — see Func).
+            case ZigTry t:
+                return ($"ErrUnion.Try({Expr(t.Inner)})", PPrimary);
+            // `u catch fallback` → ErrUnion.Catch<P>(u, fallback): the payload on success,
+            // else the (side-effect-free) fallback. The type argument is explicit so a fitting
+            // constant fallback (`f() catch 0`) converts to the payload implicitly — otherwise
+            // C# infers T from both args and a bare `0` (int) clashes with the union's payload.
+            case ZigCatch c:
+            {
+                var cts = c.Type is CType.VoidType ? "Unit" : Cs(c.Type);
+                return ($"ErrUnion.Catch<{cts}>({Expr(c.Union)}, {Coerced(c.Fallback, c.Type)})", PPrimary);
+            }
             // A bare unresolved identifier: the backend escapes the raw name.
             case NameRef nr: return (DotCC.EmitHelpers.Id(nr.RawName), PPrimary);
             // An enumerator of a real enum: EnumName.Member (member access). If a

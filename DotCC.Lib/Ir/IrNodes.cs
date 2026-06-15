@@ -213,6 +213,34 @@ public sealed record NullPtr : CExpr;
 /// front-end never produces this; it is a Zig-lowering / C#-target construct.</summary>
 public sealed record NullCoalesce(CExpr Left, CExpr Right) : CExpr;
 
+/// <summary>A Zig <c>return e;</c> in a <c>!T</c> function, lowered to a success error
+/// union — <c>ErrUnion&lt;T&gt;.Ok(payload)</c>. <see cref="Payload"/> is null for a
+/// <c>!void</c> success (<c>return;</c> / fall-off → <c>ErrUnion&lt;Unit&gt;.Ok(default)</c>).
+/// <see cref="CExpr.Type"/> is the <see cref="CType.ErrorUnion"/> the function returns, so
+/// the backend reads the payload type from it. The C front-end never produces this; it is a
+/// Zig-lowering / C#-target construct (Milestone B2).</summary>
+public sealed record ErrUnionOk(CExpr? Payload) : CExpr;
+
+/// <summary>A Zig <c>return error.Foo;</c>, lowered to an error error union —
+/// <c>ErrUnion&lt;T&gt;.Err(code)</c>. <see cref="Code"/> is the error's stable code in the
+/// flat global error set (non-zero). <see cref="CExpr.Type"/> is the
+/// <see cref="CType.ErrorUnion"/> the function returns. Zig-lowering / C#-target only.</summary>
+public sealed record ErrUnionErr(int Code) : CExpr;
+
+/// <summary>A Zig <c>try e</c> — unwrap the payload of the error union <see cref="Inner"/>,
+/// or propagate its error by throwing <c>ZigErrorReturn</c> (caught at the enclosing
+/// function's emitted boundary). Lowers to <c>ErrUnion.Try(inner)</c>; <see cref="CExpr.Type"/>
+/// is the unwrapped payload type. The early-return-out-of-an-expression construct, modeled on
+/// the <c>setjmp</c> lowering. Zig-lowering / C#-target only (Milestone B2).</summary>
+public sealed record ZigTry(CExpr Inner) : CExpr;
+
+/// <summary>A Zig <c>u catch fallback</c> — the payload of the error union
+/// <see cref="Union"/> on success, else <see cref="Fallback"/> (no propagation). Lowers to
+/// <c>ErrUnion.Catch(union, fallback)</c>; <see cref="CExpr.Type"/> is the payload type. The
+/// lowering only builds this when <see cref="Fallback"/> is side-effect-free, so the eager
+/// helper matches Zig's lazy semantics. Zig-lowering / C#-target only (Milestone B2).</summary>
+public sealed record ZigCatch(CExpr Union, CExpr Fallback) : CExpr;
+
 /// <summary>A bare identifier the binder left unresolved — a runtime/library symbol
 /// surfaced by name (the <c>&lt;complex.h&gt;</c> imaginary unit), or an
 /// incremental-growth safety net for a name not in any header. Carries the RAW

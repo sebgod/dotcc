@@ -49,6 +49,9 @@ internal sealed class ZigFrontend : IFrontend
     internal static void AddUnits(IrBuilder ir, IReadOnlyList<string> paths, INameLegalizer names)
     {
         var lexerTable = Zig.BuildLexer();
+        // One error-code registry shared across the build's units — a given `error.Foo`
+        // name maps to one code program-wide (V1 erases the error set into a flat space).
+        var errorCodes = new Dictionary<string, int>(StringComparer.Ordinal);
         foreach (var path in paths)
         {
             var source = File.ReadAllText(path);
@@ -72,7 +75,7 @@ internal sealed class ZigFrontend : IFrontend
             {
                 throw new CompileException($"parse failed in {Path.GetFileName(path)}: {root}");
             }
-            new ZigLowering(ir, names).Lower(root);
+            new ZigLowering(ir, names, errorCodes).Lower(root);
         }
     }
 }

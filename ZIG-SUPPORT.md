@@ -38,7 +38,8 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `extern fn f(p: T) Ret;` | ✅ | libc/FFI prototype (no body); routed by bare name, linked with `-lc` |
 | `extern fn f(p: T, ...) Ret;` | ✅ | **variadic** extern (e.g. `printf`); `...` must be last + extern-only. A variadic argument must have a fixed-size type — `printf("%d", @as(c_int, 42))`, never a bare `printf("%d", 42)` (rejected, matching real zig — see below) |
 | local `const`/`var` (typed or inferred) | ✅ | inside a function body |
-| `fn f() !T` (inferred-error return) | 🚧 | parses; the `!` is dropped and `T` is used (error unions deferred) |
+| `fn f() !T` (inferred-error return) | ✅ | the `!T` returns an error union (`ErrUnion<T>`); see `try`/`catch`/`error.X` below. V1 erases the error SET |
+| `pub fn main() !void` / `!u8` (error-union main) | 🚫 | main itself returning an error union is deferred — error unions live in helper fns; main stays `void`/`u8` |
 | top-level / global `const`/`var` | 🚫 | only function-local decls lower today |
 | `export`/`inline`/`callconv`/`align`/`linksection` | 🚫 | full FnProto modifiers not modeled |
 | `extern "c"` library-name string | 🚫 | bare `extern fn` only |
@@ -57,7 +58,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `?T` optional | ✅ | `?*T` → bare nullable `T*` (niche); `?T` over a value → C# `Nullable<T>`. `null`/`.?`/`orelse` below |
 | `[]T` slice | 🚧 | parses; the fat-struct lowering is not built |
 | `[N]T` array | 🚧 | parses; does not lower |
-| `E!T` error-union type | 🚧 | parses; treated as `T` |
+| `E!T` / `!T` error-union type | ✅ | → runtime `ErrUnion<Payload>` (`ErrUnion<Unit>` for `!void`). V1 erases the error SET `E` — `anyerror!T` / named `E!T` lower identically (payload only) |
 | `comptime_int`/`comptime_float`, arbitrary `iN`/`uN` | 🚫 | |
 | `[*]T` many-item, `[*:s]T` sentinel | 🚫 | only `[*c]` is tokenized |
 
@@ -92,10 +93,12 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `null` literal | ✅ | optional none / null pointer (renders C# `null`) |
 | postfix `.?` (optional unwrap) | ✅ | value optional → `.Value` (panics on none); optional pointer → identity (V1: no null-check) |
 | `a orelse b` (value RHS) | ✅ | value optional → C# `??` (single-eval, lazy `b`); pointer → `a != null ? a : b` (simple LHS; `orelse return` is Milestone B2) |
-| postfix `.field`; prefix `try` | 🚧 | parse only — `.field` needs structs (Milestone E), `try` needs error unions (Milestone B2) |
+| prefix `try` | ✅ | unwrap an error union's payload, or PROPAGATE its error out of the enclosing `!T` fn (exception-based early-return, modeled on the setjmp lowering). `try e;` as a statement works too |
+| `e catch fallback` | ✅ | the payload on success, else the fallback. The fallback must be side-effect-free (literal / variable) — a non-trivial one is rejected (deferred), as is `catch \|e\| …` capture and `catch return` |
+| `error.Foo` | ✅ | an error value — only in `return error.Foo;` within a `!T` fn (a bare error value / error-set decls deferred) |
+| postfix `.field` | 🚧 | parse only — needs structs (Milestone E) |
 | other `@builtin(...)` (`@intCast`/`@ptrCast`/…) | 🚧 | parse only — Zig 0.16's forms are result-location-typed (single arg), needing context-type inference dotcc lacks |
 | `.enumLiteral` | 🚧 | parse only |
-| `catch` | 🚫 | error-union handling — Milestone B2 |
 | wrapping/saturating ops | 🚫 | |
 
 ## Lexer
@@ -108,8 +111,9 @@ program's libc call is handled. No `@cImport`, no header harvest.
 ## Out of scope (the dialect line)
 
 `comptime` (beyond const folding), generics / `anytype`, `@import("std")`,
-container decls (`struct`/`enum`/`union`/`opaque`), error sets, anonymous init
-lists `.{…}`, `async`/`suspend`, inline assembly, destructuring assignment.
+container decls (`struct`/`enum`/`union`/`opaque`), explicit error-SET declarations
+(`error{A,B}` — inferred `!T` + `error.X` ARE supported), anonymous init lists
+`.{…}`, `async`/`suspend`, inline assembly, destructuring assignment.
 
 ## Mixed `.c` + `.zig` translation units
 
@@ -134,6 +138,29 @@ pub fn add(a: c_int, b: c_int) c_int { return a + b; }
 Limits: `-shared` / `-l` import mode combined with a mixed set is not validated yet
 (single-language only); cross-language **struct/type sharing** is moot until the Zig
 front-end emits aggregates.
+
+## Error unions — `try` is exception-based (the setjmp pattern, reused)
+
+A `!T` function lowers to the runtime value type `ErrUnion<T>` (`DotCC.Libc/ZigErr.cs`,
+auto-spliced like `CBool`) — either a payload (`Code == 0`) or a non-zero error code.
+`return e;` → `ErrUnion<T>.Ok(e)`, `return error.Foo;` → `ErrUnion<T>.Err(code)`, and a
+`!void` body that falls off the end returns `ErrUnion<Unit>.Ok(default)` (C# has no
+generic-over-void, so `!void` uses the `Unit` payload).
+
+The hard part is `try e`: it must unwrap the payload OR abort the *current* function with
+the error, from **any** expression position (`const v = try f() + 1;`). Structured C# can't
+express early-return-out-of-an-expression — so dotcc reuses the exact mechanism the C
+front-end uses for `setjmp`/`longjmp`: `try e` lowers to `ErrUnion.Try(e)`, which throws a
+private `ZigErrorReturn` on error, and every `!T` function body is wrapped in
+`try { … } catch (ZigErrorReturn __e) { return ErrUnion<T>.Err(__e.Code); }`, converting the
+propagated error back into an error-union return. `e catch fallback` doesn't propagate, so it
+lowers to the plain `ErrUnion.Catch(e, fallback)` instead.
+
+**V1 limits** (documented, not silent): the error SET is erased to one flat global code
+space (`!T` / `anyerror!T` / `E!T` lower identically); the payload must be a value type (an
+error union over a *pointer* is deferred — a C# generic can't take a pointer arg);
+`catch`'s fallback must be side-effect-free; and `catch |e| …` capture, `catch return`,
+explicit `error{…}` set decls, and an error-union `main` are all deferred.
 
 ## Strictness — dotcc tracks Zig where it matters
 
@@ -163,4 +190,4 @@ rejects, not silently accept more.
   pinned `zig 0.16.0`.
 - **Examples** — `examples/zig-hello`, `examples/zig-extern` (putchar),
   `examples/zig-printf` (variadic printf), `examples/zig-optional` (`?T` / `null` /
-  `.?` / `orelse`).
+  `.?` / `orelse`), `examples/zig-errunion` (`!T` / `try` / `catch` / `error.X`).
