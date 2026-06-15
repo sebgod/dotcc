@@ -61,14 +61,20 @@ name: ci
 #                 export ABI works from C; LibraryModeTests only checks the managed
 #                 export metadata. Installs clang + zlib1g-dev (the NativeAOT linker
 #                 deps); opt-in via DOTCC_RUN_SHARED_LIB_ORACLE=1.
-#   zig-oracle  — the Zig front-end differential oracle (ubuntu-latest): compile +
-#                 run each .zig program with the REAL zig compiler and assert dotcc's
-#                 Zig path agrees on exit code AND stdout (extern-fn libc cases link
-#                 -lc). The zig install is FORKED (inlined download + sha256-verify +
-#                 version assert), never a third-party setup-zig action. Pinned to the
+#   zig-oracle  — the Zig front-end differential oracle (ubuntu-latest, x86_64):
+#                 compile + run each .zig program with the REAL zig compiler and assert
+#                 dotcc's Zig path agrees on exit code AND stdout (extern-fn libc cases
+#                 link -lc). The zig install is FORKED (inlined download + sha256-verify
+#                 + version assert), never a third-party setup-zig action. Pinned to the
 #                 DURABLE tagged release 0.16.0 (dev/master tarballs are GC'd off
 #                 ziglang.org/builds; the grammar tracks 0.17-dev but the test set is
 #                 stable-core syntax both accept). Opt-in via DOTCC_RUN_ZIG_ORACLE=1.
+#   zig-oracle-windows — the same differential on windows-latest (x86_64): exercises
+#                 zig's Windows `-lc` (MSVC CRT) link + the OS-agnostic ZigOracle
+#                 transport (direct zig spawn, no WSL hop). windows-11-arm is
+#                 deliberately omitted: zig 0.16.0's aarch64-windows build segfaults on
+#                 build-exe (the x86_64 build is fine) — arm64 emit/grammar coverage
+#                 still rides build-test-windows-arm64.
 
 on:
   push:
@@ -406,6 +412,63 @@ jobs:
           echo "zig version: $got"
           test "$got" = "${ZIG_VERSION}" || { echo "expected zig ${ZIG_VERSION}, got $got"; exit 1; }
 
+      - name: Restore
+        run: dotnet restore dotcc.sln
+
+      - name: Build (Release, NuGet path)
+        run: dotnet build dotcc.sln -c Release --no-restore --nologo -p:UseLocalLalrCc=false
+
+      - name: Zig differential oracle
+        run: >
+          dotnet test DotCC.FunctionalTests/DotCC.FunctionalTests.csproj
+          -c Release --no-build --nologo --filter "FullyQualifiedName~ZigOracleTests"
+
+  zig-oracle-windows:
+    # The Zig differential oracle on windows-latest (x86_64). ZigOracle is
+    # OS-agnostic (invokes zig DIRECTLY, no WSL hop), so the only difference from the
+    # Linux leg is the install (a .zip + Get-FileHash). Validates dotcc's Zig path AND
+    # zig's Windows `-lc` (MSVC CRT) link for the extern-fn case. Pinned x86_64-windows
+    # 0.16.0 (validated locally, 9/9). windows-11-arm is NOT added: zig 0.16.0's
+    # aarch64-windows build segfaults on build-exe (the x86_64 build is fine); arm64
+    # emit/grammar coverage stays in build-test-windows-arm64.
+    runs-on: windows-latest
+    env:
+      ZIG_VERSION: '0.16.0'
+      ZIG_SHA256: '68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e'
+      DOTCC_RUN_ZIG_ORACLE: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Install zig ${{ env.ZIG_VERSION }} (pinned + checksum-verified)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $asset = "zig-x86_64-windows-$env:ZIG_VERSION.zip"
+          $url = "https://ziglang.org/download/$env:ZIG_VERSION/$asset"
+          $zip = "$env:RUNNER_TEMP\zig.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $got = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $env:ZIG_SHA256) { throw "sha256 mismatch: got $got, expected $env:ZIG_SHA256" }
+          Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP\zig" -Force
+          # the zip contains a top-level zig-x86_64-windows-<ver>\ directory
+          Add-Content -Path $env:GITHUB_PATH -Value "$env:RUNNER_TEMP\zig\zig-x86_64-windows-$env:ZIG_VERSION"
+
+      - name: Verify zig present + exact version (fail rather than let the oracle skip)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $got = (zig version).Trim()
+          Write-Host "zig version: $got"
+          if ($got -ne $env:ZIG_VERSION) { throw "expected zig $env:ZIG_VERSION, got $got" }
+
+      # Same separate restore -> build --no-restore -> test --no-build structure as the
+      # other Windows jobs (keeps clear of the LALR.CC.dll copy-lock flake).
       - name: Restore
         run: dotnet restore dotcc.sln
 
