@@ -126,6 +126,9 @@ symbols:
   # --- error unions (Milestone B2; appended — never reorder) ---
   - 'catch'      # 82  `a catch b` — error-union handling (joins the OrElse level)
   - 'error'      # 83  `error.Foo` error-value literal keyword
+  # --- control flow (Milestone C1; appended — never reorder) ---
+  - 'break'      # 84  `break;` loop exit
+  - 'continue'   # 85  `continue;` loop next-iteration
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -202,6 +205,16 @@ productions:
   - derivation: none
     rules:
       - { lhs: Stmt, rhs: ['while', '(', Expr, ')', Stmt], action: stmtWhile }
+      # `while (cond) : (cont) body` — the continue-expression runs after each iteration
+      # (and on `continue`), exactly like C's `for(; cond; cont)`, so it lowers to the C IR
+      # `For` (no init). Zig's PEG: `WhilePrefix (COLON LPAREN AssignExpr RPAREN)? Block`. The
+      # cont is an AssignExpr, but our `Expr` cascade has no assignment, so the common
+      # `: (i = i + 1)` form gets its own production; a bare-expr cont (`: (step())`) the other.
+      # The `=` vs `)` after the inner Expr is a clean shift/reduce decision.
+      - { lhs: Stmt, rhs: ['while', '(', Expr, ')', ':', '(', Expr, '=', RhsExpr, ')', Stmt], action: stmtWhileContAssign }
+      - { lhs: Stmt, rhs: ['while', '(', Expr, ')', ':', '(', Expr, ')', Stmt],               action: stmtWhileCont }
+      - { lhs: Stmt, rhs: ['break', ';'],    action: stmtBreak }
+      - { lhs: Stmt, rhs: ['continue', ';'], action: stmtContinue }
       - { lhs: Stmt, rhs: ['return', RhsExpr, ';'],         action: stmtReturn }
       - { lhs: Stmt, rhs: ['return', ';'],                   action: stmtReturnVoid }
       - { lhs: Stmt, rhs: [VarDecl] }
@@ -386,6 +399,8 @@ lexer:
     - { symbol: 'null',   match: 'null' }
     - { symbol: 'catch',  match: 'catch' }
     - { symbol: 'error',  match: 'error' }
+    - { symbol: 'break',    match: 'break' }
+    - { symbol: 'continue', match: 'continue' }
 
     # Multi-char operators (longest-match handles overlaps; listed first for clarity).
     - { symbol: '==', match: '==' }

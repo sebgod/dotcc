@@ -244,4 +244,28 @@ public sealed class ZigFrontendTests
             "pub fn main() u8 { const x: u8 = 5; return try x; }\n"));
         ex.Message.ShouldContain("error-union");
     }
+
+    [Fact]
+    public void Lowers_while_continue_expression_to_a_for()
+    {
+        // `while (cond) : (cont) body` → the C IR `For` (no init), so the cont runs after
+        // each iteration AND on `continue` — exactly C's for-update semantics. The `i = i + 1`
+        // assignment cont becomes the for-post.
+        var cs = EmitZig(
+            "pub fn main() u8 { var i: u8 = 0; while (i < 10) : (i = i + 1) { } return i; }\n");
+        cs.ShouldContain("for (;");              // lowered to a for (no init)
+        cs.ShouldContain("i = (byte)(i + 1)");   // the continue-expression as the for-post
+    }
+
+    [Fact]
+    public void Lowers_break_and_continue()
+    {
+        // `break;` / `continue;` reuse the C IR loop-control nodes; the C# backend renders
+        // them verbatim. `continue` in a `while : (cont)` runs the cont (the for-post).
+        var cs = EmitZig(
+            "pub fn main() u8 { var i: u8 = 0; while (i < 10) : (i = i + 1) { " +
+            "if (i == 2) continue; if (i == 5) break; } return i; }\n");
+        cs.ShouldContain("continue;");
+        cs.ShouldContain("break;");
+    }
 }

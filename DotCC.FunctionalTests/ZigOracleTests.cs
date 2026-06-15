@@ -117,6 +117,17 @@ public sealed class ZigOracleTests
             "fn check(x: u8) !void { if (x == 0) return error.Zero; }\n" +
             "fn run(x: u8) !u8 { try check(x); return 9; }\n" +
             "pub fn main() u8 { return run(5) catch 0; }\n", 9, "" },
+        // CONTROL FLOW (Milestone C1). `while (cond) : (cont)` + `break` + `continue`.
+        // i: 0,1,2,(skip 3),4,5,6,(break at 7) → sum = 0+1+2+4+5+6 = 18. The cont (`i = i+1`)
+        // runs on `continue` too, so i still advances past 3.
+        new object[] { "loop_break_continue",
+            "pub fn main() u8 { var sum: u8 = 0; var i: u8 = 0; " +
+            "while (i < 10) : (i = i + 1) { if (i == 3) continue; if (i == 7) break; sum = sum + i; } " +
+            "return sum; }\n", 18, "" },
+        // A plain `while : (cont)` with no break/continue — counts 0..4 → 0+1+2+3+4 = 10.
+        new object[] { "loop_while_cont",
+            "pub fn main() u8 { var sum: u8 = 0; var i: u8 = 0; " +
+            "while (i < 5) : (i = i + 1) { sum = sum + i; } return sum; }\n", 10, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

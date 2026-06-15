@@ -248,6 +248,25 @@ internal sealed class ZigLowering
             case Zig.StmtIfElse f:      return new If(LowerExpr(f.Arg2), LowerStmt(f.Arg4), LowerStmt(f.Arg6));
             case Zig.StmtWhile w:       return new While(LowerExpr(w.Arg2), LowerStmt(w.Arg4));
 
+            // `while (cond) : (cont) body` → the C IR `For` (no init): the cont runs after each
+            // iteration AND on `continue`, exactly matching C's for-update — so `continue`
+            // inside the loop runs the cont, faithful to Zig. The assignment cont (`i = i + 1`)
+            // builds an Assign CExpr post (mirroring StmtAssign); the bare-expr cont a plain one.
+            case Zig.StmtWhileCont w:
+                return new For(null, LowerExpr(w.Arg2), LowerExpr(w.Arg6), LowerStmt(w.Arg8));
+            case Zig.StmtWhileContAssign w:
+            {
+                var post = LowerExpr(w.Arg6);
+                var postVal = LowerExpr(w.Arg8);
+                var postAssign = new Assign(null, post, postVal) { Type = post.Type };
+                return new For(null, LowerExpr(w.Arg2), postAssign, LowerStmt(w.Arg10));
+            }
+
+            // `break;` / `continue;` — reuse the C IR loop-control nodes (the C# backend
+            // renders them verbatim; valid inside the while/for forms above).
+            case Zig.StmtBreak:    return new Break();
+            case Zig.StmtContinue: return new Continue();
+
             // A brace block in statement position (`Stmt -> Block`, pass-through).
             case Zig.Block:
             case Zig.BlockEmpty:        return LowerBlock(stmt);

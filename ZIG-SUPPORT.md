@@ -67,12 +67,14 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | Feature | Status | Notes |
 |---|---|---|
 | `if (c) … else …` | ✅ | condition wrapped in `Cond.B(…)` for C-truthy semantics |
-| `while (c) …` | ✅ | (no payload / continue-expression yet) |
+| `while (c) …` | ✅ | (no payload capture yet) |
+| `while (c) : (cont) …` | ✅ | the continue-expression → the C IR `for`-post, so `continue` runs `cont` (faithful to Zig). The common assignment cont `: (i = i + 1)` and a bare-expr cont both parse |
+| `break;` / `continue;` | ✅ | unlabeled — reuse the C IR loop-control nodes (labeled `break :blk` deferred) |
 | `return e;` / `return;` | ✅ | |
 | `x = e;` assignment | ✅ | |
 | `_ = e;` discard | ✅ | Zig's mandatory discard of a non-void result |
 | block `{ … }` | ✅ | |
-| `for`, `switch`, `defer`/`errdefer`, labeled loops, `break`/`continue` | 🚫 | |
+| `for`, `switch`, `defer`/`errdefer`, labeled loops, labeled `break`/`continue` | 🚫 | (`for` / `switch` are the next slices) |
 
 ## Expressions
 
