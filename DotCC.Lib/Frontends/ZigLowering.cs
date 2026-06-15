@@ -2,6 +2,7 @@
 
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using DotCC.Ir;
 using LALR.CC.LexicalGrammar;
 
@@ -17,10 +18,20 @@ namespace DotCC.Frontends;
 /// the two frontends stay decoupled. Shared IR-construction helpers get extracted from
 /// <see cref="IrBuilder"/> only once this second implementer shows what's actually common.
 ///
-/// VERTICAL SLICE: just enough to compile <c>pub fn main() u8 { const x: u8 = 40;
-/// return x + 2; }</c> end-to-end (fn def, typed/untyped const, return, identifier,
-/// integer literal, +/-/* arithmetic). Everything else throws
-/// <see cref="IrUnsupportedException"/> — fail loudly, grow deliberately.
+/// SURFACE (grows deliberately; the grammar parses more than this lowers): functions
+/// with parameters; typed/untyped <c>const</c>/<c>var</c>; <c>return</c>; <c>if</c>/
+/// <c>while</c> statements and assignment; the <c>if</c>-expression (→ ternary); the
+/// full arithmetic / comparison / boolean / bitwise / shift / prefix operator set; and
+/// the fixed-width integer types mapped to their faithful C# signedness. Everything else
+/// throws <see cref="IrUnsupportedException"/> — fail loudly, grow deliberately.
+///
+/// SEMANTICS NOTE: Zig has no C-style implicit promotions — a valid Zig binary op has
+/// same-typed operands — but we reuse C's <see cref="CType.UsualArithmetic"/> for the
+/// result type anyway, because the C# BACKEND promotes identically (<c>u8 + u8</c> is
+/// <c>int</c> in C# too) and inserts the narrowing cast back at the typed sink. A
+/// comparison / boolean op is typed <see cref="CType.Int"/>: the backend renders it as
+/// an integer-valued <c>(CBool)(…)</c> and wraps every condition in <c>Cond.B(…)</c>,
+/// so an <c>int</c>-typed relational feeds <c>if</c>/<c>while</c>/ternary cleanly.
 /// </summary>
 internal sealed class ZigLowering
 {
@@ -38,7 +49,7 @@ internal sealed class ZigLowering
 
     public void Lower(Item root)
     {
-        foreach (var decl in Flatten(root, isDecls: true)) { LowerDecl(decl); }
+        foreach (var decl in Flatten(root)) { LowerDecl(decl); }
     }
 
     // ---- top level -------------------------------------------------------
@@ -59,21 +70,36 @@ internal sealed class ZigLowering
     private void LowerFn(Item nameTok, Item? paramsItem, Item retType, Item body)
     {
         var ret = LowerType(retType);
-        var paramTypes = new List<CType>();
-        // (slice: param list lowering deferred — main() takes none.)
-        if (paramsItem is not null) { throw new IrUnsupportedException("zig fn parameters not lowered yet (slice)"); }
+
+        // (name, type) for each parameter, in source order.
+        var paramInfos = new List<(string name, CType type)>();
+        if (paramsItem is not null)
+        {
+            foreach (var p in Flatten(paramsItem))
+            {
+                if (p.Content is not Zig.Param pm)
+                {
+                    throw new IrUnsupportedException("zig param: " + (p.Content?.GetType().Name ?? "null"));
+                }
+                paramInfos.Add((Tok(pm.Arg0), LowerType(pm.Arg2)));
+            }
+        }
 
         var funcSym = _symbols.Declare(new Symbol
         {
             Name = Tok(nameTok),
             Kind = SymKind.Func,
-            Type = new CType.Func(ret, paramTypes, false),
+            Type = new CType.Func(ret, paramInfos.Select(p => p.type).ToList(), false),
             IsGlobal = true,
         });
 
         _symbols.BeginFunction();
         _symbols.EnterScope();
-        var paramSyms = new List<Symbol>();
+        // Params share the function's top scope (a top-block redecl of a param name
+        // is an error in C; Zig likewise). Declare them before lowering the body.
+        var paramSyms = paramInfos
+            .Select(p => _symbols.Declare(new Symbol { Name = p.name, Kind = SymKind.Param, Type = p.type }))
+            .ToList();
         var blk = LowerBlock(body);
         _symbols.ExitScope();
 
@@ -89,7 +115,7 @@ internal sealed class ZigLowering
         {
             case Zig.BlockEmpty: break;
             case Zig.Block b:
-                foreach (var s in Flatten(b.Arg1, isDecls: false)) { stmts.Add(LowerStmt(s)); }
+                foreach (var s in Flatten(b.Arg1)) { stmts.Add(LowerStmt(s)); }
                 break;
             default: throw new IrUnsupportedException("zig block: " + (block.Content?.GetType().Name ?? "null"));
         }
@@ -107,6 +133,25 @@ internal sealed class ZigLowering
             case Zig.StmtReturn r:      return new Return(LowerExpr(r.Arg1));
             case Zig.StmtReturnVoid:    return new Return(null);
             case Zig.StmtExpr e:        return new ExprStmt(LowerExpr(e.Arg0));
+
+            // `x = value;`  → an assignment used as a statement.
+            case Zig.StmtAssign a:
+            {
+                var target = LowerExpr(a.Arg0);
+                var value = LowerExpr(a.Arg2);
+                return new ExprStmt(new Assign(null, target, value) { Type = target.Type });
+            }
+
+            // if (cond) then [else else]  — `then`/`else`/`body` are themselves Stmts
+            // (a single statement or a brace Block), which LowerStmt handles uniformly.
+            case Zig.StmtIf f:          return new If(LowerExpr(f.Arg2), LowerStmt(f.Arg4), null);
+            case Zig.StmtIfElse f:      return new If(LowerExpr(f.Arg2), LowerStmt(f.Arg4), LowerStmt(f.Arg6));
+            case Zig.StmtWhile w:       return new While(LowerExpr(w.Arg2), LowerStmt(w.Arg4));
+
+            // A brace block in statement position (`Stmt -> Block`, pass-through).
+            case Zig.Block:
+            case Zig.BlockEmpty:        return LowerBlock(stmt);
+
             default: throw new IrUnsupportedException("zig statement: " + (stmt.Content?.GetType().Name ?? "null"));
         }
     }
@@ -140,17 +185,74 @@ internal sealed class ZigLowering
                 return new VarRef(sym) { Type = sym.Type, IsLValue = sym.Kind is SymKind.Var or SymKind.Param };
             }
             case Zig.Grouped g: { var inner = LowerExpr(g.Arg1); return new Paren(inner) { Type = inner.Type }; }
+
+            // if (cond) a else b  — the if-EXPRESSION, lowered to a ternary. Both
+            // branches are RhsExpr; the backend wraps the condition in Cond.B.
+            case Zig.IfExpr e:
+            {
+                var then = LowerExpr(e.Arg4);
+                return new CondExpr(LowerExpr(e.Arg2), then, LowerExpr(e.Arg6)) { Type = then.Type };
+            }
+
+            // arithmetic
             case Zig.Add a:     return Bin(BinOp.Add, a.Arg0, a.Arg2);
             case Zig.Sub a:     return Bin(BinOp.Sub, a.Arg0, a.Arg2);
             case Zig.Mul a:     return Bin(BinOp.Mul, a.Arg0, a.Arg2);
             case Zig.DivOp a:   return Bin(BinOp.Div, a.Arg0, a.Arg2);
             case Zig.ModOp a:   return Bin(BinOp.Mod, a.Arg0, a.Arg2);
+            // comparison (non-associative in the grammar)
+            case Zig.CmpEq a:   return Bin(BinOp.Eq, a.Arg0, a.Arg2);
+            case Zig.CmpNe a:   return Bin(BinOp.Ne, a.Arg0, a.Arg2);
+            case Zig.CmpLt a:   return Bin(BinOp.Lt, a.Arg0, a.Arg2);
+            case Zig.CmpGt a:   return Bin(BinOp.Gt, a.Arg0, a.Arg2);
+            case Zig.CmpLe a:   return Bin(BinOp.Le, a.Arg0, a.Arg2);
+            case Zig.CmpGe a:   return Bin(BinOp.Ge, a.Arg0, a.Arg2);
+            // boolean (short-circuit)
+            case Zig.BoolOr a:  return Bin(BinOp.LogOr, a.Arg0, a.Arg2);
+            case Zig.BoolAnd a: return Bin(BinOp.LogAnd, a.Arg0, a.Arg2);
+            // bitwise / shift
+            case Zig.BitAnd a:  return Bin(BinOp.BitAnd, a.Arg0, a.Arg2);
+            case Zig.BitXor a:  return Bin(BinOp.BitXor, a.Arg0, a.Arg2);
+            case Zig.BitOr a:   return Bin(BinOp.BitOr, a.Arg0, a.Arg2);
+            case Zig.Shl a:     return Bin(BinOp.Shl, a.Arg0, a.Arg2);
+            case Zig.Shr a:     return Bin(BinOp.Shr, a.Arg0, a.Arg2);
+            // value prefix
+            case Zig.PreNeg p:    return Pre(UnOp.Neg, p.Arg1);
+            case Zig.PreBitNot p: return Pre(UnOp.BitNot, p.Arg1);
+            case Zig.PreNot p:    return Pre(UnOp.LogNot, p.Arg1);
+            case Zig.PreAddrOf:   throw new IrUnsupportedException("zig `&` address-of not lowered yet");
+            case Zig.PreTry:      throw new IrUnsupportedException("zig `try` not lowered yet (needs error unions)");
+
             default: throw new IrUnsupportedException("zig expression: " + (expr.Content?.GetType().Name ?? "null"));
         }
     }
 
-    private CExpr Bin(BinOp op, Item l, Item r) =>
-        new Binary(op, LowerExpr(l), LowerExpr(r)) { Type = CType.Int };
+    /// <summary>Lower a binary op, synthesizing the result type the way the C# backend
+    /// will treat it: usual-arithmetic for arithmetic/bitwise, the promoted left type
+    /// for a shift (operands promote independently), and <c>int</c> for a relational /
+    /// boolean (the backend renders those as an integer-valued <c>(CBool)(…)</c>).</summary>
+    private CExpr Bin(BinOp op, Item l, Item r)
+    {
+        var left = LowerExpr(l);
+        var right = LowerExpr(r);
+        var type = op switch
+        {
+            BinOp.Eq or BinOp.Ne or BinOp.Lt or BinOp.Gt or BinOp.Le or BinOp.Ge
+                or BinOp.LogAnd or BinOp.LogOr => CType.Int,
+            BinOp.Shl or BinOp.Shr => CType.IntegerPromote(left.Type),
+            _ => CType.UsualArithmetic(left.Type, right.Type),
+        };
+        return new Binary(op, left, right) { Type = type };
+    }
+
+    /// <summary>Lower a value-prefix unary op. <c>!x</c> yields an int (the backend
+    /// renders it 0/1); <c>-x</c>/<c>~x</c> take the integer-promoted operand type.</summary>
+    private CExpr Pre(UnOp op, Item operandItem)
+    {
+        var operand = LowerExpr(operandItem);
+        var type = op == UnOp.LogNot ? CType.Int : CType.IntegerPromote(operand.Type);
+        return new Unary(op, operand) { Type = type };
+    }
 
     // ---- types -----------------------------------------------------------
 
@@ -160,22 +262,41 @@ internal sealed class ZigLowering
         _ => throw new IrUnsupportedException("zig type: " + (type.Content?.GetType().Name ?? "null")),
     };
 
-    // Slice subset; 8-bit signedness is deferred (both map to C# byte for now).
+    /// <summary>Map a Zig primitive type name to its faithful C# lowering. The
+    /// fixed-width integers carry real signedness (i8 → <c>sbyte</c>, u8 → <c>byte</c>,
+    /// …), unlike the earlier slice that collapsed both 8-bit forms to <c>byte</c>.
+    /// <c>usize</c>/<c>isize</c> map to the LP64 64-bit <c>size_t</c>/<c>long</c>
+    /// (width-correct on dotcc's target; a dedicated pointer-width type is a later
+    /// refinement). <c>comptime_int</c>/<c>comptime_float</c> and the bigger/arbitrary
+    /// <c>iN</c>/<c>uN</c> widths are deferred.</summary>
     private static CType LowerPrim(string name) => name switch
     {
-        "i8" or "u8" => CType.Char,   // → C# byte
+        "void" => CType.Void,
+        "bool" => CType.Bool,
+        "i8"  => CType.SChar,    // → C# sbyte
+        "u8"  => CType.UChar,    // → C# byte
+        "i16" => CType.Short,
+        "u16" => CType.UShort,
         "i32" => CType.Int,
         "u32" => CType.UInt,
         "i64" => CType.Long,
+        "u64" => CType.ULong,
+        "isize" => CType.Long,   // LP64: pointer-width signed
+        "usize" => CType.ULong,  // LP64: pointer-width unsigned (== size_t)
+        "f32" => CType.Float,
+        "f64" => CType.Double,
         _ => throw new IrUnsupportedException($"zig type '{name}' not supported yet (slice)"),
     };
 
     // ---- helpers ---------------------------------------------------------
 
-    /// <summary>Flatten a left-/right-recursive list (Decls or Stmts) into source
+    /// <summary>Flatten a left-recursive list spine (Decls / Stmts / Params) into source
     /// order with an explicit stack — same anti-stack-overflow walk as
-    /// <see cref="IrBuilder"/>'s <c>FlattenFns</c>.</summary>
-    private static List<Item> Flatten(Item it, bool isDecls)
+    /// <see cref="IrBuilder"/>'s <c>FlattenFns</c>. The cons/one node types are disjoint
+    /// across the three list kinds, and the walk stops at the first non-list node (so a
+    /// nested Block's own Stmts aren't pulled into the parent), so one method serves all
+    /// three with no cross-contamination.</summary>
+    private static List<Item> Flatten(Item it)
     {
         var stack = new Stack<Item>();
         stack.Push(it);
@@ -185,10 +306,12 @@ internal sealed class ZigLowering
             var n = stack.Pop();
             switch (n.Content)
             {
-                case Zig.DeclsCons c when isDecls: stack.Push(c.Arg1); stack.Push(c.Arg0); break;
-                case Zig.DeclsOne o when isDecls:  stack.Push(o.Arg0); break;
-                case Zig.StmtsCons c when !isDecls: stack.Push(c.Arg1); stack.Push(c.Arg0); break;
-                case Zig.StmtsOne o when !isDecls:  stack.Push(o.Arg0); break;
+                case Zig.DeclsCons c:  stack.Push(c.Arg1); stack.Push(c.Arg0); break;  // [Decl, Decls]
+                case Zig.DeclsOne o:   stack.Push(o.Arg0); break;
+                case Zig.StmtsCons c:  stack.Push(c.Arg1); stack.Push(c.Arg0); break;  // [Stmt, Stmts]
+                case Zig.StmtsOne o:   stack.Push(o.Arg0); break;
+                case Zig.ParamsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [Param, ',', Params]
+                case Zig.ParamsOne o:  stack.Push(o.Arg0); break;
                 default: ordered.Add(n); break;
             }
         }
