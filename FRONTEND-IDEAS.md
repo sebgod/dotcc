@@ -222,20 +222,37 @@ table** — simply doesn't exist in Zig:
   contextual-keyword soup.** So Zig needs **zero `RewritingTokenStream` stages** —
   not even the one C requires. A strictly lighter front than the C frontend we ship.
 - The only friction is mechanical PEG→LALR translation: a handful of bounded
-  shift/reduce conflicts (`|capture|` vs binary `|`, labeled blocks `label:`,
-  `.{…}` anon-init vs `{` block, expr-vs-stmt `if`/`switch`) that resolve with
-  precedence + one-token lookahead — **none need the symbol table.**
+  shift/reduce conflicts that resolve with precedence + one-token lookahead — **none
+  need the symbol table.**
 
-So the M0 grammar spike the plan flagged as risk #1 is substantially **de-risked**:
-the v1 subset is *more* tractable than the C grammar already in production, not less.
+**M0 grammar spike — ✅ DONE (validated empirically, not just argued).** A slice-1
+hand translation of Zig's C-shaped value/type core generates **clean LALR(1) tables —
+zero shift/reduce or reduce/reduce conflicts**, parses real Zig (functions, pointer/
+optional types, error-union returns, calls, field chains, `.*`/`.?`, if/else, while)
+through the real `BytesLexer → Parser.ParseInput` pipeline, and rejects faithfully
+(the non-associative `a < b < c`) — with **zero `RewritingTokenStream` stages**. The
+feared part — Zig's *unified* value/type grammar, where `*` `&` `[` `!` `.` each pull
+double duty (operand-position type/prefix vs after-operand binary/postfix) — separates
+purely by **parser state**, no precedence hacks beyond the cascade + a `rightmost`
+dangling-else group. So the v1 subset is *more* tractable than the C grammar in
+production — now confirmed, not conjectured. Lives as a conflict regression in
+**LALR.CC `examples/Zig/`** (PR #4 → SharpAstro/LALR.CC; grammar frozen + pinned to
+`ziglang/zig` `3391ad7a`, oracle `zig 0.17.0-dev.667`).
 
-**The two real open items, and their status:**
+**The real open items, and their status:**
 
-1. **The frontend seam (M0).** `ITarget` exists (the M-axis: `cs`, `wat`); there is
-   **no `IFrontend` yet** (verified — only `ITarget` in `Ir/Target.cs`). Extracting
-   it (C pipeline behind it, byte-identical) is pure refactoring but it is the genuine
-   **unstarted prerequisite** — nothing Zig happens before it.
-2. **comptime.** The plan scopes v1 comptime to **const-folding only**, and *that*
+1. **The remaining grammar risk — `!ExprSuffix` / `!BlockExpr`.** Slice 1 deliberately
+   deferred control-flow *as expressions* (`if`/`for`/`while`/`switch` exprs), which
+   PEG gates with **negative-lookahead predicates** — the one genuine PEG-ism, where
+   LALR can't say "this alternative only if *not* followed by an operator." Whether
+   that translates (precedence) or forces an over-accept + semantic check is the next
+   real test; everything else in the grammar is now known-clean.
+2. **The frontend seam (M0's other half).** `ITarget` exists (the M-axis: `cs`, `wat`);
+   there is **no `IFrontend` yet** (verified — only `ITarget` in `Ir/Target.cs`).
+   Extracting it (C pipeline behind it, byte-identical) is pure refactoring, and with
+   the grammar spike done it's now the **gating prerequisite** to stand up the
+   production Zig frontend *in dotcc*.
+3. **comptime.** The plan scopes v1 comptime to **const-folding only**, and *that*
    has a concrete, independently-valuable build-up path — see below.
 
 ### Doing C23 `constexpr` first — the const-eval bridge to comptime ⭐
@@ -324,11 +341,16 @@ GC** (as in 3b) — native blobs, never GC objects; Zig has no ARC, so no ARC-vs
 tension. Net: unify C + Zig allocation, make the ASan swap principled and
 arena-extensible, and the Zig allocator story falls out for free.
 
-**Status:** parked, but **less parked than it was.** The IR was already designed to
-need zero generalization for v1; the grammar is now known to be cheaper than C's; and
-the comptime blocker has a real on-ramp via C23 `constexpr`. What remains genuinely
-unstarted is the M0 `IFrontend` seam. Recent struct/union/bit-field MSVC-faithful
-packing also quietly helps (extern-struct fidelity + the slice `{ptr,len}` fat-struct).
+**Status: un-parked — moving to implementation.** The grammar question is answered
+(M0 spike done, LALR.CC PR #4: slice-1 LALR(1)-clean, parses real Zig, zero rewriting
+stages); the IR was already designed for zero v1 generalization; the comptime blocker
+has a real on-ramp via C23 `constexpr`; and recent struct/union/bit-field MSVC-faithful
+packing quietly helps (extern-struct fidelity + the slice `{ptr,len}` fat-struct). The
+remaining gates, in order: **(1)** extract the `IFrontend` seam (byte-identical C
+pipeline behind it); **(2)** port the production grammar into dotcc and push it through
+slice 2 (`!ExprSuffix` control-flow-as-expr); **(3)** lower to IR + `@cImport`
+composition; comptime as const-fold. The LALR.CC `examples/Zig` spike stays as the
+isolated conflict regression; the real grammar + frontend live here in dotcc.
 
 ---
 
