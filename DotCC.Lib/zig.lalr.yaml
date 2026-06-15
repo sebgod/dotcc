@@ -111,6 +111,9 @@ symbols:
   # --- terminals: ignored ---
   - WS           # 72
   - LINE_COMMENT # 73
+  # --- slice 2a: control-flow as expression (appended — never reorder) ---
+  - RhsExpr      # 74  value-position expression: Expr | IfExpr (init/return/branch)
+  - IfExpr       # 75  if (Expr) RhsExpr else RhsExpr — the if-expression
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -153,10 +156,10 @@ productions:
   # blocks (Stmt).
   - derivation: none
     rules:
-      - { lhs: VarDecl, rhs: ['const', IDENT, '=', Expr, ';'],            action: constDecl }
-      - { lhs: VarDecl, rhs: ['const', IDENT, ':', Type, '=', Expr, ';'], action: constDeclTyped }
-      - { lhs: VarDecl, rhs: ['var', IDENT, '=', Expr, ';'],             action: varDecl }
-      - { lhs: VarDecl, rhs: ['var', IDENT, ':', Type, '=', Expr, ';'],  action: varDeclTyped }
+      - { lhs: VarDecl, rhs: ['const', IDENT, '=', RhsExpr, ';'],            action: constDecl }
+      - { lhs: VarDecl, rhs: ['const', IDENT, ':', Type, '=', RhsExpr, ';'], action: constDeclTyped }
+      - { lhs: VarDecl, rhs: ['var', IDENT, '=', RhsExpr, ';'],             action: varDecl }
+      - { lhs: VarDecl, rhs: ['var', IDENT, ':', Type, '=', RhsExpr, ';'],  action: varDeclTyped }
 
   - derivation: none
     rules:
@@ -177,10 +180,10 @@ productions:
   - derivation: none
     rules:
       - { lhs: Stmt, rhs: ['while', '(', Expr, ')', Stmt], action: stmtWhile }
-      - { lhs: Stmt, rhs: ['return', Expr, ';'],            action: stmtReturn }
+      - { lhs: Stmt, rhs: ['return', RhsExpr, ';'],         action: stmtReturn }
       - { lhs: Stmt, rhs: ['return', ';'],                   action: stmtReturnVoid }
       - { lhs: Stmt, rhs: [VarDecl] }
-      - { lhs: Stmt, rhs: [Expr, '=', Expr, ';'],            action: stmtAssign }
+      - { lhs: Stmt, rhs: [Expr, '=', RhsExpr, ';'],         action: stmtAssign }
       - { lhs: Stmt, rhs: [Expr, ';'],                        action: stmtExpr }
       - { lhs: Stmt, rhs: [Block] }
 
@@ -188,6 +191,27 @@ productions:
   - derivation: none
     rules:
       - { lhs: Expr, rhs: [BoolOr] }
+
+  # ===== slice 2a: control-flow as expression =====
+  # A value-position expression is either an operator-expression (the cascade,
+  # Expr) or a control-flow expression (IfExpr). Disjoint first sets — the cascade
+  # never starts with `if`, so no R/R conflict. Crucially IfExpr is NOT in the
+  # cascade (not a Primary), so a control-flow expr can never be a binary SUB-operand
+  # — which reproduces Zig's `!ExprSuffix` rule WITHOUT a predicate: the branches are
+  # greedy RhsExpr, so any trailing operator is absorbed into the branch by the normal
+  # cascade (`if c a else b + d` → `if c a else (b + d)`), and the cascade has already
+  # consumed every operator before RhsExpr → Expr reduces, so there's no operator
+  # left over to apply to the if-expr. (Deferred: `a + if (c) x else y`, i.e. an
+  # if-expr as an arbitrary binary sub-operand, which Zig allows; here it needs parens.
+  # Also deferred: while/for/switch expressions, if-without-else.)
+  - derivation: none
+    rules:
+      - { lhs: RhsExpr, rhs: [Expr] }
+      - { lhs: RhsExpr, rhs: [IfExpr] }
+
+  - derivation: none
+    rules:
+      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', RhsExpr, 'else', RhsExpr], action: ifExpr }
 
   - derivation: leftmost
     rules:
