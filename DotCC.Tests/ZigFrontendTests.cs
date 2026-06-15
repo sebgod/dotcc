@@ -80,4 +80,14 @@ public sealed class ZigFrontendTests
         cs.ShouldContain("? ");
         cs.ShouldContain(" : ");
     }
+
+    [Fact]
+    public void Lowers_a_function_call_including_forward_reference()
+    {
+        // main calls add, which is defined AFTER it — the two-pass lowering declares
+        // every signature before lowering any body, so the forward reference resolves.
+        var cs = EmitZig("pub fn main() u8 { return add(40, 2); }\nfn add(a: u8, b: u8) u8 { return a + b; }\n");
+        cs.ShouldContain("add(40, 2)");           // the call site (fitting constants aren't cast)
+        cs.ShouldContain("add(byte a, byte b)");  // the callee signature
+    }
 }

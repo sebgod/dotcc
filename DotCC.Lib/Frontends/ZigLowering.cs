@@ -49,25 +49,32 @@ internal sealed class ZigLowering
 
     public void Lower(Item root)
     {
-        foreach (var decl in Flatten(root)) { LowerDecl(decl); }
+        // Two passes so a call can forward-reference: Zig has no prototypes, and a
+        // function may call one defined later in the file. Pass 1 declares every
+        // signature in the (global) scope; pass 2 lowers each body against them.
+        var entries = new List<(Symbol sym, List<(string name, CType type)> ps, Item body)>();
+        foreach (var decl in Flatten(root))
+        {
+            var d = decl.Content is Zig.PubFn p ? p.Arg1 : decl;   // unwrap `pub`
+            entries.Add(d.Content switch
+            {
+                Zig.FnDef f          => DeclareFn(f.Arg1, f.Arg3, f.Arg5, f.Arg6),
+                Zig.FnDefNoArgs f    => DeclareFn(f.Arg1, null, f.Arg4, f.Arg5),
+                Zig.FnDefErr f       => DeclareFn(f.Arg1, f.Arg3, f.Arg6, f.Arg7),   // `!T` return — error union deferred, use T
+                Zig.FnDefNoArgsErr f => DeclareFn(f.Arg1, null, f.Arg5, f.Arg6),
+                _ => throw new IrUnsupportedException("zig top-level decl: " + (d.Content?.GetType().Name ?? "null")),
+            });
+        }
+        foreach (var (sym, ps, body) in entries) { LowerFnBody(sym, ps, body); }
     }
 
     // ---- top level -------------------------------------------------------
 
-    private void LowerDecl(Item decl)
-    {
-        switch (decl.Content)
-        {
-            case Zig.PubFn p:            LowerDecl(p.Arg1); break;            // unwrap `pub`
-            case Zig.FnDef f:            LowerFn(f.Arg1, f.Arg3, f.Arg5, f.Arg6); break;
-            case Zig.FnDefNoArgs f:      LowerFn(f.Arg1, null, f.Arg4, f.Arg5); break;
-            case Zig.FnDefErr f:         LowerFn(f.Arg1, f.Arg3, f.Arg6, f.Arg7); break;   // `!T` return — error union deferred, use T
-            case Zig.FnDefNoArgsErr f:   LowerFn(f.Arg1, null, f.Arg5, f.Arg6); break;
-            default: throw new IrUnsupportedException("zig top-level decl: " + (decl.Content?.GetType().Name ?? "null"));
-        }
-    }
-
-    private void LowerFn(Item nameTok, Item? paramsItem, Item retType, Item body)
+    /// <summary>Pass 1: declare a function's signature (return + parameter types) in
+    /// the global scope and bundle its body for pass 2. Declaring all signatures up
+    /// front is what lets a call forward-reference a function defined later.</summary>
+    private (Symbol sym, List<(string name, CType type)> ps, Item body) DeclareFn(
+        Item nameTok, Item? paramsItem, Item retType, Item body)
     {
         var ret = LowerType(retType);
 
@@ -92,11 +99,16 @@ internal sealed class ZigLowering
             Type = new CType.Func(ret, paramInfos.Select(p => p.type).ToList(), false),
             IsGlobal = true,
         });
+        return (funcSym, paramInfos, body);
+    }
 
+    /// <summary>Pass 2: lower a function body. Params share the function's top scope
+    /// (a top-block redecl of a param name is an error in C; Zig likewise), so they
+    /// are declared inside the function scope before the body.</summary>
+    private void LowerFnBody(Symbol funcSym, List<(string name, CType type)> paramInfos, Item body)
+    {
         _symbols.BeginFunction();
         _symbols.EnterScope();
-        // Params share the function's top scope (a top-block redecl of a param name
-        // is an error in C; Zig likewise). Declare them before lowering the body.
         var paramSyms = paramInfos
             .Select(p => _symbols.Declare(new Symbol { Name = p.name, Kind = SymKind.Param, Type = p.type }))
             .ToList();
@@ -223,8 +235,47 @@ internal sealed class ZigLowering
             case Zig.PreAddrOf:   throw new IrUnsupportedException("zig `&` address-of not lowered yet");
             case Zig.PreTry:      throw new IrUnsupportedException("zig `try` not lowered yet (needs error unions)");
 
+            // call of a named function (bare-identifier callee).
+            case Zig.CallArgs c:   return LowerCall(c.Arg0, c.Arg2);
+            case Zig.CallNoArgs c: return LowerCall(c.Arg0, null);
+
             default: throw new IrUnsupportedException("zig expression: " + (expr.Content?.GetType().Name ?? "null"));
         }
+    }
+
+    /// <summary>Lower a call. V1: only a bare-identifier callee bound to a named
+    /// function → an IR <see cref="Call"/> carrying the callee's parameter types (so
+    /// the backend coerces each argument as C does at a call) and the resolved symbol
+    /// (so it emits the legalized target name). A computed / member callee
+    /// (<c>c.printf</c>, a function pointer) is deferred — member calls come with
+    /// <c>@cImport</c>.</summary>
+    private CExpr LowerCall(Item calleeItem, Item? argListItem)
+    {
+        if (calleeItem.Content is not Zig.Ident id)
+        {
+            throw new IrUnsupportedException("zig call: only a bare-identifier callee is lowered yet (got "
+                + (calleeItem.Content?.GetType().Name ?? "null") + ")");
+        }
+        var name = Tok(id.Arg0);
+        var sym = _symbols.Resolve(name)
+            ?? throw new IrUnsupportedException($"call to unresolved name '{name}'");
+        if (sym.Type.Unqualified is not CType.Func fn)
+        {
+            throw new IrUnsupportedException($"'{name}' is not a function (indirect / fn-ptr calls deferred)");
+        }
+
+        var args = new List<CExpr>();
+        if (argListItem is not null)
+        {
+            foreach (var a in Flatten(argListItem)) { args.Add(LowerExpr(a)); }
+        }
+        if (args.Count != fn.Params.Count)
+        {
+            throw new IrUnsupportedException(
+                $"call to '{name}': expected {fn.Params.Count} argument(s), got {args.Count}");
+        }
+
+        return new Call(name, args, fn.Params, sym) { Type = fn.Return };
     }
 
     /// <summary>Lower a binary op, synthesizing the result type the way the C# backend
@@ -290,12 +341,12 @@ internal sealed class ZigLowering
 
     // ---- helpers ---------------------------------------------------------
 
-    /// <summary>Flatten a left-recursive list spine (Decls / Stmts / Params) into source
-    /// order with an explicit stack — same anti-stack-overflow walk as
+    /// <summary>Flatten a left-recursive list spine (Decls / Stmts / Params / ArgList)
+    /// into source order with an explicit stack — same anti-stack-overflow walk as
     /// <see cref="IrBuilder"/>'s <c>FlattenFns</c>. The cons/one node types are disjoint
-    /// across the three list kinds, and the walk stops at the first non-list node (so a
+    /// across the four list kinds, and the walk stops at the first non-list node (so a
     /// nested Block's own Stmts aren't pulled into the parent), so one method serves all
-    /// three with no cross-contamination.</summary>
+    /// four with no cross-contamination.</summary>
     private static List<Item> Flatten(Item it)
     {
         var stack = new Stack<Item>();
@@ -312,6 +363,8 @@ internal sealed class ZigLowering
                 case Zig.StmtsOne o:   stack.Push(o.Arg0); break;
                 case Zig.ParamsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [Param, ',', Params]
                 case Zig.ParamsOne o:  stack.Push(o.Arg0); break;
+                case Zig.ArgsCons c:   stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [Expr, ',', ArgList]
+                case Zig.ArgsOne o:    stack.Push(o.Arg0); break;
                 default: ordered.Add(n); break;
             }
         }

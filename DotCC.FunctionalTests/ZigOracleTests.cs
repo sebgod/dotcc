@@ -58,12 +58,17 @@ public sealed class ZigOracleTests
             "pub fn main() u8 { var i: u8 = 0; var sum: u8 = 0; while (i < 5) { sum = sum + i; i = i + 1; } return sum; }\n", 10 },
         new object[] { "bitnot",
             "pub fn main() u8 { const a: u8 = 0; const b: u8 = ~a; return b; }\n", 255 },
-        // i64 parameters: `wide` is defined (and type-checked by dotcc's emit +
-        // Roslyn) with the wider signedness that the UsualArithmetic fix preserves;
-        // main is the runnable observable. Calls aren't lowered yet, so wide stays
-        // uncalled.
+        // i64 parameters: `wide` is type-checked by dotcc's emit + Roslyn with the
+        // wider signedness the UsualArithmetic fix preserves; main is the observable.
         new object[] { "i64_params",
             "fn wide(a: i64, b: i64) i64 { return a * b; }\npub fn main() u8 { return 42; }\n", 42 },
+        // A function CALL — main invokes a named function with arguments.
+        new object[] { "call",
+            "fn add(a: u8, b: u8) u8 { return a + b; }\npub fn main() u8 { return add(40, 2); }\n", 42 },
+        // A FORWARD-referenced call — `add` is defined AFTER `main` (Zig has no
+        // prototypes); the two-pass lowering must resolve it.
+        new object[] { "call_forward",
+            "pub fn main() u8 { return add(40, 2); }\nfn add(a: u8, b: u8) u8 { return a + b; }\n", 42 },
     };
 
     [Theory]
