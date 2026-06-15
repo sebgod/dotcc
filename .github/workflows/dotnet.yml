@@ -62,13 +62,13 @@ name: ci
 #                 export metadata. Installs clang + zlib1g-dev (the NativeAOT linker
 #                 deps); opt-in via DOTCC_RUN_SHARED_LIB_ORACLE=1.
 #   zig-oracle  — the Zig front-end differential oracle (ubuntu-latest): compile +
-#                 run a .zig program with the REAL zig compiler and assert dotcc's
-#                 Zig path agrees. The zig install is FORKED (inlined download +
-#                 sha256-verify + version assert), never a third-party setup-zig
-#                 action. DORMANT (workflow_dispatch only) until the Zig front-end
-#                 can print — today the slice is exit-code-only, so there is little
-#                 to differentially diff; flip it to push/PR at @cImport. Opt-in via
-#                 DOTCC_RUN_ZIG_ORACLE=1.
+#                 run each .zig program with the REAL zig compiler and assert dotcc's
+#                 Zig path agrees on exit code AND stdout (extern-fn libc cases link
+#                 -lc). The zig install is FORKED (inlined download + sha256-verify +
+#                 version assert), never a third-party setup-zig action. Pinned to the
+#                 DURABLE tagged release 0.16.0 (dev/master tarballs are GC'd off
+#                 ziglang.org/builds; the grammar tracks 0.17-dev but the test set is
+#                 stable-core syntax both accept). Opt-in via DOTCC_RUN_ZIG_ORACLE=1.
 
 on:
   push:
@@ -352,33 +352,29 @@ jobs:
           --filter "FullyQualifiedName~SharedLibOracleTests|FullyQualifiedName~NativeImportOracleTests"
 
   zig-oracle:
-    # Zig front-end differential oracle (sketch — dormant until @cImport).
-    # Compile + run a .zig program with the real zig compiler and assert dotcc's
-    # Zig path agrees. ZigOracle invokes zig DIRECTLY (no shell / no WSL hop —
-    # zig is a self-contained native binary on every host), so the same oracle
-    # the maintainer runs locally on win-arm64 runs here on Linux.
+    # Zig front-end differential oracle. Compile + run each .zig program with the
+    # real zig compiler and assert dotcc's Zig path agrees on BOTH exit code and
+    # stdout. ZigOracle invokes zig DIRECTLY (no shell / no WSL hop — zig is a
+    # self-contained native binary on every host), so the same oracle the maintainer
+    # runs locally on win-arm64 runs here on Linux; extern-fn libc cases link -lc.
     #
     # FORKED, not `mlugg/setup-zig@v2`: we never reference a third-party action —
-    # the install is inlined below (download + sha256-verify + assert version),
-    # the same pin-and-assert recipe as the wabt step in wat-oracle. (Maintainer
+    # the install is inlined below (download + sha256-verify + assert version), the
+    # same pin-and-assert recipe as the wabt step in wat-oracle. (Maintainer
     # preference: don't depend on actions you don't control.)
     #
-    # DORMANT: workflow_dispatch only, because today's Zig slice is exit-code-only
-    # — there is no stdout to differentially diff yet. To turn it on at @cImport:
-    #   1. fill ZIG_SHA256 (`sha256sum` of the pinned tarball),
-    #   2. confirm the asset name/URL against https://ziglang.org/download/,
-    #   3. add `push`/`pull_request` triggering (drop the `if` guard).
-    #
-    # REPRODUCIBILITY CAVEAT: the grammar is pinned to a zig *dev* build
-    # (0.17.0-dev.667+0569f1f6a). Dev tarballs are garbage-collected off
-    # ziglang.org/builds once master advances, so this URL WILL eventually 404 —
-    # bump to a tagged release (0.17.0 when it ships) for a durable pin, or
-    # self-host the tarball.
-    if: ${{ github.event_name == 'workflow_dispatch' }}
+    # PIN: the DURABLE tagged release 0.16.0. Tagged-release tarballs never rot;
+    # dev/master builds are GC'd off ziglang.org/builds within days (our former
+    # 0.17-dev.667 pin is already gone from the index), so a dev pin would break CI.
+    # The GRAMMAR tracks zig 0.17-dev (syntax faithfulness); the oracle only needs a
+    # zig that compiles + runs the same OBSERVABLE programs, and the test set uses the
+    # stable core (fn/const/var/if/while/extern-fn/operators) that 0.16.0 and 0.17-dev
+    # accept identically. Bump (version + shasum from the download index) when a test
+    # needs newer syntax.
     runs-on: ubuntu-latest
     env:
-      ZIG_VERSION: '0.17.0-dev.667+0569f1f6a'
-      ZIG_SHA256: 'REPLACE_WITH_SHA256_OF_THE_PINNED_TARBALL'
+      ZIG_VERSION: '0.16.0'
+      ZIG_SHA256: '70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00'
       DOTCC_RUN_ZIG_ORACLE: '1'
     steps:
       - name: Checkout
@@ -392,11 +388,10 @@ jobs:
       - name: Install zig ${{ env.ZIG_VERSION }} (pinned + checksum-verified)
         run: |
           set -euo pipefail
-          # Asset naming: 0.14+ master builds are `zig-x86_64-linux-<ver>.tar.xz`
-          # (arch-first). Older builds used `zig-linux-x86_64-<ver>` — confirm
-          # against https://ziglang.org/download/ when wiring this live.
+          # Tagged-release asset (arch-first naming, confirmed against the download
+          # index). A tagged release lives under /download/<ver>/, not /builds/.
           asset="zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
-          url="https://ziglang.org/builds/${asset}"
+          url="https://ziglang.org/download/${ZIG_VERSION}/${asset}"
           curl -fsSL "$url" -o "/tmp/${asset}"
           echo "${ZIG_SHA256}  /tmp/${asset}" | sha256sum -c -
           mkdir -p /tmp/zig
