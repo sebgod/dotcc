@@ -79,7 +79,7 @@ genuinely **context-sensitive** → expensive (hand-RD) or impossible via LALR.
 
 | Tier | Cost | Languages |
 |---|---|---|
-| **1 — clean LALR(1)** | yacc/Bison-able as-is | Pascal · **C** (modulo the typedef lexer-hack + dangling-else precedence) · SQL (PostgreSQL/MySQL ship real Bison grammars) · PHP (`zend_language_parser.y` is Bison) · Lua · Go (`gc` was yacc through 1.4) · Scheme/Lisp (trivial) |
+| **1 — clean LALR(1)** | yacc/Bison-able as-is | Pascal · **C** (modulo the typedef lexer-hack + dangling-else precedence) · SQL (PostgreSQL/MySQL ship real Bison grammars) · PHP (`zend_language_parser.y` is Bison) · **Lua** (suffixed-primary left-refactor; long-bracket strings need a tiny stateful lexer scan — see #7) · Go (`gc` was yacc through 1.4) · Scheme/Lisp (trivial) |
 | **2 — LALR(1) + bounded lexer hacks** | one `RewritingTokenStream` | Java (`>>`/`>>>` token-splitting) · Haskell (**GHC uses Happy/LALR**, with the off-side `parse-error(t)` feedback) · Ruby (Bison `parse.y`, but a lexer-state swamp) · Python (INDENT/DEDENT injection; LL/pgen-parsed for ~30 yrs, PEG only since 3.9) · **Zig — lands here but leans Tier 1, see below** |
 | **3 — fights LALR; wants backtracking / hand-RD** | speculative parse | C# (the `F(G<A,B>(7))` cast-vs-compare) · JavaScript (ASI + `/` regex-vs-divide + arrow lookahead) · Rust (turbofish, macro token-trees) · Swift (custom operators, trailing closures, heavy contextual disambiguation) · **Mercury/Prolog** (operator-precedence term parser over a *runtime-mutable* `op/3` table — not a fixed grammar) · fixed-form Fortran (insignificant whitespace + no reserved words → not even tokenizable) |
 | **4 — not LALR(1) at all** | GLR / hand-RD only | **C++** (context-sensitive: `a<b>c`, most-vexing-parse, `typename` needs the symbol table mid-parse — GCC & Clang are both hand-RD) · Perl (provably undecidable — BEGIN blocks rewrite the grammar) |
@@ -89,7 +89,10 @@ INDENT/DEDENT rewriter drops it squarely in LALR.CC's wheelhouse; *genuinely che
 Swift source (#3a) is **Tier 3** — contextual disambiguation that wants backtracking
 LALR.CC doesn't give, which is the concrete reason #3b (compiled Wasm input) is the
 better Swift bet. Anything C++-shaped is **Tier 4** — reachable only through a
-compiled-input route (#5: IR, not grammar). And **Zig is the surprise** — see #2.
+compiled-input route (#5: IR, not grammar). And **Zig is the surprise** — see #2. At the
+opposite, *easy* end, **Lua** is the cleanest Tier-1 grammar of any candidate, but its
+value is gated entirely downstream by dynamic-typing **semantics** — the mirror image of
+Zig (see #7).
 
 #### PEG / operator-precedence sources — and why LALR is an *implementation detail*
 
@@ -619,6 +622,110 @@ single uniform NativeAOT artifact mixing Mercury + C + other dotcc frontends.
 `csharp` grade I already maintain, not dotcc. The only distinct dotcc angle is
 C-foreign_proc-in-one-IR (and exercising the `hlc.agc` output on .NET as research).
 Recorded here as the deliberate *"existing toolchain wins"* case.
+
+---
+
+## 7. Lua — cleanest grammar of any candidate; dynamic semantics are the catch (already runs via C)
+
+**Already runs on dotcc today** — the same proof point as Scheme (#4). The `lua.yml`
+CI transpiles the **PUC-Lua interpreter's C source** to .NET and runs the Lua suite, so
+"Lua programs run on dotcc" is already true *through the C frontend* (the transpiled
+interpreter). A direct Lua **frontend** — parse `.lua` → IR → .NET, i.e. AOT-compile Lua
+itself — is a different thing, and the analysis below is about that.
+
+### Parsing Lua via LALR — yes, and it's the *cleanest* Tier 1 here
+
+The question — can Lua be parsed via LALR(1)? — has a crisp answer: **yes, more cleanly
+than C or Zig.** Lua's reference grammar is tiny, and on every axis that forces C/Zig off
+the easy path, Lua has *nothing*:
+
+- **No typedef lexer-hack** — Lua is dynamically typed, so there are **no type names at
+  all**; the "is this token a type?" symbol-table feedback that drags C to Tier 1's edge
+  cannot even arise.
+- **No preprocessor, no significant whitespace, no contextual-keyword soup** — so, like
+  Zig, **zero `RewritingTokenStream` stages** for the parser.
+- **Fully-delimited blocks.** Every block closes with an explicit keyword
+  (`end`/`until`/`elseif`/`else`), so there is **no dangling-else** and no
+  statement-terminator ambiguity *within* a block — Lua doesn't even need the `rightmost`
+  precedence group C and Zig use.
+
+Two well-known wrinkles, both standard and bounded:
+
+1. **The `prefixexp` / `var` / `functioncall` mutual recursion.** The reference grammar as
+   written (`var ::= … | prefixexp '[' exp ']'`, `functioncall ::= prefixexp args`,
+   `prefixexp ::= var | functioncall | '(' exp ')'`) has reduce/reduce conflicts. The
+   standard fix is the **left-recursive "suffixed-primary" refactor** — one
+   `prefixexp ::= Name | '(' exp ')' | prefixexp '[' exp ']' | prefixexp '.' Name |
+   prefixexp args | prefixexp ':' Name args` — *exactly the postfix-chain technique dotcc
+   already uses for the C postfix operators and the Zig `Suffix` cascade.* After it the
+   core is LALR(1)-clean. The statement-level "assignment vs. call" split (`a.b = c` vs
+   `f()`) and the rule that **you can't assign to a call** (`f() = 1` is illegal) are an
+   **over-accept + semantic check** — precisely what Lua's own `lparser.c` does in
+   `exprstat` (parse a suffixed expr, branch on a following `=`/`,`, verify the LHS is
+   assignable). No symbol table needed; the same over-accept pattern already accepted for
+   Zig.
+2. **The `f \n (x)` call-continuation ambiguity.** Lua has no statement terminators, so
+   `a = b` ⏎ `(print)()` could be `a = b(print)()` or two statements. Lua resolves it by
+   **greedily shifting** the `(` onto the call (and documents the hazard, recommending a
+   `;`). In LALR terms that's a shift/reduce conflict resolved **shift-first** — the same
+   one-line `derivation:` resolution as dangling-else, reproducing Lua's actual behavior.
+
+The **one genuinely non-regular bit is lexical, not grammatical**: long strings and long
+comments `[==[ … ]==]` / `--[==[ … ]==]` match an *arbitrary, level-matched* number of
+`=` signs on both delimiters, which a regex can't express. That needs a small **stateful
+lexer scan** (count the opening `=`s, read to the matching close) — below the parser,
+contained, and nothing like symbol-table feedback (Lua's own `llex.c` does exactly this).
+So Lua is **Tier 1 + a trivial custom string scanner** — comfortably under the
+`RewritingTokenStream` bar; the *parser* itself is clean.
+
+### The catch is semantics — the mirror image of Zig
+
+Where Zig was "hard-looking grammar (now done), easy static semantics," Lua is the
+**inverse**: trivial grammar, **hard dynamic semantics.** Everything that keeps Lua small
+as a syntax makes it big as a runtime to lower onto AOT-clean C#:
+
+- **Dynamic typing** → a tagged `LuaValue` (nil/boolean/number/string/table/function/
+  userdata), every operator a runtime dispatch (`+` is number-add-or-`__add`-metamethod,
+  …). A full value model, like Python's — the long pole.
+- **Tables + metatables** — the single universal structure (array+hash) with metamethod
+  dispatch (`__index`/`__newindex`/`__add`/…); the heart of Lua semantics.
+- **The number model** (Lua 5.3+ integer/float subtypes with defined coercion), **interned
+  immutable strings**, **closures over upvalues**, and **coroutines** — the last the
+  thorniest on .NET (stackful coroutines have no direct CLR equivalent; they want an
+  `async`/continuation or CPS lowering).
+- **GC**: unlike the Swift/Wasm "objects in a `NativeMemory` arena" plan, Lua values map
+  most naturally to **C# objects on the .NET GC** (Lua's GC is not
+  deterministic-finalization-dependent the way ARC is) — so this part is *easy*, the
+  opposite of the Swift ARC headache.
+
+Route B (compiled input) is **weak for Lua, exactly as for Python**: Lua's only compiled
+artifact is its **own bytecode** (`luac`, or LuaJIT's distinct bytecode), and consuming it
+means *supplying a Lua VM* — i.e. reimplementing the runtime, skipping only the (cheap!)
+parser. And the **transpiled C interpreter already covers "run Lua on .NET,"** so Route
+B's goal is met. For Lua, Route A (source frontend) is the only one that adds anything.
+
+### Unique value, and a free oracle
+
+A direct frontend's payoff over the already-working transpiled interpreter:
+**AOT-compiled Lua** (functions become real .NET methods, no bytecode dispatch loop) and
+**first-class Lua↔C# interop** (tables ↔ objects), versus the interpreter's opaque
+C-struct values. And the IR-composition multiplier reappears: a Lua program *and its C
+modules* (Lua C-API extensions compiled by the C frontend) could live in **one .NET IR**
+— "Lua + its C foreign code together on .NET," the same narrow niche that was Mercury's
+(#6) one genuine angle.
+
+Best of all, the existing CI gives a **built-in differential oracle for free**: run the
+same `.lua` through a direct frontend *and* through the transpiled PUC-Lua interpreter and
+compare output — exactly the chibi/Zig-oracle pattern, with the reference implementation
+already in the tree.
+
+**Status:** idea. The grammar is the *least* of the worries (cleanest Tier 1 here); the
+honest cost is a dynamic-language runtime (`LuaValue` + tables/metatables + coroutines),
+the same pole as Python (#1) — and partly pre-empted by the interpreter that already runs.
+Cheapest probe: a `lua.lalr.yaml` for the expression/statement core + the long-bracket
+lexer scan, lowering a pure-arithmetic-plus-`if`/`while` subset onto a `LuaValue` struct —
+enough to feel how the dynamic-dispatch lowering goes before committing to
+tables/metatables.
 
 ---
 
