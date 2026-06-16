@@ -147,6 +147,8 @@ symbols:
   - EnumField    # 98  one enum member: `name` or `name = value`
   - FieldInits   # 99  anonymous struct-literal init list
   - FieldInit    # 100 one field init: `.name = expr`
+  # --- typed struct literals `T{ … }` (appended — never reorder) ---
+  - CurlySuffix  # 101 value-position curly-suffix: `Type` or `Type { FieldInits }` (Zig's CurlySuffixExpr)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -355,7 +357,22 @@ productions:
       - { lhs: Prefix, rhs: ['~', Prefix],  action: preBitNot }
       - { lhs: Prefix, rhs: ['&', Prefix],  action: preAddrOf }
       - { lhs: Prefix, rhs: ['try', Prefix], action: preTry }
-      - { lhs: Prefix, rhs: [Type] }
+      - { lhs: Prefix, rhs: [CurlySuffix] }
+
+  # Curly-suffix level — Zig's `CurlySuffixExpr <- TypeExpr InitList?`. A value-position
+  # type optionally followed by a struct-init list, so `Point{ .x = 1 }` parses WITHOUT
+  # the shift/reduce conflict a `Primary -> IDENT '{'` rule would create against
+  # `fn f() Point { … }`. The trick is structural, exactly as real Zig does it: the init
+  # list attaches ABOVE `Type` and ONLY here (value position), while the fn RETURN type
+  # stays a raw `Type` (no init list) — so the return-type brace is unambiguously a Block.
+  # `{` is never in FOLLOW(Expr), so the state after `Type` shifts the init-list `{` with no
+  # ambiguity against the bare-`Type` reduction. The leading-`.` anonymous form (`.{ … }`)
+  # stays a Primary; this is the typed form. Empty `Type{}` is the second rule.
+  - derivation: none
+    rules:
+      - { lhs: CurlySuffix, rhs: [Type] }
+      - { lhs: CurlySuffix, rhs: [Type, '{', FieldInits, '}'], action: typedStructInit }
+      - { lhs: CurlySuffix, rhs: [Type, '{', '}'],             action: typedStructInitEmpty }
 
   # Type-level prefix ops (right-assoc): `?T`, `*T`, `[]T`, `[N]T`. These sit at
   # operand position; `*`/`&`/`[` here are the SAME tokens as binary mul / bitwise-

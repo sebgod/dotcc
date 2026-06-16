@@ -318,6 +318,24 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_typed_struct_literal_in_value_and_sink_less_positions()
+    {
+        // The TYPED form `Point{ .x = … }` (Zig's CurlySuffixExpr) names its own type, so —
+        // unlike the anonymous `.{…}` — it needs no sink and is valid in a sink-less position
+        // such as an immediate field access `(Point{…}).y`. Both lower to a C# object
+        // initializer (`(Point{…}).y` → `new Point { … }.y`, member access on the literal).
+        var cs = EmitZig(
+            "const Point = struct { x: i32, y: i32 };\n" +
+            "pub fn main() u8 {\n" +
+            "    const p = Point{ .x = 40, .y = 2 };\n" +
+            "    const j = (Point{ .x = 5, .y = 9 }).y;\n" +
+            "    return @as(u8, p.x + p.y - 9 + j); }\n");
+        cs.ShouldContain("new Point {");   // typed literal → object initializer
+        cs.ShouldContain("x = 40");        // value-position literal
+        cs.ShouldContain("}.y");           // sink-less immediate field access on the literal
+    }
+
+    [Fact]
     public void Lowers_struct_field_access_through_a_pointer_with_arrow()
     {
         // Zig has no `->`: `p.x` on a `*Point` auto-derefs. The shared `Member` node carries

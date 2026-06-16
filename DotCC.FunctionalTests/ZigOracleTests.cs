@@ -171,6 +171,15 @@ public sealed class ZigOracleTests
             "const Color = enum { red, green, blue };\n" +
             "fn rank(c: Color) u8 { switch (c) { .red => { return 1; }, .green => { return 42; }, else => { return 3; }, } }\n" +
             "pub fn main() u8 { return rank(.green); }\n", 42, "" },
+        // TYPED struct literal `Point{ … }` (Zig's CurlySuffixExpr). Unlike the anonymous
+        // `.{…}`, it names its own type → no sink needed → valid in a sink-less position like
+        // an immediate field access `(Point{…}).y`. 40 + 2 - 9 + 9 = 42.
+        new object[] { "struct_typed_literal",
+            "const Point = struct { x: u8, y: u8 };\n" +
+            "pub fn main() u8 {\n" +
+            "    const p = Point{ .x = 40, .y = 2 };\n" +
+            "    const j = (Point{ .x = 5, .y = 9 }).y;\n" +
+            "    return p.x + p.y - 9 + j; }\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

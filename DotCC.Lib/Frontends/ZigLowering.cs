@@ -359,17 +359,43 @@ internal sealed class ZigLowering
             throw new IrUnsupportedException(
                 "zig anonymous struct literal `.{…}` needs a known struct result type (a typed const/var, a return, or a field)");
         }
-        var members = new List<FieldInit>();
-        if (initItem.Content is Zig.AnonStructInit a)   // Primary -> '.' '{' FieldInits '}'
+        // The empty `.{}` (AnonStructInitEmpty) carries no field list — zero-init every field.
+        IReadOnlyList<Item> fields = initItem.Content is Zig.AnonStructInit a ? Flatten(a.Arg2) : [];   // Primary -> '.' '{' FieldInits '}'
+        return BuildStructInit(fields, named);
+    }
+
+    /// <summary>Lower a TYPED struct literal `Type{ .field = … }` — Zig's CurlySuffixExpr
+    /// (`CurlySuffix -> Type '{' FieldInits '}'`). Unlike the anonymous `.{…}` form, the struct
+    /// type is named explicitly by the leading <c>Type</c>, so this needs NO sink and is valid in
+    /// any expression position (e.g. <c>&amp;Point{…}</c>, a bare subexpression). The leading type
+    /// must resolve to a registered struct.</summary>
+    private CExpr LowerTypedStructInit(Item typeItem, IReadOnlyList<Item> fieldInitItems)
+    {
+        var t = LowerType(typeItem);
+        if (t.Unqualified is not CType.Named named)
         {
-            foreach (var fiItem in Flatten(a.Arg2))
-            {
-                var fi = (Zig.FieldInit)fiItem.Content!;   // FieldInit -> '.' IDENT '=' Expr
-                var fname = Tok(fi.Arg1);
-                var ftype = _ir.StructFieldType(named, fname)
-                    ?? throw new IrUnsupportedException($"struct '{named.Name}' has no field '{fname}'");
-                members.Add(new FieldInit(fname, ftype, LowerExprSink(fi.Arg3, ftype)));
-            }
+            throw new IrUnsupportedException(
+                $"zig typed struct literal `Type{{…}}` requires a struct type, got {t.Describe()}");
+        }
+        return BuildStructInit(fieldInitItems, named);
+    }
+
+    /// <summary>Shared back half of both struct-literal forms (anonymous `.{…}` and typed
+    /// `Type{…}`): turn the `.field = expr` items into <see cref="FieldInit"/>s against a known
+    /// struct type. Each field's declared type (via <see cref="IrBuilder.StructFieldType"/>) is
+    /// the value's sink, so a nested `.{…}`/`.member` resolves; an unknown field errors
+    /// precisely. An omitted field takes C#'s zero default (D1 doesn't enforce Zig's
+    /// required-field rule).</summary>
+    private CExpr BuildStructInit(IReadOnlyList<Item> fieldInitItems, CType.Named named)
+    {
+        var members = new List<FieldInit>();
+        foreach (var fiItem in fieldInitItems)
+        {
+            var fi = (Zig.FieldInit)fiItem.Content!;   // FieldInit -> '.' IDENT '=' Expr
+            var fname = Tok(fi.Arg1);
+            var ftype = _ir.StructFieldType(named, fname)
+                ?? throw new IrUnsupportedException($"struct '{named.Name}' has no field '{fname}'");
+            members.Add(new FieldInit(fname, ftype, LowerExprSink(fi.Arg3, ftype)));
         }
         return new StructInit(members) { Type = named };
     }
@@ -716,6 +742,13 @@ internal sealed class ZigLowering
             case Zig.AnonStructInitEmpty:
                 throw new IrUnsupportedException(
                     "zig anonymous struct literal `.{…}` needs a known struct result type (a typed const/var, a return, or a field)");
+
+            // Typed struct literal `Type{ .field = … }` (Zig's CurlySuffixExpr). The struct type
+            // is named explicitly, so — unlike `.{…}` — it needs no sink and is valid anywhere.
+            case Zig.TypedStructInit t:       // CurlySuffix -> Type '{' FieldInits '}'
+                return LowerTypedStructInit(t.Arg0, Flatten(t.Arg2));
+            case Zig.TypedStructInitEmpty t:  // CurlySuffix -> Type '{' '}'
+                return LowerTypedStructInit(t.Arg0, []);
 
             // Postfix deref `p.*` and subscript `a[i]` → the C Unary(Deref)/Index IR.
             case Zig.Deref d:

@@ -103,7 +103,8 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `e catch fallback` | ✅ | the payload on success, else the fallback. The fallback must be side-effect-free (literal / variable) — a non-trivial one is rejected (deferred), as is `catch \|e\| …` capture and `catch return` |
 | `error.Foo` | ✅ | an error value — only in `return error.Foo;` within a `!T` fn (a bare error value / error-set decls deferred) |
 | postfix `.field` | ✅ | struct field access → the shared `Member` IR (field type from the aggregate table). Zig has no `->`, so `p.field` on a `*T` auto-derefs (emits C# `->`). `EnumName.member` resolves here too → an `EnumConstRef` |
-| `.{ .f = v, … }` (anonymous struct literal) | ✅ | result-located → `new T { f = v }` from the sink type (a typed decl, return, assignment, call arg, or field). Empty `.{}` zero-inits. Typed `T{…}` is deferred (it would conflict with `fn f() RetType {`) |
+| `.{ .f = v, … }` (anonymous struct literal) | ✅ | result-located → `new T { f = v }` from the sink type (a typed decl, return, assignment, call arg, or field). Empty `.{}` zero-inits |
+| `T{ .f = v, … }` (typed struct literal) | ✅ | Zig's `CurlySuffixExpr <- TypeExpr InitList?` — the type is named, so NO sink is needed; valid in any position, incl. sink-less ones like `(T{…}).field`. A dedicated `CurlySuffix` grammar level (above `Type`) makes it conflict-free against `fn f() RetType {` (the return type stays a raw `Type`, no init list) — no rewriter. Address-of-a-temporary `&T{…}` needs temp-materialization, deferred |
 | `.enumLiteral` | ✅ | a bare `.member` resolves against its sink (typed decl / return / assignment / call arg / switch subject) → an `EnumConstRef` (`EnumName.member`). Untyped (no sink) is rejected, as Zig requires |
 | `@intFromEnum(e)` | ✅ | the enum's integer value → decay to the underlying type (the C enum→int decay) |
 | other `@builtin(...)` (`@intCast`/`@ptrCast`/…) | 🚧 | parse only — Zig 0.16's forms are result-location-typed (single arg), needing context-type inference dotcc lacks |
@@ -121,8 +122,9 @@ program's libc call is handled. No `@cImport`, no header harvest.
 `comptime` (beyond const folding), generics / `anytype`, `@import("std")`, struct
 **methods** (UFCS) + tagged `union(enum)` + `opaque` (later D slices; data-only
 `struct`/`enum` ARE supported), explicit error-SET declarations (`error{A,B}` —
-inferred `!T` + `error.X` ARE supported), typed `T{…}` init lists (anonymous `.{…}`
-IS supported), `async`/`suspend`, inline assembly, destructuring assignment.
+inferred `!T` + `error.X` ARE supported), `async`/`suspend`, inline assembly,
+destructuring assignment. (Both `.{…}` and typed `T{…}` init lists ARE supported;
+only `&T{…}` — address-of-a-temporary — is deferred, pending temp-materialization.)
 
 ## Mixed `.c` + `.zig` translation units
 
@@ -201,4 +203,5 @@ rejects, not silently accept more.
   `examples/zig-printf` (variadic printf), `examples/zig-optional` (`?T` / `null` /
   `.?` / `orelse`), `examples/zig-errunion` (`!T` / `try` / `catch` / `error.X`),
   `examples/zig-controlflow` (while-cont / `break` / `continue` / `switch` / range-`for`),
-  `examples/zig-struct` (`struct` + `.{…}` + field access, `enum` + `.member` + `@intFromEnum` + enum `switch`).
+  `examples/zig-struct` (`struct` + `.{…}` + field access, `enum` + `.member` + `@intFromEnum` + enum `switch`),
+  `examples/zig-struct-typed` (typed `T{…}` literal in value + sink-less positions).
