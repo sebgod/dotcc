@@ -285,4 +285,17 @@ public sealed class ZigFrontendTests
         cs.ShouldContain("default:");  // `else` → default
         cs.ShouldContain("break;");    // no Zig fall-through
     }
+
+    [Fact]
+    public void Lowers_for_range_to_a_counted_for()
+    {
+        // `for (0..n) |i| body` → C `for (ulong i = 0; i < (ulong)n; i++) body`. The `|i|`
+        // capture is the usize loop index; the end is cast to ulong so the comparison is
+        // unsigned-clean (C# won't compare ulong with a signed operand).
+        var cs = EmitZig(
+            "pub fn main() u8 { var s: u8 = 0; for (0..10) |i| { if (i == 7) { s = 1; } } return s; }\n");
+        cs.ShouldContain("for (ulong i = 0;");   // counted for over the usize index
+        cs.ShouldContain("i < (ulong)");          // unsigned-clean bound comparison
+        cs.ShouldContain("i++");                  // the increment
+    }
 }

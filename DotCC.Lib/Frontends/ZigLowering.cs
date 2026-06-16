@@ -272,6 +272,24 @@ internal sealed class ZigLowering
             case Zig.StmtSwitch s:         return LowerSwitch(s.Arg2, s.Arg5);
             case Zig.StmtSwitchTrailing s: return LowerSwitch(s.Arg2, s.Arg5);
 
+            // `for (start..end) |i| body` → C `for (usize i = start; i < end; i++) body`. The
+            // capture `i` is the usize loop index (its own scope so it doesn't leak); the end
+            // is cast to usize so the comparison is unsigned-clean (C# forbids ulong<>signed).
+            case Zig.StmtForRange f:
+            {
+                _symbols.EnterScope();
+                var start = LowerExpr(f.Arg2);
+                var end = LowerExpr(f.Arg4);
+                var iSym = _symbols.Declare(new Symbol { Name = Tok(f.Arg7), Kind = SymKind.Var, Type = CType.ULong });
+                var iRef = new VarRef(iSym) { Type = CType.ULong, IsLValue = true };
+                var init = new DeclStmt(new List<LocalDecl> { new(iSym, start) });
+                var cond = new Binary(BinOp.Lt, iRef, new Cast(CType.ULong, end) { Type = CType.ULong }) { Type = CType.Int };
+                var post = new Unary(UnOp.PostInc, iRef) { Type = CType.ULong };
+                var body = LowerStmt(f.Arg9);
+                _symbols.ExitScope();
+                return new For(init, cond, post, body);
+            }
+
             // A brace block in statement position (`Stmt -> Block`, pass-through).
             case Zig.Block:
             case Zig.BlockEmpty:        return LowerBlock(stmt);

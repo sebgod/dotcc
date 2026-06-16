@@ -135,6 +135,9 @@ symbols:
   - Prongs       # 88  prong list (left-recursive, clean trailing-comma handling)
   - Prong        # 89  one prong: CaseVals '=>' Block
   - CaseVals     # 90  prong case values: Expr (, Expr)* | else
+  # --- range for (Milestone C3; appended — never reorder) ---
+  - 'for'        # 91  `for (a..b) |i| …` range loop
+  - '..'         # 92  range operator (for-range; slicing later)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -228,6 +231,11 @@ productions:
       # differ only by an optional trailing comma after the last prong.
       - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', '{', Prongs, '}'],      action: stmtSwitch }
       - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', '{', Prongs, ',', '}'], action: stmtSwitchTrailing }
+      # `for (start..end) |i| body` — the only slice-free `for` (a range). Lowers to the C IR
+      # `for (usize i = start; i < end; i++) body`; the `|i|` capture is the usize loop index
+      # (Zig's range-for index type). The body is a Stmt (single statement or a block), like
+      # `while`. for-over-slice / `0..` open-ended / the second `, 0..` index are deferred.
+      - { lhs: Stmt, rhs: ['for', '(', Expr, '..', Expr, ')', '|', IDENT, '|', Stmt], action: stmtForRange }
       - { lhs: Stmt, rhs: ['return', RhsExpr, ';'],         action: stmtReturn }
       - { lhs: Stmt, rhs: ['return', ';'],                   action: stmtReturnVoid }
       - { lhs: Stmt, rhs: [VarDecl] }
@@ -436,6 +444,7 @@ lexer:
     - { symbol: 'break',    match: 'break' }
     - { symbol: 'continue', match: 'continue' }
     - { symbol: 'switch',   match: 'switch' }
+    - { symbol: 'for',      match: 'for' }
 
     # Multi-char operators (longest-match handles overlaps; listed first for clarity).
     - { symbol: '==', match: '==' }
@@ -448,8 +457,10 @@ lexer:
     - { symbol: '.?', match: '\.\?' }
     - { symbol: '=>', match: '=>' }
     # `...` (3 chars) before `.*`/`.?`/`.` — longest-match prefers it regardless of
-    # order, but listed here with the other multi-char operators for clarity.
+    # order, but listed here with the other multi-char operators for clarity. `..` (2 chars,
+    # the for-range operator) sits between `...` and `.` — longest-match picks the right one.
     - { symbol: '...', match: '\.\.\.' }
+    - { symbol: '..',  match: '\.\.' }
     # `[*c]` — the C-pointer type prefix as ONE glued token (longest-match beats the
     # single-char `[`); never appears in expression-index position, so no clash.
     - { symbol: '[*c]', match: '\[\*c\]' }

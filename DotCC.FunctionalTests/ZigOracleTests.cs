@@ -139,6 +139,13 @@ public sealed class ZigOracleTests
             "fn classify(x: u8) u8 { var r: u8 = 0; switch (x) { " +
             "0 => { r = 10; }, 1, 2 => { r = 20; }, else => { r = 30; }, } return r; }\n" +
             "pub fn main() u8 { return classify(9); }\n", 30, "" },
+        // RANGE FOR (Milestone C3). `for (0..n) |i|` — the usize loop index used in a
+        // comparison (narrowing it to u8 needs @intCast, deferred). i hits 7 → found = 42.
+        new object[] { "for_range_index",
+            "pub fn main() u8 { var found: u8 = 0; for (0..10) |i| { if (i == 7) { found = 42; } } return found; }\n", 42, "" },
+        // The `|_|` discard form — count 5 iterations into a u8 (no usize arithmetic). → 5.
+        new object[] { "for_range_count",
+            "pub fn main() u8 { var sum: u8 = 0; for (0..5) |_| { sum = sum + 1; } return sum; }\n", 5, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

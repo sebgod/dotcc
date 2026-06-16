@@ -75,7 +75,8 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `x = e;` assignment | ✅ | |
 | `_ = e;` discard | ✅ | Zig's mandatory discard of a non-void result |
 | block `{ … }` | ✅ | |
-| `for`, `defer`/`errdefer`, labeled loops, labeled `break`/`continue`, switch ranges/expr | 🚫 | (range-`for` is the next slice) |
+| `for (a..b) \|i\| …` (range for) | ✅ | → C `for (usize i = a; i < b; i++)`; the `\|i\|` capture is the usize loop index (`\|_\|` discards). The body is a Stmt or block |
+| `for (slice) \|x\|`, `0..` open-ended, `for (s, 0..) \|x, i\|`, `defer`/`errdefer`, labeled loops, labeled `break`/`continue`, switch ranges/expr | 🚫 | for-over-slice needs slices (later milestone) |
 
 ## Expressions
 
