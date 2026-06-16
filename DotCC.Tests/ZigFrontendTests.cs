@@ -268,4 +268,21 @@ public sealed class ZigFrontendTests
         cs.ShouldContain("continue;");
         cs.ShouldContain("break;");
     }
+
+    [Fact]
+    public void Lowers_switch_with_multi_value_and_else()
+    {
+        // `switch (x) { 0 => {…}, 1, 2 => {…}, else => {…} }` → the C IR Switch: single value
+        // → one `case`, a multi-value prong → stacked `case`s, `else` → `default`. Zig has no
+        // fall-through, so each section ends in an appended `break;` (no synthetic goto-next).
+        var cs = EmitZig(
+            "pub fn main() u8 { var r: u8 = 0; switch (r) { " +
+            "0 => { r = 10; }, 1, 2 => { r = 20; }, else => { r = 30; }, } return r; }\n");
+        cs.ShouldContain("switch (");
+        cs.ShouldContain("case 0:");
+        cs.ShouldContain("case 1:");
+        cs.ShouldContain("case 2:");   // multi-value prong → stacked labels
+        cs.ShouldContain("default:");  // `else` → default
+        cs.ShouldContain("break;");    // no Zig fall-through
+    }
 }

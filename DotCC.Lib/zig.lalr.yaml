@@ -129,6 +129,12 @@ symbols:
   # --- control flow (Milestone C1; appended — never reorder) ---
   - 'break'      # 84  `break;` loop exit
   - 'continue'   # 85  `continue;` loop next-iteration
+  # --- switch (Milestone C2; appended — never reorder) ---
+  - 'switch'     # 86  `switch (x) { … }`
+  - '=>'         # 87  switch-prong arrow
+  - Prongs       # 88  prong list (left-recursive, clean trailing-comma handling)
+  - Prong        # 89  one prong: CaseVals '=>' Block
+  - CaseVals     # 90  prong case values: Expr (, Expr)* | else
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -215,6 +221,13 @@ productions:
       - { lhs: Stmt, rhs: ['while', '(', Expr, ')', ':', '(', Expr, ')', Stmt],               action: stmtWhileCont }
       - { lhs: Stmt, rhs: ['break', ';'],    action: stmtBreak }
       - { lhs: Stmt, rhs: ['continue', ';'], action: stmtContinue }
+      # `switch (x) { prong, … }` as a STATEMENT. Each prong is `CaseVals => Block` — the
+      # body MUST be a braced block (bare-expr bodies + switch-as-EXPRESSION are deferred).
+      # Zig switch has NO fall-through, so the lowering appends a `break` to each section
+      # (the C# backend would otherwise synthesize C's fall-through). The two productions
+      # differ only by an optional trailing comma after the last prong.
+      - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', '{', Prongs, '}'],      action: stmtSwitch }
+      - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', '{', Prongs, ',', '}'], action: stmtSwitchTrailing }
       - { lhs: Stmt, rhs: ['return', RhsExpr, ';'],         action: stmtReturn }
       - { lhs: Stmt, rhs: ['return', ';'],                   action: stmtReturnVoid }
       - { lhs: Stmt, rhs: [VarDecl] }
@@ -375,6 +388,27 @@ productions:
       - { lhs: ArgList, rhs: [Expr, ',', ArgList], action: argsCons }
       - { lhs: ArgList, rhs: [Expr],                action: argsOne }
 
+  # ===== switch prongs (Milestone C2) =====
+  # LEFT-recursive prong list — the form that makes the optional trailing comma a clean
+  # 1-token shift decision (`Prongs ','` then `}` → trailing-comma Stmt, else another Prong).
+  - derivation: leftmost
+    rules:
+      - { lhs: Prongs, rhs: [Prongs, ',', Prong], action: prongsCons }
+      - { lhs: Prongs, rhs: [Prong],               action: prongsOne }
+
+  - derivation: none
+    rules:
+      - { lhs: Prong, rhs: [CaseVals, '=>', Block], action: prong }
+
+  # Case values: a comma-list of value Exprs, or `else` (the default). The `,` here never
+  # clashes with the prong-separator `,` because FOLLOW(CaseVals) = { '=>' } — after a value
+  # Expr, a `,` can only continue the value list (a complete CaseVals reduces on '=>' alone).
+  - derivation: leftmost
+    rules:
+      - { lhs: CaseVals, rhs: [Expr, ',', CaseVals], action: caseValsCons }
+      - { lhs: CaseVals, rhs: [Expr],                 action: caseValsOne }
+      - { lhs: CaseVals, rhs: ['else'],               action: caseElse }
+
 lexer:
   root:
     # Comments first. Zig line comments `//...` (incl. `///` doc comments) — ignored
@@ -401,6 +435,7 @@ lexer:
     - { symbol: 'error',  match: 'error' }
     - { symbol: 'break',    match: 'break' }
     - { symbol: 'continue', match: 'continue' }
+    - { symbol: 'switch',   match: 'switch' }
 
     # Multi-char operators (longest-match handles overlaps; listed first for clarity).
     - { symbol: '==', match: '==' }
@@ -411,6 +446,7 @@ lexer:
     - { symbol: '>>', match: '>>' }
     - { symbol: '.*', match: '\.\*' }
     - { symbol: '.?', match: '\.\?' }
+    - { symbol: '=>', match: '=>' }
     # `...` (3 chars) before `.*`/`.?`/`.` — longest-match prefers it regardless of
     # order, but listed here with the other multi-char operators for clarity.
     - { symbol: '...', match: '\.\.\.' }

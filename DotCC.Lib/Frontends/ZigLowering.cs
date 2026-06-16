@@ -267,6 +267,11 @@ internal sealed class ZigLowering
             case Zig.StmtBreak:    return new Break();
             case Zig.StmtContinue: return new Continue();
 
+            // `switch (subject) { prongs }` → the C IR Switch (subject=Arg2, prongs=Arg5 for
+            // both the plain and trailing-comma forms).
+            case Zig.StmtSwitch s:         return LowerSwitch(s.Arg2, s.Arg5);
+            case Zig.StmtSwitchTrailing s: return LowerSwitch(s.Arg2, s.Arg5);
+
             // A brace block in statement position (`Stmt -> Block`, pass-through).
             case Zig.Block:
             case Zig.BlockEmpty:        return LowerBlock(stmt);
@@ -282,6 +287,54 @@ internal sealed class ZigLowering
         var sym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = type });
         return new DeclStmt(new List<LocalDecl> { new(sym, init) });
     }
+
+    /// <summary>Lower a <c>switch (subject) { prong, … }</c> statement to the C IR
+    /// <see cref="Switch"/>. Each prong (<c>CaseVals =&gt; Block</c>) becomes a
+    /// <see cref="SwitchSection"/>: its case values are the labels (<c>else</c> → the null
+    /// default label), and its braced block is the body. Zig switch has NO fall-through, so a
+    /// terminating <see cref="Break"/> is appended to any section that doesn't already end
+    /// control flow — otherwise the C# backend would synthesize C's fall-through jump.</summary>
+    private CStmt LowerSwitch(Item subjectItem, Item prongsItem)
+    {
+        var subject = LowerExpr(subjectItem);
+        var sections = new List<SwitchSection>();
+        foreach (var prongItem in Flatten(prongsItem))
+        {
+            var p = (Zig.Prong)prongItem.Content!;            // CaseVals=Arg0, '=>'=Arg1, Block=Arg2
+            var labels = LowerCaseVals(p.Arg0);
+            var body = new List<CStmt> { LowerBlock(p.Arg2) }; // the braced block, scoped
+            if (!EndsInJump(body)) { body.Add(new Break()); }  // no Zig fall-through
+            sections.Add(new SwitchSection(labels, body));
+        }
+        return new Switch(subject, sections);
+    }
+
+    /// <summary>Lower a prong's case values to switch labels: <c>else</c> → the single null
+    /// (default) label; otherwise each comma-separated value Expr → one constant label.</summary>
+    private List<SwitchLabel> LowerCaseVals(Item caseVals)
+    {
+        if (caseVals.Content is Zig.CaseElse)
+        {
+            return new List<SwitchLabel> { new SwitchLabel(null) };
+        }
+        var labels = new List<SwitchLabel>();
+        foreach (var v in Flatten(caseVals)) { labels.Add(new SwitchLabel(LowerExpr(v))); }
+        return labels;
+    }
+
+    /// <summary>True when a lowered statement list provably ends control flow (so no
+    /// synthetic <see cref="Break"/> is needed for a switch section). Mirrors the C# backend's
+    /// own <c>Terminates</c>.</summary>
+    private static bool EndsInJump(IReadOnlyList<CStmt> body) =>
+        body.Count > 0 && Terminates(body[^1]);
+
+    private static bool Terminates(CStmt s) => s switch
+    {
+        Return or Break or Continue or Goto => true,
+        Block b => b.Stmts.Count > 0 && Terminates(b.Stmts[^1]),
+        If f => f.Else is { } e && Terminates(f.Then) && Terminates(e),
+        _ => false,
+    };
 
     /// <summary>Lower <c>return e;</c>. In a <c>!T</c> function the value becomes an error
     /// union: <c>return error.Foo;</c> → an <see cref="ErrUnionErr"/>; a value that is ALREADY
@@ -764,6 +817,10 @@ internal sealed class ZigLowering
                 case Zig.ParamsOne o:  stack.Push(o.Arg0); break;
                 case Zig.ArgsCons c:   stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [Expr, ',', ArgList]
                 case Zig.ArgsOne o:    stack.Push(o.Arg0); break;
+                case Zig.ProngsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [Prongs, ',', Prong] (left-recursive)
+                case Zig.ProngsOne o:  stack.Push(o.Arg0); break;
+                case Zig.CaseValsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [Expr, ',', CaseVals]
+                case Zig.CaseValsOne o:  stack.Push(o.Arg0); break;
                 default: ordered.Add(n); break;
             }
         }

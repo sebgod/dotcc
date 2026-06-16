@@ -128,6 +128,17 @@ public sealed class ZigOracleTests
         new object[] { "loop_while_cont",
             "pub fn main() u8 { var sum: u8 = 0; var i: u8 = 0; " +
             "while (i < 5) : (i = i + 1) { sum = sum + i; } return sum; }\n", 10, "" },
+        // SWITCH (Milestone C2). Single / multi-value / else prongs, no fall-through.
+        // classify(2) hits the `1, 2` multi-value prong → 20.
+        new object[] { "switch_multi",
+            "fn classify(x: u8) u8 { var r: u8 = 0; switch (x) { " +
+            "0 => { r = 10; }, 1, 2 => { r = 20; }, else => { r = 30; }, } return r; }\n" +
+            "pub fn main() u8 { return classify(2); }\n", 20, "" },
+        // classify(9) falls to `else` → 30. (Distinct exit code locks the default branch.)
+        new object[] { "switch_else",
+            "fn classify(x: u8) u8 { var r: u8 = 0; switch (x) { " +
+            "0 => { r = 10; }, 1, 2 => { r = 20; }, else => { r = 30; }, } return r; }\n" +
+            "pub fn main() u8 { return classify(9); }\n", 30, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

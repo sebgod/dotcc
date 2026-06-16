@@ -70,11 +70,12 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `while (c) …` | ✅ | (no payload capture yet) |
 | `while (c) : (cont) …` | ✅ | the continue-expression → the C IR `for`-post, so `continue` runs `cont` (faithful to Zig). The common assignment cont `: (i = i + 1)` and a bare-expr cont both parse |
 | `break;` / `continue;` | ✅ | unlabeled — reuse the C IR loop-control nodes (labeled `break :blk` deferred) |
+| `switch (x) { v => {…}, a, b => {…}, else => {…} }` | ✅ | as a STATEMENT → the C IR Switch. Single / multi-value / `else` (→ default) prongs; NO fall-through (each prong gets an appended `break`). Prong bodies must be braced **blocks**; bare-expr bodies, ranges (`a...b`), and switch-as-EXPRESSION are deferred |
 | `return e;` / `return;` | ✅ | |
 | `x = e;` assignment | ✅ | |
 | `_ = e;` discard | ✅ | Zig's mandatory discard of a non-void result |
 | block `{ … }` | ✅ | |
-| `for`, `switch`, `defer`/`errdefer`, labeled loops, labeled `break`/`continue` | 🚫 | (`for` / `switch` are the next slices) |
+| `for`, `defer`/`errdefer`, labeled loops, labeled `break`/`continue`, switch ranges/expr | 🚫 | (range-`for` is the next slice) |
 
 ## Expressions
 
