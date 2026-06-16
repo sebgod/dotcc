@@ -1660,6 +1660,19 @@ internal sealed class CSharpBackend
             // leans on this: &absentkey, &dummynode_.)
             case UnOp.AddrOf when RootsAtGlobal(u.Operand):
                 return ($"({Cs(u.Type)})System.Runtime.CompilerServices.Unsafe.AsPointer(ref {BareLValue(u.Operand)})", PUnary);
+            // &<rvalue> — the address of a materialized temporary: a C compound literal
+            // `&(T){…}` or a Zig typed struct literal `&T{…}` (both lower to a StructInit
+            // rvalue). C# forbids `&new T{…}` (CS0211), so bind the literal to a block-local
+            // temp — C's automatic storage for the compound literal's unnamed object — and
+            // take ITS address (a stack local is non-moveable, so `&local` needs no `fixed`).
+            // Hoistable contexts only; elsewhere fall through (a non-hoistable `&literal` is
+            // rare and unsupported, same leniency as the StackArray case).
+            case UnOp.AddrOf when !u.Operand.IsLValue && _canHoist:
+            {
+                var name = $"__cl{_clCounter++}";
+                _pending.Add($"{Cs(u.Operand.Type)} {name} = {Expr(u.Operand)}");
+                return ($"&{name}", PUnary);
+            }
             // BareLValue so `&` of a volatile lvalue takes the address, not the
             // address of a Volatile.Read(...) call.
             case UnOp.AddrOf: return ($"&{BareLValue(u.Operand)}", PUnary);

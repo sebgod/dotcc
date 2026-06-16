@@ -104,7 +104,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `error.Foo` | ✅ | an error value — only in `return error.Foo;` within a `!T` fn (a bare error value / error-set decls deferred) |
 | postfix `.field` | ✅ | struct field access → the shared `Member` IR (field type from the aggregate table). Zig has no `->`, so `p.field` on a `*T` auto-derefs (emits C# `->`). `EnumName.member` resolves here too → an `EnumConstRef` |
 | `.{ .f = v, … }` (anonymous struct literal) | ✅ | result-located → `new T { f = v }` from the sink type (a typed decl, return, assignment, call arg, or field). Empty `.{}` zero-inits |
-| `T{ .f = v, … }` (typed struct literal) | ✅ | Zig's `CurlySuffixExpr <- TypeExpr InitList?` — the type is named, so NO sink is needed; valid in any position, incl. sink-less ones like `(T{…}).field`. A dedicated `CurlySuffix` grammar level (above `Type`) makes it conflict-free against `fn f() RetType {` (the return type stays a raw `Type`, no init list) — no rewriter. Address-of-a-temporary `&T{…}` needs temp-materialization, deferred |
+| `T{ .f = v, … }` (typed struct literal) | ✅ | Zig's `CurlySuffixExpr <- TypeExpr InitList?` — the type is named, so NO sink is needed; valid in any position, incl. sink-less ones like `(T{…}).field`. A dedicated `CurlySuffix` grammar level (above `Type`) makes it conflict-free against `fn f() RetType {` (the return type stays a raw `Type`, no init list) — no rewriter. `&T{…}` (address of a temporary) materializes a block-local temp and takes its address (the same shared-backend path as C's `&(T){…}`) |
 | `.enumLiteral` | ✅ | a bare `.member` resolves against its sink (typed decl / return / assignment / call arg / switch subject) → an `EnumConstRef` (`EnumName.member`). Untyped (no sink) is rejected, as Zig requires |
 | `@intFromEnum(e)` | ✅ | the enum's integer value → decay to the underlying type (the C enum→int decay) |
 | other `@builtin(...)` (`@intCast`/`@ptrCast`/…) | 🚧 | parse only — Zig 0.16's forms are result-location-typed (single arg), needing context-type inference dotcc lacks |
@@ -123,8 +123,8 @@ program's libc call is handled. No `@cImport`, no header harvest.
 **methods** (UFCS) + tagged `union(enum)` + `opaque` (later D slices; data-only
 `struct`/`enum` ARE supported), explicit error-SET declarations (`error{A,B}` —
 inferred `!T` + `error.X` ARE supported), `async`/`suspend`, inline assembly,
-destructuring assignment. (Both `.{…}` and typed `T{…}` init lists ARE supported;
-only `&T{…}` — address-of-a-temporary — is deferred, pending temp-materialization.)
+destructuring assignment. (Both `.{…}` and typed `T{…}` init lists ARE supported,
+including `&T{…}` — address-of-a-temporary — via a materialized block-local temp.)
 
 ## Mixed `.c` + `.zig` translation units
 

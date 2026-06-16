@@ -336,6 +336,21 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_addr_of_typed_struct_literal_via_a_temp()
+    {
+        // `&Point{ … }` — address of a temporary. C# forbids `&new T{…}` (CS0211), so the
+        // literal is materialized to a block-local temp and ITS address is taken — the same
+        // shared-backend path C compound literals `&(T){…}` use. Here as a `*Point` argument.
+        var cs = EmitZig(
+            "const Point = struct { x: i32, y: i32 };\n" +
+            "fn sum(p: *const Point) i32 { return p.x + p.y; }\n" +   // &literal is *const T in Zig
+            "pub fn main() u8 { return @as(u8, sum(&Point{ .x = 40, .y = 2 })); }\n");
+        cs.ShouldContain("new Point {");   // literal materialized…
+        cs.ShouldContain("__cl");          // …into a block-local temp
+        cs.ShouldContain("&__cl");         // address of the temp (not `&new T{…}`)
+    }
+
+    [Fact]
     public void Lowers_struct_field_access_through_a_pointer_with_arrow()
     {
         // Zig has no `->`: `p.x` on a `*Point` auto-derefs. The shared `Member` node carries

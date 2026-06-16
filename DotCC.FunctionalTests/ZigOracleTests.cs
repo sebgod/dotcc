@@ -180,6 +180,13 @@ public sealed class ZigOracleTests
             "    const p = Point{ .x = 40, .y = 2 };\n" +
             "    const j = (Point{ .x = 5, .y = 9 }).y;\n" +
             "    return p.x + p.y - 9 + j; }\n", 42, "" },
+        // `&T{…}` — address of a temporary, passed as a `*const Point` arg (in Zig `&literal`
+        // is `*const T`). C# can't take `&new T{…}`, so the literal is materialized to a
+        // block-local temp and its address taken (shared with C's `&(T){…}`).
+        new object[] { "struct_addr_literal",
+            "const Point = struct { x: u8, y: u8 };\n" +
+            "fn sum(p: *const Point) u8 { return p.x + p.y; }\n" +
+            "pub fn main() u8 { return sum(&Point{ .x = 40, .y = 2 }); }\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
