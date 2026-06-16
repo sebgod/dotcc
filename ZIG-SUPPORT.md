@@ -194,4 +194,5 @@ rejects, not silently accept more.
   pinned `zig 0.16.0`.
 - **Examples** — `examples/zig-hello`, `examples/zig-extern` (putchar),
   `examples/zig-printf` (variadic printf), `examples/zig-optional` (`?T` / `null` /
-  `.?` / `orelse`), `examples/zig-errunion` (`!T` / `try` / `catch` / `error.X`).
+  `.?` / `orelse`), `examples/zig-errunion` (`!T` / `try` / `catch` / `error.X`),
+  `examples/zig-controlflow` (while-cont / `break` / `continue` / `switch` / range-`for`).
