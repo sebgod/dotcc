@@ -49,6 +49,22 @@ internal sealed class ZigLowering
     /// <c>return</c> wraps its value as an error union (<see cref="LowerReturn"/>).</summary>
     private CType? _currentFnRet;
 
+    /// <summary>Container type names declared in this unit (<c>const P = struct {…}</c> /
+    /// <c>const C = enum {…}</c>) → the <see cref="CType"/> the name resolves to: a
+    /// <see cref="CType.Named"/> for a struct, a <see cref="CType.Enum"/> for an enum.
+    /// Populated in pass 0 (before signatures/bodies) so a struct used before its decl —
+    /// or a self/forward reference like <c>next: *Node</c> — resolves. Consulted by
+    /// <see cref="LowerTypeName"/> ahead of the primitive table.</summary>
+    private readonly Dictionary<string, CType> _containerTypes = new(System.StringComparer.Ordinal);
+
+    /// <summary>Per enum name, each member name → its <see cref="SymKind.EnumConst"/> symbol
+    /// (carrying the enum <see cref="CType"/> + the constant value). Drives both
+    /// <c>EnumName.member</c> (a <see cref="Zig.Field"/> whose base names an enum) and the
+    /// bare <c>.member</c> literal at a typed sink (<see cref="ResolveEnumLit"/>) — each
+    /// lowering to an <see cref="EnumConstRef"/>, rendered by the shared backend as
+    /// <c>EnumName.member</c>.</summary>
+    private readonly Dictionary<string, Dictionary<string, Symbol>> _enumMembers = new(System.StringComparer.Ordinal);
+
     public ZigLowering(IrBuilder ir, INameLegalizer names, Dictionary<string, int>? errorCodes = null)
     {
         _ir = ir;
@@ -73,14 +89,42 @@ internal sealed class ZigLowering
 
     public void Lower(Item root)
     {
-        // Two passes so a call can forward-reference: Zig has no prototypes, and a
-        // function may call one defined later in the file. Pass 1 declares every
-        // signature in the (global) scope; pass 2 lowers each body against them. An
+        // Three passes. Pass 0 registers container TYPES (struct/enum) so a signature,
+        // body, or another container's field can reference one declared later (a forward /
+        // self reference). Pass 1 declares every function signature in the (global) scope —
+        // Zig has no prototypes, so a call may forward-reference a function defined later.
+        // Pass 2 lowers each body against the now-complete type + signature environment. An
         // `extern fn` prototype is declared in pass 1 too but has no body to lower.
-        var entries = new List<(Symbol sym, List<(string name, CType type)> ps, Item body)>();
-        foreach (var decl in Flatten(root))
+        var decls = Flatten(root);
+
+        // Pass 0a: register every container NAME first (a struct as a `CType.Named`
+        // placeholder, an enum fully — enums are self-contained int constants), so pass 0b
+        // can resolve a struct field that points to a struct/enum declared further down.
+        foreach (var decl in decls)
         {
-            var d = decl.Content is Zig.PubFn p ? p.Arg1 : decl;   // unwrap `pub`
+            switch (Unwrap(decl).Content)
+            {
+                case Zig.StructDecl s:      _containerTypes[Tok(s.Arg1)] = new CType.Named(Tok(s.Arg1)); break;
+                case Zig.StructDeclEmpty s: _containerTypes[Tok(s.Arg1)] = new CType.Named(Tok(s.Arg1)); break;
+                case Zig.EnumDecl e:        RegisterEnumZig(e.Arg1, null, e.Arg5); break;       // const IDENT = enum { EnumFields } ;
+                case Zig.EnumDeclTyped e:   RegisterEnumZig(e.Arg1, e.Arg5, e.Arg8); break;     // const IDENT = enum ( Type ) { EnumFields } ;
+            }
+        }
+        // Pass 0b: build struct field layouts (field types now resolve through 0a).
+        foreach (var decl in decls)
+        {
+            switch (Unwrap(decl).Content)
+            {
+                case Zig.StructDecl s:      RegisterStruct(s.Arg1, s.Arg5); break;   // const IDENT = struct { FieldDecls } ;
+                case Zig.StructDeclEmpty s: RegisterStruct(s.Arg1, null); break;     // const IDENT = struct { } ;
+            }
+        }
+
+        // Pass 1: function signatures.
+        var entries = new List<(Symbol sym, List<(string name, CType type)> ps, Item body)>();
+        foreach (var decl in decls)
+        {
+            var d = Unwrap(decl);   // unwrap `pub`
             switch (d.Content)
             {
                 case Zig.ExternFnProto f:       DeclareExternFn(f.Arg2, f.Arg4, f.Arg6); break;  // extern fn IDENT ( Params ) Type ;
@@ -89,11 +133,19 @@ internal sealed class ZigLowering
                 case Zig.FnDefNoArgs f:    entries.Add(DeclareFn(f.Arg1, null, f.Arg4, f.Arg5)); break;
                 case Zig.FnDefErr f:       entries.Add(DeclareFn(f.Arg1, f.Arg3, f.Arg6, f.Arg7, errUnion: true)); break;   // `!T` return → ErrorUnion(T)
                 case Zig.FnDefNoArgsErr f: entries.Add(DeclareFn(f.Arg1, null, f.Arg5, f.Arg6, errUnion: true)); break;
+                // Container decls were handled in pass 0 — skip here.
+                case Zig.StructDecl or Zig.StructDeclEmpty or Zig.EnumDecl or Zig.EnumDeclTyped: break;
                 default: throw new IrUnsupportedException("zig top-level decl: " + (d.Content?.GetType().Name ?? "null"));
             }
         }
         foreach (var (sym, ps, body) in entries) { LowerFnBody(sym, ps, body); }
     }
+
+    /// <summary>Unwrap a top-level decl's optional <c>pub</c> wrapper (<see cref="Zig.PubFn"/>)
+    /// to its inner declaration; a non-<c>pub</c> decl is returned unchanged. (D1 container
+    /// decls are not <c>pub</c>-wrappable yet — single-file programs don't need export
+    /// visibility; deferred to the methods milestone.)</summary>
+    private static Item Unwrap(Item decl) => decl.Content is Zig.PubFn p ? p.Arg1 : decl;
 
     // ---- top level -------------------------------------------------------
 
@@ -200,6 +252,148 @@ internal sealed class ZigLowering
         _ir.Functions.Add(new FuncDef(funcSym, paramSyms, blk, false));
     }
 
+    // ---- containers (structs / enums) ------------------------------------
+
+    /// <summary>Register a Zig <c>struct</c> declaration: build its field layout (each
+    /// <c>name: Type</c> field's type resolved through <see cref="LowerType"/>, so it can
+    /// reference any container registered in pass 0) and hand it to the shared IR aggregate
+    /// table via <see cref="IrBuilder.RegisterStructType"/>. <paramref name="fieldsItem"/>
+    /// is null for an empty <c>struct {}</c>.</summary>
+    private void RegisterStruct(Item nameTok, Item? fieldsItem)
+    {
+        var name = Tok(nameTok);
+        var fields = new List<StructField>();
+        if (fieldsItem is not null)
+        {
+            foreach (var fd in Flatten(fieldsItem))
+            {
+                var f = (Zig.StructField)fd.Content!;   // FieldDecl -> IDENT ':' Type
+                fields.Add(new StructField(Tok(f.Arg0), LowerType(f.Arg2)));
+            }
+        }
+        _ir.RegisterStructType(name, fields, isUnion: false);
+    }
+
+    /// <summary>Register a Zig <c>enum</c> declaration: assign each member its value
+    /// (explicit <c>= value</c> via <see cref="ZigConstEval"/>, else auto-incremented from
+    /// the previous, starting at 0), build the shared <see cref="EnumTypeDef"/> via
+    /// <see cref="IrBuilder.RegisterEnumType"/>, and record a per-member
+    /// <see cref="SymKind.EnumConst"/> symbol (so <c>Color.red</c> / a sink-typed
+    /// <c>.red</c> resolve to an <see cref="EnumConstRef"/>). The underlying type is the
+    /// <c>enum(T)</c> base, else C's default <see cref="CType.Int"/>.</summary>
+    private void RegisterEnumZig(Item nameTok, Item? underlyingType, Item membersItem)
+    {
+        var name = Tok(nameTok);
+        var underlying = underlyingType is not null ? LowerType(underlyingType) : CType.Int;
+        var enumType = new CType.Enum(name, underlying);
+        var members = new List<EnumMember>();
+        var memberSyms = new Dictionary<string, Symbol>(System.StringComparer.Ordinal);
+        long next = 0;
+        foreach (var emItem in Flatten(membersItem))
+        {
+            string mName;
+            Item? valExpr;
+            switch (emItem.Content)
+            {
+                case Zig.EnumField ef:     mName = Tok(ef.Arg0); valExpr = null; break;       // IDENT
+                case Zig.EnumFieldInit ef: mName = Tok(ef.Arg0); valExpr = ef.Arg2; break;    // IDENT '=' Expr
+                default: throw new IrUnsupportedException("zig enum member: " + (emItem.Content?.GetType().Name ?? "null"));
+            }
+            if (valExpr is not null)
+            {
+                next = ZigConstEval(LowerExpr(valExpr))
+                    ?? throw new IrUnsupportedException($"enum '{name}' member '{mName}': value must be a constant integer expression");
+            }
+            members.Add(new EnumMember(mName, next));
+            memberSyms[mName] = new Symbol
+            {
+                Name = mName, Kind = SymKind.EnumConst, Type = enumType, ConstValue = next, IsGlobal = true,
+            };
+            next++;
+        }
+        _ir.RegisterEnumType(name, underlying, members);
+        _containerTypes[name] = enumType;
+        _enumMembers[name] = memberSyms;
+    }
+
+    /// <summary>Const-fold a lowered enum-member initializer to its integer value, or null
+    /// if not a constant the D1 subset evaluates (an int literal, a parenthesized such, or a
+    /// unary <c>-</c>/<c>~</c> of one). Wider constant expressions are deferred.</summary>
+    private static long? ZigConstEval(CExpr e) => e switch
+    {
+        LitInt i => i.Value,
+        Paren p => ZigConstEval(p.Inner),
+        Unary u => u.Op switch
+        {
+            UnOp.Neg => ZigConstEval(u.Operand) is { } v ? -v : null,
+            UnOp.BitNot => ZigConstEval(u.Operand) is { } v ? ~v : null,
+            _ => null,
+        },
+        _ => null,
+    };
+
+    /// <summary>Resolve a bare enum literal <c>.member</c> against the enum type its sink
+    /// names — an <see cref="EnumConstRef"/> the shared backend renders as
+    /// <c>EnumName.member</c>.</summary>
+    private CExpr ResolveEnumLit(string member, CType.Enum en)
+    {
+        if (_enumMembers.TryGetValue(en.Name, out var syms) && syms.TryGetValue(member, out var sym))
+        {
+            return new EnumConstRef(sym) { Type = en };
+        }
+        throw new IrUnsupportedException($"enum '{en.Name}' has no member '{member}'");
+    }
+
+    /// <summary>Lower an anonymous struct literal <c>.{ .f = v, … }</c> against the struct
+    /// type its sink names (Zig's result-location inference). Each <c>.field = value</c>
+    /// pairs the field with its declared type (looked up via
+    /// <see cref="IrBuilder.StructFieldType"/>) so the value coerces as C would at the
+    /// store; the value is itself lowered at that field type as its sink (so a nested
+    /// <c>.{…}</c> or <c>.member</c> resolves). An omitted field takes C#'s zero default —
+    /// matching C's partial-init / Zig's required-field rule isn't enforced in D1. An empty
+    /// <c>.{}</c> zero-inits every field.</summary>
+    private CExpr LowerStructInit(Item initItem, CType? sink)
+    {
+        if (sink?.Unqualified is not CType.Named named)
+        {
+            throw new IrUnsupportedException(
+                "zig anonymous struct literal `.{…}` needs a known struct result type (a typed const/var, a return, or a field)");
+        }
+        var members = new List<FieldInit>();
+        if (initItem.Content is Zig.AnonStructInit a)   // Primary -> '.' '{' FieldInits '}'
+        {
+            foreach (var fiItem in Flatten(a.Arg2))
+            {
+                var fi = (Zig.FieldInit)fiItem.Content!;   // FieldInit -> '.' IDENT '=' Expr
+                var fname = Tok(fi.Arg1);
+                var ftype = _ir.StructFieldType(named, fname)
+                    ?? throw new IrUnsupportedException($"struct '{named.Name}' has no field '{fname}'");
+                members.Add(new FieldInit(fname, ftype, LowerExprSink(fi.Arg3, ftype)));
+            }
+        }
+        return new StructInit(members) { Type = named };
+    }
+
+    /// <summary>Lower an expression that has a known result type (a "sink"): the two
+    /// result-located Zig forms — a bare enum literal <c>.member</c> and an anonymous struct
+    /// literal <c>.{…}</c> — need that type to resolve, so they're dispatched here; every
+    /// other expression ignores the sink and lowers via <see cref="LowerExpr"/> (the backend
+    /// still coerces at the store). Used at each typed sink: a typed decl init, a
+    /// <c>return</c>, an assignment target, a switch case value, a struct-literal field.</summary>
+    private CExpr LowerExprSink(Item expr, CType? sink)
+    {
+        switch (expr.Content)
+        {
+            case Zig.EnumLit el when sink?.Unqualified is CType.Enum en:  // '.' IDENT
+                return ResolveEnumLit(Tok(el.Arg1), en);
+            case Zig.AnonStructInit:
+            case Zig.AnonStructInitEmpty:
+                return LowerStructInit(expr, sink);
+            default:
+                return LowerExpr(expr);
+        }
+    }
+
     // ---- statements ------------------------------------------------------
 
     private Block LowerBlock(Item block)
@@ -238,7 +432,7 @@ internal sealed class ZigLowering
                     return new ExprStmt(LowerExpr(a.Arg2));
                 }
                 var target = LowerExpr(a.Arg0);
-                var value = LowerExpr(a.Arg2);
+                var value = LowerExprSink(a.Arg2, target.Type);   // target type is the sink (`x = .member;`)
                 return new ExprStmt(new Assign(null, target, value) { Type = target.Type });
             }
 
@@ -300,8 +494,11 @@ internal sealed class ZigLowering
 
     private DeclStmt DeclOf(Item nameTok, Item? typeItem, Item initExpr)
     {
-        var init = LowerExpr(initExpr);
-        var type = typeItem is not null ? LowerType(typeItem) : (init.Type ?? CType.Int);
+        // Compute the declared type FIRST: a result-located init (`.member` / `.{…}`) needs
+        // it as its sink, so resolve the annotation before lowering the initializer.
+        var declared = typeItem is not null ? LowerType(typeItem) : null;
+        var init = LowerExprSink(initExpr, declared);
+        var type = declared ?? init.Type ?? CType.Int;
         var sym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = type });
         return new DeclStmt(new List<LocalDecl> { new(sym, init) });
     }
@@ -319,7 +516,7 @@ internal sealed class ZigLowering
         foreach (var prongItem in Flatten(prongsItem))
         {
             var p = (Zig.Prong)prongItem.Content!;            // CaseVals=Arg0, '=>'=Arg1, Block=Arg2
-            var labels = LowerCaseVals(p.Arg0);
+            var labels = LowerCaseVals(p.Arg0, subject.Type); // case values compare against the subject
             var body = new List<CStmt> { LowerBlock(p.Arg2) }; // the braced block, scoped
             if (!EndsInJump(body)) { body.Add(new Break()); }  // no Zig fall-through
             sections.Add(new SwitchSection(labels, body));
@@ -328,15 +525,17 @@ internal sealed class ZigLowering
     }
 
     /// <summary>Lower a prong's case values to switch labels: <c>else</c> → the single null
-    /// (default) label; otherwise each comma-separated value Expr → one constant label.</summary>
-    private List<SwitchLabel> LowerCaseVals(Item caseVals)
+    /// (default) label; otherwise each comma-separated value Expr → one constant label,
+    /// lowered against the subject type as its sink (so a <c>.member</c> case resolves when
+    /// switching on an enum).</summary>
+    private List<SwitchLabel> LowerCaseVals(Item caseVals, CType? sink)
     {
         if (caseVals.Content is Zig.CaseElse)
         {
             return new List<SwitchLabel> { new SwitchLabel(null) };
         }
         var labels = new List<SwitchLabel>();
-        foreach (var v in Flatten(caseVals)) { labels.Add(new SwitchLabel(LowerExpr(v))); }
+        foreach (var v in Flatten(caseVals)) { labels.Add(new SwitchLabel(LowerExprSink(v, sink))); }
         return labels;
     }
 
@@ -371,7 +570,9 @@ internal sealed class ZigLowering
             if (v.Type.Unqualified is CType.ErrorUnion) { return new Return(v); }
             return new Return(new ErrUnionOk(v) { Type = eu });
         }
-        return new Return(LowerExpr(valueItem));
+        // The return type is the sink, so `return .member;` / `return .{…};` resolve against
+        // a struct/enum-returning function.
+        return new Return(LowerExprSink(valueItem, _currentFnRet));
     }
 
     /// <summary>Lower <c>return;</c>. In a <c>!void</c> function it is a success error union
@@ -484,9 +685,39 @@ internal sealed class ZigLowering
                 return new ZigTry(inner) { Type = eu.Payload };
             }
 
+            // `base.field` (Suffix '.' IDENT) — two meanings split here. When the base is a
+            // bare identifier naming a registered ENUM type, it's `EnumName.member` → an
+            // EnumConstRef. Otherwise it's struct field access on a value/pointer; Zig has no
+            // `->`, so `p.x` on a pointer auto-derefs (emit `->`). The field type comes from
+            // the shared aggregate table.
+            case Zig.Field fld:
+            {
+                var fieldName = Tok(fld.Arg2);
+                if (fld.Arg0.Content is Zig.Ident bid
+                    && _containerTypes.TryGetValue(Tok(bid.Arg0), out var baseTy)
+                    && baseTy.Unqualified is CType.Enum en)
+                {
+                    return ResolveEnumLit(fieldName, en);
+                }
+                var structExpr = LowerExpr(fld.Arg0);
+                var ftype = _ir.StructFieldType(structExpr.Type, fieldName)
+                    ?? throw new IrUnsupportedException($"no field '{fieldName}' on type {structExpr.Type.Describe()}");
+                var arrow = structExpr.Type.Unqualified is CType.Pointer;   // Zig `p.x` auto-derefs
+                return new Member(structExpr, fieldName, arrow) { Type = ftype, IsLValue = true };
+            }
+
+            // A bare enum literal `.member` or anonymous struct literal `.{…}` outside a
+            // typed sink — Zig requires a known result type for both, so reject loudly here
+            // (the sink-aware paths in LowerExprSink handle the valid cases).
+            case Zig.EnumLit:
+                throw new IrUnsupportedException(
+                    "zig enum literal `.member` needs a known result type (use a typed declaration, a return, an assignment, or a switch on the enum)");
+            case Zig.AnonStructInit:
+            case Zig.AnonStructInitEmpty:
+                throw new IrUnsupportedException(
+                    "zig anonymous struct literal `.{…}` needs a known struct result type (a typed const/var, a return, or a field)");
+
             // Postfix deref `p.*` and subscript `a[i]` → the C Unary(Deref)/Index IR.
-            // Field access `.field` (Zig.Field) stays deferred — it needs struct field
-            // types (Milestone E).
             case Zig.Deref d:
             {
                 var operand = LowerExpr(d.Arg0);
@@ -532,17 +763,33 @@ internal sealed class ZigLowering
             case Zig.BuiltinCall b:
             {
                 var bname = Tok(b.Arg0);
-                if (bname != "@as")
-                {
-                    throw new IrUnsupportedException($"zig builtin '{bname}' not lowered yet (only @as is supported)");
-                }
                 var bargs = Flatten(b.Arg2);
-                if (bargs.Count != 2)
+                switch (bname)
                 {
-                    throw new IrUnsupportedException($"zig `@as` expects (type, value); got {bargs.Count} argument(s)");
+                    case "@as":
+                        // `@as(T, expr)` — the explicit-type cast → the C Cast IR.
+                        if (bargs.Count != 2)
+                        {
+                            throw new IrUnsupportedException($"zig `@as` expects (type, value); got {bargs.Count} argument(s)");
+                        }
+                        var target = LowerType(bargs[0]);
+                        return new Cast(target, LowerExpr(bargs[1])) { Type = target };
+                    case "@intFromEnum":
+                        // `@intFromEnum(e)` — the enum's integer value → decay to the
+                        // underlying type (the same Cast the backend uses for C's enum→int).
+                        if (bargs.Count != 1)
+                        {
+                            throw new IrUnsupportedException($"zig `@intFromEnum` expects (enum); got {bargs.Count} argument(s)");
+                        }
+                        var operand = LowerExpr(bargs[0]);
+                        if (operand.Type.Unqualified is not CType.Enum en)
+                        {
+                            throw new IrUnsupportedException("zig `@intFromEnum` expects an enum operand");
+                        }
+                        return new Cast(en.Underlying, operand) { Type = en.Underlying };
+                    default:
+                        throw new IrUnsupportedException($"zig builtin '{bname}' not lowered yet (only @as / @intFromEnum are supported)");
                 }
-                var target = LowerType(bargs[0]);
-                return new Cast(target, LowerExpr(bargs[1])) { Type = target };
             }
 
             // `null` — reuse the C null-pointer node (renders C# `null`, valid for BOTH a
@@ -634,7 +881,14 @@ internal sealed class ZigLowering
 
         var argItems = argListItem is null ? new List<Item>() : Flatten(argListItem);
         var args = new List<CExpr>(argItems.Count);
-        foreach (var a in argItems) { args.Add(LowerExpr(a)); }
+        // Each fixed argument's parameter type is its sink (Zig result-locates a call
+        // argument), so `f(.member)` / `f(.{…})` resolve against the parameter. A variadic
+        // tail argument has no fixed parameter type → no sink (plain LowerExpr).
+        for (var i = 0; i < argItems.Count; i++)
+        {
+            var paramSink = i < fn.Params.Count ? fn.Params[i] : null;
+            args.Add(LowerExprSink(argItems[i], paramSink));
+        }
         // A variadic callee (printf) needs AT LEAST the fixed params; the rest are the
         // variadic tail. A fixed-arity callee needs an exact match.
         var arityOk = fn.Variadic ? args.Count >= fn.Params.Count : args.Count == fn.Params.Count;
@@ -740,7 +994,7 @@ internal sealed class ZigLowering
 
     private CType LowerType(Item type) => type.Content switch
     {
-        Zig.Ident id => LowerPrim(Tok(id.Arg0)),
+        Zig.Ident id => LowerTypeName(Tok(id.Arg0)),
         // Pointer types. `*T` and the C-pointer `[*c]T` both lower to a plain
         // `T*` (the C-pointer's null/arithmetic semantics ARE C's pointer). The
         // pointee `const` rides as a TypeQual so const-correctness sees it; it
@@ -761,6 +1015,13 @@ internal sealed class ZigLowering
         Zig.ErrUnion eu => new CType.ErrorUnion(LowerType(eu.Arg2)),
         _ => throw new IrUnsupportedException("zig type: " + (type.Content?.GetType().Name ?? "null")),
     };
+
+    /// <summary>Resolve a Zig type spelled as a bare identifier: a registered container
+    /// (struct → <see cref="CType.Named"/>, enum → <see cref="CType.Enum"/>) wins over the
+    /// primitive table, so a user type name resolves before <see cref="LowerPrim"/> would
+    /// throw on it.</summary>
+    private CType LowerTypeName(string name) =>
+        _containerTypes.TryGetValue(name, out var ct) ? ct : LowerPrim(name);
 
     /// <summary>Lower a Zig optional payload type: a pointer payload stays a bare nullable
     /// pointer (the niche); any other payload is wrapped in <see cref="CType.Optional"/>
@@ -839,6 +1100,15 @@ internal sealed class ZigLowering
                 case Zig.ProngsOne o:  stack.Push(o.Arg0); break;
                 case Zig.CaseValsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [Expr, ',', CaseVals]
                 case Zig.CaseValsOne o:  stack.Push(o.Arg0); break;
+                case Zig.FieldDeclsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [FieldDecls, ',', FieldDecl] (left-recursive)
+                case Zig.FieldDeclsOne o:  stack.Push(o.Arg0); break;
+                case Zig.FieldDeclsTrail t: stack.Push(t.Arg0); break;                     // [FieldDecls, ','] trailing comma
+                case Zig.EnumFieldsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [EnumFields, ',', EnumField]
+                case Zig.EnumFieldsOne o:  stack.Push(o.Arg0); break;
+                case Zig.EnumFieldsTrail t: stack.Push(t.Arg0); break;
+                case Zig.FieldInitsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [FieldInits, ',', FieldInit]
+                case Zig.FieldInitsOne o:  stack.Push(o.Arg0); break;
+                case Zig.FieldInitsTrail t: stack.Push(t.Arg0); break;
                 default: ordered.Add(n); break;
             }
         }

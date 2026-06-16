@@ -298,4 +298,102 @@ public sealed class ZigFrontendTests
         cs.ShouldContain("i < (ulong)");          // unsigned-clean bound comparison
         cs.ShouldContain("i++");                  // the increment
     }
+
+    [Fact]
+    public void Lowers_struct_decl_field_access_and_anonymous_literal()
+    {
+        // `const Point = struct { x: i32, y: i32 };` → a real C# `unsafe struct Point` with
+        // typed fields (the SAME shared aggregate machinery the C frontend uses). A typed
+        // `const p: Point = .{ .x = 40, .y = 2 };` is Zig's result-located literal → a C#
+        // object initializer `new Point { x = 40, y = 2 }`; `p.x` reads the field by type.
+        var cs = EmitZig(
+            "const Point = struct { x: i32, y: i32 };\n" +
+            "pub fn main() u8 { const p: Point = .{ .x = 40, .y = 2 }; return @as(u8, p.x + p.y); }\n");
+        cs.ShouldContain("unsafe struct Point");   // struct → C# struct (shared StructText)
+        cs.ShouldContain("public int x;");          // i32 field
+        cs.ShouldContain("new Point {");            // `.{…}` → object initializer
+        cs.ShouldContain("x = 40");                 // designated field init
+        cs.ShouldContain("p.x");                    // field access by type
+        cs.ShouldContain("p.y");
+    }
+
+    [Fact]
+    public void Lowers_struct_field_access_through_a_pointer_with_arrow()
+    {
+        // Zig has no `->`: `p.x` on a `*Point` auto-derefs. The shared `Member` node carries
+        // an arrow flag, so a pointer base emits C#'s `p->x` (valid on an unsafe struct ptr).
+        var cs = EmitZig(
+            "const Point = struct { x: i32, y: i32 };\n" +
+            "fn getx(p: *Point) i32 { return p.x; }\n" +
+            "pub fn main() u8 { var pt: Point = .{ .x = 7, .y = 0 }; return @as(u8, getx(&pt)); }\n");
+        cs.ShouldContain("getx(Point* p)");   // *Point param
+        cs.ShouldContain("p->x");              // pointer field access auto-derefs
+    }
+
+    [Fact]
+    public void Lowers_enum_decl_and_dotted_member_access()
+    {
+        // `const Color = enum(u8) { red, green, blue };` → a C# `enum Color : byte` with
+        // auto-incremented members. `Color.blue` resolves to an EnumConstRef → `Color.blue`;
+        // `@intFromEnum` decays it to the underlying integer (the C-enum→int decay reused).
+        var cs = EmitZig(
+            "const Color = enum(u8) { red, green, blue };\n" +
+            "pub fn main() u8 { return @intFromEnum(Color.blue); }\n");
+        cs.ShouldContain("enum Color : byte");   // enum → C# enum with underlying
+        cs.ShouldContain("red = 0,");             // auto-increment from 0
+        cs.ShouldContain("blue = 2,");
+        cs.ShouldContain("Color.blue");           // dotted member access
+    }
+
+    [Fact]
+    public void Lowers_enum_literal_at_a_typed_sink_and_explicit_value()
+    {
+        // A bare `.green` literal resolves against its sink: a typed `const c: Color`. An
+        // explicit member value (`two = 2`) is const-evaluated; the next bare member
+        // auto-increments from it (`three` = 3).
+        var cs = EmitZig(
+            "const N = enum(u8) { zero, two = 2, three };\n" +
+            "const Color = enum { red, green };\n" +
+            "pub fn main() u8 { const c: Color = .green; return @intFromEnum(c) + @intFromEnum(N.three); }\n");
+        cs.ShouldContain("two = 2,");
+        cs.ShouldContain("three = 3,");    // auto-increment continues from the explicit value
+        cs.ShouldContain("Color.green");   // `.green` resolved at the typed sink
+    }
+
+    [Fact]
+    public void Lowers_switch_on_an_enum_with_dotted_cases()
+    {
+        // `switch (c) { .red => …, else => … }` on an enum: the subject + case labels decay
+        // to the underlying integer (shared enum-switch lowering), so the labels render as
+        // `case (int)Color.red:` and `default:` (the `else`).
+        var cs = EmitZig(
+            "const Color = enum { red, green, blue };\n" +
+            "fn rank(c: Color) u8 { switch (c) { .red => { return 1; }, .green => { return 2; }, else => { return 9; }, } }\n" +
+            "pub fn main() u8 { return rank(.green); }\n");
+        cs.ShouldContain("switch (");
+        cs.ShouldContain("Color.red");    // dotted case label (decayed: `case (int)Color.red:`)
+        cs.ShouldContain("default:");      // `else` prong
+    }
+
+    [Fact]
+    public void Rejects_an_unknown_struct_field()
+    {
+        // A `.field` not declared on the struct is a structural error (real zig: "no field
+        // named …"). dotcc fails loudly via the shared field-type lookup rather than guessing.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const Point = struct { x: i32 };\n" +
+            "pub fn main() u8 { const p: Point = .{ .x = 1 }; return @as(u8, p.z); }\n"));
+        ex.Message.ShouldContain("field");
+    }
+
+    [Fact]
+    public void Rejects_a_bare_enum_literal_without_a_sink()
+    {
+        // A bare `.member` with no known result type can't pick an enum — real zig needs the
+        // result type. dotcc rejects rather than miscompiling (an untyped `const`).
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const Color = enum { red, green };\n" +
+            "pub fn main() u8 { const c = .red; _ = c; return 0; }\n"));
+        ex.Message.ShouldContain("result type");
+    }
 }

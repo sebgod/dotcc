@@ -146,6 +146,31 @@ public sealed class ZigOracleTests
         // The `|_|` discard form — count 5 iterations into a u8 (no usize arithmetic). → 5.
         new object[] { "for_range_count",
             "pub fn main() u8 { var sum: u8 = 0; for (0..5) |_| { sum = sum + 1; } return sum; }\n", 5, "" },
+        // STRUCTS (Milestone D1). A `struct` decl + a result-located `.{…}` literal +
+        // field reads — built on the SAME C# struct machinery the C frontend uses.
+        new object[] { "struct_field",
+            "const Point = struct { x: u8, y: u8 };\n" +
+            "pub fn main() u8 { const p: Point = .{ .x = 40, .y = 2 }; return p.x + p.y; }\n", 42, "" },
+        // A `*Point` parameter + `p.x` (Zig auto-derefs a pointer field access → C# `->`).
+        new object[] { "struct_ptr",
+            "const Point = struct { x: u8, y: u8 };\n" +
+            "fn sum(p: *Point) u8 { return p.x + p.y; }\n" +
+            "pub fn main() u8 { var pt: Point = .{ .x = 30, .y = 12 }; return sum(&pt); }\n", 42, "" },
+        // ENUMS (Milestone D1). A typed `enum(u8)` + a sink-typed `.blue` literal +
+        // `@intFromEnum` (the enum→int decay). blue = 2 → 2 + 40 = 42.
+        new object[] { "enum_value",
+            "const Color = enum(u8) { red, green, blue };\n" +
+            "pub fn main() u8 { const c: Color = .blue; return @intFromEnum(c) + 40; }\n", 42, "" },
+        // Explicit member value + auto-increment continuation: a = 40, b = 41, c = 42.
+        new object[] { "enum_explicit",
+            "const E = enum(u8) { a = 40, b, c };\n" +
+            "pub fn main() u8 { return @intFromEnum(E.c); }\n", 42, "" },
+        // `switch` on an enum with dotted `.member` cases (subject + labels decay to the
+        // underlying int). `else` makes it exhaustive. rank(.green) → 42.
+        new object[] { "enum_switch",
+            "const Color = enum { red, green, blue };\n" +
+            "fn rank(c: Color) u8 { switch (c) { .red => { return 1; }, .green => { return 42; }, else => { return 3; }, } }\n" +
+            "pub fn main() u8 { return rank(.green); }\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

@@ -138,6 +138,15 @@ symbols:
   # --- range for (Milestone C3; appended — never reorder) ---
   - 'for'        # 91  `for (a..b) |i| …` range loop
   - '..'         # 92  range operator (for-range; slicing later)
+  # --- structs & enums (Milestone D1; appended — never reorder) ---
+  - 'struct'     # 93  `const P = struct { … };` container decl
+  - 'enum'       # 94  `const C = enum(u8) { … };` container decl
+  - FieldDecls   # 95  struct field list (left-recursive, clean trailing comma)
+  - FieldDecl    # 96  one struct field: `name: Type`
+  - EnumFields   # 97  enum member list (left-recursive, clean trailing comma)
+  - EnumField    # 98  one enum member: `name` or `name = value`
+  - FieldInits   # 99  anonymous struct-literal init list
+  - FieldInit    # 100 one field init: `.name = expr`
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -161,6 +170,17 @@ productions:
       # library-name string and a `!T` error-union return are deferred.
       - { lhs: Decl, rhs: ['extern', 'fn', IDENT, '(', Params, ')', Type, ';'], action: externFnProto }
       - { lhs: Decl, rhs: ['extern', 'fn', IDENT, '(', ')', Type, ';'],         action: externFnProtoNoArgs }
+      # Container decls — Zig binds a struct/enum TYPE to a `const` name (types are
+      # values). A struct/enum RHS isn't an `RhsExpr`, so these are distinct Decl forms,
+      # NOT VarDecl: the `struct`/`enum` keyword right after `=` is a clean 1-token shift
+      # decision (no `RhsExpr` starts with `struct`/`enum`). Top-level only in D1 (a
+      # container `const` inside a function body is deferred — it'd need these on Stmt too).
+      # An empty `struct {}` (a zero-size marker / namespace) is allowed; `enum {}` is not
+      # (Zig rejects a memberless enum). The fixed-underlying form is `enum(u8) { … }`.
+      - { lhs: Decl, rhs: ['const', IDENT, '=', 'struct', '{', FieldDecls, '}', ';'],          action: structDecl }
+      - { lhs: Decl, rhs: ['const', IDENT, '=', 'struct', '{', '}', ';'],                       action: structDeclEmpty }
+      - { lhs: Decl, rhs: ['const', IDENT, '=', 'enum', '{', EnumFields, '}', ';'],             action: enumDecl }
+      - { lhs: Decl, rhs: ['const', IDENT, '=', 'enum', '(', Type, ')', '{', EnumFields, '}', ';'], action: enumDeclTyped }
 
   # FnProto (subset): `fn name(params) RetType Block`. RetType may carry the
   # inferred-error-set leading `!` (`fn f() !void`), distinct from ErrUnion's
@@ -385,6 +405,11 @@ productions:
       - { lhs: Primary, rhs: [BUILTIN, '(', ')'],           action: builtinCallNoArgs }
       - { lhs: Primary, rhs: ['null'],              action: nullLit }
       - { lhs: Primary, rhs: ['.', IDENT],          action: enumLit }
+      # Anonymous struct literal `.{ … }` (Milestone D1). The leading `.` is the SAME token
+      # as enumLit's; they split cleanly on the next symbol (`{` → struct literal, IDENT →
+      # enum literal). An empty `.{}` zero-inits the (sink-typed) struct.
+      - { lhs: Primary, rhs: ['.', '{', FieldInits, '}'], action: anonStructInit }
+      - { lhs: Primary, rhs: ['.', '{', '}'],             action: anonStructInitEmpty }
       # `error.Foo` — an error-value literal. `error` is a distinct keyword token, so this
       # never collides with the `Suffix '.' IDENT` field access (which starts from a
       # Primary/IDENT). V1: error SETS aren't modelled (`error{A,B}` decls deferred); a bare
@@ -417,6 +442,49 @@ productions:
       - { lhs: CaseVals, rhs: [Expr],                 action: caseValsOne }
       - { lhs: CaseVals, rhs: ['else'],               action: caseElse }
 
+  # ===== struct / enum bodies (Milestone D1) =====
+  # Struct field list — LEFT-recursive so the optional trailing comma is a clean 1-token
+  # shift decision (after `FieldDecls ','`: another FieldDecl → continue, `}` → reduce the
+  # trailing-comma form). Mirrors the C grammar's EnumList{Cons,One,Trail} shape.
+  - derivation: leftmost
+    rules:
+      - { lhs: FieldDecls, rhs: [FieldDecls, ',', FieldDecl], action: fieldDeclsCons }
+      - { lhs: FieldDecls, rhs: [FieldDecl],                   action: fieldDeclsOne }
+      - { lhs: FieldDecls, rhs: [FieldDecls, ','],             action: fieldDeclsTrail }
+
+  - derivation: none
+    rules:
+      - { lhs: FieldDecl, rhs: [IDENT, ':', Type], action: structField }
+
+  # Enum member list — same trailing-comma shape. A member is a bare name (auto-increment
+  # from the previous, starting at 0) or `name = value` (a constant Expr; D1 const-evals
+  # int literals + unary +/- of one).
+  - derivation: leftmost
+    rules:
+      - { lhs: EnumFields, rhs: [EnumFields, ',', EnumField], action: enumFieldsCons }
+      - { lhs: EnumFields, rhs: [EnumField],                   action: enumFieldsOne }
+      - { lhs: EnumFields, rhs: [EnumFields, ','],             action: enumFieldsTrail }
+
+  - derivation: none
+    rules:
+      - { lhs: EnumField, rhs: [IDENT],            action: enumField }
+      - { lhs: EnumField, rhs: [IDENT, '=', Expr], action: enumFieldInit }
+
+  # Anonymous struct literal `.{ .f = v, … }` — Zig's result-located init, where the type
+  # is inferred from the sink (a typed `const`/`var`, a `return`, a field's declared type).
+  # The leading `.{` is lexically `.` then `{`, distinct from `IDENT {` — so it sidesteps
+  # the `fn f() RetType {` shift/reduce conflict a typed `T{…}` literal would create (the
+  # return-type IDENT vs the body brace). An empty `.{}` zero-inits every field.
+  - derivation: leftmost
+    rules:
+      - { lhs: FieldInits, rhs: [FieldInits, ',', FieldInit], action: fieldInitsCons }
+      - { lhs: FieldInits, rhs: [FieldInit],                   action: fieldInitsOne }
+      - { lhs: FieldInits, rhs: [FieldInits, ','],             action: fieldInitsTrail }
+
+  - derivation: none
+    rules:
+      - { lhs: FieldInit, rhs: ['.', IDENT, '=', Expr], action: fieldInit }
+
 lexer:
   root:
     # Comments first. Zig line comments `//...` (incl. `///` doc comments) — ignored
@@ -445,6 +513,8 @@ lexer:
     - { symbol: 'continue', match: 'continue' }
     - { symbol: 'switch',   match: 'switch' }
     - { symbol: 'for',      match: 'for' }
+    - { symbol: 'struct',   match: 'struct' }
+    - { symbol: 'enum',     match: 'enum' }
 
     # Multi-char operators (longest-match handles overlaps; listed first for clarity).
     - { symbol: '==', match: '==' }

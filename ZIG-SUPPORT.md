@@ -58,6 +58,8 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `?T` optional | ✅ | `?*T` → bare nullable `T*` (niche); `?T` over a value → C# `Nullable<T>`. `null`/`.?`/`orelse` below |
 | `[]T` slice | 🚧 | parses; the fat-struct lowering is not built |
 | `[N]T` array | 🚧 | parses; does not lower |
+| `const P = struct { … };` | ✅ | container decl (top-level) → a real C# `unsafe struct` via the SHARED aggregate machinery the C frontend uses. Data-only fields; methods (UFCS) + tagged unions are later D slices. Empty `struct {}` allowed; `pub`-wrapped + in-function containers deferred |
+| `const C = enum(T) { … };` / `enum { … }` | ✅ | container decl → C# `enum C : T` (default underlying `int`); members auto-increment or take an explicit constant value. `@intFromEnum` decays to the underlying int |
 | `E!T` / `!T` error-union type | ✅ | → runtime `ErrUnion<Payload>` (`ErrUnion<Unit>` for `!void`). V1 erases the error SET `E` — `anyerror!T` / named `E!T` lower identically (payload only) |
 | `comptime_int`/`comptime_float`, arbitrary `iN`/`uN` | 🚫 | |
 | `[*]T` many-item, `[*:s]T` sentinel | 🚫 | only `[*c]` is tokenized |
@@ -70,7 +72,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `while (c) …` | ✅ | (no payload capture yet) |
 | `while (c) : (cont) …` | ✅ | the continue-expression → the C IR `for`-post, so `continue` runs `cont` (faithful to Zig). The common assignment cont `: (i = i + 1)` and a bare-expr cont both parse |
 | `break;` / `continue;` | ✅ | unlabeled — reuse the C IR loop-control nodes (labeled `break :blk` deferred) |
-| `switch (x) { v => {…}, a, b => {…}, else => {…} }` | ✅ | as a STATEMENT → the C IR Switch. Single / multi-value / `else` (→ default) prongs; NO fall-through (each prong gets an appended `break`). Prong bodies must be braced **blocks**; bare-expr bodies, ranges (`a...b`), and switch-as-EXPRESSION are deferred |
+| `switch (x) { v => {…}, a, b => {…}, else => {…} }` | ✅ | as a STATEMENT → the C IR Switch. Single / multi-value / `else` (→ default) prongs; NO fall-through (each prong gets an appended `break`). Switching on an **enum** works (subject + `.member` labels decay to the underlying int). Prong bodies must be braced **blocks**; bare-expr bodies, ranges (`a...b`), payload capture `\|x\|`, and switch-as-EXPRESSION are deferred |
 | `return e;` / `return;` | ✅ | |
 | `x = e;` assignment | ✅ | |
 | `_ = e;` discard | ✅ | Zig's mandatory discard of a non-void result |
@@ -100,9 +102,11 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | prefix `try` | ✅ | unwrap an error union's payload, or PROPAGATE its error out of the enclosing `!T` fn (exception-based early-return, modeled on the setjmp lowering). `try e;` as a statement works too |
 | `e catch fallback` | ✅ | the payload on success, else the fallback. The fallback must be side-effect-free (literal / variable) — a non-trivial one is rejected (deferred), as is `catch \|e\| …` capture and `catch return` |
 | `error.Foo` | ✅ | an error value — only in `return error.Foo;` within a `!T` fn (a bare error value / error-set decls deferred) |
-| postfix `.field` | 🚧 | parse only — needs structs (Milestone E) |
+| postfix `.field` | ✅ | struct field access → the shared `Member` IR (field type from the aggregate table). Zig has no `->`, so `p.field` on a `*T` auto-derefs (emits C# `->`). `EnumName.member` resolves here too → an `EnumConstRef` |
+| `.{ .f = v, … }` (anonymous struct literal) | ✅ | result-located → `new T { f = v }` from the sink type (a typed decl, return, assignment, call arg, or field). Empty `.{}` zero-inits. Typed `T{…}` is deferred (it would conflict with `fn f() RetType {`) |
+| `.enumLiteral` | ✅ | a bare `.member` resolves against its sink (typed decl / return / assignment / call arg / switch subject) → an `EnumConstRef` (`EnumName.member`). Untyped (no sink) is rejected, as Zig requires |
+| `@intFromEnum(e)` | ✅ | the enum's integer value → decay to the underlying type (the C enum→int decay) |
 | other `@builtin(...)` (`@intCast`/`@ptrCast`/…) | 🚧 | parse only — Zig 0.16's forms are result-location-typed (single arg), needing context-type inference dotcc lacks |
-| `.enumLiteral` | 🚧 | parse only |
 | wrapping/saturating ops | 🚫 | |
 
 ## Lexer
@@ -114,10 +118,11 @@ program's libc call is handled. No `@cImport`, no header harvest.
 
 ## Out of scope (the dialect line)
 
-`comptime` (beyond const folding), generics / `anytype`, `@import("std")`,
-container decls (`struct`/`enum`/`union`/`opaque`), explicit error-SET declarations
-(`error{A,B}` — inferred `!T` + `error.X` ARE supported), anonymous init lists
-`.{…}`, `async`/`suspend`, inline assembly, destructuring assignment.
+`comptime` (beyond const folding), generics / `anytype`, `@import("std")`, struct
+**methods** (UFCS) + tagged `union(enum)` + `opaque` (later D slices; data-only
+`struct`/`enum` ARE supported), explicit error-SET declarations (`error{A,B}` —
+inferred `!T` + `error.X` ARE supported), typed `T{…}` init lists (anonymous `.{…}`
+IS supported), `async`/`suspend`, inline assembly, destructuring assignment.
 
 ## Mixed `.c` + `.zig` translation units
 
@@ -195,4 +200,5 @@ rejects, not silently accept more.
 - **Examples** — `examples/zig-hello`, `examples/zig-extern` (putchar),
   `examples/zig-printf` (variadic printf), `examples/zig-optional` (`?T` / `null` /
   `.?` / `orelse`), `examples/zig-errunion` (`!T` / `try` / `catch` / `error.X`),
-  `examples/zig-controlflow` (while-cont / `break` / `continue` / `switch` / range-`for`).
+  `examples/zig-controlflow` (while-cont / `break` / `continue` / `switch` / range-`for`),
+  `examples/zig-struct` (`struct` + `.{…}` + field access, `enum` + `.member` + `@intFromEnum` + enum `switch`).
