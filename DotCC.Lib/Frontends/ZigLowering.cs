@@ -153,24 +153,29 @@ internal sealed class ZigLowering
         // `extern fn` prototype is declared in pass 1 too but has no body to lower.
         var decls = Flatten(root);
 
-        // Pass 0a: register every container NAME first (a struct as a `CType.Named`
+        // Container methods (struct/enum/union), collected across pass 0 as mangled
+        // `TypeName_method` free functions and declared in pass 1 (so a method body can
+        // forward-reference a sibling). A method is container-kind-agnostic at this point — it is
+        // keyed only by the container NAME (see DeclareMethod / LowerMethodCall).
+        var containerMethods = new List<(string container, Item fnDef)>();
+
+        // Pass 0a: register every container NAME first (a struct/union as a `CType.Named`
         // placeholder, an enum fully — enums are self-contained int constants), so pass 0b
-        // can resolve a struct field that points to a struct/enum declared further down.
+        // can resolve a struct field that points to a struct/enum declared further down. An enum
+        // is fully registered here (incl. its consts), so its methods are collected here too.
         foreach (var decl in decls)
         {
             switch (Unwrap(decl).Content)
             {
                 case Zig.StructDecl s:      _containerTypes[Tok(s.Arg1)] = new CType.Named(Tok(s.Arg1)); break;
                 case Zig.StructDeclEmpty s: _containerTypes[Tok(s.Arg1)] = new CType.Named(Tok(s.Arg1)); break;
-                case Zig.EnumDecl e:        RegisterEnumZig(e.Arg1, null, e.Arg5); break;       // const IDENT = enum { EnumFields } ;
-                case Zig.EnumDeclTyped e:   RegisterEnumZig(e.Arg1, e.Arg5, e.Arg8); break;     // const IDENT = enum ( Type ) { EnumFields } ;
+                case Zig.EnumDecl e:        foreach (var m in RegisterEnumZig(e.Arg1, null, e.Arg5)) { containerMethods.Add((Tok(e.Arg1), m)); } break;       // const IDENT = enum { EnumFields } ;
+                case Zig.EnumDeclTyped e:   foreach (var m in RegisterEnumZig(e.Arg1, e.Arg5, e.Arg8)) { containerMethods.Add((Tok(e.Arg1), m)); } break;     // const IDENT = enum ( Type ) { EnumFields } ;
                 case Zig.UnionDeclEnum u:   _containerTypes[Tok(u.Arg1)] = new CType.Named(Tok(u.Arg1)); break;  // const IDENT = union(enum) { … } ;
             }
         }
-        // Pass 0b: build struct field layouts (field types now resolve through 0a) and split
-        // each struct body into fields (for the layout) and methods (declared as free functions
-        // in pass 1 — see `structMethods`).
-        var structMethods = new List<(string container, Item fnDef)>();
+        // Pass 0b: build struct field layouts (field types now resolve through 0a), register each
+        // struct's/union's consts, and collect their methods.
         foreach (var decl in decls)
         {
             switch (Unwrap(decl).Content)
@@ -180,11 +185,11 @@ internal sealed class ZigLowering
                     var (fields, methods, consts) = SplitMembers(s.Arg5);
                     RegisterStruct(Tok(s.Arg1), fields);
                     RegisterContainerConsts(Tok(s.Arg1), consts);
-                    foreach (var m in methods) { structMethods.Add((Tok(s.Arg1), m)); }
+                    foreach (var m in methods) { containerMethods.Add((Tok(s.Arg1), m)); }
                     break;
                 }
                 case Zig.StructDeclEmpty s: RegisterStruct(Tok(s.Arg1), System.Array.Empty<Item>()); break;  // const IDENT = struct { } ;
-                case Zig.UnionDeclEnum u:   RegisterUnion(Tok(u.Arg1), u.Arg8); break;                       // const IDENT = union(enum) { UnionVariants } ;
+                case Zig.UnionDeclEnum u:   foreach (var m in RegisterUnion(Tok(u.Arg1), u.Arg8)) { containerMethods.Add((Tok(u.Arg1), m)); } break;  // const IDENT = union(enum) { UnionMembers } ;
             }
         }
 
@@ -209,7 +214,7 @@ internal sealed class ZigLowering
                 default: throw new IrUnsupportedException("zig top-level decl: " + (d.Content?.GetType().Name ?? "null"));
             }
         }
-        foreach (var (container, fnDef) in structMethods) { entries.Add(DeclareMethod(container, fnDef)); }
+        foreach (var (container, fnDef) in containerMethods) { entries.Add(DeclareMethod(container, fnDef)); }
 
         // Pass 2: bodies. `_currentContainer` is set for a method body so its `@This()` resolves.
         foreach (var (sym, ps, body, container) in entries)
@@ -421,6 +426,56 @@ internal sealed class ZigLowering
         return (fields, methods, consts);
     }
 
+    /// <summary>Split an enum body (<c>EnumFields</c> = a list of <c>EnumMember</c>) into its value
+    /// fields (each a <see cref="Zig.EnumField"/> / <see cref="Zig.EnumFieldInit"/>), its methods
+    /// (the inner <c>FnDef</c> of each <c>fn</c>/<c>pub fn</c> member), and its <c>const</c> members
+    /// (each a <c>VarDecl</c>) — the enum analogue of <see cref="SplitMembers"/>.</summary>
+    private static (List<Item> fields, List<Item> methods, List<Item> consts) SplitEnumMembers(Item membersItem)
+    {
+        var fields = new List<Item>();
+        var methods = new List<Item>();
+        var consts = new List<Item>();
+        foreach (var m in Flatten(membersItem))
+        {
+            switch (m.Content)
+            {
+                case Zig.EnumMemberField mf:     fields.Add(mf.Arg0); break;   // EnumField ','
+                case Zig.EnumMemberFieldLast mf: fields.Add(mf.Arg0); break;   // EnumField
+                case Zig.EnumMemberMethod mm:    methods.Add(mm.Arg0); break;  // FnDef
+                case Zig.EnumMemberPubMethod mm: methods.Add(mm.Arg1); break;  // 'pub' FnDef
+                case Zig.EnumMemberConst mc:     consts.Add(mc.Arg0); break;   // VarDecl
+                case Zig.EnumMemberPubConst mc:  consts.Add(mc.Arg1); break;   // 'pub' VarDecl
+                default: throw new IrUnsupportedException("zig enum member: " + (m.Content?.GetType().Name ?? "null"));
+            }
+        }
+        return (fields, methods, consts);
+    }
+
+    /// <summary>Split a union body (<c>UnionVariants</c> = a list of <c>UnionMember</c>) into its
+    /// variants (each a <see cref="Zig.UnionVariantPayload"/> / <see cref="Zig.UnionVariantVoid"/>),
+    /// its methods, and its <c>const</c> members — the union analogue of
+    /// <see cref="SplitMembers"/>.</summary>
+    private static (List<Item> variants, List<Item> methods, List<Item> consts) SplitUnionMembers(Item membersItem)
+    {
+        var variants = new List<Item>();
+        var methods = new List<Item>();
+        var consts = new List<Item>();
+        foreach (var m in Flatten(membersItem))
+        {
+            switch (m.Content)
+            {
+                case Zig.UnionMemberVariant mv:     variants.Add(mv.Arg0); break;   // UnionVariant ','
+                case Zig.UnionMemberVariantLast mv: variants.Add(mv.Arg0); break;   // UnionVariant
+                case Zig.UnionMemberMethod mm:      methods.Add(mm.Arg0); break;    // FnDef
+                case Zig.UnionMemberPubMethod mm:   methods.Add(mm.Arg1); break;    // 'pub' FnDef
+                case Zig.UnionMemberConst mc:       consts.Add(mc.Arg0); break;     // VarDecl
+                case Zig.UnionMemberPubConst mc:    consts.Add(mc.Arg1); break;     // 'pub' VarDecl
+                default: throw new IrUnsupportedException("zig union member: " + (m.Content?.GetType().Name ?? "null"));
+            }
+        }
+        return (variants, methods, consts);
+    }
+
     /// <summary>Register a container's <c>const</c> members. V1 supports only the self-type alias
     /// <c>const Self = @This();</c> (any alias name; the RHS must be <c>@This()</c>): it records
     /// <c>alias → the container's own type</c> in <see cref="_selfAliases"/> so a method of this
@@ -467,11 +522,14 @@ internal sealed class ZigLowering
     /// variant at <c>[FieldOffset(0)]</c>, reusing the shared C union machinery); and the outer
     /// struct <c>U</c> = <c>{ __tag, __payload }</c>. A union with only void variants gets no
     /// <c>__payload</c>. Records the <see cref="ZigUnionInfo"/> for construction + <c>switch</c>.
-    /// Variant payload types resolve through pass 0a, so a variant may name any container.</summary>
-    private void RegisterUnion(string name, Item variantsItem)
+    /// Variant payload types resolve through pass 0a, so a variant may name any container. Returns
+    /// the body's method items (each a <c>FnDef</c>) for declaration in pass 1, and registers its
+    /// consts (e.g. <c>const Self = @This();</c> → the outer struct type).</summary>
+    private List<Item> RegisterUnion(string name, Item variantsItem)
     {
+        var (variantItems, methods, consts) = SplitUnionMembers(variantsItem);
         var variants = new List<(string name, CType? payload)>();
-        foreach (var v in Flatten(variantsItem))
+        foreach (var v in variantItems)
         {
             switch (v.Content)
             {
@@ -519,6 +577,8 @@ internal sealed class ZigLowering
         _ir.RegisterStructType(name, fields, isUnion: false);
 
         _unions[name] = new ZigUnionInfo(tagType, TagFieldName, payloadTypeName, PayloadFieldName, variantMap);
+        RegisterContainerConsts(name, consts);   // e.g. `const Self = @This();` → the outer struct type
+        return methods;
     }
 
     /// <summary>Register a Zig <c>enum</c> declaration: assign each member its value
@@ -527,16 +587,19 @@ internal sealed class ZigLowering
     /// <see cref="IrBuilder.RegisterEnumType"/>, and record a per-member
     /// <see cref="SymKind.EnumConst"/> symbol (so <c>Color.red</c> / a sink-typed
     /// <c>.red</c> resolve to an <see cref="EnumConstRef"/>). The underlying type is the
-    /// <c>enum(T)</c> base, else C's default <see cref="CType.Int"/>.</summary>
-    private void RegisterEnumZig(Item nameTok, Item? underlyingType, Item membersItem)
+    /// <c>enum(T)</c> base, else C's default <see cref="CType.Int"/>. Returns the body's method
+    /// items (each a <c>FnDef</c>) for declaration in pass 1, and registers its consts (e.g.
+    /// <c>const Self = @This();</c> → the enum type).</summary>
+    private List<Item> RegisterEnumZig(Item nameTok, Item? underlyingType, Item membersItem)
     {
         var name = Tok(nameTok);
+        var (fieldItems, methods, consts) = SplitEnumMembers(membersItem);
         var underlying = underlyingType is not null ? LowerType(underlyingType) : CType.Int;
         var enumType = new CType.Enum(name, underlying);
         var members = new List<EnumMember>();
         var memberSyms = new Dictionary<string, Symbol>(System.StringComparer.Ordinal);
         long next = 0;
-        foreach (var emItem in Flatten(membersItem))
+        foreach (var emItem in fieldItems)
         {
             string mName;
             Item? valExpr;
@@ -561,6 +624,8 @@ internal sealed class ZigLowering
         _ir.RegisterEnumType(name, underlying, members);
         _containerTypes[name] = enumType;
         _enumMembers[name] = memberSyms;
+        RegisterContainerConsts(name, consts);   // e.g. `const Self = @This();` → the enum type
+        return methods;
     }
 
     /// <summary>Const-fold a lowered enum-member initializer to its integer value, or null
@@ -1599,19 +1664,20 @@ internal sealed class ZigLowering
     {
         var methodName = Tok(fld.Arg2);
 
-        // (A) `Type.func(args)` — a bare-identifier base naming a registered struct type (or the
-        // self alias `Self`), and NOT a variable → the associated/static function; all arguments
-        // are explicit (no receiver). A self alias maps to the real container name so the method
-        // lookup and the mangled target match the explicit-name form.
+        // (A) `Type.func(args)` — a bare-identifier base naming a registered container type (a
+        // struct/union `Named`, an enum `Enum`, or the self alias `Self`), and NOT a variable →
+        // the associated/static function; all arguments are explicit (no receiver). A self alias
+        // maps to the real container name so the method lookup and the mangled target match the
+        // explicit-name form. (An `EnumName.member` non-call resolves to a tag constant earlier, in
+        // the Zig.Field case; this branch only fires for a CALL whose method is a function.)
         if (fld.Arg0.Content is Zig.Ident bid
             && TryLookupContainerType(Tok(bid.Arg0), out var baseTy)
-            && baseTy.Unqualified is CType.Named named0
+            && ContainerTypeName(baseTy) is { } typeName
             && _symbols.Resolve(Tok(bid.Arg0)) is null)
         {
-            var typeName = named0.Name;
             if (!_methods.TryGetValue(typeName, out var byType) || !byType.TryGetValue(methodName, out var staticSym))
             {
-                throw new IrUnsupportedException($"struct '{typeName}' has no function '{methodName}'");
+                throw new IrUnsupportedException($"'{typeName}' has no function '{methodName}'");
             }
             return BuildCall(staticSym, argItems, receiver: null);
         }
@@ -1637,17 +1703,31 @@ internal sealed class ZigLowering
         return BuildCall(msym, argItems, receiver);
     }
 
-    /// <summary>Resolve the struct name a receiver expression's type names — a
-    /// <see cref="CType.Named"/> value or a pointer to one (<c>Point</c> / <c>*Point</c>) — for
-    /// instance-method dispatch.</summary>
+    /// <summary>Resolve the container name a receiver expression's type names — a
+    /// <see cref="CType.Named"/> struct/union or a <see cref="CType.Enum"/>, as a value or a pointer
+    /// to one (<c>Point</c> / <c>*Point</c> / <c>Color</c> / <c>*Color</c>) — for instance-method
+    /// dispatch.</summary>
     private static bool TryContainerName(CType t, out string name)
     {
         var u = t.Unqualified;
         if (u is CType.Pointer p) { u = p.Pointee.Unqualified; }
-        if (u is CType.Named n) { name = n.Name; return true; }
-        name = "";
-        return false;
+        switch (u)
+        {
+            case CType.Named n: name = n.Name; return true;
+            case CType.Enum e:  name = e.Name; return true;
+            default: name = ""; return false;
+        }
     }
+
+    /// <summary>The container name a type names for static-call (<c>Type.func(…)</c>) dispatch — a
+    /// struct/union (<see cref="CType.Named"/>) or an enum (<see cref="CType.Enum"/>); null for any
+    /// other type.</summary>
+    private static string? ContainerTypeName(CType t) => t.Unqualified switch
+    {
+        CType.Named n => n.Name,
+        CType.Enum e  => e.Name,
+        _ => null,
+    };
 
     /// <summary>Adjust an instance-method receiver to the method's declared first-parameter form
     /// (Zig UFCS auto-ref/deref): a value receiver to a <c>*Self</c> method takes its address (a
@@ -1680,8 +1760,12 @@ internal sealed class ZigLowering
     /// boolean (the backend renders those as an integer-valued <c>(CBool)(…)</c>).</summary>
     private CExpr Bin(BinOp op, Item l, Item r)
     {
-        var left = LowerExpr(l);
-        var right = LowerExpr(r);
+        // `==` / `!=` may compare an enum value against a bare `.member` literal (`self == .red`),
+        // which Zig result-locates against the other operand's enum type — so those two operands
+        // get the enum-aware lowering; everything else lowers both sides plainly.
+        var (left, right) = op is BinOp.Eq or BinOp.Ne
+            ? LowerComparisonOperands(l, r)
+            : (LowerExpr(l), LowerExpr(r));
         var type = op switch
         {
             BinOp.Eq or BinOp.Ne or BinOp.Lt or BinOp.Gt or BinOp.Le or BinOp.Ge
@@ -1690,6 +1774,31 @@ internal sealed class ZigLowering
             _ => CType.UsualArithmetic(left.Type, right.Type),
         };
         return new Binary(op, left, right) { Type = type };
+    }
+
+    /// <summary>Lower the two operands of an <c>==</c> / <c>!=</c> comparison, result-locating a
+    /// bare enum literal <c>.member</c> against the OTHER operand's enum type — Zig's
+    /// <c>self == .red</c> (the idiomatic enum-method test). The concrete side is lowered first; if
+    /// it is enum-typed, the <c>.member</c> resolves to that enum's tag constant. When neither side
+    /// is a bare <c>.member</c> (or the concrete side isn't an enum), both lower normally — so a
+    /// bare literal with no enum partner still hits <see cref="LowerExpr"/>'s loud rejection.</summary>
+    private (CExpr left, CExpr right) LowerComparisonOperands(Item l, Item r)
+    {
+        if (r.Content is Zig.EnumLit rel && l.Content is not Zig.EnumLit)
+        {
+            var left = LowerExpr(l);
+            return left.Type.Unqualified is CType.Enum en
+                ? (left, ResolveEnumLit(Tok(rel.Arg1), en))
+                : (left, LowerExpr(r));
+        }
+        if (l.Content is Zig.EnumLit lel && r.Content is not Zig.EnumLit)
+        {
+            var right = LowerExpr(r);
+            return right.Type.Unqualified is CType.Enum en
+                ? (ResolveEnumLit(Tok(lel.Arg1), en), right)
+                : (LowerExpr(l), right);
+        }
+        return (LowerExpr(l), LowerExpr(r));
     }
 
     /// <summary>Lower a value-prefix unary op. <c>!x</c> yields an int (the backend
@@ -1907,12 +2016,10 @@ internal sealed class ZigLowering
                 case Zig.CaseValsOne o:  stack.Push(o.Arg0); break;
                 case Zig.FieldDeclsCons c: stack.Push(c.Arg1); stack.Push(c.Arg0); break;  // [Member, FieldDecls] (right-recursive)
                 case Zig.FieldDeclsOne o:  stack.Push(o.Arg0); break;
-                case Zig.EnumFieldsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [EnumFields, ',', EnumField]
+                case Zig.EnumFieldsCons c: stack.Push(c.Arg1); stack.Push(c.Arg0); break;  // [EnumMember, EnumFields] (right-recursive)
                 case Zig.EnumFieldsOne o:  stack.Push(o.Arg0); break;
-                case Zig.EnumFieldsTrail t: stack.Push(t.Arg0); break;
-                case Zig.UnionVariantsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [UnionVariants, ',', UnionVariant]
+                case Zig.UnionVariantsCons c: stack.Push(c.Arg1); stack.Push(c.Arg0); break;  // [UnionMember, UnionVariants] (right-recursive)
                 case Zig.UnionVariantsOne o:  stack.Push(o.Arg0); break;
-                case Zig.UnionVariantsTrail t: stack.Push(t.Arg0); break;
                 case Zig.FieldInitsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [FieldInits, ',', FieldInit]
                 case Zig.FieldInitsOne o:  stack.Push(o.Arg0); break;
                 case Zig.FieldInitsTrail t: stack.Push(t.Arg0); break;

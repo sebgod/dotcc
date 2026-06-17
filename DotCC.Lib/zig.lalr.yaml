@@ -157,6 +157,9 @@ symbols:
   - UnionVariant   # 105 one variant: `name: Type` (payload) or `name` (void / tag-only)
   # --- arrays (Milestone E follow-up; appended — never reorder) ---
   - 'undefined'    # 106 the `undefined` initializer (uninitialized storage — `var b: [N]T = undefined;`)
+  # --- enum / union methods (D2/D3 leftovers; appended — never reorder) ---
+  - EnumMember     # 107 one enum-body member: a value field (`name` / `name = v`), a method, or a const
+  - UnionMember    # 108 one union-body member: a variant (`name: T` / `name`), a method, or a const
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -529,29 +532,56 @@ productions:
     rules:
       - { lhs: FieldDecl, rhs: [IDENT, ':', Type], action: structField }
 
-  # Enum member list — same trailing-comma shape. A member is a bare name (auto-increment
-  # from the previous, starting at 0) or `name = value` (a constant Expr; D1 const-evals
-  # int literals + unary +/- of one).
+  # Enum body as a MEMBER list (right-recursive over EnumMember, like struct's FieldDecls) — so
+  # value members, methods (`fn`/`pub fn`), and consts (`const Self = @This();`) interleave. The
+  # `enumDecl`/`enumDeclTyped` rules reference EnumFields unchanged; it is now this member list.
   - derivation: leftmost
     rules:
-      - { lhs: EnumFields, rhs: [EnumFields, ',', EnumField], action: enumFieldsCons }
-      - { lhs: EnumFields, rhs: [EnumField],                   action: enumFieldsOne }
-      - { lhs: EnumFields, rhs: [EnumFields, ','],             action: enumFieldsTrail }
+      - { lhs: EnumFields, rhs: [EnumMember, EnumFields], action: enumFieldsCons }
+      - { lhs: EnumFields, rhs: [EnumMember],              action: enumFieldsOne }
+
+  # One enum-body member: a value field (a bare name = auto-increment from the previous starting at
+  # 0, or `name = value` const-Expr), with its own optional trailing comma; a method; or a const. A
+  # value field carries the comma here so `,` never leaks into the list recursion, and a method/const
+  # self-terminates — so `,` ∉ FOLLOW(EnumMember) and `derivation: none` is conflict-free (the same
+  # reasoning as a struct's Member). Member starts are disjoint: IDENT (field) / `fn` / `const`/`var`
+  # / `pub`.
+  - derivation: none
+    rules:
+      - { lhs: EnumMember, rhs: [EnumField, ','], action: enumMemberField }
+      - { lhs: EnumMember, rhs: [EnumField],       action: enumMemberFieldLast }
+      - { lhs: EnumMember, rhs: [FnDef],           action: enumMemberMethod }
+      - { lhs: EnumMember, rhs: ['pub', FnDef],    action: enumMemberPubMethod }
+      - { lhs: EnumMember, rhs: [VarDecl],         action: enumMemberConst }
+      - { lhs: EnumMember, rhs: ['pub', VarDecl],  action: enumMemberPubConst }
 
   - derivation: none
     rules:
       - { lhs: EnumField, rhs: [IDENT],            action: enumField }
       - { lhs: EnumField, rhs: [IDENT, '=', Expr], action: enumFieldInit }
 
-  # ===== tagged-union variants (Milestone D3) =====
-  # Same trailing-comma list shape as EnumFields/FieldDecls. A variant is `name: Type`
-  # (a payload) or a bare `name` (a void / tag-only variant). The `:` vs `,`/`}` after the
-  # IDENT is a clean shift/reduce decision (`:` ∉ FOLLOW(UnionVariant)).
+  # ===== tagged-union body (Milestone D3 + D2/D3-leftovers methods) =====
+  # A MEMBER list (right-recursive over UnionMember, like struct's FieldDecls) so variants,
+  # methods (`fn`/`pub fn`), and consts interleave. `unionDeclEnum` references UnionVariants
+  # unchanged; it is now this member list.
   - derivation: leftmost
     rules:
-      - { lhs: UnionVariants, rhs: [UnionVariants, ',', UnionVariant], action: unionVariantsCons }
-      - { lhs: UnionVariants, rhs: [UnionVariant],                      action: unionVariantsOne }
-      - { lhs: UnionVariants, rhs: [UnionVariants, ','],                action: unionVariantsTrail }
+      - { lhs: UnionVariants, rhs: [UnionMember, UnionVariants], action: unionVariantsCons }
+      - { lhs: UnionVariants, rhs: [UnionMember],                 action: unionVariantsOne }
+
+  # One union-body member: a variant (`name: Type` payload / bare `name` void) with its own
+  # optional trailing comma, a method, or a const. The `:` vs `,`/`}` after a variant IDENT is a
+  # clean shift/reduce decision, and a method/const self-terminates — so `,` ∉ FOLLOW(UnionMember)
+  # and `derivation: none` is conflict-free. Member starts are disjoint: IDENT (variant) / `fn` /
+  # `const`/`var` / `pub`.
+  - derivation: none
+    rules:
+      - { lhs: UnionMember, rhs: [UnionVariant, ','], action: unionMemberVariant }
+      - { lhs: UnionMember, rhs: [UnionVariant],       action: unionMemberVariantLast }
+      - { lhs: UnionMember, rhs: [FnDef],              action: unionMemberMethod }
+      - { lhs: UnionMember, rhs: ['pub', FnDef],       action: unionMemberPubMethod }
+      - { lhs: UnionMember, rhs: [VarDecl],            action: unionMemberConst }
+      - { lhs: UnionMember, rhs: ['pub', VarDecl],     action: unionMemberPubConst }
 
   - derivation: none
     rules:

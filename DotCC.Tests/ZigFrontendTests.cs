@@ -559,6 +559,53 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_enum_methods_and_self_equality()
+    {
+        // An enum body can hold methods (D2/D3 leftover): a `fn`/`pub fn` lowers to a mangled free
+        // function `Color_method` with the enum value as its receiver. `self == .red` result-locates
+        // the bare `.member` against the receiver's enum type. Both an instance method (`c.isRed()`)
+        // and a static associated function (`Color.count()`, no receiver) dispatch through `_methods`.
+        var cs = EmitZig(
+            "const Color = enum(u8) {\n" +
+            "    red,\n" +
+            "    green,\n" +
+            "    fn isRed(self: Color) bool { return self == .red; }\n" +
+            "    fn count() u8 { return 2; }\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    const c: Color = .green;\n" +
+            "    if (c.isRed()) { return 1; }\n" +
+            "    return Color.count() * 21;\n" +
+            "}\n");
+        cs.ShouldContain("Color_isRed(Color self)");   // enum method → mangled free fn, enum receiver
+        cs.ShouldContain("Color.red");                  // `self == .red` → the `.red` enum constant
+        cs.ShouldContain("Color_isRed(c)");             // UFCS instance call → enum value receiver
+        cs.ShouldContain("Color_count()");              // static associated function → no receiver
+    }
+
+    [Fact]
+    public void Lowers_a_union_method()
+    {
+        // A `union(enum)` body can hold methods (D2/D3 leftover): `fn first(self: Shape) u8` lowers
+        // to a mangled free function `Shape_first(Shape self)`, and a direct payload read inside the
+        // method (`self.circle`) goes through the nested-union accessor `self.__payload.circle`. The
+        // UFCS call `s.first()` passes the union value.
+        var cs = EmitZig(
+            "const Shape = union(enum) {\n" +
+            "    circle: u8,\n" +
+            "    square: u8,\n" +
+            "    fn first(self: Shape) u8 { return self.circle; }\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    const s = Shape{ .circle = 42 };\n" +
+            "    return s.first();\n" +
+            "}\n");
+        cs.ShouldContain("Shape_first(Shape self)");   // union method → mangled free fn, union receiver
+        cs.ShouldContain("__payload.circle");           // payload read inside the method
+        cs.ShouldContain("Shape_first(s)");             // UFCS instance call
+    }
+
+    [Fact]
     public void Lowers_a_tagged_union_decl_and_payload_construction()
     {
         // `union(enum)` (Milestone D3) → a synthesized tag enum `Shape_Tag` + a discriminated

@@ -221,6 +221,44 @@ public sealed class ZigOracleTests
             "    const v = Vec.init(40, 2);\n" +
             "    return v.sum();\n" +
             "}\n", 42, "" },
+        // ENUM METHODS (D2/D3 leftover). An enum body holds methods alongside value members, each
+        // a mangled free function `Color_method` with the enum value as the receiver. `self == .red`
+        // result-locates the bare `.member`; `@intFromEnum(self)` decays to the underlying int.
+        // isRed(blue)=false → rank(blue)=2, +40 ⇒ 42.
+        new object[] { "enum_methods",
+            "const Color = enum(u8) {\n" +
+            "    red,\n" +
+            "    green,\n" +
+            "    blue,\n" +
+            "    fn isRed(self: Color) bool { return self == .red; }\n" +
+            "    fn rank(self: Color) u8 { return @intFromEnum(self); }\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    const c: Color = .blue;\n" +
+            "    if (c.isRed()) { return 1; }\n" +
+            "    return c.rank() + 40;\n" +
+            "}\n", 42, "" },
+        // UNION METHODS (D2/D3 leftover). A `union(enum)` body holds methods; the method body
+        // switches on the receiver with `|capture|` payload binding. value(circle 40)=42,
+        // value(none)=0 ⇒ 42.
+        new object[] { "union_methods",
+            "const Shape = union(enum) {\n" +
+            "    circle: u8,\n" +
+            "    square: u8,\n" +
+            "    none,\n" +
+            "    fn value(self: Shape) u8 {\n" +
+            "        switch (self) {\n" +
+            "            .circle => |r| { return r + 2; },\n" +
+            "            .square => |x| { return x * x; },\n" +
+            "            .none => { return 0; },\n" +
+            "        }\n" +
+            "    }\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = Shape{ .circle = 40 };\n" +
+            "    const b: Shape = .none;\n" +
+            "    return a.value() + b.value();\n" +
+            "}\n", 42, "" },
         // TAGGED UNIONS (Milestone D3). `union(enum)` → a discriminated struct (tag enum +
         // `__tag` + payload fields). Exercises payload construction (`Shape{ .circle = 40 }`),
         // a void variant (`.none`), and a `switch` with `|r|` payload capture. value(circle 40)
