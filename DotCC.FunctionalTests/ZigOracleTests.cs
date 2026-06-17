@@ -259,6 +259,21 @@ public sealed class ZigOracleTests
             "    const b: Shape = .none;\n" +
             "    return a.value() + b.value();\n" +
             "}\n", 42, "" },
+        // NAMESPACED VALUE CONSTS (D2/D3 leftover). A container-level `const NAME = expr;` is a
+        // comptime constant read as `Type.NAME`; dotcc inlines the RHS. A struct const literal
+        // (`Cfg.max`=40) + an enum const whose value is an enum member (`Color.fallback`=blue=2),
+        // 40 + 2 ⇒ 42.
+        new object[] { "namespaced_const",
+            "const Cfg = struct {\n" +
+            "    pub const max: u8 = 40;\n" +
+            "};\n" +
+            "const Color = enum(u8) {\n" +
+            "    red, green, blue,\n" +
+            "    pub const fallback = Color.blue;\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    return Cfg.max + @intFromEnum(Color.fallback);\n" +
+            "}\n", 42, "" },
         // TAGGED UNIONS (Milestone D3). `union(enum)` → a discriminated struct (tag enum +
         // `__tag` + payload fields). Exercises payload construction (`Shape{ .circle = 40 }`),
         // a void variant (`.none`), and a `switch` with `|r|` payload capture. value(circle 40)

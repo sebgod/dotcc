@@ -88,6 +88,16 @@ internal sealed class ZigLowering
     /// value const — a namespaced constant — is not lowered yet; it needs top-level globals.)</summary>
     private readonly Dictionary<string, Dictionary<string, CType>> _selfAliases = new(System.StringComparer.Ordinal);
 
+    /// <summary>Per container name, each namespaced VALUE <c>const</c> member → its (optional type
+    /// annotation + ) right-hand-side expression, stored unlowered. A container-level <c>const</c>
+    /// is a comptime constant in Zig, so a <c>Type.NAME</c> use inlines the expression — lowered
+    /// fresh at each use site (with the annotation as its sink), which needs no global storage. So a
+    /// <c>const max = 100;</c> / <c>const default = Color.red;</c> member reads as <c>Type.max</c> /
+    /// <c>Type.default</c>. (A container-level <c>var</c> — a mutable global — is still rejected; it
+    /// needs real top-level global storage. A const RHS that references a sibling const by bare name
+    /// is unsupported — qualify it as <c>Type.sibling</c>.)</summary>
+    private readonly Dictionary<string, Dictionary<string, (Item? typeItem, Item rhs)>> _containerConsts = new(System.StringComparer.Ordinal);
+
     /// <summary>A tagged union (<c>union(enum)</c>) lowered to the FAITHFUL C tagged-union shape:
     /// an outer struct <c>{ U_Tag __tag; U_Payload __payload; }</c> whose <c>__payload</c> is a
     /// nested <c>[StructLayout(Explicit)]</c> union (every payload variant overlaid at offset 0,
@@ -476,42 +486,63 @@ internal sealed class ZigLowering
         return (variants, methods, consts);
     }
 
-    /// <summary>Register a container's <c>const</c> members. V1 supports only the self-type alias
-    /// <c>const Self = @This();</c> (any alias name; the RHS must be <c>@This()</c>): it records
-    /// <c>alias → the container's own type</c> in <see cref="_selfAliases"/> so a method of this
-    /// container may spell its receiver / return / local type as the alias. Runs in pass 0b (after
-    /// <see cref="_containerTypes"/> is populated, before signatures), so a method signature can
-    /// use the alias. A typed const, a <c>var</c>, or a non-<c>@This()</c> value const is rejected
-    /// loudly — a namespaced value constant needs top-level globals, which the Zig front-end does
-    /// not lower yet.</summary>
+    /// <summary>Register a container's <c>const</c> members. Two forms: the self-type alias
+    /// <c>const Self = @This();</c> (any alias name; RHS <c>@This()</c>) → records <c>alias → the
+    /// container's own type</c> in <see cref="_selfAliases"/> (so a method can spell its receiver /
+    /// return / local type as the alias); and a namespaced VALUE const <c>const NAME = expr;</c> (or
+    /// <c>const NAME: T = expr;</c>) → records the RHS in <see cref="_containerConsts"/> for inlining
+    /// at each <c>Type.NAME</c> use site (container-level consts are comptime in Zig). Runs in pass
+    /// 0b (after <see cref="_containerTypes"/> is populated, before signatures) so a method signature
+    /// can use a self alias. A container-level <c>var</c> (a mutable global) is rejected — it needs
+    /// real top-level global storage, which the Zig front-end doesn't lower yet.</summary>
     private void RegisterContainerConsts(string container, IReadOnlyList<Item> constItems)
     {
         foreach (var c in constItems)
         {
+            Item nameTok; Item? typeItem; Item rhs; bool isVar;
+            switch (c.Content)
+            {
+                case Zig.ConstDecl d:      nameTok = d.Arg1; typeItem = null;   rhs = d.Arg3; isVar = false; break;  // const IDENT = RhsExpr ;
+                case Zig.ConstDeclTyped d: nameTok = d.Arg1; typeItem = d.Arg3; rhs = d.Arg5; isVar = false; break;  // const IDENT : Type = RhsExpr ;
+                case Zig.VarDecl d:        nameTok = d.Arg1; typeItem = null;   rhs = d.Arg3; isVar = true;  break;
+                case Zig.VarDeclTyped d:   nameTok = d.Arg1; typeItem = d.Arg3; rhs = d.Arg5; isVar = true;  break;
+                default: throw new IrUnsupportedException("zig container const: " + (c.Content?.GetType().Name ?? "null"));
+            }
+            var cname = Tok(nameTok);
+
+            // A container-level `var` is a namespaced mutable GLOBAL — it needs real top-level global
+            // storage, which the Zig front-end doesn't lower yet. Reject loudly.
+            if (isVar)
+            {
+                throw new IrUnsupportedException(
+                    $"container '{container}' member `var {cname}` (a namespaced mutable global) is not supported yet — "
+                    + "use a `const` (a comptime value)");
+            }
+
             // `const Alias = @This();` — the self-type alias. `@This()` is a no-arg builtin; the
             // transparent expression productions collapse, so the RHS content is it directly.
-            if (c.Content is Zig.ConstDecl cd
-                && cd.Arg3.Content is Zig.BuiltinCallNoArgs b && Tok(b.Arg0) == "@This")
+            if (typeItem is null && rhs.Content is Zig.BuiltinCallNoArgs b && Tok(b.Arg0) == "@This")
             {
                 if (!_selfAliases.TryGetValue(container, out var aliases))
                 {
                     aliases = new Dictionary<string, CType>(System.StringComparer.Ordinal);
                     _selfAliases[container] = aliases;
                 }
-                aliases[Tok(cd.Arg1)] = _containerTypes[container];
+                aliases[cname] = _containerTypes[container];
                 continue;
             }
-            var name = c.Content switch
+
+            // A namespaced VALUE const — store its (annotation + ) RHS to inline at each `Type.NAME`
+            // use (see the `Zig.Field` case in LowerExpr).
+            if (!_containerConsts.TryGetValue(container, out var consts))
             {
-                Zig.ConstDecl d      => Tok(d.Arg1),
-                Zig.ConstDeclTyped d => Tok(d.Arg1),
-                Zig.VarDecl d        => Tok(d.Arg1),
-                Zig.VarDeclTyped d   => Tok(d.Arg1),
-                _ => "?",
-            };
-            throw new IrUnsupportedException(
-                $"container '{container}' member `const {name}` is not supported yet — only the self-type "
-                + "alias `const Self = @This();` (a namespaced value constant needs top-level globals)");
+                consts = new Dictionary<string, (Item?, Item)>(System.StringComparer.Ordinal);
+                _containerConsts[container] = consts;
+            }
+            if (!consts.TryAdd(cname, (typeItem, rhs)))
+            {
+                throw new IrUnsupportedException($"container '{container}' declares const '{cname}' more than once");
+            }
         }
     }
 
@@ -1319,14 +1350,25 @@ internal sealed class ZigLowering
                 return new ZigTry(inner) { Type = eu.Payload };
             }
 
-            // `base.field` (Suffix '.' IDENT) — two meanings split here. When the base is a
-            // bare identifier naming a registered ENUM type, it's `EnumName.member` → an
-            // EnumConstRef. Otherwise it's struct field access on a value/pointer; Zig has no
-            // `->`, so `p.x` on a pointer auto-derefs (emit `->`). The field type comes from
-            // the shared aggregate table.
+            // `base.field` (Suffix '.' IDENT) — three meanings split here. When the base is a bare
+            // identifier naming a container TYPE (not a variable): `Type.NAME` resolves to a
+            // namespaced VALUE const if the container declares one (the comptime RHS, inlined fresh
+            // here with its annotation as the sink); else `EnumName.member` → an EnumConstRef.
+            // Otherwise it's struct field access on a value/pointer; Zig has no `->`, so `p.x` on a
+            // pointer auto-derefs (emit `->`). The field type comes from the shared aggregate table.
             case Zig.Field fld:
             {
                 var fieldName = Tok(fld.Arg2);
+                if (fld.Arg0.Content is Zig.Ident cbid
+                    && _symbols.Resolve(Tok(cbid.Arg0)) is null
+                    && TryLookupContainerType(Tok(cbid.Arg0), out var cbaseTy)
+                    && ContainerTypeName(cbaseTy) is { } cContainer
+                    && _containerConsts.TryGetValue(cContainer, out var cconsts)
+                    && cconsts.TryGetValue(fieldName, out var centry))
+                {
+                    var csink = centry.typeItem is not null ? LowerType(centry.typeItem) : null;
+                    return LowerExprSink(centry.rhs, csink);
+                }
                 if (fld.Arg0.Content is Zig.Ident bid
                     && TryLookupContainerType(Tok(bid.Arg0), out var baseTy)
                     && baseTy.Unqualified is CType.Enum en)

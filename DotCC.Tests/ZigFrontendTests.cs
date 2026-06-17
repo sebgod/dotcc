@@ -542,20 +542,44 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_a_non_self_alias_container_const()
+    public void Lowers_namespaced_value_consts()
     {
-        // V1 supports only the `const Self = @This();` self-type alias as a container const. A
-        // namespaced VALUE constant needs top-level globals (not lowered yet), so it fails loudly
-        // rather than silently dropping the declaration.
+        // A container-level `const NAME = expr;` is a comptime constant accessed as `Type.NAME`
+        // (D2/D3 leftover). dotcc inlines the RHS at each use site (no global storage). Works across
+        // struct/enum/union; here a struct const (a typed literal) and an enum const whose value is
+        // one of the enum's own members.
+        var cs = EmitZig(
+            "const Cfg = struct {\n" +
+            "    pub const max: u8 = 42;\n" +
+            "};\n" +
+            "const Color = enum(u8) {\n" +
+            "    red, green, blue,\n" +
+            "    pub const fallback = Color.blue;\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    const d: Color = Color.fallback;\n" +
+            "    if (@intFromEnum(d) == 2) { return Cfg.max; }\n" +
+            "    return 0;\n" +
+            "}\n");
+        cs.ShouldContain("Color.blue");        // `Color.fallback` inlines to the enum constant
+        cs.ShouldNotContain("Cfg.max");        // `Cfg.max` inlines to its value (no member access survives)
+    }
+
+    [Fact]
+    public void Rejects_a_container_var_member()
+    {
+        // A container-level `var` is a namespaced mutable GLOBAL — it needs real top-level global
+        // storage, which the Zig front-end doesn't lower yet. It fails loudly rather than silently
+        // dropping the declaration. (A `const` value member IS supported — see above.)
         var ex = Should.Throw<CompileException>(() => EmitZig(
             "const Counter = struct {\n" +
             "    n: i32,\n" +
-            "    const MAX = 100;\n" +
+            "    var total: i32 = 0;\n" +
             "    fn get(self: Counter) i32 { return self.n; }\n" +
             "};\n" +
             "pub fn main() u8 { const c = Counter{ .n = 42 }; return @as(u8, c.get()); }\n"));
-        ex.Message.ShouldContain("MAX");
-        ex.Message.ShouldContain("top-level globals");
+        ex.Message.ShouldContain("total");
+        ex.Message.ShouldContain("mutable global");
     }
 
     [Fact]
