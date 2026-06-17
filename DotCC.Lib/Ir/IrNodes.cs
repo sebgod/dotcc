@@ -241,6 +241,15 @@ public sealed record ZigTry(CExpr Inner) : CExpr;
 /// helper matches Zig's lazy semantics. Zig-lowering / C#-target only (Milestone B2).</summary>
 public sealed record ZigCatch(CExpr Union, CExpr Fallback) : CExpr;
 
+/// <summary>A Zig slice value constructed from a <c>{ ptr, len }</c> pair — the result of an
+/// array→slice coercion (a string literal / <c>[N]T</c>) or the slicing operator
+/// <c>a[lo..hi]</c>. Lowers to <c>new Slice&lt;T&gt;(ptr, len)</c> (or <c>ConstSlice&lt;T&gt;</c>
+/// when <see cref="Const"/>). <see cref="Ptr"/> renders to a <c>T*</c>, <see cref="Len"/> to the
+/// element count (a <c>ulong</c>); <see cref="Element"/> is the unqualified element type.
+/// <see cref="CExpr.Type"/> is the <see cref="CType.Slice"/> produced. The C front-end never
+/// produces this; it is a Zig-lowering / C#-target construct (Milestone E).</summary>
+public sealed record SliceNew(CExpr Ptr, CExpr Len, CType Element, bool Const) : CExpr;
+
 /// <summary>A bare identifier the binder left unresolved — a runtime/library symbol
 /// surfaced by name (the <c>&lt;complex.h&gt;</c> imaginary unit), or an
 /// incremental-growth safety net for a name not in any header. Carries the RAW

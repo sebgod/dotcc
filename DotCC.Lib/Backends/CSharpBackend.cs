@@ -1352,6 +1352,14 @@ internal sealed class CSharpBackend
                 var cts = c.Type is CType.VoidType ? "Unit" : Cs(c.Type);
                 return ($"ErrUnion.Catch<{cts}>({Expr(c.Union)}, {Coerced(c.Fallback, c.Type)})", PPrimary);
             }
+            // A Zig slice fat pointer `{ ptr, len }` (Milestone E): array→slice coercion or
+            // `a[lo..hi]` → new Slice<T>(ptr, len) (ConstSlice<T> for a `[]const T`). Len is
+            // coerced to the ctor's `ulong`.
+            case SliceNew sn:
+            {
+                var name = sn.Const ? "ConstSlice" : "Slice";
+                return ($"new {name}<{Cs(sn.Element.Unqualified)}>({Expr(sn.Ptr)}, {Coerced(sn.Len, CType.ULong)})", PPrimary);
+            }
             // A bare unresolved identifier: the backend escapes the raw name.
             case NameRef nr: return (DotCC.EmitHelpers.Id(nr.RawName), PPrimary);
             // An enumerator of a real enum: EnumName.Member (member access). If a

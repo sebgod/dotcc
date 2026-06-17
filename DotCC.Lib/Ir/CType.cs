@@ -77,6 +77,7 @@ public abstract record CType
         Float128Type => "_Float128",
         Optional o => "?" + o.Inner.Describe(),
         ErrorUnion eu => "!" + eu.Payload.Describe(),
+        Slice s => "[]" + (s.Element.IsConst ? "const " : "") + s.Element.Unqualified.Describe(),
         _ => GetType().Name,
     };
 
@@ -235,6 +236,21 @@ public abstract record CType
         // Approximate: the payload plus a 2-byte code, padded. @sizeOf(E!T) is not a B2
         // feature, so an exact layout isn't needed here.
         public override int SizeOf => Payload.SizeOf + 2;
+    }
+
+    /// <summary>A Zig slice <c>[]T</c> / <c>[]const T</c> (Milestone E) — a fat pointer
+    /// <c>{ ptr, len }</c>. The C# backend lowers it to the runtime <c>Slice&lt;T&gt;</c>
+    /// value type (<c>ConstSlice&lt;T&gt;</c> when <see cref="Element"/> is <c>const</c>):
+    /// a blittable <c>{ T* Ptr; nuint Len; }</c>, the C++ <c>std::span</c> shape — NOT C#'s
+    /// ref-struct <see cref="System.Span{T}"/> (a slice must be a struct field / cross the
+    /// Zig ABI, neither of which a ref struct allows). <c>[]const T</c> is this with a
+    /// <c>const</c>-qualified <see cref="Element"/>, reusing the qualifier machinery. The C
+    /// front-end never produces it (C has no slices); only the C# target renders it.</summary>
+    public sealed record Slice(CType Element) : CType
+    {
+        // A fat pointer: a data pointer (8) plus a nuint length (8). @sizeOf([]T) is not in
+        // scope for Milestone E, so an exact-layout guarantee isn't needed here.
+        public override int SizeOf => 16;
     }
 
     // ---- well-known instances -------------------------------------------
