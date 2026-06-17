@@ -15,6 +15,7 @@ namespace DotCC.Tests;
 /// (which can't be referenced across the assembly boundary), so these pin the
 /// grammar independently.
 /// </summary>
+[Collection("PrintfFormat")]
 public sealed class PrintfFormatTests
 {
     private static List<int> Bytes(string s) => s.Select(ch => (int)ch).ToList();

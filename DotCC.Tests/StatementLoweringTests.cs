@@ -17,6 +17,7 @@ namespace DotCC.Tests;
 /// End-to-end in <c>void-ternary-stmt/</c>, <c>braceless-comma-body/</c>,
 /// <c>setjmp-try-body/</c>.
 /// </summary>
+[Collection("StatementLowering")]
 public sealed class StatementLoweringTests
 {
     private static string Emit(string body)

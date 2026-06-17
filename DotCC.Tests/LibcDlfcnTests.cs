@@ -17,6 +17,7 @@ namespace DotCC.Tests;
 /// invoked through an unmanaged cdecl function pointer here, proving the loaded
 /// native code runs and returns correctly on both host OSes.
 /// </summary>
+[Collection("Runtime")]
 public sealed unsafe class LibcDlfcnTests
 {
     // RTLD_LAZY — accepted and ignored by dotcc's dlopen (platform default binding),

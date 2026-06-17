@@ -20,6 +20,7 @@ namespace DotCC.Tests;
 /// forwarding a <c>va_list</c> to another function) is in the <c>varargs/</c>
 /// functional fixture.
 /// </summary>
+[Collection("Vararg")]
 public sealed class VarargTests
 {
     private static string WriteTemp(string body)

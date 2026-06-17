@@ -16,6 +16,7 @@ namespace DotCC.Tests;
 /// <c>int n</c> bound takes the store-conversion cast for an unsigned/wider C
 /// argument. End-to-end in the <c>sprintf-snprintf/</c> fixture.
 /// </summary>
+[Collection("SprintfLowering")]
 public sealed class SprintfLoweringTests
 {
     private static string WriteTemp(string body)

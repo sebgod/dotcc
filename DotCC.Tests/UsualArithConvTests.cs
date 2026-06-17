@@ -18,6 +18,7 @@ namespace DotCC.Tests;
 /// nested expressions / into comparisons / Cond.B / stores. End-to-end in the
 /// <c>usual-arith-conv/</c> fixture (gcc-oracle-validated).
 /// </summary>
+[Collection("UsualArithConv")]
 public sealed class UsualArithConvTests
 {
     private static string WriteTemp(string body)

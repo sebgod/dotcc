@@ -18,6 +18,7 @@ namespace DotCC.Tests;
 /// fixture; the paren-see-through and <c>@</c>-escape-preserving behaviour of
 /// <c>DecayFnName</c> are asserted here.
 /// </summary>
+[Collection("FnPtrAggregateInit")]
 public sealed class FnPtrAggregateInitTests
 {
     private static string WriteTemp(string body)

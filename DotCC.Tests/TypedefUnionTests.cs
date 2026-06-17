@@ -14,6 +14,7 @@ namespace DotCC.Tests;
 /// storage), exactly like a plain <c>union</c> def. End-to-end behavior is in the
 /// <c>typedef-union/</c> fixture.
 /// </summary>
+[Collection("TypedefUnion")]
 public sealed class TypedefUnionTests
 {
     private static string WriteTemp(string body)

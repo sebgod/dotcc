@@ -18,6 +18,7 @@ namespace DotCC.Tests;
 /// <c>IdentityVisitor</c>. The standalone spike lives in SharpAstro/LALR.CC
 /// (<c>examples/Zig</c>); this is the dotcc-side copy the frontend grows on.
 /// </summary>
+[Collection("ZigGrammar")]
 public sealed class ZigGrammarTests
 {
     private static bool TryParse(string src)

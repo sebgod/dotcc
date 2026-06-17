@@ -19,6 +19,7 @@ namespace DotCC.Tests;
 /// (non-constant) cast, stay bare — clean output, and a runtime cast truncates
 /// silently anyway. End-to-end in <c>const-cast-unchecked/</c>.
 /// </summary>
+[Collection("ConstCastUnchecked")]
 public sealed class ConstCastUncheckedTests
 {
     private static string WriteTemp(string body)

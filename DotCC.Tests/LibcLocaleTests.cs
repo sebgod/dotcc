@@ -15,6 +15,7 @@ namespace DotCC.Tests;
 /// C, not to this C# test — so the category is passed as a plain int here;
 /// <c>setlocale</c> ignores it, since dotcc has one locale.)
 /// </summary>
+[Collection("Runtime")]
 public sealed unsafe class LibcLocaleTests
 {
     private static string Cstr(byte* p) =>

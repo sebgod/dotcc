@@ -15,6 +15,7 @@ namespace DotCC.Tests;
 /// is what <c>tgmath.h</c> dispatches to in real C via <c>_Generic</c>; in
 /// dotcc the same dispatch falls out of C# overload resolution.
 /// </summary>
+[Collection("Runtime")]
 public sealed class LibcMathTests
 {
     private const double Eps = 1e-12;

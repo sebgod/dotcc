@@ -16,6 +16,7 @@ namespace DotCC.Tests;
 /// "multiple-include optimization", on which every non-trivial C project
 /// depends to keep transitive-include cost manageable.
 /// </summary>
+[Collection("PreprocessorIncludeGuard")]
 public sealed class PreprocessorIncludeGuardTests
 {
     // -----------------------------------------------------------------

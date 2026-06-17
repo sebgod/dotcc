@@ -19,6 +19,7 @@ namespace DotCC.Tests;
 /// the emitted text. The run-it-end-to-end check lives in the <c>const-qualifiers/</c>
 /// functional fixture; const-violation diagnosing lives in <c>ConstCheckTests</c>.
 /// </summary>
+[Collection("ConstQualifier")]
 public sealed class ConstQualifierTests
 {
     private static string WriteTemp(string body)

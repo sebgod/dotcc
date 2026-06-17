@@ -27,6 +27,7 @@ namespace DotCC.Tests;
 /// (0xDE 0xAD …) so a match can't collide with an unrelated constant in the spliced
 /// runtime block.
 /// </remarks>
+[Collection("Console")]
 public sealed class EmbedTests
 {
     /// <summary>Emit <paramref name="mainC"/> with <paramref name="embedName"/>

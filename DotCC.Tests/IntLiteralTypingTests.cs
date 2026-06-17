@@ -17,6 +17,7 @@ namespace DotCC.Tests;
 /// The C# backend previously masked mis-typed literals (C# re-types the text); the
 /// wat backend exposed it, so this pins the front-end rule directly.
 /// </summary>
+[Collection("IntLiteralTyping")]
 public sealed class IntLiteralTypingTests
 {
     /// <summary>Emit a program whose <c>main</c> declares a local initialised by the

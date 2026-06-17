@@ -17,6 +17,7 @@ namespace DotCC.Tests;
 /// <c>access</c>) over <see cref="System.IO"/>. These are what chibi-scheme's
 /// <c>(chibi filesystem)</c> binds to.
 /// </summary>
+[Collection("Runtime")]
 public sealed unsafe class LibcPosixFsTests
 {
     private static byte* C(string s)

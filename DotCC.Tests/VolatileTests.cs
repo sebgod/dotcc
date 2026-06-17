@@ -16,6 +16,7 @@ namespace DotCC.Tests;
 /// access for now. End-to-end behaviour is checked by the <c>volatile-access/</c>
 /// functional fixture.
 /// </summary>
+[Collection("Runtime")]
 public sealed class VolatileTests
 {
     private static string WriteTemp(string body)

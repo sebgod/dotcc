@@ -15,6 +15,7 @@ namespace DotCC.Tests;
 /// with a "requires a matching else" diagnostic. End-to-end in the
 /// <c>setjmp-no-else/</c> fixture.
 /// </summary>
+[Collection("SetjmpNoElse")]
 public sealed class SetjmpNoElseTests
 {
     private static string WriteTemp(string body)

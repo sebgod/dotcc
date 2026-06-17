@@ -15,6 +15,7 @@ namespace DotCC.Tests;
 /// Foo;</c> idiom. End-to-end behavior is in the <c>typedef-tag-collision/</c>
 /// fixture.
 /// </summary>
+[Collection("TypedefTag")]
 public sealed class TypedefTagTests
 {
     private static string WriteTemp(string body)

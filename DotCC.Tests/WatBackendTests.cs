@@ -16,6 +16,7 @@ namespace DotCC.Tests;
 /// integer slice and that out-of-slice constructs fail loudly rather than
 /// miscompile.
 /// </summary>
+[Collection("WatBackend")]
 public sealed class WatBackendTests
 {
     private static string Wat(string body)

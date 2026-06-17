@@ -20,6 +20,7 @@ namespace DotCC.Tests;
 /// would dangle. The struct arm and its escape rules are exercised in
 /// <see cref="CompilerTests"/> (LoweringAndShadowing).
 /// </summary>
+[Collection("MallocStackalloc")]
 public sealed class MallocStackallocTests
 {
     private static string WriteTemp(string body)

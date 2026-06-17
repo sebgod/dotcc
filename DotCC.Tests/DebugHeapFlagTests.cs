@@ -16,6 +16,7 @@ namespace DotCC.Tests;
 /// <c>NativeMemory</c> route (the runtime <c>DOTCC_DEBUG_HEAP=1</c> override is
 /// the no-recompile equivalent). These guard the emitter shape both ways.
 /// </summary>
+[Collection("Runtime")]
 public sealed class DebugHeapFlagTests
 {
     private static string WriteTemp(string body)

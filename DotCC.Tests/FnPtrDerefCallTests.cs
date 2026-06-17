@@ -16,6 +16,7 @@ namespace DotCC.Tests;
 /// (bare <c>delegate*</c> or a fn-ptr typedef). A DATA pointer's <c>*p</c> stays
 /// a real dereference. End-to-end in the <c>fnptr-deref-call/</c> fixture.
 /// </summary>
+[Collection("FnPtrDerefCall")]
 public sealed class FnPtrDerefCallTests
 {
     private static string WriteTemp(string body)

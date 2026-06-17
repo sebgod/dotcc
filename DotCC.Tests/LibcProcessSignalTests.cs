@@ -16,6 +16,7 @@ namespace DotCC.Tests;
 /// stands on, so they're proven against the raw OS syscall here BEFORE kill is
 /// exercised.
 /// </summary>
+[Collection("Runtime")]
 public sealed unsafe class LibcProcessSignalTests
 {
     // Raw OS process-id calls, used only to cross-check Libc.getpid() against an

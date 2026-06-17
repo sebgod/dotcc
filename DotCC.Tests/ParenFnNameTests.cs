@@ -13,6 +13,7 @@ namespace DotCC.Tests;
 /// *(lua_newstate)(…)</c>). The parens are stripped; the emitted method is
 /// identical to the bare form. End-to-end in the <c>paren-fn-name/</c> fixture.
 /// </summary>
+[Collection("ParenFnName")]
 public sealed class ParenFnNameTests
 {
     private static string WriteTemp(string body)

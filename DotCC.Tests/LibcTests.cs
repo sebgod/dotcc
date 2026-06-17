@@ -13,6 +13,7 @@ namespace DotCC.Tests;
 /// against either a stack-allocated or heap-allocated byte buffer, mirroring
 /// the way emitted C code calls these.
 /// </summary>
+[Collection("Console")]
 public sealed unsafe class LibcTests
 {
     // -----------------------------------------------------------------

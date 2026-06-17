@@ -13,6 +13,7 @@ namespace DotCC.Tests;
 /// (&lt;stdio.h&gt;). End-to-end through dotcc in the
 /// <c>libc-frexp-ldexp-strcoll-ungetc/</c> fixture.
 /// </summary>
+[Collection("Runtime")]
 public sealed unsafe class LibcAddedSurfaceTests
 {
     private const double Eps = 1e-12;

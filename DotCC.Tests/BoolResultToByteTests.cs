@@ -15,6 +15,7 @@ namespace DotCC.Tests;
 /// inserts the <c>(byte)</c> cast (which chains <c>CBool</c>→int→byte).
 /// End-to-end in <c>bool-result-to-byte/</c>.
 /// </summary>
+[Collection("BoolResultToByte")]
 public sealed class BoolResultToByteTests
 {
     private static string Emit(string body)

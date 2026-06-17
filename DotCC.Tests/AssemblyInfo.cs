@@ -2,19 +2,25 @@
 
 using Xunit;
 
-// The unit suite is serialized because it races on PROCESS-GLOBAL Console state
-// under xUnit's default per-collection parallelism:
-//   - Console.Out / Console.Error / Console.In are redirected by the libc-I/O
-//     tests (printf / putchar / perror capture) and several assert EXACT
-//     captured content. They cannot be made test-local: Libc writes to the
-//     real Console, so the test must swap the global to capture it.
-//   - The compiler's -Wconversion / -pedantic diagnostics also write to the
-//     global Console.Error — so a diagnostic from one test can land in another
-//     test's capture buffer, and two redirecting classes can clobber each
-//     other's SetOut/SetError.
-// Run in parallel, two such tests intermittently corrupt each other — a
-// load-dependent flake (fires under CI/build load, where scheduling widens the
-// window, far more than in an idle local run). Serializing the assembly removes
-// the race class entirely; it costs only ~45s (the unit tests are individually
-// fast). The functional suite is a separate assembly and keeps its own behavior.
+// Tests run SERIAL (assembly-wide). Two independent reasons require this on the current
+// arm64 setup — both were confirmed empirically; do NOT re-enable parallelization without
+// addressing BOTH (and without different hardware, see reason 2):
+//
+//  1. PROCESS-GLOBAL Console. The libc-I/O tests redirect Console.Out/Error to capture
+//     output, and the compiler writes -Wconversion/-pedantic diagnostics to the global
+//     Console.Error — so in parallel a diagnostic from one test lands in another's capture
+//     buffer. (The Console-capturing classes carry [Collection("Console")] and could be
+//     isolated via DisableParallelization — see CollectionDefinitions.cs.)
+//  2. DEADLOCK / THRASH on this box. Enabling within-assembly parallelism was tried twice:
+//     (a) with the blocking socket/thread tests ([Collection("Runtime")]) overlapping the
+//     parallel pure phase, the suite DEADLOCKED (42 min+) — their helper threads starve in
+//     the saturated thread pool; (b) with "Runtime" also isolated (DisableParallelization),
+//     no deadlock, but the parallel pure phase THRASHED (worse than the ~17 min serial) from
+//     CPU oversubscription. Net loss either way on this hardware.
+//
+// Every test class still names a [Collection] — categorization + filtering
+// (`--filter Collection=Console`), and ready if a future host can parallelize. Under this
+// assembly-wide serial setting those names don't drive parallelism. See CollectionDefinitions.cs.
+// FAIL-SAFE: run via Scripts/run-unit-tests.sh, which passes `--blame-hang-timeout` so a hang
+// (in any mode) is bounded and the culprit named, instead of a silent stall.
 [assembly: CollectionBehavior(DisableTestParallelization = true)]

@@ -15,6 +15,7 @@ namespace DotCC.Tests;
 /// incremental rebuilds). These drive the library API directly against a
 /// throwaway temp directory of <c>.c</c>/<c>.h</c> files.
 /// </summary>
+[Collection("DependencyFile")]
 public sealed class DependencyFileTests
 {
     /// <summary>

@@ -16,6 +16,7 @@ namespace DotCC.Tests;
 /// lauxlib's <c>char buff[BUFSIZ];</c> struct member — BUFSIZ must fold to a
 /// constant array bound. End-to-end in the <c>stdio-limits/</c> fixture.
 /// </summary>
+[Collection("StdioLimits")]
 public sealed class StdioLimitsTests
 {
     private static string WriteTemp(string body)

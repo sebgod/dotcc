@@ -14,6 +14,7 @@ namespace DotCC.Tests;
 /// functions are phase A2. End-to-end behaviour is in the <c>atomic-counter/</c>
 /// functional fixture.
 /// </summary>
+[Collection("Runtime")]
 public sealed class AtomicTests
 {
     private static string WriteTemp(string body)

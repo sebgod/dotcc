@@ -17,6 +17,7 @@ namespace DotCC.Tests;
 /// (<c>(f)(x)</c> → <c>f(x)</c>), which avoids C#'s cast-ambiguity. End-to-end
 /// in <c>fnptr-field-comma/</c>.
 /// </summary>
+[Collection("FieldChainComma")]
 public sealed class FieldChainCommaTests
 {
     private static string WriteTemp(string body)

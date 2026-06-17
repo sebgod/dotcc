@@ -12,6 +12,7 @@ namespace DotCC.Tests;
 /// <see cref="DotCC.Libc.Libc"/> (StdlibLib.cs): integer conversions,
 /// arithmetic, allocation extras, RNG, environment, and qsort/bsearch.
 /// </summary>
+[Collection("Runtime")]
 public sealed unsafe class LibcStdlibTests
 {
     private static string Cstr(byte* p) =>

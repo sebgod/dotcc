@@ -19,6 +19,7 @@ namespace DotCC.Tests;
 /// which would race under xUnit parallelism); <c>wprintf</c>-to-stdout is covered by
 /// the <c>wchar-io</c> functional fixture instead.
 /// </summary>
+[Collection("Console")]
 public sealed unsafe class LibcWcharIoTests
 {
     private static string Wstr(char* p) => p == null ? "<null>" : new string(p, 0, wcslen(p));

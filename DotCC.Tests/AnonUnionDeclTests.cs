@@ -16,6 +16,7 @@ namespace DotCC.Tests;
 /// Type so the ordinary declaration / aggregate-init productions compose (a brace
 /// init targets the FIRST union member). End-to-end in `anon-union-decl/`.
 /// </summary>
+[Collection("AnonUnionDecl")]
 public sealed class AnonUnionDeclTests
 {
     private static string WriteTemp(string body)

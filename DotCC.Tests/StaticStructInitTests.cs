@@ -16,6 +16,7 @@ namespace DotCC.Tests;
 /// Lua's lcode.c `static const expdesc ef = {VKINT, {0}, NO_JUMP, NO_JUMP}`.
 /// End-to-end in the `static-struct-init/` fixture (gcc-oracle-validated).
 /// </summary>
+[Collection("StaticStructInit")]
 public sealed class StaticStructInitTests
 {
     private static string WriteTemp(string body)

@@ -16,6 +16,7 @@ namespace DotCC.Tests;
 /// <c>u"…"</c> / <c>u'x'</c> (pooled <c>Libc.L16</c>, explicit <c>(char)</c> casts).
 /// These mirror <see cref="Char16Tests"/> with the <c>L</c>-prefixed forms.
 /// </summary>
+[Collection("Wchar")]
 public sealed class WcharTests
 {
     private static string WriteTemp(string body)

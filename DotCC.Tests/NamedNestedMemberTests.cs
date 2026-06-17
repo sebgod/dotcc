@@ -14,6 +14,7 @@ namespace DotCC.Tests;
 /// <c>o.name.inner</c>. End-to-end behavior is in the <c>named-nested-member/</c>
 /// fixture.
 /// </summary>
+[Collection("NamedNestedMember")]
 public sealed class NamedNestedMemberTests
 {
     private static string WriteTemp(string body)

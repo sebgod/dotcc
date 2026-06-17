@@ -14,6 +14,7 @@ namespace DotCC.Tests;
 /// table AND a fresh rebuild of it parse the construct — guarding against a stale or
 /// divergent generated parse table.
 /// </summary>
+[Collection("ZigParseTableRegression")]
 public class ZigParseTableRegressionTests
 {
     private const string TypedStructLiteral =

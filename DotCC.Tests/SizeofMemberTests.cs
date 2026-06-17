@@ -17,6 +17,7 @@ namespace DotCC.Tests;
 /// unsynthesizable operand still fails loudly rather than emit a wrong size.
 /// End-to-end in the <c>sizeof-member/</c> fixture (gcc-oracle-validated).
 /// </summary>
+[Collection("SizeofMember")]
 public sealed class SizeofMemberTests
 {
     private static string WriteTemp(string body)

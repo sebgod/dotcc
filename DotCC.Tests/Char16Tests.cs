@@ -17,6 +17,7 @@ namespace DotCC.Tests;
 /// silently emitted without its cast → CS0266). The <c>u"…"</c> / <c>u'…'</c> literals
 /// are exercised in later phases.
 /// </summary>
+[Collection("Char16")]
 public sealed class Char16Tests
 {
     private static string WriteTemp(string body)

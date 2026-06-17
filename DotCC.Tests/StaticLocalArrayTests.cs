@@ -18,6 +18,7 @@ namespace DotCC.Tests;
 /// (CS0306 / CS0611) — this also fixes the same latent bug on the file-scope
 /// path. End-to-end in the <c>static-local-array/</c> fixture.
 /// </summary>
+[Collection("StaticLocalArray")]
 public sealed class StaticLocalArrayTests
 {
     private static string WriteTemp(string body)

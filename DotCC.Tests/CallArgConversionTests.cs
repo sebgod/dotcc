@@ -16,6 +16,7 @@ namespace DotCC.Tests;
 /// the call-site twin of the store conversions). End-to-end in the
 /// <c>call-arg-conv/</c> fixture.
 /// </summary>
+[Collection("CallArgConversion")]
 public sealed class CallArgConversionTests
 {
     private static string WriteTemp(string body)
