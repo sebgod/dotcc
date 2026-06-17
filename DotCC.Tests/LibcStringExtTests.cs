@@ -12,6 +12,7 @@ namespace DotCC.Tests;
 /// <c>stackalloc</c> (the <see cref="DotCC.Libc.Libc.L"/> idiom pins read-only
 /// RVA data, so it can't back a mutating call).
 /// </summary>
+[Collection("Runtime")]
 public sealed unsafe class LibcStringExtTests
 {
     private static string Cstr(byte* p) =>

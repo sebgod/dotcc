@@ -17,6 +17,7 @@ namespace DotCC.Tests;
 /// or a trailing <c>break;</c> on the final section. A section that already
 /// terminates is left alone. End-to-end in the <c>switch-fallthrough/</c> fixture.
 /// </summary>
+[Collection("SwitchFallthrough")]
 public sealed class SwitchFallthroughTests
 {
     private static string WriteTemp(string body)

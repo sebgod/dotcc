@@ -15,6 +15,7 @@ namespace DotCC.Tests;
 /// fields, and returns the synth name as the Type so the ordinary array /
 /// aggregate-init productions compose. End-to-end in `anon-struct-decl/`.
 /// </summary>
+[Collection("AnonStructDecl")]
 public sealed class AnonStructDeclTests
 {
     private static string WriteTemp(string body)

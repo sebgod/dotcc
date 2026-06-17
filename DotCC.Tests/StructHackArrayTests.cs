@@ -14,6 +14,7 @@ namespace DotCC.Tests;
 /// (<c>(T*)&amp;field</c>) so the struct-hack over-indexing + array→pointer decay
 /// stay faithful. End-to-end behavior is in the <c>struct-hack-array/</c> fixture.
 /// </summary>
+[Collection("StructHackArray")]
 public sealed class StructHackArrayTests
 {
     private static string WriteTemp(string body)

@@ -16,6 +16,7 @@ namespace DotCC.Tests;
 /// put and surfaces as a clean <see cref="CompileException"/> rather than an
 /// unhandled lexer exception.
 /// </summary>
+[Collection("LineContinuation")]
 public sealed class LineContinuationTests
 {
     private static string WriteTemp(string body)

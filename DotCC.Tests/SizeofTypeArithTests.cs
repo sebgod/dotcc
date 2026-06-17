@@ -16,6 +16,7 @@ namespace DotCC.Tests;
 /// wraps the unfoldable sizeof in parens so the operator binds as binary.
 /// End-to-end in the <c>sizeof-struct/</c> fixture (gcc-oracle-validated).
 /// </summary>
+[Collection("SizeofTypeArith")]
 public sealed class SizeofTypeArithTests
 {
     private static string WriteTemp(string body)

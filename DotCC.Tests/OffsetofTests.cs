@@ -20,6 +20,7 @@ namespace DotCC.Tests;
 /// uses <c>&amp;t.field</c>. End-to-end in the <c>offsetof/</c> and
 /// <c>align-union/</c> fixtures.
 /// </summary>
+[Collection("Offsetof")]
 public sealed class OffsetofTests
 {
     private static string WriteTemp(string body)

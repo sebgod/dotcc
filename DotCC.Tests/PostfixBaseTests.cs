@@ -17,6 +17,7 @@ namespace DotCC.Tests;
 /// <c>getlastfree</c> macro <c>((cast(Limbox*, (t)-&gt;node) - 1)-&gt;lastfree)</c>
 /// is the motivating case. End-to-end in <c>ptr-arith-arrow/</c>.
 /// </summary>
+[Collection("PostfixBase")]
 public sealed class PostfixBaseTests
 {
     private static string WriteTemp(string body)

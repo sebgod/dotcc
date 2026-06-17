@@ -17,6 +17,7 @@ namespace DotCC.Tests;
 /// inside system headers don't fire on the user. (The qualifier reaches the IR via
 /// the Type prefix/postfix productions — see <see cref="ConstQualifierTests"/>.)
 /// </summary>
+[Collection("Console")]
 public sealed class ConstCheckTests
 {
     private static string Emit(string body)

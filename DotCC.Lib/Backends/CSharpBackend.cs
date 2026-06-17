@@ -20,7 +20,8 @@ internal sealed record CSharpBackendResult(
     string Aliases,
     string Globals,
     int MainArity,
-    IReadOnlyList<DotCC.EmitHelpers.Export> Exports);
+    IReadOnlyList<DotCC.EmitHelpers.Export> Exports,
+    bool MainReturnsVoid = false);
 
 /// <summary>
 /// Lowers the typed IR to low-level unsafe C# text. Deliberately DUMB: every
@@ -53,6 +54,7 @@ internal sealed class CSharpBackend
         var fns = new StringBuilder();
         var exports = new List<DotCC.EmitHelpers.Export>();
         var mainArity = -1;
+        var mainReturnsVoid = false;
 
         foreach (var fn in unit.Functions)
         {
@@ -60,7 +62,15 @@ internal sealed class CSharpBackend
             cg._currentFnName = fn.Sym.Name;
             fns.Append(cg.Func(fn));
 
-            if (fn.Sym.Name == "main") { mainArity = fn.Params.Count; }
+            if (fn.Sym.Name == "main")
+            {
+                mainArity = fn.Params.Count;
+                // A `void`-returning main (Zig's `pub fn main() void`, or a non-standard
+                // `void main()` in C) can't be `return`ed from the int-typed entry — the
+                // shell calls it for effect and returns 0 instead. Detect it here so the
+                // entry-wiring can choose the right form.
+                mainReturnsVoid = fn.Sym.Type is CType.Func f && f.Return.Unqualified is CType.VoidType;
+            }
             // A variadic function's `params VaArg[]` tail isn't a valid
             // [UnmanagedCallersOnly] signature, so it can't be exported.
             else if (fn.Sym.Storage != Storage.Static && !fn.Variadic)
@@ -95,7 +105,7 @@ internal sealed class CSharpBackend
         foreach (var t in unit.Types) { structs.Append(cg.StructText(t)); }
         foreach (var en in unit.Enums) { structs.Append(cg.EnumText(en)); }
 
-        return new CSharpBackendResult(fns.ToString(), structs.ToString(), Aliases: "", globals.ToString(), mainArity, exports);
+        return new CSharpBackendResult(fns.ToString(), structs.ToString(), Aliases: "", globals.ToString(), mainArity, exports, mainReturnsVoid);
     }
 
     // ---- type declarations -----------------------------------------------
@@ -337,7 +347,26 @@ internal sealed class CSharpBackend
         // C lets a goto jump INTO a nested block; C# scopes labels to their
         // block. Hoist labeled tails until every goto is legal (no-op for the
         // overwhelming majority of functions — see GotoScopeNormalizer).
-        Stmt(sb, GotoScopeNormalizer.Normalize(fn.Body), 0);
+        var body = GotoScopeNormalizer.Normalize(fn.Body);
+        // A Zig `!T` function (error-union return) wraps its body so a propagated
+        // `try` (ZigErrorReturn) converts back to an `Err` return — the exception-based
+        // early-return-out-of-an-expression, modeled on the setjmp lowering. A `!void`
+        // body that falls off the end is a Zig success, so it returns Ok(default).
+        if (retTy is CType.ErrorUnion eu)
+        {
+            var ts = eu.Payload is CType.VoidType ? "Unit" : Cs(eu.Payload);
+            sb.Append("{\n");
+            sb.Append(Pad(1)).Append("try\n");
+            Stmt(sb, body, 1);
+            sb.Append(Pad(1)).Append($"catch (ZigErrorReturn __e) {{ return ErrUnion<{ts}>.Err(__e.Code); }}\n");
+            if (eu.Payload is CType.VoidType && !Terminates(body))
+            {
+                sb.Append(Pad(1)).Append("return ErrUnion<Unit>.Ok(default);\n");
+            }
+            sb.Append("}\n");
+            return sb.ToString();
+        }
+        Stmt(sb, body, 0);
         return sb.ToString();
     }
 
@@ -1286,6 +1315,43 @@ internal sealed class CSharpBackend
             case LitStr s: return (DotCC.EmitHelpers.EncodeStringLiteral(s.Segments), PPrimary);
             case LitU16Str s: return (DotCC.EmitHelpers.EncodeU16StringLiteral(s.Segments), PPrimary);
             case NullPtr: return ("null", PPrimary);
+            // Zig `a orelse b` over a value optional (`T?`) → C#'s `??` (single-eval left,
+            // lazy right). The right is coerced to the payload type so `maybe_u8 orelse 0`
+            // is `a ?? (byte)0`, not a `byte?`/`int` mismatch. Parenthesized → safe anywhere.
+            case NullCoalesce nc:
+                return ($"({Sub(nc.Left, PUnary)} ?? {Coerced(nc.Right, nc.Type)})", PPrimary);
+            // Zig error unions (Milestone B2). `return e;` in a `!T` fn → ErrUnion<P>.Ok(e);
+            // a `!void` success carries no payload (`return;` / fall-off) → Ok(default). The
+            // payload type rides on the node's CType.ErrorUnion, so the backend reads it back.
+            case ErrUnionOk ok:
+            {
+                var eu = (CType.ErrorUnion)ok.Type;
+                var ts = eu.Payload is CType.VoidType ? "Unit" : Cs(eu.Payload);
+                var arg = ok.Payload is null ? "default"
+                        : eu.Payload is CType.VoidType ? Expr(ok.Payload)  // a Unit-valued `try`-of-!void
+                        : Coerced(ok.Payload, eu.Payload);
+                return ($"ErrUnion<{ts}>.Ok({arg})", PPrimary);
+            }
+            // `return error.Foo;` → ErrUnion<P>.Err(code) (code from the flat global set).
+            case ErrUnionErr err:
+            {
+                var eu = (CType.ErrorUnion)err.Type;
+                var ts = eu.Payload is CType.VoidType ? "Unit" : Cs(eu.Payload);
+                return ($"ErrUnion<{ts}>.Err({err.Code})", PPrimary);
+            }
+            // `try e` → ErrUnion.Try(e): the payload on success, else throw ZigErrorReturn
+            // (caught at the enclosing `!T` function's emitted try/catch boundary — see Func).
+            case ZigTry t:
+                return ($"ErrUnion.Try({Expr(t.Inner)})", PPrimary);
+            // `u catch fallback` → ErrUnion.Catch<P>(u, fallback): the payload on success,
+            // else the (side-effect-free) fallback. The type argument is explicit so a fitting
+            // constant fallback (`f() catch 0`) converts to the payload implicitly — otherwise
+            // C# infers T from both args and a bare `0` (int) clashes with the union's payload.
+            case ZigCatch c:
+            {
+                var cts = c.Type is CType.VoidType ? "Unit" : Cs(c.Type);
+                return ($"ErrUnion.Catch<{cts}>({Expr(c.Union)}, {Coerced(c.Fallback, c.Type)})", PPrimary);
+            }
             // A bare unresolved identifier: the backend escapes the raw name.
             case NameRef nr: return (DotCC.EmitHelpers.Id(nr.RawName), PPrimary);
             // An enumerator of a real enum: EnumName.Member (member access). If a
@@ -1594,6 +1660,19 @@ internal sealed class CSharpBackend
             // leans on this: &absentkey, &dummynode_.)
             case UnOp.AddrOf when RootsAtGlobal(u.Operand):
                 return ($"({Cs(u.Type)})System.Runtime.CompilerServices.Unsafe.AsPointer(ref {BareLValue(u.Operand)})", PUnary);
+            // &<rvalue> — the address of a materialized temporary: a C compound literal
+            // `&(T){…}` or a Zig typed struct literal `&T{…}` (both lower to a StructInit
+            // rvalue). C# forbids `&new T{…}` (CS0211), so bind the literal to a block-local
+            // temp — C's automatic storage for the compound literal's unnamed object — and
+            // take ITS address (a stack local is non-moveable, so `&local` needs no `fixed`).
+            // Hoistable contexts only; elsewhere fall through (a non-hoistable `&literal` is
+            // rare and unsupported, same leniency as the StackArray case).
+            case UnOp.AddrOf when !u.Operand.IsLValue && _canHoist:
+            {
+                var name = $"__cl{_clCounter++}";
+                _pending.Add($"{Cs(u.Operand.Type)} {name} = {Expr(u.Operand)}");
+                return ($"&{name}", PUnary);
+            }
             // BareLValue so `&` of a volatile lvalue takes the address, not the
             // address of a Volatile.Read(...) call.
             case UnOp.AddrOf: return ($"&{BareLValue(u.Operand)}", PUnary);

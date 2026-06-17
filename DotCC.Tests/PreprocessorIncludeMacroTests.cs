@@ -19,6 +19,7 @@ namespace DotCC.Tests;
 /// runs a <c>MacroExpander</c> over the include body while the definition is
 /// still live (mirroring the top-level pipeline).
 /// </summary>
+[Collection("PreprocessorIncludeMacro")]
 public sealed class PreprocessorIncludeMacroTests
 {
     /// <summary>Write <paramref name="header"/> + <paramref name="main"/> into a

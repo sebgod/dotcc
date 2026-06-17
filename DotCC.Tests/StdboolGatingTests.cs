@@ -15,6 +15,7 @@ namespace DotCC.Tests;
 /// matching gcc; only <c>__bool_true_false_are_defined</c> survives in C23.
 /// End-to-end in the <c>stdbool-c23/</c> fixture.
 /// </summary>
+[Collection("StdboolGating")]
 public sealed class StdboolGatingTests
 {
     private static string WriteTemp(string body)

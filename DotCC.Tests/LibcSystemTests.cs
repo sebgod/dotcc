@@ -15,6 +15,7 @@ namespace DotCC.Tests;
 /// emitted C code would call it (the threads/setjmp handles are taken by
 /// address, matching <c>thrd_t t; thrd_create(&amp;t, …)</c>).
 /// </summary>
+[Collection("Runtime")]
 public sealed unsafe class LibcSystemTests
 {
     // =================================================================

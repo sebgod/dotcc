@@ -14,6 +14,7 @@ namespace DotCC.Tests;
 /// a typedef element resolves to its underlying primitive for the fixed-buffer check.
 /// End-to-end in the <c>array-member-constexpr/</c> fixture.
 /// </summary>
+[Collection("ArrayMemberConstExpr")]
 public sealed class ArrayMemberConstExprTests
 {
     private static string WriteTemp(string body)

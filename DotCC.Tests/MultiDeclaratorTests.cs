@@ -14,6 +14,7 @@ namespace DotCC.Tests;
 /// <c>*</c>s are absorbed into Type). A uniform list stays one C# multi-declarator;
 /// a mixed one splits. End-to-end in the <c>multi-declarator/</c> fixture.
 /// </summary>
+[Collection("MultiDeclarator")]
 public sealed class MultiDeclaratorTests
 {
     private static string WriteTemp(string body)

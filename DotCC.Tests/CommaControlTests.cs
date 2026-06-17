@@ -15,6 +15,7 @@ namespace DotCC.Tests;
 /// <c>Cond.B</c>. Lua's llex.c `while (cast_void(save_and_next(ls)),
 /// lisxdigit(ls-&gt;current))`. End-to-end in `comma-void-control/`.
 /// </summary>
+[Collection("CommaControl")]
 public sealed class CommaControlTests
 {
     private static string WriteTemp(string body)

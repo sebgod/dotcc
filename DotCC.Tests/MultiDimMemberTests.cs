@@ -14,6 +14,7 @@ namespace DotCC.Tests;
 /// non-primitive one) and <c>s.grid[i][j]</c> rewrites to flat pointer striding.
 /// End-to-end in the <c>multidim-member/</c> fixture.
 /// </summary>
+[Collection("MultiDimMember")]
 public sealed class MultiDimMemberTests
 {
     private static string WriteTemp(string body)

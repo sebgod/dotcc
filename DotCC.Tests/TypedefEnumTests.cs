@@ -13,6 +13,7 @@ namespace DotCC.Tests;
 /// typedef-struct/union. Both lower to a real C# <c>enum Name : int { … }</c>.
 /// End-to-end in the <c>typedef-enum/</c> fixture.
 /// </summary>
+[Collection("TypedefEnum")]
 public sealed class TypedefEnumTests
 {
     private static string WriteTemp(string body)

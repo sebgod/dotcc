@@ -17,6 +17,7 @@ namespace DotCC.Tests;
 /// its own catchable "C stack overflow". The shell reserves 64 MB so such
 /// programs reach their own recursion guards and fault gracefully.
 /// </summary>
+[Collection("Runtime")]
 public sealed class EntryStackThreadTests
 {
     private static string WriteTemp(string body)

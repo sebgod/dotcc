@@ -15,6 +15,7 @@ namespace DotCC.Tests;
 /// statement emits nothing — IDENTICAL to its file-scope counterpart. Motivated
 /// by Lua lstrlib's local alignment probe. End-to-end in `local-type-def/`.
 /// </summary>
+[Collection("LocalTypeDef")]
 public sealed class LocalTypeDefTests
 {
     private static string WriteTemp(string body)

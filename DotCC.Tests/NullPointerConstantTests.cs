@@ -14,6 +14,7 @@ namespace DotCC.Tests;
 /// is a pointer (and the value is a constant 0). A non-pointer target is
 /// unaffected. End-to-end in the <c>null-pointer-constant/</c> fixture.
 /// </summary>
+[Collection("NullPointerConstant")]
 public sealed class NullPointerConstantTests
 {
     private static string Emit(string body)

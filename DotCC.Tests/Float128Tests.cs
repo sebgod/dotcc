@@ -15,6 +15,7 @@ namespace DotCC.Tests;
 /// subprocess: the gcc/long-double differential oracle (for arithmetic) lives
 /// in DotCC.FunctionalTests. Rounding-tie cases here are hand-computed.
 /// </summary>
+[Collection("Float128")]
 public sealed class Float128Tests
 {
     // binary128 of 1.0: biased exponent 16383 (0x3FFF), zero fraction.

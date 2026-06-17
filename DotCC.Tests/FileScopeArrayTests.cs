@@ -14,6 +14,7 @@ namespace DotCC.Tests;
 /// the <c>sizeof(a)/sizeof(a[0])</c> idiom and multi-dim subscripting) is in the
 /// <c>file-scope-arrays/</c> functional fixture.
 /// </summary>
+[Collection("FileScopeArray")]
 public sealed class FileScopeArrayTests
 {
     private static string WriteTemp(string body)

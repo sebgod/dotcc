@@ -75,6 +75,8 @@ public abstract record CType
         Enum e => "enum " + e.Name,
         ComplexType => "_Complex",
         Float128Type => "_Float128",
+        Optional o => "?" + o.Inner.Describe(),
+        ErrorUnion eu => "!" + eu.Payload.Describe(),
         _ => GetType().Name,
     };
 
@@ -205,6 +207,34 @@ public abstract record CType
     public sealed record Float128Type : CType
     {
         public override int SizeOf => 0;
+    }
+
+    /// <summary>A Zig optional <c>?T</c> over a NON-pointer payload. The C# backend
+    /// lowers it to <c>Nullable&lt;T&gt;</c> (<c>T?</c>), so <c>null</c> is none, <c>.?</c>
+    /// is <c>.Value</c> (panics on none), and <c>orelse</c> is <c>??</c> — exactly Zig's
+    /// semantics, for free. An optional POINTER <c>?*T</c> does NOT use this: it lowers to
+    /// a bare nullable <c>T*</c> (Zig's own niche), so <see cref="Optional"/> only ever
+    /// wraps a value type. The C front-end never produces it (C has no optionals); only the
+    /// C# target renders it.</summary>
+    public sealed record Optional(CType Inner) : CType
+    {
+        // Approximate (Nullable<T> is the payload plus a flag byte, padded). @sizeOf(?T)
+        // is not a B1 feature, so an exact layout isn't needed here.
+        public override int SizeOf => Inner.SizeOf + 1;
+    }
+
+    /// <summary>A Zig error union <c>E!T</c> (Milestone B2). The C# backend lowers it to
+    /// the runtime <c>ErrUnion&lt;Payload&gt;</c> value type (<c>ErrUnion&lt;Unit&gt;</c> for
+    /// a <c>void</c> payload, since C# has no generic-over-void) — either a payload or a
+    /// non-zero error code. V1 erases the error SET: every union shares one flat global code
+    /// space, so the set <c>E</c> is dropped here (<c>!T</c> / <c>anyerror!T</c> / <c>E!T</c>
+    /// all carry just the payload). The C front-end never produces it (C has no error
+    /// unions); only the C# target renders it.</summary>
+    public sealed record ErrorUnion(CType Payload) : CType
+    {
+        // Approximate: the payload plus a 2-byte code, padded. @sizeOf(E!T) is not a B2
+        // feature, so an exact layout isn't needed here.
+        public override int SizeOf => Payload.SizeOf + 2;
     }
 
     // ---- well-known instances -------------------------------------------

@@ -17,6 +17,7 @@ namespace DotCC.Tests;
 /// enumerator case labels to <c>(int)</c> (uniform int = pure C semantics).
 /// End-to-end in the <c>enum-switch-int/</c> fixture.
 /// </summary>
+[Collection("EnumSwitch")]
 public sealed class EnumSwitchTests
 {
     private static string WriteTemp(string body)

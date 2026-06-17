@@ -14,6 +14,7 @@ namespace DotCC.Tests;
 /// a <c>delegate*</c>, so dotcc casts it to the other operand's fn-ptr type. End-to-end
 /// in the <c>fnptr-compare/</c> fixture.
 /// </summary>
+[Collection("FnPtrCompare")]
 public sealed class FnPtrCompareTests
 {
     private static string Emit(string body)

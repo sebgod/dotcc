@@ -18,6 +18,7 @@ namespace DotCC.Tests;
 /// sync helpers so the concurrent test can stay <c>async</c> (pointer locals and
 /// <c>async</c> don't mix).
 /// </summary>
+[Collection("Runtime")]
 public sealed class LibcSocketTests
 {
     // Linux/glibc numeric values — exactly what the synthetic headers hand the C

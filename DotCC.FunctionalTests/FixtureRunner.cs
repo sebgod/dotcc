@@ -56,6 +56,17 @@ internal static class FixtureRunner
     /// not a fixture bug).
     /// </summary>
     public static string CompileAndRun(string csharpSource, string[] args)
+        => CompileAndRunCapturingExit(csharpSource, args).stdout;
+
+    /// <summary>
+    /// As <see cref="CompileAndRun"/>, but also surfaces the entry point's
+    /// return value as a process-style exit code: a top-level-statements
+    /// <c>&lt;Main&gt;$</c> returns <c>int</c> when the program's <c>main</c>
+    /// does, and a <c>void</c> entry yields 0. The Zig oracle needs this — a Zig
+    /// program with no I/O is observed only by its exit code until
+    /// <c>@cImport</c> brings stdout into reach.
+    /// </summary>
+    public static (string stdout, int exit) CompileAndRunCapturingExit(string csharpSource, string[] args)
     {
         // Strip the file-based-program directive — Roslyn doesn't parse it
         // (it's a `dotnet run --file` thing). The rest of the source compiles
@@ -120,6 +131,7 @@ internal static class FixtureRunner
             ?? throw new InvalidOperationException("emitted assembly has no entry point");
 
         var captured = new StringWriter();
+        int exitCode = 0;
         lock (_consoleLock)
         {
             var prevOut = Console.Out;
@@ -135,7 +147,10 @@ internal static class FixtureRunner
                     1 => new object?[] { args },
                     _ => throw new InvalidOperationException($"unexpected entry-point arity {pars.Length}"),
                 };
-                entry.Invoke(null, invokeArgs);
+                // A non-void entry point (the C `int main` / Zig `u8 main` case)
+                // returns its exit code through Invoke; a void entry yields null → 0.
+                var ret = entry.Invoke(null, invokeArgs);
+                exitCode = ret is int code ? code : 0;
             }
             catch (TargetInvocationException tie) when (tie.InnerException is not null)
             {
@@ -146,7 +161,7 @@ internal static class FixtureRunner
                 Console.SetOut(prevOut);
             }
         }
-        return captured.ToString();
+        return (captured.ToString(), exitCode);
     }
 
     /// <summary>

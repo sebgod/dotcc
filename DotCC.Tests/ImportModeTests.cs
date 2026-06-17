@@ -18,6 +18,7 @@ namespace DotCC.Tests;
 /// runtime-provided libc proto and a user import is the synthetic line band
 /// (<see cref="DotCC.Ir.SrcPos.SyntheticLineBase"/>).
 /// </summary>
+[Collection("Console")]
 public sealed class ImportModeTests
 {
     /// <summary>

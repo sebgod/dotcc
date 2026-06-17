@@ -13,6 +13,7 @@ namespace DotCC.Tests;
 /// local-zone functions are exercised via the tz-cancelling
 /// <c>localtime(mktime(&amp;tm))</c> round-trip.
 /// </summary>
+[Collection("Runtime")]
 public sealed unsafe class LibcCalendarTests
 {
     private static string Cstr(byte* p) =>

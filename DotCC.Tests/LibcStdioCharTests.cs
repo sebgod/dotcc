@@ -15,6 +15,7 @@ namespace DotCC.Tests;
 /// <see cref="StringReader"/>; the stdin/stdout-bound ones redirect
 /// <see cref="Console"/>.
 /// </summary>
+[Collection("Console")]
 public sealed unsafe class LibcStdioCharTests
 {
     private static string Cstr(byte* p) =>

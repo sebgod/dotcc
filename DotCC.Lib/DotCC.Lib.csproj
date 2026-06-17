@@ -47,9 +47,11 @@
     <PackageReference Include="SharpAstro.LALR.CC" />
   </ItemGroup>
 
-  <!-- Grammar source. Filename → generated class: c.lalr.yaml → DotCC.C. -->
+  <!-- Grammar sources. Filename → generated class: c.lalr.yaml → DotCC.C,
+       zig.lalr.yaml → DotCC.Zig (the Zig frontend grammar, behind IFrontend). -->
   <ItemGroup>
     <AdditionalFiles Include="c.lalr.yaml" />
+    <AdditionalFiles Include="zig.lalr.yaml" />
   </ItemGroup>
 
   <!-- Synthetic standard headers shipped with the compiler.

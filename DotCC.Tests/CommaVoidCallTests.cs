@@ -16,6 +16,7 @@ namespace DotCC.Tests;
 /// normal non-void comma in init position is also lifted (no delegate, no tuple).
 /// End-to-end (incl. short-circuit) in the <c>comma-void-call/</c> fixture.
 /// </summary>
+[Collection("CommaVoidCall")]
 public sealed class CommaVoidCallTests
 {
     private static string Emit(string body)

@@ -15,6 +15,7 @@ namespace DotCC.Tests;
 /// rewind, feof/ferror, remove/rename, tmpfile. Each test uses a real temp
 /// file (hermetic, cleaned up) or an anonymous <c>tmpfile()</c>.
 /// </summary>
+[Collection("Runtime")]
 public sealed unsafe class LibcFileTests
 {
     // Marshal a managed string to a NUL-terminated UTF-8 native buffer.

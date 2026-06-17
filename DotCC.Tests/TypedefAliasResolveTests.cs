@@ -16,6 +16,7 @@ namespace DotCC.Tests;
 /// (<c>lua_KContext</c>/<c>lua_Reader</c>) is the motivating case. End-to-end in
 /// <c>typedef-alias-resolve/</c>.
 /// </summary>
+[Collection("TypedefAliasResolve")]
 public sealed class TypedefAliasResolveTests
 {
     private static string Emit(string body)

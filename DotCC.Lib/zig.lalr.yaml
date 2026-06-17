@@ -1,0 +1,637 @@
+# zig.lalr.yaml — the PRODUCTION dotcc Zig grammar (filename → generated class
+# `DotCC.Zig`, parallel to `c.lalr.yaml` → `DotCC.C`), sitting behind the
+# `IFrontend` seam. A hand LALR(1) translation of Zig's PEG, pinned to
+# ziglang/zig 3391ad7a (oracle = zig 0.17.0-dev.667).
+#
+# The C-shaped value/type CORE (slice 1) was validated as a standalone conflict
+# regression in the LALR.CC repo (examples/Zig, SharpAstro/LALR.CC#4): clean LALR(1)
+# tables, parses real Zig, rejects faithfully — exercising Zig's UNIFIED expression/
+# type grammar, where `*`, `&`, `[`, `!`, `.` are each both an operand-position
+# (type/prefix) token and an after-operand (binary/postfix) token, which LALR
+# separates by parser state rather than PEG ordered choice. This copy is where the
+# grammar grows toward full Zig (slice 2+); upstream PEG deltas are ported through
+# the frozen LALR.CC `examples/Zig/grammar.peg` reference.
+#
+# Precedence cascade (lowest -> highest), faithful to grammar.peg:
+#   Expr -> BoolOr(or) -> BoolAnd(and) -> Compare(== != < > <= >=, NON-assoc)
+#        -> Bitwise(& ^ |) -> BitShift(<< >>) -> Add(+ -) -> Mul(* / %)
+#        -> Prefix(! - ~ & try, right-assoc)  [value-level prefix]
+#        -> Type(? * []T [N]T, right-assoc)   [type-level prefix; types ARE values]
+#        -> ErrUnion(E ! T) -> Suffix(. .* .? [idx] call, left-assoc) -> Primary
+#
+# DEFERRED to later slices (documented, not silent — grammar.peg has them):
+#   - control-flow-as-expression (if/for/while/switch exprs) and the `!ExprSuffix`
+#     negative-lookahead predicates that gate them (the hard PEG-ism);
+#   - labeled blocks/loops (`label:`), payloads (`|x|`), switch, for-ranges;
+#   - container decls (struct/enum/union/opaque), error sets, init lists `.{...}`;
+#   - comptime/defer/errdefer/nosuspend, asm, destructuring assignment, anytype;
+#   - full FnProto modifiers (export/extern/inline/callconv/align/linksection/...);
+#   - hex/oct/bin/underscored integers, char literals, multiline strings, builtins
+#     beyond `@name(args)`, `orelse`/`catch`, the wrapping/saturating operators.
+
+symbols:
+  # --- non-terminals (start = Root at index 0) ---
+  - Root         # 0  translation unit (start)
+  - Decls        # 1  top-level declaration list
+  - Decl         # 2  one top-level declaration
+  - FnDef        # 3  function definition
+  - Params       # 4  parameter list
+  - Param        # 5  one parameter (name: type)
+  - VarDecl      # 6  const/var declaration (top-level or statement)
+  - Block        # 7  { statements }
+  - Stmts        # 8  statement list
+  - Stmt         # 9  one statement
+  - Type         # 10 TypeExpr: PrefixTypeOp* over ErrUnion (types are values)
+  - Expr         # 11 expression (top of the cascade)
+  - BoolOr       # 12 `or`
+  - BoolAnd      # 13 `and`
+  - Compare      # 14 == != < > <= >=  (non-associative: at most one)
+  - Bitwise      # 15 & ^ |
+  - BitShift     # 16 << >>
+  - Add          # 17 + -
+  - Mul          # 18 * / %
+  - Prefix       # 19 value prefix ops: ! - ~ & try
+  - ErrUnion     # 20 E ! T error-union type
+  - Suffix       # 21 postfix: .field .* .? [idx] (args)
+  - Primary      # 22 atoms
+  - ArgList      # 23 call-argument list
+  # --- terminals: keywords ---
+  - 'fn'         # 24
+  - 'pub'        # 25
+  - 'const'      # 26
+  - 'var'        # 27
+  - 'return'     # 28
+  - 'if'         # 29
+  - 'else'       # 30
+  - 'while'      # 31
+  - 'and'        # 32
+  - 'or'         # 33
+  - 'try'        # 34
+  # --- terminals: punctuation ---
+  - '('          # 35
+  - ')'          # 36
+  - '{'          # 37
+  - '}'          # 38
+  - '['          # 39
+  - ']'          # 40
+  - ';'          # 41
+  - ','          # 42
+  - ':'          # 43
+  - '='          # 44
+  # --- terminals: binary operators ---
+  - '=='         # 45
+  - '!='         # 46
+  - '<'          # 47
+  - '>'          # 48
+  - '<='         # 49
+  - '>='         # 50
+  - '&'          # 51  (also value prefix: address-of)
+  - '^'          # 52
+  - '|'          # 53
+  - '<<'         # 54
+  - '>>'         # 55
+  - '+'          # 56
+  - '-'          # 57  (also value prefix: negate)
+  - '*'          # 58  (also type prefix: pointer)
+  - '/'          # 59
+  - '%'          # 60
+  # --- terminals: prefix / type / postfix ---
+  - '!'          # 61  (value prefix: not; also error-union infix E!T)
+  - '~'          # 62  (value prefix: bit-not)
+  - '?'          # 63  (type prefix: optional)
+  - '.'          # 64  (postfix field / enum literal)
+  - '.*'         # 65  (postfix pointer deref)
+  - '.?'         # 66  (postfix optional unwrap)
+  # --- terminals: atoms ---
+  - IDENT        # 67
+  - INTEGER      # 68
+  - FLOAT        # 69
+  - STRING       # 70
+  - BUILTIN      # 71  @name
+  # --- terminals: ignored ---
+  - WS           # 72
+  - LINE_COMMENT # 73
+  # --- slice 2a: control-flow as expression (appended — never reorder) ---
+  - RhsExpr      # 74  value-position expression: Expr | IfExpr (init/return/branch)
+  - IfExpr       # 75  if (Expr) RhsExpr else RhsExpr — the if-expression
+  # --- extern fn FFI (appended — never reorder) ---
+  - 'extern'     # 76  extern fn prototype (libc FFI, linked with -lc)
+  # --- printf slice: variadic + C-pointer type (appended — never reorder) ---
+  - '...'        # 77  variadic parameter pack (`fn(fixed, ...)`, extern fn only)
+  - '[*c]'       # 78  C-pointer type prefix: `[*c]T` == C's `T*` (glued token)
+  # --- optionals (Milestone B1; appended — never reorder) ---
+  - OrElse       # 79  `a orelse b` — lowest-precedence binary (Expr -> OrElse -> BoolOr)
+  - 'orelse'     # 80  optional null-coalescing keyword
+  - 'null'       # 81  the null literal (optional none / null pointer)
+  # --- error unions (Milestone B2; appended — never reorder) ---
+  - 'catch'      # 82  `a catch b` — error-union handling (joins the OrElse level)
+  - 'error'      # 83  `error.Foo` error-value literal keyword
+  # --- control flow (Milestone C1; appended — never reorder) ---
+  - 'break'      # 84  `break;` loop exit
+  - 'continue'   # 85  `continue;` loop next-iteration
+  # --- switch (Milestone C2; appended — never reorder) ---
+  - 'switch'     # 86  `switch (x) { … }`
+  - '=>'         # 87  switch-prong arrow
+  - Prongs       # 88  prong list (left-recursive, clean trailing-comma handling)
+  - Prong        # 89  one prong: CaseVals '=>' Block
+  - CaseVals     # 90  prong case values: Expr (, Expr)* | else
+  # --- range for (Milestone C3; appended — never reorder) ---
+  - 'for'        # 91  `for (a..b) |i| …` range loop
+  - '..'         # 92  range operator (for-range; slicing later)
+  # --- structs & enums (Milestone D1; appended — never reorder) ---
+  - 'struct'     # 93  `const P = struct { … };` container decl
+  - 'enum'       # 94  `const C = enum(u8) { … };` container decl
+  - FieldDecls   # 95  struct field list (left-recursive, clean trailing comma)
+  - FieldDecl    # 96  one struct field: `name: Type`
+  - EnumFields   # 97  enum member list (left-recursive, clean trailing comma)
+  - EnumField    # 98  one enum member: `name` or `name = value`
+  - FieldInits   # 99  anonymous struct-literal init list
+  - FieldInit    # 100 one field init: `.name = expr`
+  # --- typed struct literals `T{ … }` (appended — never reorder) ---
+  - CurlySuffix  # 101 value-position curly-suffix: `Type` or `Type { FieldInits }` (Zig's CurlySuffixExpr)
+  # --- struct methods / UFCS (Milestone D2; appended — never reorder) ---
+  - Member       # 102 one container-body member: a field (`name: Type`) or a method (`fn`/`pub fn`)
+  # --- tagged unions (Milestone D3; appended — never reorder) ---
+  - 'union'        # 103 `const U = union(enum) { … };` tagged-union container decl
+  - UnionVariants  # 104 union variant list (left-recursive, clean trailing comma)
+  - UnionVariant   # 105 one variant: `name: Type` (payload) or `name` (void / tag-only)
+
+productions:
+  # Start: single non-terminal, trimmed at parse time.
+  - derivation: none
+    rules:
+      - { lhs: Root, rhs: [Decls] }
+
+  - derivation: leftmost
+    rules:
+      - { lhs: Decls, rhs: [Decl, Decls], action: declsCons }
+      - { lhs: Decls, rhs: [Decl],         action: declsOne }
+
+  - derivation: none
+    rules:
+      - { lhs: Decl, rhs: [FnDef] }
+      - { lhs: Decl, rhs: ['pub', FnDef],  action: pubFn }
+      - { lhs: Decl, rhs: [VarDecl] }
+      - { lhs: Decl, rhs: ['pub', VarDecl], action: pubVar }
+      # extern fn PROTOTYPE — no body, ends with `;`; linked with -lc (PEG:
+      # `KEYWORD_extern STRINGLITERALSINGLE? FnProto SEMICOLON`). The `extern "c"`
+      # library-name string and a `!T` error-union return are deferred.
+      - { lhs: Decl, rhs: ['extern', 'fn', IDENT, '(', Params, ')', Type, ';'], action: externFnProto }
+      - { lhs: Decl, rhs: ['extern', 'fn', IDENT, '(', ')', Type, ';'],         action: externFnProtoNoArgs }
+      # Container decls — Zig binds a struct/enum TYPE to a `const` name (types are
+      # values). A struct/enum RHS isn't an `RhsExpr`, so these are distinct Decl forms,
+      # NOT VarDecl: the `struct`/`enum` keyword right after `=` is a clean 1-token shift
+      # decision (no `RhsExpr` starts with `struct`/`enum`). Top-level only in D1 (a
+      # container `const` inside a function body is deferred — it'd need these on Stmt too).
+      # An empty `struct {}` (a zero-size marker / namespace) is allowed; `enum {}` is not
+      # (Zig rejects a memberless enum). The fixed-underlying form is `enum(u8) { … }`.
+      - { lhs: Decl, rhs: ['const', IDENT, '=', 'struct', '{', FieldDecls, '}', ';'],          action: structDecl }
+      - { lhs: Decl, rhs: ['const', IDENT, '=', 'struct', '{', '}', ';'],                       action: structDeclEmpty }
+      - { lhs: Decl, rhs: ['const', IDENT, '=', 'enum', '{', EnumFields, '}', ';'],             action: enumDecl }
+      - { lhs: Decl, rhs: ['const', IDENT, '=', 'enum', '(', Type, ')', '{', EnumFields, '}', ';'], action: enumDeclTyped }
+      # Tagged union (Milestone D3): `const U = union(enum) { a: T, b, … };`. Only the
+      # auto-inferred-tag form `union(enum)` (the `enum` keyword after `(`) — an explicit
+      # `union(SomeEnum)` tag and a bare untagged `union { … }` are deferred. The `union`
+      # keyword right after `=` is a clean 1-token shift decision, symmetric with struct/enum.
+      - { lhs: Decl, rhs: ['const', IDENT, '=', 'union', '(', 'enum', ')', '{', UnionVariants, '}', ';'], action: unionDeclEnum }
+
+  # FnProto (subset): `fn name(params) RetType Block`. RetType may carry the
+  # inferred-error-set leading `!` (`fn f() !void`), distinct from ErrUnion's
+  # infix `!` by lookahead (leading `!` appears immediately after `)`).
+  - derivation: none
+    rules:
+      - { lhs: FnDef, rhs: ['fn', IDENT, '(', Params, ')', Type, Block],       action: fnDef }
+      - { lhs: FnDef, rhs: ['fn', IDENT, '(', ')', Type, Block],               action: fnDefNoArgs }
+      - { lhs: FnDef, rhs: ['fn', IDENT, '(', Params, ')', '!', Type, Block],  action: fnDefErr }
+      - { lhs: FnDef, rhs: ['fn', IDENT, '(', ')', '!', Type, Block],          action: fnDefNoArgsErr }
+
+  - derivation: leftmost
+    rules:
+      - { lhs: Params, rhs: [Param, ',', Params], action: paramsCons }
+      - { lhs: Params, rhs: [Param],               action: paramsOne }
+
+  - derivation: none
+    rules:
+      - { lhs: Param, rhs: [IDENT, ':', Type], action: param }
+      # The variadic marker `...` is a parameter alternative (Zig's PEG: `ParamDecl
+      # <- ... / DOT3`), NOT a comma-suffix after the whole list — so `,` never enters
+      # FOLLOW(Params) and the paramsCons/paramsOne S/R stays clean. Grammar-accepted
+      # anywhere a Param is, but lowering enforces last-position + extern-only.
+      - { lhs: Param, rhs: ['...'], action: paramVariadic }
+
+  # const/var, optionally type-annotated. Reused at top level (Decl) and inside
+  # blocks (Stmt).
+  - derivation: none
+    rules:
+      - { lhs: VarDecl, rhs: ['const', IDENT, '=', RhsExpr, ';'],            action: constDecl }
+      - { lhs: VarDecl, rhs: ['const', IDENT, ':', Type, '=', RhsExpr, ';'], action: constDeclTyped }
+      - { lhs: VarDecl, rhs: ['var', IDENT, '=', RhsExpr, ';'],             action: varDecl }
+      - { lhs: VarDecl, rhs: ['var', IDENT, ':', Type, '=', RhsExpr, ';'],  action: varDeclTyped }
+
+  - derivation: none
+    rules:
+      - { lhs: Block, rhs: ['{', Stmts, '}'], action: block }
+      - { lhs: Block, rhs: ['{', '}'],         action: blockEmpty }
+
+  - derivation: leftmost
+    rules:
+      - { lhs: Stmts, rhs: [Stmt, Stmts], action: stmtsCons }
+      - { lhs: Stmts, rhs: [Stmt],         action: stmtsOne }
+
+  # Dangling-else: rightmost group so `else` shifts onto the nearest open `if`.
+  - derivation: rightmost
+    rules:
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', Stmt],                 action: stmtIf }
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', Stmt, 'else', Stmt],   action: stmtIfElse }
+
+  - derivation: none
+    rules:
+      - { lhs: Stmt, rhs: ['while', '(', Expr, ')', Stmt], action: stmtWhile }
+      # `while (cond) : (cont) body` — the continue-expression runs after each iteration
+      # (and on `continue`), exactly like C's `for(; cond; cont)`, so it lowers to the C IR
+      # `For` (no init). Zig's PEG: `WhilePrefix (COLON LPAREN AssignExpr RPAREN)? Block`. The
+      # cont is an AssignExpr, but our `Expr` cascade has no assignment, so the common
+      # `: (i = i + 1)` form gets its own production; a bare-expr cont (`: (step())`) the other.
+      # The `=` vs `)` after the inner Expr is a clean shift/reduce decision.
+      - { lhs: Stmt, rhs: ['while', '(', Expr, ')', ':', '(', Expr, '=', RhsExpr, ')', Stmt], action: stmtWhileContAssign }
+      - { lhs: Stmt, rhs: ['while', '(', Expr, ')', ':', '(', Expr, ')', Stmt],               action: stmtWhileCont }
+      - { lhs: Stmt, rhs: ['break', ';'],    action: stmtBreak }
+      - { lhs: Stmt, rhs: ['continue', ';'], action: stmtContinue }
+      # `switch (x) { prong, … }` as a STATEMENT. Each prong is `CaseVals => Block` — the
+      # body MUST be a braced block (bare-expr bodies + switch-as-EXPRESSION are deferred).
+      # Zig switch has NO fall-through, so the lowering appends a `break` to each section
+      # (the C# backend would otherwise synthesize C's fall-through). The two productions
+      # differ only by an optional trailing comma after the last prong.
+      - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', '{', Prongs, '}'],      action: stmtSwitch }
+      - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', '{', Prongs, ',', '}'], action: stmtSwitchTrailing }
+      # `for (start..end) |i| body` — the only slice-free `for` (a range). Lowers to the C IR
+      # `for (usize i = start; i < end; i++) body`; the `|i|` capture is the usize loop index
+      # (Zig's range-for index type). The body is a Stmt (single statement or a block), like
+      # `while`. for-over-slice / `0..` open-ended / the second `, 0..` index are deferred.
+      - { lhs: Stmt, rhs: ['for', '(', Expr, '..', Expr, ')', '|', IDENT, '|', Stmt], action: stmtForRange }
+      - { lhs: Stmt, rhs: ['return', RhsExpr, ';'],         action: stmtReturn }
+      - { lhs: Stmt, rhs: ['return', ';'],                   action: stmtReturnVoid }
+      - { lhs: Stmt, rhs: [VarDecl] }
+      - { lhs: Stmt, rhs: [Expr, '=', RhsExpr, ';'],         action: stmtAssign }
+      - { lhs: Stmt, rhs: [Expr, ';'],                        action: stmtExpr }
+      - { lhs: Stmt, rhs: [Block] }
+
+  # ===== expression cascade =====
+  - derivation: none
+    rules:
+      - { lhs: Expr, rhs: [OrElse] }
+
+  # `a orelse b` / `a catch b` — lowest-precedence binary level (below `or`), left-assoc.
+  # The RHS is BoolOr (a value expr); `orelse return` / `catch return` (a noreturn RHS)
+  # isn't expressible — `return` is a statement, not an expression — so the value-vs-
+  # control-flow boundary stays grammar-enforced. `catch |e| …` payload-capture is deferred.
+  - derivation: leftmost
+    rules:
+      - { lhs: OrElse, rhs: [OrElse, 'orelse', BoolOr], action: orElse }
+      - { lhs: OrElse, rhs: [OrElse, 'catch', BoolOr],  action: catchOp }
+      - { lhs: OrElse, rhs: [BoolOr] }
+
+  # ===== slice 2a: control-flow as expression =====
+  # A value-position expression is either an operator-expression (the cascade,
+  # Expr) or a control-flow expression (IfExpr). Disjoint first sets — the cascade
+  # never starts with `if`, so no R/R conflict. Crucially IfExpr is NOT in the
+  # cascade (not a Primary), so a control-flow expr can never be a binary SUB-operand
+  # — which reproduces Zig's `!ExprSuffix` rule WITHOUT a predicate: the branches are
+  # greedy RhsExpr, so any trailing operator is absorbed into the branch by the normal
+  # cascade (`if c a else b + d` → `if c a else (b + d)`), and the cascade has already
+  # consumed every operator before RhsExpr → Expr reduces, so there's no operator
+  # left over to apply to the if-expr. (Deferred: `a + if (c) x else y`, i.e. an
+  # if-expr as an arbitrary binary sub-operand, which Zig allows; here it needs parens.
+  # Also deferred: while/for/switch expressions, if-without-else.)
+  - derivation: none
+    rules:
+      - { lhs: RhsExpr, rhs: [Expr] }
+      - { lhs: RhsExpr, rhs: [IfExpr] }
+
+  - derivation: none
+    rules:
+      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', RhsExpr, 'else', RhsExpr], action: ifExpr }
+
+  - derivation: leftmost
+    rules:
+      - { lhs: BoolOr, rhs: [BoolOr, 'or', BoolAnd], action: boolOr }
+      - { lhs: BoolOr, rhs: [BoolAnd] }
+
+  - derivation: leftmost
+    rules:
+      - { lhs: BoolAnd, rhs: [BoolAnd, 'and', Compare], action: boolAnd }
+      - { lhs: BoolAnd, rhs: [Compare] }
+
+  # Compare is non-associative (PEG: `BitwiseExpr (CompareOp BitwiseExpr)?`) — no
+  # self-recursion, so `a < b < c` is a parse error, matching Zig.
+  - derivation: none
+    rules:
+      - { lhs: Compare, rhs: [Bitwise, '==', Bitwise], action: cmpEq }
+      - { lhs: Compare, rhs: [Bitwise, '!=', Bitwise], action: cmpNe }
+      - { lhs: Compare, rhs: [Bitwise, '<', Bitwise],  action: cmpLt }
+      - { lhs: Compare, rhs: [Bitwise, '>', Bitwise],  action: cmpGt }
+      - { lhs: Compare, rhs: [Bitwise, '<=', Bitwise], action: cmpLe }
+      - { lhs: Compare, rhs: [Bitwise, '>=', Bitwise], action: cmpGe }
+      - { lhs: Compare, rhs: [Bitwise] }
+
+  - derivation: leftmost
+    rules:
+      - { lhs: Bitwise, rhs: [Bitwise, '&', BitShift], action: bitAnd }
+      - { lhs: Bitwise, rhs: [Bitwise, '^', BitShift], action: bitXor }
+      - { lhs: Bitwise, rhs: [Bitwise, '|', BitShift], action: bitOr }
+      - { lhs: Bitwise, rhs: [BitShift] }
+
+  - derivation: leftmost
+    rules:
+      - { lhs: BitShift, rhs: [BitShift, '<<', Add], action: shl }
+      - { lhs: BitShift, rhs: [BitShift, '>>', Add], action: shr }
+      - { lhs: BitShift, rhs: [Add] }
+
+  - derivation: leftmost
+    rules:
+      - { lhs: Add, rhs: [Add, '+', Mul], action: add }
+      - { lhs: Add, rhs: [Add, '-', Mul], action: sub }
+      - { lhs: Add, rhs: [Mul] }
+
+  - derivation: leftmost
+    rules:
+      - { lhs: Mul, rhs: [Mul, '*', Prefix], action: mul }
+      - { lhs: Mul, rhs: [Mul, '/', Prefix], action: divOp }
+      - { lhs: Mul, rhs: [Mul, '%', Prefix], action: modOp }
+      - { lhs: Mul, rhs: [Prefix] }
+
+  # Value-level prefix ops (right-assoc). Below Mul, above the type-prefix level.
+  - derivation: rightmost
+    rules:
+      - { lhs: Prefix, rhs: ['!', Prefix],  action: preNot }
+      - { lhs: Prefix, rhs: ['-', Prefix],  action: preNeg }
+      - { lhs: Prefix, rhs: ['~', Prefix],  action: preBitNot }
+      - { lhs: Prefix, rhs: ['&', Prefix],  action: preAddrOf }
+      - { lhs: Prefix, rhs: ['try', Prefix], action: preTry }
+      - { lhs: Prefix, rhs: [CurlySuffix] }
+
+  # Curly-suffix level — Zig's `CurlySuffixExpr <- TypeExpr InitList?`. A value-position
+  # type optionally followed by a struct-init list, so `Point{ .x = 1 }` parses WITHOUT
+  # the shift/reduce conflict a `Primary -> IDENT '{'` rule would create against
+  # `fn f() Point { … }`. The trick is structural, exactly as real Zig does it: the init
+  # list attaches ABOVE `Type` and ONLY here (value position), while the fn RETURN type
+  # stays a raw `Type` (no init list) — so the return-type brace is unambiguously a Block.
+  # `{` is never in FOLLOW(Expr), so the state after `Type` shifts the init-list `{` with no
+  # ambiguity against the bare-`Type` reduction. The leading-`.` anonymous form (`.{ … }`)
+  # stays a Primary; this is the typed form. Empty `Type{}` is the second rule.
+  - derivation: none
+    rules:
+      - { lhs: CurlySuffix, rhs: [Type] }
+      - { lhs: CurlySuffix, rhs: [Type, '{', FieldInits, '}'], action: typedStructInit }
+      - { lhs: CurlySuffix, rhs: [Type, '{', '}'],             action: typedStructInitEmpty }
+
+  # Type-level prefix ops (right-assoc): `?T`, `*T`, `[]T`, `[N]T`. These sit at
+  # operand position; `*`/`&`/`[` here are the SAME tokens as binary mul / bitwise-
+  # and / postfix-index but reached in a different parser state. This is the core
+  # thing the spike validates.
+  - derivation: rightmost
+    rules:
+      - { lhs: Type, rhs: ['?', Type],            action: tyOptional }
+      - { lhs: Type, rhs: ['*', Type],            action: tyPointer }
+      # `*const T` and the C-pointer `[*c]T` / `[*c]const T`. The pointee `const`
+      # is grammatically tied to the pointer prefix (NOT a free-standing `const T`
+      # type prefix), so it can never be reached from the expression cascade — that
+      # would collide with a `const`-decl. `[*c]` is one glued lexer token, so it
+      # never clashes with the array `[Expr]` / slice `[]` forms. (`[*]T` many-item
+      # and `[*:s]T` sentinel pointers are deferred — printf needs only `[*c]`.)
+      - { lhs: Type, rhs: ['*', 'const', Type],    action: tyPtrConst }
+      - { lhs: Type, rhs: ['[*c]', Type],          action: tyCPtr }
+      - { lhs: Type, rhs: ['[*c]', 'const', Type], action: tyCPtrConst }
+      - { lhs: Type, rhs: ['[', ']', Type],       action: tySlice }
+      - { lhs: Type, rhs: ['[', Expr, ']', Type], action: tyArray }
+      - { lhs: Type, rhs: [ErrUnion] }
+
+  - derivation: none
+    rules:
+      - { lhs: ErrUnion, rhs: [Suffix, '!', Type], action: errUnion }
+      - { lhs: ErrUnion, rhs: [Suffix] }
+
+  # Postfix chain (left-assoc): field access, deref, optional-unwrap, index, call.
+  - derivation: leftmost
+    rules:
+      - { lhs: Suffix, rhs: [Suffix, '.', IDENT],      action: field }
+      - { lhs: Suffix, rhs: [Suffix, '.*'],             action: deref }
+      - { lhs: Suffix, rhs: [Suffix, '.?'],             action: unwrap }
+      - { lhs: Suffix, rhs: [Suffix, '[', Expr, ']'],  action: index }
+      - { lhs: Suffix, rhs: [Suffix, '(', ArgList, ')'], action: callArgs }
+      - { lhs: Suffix, rhs: [Suffix, '(', ')'],          action: callNoArgs }
+      - { lhs: Suffix, rhs: [Primary] }
+
+  - derivation: none
+    rules:
+      - { lhs: Primary, rhs: [IDENT],               action: ident }
+      - { lhs: Primary, rhs: [INTEGER],             action: intLit }
+      - { lhs: Primary, rhs: [FLOAT],               action: floatLit }
+      - { lhs: Primary, rhs: [STRING],              action: strLit }
+      - { lhs: Primary, rhs: ['(', Expr, ')'],      action: grouped }
+      - { lhs: Primary, rhs: [BUILTIN, '(', ArgList, ')'], action: builtinCall }
+      - { lhs: Primary, rhs: [BUILTIN, '(', ')'],           action: builtinCallNoArgs }
+      - { lhs: Primary, rhs: ['null'],              action: nullLit }
+      - { lhs: Primary, rhs: ['.', IDENT],          action: enumLit }
+      # Anonymous struct literal `.{ … }` (Milestone D1). The leading `.` is the SAME token
+      # as enumLit's; they split cleanly on the next symbol (`{` → struct literal, IDENT →
+      # enum literal). An empty `.{}` zero-inits the (sink-typed) struct.
+      - { lhs: Primary, rhs: ['.', '{', FieldInits, '}'], action: anonStructInit }
+      - { lhs: Primary, rhs: ['.', '{', '}'],             action: anonStructInitEmpty }
+      # `error.Foo` — an error-value literal. `error` is a distinct keyword token, so this
+      # never collides with the `Suffix '.' IDENT` field access (which starts from a
+      # Primary/IDENT). V1: error SETS aren't modelled (`error{A,B}` decls deferred); a bare
+      # `error.Foo` is only meaningful in `return error.Foo;` within a `!T` function.
+      - { lhs: Primary, rhs: ['error', '.', IDENT], action: errorLit }
+
+  - derivation: leftmost
+    rules:
+      - { lhs: ArgList, rhs: [Expr, ',', ArgList], action: argsCons }
+      - { lhs: ArgList, rhs: [Expr],                action: argsOne }
+
+  # ===== switch prongs (Milestone C2) =====
+  # LEFT-recursive prong list — the form that makes the optional trailing comma a clean
+  # 1-token shift decision (`Prongs ','` then `}` → trailing-comma Stmt, else another Prong).
+  - derivation: leftmost
+    rules:
+      - { lhs: Prongs, rhs: [Prongs, ',', Prong], action: prongsCons }
+      - { lhs: Prongs, rhs: [Prong],               action: prongsOne }
+
+  # A prong body is a braced Block, optionally preceded by a payload capture `|x|` (Milestone
+  # D3 — meaningful only when switching on a tagged union; rejected by the lowering otherwise).
+  # After `=>`, a `|` (capture) vs a `{` (block) is a clean shift decision.
+  - derivation: none
+    rules:
+      - { lhs: Prong, rhs: [CaseVals, '=>', Block],                  action: prong }
+      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, '|', Block], action: prongCapture }
+
+  # Case values: a comma-list of value Exprs, or `else` (the default). The `,` here never
+  # clashes with the prong-separator `,` because FOLLOW(CaseVals) = { '=>' } — after a value
+  # Expr, a `,` can only continue the value list (a complete CaseVals reduces on '=>' alone).
+  - derivation: leftmost
+    rules:
+      - { lhs: CaseVals, rhs: [Expr, ',', CaseVals], action: caseValsCons }
+      - { lhs: CaseVals, rhs: [Expr],                 action: caseValsOne }
+      - { lhs: CaseVals, rhs: ['else'],               action: caseElse }
+
+  # ===== struct container body (Milestone D2 — a field-only list in D1) =====
+  # A struct body is a list of MEMBERS: fields (`name: Type`, comma-separated) interleaved
+  # with methods (`fn`/`pub fn …`, which self-terminate with their Block and so need no
+  # separator). FieldDecls is RIGHT-recursive over Member — exactly the Decls/Stmts list shape
+  # — so a method and a field can sit side by side with no comma between them. The optional
+  # trailing comma after the last field is the `Member -> FieldDecl ','` form (then FieldDecls
+  # reduces to a single Member, `}` follows). Conflict-free: `,` is never in FOLLOW(Member) (a
+  # Member is followed only by another Member or `}`), so the `FieldDecl ','` shift and the
+  # bare-`FieldDecl` reduce never collide — hence `derivation: none`.
+  - derivation: leftmost
+    rules:
+      - { lhs: FieldDecls, rhs: [Member, FieldDecls], action: fieldDeclsCons }
+      - { lhs: FieldDecls, rhs: [Member],              action: fieldDeclsOne }
+
+  # One container member. A field carries its (optional, when last) trailing comma here so the
+  # comma never leaks into the FieldDecls list recursion. A method is a full FnDef (the same
+  # nonterminal as a top-level function), optionally `pub` — lowered to a mangled free function
+  # `TypeName_method` with the receiver as its first parameter (Milestone D2). A container-level
+  # `const` (namespaced constant) and `const Self = @This();` are deferred.
+  - derivation: none
+    rules:
+      - { lhs: Member, rhs: [FieldDecl, ','], action: memberField }
+      - { lhs: Member, rhs: [FieldDecl],       action: memberFieldLast }
+      - { lhs: Member, rhs: [FnDef],           action: memberMethod }
+      - { lhs: Member, rhs: ['pub', FnDef],    action: memberPubMethod }
+
+  - derivation: none
+    rules:
+      - { lhs: FieldDecl, rhs: [IDENT, ':', Type], action: structField }
+
+  # Enum member list — same trailing-comma shape. A member is a bare name (auto-increment
+  # from the previous, starting at 0) or `name = value` (a constant Expr; D1 const-evals
+  # int literals + unary +/- of one).
+  - derivation: leftmost
+    rules:
+      - { lhs: EnumFields, rhs: [EnumFields, ',', EnumField], action: enumFieldsCons }
+      - { lhs: EnumFields, rhs: [EnumField],                   action: enumFieldsOne }
+      - { lhs: EnumFields, rhs: [EnumFields, ','],             action: enumFieldsTrail }
+
+  - derivation: none
+    rules:
+      - { lhs: EnumField, rhs: [IDENT],            action: enumField }
+      - { lhs: EnumField, rhs: [IDENT, '=', Expr], action: enumFieldInit }
+
+  # ===== tagged-union variants (Milestone D3) =====
+  # Same trailing-comma list shape as EnumFields/FieldDecls. A variant is `name: Type`
+  # (a payload) or a bare `name` (a void / tag-only variant). The `:` vs `,`/`}` after the
+  # IDENT is a clean shift/reduce decision (`:` ∉ FOLLOW(UnionVariant)).
+  - derivation: leftmost
+    rules:
+      - { lhs: UnionVariants, rhs: [UnionVariants, ',', UnionVariant], action: unionVariantsCons }
+      - { lhs: UnionVariants, rhs: [UnionVariant],                      action: unionVariantsOne }
+      - { lhs: UnionVariants, rhs: [UnionVariants, ','],                action: unionVariantsTrail }
+
+  - derivation: none
+    rules:
+      - { lhs: UnionVariant, rhs: [IDENT, ':', Type], action: unionVariantPayload }
+      - { lhs: UnionVariant, rhs: [IDENT],             action: unionVariantVoid }
+
+  # Anonymous struct literal `.{ .f = v, … }` — Zig's result-located init, where the type
+  # is inferred from the sink (a typed `const`/`var`, a `return`, a field's declared type).
+  # The leading `.{` is lexically `.` then `{`, distinct from `IDENT {` — so it sidesteps
+  # the `fn f() RetType {` shift/reduce conflict a typed `T{…}` literal would create (the
+  # return-type IDENT vs the body brace). An empty `.{}` zero-inits every field.
+  - derivation: leftmost
+    rules:
+      - { lhs: FieldInits, rhs: [FieldInits, ',', FieldInit], action: fieldInitsCons }
+      - { lhs: FieldInits, rhs: [FieldInit],                   action: fieldInitsOne }
+      - { lhs: FieldInits, rhs: [FieldInits, ','],             action: fieldInitsTrail }
+
+  - derivation: none
+    rules:
+      - { lhs: FieldInit, rhs: ['.', IDENT, '=', Expr], action: fieldInit }
+
+lexer:
+  root:
+    # Comments first. Zig line comments `//...` (incl. `///` doc comments) — ignored
+    # for the spike. Must precede the `/` operator so the slash isn't eaten first.
+    - { symbol: LINE_COMMENT, match: '//[^\n]*', action: ignore }
+
+    # Keywords. First-rule-wins on ties with IDENT; longest-match means `fnord`
+    # lexes as IDENT (5 chars) not `fn`+`ord`.
+    - { symbol: 'fn',     match: 'fn' }
+    - { symbol: 'pub',    match: 'pub' }
+    - { symbol: 'const',  match: 'const' }
+    - { symbol: 'var',    match: 'var' }
+    - { symbol: 'return', match: 'return' }
+    - { symbol: 'if',     match: 'if' }
+    - { symbol: 'else',   match: 'else' }
+    - { symbol: 'while',  match: 'while' }
+    - { symbol: 'extern', match: 'extern' }
+    - { symbol: 'and',    match: 'and' }
+    - { symbol: 'or',     match: 'or' }
+    - { symbol: 'orelse', match: 'orelse' }
+    - { symbol: 'try',    match: 'try' }
+    - { symbol: 'null',   match: 'null' }
+    - { symbol: 'catch',  match: 'catch' }
+    - { symbol: 'error',  match: 'error' }
+    - { symbol: 'break',    match: 'break' }
+    - { symbol: 'continue', match: 'continue' }
+    - { symbol: 'switch',   match: 'switch' }
+    - { symbol: 'for',      match: 'for' }
+    - { symbol: 'struct',   match: 'struct' }
+    - { symbol: 'enum',     match: 'enum' }
+    - { symbol: 'union',    match: 'union' }
+
+    # Multi-char operators (longest-match handles overlaps; listed first for clarity).
+    - { symbol: '==', match: '==' }
+    - { symbol: '!=', match: '!=' }
+    - { symbol: '<=', match: '<=' }
+    - { symbol: '>=', match: '>=' }
+    - { symbol: '<<', match: '<<' }
+    - { symbol: '>>', match: '>>' }
+    - { symbol: '.*', match: '\.\*' }
+    - { symbol: '.?', match: '\.\?' }
+    - { symbol: '=>', match: '=>' }
+    # `...` (3 chars) before `.*`/`.?`/`.` — longest-match prefers it regardless of
+    # order, but listed here with the other multi-char operators for clarity. `..` (2 chars,
+    # the for-range operator) sits between `...` and `.` — longest-match picks the right one.
+    - { symbol: '...', match: '\.\.\.' }
+    - { symbol: '..',  match: '\.\.' }
+    # `[*c]` — the C-pointer type prefix as ONE glued token (longest-match beats the
+    # single-char `[`); never appears in expression-index position, so no clash.
+    - { symbol: '[*c]', match: '\[\*c\]' }
+
+    # Single-char operators / punctuation.
+    - { symbol: '(', match: '\(' }
+    - { symbol: ')', match: '\)' }
+    - { symbol: '{', match: '\{' }
+    - { symbol: '}', match: '\}' }
+    - { symbol: '[', match: '\[' }
+    - { symbol: ']', match: '\]' }
+    - { symbol: ';', match: ';' }
+    - { symbol: ',', match: ',' }
+    - { symbol: ':', match: ':' }
+    - { symbol: '=', match: '=' }
+    - { symbol: '<', match: '<' }
+    - { symbol: '>', match: '>' }
+    - { symbol: '&', match: '&' }
+    - { symbol: '^', match: '\^' }
+    - { symbol: '|', match: '\|' }
+    - { symbol: '+', match: '\+' }
+    - { symbol: '-', match: '\-' }
+    - { symbol: '*', match: '\*' }
+    - { symbol: '/', match: '/' }
+    - { symbol: '%', match: '%' }
+    - { symbol: '!', match: '!' }
+    - { symbol: '~', match: '~' }
+    - { symbol: '?', match: '\?' }
+    - { symbol: '.', match: '\.' }
+
+    # Atoms. FLOAT before INTEGER (longest-match picks float for `1.5`). Builtin
+    # `@name` before IDENT. Slice-1 integers are decimal-only.
+    - { symbol: BUILTIN, match: '@[a-zA-Z_][a-zA-Z_0-9]*' }
+    - { symbol: STRING,  match: '"[^"]*"' }
+    - { symbol: FLOAT,   match: '[0-9]+\.[0-9]+([eE][+\-]?[0-9]+)?' }
+    - { symbol: INTEGER, match: '[0-9]+' }
+    - { symbol: IDENT,   match: '[a-zA-Z_][a-zA-Z_0-9]*' }
+
+    # Whitespace (incl. newlines) — ignored.
+    - { symbol: WS, match: '[ \t\r\n]+', action: ignore }

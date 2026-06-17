@@ -14,6 +14,7 @@ namespace DotCC.Tests;
 /// the string argument carrying its own trailing NUL); writable buffers come from
 /// <c>stackalloc char[]</c>.
 /// </summary>
+[Collection("Runtime")]
 public sealed unsafe class LibcWcharTests
 {
     private static string Wstr(char* p) => p == null ? "<null>" : new string(p, 0, wcslen(p));

@@ -16,6 +16,7 @@ namespace DotCC.Tests;
 /// <c>main(...)</c> call and file-scope <c>&amp;fn</c> resolve by bare name via
 /// <c>using static DotCcProgram;</c>. End-to-end in <c>fnptr-table/</c>.
 /// </summary>
+[Collection("EmissionModel")]
 public sealed class EmissionModelTests
 {
     private static string Emit(string body)

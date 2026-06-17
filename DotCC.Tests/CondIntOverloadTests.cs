@@ -18,6 +18,7 @@ namespace DotCC.Tests;
 /// <c>cond-int-types/</c> fixture; here we assert the emitted shell carries the
 /// overloads.
 /// </summary>
+[Collection("CondIntOverload")]
 public sealed class CondIntOverloadTests
 {
     private static string WriteTemp(string body)

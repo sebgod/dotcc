@@ -12,6 +12,7 @@ namespace DotCC.Tests;
 /// short C snippet to a temp file, drives <see cref="Compiler.EmitCSharp"/>
 /// in-process, and asserts on the returned C# string. No subprocesses.
 /// </summary>
+[Collection("Compiler")]
 public sealed partial class CompilerTests
 {
     private static string WriteTemp(string body)

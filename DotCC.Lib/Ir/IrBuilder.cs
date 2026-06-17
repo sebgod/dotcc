@@ -774,6 +774,56 @@ internal sealed partial class IrBuilder
         if (alias is not null) { _typedefs[alias] = new CType.Named(canonical); }
     }
 
+    // ---- shared aggregate API for a second frontend (Zig) -----------------
+    // The struct/enum field tables (_structFields / _structIsUnion / _enumTypes) are
+    // private to the C build, but the registries they feed (Types / Enums) and the
+    // layout/field-type model are frontend-neutral. These `internal` shims let the Zig
+    // frontend register the SAME def records and resolve field types through the SAME
+    // tables — no duplication, no behavior change for C, AOT-clean. The first shared-code
+    // addition since the IFrontend seam (Zig Milestone D); see ZigLowering.
+
+    /// <summary>Register a Zig struct/union under <paramref name="name"/>: add it to the
+    /// emitted <see cref="Types"/> list AND the field/union layout tables so member access
+    /// and <c>sizeof</c>/<c>offsetof</c> resolve through the same compile-time model the C
+    /// frontend uses. Idempotent on the name (a second registration is ignored).</summary>
+    internal void RegisterStructType(string name, List<StructField> fields, bool isUnion)
+    {
+        if (_emittedTypes.Add(name))
+        {
+            _structFields[name] = fields;
+            _structIsUnion[name] = isUnion;
+            Types.Add(new StructTypeDef(name, fields, isUnion));
+        }
+    }
+
+    /// <summary>Register a Zig enum under <paramref name="name"/> with the given underlying
+    /// integer type and members, mapping the name to its <see cref="CType.Enum"/> (so the
+    /// name resolves as a real enum type) and emitting an <see cref="EnumTypeDef"/>. Returns
+    /// the <see cref="CType.Enum"/>. Idempotent on the name.</summary>
+    internal CType.Enum RegisterEnumType(string name, CType underlying, List<EnumMember> members)
+    {
+        var enumType = new CType.Enum(name, underlying);
+        _enumTypes[name] = enumType;
+        if (Enums.All(e => e.Name != name)) { Enums.Add(new EnumTypeDef(name, underlying, members)); }
+        return enumType;
+    }
+
+    /// <summary>The declared type of <paramref name="field"/> on the struct/union that
+    /// <paramref name="structType"/> names (pointer levels peeled, mirroring
+    /// <see cref="MemberType"/>), or <c>null</c> when the type isn't a registered aggregate
+    /// or has no such field — so the Zig frontend can raise a precise diagnostic rather than
+    /// silently defaulting to <see cref="CType.Int"/> as the C member access does.</summary>
+    internal CType? StructFieldType(CType structType, string field)
+    {
+        var t = structType.Unqualified;
+        while (t is CType.Pointer p) { t = p.Pointee.Unqualified; }
+        if (t is CType.Named n && _structFields.TryGetValue(n.Name, out var fields))
+        {
+            foreach (var f in fields) { if (f.Name == field) { return f.Type; } }
+        }
+        return null;
+    }
+
     /// <summary>Promoted (anonymous-aggregate) field map: per owning struct/union,
     /// each promoted inner field name → (the hidden container field, the nested
     /// aggregate's type name). A C11 anonymous <c>struct {…};</c> / <c>union {…};</c>

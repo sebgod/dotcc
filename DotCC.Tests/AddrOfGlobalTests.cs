@@ -15,6 +15,7 @@ namespace DotCC.Tests;
 /// is a fixed variable, so its <c>&amp;</c> stays the plain form. End-to-end in
 /// the <c>addr-of-global/</c> fixture.
 /// </summary>
+[Collection("AddrOfGlobal")]
 public sealed class AddrOfGlobalTests
 {
     private static string Emit(string body)

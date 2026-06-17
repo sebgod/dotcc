@@ -15,6 +15,7 @@ namespace DotCC.Tests;
 /// plain int operands, and that fn-ptr typedefs decay bare function names to
 /// their address. End-to-end in the <c>comma-ptr-typedef/</c> fixture.
 /// </summary>
+[Collection("CommaPointerTypedef")]
 public sealed class CommaPointerTypedefTests
 {
     private static string WriteTemp(string body)

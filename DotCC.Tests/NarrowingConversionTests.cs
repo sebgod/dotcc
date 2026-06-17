@@ -17,6 +17,7 @@ namespace DotCC.Tests;
 /// also warns at each width-narrowing store. End-to-end in the
 /// <c>narrowing-store/</c> fixture.
 /// </summary>
+[Collection("Console")]
 public sealed class NarrowingConversionTests
 {
     private static string WriteTemp(string body)

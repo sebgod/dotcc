@@ -17,6 +17,7 @@ namespace DotCC.Tests;
 /// so the comment ran on to the NEXT <c>*/</c>, silently swallowing the code
 /// between. End-to-end in the <c>block-comment-close/</c> fixture.
 /// </summary>
+[Collection("BlockComment")]
 public sealed class BlockCommentTests
 {
     private static string WriteTemp(string body)

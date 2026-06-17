@@ -10,6 +10,7 @@ namespace DotCC.Tests;
 /// Unit tests for the <c>&lt;time.h&gt;</c> scalar surface (TimeLib.cs) and the
 /// <c>&lt;inttypes.h&gt;</c> functions (InttypesLib.cs).
 /// </summary>
+[Collection("Runtime")]
 public sealed unsafe class LibcTimeInttypesTests
 {
     // ---- time.h ----
