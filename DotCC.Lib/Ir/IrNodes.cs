@@ -250,6 +250,23 @@ public sealed record ZigCatch(CExpr Union, CExpr Fallback) : CExpr;
 /// produces this; it is a Zig-lowering / C#-target construct (Milestone E).</summary>
 public sealed record SliceNew(CExpr Ptr, CExpr Len, CType Element, bool Const) : CExpr;
 
+/// <summary>A Zig allocator <c>a.alloc(T, n)</c> (Milestone F). <see cref="Element"/> is the
+/// element type <c>T</c>, <see cref="Count"/> the element count <c>n</c>, <see cref="OomCode"/>
+/// the <c>error.OutOfMemory</c> code returned on a failed allocation. <see cref="CExpr.Type"/>
+/// is <c>ErrorUnion(Slice(Element))</c> — matching Zig's <c>Error![]T</c> — so it composes with
+/// <c>try</c>/<c>catch</c>. <see cref="Receiver"/> null = the DEVIRTUALIZED C-heap default →
+/// <c>ZigAlloc.AllocCHeap&lt;T&gt;(n, oom)</c> (a direct <c>Libc.malloc</c>, no vtable); non-null
+/// = an opaque/runtime allocator → <c>recv.Alloc&lt;T&gt;(n, oom)</c> (the indirect vtable
+/// dispatch inside the runtime <c>Allocator</c>). Zig-lowering / C#-target only.</summary>
+public sealed record AllocCall(CExpr? Receiver, CType Element, CExpr Count, int OomCode) : CExpr;
+
+/// <summary>A Zig allocator <c>a.free(slice)</c> (Milestone F). <see cref="SliceExpr"/> is the
+/// slice to free, <see cref="Element"/> its element type. <see cref="Receiver"/> null = the
+/// DEVIRTUALIZED C-heap default → <c>ZigAlloc.FreeCHeap&lt;T&gt;(slice)</c> (a direct
+/// <c>Libc.free</c>); non-null = an opaque/runtime allocator → <c>recv.Free&lt;T&gt;(slice)</c>
+/// (indirect). <see cref="CExpr.Type"/> is <c>void</c>. Zig-lowering / C#-target only.</summary>
+public sealed record FreeCall(CExpr? Receiver, CExpr SliceExpr, CType Element) : CExpr;
+
 /// <summary>A bare identifier the binder left unresolved — a runtime/library symbol
 /// surfaced by name (the <c>&lt;complex.h&gt;</c> imaginary unit), or an
 /// incremental-growth safety net for a name not in any header. Carries the RAW

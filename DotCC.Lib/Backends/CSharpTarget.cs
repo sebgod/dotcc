@@ -45,6 +45,9 @@ internal sealed class CSharpTarget : ITarget
         // (a const-qualified element) → `ConstSlice<T>`. The element is rendered unqualified
         // (the const lives in the slice type's identity, not a C# `const`).
         CType.Slice s => (s.Element.IsConst ? "ConstSlice<" : "Slice<") + RenderType(s.Element.Unqualified) + ">",
+        // A Zig `std.mem.Allocator` → the runtime `Allocator` fat-pointer value type
+        // (Milestone F). The concrete `FixedBufferAllocator` is a `CType.Named` (renders its name).
+        CType.Allocator => "Allocator",
         _ => throw new IrUnsupportedException("C# target cannot render type " + t.GetType().Name),
     };
 
