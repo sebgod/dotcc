@@ -187,6 +187,46 @@ public sealed class ZigOracleTests
             "const Point = struct { x: u8, y: u8 };\n" +
             "fn sum(p: *const Point) u8 { return p.x + p.y; }\n" +
             "pub fn main() u8 { return sum(&Point{ .x = 40, .y = 2 }); }\n", 42, "" },
+        // METHODS / UFCS (Milestone D2). A struct body holds methods alongside fields, each
+        // lowered to a mangled free function `Point_method`. Exercises all three call forms:
+        // a static/associated function (`Point.init`), a pointer-receiver method that mutates
+        // (`p.scale(2)` → auto-ref `&p`, `self->x`), and a value-receiver method whose receiver
+        // type is `@This()` (`p.sum()`). init(20,1) → scale(2) ⇒ {40,2} → sum ⇒ 42.
+        new object[] { "struct_methods",
+            "const Point = struct {\n" +
+            "    x: u8,\n" +
+            "    y: u8,\n" +
+            "    fn init(x: u8, y: u8) Point { return .{ .x = x, .y = y }; }\n" +
+            "    fn scale(self: *Point, f: u8) void { self.x = self.x * f; self.y = self.y * f; }\n" +
+            "    fn sum(self: @This()) u8 { return self.x + self.y; }\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    var p = Point.init(20, 1);\n" +
+            "    p.scale(2);\n" +
+            "    return p.sum();\n" +
+            "}\n", 42, "" },
+        // TAGGED UNIONS (Milestone D3). `union(enum)` → a discriminated struct (tag enum +
+        // `__tag` + payload fields). Exercises payload construction (`Shape{ .circle = 40 }`),
+        // a void variant (`.none`), and a `switch` with `|r|` payload capture. value(circle 40)
+        // = 42, value(none) = 0 ⇒ 42.
+        new object[] { "union_tagged",
+            "const Shape = union(enum) {\n" +
+            "    circle: u8,\n" +
+            "    square: u8,\n" +
+            "    none,\n" +
+            "};\n" +
+            "fn value(s: Shape) u8 {\n" +
+            "    switch (s) {\n" +
+            "        .circle => |r| { return r + 2; },\n" +
+            "        .square => |x| { return x * x; },\n" +
+            "        .none => { return 0; },\n" +
+            "    }\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = Shape{ .circle = 40 };\n" +
+            "    const b: Shape = .none;\n" +
+            "    return value(a) + value(b);\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

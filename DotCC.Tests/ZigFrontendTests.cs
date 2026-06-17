@@ -13,6 +13,7 @@ namespace DotCC.Tests;
 /// backend + shell, exactly like a C input. Proves the <c>IFrontend</c> seam works with
 /// a real second implementer, not just structurally.
 /// </summary>
+[Collection("ZigFrontend")]
 public sealed class ZigFrontendTests
 {
     private static string EmitZig(string body)
@@ -428,5 +429,157 @@ public sealed class ZigFrontendTests
             "const Color = enum { red, green };\n" +
             "pub fn main() u8 { const c = .red; _ = c; return 0; }\n"));
         ex.Message.ShouldContain("result type");
+    }
+
+    [Fact]
+    public void Lowers_a_value_receiver_method_as_a_mangled_free_function()
+    {
+        // A method in a struct body (Milestone D2) lowers to a free function `TypeName_method`
+        // with the receiver as its ordinary first parameter; `self.x` is plain field access.
+        // A UFCS instance call `p.sum()` rewrites to `Point_sum(p)` (value receiver → passed by
+        // value, no `&`).
+        var cs = EmitZig(
+            "const Point = struct {\n" +
+            "    x: i32,\n" +
+            "    y: i32,\n" +
+            "    fn sum(self: Point) i32 { return self.x + self.y; }\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    const p = Point{ .x = 40, .y = 2 };\n" +
+            "    return @as(u8, p.sum());\n" +
+            "}\n");
+        cs.ShouldContain("Point_sum(Point self)");   // method → mangled free function
+        cs.ShouldContain("self.x + self.y");          // value receiver → no arrow
+        cs.ShouldContain("Point_sum(p)");             // UFCS call → receiver passed by value
+    }
+
+    [Fact]
+    public void Lowers_a_pointer_receiver_method_with_auto_ref_and_arrow()
+    {
+        // A `*Point` receiver: UFCS auto-takes the address of a value receiver (`p.scale(2)` →
+        // `Point_scale(&p, 2)`), and `self.x` on the pointer receiver auto-derefs to `self->x`.
+        var cs = EmitZig(
+            "const Point = struct {\n" +
+            "    x: i32,\n" +
+            "    y: i32,\n" +
+            "    fn scale(self: *Point, f: i32) void { self.x = self.x * f; self.y = self.y * f; }\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    var p = Point{ .x = 20, .y = 1 };\n" +
+            "    p.scale(2);\n" +
+            "    return @as(u8, p.x + p.y);\n" +
+            "}\n");
+        cs.ShouldContain("Point_scale");      // method → mangled free function
+        cs.ShouldContain("self->x");          // pointer receiver → arrow field access
+        cs.ShouldContain("Point_scale(&p, 2)");  // UFCS auto-ref of a value receiver
+    }
+
+    [Fact]
+    public void Lowers_a_static_associated_function_call()
+    {
+        // `Type.func(args)` — a function whose first parameter is NOT a receiver — is an
+        // associated (static) function: the base names the type, so all arguments are explicit
+        // and the call rewrites to the mangled free function with no synthesized receiver.
+        var cs = EmitZig(
+            "const Point = struct {\n" +
+            "    x: i32,\n" +
+            "    y: i32,\n" +
+            "    fn init(x: i32, y: i32) Point { return .{ .x = x, .y = y }; }\n" +
+            "    fn sum(self: Point) i32 { return self.x + self.y; }\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    const p = Point.init(40, 2);\n" +
+            "    return @as(u8, p.sum());\n" +
+            "}\n");
+        cs.ShouldContain("Point_init(40, 2)");   // static call → no receiver
+        cs.ShouldContain("Point_sum(p)");         // instance call → value receiver
+    }
+
+    [Fact]
+    public void Lowers_an_at_This_receiver_type()
+    {
+        // `self: @This()` names the receiver as the enclosing container type without repeating
+        // its name — resolves to `Vec`, so the method lowers to `Vec_total` and the call binds.
+        var cs = EmitZig(
+            "const Vec = struct {\n" +
+            "    a: i32,\n" +
+            "    b: i32,\n" +
+            "    fn total(self: @This()) i32 { return self.a + self.b; }\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    const v = Vec{ .a = 30, .b = 12 };\n" +
+            "    return @as(u8, v.total());\n" +
+            "}\n");
+        cs.ShouldContain("Vec_total(Vec self)");   // @This() resolved to Vec
+        cs.ShouldContain("Vec_total(v)");
+    }
+
+    [Fact]
+    public void Lowers_a_tagged_union_decl_and_payload_construction()
+    {
+        // `union(enum)` (Milestone D3) → a synthesized tag enum `Shape_Tag` + a discriminated
+        // struct `Shape` with a `__tag` field and one field per payload variant. A payload
+        // literal `.{ .circle = … }` sets BOTH the tag and the variant's field.
+        var cs = EmitZig(
+            "const Shape = union(enum) { circle: i32, square: i32, none };\n" +
+            "pub fn main() u8 {\n" +
+            "    const s: Shape = .{ .circle = 5 };\n" +
+            "    _ = s;\n" +
+            "    return 0;\n" +
+            "}\n");
+        cs.ShouldContain("enum Shape_Tag");        // synthesized tag enum
+        cs.ShouldContain("__tag");                  // discriminant field
+        cs.ShouldContain("Shape_Tag.circle");       // construction sets the tag…
+        cs.ShouldContain("circle = 5");             // …and the payload field
+    }
+
+    [Fact]
+    public void Lowers_a_void_variant_via_a_bare_dotted_literal()
+    {
+        // A bare `.none` at a tagged-union sink constructs the void variant — only the tag is
+        // set (no payload field).
+        var cs = EmitZig(
+            "const Shape = union(enum) { circle: i32, none };\n" +
+            "pub fn main() u8 {\n" +
+            "    const s: Shape = .none;\n" +
+            "    _ = s;\n" +
+            "    return 0;\n" +
+            "}\n");
+        cs.ShouldContain("__tag = Shape_Tag.none");
+    }
+
+    [Fact]
+    public void Lowers_a_switch_on_a_tagged_union_with_payload_capture()
+    {
+        // `switch (s) { .circle => |r| … }` on a tagged union → a switch on the `__tag`
+        // discriminant; the `|r|` capture binds to the matched variant's overlaid payload field
+        // (`s.__payload.circle`, by value) at the top of the prong. The subject `s` is a parameter
+        // (a bare var) so it is re-referenced directly — no temp.
+        var cs = EmitZig(
+            "const Shape = union(enum) { circle: i32, square: i32, none };\n" +
+            "fn area(s: Shape) i32 {\n" +
+            "    switch (s) {\n" +
+            "        .circle => |r| { return r * 2; },\n" +
+            "        .square => |x| { return x * x; },\n" +
+            "        .none => { return 0; },\n" +
+            "    }\n" +
+            "}\n" +
+            "pub fn main() u8 { const s: Shape = .{ .circle = 5 }; return @as(u8, area(s)); }\n");
+        cs.ShouldContain("__tag");                 // switch on the discriminant
+        cs.ShouldContain("s.__payload.circle");     // capture reads the overlaid payload field
+        cs.ShouldContain("r * 2");                  // capture used in the prong body
+    }
+
+    [Fact]
+    public void Rejects_a_payload_capture_on_a_non_union_switch()
+    {
+        // A `|x|` capture is only meaningful on a tagged-union switch; on an integer switch it is
+        // rejected (the grammar parses it, the lowering fails loudly).
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const x: u8 = 1;\n" +
+            "    switch (x) { 1 => |y| { return y; }, else => { return 0; } }\n" +
+            "}\n"));
+        ex.Message.ShouldContain("tagged-union");
     }
 }

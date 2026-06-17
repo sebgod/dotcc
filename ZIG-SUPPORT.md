@@ -58,8 +58,11 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `?T` optional | ✅ | `?*T` → bare nullable `T*` (niche); `?T` over a value → C# `Nullable<T>`. `null`/`.?`/`orelse` below |
 | `[]T` slice | 🚧 | parses; the fat-struct lowering is not built |
 | `[N]T` array | 🚧 | parses; does not lower |
-| `const P = struct { … };` | ✅ | container decl (top-level) → a real C# `unsafe struct` via the SHARED aggregate machinery the C frontend uses. Data-only fields; methods (UFCS) + tagged unions are later D slices. Empty `struct {}` allowed; `pub`-wrapped + in-function containers deferred |
-| `const C = enum(T) { … };` / `enum { … }` | ✅ | container decl → C# `enum C : T` (default underlying `int`); members auto-increment or take an explicit constant value. `@intFromEnum` decays to the underlying int |
+| `const P = struct { fields…, methods… };` | ✅ | container decl (top-level) → a real C# `unsafe struct` via the SHARED aggregate machinery the C frontend uses. Fields **and** methods (below) in the body; tagged unions are a later D slice. Empty `struct {}` allowed; `pub`-wrapped + in-function containers deferred |
+| struct **method** `fn m(self: P, …) …` | ✅ | a `fn`/`pub fn` in a struct body lowers to a free function `P_m` with the receiver as its first parameter. `p.m(a)` (UFCS) auto-refs/derefs the receiver to the declared `self` form (`&p` for a `*P` receiver, `p.*` for the reverse); `P.m(p, a)` and a no-receiver `P.assoc(a)` (associated function) call it directly. **Deferred:** `const Self = @This();` alias, enum/union methods, namespaced container `const`s, generic methods |
+| receiver type `self: @This()` | ✅ | `@This()` resolves to the enclosing container type (so `self: @This()` / `self: *@This()` name the receiver without repeating the name); explicit `self: P` / `self: *P` also work |
+| `const C = enum(T) { … };` / `enum { … }` | ✅ | container decl → C# `enum C : T` (default underlying `int`); members auto-increment or take an explicit constant value. `@intFromEnum` decays to the underlying int. (Enum methods deferred) |
+| `const U = union(enum) { a: T, b, … };` | ✅ | tagged union → the faithful C tagged-union shape: an outer struct `{ U_Tag __tag; U_Payload __payload; }` whose `__payload` is a NESTED `[StructLayout(Explicit)]` union overlaying every payload variant at offset 0 (the shared C-union machinery) — so payloads share storage, matching Zig's memory model. A void variant (`b`) is tag-only; an all-void union has no `__payload`. Construct with `.{ .a = v }` / `U{ .a = v }` (payload) or `.b` at a union sink (void). Direct `u.a` reads `u.__payload.a` (unchecked, like Zig release mode). **Deferred:** untagged `union { … }`, explicit `union(SomeEnum)`, union methods |
 | `E!T` / `!T` error-union type | ✅ | → runtime `ErrUnion<Payload>` (`ErrUnion<Unit>` for `!void`). V1 erases the error SET `E` — `anyerror!T` / named `E!T` lower identically (payload only) |
 | `comptime_int`/`comptime_float`, arbitrary `iN`/`uN` | 🚫 | |
 | `[*]T` many-item, `[*:s]T` sentinel | 🚫 | only `[*c]` is tokenized |
@@ -72,7 +75,8 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `while (c) …` | ✅ | (no payload capture yet) |
 | `while (c) : (cont) …` | ✅ | the continue-expression → the C IR `for`-post, so `continue` runs `cont` (faithful to Zig). The common assignment cont `: (i = i + 1)` and a bare-expr cont both parse |
 | `break;` / `continue;` | ✅ | unlabeled — reuse the C IR loop-control nodes (labeled `break :blk` deferred) |
-| `switch (x) { v => {…}, a, b => {…}, else => {…} }` | ✅ | as a STATEMENT → the C IR Switch. Single / multi-value / `else` (→ default) prongs; NO fall-through (each prong gets an appended `break`). Switching on an **enum** works (subject + `.member` labels decay to the underlying int). Prong bodies must be braced **blocks**; bare-expr bodies, ranges (`a...b`), payload capture `\|x\|`, and switch-as-EXPRESSION are deferred |
+| `switch (x) { v => {…}, a, b => {…}, else => {…} }` | ✅ | as a STATEMENT → the C IR Switch. Single / multi-value / `else` (→ default) prongs; NO fall-through (each prong gets an appended `break`). Switching on an **enum** works (subject + `.member` labels decay to the underlying int). Prong bodies must be braced **blocks**; bare-expr bodies, ranges (`a...b`), and switch-as-EXPRESSION are deferred |
+| `switch (u) { .a => \|x\| {…}, … }` | ✅ | switch on a **tagged union** → dispatch on the `__tag`; a `\|x\|` payload capture binds the matched variant's payload (by value). An exhaustive union switch with no `else` makes its last prong the C# `default` (so the function provably returns). **Deferred:** by-reference `\|*x\|` capture, multi-variant capture prongs, capture on `if`/`while` (optionals / error-unions) |
 | `return e;` / `return;` | ✅ | |
 | `x = e;` assignment | ✅ | |
 | `_ = e;` discard | ✅ | Zig's mandatory discard of a non-void result |
@@ -119,9 +123,11 @@ program's libc call is handled. No `@cImport`, no header harvest.
 
 ## Out of scope (the dialect line)
 
-`comptime` (beyond const folding), generics / `anytype`, `@import("std")`, struct
-**methods** (UFCS) + tagged `union(enum)` + `opaque` (later D slices; data-only
-`struct`/`enum` ARE supported), explicit error-SET declarations (`error{A,B}` —
+`comptime` (beyond const folding), generics / `anytype`, `@import("std")`, untagged
+`union { … }` + explicit `union(SomeEnum)` + `opaque` (data-only `struct`/`enum` **with
+methods** AND tagged `union(enum)` ARE supported — see below), `const Self = @This();`
+alias + enum/union methods + namespaced container `const`s (struct methods with explicit
+/ `@This()` receivers ARE supported), explicit error-SET declarations (`error{A,B}` —
 inferred `!T` + `error.X` ARE supported), `async`/`suspend`, inline assembly,
 destructuring assignment. (Both `.{…}` and typed `T{…}` init lists ARE supported,
 including `&T{…}` — address-of-a-temporary — via a materialized block-local temp.)
@@ -204,4 +210,6 @@ rejects, not silently accept more.
   `.?` / `orelse`), `examples/zig-errunion` (`!T` / `try` / `catch` / `error.X`),
   `examples/zig-controlflow` (while-cont / `break` / `continue` / `switch` / range-`for`),
   `examples/zig-struct` (`struct` + `.{…}` + field access, `enum` + `.member` + `@intFromEnum` + enum `switch`),
-  `examples/zig-struct-typed` (typed `T{…}` literal in value + sink-less positions).
+  `examples/zig-struct-typed` (typed `T{…}` literal in value + sink-less positions),
+  `examples/zig-methods` (struct methods + UFCS: static `init`, pointer-receiver `scale`, `@This()` value receiver),
+  `examples/zig-union` (tagged `union(enum)`: payload + void variants, `switch` with `\|x\|` capture).

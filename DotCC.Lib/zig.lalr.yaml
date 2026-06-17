@@ -149,6 +149,12 @@ symbols:
   - FieldInit    # 100 one field init: `.name = expr`
   # --- typed struct literals `T{ … }` (appended — never reorder) ---
   - CurlySuffix  # 101 value-position curly-suffix: `Type` or `Type { FieldInits }` (Zig's CurlySuffixExpr)
+  # --- struct methods / UFCS (Milestone D2; appended — never reorder) ---
+  - Member       # 102 one container-body member: a field (`name: Type`) or a method (`fn`/`pub fn`)
+  # --- tagged unions (Milestone D3; appended — never reorder) ---
+  - 'union'        # 103 `const U = union(enum) { … };` tagged-union container decl
+  - UnionVariants  # 104 union variant list (left-recursive, clean trailing comma)
+  - UnionVariant   # 105 one variant: `name: Type` (payload) or `name` (void / tag-only)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -183,6 +189,11 @@ productions:
       - { lhs: Decl, rhs: ['const', IDENT, '=', 'struct', '{', '}', ';'],                       action: structDeclEmpty }
       - { lhs: Decl, rhs: ['const', IDENT, '=', 'enum', '{', EnumFields, '}', ';'],             action: enumDecl }
       - { lhs: Decl, rhs: ['const', IDENT, '=', 'enum', '(', Type, ')', '{', EnumFields, '}', ';'], action: enumDeclTyped }
+      # Tagged union (Milestone D3): `const U = union(enum) { a: T, b, … };`. Only the
+      # auto-inferred-tag form `union(enum)` (the `enum` keyword after `(`) — an explicit
+      # `union(SomeEnum)` tag and a bare untagged `union { … }` are deferred. The `union`
+      # keyword right after `=` is a clean 1-token shift decision, symmetric with struct/enum.
+      - { lhs: Decl, rhs: ['const', IDENT, '=', 'union', '(', 'enum', ')', '{', UnionVariants, '}', ';'], action: unionDeclEnum }
 
   # FnProto (subset): `fn name(params) RetType Block`. RetType may carry the
   # inferred-error-set leading `!` (`fn f() !void`), distinct from ErrUnion's
@@ -446,9 +457,13 @@ productions:
       - { lhs: Prongs, rhs: [Prongs, ',', Prong], action: prongsCons }
       - { lhs: Prongs, rhs: [Prong],               action: prongsOne }
 
+  # A prong body is a braced Block, optionally preceded by a payload capture `|x|` (Milestone
+  # D3 — meaningful only when switching on a tagged union; rejected by the lowering otherwise).
+  # After `=>`, a `|` (capture) vs a `{` (block) is a clean shift decision.
   - derivation: none
     rules:
-      - { lhs: Prong, rhs: [CaseVals, '=>', Block], action: prong }
+      - { lhs: Prong, rhs: [CaseVals, '=>', Block],                  action: prong }
+      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, '|', Block], action: prongCapture }
 
   # Case values: a comma-list of value Exprs, or `else` (the default). The `,` here never
   # clashes with the prong-separator `,` because FOLLOW(CaseVals) = { '=>' } — after a value
@@ -459,15 +474,31 @@ productions:
       - { lhs: CaseVals, rhs: [Expr],                 action: caseValsOne }
       - { lhs: CaseVals, rhs: ['else'],               action: caseElse }
 
-  # ===== struct / enum bodies (Milestone D1) =====
-  # Struct field list — LEFT-recursive so the optional trailing comma is a clean 1-token
-  # shift decision (after `FieldDecls ','`: another FieldDecl → continue, `}` → reduce the
-  # trailing-comma form). Mirrors the C grammar's EnumList{Cons,One,Trail} shape.
+  # ===== struct container body (Milestone D2 — a field-only list in D1) =====
+  # A struct body is a list of MEMBERS: fields (`name: Type`, comma-separated) interleaved
+  # with methods (`fn`/`pub fn …`, which self-terminate with their Block and so need no
+  # separator). FieldDecls is RIGHT-recursive over Member — exactly the Decls/Stmts list shape
+  # — so a method and a field can sit side by side with no comma between them. The optional
+  # trailing comma after the last field is the `Member -> FieldDecl ','` form (then FieldDecls
+  # reduces to a single Member, `}` follows). Conflict-free: `,` is never in FOLLOW(Member) (a
+  # Member is followed only by another Member or `}`), so the `FieldDecl ','` shift and the
+  # bare-`FieldDecl` reduce never collide — hence `derivation: none`.
   - derivation: leftmost
     rules:
-      - { lhs: FieldDecls, rhs: [FieldDecls, ',', FieldDecl], action: fieldDeclsCons }
-      - { lhs: FieldDecls, rhs: [FieldDecl],                   action: fieldDeclsOne }
-      - { lhs: FieldDecls, rhs: [FieldDecls, ','],             action: fieldDeclsTrail }
+      - { lhs: FieldDecls, rhs: [Member, FieldDecls], action: fieldDeclsCons }
+      - { lhs: FieldDecls, rhs: [Member],              action: fieldDeclsOne }
+
+  # One container member. A field carries its (optional, when last) trailing comma here so the
+  # comma never leaks into the FieldDecls list recursion. A method is a full FnDef (the same
+  # nonterminal as a top-level function), optionally `pub` — lowered to a mangled free function
+  # `TypeName_method` with the receiver as its first parameter (Milestone D2). A container-level
+  # `const` (namespaced constant) and `const Self = @This();` are deferred.
+  - derivation: none
+    rules:
+      - { lhs: Member, rhs: [FieldDecl, ','], action: memberField }
+      - { lhs: Member, rhs: [FieldDecl],       action: memberFieldLast }
+      - { lhs: Member, rhs: [FnDef],           action: memberMethod }
+      - { lhs: Member, rhs: ['pub', FnDef],    action: memberPubMethod }
 
   - derivation: none
     rules:
@@ -486,6 +517,21 @@ productions:
     rules:
       - { lhs: EnumField, rhs: [IDENT],            action: enumField }
       - { lhs: EnumField, rhs: [IDENT, '=', Expr], action: enumFieldInit }
+
+  # ===== tagged-union variants (Milestone D3) =====
+  # Same trailing-comma list shape as EnumFields/FieldDecls. A variant is `name: Type`
+  # (a payload) or a bare `name` (a void / tag-only variant). The `:` vs `,`/`}` after the
+  # IDENT is a clean shift/reduce decision (`:` ∉ FOLLOW(UnionVariant)).
+  - derivation: leftmost
+    rules:
+      - { lhs: UnionVariants, rhs: [UnionVariants, ',', UnionVariant], action: unionVariantsCons }
+      - { lhs: UnionVariants, rhs: [UnionVariant],                      action: unionVariantsOne }
+      - { lhs: UnionVariants, rhs: [UnionVariants, ','],                action: unionVariantsTrail }
+
+  - derivation: none
+    rules:
+      - { lhs: UnionVariant, rhs: [IDENT, ':', Type], action: unionVariantPayload }
+      - { lhs: UnionVariant, rhs: [IDENT],             action: unionVariantVoid }
 
   # Anonymous struct literal `.{ .f = v, … }` — Zig's result-located init, where the type
   # is inferred from the sink (a typed `const`/`var`, a `return`, a field's declared type).
@@ -532,6 +578,7 @@ lexer:
     - { symbol: 'for',      match: 'for' }
     - { symbol: 'struct',   match: 'struct' }
     - { symbol: 'enum',     match: 'enum' }
+    - { symbol: 'union',    match: 'union' }
 
     # Multi-char operators (longest-match handles overlaps; listed first for clarity).
     - { symbol: '==', match: '==' }

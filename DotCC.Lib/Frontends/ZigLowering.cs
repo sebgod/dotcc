@@ -65,6 +65,52 @@ internal sealed class ZigLowering
     /// <c>EnumName.member</c>.</summary>
     private readonly Dictionary<string, Dictionary<string, Symbol>> _enumMembers = new(System.StringComparer.Ordinal);
 
+    /// <summary>Per container (struct) name, each method name → the mangled free-function
+    /// <see cref="Symbol"/> it lowers to (<c>TypeName_method</c>). Populated in pass 1 (so a
+    /// method body can forward-reference a sibling method) and consulted by
+    /// <see cref="LowerMethodCall"/> to rewrite a UFCS instance call (<c>p.method(…)</c>) or a
+    /// static/associated call (<c>Type.func(…)</c>) to that free function.</summary>
+    private readonly Dictionary<string, Dictionary<string, Symbol>> _methods = new(System.StringComparer.Ordinal);
+
+    /// <summary>The container (struct) whose method signature / body is currently being lowered,
+    /// so a <c>@This()</c> type resolves to it (null outside a method — a <c>@This()</c> there is
+    /// an error). Set around method declaration (<see cref="DeclareMethod"/>) and pass-2 body
+    /// lowering, mirroring how <see cref="_currentFnRet"/> tracks the active return type.</summary>
+    private string? _currentContainer;
+
+    /// <summary>A tagged union (<c>union(enum)</c>) lowered to the FAITHFUL C tagged-union shape:
+    /// an outer struct <c>{ U_Tag __tag; U_Payload __payload; }</c> whose <c>__payload</c> is a
+    /// nested <c>[StructLayout(Explicit)]</c> union (every payload variant overlaid at offset 0,
+    /// via the shared C union machinery — <c>IsUnion=true</c>). Overlapping payloads match Zig's
+    /// memory model (correct size). A union with only void variants has no <c>__payload</c> (it is
+    /// just a tag). Holds what construction (<see cref="BuildUnionInit"/>) and a union
+    /// <c>switch</c> (<see cref="LowerUnionSwitch"/>) need.</summary>
+    private sealed record ZigUnionInfo(
+        CType.Enum TagType,
+        string TagFieldName,
+        string? PayloadTypeName,        // the nested overlapping-payload union type (null if every variant is void)
+        string PayloadFieldName,
+        IReadOnlyDictionary<string, CType?> Variants)   // variant name → payload type (null = void)
+    {
+        public string Name => TagType.Name[..^TagSuffix.Length];   // `U_Tag` → `U`
+    }
+
+    /// <summary>Registered tagged unions: the union struct name → its <see cref="ZigUnionInfo"/>.</summary>
+    private readonly Dictionary<string, ZigUnionInfo> _unions = new(System.StringComparer.Ordinal);
+
+    /// <summary>The discriminant field name on a lowered tagged-union struct — a leading
+    /// double-underscore so it can't collide with a user variant (a Zig field name).</summary>
+    private const string TagFieldName = "__tag";
+
+    /// <summary>The nested overlapping-payload union field on a lowered tagged-union struct.</summary>
+    private const string PayloadFieldName = "__payload";
+
+    /// <summary>Suffix for a synthesized tag enum's name (<c>U</c> → <c>U_Tag</c>).</summary>
+    private const string TagSuffix = "_Tag";
+
+    /// <summary>Suffix for the synthesized nested payload-union type (<c>U</c> → <c>U_Payload</c>).</summary>
+    private const string PayloadSuffix = "_Payload";
+
     public ZigLowering(IrBuilder ir, INameLegalizer names, Dictionary<string, int>? errorCodes = null)
     {
         _ir = ir;
@@ -108,20 +154,34 @@ internal sealed class ZigLowering
                 case Zig.StructDeclEmpty s: _containerTypes[Tok(s.Arg1)] = new CType.Named(Tok(s.Arg1)); break;
                 case Zig.EnumDecl e:        RegisterEnumZig(e.Arg1, null, e.Arg5); break;       // const IDENT = enum { EnumFields } ;
                 case Zig.EnumDeclTyped e:   RegisterEnumZig(e.Arg1, e.Arg5, e.Arg8); break;     // const IDENT = enum ( Type ) { EnumFields } ;
+                case Zig.UnionDeclEnum u:   _containerTypes[Tok(u.Arg1)] = new CType.Named(Tok(u.Arg1)); break;  // const IDENT = union(enum) { … } ;
             }
         }
-        // Pass 0b: build struct field layouts (field types now resolve through 0a).
+        // Pass 0b: build struct field layouts (field types now resolve through 0a) and split
+        // each struct body into fields (for the layout) and methods (declared as free functions
+        // in pass 1 — see `structMethods`).
+        var structMethods = new List<(string container, Item fnDef)>();
         foreach (var decl in decls)
         {
             switch (Unwrap(decl).Content)
             {
-                case Zig.StructDecl s:      RegisterStruct(s.Arg1, s.Arg5); break;   // const IDENT = struct { FieldDecls } ;
-                case Zig.StructDeclEmpty s: RegisterStruct(s.Arg1, null); break;     // const IDENT = struct { } ;
+                case Zig.StructDecl s:      // const IDENT = struct { Members } ;
+                {
+                    var (fields, methods) = SplitMembers(s.Arg5);
+                    RegisterStruct(Tok(s.Arg1), fields);
+                    foreach (var m in methods) { structMethods.Add((Tok(s.Arg1), m)); }
+                    break;
+                }
+                case Zig.StructDeclEmpty s: RegisterStruct(Tok(s.Arg1), System.Array.Empty<Item>()); break;  // const IDENT = struct { } ;
+                case Zig.UnionDeclEnum u:   RegisterUnion(Tok(u.Arg1), u.Arg8); break;                       // const IDENT = union(enum) { UnionVariants } ;
             }
         }
 
-        // Pass 1: function signatures.
-        var entries = new List<(Symbol sym, List<(string name, CType type)> ps, Item body)>();
+        // Pass 1: function signatures. Free functions first (a top-level decl), then struct
+        // methods (mangled `TypeName_method` free functions, recorded in `_methods` for call
+        // rewriting). Declaring every signature up front lets a call forward-reference any
+        // function — including a sibling method.
+        var entries = new List<(Symbol sym, List<(string name, CType type)> ps, Item body, string? container)>();
         foreach (var decl in decls)
         {
             var d = Unwrap(decl);   // unwrap `pub`
@@ -129,17 +189,31 @@ internal sealed class ZigLowering
             {
                 case Zig.ExternFnProto f:       DeclareExternFn(f.Arg2, f.Arg4, f.Arg6); break;  // extern fn IDENT ( Params ) Type ;
                 case Zig.ExternFnProtoNoArgs f: DeclareExternFn(f.Arg2, null, f.Arg5); break;     // extern fn IDENT ( ) Type ;
-                case Zig.FnDef f:          entries.Add(DeclareFn(f.Arg1, f.Arg3, f.Arg5, f.Arg6)); break;
-                case Zig.FnDefNoArgs f:    entries.Add(DeclareFn(f.Arg1, null, f.Arg4, f.Arg5)); break;
-                case Zig.FnDefErr f:       entries.Add(DeclareFn(f.Arg1, f.Arg3, f.Arg6, f.Arg7, errUnion: true)); break;   // `!T` return → ErrorUnion(T)
-                case Zig.FnDefNoArgsErr f: entries.Add(DeclareFn(f.Arg1, null, f.Arg5, f.Arg6, errUnion: true)); break;
+                case Zig.FnDef f:          entries.Add(AsEntry(DeclareFn(f.Arg1, f.Arg3, f.Arg5, f.Arg6), null)); break;
+                case Zig.FnDefNoArgs f:    entries.Add(AsEntry(DeclareFn(f.Arg1, null, f.Arg4, f.Arg5), null)); break;
+                case Zig.FnDefErr f:       entries.Add(AsEntry(DeclareFn(f.Arg1, f.Arg3, f.Arg6, f.Arg7, errUnion: true), null)); break;   // `!T` return → ErrorUnion(T)
+                case Zig.FnDefNoArgsErr f: entries.Add(AsEntry(DeclareFn(f.Arg1, null, f.Arg5, f.Arg6, errUnion: true), null)); break;
                 // Container decls were handled in pass 0 — skip here.
-                case Zig.StructDecl or Zig.StructDeclEmpty or Zig.EnumDecl or Zig.EnumDeclTyped: break;
+                case Zig.StructDecl or Zig.StructDeclEmpty or Zig.EnumDecl or Zig.EnumDeclTyped or Zig.UnionDeclEnum: break;
                 default: throw new IrUnsupportedException("zig top-level decl: " + (d.Content?.GetType().Name ?? "null"));
             }
         }
-        foreach (var (sym, ps, body) in entries) { LowerFnBody(sym, ps, body); }
+        foreach (var (container, fnDef) in structMethods) { entries.Add(DeclareMethod(container, fnDef)); }
+
+        // Pass 2: bodies. `_currentContainer` is set for a method body so its `@This()` resolves.
+        foreach (var (sym, ps, body, container) in entries)
+        {
+            _currentContainer = container;
+            LowerFnBody(sym, ps, body);
+            _currentContainer = null;
+        }
     }
+
+    /// <summary>Tag a pass-1 function entry with the container it belongs to (null for a free
+    /// function), so pass 2 can set <see cref="_currentContainer"/> while lowering its body.</summary>
+    private static (Symbol sym, List<(string name, CType type)> ps, Item body, string? container) AsEntry(
+        (Symbol sym, List<(string name, CType type)> ps, Item body) e, string? container)
+        => (e.sym, e.ps, e.body, container);
 
     /// <summary>Unwrap a top-level decl's optional <c>pub</c> wrapper (<see cref="Zig.PubFn"/>)
     /// to its inner declaration; a non-<c>pub</c> decl is returned unchanged. (D1 container
@@ -153,7 +227,7 @@ internal sealed class ZigLowering
     /// the global scope and bundle its body for pass 2. Declaring all signatures up
     /// front is what lets a call forward-reference a function defined later.</summary>
     private (Symbol sym, List<(string name, CType type)> ps, Item body) DeclareFn(
-        Item nameTok, Item? paramsItem, Item retType, Item body, bool errUnion = false)
+        Item nameTok, Item? paramsItem, Item retType, Item body, bool errUnion = false, string? mangledName = null)
     {
         var ret = LowerType(retType);
         // A `!T` return (Zig's inferred error set) wraps the payload in an error union;
@@ -171,12 +245,49 @@ internal sealed class ZigLowering
 
         var funcSym = _symbols.Declare(new Symbol
         {
-            Name = Tok(nameTok),
+            // A method is lowered to a free function under its mangled `TypeName_method` name
+            // (so it can be `&fn`-addressed and called directly); a plain function keeps its name.
+            Name = mangledName ?? Tok(nameTok),
             Kind = SymKind.Func,
             Type = new CType.Func(ret, paramInfos.Select(p => p.type).ToList(), false),
             IsGlobal = true,
         });
         return (funcSym, paramInfos, body);
+    }
+
+    /// <summary>Pass 1 for a struct method: declare it as a free function named
+    /// <c>TypeName_method</c> (its receiver, if any, is the ordinary first parameter, so the
+    /// body lowers exactly like a free function — <c>self.x</c> is plain field access) and record
+    /// it in <see cref="_methods"/> for call rewriting. <see cref="_currentContainer"/> is set so
+    /// a <c>@This()</c> in a parameter type resolves to the container.</summary>
+    private (Symbol sym, List<(string name, CType type)> ps, Item body, string? container) DeclareMethod(
+        string container, Item fnDef)
+    {
+        Item nameTok; Item? paramsItem; Item retType; Item body; bool errUnion;
+        switch (fnDef.Content)
+        {
+            case Zig.FnDef f:          nameTok = f.Arg1; paramsItem = f.Arg3; retType = f.Arg5; body = f.Arg6; errUnion = false; break;
+            case Zig.FnDefNoArgs f:    nameTok = f.Arg1; paramsItem = null;   retType = f.Arg4; body = f.Arg5; errUnion = false; break;
+            case Zig.FnDefErr f:       nameTok = f.Arg1; paramsItem = f.Arg3; retType = f.Arg6; body = f.Arg7; errUnion = true;  break;
+            case Zig.FnDefNoArgsErr f: nameTok = f.Arg1; paramsItem = null;   retType = f.Arg5; body = f.Arg6; errUnion = true;  break;
+            default: throw new IrUnsupportedException("zig method: " + (fnDef.Content?.GetType().Name ?? "null"));
+        }
+        var methodName = Tok(nameTok);
+
+        _currentContainer = container;
+        var e = DeclareFn(nameTok, paramsItem, retType, body, errUnion: errUnion, mangledName: container + "_" + methodName);
+        _currentContainer = null;
+
+        if (!_methods.TryGetValue(container, out var methods))
+        {
+            methods = new Dictionary<string, Symbol>(System.StringComparer.Ordinal);
+            _methods[container] = methods;
+        }
+        if (!methods.TryAdd(methodName, e.sym))
+        {
+            throw new IrUnsupportedException($"struct '{container}' declares '{methodName}' more than once");
+        }
+        return AsEntry(e, container);
     }
 
     /// <summary>Collect a parameter list's <c>(name, type)</c> infos in source order,
@@ -257,21 +368,103 @@ internal sealed class ZigLowering
     /// <summary>Register a Zig <c>struct</c> declaration: build its field layout (each
     /// <c>name: Type</c> field's type resolved through <see cref="LowerType"/>, so it can
     /// reference any container registered in pass 0) and hand it to the shared IR aggregate
-    /// table via <see cref="IrBuilder.RegisterStructType"/>. <paramref name="fieldsItem"/>
-    /// is null for an empty <c>struct {}</c>.</summary>
-    private void RegisterStruct(Item nameTok, Item? fieldsItem)
+    /// table via <see cref="IrBuilder.RegisterStructType"/>. <paramref name="fieldItems"/> are
+    /// the body's field members (each a <see cref="Zig.StructField"/>), already split out from
+    /// any methods by <see cref="SplitMembers"/>; empty for a <c>struct {}</c>.</summary>
+    private void RegisterStruct(string name, IReadOnlyList<Item> fieldItems)
     {
-        var name = Tok(nameTok);
         var fields = new List<StructField>();
-        if (fieldsItem is not null)
+        foreach (var fd in fieldItems)
         {
-            foreach (var fd in Flatten(fieldsItem))
-            {
-                var f = (Zig.StructField)fd.Content!;   // FieldDecl -> IDENT ':' Type
-                fields.Add(new StructField(Tok(f.Arg0), LowerType(f.Arg2)));
-            }
+            var f = (Zig.StructField)fd.Content!;   // FieldDecl -> IDENT ':' Type
+            fields.Add(new StructField(Tok(f.Arg0), LowerType(f.Arg2)));
         }
         _ir.RegisterStructType(name, fields, isUnion: false);
+    }
+
+    /// <summary>Split a struct container body (<c>FieldDecls</c> = a list of <c>Member</c>) into
+    /// its field declarations (each a <see cref="Zig.StructField"/>, for the layout) and its
+    /// methods (the inner <c>FnDef</c> item of each <c>fn</c>/<c>pub fn</c> member, declared as
+    /// mangled free functions in pass 1). A method is always lowered to an internal free
+    /// function, so <c>pub</c> carries no extra meaning yet (export visibility for a single-file
+    /// program is a no-op) and is dropped here.</summary>
+    private static (List<Item> fields, List<Item> methods) SplitMembers(Item membersItem)
+    {
+        var fields = new List<Item>();
+        var methods = new List<Item>();
+        foreach (var m in Flatten(membersItem))
+        {
+            switch (m.Content)
+            {
+                case Zig.MemberField mf:     fields.Add(mf.Arg0); break;   // FieldDecl ','  → StructField
+                case Zig.MemberFieldLast mf: fields.Add(mf.Arg0); break;   // FieldDecl       → StructField
+                case Zig.MemberMethod mm:    methods.Add(mm.Arg0); break;  // FnDef
+                case Zig.MemberPubMethod mm: methods.Add(mm.Arg1); break;  // 'pub' FnDef
+                default: throw new IrUnsupportedException("zig container member: " + (m.Content?.GetType().Name ?? "null"));
+            }
+        }
+        return (fields, methods);
+    }
+
+    /// <summary>Register a Zig <c>union(enum)</c> declaration as the faithful C tagged-union shape
+    /// (see <see cref="ZigUnionInfo"/>): synthesize the tag enum <c>U_Tag</c> (a member per variant,
+    /// value = its index) + per-member symbols (so <c>.variant</c> resolves to a tag constant); a
+    /// nested overlapping-payload union <c>U_Payload</c> (<c>IsUnion=true</c> → every payload
+    /// variant at <c>[FieldOffset(0)]</c>, reusing the shared C union machinery); and the outer
+    /// struct <c>U</c> = <c>{ __tag, __payload }</c>. A union with only void variants gets no
+    /// <c>__payload</c>. Records the <see cref="ZigUnionInfo"/> for construction + <c>switch</c>.
+    /// Variant payload types resolve through pass 0a, so a variant may name any container.</summary>
+    private void RegisterUnion(string name, Item variantsItem)
+    {
+        var variants = new List<(string name, CType? payload)>();
+        foreach (var v in Flatten(variantsItem))
+        {
+            switch (v.Content)
+            {
+                case Zig.UnionVariantPayload vp: variants.Add((Tok(vp.Arg0), LowerType(vp.Arg2))); break;  // IDENT ':' Type
+                case Zig.UnionVariantVoid vv:    variants.Add((Tok(vv.Arg0), null)); break;                 // IDENT
+                default: throw new IrUnsupportedException("zig union variant: " + (v.Content?.GetType().Name ?? "null"));
+            }
+        }
+
+        // Synthesize the tag enum `U_Tag` + its member symbols (variant name → tag constant).
+        var tagName = name + TagSuffix;
+        var tagType = new CType.Enum(tagName, CType.Int);
+        var tagMembers = new List<EnumMember>();
+        var tagSyms = new Dictionary<string, Symbol>(System.StringComparer.Ordinal);
+        var variantMap = new Dictionary<string, CType?>(System.StringComparer.Ordinal);
+        long idx = 0;
+        foreach (var (vname, payload) in variants)
+        {
+            tagMembers.Add(new EnumMember(vname, idx));
+            tagSyms[vname] = new Symbol { Name = vname, Kind = SymKind.EnumConst, Type = tagType, ConstValue = idx, IsGlobal = true };
+            variantMap[vname] = payload;
+            idx++;
+        }
+        _ir.RegisterEnumType(tagName, CType.Int, tagMembers);
+        _containerTypes[tagName] = tagType;
+        _enumMembers[tagName] = tagSyms;
+
+        // Nested overlapping-payload union `U_Payload` (one overlaid field per PAYLOAD variant) —
+        // only when at least one variant carries a payload; an all-void union is just a tag.
+        string? payloadTypeName = null;
+        var payloadFields = new List<StructField>();
+        foreach (var (vname, payload) in variants)
+        {
+            if (payload is not null) { payloadFields.Add(new StructField(vname, payload)); }
+        }
+        if (payloadFields.Count > 0)
+        {
+            payloadTypeName = name + PayloadSuffix;
+            _ir.RegisterStructType(payloadTypeName, payloadFields, isUnion: true);   // [StructLayout(Explicit)], all at offset 0
+        }
+
+        // Outer discriminated struct `U` = { __tag; (__payload if any) }.
+        var fields = new List<StructField> { new StructField(TagFieldName, tagType) };
+        if (payloadTypeName is not null) { fields.Add(new StructField(PayloadFieldName, new CType.Named(payloadTypeName))); }
+        _ir.RegisterStructType(name, fields, isUnion: false);
+
+        _unions[name] = new ZigUnionInfo(tagType, TagFieldName, payloadTypeName, PayloadFieldName, variantMap);
     }
 
     /// <summary>Register a Zig <c>enum</c> declaration: assign each member its value
@@ -361,6 +554,8 @@ internal sealed class ZigLowering
         }
         // The empty `.{}` (AnonStructInitEmpty) carries no field list — zero-init every field.
         IReadOnlyList<Item> fields = initItem.Content is Zig.AnonStructInit a ? Flatten(a.Arg2) : [];   // Primary -> '.' '{' FieldInits '}'
+        // A tagged-union sink → a union literal (sets the tag + exactly one payload variant).
+        if (_unions.TryGetValue(named.Name, out var uinfo)) { return BuildUnionInit(fields, uinfo); }
         return BuildStructInit(fields, named);
     }
 
@@ -377,6 +572,8 @@ internal sealed class ZigLowering
             throw new IrUnsupportedException(
                 $"zig typed struct literal `Type{{…}}` requires a struct type, got {t.Describe()}");
         }
+        // A typed tagged-union literal `U{ .variant = … }` sets the tag + the one payload variant.
+        if (_unions.TryGetValue(named.Name, out var uinfo)) { return BuildUnionInit(fieldInitItems, uinfo); }
         return BuildStructInit(fieldInitItems, named);
     }
 
@@ -400,6 +597,63 @@ internal sealed class ZigLowering
         return new StructInit(members) { Type = named };
     }
 
+    /// <summary>Build a tagged-union PAYLOAD literal — <c>.{ .variant = value }</c> or
+    /// <c>U{ .variant = value }</c> — as a <see cref="StructInit"/> that sets BOTH the
+    /// <see cref="TagFieldName"/> discriminant (to the variant's tag constant) and the variant's
+    /// payload field (the value lowered at the payload type as its sink). Exactly one variant must
+    /// be set; a void variant is constructed with the bare <c>.variant</c> form
+    /// (<see cref="BuildVoidVariant"/>), not this one.</summary>
+    private CExpr BuildUnionInit(IReadOnlyList<Item> fieldInitItems, ZigUnionInfo info)
+    {
+        if (fieldInitItems.Count != 1)
+        {
+            throw new IrUnsupportedException(
+                $"zig tagged-union literal for '{info.Name}' must set exactly one variant (got {fieldInitItems.Count})");
+        }
+        var fi = (Zig.FieldInit)fieldInitItems[0].Content!;   // FieldInit -> '.' IDENT '=' Expr
+        var variant = Tok(fi.Arg1);
+        if (!info.Variants.TryGetValue(variant, out var payloadType))
+        {
+            throw new IrUnsupportedException($"union '{info.Name}' has no variant '{variant}'");
+        }
+        if (payloadType is null)
+        {
+            throw new IrUnsupportedException(
+                $"union '{info.Name}' variant '{variant}' is a void variant — construct it as `.{variant}`, not `.{{ .{variant} = … }}`");
+        }
+        // Nested: new U { __tag = U_Tag.variant, __payload = new U_Payload { variant = value } }.
+        var payloadNamed = new CType.Named(info.PayloadTypeName!);
+        var payloadInit = new StructInit(new List<FieldInit>
+        {
+            new FieldInit(variant, payloadType, LowerExprSink(fi.Arg3, payloadType)),
+        }) { Type = payloadNamed };
+        var members = new List<FieldInit>
+        {
+            new FieldInit(info.TagFieldName, info.TagType, ResolveEnumLit(variant, info.TagType)),
+            new FieldInit(info.PayloadFieldName, payloadNamed, payloadInit),
+        };
+        return new StructInit(members) { Type = new CType.Named(info.Name) };
+    }
+
+    /// <summary>Build a tagged-union VOID variant — the bare <c>.variant</c> form at a union sink
+    /// — as a <see cref="StructInit"/> that sets only the <see cref="TagFieldName"/> discriminant
+    /// (the payload fields take their zero default). The variant must be a void / tag-only
+    /// variant.</summary>
+    private CExpr BuildVoidVariant(ZigUnionInfo info, string variant)
+    {
+        if (!info.Variants.TryGetValue(variant, out var payloadType))
+        {
+            throw new IrUnsupportedException($"union '{info.Name}' has no variant '{variant}'");
+        }
+        if (payloadType is not null)
+        {
+            throw new IrUnsupportedException(
+                $"union '{info.Name}' variant '{variant}' carries a payload — construct it as `.{{ .{variant} = … }}`");
+        }
+        var members = new List<FieldInit> { new FieldInit(info.TagFieldName, info.TagType, ResolveEnumLit(variant, info.TagType)) };
+        return new StructInit(members) { Type = new CType.Named(info.Name) };
+    }
+
     /// <summary>Lower an expression that has a known result type (a "sink"): the two
     /// result-located Zig forms — a bare enum literal <c>.member</c> and an anonymous struct
     /// literal <c>.{…}</c> — need that type to resolve, so they're dispatched here; every
@@ -410,6 +664,9 @@ internal sealed class ZigLowering
     {
         switch (expr.Content)
         {
+            // A bare `.variant` at a tagged-union sink constructs its VOID variant (set the tag).
+            case Zig.EnumLit el when sink?.Unqualified is CType.Named n && _unions.TryGetValue(n.Name, out var uinfo):
+                return BuildVoidVariant(uinfo, Tok(el.Arg1));
             case Zig.EnumLit el when sink?.Unqualified is CType.Enum en:  // '.' IDENT
                 return ResolveEnumLit(Tok(el.Arg1), en);
             case Zig.AnonStructInit:
@@ -487,10 +744,10 @@ internal sealed class ZigLowering
             case Zig.StmtBreak:    return new Break();
             case Zig.StmtContinue: return new Continue();
 
-            // `switch (subject) { prongs }` → the C IR Switch (subject=Arg2, prongs=Arg5 for
-            // both the plain and trailing-comma forms).
-            case Zig.StmtSwitch s:         return LowerSwitch(s.Arg2, s.Arg5);
-            case Zig.StmtSwitchTrailing s: return LowerSwitch(s.Arg2, s.Arg5);
+            // `switch (subject) { prongs }` → the C IR Switch (subject=Arg2, prongs=Arg5 for both
+            // the plain and trailing-comma forms). A tagged-union subject takes the capture path.
+            case Zig.StmtSwitch s:         return LowerSwitchStmt(s.Arg2, s.Arg5);
+            case Zig.StmtSwitchTrailing s: return LowerSwitchStmt(s.Arg2, s.Arg5);
 
             // `for (start..end) |i| body` → C `for (usize i = start; i < end; i++) body`. The
             // capture `i` is the usize loop index (its own scope so it doesn't leak); the end
@@ -529,18 +786,44 @@ internal sealed class ZigLowering
         return new DeclStmt(new List<LocalDecl> { new(sym, init) });
     }
 
-    /// <summary>Lower a <c>switch (subject) { prong, … }</c> statement to the C IR
+    /// <summary>Dispatch a <c>switch</c> statement: lower the subject once, then route a
+    /// tagged-union subject (a value or pointer-to a registered <c>union(enum)</c>) to
+    /// <see cref="LowerUnionSwitch"/> (the tag-discriminant + payload-capture path) and any other
+    /// subject to the plain <see cref="LowerSwitch"/>.</summary>
+    private CStmt LowerSwitchStmt(Item subjectItem, Item prongsItem)
+    {
+        var subject = LowerExpr(subjectItem);
+        var u = subject.Type.Unqualified;
+        var uname = u switch
+        {
+            CType.Named n => n.Name,
+            CType.Pointer { Pointee: var pe } when pe.Unqualified is CType.Named pn => pn.Name,
+            _ => null,
+        };
+        if (uname is not null && _unions.TryGetValue(uname, out var info))
+        {
+            return LowerUnionSwitch(subject, prongsItem, info);
+        }
+        return LowerSwitch(subject, prongsItem);
+    }
+
+    /// <summary>Lower a non-union <c>switch (subject) { prong, … }</c> to the C IR
     /// <see cref="Switch"/>. Each prong (<c>CaseVals =&gt; Block</c>) becomes a
     /// <see cref="SwitchSection"/>: its case values are the labels (<c>else</c> → the null
     /// default label), and its braced block is the body. Zig switch has NO fall-through, so a
     /// terminating <see cref="Break"/> is appended to any section that doesn't already end
-    /// control flow — otherwise the C# backend would synthesize C's fall-through jump.</summary>
-    private CStmt LowerSwitch(Item subjectItem, Item prongsItem)
+    /// control flow — otherwise the C# backend would synthesize C's fall-through jump. A payload
+    /// capture <c>|x|</c> here is an error (only a tagged-union switch binds a payload).</summary>
+    private CStmt LowerSwitch(CExpr subject, Item prongsItem)
     {
-        var subject = LowerExpr(subjectItem);
         var sections = new List<SwitchSection>();
         foreach (var prongItem in Flatten(prongsItem))
         {
+            if (prongItem.Content is Zig.ProngCapture)
+            {
+                throw new IrUnsupportedException(
+                    "zig switch payload capture `|x|` is only valid on a tagged-union switch");
+            }
             var p = (Zig.Prong)prongItem.Content!;            // CaseVals=Arg0, '=>'=Arg1, Block=Arg2
             var labels = LowerCaseVals(p.Arg0, subject.Type); // case values compare against the subject
             var body = new List<CStmt> { LowerBlock(p.Arg2) }; // the braced block, scoped
@@ -548,6 +831,103 @@ internal sealed class ZigLowering
             sections.Add(new SwitchSection(labels, body));
         }
         return new Switch(subject, sections);
+    }
+
+    /// <summary>Lower a <c>switch</c> over a tagged union: switch on the <see cref="TagFieldName"/>
+    /// discriminant, with <c>.variant</c> case labels resolving against the tag enum. A
+    /// <c>|x|</c> payload capture binds <c>x</c> to the matched variant's payload field (by value)
+    /// at the top of that prong's block. The subject is hoisted to a temp first (unless it is
+    /// already a simple variable) so each capture re-reads it without re-evaluating a
+    /// side-effecting subject expression.</summary>
+    private CStmt LowerUnionSwitch(CExpr subject, Item prongsItem, ZigUnionInfo info)
+    {
+        var isPtr = subject.Type.Unqualified is CType.Pointer;
+        var pre = new List<CStmt>();
+        CExpr unionRef;
+        if (subject is VarRef)
+        {
+            unionRef = subject;   // a bare variable — safe to re-reference per prong
+        }
+        else
+        {
+            var tmp = _symbols.Declare(new Symbol { Name = "__un", Kind = SymKind.Var, Type = subject.Type });
+            pre.Add(new DeclStmt(new List<LocalDecl> { new(tmp, subject) }));
+            unionRef = new VarRef(tmp) { Type = subject.Type, IsLValue = true };
+        }
+        var disc = new Member(unionRef, info.TagFieldName, isPtr) { Type = info.TagType, IsLValue = true };
+
+        var sections = new List<SwitchSection>();
+        foreach (var prongItem in Flatten(prongsItem))
+        {
+            Item caseVals; string? captureName; Item block;
+            switch (prongItem.Content)
+            {
+                case Zig.Prong p:        caseVals = p.Arg0; captureName = null;        block = p.Arg2; break;
+                case Zig.ProngCapture p: caseVals = p.Arg0; captureName = Tok(p.Arg3); block = p.Arg5; break;
+                default: throw new IrUnsupportedException("zig switch prong: " + (prongItem.Content?.GetType().Name ?? "null"));
+            }
+            var labels = LowerCaseVals(caseVals, info.TagType);   // `.variant` → EnumConstRef(U_Tag.variant)
+
+            List<CStmt> body;
+            if (captureName is not null && captureName != "_")
+            {
+                var variant = SingleVariantName(caseVals, info);
+                var payloadType = info.Variants[variant]
+                    ?? throw new IrUnsupportedException(
+                        $"union '{info.Name}' variant '{variant}' is a void variant — it has no payload to capture with `|{captureName}|`");
+                _symbols.EnterScope();
+                var capSym = _symbols.Declare(new Symbol { Name = captureName, Kind = SymKind.Var, Type = payloadType });
+                // `var x = __un.__payload.variant;` — read the overlaid payload field.
+                var payloadBase = new Member(unionRef, info.PayloadFieldName, isPtr) { Type = new CType.Named(info.PayloadTypeName!), IsLValue = true };
+                var capInit = new Member(payloadBase, variant, false) { Type = payloadType, IsLValue = true };
+                var inner = LowerBlock(block);
+                _symbols.ExitScope();
+                var combined = new List<CStmt> { new DeclStmt(new List<LocalDecl> { new(capSym, capInit) }) };
+                combined.AddRange(inner.Stmts);
+                body = new List<CStmt> { new Block(combined) };
+            }
+            else
+            {
+                body = new List<CStmt> { LowerBlock(block) };
+            }
+            if (!EndsInJump(body)) { body.Add(new Break()); }   // no Zig fall-through
+            sections.Add(new SwitchSection(labels, body));
+        }
+
+        // A Zig union switch is exhaustive; C# can't prove a tag switch covers every case, so
+        // without an `else` it would reject the enclosing function ("not all code paths return",
+        // CS0161). Make the LAST prong the `default` — for an exhaustive switch (which valid Zig
+        // requires) the last variant's tag is the only value that reaches it, so this is
+        // semantics-preserving and needs no synthetic statement.
+        if (sections.Count > 0 && !sections.Any(s => s.Labels.Any(l => l.CaseExpr is null)))
+        {
+            sections[^1] = sections[^1] with { Labels = new List<SwitchLabel> { new SwitchLabel(null) } };
+        }
+
+        var sw = new Switch(disc, sections);
+        if (pre.Count == 0) { return sw; }
+        pre.Add(sw);
+        return new Block(pre);   // { var __un = subject; switch (__un.__tag) { … } }
+    }
+
+    /// <summary>The single <c>.variant</c> a tagged-union capture prong matches — a capture
+    /// (<c>|x|</c>) is only meaningful on a prong that selects exactly one payload variant, so an
+    /// <c>else</c>, a multi-value prong, or an unknown variant is rejected.</summary>
+    private string SingleVariantName(Item caseVals, ZigUnionInfo info)
+    {
+        var vals = Flatten(caseVals);
+        if (vals.Count != 1 || vals[0].Content is not Zig.EnumLit el)
+        {
+            var what = caseVals.Content is Zig.CaseElse ? "`else`" : $"{vals.Count} value(s)";
+            throw new IrUnsupportedException(
+                $"a tagged-union capture prong must match exactly one `.variant` (got {what})");
+        }
+        var variant = Tok(el.Arg1);
+        if (!info.Variants.ContainsKey(variant))
+        {
+            throw new IrUnsupportedException($"union '{info.Name}' has no variant '{variant}'");
+        }
+        return variant;
     }
 
     /// <summary>Lower a prong's case values to switch labels: <c>else</c> → the single null
@@ -726,9 +1106,18 @@ internal sealed class ZigLowering
                     return ResolveEnumLit(fieldName, en);
                 }
                 var structExpr = LowerExpr(fld.Arg0);
+                var arrow = structExpr.Type.Unqualified is CType.Pointer;   // Zig `p.x` auto-derefs
+                // Tagged-union payload access `u.variant` → `u.__payload.variant` (unchecked,
+                // like Zig's release-mode field access; the tag isn't a user-facing field).
+                if (TryContainerName(structExpr.Type, out var cname)
+                    && _unions.TryGetValue(cname, out var uinfo)
+                    && uinfo.Variants.TryGetValue(fieldName, out var vpayload) && vpayload is not null)
+                {
+                    var payloadBase = new Member(structExpr, uinfo.PayloadFieldName, arrow) { Type = new CType.Named(uinfo.PayloadTypeName!), IsLValue = true };
+                    return new Member(payloadBase, fieldName, false) { Type = vpayload, IsLValue = true };
+                }
                 var ftype = _ir.StructFieldType(structExpr.Type, fieldName)
                     ?? throw new IrUnsupportedException($"no field '{fieldName}' on type {structExpr.Type.Describe()}");
-                var arrow = structExpr.Type.Unqualified is CType.Pointer;   // Zig `p.x` auto-derefs
                 return new Member(structExpr, fieldName, arrow) { Type = ftype, IsLValue = true };
             }
 
@@ -891,54 +1280,76 @@ internal sealed class ZigLowering
         }
     }
 
-    /// <summary>Lower a call. V1: only a bare-identifier callee bound to a named
-    /// function → an IR <see cref="Call"/> carrying the callee's parameter types (so
-    /// the backend coerces each argument as C does at a call) and the resolved symbol
-    /// (so it emits the legalized target name). A computed / member callee
-    /// (<c>c.printf</c>, a function pointer) is deferred — member calls come with
-    /// <c>@cImport</c>.</summary>
+    /// <summary>Lower a call. Two callee shapes: a bare identifier bound to a named function
+    /// (free function or <c>extern</c>/libc) → <see cref="BuildCall"/>; a <c>base.name(args)</c>
+    /// field callee → <see cref="LowerMethodCall"/> (a UFCS instance method or a static/associated
+    /// function). An indirect / function-pointer callee is still deferred.</summary>
     private CExpr LowerCall(Item calleeItem, Item? argListItem)
     {
+        var argItems = argListItem is null ? new List<Item>() : Flatten(argListItem);
+
+        // `base.method(args)` — a method (UFCS) or associated-function call.
+        if (calleeItem.Content is Zig.Field fld)
+        {
+            return LowerMethodCall(fld, argItems);
+        }
+
         if (calleeItem.Content is not Zig.Ident id)
         {
-            throw new IrUnsupportedException("zig call: only a bare-identifier callee is lowered yet (got "
+            throw new IrUnsupportedException("zig call: only a bare-identifier or `base.method` callee is lowered yet (got "
                 + (calleeItem.Content?.GetType().Name ?? "null") + ")");
         }
         var name = Tok(id.Arg0);
         var sym = _symbols.Resolve(name)
             ?? throw new IrUnsupportedException($"call to unresolved name '{name}'");
-        if (sym.Type.Unqualified is not CType.Func fn)
+        if (sym.Type.Unqualified is not CType.Func)
         {
             throw new IrUnsupportedException($"'{name}' is not a function (indirect / fn-ptr calls deferred)");
         }
+        return BuildCall(sym, argItems, receiver: null);
+    }
 
-        var argItems = argListItem is null ? new List<Item>() : Flatten(argListItem);
-        var args = new List<CExpr>(argItems.Count);
-        // Each fixed argument's parameter type is its sink (Zig result-locates a call
-        // argument), so `f(.member)` / `f(.{…})` resolve against the parameter. A variadic
-        // tail argument has no fixed parameter type → no sink (plain LowerExpr).
+    /// <summary>Build an IR <see cref="Call"/> to a resolved function symbol, optionally with a
+    /// synthesized leading <paramref name="receiver"/> argument (an instance method's <c>self</c>).
+    /// Carries the callee's parameter types (so the backend coerces each argument as C does at a
+    /// call) and the symbol (so it emits the legalized target name); an <c>extern</c>/libc symbol
+    /// (<see cref="Symbol.FromSystemHeader"/>) drops the symbol so the call binds to dotcc's
+    /// <c>Libc</c> runtime by bare name. Each fixed argument's parameter type is its sink (Zig
+    /// result-locates call arguments), accounting for the receiver's parameter slot.</summary>
+    private CExpr BuildCall(Symbol sym, IReadOnlyList<Item> argItems, CExpr? receiver)
+    {
+        var fn = (CType.Func)sym.Type.Unqualified;
+        var args = new List<CExpr>(argItems.Count + 1);
+        var paramOffset = 0;
+        if (receiver is not null) { args.Add(receiver); paramOffset = 1; }
+
+        // Each fixed argument's parameter type is its sink (Zig result-locates a call argument),
+        // so `f(.member)` / `f(.{…})` resolve against the parameter. The receiver, if any, has
+        // already consumed parameter slot 0. A variadic tail argument has no fixed parameter
+        // type → no sink (plain LowerExpr).
         for (var i = 0; i < argItems.Count; i++)
         {
-            var paramSink = i < fn.Params.Count ? fn.Params[i] : null;
+            var pIndex = i + paramOffset;
+            var paramSink = pIndex < fn.Params.Count ? fn.Params[pIndex] : null;
             args.Add(LowerExprSink(argItems[i], paramSink));
         }
-        // A variadic callee (printf) needs AT LEAST the fixed params; the rest are the
-        // variadic tail. A fixed-arity callee needs an exact match.
+
+        // A variadic callee (printf) needs AT LEAST the fixed params; the rest are the variadic
+        // tail. A fixed-arity callee needs an exact match.
         var arityOk = fn.Variadic ? args.Count >= fn.Params.Count : args.Count == fn.Params.Count;
         if (!arityOk)
         {
             throw new IrUnsupportedException(
-                $"call to '{name}': expected {(fn.Variadic ? "at least " : "")}{fn.Params.Count} argument(s), got {args.Count}");
+                $"call to '{sym.Name}': expected {(fn.Variadic ? "at least " : "")}{fn.Params.Count} argument(s), got {args.Count}");
         }
-        // Zig parity (the differential oracle caught dotcc being too lenient here): an
-        // untyped comptime numeric literal has no fixed-size ABI type, so Zig forbids
-        // passing it to a C-variadic — `printf("%d", 42)` is an error, `@as(c_int, 42)`
-        // (or any concretely-typed value) is required. Reject the variadic tail the same
-        // way, with zig's exact wording, via the same diagnostics channel C uses for
-        // constraint violations (write-to-const).
+        // Zig parity (the differential oracle caught dotcc being too lenient here): an untyped
+        // comptime numeric literal has no fixed-size ABI type, so Zig forbids passing it to a
+        // C-variadic — `printf("%d", 42)` is an error, `@as(c_int, 42)` is required. The variadic
+        // tail begins at argItems index `fn.Params.Count - paramOffset`. (Methods are never
+        // variadic, so paramOffset is 0 whenever this branch runs.)
         if (fn.Variadic)
         {
-            for (var k = fn.Params.Count; k < argItems.Count; k++)
+            for (var k = fn.Params.Count - paramOffset; k < argItems.Count; k++)
             {
                 if (IsComptimeUntypedNumeric(argItems[k]))
                 {
@@ -949,12 +1360,95 @@ internal sealed class ZigLowering
             }
         }
 
-        // An extern/libc function (FromSystemHeader) renders by its bare name — no
-        // CalleeSym — so it binds to dotcc's Libc runtime (and printf/scanf hit the
-        // fluent builder), exactly as a C program's libc call does. A user Zig
-        // function carries its symbol so the (possibly legalized) target name is used.
+        // An extern/libc function (FromSystemHeader) renders by its bare name — no CalleeSym —
+        // so it binds to dotcc's Libc runtime (and printf/scanf hit the fluent builder), exactly
+        // as a C program's libc call does. A user Zig function (or method) carries its symbol so
+        // the (possibly legalized / mangled) target name is used.
         var calleeSym = sym.FromSystemHeader ? null : sym;
-        return new Call(name, args, fn.Params, calleeSym) { Type = fn.Return };
+        return new Call(sym.Name, args, fn.Params, calleeSym) { Type = fn.Return };
+    }
+
+    /// <summary>Lower a <c>base.name(args)</c> call. Two shapes: (A) a STATIC / associated call
+    /// <c>Type.func(args)</c> — the base is a bare identifier naming a registered struct (and is
+    /// NOT a variable in scope) — every argument is explicit, no receiver; (B) an INSTANCE call
+    /// <c>expr.method(args)</c> — the base value is the receiver, adjusted (Zig UFCS auto-ref/
+    /// deref) to the method's declared first-parameter form. Both rewrite to the mangled free
+    /// function <c>TypeName_method</c> recorded in <see cref="_methods"/>.</summary>
+    private CExpr LowerMethodCall(Zig.Field fld, IReadOnlyList<Item> argItems)
+    {
+        var methodName = Tok(fld.Arg2);
+
+        // (A) `Type.func(args)` — a bare-identifier base naming a registered struct type (not a
+        // variable) → the associated/static function; all arguments are explicit (no receiver).
+        if (fld.Arg0.Content is Zig.Ident bid
+            && _containerTypes.TryGetValue(Tok(bid.Arg0), out var baseTy)
+            && baseTy.Unqualified is CType.Named
+            && _symbols.Resolve(Tok(bid.Arg0)) is null)
+        {
+            var typeName = Tok(bid.Arg0);
+            if (!_methods.TryGetValue(typeName, out var byType) || !byType.TryGetValue(methodName, out var staticSym))
+            {
+                throw new IrUnsupportedException($"struct '{typeName}' has no function '{methodName}'");
+            }
+            return BuildCall(staticSym, argItems, receiver: null);
+        }
+
+        // (B) `expr.method(args)` — the base is an instance of a container type.
+        var recv = LowerExpr(fld.Arg0);
+        if (!TryContainerName(recv.Type, out var container))
+        {
+            throw new IrUnsupportedException(
+                $"zig method call `.{methodName}()` needs a struct (or pointer-to-struct) receiver, got {recv.Type.Describe()}");
+        }
+        if (!_methods.TryGetValue(container, out var methods) || !methods.TryGetValue(methodName, out var msym))
+        {
+            throw new IrUnsupportedException($"struct '{container}' has no method '{methodName}'");
+        }
+        var mfn = (CType.Func)msym.Type.Unqualified;
+        if (mfn.Params.Count == 0)
+        {
+            throw new IrUnsupportedException(
+                $"'{container}.{methodName}' takes no parameters — call it as `{container}.{methodName}(…)`, not on an instance");
+        }
+        var receiver = AdjustReceiver(recv, mfn.Params[0]);
+        return BuildCall(msym, argItems, receiver);
+    }
+
+    /// <summary>Resolve the struct name a receiver expression's type names — a
+    /// <see cref="CType.Named"/> value or a pointer to one (<c>Point</c> / <c>*Point</c>) — for
+    /// instance-method dispatch.</summary>
+    private static bool TryContainerName(CType t, out string name)
+    {
+        var u = t.Unqualified;
+        if (u is CType.Pointer p) { u = p.Pointee.Unqualified; }
+        if (u is CType.Named n) { name = n.Name; return true; }
+        name = "";
+        return false;
+    }
+
+    /// <summary>Adjust an instance-method receiver to the method's declared first-parameter form
+    /// (Zig UFCS auto-ref/deref): a value receiver to a <c>*Self</c> method takes its address (a
+    /// var/param operand is marked address-taken; a non-lvalue is materialized to a temp by the
+    /// backend's <c>&amp;rvalue</c> rule); a pointer receiver to a value-<c>Self</c> method is
+    /// dereferenced; matching forms (both pointer or both value) pass through unchanged.</summary>
+    private static CExpr AdjustReceiver(CExpr recv, CType paramType)
+    {
+        var paramIsPtr = paramType.Unqualified is CType.Pointer;
+        var recvIsPtr = recv.Type.Unqualified is CType.Pointer;
+        if (paramIsPtr && !recvIsPtr)
+        {
+            if (Unparen(recv) is VarRef { Sym: { Kind: SymKind.Var or SymKind.Param } s })
+            {
+                s.AddressTaken = true;
+            }
+            return new Unary(UnOp.AddrOf, recv) { Type = new CType.Pointer(recv.Type) };
+        }
+        if (!paramIsPtr && recvIsPtr)
+        {
+            var pointee = ((CType.Pointer)recv.Type.Unqualified).Pointee;
+            return new Unary(UnOp.Deref, recv) { Type = pointee, IsLValue = true };
+        }
+        return recv;
     }
 
     /// <summary>Lower a binary op, synthesizing the result type the way the C# backend
@@ -1046,8 +1540,21 @@ internal sealed class ZigLowering
         // Suffix naming the set), so `anyerror!T` and a named `E!T` lower identically — the
         // payload is what the backend renders (`ErrUnion<T>`). See [[CType.ErrorUnion]].
         Zig.ErrUnion eu => new CType.ErrorUnion(LowerType(eu.Arg2)),
+        // `@This()` — Zig's reflective self-type → the container currently being lowered, so
+        // `self: @This()` / `self: *@This()` name the receiver without repeating the type name.
+        // (`const Self = @This();` — a container-level const alias — is deferred; use `@This()`
+        // directly or the explicit type name.)
+        Zig.BuiltinCallNoArgs b when Tok(b.Arg0) == "@This" => CurrentContainerType(),
         _ => throw new IrUnsupportedException("zig type: " + (type.Content?.GetType().Name ?? "null")),
     };
+
+    /// <summary>The type the enclosing container's <c>@This()</c> resolves to — the struct/enum
+    /// whose method is currently being lowered. An error outside a method (no container in
+    /// scope).</summary>
+    private CType CurrentContainerType() =>
+        _currentContainer is { } c && _containerTypes.TryGetValue(c, out var t)
+            ? t
+            : throw new IrUnsupportedException("zig `@This()` is only supported inside a container method");
 
     /// <summary>Resolve a Zig type spelled as a bare identifier: a registered container
     /// (struct → <see cref="CType.Named"/>, enum → <see cref="CType.Enum"/>) wins over the
@@ -1133,12 +1640,14 @@ internal sealed class ZigLowering
                 case Zig.ProngsOne o:  stack.Push(o.Arg0); break;
                 case Zig.CaseValsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [Expr, ',', CaseVals]
                 case Zig.CaseValsOne o:  stack.Push(o.Arg0); break;
-                case Zig.FieldDeclsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [FieldDecls, ',', FieldDecl] (left-recursive)
+                case Zig.FieldDeclsCons c: stack.Push(c.Arg1); stack.Push(c.Arg0); break;  // [Member, FieldDecls] (right-recursive)
                 case Zig.FieldDeclsOne o:  stack.Push(o.Arg0); break;
-                case Zig.FieldDeclsTrail t: stack.Push(t.Arg0); break;                     // [FieldDecls, ','] trailing comma
                 case Zig.EnumFieldsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [EnumFields, ',', EnumField]
                 case Zig.EnumFieldsOne o:  stack.Push(o.Arg0); break;
                 case Zig.EnumFieldsTrail t: stack.Push(t.Arg0); break;
+                case Zig.UnionVariantsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [UnionVariants, ',', UnionVariant]
+                case Zig.UnionVariantsOne o:  stack.Push(o.Arg0); break;
+                case Zig.UnionVariantsTrail t: stack.Push(t.Arg0); break;
                 case Zig.FieldInitsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [FieldInits, ',', FieldInit]
                 case Zig.FieldInitsOne o:  stack.Push(o.Arg0); break;
                 case Zig.FieldInitsTrail t: stack.Push(t.Arg0); break;
