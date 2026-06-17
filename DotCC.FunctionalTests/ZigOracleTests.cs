@@ -259,6 +259,16 @@ public sealed class ZigOracleTests
             "    if (countL(s) == 2) { if (sumLpos(s) == 5) { return 42; } }\n" +
             "    return 0;\n" +
             "}\n", 42, "" },
+        // ARRAY LOCALS (Milestone E follow-up). `var b: [N]T = undefined;` → a stackalloc'd
+        // C array (zero heap); slicing it (`b[0..3]`) gives a stack-backed slice. Fill 10/20/12,
+        // sum the slice → 42.
+        new object[] { "array_local",
+            "pub fn main() u8 {\n" +
+            "    var buf: [4]u8 = undefined;\n" +
+            "    buf[0] = 10; buf[1] = 20; buf[2] = 12;\n" +
+            "    const s: []u8 = buf[0..3];\n" +
+            "    return s[0] + s[1] + s[2];\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

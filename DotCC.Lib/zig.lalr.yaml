@@ -155,6 +155,8 @@ symbols:
   - 'union'        # 103 `const U = union(enum) { … };` tagged-union container decl
   - UnionVariants  # 104 union variant list (left-recursive, clean trailing comma)
   - UnionVariant   # 105 one variant: `name: Type` (payload) or `name` (void / tag-only)
+  # --- arrays (Milestone E follow-up; appended — never reorder) ---
+  - 'undefined'    # 106 the `undefined` initializer (uninitialized storage — `var b: [N]T = undefined;`)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -444,6 +446,7 @@ productions:
       - { lhs: Primary, rhs: [BUILTIN, '(', ArgList, ')'], action: builtinCall }
       - { lhs: Primary, rhs: [BUILTIN, '(', ')'],           action: builtinCallNoArgs }
       - { lhs: Primary, rhs: ['null'],              action: nullLit }
+      - { lhs: Primary, rhs: ['undefined'],         action: undefinedLit }
       - { lhs: Primary, rhs: ['.', IDENT],          action: enumLit }
       # Anonymous struct literal `.{ … }` (Milestone D1). The leading `.` is the SAME token
       # as enumLit's; they split cleanly on the next symbol (`{` → struct literal, IDENT →
@@ -582,6 +585,7 @@ lexer:
     - { symbol: 'orelse', match: 'orelse' }
     - { symbol: 'try',    match: 'try' }
     - { symbol: 'null',   match: 'null' }
+    - { symbol: 'undefined', match: 'undefined' }
     - { symbol: 'catch',  match: 'catch' }
     - { symbol: 'error',  match: 'error' }
     - { symbol: 'break',    match: 'break' }

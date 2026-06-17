@@ -672,6 +672,10 @@ internal sealed class ZigLowering
             case Zig.AnonStructInit:
             case Zig.AnonStructInitEmpty:
                 return LowerStructInit(expr, sink);
+            // `var x: T = undefined;` (scalar) → `default(T)` (Zig's uninitialized; a zeroed
+            // over-approximation). An array sink is handled earlier in DeclOf (stackalloc).
+            case Zig.UndefinedLit:
+                return new DefaultLit { Type = sink ?? CType.Int };
             default:
             {
                 var lowered = LowerExpr(expr);
@@ -810,15 +814,29 @@ internal sealed class ZigLowering
         }
     }
 
-    private DeclStmt DeclOf(Item nameTok, Item? typeItem, Item initExpr)
+    private CStmt DeclOf(Item nameTok, Item? typeItem, Item initExpr)
     {
         // Compute the declared type FIRST: a result-located init (`.member` / `.{…}`) needs
         // it as its sink, so resolve the annotation before lowering the initializer.
         var declared = typeItem is not null ? LowerType(typeItem) : null;
+        // `var b: [N]T = undefined;` → a stackalloc'd C array (ArrayDecl → `T* b = stackalloc
+        // T[N]`), so `b[i]` / `b[lo..hi]` reuse the array paths and yield a stack-backed slice.
+        // Only `undefined` init is supported (positional `.{…}` array literals are deferred).
+        if (declared is CType.Array arr)
+        {
+            if (initExpr.Content is not Zig.UndefinedLit)
+            {
+                throw new IrUnsupportedException(
+                    "a `[N]T` array local must be initialized with `undefined` (positional array literals are not supported yet)");
+            }
+            var sym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = arr });
+            var count = new LitInt((arr.Count ?? 0).ToString(CultureInfo.InvariantCulture), arr.Count ?? 0) { Type = CType.Int };
+            return new ArrayDecl(sym, arr.Element, count, null);   // C# zero-fills the stackalloc
+        }
         var init = LowerExprSink(initExpr, declared);
         var type = declared ?? init.Type ?? CType.Int;
-        var sym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = type });
-        return new DeclStmt(new List<LocalDecl> { new(sym, init) });
+        var sym2 = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = type });
+        return new DeclStmt(new List<LocalDecl> { new(sym2, init) });
     }
 
     /// <summary>Dispatch a <c>switch</c> statement: lower the subject once, then route a
@@ -1362,6 +1380,12 @@ internal sealed class ZigLowering
             // at a typed sink, so the backend's store-coercion gives it the right form.
             case Zig.NullLit: return new NullPtr { Type = new CType.Pointer(CType.Void) };
 
+            // `undefined` — uninitialized storage. Without a sink we can only emit a zeroed
+            // `default` (an over-approximation of Zig's "any value"; a correct program writes
+            // before reading). At a typed sink LowerExprSink types it precisely; an array local
+            // takes the dedicated stackalloc path in DeclOf.
+            case Zig.UndefinedLit: return new DefaultLit { Type = CType.Int };
+
             // `a orelse b`. A value optional → C#'s `??` (single-eval LHS, lazy RHS) via
             // NullCoalesce. An optional POINTER → `a != null ? a : b` (C# `??` doesn't apply
             // to pointers); the LHS is named twice there, so a non-trivial (side-effecting)
@@ -1689,6 +1713,10 @@ internal sealed class ZigLowering
         // [[CType.Slice]]. (`[N]T` arrays and `[*]T` many-pointers are still deferred.)
         Zig.TySlice s      => new CType.Slice(LowerType(s.Arg2)),
         Zig.TySliceConst s => new CType.Slice(LowerType(s.Arg3).WithQuals(TypeQual.Const)),
+        // `[N]T` fixed-size array → CType.Array(element, N). N must be an integer literal
+        // (a general comptime const-expr size is deferred). A `var b: [N]T` local lowers to a
+        // stackalloc'd C array (see DeclOf), so slicing it (`b[lo..hi]`) yields a stack-backed slice.
+        Zig.TyArray a => new CType.Array(LowerType(a.Arg3), ConstEvalArraySize(a.Arg1)),
         // `@This()` — Zig's reflective self-type → the container currently being lowered, so
         // `self: @This()` / `self: *@This()` name the receiver without repeating the type name.
         // (`const Self = @This();` — a container-level const alias — is deferred; use `@This()`
@@ -1720,6 +1748,14 @@ internal sealed class ZigLowering
         var inner = LowerType(innerType);
         return inner.Unqualified is CType.Pointer ? inner : new CType.Optional(inner);
     }
+
+    /// <summary>Const-evaluate a <c>[N]T</c> array size — an integer literal <c>N</c> (a general
+    /// comptime const-expression size is deferred). Throws on a non-literal size.</summary>
+    private int ConstEvalArraySize(Item sizeExpr) => sizeExpr.Content switch
+    {
+        Zig.IntLit i => (int)long.Parse(Tok(i.Arg0), CultureInfo.InvariantCulture),
+        _ => throw new IrUnsupportedException("a `[N]T` array size must be an integer literal"),
+    };
 
     /// <summary>Map a Zig primitive type name to its faithful C# lowering. The
     /// fixed-width integers carry real signedness (i8 → <c>sbyte</c>, u8 → <c>byte</c>,
