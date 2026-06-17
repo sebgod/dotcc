@@ -41,6 +41,10 @@ internal sealed class CSharpTarget : ITarget
         // A Zig error union `E!T` → the runtime `ErrUnion<Payload>` value type. A `void`
         // payload (`!void`) has no generic-over-void in C#, so it uses the `Unit` payload.
         CType.ErrorUnion eu => "ErrUnion<" + (eu.Payload is CType.VoidType ? "Unit" : RenderType(eu.Payload)) + ">",
+        // A Zig slice `[]T` → the runtime `Slice<T>` fat-pointer value type; `[]const T`
+        // (a const-qualified element) → `ConstSlice<T>`. The element is rendered unqualified
+        // (the const lives in the slice type's identity, not a C# `const`).
+        CType.Slice s => (s.Element.IsConst ? "ConstSlice<" : "Slice<") + RenderType(s.Element.Unqualified) + ">",
         _ => throw new IrUnsupportedException("C# target cannot render type " + t.GetType().Name),
     };
 

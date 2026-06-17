@@ -227,6 +227,38 @@ public sealed class ZigOracleTests
             "    const b: Shape = .none;\n" +
             "    return value(a) + value(b);\n" +
             "}\n", 42, "" },
+        // SLICES (Milestone E, stage 1). `[]const u8` params, `.len`, element index `s[i]`,
+        // and the array→slice coercion (a string literal `*const [N:0]u8` → `[]const u8`,
+        // its `.len` excluding the sentinel NUL). lenOf("hello")==5 and firstByte=='h'(104) → 42.
+        new object[] { "slices",
+            "fn lenOf(s: []const u8) usize { return s.len; }\n" +
+            "fn firstByte(s: []const u8) u8 { return s[0]; }\n" +
+            "pub fn main() u8 {\n" +
+            "    const s: []const u8 = \"hello\";\n" +
+            "    if (lenOf(s) == 5) { if (firstByte(s) == 104) { return 42; } }\n" +
+            "    return 0;\n" +
+            "}\n", 42, "" },
+        // SLICING OPERATOR (Milestone E, stage 2). `s[lo..hi]` → a sub-slice `{ s.ptr+lo,
+        // hi-lo }`. mid = "hello"[1..4] = "ell" (len 3, mid[0]=='e'==101) → 42.
+        new object[] { "slice_range",
+            "fn firstByte(s: []const u8) u8 { return s[0]; }\n" +
+            "pub fn main() u8 {\n" +
+            "    const s: []const u8 = \"hello\";\n" +
+            "    const mid = s[1..4];\n" +
+            "    if (mid.len == 3) { if (firstByte(mid) == 101) { return 42; } }\n" +
+            "    return 0;\n" +
+            "}\n", 42, "" },
+        // FOR-OVER-SLICE (Milestone E, stage 3). `for (s) |b|` iterates elements;
+        // `for (s, 0..) |b, i|` also binds the usize index. "hello" has two 'l' (108) at
+        // indices 2 and 3 → countL == 2 and sumLpos == 5 → 42.
+        new object[] { "for_slice",
+            "fn countL(s: []const u8) usize { var n: usize = 0; for (s) |b| { if (b == 108) { n = n + 1; } } return n; }\n" +
+            "fn sumLpos(s: []const u8) usize { var acc: usize = 0; for (s, 0..) |b, i| { if (b == 108) { acc = acc + i; } } return acc; }\n" +
+            "pub fn main() u8 {\n" +
+            "    const s: []const u8 = \"hello\";\n" +
+            "    if (countL(s) == 2) { if (sumLpos(s) == 5) { return 42; } }\n" +
+            "    return 0;\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

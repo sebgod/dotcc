@@ -5,7 +5,7 @@
 [![chibi](https://github.com/sebgod/dotcc/actions/workflows/chibi.yml/badge.svg)](https://github.com/sebgod/dotcc/actions/workflows/chibi.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**dotcc** is a clang-like C compiler frontend that compiles C to **.NET 10 / C# 14** (AOT-clean, `unsafe` C#) — and, as a second backend, to **WebAssembly text** (`--target=wat`).
+**dotcc** is a clang-like compiler frontend that compiles **C** to **.NET 10 / C# 14** (AOT-clean, `unsafe` C#) — and, as a second backend, to **WebAssembly text** (`--target=wat`). It now also has a **second front-end for Zig**: C and Zig are lexed and parsed by their own LALR(1) grammars, but lower to one shared typed IR, C# backend, and libc-shaped runtime.
 
 It is real enough to compile the **full Lua 5.5 interpreter** — core, stdlib, and the standalone `lua` binary — into a .NET program that passes Lua's own upstream conformance suite (`testes/all.lua`, including bytecode dump/undump round-trips). That run is CI: every push transpiles Lua, Roslyn-compiles it, and greps for `final OK !!!`.
 
@@ -41,6 +41,23 @@ It also lowers a real POSIX surface onto the BCL: filesystem and process control
 The feature-by-feature tracker — every lexical form, type, operator, statement, libc function, and what's partial or out of scope — lives in **[C-SUPPORT.md](C-SUPPORT.md)**. There are no known silent miscompiles: every gap fails loudly at compile time.
 
 Out of scope by design: VLAs, wide string literals, trigraphs/digraphs, `_BitInt(N)`, GNU extensions.
+
+## Also: a Zig front-end
+
+The same IR and backend drive a **second front-end for Zig** — a `.zig` file is parsed by its own LALR(1) grammar ([`DotCC.Lib/zig.lalr.yaml`](DotCC.Lib/zig.lalr.yaml)), lowered by [`ZigLowering`](DotCC.Lib/Frontends/ZigLowering.cs) to the *same* typed IR, and emitted by the *same* C# backend — so it inherits the whole libc-shaped runtime for free (`printf` just prints).
+
+```zig
+extern fn printf(format: [*c]const u8, ...) c_int;
+
+pub fn main() u8 {
+    _ = printf("Hi %d from Zig, sum=%d\n", @as(c_int, 42), @as(c_int, 100 + 5));
+    return 0; // prints "Hi 42 from Zig, sum=105"
+}
+```
+
+This is an honest, **growing subset** of Zig, not the whole language. Working today: primitive / pointer / optional (`?T`) / error-union (`!T`) types; `extern fn` libc FFI and variadic `printf`; control flow (`if` / `while` / `break` / `continue` / `switch` / range-`for`); and data — `struct`, `enum`, methods + UFCS, and tagged `union(enum)` with `switch` captures. **Slices are next.** Every program is validated against the *real* `zig` compiler by an opt-in differential oracle (`DOTCC_RUN_ZIG_ORACLE=1`) that runs in CI on Linux and Windows.
+
+The feature-by-feature Zig tracker is **[ZIG-SUPPORT.md](ZIG-SUPPORT.md)**; the design rationale for growing new front-ends on the shared IR lives in **[FRONTEND-IDEAS.md](FRONTEND-IDEAS.md)**.
 
 ## Usage
 
@@ -79,21 +96,21 @@ Separate compilation means dotcc drops into existing build systems — `examples
 A straight pull-pipeline, generated and driven by LALR.CC:
 
 ```
-.c → lexer → preprocessor → macro expander → dialect keyword rewriter
-   → typedef rewriter ("the lexer hack") → LALR(1) parser
-   → typed-IR emitter → C# program shell   (or → WAT module)
+C   → lexer → preprocessor → macro / dialect-keyword / typedef rewriters → LALR(1) parser ┐
+                                                                                          ├→ typed IR → C# program shell  (or → WAT module)
+Zig → lexer → LALR(1) parser ─────────────────────────────────────────────────────────────┘
 ```
 
-The grammar lives in [`DotCC.Lib/c.lalr.yaml`](DotCC.Lib/c.lalr.yaml); a source generator turns it into a typed AST and an `IVisitor` interface at build time, so grammar and emitter can never drift apart. Emitted programs link against `DotCC.Libc`, a libc-shaped runtime where each function routes to the obvious BCL primitive (`malloc` → `NativeMemory`, `sin` → `Math.Sin`, `printf` → a boxing-free fluent builder).
+Everything downstream of the typed IR — both backends and the libc-shaped runtime — is shared; a front-end is just a grammar plus a lowering. The C grammar lives in [`DotCC.Lib/c.lalr.yaml`](DotCC.Lib/c.lalr.yaml), the Zig grammar in [`DotCC.Lib/zig.lalr.yaml`](DotCC.Lib/zig.lalr.yaml); a source generator turns each into a typed AST and an `IVisitor` interface at build time, so grammar and lowering can never drift apart. Emitted programs link against `DotCC.Libc`, a libc-shaped runtime where each function routes to the obvious BCL primitive (`malloc` → `NativeMemory`, `sin` → `Math.Sin`, `printf` → a boxing-free fluent builder).
 
 | Project | Role |
 |---|---|
-| `DotCC.Lib/` | The compiler: grammar, preprocessor, emitters |
+| `DotCC.Lib/` | The compiler: C + Zig grammars, preprocessor, typed IR, C#/wat backends |
 | `DotCC.Libc/` | The libc runtime emitted programs link against |
 | `DotCC/` | The clang-shaped CLI (~150 lines, NativeAOT) |
 | `DotCC.Tests/` | Unit tests against inline C strings |
 | `DotCC.FunctionalTests/` | Golden fixtures: C in, Roslyn-compiled, stdout vs snapshot |
-| `examples/` | hello, calc, factorial, cmake-demo, smoke-lib — and Lua 5.5 + chibi-scheme |
+| `examples/` | C: hello, calc, factorial, cmake-demo, smoke-lib — and Lua 5.5 + chibi-scheme; Zig: `zig-*` demos |
 
 ## Building and testing
 

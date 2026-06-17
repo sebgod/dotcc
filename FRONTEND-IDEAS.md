@@ -202,18 +202,29 @@ skeleton, *before* committing to the Python frontend.
 
 ---
 
-## 2. Zig — IR-level `@cImport`, not translate-c
+## 2. Zig — ✅ BUILT: a second `IFrontend` on the shared IR (Milestones A–D merged)
 
-Parked (full plan: `~/.claude/plans/dotcc-zig-frontend.md`, memory
-`project_zig_frontend_plan.md`). The recorded core decision still holds: `@cImport`
-is **IR-level composition** with the existing C frontend, *not* a translate-c text
-pass — the C frontend lowers the imported headers to IR and the Zig frontend composes
-against that. This is the canonical IR-composition multiplier and informs every other
-"language that needs to talk to C" frontend (Python extensions above, Swift C-interop
+**No longer an idea — it shipped.** The Zig front-end is merged to `main`: a `.zig`
+input is parsed by [`DotCC.Lib/zig.lalr.yaml`](DotCC.Lib/zig.lalr.yaml) (→ generated
+`DotCC.Zig`), lowered by [`ZigLowering`](DotCC.Lib/Frontends/ZigLowering.cs) to the same
+typed IR as C, and emitted by the same C# backend + runtime. Milestones A–D are done —
+primitive/pointer/optional/error-union types, `extern fn` libc FFI + variadic `printf`,
+control flow (`break`/`continue`/`switch`/range-`for`), and data (`struct`/`enum`/
+methods+UFCS/tagged `union(enum)`), all validated against the real `zig` compiler by an
+opt-in differential oracle in CI. **Coverage source of truth:
+[ZIG-SUPPORT.md](ZIG-SUPPORT.md).** Next milestone: slices (then the shared allocator
 below).
 
-**Parked on *semantics*, not *parsing* — and the grammar is cheaper than C's.** This
-is the correction worth recording. Zig sits in the rubric's Tier 2 but leans Tier 1,
+**One recorded decision was reversed in practice.** The original plan was `@cImport` as
+**IR-level composition** with the C frontend (lower imported headers to IR, compose the
+Zig frontend against that). In the shipped design `@cImport` is **dead** — C interop is
+plain `extern fn` + `-lc` (the existing import mode), which reuses the native-binding
+machinery and needs no cross-frontend IR composition. The IR-composition *idea* still
+informs other "language that needs to talk to C" frontends (Python extensions above,
+Swift C-interop below); Zig just didn't end up needing it.
+
+**It was tractable on *parsing* — the grammar is cheaper than C's,** and that held
+all the way through the build. Zig sits in the rubric's Tier 2 but leans Tier 1,
 *below C*, because the one thing that forces C off the clean path — the typedef
 lexer-hack, where `Color * x;` is a decl-or-multiply depending on the **symbol
 table** — simply doesn't exist in Zig:
