@@ -515,6 +515,121 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_a_const_Self_at_This_alias()
+    {
+        // `const Self = @This();` (the ubiquitous Zig idiom) — a container-level const that aliases
+        // the container's own type inside its methods. It resolves everywhere the explicit name
+        // would: as a parameter type (`self: Self`), a return type (`Self`), the base of a static
+        // call (`Self.init(…)`), and a typed literal (`Self{…}`) — all to `Vec`, so the methods
+        // lower to `Vec_init` / `Vec_sum` and the literal to `new Vec{…}`.
+        var cs = EmitZig(
+            "const Vec = struct {\n" +
+            "    a: i32,\n" +
+            "    b: i32,\n" +
+            "    const Self = @This();\n" +
+            "    fn init(a: i32, b: i32) Self { return Self{ .a = a, .b = b }; }\n" +
+            "    fn sum(self: Self) i32 { return self.a + self.b; }\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    const v = Vec.init(40, 2);\n" +
+            "    return @as(u8, v.sum());\n" +
+            "}\n");
+        cs.ShouldContain("Vec Vec_init(int a, int b)");   // `Self` return type → Vec
+        cs.ShouldContain("Vec_sum(Vec self)");             // `self: Self` param → Vec
+        cs.ShouldContain("new Vec");                       // `Self{…}` literal → new Vec{…}
+        cs.ShouldContain("Vec_init(40, 2)");               // `Self.init(…)` static call via the alias
+        cs.ShouldContain("Vec_sum(v)");                    // instance call
+    }
+
+    [Fact]
+    public void Lowers_namespaced_value_consts()
+    {
+        // A container-level `const NAME = expr;` is a comptime constant accessed as `Type.NAME`
+        // (D2/D3 leftover). dotcc inlines the RHS at each use site (no global storage). Works across
+        // struct/enum/union; here a struct const (a typed literal) and an enum const whose value is
+        // one of the enum's own members.
+        var cs = EmitZig(
+            "const Cfg = struct {\n" +
+            "    pub const max: u8 = 42;\n" +
+            "};\n" +
+            "const Color = enum(u8) {\n" +
+            "    red, green, blue,\n" +
+            "    pub const fallback = Color.blue;\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    const d: Color = Color.fallback;\n" +
+            "    if (@intFromEnum(d) == 2) { return Cfg.max; }\n" +
+            "    return 0;\n" +
+            "}\n");
+        cs.ShouldContain("Color.blue");        // `Color.fallback` inlines to the enum constant
+        cs.ShouldNotContain("Cfg.max");        // `Cfg.max` inlines to its value (no member access survives)
+    }
+
+    [Fact]
+    public void Rejects_a_container_var_member()
+    {
+        // A container-level `var` is a namespaced mutable GLOBAL — it needs real top-level global
+        // storage, which the Zig front-end doesn't lower yet. It fails loudly rather than silently
+        // dropping the declaration. (A `const` value member IS supported — see above.)
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const Counter = struct {\n" +
+            "    n: i32,\n" +
+            "    var total: i32 = 0;\n" +
+            "    fn get(self: Counter) i32 { return self.n; }\n" +
+            "};\n" +
+            "pub fn main() u8 { const c = Counter{ .n = 42 }; return @as(u8, c.get()); }\n"));
+        ex.Message.ShouldContain("total");
+        ex.Message.ShouldContain("mutable global");
+    }
+
+    [Fact]
+    public void Lowers_enum_methods_and_self_equality()
+    {
+        // An enum body can hold methods (D2/D3 leftover): a `fn`/`pub fn` lowers to a mangled free
+        // function `Color_method` with the enum value as its receiver. `self == .red` result-locates
+        // the bare `.member` against the receiver's enum type. Both an instance method (`c.isRed()`)
+        // and a static associated function (`Color.count()`, no receiver) dispatch through `_methods`.
+        var cs = EmitZig(
+            "const Color = enum(u8) {\n" +
+            "    red,\n" +
+            "    green,\n" +
+            "    fn isRed(self: Color) bool { return self == .red; }\n" +
+            "    fn count() u8 { return 2; }\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    const c: Color = .green;\n" +
+            "    if (c.isRed()) { return 1; }\n" +
+            "    return Color.count() * 21;\n" +
+            "}\n");
+        cs.ShouldContain("Color_isRed(Color self)");   // enum method → mangled free fn, enum receiver
+        cs.ShouldContain("Color.red");                  // `self == .red` → the `.red` enum constant
+        cs.ShouldContain("Color_isRed(c)");             // UFCS instance call → enum value receiver
+        cs.ShouldContain("Color_count()");              // static associated function → no receiver
+    }
+
+    [Fact]
+    public void Lowers_a_union_method()
+    {
+        // A `union(enum)` body can hold methods (D2/D3 leftover): `fn first(self: Shape) u8` lowers
+        // to a mangled free function `Shape_first(Shape self)`, and a direct payload read inside the
+        // method (`self.circle`) goes through the nested-union accessor `self.__payload.circle`. The
+        // UFCS call `s.first()` passes the union value.
+        var cs = EmitZig(
+            "const Shape = union(enum) {\n" +
+            "    circle: u8,\n" +
+            "    square: u8,\n" +
+            "    fn first(self: Shape) u8 { return self.circle; }\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    const s = Shape{ .circle = 42 };\n" +
+            "    return s.first();\n" +
+            "}\n");
+        cs.ShouldContain("Shape_first(Shape self)");   // union method → mangled free fn, union receiver
+        cs.ShouldContain("__payload.circle");           // payload read inside the method
+        cs.ShouldContain("Shape_first(s)");             // UFCS instance call
+    }
+
+    [Fact]
     public void Lowers_a_tagged_union_decl_and_payload_construction()
     {
         // `union(enum)` (Milestone D3) → a synthesized tag enum `Shape_Tag` + a discriminated

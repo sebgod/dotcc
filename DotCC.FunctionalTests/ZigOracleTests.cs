@@ -205,6 +205,75 @@ public sealed class ZigOracleTests
             "    p.scale(2);\n" +
             "    return p.sum();\n" +
             "}\n", 42, "" },
+        // SELF-TYPE ALIAS (D2 follow-up). `const Self = @This();` — the ubiquitous Zig idiom —
+        // names the container type inside its own methods. Used as a static-call base
+        // (`Self.init`), a return type, a `Self{…}` literal, and a value-receiver param type
+        // (`self: Self`). init(40,2) → sum ⇒ 42.
+        new object[] { "self_alias",
+            "const Vec = struct {\n" +
+            "    a: u8,\n" +
+            "    b: u8,\n" +
+            "    const Self = @This();\n" +
+            "    fn init(a: u8, b: u8) Self { return Self{ .a = a, .b = b }; }\n" +
+            "    fn sum(self: Self) u8 { return self.a + self.b; }\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    const v = Vec.init(40, 2);\n" +
+            "    return v.sum();\n" +
+            "}\n", 42, "" },
+        // ENUM METHODS (D2/D3 leftover). An enum body holds methods alongside value members, each
+        // a mangled free function `Color_method` with the enum value as the receiver. `self == .red`
+        // result-locates the bare `.member`; `@intFromEnum(self)` decays to the underlying int.
+        // isRed(blue)=false → rank(blue)=2, +40 ⇒ 42.
+        new object[] { "enum_methods",
+            "const Color = enum(u8) {\n" +
+            "    red,\n" +
+            "    green,\n" +
+            "    blue,\n" +
+            "    fn isRed(self: Color) bool { return self == .red; }\n" +
+            "    fn rank(self: Color) u8 { return @intFromEnum(self); }\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    const c: Color = .blue;\n" +
+            "    if (c.isRed()) { return 1; }\n" +
+            "    return c.rank() + 40;\n" +
+            "}\n", 42, "" },
+        // UNION METHODS (D2/D3 leftover). A `union(enum)` body holds methods; the method body
+        // switches on the receiver with `|capture|` payload binding. value(circle 40)=42,
+        // value(none)=0 ⇒ 42.
+        new object[] { "union_methods",
+            "const Shape = union(enum) {\n" +
+            "    circle: u8,\n" +
+            "    square: u8,\n" +
+            "    none,\n" +
+            "    fn value(self: Shape) u8 {\n" +
+            "        switch (self) {\n" +
+            "            .circle => |r| { return r + 2; },\n" +
+            "            .square => |x| { return x * x; },\n" +
+            "            .none => { return 0; },\n" +
+            "        }\n" +
+            "    }\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = Shape{ .circle = 40 };\n" +
+            "    const b: Shape = .none;\n" +
+            "    return a.value() + b.value();\n" +
+            "}\n", 42, "" },
+        // NAMESPACED VALUE CONSTS (D2/D3 leftover). A container-level `const NAME = expr;` is a
+        // comptime constant read as `Type.NAME`; dotcc inlines the RHS. A struct const literal
+        // (`Cfg.max`=40) + an enum const whose value is an enum member (`Color.fallback`=blue=2),
+        // 40 + 2 ⇒ 42.
+        new object[] { "namespaced_const",
+            "const Cfg = struct {\n" +
+            "    pub const max: u8 = 40;\n" +
+            "};\n" +
+            "const Color = enum(u8) {\n" +
+            "    red, green, blue,\n" +
+            "    pub const fallback = Color.blue;\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    return Cfg.max + @intFromEnum(Color.fallback);\n" +
+            "}\n", 42, "" },
         // TAGGED UNIONS (Milestone D3). `union(enum)` → a discriminated struct (tag enum +
         // `__tag` + payload fields). Exercises payload construction (`Shape{ .circle = 40 }`),
         // a void variant (`.none`), and a `switch` with `|r|` payload capture. value(circle 40)
