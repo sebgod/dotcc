@@ -514,6 +514,16 @@ productions:
       - { lhs: Member, rhs: [FieldDecl],       action: memberFieldLast }
       - { lhs: Member, rhs: [FnDef],           action: memberMethod }
       - { lhs: Member, rhs: ['pub', FnDef],    action: memberPubMethod }
+      # A container-level `const` member, reusing the existing VarDecl nonterminal. V1 lowers only
+      # the ubiquitous self-type alias `const Self = @This();` (any alias name; RHS `@This()`) —
+      # naming the container type inside its own methods without repeating it; a non-`@This()`
+      # value const (a namespaced constant) parses but is rejected in lowering (it needs top-level
+      # globals, not yet lowered). Conflict-free with `derivation: none`: a VarDecl member starts
+      # with `const`/`var`, disjoint from FieldDecl's leading IDENT and FnDef's `fn` — a clean
+      # 1-token shift decision — and a VarDecl self-terminates with `;`, so `,` never enters
+      # FOLLOW(Member). The `pub` form is symmetric with `pub FnDef` (export is a no-op today).
+      - { lhs: Member, rhs: [VarDecl],         action: memberConst }
+      - { lhs: Member, rhs: ['pub', VarDecl],  action: memberPubConst }
 
   - derivation: none
     rules:

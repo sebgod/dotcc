@@ -205,6 +205,22 @@ public sealed class ZigOracleTests
             "    p.scale(2);\n" +
             "    return p.sum();\n" +
             "}\n", 42, "" },
+        // SELF-TYPE ALIAS (D2 follow-up). `const Self = @This();` — the ubiquitous Zig idiom —
+        // names the container type inside its own methods. Used as a static-call base
+        // (`Self.init`), a return type, a `Self{…}` literal, and a value-receiver param type
+        // (`self: Self`). init(40,2) → sum ⇒ 42.
+        new object[] { "self_alias",
+            "const Vec = struct {\n" +
+            "    a: u8,\n" +
+            "    b: u8,\n" +
+            "    const Self = @This();\n" +
+            "    fn init(a: u8, b: u8) Self { return Self{ .a = a, .b = b }; }\n" +
+            "    fn sum(self: Self) u8 { return self.a + self.b; }\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    const v = Vec.init(40, 2);\n" +
+            "    return v.sum();\n" +
+            "}\n", 42, "" },
         // TAGGED UNIONS (Milestone D3). `union(enum)` → a discriminated struct (tag enum +
         // `__tag` + payload fields). Exercises payload construction (`Shape{ .circle = 40 }`),
         // a void variant (`.none`), and a `switch` with `|r|` payload capture. value(circle 40)

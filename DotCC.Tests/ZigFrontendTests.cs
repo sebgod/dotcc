@@ -515,6 +515,50 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_a_const_Self_at_This_alias()
+    {
+        // `const Self = @This();` (the ubiquitous Zig idiom) — a container-level const that aliases
+        // the container's own type inside its methods. It resolves everywhere the explicit name
+        // would: as a parameter type (`self: Self`), a return type (`Self`), the base of a static
+        // call (`Self.init(…)`), and a typed literal (`Self{…}`) — all to `Vec`, so the methods
+        // lower to `Vec_init` / `Vec_sum` and the literal to `new Vec{…}`.
+        var cs = EmitZig(
+            "const Vec = struct {\n" +
+            "    a: i32,\n" +
+            "    b: i32,\n" +
+            "    const Self = @This();\n" +
+            "    fn init(a: i32, b: i32) Self { return Self{ .a = a, .b = b }; }\n" +
+            "    fn sum(self: Self) i32 { return self.a + self.b; }\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    const v = Vec.init(40, 2);\n" +
+            "    return @as(u8, v.sum());\n" +
+            "}\n");
+        cs.ShouldContain("Vec Vec_init(int a, int b)");   // `Self` return type → Vec
+        cs.ShouldContain("Vec_sum(Vec self)");             // `self: Self` param → Vec
+        cs.ShouldContain("new Vec");                       // `Self{…}` literal → new Vec{…}
+        cs.ShouldContain("Vec_init(40, 2)");               // `Self.init(…)` static call via the alias
+        cs.ShouldContain("Vec_sum(v)");                    // instance call
+    }
+
+    [Fact]
+    public void Rejects_a_non_self_alias_container_const()
+    {
+        // V1 supports only the `const Self = @This();` self-type alias as a container const. A
+        // namespaced VALUE constant needs top-level globals (not lowered yet), so it fails loudly
+        // rather than silently dropping the declaration.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const Counter = struct {\n" +
+            "    n: i32,\n" +
+            "    const MAX = 100;\n" +
+            "    fn get(self: Counter) i32 { return self.n; }\n" +
+            "};\n" +
+            "pub fn main() u8 { const c = Counter{ .n = 42 }; return @as(u8, c.get()); }\n"));
+        ex.Message.ShouldContain("MAX");
+        ex.Message.ShouldContain("top-level globals");
+    }
+
+    [Fact]
     public void Lowers_a_tagged_union_decl_and_payload_construction()
     {
         // `union(enum)` (Milestone D3) → a synthesized tag enum `Shape_Tag` + a discriminated
