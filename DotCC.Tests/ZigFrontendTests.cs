@@ -656,4 +656,23 @@ public sealed class ZigFrontendTests
         cs.ShouldContain("s.Ptr[__i]");
         cs.ShouldContain("ulong i = __i + (ulong)0");
     }
+
+    [Fact]
+    public void Lowers_fixed_array_local_to_stackalloc_and_slices_it()
+    {
+        // `var b: [N]T = undefined;` → a stackalloc'd C array (zero heap); slicing it
+        // (`b[lo..hi]`) yields a Slice over the stack buffer — the idiomatic stack-backed slice.
+        var cs = EmitZig("pub fn main() u8 { var b: [4]u8 = undefined; b[0] = 1; const s: []u8 = b[0..2]; return s[0]; }\n");
+        cs.ShouldContain("byte* b = stackalloc byte[4]");
+        cs.ShouldContain("new Slice<byte>(b + 0");
+    }
+
+    [Fact]
+    public void Lowers_scalar_undefined_to_default()
+    {
+        // `var x: T = undefined;` (scalar) → `default(T)` (a zeroed over-approximation of
+        // Zig's uninitialized storage).
+        var cs = EmitZig("pub fn main() u8 { var x: u8 = undefined; x = 42; return x; }\n");
+        cs.ShouldContain("byte x = default");
+    }
 }
