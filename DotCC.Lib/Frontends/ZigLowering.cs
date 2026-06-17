@@ -118,6 +118,31 @@ internal sealed class ZigLowering
     /// <summary>Registered tagged unions: the union struct name → its <see cref="ZigUnionInfo"/>.</summary>
     private readonly Dictionary<string, ZigUnionInfo> _unions = new(System.StringComparer.Ordinal);
 
+    /// <summary>Module-import aliases (Milestone F): the bound name of a <c>const X =
+    /// @import("std");</c> → the module string (<c>"std"</c>). Comptime — no runtime decl is
+    /// emitted; the alias roots a dotted-path resolution (<see cref="TryResolveStdPath"/>) so
+    /// <c>X.heap.page_allocator</c> / <c>X.mem.Allocator</c> resolve. Only <c>"std"</c> is
+    /// modeled; any other module errors. Function-flat (no nested-scope shadowing), like the
+    /// self-alias / container-const tracking.</summary>
+    private readonly Dictionary<string, string> _imports = new(System.StringComparer.Ordinal);
+
+    /// <summary>Bindings to the statically-known default allocator (Milestone F): a <c>const a =
+    /// std.heap.page_allocator;</c> (or <c>c_allocator</c>) records <c>a → CHeap</c> so a later
+    /// <c>a.alloc(…)</c> DEVIRTUALIZES to a direct <c>Libc.malloc</c> (no vtable). Comptime — no
+    /// runtime decl; a use of <c>a</c> as a VALUE materializes <c>ZigAlloc.CHeap()</c>. Only the
+    /// C-heap default is provable in V1; an opaque <c>std.mem.Allocator</c> parameter or an
+    /// <c>fba.allocator()</c> result is never recorded here (→ indirect dispatch).</summary>
+    private readonly Dictionary<string, AllocKind> _defaultAllocatorBindings = new(System.StringComparer.Ordinal);
+
+    /// <summary>The provable kind of an allocator operand. V1 has exactly one provable kind — the
+    /// C heap (the statically-known <c>page_allocator</c>/<c>c_allocator</c> default), which
+    /// devirtualizes to direct <c>Libc.malloc</c>/<c>free</c>.</summary>
+    private enum AllocKind { CHeap }
+
+    /// <summary>The runtime <c>FixedBufferAllocator</c> type name (a <see cref="CType.Named"/>), as
+    /// spelled by the spliced <c>ZigAlloc.cs</c> — the second concrete allocator.</summary>
+    private const string FbaTypeName = "FixedBufferAllocator";
+
     /// <summary>The discriminant field name on a lowered tagged-union struct — a leading
     /// double-underscore so it can't collide with a user variant (a Zig field name).</summary>
     private const string TagFieldName = "__tag";
@@ -182,6 +207,12 @@ internal sealed class ZigLowering
                 case Zig.EnumDecl e:        foreach (var m in RegisterEnumZig(e.Arg1, null, e.Arg5)) { containerMethods.Add((Tok(e.Arg1), m)); } break;       // const IDENT = enum { EnumFields } ;
                 case Zig.EnumDeclTyped e:   foreach (var m in RegisterEnumZig(e.Arg1, e.Arg5, e.Arg8)) { containerMethods.Add((Tok(e.Arg1), m)); } break;     // const IDENT = enum ( Type ) { EnumFields } ;
                 case Zig.UnionDeclEnum u:   _containerTypes[Tok(u.Arg1)] = new CType.Named(Tok(u.Arg1)); break;  // const IDENT = union(enum) { … } ;
+                // A top-level comptime allocator/namespace binding (`const std = @import("std");`)
+                // — recorded HERE in pass 0 so a pass-1 signature (`fn f(a: std.mem.Allocator)`)
+                // resolves the import alias. Emits no decl (Milestone F). A non-comptime const
+                // falls through (rejected in pass 1 as an unsupported top-level global).
+                case Zig.ConstDecl d:      TryComptimeConstBinding(Tok(d.Arg1), d.Arg3); break;  // const IDENT = RhsExpr ;
+                case Zig.ConstDeclTyped d: TryComptimeConstBinding(Tok(d.Arg1), d.Arg5); break;  // const IDENT : Type = RhsExpr ;
             }
         }
         // Pass 0b: build struct field layouts (field types now resolve through 0a), register each
@@ -221,6 +252,14 @@ internal sealed class ZigLowering
                 case Zig.FnDefNoArgsErr f: entries.Add(AsEntry(DeclareFn(f.Arg1, null, f.Arg5, f.Arg6, errUnion: true), null)); break;
                 // Container decls were handled in pass 0 — skip here.
                 case Zig.StructDecl or Zig.StructDeclEmpty or Zig.EnumDecl or Zig.EnumDeclTyped or Zig.UnionDeclEnum: break;
+                // A top-level `const` that pass 0 recorded as a comptime allocator/namespace
+                // binding emits no decl; any OTHER top-level const/var is a runtime global, which
+                // the Zig front-end doesn't support yet (Milestone F).
+                case Zig.ConstDecl cd      when IsComptimeBound(Tok(cd.Arg1)): break;
+                case Zig.ConstDeclTyped cd when IsComptimeBound(Tok(cd.Arg1)): break;
+                case Zig.ConstDecl or Zig.ConstDeclTyped or Zig.VarDecl or Zig.VarDeclTyped:
+                    throw new IrUnsupportedException(
+                        "zig top-level `const`/`var`: only a comptime `@import`/allocator binding, a struct/enum/union, or a function is supported (a runtime top-level global is not)");
                 default: throw new IrUnsupportedException("zig top-level decl: " + (d.Content?.GetType().Name ?? "null"));
             }
         }
@@ -879,8 +918,10 @@ internal sealed class ZigLowering
     {
         switch (stmt.Content)
         {
-            case Zig.ConstDecl d:       return DeclOf(d.Arg1, null, d.Arg3);
-            case Zig.ConstDeclTyped d:  return DeclOf(d.Arg1, d.Arg3, d.Arg5);
+            // A `const` may be a comptime allocator/namespace binding (`const std = @import("std");`,
+            // `const a = std.heap.page_allocator;`) — recorded with NO runtime decl (Milestone F).
+            case Zig.ConstDecl d:       return DeclOrComptime(d.Arg1, null, d.Arg3);
+            case Zig.ConstDeclTyped d:  return DeclOrComptime(d.Arg1, d.Arg3, d.Arg5);
             case Zig.VarDecl d:         return DeclOf(d.Arg1, null, d.Arg3);
             case Zig.VarDeclTyped d:    return DeclOf(d.Arg1, d.Arg3, d.Arg5);
             case Zig.StmtReturn r:      return LowerReturn(r.Arg1);
@@ -963,6 +1004,16 @@ internal sealed class ZigLowering
             default: throw new IrUnsupportedException("zig statement: " + (stmt.Content?.GetType().Name ?? "null"));
         }
     }
+
+    /// <summary>Lower a local <c>const</c> declaration, intercepting a comptime allocator /
+    /// namespace binding first (Milestone F): <c>const std = @import("std");</c> /
+    /// <c>const a = std.heap.page_allocator;</c> carry no runtime value, so they register the
+    /// alias (<see cref="TryComptimeConstBinding"/>) and emit nothing (an empty <see cref="Seq"/>).
+    /// Any other <c>const</c> is an ordinary <see cref="DeclOf"/>.</summary>
+    private CStmt DeclOrComptime(Item nameTok, Item? typeItem, Item initExpr)
+        => TryComptimeConstBinding(Tok(nameTok), initExpr)
+            ? new Seq(new List<CStmt>())
+            : DeclOf(nameTok, typeItem, initExpr);
 
     private CStmt DeclOf(Item nameTok, Item? typeItem, Item initExpr)
     {
@@ -1285,6 +1336,11 @@ internal sealed class ZigLowering
             case Zig.Ident id:
             {
                 var name = Tok(id.Arg0);
+                // A const bound to the statically-known default allocator (Milestone F) emitted no
+                // runtime decl; used here as a VALUE (e.g. passed to a `std.mem.Allocator`
+                // parameter) it materializes the C-heap allocator. (As a `.alloc`/`.free` RECEIVER
+                // it never reaches this case — LowerMethodCall short-circuits to the devirt path.)
+                if (_defaultAllocatorBindings.ContainsKey(name)) { return MaterializeCHeap(); }
                 var sym = _symbols.Resolve(name)
                     ?? throw new IrUnsupportedException($"unresolved identifier '{name}'");
                 return new VarRef(sym) { Type = sym.Type, IsLValue = sym.Kind is SymKind.Var or SymKind.Param };
@@ -1359,6 +1415,21 @@ internal sealed class ZigLowering
             case Zig.Field fld:
             {
                 var fieldName = Tok(fld.Arg2);
+                // A dotted std path used as a VALUE (Milestone F): the C-heap default
+                // (`std.heap.page_allocator`/`c_allocator`) materializes a runtime Allocator; a std
+                // TYPE used as a value, or any unmodeled std path, errors. (A `.alloc(…)` /
+                // `.init(…)` CALL never reaches here — the callee Field goes through LowerMethodCall.)
+                if (TryResolveStdPath(expr, out var stdPath))
+                {
+                    return stdPath switch
+                    {
+                        "std.heap.page_allocator" or "std.heap.c_allocator" => MaterializeCHeap(),
+                        "std.mem.Allocator" or "std.heap.FixedBufferAllocator" => throw new IrUnsupportedException(
+                            $"zig `{stdPath}` is a type, not a value"),
+                        _ => throw new IrUnsupportedException(
+                            $"zig std path `{stdPath}` is not modeled (values: std.heap.page_allocator / std.heap.c_allocator)"),
+                    };
+                }
                 if (fld.Arg0.Content is Zig.Ident cbid
                     && _symbols.Resolve(Tok(cbid.Arg0)) is null
                     && TryLookupContainerType(Tok(cbid.Arg0), out var cbaseTy)
@@ -1706,6 +1777,21 @@ internal sealed class ZigLowering
     {
         var methodName = Tok(fld.Arg2);
 
+        // --- Zig allocators (Milestone F), before the generic method dispatch ---
+        // `std.heap.FixedBufferAllocator.init(buf)` — a static call on the std FBA type.
+        if (methodName == "init" && TryResolveStdPath(fld.Arg0, out var basePath) && basePath == "std.heap.FixedBufferAllocator")
+        {
+            return LowerFbaInit(argItems);
+        }
+        // `a.alloc(T, n)` / `a.free(s)` (and the deferred `create`/`destroy`) on a known-default
+        // (→ devirt) or an Allocator-typed receiver (→ indirect). A same-named method on a
+        // non-allocator receiver falls through to the generic dispatch below.
+        if (methodName is "alloc" or "free" or "create" or "destroy"
+            && TryLowerAllocatorMethod(fld, methodName, argItems, out var allocExpr))
+        {
+            return allocExpr;
+        }
+
         // (A) `Type.func(args)` — a bare-identifier base naming a registered container type (a
         // struct/union `Named`, an enum `Enum`, or the self alias `Self`), and NOT a variable →
         // the associated/static function; all arguments are explicit (no receiver). A self alias
@@ -1726,6 +1812,24 @@ internal sealed class ZigLowering
 
         // (B) `expr.method(args)` — the base is an instance of a container type.
         var recv = LowerExpr(fld.Arg0);
+        // `fba.allocator()` — a FixedBufferAllocator hands out an Allocator fat pointer over
+        // itself (Milestone F). Needs `&fba` as the vtable context; the result is opaque (→ the
+        // indirect dispatch path). Handled before the generic _methods lookup (FBA is a runtime
+        // type, not a Zig-declared container).
+        if (methodName == "allocator" && recv.Type.Unqualified is CType.Named { Name: FbaTypeName })
+        {
+            if (argItems.Count != 0)
+            {
+                throw new IrUnsupportedException("zig `fba.allocator()` takes no arguments");
+            }
+            if (Unparen(recv) is VarRef { Sym: { Kind: SymKind.Var or SymKind.Param } s })
+            {
+                s.AddressTaken = true;
+            }
+            var fbaAddr = new Unary(UnOp.AddrOf, recv) { Type = new CType.Pointer(recv.Type) };
+            return new Call("ZigAlloc.FbaAllocator", new List<CExpr> { fbaAddr },
+                new List<CType> { new CType.Pointer(new CType.Named(FbaTypeName)) }, null) { Type = new CType.Allocator() };
+        }
         if (!TryContainerName(recv.Type, out var container))
         {
             throw new IrUnsupportedException(
@@ -1743,6 +1847,86 @@ internal sealed class ZigLowering
         }
         var receiver = AdjustReceiver(recv, mfn.Params[0]);
         return BuildCall(msym, argItems, receiver);
+    }
+
+    /// <summary>Try to lower an allocator method call <c>a.alloc(T, n)</c> / <c>a.free(s)</c>
+    /// (Milestone F). The receiver is DEVIRTUALIZED to a direct <c>Libc.malloc</c>/<c>free</c> when
+    /// it is provably the statically-known C-heap default (<see cref="TryKnownAllocatorKind"/>);
+    /// otherwise the receiver is lowered and, if it is an <see cref="CType.Allocator"/>, dispatched
+    /// indirectly through its vtable. Returns <c>false</c> (so the caller falls through to the
+    /// generic method dispatch) when the receiver is neither — i.e. a same-named method on a
+    /// non-allocator type. <c>create</c>/<c>destroy</c> on an allocator are a clear deferred error.</summary>
+    private bool TryLowerAllocatorMethod(Zig.Field fld, string methodName, IReadOnlyList<Item> argItems, out CExpr result)
+    {
+        result = null!;
+        bool devirt = TryKnownAllocatorKind(fld.Arg0, out _);
+        CExpr? recv = null;
+        if (!devirt)
+        {
+            recv = LowerExpr(fld.Arg0);
+            if (recv.Type.Unqualified is not CType.Allocator) { return false; }   // not an allocator → generic dispatch
+        }
+
+        switch (methodName)
+        {
+            case "alloc":
+            {
+                if (argItems.Count != 2)
+                {
+                    throw new IrUnsupportedException($"zig allocator `.alloc` expects (type, count); got {argItems.Count} argument(s)");
+                }
+                var elem = LowerType(argItems[0]);
+                var count = LowerExpr(argItems[1]);
+                result = new AllocCall(devirt ? null : recv, elem, count, ErrorCode("OutOfMemory"))
+                {
+                    Type = new CType.ErrorUnion(new CType.Slice(elem)),
+                };
+                return true;
+            }
+            case "free":
+            {
+                if (argItems.Count != 1)
+                {
+                    throw new IrUnsupportedException($"zig allocator `.free` expects (slice); got {argItems.Count} argument(s)");
+                }
+                var sliceExpr = LowerExpr(argItems[0]);
+                if (sliceExpr.Type.Unqualified is not CType.Slice slc)
+                {
+                    throw new IrUnsupportedException($"zig allocator `.free` expects a slice argument, got {sliceExpr.Type.Describe()}");
+                }
+                result = new FreeCall(devirt ? null : recv, sliceExpr, slc.Element) { Type = CType.Void };
+                return true;
+            }
+            default:   // create / destroy — single-object alloc
+                throw new IrUnsupportedException(
+                    $"zig allocator `.{methodName}` is deferred (single-object alloc needs an error-union-over-pointer); use `.alloc`/`.free`");
+        }
+    }
+
+    /// <summary>Lower <c>std.heap.FixedBufferAllocator.init(&amp;buf)</c> (Milestone F) to
+    /// <c>FixedBufferAllocator.Init(bytePtr, capacity)</c>. <paramref name="argItems"/> is the
+    /// single <c>&amp;buf</c> argument, where <c>buf</c> is a <c>[N]T</c> array local — which
+    /// already lowers to a stackalloc'd pointer, so the buffer pointer is the array value itself
+    /// (cast to <c>byte*</c>) and the capacity is <c>N * sizeof(T)</c> bytes.</summary>
+    private CExpr LowerFbaInit(IReadOnlyList<Item> argItems)
+    {
+        if (argItems.Count != 1)
+        {
+            throw new IrUnsupportedException($"zig `FixedBufferAllocator.init` expects (buffer); got {argItems.Count} argument(s)");
+        }
+        // Accept `&buf` (the idiom) or a bare `buf`; either way the array local is the byte run.
+        var inner = argItems[0].Content is Zig.PreAddrOf ad ? ad.Arg1 : argItems[0];
+        var buf = LowerExpr(inner);
+        if (buf.Type.Unqualified is not CType.Array a || a.Count is not int n)
+        {
+            throw new IrUnsupportedException(
+                "zig `FixedBufferAllocator.init` expects `&buf` where buf is a fixed-size `[N]T` array local");
+        }
+        var bytePtr = new Cast(new CType.Pointer(CType.UChar), buf) { Type = new CType.Pointer(CType.UChar) };
+        long bytes = (long)n * a.Element.Unqualified.SizeOf;
+        var cap = new LitInt(bytes.ToString(CultureInfo.InvariantCulture), bytes) { Type = CType.ULong };
+        return new Call("FixedBufferAllocator.Init", new List<CExpr> { bytePtr, cap },
+            new List<CType> { new CType.Pointer(CType.UChar), CType.ULong }, null) { Type = new CType.Named(FbaTypeName) };
     }
 
     /// <summary>Resolve the container name a receiver expression's type names — a
@@ -1893,9 +2077,109 @@ internal sealed class ZigLowering
 
     // ---- types -----------------------------------------------------------
 
+    // ---- allocators / std (Milestone F) ----------------------------------
+
+    /// <summary>Try to record a comptime <c>const</c> binding that carries no runtime value
+    /// (Milestone F): <c>const X = @import("std");</c> registers a module alias in
+    /// <see cref="_imports"/>; <c>const a = std.heap.page_allocator;</c> (or a const bound to
+    /// another default binding) registers a known-default allocator in
+    /// <see cref="_defaultAllocatorBindings"/>. Both emit NO decl (returns <c>true</c> → the
+    /// caller drops the statement). A non-comptime RHS returns <c>false</c> (a normal decl). Only
+    /// <c>const</c> bindings reach here. A non-<c>std</c> module errors clearly.</summary>
+    private bool TryComptimeConstBinding(string name, Item rhs)
+    {
+        if (rhs.Content is Zig.BuiltinCall b && Tok(b.Arg0) == "@import")
+        {
+            var bargs = Flatten(b.Arg2);
+            if (bargs.Count == 1 && bargs[0].Content is Zig.StrLit sl)
+            {
+                var module = UnquoteStringLiteral(Tok(sl.Arg0));
+                if (module != "std")
+                {
+                    throw new IrUnsupportedException(
+                        $"zig `@import(\"{module}\")` is not modeled — only `@import(\"std\")` (and only its allocator paths: std.mem.Allocator, std.heap.page_allocator/c_allocator/FixedBufferAllocator)");
+                }
+                _imports[name] = module;
+                return true;
+            }
+        }
+        if (TryKnownAllocatorKind(rhs, out var kind))
+        {
+            _defaultAllocatorBindings[name] = kind;
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>Walk a dotted access chain (<see cref="Zig.Field"/> over a <see cref="Zig.Ident"/>
+    /// root) rooted at a module-import alias, returning the canonical dotted path with the MODULE
+    /// name as its root (e.g. <c>"std.heap.page_allocator"</c>) regardless of the alias spelling.
+    /// Works in both expression and type position (same AST shape). Returns <c>false</c> for any
+    /// chain not rooted at an <see cref="_imports"/> alias.</summary>
+    private bool TryResolveStdPath(Item expr, out string path)
+    {
+        path = "";
+        var segments = new List<string>();
+        var cur = expr;
+        while (cur.Content is Zig.Field f)
+        {
+            segments.Add(Tok(f.Arg2));
+            cur = f.Arg0;
+        }
+        if (cur.Content is not Zig.Ident id || !_imports.TryGetValue(Tok(id.Arg0), out var module))
+        {
+            return false;
+        }
+        segments.Add(module);
+        segments.Reverse();
+        path = string.Join(".", segments);
+        return true;
+    }
+
+    /// <summary>True when <paramref name="expr"/> is provably the statically-known default
+    /// allocator — a <c>const</c> bound to it (<see cref="_defaultAllocatorBindings"/>), or a
+    /// direct <c>std.heap.page_allocator</c> / <c>std.heap.c_allocator</c> path. This is the
+    /// devirtualization predicate; an opaque parameter or an <c>fba.allocator()</c> result is NOT
+    /// provable here (→ indirect dispatch).</summary>
+    private bool TryKnownAllocatorKind(Item expr, out AllocKind kind)
+    {
+        if (expr.Content is Zig.Ident id && _defaultAllocatorBindings.TryGetValue(Tok(id.Arg0), out kind))
+        {
+            return true;
+        }
+        if (TryResolveStdPath(expr, out var path) && (path is "std.heap.page_allocator" or "std.heap.c_allocator"))
+        {
+            kind = AllocKind.CHeap;
+            return true;
+        }
+        kind = AllocKind.CHeap;
+        return false;
+    }
+
+    /// <summary>True when <paramref name="name"/> is a comptime allocator/namespace binding
+    /// recorded by <see cref="TryComptimeConstBinding"/> (a module import or a known-default
+    /// allocator) — so pass 1 skips its (non-existent) top-level decl.</summary>
+    private bool IsComptimeBound(string name)
+        => _imports.ContainsKey(name) || _defaultAllocatorBindings.ContainsKey(name);
+
+    /// <summary>Strip the surrounding double quotes from a Zig string-literal lexeme. Used only
+    /// for the simple identifier-shaped module name in <c>@import("…")</c> (no escapes).</summary>
+    private static string UnquoteStringLiteral(string raw)
+        => raw.Length >= 2 && raw[0] == '"' && raw[^1] == '"' ? raw[1..^1] : raw;
+
+    /// <summary>The materialized C-heap default allocator as a runtime <see cref="CType.Allocator"/>
+    /// value (<c>ZigAlloc.CHeap()</c>) — emitted when the statically-known default flows into an
+    /// opaque allocator sink (a value position, not a devirtualizable <c>.alloc</c> receiver).</summary>
+    private static CExpr MaterializeCHeap()
+        => new Call("ZigAlloc.CHeap", new List<CExpr>(), new List<CType>(), null) { Type = new CType.Allocator() };
+
     private CType LowerType(Item type) => type.Content switch
     {
         Zig.Ident id => LowerTypeName(Tok(id.Arg0)),
+        // A dotted std type (Milestone F): `std.mem.Allocator` → the runtime Allocator fat
+        // pointer; `std.heap.FixedBufferAllocator` → the concrete bump allocator. Any other std
+        // path in type position errors clearly (`std` is a known-paths resolver, not a real model).
+        Zig.Field => LowerStdType(type),
         // Pointer types. `*T` and the C-pointer `[*c]T` both lower to a plain
         // `T*` (the C-pointer's null/arithmetic semantics ARE C's pointer). The
         // pointee `const` rides as a TypeQual so const-correctness sees it; it
@@ -1932,6 +2216,26 @@ internal sealed class ZigLowering
         Zig.BuiltinCallNoArgs b when Tok(b.Arg0) == "@This" => CurrentContainerType(),
         _ => throw new IrUnsupportedException("zig type: " + (type.Content?.GetType().Name ?? "null")),
     };
+
+    /// <summary>Lower a dotted std type (Milestone F): <c>std.mem.Allocator</c> → the runtime
+    /// <see cref="CType.Allocator"/> fat pointer; <c>std.heap.FixedBufferAllocator</c> → the
+    /// concrete <see cref="CType.Named"/> bump allocator. Any other dotted type errors — either a
+    /// chain not rooted at a std import (so not a known type at all) or an unmodeled std path.</summary>
+    private CType LowerStdType(Item f)
+    {
+        if (TryResolveStdPath(f, out var path))
+        {
+            return path switch
+            {
+                "std.mem.Allocator" => new CType.Allocator(),
+                "std.heap.FixedBufferAllocator" => new CType.Named(FbaTypeName),
+                _ => throw new IrUnsupportedException(
+                    $"zig type `{path}` is not modeled (std types: std.mem.Allocator, std.heap.FixedBufferAllocator)"),
+            };
+        }
+        throw new IrUnsupportedException(
+            $"zig type: a dotted type `{Tok(((Zig.Field)f.Content!).Arg2)}` that is not a modeled std path");
+    }
 
     /// <summary>The type the enclosing container's <c>@This()</c> resolves to — the struct/enum
     /// whose method is currently being lowered. An error outside a method (no container in

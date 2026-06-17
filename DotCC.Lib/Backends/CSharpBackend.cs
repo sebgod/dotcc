@@ -2004,7 +2004,10 @@ internal sealed class CSharpBackend
 
     private static bool IsStmtExpr(CExpr e) => e switch
     {
-        Assign or Call or IndirectCall => true,
+        // A Zig allocator alloc/free (Milestone F) renders as a method call — a valid statement
+        // expression. FreeCall is void, so it MUST be recognized here (a `_ = <void>` discard is
+        // a C# error); a discarded AllocCall is a normal `_ = recv.Alloc(...)`, also fine as a stmt.
+        Assign or Call or IndirectCall or AllocCall or FreeCall => true,
         Unary u => u.Op is UnOp.PreInc or UnOp.PreDec or UnOp.PostInc or UnOp.PostDec,
         Paren p => IsStmtExpr(p.Inner),
         _ => false,
