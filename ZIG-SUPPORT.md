@@ -56,8 +56,8 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `*T`, `*const T` | ✅ | pointer (pointee `const` rides as a type qualifier) |
 | `[*c]T`, `[*c]const T` | ✅ | C pointer (== C's `T*` / `const T*`) — printf's `[*c]const u8` format |
 | `?T` optional | ✅ | `?*T` → bare nullable `T*` (niche); `?T` over a value → C# `Nullable<T>`. `null`/`.?`/`orelse` below |
-| `[]T` slice | 🚧 | parses; the fat-struct lowering is not built |
-| `[N]T` array | 🚧 | parses; does not lower |
+| `[]T` / `[]const T` slice | ✅ | → the runtime fat pointer `Slice<T>` / `ConstSlice<T>` (`{ T* Ptr; ulong Len; }`, the C++ `std::span` shape — **not** C#'s ref-struct `Span<T>`, so a slice can be a struct field and cross the ABI; `AsSpan()` bridges to the BCL). `.len`/`.ptr`, `s[i]`, `s[lo..hi]`, array/string coercion, and `for` over it all work (rows below). **Deferred:** `[*]T`-backed slices, sentinel `[:0]T`, open-ended `s[lo..]`, by-ref `\|*x\|`, the non-escaping-stack → `stackalloc`+`Span` peephole |
+| `[N]T` array | 🚧 | parses; does not lower (slices cover the common case) |
 | `const P = struct { fields…, methods… };` | ✅ | container decl (top-level) → a real C# `unsafe struct` via the SHARED aggregate machinery the C frontend uses. Fields **and** methods (below) in the body; tagged unions are a later D slice. Empty `struct {}` allowed; `pub`-wrapped + in-function containers deferred |
 | struct **method** `fn m(self: P, …) …` | ✅ | a `fn`/`pub fn` in a struct body lowers to a free function `P_m` with the receiver as its first parameter. `p.m(a)` (UFCS) auto-refs/derefs the receiver to the declared `self` form (`&p` for a `*P` receiver, `p.*` for the reverse); `P.m(p, a)` and a no-receiver `P.assoc(a)` (associated function) call it directly. **Deferred:** `const Self = @This();` alias, enum/union methods, namespaced container `const`s, generic methods |
 | receiver type `self: @This()` | ✅ | `@This()` resolves to the enclosing container type (so `self: @This()` / `self: *@This()` name the receiver without repeating the name); explicit `self: P` / `self: *P` also work |
@@ -82,7 +82,8 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `_ = e;` discard | ✅ | Zig's mandatory discard of a non-void result |
 | block `{ … }` | ✅ | |
 | `for (a..b) \|i\| …` (range for) | ✅ | → C `for (usize i = a; i < b; i++)`; the `\|i\|` capture is the usize loop index (`\|_\|` discards). The body is a Stmt or block |
-| `for (slice) \|x\|`, `0..` open-ended, `for (s, 0..) \|x, i\|`, `defer`/`errdefer`, labeled loops, labeled `break`/`continue`, switch ranges/expr | 🚫 | for-over-slice needs slices (later milestone) |
+| `for (s) \|x\|` / `for (s, 0..) \|x, i\|` (for-over-slice) | ✅ | iterate a slice's elements (`x` = a per-iteration copy); the index form also binds the usize index. → C `for (usize __i=0; __i<s.Len; __i++) { var x = s.Ptr[__i]; [var i = __i + 0;] … }` (the slice is hoisted to a temp unless a bare var) |
+| open-ended `s[lo..]`, by-ref `\|*x\|`, `defer`/`errdefer`, labeled loops, labeled `break`/`continue`, switch ranges/expr | 🚫 | |
 
 ## Expressions
 
@@ -98,7 +99,9 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `if (c) a else b` (if-**expression**) | ✅ | → C# ternary |
 | function call `f(args)` | ✅ | intra-Zig + forward-ref + libc-by-bare-name (incl. variadic `printf`) |
 | prefix `&` (address-of) | ✅ | `&x` → `*T`; a var/param operand is marked address-taken |
-| postfix `p.*` (deref), `a[i]` (index) | ✅ | pointer deref / subscript → the C `Unary(Deref)` / `Index` IR |
+| postfix `p.*` (deref), `a[i]` (index) | ✅ | pointer deref / subscript → the C `Unary(Deref)` / `Index` IR. On a slice, `s[i]` indexes through `.Ptr` (`s.Ptr[i]`) |
+| `s[lo..hi]` (slicing) | ✅ | → a sub-slice fat pointer `{ s.ptr + lo, (ulong)(hi - lo) }` (base may be a slice, pointer, or array) |
+| `s.len` / `s.ptr` (slice fields) | ✅ | the fat pointer's length (`ulong`) and data pointer (`T*`) |
 | `@as(T, expr)` | ✅ | explicit-type cast → the C `Cast` IR (`@as(c_int, 42)` for a variadic arg) |
 | `null` literal | ✅ | optional none / null pointer (renders C# `null`) |
 | postfix `.?` (optional unwrap) | ✅ | value optional → `.Value` (panics on none); optional pointer → identity (V1: no null-check) |
@@ -212,4 +215,5 @@ rejects, not silently accept more.
   `examples/zig-struct` (`struct` + `.{…}` + field access, `enum` + `.member` + `@intFromEnum` + enum `switch`),
   `examples/zig-struct-typed` (typed `T{…}` literal in value + sink-less positions),
   `examples/zig-methods` (struct methods + UFCS: static `init`, pointer-receiver `scale`, `@This()` value receiver),
-  `examples/zig-union` (tagged `union(enum)`: payload + void variants, `switch` with `\|x\|` capture).
+  `examples/zig-union` (tagged `union(enum)`: payload + void variants, `switch` with `\|x\|` capture),
+  `examples/zig-slices` (`[]const u8` slices: `.len`/`.ptr`, index, `s[lo..hi]`, `for (s) \|b\|`).

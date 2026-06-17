@@ -582,4 +582,78 @@ public sealed class ZigFrontendTests
             "}\n"));
         ex.Message.ShouldContain("tagged-union");
     }
+
+    // ---- slices (Milestone E, stage 1) -----------------------------------
+
+    [Fact]
+    public void Lowers_const_slice_param_and_len()
+    {
+        // `[]const u8` → the runtime ConstSlice<byte> fat pointer; `.len` reads `.Len`.
+        var cs = EmitZig("fn lenOf(s: []const u8) usize { return s.len; }\npub fn main() u8 { return 0; }\n");
+        cs.ShouldContain("lenOf(ConstSlice<byte> s)");
+        cs.ShouldContain("s.Len");
+    }
+
+    [Fact]
+    public void Lowers_mutable_slice_type()
+    {
+        // `[]u8` (no const) → the mutable Slice<byte>.
+        var cs = EmitZig("fn f(s: []u8) u8 { return s[0]; }\npub fn main() u8 { return 0; }\n");
+        cs.ShouldContain("f(Slice<byte> s)");
+    }
+
+    [Fact]
+    public void Lowers_slice_index_through_the_data_pointer()
+    {
+        // `s[i]` indexes through the fat pointer's data pointer → `s.Ptr[i]`.
+        var cs = EmitZig("fn firstByte(s: []const u8) u8 { return s[0]; }\npub fn main() u8 { return 0; }\n");
+        cs.ShouldContain("s.Ptr[0]");
+    }
+
+    [Fact]
+    public void Lowers_slice_ptr_field()
+    {
+        // `.ptr` reads the fat pointer's `.Ptr`.
+        var cs = EmitZig("fn p(s: []const u8) [*c]const u8 { return s.ptr; }\npub fn main() u8 { return 0; }\n");
+        cs.ShouldContain("s.Ptr");
+    }
+
+    [Fact]
+    public void Coerces_string_literal_to_const_slice_dropping_the_sentinel()
+    {
+        // A string literal `*const [N:0]u8` → `[]const u8`: the data pointer is the pooled
+        // `L("…\0"u8)` and the slice `.len` excludes the trailing NUL (5 for "hello", not 6).
+        var cs = EmitZig("pub fn main() u8 { const s: []const u8 = \"hello\"; return s[0]; }\n");
+        cs.ShouldContain("new ConstSlice<byte>(");
+        cs.ShouldContain("\"hello\\0\"u8");
+        cs.ShouldContain(", 5UL)");   // length = 5 (NUL dropped)
+    }
+
+    [Fact]
+    public void Lowers_slice_range_to_a_sub_slice()
+    {
+        // `s[a..b]` → new ConstSlice<byte>(s.Ptr + a, (ulong)(b - a)); the length is an
+        // explicit `(ulong)` cast so variable (non-constant) bounds convert to the ctor arg.
+        var cs = EmitZig("fn mid(s: []const u8, a: usize, b: usize) usize { const m = s[a..b]; return m.len; }\npub fn main() u8 { return 0; }\n");
+        cs.ShouldContain("new ConstSlice<byte>(s.Ptr + a");
+        cs.ShouldContain("(ulong)(b - a)");
+    }
+
+    [Fact]
+    public void Lowers_for_over_slice()
+    {
+        // `for (s) |b| {...}` → for (ulong __i = 0; __i < s.Len; __i++) { byte b = s.Ptr[__i]; ... }
+        var cs = EmitZig("fn f(s: []const u8) u8 { var n: u8 = 0; for (s) |b| { n = b; } return n; }\npub fn main() u8 { return 0; }\n");
+        cs.ShouldContain("__i < s.Len");
+        cs.ShouldContain("byte b = s.Ptr[__i]");
+    }
+
+    [Fact]
+    public void Lowers_for_over_slice_with_index_capture()
+    {
+        // `for (s, 0..) |b, i| {...}` also binds the usize index (counter + start).
+        var cs = EmitZig("fn f(s: []const u8) usize { var acc: usize = 0; for (s, 0..) |b, i| { acc = acc + i; } return acc; }\npub fn main() u8 { return 0; }\n");
+        cs.ShouldContain("s.Ptr[__i]");
+        cs.ShouldContain("ulong i = __i + (ulong)0");
+    }
 }

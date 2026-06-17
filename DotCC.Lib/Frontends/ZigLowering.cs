@@ -673,8 +673,36 @@ internal sealed class ZigLowering
             case Zig.AnonStructInitEmpty:
                 return LowerStructInit(expr, sink);
             default:
-                return LowerExpr(expr);
+            {
+                var lowered = LowerExpr(expr);
+                // Array / string-literal → slice coercion at a `[]T` / `[]const T` sink (Zig's
+                // implicit `*[N]T` → `[]T` and string-literal `*const [N:0]u8` → `[]const u8`).
+                // A value already of slice type passes through (e.g. forwarding a `[]const u8`).
+                if (sink?.Unqualified is CType.Slice slc && lowered.Type.Unqualified is not CType.Slice)
+                {
+                    return CoerceToSlice(lowered, slc);
+                }
+                return lowered;
+            }
         }
+    }
+
+    /// <summary>Coerce an array or string-literal value into a slice fat pointer at a
+    /// <c>[]T</c> / <c>[]const T</c> sink (Zig's array→slice coercion). A string literal is
+    /// <c>*const [N:0]u8</c> — its <c>.len</c> excludes the sentinel NUL, so the count is the
+    /// <see cref="LitStr"/>'s byte length (which INCLUDES the NUL) minus one; a plain array
+    /// <c>[N]T</c> keeps its full element count.</summary>
+    private CExpr CoerceToSlice(CExpr value, CType.Slice sliceType)
+    {
+        if (value.Type.Unqualified is not CType.Array { Count: { } n })
+        {
+            throw new IrUnsupportedException(
+                $"cannot coerce {value.Type.Describe()} to slice {sliceType.Describe()} (need an array or string literal)");
+        }
+        long count = value is LitStr ? n - 1 : n;   // string literal drops the trailing NUL
+        var lenLit = new LitInt(count.ToString(CultureInfo.InvariantCulture), count) { Type = CType.ULong };
+        var elem = sliceType.Element;
+        return new SliceNew(value, lenLit, elem.Unqualified, elem.IsConst) { Type = sliceType };
     }
 
     // ---- statements ------------------------------------------------------
@@ -766,6 +794,13 @@ internal sealed class ZigLowering
                 _symbols.ExitScope();
                 return new For(init, cond, post, body);
             }
+
+            // `for (s) |x| body` — iterate a slice's elements (x = a per-iteration copy).
+            case Zig.StmtForSlice f:     // for '(' Expr ')' '|' IDENT '|' Stmt
+                return LowerForSlice(LowerExpr(f.Arg2), Tok(f.Arg5), null, f.Arg7);
+            // `for (s, 0..) |x, i| body` — also bind the usize index (counter + start).
+            case Zig.StmtForSliceIdx f:  // for '(' Expr ',' Expr '..' ')' '|' IDENT ',' IDENT '|' Stmt
+                return LowerForSlice(LowerExpr(f.Arg2), Tok(f.Arg8), (Tok(f.Arg10), LowerExpr(f.Arg4)), f.Arg12);
 
             // A brace block in statement position (`Stmt -> Block`, pass-through).
             case Zig.Block:
@@ -908,6 +943,62 @@ internal sealed class ZigLowering
         if (pre.Count == 0) { return sw; }
         pre.Add(sw);
         return new Block(pre);   // { var __un = subject; switch (__un.__tag) { … } }
+    }
+
+    /// <summary>Lower a for-over-slice — <c>for (s) |x| body</c> and (when <paramref name="index"/>
+    /// is set) <c>for (s, START..) |x, i| body</c> — to the C IR <c>for</c>:
+    /// <code>{ var __s = s; for (usize __i = 0; __i &lt; __s.Len; __i++) { var x = __s.Ptr[__i];
+    /// [var i = __i + START;] body } }</code>
+    /// The element capture <c>x</c> is a per-iteration copy (Zig's by-value <c>|x|</c>; the by-ref
+    /// <c>|*x|</c> form is deferred). The slice is hoisted to <c>__s</c> unless it is already a bare
+    /// variable, so <c>.Len</c>/<c>.Ptr</c> aren't re-evaluated with side effects.</summary>
+    private CStmt LowerForSlice(CExpr sliceExpr, string elemName, (string name, CExpr start)? index, Item bodyItem)
+    {
+        if (sliceExpr.Type.Unqualified is not CType.Slice slc)
+        {
+            throw new IrUnsupportedException($"for-over-slice needs a slice; got {sliceExpr.Type.Describe()}");
+        }
+        var pre = new List<CStmt>();
+        CExpr sliceRef;
+        if (sliceExpr is VarRef)
+        {
+            sliceRef = sliceExpr;
+        }
+        else
+        {
+            var tmp = _symbols.Declare(new Symbol { Name = "__s", Kind = SymKind.Var, Type = sliceExpr.Type });
+            pre.Add(new DeclStmt(new List<LocalDecl> { new(tmp, sliceExpr) }));
+            sliceRef = new VarRef(tmp) { Type = sliceExpr.Type, IsLValue = true };
+        }
+
+        _symbols.EnterScope();
+        // usize __i = 0; __i < __s.Len; __i++
+        var iSym = _symbols.Declare(new Symbol { Name = "__i", Kind = SymKind.Var, Type = CType.ULong });
+        var iRef = new VarRef(iSym) { Type = CType.ULong, IsLValue = true };
+        var init = new DeclStmt(new List<LocalDecl> { new(iSym, new LitInt("0", 0) { Type = CType.ULong }) });
+        var lenMember = new Member(sliceRef, "Len", false) { Type = CType.ULong, IsLValue = true };
+        var cond = new Binary(BinOp.Lt, iRef, lenMember) { Type = CType.Int };
+        var post = new Unary(UnOp.PostInc, iRef) { Type = CType.ULong };
+
+        // body: prepend `var x = __s.Ptr[__i];` (the element copy) and, for the index form,
+        // `var i = __i + START;`.
+        var ptrMember = new Member(sliceRef, "Ptr", false) { Type = new CType.Pointer(slc.Element) };
+        var elemInit = new DotCC.Ir.Index(ptrMember, iRef) { Type = slc.Element, IsLValue = true };
+        var elemSym = _symbols.Declare(new Symbol { Name = elemName, Kind = SymKind.Var, Type = slc.Element });
+        var bodyStmts = new List<CStmt> { new DeclStmt(new List<LocalDecl> { new(elemSym, elemInit) }) };
+        if (index is { } idx)
+        {
+            var idxInit = new Binary(BinOp.Add, iRef, new Cast(CType.ULong, idx.start) { Type = CType.ULong }) { Type = CType.ULong };
+            var idxSym = _symbols.Declare(new Symbol { Name = idx.name, Kind = SymKind.Var, Type = CType.ULong });
+            bodyStmts.Add(new DeclStmt(new List<LocalDecl> { new(idxSym, idxInit) }));
+        }
+        bodyStmts.Add(LowerStmt(bodyItem));
+        _symbols.ExitScope();
+
+        var forStmt = new For(init, cond, post, new Block(bodyStmts));
+        if (pre.Count == 0) { return forStmt; }
+        pre.Add(forStmt);
+        return new Block(pre);
     }
 
     /// <summary>The single <c>.variant</c> a tagged-union capture prong matches — a capture
@@ -1107,6 +1198,17 @@ internal sealed class ZigLowering
                 }
                 var structExpr = LowerExpr(fld.Arg0);
                 var arrow = structExpr.Type.Unqualified is CType.Pointer;   // Zig `p.x` auto-derefs
+                // Slice `.len` / `.ptr` — the runtime Slice<T> exposes `Len` (ulong) and
+                // `Ptr` (T*); a `[]const T`'s `.ptr` is a pointer-to-const.
+                if (structExpr.Type.Unqualified is CType.Slice slc)
+                {
+                    return fieldName switch
+                    {
+                        "len" => new Member(structExpr, "Len", arrow) { Type = CType.ULong, IsLValue = true },
+                        "ptr" => new Member(structExpr, "Ptr", arrow) { Type = new CType.Pointer(slc.Element), IsLValue = true },
+                        _ => throw new IrUnsupportedException($"slice has no field '{fieldName}' (only .len / .ptr)"),
+                    };
+                }
                 // Tagged-union payload access `u.variant` → `u.__payload.variant` (unchecked,
                 // like Zig's release-mode field access; the tag isn't a user-facing field).
                 if (TryContainerName(structExpr.Type, out var cname)
@@ -1155,6 +1257,12 @@ internal sealed class ZigLowering
             {
                 var baseExpr = LowerExpr(ix.Arg0);
                 var idx = LowerExpr(ix.Arg2);
+                // A slice subscript indexes through its data pointer: `s[i]` → `s.Ptr[i]`.
+                if (baseExpr.Type.Unqualified is CType.Slice slc)
+                {
+                    var ptr = new Member(baseExpr, "Ptr", false) { Type = new CType.Pointer(slc.Element) };
+                    return new DotCC.Ir.Index(ptr, idx) { Type = slc.Element, IsLValue = true };
+                }
                 var elem = baseExpr.Type switch
                 {
                     CType.Pointer p => p.Pointee,
@@ -1162,6 +1270,41 @@ internal sealed class ZigLowering
                     _ => CType.Int,
                 };
                 return new DotCC.Ir.Index(baseExpr, idx) { Type = elem, IsLValue = true };
+            }
+
+            // Slicing `a[lo..hi]` → a sub-slice fat pointer `{ a.ptr + lo, hi - lo }`. The base
+            // may be a slice (re-slice through `.Ptr`), a pointer, or an array (decays); the
+            // element type + const-ness ride into the resulting `[]T` / `[]const T`.
+            case Zig.SliceRange sr:
+            {
+                var baseExpr = LowerExpr(sr.Arg0);
+                var lo = LowerExpr(sr.Arg2);
+                var hi = LowerExpr(sr.Arg4);
+                CExpr basePtr;
+                CType element;
+                switch (baseExpr.Type.Unqualified)
+                {
+                    case CType.Slice s:
+                        basePtr = new Member(baseExpr, "Ptr", false) { Type = new CType.Pointer(s.Element) };
+                        element = s.Element;
+                        break;
+                    case CType.Pointer p:
+                        basePtr = baseExpr;
+                        element = p.Pointee;
+                        break;
+                    case CType.Array a:
+                        basePtr = baseExpr;   // decays to its element pointer
+                        element = a.Element;
+                        break;
+                    default:
+                        throw new IrUnsupportedException($"cannot slice a {baseExpr.Type.Describe()} (need a slice, pointer, or array)");
+                }
+                var ptr = new Binary(BinOp.Add, basePtr, lo) { Type = new CType.Pointer(element) };
+                // len = (ulong)(hi - lo). The explicit cast covers non-constant bounds, where
+                // a signed `int` difference has no implicit conversion to the ctor's `ulong`.
+                var diff = new Binary(BinOp.Sub, hi, lo) { Type = hi.Type };
+                var len = new Cast(CType.ULong, diff) { Type = CType.ULong };
+                return new SliceNew(ptr, len, element.Unqualified, element.IsConst) { Type = new CType.Slice(element) };
             }
 
             // `.?` optional unwrap. A value optional (CType.Optional → C# `T?`) unwraps via
@@ -1540,6 +1683,12 @@ internal sealed class ZigLowering
         // Suffix naming the set), so `anyerror!T` and a named `E!T` lower identically — the
         // payload is what the backend renders (`ErrUnion<T>`). See [[CType.ErrorUnion]].
         Zig.ErrUnion eu => new CType.ErrorUnion(LowerType(eu.Arg2)),
+        // `[]T` / `[]const T` slice → CType.Slice (the runtime Slice<T> / ConstSlice<T> fat
+        // pointer). `[]const T` carries the `const` on the element, so the backend renders it
+        // as `ConstSlice<T>` — element-only const, like the pointer forms above. See
+        // [[CType.Slice]]. (`[N]T` arrays and `[*]T` many-pointers are still deferred.)
+        Zig.TySlice s      => new CType.Slice(LowerType(s.Arg2)),
+        Zig.TySliceConst s => new CType.Slice(LowerType(s.Arg3).WithQuals(TypeQual.Const)),
         // `@This()` — Zig's reflective self-type → the container currently being lowered, so
         // `self: @This()` / `self: *@This()` name the receiver without repeating the type name.
         // (`const Self = @This();` — a container-level const alias — is deferred; use `@This()`

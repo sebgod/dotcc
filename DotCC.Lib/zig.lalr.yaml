@@ -264,11 +264,17 @@ productions:
       # differ only by an optional trailing comma after the last prong.
       - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', '{', Prongs, '}'],      action: stmtSwitch }
       - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', '{', Prongs, ',', '}'], action: stmtSwitchTrailing }
-      # `for (start..end) |i| body` — the only slice-free `for` (a range). Lowers to the C IR
+      # `for (start..end) |i| body` — the range `for`. Lowers to the C IR
       # `for (usize i = start; i < end; i++) body`; the `|i|` capture is the usize loop index
       # (Zig's range-for index type). The body is a Stmt (single statement or a block), like
-      # `while`. for-over-slice / `0..` open-ended / the second `, 0..` index are deferred.
+      # `while`.
       - { lhs: Stmt, rhs: ['for', '(', Expr, '..', Expr, ')', '|', IDENT, '|', Stmt], action: stmtForRange }
+      # for-over-slice. `for (s) |x| body` iterates the elements; `for (s, 0..) |x, i| body`
+      # also binds the usize index. Conflict-free against the range form: after `for ( Expr`,
+      # the lookahead selects — `..` → range, `)` → slice, `,` → slice+index. (`|*x|` by-ref
+      # capture and a non-zero index start are deferred.)
+      - { lhs: Stmt, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', Stmt], action: stmtForSlice }
+      - { lhs: Stmt, rhs: ['for', '(', Expr, ',', Expr, '..', ')', '|', IDENT, ',', IDENT, '|', Stmt], action: stmtForSliceIdx }
       - { lhs: Stmt, rhs: ['return', RhsExpr, ';'],         action: stmtReturn }
       - { lhs: Stmt, rhs: ['return', ';'],                   action: stmtReturnVoid }
       - { lhs: Stmt, rhs: [VarDecl] }
@@ -403,6 +409,9 @@ productions:
       - { lhs: Type, rhs: ['[*c]', Type],          action: tyCPtr }
       - { lhs: Type, rhs: ['[*c]', 'const', Type], action: tyCPtrConst }
       - { lhs: Type, rhs: ['[', ']', Type],       action: tySlice }
+      # `[]const T` — a const slice. The `const` after `]` is unambiguous (no Type starts
+      # with a bare `const`), so it stays conflict-free against `[]T` / `[Expr]T`.
+      - { lhs: Type, rhs: ['[', ']', 'const', Type], action: tySliceConst }
       - { lhs: Type, rhs: ['[', Expr, ']', Type], action: tyArray }
       - { lhs: Type, rhs: [ErrUnion] }
 
@@ -418,6 +427,9 @@ productions:
       - { lhs: Suffix, rhs: [Suffix, '.*'],             action: deref }
       - { lhs: Suffix, rhs: [Suffix, '.?'],             action: unwrap }
       - { lhs: Suffix, rhs: [Suffix, '[', Expr, ']'],  action: index }
+      # Slicing `a[lo..hi]` → a sub-slice. Conflict-free against `index`: after
+      # `Suffix '[' Expr`, the lookahead `..` (vs `]`) selects this production.
+      - { lhs: Suffix, rhs: [Suffix, '[', Expr, '..', Expr, ']'], action: sliceRange }
       - { lhs: Suffix, rhs: [Suffix, '(', ArgList, ')'], action: callArgs }
       - { lhs: Suffix, rhs: [Suffix, '(', ')'],          action: callNoArgs }
       - { lhs: Suffix, rhs: [Primary] }
