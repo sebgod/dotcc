@@ -78,6 +78,7 @@ public abstract record CType
         Optional o => "?" + o.Inner.Describe(),
         ErrorUnion eu => "!" + eu.Payload.Describe(),
         Slice s => "[]" + (s.Element.IsConst ? "const " : "") + s.Element.Unqualified.Describe(),
+        Allocator => "std.mem.Allocator",
         _ => GetType().Name,
     };
 
@@ -251,6 +252,23 @@ public abstract record CType
         // A fat pointer: a data pointer (8) plus a nuint length (8). @sizeOf([]T) is not in
         // scope for Milestone E, so an exact-layout guarantee isn't needed here.
         public override int SizeOf => 16;
+    }
+
+    /// <summary>Zig's <c>std.mem.Allocator</c> (Milestone F) — a fat pointer
+    /// <c>{ ptr, vtable }</c> over a runtime allocator. The C# backend lowers it to the runtime
+    /// <c>Allocator</c> value type (<c>DotCC.Libc/ZigAlloc.cs</c>): an opaque context plus a
+    /// by-value vtable of raw allocation function pointers. A method call <c>a.alloc(T,n)</c> /
+    /// <c>a.free(s)</c> on an operand of this type dispatches through the vtable (the indirect
+    /// path); the lowering devirtualizes to a direct <c>Libc.malloc</c>/<c>free</c> when it can
+    /// prove the operand is the statically-known C-heap default. The C front-end never produces
+    /// it (C has no allocator abstraction — its <c>malloc</c> is already a direct call); only the
+    /// C# target renders it.</summary>
+    public sealed record Allocator : CType
+    {
+        // { void* Ctx; AllocatorVTable Vtable } where the vtable carries two fn-ptrs by value:
+        // 8 (ctx) + 8 + 8 (two delegate*). @sizeOf(Allocator) isn't a Zig surface feature, so an
+        // exact layout isn't needed.
+        public override int SizeOf => 24;
     }
 
     // ---- well-known instances -------------------------------------------

@@ -338,6 +338,63 @@ public sealed class ZigOracleTests
             "    const s: []u8 = buf[0..3];\n" +
             "    return s[0] + s[1] + s[2];\n" +
             "}\n", 42, "" },
+        // ALLOCATORS (Milestone F). The `run() catch 1` wrapper avoids the deferred `catch
+        // return` (V1 cut): a `!u8` helper uses `try`, and main supplies a literal fallback.
+        // alloc_page — the statically-known default DEVIRTUALIZES to a direct Libc.malloc/free.
+        new object[] { "alloc_page",
+            "const std = @import(\"std\");\n" +
+            "fn run() !u8 {\n" +
+            "    const a = std.heap.page_allocator;\n" +
+            "    const buf = try a.alloc(u8, 4);\n" +
+            "    buf[0] = 42;\n" +
+            "    const r = buf[0];\n" +
+            "    a.free(buf);\n" +
+            "    return r;\n" +
+            "}\n" +
+            "pub fn main() u8 { return run() catch 1; }\n", 42, "" },
+        // alloc_fba — a FixedBufferAllocator (the 2nd allocator); `.alloc` dispatches INDIRECTLY
+        // through the runtime Allocator vtable.
+        new object[] { "alloc_fba",
+            "const std = @import(\"std\");\n" +
+            "fn run() !u8 {\n" +
+            "    var buffer: [64]u8 = undefined;\n" +
+            "    var fba = std.heap.FixedBufferAllocator.init(&buffer);\n" +
+            "    const a = fba.allocator();\n" +
+            "    const s = try a.alloc(u8, 3);\n" +
+            "    s[0] = 10; s[1] = 15; s[2] = 17;\n" +
+            "    return s[0] + s[1] + s[2];\n" +
+            "}\n" +
+            "pub fn main() u8 { return run() catch 1; }\n", 42, "" },
+        // alloc_param — an opaque `std.mem.Allocator` parameter (→ indirect dispatch), fed BOTH a
+        // FixedBufferAllocator AND the default (which materializes through the same opaque path).
+        new object[] { "alloc_param",
+            "const std = @import(\"std\");\n" +
+            "fn fill(a: std.mem.Allocator, n: usize) ![]u8 {\n" +
+            "    const s = try a.alloc(u8, n);\n" +
+            "    var i: usize = 0;\n" +
+            "    while (i < n) : (i = i + 1) { s[i] = 7; }\n" +
+            "    return s;\n" +
+            "}\n" +
+            "fn run() !u8 {\n" +
+            "    var buffer: [64]u8 = undefined;\n" +
+            "    var fba = std.heap.FixedBufferAllocator.init(&buffer);\n" +
+            "    const s1 = try fill(fba.allocator(), 3);\n" +
+            "    const s2 = try fill(std.heap.page_allocator, 3);\n" +
+            "    return s1[0] + s1[1] + s1[2] + s2[0] + s2[1] + s2[2];\n" +
+            "}\n" +
+            "pub fn main() u8 { return run() catch 1; }\n", 42, "" },
+        // alloc_oom — a 4-byte FixedBufferAllocator can't satisfy a 100-byte request → the error
+        // propagates through `try` and main's `catch 42` (the deterministic OOM error path).
+        new object[] { "alloc_oom",
+            "const std = @import(\"std\");\n" +
+            "fn run() !u8 {\n" +
+            "    var buffer: [4]u8 = undefined;\n" +
+            "    var fba = std.heap.FixedBufferAllocator.init(&buffer);\n" +
+            "    const a = fba.allocator();\n" +
+            "    const s = try a.alloc(u8, 100);\n" +
+            "    return s[0];\n" +
+            "}\n" +
+            "pub fn main() u8 { return run() catch 42; }\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

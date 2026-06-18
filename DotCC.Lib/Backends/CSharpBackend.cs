@@ -1360,6 +1360,27 @@ internal sealed class CSharpBackend
                 var name = sn.Const ? "ConstSlice" : "Slice";
                 return ($"new {name}<{Cs(sn.Element.Unqualified)}>({Expr(sn.Ptr)}, {Coerced(sn.Len, CType.ULong)})", PPrimary);
             }
+            // A Zig allocator `a.alloc(T, n)` (Milestone F). Receiver null → the DEVIRTUALIZED
+            // C-heap default: a direct `ZigAlloc.AllocCHeap<T>(n, oom)` (→ Libc.malloc, no vtable).
+            // Non-null → the indirect vtable dispatch via the runtime Allocator's `Alloc<T>`. The
+            // count coerces to the helper's `ulong`.
+            case AllocCall ac:
+            {
+                var elem = Cs(ac.Element.Unqualified);
+                var n = Coerced(ac.Count, CType.ULong);
+                return ac.Receiver is null
+                    ? ($"ZigAlloc.AllocCHeap<{elem}>({n}, {ac.OomCode})", PPostfix)
+                    : ($"{Sub(ac.Receiver, PPostfix)}.Alloc<{elem}>({n}, {ac.OomCode})", PPostfix);
+            }
+            // A Zig allocator `a.free(slice)` (Milestone F). Receiver null → devirtualized direct
+            // `ZigAlloc.FreeCHeap<T>(slice)` (→ Libc.free); non-null → indirect `recv.Free<T>(slice)`.
+            case FreeCall fc:
+            {
+                var elem = Cs(fc.Element.Unqualified);
+                return fc.Receiver is null
+                    ? ($"ZigAlloc.FreeCHeap<{elem}>({Expr(fc.SliceExpr)})", PPostfix)
+                    : ($"{Sub(fc.Receiver, PPostfix)}.Free<{elem}>({Expr(fc.SliceExpr)})", PPostfix);
+            }
             // A bare unresolved identifier: the backend escapes the raw name.
             case NameRef nr: return (DotCC.EmitHelpers.Id(nr.RawName), PPrimary);
             // An enumerator of a real enum: EnumName.Member (member access). If a
@@ -1983,7 +2004,10 @@ internal sealed class CSharpBackend
 
     private static bool IsStmtExpr(CExpr e) => e switch
     {
-        Assign or Call or IndirectCall => true,
+        // A Zig allocator alloc/free (Milestone F) renders as a method call — a valid statement
+        // expression. FreeCall is void, so it MUST be recognized here (a `_ = <void>` discard is
+        // a C# error); a discarded AllocCall is a normal `_ = recv.Alloc(...)`, also fine as a stmt.
+        Assign or Call or IndirectCall or AllocCall or FreeCall => true,
         Unary u => u.Op is UnOp.PreInc or UnOp.PreDec or UnOp.PostInc or UnOp.PostDec,
         Paren p => IsStmtExpr(p.Inner),
         _ => false,

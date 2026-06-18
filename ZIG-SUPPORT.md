@@ -11,9 +11,12 @@ for free — including the libc routing that makes `printf` print.
 This is an honest **subset dialect**, not full Zig: the grammar parses a
 C-shaped value/type core, and lowering grows behind it deliberately ("fail
 loudly, grow on purpose" — anything unlowered throws `IrUnsupportedException`
-rather than miscompiling). `comptime`, generics, and `std` are out of scope by
-design. Legend: ✅ supported (parses **and** lowers + runs) · 🚧 parses but does
-not lower yet (loud error at the use site) · 🚫 not supported.
+rather than miscompiling). `comptime` and generics are out of scope by design;
+`std` is **not** modeled in general — only a curated set of allocator paths
+(`std.mem.Allocator`, `std.heap.page_allocator`/`c_allocator`/`FixedBufferAllocator`;
+see the Allocators section) resolves, everything else errors clearly. Legend: ✅
+supported (parses **and** lowers + runs) · 🚧 parses but does not lower yet (loud
+error at the use site) · 🚫 not supported.
 
 ## Design intent — C interop without `@cImport`
 
@@ -58,6 +61,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `?T` optional | ✅ | `?*T` → bare nullable `T*` (niche); `?T` over a value → C# `Nullable<T>`. `null`/`.?`/`orelse` below |
 | `[]T` / `[]const T` slice | ✅ | → the runtime fat pointer `Slice<T>` / `ConstSlice<T>` (`{ T* Ptr; ulong Len; }`, the C++ `std::span` shape — **not** C#'s ref-struct `Span<T>`, so a slice can be a struct field and cross the ABI; `AsSpan()` bridges to the BCL). `.len`/`.ptr`, `s[i]`, `s[lo..hi]`, array/string coercion, and `for` over it all work (rows below). **Deferred:** `[*]T`-backed slices, sentinel `[:0]T`, open-ended `s[lo..]`, by-ref `\|*x\|`, the non-escaping-stack → `stackalloc`+`Span` peephole |
 | `[N]T` array (local) | ✅ | `var b: [N]T = undefined;` → a stackalloc'd C array (zero heap); `b[i]` indexes, `b[lo..hi]` yields a **stack-backed slice**. Size `N` must be an integer literal. **Init:** only `undefined` so far (positional `.{…}` / `[_]T{…}` array literals deferred) |
+| `std.mem.Allocator` | ✅ | the allocator fat pointer `{ ptr, vtable }` → the runtime `Allocator` value type (see the **Allocators** section). `std.heap.FixedBufferAllocator` is the concrete second allocator. Any OTHER `std.*` type errors clearly |
 | `const P = struct { fields…, methods… };` | ✅ | container decl (top-level) → a real C# `unsafe struct` via the SHARED aggregate machinery the C frontend uses. Fields **and** methods (below) in the body; tagged unions are a later D slice. Empty `struct {}` allowed; `pub`-wrapped + in-function containers deferred |
 | container **method** `fn m(self: P, …) …` | ✅ | a `fn`/`pub fn` in a struct, **enum, or union** body lowers to a free function `P_m` with the receiver as its first parameter. `p.m(a)` (UFCS) auto-refs/derefs the receiver to the declared `self` form (`&p` for a `*P` receiver, `p.*` for the reverse); `P.m(p, a)` and a no-receiver `P.assoc(a)` (associated function) call it directly. An enum receiver dispatches the same way; `self == .member` (enum equality with a result-located literal) is supported. **Deferred:** generic methods |
 | namespaced value `const NAME = …;` | ✅ | a container-level `const` (a comptime value) read as `Type.NAME` in any of struct/enum/union. dotcc **inlines** the (lazily re-lowered) RHS at each use site — `const max: u8 = 42;` → `Cfg.max`, `const default = Color.blue;` → `Color.default`. **Deferred:** a container-level `var` (a mutable global — needs top-level globals; rejected loudly) and a const RHS that references a *sibling* const by bare name (qualify it as `Type.sibling`) |
@@ -129,7 +133,9 @@ program's libc call is handled. No `@cImport`, no header harvest.
 
 ## Out of scope (the dialect line)
 
-`comptime` (beyond const folding), generics / `anytype`, `@import("std")`, untagged
+`comptime` (beyond const folding), generics / `anytype`, `@import("std")` beyond the curated
+allocator paths (`std.mem.Allocator` + `std.heap.page_allocator`/`c_allocator`/
+`FixedBufferAllocator` ARE supported — see the Allocators section), untagged
 `union { … }` + explicit `union(SomeEnum)` + `opaque` (data-only `struct`/`enum`/`union`
 **with methods** — struct/enum/union methods + the `const Self = @This();` self-type alias
 + namespaced VALUE `const`s ARE supported — see below), container-level `var` (a namespaced
@@ -186,6 +192,39 @@ error union over a *pointer* is deferred — a C# generic can't take a pointer a
 `catch`'s fallback must be side-effect-free; and `catch |e| …` capture, `catch return`,
 explicit `error{…}` set decls, and an error-union `main` are all deferred.
 
+## Allocators — devirtualize the default, vtable for the rest
+
+dotcc models Zig's `std.mem.Allocator` as a fat pointer `{ ptr, vtable }` (the runtime
+`Allocator` value type in `DotCC.Libc/ZigAlloc.cs`, auto-spliced) whose high-level
+`a.alloc(T, n)` / `a.free(s)` dispatch through a vtable of raw function pointers — `alloc`
+returns `Error![]T` (an `ErrUnion<Slice<T>>`, composing with `try`/`catch` above). Two
+allocators ship: the C heap (the `std.heap.page_allocator`/`c_allocator` default, backed by
+`Libc.malloc`/`free`) and `std.heap.FixedBufferAllocator` (a deterministic bump allocator
+over a caller buffer — the second allocator that exercises real indirect dispatch).
+
+**Devirtualization is the optimization layer.** At each `a.alloc(…)` site the lowering asks
+*can it prove which concrete allocator `a` is?*
+
+| Form | Lowers to |
+|---|---|
+| `const a = std.heap.page_allocator;` / `c_allocator` | comptime binding (no decl); `@import("std")` likewise |
+| `a.alloc(T, n)` / `a.free(s)` on the **provable** default | **DIRECT** `ZigAlloc.AllocCHeap<T>` / `FreeCHeap<T>` (a `Libc.malloc`/`free`, no vtable) |
+| `var fba = std.heap.FixedBufferAllocator.init(&buf);` | `FixedBufferAllocator.Init((byte*)buf, N)` |
+| `fba.allocator()` | `ZigAlloc.FbaAllocator(&fba)` → a runtime `Allocator` (opaque) |
+| `a.alloc(T, n)` on an **opaque** `a` (a `std.mem.Allocator` param, or `fba.allocator()`'s result) | **INDIRECT** `a.Alloc<T>(n, oom)` — the genuine `vtable->alloc(ctx, bytes)` dispatch, inside the runtime |
+| the default passed to an opaque `std.mem.Allocator` sink | materialized `ZigAlloc.CHeap()` (a runtime fat pointer; its vtable still reaches the C heap) |
+
+So the default stays a direct call; only a genuinely runtime-selected allocator pays the
+indirect dispatch. Example: `examples/zig-alloc/main.zig`.
+
+**V1 limits** (documented, not silent): only the C-heap default is *provable* — an
+`fba.allocator()` result and every `std.mem.Allocator` parameter are opaque (indirect), even
+where a local could in principle be proven; `a.create(T)` / `a.destroy(p)` (single-object
+alloc → `Error!*T`, an error-union-over-pointer) and `resize`/`remap`/`realloc` are deferred
+with a clear error; `defer`/`errdefer` is a separate (unbuilt) feature, so allocations are
+freed explicitly (or leak on process exit); and `std` is a known-paths resolver, not a real
+std model — anything outside the allocator paths above errors clearly.
+
 ## Strictness — dotcc tracks Zig where it matters
 
 dotcc lowers Zig onto the same C-shaped IR + C# backend as C, which is C-lenient by
@@ -220,4 +259,6 @@ rejects, not silently accept more.
   `examples/zig-struct-typed` (typed `T{…}` literal in value + sink-less positions),
   `examples/zig-methods` (struct methods + UFCS: static `init`, pointer-receiver `scale`, `@This()` value receiver),
   `examples/zig-union` (tagged `union(enum)`: payload + void variants, `switch` with `\|x\|` capture),
-  `examples/zig-slices` (`[]const u8` slices: `.len`/`.ptr`, index, `s[lo..hi]`, `for (s) \|b\|`).
+  `examples/zig-slices` (`[]const u8` slices: `.len`/`.ptr`, index, `s[lo..hi]`, `for (s) \|b\|`),
+  `examples/zig-alloc` (allocators: devirt'd `page_allocator`, a `FixedBufferAllocator` via the
+  indirect vtable, an opaque `std.mem.Allocator` param + materialized default).

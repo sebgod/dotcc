@@ -790,4 +790,100 @@ public sealed class ZigFrontendTests
         var cs = EmitZig("pub fn main() u8 { var x: u8 = undefined; x = 42; return x; }\n");
         cs.ShouldContain("byte x = default");
     }
+
+    // ---- allocators (Milestone F) ----------------------------------------
+
+    [Fact]
+    public void Devirtualizes_the_default_allocator_to_a_direct_c_heap_call()
+    {
+        // `const a = std.heap.page_allocator; a.alloc(u8, n) / a.free(s)` — the statically-known
+        // default DEVIRTUALIZES to a direct ZigAlloc.AllocCHeap / FreeCHeap (a Libc.malloc/free,
+        // no vtable). `@import("std")` and the `const a = …` binding are comptime (no decl).
+        var cs = EmitZig(
+            "const std = @import(\"std\");\n" +
+            "fn run() !u8 {\n" +
+            "    const a = std.heap.page_allocator;\n" +
+            "    const buf = try a.alloc(u8, 4);\n" +
+            "    buf[0] = 42;\n" +
+            "    const r = buf[0];\n" +
+            "    a.free(buf);\n" +
+            "    return r;\n" +
+            "}\n" +
+            "pub fn main() u8 { return run() catch 1; }\n");
+        cs.ShouldContain("ZigAlloc.AllocCHeap<byte>(4");   // the devirt'd alloc (direct malloc)
+        cs.ShouldContain("ZigAlloc.FreeCHeap<byte>(buf)");  // the devirt'd free (direct free)
+        cs.ShouldNotContain(".Alloc<byte>(");               // NOT the indirect vtable dispatch
+        cs.ShouldNotContain("Allocator a =");               // the comptime binding emits no decl
+    }
+
+    [Fact]
+    public void Lowers_a_FixedBufferAllocator_through_the_indirect_vtable()
+    {
+        // A FixedBufferAllocator (the 2nd allocator) over a stack buffer; `fba.allocator()`
+        // yields a runtime Allocator (opaque) → `.alloc` dispatches INDIRECTLY through the vtable.
+        var cs = EmitZig(
+            "const std = @import(\"std\");\n" +
+            "fn run() !u8 {\n" +
+            "    var buffer: [64]u8 = undefined;\n" +
+            "    var fba = std.heap.FixedBufferAllocator.init(&buffer);\n" +
+            "    const a = fba.allocator();\n" +
+            "    const s = try a.alloc(u8, 3);\n" +
+            "    s[0] = 42;\n" +
+            "    return s[0];\n" +
+            "}\n" +
+            "pub fn main() u8 { return run() catch 1; }\n");
+        cs.ShouldContain("FixedBufferAllocator.Init((byte*)");   // init over the stack buffer
+        cs.ShouldContain("ZigAlloc.FbaAllocator(&fba)");          // the allocator() fat pointer
+        cs.ShouldContain("Allocator a =");                        // a runtime Allocator local
+        cs.ShouldContain(".Alloc<byte>(3");                       // INDIRECT vtable dispatch
+        cs.ShouldNotContain("ZigAlloc.AllocCHeap<byte>(");        // NOT devirt'd (the call site; the
+                                                                  // runtime's <T> definition doesn't match)
+    }
+
+    [Fact]
+    public void Passes_an_opaque_allocator_param_and_materializes_the_default()
+    {
+        // An opaque `std.mem.Allocator` parameter → an `Allocator` C# param, dispatched
+        // indirectly. The statically-known default passed to it MATERIALIZES `ZigAlloc.CHeap()`.
+        var cs = EmitZig(
+            "const std = @import(\"std\");\n" +
+            "fn fill(a: std.mem.Allocator, n: usize) ![]u8 {\n" +
+            "    const s = try a.alloc(u8, n);\n" +
+            "    return s;\n" +
+            "}\n" +
+            "fn run() !u8 {\n" +
+            "    const s = try fill(std.heap.page_allocator, 2);\n" +
+            "    return s[0];\n" +
+            "}\n" +
+            "pub fn main() u8 { return run() catch 1; }\n");
+        cs.ShouldContain("fill(Allocator a, ulong n)");   // the opaque allocator parameter
+        cs.ShouldContain("a.Alloc<byte>(n");               // indirect dispatch on the param
+        cs.ShouldContain("fill(ZigAlloc.CHeap()");         // the default materialized as an arg
+    }
+
+    [Fact]
+    public void Rejects_a_deferred_allocator_create()
+    {
+        // `a.create(T)` (single-object alloc) returns `Error!*T` — an error-union-over-pointer,
+        // which the runtime can't express yet — so it's a clear deferred error, not a miscompile.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const std = @import(\"std\");\n" +
+            "fn run() !u8 {\n" +
+            "    const a = std.heap.page_allocator;\n" +
+            "    const p = try a.create(u8);\n" +
+            "    return p.*;\n" +
+            "}\n" +
+            "pub fn main() u8 { return run() catch 1; }\n"));
+        ex.Message.ShouldContain("deferred");
+    }
+
+    [Fact]
+    public void Rejects_an_unmodeled_std_import()
+    {
+        // `std` is a known-paths resolver, not a real std model — a non-`std` import errors.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const builtin = @import(\"builtin\");\n" +
+            "pub fn main() u8 { return 0; }\n"));
+        ex.Message.ShouldContain("not modeled");
+    }
 }
