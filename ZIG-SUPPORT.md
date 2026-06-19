@@ -61,6 +61,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `?T` optional | ✅ | `?*T` → bare nullable `T*` (niche); `?T` over a value → C# `Nullable<T>`. `null`/`.?`/`orelse` below |
 | `[]T` / `[]const T` slice | ✅ | → the runtime fat pointer `Slice<T>` / `ConstSlice<T>` (`{ T* Ptr; ulong Len; }`, the C++ `std::span` shape — **not** C#'s ref-struct `Span<T>`, so a slice can be a struct field and cross the ABI; `AsSpan()` bridges to the BCL). `.len`/`.ptr`, `s[i]`, `s[lo..hi]`, array/string coercion, and `for` over it all work (rows below). **Deferred:** `[*]T`-backed slices, sentinel `[:0]T`, open-ended `s[lo..]`, by-ref `\|*x\|`, the non-escaping-stack → `stackalloc`+`Span` peephole |
 | `[N]T` array (local) | ✅ | `var b: [N]T = undefined;` → a stackalloc'd C array (zero heap); `b[i]` indexes, `b[lo..hi]` yields a **stack-backed slice**. Size `N` must be an integer literal. **Init:** only `undefined` so far (positional `.{…}` / `[_]T{…}` array literals deferred) |
+| tuple `struct { T1, T2, … }` | ✅ | an anonymous **positional** struct → C# `System.ValueTuple<…>` (Milestone G — see the **Tuples** section). Valid as a return / param / var type; a positional literal `.{a, b}` constructs it, `t[N]` (literal `N`) reads `.ItemN+1`, and `const a, const b = e` destructures. **Runtime subset only:** arity 1..7 (empty + >7 deferred); comptime / type-valued fields and a mixed positional+named literal are rejected |
 | `std.mem.Allocator` | ✅ | the allocator fat pointer `{ ptr, vtable }` → the runtime `Allocator` value type (see the **Allocators** section). `std.heap.FixedBufferAllocator` is the concrete second allocator. Any OTHER `std.*` type errors clearly |
 | `const P = struct { fields…, methods… };` | ✅ | container decl (top-level) → a real C# `unsafe struct` via the SHARED aggregate machinery the C frontend uses. Fields **and** methods (below) in the body; tagged unions are a later D slice. Empty `struct {}` allowed; `pub`-wrapped + in-function containers deferred |
 | container **method** `fn m(self: P, …) …` | ✅ | a `fn`/`pub fn` in a struct, **enum, or union** body lowers to a free function `P_m` with the receiver as its first parameter. `p.m(a)` (UFCS) auto-refs/derefs the receiver to the declared `self` form (`&p` for a `*P` receiver, `p.*` for the reverse); `P.m(p, a)` and a no-receiver `P.assoc(a)` (associated function) call it directly. An enum receiver dispatches the same way; `self == .member` (enum equality with a result-located literal) is supported. **Deferred:** generic methods |
@@ -85,6 +86,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `switch (u) { .a => \|x\| {…}, … }` | ✅ | switch on a **tagged union** → dispatch on the `__tag`; a `\|x\|` payload capture binds the matched variant's payload (by value). An exhaustive union switch with no `else` makes its last prong the C# `default` (so the function provably returns). **Deferred:** by-reference `\|*x\|` capture, multi-variant capture prongs, capture on `if`/`while` (optionals / error-unions) |
 | `return e;` / `return;` | ✅ | |
 | `x = e;` assignment | ✅ | |
+| `const a, const b = e;` destructure | ✅ | bind a tuple's elements to new locals (Milestone G) — desugars to a single-eval temp + per-element `.ItemN` reads (a brace-less sequence, so the binders stay in the enclosing scope). `const`/`var` binders, ≥2. **Deferred:** the assign-to-existing-lvalue form `a, b = e;` (a grammar-level cut, so a parse error) and typed binders (`const a: T, …`) |
 | `_ = e;` discard | ✅ | Zig's mandatory discard of a non-void result |
 | block `{ … }` | ✅ | |
 | `for (a..b) \|i\| …` (range for) | ✅ | → C `for (usize i = a; i < b; i++)`; the `\|i\|` capture is the usize loop index (`\|_\|` discards). The body is a Stmt or block |
@@ -106,6 +108,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | function call `f(args)` | ✅ | intra-Zig + forward-ref + libc-by-bare-name (incl. variadic `printf`) |
 | prefix `&` (address-of) | ✅ | `&x` → `*T`; a var/param operand is marked address-taken |
 | postfix `p.*` (deref), `a[i]` (index) | ✅ | pointer deref / subscript → the C `Unary(Deref)` / `Index` IR. On a slice, `s[i]` indexes through `.Ptr` (`s.Ptr[i]`) |
+| `t[N]` (tuple index) | ✅ | a **literal** `N` into a tuple → `.ItemN+1` (Milestone G); a runtime index is rejected (a tuple field is statically named, not addressed) |
 | `s[lo..hi]` (slicing) | ✅ | → a sub-slice fat pointer `{ s.ptr + lo, (ulong)(hi - lo) }` (base may be a slice, pointer, or array) |
 | `s.len` / `s.ptr` (slice fields) | ✅ | the fat pointer's length (`ulong`) and data pointer (`T*`) |
 | `@as(T, expr)` | ✅ | explicit-type cast → the C `Cast` IR (`@as(c_int, 42)` for a variadic arg) |
@@ -119,6 +122,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | postfix `.field` | ✅ | struct field access → the shared `Member` IR (field type from the aggregate table). Zig has no `->`, so `p.field` on a `*T` auto-derefs (emits C# `->`). `EnumName.member` resolves here too → an `EnumConstRef` |
 | `.{ .f = v, … }` (anonymous struct literal) | ✅ | result-located → `new T { f = v }` from the sink type (a typed decl, return, assignment, call arg, or field). Empty `.{}` zero-inits |
 | `T{ .f = v, … }` (typed struct literal) | ✅ | Zig's `CurlySuffixExpr <- TypeExpr InitList?` — the type is named, so NO sink is needed; valid in any position, incl. sink-less ones like `(T{…}).field`. A dedicated `CurlySuffix` grammar level (above `Type`) makes it conflict-free against `fn f() RetType {` (the return type stays a raw `Type`, no init list) — no rewriter. `&T{…}` (address of a temporary) materializes a block-local temp and takes its address (the same shared-backend path as C's `&(T){…}`) |
+| `.{ a, b, … }` (positional tuple literal) | ✅ | result-located → `new System.ValueTuple<…>(a, b)` (Milestone G); element types come from a tuple sink, or are inferred from the elements (`const t = .{a, b};`). Shares the `.{…}` surface with the named struct literal — a literal that MIXES positional + named is rejected |
 | `.enumLiteral` | ✅ | a bare `.member` resolves against its sink (typed decl / return / assignment / call arg / switch subject) → an `EnumConstRef` (`EnumName.member`). Untyped (no sink) is rejected, as Zig requires |
 | `@intFromEnum(e)` | ✅ | the enum's integer value → decay to the underlying type (the C enum→int decay) |
 | other `@builtin(...)` (`@intCast`/`@ptrCast`/…) | 🚧 | parse only — Zig 0.16's forms are result-location-typed (single arg), needing context-type inference dotcc lacks |
@@ -176,12 +180,12 @@ onto .NET's scheduler-driven `async`/`await` without a lossy translation — *an
 removed from the pinned Zig, so it's a feature the reference compiler doesn't even have
 (the differential oracle couldn't validate it anyway).
 
-**The soft case** — destructuring assignment is "not yet", not "can't". It needs tuple
-types (positional anonymous structs), which lower cleanly onto C# `ValueTuple` for the
-**runtime** subset — value semantics, positional access, comptime-known fixed arity, and
-native deconstruction. Only the comptime *flavor* of tuples stays out (type-valued /
-`comptime_int` fields, and the `std.fmt` reflection idiom above) — the comptime root again.
-Runtime tuples + destructuring are in progress.
+**The soft case** — destructuring assignment was "not yet", not "can't", and it has now
+landed (Milestone G — see the **Tuples** section). It needed tuple types (positional anonymous
+structs), which lower cleanly onto C# `ValueTuple` for the **runtime** subset — value semantics,
+positional access, comptime-known fixed arity, and native deconstruction. Only the comptime
+*flavor* of tuples stays out (type-valued / `comptime_int` fields, and the `std.fmt` reflection
+idiom above) — the comptime root again.
 
 ## Mixed `.c` + `.zig` translation units
 
@@ -263,6 +267,35 @@ with a clear error; `defer`/`errdefer` is a separate (unbuilt) feature, so alloc
 freed explicitly (or leak on process exit); and `std` is a known-paths resolver, not a real
 std model — anything outside the allocator paths above errors clearly.
 
+## Tuples — runtime tuples → C# `ValueTuple`
+
+A Zig tuple is an anonymous **positional** struct — `.{ a, b }`, type `struct { T1, T2 }`, accessed
+`t[0]`/`t[1]`. dotcc lowers the **runtime** subset directly onto C# `System.ValueTuple<…>`
+(Milestone G): the same value semantics, positional access, comptime-known fixed arity, and native
+deconstruction. The headline use is multiple return values.
+
+| Form | Lowers to |
+|---|---|
+| tuple TYPE `struct { T1, T2, … }` (return / param / var) | `System.ValueTuple<T1, …>` (arity-uniform, incl. arity 1) |
+| positional literal `.{ a, b }` | `new System.ValueTuple<…>(a, b)` — element types from the tuple sink, or inferred from the elements |
+| `t[N]` (literal `N`) | `.ItemN+1` (ValueTuple's 1-based fields) |
+| `const a, const b = e;` | a single-eval temp + per-binder `.ItemN` reads (a brace-less `Seq`, so the binders land in the enclosing scope) |
+
+So a function returns `struct { u8, u8 }`, the caller writes `const lo, const hi = minmax(…);`, and
+both sides are plain `ValueTuple` — no custom runtime. Example: `examples/zig-tuple/main.zig`.
+
+**Why `ValueTuple` and not a `Span`-style type:** a `ValueTuple` is a value type (copied on
+assignment), positional, fixed-arity, deconstructs natively, and is `unmanaged` when its elements
+are (so it can be a struct field / cross the ABI) — the same property that justified `Slice<T>`. The
+fit is exact for the runtime subset; only the comptime *flavor* of tuples (type-valued /
+`comptime_int` fields, and the `std.fmt` `.{…}` reflection idiom — already handled via
+`extern fn printf`) stays out, the comptime root again.
+
+**V1 limits** (documented, not silent): arity 1..7 (an empty tuple and arity > 7 — which would need
+ValueTuple's `TRest` nesting — are deferred); the assign-to-existing-lvalue destructure `a, b = e;`
+is a grammar-level cut (a parse error — V1 binders are `const`/`var` only); a literal that mixes
+positional + named fields is rejected; and a runtime (non-literal) tuple index is rejected.
+
 ## Strictness — dotcc tracks Zig where it matters
 
 dotcc lowers Zig onto the same C-shaped IR + C# backend as C, which is C-lenient by
@@ -299,4 +332,6 @@ rejects, not silently accept more.
   `examples/zig-union` (tagged `union(enum)`: payload + void variants, `switch` with `\|x\|` capture),
   `examples/zig-slices` (`[]const u8` slices: `.len`/`.ptr`, index, `s[lo..hi]`, `for (s) \|b\|`),
   `examples/zig-alloc` (allocators: devirt'd `page_allocator`, a `FixedBufferAllocator` via the
-  indirect vtable, an opaque `std.mem.Allocator` param + materialized default).
+  indirect vtable, an opaque `std.mem.Allocator` param + materialized default),
+  `examples/zig-tuple` (tuples: a `struct { u8, u8 }` multiple-return + `const lo, const hi = …`
+  destructure, a tuple-typed parameter, an inline-literal destructure, a literal `t[N]` index).
