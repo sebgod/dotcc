@@ -505,6 +505,21 @@ public sealed class ZigOracleTests
             "    if (calls == 1) return arr[0];\n" +
             "    return 0;\n" +
             "}\n", 42, "" },
+        // TOP-LEVEL GLOBALS. A typed `const`, an untyped `const` (comptime_int → int), and a
+        // mutable `var` global bumped twice by a function (proving the mutation persists across
+        // calls and resolves by bare name). 30 + 10 + 2 = 42.
+        new object[] { "global_const_var",
+            "const BONUS: u8 = 10;\n" +
+            "const BASE = 30;\n" +
+            "var counter: u8 = 0;\n" +
+            "fn bump() void { counter += 1; }\n" +
+            "pub fn main() u8 { bump(); bump(); return BASE + BONUS + counter; }\n", 42, "" },
+        // A global's initializer references an EARLIER global by bare name (source-ordered lowering
+        // → C# declaration-ordered field init). 20 + 22 = 42.
+        new object[] { "global_const_ref",
+            "const A: u8 = 20;\n" +
+            "const B: u8 = A + 22;\n" +
+            "pub fn main() u8 { return B; }\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
