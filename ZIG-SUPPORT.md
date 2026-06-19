@@ -89,9 +89,11 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `const a, const b = e;` destructure | ✅ | bind a tuple's elements to new locals (Milestone G) — desugars to a single-eval temp + per-element `.ItemN` reads (a brace-less sequence, so the binders stay in the enclosing scope). `const`/`var` binders, ≥2. **Deferred:** the assign-to-existing-lvalue form `a, b = e;` (a grammar-level cut, so a parse error) and typed binders (`const a: T, …`) |
 | `_ = e;` discard | ✅ | Zig's mandatory discard of a non-void result |
 | block `{ … }` | ✅ | |
+| `defer Stmt;` | ✅ | scope-exit cleanup — runs on EVERY exit from the enclosing block (fall-through, `return`, `break`, `continue`, a propagating error), in LIFO declaration order. → C# `try { rest } finally { cleanup }`. The deferred `Stmt` is an `expr;`, a `_ = expr;` discard, or a braced block. See the **Defer** section |
+| `errdefer Stmt;` | ✅ | error-exit cleanup — runs only when the block exits via a propagating error, LIFO-interleaved with `defer`. → C# `try { rest } catch (ZigErrorReturn) { cleanup; throw; }`. A function with an `errdefer` routes its `return error.X` through a throw so it reaches the catch. **Deferred:** `errdefer \|e\| …` payload capture |
 | `for (a..b) \|i\| …` (range for) | ✅ | → C `for (usize i = a; i < b; i++)`; the `\|i\|` capture is the usize loop index (`\|_\|` discards). The body is a Stmt or block |
 | `for (s) \|x\|` / `for (s, 0..) \|x, i\|` (for-over-slice) | ✅ | iterate a slice's elements (`x` = a per-iteration copy); the index form also binds the usize index. → C `for (usize __i=0; __i<s.Len; __i++) { var x = s.Ptr[__i]; [var i = __i + 0;] … }` (the slice is hoisted to a temp unless a bare var) |
-| open-ended `s[lo..]`, by-ref `\|*x\|`, `defer`/`errdefer`, labeled loops, labeled `break`/`continue`, switch ranges/expr | 🚫 | |
+| open-ended `s[lo..]`, by-ref `\|*x\|`, labeled loops, labeled `break`/`continue`, switch ranges/expr | 🚫 | |
 
 ## Expressions
 
@@ -263,9 +265,9 @@ indirect dispatch. Example: `examples/zig-alloc/main.zig`.
 `fba.allocator()` result and every `std.mem.Allocator` parameter are opaque (indirect), even
 where a local could in principle be proven; `a.create(T)` / `a.destroy(p)` (single-object
 alloc → `Error!*T`, an error-union-over-pointer) and `resize`/`remap`/`realloc` are deferred
-with a clear error; `defer`/`errdefer` is a separate (unbuilt) feature, so allocations are
-freed explicitly (or leak on process exit); and `std` is a known-paths resolver, not a real
-std model — anything outside the allocator paths above errors clearly.
+with a clear error; and `std` is a known-paths resolver, not a real std model — anything outside
+the allocator paths above errors clearly. (`defer a.free(buf)` — the idiomatic, every-path release
+— now works; see the **Defer** section.)
 
 ## Tuples — runtime tuples → C# `ValueTuple`
 
@@ -295,6 +297,40 @@ fit is exact for the runtime subset; only the comptime *flavor* of tuples (type-
 ValueTuple's `TRest` nesting — are deferred); the assign-to-existing-lvalue destructure `a, b = e;`
 is a grammar-level cut (a parse error — V1 binders are `const`/`var` only); a literal that mixes
 positional + named fields is rejected; and a runtime (non-literal) tuple index is rejected.
+
+## Defer / errdefer — scope-exit cleanup → C# try/finally + try/catch
+
+`defer Stmt;` registers a cleanup that runs when control leaves the enclosing block — on EVERY
+exit (fall-through, `return`, `break`, `continue`, or a propagating error), in LIFO declaration
+order. `errdefer Stmt;` is the same but fires only when the block exits via a **propagating
+error**. The two share one LIFO cleanup stack (a later-declared `errdefer` runs before an
+earlier `defer`). The headline use is pairing an allocation with its release:
+`const buf = try a.alloc(u8, n); defer a.free(buf);`.
+
+dotcc lowers a block's defers by **restructuring**: each `defer`/`errdefer` wraps the statements
+that follow it within its block, nested in lexical order — so the nesting itself yields the LIFO
+order, the same shape as the C front-end's `setjmp` try-guard.
+
+| Form | Lowers to |
+|---|---|
+| `defer cleanup;` | `try { rest-of-block } finally { cleanup }` (C#'s finally fires on every exit) |
+| `errdefer cleanup;` | `try { rest-of-block } catch (ZigErrorReturn) { cleanup; throw; }` (the rethrow keeps the error propagating to the `!T` boundary) |
+| `return error.X;` in a fn that has an `errdefer` | `throw new ZigErrorReturn(code);` (NOT a direct `Err` return — see below) |
+
+**The `errdefer` ⇄ `return error.X` seam.** An `errdefer` is a C# `catch`, which only fires on a
+THROWN error. But `return error.X;` normally lowers to a *direct* `ErrUnion<T>.Err(code)` return
+(Milestone B2), which a catch can't observe. So when the enclosing function contains an `errdefer`,
+its error returns are instead routed through a thrown `ZigErrorReturn` — propagating through the
+errdefer catch(es) on the stack, with the existing `!T` boundary catch still converting it back to
+an `Err`. This unifies both error-exit paths (`try`-propagation and explicit `return error.X`) to one
+mechanism. A function with **no** `errdefer` keeps B2's elegant, exception-free direct `Err` return
+untouched. (`defer` needs no such rewrite — a C# `finally` fires on a direct return too.) Example:
+`examples/zig-defer/main.zig`.
+
+**V1 limits** (documented, not silent): `errdefer |e| …` payload capture is deferred (the grammar's
+`errdefer Stmt` has no `|e|`); a control-flow statement inside a defer (`defer return;` /
+`break` / `continue` — which Zig itself rejects) would emit an illegal C# `finally { return; }`
+(CS0157) rather than a faithful loud reject (a later polish).
 
 ## Strictness — dotcc tracks Zig where it matters
 
@@ -334,4 +370,6 @@ rejects, not silently accept more.
   `examples/zig-alloc` (allocators: devirt'd `page_allocator`, a `FixedBufferAllocator` via the
   indirect vtable, an opaque `std.mem.Allocator` param + materialized default),
   `examples/zig-tuple` (tuples: a `struct { u8, u8 }` multiple-return + `const lo, const hi = …`
-  destructure, a tuple-typed parameter, an inline-literal destructure, a literal `t[N]` index).
+  destructure, a tuple-typed parameter, an inline-literal destructure, a literal `t[N]` index),
+  `examples/zig-defer` (defer/errdefer: `defer a.free(buf)` pairing a FixedBufferAllocator
+  allocation with its release, plus an `errdefer` step that fires on the error path).
