@@ -49,6 +49,13 @@ internal sealed class ZigLowering
     /// <c>return</c> wraps its value as an error union (<see cref="LowerReturn"/>).</summary>
     private CType? _currentFnRet;
 
+    /// <summary>Monotonic counter for destructure temporaries (<c>__tupN</c>): a destructure
+    /// <c>const a, const b = e;</c> evaluates <c>e</c> ONCE into <c>__tupN</c>, then binds each
+    /// name to its positional element. The temp lives in the enclosing (brace-less
+    /// <see cref="Seq"/>) scope alongside the binders, so repeated destructures in one block need
+    /// distinct temp names (Milestone G).</summary>
+    private int _tupleTempCounter;
+
     /// <summary>Container type names declared in this unit (<c>const P = struct {…}</c> /
     /// <c>const C = enum {…}</c>) → the <see cref="CType"/> the name resolves to: a
     /// <see cref="CType.Named"/> for a struct, a <see cref="CType.Enum"/> for an enum.
@@ -736,16 +743,84 @@ internal sealed class ZigLowering
     /// <c>.{}</c> zero-inits every field.</summary>
     private CExpr LowerStructInit(Item initItem, CType? sink)
     {
+        // The empty `.{}` (AnonStructInitEmpty) carries no field list — zero-init every field.
+        IReadOnlyList<Item> fields = initItem.Content is Zig.AnonStructInit a ? Flatten(a.Arg2) : [];   // Primary -> '.' '{' FieldInits '}'
+        // A `.{…}` is a TUPLE when its elements are positional (`.{a, b}`) and a STRUCT/UNION when
+        // they are named (`.{.f = v}`). Zig never mixes the two in one literal — reject that early.
+        bool anyPositional = false, anyNamed = false;
+        foreach (var f in fields)
+        {
+            if (f.Content is Zig.FieldInitPositional) { anyPositional = true; } else { anyNamed = true; }
+        }
+        if (anyPositional && anyNamed)
+        {
+            throw new IrUnsupportedException(
+                "zig `.{…}` mixes positional and named fields — a tuple literal is all-positional, a struct literal all-named");
+        }
+        // Tuple literal: a positional list, or a (positional/empty) `.{…}` whose sink IS a tuple.
+        // Element types come from the sink, or are inferred from the elements when there's none.
+        if (sink?.Unqualified is CType.Tuple tupleSink)
+        {
+            if (anyNamed)
+            {
+                throw new IrUnsupportedException(
+                    "zig tuple `.{…}` at a tuple type must use positional elements, not `.field = …`");
+            }
+            return BuildTupleInit(fields, tupleSink);
+        }
+        if (anyPositional)
+        {
+            return BuildTupleInit(fields, null);   // inferred tuple (no sink, e.g. `const t = .{a, b};`)
+        }
+        // Named struct / union — needs a known struct result type.
         if (sink?.Unqualified is not CType.Named named)
         {
             throw new IrUnsupportedException(
                 "zig anonymous struct literal `.{…}` needs a known struct result type (a typed const/var, a return, or a field)");
         }
-        // The empty `.{}` (AnonStructInitEmpty) carries no field list — zero-init every field.
-        IReadOnlyList<Item> fields = initItem.Content is Zig.AnonStructInit a ? Flatten(a.Arg2) : [];   // Primary -> '.' '{' FieldInits '}'
         // A tagged-union sink → a union literal (sets the tag + exactly one payload variant).
         if (_unions.TryGetValue(named.Name, out var uinfo)) { return BuildUnionInit(fields, uinfo); }
         return BuildStructInit(fields, named);
+    }
+
+    /// <summary>Build a tuple literal <c>.{ a, b, … }</c> (Milestone G) → <see cref="TupleNew"/>.
+    /// With a <paramref name="sink"/> tuple type, each element lowers at its declared element type
+    /// as its sink (so a nested <c>.{…}</c>/<c>.member</c> resolves) and the count must match; with
+    /// no sink the element types are inferred from the elements themselves
+    /// (<c>const t = .{a, b};</c>). Arity 1..7 (empty and &gt; 7 deferred — see
+    /// <see cref="LowerTupleType"/>).</summary>
+    private CExpr BuildTupleInit(IReadOnlyList<Item> posItems, CType.Tuple? sink)
+    {
+        if (sink is not null && posItems.Count != sink.Elements.Count)
+        {
+            throw new IrUnsupportedException(
+                $"zig tuple literal has {posItems.Count} element(s) but the target tuple has {sink.Elements.Count}");
+        }
+        if (posItems.Count is 0 or > 7)
+        {
+            throw new IrUnsupportedException(
+                $"zig tuple literal arity {posItems.Count} is not supported (1..7; an empty tuple and arity > 7 are deferred)");
+        }
+        var elems = new List<CExpr>();
+        var types = new List<CType>();
+        for (int i = 0; i < posItems.Count; i++)
+        {
+            var pos = (Zig.FieldInitPositional)posItems[i].Content!;   // FieldInit -> Expr
+            if (sink is not null)
+            {
+                var et = sink.Elements[i];
+                elems.Add(LowerExprSink(pos.Arg0, et));
+                types.Add(et);
+            }
+            else
+            {
+                var e = LowerExpr(pos.Arg0);
+                elems.Add(e);
+                types.Add(e.Type);
+            }
+        }
+        var tt = sink ?? new CType.Tuple(types);
+        return new TupleNew(elems, tt) { Type = tt };
     }
 
     /// <summary>Lower a TYPED struct literal `Type{ .field = … }` — Zig's CurlySuffixExpr
@@ -924,6 +999,9 @@ internal sealed class ZigLowering
             case Zig.ConstDeclTyped d:  return DeclOrComptime(d.Arg1, d.Arg3, d.Arg5);
             case Zig.VarDecl d:         return DeclOf(d.Arg1, null, d.Arg3);
             case Zig.VarDeclTyped d:    return DeclOf(d.Arg1, d.Arg3, d.Arg5);
+            // `const a, const b = e;` (Milestone G) — destructure a tuple value: single-eval the
+            // RHS, then bind each name to its positional element. See LowerDestructure.
+            case Zig.StmtDestructure sd: return LowerDestructure(sd);
             case Zig.StmtReturn r:      return LowerReturn(r.Arg1);
             case Zig.StmtReturnVoid:    return LowerReturnVoid();
             case Zig.StmtExpr e:        return new ExprStmt(LowerExpr(e.Arg0));
@@ -1038,6 +1116,51 @@ internal sealed class ZigLowering
         var type = declared ?? init.Type ?? CType.Int;
         var sym2 = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = type });
         return new DeclStmt(new List<LocalDecl> { new(sym2, init) });
+    }
+
+    /// <summary>Lower a destructure binding <c>const a, const b = e;</c> (Milestone G). The RHS is
+    /// evaluated ONCE into a fresh tuple temp (<c>__tupN</c>), then each binder reads its positional
+    /// element (<c>__tupN.ItemK</c>). Emitted as a brace-less <see cref="Seq"/> so the binders land
+    /// in the ENCLOSING scope (a <see cref="Block"/> would wrongly scope them). The RHS must be a
+    /// tuple whose arity matches the binder count. V1 binders are <c>const</c>/<c>var</c> only — the
+    /// const-ness isn't enforced (both lower to a C# local); the assign-to-existing form is
+    /// deferred (see the grammar).</summary>
+    private CStmt LowerDestructure(Zig.StmtDestructure d)
+    {
+        // Binders in source order: the leading one (Arg0) + the rest (the Arg2 list).
+        var binders = new List<Item> { d.Arg0 };
+        binders.AddRange(Flatten(d.Arg2));
+        var rhs = LowerExpr(d.Arg4);   // RhsExpr is transparent — the underlying Expr/IfExpr comes through
+        if (rhs.Type.Unqualified is not CType.Tuple tup)
+        {
+            throw new IrUnsupportedException(
+                $"zig destructure `const a, … = e` needs a tuple value; got {rhs.Type.Describe()}");
+        }
+        if (tup.Elements.Count != binders.Count)
+        {
+            throw new IrUnsupportedException(
+                $"zig destructure binds {binders.Count} name(s) but the tuple has {tup.Elements.Count} element(s)");
+        }
+        var stmts = new List<CStmt>();
+        // The single-eval temp: `var __tupN = e;`.
+        var tmp = _symbols.Declare(new Symbol { Name = "__tup" + _tupleTempCounter++, Kind = SymKind.Var, Type = tup });
+        stmts.Add(new DeclStmt(new List<LocalDecl> { new(tmp, rhs) }));
+        var tmpRef = new VarRef(tmp) { Type = tup, IsLValue = true };
+        for (int i = 0; i < binders.Count; i++)
+        {
+            var name = binders[i].Content switch
+            {
+                Zig.DestructBindConst c => Tok(c.Arg1),   // 'const' IDENT
+                Zig.DestructBindVar v   => Tok(v.Arg1),   // 'var' IDENT
+                _ => throw new IrUnsupportedException(
+                    "zig destructure binder: " + (binders[i].Content?.GetType().Name ?? "null")),
+            };
+            var et = tup.Elements[i];
+            var read = new TupleIndex(tmpRef, i, et) { Type = et };
+            var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = et });
+            stmts.Add(new DeclStmt(new List<LocalDecl> { new(sym, read) }));
+        }
+        return new Seq(stmts);
     }
 
     /// <summary>Dispatch a <c>switch</c> statement: lower the subject once, then route a
@@ -1479,10 +1602,12 @@ internal sealed class ZigLowering
             case Zig.EnumLit:
                 throw new IrUnsupportedException(
                     "zig enum literal `.member` needs a known result type (use a typed declaration, a return, an assignment, or a switch on the enum)");
+            // A `.{…}` with no sink: a POSITIONAL list is an inferred tuple literal (`const t =
+            // .{a, b};`); a NAMED list still needs a struct result type, so LowerStructInit errors
+            // there as before (Milestone G routes both through the one method).
             case Zig.AnonStructInit:
             case Zig.AnonStructInitEmpty:
-                throw new IrUnsupportedException(
-                    "zig anonymous struct literal `.{…}` needs a known struct result type (a typed const/var, a return, or a field)");
+                return LowerStructInit(expr, null);
 
             // Typed struct literal `Type{ .field = … }` (Zig's CurlySuffixExpr). The struct type
             // is named explicitly, so — unlike `.{…}` — it needs no sink and is valid anywhere.
@@ -1507,6 +1632,23 @@ internal sealed class ZigLowering
             {
                 var baseExpr = LowerExpr(ix.Arg0);
                 var idx = LowerExpr(ix.Arg2);
+                // A tuple subscript `t[N]` (N a literal) reads the Nth element → `.ItemN+1`
+                // (Milestone G). A tuple has no runtime indexing (the field is statically named),
+                // so a non-literal index is rejected.
+                if (baseExpr.Type.Unqualified is CType.Tuple tup)
+                {
+                    if (idx is not LitInt { Value: { } n })
+                    {
+                        throw new IrUnsupportedException(
+                            "zig tuple index must be an integer literal (a tuple has no runtime indexing)");
+                    }
+                    if (n < 0 || n >= tup.Elements.Count)
+                    {
+                        throw new IrUnsupportedException(
+                            $"zig tuple index {n} is out of range (the tuple has {tup.Elements.Count} element(s))");
+                    }
+                    return new TupleIndex(baseExpr, (int)n, tup.Elements[(int)n]) { Type = tup.Elements[(int)n] };
+                }
                 // A slice subscript indexes through its data pointer: `s[i]` → `s.Ptr[i]`.
                 if (baseExpr.Type.Unqualified is CType.Slice slc)
                 {
@@ -2208,6 +2350,9 @@ internal sealed class ZigLowering
         // (a general comptime const-expr size is deferred). A `var b: [N]T` local lowers to a
         // stackalloc'd C array (see DeclOf), so slicing it (`b[lo..hi]`) yields a stack-backed slice.
         Zig.TyArray a => new CType.Array(LowerType(a.Arg3), ConstEvalArraySize(a.Arg1)),
+        // Tuple TYPE `struct { T1, T2, … }` (Milestone G) → CType.Tuple → C# System.ValueTuple<…>.
+        // Used as a function return type or a var/param annotation; nested tuple types compose.
+        Zig.TyTuple t => LowerTupleType(t.Arg2),
         // `@This()` — Zig's reflective self-type → the container currently being lowered, so
         // `self: @This()` / `self: *@This()` name the receiver without repeating the type name.
         // The `const Self = @This();` alias form (the common Zig idiom) is also supported — it
@@ -2235,6 +2380,21 @@ internal sealed class ZigLowering
         }
         throw new IrUnsupportedException(
             $"zig type: a dotted type `{Tok(((Zig.Field)f.Content!).Arg2)}` that is not a modeled std path");
+    }
+
+    /// <summary>Lower a tuple TYPE body (the <c>T1, T2, …</c> inside <c>struct { … }</c> at a Type
+    /// position) to a <see cref="CType.Tuple"/>. V1 supports arity 1..7 (an empty tuple and
+    /// arity &gt; 7 — which would need ValueTuple's <c>TRest</c> nesting — are deferred with a clear
+    /// error). Each element is itself a <see cref="LowerType"/>, so nested tuple types compose.</summary>
+    private CType LowerTupleType(Item tupleTypes)
+    {
+        var elems = Flatten(tupleTypes).Select(LowerType).ToList();
+        if (elems.Count is 0 or > 7)
+        {
+            throw new IrUnsupportedException(
+                $"zig tuple type arity {elems.Count} is not supported (1..7; an empty tuple and arity > 7 are deferred)");
+        }
+        return new CType.Tuple(elems);
     }
 
     /// <summary>The type the enclosing container's <c>@This()</c> resolves to — the struct/enum
@@ -2369,6 +2529,11 @@ internal sealed class ZigLowering
                 case Zig.FieldInitsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [FieldInits, ',', FieldInit]
                 case Zig.FieldInitsOne o:  stack.Push(o.Arg0); break;
                 case Zig.FieldInitsTrail t: stack.Push(t.Arg0); break;
+                case Zig.TupleTypesCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [TupleTypes, ',', Type]
+                case Zig.TupleTypesOne o:  stack.Push(o.Arg0); break;
+                case Zig.TupleTypesTrail t: stack.Push(t.Arg0); break;
+                case Zig.DestructBindsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [DestructBinds, ',', DestructBind]
+                case Zig.DestructBindsOne o:  stack.Push(o.Arg0); break;
                 default: ordered.Add(n); break;
             }
         }

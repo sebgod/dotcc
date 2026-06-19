@@ -395,6 +395,27 @@ public sealed class ZigOracleTests
             "    return s[0];\n" +
             "}\n" +
             "pub fn main() u8 { return run() catch 42; }\n", 42, "" },
+        // TUPLES (Milestone G). The headline use: a function returns a tuple `struct { u8, u8 }`
+        // and the caller destructures it with `const a, const b = mm();` → C# ValueTuple +
+        // `.Item1`/`.Item2`. 20 + 22 = 42.
+        new object[] { "tuple_return",
+            "fn mm() struct { u8, u8 } { return .{ 20, 22 }; }\n" +
+            "pub fn main() u8 { const a, const b = mm(); return a + b; }\n", 42, "" },
+        // A tuple LITERAL bound to a var, indexed by literal subscript (`t[0]`/`t[1]` → `.ItemN`).
+        new object[] { "tuple_index",
+            "pub fn main() u8 { const t = .{ @as(u8, 20), @as(u8, 22) }; return t[0] + t[1]; }\n", 42, "" },
+        // Destructure straight from an inline positional literal (its tuple type is inferred).
+        new object[] { "tuple_destructure_literal",
+            "pub fn main() u8 { const a, const b = .{ @as(u8, 40), @as(u8, 2) }; return a + b; }\n", 42, "" },
+        // Arity 3 — a 3-tuple return + 3-binder destructure. 10 + 15 + 17 = 42.
+        new object[] { "tuple_three",
+            "fn mm() struct { u8, u8, u8 } { return .{ 10, 15, 17 }; }\n" +
+            "pub fn main() u8 { const a, const b, const c = mm(); return a + b + c; }\n", 42, "" },
+        // A tuple TYPE as a function PARAMETER, fed an inline literal at the call (result-located),
+        // and indexed inside. 40 + 2 = 42.
+        new object[] { "tuple_param",
+            "fn sum(t: struct { u8, u8 }) u8 { return t[0] + t[1]; }\n" +
+            "pub fn main() u8 { return sum(.{ 40, 2 }); }\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
