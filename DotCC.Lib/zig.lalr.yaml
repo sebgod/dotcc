@@ -164,6 +164,9 @@ symbols:
   - TupleTypes     # 109 tuple-TYPE element list: the `T1, T2, …` inside `struct { … }` at a Type position
   - DestructBinds  # 110 destructure binder list (≥2 via the Stmt rule): `const a, const b`
   - DestructBind   # 111 one destructure binder: `const IDENT` / `var IDENT`
+  # --- defer / errdefer (Milestone H; appended — never reorder) ---
+  - 'defer'        # 112 `defer Stmt` — scope-exit cleanup (runs on every block exit, LIFO)
+  - 'errdefer'     # 113 `errdefer Stmt` — error-exit cleanup (runs only when the block errors out)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -266,6 +269,12 @@ productions:
       - { lhs: Stmt, rhs: ['while', '(', Expr, ')', ':', '(', Expr, ')', Stmt],               action: stmtWhileCont }
       - { lhs: Stmt, rhs: ['break', ';'],    action: stmtBreak }
       - { lhs: Stmt, rhs: ['continue', ';'], action: stmtContinue }
+      # `defer Stmt` / `errdefer Stmt` (Milestone H) — scope-exit cleanup. The body is a
+      # full Stmt (an `expr;`, a `_ = expr;` discard, or a braced Block). A unique leading
+      # keyword at statement position, so no conflict with the other Stmt forms (like break/
+      # continue). The block restructuring + LIFO nesting lives in ZigLowering, not the grammar.
+      - { lhs: Stmt, rhs: ['defer', Stmt],    action: stmtDefer }
+      - { lhs: Stmt, rhs: ['errdefer', Stmt], action: stmtErrdefer }
       # `switch (x) { prong, … }` as a STATEMENT. Each prong is `CaseVals => Block` — the
       # body MUST be a braced block (bare-expr bodies + switch-as-EXPRESSION are deferred).
       # Zig switch has NO fall-through, so the lowering appends a `break` to each section
@@ -682,6 +691,11 @@ lexer:
     - { symbol: 'struct',   match: 'struct' }
     - { symbol: 'enum',     match: 'enum' }
     - { symbol: 'union',    match: 'union' }
+    # `errdefer` (8 chars) and `defer` (5): longest-match beats IDENT; `errdefer` vs the
+    # `error` keyword — `errdefer` is longer, so it wins on its own input; `error` still
+    # wins on `error` (first-rule-wins on the 5-char tie with IDENT).
+    - { symbol: 'defer',    match: 'defer' }
+    - { symbol: 'errdefer', match: 'errdefer' }
 
     # Multi-char operators (longest-match handles overlaps; listed first for clarity).
     - { symbol: '==', match: '==' }
