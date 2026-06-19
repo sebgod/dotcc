@@ -171,6 +171,19 @@ symbols:
   - 'true'         # 114 the `true` boolean literal (a `bool` value, like null/undefined)
   - 'false'        # 115 the `false` boolean literal
   - CHAR           # 116 a character literal `'x'` / `'\n'` / `'\xNN'` — value = the codepoint
+  # --- compound assignment operators (appended — never reorder) ---
+  # The 10 plain compound-assign operators (`x op= y`). Zig also has wrapping (`+%=`) and
+  # saturating (`+|=`) variants — deferred — and NO `++`/`--` (the idiom is `x += 1`).
+  - '+='           # 117 add-assign
+  - '-='           # 118 sub-assign
+  - '*='           # 119 mul-assign
+  - '/='           # 120 div-assign
+  - '%='           # 121 mod-assign
+  - '<<='          # 122 shl-assign
+  - '>>='          # 123 shr-assign
+  - '&='           # 124 bitand-assign
+  - '|='           # 125 bitor-assign
+  - '^='           # 126 bitxor-assign
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -307,6 +320,22 @@ productions:
       # always followed by `,` (never `=`), keeping the `=`/`:` lookahead clean vs VarDecl/stmtAssign.
       - { lhs: Stmt, rhs: [DestructBind, ',', DestructBinds, '=', RhsExpr, ';'], action: stmtDestructure }
       - { lhs: Stmt, rhs: [Expr, '=', RhsExpr, ';'],         action: stmtAssign }
+      # Compound assignment `x op= y` — one rule per operator, mirroring the binary-operator
+      # cascade. Each lowers to the shared `Assign` IR node with a non-null `CompoundOp`, which
+      # the C# backend renders as a NATIVE `target op= rhs` — so the lvalue is evaluated EXACTLY
+      # ONCE (correct binding for `a[i()] += 1` / `p.* += 1`), never the double-eval a `x = x + y`
+      # desugar would cause. After `Expr`, each operator token is a clean shift (distinct from the
+      # `=` of stmtAssign and the `;` of stmtExpr), so these are conflict-free with both.
+      - { lhs: Stmt, rhs: [Expr, '+=',  RhsExpr, ';'], action: stmtAddAssign }
+      - { lhs: Stmt, rhs: [Expr, '-=',  RhsExpr, ';'], action: stmtSubAssign }
+      - { lhs: Stmt, rhs: [Expr, '*=',  RhsExpr, ';'], action: stmtMulAssign }
+      - { lhs: Stmt, rhs: [Expr, '/=',  RhsExpr, ';'], action: stmtDivAssign }
+      - { lhs: Stmt, rhs: [Expr, '%=',  RhsExpr, ';'], action: stmtModAssign }
+      - { lhs: Stmt, rhs: [Expr, '<<=', RhsExpr, ';'], action: stmtShlAssign }
+      - { lhs: Stmt, rhs: [Expr, '>>=', RhsExpr, ';'], action: stmtShrAssign }
+      - { lhs: Stmt, rhs: [Expr, '&=',  RhsExpr, ';'], action: stmtBitAndAssign }
+      - { lhs: Stmt, rhs: [Expr, '|=',  RhsExpr, ';'], action: stmtBitOrAssign }
+      - { lhs: Stmt, rhs: [Expr, '^=',  RhsExpr, ';'], action: stmtBitXorAssign }
       - { lhs: Stmt, rhs: [Expr, ';'],                        action: stmtExpr }
       - { lhs: Stmt, rhs: [Block] }
 
@@ -718,6 +747,19 @@ lexer:
     - { symbol: '.*', match: '\.\*' }
     - { symbol: '.?', match: '\.\?' }
     - { symbol: '=>', match: '=>' }
+    # Compound-assignment operators. Longest-match picks these over their prefix operators
+    # (`+=` over `+`/`=`, `<<=` over `<<`/`<`/`<=`), so order vs the single-char rules below
+    # doesn't matter — grouped here with the other multi-char ops for clarity.
+    - { symbol: '+=',  match: '\+=' }
+    - { symbol: '-=',  match: '\-=' }
+    - { symbol: '*=',  match: '\*=' }
+    - { symbol: '/=',  match: '/=' }
+    - { symbol: '%=',  match: '%=' }
+    - { symbol: '<<=', match: '<<=' }
+    - { symbol: '>>=', match: '>>=' }
+    - { symbol: '&=',  match: '&=' }
+    - { symbol: '|=',  match: '\|=' }
+    - { symbol: '^=',  match: '\^=' }
     # `...` (3 chars) before `.*`/`.?`/`.` — longest-match prefers it regardless of
     # order, but listed here with the other multi-char operators for clarity. `..` (2 chars,
     # the for-range operator) sits between `...` and `.` — longest-match picks the right one.
