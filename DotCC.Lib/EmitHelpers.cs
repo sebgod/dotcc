@@ -135,6 +135,18 @@ internal static class EmitHelpers
 
     private static int HexVal(char c) => c <= '9' ? c - '0' : char.ToLowerInvariant(c) - 'a' + 10;
 
+    /// <summary>Decode a character-literal body (the chars BETWEEN the quotes) to its codepoint
+    /// value — a single char, a named/GNU escape, octal, or <c>\xNN</c> hex — reusing the same
+    /// escape machinery as the string lowering (<see cref="DecodeEscapeOrChar"/>). Used by the Zig
+    /// front-end for <c>'x'</c> literals (Zig char literals are <c>comptime_int</c> = the codepoint;
+    /// their escape set overlaps C's for the cases dotcc lexes). An empty body yields 0.</summary>
+    internal static int DecodeCharLiteral(string body)
+    {
+        if (body.Length == 0) { return 0; }
+        var i = 0;
+        return DecodeEscapeOrChar(body, ref i).Value;
+    }
+
     // Re-emit decoded items as a greedy-safe C# u8-literal body, returning the
     // escaped text and byte length. Source chars pass through (the u8 literal
     // UTF-8-encodes them — matching C's UTF-8 source bytes); decoded escape

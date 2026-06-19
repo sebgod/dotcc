@@ -1490,6 +1490,21 @@ internal sealed class ZigLowering
             }
             case Zig.FloatLit f: return new LitFloat(Tok(f.Arg0)) { Type = CType.Double };
 
+            // `true`/`false` — boolean literals (a `bool` value, like `null`/`undefined`). Typed
+            // `_Bool` (→ the store-normalising `CBool`, which takes a C# `bool`).
+            case Zig.TrueLit:  return new LitBool(true) { Type = CType.Bool };
+            case Zig.FalseLit: return new LitBool(false) { Type = CType.Bool };
+
+            // A char literal `'x'` / `'\n'` / `'\xNN'` — Zig's `comptime_int` = the codepoint.
+            // Decode the body (quotes stripped) reusing the shared escape machinery, then lower to
+            // an int literal, exactly like the C front-end's char constant.
+            case Zig.CharLit c:
+            {
+                var raw = Tok(c.Arg0);
+                var v = DotCC.EmitHelpers.DecodeCharLiteral(raw.Length >= 2 ? raw[1..^1] : "");
+                return new LitInt(v.ToString(CultureInfo.InvariantCulture), v) { Type = CType.Int };
+            }
+
             // A string literal. Zig's escape set overlaps C's for the common cases
             // (`\n`/`\t`/`\\`/`\"`/`\xNN`), so we reuse the C string machinery: the raw
             // quoted lexeme becomes a single LitStr segment, typed `char[N]` (decoded

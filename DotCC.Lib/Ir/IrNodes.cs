@@ -39,6 +39,12 @@ public abstract record CExpr
 /// when it fits a long (for const-expression contexts).</summary>
 public sealed record LitInt(string Digits, long? Value) : CExpr;
 
+/// <summary>A boolean literal — the Zig front-end's <c>true</c>/<c>false</c> (C has no bool
+/// literal node; its <c>true</c>/<c>false</c> are <c>&lt;stdbool.h&gt;</c> macros → 1/0). The
+/// backend renders it as C# <c>true</c>/<c>false</c>; its <see cref="CExpr.Type"/> is
+/// <see cref="CType.Bool"/> (→ the store-normalising <c>CBool</c>, which takes a C# <c>bool</c>).</summary>
+public sealed record LitBool(bool Value) : CExpr;
+
 /// <summary>A floating constant. <see cref="Text"/> is the target-neutral decimal
 /// spelling (a hex-float normalised to round-trippable decimal; a long-double
 /// suffix dropped, an <c>f</c> kept); the backend emits it via
