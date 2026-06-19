@@ -1338,6 +1338,7 @@ internal sealed class CSharpBackend
         switch (e)
         {
             case LitInt i: return (_target.RenderIntLit(i), PPrimary);
+            case LitBool b: return (b.Value ? "true" : "false", PPrimary);
             case LitFloat f: return (_target.RenderFloatLit(f), PPrimary);
             case LitStr s: return (DotCC.EmitHelpers.EncodeStringLiteral(s.Segments), PPrimary);
             case LitU16Str s: return (DotCC.EmitHelpers.EncodeU16StringLiteral(s.Segments), PPrimary);

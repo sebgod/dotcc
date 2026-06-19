@@ -1015,4 +1015,39 @@ public sealed class ZigFrontendTests
         // own `throw new ZigErrorReturn(u.Code)` is exempt — it carries no `(ushort)` cast.
         cs.ShouldNotContain("throw new ZigErrorReturn((ushort)");
     }
+
+    [Fact]
+    public void Lowers_true_and_false_to_csharp_bool_literals()
+    {
+        // `true`/`false` are bool values → C# `true`/`false`; a `: bool` decl lowers to the
+        // store-normalising CBool (which takes a C# bool).
+        var cs = EmitZig(
+            "pub fn main() u8 { const a: bool = true; const b = false; if (a) { if (b) return 0; return 1; } return 2; }\n");
+        cs.ShouldContain("CBool a = true;");
+        cs.ShouldContain("= false;");
+    }
+
+    [Fact]
+    public void Lowers_a_char_literal_to_its_codepoint()
+    {
+        // A char literal is Zig's comptime_int = the codepoint → an integer literal (`'A'` → 65).
+        var cs = EmitZig(
+            "extern fn putchar(c: c_int) c_int;\n" +
+            "pub fn main() u8 { _ = putchar('A'); return 0; }\n");
+        cs.ShouldContain("putchar(65)");
+    }
+
+    [Fact]
+    public void Decodes_char_literal_escapes()
+    {
+        // Named, hex, and quote/backslash escapes all decode to their byte value via the shared
+        // escape machinery: '\n'→10, '\x2A'→42, '\''→39, '\\'→92.
+        var cs = EmitZig(
+            "pub fn main() u8 { const nl: u8 = '\\n'; const hx: u8 = '\\x2A'; const q: u8 = '\\''; " +
+            "const bs: u8 = '\\\\'; return nl + hx + q + bs; }\n");
+        cs.ShouldContain("byte nl = 10;");
+        cs.ShouldContain("byte hx = 42;");
+        cs.ShouldContain("byte q = 39;");
+        cs.ShouldContain("byte bs = 92;");
+    }
 }
