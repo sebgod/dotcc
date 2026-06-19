@@ -344,6 +344,25 @@ public sealed record Labeled(string Name, CStmt Body) : CStmt;
 /// and matched on, so nested setjmps stay disambiguated by token identity.</summary>
 public sealed record SetjmpGuard(CExpr Env, CStmt? TryBody, CStmt? CatchBody) : CStmt;
 
+/// <summary>A Zig <c>defer</c> / <c>errdefer</c>-guarded region (Milestone H). Produced
+/// by <c>ZigLowering</c>'s block restructuring: each <c>defer</c>/<c>errdefer</c> wraps the
+/// statements that follow it within its block, so nesting in lexical order yields Zig's LIFO
+/// cleanup. The C# backend renders it via the try-precedent of <see cref="SetjmpGuard"/>:
+/// <c>defer</c> (<see cref="OnErrorOnly"/> = false) → <c>try { Body } finally { Cleanup }</c>
+/// (the finally fires on EVERY exit — fall-through, return, break, continue, throw);
+/// <c>errdefer</c> (<see cref="OnErrorOnly"/> = true) → <c>try { Body } catch (ZigErrorReturn)
+/// { Cleanup; throw; }</c> (fires only on the propagating-error path, then re-throws to the
+/// enclosing <c>!T</c> boundary that converts it to an <c>Err</c> return).</summary>
+public sealed record DeferGuard(CStmt Body, CStmt Cleanup, bool OnErrorOnly) : CStmt;
+
+/// <summary>An unconditional <c>throw new ZigErrorReturn(Code);</c> (Milestone H). A Zig
+/// <c>return error.X;</c> normally lowers to a DIRECT <see cref="ErrUnionErr"/> return, but a
+/// C# <c>catch</c> can't observe a direct return — so when the enclosing function carries an
+/// <c>errdefer</c>, the error return is routed through this throw instead, so it propagates
+/// through the errdefer <c>catch</c>(es) on the stack (and the <c>!T</c> boundary catch still
+/// converts it back to an <c>Err</c>). Flow-terminating, like a C# <c>throw</c>.</summary>
+public sealed record ZigErrorThrow(int Code) : CStmt;
+
 /// <summary>A C <c>switch (Subject) { … }</c>, lowered to a C# switch. The body is
 /// pre-grouped into <see cref="Sections"/> (the grammar parses <c>case E:</c> /
 /// <c>default:</c> as statement-level labels — possibly Duff's-device-nested — so

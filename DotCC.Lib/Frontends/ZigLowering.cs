@@ -49,6 +49,13 @@ internal sealed class ZigLowering
     /// <c>return</c> wraps its value as an error union (<see cref="LowerReturn"/>).</summary>
     private CType? _currentFnRet;
 
+    /// <summary>True while lowering a function body that contains at least one <c>errdefer</c>
+    /// (pre-scanned in <see cref="LowerFnBody"/>). When set, a <c>return error.X;</c> is routed
+    /// through a thrown <see cref="ZigErrorThrow"/> rather than a direct <see cref="ErrUnionErr"/>
+    /// return, so the error propagates through the <c>errdefer</c> <c>catch</c>(es) on the stack
+    /// (Milestone H). A function with no <c>errdefer</c> keeps the direct-return form untouched.</summary>
+    private bool _currentFnHasErrdefer;
+
     /// <summary>Monotonic counter for destructure temporaries (<c>__tupN</c>): a destructure
     /// <c>const a, const b = e;</c> evaluates <c>e</c> ONCE into <c>__tupN</c>, then binds each
     /// name to its positional element. The temp lives in the enclosing (brace-less
@@ -424,6 +431,7 @@ internal sealed class ZigLowering
     private void LowerFnBody(Symbol funcSym, List<(string name, CType type)> paramInfos, Item body)
     {
         _currentFnRet = (funcSym.Type as CType.Func)?.Return;
+        _currentFnHasErrdefer = false;   // set lazily as `errdefer`s are encountered (Milestone H)
         _symbols.BeginFunction();
         _symbols.EnterScope();
         var paramSyms = paramInfos
@@ -977,16 +985,49 @@ internal sealed class ZigLowering
 
     private Block LowerBlock(Item block)
     {
-        var stmts = new List<CStmt>();
+        var items = new List<Item>();
         switch (block.Content)
         {
             case Zig.BlockEmpty: break;
-            case Zig.Block b:
-                foreach (var s in Flatten(b.Arg1)) { stmts.Add(LowerStmt(s)); }
-                break;
+            case Zig.Block b: items.AddRange(Flatten(b.Arg1)); break;
             default: throw new IrUnsupportedException("zig block: " + (block.Content?.GetType().Name ?? "null"));
         }
-        return new Block(stmts);
+        return new Block(LowerStmtsWithDefers(items, 0));
+    }
+
+    /// <summary>Lower a block's statement items, restructuring <c>defer</c>/<c>errdefer</c> into
+    /// nested <see cref="DeferGuard"/>s (Milestone H). Each guard wraps the statements that FOLLOW
+    /// it within the block (built by recursion), so nesting them in lexical declaration order yields
+    /// Zig's LIFO cleanup — the last-declared defer/errdefer is innermost, hence runs first. A
+    /// <c>defer</c> guards every exit (a try/finally); an <c>errdefer</c> only the error exit (a
+    /// try/catch). The cleanup expression is lowered AT the defer's position (before the rest), so it
+    /// resolves against the variables in scope there — and runs reading their values at scope exit
+    /// (its render site is the finally/catch), matching Zig's defer semantics.</summary>
+    private List<CStmt> LowerStmtsWithDefers(List<Item> items, int start)
+    {
+        var stmts = new List<CStmt>();
+        for (int i = start; i < items.Count; i++)
+        {
+            var it = items[i];
+            Item? cleanupBody;
+            bool onErrorOnly;
+            switch (it.Content)
+            {
+                case Zig.StmtDefer d:    cleanupBody = d.Arg1; onErrorOnly = false; break;
+                case Zig.StmtErrdefer d: cleanupBody = d.Arg1; onErrorOnly = true;  break;
+                default:                 stmts.Add(LowerStmt(it)); continue;
+            }
+            // An `errdefer` makes the function's later `return error.X` propagate via a thrown
+            // ZigErrorReturn (so it reaches this catch) — flagged BEFORE lowering the rest, so every
+            // statement the guard wraps sees it (a guarded error-return always follows its errdefer
+            // lexically, hence is lowered after this point).
+            if (onErrorOnly) { _currentFnHasErrdefer = true; }
+            var cleanup = LowerStmt(cleanupBody);
+            var rest = new Block(LowerStmtsWithDefers(items, i + 1));
+            stmts.Add(new DeferGuard(rest, cleanup, onErrorOnly));
+            return stmts;   // the remaining statements now live inside the guard
+        }
+        return stmts;
     }
 
     private CStmt LowerStmt(Item stmt)
@@ -1403,6 +1444,11 @@ internal sealed class ZigLowering
         {
             if (IsErrorLit(valueItem, out var errName))
             {
+                // With an `errdefer` in this function, the error must propagate via a thrown
+                // ZigErrorReturn so it passes through the errdefer catch(es) on the stack (a C#
+                // catch can't observe a direct return); the `!T` boundary catch converts it back
+                // to an Err. Without an errdefer, keep the direct, exception-free Err return.
+                if (_currentFnHasErrdefer) { return new ZigErrorThrow(ErrorCode(errName)); }
                 return new Return(new ErrUnionErr(ErrorCode(errName)) { Type = eu });
             }
             var v = LowerExpr(valueItem);
