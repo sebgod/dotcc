@@ -587,6 +587,30 @@ internal sealed class CSharpBackend
                 GuardBody(sb, sj.CatchBody, ind);
                 break;
             }
+            case DeferGuard dg:
+            {
+                // `defer` → try/finally (cleanup on every exit); `errdefer` → try/catch that
+                // runs the cleanup only on a propagating error, then re-throws. Mirrors the
+                // SetjmpGuard try precedent; GuardBody braces a braceless body.
+                sb.Append(pad).Append("try\n");
+                GuardBody(sb, dg.Body, ind);
+                if (dg.OnErrorOnly)
+                {
+                    sb.Append(pad).Append("catch (ZigErrorReturn)\n").Append(pad).Append("{\n");
+                    Stmt(sb, dg.Cleanup, ind + 1);
+                    sb.Append(Pad(ind + 1)).Append("throw;\n");
+                    sb.Append(pad).Append("}\n");
+                }
+                else
+                {
+                    sb.Append(pad).Append("finally\n");
+                    GuardBody(sb, dg.Cleanup, ind);
+                }
+                break;
+            }
+            case ZigErrorThrow zt:
+                sb.Append(pad).Append($"throw new ZigErrorReturn((ushort){zt.Code});\n");
+                break;
             case For fr:
                 var init = fr.Init switch
                 {
@@ -873,10 +897,13 @@ internal sealed class CSharpBackend
     /// switch section ending in it needs no synthetic fall-through jump.</summary>
     private static bool Terminates(CStmt s) => s switch
     {
-        Break or Continue or Return or Goto => true,
+        Break or Continue or Return or Goto or ZigErrorThrow => true,
         Block b => b.Stmts.Count > 0 && Terminates(b.Stmts[^1]),
         If f => f.Else is { } e && Terminates(f.Then) && Terminates(e),
         Labeled l => Terminates(l.Body),
+        // A defer/errdefer guard adds no fall-through path of its own: the try/finally
+        // (and the errdefer catch, which re-throws) terminate exactly when the body does.
+        DeferGuard g => Terminates(g.Body),
         _ => false,
     };
 

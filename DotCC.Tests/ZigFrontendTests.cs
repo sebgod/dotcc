@@ -959,4 +959,60 @@ public sealed class ZigFrontendTests
             "_ = &a; _ = &b; return a + b; }\n"));
         ex.Message.ShouldContain("parse");
     }
+
+    [Fact]
+    public void Defer_lowers_to_nested_try_finally_in_lifo_order()
+    {
+        // Two `defer`s + a body statement → nested try/finally. The LAST-declared defer is the
+        // INNERMOST try, so its cleanup runs FIRST (Zig's LIFO) — in the emitted text the inner
+        // finally (putchar(98)) precedes the outer one (putchar(97)).
+        var cs = EmitZig(
+            "extern fn putchar(c: c_int) c_int;\n" +
+            "pub fn main() u8 { defer _ = putchar(97); defer _ = putchar(98); _ = putchar(99); return 0; }\n");
+        cs.ShouldContain("try");
+        cs.ShouldContain("finally");
+        cs.IndexOf("putchar(98)").ShouldBeLessThan(cs.IndexOf("putchar(97)"));   // LIFO nesting
+    }
+
+    [Fact]
+    public void Errdefer_lowers_to_a_try_catch_that_rethrows()
+    {
+        // `errdefer` runs only on the error exit → a catch on the propagating ZigErrorReturn that
+        // runs the cleanup then re-throws (so the error keeps propagating to the `!T` boundary).
+        var cs = EmitZig(
+            "extern fn putchar(c: c_int) c_int;\n" +
+            "fn f() !u8 { errdefer _ = putchar(69); return 7; }\n" +
+            "pub fn main() u8 { return f() catch 1; }\n");
+        cs.ShouldContain("catch (ZigErrorReturn)");
+        cs.ShouldContain("putchar(69)");
+        cs.ShouldContain("throw;");
+    }
+
+    [Fact]
+    public void Return_error_under_an_errdefer_throws_to_propagate()
+    {
+        // With an `errdefer` in scope, `return error.X` can't be a direct Err return (a C# catch
+        // wouldn't see it) — it's routed through a thrown ZigErrorReturn so the errdefer catch fires.
+        var cs = EmitZig(
+            "extern fn putchar(c: c_int) c_int;\n" +
+            "fn f() !u8 { errdefer _ = putchar(69); return error.Boom; }\n" +
+            "pub fn main() u8 { return f() catch 1; }\n");
+        // The `(ushort)` cast distinguishes the ZigErrorThrow node from the runtime `ErrUnion.Try`
+        // helper (which also throws ZigErrorReturn, but as `ZigErrorReturn(u.Code)`).
+        cs.ShouldContain("throw new ZigErrorReturn((ushort)");
+    }
+
+    [Fact]
+    public void Return_error_without_an_errdefer_stays_a_direct_err_return()
+    {
+        // The throw-rewrite is gated on an in-scope `errdefer`: a function with none keeps the
+        // elegant, exception-free direct `Err` return (the throw form must NOT appear).
+        var cs = EmitZig(
+            "fn f() !u8 { return error.Boom; }\n" +
+            "pub fn main() u8 { return f() catch 1; }\n");
+        cs.ShouldContain(".Err(");
+        // No ZigErrorThrow node (the `(ushort)`-cast throw); the runtime `ErrUnion.Try` helper's
+        // own `throw new ZigErrorReturn(u.Code)` is exempt — it carries no `(ushort)` cast.
+        cs.ShouldNotContain("throw new ZigErrorReturn((ushort)");
+    }
 }
