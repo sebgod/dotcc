@@ -141,9 +141,47 @@ allocator paths (`std.mem.Allocator` + `std.heap.page_allocator`/`c_allocator`/
 + namespaced VALUE `const`s ARE supported — see below), container-level `var` (a namespaced
 mutable global — needs top-level global storage),
 explicit error-SET declarations (`error{A,B}` —
-inferred `!T` + `error.X` ARE supported), `async`/`suspend`, inline assembly,
-destructuring assignment. (Both `.{…}` and typed `T{…}` init lists ARE supported,
-including `&T{…}` — address-of-a-temporary — via a materialized block-local temp.)
+inferred `!T` + `error.X` ARE supported), `async`/`suspend`, inline assembly. (Both
+`.{…}` and typed `T{…}` init lists ARE supported, including `&T{…}` —
+address-of-a-temporary — via a materialized block-local temp.)
+
+### Why these are out of scope — the reasoning, not just the line
+
+The cuts aren't arbitrary. dotcc is a **syntax-directed transpiler**: it lowers parsed
+syntax to a C-shaped IR and emits C# (or wat). It has **no compile-time evaluation
+engine**, and it targets a **managed VM**, not native machine code. Nearly every item
+above falls out of one of those two facts.
+
+**The comptime root** — catches `comptime`, generics / `anytype`, and a real `std`. These
+are one wall, not three. `comptime` is partial evaluation (arbitrary Zig run by the
+compiler at build time — loops, branches, type construction); supporting it properly means
+*building a Zig interpreter*, which dotcc is not (it only constant-folds, like its C
+front-end). Zig generics are comptime-driven **monomorphization** — a fresh,
+differently-*shaped* function body instantiated per type at each call site — so they can't
+map onto C# generics (which can't change a body's shape per `T`, and have no notion of a
+*value*- or *type*-valued generic argument); doing it yourself needs the interpreter.
+Generics ⊂ comptime. And `std` is generics- and comptime-soaked top to bottom, so a
+faithful `std` needs both — hence the curated-paths resolver (model only what maps cleanly
+to the runtime: the allocator, libc; error loudly on the rest) instead of a real `std`
+model. The biggest tuple/`.{…}` consumer — `std.fmt`'s `print("{} {}", .{a, b})` — lives
+here too (comptime reflection over the arg tuple), and is already side-stepped by routing
+formatting through `extern fn printf` + libc.
+
+**The managed-target root** — catches inline assembly and `async`/`suspend`. Inline `asm`
+emits raw target machine code; the C# and wat backends run on a VM with nowhere to put it
+(C# has no inline-asm escape hatch) — untranslatable by construction, the same wall the C
+front-end hits. `async`/`suspend` is a double miss: Zig's stackless coroutines with an
+explicit, caller-owned `@Frame` (take `&frame`, store it, `resume` it by hand) don't map
+onto .NET's scheduler-driven `async`/`await` without a lossy translation — *and* async was
+removed from the pinned Zig, so it's a feature the reference compiler doesn't even have
+(the differential oracle couldn't validate it anyway).
+
+**The soft case** — destructuring assignment is "not yet", not "can't". It needs tuple
+types (positional anonymous structs), which lower cleanly onto C# `ValueTuple` for the
+**runtime** subset — value semantics, positional access, comptime-known fixed arity, and
+native deconstruction. Only the comptime *flavor* of tuples stays out (type-valued /
+`comptime_int` fields, and the `std.fmt` reflection idiom above) — the comptime root again.
+Runtime tuples + destructuring are in progress.
 
 ## Mixed `.c` + `.zig` translation units
 
