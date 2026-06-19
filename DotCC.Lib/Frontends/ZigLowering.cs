@@ -266,18 +266,20 @@ internal sealed class ZigLowering
                 case Zig.FnDefNoArgsErr f: entries.Add(AsEntry(DeclareFn(f.Arg1, null, f.Arg5, f.Arg6, errUnion: true), null)); break;
                 // Container decls were handled in pass 0 — skip here.
                 case Zig.StructDecl or Zig.StructDeclEmpty or Zig.EnumDecl or Zig.EnumDeclTyped or Zig.UnionDeclEnum: break;
-                // A top-level `const` that pass 0 recorded as a comptime allocator/namespace
-                // binding emits no decl; any OTHER top-level const/var is a runtime global, which
-                // the Zig front-end doesn't support yet (Milestone F).
-                case Zig.ConstDecl cd      when IsComptimeBound(Tok(cd.Arg1)): break;
-                case Zig.ConstDeclTyped cd when IsComptimeBound(Tok(cd.Arg1)): break;
-                case Zig.ConstDecl or Zig.ConstDeclTyped or Zig.VarDecl or Zig.VarDeclTyped:
-                    throw new IrUnsupportedException(
-                        "zig top-level `const`/`var`: only a comptime `@import`/allocator binding, a struct/enum/union, or a function is supported (a runtime top-level global is not)");
+                // A top-level `const`/`var` is either a comptime binding (an `@import`/allocator
+                // alias recorded in pass 0, which emits no decl) or a runtime global — both are
+                // resolved by the global pass below (LowerTopLevelGlobals), so skip them here.
+                case Zig.ConstDecl or Zig.ConstDeclTyped or Zig.VarDecl or Zig.VarDeclTyped: break;
                 default: throw new IrUnsupportedException("zig top-level decl: " + (d.Content?.GetType().Name ?? "null"));
             }
         }
         foreach (var (container, fnDef) in containerMethods) { entries.Add(DeclareMethod(container, fnDef)); }
+
+        // Pass 1.5: runtime top-level globals. Lowered AFTER every function/method signature
+        // (so a global initializer may reference a function) and BEFORE the bodies (so a body
+        // resolves a global), in SOURCE order (so a global may reference an earlier global — a
+        // forward reference between globals is a documented V1 cut).
+        LowerTopLevelGlobals(decls);
 
         // Pass 2: bodies. `_currentContainer` is set for a method body so its `@This()` resolves.
         foreach (var (sym, ps, body, container) in entries)
@@ -286,6 +288,51 @@ internal sealed class ZigLowering
             LowerFnBody(sym, ps, body);
             _currentContainer = null;
         }
+    }
+
+    /// <summary>Pass 1.5: lower every runtime top-level <c>const</c>/<c>var</c> to a
+    /// <see cref="GlobalVar"/> (the same IR node the C frontend's file-scope variables produce, so
+    /// the C# backend renders each as a <c>public static</c> field of <c>DotCcGlobals</c>, surfaced
+    /// by bare name via <c>using static</c>). A <c>const</c> bound to a comptime <c>@import</c>/
+    /// allocator alias (recorded in pass 0) emits no decl and is skipped. A top-level <c>var</c> is
+    /// always a runtime global (only <c>const</c> can be a comptime binding). The const-ness of a
+    /// <c>const</c> global is NOT enforced — both lower to a mutable field, which is observably
+    /// identical for a correct Zig program (real zig rejects a write to a const).</summary>
+    private void LowerTopLevelGlobals(IReadOnlyList<Item> decls)
+    {
+        foreach (var decl in decls)
+        {
+            switch (Unwrap(decl).Content)
+            {
+                case Zig.ConstDecl d      when !IsComptimeBound(Tok(d.Arg1)): LowerGlobal(d.Arg1, null,   d.Arg3); break;  // const IDENT = RhsExpr ;
+                case Zig.ConstDeclTyped d when !IsComptimeBound(Tok(d.Arg1)): LowerGlobal(d.Arg1, d.Arg3, d.Arg5); break;  // const IDENT : Type = RhsExpr ;
+                case Zig.VarDecl d:        LowerGlobal(d.Arg1, null,   d.Arg3); break;  // var IDENT = RhsExpr ;
+                case Zig.VarDeclTyped d:   LowerGlobal(d.Arg1, d.Arg3, d.Arg5); break;  // var IDENT : Type = RhsExpr ;
+            }
+        }
+    }
+
+    /// <summary>Lower one top-level global: resolve its declared type (annotation, else inferred
+    /// from the initializer like an untyped local in <see cref="DeclOf"/>), lower the initializer
+    /// against that sink, declare the global symbol in the (module) scope so bodies resolve it, and
+    /// record a <see cref="GlobalVar"/>. The initializer is lowered at module scope, so it must be a
+    /// scalar value expression — an aggregate / <c>[N]T</c> array / <c>undefined</c> global is a
+    /// documented V1 cut (the pinned-array global path the C frontend uses is not wired for Zig).</summary>
+    private void LowerGlobal(Item nameTok, Item? typeItem, Item rhsItem)
+    {
+        var declared = typeItem is not null ? LowerType(typeItem) : null;
+        if (declared is CType.Array)
+        {
+            throw new IrUnsupportedException(
+                $"zig top-level array global '{Tok(nameTok)}': a `[N]T` global is not supported yet (only scalar globals)");
+        }
+        var init = LowerExprSink(rhsItem, declared);
+        var type = declared ?? init.Type ?? CType.Int;
+        var sym = _symbols.Declare(new Symbol
+        {
+            Name = Tok(nameTok), Kind = SymKind.Var, Type = type, Storage = Storage.Static, IsGlobal = true,
+        });
+        _ir.Globals.Add(new GlobalVar(sym, init));
     }
 
     /// <summary>Tag a pass-1 function entry with the container it belongs to (null for a free

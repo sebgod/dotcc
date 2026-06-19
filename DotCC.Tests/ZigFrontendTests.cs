@@ -1097,4 +1097,46 @@ public sealed class ZigFrontendTests
         cs.ShouldContain("*p +=");
         cs.ShouldNotContain("*p = *p");
     }
+
+    [Fact]
+    public void Lowers_a_top_level_const_to_a_global_field()
+    {
+        // A top-level `const` becomes a `public static` field of DotCcGlobals (the same path the
+        // C frontend's file-scope variables take). A typed const keeps its annotation's type; an
+        // untyped const infers `int` from its literal (like an untyped local).
+        var cs = EmitZig(
+            "const PI: f64 = 3.14;\n" +
+            "const MAX = 100;\n" +
+            "pub fn main() u8 { return 0; }\n");
+        cs.ShouldContain("public static unsafe double PI = 3.14");
+        cs.ShouldContain("public static unsafe int MAX = 100");
+    }
+
+    [Fact]
+    public void Lowers_a_top_level_var_to_a_mutable_global_field_resolved_by_bare_name()
+    {
+        // A top-level `var` is a mutable global field; a function body references it by bare name
+        // (surfaced through `using static DotCcGlobals;`) and may mutate it.
+        var cs = EmitZig(
+            "var counter: u8 = 0;\n" +
+            "fn bump() void { counter += 1; }\n" +
+            "pub fn main() u8 { bump(); return counter; }\n");
+        cs.ShouldContain("public static unsafe byte counter = 0");
+        cs.ShouldContain("counter +=");
+    }
+
+    [Fact]
+    public void A_global_initializer_can_reference_an_earlier_global()
+    {
+        // Globals are lowered in source order, so a later global's initializer resolves an earlier
+        // one by bare name (a sibling field of DotCcGlobals; C# field initializers run in
+        // declaration order, so the referenced field is set first).
+        var cs = EmitZig(
+            "const A: u8 = 20;\n" +
+            "const B: u8 = A + 22;\n" +
+            "pub fn main() u8 { return B; }\n");
+        cs.ShouldContain("public static unsafe byte A = 20");
+        cs.ShouldContain("byte B = ");
+        cs.ShouldContain("A + 22");
+    }
 }
