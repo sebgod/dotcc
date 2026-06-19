@@ -24,7 +24,7 @@
 #     negative-lookahead predicates that gate them (the hard PEG-ism);
 #   - labeled blocks/loops (`label:`), payloads (`|x|`), switch, for-ranges;
 #   - container decls (struct/enum/union/opaque), error sets, init lists `.{...}`;
-#   - comptime/defer/errdefer/nosuspend, asm, destructuring assignment, anytype;
+#   - comptime/nosuspend, asm, anytype;
 #   - full FnProto modifiers (export/extern/inline/callconv/align/linksection/...);
 #   - hex/oct/bin/underscored integers, char literals, multiline strings, builtins
 #     beyond `@name(args)`, `orelse`/`catch`, the wrapping/saturating operators.
