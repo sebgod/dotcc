@@ -86,6 +86,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `switch (u) { .a => \|x\| {…}, … }` | ✅ | switch on a **tagged union** → dispatch on the `__tag`; a `\|x\|` payload capture binds the matched variant's payload (by value). An exhaustive union switch with no `else` makes its last prong the C# `default` (so the function provably returns). **Deferred:** by-reference `\|*x\|` capture, multi-variant capture prongs, capture on `if`/`while` (optionals / error-unions) |
 | `return e;` / `return;` | ✅ | |
 | `x = e;` assignment | ✅ | |
+| `x op= e;` compound assignment | ✅ | all ten: `+= -= *= /= %= <<= >>= &= \|= ^=`. → the shared `Assign` IR node with a non-null `CompoundOp` → a NATIVE C# `x op= e`, so the target lvalue is evaluated exactly **once** (`arr[next()] += 1` calls `next()` a single time — not a `x = x op e` desugar). Zig has the wrapping (`+%=`) / saturating (`+\|=`) variants (deferred) and **no** `++`/`--` (the idiom is `i += 1`) |
 | `const a, const b = e;` destructure | ✅ | bind a tuple's elements to new locals (Milestone G) — desugars to a single-eval temp + per-element `.ItemN` reads (a brace-less sequence, so the binders stay in the enclosing scope). `const`/`var` binders, ≥2. **Deferred:** the assign-to-existing-lvalue form `a, b = e;` (a grammar-level cut, so a parse error) and typed binders (`const a: T, …`) |
 | `_ = e;` discard | ✅ | Zig's mandatory discard of a non-void result |
 | block `{ … }` | ✅ | |
@@ -376,4 +377,6 @@ rejects, not silently accept more.
   `examples/zig-defer` (defer/errdefer: `defer a.free(buf)` pairing a FixedBufferAllocator
   allocation with its release, plus an `errdefer` step that fires on the error path),
   `examples/zig-literals` (bool + char literals: `true`/`false` driving a branch, char-codepoint
-  arithmetic for an ASCII case fold, the common escapes).
+  arithmetic for an ASCII case fold, the common escapes),
+  `examples/zig-compound-assign` (compound assignment: `i += 1` as the `++` replacement, a
+  `+=`/`-=` chain, single-eval on the target lvalue).
