@@ -267,6 +267,20 @@ public sealed record AllocCall(CExpr? Receiver, CType Element, CExpr Count, int 
 /// (indirect). <see cref="CExpr.Type"/> is <c>void</c>. Zig-lowering / C#-target only.</summary>
 public sealed record FreeCall(CExpr? Receiver, CExpr SliceExpr, CType Element) : CExpr;
 
+/// <summary>A Zig tuple literal <c>.{ a, b, … }</c> (Milestone G), at a tuple sink or with an
+/// inferred type. <see cref="Elements"/> are the positional element expressions in order;
+/// <see cref="TupleType"/> is the <see cref="CType.Tuple"/> produced (and <see cref="CExpr.Type"/>).
+/// The C# backend renders it <c>new System.ValueTuple&lt;T1, …&gt;(e1, …)</c>, coercing each element
+/// to its declared element type. Zig-lowering / C#-target only.</summary>
+public sealed record TupleNew(IReadOnlyList<CExpr> Elements, CType TupleType) : CExpr;
+
+/// <summary>A Zig tuple index <c>t[N]</c> with a literal <c>N</c> (Milestone G) → the Nth element
+/// (zero-based). The C# backend renders it <c><see cref="Tuple"/>.Item{Index+1}</c>;
+/// <see cref="Element"/> is the element type (and <see cref="CExpr.Type"/>). Used both for an
+/// explicit <c>t[N]</c> and for the per-binder reads a destructure desugars into. Zig-lowering /
+/// C#-target only.</summary>
+public sealed record TupleIndex(CExpr Tuple, int Index, CType Element) : CExpr;
+
 /// <summary>A bare identifier the binder left unresolved — a runtime/library symbol
 /// surfaced by name (the <c>&lt;complex.h&gt;</c> imaginary unit), or an
 /// incremental-growth safety net for a name not in any header. Carries the RAW

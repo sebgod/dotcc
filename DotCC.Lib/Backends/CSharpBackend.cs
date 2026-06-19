@@ -1381,6 +1381,20 @@ internal sealed class CSharpBackend
                     ? ($"ZigAlloc.FreeCHeap<{elem}>({Expr(fc.SliceExpr)})", PPostfix)
                     : ($"{Sub(fc.Receiver, PPostfix)}.Free<{elem}>({Expr(fc.SliceExpr)})", PPostfix);
             }
+            // A Zig tuple literal `.{ a, b }` (Milestone G) → `new System.ValueTuple<T1, …>(e1, …)`,
+            // each element coerced to its declared element type. Arity-uniform (incl. 1) — the
+            // `(a, b)` shorthand has no 1-tuple form, so the explicit `ValueTuple` ctor is used.
+            case TupleNew tn:
+            {
+                var tt = (CType.Tuple)tn.TupleType.Unqualified;
+                var typeArgs = string.Join(", ", tt.Elements.Select(e => Cs(e.Unqualified)));
+                var args = string.Join(", ", tn.Elements.Select((e, i) => Coerced(e, tt.Elements[i])));
+                return ($"new System.ValueTuple<{typeArgs}>({args})", PPrimary);
+            }
+            // A Zig tuple index `t[N]` (Milestone G) → `<tuple>.Item{N+1}` (ValueTuple's 1-based
+            // fields). Also the per-binder read a destructure desugars into.
+            case TupleIndex ti:
+                return ($"{Sub(ti.Tuple, PPostfix)}.Item{ti.Index + 1}", PPostfix);
             // A bare unresolved identifier: the backend escapes the raw name.
             case NameRef nr: return (DotCC.EmitHelpers.Id(nr.RawName), PPrimary);
             // An enumerator of a real enum: EnumName.Member (member access). If a

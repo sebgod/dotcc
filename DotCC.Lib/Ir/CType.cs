@@ -79,6 +79,7 @@ public abstract record CType
         ErrorUnion eu => "!" + eu.Payload.Describe(),
         Slice s => "[]" + (s.Element.IsConst ? "const " : "") + s.Element.Unqualified.Describe(),
         Allocator => "std.mem.Allocator",
+        Tuple t => "struct { " + string.Join(", ", t.Elements.Select(e => e.Describe())) + " }",
         _ => GetType().Name,
     };
 
@@ -269,6 +270,33 @@ public abstract record CType
         // 8 (ctx) + 8 + 8 (two delegate*). @sizeOf(Allocator) isn't a Zig surface feature, so an
         // exact layout isn't needed.
         public override int SizeOf => 24;
+    }
+
+    /// <summary>A Zig tuple <c>struct { T1, T2, … }</c> (Milestone G) — an anonymous positional
+    /// struct. The C# backend lowers it to <c>System.ValueTuple&lt;T1, …&gt;</c> (arity-uniform,
+    /// including arity 1), so a positional literal <c>.{a, b}</c> constructs one
+    /// (<see cref="DotCC.Ir.TupleNew"/>), <c>t[N]</c> reads <c>.ItemN+1</c>
+    /// (<see cref="DotCC.Ir.TupleIndex"/>), and <c>const a, const b = e</c> destructures it. Only
+    /// the runtime subset maps — comptime / type-valued tuple fields stay out. The C front-end
+    /// never produces it; only the C# target renders it.</summary>
+    public sealed record Tuple(IReadOnlyList<CType> Elements) : CType
+    {
+        // Approximate — Σ element sizes, ignoring ValueTuple field layout/padding. @sizeOf of a
+        // tuple isn't a Zig surface feature, so an exact layout isn't needed here.
+        public override int SizeOf => Elements.Sum(e => e.SizeOf);
+
+        // Structural equality over the element list (the default record comparer would use
+        // reference equality on the list), plus the base qualifiers — mirrors the Func record.
+        public bool Equals(Tuple? other) =>
+            other is not null && Quals == other.Quals && Elements.SequenceEqual(other.Elements);
+
+        public override int GetHashCode()
+        {
+            var h = new HashCode();
+            h.Add(Quals);
+            foreach (var e in Elements) { h.Add(e); }
+            return h.ToHashCode();
+        }
     }
 
     // ---- well-known instances -------------------------------------------

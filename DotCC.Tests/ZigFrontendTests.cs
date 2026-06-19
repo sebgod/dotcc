@@ -886,4 +886,77 @@ public sealed class ZigFrontendTests
             "pub fn main() u8 { return 0; }\n"));
         ex.Message.ShouldContain("not modeled");
     }
+
+    [Fact]
+    public void Lowers_a_tuple_return_and_destructures_it()
+    {
+        // The headline use (Milestone G): a function returns a tuple `struct { u8, u8 }` and the
+        // caller destructures it with `const a, const b = mm();`. The tuple type → C#
+        // `System.ValueTuple<byte, byte>`; the positional `.{ 3, 7 }` at that sink →
+        // `new System.ValueTuple<byte, byte>(3, 7)`; the destructure single-evals into a temp,
+        // then binds each name to its positional element (`.Item1`/`.Item2`).
+        var cs = EmitZig(
+            "fn mm() struct { u8, u8 } { return .{ 3, 7 }; }\n" +
+            "pub fn main() u8 { const a, const b = mm(); return a + b; }\n");
+        cs.ShouldContain("System.ValueTuple<byte, byte> mm()");        // tuple TYPE return
+        cs.ShouldContain("new System.ValueTuple<byte, byte>(3, 7)");   // positional literal at the tuple sink
+        cs.ShouldContain("__tup");                                      // single-eval temp
+        cs.ShouldContain(".Item1");                                     // binder a ← element 0
+        cs.ShouldContain(".Item2");                                     // binder b ← element 1
+    }
+
+    [Fact]
+    public void Destructures_an_inline_tuple_literal()
+    {
+        // `const a, const b = .{ … };` — the RHS is an inline positional literal with no sink, so
+        // its tuple type is INFERRED from the elements, then destructured the same way.
+        var cs = EmitZig(
+            "pub fn main() u8 { const a, const b = .{ @as(u8, 4), @as(u8, 6) }; return a + b; }\n");
+        cs.ShouldContain("new System.ValueTuple<byte, byte>(");   // inferred tuple from the literal
+        cs.ShouldContain(".Item1");
+        cs.ShouldContain(".Item2");
+    }
+
+    [Fact]
+    public void Indexes_a_tuple_value()
+    {
+        // A literal tuple index `t[N]` reads the Nth element (zero-based) → ValueTuple's 1-based
+        // `.ItemN+1`. No array indexing is emitted (a tuple field is statically named).
+        var cs = EmitZig(
+            "pub fn main() u8 { const t = .{ @as(u8, 3), @as(u8, 7) }; return t[0] + t[1]; }\n");
+        cs.ShouldContain(".Item1");   // t[0]
+        cs.ShouldContain(".Item2");   // t[1]
+    }
+
+    [Fact]
+    public void Rejects_a_literal_mixing_positional_and_named_fields()
+    {
+        // A Zig `.{…}` is a tuple (all-positional) OR a struct (all-named), never a mix. dotcc
+        // rejects the mix loudly rather than guessing.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 { const t = .{ 1, .y = 2 }; _ = t; return 0; }\n"));
+        ex.Message.ShouldContain("mixes positional and named");
+    }
+
+    [Fact]
+    public void Rejects_a_destructure_arity_mismatch()
+    {
+        // The binder count must match the tuple's arity — binding 3 names from a 2-tuple errors.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "fn mm() struct { u8, u8 } { return .{ 3, 7 }; }\n" +
+            "pub fn main() u8 { const a, const b, const c = mm(); return a; }\n"));
+        ex.Message.ShouldContain("binds 3");
+    }
+
+    [Fact]
+    public void Rejects_the_deferred_assign_to_existing_destructure()
+    {
+        // V1 binders are `const`/`var` only — the assign-to-existing-lvalue form (`a, b = e;`) is
+        // deferred and structurally excluded at the grammar level (a parse error, not a lowering
+        // one), which keeps the `=` lookahead clean vs an ordinary assignment.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 { var a: u8 = 0; var b: u8 = 0; a, b = .{ @as(u8, 1), @as(u8, 9) }; " +
+            "_ = &a; _ = &b; return a + b; }\n"));
+        ex.Message.ShouldContain("parse");
+    }
 }

@@ -48,6 +48,10 @@ internal sealed class CSharpTarget : ITarget
         // A Zig `std.mem.Allocator` → the runtime `Allocator` fat-pointer value type
         // (Milestone F). The concrete `FixedBufferAllocator` is a `CType.Named` (renders its name).
         CType.Allocator => "Allocator",
+        // A Zig tuple `struct { T1, T2, … }` → `System.ValueTuple<T1, …>` (Milestone G).
+        // Arity-uniform — including arity 1 (`System.ValueTuple<T>`), where C#'s `(T)` shorthand
+        // would be a parenthesised expression, not a tuple.
+        CType.Tuple tup => "System.ValueTuple<" + string.Join(", ", tup.Elements.Select(e => RenderType(e.Unqualified))) + ">",
         _ => throw new IrUnsupportedException("C# target cannot render type " + t.GetType().Name),
     };
 
