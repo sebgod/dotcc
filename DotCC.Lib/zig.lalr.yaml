@@ -160,6 +160,10 @@ symbols:
   # --- enum / union methods (D2/D3 leftovers; appended — never reorder) ---
   - EnumMember     # 107 one enum-body member: a value field (`name` / `name = v`), a method, or a const
   - UnionMember    # 108 one union-body member: a variant (`name: T` / `name`), a method, or a const
+  # --- tuples (Milestone G; appended — never reorder) ---
+  - TupleTypes     # 109 tuple-TYPE element list: the `T1, T2, …` inside `struct { … }` at a Type position
+  - DestructBinds  # 110 destructure binder list (≥2 via the Stmt rule): `const a, const b`
+  - DestructBind   # 111 one destructure binder: `const IDENT` / `var IDENT`
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -283,9 +287,30 @@ productions:
       - { lhs: Stmt, rhs: ['return', RhsExpr, ';'],         action: stmtReturn }
       - { lhs: Stmt, rhs: ['return', ';'],                   action: stmtReturnVoid }
       - { lhs: Stmt, rhs: [VarDecl] }
+      # Destructure binding (Milestone G) — `const a, const b = e;` (≥2 binders, enforced by the
+      # one-binder + DestructBinds shape). Desugars in lowering to a single temp eval + per-index
+      # `.ItemN` reads (single-eval, no new deconstruction IR node). V1 binders are `const`/`var`
+      # only — the assign-to-existing-lvalue form (`a, b = e;`) is deferred so the first binder is
+      # always followed by `,` (never `=`), keeping the `=`/`:` lookahead clean vs VarDecl/stmtAssign.
+      - { lhs: Stmt, rhs: [DestructBind, ',', DestructBinds, '=', RhsExpr, ';'], action: stmtDestructure }
       - { lhs: Stmt, rhs: [Expr, '=', RhsExpr, ';'],         action: stmtAssign }
       - { lhs: Stmt, rhs: [Expr, ';'],                        action: stmtExpr }
       - { lhs: Stmt, rhs: [Block] }
+
+  # Destructure binder list (Milestone G) — left-recursive; ≥2 total is guaranteed by the Stmt
+  # rule (one leading DestructBind + a DestructBinds of ≥1). At statement start the FIRST binder
+  # is followed only by `,`, so its reduce never competes with VarDecl's `=`/`:` shift (the
+  # stmt-start state carries the VarDecl items; the list-tail state, reached only after a comma,
+  # does not — distinct LALR states, no merge).
+  - derivation: leftmost
+    rules:
+      - { lhs: DestructBinds, rhs: [DestructBinds, ',', DestructBind], action: destructBindsCons }
+      - { lhs: DestructBinds, rhs: [DestructBind],                     action: destructBindsOne }
+
+  - derivation: none
+    rules:
+      - { lhs: DestructBind, rhs: ['const', IDENT], action: destructBindConst }
+      - { lhs: DestructBind, rhs: ['var', IDENT],    action: destructBindVar }
 
   # ===== expression cascade =====
   - derivation: none
@@ -418,12 +443,28 @@ productions:
       # with a bare `const`), so it stays conflict-free against `[]T` / `[Expr]T`.
       - { lhs: Type, rhs: ['[', ']', 'const', Type], action: tySliceConst }
       - { lhs: Type, rhs: ['[', Expr, ']', Type], action: tyArray }
+      # Tuple TYPE `struct { T1, T2, … }` (Milestone G) — an anonymous positional struct, used
+      # as a function return type or a var/param annotation → C# `System.ValueTuple<…>`. Distinct
+      # parser state from the Decl-level `const X = struct { FieldDecls }` (named fields, reached
+      # only after `const IDENT =`); here the body is a comma list of bare Types. `struct` leads,
+      # so it's a clean 1-token shift at Type position, and the tuple `}` then a function Block `{`
+      # is a clean boundary. Mixed named+positional and arity > 7 are rejected in lowering.
+      - { lhs: Type, rhs: ['struct', '{', TupleTypes, '}'], action: tyTuple }
       - { lhs: Type, rhs: [ErrUnion] }
 
   - derivation: none
     rules:
       - { lhs: ErrUnion, rhs: [Suffix, '!', Type], action: errUnion }
       - { lhs: ErrUnion, rhs: [Suffix] }
+
+  # Tuple-TYPE element list (Milestone G) — comma-separated bare Types, clean trailing comma
+  # (same shape as FieldInits). Nested tuple types compose (a `Type` element may itself be a
+  # tuple); arity is bounded in lowering, not here.
+  - derivation: leftmost
+    rules:
+      - { lhs: TupleTypes, rhs: [TupleTypes, ',', Type], action: tupleTypesCons }
+      - { lhs: TupleTypes, rhs: [Type],                  action: tupleTypesOne }
+      - { lhs: TupleTypes, rhs: [TupleTypes, ','],       action: tupleTypesTrail }
 
   # Postfix chain (left-assoc): field access, deref, optional-unwrap, index, call.
   - derivation: leftmost
@@ -602,6 +643,12 @@ productions:
   - derivation: none
     rules:
       - { lhs: FieldInit, rhs: ['.', IDENT, '=', Expr], action: fieldInit }
+      # Positional element (Milestone G) — a tuple init `.{ a, b }` reuses the SAME FieldInits
+      # list as the named struct init `.{ .f = v }` (the surface is identical until the first
+      # element). Lowering rejects a literal that MIXES positional + named. A named `.IDENT =`
+      # vs a `.member` enum-literal positional element split on the token after `.IDENT` (`=`
+      # named — shift; `,`/`}` enum-literal — reduce), so they stay LALR(1)-distinct.
+      - { lhs: FieldInit, rhs: [Expr], action: fieldInitPositional }
 
 lexer:
   root:
