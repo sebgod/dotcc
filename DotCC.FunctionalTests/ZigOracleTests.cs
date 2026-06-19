@@ -481,6 +481,30 @@ public sealed class ZigOracleTests
             "    if (tab == 9 and bs == 92 and q == 39 and hx == 42) return star;\n" +
             "    return 0;\n" +
             "}\n", 42, "Hi" },
+        // COMPOUND ASSIGNMENT. All 10 operators applied in a chain on one u8 lvalue, each doing
+        // real work and landing on 42: 5 <<4=80 >>1=40 +10=50 -2=48 /2=24 *7=168 %50=18 |32=50
+        // &46=34 ^8=42. Proves dotcc's `op=` lowering matches Zig's operator-by-operator.
+        new object[] { "compound_assign",
+            "pub fn main() u8 {\n" +
+            "    var a: u8 = 5;\n" +
+            "    a <<= 4; a >>= 1; a += 10; a -= 2; a /= 2;\n" +
+            "    a *= 7; a %= 50; a |= 32; a &= 46; a ^= 8;\n" +
+            "    return a;\n" +
+            "}\n", 42, "" },
+        // SINGLE-EVALUATION BINDING (the trap a `x = x op y` desugar would fail). The index
+        // `bump(&calls)` has a side effect (it bumps `calls` via a pointer-deref compound assign
+        // `p.* += 1`). `arr[bump(&calls)] += 2` must evaluate the lvalue ONCE: calls==1 and
+        // arr[0]==42. A double-eval would call bump twice (calls==2) and return 0.
+        new object[] { "compound_assign_eval_once",
+            "fn bump(p: *u8) usize { p.* += 1; return 0; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var calls: u8 = 0;\n" +
+            "    var arr: [1]u8 = undefined;\n" +
+            "    arr[0] = 40;\n" +
+            "    arr[bump(&calls)] += 2;\n" +
+            "    if (calls == 1) return arr[0];\n" +
+            "    return 0;\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
