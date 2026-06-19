@@ -100,6 +100,8 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | Feature | Status | Notes |
 |---|---|---|
 | integer / float / string literals | ✅ | decimal int; string reuses C escape decoding (`\n \t \\ \" \xNN`) |
+| `true` / `false` | ✅ | boolean literals — a `bool` value (→ C# `true`/`false`, stored in the normalising `CBool`) |
+| char literal `'x'` | ✅ | Zig's `comptime_int` = the codepoint → an integer literal (`'A'` → 65). Escapes `\n \t \r \\ \' \xNN` + octal decode via the shared string-escape machinery. **Deferred:** `\u{…}` unicode escapes |
 | identifiers, `(grouped)` | ✅ | |
 | `or` `and` (short-circuit) | ✅ | |
 | comparison `== != < > <= >=` | ✅ | non-associative (`a < b < c` is a parse error, like Zig) |
@@ -134,8 +136,8 @@ program's libc call is handled. No `@cImport`, no header harvest.
 
 | Feature | Status |
 |---|---|
-| decimal integers, floats, `"…"` strings, `//` line comments, `@name` builtins | ✅ |
-| hex/oct/bin/underscored integers, char literals `'x'`, multiline `\\` strings, `\u{…}` escapes, escaped-quote `\"` in a string | 🚫 |
+| decimal integers, floats, `"…"` strings, char literals `'x'` (`\n \t \\ \' \xNN`), `//` line comments, `@name` builtins | ✅ |
+| hex/oct/bin/underscored integers, multiline `\\` strings, `\u{…}` escapes, escaped-quote `\"` in a string | 🚫 |
 
 ## Out of scope (the dialect line)
 
@@ -372,4 +374,6 @@ rejects, not silently accept more.
   `examples/zig-tuple` (tuples: a `struct { u8, u8 }` multiple-return + `const lo, const hi = …`
   destructure, a tuple-typed parameter, an inline-literal destructure, a literal `t[N]` index),
   `examples/zig-defer` (defer/errdefer: `defer a.free(buf)` pairing a FixedBufferAllocator
-  allocation with its release, plus an `errdefer` step that fires on the error path).
+  allocation with its release, plus an `errdefer` step that fires on the error path),
+  `examples/zig-literals` (bool + char literals: `true`/`false` driving a branch, char-codepoint
+  arithmetic for an ASCII case fold, the common escapes).
