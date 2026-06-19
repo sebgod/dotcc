@@ -1061,6 +1061,22 @@ internal sealed class ZigLowering
                 return new ExprStmt(new Assign(null, target, value) { Type = target.Type });
             }
 
+            // `x op= y` (compound assignment) → the shared Assign node with a non-null CompoundOp.
+            // Each operator maps to the SAME BinOp the matching Zig binary op uses (Add/Sub/…), so
+            // `+=` stays consistent with how Zig's `+` lowers — NOT C's promotion rules. The C#
+            // backend renders a native `target op= rhs`, evaluating the lvalue exactly once (correct
+            // binding for `a[i()] += 1` / `p.* += 1`). Zig has no `++`/`--`; `x += 1` is the idiom.
+            case Zig.StmtAddAssign a:    return CompoundAssign(a.Arg0, BinOp.Add, a.Arg2);
+            case Zig.StmtSubAssign a:    return CompoundAssign(a.Arg0, BinOp.Sub, a.Arg2);
+            case Zig.StmtMulAssign a:    return CompoundAssign(a.Arg0, BinOp.Mul, a.Arg2);
+            case Zig.StmtDivAssign a:    return CompoundAssign(a.Arg0, BinOp.Div, a.Arg2);
+            case Zig.StmtModAssign a:    return CompoundAssign(a.Arg0, BinOp.Mod, a.Arg2);
+            case Zig.StmtShlAssign a:    return CompoundAssign(a.Arg0, BinOp.Shl, a.Arg2);
+            case Zig.StmtShrAssign a:    return CompoundAssign(a.Arg0, BinOp.Shr, a.Arg2);
+            case Zig.StmtBitAndAssign a: return CompoundAssign(a.Arg0, BinOp.BitAnd, a.Arg2);
+            case Zig.StmtBitOrAssign a:  return CompoundAssign(a.Arg0, BinOp.BitOr, a.Arg2);
+            case Zig.StmtBitXorAssign a: return CompoundAssign(a.Arg0, BinOp.BitXor, a.Arg2);
+
             // if (cond) then [else else]  — `then`/`else`/`body` are themselves Stmts
             // (a single statement or a brace Block), which LowerStmt handles uniformly.
             case Zig.StmtIf f:          return new If(LowerExpr(f.Arg2), LowerStmt(f.Arg4), null);
@@ -1122,6 +1138,19 @@ internal sealed class ZigLowering
 
             default: throw new IrUnsupportedException("zig statement: " + (stmt.Content?.GetType().Name ?? "null"));
         }
+    }
+
+    /// <summary>Lower a Zig compound assignment <c>target op= value</c> to the shared
+    /// <see cref="Assign"/> node with a non-null <see cref="BinOp"/>. The C# backend renders a
+    /// native <c>target op= value</c>, so the lvalue is evaluated EXACTLY ONCE — correct binding
+    /// for a side-effecting lvalue like <c>a[i()] += 1</c> or <c>p.* += 1</c> (a textual
+    /// <c>x = x op y</c> desugar would double-evaluate it). The RHS is sink-typed to the target
+    /// type for parity with plain <see cref="Zig.StmtAssign"/> (harmless for a numeric RHS).</summary>
+    private CStmt CompoundAssign(Item targetItem, BinOp op, Item valueItem)
+    {
+        var target = LowerExpr(targetItem);
+        var value = LowerExprSink(valueItem, target.Type);
+        return new ExprStmt(new Assign(op, target, value) { Type = target.Type });
     }
 
     /// <summary>Lower a local <c>const</c> declaration, intercepting a comptime allocator /

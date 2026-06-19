@@ -1050,4 +1050,51 @@ public sealed class ZigFrontendTests
         cs.ShouldContain("byte q = 39;");
         cs.ShouldContain("byte bs = 92;");
     }
+
+    [Fact]
+    public void Lowers_plus_equals_to_a_native_compound_assignment()
+    {
+        // `x += 5` lowers to the shared Assign with CompoundOp=Add → a NATIVE C# `x += …`,
+        // NOT a `x = x + 5` desugar (which would double-evaluate a side-effecting lvalue).
+        var cs = EmitZig("pub fn main() u8 { var x: u8 = 37; x += 5; return x; }\n");
+        cs.ShouldContain("x +=");
+        cs.ShouldNotContain("x = x +");
+    }
+
+    [Fact]
+    public void Lowers_all_compound_assignment_operators()
+    {
+        // Each of the 10 operators maps to the same C# operator as the matching Zig binary op.
+        // One mutation per line; each compound form is checked in isolation on the same lvalue.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var a: u32 = 100;\n" +
+            "    a += 1; a -= 2; a *= 3; a /= 4; a %= 5;\n" +
+            "    a <<= 1; a >>= 1; a &= 6; a |= 7; a ^= 8;\n" +
+            "    return 0;\n" +
+            "}\n");
+        cs.ShouldContain("a +=");
+        cs.ShouldContain("a -=");
+        cs.ShouldContain("a *=");
+        cs.ShouldContain("a /=");
+        cs.ShouldContain("a %=");
+        cs.ShouldContain("a <<=");
+        cs.ShouldContain("a >>=");
+        cs.ShouldContain("a &=");
+        cs.ShouldContain("a |=");
+        cs.ShouldContain("a ^=");
+    }
+
+    [Fact]
+    public void Compound_assignment_through_a_pointer_keeps_single_evaluation()
+    {
+        // Binding correctness (the trap): `p.* += 5` renders as a native compound assign on the
+        // deref (`*p += …`), NOT `*p = *p + 5`. C#'s `op=` evaluates the target lvalue exactly
+        // once — so a side-effecting lvalue (`a[i()] += 1`) is correct without a bound temp.
+        var cs = EmitZig(
+            "fn bump(p: *u32) void { p.* += 5; }\n" +
+            "pub fn main() u8 { return 0; }\n");
+        cs.ShouldContain("*p +=");
+        cs.ShouldNotContain("*p = *p");
+    }
 }
