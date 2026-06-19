@@ -43,7 +43,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | local `const`/`var` (typed or inferred) | ✅ | inside a function body |
 | `fn f() !T` (inferred-error return) | ✅ | the `!T` returns an error union (`ErrUnion<T>`); see `try`/`catch`/`error.X` below. V1 erases the error SET |
 | `pub fn main() !void` / `!u8` (error-union main) | 🚫 | main itself returning an error union is deferred — error unions live in helper fns; main stays `void`/`u8` |
-| top-level / global `const`/`var` | 🚫 | only function-local decls lower today |
+| top-level / global `const`/`var` | ✅ | a runtime global → a `public static` field of `DotCcGlobals` (the same path the C front-end's file-scope variables take), surfaced by bare name (a function body reads/writes it unqualified). Typed keeps its annotation; untyped infers from the initializer (`const N = 5;` → `int`). Initializers are lowered in source order, so a global may reference an EARLIER global by bare name. `const`-ness isn't enforced (both lower to a mutable field — observably identical for a correct Zig program). **Deferred:** an aggregate / `[N]T` array / `undefined` global, a fn-pointer global, and a forward reference to a LATER global |
 | `export`/`inline`/`callconv`/`align`/`linksection` | 🚫 | full FnProto modifiers not modeled |
 | `extern "c"` library-name string | 🚫 | bare `extern fn` only |
 
@@ -148,7 +148,8 @@ allocator paths (`std.mem.Allocator` + `std.heap.page_allocator`/`c_allocator`/
 `union { … }` + explicit `union(SomeEnum)` + `opaque` (data-only `struct`/`enum`/`union`
 **with methods** — struct/enum/union methods + the `const Self = @This();` self-type alias
 + namespaced VALUE `const`s ARE supported — see below), container-level `var` (a namespaced
-mutable global — needs top-level global storage),
+mutable global — *top-level* `const`/`var` globals ARE now supported, but the container-level
+`Type.field` wiring is not),
 explicit error-SET declarations (`error{A,B}` —
 inferred `!T` + `error.X` ARE supported), `async`/`suspend`, inline assembly. (Both
 `.{…}` and typed `T{…}` init lists ARE supported, including `&T{…}` —
@@ -379,4 +380,6 @@ rejects, not silently accept more.
   `examples/zig-literals` (bool + char literals: `true`/`false` driving a branch, char-codepoint
   arithmetic for an ASCII case fold, the common escapes),
   `examples/zig-compound-assign` (compound assignment: `i += 1` as the `++` replacement, a
-  `+=`/`-=` chain, single-eval on the target lvalue).
+  `+=`/`-=` chain, single-eval on the target lvalue),
+  `examples/zig-globals` (top-level globals: a typed `const`, a const initialized from an earlier
+  const, and a mutable `var` accumulator bumped by a function through its bare name).
