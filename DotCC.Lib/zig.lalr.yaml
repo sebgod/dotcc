@@ -167,6 +167,10 @@ symbols:
   # --- defer / errdefer (Milestone H; appended — never reorder) ---
   - 'defer'        # 112 `defer Stmt` — scope-exit cleanup (runs on every block exit, LIFO)
   - 'errdefer'     # 113 `errdefer Stmt` — error-exit cleanup (runs only when the block errors out)
+  # --- bool + char literals (appended — never reorder) ---
+  - 'true'         # 114 the `true` boolean literal (a `bool` value, like null/undefined)
+  - 'false'        # 115 the `false` boolean literal
+  - CHAR           # 116 a character literal `'x'` / `'\n'` / `'\xNN'` — value = the codepoint
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -500,6 +504,11 @@ productions:
       - { lhs: Primary, rhs: [BUILTIN, '(', ')'],           action: builtinCallNoArgs }
       - { lhs: Primary, rhs: ['null'],              action: nullLit }
       - { lhs: Primary, rhs: ['undefined'],         action: undefinedLit }
+      # bool + char literals: `true`/`false` are bool values (like null/undefined); a char literal
+      # `'x'` is a comptime_int = the codepoint, lowered to an integer literal.
+      - { lhs: Primary, rhs: ['true'],              action: trueLit }
+      - { lhs: Primary, rhs: ['false'],             action: falseLit }
+      - { lhs: Primary, rhs: [CHAR],                action: charLit }
       - { lhs: Primary, rhs: ['.', IDENT],          action: enumLit }
       # Anonymous struct literal `.{ … }` (Milestone D1). The leading `.` is the SAME token
       # as enumLit's; they split cleanly on the next symbol (`{` → struct literal, IDENT →
@@ -682,6 +691,8 @@ lexer:
     - { symbol: 'try',    match: 'try' }
     - { symbol: 'null',   match: 'null' }
     - { symbol: 'undefined', match: 'undefined' }
+    - { symbol: 'true',   match: 'true' }
+    - { symbol: 'false',  match: 'false' }
     - { symbol: 'catch',  match: 'catch' }
     - { symbol: 'error',  match: 'error' }
     - { symbol: 'break',    match: 'break' }
@@ -746,6 +757,10 @@ lexer:
     # `@name` before IDENT. Slice-1 integers are decimal-only.
     - { symbol: BUILTIN, match: '@[a-zA-Z_][a-zA-Z_0-9]*' }
     - { symbol: STRING,  match: '"[^"]*"' }
+    # CHAR `'x'`: a hex escape `\xHH`, any other backslash escape `\.` (\n \t \\ \' …), or a single
+    # non-quote/non-backslash char. `'` is a unique lead (no other token starts with it), so no
+    # clash. (Zig's `\u{…}` unicode escape in a char literal is deferred.)
+    - { symbol: CHAR,    match: '''(\\x[0-9a-fA-F][0-9a-fA-F]|\\.|[^''\\])''' }
     - { symbol: FLOAT,   match: '[0-9]+\.[0-9]+([eE][+\-]?[0-9]+)?' }
     - { symbol: INTEGER, match: '[0-9]+' }
     - { symbol: IDENT,   match: '[a-zA-Z_][a-zA-Z_0-9]*' }
