@@ -453,6 +453,34 @@ public sealed class ZigOracleTests
             "fn outer(fail: bool) !u8 { defer _ = putchar(68); errdefer _ = putchar(82); const v = try inner(fail); return v + 4; }\n" +
             "fn run() u8 { const a = outer(1 == 1) catch 9; _ = putchar(124); const b = outer(1 == 0) catch 9; return a + b; }\n" +
             "pub fn main() u8 { return run(); }\n", 14, "RD|D" },
+        // BOOL LITERALS. `true`/`false` as a typed decl, an inferred decl, an `if` condition, and a
+        // `bool` argument. pick(true)=10 + pick(false)=20 + (a true → n=1) = 31.
+        new object[] { "bool_literals",
+            "fn pick(c: bool) u8 { if (c) return 10; return 20; }\n" +
+            "pub fn main() u8 {\n" +
+            "    const a: bool = true;\n" +
+            "    const b = false;\n" +
+            "    var n: u8 = 0;\n" +
+            "    if (a) n = n + 1;\n" +
+            "    if (b) n = n + 100;\n" +
+            "    return pick(a) + pick(b) + n;\n" +
+            "}\n", 31, "" },
+        // CHAR LITERALS. Codepoints ('H'=72, 'i'=105, '\n'=10, '*'=42) and the escapes \t=9, \\=92,
+        // \'=39, \x2A=42 all decode; prints "Hi" and returns 42 once the escapes check out.
+        new object[] { "char_literals",
+            "extern fn putchar(c: c_int) c_int;\n" +
+            "pub fn main() u8 {\n" +
+            "    _ = putchar('H');\n" +
+            "    _ = putchar('i');\n" +
+            "    _ = putchar('\\n');\n" +
+            "    const star: u8 = '*';\n" +
+            "    const tab: u8 = '\\t';\n" +
+            "    const bs: u8 = '\\\\';\n" +
+            "    const q: u8 = '\\'';\n" +
+            "    const hx: u8 = '\\x2A';\n" +
+            "    if (tab == 9 and bs == 92 and q == 39 and hx == 42) return star;\n" +
+            "    return 0;\n" +
+            "}\n", 42, "Hi" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
