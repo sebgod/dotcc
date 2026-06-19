@@ -416,6 +416,43 @@ public sealed class ZigOracleTests
         new object[] { "tuple_param",
             "fn sum(t: struct { u8, u8 }) u8 { return t[0] + t[1]; }\n" +
             "pub fn main() u8 { return sum(.{ 40, 2 }); }\n", 42, "" },
+        // DEFER / ERRDEFER (Milestone H). Both observables (stdout AND exit) prove the lowering.
+        // defer_lifo — two `defer`s run in reverse declaration order at block exit: the body prints
+        // 'c' (99), then on exit 'b' (98) then 'a' (97) → "cba". (codes, since char literals are
+        // not lexed yet.)
+        new object[] { "defer_lifo",
+            "extern fn putchar(c: c_int) c_int;\n" +
+            "fn run() void { defer _ = putchar(97); defer _ = putchar(98); _ = putchar(99); }\n" +
+            "pub fn main() u8 { run(); return 10; }\n", 10, "cba" },
+        // defer_scope — an inner-block `defer` fires at the INNER block's exit, and the outer
+        // `defer` fires even on an early `return`: '1'(49), 'i'(105 inner exit), '2'(50),
+        // 'z'(122 outer defer on the early return) → "1i2z".
+        new object[] { "defer_scope",
+            "extern fn putchar(c: c_int) c_int;\n" +
+            "fn run() u8 {\n" +
+            "    defer _ = putchar(122);\n" +
+            "    { defer _ = putchar(105); _ = putchar(49); }\n" +
+            "    _ = putchar(50);\n" +
+            "    if (1 == 1) return 10;\n" +
+            "    return 99;\n" +
+            "}\n" +
+            "pub fn main() u8 { return run(); }\n", 10, "1i2z" },
+        // errdefer_return — `errdefer` fires on an explicit `return error.X` (here mayFail(true)
+        // prints 'E'=69), but NOT on the success return. a=3 (catch), b=7 → 10; stdout "E".
+        new object[] { "errdefer_return",
+            "extern fn putchar(c: c_int) c_int;\n" +
+            "fn mayFail(fail: bool) !u8 { errdefer _ = putchar(69); if (fail) return error.Boom; return 7; }\n" +
+            "fn run() u8 { const a = mayFail(1 == 1) catch 3; const b = mayFail(1 == 0) catch 3; return a + b; }\n" +
+            "pub fn main() u8 { return run(); }\n", 10, "E" },
+        // errdefer_propagate — `defer` + `errdefer` interleave LIFO, and `errdefer` fires on a
+        // `try`-propagated error too. outer(true): 'R'(82 errdefer) then 'D'(68 defer), catch→9;
+        // outer(false): 'D' only, →5. "RD" + "|"(124) + "D" = "RD|D"; 9 + 5 = 14.
+        new object[] { "errdefer_propagate",
+            "extern fn putchar(c: c_int) c_int;\n" +
+            "fn inner(fail: bool) !u8 { if (fail) return error.X; return 1; }\n" +
+            "fn outer(fail: bool) !u8 { defer _ = putchar(68); errdefer _ = putchar(82); const v = try inner(fail); return v + 4; }\n" +
+            "fn run() u8 { const a = outer(1 == 1) catch 9; _ = putchar(124); const b = outer(1 == 0) catch 9; return a + b; }\n" +
+            "pub fn main() u8 { return run(); }\n", 14, "RD|D" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
