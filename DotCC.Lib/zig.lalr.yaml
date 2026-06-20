@@ -303,6 +303,14 @@ productions:
       # The `=` vs `)` after the inner Expr is a clean shift/reduce decision.
       - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', ':', '(', Expr, '=', RhsExpr, ')', Stmt], action: stmtWhileContAssign }
       - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', ':', '(', Expr, ')', Stmt],               action: stmtWhileCont }
+      # `while (opt) |x| body` — optional payload capture-while (Milestone M, part 2). Each iteration
+      # re-evaluates the condition; while it yields a payload, `x` is bound and the body runs, else the
+      # loop exits. After the condition `')'` a `'|'` lookahead selects this over the plain
+      # `while (Expr) Stmt` (no Stmt begins with `'|'`) — conflict-free. A `LoopStmt` (like the other
+      # while/for forms) so a `label:` may prefix it; the lowering desugars to `while (true) { var
+      # __cap = cond; if (has) { var x = …; body } else break; }`, so labeled break/continue compose.
+      # (The `: (cont)` continue-expr capture-while and the while-`else` clause are deferred.)
+      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', Stmt], action: stmtWhileCapture }
       - { lhs: Stmt, rhs: ['break', ';'],    action: stmtBreak }
       - { lhs: Stmt, rhs: ['continue', ';'], action: stmtContinue }
       # `break :blk v;` — a labeled break carrying a VALUE, yielding it from the enclosing

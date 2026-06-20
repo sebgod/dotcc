@@ -758,6 +758,22 @@ public sealed class ZigOracleTests
             "    sum += k;\n" +
             "    return @as(u8, @intCast(sum));\n" + // 4 + 10 + 8 + 20
             "}\n", 42, "" },
+
+        // --- Milestone M (part 2): optional capture-`while` (exit-code only) ---
+        // A value-optional capture-while summing a `nextLT` iterator 0..8 = 36, plus a `_` discard
+        // capture-while counting 6 iterations = +6. 36 + 6 = 42.
+        new object[] { "while_capture",
+            "fn nextLT(i: *i32, max: i32) ?i32 { if (i.* >= max) return null; const v = i.*; i.* += 1; return v; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var sum: i32 = 0;\n" +
+            "    var i: i32 = 0;\n" +
+            "    while (nextLT(&i, 9)) |v| { sum += v; }\n" + // 0+1+…+8 = 36
+            "    var j: i32 = 0;\n" +
+            "    var count: i32 = 0;\n" +
+            "    while (nextLT(&j, 6)) |_| { count += 1; }\n" + // 6 iterations
+            "    sum += count;\n" +
+            "    return @as(u8, @intCast(sum));\n" + // 36 + 6
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
