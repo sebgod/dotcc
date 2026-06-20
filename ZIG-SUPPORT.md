@@ -82,7 +82,8 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `while (c) …` | ✅ | (no payload capture yet) |
 | `while (c) : (cont) …` | ✅ | the continue-expression → the C IR `for`-post, so `continue` runs `cont` (faithful to Zig). The common assignment cont `: (i = i + 1)` and a bare-expr cont both parse |
 | `break;` / `continue;` | ✅ | unlabeled — reuse the C IR loop-control nodes |
-| `break :blk v;` (labeled break with value) | ✅ | yields `v` from the enclosing labeled value-block (see **labeled block as a value** in Expressions). **Deferred:** the no-value `break :blk;` and labeled-LOOP `break :lbl` / `continue :lbl` |
+| `break :blk v;` (labeled break with value) | ✅ | yields `v` from the enclosing labeled value-block (see **labeled block as a value** in Expressions) |
+| `lbl: while/for (…) …` (labeled loop) + `break :lbl;` / `continue :lbl;` | ✅ | a `label:` may prefix any while/for loop; `break :lbl` / `continue :lbl` exit / next-iterate it — including an **outer** loop. C# has no labeled break/continue, so they lower to a `goto`: `break :lbl` → a label just AFTER the loop, `continue :lbl` → a label at the END of the loop body (so the natural iteration step still runs). Labels are emitted only when referenced. **Deferred:** the labeled-while/for VALUE form (`break :lbl v` yielding from a loop used as an expression) |
 | `switch (x) { v => {…}, a, b => {…}, else => {…} }` | ✅ | as a STATEMENT → the C IR Switch. Single / multi-value / `else` (→ default) prongs; NO fall-through (each prong gets an appended `break`). Switching on an **enum** works (subject + `.member` labels decay to the underlying int). Prong bodies are braced **blocks** OR a bare expression (`v => expr`, an expression statement). **Deferred:** ranges (`a...b`) |
 | `switch (u) { .a => \|x\| {…}, … }` | ✅ | switch on a **tagged union** → dispatch on the `__tag`; a `\|x\|` payload capture binds the matched variant's payload (by value). An exhaustive union switch with no `else` makes its last prong the C# `default` (so the function provably returns). **Deferred:** by-reference `\|*x\|` capture, multi-variant capture prongs, capture on `if`/`while` (optionals / error-unions) |
 | `return e;` / `return;` | ✅ | |
@@ -95,7 +96,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `errdefer Stmt;` | ✅ | error-exit cleanup — runs only when the block exits via a propagating error, LIFO-interleaved with `defer`. → C# `try { rest } catch (ZigErrorReturn) { cleanup; throw; }`. A function with an `errdefer` routes its `return error.X` through a throw so it reaches the catch. **Deferred:** `errdefer \|e\| …` payload capture |
 | `for (a..b) \|i\| …` (range for) | ✅ | → C `for (usize i = a; i < b; i++)`; the `\|i\|` capture is the usize loop index (`\|_\|` discards). The body is a Stmt or block |
 | `for (s) \|x\|` / `for (s, 0..) \|x, i\|` (for-over-slice) | ✅ | iterate a slice's elements (`x` = a per-iteration copy); the index form also binds the usize index. → C `for (usize __i=0; __i<s.Len; __i++) { var x = s.Ptr[__i]; [var i = __i + 0;] … }` (the slice is hoisted to a temp unless a bare var) |
-| open-ended `s[lo..]`, by-ref `\|*x\|`, labeled loops, labeled-loop `break`/`continue`, switch ranges | 🚫 | (switch-as-expression and labeled-block-as-value are now ✅ — see Expressions) |
+| open-ended `s[lo..]`, by-ref `\|*x\|`, switch ranges | 🚫 | (switch-as-expression, labeled-block-as-value, and labeled loops + labeled `break`/`continue` are now ✅) |
 
 ## Expressions
 
@@ -407,4 +408,6 @@ rejects, not silently accept more.
   `.member` labels + `else`, and a typed-decl int switch with a multi-value prong → C#'s native
   switch expression),
   `examples/zig-labeled-block` (labeled block as a value: typed-decl / inferred / return /
-  assignment `blk: { …; break :blk v; }`, including a conditional `break :blk` from inside an `if`).
+  assignment `blk: { …; break :blk v; }`, including a conditional `break :blk` from inside an `if`),
+  `examples/zig-labeled-loop` (labeled loops: `break :outer` and `continue :scan` from nested loops
+  → `goto` to a break label after the loop / a continue label at the body's end).

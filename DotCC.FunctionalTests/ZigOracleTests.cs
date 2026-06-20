@@ -676,6 +676,45 @@ public sealed class ZigOracleTests
             "    acc = blk: { const t = classify(-1); break :blk t - 68; };\n" + // 32
             "    return @as(u8, @intCast(classify(5) + acc));\n" +              // 10 + 32
             "}\n", 42, "" },
+
+        // --- Milestone L (part 3): labeled loops + labeled break/continue (exit-code only) ---
+        // `break :outer` from a nested loop finds the first (i,j) with i*j>=6 → (2,3); plus a
+        // `continue :scan` that counts 2 inner iterations per outer (skipping a trailing add).
+        // 2*3 (found) = 6, scan count = 6 → 6*6 + 6 = 42.
+        new object[] { "labeled_loop_break_continue",
+            "pub fn main() u8 {\n" +
+            "    var fi: i32 = 0; var fj: i32 = 0; var i: i32 = 1;\n" +
+            "    outer: while (i <= 5) : (i = i + 1) {\n" +
+            "        var j: i32 = 1;\n" +
+            "        while (j <= 5) : (j = j + 1) {\n" +
+            "            if (i * j >= 6) { fi = i; fj = j; break :outer; }\n" +
+            "        }\n" +
+            "    }\n" +
+            "    var count: i32 = 0; var hits: i32 = 0; var a: i32 = 0;\n" +
+            "    scan: while (a < 3) : (a = a + 1) {\n" +
+            "        var b: i32 = 0;\n" +
+            "        while (b < 3) : (b = b + 1) {\n" +
+            "            count = count + 1;\n" +
+            "            if (b == 1) continue :scan;\n" +
+            "        }\n" +
+            "        hits = hits + 100;\n" +
+            "    }\n" +
+            "    return @as(u8, @intCast(count * count + fi * fj + hits));\n" + // 36 + 6 + 0
+            "}\n", 42, "" },
+        // A labeled `for` (range) loop with `continue :row` from a nested for. 3 rows × 2 counted
+        // inner iters = 6; 6*7 = 42.
+        new object[] { "labeled_for_continue",
+            "pub fn main() u8 {\n" +
+            "    var n: i32 = 0;\n" +
+            "    row: for (0..3) |_| {\n" + // index unused → `|_|` (real zig errors on an unused capture)
+            "        for (0..3) |c| {\n" +
+            "            n = n + 1;\n" +
+            "            if (c == @as(usize, 1)) continue :row;\n" +
+            "        }\n" +
+            "        n = n + 100;\n" +
+            "    }\n" +
+            "    return @as(u8, @intCast(n * 7));\n" + // 6 * 7
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

@@ -188,6 +188,8 @@ symbols:
   - SwitchExpr     # 127 `switch (x) { v => e, … }` in value position (a RhsExpr, like IfExpr)
   # --- labeled block as a value (Milestone L, part 2; appended — never reorder) ---
   - LabeledBlock   # 128 `blk: { … break :blk v; }` — a labeled block as a VALUE (a RhsExpr)
+  # --- labeled loops (Milestone L, part 3; appended — never reorder) ---
+  - LoopStmt       # 129 a while/for loop statement, factored out so a `label:` can prefix it
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -279,23 +281,34 @@ productions:
 
   - derivation: none
     rules:
-      - { lhs: Stmt, rhs: ['while', '(', Expr, ')', Stmt], action: stmtWhile }
+      # The while/for loops are `LoopStmt` (not `Stmt` directly) so a `label:` prefix can wrap any
+      # of them uniformly (`Stmt -> IDENT ':' LoopStmt`, below) without duplicating each form. A
+      # plain `Stmt -> LoopStmt` (below) keeps an unlabeled loop a statement. Their actions/record
+      # names are unchanged, so the lowering for stmtWhile/stmtForRange/… is untouched.
+      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', Stmt], action: stmtWhile }
       # `while (cond) : (cont) body` — the continue-expression runs after each iteration
       # (and on `continue`), exactly like C's `for(; cond; cont)`, so it lowers to the C IR
       # `For` (no init). Zig's PEG: `WhilePrefix (COLON LPAREN AssignExpr RPAREN)? Block`. The
       # cont is an AssignExpr, but our `Expr` cascade has no assignment, so the common
       # `: (i = i + 1)` form gets its own production; a bare-expr cont (`: (step())`) the other.
       # The `=` vs `)` after the inner Expr is a clean shift/reduce decision.
-      - { lhs: Stmt, rhs: ['while', '(', Expr, ')', ':', '(', Expr, '=', RhsExpr, ')', Stmt], action: stmtWhileContAssign }
-      - { lhs: Stmt, rhs: ['while', '(', Expr, ')', ':', '(', Expr, ')', Stmt],               action: stmtWhileCont }
+      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', ':', '(', Expr, '=', RhsExpr, ')', Stmt], action: stmtWhileContAssign }
+      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', ':', '(', Expr, ')', Stmt],               action: stmtWhileCont }
       - { lhs: Stmt, rhs: ['break', ';'],    action: stmtBreak }
       - { lhs: Stmt, rhs: ['continue', ';'], action: stmtContinue }
       # `break :blk v;` — a labeled break carrying a VALUE, yielding it from the enclosing
       # labeled block `:blk` (Milestone L, part 2). After `break`, the `:` lookahead selects this
       # over the bare `break ;` (distinct tokens, conflict-free). The lowering assigns the value to
-      # the block's result temp and jumps to the block's end label. (The no-value labeled break and
-      # labeled-loop `break :lbl` / `continue :lbl` come in a later L increment.)
+      # the block's result temp and jumps to the block's end label.
       - { lhs: Stmt, rhs: ['break', ':', IDENT, RhsExpr, ';'], action: stmtBreakLabelValue }
+      # `break :lbl;` / `continue :lbl;` — labeled-LOOP control (Milestone L, part 3): exit / next-
+      # iterate the enclosing loop named `:lbl` (which may be an OUTER loop). After `break ':' IDENT`
+      # the `;` lookahead selects this no-value form over the value-carrying `break :blk v;` above
+      # (`;` isn't in RhsExpr's first set — a clean shift/reduce). Lowered to a `goto` to the loop's
+      # break / continue label (the continue label sits at the end of the loop body, so the natural
+      # iteration step still runs). `continue` never carries a value, so it has only this form.
+      - { lhs: Stmt, rhs: ['break', ':', IDENT, ';'],    action: stmtBreakLabel }
+      - { lhs: Stmt, rhs: ['continue', ':', IDENT, ';'], action: stmtContinueLabel }
       # `defer Stmt` / `errdefer Stmt` (Milestone H) — scope-exit cleanup. The body is a
       # full Stmt (an `expr;`, a `_ = expr;` discard, or a braced Block). A unique leading
       # keyword at statement position, so no conflict with the other Stmt forms (like break/
@@ -313,13 +326,21 @@ productions:
       # `for (usize i = start; i < end; i++) body`; the `|i|` capture is the usize loop index
       # (Zig's range-for index type). The body is a Stmt (single statement or a block), like
       # `while`.
-      - { lhs: Stmt, rhs: ['for', '(', Expr, '..', Expr, ')', '|', IDENT, '|', Stmt], action: stmtForRange }
+      - { lhs: LoopStmt, rhs: ['for', '(', Expr, '..', Expr, ')', '|', IDENT, '|', Stmt], action: stmtForRange }
       # for-over-slice. `for (s) |x| body` iterates the elements; `for (s, 0..) |x, i| body`
       # also binds the usize index. Conflict-free against the range form: after `for ( Expr`,
       # the lookahead selects — `..` → range, `)` → slice, `,` → slice+index. (`|*x|` by-ref
       # capture and a non-zero index start are deferred.)
-      - { lhs: Stmt, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', Stmt], action: stmtForSlice }
-      - { lhs: Stmt, rhs: ['for', '(', Expr, ',', Expr, '..', ')', '|', IDENT, ',', IDENT, '|', Stmt], action: stmtForSliceIdx }
+      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', Stmt], action: stmtForSlice }
+      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ',', Expr, '..', ')', '|', IDENT, ',', IDENT, '|', Stmt], action: stmtForSliceIdx }
+      # A loop is a statement; and a `label:` may prefix one — `outer: while (…) { … break :outer; }`
+      # (Milestone L, part 3). `IDENT ':' LoopStmt` reuses the same `:` lookahead trick as the value-
+      # block: at statement start an IDENT also begins an Expr, but a Primary is never followed by
+      # `:`, so the `:` cleanly selects the labeled loop. Restricting the label to a `LoopStmt` (not
+      # any `Stmt`) keeps a labeled-block STATEMENT out (it stays value-only) and lets the lowering
+      # assume a loop target for `break :lbl` / `continue :lbl`.
+      - { lhs: Stmt, rhs: [LoopStmt] }
+      - { lhs: Stmt, rhs: [IDENT, ':', LoopStmt], action: labeledLoop }
       - { lhs: Stmt, rhs: ['return', RhsExpr, ';'],         action: stmtReturn }
       - { lhs: Stmt, rhs: ['return', ';'],                   action: stmtReturnVoid }
       - { lhs: Stmt, rhs: [VarDecl] }
