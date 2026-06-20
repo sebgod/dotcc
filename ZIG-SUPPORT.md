@@ -84,7 +84,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `break;` / `continue;` | ✅ | unlabeled — reuse the C IR loop-control nodes |
 | `break :blk v;` (labeled break with value) | ✅ | yields `v` from the enclosing labeled value-block (see **labeled block as a value** in Expressions) |
 | `lbl: while/for (…) …` (labeled loop) + `break :lbl;` / `continue :lbl;` | ✅ | a `label:` may prefix any while/for loop; `break :lbl` / `continue :lbl` exit / next-iterate it — including an **outer** loop. C# has no labeled break/continue, so they lower to a `goto`: `break :lbl` → a label just AFTER the loop, `continue :lbl` → a label at the END of the loop body (so the natural iteration step still runs). Labels are emitted only when referenced. **Deferred:** the labeled-while/for VALUE form (`break :lbl v` yielding from a loop used as an expression) |
-| `switch (x) { v => {…}, a, b => {…}, else => {…} }` | ✅ | as a STATEMENT → the C IR Switch. Single / multi-value / `else` (→ default) prongs; NO fall-through (each prong gets an appended `break`). Switching on an **enum** works (subject + `.member` labels decay to the underlying int). Prong bodies are braced **blocks** OR a bare expression (`v => expr`, an expression statement). **Deferred:** ranges (`a...b`) |
+| `switch (x) { v => {…}, a, b => {…}, lo...hi => {…}, else => {…} }` | ✅ | as a STATEMENT → the C IR Switch. Single / multi-value / inclusive-**range** (`lo...hi`) / `else` (→ default) prongs; NO fall-through (each prong gets an appended `break`). Switching on an **enum** works (subject + `.member` labels decay to the underlying int). A range lowers to a C# relational-pattern case `case >= lo and <= hi:` (Zig requires comptime-known bounds = C#'s constant requirement). Prong bodies are braced **blocks** OR a bare expression (`v => expr`, an expression statement) |
 | `switch (u) { .a => \|x\| {…}, … }` | ✅ | switch on a **tagged union** → dispatch on the `__tag`; a `\|x\|` payload capture binds the matched variant's payload (by value). An exhaustive union switch with no `else` makes its last prong the C# `default` (so the function provably returns). **Deferred:** by-reference `\|*x\|` capture, multi-variant capture prongs, capture on `if`/`while` (optionals / error-unions) |
 | `return e;` / `return;` | ✅ | |
 | `x = e;` assignment | ✅ | |
@@ -96,7 +96,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `errdefer Stmt;` | ✅ | error-exit cleanup — runs only when the block exits via a propagating error, LIFO-interleaved with `defer`. → C# `try { rest } catch (ZigErrorReturn) { cleanup; throw; }`. A function with an `errdefer` routes its `return error.X` through a throw so it reaches the catch. **Deferred:** `errdefer \|e\| …` payload capture |
 | `for (a..b) \|i\| …` (range for) | ✅ | → C `for (usize i = a; i < b; i++)`; the `\|i\|` capture is the usize loop index (`\|_\|` discards). The body is a Stmt or block |
 | `for (s) \|x\|` / `for (s, 0..) \|x, i\|` (for-over-slice) | ✅ | iterate a slice's elements (`x` = a per-iteration copy); the index form also binds the usize index. → C `for (usize __i=0; __i<s.Len; __i++) { var x = s.Ptr[__i]; [var i = __i + 0;] … }` (the slice is hoisted to a temp unless a bare var) |
-| open-ended `s[lo..]`, by-ref `\|*x\|`, switch ranges | 🚫 | (switch-as-expression, labeled-block-as-value, and labeled loops + labeled `break`/`continue` are now ✅) |
+| open-ended `s[lo..]`, by-ref `\|*x\|` | 🚫 | (switch-as-expression, labeled-block-as-value, labeled loops + labeled `break`/`continue`, and switch ranges are now ✅) |
 
 ## Expressions
 
@@ -112,7 +112,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | arithmetic `+ - * / %` | ✅ | usual-arithmetic result typing (fixes i64 truncation) |
 | prefix `-` `~` `!` | ✅ | |
 | `if (c) a else b` (if-**expression**) | ✅ | → C# ternary |
-| `switch (x) { v => e, … }` (switch-**expression**) | ✅ | a switch in value position (a typed binding / return / any `RhsExpr`) → C#'s native switch EXPRESSION (`x switch { v => e, a or b => e, _ => e }`). Each prong yields a value (a bare-expr body); `else` → the `_` default; arm values lower at the result sink; an enum subject + `.member` labels decay to the underlying int. Same structural trick as the if-expression (a `RhsExpr`, not a Primary). **Deferred:** a block-bodied prong (needs a labeled `break :blk v`), a `\|x\|` capture in expression position, ranges |
+| `switch (x) { v => e, … }` (switch-**expression**) | ✅ | a switch in value position (a typed binding / return / any `RhsExpr`) → C#'s native switch EXPRESSION (`x switch { v => e, a or b => e, _ => e }`). Each prong yields a value (a bare-expr body); `else` → the `_` default; arm values lower at the result sink; an enum subject + `.member` labels decay to the underlying int. Same structural trick as the if-expression (a `RhsExpr`, not a Primary). An inclusive **range** arm `lo...hi => e` lowers to a relational pattern `>= lo and <= hi => e`. **Deferred:** a block-bodied prong (needs a labeled `break :blk v`), a `\|x\|` capture in expression position |
 | `blk: { …; break :blk v; }` (labeled block as a value) | ✅ | a block in value position that runs statements and YIELDS a value via `break :blk v`. → the roadmap's temp-fill: a result temp (`__blkN`), each `break :blk v` rewritten to `temp = v; goto __blkN_end;` (braced, so a conditional break stays conditional), an end label, then the surrounding statement reads the temp. The result type is the sink (an annotated decl / function return / lvalue) or the first `break` value's type. Same structural trick as the if/switch-expression (a `RhsExpr`, not a Primary). **Deferred** (clear errors): an if/switch-expression arm or a sub-expression position (only a full `=`/`return`/assignment RHS today), a global initializer (needs a comptime value), and an error-union (`!T`) function return |
 | function call `f(args)` | ✅ | intra-Zig + forward-ref + libc-by-bare-name (incl. variadic `printf`) |
 | prefix `&` (address-of) | ✅ | `&x` → `*T`; a var/param operand is marked address-taken |
@@ -410,4 +410,6 @@ rejects, not silently accept more.
   `examples/zig-labeled-block` (labeled block as a value: typed-decl / inferred / return /
   assignment `blk: { …; break :blk v; }`, including a conditional `break :blk` from inside an `if`),
   `examples/zig-labeled-loop` (labeled loops: `break :outer` and `continue :scan` from nested loops
-  → `goto` to a break label after the loop / a continue label at the body's end).
+  → `goto` to a break label after the loop / a continue label at the body's end),
+  `examples/zig-switch-range` (switch ranges: a char-classifier switch EXPRESSION `'0'...'9' => …`
+  and a statement switch with `lo...hi` ranges + a multi-value prong → C# relational patterns).

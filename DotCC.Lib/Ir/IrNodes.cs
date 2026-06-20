@@ -127,9 +127,11 @@ public sealed record CondExpr(CExpr Cond, CExpr Then, CExpr Else) : CExpr;
 /// coerces each arm to the result <see cref="CExpr.Type"/>. Zig-only.</summary>
 public sealed record SwitchExpr(CExpr Subject, IReadOnlyList<SwitchExprArm> Arms) : CExpr;
 
-/// <summary>One arm of a <see cref="SwitchExpr"/>: constant-pattern <paramref name="Labels"/>
-/// (null = the <c>_</c> default) yielding <paramref name="Value"/>.</summary>
-public sealed record SwitchExprArm(IReadOnlyList<CExpr>? Labels, CExpr Value);
+/// <summary>One arm of a <see cref="SwitchExpr"/>: pattern <paramref name="Labels"/>
+/// (null = the <c>_</c> default) yielding <paramref name="Value"/>. A label with a non-null
+/// <see cref="SwitchLabel.HiExpr"/> is an inclusive range (Zig <c>lo...hi</c>) → a relational
+/// pattern; a single-value label is a constant pattern.</summary>
+public sealed record SwitchExprArm(IReadOnlyList<SwitchLabel>? Labels, CExpr Value);
 
 /// <summary>An array subscript <c>base[index]</c> — an lvalue.</summary>
 public sealed record Index(CExpr Base, CExpr Idx) : CExpr;
@@ -416,8 +418,12 @@ public sealed record CaseLabelStmt(CExpr? CaseExpr, CStmt Body) : CStmt;
 /// <summary>A <c>case E:</c> (<see cref="CaseExpr"/> set) or <c>default:</c>
 /// (null) label. The case expression must be a constant per C# rules — an integer
 /// literal, or an enumerator which codegen decays to <c>(int)EnumName.Member</c>
-/// (still a constant), matching the int-decayed switch subject.</summary>
-public readonly record struct SwitchLabel(CExpr? CaseExpr);
+/// (still a constant), matching the int-decayed switch subject. When
+/// <paramref name="HiExpr"/> is non-null the label is an INCLUSIVE range
+/// <c>[CaseExpr, HiExpr]</c> (Zig <c>lo...hi</c>), rendered as a C# relational
+/// pattern <c>>= lo and &lt;= hi</c> (both bounds comptime-known constants). Zig-only;
+/// the C front-end never sets it (positional <c>new SwitchLabel(expr)</c> keeps it null).</summary>
+public readonly record struct SwitchLabel(CExpr? CaseExpr, CExpr? HiExpr = null);
 
 // ---- declarations / translation unit ------------------------------------
 

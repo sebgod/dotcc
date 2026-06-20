@@ -1782,6 +1782,7 @@ internal sealed class ZigLowering
             // with no payload capture (capture needs a braced block); handle it up front.
             if (prongItem.Content is Zig.ProngExpr pe)
             {
+                RejectUnionRange(pe.Arg0, info);
                 var exprLabels = LowerCaseVals(pe.Arg0, info.TagType);
                 var exprBody = new List<CStmt> { new ExprStmt(LowerExpr(pe.Arg2)) };
                 if (!EndsInJump(exprBody)) { exprBody.Add(new Break()); }
@@ -1795,6 +1796,7 @@ internal sealed class ZigLowering
                 case Zig.ProngCapture p: caseVals = p.Arg0; captureName = Tok(p.Arg3); block = p.Arg5; break;
                 default: throw new IrUnsupportedException("zig switch prong: " + (prongItem.Content?.GetType().Name ?? "null"));
             }
+            RejectUnionRange(caseVals, info);
             var labels = LowerCaseVals(caseVals, info.TagType);   // `.variant` → EnumConstRef(U_Tag.variant)
 
             List<CStmt> body;
@@ -1916,9 +1918,10 @@ internal sealed class ZigLowering
     }
 
     /// <summary>Lower a prong's case values to switch labels: <c>else</c> → the single null
-    /// (default) label; otherwise each comma-separated value Expr → one constant label,
-    /// lowered against the subject type as its sink (so a <c>.member</c> case resolves when
-    /// switching on an enum).</summary>
+    /// (default) label; otherwise each comma-separated element → one label, lowered against the
+    /// subject type as its sink (so a <c>.member</c> case resolves when switching on an enum). An
+    /// inclusive range element <c>lo...hi</c> (Milestone L, part 4) becomes a range label
+    /// (<see cref="SwitchLabel.HiExpr"/> set) → a relational pattern in the backend.</summary>
     private List<SwitchLabel> LowerCaseVals(Item caseVals, CType? sink)
     {
         if (caseVals.Content is Zig.CaseElse)
@@ -1926,8 +1929,57 @@ internal sealed class ZigLowering
             return new List<SwitchLabel> { new SwitchLabel(null) };
         }
         var labels = new List<SwitchLabel>();
-        foreach (var v in Flatten(caseVals)) { labels.Add(new SwitchLabel(LowerExprSink(v, sink))); }
+        foreach (var (lo, hi) in WalkCaseValItems(caseVals))
+        {
+            labels.Add(hi is null
+                ? new SwitchLabel(LowerExprSink(lo, sink))
+                : new SwitchLabel(LowerExprSink(lo, sink), LowerExprSink(hi, sink)));
+        }
         return labels;
+    }
+
+    /// <summary>Walk a (non-<c>else</c>) <c>CaseVals</c> comma-list into its elements, each a single
+    /// value (<c>Hi</c> null) or an inclusive range <c>lo...hi</c> (<c>Hi</c> set). Mirrors the
+    /// grammar's right-recursive list shape over the plain (<c>CaseVals…</c>) and range
+    /// (<c>CaseRange…</c>) productions.</summary>
+    private static List<(Item Lo, Item? Hi)> WalkCaseValItems(Item caseVals)
+    {
+        var items = new List<(Item, Item?)>();
+        var it = caseVals;
+        while (true)
+        {
+            switch (it.Content)
+            {
+                case Zig.CaseValsCons c:  items.Add((c.Arg0, null));   it = c.Arg2; continue;  // [Expr ',' CaseVals]
+                case Zig.CaseValsOne o:   items.Add((o.Arg0, null));   return items;           // [Expr]
+                case Zig.CaseRangeCons r: items.Add((r.Arg0, r.Arg2)); it = r.Arg4; continue;  // [Expr '...' Expr ',' CaseVals]
+                case Zig.CaseRangeOne r:  items.Add((r.Arg0, r.Arg2)); return items;           // [Expr '...' Expr]
+                default:
+                    throw new IrUnsupportedException(
+                        "zig switch case values: " + (it.Content?.GetType().Name ?? "null"));
+            }
+        }
+    }
+
+    /// <summary>True when a <c>CaseVals</c> list contains an inclusive range element
+    /// (<c>lo...hi</c>) — used to reject ranges where they aren't supported yet (a switch
+    /// EXPRESSION arm, a tagged-union switch).</summary>
+    private static bool CaseValsContainsRange(Item caseVals) => caseVals.Content switch
+    {
+        Zig.CaseRangeOne or Zig.CaseRangeCons => true,
+        Zig.CaseValsCons c => CaseValsContainsRange(c.Arg2),
+        _ => false,
+    };
+
+    /// <summary>Reject an inclusive range in a tagged-union switch prong — a union's variants are
+    /// not ordered, so <c>.a...c</c> is meaningless (and not valid Zig).</summary>
+    private static void RejectUnionRange(Item caseVals, ZigUnionInfo info)
+    {
+        if (CaseValsContainsRange(caseVals))
+        {
+            throw new IrUnsupportedException(
+                $"an inclusive range (`lo...hi`) isn't valid in a switch on the tagged union '{info.Name}' (its variants aren't ordered)");
+        }
     }
 
     /// <summary>Lower a switch EXPRESSION `switch (subj) { v => e, …, else => e }` (Milestone L) to
@@ -1950,9 +2002,13 @@ internal sealed class ZigLowering
                     "(needing a labeled `break :blk v`) and a `|x|` capture in a switch expression are not supported yet");
             }
             var value = LowerExprSink(pe.Arg2, sink);
+            // `else` → the `_` default arm; otherwise the prong's case values become the arm's
+            // labels (a multi-value prong → several, rendered `a or b`), reusing LowerCaseVals so an
+            // inclusive range `lo...hi` lowers to a relational-pattern label exactly as in a
+            // statement switch.
             arms.Add(pe.Arg0.Content is Zig.CaseElse
-                ? new SwitchExprArm(null, value)   // `else` → the `_` default arm
-                : new SwitchExprArm(Flatten(pe.Arg0).Select(v => LowerExprSink(v, subject.Type)).ToList(), value));
+                ? new SwitchExprArm(null, value)
+                : new SwitchExprArm(LowerCaseVals(pe.Arg0, subject.Type), value));
         }
         // The result type is the sink, else inferred from the first value-yielding arm.
         var resultType = sink

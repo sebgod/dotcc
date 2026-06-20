@@ -776,7 +776,12 @@ internal sealed class CSharpBackend
             var sec = sw.Sections[si];
             foreach (var lab in sec.Labels)
             {
-                sb.Append(ipad).Append(lab.CaseExpr is { } ce ? $"case {CaseValue(ce, sw.Subject.Type)}:\n" : "default:\n");
+                // A range label (`lo...hi`) → a relational pattern `case >= lo and <= hi:`; a
+                // single value → `case v:`; a null `CaseExpr` → `default:`.
+                sb.Append(ipad).Append(
+                    lab.CaseExpr is not { } ce ? "default:\n"
+                    : lab.HiExpr is { } hi ? $"case >= {CaseValue(ce, sw.Subject.Type)} and <= {CaseValue(hi, sw.Subject.Type)}:\n"
+                    : $"case {CaseValue(ce, sw.Subject.Type)}:\n");
             }
             var eff = Eff(sec);
             // Relocated wholesale (a fall-through chain flows in): the in-switch case
@@ -1587,12 +1592,18 @@ internal sealed class CSharpBackend
                     // arms share a C# type (C# requires it). The subject is decayed (an enum subject
                     // matches its `EnumType.member` constant-pattern labels). Self-parenthesized and
                     // returned as a primary (like the ternary), so it never needs outer parens.
+                    // One label → a constant pattern, or `>= lo and <= hi` for an inclusive range
+                    // (Zig `lo...hi`); a multi-value prong joins them with `or`.
+                    string LabelPat(SwitchLabel l) =>
+                        l.HiExpr is { } hi
+                            ? $">= {Sub(DecayEnum(l.CaseExpr!), PCond)} and <= {Sub(DecayEnum(hi), PCond)}"
+                            : Sub(DecayEnum(l.CaseExpr!), PCond);
                     string ArmText(SwitchExprArm a) => NoHoist(() =>
                     {
                         var val = Coerced(a.Value, sw.Type);
                         return a.Labels is null
                             ? $"_ => {val}"
-                            : $"{string.Join(" or ", a.Labels.Select(l => Sub(DecayEnum(l), PCond)))} => {val}";
+                            : $"{string.Join(" or ", a.Labels.Select(LabelPat))} => {val}";
                     });
                     return ($"({Sub(DecayEnum(sw.Subject), PPostfix)} switch {{ {string.Join(", ", sw.Arms.Select(ArmText))} }})", PPrimary);
                 }
