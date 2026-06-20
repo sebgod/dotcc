@@ -340,4 +340,46 @@ internal static class EmitHelpers
             default: sb.Append("\\u").Append(cu.ToString("X4")); break;
         }
     }
+
+    // ---- hexadecimal floating constants ---------------------------------
+
+    /// <summary>Parse a hexadecimal floating constant (<c>0xH.HHp±E</c>, C99 / Zig
+    /// <c>0x1.8p3</c>) to its exact binary value and render it as a round-trippable C#
+    /// decimal literal (C# has no hex-float syntax). The optional trailing C suffix
+    /// (<c>f</c>/<c>F</c> → preserved as a <c>float</c>; <c>l</c>/<c>L</c> → dropped) is
+    /// honored for the C front-end; a Zig caller passes a suffix-free spelling. All bits
+    /// come from the hex mantissa and binary exponent, so an exactly representable source
+    /// value lowers bit-for-bit identically. Shared by the C IR builder and the Zig
+    /// front-end (single source of truth — Zig's <c>0x1.8p3</c> reuses this verbatim).</summary>
+    internal static string LowerHexFloat(string raw)
+    {
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        var s = raw;
+        var isFloat = false;
+        var last = s[^1];
+        if (last is 'f' or 'F') { isFloat = true; s = s[..^1]; }
+        else if (last is 'l' or 'L') { s = s[..^1]; }
+
+        var body = s[2..];                                // strip the 0x prefix
+        var pIdx = body.IndexOfAny(new[] { 'p', 'P' });
+        var mant = pIdx >= 0 ? body[..pIdx] : body;
+        var exp = pIdx >= 0 ? int.Parse(body[(pIdx + 1)..], inv) : 0;
+
+        var dot = mant.IndexOf('.');
+        var intPart = dot < 0 ? mant : mant[..dot];
+        var fracPart = dot < 0 ? "" : mant[(dot + 1)..];
+
+        double value = intPart.Length > 0 ? Convert.ToUInt64(intPart, 16) : 0;
+        var scale = 1.0 / 16.0;
+        foreach (var ch in fracPart)
+        {
+            value += Convert.ToInt32(ch.ToString(), 16) * scale;
+            scale /= 16.0;
+        }
+        value *= Math.Pow(2, exp);
+
+        return isFloat
+            ? ((float)value).ToString("R", inv) + "f"
+            : value.ToString("R", inv);
+    }
 }

@@ -1139,4 +1139,74 @@ public sealed class ZigFrontendTests
         cs.ShouldContain("byte B = ");
         cs.ShouldContain("A + 22");
     }
+
+    // ---- Milestone I: lexer & literal completeness ----------------------
+
+    [Fact]
+    public void Lowers_radix_and_underscored_integer_literals()
+    {
+        // Zig radix prefixes `0x`/`0o`/`0b` and `_` digit separators — decoded to the same
+        // numeric value (the core normalizes to decimal). `0o` octal and `_` separator are
+        // Zig-specific (UNLIKE C's bare-`0` octal / `'` separator), handled in DecodeZigInt.
+        var cs = EmitZig(
+            "const H: u32 = 0xFF;\n" +      // 255
+            "const O: u32 = 0o17;\n" +      // 15
+            "const B: u32 = 0b1010;\n" +    // 10
+            "const U: u32 = 1_000_000;\n" + // 1000000
+            "pub fn main() u8 { return 0; }\n");
+        cs.ShouldContain("H = 255");
+        cs.ShouldContain("O = 15");
+        cs.ShouldContain("B = 10");
+        cs.ShouldContain("U = 1000000");
+    }
+
+    [Fact]
+    public void Lowers_hex_and_underscored_float_literals()
+    {
+        // A hex float `0x1.8p3` (= 1.5 * 2^3 = 12.0) has no C# syntax, so it's converted to a
+        // round-trippable decimal; a decimal float keeps `_` separators stripped.
+        var cs = EmitZig(
+            "const HF: f64 = 0x1.8p3;\n" +
+            "const DF: f64 = 1_000.5;\n" +
+            "pub fn main() u8 { return 0; }\n");
+        cs.ShouldContain("HF = 12");       // 0x1.8p3 == 12.0
+        cs.ShouldContain("DF = 1000.5");
+    }
+
+    [Fact]
+    public void Lowers_escaped_quote_and_unicode_escape_in_a_string()
+    {
+        // `\"` is an escaped quote (the old `"[^"]*"` rule truncated there); `\u{NNNN}` expands to
+        // its UTF-8 bytes — U+2764 (❤) = E2 9D A4, which (being > 0x7F) routes to the byte-array path.
+        var cs = EmitZig(
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "pub fn main() u8 { _ = printf(\"a\\\"b\"); _ = printf(\"\\u{2764}\"); return 0; }\n");
+        cs.ShouldContain("a\\\"b");               // the escaped quote survived into the u8 literal
+        cs.ShouldContain("0xE2, 0x9D, 0xA4");     // U+2764 UTF-8 bytes
+    }
+
+    [Fact]
+    public void Lowers_a_multiline_string_to_a_newline_joined_literal()
+    {
+        // A run of `\\`-prefixed lines folds into one literal, lines joined by `\n`; escapes are
+        // NOT processed inside a multiline string (raw content).
+        var cs = EmitZig(
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "pub fn main() u8 {\n" +
+            "    _ = printf(\n" +
+            "        \\\\line one\n" +
+            "        \\\\line two\n" +
+            "    );\n" +
+            "    return 0;\n" +
+            "}\n");
+        cs.ShouldContain("line one\\nline two");   // joined with a `\n` escape in the u8 literal
+    }
+
+    [Fact]
+    public void Lowers_a_unicode_escape_in_a_char_literal()
+    {
+        // '\u{41}' is the codepoint 0x41 = 'A' = 65 (a Zig comptime_int).
+        var cs = EmitZig("pub fn main() u8 { return '\\u{41}'; }\n");
+        cs.ShouldContain("65");
+    }
 }
