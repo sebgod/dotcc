@@ -1209,4 +1209,106 @@ public sealed class ZigFrontendTests
         var cs = EmitZig("pub fn main() u8 { return '\\u{41}'; }\n");
         cs.ShouldContain("65");
     }
+
+    // ---- Milestone J: result-location cast builtins ----
+
+    [Fact]
+    public void Lowers_intCast_and_truncate_to_a_narrowing_cast()
+    {
+        // @intCast / @truncate infer their target from the SINK (the `u8` binding), not an
+        // explicit type arg — both lower to the C `(byte)` cast.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const wide: usize = 20;\n" +
+            "    const a: u8 = @intCast(wide);\n" +
+            "    const big: u32 = 0x16;\n" +
+            "    const b: u8 = @truncate(big);\n" +
+            "    return a + b;\n" +
+            "}\n");
+        cs.ShouldContain("(byte)wide");   // @intCast at a u8 sink
+        cs.ShouldContain("(byte)big");    // @truncate at a u8 sink
+    }
+
+    [Fact]
+    public void Lowers_float_conversion_builtins()
+    {
+        // @floatFromInt / @floatCast / @intFromFloat take their target from the sink type.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const i: i32 = 42;\n" +
+            "    const f: f64 = @floatFromInt(i);\n" +
+            "    const g: f32 = @floatCast(f);\n" +
+            "    const back: u8 = @intFromFloat(g);\n" +
+            "    return back;\n" +
+            "}\n");
+        cs.ShouldContain("(double)i");   // @floatFromInt at an f64 sink
+        cs.ShouldContain("(float)f");    // @floatCast at an f32 sink
+        cs.ShouldContain("(byte)g");     // @intFromFloat at a u8 sink
+    }
+
+    [Fact]
+    public void Lowers_bitCast_to_Unsafe_BitCast()
+    {
+        // @bitCast is a same-size bit reinterpret (not a value conversion) → Unsafe.BitCast,
+        // generic over <source, sink>. The source is the f32 operand, the sink the u32 binding.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const bits: u32 = @bitCast(@as(f32, 1.0));\n" +
+            "    const lo: u8 = @truncate(bits);\n" +
+            "    return lo;\n" +
+            "}\n");
+        cs.ShouldContain("System.Runtime.CompilerServices.Unsafe.BitCast<float, uint>");
+    }
+
+    [Fact]
+    public void Lowers_ptrCast_and_alignCast()
+    {
+        // @ptrCast reinterprets the pointee type (→ a C pointer cast); @alignCast is the
+        // identity in dotcc's managed model (alignment is unobservable), so the nested
+        // `@ptrCast(@alignCast(p8))` still lowers to a single `(uint*)` cast.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var x: u32 = 42;\n" +
+            "    const p8: *u8 = @ptrCast(&x);\n" +
+            "    const p32: *u32 = @ptrCast(@alignCast(p8));\n" +
+            "    return @intCast(p32.* & 0xFF);\n" +
+            "}\n");
+        cs.ShouldContain("(byte*)");   // @ptrCast to *u8
+        cs.ShouldContain("(uint*)");   // @ptrCast(@alignCast(...)) to *u32
+    }
+
+    [Fact]
+    public void Lowers_enumFromInt_to_an_enum_cast()
+    {
+        // @enumFromInt(int) at an enum sink → a C# cast to the enum type.
+        var cs = EmitZig(
+            "const Color = enum(u8) { red, green, blue };\n" +
+            "pub fn main() u8 {\n" +
+            "    const c: Color = @enumFromInt(@as(u8, 2));\n" +
+            "    return @intFromEnum(c) + 40;\n" +
+            "}\n");
+        cs.ShouldContain("(Color)");
+    }
+
+    [Fact]
+    public void Lowers_sizeOf_to_a_constant_size()
+    {
+        // @sizeOf(T) reuses the C `sizeof` IR (no sink needed) → C#'s `sizeof(uint)`.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const sz: usize = @sizeOf(u32);\n" +
+            "    return @intCast(sz * 10 + 2);\n" +
+            "}\n");
+        cs.ShouldContain("sizeof(uint)");
+    }
+
+    [Fact]
+    public void Rejects_a_result_location_builtin_with_no_sink()
+    {
+        // A result-location builtin needs a known target type (Zig requires a result location);
+        // an untyped binding gives no sink, so dotcc rejects it with a clear message.
+        var ex = Should.Throw<CompileException>(() =>
+            EmitZig("pub fn main() u8 { const x = @intCast(5); return x; }\n"));
+        ex.Message.ShouldContain("result location");
+    }
 }
