@@ -82,7 +82,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `while (c) …` | ✅ | (no payload capture yet) |
 | `while (c) : (cont) …` | ✅ | the continue-expression → the C IR `for`-post, so `continue` runs `cont` (faithful to Zig). The common assignment cont `: (i = i + 1)` and a bare-expr cont both parse |
 | `break;` / `continue;` | ✅ | unlabeled — reuse the C IR loop-control nodes (labeled `break :blk` deferred) |
-| `switch (x) { v => {…}, a, b => {…}, else => {…} }` | ✅ | as a STATEMENT → the C IR Switch. Single / multi-value / `else` (→ default) prongs; NO fall-through (each prong gets an appended `break`). Switching on an **enum** works (subject + `.member` labels decay to the underlying int). Prong bodies must be braced **blocks**; bare-expr bodies, ranges (`a...b`), and switch-as-EXPRESSION are deferred |
+| `switch (x) { v => {…}, a, b => {…}, else => {…} }` | ✅ | as a STATEMENT → the C IR Switch. Single / multi-value / `else` (→ default) prongs; NO fall-through (each prong gets an appended `break`). Switching on an **enum** works (subject + `.member` labels decay to the underlying int). Prong bodies are braced **blocks** OR a bare expression (`v => expr`, an expression statement). **Deferred:** ranges (`a...b`) |
 | `switch (u) { .a => \|x\| {…}, … }` | ✅ | switch on a **tagged union** → dispatch on the `__tag`; a `\|x\|` payload capture binds the matched variant's payload (by value). An exhaustive union switch with no `else` makes its last prong the C# `default` (so the function provably returns). **Deferred:** by-reference `\|*x\|` capture, multi-variant capture prongs, capture on `if`/`while` (optionals / error-unions) |
 | `return e;` / `return;` | ✅ | |
 | `x = e;` assignment | ✅ | |
@@ -94,7 +94,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `errdefer Stmt;` | ✅ | error-exit cleanup — runs only when the block exits via a propagating error, LIFO-interleaved with `defer`. → C# `try { rest } catch (ZigErrorReturn) { cleanup; throw; }`. A function with an `errdefer` routes its `return error.X` through a throw so it reaches the catch. **Deferred:** `errdefer \|e\| …` payload capture |
 | `for (a..b) \|i\| …` (range for) | ✅ | → C `for (usize i = a; i < b; i++)`; the `\|i\|` capture is the usize loop index (`\|_\|` discards). The body is a Stmt or block |
 | `for (s) \|x\|` / `for (s, 0..) \|x, i\|` (for-over-slice) | ✅ | iterate a slice's elements (`x` = a per-iteration copy); the index form also binds the usize index. → C `for (usize __i=0; __i<s.Len; __i++) { var x = s.Ptr[__i]; [var i = __i + 0;] … }` (the slice is hoisted to a temp unless a bare var) |
-| open-ended `s[lo..]`, by-ref `\|*x\|`, labeled loops, labeled `break`/`continue`, switch ranges/expr | 🚫 | |
+| open-ended `s[lo..]`, by-ref `\|*x\|`, labeled loops, labeled `break`/`continue`, switch ranges, labeled-block-as-value | 🚫 | (switch-as-expression is now ✅ — see Expressions) |
 
 ## Expressions
 
@@ -110,6 +110,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | arithmetic `+ - * / %` | ✅ | usual-arithmetic result typing (fixes i64 truncation) |
 | prefix `-` `~` `!` | ✅ | |
 | `if (c) a else b` (if-**expression**) | ✅ | → C# ternary |
+| `switch (x) { v => e, … }` (switch-**expression**) | ✅ | a switch in value position (a typed binding / return / any `RhsExpr`) → C#'s native switch EXPRESSION (`x switch { v => e, a or b => e, _ => e }`). Each prong yields a value (a bare-expr body); `else` → the `_` default; arm values lower at the result sink; an enum subject + `.member` labels decay to the underlying int. Same structural trick as the if-expression (a `RhsExpr`, not a Primary). **Deferred:** a block-bodied prong (needs a labeled `break :blk v`), a `\|x\|` capture in expression position, ranges |
 | function call `f(args)` | ✅ | intra-Zig + forward-ref + libc-by-bare-name (incl. variadic `printf`) |
 | prefix `&` (address-of) | ✅ | `&x` → `*T`; a var/param operand is marked address-taken |
 | postfix `p.*` (deref), `a[i]` (index) | ✅ | pointer deref / subscript → the C `Unary(Deref)` / `Index` IR. On a slice, `s[i]` indexes through `.Ptr` (`s.Ptr[i]`) |
@@ -399,4 +400,7 @@ rejects, not silently accept more.
   each inferring its target from the binding it flows into),
   `examples/zig-arrays` (array literals & aggregate globals: `.{…}` at a `[N]T` sink, typed
   `[N]T{…}` / inferred `[_]T{…}` locals, plus literal-array / inferred-array / `undefined`-array
-  and struct globals routed through the pinned global store).
+  and struct globals routed through the pinned global store),
+  `examples/zig-switch-expr` (switch as an expression: a return-position enum switch with
+  `.member` labels + `else`, and a typed-decl int switch with a multi-value prong → C#'s native
+  switch expression).

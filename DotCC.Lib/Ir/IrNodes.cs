@@ -119,6 +119,18 @@ public sealed record BitCast(CType Target, CExpr Operand) : CExpr;
 /// the condition in <c>Cond.B(...)</c> for C-truthy semantics.</summary>
 public sealed record CondExpr(CExpr Cond, CExpr Then, CExpr Else) : CExpr;
 
+/// <summary>A C# switch EXPRESSION — <c>subject switch { labels =&gt; value, …, _ =&gt; value }</c>
+/// — the lowering of Zig's switch-as-a-value (Milestone L). Each arm's <see cref="SwitchExprArm.Labels"/>
+/// are constant patterns (rendered joined with <c>or</c>); a null-label arm is the <c>_</c> default
+/// (Zig's <c>else</c>). Distinct from the <see cref="Switch"/> STATEMENT (no fall-through, yields a
+/// value at the result location). Codegen self-parenthesizes (like <see cref="CondExpr"/>) and
+/// coerces each arm to the result <see cref="CExpr.Type"/>. Zig-only.</summary>
+public sealed record SwitchExpr(CExpr Subject, IReadOnlyList<SwitchExprArm> Arms) : CExpr;
+
+/// <summary>One arm of a <see cref="SwitchExpr"/>: constant-pattern <paramref name="Labels"/>
+/// (null = the <c>_</c> default) yielding <paramref name="Value"/>.</summary>
+public sealed record SwitchExprArm(IReadOnlyList<CExpr>? Labels, CExpr Value);
+
 /// <summary>An array subscript <c>base[index]</c> — an lvalue.</summary>
 public sealed record Index(CExpr Base, CExpr Idx) : CExpr;
 
