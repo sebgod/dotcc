@@ -520,6 +520,38 @@ public sealed class ZigOracleTests
             "const A: u8 = 20;\n" +
             "const B: u8 = A + 22;\n" +
             "pub fn main() u8 { return B; }\n", 42, "" },
+
+        // --- Milestone I: lexer & literal completeness ---
+        // Radix prefixes (0x/0o/0b) + `_` digit separators decode to the same value. 20+18+4 = 42.
+        new object[] { "lexer_radix",
+            "pub fn main() u8 {\n" +
+            "    const a: u8 = 0x1_4;\n" +     // 20
+            "    const b: u8 = 0o22;\n" +      // 18
+            "    const c: u8 = 0b0_100;\n" +   // 4
+            "    return a + b + c;\n" +
+            "}\n", 42, "" },
+        // A hex float `0x1.8p3` (= 12.0, no C# syntax → decimal) and an underscored decimal float.
+        new object[] { "lexer_floats",
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "pub fn main() u8 {\n" +
+            "    const hf: f64 = 0x1.8p3;\n" + // 12.0
+            "    const df: f64 = 1_5.0;\n" +   // 15.0
+            "    _ = printf(\"%.1f %.1f\\n\", hf, df);\n" +
+            "    return 42;\n" +
+            "}\n", 42, "12.0 15.0" },
+        // Escaped quote `\"`, a `\u{41}` unicode escape ('A'), and a `\\`-prefixed multiline string
+        // (lines joined by `\n`, no trailing newline). stdout: q="x" u=A / a / b.
+        new object[] { "lexer_strings",
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "pub fn main() u8 {\n" +
+            "    _ = printf(\"q=\\\"x\\\" u=\\u{41}\\n\");\n" +
+            "    _ = printf(\n" +
+            "        \\\\a\n" +
+            "        \\\\b\n" +
+            "    );\n" +
+            "    _ = printf(\"\\n\");\n" +
+            "    return 42;\n" +
+            "}\n", 42, "q=\"x\" u=A\na\nb" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

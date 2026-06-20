@@ -26,8 +26,8 @@
 #   - container decls (struct/enum/union/opaque), error sets, init lists `.{...}`;
 #   - comptime/nosuspend, asm, anytype;
 #   - full FnProto modifiers (export/extern/inline/callconv/align/linksection/...);
-#   - hex/oct/bin/underscored integers, char literals, multiline strings, builtins
-#     beyond `@name(args)`, `orelse`/`catch`, the wrapping/saturating operators.
+#   - builtins beyond `@name(args)`/`@as`/`@intFromEnum` (the @intCast family — Milestone J),
+#     the wrapping/saturating operators (Milestone P).
 
 symbols:
   # --- non-terminals (start = Root at index 0) ---
@@ -795,16 +795,31 @@ lexer:
     - { symbol: '?', match: '\?' }
     - { symbol: '.', match: '\.' }
 
-    # Atoms. FLOAT before INTEGER (longest-match picks float for `1.5`). Builtin
-    # `@name` before IDENT. Slice-1 integers are decimal-only.
+    # Atoms. FLOAT before INTEGER (longest-match picks float for `1.5` / `0x1.8p3`).
+    # Builtin `@name` before IDENT.
     - { symbol: BUILTIN, match: '@[a-zA-Z_][a-zA-Z_0-9]*' }
-    - { symbol: STRING,  match: '"[^"]*"' }
-    # CHAR `'x'`: a hex escape `\xHH`, any other backslash escape `\.` (\n \t \\ \' …), or a single
-    # non-quote/non-backslash char. `'` is a unique lead (no other token starts with it), so no
-    # clash. (Zig's `\u{…}` unicode escape in a char literal is deferred.)
-    - { symbol: CHAR,    match: '''(\\x[0-9a-fA-F][0-9a-fA-F]|\\.|[^''\\])''' }
-    - { symbol: FLOAT,   match: '[0-9]+\.[0-9]+([eE][+\-]?[0-9]+)?' }
-    - { symbol: INTEGER, match: '[0-9]+' }
+    # Multiline string: one or more `\\`-prefixed lines (joined with `\n`, decoded RAW — Zig
+    # multiline strings process NO escapes). Backslash leads no other Zig token, so a `\\`-led
+    # lexeme is unambiguous; disjoint lead from the quoted form (`"`), order vs it is moot. A
+    # trailing CRLF `\r` is absorbed by `[^\n]*` (which excludes only `\n`) and stripped in the
+    # decoder, so the line separator is a bare `\n`.
+    - { symbol: STRING,  match: '\\\\[^\n]*([\n][ \t]*\\\\[^\n]*)*' }
+    # Quoted string: a backslash escape (`\n` `\t` `\\` `\"` `\xNN` `\u{…}` …) or any
+    # non-quote/non-backslash char. The `\\.` arm makes `\"` an escaped quote (not a terminator)
+    # — fixing the old `"[^"]*"` which truncated at the first `\"`. `\u{…}` rides the `\\.`+chars.
+    - { symbol: STRING,  match: '"(\\.|[^"\\])*"' }
+    # CHAR `'x'`: `\u{…}` unicode, a hex escape `\xHH`, any other backslash escape `\.`
+    # (\n \t \\ \' …), or a single non-quote/non-backslash char. `'` is a unique lead, so no clash.
+    - { symbol: CHAR,    match: '''(\\u\{[0-9a-fA-F_]+\}|\\x[0-9a-fA-F][0-9a-fA-F]|\\.|[^''\\])''' }
+    # Numeric literals — Zig radix prefixes `0x`/`0o`/`0b` and `_` digit separators (UNLIKE C's
+    # bare-`0` octal and `'` separator; decoded Zig-side in DecodeZigInt). FLOAT before INTEGER so
+    # `0x1.8p3` / `1.5` win over the integer prefix. Hex float uses a `p`/`P` binary exponent.
+    - { symbol: FLOAT,   match: '0x[0-9a-fA-F_]+(\.[0-9a-fA-F_]+)?[pP][+\-]?[0-9_]+' }
+    - { symbol: FLOAT,   match: '[0-9][0-9_]*\.[0-9_]+([eE][+\-]?[0-9_]+)?' }
+    - { symbol: INTEGER, match: '0x[0-9a-fA-F_]+' }
+    - { symbol: INTEGER, match: '0o[0-7_]+' }
+    - { symbol: INTEGER, match: '0b[01_]+' }
+    - { symbol: INTEGER, match: '[0-9][0-9_]*' }
     - { symbol: IDENT,   match: '[a-zA-Z_][a-zA-Z_0-9]*' }
 
     # Whitespace (incl. newlines) — ignored.

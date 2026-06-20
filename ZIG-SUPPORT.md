@@ -100,9 +100,9 @@ program's libc call is handled. No `@cImport`, no header harvest.
 
 | Feature | Status | Notes |
 |---|---|---|
-| integer / float / string literals | ✅ | decimal int; string reuses C escape decoding (`\n \t \\ \" \xNN`) |
+| integer / float / string literals | ✅ | decimal **+ `0x`/`0o`/`0b` radix + `_` separators** (see Lexer); float incl. hex `0x1.8p3`; string reuses C escape decoding (`\n \t \\ \" \xNN`) **+ `\u{…}` + multiline `\\`** |
 | `true` / `false` | ✅ | boolean literals — a `bool` value (→ C# `true`/`false`, stored in the normalising `CBool`) |
-| char literal `'x'` | ✅ | Zig's `comptime_int` = the codepoint → an integer literal (`'A'` → 65). Escapes `\n \t \r \\ \' \xNN` + octal decode via the shared string-escape machinery. **Deferred:** `\u{…}` unicode escapes |
+| char literal `'x'` | ✅ | Zig's `comptime_int` = the codepoint → an integer literal (`'A'` → 65). Escapes `\n \t \r \\ \' \xNN` + octal decode via the shared string-escape machinery, plus `\u{NNNN}` (decoded Zig-side). **Deferred:** a `\u{…}` codepoint > 0xFFFF (lowered as a single int — surrogate handling deferred) |
 | identifiers, `(grouped)` | ✅ | |
 | `or` `and` (short-circuit) | ✅ | |
 | comparison `== != < > <= >=` | ✅ | non-associative (`a < b < c` is a parse error, like Zig) |
@@ -138,7 +138,11 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | Feature | Status |
 |---|---|
 | decimal integers, floats, `"…"` strings, char literals `'x'` (`\n \t \\ \' \xNN`), `//` line comments, `@name` builtins | ✅ |
-| hex/oct/bin/underscored integers, multiline `\\` strings, `\u{…}` escapes, escaped-quote `\"` in a string | 🚫 |
+| hex/octal/binary integers `0x1F`/`0o17`/`0b1010` + `_` digit separators `1_000_000` | ✅ | radix + `_` decoded in `DecodeZigInt` (Zig's `0o` octal / `_` separator, UNLIKE C's bare-`0` / `'`); the literal's carrier type is the narrowest of int/uint/long/ulong holding it |
+| hex float `0x1.8p3` + underscored float `1_000.5` | ✅ | hex float has no C# syntax → converted to a round-trippable decimal via the shared `EmitHelpers.LowerHexFloat` |
+| multiline `\\` strings | ✅ | a run of `\\`-prefixed lines folded into one literal, lines joined by `\n`; escapes are NOT processed (raw content), matching Zig |
+| `\u{NNNN}` unicode escapes (string + char), escaped-quote `\"` in a string | ✅ | `\u{…}` expands to its UTF-8 bytes Zig-side (the shared decoder is untouched); `\"` is an escaped quote (the old `"[^"]*"` rule truncated there) |
+| `\u{…}` with a codepoint > 0xFFFF, `1e10` (exponent-only, no point), `0X`/`0O`/`0B` (uppercase prefix) | 🚫 | non-BMP `\u{…}` in a char literal lowers as a single int (surrogate handling deferred); exponent-only float + uppercase radix prefix not lexed yet |
 
 ## Out of scope (the dialect line)
 
@@ -382,4 +386,6 @@ rejects, not silently accept more.
   `examples/zig-compound-assign` (compound assignment: `i += 1` as the `++` replacement, a
   `+=`/`-=` chain, single-eval on the target lvalue),
   `examples/zig-globals` (top-level globals: a typed `const`, a const initialized from an earlier
-  const, and a mutable `var` accumulator bumped by a function through its bare name).
+  const, and a mutable `var` accumulator bumped by a function through its bare name),
+  `examples/zig-lexer` (lexer & literals: `0x`/`0o`/`0b` radix + `_` separators, a hex float, an
+  escaped quote + `\u{…}` unicode escape, and a `\\` multiline string).

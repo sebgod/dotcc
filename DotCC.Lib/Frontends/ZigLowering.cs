@@ -1558,38 +1558,42 @@ internal sealed class ZigLowering
     {
         switch (expr.Content)
         {
-            case Zig.IntLit i:
-            {
-                var text = Tok(i.Arg0);
-                var value = long.Parse(text, CultureInfo.InvariantCulture);
-                return new LitInt(text, value) { Type = CType.Int };
-            }
-            case Zig.FloatLit f: return new LitFloat(Tok(f.Arg0)) { Type = CType.Double };
+            case Zig.IntLit i: return DecodeZigInt(Tok(i.Arg0));
+            case Zig.FloatLit f: return new LitFloat(LowerZigFloat(Tok(f.Arg0))) { Type = CType.Double };
 
             // `true`/`false` — boolean literals (a `bool` value, like `null`/`undefined`). Typed
             // `_Bool` (→ the store-normalising `CBool`, which takes a C# `bool`).
             case Zig.TrueLit:  return new LitBool(true) { Type = CType.Bool };
             case Zig.FalseLit: return new LitBool(false) { Type = CType.Bool };
 
-            // A char literal `'x'` / `'\n'` / `'\xNN'` — Zig's `comptime_int` = the codepoint.
-            // Decode the body (quotes stripped) reusing the shared escape machinery, then lower to
-            // an int literal, exactly like the C front-end's char constant.
+            // A char literal `'x'` / `'\n'` / `'\xNN'` / `'\u{1F600}'` — Zig's `comptime_int` = the
+            // codepoint. The `\u{…}` form is decoded Zig-side (the shared escape machinery has no
+            // `\u{…}` arm — and adding one would change the C front-end's `\u` handling); everything
+            // else reuses the shared decoder, then lowers to an int literal like a C char constant.
             case Zig.CharLit c:
             {
                 var raw = Tok(c.Arg0);
-                var v = DotCC.EmitHelpers.DecodeCharLiteral(raw.Length >= 2 ? raw[1..^1] : "");
+                var body = raw.Length >= 2 ? raw[1..^1] : "";
+                var v = body.StartsWith("\\u{", System.StringComparison.Ordinal) && body.EndsWith("}", System.StringComparison.Ordinal)
+                    ? System.Convert.ToInt32(body[3..^1].Replace("_", ""), 16)
+                    : DotCC.EmitHelpers.DecodeCharLiteral(body);
                 return new LitInt(v.ToString(CultureInfo.InvariantCulture), v) { Type = CType.Int };
             }
 
             // A string literal. Zig's escape set overlaps C's for the common cases
-            // (`\n`/`\t`/`\\`/`\"`/`\xNN`), so we reuse the C string machinery: the raw
-            // quoted lexeme becomes a single LitStr segment, typed `char[N]` (decoded
-            // byte count incl. NUL) so it decays to `char*` exactly like a C literal —
-            // and the C# backend lowers it to the same pooled `Libc.L("…"u8)` pointer.
-            // (Zig's `\u{…}` and multiline `\\` strings are deferred.)
+            // (`\n`/`\t`/`\\`/`\"`/`\xNN`), so we reuse the C string machinery: the (escape-expanded)
+            // quoted lexeme becomes a single LitStr segment, typed `char[N]` (decoded byte count incl.
+            // NUL) so it decays to `char*` exactly like a C literal — the C# backend lowers it to the
+            // same pooled `Libc.L("…"u8)` pointer. Two Zig-specific reshapes happen FIRST so the shared
+            // decoder is untouched: a `\\`-prefixed multiline string is folded to one quoted lexeme of
+            // its raw (un-escaped) content; a `\u{…}` unicode escape is expanded to `\xNN` UTF-8 bytes.
             case Zig.StrLit s:
             {
-                var segs = new List<string> { Tok(s.Arg0) };   // raw lexeme, quotes included
+                var raw = Tok(s.Arg0);
+                var lexeme = raw.StartsWith("\\", System.StringComparison.Ordinal)
+                    ? FoldZigMultilineString(raw)
+                    : ExpandZigUnicodeEscapes(raw);
+                var segs = new List<string> { lexeme };
                 DotCC.EmitHelpers.EncodeStringLiteral(segs, out var byteLen);
                 return new LitStr(segs) { Type = new CType.Array(CType.Char, byteLen) };
             }
@@ -2582,12 +2586,136 @@ internal sealed class ZigLowering
     }
 
     /// <summary>Const-evaluate a <c>[N]T</c> array size — an integer literal <c>N</c> (a general
-    /// comptime const-expression size is deferred). Throws on a non-literal size.</summary>
+    /// comptime const-expression size is deferred). Throws on a non-literal size. Routed through
+    /// <see cref="DecodeZigInt"/> so a radix / underscored size (<c>[0x10]u8</c>) is accepted.</summary>
     private int ConstEvalArraySize(Item sizeExpr) => sizeExpr.Content switch
     {
-        Zig.IntLit i => (int)long.Parse(Tok(i.Arg0), CultureInfo.InvariantCulture),
+        Zig.IntLit i => (int)(DecodeZigInt(Tok(i.Arg0)).Value
+            ?? throw new IrUnsupportedException("a `[N]T` array size literal is too large")),
         _ => throw new IrUnsupportedException("a `[N]T` array size must be an integer literal"),
     };
+
+    /// <summary>Decode a Zig integer literal — decimal, <c>0x</c>/<c>0o</c>/<c>0b</c> radix, with
+    /// <c>_</c> digit separators (UNLIKE C's bare-<c>0</c> octal and <c>'</c> separator) — to a
+    /// <see cref="LitInt"/>. The numeric core is normalized to decimal (the backend re-spells it +
+    /// adds a type suffix); the signed-long <c>Value</c> is set when it fits (drives const-folding,
+    /// left null past <c>long.MaxValue</c>); the carrier type is the narrowest of int/uint/long/ulong
+    /// that holds the magnitude. (A Zig <c>comptime_int</c> has no fixed type — at a typed sink
+    /// <see cref="LowerExprSink"/> casts it; the literal just needs a representable carrier.)</summary>
+    private static LitInt DecodeZigInt(string raw)
+    {
+        var t = raw.Replace("_", "");
+        var inv = CultureInfo.InvariantCulture;
+        ulong mag = 0; bool magOk; long? val = null;
+        if (t.Length >= 2 && t[0] == '0' && t[1] is 'x' or 'X')
+        {
+            magOk = ulong.TryParse(t[2..], NumberStyles.HexNumber, inv, out mag);
+            if (long.TryParse(t[2..], NumberStyles.HexNumber, inv, out var hv)) { val = hv; }
+        }
+        else if (t.Length >= 2 && t[0] == '0' && t[1] is 'o' or 'O')
+        {
+            try { mag = System.Convert.ToUInt64(t[2..], 8); magOk = true; } catch { magOk = false; }
+            if (magOk && mag <= long.MaxValue) { val = (long)mag; }
+        }
+        else if (t.Length >= 2 && t[0] == '0' && t[1] is 'b' or 'B')
+        {
+            try { mag = System.Convert.ToUInt64(t[2..], 2); magOk = true; } catch { magOk = false; }
+            if (magOk && mag <= long.MaxValue) { val = (long)mag; }
+        }
+        else
+        {
+            magOk = ulong.TryParse(t, NumberStyles.None, inv, out mag);
+            if (long.TryParse(t, inv, out var dv)) { val = dv; }
+        }
+        // The literal's decimal CORE — radix/underscores are gone; the backend re-adds a suffix
+        // from the type below. (A non-decimal radix would also be valid C#, but decimal is uniform.)
+        var core = magOk ? mag.ToString(inv) : t;
+        var type = !magOk ? CType.Long
+            : mag <= int.MaxValue ? CType.Int
+            : mag <= uint.MaxValue ? CType.UInt
+            : mag <= long.MaxValue ? CType.Long
+            : CType.ULong;
+        return new LitInt(core, val) { Type = type };
+    }
+
+    /// <summary>Lower a Zig float literal: strip <c>_</c> separators, and convert a hex float
+    /// (<c>0x1.8p3</c>, no C# syntax) to a round-trippable decimal via the shared
+    /// <see cref="EmitHelpers.LowerHexFloat"/>. A decimal float passes through (C# accepts it
+    /// verbatim, typed <c>double</c> here). Zig has no <c>f</c>/<c>l</c> literal suffix.</summary>
+    private static string LowerZigFloat(string raw)
+    {
+        var t = raw.Replace("_", "");
+        return t.Length > 2 && t[0] == '0' && t[1] is 'x' or 'X' ? EmitHelpers.LowerHexFloat(t) : t;
+    }
+
+    /// <summary>Expand Zig's <c>\u{NNNN}</c> unicode escapes in a quoted string lexeme to the
+    /// equivalent <c>\xNN</c> UTF-8 byte escapes, so the SHARED string decoder (which has no
+    /// <c>\u{…}</c> arm) handles them unchanged. Every OTHER escape (incl. a literal <c>\\</c>)
+    /// is copied verbatim, so a <c>\\u{</c> (escaped backslash then a <c>u{</c>) is not mistaken
+    /// for a unicode escape. The input/output keep the surrounding quotes.</summary>
+    private static string ExpandZigUnicodeEscapes(string quoted)
+    {
+        if (!quoted.Contains("\\u{", System.StringComparison.Ordinal)) { return quoted; }
+        var sb = new System.Text.StringBuilder(quoted.Length);
+        var i = 0;
+        while (i < quoted.Length)
+        {
+            if (quoted[i] == '\\' && i + 2 < quoted.Length && quoted[i + 1] == 'u' && quoted[i + 2] == '{')
+            {
+                var close = quoted.IndexOf('}', i + 3);
+                if (close < 0) { throw new IrUnsupportedException("unterminated `\\u{…}` escape in string literal"); }
+                var cp = System.Convert.ToInt32(quoted[(i + 3)..close].Replace("_", ""), 16);
+                foreach (var b in System.Text.Encoding.UTF8.GetBytes(char.ConvertFromUtf32(cp)))
+                {
+                    sb.Append("\\x").Append(b.ToString("X2"));
+                }
+                i = close + 1;
+            }
+            else if (quoted[i] == '\\' && i + 1 < quoted.Length)
+            {
+                sb.Append(quoted[i]).Append(quoted[i + 1]);   // keep any other escape (incl. `\\`) intact
+                i += 2;
+            }
+            else { sb.Append(quoted[i]); i++; }
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>Fold a Zig multiline string token (a run of <c>\\</c>-prefixed lines) into a single
+    /// QUOTED lexeme whose decoded content is the raw concatenation joined by <c>\n</c>. Zig
+    /// multiline strings process NO escapes, so each line's content after its <c>\\</c> prefix is
+    /// taken verbatim — then re-escaped for the shared C-string decoder (only <c>"</c>/<c>\\</c>/
+    /// control chars need escaping; printable + UTF-8 source chars pass through and the decoder
+    /// UTF-8-encodes them).</summary>
+    private static string FoldZigMultilineString(string token)
+    {
+        var lines = token.Replace("\r", "").Split('\n');
+        var parts = new List<string>(lines.Length);
+        foreach (var raw in lines)
+        {
+            var line = raw.TrimStart(' ', '\t');
+            if (line.StartsWith("\\\\", System.StringComparison.Ordinal)) { parts.Add(line[2..]); }
+        }
+        var content = string.Join("\n", parts);
+        var sb = new System.Text.StringBuilder(content.Length + 2);
+        sb.Append('"');
+        foreach (var c in content)
+        {
+            switch (c)
+            {
+                case '"': sb.Append("\\\""); break;
+                case '\\': sb.Append("\\\\"); break;
+                case '\n': sb.Append("\\n"); break;
+                case '\t': sb.Append("\\t"); break;
+                default:
+                    if (c < 0x20) { sb.Append("\\x").Append(((int)c).ToString("X2")); }
+                    else { sb.Append(c); }   // printable ASCII + non-ASCII (UTF-8-encoded by the decoder)
+                    break;
+            }
+        }
+        sb.Append('"');
+        return sb.ToString();
+    }
 
     /// <summary>Map a Zig primitive type name to its faithful C# lowering. The
     /// fixed-width integers carry real signedness (i8 → <c>sbyte</c>, u8 → <c>byte</c>,
