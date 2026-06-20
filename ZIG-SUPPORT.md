@@ -130,7 +130,8 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | postfix `.?` (optional unwrap) | ✅ | value optional → `.Value` (panics on none); optional pointer → identity (V1: no null-check) |
 | `a orelse b` (value RHS) | ✅ | value optional → C# `??` (single-eval, lazy `b`); pointer → `a != null ? a : b` (simple LHS; `orelse return` is Milestone B2) |
 | prefix `try` | ✅ | unwrap an error union's payload, or PROPAGATE its error out of the enclosing `!T` fn (exception-based early-return, modeled on the setjmp lowering). `try e;` as a statement works too |
-| `e catch fallback` | ✅ | the payload on success, else the fallback. The fallback must be side-effect-free (literal / variable) — a non-trivial one is rejected (deferred), as is `catch \|e\| …` capture and `catch return` |
+| `e catch fallback` | ✅ | the payload on success, else the fallback. A simple, side-effect-free fallback keeps the eager `ErrUnion.Catch(a, b)`; a SIDE-EFFECTING fallback (Milestone N, part 3) lowers LAZILY — the union is hoisted to a single-eval temp and `b` runs only on error via a ternary `__cE.IsErr ? b : __cE.Value`. The lazy/capturing forms need a statement context (a `const`/`var` initializer); a side-effecting fallback in a sub-expression is still rejected |
+| `e catch \|err\| fallback` (catch capture) | ✅ | binds the error to `err` for the fallback `b` (Milestone N, part 3), lowered lazily — hoist the union, bind `ushort err = __cE.Code;`, then `__cE.IsErr ? b : __cE.Value` so `b` (which may use `err`, e.g. `err == error.Bad`) runs only on error. As a `const`/`var` initializer. **Deferred:** the control-flow fallback `catch return` / `catch \|e\| return e` (clusters with `orelse return`); the capture in a sub-expression / statement position |
 | `error.Foo` (bare error value) | ✅ | a first-class error VALUE (Milestone N, part 1) — usable outside `return error.Foo;`: bound to a `const`/`var`, captured (`else \|e\|` / future `catch \|e\|`), and compared. V1 erases the named set into one flat global code space, so an `error.Foo` lowers to its stable `ushort` code, typed `CType.ErrorSet`. (Explicit `error{A,B}` set decls / named `E!T` distinct from `anyerror!T` are still deferred) |
 | `e == error.Foo` / `e != error.Foo` (error-value equality) | ✅ | error-value comparison (Milestone N, part 1) — equal codes mean equal errors, so `==`/`!=` lower to the ordinary integer comparison of the flat codes. Works on a bound error too (`else \|e\|` / a `const`), which un-erases the Milestone M part-3 cut (a USED named `\|e\|` is now valid in both compilers) |
 | `switch (e) { error.Foo => …, else => … }` (error switch) | ✅ | switch on an error value (Milestone N, part 2) — an error value IS its flat `ushort` code, so this lowers to an ORDINARY integer `switch` on the code (each `error.Foo` prong → a `case <code>:`, `else` → `default:`). Rode in on part 1's representation — no new lowering. The error is commonly captured from `else \|e\|` first; an `anyerror!T` (open set) requires the `else` |
@@ -261,11 +262,17 @@ compared against an error is finally valid in both compilers). Because an error 
 a `switch (e)` on an error (Milestone N, part 2) lowers to an ordinary integer `switch` on the code
 (`error.Foo` → `case <code>:`, `else` → `default:`) — it rode in on the part-1 representation.
 
+`catch` now supports a SIDE-EFFECTING fallback and a `catch |e|` capture (Milestone N, part 3):
+both lower lazily (hoist the union to a single-eval temp, run the fallback only on error via a
+ternary; the capture binds `e` to the flat error code, usable as `e == error.Foo`). These need a
+statement context (a `const`/`var` initializer).
+
 **V1 limits** (documented, not silent): the error SET is erased to one flat global code
 space (`!T` / `anyerror!T` / `E!T` lower identically; an `error.Foo` value is its code); the
 payload must be a value type (an error union over a *pointer* is deferred — a C# generic can't
-take a pointer arg); `catch`'s fallback must be side-effect-free; and `catch |e| …` capture,
-`catch return`, explicit `error{…}` set decls, and an error-union `main` are all deferred.
+take a pointer arg); a side-effecting / capturing `catch` is a `const`/`var` initializer only (a
+sub-expression position keeps the eager-only rule); and the control-flow fallback `catch return` /
+`catch |e| return e`, explicit `error{…}` set decls, and an error-union `main` are all deferred.
 
 ## Allocators — devirtualize the default, vtable for the rest
 
@@ -438,4 +445,6 @@ rejects, not silently accept more.
   `examples/zig-error-value` (error values as comparable values: a USED `else |e|` capture compared
   against `error.Bad`, plus a `const`-bound bare error value tested with `==`/`!=`),
   `examples/zig-error-switch` (`switch` on an error value: a captured `else |e|` switched over
-  `error.Zero` / `error.Negative` / `else` → an integer switch on the flat code).
+  `error.Zero` / `error.Negative` / `else` → an integer switch on the flat code),
+  `examples/zig-catch-capture` (`catch |e|` capture using `e == error.Bad` for a bool fallback, plus
+  a lazy side-effecting `catch dflt()` whose call runs only on the error path).

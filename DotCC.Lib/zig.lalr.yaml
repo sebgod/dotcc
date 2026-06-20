@@ -420,11 +420,16 @@ productions:
   # `a orelse b` / `a catch b` — lowest-precedence binary level (below `or`), left-assoc.
   # The RHS is BoolOr (a value expr); `orelse return` / `catch return` (a noreturn RHS)
   # isn't expressible — `return` is a statement, not an expression — so the value-vs-
-  # control-flow boundary stays grammar-enforced. `catch |e| …` payload-capture is deferred.
+  # control-flow boundary stays grammar-enforced (deferred to Milestone N's control-flow part).
+  # `a catch |e| b` (Milestone N, part 3) binds the error to `e` for the fallback `b`: after the
+  # `'catch'`, a `'|'` lookahead selects the capture form over the plain value RHS — no value
+  # expression starts with `'|'` (it's only the infix bitwise-or / the capture delimiter), so the
+  # alternative is conflict-free (the same trick as the M capture forms).
   - derivation: leftmost
     rules:
       - { lhs: OrElse, rhs: [OrElse, 'orelse', BoolOr], action: orElse }
       - { lhs: OrElse, rhs: [OrElse, 'catch', BoolOr],  action: catchOp }
+      - { lhs: OrElse, rhs: [OrElse, 'catch', '|', IDENT, '|', BoolOr], action: catchCapture }
       - { lhs: OrElse, rhs: [BoolOr] }
 
   # ===== slice 2a: control-flow as expression =====

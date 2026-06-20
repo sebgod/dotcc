@@ -1502,6 +1502,27 @@ internal sealed class ZigLowering
                 return new DeclStmt(new List<LocalDecl> { new(sym, new VarRef(temp) { Type = temp.Type }) });
             });
         }
+        // `const v = a catch |e| b;` / `const v = a catch <side-effecting>;` (Milestone N, part 3) —
+        // a capturing or side-effecting catch needs a statement context (the fallback runs only on
+        // error; the capture binds `e`). Hoist + (bind) + initialize `v` from the lazy ternary. A
+        // simple, side-effect-free `a catch b` (no capture) yields empty pre and falls through to the
+        // normal path below — the eager `ErrUnion.Catch`, unchanged.
+        if (initExpr.Content is Zig.CatchOp or Zig.CatchCapture)
+        {
+            string? capName = initExpr.Content is Zig.CatchCapture cc ? Tok(cc.Arg3) : null;
+            var unionIt = initExpr.Content switch { Zig.CatchOp co => co.Arg0, Zig.CatchCapture c2 => c2.Arg0, _ => initExpr };
+            var fbIt = initExpr.Content switch { Zig.CatchOp co => co.Arg2, Zig.CatchCapture c2 => c2.Arg5, _ => initExpr };
+            var (pre, value) = LowerCatchValue(unionIt, capName, fbIt);
+            // Capture always lowers structurally; a no-capture catch only when it hoisted (i.e. the
+            // fallback was side-effecting). A simple no-capture catch (empty pre) falls through.
+            if (capName is not null || pre.Count > 0)
+            {
+                var ctype = declared ?? value.Type ?? CType.Int;
+                var csym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = ctype });
+                pre.Add(new DeclStmt(new List<LocalDecl> { new(csym, value) }));
+                return pre.Count == 1 ? pre[0] : new Seq(pre);
+            }
+        }
         // `var b: [N]T = …;` → a stackalloc'd C array (ArrayDecl → `T* b = stackalloc T[…]`), so
         // `b[i]` / `b[lo..hi]` reuse the array paths and yield a stack-backed slice. `undefined`
         // gives a zeroed extent; an array literal (`.{…}` / `[N]T{…}`, Milestone K) gives a
@@ -2291,6 +2312,67 @@ internal sealed class ZigLowering
             ? new Return(new ErrUnionOk(null) { Type = eu })
             : new Return(null);
 
+    /// <summary>Lower a <c>catch</c> fallback's VALUE at a statement-context position (a
+    /// <c>const</c>/<c>var</c> initializer), returning the pre-statements that must run first plus
+    /// the value expression. Three shapes:
+    /// <list type="bullet">
+    /// <item>no capture + a simple (re-evaluable, side-effect-free) fallback → empty pre + the eager
+    /// <see cref="ZigCatch"/> (<c>ErrUnion.Catch(a, b)</c>, unchanged from Milestone B2);</item>
+    /// <item>no capture + a side-effecting fallback → hoist the union to a single-eval <c>__cE</c>
+    /// temp and make the fallback LAZY via a ternary <c>__cE.IsErr ? b : __cE.Value</c> (so <c>b</c>
+    /// runs only on error);</item>
+    /// <item>a capture <c>catch |e| b</c> → hoist the union, bind <c>e</c> to the flat error code
+    /// (<see cref="CType.ErrorSet"/>), then the same lazy ternary with <c>e</c> in scope for
+    /// <c>b</c>.</item>
+    /// </list>
+    /// The left operand must be an error union; the lazy ternary keeps Zig's evaluate-fallback-only-
+    /// on-error semantics where the eager helper can't.</summary>
+    private (List<CStmt> Pre, CExpr Value) LowerCatchValue(Item unionItem, string? capName, Item fallbackItem)
+    {
+        var union = LowerExpr(unionItem);
+        if (union.Type.Unqualified is not CType.ErrorUnion eu)
+        {
+            throw new IrUnsupportedException("zig `catch` requires an error-union left operand");
+        }
+        var payload = eu.Payload;
+        var pre = new List<CStmt>();
+
+        if (capName is null)
+        {
+            var fb = LowerExpr(fallbackItem);
+            if (IsSimpleReeval(fb)) { return (pre, new ZigCatch(union, fb) { Type = payload }); }
+            var ce = HoistCatchUnion(union, pre);
+            return (pre, new CondExpr(
+                new Member(ce, "IsErr", false) { Type = CType.Bool },
+                fb,
+                new Member(ce, "Value", false) { Type = payload }) { Type = payload });
+        }
+
+        // Capture form `catch |e| b`: hoist, bind `e`, then the lazy ternary (with `e` visible).
+        var ceCap = HoistCatchUnion(union, pre);
+        if (capName != "_")
+        {
+            var errSym = _symbols.Declare(new Symbol { Name = capName, Kind = SymKind.Var, Type = CType.ErrorSet });
+            pre.Add(new DeclStmt(new List<LocalDecl> { new(errSym, new Member(ceCap, "Code", false) { Type = CType.ErrorSet }) }));
+        }
+        var fbCap = LowerExpr(fallbackItem);
+        return (pre, new CondExpr(
+            new Member(ceCap, "IsErr", false) { Type = CType.Bool },
+            fbCap,
+            new Member(ceCap, "Value", false) { Type = payload }) { Type = payload });
+    }
+
+    /// <summary>Hoist a (possibly side-effecting) error-union operand to a single-eval <c>__cE</c>
+    /// temp unless it is already a bare variable; append the decl to <paramref name="pre"/> and
+    /// return a reference for re-reading it (the <c>.IsErr</c>/<c>.Code</c>/<c>.Value</c> sites).</summary>
+    private CExpr HoistCatchUnion(CExpr union, List<CStmt> pre)
+    {
+        if (union is VarRef) { return union; }
+        var tmp = _symbols.Declare(new Symbol { Name = "__cE", Kind = SymKind.Var, Type = union.Type });
+        pre.Add(new DeclStmt(new List<LocalDecl> { new(tmp, union) }));
+        return new VarRef(tmp) { Type = union.Type, IsLValue = true };
+    }
+
     /// <summary>True when an item is an <c>error.Foo</c> literal, yielding the error name.</summary>
     private static bool IsErrorLit(Item it, out string name)
     {
@@ -2671,25 +2753,25 @@ internal sealed class ZigLowering
             }
 
             // `a catch b` — the error union's payload on success, else the fallback `b` (no
-            // propagation). Lowers to the eager `ErrUnion.Catch(a, b)`; since C# evaluates `b`
-            // before the call, the fallback must be side-effect-free for that to match Zig's
-            // lazy form, so a non-trivial fallback is rejected (deferred) — mirrors the pointer
-            // `orelse` rule in B1. `catch |e| …` capture and `catch return` are deferred too.
+            // propagation). A simple, side-effect-free `b` keeps the eager `ErrUnion.Catch(a, b)`
+            // (C# evaluates `b` before the call, which is observationally identical to Zig's lazy
+            // form only when `b` has no side effects). A side-effecting `b` (Milestone N, part 3)
+            // needs a LAZY lowering that runs `b` only on error, which requires a statement context
+            // (a `const`/`var` initializer — see DeclOf / LowerCatchValue); in a sub-expression
+            // position only the eager form is available.
             case Zig.CatchOp c:
             {
-                var union = LowerExpr(c.Arg0);
-                if (union.Type.Unqualified is not CType.ErrorUnion eu)
-                {
-                    throw new IrUnsupportedException("zig `catch` requires an error-union left operand");
-                }
-                var fallback = LowerExpr(c.Arg2);
-                if (!IsSimpleReeval(fallback))
-                {
-                    throw new IrUnsupportedException(
-                        "zig `catch` with a side-effecting fallback not lowered yet (only a literal / variable fallback; `catch |e| …` capture and `catch return` are deferred)");
-                }
-                return new ZigCatch(union, fallback) { Type = eu.Payload };
+                var (pre, value) = LowerCatchValue(c.Arg0, null, c.Arg2);
+                if (pre.Count == 0) { return value; }   // simple, side-effect-free → eager ZigCatch
+                throw new IrUnsupportedException(
+                    "zig `catch` with a side-effecting fallback is only lowered as a `const`/`var` initializer (other positions deferred)");
             }
+            // `a catch |e| b` (Milestone N, part 3) — bind the error to `e` for the fallback `b`,
+            // evaluated lazily (only on error). Needs a statement context (the bind is a statement),
+            // so it is only lowered as a `const`/`var` initializer (see DeclOf).
+            case Zig.CatchCapture:
+                throw new IrUnsupportedException(
+                    "zig `catch |e| …` capture is only lowered as a `const`/`var` initializer (other positions deferred)");
 
             // A bare `error.Foo` value (Milestone N): the error's stable code in the flat global
             // set, typed `CType.ErrorSet` (rendered `ushort`). This makes error values usable

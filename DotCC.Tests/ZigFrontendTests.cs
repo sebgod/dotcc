@@ -1862,6 +1862,72 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_a_catch_capture()
+    {
+        // Milestone N, part 3: `a catch |e| b` binds the error to `e` for the fallback `b`, lowered
+        // lazily — hoist the union to `__cE`, bind `ushort e = __cE.Code;`, then a ternary
+        // `__cE.IsErr ? b : __cE.Value` so `b` (which may use `e`) runs only on error.
+        var cs = EmitZig(
+            "fn mayBool(ok: bool) !bool { if (ok) return true; return error.Bad; }\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = mayBool(false) catch |e| (e == error.Bad);\n" +
+            "    return if (a) 42 else 0;\n" +
+            "}\n");
+        cs.ShouldContain("__cE = mayBool");        // the union is hoisted to a single-eval temp
+        cs.ShouldContain("ushort e = __cE.Code;"); // the captured error binds to the flat code
+        cs.ShouldContain("__cE.IsErr");            // lazy ternary test
+        cs.ShouldContain("__cE.Value");            // success arm
+        cs.ShouldContain("e == 1");                // the fallback uses `e` (error.Bad → code 1)
+    }
+
+    [Fact]
+    public void Lowers_a_side_effecting_catch_lazily()
+    {
+        // A side-effecting (call) fallback can't use the eager `ErrUnion.Catch` (it would run the
+        // call unconditionally); it lowers to the lazy ternary so the call happens only on error.
+        var cs = EmitZig(
+            "fn mk(ok: bool) !i32 { if (ok) return 7; return error.Bad; }\n" +
+            "fn dflt() i32 { return 13; }\n" +
+            "pub fn main() u8 {\n" +
+            "    const v = mk(false) catch dflt();\n" +
+            "    return @as(u8, @intCast(v));\n" +
+            "}\n");
+        cs.ShouldContain("ErrUnion<int> __cE = mk");      // hoisted union (the lazy path, not eager)
+        cs.ShouldContain("(Cond.B(__cE.IsErr) ? dflt()"); // lazy ternary: dflt() only on the error arm
+        cs.ShouldContain("__cE.Value");                    // success arm reads the payload
+    }
+
+    [Fact]
+    public void Keeps_a_simple_catch_eager()
+    {
+        // A simple, side-effect-free, non-capturing `a catch b` keeps the eager `ErrUnion.Catch`
+        // helper (no hoist, no ternary) — unchanged from Milestone B2.
+        var cs = EmitZig(
+            "fn mk(ok: bool) !i32 { if (ok) return 7; return error.Bad; }\n" +
+            "pub fn main() u8 {\n" +
+            "    const v = mk(false) catch 0;\n" +
+            "    return @as(u8, @intCast(v));\n" +
+            "}\n");
+        cs.ShouldContain("ErrUnion.Catch<int>(");   // the eager helper
+        cs.ShouldNotContain("__cE");                // no hoist temp
+    }
+
+    [Fact]
+    public void Rejects_a_catch_capture_in_a_sub_expression()
+    {
+        // The capture / lazy catch needs a statement context (the bind is a statement); a
+        // sub-expression position (here a call argument) is a clear deferred error.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "fn mk(ok: bool) !bool { if (ok) return true; return error.Bad; }\n" +
+            "fn id(x: bool) bool { return x; }\n" +
+            "pub fn main() u8 {\n" +
+            "    const v = id(mk(false) catch |e| (e == error.Bad));\n" +
+            "    return if (v) 1 else 0;\n" +
+            "}\n"));
+        ex.Message.ShouldContain("catch |e|");
+    }
+
+    [Fact]
     public void Lowers_an_optional_capture_while()
     {
         // `while (opt) |x| { … }` → `while (true) { var __cap = cond; if (__cap.HasValue) { var x =
