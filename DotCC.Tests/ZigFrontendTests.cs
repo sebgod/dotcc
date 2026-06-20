@@ -1674,4 +1674,81 @@ public sealed class ZigFrontendTests
             "}\n"));
         ex.Message.ShouldContain("range");
     }
+
+    [Fact]
+    public void Lowers_an_optional_capture_in_if()
+    {
+        // `if (opt) |x| { … } else { … }` over a value optional `?T` → hoist the condition to a
+        // single-eval temp, test `__cap.HasValue`, bind `var x = __cap.Value;` at the top of the
+        // then-branch; the else-branch runs on a none.
+        var cs = EmitZig(
+            "fn pick(p: bool, v: i32) ?i32 { if (p) return v; return null; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var sum: i32 = 0;\n" +
+            "    if (pick(true, 4)) |e| { sum += e; } else { sum += 100; }\n" +
+            "    return @as(u8, @intCast(sum));\n" +
+            "}\n");
+        cs.ShouldContain("int? __cap = pick");
+        cs.ShouldContain("Cond.B(__cap.HasValue)");
+        cs.ShouldContain("int e = __cap.Value;");
+    }
+
+    [Fact]
+    public void Lowers_a_discard_capture_in_if_without_binding()
+    {
+        // `|_|` tests the optional but binds nothing — the then-branch still runs when present, and
+        // no payload local is emitted.
+        var cs = EmitZig(
+            "fn pick(p: bool, v: i32) ?i32 { if (p) return v; return null; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var sum: i32 = 0;\n" +
+            "    if (pick(true, 8)) |_| { sum += 8; }\n" +
+            "    return @as(u8, @intCast(sum));\n" +
+            "}\n");
+        cs.ShouldContain("Cond.B(__cap.HasValue)");
+        cs.ShouldNotContain("__cap.Value");   // `_` discards the payload — no binding
+    }
+
+    [Fact]
+    public void Lowers_an_optional_pointer_capture_in_if()
+    {
+        // A niche optional pointer `?*T` is a bare `T*`, so the test is a plain non-null check
+        // (`Cond.B(void*)`) and the capture binds the unwrapped pointer itself (the same value).
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var k: i32 = 0;\n" +
+            "    const maybe: ?*i32 = &k;\n" +
+            "    if (maybe) |p| { p.* = 42; }\n" +
+            "    return @as(u8, @intCast(k));\n" +
+            "}\n");
+        cs.ShouldContain("if (Cond.B(maybe))");
+        cs.ShouldContain("int* p = maybe;");
+    }
+
+    [Fact]
+    public void Rejects_a_capture_if_on_a_non_optional()
+    {
+        // `if (n) |x|` where `n` is a plain integer has no payload to bind — a clear error.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const n: i32 = 1;\n" +
+            "    if (n) |x| { _ = x; }\n" +
+            "    return 0;\n" +
+            "}\n"));
+        ex.Message.ShouldContain("optional");
+    }
+
+    [Fact]
+    public void Defers_an_error_union_capture_in_if()
+    {
+        // An error-union condition (`!T`) with a capture is part 3 — for now a clear deferred error
+        // (the `else |e|` grammar + the success/error split land in the next increment).
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "fn mk(ok: bool) !i32 { if (ok) return 7; return error.Bad; }\n" +
+            "pub fn main() u8 {\n" +
+            "    if (mk(true)) |x| { _ = x; } else { }\n" +
+            "    return 0;\n" +
+            "}\n"));
+        ex.Message.ShouldContain("part 3");
+    }
 }

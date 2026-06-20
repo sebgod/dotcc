@@ -740,6 +740,24 @@ public sealed class ZigOracleTests
             "    const s: i32 = kind('7') + kind('Q') + kind('z') + kind('!');\n" + // 1+2+3+0 = 6
             "    return @as(u8, @intCast(bucket * 18 + s));\n" +                    // 36 + 6
             "}\n", 42, "" },
+
+        // --- Milestone M (part 1): optional payload capture in `if` (exit-code only) ---
+        // Value optional then/else/`_`/no-else + a niche optional-pointer capture written through.
+        // 4 (then) + 10 (else) + 8 (discard) + 20 (ptr write) = 42.
+        new object[] { "if_capture",
+            "fn pick(p: bool, v: i32) ?i32 { if (p) return v; return null; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var sum: i32 = 0;\n" +
+            "    if (pick(true, 4)) |e| { sum += e; } else { sum += 100; }\n" +
+            "    if (pick(false, 9)) |e| { sum += e; } else { sum += 10; }\n" +
+            "    if (pick(true, 8)) |_| { sum += 8; }\n" +
+            "    if (pick(false, 5)) |e| { sum += e; }\n" +
+            "    var k: i32 = 0;\n" +
+            "    const maybe: ?*i32 = &k;\n" +
+            "    if (maybe) |p| { p.* = 20; }\n" +
+            "    sum += k;\n" +
+            "    return @as(u8, @intCast(sum));\n" + // 4 + 10 + 8 + 20
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
