@@ -635,6 +635,22 @@ public sealed class ZigOracleTests
             "    return table[0] + table[1] + table[2] + more[0] + more[1]\n" +
             "         + scratch[0] + scratch[1] + origin.x + origin.y;\n" +
             "}\n", 42, "" },
+
+        // --- Milestone L (part 1): switch as an expression (exit-code only) ---
+        // An int switch expression: a multi-value prong (`0, 1 => 5`) + an `else` default, at a
+        // typed decl sink. n=2 → a=20, b=22 → 42.
+        new object[] { "switch_expr_int",
+            "pub fn main() u8 {\n" +
+            "    const n: u8 = 2;\n" +
+            "    const a: u8 = switch (n) { 0, 1 => 5, 2 => 20, else => 0 };\n" +
+            "    const b: u8 = switch (n) { 0 => 1, else => 22 };\n" +
+            "    return a + b;\n" +
+            "}\n", 42, "" },
+        // An enum switch expression in return position (`.member` labels + `else`). 20+12+10 = 42.
+        new object[] { "switch_expr_enum",
+            "const Color = enum(u8) { red, green, blue };\n" +
+            "fn rank(c: Color) u8 { return switch (c) { .red => 10, .green => 20, else => 12 }; }\n" +
+            "pub fn main() u8 { return rank(.green) + rank(.blue) + rank(.red); }\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

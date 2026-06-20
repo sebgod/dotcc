@@ -1579,6 +1579,23 @@ internal sealed class CSharpBackend
                             : Expr(a));
                     return ($"(Cond.B({Expr(DecayEnum(t.Cond))}) ? {Arm(t.Then)} : {Arm(t.Else)})", PPrimary);
                 }
+            case SwitchExpr sw:
+                {
+                    // C#'s native switch expression. Each arm's labels are constant patterns
+                    // (joined with `or` for a multi-value Zig prong); a null-label arm is the `_`
+                    // default (Zig's `else`). Each arm value is coerced to the result type so the
+                    // arms share a C# type (C# requires it). The subject is decayed (an enum subject
+                    // matches its `EnumType.member` constant-pattern labels). Self-parenthesized and
+                    // returned as a primary (like the ternary), so it never needs outer parens.
+                    string ArmText(SwitchExprArm a) => NoHoist(() =>
+                    {
+                        var val = Coerced(a.Value, sw.Type);
+                        return a.Labels is null
+                            ? $"_ => {val}"
+                            : $"{string.Join(" or ", a.Labels.Select(l => Sub(DecayEnum(l), PCond)))} => {val}";
+                    });
+                    return ($"({Sub(DecayEnum(sw.Subject), PPostfix)} switch {{ {string.Join(", ", sw.Arms.Select(ArmText))} }})", PPrimary);
+                }
             case CommaSeq cs:
                 return (string.Join(", ", cs.Items.Select(it => Sub(it, PAssign))), PComma);
             case CommaOp co:
@@ -2108,6 +2125,7 @@ internal sealed class CSharpBackend
                    && IsPure(u.Operand),
         Binary b => IsPure(b.Left) && IsPure(b.Right),
         CondExpr t => IsPure(t.Cond) && IsPure(t.Then) && IsPure(t.Else),
+        SwitchExpr sw => IsPure(sw.Subject) && sw.Arms.All(a => IsPure(a.Value)),
         CommaOp co => co.Items.All(IsPure),
         _ => false,   // Call / IndirectCall / Assign / StructInit / VaArgGet / …
     };

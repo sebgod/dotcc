@@ -1088,6 +1088,10 @@ internal sealed class ZigLowering
             // shared lowering WITH the sink (vs LowerExpr's sink-free call).
             case Zig.BuiltinCall b:
                 return LowerBuiltinCall(b, sink);
+            // A switch EXPRESSION at a typed sink (`const x: T = switch (y) { … }`) — each arm's
+            // value lowers at `sink`, so a result-located arm (`.member` / `.{…}` / a cast) resolves.
+            case Zig.SwitchExpr s:         return LowerSwitchExpr(s.Arg2, s.Arg5, sink);
+            case Zig.SwitchExprTrailing s: return LowerSwitchExpr(s.Arg2, s.Arg5, sink);
             // `var x: T = undefined;` (scalar) → `default(T)` (Zig's uninitialized; a zeroed
             // over-approximation). An array sink is handled earlier in DeclOf (stackalloc).
             case Zig.UndefinedLit:
@@ -1514,10 +1518,18 @@ internal sealed class ZigLowering
                 throw new IrUnsupportedException(
                     "zig switch payload capture `|x|` is only valid on a tagged-union switch");
             }
-            var p = (Zig.Prong)prongItem.Content!;            // CaseVals=Arg0, '=>'=Arg1, Block=Arg2
-            var labels = LowerCaseVals(p.Arg0, subject.Type); // case values compare against the subject
-            var body = new List<CStmt> { LowerBlock(p.Arg2) }; // the braced block, scoped
-            if (!EndsInJump(body)) { body.Add(new Break()); }  // no Zig fall-through
+            // A prong body is a braced Block (`=> { … }`) or a bare expression (`=> expr`, which in
+            // a STATEMENT switch is an expression statement, e.g. `1 => doThing()`).
+            Item caseVals;
+            List<CStmt> body;
+            switch (prongItem.Content)
+            {
+                case Zig.Prong p:      caseVals = p.Arg0;  body = new List<CStmt> { LowerBlock(p.Arg2) }; break;
+                case Zig.ProngExpr pe: caseVals = pe.Arg0; body = new List<CStmt> { new ExprStmt(LowerExpr(pe.Arg2)) }; break;
+                default: throw new IrUnsupportedException("zig switch prong: " + (prongItem.Content?.GetType().Name ?? "null"));
+            }
+            var labels = LowerCaseVals(caseVals, subject.Type); // case values compare against the subject
+            if (!EndsInJump(body)) { body.Add(new Break()); }   // no Zig fall-through
             sections.Add(new SwitchSection(labels, body));
         }
         return new Switch(subject, sections);
@@ -1549,6 +1561,16 @@ internal sealed class ZigLowering
         var sections = new List<SwitchSection>();
         foreach (var prongItem in Flatten(prongsItem))
         {
+            // A bare-expr prong (`=> expr`) in a union STATEMENT switch is an expression statement,
+            // with no payload capture (capture needs a braced block); handle it up front.
+            if (prongItem.Content is Zig.ProngExpr pe)
+            {
+                var exprLabels = LowerCaseVals(pe.Arg0, info.TagType);
+                var exprBody = new List<CStmt> { new ExprStmt(LowerExpr(pe.Arg2)) };
+                if (!EndsInJump(exprBody)) { exprBody.Add(new Break()); }
+                sections.Add(new SwitchSection(exprLabels, exprBody));
+                continue;
+            }
             Item caseVals; string? captureName; Item block;
             switch (prongItem.Content)
             {
@@ -1691,6 +1713,37 @@ internal sealed class ZigLowering
         return labels;
     }
 
+    /// <summary>Lower a switch EXPRESSION `switch (subj) { v => e, …, else => e }` (Milestone L) to
+    /// the C# switch-expression IR (<see cref="SwitchExpr"/>). Each prong must YIELD a value — a
+    /// bare-expr body `v => e` lowered at the result <paramref name="sink"/> (so a nested `.member`
+    /// / `.{…}` / cast resolves). `else` → the `_` default arm; a multi-value prong `a, b => e`
+    /// becomes one arm with both labels (rendered `a or b`). The subject is lowered once. Deferred
+    /// (clear error): a block-bodied prong (`=> { … break :blk v; }`, needs the labeled-block
+    /// increment) and a tagged-union payload capture `|x|` in expression position.</summary>
+    private CExpr LowerSwitchExpr(Item subjectItem, Item prongsItem, CType? sink)
+    {
+        var subject = LowerExpr(subjectItem);
+        var arms = new List<SwitchExprArm>();
+        foreach (var prongItem in Flatten(prongsItem))
+        {
+            if (prongItem.Content is not Zig.ProngExpr pe)
+            {
+                throw new IrUnsupportedException(
+                    "zig switch-expression prong must yield a value (`v => expr`); a block-bodied prong " +
+                    "(needing a labeled `break :blk v`) and a `|x|` capture in a switch expression are not supported yet");
+            }
+            var value = LowerExprSink(pe.Arg2, sink);
+            arms.Add(pe.Arg0.Content is Zig.CaseElse
+                ? new SwitchExprArm(null, value)   // `else` → the `_` default arm
+                : new SwitchExprArm(Flatten(pe.Arg0).Select(v => LowerExprSink(v, subject.Type)).ToList(), value));
+        }
+        // The result type is the sink, else inferred from the first value-yielding arm.
+        var resultType = sink
+            ?? arms.Select(a => a.Value.Type).FirstOrDefault(t => t is not null)
+            ?? CType.Int;
+        return new SwitchExpr(subject, arms) { Type = resultType };
+    }
+
     /// <summary>True when a lowered statement list provably ends control flow (so no
     /// synthetic <see cref="Break"/> is needed for a switch section). Mirrors the C# backend's
     /// own <c>Terminates</c>.</summary>
@@ -1814,6 +1867,11 @@ internal sealed class ZigLowering
                 var then = LowerExpr(e.Arg4);
                 return new CondExpr(LowerExpr(e.Arg2), then, LowerExpr(e.Arg6)) { Type = then.Type };
             }
+            // A switch EXPRESSION reached with no result-location type (e.g. `x = switch(y){…}`
+            // where the LHS type still flows in via LowerExprSink, or an inferred `const`). The
+            // sink-carrying path is in LowerExprSink; here the arm types are inferred.
+            case Zig.SwitchExpr s:         return LowerSwitchExpr(s.Arg2, s.Arg5, null);
+            case Zig.SwitchExprTrailing s: return LowerSwitchExpr(s.Arg2, s.Arg5, null);
 
             // arithmetic
             case Zig.Add a:     return Bin(BinOp.Add, a.Arg0, a.Arg2);

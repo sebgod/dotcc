@@ -1377,4 +1377,62 @@ public sealed class ZigFrontendTests
             "pub fn main() u8 { return origin.x + origin.y; }\n");
         cs.ShouldContain("new Point { x = 6, y = 7 }");
     }
+
+    // ---- Milestone L (part 1): switch as an expression ----
+
+    [Fact]
+    public void Lowers_a_switch_expression_over_an_int()
+    {
+        // `switch (n) { 0,1 => a, 2 => b, else => c }` → a C# switch expression: a multi-value
+        // prong joins with `or`, `else` is the `_` default.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const n: u8 = 2;\n" +
+            "    const a: u8 = switch (n) { 0, 1 => 5, 2 => 20, else => 0 };\n" +
+            "    return a;\n" +
+            "}\n");
+        cs.ShouldContain("switch {");
+        cs.ShouldContain("0 or 1 => 5");
+        cs.ShouldContain("_ => 0");
+    }
+
+    [Fact]
+    public void Lowers_a_switch_expression_over_an_enum_in_return_position()
+    {
+        // An enum subject decays to its underlying value; `.member` labels decay too, and the
+        // whole switch-expression is the returned value.
+        var cs = EmitZig(
+            "const Color = enum(u8) { red, green, blue };\n" +
+            "fn rank(c: Color) u8 { return switch (c) { .red => 10, .green => 20, else => 12 }; }\n" +
+            "pub fn main() u8 { return rank(.green); }\n");
+        cs.ShouldContain("switch {");
+        cs.ShouldContain("=> 20");
+        cs.ShouldContain("_ => 12");
+    }
+
+    [Fact]
+    public void Rejects_a_block_bodied_switch_expression_prong()
+    {
+        // A block-bodied prong in a switch EXPRESSION needs a labeled `break :blk v` (a later L
+        // increment); for now it's a clear error.
+        var ex = Should.Throw<CompileException>(() =>
+            EmitZig("pub fn main() u8 { const x: u8 = switch (1) { 1 => { return 2; }, else => 0 }; return x; }\n"));
+        ex.Message.ShouldContain("yield a value");
+    }
+
+    [Fact]
+    public void Lowers_a_bare_expr_prong_in_a_statement_switch()
+    {
+        // The shared bare-expr prong body also serves a STATEMENT switch — `v => expr` becomes an
+        // expression statement (here a call), with Zig's no-fall-through `break` appended.
+        var cs = EmitZig(
+            "extern fn putchar(c: c_int) c_int;\n" +
+            "pub fn main() u8 {\n" +
+            "    const n: u8 = 1;\n" +
+            "    switch (n) { 1 => putchar(42), else => {} }\n" +
+            "    return 0;\n" +
+            "}\n");
+        cs.ShouldContain("case 1:");
+        cs.ShouldContain("putchar(");
+    }
 }

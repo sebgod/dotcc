@@ -184,6 +184,8 @@ symbols:
   - '&='           # 124 bitand-assign
   - '|='           # 125 bitor-assign
   - '^='           # 126 bitxor-assign
+  # --- switch as an expression (Milestone L; appended — never reorder) ---
+  - SwitchExpr     # 127 `switch (x) { v => e, … }` in value position (a RhsExpr, like IfExpr)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -385,10 +387,19 @@ productions:
     rules:
       - { lhs: RhsExpr, rhs: [Expr] }
       - { lhs: RhsExpr, rhs: [IfExpr] }
+      # `switch` as a VALUE (Milestone L) — same structural trick as IfExpr: a RhsExpr
+      # alternative, NOT a Primary, so it never starts an Expr-cascade sub-operand and never
+      # clashes with the statement-level `switch` (which is reached only at Stmt position; a
+      # SwitchExpr only after `=` / `return` / an init). `switch` isn't in the cascade's first
+      # set, so the alternative is conflict-free. Reuses the same `Prongs`, whose bodies may now
+      # be a bare value Expr (`v => e`) — a switch expression's prongs YIELD a value.
+      - { lhs: RhsExpr, rhs: [SwitchExpr] }
 
   - derivation: none
     rules:
       - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', RhsExpr, 'else', RhsExpr], action: ifExpr }
+      - { lhs: SwitchExpr, rhs: ['switch', '(', Expr, ')', '{', Prongs, '}'],      action: switchExpr }
+      - { lhs: SwitchExpr, rhs: ['switch', '(', Expr, ')', '{', Prongs, ',', '}'], action: switchExprTrailing }
 
   - derivation: leftmost
     rules:
@@ -570,6 +581,12 @@ productions:
     rules:
       - { lhs: Prong, rhs: [CaseVals, '=>', Block],                  action: prong }
       - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, '|', Block], action: prongCapture }
+      # A bare value-Expr prong body (Milestone L) — `v => expr`. After `=>`, a `{` selects the
+      # Block prong and a `|` the capture prong, so a leading non-`{`/`|` token unambiguously
+      # starts this Expr (the Expr cascade has no top-level `,`, so the prong-separator `,` stays
+      # clean). The headline use is a switch EXPRESSION's value-yielding arm; in a statement
+      # switch it's an expression statement (`1 => doThing(),`).
+      - { lhs: Prong, rhs: [CaseVals, '=>', Expr],                   action: prongExpr }
 
   # Case values: a comma-list of value Exprs, or `else` (the default). The `,` here never
   # clashes with the prong-separator `,` because FOLLOW(CaseVals) = { '=>' } — after a value
