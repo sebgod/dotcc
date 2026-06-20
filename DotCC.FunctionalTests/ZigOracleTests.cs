@@ -651,6 +651,31 @@ public sealed class ZigOracleTests
             "const Color = enum(u8) { red, green, blue };\n" +
             "fn rank(c: Color) u8 { return switch (c) { .red => 10, .green => 20, else => 12 }; }\n" +
             "pub fn main() u8 { return rank(.green) + rank(.blue) + rank(.red); }\n", 42, "" },
+
+        // --- Milestone L (part 2): labeled block as a value (exit-code only) ---
+        // A typed-decl labeled value-block with an intermediate local. 10*2 + 22 = 42.
+        new object[] { "labeled_block_decl",
+            "pub fn main() u8 {\n" +
+            "    const doubled: i32 = blk: {\n" +
+            "        const half: i32 = 10;\n" +
+            "        break :blk half * 2;\n" +
+            "    };\n" +
+            "    return @as(u8, @intCast(doubled + 22));\n" +
+            "}\n", 42, "" },
+        // A return-position labeled value-block with an early `break :blk` from inside an `if`
+        // (the conditional break must stay conditional). classify(5)=10, classify(-1)=100 → 10+32 = 42.
+        new object[] { "labeled_block_return",
+            "fn classify(n: i32) i32 {\n" +
+            "    return blk: {\n" +
+            "        if (n < 0) break :blk 100;\n" +
+            "        break :blk n * 2;\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var acc: i32 = 0;\n" +
+            "    acc = blk: { const t = classify(-1); break :blk t - 68; };\n" + // 32
+            "    return @as(u8, @intCast(classify(5) + acc));\n" +              // 10 + 32
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

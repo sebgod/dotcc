@@ -63,6 +63,29 @@ internal sealed class ZigLowering
     /// distinct temp names (Milestone G).</summary>
     private int _tupleTempCounter;
 
+    /// <summary>An enclosing labeled value-block (<c>blk: { … break :blk v; }</c>) being lowered
+    /// (Milestone L, part 2). Each <c>break :blk v</c> assigns <c>v</c> to the block's result
+    /// <see cref="Temp"/> and jumps to <see cref="EndLabel"/>; the surrounding statement then reads
+    /// the temp. <see cref="Sink"/> is the result-location hint (the annotated type / function
+    /// return / lvalue type) and <see cref="ResultType"/> is the resolved type — the sink if known,
+    /// else the first <c>break</c> value's type. A stack so nested labeled blocks resolve a
+    /// <c>break :label</c> innermost-first.</summary>
+    private sealed class LabeledBlockTarget
+    {
+        public required string Label { get; init; }
+        public required Symbol Temp { get; init; }
+        public required string EndLabel { get; init; }
+        public CType? Sink { get; init; }
+        public CType? ResultType { get; set; }
+    }
+
+    /// <summary>Active labeled value-blocks, innermost on top — see <see cref="LabeledBlockTarget"/>.</summary>
+    private readonly Stack<LabeledBlockTarget> _labeledBlocks = new();
+
+    /// <summary>Monotonic counter for labeled-value-block temporaries / end labels
+    /// (<c>__blkN</c> / <c>__blkN_end</c>), one per <c>blk: { … }</c> (Milestone L, part 2).</summary>
+    private int _blockLabelCounter;
+
     /// <summary>Container type names declared in this unit (<c>const P = struct {…}</c> /
     /// <c>const C = enum {…}</c>) → the <see cref="CType"/> the name resolves to: a
     /// <see cref="CType.Named"/> for a struct, a <see cref="CType.Enum"/> for an enum.
@@ -320,6 +343,14 @@ internal sealed class ZigLowering
     /// is lowered at module scope, so it must be a constant / module-resolvable value.</summary>
     private void LowerGlobal(Item nameTok, Item? typeItem, Item rhsItem)
     {
+        // A labeled value-block initializes via runtime statements (a temp + control flow); a global
+        // must be comptime-initialized, so it can't host one. Clear error (not the generic
+        // expression-position one, which would read oddly for a global).
+        if (rhsItem.Content is Zig.LabeledBlock)
+        {
+            throw new IrUnsupportedException(
+                $"a labeled value-block can't initialize the global '{Tok(nameTok)}' (a global needs a comptime value)");
+        }
         var declared = typeItem is not null ? LowerType(typeItem) : null;
         // `[N]T = undefined` → a zeroed, pinned, program-lifetime backing store (the array-literal
         // forms fall through to the StackArray pinning below, which also catches an inferred
@@ -1296,6 +1327,13 @@ internal sealed class ZigLowering
                     return new ExprStmt(LowerExpr(a.Arg2));
                 }
                 var target = LowerExpr(a.Arg0);
+                // `x = blk: { … break :blk v; };` — a labeled value-block assignment (Milestone L,
+                // part 2): temp-fill against the lvalue's type, then assign the result temp into it.
+                if (a.Arg2.Content is Zig.LabeledBlock lb)
+                {
+                    return LowerLabeledValueBlock(Tok(lb.Arg0), lb.Arg2, target.Type,
+                        temp => new ExprStmt(new Assign(null, target, new VarRef(temp) { Type = temp.Type }) { Type = target.Type }));
+                }
                 var value = LowerExprSink(a.Arg2, target.Type);   // target type is the sink (`x = .member;`)
                 return new ExprStmt(new Assign(null, target, value) { Type = target.Type });
             }
@@ -1340,6 +1378,10 @@ internal sealed class ZigLowering
             // renders them verbatim; valid inside the while/for forms above).
             case Zig.StmtBreak:    return new Break();
             case Zig.StmtContinue: return new Continue();
+
+            // `break :blk v;` — yield a value from the enclosing labeled value-block (Milestone L,
+            // part 2). Assigns the block's result temp and jumps to its end label (LowerLabeledBreak).
+            case Zig.StmtBreakLabelValue b: return LowerLabeledBreak(Tok(b.Arg2), b.Arg3);
 
             // `switch (subject) { prongs }` → the C IR Switch (subject=Arg2, prongs=Arg5 for both
             // the plain and trailing-comma forms). A tagged-union subject takes the capture path.
@@ -1407,6 +1449,16 @@ internal sealed class ZigLowering
         // Compute the declared type FIRST: a result-located init (`.member` / `.{…}`) needs
         // it as its sink, so resolve the annotation before lowering the initializer.
         var declared = typeItem is not null ? LowerType(typeItem) : null;
+        // `const x = blk: { … break :blk v; };` — a labeled value-block initializer. Temp-fill it
+        // (the declared type, if any, is the sink), then bind `x` to the result temp.
+        if (initExpr.Content is Zig.LabeledBlock lb)
+        {
+            return LowerLabeledValueBlock(Tok(lb.Arg0), lb.Arg2, declared, temp =>
+            {
+                var sym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = temp.Type });
+                return new DeclStmt(new List<LocalDecl> { new(sym, new VarRef(temp) { Type = temp.Type }) });
+            });
+        }
         // `var b: [N]T = …;` → a stackalloc'd C array (ArrayDecl → `T* b = stackalloc T[…]`), so
         // `b[i]` / `b[lo..hi]` reuse the array paths and yield a stack-backed slice. `undefined`
         // gives a zeroed extent; an array literal (`.{…}` / `[N]T{…}`, Milestone K) gives a
@@ -1478,6 +1530,68 @@ internal sealed class ZigLowering
             stmts.Add(new DeclStmt(new List<LocalDecl> { new(sym, read) }));
         }
         return new Seq(stmts);
+    }
+
+    /// <summary>Lower a labeled block used as a VALUE — <c>blk: { …; break :blk v; }</c> — at a
+    /// statement RHS position (Milestone L, part 2). A statement form can't be an expression, so we
+    /// use the roadmap's temp-fill: a fresh result temp (<c>__blkN</c>) is declared, the block body
+    /// is lowered with each <c>break :blk v</c> rewritten (in <see cref="LowerLabeledBreak"/>) to
+    /// "assign the temp, <c>goto __blkN_end</c>", an end label follows the body, and <paramref
+    /// name="consume"/> builds the surrounding statement that reads the temp (the decl / return /
+    /// assignment). The temp's type is the <paramref name="sink"/> when known (an annotated decl, a
+    /// function return, an lvalue), else the first <c>break</c> value's type. The temp is declared in
+    /// the ENCLOSING scope (before the body's), so a <c>break</c> inside can assign it and the
+    /// consumer outside can read it. The end label wraps an empty block (<c>__blkN_end: { }</c>) so a
+    /// following declaration is legal — a C# label can't directly precede a declaration (CS1023).</summary>
+    private CStmt LowerLabeledValueBlock(string label, Item blockItem, CType? sink, Func<Symbol, CStmt> consume)
+    {
+        var n = _blockLabelCounter++;
+        var endLabel = "__blk" + n + "_end";
+        // Declared with a provisional type; retyped below once the result type is resolved. The
+        // counter-unique name never collides, so declaring it up front is safe.
+        var temp = _symbols.Declare(new Symbol { Name = "__blk" + n, Kind = SymKind.Var, Type = sink ?? CType.Int });
+        var target = new LabeledBlockTarget { Label = label, Temp = temp, EndLabel = endLabel, Sink = sink, ResultType = sink };
+        _labeledBlocks.Push(target);
+        var body = LowerBlock(blockItem);   // each `break :label v` reads `target` via LowerLabeledBreak
+        _labeledBlocks.Pop();
+        var resultType = target.ResultType
+            ?? throw new IrUnsupportedException(
+                $"labeled block ':{label}' must yield a value via `break :{label} <value>;`");
+        temp.Type = resultType;
+        var stmts = new List<CStmt>
+        {
+            // `T __blkN = default;` — default-initialized so C# definite-assignment is satisfied even
+            // though every real path assigns via a `break` (the gotos defeat flow analysis).
+            new DeclStmt(new List<LocalDecl> { new(temp, new DefaultLit { Type = resultType }) }),
+            body,
+            new Labeled(endLabel, new Block(new List<CStmt>())),
+            consume(temp),
+        };
+        return new Seq(stmts);
+    }
+
+    /// <summary>Lower <c>break :label v;</c> (Milestone L, part 2) — yield <paramref name="valueItem"/>
+    /// from the enclosing labeled block named <paramref name="label"/>: assign the value to the
+    /// block's result temp, then <c>goto</c> its end label. Resolves the label innermost-first off the
+    /// active stack; the value is sink-typed to the block's result type when known, and the first
+    /// such break (when the block has no result-location hint) fixes that type.</summary>
+    private CStmt LowerLabeledBreak(string label, Item valueItem)
+    {
+        var target = _labeledBlocks.FirstOrDefault(t => t.Label == label)
+            ?? throw new IrUnsupportedException(
+                $"`break :{label}` has no enclosing labeled block ':{label}' (labeled-loop break is not supported yet)");
+        var value = target.Sink is { } sk ? LowerExprSink(valueItem, sk) : LowerExpr(valueItem);
+        target.ResultType ??= value.Type;
+        var tref = new VarRef(target.Temp) { Type = target.ResultType, IsLValue = true };
+        // A `Block` (not a brace-less `Seq`): this pair is a single statement, and as an `if`/`while`
+        // body the backend braces a Block but renders a Seq brace-less — which would leave the `goto`
+        // unconditional (`if (c) temp = v; goto end;`). A `goto` out of the block to the enclosing
+        // end label is legal C#; the assign-and-goto declare nothing, so the extra scope is harmless.
+        return new Block(new List<CStmt>
+        {
+            new ExprStmt(new Assign(null, tref, value) { Type = target.ResultType }),
+            new Goto(target.EndLabel),
+        });
     }
 
     /// <summary>Dispatch a <c>switch</c> statement: lower the subject once, then route a
@@ -1765,6 +1879,20 @@ internal sealed class ZigLowering
     /// Outside an error-union function it is a plain <see cref="Return"/>.</summary>
     private CStmt LowerReturn(Item valueItem)
     {
+        // `return blk: { … break :blk v; };` — a labeled value-block return (Milestone L, part 2).
+        // Temp-fill against the function's return type, then `return` the result temp. (In an error-
+        // union function the wrapping below would need to apply to the temp — deferred with a clear
+        // error rather than silently returning an unwrapped value.)
+        if (valueItem.Content is Zig.LabeledBlock lb)
+        {
+            if (_currentFnRet is CType.ErrorUnion)
+            {
+                throw new IrUnsupportedException(
+                    "a labeled value-block `return blk: {…}` in an error-union (`!T`) function is not supported yet");
+            }
+            return LowerLabeledValueBlock(Tok(lb.Arg0), lb.Arg2, _currentFnRet,
+                temp => new Return(new VarRef(temp) { Type = temp.Type }));
+        }
         if (_currentFnRet is CType.ErrorUnion eu)
         {
             if (IsErrorLit(valueItem, out var errName))
@@ -1872,6 +2000,15 @@ internal sealed class ZigLowering
             // sink-carrying path is in LowerExprSink; here the arm types are inferred.
             case Zig.SwitchExpr s:         return LowerSwitchExpr(s.Arg2, s.Arg5, null);
             case Zig.SwitchExprTrailing s: return LowerSwitchExpr(s.Arg2, s.Arg5, null);
+
+            // A labeled value-block in a pure-expression position (an if/switch-expression arm, a
+            // binary sub-operand) — it produces a value via statements, which a C# expression can't
+            // host, so it's supported only as a full `=` / `return` / assignment RHS (intercepted in
+            // DeclOf / LowerReturn / StmtAssign before reaching here). A clear deferred error.
+            case Zig.LabeledBlock lb:
+                throw new IrUnsupportedException(
+                    $"a labeled value-block (`{Tok(lb.Arg0)}: {{ … }}`) is supported only as a full initializer, " +
+                    "`return`, or assignment right-hand side — not inside an if/switch-expression arm or a sub-expression yet");
 
             // arithmetic
             case Zig.Add a:     return Bin(BinOp.Add, a.Arg0, a.Arg2);

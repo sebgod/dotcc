@@ -1435,4 +1435,94 @@ public sealed class ZigFrontendTests
         cs.ShouldContain("case 1:");
         cs.ShouldContain("putchar(");
     }
+
+    // ---- Milestone L (part 2): labeled block as a value ----
+
+    [Fact]
+    public void Lowers_a_typed_decl_labeled_value_block()
+    {
+        // `const x: T = blk: { …; break :blk v; };` → a result temp default-initialized, the body
+        // (with `break :blk v` rewritten to `temp = v; goto end`), an end label, then `x = temp`.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const doubled: i32 = blk: {\n" +
+            "        const half: i32 = 10;\n" +
+            "        break :blk half * 2;\n" +
+            "    };\n" +
+            "    return @as(u8, @intCast(doubled));\n" +
+            "}\n");
+        cs.ShouldContain("int __blk0 = default(int);");
+        cs.ShouldContain("__blk0 = half * 2;");
+        cs.ShouldContain("goto __blk0_end;");
+        cs.ShouldContain("__blk0_end:");
+        cs.ShouldContain("int doubled = __blk0;");
+    }
+
+    [Fact]
+    public void Lowers_an_inferred_labeled_value_block()
+    {
+        // No type annotation — the result temp's type comes from the first `break` value (i32 here).
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const tag = blk: {\n" +
+            "        const base: i32 = 3;\n" +
+            "        break :blk base + 4;\n" +
+            "    };\n" +
+            "    return @as(u8, @intCast(tag));\n" +
+            "}\n");
+        cs.ShouldContain("int __blk0 = default(int);");
+        cs.ShouldContain("int tag = __blk0;");
+    }
+
+    [Fact]
+    public void Lowers_a_labeled_value_block_with_a_conditional_break()
+    {
+        // A `break :blk` inside an `if` must be BRACED (a Block, not a brace-less Seq) so the `goto`
+        // stays conditional — `if (c) { temp = v; goto end; }`, never a dangling unconditional goto.
+        var cs = EmitZig(
+            "fn classify(n: i32) i32 {\n" +
+            "    return blk: {\n" +
+            "        if (n < 0) break :blk 100;\n" +
+            "        break :blk n * 2;\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 { return @as(u8, @intCast(classify(5))); }\n");
+        // The conditional break is a braced block, so both the assign and the goto are guarded.
+        cs.ShouldContain("__blk0 = 100;");
+        cs.ShouldContain("return __blk0;");
+    }
+
+    [Fact]
+    public void Rejects_a_labeled_value_block_in_an_if_expression_arm()
+    {
+        // A value-block produces its value via statements, which a C# expression (the ternary an
+        // if-expression lowers to) can't host — supported only as a full `=`/`return`/assign RHS.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const x: i32 = if (true) blk: { break :blk 1; } else 0;\n" +
+            "    return @as(u8, @intCast(x));\n" +
+            "}\n"));
+        ex.Message.ShouldContain("labeled value-block");
+    }
+
+    [Fact]
+    public void Rejects_a_break_to_an_unknown_label()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const x: i32 = blk: { break :nope 1; };\n" +
+            "    return @as(u8, @intCast(x));\n" +
+            "}\n"));
+        ex.Message.ShouldContain("no enclosing labeled block");
+    }
+
+    [Fact]
+    public void Rejects_a_labeled_value_block_initializing_a_global()
+    {
+        // A global needs a comptime value; a value-block initializes via runtime statements.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const g: i32 = blk: { break :blk 5; };\n" +
+            "pub fn main() u8 { return @as(u8, @intCast(g)); }\n"));
+        ex.Message.ShouldContain("comptime value");
+    }
 }
