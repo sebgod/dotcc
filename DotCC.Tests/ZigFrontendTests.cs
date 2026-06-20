@@ -1525,4 +1525,96 @@ public sealed class ZigFrontendTests
             "pub fn main() u8 { return @as(u8, @intCast(g)); }\n"));
         ex.Message.ShouldContain("comptime value");
     }
+
+    // ---- Milestone L (part 3): labeled loops + labeled break/continue ----
+
+    [Fact]
+    public void Lowers_a_labeled_break_to_a_goto_after_the_loop()
+    {
+        // `break :outer` from a nested loop → `goto __loop0_brk;`, with the break label emitted
+        // just AFTER the outer loop. The continue label is NOT emitted (continue :outer is unused).
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var hit: i32 = 0;\n" +
+            "    var i: i32 = 0;\n" +
+            "    outer: while (i < 5) : (i = i + 1) {\n" +
+            "        var j: i32 = 0;\n" +
+            "        while (j < 5) : (j = j + 1) {\n" +
+            "            if (i + j == 3) { hit = 1; break :outer; }\n" +
+            "        }\n" +
+            "    }\n" +
+            "    return @as(u8, @intCast(hit));\n" +
+            "}\n");
+        cs.ShouldContain("goto __loop0_brk;");
+        cs.ShouldContain("__loop0_brk:");
+        cs.ShouldNotContain("__loop0_cont");   // continue :outer never used → no continue label
+    }
+
+    [Fact]
+    public void Lowers_a_labeled_continue_to_a_goto_at_the_body_end()
+    {
+        // `continue :outer` → `goto __loopN_cont;`, with the continue label at the END of the loop
+        // body (so the `: (cont)` step still runs). The break label is NOT emitted (unused).
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var n: i32 = 0;\n" +
+            "    var a: i32 = 0;\n" +
+            "    outer: while (a < 3) : (a = a + 1) {\n" +
+            "        var b: i32 = 0;\n" +
+            "        while (b < 3) : (b = b + 1) {\n" +
+            "            n = n + 1;\n" +
+            "            if (b == 1) continue :outer;\n" +
+            "        }\n" +
+            "        n = n + 100;\n" +
+            "    }\n" +
+            "    return @as(u8, @intCast(n));\n" +
+            "}\n");
+        cs.ShouldContain("goto __loop0_cont;");
+        cs.ShouldContain("__loop0_cont:");
+        cs.ShouldNotContain("__loop0_brk");   // break :outer never used → no break label
+    }
+
+    [Fact]
+    public void Lowers_a_labeled_for_loop()
+    {
+        // A `label:` may prefix a `for` loop too (the `LoopStmt` factor covers while + for).
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var sum: i32 = 0;\n" +
+            "    row: for (0..3) |_| {\n" +   // outer index unused → `|_|` (valid Zig; real zig errors otherwise)
+            "        for (0..3) |c| {\n" +
+            "            sum = sum + 1;\n" +
+            "            if (c == @as(usize, 1)) continue :row;\n" +
+            "        }\n" +
+            "    }\n" +
+            "    return @as(u8, @intCast(sum));\n" +
+            "}\n");
+        cs.ShouldContain("goto __loop0_cont;");
+        cs.ShouldContain("__loop0_cont:");
+    }
+
+    [Fact]
+    public void Rejects_a_labeled_break_to_an_unknown_loop()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 {\n" +
+            "    outer: while (true) { break :nope; }\n" +
+            "    return 0;\n" +
+            "}\n"));
+        ex.Message.ShouldContain("no enclosing labeled loop");
+    }
+
+    [Fact]
+    public void Rejects_a_labeled_value_break_targeting_a_loop()
+    {
+        // `break :lbl <value>` where `lbl` names the enclosing LOOP is the labeled-while value form
+        // (a loop used as an expression) — deferred. (The loop is a statement, so the break-with-value
+        // is reached from inside the loop body, where `lp` is on the labeled-loop stack.)
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 {\n" +
+            "    lp: while (true) { break :lp 5; }\n" +
+            "    return 0;\n" +
+            "}\n"));
+        ex.Message.ShouldContain("labeled-while");
+    }
 }

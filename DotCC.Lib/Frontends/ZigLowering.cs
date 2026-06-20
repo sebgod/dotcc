@@ -86,6 +86,29 @@ internal sealed class ZigLowering
     /// (<c>__blkN</c> / <c>__blkN_end</c>), one per <c>blk: { … }</c> (Milestone L, part 2).</summary>
     private int _blockLabelCounter;
 
+    /// <summary>An enclosing labeled loop (<c>lbl: while (…) { … }</c>) being lowered (Milestone L,
+    /// part 3). C# has no labeled break/continue, so a <c>break :lbl</c> / <c>continue :lbl</c> — which
+    /// may target an OUTER loop — lowers to a <c>goto</c> to <see cref="BreakLabel"/> (emitted just
+    /// after the loop) / <see cref="ContLabel"/> (emitted at the END of the loop body, so the loop's
+    /// natural iteration step still runs after the jump). The labels are emitted only when actually
+    /// referenced (<see cref="BreakUsed"/> / <see cref="ContUsed"/>), so an unused one draws no C#
+    /// "unreferenced label" warning. A stack so a <c>break :lbl</c> resolves the label innermost-first.</summary>
+    private sealed class LabeledLoopTarget
+    {
+        public required string Label { get; init; }
+        public required string BreakLabel { get; init; }
+        public required string ContLabel { get; init; }
+        public bool BreakUsed { get; set; }
+        public bool ContUsed { get; set; }
+    }
+
+    /// <summary>Active labeled loops, innermost on top — see <see cref="LabeledLoopTarget"/>.</summary>
+    private readonly Stack<LabeledLoopTarget> _labeledLoops = new();
+
+    /// <summary>Monotonic counter for labeled-loop break / continue labels (<c>__loopN_brk</c> /
+    /// <c>__loopN_cont</c>), one per labeled loop (Milestone L, part 3).</summary>
+    private int _loopLabelCounter;
+
     /// <summary>Container type names declared in this unit (<c>const P = struct {…}</c> /
     /// <c>const C = enum {…}</c>) → the <see cref="CType"/> the name resolves to: a
     /// <see cref="CType.Named"/> for a struct, a <see cref="CType.Enum"/> for an enum.
@@ -1383,6 +1406,12 @@ internal sealed class ZigLowering
             // part 2). Assigns the block's result temp and jumps to its end label (LowerLabeledBreak).
             case Zig.StmtBreakLabelValue b: return LowerLabeledBreak(Tok(b.Arg2), b.Arg3);
 
+            // `lbl: while/for (…) { … }` — a labeled loop (Milestone L, part 3); `break :lbl;` /
+            // `continue :lbl;` exit / next-iterate it (possibly an OUTER loop) via a goto.
+            case Zig.LabeledLoop ll:       return LowerLabeledLoop(Tok(ll.Arg0), ll.Arg2);
+            case Zig.StmtBreakLabel b:     return LowerLabeledLoopJump(Tok(b.Arg2), isContinue: false);
+            case Zig.StmtContinueLabel c:  return LowerLabeledLoopJump(Tok(c.Arg2), isContinue: true);
+
             // `switch (subject) { prongs }` → the C IR Switch (subject=Arg2, prongs=Arg5 for both
             // the plain and trailing-comma forms). A tagged-union subject takes the capture path.
             case Zig.StmtSwitch s:         return LowerSwitchStmt(s.Arg2, s.Arg5);
@@ -1577,9 +1606,16 @@ internal sealed class ZigLowering
     /// such break (when the block has no result-location hint) fixes that type.</summary>
     private CStmt LowerLabeledBreak(string label, Item valueItem)
     {
+        // A value break targeting a labeled LOOP is the labeled-while-value form (`break :lbl v`
+        // with a `while (…) … else …` value) — deferred; report it precisely rather than "unknown".
+        if (_labeledBlocks.All(t => t.Label != label) && _labeledLoops.Any(l => l.Label == label))
+        {
+            throw new IrUnsupportedException(
+                $"`break :{label} <value>` yields a value from a labeled loop — the labeled-while/for value form is not supported yet");
+        }
         var target = _labeledBlocks.FirstOrDefault(t => t.Label == label)
             ?? throw new IrUnsupportedException(
-                $"`break :{label}` has no enclosing labeled block ':{label}' (labeled-loop break is not supported yet)");
+                $"`break :{label}` has no enclosing labeled block ':{label}'");
         var value = target.Sink is { } sk ? LowerExprSink(valueItem, sk) : LowerExpr(valueItem);
         target.ResultType ??= value.Type;
         var tref = new VarRef(target.Temp) { Type = target.ResultType, IsLValue = true };
@@ -1592,6 +1628,73 @@ internal sealed class ZigLowering
             new ExprStmt(new Assign(null, tref, value) { Type = target.ResultType }),
             new Goto(target.EndLabel),
         });
+    }
+
+    /// <summary>Lower a labeled loop <c>lbl: while/for (…) { … }</c> (Milestone L, part 3). The loop
+    /// itself lowers normally (its record name is unchanged by the grammar's <c>LoopStmt</c> factor);
+    /// while its body is lowered, an enclosing <see cref="LabeledLoopTarget"/> lets a <c>break :lbl</c>
+    /// / <c>continue :lbl</c> within (possibly inside a nested loop) resolve to a <c>goto</c>. After
+    /// lowering, the continue label is appended to the END of the loop body (so a <c>goto</c> there
+    /// falls into the loop's natural iteration step) and the break label is placed just AFTER the loop
+    /// — each only when actually referenced, to avoid a C# unreferenced-label warning.</summary>
+    private CStmt LowerLabeledLoop(string label, Item loopItem)
+    {
+        var n = _loopLabelCounter++;
+        var t = new LabeledLoopTarget
+        {
+            Label = label, BreakLabel = "__loop" + n + "_brk", ContLabel = "__loop" + n + "_cont",
+        };
+        _labeledLoops.Push(t);
+        var loop = LowerStmt(loopItem);   // a While / For / DoWhile; break/continue :lbl read `t`
+        _labeledLoops.Pop();
+        if (t.ContUsed) { loop = WithLoopBody(loop, body => AppendLabel(body, t.ContLabel)); }
+        var stmts = new List<CStmt> { loop };
+        if (t.BreakUsed) { stmts.Add(new Labeled(t.BreakLabel, new Block(new List<CStmt>()))); }
+        return new Seq(stmts);
+    }
+
+    /// <summary>Rebuild a loop statement with its body transformed by <paramref name="f"/> — used to
+    /// append a labeled loop's continue label to the end of the body. Defensive: anything that isn't a
+    /// loop is returned untouched (the grammar's <c>LoopStmt</c> guarantees a loop here).</summary>
+    private static CStmt WithLoopBody(CStmt loop, Func<CStmt, CStmt> f) => loop switch
+    {
+        While w  => new While(w.Cond, f(w.Body)),
+        For fr   => new For(fr.Init, fr.Cond, fr.Post, f(fr.Body)),
+        DoWhile d => new DoWhile(f(d.Body), d.Cond),
+        _ => loop,
+    };
+
+    /// <summary>Append a (no-op-bodied) label to a statement, flattening into an existing block so the
+    /// label sits at the body's end. The label wraps an empty <see cref="Block"/> (<c>lbl: { }</c>)
+    /// because a C# label can't directly precede a declaration (CS1023).</summary>
+    private static CStmt AppendLabel(CStmt body, string label)
+    {
+        var labeled = new Labeled(label, new Block(new List<CStmt>()));
+        var stmts = body is Block b ? new List<CStmt>(b.Stmts) : new List<CStmt> { body };
+        stmts.Add(labeled);
+        return new Block(stmts);
+    }
+
+    /// <summary>Lower <c>break :lbl;</c> / <c>continue :lbl;</c> (Milestone L, part 3) to a <c>goto</c>
+    /// to the enclosing labeled loop's break / continue label (resolved innermost-first, marking the
+    /// label used so it gets emitted). A label that names a value-block (not a loop) is a clear error
+    /// — a loop <c>break</c>/<c>continue</c> can't target a value-block.</summary>
+    private CStmt LowerLabeledLoopJump(string label, bool isContinue)
+    {
+        var t = _labeledLoops.FirstOrDefault(l => l.Label == label);
+        if (t is null)
+        {
+            var what = isContinue ? "continue" : "break";
+            if (_labeledBlocks.Any(b => b.Label == label))
+            {
+                throw new IrUnsupportedException(
+                    $"`{what} :{label}` targets a labeled block, but a labeled block isn't a loop (use `break :{label} <value>;` to yield its value)");
+            }
+            throw new IrUnsupportedException($"`{what} :{label}` has no enclosing labeled loop ':{label}'");
+        }
+        if (isContinue) { t.ContUsed = true; return new Goto(t.ContLabel); }
+        t.BreakUsed = true;
+        return new Goto(t.BreakLabel);
     }
 
     /// <summary>Dispatch a <c>switch</c> statement: lower the subject once, then route a
