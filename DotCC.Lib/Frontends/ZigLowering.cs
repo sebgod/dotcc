@@ -1385,8 +1385,9 @@ internal sealed class ZigLowering
             // `if (opt) |x| then [else else]` — payload-capturing `if` (Milestone M). Binds the
             // optional's payload (value `?T` or niche pointer) — or, with `else |e|`, an
             // error-union's success/error (part 3) — in the matching branch. See LowerIfCapture.
-            case Zig.StmtIfCapture f:     return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, null, null);
-            case Zig.StmtIfCaptureElse f: return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, f.Arg9, null);
+            case Zig.StmtIfCapture f:        return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, null, null);
+            case Zig.StmtIfCaptureElse f:    return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, f.Arg9, null);
+            case Zig.StmtIfCaptureErrElse f: return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, f.Arg12, Tok(f.Arg10));
             case Zig.StmtWhile w:       return new While(LowerExpr(w.Arg2), LowerStmt(w.Arg4));
 
             // `while (cond) : (cont) body` → the C IR `For` (no init): the cont runs after each
@@ -1715,7 +1716,9 @@ internal sealed class ZigLowering
     /// <item>a niche optional pointer (lowered to a bare <c>T*</c>) → test the pointer for non-null
     /// (the <c>Cond.B(void*)</c> overload), bind <c>x = __cap</c> (the unwrapped pointer is the
     /// same value);</item>
-    /// <item>an error union <c>!T</c> (<see cref="CType.ErrorUnion"/>) → part 3, deferred here.</item>
+    /// <item>an error union <c>!T</c> (<see cref="CType.ErrorUnion"/>) → bind the success payload to
+    /// <c>x</c> in the then-branch and (with <c>else |e|</c>) the error code to <c>e</c> in the
+    /// else-branch — a value inspection of <c>.IsErr</c>, never a propagating <c>try</c>.</item>
     /// </list>
     /// The condition is hoisted to a single-eval temp unless it is already a bare variable (the test
     /// and the binding both read it). A capture name of <c>_</c> tests without binding. An
@@ -1764,10 +1767,38 @@ internal sealed class ZigLowering
             payloadInit = condRef; // the unwrapped pointer is the same value
             payloadType = cond.Type;
         }
-        else if (ct is CType.ErrorUnion)
+        else if (ct is CType.ErrorUnion eu)
         {
-            throw new IrUnsupportedException(
-                "zig error-union capture `if (eu) |x| … else |e|` not lowered yet (Milestone M, part 3)");
+            // Error union (Milestone M, part 3): bind the success payload to `x` in the then-branch,
+            // the error to `e` (the runtime `ushort Code`) in the else-branch. We test `__cap.IsErr`
+            // (a clean bool) and emit the ERROR branch as the C# `if`, success as `else` — so no `!`
+            // is needed. NOTE: this is a value inspection (`.IsErr`), NOT `try`, so it never throws a
+            // ZigErrorReturn — the error is handled HERE and does not propagate to the function's
+            // boundary catch. (V1: `e` is the erased ushort code; named-error compare is Milestone N.)
+            var errStmts = new List<CStmt>();
+            _symbols.EnterScope();
+            if (errCapName is not null && errCapName != "_")
+            {
+                var errSym = _symbols.Declare(new Symbol { Name = errCapName, Kind = SymKind.Var, Type = CType.UShort });
+                errStmts.Add(new DeclStmt(new List<LocalDecl> { new(errSym, new Member(condRef, "Code", false) { Type = CType.UShort }) }));
+            }
+            if (elseItem is not null) { errStmts.Add(LowerStmt(elseItem)); }
+            _symbols.ExitScope();
+
+            var okStmts = new List<CStmt>();
+            _symbols.EnterScope();
+            if (capName != "_")
+            {
+                var okSym = _symbols.Declare(new Symbol { Name = capName, Kind = SymKind.Var, Type = eu.Payload });
+                okStmts.Add(new DeclStmt(new List<LocalDecl> { new(okSym, new Member(condRef, "Value", false) { Type = eu.Payload }) }));
+            }
+            okStmts.Add(LowerStmt(thenItem));
+            _symbols.ExitScope();
+
+            var errTest = new Member(condRef, "IsErr", false) { Type = CType.Bool };
+            CStmt euIf = new If(errTest, new Block(errStmts), new Block(okStmts));
+            if (pre.Count > 0) { pre.Add(euIf); return new Block(pre); }
+            return euIf;
         }
         else
         {

@@ -774,6 +774,20 @@ public sealed class ZigOracleTests
             "    sum += count;\n" +
             "    return @as(u8, @intCast(sum));\n" + // 36 + 6
             "}\n", 42, "" },
+
+        // --- Milestone M (part 3): error-union capture in `if` (exit-code only) ---
+        // Payload capture `|x|` on success + the error branch on failure, both via `else |_|` (the
+        // both-compiler-valid subset: real zig REJECTS a plain `else` on an error union and rejects
+        // `_ = e;`, so the error is discarded with `|_|`; a USED named `|e|` awaits the error-set
+        // milestone). success(+20) + failure-else(+22) = 42.
+        new object[] { "error_capture",
+            "fn tryVal(ok: bool, v: i32) !i32 { if (ok) return v; return error.Bad; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var sum: i32 = 0;\n" +
+            "    if (tryVal(true, 20)) |x| { sum += x; } else |_| { sum += 100; }\n" + // success → +20
+            "    if (tryVal(false, 99)) |x| { sum += x; } else |_| { sum += 22; }\n" + // failure → +22
+            "    return @as(u8, @intCast(sum));\n" + // 20 + 22
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

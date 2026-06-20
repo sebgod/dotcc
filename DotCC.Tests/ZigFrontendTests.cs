@@ -1739,17 +1739,53 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Defers_an_error_union_capture_in_if()
+    public void Lowers_an_error_union_capture_in_if()
     {
-        // An error-union condition (`!T`) with a capture is part 3 — for now a clear deferred error
-        // (the `else |e|` grammar + the success/error split land in the next increment).
-        var ex = Should.Throw<CompileException>(() => EmitZig(
+        // `if (eu) |x| { … } else |e| { … }` → inspect the runtime `ErrUnion<T>`: test `__cap.IsErr`
+        // (error branch first, success in the C# `else`, so no `!`), bind `int x = __cap.Value;` on
+        // success and `ushort e = __cap.Code;` (the erased error code) on failure.
+        var cs = EmitZig(
             "fn mk(ok: bool) !i32 { if (ok) return 7; return error.Bad; }\n" +
             "pub fn main() u8 {\n" +
-            "    if (mk(true)) |x| { _ = x; } else { }\n" +
-            "    return 0;\n" +
-            "}\n"));
-        ex.Message.ShouldContain("part 3");
+            "    var sum: i32 = 0;\n" +
+            "    if (mk(true)) |x| { sum += x; } else |e| { _ = e; sum += 100; }\n" +
+            "    return @as(u8, @intCast(sum));\n" +
+            "}\n");
+        cs.ShouldContain("ErrUnion<int> __cap = mk");
+        cs.ShouldContain("Cond.B(__cap.IsErr)");
+        cs.ShouldContain("ushort e = __cap.Code;");
+        cs.ShouldContain("int x = __cap.Value;");
+    }
+
+    [Fact]
+    public void Lowers_an_error_union_capture_with_a_plain_else()
+    {
+        // A plain `else` (no `|e|`) discards the error — the error branch runs without binding a code.
+        var cs = EmitZig(
+            "fn mk(ok: bool) !i32 { if (ok) return 7; return error.Bad; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var sum: i32 = 0;\n" +
+            "    if (mk(true)) |x| { sum += x; } else { sum += 50; }\n" +
+            "    return @as(u8, @intCast(sum));\n" +
+            "}\n");
+        cs.ShouldContain("Cond.B(__cap.IsErr)");
+        cs.ShouldContain("int x = __cap.Value;");
+        cs.ShouldNotContain("__cap.Code");   // no `|e|` → the error code is not bound
+    }
+
+    [Fact]
+    public void Lowers_an_error_union_discard_error_capture()
+    {
+        // `else |_|` runs the error branch without binding the code.
+        var cs = EmitZig(
+            "fn mk(ok: bool) !i32 { if (ok) return 7; return error.Bad; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var sum: i32 = 0;\n" +
+            "    if (mk(false)) |x| { sum += x; } else |_| { sum += 42; }\n" +
+            "    return @as(u8, @intCast(sum));\n" +
+            "}\n");
+        cs.ShouldContain("Cond.B(__cap.IsErr)");
+        cs.ShouldNotContain("__cap.Code");   // `_` discards the error — no binding
     }
 
     [Fact]

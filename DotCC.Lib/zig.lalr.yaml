@@ -287,6 +287,11 @@ productions:
       # capture (part 3) and the by-ref `|*x|` form (part 4) extend these two productions.
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', Stmt],                 action: stmtIfCapture }
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', Stmt, 'else', Stmt],   action: stmtIfCaptureElse }
+      # `if (eu) |x| then else |e| elsebody` — error-union capture (Milestone M, part 3): bind the
+      # success payload to `x` in the then-branch, the error to `e` in the else-branch. After the
+      # then-Stmt's `else`, a `|` lookahead selects this error-capture form over the plain
+      # `… else Stmt` above (no Stmt begins with `|`) — conflict-free, same rightmost group.
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', Stmt, 'else', '|', IDENT, '|', Stmt], action: stmtIfCaptureErrElse }
 
   - derivation: none
     rules:
