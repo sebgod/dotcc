@@ -43,7 +43,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | local `const`/`var` (typed or inferred) | ✅ | inside a function body |
 | `fn f() !T` (inferred-error return) | ✅ | the `!T` returns an error union (`ErrUnion<T>`); see `try`/`catch`/`error.X` below. V1 erases the error SET |
 | `pub fn main() !void` / `!u8` (error-union main) | 🚫 | main itself returning an error union is deferred — error unions live in helper fns; main stays `void`/`u8` |
-| top-level / global `const`/`var` | ✅ | a runtime global → a `public static` field of `DotCcGlobals` (the same path the C front-end's file-scope variables take), surfaced by bare name (a function body reads/writes it unqualified). Typed keeps its annotation; untyped infers from the initializer (`const N = 5;` → `int`). Initializers are lowered in source order, so a global may reference an EARLIER global by bare name. `const`-ness isn't enforced (both lower to a mutable field — observably identical for a correct Zig program). **Deferred:** an aggregate / `[N]T` array / `undefined` global, a fn-pointer global, and a forward reference to a LATER global |
+| top-level / global `const`/`var` | ✅ | a runtime global → a `public static` field of `DotCcGlobals` (the same path the C front-end's file-scope variables take), surfaced by bare name (a function body reads/writes it unqualified). Typed keeps its annotation; untyped infers from the initializer (`const N = 5;` → `int`). Initializers are lowered in source order, so a global may reference an EARLIER global by bare name. `const`-ness isn't enforced (both lower to a mutable field — observably identical for a correct Zig program). An aggregate (struct), `[N]T` array, and `undefined` global are supported (Milestone K — an array routes through a pinned, program-lifetime backing store). **Deferred:** a fn-pointer global and a forward reference to a LATER global |
 | `export`/`inline`/`callconv`/`align`/`linksection` | 🚫 | full FnProto modifiers not modeled |
 | `extern "c"` library-name string | 🚫 | bare `extern fn` only |
 
@@ -60,7 +60,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `[*c]T`, `[*c]const T` | ✅ | C pointer (== C's `T*` / `const T*`) — printf's `[*c]const u8` format |
 | `?T` optional | ✅ | `?*T` → bare nullable `T*` (niche); `?T` over a value → C# `Nullable<T>`. `null`/`.?`/`orelse` below |
 | `[]T` / `[]const T` slice | ✅ | → the runtime fat pointer `Slice<T>` / `ConstSlice<T>` (`{ T* Ptr; ulong Len; }`, the C++ `std::span` shape — **not** C#'s ref-struct `Span<T>`, so a slice can be a struct field and cross the ABI; `AsSpan()` bridges to the BCL). `.len`/`.ptr`, `s[i]`, `s[lo..hi]`, array/string coercion, and `for` over it all work (rows below). **Deferred:** `[*]T`-backed slices, sentinel `[:0]T`, open-ended `s[lo..]`, by-ref `\|*x\|`, the non-escaping-stack → `stackalloc`+`Span` peephole |
-| `[N]T` array (local) | ✅ | `var b: [N]T = undefined;` → a stackalloc'd C array (zero heap); `b[i]` indexes, `b[lo..hi]` yields a **stack-backed slice**. Size `N` must be an integer literal. **Init:** only `undefined` so far (positional `.{…}` / `[_]T{…}` array literals deferred) |
+| `[N]T` array (local) | ✅ | `var b: [N]T = …;` → a stackalloc'd C array (zero heap); `b[i]` indexes, `b[lo..hi]` yields a **stack-backed slice**. Size `N` must be an integer literal. **Init:** `undefined` (zeroed) OR an array literal (Milestone K) — `.{…}` at a `[N]T` sink, typed `[N]T{…}` (explicit length), or `[_]T{…}` (length inferred from the element count). An empty literal is rejected (use `undefined`); returning an array literal by value is out of scope (arrays lower to pointers) |
 | tuple `struct { T1, T2, … }` | ✅ | an anonymous **positional** struct → C# `System.ValueTuple<…>` (Milestone G — see the **Tuples** section). Valid as a return / param / var type; a positional literal `.{a, b}` constructs it, `t[N]` (literal `N`) reads `.ItemN+1`, and `const a, const b = e` destructures. **Runtime subset only:** arity 1..7 (empty + >7 deferred); comptime / type-valued fields and a mixed positional+named literal are rejected |
 | `std.mem.Allocator` | ✅ | the allocator fat pointer `{ ptr, vtable }` → the runtime `Allocator` value type (see the **Allocators** section). `std.heap.FixedBufferAllocator` is the concrete second allocator. Any OTHER `std.*` type errors clearly |
 | `const P = struct { fields…, methods… };` | ✅ | container decl (top-level) → a real C# `unsafe struct` via the SHARED aggregate machinery the C frontend uses. Fields **and** methods (below) in the body; tagged unions are a later D slice. Empty `struct {}` allowed; `pub`-wrapped + in-function containers deferred |
@@ -396,4 +396,7 @@ rejects, not silently accept more.
   escaped quote + `\u{…}` unicode escape, and a `\\` multiline string),
   `examples/zig-builtins` (result-location cast builtins: `@intCast`/`@truncate`/`@floatFromInt`/
   `@floatCast`/`@intFromFloat`/`@bitCast`/`@ptrCast`+`@alignCast`/`@enumFromInt` + `@sizeOf`,
-  each inferring its target from the binding it flows into).
+  each inferring its target from the binding it flows into),
+  `examples/zig-arrays` (array literals & aggregate globals: `.{…}` at a `[N]T` sink, typed
+  `[N]T{…}` / inferred `[_]T{…}` locals, plus literal-array / inferred-array / `undefined`-array
+  and struct globals routed through the pinned global store).
