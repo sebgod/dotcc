@@ -1448,10 +1448,13 @@ internal sealed class ZigLowering
 
             // `for (s) |x| body` — iterate a slice's elements (x = a per-iteration copy).
             case Zig.StmtForSlice f:     // for '(' Expr ')' '|' IDENT '|' Stmt
-                return LowerForSlice(LowerExpr(f.Arg2), Tok(f.Arg5), null, f.Arg7);
+                return LowerForSlice(LowerExpr(f.Arg2), Tok(f.Arg5), null, f.Arg7, byRef: false);
+            // `for (s) |*x| body` — BY-REFERENCE element capture: x is a `*T` into the slice (Milestone M, part 4).
+            case Zig.StmtForSliceRef f:  // for '(' Expr ')' '|' '*' IDENT '|' Stmt
+                return LowerForSlice(LowerExpr(f.Arg2), Tok(f.Arg6), null, f.Arg8, byRef: true);
             // `for (s, 0..) |x, i| body` — also bind the usize index (counter + start).
             case Zig.StmtForSliceIdx f:  // for '(' Expr ',' Expr '..' ')' '|' IDENT ',' IDENT '|' Stmt
-                return LowerForSlice(LowerExpr(f.Arg2), Tok(f.Arg8), (Tok(f.Arg10), LowerExpr(f.Arg4)), f.Arg12);
+                return LowerForSlice(LowerExpr(f.Arg2), Tok(f.Arg8), (Tok(f.Arg10), LowerExpr(f.Arg4)), f.Arg12, byRef: false);
 
             // A brace block in statement position (`Stmt -> Block`, pass-through).
             case Zig.Block:
@@ -1925,7 +1928,7 @@ internal sealed class ZigLowering
         var sections = new List<SwitchSection>();
         foreach (var prongItem in Flatten(prongsItem))
         {
-            if (prongItem.Content is Zig.ProngCapture)
+            if (prongItem.Content is Zig.ProngCapture or Zig.ProngCaptureRef)
             {
                 throw new IrUnsupportedException(
                     "zig switch payload capture `|x|` is only valid on a tagged-union switch");
@@ -1949,10 +1952,12 @@ internal sealed class ZigLowering
 
     /// <summary>Lower a <c>switch</c> over a tagged union: switch on the <see cref="TagFieldName"/>
     /// discriminant, with <c>.variant</c> case labels resolving against the tag enum. A
-    /// <c>|x|</c> payload capture binds <c>x</c> to the matched variant's payload field (by value)
-    /// at the top of that prong's block. The subject is hoisted to a temp first (unless it is
-    /// already a simple variable) so each capture re-reads it without re-evaluating a
-    /// side-effecting subject expression.</summary>
+    /// <c>|x|</c> payload capture binds <c>x</c> to the matched variant's payload field (by value),
+    /// and a by-reference <c>|*x|</c> capture (Milestone M, part 4) binds <c>x</c> to a <c>*T</c>
+    /// pointer INTO that payload field, so <c>x.* = …</c> writes through to the (mutable) union — at
+    /// the top of that prong's block. The subject is hoisted to a temp first (unless it is already a
+    /// simple variable) so each capture re-reads it without re-evaluating a side-effecting subject
+    /// expression.</summary>
     private CStmt LowerUnionSwitch(CExpr subject, Item prongsItem, ZigUnionInfo info)
     {
         var isPtr = subject.Type.Unqualified is CType.Pointer;
@@ -1984,11 +1989,12 @@ internal sealed class ZigLowering
                 sections.Add(new SwitchSection(exprLabels, exprBody));
                 continue;
             }
-            Item caseVals; string? captureName; Item block;
+            Item caseVals; string? captureName; Item block; bool captureByRef;
             switch (prongItem.Content)
             {
-                case Zig.Prong p:        caseVals = p.Arg0; captureName = null;        block = p.Arg2; break;
-                case Zig.ProngCapture p: caseVals = p.Arg0; captureName = Tok(p.Arg3); block = p.Arg5; break;
+                case Zig.Prong p:           caseVals = p.Arg0; captureName = null;        block = p.Arg2; captureByRef = false; break;
+                case Zig.ProngCapture p:    caseVals = p.Arg0; captureName = Tok(p.Arg3); block = p.Arg5; captureByRef = false; break;
+                case Zig.ProngCaptureRef p: caseVals = p.Arg0; captureName = Tok(p.Arg4); block = p.Arg6; captureByRef = true;  break;
                 default: throw new IrUnsupportedException("zig switch prong: " + (prongItem.Content?.GetType().Name ?? "null"));
             }
             RejectUnionRange(caseVals, info);
@@ -2002,10 +2008,15 @@ internal sealed class ZigLowering
                     ?? throw new IrUnsupportedException(
                         $"union '{info.Name}' variant '{variant}' is a void variant — it has no payload to capture with `|{captureName}|`");
                 _symbols.EnterScope();
-                var capSym = _symbols.Declare(new Symbol { Name = captureName, Kind = SymKind.Var, Type = payloadType });
-                // `var x = __un.__payload.variant;` — read the overlaid payload field.
+                // By-value (`|x|`): `var x = __un.__payload.variant;` (a copy). By-reference (`|*x|`):
+                // `T* x = &(__un.__payload.variant);` — a pointer into the union's payload field, so
+                // `x.* = …` writes through to the (mutable) union value.
+                var bindType = captureByRef ? new CType.Pointer(payloadType) : payloadType;
+                var capSym = _symbols.Declare(new Symbol { Name = captureName, Kind = SymKind.Var, Type = bindType });
                 var payloadBase = new Member(unionRef, info.PayloadFieldName, isPtr) { Type = new CType.Named(info.PayloadTypeName!), IsLValue = true };
-                var capInit = new Member(payloadBase, variant, false) { Type = payloadType, IsLValue = true };
+                var payloadField = new Member(payloadBase, variant, false) { Type = payloadType, IsLValue = true };
+                CExpr capInit = captureByRef ? new Unary(UnOp.AddrOf, payloadField) { Type = bindType } : payloadField;
+                if (captureByRef && unionRef is VarRef { Sym: { } uvar }) { uvar.AddressTaken = true; }
                 var inner = LowerBlock(block);
                 _symbols.ExitScope();
                 var combined = new List<CStmt> { new DeclStmt(new List<LocalDecl> { new(capSym, capInit) }) };
@@ -2043,7 +2054,7 @@ internal sealed class ZigLowering
     /// The element capture <c>x</c> is a per-iteration copy (Zig's by-value <c>|x|</c>; the by-ref
     /// <c>|*x|</c> form is deferred). The slice is hoisted to <c>__s</c> unless it is already a bare
     /// variable, so <c>.Len</c>/<c>.Ptr</c> aren't re-evaluated with side effects.</summary>
-    private CStmt LowerForSlice(CExpr sliceExpr, string elemName, (string name, CExpr start)? index, Item bodyItem)
+    private CStmt LowerForSlice(CExpr sliceExpr, string elemName, (string name, CExpr start)? index, Item bodyItem, bool byRef)
     {
         if (sliceExpr.Type.Unqualified is not CType.Slice slc)
         {
@@ -2071,11 +2082,14 @@ internal sealed class ZigLowering
         var cond = new Binary(BinOp.Lt, iRef, lenMember) { Type = CType.Int };
         var post = new Unary(UnOp.PostInc, iRef) { Type = CType.ULong };
 
-        // body: prepend `var x = __s.Ptr[__i];` (the element copy) and, for the index form,
-        // `var i = __i + START;`.
+        // body: prepend the element binding and, for the index form, `var i = __i + START;`.
+        // By-value (`|x|`): `var x = __s.Ptr[__i];` (a per-iteration copy). By-reference (`|*x|`):
+        // `T* x = &(__s.Ptr[__i]);` so `x.* = …` writes through to the element.
         var ptrMember = new Member(sliceRef, "Ptr", false) { Type = new CType.Pointer(slc.Element) };
-        var elemInit = new DotCC.Ir.Index(ptrMember, iRef) { Type = slc.Element, IsLValue = true };
-        var elemSym = _symbols.Declare(new Symbol { Name = elemName, Kind = SymKind.Var, Type = slc.Element });
+        var elemAccess = new DotCC.Ir.Index(ptrMember, iRef) { Type = slc.Element, IsLValue = true };
+        var elemType = byRef ? new CType.Pointer(slc.Element) : slc.Element;
+        CExpr elemInit = byRef ? new Unary(UnOp.AddrOf, elemAccess) { Type = elemType } : elemAccess;
+        var elemSym = _symbols.Declare(new Symbol { Name = elemName, Kind = SymKind.Var, Type = elemType });
         var bodyStmts = new List<CStmt> { new DeclStmt(new List<LocalDecl> { new(elemSym, elemInit) }) };
         if (index is { } idx)
         {

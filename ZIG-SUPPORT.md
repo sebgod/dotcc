@@ -88,7 +88,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `break :blk v;` (labeled break with value) | ✅ | yields `v` from the enclosing labeled value-block (see **labeled block as a value** in Expressions) |
 | `lbl: while/for (…) …` (labeled loop) + `break :lbl;` / `continue :lbl;` | ✅ | a `label:` may prefix any while/for loop; `break :lbl` / `continue :lbl` exit / next-iterate it — including an **outer** loop. C# has no labeled break/continue, so they lower to a `goto`: `break :lbl` → a label just AFTER the loop, `continue :lbl` → a label at the END of the loop body (so the natural iteration step still runs). Labels are emitted only when referenced. **Deferred:** the labeled-while/for VALUE form (`break :lbl v` yielding from a loop used as an expression) |
 | `switch (x) { v => {…}, a, b => {…}, lo...hi => {…}, else => {…} }` | ✅ | as a STATEMENT → the C IR Switch. Single / multi-value / inclusive-**range** (`lo...hi`) / `else` (→ default) prongs; NO fall-through (each prong gets an appended `break`). Switching on an **enum** works (subject + `.member` labels decay to the underlying int). A range lowers to a C# relational-pattern case `case >= lo and <= hi:` (Zig requires comptime-known bounds = C#'s constant requirement). Prong bodies are braced **blocks** OR a bare expression (`v => expr`, an expression statement) |
-| `switch (u) { .a => \|x\| {…}, … }` | ✅ | switch on a **tagged union** → dispatch on the `__tag`; a `\|x\|` payload capture binds the matched variant's payload (by value). An exhaustive union switch with no `else` makes its last prong the C# `default` (so the function provably returns). **Deferred:** by-reference `\|*x\|` capture, multi-variant capture prongs (the optional `if`/`while` and the error-union `if` captures are now ✅ — see those rows) |
+| `switch (u) { .a => \|x\| {…}, .b => \|*y\| {…} }` | ✅ | switch on a **tagged union** → dispatch on the `__tag`; a `\|x\|` payload capture binds the matched variant's payload **by value**, and a by-reference `\|*x\|` capture (Milestone M, part 4) binds a `*T` into the payload field (`T* x = &u.__payload.v;`) so `x.* = …` writes through to the (mutable) union. An exhaustive union switch with no `else` makes its last prong the C# `default` (so the function provably returns). **Deferred:** multi-variant capture prongs (the optional `if`/`while` and the error-union `if` captures are now ✅ — see those rows) |
 | `return e;` / `return;` | ✅ | |
 | `x = e;` assignment | ✅ | |
 | `x op= e;` compound assignment | ✅ | all ten: `+= -= *= /= %= <<= >>= &= \|= ^=`. → the shared `Assign` IR node with a non-null `CompoundOp` → a NATIVE C# `x op= e`, so the target lvalue is evaluated exactly **once** (`arr[next()] += 1` calls `next()` a single time — not a `x = x op e` desugar). Zig has the wrapping (`+%=`) / saturating (`+\|=`) variants (deferred) and **no** `++`/`--` (the idiom is `i += 1`) |
@@ -99,7 +99,8 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `errdefer Stmt;` | ✅ | error-exit cleanup — runs only when the block exits via a propagating error, LIFO-interleaved with `defer`. → C# `try { rest } catch (ZigErrorReturn) { cleanup; throw; }`. A function with an `errdefer` routes its `return error.X` through a throw so it reaches the catch. **Deferred:** `errdefer \|e\| …` payload capture |
 | `for (a..b) \|i\| …` (range for) | ✅ | → C `for (usize i = a; i < b; i++)`; the `\|i\|` capture is the usize loop index (`\|_\|` discards). The body is a Stmt or block |
 | `for (s) \|x\|` / `for (s, 0..) \|x, i\|` (for-over-slice) | ✅ | iterate a slice's elements (`x` = a per-iteration copy); the index form also binds the usize index. → C `for (usize __i=0; __i<s.Len; __i++) { var x = s.Ptr[__i]; [var i = __i + 0;] … }` (the slice is hoisted to a temp unless a bare var) |
-| open-ended `s[lo..]`, by-ref `\|*x\|` | 🚫 | (switch-as-expression, labeled-block-as-value, labeled loops + labeled `break`/`continue`, and switch ranges are now ✅) |
+| `for (s) \|*e\|` (by-reference for-slice) | ✅ | BY-REFERENCE element capture (Milestone M, part 4): `e` is a `T*` into the slice element (`T* e = &s.Ptr[__i];`), so `e.* = …` writes through to the element. **Deferred:** the by-ref + index combo `for (s, 0..) \|*e, i\|` |
+| open-ended `s[lo..]` | 🚫 | (switch-as-expression, labeled-block-as-value, labeled loops + labeled `break`/`continue`, switch ranges, and by-ref `\|*x\|` capture in `for`/`switch` are now ✅; by-ref on an optional/error-union `if`/`while` stays a grammar-level cut) |
 
 ## Expressions
 
@@ -421,4 +422,6 @@ rejects, not silently accept more.
   `examples/zig-while-capture` (optional capture-`while`: a value-optional iterator-style loop
   `while (nextLT(&i, 9)) |v|` + a `_` discard capture-while),
   `examples/zig-error-capture` (error-union capture in `if`: payload `|x|` on success + the error
-  branch on failure via `else |_|`).
+  branch on failure via `else |_|`),
+  `examples/zig-byref-capture` (by-reference capture `|*x|`: doubling a slice in place via
+  `for (s) |*e|` + mutating a tagged-union payload via `switch (b) { .i => |*p| … }`).

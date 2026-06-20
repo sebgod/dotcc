@@ -1866,4 +1866,50 @@ public sealed class ZigFrontendTests
             "}\n"));
         ex.Message.ShouldContain("optional");
     }
+
+    [Fact]
+    public void Lowers_a_by_ref_for_slice_capture()
+    {
+        // `for (s) |*e| { … }` binds `e` to a `T*` INTO the slice element, so `e.* = …` writes
+        // through. → `T* e = &s.Ptr[__i];` (vs the by-value `T e = s.Ptr[__i];`).
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var arr = [_]i32{ 1, 2, 3 };\n" +
+            "    const s: []i32 = arr[0..3];\n" +
+            "    for (s) |*e| { e.* = e.* + 1; }\n" +
+            "    return @as(u8, @intCast(s[0]));\n" +
+            "}\n");
+        cs.ShouldContain("int* e = &s.Ptr[__i];");
+        cs.ShouldContain("*e = *e + 1");
+    }
+
+    [Fact]
+    public void Lowers_a_by_ref_union_switch_capture()
+    {
+        // `switch (u) { .v => |*p| { … } }` binds `p` to a `T*` INTO the matched variant's payload
+        // field, so `p.* = …` writes through to the union. → `T* p = &u.__payload.v;`.
+        var cs = EmitZig(
+            "const U = union(enum) { n: i32, f: i32 };\n" +
+            "pub fn main() u8 {\n" +
+            "    var u: U = .{ .n = 0 };\n" +
+            "    switch (u) { .n => |*p| { p.* = 42; }, .f => |*p| { p.* = 0; } }\n" +
+            "    return 0;\n" +
+            "}\n");
+        cs.ShouldContain("int* p = &u.__payload.n;");
+        cs.ShouldContain("*p = 42");
+    }
+
+    [Fact]
+    public void Rejects_a_by_ref_capture_on_a_non_union_switch()
+    {
+        // A `|*x|` capture is only meaningful on a tagged-union switch (a plain switch has no
+        // payload field to point into) — a clear error.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const n: i32 = 1;\n" +
+            "    switch (n) { 1 => |*x| { _ = x; }, else => {} }\n" +
+            "    return 0;\n" +
+            "}\n"));
+        ex.Message.ShouldContain("tagged-union");
+    }
 }

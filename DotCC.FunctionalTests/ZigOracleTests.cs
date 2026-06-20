@@ -788,6 +788,23 @@ public sealed class ZigOracleTests
             "    if (tryVal(false, 99)) |x| { sum += x; } else |_| { sum += 22; }\n" + // failure → +22
             "    return @as(u8, @intCast(sum));\n" + // 20 + 22
             "}\n", 42, "" },
+
+        // --- Milestone M (part 4): by-reference capture `|*x|` (exit-code only) ---
+        // `for (s) |*e|` doubles a slice in place (3,4,5,6 → 6,8,10,12 = 36); `switch (b) |*p|`
+        // mutates the union payload in place (+6, read back via a by-value capture). 36 + 6 = 42.
+        new object[] { "byref_capture",
+            "const Box = union(enum) { i: i32, f: i32 };\n" +
+            "pub fn main() u8 {\n" +
+            "    var sum: i32 = 0;\n" +
+            "    var arr = [_]i32{ 3, 4, 5, 6 };\n" +
+            "    const s: []i32 = arr[0..4];\n" +
+            "    for (s) |*e| { e.* = e.* * 2; }\n" + // double in place
+            "    for (s) |e| { sum += e; }\n" + // 6+8+10+12 = 36
+            "    var b: Box = .{ .i = 0 };\n" +
+            "    switch (b) { .i => |*p| { p.* = 6; }, .f => |*p| { p.* = 0; } }\n" + // mutate payload
+            "    switch (b) { .i => |v| { sum += v; }, .f => |v| { sum += v; } }\n" + // +6
+            "    return @as(u8, @intCast(sum));\n" + // 36 + 6
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
