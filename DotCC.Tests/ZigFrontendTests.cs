@@ -1789,6 +1789,56 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_a_bare_error_value_to_its_code()
+    {
+        // Milestone N, part 1: a bare `error.Foo` (outside `return error.Foo;`) lowers to its stable
+        // code in the flat global error set, typed `CType.ErrorSet` → C# `ushort`. So it can be bound
+        // to a const and compared — `e == error.Foo` matches codes (equal codes = equal errors).
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const e = error.Foo;\n" +
+            "    if (e == error.Foo) { return 42; }\n" +
+            "    return 0;\n" +
+            "}\n");
+        cs.ShouldContain("ushort e = 1;");   // the sole error name → code 1
+        cs.ShouldContain("e == 1");          // error-value equality compares codes
+    }
+
+    [Fact]
+    public void Distinct_error_values_get_distinct_codes()
+    {
+        // Two distinct `error.X` names get distinct stable codes (first-encounter order), so a
+        // cross-name comparison is a code mismatch.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const a = error.First;\n" +
+            "    const b = error.Second;\n" +
+            "    if (a == b) { return 1; }\n" +
+            "    return 42;\n" +
+            "}\n");
+        cs.ShouldContain("ushort a = 1;");
+        cs.ShouldContain("ushort b = 2;");
+        cs.ShouldContain("a == b");
+    }
+
+    [Fact]
+    public void Lowers_a_compared_captured_error()
+    {
+        // The Milestone-N payoff for the part-3 `else |e|` capture: the bound error is now an
+        // error-set value (not the opaque `ushort` code), so `e == error.Bad` compares codes — a
+        // USED named capture, valid in both compilers (it was emit-pin-only until error values).
+        var cs = EmitZig(
+            "fn mk(ok: bool) !i32 { if (ok) return 7; return error.Bad; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var sum: i32 = 0;\n" +
+            "    if (mk(false)) |x| { sum += x; } else |e| { if (e == error.Bad) { sum += 42; } }\n" +
+            "    return @as(u8, @intCast(sum));\n" +
+            "}\n");
+        cs.ShouldContain("ushort e = __cap.Code;");   // captured error (rendered ushort)
+        cs.ShouldContain("e == 1");                    // compared against error.Bad's code (1)
+    }
+
+    [Fact]
     public void Lowers_an_optional_capture_while()
     {
         // `while (opt) |x| { … }` → `while (true) { var __cap = cond; if (__cap.HasValue) { var x =

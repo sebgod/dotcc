@@ -805,6 +805,22 @@ public sealed class ZigOracleTests
             "    switch (b) { .i => |v| { sum += v; }, .f => |v| { sum += v; } }\n" + // +6
             "    return @as(u8, @intCast(sum));\n" + // 36 + 6
             "}\n", 42, "" },
+
+        // --- Milestone N (part 1): error values — bare `error.X` + `==`/`!=` (exit-code only) ---
+        // A USED captured error compared against a named error (the part-3 payoff, now both-valid):
+        // failure → `e == error.Bad` matches → +20. A bare `error.X` const compared two ways: `==`
+        // matches (+10), `!=` against a different error matches (+12). 20 + 10 + 12 = 42.
+        new object[] { "error_value",
+            "fn tryVal(ok: bool, v: i32) !i32 { if (ok) return v; return error.Bad; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var sum: i32 = 0;\n" +
+            "    if (tryVal(false, 99)) |x| { sum += x; } else |e| { if (e == error.Bad) { sum += 20; } else { sum += 100; } }\n" +
+            "    const want = error.Bad;\n" +
+            "    if (want == error.Bad) { sum += 10; }\n" + // matched
+            "    if (want == error.Other) { sum += 100; }\n" + // not matched
+            "    if (want != error.Other) { sum += 12; }\n" + // matched (inequality)
+            "    return @as(u8, @intCast(sum));\n" + // 20 + 10 + 12
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

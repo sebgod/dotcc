@@ -1777,13 +1777,15 @@ internal sealed class ZigLowering
             // (a clean bool) and emit the ERROR branch as the C# `if`, success as `else` — so no `!`
             // is needed. NOTE: this is a value inspection (`.IsErr`), NOT `try`, so it never throws a
             // ZigErrorReturn — the error is handled HERE and does not propagate to the function's
-            // boundary catch. (V1: `e` is the erased ushort code; named-error compare is Milestone N.)
+            // boundary catch. The captured error binds as `CType.ErrorSet` (rendered `ushort`, the
+            // flat global code), so `e == error.Foo` compares codes (Milestone N) — what un-erased
+            // the part-3 cut: a USED named `|e|` is now valid in both compilers.
             var errStmts = new List<CStmt>();
             _symbols.EnterScope();
             if (errCapName is not null && errCapName != "_")
             {
-                var errSym = _symbols.Declare(new Symbol { Name = errCapName, Kind = SymKind.Var, Type = CType.UShort });
-                errStmts.Add(new DeclStmt(new List<LocalDecl> { new(errSym, new Member(condRef, "Code", false) { Type = CType.UShort }) }));
+                var errSym = _symbols.Declare(new Symbol { Name = errCapName, Kind = SymKind.Var, Type = CType.ErrorSet });
+                errStmts.Add(new DeclStmt(new List<LocalDecl> { new(errSym, new Member(condRef, "Code", false) { Type = CType.ErrorSet }) }));
             }
             if (elseItem is not null) { errStmts.Add(LowerStmt(elseItem)); }
             _symbols.ExitScope();
@@ -2297,6 +2299,18 @@ internal sealed class ZigLowering
         return false;
     }
 
+    /// <summary>Lower a bare <c>error.Foo</c> value to its stable code in the flat global error set,
+    /// typed <see cref="CType.ErrorSet"/> (rendered <c>ushort</c>). The code IS the value, so
+    /// error-value equality compares codes (<c>e == error.Foo</c> → <c>e == &lt;code&gt;</c>). Shared
+    /// by the bare-value lowering (here) and the captured-error binding; <c>return error.Foo;</c>
+    /// keeps its dedicated <see cref="ErrUnionErr"/> / <see cref="ZigErrorThrow"/> path in
+    /// <see cref="LowerReturn"/>.</summary>
+    private CExpr LowerErrorLit(string name)
+    {
+        var code = ErrorCode(name);
+        return new LitInt(code.ToString(CultureInfo.InvariantCulture), code) { Type = CType.ErrorSet };
+    }
+
     // ---- expressions -----------------------------------------------------
 
     private CExpr LowerExpr(Item expr)
@@ -2677,11 +2691,14 @@ internal sealed class ZigLowering
                 return new ZigCatch(union, fallback) { Type = eu.Payload };
             }
 
-            // A bare `error.Foo` value (type `anyerror`) — only `return error.Foo;` is lowered
-            // (handled in LowerReturn); a bare error value elsewhere needs error-set modelling.
-            case Zig.ErrorLit:
-                throw new IrUnsupportedException(
-                    "zig bare `error.X` value not lowered yet (only `return error.X;` in a `!T` function)");
+            // A bare `error.Foo` value (Milestone N): the error's stable code in the flat global
+            // set, typed `CType.ErrorSet` (rendered `ushort`). This makes error values usable
+            // outside `return error.Foo;` — bound to a const/var and compared (`e == error.Foo`)
+            // via the ordinary `==`/`!=` lowering, since equal codes mean equal error values. V1
+            // still erases the named SET (an explicit `error{A,B}` decl / a named `E!T` is later
+            // Milestone N work); the comparison just matches codes.
+            case Zig.ErrorLit el:
+                return LowerErrorLit(Tok(el.Arg2));
 
             // call of a named function (bare-identifier callee).
             case Zig.CallArgs c:   return LowerCall(c.Arg0, c.Arg2);

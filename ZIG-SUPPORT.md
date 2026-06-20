@@ -131,7 +131,8 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `a orelse b` (value RHS) | ✅ | value optional → C# `??` (single-eval, lazy `b`); pointer → `a != null ? a : b` (simple LHS; `orelse return` is Milestone B2) |
 | prefix `try` | ✅ | unwrap an error union's payload, or PROPAGATE its error out of the enclosing `!T` fn (exception-based early-return, modeled on the setjmp lowering). `try e;` as a statement works too |
 | `e catch fallback` | ✅ | the payload on success, else the fallback. The fallback must be side-effect-free (literal / variable) — a non-trivial one is rejected (deferred), as is `catch \|e\| …` capture and `catch return` |
-| `error.Foo` | ✅ | an error value — only in `return error.Foo;` within a `!T` fn (a bare error value / error-set decls deferred) |
+| `error.Foo` (bare error value) | ✅ | a first-class error VALUE (Milestone N, part 1) — usable outside `return error.Foo;`: bound to a `const`/`var`, captured (`else \|e\|` / future `catch \|e\|`), and compared. V1 erases the named set into one flat global code space, so an `error.Foo` lowers to its stable `ushort` code, typed `CType.ErrorSet`. (Explicit `error{A,B}` set decls / named `E!T` distinct from `anyerror!T` are still deferred) |
+| `e == error.Foo` / `e != error.Foo` (error-value equality) | ✅ | error-value comparison (Milestone N, part 1) — equal codes mean equal errors, so `==`/`!=` lower to the ordinary integer comparison of the flat codes. Works on a bound error too (`else \|e\|` / a `const`), which un-erases the Milestone M part-3 cut (a USED named `\|e\|` is now valid in both compilers). **Deferred:** `switch (e)` on an error |
 | postfix `.field` | ✅ | struct field access → the shared `Member` IR (field type from the aggregate table). Zig has no `->`, so `p.field` on a `*T` auto-derefs (emits C# `->`). `EnumName.member` resolves here too → an `EnumConstRef` |
 | `.{ .f = v, … }` (anonymous struct literal) | ✅ | result-located → `new T { f = v }` from the sink type (a typed decl, return, assignment, call arg, or field). Empty `.{}` zero-inits |
 | `T{ .f = v, … }` (typed struct literal) | ✅ | Zig's `CurlySuffixExpr <- TypeExpr InitList?` — the type is named, so NO sink is needed; valid in any position, incl. sink-less ones like `(T{…}).field`. A dedicated `CurlySuffix` grammar level (above `Type`) makes it conflict-free against `fn f() RetType {` (the return type stays a raw `Type`, no init list) — no rewriter. `&T{…}` (address of a temporary) materializes a block-local temp and takes its address (the same shared-backend path as C's `&(T){…}`) |
@@ -251,11 +252,18 @@ private `ZigErrorReturn` on error, and every `!T` function body is wrapped in
 propagated error back into an error-union return. `e catch fallback` doesn't propagate, so it
 lowers to the plain `ErrUnion.Catch(e, fallback)` instead.
 
+A bare `error.Foo` is now a first-class VALUE (Milestone N, part 1): the named set is still
+erased, so an error value IS its flat `ushort` code (typed `CType.ErrorSet`), and error-value
+equality `e == error.Foo` / `e != error.Foo` compares codes. This makes a `const`-bound error and
+a USED `else |e|` capture usable (the latter un-erases the Milestone M part-3 cut — a named `|e|`
+compared against an error is finally valid in both compilers).
+
 **V1 limits** (documented, not silent): the error SET is erased to one flat global code
-space (`!T` / `anyerror!T` / `E!T` lower identically); the payload must be a value type (an
-error union over a *pointer* is deferred — a C# generic can't take a pointer arg);
-`catch`'s fallback must be side-effect-free; and `catch |e| …` capture, `catch return`,
-explicit `error{…}` set decls, and an error-union `main` are all deferred.
+space (`!T` / `anyerror!T` / `E!T` lower identically; an `error.Foo` value is its code); the
+payload must be a value type (an error union over a *pointer* is deferred — a C# generic can't
+take a pointer arg); `catch`'s fallback must be side-effect-free; and `catch |e| …` capture,
+`catch return`, `switch (e)` on an error, explicit `error{…}` set decls, and an error-union
+`main` are all deferred.
 
 ## Allocators — devirtualize the default, vtable for the rest
 
@@ -424,4 +432,6 @@ rejects, not silently accept more.
   `examples/zig-error-capture` (error-union capture in `if`: payload `|x|` on success + the error
   branch on failure via `else |_|`),
   `examples/zig-byref-capture` (by-reference capture `|*x|`: doubling a slice in place via
-  `for (s) |*e|` + mutating a tagged-union payload via `switch (b) { .i => |*p| … }`).
+  `for (s) |*e|` + mutating a tagged-union payload via `switch (b) { .i => |*p| … }`),
+  `examples/zig-error-value` (error values as comparable values: a USED `else |e|` capture compared
+  against `error.Bad`, plus a `const`-bound bare error value tested with `==`/`!=`).
