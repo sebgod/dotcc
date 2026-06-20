@@ -991,6 +991,11 @@ internal sealed class ZigLowering
             case Zig.AnonStructInit:
             case Zig.AnonStructInitEmpty:
                 return LowerStructInit(expr, sink);
+            // A `@builtin(...)` at a typed sink — the result-location cast builtins
+            // (`@intCast`/`@ptrCast`/…) infer their target from `sink`. Routed through the
+            // shared lowering WITH the sink (vs LowerExpr's sink-free call).
+            case Zig.BuiltinCall b:
+                return LowerBuiltinCall(b, sink);
             // `var x: T = undefined;` (scalar) → `default(T)` (Zig's uninitialized; a zeroed
             // over-approximation). An array sink is handled earlier in DeclOf (stackalloc).
             case Zig.UndefinedLit:
@@ -1026,6 +1031,97 @@ internal sealed class ZigLowering
         var lenLit = new LitInt(count.ToString(CultureInfo.InvariantCulture), count) { Type = CType.ULong };
         var elem = sliceType.Element;
         return new SliceNew(value, lenLit, elem.Unqualified, elem.IsConst) { Type = sliceType };
+    }
+
+    /// <summary>Lower a <c>@builtin(...)</c> call. Several builtins are RESULT-LOCATION-typed —
+    /// Zig infers their target from the sink, not an explicit type argument: <c>@intCast</c>,
+    /// <c>@truncate</c>, <c>@ptrCast</c>, <c>@bitCast</c>, <c>@floatFromInt</c>,
+    /// <c>@intFromFloat</c>, <c>@floatCast</c>, <c>@enumFromInt</c>. Those are valid only at a
+    /// typed sink (a typed binding, <c>return</c>, assignment, call argument, or nested inside
+    /// <c>@as(T, …)</c>), so without one (<paramref name="sink"/> null) they're a clear error.
+    /// <c>@as</c>/<c>@intFromEnum</c>/<c>@sizeOf</c>/<c>@alignCast</c> carry or need no sink and
+    /// lower the same way from either path. Called from <see cref="LowerExpr"/> (sink null) and
+    /// <see cref="LowerExprSink"/> (sink set).</summary>
+    private CExpr LowerBuiltinCall(Zig.BuiltinCall b, CType? sink)
+    {
+        var bname = Tok(b.Arg0);
+        var bargs = Flatten(b.Arg2);
+        switch (bname)
+        {
+            case "@as":
+                // `@as(T, expr)` — the explicit-type cast → the C Cast IR. The type arg becomes
+                // the value's sink, so a nested result-location builtin (`@as(u8, @intCast(x))`)
+                // and a bare enum/struct literal both resolve.
+                if (bargs.Count != 2)
+                {
+                    throw new IrUnsupportedException($"zig `@as` expects (type, value); got {bargs.Count} argument(s)");
+                }
+                var asTarget = LowerType(bargs[0]);
+                return new Cast(asTarget, LowerExprSink(bargs[1], asTarget)) { Type = asTarget };
+            case "@intFromEnum":
+                // `@intFromEnum(e)` — the enum's integer value → decay to the underlying type
+                // (the same Cast the backend uses for C's enum→int).
+                if (bargs.Count != 1)
+                {
+                    throw new IrUnsupportedException($"zig `@intFromEnum` expects (enum); got {bargs.Count} argument(s)");
+                }
+                var enumOperand = LowerExpr(bargs[0]);
+                if (enumOperand.Type.Unqualified is not CType.Enum en)
+                {
+                    throw new IrUnsupportedException("zig `@intFromEnum` expects an enum operand");
+                }
+                return new Cast(en.Underlying, enumOperand) { Type = en.Underlying };
+            case "@sizeOf":
+                // `@sizeOf(T)` — the byte size as `usize`. Reuses the C `sizeof` IR (folded for a
+                // user aggregate via the layout model, else C#'s `sizeof(T)`).
+                if (bargs.Count != 1)
+                {
+                    throw new IrUnsupportedException($"zig `@sizeOf` expects (type); got {bargs.Count} argument(s)");
+                }
+                return new SizeOfExpr(LowerType(bargs[0])) { Type = CType.ULong };
+            case "@alignCast":
+                // `@alignCast(p)` only raises the pointee's alignment requirement — unobservable
+                // in dotcc's managed model — so it's the IDENTITY (the enclosing `@ptrCast` / sink
+                // does the real conversion). Needs no sink, and works nested in its idiomatic
+                // `@ptrCast(@alignCast(p))` (where it's reached via the sink-free LowerExpr).
+                if (bargs.Count != 1)
+                {
+                    throw new IrUnsupportedException($"zig `@alignCast` expects (value); got {bargs.Count} argument(s)");
+                }
+                return LowerExpr(bargs[0]);
+            case "@intCast" or "@truncate" or "@ptrCast" or "@bitCast"
+                or "@floatFromInt" or "@intFromFloat" or "@floatCast" or "@enumFromInt":
+                return LowerResultLocationBuiltin(bname, bargs, sink);
+            default:
+                throw new IrUnsupportedException(
+                    $"zig builtin '{bname}' not lowered yet (supported: @as, @intCast, @truncate, @ptrCast, @bitCast, " +
+                    "@floatFromInt, @intFromFloat, @floatCast, @enumFromInt, @alignCast, @intFromEnum, @sizeOf)");
+        }
+    }
+
+    /// <summary>Lower a result-location cast builtin at its sink. Each is single-arg; the cast
+    /// TARGET is the <paramref name="sink"/> (Zig infers it from the result location, unlike
+    /// <c>@as(T, x)</c> which carries the type). Most map to the C <see cref="Cast"/> IR — the
+    /// backend's unchecked cast truncates/converts, matching Zig's NON-safe-mode semantics (dotcc
+    /// models no overflow trap, the same stance taken for plain <c>+</c>); <c>@bitCast</c>
+    /// reinterprets the bit pattern via <see cref="BitCast"/>. Without a sink it's a clear error
+    /// (Zig requires a result location to infer the type).</summary>
+    private CExpr LowerResultLocationBuiltin(string name, List<Item> bargs, CType? sink)
+    {
+        if (bargs.Count != 1)
+        {
+            throw new IrUnsupportedException($"zig builtin '{name}' expects (value); got {bargs.Count} argument(s)");
+        }
+        if (sink is null)
+        {
+            throw new IrUnsupportedException(
+                $"zig builtin '{name}' needs a result location to infer its target type — use it at a typed binding, " +
+                "return, assignment, call argument, or nested inside `@as(T, …)`");
+        }
+        var operand = LowerExpr(bargs[0]);
+        return name == "@bitCast"
+            ? new BitCast(sink, operand) { Type = sink }
+            : new Cast(sink, operand) { Type = sink };
     }
 
     // ---- statements ------------------------------------------------------
@@ -1854,41 +1950,11 @@ internal sealed class ZigLowering
                 return operand;
             }
 
-            // `@as(T, expr)` — the explicit-type cast builtin → the C Cast IR (RenderCast).
-            // Zig 0.16's `@intCast`/`@ptrCast` are result-location-typed (single arg, no
-            // explicit target type), which needs the context-type inference dotcc lacks —
-            // deferred. arg0 is a type spelled as an expression (handled by LowerType).
-            case Zig.BuiltinCall b:
-            {
-                var bname = Tok(b.Arg0);
-                var bargs = Flatten(b.Arg2);
-                switch (bname)
-                {
-                    case "@as":
-                        // `@as(T, expr)` — the explicit-type cast → the C Cast IR.
-                        if (bargs.Count != 2)
-                        {
-                            throw new IrUnsupportedException($"zig `@as` expects (type, value); got {bargs.Count} argument(s)");
-                        }
-                        var target = LowerType(bargs[0]);
-                        return new Cast(target, LowerExpr(bargs[1])) { Type = target };
-                    case "@intFromEnum":
-                        // `@intFromEnum(e)` — the enum's integer value → decay to the
-                        // underlying type (the same Cast the backend uses for C's enum→int).
-                        if (bargs.Count != 1)
-                        {
-                            throw new IrUnsupportedException($"zig `@intFromEnum` expects (enum); got {bargs.Count} argument(s)");
-                        }
-                        var operand = LowerExpr(bargs[0]);
-                        if (operand.Type.Unqualified is not CType.Enum en)
-                        {
-                            throw new IrUnsupportedException("zig `@intFromEnum` expects an enum operand");
-                        }
-                        return new Cast(en.Underlying, operand) { Type = en.Underlying };
-                    default:
-                        throw new IrUnsupportedException($"zig builtin '{bname}' not lowered yet (only @as / @intFromEnum are supported)");
-                }
-            }
+            // `@builtin(...)`. Several Zig builtins are RESULT-LOCATION-typed (`@intCast`,
+            // `@ptrCast`, …) — they infer the target from the sink, which only LowerExprSink
+            // carries; reached here (no sink) they error clearly. The sink-carrying forms (and
+            // the sink-free `@as`/`@intFromEnum`/`@sizeOf`/`@alignCast`) share one lowering.
+            case Zig.BuiltinCall b: return LowerBuiltinCall(b, null);
 
             // `null` — reuse the C null-pointer node (renders C# `null`, valid for BOTH a
             // pointer sink `T*` and a value-optional sink `T?`). In Zig `null` only appears

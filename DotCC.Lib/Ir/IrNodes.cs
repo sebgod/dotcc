@@ -107,6 +107,14 @@ public sealed record IndirectCall(CExpr Callee, IReadOnlyList<CExpr> Args) : CEx
 /// <summary>A cast (explicit or inserted by a coercion pass).</summary>
 public sealed record Cast(CType Target, CExpr Operand) : CExpr;
 
+/// <summary>Zig <c>@bitCast(x)</c> — reinterpret the bit pattern of <paramref name="Operand"/>
+/// as <paramref name="Target"/> (same byte size; e.g. <c>f32</c>↔<c>u32</c>). Distinct from
+/// <see cref="Cast"/> (a value conversion): codegen emits
+/// <c>System.Runtime.CompilerServices.Unsafe.BitCast&lt;TFrom, TTo&gt;</c>, which is AOT-clean
+/// and verifies the size match. Zig-only (the C front-end never produces it); the wat backend,
+/// which Zig never targets, leaves it on the default throw like <c>Slice</c>/<c>ErrorUnion</c>.</summary>
+public sealed record BitCast(CType Target, CExpr Operand) : CExpr;
+
 /// <summary>A conditional (ternary) expression <c>c ? a : b</c>. Codegen wraps
 /// the condition in <c>Cond.B(...)</c> for C-truthy semantics.</summary>
 public sealed record CondExpr(CExpr Cond, CExpr Then, CExpr Else) : CExpr;

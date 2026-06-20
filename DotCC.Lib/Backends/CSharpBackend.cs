@@ -1455,6 +1455,11 @@ internal sealed class CSharpBackend
                 return ($"{Sub(ic.Callee, PPostfix)}({string.Join(", ", ic.Args.Select(a => Sub(a, PAssign)))})", PPostfix);
             case Paren p: return Render(p.Inner); // explicit C parens are redundant; precedence re-adds as needed
             case Cast c: return RenderCast(c);
+            case BitCast bc:
+                // Zig `@bitCast` — same-size bit reinterpret. `Unsafe.BitCast<TFrom, TTo>` is the
+                // AOT-clean primitive (it static-asserts the size match); the source type is the
+                // operand's lowered type, the destination the result-location sink.
+                return ($"System.Runtime.CompilerServices.Unsafe.BitCast<{Cs(bc.Operand.Type)}, {Cs(bc.Target)}>({Sub(bc.Operand, PAssign)})", PPrimary);
             case SizeOfExpr so:
                 // C's `sizeof` yields `size_t` — unsigned, `ulong` in dotcc's
                 // model — but C#'s `sizeof` operator is `int`. Emit the `(ulong)`
@@ -2096,6 +2101,7 @@ internal sealed class CSharpBackend
         LitInt or LitFloat or LitStr or NullPtr or NameRef or DefaultLit or VarRef or SizeOfExpr or OffsetOf => true,
         Paren p => IsPure(p.Inner),
         Cast c => IsPure(c.Operand),
+        BitCast bc => IsPure(bc.Operand),
         Member m => IsPure(m.Base),
         Index ix => IsPure(ix.Base) && IsPure(ix.Idx),
         Unary u => u.Op is not (UnOp.PreInc or UnOp.PreDec or UnOp.PostInc or UnOp.PostDec)

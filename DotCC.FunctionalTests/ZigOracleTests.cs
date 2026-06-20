@@ -552,6 +552,64 @@ public sealed class ZigOracleTests
             "    _ = printf(\"\\n\");\n" +
             "    return 42;\n" +
             "}\n", 42, "q=\"x\" u=A\na\nb" },
+
+        // --- Milestone J: result-location cast builtins (exit-code only — they prove the cast
+        // SEMANTICS against real zig precisely, without the variadic-printf typing distraction) ---
+        // @intCast narrows a wide usize to u8 — the result type comes from the binding, not an arg.
+        new object[] { "builtin_intcast",
+            "pub fn main() u8 {\n" +
+            "    const wide: usize = 42;\n" +
+            "    const narrow: u8 = @intCast(wide);\n" +
+            "    return narrow;\n" +
+            "}\n", 42, "" },
+        // @truncate keeps the low byte of a u32 (0xFF2A & 0xFF = 0x2A = 42).
+        new object[] { "builtin_truncate",
+            "pub fn main() u8 {\n" +
+            "    const big: u32 = 0xFF2A;\n" +
+            "    const low: u8 = @truncate(big);\n" +
+            "    return low;\n" +
+            "}\n", 42, "" },
+        // @bitCast reinterprets 1.0f's bits (0x3F800000); its biased exponent (bits >> 23) is 127.
+        new object[] { "builtin_bitcast",
+            "pub fn main() u8 {\n" +
+            "    const bits: u32 = @bitCast(@as(f32, 1.0));\n" +
+            "    const exp: u8 = @truncate(bits >> 23);\n" +
+            "    return exp - 85;\n" +   // 127 - 85 = 42
+            "}\n", 42, "" },
+        // int -> f64 -> f32 -> int round trip via @floatFromInt / @floatCast / @intFromFloat.
+        new object[] { "builtin_floatcast",
+            "pub fn main() u8 {\n" +
+            "    const i: i32 = 42;\n" +
+            "    const f: f64 = @floatFromInt(i);\n" +
+            "    const g: f32 = @floatCast(f);\n" +
+            "    const back: u8 = @intFromFloat(g);\n" +
+            "    return back;\n" +
+            "}\n", 42, "" },
+        // @enumFromInt(3) -> E.d, @intFromEnum -> 3, * 14 = 42.
+        new object[] { "builtin_enumfromint",
+            "const E = enum(u8) { a, b, c, d };\n" +
+            "pub fn main() u8 {\n" +
+            "    const e: E = @enumFromInt(3);\n" +
+            "    const back: u8 = @intFromEnum(e);\n" +
+            "    return back * 14;\n" +
+            "}\n", 42, "" },
+        // @ptrCast reinterprets a u32's storage as *u8 then back to *u32 (the up-cast needs
+        // @alignCast); the low byte of 42 on a little-endian target is 42.
+        new object[] { "builtin_ptrcast",
+            "pub fn main() u8 {\n" +
+            "    var x: u32 = 0;\n" +
+            "    x = 42;\n" +
+            "    const p8: *u8 = @ptrCast(&x);\n" +
+            "    const p32: *u32 = @ptrCast(@alignCast(p8));\n" +
+            "    return @intCast(p32.* & 0xFF);\n" +
+            "}\n", 42, "" },
+        // @sizeOf(u32) (= 4) folds into a constant; 4 * 10 + 2 = 42, narrowed by @intCast.
+        new object[] { "builtin_sizeof",
+            "pub fn main() u8 {\n" +
+            "    const sz: usize = @sizeOf(u32);\n" +
+            "    const n: u8 = @intCast(sz * 10 + 2);\n" +
+            "    return n;\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

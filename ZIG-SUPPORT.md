@@ -130,7 +130,12 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `.{ a, b, … }` (positional tuple literal) | ✅ | result-located → `new System.ValueTuple<…>(a, b)` (Milestone G); element types come from a tuple sink, or are inferred from the elements (`const t = .{a, b};`). Shares the `.{…}` surface with the named struct literal — a literal that MIXES positional + named is rejected |
 | `.enumLiteral` | ✅ | a bare `.member` resolves against its sink (typed decl / return / assignment / call arg / switch subject) → an `EnumConstRef` (`EnumName.member`). Untyped (no sink) is rejected, as Zig requires |
 | `@intFromEnum(e)` | ✅ | the enum's integer value → decay to the underlying type (the C enum→int decay) |
-| other `@builtin(...)` (`@intCast`/`@ptrCast`/…) | 🚧 | parse only — Zig 0.16's forms are result-location-typed (single arg), needing context-type inference dotcc lacks |
+| `@intCast` / `@truncate` / `@floatFromInt` / `@intFromFloat` / `@floatCast` / `@enumFromInt` / `@ptrCast` (x) | ✅ | **result-location** casts (Milestone J) — single-arg, target inferred from the SINK (typed binding / return / assignment / call arg / nested `@as`), not a type arg → the C `Cast` IR. Used with no result location they're a clear error, as Zig requires. The cast follows Zig's NON-safe-mode semantics (no overflow trap — same stance as plain `+`) |
+| `@bitCast(x)` | ✅ | same-size **bit** reinterpret (e.g. `f32`↔`u32`) → `System.Runtime.CompilerServices.Unsafe.BitCast<TFrom, TTo>` (AOT-clean, size-checked). Result-located like the casts above |
+| `@alignCast(p)` | ✅ | identity in dotcc's managed model (alignment is unobservable); the enclosing `@ptrCast`/sink does the real conversion. Needs no sink, so its idiomatic `@ptrCast(@alignCast(p))` lowers to one cast |
+| `@sizeOf(T)` | ✅ | the byte size as `usize` → the C `sizeof` IR (folded for a user aggregate via the layout model, else C#'s `sizeof(T)`) |
+| `@alignOf(T)` / `@offsetOf(T, f)` | 🚧 | parse only — alignment isn't meaningfully observable on the managed VM and `@offsetOf` waits on surfaced field offsets (deferred; revisit per-need) |
+| other `@builtin(...)` (`@typeInfo`/`@TypeOf`/`@field`/…) | 🚫 | reflection / comptime — out of scope (see below) |
 | wrapping/saturating ops | 🚫 | |
 
 ## Lexer
@@ -388,4 +393,7 @@ rejects, not silently accept more.
   `examples/zig-globals` (top-level globals: a typed `const`, a const initialized from an earlier
   const, and a mutable `var` accumulator bumped by a function through its bare name),
   `examples/zig-lexer` (lexer & literals: `0x`/`0o`/`0b` radix + `_` separators, a hex float, an
-  escaped quote + `\u{…}` unicode escape, and a `\\` multiline string).
+  escaped quote + `\u{…}` unicode escape, and a `\\` multiline string),
+  `examples/zig-builtins` (result-location cast builtins: `@intCast`/`@truncate`/`@floatFromInt`/
+  `@floatCast`/`@intFromFloat`/`@bitCast`/`@ptrCast`+`@alignCast`/`@enumFromInt` + `@sizeOf`,
+  each inferring its target from the binding it flows into).
