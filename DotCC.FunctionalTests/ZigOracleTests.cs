@@ -838,6 +838,26 @@ public sealed class ZigOracleTests
             "    score(0, &sum); score(-3, &sum); score(17, &sum);\n" + // +20 +5 +17
             "    return @as(u8, @intCast(sum));\n" +
             "}\n", 42, "" },
+
+        // --- Milestone N (part 3): `catch |e|` capture + lazy/side-effecting `catch` (exit-code only) ---
+        // `catch |e| (e == error.Bad)` binds the error and uses it (a bool fallback): success→true,
+        // error→`Bad==Bad`=true → +10 +12. A side-effecting (call) fallback `catch dflt()` runs the
+        // call only on error: mk(true)→7, mk(false)→dflt()=13 → +7 +13. 10+12+7+13 = 42.
+        new object[] { "error_catch",
+            "fn mayBool(ok: bool) !bool { if (ok) return true; return error.Bad; }\n" +
+            "fn mk(ok: bool) !i32 { if (ok) return 7; return error.Bad; }\n" +
+            "fn dflt() i32 { return 13; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var sum: i32 = 0;\n" +
+            "    const a = mayBool(true) catch |e| (e == error.Bad);\n" +
+            "    const b = mayBool(false) catch |e| (e == error.Bad);\n" +
+            "    if (a) sum += 10;\n" +
+            "    if (b) sum += 12;\n" +
+            "    const c = mk(true) catch dflt();\n" +
+            "    const d = mk(false) catch dflt();\n" +
+            "    sum += c; sum += d;\n" + // +7 +13
+            "    return @as(u8, @intCast(sum));\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
