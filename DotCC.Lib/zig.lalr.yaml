@@ -186,6 +186,8 @@ symbols:
   - '^='           # 126 bitxor-assign
   # --- switch as an expression (Milestone L; appended — never reorder) ---
   - SwitchExpr     # 127 `switch (x) { v => e, … }` in value position (a RhsExpr, like IfExpr)
+  # --- labeled block as a value (Milestone L, part 2; appended — never reorder) ---
+  - LabeledBlock   # 128 `blk: { … break :blk v; }` — a labeled block as a VALUE (a RhsExpr)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -288,6 +290,12 @@ productions:
       - { lhs: Stmt, rhs: ['while', '(', Expr, ')', ':', '(', Expr, ')', Stmt],               action: stmtWhileCont }
       - { lhs: Stmt, rhs: ['break', ';'],    action: stmtBreak }
       - { lhs: Stmt, rhs: ['continue', ';'], action: stmtContinue }
+      # `break :blk v;` — a labeled break carrying a VALUE, yielding it from the enclosing
+      # labeled block `:blk` (Milestone L, part 2). After `break`, the `:` lookahead selects this
+      # over the bare `break ;` (distinct tokens, conflict-free). The lowering assigns the value to
+      # the block's result temp and jumps to the block's end label. (The no-value labeled break and
+      # labeled-loop `break :lbl` / `continue :lbl` come in a later L increment.)
+      - { lhs: Stmt, rhs: ['break', ':', IDENT, RhsExpr, ';'], action: stmtBreakLabelValue }
       # `defer Stmt` / `errdefer Stmt` (Milestone H) — scope-exit cleanup. The body is a
       # full Stmt (an `expr;`, a `_ = expr;` discard, or a braced Block). A unique leading
       # keyword at statement position, so no conflict with the other Stmt forms (like break/
@@ -394,12 +402,22 @@ productions:
       # set, so the alternative is conflict-free. Reuses the same `Prongs`, whose bodies may now
       # be a bare value Expr (`v => e`) — a switch expression's prongs YIELD a value.
       - { lhs: RhsExpr, rhs: [SwitchExpr] }
+      # A labeled block as a VALUE (Milestone L, part 2) — `blk: { …; break :blk v; }`. Same
+      # structural trick as IfExpr/SwitchExpr: a RhsExpr alternative, NOT a Primary, so it never
+      # starts an Expr-cascade sub-operand. `blk:` is `IDENT ':'`; the RhsExpr cascade's other
+      # alternative (Expr) also starts with IDENT, but a Primary is never followed by `:` anywhere
+      # in the grammar, so the 1-token `:` lookahead cleanly selects this production over reducing
+      # IDENT to a Primary — conflict-free. The block YIELDS a value via `break :blk v` (a labeled
+      # break, below); the temp-fill lowering lives in ZigLowering (it only appears as a full
+      # `=`/`return`/assignment RHS — an if/switch-expr arm or sub-expression position errors).
+      - { lhs: RhsExpr, rhs: [LabeledBlock] }
 
   - derivation: none
     rules:
       - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', RhsExpr, 'else', RhsExpr], action: ifExpr }
       - { lhs: SwitchExpr, rhs: ['switch', '(', Expr, ')', '{', Prongs, '}'],      action: switchExpr }
       - { lhs: SwitchExpr, rhs: ['switch', '(', Expr, ')', '{', Prongs, ',', '}'], action: switchExprTrailing }
+      - { lhs: LabeledBlock, rhs: [IDENT, ':', Block], action: labeledBlock }
 
   - derivation: leftmost
     rules:
