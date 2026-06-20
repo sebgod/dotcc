@@ -821,6 +821,23 @@ public sealed class ZigOracleTests
             "    if (want != error.Other) { sum += 12; }\n" + // matched (inequality)
             "    return @as(u8, @intCast(sum));\n" + // 20 + 10 + 12
             "}\n", 42, "" },
+
+        // --- Milestone N (part 2): `switch (e)` on an error value (exit-code only) ---
+        // An error value IS its flat code, so an error switch lowers to an integer switch (each
+        // `error.X` prong → a `case <code>:`, `else` → `default:`). The error is captured from
+        // `else |e|`. score(0)→error.Zero→+20, score(-3)→error.Negative→+5, score(17)→ok→+17 = 42.
+        new object[] { "error_switch",
+            "fn classify(n: i32) anyerror!i32 { if (n == 0) return error.Zero; if (n < 0) return error.Negative; return n; }\n" +
+            "fn score(n: i32, sum: *i32) void {\n" +
+            "    if (classify(n)) |v| { sum.* += v; } else |e| {\n" +
+            "        switch (e) { error.Zero => { sum.* += 20; }, error.Negative => { sum.* += 5; }, else => { sum.* += 1; } }\n" +
+            "    }\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var sum: i32 = 0;\n" +
+            "    score(0, &sum); score(-3, &sum); score(17, &sum);\n" + // +20 +5 +17
+            "    return @as(u8, @intCast(sum));\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

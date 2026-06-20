@@ -1839,6 +1839,29 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_a_switch_on_an_error_value()
+    {
+        // Milestone N, part 2: `switch (e) { error.X => …, else => … }` on an error value lowers to
+        // an ORDINARY C# integer switch on the flat code — each `error.X` → a `case <code>:` label,
+        // `else` → `default:`. No new lowering over part 1 (the `CType.ErrorSet`-renders-`ushort`
+        // marker routes straight through `LowerSwitch`). The error is captured via `else |e|` first.
+        var cs = EmitZig(
+            "fn classify(n: i32) anyerror!i32 { if (n == 0) return error.Zero; return n; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var sum: i32 = 0;\n" +
+            "    if (classify(0)) |v| { sum += v; } else |e| {\n" +
+            "        switch (e) { error.Zero => { sum += 20; }, error.Other => { sum += 5; }, else => { sum += 1; } }\n" +
+            "    }\n" +
+            "    return @as(u8, @intCast(sum));\n" +
+            "}\n");
+        cs.ShouldContain("ushort e = __cap.Code;");   // the switched-on value IS the captured error code
+        cs.ShouldContain("switch (e)");
+        cs.ShouldContain("case 1:");                   // error.Zero (first error encountered → code 1)
+        cs.ShouldContain("case 2:");                   // error.Other → code 2
+        cs.ShouldContain("default:");                  // else
+    }
+
+    [Fact]
     public void Lowers_an_optional_capture_while()
     {
         // `while (opt) |x| { … }` → `while (true) { var __cap = cond; if (__cap.HasValue) { var x =
