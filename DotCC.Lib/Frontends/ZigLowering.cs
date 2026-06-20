@@ -1381,6 +1381,12 @@ internal sealed class ZigLowering
             // (a single statement or a brace Block), which LowerStmt handles uniformly.
             case Zig.StmtIf f:          return new If(LowerExpr(f.Arg2), LowerStmt(f.Arg4), null);
             case Zig.StmtIfElse f:      return new If(LowerExpr(f.Arg2), LowerStmt(f.Arg4), LowerStmt(f.Arg6));
+
+            // `if (opt) |x| then [else else]` — payload-capturing `if` (Milestone M). Binds the
+            // optional's payload (value `?T` or niche pointer) — or, with `else |e|`, an
+            // error-union's success/error (part 3) — in the matching branch. See LowerIfCapture.
+            case Zig.StmtIfCapture f:     return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, null, null);
+            case Zig.StmtIfCaptureElse f: return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, f.Arg9, null);
             case Zig.StmtWhile w:       return new While(LowerExpr(w.Arg2), LowerStmt(w.Arg4));
 
             // `while (cond) : (cont) body` → the C IR `For` (no init): the cont runs after each
@@ -1695,6 +1701,97 @@ internal sealed class ZigLowering
         if (isContinue) { t.ContUsed = true; return new Goto(t.ContLabel); }
         t.BreakUsed = true;
         return new Goto(t.BreakLabel);
+    }
+
+    /// <summary>Lower a payload-capturing <c>if (cond) |x| then [else …]</c> (Milestone M). The
+    /// branch test and the binding depend on the condition's lowered type:
+    /// <list type="bullet">
+    /// <item>a value optional <c>?T</c> (<see cref="CType.Optional"/>) → test <c>__cap.HasValue</c>,
+    /// bind <c>x = __cap.Value</c> at the top of the then-branch;</item>
+    /// <item>a niche optional pointer (lowered to a bare <c>T*</c>) → test the pointer for non-null
+    /// (the <c>Cond.B(void*)</c> overload), bind <c>x = __cap</c> (the unwrapped pointer is the
+    /// same value);</item>
+    /// <item>an error union <c>!T</c> (<see cref="CType.ErrorUnion"/>) → part 3, deferred here.</item>
+    /// </list>
+    /// The condition is hoisted to a single-eval temp unless it is already a bare variable (the test
+    /// and the binding both read it). A capture name of <c>_</c> tests without binding. An
+    /// <paramref name="errCapName"/> (an <c>else |e|</c>) is only valid on an error union.</summary>
+    private CStmt LowerIfCapture(Item condItem, string capName, Item thenItem, Item? elseItem, string? errCapName)
+    {
+        var cond = LowerExpr(condItem);
+        var ct = cond.Type.Unqualified;
+
+        // Hoist a side-effecting condition to a single-eval temp (a bare var is already re-readable).
+        var pre = new List<CStmt>();
+        CExpr condRef;
+        if (cond is VarRef)
+        {
+            condRef = cond;
+        }
+        else
+        {
+            var tmp = _symbols.Declare(new Symbol { Name = "__cap", Kind = SymKind.Var, Type = cond.Type });
+            pre.Add(new DeclStmt(new List<LocalDecl> { new(tmp, cond) }));
+            condRef = new VarRef(tmp) { Type = cond.Type, IsLValue = true };
+        }
+
+        CExpr test;
+        CExpr payloadInit;
+        CType payloadType;
+        if (ct is CType.Optional opt)
+        {
+            if (errCapName is not null)
+            {
+                throw new IrUnsupportedException(
+                    "zig `if (optional) |x| … else |e|`: an optional has no error to capture (use a plain `else`)");
+            }
+            test = new Member(condRef, "HasValue", false) { Type = CType.Bool };
+            payloadInit = new Member(condRef, "Value", false) { Type = opt.Inner };
+            payloadType = opt.Inner;
+        }
+        else if (ct is CType.Pointer)
+        {
+            if (errCapName is not null)
+            {
+                throw new IrUnsupportedException(
+                    "zig `if (optional pointer) |x| … else |e|`: a pointer optional has no error to capture (use a plain `else`)");
+            }
+            test = condRef;        // Cond.B(void*) tests non-null
+            payloadInit = condRef; // the unwrapped pointer is the same value
+            payloadType = cond.Type;
+        }
+        else if (ct is CType.ErrorUnion)
+        {
+            throw new IrUnsupportedException(
+                "zig error-union capture `if (eu) |x| … else |e|` not lowered yet (Milestone M, part 3)");
+        }
+        else
+        {
+            throw new IrUnsupportedException(
+                "zig `if (...) |x|` requires an optional (or error-union) condition");
+        }
+
+        // then-branch: bind the payload at the top, with `x` in scope while lowering the branch.
+        var thenStmts = new List<CStmt>();
+        _symbols.EnterScope();
+        if (capName != "_")
+        {
+            var capSym = _symbols.Declare(new Symbol { Name = capName, Kind = SymKind.Var, Type = payloadType });
+            thenStmts.Add(new DeclStmt(new List<LocalDecl> { new(capSym, payloadInit) }));
+        }
+        thenStmts.Add(LowerStmt(thenItem));
+        _symbols.ExitScope();
+        var thenBlock = new Block(thenStmts);
+
+        var elseStmt = elseItem is null ? null : LowerStmt(elseItem);
+
+        CStmt ifStmt = new If(test, thenBlock, elseStmt);
+        if (pre.Count > 0)
+        {
+            pre.Add(ifStmt);
+            return new Block(pre);
+        }
+        return ifStmt;
     }
 
     /// <summary>Dispatch a <c>switch</c> statement: lower the subject once, then route a

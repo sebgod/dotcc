@@ -278,6 +278,15 @@ productions:
     rules:
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', Stmt],                 action: stmtIf }
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', Stmt, 'else', Stmt],   action: stmtIfElse }
+      # Payload-capturing `if` (Milestone M): `if (opt) |x| then [else …]` binds an optional's
+      # payload (or, in part 3, an error-union's success value) in the then-branch. After the
+      # condition `')'`, a `'|'` lookahead selects the capture form — no Stmt begins with `'|'`
+      # (the bitor operator never starts an expression), so this is conflict-free with the plain
+      # `if`, and lives in the same rightmost group (dangling-else applies identically). The
+      # capture name may be `_` (discard — test only, no binding). The error-union `else |e|`
+      # capture (part 3) and the by-ref `|*x|` form (part 4) extend these two productions.
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', Stmt],                 action: stmtIfCapture }
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', Stmt, 'else', Stmt],   action: stmtIfCaptureElse }
 
   - derivation: none
     rules:

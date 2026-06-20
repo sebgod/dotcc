@@ -79,13 +79,14 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | Feature | Status | Notes |
 |---|---|---|
 | `if (c) … else …` | ✅ | condition wrapped in `Cond.B(…)` for C-truthy semantics |
+| `if (opt) \|x\| {…} else {…}` (optional capture) | ✅ | bind a value/pointer optional's payload in the then-branch (Milestone M, part 1). A value optional `?T` → hoist the condition to a single-eval temp, `if (Cond.B(__cap.HasValue)) { var x = __cap.Value; … } else { … }`; a niche optional pointer `?*T` (a bare `T*`) → a non-null test with `x` bound to the unwrapped pointer (the same value). `\|_\|` tests without binding; the `else` is optional. **Deferred:** the error-union `if (eu) \|x\| else \|e\|` (part 3) and the by-ref `\|*x\|` form (part 4) |
 | `while (c) …` | ✅ | (no payload capture yet) |
 | `while (c) : (cont) …` | ✅ | the continue-expression → the C IR `for`-post, so `continue` runs `cont` (faithful to Zig). The common assignment cont `: (i = i + 1)` and a bare-expr cont both parse |
 | `break;` / `continue;` | ✅ | unlabeled — reuse the C IR loop-control nodes |
 | `break :blk v;` (labeled break with value) | ✅ | yields `v` from the enclosing labeled value-block (see **labeled block as a value** in Expressions) |
 | `lbl: while/for (…) …` (labeled loop) + `break :lbl;` / `continue :lbl;` | ✅ | a `label:` may prefix any while/for loop; `break :lbl` / `continue :lbl` exit / next-iterate it — including an **outer** loop. C# has no labeled break/continue, so they lower to a `goto`: `break :lbl` → a label just AFTER the loop, `continue :lbl` → a label at the END of the loop body (so the natural iteration step still runs). Labels are emitted only when referenced. **Deferred:** the labeled-while/for VALUE form (`break :lbl v` yielding from a loop used as an expression) |
 | `switch (x) { v => {…}, a, b => {…}, lo...hi => {…}, else => {…} }` | ✅ | as a STATEMENT → the C IR Switch. Single / multi-value / inclusive-**range** (`lo...hi`) / `else` (→ default) prongs; NO fall-through (each prong gets an appended `break`). Switching on an **enum** works (subject + `.member` labels decay to the underlying int). A range lowers to a C# relational-pattern case `case >= lo and <= hi:` (Zig requires comptime-known bounds = C#'s constant requirement). Prong bodies are braced **blocks** OR a bare expression (`v => expr`, an expression statement) |
-| `switch (u) { .a => \|x\| {…}, … }` | ✅ | switch on a **tagged union** → dispatch on the `__tag`; a `\|x\|` payload capture binds the matched variant's payload (by value). An exhaustive union switch with no `else` makes its last prong the C# `default` (so the function provably returns). **Deferred:** by-reference `\|*x\|` capture, multi-variant capture prongs, capture on `if`/`while` (optionals / error-unions) |
+| `switch (u) { .a => \|x\| {…}, … }` | ✅ | switch on a **tagged union** → dispatch on the `__tag`; a `\|x\|` payload capture binds the matched variant's payload (by value). An exhaustive union switch with no `else` makes its last prong the C# `default` (so the function provably returns). **Deferred:** by-reference `\|*x\|` capture, multi-variant capture prongs, the capturing `while`, and the error-union `if (eu) \|x\| else \|e\|` (the optional `if` capture is now ✅ — see the `if` rows) |
 | `return e;` / `return;` | ✅ | |
 | `x = e;` assignment | ✅ | |
 | `x op= e;` compound assignment | ✅ | all ten: `+= -= *= /= %= <<= >>= &= \|= ^=`. → the shared `Assign` IR node with a non-null `CompoundOp` → a NATIVE C# `x op= e`, so the target lvalue is evaluated exactly **once** (`arr[next()] += 1` calls `next()` a single time — not a `x = x op e` desugar). Zig has the wrapping (`+%=`) / saturating (`+\|=`) variants (deferred) and **no** `++`/`--` (the idiom is `i += 1`) |
@@ -412,4 +413,6 @@ rejects, not silently accept more.
   `examples/zig-labeled-loop` (labeled loops: `break :outer` and `continue :scan` from nested loops
   → `goto` to a break label after the loop / a continue label at the body's end),
   `examples/zig-switch-range` (switch ranges: a char-classifier switch EXPRESSION `'0'...'9' => …`
-  and a statement switch with `lo...hi` ranges + a multi-value prong → C# relational patterns).
+  and a statement switch with `lo...hi` ranges + a multi-value prong → C# relational patterns),
+  `examples/zig-if-capture` (optional payload capture in `if`: value optional then/else/`_`/no-else
+  + a niche optional-pointer capture written through).
