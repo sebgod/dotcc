@@ -1311,4 +1311,70 @@ public sealed class ZigFrontendTests
             EmitZig("pub fn main() u8 { const x = @intCast(5); return x; }\n"));
         ex.Message.ShouldContain("result location");
     }
+
+    // ---- Milestone K: array literals & aggregate globals ----
+
+    [Fact]
+    public void Lowers_an_anonymous_array_literal_at_a_sink()
+    {
+        // `.{a, b, c}` at a `[N]T` sink → a stackalloc'd array (clean ArrayDecl in a decl).
+        var cs = EmitZig("pub fn main() u8 { const a: [3]u8 = .{ 10, 11, 12 }; return a[0]; }\n");
+        cs.ShouldContain("stackalloc byte[]{ 10, 11, 12 }");
+    }
+
+    [Fact]
+    public void Lowers_a_typed_array_literal_with_explicit_and_inferred_length()
+    {
+        // `[N]T{…}` (explicit) and `[_]T{…}` (length inferred from the element count) both lower
+        // to a stackalloc'd array.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const b = [3]u8{ 4, 5, 6 };\n" +
+            "    const c = [_]u8{ 7, 8 };\n" +
+            "    return b[0] + c[0];\n" +
+            "}\n");
+        cs.ShouldContain("stackalloc byte[]{ 4, 5, 6 }");
+        cs.ShouldContain("stackalloc byte[]{ 7, 8 }");
+    }
+
+    [Fact]
+    public void Rejects_an_array_literal_with_a_count_mismatch()
+    {
+        // A fixed `[3]u8` sink with two elements is a clear error (Zig requires the count to match).
+        var ex = Should.Throw<CompileException>(() =>
+            EmitZig("pub fn main() u8 { const a: [3]u8 = .{ 1, 2 }; return a[0]; }\n"));
+        ex.Message.ShouldContain("expects 3");
+    }
+
+    [Fact]
+    public void Lowers_an_array_global_to_a_pinned_store()
+    {
+        // A `[N]T` array global → a pinned, program-lifetime backing store (not a dangling
+        // stackalloc), exposed as a stable `T*`.
+        var cs = EmitZig(
+            "const table: [3]u8 = .{ 10, 11, 12 };\n" +
+            "pub fn main() u8 { return table[0]; }\n");
+        cs.ShouldContain("GlobalArrayFrom<byte>(new byte[]{ 10, 11, 12 })");
+    }
+
+    [Fact]
+    public void Lowers_an_undefined_array_global_to_a_zeroed_store()
+    {
+        // `var s: [N]T = undefined;` at module scope → a zeroed pinned store.
+        var cs = EmitZig(
+            "var scratch: [4]u8 = undefined;\n" +
+            "pub fn main() u8 { scratch[0] = 42; return scratch[0]; }\n");
+        cs.ShouldContain("GlobalArrayZeroed<byte>(4)");
+    }
+
+    [Fact]
+    public void Lowers_an_aggregate_struct_global()
+    {
+        // A struct global initializes via the StructInit path → a C# object initializer.
+        var cs = EmitZig(
+            "const Point = struct { x: u8, y: u8 };\n" +
+            "const origin: Point = .{ .x = 6, .y = 7 };\n" +
+            "pub fn main() u8 { return origin.x + origin.y; }\n");
+        cs.ShouldContain("new Point { x = 6, y = 7 }");
+    }
 }

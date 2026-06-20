@@ -610,6 +610,31 @@ public sealed class ZigOracleTests
             "    const n: u8 = @intCast(sz * 10 + 2);\n" +
             "    return n;\n" +
             "}\n", 42, "" },
+
+        // --- Milestone K: array literals & aggregate globals (exit-code only) ---
+        // Local array literals: anon `.{…}` at a [N]T sink, typed `[N]T{…}`, inferred `[_]T{…}`.
+        // (33) + (6) + (9) - 6 = 42.
+        new object[] { "array_literal_local",
+            "pub fn main() u8 {\n" +
+            "    const a: [3]u8 = .{ 10, 11, 12 };\n" +
+            "    const b = [3]u8{ 1, 2, 3 };\n" +
+            "    const c = [_]u8{ 4, 5 };\n" +
+            "    return a[0] + a[1] + a[2] + b[0] + b[1] + b[2] + c[0] + c[1] - 6;\n" +
+            "}\n", 42, "" },
+        // Aggregate globals: a literal array global, an inferred-length array global, an
+        // `undefined` array global (mutated in main), and a struct global. 33 + 3 + 6 + 0 = 42.
+        new object[] { "array_global",
+            "const Point = struct { x: u8, y: u8 };\n" +
+            "const table: [3]u8 = .{ 10, 11, 12 };\n" +
+            "const more = [_]u8{ 1, 2 };\n" +
+            "var scratch: [2]u8 = undefined;\n" +
+            "const origin: Point = .{ .x = 0, .y = 0 };\n" +
+            "pub fn main() u8 {\n" +
+            "    scratch[0] = 4;\n" +
+            "    scratch[1] = 2;\n" +
+            "    return table[0] + table[1] + table[2] + more[0] + more[1]\n" +
+            "         + scratch[0] + scratch[1] + origin.x + origin.y;\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

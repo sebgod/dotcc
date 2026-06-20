@@ -315,24 +315,51 @@ internal sealed class ZigLowering
     /// <summary>Lower one top-level global: resolve its declared type (annotation, else inferred
     /// from the initializer like an untyped local in <see cref="DeclOf"/>), lower the initializer
     /// against that sink, declare the global symbol in the (module) scope so bodies resolve it, and
-    /// record a <see cref="GlobalVar"/>. The initializer is lowered at module scope, so it must be a
-    /// scalar value expression — an aggregate / <c>[N]T</c> array / <c>undefined</c> global is a
-    /// documented V1 cut (the pinned-array global path the C frontend uses is not wired for Zig).</summary>
+    /// record a <see cref="GlobalVar"/>. Scalar, aggregate (struct via <see cref="StructInit"/>),
+    /// and <c>[N]T</c> array / <c>undefined</c> globals are supported (Milestone K). The initializer
+    /// is lowered at module scope, so it must be a constant / module-resolvable value.</summary>
     private void LowerGlobal(Item nameTok, Item? typeItem, Item rhsItem)
     {
         var declared = typeItem is not null ? LowerType(typeItem) : null;
-        if (declared is CType.Array)
+        // `[N]T = undefined` → a zeroed, pinned, program-lifetime backing store (the array-literal
+        // forms fall through to the StackArray pinning below, which also catches an inferred
+        // `const more = [_]T{…}` with no annotation).
+        if (declared is CType.Array uarr && rhsItem.Content is Zig.UndefinedLit)
         {
-            throw new IrUnsupportedException(
-                $"zig top-level array global '{Tok(nameTok)}': a `[N]T` global is not supported yet (only scalar globals)");
+            var n = uarr.Count ?? 0;
+            AddArrayGlobal(Tok(nameTok), uarr, new PinnedArray(uarr.Element, null,
+                new LitInt(n.ToString(CultureInfo.InvariantCulture), n) { Type = CType.Int }) { Type = new CType.Pointer(uarr.Element) });
+            return;
         }
         var init = LowerExprSink(rhsItem, declared);
+        // An array literal (`.{…}` / `[N]T{…}`) lowers to a StackArray — a `stackalloc`, invalid and
+        // dangling as a static field initializer. Re-home it in a pinned, rooted, program-lifetime
+        // backing store exposed as a stable `T*` (the same store a C file-scope array uses).
+        if (init is StackArray sa)
+        {
+            AddArrayGlobal(Tok(nameTok), (CType.Array)sa.Type,
+                new PinnedArray(sa.Element, sa.Elems, null) { Type = new CType.Pointer(sa.Element) });
+            return;
+        }
         var type = declared ?? init.Type ?? CType.Int;
         var sym = _symbols.Declare(new Symbol
         {
             Name = Tok(nameTok), Kind = SymKind.Var, Type = type, Storage = Storage.Static, IsGlobal = true,
         });
         _ir.Globals.Add(new GlobalVar(sym, init));
+    }
+
+    /// <summary>Record a <c>[N]T</c> array global: an array-typed static symbol (so references
+    /// resolve + <c>sizeof</c> is exact) backed by the pinned <paramref name="pinned"/> store
+    /// (rendered as a stable <c>T*</c>). The symbol is declared after the initializer is lowered, so
+    /// a literal element can reference an earlier global but never the array itself.</summary>
+    private void AddArrayGlobal(string name, CType.Array arr, CExpr pinned)
+    {
+        var sym = _symbols.Declare(new Symbol
+        {
+            Name = name, Kind = SymKind.Var, Type = arr, Storage = Storage.Static, IsGlobal = true,
+        });
+        _ir.Globals.Add(new GlobalVar(sym, pinned));
     }
 
     /// <summary>Tag a pass-1 function entry with the container it belongs to (null for a free
@@ -812,6 +839,18 @@ internal sealed class ZigLowering
             throw new IrUnsupportedException(
                 "zig `.{…}` mixes positional and named fields — a tuple literal is all-positional, a struct literal all-named");
         }
+        // Array literal: a positional `.{e0, e1, …}` whose sink is a `[N]T` array (Milestone K) →
+        // a stackalloc'd array value. Checked BEFORE the tuple sink so `[N]T` wins over a same-arity
+        // tuple. A named element here is a mistake (an array literal is all-positional).
+        if (sink?.Unqualified is CType.Array arrSink)
+        {
+            if (anyNamed)
+            {
+                throw new IrUnsupportedException(
+                    "zig array literal `.{…}` must use positional elements, not `.field = …`");
+            }
+            return BuildArrayInit(fields, arrSink);
+        }
         // Tuple literal: a positional list, or a (positional/empty) `.{…}` whose sink IS a tuple.
         // Element types come from the sink, or are inferred from the elements when there's none.
         if (sink?.Unqualified is CType.Tuple tupleSink)
@@ -878,6 +917,47 @@ internal sealed class ZigLowering
         return new TupleNew(elems, tt) { Type = tt };
     }
 
+    /// <summary>Build an array literal (Milestone K) — a positional `.{e0, e1, …}` at a `[N]T` sink,
+    /// or a typed `[N]T{…}` / `[_]T{…}` — as a <see cref="StackArray"/> (a stackalloc'd array value;
+    /// the backend hoists it to a block-local pointer temp when used outside an initializer). Each
+    /// element lowers at the array's element type as its sink (so a nested `.{…}` / `.member`
+    /// resolves). A fixed extent must match the element count; an inferred `[_]T` (Count null) takes
+    /// the element count. An empty literal is rejected — a zeroed array uses `undefined`.</summary>
+    private CExpr BuildArrayInit(IReadOnlyList<Item> posItems, CType.Array arr)
+    {
+        if (posItems.Count == 0)
+        {
+            throw new IrUnsupportedException(
+                "zig empty array literal is not supported — initialize a `[N]T` with `undefined` for a zeroed array");
+        }
+        if (arr.Count is { } n && posItems.Count != n)
+        {
+            throw new IrUnsupportedException(
+                $"zig array literal has {posItems.Count} element(s) but the target array `[{n}]…` expects {n}");
+        }
+        var elems = LowerArrayElems(posItems, arr.Element);
+        var arrType = arr.Count is null ? new CType.Array(arr.Element, posItems.Count) : arr;
+        return new StackArray(arr.Element, elems) { Type = arrType };
+    }
+
+    /// <summary>Lower the positional elements of an array literal, each at <paramref name="element"/>
+    /// as its sink (so a nested literal / bare `.member` resolves). A named `.field = …` element is
+    /// rejected — an array literal is all-positional.</summary>
+    private List<CExpr> LowerArrayElems(IReadOnlyList<Item> fields, CType element)
+    {
+        var elems = new List<CExpr>(fields.Count);
+        foreach (var f in fields)
+        {
+            if (f.Content is not Zig.FieldInitPositional pos)
+            {
+                throw new IrUnsupportedException(
+                    "zig array literal must use positional elements (`.{a, b}` / `[N]T{a, b}`), not `.field = …`");
+            }
+            elems.Add(LowerExprSink(pos.Arg0, element));
+        }
+        return elems;
+    }
+
     /// <summary>Lower a TYPED struct literal `Type{ .field = … }` — Zig's CurlySuffixExpr
     /// (`CurlySuffix -> Type '{' FieldInits '}'`). Unlike the anonymous `.{…}` form, the struct
     /// type is named explicitly by the leading <c>Type</c>, so this needs NO sink and is valid in
@@ -885,6 +965,18 @@ internal sealed class ZigLowering
     /// must resolve to a registered struct.</summary>
     private CExpr LowerTypedStructInit(Item typeItem, IReadOnlyList<Item> fieldInitItems)
     {
+        // `[N]T{…}` / `[_]T{…}` — a typed array literal (Milestone K). Resolve the element type and
+        // extent WITHOUT lowering the whole `[_]T` type (LowerType can't const-eval the inferred `_`);
+        // `[_]T` takes the element count, `[N]T` the literal N (which must match the elements).
+        if (typeItem.Content is Zig.TyArray ta)
+        {
+            var element = LowerType(ta.Arg3);
+            var inferred = ta.Arg1.Content is Zig.Ident id && Tok(id.Arg0) == "_";
+            var arr = inferred
+                ? new CType.Array(element, null)
+                : new CType.Array(element, ConstEvalArraySize(ta.Arg1));
+            return BuildArrayInit(fieldInitItems, arr);
+        }
         var t = LowerType(typeItem);
         if (t.Unqualified is not CType.Named named)
         {
@@ -1311,19 +1403,27 @@ internal sealed class ZigLowering
         // Compute the declared type FIRST: a result-located init (`.member` / `.{…}`) needs
         // it as its sink, so resolve the annotation before lowering the initializer.
         var declared = typeItem is not null ? LowerType(typeItem) : null;
-        // `var b: [N]T = undefined;` → a stackalloc'd C array (ArrayDecl → `T* b = stackalloc
-        // T[N]`), so `b[i]` / `b[lo..hi]` reuse the array paths and yield a stack-backed slice.
-        // Only `undefined` init is supported (positional `.{…}` array literals are deferred).
+        // `var b: [N]T = …;` → a stackalloc'd C array (ArrayDecl → `T* b = stackalloc T[…]`), so
+        // `b[i]` / `b[lo..hi]` reuse the array paths and yield a stack-backed slice. `undefined`
+        // gives a zeroed extent; an array literal (`.{…}` / `[N]T{…}`, Milestone K) gives a
+        // stackalloc with the element inits. The literal lowers BEFORE the symbol is declared, so
+        // the array name isn't visible in its own initializer.
         if (declared is CType.Array arr)
         {
-            if (initExpr.Content is not Zig.UndefinedLit)
+            if (initExpr.Content is Zig.UndefinedLit)
+            {
+                var sym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = arr });
+                var count = new LitInt((arr.Count ?? 0).ToString(CultureInfo.InvariantCulture), arr.Count ?? 0) { Type = CType.Int };
+                return new ArrayDecl(sym, arr.Element, count, null);   // C# zero-fills the stackalloc
+            }
+            if (LowerExprSink(initExpr, arr) is not StackArray sa)
             {
                 throw new IrUnsupportedException(
-                    "a `[N]T` array local must be initialized with `undefined` (positional array literals are not supported yet)");
+                    $"a `[N]T` array local '{Tok(nameTok)}' must be initialized with an array literal (`.{{…}}` / `[N]T{{…}}`) or `undefined`");
             }
-            var sym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = arr });
-            var count = new LitInt((arr.Count ?? 0).ToString(CultureInfo.InvariantCulture), arr.Count ?? 0) { Type = CType.Int };
-            return new ArrayDecl(sym, arr.Element, count, null);   // C# zero-fills the stackalloc
+            var asym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = arr });
+            var countLit = new LitInt(sa.Elems.Count.ToString(CultureInfo.InvariantCulture), sa.Elems.Count) { Type = CType.Int };
+            return new ArrayDecl(asym, sa.Element, countLit, sa.Elems);
         }
         var init = LowerExprSink(initExpr, declared);
         var type = declared ?? init.Type ?? CType.Int;
