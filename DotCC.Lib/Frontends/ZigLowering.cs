@@ -1403,6 +1403,10 @@ internal sealed class ZigLowering
                 return new For(null, LowerExpr(w.Arg2), postAssign, LowerStmt(w.Arg10));
             }
 
+            // `while (opt) |x| body` — optional payload capture-while (Milestone M, part 2). See
+            // LowerWhileCapture (desugars to `while (true) { … if (has) { bind; body } else break; }`).
+            case Zig.StmtWhileCapture w: return LowerWhileCapture(w.Arg2, Tok(w.Arg5), w.Arg7);
+
             // `break;` / `continue;` — reuse the C IR loop-control nodes (the C# backend
             // renders them verbatim; valid inside the while/for forms above).
             case Zig.StmtBreak:    return new Break();
@@ -1792,6 +1796,69 @@ internal sealed class ZigLowering
             return new Block(pre);
         }
         return ifStmt;
+    }
+
+    /// <summary>Lower an optional capture-<c>while</c> <c>while (opt) |x| body</c> (Milestone M, part
+    /// 2). The condition is re-evaluated EACH iteration (it commonly advances an iterator), so it lives
+    /// inside the loop body — a fresh <c>__cap</c> per turn. When it yields a payload, bind <c>x</c> and
+    /// run the body; otherwise break. Desugars to
+    /// <code>while (true) { var __cap = cond; if (has) { var x = payload; body } else break; }</code>
+    /// which produces a real <see cref="While"/> node, so a labeled break/continue composes via the
+    /// existing labeled-loop machinery. A value optional <c>?T</c> tests <c>__cap.HasValue</c> / binds
+    /// <c>.Value</c>; a niche optional pointer tests non-null / binds the pointer itself. <c>_</c> tests
+    /// without binding. An error-union or non-optional condition is a clear error.</summary>
+    private CStmt LowerWhileCapture(Item condItem, string capName, Item bodyItem)
+    {
+        var cond = LowerExpr(condItem);
+        var ct = cond.Type.Unqualified;
+
+        var capTmp = _symbols.Declare(new Symbol { Name = "__cap", Kind = SymKind.Var, Type = cond.Type });
+        var capRef = new VarRef(capTmp) { Type = cond.Type, IsLValue = true };
+
+        CExpr test;
+        CExpr payloadInit;
+        CType payloadType;
+        if (ct is CType.Optional opt)
+        {
+            test = new Member(capRef, "HasValue", false) { Type = CType.Bool };
+            payloadInit = new Member(capRef, "Value", false) { Type = opt.Inner };
+            payloadType = opt.Inner;
+        }
+        else if (ct is CType.Pointer)
+        {
+            test = capRef;        // Cond.B(void*) tests non-null
+            payloadInit = capRef; // the unwrapped pointer is the same value
+            payloadType = cond.Type;
+        }
+        else if (ct is CType.ErrorUnion)
+        {
+            throw new IrUnsupportedException(
+                "zig error-union capture `while (eu) |x|` not lowered yet (Milestone M)");
+        }
+        else
+        {
+            throw new IrUnsupportedException(
+                "zig `while (...) |x|` requires an optional condition");
+        }
+
+        // then-branch: bind the payload, then the user body, with `x` in scope while lowering it.
+        var thenStmts = new List<CStmt>();
+        _symbols.EnterScope();
+        if (capName != "_")
+        {
+            var capSym = _symbols.Declare(new Symbol { Name = capName, Kind = SymKind.Var, Type = payloadType });
+            thenStmts.Add(new DeclStmt(new List<LocalDecl> { new(capSym, payloadInit) }));
+        }
+        thenStmts.Add(LowerStmt(bodyItem));
+        _symbols.ExitScope();
+
+        // body: re-eval the condition, then bind+run or break.
+        var loopBody = new List<CStmt>
+        {
+            new DeclStmt(new List<LocalDecl> { new(capTmp, cond) }),
+            new If(test, new Block(thenStmts), new Break()),
+        };
+        return new While(new LitBool(true) { Type = CType.Bool }, new Block(loopBody));
     }
 
     /// <summary>Dispatch a <c>switch</c> statement: lower the subject once, then route a

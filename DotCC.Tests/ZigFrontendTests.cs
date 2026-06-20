@@ -1751,4 +1751,83 @@ public sealed class ZigFrontendTests
             "}\n"));
         ex.Message.ShouldContain("part 3");
     }
+
+    [Fact]
+    public void Lowers_an_optional_capture_while()
+    {
+        // `while (opt) |x| { … }` → `while (true) { var __cap = cond; if (__cap.HasValue) { var x =
+        // __cap.Value; … } else break; }` — the condition is re-evaluated (and `__cap` re-bound) each
+        // iteration, so it lives inside the loop body.
+        var cs = EmitZig(
+            "fn nextLT(i: *i32, max: i32) ?i32 { if (i.* >= max) return null; const v = i.*; i.* += 1; return v; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var i: i32 = 0;\n" +
+            "    var sum: i32 = 0;\n" +
+            "    while (nextLT(&i, 9)) |v| { sum += v; }\n" +
+            "    return @as(u8, @intCast(sum));\n" +
+            "}\n");
+        cs.ShouldContain("while (Cond.B(true))");
+        cs.ShouldContain("int? __cap = nextLT");
+        cs.ShouldContain("Cond.B(__cap.HasValue)");
+        cs.ShouldContain("int v = __cap.Value;");
+    }
+
+    [Fact]
+    public void Lowers_a_discard_capture_while_without_binding()
+    {
+        // `|_|` iterates without binding the payload — no payload local is emitted.
+        var cs = EmitZig(
+            "fn nextLT(i: *i32, max: i32) ?i32 { if (i.* >= max) return null; const v = i.*; i.* += 1; return v; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var j: i32 = 0;\n" +
+            "    var count: i32 = 0;\n" +
+            "    while (nextLT(&j, 6)) |_| { count += 1; }\n" +
+            "    return @as(u8, @intCast(count));\n" +
+            "}\n");
+        cs.ShouldContain("Cond.B(__cap.HasValue)");
+        cs.ShouldNotContain("__cap.Value");   // `_` discards the payload — no binding
+    }
+
+    [Fact]
+    public void Lowers_a_pointer_optional_capture_while()
+    {
+        // A niche optional pointer `?*T` capture-while tests the pointer for non-null and binds the
+        // unwrapped pointer itself; the loop runs until the pointer is set to null.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var x: i32 = 5;\n" +
+            "    var p: ?*i32 = &x;\n" +
+            "    while (p) |q| { _ = q; p = null; }\n" +
+            "    return 0;\n" +
+            "}\n");
+        cs.ShouldContain("while (Cond.B(true))");
+        cs.ShouldContain("if (Cond.B(__cap))");
+        cs.ShouldContain("int* q = __cap;");
+    }
+
+    [Fact]
+    public void Defers_an_error_union_capture_while()
+    {
+        // An error-union capture-while is deferred — a clear error (not a silent miscompile).
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "fn mk(ok: bool) !i32 { if (ok) return 7; return error.Bad; }\n" +
+            "pub fn main() u8 {\n" +
+            "    while (mk(true)) |x| { _ = x; }\n" +
+            "    return 0;\n" +
+            "}\n"));
+        ex.Message.ShouldContain("while");
+    }
+
+    [Fact]
+    public void Rejects_a_capture_while_on_a_non_optional()
+    {
+        // A plain integer condition has no payload to bind — a clear error.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var n: i32 = 3;\n" +
+            "    while (n) |x| { _ = x; n = n - 1; }\n" +
+            "    return 0;\n" +
+            "}\n"));
+        ex.Message.ShouldContain("optional");
+    }
 }
