@@ -77,6 +77,7 @@ public abstract record CType
         Float128Type => "_Float128",
         Optional o => "?" + o.Inner.Describe(),
         ErrorUnion eu => "!" + eu.Payload.Describe(),
+        ErrorSetType => "anyerror",
         Slice s => "[]" + (s.Element.IsConst ? "const " : "") + s.Element.Unqualified.Describe(),
         Allocator => "std.mem.Allocator",
         Tuple t => "struct { " + string.Join(", ", t.Elements.Select(e => e.Describe())) + " }",
@@ -240,6 +241,22 @@ public abstract record CType
         public override int SizeOf => Payload.SizeOf + 2;
     }
 
+    /// <summary>A Zig error SET value (Milestone N) — the type of a bare <c>error.Foo</c> and of an
+    /// <c>else |e|</c> / <c>catch |e|</c> capture. V1 erases the named set into one flat global code
+    /// space (each <c>error.Foo</c> name → a stable <c>ushort</c> code, shared program-wide), so this
+    /// is a single nameless marker the C# backend renders as <c>ushort</c> — the raw code. A bare
+    /// <c>error.Foo</c> lowers to that code as a literal of this type, so error-value equality
+    /// (<c>e == error.Foo</c>) and a future error <c>switch</c> compare codes. Distinct from a plain
+    /// <see cref="UShort"/> so error operands are recognisable structurally (and so a named
+    /// <c>error{A,B}</c> set has a type to attach to later). The C front-end never produces it; only
+    /// the C# target renders it.</summary>
+    public sealed record ErrorSetType : CType
+    {
+        // The flat global error code (a ushort). @sizeOf of an error set isn't a Zig surface
+        // feature, so an exact layout isn't needed here.
+        public override int SizeOf => 2;
+    }
+
     /// <summary>A Zig slice <c>[]T</c> / <c>[]const T</c> (Milestone E) — a fat pointer
     /// <c>{ ptr, len }</c>. The C# backend lowers it to the runtime <c>Slice&lt;T&gt;</c>
     /// value type (<c>ConstSlice&lt;T&gt;</c> when <see cref="Element"/> is <c>const</c>):
@@ -344,6 +361,10 @@ public abstract record CType
 
     /// <summary>C23 <c>_Float128</c> — software binary128. See <see cref="Float128Type"/>.</summary>
     public static readonly CType Float128 = new Float128Type();
+
+    /// <summary>The Zig error-set value type — a bare <c>error.Foo</c> value / a captured error
+    /// (Milestone N). See <see cref="ErrorSetType"/>.</summary>
+    public static readonly CType ErrorSet = new ErrorSetType();
 
     /// <summary>The decayed type of a string literal: <c>char*</c> (i.e. <c>byte*</c>).</summary>
     public static CType CharPtr => new Pointer(Char);
