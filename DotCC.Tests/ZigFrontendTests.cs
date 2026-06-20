@@ -1617,4 +1617,61 @@ public sealed class ZigFrontendTests
             "}\n"));
         ex.Message.ShouldContain("labeled-while");
     }
+
+    // ---- Milestone L (part 4): switch ranges ----
+
+    [Fact]
+    public void Lowers_a_range_in_a_statement_switch_to_a_relational_pattern()
+    {
+        // `lo...hi => {…}` → a C# relational-pattern case `case >= lo and <= hi:`. Mixes with a
+        // multi-value prong (`100, 200 => …` → `case 100: case 200:`) and `else` (→ `default:`).
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var bucket: i32 = 0;\n" +
+            "    const n: i32 = 42;\n" +
+            "    switch (n) {\n" +
+            "        0...9 => { bucket = 1; },\n" +
+            "        10...99 => { bucket = 2; },\n" +
+            "        100, 200 => { bucket = 3; },\n" +
+            "        else => { bucket = 9; },\n" +
+            "    }\n" +
+            "    return @as(u8, @intCast(bucket));\n" +
+            "}\n");
+        cs.ShouldContain("case >= 0 and <= 9:");
+        cs.ShouldContain("case >= 10 and <= 99:");
+        cs.ShouldContain("case 100:");
+        cs.ShouldContain("case 200:");
+    }
+
+    [Fact]
+    public void Lowers_a_range_in_a_switch_expression_to_a_relational_pattern()
+    {
+        // `lo...hi => e` in a switch EXPRESSION → a relational pattern arm `>= lo and <= hi => e`.
+        var cs = EmitZig(
+            "fn kind(c: u8) u8 {\n" +
+            "    return switch (c) {\n" +
+            "        '0'...'9' => 1,\n" +
+            "        'A'...'Z' => 2,\n" +
+            "        else => 0,\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 { return kind('7'); }\n");
+        cs.ShouldContain(">= 48 and <= 57 => 1");
+        cs.ShouldContain(">= 65 and <= 90 => 2");
+        cs.ShouldContain("_ => 0");
+    }
+
+    [Fact]
+    public void Rejects_a_range_in_a_tagged_union_switch()
+    {
+        // A union's variants aren't ordered, so `lo...hi` is meaningless there — a clear error.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const U = union(enum) { a: i32, b: i32, c: i32 };\n" +
+            "pub fn main() u8 {\n" +
+            "    const u: U = .{ .a = 1 };\n" +
+            "    switch (u) { .a...c => {}, else => {} }\n" +
+            "    return 0;\n" +
+            "}\n"));
+        ex.Message.ShouldContain("range");
+    }
 }

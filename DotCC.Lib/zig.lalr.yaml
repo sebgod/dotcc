@@ -630,11 +630,19 @@ productions:
   # Case values: a comma-list of value Exprs, or `else` (the default). The `,` here never
   # clashes with the prong-separator `,` because FOLLOW(CaseVals) = { '=>' } — after a value
   # Expr, a `,` can only continue the value list (a complete CaseVals reduces on '=>' alone).
+  # An element may also be an inclusive RANGE `lo...hi` (Milestone L, part 4 — Zig uses `...`,
+  # the distinct longest-match token, for an inclusive switch range; `..` stays exclusive for
+  # slices/for-ranges). After an `Expr`, the lookahead cleanly selects: `...` → a range element,
+  # `,` → the next list element, `=>` → reduce (end of the value list). Lowered to a relational
+  # pattern (`case >= lo and <= hi:` / `>= lo and <= hi => …`) since Zig requires comptime-known
+  # bounds, which is exactly C#'s relational-pattern constant requirement.
   - derivation: leftmost
     rules:
-      - { lhs: CaseVals, rhs: [Expr, ',', CaseVals], action: caseValsCons }
-      - { lhs: CaseVals, rhs: [Expr],                 action: caseValsOne }
-      - { lhs: CaseVals, rhs: ['else'],               action: caseElse }
+      - { lhs: CaseVals, rhs: [Expr, ',', CaseVals],              action: caseValsCons }
+      - { lhs: CaseVals, rhs: [Expr],                             action: caseValsOne }
+      - { lhs: CaseVals, rhs: ['else'],                           action: caseElse }
+      - { lhs: CaseVals, rhs: [Expr, '...', Expr],               action: caseRangeOne }
+      - { lhs: CaseVals, rhs: [Expr, '...', Expr, ',', CaseVals], action: caseRangeCons }
 
   # ===== struct container body (Milestone D2 — a field-only list in D1) =====
   # A struct body is a list of MEMBERS: fields (`name: Type`, comma-separated) interleaved

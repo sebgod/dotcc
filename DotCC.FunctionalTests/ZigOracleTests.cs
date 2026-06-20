@@ -715,6 +715,31 @@ public sealed class ZigOracleTests
             "    }\n" +
             "    return @as(u8, @intCast(n * 7));\n" + // 6 * 7
             "}\n", 42, "" },
+
+        // --- Milestone L (part 4): switch ranges (exit-code only) ---
+        // A switch EXPRESSION with `lo...hi` ranges (a char classifier) + a STATEMENT switch with
+        // ranges and a multi-value prong. bucket(2)*18 + kinds(1+2+3+0=6) = 42.
+        new object[] { "switch_range",
+            "fn kind(c: u8) u8 {\n" +
+            "    return switch (c) {\n" +
+            "        '0'...'9' => 1,\n" +
+            "        'A'...'Z' => 2,\n" +
+            "        'a'...'z' => 3,\n" +
+            "        else => 0,\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var bucket: i32 = 0;\n" +
+            "    const n: i32 = 42;\n" +
+            "    switch (n) {\n" +
+            "        0...9 => { bucket = 1; },\n" +
+            "        10...99 => { bucket = 2; },\n" +
+            "        100, 200, 300 => { bucket = 3; },\n" +
+            "        else => { bucket = 9; },\n" +
+            "    }\n" +
+            "    const s: i32 = kind('7') + kind('Q') + kind('z') + kind('!');\n" + // 1+2+3+0 = 6
+            "    return @as(u8, @intCast(bucket * 18 + s));\n" +                    // 36 + 6
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
