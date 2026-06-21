@@ -95,7 +95,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `switch (u) { .a => \|x\| {…}, .b => \|*y\| {…} }` | ✅ | switch on a **tagged union** → dispatch on the `__tag`; a `\|x\|` payload capture binds the matched variant's payload **by value**, and a by-reference `\|*x\|` capture (Milestone M, part 4) binds a `*T` into the payload field (`T* x = &u.__payload.v;`) so `x.* = …` writes through to the (mutable) union. An exhaustive union switch with no `else` makes its last prong the C# `default` (so the function provably returns). **Deferred:** multi-variant capture prongs (the optional `if`/`while` and the error-union `if` captures are now ✅ — see those rows) |
 | `return e;` / `return;` | ✅ | |
 | `x = e;` assignment | ✅ | |
-| `x op= e;` compound assignment | ✅ | all ten: `+= -= *= /= %= <<= >>= &= \|= ^=`, plus the wrapping `+%= -%= *%=` (Milestone P, part 1). → the shared `Assign` IR node with a non-null `CompoundOp` → a NATIVE C# `x op= e`, so the target lvalue is evaluated exactly **once** (`arr[next()] += 1` calls `next()` a single time — not a `x = x op e` desugar). A native compound op already truncates back to the LHS width (unchecked), so `+%=` is observably identical to `+=` here. Zig has **no** `++`/`--` (the idiom is `i += 1`); the saturating compound forms (`+\|=`) are a later P part |
+| `x op= e;` compound assignment | ✅ | all ten: `+= -= *= /= %= <<= >>= &= \|= ^=`, plus the wrapping `+%= -%= *%=` and saturating `+\|= -\|= *\|=` (Milestone P). → the shared `Assign` IR node with a non-null `CompoundOp` → a NATIVE C# `x op= e`, so the target lvalue is evaluated exactly **once** (`arr[next()] += 1` calls `next()` a single time — not a `x = x op e` desugar). A native compound op already truncates back to the LHS width (unchecked), so `+%=` is observably identical to `+=`. The SATURATING compound forms have no native op → they desugar to `x = ZigMath.Sat…(x, e)` (the lvalue read twice; a side-effecting target — `slot().* +\|= 1` — is a clear deferred error rather than a silent double-eval). Zig has **no** `++`/`--` (the idiom is `i += 1`) |
 | `const a, const b = e;` destructure | ✅ | bind a tuple's elements to new locals (Milestone G) — desugars to a single-eval temp + per-element `.ItemN` reads (a brace-less sequence, so the binders stay in the enclosing scope). `const`/`var` binders, ≥2. **Deferred:** the assign-to-existing-lvalue form `a, b = e;` (a grammar-level cut, so a parse error) and typed binders (`const a: T, …`) |
 | `_ = e;` discard | ✅ | Zig's mandatory discard of a non-void result |
 | block `{ … }` | ✅ | |
@@ -119,6 +119,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | bitwise `& ^ \|`, shift `<< >>` | ✅ | |
 | arithmetic `+ - * / %` | ✅ | usual-arithmetic result typing (fixes i64 truncation) |
 | wrapping `+% -% *%` | ✅ | two's-complement WRAP at the operand width (Milestone P, part 1). Zig has no integer promotion, so the result type is the peer-resolved operand type; the emitted C# runs unchecked, where a narrowing cast truncates — a sub-`int` width (`u8`/`u16`/…) gets a `(byte)`/`(short)` truncating cast back, `int`-and-wider wrap natively. The wrap is at the OPERAND width even when widened (`(250 +% 10)` is 4, not 260). dotcc does **not** model Zig's safe-mode trap on plain `+`, so `+%` and `+` are observably identical here |
+| saturating `+\| -\| *\|` | ✅ | CLAMP to the operand type's range (Milestone P, part 2). No native C# operator, so each routes through the spliced `ZigMath.Sat{Add,Sub,Mul}<T>` runtime (`DotCC.Libc/ZigMath.cs`): widen both operands to a 128-bit accumulator, do the EXACT op, clamp to `[T.min, T.max]`, truncate back — exception-free and correct for every width (incl. the signed `MinValue * -1` edge). The peer type is the operand type (a literal yields to its concrete peer); the clamp is at the OPERAND width even when widened. Two comptime-literal operands are a Zig error if the exact result doesn't fit the sink (`100 *\| 100` at `u8`) — not modeled (no comptime fit-check), but never round-trippable code |
 | prefix `-` `~` `!` | ✅ | |
 | `if (c) a else b` (if-**expression**) | ✅ | → C# ternary |
 | `switch (x) { v => e, … }` (switch-**expression**) | ✅ | a switch in value position (a typed binding / return / any `RhsExpr`) → C#'s native switch EXPRESSION (`x switch { v => e, a or b => e, _ => e }`). Each prong yields a value (a bare-expr body); `else` → the `_` default; arm values lower at the result sink; an enum subject + `.member` labels decay to the underlying int. Same structural trick as the if-expression (a `RhsExpr`, not a Primary). An inclusive **range** arm `lo...hi => e` lowers to a relational pattern `>= lo and <= hi => e`. **Deferred:** a block-bodied prong (needs a labeled `break :blk v`), a `\|x\|` capture in expression position |
@@ -155,7 +156,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `@alignOf(T)` / `@offsetOf(T, f)` | 🚧 | parse only — alignment isn't meaningfully observable on the managed VM and `@offsetOf` waits on surfaced field offsets (deferred; revisit per-need) |
 | other `@builtin(...)` (`@typeInfo`/`@TypeOf`/`@field`/…) | 🚫 | reflection / comptime — out of scope (see below) |
 | wrapping ops `+% -% *%` (+ `op%=`) | ✅ | two's-complement wrap (Milestone P, part 1) — see the operators table above |
-| saturating ops `+\| -\| *\|` (+ `op\|=`) | 🚫 | a later Milestone P part |
+| saturating ops `+\| -\| *\|` (+ `op\|=`) | ✅ | clamp-to-range (Milestone P, part 2) — see the operators table above |
 
 ## Lexer
 
@@ -481,4 +482,6 @@ rejects, not silently accept more.
   `examples/zig-catch-orelse-return` (control-flow fallbacks: `mk(a) catch return error.NoX` (error
   union early-return) + `pick(b) orelse return 0` (optional early-return) inside a `!i32` function),
   `examples/zig-wrap-ops` (wrapping arithmetic: `+%=`/`-%=`/`*%=` overflow on `u8`, a `z -% 2`
-  underflow, and a `u8 +% u8` that wraps at the operand width before widening to `u32`).
+  underflow, and a `u8 +% u8` that wraps at the operand width before widening to `u32`),
+  `examples/zig-sat-ops` (saturating arithmetic: unsigned `+|=`/`-|=`/`*|=` clamp to 255 / floor at
+  0, signed `+|=`/`-|=` clamp to 127 / -128, and a `u8 +| u8` clamped at the operand width).

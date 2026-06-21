@@ -1467,6 +1467,13 @@ internal sealed partial class ZigLowering
             case Zig.StmtSubWrapAssign a: return CompoundAssign(a.Arg0, BinOp.Sub, a.Arg2);
             case Zig.StmtMulWrapAssign a: return CompoundAssign(a.Arg0, BinOp.Mul, a.Arg2);
 
+            // `x op|= y` (saturating compound assignment, Milestone P) → `x = ZigMath.Sat…(x, y)`.
+            // No native C# saturating compound op exists, so it desugars to a plain assignment of the
+            // clamping call (single-eval-guarded on the lvalue — see SatCompoundAssign).
+            case Zig.StmtAddSatAssign a: return SatCompoundAssign(a.Arg0, "SatAdd", a.Arg2);
+            case Zig.StmtSubSatAssign a: return SatCompoundAssign(a.Arg0, "SatSub", a.Arg2);
+            case Zig.StmtMulSatAssign a: return SatCompoundAssign(a.Arg0, "SatMul", a.Arg2);
+
             // if (cond) then [else else]  — `then`/`else`/`body` are themselves Stmts
             // (a single statement or a brace Block), which LowerStmt handles uniformly.
             case Zig.StmtIf f:          return new If(LowerExpr(f.Arg2), LowerStmt(f.Arg4), null);
@@ -2669,6 +2676,10 @@ internal sealed partial class ZigLowering
             case Zig.AddWrap a: return WrapBin(BinOp.Add, a.Arg0, a.Arg2);
             case Zig.SubWrap a: return WrapBin(BinOp.Sub, a.Arg0, a.Arg2);
             case Zig.MulWrap a: return WrapBin(BinOp.Mul, a.Arg0, a.Arg2);
+            // saturating arithmetic (Milestone P) — clamp to the operand-type range via ZigMath
+            case Zig.AddSat a:  return SatBin("SatAdd", a.Arg0, a.Arg2);
+            case Zig.SubSat a:  return SatBin("SatSub", a.Arg0, a.Arg2);
+            case Zig.MulSat a:  return SatBin("SatMul", a.Arg0, a.Arg2);
             case Zig.DivOp a:   return Bin(BinOp.Div, a.Arg0, a.Arg2);
             case Zig.ModOp a:   return Bin(BinOp.Mod, a.Arg0, a.Arg2);
             // comparison (non-associative in the grammar)
@@ -3321,8 +3332,11 @@ internal sealed partial class ZigLowering
     /// <summary>The fixed-width integer type a wrapping/saturating operator wraps (or saturates) at —
     /// Zig's peer-resolved operand type. Valid Zig gives both operands one shared type; a bare integer
     /// literal (a <c>comptime_int</c>, lowered to a <see cref="LitInt"/>) yields to its concrete-typed
-    /// peer. With both concrete the wider wins (they are equal in valid Zig; ties resolve to the
-    /// left).</summary>
+    /// peer. With both concrete the wider wins (they are equal in valid Zig; ties resolve to the left).
+    /// Two comptime literals have no fixed-width peer — Zig evaluates them at comptime (exact, then
+    /// coerced to the result location, erroring if it overflows), so dotcc just picks the wider integer
+    /// (a fit-checking comptime engine is out of scope; a non-fitting literal pair is already a Zig
+    /// error, never round-trippable code).</summary>
     private static CType PeerIntType(CExpr left, CExpr right)
     {
         var lt = left.Type.Unqualified;
@@ -3331,6 +3345,64 @@ internal sealed partial class ZigLowering
         if (right is LitInt && left is not LitInt) return lt;
         return lt.SizeOf >= rt.SizeOf ? lt : rt;
     }
+
+    /// <summary>Lower a Zig SATURATING arithmetic operator (<c>+|</c>/<c>-|</c>/<c>*|</c>) to a
+    /// <c>ZigMath.Sat{Add,Sub,Mul}&lt;T&gt;</c> call (<see cref="DotCC.Libc.ZigMath"/>) that clamps
+    /// the true result to the operand type's range. Zig has no integer promotion, so the result
+    /// type is the peer-resolved operand type (<see cref="PeerIntType"/>); both operands are coerced
+    /// to it so C# infers the generic <c>T</c> and the runtime clamps at the right width. Unlike
+    /// wrapping (a truncating cast in the unchecked context), a clamp has no native C# operator, so
+    /// this routes through the spliced runtime.</summary>
+    private CExpr SatBin(string helper, Item l, Item r)
+    {
+        var left = LowerExpr(l);
+        var right = LowerExpr(r);
+        var t = PeerIntType(left, right);
+        var args = new List<CExpr> { CoerceToPeer(left, t), CoerceToPeer(right, t) };
+        return new Call($"ZigMath.{helper}", args) { Type = t };
+    }
+
+    /// <summary>Coerce a wrapping/saturating operand to the peer integer type, skipping the cast when
+    /// it already has that type — so <c>i32 +| i32</c> emits <c>ZigMath.SatAdd(a, b)</c> with no
+    /// redundant casts, while <c>u8 +| 5</c> casts the literal so C# infers <c>byte</c>.</summary>
+    private static CExpr CoerceToPeer(CExpr e, CType t)
+        => e.Type.Unqualified.Equals(t) ? e : new Cast(t, e) { Type = t };
+
+    /// <summary>Lower a Zig SATURATING compound assignment (<c>x op|= y</c>). There is no native C#
+    /// saturating compound operator, so it desugars to <c>target = ZigMath.Sat…(target, y)</c> at the
+    /// LHS width. The lvalue is read on both sides; that is sound only when re-evaluating it has no
+    /// side effects, so a non-repeatable target (an index/deref reached through a call) is a clear
+    /// deferred error rather than a silent double-eval.</summary>
+    private CStmt SatCompoundAssign(Item targetItem, string helper, Item valueItem)
+    {
+        var target = LowerExpr(targetItem);
+        if (!IsRepeatableLValue(target))
+        {
+            throw new IrUnsupportedException(
+                "a saturating compound assignment (`x op|= y`) to a target with side effects is not " +
+                "supported yet — assign in two steps (`x = x op| y;`) with a simpler target");
+        }
+        var value = LowerExprSink(valueItem, target.Type);
+        var call = new Call($"ZigMath.{helper}", new List<CExpr> { target, CoerceToPeer(value, target.Type) })
+            { Type = target.Type };
+        return new ExprStmt(new Assign(null, target, call) { Type = target.Type });
+    }
+
+    /// <summary>True when <paramref name="e"/> is an lvalue that can be re-evaluated without side
+    /// effects — a variable / parameter, or a field / element / deref reached only through other
+    /// repeatable sub-expressions and constants. A call anywhere makes it non-repeatable. Gates the
+    /// double-read in <see cref="SatCompoundAssign"/>, whose desugar has no single-eval form.</summary>
+    private static bool IsRepeatableLValue(CExpr e) => e switch
+    {
+        VarRef => true,
+        LitInt or LitBool or LitFloat => true,
+        Paren p => IsRepeatableLValue(p.Inner),
+        Cast c => IsRepeatableLValue(c.Operand),
+        Member m => IsRepeatableLValue(m.Base),
+        Unary { Op: UnOp.Deref or UnOp.AddrOf } u => IsRepeatableLValue(u.Operand),
+        DotCC.Ir.Index ix => IsRepeatableLValue(ix.Base) && IsRepeatableLValue(ix.Idx),
+        _ => false,
+    };
 
     /// <summary>Lower the two operands of an <c>==</c> / <c>!=</c> comparison, result-locating a
     /// bare enum literal <c>.member</c> against the OTHER operand's enum type — Zig's
