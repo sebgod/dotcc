@@ -963,6 +963,19 @@ public sealed class ZigOracleTests
             "    const p: [*:0]const u8 = s.ptr;\n" +
             "    return @as(u8, @intCast(s.len + clen(p)));\n" + // 21 + 21 = 42
             "}\n", 42, "" },
+
+        // `[N:0]T` sentinel arrays (Milestone O, part 4): N+1 storage, the trailing slot is the
+        // sentinel 0 (so the buffer is a NUL-terminated C string), logical length N. The 5 elements
+        // sum to 42; `buf[5]` reads back the reserved sentinel slot (must be 0).
+        new object[] { "sentinel_array",
+            "pub fn main() u8 {\n" +
+            "    const buf: [5:0]u8 = .{ 10, 11, 12, 8, 1 };\n" + // 5 logical bytes -> 42
+            "    var sum: u32 = 0;\n" +
+            "    var i: usize = 0;\n" +
+            "    while (i < 5) : (i = i + 1) { sum = sum + buf[i]; }\n" +
+            "    if (buf[5] != 0) return 1;\n" + // the reserved sentinel slot is 0
+            "    return @as(u8, @intCast(sum));\n" + // 42
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

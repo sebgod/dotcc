@@ -63,6 +63,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `?T` optional | ✅ | `?*T` → bare nullable `T*` (niche); `?T` over a value → C# `Nullable<T>`. `null`/`.?`/`orelse` below |
 | `[]T` / `[]const T` slice | ✅ | → the runtime fat pointer `Slice<T>` / `ConstSlice<T>` (`{ T* Ptr; ulong Len; }`, the C++ `std::span` shape — **not** C#'s ref-struct `Span<T>`, so a slice can be a struct field and cross the ABI; `AsSpan()` bridges to the BCL). `.len`/`.ptr`, `s[i]`, `s[lo..hi]`, array/string coercion, and `for` over it all work (rows below). **Deferred:** `[*]T`-backed slices, sentinel `[:0]T`, open-ended `s[lo..]`, by-ref `\|*x\|`, the non-escaping-stack → `stackalloc`+`Span` peephole |
 | `[N]T` array (local) | ✅ | `var b: [N]T = …;` → a stackalloc'd C array (zero heap); `b[i]` indexes, `b[lo..hi]` yields a **stack-backed slice**. Size `N` must be an integer literal. **Init:** `undefined` (zeroed) OR an array literal (Milestone K) — `.{…}` at a `[N]T` sink, typed `[N]T{…}` (explicit length), or `[_]T{…}` (length inferred from the element count). An empty literal is rejected (use `undefined`); returning an array literal by value is out of scope (arrays lower to pointers) |
+| `[N:0]T` sentinel array (local) | ✅ | sentinel-terminated array (Milestone O, part 4 — V1 sentinel = 0). Reserves **N+1** elements of storage: the trailing slot (index `N`) holds the sentinel `0`, the logical length stays `N` — so a `[N:0]u8` literal is a valid NUL-terminated C string with no hand-written terminator, and `b[N]` reads the sentinel back. Lowers to the same `stackalloc` an `[N]T` local uses, grown by one zeroed slot (`undefined` reserves `N+1` zeroed; a literal lays down its `N` elements + a trailing `0`). The symbol's type is the N-element `CType.Array`, so indexing/slicing behave like `[N]T`. **Cut:** a non-zero sentinel; a **global** `[N:0]T` (the pinned store has no N+1 hook yet — declare it as a local; rejected loudly, never silently truncated) |
 | tuple `struct { T1, T2, … }` | ✅ | an anonymous **positional** struct → C# `System.ValueTuple<…>` (Milestone G — see the **Tuples** section). Valid as a return / param / var type; a positional literal `.{a, b}` constructs it, `t[N]` (literal `N`) reads `.ItemN+1`, and `const a, const b = e` destructures. **Runtime subset only:** arity 1..7 (empty + >7 deferred); comptime / type-valued fields and a mixed positional+named literal are rejected |
 | `std.mem.Allocator` | ✅ | the allocator fat pointer `{ ptr, vtable }` → the runtime `Allocator` value type (see the **Allocators** section). `std.heap.FixedBufferAllocator` is the concrete second allocator. Any OTHER `std.*` type errors clearly |
 | `const P = struct { fields…, methods… };` | ✅ | container decl (top-level) → a real C# `unsafe struct` via the SHARED aggregate machinery the C frontend uses. Fields **and** methods (below) in the body; tagged unions are a later D slice. Empty `struct {}` allowed; `pub`-wrapped + in-function containers deferred |
@@ -74,7 +75,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `const U = union(enum) { a: T, b, … };` | ✅ | tagged union → the faithful C tagged-union shape: an outer struct `{ U_Tag __tag; U_Payload __payload; }` whose `__payload` is a NESTED `[StructLayout(Explicit)]` union overlaying every payload variant at offset 0 (the shared C-union machinery) — so payloads share storage, matching Zig's memory model. A void variant (`b`) is tag-only; an all-void union has no `__payload`. Construct with `.{ .a = v }` / `U{ .a = v }` (payload) or `.b` at a union sink (void). Direct `u.a` reads `u.__payload.a` (unchecked, like Zig release mode). Methods (above) and a `const Self = @This();` alias are allowed in the body. **Deferred:** untagged `union { … }`, explicit `union(SomeEnum)` |
 | `E!T` / `!T` error-union type | ✅ | → runtime `ErrUnion<Payload>` (`ErrUnion<Unit>` for `!void`). V1 erases the error SET `E` — `anyerror!T` / named `E!T` lower identically (payload only) |
 | `comptime_int`/`comptime_float`, arbitrary `iN`/`uN` | 🚫 | |
-| `[*:s]T` / `[N:s]T` non-zero sentinel | 🚫 | sentinel `0` is ✅ (part 3 — `[*:0]T`/`[:0]T`); non-zero sentinels + `[N:0]T` sentinel arrays (part 4) remain |
+| `[*:s]T` / `[N:s]T` non-zero sentinel | 🚫 | sentinel `0` is ✅ (part 3 `[*:0]T`/`[:0]T`, part 4 `[N:0]T` arrays); only a **non-zero** sentinel value remains (+ a global `[N:0]T`, deferred) |
 
 ## Statements
 
@@ -423,6 +424,8 @@ rejects, not silently accept more.
   slice's `.ptr`),
   `examples/zig-sentinel` (sentinel-terminated `[*:0]T` / `[:0]T`: a `[:0]const u8` string-literal
   slice + a `[*:0]const u8` C-string pointer scanned to the NUL),
+  `examples/zig-sentinel-array` (sentinel arrays `[N:0]T`: a `[5:0]u8` literal reserving the N+1th
+  slot for the sentinel, summed over its logical length, with `buf[N]` reading the sentinel back),
   `examples/zig-alloc` (allocators: devirt'd `page_allocator`, a `FixedBufferAllocator` via the
   indirect vtable, an opaque `std.mem.Allocator` param + materialized default),
   `examples/zig-tuple` (tuples: a `struct { u8, u8 }` multiple-return + `const lo, const hi = …`

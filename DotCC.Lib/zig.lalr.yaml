@@ -599,6 +599,11 @@ productions:
       # with a bare `const`), so it stays conflict-free against `[]T` / `[Expr]T`.
       - { lhs: Type, rhs: ['[', ']', 'const', Type], action: tySliceConst }
       - { lhs: Type, rhs: ['[', Expr, ']', Type], action: tyArray }
+      # `[N:0]T` sentinel-terminated array (Milestone O, part 4) — N+1 elements of storage (the
+      # trailing slot holds the sentinel 0), logical length N. Conflict-free against `tyArray`:
+      # after `[ Expr`, the lookahead `:` (vs `]`) selects this production. V1 sentinel = 0 only
+      # (the sentinel Expr is rejected in lowering if non-zero); the size N must be a literal.
+      - { lhs: Type, rhs: ['[', Expr, ':', Expr, ']', Type], action: tySentArray }
       # Tuple TYPE `struct { T1, T2, … }` (Milestone G) — an anonymous positional struct, used
       # as a function return type or a var/param annotation → C# `System.ValueTuple<…>`. Distinct
       # parser state from the Decl-level `const X = struct { FieldDecls }` (named fields, reached

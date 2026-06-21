@@ -862,6 +862,48 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_sentinel_array_local_to_a_stackalloc_with_a_trailing_sentinel()
+    {
+        // `[N:0]T` reserves N+1 slots — a literal lays down its N elements plus a trailing `0`
+        // sentinel; the symbol's type stays the N-element array so `b[i]` indexes as `[N]T` and
+        // `b[N]` reads the sentinel. The sentinel renders as a bare `int` 0 (constant-converts to
+        // the element type), NOT an element-typed `0u`.
+        var cs = EmitZig(
+            "pub fn main() u8 { const b: [3:0]u8 = .{ 1, 2, 3 }; return b[0] + b[3]; }\n");
+        cs.ShouldContain("stackalloc byte[]{ 1, 2, 3, 0 }");
+    }
+
+    [Fact]
+    public void Lowers_undefined_sentinel_array_local_reserving_the_extra_slot()
+    {
+        // `var b: [3:0]u8 = undefined;` → a zeroed stackalloc of N+1 = 4 (the trailing slot is the
+        // sentinel; C# zero-fills the rest), distinct from a plain `[3]u8` (which is `byte[3]`).
+        var cs = EmitZig(
+            "pub fn main() u8 { var b: [3:0]u8 = undefined; b[0] = 42; return b[0]; }\n");
+        cs.ShouldContain("stackalloc byte[4]");
+    }
+
+    [Fact]
+    public void Rejects_a_non_zero_sentinel_array()
+    {
+        // V1 supports only the zero sentinel `:0` (a NUL-terminated buffer); a non-zero sentinel
+        // (`[3:1]u8`) is deferred with a clear error, mirroring the `[*:s]` / `[:s]` pointer cuts.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 { const b: [3:1]u8 = .{ 1, 2, 3 }; return b[0]; }\n"));
+        ex.Message.ShouldContain("zero sentinel");
+    }
+
+    [Fact]
+    public void Rejects_a_global_sentinel_array()
+    {
+        // The N+1 reservation is materialized only at the local-decl stackalloc; a pinned global
+        // store has no such hook yet, so a global `[N:0]T` is rejected (not silently truncated).
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const g: [3:0]u8 = .{ 1, 2, 3 };\npub fn main() u8 { return g[0]; }\n"));
+        ex.Message.ShouldContain("deferred");
+    }
+
+    [Fact]
     public void Lowers_for_over_slice()
     {
         // `for (s) |b| {...}` → for (ulong __i = 0; __i < s.Len; __i++) { byte b = s.Ptr[__i]; ... }
