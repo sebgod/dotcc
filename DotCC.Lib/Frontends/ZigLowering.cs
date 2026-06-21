@@ -3497,9 +3497,19 @@ internal sealed class ZigLowering
         // `[]T` / `[]const T` slice → CType.Slice (the runtime Slice<T> / ConstSlice<T> fat
         // pointer). `[]const T` carries the `const` on the element, so the backend renders it
         // as `ConstSlice<T>` — element-only const, like the pointer forms above. See
-        // [[CType.Slice]]. (`[N]T` arrays and `[*]T` many-pointers are still deferred.)
+        // [[CType.Slice]].
         Zig.TySlice s      => new CType.Slice(LowerType(s.Arg2)),
         Zig.TySliceConst s => new CType.Slice(LowerType(s.Arg3).WithQuals(TypeQual.Const)),
+        // Sentinel-terminated types (Milestone O, part 3 — the C-string shape; V1 sentinel = 0).
+        // `[*:0]T` is a NUL-terminated many-item pointer (C's `char*`) → a bare `T*`, like `[*]`;
+        // `[:0]T` is a NUL-terminated slice → CType.Slice, like `[]T`. The sentinel is a type-level
+        // annotation, not separately enforced (string literals are already NUL-terminated, so a
+        // manual `while (p[n] != 0)` scan works); the auto-scan `p[0..]` on a sentinel pointer is
+        // a documented cut. Const rides as a TypeQual on the element, same as the non-sentinel forms.
+        Zig.TySentPtr p      => new CType.Pointer(LowerType(p.Arg1)),
+        Zig.TySentPtrConst p => new CType.Pointer(LowerType(p.Arg2).WithQuals(TypeQual.Const)),
+        Zig.TySentSlice s      => new CType.Slice(LowerType(s.Arg1)),
+        Zig.TySentSliceConst s => new CType.Slice(LowerType(s.Arg2).WithQuals(TypeQual.Const)),
         // `[N]T` fixed-size array → CType.Array(element, N). N must be an integer literal
         // (a general comptime const-expr size is deferred). A `var b: [N]T` local lowers to a
         // stackalloc'd C array (see DeclOf), so slicing it (`b[lo..hi]`) yields a stack-backed slice.

@@ -949,6 +949,20 @@ public sealed class ZigOracleTests
             "    if (take3(p) != 3) return 1;\n" + // closed slice of a [*]T -> .len
             "    return first(p);\n" + // 42
             "}\n", 42, "" },
+        // sentinel-terminated types: `[:0]const u8` slice (.len excludes the NUL), `[*:0]const u8`
+        // C-string pointer (manual scan to the sentinel since string literals are NUL-terminated).
+        // s.len(21) + clen(21) = 42; `s.ptr` is a `[*:0]const u8`.
+        new object[] { "sentinel",
+            "fn clen(p: [*:0]const u8) usize {\n" +
+            "    var n: usize = 0;\n" +
+            "    while (p[n] != 0) : (n = n + 1) {}\n" +
+            "    return n;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const s: [:0]const u8 = \"abcdefghijklmnopqrstu\";\n" + // .len = 21
+            "    const p: [*:0]const u8 = s.ptr;\n" +
+            "    return @as(u8, @intCast(s.len + clen(p)));\n" + // 21 + 21 = 42
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

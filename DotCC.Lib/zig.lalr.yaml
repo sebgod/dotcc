@@ -193,6 +193,8 @@ symbols:
   - ErrSetList     # 130 error-set member list: the `A, B, …` inside an `error{ … }` set declaration
   # --- pointer & slice completeness (Milestone O; appended — never reorder) ---
   - '[*]'          # 131 many-item-pointer type prefix: `[*]T` / `[*]const T` (glued token, → `T*`)
+  - '[:0]'         # 132 sentinel-terminated slice prefix: `[:0]T` (glued token, → `Slice<T>`)
+  - '[*:0]'        # 133 sentinel-terminated many-item-pointer prefix: `[*:0]T` (glued token, → `T*`)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -581,6 +583,17 @@ productions:
       # both are `T*` in dotcc.
       - { lhs: Type, rhs: ['[*]', Type],           action: tyManyPtr }
       - { lhs: Type, rhs: ['[*]', 'const', Type],  action: tyManyPtrConst }
+      # Sentinel-terminated types (Milestone O, part 3 — the C-string shape; V1 sentinel = 0
+      # only, glued into the token). `[*:0]T` is a NUL-terminated many-item pointer (a C string
+      # `char*`); `[:0]T` is a NUL-terminated slice (`.len` excludes the sentinel). They lower
+      # to the SAME `T*` / `Slice<T>` as `[*]T` / `[]T` — the sentinel is a type-level annotation,
+      # not separately enforced (dotcc's string literals are already NUL-terminated, so a manual
+      # `while (p[n] != 0)` scan works). The auto-scan open-ended slice `p[0..]` on a sentinel
+      # pointer is a documented cut (use a manual scan loop).
+      - { lhs: Type, rhs: ['[*:0]', Type],          action: tySentPtr }
+      - { lhs: Type, rhs: ['[*:0]', 'const', Type], action: tySentPtrConst }
+      - { lhs: Type, rhs: ['[:0]', Type],           action: tySentSlice }
+      - { lhs: Type, rhs: ['[:0]', 'const', Type],  action: tySentSliceConst }
       - { lhs: Type, rhs: ['[', ']', Type],       action: tySlice }
       # `[]const T` — a const slice. The `const` after `]` is unambiguous (no Type starts
       # with a bare `const`), so it stays conflict-free against `[]T` / `[Expr]T`.
@@ -910,6 +923,11 @@ lexer:
     # contiguous 3 chars `[*]`; an index like `a[*p]` has a token between `*` and `]`,
     # so the regex falls back to the single-char `[` (no clash, same logic as `[*c]`).
     - { symbol: '[*]', match: '\[\*\]' }
+    # `[*:0]` / `[:0]` — sentinel-terminated pointer / slice prefixes, ONE glued token each
+    # (V1 sentinel = 0). Longest-match: `[*:0]` (5 chars) beats `[*]`/`[*c]`/`[`; `[:0]` (4)
+    # beats `[`. `[:` never starts an expression, so no clash with index/slice expressions.
+    - { symbol: '[*:0]', match: '\[\*:0\]' }
+    - { symbol: '[:0]',  match: '\[:0\]' }
 
     # Single-char operators / punctuation.
     - { symbol: '(', match: '\(' }
