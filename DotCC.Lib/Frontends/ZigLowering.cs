@@ -194,6 +194,13 @@ internal sealed class ZigLowering
     /// <c>fba.allocator()</c> result is never recorded here (→ indirect dispatch).</summary>
     private readonly Dictionary<string, AllocKind> _defaultAllocatorBindings = new(System.StringComparer.Ordinal);
 
+    /// <summary>Names bound to an explicit error-set declaration (Milestone N, part 5): a
+    /// <c>const E = error{A, B};</c> records <c>E</c> here. dotcc erases the set, so <c>E</c> carries
+    /// no runtime value (it is used only as the ignored set in an <c>E!T</c> return type) — recording
+    /// it makes the top-level global pass skip its (non-existent) decl, exactly like the comptime
+    /// allocator/import bindings.</summary>
+    private readonly HashSet<string> _errorSets = new(System.StringComparer.Ordinal);
+
     /// <summary>The provable kind of an allocator operand. V1 has exactly one provable kind — the
     /// C heap (the statically-known <c>page_allocator</c>/<c>c_allocator</c> default), which
     /// devirtualizes to direct <c>Libc.malloc</c>/<c>free</c>.</summary>
@@ -2782,6 +2789,14 @@ internal sealed class ZigLowering
             case Zig.ErrorLit el:
                 return LowerErrorLit(Tok(el.Arg2));
 
+            // `error{A, B}` as a VALUE is not meaningful in dotcc's erased model — it is only a
+            // `const E = error{…};` declaration (handled in TryComptimeConstBinding, emits nothing)
+            // or an (ignored) set in an `E!T` return type.
+            case Zig.ErrorSet:
+            case Zig.ErrorSetEmpty:
+                throw new IrUnsupportedException(
+                    "zig `error{…}` set literal is only valid as a `const E = error{…};` declaration or an `E!T` return-type set");
+
             // call of a named function (bare-identifier callee).
             case Zig.CallArgs c:   return LowerCall(c.Arg0, c.Arg2);
             case Zig.CallNoArgs c: return LowerCall(c.Arg0, null);
@@ -3219,7 +3234,40 @@ internal sealed class ZigLowering
             _defaultAllocatorBindings[name] = kind;
             return true;
         }
+        // `const E = error{A, B};` — an explicit error-set declaration (Milestone N, part 5). dotcc
+        // erases the set into the flat global code space, so register the member names (assigning
+        // each a stable code, in declaration order) and emit NO decl; `E` is then used only as the
+        // (erased) set in an `E!T` return type, where LowerType ignores the set name anyway. An empty
+        // `error{}` (the never-erroring set) has no members to register.
+        if (rhs.Content is Zig.ErrorSet es)
+        {
+            foreach (var member in WalkErrSetMembers(es.Arg2)) { ErrorCode(member); }
+            _errorSets.Add(name);
+            return true;
+        }
+        if (rhs.Content is Zig.ErrorSetEmpty)
+        {
+            _errorSets.Add(name);
+            return true;
+        }
         return false;
+    }
+
+    /// <summary>Walk an <c>error{ A, B, … }</c> member list (the right-recursive <c>ErrSetList</c>)
+    /// into its member names, mirroring the grammar's one / trailing-comma / cons shapes.</summary>
+    private static IEnumerable<string> WalkErrSetMembers(Item list)
+    {
+        var cur = list;
+        while (true)
+        {
+            switch (cur.Content)
+            {
+                case Zig.ErrSetOne o:         yield return Tok(o.Arg0); yield break;
+                case Zig.ErrSetOneTrailing o: yield return Tok(o.Arg0); yield break;
+                case Zig.ErrSetCons c:        yield return Tok(c.Arg0); cur = c.Arg2; break;
+                default:                      yield break;
+            }
+        }
     }
 
     /// <summary>Walk a dotted access chain (<see cref="Zig.Field"/> over a <see cref="Zig.Ident"/>
@@ -3271,7 +3319,7 @@ internal sealed class ZigLowering
     /// recorded by <see cref="TryComptimeConstBinding"/> (a module import or a known-default
     /// allocator) — so pass 1 skips its (non-existent) top-level decl.</summary>
     private bool IsComptimeBound(string name)
-        => _imports.ContainsKey(name) || _defaultAllocatorBindings.ContainsKey(name);
+        => _imports.ContainsKey(name) || _defaultAllocatorBindings.ContainsKey(name) || _errorSets.Contains(name);
 
     /// <summary>Strip the surrounding double quotes from a Zig string-literal lexeme. Used only
     /// for the simple identifier-shaped module name in <c>@import("…")</c> (no escapes).</summary>

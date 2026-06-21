@@ -96,7 +96,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `_ = e;` discard | ✅ | Zig's mandatory discard of a non-void result |
 | block `{ … }` | ✅ | |
 | `defer Stmt;` | ✅ | scope-exit cleanup — runs on EVERY exit from the enclosing block (fall-through, `return`, `break`, `continue`, a propagating error), in LIFO declaration order. → C# `try { rest } finally { cleanup }`. The deferred `Stmt` is an `expr;`, a `_ = expr;` discard, or a braced block. See the **Defer** section |
-| `errdefer Stmt;` | ✅ | error-exit cleanup — runs only when the block exits via a propagating error, LIFO-interleaved with `defer`. → C# `try { rest } catch (ZigErrorReturn) { cleanup; throw; }`. A function with an `errdefer` routes its `return error.X` through a throw so it reaches the catch. **Deferred:** `errdefer \|e\| …` payload capture |
+| `errdefer Stmt;` | ✅ | error-exit cleanup — runs only when the block exits via a propagating error, LIFO-interleaved with `defer`. → C# `try { rest } catch (ZigErrorReturn) { cleanup; throw; }`. A function with an `errdefer` routes its `return error.X` through a throw so it reaches the catch. **NOT pursued:** `errdefer \|e\| …` payload capture — current Zig (0.17) has REMOVED that syntax (`errdefer \|e\|` is a parse error: "expected block or expression, found '\|'"), so dotcc rejects it too (round-trippable) |
 | `for (a..b) \|i\| …` (range for) | ✅ | → C `for (usize i = a; i < b; i++)`; the `\|i\|` capture is the usize loop index (`\|_\|` discards). The body is a Stmt or block |
 | `for (s) \|x\|` / `for (s, 0..) \|x, i\|` (for-over-slice) | ✅ | iterate a slice's elements (`x` = a per-iteration copy); the index form also binds the usize index. → C `for (usize __i=0; __i<s.Len; __i++) { var x = s.Ptr[__i]; [var i = __i + 0;] … }` (the slice is hoisted to a temp unless a bare var) |
 | `for (s) \|*e\|` (by-reference for-slice) | ✅ | BY-REFERENCE element capture (Milestone M, part 4): `e` is a `T*` into the slice element (`T* e = &s.Ptr[__i];`), so `e.* = …` writes through to the element. **Deferred:** the by-ref + index combo `for (s, 0..) \|*e, i\|` |
@@ -135,6 +135,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `error.Foo` (bare error value) | ✅ | a first-class error VALUE (Milestone N, part 1) — usable outside `return error.Foo;`: bound to a `const`/`var`, captured (`else \|e\|` / future `catch \|e\|`), and compared. V1 erases the named set into one flat global code space, so an `error.Foo` lowers to its stable `ushort` code, typed `CType.ErrorSet`. (Explicit `error{A,B}` set decls / named `E!T` distinct from `anyerror!T` are still deferred) |
 | `e == error.Foo` / `e != error.Foo` (error-value equality) | ✅ | error-value comparison (Milestone N, part 1) — equal codes mean equal errors, so `==`/`!=` lower to the ordinary integer comparison of the flat codes. Works on a bound error too (`else \|e\|` / a `const`), which un-erases the Milestone M part-3 cut (a USED named `\|e\|` is now valid in both compilers) |
 | `switch (e) { error.Foo => …, else => … }` (error switch) | ✅ | switch on an error value (Milestone N, part 2) — an error value IS its flat `ushort` code, so this lowers to an ORDINARY integer `switch` on the code (each `error.Foo` prong → a `case <code>:`, `else` → `default:`). Rode in on part 1's representation — no new lowering. The error is commonly captured from `else \|e\|` first; an `anyerror!T` (open set) requires the `else` |
+| `const E = error{ A, B };` (error-set declaration) | ✅ | an explicit named error set (Milestone N, part 5). dotcc erases the set into the flat global code space, so the decl is COMPTIME — it registers the member names (each a stable code) and emits NO runtime decl; `E` is then used only as the (ignored) set in an `E!T` return type, which lowers to the same `ErrUnion<T>` as `anyerror!T`. An inline `error{A}!T` return type works the same way. **Deferred:** `E.member` access (use the global `error.member`); `@errorName` (needs the un-erased name table) |
 | postfix `.field` | ✅ | struct field access → the shared `Member` IR (field type from the aggregate table). Zig has no `->`, so `p.field` on a `*T` auto-derefs (emits C# `->`). `EnumName.member` resolves here too → an `EnumConstRef` |
 | `.{ .f = v, … }` (anonymous struct literal) | ✅ | result-located → `new T { f = v }` from the sink type (a typed decl, return, assignment, call arg, or field). Empty `.{}` zero-inits |
 | `T{ .f = v, … }` (typed struct literal) | ✅ | Zig's `CurlySuffixExpr <- TypeExpr InitList?` — the type is named, so NO sink is needed; valid in any position, incl. sink-less ones like `(T{…}).field`. A dedicated `CurlySuffix` grammar level (above `Type`) makes it conflict-free against `fn f() RetType {` (the return type stays a raw `Type`, no init list) — no rewriter. `&T{…}` (address of a temporary) materializes a block-local temp and takes its address (the same shared-backend path as C's `&(T){…}`) |
@@ -272,9 +273,13 @@ space (`!T` / `anyerror!T` / `E!T` lower identically; an `error.Foo` value is it
 payload must be a value type (an error union over a *pointer* is deferred — a C# generic can't
 take a pointer arg); a side-effecting / capturing `catch` is a `const`/`var` initializer only (a
 sub-expression position keeps the eager-only rule); and the control-flow fallback `catch return` /
-`catch |e| return e` and explicit `error{…}` set decls are deferred. An error-union `main`
+`catch |e| return e` is deferred. An error-union `main`
 (`!void` / `!u8`, Milestone N part 4) IS supported — an error from main reports its flat code to
 stderr and exits 1 (real zig prints the error NAME + a trace; the name awaits the un-erased set).
+Explicit `error{A, B}` set declarations (Milestone N part 5) are supported — dotcc erases the set,
+so the decl is comptime (registers names, emits nothing) and `E!T` lowers like `anyerror!T`. STILL
+un-erasing-bound: `@errorName(e)` and real error NAMES in a main trace need a runtime code→name
+table (deferred). `errdefer |e|` capture is NOT pursued (current Zig removed the syntax).
 
 ## Allocators — devirtualize the default, vtable for the rest
 
@@ -451,4 +456,6 @@ rejects, not silently accept more.
   `examples/zig-catch-capture` (`catch |e|` capture using `e == error.Bad` for a bool fallback, plus
   a lazy side-effecting `catch dflt()` whose call runs only on the error path),
   `examples/zig-errunion-main` (error-union `main`: `pub fn main() !u8` with `try` inside, the payload
-  as the process exit code; an error would propagate to the entry and exit 1).
+  as the process exit code; an error would propagate to the entry and exit 1),
+  `examples/zig-error-set` (a named `const MathError = error{ Overflow, Negative };` used as a
+  `MathError!i32` return type — the erased set, members returned via `error.X` and handled with `catch`).

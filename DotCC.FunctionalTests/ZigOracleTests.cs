@@ -877,6 +877,20 @@ public sealed class ZigOracleTests
         new object[] { "main_errunion_err",
             "fn mk(ok: bool) !u8 { if (ok) return 42; return error.Bad; }\n" +
             "pub fn main() !u8 { const v = try mk(false); return v; }\n", 1, "" },
+
+        // --- Milestone N (part 5): explicit `error{A, B}` set declarations + named `E!T` ---
+        // A named error set used as an `E!T` return type; dotcc erases the set (`E` emits nothing).
+        // checked(5)→10, checked(-1)→error.Negative→catch 12, checked(200)→error.Overflow→catch 20.
+        new object[] { "error_set",
+            "const MathError = error{ Overflow, Negative };\n" +
+            "fn checked(n: i32) MathError!i32 { if (n > 100) return error.Overflow; if (n < 0) return error.Negative; return n * 2; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var sum: i32 = 0;\n" +
+            "    sum += checked(5) catch 0;\n" + // +10
+            "    sum += checked(-1) catch 12;\n" + // +12
+            "    sum += checked(200) catch 20;\n" + // +20
+            "    return @as(u8, @intCast(sum));\n" + // 42
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
