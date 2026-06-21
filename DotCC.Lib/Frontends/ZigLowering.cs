@@ -33,7 +33,7 @@ namespace DotCC.Frontends;
 /// an integer-valued <c>(CBool)(…)</c> and wraps every condition in <c>Cond.B(…)</c>,
 /// so an <c>int</c>-typed relational feeds <c>if</c>/<c>while</c>/ternary cleanly.
 /// </summary>
-internal sealed class ZigLowering
+internal sealed partial class ZigLowering
 {
     private readonly IrBuilder _ir;
     private readonly SymbolTable _symbols;
@@ -581,6 +581,11 @@ internal sealed class ZigLowering
             .Select(p => _symbols.Declare(new Symbol { Name = p.name, Kind = SymKind.Param, Type = p.type }))
             .ToList();
         var blk = LowerBlock(body);
+        // Milestone O part 5 — demote a non-escaping, freed, constant-size byte slice allocated
+        // through the devirtualized C-heap default (`page_allocator`/`c_allocator`) to a `stackalloc`
+        // backing. Runs BEFORE ExitScope so the synthetic backing-buffer temp uniquifies against this
+        // function's names (BeginFunction cleared `_usedNames`; ExitScope would not).
+        blk = PromoteStackSlices(blk);
         _symbols.ExitScope();
 
         _ir.Functions.Add(new FuncDef(funcSym, paramSyms, blk, false));

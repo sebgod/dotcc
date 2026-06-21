@@ -976,6 +976,25 @@ public sealed class ZigOracleTests
             "    if (buf[5] != 0) return 1;\n" + // the reserved sentinel slot is 0
             "    return @as(u8, @intCast(sum));\n" + // 42
             "}\n", 42, "" },
+
+        // Non-escaping stack-slice peephole (Milestone O, part 5): a page_allocator (devirt'd
+        // C-heap) byte slice that is constant-size, freed, and used only via s[i]/s.len is demoted
+        // to a `stackalloc` backing on dotcc (the heap alloc/free vanish). Real zig heap-allocs +
+        // frees; both observe 6 * 7 = 42.
+        new object[] { "stack_slice",
+            "const std = @import(\"std\");\n" +
+            "fn run() !u8 {\n" +
+            "    const a = std.heap.page_allocator;\n" +
+            "    const buf = try a.alloc(u8, 6);\n" +
+            "    var i: usize = 0;\n" +
+            "    while (i < buf.len) : (i = i + 1) { buf[i] = 7; }\n" +
+            "    var sum: u32 = 0;\n" +
+            "    i = 0;\n" +
+            "    while (i < buf.len) : (i = i + 1) { sum = sum + buf[i]; }\n" +
+            "    a.free(buf);\n" +
+            "    return @as(u8, @intCast(sum));\n" + // 6 * 7 = 42
+            "}\n" +
+            "pub fn main() u8 { return run() catch 1; }\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
