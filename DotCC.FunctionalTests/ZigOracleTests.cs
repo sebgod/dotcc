@@ -924,6 +924,20 @@ public sealed class ZigOracleTests
             "    sum += deref(null);\n" + // 5
             "    return @as(u8, @intCast(sum));\n" + // 42
             "}\n", 42, "" },
+        // open-ended slicing `s[lo..]`: the high bound is the source length. Slice source via
+        // `.len` (21+14+7 = 42); array source through the offset element pointer (t[0], t.len);
+        // a closed re-slice still works. Element read proves `.ptr + lo`; lengths prove `len - lo`.
+        new object[] { "open_slice",
+            "pub fn main() u8 {\n" +
+            "    const s: []const u8 = \"abcdefghijklmnopqrstu\";\n" + // len 21
+            "    const a = s[0..].len + s[7..].len + s[14..].len;\n" + // 21+14+7 = 42
+            "    const arr = [_]u8{ 5, 10, 20, 12 };\n" +
+            "    const t = arr[1..];\n" + // {10,20,12}
+            "    if (t[0] != 10) return 1;\n" + // element through the offset pointer
+            "    if (t.len != 3) return 2;\n" + // array open-ended length
+            "    if (s[2..5].len != 3) return 3;\n" + // closed re-slice still works
+            "    return @as(u8, @intCast(a));\n" + // 42
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

@@ -611,6 +611,11 @@ productions:
       # Slicing `a[lo..hi]` → a sub-slice. Conflict-free against `index`: after
       # `Suffix '[' Expr`, the lookahead `..` (vs `]`) selects this production.
       - { lhs: Suffix, rhs: [Suffix, '[', Expr, '..', Expr, ']'], action: sliceRange }
+      # Open-ended slicing `a[lo..]` → the high bound is the source length. Conflict-free
+      # against `sliceRange`: after `Suffix '[' Expr '..'`, the lookahead `]` (vs an
+      # Expr-start) selects this production. Valid only on a known-length source (slice
+      # or array); a bare pointer has no length (rejected in lowering, as Zig does).
+      - { lhs: Suffix, rhs: [Suffix, '[', Expr, '..', ']'], action: sliceOpen }
       - { lhs: Suffix, rhs: [Suffix, '(', ArgList, ')'], action: callArgs }
       - { lhs: Suffix, rhs: [Suffix, '(', ')'],          action: callNoArgs }
       - { lhs: Suffix, rhs: [Primary] }

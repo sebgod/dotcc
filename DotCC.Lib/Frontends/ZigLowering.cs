@@ -1190,6 +1190,64 @@ internal sealed class ZigLowering
         return new SliceNew(value, lenLit, elem.Unqualified, elem.IsConst) { Type = sliceType };
     }
 
+    /// <summary>Lower a slice expression <c>base[lo..hi]</c> to a fat-pointer
+    /// <see cref="SliceNew"/> <c>{ base.ptr + lo, hi - lo }</c>. When <paramref name="hi"/> is
+    /// null the slice is open-ended (<c>base[lo..]</c>) and the high bound is the source length:
+    /// a slice's <c>.Len</c> or an array's element count. The base may be a slice (re-slice
+    /// through <c>.Ptr</c>), a bare pointer (no length — open-ended is rejected, as Zig does),
+    /// or an array (decays to its element pointer); the element type + const-ness ride into the
+    /// resulting <c>[]T</c> / <c>[]const T</c>.</summary>
+    private CExpr BuildSlice(CExpr baseExpr, CExpr lo, CExpr? hi)
+    {
+        CExpr basePtr;
+        CType element;
+        CExpr? sourceLen;   // the known source length, used for an open-ended high bound
+        switch (baseExpr.Type.Unqualified)
+        {
+            case CType.Slice s:
+                basePtr = new Member(baseExpr, "Ptr", false) { Type = new CType.Pointer(s.Element) };
+                element = s.Element;
+                sourceLen = new Member(baseExpr, "Len", false) { Type = CType.ULong };
+                break;
+            case CType.Pointer p:
+                basePtr = baseExpr;
+                element = p.Pointee;
+                sourceLen = null;   // a bare pointer carries no length
+                break;
+            case CType.Array a:
+                basePtr = baseExpr;   // decays to its element pointer
+                element = a.Element;
+                sourceLen = a.Count is int n
+                    ? new LitInt(n.ToString(CultureInfo.InvariantCulture), n) { Type = CType.ULong }
+                    : null;
+                break;
+            default:
+                throw new IrUnsupportedException($"cannot slice a {baseExpr.Type.Describe()} (need a slice, pointer, or array)");
+        }
+        var ptr = new Binary(BinOp.Add, basePtr, lo) { Type = new CType.Pointer(element) };
+        CExpr len;
+        if (hi is not null)
+        {
+            // len = (ulong)(hi - lo). The explicit cast covers non-constant bounds, where
+            // a signed `int` difference has no implicit conversion to the ctor's `ulong`.
+            var diff = new Binary(BinOp.Sub, hi, lo) { Type = hi.Type };
+            len = new Cast(CType.ULong, diff) { Type = CType.ULong };
+        }
+        else
+        {
+            if (sourceLen is null)
+            {
+                throw new IrUnsupportedException(
+                    "open-ended slice `[lo..]` needs a known length (slice or array); a bare pointer has none");
+            }
+            // len = sourceLen - (ulong)lo. sourceLen is already ulong; cast lo to match (a
+            // signed `int` index has no implicit conversion to ulong).
+            var loU = new Cast(CType.ULong, lo) { Type = CType.ULong };
+            len = new Binary(BinOp.Sub, sourceLen, loU) { Type = CType.ULong };
+        }
+        return new SliceNew(ptr, len, element.Unqualified, element.IsConst) { Type = new CType.Slice(element) };
+    }
+
     /// <summary>Lower a <c>@builtin(...)</c> call. Several builtins are RESULT-LOCATION-typed —
     /// Zig infers their target from the sink, not an explicit type argument: <c>@intCast</c>,
     /// <c>@truncate</c>, <c>@ptrCast</c>, <c>@bitCast</c>, <c>@floatFromInt</c>,
@@ -2759,36 +2817,13 @@ internal sealed class ZigLowering
             // may be a slice (re-slice through `.Ptr`), a pointer, or an array (decays); the
             // element type + const-ness ride into the resulting `[]T` / `[]const T`.
             case Zig.SliceRange sr:
-            {
-                var baseExpr = LowerExpr(sr.Arg0);
-                var lo = LowerExpr(sr.Arg2);
-                var hi = LowerExpr(sr.Arg4);
-                CExpr basePtr;
-                CType element;
-                switch (baseExpr.Type.Unqualified)
-                {
-                    case CType.Slice s:
-                        basePtr = new Member(baseExpr, "Ptr", false) { Type = new CType.Pointer(s.Element) };
-                        element = s.Element;
-                        break;
-                    case CType.Pointer p:
-                        basePtr = baseExpr;
-                        element = p.Pointee;
-                        break;
-                    case CType.Array a:
-                        basePtr = baseExpr;   // decays to its element pointer
-                        element = a.Element;
-                        break;
-                    default:
-                        throw new IrUnsupportedException($"cannot slice a {baseExpr.Type.Describe()} (need a slice, pointer, or array)");
-                }
-                var ptr = new Binary(BinOp.Add, basePtr, lo) { Type = new CType.Pointer(element) };
-                // len = (ulong)(hi - lo). The explicit cast covers non-constant bounds, where
-                // a signed `int` difference has no implicit conversion to the ctor's `ulong`.
-                var diff = new Binary(BinOp.Sub, hi, lo) { Type = hi.Type };
-                var len = new Cast(CType.ULong, diff) { Type = CType.ULong };
-                return new SliceNew(ptr, len, element.Unqualified, element.IsConst) { Type = new CType.Slice(element) };
-            }
+                return BuildSlice(LowerExpr(sr.Arg0), LowerExpr(sr.Arg2), LowerExpr(sr.Arg4));
+
+            // Open-ended slicing `a[lo..]` → the high bound is the source length, so the
+            // result is `{ a.ptr + lo, sourceLen - lo }`. Only a known-length source (slice
+            // or array) has a length; a bare pointer is rejected (as Zig does).
+            case Zig.SliceOpen so:
+                return BuildSlice(LowerExpr(so.Arg0), LowerExpr(so.Arg2), null);
 
             // `.?` optional unwrap. A value optional (CType.Optional → C# `T?`) unwraps via
             // `.Value` (panics on none, matching Zig's `.?`-on-null). An optional POINTER is

@@ -785,6 +785,34 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_open_ended_slice_of_a_slice_to_source_len_minus_lo()
+    {
+        // `s[lo..]` → new ConstSlice<byte>(s.Ptr + lo, s.Len - (ulong)lo); the open high
+        // bound is the source `.Len`, NOT a `hi - lo` difference.
+        var cs = EmitZig("fn tail(s: []const u8, a: usize) usize { const m = s[a..]; return m.len; }\npub fn main() u8 { return 0; }\n");
+        cs.ShouldContain("new ConstSlice<byte>(s.Ptr + a, s.Len - (ulong)a)");
+    }
+
+    [Fact]
+    public void Lowers_open_ended_slice_of_an_array_to_count_minus_lo()
+    {
+        // `arr[lo..]` on a `[N]T` array → the open high bound is the element count `N`,
+        // so the length is `N - (ulong)lo` and the base decays to its element pointer.
+        var cs = EmitZig("pub fn main() u8 { var b: [4]u8 = undefined; b[0] = 1; const s = b[1..]; return s[0]; }\n");
+        cs.ShouldContain("new Slice<byte>(b + 1, 4UL - (ulong)1)");
+    }
+
+    [Fact]
+    public void Rejects_open_ended_slice_of_a_bare_pointer()
+    {
+        // A `[*c]T` C-pointer has no length, so `p[lo..]` cannot infer a high bound —
+        // rejected with a clear error (matching Zig, which also forbids it).
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "fn f(p: [*c]u8) usize { const s = p[1..]; return s.len; }\npub fn main() u8 { return 0; }\n"));
+        ex.Message.ShouldContain("open-ended slice");
+    }
+
+    [Fact]
     public void Lowers_for_over_slice()
     {
         // `for (s) |b| {...}` → for (ulong __i = 0; __i < s.Len; __i++) { byte b = s.Ptr[__i]; ... }
