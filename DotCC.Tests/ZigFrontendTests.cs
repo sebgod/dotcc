@@ -2400,4 +2400,82 @@ public sealed class ZigFrontendTests
             "}\n"));
         ex.Message.ShouldContain("tagged-union");
     }
+
+    // ---- Milestone P, part 1: wrapping arithmetic (`+%` / `-%` / `*%` + compound) ----
+
+    [Fact]
+    public void Lowers_wrapping_add_at_a_sub_int_width_with_a_truncating_cast()
+    {
+        // `a +% b` on `u8` operands wraps at 8 bits. C# would promote the operands to `int`, so a
+        // truncating `(byte)` cast back to the operand width is inserted — exactly two's-complement
+        // wrap in the project's unchecked context (200 + 100 = 300 → 44).
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const a: u8 = 200;\n" +
+            "    const b: u8 = 100;\n" +
+            "    const c: u8 = a +% b;\n" +
+            "    return c;\n" +
+            "}\n");
+        cs.ShouldContain("(byte)(a + b)");
+    }
+
+    [Fact]
+    public void Lowers_wrapping_mul_with_a_truncating_cast()
+    {
+        // `*%` is multiplicative-precedence; on `u8` it wraps at 8 bits (16 * 16 = 256 → 0).
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const a: u8 = 16;\n" +
+            "    const b: u8 = 16;\n" +
+            "    const c: u8 = a *% b;\n" +
+            "    return c;\n" +
+            "}\n");
+        cs.ShouldContain("(byte)(a * b)");
+    }
+
+    [Fact]
+    public void Wraps_at_the_operand_width_before_widening()
+    {
+        // The wrap is at the OPERAND width, not the result location: `u8 +% u8` wraps at 8 bits
+        // (300 → 44) and only then widens to the `u32` sink — so the truncating cast is `(byte)`,
+        // never `(uint)`. (A naive "wrap at the sink width" would give 300, the bug this guards.)
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const a: u8 = 200;\n" +
+            "    const b: u8 = 100;\n" +
+            "    const w: u32 = a +% b;\n" +
+            "    return @as(u8, @intCast(w - 2));\n" +
+            "}\n");
+        cs.ShouldContain("uint w = (byte)(a + b)");
+    }
+
+    [Fact]
+    public void Lowers_wrapping_at_int_width_without_a_cast()
+    {
+        // At `int` and wider, native C# arithmetic already wraps at the operand width in the
+        // unchecked context, so no extra truncating cast is emitted.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const a: i32 = 100;\n" +
+            "    const b: i32 = 200;\n" +
+            "    const c: i32 = a +% b;\n" +
+            "    return @as(u8, @intCast(c - 258));\n" +
+            "}\n");
+        cs.ShouldContain("a + b");
+        cs.ShouldNotContain("(int)(a + b)");
+    }
+
+    [Fact]
+    public void Lowers_a_wrapping_compound_assignment_to_a_native_compound_op()
+    {
+        // `x +%= y` is a native C# `x += y` — the compound operator already truncates back to the
+        // LHS width (unchecked), so it is observably identical to the plain `+=` form.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var x: u8 = 40;\n" +
+            "    x +%= 2;\n" +
+            "    return x;\n" +
+            "}\n");
+        cs.ShouldContain("x += (byte)(2)"); // native compound op (value coerced to the LHS width)
+    }
 }

@@ -995,6 +995,27 @@ public sealed class ZigOracleTests
             "    return @as(u8, @intCast(sum));\n" + // 6 * 7 = 42
             "}\n" +
             "pub fn main() u8 { return run() catch 1; }\n", 42, "" },
+
+        // Wrapping arithmetic (Milestone P, part 1): `+%`/`-%`/`*%` + the compound forms. Two's-
+        // complement wrap at the operand width (Zig has no integer promotion); the `u32` slot proves
+        // the wrap is at the `u8` operand width (260 -> 4), NOT the result location. Lands on 42.
+        new object[] { "wrap_ops",
+            "pub fn main() u8 {\n" +
+            "    var x: u8 = 200;\n" +
+            "    x +%= 100;\n" + // 300 -> 44
+            "    x -%= 2;\n" +   // 42
+            "    var k: u8 = 16;\n" +
+            "    k *%= 16;\n" +  // 256 -> 0
+            "    if (k != 0) return 1;\n" +
+            "    const z: u8 = 0;\n" +
+            "    const u: u8 = z -% 2;\n" + // 0 -% 2 -> 254
+            "    if (u != 254) return 2;\n" +
+            "    const a: u8 = 250;\n" +
+            "    const b: u8 = 10;\n" +
+            "    const w: u32 = a +% b;\n" + // 260 wraps at u8 -> 4, then widens -> 4
+            "    if (w != 4) return 3;\n" +
+            "    return x;\n" + // 42
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

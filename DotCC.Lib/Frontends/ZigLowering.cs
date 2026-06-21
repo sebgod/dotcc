@@ -1459,6 +1459,14 @@ internal sealed partial class ZigLowering
             case Zig.StmtBitOrAssign a:  return CompoundAssign(a.Arg0, BinOp.BitOr, a.Arg2);
             case Zig.StmtBitXorAssign a: return CompoundAssign(a.Arg0, BinOp.BitXor, a.Arg2);
 
+            // `x op%= y` (wrapping compound assignment, Milestone P) → the SAME CompoundAssign node as
+            // the plain form. A native C# `target op= rhs` already truncates the result back to the LHS
+            // width in the project's unchecked context — exactly two's-complement wrap — so `+%=` and
+            // `+=` lower identically (dotcc doesn't model Zig's plain-`+` safe-mode overflow trap).
+            case Zig.StmtAddWrapAssign a: return CompoundAssign(a.Arg0, BinOp.Add, a.Arg2);
+            case Zig.StmtSubWrapAssign a: return CompoundAssign(a.Arg0, BinOp.Sub, a.Arg2);
+            case Zig.StmtMulWrapAssign a: return CompoundAssign(a.Arg0, BinOp.Mul, a.Arg2);
+
             // if (cond) then [else else]  — `then`/`else`/`body` are themselves Stmts
             // (a single statement or a brace Block), which LowerStmt handles uniformly.
             case Zig.StmtIf f:          return new If(LowerExpr(f.Arg2), LowerStmt(f.Arg4), null);
@@ -2657,6 +2665,10 @@ internal sealed partial class ZigLowering
             case Zig.Add a:     return Bin(BinOp.Add, a.Arg0, a.Arg2);
             case Zig.Sub a:     return Bin(BinOp.Sub, a.Arg0, a.Arg2);
             case Zig.Mul a:     return Bin(BinOp.Mul, a.Arg0, a.Arg2);
+            // wrapping arithmetic (Milestone P) — two's-complement wrap at the operand width
+            case Zig.AddWrap a: return WrapBin(BinOp.Add, a.Arg0, a.Arg2);
+            case Zig.SubWrap a: return WrapBin(BinOp.Sub, a.Arg0, a.Arg2);
+            case Zig.MulWrap a: return WrapBin(BinOp.Mul, a.Arg0, a.Arg2);
             case Zig.DivOp a:   return Bin(BinOp.Div, a.Arg0, a.Arg2);
             case Zig.ModOp a:   return Bin(BinOp.Mod, a.Arg0, a.Arg2);
             // comparison (non-associative in the grammar)
@@ -3285,6 +3297,39 @@ internal sealed partial class ZigLowering
             _ => CType.UsualArithmetic(left.Type, right.Type),
         };
         return new Binary(op, left, right) { Type = type };
+    }
+
+    /// <summary>Lower a Zig WRAPPING arithmetic operator (<c>+%</c>/<c>-%</c>/<c>*%</c>) —
+    /// two's-complement arithmetic that wraps at the OPERAND width. Zig has no integer promotion,
+    /// so the result type is the peer-resolved operand type (<see cref="PeerIntType"/>), and the
+    /// wrap happens at that width. The emitted C# runs in the project's default <c>unchecked</c>
+    /// context, where a narrowing cast truncates rather than throwing. For a sub-<c>int</c> peer
+    /// width (<c>byte</c>/<c>short</c>/…) C# would promote the operands to <c>int</c> and so NOT
+    /// wrap at the operand width — so a truncating <see cref="Cast"/> back to the peer type is
+    /// inserted (correct even when the result is then widened: <c>u8 +% u8</c> wraps at 8 bits
+    /// BEFORE any widening). At <c>int</c> and wider, native C# arithmetic already wraps at the
+    /// right width, so no cast is needed.</summary>
+    private CExpr WrapBin(BinOp op, Item l, Item r)
+    {
+        var left = LowerExpr(l);
+        var right = LowerExpr(r);
+        var t = PeerIntType(left, right);
+        var inner = new Binary(op, left, right) { Type = t };
+        return t.SizeOf < 4 ? new Cast(t, inner) { Type = t } : inner;
+    }
+
+    /// <summary>The fixed-width integer type a wrapping/saturating operator wraps (or saturates) at —
+    /// Zig's peer-resolved operand type. Valid Zig gives both operands one shared type; a bare integer
+    /// literal (a <c>comptime_int</c>, lowered to a <see cref="LitInt"/>) yields to its concrete-typed
+    /// peer. With both concrete the wider wins (they are equal in valid Zig; ties resolve to the
+    /// left).</summary>
+    private static CType PeerIntType(CExpr left, CExpr right)
+    {
+        var lt = left.Type.Unqualified;
+        var rt = right.Type.Unqualified;
+        if (left is LitInt && right is not LitInt) return rt;
+        if (right is LitInt && left is not LitInt) return lt;
+        return lt.SizeOf >= rt.SizeOf ? lt : rt;
     }
 
     /// <summary>Lower the two operands of an <c>==</c> / <c>!=</c> comparison, result-locating a
