@@ -100,7 +100,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `for (a..b) \|i\| …` (range for) | ✅ | → C `for (usize i = a; i < b; i++)`; the `\|i\|` capture is the usize loop index (`\|_\|` discards). The body is a Stmt or block |
 | `for (s) \|x\|` / `for (s, 0..) \|x, i\|` (for-over-slice) | ✅ | iterate a slice's elements (`x` = a per-iteration copy); the index form also binds the usize index. → C `for (usize __i=0; __i<s.Len; __i++) { var x = s.Ptr[__i]; [var i = __i + 0;] … }` (the slice is hoisted to a temp unless a bare var) |
 | `for (s) \|*e\|` (by-reference for-slice) | ✅ | BY-REFERENCE element capture (Milestone M, part 4): `e` is a `T*` into the slice element (`T* e = &s.Ptr[__i];`), so `e.* = …` writes through to the element. **Deferred:** the by-ref + index combo `for (s, 0..) \|*e, i\|` |
-| open-ended `s[lo..]` | 🚫 | (switch-as-expression, labeled-block-as-value, labeled loops + labeled `break`/`continue`, switch ranges, and by-ref `\|*x\|` capture in `for`/`switch` are now ✅; by-ref on an optional/error-union `if`/`while` stays a grammar-level cut) |
+| open-ended `s[lo..]` | ✅ | open-ended slicing (Milestone O, part 1) — the high bound is the source LENGTH, so → `{ s.ptr + lo, sourceLen - lo }` where `sourceLen` is a slice's `.len` or an array's element count. Shares the `s[lo..hi]` machinery; only the high bound differs. A bare pointer carries no length, so open-ending one is rejected (as Zig does). (by-ref on an optional/error-union `if`/`while` stays a grammar-level cut) |
 
 ## Expressions
 
@@ -415,6 +415,8 @@ rejects, not silently accept more.
   `examples/zig-methods` (struct methods + UFCS: static `init`, pointer-receiver `scale`, `@This()` value receiver),
   `examples/zig-union` (tagged `union(enum)`: payload + void variants, `switch` with `\|x\|` capture),
   `examples/zig-slices` (`[]const u8` slices: `.len`/`.ptr`, index, `s[lo..hi]`, `for (s) \|b\|`),
+  `examples/zig-open-slice` (open-ended slicing `s[lo..]`: the high bound is the source length — a
+  slice's `.len`, an array's element count; alongside a closed re-slice),
   `examples/zig-alloc` (allocators: devirt'd `page_allocator`, a `FixedBufferAllocator` via the
   indirect vtable, an opaque `std.mem.Allocator` param + materialized default),
   `examples/zig-tuple` (tuples: a `struct { u8, u8 }` multiple-return + `const lo, const hi = …`
