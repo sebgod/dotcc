@@ -381,6 +381,14 @@ internal sealed class ZigLowering
             throw new IrUnsupportedException(
                 $"a labeled value-block can't initialize the global '{Tok(nameTok)}' (a global needs a comptime value)");
         }
+        // A `[N:0]T` sentinel array's N+1 reservation is materialized only at the local-decl
+        // stackalloc (part 4); the pinned global store has no such hook yet, so reject it clearly
+        // rather than silently dropping the sentinel slot (deferred — declare it as a local).
+        if (IsSentinelArrayType(typeItem))
+        {
+            throw new IrUnsupportedException(
+                $"a global `[N:0]T` sentinel array '{Tok(nameTok)}' is deferred (declare it as a local)");
+        }
         var declared = typeItem is not null ? LowerType(typeItem) : null;
         // `[N]T = undefined` → a zeroed, pinned, program-lifetime backing store (the array-literal
         // forms fall through to the StackArray pinning below, which also catches an inferred
@@ -1611,10 +1619,16 @@ internal sealed class ZigLowering
         // the array name isn't visible in its own initializer.
         if (declared is CType.Array arr)
         {
+            // `[N:0]T` sentinel array (part 4): reserve ONE extra trailing slot for the sentinel 0.
+            // The symbol keeps the logical `CType.Array(element, N)` type (so `.len` / slicing exclude
+            // the sentinel); only the stackalloc extent (and the literal's element list) grow by one,
+            // and C#'s zero-fill makes the trailing slot the sentinel 0.
+            var sentinel = IsSentinelArrayType(typeItem);
             if (initExpr.Content is Zig.UndefinedLit)
             {
+                var n = (arr.Count ?? 0) + (sentinel ? 1 : 0);
                 var sym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = arr });
-                var count = new LitInt((arr.Count ?? 0).ToString(CultureInfo.InvariantCulture), arr.Count ?? 0) { Type = CType.Int };
+                var count = new LitInt(n.ToString(CultureInfo.InvariantCulture), n) { Type = CType.Int };
                 return new ArrayDecl(sym, arr.Element, count, null);   // C# zero-fills the stackalloc
             }
             if (LowerExprSink(initExpr, arr) is not StackArray sa)
@@ -1623,8 +1637,15 @@ internal sealed class ZigLowering
                     $"a `[N]T` array local '{Tok(nameTok)}' must be initialized with an array literal (`.{{…}}` / `[N]T{{…}}`) or `undefined`");
             }
             var asym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = arr });
-            var countLit = new LitInt(sa.Elems.Count.ToString(CultureInfo.InvariantCulture), sa.Elems.Count) { Type = CType.Int };
-            return new ArrayDecl(asym, sa.Element, countLit, sa.Elems);
+            // Append the trailing sentinel 0 → `stackalloc T[]{ e0, …, eN-1, 0 }` lays down N+1 slots.
+            // The sentinel is an `int` literal `0` (NOT element-typed): it renders bare `0`, which
+            // C#'s constant conversion accepts into any element type — an element-typed `0` on an
+            // unsigned/narrow element would render `0u` and fail the implicit byte conversion.
+            var elems = sentinel
+                ? new List<CExpr>(sa.Elems) { new LitInt("0", 0) { Type = CType.Int } }
+                : sa.Elems;
+            var countLit = new LitInt(elems.Count.ToString(CultureInfo.InvariantCulture), elems.Count) { Type = CType.Int };
+            return new ArrayDecl(asym, sa.Element, countLit, elems);
         }
         var init = LowerExprSink(initExpr, declared);
         var type = declared ?? init.Type ?? CType.Int;
@@ -3514,6 +3535,13 @@ internal sealed class ZigLowering
         // (a general comptime const-expr size is deferred). A `var b: [N]T` local lowers to a
         // stackalloc'd C array (see DeclOf), so slicing it (`b[lo..hi]`) yields a stack-backed slice.
         Zig.TyArray a => new CType.Array(LowerType(a.Arg3), ConstEvalArraySize(a.Arg1)),
+        // `[N:0]T` sentinel-terminated array (Milestone O, part 4) → CType.Array(element, N) — the
+        // LOGICAL length N (so `.len` / slicing exclude the sentinel, like Zig). The extra trailing
+        // sentinel slot (N+1 total storage, zeroed) is materialized only at the local decl site
+        // (see DeclOf / IsSentinelArrayType); the type itself stays an ordinary N-element array, so
+        // a `[N:0]u8` buffer is a valid NUL-terminated C string without writing the terminator. V1
+        // sentinel = 0 only (a non-zero sentinel is deferred, like the `[*:s]`/`[:s]` cuts).
+        Zig.TySentArray a => new CType.Array(LowerType(a.Arg5), ConstEvalArraySize(RequireZeroSentinel(a.Arg3, a.Arg1))),
         // Tuple TYPE `struct { T1, T2, … }` (Milestone G) → CType.Tuple → C# System.ValueTuple<…>.
         // Used as a function return type or a var/param annotation; nested tuple types compose.
         Zig.TyTuple t => LowerTupleType(t.Arg2),
@@ -3607,6 +3635,26 @@ internal sealed class ZigLowering
         var inner = LowerType(innerType);
         return inner.Unqualified is CType.Pointer ? inner : new CType.Optional(inner);
     }
+
+    /// <summary>Validate a <c>[N:s]T</c> array's sentinel <paramref name="sentinel"/> — V1 supports
+    /// only a zero sentinel <c>:0</c> (a non-zero sentinel is deferred, like the <c>[*:s]</c> /
+    /// <c>[:s]</c> pointer/slice cuts). Returns the size Item <paramref name="size"/> so it composes
+    /// inline at the <see cref="LowerType"/> call site.</summary>
+    private Item RequireZeroSentinel(Item sentinel, Item size)
+    {
+        if (sentinel.Content is not Zig.IntLit i || DecodeZigInt(Tok(i.Arg0)).Value != 0)
+        {
+            throw new IrUnsupportedException(
+                "a `[N:s]T` sentinel array supports only a zero sentinel `:0` (a non-zero sentinel is deferred)");
+        }
+        return size;
+    }
+
+    /// <summary>True when a declaration's type annotation is a <c>[N:0]T</c> sentinel array
+    /// (Milestone O, part 4). Its storage reserves N+1 elements (the trailing slot is the sentinel),
+    /// so a LOCAL decl lays down one extra zeroed slot beyond the <c>CType.Array(element, N)</c>
+    /// logical length (see <see cref="DeclOf"/>); the symbol's type stays the N-element array.</summary>
+    private static bool IsSentinelArrayType(Item? typeItem) => typeItem?.Content is Zig.TySentArray;
 
     /// <summary>Const-evaluate a <c>[N]T</c> array size — an integer literal <c>N</c> (a general
     /// comptime const-expression size is deferred). Throws on a non-literal size. Routed through
