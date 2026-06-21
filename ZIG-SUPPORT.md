@@ -128,7 +128,8 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `null` literal | ✅ | optional none / null pointer (renders C# `null`) |
 | `undefined` | ✅ | uninitialized storage. An array local takes the stackalloc path; a scalar → `default(T)` (a zeroed over-approximation — a correct program writes before reading) |
 | postfix `.?` (optional unwrap) | ✅ | value optional → `.Value` (panics on none); optional pointer → identity (V1: no null-check) |
-| `a orelse b` (value RHS) | ✅ | value optional → C# `??` (single-eval, lazy `b`); pointer → `a != null ? a : b` (simple LHS; `orelse return` is Milestone B2) |
+| `a orelse b` (value RHS) | ✅ | value optional → C# `??` (single-eval, lazy `b`); pointer → `a != null ? a : b` (simple LHS) |
+| `a orelse return [v]` / `a catch return [v]` (control-flow fallback) | ✅ | the unwrapped payload, or — on none / error — an EARLY `return` from the current function (Milestone N, part 6). Lowered structurally at a `const`/`var` initializer or a statement: hoist the operand, `if (none / error) { return …; }`, then bind the payload. The `return` wraps correctly in a `!T` fn (incl. `return error.X`). Both a value (`return v`) and void (`return`) form. (`a catch \|e\| return e` is just `try a` — use `try`.) **Deferred:** a sub-expression position; `break`/`continue` control-flow fallbacks |
 | prefix `try` | ✅ | unwrap an error union's payload, or PROPAGATE its error out of the enclosing `!T` fn (exception-based early-return, modeled on the setjmp lowering). `try e;` as a statement works too |
 | `e catch fallback` | ✅ | the payload on success, else the fallback. A simple, side-effect-free fallback keeps the eager `ErrUnion.Catch(a, b)`; a SIDE-EFFECTING fallback (Milestone N, part 3) lowers LAZILY — the union is hoisted to a single-eval temp and `b` runs only on error via a ternary `__cE.IsErr ? b : __cE.Value`. The lazy/capturing forms need a statement context (a `const`/`var` initializer); a side-effecting fallback in a sub-expression is still rejected |
 | `e catch \|err\| fallback` (catch capture) | ✅ | binds the error to `err` for the fallback `b` (Milestone N, part 3), lowered lazily — hoist the union, bind `ushort err = __cE.Code;`, then `__cE.IsErr ? b : __cE.Value` so `b` (which may use `err`, e.g. `err == error.Bad`) runs only on error. As a `const`/`var` initializer. **Deferred:** the control-flow fallback `catch return` / `catch \|e\| return e` (clusters with `orelse return`); the capture in a sub-expression / statement position |
@@ -272,8 +273,10 @@ statement context (a `const`/`var` initializer).
 space (`!T` / `anyerror!T` / `E!T` lower identically; an `error.Foo` value is its code); the
 payload must be a value type (an error union over a *pointer* is deferred — a C# generic can't
 take a pointer arg); a side-effecting / capturing `catch` is a `const`/`var` initializer only (a
-sub-expression position keeps the eager-only rule); and the control-flow fallback `catch return` /
-`catch |e| return e` is deferred. An error-union `main`
+sub-expression position keeps the eager-only rule). The control-flow fallbacks `catch return [v]` /
+`orelse return [v]` (Milestone N part 6) ARE supported (a `const`/`var` initializer or a statement;
+an early `return` on the error / none path); `catch |e| return e` is just `try` (use `try`). An
+error-union `main`
 (`!void` / `!u8`, Milestone N part 4) IS supported — an error from main reports its flat code to
 stderr and exits 1 (real zig prints the error NAME + a trace; the name awaits the un-erased set).
 Explicit `error{A, B}` set declarations (Milestone N part 5) are supported — dotcc erases the set,
@@ -458,4 +461,6 @@ rejects, not silently accept more.
   `examples/zig-errunion-main` (error-union `main`: `pub fn main() !u8` with `try` inside, the payload
   as the process exit code; an error would propagate to the entry and exit 1),
   `examples/zig-error-set` (a named `const MathError = error{ Overflow, Negative };` used as a
-  `MathError!i32` return type — the erased set, members returned via `error.X` and handled with `catch`).
+  `MathError!i32` return type — the erased set, members returned via `error.X` and handled with `catch`),
+  `examples/zig-catch-orelse-return` (control-flow fallbacks: `mk(a) catch return error.NoX` (error
+  union early-return) + `pick(b) orelse return 0` (optional early-return) inside a `!i32` function).

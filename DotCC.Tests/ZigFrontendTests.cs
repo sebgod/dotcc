@@ -1983,6 +1983,60 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_a_catch_return()
+    {
+        // Milestone N, part 6: `const v = a catch return [x];` — hoist the union, `if (IsErr) return …;`
+        // (early-out, the `return error.X` wraps as an Err in the `!T` fn), then bind the payload.
+        var cs = EmitZig(
+            "fn mk(ok: bool) !i32 { if (ok) return 10; return error.Bad; }\n" +
+            "fn wrap(ok: bool) !i32 { const v = mk(ok) catch return error.Wrapped; return v + 1; }\n" +
+            "pub fn main() u8 { return @as(u8, @intCast(wrap(true) catch 0)); }\n");
+        cs.ShouldContain("ErrUnion<int> __cf = mk");   // the union is hoisted
+        cs.ShouldContain("Cond.B(__cf.IsErr)");         // error → early return
+        cs.ShouldContain("ErrUnion<int>.Err(");         // `return error.Wrapped` wraps as Err
+        cs.ShouldContain("int v = __cf.Value;");        // success → bind the payload
+    }
+
+    [Fact]
+    public void Lowers_an_orelse_return()
+    {
+        // `const v = a orelse return [x];` — on the optional's none, early-return; else bind the payload.
+        var cs = EmitZig(
+            "fn pick(b: bool) ?i32 { if (b) return 20; return null; }\n" +
+            "fn fetch(b: bool) i32 { const v = pick(b) orelse return 7; return v; }\n" +
+            "pub fn main() u8 { return @as(u8, @intCast(fetch(true))); }\n");
+        cs.ShouldContain("int? __cf = pick");   // the optional is hoisted
+        cs.ShouldContain("__cf.HasValue");       // none → early return
+        cs.ShouldContain("return 7;");           // the orelse fallback
+        cs.ShouldContain("int v = __cf.Value;"); // success → bind the payload
+    }
+
+    [Fact]
+    public void Lowers_a_statement_catch_return()
+    {
+        // `a catch return …;` as a STATEMENT (the `!void` value discarded) — common for an early-out.
+        var cs = EmitZig(
+            "fn step(go: bool) !void { if (go) return error.Bad; }\n" +
+            "fn run(go: bool) !u8 { step(go) catch return error.Stop; return 7; }\n" +
+            "pub fn main() u8 { return run(false) catch 9; }\n");
+        cs.ShouldContain("ErrUnion<Unit> __cf = step");   // `!void` → ErrUnion<Unit>
+        cs.ShouldContain("Cond.B(__cf.IsErr)");            // error → early return
+        cs.ShouldContain("ErrUnion<byte>.Err(");           // `return error.Stop` in the `!u8` fn
+    }
+
+    [Fact]
+    public void Rejects_a_catch_return_in_a_sub_expression()
+    {
+        // The control-flow fallback needs a statement context — a sub-expression (call arg) is a clear
+        // deferred error.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "fn mk(ok: bool) !i32 { if (ok) return 1; return error.Bad; }\n" +
+            "fn id(x: i32) i32 { return x; }\n" +
+            "pub fn main() u8 { const v = id(mk(false) catch return 0); return @as(u8, @intCast(v)); }\n"));
+        ex.Message.ShouldContain("catch return");
+    }
+
+    [Fact]
     public void Lowers_an_optional_capture_while()
     {
         // `while (opt) |x| { … }` → `while (true) { var __cap = cond; if (__cap.HasValue) { var x =

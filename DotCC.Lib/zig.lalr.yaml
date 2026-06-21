@@ -423,18 +423,24 @@ productions:
       - { lhs: Expr, rhs: [OrElse] }
 
   # `a orelse b` / `a catch b` — lowest-precedence binary level (below `or`), left-assoc.
-  # The RHS is BoolOr (a value expr); `orelse return` / `catch return` (a noreturn RHS)
-  # isn't expressible — `return` is a statement, not an expression — so the value-vs-
-  # control-flow boundary stays grammar-enforced (deferred to Milestone N's control-flow part).
-  # `a catch |e| b` (Milestone N, part 3) binds the error to `e` for the fallback `b`: after the
-  # `'catch'`, a `'|'` lookahead selects the capture form over the plain value RHS — no value
-  # expression starts with `'|'` (it's only the infix bitwise-or / the capture delimiter), so the
-  # alternative is conflict-free (the same trick as the M capture forms).
+  # The value RHS is BoolOr; `a catch |e| b` (Milestone N, part 3) binds the error to `e` for the
+  # fallback `b` (after `'catch'`, a `'|'` lookahead selects the capture form — no value expression
+  # starts with `'|'`, so conflict-free). The CONTROL-FLOW fallback forms `orelse return [v]` /
+  # `catch return [v]` (Milestone N, part 6) make `return` usable as a noreturn RHS: after the
+  # `'orelse'`/`'catch'`, a `'return'` keyword lookahead selects them (it's not in FIRST(BoolOr)).
+  # Each has a value (`return v`) and a void (`return`) form; the value-vs-void split is the same
+  # lookahead S/R as the statement-level `return Expr;` / `return ;` (FOLLOW(OrElse) is disjoint from
+  # FIRST(BoolOr)) — conflict-free. The lowering (structural early-return) lives in ZigLowering, at a
+  # decl-initializer or expression-statement position.
   - derivation: leftmost
     rules:
       - { lhs: OrElse, rhs: [OrElse, 'orelse', BoolOr], action: orElse }
       - { lhs: OrElse, rhs: [OrElse, 'catch', BoolOr],  action: catchOp }
       - { lhs: OrElse, rhs: [OrElse, 'catch', '|', IDENT, '|', BoolOr], action: catchCapture }
+      - { lhs: OrElse, rhs: [OrElse, 'orelse', 'return', BoolOr], action: orElseReturn }
+      - { lhs: OrElse, rhs: [OrElse, 'orelse', 'return'],         action: orElseReturnVoid }
+      - { lhs: OrElse, rhs: [OrElse, 'catch', 'return', BoolOr],  action: catchReturn }
+      - { lhs: OrElse, rhs: [OrElse, 'catch', 'return'],          action: catchReturnVoid }
       - { lhs: OrElse, rhs: [BoolOr] }
 
   # ===== slice 2a: control-flow as expression =====
