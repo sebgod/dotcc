@@ -1016,6 +1016,34 @@ public sealed class ZigOracleTests
             "    if (w != 4) return 3;\n" +
             "    return x;\n" + // 42
             "}\n", 42, "" },
+
+        // Saturating arithmetic (Milestone P, part 2): `+|`/`-|`/`*|` + compound. Clamp to the
+        // operand-type range (signed both ends, unsigned floor at 0); the `u32` slot proves the
+        // clamp is at the `u8` operand width (260 -> 255) before widening. Lands on 42.
+        new object[] { "sat_ops",
+            "pub fn main() u8 {\n" +
+            "    var x: u8 = 200;\n" +
+            "    x +|= 100;\n" + // 300 -> 255
+            "    if (x != 255) return 1;\n" +
+            "    var y: u8 = 5;\n" +
+            "    y -|= 10;\n" +  // -> 0
+            "    if (y != 0) return 2;\n" +
+            "    var k: u8 = 100;\n" +
+            "    k *|= 100;\n" + // 10000 -> 255
+            "    if (k != 255) return 3;\n" +
+            "    var s: i8 = 100;\n" +
+            "    s +|= 100;\n" + // 200 -> 127
+            "    if (s != 127) return 4;\n" +
+            "    var n: i8 = -100;\n" +
+            "    n -|= 100;\n" + // -200 -> -128
+            "    if (n != -128) return 5;\n" +
+            "    const a: u8 = 250;\n" +
+            "    const b: u8 = 10;\n" +
+            "    const w: u32 = a +| b;\n" + // 260 clamps at u8 -> 255, then widens -> 255
+            "    if (w != 255) return 6;\n" +
+            "    const base: u8 = 40;\n" +
+            "    return base +| 2;\n" + // 42 (no saturation)
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

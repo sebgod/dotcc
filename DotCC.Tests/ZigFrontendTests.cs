@@ -2478,4 +2478,92 @@ public sealed class ZigFrontendTests
             "}\n");
         cs.ShouldContain("x += (byte)(2)"); // native compound op (value coerced to the LHS width)
     }
+
+    // ---- Milestone P, part 2: saturating arithmetic (`+|` / `-|` / `*|` + compound) ----
+
+    [Fact]
+    public void Lowers_saturating_add_to_a_zigmath_call()
+    {
+        // `a +| b` has no native C# operator — it routes through the spliced `ZigMath.SatAdd<T>`
+        // clamp helper. Both operands are already `u8`, so C# infers `T = byte` with no casts.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const a: u8 = 200;\n" +
+            "    const b: u8 = 100;\n" +
+            "    const c: u8 = a +| b;\n" + // 300 -> 255
+            "    return c;\n" +
+            "}\n");
+        cs.ShouldContain("ZigMath.SatAdd(a, b)");
+    }
+
+    [Fact]
+    public void Lowers_saturating_mul_to_a_zigmath_call()
+    {
+        // `*|` is multiplicative-precedence; routes through `ZigMath.SatMul<T>`.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const a: u8 = 100;\n" +
+            "    const b: u8 = 100;\n" +
+            "    const c: u8 = a *| b;\n" + // 10000 -> 255
+            "    return c;\n" +
+            "}\n");
+        cs.ShouldContain("ZigMath.SatMul(a, b)");
+    }
+
+    [Fact]
+    public void Casts_a_literal_saturating_operand_so_csharp_infers_the_peer_type()
+    {
+        // `a +| 5` — `a` is `u8`, the literal yields to its concrete peer (`byte`); the literal is
+        // cast so C# infers `T = byte` (and the runtime clamps at the u8 range, not int).
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const a: u8 = 250;\n" +
+            "    const c: u8 = a +| 5;\n" + // 255 (no saturation, but clamped at u8)
+            "    return c;\n" +
+            "}\n");
+        cs.ShouldContain("ZigMath.SatAdd(a, (byte)5)");
+    }
+
+    [Fact]
+    public void Lowers_saturating_at_int_width_without_redundant_casts()
+    {
+        // Two `i32` operands need no peer casts — C# infers `T = int` directly.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const a: i32 = 100;\n" +
+            "    const b: i32 = 200;\n" +
+            "    const c: i32 = a +| b;\n" +
+            "    return @as(u8, @intCast(c - 258));\n" +
+            "}\n");
+        cs.ShouldContain("ZigMath.SatAdd(a, b)");
+        cs.ShouldNotContain("ZigMath.SatAdd((int)a");
+    }
+
+    [Fact]
+    public void Lowers_a_saturating_compound_assignment_to_a_zigmath_assignment()
+    {
+        // `x +|= y` has no native compound operator → desugars to `x = ZigMath.SatAdd(x, y)`.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var x: u8 = 200;\n" +
+            "    x +|= 100;\n" + // 300 -> 255
+            "    return x;\n" +
+            "}\n");
+        cs.ShouldContain("x = ZigMath.SatAdd(x,");
+    }
+
+    [Fact]
+    public void Rejects_a_saturating_compound_assignment_to_a_side_effecting_target()
+    {
+        // The saturating compound desugar reads the lvalue twice; a target reached through a call
+        // (`slot().*`) would double-eval it, so it is a clear deferred error rather than silent.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "var g: u8 = 0;\n" +
+            "fn slot() *u8 { return &g; }\n" +
+            "pub fn main() u8 {\n" +
+            "    slot().* +|= 1;\n" +
+            "    return 0;\n" +
+            "}\n"));
+        ex.Message.ShouldContain("side effects");
+    }
 }

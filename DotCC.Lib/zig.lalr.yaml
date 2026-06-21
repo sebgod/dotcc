@@ -206,6 +206,15 @@ symbols:
   - '+%='          # 137 wrapping add-assign
   - '-%='          # 138 wrapping sub-assign
   - '*%='          # 139 wrapping mul-assign
+  # --- saturating arithmetic operators (Milestone P, part 2; appended — never reorder) ---
+  # Clamp-to-range ops + their compound forms. Additive `+|`/`-|` at the `+`/`-` level, multiplicative
+  # `*|` at the `*` level. No native C# operator → lowered to a `ZigMath.Sat{Add,Sub,Mul}<T>` call.
+  - '+|'           # 140 saturating add
+  - '-|'           # 141 saturating sub
+  - '*|'           # 142 saturating mul
+  - '+|='          # 143 saturating add-assign
+  - '-|='          # 144 saturating sub-assign
+  - '*|='          # 145 saturating mul-assign
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -421,6 +430,11 @@ productions:
       - { lhs: Stmt, rhs: [Expr, '+%=', RhsExpr, ';'], action: stmtAddWrapAssign }
       - { lhs: Stmt, rhs: [Expr, '-%=', RhsExpr, ';'], action: stmtSubWrapAssign }
       - { lhs: Stmt, rhs: [Expr, '*%=', RhsExpr, ';'], action: stmtMulWrapAssign }
+      # Saturating compound assignment `x op|= y` (Milestone P, part 2) — no native C# compound op,
+      # so lowering desugars to `target = ZigMath.Sat…(target, y)` (single-eval guard on the lvalue).
+      - { lhs: Stmt, rhs: [Expr, '+|=', RhsExpr, ';'], action: stmtAddSatAssign }
+      - { lhs: Stmt, rhs: [Expr, '-|=', RhsExpr, ';'], action: stmtSubSatAssign }
+      - { lhs: Stmt, rhs: [Expr, '*|=', RhsExpr, ';'], action: stmtMulSatAssign }
       - { lhs: Stmt, rhs: [Expr, ';'],                        action: stmtExpr }
       - { lhs: Stmt, rhs: [Block] }
 
@@ -547,6 +561,9 @@ productions:
       # Wrapping additive ops (Milestone P, part 1) — same precedence/associativity as `+`/`-`.
       - { lhs: Add, rhs: [Add, '+%', Mul], action: addWrap }
       - { lhs: Add, rhs: [Add, '-%', Mul], action: subWrap }
+      # Saturating additive ops (Milestone P, part 2) — same precedence/associativity as `+`/`-`.
+      - { lhs: Add, rhs: [Add, '+|', Mul], action: addSat }
+      - { lhs: Add, rhs: [Add, '-|', Mul], action: subSat }
       - { lhs: Add, rhs: [Mul] }
 
   - derivation: leftmost
@@ -556,6 +573,8 @@ productions:
       - { lhs: Mul, rhs: [Mul, '%', Prefix], action: modOp }
       # Wrapping multiplicative op (Milestone P, part 1) — same precedence/associativity as `*`.
       - { lhs: Mul, rhs: [Mul, '*%', Prefix], action: mulWrap }
+      # Saturating multiplicative op (Milestone P, part 2) — same precedence/associativity as `*`.
+      - { lhs: Mul, rhs: [Mul, '*|', Prefix], action: mulSat }
       - { lhs: Mul, rhs: [Prefix] }
 
   # Value-level prefix ops (right-assoc). Below Mul, above the type-prefix level.
@@ -947,6 +966,15 @@ lexer:
     - { symbol: '+%',  match: '\+%' }
     - { symbol: '-%',  match: '\-%' }
     - { symbol: '*%',  match: '\*%' }
+    # Saturating arithmetic operators (Milestone P, part 2). Longest-match: `+|=` over `+|` over
+    # `+`; the glued `+|`/`-|`/`*|` beat the single-char `+`/`-`/`*` and never clash with `|` (bitor)
+    # / `|=` (which start with `|`). `|` is escaped in the regex.
+    - { symbol: '+|=', match: '\+\|=' }
+    - { symbol: '-|=', match: '\-\|=' }
+    - { symbol: '*|=', match: '\*\|=' }
+    - { symbol: '+|',  match: '\+\|' }
+    - { symbol: '-|',  match: '\-\|' }
+    - { symbol: '*|',  match: '\*\|' }
     # `...` (3 chars) before `.*`/`.?`/`.` — longest-match prefers it regardless of
     # order, but listed here with the other multi-char operators for clarity. `..` (2 chars,
     # the for-range operator) sits between `...` and `.` — longest-match picks the right one.
