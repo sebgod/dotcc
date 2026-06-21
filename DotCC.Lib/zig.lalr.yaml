@@ -195,6 +195,17 @@ symbols:
   - '[*]'          # 131 many-item-pointer type prefix: `[*]T` / `[*]const T` (glued token, → `T*`)
   - '[:0]'         # 132 sentinel-terminated slice prefix: `[:0]T` (glued token, → `Slice<T>`)
   - '[*:0]'        # 133 sentinel-terminated many-item-pointer prefix: `[*:0]T` (glued token, → `T*`)
+  # --- wrapping arithmetic operators (Milestone P, part 1; appended — never reorder) ---
+  # Two's-complement wrapping ops + their compound-assign forms. Additive `+%`/`-%` sit at the
+  # `+`/`-` precedence level; multiplicative `*%` at the `*`/`/`/`%` level. (Saturating `+|`/… are
+  # a later append.) NO `++`/`--`; Zig's plain `+` overflow-trap (safe mode) is NOT modeled — dotcc's
+  # `+` stays wrapping/lenient, so `+%` and `+` are observably identical here (documented).
+  - '+%'           # 134 wrapping add
+  - '-%'           # 135 wrapping sub
+  - '*%'           # 136 wrapping mul
+  - '+%='          # 137 wrapping add-assign
+  - '-%='          # 138 wrapping sub-assign
+  - '*%='          # 139 wrapping mul-assign
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -403,6 +414,13 @@ productions:
       - { lhs: Stmt, rhs: [Expr, '&=',  RhsExpr, ';'], action: stmtBitAndAssign }
       - { lhs: Stmt, rhs: [Expr, '|=',  RhsExpr, ';'], action: stmtBitOrAssign }
       - { lhs: Stmt, rhs: [Expr, '^=',  RhsExpr, ';'], action: stmtBitXorAssign }
+      # Wrapping compound assignment `x op%= y` (Milestone P, part 1) — same shape as the plain
+      # forms. In dotcc's unchecked model a native C# `target op= rhs` already truncates back to the
+      # LHS width (= two's-complement wrap), so each lowers to the SAME `Assign`+`CompoundOp` node as
+      # `+=`/… — `+%=` and `+=` are observably identical (dotcc doesn't model Zig's safe-mode trap).
+      - { lhs: Stmt, rhs: [Expr, '+%=', RhsExpr, ';'], action: stmtAddWrapAssign }
+      - { lhs: Stmt, rhs: [Expr, '-%=', RhsExpr, ';'], action: stmtSubWrapAssign }
+      - { lhs: Stmt, rhs: [Expr, '*%=', RhsExpr, ';'], action: stmtMulWrapAssign }
       - { lhs: Stmt, rhs: [Expr, ';'],                        action: stmtExpr }
       - { lhs: Stmt, rhs: [Block] }
 
@@ -526,6 +544,9 @@ productions:
     rules:
       - { lhs: Add, rhs: [Add, '+', Mul], action: add }
       - { lhs: Add, rhs: [Add, '-', Mul], action: sub }
+      # Wrapping additive ops (Milestone P, part 1) — same precedence/associativity as `+`/`-`.
+      - { lhs: Add, rhs: [Add, '+%', Mul], action: addWrap }
+      - { lhs: Add, rhs: [Add, '-%', Mul], action: subWrap }
       - { lhs: Add, rhs: [Mul] }
 
   - derivation: leftmost
@@ -533,6 +554,8 @@ productions:
       - { lhs: Mul, rhs: [Mul, '*', Prefix], action: mul }
       - { lhs: Mul, rhs: [Mul, '/', Prefix], action: divOp }
       - { lhs: Mul, rhs: [Mul, '%', Prefix], action: modOp }
+      # Wrapping multiplicative op (Milestone P, part 1) — same precedence/associativity as `*`.
+      - { lhs: Mul, rhs: [Mul, '*%', Prefix], action: mulWrap }
       - { lhs: Mul, rhs: [Prefix] }
 
   # Value-level prefix ops (right-assoc). Below Mul, above the type-prefix level.
@@ -916,6 +939,14 @@ lexer:
     - { symbol: '&=',  match: '&=' }
     - { symbol: '|=',  match: '\|=' }
     - { symbol: '^=',  match: '\^=' }
+    # Wrapping arithmetic operators (Milestone P, part 1). Longest-match picks the right token over
+    # the prefixes (`+%=` over `+%` over `+=`/`+`), so order is irrelevant — grouped here for clarity.
+    - { symbol: '+%=', match: '\+%=' }
+    - { symbol: '-%=', match: '\-%=' }
+    - { symbol: '*%=', match: '\*%=' }
+    - { symbol: '+%',  match: '\+%' }
+    - { symbol: '-%',  match: '\-%' }
+    - { symbol: '*%',  match: '\*%' }
     # `...` (3 chars) before `.*`/`.?`/`.` — longest-match prefers it regardless of
     # order, but listed here with the other multi-char operators for clarity. `..` (2 chars,
     # the for-range operator) sits between `...` and `.` — longest-match picks the right one.
