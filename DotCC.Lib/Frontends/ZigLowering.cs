@@ -1345,6 +1345,10 @@ internal sealed class ZigLowering
             case Zig.StmtDestructure sd: return LowerDestructure(sd);
             case Zig.StmtReturn r:      return LowerReturn(r.Arg1);
             case Zig.StmtReturnVoid:    return LowerReturnVoid();
+            // `a catch return [x];` / `a orelse return [x];` as a STATEMENT (Milestone N, part 6) —
+            // a control-flow early-out; the unwrapped value is discarded (common for a `!void` `a`).
+            case Zig.StmtExpr e when IsControlFlowFallback(e.Arg0, out var cfL, out var cfC, out var cfR):
+                return LowerControlFlowFallback(cfL, cfC, cfR, null);
             case Zig.StmtExpr e:        return new ExprStmt(LowerExpr(e.Arg0));
 
             // `x = value;`  → an assignment used as a statement. `_ = value;` is Zig's
@@ -1507,6 +1511,18 @@ internal sealed class ZigLowering
             {
                 var sym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = temp.Type });
                 return new DeclStmt(new List<LocalDecl> { new(sym, new VarRef(temp) { Type = temp.Type }) });
+            });
+        }
+        // `const v = a catch return [x];` / `const v = a orelse return [x];` (Milestone N, part 6) —
+        // a control-flow fallback. On the error/none path the `return` runs (early-out); on success
+        // `v` binds the unwrapped payload.
+        if (IsControlFlowFallback(initExpr, out var cfLhs, out var cfCatch, out var cfRet))
+        {
+            return LowerControlFlowFallback(cfLhs, cfCatch, cfRet, payload =>
+            {
+                var ptype = declared ?? payload.Type ?? CType.Int;
+                var psym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = ptype });
+                return new DeclStmt(new List<LocalDecl> { new(psym, payload) });
             });
         }
         // `const v = a catch |e| b;` / `const v = a catch <side-effecting>;` (Milestone N, part 3) —
@@ -2380,6 +2396,78 @@ internal sealed class ZigLowering
         return new VarRef(tmp) { Type = union.Type, IsLValue = true };
     }
 
+    /// <summary>Recognize a control-flow <c>catch</c>/<c>orelse</c> fallback (Milestone N, part 6) —
+    /// <c>a catch return [v]</c> / <c>a orelse return [v]</c> — yielding the left operand, whether it
+    /// is a <c>catch</c> (vs <c>orelse</c>), and the optional return value (null = <c>return;</c>).</summary>
+    private static bool IsControlFlowFallback(Item it, out Item lhs, out bool isCatch, out Item? retVal)
+    {
+        switch (it.Content)
+        {
+            case Zig.OrElseReturn r:     lhs = r.Arg0; isCatch = false; retVal = r.Arg3; return true;
+            case Zig.OrElseReturnVoid r: lhs = r.Arg0; isCatch = false; retVal = null;   return true;
+            case Zig.CatchReturn r:      lhs = r.Arg0; isCatch = true;  retVal = r.Arg3; return true;
+            case Zig.CatchReturnVoid r:  lhs = r.Arg0; isCatch = true;  retVal = null;   return true;
+            default: lhs = it; isCatch = false; retVal = null; return false;
+        }
+    }
+
+    /// <summary>Lower a control-flow <c>catch</c>/<c>orelse</c> fallback (Milestone N, part 6): <c>a
+    /// catch return [v]</c> / <c>a orelse return [v]</c>. The left operand — an error union (for
+    /// <c>catch</c>) or an optional (for <c>orelse</c>) — is hoisted to a single-eval temp; on the
+    /// error / none path the <c>return</c> runs as an EARLY-OUT (lowered via
+    /// <see cref="LowerReturn"/>/<see cref="LowerReturnVoid"/>, so it wraps correctly in a <c>!T</c>
+    /// function — incl. <c>return error.X</c>). On the success path the unwrapped payload is consumed
+    /// by <paramref name="bind"/> (a decl initializer binds it; an expression-statement passes null
+    /// and discards it). Emitted as <c>{ var __cf = a; if (Cond.B(&lt;none/error&gt;)) { return …; }
+    /// [bind(payload)] }</c>.</summary>
+    private CStmt LowerControlFlowFallback(Item lhsItem, bool isCatch, Item? retValItem, Func<CExpr, CStmt>? bind)
+    {
+        var lhs = LowerExpr(lhsItem);
+        var pre = new List<CStmt>();
+        CExpr lhsRef;
+        if (lhs is VarRef) { lhsRef = lhs; }
+        else
+        {
+            var tmp = _symbols.Declare(new Symbol { Name = "__cf", Kind = SymKind.Var, Type = lhs.Type });
+            pre.Add(new DeclStmt(new List<LocalDecl> { new(tmp, lhs) }));
+            lhsRef = new VarRef(tmp) { Type = lhs.Type, IsLValue = true };
+        }
+
+        CExpr test;       // true on the path that must `return` (error for catch, none for orelse)
+        CExpr payload;    // the unwrapped success value
+        var ct = lhsRef.Type.Unqualified;
+        if (isCatch)
+        {
+            if (ct is not CType.ErrorUnion eu)
+            {
+                throw new IrUnsupportedException("zig `catch return` requires an error-union left operand");
+            }
+            test = new Member(lhsRef, "IsErr", false) { Type = CType.Bool };
+            payload = new Member(lhsRef, "Value", false) { Type = eu.Payload };
+        }
+        else if (ct is CType.Optional opt)
+        {
+            test = new Unary(UnOp.LogNot, new Member(lhsRef, "HasValue", false) { Type = CType.Bool }) { Type = CType.Int };
+            payload = new Member(lhsRef, "Value", false) { Type = opt.Inner };
+        }
+        else if (ct is CType.Pointer)
+        {
+            // A niche optional pointer (`?*T` → bare `T*`): none is null, the unwrapped value is the
+            // pointer itself.
+            test = new Binary(BinOp.Eq, lhsRef, new NullPtr { Type = new CType.Pointer(CType.Void) }) { Type = CType.Int };
+            payload = lhsRef;
+        }
+        else
+        {
+            throw new IrUnsupportedException("zig `orelse return` requires an optional left operand");
+        }
+
+        var ret = retValItem is null ? LowerReturnVoid() : LowerReturn(retValItem);
+        pre.Add(new If(test, new Block(new List<CStmt> { ret }), null));
+        if (bind is not null) { pre.Add(bind(payload)); }
+        return pre.Count == 1 ? pre[0] : new Seq(pre);
+    }
+
     /// <summary>True when an item is an <c>error.Foo</c> literal, yielding the error name.</summary>
     private static bool IsErrorLit(Item it, out string name)
     {
@@ -2779,6 +2867,16 @@ internal sealed class ZigLowering
             case Zig.CatchCapture:
                 throw new IrUnsupportedException(
                     "zig `catch |e| …` capture is only lowered as a `const`/`var` initializer (other positions deferred)");
+
+            // `a catch return [x]` / `a orelse return [x]` (control-flow fallback) — the `return` is a
+            // statement, so these lower structurally only as a `const`/`var` initializer or a
+            // statement (handled in DeclOf / LowerStmt), never as a sub-expression.
+            case Zig.CatchReturn:
+            case Zig.CatchReturnVoid:
+            case Zig.OrElseReturn:
+            case Zig.OrElseReturnVoid:
+                throw new IrUnsupportedException(
+                    "zig `catch return` / `orelse return` is only lowered as a `const`/`var` initializer or a statement (sub-expression position deferred)");
 
             // A bare `error.Foo` value (Milestone N): the error's stable code in the flat global
             // set, typed `CType.ErrorSet` (rendered `ushort`). This makes error values usable

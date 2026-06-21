@@ -891,6 +891,39 @@ public sealed class ZigOracleTests
             "    sum += checked(200) catch 20;\n" + // +20
             "    return @as(u8, @intCast(sum));\n" + // 42
             "}\n", 42, "" },
+
+        // --- Milestone N (part 6): control-flow `catch return` / `orelse return` ---
+        // decl `catch return` (error union) + decl `orelse return` (value optional). compute(t,t)→30;
+        // compute(f,t)→mk errors→`catch return error.NoX`→compute Err→main `catch 12`. 30+12 = 42.
+        new object[] { "cf_return",
+            "fn mk(ok: bool) !i32 { if (ok) return 10; return error.Bad; }\n" +
+            "fn pick(b: bool) ?i32 { if (b) return 20; return null; }\n" +
+            "fn compute(a: bool, b: bool) !i32 {\n" +
+            "    const x = mk(a) catch return error.NoX;\n" +
+            "    const y = pick(b) orelse return 0;\n" +
+            "    return x + y;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var sum: i32 = 0;\n" +
+            "    sum += compute(true, true) catch 99;\n" + // 30
+            "    sum += compute(false, true) catch 12;\n" + // 12
+            "    return @as(u8, @intCast(sum));\n" + // 42
+            "}\n", 42, "" },
+        // statement-position `catch return` (a `!void` early-out) + a niche-pointer `orelse return`.
+        // run(false)→7; run(true)→error.Stop→catch 30; deref(&k)→0; deref(null)→orelse 5. 7+30+0+5 = 42.
+        new object[] { "cf_return_stmt",
+            "fn step(go: bool) !void { if (go) return error.Bad; }\n" +
+            "fn run(go: bool) !u8 { step(go) catch return error.Stop; return 7; }\n" +
+            "fn deref(p: ?*i32) i32 { const q = p orelse return 5; return q.*; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var sum: i32 = 0;\n" +
+            "    sum += run(false) catch 0;\n" + // 7
+            "    sum += run(true) catch 30;\n" + // 30
+            "    var k: i32 = 0;\n" +
+            "    sum += deref(&k);\n" + // 0
+            "    sum += deref(null);\n" + // 5
+            "    return @as(u8, @intCast(sum));\n" + // 42
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
