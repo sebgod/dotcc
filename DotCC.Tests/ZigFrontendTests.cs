@@ -836,6 +836,32 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_sentinel_const_pointer_and_slice_like_their_non_sentinel_forms()
+    {
+        // `[*:0]const u8` (C-string ptr) → bare `byte*` (like `[*]`); `[:0]const u8` →
+        // ConstSlice<byte> (like `[]const u8`). A string literal coerces to `[:0]const u8`
+        // with `.len` EXCLUDING the NUL (so "hi" → len 2, ctor `(L("hi\0"u8), 2UL)`).
+        var cs = EmitZig(
+            "fn clen(p: [*:0]const u8) u8 { return p[0]; }\n" +
+            "pub fn main() u8 { const s: [:0]const u8 = \"hi\"; return clen(s.ptr); }\n");
+        cs.ShouldContain("clen(byte* p)");
+        cs.ShouldContain("ConstSlice<byte> s = new ConstSlice<byte>(");
+        cs.ShouldContain(", 2UL)");
+    }
+
+    [Fact]
+    public void Lowers_mutable_sentinel_pointer_and_slice_forms()
+    {
+        // the non-const sentinel forms `[*:0]u8` / `[:0]u8` also lower — to `byte*` / `Slice<byte>`.
+        var cs = EmitZig(
+            "fn w(q: [*:0]u8) void { q[0] = 1; }\n" +
+            "fn g(s: [:0]u8) usize { return s.len; }\n" +
+            "pub fn main() u8 { return 0; }\n");
+        cs.ShouldContain("w(byte* q)");
+        cs.ShouldContain("g(Slice<byte> s)");
+    }
+
+    [Fact]
     public void Lowers_for_over_slice()
     {
         // `for (s) |b| {...}` → for (ulong __i = 0; __i < s.Len; __i++) { byte b = s.Ptr[__i]; ... }
