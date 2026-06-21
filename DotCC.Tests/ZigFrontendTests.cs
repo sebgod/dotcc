@@ -813,6 +813,29 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_many_item_pointer_to_a_bare_pointer()
+    {
+        // `[*]const u8` / `[*]u8` many-item pointers lower to a bare `byte*` (like `[*c]`);
+        // indexing `p[i]` and write-through `q[0] = …` work through the pointer.
+        var cs = EmitZig(
+            "fn at(p: [*]const u8, i: usize) u8 { return p[i]; }\n" +
+            "fn w(q: [*]u8) void { q[0] = 1; }\n" +
+            "pub fn main() u8 { return 0; }\n");
+        cs.ShouldContain("at(byte* p, ulong i)");
+        cs.ShouldContain("w(byte* q)");
+    }
+
+    [Fact]
+    public void Closed_slices_a_many_item_pointer_into_a_slice()
+    {
+        // `p[lo..hi]` on a `[*]const u8` → a length-carrying `ConstSlice<byte>` over the
+        // pointer (a many-item pointer slices with explicit bounds, even without `.len`).
+        var cs = EmitZig(
+            "fn take3(p: [*]const u8) usize { const sl = p[0..3]; return sl.len; }\npub fn main() u8 { return 0; }\n");
+        cs.ShouldContain("new ConstSlice<byte>(p + 0");
+    }
+
+    [Fact]
     public void Lowers_for_over_slice()
     {
         // `for (s) |b| {...}` → for (ulong __i = 0; __i < s.Len; __i++) { byte b = s.Ptr[__i]; ... }

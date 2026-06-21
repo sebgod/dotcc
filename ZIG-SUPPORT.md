@@ -58,6 +58,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `c_char c_short c_ushort c_int c_uint c_long c_ulong c_longlong c_ulonglong` | ✅ | C-ABI types for `extern fn`, LP64-shaped |
 | `*T`, `*const T` | ✅ | pointer (pointee `const` rides as a type qualifier) |
 | `[*c]T`, `[*c]const T` | ✅ | C pointer (== C's `T*` / `const T*`) — printf's `[*c]const u8` format |
+| `[*]T`, `[*]const T` (many-item) | ✅ | many-item pointer (Milestone O, part 2) → a bare `T*`, like `[*c]`; indexing `p[i]` + closed-slicing `p[lo..hi]` work, `.len` is unavailable (no known length). A slice's `.ptr` is a `[*]T`. The type-level distinction from `[*c]` (non-null, no C-conversion) is not modeled — both are `T*` |
 | `?T` optional | ✅ | `?*T` → bare nullable `T*` (niche); `?T` over a value → C# `Nullable<T>`. `null`/`.?`/`orelse` below |
 | `[]T` / `[]const T` slice | ✅ | → the runtime fat pointer `Slice<T>` / `ConstSlice<T>` (`{ T* Ptr; ulong Len; }`, the C++ `std::span` shape — **not** C#'s ref-struct `Span<T>`, so a slice can be a struct field and cross the ABI; `AsSpan()` bridges to the BCL). `.len`/`.ptr`, `s[i]`, `s[lo..hi]`, array/string coercion, and `for` over it all work (rows below). **Deferred:** `[*]T`-backed slices, sentinel `[:0]T`, open-ended `s[lo..]`, by-ref `\|*x\|`, the non-escaping-stack → `stackalloc`+`Span` peephole |
 | `[N]T` array (local) | ✅ | `var b: [N]T = …;` → a stackalloc'd C array (zero heap); `b[i]` indexes, `b[lo..hi]` yields a **stack-backed slice**. Size `N` must be an integer literal. **Init:** `undefined` (zeroed) OR an array literal (Milestone K) — `.{…}` at a `[N]T` sink, typed `[N]T{…}` (explicit length), or `[_]T{…}` (length inferred from the element count). An empty literal is rejected (use `undefined`); returning an array literal by value is out of scope (arrays lower to pointers) |
@@ -72,7 +73,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `const U = union(enum) { a: T, b, … };` | ✅ | tagged union → the faithful C tagged-union shape: an outer struct `{ U_Tag __tag; U_Payload __payload; }` whose `__payload` is a NESTED `[StructLayout(Explicit)]` union overlaying every payload variant at offset 0 (the shared C-union machinery) — so payloads share storage, matching Zig's memory model. A void variant (`b`) is tag-only; an all-void union has no `__payload`. Construct with `.{ .a = v }` / `U{ .a = v }` (payload) or `.b` at a union sink (void). Direct `u.a` reads `u.__payload.a` (unchecked, like Zig release mode). Methods (above) and a `const Self = @This();` alias are allowed in the body. **Deferred:** untagged `union { … }`, explicit `union(SomeEnum)` |
 | `E!T` / `!T` error-union type | ✅ | → runtime `ErrUnion<Payload>` (`ErrUnion<Unit>` for `!void`). V1 erases the error SET `E` — `anyerror!T` / named `E!T` lower identically (payload only) |
 | `comptime_int`/`comptime_float`, arbitrary `iN`/`uN` | 🚫 | |
-| `[*]T` many-item, `[*:s]T` sentinel | 🚫 | only `[*c]` is tokenized |
+| `[*:s]T` sentinel pointer | 🚫 | `[*]T` many-item is now ✅ (part 2); sentinel `[*:0]T` is Milestone O part 3 |
 
 ## Statements
 
@@ -417,6 +418,8 @@ rejects, not silently accept more.
   `examples/zig-slices` (`[]const u8` slices: `.len`/`.ptr`, index, `s[lo..hi]`, `for (s) \|b\|`),
   `examples/zig-open-slice` (open-ended slicing `s[lo..]`: the high bound is the source length — a
   slice's `.len`, an array's element count; alongside a closed re-slice),
+  `examples/zig-many-ptr` (many-item pointers `[*]T`: index `p[i]`, closed-slice `p[lo..hi]`, bind a
+  slice's `.ptr`),
   `examples/zig-alloc` (allocators: devirt'd `page_allocator`, a `FixedBufferAllocator` via the
   indirect vtable, an opaque `std.mem.Allocator` param + materialized default),
   `examples/zig-tuple` (tuples: a `struct { u8, u8 }` multiple-return + `const lo, const hi = …`

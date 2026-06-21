@@ -938,6 +938,17 @@ public sealed class ZigOracleTests
             "    if (s[2..5].len != 3) return 3;\n" + // closed re-slice still works
             "    return @as(u8, @intCast(a));\n" + // 42
             "}\n", 42, "" },
+        // many-item pointers `[*]T`: index `p[i]`, closed-slice `p[0..3]` into a slice (+ .len),
+        // and bind a slice's `.ptr` (a `[*]const u8`) across. `'*'` is ASCII 42, so first(p)=42.
+        new object[] { "many_ptr",
+            "fn first(p: [*]const u8) u8 { return p[0]; }\n" +
+            "fn take3(p: [*]const u8) usize { const sl = p[0..3]; return sl.len; }\n" +
+            "pub fn main() u8 {\n" +
+            "    const s: []const u8 = \"*bcdef\";\n" + // s.ptr[0] = '*' = 42
+            "    const p: [*]const u8 = s.ptr;\n" + // slice .ptr is a many-item pointer
+            "    if (take3(p) != 3) return 1;\n" + // closed slice of a [*]T -> .len
+            "    return first(p);\n" + // 42
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

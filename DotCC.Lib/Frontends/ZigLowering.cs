@@ -3481,6 +3481,10 @@ internal sealed class ZigLowering
         Zig.TyPtrConst p   => new CType.Pointer(LowerType(p.Arg2).WithQuals(TypeQual.Const)),
         Zig.TyCPtr p       => new CType.Pointer(LowerType(p.Arg1)),
         Zig.TyCPtrConst p  => new CType.Pointer(LowerType(p.Arg2).WithQuals(TypeQual.Const)),
+        // `[*]T` / `[*]const T` many-item pointers (Milestone O, part 2) — like `[*c]`,
+        // a bare `T*`. They index/slice; `.len` is unavailable (a pointer has no length).
+        Zig.TyManyPtr p     => new CType.Pointer(LowerType(p.Arg1)),
+        Zig.TyManyPtrConst p => new CType.Pointer(LowerType(p.Arg2).WithQuals(TypeQual.Const)),
         // `?T` optional. An optional POINTER `?*T` lowers to a bare nullable `T*` (Zig's
         // own niche — null = none, zero cost; a non-optional `*T` loses its non-null
         // guarantee, a documented leniency). A `?T` over a value type lowers to C#

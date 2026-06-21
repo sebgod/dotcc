@@ -191,6 +191,8 @@ symbols:
   # --- labeled loops (Milestone L, part 3; appended — never reorder) ---
   - LoopStmt       # 129 a while/for loop statement, factored out so a `label:` can prefix it
   - ErrSetList     # 130 error-set member list: the `A, B, …` inside an `error{ … }` set declaration
+  # --- pointer & slice completeness (Milestone O; appended — never reorder) ---
+  - '[*]'          # 131 many-item-pointer type prefix: `[*]T` / `[*]const T` (glued token, → `T*`)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -567,12 +569,18 @@ productions:
       # `*const T` and the C-pointer `[*c]T` / `[*c]const T`. The pointee `const`
       # is grammatically tied to the pointer prefix (NOT a free-standing `const T`
       # type prefix), so it can never be reached from the expression cascade — that
-      # would collide with a `const`-decl. `[*c]` is one glued lexer token, so it
-      # never clashes with the array `[Expr]` / slice `[]` forms. (`[*]T` many-item
-      # and `[*:s]T` sentinel pointers are deferred — printf needs only `[*c]`.)
+      # would collide with a `const`-decl. `[*c]` / `[*]` are each ONE glued lexer
+      # token, so they never clash with the array `[Expr]` / slice `[]` forms.
+      # (`[*:s]T` sentinel pointers are deferred to Milestone O part 3.)
       - { lhs: Type, rhs: ['*', 'const', Type],    action: tyPtrConst }
       - { lhs: Type, rhs: ['[*c]', Type],          action: tyCPtr }
       - { lhs: Type, rhs: ['[*c]', 'const', Type], action: tyCPtrConst }
+      # `[*]T` / `[*]const T` — many-item pointers (Milestone O, part 2). Like `[*c]`,
+      # they lower to a bare `T*`; they support indexing/slicing but not `.len`. The
+      # type-level distinction from `[*c]` (non-null, no C-conversion) is not modeled —
+      # both are `T*` in dotcc.
+      - { lhs: Type, rhs: ['[*]', Type],           action: tyManyPtr }
+      - { lhs: Type, rhs: ['[*]', 'const', Type],  action: tyManyPtrConst }
       - { lhs: Type, rhs: ['[', ']', Type],       action: tySlice }
       # `[]const T` — a const slice. The `const` after `]` is unambiguous (no Type starts
       # with a bare `const`), so it stays conflict-free against `[]T` / `[Expr]T`.
@@ -898,6 +906,10 @@ lexer:
     # `[*c]` — the C-pointer type prefix as ONE glued token (longest-match beats the
     # single-char `[`); never appears in expression-index position, so no clash.
     - { symbol: '[*c]', match: '\[\*c\]' }
+    # `[*]` — the many-item-pointer type prefix, also ONE glued token. Requires the
+    # contiguous 3 chars `[*]`; an index like `a[*p]` has a token between `*` and `]`,
+    # so the regex falls back to the single-char `[` (no clash, same logic as `[*c]`).
+    - { symbol: '[*]', match: '\[\*\]' }
 
     # Single-char operators / punctuation.
     - { symbol: '(', match: '\(' }
