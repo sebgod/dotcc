@@ -360,9 +360,9 @@ public static class Compiler
                 .Concat(irBuilder.Globals.Select(g => g.Sym.Name))
                 .Distinct(StringComparer.Ordinal);
             return SerializeFragment(cg.Functions, new Dictionary<string, string>(), cg.Aliases, cg.Globals, cg.MainArity,
-                objImports, objDefs, cg.MainReturnsVoid);
+                objImports, objDefs, cg.MainReturnsVoid, cg.MainReturnsErrUnion, cg.MainErrPayloadIsVoid);
         }
-        return BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, fileBased, libraryMode, cg.Exports, debugHeap, importsClass, importsAreStatic, cg.MainReturnsVoid);
+        return BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, fileBased, libraryMode, cg.Exports, debugHeap, importsClass, importsAreStatic, cg.MainReturnsVoid, cg.MainReturnsErrUnion, cg.MainErrPayloadIsVoid);
     }
 
     /// <summary>
@@ -568,6 +568,7 @@ public static class Compiler
     // real emitted code.
     private const string FragMain   = "//!!dotcc-obj main:";
     private const string FragMainVoid = "//!!dotcc-obj main-void:"; // 1 when main returns void
+    private const string FragMainErr = "//!!dotcc-obj main-err:";   // v|i when main returns `!void`|`!<int>`
     private const string FragType   = "//!!dotcc-obj type:";
     private const string FragSect   = "//!!dotcc-obj section:"; // aliases|globals|functions
     // Import mode in separate compilation: `-l` is known only at LINK time, so each
@@ -599,12 +600,14 @@ public static class Compiler
 
     private static string SerializeFragment(
         string functions, IReadOnlyDictionary<string, string> typeDecls, string aliases, string globals, int mainArity,
-        IReadOnlyList<(string Name, string FieldType)> importSpecs, IEnumerable<string> defNames, bool mainReturnsVoid = false)
+        IReadOnlyList<(string Name, string FieldType)> importSpecs, IEnumerable<string> defNames, bool mainReturnsVoid = false,
+        bool mainReturnsErrUnion = false, bool mainErrPayloadIsVoid = false)
     {
         var sb = new StringBuilder();
         sb.Append(MagicObject).Append(" 1 — link with `dotcc <objs> -o <out>`.\n");
         sb.Append(FragMain).Append(mainArity).Append('\n');
         if (mainReturnsVoid) { sb.Append(FragMainVoid).Append("1").Append('\n'); }
+        if (mainReturnsErrUnion) { sb.Append(FragMainErr).Append(mainErrPayloadIsVoid ? "v" : "i").Append('\n'); }
         // Import candidates + defined names, for the link step's resolution. Names
         // have no spaces (C identifiers), so the type — which does (`delegate*
         // unmanaged[Cdecl]<int, int>`) — is everything after the first space.
@@ -639,6 +642,8 @@ public static class Compiler
         var functions = new StringBuilder();
         var mainArity = -1;
         var mainReturnsVoid = false;
+        var mainReturnsErrUnion = false;
+        var mainErrPayloadIsVoid = false;
         // Import resolution across fragments: a candidate name → its fn-ptr type, and
         // every name some fragment DEFINES. A candidate survives iff no fragment defines it.
         var importSpecs = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -667,7 +672,14 @@ public static class Compiler
             }
             foreach (var line in text.Split('\n'))
             {
-                if (line.StartsWith(FragMainVoid, StringComparison.Ordinal))
+                if (line.StartsWith(FragMainErr, StringComparison.Ordinal))
+                {
+                    // `main-err:` (v|i) — an error-union main (`!void`/`!<int>`). Disjoint from
+                    // the `main-void:` / `main:` markers (the char after "main" differs).
+                    mainReturnsErrUnion = true;
+                    mainErrPayloadIsVoid = line[FragMainErr.Length..].Trim() == "v";
+                }
+                else if (line.StartsWith(FragMainVoid, StringComparison.Ordinal))
                 {
                     // `main-void:` and `main:` are disjoint markers (the char after
                     // "main" differs: '-' vs ':'), so this branch and the next don't race.
@@ -742,7 +754,8 @@ public static class Compiler
         }
         return BuildShell(mainArity, functions.ToString(), structDecls.ToString(), aliasText, globalText,
                           fileBased, libraryMode, System.Array.Empty<EmitHelpers.Export>(), debugHeap, importsClass,
-                          importsAreStatic: false, mainReturnsVoid: mainReturnsVoid);
+                          importsAreStatic: false, mainReturnsVoid: mainReturnsVoid,
+                          mainReturnsErrUnion: mainReturnsErrUnion, mainErrPayloadIsVoid: mainErrPayloadIsVoid);
     }
 
     /// <summary>
@@ -1263,7 +1276,9 @@ public static class Compiler
         bool debugHeap = false,
         string importsClass = "",
         bool importsAreStatic = false,
-        bool mainReturnsVoid = false)
+        bool mainReturnsVoid = false,
+        bool mainReturnsErrUnion = false,
+        bool mainErrPayloadIsVoid = false)
     {
         if (libraryMode)
         {
@@ -1300,8 +1315,20 @@ public static class Compiler
         // A `void`-returning main (Zig's `pub fn main() void`; also a non-standard
         // `void main()` in C) can't be `return`ed from the int-typed entry, so it is
         // called for effect and followed by `return 0;`. An int-returning main is
-        // returned directly as the process exit code.
-        static string Wrap(string call, bool isVoid) => isVoid ? $"{call}; return 0;" : $"return {call};";
+        // returned directly as the process exit code. An ERROR-UNION main (Zig's
+        // `pub fn main() !void` / `!u8`, Milestone N part 4) returns an `ErrUnion<…>`:
+        // call it into a temp, and (matching real zig) map an error to a non-zero exit
+        // (1, with the flat error code reported to stderr — stdout stays clean for the
+        // oracle), success to 0 (a void payload) or the integer payload value.
+        string Wrap(string call, bool isVoid)
+        {
+            if (mainReturnsErrUnion)
+            {
+                var exit = mainErrPayloadIsVoid ? "0" : "(int)__mr.Value";
+                return $"var __mr = {call}; if (__mr.IsErr) {{ Console.Error.WriteLine(\"dotcc: error: code \" + __mr.Code); return 1; }} return {exit};";
+            }
+            return isVoid ? $"{call}; return 0;" : $"return {call};";
+        }
         var entry = mainArity switch
         {
             0 => Wrap("main()", mainReturnsVoid),

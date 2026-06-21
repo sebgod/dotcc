@@ -21,7 +21,9 @@ internal sealed record CSharpBackendResult(
     string Globals,
     int MainArity,
     IReadOnlyList<DotCC.EmitHelpers.Export> Exports,
-    bool MainReturnsVoid = false);
+    bool MainReturnsVoid = false,
+    bool MainReturnsErrUnion = false,
+    bool MainErrPayloadIsVoid = false);
 
 /// <summary>
 /// Lowers the typed IR to low-level unsafe C# text. Deliberately DUMB: every
@@ -55,6 +57,8 @@ internal sealed class CSharpBackend
         var exports = new List<DotCC.EmitHelpers.Export>();
         var mainArity = -1;
         var mainReturnsVoid = false;
+        var mainReturnsErrUnion = false;
+        var mainErrPayloadIsVoid = false;
 
         foreach (var fn in unit.Functions)
         {
@@ -67,9 +71,18 @@ internal sealed class CSharpBackend
                 mainArity = fn.Params.Count;
                 // A `void`-returning main (Zig's `pub fn main() void`, or a non-standard
                 // `void main()` in C) can't be `return`ed from the int-typed entry — the
-                // shell calls it for effect and returns 0 instead. Detect it here so the
+                // shell calls it for effect and returns 0 instead. An error-union main
+                // (`pub fn main() !void` / `!u8`, Milestone N part 4) returns an `ErrUnion<…>`:
+                // the shell maps an error to a non-zero exit (1) and success to 0 (a void
+                // payload) or the payload value (an integer payload). Detect both here so the
                 // entry-wiring can choose the right form.
-                mainReturnsVoid = fn.Sym.Type is CType.Func f && f.Return.Unqualified is CType.VoidType;
+                var mret = fn.Sym.Type is CType.Func mf ? mf.Return.Unqualified : null;
+                mainReturnsVoid = mret is CType.VoidType;
+                if (mret is CType.ErrorUnion meu)
+                {
+                    mainReturnsErrUnion = true;
+                    mainErrPayloadIsVoid = meu.Payload.Unqualified is CType.VoidType;
+                }
             }
             // A variadic function's `params VaArg[]` tail isn't a valid
             // [UnmanagedCallersOnly] signature, so it can't be exported.
@@ -105,7 +118,7 @@ internal sealed class CSharpBackend
         foreach (var t in unit.Types) { structs.Append(cg.StructText(t)); }
         foreach (var en in unit.Enums) { structs.Append(cg.EnumText(en)); }
 
-        return new CSharpBackendResult(fns.ToString(), structs.ToString(), Aliases: "", globals.ToString(), mainArity, exports, mainReturnsVoid);
+        return new CSharpBackendResult(fns.ToString(), structs.ToString(), Aliases: "", globals.ToString(), mainArity, exports, mainReturnsVoid, mainReturnsErrUnion, mainErrPayloadIsVoid);
     }
 
     // ---- type declarations -----------------------------------------------
