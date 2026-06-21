@@ -1958,6 +1958,31 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_an_error_set_declaration()
+    {
+        // Milestone N, part 5: `const E = error{A, B};` is a comptime declaration — dotcc erases the
+        // set, so it registers the member names and emits NO `E` decl; `E` is used only as the
+        // (ignored) set in an `E!T` return type, which lowers to the same `ErrUnion<T>` as
+        // `anyerror!T`. `error.X` members + `catch` work as in the flat-code model.
+        var cs = EmitZig(
+            "const MathError = error{ Overflow, Negative };\n" +
+            "fn scale(n: i32) MathError!i32 { if (n < 0) return error.Negative; return n; }\n" +
+            "pub fn main() u8 { const v = scale(5) catch 0; return @as(u8, @intCast(v)); }\n");
+        cs.ShouldContain("ErrUnion<int> scale(");     // `MathError!i32` → the erased ErrUnion
+        cs.ShouldNotContain("MathError");             // the error-set decl emits nothing (comptime)
+    }
+
+    [Fact]
+    public void Rejects_an_error_set_literal_in_value_position()
+    {
+        // `error{…}` is only a `const E = error{…};` declaration or an (ignored) `E!T` set — a bare
+        // error-set literal used as a value is a clear error.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 { const v = 1 + error{Bad}; return @as(u8, @intCast(v)); }\n"));
+        ex.Message.ShouldContain("error{");
+    }
+
+    [Fact]
     public void Lowers_an_optional_capture_while()
     {
         // `while (opt) |x| { … }` → `while (true) { var __cap = cond; if (__cap.HasValue) { var x =

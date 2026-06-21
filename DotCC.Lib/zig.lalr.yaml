@@ -190,6 +190,7 @@ symbols:
   - LabeledBlock   # 128 `blk: { … break :blk v; }` — a labeled block as a VALUE (a RhsExpr)
   # --- labeled loops (Milestone L, part 3; appended — never reorder) ---
   - LoopStmt       # 129 a while/for loop statement, factored out so a `label:` can prefix it
+  - ErrSetList     # 130 error-set member list: the `A, B, …` inside an `error{ … }` set declaration
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -337,6 +338,10 @@ productions:
       # continue). The block restructuring + LIFO nesting lives in ZigLowering, not the grammar.
       - { lhs: Stmt, rhs: ['defer', Stmt],    action: stmtDefer }
       - { lhs: Stmt, rhs: ['errdefer', Stmt], action: stmtErrdefer }
+      # NOTE: `errdefer |e| …` payload capture is intentionally NOT supported — current Zig (0.17)
+      # has REMOVED that syntax (`zig build-exe` rejects `errdefer |e|` with "expected block or
+      # expression, found '|'"), so an `errdefer` binds no error. Keeping it out preserves
+      # round-trippability (dotcc accepts no construct real zig rejects).
       # `switch (x) { prong, … }` as a STATEMENT. Each prong is `CaseVals => Block` — the
       # body MUST be a braced block (bare-expr bodies + switch-as-EXPRESSION are deferred).
       # Zig switch has NO fall-through, so the lowering appends a `break` to each section
@@ -628,9 +633,23 @@ productions:
       - { lhs: Primary, rhs: ['.', '{', '}'],             action: anonStructInitEmpty }
       # `error.Foo` — an error-value literal. `error` is a distinct keyword token, so this
       # never collides with the `Suffix '.' IDENT` field access (which starts from a
-      # Primary/IDENT). V1: error SETS aren't modelled (`error{A,B}` decls deferred); a bare
-      # `error.Foo` is only meaningful in `return error.Foo;` within a `!T` function.
+      # Primary/IDENT). After `error`, a `'.'` selects the value literal and a `'{'` the set
+      # declaration (below) — disjoint lookahead, conflict-free.
       - { lhs: Primary, rhs: ['error', '.', IDENT], action: errorLit }
+      # `error{ A, B }` — an explicit error-SET declaration (Milestone N, part 5). dotcc erases the
+      # set into the flat global code space, so a `const E = error{A,B};` is a comptime binding that
+      # registers the member names (assigning them stable codes) and emits NO decl; `E` is then used
+      # only as the (erased) set in an `E!T` return type. An empty `error{}` is the never-erroring set.
+      - { lhs: Primary, rhs: ['error', '{', ErrSetList, '}'], action: errorSet }
+      - { lhs: Primary, rhs: ['error', '{', '}'],             action: errorSetEmpty }
+
+  # error-set member list inside `error{ … }` — a comma-separated IDENT list with an optional
+  # trailing comma. Right-recursive (clean trailing comma), mirroring the other list shapes.
+  - derivation: none
+    rules:
+      - { lhs: ErrSetList, rhs: [IDENT],                    action: errSetOne }
+      - { lhs: ErrSetList, rhs: [IDENT, ','],               action: errSetOneTrailing }
+      - { lhs: ErrSetList, rhs: [IDENT, ',', ErrSetList],   action: errSetCons }
 
   - derivation: leftmost
     rules:
