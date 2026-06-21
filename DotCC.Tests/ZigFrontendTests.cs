@@ -903,6 +903,124 @@ public sealed class ZigFrontendTests
         ex.Message.ShouldContain("deferred");
     }
 
+    // --- Milestone O part 5: non-escaping stack-slice peephole ---------------
+    // The synthetic backing-buffer name `__slicebuf` appears ONLY when a slice is promoted to a
+    // stackalloc — the embedded runtime always defines `AllocCHeap`/`FreeCHeap` + has incidental
+    // `stackalloc byte[N]`, so `__slicebuf` is the reliable promote / no-promote discriminator.
+
+    /// <summary>A page_allocator (devirt'd C-heap) byte slice that is constant-size, freed, and
+    /// used only via <c>s[i]</c> is demoted to a <c>stackalloc</c> backing (the heap alloc/free
+    /// vanish).</summary>
+    [Fact]
+    public void Promotes_a_non_escaping_freed_constant_byte_slice_to_a_stackalloc()
+    {
+        var cs = EmitZig(
+            "const std = @import(\"std\");\n" +
+            "fn run() !u8 {\n" +
+            "    const a = std.heap.page_allocator;\n" +
+            "    const buf = try a.alloc(u8, 4);\n" +
+            "    buf[0] = 42;\n" +
+            "    const r = buf[0];\n" +
+            "    a.free(buf);\n" +
+            "    return r;\n" +
+            "}\n" +
+            "pub fn main() u8 { return run() catch 1; }\n");
+        cs.ShouldContain("byte* __slicebuf");
+        cs.ShouldContain("= stackalloc byte[4]");
+        cs.ShouldContain("new Slice<byte>(__slicebuf");
+    }
+
+    /// <summary>Returning the slice escapes the frame → it stays on the heap (no promotion).</summary>
+    [Fact]
+    public void Keeps_a_returned_slice_on_the_heap()
+    {
+        var cs = EmitZig(
+            "const std = @import(\"std\");\n" +
+            "fn run() ![]u8 {\n" +
+            "    const a = std.heap.page_allocator;\n" +
+            "    const buf = try a.alloc(u8, 4);\n" +
+            "    buf[0] = 1;\n" +
+            "    return buf;\n" +
+            "}\n" +
+            "pub fn main() u8 { return 0; }\n");
+        cs.ShouldNotContain("__slicebuf");
+        cs.ShouldContain("AllocCHeap<byte>(4");
+    }
+
+    /// <summary>Exposing the backing pointer (<c>s.ptr</c> passed to a callee) escapes → heap.</summary>
+    [Fact]
+    public void Keeps_a_slice_whose_ptr_escapes_to_a_callee_on_the_heap()
+    {
+        var cs = EmitZig(
+            "const std = @import(\"std\");\n" +
+            "fn use_it(p: [*]u8) void { p[0] = 1; }\n" +
+            "fn run() !u8 {\n" +
+            "    const a = std.heap.page_allocator;\n" +
+            "    const buf = try a.alloc(u8, 4);\n" +
+            "    use_it(buf.ptr);\n" +
+            "    a.free(buf);\n" +
+            "    return buf[0];\n" +
+            "}\n" +
+            "pub fn main() u8 { return run() catch 1; }\n");
+        cs.ShouldNotContain("__slicebuf");
+        cs.ShouldContain("AllocCHeap<byte>(4");
+    }
+
+    /// <summary>A non-constant size can't bound the stackalloc → it stays on the heap.</summary>
+    [Fact]
+    public void Keeps_a_non_constant_size_slice_on_the_heap()
+    {
+        var cs = EmitZig(
+            "const std = @import(\"std\");\n" +
+            "fn run(n: usize) !u8 {\n" +
+            "    const a = std.heap.page_allocator;\n" +
+            "    const buf = try a.alloc(u8, n);\n" +
+            "    buf[0] = 1;\n" +
+            "    a.free(buf);\n" +
+            "    return buf[0];\n" +
+            "}\n" +
+            "pub fn main() u8 { return run(4) catch 1; }\n");
+        cs.ShouldNotContain("__slicebuf");
+    }
+
+    /// <summary>An un-freed slice stays on the heap (no <c>free</c> to drop → not promotable).</summary>
+    [Fact]
+    public void Keeps_an_unfreed_slice_on_the_heap()
+    {
+        var cs = EmitZig(
+            "const std = @import(\"std\");\n" +
+            "fn run() !u8 {\n" +
+            "    const a = std.heap.page_allocator;\n" +
+            "    const buf = try a.alloc(u8, 4);\n" +
+            "    buf[0] = 1;\n" +
+            "    return buf[0];\n" +
+            "}\n" +
+            "pub fn main() u8 { return run() catch 1; }\n");
+        cs.ShouldNotContain("__slicebuf");
+        cs.ShouldContain("AllocCHeap<byte>(4");
+    }
+
+    /// <summary>An INDIRECT allocator (a FixedBufferAllocator's vtable dispatch, <c>Receiver != null</c>)
+    /// is left on its allocator — only the devirtualized C-heap default is promoted.</summary>
+    [Fact]
+    public void Keeps_an_indirect_allocator_slice_unpromoted()
+    {
+        var cs = EmitZig(
+            "const std = @import(\"std\");\n" +
+            "fn run() !u8 {\n" +
+            "    var buffer: [64]u8 = undefined;\n" +
+            "    var fba = std.heap.FixedBufferAllocator.init(&buffer);\n" +
+            "    const aa = fba.allocator();\n" +
+            "    const buf = try aa.alloc(u8, 4);\n" +
+            "    buf[0] = 5;\n" +
+            "    aa.free(buf);\n" +
+            "    return buf[0];\n" +
+            "}\n" +
+            "pub fn main() u8 { return run() catch 1; }\n");
+        cs.ShouldNotContain("__slicebuf");
+        cs.ShouldContain(".Alloc<byte>(4");
+    }
+
     [Fact]
     public void Lowers_for_over_slice()
     {
@@ -948,18 +1066,21 @@ public sealed class ZigFrontendTests
         // `const a = std.heap.page_allocator; a.alloc(u8, n) / a.free(s)` — the statically-known
         // default DEVIRTUALIZES to a direct ZigAlloc.AllocCHeap / FreeCHeap (a Libc.malloc/free,
         // no vtable). `@import("std")` and the `const a = …` binding are comptime (no decl).
+        // A NON-CONSTANT size (the `n` param) keeps this devirt'd-but-heap: the Milestone O part 5
+        // stack-slice peephole would otherwise demote a constant-size, non-escaping, freed slice to
+        // a `stackalloc` (eliding the very AllocCHeap/FreeCHeap calls this test pins).
         var cs = EmitZig(
             "const std = @import(\"std\");\n" +
-            "fn run() !u8 {\n" +
+            "fn run(n: usize) !u8 {\n" +
             "    const a = std.heap.page_allocator;\n" +
-            "    const buf = try a.alloc(u8, 4);\n" +
+            "    const buf = try a.alloc(u8, n);\n" +
             "    buf[0] = 42;\n" +
             "    const r = buf[0];\n" +
             "    a.free(buf);\n" +
             "    return r;\n" +
             "}\n" +
-            "pub fn main() u8 { return run() catch 1; }\n");
-        cs.ShouldContain("ZigAlloc.AllocCHeap<byte>(4");   // the devirt'd alloc (direct malloc)
+            "pub fn main() u8 { return run(4) catch 1; }\n");
+        cs.ShouldContain("ZigAlloc.AllocCHeap<byte>(");    // the devirt'd alloc (direct malloc)
         cs.ShouldContain("ZigAlloc.FreeCHeap<byte>(buf)");  // the devirt'd free (direct free)
         cs.ShouldNotContain(".Alloc<byte>(");               // NOT the indirect vtable dispatch
         cs.ShouldNotContain("Allocator a =");               // the comptime binding emits no decl
