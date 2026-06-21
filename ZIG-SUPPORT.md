@@ -42,7 +42,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `extern fn f(p: T, ...) Ret;` | ✅ | **variadic** extern (e.g. `printf`); `...` must be last + extern-only. A variadic argument must have a fixed-size type — `printf("%d", @as(c_int, 42))`, never a bare `printf("%d", 42)` (rejected, matching real zig — see below) |
 | local `const`/`var` (typed or inferred) | ✅ | inside a function body |
 | `fn f() !T` (inferred-error return) | ✅ | the `!T` returns an error union (`ErrUnion<T>`); see `try`/`catch`/`error.X` below. V1 erases the error SET |
-| `pub fn main() !void` / `!u8` (error-union main) | 🚫 | main itself returning an error union is deferred — error unions live in helper fns; main stays `void`/`u8` |
+| `pub fn main() !void` / `!u8` (error-union main) | ✅ | main may return an error union (Milestone N, part 4) — emitted as `ErrUnion<…>`; the process entry maps the result like real zig: an error → exit 1 (the flat error code reported to stderr, stdout stays clean), success → exit 0 (a `!void` payload) or the integer payload value (`!u8`). `try` inside main propagates to that boundary |
 | top-level / global `const`/`var` | ✅ | a runtime global → a `public static` field of `DotCcGlobals` (the same path the C front-end's file-scope variables take), surfaced by bare name (a function body reads/writes it unqualified). Typed keeps its annotation; untyped infers from the initializer (`const N = 5;` → `int`). Initializers are lowered in source order, so a global may reference an EARLIER global by bare name. `const`-ness isn't enforced (both lower to a mutable field — observably identical for a correct Zig program). An aggregate (struct), `[N]T` array, and `undefined` global are supported (Milestone K — an array routes through a pinned, program-lifetime backing store). **Deferred:** a fn-pointer global and a forward reference to a LATER global |
 | `export`/`inline`/`callconv`/`align`/`linksection` | 🚫 | full FnProto modifiers not modeled |
 | `extern "c"` library-name string | 🚫 | bare `extern fn` only |
@@ -272,7 +272,9 @@ space (`!T` / `anyerror!T` / `E!T` lower identically; an `error.Foo` value is it
 payload must be a value type (an error union over a *pointer* is deferred — a C# generic can't
 take a pointer arg); a side-effecting / capturing `catch` is a `const`/`var` initializer only (a
 sub-expression position keeps the eager-only rule); and the control-flow fallback `catch return` /
-`catch |e| return e`, explicit `error{…}` set decls, and an error-union `main` are all deferred.
+`catch |e| return e` and explicit `error{…}` set decls are deferred. An error-union `main`
+(`!void` / `!u8`, Milestone N part 4) IS supported — an error from main reports its flat code to
+stderr and exits 1 (real zig prints the error NAME + a trace; the name awaits the un-erased set).
 
 ## Allocators — devirtualize the default, vtable for the rest
 
@@ -447,4 +449,6 @@ rejects, not silently accept more.
   `examples/zig-error-switch` (`switch` on an error value: a captured `else |e|` switched over
   `error.Zero` / `error.Negative` / `else` → an integer switch on the flat code),
   `examples/zig-catch-capture` (`catch |e|` capture using `e == error.Bad` for a bool fallback, plus
-  a lazy side-effecting `catch dflt()` whose call runs only on the error path).
+  a lazy side-effecting `catch dflt()` whose call runs only on the error path),
+  `examples/zig-errunion-main` (error-union `main`: `pub fn main() !u8` with `try` inside, the payload
+  as the process exit code; an error would propagate to the entry and exit 1).

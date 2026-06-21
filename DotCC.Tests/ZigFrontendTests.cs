@@ -165,6 +165,36 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_an_error_union_void_main()
+    {
+        // `pub fn main() !void` (Milestone N, part 4) → main returns `ErrUnion<Unit>`. The entry
+        // calls it into a temp; an error maps to a non-zero exit (1, reported to stderr), success to
+        // exit 0 (a void payload has no exit value). Matches real zig's `!void` main.
+        var cs = EmitZig(
+            "fn boom(go: bool) !void { if (go) return error.Bad; }\n" +
+            "pub fn main() !void { try boom(false); }\n");
+        cs.ShouldContain("ErrUnion<Unit> main()");          // error-union main lowered
+        cs.ShouldContain("var __mr = main();");              // entry: call into a temp
+        cs.ShouldContain("if (__mr.IsErr)");                 // error → non-zero exit
+        cs.ShouldContain("return 1;");                       // error exit code
+        cs.ShouldContain("return 0;");                       // success: void payload → exit 0
+    }
+
+    [Fact]
+    public void Lowers_an_error_union_int_main()
+    {
+        // `pub fn main() !u8` → main returns `ErrUnion<byte>`. Success exits with the payload value;
+        // an error exits 1. Matches real zig's `!u8` main.
+        var cs = EmitZig(
+            "fn mk(ok: bool) !u8 { if (ok) return 42; return error.Bad; }\n" +
+            "pub fn main() !u8 { const v = try mk(true); return v; }\n");
+        cs.ShouldContain("ErrUnion<byte> main()");           // error-union main lowered
+        cs.ShouldContain("var __mr = main();");              // entry: call into a temp
+        cs.ShouldContain("if (__mr.IsErr)");                 // error → non-zero exit
+        cs.ShouldContain("return (int)__mr.Value;");         // success: payload → exit code
+    }
+
+    [Fact]
     public void Lowers_value_optional_to_csharp_nullable()
     {
         // A `?T` over a value type → C# Nullable<T> (`T?`): `null` is none, `.?` is

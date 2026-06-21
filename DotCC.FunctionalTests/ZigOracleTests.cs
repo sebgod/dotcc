@@ -858,6 +858,25 @@ public sealed class ZigOracleTests
             "    sum += c; sum += d;\n" + // +7 +13
             "    return @as(u8, @intCast(sum));\n" +
             "}\n", 42, "" },
+
+        // --- Milestone N (part 4): error-union `main` (`!void` / `!u8`) ---
+        // `pub fn main() !void` — success path (the error is not taken): exit 0, prints "ok".
+        new object[] { "main_errunion_void",
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "fn step(go: bool) !void { if (go) return error.Bad; }\n" +
+            "pub fn main() !void {\n" +
+            "    try step(false);\n" +
+            "    _ = printf(\"ok\\n\");\n" +
+            "}\n", 0, "ok" },
+        // `pub fn main() !u8` — success: the payload IS the exit code (42).
+        new object[] { "main_errunion_u8",
+            "fn mk(ok: bool) !u8 { if (ok) return 42; return error.Bad; }\n" +
+            "pub fn main() !u8 { const v = try mk(true); return v; }\n", 42, "" },
+        // `pub fn main() !u8` — error path: the error propagates out of main → exit 1 (the error is
+        // reported to stderr in both compilers, so stdout stays empty).
+        new object[] { "main_errunion_err",
+            "fn mk(ok: bool) !u8 { if (ok) return 42; return error.Bad; }\n" +
+            "pub fn main() !u8 { const v = try mk(false); return v; }\n", 1, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
