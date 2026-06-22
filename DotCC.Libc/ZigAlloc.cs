@@ -177,4 +177,22 @@ public static unsafe class ZigAlloc
     /// alive (the same stack-lifetime rule as Zig).</summary>
     public static Allocator FbaAllocator(FixedBufferAllocator* self)
         => new() { Ctx = self, Vtable = new AllocatorVTable { AllocFn = &FbaAlloc, FreeFn = &FbaFree } };
+
+    // ---- array-by-value return (the Milestone K cut, made sound) ---------
+
+    /// <summary>Copy an <paramref name="n"/>-element array at <paramref name="src"/> into a fresh
+    /// heap-owned buffer and return the pointer — the sound lowering of a Zig <c>[N]T</c> by-value
+    /// return. The callee's array local is a <c>stackalloc</c> that dies with its frame, but Zig
+    /// arrays are VALUE types, so the caller must receive a copy that outlives the call (returning
+    /// the stackalloc pointer directly would be a dangling pointer). V1: the buffer is NOT freed
+    /// (leaked — sound values, unfreed); a caller-allocated result pointer (sret) would avoid the
+    /// leak but rewrites the call ABI. BCL names are fully qualified because the runtime-splice
+    /// strips <c>using</c> directives when this file is embedded into an emitted program.</summary>
+    public static T* CopyArrayResult<T>(T* src, int n) where T : unmanaged
+    {
+        nuint bytes = (nuint)n * (nuint)sizeof(T);
+        var dst = (T*)System.Runtime.InteropServices.NativeMemory.Alloc(bytes);
+        System.Buffer.MemoryCopy(src, dst, (long)bytes, (long)bytes);
+        return dst;
+    }
 }

@@ -1445,6 +1445,15 @@ internal sealed class CSharpBackend
                     ? ($"ZigAlloc.FreeCHeap<{elem}>({Expr(fc.SliceExpr)})", PPostfix)
                     : ($"{Sub(fc.Receiver, PPostfix)}.Free<{elem}>({Expr(fc.SliceExpr)})", PPostfix);
             }
+            // An array-by-value return (the Milestone K cut, made sound). Copy the N elements of the
+            // source array (a `T*`) into a heap-owned buffer so the returned pointer outlives the
+            // callee frame — Zig arrays are value types. The source renders as a `T*` (an array var
+            // is a stackalloc pointer; an array literal hoists to a `__cl` pointer).
+            case ArrayByValReturn abr:
+            {
+                var elem = Cs(abr.Element.Unqualified);
+                return ($"ZigAlloc.CopyArrayResult<{elem}>({Expr(abr.Source)}, {abr.Count})", PPostfix);
+            }
             // A Zig tuple literal `.{ a, b }` (Milestone G) → `new System.ValueTuple<T1, …>(e1, …)`,
             // each element coerced to its declared element type. Arity-uniform (incl. 1) — the
             // `(a, b)` shorthand has no 1-tuple form, so the explicit `ValueTuple` ctor is used.

@@ -1242,6 +1242,26 @@ public sealed class ZigOracleTests
             "    _ = printf(\"fib=%u fact=%u\\n\", a, b);\n" +
             "    return @intCast(a + b - 133);\n" +               // 55 + 120 - 133 = 42
             "}\n", 42, "fib=55 fact=120" },
+
+        // Array-by-value return (the Milestone K cut, made sound). A `[N]T`-returning function copies
+        // its result into a heap-owned buffer so the value outlives the call — Zig arrays are value
+        // types. `squares()` is called TWICE: with the old dangling-stackalloc-pointer bug both `a`
+        // and `b` would read garbage from the same dead frame, so two independent correct copies is
+        // the regression guard. squares() = [0,1,4,9]; (1+4+9)+(1+4+9)+14 = 42.
+        new object[] { "array_return",
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "fn squares() [4]u32 {\n" +
+            "    var t: [4]u32 = undefined;\n" +
+            "    var i: usize = 0;\n" +
+            "    while (i < 4) { t[i] = @intCast(i * i); i = i + 1; }\n" +
+            "    return t;\n}\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = squares();\n" +
+            "    const b = squares();\n" +
+            "    _ = printf(\"a3=%u b3=%u\\n\", a[3], b[3]);\n" +
+            "    const s: u32 = a[1] + a[2] + a[3] + b[1] + b[2] + b[3] + 14;\n" +
+            "    return @intCast(s);\n" +
+            "}\n", 42, "a3=9 b3=9" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

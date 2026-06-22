@@ -2732,6 +2732,17 @@ internal sealed partial class ZigLowering
             if (v.Type.Unqualified is CType.ErrorUnion) { return new Return(v); }
             return new Return(new ErrUnionOk(v) { Type = eu });
         }
+        // An array-by-value return (the Milestone K cut, made sound). A `[N]T`-returning function
+        // emits a `T*` signature, but `return t;` of a stackalloc array local would hand back a
+        // dangling pointer into the dead callee frame — yet Zig arrays are value types. Copy the N
+        // elements into a heap-owned buffer (ArrayByValReturn) so the result outlives the call. The
+        // node's type is the array type, so the return coercion is a no-op. (An array in an `!T`
+        // error-union function takes the path above — a follow-up; rare in practice.)
+        if (_currentFnRet is CType.Array retArr && retArr.Count is int retN)
+        {
+            var src = LowerExprSink(valueItem, retArr);
+            return new Return(new ArrayByValReturn(src, retArr.Element, retN) { Type = retArr });
+        }
         // The return type is the sink, so `return .member;` / `return .{…};` resolve against
         // a struct/enum-returning function.
         return new Return(LowerExprSink(valueItem, _currentFnRet));
