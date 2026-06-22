@@ -41,6 +41,10 @@ internal sealed partial class IrBuilder
     // Whether each registered aggregate is a union — drives the compile-time layout
     // model (offsetof folding) and is set alongside every _structFields entry.
     private readonly Dictionary<string, bool> _structIsUnion = new(StringComparer.Ordinal);
+    // Byte-packed structs (Zig `packed struct`): the compile-time layout model drops
+    // inter-field padding + aligns to 1 for these, so `@sizeOf`/`offsetof` match the
+    // emitted [StructLayout(Sequential, Pack=1)] runtime layout. (Zig front-end only.)
+    private readonly HashSet<string> _packedStructs = new(StringComparer.Ordinal);
     // Enum tag → its resolved CType.Enum, so `enum Tag` as a type resolves to the
     // real enum (not plain int). Anonymous-but-typedef'd enums are reached through
     // _typedefs instead (the alias maps to the same CType.Enum).
@@ -698,10 +702,12 @@ internal sealed partial class IrBuilder
     {
         if (!_structFields.TryGetValue(name, out var fields)) { return (0, 1); } // opaque/unknown
         var isUnion = _structIsUnion.GetValueOrDefault(name);
+        var packed = _packedStructs.Contains(name);   // byte-packed: no inter-field padding, align 1
         int align = 1, size = 0, off = 0;
         foreach (var f in fields)
         {
             var (fs, fa) = Layout(f.Type);
+            if (packed) { fa = 1; }
             if (fa > align) { align = fa; }
             if (isUnion) { if (fs > size) { size = fs; } }
             else { off = RoundUp(off, fa) + fs; }
@@ -741,11 +747,12 @@ internal sealed partial class IrBuilder
     {
         if (!_structFields.TryGetValue(structName, out var fields)) { return null; }
         if (_structIsUnion.GetValueOrDefault(structName)) { return 0; }
+        var packed = _packedStructs.Contains(structName);   // byte-packed: no inter-field padding
         var off = 0;
         foreach (var f in fields)
         {
             var (fs, fa) = Layout(f.Type);
-            off = RoundUp(off, fa);
+            if (!packed) { off = RoundUp(off, fa); }
             if (f.Name == member) { return off; }
             off += fs;
         }
@@ -786,13 +793,14 @@ internal sealed partial class IrBuilder
     /// emitted <see cref="Types"/> list AND the field/union layout tables so member access
     /// and <c>sizeof</c>/<c>offsetof</c> resolve through the same compile-time model the C
     /// frontend uses. Idempotent on the name (a second registration is ignored).</summary>
-    internal void RegisterStructType(string name, List<StructField> fields, bool isUnion)
+    internal void RegisterStructType(string name, List<StructField> fields, bool isUnion, AggregateLayout layout = AggregateLayout.Default)
     {
         if (_emittedTypes.Add(name))
         {
             _structFields[name] = fields;
             _structIsUnion[name] = isUnion;
-            Types.Add(new StructTypeDef(name, fields, isUnion));
+            if (layout == AggregateLayout.Packed) { _packedStructs.Add(name); }
+            Types.Add(new StructTypeDef(name, fields, isUnion, layout));
         }
     }
 

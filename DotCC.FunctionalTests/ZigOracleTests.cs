@@ -1095,6 +1095,26 @@ public sealed class ZigOracleTests
             "    _ = printf(\"flagtag=%d\\n\", @as(c_int, @intFromEnum(Kind.flag)));\n" +
             "    return score(a) + score(b);\n" + // 30 + 12 = 42
             "}\n", 42, "flagtag=4" },             // expected stdout is newline-trimmed (see Norm)
+
+        // Struct layout modifiers (Milestone R, part 2): `extern struct` (C-ABI sequential) vs
+        // `packed struct` (byte-packed, no padding). @sizeOf(Ext{u8,u32}) = 8 (aligned + tail pad);
+        // @sizeOf(Pk{4×u8}) = 4 (32 bits → matches Zig's bit-backing model for byte-multiple fields).
+        // Field read/write on both. 3 + 11 + 1 + 2 + 3 + 10 + 12(sz) = 42; stdout proves sz = 12.
+        new object[] { "struct_layout",
+            "const Ext = extern struct { a: u8, b: u32 };\n" +
+            "const Pk = packed struct { a: u8, b: u8, c: u8, d: u8 };\n" +
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "pub fn main() u8 {\n" +
+            "    var e: Ext = .{ .a = 3, .b = 7 };\n" +
+            "    e.b += 4;\n" + // 11
+            "    var p: Pk = .{ .a = 1, .b = 2, .c = 3, .d = 4 };\n" +
+            "    p.d += 6;\n" + // 10
+            "    const sz: u32 = @sizeOf(Ext) + @sizeOf(Pk);\n" + // 8 + 4 = 12
+            "    const szc: c_int = @intCast(sz);\n" +
+            "    _ = printf(\"sz=%d\\n\", szc);\n" +
+            "    const total: u32 = @as(u32, e.a) + e.b + @as(u32, p.a) + @as(u32, p.b) + @as(u32, p.c) + @as(u32, p.d) + sz;\n" +
+            "    return @intCast(total);\n" + // 42
+            "}\n", 42, "sz=12" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

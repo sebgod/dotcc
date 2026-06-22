@@ -436,11 +436,21 @@ public sealed record ArrayDecl(Symbol Sym, CType Element, CExpr? CountExpr, IRea
 /// <summary>A local variable declaration with optional initializer.</summary>
 public sealed record LocalDecl(Symbol Sym, CExpr? Init);
 
+/// <summary>The C# memory layout a non-union aggregate is rendered with. <c>Default</c> emits no
+/// attribute (C# value-type default, which the runtime treats as sequential). <c>Sequential</c>
+/// pins it explicitly (Zig <c>extern struct</c> — guaranteed C-ABI layout). <c>Packed</c> emits
+/// <c>[StructLayout(Sequential, Pack=1)]</c> (Zig <c>packed struct</c> — no inter-field padding).
+/// A union always uses explicit overlapping layout regardless of this (see
+/// <see cref="StructTypeDef.IsUnion"/>).</summary>
+public enum AggregateLayout { Default, Sequential, Packed }
+
 /// <summary>A struct or union type definition. Codegen renders it into the
 /// top-level type-declarations section (a plain <c>unsafe struct</c>, or an
 /// explicit-layout one for a union). Field types are also registered in the
-/// builder's struct table so member access resolves a field's type.</summary>
-public sealed record StructTypeDef(string Name, IReadOnlyList<StructField> Fields, bool IsUnion);
+/// builder's struct table so member access resolves a field's type.
+/// <see cref="Layout"/> drives an optional <c>[StructLayout]</c> attribute for a
+/// non-union aggregate (Zig <c>extern</c>/<c>packed struct</c>).</summary>
+public sealed record StructTypeDef(string Name, IReadOnlyList<StructField> Fields, bool IsUnion, AggregateLayout Layout = AggregateLayout.Default);
 
 /// <summary>One field of a <see cref="StructTypeDef"/>. <see cref="BitWidth"/> is
 /// <c>null</c> for a normal field, or the declared width of a bit-field —

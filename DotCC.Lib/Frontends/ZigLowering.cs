@@ -267,8 +267,10 @@ internal sealed partial class ZigLowering
         {
             switch (Unwrap(decl).Content)
             {
-                case Zig.StructDecl s:      _containerTypes[Tok(s.Arg1)] = new CType.Named(Tok(s.Arg1)); break;
-                case Zig.StructDeclEmpty s: _containerTypes[Tok(s.Arg1)] = new CType.Named(Tok(s.Arg1)); break;
+                case Zig.StructDecl s:        _containerTypes[Tok(s.Arg1)] = new CType.Named(Tok(s.Arg1)); break;
+                case Zig.StructDeclEmpty s:   _containerTypes[Tok(s.Arg1)] = new CType.Named(Tok(s.Arg1)); break;
+                case Zig.ExternStructDecl s:  _containerTypes[Tok(s.Arg1)] = new CType.Named(Tok(s.Arg1)); break;  // const IDENT = extern struct { … } ;
+                case Zig.PackedStructDecl s:  _containerTypes[Tok(s.Arg1)] = new CType.Named(Tok(s.Arg1)); break;  // const IDENT = packed struct { … } ;
                 case Zig.EnumDecl e:        foreach (var m in RegisterEnumZig(e.Arg1, null, e.Arg5)) { containerMethods.Add((Tok(e.Arg1), m)); } break;       // const IDENT = enum { EnumFields } ;
                 case Zig.EnumDeclTyped e:   foreach (var m in RegisterEnumZig(e.Arg1, e.Arg5, e.Arg8)) { containerMethods.Add((Tok(e.Arg1), m)); } break;     // const IDENT = enum ( Type ) { EnumFields } ;
                 case Zig.UnionDeclEnum u:   _containerTypes[Tok(u.Arg1)] = new CType.Named(Tok(u.Arg1)); break;  // const IDENT = union(enum) { … } ;
@@ -296,6 +298,22 @@ internal sealed partial class ZigLowering
                     break;
                 }
                 case Zig.StructDeclEmpty s: RegisterStruct(Tok(s.Arg1), System.Array.Empty<Item>()); break;  // const IDENT = struct { } ;
+                case Zig.ExternStructDecl s:  // const IDENT = extern struct { Members } ;
+                {
+                    var (fields, methods, consts) = SplitMembers(s.Arg6);
+                    RegisterStruct(Tok(s.Arg1), fields, AggregateLayout.Sequential);
+                    RegisterContainerConsts(Tok(s.Arg1), consts);
+                    foreach (var m in methods) { containerMethods.Add((Tok(s.Arg1), m)); }
+                    break;
+                }
+                case Zig.PackedStructDecl s:  // const IDENT = packed struct { Members } ;
+                {
+                    var (fields, methods, consts) = SplitMembers(s.Arg6);
+                    RegisterStruct(Tok(s.Arg1), fields, AggregateLayout.Packed);
+                    RegisterContainerConsts(Tok(s.Arg1), consts);
+                    foreach (var m in methods) { containerMethods.Add((Tok(s.Arg1), m)); }
+                    break;
+                }
                 case Zig.UnionDeclEnum u:   foreach (var m in RegisterUnion(Tok(u.Arg1), u.Arg8)) { containerMethods.Add((Tok(u.Arg1), m)); } break;  // const IDENT = union(enum) { UnionMembers } ;
                 case Zig.UnionDeclTagged u: foreach (var m in RegisterUnionTagged(Tok(u.Arg1), Tok(u.Arg5), u.Arg8)) { containerMethods.Add((Tok(u.Arg1), m)); } break;  // const IDENT = union(SomeEnum) { UnionMembers } ;
             }
@@ -318,7 +336,7 @@ internal sealed partial class ZigLowering
                 case Zig.FnDefErr f:       entries.Add(AsEntry(DeclareFn(f.Arg1, f.Arg3, f.Arg6, f.Arg7, errUnion: true), null)); break;   // `!T` return → ErrorUnion(T)
                 case Zig.FnDefNoArgsErr f: entries.Add(AsEntry(DeclareFn(f.Arg1, null, f.Arg5, f.Arg6, errUnion: true), null)); break;
                 // Container decls were handled in pass 0 — skip here.
-                case Zig.StructDecl or Zig.StructDeclEmpty or Zig.EnumDecl or Zig.EnumDeclTyped or Zig.UnionDeclEnum or Zig.UnionDeclTagged: break;
+                case Zig.StructDecl or Zig.StructDeclEmpty or Zig.ExternStructDecl or Zig.PackedStructDecl or Zig.EnumDecl or Zig.EnumDeclTyped or Zig.UnionDeclEnum or Zig.UnionDeclTagged: break;
                 // A top-level `const`/`var` is either a comptime binding (an `@import`/allocator
                 // alias recorded in pass 0, which emits no decl) or a runtime global — both are
                 // resolved by the global pass below (LowerTopLevelGlobals), so skip them here.
@@ -599,7 +617,7 @@ internal sealed partial class ZigLowering
     /// table via <see cref="IrBuilder.RegisterStructType"/>. <paramref name="fieldItems"/> are
     /// the body's field members (each a <see cref="Zig.StructField"/>), already split out from
     /// any methods by <see cref="SplitMembers"/>; empty for a <c>struct {}</c>.</summary>
-    private void RegisterStruct(string name, IReadOnlyList<Item> fieldItems)
+    private void RegisterStruct(string name, IReadOnlyList<Item> fieldItems, AggregateLayout layout = AggregateLayout.Default)
     {
         var fields = new List<StructField>();
         foreach (var fd in fieldItems)
@@ -607,7 +625,7 @@ internal sealed partial class ZigLowering
             var f = (Zig.StructField)fd.Content!;   // FieldDecl -> IDENT ':' Type
             fields.Add(new StructField(Tok(f.Arg0), LowerType(f.Arg2)));
         }
-        _ir.RegisterStructType(name, fields, isUnion: false);
+        _ir.RegisterStructType(name, fields, isUnion: false, layout);
     }
 
     /// <summary>Split a struct container body (<c>FieldDecls</c> = a list of <c>Member</c>) into
