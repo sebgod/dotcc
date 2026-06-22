@@ -219,6 +219,7 @@ symbols:
   # `packed struct { … }` / `packed union { … }` layout modifier. `extern struct`/`extern union`
   # reuse the existing #76 `extern` keyword (already a Decl-start token for `extern fn`).
   - 'packed'       # 146 `packed struct { … }` layout modifier
+  - 'export'       # 147 `export fn …` — force C-ABI external linkage (FFI export surface)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -237,11 +238,22 @@ productions:
       - { lhs: Decl, rhs: ['pub', FnDef],  action: pubFn }
       - { lhs: Decl, rhs: [VarDecl] }
       - { lhs: Decl, rhs: ['pub', VarDecl], action: pubVar }
+      # `export fn` / `pub export fn` (Milestone R, part 4) — force C-ABI external linkage. dotcc
+      # lowers it as an ordinary (export-eligible under -shared) function; Unwrap peels the modifier
+      # to the inner FnDef so all existing FnDef handling applies. After `export`, only `fn` (a FnDef)
+      # follows; after `pub`, `export` vs `fn`/`const`/`var` is a disjoint 1-token shift — conflict-free.
+      - { lhs: Decl, rhs: ['export', FnDef],        action: exportFn }
+      - { lhs: Decl, rhs: ['pub', 'export', FnDef], action: pubExportFn }
       # extern fn PROTOTYPE — no body, ends with `;`; linked with -lc (PEG:
-      # `KEYWORD_extern STRINGLITERALSINGLE? FnProto SEMICOLON`). The `extern "c"`
-      # library-name string and a `!T` error-union return are deferred.
+      # `KEYWORD_extern STRINGLITERALSINGLE? FnProto SEMICOLON`). The optional `extern "c"`
+      # library/calling-convention string (Milestone R, part 4) is accepted and lowered like a plain
+      # `extern fn` (routed to dotcc's Libc runtime by bare name); after `extern`, a `STRING` selects
+      # the `"c"` forms vs the bare `fn` forms — disjoint, conflict-free. A `!T` error-union return is
+      # still deferred.
       - { lhs: Decl, rhs: ['extern', 'fn', IDENT, '(', Params, ')', Type, ';'], action: externFnProto }
       - { lhs: Decl, rhs: ['extern', 'fn', IDENT, '(', ')', Type, ';'],         action: externFnProtoNoArgs }
+      - { lhs: Decl, rhs: ['extern', STRING, 'fn', IDENT, '(', Params, ')', Type, ';'], action: externCFnProto }
+      - { lhs: Decl, rhs: ['extern', STRING, 'fn', IDENT, '(', ')', Type, ';'],         action: externCFnProtoNoArgs }
       # Container decls — Zig binds a struct/enum TYPE to a `const` name (types are
       # values). A struct/enum RHS isn't an `RhsExpr`, so these are distinct Decl forms,
       # NOT VarDecl: the `struct`/`enum` keyword right after `=` is a clean 1-token shift
@@ -966,6 +978,7 @@ lexer:
     - { symbol: 'enum',     match: 'enum' }
     - { symbol: 'union',    match: 'union' }
     - { symbol: 'packed',   match: 'packed' }
+    - { symbol: 'export',   match: 'export' }
     # `errdefer` (8 chars) and `defer` (5): longest-match beats IDENT; `errdefer` vs the
     # `error` keyword — `errdefer` is longer, so it wins on its own input; `error` still
     # wins on `error` (first-rule-wins on the 5-char tie with IDENT).

@@ -774,6 +774,32 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_export_and_pub_export_functions_like_ordinary_ones()
+    {
+        // Milestone R, part 4 — `export fn` / `pub export fn` force C-ABI external linkage in Zig;
+        // dotcc peels the modifier (Unwrap) and lowers them as ordinary functions (already
+        // export-eligible under -shared), so both are emitted + callable.
+        var cs = EmitZig(
+            "export fn add(a: u8, b: u8) u8 { return a + b; }\n" +
+            "pub export fn mul(a: u8, b: u8) u8 { return a * b; }\n" +
+            "pub fn main() u8 { return add(mul(20, 2), 2); }\n");
+        cs.ShouldContain("add(byte a, byte b)");   // export fn emitted
+        cs.ShouldContain("mul(byte a, byte b)");   // pub export fn emitted
+        cs.ShouldContain("add(mul(20, 2), 2)");    // both callable locally
+    }
+
+    [Fact]
+    public void Lowers_an_extern_c_fn_prototype_like_a_plain_extern_fn()
+    {
+        // `extern "c" fn` — the optional library/calling-convention string after `extern`. Lowered
+        // identically to a plain `extern fn`: the call routes by bare name to dotcc's Libc runtime.
+        var cs = EmitZig(
+            "extern \"c\" fn putchar(c: c_int) c_int;\n" +
+            "pub fn main() u8 { _ = putchar(72); return 0; }\n");
+        cs.ShouldContain("putchar(72)");
+    }
+
+    [Fact]
     public void Lowers_a_void_variant_via_a_bare_dotted_literal()
     {
         // A bare `.none` at a tagged-union sink constructs the void variant — only the tag is
