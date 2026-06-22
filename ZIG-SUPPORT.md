@@ -36,6 +36,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `pub fn main() void` | ✅ | void-returning main — shell calls it for effect, returns 0 |
 | `pub fn main() u8` | ✅ | the `u8` return is the process exit code |
 | `pub fn …` | ✅ | `pub` unwrapped (visibility is a no-op in our single-module emit) |
+| `export fn …` / `pub export fn …` | ✅ | C-ABI external-linkage modifier (Milestone R, part 4) — unwrapped to the inner function, which lowers like an ordinary one (every non-static function is already export-eligible under `-shared`, so the modifier is a no-op in a console program). Scoped to functions; `export const`/`export var` (exported data) is deferred |
 | Parameters `name: Type` | ✅ | names + types ride into the C# signature; faithful signedness |
 | Forward references | ✅ | two-pass lowering (Zig has no prototypes) — a call may precede the callee |
 | `extern fn f(p: T) Ret;` | ✅ | libc/FFI prototype (no body); routed by bare name, linked with `-lc` |
@@ -44,8 +45,8 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `fn f() !T` (inferred-error return) | ✅ | the `!T` returns an error union (`ErrUnion<T>`); see `try`/`catch`/`error.X` below. V1 erases the error SET |
 | `pub fn main() !void` / `!u8` (error-union main) | ✅ | main may return an error union (Milestone N, part 4) — emitted as `ErrUnion<…>`; the process entry maps the result like real zig: an error → exit 1 (the flat error code reported to stderr, stdout stays clean), success → exit 0 (a `!void` payload) or the integer payload value (`!u8`). `try` inside main propagates to that boundary |
 | top-level / global `const`/`var` | ✅ | a runtime global → a `public static` field of `DotCcGlobals` (the same path the C front-end's file-scope variables take), surfaced by bare name (a function body reads/writes it unqualified). Typed keeps its annotation; untyped infers from the initializer (`const N = 5;` → `int`). Initializers are lowered in source order, so a global may reference an EARLIER global by bare name. `const`-ness isn't enforced (both lower to a mutable field — observably identical for a correct Zig program). An aggregate (struct), `[N]T` array, and `undefined` global are supported (Milestone K — an array routes through a pinned, program-lifetime backing store). **Deferred:** a fn-pointer global and a forward reference to a LATER global |
-| `export`/`inline`/`callconv`/`align`/`linksection` | 🚫 | full FnProto modifiers not modeled |
-| `extern "c"` library-name string | 🚫 | bare `extern fn` only |
+| `inline`/`callconv`/`align`/`linksection` | 🚫 | other FnProto modifiers not modeled (`export` ✅ above; `callconv`/`align`/`linksection` planned for Milestone R, part 5) |
+| `extern "c" fn …;` | ✅ | the optional library/calling-convention string after `extern` (Milestone R, part 4); accepted + lowered like a plain `extern fn` (routed to dotcc's libc-shaped runtime by bare name) |
 
 ## Types
 
@@ -437,6 +438,8 @@ rejects, not silently accept more.
   vs `packed struct` → byte-packed `[StructLayout(Sequential, Pack=1)]`, with matching `@sizeOf` + field access),
   `examples/zig-union-untagged` (untagged `union { … }`: a bare overlapping-storage overlay struct, each
   value kept to a single active field — write-then-read the same field, no type-punning),
+  `examples/zig-export-extern` (FFI declaration surface: `extern "c" fn printf` + `export fn` /
+  `pub export fn` callable locally),
   `examples/zig-slices` (`[]const u8` slices: `.len`/`.ptr`, index, `s[lo..hi]`, `for (s) \|b\|`),
   `examples/zig-open-slice` (open-ended slicing `s[lo..]`: the high bound is the source length — a
   slice's `.len`, an array's element count; alongside a closed re-slice),

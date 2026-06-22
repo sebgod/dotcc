@@ -1132,6 +1132,20 @@ public sealed class ZigOracleTests
             "    _ = printf(\"u=%d\\n\", bc);\n" +
             "    return @intCast(@as(u32, a.small) + b.big);\n" + // 42
             "}\n", 42, "u=27" },
+
+        // FFI declaration surface (Milestone R, part 4): `extern "c" fn` (library/calling-convention
+        // string) + `export fn` / `pub export fn` (C-ABI external linkage). dotcc lowers extern "c"
+        // like a plain extern fn (routed to its libc runtime) and emits export functions as ordinary
+        // callable ones. mul(20,2)=40, add(40,2)=42; stdout proves the extern "c" printf.
+        new object[] { "export_extern",
+            "extern \"c\" fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "export fn add(a: u8, b: u8) u8 { return a + b; }\n" +
+            "pub export fn mul(a: u8, b: u8) u8 { return a * b; }\n" +
+            "pub fn main() u8 {\n" +
+            "    const r = add(mul(20, 2), 2);\n" + // 42
+            "    _ = printf(\"r=%d\\n\", @as(c_int, r));\n" +
+            "    return r;\n" +
+            "}\n", 42, "r=42" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

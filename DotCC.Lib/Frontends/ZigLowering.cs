@@ -333,6 +333,8 @@ internal sealed partial class ZigLowering
             {
                 case Zig.ExternFnProto f:       DeclareExternFn(f.Arg2, f.Arg4, f.Arg6); break;  // extern fn IDENT ( Params ) Type ;
                 case Zig.ExternFnProtoNoArgs f: DeclareExternFn(f.Arg2, null, f.Arg5); break;     // extern fn IDENT ( ) Type ;
+                case Zig.ExternCFnProto f:       DeclareExternFn(f.Arg3, f.Arg5, f.Arg7); break;  // extern "c" fn IDENT ( Params ) Type ;
+                case Zig.ExternCFnProtoNoArgs f: DeclareExternFn(f.Arg3, null, f.Arg6); break;     // extern "c" fn IDENT ( ) Type ;
                 case Zig.FnDef f:          entries.Add(AsEntry(DeclareFn(f.Arg1, f.Arg3, f.Arg5, f.Arg6), null)); break;
                 case Zig.FnDefNoArgs f:    entries.Add(AsEntry(DeclareFn(f.Arg1, null, f.Arg4, f.Arg5), null)); break;
                 case Zig.FnDefErr f:       entries.Add(AsEntry(DeclareFn(f.Arg1, f.Arg3, f.Arg6, f.Arg7, errUnion: true), null)); break;   // `!T` return → ErrorUnion(T)
@@ -457,11 +459,19 @@ internal sealed partial class ZigLowering
         (Symbol sym, List<(string name, CType type)> ps, Item body) e, string? container)
         => (e.sym, e.ps, e.body, container);
 
-    /// <summary>Unwrap a top-level decl's optional <c>pub</c> wrapper (<see cref="Zig.PubFn"/>)
-    /// to its inner declaration; a non-<c>pub</c> decl is returned unchanged. (D1 container
-    /// decls are not <c>pub</c>-wrappable yet — single-file programs don't need export
-    /// visibility; deferred to the methods milestone.)</summary>
-    private static Item Unwrap(Item decl) => decl.Content is Zig.PubFn p ? p.Arg1 : decl;
+    /// <summary>Unwrap a top-level decl's optional visibility/linkage modifier — <c>pub</c>
+    /// (<see cref="Zig.PubFn"/>), <c>export</c> (<see cref="Zig.ExportFn"/>), or <c>pub export</c>
+    /// (<see cref="Zig.PubExportFn"/>) — to its inner declaration; an unmodified decl is returned
+    /// unchanged. Both modifiers are a no-op in a single-file console program (every non-static
+    /// function is already export-eligible under <c>-shared</c>), so peeling lets all the existing
+    /// FnDef handling apply. (D1 container decls are not modifier-wrappable yet.)</summary>
+    private static Item Unwrap(Item decl) => decl.Content switch
+    {
+        Zig.PubFn p        => p.Arg1,   // `pub FnDef`
+        Zig.ExportFn e     => e.Arg1,   // `export FnDef` (Milestone R)
+        Zig.PubExportFn pe => pe.Arg2,  // `pub export FnDef` (Milestone R)
+        _ => decl,
+    };
 
     // ---- top level -------------------------------------------------------
 
