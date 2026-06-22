@@ -59,11 +59,26 @@ internal sealed class CSharpTarget : ITarget
         _ => throw new IrUnsupportedException("C# target cannot render type " + t.GetType().Name),
     };
 
-    public string RenderIntLit(LitInt lit) => lit.Digits + IntSuffix(lit.Type);
+    public string RenderIntLit(LitInt lit) =>
+        lit.Type.Unqualified is CType.Prim { Integer: true, Bytes: >= 16 } p128
+            ? Render128Lit(lit.Digits, p128.Signed)
+            : lit.Digits + IntSuffix(lit.Type);
+
+    /// <summary>Emit a 128-bit integer literal. C# has no <c>Int128</c>/<c>UInt128</c> literal
+    /// suffix, so a magnitude that fits <c>ulong</c> is written as a plain literal cast to the
+    /// 128-bit type (the cast pins overload resolution), and a larger magnitude — which has no C#
+    /// literal form at all — is materialized via <c>Parse</c>. The digit string is the normalized
+    /// decimal magnitude (any sign rides on an outer <c>Unary(Neg)</c>).</summary>
+    private static string Render128Lit(string digits, bool signed)
+    {
+        var ty = signed ? "System.Int128" : "System.UInt128";
+        return ulong.TryParse(digits, out _) ? $"({ty}){digits}UL" : $"{ty}.Parse(\"{digits}\")";
+    }
 
     /// <summary>The C# integer-literal suffix for a type: <c>u</c> (uint), <c>L</c>
     /// (long), <c>UL</c> (ulong), none (int / narrower) — reproducing exactly what
-    /// the builder used to append before the suffix moved behind this seam.</summary>
+    /// the builder used to append before the suffix moved behind this seam. 128-bit types are
+    /// handled separately by <see cref="Render128Lit"/> (no C# suffix exists for them).</summary>
     private static string IntSuffix(CType t) => t.Unqualified is CType.Prim { Integer: true } p
         ? (p.Signed, p.Bytes >= 8) switch
         {
@@ -96,6 +111,8 @@ internal sealed class CSharpTarget : ITarget
         "unsigned long" => "ulong",
         "long long" => "long",
         "unsigned long long" => "ulong",
+        "__int128" => "System.Int128",            // C __int128 / Zig i128 → BCL Int128
+        "unsigned __int128" => "System.UInt128",  // C unsigned __int128 / Zig u128 → BCL UInt128
         "float" => "float",
         "double" => "double",
         "long double" => "double",

@@ -1181,6 +1181,23 @@ public sealed class ZigOracleTests
             "    _ = printf(\"counter=%d\\n\", c);\n" +
             "    return @intCast(Cfg.counter);\n" + // 42
             "}\n", 42, "counter=42" },
+
+        // Milestone ß ("sharp-s"): 128-bit integers i128/u128 → C# System.Int128/UInt128 (BCL
+        // primitives, arithmetic free). The values genuinely exceed 64 bits (2^80 via a u128
+        // multiply; -(2^100) as a signed i128 with a sign-preserving arithmetic shift), so a 64-bit
+        // lowering would truncate them. Reduced to a byte exit code; stdout proves the wide values.
+        new object[] { "int128",
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "pub fn main() u8 {\n" +
+            "    const a: u128 = @as(u128, 1) << 40;\n" +
+            "    const wide: u128 = a * a;\n" +              // 2^80
+            "    const hi: u64 = @intCast(wide >> 64);\n" +  // 2^16 = 65536
+            "    const big: i128 = -(@as(i128, 1) << 100);\n" +
+            "    const neg: i64 = @intCast(big >> 100);\n" + // -1
+            "    const code: u64 = (hi / 65536) + @as(u64, @intCast(-neg)) + 40;\n" + // 1 + 1 + 40 = 42
+            "    _ = printf(\"hi=%llu neg=%lld\\n\", hi, neg);\n" +
+            "    return @intCast(code);\n" + // 42
+            "}\n", 42, "hi=65536 neg=-1" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

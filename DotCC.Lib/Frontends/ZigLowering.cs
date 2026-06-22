@@ -3683,8 +3683,24 @@ internal sealed partial class ZigLowering
         var left = LowerExpr(l);
         var right = LowerExpr(r);
         var t = PeerIntType(left, right);
+        GuardNo128Saturation(t);
         var args = new List<CExpr> { CoerceToPeer(left, t), CoerceToPeer(right, t) };
         return new Call($"ZigMath.{helper}", args) { Type = t };
+    }
+
+    /// <summary>Reject a saturating op (<c>+|</c>/<c>-|</c>/<c>*|</c>) at a 128-bit operand width.
+    /// <see cref="DotCC.Libc.ZigMath"/> clamps via an exact-in-128-bit accumulator, which a 16-byte
+    /// operand would itself overflow — so it can't honor the saturation contract there. Wrapping
+    /// (<c>+%</c>) and ordinary arithmetic on <c>i128</c>/<c>u128</c> are unaffected (native C#
+    /// <c>Int128</c>/<c>UInt128</c>). A documented V1 cut.</summary>
+    private static void GuardNo128Saturation(CType t)
+    {
+        if (t.Unqualified is CType.Prim { Integer: true, Bytes: >= 16 })
+        {
+            throw new IrUnsupportedException(
+                "saturating arithmetic (+|/-|/*|) on a 128-bit integer is not supported — the exact " +
+                "128-bit accumulator would itself overflow; use wrapping (+%) or clamp manually");
+        }
     }
 
     /// <summary>Coerce a wrapping/saturating operand to the peer integer type, skipping the cast when
@@ -3707,6 +3723,7 @@ internal sealed partial class ZigLowering
                 "a saturating compound assignment (`x op|= y`) to a target with side effects is not " +
                 "supported yet — assign in two steps (`x = x op| y;`) with a simpler target");
         }
+        GuardNo128Saturation(target.Type);
         var value = LowerExprSink(valueItem, target.Type);
         var call = new Call($"ZigMath.{helper}", new List<CExpr> { target, CoerceToPeer(value, target.Type) })
             { Type = target.Type };
@@ -4125,35 +4142,75 @@ internal sealed partial class ZigLowering
         var t = raw.Replace("_", "");
         var inv = CultureInfo.InvariantCulture;
         ulong mag = 0; bool magOk; long? val = null;
+        string body; int radix;
         if (t.Length >= 2 && t[0] == '0' && t[1] is 'x' or 'X')
         {
-            magOk = ulong.TryParse(t[2..], NumberStyles.HexNumber, inv, out mag);
-            if (long.TryParse(t[2..], NumberStyles.HexNumber, inv, out var hv)) { val = hv; }
+            body = t[2..]; radix = 16;
+            magOk = ulong.TryParse(body, NumberStyles.HexNumber, inv, out mag);
+            if (long.TryParse(body, NumberStyles.HexNumber, inv, out var hv)) { val = hv; }
         }
         else if (t.Length >= 2 && t[0] == '0' && t[1] is 'o' or 'O')
         {
-            try { mag = System.Convert.ToUInt64(t[2..], 8); magOk = true; } catch { magOk = false; }
+            body = t[2..]; radix = 8;
+            try { mag = System.Convert.ToUInt64(body, 8); magOk = true; } catch { magOk = false; }
             if (magOk && mag <= long.MaxValue) { val = (long)mag; }
         }
         else if (t.Length >= 2 && t[0] == '0' && t[1] is 'b' or 'B')
         {
-            try { mag = System.Convert.ToUInt64(t[2..], 2); magOk = true; } catch { magOk = false; }
+            body = t[2..]; radix = 2;
+            try { mag = System.Convert.ToUInt64(body, 2); magOk = true; } catch { magOk = false; }
             if (magOk && mag <= long.MaxValue) { val = (long)mag; }
         }
         else
         {
+            body = t; radix = 10;
             magOk = ulong.TryParse(t, NumberStyles.None, inv, out mag);
             if (long.TryParse(t, inv, out var dv)) { val = dv; }
         }
-        // The literal's decimal CORE — radix/underscores are gone; the backend re-adds a suffix
-        // from the type below. (A non-decimal radix would also be valid C#, but decimal is uniform.)
-        var core = magOk ? mag.ToString(inv) : t;
-        var type = !magOk ? CType.Long
-            : mag <= int.MaxValue ? CType.Int
-            : mag <= uint.MaxValue ? CType.UInt
-            : mag <= long.MaxValue ? CType.Long
-            : CType.ULong;
-        return new LitInt(core, val) { Type = type };
+        if (magOk)
+        {
+            // The literal's decimal CORE — radix/underscores are gone; the backend re-adds a suffix
+            // from the type below. (A non-decimal radix would also be valid C#, but decimal is uniform.)
+            var core = mag.ToString(inv);
+            var type = mag <= int.MaxValue ? CType.Int
+                : mag <= uint.MaxValue ? CType.UInt
+                : mag <= long.MaxValue ? CType.Long
+                : CType.ULong;
+            return new LitInt(core, val) { Type = type };
+        }
+        // Magnitude exceeds ulong: carry it as a 128-bit literal when it fits u128 (Value stays null —
+        // it can't fit a long; a typed i128/u128 sink casts the carrier). Beyond u128 a literal is out
+        // of scope, so keep the legacy ulong-ish carrier (any downstream use rejects it).
+        if (TryParseRadix128(body, radix, out var mag128))
+        {
+            return new LitInt(mag128.ToString(inv), null) { Type = CType.UInt128 };
+        }
+        return new LitInt(t, null) { Type = CType.Long };
+    }
+
+    /// <summary>Parse a (radix-stripped) integer body into a <see cref="System.UInt128"/>, with an
+    /// exact overflow guard — the >64-bit-literal path for <c>i128</c>/<c>u128</c>. Radix-uniform
+    /// (10/16/8/2), since the BCL only parses <c>UInt128</c> in decimal/hex; returns false on a bad
+    /// digit, an empty body, or a magnitude past <see cref="System.UInt128.MaxValue"/>.</summary>
+    private static bool TryParseRadix128(string body, int radix, out System.UInt128 result)
+    {
+        result = 0;
+        if (body.Length == 0) { return false; }
+        var r = (System.UInt128)radix;
+        var max = System.UInt128.MaxValue;
+        System.UInt128 acc = 0;
+        foreach (var ch in body)
+        {
+            int d = ch is >= '0' and <= '9' ? ch - '0'
+                  : ch is >= 'a' and <= 'f' ? ch - 'a' + 10
+                  : ch is >= 'A' and <= 'F' ? ch - 'A' + 10
+                  : -1;
+            if (d < 0 || d >= radix) { return false; }
+            if (acc > (max - (System.UInt128)d) / r) { return false; }  // would overflow u128
+            acc = acc * r + (System.UInt128)d;
+        }
+        result = acc;
+        return true;
     }
 
     /// <summary>Lower a Zig float literal: strip <c>_</c> separators, and convert a hex float
@@ -4254,6 +4311,8 @@ internal sealed partial class ZigLowering
         "u32" => CType.UInt,
         "i64" => CType.Long,
         "u64" => CType.ULong,
+        "i128" => CType.Int128,  // → C# System.Int128
+        "u128" => CType.UInt128, // → C# System.UInt128
         "isize" => CType.Long,   // LP64: pointer-width signed
         "usize" => CType.ULong,  // LP64: pointer-width unsigned (== size_t)
         "f32" => CType.Float,
