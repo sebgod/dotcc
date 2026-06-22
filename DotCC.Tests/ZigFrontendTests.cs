@@ -711,6 +711,38 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_an_extern_struct_with_sequential_layout()
+    {
+        // Milestone R, part 2 — `extern struct` pins guaranteed C-ABI layout: dotcc emits
+        // [StructLayout(Sequential)] (no packing). Field access lowers like any struct.
+        var cs = EmitZig(
+            "const P = extern struct { a: u8, b: u32 };\n" +
+            "pub fn main() u8 {\n" +
+            "    var p: P = .{ .a = 1, .b = 2 };\n" +
+            "    p.b += 3;\n" +
+            "    return @intCast(p.b);\n" +
+            "}\n");
+        cs.ShouldContain("LayoutKind.Sequential)]");   // explicit C-ABI layout
+        cs.ShouldContain("unsafe struct P");
+        cs.ShouldNotContain("Pack = 1");               // extern is NOT packed
+    }
+
+    [Fact]
+    public void Lowers_a_packed_struct_with_pack1_layout()
+    {
+        // Milestone R, part 2 — `packed struct` removes inter-field padding: dotcc emits
+        // [StructLayout(Sequential, Pack=1)] (V1 byte-packs, not bit-packs).
+        var cs = EmitZig(
+            "const P = packed struct { a: u8, b: u8, c: u8, d: u8 };\n" +
+            "pub fn main() u8 {\n" +
+            "    var p: P = .{ .a = 1, .b = 2, .c = 3, .d = 4 };\n" +
+            "    return @intCast(@as(u32, p.a) + p.b + p.c + p.d);\n" +
+            "}\n");
+        cs.ShouldContain("LayoutKind.Sequential, Pack = 1)]");
+        cs.ShouldContain("unsafe struct P");
+    }
+
+    [Fact]
     public void Lowers_a_void_variant_via_a_bare_dotted_literal()
     {
         // A bare `.none` at a tagged-union sink constructs the void variant — only the tag is

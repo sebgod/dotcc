@@ -215,6 +215,10 @@ symbols:
   - '+|='          # 143 saturating add-assign
   - '-|='          # 144 saturating sub-assign
   - '*|='          # 145 saturating mul-assign
+  # --- declaration modifiers & aggregate kinds (Milestone R; appended — never reorder) ---
+  # `packed struct { … }` / `packed union { … }` layout modifier. `extern struct`/`extern union`
+  # reuse the existing #76 `extern` keyword (already a Decl-start token for `extern fn`).
+  - 'packed'       # 146 `packed struct { … }` layout modifier
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -247,6 +251,16 @@ productions:
       # (Zig rejects a memberless enum). The fixed-underlying form is `enum(u8) { … }`.
       - { lhs: Decl, rhs: ['const', IDENT, '=', 'struct', '{', FieldDecls, '}', ';'],          action: structDecl }
       - { lhs: Decl, rhs: ['const', IDENT, '=', 'struct', '{', '}', ';'],                       action: structDeclEmpty }
+      # Layout-controlled structs (Milestone R): `extern struct` → C-ABI sequential layout
+      # ([StructLayout(Sequential)]); `packed struct` → byte-packed, no inter-field padding
+      # ([StructLayout(Sequential, Pack=1)]). The token right after `=` (`extern` / `packed`)
+      # is a clean 1-token shift decision, disjoint from the plain `struct`/`enum`/`union`/RhsExpr
+      # starts — conflict-free. V1 byte-packs (Pack=1): a packed struct's `@sizeOf` matches Zig's
+      # bit-backing-integer model only when fields are byte-multiples summing to an ABI size;
+      # sub-byte bit-packed fields stay a cut (see ZIG-SUPPORT.md). Empty `extern/packed struct {}`
+      # is not accepted (a useless zero-size aggregate — a documented cut).
+      - { lhs: Decl, rhs: ['const', IDENT, '=', 'extern', 'struct', '{', FieldDecls, '}', ';'], action: externStructDecl }
+      - { lhs: Decl, rhs: ['const', IDENT, '=', 'packed', 'struct', '{', FieldDecls, '}', ';'], action: packedStructDecl }
       - { lhs: Decl, rhs: ['const', IDENT, '=', 'enum', '{', EnumFields, '}', ';'],             action: enumDecl }
       - { lhs: Decl, rhs: ['const', IDENT, '=', 'enum', '(', Type, ')', '{', EnumFields, '}', ';'], action: enumDeclTyped }
       # Tagged union (Milestone D3 + R): `const U = union(enum) { a: T, b, … };` (auto-inferred tag)
@@ -946,6 +960,7 @@ lexer:
     - { symbol: 'struct',   match: 'struct' }
     - { symbol: 'enum',     match: 'enum' }
     - { symbol: 'union',    match: 'union' }
+    - { symbol: 'packed',   match: 'packed' }
     # `errdefer` (8 chars) and `defer` (5): longest-match beats IDENT; `errdefer` vs the
     # `error` keyword — `errdefer` is longer, so it wins on its own input; `error` still
     # wins on `error` (first-rule-wins on the 5-char tie with IDENT).

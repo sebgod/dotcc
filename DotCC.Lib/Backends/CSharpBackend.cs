@@ -134,6 +134,16 @@ internal sealed class CSharpBackend
         {
             sb.Append("[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit)]\n");
         }
+        else if (t.Layout == AggregateLayout.Sequential)
+        {
+            // Zig `extern struct` — pin guaranteed C-ABI sequential layout.
+            sb.Append("[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]\n");
+        }
+        else if (t.Layout == AggregateLayout.Packed)
+        {
+            // Zig `packed struct` — byte-pack with no inter-field padding (V1: Pack=1, not bit-packed).
+            sb.Append("[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, Pack = 1)]\n");
+        }
         sb.Append("unsafe struct ").Append(t.Name).Append("\n{\n");
         var bitUnitCounter = 0;
         for (var fi = 0; fi < t.Fields.Count; )
