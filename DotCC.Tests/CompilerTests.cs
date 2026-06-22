@@ -65,6 +65,38 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void EmitCSharp_lowers_int128_to_System_Int128_and_UInt128()
+    {
+        // Milestone ß ("sharp-s"): the GCC __int128 extension → C# System.Int128 /
+        // System.UInt128. `signed`/`unsigned` compose via the existing TypeSpecs.
+        var src = WriteTemp("""
+            __int128 s; unsigned __int128 u; signed __int128 ss;
+            int main() { return 0; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("System.Int128 s");
+            emitted.ShouldContain("System.UInt128 u");
+            emitted.ShouldContain("System.Int128 ss");  // `signed __int128` is still Int128
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void EmitCSharp_rejects_int128_combined_with_long()
+    {
+        // __int128 takes signed/unsigned only — no size modifiers (like `int` can't be `long int128`).
+        var src = WriteTemp("long __int128 x; int main() { return 0; }");
+        try
+        {
+            Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }))
+                .Message.ShouldContain("__int128");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Duffs_device_parses_and_emits_structure()
     {
         // The legendary loop-unrolling trick. Case labels are interleaved
