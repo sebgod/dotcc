@@ -1162,6 +1162,25 @@ public sealed class ZigOracleTests
             "    _ = printf(\"c=%d\\n\", c);\n" +
             "    return @intCast(counter);\n" + // 42
             "}\n", 42, "c=42" },
+
+        // Container-level `var` (a namespaced mutable global) + sibling-const-by-bare-name (Milestone R,
+        // part 6). `Cfg.counter` is a mutable global; `Cfg.doubled = base * 2` references the sibling
+        // `const base` by bare name. 20 + 10 + 12 = 42; stdout proves the running counter.
+        new object[] { "container_var",
+            "extern \"c\" fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "const Cfg = struct {\n" +
+            "    const base: u32 = 10;\n" +
+            "    const doubled: u32 = base * 2;\n" + // bare `base` → 20
+            "    var counter: u32 = 0;\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    Cfg.counter = Cfg.doubled;\n" + // 20
+            "    Cfg.counter += Cfg.base;\n" + // 30
+            "    Cfg.counter += 12;\n" + // 42
+            "    const c: c_int = @intCast(Cfg.counter);\n" +
+            "    _ = printf(\"counter=%d\\n\", c);\n" +
+            "    return @intCast(Cfg.counter);\n" + // 42
+            "}\n", 42, "counter=42" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

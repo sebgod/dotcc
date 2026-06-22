@@ -153,10 +153,32 @@ internal sealed partial class ZigLowering
     /// is a comptime constant in Zig, so a <c>Type.NAME</c> use inlines the expression — lowered
     /// fresh at each use site (with the annotation as its sink), which needs no global storage. So a
     /// <c>const max = 100;</c> / <c>const default = Color.red;</c> member reads as <c>Type.max</c> /
-    /// <c>Type.default</c>. (A container-level <c>var</c> — a mutable global — is still rejected; it
-    /// needs real top-level global storage. A const RHS that references a sibling const by bare name
-    /// is unsupported — qualify it as <c>Type.sibling</c>.)</summary>
+    /// <c>Type.default</c>. A const RHS may reference a SIBLING const by bare name (Milestone R, part
+    /// 6) — resolved against this table during the re-lower (<see cref="_currentConstContainer"/>).</summary>
     private readonly Dictionary<string, Dictionary<string, (Item? typeItem, Item rhs)>> _containerConsts = new(System.StringComparer.Ordinal);
+
+    /// <summary>Per container name, each namespaced mutable <c>var</c> member → its lowered global
+    /// symbol (Milestone R, part 6). A container-level <c>var</c> is a namespaced mutable global; it
+    /// lowers to a real <see cref="GlobalVar"/> under a mangled <c>Container_name</c> symbol (pass 1.5,
+    /// <see cref="LowerContainerVar"/>), and a <c>Type.name</c> read/write resolves to a
+    /// <see cref="VarRef"/> of that symbol (an lvalue). Populated before pass 2 so bodies resolve it.
+    /// V1: scalar only (an array/aggregate container var is rejected).</summary>
+    private readonly Dictionary<string, Dictionary<string, Symbol>> _containerVars = new(System.StringComparer.Ordinal);
+
+    /// <summary>Container <c>var</c>s collected in pass 0b (container, name, optional type, RHS),
+    /// lowered to globals in pass 1.5 — deferred so the initializer can reference functions (declared
+    /// in pass 1) and an untyped var can infer from a fully-resolvable RHS.</summary>
+    private readonly List<(string container, string name, Item? typeItem, Item rhs)> _pendingContainerVars = new();
+
+    /// <summary>The container whose <c>const</c> RHS is currently being re-lowered (Milestone R, part
+    /// 6) — lets a bare (unqualified) identifier in that RHS resolve to a SIBLING container const. Null
+    /// outside a container-const re-lower (so an unresolved bare ident still errors as before).</summary>
+    private string? _currentConstContainer;
+
+    /// <summary>Container consts currently mid-resolution (keyed <c>container.name</c>) — a cycle
+    /// guard for sibling-const-by-bare-name, so <c>const a = b; const b = a;</c> errors cleanly rather
+    /// than recursing forever.</summary>
+    private readonly HashSet<string> _constResolving = new(System.StringComparer.Ordinal);
 
     /// <summary>A tagged union (<c>union(enum)</c>) lowered to the FAITHFUL C tagged-union shape:
     /// an outer struct <c>{ U_Tag __tag; U_Payload __payload; }</c> whose <c>__payload</c> is a
@@ -358,6 +380,12 @@ internal sealed partial class ZigLowering
         // resolves a global), in SOURCE order (so a global may reference an earlier global — a
         // forward reference between globals is a documented V1 cut).
         LowerTopLevelGlobals(decls);
+        // Container-level `var`s (Milestone R, part 6) — lowered to globals after top-level globals
+        // (so a container var's init may reference one) and before pass 2 (so a body resolves it).
+        foreach (var (container, name, typeItem, rhs) in _pendingContainerVars)
+        {
+            LowerContainerVar(container, name, typeItem, rhs);
+        }
 
         // Pass 2: bodies. `_currentContainer` is set for a method body so its `@This()` resolves.
         foreach (var (sym, ps, body, container) in entries)
@@ -458,6 +486,66 @@ internal sealed partial class ZigLowering
             Name = name, Kind = SymKind.Var, Type = arr, Storage = Storage.Static, IsGlobal = true,
         });
         _ir.Globals.Add(new GlobalVar(sym, pinned));
+    }
+
+    /// <summary>Pass 1.5: lower a container-level <c>var</c> (a namespaced mutable global, Milestone R
+    /// part 6) to a <see cref="GlobalVar"/> under a mangled <c>Container_name</c> symbol — the same
+    /// shape a top-level global takes, so the backend renders it as a <c>DotCcGlobals</c> field. The
+    /// initializer is lowered at module scope (with <see cref="_currentConstContainer"/> set so it may
+    /// reference a sibling const by bare name). The symbol is recorded in <see cref="_containerVars"/>
+    /// so a <c>Type.name</c> read/write resolves to its <see cref="VarRef"/>. V1: scalar only — an
+    /// array/aggregate container var is rejected (the pinned-store mangling isn't wired).</summary>
+    private void LowerContainerVar(string container, string name, Item? typeItem, Item rhsItem)
+    {
+        var declared = typeItem is not null ? LowerType(typeItem) : null;
+        var prev = _currentConstContainer;
+        _currentConstContainer = container;   // a container var's init may name a sibling const
+        CExpr init;
+        try { init = LowerExprSink(rhsItem, declared); }
+        finally { _currentConstContainer = prev; }
+        if (init is StackArray)
+        {
+            throw new IrUnsupportedException(
+                $"container '{container}' var '{name}': an array/aggregate container `var` is not supported yet (use a scalar)");
+        }
+        var type = declared ?? init.Type ?? CType.Int;
+        var sym = _symbols.Declare(new Symbol
+        {
+            Name = container + "_" + name, Kind = SymKind.Var, Type = type, Storage = Storage.Static, IsGlobal = true,
+        });
+        _ir.Globals.Add(new GlobalVar(sym, init));
+        if (!_containerVars.TryGetValue(container, out var vars))
+        {
+            vars = new Dictionary<string, Symbol>(System.StringComparer.Ordinal);
+            _containerVars[container] = vars;
+        }
+        vars[name] = sym;
+    }
+
+    /// <summary>Re-lower a container <c>const</c>'s RHS at a <c>Type.NAME</c> (or sibling-bare-name)
+    /// use site — container consts are comptime, so the expression is inlined fresh each time (typed
+    /// by its annotation). <see cref="_currentConstContainer"/> is set so a bare identifier in the RHS
+    /// resolves to a SIBLING const (Milestone R, part 6); a re-entry on the same const is a dependency
+    /// cycle and errors cleanly (<see cref="_constResolving"/>).</summary>
+    private CExpr LowerContainerConst(string container, string name, Item? typeItem, Item rhs)
+    {
+        var key = container + "." + name;
+        if (!_constResolving.Add(key))
+        {
+            throw new IrUnsupportedException($"container '{container}' const '{name}' has a dependency cycle");
+        }
+        var prev = _currentConstContainer;
+        _currentConstContainer = container;
+        try
+        {
+            var sink = typeItem is not null ? LowerType(typeItem) : null;
+            return LowerExprSink(rhs, sink);
+        }
+        finally
+        {
+            _currentConstContainer = prev;
+            _constResolving.Remove(key);
+        }
     }
 
     /// <summary>Tag a pass-1 function entry with the container it belongs to (null for a free
@@ -733,8 +821,8 @@ internal sealed partial class ZigLowering
     /// <c>const NAME: T = expr;</c>) → records the RHS in <see cref="_containerConsts"/> for inlining
     /// at each <c>Type.NAME</c> use site (container-level consts are comptime in Zig). Runs in pass
     /// 0b (after <see cref="_containerTypes"/> is populated, before signatures) so a method signature
-    /// can use a self alias. A container-level <c>var</c> (a mutable global) is rejected — it needs
-    /// real top-level global storage, which the Zig front-end doesn't lower yet.</summary>
+    /// can use a self alias. A container-level <c>var</c> (a namespaced mutable global) is COLLECTED
+    /// here and lowered to a real global in pass 1.5 (<see cref="LowerContainerVar"/>).</summary>
     private void RegisterContainerConsts(string container, IReadOnlyList<Item> constItems)
     {
         foreach (var c in constItems)
@@ -750,13 +838,14 @@ internal sealed partial class ZigLowering
             }
             var cname = Tok(nameTok);
 
-            // A container-level `var` is a namespaced mutable GLOBAL — it needs real top-level global
-            // storage, which the Zig front-end doesn't lower yet. Reject loudly.
+            // A container-level `var` is a namespaced mutable GLOBAL (Milestone R, part 6). Collect it
+            // now (pass 0b); it's lowered to a real GlobalVar in pass 1.5 (LowerContainerVar) — deferred
+            // so its initializer can reference functions (declared in pass 1). A `Type.name` read/write
+            // then resolves to the global's VarRef (see the `Zig.Field` case + the container-var path).
             if (isVar)
             {
-                throw new IrUnsupportedException(
-                    $"container '{container}' member `var {cname}` (a namespaced mutable global) is not supported yet — "
-                    + "use a `const` (a comptime value)");
+                _pendingContainerVars.Add((container, cname, typeItem, rhs));
+                continue;
             }
 
             // `const Alias = @This();` — the self-type alias. `@This()` is a no-arg builtin; the
@@ -2854,9 +2943,20 @@ internal sealed partial class ZigLowering
                 // parameter) it materializes the C-heap allocator. (As a `.alloc`/`.free` RECEIVER
                 // it never reaches this case — LowerMethodCall short-circuits to the devirt path.)
                 if (_defaultAllocatorBindings.ContainsKey(name)) { return MaterializeCHeap(); }
-                var sym = _symbols.Resolve(name)
-                    ?? throw new IrUnsupportedException($"unresolved identifier '{name}'");
-                return new VarRef(sym) { Type = sym.Type, IsLValue = sym.Kind is SymKind.Var or SymKind.Param };
+                if (_symbols.Resolve(name) is { } sym)
+                {
+                    return new VarRef(sym) { Type = sym.Type, IsLValue = sym.Kind is SymKind.Var or SymKind.Param };
+                }
+                // A bare (unqualified) sibling container const (Milestone R, part 6): inside a
+                // container const's RHS re-lower (`_currentConstContainer` set), an unresolved name may
+                // name a SIBLING const — inline it (comptime). Outside that, the unresolved error holds.
+                if (_currentConstContainer is { } cc
+                    && _containerConsts.TryGetValue(cc, out var sibs)
+                    && sibs.TryGetValue(name, out var sib))
+                {
+                    return LowerContainerConst(cc, name, sib.typeItem, sib.rhs);
+                }
+                throw new IrUnsupportedException($"unresolved identifier '{name}'");
             }
             case Zig.Grouped g: { var inner = LowerExpr(g.Arg1); return new Paren(inner) { Type = inner.Type }; }
 
@@ -2972,8 +3072,19 @@ internal sealed partial class ZigLowering
                     && _containerConsts.TryGetValue(cContainer, out var cconsts)
                     && cconsts.TryGetValue(fieldName, out var centry))
                 {
-                    var csink = centry.typeItem is not null ? LowerType(centry.typeItem) : null;
-                    return LowerExprSink(centry.rhs, csink);
+                    // A namespaced container const — re-lower its RHS (comptime; inlined per use).
+                    return LowerContainerConst(cContainer, fieldName, centry.typeItem, centry.rhs);
+                }
+                // A namespaced container `var` (Milestone R, part 6) — `Type.name` resolves to the
+                // mangled global's VarRef (an lvalue, so `Type.name = x` / `+= x` write through it).
+                if (fld.Arg0.Content is Zig.Ident cvid
+                    && _symbols.Resolve(Tok(cvid.Arg0)) is null
+                    && TryLookupContainerType(Tok(cvid.Arg0), out var cvBaseTy)
+                    && ContainerTypeName(cvBaseTy) is { } cvContainer
+                    && _containerVars.TryGetValue(cvContainer, out var cvars)
+                    && cvars.TryGetValue(fieldName, out var cvSym))
+                {
+                    return new VarRef(cvSym) { Type = cvSym.Type, IsLValue = true };
                 }
                 if (fld.Arg0.Content is Zig.Ident bid
                     && TryLookupContainerType(Tok(bid.Arg0), out var baseTy)
