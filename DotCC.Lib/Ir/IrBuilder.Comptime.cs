@@ -1,5 +1,6 @@
 #nullable enable
 
+using System.Collections.Generic;
 using System.Globalization;
 
 namespace DotCC.Ir;
@@ -54,6 +55,19 @@ internal sealed partial class IrBuilder
     private int _comptimeSteps;
     private const int ComptimeStepBudget = 4_000_000;
 
+    // The active comptime call frame: a locals/params environment keyed by Symbol IDENTITY
+    // (Symbol is a reference type — the SAME instance is shared by every VarRef/LocalDecl that
+    // names it, so reference equality is the correct key under shadowing). Null outside a comptime
+    // function call (plain const folding has no locals). Saved/restored around each nested call, so
+    // recursion (e.g. fib) gets a fresh frame.
+    private Dictionary<Symbol, ComptimeValue>? _comptimeFrame;
+
+    // Whether a function CALL may be interpreted. A C function call is NOT a constant expression
+    // (C §6.6), so the C const-folding entry (`ConstEval`) leaves this false and a call folds to
+    // null (rejected as non-constant). Only the Zig `comptime` resolver enables it — comptime
+    // function evaluation is a Zig-only capability in this milestone.
+    private bool _comptimeAllowCalls;
+
     private void StepComptime()
     {
         if (++_comptimeSteps > ComptimeStepBudget)
@@ -70,15 +84,24 @@ internal sealed partial class IrBuilder
     /// bounds, enum/case/bit-field/designator values, and Zig array sizes / enum
     /// initializers all route here. A relational/logical result reads as C's <c>int</c>
     /// (0/1).</summary>
-    internal long? ConstEval(CExpr e)
-    {
-        _comptimeSteps = 0;
-        return EvalComptime(e) switch
+    internal long? ConstEval(CExpr e) =>
+        TryEvalTop(e, allowCalls: false) switch
         {
             CtInt i when InLongRange(i.Value) => (long)i.Value,
             CtBool b => b.Value ? 1L : 0L,
             _ => null,
         };
+
+    /// <summary>The top-level eval entry: reset the step budget + call frame, then evaluate. A
+    /// <see cref="ComptimeAbort"/> (a body construct the interpreter doesn't evaluate) maps to null
+    /// (not a compile-time constant); the step-budget overflow surfaces as a loud error.</summary>
+    private ComptimeValue? TryEvalTop(CExpr e, bool allowCalls)
+    {
+        _comptimeSteps = 0;
+        _comptimeFrame = null;
+        _comptimeAllowCalls = allowCalls;
+        try { return EvalComptime(e); }
+        catch (ComptimeAbort) { return null; }
     }
 
     private static bool InLongRange(System.Int128 v) =>
@@ -87,11 +110,8 @@ internal sealed partial class IrBuilder
     /// <summary>Resolve a deferred <c>comptime EXPR</c> to a spliced literal <see cref="CExpr"/>, or
     /// null if it does not evaluate to a compile-time constant value. The Zig front-end's post-pass
     /// calls this once every function body is lowered, so a comptime call can interpret its callee.</summary>
-    internal CExpr? ResolveComptimeFold(CExpr inner)
-    {
-        _comptimeSteps = 0;
-        return EvalComptime(inner) is { } v ? Splice(v) : null;
-    }
+    internal CExpr? ResolveComptimeFold(CExpr inner) =>
+        TryEvalTop(inner, allowCalls: true) is { } v ? Splice(v) : null;
 
     /// <summary>Re-materialize a <see cref="ComptimeValue"/> as an IR literal, so the rest of the
     /// pipeline (lower → emit) sees an ordinary constant. Only int / float / bool in this milestone;
@@ -189,6 +209,18 @@ internal sealed partial class IrBuilder
             case Binary b:
                 return EvalBinary(b);
 
+            // Inside a comptime call frame: read a local/param, mutate one, or recurse into a call.
+            // Outside a frame (`_comptimeFrame` null — plain const folding) a variable read is not a
+            // compile-time constant, so these fall through to null.
+            case VarRef v:
+                return _comptimeFrame is { } fr && fr.TryGetValue(v.Sym, out var bound) ? bound : null;
+
+            case Assign a:
+                return EvalComptimeAssign(a);
+
+            case Call c:
+                return EvalComptimeCall(c);
+
             default:
                 return null;
         }
@@ -253,19 +285,25 @@ internal sealed partial class IrBuilder
         }
 
         if (EvalComptime(b.Left) is not { } l || EvalComptime(b.Right) is not { } r) { return null; }
+        return CombineBin(b.Op, l, r);
+    }
 
-        // Relational / equality → bool.
-        if (b.Op is BinOp.Lt or BinOp.Gt or BinOp.Le or BinOp.Ge or BinOp.Eq or BinOp.Ne)
+    /// <summary>Apply a non-logical binary operator to two already-evaluated comptime values.
+    /// Shared by <see cref="EvalBinary"/> and compound assignment. Relational/equality → bool;
+    /// a floating operand pulls into <c>double</c>; otherwise integer arithmetic/bitwise computed
+    /// exact in 128 bits (wrap at 128, never trap — the const-folding flavour) at C's usual
+    /// arithmetic-conversion result type.</summary>
+    private ComptimeValue? CombineBin(BinOp op, ComptimeValue l, ComptimeValue r)
+    {
+        if (op is BinOp.Lt or BinOp.Gt or BinOp.Le or BinOp.Ge or BinOp.Eq or BinOp.Ne)
         {
-            return new CtBool(Compare(b.Op, l, r));
+            return new CtBool(Compare(op, l, r));
         }
 
-        // A floating operand pulls the operation into double (arithmetic only;
-        // bitwise/% on a float is not a valid constant expression → null).
         if (l is CtFloat || r is CtFloat)
         {
             double x = ToDouble(l), y = ToDouble(r);
-            return b.Op switch
+            return op switch
             {
                 BinOp.Add => new CtFloat(x + y, CType.Double),
                 BinOp.Sub => new CtFloat(x - y, CType.Double),
@@ -275,12 +313,9 @@ internal sealed partial class IrBuilder
             };
         }
 
-        // Integer arithmetic / bitwise, computed exact in 128 bits (wrap at 128,
-        // never trap — the const-folding flavour). The result type is C's usual
-        // arithmetic conversion of the operand types.
         System.Int128 a = ToInt128(l), c = ToInt128(r);
         var ty = CType.UsualArithmetic(TypeOf(l), TypeOf(r));
-        return b.Op switch
+        return op switch
         {
             BinOp.Add => new CtInt(unchecked(a + c), ty),
             BinOp.Sub => new CtInt(unchecked(a - c), ty),
@@ -342,4 +377,209 @@ internal sealed partial class IrBuilder
         CtFloat f => f.Type,
         _ => CType.Int,   // a bool participates in arithmetic as int
     };
+
+    // ---- comptime function calls (Milestone T, part 2b) -------------------
+    //
+    // A `comptime f(args)` interprets the callee's already-lowered body in a fresh call frame.
+    // Control flow inside the body unwinds through these signals; the step budget bounds it.
+
+    /// <summary>A comptime <c>return</c> — carries the value back to the call boundary.</summary>
+    private sealed class ComptimeReturn : System.Exception { public ComptimeValue? Value; }
+
+    /// <summary>A comptime <c>break</c> — unwinds to the nearest enclosing comptime loop.</summary>
+    private sealed class ComptimeBreak : System.Exception { }
+
+    /// <summary>A comptime <c>continue</c> — unwinds to the nearest enclosing comptime loop.</summary>
+    private sealed class ComptimeContinue : System.Exception { }
+
+    /// <summary>The body contains a construct the comptime interpreter does not evaluate (a goto,
+    /// a switch, a pointer/aggregate op, a read of a non-frame symbol, …). Caught at the top-level
+    /// entry, where it maps to "not a compile-time constant" — the caller decides if that position
+    /// required one.</summary>
+    private sealed class ComptimeAbort : System.Exception
+    {
+        public ComptimeAbort(string reason) : base(reason) { }
+    }
+
+    /// <summary>Interpret a function call at compile time: evaluate the arguments in the caller's
+    /// frame, bind them to the callee's parameters in a fresh frame, walk the lowered body, and
+    /// return the value carried by its <c>return</c>. Null when the call cannot be a compile-time
+    /// value — calls disabled (the C path), an extern/libc/runtime function (no body), a variadic,
+    /// an arity mismatch, or a non-constant argument. The result is re-typed to the function's
+    /// declared return type so the spliced literal carries the right carrier.</summary>
+    private ComptimeValue? EvalComptimeCall(Call c)
+    {
+        if (!_comptimeAllowCalls || c.CalleeSym is not { } cs) { return null; }
+        var fn = FindFuncDef(cs);
+        if (fn is null || fn.Variadic || fn.Params.Count != c.Args.Count) { return null; }
+
+        var argVals = new ComptimeValue[c.Args.Count];
+        for (int i = 0; i < c.Args.Count; i++)
+        {
+            if (EvalComptime(c.Args[i]) is not { } av) { return null; }
+            argVals[i] = av;
+        }
+
+        var frame = new Dictionary<Symbol, ComptimeValue>();   // Symbol identity (reference) keys
+        for (int i = 0; i < fn.Params.Count; i++)
+        {
+            frame[fn.Params[i]] = RetypeTo(argVals[i], fn.Params[i].Type);
+        }
+
+        var saved = _comptimeFrame;
+        _comptimeFrame = frame;
+        try
+        {
+            EvalComptimeStmt(fn.Body);
+            return null;   // fell off the end with no `return` value — treat as non-constant
+        }
+        catch (ComptimeReturn r)
+        {
+            return r.Value is { } rv ? RetypeTo(rv, c.Type) : null;
+        }
+        finally
+        {
+            _comptimeFrame = saved;
+        }
+    }
+
+    /// <summary>The lowered <see cref="FuncDef"/> for a callee symbol, by reference identity (the
+    /// same <see cref="Symbol"/> instance is shared by the declaration and every call site), or null
+    /// if the function has no lowered body (extern / not a user function).</summary>
+    private FuncDef? FindFuncDef(Symbol sym)
+    {
+        foreach (var f in Functions)
+        {
+            if (ReferenceEquals(f.Sym, sym)) { return f; }
+        }
+        return null;
+    }
+
+    /// <summary>Re-type a comptime scalar to a target arithmetic type (so a parameter binding /
+    /// return value carries the declared type, driving usual-arithmetic + the splice carrier).
+    /// A bool target / non-arithmetic target leaves the value unchanged.</summary>
+    private static ComptimeValue RetypeTo(ComptimeValue v, CType t)
+    {
+        if (t.Unqualified is not CType.Prim p) { return v; }
+        if (p.Integer)
+        {
+            return v switch
+            {
+                CtInt i => new CtInt(i.Value, t),
+                CtFloat f => new CtInt((System.Int128)f.Value, t),
+                _ => v,   // a bool stays a bool
+            };
+        }
+        return v switch
+        {
+            CtInt i => new CtFloat((double)i.Value, t),
+            CtFloat f => new CtFloat(f.Value, t),
+            _ => v,
+        };
+    }
+
+    /// <summary>Apply a comptime assignment (simple or compound) to a frame local, returning the
+    /// stored value. Only a local/param l-value is assignable at comptime; anything else aborts.</summary>
+    private ComptimeValue? EvalComptimeAssign(Assign a)
+    {
+        if (_comptimeFrame is not { } f || a.Target is not VarRef vr)
+        {
+            throw new ComptimeAbort("comptime assignment target must be a local variable");
+        }
+        if (EvalComptime(a.Value) is not { } rhs) { return null; }
+        if (a.CompoundOp is { } op)
+        {
+            if (!f.TryGetValue(vr.Sym, out var cur) || CombineBin(op, cur, rhs) is not { } combined)
+            {
+                return null;
+            }
+            rhs = RetypeTo(combined, vr.Sym.Type);
+        }
+        f[vr.Sym] = RetypeTo(rhs, vr.Sym.Type);
+        return f[vr.Sym];
+    }
+
+    /// <summary>Walk a statement of a comptime function body. Supports the side-effect-free
+    /// control-flow subset — blocks, local decls, expression statements (assignments), if/else,
+    /// while/do-while/for loops (break/continue), and return. Any other statement aborts the
+    /// evaluation (→ the value is not compile-time-constant). The step budget bounds every loop.</summary>
+    private void EvalComptimeStmt(CStmt s)
+    {
+        StepComptime();
+        switch (s)
+        {
+            case Block b:
+                foreach (var st in b.Stmts) { EvalComptimeStmt(st); }
+                break;
+
+            case Seq q:
+                foreach (var st in q.Stmts) { EvalComptimeStmt(st); }
+                break;
+
+            case DeclStmt d:
+                foreach (var decl in d.Decls)
+                {
+                    if (decl.Init is not { } init) { continue; }   // uninitialized — bound on first store
+                    _comptimeFrame![decl.Sym] = EvalComptime(init) is { } v
+                        ? RetypeTo(v, decl.Sym.Type)
+                        : throw new ComptimeAbort("non-constant comptime local initializer");
+                }
+                break;
+
+            case ExprStmt e:
+                EvalComptime(e.Expr);   // evaluated for its effect on the frame (assignments)
+                break;
+
+            case If i:
+                if (EvalComptime(i.Cond) is not { } cnd) { throw new ComptimeAbort("non-constant comptime condition"); }
+                if (Truthy(cnd)) { EvalComptimeStmt(i.Then); }
+                else if (i.Else is { } el) { EvalComptimeStmt(el); }
+                break;
+
+            case While w:
+                while (EvalComptime(w.Cond) is { } wc && Truthy(wc))
+                {
+                    StepComptime();
+                    try { EvalComptimeStmt(w.Body); }
+                    catch (ComptimeContinue) { }
+                    catch (ComptimeBreak) { break; }
+                }
+                break;
+
+            case DoWhile dw:
+                do
+                {
+                    StepComptime();
+                    try { EvalComptimeStmt(dw.Body); }
+                    catch (ComptimeContinue) { }
+                    catch (ComptimeBreak) { break; }
+                }
+                while (EvalComptime(dw.Cond) is { } dc && Truthy(dc));
+                break;
+
+            case For fo:
+                if (fo.Init is { } ini) { EvalComptimeStmt(ini); }
+                while (fo.Cond is null || (EvalComptime(fo.Cond) is { } fc && Truthy(fc)))
+                {
+                    StepComptime();
+                    try { EvalComptimeStmt(fo.Body); }
+                    catch (ComptimeContinue) { }
+                    catch (ComptimeBreak) { break; }
+                    if (fo.Post is { } post) { EvalComptime(post); }
+                }
+                break;
+
+            case Return r:
+                throw new ComptimeReturn { Value = r.Value is { } rv ? EvalComptime(rv) : null };
+
+            case Break:
+                throw new ComptimeBreak();
+
+            case Continue:
+                throw new ComptimeContinue();
+
+            default:
+                throw new ComptimeAbort("comptime: unsupported statement " + s.GetType().Name);
+        }
+    }
 }
