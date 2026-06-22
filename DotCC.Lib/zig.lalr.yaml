@@ -220,6 +220,14 @@ symbols:
   # reuse the existing #76 `extern` keyword (already a Decl-start token for `extern fn`).
   - 'packed'       # 146 `packed struct { … }` layout modifier
   - 'export'       # 147 `export fn …` — force C-ABI external linkage (FFI export surface)
+  # FnProto / decl modifiers (Milestone R, part 5). All ACCEPTED + IGNORED — pure no-ops on dotcc's
+  # managed target (a C# method/field has no controllable calling convention, alignment, or link
+  # section); their value is round-trippability (parsing real Zig that uses them).
+  - 'callconv'     # 148 callconv(.c) calling-convention modifier on a fn return
+  - 'align'        # 149 align(N) alignment modifier on a typed const/var
+  - 'linksection'  # 150 linksection(".name") section-placement modifier on a typed const/var
+  - CallConv       # 151 optional callconv(...) between `)` and the fn return type (epsilon | callconv(Expr))
+  - DeclMods       # 152 align/linksection modifier(s) between a typed decl's Type and `=` (non-empty)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -294,10 +302,18 @@ productions:
   # infix `!` by lookahead (leading `!` appears immediately after `)`).
   - derivation: none
     rules:
-      - { lhs: FnDef, rhs: ['fn', IDENT, '(', Params, ')', Type, Block],       action: fnDef }
-      - { lhs: FnDef, rhs: ['fn', IDENT, '(', ')', Type, Block],               action: fnDefNoArgs }
-      - { lhs: FnDef, rhs: ['fn', IDENT, '(', Params, ')', '!', Type, Block],  action: fnDefErr }
-      - { lhs: FnDef, rhs: ['fn', IDENT, '(', ')', '!', Type, Block],          action: fnDefNoArgsErr }
+      - { lhs: FnDef, rhs: ['fn', IDENT, '(', Params, ')', CallConv, Type, Block],       action: fnDef }
+      - { lhs: FnDef, rhs: ['fn', IDENT, '(', ')', CallConv, Type, Block],               action: fnDefNoArgs }
+      - { lhs: FnDef, rhs: ['fn', IDENT, '(', Params, ')', CallConv, '!', Type, Block],  action: fnDefErr }
+      - { lhs: FnDef, rhs: ['fn', IDENT, '(', ')', CallConv, '!', Type, Block],          action: fnDefNoArgsErr }
+
+  # An optional `callconv(Expr)` between `)` and the return type (Milestone R, part 5). Epsilon when
+  # absent — `callconv` ∉ FIRST(Type) ∪ {`!`}, so the reduce-ε vs shift-`callconv` decision after `)`
+  # is conflict-free. ACCEPTED + IGNORED (no-op on the managed target); the arg Expr is never read.
+  - derivation: none
+    rules:
+      - { lhs: CallConv, rhs: ['callconv', '(', Expr, ')'], action: callConv }
+      - { lhs: CallConv, rhs: [] }
 
   - derivation: leftmost
     rules:
@@ -321,6 +337,20 @@ productions:
       - { lhs: VarDecl, rhs: ['const', IDENT, ':', Type, '=', RhsExpr, ';'], action: constDeclTyped }
       - { lhs: VarDecl, rhs: ['var', IDENT, '=', RhsExpr, ';'],             action: varDecl }
       - { lhs: VarDecl, rhs: ['var', IDENT, ':', Type, '=', RhsExpr, ';'],  action: varDeclTyped }
+      # A typed const/var with `align(N)` and/or `linksection(".s")` modifiers between the Type and `=`
+      # (Milestone R, part 5). DeclMods is NON-EMPTY (the no-modifier case is the rule above) — after
+      # `Type`, the `align`/`linksection` vs `=` lookahead is disjoint, conflict-free. ACCEPTED +
+      # IGNORED: lowered exactly like the unmodified typed decl (no-op on the managed target).
+      - { lhs: VarDecl, rhs: ['const', IDENT, ':', Type, DeclMods, '=', RhsExpr, ';'], action: constDeclTypedMods }
+      - { lhs: VarDecl, rhs: ['var',   IDENT, ':', Type, DeclMods, '=', RhsExpr, ';'], action: varDeclTypedMods }
+
+  # The `align(Expr)` / `linksection(Expr)` modifier(s) on a typed const/var (Milestone R, part 5),
+  # in Zig's order (align then linksection). Non-empty; the arg Exprs are never read.
+  - derivation: none
+    rules:
+      - { lhs: DeclMods, rhs: ['align', '(', Expr, ')'],                              action: declModAlign }
+      - { lhs: DeclMods, rhs: ['linksection', '(', Expr, ')'],                        action: declModLinksection }
+      - { lhs: DeclMods, rhs: ['align', '(', Expr, ')', 'linksection', '(', Expr, ')'], action: declModAlignLink }
 
   - derivation: none
     rules:
@@ -979,6 +1009,9 @@ lexer:
     - { symbol: 'union',    match: 'union' }
     - { symbol: 'packed',   match: 'packed' }
     - { symbol: 'export',   match: 'export' }
+    - { symbol: 'callconv', match: 'callconv' }
+    - { symbol: 'align',    match: 'align' }
+    - { symbol: 'linksection', match: 'linksection' }
     # `errdefer` (8 chars) and `defer` (5): longest-match beats IDENT; `errdefer` vs the
     # `error` keyword — `errdefer` is longer, so it wins on its own input; `error` still
     # wins on `error` (first-rule-wins on the 5-char tie with IDENT).

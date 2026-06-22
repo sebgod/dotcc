@@ -335,16 +335,19 @@ internal sealed partial class ZigLowering
                 case Zig.ExternFnProtoNoArgs f: DeclareExternFn(f.Arg2, null, f.Arg5); break;     // extern fn IDENT ( ) Type ;
                 case Zig.ExternCFnProto f:       DeclareExternFn(f.Arg3, f.Arg5, f.Arg7); break;  // extern "c" fn IDENT ( Params ) Type ;
                 case Zig.ExternCFnProtoNoArgs f: DeclareExternFn(f.Arg3, null, f.Arg6); break;     // extern "c" fn IDENT ( ) Type ;
-                case Zig.FnDef f:          entries.Add(AsEntry(DeclareFn(f.Arg1, f.Arg3, f.Arg5, f.Arg6), null)); break;
-                case Zig.FnDefNoArgs f:    entries.Add(AsEntry(DeclareFn(f.Arg1, null, f.Arg4, f.Arg5), null)); break;
-                case Zig.FnDefErr f:       entries.Add(AsEntry(DeclareFn(f.Arg1, f.Arg3, f.Arg6, f.Arg7, errUnion: true), null)); break;   // `!T` return → ErrorUnion(T)
-                case Zig.FnDefNoArgsErr f: entries.Add(AsEntry(DeclareFn(f.Arg1, null, f.Arg5, f.Arg6, errUnion: true), null)); break;
+                // The optional CallConv (Milestone R, part 5) sits between `)` and the return, so the
+                // return type + body are one slot further right than the pre-CallConv layout.
+                case Zig.FnDef f:          entries.Add(AsEntry(DeclareFn(f.Arg1, f.Arg3, f.Arg6, f.Arg7), null)); break;
+                case Zig.FnDefNoArgs f:    entries.Add(AsEntry(DeclareFn(f.Arg1, null, f.Arg5, f.Arg6), null)); break;
+                case Zig.FnDefErr f:       entries.Add(AsEntry(DeclareFn(f.Arg1, f.Arg3, f.Arg7, f.Arg8, errUnion: true), null)); break;   // `!T` return → ErrorUnion(T)
+                case Zig.FnDefNoArgsErr f: entries.Add(AsEntry(DeclareFn(f.Arg1, null, f.Arg6, f.Arg7, errUnion: true), null)); break;
                 // Container decls were handled in pass 0 — skip here.
                 case Zig.StructDecl or Zig.StructDeclEmpty or Zig.ExternStructDecl or Zig.PackedStructDecl or Zig.EnumDecl or Zig.EnumDeclTyped or Zig.UnionDeclEnum or Zig.UnionDeclTagged or Zig.UnionDeclUntagged: break;
                 // A top-level `const`/`var` is either a comptime binding (an `@import`/allocator
                 // alias recorded in pass 0, which emits no decl) or a runtime global — both are
                 // resolved by the global pass below (LowerTopLevelGlobals), so skip them here.
-                case Zig.ConstDecl or Zig.ConstDeclTyped or Zig.VarDecl or Zig.VarDeclTyped: break;
+                case Zig.ConstDecl or Zig.ConstDeclTyped or Zig.VarDecl or Zig.VarDeclTyped
+                  or Zig.ConstDeclTypedMods or Zig.VarDeclTypedMods: break;
                 default: throw new IrUnsupportedException("zig top-level decl: " + (d.Content?.GetType().Name ?? "null"));
             }
         }
@@ -383,6 +386,10 @@ internal sealed partial class ZigLowering
                 case Zig.ConstDeclTyped d when !IsComptimeBound(Tok(d.Arg1)): LowerGlobal(d.Arg1, d.Arg3, d.Arg5); break;  // const IDENT : Type = RhsExpr ;
                 case Zig.VarDecl d:        LowerGlobal(d.Arg1, null,   d.Arg3); break;  // var IDENT = RhsExpr ;
                 case Zig.VarDeclTyped d:   LowerGlobal(d.Arg1, d.Arg3, d.Arg5); break;  // var IDENT : Type = RhsExpr ;
+                // A typed global with align/linksection modifiers (Milestone R, part 5) — modifiers
+                // ignored (no-op on the managed target); RhsExpr is one slot right of the Type.
+                case Zig.ConstDeclTypedMods d: LowerGlobal(d.Arg1, d.Arg3, d.Arg6); break;  // const IDENT : Type DeclMods = RhsExpr ;
+                case Zig.VarDeclTypedMods d:   LowerGlobal(d.Arg1, d.Arg3, d.Arg6); break;  // var IDENT : Type DeclMods = RhsExpr ;
             }
         }
     }
@@ -518,10 +525,11 @@ internal sealed partial class ZigLowering
         Item nameTok; Item? paramsItem; Item retType; Item body; bool errUnion;
         switch (fnDef.Content)
         {
-            case Zig.FnDef f:          nameTok = f.Arg1; paramsItem = f.Arg3; retType = f.Arg5; body = f.Arg6; errUnion = false; break;
-            case Zig.FnDefNoArgs f:    nameTok = f.Arg1; paramsItem = null;   retType = f.Arg4; body = f.Arg5; errUnion = false; break;
-            case Zig.FnDefErr f:       nameTok = f.Arg1; paramsItem = f.Arg3; retType = f.Arg6; body = f.Arg7; errUnion = true;  break;
-            case Zig.FnDefNoArgsErr f: nameTok = f.Arg1; paramsItem = null;   retType = f.Arg5; body = f.Arg6; errUnion = true;  break;
+            // The optional CallConv (Milestone R, part 5) shifts the return type + body one slot right.
+            case Zig.FnDef f:          nameTok = f.Arg1; paramsItem = f.Arg3; retType = f.Arg6; body = f.Arg7; errUnion = false; break;
+            case Zig.FnDefNoArgs f:    nameTok = f.Arg1; paramsItem = null;   retType = f.Arg5; body = f.Arg6; errUnion = false; break;
+            case Zig.FnDefErr f:       nameTok = f.Arg1; paramsItem = f.Arg3; retType = f.Arg7; body = f.Arg8; errUnion = true;  break;
+            case Zig.FnDefNoArgsErr f: nameTok = f.Arg1; paramsItem = null;   retType = f.Arg6; body = f.Arg7; errUnion = true;  break;
             default: throw new IrUnsupportedException("zig method: " + (fnDef.Content?.GetType().Name ?? "null"));
         }
         var methodName = Tok(nameTok);
@@ -1518,6 +1526,11 @@ internal sealed partial class ZigLowering
             case Zig.ConstDeclTyped d:  return DeclOrComptime(d.Arg1, d.Arg3, d.Arg5);
             case Zig.VarDecl d:         return DeclOf(d.Arg1, null, d.Arg3);
             case Zig.VarDeclTyped d:    return DeclOf(d.Arg1, d.Arg3, d.Arg5);
+            // `const/var x: T align(N)/linksection(".s") = e;` (Milestone R, part 5) — the modifiers
+            // are a no-op on the managed target, so lower exactly like the unmodified typed decl
+            // (the DeclMods arg is ignored). RhsExpr is one slot right of the Type (DeclMods between).
+            case Zig.ConstDeclTypedMods d: return DeclOrComptime(d.Arg1, d.Arg3, d.Arg6);
+            case Zig.VarDeclTypedMods d:   return DeclOf(d.Arg1, d.Arg3, d.Arg6);
             // `const a, const b = e;` (Milestone G) — destructure a tuple value: single-eval the
             // RHS, then bind each name to its positional element. See LowerDestructure.
             case Zig.StmtDestructure sd: return LowerDestructure(sd);

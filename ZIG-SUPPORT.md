@@ -45,7 +45,8 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `fn f() !T` (inferred-error return) | ✅ | the `!T` returns an error union (`ErrUnion<T>`); see `try`/`catch`/`error.X` below. V1 erases the error SET |
 | `pub fn main() !void` / `!u8` (error-union main) | ✅ | main may return an error union (Milestone N, part 4) — emitted as `ErrUnion<…>`; the process entry maps the result like real zig: an error → exit 1 (the flat error code reported to stderr, stdout stays clean), success → exit 0 (a `!void` payload) or the integer payload value (`!u8`). `try` inside main propagates to that boundary |
 | top-level / global `const`/`var` | ✅ | a runtime global → a `public static` field of `DotCcGlobals` (the same path the C front-end's file-scope variables take), surfaced by bare name (a function body reads/writes it unqualified). Typed keeps its annotation; untyped infers from the initializer (`const N = 5;` → `int`). Initializers are lowered in source order, so a global may reference an EARLIER global by bare name. `const`-ness isn't enforced (both lower to a mutable field — observably identical for a correct Zig program). An aggregate (struct), `[N]T` array, and `undefined` global are supported (Milestone K — an array routes through a pinned, program-lifetime backing store). **Deferred:** a fn-pointer global and a forward reference to a LATER global |
-| `inline`/`callconv`/`align`/`linksection` | 🚫 | other FnProto modifiers not modeled (`export` ✅ above; `callconv`/`align`/`linksection` planned for Milestone R, part 5) |
+| `callconv(.c)` / `align(N)` / `linksection(".s")` | ✅ | declaration modifiers (Milestone R, part 5) — `callconv(Expr)` between a fn's `)` and its return type; `align(Expr)` / `linksection(Expr)` (in that order) between a typed `const`/`var`'s Type and `=`. All ACCEPTED + IGNORED (pure no-ops on the managed target — a C# method/field has no controllable calling convention, alignment, or link section); their value is round-trippability. **Cuts:** `align`/`linksection` on a pointer type / struct field / function; `callconv` on an `extern` prototype; a container-`const` with modifiers |
+| `inline fn` | 🚫 | inlining modifier not modeled (`export`/`callconv`/`align`/`linksection` ARE — above) |
 | `extern "c" fn …;` | ✅ | the optional library/calling-convention string after `extern` (Milestone R, part 4); accepted + lowered like a plain `extern fn` (routed to dotcc's libc-shaped runtime by bare name) |
 
 ## Types
@@ -440,6 +441,8 @@ rejects, not silently accept more.
   value kept to a single active field — write-then-read the same field, no type-punning),
   `examples/zig-export-extern` (FFI declaration surface: `extern "c" fn printf` + `export fn` /
   `pub export fn` callable locally),
+  `examples/zig-decl-modifiers` (declaration modifiers, all no-ops on the managed target: `callconv(.c)`
+  on a function, `align(8)` on a local, `linksection(".mydata")` on a global),
   `examples/zig-slices` (`[]const u8` slices: `.len`/`.ptr`, index, `s[lo..hi]`, `for (s) \|b\|`),
   `examples/zig-open-slice` (open-ended slicing `s[lo..]`: the high bound is the source length — a
   slice's `.len`, an array's element count; alongside a closed re-slice),
