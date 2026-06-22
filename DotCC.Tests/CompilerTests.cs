@@ -97,6 +97,24 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void EmitCSharp_folds_relational_and_logical_const_exprs_in_an_enum_initializer()
+    {
+        // Milestone T: the unified comptime interpreter folds relational / logical / ternary
+        // operators in a constant-expression position. dotcc's older integer-only ConstEval
+        // returned null for these, so an enum value using one was rejected as "non-constant".
+        var src = WriteTemp("""
+            enum E { GT = (3 > 2), LOG = (0 || 2) * 3, TERN = (GT ? 7 : 9) };
+            int main(void) { return 0; }
+            """);
+        try
+        {
+            // Previously this threw "non-constant enum initializer"; now it folds (GT=1, LOG=3, TERN=7).
+            Compiler.EmitCSharp(new[] { src });
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Duffs_device_parses_and_emits_structure()
     {
         // The legendary loop-unrolling trick. Case labels are interleaved
