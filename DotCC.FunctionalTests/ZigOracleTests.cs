@@ -1115,6 +1115,23 @@ public sealed class ZigOracleTests
             "    const total: u32 = @as(u32, e.a) + e.b + @as(u32, p.a) + @as(u32, p.b) + @as(u32, p.c) + @as(u32, p.d) + sz;\n" +
             "    return @intCast(total);\n" + // 42
             "}\n", 42, "sz=12" },
+
+        // Untagged `union { … }` (Milestone R, part 3): no discriminant — a bare overlapping-storage
+        // union. dotcc lowers it to a [StructLayout(Explicit)] overlay struct. Each value keeps to a
+        // single ACTIVE field (write-then-read the same field): Zig's safe-mode active-field tracking
+        // isn't modeled, so punning is out of scope. a.small(15) + b.big(27) = 42; stdout proves b.big.
+        new object[] { "union_untagged",
+            "const Box = union { small: u8, big: u32 };\n" +
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "pub fn main() u8 {\n" +
+            "    var a: Box = .{ .small = 10 };\n" +
+            "    a.small += 5;\n" + // 15
+            "    var b: Box = .{ .big = 25 };\n" +
+            "    b.big += 2;\n" + // 27
+            "    const bc: c_int = @intCast(b.big);\n" +
+            "    _ = printf(\"u=%d\\n\", bc);\n" +
+            "    return @intCast(@as(u32, a.small) + b.big);\n" + // 42
+            "}\n", 42, "u=27" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

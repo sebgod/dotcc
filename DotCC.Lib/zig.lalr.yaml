@@ -267,10 +267,15 @@ productions:
       # and `const U = union(SomeEnum) { … };` (Milestone R — an EXISTING named enum as the tag). The
       # token right after `union (` selects: the `enum` keyword → the auto form, any other IDENT → the
       # named-tag form (disjoint terminals, conflict-free). The `union` keyword right after `=` is a
-      # clean 1-token shift decision, symmetric with struct/enum. A bare untagged `union { … }` is
-      # still deferred (its safe-mode active-field tracking / type-pun semantics aren't modeled).
+      # clean 1-token shift decision, symmetric with struct/enum. An UNTAGGED `union { … }` (no tag —
+      # Milestone R, part 3) is the third form: the token right after `union` selects (`(` → tagged,
+      # `{` → untagged) — disjoint, conflict-free. It lowers to the bare overlapping-payload struct
+      # ([StructLayout(Explicit)], every variant at offset 0) WITHOUT the outer __tag/__payload, so it
+      # is NOT a ZigUnionInfo; Zig's safe-mode active-field tracking / type-pun checks aren't modeled
+      # (same-field read/write is faithful — see ZIG-SUPPORT.md).
       - { lhs: Decl, rhs: ['const', IDENT, '=', 'union', '(', 'enum', ')', '{', UnionVariants, '}', ';'], action: unionDeclEnum }
       - { lhs: Decl, rhs: ['const', IDENT, '=', 'union', '(', IDENT, ')', '{', UnionVariants, '}', ';'], action: unionDeclTagged }
+      - { lhs: Decl, rhs: ['const', IDENT, '=', 'union', '{', UnionVariants, '}', ';'],                  action: unionDeclUntagged }
 
   # FnProto (subset): `fn name(params) RetType Block`. RetType may carry the
   # inferred-error-set leading `!` (`fn f() !void`), distinct from ErrUnion's

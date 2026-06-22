@@ -273,8 +273,9 @@ internal sealed partial class ZigLowering
                 case Zig.PackedStructDecl s:  _containerTypes[Tok(s.Arg1)] = new CType.Named(Tok(s.Arg1)); break;  // const IDENT = packed struct { … } ;
                 case Zig.EnumDecl e:        foreach (var m in RegisterEnumZig(e.Arg1, null, e.Arg5)) { containerMethods.Add((Tok(e.Arg1), m)); } break;       // const IDENT = enum { EnumFields } ;
                 case Zig.EnumDeclTyped e:   foreach (var m in RegisterEnumZig(e.Arg1, e.Arg5, e.Arg8)) { containerMethods.Add((Tok(e.Arg1), m)); } break;     // const IDENT = enum ( Type ) { EnumFields } ;
-                case Zig.UnionDeclEnum u:   _containerTypes[Tok(u.Arg1)] = new CType.Named(Tok(u.Arg1)); break;  // const IDENT = union(enum) { … } ;
-                case Zig.UnionDeclTagged u: _containerTypes[Tok(u.Arg1)] = new CType.Named(Tok(u.Arg1)); break;  // const IDENT = union(SomeEnum) { … } ;
+                case Zig.UnionDeclEnum u:     _containerTypes[Tok(u.Arg1)] = new CType.Named(Tok(u.Arg1)); break;  // const IDENT = union(enum) { … } ;
+                case Zig.UnionDeclTagged u:   _containerTypes[Tok(u.Arg1)] = new CType.Named(Tok(u.Arg1)); break;  // const IDENT = union(SomeEnum) { … } ;
+                case Zig.UnionDeclUntagged u: _containerTypes[Tok(u.Arg1)] = new CType.Named(Tok(u.Arg1)); break;  // const IDENT = union { … } ;
                 // A top-level comptime allocator/namespace binding (`const std = @import("std");`)
                 // — recorded HERE in pass 0 so a pass-1 signature (`fn f(a: std.mem.Allocator)`)
                 // resolves the import alias. Emits no decl (Milestone F). A non-comptime const
@@ -316,6 +317,7 @@ internal sealed partial class ZigLowering
                 }
                 case Zig.UnionDeclEnum u:   foreach (var m in RegisterUnion(Tok(u.Arg1), u.Arg8)) { containerMethods.Add((Tok(u.Arg1), m)); } break;  // const IDENT = union(enum) { UnionMembers } ;
                 case Zig.UnionDeclTagged u: foreach (var m in RegisterUnionTagged(Tok(u.Arg1), Tok(u.Arg5), u.Arg8)) { containerMethods.Add((Tok(u.Arg1), m)); } break;  // const IDENT = union(SomeEnum) { UnionMembers } ;
+                case Zig.UnionDeclUntagged u: foreach (var m in RegisterUnionUntagged(Tok(u.Arg1), u.Arg5)) { containerMethods.Add((Tok(u.Arg1), m)); } break;  // const IDENT = union { UnionMembers } ;
             }
         }
 
@@ -336,7 +338,7 @@ internal sealed partial class ZigLowering
                 case Zig.FnDefErr f:       entries.Add(AsEntry(DeclareFn(f.Arg1, f.Arg3, f.Arg6, f.Arg7, errUnion: true), null)); break;   // `!T` return → ErrorUnion(T)
                 case Zig.FnDefNoArgsErr f: entries.Add(AsEntry(DeclareFn(f.Arg1, null, f.Arg5, f.Arg6, errUnion: true), null)); break;
                 // Container decls were handled in pass 0 — skip here.
-                case Zig.StructDecl or Zig.StructDeclEmpty or Zig.ExternStructDecl or Zig.PackedStructDecl or Zig.EnumDecl or Zig.EnumDeclTyped or Zig.UnionDeclEnum or Zig.UnionDeclTagged: break;
+                case Zig.StructDecl or Zig.StructDeclEmpty or Zig.ExternStructDecl or Zig.PackedStructDecl or Zig.EnumDecl or Zig.EnumDeclTyped or Zig.UnionDeclEnum or Zig.UnionDeclTagged or Zig.UnionDeclUntagged: break;
                 // A top-level `const`/`var` is either a comptime binding (an `@import`/allocator
                 // alias recorded in pass 0, which emits no decl) or a runtime global — both are
                 // resolved by the global pass below (LowerTopLevelGlobals), so skip them here.
@@ -877,6 +879,36 @@ internal sealed partial class ZigLowering
         if (payloadTypeName is not null) { fields.Add(new StructField(PayloadFieldName, new CType.Named(payloadTypeName))); }
         _ir.RegisterStructType(name, fields, isUnion: false);
         _unions[name] = new ZigUnionInfo(name, tagType, TagFieldName, payloadTypeName, PayloadFieldName, variantMap);
+    }
+
+    /// <summary>Register a Zig UNTAGGED <c>union { a: T, b: U, … }</c> (Milestone R, part 3) — a bare
+    /// overlapping-storage union with NO discriminant. Unlike a tagged union it has no outer
+    /// <c>{ __tag, __payload }</c> wrapper and is NOT a <see cref="ZigUnionInfo"/>: the union TYPE
+    /// itself is the overlay struct (<c>[StructLayout(Explicit)]</c>, every variant at
+    /// <c>[FieldOffset(0)]</c>, via the shared C-union machinery — <c>isUnion: true</c>). Construction
+    /// (<c>U{ .a = v }</c> / <c>.{ .a = v }</c>) and access (<c>u.a</c>) therefore route through the
+    /// ordinary struct-init / member paths, not <see cref="BuildUnionInit"/>. Each variant must carry a
+    /// payload type — a void variant needs a tagged <c>union(enum)</c> (there is no tag here to select
+    /// it). Zig's safe-mode active-field tracking / type-pun checks are NOT modeled (same-field
+    /// read/write is faithful; a `switch` on an untagged union is rejected, as Zig forbids it).
+    /// Returns the body's method items for declaration in pass 1, and registers its consts.</summary>
+    private List<Item> RegisterUnionUntagged(string name, Item variantsItem)
+    {
+        var (variantItems, methods, consts) = SplitUnionMembers(variantsItem);
+        var variants = ParseUnionVariants(variantItems);
+        var fields = new List<StructField>();
+        foreach (var (vname, payload) in variants)
+        {
+            if (payload is null)
+            {
+                throw new IrUnsupportedException(
+                    $"untagged union '{name}' variant '{vname}' must have a type — a void variant needs a tagged `union(enum)`");
+            }
+            fields.Add(new StructField(vname, payload));
+        }
+        _ir.RegisterStructType(name, fields, isUnion: true);   // [StructLayout(Explicit)], all at offset 0
+        RegisterContainerConsts(name, consts);
+        return methods;
     }
 
     /// <summary>Register a Zig <c>enum</c> declaration: assign each member its value
