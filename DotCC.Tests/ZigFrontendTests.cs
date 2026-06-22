@@ -123,6 +123,22 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Folds_a_comptime_expression_prefix_and_splices_the_literal()
+    {
+        // Milestone T part 2: `comptime EXPR` forces compile-time evaluation of a value and
+        // splices the result as a literal. `comptime (2 + 3)` folds to 5 (the trailing `* 4`
+        // is outside the prefix, so it stays a runtime `5 * 4`); `comptime @sizeOf(u64)` to 8.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const a: u32 = comptime (2 + 3) * 4;\n" +
+            "    const sz: u32 = comptime @sizeOf(u64);\n" +
+            "    _ = a; _ = sz;\n" +
+            "    return 0;\n}\n");
+        cs.ShouldContain("5 * 4");   // comptime (2 + 3) folded to 5
+        cs.ShouldContain("8UL");     // comptime @sizeOf(u64) folded to the size_t literal 8
+    }
+
+    [Fact]
     public void Lowers_if_and_while_statements()
     {
         // if/else + while lower to the C# forms, conditions wrapped in Cond.B for

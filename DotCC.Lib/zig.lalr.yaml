@@ -228,6 +228,7 @@ symbols:
   - 'linksection'  # 150 linksection(".name") section-placement modifier on a typed const/var
   - CallConv       # 151 optional callconv(...) between `)` and the fn return type (epsilon | callconv(Expr))
   - DeclMods       # 152 align/linksection modifier(s) between a typed decl's Type and `=` (non-empty)
+  - 'comptime'     # 153 `comptime EXPR` value prefix — force compile-time evaluation (Milestone T)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -663,6 +664,7 @@ productions:
       - { lhs: Prefix, rhs: ['~', Prefix],  action: preBitNot }
       - { lhs: Prefix, rhs: ['&', Prefix],  action: preAddrOf }
       - { lhs: Prefix, rhs: ['try', Prefix], action: preTry }
+      - { lhs: Prefix, rhs: ['comptime', Prefix], action: preComptime }
       - { lhs: Prefix, rhs: [CurlySuffix] }
 
   # Curly-suffix level — Zig's `CurlySuffixExpr <- TypeExpr InitList?`. A value-position
@@ -1017,6 +1019,7 @@ lexer:
     # wins on `error` (first-rule-wins on the 5-char tie with IDENT).
     - { symbol: 'defer',    match: 'defer' }
     - { symbol: 'errdefer', match: 'errdefer' }
+    - { symbol: 'comptime', match: 'comptime' }
 
     # Multi-char operators (longest-match handles overlaps; listed first for clarity).
     - { symbol: '==', match: '==' }

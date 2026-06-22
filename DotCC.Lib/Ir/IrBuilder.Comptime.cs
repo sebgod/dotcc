@@ -84,6 +84,54 @@ internal sealed partial class IrBuilder
     private static bool InLongRange(System.Int128 v) =>
         v >= long.MinValue && v <= long.MaxValue;
 
+    /// <summary>Resolve a deferred <c>comptime EXPR</c> to a spliced literal <see cref="CExpr"/>, or
+    /// null if it does not evaluate to a compile-time constant value. The Zig front-end's post-pass
+    /// calls this once every function body is lowered, so a comptime call can interpret its callee.</summary>
+    internal CExpr? ResolveComptimeFold(CExpr inner)
+    {
+        _comptimeSteps = 0;
+        return EvalComptime(inner) is { } v ? Splice(v) : null;
+    }
+
+    /// <summary>Re-materialize a <see cref="ComptimeValue"/> as an IR literal, so the rest of the
+    /// pipeline (lower → emit) sees an ordinary constant. Only int / float / bool in this milestone;
+    /// an aggregate comptime value (array/struct) is a later increment.</summary>
+    private static CExpr Splice(ComptimeValue v) => v switch
+    {
+        CtInt i => SpliceInt(i),
+        CtFloat f => new LitFloat(FormatComptimeFloat(f.Value)) { Type = f.Type },
+        CtBool b => new LitBool(b.Value) { Type = CType.Bool },
+        _ => throw new IrUnsupportedException("comptime value cannot be spliced back (only int/float/bool yet)"),
+    };
+
+    private static CExpr SpliceInt(CtInt i)
+    {
+        // A non-negative magnitude splices straight to a LitInt; the fast-path Value is set when it
+        // fits long, else left null so the literal rides the 128-bit decimal-Digits path (Milestone ß).
+        if (i.Value >= System.Int128.Zero)
+        {
+            long? fast = i.Value <= (System.Int128)long.MaxValue ? (long)i.Value : null;
+            return new LitInt(i.Value.ToString(CultureInfo.InvariantCulture), fast) { Type = i.Type };
+        }
+        // Int128.MinValue has no in-range positive magnitude — splice it as a signed-decimal literal.
+        if (i.Value == System.Int128.MinValue)
+        {
+            return new LitInt(i.Value.ToString(CultureInfo.InvariantCulture), null) { Type = i.Type };
+        }
+        // A negative value splices as -(magnitude), matching how literals are otherwise carried.
+        var mag = -i.Value;
+        long? fastMag = mag <= (System.Int128)long.MaxValue ? (long)mag : null;
+        CExpr lit = new LitInt(mag.ToString(CultureInfo.InvariantCulture), fastMag) { Type = i.Type };
+        return new Unary(UnOp.Neg, lit) { Type = i.Type };
+    }
+
+    private static string FormatComptimeFloat(double d)
+    {
+        var s = d.ToString("R", CultureInfo.InvariantCulture);
+        // Keep a decimal point / exponent so the backend renders a FLOATING literal, not an integer.
+        return s.IndexOfAny(['.', 'e', 'E', 'n', 'N', 'i', 'I']) >= 0 ? s : s + ".0";
+    }
+
     /// <summary>The interpreter core: a tree-walk of the lowered, typed
     /// <see cref="CExpr"/>. Returns the <see cref="ComptimeValue"/>, or null when the
     /// expression is not a foldable compile-time value (a variable, a call, a pointer,
@@ -122,6 +170,12 @@ internal sealed partial class IrBuilder
 
             case Paren p:
                 return EvalComptime(p.Inner);
+
+            case ComptimeFold cf:
+                // A `comptime EXPR` value. If the post-pass already resolved it, read the spliced
+                // literal; otherwise evaluate the inner inline (an array-size or other type position
+                // needs the value DURING lowering, before the post-pass runs).
+                return EvalComptime(cf.Resolved ?? cf.Inner);
 
             case Cast c:
                 return EvalCast(c);
