@@ -679,6 +679,38 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_a_union_with_an_explicit_named_tag_enum()
+    {
+        // Milestone R — `union(Kind)`: the discriminant is an EXISTING named enum, not a synthesized
+        // `U_Tag`. The union reuses the tagged-union shape but the `__tag` field is typed by the named
+        // enum, and construction + the tag VALUE come from that enum's members (here `Kind` uses 1/2/4,
+        // proving the named enum drives the discriminant rather than a 0-based synthesized one).
+        var cs = EmitZig(
+            "const Kind = enum(u8) { num = 1, small = 2 };\n" +
+            "const Value = union(Kind) { num: i32, small: u8 };\n" +
+            "pub fn main() u8 {\n" +
+            "    const a: Value = .{ .num = 7 };\n" +
+            "    _ = a;\n" +
+            "    return 0;\n" +
+            "}\n");
+        cs.ShouldContain("public Kind __tag;");              // discriminant typed by the NAMED enum
+        cs.ShouldContain("new Value { __tag = Kind.num");    // construction names the named-enum member
+        cs.ShouldNotContain("Value_Tag");                    // no synthesized tag enum
+    }
+
+    [Fact]
+    public void Rejects_a_named_tag_union_variant_not_in_the_enum()
+    {
+        // A `union(Kind)` variant must be a member of the tag enum `Kind` — a typo / extra variant
+        // is rejected loudly (a structural check, not a silent mis-tag).
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const Kind = enum { a, b };\n" +
+            "const Value = union(Kind) { a: i32, c: u8 };\n" +
+            "pub fn main() u8 { return 0; }\n"));
+        ex.Message.ShouldContain("not a member of enum 'Kind'");
+    }
+
+    [Fact]
     public void Lowers_a_void_variant_via_a_bare_dotted_literal()
     {
         // A bare `.none` at a tagged-union sink constructs the void variant — only the tag is

@@ -73,7 +73,8 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | receiver type `self: @This()` | ✅ | `@This()` resolves to the enclosing container type (so `self: @This()` / `self: *@This()` name the receiver without repeating the name); explicit `self: P` / `self: *P` also work |
 | self-type alias `const Self = @This();` | ✅ | a container-level `const` aliasing the container's own type inside its methods (the ubiquitous Zig idiom; any alias name). Resolves as a param/return/local type (`self: Self`, `… ) Self`), the base of a static call (`Self.init(…)`), and a typed literal (`Self{…}`) — all to the container, scoped per-container (two containers may each declare `const Self = @This();`). A **non-`@This()`** container `const` (a namespaced value constant) is rejected — it needs top-level globals, not yet lowered |
 | `const C = enum(T) { … };` / `enum { … }` | ✅ | container decl → C# `enum C : T` (default underlying `int`); members auto-increment or take an explicit constant value. `@intFromEnum` decays to the underlying int. Methods (above) and a `const Self = @This();` alias are allowed in the body |
-| `const U = union(enum) { a: T, b, … };` | ✅ | tagged union → the faithful C tagged-union shape: an outer struct `{ U_Tag __tag; U_Payload __payload; }` whose `__payload` is a NESTED `[StructLayout(Explicit)]` union overlaying every payload variant at offset 0 (the shared C-union machinery) — so payloads share storage, matching Zig's memory model. A void variant (`b`) is tag-only; an all-void union has no `__payload`. Construct with `.{ .a = v }` / `U{ .a = v }` (payload) or `.b` at a union sink (void). Direct `u.a` reads `u.__payload.a` (unchecked, like Zig release mode). Methods (above) and a `const Self = @This();` alias are allowed in the body. **Deferred:** untagged `union { … }`, explicit `union(SomeEnum)` |
+| `const U = union(enum) { a: T, b, … };` | ✅ | tagged union → the faithful C tagged-union shape: an outer struct `{ U_Tag __tag; U_Payload __payload; }` whose `__payload` is a NESTED `[StructLayout(Explicit)]` union overlaying every payload variant at offset 0 (the shared C-union machinery) — so payloads share storage, matching Zig's memory model. A void variant (`b`) is tag-only; an all-void union has no `__payload`. Construct with `.{ .a = v }` / `U{ .a = v }` (payload) or `.b` at a union sink (void). Direct `u.a` reads `u.__payload.a` (unchecked, like Zig release mode). Methods (above) and a `const Self = @This();` alias are allowed in the body. **Deferred:** untagged `union { … }` |
+| `const U = union(SomeEnum) { a: T, b, … };` | ✅ | explicit-tag tagged union (Milestone R) — the discriminant is an EXISTING named enum rather than a synthesized `U_Tag`. Reuses the whole tagged-union lowering 1:1 (outer `{ __tag, __payload }`, switch on `__tag`, payload capture); only the tag enum source differs, so the `__tag` field is typed by the named enum and each variant's tag VALUE is that enum member's value (a non-zero / out-of-order enum drives the discriminant). Each variant must name a member of the tag enum (an extra enum member with no variant is tolerated — a V1 leniency). **Deferred:** untagged `union { … }` |
 | `E!T` / `!T` error-union type | ✅ | → runtime `ErrUnion<Payload>` (`ErrUnion<Unit>` for `!void`). V1 erases the error SET `E` — `anyerror!T` / named `E!T` lower identically (payload only) |
 | `comptime_int`/`comptime_float`, arbitrary `iN`/`uN` | 🚫 | |
 | `[*:s]T` / `[N:s]T` non-zero sentinel | 🚫 | sentinel `0` is ✅ (part 3 `[*:0]T`/`[:0]T`, part 4 `[N:0]T` arrays); only a **non-zero** sentinel value remains (+ a global `[N:0]T`, deferred) |
@@ -174,7 +175,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 `comptime` (beyond const folding), generics / `anytype`, `@import("std")` beyond the curated
 allocator paths (`std.mem.Allocator` + `std.heap.page_allocator`/`c_allocator`/
 `FixedBufferAllocator` ARE supported — see the Allocators section), untagged
-`union { … }` + explicit `union(SomeEnum)` + `opaque` (data-only `struct`/`enum`/`union`
+`union { … }` (explicit `union(SomeEnum)` is now ✅ — Milestone R) + `opaque` (data-only `struct`/`enum`/`union`
 **with methods** — struct/enum/union methods + the `const Self = @This();` self-type alias
 + namespaced VALUE `const`s ARE supported — see below), container-level `var` (a namespaced
 mutable global — *top-level* `const`/`var` globals ARE now supported, but the container-level
@@ -426,6 +427,8 @@ rejects, not silently accept more.
   `examples/zig-struct-typed` (typed `T{…}` literal in value + sink-less positions),
   `examples/zig-methods` (struct methods + UFCS: static `init`, pointer-receiver `scale`, `@This()` value receiver),
   `examples/zig-union` (tagged `union(enum)`: payload + void variants, `switch` with `\|x\|` capture),
+  `examples/zig-union-tagged` (explicit-tag `union(Kind)`: an existing named enum as the discriminant,
+  with non-zero/out-of-order tag values driving the dispatch),
   `examples/zig-slices` (`[]const u8` slices: `.len`/`.ptr`, index, `s[lo..hi]`, `for (s) \|b\|`),
   `examples/zig-open-slice` (open-ended slicing `s[lo..]`: the high bound is the source length — a
   slice's `.len`, an array's element count; alongside a closed re-slice),

@@ -249,11 +249,14 @@ productions:
       - { lhs: Decl, rhs: ['const', IDENT, '=', 'struct', '{', '}', ';'],                       action: structDeclEmpty }
       - { lhs: Decl, rhs: ['const', IDENT, '=', 'enum', '{', EnumFields, '}', ';'],             action: enumDecl }
       - { lhs: Decl, rhs: ['const', IDENT, '=', 'enum', '(', Type, ')', '{', EnumFields, '}', ';'], action: enumDeclTyped }
-      # Tagged union (Milestone D3): `const U = union(enum) { a: T, b, … };`. Only the
-      # auto-inferred-tag form `union(enum)` (the `enum` keyword after `(`) — an explicit
-      # `union(SomeEnum)` tag and a bare untagged `union { … }` are deferred. The `union`
-      # keyword right after `=` is a clean 1-token shift decision, symmetric with struct/enum.
+      # Tagged union (Milestone D3 + R): `const U = union(enum) { a: T, b, … };` (auto-inferred tag)
+      # and `const U = union(SomeEnum) { … };` (Milestone R — an EXISTING named enum as the tag). The
+      # token right after `union (` selects: the `enum` keyword → the auto form, any other IDENT → the
+      # named-tag form (disjoint terminals, conflict-free). The `union` keyword right after `=` is a
+      # clean 1-token shift decision, symmetric with struct/enum. A bare untagged `union { … }` is
+      # still deferred (its safe-mode active-field tracking / type-pun semantics aren't modeled).
       - { lhs: Decl, rhs: ['const', IDENT, '=', 'union', '(', 'enum', ')', '{', UnionVariants, '}', ';'], action: unionDeclEnum }
+      - { lhs: Decl, rhs: ['const', IDENT, '=', 'union', '(', IDENT, ')', '{', UnionVariants, '}', ';'], action: unionDeclTagged }
 
   # FnProto (subset): `fn name(params) RetType Block`. RetType may carry the
   # inferred-error-set leading `!` (`fn f() !void`), distinct from ErrUnion's
