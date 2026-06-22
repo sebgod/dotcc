@@ -1146,6 +1146,22 @@ public sealed class ZigOracleTests
             "    _ = printf(\"r=%d\\n\", @as(c_int, r));\n" +
             "    return r;\n" +
             "}\n", 42, "r=42" },
+
+        // Declaration modifiers (Milestone R, part 5): callconv / align / linksection — all no-ops on
+        // the managed target, accepted for round-trippability. `linksection` on a global var, `callconv`
+        // on a function, `align` on a local. tag(11)=12, buf=30+12=42; stdout proves the value.
+        new object[] { "decl_modifiers",
+            "extern \"c\" fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "var counter: u32 linksection(\".mydata\") = 0;\n" +
+            "fn tag(x: u8) callconv(.c) u8 { return x + 1; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf: u32 align(8) = 30;\n" +
+            "    buf += tag(11);\n" + // 42
+            "    counter = buf;\n" +
+            "    const c: c_int = @intCast(counter);\n" +
+            "    _ = printf(\"c=%d\\n\", c);\n" +
+            "    return @intCast(counter);\n" + // 42
+            "}\n", 42, "c=42" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

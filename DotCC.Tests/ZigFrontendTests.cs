@@ -800,6 +800,27 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Accepts_and_ignores_callconv_align_linksection_modifiers()
+    {
+        // Milestone R, part 5 — callconv / align / linksection are pure no-ops on the managed target:
+        // accepted (so real Zig that uses them round-trips) and lowered exactly like the unmodified
+        // decl. `callconv` on the fn, `align` on a local, `linksection` on a global.
+        var cs = EmitZig(
+            "var counter: u32 linksection(\".mydata\") = 0;\n" +
+            "fn tag(x: u8) callconv(.c) u8 { return x + 1; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf: u32 align(8) = 30;\n" +
+            "    buf += tag(11);\n" +
+            "    counter = buf;\n" +
+            "    return @intCast(counter);\n" +
+            "}\n");
+        cs.ShouldContain("tag(byte x)");      // callconv ignored — an ordinary method
+        cs.ShouldContain("x + 1");            // body lowered (the CallConv arg-shift is correct)
+        cs.ShouldContain("uint buf = 30");    // align ignored — an ordinary local
+        cs.ShouldContain("counter");          // linksection ignored — an ordinary global
+    }
+
+    [Fact]
     public void Lowers_a_void_variant_via_a_bare_dotted_literal()
     {
         // A bare `.none` at a tagged-union sink constructs the void variant — only the tag is
