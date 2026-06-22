@@ -1066,20 +1066,11 @@ internal sealed partial class ZigLowering
     }
 
     /// <summary>Const-fold a lowered enum-member initializer to its integer value, or null
-    /// if not a constant the D1 subset evaluates (an int literal, a parenthesized such, or a
-    /// unary <c>-</c>/<c>~</c> of one). Wider constant expressions are deferred.</summary>
-    private static long? ZigConstEval(CExpr e) => e switch
-    {
-        LitInt i => i.Value,
-        Paren p => ZigConstEval(p.Inner),
-        Unary u => u.Op switch
-        {
-            UnOp.Neg => ZigConstEval(u.Operand) is { } v ? -v : null,
-            UnOp.BitNot => ZigConstEval(u.Operand) is { } v ? ~v : null,
-            _ => null,
-        },
-        _ => null,
-    };
+    /// if it is not a compile-time constant. Routed through the shared
+    /// <see cref="IrBuilder.ConstEval"/> interpreter (Milestone T), so a Zig enum value
+    /// may now be any constant expression — binary arithmetic/bitwise/shift, parens,
+    /// sizeof, a reference to an earlier member — not just a literal or unary of one.</summary>
+    private long? ZigConstEval(CExpr e) => _ir.ConstEval(e);
 
     /// <summary>Resolve a bare enum literal <c>.member</c> against the enum type its sink
     /// names — an <see cref="EnumConstRef"/> the shared backend renders as
@@ -4120,15 +4111,22 @@ internal sealed partial class ZigLowering
     /// logical length (see <see cref="DeclOf"/>); the symbol's type stays the N-element array.</summary>
     private static bool IsSentinelArrayType(Item? typeItem) => typeItem?.Content is Zig.TySentArray;
 
-    /// <summary>Const-evaluate a <c>[N]T</c> array size — an integer literal <c>N</c> (a general
-    /// comptime const-expression size is deferred). Throws on a non-literal size. Routed through
-    /// <see cref="DecodeZigInt"/> so a radix / underscored size (<c>[0x10]u8</c>) is accepted.</summary>
-    private int ConstEvalArraySize(Item sizeExpr) => sizeExpr.Content switch
+    /// <summary>Const-evaluate a <c>[N]T</c> array size. A bare integer literal <c>N</c> takes a
+    /// fast path through <see cref="DecodeZigInt"/> (so a radix / underscored size <c>[0x10]u8</c>
+    /// is accepted with no symbol context); any other form is lowered and folded by the shared
+    /// <see cref="IrBuilder.ConstEval"/> comptime interpreter (Milestone T) — so a computed size
+    /// <c>[N * 2]</c> or a container-const size <c>[SIZE]</c> now works. Throws on a non-constant size.</summary>
+    private int ConstEvalArraySize(Item sizeExpr)
     {
-        Zig.IntLit i => (int)(DecodeZigInt(Tok(i.Arg0)).Value
-            ?? throw new IrUnsupportedException("a `[N]T` array size literal is too large")),
-        _ => throw new IrUnsupportedException("a `[N]T` array size must be an integer literal"),
-    };
+        if (sizeExpr.Content is Zig.IntLit i)
+        {
+            return (int)(DecodeZigInt(Tok(i.Arg0)).Value
+                ?? throw new IrUnsupportedException("a `[N]T` array size literal is too large"));
+        }
+        return _ir.ConstEval(LowerExpr(sizeExpr)) is { } n
+            ? (int)n
+            : throw new IrUnsupportedException("a `[N]T` array size must be a constant integer expression");
+    }
 
     /// <summary>Decode a Zig integer literal — decimal, <c>0x</c>/<c>0o</c>/<c>0b</c> radix, with
     /// <c>_</c> digit separators (UNLIKE C's bare-<c>0</c> octal and <c>'</c> separator) — to a

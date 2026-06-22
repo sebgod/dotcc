@@ -1198,6 +1198,21 @@ public sealed class ZigOracleTests
             "    _ = printf(\"hi=%llu neg=%lld\\n\", hi, neg);\n" +
             "    return @intCast(code);\n" + // 42
             "}\n", 42, "hi=65536 neg=-1" },
+
+        // Milestone T (part 1): the shared comptime interpreter folds constant expressions
+        // that the old Zig-side folder rejected — a binary-op enum initializer (`1 << 2`,
+        // `(1 << 3) - 1` → all=7) and a computed array size (`[2 * 8]u8` → 16 elements, so
+        // index 15 is in bounds). Real zig 0.17 folds both; dotcc now agrees. 7 + 2 + 33 = 42.
+        new object[] { "comptime-fold",
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "const Flags = enum(u8) { read = 1 << 0, write = 1 << 1, exec = 1 << 2, all = (1 << 3) - 1 };\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf: [2 * 8]u8 = undefined;\n" +              // computed size -> 16 elements
+            "    buf[15] = @intFromEnum(Flags.all);\n" +          // last slot in bounds + folded enum -> 7
+            "    buf[0] = @intFromEnum(Flags.write);\n" +         // 2
+            "    _ = printf(\"all=%d write=%d\\n\", @as(c_int, buf[15]), @as(c_int, buf[0]));\n" +
+            "    return buf[15] + buf[0] + 33;\n" +               // 7 + 2 + 33 = 42
+            "}\n", 42, "all=7 write=2" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

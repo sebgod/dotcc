@@ -629,45 +629,11 @@ internal sealed partial class IrBuilder
         return (CType?)enumType ?? CType.Int;
     }
 
-    /// <summary>Evaluate an integer constant expression, or null if non-constant.
-    /// Covers the forms enum initializers and array bounds use (literals,
-    /// unary +/-/~, the binary arithmetic/shift/bitwise operators, parens,
-    /// integer casts, <c>sizeof</c>, <c>offsetof</c>, and already-resolved
-    /// enum-constant literals). <c>sizeof</c>/<c>offsetof</c> of a user aggregate use
-    /// the compile-time layout model so they can size an array bound.</summary>
-    private long? ConstEval(CExpr e) => e switch
-    {
-        LitInt i => i.Value,
-        EnumConstRef ec => ec.Sym.ConstValue,
-        SizeOfExpr s => SizeOfConst(s.Of),
-        OffsetOf o => StructCanonical(o.StructType) is { } n ? OffsetOfConstPath(n, o.Path) : null,
-        Paren p => ConstEval(p.Inner),
-        Cast c => ConstEval(c.Operand),
-        Unary u => u.Op switch
-        {
-            UnOp.Plus => ConstEval(u.Operand),
-            UnOp.Neg => ConstEval(u.Operand) is { } v ? -v : null,
-            UnOp.BitNot => ConstEval(u.Operand) is { } v ? ~v : null,
-            _ => null,
-        },
-        Binary b => ConstEval(b.Left) is { } l && ConstEval(b.Right) is { } r ? ApplyConstBin(b.Op, l, r) : null,
-        _ => null,
-    };
-
     /// <summary>The constant byte size of a type — the layout model for a user
     /// aggregate (so the size is exact for an array bound), else the type's own
     /// <see cref="CType.SizeOf"/>.</summary>
     private long? SizeOfConst(CType t) =>
         t.Unqualified is CType.Named n && _structFields.ContainsKey(n.Name) ? Layout(t).Size : t.SizeOf;
-
-    private static long? ApplyConstBin(BinOp op, long l, long r) => op switch
-    {
-        BinOp.Add => l + r, BinOp.Sub => l - r, BinOp.Mul => l * r,
-        BinOp.Div => r != 0 ? l / r : null, BinOp.Mod => r != 0 ? l % r : null,
-        BinOp.Shl => l << (int)r, BinOp.Shr => l >> (int)r,
-        BinOp.BitAnd => l & r, BinOp.BitOr => l | r, BinOp.BitXor => l ^ r,
-        _ => null,
-    };
 
     // ---- compile-time C-ABI layout (for offsetof / sizeof folding) --------
     // The .NET blittable layout dotcc emits (sequential structs, explicit unions,

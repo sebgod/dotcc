@@ -98,6 +98,31 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Folds_binary_op_enum_initializers_via_the_comptime_interpreter()
+    {
+        // Milestone T: a Zig enum value may now be any constant expression, not just a
+        // literal or a unary of one — the old ZigConstEval rejected `1 << 2`. The shared
+        // comptime interpreter folds the shifts (and the `- 1`), so the members land at 1/2/4/7.
+        var cs = EmitZig(
+            "const Flags = enum(u8) { read = 1 << 0, write = 1 << 1, exec = 1 << 2, all = (1 << 3) - 1 };\n" +
+            "pub fn main() u8 { return @intFromEnum(Flags.all); }\n");
+        cs.ShouldContain("read = 1,");
+        cs.ShouldContain("write = 2,");
+        cs.ShouldContain("exec = 4,");
+        cs.ShouldContain("all = 7,");
+    }
+
+    [Fact]
+    public void Folds_a_computed_array_size_via_the_comptime_interpreter()
+    {
+        // Milestone T: a `[N]T` size may now be a constant expression (`2 * 8`), not only a
+        // bare integer literal — ConstEvalArraySize defers the non-literal form to the
+        // comptime interpreter, which folds it to 16.
+        var cs = EmitZig("pub fn main() u8 { var b: [2 * 8]u8 = undefined; b[0] = 1; return b[0]; }\n");
+        cs.ShouldContain("stackalloc byte[16]");
+    }
+
+    [Fact]
     public void Lowers_if_and_while_statements()
     {
         // if/else + while lower to the C# forms, conditions wrapped in Cond.B for
