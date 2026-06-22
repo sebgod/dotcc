@@ -132,6 +132,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `if (c) a else b` (if-**expression**) | ✅ | → C# ternary |
 | `switch (x) { v => e, … }` (switch-**expression**) | ✅ | a switch in value position (a typed binding / return / any `RhsExpr`) → C#'s native switch EXPRESSION (`x switch { v => e, a or b => e, _ => e }`). Each prong yields a value (a bare-expr body); `else` → the `_` default; arm values lower at the result sink; an enum subject + `.member` labels decay to the underlying int. Same structural trick as the if-expression (a `RhsExpr`, not a Primary). An inclusive **range** arm `lo...hi => e` lowers to a relational pattern `>= lo and <= hi => e`. **Deferred:** a block-bodied prong (needs a labeled `break :blk v`), a `\|x\|` capture in expression position |
 | `blk: { …; break :blk v; }` (labeled block as a value) | ✅ | a block in value position that runs statements and YIELDS a value via `break :blk v`. → the roadmap's temp-fill: a result temp (`__blkN`), each `break :blk v` rewritten to `temp = v; goto __blkN_end;` (braced, so a conditional break stays conditional), an end label, then the surrounding statement reads the temp. The result type is the sink (an annotated decl / function return / lvalue) or the first `break` value's type. Same structural trick as the if/switch-expression (a `RhsExpr`, not a Primary). **Deferred** (clear errors): an if/switch-expression arm or a sub-expression position (only a full `=`/`return`/assignment RHS today), a global initializer (needs a comptime value), and an error-union (`!T`) function return |
+| `comptime EXPR` (value-comptime) | ✅ | Milestone T — forces compile-time evaluation of a side-effect-free **value** and splices the result back as a literal. Folds the full expression subset (arithmetic/bitwise/relational/logical/ternary, `@sizeOf`, enum constants), AND interprets a CALL to a user function — `comptime fib(10)` runs the recursive callee (call frames + recursion), `comptime fact(5)` runs a `while` loop with local mutation. Computed in 128-bit; an eval-step budget is the non-termination backstop (Zig's `@setEvalBranchQuota`). **V1 splices scalars** (int/float/bool); a comptime function returning an **aggregate** (a lookup table), a `comptime { … }` block statement, and `inline for`/`inline while` unrolling are follow-ups. A comptime that produces a **type** is the wall (below) |
 | function call `f(args)` | ✅ | intra-Zig + forward-ref + libc-by-bare-name (incl. variadic `printf`) |
 | prefix `&` (address-of) | ✅ | `&x` → `*T`; a var/param operand is marked address-taken |
 | postfix `p.*` (deref), `a[i]` (index) | ✅ | pointer deref / subscript → the C `Unary(Deref)` / `Index` IR. On a slice, `s[i]` indexes through `.Ptr` (`s.Ptr[i]`) |
@@ -179,7 +180,8 @@ program's libc call is handled. No `@cImport`, no header harvest.
 
 ## Out of scope (the dialect line)
 
-`comptime` (beyond const folding), generics / `anytype`, `@import("std")` beyond the curated
+comptime **TYPES** (a `comptime` expression that produces or consumes a `type` — value-comptime
+IS supported, see below), generics / `anytype`, `@import("std")` beyond the curated
 allocator paths (`std.mem.Allocator` + `std.heap.page_allocator`/`c_allocator`/
 `FixedBufferAllocator` ARE supported — see the Allocators section),
 `opaque` (the union kinds — tagged `union(enum)`, explicit-tag `union(SomeEnum)`, and untagged
@@ -198,11 +200,16 @@ syntax to a C-shaped IR and emits C# (or wat). It has **no compile-time evaluati
 engine**, and it targets a **managed VM**, not native machine code. Nearly every item
 above falls out of one of those two facts.
 
-**The comptime root** — catches `comptime`, generics / `anytype`, and a real `std`. These
-are one wall, not three. `comptime` is partial evaluation (arbitrary Zig run by the
-compiler at build time — loops, branches, type construction); supporting it properly means
-*building a Zig interpreter*, which dotcc is not (it only constant-folds, like its C
-front-end). Zig generics are comptime-driven **monomorphization** — a fresh,
+**The comptime root** — catches comptime **types**, generics / `anytype`, and a real `std`.
+These are one wall. comptime splits cleanly in two by one rule: does the evaluation produce a
+**value** or a **type**? Value-comptime — `comptime EXPR`, a `comptime fib(10)` call, comptime
+constants and array bounds — **IS supported** (Milestone T): dotcc hosts a small tree-walking
+interpreter over its own typed IR (the same engine the C `#if` / array-bound folder uses), with
+call frames, loops, and an eval-step budget. What stays out is comptime **types**: a `comptime`
+expression that produces or consumes a `type` (a `type`-returning fn, `comptime T: type`, comptime
+struct construction). That half is *generative* — it monomorphizes the IR — and needs an
+interleaved semantic analyzer (Zig's `Sema` shape), a different compiler than dotcc's bottom-up
+pipeline. Zig generics are comptime-driven **monomorphization** — a fresh,
 differently-*shaped* function body instantiated per type at each call site — so they can't
 map onto C# generics (which can't change a body's shape per `T`, and have no notion of a
 *value*- or *type*-valued generic argument); doing it yourself needs the interpreter.
