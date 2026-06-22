@@ -743,6 +743,37 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_an_untagged_union_as_an_overlay_struct()
+    {
+        // Milestone R, part 3 — `union { … }` (no tag) → a bare [StructLayout(Explicit)] overlay
+        // struct (every variant at FieldOffset(0)), NOT a ZigUnionInfo: NO outer __tag/__payload.
+        // Construction + access route through the ordinary struct-init / member paths.
+        var cs = EmitZig(
+            "const Box = union { small: u8, big: u32 };\n" +
+            "pub fn main() u8 {\n" +
+            "    var a: Box = .{ .small = 10 };\n" +
+            "    a.small += 5;\n" +
+            "    return @intCast(a.small);\n" +
+            "}\n");
+        cs.ShouldContain("LayoutKind.Explicit)]");      // overlapping storage
+        cs.ShouldContain("unsafe struct Box");
+        cs.ShouldContain("new Box { small = 10 }");     // ordinary struct construction
+        cs.ShouldNotContain("__tag");                   // no discriminant
+        cs.ShouldNotContain("Box_Payload");             // no nested payload union (it IS the union)
+    }
+
+    [Fact]
+    public void Rejects_a_void_variant_in_an_untagged_union()
+    {
+        // An untagged union has no tag to select a void variant — require a payload type (a void
+        // variant needs a tagged `union(enum)`).
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const Bad = union { a: u8, b };\n" +
+            "pub fn main() u8 { return 0; }\n"));
+        ex.Message.ShouldContain("must have a type");
+    }
+
+    [Fact]
     public void Lowers_a_void_variant_via_a_bare_dotted_literal()
     {
         // A bare `.none` at a tagged-union sink constructs the void variant — only the tag is
