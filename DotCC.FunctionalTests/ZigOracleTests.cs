@@ -1073,6 +1073,28 @@ public sealed class ZigOracleTests
             "    if (x != 20 or y != 22) return 6;\n" +
             "    return c + f + x + g + 1;\n" +   // 6 + 7 + 20 + 8 + 1 = 42
             "}\n", 42, "" },
+
+        // `union(SomeEnum)` (Milestone R): a tagged union whose discriminant is an EXISTING named
+        // enum. `Kind` uses non-zero/out-of-order values (1/2/4), so the tag VALUE comes from the
+        // named enum (not a synthesized 0-based one). Reuses the tagged-union construct + switch +
+        // payload-capture lowering. Stdout proves @intFromEnum(Kind.flag)==4; lands on 42.
+        new object[] { "union_tagged",
+            "const Kind = enum(u8) { num = 1, small = 2, flag = 4 };\n" +
+            "const Value = union(Kind) { num: i32, small: u8, flag: bool };\n" +
+            "fn score(v: Value) u8 {\n" +
+            "    switch (v) {\n" +
+            "        .num => |x| { return @intCast(x); },\n" +
+            "        .small => |y| { return y; },\n" +
+            "        .flag => |z| { return if (z) 100 else 0; },\n" +
+            "    }\n" +
+            "}\n" +
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "pub fn main() u8 {\n" +
+            "    const a: Value = .{ .num = 30 };\n" +
+            "    const b: Value = .{ .small = 12 };\n" +
+            "    _ = printf(\"flagtag=%d\\n\", @as(c_int, @intFromEnum(Kind.flag)));\n" +
+            "    return score(a) + score(b);\n" + // 30 + 12 = 42
+            "}\n", 42, "flagtag=4" },             // expected stdout is newline-trimmed (see Norm)
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

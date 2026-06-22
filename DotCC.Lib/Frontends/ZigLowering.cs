@@ -166,14 +166,12 @@ internal sealed partial class ZigLowering
     /// just a tag). Holds what construction (<see cref="BuildUnionInit"/>) and a union
     /// <c>switch</c> (<see cref="LowerUnionSwitch"/>) need.</summary>
     private sealed record ZigUnionInfo(
-        CType.Enum TagType,
+        string Name,                    // the outer discriminated-union struct name (`U`)
+        CType.Enum TagType,             // the tag enum — auto-synthesized `U_Tag`, or a named `union(SomeEnum)` enum
         string TagFieldName,
         string? PayloadTypeName,        // the nested overlapping-payload union type (null if every variant is void)
         string PayloadFieldName,
-        IReadOnlyDictionary<string, CType?> Variants)   // variant name → payload type (null = void)
-    {
-        public string Name => TagType.Name[..^TagSuffix.Length];   // `U_Tag` → `U`
-    }
+        IReadOnlyDictionary<string, CType?> Variants);  // variant name → payload type (null = void)
 
     /// <summary>Registered tagged unions: the union struct name → its <see cref="ZigUnionInfo"/>.</summary>
     private readonly Dictionary<string, ZigUnionInfo> _unions = new(System.StringComparer.Ordinal);
@@ -274,6 +272,7 @@ internal sealed partial class ZigLowering
                 case Zig.EnumDecl e:        foreach (var m in RegisterEnumZig(e.Arg1, null, e.Arg5)) { containerMethods.Add((Tok(e.Arg1), m)); } break;       // const IDENT = enum { EnumFields } ;
                 case Zig.EnumDeclTyped e:   foreach (var m in RegisterEnumZig(e.Arg1, e.Arg5, e.Arg8)) { containerMethods.Add((Tok(e.Arg1), m)); } break;     // const IDENT = enum ( Type ) { EnumFields } ;
                 case Zig.UnionDeclEnum u:   _containerTypes[Tok(u.Arg1)] = new CType.Named(Tok(u.Arg1)); break;  // const IDENT = union(enum) { … } ;
+                case Zig.UnionDeclTagged u: _containerTypes[Tok(u.Arg1)] = new CType.Named(Tok(u.Arg1)); break;  // const IDENT = union(SomeEnum) { … } ;
                 // A top-level comptime allocator/namespace binding (`const std = @import("std");`)
                 // — recorded HERE in pass 0 so a pass-1 signature (`fn f(a: std.mem.Allocator)`)
                 // resolves the import alias. Emits no decl (Milestone F). A non-comptime const
@@ -298,6 +297,7 @@ internal sealed partial class ZigLowering
                 }
                 case Zig.StructDeclEmpty s: RegisterStruct(Tok(s.Arg1), System.Array.Empty<Item>()); break;  // const IDENT = struct { } ;
                 case Zig.UnionDeclEnum u:   foreach (var m in RegisterUnion(Tok(u.Arg1), u.Arg8)) { containerMethods.Add((Tok(u.Arg1), m)); } break;  // const IDENT = union(enum) { UnionMembers } ;
+                case Zig.UnionDeclTagged u: foreach (var m in RegisterUnionTagged(Tok(u.Arg1), Tok(u.Arg5), u.Arg8)) { containerMethods.Add((Tok(u.Arg1), m)); } break;  // const IDENT = union(SomeEnum) { UnionMembers } ;
             }
         }
 
@@ -318,7 +318,7 @@ internal sealed partial class ZigLowering
                 case Zig.FnDefErr f:       entries.Add(AsEntry(DeclareFn(f.Arg1, f.Arg3, f.Arg6, f.Arg7, errUnion: true), null)); break;   // `!T` return → ErrorUnion(T)
                 case Zig.FnDefNoArgsErr f: entries.Add(AsEntry(DeclareFn(f.Arg1, null, f.Arg5, f.Arg6, errUnion: true), null)); break;
                 // Container decls were handled in pass 0 — skip here.
-                case Zig.StructDecl or Zig.StructDeclEmpty or Zig.EnumDecl or Zig.EnumDeclTyped or Zig.UnionDeclEnum: break;
+                case Zig.StructDecl or Zig.StructDeclEmpty or Zig.EnumDecl or Zig.EnumDeclTyped or Zig.UnionDeclEnum or Zig.UnionDeclTagged: break;
                 // A top-level `const`/`var` is either a comptime binding (an `@import`/allocator
                 // alias recorded in pass 0, which emits no decl) or a runtime global — both are
                 // resolved by the global pass below (LowerTopLevelGlobals), so skip them here.
@@ -761,6 +761,67 @@ internal sealed partial class ZigLowering
     private List<Item> RegisterUnion(string name, Item variantsItem)
     {
         var (variantItems, methods, consts) = SplitUnionMembers(variantsItem);
+        var variants = ParseUnionVariants(variantItems);
+
+        // Synthesize the tag enum `U_Tag` + its member symbols (variant name → tag constant = index).
+        var tagName = name + TagSuffix;
+        var tagType = new CType.Enum(tagName, CType.Int);
+        var tagMembers = new List<EnumMember>();
+        var tagSyms = new Dictionary<string, Symbol>(System.StringComparer.Ordinal);
+        long idx = 0;
+        foreach (var (vname, _) in variants)
+        {
+            tagMembers.Add(new EnumMember(vname, idx));
+            tagSyms[vname] = new Symbol { Name = vname, Kind = SymKind.EnumConst, Type = tagType, ConstValue = idx, IsGlobal = true };
+            idx++;
+        }
+        _ir.RegisterEnumType(tagName, CType.Int, tagMembers);
+        _containerTypes[tagName] = tagType;
+        _enumMembers[tagName] = tagSyms;
+
+        FinishUnion(name, variants, tagType);
+        RegisterContainerConsts(name, consts);   // e.g. `const Self = @This();` → the outer struct type
+        return methods;
+    }
+
+    /// <summary>Register a Zig <c>union(SomeEnum)</c> declaration — a tagged union whose discriminant
+    /// is an EXISTING, named enum rather than an auto-synthesized one (Milestone R). Reuses the named
+    /// enum (registered fully in pass 0a, so it's available here in pass 0b) as the tag type, then
+    /// builds the same payload-union + outer-struct shape as <see cref="RegisterUnion"/> via
+    /// <see cref="FinishUnion"/> — so construction (<see cref="BuildUnionInit"/>) and <c>switch</c>
+    /// (<see cref="LowerUnionSwitch"/>) work unchanged (they key off <see cref="ZigUnionInfo.TagType"/>
+    /// + the tag enum's member symbols, which a named tag enum already carries). Each variant must
+    /// name a member of the tag enum; an extra enum member with no variant is tolerated (a V1 leniency
+    /// — Zig requires the sets to correspond exactly).</summary>
+    private List<Item> RegisterUnionTagged(string name, string tagEnumName, Item variantsItem)
+    {
+        var (variantItems, methods, consts) = SplitUnionMembers(variantsItem);
+        var variants = ParseUnionVariants(variantItems);
+
+        if (!_containerTypes.TryGetValue(tagEnumName, out var t) || t is not CType.Enum tagType
+            || !_enumMembers.TryGetValue(tagEnumName, out var tagSyms))
+        {
+            throw new IrUnsupportedException(
+                $"zig `union({tagEnumName})` tag must name a declared enum type; '{tagEnumName}' is not one");
+        }
+        foreach (var (vname, _) in variants)
+        {
+            if (!tagSyms.ContainsKey(vname))
+            {
+                throw new IrUnsupportedException(
+                    $"zig `union({tagEnumName})` variant '{vname}' is not a member of enum '{tagEnumName}'");
+            }
+        }
+
+        FinishUnion(name, variants, tagType);
+        RegisterContainerConsts(name, consts);
+        return methods;
+    }
+
+    /// <summary>Parse a union body's variant items into <c>(name, payload?)</c> pairs — a
+    /// payload variant (<c>name: Type</c>) or a void/tag-only variant (<c>name</c>).</summary>
+    private List<(string name, CType? payload)> ParseUnionVariants(IReadOnlyList<Item> variantItems)
+    {
         var variants = new List<(string name, CType? payload)>();
         foreach (var v in variantItems)
         {
@@ -771,47 +832,33 @@ internal sealed partial class ZigLowering
                 default: throw new IrUnsupportedException("zig union variant: " + (v.Content?.GetType().Name ?? "null"));
             }
         }
+        return variants;
+    }
 
-        // Synthesize the tag enum `U_Tag` + its member symbols (variant name → tag constant).
-        var tagName = name + TagSuffix;
-        var tagType = new CType.Enum(tagName, CType.Int);
-        var tagMembers = new List<EnumMember>();
-        var tagSyms = new Dictionary<string, Symbol>(System.StringComparer.Ordinal);
+    /// <summary>Finish registering a tagged union once its variants + tag enum are known (shared by
+    /// the auto-tag <c>union(enum)</c> and the explicit-tag <c>union(SomeEnum)</c> forms): build the
+    /// nested overlapping-payload union <c>U_Payload</c> (one <c>[FieldOffset(0)]</c> field per PAYLOAD
+    /// variant — none for an all-void union), the outer discriminated struct <c>U = { __tag,
+    /// (__payload?) }</c>, and record the <see cref="ZigUnionInfo"/> for construction + <c>switch</c>.</summary>
+    private void FinishUnion(string name, IReadOnlyList<(string name, CType? payload)> variants, CType.Enum tagType)
+    {
         var variantMap = new Dictionary<string, CType?>(System.StringComparer.Ordinal);
-        long idx = 0;
-        foreach (var (vname, payload) in variants)
-        {
-            tagMembers.Add(new EnumMember(vname, idx));
-            tagSyms[vname] = new Symbol { Name = vname, Kind = SymKind.EnumConst, Type = tagType, ConstValue = idx, IsGlobal = true };
-            variantMap[vname] = payload;
-            idx++;
-        }
-        _ir.RegisterEnumType(tagName, CType.Int, tagMembers);
-        _containerTypes[tagName] = tagType;
-        _enumMembers[tagName] = tagSyms;
-
-        // Nested overlapping-payload union `U_Payload` (one overlaid field per PAYLOAD variant) —
-        // only when at least one variant carries a payload; an all-void union is just a tag.
-        string? payloadTypeName = null;
         var payloadFields = new List<StructField>();
         foreach (var (vname, payload) in variants)
         {
+            variantMap[vname] = payload;
             if (payload is not null) { payloadFields.Add(new StructField(vname, payload)); }
         }
+        string? payloadTypeName = null;
         if (payloadFields.Count > 0)
         {
             payloadTypeName = name + PayloadSuffix;
             _ir.RegisterStructType(payloadTypeName, payloadFields, isUnion: true);   // [StructLayout(Explicit)], all at offset 0
         }
-
-        // Outer discriminated struct `U` = { __tag; (__payload if any) }.
         var fields = new List<StructField> { new StructField(TagFieldName, tagType) };
         if (payloadTypeName is not null) { fields.Add(new StructField(PayloadFieldName, new CType.Named(payloadTypeName))); }
         _ir.RegisterStructType(name, fields, isUnion: false);
-
-        _unions[name] = new ZigUnionInfo(tagType, TagFieldName, payloadTypeName, PayloadFieldName, variantMap);
-        RegisterContainerConsts(name, consts);   // e.g. `const Self = @This();` → the outer struct type
-        return methods;
+        _unions[name] = new ZigUnionInfo(name, tagType, TagFieldName, payloadTypeName, PayloadFieldName, variantMap);
     }
 
     /// <summary>Register a Zig <c>enum</c> declaration: assign each member its value
