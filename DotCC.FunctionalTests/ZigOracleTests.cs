@@ -1044,6 +1044,35 @@ public sealed class ZigOracleTests
             "    const base: u8 = 40;\n" +
             "    return base +| 2;\n" + // 42 (no saturation)
             "}\n", 42, "" },
+
+        // Destructuring completeness (Milestone S): assign-to-existing lvalues, mixed new+existing,
+        // typed binders, and the `_` discard. Zig destructuring is SEQUENTIAL — for a tuple-literal
+        // RHS an existing-lvalue write is visible to a later element's read, so `a, b = .{ b, a }` is
+        // NOT a swap (a<-old b, then b<-the new a). A non-literal tuple RHS (`pair()`) single-evals.
+        new object[] { "destructure",
+            "fn pair() struct { u8, u8 } { return .{ 20, 22 }; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var a: u8 = 3;\n" +
+            "    var b: u8 = 9;\n" +
+            "    a, b = .{ b, a };\n" +          // a<-9, b<-new a (9): NOT a swap
+            "    if (a != 9 or b != 9) return 1;\n" +
+            "    var p: u8 = 1;\n" +
+            "    var q: u8 = 2;\n" +
+            "    var r: u8 = 3;\n" +
+            "    p, q, r = .{ q, r, p };\n" +     // p<-2, q<-3, r<-new p (2)
+            "    if (p != 2 or q != 3 or r != 2) return 2;\n" +
+            "    var c: u8 = 0;\n" +
+            "    const d, c = .{ 5, 6 };\n" +     // mixed: new const + existing lvalue
+            "    if (d != 5 or c != 6) return 3;\n" +
+            "    const e: u16, const f: u8 = .{ 300, 7 };\n" + // typed binders drive result-location
+            "    if (e != 300 or f != 7) return 4;\n" +
+            "    var g: u8 = 0;\n" +
+            "    _, g = .{ 99, 8 };\n" +          // `_` discard
+            "    if (g != 8) return 5;\n" +
+            "    const x, const y = pair();\n" +  // non-literal RHS: single-eval into a temp
+            "    if (x != 20 or y != 22) return 6;\n" +
+            "    return c + f + x + g + 1;\n" +   // 6 + 7 + 20 + 8 + 1 = 42
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

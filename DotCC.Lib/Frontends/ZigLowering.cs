@@ -1673,49 +1673,143 @@ internal sealed partial class ZigLowering
         return new DeclStmt(new List<LocalDecl> { new(sym2, init) });
     }
 
-    /// <summary>Lower a destructure binding <c>const a, const b = e;</c> (Milestone G). The RHS is
-    /// evaluated ONCE into a fresh tuple temp (<c>__tupN</c>), then each binder reads its positional
-    /// element (<c>__tupN.ItemK</c>). Emitted as a brace-less <see cref="Seq"/> so the binders land
-    /// in the ENCLOSING scope (a <see cref="Block"/> would wrongly scope them). The RHS must be a
-    /// tuple whose arity matches the binder count. V1 binders are <c>const</c>/<c>var</c> only — the
-    /// const-ness isn't enforced (both lower to a C# local); the assign-to-existing form is
-    /// deferred (see the grammar).</summary>
+    /// <summary>Lower a destructure binding <c>&lt;binder&gt;, &lt;binder&gt;… = e;</c> (Milestone G,
+    /// extended in S). A binder is a fresh <c>const</c>/<c>var</c> (optionally typed <c>: T</c>), an
+    /// existing lvalue, or a <c>_</c> discard. Two lowerings, picked by the RHS shape:
+    /// <list type="bullet">
+    /// <item>A tuple-LITERAL RHS (<c>.{e0, e1, …}</c>) is lowered ELEMENT-WISE in source order with NO
+    /// snapshot temp — each element <c>e_i</c> is bound/assigned directly. This matches Zig's
+    /// sequential destructuring, where an existing-lvalue write is visible to a LATER element's read
+    /// (so <c>a, b = .{ b, a }</c> is NOT a swap: <c>a←b</c>, then <c>b←</c> the new <c>a</c>). New
+    /// binders can't alias (Zig forbids shadowing), so the order is also faithful for them, and a typed
+    /// binder drives its element's result location (sink).</item>
+    /// <item>A non-literal tuple-valued RHS (a fn call, a tuple var) is evaluated ONCE into a fresh
+    /// <c>__tupN</c> temp, then each binder reads its positional element (<c>__tupN.ItemK</c>) — single
+    /// eval, and a value temp can't alias an lvalue being written.</item>
+    /// </list>
+    /// Emitted as a brace-less <see cref="Seq"/> so any new binders land in the ENCLOSING scope (a
+    /// <see cref="Block"/> would wrongly scope them). The arity must match the binder count.</summary>
     private CStmt LowerDestructure(Zig.StmtDestructure d)
     {
         // Binders in source order: the leading one (Arg0) + the rest (the Arg2 list).
         var binders = new List<Item> { d.Arg0 };
         binders.AddRange(Flatten(d.Arg2));
-        var rhs = LowerExpr(d.Arg4);   // RhsExpr is transparent — the underlying Expr/IfExpr comes through
+        var stmts = new List<CStmt>();
+
+        // RhsExpr is transparent, so d.Arg4.Content is the underlying literal/expr directly.
+        if (IsPositionalTupleLiteral(d.Arg4, out var elemItems))
+        {
+            if (elemItems.Count != binders.Count)
+            {
+                throw new IrUnsupportedException(
+                    $"zig destructure binds {binders.Count} name(s) but the literal has {elemItems.Count} element(s)");
+            }
+            // Element-wise, source order: each binder lowers its own element expr (a typed/lvalue
+            // binder passes its type as the element's sink). No temp — preserves Zig's aliasing.
+            for (int i = 0; i < binders.Count; i++)
+            {
+                stmts.Add(LowerDestructBinder(binders[i], elemItems[i], snapshotRead: null));
+            }
+            return new Seq(stmts);
+        }
+
+        var rhs = LowerExpr(d.Arg4);
         if (rhs.Type.Unqualified is not CType.Tuple tup)
         {
             throw new IrUnsupportedException(
-                $"zig destructure `const a, … = e` needs a tuple value; got {rhs.Type.Describe()}");
+                $"zig destructure `…, … = e` needs a tuple value; got {rhs.Type.Describe()}");
         }
         if (tup.Elements.Count != binders.Count)
         {
             throw new IrUnsupportedException(
                 $"zig destructure binds {binders.Count} name(s) but the tuple has {tup.Elements.Count} element(s)");
         }
-        var stmts = new List<CStmt>();
-        // The single-eval temp: `var __tupN = e;`.
+        // The single-eval temp: `var __tupN = e;`, then each binder reads `__tupN.ItemK`.
         var tmp = _symbols.Declare(new Symbol { Name = "__tup" + _tupleTempCounter++, Kind = SymKind.Var, Type = tup });
         stmts.Add(new DeclStmt(new List<LocalDecl> { new(tmp, rhs) }));
         var tmpRef = new VarRef(tmp) { Type = tup, IsLValue = true };
         for (int i = 0; i < binders.Count; i++)
         {
-            var name = binders[i].Content switch
-            {
-                Zig.DestructBindConst c => Tok(c.Arg1),   // 'const' IDENT
-                Zig.DestructBindVar v   => Tok(v.Arg1),   // 'var' IDENT
-                _ => throw new IrUnsupportedException(
-                    "zig destructure binder: " + (binders[i].Content?.GetType().Name ?? "null")),
-            };
             var et = tup.Elements[i];
             var read = new TupleIndex(tmpRef, i, et) { Type = et };
-            var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = et });
-            stmts.Add(new DeclStmt(new List<LocalDecl> { new(sym, read) }));
+            stmts.Add(LowerDestructBinder(binders[i], elemItem: null, snapshotRead: read));
         }
         return new Seq(stmts);
+    }
+
+    /// <summary>Emit one destructure binder's statement (Milestone G + S). A fresh <c>const</c>/<c>var</c>
+    /// binder (optionally typed <c>: T</c>) declares a local; an existing-lvalue binder assigns through
+    /// it; <c>_</c> discards. The source value is either the tuple-literal element <paramref name="elemItem"/>
+    /// (lowered at the binder's declared/lvalue type as its sink) or the snapshot read
+    /// <paramref name="snapshotRead"/> (coerced to the binder's type). Exactly one of the two is non-null.</summary>
+    private CStmt LowerDestructBinder(Item binder, Item? elemItem, CExpr? snapshotRead)
+    {
+        switch (binder.Content)
+        {
+            case Zig.DestructBindConst c:      return DeclareDestructLocal(Tok(c.Arg1), null, elemItem, snapshotRead);
+            case Zig.DestructBindVar v:        return DeclareDestructLocal(Tok(v.Arg1), null, elemItem, snapshotRead);
+            case Zig.DestructBindConstTyped c: return DeclareDestructLocal(Tok(c.Arg1), LowerType(c.Arg3), elemItem, snapshotRead);
+            case Zig.DestructBindVarTyped v:   return DeclareDestructLocal(Tok(v.Arg1), LowerType(v.Arg3), elemItem, snapshotRead);
+            case Zig.DestructBindLValue lv:    return AssignDestructTarget(lv.Arg0, elemItem, snapshotRead);
+            default:
+                throw new IrUnsupportedException(
+                    "zig destructure binder: " + (binder.Content?.GetType().Name ?? "null"));
+        }
+    }
+
+    /// <summary>Declare a fresh destructure local <c>name</c>. With a <paramref name="declType"/> the
+    /// element lowers at that type as its sink (literal RHS) or the snapshot read is coerced to it;
+    /// without one the type is inferred from the element/read.</summary>
+    private CStmt DeclareDestructLocal(string name, CType? declType, Item? elemItem, CExpr? snapshotRead)
+    {
+        CExpr value = elemItem is not null
+            ? (declType is not null ? LowerExprSink(elemItem, declType) : LowerExpr(elemItem))
+            : (declType is not null ? CoerceRead(snapshotRead!, declType) : snapshotRead!);
+        var symType = declType ?? value.Type;
+        var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = symType });
+        return new DeclStmt(new List<LocalDecl> { new(sym, value) });
+    }
+
+    /// <summary>Assign a destructure element to an existing lvalue (or discard it for <c>_</c>). The
+    /// lvalue is the sink for a literal element; a snapshot read is coerced to the lvalue type. A
+    /// <c>_</c> binder just evaluates the element for its side effects (a value-context discard).</summary>
+    private CStmt AssignDestructTarget(Item lvalueItem, Item? elemItem, CExpr? snapshotRead)
+    {
+        if (lvalueItem.Content is Zig.Ident id && Tok(id.Arg0) == "_")
+        {
+            // `_` — evaluate the element/read; ExprStmt renders a `_ = …` discard when it isn't a call.
+            return new ExprStmt(elemItem is not null ? LowerExpr(elemItem) : snapshotRead!);
+        }
+        var target = LowerExpr(lvalueItem);
+        CExpr value = elemItem is not null
+            ? LowerExprSink(elemItem, target.Type)
+            : CoerceRead(snapshotRead!, target.Type);
+        return new ExprStmt(new Assign(null, target, value) { Type = target.Type });
+    }
+
+    /// <summary>Coerce a snapshot read (a <c>__tupN.ItemK</c> CExpr) to a binder's declared/lvalue
+    /// type, inserting a <see cref="Cast"/> only when the types differ (a no-op when they match).</summary>
+    private static CExpr CoerceRead(CExpr read, CType to)
+        => read.Type.Unqualified.Equals(to.Unqualified) ? read : new Cast(to, read) { Type = to };
+
+    /// <summary>True when <paramref name="rhsItem"/> is a positional tuple literal (<c>.{e0, e1, …}</c>),
+    /// yielding its element expressions in <paramref name="elemItems"/>. A named <c>.{.f = v}</c> (a
+    /// struct literal) or the empty <c>.{}</c> is not a positional tuple literal → false (the snapshot
+    /// path then handles / rejects it).</summary>
+    private static bool IsPositionalTupleLiteral(Item rhsItem, out IReadOnlyList<Item> elemItems)
+    {
+        elemItems = [];
+        if (rhsItem.Content is not Zig.AnonStructInit a) { return false; }
+        var fields = Flatten(a.Arg2);
+        if (fields.Count == 0) { return false; }
+        var items = new List<Item>(fields.Count);
+        foreach (var f in fields)
+        {
+            if (f.Content is not Zig.FieldInitPositional pos) { return false; }   // a named field → struct literal
+            items.Add(pos.Arg0);
+        }
+        elemItems = items;
+        return true;
     }
 
     /// <summary>Lower a labeled block used as a VALUE — <c>blk: { …; break :blk v; }</c> — at a

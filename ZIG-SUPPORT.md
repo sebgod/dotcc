@@ -96,7 +96,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `return e;` / `return;` | ✅ | |
 | `x = e;` assignment | ✅ | |
 | `x op= e;` compound assignment | ✅ | all ten: `+= -= *= /= %= <<= >>= &= \|= ^=`, plus the wrapping `+%= -%= *%=` and saturating `+\|= -\|= *\|=` (Milestone P). → the shared `Assign` IR node with a non-null `CompoundOp` → a NATIVE C# `x op= e`, so the target lvalue is evaluated exactly **once** (`arr[next()] += 1` calls `next()` a single time — not a `x = x op e` desugar). A native compound op already truncates back to the LHS width (unchecked), so `+%=` is observably identical to `+=`. The SATURATING compound forms have no native op → they desugar to `x = ZigMath.Sat…(x, e)` (the lvalue read twice; a side-effecting target — `slot().* +\|= 1` — is a clear deferred error rather than a silent double-eval). Zig has **no** `++`/`--` (the idiom is `i += 1`) |
-| `const a, const b = e;` destructure | ✅ | bind a tuple's elements to new locals (Milestone G) — desugars to a single-eval temp + per-element `.ItemN` reads (a brace-less sequence, so the binders stay in the enclosing scope). `const`/`var` binders, ≥2. **Deferred:** the assign-to-existing-lvalue form `a, b = e;` (a grammar-level cut, so a parse error) and typed binders (`const a: T, …`) |
+| destructure `a, b = e;` / `const a, const b = e;` | ✅ | bind a tuple's elements to new locals OR assign to existing lvalues (Milestone G + S), ≥2 binders. Binder kinds: a fresh `const`/`var` (optionally typed `const a: T`), an existing lvalue, or `_` (discard). A tuple-**literal** RHS lowers **element-wise in source order, no temp** — matching Zig's sequential semantics, where an existing-lvalue write is visible to a later element's read (so `a, b = .{ b, a }` is **not** a swap: `a←b`, then `b←` the new `a`). A non-literal tuple RHS single-evals into `__tupN`, then per-element `.ItemN` reads. A brace-less sequence keeps new binders in the enclosing scope |
 | `_ = e;` discard | ✅ | Zig's mandatory discard of a non-void result |
 | block `{ … }` | ✅ | |
 | `defer Stmt;` | ✅ | scope-exit cleanup — runs on EVERY exit from the enclosing block (fall-through, `return`, `break`, `continue`, a propagating error), in LIFO declaration order. → C# `try { rest } finally { cleanup }`. The deferred `Stmt` is an `expr;`, a `_ = expr;` discard, or a braced block. See the **Defer** section |
@@ -348,10 +348,15 @@ fit is exact for the runtime subset; only the comptime *flavor* of tuples (type-
 `comptime_int` fields, and the `std.fmt` `.{…}` reflection idiom — already handled via
 `extern fn printf`) stays out, the comptime root again.
 
+The full destructure surface is in (Milestone S): assign-to-existing lvalues (`a, b = e;`), mixed
+new+existing, typed binders (`const a: T, …`), and the `_` discard. A tuple-literal RHS lowers
+element-wise in source order (faithful to Zig's sequential, non-snapshotting semantics — so a swap
+needs `a, b = .{ b, a }` to *not* swap, which it doesn't); a non-literal tuple RHS single-evals.
+
 **V1 limits** (documented, not silent): arity 1..7 (an empty tuple and arity > 7 — which would need
-ValueTuple's `TRest` nesting — are deferred); the assign-to-existing-lvalue destructure `a, b = e;`
-is a grammar-level cut (a parse error — V1 binders are `const`/`var` only); a literal that mixes
-positional + named fields is rejected; and a runtime (non-literal) tuple index is rejected.
+ValueTuple's `TRest` nesting — are deferred); destructuring a non-tuple aggregate and nested
+destructure are deferred; a literal that mixes positional + named fields is rejected; and a runtime
+(non-literal) tuple index is rejected.
 
 ## Defer / errdefer — scope-exit cleanup → C# try/finally + try/catch
 
@@ -436,6 +441,9 @@ rejects, not silently accept more.
   indirect vtable, an opaque `std.mem.Allocator` param + materialized default),
   `examples/zig-tuple` (tuples: a `struct { u8, u8 }` multiple-return + `const lo, const hi = …`
   destructure, a tuple-typed parameter, an inline-literal destructure, a literal `t[N]` index),
+  `examples/zig-destructure` (destructure completeness: assign-to-existing `a, b = .{ b, a }` with
+  Zig's sequential no-swap semantics, a 3-way rotate, mixed new+existing, typed binders, the `_`
+  discard, and a non-literal `pair()` RHS single-eval),
   `examples/zig-defer` (defer/errdefer: `defer a.free(buf)` pairing a FixedBufferAllocator
   allocation with its release, plus an `errdefer` step that fires on the error path),
   `examples/zig-literals` (bool + char literals: `true`/`false` driving a branch, char-codepoint

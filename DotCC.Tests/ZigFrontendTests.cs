@@ -1176,15 +1176,17 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Destructures_an_inline_tuple_literal()
+    public void Destructures_an_inline_tuple_literal_element_wise()
     {
-        // `const a, const b = .{ … };` — the RHS is an inline positional literal with no sink, so
-        // its tuple type is INFERRED from the elements, then destructured the same way.
+        // `const a, const b = .{ … };` — a tuple-LITERAL RHS lowers ELEMENT-WISE in source order
+        // (Milestone S): each binder takes its own element directly, with NO snapshot temp / tuple
+        // value. (A non-literal tuple RHS still single-evals into `__tup`; see the test above.)
         var cs = EmitZig(
             "pub fn main() u8 { const a, const b = .{ @as(u8, 4), @as(u8, 6) }; return a + b; }\n");
-        cs.ShouldContain("new System.ValueTuple<byte, byte>(");   // inferred tuple from the literal
-        cs.ShouldContain(".Item1");
-        cs.ShouldContain(".Item2");
+        cs.ShouldContain("byte a = (byte)4;");
+        cs.ShouldContain("byte b = (byte)6;");
+        cs.ShouldNotContain("__tup");          // no snapshot temp for a literal RHS
+        cs.ShouldNotContain("ValueTuple");     // no tuple value constructed at all
     }
 
     [Fact]
@@ -1219,15 +1221,49 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_the_deferred_assign_to_existing_destructure()
+    public void Destructures_to_existing_lvalues_element_wise()
     {
-        // V1 binders are `const`/`var` only — the assign-to-existing-lvalue form (`a, b = e;`) is
-        // deferred and structurally excluded at the grammar level (a parse error, not a lowering
-        // one), which keeps the `=` lookahead clean vs an ordinary assignment.
-        var ex = Should.Throw<CompileException>(() => EmitZig(
-            "pub fn main() u8 { var a: u8 = 0; var b: u8 = 0; a, b = .{ @as(u8, 1), @as(u8, 9) }; " +
-            "_ = &a; _ = &b; return a + b; }\n"));
-        ex.Message.ShouldContain("parse");
+        // Milestone S — `a, b = .{ … };` assigns to EXISTING lvalues. A tuple-literal RHS lowers
+        // element-wise in source order with no temp, faithful to Zig's sequential semantics: a later
+        // element's read sees an earlier element's write (so `a, b = .{ b, a }` is NOT a swap).
+        var cs = EmitZig(
+            "pub fn main() u8 { var a: u8 = 3; var b: u8 = 9; a, b = .{ b, a }; _ = &a; _ = &b; return a + b - 12; }\n");
+        cs.ShouldContain("a = b;");
+        cs.ShouldContain("b = a;");
+        cs.ShouldNotContain("__tup");   // element-wise, no snapshot
+    }
+
+    [Fact]
+    public void Destructures_with_typed_binders()
+    {
+        // Milestone S — `const e: u16, const f: u8 = .{ 300, 7 };`. Each binder's declared type is
+        // its element's result location, so a bare `300` lands as a `ushort` (u16), `7` as a `byte`.
+        var cs = EmitZig(
+            "pub fn main() u8 { const e: u16, const f: u8 = .{ 300, 7 }; return @as(u8, @intCast(e - 293)) + f; }\n");
+        cs.ShouldContain("ushort e = 300;");
+        cs.ShouldContain("byte f = 7;");
+    }
+
+    [Fact]
+    public void Destructures_mixed_new_and_existing_binders()
+    {
+        // Milestone S — a fresh `const d` interleaved with an existing lvalue `c`: the new binder
+        // declares, the existing one assigns, in source order.
+        var cs = EmitZig(
+            "pub fn main() u8 { var c: u8 = 0; const d, c = .{ 5, 6 }; _ = &c; return d + c - 11; }\n");
+        cs.ShouldContain("int d = 5;");   // untyped `const d` infers int from the literal element
+        cs.ShouldContain("c = 6;");       // existing lvalue assigned
+    }
+
+    [Fact]
+    public void Destructures_with_a_discard_binder()
+    {
+        // Milestone S — a `_` binder ignores its element. A side-effect-free element (the literal 99)
+        // simply isn't bound; the sibling `g` still takes its element.
+        var cs = EmitZig(
+            "pub fn main() u8 { var g: u8 = 0; _, g = .{ 99, 8 }; _ = &g; return g; }\n");
+        cs.ShouldContain("g = 8;");
+        cs.ShouldNotContain("__tup");
     }
 
     [Fact]
