@@ -1,0 +1,1 @@
+MSVC has no __int128 type (it is a GCC/Clang extension).

@@ -1105,6 +1105,7 @@ internal sealed partial class IrBuilder
         C.TsSigned => "signed",
         C.TsBool => "_Bool",
         C.TsFloat128 => "Float128",
+        C.TsInt128 => "__int128",
         C.TsInline => "inline",
         C.TsNoreturn => "_Noreturn",
         C.TsComplex => "_Complex",
@@ -1148,6 +1149,7 @@ internal sealed partial class IrBuilder
                 case "double": base_ = "double"; baseCount++; break;
                 case "_Bool": base_ = "_Bool"; baseCount++; break;
                 case "Float128": base_ = "Float128"; baseCount++; break;
+                case "__int128": base_ = "__int128"; baseCount++; break;
             }
         }
 
@@ -1167,6 +1169,9 @@ internal sealed partial class IrBuilder
         { throw new DotCC.CompileException("`_Bool` cannot be combined with other type specifiers"); }
         if (base_ == "Float128" && (u > 0 || s > 0 || sh > 0 || lng > 0 || isComplex))
         { throw new DotCC.CompileException("`_Float128` cannot be combined with other type specifiers"); }
+        // `__int128` takes signed/unsigned (like `int`) but no size or `_Complex` modifier.
+        if (base_ == "__int128" && (sh > 0 || lng > 0 || isComplex))
+        { throw new DotCC.CompileException("`__int128` cannot be combined with `short`, `long`, or `_Complex`"); }
         if (base_ == "float" && (u > 0 || s > 0 || sh > 0 || lng > 0))
         { throw new DotCC.CompileException("`float` cannot take size or sign modifiers"); }
         if (base_ == "double" && lng >= 2)
@@ -1187,6 +1192,7 @@ internal sealed partial class IrBuilder
             "void" => CType.Void,
             "_Bool" => CType.Bool,
             "Float128" => CType.Float128,
+            "__int128" => u > 0 ? CType.UInt128 : CType.Int128,  // signed is the default
             "float" => CType.Float,
             "double" => lng >= 1 ? CType.LongDouble : CType.Double,
             "char" => u > 0 ? CType.UChar : s > 0 ? CType.SChar : CType.Char,

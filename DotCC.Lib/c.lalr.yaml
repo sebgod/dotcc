@@ -402,6 +402,7 @@ symbols:
   # preprocessor (OnLine), never reaches the parser — appended here purely so the
   # byte lexer has a terminal to emit. See the preprocessor: block at the bottom.
   - '#line'        # 172 preprocessor directive — renumber __LINE__ / __FILE__
+  - '__int128'     # 173 GCC 128-bit integer extension — `__int128` / `unsigned __int128`.
 
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
@@ -797,6 +798,7 @@ productions:
       - { lhs: TypeSpec, rhs: ['signed'],   action: tsSigned }
       - { lhs: TypeSpec, rhs: ['_Bool'],    action: tsBool }
       - { lhs: TypeSpec, rhs: ['_Float128'], action: tsFloat128 }
+      - { lhs: TypeSpec, rhs: ['__int128'], action: tsInt128 }
       # NOTE: `const` and `volatile` are NOT TypeSpecs — they're Type PREFIX +
       # POSTFIX productions (see the `Type` group above), so they carry a CType
       # qualifier flag and parse in every position without the spec-list-vs-prefix
@@ -1573,6 +1575,10 @@ lexer:
     # Before the ID rule (longest-match ties resolve first-rule-wins).
     - { symbol: '_Float128', match: '_Float128' }
     - { symbol: '_Float128', match: '__float128' }
+    # GCC `__int128` — a `__`-reserved implementation keyword (like `__float128`), so
+    # accepted in every dialect with no DialectGate. `signed`/`unsigned __int128` compose
+    # via the existing signed/unsigned TypeSpecs (no extra production).
+    - { symbol: '__int128', match: '__int128' }
     # `_Static_assert` (C11) — always a keyword (reserved underscore-uppercase
     # prefix). The C23 lowercase `static_assert` is promoted onto this terminal
     # by DialectKeywordRewriter; it has no lexer rule of its own (rule 2).
