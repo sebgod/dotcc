@@ -596,20 +596,26 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_a_container_var_member()
+    public void Lowers_a_container_var_alongside_fields_and_methods()
     {
-        // A container-level `var` is a namespaced mutable GLOBAL — it needs real top-level global
-        // storage, which the Zig front-end doesn't lower yet. It fails loudly rather than silently
-        // dropping the declaration. (A `const` value member IS supported — see above.)
-        var ex = Should.Throw<CompileException>(() => EmitZig(
+        // A container-level `var` is a namespaced mutable GLOBAL (Milestone R, part 6) — lowered to a
+        // mangled `Counter_total` global field, coexisting with the struct's instance field `n` and a
+        // method. (A `const` value member is supported too — see above.)
+        var cs = EmitZig(
             "const Counter = struct {\n" +
             "    n: i32,\n" +
             "    var total: i32 = 0;\n" +
             "    fn get(self: Counter) i32 { return self.n; }\n" +
             "};\n" +
-            "pub fn main() u8 { const c = Counter{ .n = 42 }; return @as(u8, c.get()); }\n"));
-        ex.Message.ShouldContain("total");
-        ex.Message.ShouldContain("mutable global");
+            "pub fn main() u8 {\n" +
+            "    const c = Counter{ .n = 30 };\n" +
+            "    Counter.total = c.get();\n" +
+            "    Counter.total += 12;\n" +
+            "    return @intCast(Counter.total);\n" +
+            "}\n");
+        cs.ShouldContain("Counter_total = 0");   // the namespaced var → a mangled global field
+        cs.ShouldContain("Counter_total =");     // `Counter.total = …` writes the global
+        cs.ShouldContain("int n;");              // the instance field stays a real struct member
     }
 
     [Fact]
@@ -818,6 +824,42 @@ public sealed class ZigFrontendTests
         cs.ShouldContain("x + 1");            // body lowered (the CallConv arg-shift is correct)
         cs.ShouldContain("uint buf = 30");    // align ignored — an ordinary local
         cs.ShouldContain("counter");          // linksection ignored — an ordinary global
+    }
+
+    [Fact]
+    public void Lowers_a_container_var_and_sibling_const_by_bare_name()
+    {
+        // Milestone R, part 6 — a container-level `var` is a namespaced mutable global (lowered to a
+        // mangled `Cfg_counter` field; `Cfg.counter` reads/writes it), and a sibling const referenced
+        // by BARE name in another const's RHS (`doubled = base * 2`) resolves against the container.
+        var cs = EmitZig(
+            "const Cfg = struct {\n" +
+            "    const base: u32 = 10;\n" +
+            "    const doubled: u32 = base * 2;\n" +
+            "    var counter: u32 = 0;\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    Cfg.counter = Cfg.doubled;\n" +
+            "    Cfg.counter += Cfg.base;\n" +
+            "    return @intCast(Cfg.counter);\n" +
+            "}\n");
+        cs.ShouldContain("Cfg_counter = 0");   // the namespaced var → a mangled global field
+        cs.ShouldContain("Cfg_counter =");     // `Cfg.counter = …` writes the global
+        cs.ShouldContain("Cfg_counter +=");    // `Cfg.counter += …` writes the global
+        cs.ShouldContain("10 * 2");            // sibling `base` resolved by bare name inside `doubled`
+    }
+
+    [Fact]
+    public void Rejects_a_sibling_const_dependency_cycle()
+    {
+        // `const a = b; const b = a;` — a bare-name sibling cycle errors cleanly (no infinite recurse).
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const Cfg = struct {\n" +
+            "    const a: u32 = b;\n" +
+            "    const b: u32 = a;\n" +
+            "};\n" +
+            "pub fn main() u8 { return @intCast(Cfg.a); }\n"));
+        ex.Message.ShouldContain("dependency cycle");
     }
 
     [Fact]
