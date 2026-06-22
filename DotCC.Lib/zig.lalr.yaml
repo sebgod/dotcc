@@ -400,11 +400,15 @@ productions:
       - { lhs: Stmt, rhs: ['return', RhsExpr, ';'],         action: stmtReturn }
       - { lhs: Stmt, rhs: ['return', ';'],                   action: stmtReturnVoid }
       - { lhs: Stmt, rhs: [VarDecl] }
-      # Destructure binding (Milestone G) — `const a, const b = e;` (≥2 binders, enforced by the
-      # one-binder + DestructBinds shape). Desugars in lowering to a single temp eval + per-index
-      # `.ItemN` reads (single-eval, no new deconstruction IR node). V1 binders are `const`/`var`
-      # only — the assign-to-existing-lvalue form (`a, b = e;`) is deferred so the first binder is
-      # always followed by `,` (never `=`), keeping the `=`/`:` lookahead clean vs VarDecl/stmtAssign.
+      # Destructure binding (Milestone G + S) — `<binder>, <binder>… = e;` (≥2 binders, enforced by
+      # the one-binder + DestructBinds shape). A binder is a fresh `const`/`var` (optionally typed
+      # `: T`) OR an existing lvalue / `_` discard (Milestone S — the assign-to-existing form `a, b =
+      # e;`). Lowering (see LowerDestructure): a tuple-LITERAL RHS (`.{e0, e1, …}`) is desugared
+      # ELEMENT-WISE in source order with NO snapshot temp — matching Zig's sequential semantics where
+      # an existing-lvalue write is visible to a later element's read (so `a, b = .{ b, a }` is NOT a
+      # swap: a←b, then b←newA); a non-literal tuple-valued RHS is evaluated ONCE into `__tupN`, then
+      # read positionally (`.ItemN`). The first binder is always followed by `,` (never `=`), so the
+      # `,`-vs-`=`/`;`/`op=` lookahead selects the destructure cleanly against VarDecl/stmtAssign.
       - { lhs: Stmt, rhs: [DestructBind, ',', DestructBinds, '=', RhsExpr, ';'], action: stmtDestructure }
       - { lhs: Stmt, rhs: [Expr, '=', RhsExpr, ';'],         action: stmtAssign }
       # Compound assignment `x op= y` — one rule per operator, mirroring the binary-operator
@@ -448,10 +452,20 @@ productions:
       - { lhs: DestructBinds, rhs: [DestructBinds, ',', DestructBind], action: destructBindsCons }
       - { lhs: DestructBinds, rhs: [DestructBind],                     action: destructBindsOne }
 
+  # A destructure binder (Milestone G + S): a fresh `const`/`var` binding (optionally typed `: Type`,
+  # Milestone S), or an existing lvalue / `_` discard (Milestone S — the `Expr` form). The lvalue
+  # form reuses the full `Expr` cascade: at statement start the parser builds the leading binder as
+  # an `Expr`, and the `,` that always follows it (vs the `=`/`;`/`op=` ending an ordinary
+  # assignment/expr-statement) selects the destructure — distinct LALR states from VarDecl/stmtAssign,
+  # conflict-free. A typed binder shares VarDecl's `:` shift after `const`/`var IDENT`; then `,`
+  # (binder, reduce) vs `=` (VarDecl, shift) splits cleanly once the `Type` is parsed.
   - derivation: none
     rules:
-      - { lhs: DestructBind, rhs: ['const', IDENT], action: destructBindConst }
-      - { lhs: DestructBind, rhs: ['var', IDENT],    action: destructBindVar }
+      - { lhs: DestructBind, rhs: ['const', IDENT],            action: destructBindConst }
+      - { lhs: DestructBind, rhs: ['const', IDENT, ':', Type], action: destructBindConstTyped }
+      - { lhs: DestructBind, rhs: ['var', IDENT],              action: destructBindVar }
+      - { lhs: DestructBind, rhs: ['var', IDENT, ':', Type],   action: destructBindVarTyped }
+      - { lhs: DestructBind, rhs: [Expr],                      action: destructBindLValue }
 
   # ===== expression cascade =====
   - derivation: none
