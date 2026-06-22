@@ -57,6 +57,47 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_i128_and_u128_to_System_Int128_and_UInt128()
+    {
+        // Milestone ß ("sharp-s"): Zig i128/u128 → C# System.Int128 / System.UInt128 (BCL
+        // primitives — arithmetic comes for free; no clean-room type like Float128 needed).
+        var cs = EmitZig("fn f(a: i128, b: u128) i128 { return a; }\npub fn main() u8 { return 0; }\n");
+        cs.ShouldContain("f(System.Int128 a, System.UInt128 b)");
+    }
+
+    [Fact]
+    public void Emits_a_128_bit_literal_beyond_ulong_via_Parse()
+    {
+        // A u128 literal larger than ulong has no C# literal form (no Int128 suffix), so it
+        // materializes via Parse. 0xffff_ffff_ffff_ffff_ffff == 2^80-1 == 1208925819614629174706175.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const x: u128 = 0xffff_ffff_ffff_ffff_ffff;\n" +
+            "    _ = x;\n" +
+            "    return 0;\n}\n");
+        cs.ShouldContain("System.UInt128.Parse(\"1208925819614629174706175\")");
+    }
+
+    [Fact]
+    public void Lowers_wrapping_arithmetic_on_a_128_bit_integer()
+    {
+        // Wrapping +% on i128/u128 IS supported — native C# Int128/UInt128 wrap under unchecked
+        // (no sub-int cast-back at 16 bytes). Only saturating is the cut (below).
+        var cs = EmitZig("fn f(a: u128, b: u128) u128 { return a +% b; }\npub fn main() u8 { return 0; }\n");
+        cs.ShouldContain("a + b");
+    }
+
+    [Fact]
+    public void Rejects_saturating_arithmetic_on_a_128_bit_integer()
+    {
+        // Saturating +|/-|/*| clamps via ZigMath's exact-128-bit accumulator, which a 128-bit
+        // operand would itself overflow — a documented V1 cut, rejected with a clear message.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "fn f(a: u128, b: u128) u128 { return a +| b; }\npub fn main() u8 { return 0; }\n"));
+        ex.Message.ShouldContain("128-bit");
+    }
+
+    [Fact]
     public void Lowers_if_and_while_statements()
     {
         // if/else + while lower to the C# forms, conditions wrapped in Cond.B for

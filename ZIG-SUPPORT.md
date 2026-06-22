@@ -54,6 +54,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | Feature | Status | Notes |
 |---|---|---|
 | `i8 i16 i32 i64`, `u8 u16 u32 u64` | ✅ | faithful signedness (i8→`sbyte`, u8→`byte`, …) |
+| `i128`/`u128` | ✅ | Milestone ß — → C# `System.Int128`/`System.UInt128` (BCL primitives; `* / << >>` etc. free). A literal past `ulong` materializes via `Parse(...)` (no C# 128-bit literal suffix). Wrapping `+%` works; **saturating `+\|`/`-\|`/`*\|` is a cut** (the exact-128-bit clamp accumulator would itself overflow). The wat target has no 128-bit type (throws). |
 | `usize`/`isize` | ✅ | LP64 pointer-width (`ulong`/`long`) |
 | `f32`/`f64` | ✅ | → C# `float`/`double` |
 | `bool`, `void` | ✅ | |

@@ -348,6 +348,13 @@ public abstract record CType
     public static readonly CType ULong = new Prim("unsigned long", 8, true, false);
     public static readonly CType LongLong = new Prim("long long", 8, true, true);
     public static readonly CType ULongLong = new Prim("unsigned long long", 8, true, false);
+
+    /// <summary>The 128-bit integer types — GCC's <c>__int128</c> / <c>unsigned __int128</c> in C,
+    /// Zig's <c>i128</c> / <c>u128</c>. Both lower to C# <see cref="System.Int128"/> /
+    /// <see cref="System.UInt128"/> (BCL primitives — all arithmetic comes for free). 16 bytes;
+    /// <see cref="UsualArithmetic"/> ranks them above <c>long</c> structurally on <c>Bytes</c>.</summary>
+    public static readonly CType Int128 = new Prim("__int128", 16, true, true);
+    public static readonly CType UInt128 = new Prim("unsigned __int128", 16, true, false);
     public static readonly CType Float = new Prim("float", 4, false, true);
     public static readonly CType Double = new Prim("double", 8, false, true);
     public static readonly CType LongDouble = new Prim("long double", 8, false, true);

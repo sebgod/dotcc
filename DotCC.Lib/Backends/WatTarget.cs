@@ -39,6 +39,12 @@ internal sealed class WatTarget : ITarget
         {
             return p.Bytes <= 4 ? "f32" : "f64";
         }
+        // wasm has no 128-bit integer; without this guard a 16-byte __int128 would silently
+        // truncate to i64 (the Bytes<=4 fallthrough). Throw cleanly instead.
+        if (p.Bytes > 8)
+        {
+            throw new IrUnsupportedException("wat target has no 128-bit integer type (" + p.Name + ")");
+        }
         return p.Bytes <= 4 ? "i32" : "i64";
     }
 

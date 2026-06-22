@@ -1162,6 +1162,9 @@ internal sealed class CSharpBackend
         "short" or "ushort" or "char" => 2,
         "int" or "uint" => 4,
         "long" or "ulong" or "nint" or "nuint" => 8,
+        // 128-bit (C __int128 / Zig i128|u128). Without these the coercion machinery treats a
+        // 128-bit sink as non-integer and silently drops the narrowing cast (CS0266), same as char.
+        "System.Int128" or "System.UInt128" => 16,
         _ => null,
     };
 
@@ -1195,8 +1198,8 @@ internal sealed class CSharpBackend
         // plain unsigned source below may emit a harmless redundant `(ushort)` for the
         // genuinely-implicit `char → ushort` — accepted, see the plan's honest limits.)
         if (tgt is "char") { return false; }
-        var srcUnsigned = src is "byte" or "ushort" or "uint" or "ulong" or "nuint" or "char";
-        var tgtUnsigned = tgt is "byte" or "ushort" or "uint" or "ulong" or "nuint";
+        var srcUnsigned = src is "byte" or "ushort" or "uint" or "ulong" or "nuint" or "char" or "System.UInt128";
+        var tgtUnsigned = tgt is "byte" or "ushort" or "uint" or "ulong" or "nuint" or "System.UInt128";
         return srcUnsigned ? tw > sw : (!tgtUnsigned && tw > sw);
     }
 
