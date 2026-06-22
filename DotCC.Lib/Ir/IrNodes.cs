@@ -208,6 +208,20 @@ public sealed record StackArray(CType Element, IReadOnlyList<CExpr> Elems) : CEx
 /// <c>nint[]</c> reinterpreted as <c>T**</c>.</summary>
 public sealed record PinnedArray(CType Element, IReadOnlyList<CExpr>? Elems, CExpr? Count) : CExpr;
 
+/// <summary>A Zig array-by-value return (the Milestone K "array-by-value return" cut, made
+/// sound). A function returning a fixed array <c>[N]T</c> decays its return type to <c>T*</c> in
+/// the emitted C# signature, but <c>return t;</c> of a <c>stackalloc</c>'d array local would hand
+/// back a pointer into the callee's dead frame (a dangling pointer) — yet Zig arrays are VALUE
+/// types, so the caller must receive a copy that outlives the call. Codegen copies the
+/// <see cref="Count"/> elements of <see cref="Source"/> (a <c>T*</c>) into a heap-owned buffer and
+/// returns the pointer (<c>ZigAlloc.CopyArrayResult&lt;T&gt;(src, n)</c>). <see cref="Element"/> is
+/// the element type. <see cref="CExpr.Type"/> is the array type, so the return coercion is a no-op.
+/// V1: the buffer is NOT freed (leaked — sound values, unfreed); a caller-allocated result pointer
+/// (sret) would avoid the leak but rewrites the call ABI. Zig-lowering / C#-target only (the C
+/// front-end never produces it; the wat backend, which Zig never targets, leaves it on the
+/// default throw like <c>SliceNew</c>).</summary>
+public sealed record ArrayByValReturn(CExpr Source, CType Element, int Count) : CExpr;
+
 /// <summary>The stack-value replacement for a promoted <c>malloc</c> — the
 /// malloc→stack peephole rewrites <c>T* p = (T*)malloc(sizeof(T))</c> (used only
 /// via <c>-&gt;</c> and freed, never escaping) to <c>T p = new T()</c>. Codegen

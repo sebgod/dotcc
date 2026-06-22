@@ -98,6 +98,26 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Returns_a_fixed_array_by_value_via_a_heap_owned_copy()
+    {
+        // The Milestone K "array-by-value return" cut, made sound. A `[N]T`-returning function
+        // emits a `T*` signature; returning the stackalloc array local directly would be a
+        // dangling pointer once the callee frame pops, but Zig arrays are value types. The return
+        // is lowered to a heap-owned copy (ZigAlloc.CopyArrayResult) so the result outlives the
+        // call — no spurious cast wraps it (the node carries the array type, so the return
+        // coercion is a no-op).
+        var cs = EmitZig(
+            "fn buildTable() [4]u32 {\n" +
+            "    var t: [4]u32 = undefined;\n" +
+            "    var i: usize = 0;\n" +
+            "    while (i < 4) { t[i] = @intCast(i * i); i = i + 1; }\n" +
+            "    return t;\n}\n" +
+            "pub fn main() u8 { const tbl = buildTable(); return @intCast(tbl[3]); }\n");
+        cs.ShouldContain("uint* buildTable()");
+        cs.ShouldContain("ZigAlloc.CopyArrayResult<uint>(t, 4)");
+    }
+
+    [Fact]
     public void Folds_binary_op_enum_initializers_via_the_comptime_interpreter()
     {
         // Milestone T: a Zig enum value may now be any constant expression, not just a
