@@ -1212,6 +1212,7 @@ internal sealed class CSharpBackend
             case LitInt { Value: { } lv }: v = lv; return true;
             case EnumConstRef ec: v = ec.Sym.ConstValue; return true;
             case Paren p: return TryConstInt(p.Inner, out v);
+            case ComptimeFold { Resolved: { } r }: return TryConstInt(r, out v);
             case Unary u when TryConstInt(u.Operand, out var ov):
                 switch (u.Op)
                 {
@@ -1262,6 +1263,7 @@ internal sealed class CSharpBackend
             case LitInt { Value: { } lv }: v = lv; return true;
             case EnumConstRef ec: v = ec.Sym.ConstValue; return true;
             case Paren p: return FoldConst(p.Inner, out v);
+            case ComptimeFold { Resolved: { } r }: return FoldConst(r, out v);
             case Cast c when FoldConst(c.Operand, out v):
                 if (c.Target.Unqualified is CType.Prim { Integer: true } tp) { v = TruncateTo(v, tp); }
                 return true; // pointer (and other reinterpret) casts preserve the value
@@ -1374,6 +1376,9 @@ internal sealed class CSharpBackend
             case LitStr s: return (DotCC.EmitHelpers.EncodeStringLiteral(s.Segments), PPrimary);
             case LitU16Str s: return (DotCC.EmitHelpers.EncodeU16StringLiteral(s.Segments), PPrimary);
             case NullPtr: return ("null", PPrimary);
+            // A `comptime EXPR` (Milestone T) is resolved to a literal before emit — render that.
+            case ComptimeFold cf: return Render(cf.Resolved
+                ?? throw new IrUnsupportedException("an unresolved comptime fold reached the backend"));
             // Zig `a orelse b` over a value optional (`T?`) → C#'s `??` (single-eval left,
             // lazy right). The right is coerced to the payload type so `maybe_u8 orelse 0`
             // is `a ?? (byte)0`, not a `byte?`/`int` mismatch. Parenthesized → safe anywhere.
@@ -1992,6 +1997,7 @@ internal sealed class CSharpBackend
     {
         LitInt or LitFloat or SizeOfExpr or EnumConstRef => true,
         Paren p => IsConstExpr(p.Inner),
+        ComptimeFold cf => cf.Resolved is { } r && IsConstExpr(r),
         Cast c => IsConstExpr(c.Operand),
         Unary u => u.Op is UnOp.Plus or UnOp.Neg or UnOp.BitNot or UnOp.LogNot && IsConstExpr(u.Operand),
         Binary { Op: not (BinOp.LogAnd or BinOp.LogOr) } b => IsConstExpr(b.Left) && IsConstExpr(b.Right),

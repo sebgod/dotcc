@@ -230,6 +230,18 @@ public sealed record VaArgGet(CExpr Ap, CType Target) : CExpr;
 /// explicit grouping (precedence-driven parens come later).</summary>
 public sealed record Paren(CExpr Inner) : CExpr;
 
+/// <summary>A deferred Zig <c>comptime EXPR</c> value (Milestone T). The inner expression
+/// must evaluate to a compile-time constant; the result is spliced into <see cref="Resolved"/>
+/// by a post-pass that runs AFTER every function body is lowered — so a <c>comptime fib(10)</c>
+/// can interpret its callee, whose body may be defined later or be a forward reference.
+/// The backend forwards transparently to <see cref="Resolved"/> (a <see cref="LitInt"/> /
+/// <see cref="LitFloat"/> / <see cref="LitBool"/> / aggregate literal). A mutable property —
+/// the node is shared by reference in the IR, so resolving it in place patches every use.</summary>
+public sealed record ComptimeFold(CExpr Inner) : CExpr
+{
+    public CExpr? Resolved { get; set; }
+}
+
 /// <summary>The null pointer constant (C23 <c>nullptr</c>). A typed node rather
 /// than a literal so the backend spells it per target (the C# backend: <c>null</c>).</summary>
 public sealed record NullPtr : CExpr;

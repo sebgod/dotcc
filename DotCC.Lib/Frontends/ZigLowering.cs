@@ -170,6 +170,12 @@ internal sealed partial class ZigLowering
     /// in pass 1) and an untyped var can infer from a fully-resolvable RHS.</summary>
     private readonly List<(string container, string name, Item? typeItem, Item rhs)> _pendingContainerVars = new();
 
+    /// <summary>Deferred <c>comptime EXPR</c> folds (Milestone T), collected as they are lowered and
+    /// resolved in a post-pass after pass 2 — when every function body is lowered, so a
+    /// <c>comptime fib(10)</c> can interpret its callee regardless of declaration order. Each node is
+    /// shared by reference in the IR; resolving it patches its <see cref="ComptimeFold.Resolved"/> in place.</summary>
+    private readonly List<ComptimeFold> _pendingComptimeFolds = new();
+
     /// <summary>The container whose <c>const</c> RHS is currently being re-lowered (Milestone R, part
     /// 6) — lets a bare (unqualified) identifier in that RHS resolve to a SIBLING container const. Null
     /// outside a container-const re-lower (so an unresolved bare ident still errors as before).</summary>
@@ -393,6 +399,17 @@ internal sealed partial class ZigLowering
             _currentContainer = container;
             LowerFnBody(sym, ps, body);
             _currentContainer = null;
+        }
+
+        // Pass 3 (Milestone T): resolve every deferred `comptime EXPR`. All function bodies are now
+        // lowered (in `_ir.Functions`), so a comptime call can interpret its callee. Each fold is
+        // evaluated by the shared comptime interpreter and patched in place with the spliced literal;
+        // a non-constant `comptime` value is a loud error.
+        foreach (var fold in _pendingComptimeFolds)
+        {
+            fold.Resolved = _ir.ResolveComptimeFold(fold.Inner)
+                ?? throw new IrUnsupportedException(
+                    "`comptime` expression did not evaluate to a compile-time constant value");
         }
     }
 
@@ -3030,6 +3047,17 @@ internal sealed partial class ZigLowering
                     throw new IrUnsupportedException("zig `try` requires an error-union operand");
                 }
                 return new ZigTry(inner) { Type = eu.Payload };
+            }
+            // `comptime EXPR` (Milestone T) — force compile-time evaluation of a value. The inner
+            // expression is lowered now, but wrapped in a deferred ComptimeFold and queued; it is
+            // evaluated + spliced after pass 2 (so a `comptime fib(10)` sees its callee's lowered
+            // body regardless of declaration order). The fold carries the inner expression's type.
+            case Zig.PreComptime p:
+            {
+                var inner = LowerExpr(p.Arg1);
+                var fold = new ComptimeFold(inner) { Type = inner.Type };
+                _pendingComptimeFolds.Add(fold);
+                return fold;
             }
 
             // `base.field` (Suffix '.' IDENT) — three meanings split here. When the base is a bare

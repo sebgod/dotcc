@@ -1213,6 +1213,21 @@ public sealed class ZigOracleTests
             "    _ = printf(\"all=%d write=%d\\n\", @as(c_int, buf[15]), @as(c_int, buf[0]));\n" +
             "    return buf[15] + buf[0] + 33;\n" +               // 7 + 2 + 33 = 42
             "}\n", 42, "all=7 write=2" },
+
+        // Milestone T (part 2): `comptime EXPR` forces compile-time evaluation and splices the
+        // result as a literal — arithmetic (`comptime (2 + 3) * 4` → 20), `@sizeOf` (8), and a
+        // relational used as a comptime-known condition (`comptime (7 > 3)` → true). Real zig 0.17
+        // computes the same; a=20, sz=8, r=28, exit 28.
+        new object[] { "comptime-expr",
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "pub fn main() u8 {\n" +
+            "    const a: u32 = comptime (2 + 3) * 4;\n" +        // 20
+            "    const sz: u32 = comptime @sizeOf(u64);\n" +      // 8
+            "    var r: u32 = a + sz;\n" +                        // 28
+            "    if (comptime (7 > 3)) { r += 0; }\n" +           // comptime-known true branch
+            "    _ = printf(\"a=%u sz=%u r=%u\\n\", a, sz, r);\n" +
+            "    return @intCast(r);\n" +                         // 28
+            "}\n", 28, "a=20 sz=8 r=28" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
