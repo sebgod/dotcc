@@ -139,6 +139,40 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Evaluates_a_recursive_comptime_function_call()
+    {
+        // Milestone T part 2b: `comptime fib(10)` interprets the recursive callee in the comptime
+        // interpreter (if/return + a call frame per recursion) and splices the result 55 as a
+        // literal — no fib call survives at the call site.
+        var cs = EmitZig(
+            "fn fib(n: u32) u32 { if (n < 2) return n; return fib(n - 1) + fib(n - 2); }\n" +
+            "pub fn main() u8 { const f: u32 = comptime fib(10); _ = f; return 0; }\n");
+        cs.ShouldContain("55u");
+    }
+
+    [Fact]
+    public void Evaluates_a_loop_based_comptime_function_call()
+    {
+        // A comptime function with a local `var`, a `while` loop, and mutation — the statement
+        // walker runs the loop and assignments, folding fact(5) to 120.
+        var cs = EmitZig(
+            "fn fact(n: u32) u32 { var r: u32 = 1; var i: u32 = 2; while (i <= n) { r = r * i; i = i + 1; } return r; }\n" +
+            "pub fn main() u8 { const f: u32 = comptime fact(5); _ = f; return 0; }\n");
+        cs.ShouldContain("120u");
+    }
+
+    [Fact]
+    public void Rejects_a_nonterminating_comptime_evaluation()
+    {
+        // The eval-step budget is the non-termination backstop (Zig's @setEvalBranchQuota): a
+        // comptime computation that blows past it is a loud error, never a hang.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "fn fib(n: u32) u32 { if (n < 2) return n; return fib(n - 1) + fib(n - 2); }\n" +
+            "pub fn main() u8 { const x: u32 = comptime fib(40); return @intCast(x); }\n"));
+        ex.Message.ShouldContain("budget");
+    }
+
+    [Fact]
     public void Lowers_if_and_while_statements()
     {
         // if/else + while lower to the C# forms, conditions wrapped in Cond.B for

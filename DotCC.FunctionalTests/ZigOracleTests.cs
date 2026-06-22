@@ -1228,6 +1228,20 @@ public sealed class ZigOracleTests
             "    _ = printf(\"a=%u sz=%u r=%u\\n\", a, sz, r);\n" +
             "    return @intCast(r);\n" +                         // 28
             "}\n", 28, "a=20 sz=8 r=28" },
+
+        // Milestone T (part 2b): `comptime fib(10)` / `comptime fact(5)` interpret the callee at
+        // compile time — recursion + a call frame for fib, a while-loop + local mutation for fact —
+        // and splice the results (55, 120) as literals. Real zig 0.17 computes the same; 55+120-133=42.
+        new object[] { "comptime-call",
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "fn fib(n: u32) u32 { if (n < 2) return n; return fib(n - 1) + fib(n - 2); }\n" +
+            "fn fact(n: u32) u32 { var r: u32 = 1; var i: u32 = 2; while (i <= n) { r = r * i; i = i + 1; } return r; }\n" +
+            "pub fn main() u8 {\n" +
+            "    const a: u32 = comptime fib(10);\n" +            // 55
+            "    const b: u32 = comptime fact(5);\n" +            // 120
+            "    _ = printf(\"fib=%u fact=%u\\n\", a, b);\n" +
+            "    return @intCast(a + b - 133);\n" +               // 55 + 120 - 133 = 42
+            "}\n", 42, "fib=55 fact=120" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
