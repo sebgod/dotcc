@@ -246,6 +246,80 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Unrolls_an_inline_for_into_per_iteration_blocks()
+    {
+        // Milestone T, part 3 — `inline for (lo..hi) |i|` UNROLLS at compile time: the body is
+        // replicated once per index, each copy binding the capture to that iteration's constant
+        // (`ulong i = 0UL;`, `ulong i__1 = 1UL;`, …). No runtime `for` header for this loop survives —
+        // the distinct, renamed sibling index locals are the unroll signature (a real loop has one `i`).
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var sum: u32 = 0;\n" +
+            "    inline for (0..3) |i| { sum += @intCast(i); }\n" +
+            "    return @intCast(sum + 39);\n}\n");
+        cs.ShouldContain("ulong i = 0UL;");
+        cs.ShouldContain("ulong i__1 = 1UL;");
+        cs.ShouldContain("ulong i__2 = 2UL;");
+    }
+
+    [Fact]
+    public void Runs_an_inline_for_at_comptime_to_fold_a_table()
+    {
+        // The same `inline for` runs INSIDE the comptime interpreter when the enclosing function is
+        // `comptime`-called: the interpreter walks the unrolled copies (each `const i = v` binds into
+        // its frame), fills the array, and the result splices to a `stackalloc` literal — proving the
+        // unrolled IR is uniform across the runtime and comptime paths (no `inline for`-specific
+        // interpreter case). No buildSquares() call survives at the use site.
+        var cs = EmitZig(
+            "fn buildSquares() [5]u32 {\n" +
+            "    var t: [5]u32 = undefined;\n" +
+            "    inline for (0..5) |i| { t[i] = @intCast(i * i); }\n" +
+            "    return t;\n}\n" +
+            "pub fn main() u8 { const sq = comptime buildSquares(); return @intCast(sq[4] - 14); }\n");
+        cs.ShouldContain("stackalloc uint[]{ 0u, 1u, 4u, 9u, 16u }");
+    }
+
+    [Fact]
+    public void Rejects_inline_on_a_while_loop()
+    {
+        // Only the counted range `for` is unrolled in V1; `inline while` is a clear deferred error
+        // (it needs a comptime mutable loop variable + condition re-eval between copies).
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var i: u8 = 0;\n" +
+            "    inline while (i < 3) { i = i + 1; }\n" +
+            "    return i + 39;\n}\n"));
+        ex.Message.ShouldContain("counted `for");
+    }
+
+    [Fact]
+    public void Rejects_break_inside_an_inline_for()
+    {
+        // A bare `break`/`continue` in an `inline for` body targets the loop, which unrolling removes —
+        // a clear deferred error, never a silent C# "break outside loop".
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var sum: u8 = 0;\n" +
+            "    inline for (0..3) |i| { sum += @intCast(i); if (sum > 0) break; }\n" +
+            "    return sum + 42;\n}\n"));
+        ex.Message.ShouldContain("inline for");
+    }
+
+    [Fact]
+    public void Rejects_non_constant_inline_for_bounds()
+    {
+        // The bounds must fold to a compile-time constant — a runtime variable bound is rejected
+        // (Zig requires `inline for` bounds to be comptime-known too).
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var n: usize = 3;\n" +
+            "    var sum: u32 = 0;\n" +
+            "    inline for (0..n) |i| { sum += @intCast(i); }\n" +
+            "    return @intCast(sum + 42);\n}\n"));
+        ex.Message.ShouldContain("compile-time-known");
+    }
+
+    [Fact]
     public void Lowers_if_and_while_statements()
     {
         // if/else + while lower to the C# forms, conditions wrapped in Cond.B for

@@ -229,6 +229,7 @@ symbols:
   - CallConv       # 151 optional callconv(...) between `)` and the fn return type (epsilon | callconv(Expr))
   - DeclMods       # 152 align/linksection modifier(s) between a typed decl's Type and `=` (non-empty)
   - 'comptime'     # 153 `comptime EXPR` value prefix — force compile-time evaluation (Milestone T)
+  - 'inline'       # 154 `inline for/while` — comptime loop UNROLLING (Milestone T, part 3)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -462,6 +463,14 @@ productions:
       # assume a loop target for `break :lbl` / `continue :lbl`.
       - { lhs: Stmt, rhs: [LoopStmt] }
       - { lhs: Stmt, rhs: [IDENT, ':', LoopStmt], action: labeledLoop }
+      # `inline for (lo..hi) |i| body` — a comptime-UNROLLED counted loop (Milestone T, part 3): the
+      # body is replicated once per iteration with `i` bound to a compile-time-constant index, so the
+      # loop disappears (no runtime `for`). Reuses the `LoopStmt` factor exactly like `labeledLoop` — a
+      # leading `'inline'` keyword wraps any loop form; the lowering (`LowerInlineLoop`) inspects the
+      # wrapped form and unrolls the range case (`inline while` / `inline for` over a slice are deferred,
+      # a clear error). `'inline'` is a distinct keyword token at statement position, so it can never
+      # begin an Expr/decl — conflict-free with the other Stmt forms.
+      - { lhs: Stmt, rhs: ['inline', LoopStmt], action: inlineLoop }
       - { lhs: Stmt, rhs: ['return', RhsExpr, ';'],         action: stmtReturn }
       - { lhs: Stmt, rhs: ['return', ';'],                   action: stmtReturnVoid }
       - { lhs: Stmt, rhs: [VarDecl] }
@@ -1020,6 +1029,7 @@ lexer:
     - { symbol: 'defer',    match: 'defer' }
     - { symbol: 'errdefer', match: 'errdefer' }
     - { symbol: 'comptime', match: 'comptime' }
+    - { symbol: 'inline',   match: 'inline' }
 
     # Multi-char operators (longest-match handles overlaps; listed first for clarity).
     - { symbol: '==', match: '==' }
