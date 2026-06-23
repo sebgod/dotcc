@@ -57,12 +57,24 @@ internal sealed partial class IrBuilder
     /// is the next increment).</summary>
     internal sealed record CtStruct(Dictionary<string, ComptimeValue> Fields, CType Type) : ComptimeValue;
 
+    /// <summary>A comptime fixed-array value (Milestone T — comptime aggregates / lookup tables) —
+    /// N element values, MUTABLE in place so a comptime <c>t[i] = v;</c> updates an element and a
+    /// later read sees it. <see cref="Element"/> is the element type, <see cref="Type"/> the array
+    /// <see cref="CType.Array"/>. Splices back as a <see cref="StackArray"/>. Still NO pointer
+    /// variant — the array is a flat by-value vector, the firewall holds.</summary>
+    internal sealed record CtArray(ComptimeValue[] Elems, CType Element, CType Type) : ComptimeValue;
+
     // The eval-step budget. Expression-only folding (Milestone T part 1) is bounded by
     // the tree size, so this is a safety net here; comptime calls / `inline` loops
     // (later parts) lean on it to reject a non-terminating comptime computation
     // (Zig's `@setEvalBranchQuota` exists for exactly this reason).
     private int _comptimeSteps;
     private const int ComptimeStepBudget = 4_000_000;
+
+    // The largest comptime array (element count) the interpreter will materialize — a backstop on
+    // a `var t: [N]T = undefined;` with an absurd N (the fill loop is step-budgeted, but the array
+    // allocation itself is not). Generous: a comptime lookup table is typically ≤ a few thousand.
+    private const long ComptimeArrayCap = 1 << 20;
 
     // The active comptime call frame: a locals/params environment keyed by Symbol IDENTITY
     // (Symbol is a reference type — the SAME instance is shared by every VarRef/LocalDecl that
@@ -132,8 +144,19 @@ internal sealed partial class IrBuilder
         CtFloat f => new LitFloat(FormatComptimeFloat(f.Value)) { Type = f.Type },
         CtBool b => new LitBool(b.Value) { Type = CType.Bool },
         CtStruct s => SpliceStruct(s),
-        _ => throw new IrUnsupportedException("comptime value cannot be spliced back (only int/float/bool/struct yet)"),
+        CtArray a => SpliceArray(a),
+        _ => throw new IrUnsupportedException("comptime value cannot be spliced back (int/float/bool/struct/array)"),
     };
+
+    /// <summary>Splice a comptime array value back as a <see cref="StackArray"/> — a dense element
+    /// list (each element recursively spliced). At a local <c>const</c> use site this lowers to a
+    /// <c>stackalloc</c>; the post-pass re-homes a global one into a pinned, program-lifetime store.</summary>
+    private CExpr SpliceArray(CtArray a)
+    {
+        var elems = new List<CExpr>(a.Elems.Length);
+        foreach (var e in a.Elems) { elems.Add(Splice(e)); }
+        return new StackArray(a.Element, elems) { Type = a.Type };
+    }
 
     /// <summary>Splice a comptime struct value back as a <see cref="StructInit"/> object initializer,
     /// emitting each field in DECLARED order (from the struct field table) with its declared type, so
@@ -178,6 +201,19 @@ internal sealed partial class IrBuilder
                 map[f.Name] = fv;
             }
             return new CtStruct(map, named);
+        }
+        if (u is CType.Array arr && arr.Count is int ac)
+        {
+            if (ac < 0 || ac > ComptimeArrayCap) { return null; }
+            var elems = new ComptimeValue[ac];
+            for (int k = 0; k < ac; k++)
+            {
+                // A fresh zero per element — array elements are independent (a struct element must
+                // not share one mutable CtStruct reference across slots).
+                if (ZeroValue(arr.Element) is not { } ev) { return null; }
+                elems[k] = ev;
+            }
+            return new CtArray(elems, arr.Element, arr);
         }
         return null;
     }
@@ -290,6 +326,31 @@ internal sealed partial class IrBuilder
                 return EvalComptime(mem.Base) is CtStruct ms && ms.Fields.TryGetValue(mem.Field, out var mv)
                     ? mv : null;
             }
+
+            // An array literal value (`.{…}` / `[N]T{…}` in a comptime body, or a return of one).
+            case StackArray sa:
+            {
+                var elems = new ComptimeValue[sa.Elems.Count];
+                for (int k = 0; k < sa.Elems.Count; k++)
+                {
+                    if (EvalComptime(sa.Elems[k]) is not { } ev) { return null; }
+                    elems[k] = RetypeTo(ev, sa.Element);
+                }
+                return new CtArray(elems, sa.Element, sa.Type);
+            }
+
+            // An array element read `t[i]` — the base is a comptime array, the index a comptime int.
+            case Index ix:
+            {
+                if (EvalComptime(ix.Base) is not CtArray arr || EvalComptime(ix.Idx) is not CtInt ixi) { return null; }
+                long n = (long)ixi.Value;
+                return n >= 0 && n < arr.Elems.Length ? arr.Elems[n] : null;   // OOB → not foldable
+            }
+
+            // A `[N]T` by-value return (Increment A's node) is transparent at comptime — the heap
+            // copy is a runtime concern; the comptime VALUE is just the source array.
+            case ArrayByValReturn abr:
+                return EvalComptime(abr.Source);
 
             case DefaultLit dl:
                 return ZeroValue(dl.Type);
@@ -605,8 +666,22 @@ internal sealed partial class IrBuilder
                 st.Fields[m.Field] = stored;
                 return stored;
 
+            // An array element — `t[i] = v` (mutates the frame's array value in place).
+            case Index ix when EvalComptime(ix.Base) is CtArray arr:
+                if (EvalComptime(ix.Idx) is not CtInt iidx) { return null; }
+                long ai = (long)iidx.Value;
+                if (ai < 0 || ai >= arr.Elems.Length) { throw new ComptimeAbort("comptime array index out of bounds"); }
+                if (a.CompoundOp is { } iop)
+                {
+                    if (CombineBin(iop, arr.Elems[ai], rhs) is not { } icomb) { return null; }
+                    rhs = icomb;
+                }
+                var istored = RetypeTo(rhs, arr.Element);
+                arr.Elems[ai] = istored;
+                return istored;
+
             default:
-                throw new ComptimeAbort("comptime assignment target must be a local variable or struct field");
+                throw new ComptimeAbort("comptime assignment target must be a local variable, struct field, or array element");
         }
     }
 
@@ -636,6 +711,45 @@ internal sealed partial class IrBuilder
                         : throw new ComptimeAbort("non-constant comptime local initializer");
                 }
                 break;
+
+            // A `[N]T` array local — `var t: [N]T = undefined;` (zero-filled) or a brace init. Bound
+            // to a comptime array value the body then fills via `t[i] = …`. The element count is
+            // capped so an absurd `[1<<30]T` can't blow up the interpreter (the loop that fills it is
+            // step-budgeted, but the allocation itself is not).
+            case ArrayDecl ad:
+            {
+                ComptimeValue[] elems;
+                if (ad.Inits is { } inits)
+                {
+                    elems = new ComptimeValue[inits.Count];
+                    for (int k = 0; k < inits.Count; k++)
+                    {
+                        elems[k] = EvalComptime(inits[k]) is { } ev ? RetypeTo(ev, ad.Element)
+                            : throw new ComptimeAbort("non-constant comptime array initializer");
+                    }
+                }
+                else
+                {
+                    if (ad.CountExpr is null || EvalComptime(ad.CountExpr) is not CtInt cn)
+                    {
+                        throw new ComptimeAbort("comptime array declaration needs a constant size");
+                    }
+                    long n = (long)cn.Value;
+                    if (n < 0 || n > ComptimeArrayCap)
+                    {
+                        throw new IrUnsupportedException(
+                            $"comptime array of {n} elements exceeds the interpreter cap ({ComptimeArrayCap})");
+                    }
+                    elems = new ComptimeValue[n];
+                    for (int k = 0; k < n; k++)
+                    {
+                        elems[k] = ZeroValue(ad.Element)
+                            ?? throw new ComptimeAbort("comptime array element type has no compile-time zero");
+                    }
+                }
+                _comptimeFrame![ad.Sym] = new CtArray(elems, ad.Element, ad.Sym.Type);
+                break;
+            }
 
             case ExprStmt e:
                 EvalComptime(e.Expr);   // evaluated for its effect on the frame (assignments)

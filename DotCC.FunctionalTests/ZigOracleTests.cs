@@ -1281,6 +1281,24 @@ public sealed class ZigOracleTests
             "    _ = printf(\"g=%u l=%u\\n\", g.sum, l.sum);\n" +
             "    return @intCast(g.sum + l.sum + 11);\n" +
             "}\n", 42, "g=21 l=10" },
+
+        // Comptime aggregate — a comptime function returning an ARRAY (a lookup table). The
+        // interpreter zero-fills `undefined`, runs the fill loop (`t[i] = i*i`), and splices the
+        // table as a `stackalloc u32[]{ 0, 1, 4, 9, 16 }` at the LOCAL use site (the round-trippable
+        // form). The squares() function returns an array by value soundly (the array-return
+        // increment). sum(0,1,4,9,16) = 30, + 12 = 42.
+        new object[] { "comptime_table",
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "fn squares() [5]u32 {\n" +
+            "    var t: [5]u32 = undefined;\n" +
+            "    var i: usize = 0;\n" +
+            "    while (i < 5) { t[i] = @intCast(i * i); i = i + 1; }\n" +
+            "    return t;\n}\n" +
+            "pub fn main() u8 {\n" +
+            "    const tbl = comptime squares();\n" +
+            "    _ = printf(\"%u %u %u %u %u\\n\", tbl[0], tbl[1], tbl[2], tbl[3], tbl[4]);\n" +
+            "    return @intCast(tbl[0] + tbl[1] + tbl[2] + tbl[3] + tbl[4] + 12);\n" +
+            "}\n", 42, "0 1 4 9 16" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

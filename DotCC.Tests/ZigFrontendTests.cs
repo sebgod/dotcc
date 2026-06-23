@@ -213,6 +213,39 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Evaluates_a_comptime_function_returning_an_array_table()
+    {
+        // Milestone T — comptime aggregates: a comptime function returning an ARRAY (a lookup table).
+        // The interpreter zero-fills `var t: [N]u32 = undefined`, runs the fill loop with `t[i] = …`,
+        // and splices the result as a `stackalloc T[]{ … }` at the local use site — no squares() call
+        // survives there. (squares() itself returns an array by value, which is sound — see the
+        // array-by-value-return increment.) Works for both an inferred and an annotated local type.
+        var cs = EmitZig(
+            "fn squares() [4]u32 {\n" +
+            "    var t: [4]u32 = undefined;\n" +
+            "    var i: usize = 0;\n" +
+            "    while (i < 4) { t[i] = @intCast(i * i); i = i + 1; }\n" +
+            "    return t;\n}\n" +
+            "pub fn main() u8 { const tbl = comptime squares(); return @intCast(tbl[3]); }\n");
+        cs.ShouldContain("stackalloc uint[]{ 0u, 1u, 4u, 9u }");
+    }
+
+    [Fact]
+    public void Rejects_a_comptime_array_at_a_global_const()
+    {
+        // A comptime array at a CONTAINER `const` isn't round-trippable (real zig rejects `comptime`
+        // on an already-comptime container const) and the global path has no pinned re-home for the
+        // resolved StackArray, so it's a clear error — never a silent `static T* = stackalloc …`
+        // miscompile. A LOCAL `const x = comptime f();` works; a runtime `const X = f();` (no keyword)
+        // works via the sound array-by-value return.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "fn squares() [4]u32 { var t: [4]u32 = undefined; var i: usize = 0; while (i < 4) { t[i] = @intCast(i * i); i = i + 1; } return t; }\n" +
+            "const TBL = comptime squares();\n" +
+            "pub fn main() u8 { return @intCast(TBL[3]); }\n"));
+        ex.Message.ShouldContain("comptime array at a global");
+    }
+
+    [Fact]
     public void Lowers_if_and_while_statements()
     {
         // if/else + while lower to the C# forms, conditions wrapped in Cond.B for

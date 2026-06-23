@@ -475,6 +475,21 @@ internal sealed partial class ZigLowering
             return;
         }
         var init = LowerExprSink(rhsItem, declared);
+        // A comptime ARRAY at a global `const` (`const TBL = comptime buildTable();`) would resolve
+        // (in pass 3) to a StackArray, but by then this global is already a scalar GlobalVar — the
+        // StackArray would emit as an invalid `static T* TBL = stackalloc …` field initializer. The
+        // form isn't round-trippable anyway (real zig rejects `comptime` on a container const, which
+        // is already comptime), so reject it clearly rather than miscompile. A local
+        // `const x = comptime f();` works, and a runtime-initialized global `const x = f();` (no
+        // `comptime`) works via the sound array-by-value return. (A scalar/struct comptime global
+        // splices fine — only the array shape needs the pinned re-home this path doesn't do.)
+        if (init is ComptimeFold cf && (declared ?? cf.Type).Unqualified is CType.Array)
+        {
+            throw new IrUnsupportedException(
+                $"a comptime array at a global `const` '{Tok(nameTok)}' is not supported — use a local "
+                + "`const x = comptime f();`, or drop the `comptime` keyword for a runtime-initialized "
+                + "global `const x = f();` (real zig rejects `comptime` on a container const anyway)");
+        }
         // An array literal (`.{…}` / `[N]T{…}`) lowers to a StackArray — a `stackalloc`, invalid and
         // dangling as a static field initializer. Re-home it in a pinned, rooted, program-lifetime
         // backing store exposed as a stable `T*` (the same store a C file-scope array uses).
@@ -1868,7 +1883,19 @@ internal sealed partial class ZigLowering
                 var count = new LitInt(n.ToString(CultureInfo.InvariantCulture), n) { Type = CType.Int };
                 return new ArrayDecl(sym, arr.Element, count, null);   // C# zero-fills the stackalloc
             }
-            if (LowerExprSink(initExpr, arr) is not StackArray sa)
+            var arrInit = LowerExprSink(initExpr, arr);
+            // A `comptime EXPR` initializer is a ComptimeFold until pass 3 resolves it to a
+            // StackArray (e.g. `const t: [N]T = comptime buildTable();`). Route it through the
+            // ordinary DeclStmt path — the symbol is array-typed (renders `T*`), and the backend
+            // hoists the resolved StackArray into `T* t = stackalloc T[]{…}` exactly as the
+            // inferred-type form does. (A sentinel `[N:0]T` would need the +1 stackalloc slot, which
+            // this path can't add, so a comptime sentinel array stays a clear error below.)
+            if (arrInit is ComptimeFold && !sentinel)
+            {
+                var fsym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = arr });
+                return new DeclStmt(new List<LocalDecl> { new(fsym, arrInit) });
+            }
+            if (arrInit is not StackArray sa)
             {
                 throw new IrUnsupportedException(
                     $"a `[N]T` array local '{Tok(nameTok)}' must be initialized with an array literal (`.{{…}}` / `[N]T{{…}}`) or `undefined`");
