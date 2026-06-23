@@ -98,7 +98,7 @@ internal sealed partial class ZigLowering
         // unwrapped). A bare `a.alloc(…)` without `try`/`catch` would leave the error
         // union unbound, so the `try` is the only shape that binds a usable slice.
         if (init is not ZigTry { Inner: AllocCall ac }) { return false; }
-        if (ac.Receiver is not null) { return false; }   // indirect/FBA path stays on its allocator
+        if (ac.Receiver is not null || ac.FbaCtx is not null) { return false; }   // indirect / FBA-devirt stays on its allocator
         // 1-byte char family only (u8 → unsigned char, i8 → signed char) — the byte
         // count IS the element count, so no division / clean-multiple question.
         if (ac.Element.Unqualified is not CType.Prim { Bytes: 1, Integer: true, Name: "char" or "signed char" or "unsigned char" }) { return false; }
@@ -169,7 +169,7 @@ internal sealed partial class ZigLowering
         Member { Field: "Len", Base: var mb } when Unparen(mb) is VarRef mv && mv.Sym == sym => true,
         Member m => SliceSafeExpr(m.Base, sym),
         // a.free(s): the candidate as the devirtualized free's slice arg — allowed.
-        FreeCall { Receiver: null, SliceExpr: var fe } when Unparen(fe) is VarRef fv && fv.Sym == sym => true,
+        FreeCall { Receiver: null, FbaCtx: null, SliceExpr: var fe } when Unparen(fe) is VarRef fv && fv.Sym == sym => true,
         FreeCall fc => SliceSafeExpr(fc.Receiver, sym) && SliceSafeExpr(fc.SliceExpr, sym),
         AllocCall ac => SliceSafeExpr(ac.Receiver, sym) && SliceSafeExpr(ac.Count, sym),
         ZigTry zt => SliceSafeExpr(zt.Inner, sym),
@@ -222,7 +222,7 @@ internal sealed partial class ZigLowering
     /// <summary>True when <paramref name="e"/> is exactly the devirtualized
     /// <c>a.free(sym)</c> (so the statement can be dropped on promotion).</summary>
     private static bool IsFreeOfSlice(CExpr e, Symbol sym) =>
-        Unparen(e) is FreeCall { Receiver: null, SliceExpr: var fe } && Unparen(fe) is VarRef v && v.Sym == sym;
+        Unparen(e) is FreeCall { Receiver: null, FbaCtx: null, SliceExpr: var fe } && Unparen(fe) is VarRef v && v.Sym == sym;
 
     private static int CountSliceFrees(CStmt s, Symbol sym)
     {
@@ -289,7 +289,7 @@ internal sealed partial class ZigLowering
                 return b with { Stmts = b.Stmts.Select(x => RewriteSliceStmt(x, promote)).Where(x => x is not null).Select(x => x!).ToList() };
             case Seq q:
                 return q with { Stmts = q.Stmts.Select(x => RewriteSliceStmt(x, promote)).Where(x => x is not null).Select(x => x!).ToList() };
-            case ExprStmt es when Unparen(es.Expr) is FreeCall { Receiver: null, SliceExpr: var fe }
+            case ExprStmt es when Unparen(es.Expr) is FreeCall { Receiver: null, FbaCtx: null, SliceExpr: var fe }
                                   && Unparen(fe) is VarRef v && promote.ContainsKey(v.Sym):
                 return null;   // drop the free of a promoted slice
             case DeclStmt d when d.Decls.Count == 1 && promote.TryGetValue(d.Decls[0].Sym, out var sp):

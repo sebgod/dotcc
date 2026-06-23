@@ -1599,10 +1599,11 @@ public sealed class ZigFrontendTests
         cs.ShouldContain("AllocCHeap<byte>(4");
     }
 
-    /// <summary>An INDIRECT allocator (a FixedBufferAllocator's vtable dispatch, <c>Receiver != null</c>)
-    /// is left on its allocator — only the devirtualized C-heap default is promoted.</summary>
+    /// <summary>A FixedBufferAllocator slice — even FBA-site-DEVIRTUALIZED (Milestone U,
+    /// <c>FbaCtx != null</c>) — is left on its allocator: the stack-slice peephole promotes only the
+    /// devirtualized C-heap default (<c>Receiver == null &amp;&amp; FbaCtx == null</c>).</summary>
     [Fact]
-    public void Keeps_an_indirect_allocator_slice_unpromoted()
+    public void Keeps_a_devirtualized_fba_slice_unpromoted()
     {
         var cs = EmitZig(
             "const std = @import(\"std\");\n" +
@@ -1616,8 +1617,8 @@ public sealed class ZigFrontendTests
             "    return buf[0];\n" +
             "}\n" +
             "pub fn main() u8 { return run() catch 1; }\n");
-        cs.ShouldNotContain("__slicebuf");
-        cs.ShouldContain(".Alloc<byte>(4");
+        cs.ShouldNotContain("__slicebuf");                 // NOT promoted (FBA-devirt stays on its allocator)
+        cs.ShouldContain("ZigAlloc.AllocFba<byte>(&fba, 4");   // FBA-site devirt (no vtable)
     }
 
     [Fact]
@@ -1686,10 +1687,12 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Lowers_a_FixedBufferAllocator_through_the_indirect_vtable()
+    public void Devirtualizes_a_fixed_buffer_allocator_site()
     {
-        // A FixedBufferAllocator (the 2nd allocator) over a stack buffer; `fba.allocator()`
-        // yields a runtime Allocator (opaque) → `.alloc` dispatches INDIRECTLY through the vtable.
+        // `const a = fba.allocator();` over a known FixedBufferAllocator local — DEVIRTUALIZED
+        // (Milestone U): `a` carries no runtime decl, and `a.alloc(…)` becomes a direct
+        // `ZigAlloc.AllocFba<T>(&fba, …)` (no vtable load). The `&fba` is the real local (an lvalue),
+        // not a per-call copy, so the bump cursor is shared.
         var cs = EmitZig(
             "const std = @import(\"std\");\n" +
             "fn run() !u8 {\n" +
@@ -1702,11 +1705,33 @@ public sealed class ZigFrontendTests
             "}\n" +
             "pub fn main() u8 { return run() catch 1; }\n");
         cs.ShouldContain("FixedBufferAllocator.Init((byte*)");   // init over the stack buffer
-        cs.ShouldContain("ZigAlloc.FbaAllocator(&fba)");          // the allocator() fat pointer
-        cs.ShouldContain("Allocator a =");                        // a runtime Allocator local
-        cs.ShouldContain(".Alloc<byte>(3");                       // INDIRECT vtable dispatch
-        cs.ShouldNotContain("ZigAlloc.AllocCHeap<byte>(");        // NOT devirt'd (the call site; the
-                                                                  // runtime's <T> definition doesn't match)
+        cs.ShouldContain("ZigAlloc.AllocFba<byte>(&fba, 3");      // DEVIRTUALIZED FBA bump (no vtable)
+        cs.ShouldNotContain("Allocator a =");                     // the FBA-site binding emits no decl
+        cs.ShouldNotContain(".Alloc<byte>(");                     // NOT the indirect vtable dispatch
+    }
+
+    [Fact]
+    public void Lowers_a_passed_fba_allocator_through_the_indirect_vtable()
+    {
+        // When `fba.allocator()` is PASSED to an opaque `std.mem.Allocator` parameter (not bound to a
+        // provable const), it materializes `ZigAlloc.FbaAllocator(&fba)` at the call and the callee
+        // dispatches INDIRECTLY through the vtable — the FBA-site devirt applies only to a bound const.
+        var cs = EmitZig(
+            "const std = @import(\"std\");\n" +
+            "fn fill(a: std.mem.Allocator) !u8 {\n" +
+            "    const s = try a.alloc(u8, 3);\n" +
+            "    s[0] = 42;\n" +
+            "    return s[0];\n" +
+            "}\n" +
+            "fn run() !u8 {\n" +
+            "    var buffer: [64]u8 = undefined;\n" +
+            "    var fba = std.heap.FixedBufferAllocator.init(&buffer);\n" +
+            "    return fill(fba.allocator());\n" +
+            "}\n" +
+            "pub fn main() u8 { return run() catch 1; }\n");
+        cs.ShouldContain("ZigAlloc.FbaAllocator(&fba)");   // the allocator() fat pointer, materialized at the call
+        cs.ShouldContain("a.Alloc<byte>(3");                // INDIRECT vtable dispatch inside the callee
+        cs.ShouldNotContain("ZigAlloc.AllocFba<");          // NOT devirt'd (the allocator is opaque to `fill`)
     }
 
     [Fact]

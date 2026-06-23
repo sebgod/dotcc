@@ -260,6 +260,33 @@ public static unsafe class ZigAlloc
     public static Allocator FbaAllocator(FixedBufferAllocator* self)
         => new() { Ctx = self, Vtable = new AllocatorVTable { AllocFn = &FbaAlloc, FreeFn = &FbaFree } };
 
+    /// <summary>The <b>FBA-site-devirtualized</b> <c>a.alloc(T, n)</c> (Milestone U) — a direct FBA
+    /// bump with no vtable load, emitted when the lowering proves <c>a</c> is a particular
+    /// <c>fba.allocator()</c> result. The <c>&amp;fba</c> context is passed explicitly.</summary>
+    public static ErrUnion<Slice<T>> AllocFba<T>(FixedBufferAllocator* self, ulong n, ushort oom) where T : unmanaged
+    {
+        nuint bytes = (nuint)n * (nuint)sizeof(T);
+        byte* p = FbaAlloc(self, bytes);
+        return p == null
+            ? ErrUnion<Slice<T>>.Err(oom)
+            : ErrUnion<Slice<T>>.Ok(new Slice<T>((T*)p, n));
+    }
+
+    /// <summary>The FBA-site-devirtualized <c>a.free(slice)</c> — a no-op (an FBA reclaims only by
+    /// reset), mirroring <see cref="FbaFree"/>.</summary>
+    public static void FreeFba<T>(FixedBufferAllocator* self, Slice<T> s) where T : unmanaged { }
+
+    /// <summary>The FBA-site-devirtualized <c>a.create(T)</c> (Milestone U) — a direct FBA bump of
+    /// <c>sizeof(T)</c> bytes; the address rides as a <c>nuint</c> (see <see cref="Allocator.Create{T}"/>).</summary>
+    public static ErrUnion<nuint> CreateFba<T>(FixedBufferAllocator* self, ushort oom) where T : unmanaged
+    {
+        byte* p = FbaAlloc(self, (nuint)sizeof(T));
+        return p == null ? ErrUnion<nuint>.Err(oom) : ErrUnion<nuint>.Ok((nuint)p);
+    }
+
+    /// <summary>The FBA-site-devirtualized <c>a.destroy(p)</c> — a no-op, mirroring <see cref="FbaFree"/>.</summary>
+    public static void DestroyFba<T>(FixedBufferAllocator* self, T* p) where T : unmanaged { }
+
     // ---- ArenaAllocator (the third allocator, Milestone U) ---------------
 
     /// <summary>The 16-byte-aligned distance from a chunk's start to its usable space.

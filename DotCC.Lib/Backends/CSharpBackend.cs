@@ -1432,6 +1432,8 @@ internal sealed class CSharpBackend
             {
                 var elem = Cs(ac.Element.Unqualified);
                 var n = Coerced(ac.Count, CType.ULong);
+                if (ac.FbaCtx is not null)   // FBA-site devirt → direct FBA bump over &fba (Milestone U)
+                    return ($"ZigAlloc.AllocFba<{elem}>({Expr(ac.FbaCtx)}, {n}, {ac.OomCode})", PPostfix);
                 return ac.Receiver is null
                     ? ($"ZigAlloc.AllocCHeap<{elem}>({n}, {ac.OomCode})", PPostfix)
                     : ($"{Sub(ac.Receiver, PPostfix)}.Alloc<{elem}>({n}, {ac.OomCode})", PPostfix);
@@ -1441,6 +1443,8 @@ internal sealed class CSharpBackend
             case FreeCall fc:
             {
                 var elem = Cs(fc.Element.Unqualified);
+                if (fc.FbaCtx is not null)   // FBA-site devirt (Milestone U)
+                    return ($"ZigAlloc.FreeFba<{elem}>({Expr(fc.FbaCtx)}, {Expr(fc.SliceExpr)})", PPostfix);
                 return fc.Receiver is null
                     ? ($"ZigAlloc.FreeCHeap<{elem}>({Expr(fc.SliceExpr)})", PPostfix)
                     : ($"{Sub(fc.Receiver, PPostfix)}.Free<{elem}>({Expr(fc.SliceExpr)})", PPostfix);
@@ -1452,6 +1456,8 @@ internal sealed class CSharpBackend
             case CreateCall cc:
             {
                 var elem = Cs(cc.Element.Unqualified);
+                if (cc.FbaCtx is not null)   // FBA-site devirt (Milestone U)
+                    return ($"ZigAlloc.CreateFba<{elem}>({Expr(cc.FbaCtx)}, {cc.OomCode})", PPostfix);
                 return cc.Receiver is null
                     ? ($"ZigAlloc.CreateCHeap<{elem}>({cc.OomCode})", PPostfix)
                     : ($"{Sub(cc.Receiver, PPostfix)}.Create<{elem}>({cc.OomCode})", PPostfix);
@@ -1461,6 +1467,8 @@ internal sealed class CSharpBackend
             case DestroyCall dc:
             {
                 var elem = Cs(dc.Element.Unqualified);
+                if (dc.FbaCtx is not null)   // FBA-site devirt (Milestone U)
+                    return ($"ZigAlloc.DestroyFba<{elem}>({Expr(dc.FbaCtx)}, {Expr(dc.Ptr)})", PPostfix);
                 return dc.Receiver is null
                     ? ($"ZigAlloc.DestroyCHeap<{elem}>({Expr(dc.Ptr)})", PPostfix)
                     : ($"{Sub(dc.Receiver, PPostfix)}.Destroy<{elem}>({Expr(dc.Ptr)})", PPostfix);
