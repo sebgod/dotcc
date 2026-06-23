@@ -1334,6 +1334,21 @@ public sealed class ZigOracleTests
             "    _ = printf(\"sz=%zu al=%zu ob=%zu oc=%zu\\n\", sz, al, ob, oc);\n" +
             "    return @intCast(sz + al + ob + oc + 14);\n" +
             "}\n", 42, "sz=12 al=4 ob=4 oc=8" },
+
+        // `arr.len` on a fixed `[N]T` array — the comptime-known count N (folded to a literal, since a
+        // fixed array lowers to a pointer with no runtime length field). arr=[10,20,30,40] → len 4,
+        // sum 100; 4 + 100 - 62 = 42.
+        new object[] { "array_len",
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "pub fn main() u8 {\n" +
+            "    const arr = [_]u32{ 10, 20, 30, 40 };\n" +
+            "    const n: usize = arr.len;\n" +
+            "    var sum: u32 = 0;\n" +
+            "    var i: usize = 0;\n" +
+            "    while (i < arr.len) : (i = i + 1) { sum += arr[i]; }\n" +
+            "    _ = printf(\"len=%zu sum=%u\\n\", n, sum);\n" +
+            "    return @intCast(arr.len + sum - 62);\n" +
+            "}\n", 42, "len=4 sum=100" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

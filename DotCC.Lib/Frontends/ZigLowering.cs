@@ -3282,6 +3282,22 @@ internal sealed partial class ZigLowering
                         _ => throw new IrUnsupportedException($"slice has no field '{fieldName}' (only .len / .ptr)"),
                     };
                 }
+                // Fixed-array `.len` — a `[N]T`'s length is the comptime-known element count N
+                // (Zig). The array lowered to a pointer (no runtime length field), so fold to a
+                // literal. A fixed array has no `.ptr` (that's a slice / many-item-pointer field —
+                // take `&arr` for a pointer); reject any other field clearly.
+                if (structExpr.Type.Unqualified is CType.Array arrTy)
+                {
+                    if (fieldName != "len")
+                    {
+                        throw new IrUnsupportedException($"array has no field '{fieldName}' (only .len)");
+                    }
+                    if (arrTy.Count is not int arrLen)
+                    {
+                        throw new IrUnsupportedException("array `.len` requires a compile-time-known length");
+                    }
+                    return new LitInt(arrLen.ToString(System.Globalization.CultureInfo.InvariantCulture), arrLen) { Type = CType.ULong };
+                }
                 // Tagged-union payload access `u.variant` → `u.__payload.variant` (unchecked,
                 // like Zig's release-mode field access; the tag isn't a user-facing field).
                 if (TryContainerName(structExpr.Type, out var cname)

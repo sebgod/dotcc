@@ -351,6 +351,19 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Folds_fixed_array_len_to_its_count()
+    {
+        // `arr.len` on a fixed `[N]T` array is the comptime-known count N (Zig), folded to a literal —
+        // the array lowered to a pointer (no runtime length field, unlike a slice's `.Len`).
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var arr: [7]u32 = undefined;\n" +
+            "    arr[0] = 0;\n" +
+            "    return @intCast(arr.len + 35);\n}\n");
+        cs.ShouldContain("7UL");
+    }
+
+    [Fact]
     public void Lowers_if_and_while_statements()
     {
         // if/else + while lower to the C# forms, conditions wrapped in Cond.B for
