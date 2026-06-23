@@ -3296,6 +3296,14 @@ internal sealed partial class ZigLowering
             }
             test = new Member(lhsRef, "IsErr", false) { Type = CType.Bool };
             payload = new Member(lhsRef, "Value", false) { Type = eu.Payload };
+            // A `create`-style error-union-over-pointer (`Error!*T`, Milestone U) carries its payload
+            // as a `nuint` (a pointer can't be an `ErrUnion<T>` generic arg), so `.Value` is a `nuint`;
+            // cast it back to the `T*` the payload names. Mirrors the `try` lowering (PreTry above);
+            // `create` is the only producer of a pointer-payload union, so the cast is exactly correct.
+            if (eu.Payload.Unqualified is CType.Pointer)
+            {
+                payload = new Cast(eu.Payload, payload) { Type = eu.Payload };
+            }
         }
         else if (ct is CType.Optional opt)
         {

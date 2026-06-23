@@ -3343,4 +3343,91 @@ public sealed class ZigFrontendTests
             "}\n"));
         ex.Message.ShouldContain("side effects");
     }
+
+    // ---- Milestone V: C↔Zig shared-heap interop -----------------------------
+
+    /// <summary>Lower a MIXED .c + .zig translation-unit set into one C# program, like a real
+    /// dotcc mixed compile (C group first, then the Zig group, sharing the name legalizer).</summary>
+    private static string EmitMixed(string cBody, string zigBody)
+    {
+        var stem = Guid.NewGuid().ToString("N");
+        var cPath = Path.Combine(Path.GetTempPath(), $"dotcc-mixed-{stem}.c");
+        var zigPath = Path.Combine(Path.GetTempPath(), $"dotcc-mixed-{stem}.zig");
+        File.WriteAllText(cPath, cBody);
+        File.WriteAllText(zigPath, zigBody);
+        try { return Compiler.EmitCSharp(new[] { cPath, zigPath }); }
+        finally { File.Delete(cPath); File.Delete(zigPath); }
+    }
+
+    [Fact]
+    public void Shares_the_c_heap_across_the_c_zig_seam()
+    {
+        // Zig allocates through std.heap.c_allocator (the C malloc/free heap) and a C function frees
+        // it across the seam: the c_allocator default DEVIRTUALIZES to a direct Libc.malloc, the C
+        // function is emitted in the same program, and the cross-language call binds by bare name.
+        var cs = EmitMixed(
+            "void take_and_free(int *p) { free(p); }\n",
+            "const std = @import(\"std\");\n" +
+            "extern fn take_and_free(p: [*c]c_int) void;\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = std.heap.c_allocator;\n" +
+            "    const s = a.alloc(c_int, 4) catch return 1;\n" +
+            "    s[0] = 42;\n" +
+            "    const r: u8 = @intCast(s[0]);\n" +
+            "    take_and_free(s.ptr);\n" +
+            "    return r;\n" +
+            "}\n");
+        cs.ShouldContain("ZigAlloc.AllocCHeap<int>");   // c_allocator devirtualizes to the direct C heap
+        cs.ShouldContain("take_and_free");              // the C function is in the same program
+    }
+
+    [Fact]
+    public void Casts_a_create_catch_return_pointer_payload_to_the_element_pointer()
+    {
+        // `a.create(T) catch return X` carries the address as a nuint (a pointer can't be an
+        // ErrUnion<T> generic arg); the catch-return unwrap must cast `.Value` back to `T*`, exactly
+        // as the `try` path does. Regression pin for the Milestone V fix (was emitting a bare nuint →
+        // CS0266). Mixed so the created object is read by C across the seam.
+        var cs = EmitMixed(
+            "int read_int(int *p) { return *p; }\n",
+            "const std = @import(\"std\");\n" +
+            "extern fn read_int(p: *c_int) c_int;\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = std.heap.c_allocator;\n" +
+            "    const p = a.create(c_int) catch return 1;\n" +
+            "    p.* = 30;\n" +
+            "    const v = read_int(p);\n" +
+            "    a.destroy(p);\n" +
+            "    return @intCast(v + 12);\n" +
+            "}\n");
+        cs.ShouldContain("ZigAlloc.CreateCHeap<int>");   // create devirtualizes to the direct C heap
+        cs.ShouldContain("(int*)");                      // the nuint payload is cast back to int*
+    }
+
+    [Fact]
+    public void Passes_a_c_allocator_to_an_opaque_allocator_parameter()
+    {
+        // A Zig fn takes an opaque std.mem.Allocator param (→ indirect dispatch through the vtable);
+        // main passes the c_allocator default, which materializes as ZigAlloc.CHeap(). The buffer it
+        // allocates then crosses to a C function — proving the "pass the correct allocator" path.
+        var cs = EmitMixed(
+            "int sum_ints(int *p, int n) { int s = 0; for (int i = 0; i < n; i++) s += p[i]; return s; }\n",
+            "const std = @import(\"std\");\n" +
+            "extern fn sum_ints(p: [*c]c_int, n: c_int) c_int;\n" +
+            "fn build(a: std.mem.Allocator, n: usize) ![]c_int {\n" +
+            "    const s = try a.alloc(c_int, n);\n" +
+            "    var i: usize = 0;\n" +
+            "    while (i < n) : (i = i + 1) { s[i] = @intCast(i + 1); }\n" +
+            "    return s;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = std.heap.c_allocator;\n" +
+            "    const s = build(a, 8) catch return 1;\n" +
+            "    const total = sum_ints(s.ptr, 8);\n" +
+            "    a.free(s);\n" +
+            "    return @intCast(total + 6);\n" +
+            "}\n");
+        cs.ShouldContain("ZigAlloc.CHeap()");   // the default materializes for the opaque param
+        cs.ShouldContain("sum_ints");
+    }
 }
