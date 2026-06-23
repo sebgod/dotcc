@@ -1262,6 +1262,25 @@ public sealed class ZigOracleTests
             "    const s: u32 = a[1] + a[2] + a[3] + b[1] + b[2] + b[3] + 14;\n" +
             "    return @intCast(s);\n" +
             "}\n", 42, "a3=9 b3=9" },
+
+        // Comptime aggregate — a comptime function returning a STRUCT by value (Milestone T). The
+        // interpreter zero-fills `undefined`, runs the field stores + arithmetic, and splices the
+        // result as a `new V { … }` initializer. Exercises passing args into the comptime call. Both
+        // uses are LOCAL `const = comptime …` — the round-trippable form (real zig rejects `comptime`
+        // on a container const as "already comptime"). G.sum = 21, L.sum = 10, +11 = 42.
+        new object[] { "comptime_struct",
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "const V = struct { a: u32, b: u32, sum: u32 };\n" +
+            "fn mk(x: u32, y: u32) V {\n" +
+            "    var v: V = undefined;\n" +
+            "    v.a = x; v.b = y; v.sum = v.a + v.b;\n" +
+            "    return v;\n}\n" +
+            "pub fn main() u8 {\n" +
+            "    const g = comptime mk(10, 11);\n" +
+            "    const l = comptime mk(4, 6);\n" +
+            "    _ = printf(\"g=%u l=%u\\n\", g.sum, l.sum);\n" +
+            "    return @intCast(g.sum + l.sum + 11);\n" +
+            "}\n", 42, "g=21 l=10" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

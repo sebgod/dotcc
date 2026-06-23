@@ -48,6 +48,15 @@ internal sealed partial class IrBuilder
     /// (0/1), Zig as a <c>bool</c>.</summary>
     internal sealed record CtBool(bool Value) : ComptimeValue;
 
+    /// <summary>A comptime struct value (Milestone T — comptime aggregates) — a field-name → value
+    /// map, MUTABLE in place so a comptime <c>c.field = v;</c> updates it and a later read sees the
+    /// store. <see cref="Type"/> is the struct's <see cref="CType.Named"/>, which drives the
+    /// splice-back field order/types (<see cref="SpliceStruct"/>) and the zero-fill of an
+    /// <c>undefined</c>-initialized struct (<see cref="ZeroValue"/>). Still NO pointer variant — a
+    /// struct value is a flat by-value record, the firewall holds (an array sibling, <c>CtArray</c>,
+    /// is the next increment).</summary>
+    internal sealed record CtStruct(Dictionary<string, ComptimeValue> Fields, CType Type) : ComptimeValue;
+
     // The eval-step budget. Expression-only folding (Milestone T part 1) is bounded by
     // the tree size, so this is a safety net here; comptime calls / `inline` loops
     // (later parts) lean on it to reject a non-terminating comptime computation
@@ -114,15 +123,64 @@ internal sealed partial class IrBuilder
         TryEvalTop(inner, allowCalls: true) is { } v ? Splice(v) : null;
 
     /// <summary>Re-materialize a <see cref="ComptimeValue"/> as an IR literal, so the rest of the
-    /// pipeline (lower → emit) sees an ordinary constant. Only int / float / bool in this milestone;
-    /// an aggregate comptime value (array/struct) is a later increment.</summary>
-    private static CExpr Splice(ComptimeValue v) => v switch
+    /// pipeline (lower → emit) sees an ordinary constant. Int / float / bool splice to the matching
+    /// literal; a comptime STRUCT splices to a <see cref="StructInit"/> (the array sibling is a later
+    /// increment).</summary>
+    private CExpr Splice(ComptimeValue v) => v switch
     {
         CtInt i => SpliceInt(i),
         CtFloat f => new LitFloat(FormatComptimeFloat(f.Value)) { Type = f.Type },
         CtBool b => new LitBool(b.Value) { Type = CType.Bool },
-        _ => throw new IrUnsupportedException("comptime value cannot be spliced back (only int/float/bool yet)"),
+        CtStruct s => SpliceStruct(s),
+        _ => throw new IrUnsupportedException("comptime value cannot be spliced back (only int/float/bool/struct yet)"),
     };
+
+    /// <summary>Splice a comptime struct value back as a <see cref="StructInit"/> object initializer,
+    /// emitting each field in DECLARED order (from the struct field table) with its declared type, so
+    /// the backend renders <c>new T { f = …, … }</c>. A field the comptime value never set (an
+    /// unsupplied member of a partial init) is omitted, taking C#'s zero default — exactly C's
+    /// partial-init rule. Anonymous padding bit-fields have no member, so they are skipped.</summary>
+    private CExpr SpliceStruct(CtStruct s)
+    {
+        if (s.Type.Unqualified is not CType.Named named || !_structFields.TryGetValue(named.Name, out var fields))
+        {
+            throw new IrUnsupportedException("comptime struct value cannot be spliced (unknown struct type)");
+        }
+        var members = new List<FieldInit>();
+        foreach (var f in fields)
+        {
+            if (f.Name.Length == 0) { continue; }                       // anonymous padding bit-field
+            if (!s.Fields.TryGetValue(f.Name, out var fv)) { continue; } // unsupplied → C# zero default
+            members.Add(new FieldInit(f.Name, f.Type, Splice(fv)));
+        }
+        return new StructInit(members) { Type = named };
+    }
+
+    /// <summary>The zero comptime value of a type — for an <c>undefined</c> / default-initialized
+    /// comptime local. A scalar zeroes; a struct zero-fills every (named) field recursively. Returns
+    /// null when the type has no comptime zero (a pointer, an array — not yet, an aggregate with an
+    /// unmodelled field), so the position is "not a compile-time constant".</summary>
+    private ComptimeValue? ZeroValue(CType t)
+    {
+        var u = t.Unqualified;
+        if (u is CType.Prim p)
+        {
+            if (p.Name == "_Bool") { return new CtBool(false); }
+            return p.Integer ? new CtInt(System.Int128.Zero, t) : new CtFloat(0.0, t);
+        }
+        if (u is CType.Named named && _structFields.TryGetValue(named.Name, out var fields))
+        {
+            var map = new Dictionary<string, ComptimeValue>(System.StringComparer.Ordinal);
+            foreach (var f in fields)
+            {
+                if (f.Name.Length == 0) { continue; }   // anonymous padding bit-field — no member
+                if (ZeroValue(f.Type) is not { } fv) { return null; }   // a field we can't zero yet
+                map[f.Name] = fv;
+            }
+            return new CtStruct(map, named);
+        }
+        return null;
+    }
 
     private static CExpr SpliceInt(CtInt i)
     {
@@ -221,9 +279,38 @@ internal sealed partial class IrBuilder
             case Call c:
                 return EvalComptimeCall(c);
 
+            // --- comptime aggregates (Milestone T) -----------------------------
+            // A struct value: build from a struct initializer, read a field by value, or zero-fill an
+            // `undefined`/default. (`c.field = v` is the write side — see EvalComptimeAssign.)
+            case StructInit si:
+                return EvalComptimeStructInit(si);
+
+            case Member mem when !mem.Arrow:
+            {
+                return EvalComptime(mem.Base) is CtStruct ms && ms.Fields.TryGetValue(mem.Field, out var mv)
+                    ? mv : null;
+            }
+
+            case DefaultLit dl:
+                return ZeroValue(dl.Type);
+
             default:
                 return null;
         }
+    }
+
+    /// <summary>Evaluate a struct initializer at comptime: start from a fully zero-filled struct (so
+    /// an unsupplied field reads as zero — C's partial-init rule), then overlay each supplied member
+    /// (retyped to its field type). Null if the struct type or a member value is not foldable.</summary>
+    private ComptimeValue? EvalComptimeStructInit(StructInit si)
+    {
+        if (si.Type.Unqualified is not CType.Named named || ZeroValue(named) is not CtStruct st) { return null; }
+        foreach (var fi in si.Members)
+        {
+            if (EvalComptime(fi.Value) is not { } v) { return null; }
+            st.Fields[fi.Name] = RetypeTo(v, fi.FieldType);
+        }
+        return st;
     }
 
     /// <summary>Fold a cast at comptime. An arithmetic target converts/re-types the
@@ -478,25 +565,49 @@ internal sealed partial class IrBuilder
         };
     }
 
-    /// <summary>Apply a comptime assignment (simple or compound) to a frame local, returning the
-    /// stored value. Only a local/param l-value is assignable at comptime; anything else aborts.</summary>
+    /// <summary>Apply a comptime assignment (simple or compound) to a frame local or a struct field,
+    /// returning the stored value. A local/param l-value (<c>x = v</c>) or a struct member
+    /// (<c>c.field = v</c>, mutating the frame's struct value in place) is assignable at comptime;
+    /// anything else aborts.</summary>
     private ComptimeValue? EvalComptimeAssign(Assign a)
     {
-        if (_comptimeFrame is not { } f || a.Target is not VarRef vr)
-        {
-            throw new ComptimeAbort("comptime assignment target must be a local variable");
-        }
+        if (_comptimeFrame is null) { throw new ComptimeAbort("comptime assignment outside a call frame"); }
         if (EvalComptime(a.Value) is not { } rhs) { return null; }
-        if (a.CompoundOp is { } op)
+
+        switch (a.Target)
         {
-            if (!f.TryGetValue(vr.Sym, out var cur) || CombineBin(op, cur, rhs) is not { } combined)
-            {
-                return null;
-            }
-            rhs = RetypeTo(combined, vr.Sym.Type);
+            // A local / parameter.
+            case VarRef vr:
+                if (a.CompoundOp is { } vop)
+                {
+                    if (!_comptimeFrame.TryGetValue(vr.Sym, out var vcur) || CombineBin(vop, vcur, rhs) is not { } vcomb)
+                    {
+                        return null;
+                    }
+                    rhs = vcomb;
+                }
+                return _comptimeFrame[vr.Sym] = RetypeTo(rhs, vr.Sym.Type);
+
+            // A struct field — `c.field = v`. EvalComptime(m.Base) returns the SAME CtStruct the
+            // frame holds (by reference), so mutating its field map writes through to the local; a
+            // nested `c.inner.field = v` likewise mutates the nested struct in place.
+            case Member m when !m.Arrow && EvalComptime(m.Base) is CtStruct st:
+                var ftype = StructFieldType(st.Type, m.Field);
+                if (a.CompoundOp is { } mop)
+                {
+                    if (!st.Fields.TryGetValue(m.Field, out var mcur) || CombineBin(mop, mcur, rhs) is not { } mcomb)
+                    {
+                        return null;
+                    }
+                    rhs = mcomb;
+                }
+                var stored = ftype is { } ft ? RetypeTo(rhs, ft) : rhs;
+                st.Fields[m.Field] = stored;
+                return stored;
+
+            default:
+                throw new ComptimeAbort("comptime assignment target must be a local variable or struct field");
         }
-        f[vr.Sym] = RetypeTo(rhs, vr.Sym.Type);
-        return f[vr.Sym];
     }
 
     /// <summary>Walk a statement of a comptime function body. Supports the side-effect-free
