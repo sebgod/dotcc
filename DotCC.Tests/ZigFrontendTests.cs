@@ -320,6 +320,37 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Folds_alignOf_to_a_literal()
+    {
+        // Milestone T, part 4 — `@alignOf(T)` is a pure compile-time constant (the ABI alignment via
+        // the layout model), so it folds straight to a literal (no IR node). A 16-byte integer aligns
+        // to 16.
+        var cs = EmitZig("pub fn main() u8 { const a: usize = @alignOf(i128); return @intCast(a + 26); }\n");
+        cs.ShouldContain("16UL");
+    }
+
+    [Fact]
+    public void Folds_offsetOf_in_a_comptime_position()
+    {
+        // Milestone T, part 4 — `@offsetOf(T, "field")` reuses the C `offsetof` IR and folds via the
+        // layout engine in a comptime-required position (an array bound). `b` follows a `u8` then 3
+        // pad bytes, so it sits at C-ABI offset 4 → the bound is 4.
+        var cs = EmitZig(
+            "const Point = struct { a: u8, b: u32, c: u16 };\n" +
+            "pub fn main() u8 { var pad: [@offsetOf(Point, \"b\")]u8 = undefined; pad[0] = 42; return pad[0]; }\n");
+        cs.ShouldContain("stackalloc byte[4]");
+    }
+
+    [Fact]
+    public void Rejects_offsetOf_on_a_non_struct_type()
+    {
+        // `@offsetOf` needs an aggregate as its first argument — a primitive type is a clear error.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 { const o: usize = @offsetOf(u32, \"x\"); return @intCast(o); }\n"));
+        ex.Message.ShouldContain("struct/union type");
+    }
+
+    [Fact]
     public void Lowers_if_and_while_statements()
     {
         // if/else + while lower to the C# forms, conditions wrapped in Cond.B for

@@ -163,7 +163,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `@bitCast(x)` | ✅ | same-size **bit** reinterpret (e.g. `f32`↔`u32`) → `System.Runtime.CompilerServices.Unsafe.BitCast<TFrom, TTo>` (AOT-clean, size-checked). Result-located like the casts above |
 | `@alignCast(p)` | ✅ | identity in dotcc's managed model (alignment is unobservable); the enclosing `@ptrCast`/sink does the real conversion. Needs no sink, so its idiomatic `@ptrCast(@alignCast(p))` lowers to one cast |
 | `@sizeOf(T)` | ✅ | the byte size as `usize` → the C `sizeof` IR (folded for a user aggregate via the layout model, else C#'s `sizeof(T)`) |
-| `@alignOf(T)` / `@offsetOf(T, f)` | 🚧 | parse only — alignment isn't meaningfully observable on the managed VM and `@offsetOf` waits on surfaced field offsets (deferred; revisit per-need) |
+| `@alignOf(T)` / `@offsetOf(T, "f")` | ✅ | Milestone T, part 4 — both are comptime values computed from dotcc's layout model (C-ABI / natural alignment). `@alignOf(T)` folds straight to a literal (the ABI alignment; a struct = the max field alignment). `@offsetOf(T, "field")` reuses the C `offsetof` IR — it folds in a comptime-required position (an array bound `[@offsetOf(T,"m")]u8`) and renders the .NET blittable-layout offset at a runtime use. Use an `extern struct` to pin the C field layout when an exact offset must match real zig (a plain Zig struct may reorder fields) |
 | other `@builtin(...)` (`@typeInfo`/`@TypeOf`/`@field`/…) | 🚫 | reflection / comptime — out of scope (see below) |
 | wrapping ops `+% -% *%` (+ `op%=`) | ✅ | two's-complement wrap (Milestone P, part 1) — see the operators table above |
 | saturating ops `+\| -\| *\|` (+ `op\|=`) | ✅ | clamp-to-range (Milestone P, part 2) — see the operators table above |
