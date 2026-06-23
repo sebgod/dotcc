@@ -1524,4 +1524,143 @@ public sealed class ZigOracleTests
             try { Directory.Delete(workDir, recursive: true); } catch { /* best effort */ }
         }
     }
+
+    /// <summary>MIXED <c>.c</c> + <c>.zig</c> programs (Milestone V — C↔Zig shared-heap interop).
+    /// Each case is a C translation unit + a Zig <c>main</c> + expected exit + expected stdout.
+    /// The unifying guarantee under test: <c>std.heap.c_allocator</c> IS the C <c>malloc</c>/<c>free</c>/
+    /// <c>realloc</c> heap, so a buffer allocated by one front-end can be read / freed / resized by the
+    /// other, and a Zig function taking an opaque <c>std.mem.Allocator</c> works when its result crosses
+    /// into C. dotcc lowers both files into one program (C first, then the Zig group); real zig builds the
+    /// same input set (the <c>.c</c> listed alongside the root <c>.zig</c>, <c>-lc</c>). NOTE: only
+    /// <c>c_allocator</c> is cross-seam-safe — real zig's <c>page_allocator</c> is mmap/VirtualAlloc, not
+    /// malloc, so freeing its memory with C <c>free</c> would be UB; every program here uses
+    /// <c>c_allocator</c> for memory that crosses the boundary.</summary>
+    public static IEnumerable<object[]> MixedPrograms => new[]
+    {
+        // alloc/free across the seam: Zig allocates 4 ints through c_allocator, C reads (sum 100) then
+        // frees them; C mallocs 10 ints, Zig reads (sum 55), C frees. One shared heap → 100+55-113 = 42.
+        new object[] { "mixed_shared_heap",
+            "#include <stdlib.h>\n" +
+            "int *make_ints(int n) {\n" +
+            "    int *p = malloc(n * sizeof(int));\n" +
+            "    for (int i = 0; i < n; i++) { p[i] = i + 1; }\n" +
+            "    return p;\n" +
+            "}\n" +
+            "int sum_ints(int *p, int n) {\n" +
+            "    int s = 0;\n" +
+            "    for (int i = 0; i < n; i++) { s += p[i]; }\n" +
+            "    return s;\n" +
+            "}\n" +
+            "void take_and_free(int *p) { free(p); }\n",
+            "const std = @import(\"std\");\n" +
+            "extern fn make_ints(n: c_int) [*c]c_int;\n" +
+            "extern fn sum_ints(p: [*c]c_int, n: c_int) c_int;\n" +
+            "extern fn take_and_free(p: [*c]c_int) void;\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = std.heap.c_allocator;\n" +
+            "    const mine = a.alloc(c_int, 4) catch return 1;\n" +
+            "    mine[0] = 10; mine[1] = 20; mine[2] = 30; mine[3] = 40;\n" +
+            "    const zsum = sum_ints(mine.ptr, 4);\n" +
+            "    take_and_free(mine.ptr);\n" +
+            "    const raw = make_ints(10);\n" +
+            "    var sum: c_int = 0;\n" +
+            "    var i: usize = 0;\n" +
+            "    while (i < 10) : (i = i + 1) { sum = sum + raw[i]; }\n" +
+            "    take_and_free(raw);\n" +
+            "    return @intCast(zsum + sum - 113);\n" +
+            "}\n", 42, "" },
+        // create / destroy / realloc across the seam: Zig c_allocator.create(c_int), C reads it (30), Zig
+        // destroys; then alloc 2 → realloc 4 (prefix preserved) → sum 12. 30+12 = 42.
+        new object[] { "mixed_create_realloc",
+            "int read_int(int *p) { return *p; }\n",
+            "const std = @import(\"std\");\n" +
+            "extern fn read_int(p: *c_int) c_int;\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = std.heap.c_allocator;\n" +
+            "    const p = a.create(c_int) catch return 1;\n" +
+            "    p.* = 30;\n" +
+            "    const v = read_int(p);\n" +
+            "    a.destroy(p);\n" +
+            "    const s = a.alloc(c_int, 2) catch return 1;\n" +
+            "    s[0] = 5; s[1] = 7;\n" +
+            "    const s2 = a.realloc(s, 4) catch return 1;\n" +
+            "    s2[2] = 0; s2[3] = 0;\n" +
+            "    var sum: c_int = 0;\n" +
+            "    for (s2) |x| { sum = sum + x; }\n" +
+            "    a.free(s2);\n" +
+            "    return @intCast(v + sum);\n" +
+            "}\n", 42, "" },
+        // "pass the correct std.mem.Allocator": a Zig fn takes an opaque std.mem.Allocator param (indirect
+        // dispatch); main passes c_allocator; the allocated buffer crosses to C which sums it (36). 36+6 = 42.
+        new object[] { "mixed_alloc_param",
+            "int sum_ints(int *p, int n) {\n" +
+            "    int s = 0;\n" +
+            "    for (int i = 0; i < n; i++) { s += p[i]; }\n" +
+            "    return s;\n" +
+            "}\n",
+            "const std = @import(\"std\");\n" +
+            "extern fn sum_ints(p: [*c]c_int, n: c_int) c_int;\n" +
+            "fn build(a: std.mem.Allocator, n: usize) ![]c_int {\n" +
+            "    const s = try a.alloc(c_int, n);\n" +
+            "    var i: usize = 0;\n" +
+            "    while (i < n) : (i = i + 1) { s[i] = @intCast(i + 1); }\n" +
+            "    return s;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = std.heap.c_allocator;\n" +
+            "    const s = build(a, 8) catch return 1;\n" +
+            "    const total = sum_ints(s.ptr, 8);\n" +
+            "    a.free(s);\n" +
+            "    return @intCast(total + 6);\n" +
+            "}\n", 42, "" },
+    };
+
+    /// <summary>Differential for a MIXED <c>.c</c> + <c>.zig</c> program: dotcc lowers both files into one
+    /// C# program (<see cref="Compiler.EmitCSharp"/> over the pair) and runs it; real zig builds the same
+    /// input set and runs it; the exit code AND stdout must agree (and match the expected). The mixed
+    /// analogue of <see cref="Dotcc_matches_zig"/>; see <see cref="MixedPrograms"/> for the guarantee.</summary>
+    [Theory]
+    [MemberData(nameof(MixedPrograms))]
+    public void Dotcc_matches_zig_mixed(string name, string cSource, string zigSource, int expectedExit, string expectedStdout)
+    {
+        if (!ZigRunRequested)
+        {
+            Assert.Skip(
+                $"Zig oracle is opt-in. Set {RunZigEnv}=1 to compile + run each mixed .c+.zig program " +
+                $"with the real zig compiler and assert dotcc's mixed path agrees.");
+        }
+        if (!ZigOracle.IsAvailable)
+        {
+            Assert.Skip($"{RunZigEnv} requested but no `zig` is on PATH on this host.");
+        }
+
+        // dotcc path: write extra.c + main.zig to a temp dir, emit C# over BOTH (csproj-shaped —
+        // Roslyn rejects the #:property header), compile in-process, run, capture exit + stdout.
+        var dir = Path.Combine(Path.GetTempPath(), $"dotcc-zig-mixed-{name}-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        var cPath = Path.Combine(dir, "extra.c");
+        var zigPath = Path.Combine(dir, "main.zig");
+        File.WriteAllText(cPath, cSource);
+        File.WriteAllText(zigPath, zigSource);
+        int dotccExit;
+        string dotccStdout;
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { cPath, zigPath }, fileBased: false);
+            (dotccStdout, dotccExit) = FixtureRunner.CompileAndRunCapturingExit(emitted, Array.Empty<string>());
+
+            // zig path: build + run the SAME input set (CompileAndRun lists the sibling .c alongside
+            // the root .zig and links -lc, so std.heap.c_allocator and C malloc share one heap).
+            var (zigStdout, zigExit) = ZigOracle.CompileAndRun(zigPath, dir);
+
+            dotccExit.ShouldBe(zigExit, $"dotcc's mixed path diverges from real zig on '{name}' (exit code)");
+            dotccExit.ShouldBe(expectedExit, $"'{name}' did not produce the expected exit code");
+            Norm(dotccStdout).ShouldBe(Norm(zigStdout), $"dotcc's mixed path diverges from real zig on '{name}' (stdout)");
+            Norm(dotccStdout).ShouldBe(expectedStdout, $"'{name}' did not produce the expected stdout");
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best effort */ }
+        }
+    }
 }
