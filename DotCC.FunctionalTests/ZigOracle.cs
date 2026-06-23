@@ -1,8 +1,10 @@
 #nullable enable
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Text;
 
 namespace DotCC.FunctionalTests;
@@ -92,7 +94,11 @@ internal static class ZigOracle
         var srcDir = Path.GetDirectoryName(rootZig);
         if (srcDir is not null)
         {
-            foreach (var pattern in new[] { "*.zig", "*.h" })
+            // `*.c` is copied too (Milestone V): a MIXED .c + .zig program is built by
+            // listing its C translation units alongside the root .zig — exactly the input
+            // set dotcc's `EmitCSharp` receives. zig ships its own C compiler, so no
+            // external cc is needed.
+            foreach (var pattern in new[] { "*.zig", "*.h", "*.c" })
             {
                 foreach (var aux in Directory.EnumerateFiles(srcDir, pattern))
                 {
@@ -104,8 +110,16 @@ internal static class ZigOracle
         var binName = OperatingSystem.IsWindows() ? "zig-oracle.exe" : "zig-oracle";
 
         // ── zig compile ──  (-lc links libc so `extern fn` FFI — printf/putchar/… —
-        // resolves; harmless for a pure-Zig program, which simply doesn't use it.)
-        var (cOut, cErr, cExit) = RunProcess("zig", workDir, "build-exe", rootName, "-lc", "-femit-bin=" + binName);
+        // resolves; harmless for a pure-Zig program, which simply doesn't use it.) Any
+        // sibling .c translation units (Milestone V — mixed C↔Zig interop) are listed as
+        // additional positional sources, so `std.heap.c_allocator` memory and C
+        // `malloc`/`free` share one heap across the seam in the produced binary too.
+        var cSources = Directory.EnumerateFiles(workDir, "*.c").Select(p => Path.GetFileName(p)!).ToArray();
+        var buildArgs = new List<string> { "build-exe", rootName };
+        buildArgs.AddRange(cSources);
+        buildArgs.Add("-lc");
+        buildArgs.Add("-femit-bin=" + binName);
+        var (cOut, cErr, cExit) = RunProcess("zig", workDir, buildArgs.ToArray());
         if (cExit != 0)
         {
             throw new InvalidOperationException(

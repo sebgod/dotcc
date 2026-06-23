@@ -263,6 +263,28 @@ Limits: `-shared` / `-l` import mode combined with a mixed set is not validated 
 (single-language only); cross-language **struct/type sharing** is moot until the Zig
 front-end emits aggregates.
 
+### C↔Zig shared-heap interop (Milestone V)
+
+The allocator abstraction is shared with C at the **heap** level: `std.heap.c_allocator`
+devirtualizes to a direct `Libc.malloc`/`free`/`realloc`, which is the *same* heap C's
+`malloc`/`free` use. So in a mixed program, memory crosses the seam in every direction:
+
+| Pattern | Why it works |
+|---|---|
+| Zig `a.alloc(T, n)` (`c_allocator`) → C `free(p.ptr)` | both are the one `Libc` heap |
+| C `malloc` → Zig reads the `[*c]T` → C `free` | a C pointer indexes/reads in Zig directly |
+| Zig `a.create(T)` → C reads/writes `*T` → `a.destroy` | a single-object heap cell, shared |
+| Zig `a.realloc(slice, n)` of a heap slice; C `sum`s the result | `realloc` is the shared `Libc.realloc` |
+| a Zig fn taking an **opaque** `std.mem.Allocator` param, fed `c_allocator`, its buffer handed to C | the default materializes `ZigAlloc.CHeap()`; the buffer is plain heap memory |
+
+**Only `c_allocator` is cross-seam-safe.** Real zig's `page_allocator` is mmap/VirtualAlloc —
+a *different* heap from C's `malloc` — so freeing its memory with C `free` would be UB. dotcc
+happens to back both with `Libc.malloc`, but a portable mixed program must use `c_allocator`
+for any memory that crosses the boundary. Example: `examples/zig-c-heap` (a mixed program
+where a Zig `c_allocator` buffer is summed + freed by C, and a C `malloc` buffer is read by
+Zig); the `ZigOracleTests` mixed differential (`mixed_shared_heap`, `mixed_create_realloc`,
+`mixed_alloc_param`) re-checks each against real zig 0.17.
+
 ## Error unions — `try` is exception-based (the setjmp pattern, reused)
 
 A `!T` function lowers to the runtime value type `ErrUnion<T>` (`DotCC.Libc/ZigErr.cs`,
@@ -347,10 +369,14 @@ runtime-selected allocator pays the indirect dispatch. Examples: `examples/zig-a
 `remap` (`?[]T`) are deferred with a clear error — their result is allocator-page-dependent (real
 zig answers from page rounding), so use `realloc`. `arena.reset(mode)` and a non-allocator backing
 are deferred. `std` is a known-paths resolver, not a real std model — anything outside the
-allocator paths above errors clearly. The abstraction is **not yet shared with the C front-end**
-(C's `malloc`/`free` stay direct + complete; a C fn-pointer-table allocator à la `lua_Alloc` would
-be its own recognizer). (`defer a.free(buf)` / `defer arena.deinit()` — the idiomatic every-path
-release — work; see the **Defer** section.)
+allocator paths above errors clearly. The C **heap** IS shared with the C front-end (Milestone V):
+`std.heap.c_allocator` and C `malloc`/`free`/`realloc` are the same heap, so in a mixed `.c` + `.zig`
+program memory allocated by one side is read / freed / resized by the other (see **C↔Zig shared-heap
+interop** below). What is **not** yet shared is a *custom* (non-malloc) C allocator: real zig's
+`Allocator.VTable` is a 4-fn `{ alloc, resize, remap, free }` shape carrying `mem.Alignment` + `[]u8`,
+and faithfully modeling that (so a custom-vtable program matches real zig) — or recognizing a C
+`lua_Alloc` fn-pointer-table allocator — is a future milestone. (`defer a.free(buf)` /
+`defer arena.deinit()` — the idiomatic every-path release — work; see the **Defer** section.)
 
 ## Tuples — runtime tuples → C# `ValueTuple`
 
