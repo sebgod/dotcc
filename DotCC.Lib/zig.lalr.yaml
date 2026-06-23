@@ -474,6 +474,12 @@ productions:
       - { lhs: Stmt, rhs: ['return', RhsExpr, ';'],         action: stmtReturn }
       - { lhs: Stmt, rhs: ['return', ';'],                   action: stmtReturnVoid }
       - { lhs: Stmt, rhs: [VarDecl] }
+      # `comptime var i = …;` / `comptime const i = …;` — a compile-time value declaration (Milestone
+      # T, part 3, for `inline while`). The lowering tracks the value at lowering time and emits NO
+      # runtime decl; references substitute the current value as a literal. After `comptime`, the
+      # lookahead `var`/`const` (FIRST(VarDecl), disjoint from FIRST(Prefix)) cleanly selects this over
+      # the `comptime EXPR` value-prefix expression-statement — conflict-free.
+      - { lhs: Stmt, rhs: ['comptime', VarDecl], action: comptimeVarDecl }
       # Destructure binding (Milestone G + S) — `<binder>, <binder>… = e;` (≥2 binders, enforced by
       # the one-binder + DestructBinds shape). A binder is a fresh `const`/`var` (optionally typed
       # `: T`) OR an existing lvalue / `_` discard (Milestone S — the assign-to-existing form `a, b =
