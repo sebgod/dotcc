@@ -40,7 +40,12 @@ internal sealed class CSharpTarget : ITarget
         CType.Optional o => RenderType(o.Inner) + "?",
         // A Zig error union `E!T` → the runtime `ErrUnion<Payload>` value type. A `void`
         // payload (`!void`) has no generic-over-void in C#, so it uses the `Unit` payload.
-        CType.ErrorUnion eu => "ErrUnion<" + (eu.Payload is CType.VoidType ? "Unit" : RenderType(eu.Payload)) + ">",
+        CType.ErrorUnion eu => "ErrUnion<" + (
+            eu.Payload is CType.VoidType ? "Unit"
+            // `Error!*T` (Milestone U `create`): a pointer can't be an `ErrUnion<T>` generic arg, so
+            // the address rides as a `nuint`; the `try` unwrap casts it back to `T*`.
+            : eu.Payload.Unqualified is CType.Pointer ? "nuint"
+            : RenderType(eu.Payload)) + ">",
         // A Zig error-set value (a bare `error.Foo` / a captured error, Milestone N) → the raw
         // `ushort` error code. V1 erases the named set into one flat code space, so an error value
         // IS its code; error-value equality and a future error `switch` compare the codes directly.

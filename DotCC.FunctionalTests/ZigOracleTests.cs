@@ -395,6 +395,37 @@ public sealed class ZigOracleTests
             "    return s[0];\n" +
             "}\n" +
             "pub fn main() u8 { return run() catch 42; }\n", 42, "" },
+        // create_cheap (Milestone U) — single-object alloc on the statically-known default
+        // DEVIRTUALIZES to a direct malloc/free. Builds a two-node list, sums it, tears it down.
+        new object[] { "create_cheap",
+            "const std = @import(\"std\");\n" +
+            "const Node = struct { value: u8, next: ?*Node };\n" +
+            "fn run() !u8 {\n" +
+            "    const a = std.heap.page_allocator;\n" +
+            "    const head = try a.create(Node);\n" +
+            "    head.value = 30;\n" +
+            "    const tail = try a.create(Node);\n" +
+            "    tail.value = 12;\n" +
+            "    tail.next = null;\n" +
+            "    head.next = tail;\n" +
+            "    const sum = head.value + head.next.?.value;\n" +
+            "    a.destroy(tail);\n" +
+            "    a.destroy(head);\n" +
+            "    return sum;\n" +
+            "}\n" +
+            "pub fn main() u8 { return run() catch 1; }\n", 42, "" },
+        // create_param (Milestone U) — create/destroy on an OPAQUE `std.mem.Allocator` parameter
+        // dispatch INDIRECTLY through the vtable; the default materializes through the same path.
+        new object[] { "create_param",
+            "const std = @import(\"std\");\n" +
+            "fn make(a: std.mem.Allocator, v: u8) !u8 {\n" +
+            "    const p = try a.create(u8);\n" +
+            "    p.* = v;\n" +
+            "    const r = p.*;\n" +
+            "    a.destroy(p);\n" +
+            "    return r;\n" +
+            "}\n" +
+            "pub fn main() u8 { return make(std.heap.page_allocator, 42) catch 1; }\n", 42, "" },
         // TUPLES (Milestone G). The headline use: a function returns a tuple `struct { u8, u8 }`
         // and the caller destructures it with `const a, const b = mm();` → C# ValueTuple +
         // `.Item1`/`.Item2`. 20 + 22 = 42.

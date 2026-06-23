@@ -1445,6 +1445,26 @@ internal sealed class CSharpBackend
                     ? ($"ZigAlloc.FreeCHeap<{elem}>({Expr(fc.SliceExpr)})", PPostfix)
                     : ($"{Sub(fc.Receiver, PPostfix)}.Free<{elem}>({Expr(fc.SliceExpr)})", PPostfix);
             }
+            // A Zig allocator `a.create(T)` (Milestone U). Receiver null → the DEVIRTUALIZED
+            // `ZigAlloc.CreateCHeap<T>(oom)` (→ Libc.malloc, no vtable); non-null → the indirect
+            // `recv.Create<T>(oom)`. Returns `ErrUnion<nuint>`; the enclosing `try` casts the
+            // unwrapped address back to `T*`.
+            case CreateCall cc:
+            {
+                var elem = Cs(cc.Element.Unqualified);
+                return cc.Receiver is null
+                    ? ($"ZigAlloc.CreateCHeap<{elem}>({cc.OomCode})", PPostfix)
+                    : ($"{Sub(cc.Receiver, PPostfix)}.Create<{elem}>({cc.OomCode})", PPostfix);
+            }
+            // A Zig allocator `a.destroy(p)` (Milestone U). Receiver null → devirtualized direct
+            // `ZigAlloc.DestroyCHeap<T>(p)` (→ Libc.free); non-null → indirect `recv.Destroy<T>(p)`.
+            case DestroyCall dc:
+            {
+                var elem = Cs(dc.Element.Unqualified);
+                return dc.Receiver is null
+                    ? ($"ZigAlloc.DestroyCHeap<{elem}>({Expr(dc.Ptr)})", PPostfix)
+                    : ($"{Sub(dc.Receiver, PPostfix)}.Destroy<{elem}>({Expr(dc.Ptr)})", PPostfix);
+            }
             // An array-by-value return (the Milestone K cut, made sound). Copy the N elements of the
             // source array (a `T*`) into a heap-owned buffer so the returned pointer outlives the
             // callee frame — Zig arrays are value types. The source renders as a `T*` (an array var
@@ -2120,10 +2140,11 @@ internal sealed class CSharpBackend
 
     private static bool IsStmtExpr(CExpr e) => e switch
     {
-        // A Zig allocator alloc/free (Milestone F) renders as a method call — a valid statement
-        // expression. FreeCall is void, so it MUST be recognized here (a `_ = <void>` discard is
-        // a C# error); a discarded AllocCall is a normal `_ = recv.Alloc(...)`, also fine as a stmt.
-        Assign or Call or IndirectCall or AllocCall or FreeCall => true,
+        // A Zig allocator alloc/free/create/destroy (Milestones F/U) renders as a method call — a
+        // valid statement expression. FreeCall/DestroyCall are void, so they MUST be recognized here
+        // (a `_ = <void>` discard is a C# error); a discarded AllocCall/CreateCall is a normal
+        // `_ = recv.Alloc(...)`, also fine as a stmt.
+        Assign or Call or IndirectCall or AllocCall or FreeCall or CreateCall or DestroyCall => true,
         Unary u => u.Op is UnOp.PreInc or UnOp.PreDec or UnOp.PostInc or UnOp.PostDec,
         Paren p => IsStmtExpr(p.Inner),
         _ => false,

@@ -1731,19 +1731,48 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_a_deferred_allocator_create()
+    public void Devirtualizes_create_and_destroy_to_direct_c_heap_calls()
     {
-        // `a.create(T)` (single-object alloc) returns `Error!*T` — an error-union-over-pointer,
-        // which the runtime can't express yet — so it's a clear deferred error, not a miscompile.
-        var ex = Should.Throw<CompileException>(() => EmitZig(
+        // `a.create(T)` / `a.destroy(p)` (single-object alloc, Milestone U) on the statically-known
+        // default DEVIRTUALIZE to a direct ZigAlloc.CreateCHeap / DestroyCHeap (a Libc.malloc/free,
+        // no vtable). `create`'s `Error!*T` rides as `ErrUnion<nuint>` (a pointer can't be an
+        // `ErrUnion<T>` generic arg); `try` casts the unwrapped address back to `T*`.
+        var cs = EmitZig(
             "const std = @import(\"std\");\n" +
             "fn run() !u8 {\n" +
             "    const a = std.heap.page_allocator;\n" +
             "    const p = try a.create(u8);\n" +
-            "    return p.*;\n" +
+            "    p.* = 42;\n" +
+            "    const r = p.*;\n" +
+            "    a.destroy(p);\n" +
+            "    return r;\n" +
             "}\n" +
-            "pub fn main() u8 { return run() catch 1; }\n"));
-        ex.Message.ShouldContain("deferred");
+            "pub fn main() u8 { return run() catch 1; }\n");
+        cs.ShouldContain("ZigAlloc.CreateCHeap<byte>(");                       // the devirt'd create
+        cs.ShouldContain("(byte*)ErrUnion.Try(ZigAlloc.CreateCHeap<byte>(");   // the nuint -> T* cast on try
+        cs.ShouldContain("ZigAlloc.DestroyCHeap<byte>(p)");                     // the devirt'd destroy
+        cs.ShouldNotContain(".Create<byte>(");                                  // NOT the indirect vtable dispatch
+    }
+
+    [Fact]
+    public void Lowers_create_and_destroy_through_the_indirect_vtable()
+    {
+        // On an opaque `std.mem.Allocator` parameter, create/destroy dispatch INDIRECTLY through the
+        // vtable — `a.Create<T>(oom)` / `a.Destroy<T>(p)` — exactly like alloc/free.
+        var cs = EmitZig(
+            "const std = @import(\"std\");\n" +
+            "fn use_it(a: std.mem.Allocator) !u8 {\n" +
+            "    const p = try a.create(u8);\n" +
+            "    p.* = 7;\n" +
+            "    const r = p.*;\n" +
+            "    a.destroy(p);\n" +
+            "    return r;\n" +
+            "}\n" +
+            "pub fn main() u8 { return use_it(std.heap.page_allocator) catch 1; }\n");
+        cs.ShouldContain("a.Create<byte>(");                       // INDIRECT vtable dispatch
+        cs.ShouldContain("(byte*)ErrUnion.Try(a.Create<byte>(");   // the nuint -> T* cast on try
+        cs.ShouldContain("a.Destroy<byte>(p)");                    // indirect destroy
+        cs.ShouldNotContain("ZigAlloc.CreateCHeap<byte>(");        // NOT devirt'd at the call site
     }
 
     [Fact]
