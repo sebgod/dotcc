@@ -13,7 +13,7 @@ C-shaped value/type core, and lowering grows behind it deliberately ("fail
 loudly, grow on purpose" — anything unlowered throws `IrUnsupportedException`
 rather than miscompiling). `comptime` and generics are out of scope by design;
 `std` is **not** modeled in general — only a curated set of allocator paths
-(`std.mem.Allocator`, `std.heap.page_allocator`/`c_allocator`/`FixedBufferAllocator`;
+(`std.mem.Allocator`, `std.heap.page_allocator`/`c_allocator`/`FixedBufferAllocator`/`ArenaAllocator`;
 see the Allocators section) resolves, everything else errors clearly. Legend: ✅
 supported (parses **and** lowers + runs) · 🚧 parses but does not lower yet (loud
 error at the use site) · 🚫 not supported.
@@ -68,7 +68,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `[N]T` array (local) | ✅ | `var b: [N]T = …;` → a stackalloc'd C array (zero heap); `b[i]` indexes, `b[lo..hi]` yields a **stack-backed slice**. Size `N` must be an integer literal. **Init:** `undefined` (zeroed) OR an array literal (Milestone K) — `.{…}` at a `[N]T` sink, typed `[N]T{…}` (explicit length), or `[_]T{…}` (length inferred from the element count). An empty literal is rejected (use `undefined`). **Array-by-value return** (`fn() [N]T`) is supported: arrays lower to `T*`, so a naive `return t;` of a stackalloc local would dangle — dotcc copies the N elements into a heap-owned buffer (`ZigAlloc.CopyArrayResult`) so the value outlives the call (Zig arrays are value types). V1: that buffer is leaked (sound values, unfreed; a caller-allocated result pointer would avoid it) |
 | `[N:0]T` sentinel array (local) | ✅ | sentinel-terminated array (Milestone O, part 4 — V1 sentinel = 0). Reserves **N+1** elements of storage: the trailing slot (index `N`) holds the sentinel `0`, the logical length stays `N` — so a `[N:0]u8` literal is a valid NUL-terminated C string with no hand-written terminator, and `b[N]` reads the sentinel back. Lowers to the same `stackalloc` an `[N]T` local uses, grown by one zeroed slot (`undefined` reserves `N+1` zeroed; a literal lays down its `N` elements + a trailing `0`). The symbol's type is the N-element `CType.Array`, so indexing/slicing behave like `[N]T`. **Cut:** a non-zero sentinel; a **global** `[N:0]T` (the pinned store has no N+1 hook yet — declare it as a local; rejected loudly, never silently truncated) |
 | tuple `struct { T1, T2, … }` | ✅ | an anonymous **positional** struct → C# `System.ValueTuple<…>` (Milestone G — see the **Tuples** section). Valid as a return / param / var type; a positional literal `.{a, b}` constructs it, `t[N]` (literal `N`) reads `.ItemN+1`, and `const a, const b = e` destructures. **Runtime subset only:** arity 1..7 (empty + >7 deferred); comptime / type-valued fields and a mixed positional+named literal are rejected |
-| `std.mem.Allocator` | ✅ | the allocator fat pointer `{ ptr, vtable }` → the runtime `Allocator` value type (see the **Allocators** section). `std.heap.FixedBufferAllocator` is the concrete second allocator. Any OTHER `std.*` type errors clearly |
+| `std.mem.Allocator` | ✅ | the allocator fat pointer `{ ptr, vtable }` → the runtime `Allocator` value type (see the **Allocators** section). `std.heap.FixedBufferAllocator` / `std.heap.ArenaAllocator` are the concrete second / third allocators. Any OTHER `std.*` type errors clearly |
 | stack-slice peephole | ✅ | non-escaping stack-slice promotion (Milestone O, part 5 — the Zig analogue of the C `malloc`→`stackalloc` peephole). `const s = try a.alloc(u8, N); …s[i]/s.len…; a.free(s);` where the allocator is the **devirtualized C-heap default** (`page_allocator`/`c_allocator` → `Libc.malloc`), `N` is a compile-time constant ≤ 1024, the element is 1-byte, the decl isn't in a loop, and `s` never escapes (only `s[i]`/`s.len`/`a.free(s)`) → demoted to `byte* __slicebufK = stackalloc byte[N]; Slice<byte> s = new Slice<byte>(__slicebufK, N);`, the `free` dropped. The slice keeps its `Slice<T>` type (no `s[i]`/`s.len` rewrite). Conservative: any unmodeled use, a return / store / `s.ptr` exposure, a non-constant size, no `free`, or an INDIRECT/FBA allocator (`Receiver != null`) keeps it on the heap. **Cuts:** the `catch` form (only `try`), `defer a.free(s)` (only an explicit free), wider-than-byte elements |
 | `const P = struct { fields…, methods… };` | ✅ | container decl (top-level) → a real C# `unsafe struct` via the SHARED aggregate machinery the C frontend uses. Fields **and** methods (below) in the body; tagged unions are a later D slice. Empty `struct {}` allowed; `pub`-wrapped + in-function containers deferred |
 | `const P = extern struct { … };` | ✅ | layout-controlled struct (Milestone R, part 2) — guaranteed C-ABI layout → C# `[StructLayout(Sequential)]` (natural alignment + tail padding). Identical to a plain struct except the layout is pinned; `@sizeOf` matches Zig's C-ABI size. Fields/methods/consts as for a plain struct |
@@ -185,7 +185,8 @@ program's libc call is handled. No `@cImport`, no header harvest.
 comptime **TYPES** (a `comptime` expression that produces or consumes a `type` — value-comptime
 IS supported, see below), generics / `anytype`, `@import("std")` beyond the curated
 allocator paths (`std.mem.Allocator` + `std.heap.page_allocator`/`c_allocator`/
-`FixedBufferAllocator` ARE supported — see the Allocators section),
+`FixedBufferAllocator`/`ArenaAllocator`, with `alloc`/`free`/`create`/`destroy`/`realloc`, ARE
+supported — see the Allocators section),
 `opaque` (the union kinds — tagged `union(enum)`, explicit-tag `union(SomeEnum)`, and untagged
 `union { … }` — are all now ✅ as of Milestone R; data-only `struct`/`enum`/`union`
 **with methods** — struct/enum/union methods + the `const Self = @This();` self-type alias
@@ -312,33 +313,44 @@ table (deferred). `errdefer |e|` capture is NOT pursued (current Zig removed the
 dotcc models Zig's `std.mem.Allocator` as a fat pointer `{ ptr, vtable }` (the runtime
 `Allocator` value type in `DotCC.Libc/ZigAlloc.cs`, auto-spliced) whose high-level
 `a.alloc(T, n)` / `a.free(s)` dispatch through a vtable of raw function pointers — `alloc`
-returns `Error![]T` (an `ErrUnion<Slice<T>>`, composing with `try`/`catch` above). Two
+returns `Error![]T` (an `ErrUnion<Slice<T>>`, composing with `try`/`catch` above). **Three**
 allocators ship: the C heap (the `std.heap.page_allocator`/`c_allocator` default, backed by
-`Libc.malloc`/`free`) and `std.heap.FixedBufferAllocator` (a deterministic bump allocator
-over a caller buffer — the second allocator that exercises real indirect dispatch).
+`Libc.malloc`/`free`), `std.heap.FixedBufferAllocator` (a deterministic bump allocator over a
+caller buffer), and `std.heap.ArenaAllocator` (Milestone U — a growing arena over a backing
+allocator that frees wholesale at `deinit()`). The full method surface is `alloc`/`free`,
+`create`/`destroy` (single-object, Milestone U), and `realloc` (Milestone U).
 
-**Devirtualization is the optimization layer.** At each `a.alloc(…)` site the lowering asks
+**Devirtualization is the optimization layer.** At each allocator-method site the lowering asks
 *can it prove which concrete allocator `a` is?*
 
 | Form | Lowers to |
 |---|---|
 | `const a = std.heap.page_allocator;` / `c_allocator` | comptime binding (no decl); `@import("std")` likewise |
 | `a.alloc(T, n)` / `a.free(s)` on the **provable** default | **DIRECT** `ZigAlloc.AllocCHeap<T>` / `FreeCHeap<T>` (a `Libc.malloc`/`free`, no vtable) |
+| `a.create(T)` / `a.destroy(p)` on the provable default | **DIRECT** `ZigAlloc.CreateCHeap<T>` / `DestroyCHeap<T>`. `create`'s `Error!*T` is carried as `ErrUnion<nuint>` (a pointer can't be an `ErrUnion<T>` generic arg); `try a.create(T)` casts the unwrapped address back to `*T` |
+| `a.realloc(slice, n)` on the provable default | **DIRECT** `ZigAlloc.ReallocCHeap<T>` (a `Libc.realloc`); preserves contents up to the smaller of old/new |
 | `var fba = std.heap.FixedBufferAllocator.init(&buf);` | `FixedBufferAllocator.Init((byte*)buf, N)` |
-| `fba.allocator()` | `ZigAlloc.FbaAllocator(&fba)` → a runtime `Allocator` (opaque) |
-| `a.alloc(T, n)` on an **opaque** `a` (a `std.mem.Allocator` param, or `fba.allocator()`'s result) | **INDIRECT** `a.Alloc<T>(n, oom)` — the genuine `vtable->alloc(ctx, bytes)` dispatch, inside the runtime |
+| `var arena = std.heap.ArenaAllocator.init(backing);` … `arena.deinit();` | `ArenaAllocator.Init(backing)` … `ZigAlloc.ArenaDeinit(&arena)` (frees the chunk chain; pairs with `defer`) |
+| `const a = fba.allocator();` (a **provable** FBA local) | **DEVIRTUALIZED** (Milestone U): no decl; `a.alloc/free/create/destroy/realloc` → direct `ZigAlloc.*Fba<T>(&fba, …)` (no vtable) |
+| `fba.allocator()` / `arena.allocator()` (passed, not bound) | `ZigAlloc.FbaAllocator(&fba)` / `ArenaToAllocator(&arena)` → a runtime `Allocator` (opaque) |
+| any method on an **opaque** `a` (a `std.mem.Allocator` param, an arena's allocator, a passed `fba.allocator()`) | **INDIRECT** `a.Alloc<T>` / `Free<T>` / `Create<T>` / `Destroy<T>` / `Realloc<T>` — the genuine `vtable->…(ctx, …)` dispatch (`Realloc` emulated via alloc+copy+free over the 2-fn vtable) |
 | the default passed to an opaque `std.mem.Allocator` sink | materialized `ZigAlloc.CHeap()` (a runtime fat pointer; its vtable still reaches the C heap) |
 
-So the default stays a direct call; only a genuinely runtime-selected allocator pays the
-indirect dispatch. Example: `examples/zig-alloc/main.zig`.
+So the C-heap default AND a provable `fba.allocator()` site stay direct calls; only a genuinely
+runtime-selected allocator pays the indirect dispatch. Examples: `examples/zig-alloc`,
+`examples/zig-create`, `examples/zig-arena`, `examples/zig-realloc`.
 
-**V1 limits** (documented, not silent): only the C-heap default is *provable* — an
-`fba.allocator()` result and every `std.mem.Allocator` parameter are opaque (indirect), even
-where a local could in principle be proven; `a.create(T)` / `a.destroy(p)` (single-object
-alloc → `Error!*T`, an error-union-over-pointer) and `resize`/`remap`/`realloc` are deferred
-with a clear error; and `std` is a known-paths resolver, not a real std model — anything outside
-the allocator paths above errors clearly. (`defer a.free(buf)` — the idiomatic, every-path release
-— now works; see the **Defer** section.)
+**V1 limits** (documented, not silent): two allocator sites are *provable* — the C-heap default
+(`page_allocator`/`c_allocator`) and a bound `const a = fba.allocator();` over a known
+`FixedBufferAllocator` local (Milestone U); every `std.mem.Allocator` parameter, an arena's
+`allocator()`, and a cross-function FBA stay opaque (indirect). `resize` (bool, in-place) and
+`remap` (`?[]T`) are deferred with a clear error — their result is allocator-page-dependent (real
+zig answers from page rounding), so use `realloc`. `arena.reset(mode)` and a non-allocator backing
+are deferred. `std` is a known-paths resolver, not a real std model — anything outside the
+allocator paths above errors clearly. The abstraction is **not yet shared with the C front-end**
+(C's `malloc`/`free` stay direct + complete; a C fn-pointer-table allocator à la `lua_Alloc` would
+be its own recognizer). (`defer a.free(buf)` / `defer arena.deinit()` — the idiomatic every-path
+release — work; see the **Defer** section.)
 
 ## Tuples — runtime tuples → C# `ValueTuple`
 
