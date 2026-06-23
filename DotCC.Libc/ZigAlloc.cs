@@ -125,6 +125,58 @@ public unsafe struct FixedBufferAllocator
         => new() { Buffer = buf, Capacity = cap, EndIndex = 0 };
 }
 
+/// <summary>The header of one <see cref="ArenaAllocator"/> chunk — a singly-linked node prefixing a
+/// run of <see cref="Cap"/> bump-allocatable bytes. The usable space starts a fixed,
+/// 16-byte-aligned distance after the header (<c>ZigAlloc.ArenaHeaderBytes</c>), so every handed-out
+/// pointer is at least 16-aligned. Public so it can be the type of <see cref="ArenaAllocator"/>'s
+/// public <c>Current</c> field (a self-pointer chain has no encapsulation to protect here).</summary>
+public unsafe struct ArenaChunk
+{
+    /// <summary>The previously-allocated chunk (freed before this one at deinit), or null.</summary>
+    public ArenaChunk* Prev;
+
+    /// <summary>The usable capacity in bytes (after the aligned header).</summary>
+    public nuint Cap;
+
+    /// <summary>Bytes handed out of this chunk so far.</summary>
+    public nuint Used;
+}
+
+/// <summary>
+/// A growing arena over a backing <see cref="Allocator"/> — Zig's <c>std.heap.ArenaAllocator</c>.
+/// The third concrete allocator: it bump-allocates within malloc'd chunks (grown on demand from
+/// <see cref="Backing"/>) and reclaims EVERYTHING at once in <see cref="Deinit"/> — the headline
+/// pairing with <c>defer arena.deinit()</c>. Per-allocation <c>free</c> is a no-op (an arena only
+/// frees wholesale). AOT-clean: a raw <see cref="ArenaChunk"/>* chain, no managed collections.
+/// </summary>
+public unsafe struct ArenaAllocator
+{
+    /// <summary>The backing allocator the chunks are drawn from (and returned to at deinit).</summary>
+    public Allocator Backing;
+
+    /// <summary>The current (newest) chunk — null until the first allocation.</summary>
+    public ArenaChunk* Current;
+
+    /// <summary><c>std.heap.ArenaAllocator.init(backing)</c> — wrap a backing allocator. No chunk is
+    /// allocated until the first <c>alloc</c>.</summary>
+    public static ArenaAllocator Init(Allocator backing)
+        => new() { Backing = backing, Current = null };
+
+    /// <summary><c>arena.deinit()</c> — free every chunk back to <see cref="Backing"/> (newest
+    /// first) and reset. Idempotent: a second call sees an empty chain.</summary>
+    public void Deinit()
+    {
+        ArenaChunk* ch = Current;
+        while (ch != null)
+        {
+            ArenaChunk* prev = ch->Prev;
+            Backing.Vtable.FreeFn(Backing.Ctx, (byte*)ch, (nuint)ZigAlloc.ArenaHeaderBytes + ch->Cap);
+            ch = prev;
+        }
+        Current = null;
+    }
+}
+
 /// <summary>
 /// Static entry points for the Zig allocator runtime: the C-heap raw functions (which back the
 /// devirtualized default), the <see cref="FixedBufferAllocator"/> raw functions, and the
@@ -207,6 +259,53 @@ public static unsafe class ZigAlloc
     /// alive (the same stack-lifetime rule as Zig).</summary>
     public static Allocator FbaAllocator(FixedBufferAllocator* self)
         => new() { Ctx = self, Vtable = new AllocatorVTable { AllocFn = &FbaAlloc, FreeFn = &FbaFree } };
+
+    // ---- ArenaAllocator (the third allocator, Milestone U) ---------------
+
+    /// <summary>The 16-byte-aligned distance from a chunk's start to its usable space.
+    /// <see cref="ArenaChunk"/> is 24 bytes on 64-bit; rounding to 32 keeps the data start
+    /// 16-aligned (malloc returns ≥16-aligned), so every handed-out pointer is 16-aligned.</summary>
+    internal const int ArenaHeaderBytes = 32;
+
+    /// <summary>The default usable capacity of a freshly-grown arena chunk (a larger request grows a
+    /// chunk sized to fit it instead).</summary>
+    private const nuint ArenaDefaultChunk = 4096;
+
+    /// <summary>Raw arena allocation — bump within the current chunk, growing a new one from the
+    /// backing allocator when the request doesn't fit. Requests are 16-byte-aligned so mixed-type
+    /// allocations stay aligned. Returns null only when the backing allocator is exhausted.</summary>
+    private static byte* ArenaAlloc(void* ctx, nuint len)
+    {
+        var self = (ArenaAllocator*)ctx;
+        nuint need = (len + 15) & ~(nuint)15;   // round up to a 16-byte multiple
+        if (self->Current == null || self->Current->Used + need > self->Current->Cap)
+        {
+            nuint cap = need > ArenaDefaultChunk ? need : ArenaDefaultChunk;
+            byte* raw = self->Backing.Vtable.AllocFn(self->Backing.Ctx, (nuint)ArenaHeaderBytes + cap);
+            if (raw == null) { return null; }
+            var ch = (ArenaChunk*)raw;
+            ch->Prev = self->Current;
+            ch->Cap = cap;
+            ch->Used = 0;
+            self->Current = ch;
+        }
+        byte* p = (byte*)self->Current + ArenaHeaderBytes + self->Current->Used;
+        self->Current->Used += need;
+        return p;
+    }
+
+    /// <summary>Raw arena free — a no-op (an arena reclaims wholesale in <see cref="ArenaAllocator.Deinit"/>).</summary>
+    private static void ArenaFree(void* ctx, byte* p, nuint len) { }
+
+    /// <summary><c>arena.allocator()</c> — produce an <see cref="Allocator"/> fat pointer whose
+    /// context is the arena and whose vtable bump-allocates it. Valid only while the
+    /// <see cref="ArenaAllocator"/> local is alive (the same stack-lifetime rule as Zig).</summary>
+    public static Allocator ArenaToAllocator(ArenaAllocator* self)
+        => new() { Ctx = self, Vtable = new AllocatorVTable { AllocFn = &ArenaAlloc, FreeFn = &ArenaFree } };
+
+    /// <summary><c>arena.deinit()</c> — free the whole chunk chain. A static wrapper over
+    /// <see cref="ArenaAllocator.Deinit"/> (called by-ref on the local, like <see cref="ArenaToAllocator"/>).</summary>
+    public static void ArenaDeinit(ArenaAllocator* self) => self->Deinit();
 
     // ---- array-by-value return (the Milestone K cut, made sound) ---------
 

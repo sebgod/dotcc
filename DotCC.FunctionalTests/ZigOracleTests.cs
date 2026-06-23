@@ -426,6 +426,25 @@ public sealed class ZigOracleTests
             "    return r;\n" +
             "}\n" +
             "pub fn main() u8 { return make(std.heap.page_allocator, 42) catch 1; }\n", 42, "" },
+        // arena (Milestone U) — an ArenaAllocator over the default; two allocations bump the same
+        // chunk, `defer arena.deinit()` frees the chain at scope exit. The values are observable.
+        new object[] { "arena",
+            "const std = @import(\"std\");\n" +
+            "fn run() !u8 {\n" +
+            "    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);\n" +
+            "    defer arena.deinit();\n" +
+            "    const a = arena.allocator();\n" +
+            "    const s1 = try a.alloc(u8, 3);\n" +
+            "    s1[0] = 10;\n" +
+            "    s1[1] = 11;\n" +
+            "    s1[2] = 9;\n" +
+            "    const s2 = try a.alloc(u8, 2);\n" +
+            "    s2[0] = 7;\n" +
+            "    s2[1] = 5;\n" +
+            "    const total = s1[0] + s1[1] + s1[2] + s2[0] + s2[1];\n" +
+            "    return total;\n" +
+            "}\n" +
+            "pub fn main() u8 { return run() catch 1; }\n", 42, "" },
         // TUPLES (Milestone G). The headline use: a function returns a tuple `struct { u8, u8 }`
         // and the caller destructures it with `const a, const b = mm();` → C# ValueTuple +
         // `.Item1`/`.Item2`. 20 + 22 = 42.
