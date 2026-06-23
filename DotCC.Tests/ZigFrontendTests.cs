@@ -193,6 +193,26 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Evaluates_a_comptime_function_returning_a_struct_value()
+    {
+        // Milestone T — comptime aggregates: a comptime function returning a STRUCT by value. The
+        // interpreter zero-fills `var c: Config = undefined`, applies the field stores, and folds
+        // `c.width * c.height`; the result splices back as a `new Config { … }` object initializer
+        // in declared field order (so no buildConfig call survives at the use site). A LOCAL
+        // `const l = comptime f()` is the round-trippable form — real zig rejects the keyword on a
+        // CONTAINER const ("redundant comptime in already-comptime scope"), so the global is left
+        // off here (dotcc folds it too, leniently, but it isn't valid zig).
+        var cs = EmitZig(
+            "const Config = struct { width: u32, height: u32, area: u32 };\n" +
+            "fn buildConfig() Config {\n" +
+            "    var c: Config = undefined;\n" +
+            "    c.width = 4; c.height = 5; c.area = c.width * c.height;\n" +
+            "    return c;\n}\n" +
+            "pub fn main() u8 { const l = comptime buildConfig(); return @intCast(l.area + 22); }\n");
+        cs.ShouldContain("new Config { width = 4u, height = 5u, area = 20u }");
+    }
+
+    [Fact]
     public void Lowers_if_and_while_statements()
     {
         // if/else + while lower to the C# forms, conditions wrapped in Cond.B for
