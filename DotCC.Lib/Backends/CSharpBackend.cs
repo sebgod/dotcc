@@ -1473,6 +1473,18 @@ internal sealed class CSharpBackend
                     ? ($"ZigAlloc.DestroyCHeap<{elem}>({Expr(dc.Ptr)})", PPostfix)
                     : ($"{Sub(dc.Receiver, PPostfix)}.Destroy<{elem}>({Expr(dc.Ptr)})", PPostfix);
             }
+            // A Zig allocator `a.realloc(slice, n)` (Milestone U). FbaCtx → devirt FBA realloc;
+            // Receiver null → devirt C-heap (direct Libc.realloc); non-null → indirect (emulated).
+            case ReallocCall rc:
+            {
+                var elem = Cs(rc.Element.Unqualified);
+                var n = Coerced(rc.NewCount, CType.ULong);
+                if (rc.FbaCtx is not null)
+                    return ($"ZigAlloc.ReallocFba<{elem}>({Expr(rc.FbaCtx)}, {Expr(rc.OldSlice)}, {n}, {rc.OomCode})", PPostfix);
+                return rc.Receiver is null
+                    ? ($"ZigAlloc.ReallocCHeap<{elem}>({Expr(rc.OldSlice)}, {n}, {rc.OomCode})", PPostfix)
+                    : ($"{Sub(rc.Receiver, PPostfix)}.Realloc<{elem}>({Expr(rc.OldSlice)}, {n}, {rc.OomCode})", PPostfix);
+            }
             // An array-by-value return (the Milestone K cut, made sound). Copy the N elements of the
             // source array (a `T*`) into a heap-owned buffer so the returned pointer outlives the
             // callee frame — Zig arrays are value types. The source renders as a `T*` (an array var
@@ -2152,7 +2164,7 @@ internal sealed class CSharpBackend
         // valid statement expression. FreeCall/DestroyCall are void, so they MUST be recognized here
         // (a `_ = <void>` discard is a C# error); a discarded AllocCall/CreateCall is a normal
         // `_ = recv.Alloc(...)`, also fine as a stmt.
-        Assign or Call or IndirectCall or AllocCall or FreeCall or CreateCall or DestroyCall => true,
+        Assign or Call or IndirectCall or AllocCall or FreeCall or CreateCall or DestroyCall or ReallocCall => true,
         Unary u => u.Op is UnOp.PreInc or UnOp.PreDec or UnOp.PostInc or UnOp.PostDec,
         Paren p => IsStmtExpr(p.Inner),
         _ => false,

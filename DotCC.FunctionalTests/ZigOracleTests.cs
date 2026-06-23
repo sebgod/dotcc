@@ -445,6 +445,39 @@ public sealed class ZigOracleTests
             "    return total;\n" +
             "}\n" +
             "pub fn main() u8 { return run() catch 1; }\n", 42, "" },
+        // realloc_cheap (Milestone U) — grow a slice on the devirtualized C-heap default (a direct
+        // Libc.realloc); contents up to the old length are preserved, the new tail is written.
+        new object[] { "realloc_cheap",
+            "const std = @import(\"std\");\n" +
+            "fn run() !u8 {\n" +
+            "    const a = std.heap.page_allocator;\n" +
+            "    var s = try a.alloc(u8, 2);\n" +
+            "    s[0] = 10;\n" +
+            "    s[1] = 11;\n" +
+            "    s = try a.realloc(s, 4);\n" +
+            "    s[2] = 12;\n" +
+            "    s[3] = 9;\n" +
+            "    const total = s[0] + s[1] + s[2] + s[3];\n" +
+            "    a.free(s);\n" +
+            "    return total;\n" +
+            "}\n" +
+            "pub fn main() u8 { return run() catch 1; }\n", 42, "" },
+        // realloc_param (Milestone U) — realloc through an OPAQUE `std.mem.Allocator` parameter,
+        // EMULATED via the 2-fn vtable (alloc + copy-preserved-prefix + free).
+        new object[] { "realloc_param",
+            "const std = @import(\"std\");\n" +
+            "fn grow(a: std.mem.Allocator) !u8 {\n" +
+            "    var s = try a.alloc(u8, 2);\n" +
+            "    s[0] = 30;\n" +
+            "    s[1] = 0;\n" +
+            "    s = try a.realloc(s, 4);\n" +
+            "    s[2] = 12;\n" +
+            "    s[3] = 0;\n" +
+            "    const r = s[0] + s[2];\n" +
+            "    a.free(s);\n" +
+            "    return r;\n" +
+            "}\n" +
+            "pub fn main() u8 { return grow(std.heap.page_allocator) catch 1; }\n", 42, "" },
         // TUPLES (Milestone G). The headline use: a function returns a tuple `struct { u8, u8 }`
         // and the caller destructures it with `const a, const b = mm();` → C# ValueTuple +
         // `.Item1`/`.Item2`. 20 + 22 = 42.

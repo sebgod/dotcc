@@ -347,6 +347,17 @@ public sealed record CreateCall(CExpr? Receiver, CType Element, int OomCode, CEx
 /// over <see cref="Receiver"/>. <see cref="CExpr.Type"/> is <c>void</c>. Zig-lowering / C#-target only.</summary>
 public sealed record DestroyCall(CExpr? Receiver, CExpr Ptr, CType Element, CExpr? FbaCtx = null) : CExpr;
 
+/// <summary>A Zig allocator <c>a.realloc(slice, n)</c> (Milestone U) — grow/shrink a slice (may
+/// move), Zig's <c>Error![]T</c>. <see cref="OldSlice"/> is the existing slice, <see cref="Element"/>
+/// its element type, <see cref="NewCount"/> the new element count, <see cref="OomCode"/> the
+/// <c>error.OutOfMemory</c> code. <see cref="CExpr.Type"/> is <c>ErrorUnion(Slice(Element))</c> (so it
+/// composes with <c>try</c>/<c>catch</c>, like <see cref="AllocCall"/>). The devirt fork mirrors
+/// <see cref="AllocCall"/>: <see cref="FbaCtx"/> non-null ⇒ FBA-devirt (<c>ZigAlloc.ReallocFba</c>);
+/// else <see cref="Receiver"/> null ⇒ C-heap-devirt (<c>ZigAlloc.ReallocCHeap</c>, a direct
+/// <c>Libc.realloc</c>), non-null ⇒ indirect (<c>recv.Realloc</c>, emulated via the 2-fn vtable).
+/// Zig-lowering / C#-target only.</summary>
+public sealed record ReallocCall(CExpr? Receiver, CExpr OldSlice, CType Element, CExpr NewCount, int OomCode, CExpr? FbaCtx = null) : CExpr;
+
 /// <summary>A Zig tuple literal <c>.{ a, b, … }</c> (Milestone G), at a tuple sink or with an
 /// inferred type. <see cref="Elements"/> are the positional element expressions in order;
 /// <see cref="TupleType"/> is the <see cref="CType.Tuple"/> produced (and <see cref="CExpr.Type"/>).

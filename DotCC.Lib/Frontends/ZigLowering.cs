@@ -3919,7 +3919,7 @@ internal sealed partial class ZigLowering
         // `a.alloc(T, n)` / `a.free(s)` (and the deferred `create`/`destroy`) on a known-default
         // (→ devirt) or an Allocator-typed receiver (→ indirect). A same-named method on a
         // non-allocator receiver falls through to the generic dispatch below.
-        if (methodName is "alloc" or "free" or "create" or "destroy"
+        if (methodName is "alloc" or "free" or "create" or "destroy" or "realloc" or "resize" or "remap"
             && TryLowerAllocatorMethod(fld, methodName, argItems, out var allocExpr))
         {
             return allocExpr;
@@ -4083,7 +4083,34 @@ internal sealed partial class ZigLowering
                 result = new DestroyCall(recv, ptrExpr, pp.Pointee, fbaCtx) { Type = CType.Void };
                 return true;
             }
-            default:   // unreachable: the caller only dispatches alloc/free/create/destroy here
+            case "realloc":   // grow/shrink a slice → Error![]T (Milestone U)
+            {
+                if (argItems.Count != 2)
+                {
+                    throw new IrUnsupportedException($"zig allocator `.realloc` expects (slice, new count); got {argItems.Count} argument(s)");
+                }
+                var oldSlice = LowerExpr(argItems[0]);
+                if (oldSlice.Type.Unqualified is not CType.Slice rslc)
+                {
+                    throw new IrUnsupportedException($"zig allocator `.realloc` expects a slice argument, got {oldSlice.Type.Describe()}");
+                }
+                var newCount = LowerExpr(argItems[1]);
+                result = new ReallocCall(recv, oldSlice, rslc.Element, newCount, ErrorCode("OutOfMemory"), fbaCtx)
+                {
+                    Type = new CType.ErrorUnion(new CType.Slice(rslc.Element)),
+                };
+                return true;
+            }
+            case "resize":   // in-place resize → bool (deferred — see below)
+            case "remap":    // resize-possibly-moving → ?[]T (deferred — see below)
+                // `resize` returns whether the block grew/shrank IN PLACE (no move); `remap` returns
+                // the possibly-moved slice or null. Both outcomes are allocator-page-dependent (real
+                // zig's page_allocator answers from page rounding), so matching the true/false / null
+                // observably would need per-allocator in-place tracking dotcc doesn't model yet. Clear
+                // deferred error rather than a divergent guess — use `.realloc` (which always works).
+                throw new IrUnsupportedException(
+                    $"zig allocator `.{methodName}` is deferred (its in-place / optional result is allocator-page-dependent); use `.realloc`");
+            default:   // unreachable: the caller only dispatches the allocator method names above
                 return false;
         }
     }

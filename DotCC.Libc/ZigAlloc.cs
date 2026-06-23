@@ -99,6 +99,20 @@ public unsafe struct Allocator
     /// is a legal method PARAMETER even though it cannot be a generic type ARGUMENT.</summary>
     public void Destroy<T>(T* p) where T : unmanaged
         => Vtable.FreeFn(Ctx, (byte*)p, (nuint)sizeof(T));
+
+    /// <summary><c>a.realloc(slice, n)</c> (Milestone U) — grow/shrink through the vtable. The
+    /// <see cref="Allocator"/> vtable has only alloc/free, so realloc is EMULATED: allocate a fresh
+    /// region, copy the preserved prefix, free the old. Returns the new <see cref="Slice{T}"/> or
+    /// <paramref name="oom"/>.</summary>
+    public ErrUnion<Slice<T>> Realloc<T>(Slice<T> old, ulong n, ushort oom) where T : unmanaged
+    {
+        var fresh = Alloc<T>(n, oom);
+        if (fresh.IsErr) { return fresh; }
+        ulong keep = old.Len < n ? old.Len : n;
+        System.Buffer.MemoryCopy(old.Ptr, fresh.Value.Ptr, (long)(n * (ulong)sizeof(T)), (long)(keep * (ulong)sizeof(T)));
+        Free(old);
+        return fresh;
+    }
 }
 
 /// <summary>
@@ -286,6 +300,36 @@ public static unsafe class ZigAlloc
 
     /// <summary>The FBA-site-devirtualized <c>a.destroy(p)</c> — a no-op, mirroring <see cref="FbaFree"/>.</summary>
     public static void DestroyFba<T>(FixedBufferAllocator* self, T* p) where T : unmanaged { }
+
+    // ---- realloc (Milestone U) -------------------------------------------
+
+    /// <summary>The DEVIRTUALIZED C-heap <c>a.realloc(slice, n)</c> — a direct
+    /// <see cref="Libc.realloc"/> (which preserves contents up to the smaller of old/new). Returns a
+    /// new <see cref="Slice{T}"/> of <paramref name="n"/> elements, or <paramref name="oom"/> on
+    /// failure (incl. a byte count past <see cref="int.MaxValue"/>, since <see cref="Libc.realloc"/>
+    /// takes an <c>int</c>).</summary>
+    public static ErrUnion<Slice<T>> ReallocCHeap<T>(Slice<T> old, ulong n, ushort oom) where T : unmanaged
+    {
+        nuint bytes = (nuint)n * (nuint)sizeof(T);
+        if (bytes > int.MaxValue) { return ErrUnion<Slice<T>>.Err(oom); }
+        void* p = Libc.realloc(old.Ptr, (int)bytes);
+        return p == null
+            ? ErrUnion<Slice<T>>.Err(oom)
+            : ErrUnion<Slice<T>>.Ok(new Slice<T>((T*)p, n));
+    }
+
+    /// <summary>The FBA-site-devirtualized <c>a.realloc(slice, n)</c> — EMULATED (an FBA has no
+    /// in-place grow): bump a fresh region and copy the preserved prefix. The old region is left in
+    /// the buffer (an FBA reclaims only by reset), matching <see cref="FbaFree"/>.</summary>
+    public static ErrUnion<Slice<T>> ReallocFba<T>(FixedBufferAllocator* self, Slice<T> old, ulong n, ushort oom) where T : unmanaged
+    {
+        nuint bytes = (nuint)n * (nuint)sizeof(T);
+        byte* p = FbaAlloc(self, bytes);
+        if (p == null) { return ErrUnion<Slice<T>>.Err(oom); }
+        ulong keep = old.Len < n ? old.Len : n;
+        System.Buffer.MemoryCopy(old.Ptr, p, (long)bytes, (long)(keep * (ulong)sizeof(T)));
+        return ErrUnion<Slice<T>>.Ok(new Slice<T>((T*)p, n));
+    }
 
     // ---- ArenaAllocator (the third allocator, Milestone U) ---------------
 
