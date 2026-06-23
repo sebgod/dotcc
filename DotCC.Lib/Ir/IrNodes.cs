@@ -321,6 +321,24 @@ public sealed record AllocCall(CExpr? Receiver, CType Element, CExpr Count, int 
 /// (indirect). <see cref="CExpr.Type"/> is <c>void</c>. Zig-lowering / C#-target only.</summary>
 public sealed record FreeCall(CExpr? Receiver, CExpr SliceExpr, CType Element) : CExpr;
 
+/// <summary>A Zig allocator <c>a.create(T)</c> (Milestone U) — single-object allocation,
+/// Zig's <c>Error!*T</c>. <see cref="Element"/> is <c>T</c>, <see cref="OomCode"/> the
+/// <c>error.OutOfMemory</c> code. <see cref="CExpr.Type"/> is <c>ErrorUnion(Pointer(Element))</c>,
+/// so it composes with <c>try</c> (which casts the unwrapped <c>nuint</c> back to <c>T*</c>).
+/// The runtime carrier is <c>ErrUnion&lt;nuint&gt;</c>: a pointer cannot be an <c>ErrUnion&lt;T&gt;</c>
+/// generic argument, so the address rides as a <c>nuint</c>. <see cref="Receiver"/> null = the
+/// DEVIRTUALIZED C-heap default → <c>ZigAlloc.CreateCHeap&lt;T&gt;(oom)</c>; non-null = an
+/// opaque/runtime allocator → <c>recv.Create&lt;T&gt;(oom)</c>. Zig-lowering / C#-target only.</summary>
+public sealed record CreateCall(CExpr? Receiver, CType Element, int OomCode) : CExpr;
+
+/// <summary>A Zig allocator <c>a.destroy(p)</c> (Milestone U) — free a single object from
+/// <see cref="CreateCall"/>. <see cref="Ptr"/> is the <c>*T</c> to free, <see cref="Element"/> its
+/// pointee type (the byte size at free). <see cref="Receiver"/> null = the DEVIRTUALIZED C-heap
+/// default → <c>ZigAlloc.DestroyCHeap&lt;T&gt;(p)</c> (a direct <c>Libc.free</c>); non-null = an
+/// opaque/runtime allocator → <c>recv.Destroy&lt;T&gt;(p)</c>. <see cref="CExpr.Type"/> is
+/// <c>void</c>. Zig-lowering / C#-target only.</summary>
+public sealed record DestroyCall(CExpr? Receiver, CExpr Ptr, CType Element) : CExpr;
+
 /// <summary>A Zig tuple literal <c>.{ a, b, … }</c> (Milestone G), at a tuple sink or with an
 /// inferred type. <see cref="Elements"/> are the positional element expressions in order;
 /// <see cref="TupleType"/> is the <see cref="CType.Tuple"/> produced (and <see cref="CExpr.Type"/>).

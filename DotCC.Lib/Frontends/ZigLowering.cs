@@ -3478,7 +3478,17 @@ internal sealed partial class ZigLowering
                 {
                     throw new IrUnsupportedException("zig `try` requires an error-union operand");
                 }
-                return new ZigTry(inner) { Type = eu.Payload };
+                var unwrapped = new ZigTry(inner) { Type = eu.Payload };
+                // A `create`-style error-union-over-pointer (`Error!*T`, Milestone U) carries its
+                // payload as a `nuint` (a pointer can't be an `ErrUnion<T>` generic arg), so
+                // `ErrUnion.Try(...)` yields a `nuint`; cast it back to the `T*` the payload names.
+                // `create` is the only producer of a pointer-payload union, so the cast is
+                // exactly-and-only correct here.
+                if (eu.Payload.Unqualified is CType.Pointer)
+                {
+                    return new Cast(eu.Payload, unwrapped) { Type = eu.Payload };
+                }
+                return unwrapped;
             }
             // `comptime EXPR` (Milestone T) — force compile-time evaluation of a value. The inner
             // expression is lowered now, but wrapped in a deferred ComptimeFold and queued; it is
@@ -3997,9 +4007,38 @@ internal sealed partial class ZigLowering
                 result = new FreeCall(devirt ? null : recv, sliceExpr, slc.Element) { Type = CType.Void };
                 return true;
             }
-            default:   // create / destroy — single-object alloc
-                throw new IrUnsupportedException(
-                    $"zig allocator `.{methodName}` is deferred (single-object alloc needs an error-union-over-pointer); use `.alloc`/`.free`");
+            case "create":   // single-object alloc → Error!*T (Milestone U)
+            {
+                if (argItems.Count != 1)
+                {
+                    throw new IrUnsupportedException($"zig allocator `.create` expects (type); got {argItems.Count} argument(s)");
+                }
+                var elem = LowerType(argItems[0]);
+                // `Error!*T` is represented `ErrorUnion(Pointer(T))` at the IR-type level (so `try`
+                // unwraps to a `*T`); the runtime carrier is `ErrUnion<nuint>` (a pointer can't be
+                // an ErrUnion<T> generic arg). The `try` lowering casts the unwrapped nuint to T*.
+                result = new CreateCall(devirt ? null : recv, elem, ErrorCode("OutOfMemory"))
+                {
+                    Type = new CType.ErrorUnion(new CType.Pointer(elem)),
+                };
+                return true;
+            }
+            case "destroy":   // free a single object from `.create` (Milestone U)
+            {
+                if (argItems.Count != 1)
+                {
+                    throw new IrUnsupportedException($"zig allocator `.destroy` expects (pointer); got {argItems.Count} argument(s)");
+                }
+                var ptrExpr = LowerExpr(argItems[0]);
+                if (ptrExpr.Type.Unqualified is not CType.Pointer pp)
+                {
+                    throw new IrUnsupportedException($"zig allocator `.destroy` expects a pointer argument, got {ptrExpr.Type.Describe()}");
+                }
+                result = new DestroyCall(devirt ? null : recv, ptrExpr, pp.Pointee) { Type = CType.Void };
+                return true;
+            }
+            default:   // unreachable: the caller only dispatches alloc/free/create/destroy here
+                return false;
         }
     }
 

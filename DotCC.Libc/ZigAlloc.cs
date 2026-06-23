@@ -82,6 +82,23 @@ public unsafe struct Allocator
     /// take the size at free time).</summary>
     public void Free<T>(Slice<T> s) where T : unmanaged
         => Vtable.FreeFn(Ctx, (byte*)s.Ptr, (nuint)s.Len * (nuint)sizeof(T));
+
+    /// <summary><c>a.create(T)</c> — allocate one <typeparamref name="T"/> through the vtable
+    /// (Milestone U). The address is carried back as a <c>nuint</c>: a pointer cannot be the
+    /// generic argument of <see cref="ErrUnion{T}"/> (<c>T : unmanaged</c> excludes pointer
+    /// types), so <c>Error!*T</c> is represented as <c>ErrUnion&lt;nuint&gt;</c> and the caller
+    /// casts the unwrapped value back to <c>T*</c>. Returns <paramref name="oom"/> on failure.</summary>
+    public ErrUnion<nuint> Create<T>(ushort oom) where T : unmanaged
+    {
+        byte* p = Vtable.AllocFn(Ctx, (nuint)sizeof(T));
+        return p == null ? ErrUnion<nuint>.Err(oom) : ErrUnion<nuint>.Ok((nuint)p);
+    }
+
+    /// <summary><c>a.destroy(p)</c> — free a single object previously returned by
+    /// <see cref="Create{T}"/>, passing <c>sizeof(T)</c> back as the byte length. A <c>T*</c>
+    /// is a legal method PARAMETER even though it cannot be a generic type ARGUMENT.</summary>
+    public void Destroy<T>(T* p) where T : unmanaged
+        => Vtable.FreeFn(Ctx, (byte*)p, (nuint)sizeof(T));
 }
 
 /// <summary>
@@ -151,6 +168,19 @@ public static unsafe class ZigAlloc
     /// <see cref="Libc.free"/>.</summary>
     public static void FreeCHeap<T>(Slice<T> s) where T : unmanaged
         => CHeapFree(null, (byte*)s.Ptr, 0);
+
+    /// <summary>The <b>devirtualized</b> <c>page_allocator.create(T)</c> — a direct
+    /// <see cref="Libc.malloc"/> of <c>sizeof(T)</c> bytes, no vtable. The address is carried as a
+    /// <c>nuint</c> (see <see cref="Allocator.Create{T}"/> for why).</summary>
+    public static ErrUnion<nuint> CreateCHeap<T>(ushort oom) where T : unmanaged
+    {
+        byte* p = CHeapAlloc(null, (nuint)sizeof(T));
+        return p == null ? ErrUnion<nuint>.Err(oom) : ErrUnion<nuint>.Ok((nuint)p);
+    }
+
+    /// <summary>The <b>devirtualized</b> <c>page_allocator.destroy(p)</c> — a direct
+    /// <see cref="Libc.free"/>.</summary>
+    public static void DestroyCHeap<T>(T* p) where T : unmanaged => CHeapFree(null, (byte*)p, 0);
 
     // ---- FixedBufferAllocator (the second allocator) ---------------------
 
