@@ -1299,6 +1299,25 @@ public sealed class ZigOracleTests
             "    _ = printf(\"%u %u %u %u %u\\n\", tbl[0], tbl[1], tbl[2], tbl[3], tbl[4]);\n" +
             "    return @intCast(tbl[0] + tbl[1] + tbl[2] + tbl[3] + tbl[4] + 12);\n" +
             "}\n", 42, "0 1 4 9 16" },
+
+        // `inline for (lo..hi) |i|` — comptime loop UNROLLING (Milestone T, part 3). The SAME
+        // construct is exercised in both contexts: inside buildSquares() it runs at COMPTIME (the
+        // function is `comptime`-called, so the interpreter walks the unrolled copies to fold the
+        // table), and in main() it unrolls at RUNTIME into straight-line accumulation. sq = [0,1,4,9,16],
+        // sum = 30; 30 + 12 = 42. Validated identical (stdout + exit) against real zig 0.17.
+        new object[] { "inline_for",
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "fn buildSquares() [5]u32 {\n" +
+            "    var t: [5]u32 = undefined;\n" +
+            "    inline for (0..5) |i| { t[i] = @intCast(i * i); }\n" +
+            "    return t;\n}\n" +
+            "pub fn main() u8 {\n" +
+            "    const sq = comptime buildSquares();\n" +
+            "    var sum: u32 = 0;\n" +
+            "    inline for (0..5) |i| { sum += sq[i]; }\n" +
+            "    _ = printf(\"sum=%u sq4=%u\\n\", sum, sq[4]);\n" +
+            "    return @intCast(sum + 12);\n" +
+            "}\n", 42, "sum=30 sq4=16" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

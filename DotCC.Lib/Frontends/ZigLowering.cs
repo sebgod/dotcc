@@ -1752,6 +1752,10 @@ internal sealed partial class ZigLowering
             case Zig.StmtBreakLabel b:     return LowerLabeledLoopJump(Tok(b.Arg2), isContinue: false);
             case Zig.StmtContinueLabel c:  return LowerLabeledLoopJump(Tok(c.Arg2), isContinue: true);
 
+            // `inline for (lo..hi) |i| body` — comptime loop UNROLLING (Milestone T, part 3): replicate
+            // the body once per index, with `i` bound to a compile-time constant in each copy.
+            case Zig.InlineLoop il:        return LowerInlineLoop(il.Arg1);
+
             // `switch (subject) { prongs }` → the C IR Switch (subject=Arg2, prongs=Arg5 for both
             // the plain and trailing-comma forms). A tagged-union subject takes the capture path.
             case Zig.StmtSwitch s:         return LowerSwitchStmt(s.Arg2, s.Arg5);
@@ -2147,6 +2151,86 @@ internal sealed partial class ZigLowering
         if (t.BreakUsed) { stmts.Add(new Labeled(t.BreakLabel, new Block(new List<CStmt>()))); }
         return new Seq(stmts);
     }
+
+    /// The largest number of iterations <c>inline for</c> will unroll — a backstop on an absurd
+    /// <c>inline for (0..1_000_000)</c> (each iteration emits a full body copy, so the cap is far
+    /// tighter than the comptime-array cap). A real <c>inline</c> loop is a handful to a few dozen.
+    private const long InlineUnrollCap = 1 << 12;   // 4096
+
+    /// <summary>Lower an <c>inline for (lo..hi) |i| body</c> (Milestone T, part 3) by UNROLLING: the
+    /// bounds are folded to compile-time constants, and the body is replicated once per index, each
+    /// copy a block <c>{ const i = v; body }</c> binding the capture to that iteration's constant. The
+    /// loop vanishes — no runtime <c>for</c> — and because each copy is plain straight-line IR, it
+    /// works identically whether the enclosing function runs at runtime (the copies execute in order)
+    /// or is itself <c>comptime</c>-called (the interpreter walks the unrolled copies, the per-copy
+    /// <c>const i = v</c> binding into its frame). Only the counted range form is unrolled; an
+    /// <c>inline while</c> or <c>inline for</c> over a slice/array is a clear deferred error, as is a
+    /// non-constant bound or a body that <c>break</c>s/<c>continue</c>s the (now-absent) loop.</summary>
+    private CStmt LowerInlineLoop(Item loopItem)
+    {
+        if (loopItem.Content is not Zig.StmtForRange f)
+        {
+            throw new IrUnsupportedException(
+                "`inline` is only supported on a counted `for (lo..hi) |i|` range loop (comptime "
+                + "unrolling) — `inline while` and `inline for` over a slice/array are not supported yet");
+        }
+
+        // Bounds must be compile-time-known. They fold NOW (during this pass) via the const-eval
+        // interpreter — literals / constant arithmetic / sizeof — so a forward-referenced comptime
+        // CALL in a bound (whose callee may not be lowered yet) is intentionally not foldable here.
+        if (_ir.ConstEval(LowerExpr(f.Arg2)) is not { } lo || _ir.ConstEval(LowerExpr(f.Arg4)) is not { } hi)
+        {
+            throw new IrUnsupportedException(
+                "`inline for` bounds must be compile-time-known integer constants");
+        }
+        if (hi < lo)
+        {
+            throw new IrUnsupportedException(
+                $"`inline for` upper bound ({hi}) is below the lower bound ({lo})");
+        }
+        if (hi - lo > InlineUnrollCap)
+        {
+            throw new IrUnsupportedException(
+                $"`inline for` would unroll {hi - lo} iterations, exceeding the cap ({InlineUnrollCap})");
+        }
+
+        var name = Tok(f.Arg7);
+        var copies = new List<CStmt>((int)(hi - lo));
+        for (long v = lo; v < hi; v++)
+        {
+            // Each copy gets its own scope so the capture `i` is a fresh block-local (sibling blocks
+            // may reuse the name in C#; the symbol table's CS0136 rename covers any leak regardless).
+            _symbols.EnterScope();
+            var iSym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = CType.ULong });
+            var idxLit = new LitInt(v.ToString(System.Globalization.CultureInfo.InvariantCulture), v) { Type = CType.ULong };
+            var decl = new DeclStmt(new List<LocalDecl> { new(iSym, idxLit) });
+            var body = LowerStmt(f.Arg9);
+            _symbols.ExitScope();
+            if (HasLoopEscape(body))
+            {
+                throw new IrUnsupportedException(
+                    "`break`/`continue` inside an `inline for` body is not supported yet (the loop is "
+                    + "unrolled, so there is no enclosing loop to target)");
+            }
+            copies.Add(new Block(new List<CStmt> { decl, body }));
+        }
+        return new Seq(copies);
+    }
+
+    /// <summary>Does this statement contain a bare <c>break</c>/<c>continue</c> that would target an
+    /// enclosing loop (as opposed to one nested inside it)? Used to reject loop-control inside an
+    /// <c>inline for</c> body, where unrolling removes the loop. Descends into blocks / sequences /
+    /// <c>if</c> branches / labeled statements, but NOT into a nested loop or switch — a
+    /// break/continue there binds to that construct, not to the unrolled <c>inline for</c>.</summary>
+    private static bool HasLoopEscape(CStmt s) => s switch
+    {
+        Break or Continue => true,
+        Block b           => b.Stmts.Any(HasLoopEscape),
+        Seq q             => q.Stmts.Any(HasLoopEscape),
+        If i              => HasLoopEscape(i.Then) || (i.Else is { } e && HasLoopEscape(e)),
+        Labeled l         => HasLoopEscape(l.Body),
+        _                 => false,
+    };
 
     /// <summary>Rebuild a loop statement with its body transformed by <paramref name="f"/> — used to
     /// append a labeled loop's continue label to the end of the body. Defensive: anything that isn't a
