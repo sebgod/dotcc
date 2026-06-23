@@ -2193,54 +2193,96 @@ internal sealed partial class ZigLowering
     /// tighter than the comptime-array cap). A real <c>inline</c> loop is a handful to a few dozen.
     private const long InlineUnrollCap = 1 << 12;   // 4096
 
-    /// <summary>Lower an <c>inline for (lo..hi) |i| body</c> (Milestone T, part 3) by UNROLLING: the
-    /// bounds are folded to compile-time constants, and the body is replicated once per index, each
-    /// copy a block <c>{ const i = v; body }</c> binding the capture to that iteration's constant. The
-    /// loop vanishes — no runtime <c>for</c> — and because each copy is plain straight-line IR, it
-    /// works identically whether the enclosing function runs at runtime (the copies execute in order)
-    /// or is itself <c>comptime</c>-called (the interpreter walks the unrolled copies, the per-copy
-    /// <c>const i = v</c> binding into its frame). Only the counted range form is unrolled; an
-    /// <c>inline while</c> or <c>inline for</c> over a slice/array is a clear deferred error, as is a
-    /// non-constant bound or a body that <c>break</c>s/<c>continue</c>s the (now-absent) loop.</summary>
+    /// <summary>Lower an <c>inline for</c> (Milestone T, part 3) by UNROLLING: the body is replicated
+    /// once per iteration, each copy a block <c>{ const cap = …; body }</c> binding the capture to that
+    /// iteration's value. The loop vanishes — no runtime <c>for</c> — and because each copy is plain
+    /// straight-line IR, it works identically whether the enclosing function runs at runtime (the
+    /// copies execute in order) or is itself <c>comptime</c>-called (the interpreter walks the unrolled
+    /// copies, the per-copy binding entering its frame). Two forms are unrolled:
+    /// <list type="bullet">
+    /// <item><c>for (lo..hi) |i|</c> — the COUNTED range; the bounds fold to compile-time constants
+    /// and the capture binds to each constant index.</item>
+    /// <item><c>for (arr) |x|</c> — over a fixed <c>[N]T</c> array of comptime-known length; the
+    /// capture binds to each element by value (<c>const x = arr[k];</c>).</item>
+    /// </list>
+    /// An <c>inline while</c>, an <c>inline for</c> over a slice (length not comptime-known) or the
+    /// indexed <c>|x, i|</c> / by-ref <c>|*x|</c> forms, a non-constant range bound, or a body that
+    /// <c>break</c>s/<c>continue</c>s the (now-absent) loop are clear deferred errors.</summary>
     private CStmt LowerInlineLoop(Item loopItem)
     {
-        if (loopItem.Content is not Zig.StmtForRange f)
+        switch (loopItem.Content)
         {
-            throw new IrUnsupportedException(
-                "`inline` is only supported on a counted `for (lo..hi) |i|` range loop (comptime "
-                + "unrolling) — `inline while` and `inline for` over a slice/array are not supported yet");
-        }
+            // `inline for (lo..hi) |i|` — the counted range. Bounds fold NOW (during this pass) via the
+            // const-eval interpreter — literals / constant arithmetic / sizeof — so a forward-referenced
+            // comptime CALL in a bound (whose callee may not be lowered yet) is intentionally not folded.
+            case Zig.StmtForRange f:
+            {
+                if (_ir.ConstEval(LowerExpr(f.Arg2)) is not { } lo || _ir.ConstEval(LowerExpr(f.Arg4)) is not { } hi)
+                {
+                    throw new IrUnsupportedException(
+                        "`inline for` bounds must be compile-time-known integer constants");
+                }
+                if (hi < lo)
+                {
+                    throw new IrUnsupportedException(
+                        $"`inline for` upper bound ({hi}) is below the lower bound ({lo})");
+                }
+                // The capture is the usize index, bound to a literal in each copy.
+                return UnrollInlineFor(hi - lo, Tok(f.Arg7), CType.ULong, f.Arg9,
+                    k => new LitInt((lo + k).ToString(System.Globalization.CultureInfo.InvariantCulture), lo + k) { Type = CType.ULong });
+            }
 
-        // Bounds must be compile-time-known. They fold NOW (during this pass) via the const-eval
-        // interpreter — literals / constant arithmetic / sizeof — so a forward-referenced comptime
-        // CALL in a bound (whose callee may not be lowered yet) is intentionally not foldable here.
-        if (_ir.ConstEval(LowerExpr(f.Arg2)) is not { } lo || _ir.ConstEval(LowerExpr(f.Arg4)) is not { } hi)
-        {
-            throw new IrUnsupportedException(
-                "`inline for` bounds must be compile-time-known integer constants");
-        }
-        if (hi < lo)
-        {
-            throw new IrUnsupportedException(
-                $"`inline for` upper bound ({hi}) is below the lower bound ({lo})");
-        }
-        if (hi - lo > InlineUnrollCap)
-        {
-            throw new IrUnsupportedException(
-                $"`inline for` would unroll {hi - lo} iterations, exceeding the cap ({InlineUnrollCap})");
-        }
+            // `inline for (arr) |x|` — over a fixed array of comptime-known length. The operand must be
+            // a named array variable (so each element read `arr[k]` is side-effect-free across copies);
+            // the capture binds to the element by value.
+            case Zig.StmtForSlice fs:
+            {
+                var operand = LowerExpr(fs.Arg2);
+                if (operand.Type.Unqualified is not CType.Array arr || arr.Count is not int n)
+                {
+                    throw new IrUnsupportedException(
+                        "`inline for` over a value requires a fixed-size array `[N]T` of comptime-known "
+                        + "length (a slice's length is a runtime value)");
+                }
+                if (operand is not VarRef)
+                {
+                    throw new IrUnsupportedException(
+                        "`inline for` over an array requires a named array variable in V1 (so each "
+                        + "element read is side-effect-free under unrolling)");
+                }
+                // Re-lower the operand per copy (a VarRef is idempotent) so each `arr[k]` is its own node.
+                return UnrollInlineFor(n, Tok(fs.Arg5), arr.Element, fs.Arg7,
+                    k => new DotCC.Ir.Index(LowerExpr(fs.Arg2), new LitInt(k.ToString(System.Globalization.CultureInfo.InvariantCulture), k) { Type = CType.ULong }) { Type = arr.Element });
+            }
 
-        var name = Tok(f.Arg7);
-        var copies = new List<CStmt>((int)(hi - lo));
-        for (long v = lo; v < hi; v++)
+            default:
+                throw new IrUnsupportedException(
+                    "`inline` is only supported on a counted `for (lo..hi) |i|` range loop or a "
+                    + "`for (arr) |x|` over a fixed array (comptime unrolling) — `inline while`, the "
+                    + "indexed `|x, i|` / by-ref `|*x|` forms, and `inline for` over a slice are not supported yet");
+        }
+    }
+
+    /// <summary>Build the unrolled copies of an <c>inline for</c> body: for each of
+    /// <paramref name="count"/> iterations, a block <c>{ const capture = initFor(k); body }</c> with the
+    /// capture freshly declared in its own scope (sibling blocks may reuse the name in C#; the symbol
+    /// table's CS0136 rename covers any leak regardless). A bare <c>break</c>/<c>continue</c> in the
+    /// body is rejected — unrolling removes the loop, so it would have no target. The count is capped to
+    /// bound emitted-code size.</summary>
+    private CStmt UnrollInlineFor(long count, string captureName, CType captureType, Item bodyItem, System.Func<long, CExpr> initFor)
+    {
+        if (count > InlineUnrollCap)
         {
-            // Each copy gets its own scope so the capture `i` is a fresh block-local (sibling blocks
-            // may reuse the name in C#; the symbol table's CS0136 rename covers any leak regardless).
+            throw new IrUnsupportedException(
+                $"`inline for` would unroll {count} iterations, exceeding the cap ({InlineUnrollCap})");
+        }
+        var copies = new List<CStmt>((int)count);
+        for (long k = 0; k < count; k++)
+        {
             _symbols.EnterScope();
-            var iSym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = CType.ULong });
-            var idxLit = new LitInt(v.ToString(System.Globalization.CultureInfo.InvariantCulture), v) { Type = CType.ULong };
-            var decl = new DeclStmt(new List<LocalDecl> { new(iSym, idxLit) });
-            var body = LowerStmt(f.Arg9);
+            var sym = _symbols.Declare(new Symbol { Name = captureName, Kind = SymKind.Var, Type = captureType });
+            var decl = new DeclStmt(new List<LocalDecl> { new(sym, initFor(k)) });
+            var body = LowerStmt(bodyItem);
             _symbols.ExitScope();
             if (HasLoopEscape(body))
             {
