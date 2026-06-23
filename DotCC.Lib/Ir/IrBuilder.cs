@@ -641,6 +641,13 @@ internal sealed partial class IrBuilder
     // models, so size/offset can be computed at compile time — which an array bound
     // like `char padding[offsetof(T, m)]` requires (Lua's alignment-union trick).
 
+    /// <summary>The ABI alignment (in bytes) of a type — the comptime value of Zig's
+    /// <c>@alignOf(T)</c> (Milestone T, part 4). A pure compile-time constant on this LP64 target, so
+    /// the Zig front-end folds it straight to a literal; surfaced here because <see cref="Layout"/> is
+    /// private and the layout model (natural alignment, struct = max field alignment) lives in this
+    /// type.</summary>
+    internal int AlignOfConst(CType t) => Layout(t).Align;
+
     /// <summary>The (size, alignment) in bytes of a type under the C ABI / .NET
     /// blittable layout.</summary>
     private (int Size, int Align) Layout(CType t)

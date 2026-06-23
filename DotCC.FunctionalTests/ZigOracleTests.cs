@@ -1318,6 +1318,22 @@ public sealed class ZigOracleTests
             "    _ = printf(\"sum=%u sq4=%u\\n\", sum, sq[4]);\n" +
             "    return @intCast(sum + 12);\n" +
             "}\n", 42, "sum=30 sq4=16" },
+
+        // `@alignOf(T)` / `@offsetOf(T, "field")` as comptime values (Milestone T, part 4). An
+        // `extern struct` pins the C-ABI layout (a plain Zig struct may reorder fields), so dotcc's
+        // layout model and real zig agree: Point { a:u8, b:u32, c:u16 } → size 12, align 4, b@4, c@8.
+        // 12 + 4 + 4 + 8 + 14 = 42. (`@sizeOf` rides along — already supported.)
+        new object[] { "align_offset",
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "const Point = extern struct { a: u8, b: u32, c: u16 };\n" +
+            "pub fn main() u8 {\n" +
+            "    const sz: usize = @sizeOf(Point);\n" +
+            "    const al: usize = @alignOf(Point);\n" +
+            "    const ob: usize = @offsetOf(Point, \"b\");\n" +
+            "    const oc: usize = @offsetOf(Point, \"c\");\n" +
+            "    _ = printf(\"sz=%zu al=%zu ob=%zu oc=%zu\\n\", sz, al, ob, oc);\n" +
+            "    return @intCast(sz + al + ob + oc + 14);\n" +
+            "}\n", 42, "sz=12 al=4 ob=4 oc=8" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

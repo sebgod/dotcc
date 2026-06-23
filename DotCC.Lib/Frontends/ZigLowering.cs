@@ -1534,6 +1534,42 @@ internal sealed partial class ZigLowering
                     throw new IrUnsupportedException($"zig `@sizeOf` expects (type); got {bargs.Count} argument(s)");
                 }
                 return new SizeOfExpr(LowerType(bargs[0])) { Type = CType.ULong };
+            case "@alignOf":
+            {
+                // `@alignOf(T)` — the ABI alignment as `usize` (Milestone T, part 4). Always a
+                // compile-time constant on this LP64 target (the layout model computes it), so it
+                // folds straight to a literal — no IR node, and it participates in comptime arithmetic
+                // (a literal already folds) and renders directly at a runtime use site.
+                if (bargs.Count != 1)
+                {
+                    throw new IrUnsupportedException($"zig `@alignOf` expects (type); got {bargs.Count} argument(s)");
+                }
+                var align = _ir.AlignOfConst(LowerType(bargs[0]));
+                return new LitInt(align.ToString(System.Globalization.CultureInfo.InvariantCulture), align) { Type = CType.ULong };
+            }
+            case "@offsetOf":
+            {
+                // `@offsetOf(T, "field")` — the byte offset of a field as `usize` (Milestone T,
+                // part 4). Reuses the C `offsetof` IR (`OffsetOf`): the comptime engine folds it via
+                // the layout model (`OffsetOfConstPath`), and a runtime use renders the .NET
+                // blittable-layout computation. The field name is a comptime string literal.
+                if (bargs.Count != 2)
+                {
+                    throw new IrUnsupportedException($"zig `@offsetOf` expects (type, field-name); got {bargs.Count} argument(s)");
+                }
+                var offStruct = LowerType(bargs[0]);
+                if (offStruct.Unqualified is not CType.Named offNamed)
+                {
+                    throw new IrUnsupportedException("zig `@offsetOf` expects a struct/union type as the first argument");
+                }
+                if (bargs[1].Content is not Zig.StrLit offFieldLit)
+                {
+                    throw new IrUnsupportedException("zig `@offsetOf` field name must be a string literal");
+                }
+                var offField = UnquoteStringLiteral(Tok(offFieldLit.Arg0));
+                var offMemberType = _ir.StructFieldType(offNamed, offField);
+                return new OffsetOf(offStruct, new[] { offField }, offMemberType) { Type = CType.ULong };
+            }
             case "@alignCast":
                 // `@alignCast(p)` only raises the pointee's alignment requirement — unobservable
                 // in dotcc's managed model — so it's the IDENTITY (the enclosing `@ptrCast` / sink
@@ -1550,7 +1586,7 @@ internal sealed partial class ZigLowering
             default:
                 throw new IrUnsupportedException(
                     $"zig builtin '{bname}' not lowered yet (supported: @as, @intCast, @truncate, @ptrCast, @bitCast, " +
-                    "@floatFromInt, @intFromFloat, @floatCast, @enumFromInt, @alignCast, @intFromEnum, @sizeOf)");
+                    "@floatFromInt, @intFromFloat, @floatCast, @enumFromInt, @alignCast, @intFromEnum, @sizeOf, @alignOf, @offsetOf)");
         }
     }
 
