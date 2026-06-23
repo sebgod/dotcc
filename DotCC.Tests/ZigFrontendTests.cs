@@ -1735,6 +1735,69 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Devirtualizes_realloc_to_a_direct_c_heap_call()
+    {
+        // `a.realloc(s, n)` (Milestone U) on the statically-known default → a direct
+        // `ZigAlloc.ReallocCHeap` (Libc.realloc, no vtable). The initial constant-size alloc is NOT
+        // promoted to stackalloc (a realloc'd slice escapes the peephole), so AllocCHeap survives.
+        var cs = EmitZig(
+            "const std = @import(\"std\");\n" +
+            "fn run() !u8 {\n" +
+            "    const a = std.heap.page_allocator;\n" +
+            "    var s = try a.alloc(u8, 2);\n" +
+            "    s[0] = 30;\n" +
+            "    s = try a.realloc(s, 4);\n" +
+            "    s[2] = 12;\n" +
+            "    const r = s[0] + s[2];\n" +
+            "    a.free(s);\n" +
+            "    return r;\n" +
+            "}\n" +
+            "pub fn main() u8 { return run() catch 1; }\n");
+        cs.ShouldContain("ZigAlloc.AllocCHeap<byte>(2");     // initial alloc survives (not promoted)
+        cs.ShouldContain("ZigAlloc.ReallocCHeap<byte>(");    // the devirt'd realloc (direct Libc.realloc)
+        cs.ShouldNotContain(".Realloc<byte>(");              // NOT the indirect vtable emulation
+        cs.ShouldNotContain("__slicebuf");                   // NOT stackalloc-promoted
+    }
+
+    [Fact]
+    public void Lowers_realloc_through_the_indirect_vtable()
+    {
+        // On an opaque `std.mem.Allocator` parameter, realloc dispatches INDIRECTLY — `a.Realloc<T>`
+        // — which the runtime EMULATES via the 2-fn vtable (alloc + copy + free).
+        var cs = EmitZig(
+            "const std = @import(\"std\");\n" +
+            "fn grow(a: std.mem.Allocator) ![]u8 {\n" +
+            "    var s = try a.alloc(u8, 2);\n" +
+            "    s = try a.realloc(s, 4);\n" +
+            "    return s;\n" +
+            "}\n" +
+            "pub fn main() u8 { return 0; }\n");
+        cs.ShouldContain("a.Realloc<byte>(");                // INDIRECT (emulated) realloc on the param
+        cs.ShouldNotContain("ZigAlloc.ReallocCHeap<");       // NOT devirt'd (opaque allocator)
+    }
+
+    [Fact]
+    public void Rejects_deferred_resize_and_remap()
+    {
+        // `resize` (bool, in-place) / `remap` (?[]T) are deferred — their result is allocator-page-
+        // dependent — so they're a clear error, not a divergent guess. Use `realloc`.
+        foreach (var method in new[] { "resize", "remap" })
+        {
+            var ex = Should.Throw<CompileException>(() => EmitZig(
+                "const std = @import(\"std\");\n" +
+                "fn run() !u8 {\n" +
+                "    const a = std.heap.page_allocator;\n" +
+                "    const s = try a.alloc(u8, 2);\n" +
+                "    _ = a." + method + "(s, 4);\n" +
+                "    a.free(s);\n" +
+                "    return s[0];\n" +
+                "}\n" +
+                "pub fn main() u8 { return run() catch 1; }\n"));
+            ex.Message.ShouldContain("deferred");
+        }
+    }
+
+    [Fact]
     public void Lowers_an_arena_allocator_with_deinit()
     {
         // `std.heap.ArenaAllocator.init(backing)` → ArenaAllocator.Init; `arena.allocator()` →
