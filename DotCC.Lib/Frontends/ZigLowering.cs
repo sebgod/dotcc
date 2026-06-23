@@ -1805,6 +1805,10 @@ internal sealed partial class ZigLowering
             // while` counter).
             case Zig.ComptimeVarDecl cv:   return LowerComptimeVarDecl(cv.Arg1);
 
+            // `comptime { … }` — a compile-time block statement (Milestone T, part 3): run the block's
+            // comptime-value statements at lowering time, emit no runtime code.
+            case Zig.ComptimeBlock cb:     return LowerComptimeBlock(cb.Arg1);
+
             // `switch (subject) { prongs }` → the C IR Switch (subject=Arg2, prongs=Arg5 for both
             // the plain and trailing-comma forms). A tagged-union subject takes the capture path.
             case Zig.StmtSwitch s:         return LowerSwitchStmt(s.Arg2, s.Arg5);
@@ -2345,6 +2349,16 @@ internal sealed partial class ZigLowering
     /// subset is supported (the firewall — no comptime pointer/aggregate var).</summary>
     private CStmt LowerComptimeVarDecl(Item varDeclItem)
     {
+        TrackComptimeVar(varDeclItem);
+        return new Seq(new List<CStmt>());   // comptime-only — no runtime declaration
+    }
+
+    /// <summary>Fold a <c>var</c>/<c>const</c> declaration's initializer to a compile-time integer and
+    /// track it by Symbol identity in <see cref="_comptimeVars"/> (so references substitute the value).
+    /// Shared by <c>comptime var</c> statements and the bodies of a <c>comptime { … }</c> block, where
+    /// every declaration is a compile-time value. Only the integer value subset (the firewall).</summary>
+    private void TrackComptimeVar(Item varDeclItem)
+    {
         string name;
         Item initItem;
         Item? typeItem = null;
@@ -2367,7 +2381,102 @@ internal sealed partial class ZigLowering
         }
         var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = ctype });
         _comptimeVars[sym] = (v, ctype);
-        return new Seq(new List<CStmt>());   // comptime-only — no runtime declaration
+    }
+
+    /// <summary>Lower a <c>comptime { … }</c> block statement (Milestone T, part 3): EXECUTE the block
+    /// at lowering time, folding its comptime-value statements (var/const decls, assignments to comptime
+    /// vars, comptime <c>while</c> loops) and mutating any enclosing <c>comptime var</c> in place. It
+    /// emits NO runtime code — its only effect is on comptime values, which later references substitute.
+    /// Block-local comptime vars are scoped so they don't leak past the block.</summary>
+    private CStmt LowerComptimeBlock(Item blockItem)
+    {
+        _symbols.EnterScope();
+        ExecuteComptimeStmt(blockItem);
+        _symbols.ExitScope();
+        return new Seq(new List<CStmt>());   // compile-time-only — nothing runs at runtime
+    }
+
+    /// <summary>Execute one statement of a <c>comptime { … }</c> block at lowering time. Supports the
+    /// compile-time value subset: nested blocks, <c>var</c>/<c>const</c> decls (tracked as comptime),
+    /// assignment to a comptime var (folded + stored), and a <c>while</c> loop (interpreted, the body's
+    /// assignments updating comptime vars). Any other statement — or an assignment to a non-comptime
+    /// target — is a clear error (the firewall: no runtime effect, no pointer/aggregate mutation).</summary>
+    private void ExecuteComptimeStmt(Item s)
+    {
+        switch (s.Content)
+        {
+            case Zig.Block b:
+                foreach (var st in Flatten(b.Arg1)) { ExecuteComptimeStmt(st); }
+                break;
+            case Zig.BlockEmpty:
+                break;
+            case Zig.ComptimeVarDecl cv:
+                TrackComptimeVar(cv.Arg1);
+                break;
+            case Zig.ConstDecl or Zig.VarDecl or Zig.ConstDeclTyped or Zig.VarDeclTyped:
+                // Inside a comptime block every declaration is a compile-time value.
+                TrackComptimeVar(s);
+                break;
+            case Zig.StmtAssign a:          // lhs = rhs
+                ExecuteComptimeAssign(a.Arg0, a.Arg2);
+                break;
+            // A comptime `while (cond) : (cont) body` / `while (cond) body` — interpreted (the cont or
+            // the body mutates the counter). `inline while` here would unroll-to-IR (wrong in a comptime
+            // block); the plain `while` IS the comptime loop.
+            case Zig.StmtWhileContAssign w:
+                ExecuteComptimeWhile(w.Arg2, (w.Arg6, w.Arg8), w.Arg10);
+                break;
+            case Zig.StmtWhile w:
+                ExecuteComptimeWhile(w.Arg2, null, w.Arg4);
+                break;
+            default:
+                throw new IrUnsupportedException(
+                    $"comptime block: statement '{s.Content?.GetType().Name}' is not supported — only "
+                    + "var/const decls, assignments to a comptime var, and `while` loops run at comptime");
+        }
+    }
+
+    /// <summary>Apply a comptime assignment <c>lhs = rhs</c> inside a <c>comptime { … }</c> block: the
+    /// target must resolve to a tracked comptime var (its bare name, NOT substituted), the value folds
+    /// (with comptime vars substituted), and the result is stored back.</summary>
+    private void ExecuteComptimeAssign(Item lhsItem, Item rhsItem)
+    {
+        if (lhsItem.Content is not Zig.Ident id
+            || _symbols.Resolve(Tok(id.Arg0)) is not { } sym
+            || !_comptimeVars.ContainsKey(sym))
+        {
+            throw new IrUnsupportedException(
+                "comptime block: an assignment target must be a `comptime var` (no runtime store at comptime)");
+        }
+        if (_ir.ConstEval(LowerExpr(rhsItem)) is not { } v)
+        {
+            throw new IrUnsupportedException("comptime block: assignment value must be compile-time-known");
+        }
+        _comptimeVars[sym] = (v, _comptimeVars[sym].Type);
+    }
+
+    /// <summary>Interpret a comptime <c>while</c> at lowering time: fold the condition each round (with
+    /// comptime vars substituted), execute the body's comptime statements, then apply the optional
+    /// continue-expression — until the condition is false. Step-capped (a non-terminating comptime
+    /// condition otherwise loops forever).</summary>
+    private void ExecuteComptimeWhile(Item condItem, (Item Lhs, Item Rhs)? cont, Item bodyItem)
+    {
+        var steps = 0;
+        while (true)
+        {
+            if (_ir.ConstEval(LowerExpr(condItem)) is not { } cond)
+            {
+                throw new IrUnsupportedException("comptime block: `while` condition must be compile-time-known");
+            }
+            if (cond == 0) { break; }
+            if (++steps > InlineUnrollCap)
+            {
+                throw new IrUnsupportedException(
+                    $"comptime block: `while` exceeded {InlineUnrollCap} iterations — a non-terminating comptime condition?");
+            }
+            ExecuteComptimeStmt(bodyItem);
+            if (cont is { } c) { ExecuteComptimeAssign(c.Lhs, c.Rhs); }
+        }
     }
 
     /// <summary>The literal a <c>comptime var</c> reference substitutes to — its current value at the

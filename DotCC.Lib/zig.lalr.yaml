@@ -480,6 +480,12 @@ productions:
       # lookahead `var`/`const` (FIRST(VarDecl), disjoint from FIRST(Prefix)) cleanly selects this over
       # the `comptime EXPR` value-prefix expression-statement — conflict-free.
       - { lhs: Stmt, rhs: ['comptime', VarDecl], action: comptimeVarDecl }
+      # `comptime { … }` — a compile-time block STATEMENT (Milestone T, part 3). The block runs at
+      # lowering time (folding comptime var decls / assignments / a comptime while), mutating any
+      # enclosing `comptime var`s, and emits NO runtime code. After `comptime`, a `{` lookahead
+      # (FIRST(Block), disjoint from FIRST(VarDecl) = {var,const} and FIRST(Prefix)) selects this —
+      # conflict-free.
+      - { lhs: Stmt, rhs: ['comptime', Block], action: comptimeBlock }
       # Destructure binding (Milestone G + S) — `<binder>, <binder>… = e;` (≥2 binders, enforced by
       # the one-binder + DestructBinds shape). A binder is a fresh `const`/`var` (optionally typed
       # `: T`) OR an existing lvalue / `_` discard (Milestone S — the assign-to-existing form `a, b =
