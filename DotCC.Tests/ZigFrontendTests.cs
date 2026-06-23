@@ -397,6 +397,37 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Runs_a_comptime_block_at_compile_time()
+    {
+        // Milestone T, part 3 — a `comptime { … }` block STATEMENT runs at compile time: it folds its
+        // comptime statements (here a `while` summing 1..8 = 36 into the enclosing `comptime var
+        // total`) and emits NO runtime code. References to `total` afterward substitute the folded
+        // value, so `36u` appears with no runtime loop.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    comptime var total: u32 = 0;\n" +
+            "    comptime {\n" +
+            "        var i: u32 = 1;\n" +
+            "        while (i <= 8) : (i = i + 1) { total = total + i; }\n" +
+            "    }\n" +
+            "    return @intCast(total + 6);\n}\n");
+        cs.ShouldContain("36u");
+    }
+
+    [Fact]
+    public void Rejects_a_comptime_block_storing_to_a_runtime_var()
+    {
+        // A `comptime { … }` block has no runtime effect, so a store to a runtime `var` (not a
+        // `comptime var`) is a clear error — matching real zig, which also forbids it.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var r: u32 = 0;\n" +
+            "    comptime { r = 42; }\n" +
+            "    return @intCast(r);\n}\n"));
+        ex.Message.ShouldContain("comptime var");
+    }
+
+    [Fact]
     public void Folds_alignOf_to_a_literal()
     {
         // Milestone T, part 4 — `@alignOf(T)` is a pure compile-time constant (the ABI alignment via

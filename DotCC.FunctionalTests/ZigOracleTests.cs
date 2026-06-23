@@ -1344,6 +1344,20 @@ public sealed class ZigOracleTests
             "    return @intCast(sum - 8);\n" +
             "}\n", 42, "sum=50" },
 
+        // `comptime { … }` block STATEMENT (Milestone T, part 3) — runs at compile time, folding a
+        // `while` that sums 1..8 (= 36) into the enclosing `comptime var total`; no runtime loop. 36 + 6 = 42.
+        new object[] { "comptime_block",
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "pub fn main() u8 {\n" +
+            "    comptime var total: u32 = 0;\n" +
+            "    comptime {\n" +
+            "        var i: u32 = 1;\n" +
+            "        while (i <= 8) : (i = i + 1) { total = total + i; }\n" +
+            "    }\n" +
+            "    _ = printf(\"total=%u\\n\", @as(u32, total));\n" +
+            "    return @intCast(total + 6);\n" +
+            "}\n", 42, "total=36" },
+
         // `@alignOf(T)` / `@offsetOf(T, "field")` as comptime values (Milestone T, part 4). An
         // `extern struct` pins the C-ABI layout (a plain Zig struct may reorder fields), so dotcc's
         // layout model and real zig agree: Point { a:u8, b:u32, c:u16 } → size 12, align 4, b@4, c@8.
