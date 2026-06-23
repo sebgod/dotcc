@@ -244,6 +244,10 @@ internal sealed partial class ZigLowering
     /// spelled by the spliced <c>ZigAlloc.cs</c> — the second concrete allocator.</summary>
     private const string FbaTypeName = "FixedBufferAllocator";
 
+    /// <summary>The runtime <c>ArenaAllocator</c> type name (a <see cref="CType.Named"/>), as
+    /// spelled by the spliced <c>ZigAlloc.cs</c> — the third concrete allocator (Milestone U).</summary>
+    private const string ArenaTypeName = "ArenaAllocator";
+
     /// <summary>The discriminant field name on a lowered tagged-union struct — a leading
     /// double-underscore so it can't collide with a user variant (a Zig field name).</summary>
     private const string TagFieldName = "__tag";
@@ -3893,6 +3897,11 @@ internal sealed partial class ZigLowering
         {
             return LowerFbaInit(argItems);
         }
+        // `std.heap.ArenaAllocator.init(backing)` — a static call on the std arena type (Milestone U).
+        if (methodName == "init" && TryResolveStdPath(fld.Arg0, out var arenaBase) && arenaBase == "std.heap.ArenaAllocator")
+        {
+            return LowerArenaInit(argItems);
+        }
         // `a.alloc(T, n)` / `a.free(s)` (and the deferred `create`/`destroy`) on a known-default
         // (→ devirt) or an Allocator-typed receiver (→ indirect). A same-named method on a
         // non-allocator receiver falls through to the generic dispatch below.
@@ -3922,23 +3931,41 @@ internal sealed partial class ZigLowering
 
         // (B) `expr.method(args)` — the base is an instance of a container type.
         var recv = LowerExpr(fld.Arg0);
-        // `fba.allocator()` — a FixedBufferAllocator hands out an Allocator fat pointer over
-        // itself (Milestone F). Needs `&fba` as the vtable context; the result is opaque (→ the
-        // indirect dispatch path). Handled before the generic _methods lookup (FBA is a runtime
-        // type, not a Zig-declared container).
-        if (methodName == "allocator" && recv.Type.Unqualified is CType.Named { Name: FbaTypeName })
+        // `fba.allocator()` / `arena.allocator()` — a FixedBufferAllocator (Milestone F) or an
+        // ArenaAllocator (Milestone U) hands out an Allocator fat pointer over itself. Needs `&self`
+        // as the vtable context; the result is opaque (→ the indirect dispatch path). Handled before
+        // the generic _methods lookup (both are runtime types, not Zig-declared containers).
+        if (methodName == "allocator" && recv.Type.Unqualified is CType.Named { Name: var allocTy }
+            && allocTy is FbaTypeName or ArenaTypeName)
         {
             if (argItems.Count != 0)
             {
-                throw new IrUnsupportedException("zig `fba.allocator()` takes no arguments");
+                throw new IrUnsupportedException($"zig `{allocTy}.allocator()` takes no arguments");
             }
             if (Unparen(recv) is VarRef { Sym: { Kind: SymKind.Var or SymKind.Param } s })
             {
                 s.AddressTaken = true;
             }
-            var fbaAddr = new Unary(UnOp.AddrOf, recv) { Type = new CType.Pointer(recv.Type) };
-            return new Call("ZigAlloc.FbaAllocator", new List<CExpr> { fbaAddr },
-                new List<CType> { new CType.Pointer(new CType.Named(FbaTypeName)) }, null) { Type = new CType.Allocator() };
+            var selfAddr = new Unary(UnOp.AddrOf, recv) { Type = new CType.Pointer(recv.Type) };
+            var factory = allocTy == FbaTypeName ? "ZigAlloc.FbaAllocator" : "ZigAlloc.ArenaToAllocator";
+            return new Call(factory, new List<CExpr> { selfAddr },
+                new List<CType> { new CType.Pointer(new CType.Named(allocTy)) }, null) { Type = new CType.Allocator() };
+        }
+        // `arena.deinit()` — free the whole arena chunk chain (Milestone U). A static wrapper called
+        // by-ref on the local, like `allocator()`. The headline use is `defer arena.deinit();`.
+        if (methodName == "deinit" && recv.Type.Unqualified is CType.Named { Name: ArenaTypeName })
+        {
+            if (argItems.Count != 0)
+            {
+                throw new IrUnsupportedException("zig `arena.deinit()` takes no arguments");
+            }
+            if (Unparen(recv) is VarRef { Sym: { Kind: SymKind.Var or SymKind.Param } sd })
+            {
+                sd.AddressTaken = true;
+            }
+            var arenaAddr = new Unary(UnOp.AddrOf, recv) { Type = new CType.Pointer(recv.Type) };
+            return new Call("ZigAlloc.ArenaDeinit", new List<CExpr> { arenaAddr },
+                new List<CType> { new CType.Pointer(new CType.Named(ArenaTypeName)) }, null) { Type = CType.Void };
         }
         if (!TryContainerName(recv.Type, out var container))
         {
@@ -4066,6 +4093,27 @@ internal sealed partial class ZigLowering
         var cap = new LitInt(bytes.ToString(CultureInfo.InvariantCulture), bytes) { Type = CType.ULong };
         return new Call("FixedBufferAllocator.Init", new List<CExpr> { bytePtr, cap },
             new List<CType> { new CType.Pointer(CType.UChar), CType.ULong }, null) { Type = new CType.Named(FbaTypeName) };
+    }
+
+    /// <summary>Lower <c>std.heap.ArenaAllocator.init(backing)</c> (Milestone U) to
+    /// <c>ArenaAllocator.Init(backing)</c>. The single argument is the backing
+    /// <c>std.mem.Allocator</c> — the statically-known default materializes a runtime C-heap
+    /// <see cref="CType.Allocator"/> through the ordinary value path (so the arena draws its chunks
+    /// from a real allocator); an opaque allocator value is taken as-is.</summary>
+    private CExpr LowerArenaInit(IReadOnlyList<Item> argItems)
+    {
+        if (argItems.Count != 1)
+        {
+            throw new IrUnsupportedException($"zig `ArenaAllocator.init` expects (backing allocator); got {argItems.Count} argument(s)");
+        }
+        var backing = LowerExpr(argItems[0]);
+        if (backing.Type.Unqualified is not CType.Allocator)
+        {
+            throw new IrUnsupportedException(
+                $"zig `ArenaAllocator.init` expects a `std.mem.Allocator` backing, got {backing.Type.Describe()}");
+        }
+        return new Call("ArenaAllocator.Init", new List<CExpr> { backing },
+            new List<CType> { new CType.Allocator() }, null) { Type = new CType.Named(ArenaTypeName) };
     }
 
     /// <summary>Resolve the container name a receiver expression's type names — a
@@ -4536,8 +4584,9 @@ internal sealed partial class ZigLowering
             {
                 "std.mem.Allocator" => new CType.Allocator(),
                 "std.heap.FixedBufferAllocator" => new CType.Named(FbaTypeName),
+                "std.heap.ArenaAllocator" => new CType.Named(ArenaTypeName),
                 _ => throw new IrUnsupportedException(
-                    $"zig type `{path}` is not modeled (std types: std.mem.Allocator, std.heap.FixedBufferAllocator)"),
+                    $"zig type `{path}` is not modeled (std types: std.mem.Allocator, std.heap.FixedBufferAllocator, std.heap.ArenaAllocator)"),
             };
         }
         throw new IrUnsupportedException(

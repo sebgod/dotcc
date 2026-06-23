@@ -1710,6 +1710,31 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_an_arena_allocator_with_deinit()
+    {
+        // `std.heap.ArenaAllocator.init(backing)` → ArenaAllocator.Init; `arena.allocator()` →
+        // ZigAlloc.ArenaToAllocator(&arena) (an opaque Allocator → INDIRECT .Alloc); `arena.deinit()`
+        // → ZigAlloc.ArenaDeinit(&arena), wrapped by `defer` into a try/finally (Milestone U).
+        var cs = EmitZig(
+            "const std = @import(\"std\");\n" +
+            "fn run() !u8 {\n" +
+            "    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);\n" +
+            "    defer arena.deinit();\n" +
+            "    const a = arena.allocator();\n" +
+            "    const s = try a.alloc(u8, 3);\n" +
+            "    s[0] = 42;\n" +
+            "    return s[0];\n" +
+            "}\n" +
+            "pub fn main() u8 { return run() catch 1; }\n");
+        cs.ShouldContain("ArenaAllocator.Init(ZigAlloc.CHeap())");   // arena over the materialized default
+        cs.ShouldContain("ArenaAllocator arena =");                   // a runtime ArenaAllocator local
+        cs.ShouldContain("ZigAlloc.ArenaToAllocator(&arena)");        // allocator() fat pointer
+        cs.ShouldContain(".Alloc<byte>(3");                           // INDIRECT vtable dispatch
+        cs.ShouldContain("ZigAlloc.ArenaDeinit(&arena)");             // deinit
+        cs.ShouldContain("finally");                                   // defer → try/finally
+    }
+
+    [Fact]
     public void Passes_an_opaque_allocator_param_and_materializes_the_default()
     {
         // An opaque `std.mem.Allocator` parameter → an `Allocator` C# param, dispatched
