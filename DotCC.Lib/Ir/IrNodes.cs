@@ -311,15 +311,20 @@ public sealed record SliceNew(CExpr Ptr, CExpr Len, CType Element, bool Const) :
 /// <c>try</c>/<c>catch</c>. <see cref="Receiver"/> null = the DEVIRTUALIZED C-heap default →
 /// <c>ZigAlloc.AllocCHeap&lt;T&gt;(n, oom)</c> (a direct <c>Libc.malloc</c>, no vtable); non-null
 /// = an opaque/runtime allocator → <c>recv.Alloc&lt;T&gt;(n, oom)</c> (the indirect vtable
-/// dispatch inside the runtime <c>Allocator</c>). Zig-lowering / C#-target only.</summary>
-public sealed record AllocCall(CExpr? Receiver, CType Element, CExpr Count, int OomCode) : CExpr;
+/// dispatch inside the runtime <c>Allocator</c>). <see cref="FbaCtx"/> non-null ⇒ a FBA-SITE
+/// devirtualization (Milestone U): a provable <c>fba.allocator()</c> result → a direct
+/// <c>ZigAlloc.AllocFba&lt;T&gt;(&amp;fba, n, oom)</c> (the <c>&amp;fba</c> context, no vtable);
+/// it takes precedence over <see cref="Receiver"/>. Zig-lowering / C#-target only.</summary>
+public sealed record AllocCall(CExpr? Receiver, CType Element, CExpr Count, int OomCode, CExpr? FbaCtx = null) : CExpr;
 
 /// <summary>A Zig allocator <c>a.free(slice)</c> (Milestone F). <see cref="SliceExpr"/> is the
 /// slice to free, <see cref="Element"/> its element type. <see cref="Receiver"/> null = the
 /// DEVIRTUALIZED C-heap default → <c>ZigAlloc.FreeCHeap&lt;T&gt;(slice)</c> (a direct
 /// <c>Libc.free</c>); non-null = an opaque/runtime allocator → <c>recv.Free&lt;T&gt;(slice)</c>
-/// (indirect). <see cref="CExpr.Type"/> is <c>void</c>. Zig-lowering / C#-target only.</summary>
-public sealed record FreeCall(CExpr? Receiver, CExpr SliceExpr, CType Element) : CExpr;
+/// (indirect). <see cref="FbaCtx"/> non-null ⇒ FBA-site devirt (Milestone U) →
+/// <c>ZigAlloc.FreeFba&lt;T&gt;(&amp;fba, slice)</c>, precedence over <see cref="Receiver"/>.
+/// <see cref="CExpr.Type"/> is <c>void</c>. Zig-lowering / C#-target only.</summary>
+public sealed record FreeCall(CExpr? Receiver, CExpr SliceExpr, CType Element, CExpr? FbaCtx = null) : CExpr;
 
 /// <summary>A Zig allocator <c>a.create(T)</c> (Milestone U) — single-object allocation,
 /// Zig's <c>Error!*T</c>. <see cref="Element"/> is <c>T</c>, <see cref="OomCode"/> the
@@ -328,16 +333,19 @@ public sealed record FreeCall(CExpr? Receiver, CExpr SliceExpr, CType Element) :
 /// The runtime carrier is <c>ErrUnion&lt;nuint&gt;</c>: a pointer cannot be an <c>ErrUnion&lt;T&gt;</c>
 /// generic argument, so the address rides as a <c>nuint</c>. <see cref="Receiver"/> null = the
 /// DEVIRTUALIZED C-heap default → <c>ZigAlloc.CreateCHeap&lt;T&gt;(oom)</c>; non-null = an
-/// opaque/runtime allocator → <c>recv.Create&lt;T&gt;(oom)</c>. Zig-lowering / C#-target only.</summary>
-public sealed record CreateCall(CExpr? Receiver, CType Element, int OomCode) : CExpr;
+/// opaque/runtime allocator → <c>recv.Create&lt;T&gt;(oom)</c>. <see cref="FbaCtx"/> non-null ⇒
+/// FBA-site devirt (Milestone U) → <c>ZigAlloc.CreateFba&lt;T&gt;(&amp;fba, oom)</c>, precedence
+/// over <see cref="Receiver"/>. Zig-lowering / C#-target only.</summary>
+public sealed record CreateCall(CExpr? Receiver, CType Element, int OomCode, CExpr? FbaCtx = null) : CExpr;
 
 /// <summary>A Zig allocator <c>a.destroy(p)</c> (Milestone U) — free a single object from
 /// <see cref="CreateCall"/>. <see cref="Ptr"/> is the <c>*T</c> to free, <see cref="Element"/> its
 /// pointee type (the byte size at free). <see cref="Receiver"/> null = the DEVIRTUALIZED C-heap
 /// default → <c>ZigAlloc.DestroyCHeap&lt;T&gt;(p)</c> (a direct <c>Libc.free</c>); non-null = an
-/// opaque/runtime allocator → <c>recv.Destroy&lt;T&gt;(p)</c>. <see cref="CExpr.Type"/> is
-/// <c>void</c>. Zig-lowering / C#-target only.</summary>
-public sealed record DestroyCall(CExpr? Receiver, CExpr Ptr, CType Element) : CExpr;
+/// opaque/runtime allocator → <c>recv.Destroy&lt;T&gt;(p)</c>. <see cref="FbaCtx"/> non-null ⇒
+/// FBA-site devirt (Milestone U) → <c>ZigAlloc.DestroyFba&lt;T&gt;(&amp;fba, p)</c>, precedence
+/// over <see cref="Receiver"/>. <see cref="CExpr.Type"/> is <c>void</c>. Zig-lowering / C#-target only.</summary>
+public sealed record DestroyCall(CExpr? Receiver, CExpr Ptr, CType Element, CExpr? FbaCtx = null) : CExpr;
 
 /// <summary>A Zig tuple literal <c>.{ a, b, … }</c> (Milestone G), at a tuple sink or with an
 /// inferred type. <see cref="Elements"/> are the positional element expressions in order;

@@ -220,13 +220,21 @@ internal sealed partial class ZigLowering
     /// self-alias / container-const tracking.</summary>
     private readonly Dictionary<string, string> _imports = new(System.StringComparer.Ordinal);
 
-    /// <summary>Bindings to the statically-known default allocator (Milestone F): a <c>const a =
-    /// std.heap.page_allocator;</c> (or <c>c_allocator</c>) records <c>a → CHeap</c> so a later
-    /// <c>a.alloc(…)</c> DEVIRTUALIZES to a direct <c>Libc.malloc</c> (no vtable). Comptime — no
-    /// runtime decl; a use of <c>a</c> as a VALUE materializes <c>ZigAlloc.CHeap()</c>. Only the
-    /// C-heap default is provable in V1; an opaque <c>std.mem.Allocator</c> parameter or an
-    /// <c>fba.allocator()</c> result is never recorded here (→ indirect dispatch).</summary>
+    /// <summary>Bindings to a PROVABLE allocator (Milestone F/U): a <c>const a =
+    /// std.heap.page_allocator;</c> (or <c>c_allocator</c>) records <c>a → CHeap</c>; a <c>const a =
+    /// fba.allocator();</c> over a known <c>FixedBufferAllocator</c> local records <c>a → Fba</c>
+    /// (Milestone U, with the FBA symbol in <see cref="_fbaAllocatorSites"/>). Either way a later
+    /// <c>a.alloc(…)</c> DEVIRTUALIZES (a direct <c>Libc.malloc</c> / a direct FBA bump, no vtable).
+    /// Comptime — no runtime decl; a use of <c>a</c> as a VALUE materializes the matching fat pointer
+    /// (<c>ZigAlloc.CHeap()</c> / <c>ZigAlloc.FbaAllocator(&amp;fba)</c>). An opaque
+    /// <c>std.mem.Allocator</c> parameter is never recorded here (→ indirect dispatch).</summary>
     private readonly Dictionary<string, AllocKind> _defaultAllocatorBindings = new(System.StringComparer.Ordinal);
+
+    /// <summary>For each <c>Fba</c>-kind binding in <see cref="_defaultAllocatorBindings"/> (a
+    /// devirtualized <c>const a = fba.allocator();</c>, Milestone U), the backing
+    /// <c>FixedBufferAllocator</c> symbol — so a devirtualized <c>a.alloc(…)</c> can build the
+    /// <c>&amp;fba</c> context and a value use can materialize <c>ZigAlloc.FbaAllocator(&amp;fba)</c>.</summary>
+    private readonly Dictionary<string, Symbol> _fbaAllocatorSites = new(System.StringComparer.Ordinal);
 
     /// <summary>Names bound to an explicit error-set declaration (Milestone N, part 5): a
     /// <c>const E = error{A, B};</c> records <c>E</c> here. dotcc erases the set, so <c>E</c> carries
@@ -235,10 +243,11 @@ internal sealed partial class ZigLowering
     /// allocator/import bindings.</summary>
     private readonly HashSet<string> _errorSets = new(System.StringComparer.Ordinal);
 
-    /// <summary>The provable kind of an allocator operand. V1 has exactly one provable kind — the
-    /// C heap (the statically-known <c>page_allocator</c>/<c>c_allocator</c> default), which
-    /// devirtualizes to direct <c>Libc.malloc</c>/<c>free</c>.</summary>
-    private enum AllocKind { CHeap }
+    /// <summary>The provable kind of an allocator operand. <c>CHeap</c> = the statically-known
+    /// <c>page_allocator</c>/<c>c_allocator</c> default (→ direct <c>Libc.malloc</c>/<c>free</c>);
+    /// <c>Fba</c> = a provable <c>fba.allocator()</c> result (Milestone U → a direct FBA bump over
+    /// the <c>&amp;fba</c> in <see cref="_fbaAllocatorSites"/>). Both devirtualize (no vtable).</summary>
+    private enum AllocKind { CHeap, Fba }
 
     /// <summary>The runtime <c>FixedBufferAllocator</c> type name (a <see cref="CType.Named"/>), as
     /// spelled by the spliced <c>ZigAlloc.cs</c> — the second concrete allocator.</summary>
@@ -3379,11 +3388,16 @@ internal sealed partial class ZigLowering
             case Zig.Ident id:
             {
                 var name = Tok(id.Arg0);
-                // A const bound to the statically-known default allocator (Milestone F) emitted no
-                // runtime decl; used here as a VALUE (e.g. passed to a `std.mem.Allocator`
-                // parameter) it materializes the C-heap allocator. (As a `.alloc`/`.free` RECEIVER
-                // it never reaches this case — LowerMethodCall short-circuits to the devirt path.)
-                if (_defaultAllocatorBindings.ContainsKey(name)) { return MaterializeCHeap(); }
+                // A const bound to a provable allocator (Milestone F/U) emitted no runtime decl; used
+                // here as a VALUE (e.g. passed to a `std.mem.Allocator` parameter) it materializes the
+                // matching fat pointer — `ZigAlloc.CHeap()` for the C-heap default, or
+                // `ZigAlloc.FbaAllocator(&fba)` for a devirtualized `fba.allocator()` site. (As a
+                // `.alloc`/`.free` RECEIVER it never reaches this case — LowerMethodCall
+                // short-circuits to the devirt path.)
+                if (_defaultAllocatorBindings.TryGetValue(name, out var boundKind))
+                {
+                    return boundKind == AllocKind.Fba ? MaterializeFba(_fbaAllocatorSites[name]) : MaterializeCHeap();
+                }
                 if (_symbols.Resolve(name) is { } sym)
                 {
                     // A `comptime var`/`comptime const` (Milestone T) — substitute its CURRENT
@@ -3986,18 +4000,23 @@ internal sealed partial class ZigLowering
         return BuildCall(msym, argItems, receiver);
     }
 
-    /// <summary>Try to lower an allocator method call <c>a.alloc(T, n)</c> / <c>a.free(s)</c>
-    /// (Milestone F). The receiver is DEVIRTUALIZED to a direct <c>Libc.malloc</c>/<c>free</c> when
-    /// it is provably the statically-known C-heap default (<see cref="TryKnownAllocatorKind"/>);
-    /// otherwise the receiver is lowered and, if it is an <see cref="CType.Allocator"/>, dispatched
-    /// indirectly through its vtable. Returns <c>false</c> (so the caller falls through to the
-    /// generic method dispatch) when the receiver is neither — i.e. a same-named method on a
-    /// non-allocator type. <c>create</c>/<c>destroy</c> on an allocator are a clear deferred error.</summary>
+    /// <summary>Try to lower an allocator method call <c>a.alloc(T, n)</c> / <c>a.free(s)</c> /
+    /// <c>a.create(T)</c> / <c>a.destroy(p)</c> (Milestone F/U). The receiver is DEVIRTUALIZED to a
+    /// direct call when provable: the statically-known C-heap default (→ <c>ZigAlloc.*CHeap</c>, a
+    /// direct <c>Libc.malloc</c>/<c>free</c>) or a provable <c>fba.allocator()</c> site (→
+    /// <c>ZigAlloc.*Fba(&amp;fba, …)</c>, a direct FBA bump). Otherwise the receiver is lowered and,
+    /// if it is an <see cref="CType.Allocator"/>, dispatched indirectly through its vtable. Returns
+    /// <c>false</c> (so the caller falls through to the generic method dispatch) when the receiver is
+    /// neither — i.e. a same-named method on a non-allocator type.</summary>
     private bool TryLowerAllocatorMethod(Zig.Field fld, string methodName, IReadOnlyList<Item> argItems, out CExpr result)
     {
         result = null!;
-        bool devirt = TryKnownAllocatorKind(fld.Arg0, out _);
+        bool devirt = TryKnownAllocatorKind(fld.Arg0, out var kind);
         CExpr? recv = null;
+        // For an FBA-site devirt the `&fba` context rides on the IR node's FbaCtx (takes precedence
+        // over a null Receiver, which alone would mean the C-heap default). The C-heap devirt leaves
+        // both null; a non-devirt receiver is lowered and dispatched indirectly.
+        CExpr? fbaCtx = devirt && kind == AllocKind.Fba ? FbaCtxFor(fld.Arg0) : null;
         if (!devirt)
         {
             recv = LowerExpr(fld.Arg0);
@@ -4014,7 +4033,7 @@ internal sealed partial class ZigLowering
                 }
                 var elem = LowerType(argItems[0]);
                 var count = LowerExpr(argItems[1]);
-                result = new AllocCall(devirt ? null : recv, elem, count, ErrorCode("OutOfMemory"))
+                result = new AllocCall(recv, elem, count, ErrorCode("OutOfMemory"), fbaCtx)
                 {
                     Type = new CType.ErrorUnion(new CType.Slice(elem)),
                 };
@@ -4031,7 +4050,7 @@ internal sealed partial class ZigLowering
                 {
                     throw new IrUnsupportedException($"zig allocator `.free` expects a slice argument, got {sliceExpr.Type.Describe()}");
                 }
-                result = new FreeCall(devirt ? null : recv, sliceExpr, slc.Element) { Type = CType.Void };
+                result = new FreeCall(recv, sliceExpr, slc.Element, fbaCtx) { Type = CType.Void };
                 return true;
             }
             case "create":   // single-object alloc → Error!*T (Milestone U)
@@ -4044,7 +4063,7 @@ internal sealed partial class ZigLowering
                 // `Error!*T` is represented `ErrorUnion(Pointer(T))` at the IR-type level (so `try`
                 // unwraps to a `*T`); the runtime carrier is `ErrUnion<nuint>` (a pointer can't be
                 // an ErrUnion<T> generic arg). The `try` lowering casts the unwrapped nuint to T*.
-                result = new CreateCall(devirt ? null : recv, elem, ErrorCode("OutOfMemory"))
+                result = new CreateCall(recv, elem, ErrorCode("OutOfMemory"), fbaCtx)
                 {
                     Type = new CType.ErrorUnion(new CType.Pointer(elem)),
                 };
@@ -4061,12 +4080,27 @@ internal sealed partial class ZigLowering
                 {
                     throw new IrUnsupportedException($"zig allocator `.destroy` expects a pointer argument, got {ptrExpr.Type.Describe()}");
                 }
-                result = new DestroyCall(devirt ? null : recv, ptrExpr, pp.Pointee) { Type = CType.Void };
+                result = new DestroyCall(recv, ptrExpr, pp.Pointee, fbaCtx) { Type = CType.Void };
                 return true;
             }
             default:   // unreachable: the caller only dispatches alloc/free/create/destroy here
                 return false;
         }
+    }
+
+    /// <summary>Build the <c>&amp;fba</c> context for a devirtualized FBA-site allocator call
+    /// (Milestone U). <paramref name="allocExpr"/> is the <c>a</c> identifier bound to an
+    /// <c>fba.allocator()</c> site in <see cref="_fbaAllocatorSites"/> (the kind is
+    /// <see cref="AllocKind.Fba"/>, so it is necessarily a <see cref="Zig.Ident"/>).</summary>
+    private CExpr FbaCtxFor(Item allocExpr)
+    {
+        var fbaSym = _fbaAllocatorSites[Tok(((Zig.Ident)allocExpr.Content!).Arg0)];
+        fbaSym.AddressTaken = true;
+        // IsLValue=true so the backend takes `&fba` directly — without it, `&<rvalue>` would
+        // materialize a COPY of `fba` per call (`__clN = fba; &__clN`), so the bump cursor would
+        // not be shared across allocations.
+        var fbaRef = new VarRef(fbaSym) { Type = fbaSym.Type, IsLValue = true };
+        return new Unary(UnOp.AddrOf, fbaRef) { Type = new CType.Pointer(fbaSym.Type) };
     }
 
     /// <summary>Lower <c>std.heap.FixedBufferAllocator.init(&amp;buf)</c> (Milestone F) to
@@ -4406,6 +4440,22 @@ internal sealed partial class ZigLowering
             _defaultAllocatorBindings[name] = kind;
             return true;
         }
+        // `const a = fba.allocator();` over a known `FixedBufferAllocator` local — DEVIRTUALIZE the
+        // site (Milestone U): record `a → Fba(fbaSym)` and emit NO decl, so a later `a.alloc(…)`/
+        // `.free(…)` lowers to a direct FBA bump over `&fba` (no vtable). A value use of `a` later
+        // materializes `ZigAlloc.FbaAllocator(&fba)` (see the VarRef value path / MaterializeFba), so
+        // this is an optimization, not a restriction — an escaping `a` still works, just indirectly.
+        if (rhs.Content is Zig.CallNoArgs { Arg0.Content: Zig.Field afld }
+            && Tok(afld.Arg2) == "allocator"
+            && afld.Arg0.Content is Zig.Ident fbaId
+            && _symbols.Resolve(Tok(fbaId.Arg0)) is { } fbaSym
+            && fbaSym.Type.Unqualified is CType.Named { Name: FbaTypeName })
+        {
+            _defaultAllocatorBindings[name] = AllocKind.Fba;
+            _fbaAllocatorSites[name] = fbaSym;
+            fbaSym.AddressTaken = true;
+            return true;
+        }
         // `const E = error{A, B};` — an explicit error-set declaration (Milestone N, part 5). dotcc
         // erases the set into the flat global code space, so register the member names (assigning
         // each a stable code, in declaration order) and emit NO decl; `E` is then used only as the
@@ -4503,6 +4553,19 @@ internal sealed partial class ZigLowering
     /// opaque allocator sink (a value position, not a devirtualizable <c>.alloc</c> receiver).</summary>
     private static CExpr MaterializeCHeap()
         => new Call("ZigAlloc.CHeap", new List<CExpr>(), new List<CType>(), null) { Type = new CType.Allocator() };
+
+    /// <summary>The materialized runtime <see cref="CType.Allocator"/> for a devirtualized
+    /// <c>fba.allocator()</c> site (Milestone U) — <c>ZigAlloc.FbaAllocator(&amp;fba)</c>, emitted
+    /// when the FBA-bound name flows into an opaque allocator sink (a value position rather than a
+    /// devirtualizable <c>.alloc</c> receiver).</summary>
+    private static CExpr MaterializeFba(Symbol fbaSym)
+    {
+        fbaSym.AddressTaken = true;
+        var fbaRef = new VarRef(fbaSym) { Type = fbaSym.Type, IsLValue = true };   // &fba direct, not a copy
+        var addr = new Unary(UnOp.AddrOf, fbaRef) { Type = new CType.Pointer(fbaSym.Type) };
+        return new Call("ZigAlloc.FbaAllocator", new List<CExpr> { addr },
+            new List<CType> { new CType.Pointer(new CType.Named(FbaTypeName)) }, null) { Type = new CType.Allocator() };
+    }
 
     private CType LowerType(Item type) => type.Content switch
     {
