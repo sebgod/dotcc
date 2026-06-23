@@ -1331,6 +1331,19 @@ public sealed class ZigOracleTests
             "    return @intCast(sum);\n" +
             "}\n", 42, "sum=42" },
 
+        // `inline while (i < N) : (i = i + step)` over a `comptime var` counter (Milestone T, part 3) —
+        // unrolls into straight-line accumulation. arr=[5,10,15,20] → sum 50; 50 - 8 = 42.
+        new object[] { "inline_while",
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "pub fn main() u8 {\n" +
+            "    const arr = [_]u32{ 5, 10, 15, 20 };\n" +
+            "    var sum: u32 = 0;\n" +
+            "    comptime var i: usize = 0;\n" +
+            "    inline while (i < 4) : (i = i + 1) { sum += arr[i]; }\n" +
+            "    _ = printf(\"sum=%u\\n\", sum);\n" +
+            "    return @intCast(sum - 8);\n" +
+            "}\n", 42, "sum=50" },
+
         // `@alignOf(T)` / `@offsetOf(T, "field")` as comptime values (Milestone T, part 4). An
         // `extern struct` pins the C-ABI layout (a plain Zig struct may reorder fields), so dotcc's
         // layout model and real zig agree: Point { a:u8, b:u32, c:u16 } → size 12, align 4, b@4, c@8.

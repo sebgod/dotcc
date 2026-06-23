@@ -176,6 +176,14 @@ internal sealed partial class ZigLowering
     /// shared by reference in the IR; resolving it patches its <see cref="ComptimeFold.Resolved"/> in place.</summary>
     private readonly List<ComptimeFold> _pendingComptimeFolds = new();
 
+    /// <summary>Lowering-time values of <c>comptime var</c> / <c>comptime const</c> locals (Milestone T,
+    /// part 3 — the loop counter of an <c>inline while</c>). Keyed by Symbol IDENTITY (the same instance
+    /// the symbol table hands every reference). A reference to one of these substitutes its CURRENT value
+    /// as a literal during lowering (the <c>Zig.Ident</c> case), so the condition / continue-expression /
+    /// body of an <c>inline while</c> fold and unroll. Updated as comptime mutations are processed in
+    /// source order, matching Zig's sequential comptime semantics. No runtime decl is ever emitted.</summary>
+    private readonly Dictionary<Symbol, (long Value, CType Type)> _comptimeVars = new();
+
     /// <summary>The container whose <c>const</c> RHS is currently being re-lowered (Milestone R, part
     /// 6) — lets a bare (unqualified) identifier in that RHS resolve to a SIBLING container const. Null
     /// outside a container-const re-lower (so an unresolved bare ident still errors as before).</summary>
@@ -1792,6 +1800,11 @@ internal sealed partial class ZigLowering
             // the body once per index, with `i` bound to a compile-time constant in each copy.
             case Zig.InlineLoop il:        return LowerInlineLoop(il.Arg1);
 
+            // `comptime var i = …;` — a compile-time value local (Milestone T, part 3). Tracked at
+            // lowering time, no runtime decl; references substitute its current value (the `inline
+            // while` counter).
+            case Zig.ComptimeVarDecl cv:   return LowerComptimeVarDecl(cv.Arg1);
+
             // `switch (subject) { prongs }` → the C IR Switch (subject=Arg2, prongs=Arg5 for both
             // the plain and trailing-comma forms). A tagged-union subject takes the capture path.
             case Zig.StmtSwitch s:         return LowerSwitchStmt(s.Arg2, s.Arg5);
@@ -2255,12 +2268,119 @@ internal sealed partial class ZigLowering
                     k => new DotCC.Ir.Index(LowerExpr(fs.Arg2), new LitInt(k.ToString(System.Globalization.CultureInfo.InvariantCulture), k) { Type = CType.ULong }) { Type = arr.Element });
             }
 
+            // `inline while (cond) : (i = i + step) body` — comptime-UNROLLED while (Milestone T,
+            // part 3). The loop counter must be a `comptime var` mutated by the continue-expression;
+            // each round folds the condition (with the counter substituted in), unrolls a body copy,
+            // then applies the continue-expr to advance the counter — all at lowering time.
+            case Zig.StmtWhileContAssign w:
+                return UnrollInlineWhile(w.Arg2, w.Arg6, w.Arg8, w.Arg10);
+
             default:
                 throw new IrUnsupportedException(
-                    "`inline` is only supported on a counted `for (lo..hi) |i|` range loop or a "
-                    + "`for (arr) |x|` over a fixed array (comptime unrolling) — `inline while`, the "
-                    + "indexed `|x, i|` / by-ref `|*x|` forms, and `inline for` over a slice are not supported yet");
+                    "`inline` is only supported on a counted `for (lo..hi) |i|` range loop, a "
+                    + "`for (arr) |x|` over a fixed array, or an `inline while (c) : (i = …)` with a "
+                    + "`comptime var` counter (comptime unrolling) — the indexed `|x, i|` / by-ref "
+                    + "`|*x|` `for` forms, `inline for` over a slice, and a bare/expr-cont `inline "
+                    + "while` are not supported yet");
         }
+    }
+
+    /// <summary>Unroll an <c>inline while (cond) : (lhs = rhs) body</c> (Milestone T, part 3). The
+    /// continue-expression's target must be a <c>comptime var</c> counter (so its value is known at
+    /// lowering time). Each round: fold <paramref name="condItem"/> (with the counter's current value
+    /// substituted) — stop when false; lower a body copy; fold the continue-expression's RHS and store
+    /// it back as the counter's new value. The loop vanishes (no runtime <c>while</c>); a bare
+    /// <c>break</c>/<c>continue</c> in the body, a non-comptime-var counter, or a non-foldable
+    /// condition / continue value are clear errors. The unroll count is capped (a non-terminating
+    /// comptime condition otherwise loops forever).</summary>
+    private CStmt UnrollInlineWhile(Item condItem, Item contLhsItem, Item contRhsItem, Item bodyItem)
+    {
+        // The continue-expr target must resolve (WITHOUT substitution) to a tracked comptime var.
+        if (contLhsItem.Content is not Zig.Ident contId
+            || _symbols.Resolve(Tok(contId.Arg0)) is not { } contSym
+            || !_comptimeVars.ContainsKey(contSym))
+        {
+            throw new IrUnsupportedException(
+                "`inline while` requires a `comptime var` loop counter advanced by the "
+                + "continue-expression (`comptime var i = …; inline while (i < N) : (i = i + step) { … }`)");
+        }
+
+        var copies = new List<CStmt>();
+        while (true)
+        {
+            if (_ir.ConstEval(LowerExpr(condItem)) is not { } cond)
+            {
+                throw new IrUnsupportedException("`inline while` condition must be compile-time-known");
+            }
+            if (cond == 0) { break; }
+            if (copies.Count >= InlineUnrollCap)
+            {
+                throw new IrUnsupportedException(
+                    $"`inline while` exceeded the unroll cap ({InlineUnrollCap}) — a non-terminating comptime condition?");
+            }
+            // Unroll one body copy (the comptime counter substitutes to its current value within it).
+            _symbols.EnterScope();
+            var body = LowerStmt(bodyItem);
+            _symbols.ExitScope();
+            if (HasLoopEscape(body))
+            {
+                throw new IrUnsupportedException(
+                    "`break`/`continue` inside an `inline while` body is not supported yet (the loop is unrolled)");
+            }
+            copies.Add(body is Block ? body : new Block(new List<CStmt> { body }));
+            // Advance the counter: fold the continue-expr RHS (with the current value), store it back.
+            if (_ir.ConstEval(LowerExpr(contRhsItem)) is not { } next)
+            {
+                throw new IrUnsupportedException("`inline while` continue-expression must be compile-time-known");
+            }
+            _comptimeVars[contSym] = (next, _comptimeVars[contSym].Type);
+        }
+        return new Seq(copies);
+    }
+
+    /// <summary>Lower a <c>comptime var</c> / <c>comptime const</c> declaration (Milestone T, part 3):
+    /// fold the initializer to a compile-time integer and track it by Symbol identity, emitting NO
+    /// runtime declaration — references substitute its current value (see the <c>Zig.Ident</c> case).
+    /// The declared type is the explicit annotation or the initializer's type. Only the integer value
+    /// subset is supported (the firewall — no comptime pointer/aggregate var).</summary>
+    private CStmt LowerComptimeVarDecl(Item varDeclItem)
+    {
+        string name;
+        Item initItem;
+        Item? typeItem = null;
+        switch (varDeclItem.Content)
+        {
+            case Zig.ConstDecl d:      name = Tok(d.Arg1); initItem = d.Arg3; break;
+            case Zig.VarDecl d:        name = Tok(d.Arg1); initItem = d.Arg3; break;
+            case Zig.ConstDeclTyped d: name = Tok(d.Arg1); typeItem = d.Arg3; initItem = d.Arg5; break;
+            case Zig.VarDeclTyped d:   name = Tok(d.Arg1); typeItem = d.Arg3; initItem = d.Arg5; break;
+            default:
+                throw new IrUnsupportedException(
+                    "`comptime` here is only supported on a `var`/`const` value declaration");
+        }
+        var initExpr = LowerExpr(initItem);
+        var ctype = typeItem is { } ti ? LowerType(ti) : initExpr.Type;
+        if (_ir.ConstEval(initExpr) is not { } v)
+        {
+            throw new IrUnsupportedException(
+                $"`comptime var {name}` initializer must be a compile-time-known integer constant");
+        }
+        var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = ctype });
+        _comptimeVars[sym] = (v, ctype);
+        return new Seq(new List<CStmt>());   // comptime-only — no runtime declaration
+    }
+
+    /// <summary>The literal a <c>comptime var</c> reference substitutes to — its current value at the
+    /// declared type (a negative value as <c>-(magnitude)</c>, mirroring how the interpreter splices a
+    /// signed constant).</summary>
+    private static CExpr ComptimeVarLit(long v, CType t)
+    {
+        if (v >= 0)
+        {
+            return new LitInt(v.ToString(System.Globalization.CultureInfo.InvariantCulture), v) { Type = t };
+        }
+        var mag = -(System.Int128)v;
+        return new Unary(UnOp.Neg, new LitInt(mag.ToString(System.Globalization.CultureInfo.InvariantCulture), v == long.MinValue ? null : -v) { Type = t }) { Type = t };
     }
 
     /// <summary>Build the unrolled copies of an <c>inline for</c> body: for each of
@@ -3153,6 +3273,9 @@ internal sealed partial class ZigLowering
                 if (_defaultAllocatorBindings.ContainsKey(name)) { return MaterializeCHeap(); }
                 if (_symbols.Resolve(name) is { } sym)
                 {
+                    // A `comptime var`/`comptime const` (Milestone T) — substitute its CURRENT
+                    // lowering-time value as a literal, so an `inline while` condition / body folds.
+                    if (_comptimeVars.TryGetValue(sym, out var cv)) { return ComptimeVarLit(cv.Value, cv.Type); }
                     return new VarRef(sym) { Type = sym.Type, IsLValue = sym.Kind is SymKind.Var or SymKind.Param };
                 }
                 // A bare (unqualified) sibling container const (Milestone R, part 6): inside a

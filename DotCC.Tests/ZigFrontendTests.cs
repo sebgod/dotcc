@@ -280,16 +280,63 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_inline_on_a_while_loop()
+    public void Unrolls_an_inline_while_with_a_comptime_var_counter()
     {
-        // Only the counted range `for` is unrolled in V1; `inline while` is a clear deferred error
-        // (it needs a comptime mutable loop variable + condition re-eval between copies).
+        // Milestone T, part 3 — `inline while (i < N) : (i = i + step)` over a `comptime var` counter
+        // unrolls: the counter substitutes to its current value each round (so `arr[i]` becomes
+        // `arr[0]`, `arr[1]`, …) and no runtime `while`/counter survives. The substituted index reads
+        // are the unroll signature.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const arr = [_]u32{ 5, 10, 15, 20 };\n" +
+            "    var sum: u32 = 0;\n" +
+            "    comptime var i: usize = 0;\n" +
+            "    inline while (i < 4) : (i = i + 1) { sum += arr[i]; }\n" +
+            "    return @intCast(sum - 8);\n}\n");
+        cs.ShouldContain("arr[0UL]");
+        cs.ShouldContain("arr[3UL]");
+    }
+
+    [Fact]
+    public void Folds_an_inline_while_inside_a_comptime_call()
+    {
+        // The unrolled `inline while` is plain straight-line IR, so a `comptime`-called function that
+        // uses one folds entirely: triangular sums 1..8 (= 36) via an inline while, +6 = 42 → baked in.
+        var cs = EmitZig(
+            "fn triangular(n: u32) u32 {\n" +
+            "    var acc: u32 = 0;\n" +
+            "    comptime var i: u32 = 1;\n" +
+            "    inline while (i <= 8) : (i = i + 1) { acc += i; }\n" +
+            "    return acc + n;\n}\n" +
+            "pub fn main() u8 { const t = comptime triangular(6); return @intCast(t); }\n");
+        cs.ShouldContain("uint t = 42u");
+    }
+
+    [Fact]
+    public void Rejects_inline_while_without_a_comptime_var_counter()
+    {
+        // An `inline while` whose counter is a runtime `var` (not a `comptime var`) can't be unrolled
+        // (its value isn't comptime-known) — a clear error.
         var ex = Should.Throw<CompileException>(() => EmitZig(
             "pub fn main() u8 {\n" +
-            "    var i: u8 = 0;\n" +
+            "    var i: usize = 0;\n" +
+            "    var sum: u32 = 0;\n" +
+            "    inline while (i < 3) : (i = i + 1) { sum += 1; }\n" +
+            "    return @intCast(sum + 39);\n}\n"));
+        ex.Message.ShouldContain("comptime var");
+    }
+
+    [Fact]
+    public void Rejects_a_bare_inline_while_without_a_continue_expr()
+    {
+        // Only the continue-expression form `inline while (c) : (i = …)` is unrolled in V1; a bare
+        // `inline while (c) body` (counter mutated in the body) is a clear deferred error.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 {\n" +
+            "    comptime var i: u8 = 0;\n" +
             "    inline while (i < 3) { i = i + 1; }\n" +
             "    return i + 39;\n}\n"));
-        ex.Message.ShouldContain("counted `for");
+        ex.Message.ShouldContain("inline while");
     }
 
     [Fact]
