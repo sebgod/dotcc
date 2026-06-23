@@ -1319,6 +1319,18 @@ public sealed class ZigOracleTests
             "    return @intCast(sum + 12);\n" +
             "}\n", 42, "sum=30 sq4=16" },
 
+        // `inline for (arr) |x|` over a fixed array (Milestone T, part 3) — unrolls once per element,
+        // binding `x` to each element by value. 3 + 7 + 11 + 21 = 42.
+        new object[] { "inline_for_array",
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "pub fn main() u8 {\n" +
+            "    const items = [_]u32{ 3, 7, 11, 21 };\n" +
+            "    var sum: u32 = 0;\n" +
+            "    inline for (items) |x| { sum += x; }\n" +
+            "    _ = printf(\"sum=%u\\n\", sum);\n" +
+            "    return @intCast(sum);\n" +
+            "}\n", 42, "sum=42" },
+
         // `@alignOf(T)` / `@offsetOf(T, "field")` as comptime values (Milestone T, part 4). An
         // `extern struct` pins the C-ABI layout (a plain Zig struct may reorder fields), so dotcc's
         // layout model and real zig agree: Point { a:u8, b:u32, c:u16 } → size 12, align 4, b@4, c@8.

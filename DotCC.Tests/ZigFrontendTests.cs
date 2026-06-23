@@ -320,6 +320,36 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Unrolls_an_inline_for_over_a_fixed_array()
+    {
+        // Milestone T, part 3 — `inline for (arr) |x|` over a fixed `[N]T` array unrolls once per
+        // element, each copy binding `x` to that element by value (`x = items[k]`). The distinct
+        // element reads (items[0], items[3], …) are the unroll signature.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const items = [_]u32{ 3, 7, 11, 21 };\n" +
+            "    var sum: u32 = 0;\n" +
+            "    inline for (items) |x| { sum += x; }\n" +
+            "    return @intCast(sum);\n}\n");
+        cs.ShouldContain("items[0UL]");
+        cs.ShouldContain("items[3UL]");
+    }
+
+    [Fact]
+    public void Rejects_inline_for_with_an_index_capture()
+    {
+        // The indexed `inline for (arr, 0..) |x, i|` and by-ref `|*x|` forms are deferred in V1 —
+        // a clear error, not a silent miscompile.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const items = [_]u32{ 1, 2, 3 };\n" +
+            "    var sum: u32 = 0;\n" +
+            "    inline for (items, 0..) |x, i| { sum += x + @as(u32, @intCast(i)); }\n" +
+            "    return @intCast(sum + 36);\n}\n"));
+        ex.Message.ShouldContain("inline");
+    }
+
+    [Fact]
     public void Folds_alignOf_to_a_literal()
     {
         // Milestone T, part 4 — `@alignOf(T)` is a pure compile-time constant (the ABI alignment via
