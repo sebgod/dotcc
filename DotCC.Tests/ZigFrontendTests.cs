@@ -3573,4 +3573,31 @@ public sealed class ZigFrontendTests
         cs.ShouldContain("new Allocator {");              // the custom allocator is constructed
         cs.ShouldContain(".Alloc<byte>(");                // dispatch routes through the user vtable
     }
+
+    // ---- Milestone X, part 1 — @errorName + the un-erased code→name table ----
+
+    [Fact]
+    public void Lowers_errorName_to_a_code_to_name_table_lookup()
+    {
+        // `@errorName(e)` → a call to the emitted `__zigErrorName(code)` helper returning a
+        // `ConstSlice<byte>`; the helper's code→name table carries each registered error name as
+        // RVA-pinned UTF-8 bytes (`L("Foo"u8)`), un-erasing the otherwise-flat error code.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const n = @errorName(error.Foo);\n" +
+            "    return @intCast(n.len);\n" +
+            "}\n");
+        cs.ShouldContain("__zigErrorName(");                  // the builtin lowers to the table lookup
+        cs.ShouldContain("ConstSlice<byte> __zigErrorName");  // the table helper is emitted
+        cs.ShouldContain("L(\"Foo\"u8)");                     // the name is RVA-pinned in the table
+    }
+
+    [Fact]
+    public void Does_not_emit_the_error_name_table_when_no_error_is_named()
+    {
+        // The `__zigErrorName` helper is emitted only when the program names ≥1 error, so an
+        // error-free program stays clean (no dead table).
+        var cs = EmitZig("pub fn main() u8 { return 42; }\n");
+        cs.ShouldNotContain("__zigErrorName");
+    }
 }

@@ -1696,6 +1696,20 @@ internal sealed partial class ZigLowering
                 var offMemberType = _ir.StructFieldType(offNamed, offField);
                 return new OffsetOf(offStruct, new[] { offField }, offMemberType) { Type = CType.ULong };
             }
+            case "@errorName":
+                // `@errorName(e)` → the error's name as `[]const u8` (real zig: `[:0]const u8`).
+                // The operand is a flat `ushort` error code; the name comes from the runtime
+                // `__zigErrorName(code)` code→name table the backend emits from `ir.ZigErrorCodes`
+                // (Milestone X, part 1). Returns a `ConstSlice<byte>` over the RVA-pinned name bytes.
+                if (bargs.Count != 1)
+                {
+                    throw new IrUnsupportedException($"zig `@errorName` expects (error); got {bargs.Count} argument(s)");
+                }
+                return new Call("__zigErrorName", new List<CExpr> { LowerExpr(bargs[0]) },
+                                new List<CType> { CType.ErrorSet }, null)
+                {
+                    Type = new CType.Slice(CType.UChar.WithQuals(TypeQual.Const)),
+                };
             case "@alignCast":
                 // `@alignCast(p)` only raises the pointee's alignment requirement — unobservable
                 // in dotcc's managed model — so it's the IDENTITY (the enclosing `@ptrCast` / sink
@@ -1712,7 +1726,7 @@ internal sealed partial class ZigLowering
             default:
                 throw new IrUnsupportedException(
                     $"zig builtin '{bname}' not lowered yet (supported: @as, @intCast, @truncate, @ptrCast, @bitCast, " +
-                    "@floatFromInt, @intFromFloat, @floatCast, @enumFromInt, @alignCast, @intFromEnum, @sizeOf, @alignOf, @offsetOf)");
+                    "@floatFromInt, @intFromFloat, @floatCast, @enumFromInt, @alignCast, @intFromEnum, @sizeOf, @alignOf, @offsetOf, @errorName)");
         }
     }
 

@@ -331,9 +331,13 @@ error-union `main`
 (`!void` / `!u8`, Milestone N part 4) IS supported — an error from main reports its flat code to
 stderr and exits 1 (real zig prints the error NAME + a trace; the name awaits the un-erased set).
 Explicit `error{A, B}` set declarations (Milestone N part 5) are supported — dotcc erases the set,
-so the decl is comptime (registers names, emits nothing) and `E!T` lowers like `anyerror!T`. STILL
-un-erasing-bound: `@errorName(e)` and real error NAMES in a main trace need a runtime code→name
-table (deferred). `errdefer |e|` capture is NOT pursued (current Zig removed the syntax).
+so the decl is comptime (registers names, emits nothing) and `E!T` lowers like `anyerror!T`.
+**`@errorName(e)` is supported** (Milestone X, part 1): even though the set stays erased to a flat
+code, dotcc carries the code→name map into the emit as a `__zigErrorName(code)` helper, so
+`@errorName` returns the real name as `[]const u8` — a `ConstSlice<byte>` over the RVA-pinned UTF-8
+name bytes (`L("Foo"u8)`). STILL un-erasing-bound: real error NAMES in a `main` error-trace (the
+trace still prints the flat code), a set-qualified `E.member` reference, and distinct named `E!T`
+sets. `errdefer |e|` capture is NOT pursued (current Zig removed the syntax).
 
 ## Allocators — devirtualize the default, vtable for the rest
 
@@ -590,4 +594,6 @@ rejects, not silently accept more.
   `std.mem.Allocator.VTable{…}`, used through the standard `a.alloc` / `a.free` surface),
   `examples/zig-lua-alloc` (a C `lua_Alloc` behind a Zig allocator — Milestone W, part 2: a C
   realloc-style allocator `extern fn`-imported and wrapped in a custom-vtable adapter whose
-  `alloc`/`free` call the C fn-pointer across the mixed `.c` + `.zig` seam).
+  `alloc`/`free` call the C fn-pointer across the mixed `.c` + `.zig` seam),
+  `examples/zig-error-name` (`@errorName` — Milestone X, part 1: `@errorName(error.Ok)` returns the
+  real name "Ok" via the emitted code→name table; exit content-sensitive on a name byte + length).

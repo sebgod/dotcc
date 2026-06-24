@@ -77,5 +77,21 @@ internal sealed class ZigFrontend : IFrontend
             }
             new ZigLowering(ir, names, errorCodes).Lower(root);
         }
+        // Carry the flat error set to the backend so it can emit the `@errorName` code→name
+        // table (Milestone X). Merge into any existing map (a mixed build lowers C first, but C
+        // contributes no Zig error names; this also stays correct if a future C path adds some).
+        if (errorCodes.Count > 0)
+        {
+            if (ir.ZigErrorCodes is { Count: > 0 } existing)
+            {
+                var merged = new Dictionary<string, int>(existing, StringComparer.Ordinal);
+                foreach (var kv in errorCodes) { merged[kv.Key] = kv.Value; }
+                ir.ZigErrorCodes = merged;
+            }
+            else
+            {
+                ir.ZigErrorCodes = errorCodes;
+            }
+        }
     }
 }
