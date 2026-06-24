@@ -391,9 +391,15 @@ part 2 — the deep bridge): import a C realloc-style allocator via `extern fn`,
 custom-vtable adapter whose `alloc`/`free` call the imported C fn-pointer, and it dispatches across
 the mixed `.c` + `.zig` seam (the C function binds by bare name, Milestone V) — matching real zig,
 which needs the same explicit adapter (it has no auto C-fn-ptr → `std.mem.Allocator` coercion).
-What is **not** yet built is *devirtualizing* a custom vtable whose backing is provably the C heap
-(it stays opaque/indirect) — Milestone W, part 3. (`defer a.free(buf)` / `defer arena.deinit()` —
-the idiomatic every-path release — work; see the **Defer** section.)
+A user-constructed custom allocator stays **opaque** (indirect dispatch) by design: *devirtualizing*
+a hand-written vtable that happens to bottom out in `malloc`/`free` is a **documented non-goal** —
+the genuine common case (an allocator that IS the C heap) is already direct via `c_allocator`, so the
+remaining case is one a program wouldn't hand-write, and proving it would need fragile
+interprocedural body analysis for no observable gain. The **reverse** direction — a C function
+consuming a Zig `std.mem.Allocator` fat pointer by value (C must know the `{ptr, *vtable}` layout +
+4-fn ABI) — also stays cut; the safe direction (Zig allocates via `c_allocator`, C reads/frees)
+already works (Milestone V). (`defer a.free(buf)` / `defer arena.deinit()` — the idiomatic
+every-path release — work; see the **Defer** section.)
 
 ## Tuples — runtime tuples → C# `ValueTuple`
 
