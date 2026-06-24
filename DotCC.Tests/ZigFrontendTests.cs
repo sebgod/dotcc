@@ -3528,4 +3528,49 @@ public sealed class ZigFrontendTests
         cs.ShouldContain("Vtable = bump_vtable");   // &vtable stored by value (no stray '&')
         cs.ShouldContain(".Alloc<byte>(");          // indirect dispatch through the user vtable
     }
+
+    // ---- Milestone W, part 2 — a C lua_Alloc behind a Zig std.mem.Allocator ----
+
+    [Fact]
+    public void Bridges_a_c_lua_alloc_through_a_user_allocator_vtable()
+    {
+        // The deep bridge: a C `lua_Alloc`-shaped realloc allocator is imported via `extern fn` and
+        // wrapped in a hand-written custom `std.mem.Allocator` whose 4-fn vtable calls the C fn-ptr
+        // across the seam. dotcc lowers both files into one program; the C function binds by bare name
+        // and the adapter's `alloc`/`free` invoke it (the `@ptrCast` of `?*anyopaque` → `?[*]u8`
+        // renders `(byte*)`). No new lowering — pure composition of W1 + the Milestone V seam binding.
+        var cs = EmitMixed(
+            "#include <stdlib.h>\n#include <stddef.h>\n" +
+            "void *lua_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {\n" +
+            "    (void)osize; (void)ud;\n" +
+            "    if (nsize == 0) { free(ptr); return NULL; }\n" +
+            "    return realloc(ptr, nsize);\n" +
+            "}\n",
+            "const std = @import(\"std\");\n" +
+            "extern fn lua_alloc(ud: ?*anyopaque, ptr: ?*anyopaque, osize: usize, nsize: usize) ?*anyopaque;\n" +
+            "fn luaAlloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {\n" +
+            "    _ = alignment; _ = ret_addr;\n" +
+            "    return @ptrCast(lua_alloc(ctx, null, 0, len));\n" +
+            "}\n" +
+            "fn luaResize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {\n" +
+            "    _ = ctx; _ = memory; _ = alignment; _ = new_len; _ = ret_addr; return false;\n" +
+            "}\n" +
+            "fn luaRemap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {\n" +
+            "    _ = ctx; _ = memory; _ = alignment; _ = new_len; _ = ret_addr; return null;\n" +
+            "}\n" +
+            "fn luaFree(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {\n" +
+            "    _ = alignment; _ = ret_addr; _ = lua_alloc(ctx, memory.ptr, memory.len, 0);\n" +
+            "}\n" +
+            "const lua_vtable = std.mem.Allocator.VTable{ .alloc = luaAlloc, .resize = luaResize, .remap = luaRemap, .free = luaFree };\n" +
+            "pub fn main() u8 {\n" +
+            "    var bytes: usize = 0;\n" +
+            "    const a = std.mem.Allocator{ .ptr = &bytes, .vtable = &lua_vtable };\n" +
+            "    const buf = a.alloc(u8, 4) catch return 1;\n" +
+            "    buf[0] = 42; a.free(buf); return buf[0];\n" +
+            "}\n");
+        cs.ShouldContain("lua_alloc(void* ud");           // the C allocator is in the same program
+        cs.ShouldContain("(byte*)lua_alloc(");            // the adapter's @ptrCast-ed alloc call
+        cs.ShouldContain("new Allocator {");              // the custom allocator is constructed
+        cs.ShouldContain(".Alloc<byte>(");                // dispatch routes through the user vtable
+    }
 }

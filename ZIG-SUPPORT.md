@@ -278,14 +278,17 @@ devirtualizes to a direct `Libc.malloc`/`free`/`realloc`, which is the *same* he
 | Zig `a.create(T)` → C reads/writes `*T` → `a.destroy` | a single-object heap cell, shared |
 | Zig `a.realloc(slice, n)` of a heap slice; C `sum`s the result | `realloc` is the shared `Libc.realloc` |
 | a Zig fn taking an **opaque** `std.mem.Allocator` param, fed `c_allocator`, its buffer handed to C | the default materializes `ZigAlloc.CHeap()`; the buffer is plain heap memory |
+| a C `lua_Alloc` (`extern fn`) wrapped in a Zig custom-vtable `std.mem.Allocator` (Milestone W, part 2) | the adapter's vtable `alloc`/`free` call the imported C fn-pointer, bound by bare name across the seam |
 
 **Only `c_allocator` is cross-seam-safe.** Real zig's `page_allocator` is mmap/VirtualAlloc —
 a *different* heap from C's `malloc` — so freeing its memory with C `free` would be UB. dotcc
 happens to back both with `Libc.malloc`, but a portable mixed program must use `c_allocator`
 for any memory that crosses the boundary. Example: `examples/zig-c-heap` (a mixed program
 where a Zig `c_allocator` buffer is summed + freed by C, and a C `malloc` buffer is read by
-Zig); the `ZigOracleTests` mixed differential (`mixed_shared_heap`, `mixed_create_realloc`,
-`mixed_alloc_param`) re-checks each against real zig 0.17.
+Zig), and `examples/zig-lua-alloc` (a C `lua_Alloc` realloc allocator consumed by Zig as a real
+`std.mem.Allocator` via a hand-written adapter — Milestone W, part 2); the `ZigOracleTests` mixed
+differential (`mixed_shared_heap`, `mixed_create_realloc`, `mixed_alloc_param`, `mixed_lua_alloc`)
+re-checks each against real zig 0.17.
 
 ## Error unions — `try` is exception-based (the setjmp pattern, reused)
 
@@ -383,11 +386,14 @@ runtime `Allocator.VTable` is now the real-zig 4-fn `{ alloc, resize, remap, fre
 fn carrying `std.mem.Alignment` + `[]u8` + `ret_addr` — so a hand-written
 `std.mem.Allocator{ .ptr = &state, .vtable = &my_vtable }` with its own `std.mem.Allocator.VTable{…}`
 literal lowers to a runtime `Allocator` over the user's `delegate*` functions and dispatches
-indirectly, matching real zig. What is **not** yet built is the *deep C bridge*: recognizing a C
-`lua_Alloc` fn-pointer-table allocator behind a Zig `std.mem.Allocator`, and devirtualizing a
-custom vtable whose backing is provably the C heap — a future milestone (Milestone W, parts 2/3).
-(`defer a.free(buf)` / `defer arena.deinit()` — the idiomatic every-path release — work; see the
-**Defer** section.)
+indirectly, matching real zig. A **C `lua_Alloc` behind a Zig allocator** works too (Milestone W,
+part 2 — the deep bridge): import a C realloc-style allocator via `extern fn`, hand-write a
+custom-vtable adapter whose `alloc`/`free` call the imported C fn-pointer, and it dispatches across
+the mixed `.c` + `.zig` seam (the C function binds by bare name, Milestone V) — matching real zig,
+which needs the same explicit adapter (it has no auto C-fn-ptr → `std.mem.Allocator` coercion).
+What is **not** yet built is *devirtualizing* a custom vtable whose backing is provably the C heap
+(it stays opaque/indirect) — Milestone W, part 3. (`defer a.free(buf)` / `defer arena.deinit()` —
+the idiomatic every-path release — work; see the **Defer** section.)
 
 ## Tuples — runtime tuples → C# `ValueTuple`
 
@@ -575,4 +581,7 @@ rejects, not silently accept more.
   each treating its opaque ctx as a `*i32` accumulator via `@ptrCast(@alignCast(ctx))`),
   `examples/zig-custom-allocator` (a user-constructed `std.mem.Allocator`: a hand-written bump
   allocator whose `Bump` state lives behind the opaque `ctx`, bound to a real 4-fn
-  `std.mem.Allocator.VTable{…}`, used through the standard `a.alloc` / `a.free` surface).
+  `std.mem.Allocator.VTable{…}`, used through the standard `a.alloc` / `a.free` surface),
+  `examples/zig-lua-alloc` (a C `lua_Alloc` behind a Zig allocator — Milestone W, part 2: a C
+  realloc-style allocator `extern fn`-imported and wrapped in a custom-vtable adapter whose
+  `alloc`/`free` call the C fn-pointer across the mixed `.c` + `.zig` seam).
