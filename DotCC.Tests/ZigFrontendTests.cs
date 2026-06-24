@@ -3474,4 +3474,58 @@ public sealed class ZigFrontendTests
         cs.ShouldContain("void* ctx");   // the opaque parameter
         cs.ShouldContain("(int*)");      // the @ptrCast to the typed pointer
     }
+
+    // ---- Milestone W, part 1b — a user-constructed custom std.mem.Allocator ----
+
+    private const string CustomAllocator =
+        "const std = @import(\"std\");\n" +
+        "const Bump = struct { base: [*]u8, cap: usize, used: usize };\n" +
+        "fn bumpAlloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {\n" +
+        "    _ = alignment; _ = ret_addr;\n" +
+        "    const self: *Bump = @ptrCast(@alignCast(ctx));\n" +
+        "    if (self.used + len > self.cap) return null;\n" +
+        "    const p = self.base + self.used; self.used += len; return p;\n" +
+        "}\n" +
+        "fn bumpResize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {\n" +
+        "    _ = ctx; _ = memory; _ = alignment; _ = new_len; _ = ret_addr; return false;\n" +
+        "}\n" +
+        "fn bumpRemap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {\n" +
+        "    _ = ctx; _ = memory; _ = alignment; _ = new_len; _ = ret_addr; return null;\n" +
+        "}\n" +
+        "fn bumpFree(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {\n" +
+        "    _ = ctx; _ = memory; _ = alignment; _ = ret_addr;\n" +
+        "}\n" +
+        "const bump_vtable = std.mem.Allocator.VTable{ .alloc = bumpAlloc, .resize = bumpResize, .remap = bumpRemap, .free = bumpFree };\n" +
+        "pub fn main() u8 {\n" +
+        "    var backing: [256]u8 = undefined;\n" +
+        "    var state = Bump{ .base = backing[0..].ptr, .cap = backing.len, .used = 0 };\n" +
+        "    const a = std.mem.Allocator{ .ptr = &state, .vtable = &bump_vtable };\n" +
+        "    const buf = a.alloc(u8, 10) catch return 1;\n" +
+        "    buf[0] = 42; a.free(buf); return buf[0];\n" +
+        "}\n";
+
+    [Fact]
+    public void Lowers_a_user_vtable_literal_to_the_runtime_AllocatorVTable()
+    {
+        // `std.mem.Allocator.VTable{ .alloc = f, … }` → `new AllocatorVTable { alloc = &f, … }`,
+        // and each function lowers with the real vtable signature (Alignment + Slice<byte>).
+        var cs = EmitZig(CustomAllocator);
+        cs.ShouldContain("new AllocatorVTable {");
+        cs.ShouldContain("alloc = &bumpAlloc");
+        cs.ShouldContain("free = &bumpFree");
+        cs.ShouldContain("Alignment alignment");          // the modeled std.mem.Alignment param
+        cs.ShouldContain("Slice<byte> memory");           // the []u8 param
+    }
+
+    [Fact]
+    public void Constructs_a_runtime_allocator_from_ptr_and_vtable()
+    {
+        // `std.mem.Allocator{ .ptr = &state, .vtable = &bump_vtable }` → `new Allocator { Ctx = …,
+        // Vtable = bump_vtable }` (the `&vtable` dropped to a by-value store), then the standard
+        // `a.alloc` routes through the existing indirect vtable dispatch.
+        var cs = EmitZig(CustomAllocator);
+        cs.ShouldContain("new Allocator {");
+        cs.ShouldContain("Vtable = bump_vtable");   // &vtable stored by value (no stray '&')
+        cs.ShouldContain(".Alloc<byte>(");          // indirect dispatch through the user vtable
+    }
 }

@@ -86,6 +86,45 @@ public sealed class ZigOracleTests
             "    _ = f2(&acc, 2);\n" +
             "    return @intCast(acc);\n" +
             "}\n", 42, "" },
+        // A user-constructed custom std.mem.Allocator (Milestone W, part 1b): a hand-written bump
+        // allocator whose state lives behind the opaque ctx, bound to the real 4-fn VTable
+        // (alloc/resize/remap/free, each carrying std.mem.Alignment + []u8 + ret_addr). main builds
+        // `std.mem.Allocator{ .ptr = &state, .vtable = &bump_vtable }` and uses the standard alloc/free
+        // surface; dispatch flows through the vtable. alloc 10, fill 0..9 (sum 45), free → 45 - 3 = 42.
+        new object[] { "custom_allocator",
+            "const std = @import(\"std\");\n" +
+            "const Bump = struct { base: [*]u8, cap: usize, used: usize };\n" +
+            "fn bumpAlloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {\n" +
+            "    _ = alignment; _ = ret_addr;\n" +
+            "    const self: *Bump = @ptrCast(@alignCast(ctx));\n" +
+            "    if (self.used + len > self.cap) return null;\n" +
+            "    const p = self.base + self.used;\n" +
+            "    self.used += len;\n" +
+            "    return p;\n" +
+            "}\n" +
+            "fn bumpResize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {\n" +
+            "    _ = ctx; _ = memory; _ = alignment; _ = new_len; _ = ret_addr; return false;\n" +
+            "}\n" +
+            "fn bumpRemap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {\n" +
+            "    _ = ctx; _ = memory; _ = alignment; _ = new_len; _ = ret_addr; return null;\n" +
+            "}\n" +
+            "fn bumpFree(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {\n" +
+            "    _ = ctx; _ = memory; _ = alignment; _ = ret_addr;\n" +
+            "}\n" +
+            "const bump_vtable = std.mem.Allocator.VTable{ .alloc = bumpAlloc, .resize = bumpResize, .remap = bumpRemap, .free = bumpFree };\n" +
+            "pub fn main() u8 {\n" +
+            "    var backing: [256]u8 = undefined;\n" +
+            "    var state = Bump{ .base = backing[0..].ptr, .cap = backing.len, .used = 0 };\n" +
+            "    const a = std.mem.Allocator{ .ptr = &state, .vtable = &bump_vtable };\n" +
+            "    const buf = a.alloc(u8, 10) catch return 1;\n" +
+            "    var i: usize = 0;\n" +
+            "    while (i < 10) : (i = i + 1) { buf[i] = @intCast(i); }\n" +
+            "    var sum: u32 = 0;\n" +
+            "    i = 0;\n" +
+            "    while (i < 10) : (i = i + 1) { sum += buf[i]; }\n" +
+            "    a.free(buf);\n" +
+            "    return @intCast(sum - 3);\n" +
+            "}\n", 42, "" },
         // extern fn libc FFI: `putchar` from libc (linked -lc) produces real STDOUT.
         // dotcc routes it by bare name to its Libc runtime; zig links the real libc.
         new object[] { "extern_putchar",

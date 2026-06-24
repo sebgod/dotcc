@@ -87,8 +87,8 @@ public sealed class ZigAllocRuntimeTests
     [Fact]
     public unsafe void Indirect_dispatch_through_the_materialized_c_heap_vtable()
     {
-        // The materialized default allocator: dispatch goes through the vtable's AllocFn /
-        // FreeFn (the indirect path), which still reach Libc.malloc / Libc.free.
+        // The materialized default allocator: dispatch goes through the vtable's alloc /
+        // free (the indirect path), which still reach Libc.malloc / Libc.free.
         var a = ZigAlloc.CHeap();
         var r = a.Alloc<byte>(2, Oom);
         r.IsErr.ShouldBeFalse();
