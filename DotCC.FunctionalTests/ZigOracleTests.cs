@@ -1551,6 +1551,24 @@ public sealed class ZigOracleTests
             "    const r = boom() catch 1;\n" +
             "    return acc + r;\n" +
             "}\n", 42, "" },
+
+        // Milestone X, part 3 — error-set membership checking (the LEGAL side). Every returned error
+        // is a member of the function's declared set `E` (bare `error.A` AND set-qualified `E.B`), so
+        // dotcc accepts it exactly like real zig (the rejection of a FOREIGN error is a unit pin, not
+        // an oracle case — both compilers reject it). pick(42) → 42; the error paths are exercised.
+        new object[] { "error_set_check",
+            "const E = error{ A, B };\n" +
+            "fn pick(x: u8) E!u8 {\n" +
+            "    if (x == 0) return error.A;\n" +
+            "    if (x == 1) return E.B;\n" +
+            "    return x;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const ok = pick(42) catch 0;\n" +
+            "    _ = pick(0) catch 0;\n" +
+            "    _ = pick(1) catch 0;\n" +
+            "    return ok;\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
