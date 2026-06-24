@@ -64,6 +64,13 @@ internal sealed partial class IrBuilder
     public List<EnumTypeDef> Enums { get; } = new();
     public List<Diagnostic> Diagnostics { get; } = new();
 
+    /// <summary>The Zig front-end's flat error set: each <c>error.Foo</c> name → its stable
+    /// <c>ushort</c> code (1-based). Populated by <c>ZigFrontend.AddUnits</c> after lowering all
+    /// units; consumed by the backend to emit the <c>__zigErrorName</c> code→name table that
+    /// backs <c>@errorName</c> (Milestone X, part 1). Null/empty for a C-only program or a Zig
+    /// program that never names an error.</summary>
+    public IReadOnlyDictionary<string, int>? ZigErrorCodes { get; set; }
+
     /// <summary>
     /// Functions a native import (`-l`) library must resolve: declared by prototype,
     /// defined in NO translation unit, actually called, and NOT from a synthetic

@@ -1525,6 +1525,16 @@ public sealed class ZigOracleTests
             "    _ = printf(\"len=%zu sum=%u\\n\", n, sum);\n" +
             "    return @intCast(arr.len + sum - 62);\n" +
             "}\n", 42, "len=4 sum=100" },
+
+        // Milestone X, part 1 — `@errorName(e)`: the un-erased error name as `[]const u8`. dotcc
+        // carries the flat code→name table into the emit; `@errorName(error.Ok)` = "Ok". The exit is
+        // content-sensitive (reads a name byte AND the length): @as(usize,name[0]) + name.len - 39 =
+        // 79 ('O') + 2 - 39 = 42 (a wrong name byte or length diverges from real zig).
+        new object[] { "error_name",
+            "pub fn main() u8 {\n" +
+            "    const name = @errorName(error.Ok);\n" +
+            "    return @intCast(@as(usize, name[0]) + name.len - 39);\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

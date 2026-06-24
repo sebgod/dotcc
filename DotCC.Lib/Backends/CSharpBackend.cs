@@ -94,6 +94,27 @@ internal sealed class CSharpBackend
             }
         }
 
+        // Zig `@errorName` (Milestone X, part 1): emit the flat code→name table as a helper in
+        // DotCcProgram — one arm per registered `error.Foo`, returning its name as a
+        // `ConstSlice<byte>` over the RVA-pinned UTF-8 bytes (`using static Libc` surfaces `L`; the
+        // spliced runtime block defines `ConstSlice`). Error names are Zig identifiers (ASCII, no
+        // escaping). Emitted only when the program names ≥1 error (so a `@errorName` call resolves).
+        if (unit.ZigErrorCodes is { Count: > 0 } errNames)
+        {
+            if (fns.Length > 0) { fns.Append("\n\n"); }
+            // NB: emit `static unsafe` (no access modifier) — the shell rewrites `static unsafe ` →
+            // `internal static unsafe ` (exe) / `public static unsafe ` (lib), so a literal
+            // `internal` here would be doubled (CS1004). Matches `Func` above.
+            fns.Append("    /// <summary>Zig `@errorName`: a flat error code → its name as `[]const u8`.</summary>\n");
+            fns.Append("    static unsafe ConstSlice<byte> __zigErrorName(ushort code) => code switch\n    {\n");
+            foreach (var kv in errNames.OrderBy(kv => kv.Value))
+            {
+                var len = System.Text.Encoding.UTF8.GetByteCount(kv.Key);
+                fns.Append($"        {kv.Value} => new ConstSlice<byte>(L(\"{kv.Key}\"u8), {len}),\n");
+            }
+            fns.Append("        _ => new ConstSlice<byte>(L(\"(unknown)\"u8), 9),\n    };");
+        }
+
         // File-scope variables → public static fields of DotCcGlobals (the shell
         // surfaces them by bare name via `using static DotCcGlobals;`).
         var globals = new StringBuilder();
