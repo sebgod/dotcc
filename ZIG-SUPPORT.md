@@ -338,10 +338,15 @@ code, dotcc carries the code→name map into the emit as a `__zigErrorName(code)
 name bytes (`L("Foo"u8)`). A **set-qualified `E.member`** reference is supported too (Milestone X,
 part 2): `MyError.Boom` resolves to the same flat code as the bare `error.Boom` (membership erased,
 so it's the same value — as real zig treats it), usable as a value, in a comparison, and in `return`
-position. STILL un-erasing-bound: real error NAMES in a `main` error-trace (the trace still prints
-the flat code), and distinct named `E!T` sets (every set lowers like `anyerror!T`, so a foreign-error
-assignment / exhaustive set-`switch` isn't checked). `errdefer |e|` capture is NOT pursued (current
-Zig removed the syntax).
+position. **Error-set membership is now CHECKED** (Milestone X, part 3) — dotcc keeps the flat
+runtime code but is a good compiler and rejects illegal programs real zig also rejects: a
+`return error.X` / `return E.X` of an error outside a function's DECLARED set
+(`fn f() error{A}!u8 { return error.B; }` → error), and an `E.member` whose member isn't declared in
+`E`. An inferred `!T` / `anyerror!T` stays unconstrained (any error — real zig infers the set).
+STILL deferred: real error NAMES in a `main` error-trace (the trace still prints the flat code); an
+error set used as a VALUE type (`fn f(e: E)`); an exhaustive set-`switch` without `else`; and
+set-checking an error that flows in through a CALL or `try` (only the direct `return` form is
+checked). `errdefer |e|` capture is NOT pursued (current Zig removed the syntax).
 
 ## Allocators — devirtualize the default, vtable for the rest
 

@@ -243,6 +243,24 @@ internal sealed partial class ZigLowering
     /// allocator/import bindings.</summary>
     private readonly HashSet<string> _errorSets = new(System.StringComparer.Ordinal);
 
+    /// <summary>Each declared error set's member names (Milestone X, part 3) — <c>const E = error{A, B}</c>
+    /// records <c>E → {A, B}</c>. The runtime code stays flat (membership is NOT a runtime concept),
+    /// but the table lets dotcc be a good compiler and REJECT illegal programs: an <c>E.member</c>
+    /// where <c>member ∉ E</c>, and a <c>return</c> of an error outside a function's declared set.</summary>
+    private readonly Dictionary<string, HashSet<string>> _errorSetMembers = new(System.StringComparer.Ordinal);
+
+    /// <summary>An error-union function's RAW return-type AST, recorded in <see cref="DeclareFn"/>
+    /// (pass 1) and resolved to its declared set LAZILY in <see cref="LowerFnBody"/> (pass 2) for the
+    /// foreign-error return check (Milestone X, part 3). Deferred because the <c>const E = error{…}</c>
+    /// set declarations are processed in pass 1.5 (after pass 1's <c>DeclareFn</c>), so the member
+    /// table isn't ready when a signature is declared — but it always is by the time a body is lowered.</summary>
+    private readonly Dictionary<Symbol, (Item retType, bool errUnion)> _fnErrorReturnTypes = new();
+
+    /// <summary>The active function's declared error set (<see cref="_fnErrorSets"/> entry), or null
+    /// when unconstrained — set per body in <see cref="LowerFnBody"/>, mirroring <see cref="_currentFnRet"/>.
+    /// A <c>return error.X</c> / <c>return E.X</c> whose name is outside this set is rejected.</summary>
+    private (string? name, HashSet<string> members)? _currentFnErrorSet;
+
     /// <summary>The provable kind of an allocator operand. <c>CHeap</c> = the statically-known
     /// <c>page_allocator</c>/<c>c_allocator</c> default (→ direct <c>Libc.malloc</c>/<c>free</c>);
     /// <c>Fba</c> = a provable <c>fba.allocator()</c> result (Milestone U → a direct FBA bump over
@@ -661,6 +679,9 @@ internal sealed partial class ZigLowering
             Type = new CType.Func(ret, paramInfos.Select(p => p.type).ToList(), false),
             IsGlobal = true,
         });
+        // Stash the raw return-type AST so the body can resolve its declared error set in pass 2
+        // (the set decls aren't processed until pass 1.5) for the foreign-error return check.
+        if (ret is CType.ErrorUnion) { _fnErrorReturnTypes[funcSym] = (retType, errUnion); }
         return (funcSym, paramInfos, body);
     }
 
@@ -763,6 +784,14 @@ internal sealed partial class ZigLowering
     {
         _currentFnRet = (funcSym.Type as CType.Func)?.Return;
         _currentFnHasErrdefer = false;   // set lazily as `errdefer`s are encountered (Milestone H)
+        // The declared error set for the foreign-error return check (Milestone X, part 3); resolved
+        // NOW (pass 2 — all `const E = error{…}` set decls are processed by here). Null (unconstrained)
+        // for an inferred `!T` / `anyerror!T` or a non-error-union function.
+        _currentFnErrorSet =
+            _fnErrorReturnTypes.TryGetValue(funcSym, out var rt)
+            && TryDeclaredErrorSet(rt.retType, rt.errUnion, out var esName, out var esMembers)
+                ? (esName, esMembers)
+                : null;
         _symbols.BeginFunction();
         _symbols.EnterScope();
         var paramSyms = paramInfos
@@ -3270,9 +3299,14 @@ internal sealed partial class ZigLowering
         if (_currentFnRet is CType.ErrorUnion eu)
         {
             // `return error.X;` or the set-qualified `return E.X;` (Milestone X, part 2) — both an
-            // error return (the same flat code; dotcc erases set membership).
-            if (IsErrorLit(valueItem, out var errName) || TryErrorSetMember(valueItem, out errName))
+            // error return (the same flat code). Part 3: validate `E.X` membership, then reject an
+            // error outside the function's DECLARED set (a good compiler rejects illegal programs).
+            string? errName = null;
+            if (IsErrorLit(valueItem, out var bareName)) { errName = bareName; }
+            else if (TryErrorSetMember(valueItem, out var qSet, out var qName)) { ValidateSetMember(qSet, qName); errName = qName; }
+            if (errName is not null)
             {
+                CheckReturnedErrorInSet(errName);
                 // With an `errdefer` in this function, the error must propagate via a thrown
                 // ZigErrorReturn so it passes through the errdefer catch(es) on the stack (a C#
                 // catch can't observe a direct return); the `!T` boundary catch converts it back
@@ -3463,15 +3497,71 @@ internal sealed partial class ZigLowering
     /// flat code as the bare <c>error.member</c> (real zig: the same global error value). Recognized
     /// wherever <see cref="IsErrorLit"/> is — the value path and the <see cref="LowerReturn"/> error
     /// return. Instance (not static like <see cref="IsErrorLit"/>) because it reads <c>_errorSets</c>.</summary>
-    private bool TryErrorSetMember(Item it, out string name)
+    private bool TryErrorSetMember(Item it, out string set, out string name)
     {
         if (it.Content is Zig.Field f && f.Arg0.Content is Zig.Ident id && _errorSets.Contains(Tok(id.Arg0)))
         {
+            set = Tok(id.Arg0);
             name = Tok(f.Arg2);
             return true;
         }
+        set = "";
         name = "";
         return false;
+    }
+
+    /// <summary>Reject a set-qualified <c>E.member</c> whose member is not declared in set <c>E</c>
+    /// (Milestone X, part 3) — an illegal program real zig rejects, so dotcc does too (a good compiler
+    /// rejects illegal programs). Lenient only if <c>E</c> somehow has no recorded members.</summary>
+    private void ValidateSetMember(string set, string member)
+    {
+        if (_errorSetMembers.TryGetValue(set, out var members) && !members.Contains(member))
+        {
+            throw new CompileException($"zig: error '{member}' is not a member of error set '{set}'");
+        }
+    }
+
+    /// <summary>Reject a directly-returned error (<c>return error.X;</c> / <c>return E.X;</c>) whose
+    /// name is outside the current function's DECLARED error set (Milestone X, part 3) — e.g.
+    /// <c>fn f() error{A}!u8 { return error.B; }</c>. No-op when the function is unconstrained (an
+    /// inferred <c>!T</c> / <c>anyerror!T</c>, <see cref="_currentFnErrorSet"/> null). V1 checks the
+    /// direct-return forms only; an error that flows in through a CALL or <c>try</c> is not yet
+    /// set-checked (a documented cut — it would need cross-function set inference).</summary>
+    private void CheckReturnedErrorInSet(string errName)
+    {
+        if (_currentFnErrorSet is { } cs && !cs.members.Contains(errName))
+        {
+            var which = cs.name is { } n ? $"error set '{n}'" : "the function's declared error set";
+            throw new CompileException(
+                $"zig: error '{errName}' is not a member of {which} (the function's return-error set)");
+        }
+    }
+
+    /// <summary>A function's DECLARED error set, for the foreign-error return check (Milestone X,
+    /// part 3). Returns false (UNCONSTRAINED — any error is accepted) for an inferred bare <c>!T</c>,
+    /// for <c>anyerror!T</c>, or for an unknown set name (real zig infers / widens those); returns true
+    /// with the allowed member names for an <c>E!T</c> over a declared set or an inline
+    /// <c>error{…}!T</c>.</summary>
+    private bool TryDeclaredErrorSet(Item retType, bool errUnion, out string? setName, out HashSet<string> members)
+    {
+        setName = null;
+        members = new HashSet<string>(System.StringComparer.Ordinal);
+        if (errUnion) { return false; }                          // bare `!T` — inferred set
+        if (retType.Content is not Zig.ErrUnion eu) { return false; }
+        switch (eu.Arg0.Content)
+        {
+            case Zig.Ident id when Tok(id.Arg0) != "anyerror" && _errorSetMembers.TryGetValue(Tok(id.Arg0), out var declared):
+                setName = Tok(id.Arg0);
+                members = declared;
+                return true;
+            case Zig.ErrorSet inlineSet:
+                foreach (var m in WalkErrSetMembers(inlineSet.Arg2)) { members.Add(m); }
+                return true;
+            case Zig.ErrorSetEmpty:
+                return true;                                     // `error{}!T` — never errors
+            default:
+                return false;                                    // anyerror / an unknown set name
+        }
     }
 
     /// <summary>Lower a bare <c>error.Foo</c> value to its stable code in the flat global error set,
@@ -3720,9 +3810,11 @@ internal sealed partial class ZigLowering
                 // `E.member` where E is a registered error set (Milestone X, part 2) — the
                 // set-qualified form of `error.member`, resolving to the same flat code (membership
                 // erased). A USE as a value: bound to a const/var, compared (`x == E.member`), a
-                // `catch`/`switch` operand. The error-RETURN form is handled in LowerReturn.
-                if (TryErrorSetMember(expr, out var esMember))
+                // `catch`/`switch` operand. The error-RETURN form is handled in LowerReturn. Part 3
+                // rejects a member not declared in the set (a good compiler rejects illegal programs).
+                if (TryErrorSetMember(expr, out var esSet, out var esMember))
                 {
+                    ValidateSetMember(esSet, esMember);
                     return LowerErrorLit(esMember);
                 }
                 var structExpr = LowerExpr(fld.Arg0);
@@ -4674,13 +4766,16 @@ internal sealed partial class ZigLowering
         // `error{}` (the never-erroring set) has no members to register.
         if (rhs.Content is Zig.ErrorSet es)
         {
-            foreach (var member in WalkErrSetMembers(es.Arg2)) { ErrorCode(member); }
+            var members = new HashSet<string>(System.StringComparer.Ordinal);
+            foreach (var member in WalkErrSetMembers(es.Arg2)) { ErrorCode(member); members.Add(member); }
             _errorSets.Add(name);
+            _errorSetMembers[name] = members;   // Milestone X, part 3 — for the membership checks
             return true;
         }
         if (rhs.Content is Zig.ErrorSetEmpty)
         {
             _errorSets.Add(name);
+            _errorSetMembers[name] = new HashSet<string>(System.StringComparer.Ordinal);  // `error{}` — no members
             return true;
         }
         return false;

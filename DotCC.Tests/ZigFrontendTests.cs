@@ -3623,4 +3623,45 @@ public sealed class ZigFrontendTests
         cs.ShouldNotContain("MyError");       // the set name is fully erased
         cs.ShouldNotContain(".Boom");         // E.member resolved to a flat code, not a member access
     }
+
+    // ---- Milestone X, part 3 — error-set membership checking (reject illegal programs) ----
+
+    [Fact]
+    public void Rejects_returning_an_error_outside_the_functions_declared_set()
+    {
+        // `fn f() error{A}!u8 { return error.B; }` — B is not in the declared set, so a good compiler
+        // rejects it (real zig: "error.B not a member of destination error set"). dotcc keeps the flat
+        // runtime code but now checks membership at the return.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const E = error{ A };\n" +
+            "fn f() E!u8 { return error.B; }\n" +
+            "pub fn main() u8 { return f() catch 0; }\n"));
+        ex.Message.ShouldContain("'B'");
+        ex.Message.ShouldContain("'E'");
+    }
+
+    [Fact]
+    public void Rejects_a_set_qualified_member_not_declared_in_the_set()
+    {
+        // `E.Nope` where Nope ∉ E — an illegal set-qualified reference (closes the X2 leniency cut).
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const E = error{ A, B };\n" +
+            "pub fn main() u8 { const e = E.Nope; _ = e; return 0; }\n"));
+        ex.Message.ShouldContain("'Nope'");
+        ex.Message.ShouldContain("'E'");
+    }
+
+    [Fact]
+    public void Accepts_in_set_errors_and_leaves_an_inferred_set_unchecked()
+    {
+        // The legal side: every returned error is a member of the declared set (bare AND
+        // set-qualified), and an inferred `!T` stays UNCONSTRAINED (any error allowed — real zig
+        // infers the set). Both lower to error unions with no false rejection.
+        var cs = EmitZig(
+            "const E = error{ A, B };\n" +
+            "fn pick(x: u8) E!u8 { if (x == 0) return error.A; if (x == 1) return E.B; return x; }\n" +
+            "fn any(x: u8) !u8 { if (x == 0) return error.Anything; return x; }\n" +
+            "pub fn main() u8 { const a = pick(7) catch 0; const b = any(7) catch 0; return a + b; }\n");
+        cs.ShouldContain("ErrUnion<byte>");
+    }
 }
