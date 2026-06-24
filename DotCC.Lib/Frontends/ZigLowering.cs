@@ -257,6 +257,15 @@ internal sealed partial class ZigLowering
     /// spelled by the spliced <c>ZigAlloc.cs</c> — the third concrete allocator (Milestone U).</summary>
     private const string ArenaTypeName = "ArenaAllocator";
 
+    /// <summary>The runtime <c>AllocatorVTable</c> type name (Milestone W, part 1b) — the 4-fn
+    /// <c>{ alloc, resize, remap, free }</c> table a user-constructed <c>std.mem.Allocator</c>
+    /// carries by value, as spelled by the spliced <c>ZigAlloc.cs</c>.</summary>
+    private const string VTableTypeName = "AllocatorVTable";
+
+    /// <summary>The runtime <c>Alignment</c> type name (Milestone W, part 1b) — Zig's
+    /// <c>std.mem.Alignment</c> threaded through the vtable functions.</summary>
+    private const string AlignmentTypeName = "Alignment";
+
     /// <summary>The discriminant field name on a lowered tagged-union struct — a leading
     /// double-underscore so it can't collide with a user variant (a Zig field name).</summary>
     private const string TagFieldName = "__tag";
@@ -1300,6 +1309,10 @@ internal sealed partial class ZigLowering
             return BuildArrayInit(fieldInitItems, arr);
         }
         var t = LowerType(typeItem);
+        // A user-constructed custom allocator (Milestone W, part 1b): `std.mem.Allocator{ .ptr, .vtable }`
+        // and the `std.mem.Allocator.VTable{ .alloc, .resize, .remap, .free }` literal it points at.
+        if (t.Unqualified is CType.Allocator) { return BuildAllocatorLiteral(fieldInitItems); }
+        if (t.Unqualified is CType.Named { Name: VTableTypeName }) { return BuildAllocatorVTableLiteral(fieldInitItems); }
         if (t.Unqualified is not CType.Named named)
         {
             throw new IrUnsupportedException(
@@ -1328,6 +1341,98 @@ internal sealed partial class ZigLowering
             members.Add(new FieldInit(fname, ftype, LowerExprSink(fi.Arg3, ftype)));
         }
         return new StructInit(members) { Type = named };
+    }
+
+    /// <summary>The field types of the runtime <c>AllocatorVTable</c> — Zig's
+    /// <c>std.mem.Allocator.VTable</c> shape (Milestone W, part 1b). Each is a MANAGED function
+    /// pointer (<c>delegate*&lt;…&gt;</c>) whose signature matches the corresponding user function's
+    /// lowering, so a <c>&amp;fn</c> reference in a <c>VTable{…}</c> literal binds cleanly. Returns
+    /// <c>null</c> for an unknown field. Mirrors <c>AllocatorVTable</c> in <c>DotCC.Libc/ZigAlloc.cs</c>:
+    /// <c>*anyopaque</c>→<c>void*</c>, <c>?[*]u8</c>→<c>byte*</c>, <c>[]u8</c>→<c>Slice&lt;byte&gt;</c>,
+    /// <c>usize</c>→<c>ulong</c>, <c>std.mem.Alignment</c>→<c>Alignment</c>.</summary>
+    private static CType? VTableFieldType(string field)
+    {
+        CType ctx = new CType.Pointer(CType.Void);     // *anyopaque
+        CType optPtr = new CType.Pointer(CType.UChar); // ?[*]u8
+        CType mem = new CType.Slice(CType.UChar);      // []u8
+        CType usz = CType.ULong;                       // usize
+        CType aln = new CType.Named(AlignmentTypeName); // std.mem.Alignment
+        return field switch
+        {
+            "alloc"  => new CType.Func(optPtr, new[] { ctx, usz, aln, usz }, false),
+            "resize" => new CType.Func(CType.Bool, new[] { ctx, mem, aln, usz, usz }, false),
+            "remap"  => new CType.Func(optPtr, new[] { ctx, mem, aln, usz, usz }, false),
+            "free"   => new CType.Func(CType.Void, new[] { ctx, mem, aln, usz }, false),
+            _ => null,
+        };
+    }
+
+    /// <summary>Lower a <c>std.mem.Allocator.VTable{ .alloc = f, .resize = g, .remap = h, .free = k }</c>
+    /// literal (Milestone W, part 1b) to a <see cref="StructInit"/> of the runtime
+    /// <c>AllocatorVTable</c>. Each function reference is result-located against its
+    /// <see cref="VTableFieldType"/>, so a bare function name decays to <c>&amp;fn</c> matching the
+    /// managed fn-pointer field. The C# backend renders <c>new AllocatorVTable { alloc = &amp;f, … }</c>
+    /// purely from the node (no registered field metadata needed).</summary>
+    private CExpr BuildAllocatorVTableLiteral(IReadOnlyList<Item> fieldInitItems)
+    {
+        var members = new List<FieldInit>();
+        foreach (var fiItem in fieldInitItems)
+        {
+            var fi = (Zig.FieldInit)fiItem.Content!;   // FieldInit -> '.' IDENT '=' Expr
+            var fname = Tok(fi.Arg1);
+            var ftype = VTableFieldType(fname)
+                ?? throw new IrUnsupportedException(
+                    $"std.mem.Allocator.VTable has no field '{fname}' (expected alloc / resize / remap / free)");
+            members.Add(new FieldInit(fname, ftype, LowerExprSink(fi.Arg3, ftype)));
+        }
+        return new StructInit(members) { Type = new CType.Named(VTableTypeName) };
+    }
+
+    /// <summary>Lower a <c>std.mem.Allocator{ .ptr = p, .vtable = &amp;vt }</c> literal (Milestone W,
+    /// part 1b) to a <see cref="StructInit"/> of the runtime <c>Allocator</c> fat pointer. <c>.ptr</c>
+    /// (a <c>*anyopaque</c> context) maps to the runtime <c>Ctx</c> (<c>void*</c>); <c>.vtable</c> is a
+    /// <c>*const VTable</c> in Zig but the runtime carries the table BY VALUE, so the <c>&amp;vt</c> is
+    /// dereferenced to the vtable value (<see cref="LowerVtableByValue"/>). The resulting
+    /// <see cref="CType.Allocator"/> value routes through the existing indirect dispatch
+    /// (<c>a.alloc</c>/<c>a.free</c> → the vtable functions).</summary>
+    private CExpr BuildAllocatorLiteral(IReadOnlyList<Item> fieldInitItems)
+    {
+        CExpr? ctx = null;
+        CExpr? vtable = null;
+        foreach (var fiItem in fieldInitItems)
+        {
+            var fi = (Zig.FieldInit)fiItem.Content!;
+            var fname = Tok(fi.Arg1);
+            switch (fname)
+            {
+                case "ptr": ctx = LowerExprSink(fi.Arg3, new CType.Pointer(CType.Void)); break;
+                case "vtable": vtable = LowerVtableByValue(fi.Arg3); break;
+                default:
+                    throw new IrUnsupportedException(
+                        $"std.mem.Allocator literal has no field '{fname}' (expected ptr / vtable)");
+            }
+        }
+        if (ctx is null || vtable is null)
+        {
+            throw new IrUnsupportedException("std.mem.Allocator literal requires both .ptr and .vtable");
+        }
+        var members = new List<FieldInit>
+        {
+            new FieldInit("Ctx", new CType.Pointer(CType.Void), ctx),
+            new FieldInit("Vtable", new CType.Named(VTableTypeName), vtable),
+        };
+        return new StructInit(members) { Type = new CType.Allocator() };
+    }
+
+    /// <summary>Lower a <c>.vtable = &amp;vt</c> initializer to the vtable VALUE: Zig's
+    /// <c>Allocator.vtable</c> is a <c>*const VTable</c>, but dotcc's runtime <c>Allocator</c> holds
+    /// the table by value, so drop a leading <c>&amp;</c> (or dereference a general <c>*VTable</c>).</summary>
+    private CExpr LowerVtableByValue(Item vtableExpr)
+    {
+        var e = LowerExpr(vtableExpr);
+        if (e is Unary { Op: UnOp.AddrOf } u) { return u.Operand; }
+        if (e.Type.Unqualified is CType.Pointer p) { return new Unary(UnOp.Deref, e) { Type = p.Pointee }; }
+        return e;
     }
 
     /// <summary>Build a tagged-union PAYLOAD literal — <c>.{ .variant = value }</c> or
@@ -4268,11 +4373,21 @@ internal sealed partial class ZigLowering
         var (left, right) = op is BinOp.Eq or BinOp.Ne
             ? LowerComparisonOperands(l, r)
             : (LowerExpr(l), LowerExpr(r));
+        // Pointer arithmetic on a Zig many-item pointer (`[*]T` / `[*c]T`, both lowered to
+        // `CType.Pointer`): `p + i` / `p - i` yields the pointer type, and `p - q` yields a
+        // signed offset (`long`). `UsualArithmetic` only knows `Prim`s — it returns `int` for a
+        // pointer operand — so handle the pointer cases here, mirroring the C frontend's
+        // `IrBuilder.BinaryType`. (Zig fixed arrays are values and don't decay in arithmetic, so
+        // only `CType.Pointer` participates; you slice an array before pointer-walking it.)
+        var lPtr = left.Type.Unqualified is CType.Pointer;
+        var rPtr = right.Type.Unqualified is CType.Pointer;
         var type = op switch
         {
             BinOp.Eq or BinOp.Ne or BinOp.Lt or BinOp.Gt or BinOp.Le or BinOp.Ge
                 or BinOp.LogAnd or BinOp.LogOr => CType.Int,
             BinOp.Shl or BinOp.Shr => CType.IntegerPromote(left.Type),
+            BinOp.Add or BinOp.Sub when lPtr || rPtr
+                => lPtr && rPtr ? CType.Long : (lPtr ? left.Type.Unqualified : right.Type.Unqualified),
             _ => CType.UsualArithmetic(left.Type, right.Type),
         };
         return new Binary(op, left, right) { Type = type };
@@ -4708,10 +4823,14 @@ internal sealed partial class ZigLowering
             return path switch
             {
                 "std.mem.Allocator" => new CType.Allocator(),
+                // A user-constructed custom allocator (Milestone W, part 1b): the vtable struct type
+                // and the alignment a vtable function receives. Both → runtime types in ZigAlloc.cs.
+                "std.mem.Allocator.VTable" => new CType.Named(VTableTypeName),
+                "std.mem.Alignment" => new CType.Named(AlignmentTypeName),
                 "std.heap.FixedBufferAllocator" => new CType.Named(FbaTypeName),
                 "std.heap.ArenaAllocator" => new CType.Named(ArenaTypeName),
                 _ => throw new IrUnsupportedException(
-                    $"zig type `{path}` is not modeled (std types: std.mem.Allocator, std.heap.FixedBufferAllocator, std.heap.ArenaAllocator)"),
+                    $"zig type `{path}` is not modeled (std types: std.mem.Allocator, std.mem.Allocator.VTable, std.mem.Alignment, std.heap.FixedBufferAllocator, std.heap.ArenaAllocator)"),
             };
         }
         throw new IrUnsupportedException(

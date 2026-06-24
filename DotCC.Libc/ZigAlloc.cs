@@ -41,11 +41,42 @@ namespace DotCC.Libc;
 /// </remarks>
 public unsafe struct AllocatorVTable
 {
-    /// <summary>Raw allocation: <c>(ctx, byteLen) → byte*</c>; null on failure.</summary>
-    public delegate*<void*, nuint, byte*> AllocFn;
+    /// <summary>Raw allocation: <c>(ctx, len, alignment, ret_addr) → ?[*]u8</c>; null on failure.
+    /// Mirrors Zig's <c>VTable.alloc</c> exactly (the field name matches, so a user
+    /// <c>std.mem.Allocator.VTable{ .alloc = … }</c> literal binds 1:1).</summary>
+    public delegate*<void*, ulong, Alignment, ulong, byte*> alloc;
 
-    /// <summary>Raw free: <c>(ctx, ptr, byteLen) → void</c>.</summary>
-    public delegate*<void*, byte*, nuint, void> FreeFn;
+    /// <summary>In-place resize: <c>(ctx, memory: []u8, alignment, new_len, ret_addr) → bool</c>.
+    /// Stored for shape-fidelity (so a custom vtable matches real zig); dotcc's own <c>realloc</c>
+    /// emulates via alloc+copy+free, and <c>a.resize</c>/<c>a.remap</c> are deferred, so this is
+    /// never invoked by dotcc-lowered code today.</summary>
+    public delegate*<void*, Slice<byte>, Alignment, ulong, ulong, CBool> resize;
+
+    /// <summary>Resize-possibly-moving: <c>(ctx, memory: []u8, alignment, new_len, ret_addr) → ?[*]u8</c>.
+    /// Stored for shape-fidelity; not invoked by dotcc dispatch (see <see cref="resize"/>).</summary>
+    public delegate*<void*, Slice<byte>, Alignment, ulong, ulong, byte*> remap;
+
+    /// <summary>Raw free: <c>(ctx, memory: []u8, alignment, ret_addr) → void</c>.</summary>
+    public delegate*<void*, Slice<byte>, Alignment, ulong, void> free;
+}
+
+/// <summary>
+/// Models Zig's <c>std.mem.Alignment</c> (Milestone W) — a power-of-two byte alignment threaded
+/// through the allocator vtable. Real zig stores <c>log2(bytes)</c> in an <c>enum(u6)</c>; dotcc
+/// carries the byte count directly and exposes <see cref="toByteUnits"/> (identity). The request
+/// is advisory: dotcc's C heap (and a typical custom allocator) over-aligns, so the exact value is
+/// unobservable for typical programs. <b>Cut:</b> <c>@intFromEnum</c> (the log2) is not modeled —
+/// use <c>.toByteUnits()</c>.
+/// </summary>
+public readonly struct Alignment
+{
+    private readonly ulong _bytes;
+
+    /// <summary>Construct an alignment of <paramref name="bytes"/> bytes (a power of two).</summary>
+    public Alignment(ulong bytes) { _bytes = bytes; }
+
+    /// <summary>Zig's <c>Alignment.toByteUnits()</c> — the alignment in bytes.</summary>
+    public ulong toByteUnits() => _bytes;
 }
 
 /// <summary>
@@ -70,18 +101,30 @@ public unsafe struct Allocator
     /// the raw allocation returns null. The genuine indirect dispatch lives here.</summary>
     public ErrUnion<Slice<T>> Alloc<T>(ulong n, ushort oom) where T : unmanaged
     {
-        nuint bytes = (nuint)n * (nuint)sizeof(T);
-        byte* p = Vtable.AllocFn(Ctx, bytes);
+        ulong bytes = n * (ulong)sizeof(T);
+        byte* p = Vtable.alloc(Ctx, bytes, AlignOf<T>(), 0);
         return p == null
             ? ErrUnion<Slice<T>>.Err(oom)
             : ErrUnion<Slice<T>>.Ok(new Slice<T>((T*)p, n));
     }
 
     /// <summary><c>a.free(slice)</c> — free a slice previously returned by
-    /// <see cref="Alloc{T}"/>, passing the byte length back to the raw free (Zig allocators
-    /// take the size at free time).</summary>
+    /// <see cref="Alloc{T}"/>, passing the byte-length <c>[]u8</c> back to the raw free (Zig
+    /// allocators take the size at free time).</summary>
     public void Free<T>(Slice<T> s) where T : unmanaged
-        => Vtable.FreeFn(Ctx, (byte*)s.Ptr, (nuint)s.Len * (nuint)sizeof(T));
+        => Vtable.free(Ctx, new Slice<byte>((byte*)s.Ptr, s.Len * (ulong)sizeof(T)), AlignOf<T>(), 0);
+
+    /// <summary>The byte alignment dotcc passes for an element type <typeparamref name="T"/> — the
+    /// largest power of two ≤ <c>min(sizeof(T), 16)</c>. Advisory (the C heap over-aligns); a custom
+    /// allocator that honors it rounds its cursor. .NET has no <c>alignof</c>, so this size-derived
+    /// value is an approximation — exact alignment is not modeled (documented in <see cref="Alignment"/>).</summary>
+    private static Alignment AlignOf<T>() where T : unmanaged
+    {
+        ulong s = (ulong)sizeof(T);
+        ulong a = 1;
+        while ((a << 1) <= s && (a << 1) <= 16) { a <<= 1; }
+        return new Alignment(a);
+    }
 
     /// <summary><c>a.create(T)</c> — allocate one <typeparamref name="T"/> through the vtable
     /// (Milestone U). The address is carried back as a <c>nuint</c>: a pointer cannot be the
@@ -90,7 +133,7 @@ public unsafe struct Allocator
     /// casts the unwrapped value back to <c>T*</c>. Returns <paramref name="oom"/> on failure.</summary>
     public ErrUnion<nuint> Create<T>(ushort oom) where T : unmanaged
     {
-        byte* p = Vtable.AllocFn(Ctx, (nuint)sizeof(T));
+        byte* p = Vtable.alloc(Ctx, (ulong)sizeof(T), AlignOf<T>(), 0);
         return p == null ? ErrUnion<nuint>.Err(oom) : ErrUnion<nuint>.Ok((nuint)p);
     }
 
@@ -98,7 +141,7 @@ public unsafe struct Allocator
     /// <see cref="Create{T}"/>, passing <c>sizeof(T)</c> back as the byte length. A <c>T*</c>
     /// is a legal method PARAMETER even though it cannot be a generic type ARGUMENT.</summary>
     public void Destroy<T>(T* p) where T : unmanaged
-        => Vtable.FreeFn(Ctx, (byte*)p, (nuint)sizeof(T));
+        => Vtable.free(Ctx, new Slice<byte>((byte*)p, (ulong)sizeof(T)), AlignOf<T>(), 0);
 
     /// <summary><c>a.realloc(slice, n)</c> (Milestone U) — grow/shrink through the vtable. The
     /// <see cref="Allocator"/> vtable has only alloc/free, so realloc is EMULATED: allocate a fresh
@@ -184,7 +227,8 @@ public unsafe struct ArenaAllocator
         while (ch != null)
         {
             ArenaChunk* prev = ch->Prev;
-            Backing.Vtable.FreeFn(Backing.Ctx, (byte*)ch, (nuint)ZigAlloc.ArenaHeaderBytes + ch->Cap);
+            Backing.Vtable.free(Backing.Ctx,
+                new Slice<byte>((byte*)ch, (ulong)((nuint)ZigAlloc.ArenaHeaderBytes + ch->Cap)), new Alignment(16), 0);
             ch = prev;
         }
         Current = null;
@@ -201,30 +245,38 @@ public static unsafe class ZigAlloc
 {
     // ---- C heap (the statically-known default) ---------------------------
 
-    /// <summary>Raw C-heap allocation — the vtable's <c>AllocFn</c> for a materialized default
+    /// <summary>Raw C-heap allocation — the vtable's <c>alloc</c> for a materialized default
     /// allocator. <see cref="Libc.malloc"/> takes an <c>int</c>, so a request wider than
     /// <see cref="int.MaxValue"/> is treated as a failure (null).</summary>
-    private static byte* CHeapAlloc(void* ctx, nuint len)
+    private static byte* CHeapAlloc(void* ctx, ulong len, Alignment alignment, ulong retAddr)
         => len > int.MaxValue ? null : (byte*)Libc.malloc((int)len);
 
-    /// <summary>Raw C-heap free — the vtable's <c>FreeFn</c>. <see cref="Libc.free"/> ignores
-    /// the size, so it is dropped.</summary>
-    private static void CHeapFree(void* ctx, byte* p, nuint len) => Libc.free(p);
+    /// <summary>Raw C-heap resize — always <c>false</c> (malloc can't grow/shrink in place; the
+    /// caller falls back to a copying realloc). Part of the 4-fn vtable shape; see
+    /// <see cref="AllocatorVTable.resize"/>.</summary>
+    private static CBool CHeapResize(void* ctx, Slice<byte> memory, Alignment alignment, ulong newLen, ulong retAddr) => false;
+
+    /// <summary>Raw C-heap remap — always <c>null</c> (no in-place move; the caller copies).</summary>
+    private static byte* CHeapRemap(void* ctx, Slice<byte> memory, Alignment alignment, ulong newLen, ulong retAddr) => null;
+
+    /// <summary>Raw C-heap free — the vtable's <c>free</c>. <see cref="Libc.free"/> ignores the
+    /// size + alignment, so the <c>[]u8</c> / <c>Alignment</c> are dropped.</summary>
+    private static void CHeapFree(void* ctx, Slice<byte> memory, Alignment alignment, ulong retAddr) => Libc.free(memory.Ptr);
 
     /// <summary>Materialize the C-heap default as a runtime <see cref="Allocator"/> value —
     /// used when the statically-known default is passed to an opaque
     /// <c>std.mem.Allocator</c> sink (a parameter / return), where it must become a real
     /// fat-pointer value. Its vtable still reaches <see cref="Libc.malloc"/>/<see cref="Libc.free"/>.</summary>
     public static Allocator CHeap()
-        => new() { Ctx = null, Vtable = new AllocatorVTable { AllocFn = &CHeapAlloc, FreeFn = &CHeapFree } };
+        => new() { Ctx = null, Vtable = new AllocatorVTable { alloc = &CHeapAlloc, resize = &CHeapResize, remap = &CHeapRemap, free = &CHeapFree } };
 
     /// <summary>The <b>devirtualized</b> <c>page_allocator.alloc(T, n)</c> — a direct
     /// <see cref="Libc.malloc"/>, no vtable load. Emitted whenever the lowering proves the
     /// allocator is the statically-known C-heap default.</summary>
     public static ErrUnion<Slice<T>> AllocCHeap<T>(ulong n, ushort oom) where T : unmanaged
     {
-        nuint bytes = (nuint)n * (nuint)sizeof(T);
-        byte* p = CHeapAlloc(null, bytes);
+        ulong bytes = n * (ulong)sizeof(T);
+        byte* p = bytes > int.MaxValue ? null : (byte*)Libc.malloc((int)bytes);
         return p == null
             ? ErrUnion<Slice<T>>.Err(oom)
             : ErrUnion<Slice<T>>.Ok(new Slice<T>((T*)p, n));
@@ -232,55 +284,59 @@ public static unsafe class ZigAlloc
 
     /// <summary>The <b>devirtualized</b> <c>page_allocator.free(slice)</c> — a direct
     /// <see cref="Libc.free"/>.</summary>
-    public static void FreeCHeap<T>(Slice<T> s) where T : unmanaged
-        => CHeapFree(null, (byte*)s.Ptr, 0);
+    public static void FreeCHeap<T>(Slice<T> s) where T : unmanaged => Libc.free(s.Ptr);
 
     /// <summary>The <b>devirtualized</b> <c>page_allocator.create(T)</c> — a direct
     /// <see cref="Libc.malloc"/> of <c>sizeof(T)</c> bytes, no vtable. The address is carried as a
     /// <c>nuint</c> (see <see cref="Allocator.Create{T}"/> for why).</summary>
     public static ErrUnion<nuint> CreateCHeap<T>(ushort oom) where T : unmanaged
     {
-        byte* p = CHeapAlloc(null, (nuint)sizeof(T));
+        byte* p = (byte*)Libc.malloc(sizeof(T));
         return p == null ? ErrUnion<nuint>.Err(oom) : ErrUnion<nuint>.Ok((nuint)p);
     }
 
     /// <summary>The <b>devirtualized</b> <c>page_allocator.destroy(p)</c> — a direct
     /// <see cref="Libc.free"/>.</summary>
-    public static void DestroyCHeap<T>(T* p) where T : unmanaged => CHeapFree(null, (byte*)p, 0);
+    public static void DestroyCHeap<T>(T* p) where T : unmanaged => Libc.free(p);
 
     // ---- FixedBufferAllocator (the second allocator) ---------------------
 
     /// <summary>Raw FBA allocation — bump <see cref="FixedBufferAllocator.EndIndex"/>; return
     /// null when the request would overflow the buffer (Zig's <c>error.OutOfMemory</c>).</summary>
-    private static byte* FbaAlloc(void* ctx, nuint len)
+    private static byte* FbaAlloc(void* ctx, ulong len, Alignment alignment, ulong retAddr)
     {
         var self = (FixedBufferAllocator*)ctx;
-        ulong end = self->EndIndex + (ulong)len;
+        ulong end = self->EndIndex + len;
         if (end > self->Capacity) { return null; }
         byte* p = self->Buffer + self->EndIndex;
         self->EndIndex = end;
         return p;
     }
 
+    /// <summary>Raw FBA resize/remap — never succeeds in place (false / null); part of the 4-fn
+    /// vtable shape (see <see cref="AllocatorVTable.resize"/>).</summary>
+    private static CBool FbaResize(void* ctx, Slice<byte> memory, Alignment alignment, ulong newLen, ulong retAddr) => false;
+    private static byte* FbaRemap(void* ctx, Slice<byte> memory, Alignment alignment, ulong newLen, ulong retAddr) => null;
+
     /// <summary>Raw FBA free — a no-op. A bump allocator only reclaims by resetting the whole
     /// arena; per-slice free is a no-op (matches Zig's FBA for any but the last allocation, and
     /// is observationally fine for dotcc's exit-code oracle).</summary>
-    private static void FbaFree(void* ctx, byte* p, nuint len) { }
+    private static void FbaFree(void* ctx, Slice<byte> memory, Alignment alignment, ulong retAddr) { }
 
     /// <summary><c>fba.allocator()</c> — produce an <see cref="Allocator"/> fat pointer whose
     /// context is the FBA and whose vtable bumps it. The caller passes <c>&amp;fba</c>, so the
     /// returned allocator is valid only while that <see cref="FixedBufferAllocator"/> local is
     /// alive (the same stack-lifetime rule as Zig).</summary>
     public static Allocator FbaAllocator(FixedBufferAllocator* self)
-        => new() { Ctx = self, Vtable = new AllocatorVTable { AllocFn = &FbaAlloc, FreeFn = &FbaFree } };
+        => new() { Ctx = self, Vtable = new AllocatorVTable { alloc = &FbaAlloc, resize = &FbaResize, remap = &FbaRemap, free = &FbaFree } };
 
     /// <summary>The <b>FBA-site-devirtualized</b> <c>a.alloc(T, n)</c> (Milestone U) — a direct FBA
     /// bump with no vtable load, emitted when the lowering proves <c>a</c> is a particular
     /// <c>fba.allocator()</c> result. The <c>&amp;fba</c> context is passed explicitly.</summary>
     public static ErrUnion<Slice<T>> AllocFba<T>(FixedBufferAllocator* self, ulong n, ushort oom) where T : unmanaged
     {
-        nuint bytes = (nuint)n * (nuint)sizeof(T);
-        byte* p = FbaAlloc(self, bytes);
+        ulong bytes = n * (ulong)sizeof(T);
+        byte* p = FbaAlloc(self, bytes, default, 0);
         return p == null
             ? ErrUnion<Slice<T>>.Err(oom)
             : ErrUnion<Slice<T>>.Ok(new Slice<T>((T*)p, n));
@@ -294,7 +350,7 @@ public static unsafe class ZigAlloc
     /// <c>sizeof(T)</c> bytes; the address rides as a <c>nuint</c> (see <see cref="Allocator.Create{T}"/>).</summary>
     public static ErrUnion<nuint> CreateFba<T>(FixedBufferAllocator* self, ushort oom) where T : unmanaged
     {
-        byte* p = FbaAlloc(self, (nuint)sizeof(T));
+        byte* p = FbaAlloc(self, (ulong)sizeof(T), default, 0);
         return p == null ? ErrUnion<nuint>.Err(oom) : ErrUnion<nuint>.Ok((nuint)p);
     }
 
@@ -323,8 +379,8 @@ public static unsafe class ZigAlloc
     /// the buffer (an FBA reclaims only by reset), matching <see cref="FbaFree"/>.</summary>
     public static ErrUnion<Slice<T>> ReallocFba<T>(FixedBufferAllocator* self, Slice<T> old, ulong n, ushort oom) where T : unmanaged
     {
-        nuint bytes = (nuint)n * (nuint)sizeof(T);
-        byte* p = FbaAlloc(self, bytes);
+        ulong bytes = n * (ulong)sizeof(T);
+        byte* p = FbaAlloc(self, bytes, default, 0);
         if (p == null) { return ErrUnion<Slice<T>>.Err(oom); }
         ulong keep = old.Len < n ? old.Len : n;
         System.Buffer.MemoryCopy(old.Ptr, p, (long)bytes, (long)(keep * (ulong)sizeof(T)));
@@ -345,14 +401,14 @@ public static unsafe class ZigAlloc
     /// <summary>Raw arena allocation — bump within the current chunk, growing a new one from the
     /// backing allocator when the request doesn't fit. Requests are 16-byte-aligned so mixed-type
     /// allocations stay aligned. Returns null only when the backing allocator is exhausted.</summary>
-    private static byte* ArenaAlloc(void* ctx, nuint len)
+    private static byte* ArenaAlloc(void* ctx, ulong len, Alignment alignment, ulong retAddr)
     {
         var self = (ArenaAllocator*)ctx;
-        nuint need = (len + 15) & ~(nuint)15;   // round up to a 16-byte multiple
+        nuint need = ((nuint)len + 15) & ~(nuint)15;   // round up to a 16-byte multiple
         if (self->Current == null || self->Current->Used + need > self->Current->Cap)
         {
             nuint cap = need > ArenaDefaultChunk ? need : ArenaDefaultChunk;
-            byte* raw = self->Backing.Vtable.AllocFn(self->Backing.Ctx, (nuint)ArenaHeaderBytes + cap);
+            byte* raw = self->Backing.Vtable.alloc(self->Backing.Ctx, (ulong)((nuint)ArenaHeaderBytes + cap), alignment, 0);
             if (raw == null) { return null; }
             var ch = (ArenaChunk*)raw;
             ch->Prev = self->Current;
@@ -365,14 +421,19 @@ public static unsafe class ZigAlloc
         return p;
     }
 
+    /// <summary>Raw arena resize/remap — never succeeds in place (false / null); part of the 4-fn
+    /// vtable shape (see <see cref="AllocatorVTable.resize"/>).</summary>
+    private static CBool ArenaResize(void* ctx, Slice<byte> memory, Alignment alignment, ulong newLen, ulong retAddr) => false;
+    private static byte* ArenaRemap(void* ctx, Slice<byte> memory, Alignment alignment, ulong newLen, ulong retAddr) => null;
+
     /// <summary>Raw arena free — a no-op (an arena reclaims wholesale in <see cref="ArenaAllocator.Deinit"/>).</summary>
-    private static void ArenaFree(void* ctx, byte* p, nuint len) { }
+    private static void ArenaFree(void* ctx, Slice<byte> memory, Alignment alignment, ulong retAddr) { }
 
     /// <summary><c>arena.allocator()</c> — produce an <see cref="Allocator"/> fat pointer whose
     /// context is the arena and whose vtable bump-allocates it. Valid only while the
     /// <see cref="ArenaAllocator"/> local is alive (the same stack-lifetime rule as Zig).</summary>
     public static Allocator ArenaToAllocator(ArenaAllocator* self)
-        => new() { Ctx = self, Vtable = new AllocatorVTable { AllocFn = &ArenaAlloc, FreeFn = &ArenaFree } };
+        => new() { Ctx = self, Vtable = new AllocatorVTable { alloc = &ArenaAlloc, resize = &ArenaResize, remap = &ArenaRemap, free = &ArenaFree } };
 
     /// <summary><c>arena.deinit()</c> — free the whole chunk chain. A static wrapper over
     /// <see cref="ArenaAllocator.Deinit"/> (called by-ref on the local, like <see cref="ArenaToAllocator"/>).</summary>
