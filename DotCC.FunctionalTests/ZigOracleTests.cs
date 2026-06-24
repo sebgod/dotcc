@@ -1569,6 +1569,30 @@ public sealed class ZigOracleTests
             "    _ = pick(1) catch 0;\n" +
             "    return ok;\n" +
             "}\n", 42, "" },
+
+        // Milestone X, part 3b — an error set as a plain VALUE type (param / non-`!T` return /
+        // local) + an EXHAUSTIVE switch EXPRESSION with NO `else`. `worst()` returns the error
+        // VALUE (not a `MathError!T`); `weight` takes the set as a param and switches over every
+        // member with no else (real zig proves it exhaustive; dotcc injects the `_` default).
+        // 20 (Overflow) + 10 (DivByZero) + 5 (Underflow) + 7 = 42.
+        new object[] { "error_set_type",
+            "const MathError = error{ DivByZero, Overflow, Underflow };\n" +
+            "fn worst() MathError { return MathError.Overflow; }\n" +
+            "fn weight(e: MathError) u8 {\n" +
+            "    return switch (e) {\n" +
+            "        error.DivByZero => 10,\n" +
+            "        error.Overflow => 20,\n" +
+            "        error.Underflow => 5,\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const e: MathError = worst();\n" +
+            "    var acc: u8 = weight(e);\n" +
+            "    acc += weight(MathError.DivByZero);\n" +
+            "    acc += weight(error.Underflow);\n" +
+            "    acc += 7;\n" +
+            "    return acc;\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
