@@ -3269,7 +3269,9 @@ internal sealed partial class ZigLowering
         }
         if (_currentFnRet is CType.ErrorUnion eu)
         {
-            if (IsErrorLit(valueItem, out var errName))
+            // `return error.X;` or the set-qualified `return E.X;` (Milestone X, part 2) — both an
+            // error return (the same flat code; dotcc erases set membership).
+            if (IsErrorLit(valueItem, out var errName) || TryErrorSetMember(valueItem, out errName))
             {
                 // With an `errdefer` in this function, the error must propagate via a thrown
                 // ZigErrorReturn so it passes through the errdefer catch(es) on the stack (a C#
@@ -3451,6 +3453,23 @@ internal sealed partial class ZigLowering
     private static bool IsErrorLit(Item it, out string name)
     {
         if (it.Content is Zig.ErrorLit e) { name = Tok(e.Arg2); return true; }
+        name = "";
+        return false;
+    }
+
+    /// <summary>True when an item is a set-qualified error reference <c>E.member</c> (Milestone X,
+    /// part 2) — a <see cref="Zig.Field"/> whose base names a registered <c>error{…}</c> set —
+    /// yielding the member name. dotcc erases set membership, so <c>E.member</c> resolves to the same
+    /// flat code as the bare <c>error.member</c> (real zig: the same global error value). Recognized
+    /// wherever <see cref="IsErrorLit"/> is — the value path and the <see cref="LowerReturn"/> error
+    /// return. Instance (not static like <see cref="IsErrorLit"/>) because it reads <c>_errorSets</c>.</summary>
+    private bool TryErrorSetMember(Item it, out string name)
+    {
+        if (it.Content is Zig.Field f && f.Arg0.Content is Zig.Ident id && _errorSets.Contains(Tok(id.Arg0)))
+        {
+            name = Tok(f.Arg2);
+            return true;
+        }
         name = "";
         return false;
     }
@@ -3697,6 +3716,14 @@ internal sealed partial class ZigLowering
                     && baseTy.Unqualified is CType.Enum en)
                 {
                     return ResolveEnumLit(fieldName, en);
+                }
+                // `E.member` where E is a registered error set (Milestone X, part 2) — the
+                // set-qualified form of `error.member`, resolving to the same flat code (membership
+                // erased). A USE as a value: bound to a const/var, compared (`x == E.member`), a
+                // `catch`/`switch` operand. The error-RETURN form is handled in LowerReturn.
+                if (TryErrorSetMember(expr, out var esMember))
+                {
+                    return LowerErrorLit(esMember);
                 }
                 var structExpr = LowerExpr(fld.Arg0);
                 var arrow = structExpr.Type.Unqualified is CType.Pointer;   // Zig `p.x` auto-derefs

@@ -3600,4 +3600,27 @@ public sealed class ZigFrontendTests
         var cs = EmitZig("pub fn main() u8 { return 42; }\n");
         cs.ShouldNotContain("__zigErrorName");
     }
+
+    // ---- Milestone X, part 2 — E.member (set-qualified error reference) ----
+
+    [Fact]
+    public void Resolves_a_set_qualified_error_member_like_the_bare_error_form()
+    {
+        // `MyError.Boom` (set-qualified) lowers to the same flat error code as the bare `error.Boom`
+        // (membership erased) — as a compared value AND in `return` position. The set name is fully
+        // erased (no `MyError`/`.Boom` member access leaks into the emit); the `!u8` fn returns an
+        // error union.
+        var cs = EmitZig(
+            "const MyError = error{ Boom, Fizz };\n" +
+            "fn boom() MyError!u8 { return MyError.Boom; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var acc: u8 = 0;\n" +
+            "    if (MyError.Boom == error.Boom) acc += 1;\n" +
+            "    _ = boom() catch 0;\n" +
+            "    return acc;\n" +
+            "}\n");
+        cs.ShouldContain("ErrUnion<byte>");   // boom()'s !u8 error-union return lowered
+        cs.ShouldNotContain("MyError");       // the set name is fully erased
+        cs.ShouldNotContain(".Boom");         // E.member resolved to a flat code, not a member access
+    }
 }
