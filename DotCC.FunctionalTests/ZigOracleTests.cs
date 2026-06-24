@@ -1667,6 +1667,52 @@ public sealed class ZigOracleTests
             "    a.free(s);\n" +
             "    return @intCast(total + 6);\n" +
             "}\n", 42, "" },
+        // Milestone W, part 2 — a C `lua_Alloc` behind a Zig `std.mem.Allocator` (the deep bridge). A
+        // C realloc-style allocator (`nsize==0` ⇒ free, else realloc; `ud` is a byte-counter) is
+        // imported via `extern fn` and wrapped in a HAND-WRITTEN custom allocator: the 4-fn vtable's
+        // alloc/free call the C fn-ptr across the seam, bound by bare name. alloc 10 (counter += 10),
+        // fill 0..9 (sum 45), free → 45 + 10 - 13 = 42. Real zig needs the same explicit adapter (no
+        // auto C-fn-ptr→Allocator coercion exists), so the SAME source is valid in both compilers.
+        new object[] { "mixed_lua_alloc",
+            "#include <stdlib.h>\n" +
+            "#include <stddef.h>\n" +
+            "void *lua_alloc(void *ud, void *ptr, size_t osize, size_t nsize) {\n" +
+            "    (void)osize;\n" +
+            "    if (nsize == 0) { free(ptr); return NULL; }\n" +
+            "    if (ud != NULL) { *(size_t *)ud += nsize; }\n" +
+            "    return realloc(ptr, nsize);\n" +
+            "}\n",
+            "const std = @import(\"std\");\n" +
+            "extern fn lua_alloc(ud: ?*anyopaque, ptr: ?*anyopaque, osize: usize, nsize: usize) ?*anyopaque;\n" +
+            "fn luaAlloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {\n" +
+            "    _ = alignment; _ = ret_addr;\n" +
+            "    return @ptrCast(lua_alloc(ctx, null, 0, len));\n" +
+            "}\n" +
+            "fn luaResize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {\n" +
+            "    _ = ctx; _ = memory; _ = alignment; _ = new_len; _ = ret_addr;\n" +
+            "    return false;\n" +
+            "}\n" +
+            "fn luaRemap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {\n" +
+            "    _ = ctx; _ = memory; _ = alignment; _ = new_len; _ = ret_addr;\n" +
+            "    return null;\n" +
+            "}\n" +
+            "fn luaFree(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {\n" +
+            "    _ = alignment; _ = ret_addr;\n" +
+            "    _ = lua_alloc(ctx, memory.ptr, memory.len, 0);\n" +
+            "}\n" +
+            "const lua_vtable = std.mem.Allocator.VTable{ .alloc = luaAlloc, .resize = luaResize, .remap = luaRemap, .free = luaFree };\n" +
+            "pub fn main() u8 {\n" +
+            "    var bytes: usize = 0;\n" +
+            "    const a = std.mem.Allocator{ .ptr = &bytes, .vtable = &lua_vtable };\n" +
+            "    const buf = a.alloc(u8, 10) catch return 1;\n" +
+            "    var i: usize = 0;\n" +
+            "    while (i < 10) : (i = i + 1) { buf[i] = @intCast(i); }\n" +
+            "    var sum: usize = 0;\n" +
+            "    i = 0;\n" +
+            "    while (i < 10) : (i = i + 1) { sum += buf[i]; }\n" +
+            "    a.free(buf);\n" +
+            "    return @intCast(sum + bytes - 13);\n" +
+            "}\n", 42, "" },
     };
 
     /// <summary>Differential for a MIXED <c>.c</c> + <c>.zig</c> program: dotcc lowers both files into one
