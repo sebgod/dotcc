@@ -335,9 +335,13 @@ so the decl is comptime (registers names, emits nothing) and `E!T` lowers like `
 **`@errorName(e)` is supported** (Milestone X, part 1): even though the set stays erased to a flat
 code, dotcc carries the code→name map into the emit as a `__zigErrorName(code)` helper, so
 `@errorName` returns the real name as `[]const u8` — a `ConstSlice<byte>` over the RVA-pinned UTF-8
-name bytes (`L("Foo"u8)`). STILL un-erasing-bound: real error NAMES in a `main` error-trace (the
-trace still prints the flat code), a set-qualified `E.member` reference, and distinct named `E!T`
-sets. `errdefer |e|` capture is NOT pursued (current Zig removed the syntax).
+name bytes (`L("Foo"u8)`). A **set-qualified `E.member`** reference is supported too (Milestone X,
+part 2): `MyError.Boom` resolves to the same flat code as the bare `error.Boom` (membership erased,
+so it's the same value — as real zig treats it), usable as a value, in a comparison, and in `return`
+position. STILL un-erasing-bound: real error NAMES in a `main` error-trace (the trace still prints
+the flat code), and distinct named `E!T` sets (every set lowers like `anyerror!T`, so a foreign-error
+assignment / exhaustive set-`switch` isn't checked). `errdefer |e|` capture is NOT pursued (current
+Zig removed the syntax).
 
 ## Allocators — devirtualize the default, vtable for the rest
 
@@ -596,4 +600,6 @@ rejects, not silently accept more.
   realloc-style allocator `extern fn`-imported and wrapped in a custom-vtable adapter whose
   `alloc`/`free` call the C fn-pointer across the mixed `.c` + `.zig` seam),
   `examples/zig-error-name` (`@errorName` — Milestone X, part 1: `@errorName(error.Ok)` returns the
-  real name "Ok" via the emitted code→name table; exit content-sensitive on a name byte + length).
+  real name "Ok" via the emitted code→name table; exit content-sensitive on a name byte + length),
+  `examples/zig-error-member` (`E.member` — Milestone X, part 2: a set-qualified `MyError.Boom`
+  resolves to the same flat code as bare `error.Boom`, as a compared value and a `return`).

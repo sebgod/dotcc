@@ -1535,6 +1535,22 @@ public sealed class ZigOracleTests
             "    const name = @errorName(error.Ok);\n" +
             "    return @intCast(@as(usize, name[0]) + name.len - 39);\n" +
             "}\n", 42, "" },
+
+        // Milestone X, part 2 — `E.member` (set-qualified error reference). `MyError.Boom` resolves
+        // to the same flat code as the bare `error.Boom` (membership erased), as a compared value and
+        // in `return` position. Content-sensitive: Boom==Boom (+20), Fizz==Fizz (+20), Boom!=Fizz (+1);
+        // boom() returns MyError.Boom, caught → 1. 20 + 20 + 1 + 1 = 42.
+        new object[] { "error_member",
+            "const MyError = error{ Boom, Fizz };\n" +
+            "fn boom() MyError!u8 { return MyError.Boom; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var acc: u8 = 0;\n" +
+            "    if (MyError.Boom == error.Boom) acc += 20;\n" +
+            "    if (MyError.Fizz == error.Fizz) acc += 20;\n" +
+            "    if (MyError.Boom != MyError.Fizz) acc += 1;\n" +
+            "    const r = boom() catch 1;\n" +
+            "    return acc + r;\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
