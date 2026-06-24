@@ -3430,4 +3430,48 @@ public sealed class ZigFrontendTests
         cs.ShouldContain("ZigAlloc.CHeap()");   // the default materializes for the opaque param
         cs.ShouldContain("sum_ints");
     }
+
+    // ---- Milestone W, part 1a — function-pointer types + anyopaque -------
+
+    [Fact]
+    public void Lowers_a_function_pointer_type_to_a_managed_delegate_pointer()
+    {
+        // `*const fn (a: i32, b: i32) i32` → a managed `delegate*<int, int, int>` (the vtable shape);
+        // the pointer-to-function collapses to the bare Func, and binding a function emits `&add`.
+        var cs = EmitZig(
+            "fn add(a: i32, b: i32) i32 { return a + b; }\n" +
+            "pub fn main() u8 {\n" +
+            "    const op: *const fn (a: i32, b: i32) i32 = add;\n" +
+            "    return @intCast(op(40, 2));\n" +
+            "}\n");
+        cs.ShouldContain("delegate*<int, int, int>");          // managed fn-ptr (NOT unmanaged[Cdecl])
+        cs.ShouldNotContain("unmanaged[Cdecl]<int, int, int>"); // this fn-ptr is managed, not C-ABI
+        cs.ShouldContain("&add");                               // the function decays to its address
+    }
+
+    [Fact]
+    public void Calls_indirectly_through_a_function_pointer_value()
+    {
+        // Calling `op(40, 2)` where `op` is a fn-pointer LOCAL lowers to an indirect call — `op(40, 2)`
+        // over the variable, not a by-name function call.
+        var cs = EmitZig(
+            "fn add(a: i32, b: i32) i32 { return a + b; }\n" +
+            "pub fn main() u8 {\n" +
+            "    const op: *const fn (a: i32, b: i32) i32 = add;\n" +
+            "    return @intCast(op(40, 2));\n" +
+            "}\n");
+        cs.ShouldContain("op(40, 2)");   // the indirect call renders through the variable
+    }
+
+    [Fact]
+    public void Lowers_anyopaque_pointer_to_void_pointer()
+    {
+        // `*anyopaque` → `void*` (C's type-erased pointer); `@ptrCast(@alignCast(ctx))` to a typed
+        // pointer renders the `(int*)` cast.
+        var cs = EmitZig(
+            "fn f(ctx: *anyopaque) i32 { const p: *i32 = @ptrCast(@alignCast(ctx)); return p.*; }\n" +
+            "pub fn main() u8 { var x: i32 = 42; return @intCast(f(&x)); }\n");
+        cs.ShouldContain("void* ctx");   // the opaque parameter
+        cs.ShouldContain("(int*)");      // the @ptrCast to the typed pointer
+    }
 }

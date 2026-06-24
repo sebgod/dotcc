@@ -754,6 +754,18 @@ productions:
       # so it's a clean 1-token shift at Type position, and the tuple `}` then a function Block `{`
       # is a clean boundary. Mixed named+positional and arity > 7 are rejected in lowering.
       - { lhs: Type, rhs: ['struct', '{', TupleTypes, '}'], action: tyTuple }
+      # Function-pointer TYPE `fn (Params) RetType` (Milestone W, part 1a) — at a Type position
+      # (a const/var annotation, a param/return type), lowered to a managed `delegate*<…>` (a bare
+      # `CType.Func`); `*const fn (…) R` / `?*const fn (…) R` compose for free through the existing
+      # pointer / optional prefixes (the lowering collapses pointer-to-function to the bare Func, the
+      # C-frontend convention). CONFLICT-FREE with the Decl-level `fn IDENT (…)`: after `fn`, the next
+      # token disambiguates — a Type-position fn has `(` (this rule), a FnDef has `IDENT`; and a Type
+      # never appears at the top-level Decl position, so no parser state holds both items. Params are
+      # REUSED (so the params are `IDENT : Type` — real zig accepts named params in a fn-pointer type;
+      # an UNNAMED-param fn type `fn (i32) i32` is a documented cut). A `!T` error-union return or a
+      # `callconv` on a fn-pointer type are deferred.
+      - { lhs: Type, rhs: ['fn', '(', Params, ')', Type], action: tyFn }
+      - { lhs: Type, rhs: ['fn', '(', ')', Type],         action: tyFnNoArgs }
       - { lhs: Type, rhs: [ErrUnion] }
 
   - derivation: none

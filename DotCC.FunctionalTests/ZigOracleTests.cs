@@ -71,6 +71,21 @@ public sealed class ZigOracleTests
         // prototypes); the two-pass lowering must resolve it.
         new object[] { "call_forward",
             "pub fn main() u8 { return add(40, 2); }\nfn add(a: u8, b: u8) u8 { return a + b; }\n", 42, "" },
+        // Function-pointer types + anyopaque (Milestone W, part 1a): two ops share the signature
+        // `fn (ctx: *anyopaque, by: i32) i32`, each treating its opaque ctx as a `*i32` accumulator
+        // (the C void*-callback idiom). main binds each to a `*const fn (…) i32` value and calls it
+        // INDIRECTLY. acc: 5 --bump 16--> 21 --scale 2--> 42.
+        new object[] { "fn_ptr",
+            "fn bump(ctx: *anyopaque, by: i32) i32 { const p: *i32 = @ptrCast(@alignCast(ctx)); p.* = p.* + by; return p.*; }\n" +
+            "fn scale(ctx: *anyopaque, by: i32) i32 { const p: *i32 = @ptrCast(@alignCast(ctx)); p.* = p.* * by; return p.*; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var acc: i32 = 5;\n" +
+            "    const f1: *const fn (ctx: *anyopaque, by: i32) i32 = bump;\n" +
+            "    const f2: *const fn (ctx: *anyopaque, by: i32) i32 = scale;\n" +
+            "    _ = f1(&acc, 16);\n" +
+            "    _ = f2(&acc, 2);\n" +
+            "    return @intCast(acc);\n" +
+            "}\n", 42, "" },
         // extern fn libc FFI: `putchar` from libc (linked -lc) produces real STDOUT.
         // dotcc routes it by bare name to its Libc runtime; zig links the real libc.
         new object[] { "extern_putchar",
