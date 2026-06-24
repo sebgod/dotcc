@@ -3664,4 +3664,41 @@ public sealed class ZigFrontendTests
             "pub fn main() u8 { const a = pick(7) catch 0; const b = any(7) catch 0; return a + b; }\n");
         cs.ShouldContain("ErrUnion<byte>");
     }
+
+    // ---- Milestone X, part 3b — an error set as a plain VALUE type + exhaustive switch-expr ----
+
+    [Fact]
+    public void Lowers_an_error_set_used_as_a_value_type_to_the_erased_ushort_code()
+    {
+        // An error set used as a plain param / non-`!T` return / local type denotes the error VALUE
+        // itself — lowered to the flat erased `ushort` code (NOT an `ErrUnion<T>` union), with the
+        // set name fully erased. `worst()`'s `MathError` return and `weight`'s `MathError` param both
+        // render bare `ushort`; previously this was the bogus rejection "zig type 'MathError' …
+        // (slice)". (The runtime block always DEFINES `ErrUnion<T>`, so check the signatures, not a
+        // bare "ErrUnion" substring.)
+        var cs = EmitZig(
+            "const MathError = error{ DivByZero, Overflow };\n" +
+            "fn worst() MathError { return MathError.Overflow; }\n" +
+            "fn weight(e: MathError) u8 { _ = e; return 1; }\n" +
+            "pub fn main() u8 { const e: MathError = worst(); return weight(e); }\n");
+        cs.ShouldContain("ushort worst()");      // a non-`!T` error return → the bare flat code
+        cs.ShouldContain("weight(ushort e)");    // an error-set parameter → the bare flat code
+        cs.ShouldNotContain("ErrUnion<ushort>"); // NOT an error union over the code
+        cs.ShouldNotContain("MathError");        // the set name is fully erased
+    }
+
+    [Fact]
+    public void Injects_an_implicit_default_for_an_exhaustive_error_switch_expression()
+    {
+        // A switch EXPRESSION over an error set with no `else` is exhaustive in zig but unprovable in
+        // C# (CS8509 "not all values covered") over the erased `ushort`. dotcc collapses the LAST arm
+        // to the `_` default so the emit stays warning-clean — semantics-preserving for the
+        // exhaustive program (only that arm's values reach it).
+        var cs = EmitZig(
+            "const E = error{ A, B, C };\n" +
+            "fn weight(e: E) u8 { return switch (e) { error.A => 10, error.B => 20, error.C => 5 }; }\n" +
+            "pub fn main() u8 { return weight(error.B); }\n");
+        cs.ShouldContain("switch {"); // a C# switch EXPRESSION
+        cs.ShouldContain("_ =>");      // the injected implicit default arm (the collapsed last prong)
+    }
 }

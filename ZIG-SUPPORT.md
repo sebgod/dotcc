@@ -155,7 +155,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `error.Foo` (bare error value) | ✅ | a first-class error VALUE (Milestone N, part 1) — usable outside `return error.Foo;`: bound to a `const`/`var`, captured (`else \|e\|` / future `catch \|e\|`), and compared. V1 erases the named set into one flat global code space, so an `error.Foo` lowers to its stable `ushort` code, typed `CType.ErrorSet`. (Explicit `error{A,B}` set decls / named `E!T` distinct from `anyerror!T` are still deferred) |
 | `e == error.Foo` / `e != error.Foo` (error-value equality) | ✅ | error-value comparison (Milestone N, part 1) — equal codes mean equal errors, so `==`/`!=` lower to the ordinary integer comparison of the flat codes. Works on a bound error too (`else \|e\|` / a `const`), which un-erases the Milestone M part-3 cut (a USED named `\|e\|` is now valid in both compilers) |
 | `switch (e) { error.Foo => …, else => … }` (error switch) | ✅ | switch on an error value (Milestone N, part 2) — an error value IS its flat `ushort` code, so this lowers to an ORDINARY integer `switch` on the code (each `error.Foo` prong → a `case <code>:`, `else` → `default:`). Rode in on part 1's representation — no new lowering. The error is commonly captured from `else \|e\|` first; an `anyerror!T` (open set) requires the `else` |
-| `const E = error{ A, B };` (error-set declaration) | ✅ | an explicit named error set (Milestone N, part 5). dotcc erases the set into the flat global code space, so the decl is COMPTIME — it registers the member names (each a stable code) and emits NO runtime decl; `E` is then used only as the (ignored) set in an `E!T` return type, which lowers to the same `ErrUnion<T>` as `anyerror!T`. An inline `error{A}!T` return type works the same way. **Deferred:** `E.member` access (use the global `error.member`); `@errorName` (needs the un-erased name table) |
+| `const E = error{ A, B };` (error-set declaration) | ✅ | an explicit named error set (Milestone N, part 5). dotcc erases the set into the flat global code space, so the decl is COMPTIME — it registers the member names (each a stable code) and emits NO runtime decl. `E` serves as the (erased) set in an `E!T` return type (same `ErrUnion<T>` as `anyerror!T`; an inline `error{A}!T` works the same way) AND as a plain VALUE type — `fn f(e: E)`, `var x: E`, a non-`!T` return `fn worst() E` (Milestone X, part 3b) — which lowers to the flat `ushort` code (the error value itself). `E.member` access (Milestone X, part 2) and `@errorName` (part 1) are supported; set MEMBERSHIP is checked (part 3a — a `return` of a foreign error / an undeclared `E.member` is rejected). **Deferred:** distinct per-set code spaces (membership stays a single flat space, checked but not type-distinct) |
 | postfix `.field` | ✅ | struct field access → the shared `Member` IR (field type from the aggregate table). Zig has no `->`, so `p.field` on a `*T` auto-derefs (emits C# `->`). `EnumName.member` resolves here too → an `EnumConstRef` |
 | `.{ .f = v, … }` (anonymous struct literal) | ✅ | result-located → `new T { f = v }` from the sink type (a typed decl, return, assignment, call arg, or field). Empty `.{}` zero-inits |
 | `T{ .f = v, … }` (typed struct literal) | ✅ | Zig's `CurlySuffixExpr <- TypeExpr InitList?` — the type is named, so NO sink is needed; valid in any position, incl. sink-less ones like `(T{…}).field`. A dedicated `CurlySuffix` grammar level (above `Type`) makes it conflict-free against `fn f() RetType {` (the return type stays a raw `Type`, no init list) — no rewriter. `&T{…}` (address of a temporary) materializes a block-local temp and takes its address (the same shared-backend path as C's `&(T){…}`) |
@@ -343,10 +343,19 @@ runtime code but is a good compiler and rejects illegal programs real zig also r
 `return error.X` / `return E.X` of an error outside a function's DECLARED set
 (`fn f() error{A}!u8 { return error.B; }` → error), and an `E.member` whose member isn't declared in
 `E`. An inferred `!T` / `anyerror!T` stays unconstrained (any error — real zig infers the set).
-STILL deferred: real error NAMES in a `main` error-trace (the trace still prints the flat code); an
-error set used as a VALUE type (`fn f(e: E)`); an exhaustive set-`switch` without `else`; and
-set-checking an error that flows in through a CALL or `try` (only the direct `return` form is
-checked). `errdefer |e|` capture is NOT pursued (current Zig removed the syntax).
+An **error set used as a plain VALUE type** is supported too (Milestone X, part 3b): a named set
+(or `anyerror`) as a parameter, a `var`/`const`, or a non-`!T` return (`fn worst() MathError`)
+denotes the error VALUE itself — lowered to the same flat `ushort` code (NOT an `ErrUnion`), so it
+passes, compares, and `switch`es like any error value. The **exhaustive error `switch` without
+`else`** rides on it: real zig proves the prongs cover every member, so no `else` is allowed; dotcc
+can't prove coverage over the erased code, so a switch EXPRESSION collapses its last prong to the
+`_` default (semantics-preserving for the exhaustive program — only that prong's values reach it),
+keeping the emit warning-clean (also applied to enum switch-expressions). STILL deferred: real error
+NAMES in a `main` error-trace (the trace still prints the flat code); a statement-form set-`switch`
+whose every prong returns (the function-exhaustiveness collapse, like the union switch, isn't yet
+applied to a non-union statement switch); and set-checking an error that flows in through a CALL or
+`try` (only the direct `return` form is checked). `errdefer |e|` capture is NOT pursued (current Zig
+removed the syntax).
 
 ## Allocators — devirtualize the default, vtable for the rest
 
@@ -607,4 +616,7 @@ rejects, not silently accept more.
   `examples/zig-error-name` (`@errorName` — Milestone X, part 1: `@errorName(error.Ok)` returns the
   real name "Ok" via the emitted code→name table; exit content-sensitive on a name byte + length),
   `examples/zig-error-member` (`E.member` — Milestone X, part 2: a set-qualified `MyError.Boom`
-  resolves to the same flat code as bare `error.Boom`, as a compared value and a `return`).
+  resolves to the same flat code as bare `error.Boom`, as a compared value and a `return`),
+  `examples/zig-error-set-type` (an error set as a plain VALUE type — Milestone X, part 3b:
+  `fn worst() MathError` returns the error value, `fn weight(e: MathError)` takes the set as a param,
+  and an exhaustive `switch` EXPRESSION over the members with NO `else` — dotcc injects the `_` default).

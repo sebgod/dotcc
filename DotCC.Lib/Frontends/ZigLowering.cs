@@ -3254,6 +3254,20 @@ internal sealed partial class ZigLowering
                 ? new SwitchExprArm(null, value)
                 : new SwitchExprArm(LowerCaseVals(pe.Arg0, subject.Type), value));
         }
+        // A Zig switch over an error set or enum is exhaustive — real zig proves the prongs cover
+        // every member, so no `else` is required. dotcc erases an error set to a flat `ushort` and
+        // an enum value can hold any backing int, so C# can't prove coverage and rejects the switch
+        // EXPRESSION (CS8509 "not all values covered"). Mirror the union-switch fix: with no `else`,
+        // collapse the LAST arm to the `_` default — for an exhaustive switch (which valid Zig
+        // requires) only that arm's values reach it, so it is semantics-preserving. (Milestone X,
+        // part 3b.) A plain integer subject is left alone: there an `else` IS required, so a missing
+        // default reflects a genuinely non-exhaustive switch.
+        if (subject.Type.Unqualified is CType.ErrorSetType or CType.Enum
+            && arms.Count > 0
+            && !arms.Any(a => a.Labels is null))
+        {
+            arms[^1] = arms[^1] with { Labels = null };
+        }
         // The result type is the sink, else inferred from the first value-yielding arm.
         var resultType = sink
             ?? arms.Select(a => a.Value.Type).FirstOrDefault(t => t is not null)
@@ -5001,9 +5015,18 @@ internal sealed partial class ZigLowering
     /// <see cref="CType.Named"/>, enum → <see cref="CType.Enum"/>), then the primitive table — so a
     /// user type name (or a self alias inside its own method) resolves before <see cref="LowerPrim"/>
     /// would throw on it.</summary>
-    private CType LowerTypeName(string name) =>
-        ResolveSelfAlias(name)
-        ?? (_containerTypes.TryGetValue(name, out var ct) ? ct : LowerPrim(name));
+    private CType LowerTypeName(string name)
+    {
+        if (ResolveSelfAlias(name) is { } alias) { return alias; }
+        if (_containerTypes.TryGetValue(name, out var ct)) { return ct; }
+        // An error-set name used as a plain VALUE type — `fn f(e: E)`, `var x: E`, a non-`!T`
+        // error return `fn g() E` — or the open `anyerror`. Lowers to the flat erased error code
+        // (`CType.ErrorSet`, rendered `ushort`): the error VALUE itself, NOT an `E!T` error union
+        // (handled separately as `Zig.ErrUnion`). Set membership stays erased at runtime; the
+        // declared-set table only drives the compile-time rejection in part 3a. (Milestone X, part 3b.)
+        if (name == "anyerror" || _errorSets.Contains(name)) { return CType.ErrorSet; }
+        return LowerPrim(name);
+    }
 
     /// <summary>Resolve a type name that is a container-scoped self alias (<c>const Self =
     /// @This();</c>), valid only while a method of the declaring container is being lowered
