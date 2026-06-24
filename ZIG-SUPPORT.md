@@ -60,6 +60,8 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `bool`, `void` | ✅ | |
 | `c_char c_short c_ushort c_int c_uint c_long c_ulong c_longlong c_ulonglong` | ✅ | C-ABI types for `extern fn`, LP64-shaped |
 | `*T`, `*const T` | ✅ | pointer (pointee `const` rides as a type qualifier) |
+| `*anyopaque`, `?*anyopaque` | ✅ | Milestone W, part 1a — `anyopaque` is Zig's opaque type, used behind a pointer as a type-erased context (the C `void*`-callback idiom). → C's `void`, so `*anyopaque` → `void*` and `?*anyopaque` → a nullable `void*` (the pointer niche). A typed `*T` coerces in implicitly (as C does); `@ptrCast(@alignCast(ctx))` recovers the typed pointer |
+| `fn (params) RetType` (function pointer) | ✅ | Milestone W, part 1a — a function-pointer type → a **managed** C# `delegate*<P…, Ret>` (the shape the Zig allocator vtable uses; NOT the `unmanaged[Cdecl]` form a dlsym'd native fn-ptr takes). `*const fn (…) R` / `?*const fn (…) R` compose through the pointer / optional prefixes (a pointer-to-function collapses to the bare function-pointer, the C-frontend convention). A bare function name decays to its address (`&fn`); a fn-pointer VALUE is called indirectly (`op(args)`). Params are named (`IDENT : Type`) — real zig accepts named params in a fn-pointer type. **Cuts:** an UNNAMED-param fn type (`fn (i32) i32`), a `!T` error-union return, and a `callconv` on a fn-pointer type |
 | `[*c]T`, `[*c]const T` | ✅ | C pointer (== C's `T*` / `const T*`) — printf's `[*c]const u8` format |
 | `[*]T`, `[*]const T` (many-item) | ✅ | many-item pointer (Milestone O, part 2) → a bare `T*`, like `[*c]`; indexing `p[i]` + closed-slicing `p[lo..hi]` work, `.len` is unavailable (no known length). A slice's `.ptr` is a `[*]T`. The type-level distinction from `[*c]` (non-null, no C-conversion) is not modeled — both are `T*` |
 | `[*:0]T`, `[:0]T` (sentinel, +`const`) | ✅ | sentinel-terminated types (Milestone O, part 3 — the C-string shape; V1 sentinel = 0). `[*:0]T` is a NUL-terminated many-item pointer (C's `char*`) → a bare `T*`, like `[*]`; `[:0]T` is a NUL-terminated slice → `Slice<T>`, like `[]T` (`.len` excludes the sentinel). A string literal coerces to `[:0]const u8` (`.len` = char count) and its `.ptr` is a `[*:0]const u8`. The sentinel is a type-level annotation, not separately enforced — dotcc's string literals are already NUL-terminated, so a manual `while (p[n] != 0)` scan works. **Cut:** the auto-scan `p[0..]` on a sentinel pointer (use a manual scan); sentinels other than `0` |
@@ -558,4 +560,7 @@ rejects, not silently accept more.
   `examples/zig-wrap-ops` (wrapping arithmetic: `+%=`/`-%=`/`*%=` overflow on `u8`, a `z -% 2`
   underflow, and a `u8 +% u8` that wraps at the operand width before widening to `u32`),
   `examples/zig-sat-ops` (saturating arithmetic: unsigned `+|=`/`-|=`/`*|=` clamp to 255 / floor at
-  0, signed `+|=`/`-|=` clamp to 127 / -128, and a `u8 +| u8` clamped at the operand width).
+  0, signed `+|=`/`-|=` clamp to 127 / -128, and a `u8 +| u8` clamped at the operand width),
+  `examples/zig-fn-ptr` (function-pointer types + `anyopaque`: two ops sharing
+  `fn (ctx: *anyopaque, by: i32) i32` bound to `*const fn (…) i32` values and called indirectly,
+  each treating its opaque ctx as a `*i32` accumulator via `@ptrCast(@alignCast(ctx))`).

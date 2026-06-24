@@ -3837,11 +3837,31 @@ internal sealed partial class ZigLowering
         var name = Tok(id.Arg0);
         var sym = _symbols.Resolve(name)
             ?? throw new IrUnsupportedException($"call to unresolved name '{name}'");
-        if (sym.Type.Unqualified is not CType.Func)
+        // A real (named) function → a direct, by-name call.
+        if (sym.Kind is SymKind.Func && sym.Type.Unqualified is CType.Func)
         {
-            throw new IrUnsupportedException($"'{name}' is not a function (indirect / fn-ptr calls deferred)");
+            return BuildCall(sym, argItems, receiver: null);
         }
-        return BuildCall(sym, argItems, receiver: null);
+        // A fn-pointer VALUE — a `delegate*` local / parameter typed `CType.Func` (Milestone W,
+        // part 1a) → an INDIRECT call through the variable, each argument result-located against
+        // the fn-pointer's parameter type (Zig result-locates call arguments). Renders as
+        // `op(args)` over the (renamed-safe) VarRef.
+        if (sym.Type.Unqualified is CType.Func fnptr)
+        {
+            var callee = new VarRef(sym) { Type = sym.Type, IsLValue = sym.Kind is SymKind.Var or SymKind.Param };
+            if (argItems.Count != fnptr.Params.Count)
+            {
+                throw new IrUnsupportedException(
+                    $"call through fn-pointer '{name}': expected {fnptr.Params.Count} argument(s), got {argItems.Count}");
+            }
+            var args = new List<CExpr>(argItems.Count);
+            for (var i = 0; i < argItems.Count; i++)
+            {
+                args.Add(LowerExprSink(argItems[i], fnptr.Params[i]));
+            }
+            return new IndirectCall(callee, args) { Type = fnptr.Return };
+        }
+        throw new IrUnsupportedException($"'{name}' is not callable (expected a function or a fn-pointer value)");
     }
 
     /// <summary>Build an IR <see cref="Call"/> to a resolved function symbol, optionally with a
@@ -4614,8 +4634,8 @@ internal sealed partial class ZigLowering
         // pointee `const` rides as a TypeQual so const-correctness sees it; it
         // doesn't change the C# spelling (`[*c]const u8` and `[*c]u8` are both
         // `byte*`). `[*c]const u8` is exactly the type of printf's format param.
-        Zig.TyPointer p    => new CType.Pointer(LowerType(p.Arg1)),
-        Zig.TyPtrConst p   => new CType.Pointer(LowerType(p.Arg2).WithQuals(TypeQual.Const)),
+        Zig.TyPointer p    => PointerTo(LowerType(p.Arg1)),
+        Zig.TyPtrConst p   => PointerTo(LowerType(p.Arg2).WithQuals(TypeQual.Const)),
         Zig.TyCPtr p       => new CType.Pointer(LowerType(p.Arg1)),
         Zig.TyCPtrConst p  => new CType.Pointer(LowerType(p.Arg2).WithQuals(TypeQual.Const)),
         // `[*]T` / `[*]const T` many-item pointers (Milestone O, part 2) — like `[*c]`,
@@ -4661,6 +4681,13 @@ internal sealed partial class ZigLowering
         // Tuple TYPE `struct { T1, T2, … }` (Milestone G) → CType.Tuple → C# System.ValueTuple<…>.
         // Used as a function return type or a var/param annotation; nested tuple types compose.
         Zig.TyTuple t => LowerTupleType(t.Arg2),
+        // Function-pointer TYPE `fn (Params) RetType` (Milestone W, part 1a) → a bare CType.Func
+        // (the C# backend renders it as a managed `delegate*<P…, Ret>`, the same shape the Zig
+        // allocator vtable uses). `*const fn (…) R` / `?*const fn (…) R` reach here as the pointee
+        // and are collapsed to the bare Func by PointerTo / LowerOptional. Params are named
+        // (`IDENT : Type`); their names are irrelevant to the type, only the types matter.
+        Zig.TyFn f       => new CType.Func(LowerType(f.Arg4), LowerParamTypes(f.Arg2), Variadic: false),
+        Zig.TyFnNoArgs f => new CType.Func(LowerType(f.Arg3), System.Array.Empty<CType>(), Variadic: false),
         // `@This()` — Zig's reflective self-type → the container currently being lowered, so
         // `self: @This()` / `self: *@This()` name the receiver without repeating the type name.
         // The `const Self = @This();` alias form (the common Zig idiom) is also supported — it
@@ -4744,13 +4771,39 @@ internal sealed partial class ZigLowering
         return _containerTypes.TryGetValue(name, out type!);
     }
 
-    /// <summary>Lower a Zig optional payload type: a pointer payload stays a bare nullable
-    /// pointer (the niche); any other payload is wrapped in <see cref="CType.Optional"/>
-    /// (→ C# <c>T?</c>).</summary>
+    /// <summary>Lower a Zig optional payload type: a pointer (or function-pointer) payload stays a
+    /// bare nullable pointer (the niche — a `delegate*` / `T*` is null when none); any other payload
+    /// is wrapped in <see cref="CType.Optional"/> (→ C# <c>T?</c>).</summary>
     private CType LowerOptional(Item innerType)
     {
         var inner = LowerType(innerType);
-        return inner.Unqualified is CType.Pointer ? inner : new CType.Optional(inner);
+        return inner.Unqualified is CType.Pointer or CType.Func ? inner : new CType.Optional(inner);
+    }
+
+    /// <summary>Form a pointer to <paramref name="pointee"/>, collapsing a pointer-to-FUNCTION to
+    /// the bare <see cref="CType.Func"/> (Milestone W, part 1a). In dotcc's IR a function pointer
+    /// is a bare <c>Func</c> rendered as a <c>delegate*&lt;…&gt;</c> (the C-frontend convention), so
+    /// <c>*const fn (…) R</c> / <c>*fn (…) R</c> lower to the same <c>Func</c> as a bare <c>fn</c>
+    /// type — keeping every downstream call / coercion / sizeof path identical to C's.</summary>
+    private static CType PointerTo(CType pointee) =>
+        pointee.Unqualified is CType.Func ? pointee : new CType.Pointer(pointee);
+
+    /// <summary>Lower a function-pointer type's parameter list (the reused <c>Params</c>: each a
+    /// named <c>IDENT : Type</c>) to its element types — the names are irrelevant to the type. A
+    /// variadic marker (<c>...</c>) in a fn-pointer type is rejected (deferred).</summary>
+    private IReadOnlyList<CType> LowerParamTypes(Item paramsItem)
+    {
+        var types = new List<CType>();
+        foreach (var p in Flatten(paramsItem))
+        {
+            if (p.Content is not Zig.Param pm)
+            {
+                throw new IrUnsupportedException(
+                    "a variadic / unnamed parameter in a function-pointer type is not supported yet");
+            }
+            types.Add(LowerType(pm.Arg2));
+        }
+        return types;
     }
 
     /// <summary>Validate a <c>[N:s]T</c> array's sentinel <paramref name="sentinel"/> — V1 supports
@@ -4962,6 +5015,10 @@ internal sealed partial class ZigLowering
     private static CType LowerPrim(string name) => name switch
     {
         "void" => CType.Void,
+        // `anyopaque` (Milestone W, part 1a) — Zig's opaque type, used only behind a pointer
+        // (`*anyopaque` / `?*anyopaque`) as a type-erased context. Maps to C's `void`, so `*anyopaque`
+        // → `void*` and `?*anyopaque` → a nullable `void*` (the pointer niche), exactly like C.
+        "anyopaque" => CType.Void,
         "bool" => CType.Bool,
         "i8"  => CType.SChar,    // → C# sbyte
         "u8"  => CType.UChar,    // → C# byte
