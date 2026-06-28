@@ -867,12 +867,16 @@ productions:
       # tagged-union variant's payload field, so `x.* = …` writes through. After the capture `'|'`,
       # a `'*'` lookahead selects this over the by-value `'|' IDENT '|'` capture — conflict-free.
       - { lhs: Prong, rhs: [CaseVals, '=>', '|', '*', IDENT, '|', Block], action: prongCaptureRef }
-      # A bare value-Expr prong body (Milestone L) — `v => expr`. After `=>`, a `{` selects the
-      # Block prong and a `|` the capture prong, so a leading non-`{`/`|` token unambiguously
-      # starts this Expr (the Expr cascade has no top-level `,`, so the prong-separator `,` stays
-      # clean). The headline use is a switch EXPRESSION's value-yielding arm; in a statement
-      # switch it's an expression statement (`1 => doThing(),`).
-      - { lhs: Prong, rhs: [CaseVals, '=>', Expr],                   action: prongExpr }
+      # A value-position prong body (Milestone L; broadened in Milestone Y, part 1) — `v => RhsExpr`.
+      # `RhsExpr` (not just `Expr`) so a prong can yield ANY value-position form: a plain expression,
+      # an `if`/`switch` expression, or a labeled value-block `blk: { … break :blk v; }` (the
+      # idiomatic multi-statement switch arm). After `=>`, a `{` selects the Block prong and a `|` the
+      # capture prong, so a leading non-`{`/`|` token unambiguously starts this RhsExpr; an `IDENT ':'`
+      # selects the labeled block over a bare-identifier expression (a Primary is never followed by
+      # `:`), exactly as in the other RhsExpr positions. The Expr cascade has no top-level `,`, so the
+      # prong-separator `,` stays clean. The headline use is a switch EXPRESSION's value-yielding arm;
+      # in a statement switch it's an expression statement (`1 => doThing(),`).
+      - { lhs: Prong, rhs: [CaseVals, '=>', RhsExpr],                action: prongExpr }
 
   # Case values: a comma-list of value Exprs, or `else` (the default). The `,` here never
   # clashes with the prong-separator `,` because FOLLOW(CaseVals) = { '=>' } — after a value

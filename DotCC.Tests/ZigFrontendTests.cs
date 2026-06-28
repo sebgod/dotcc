@@ -2540,16 +2540,19 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_a_labeled_value_block_in_an_if_expression_arm()
+    public void Lowers_a_labeled_value_block_in_an_if_expression_arm_at_a_typed_init()
     {
-        // A value-block produces its value via statements, which a C# expression (the ternary an
-        // if-expression lowers to) can't host — supported only as a full `=`/`return`/assign RHS.
-        var ex = Should.Throw<CompileException>(() => EmitZig(
+        // Milestone Y, part 1 LIFTED the earlier cut: a labeled value-block as an `if`-expression arm
+        // at a full (here typed `i32`) `const` init no longer rejects. The ternary an if-expression
+        // would lower to can't host the block's statements, so dotcc lowers the `if` as a STATEMENT
+        // filling a result temp (`__vcf`), the typed annotation flowing in as the temp's sink.
+        var cs = EmitZig(
             "pub fn main() u8 {\n" +
             "    const x: i32 = if (true) blk: { break :blk 1; } else 0;\n" +
             "    return @as(u8, @intCast(x));\n" +
-            "}\n"));
-        ex.Message.ShouldContain("labeled value-block");
+            "}\n");
+        cs.ShouldContain("__vcf");      // the value-control-flow result temp
+        cs.ShouldContain("goto __blk"); // the labeled value-block branch lowered to temp + goto
     }
 
     [Fact]
@@ -3700,5 +3703,59 @@ public sealed class ZigFrontendTests
             "pub fn main() u8 { return weight(error.B); }\n");
         cs.ShouldContain("switch {"); // a C# switch EXPRESSION
         cs.ShouldContain("_ =>");      // the injected implicit default arm (the collapsed last prong)
+    }
+
+    [Fact]
+    public void Lowers_a_block_bodied_switch_expression_prong_as_a_statement_temp_fill()
+    {
+        // A switch EXPRESSION with a labeled value-block prong (`0 => blk: {…; break :blk v;}`) can't
+        // be a C# switch-expression (whose arms must be pure expressions). At a `const`/`var`/`return`/
+        // assignment RHS, dotcc lowers the whole switch as a STATEMENT filling a result temp (`__vcf`),
+        // each prong assigning it; the labeled block lowers via its own temp + `goto …_end`. (Y, part 1.)
+        var cs = EmitZig(
+            "fn classify(n: i32) i32 {\n" +
+            "    const label = switch (n) {\n" +
+            "        0 => blk: { const h: i32 = 100; break :blk h + 1; },\n" +
+            "        1, 2 => 20,\n" +
+            "        else => 5,\n" +
+            "    };\n" +
+            "    return label;\n" +
+            "}\n" +
+            "pub fn main() u8 { return @intCast(classify(1)); }\n");
+        cs.ShouldContain("__vcf");        // the value-control-flow result temp
+        cs.ShouldContain("goto __blk");   // the labeled value-block prong lowered to a temp + goto
+        cs.ShouldContain("default:");     // the `else` prong → the switch default section
+    }
+
+    [Fact]
+    public void Lowers_a_block_bodied_if_expression_as_a_statement_temp_fill()
+    {
+        // An if EXPRESSION with a labeled value-block branch (`if (c) blk: {…} else v`) can't be a C#
+        // ternary (whose operands must be pure expressions). At a statement RHS it lowers as an `if`
+        // statement filling a result temp. (Milestone Y, part 1.)
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const x = if (true) blk: { const b: i32 = 42; break :blk b; } else 0;\n" +
+            "    return @intCast(x);\n" +
+            "}\n");
+        cs.ShouldContain("__vcf");      // the result temp
+        cs.ShouldContain("goto __blk"); // the labeled value-block branch
+    }
+
+    [Fact]
+    public void Rejects_a_block_bodied_value_switch_in_an_error_union_return()
+    {
+        // The result-temp `return` of a value-position switch/if is deferred in an error-union (`!T`)
+        // function — the `ErrUnion<T>` wrapping would need to apply to the temp (mirrors the bare
+        // labeled-block `!T` return cut). A clear deferred error, not a silent unwrapped return.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "fn f(n: i32) !i32 {\n" +
+            "    return switch (n) {\n" +
+            "        0 => blk: { break :blk 1; },\n" +
+            "        else => 2,\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 { return @intCast(f(0) catch 9); }\n"));
+        ex.Message.ShouldContain("error-union");
     }
 }
