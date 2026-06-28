@@ -1661,6 +1661,31 @@ public sealed class ZigOracleTests
             "    total = total + forVal(arr[0..]);\n" +
             "    return @intCast(total);\n" +
             "}\n", 42, "" },
+
+        // Milestone Z — a MULTI-variant tagged-union capture prong `.circle, .square => |r|`. Both
+        // variants carry i32, so `r` binds to the shared payload (they overlap at offset 0). area of a
+        // circle(9) = 18 and a square(12) = 24; 18 + 24 = 42.
+        new object[] { "union_multi_capture",
+            "const Shape = union(enum) {\n" +
+            "    circle: i32,\n" +
+            "    square: i32,\n" +
+            "    name: u8,\n" +
+            "};\n" +
+            "fn area(s: Shape) i32 {\n" +
+            "    switch (s) {\n" +
+            "        .circle, .square => |r| {\n" +
+            "            return r * 2;\n" +
+            "        },\n" +
+            "        .name => |c| {\n" +
+            "            return @as(i32, c);\n" +
+            "        },\n" +
+            "    }\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = Shape{ .circle = 9 };\n" +
+            "    const b = Shape{ .square = 12 };\n" +
+            "    return @intCast(area(a) + area(b));\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

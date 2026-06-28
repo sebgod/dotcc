@@ -3839,4 +3839,40 @@ public sealed class ZigFrontendTests
         cs.ShouldContain("__lv");          // the value temp + else assignment still emitted
         cs.ShouldNotContain("__lv0_end:"); // but no end label (no break targets it)
     }
+
+    [Fact]
+    public void Binds_a_multi_variant_union_capture_via_the_first_variants_field()
+    {
+        // Milestone Z — a multi-variant capture prong `.circle, .square => |r|` (both i32) binds `r`
+        // to the FIRST variant's payload field; in the explicit-layout payload union every variant
+        // overlaps at offset 0, so reading `.circle` aliases whichever (`.circle`/`.square`) matched.
+        var cs = EmitZig(
+            "const Shape = union(enum) { circle: i32, square: i32, name: u8 };\n" +
+            "fn area(s: Shape) i32 {\n" +
+            "    switch (s) {\n" +
+            "        .circle, .square => |r| { return r * 2; },\n" +
+            "        .name => |c| { return @as(i32, c); },\n" +
+            "    }\n" +
+            "}\n" +
+            "pub fn main() u8 { return @intCast(area(Shape{ .circle = 21 })); }\n");
+        cs.ShouldContain("Shape_Tag.circle"); // both variants are section labels
+        cs.ShouldContain("Shape_Tag.square");
+        cs.ShouldContain("__payload.circle"); // bound via the first variant's (aliasing) field
+    }
+
+    [Fact]
+    public void Rejects_a_multi_variant_union_capture_with_differing_payload_types()
+    {
+        // A capture binds to one `|x|`, so the listed variants must share a payload type. `.circle`
+        // (i32) and `.name` (u8) differ → a clear error, not a silent mistyped read.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const Shape = union(enum) { circle: i32, name: u8 };\n" +
+            "fn f(s: Shape) i32 {\n" +
+            "    switch (s) {\n" +
+            "        .circle, .name => |x| { return @as(i32, x); },\n" +
+            "    }\n" +
+            "}\n" +
+            "pub fn main() u8 { return @intCast(f(Shape{ .circle = 1 })); }\n"));
+        ex.Message.ShouldContain("same payload type");
+    }
 }
