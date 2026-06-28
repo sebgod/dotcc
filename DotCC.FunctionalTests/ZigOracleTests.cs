@@ -1593,6 +1593,38 @@ public sealed class ZigOracleTests
             "    acc += 7;\n" +
             "    return acc;\n" +
             "}\n", 42, "" },
+
+        // Milestone Y, part 1 — value-position `if`/`switch` with a block-bodied (labeled value-block)
+        // branch. A multi-statement switch arm yields via `break :blk v`; dotcc lowers the whole
+        // switch/if as a STATEMENT filling a result temp (not a C# switch-expression / ternary), which
+        // a C# expression can't host. classify(1)=20 + classify(7)=7 + (if total>10 → 15) = 42.
+        new object[] { "value_control_flow",
+            "fn classify(n: i32) i32 {\n" +
+            "    const label = switch (n) {\n" +
+            "        0 => blk: {\n" +
+            "            const hundred: i32 = 100;\n" +
+            "            break :blk hundred + 1;\n" +
+            "        },\n" +
+            "        1, 2 => 20,\n" +
+            "        else => blk: {\n" +
+            "            var acc: i32 = 0;\n" +
+            "            acc = acc + n;\n" +
+            "            break :blk acc;\n" +
+            "        },\n" +
+            "    };\n" +
+            "    return label;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var total: i32 = 0;\n" +
+            "    total = total + classify(1);\n" +
+            "    total = total + classify(7);\n" +
+            "    const pick = if (total > 10) blk: {\n" +
+            "        const bonus: i32 = 15;\n" +
+            "        break :blk bonus;\n" +
+            "    } else 0;\n" +
+            "    total = total + pick;\n" +
+            "    return @intCast(total);\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

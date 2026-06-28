@@ -1876,6 +1876,14 @@ internal sealed partial class ZigLowering
                     return LowerLabeledValueBlock(Tok(lb.Arg0), lb.Arg2, target.Type,
                         temp => new ExprStmt(new Assign(null, target, new VarRef(temp) { Type = temp.Type }) { Type = target.Type }));
                 }
+                // `x = switch (y) { … blk: {…} };` / `x = if (c) blk:{…} else …;` — a value-position
+                // if/switch with a statement-producing branch (Milestone Y, part 1): temp-fill against
+                // the lvalue's type, then assign the result temp into it.
+                if (IsValueControlFlowStmt(a.Arg2))
+                {
+                    return LowerValueControlFlowStmt(a.Arg2, target.Type,
+                        temp => new ExprStmt(new Assign(null, target, new VarRef(temp) { Type = temp.Type }) { Type = target.Type }));
+                }
                 var value = LowerExprSink(a.Arg2, target.Type);   // target type is the sink (`x = .member;`)
                 return new ExprStmt(new Assign(null, target, value) { Type = target.Type });
             }
@@ -2044,6 +2052,19 @@ internal sealed partial class ZigLowering
         if (initExpr.Content is Zig.LabeledBlock lb)
         {
             return LowerLabeledValueBlock(Tok(lb.Arg0), lb.Arg2, declared, temp =>
+            {
+                var sym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = temp.Type });
+                return new DeclStmt(new List<LocalDecl> { new(sym, new VarRef(temp) { Type = temp.Type }) });
+            });
+        }
+        // `const x = switch (y) { … blk: {…} };` / `const x = if (c) blk:{…} else …;` — a value-
+        // position if/switch with a labeled-block (statement-producing) branch (Milestone Y, part 1):
+        // temp-fill it as a statement (the declared type, if any, is the sink), then bind `x` to the
+        // result temp. An all-simple-value if/switch is NOT intercepted here (it stays the clean C#
+        // ternary / switch-expression).
+        if (IsValueControlFlowStmt(initExpr))
+        {
+            return LowerValueControlFlowStmt(initExpr, declared, temp =>
             {
                 var sym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = temp.Type });
                 return new DeclStmt(new List<LocalDecl> { new(sym, new VarRef(temp) { Type = temp.Type }) });
@@ -3243,7 +3264,8 @@ internal sealed partial class ZigLowering
             {
                 throw new IrUnsupportedException(
                     "zig switch-expression prong must yield a value (`v => expr`); a block-bodied prong " +
-                    "(needing a labeled `break :blk v`) and a `|x|` capture in a switch expression are not supported yet");
+                    "(a labeled `break :blk v`) is supported only as a full `const`/`var`/`return`/assignment RHS " +
+                    "(Milestone Y, part 1), not in a sub-expression; a `|x|` capture in a switch expression is not supported yet");
             }
             var value = LowerExprSink(pe.Arg2, sink);
             // `else` → the `_` default arm; otherwise the prong's case values become the arm's
@@ -3273,6 +3295,139 @@ internal sealed partial class ZigLowering
             ?? arms.Select(a => a.Value.Type).FirstOrDefault(t => t is not null)
             ?? CType.Int;
         return new SwitchExpr(subject, arms) { Type = resultType };
+    }
+
+    /// <summary>A result temp shared while a value-position <c>if</c>/<c>switch</c> is lowered as a
+    /// statement (Milestone Y, part 1). Every branch fills <see cref="Temp"/>; <see cref="ResultType"/>
+    /// is the sink when known, else fixed by the first branch's value type (so a sink-less
+    /// <c>const x = switch …</c> still types the temp).</summary>
+    private sealed class ValueTempTarget
+    {
+        public required Symbol Temp;
+        public CType? ResultType;
+    }
+
+    /// <summary>True when <paramref name="rhs"/> is a value-position <c>if</c>/<c>switch</c> EXPRESSION
+    /// with a branch that needs STATEMENTS to produce its value — a labeled value-block branch
+    /// (<c>blk: {…; break :blk v;}</c>) or a block-bodied / capturing switch prong. Such a form can't
+    /// be a C# expression (a ternary / switch-expression), so a statement context (a <c>const</c> /
+    /// <c>var</c> / <c>return</c> / assignment RHS) lowers it via <see cref="LowerValueControlFlowStmt"/>
+    /// into a result temp. An all-simple-value <c>if</c>/<c>switch</c> returns false and keeps the clean
+    /// expression lowering (the C# ternary / switch-expression).</summary>
+    private static bool IsValueControlFlowStmt(Item rhs) => rhs.Content switch
+    {
+        Zig.IfExpr e             => e.Arg4.Content is Zig.LabeledBlock || e.Arg6.Content is Zig.LabeledBlock,
+        Zig.SwitchExpr s         => SwitchExprNeedsStmt(s.Arg5),
+        Zig.SwitchExprTrailing s => SwitchExprNeedsStmt(s.Arg5),
+        _ => false,
+    };
+
+    /// <summary>True when any prong of a switch EXPRESSION needs statements to yield its value — a
+    /// block-bodied (<c>=&gt; { … }</c>) or capturing (<c>=&gt; |x| { … }</c>) prong, or a bare-expr
+    /// prong whose value is itself a labeled value-block (<c>=&gt; blk: { … break :blk v; }</c>).</summary>
+    private static bool SwitchExprNeedsStmt(Item prongsItem) =>
+        Flatten(prongsItem).Any(p => p.Content switch
+        {
+            Zig.Prong or Zig.ProngCapture or Zig.ProngCaptureRef => true,
+            Zig.ProngExpr pe => pe.Arg2.Content is Zig.LabeledBlock,
+            _ => false,
+        });
+
+    /// <summary>Lower a value-position <c>if</c>/<c>switch</c> whose branch(es) need statements (see
+    /// <see cref="IsValueControlFlowStmt"/>) as a C# STATEMENT that fills a result temp, then hands the
+    /// temp to <paramref name="consume"/> (the decl / return / assignment that reads it). Mirrors the
+    /// labeled-value-block temp-fill (<see cref="LowerLabeledValueBlock"/>): a default-initialized temp,
+    /// each branch assigning it, then the consumer. The temp's type is the <paramref name="sink"/> when
+    /// known, else the first branch's value type. (Milestone Y, part 1.) A union-subject value-switch
+    /// and a <c>|x|</c> capture in expression position stay clear deferred errors.</summary>
+    private CStmt LowerValueControlFlowStmt(Item rhs, CType? sink, Func<Symbol, CStmt> consume)
+    {
+        var n = _blockLabelCounter++;
+        var temp = _symbols.Declare(new Symbol { Name = "__vcf" + n, Kind = SymKind.Var, Type = sink ?? CType.Int });
+        var rt = new ValueTempTarget { Temp = temp, ResultType = sink };
+        // The cond/subject is lowered before the branches (left-to-right C# argument evaluation), and
+        // the first branch's FillValueTemp fixes rt.ResultType so a sink-less switch/if still types.
+        CStmt filler = rhs.Content switch
+        {
+            Zig.IfExpr e => new If(LowerExpr(e.Arg2),
+                                   new Block(new List<CStmt> { FillValueTemp(e.Arg4, rt) }),
+                                   new Block(new List<CStmt> { FillValueTemp(e.Arg6, rt) })),
+            Zig.SwitchExpr s         => BuildValueSwitch(s.Arg2, s.Arg5, rt),
+            Zig.SwitchExprTrailing s => BuildValueSwitch(s.Arg2, s.Arg5, rt),
+            _ => throw new IrUnsupportedException(
+                "internal: value control-flow statement on " + (rhs.Content?.GetType().Name ?? "null")),
+        };
+        var resultType = rt.ResultType
+            ?? throw new IrUnsupportedException("a value-position `if`/`switch` must yield a value in every branch");
+        temp.Type = resultType;
+        return new Seq(new List<CStmt>
+        {
+            // Default-initialized so C# definite-assignment is satisfied even though every real path
+            // assigns the temp (a switch with no matching case is impossible in valid, exhaustive Zig).
+            new DeclStmt(new List<LocalDecl> { new(temp, new DefaultLit { Type = resultType }) }),
+            filler,
+            consume(temp),
+        });
+    }
+
+    /// <summary>Build the statement that fills a value-control-flow result temp from one branch's value
+    /// (Milestone Y, part 1). A labeled value-block branch (<c>blk: { … break :blk v; }</c>) is
+    /// temp-filled — its <c>break :blk v</c> assigns its own temp — and that temp copied into
+    /// <paramref name="rt"/>'s; any other expression is lowered at the running result type and assigned.
+    /// The first branch lowered fixes <see cref="ValueTempTarget.ResultType"/>.</summary>
+    private CStmt FillValueTemp(Item valueItem, ValueTempTarget rt)
+    {
+        if (valueItem.Content is Zig.LabeledBlock lb)
+        {
+            return LowerLabeledValueBlock(Tok(lb.Arg0), lb.Arg2, rt.ResultType, blkTemp =>
+            {
+                rt.ResultType ??= blkTemp.Type;
+                return new ExprStmt(new Assign(null, RtRef(rt), new VarRef(blkTemp) { Type = blkTemp.Type }) { Type = rt.ResultType });
+            });
+        }
+        var value = rt.ResultType is { } sk ? LowerExprSink(valueItem, sk) : LowerExpr(valueItem);
+        rt.ResultType ??= value.Type;
+        return new ExprStmt(new Assign(null, RtRef(rt), value) { Type = rt.ResultType });
+    }
+
+    /// <summary>An lvalue reference to a value-control-flow result temp at its (now-resolved) type.
+    /// Only called after a branch has fixed <see cref="ValueTempTarget.ResultType"/>, so it is non-null.</summary>
+    private static VarRef RtRef(ValueTempTarget rt) => new VarRef(rt.Temp) { Type = rt.ResultType!, IsLValue = true };
+
+    /// <summary>Build the statement <c>switch</c> that fills a value-control-flow result temp — each
+    /// prong assigns the temp (via <see cref="FillValueTemp"/>) then <c>break</c>s (Zig has no
+    /// fall-through). Because it's a STATEMENT switch over a default-initialized temp, C#'s
+    /// switch-expression exhaustiveness rule (CS8509) doesn't apply. (Milestone Y, part 1.) A
+    /// tagged-union value-switch (tag dispatch + payload capture in value position) and a void block
+    /// prong / <c>|x|</c> capture in a switch expression stay clear deferred errors.</summary>
+    private CStmt BuildValueSwitch(Item subjectItem, Item prongsItem, ValueTempTarget rt)
+    {
+        var subject = LowerExpr(subjectItem);
+        var uname = subject.Type.Unqualified switch
+        {
+            CType.Named nm => nm.Name,
+            CType.Pointer { Pointee: var pe } when pe.Unqualified is CType.Named pn => pn.Name,
+            _ => null,
+        };
+        if (uname is not null && _unions.ContainsKey(uname))
+        {
+            throw new IrUnsupportedException(
+                "a tagged-union value-switch with block prongs (`const x = switch (u) { .v => blk: {…} }`) is not supported yet");
+        }
+        var sections = new List<SwitchSection>();
+        foreach (var prongItem in Flatten(prongsItem))
+        {
+            if (prongItem.Content is not Zig.ProngExpr pe)
+            {
+                throw new IrUnsupportedException(
+                    "a value-position switch prong must yield a value (`v => expr` or `v => blk: {… break :blk v;}`); " +
+                    "a void block prong or a `|x|` capture in a switch expression is not supported yet");
+            }
+            var fill = FillValueTemp(pe.Arg2, rt);
+            var labels = LowerCaseVals(pe.Arg0, subject.Type);
+            sections.Add(new SwitchSection(labels, new List<CStmt> { fill, new Break() }));
+        }
+        return new Switch(subject, sections);
     }
 
     /// <summary>True when a lowered statement list provably ends control flow (so no
@@ -3308,6 +3463,20 @@ internal sealed partial class ZigLowering
                     "a labeled value-block `return blk: {…}` in an error-union (`!T`) function is not supported yet");
             }
             return LowerLabeledValueBlock(Tok(lb.Arg0), lb.Arg2, _currentFnRet,
+                temp => new Return(new VarRef(temp) { Type = temp.Type }));
+        }
+        // `return switch (y) { … blk: {…} };` / `return if (c) blk:{…} else …;` — a value-position
+        // if/switch with a statement-producing branch (Milestone Y, part 1): temp-fill against the
+        // return type, then `return` the temp. An error-union `!T` function is deferred (like the
+        // labeled-block return above — the ErrUnion wrapping would need to apply to the temp).
+        if (IsValueControlFlowStmt(valueItem))
+        {
+            if (_currentFnRet is CType.ErrorUnion)
+            {
+                throw new IrUnsupportedException(
+                    "a value-position `if`/`switch` with a block branch in an error-union (`!T`) function `return` is not supported yet");
+            }
+            return LowerValueControlFlowStmt(valueItem, _currentFnRet,
                 temp => new Return(new VarRef(temp) { Type = temp.Type }));
         }
         if (_currentFnRet is CType.ErrorUnion eu)
@@ -3688,7 +3857,8 @@ internal sealed partial class ZigLowering
             case Zig.LabeledBlock lb:
                 throw new IrUnsupportedException(
                     $"a labeled value-block (`{Tok(lb.Arg0)}: {{ … }}`) is supported only as a full initializer, " +
-                    "`return`, or assignment right-hand side — not inside an if/switch-expression arm or a sub-expression yet");
+                    "`return`, or assignment right-hand side (including as a value-position if/switch branch there, " +
+                    "Milestone Y part 1) — not inside a sub-expression yet");
 
             // arithmetic
             case Zig.Add a:     return Bin(BinOp.Add, a.Arg0, a.Arg2);
