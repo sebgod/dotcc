@@ -3106,7 +3106,7 @@ internal sealed partial class ZigLowering
             List<CStmt> body;
             if (captureName is not null && captureName != "_")
             {
-                var variant = SingleVariantName(caseVals, info);
+                var variant = CaptureVariantName(caseVals, info, captureName);
                 var payloadType = info.Variants[variant]
                     ?? throw new IrUnsupportedException(
                         $"union '{info.Name}' variant '{variant}' is a void variant — it has no payload to capture with `|{captureName}|`");
@@ -3209,24 +3209,51 @@ internal sealed partial class ZigLowering
         return new Block(pre);
     }
 
-    /// <summary>The single <c>.variant</c> a tagged-union capture prong matches — a capture
-    /// (<c>|x|</c>) is only meaningful on a prong that selects exactly one payload variant, so an
-    /// <c>else</c>, a multi-value prong, or an unknown variant is rejected.</summary>
-    private string SingleVariantName(Item caseVals, ZigUnionInfo info)
+    /// <summary>The payload <c>.variant</c> a tagged-union capture prong binds. A single-variant prong
+    /// (<c>.a =&gt; |x|</c>) returns that variant. A MULTI-variant capture prong (<c>.a, .b =&gt; |x|</c>,
+    /// Milestone Z) is allowed only when every listed variant shares the SAME payload type — then the
+    /// FIRST variant's payload field is bound: in the explicit-layout payload union every variant
+    /// overlaps at offset 0, so reading one (the field of the same type) aliases whichever variant
+    /// actually matched. An <c>else</c>, an unknown variant, or variants with differing payload types is
+    /// rejected (a capture binds to one <c>|x|</c>, so one payload type).</summary>
+    private string CaptureVariantName(Item caseVals, ZigUnionInfo info, string captureName)
     {
-        var vals = Flatten(caseVals);
-        if (vals.Count != 1 || vals[0].Content is not Zig.EnumLit el)
+        if (caseVals.Content is Zig.CaseElse)
         {
-            var what = caseVals.Content is Zig.CaseElse ? "`else`" : $"{vals.Count} value(s)";
             throw new IrUnsupportedException(
-                $"a tagged-union capture prong must match exactly one `.variant` (got {what})");
+                $"a tagged-union capture prong (`|{captureName}|`) cannot capture on `else` — it has no single payload type");
         }
-        var variant = Tok(el.Arg1);
-        if (!info.Variants.ContainsKey(variant))
+        var vals = Flatten(caseVals);
+        var variants = new List<string>(vals.Count);
+        foreach (var v in vals)
         {
-            throw new IrUnsupportedException($"union '{info.Name}' has no variant '{variant}'");
+            if (v.Content is not Zig.EnumLit el)
+            {
+                throw new IrUnsupportedException(
+                    "a tagged-union capture prong must list `.variant` values");
+            }
+            var name = Tok(el.Arg1);
+            if (!info.Variants.ContainsKey(name))
+            {
+                throw new IrUnsupportedException($"union '{info.Name}' has no variant '{name}'");
+            }
+            variants.Add(name);
         }
-        return variant;
+        // A multi-variant capture binds to a single `|x|`, so every listed variant must carry the
+        // same payload type. The first variant's payload field aliases the rest (all at offset 0).
+        var first = variants[0];
+        var firstType = info.Variants[first];
+        for (var i = 1; i < variants.Count; i++)
+        {
+            var ti = info.Variants[variants[i]];
+            if (firstType is null || ti is null || !firstType.Unqualified.Equals(ti.Unqualified))
+            {
+                throw new IrUnsupportedException(
+                    $"a multi-variant capture prong `.{first}, .{variants[i]} => |{captureName}|` requires every " +
+                    "listed variant to share the same payload type");
+            }
+        }
+        return first;
     }
 
     /// <summary>Lower a prong's case values to switch labels: <c>else</c> → the single null
