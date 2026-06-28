@@ -109,6 +109,30 @@ internal sealed partial class ZigLowering
     /// <c>__loopN_cont</c>), one per labeled loop (Milestone L, part 3).</summary>
     private int _loopLabelCounter;
 
+    /// <summary>A value-position loop (<c>while/for … else …</c>) being lowered as a statement
+    /// (Milestone Y, part 2): a <c>break v</c> (unlabeled, innermost) or <c>break :lbl v</c> (matching
+    /// <see cref="Label"/>) inside the body assigns <see cref="Temp"/> and jumps to
+    /// <see cref="EndLabel"/> (skipping the <c>else</c> value, which supplies the result on normal
+    /// completion). <see cref="ResultType"/> is the sink when known, else fixed by the first
+    /// <c>break</c> value (or the <c>else</c> value). <see cref="BreakUsed"/> gates emitting the end
+    /// label (an else-only loop never jumps there — avoids a C# unreferenced-label warning).</summary>
+    private sealed class LoopValueTarget
+    {
+        public required Symbol Temp { get; init; }
+        public required string EndLabel { get; init; }
+        public string? Label { get; init; }
+        public CType? Sink { get; init; }
+        public CType? ResultType { get; set; }
+        public bool BreakUsed { get; set; }
+    }
+
+    /// <summary>Active value-position loops, innermost on top — see <see cref="LoopValueTarget"/>.</summary>
+    private readonly Stack<LoopValueTarget> _loopValues = new();
+
+    /// <summary>Monotonic counter for value-loop result temps / end labels (<c>__lvN</c> /
+    /// <c>__lvN_end</c>), one per value-position loop (Milestone Y, part 2).</summary>
+    private int _loopValueCounter;
+
     /// <summary>Container type names declared in this unit (<c>const P = struct {…}</c> /
     /// <c>const C = enum {…}</c>) → the <see cref="CType"/> the name resolves to: a
     /// <see cref="CType.Named"/> for a struct, a <see cref="CType.Enum"/> for an enum.
@@ -1955,6 +1979,11 @@ internal sealed partial class ZigLowering
             case Zig.StmtBreak:    return new Break();
             case Zig.StmtContinue: return new Continue();
 
+            // `break v;` — an unlabeled value break (Milestone Y, part 2): yield `v` from the innermost
+            // value-position loop (`while/for … else`). Assigns its result temp and jumps to its end
+            // label (skipping the loop's `else`).
+            case Zig.StmtBreakValue b: return LowerBreakValue(b.Arg1);
+
             // `break :blk v;` — yield a value from the enclosing labeled value-block (Milestone L,
             // part 2). Assigns the block's result temp and jumps to its end label (LowerLabeledBreak).
             case Zig.StmtBreakLabelValue b: return LowerLabeledBreak(Tok(b.Arg2), b.Arg3);
@@ -2333,19 +2362,37 @@ internal sealed partial class ZigLowering
         return new Seq(stmts);
     }
 
-    /// <summary>Lower <c>break :label v;</c> (Milestone L, part 2) — yield <paramref name="valueItem"/>
-    /// from the enclosing labeled block named <paramref name="label"/>: assign the value to the
-    /// block's result temp, then <c>goto</c> its end label. Resolves the label innermost-first off the
-    /// active stack; the value is sink-typed to the block's result type when known, and the first
-    /// such break (when the block has no result-location hint) fixes that type.</summary>
+    /// <summary>Lower an unlabeled <c>break v;</c> (Milestone Y, part 2) — yield <paramref
+    /// name="valueItem"/> from the INNERMOST value-position loop on the stack.</summary>
+    private CStmt LowerBreakValue(Item valueItem)
+    {
+        if (_loopValues.Count == 0)
+        {
+            throw new IrUnsupportedException(
+                "`break <value>;` is only valid inside a value-position `while`/`for … else` loop");
+        }
+        return BuildLoopBreakValue(_loopValues.Peek(), valueItem);
+    }
+
+    /// <summary>Lower <c>break :label v;</c> (Milestone L, part 2; extended in Milestone Y, part 2) —
+    /// yield <paramref name="valueItem"/> from the enclosing construct named <paramref name="label"/>:
+    /// a labeled value-position loop (<c>lbl: while/for … else</c>) or a labeled value-block. Assigns
+    /// that construct's result temp, then <c>goto</c> its end label. Resolves innermost-first; the
+    /// value is sink-typed to the result type when known, and the first such break fixes that type.</summary>
     private CStmt LowerLabeledBreak(string label, Item valueItem)
     {
-        // A value break targeting a labeled LOOP is the labeled-while-value form (`break :lbl v`
-        // with a `while (…) … else …` value) — deferred; report it precisely rather than "unknown".
+        // A labeled value-position loop (`lbl: while/for … else`, Milestone Y part 2) — innermost-first.
+        foreach (var lv in _loopValues)
+        {
+            if (lv.Label == label) { return BuildLoopBreakValue(lv, valueItem); }
+        }
+        // A value break targeting a labeled STATEMENT loop (no `else` → not a value loop) is still a
+        // clear deferred error — and is invalid Zig anyway (a value `break` needs a value loop).
         if (_labeledBlocks.All(t => t.Label != label) && _labeledLoops.Any(l => l.Label == label))
         {
             throw new IrUnsupportedException(
-                $"`break :{label} <value>` yields a value from a labeled loop — the labeled-while/for value form is not supported yet");
+                $"`break :{label} <value>` yields a value from a labeled loop, but ':{label}' is a statement loop " +
+                "with no `else` clause — give it an `else` to make it a value loop");
         }
         var target = _labeledBlocks.FirstOrDefault(t => t.Label == label)
             ?? throw new IrUnsupportedException(
@@ -3319,6 +3366,9 @@ internal sealed partial class ZigLowering
         Zig.IfExpr e             => e.Arg4.Content is Zig.LabeledBlock || e.Arg6.Content is Zig.LabeledBlock,
         Zig.SwitchExpr s         => SwitchExprNeedsStmt(s.Arg5),
         Zig.SwitchExprTrailing s => SwitchExprNeedsStmt(s.Arg5),
+        // A value-position loop (`while/for … else`, Milestone Y part 2) ALWAYS needs the statement
+        // lowering — a loop that yields via `break v` / an `else` value can't be a C# expression.
+        Zig.WhileElseExpr or Zig.ForElseExpr or Zig.LabeledWhileElseExpr or Zig.LabeledForElseExpr => true,
         _ => false,
     };
 
@@ -3333,14 +3383,27 @@ internal sealed partial class ZigLowering
             _ => false,
         });
 
-    /// <summary>Lower a value-position <c>if</c>/<c>switch</c> whose branch(es) need statements (see
-    /// <see cref="IsValueControlFlowStmt"/>) as a C# STATEMENT that fills a result temp, then hands the
-    /// temp to <paramref name="consume"/> (the decl / return / assignment that reads it). Mirrors the
-    /// labeled-value-block temp-fill (<see cref="LowerLabeledValueBlock"/>): a default-initialized temp,
-    /// each branch assigning it, then the consumer. The temp's type is the <paramref name="sink"/> when
-    /// known, else the first branch's value type. (Milestone Y, part 1.) A union-subject value-switch
-    /// and a <c>|x|</c> capture in expression position stay clear deferred errors.</summary>
-    private CStmt LowerValueControlFlowStmt(Item rhs, CType? sink, Func<Symbol, CStmt> consume)
+    /// <summary>Lower a value-position control-flow form that needs statements to produce its value
+    /// (see <see cref="IsValueControlFlowStmt"/>) as a C# STATEMENT, then hand the result temp to
+    /// <paramref name="consume"/> (the decl / return / assignment that reads it). Dispatches an
+    /// <c>if</c>/<c>switch</c> branch-temp-fill (Milestone Y, part 1) and a <c>while/for … else</c>
+    /// value loop (part 2) to their builders.</summary>
+    private CStmt LowerValueControlFlowStmt(Item rhs, CType? sink, Func<Symbol, CStmt> consume) => rhs.Content switch
+    {
+        Zig.IfExpr or Zig.SwitchExpr or Zig.SwitchExprTrailing => LowerValueIfSwitch(rhs, sink, consume),
+        Zig.WhileElseExpr or Zig.ForElseExpr or Zig.LabeledWhileElseExpr or Zig.LabeledForElseExpr
+            => LowerLoopValue(rhs, sink, consume),
+        _ => throw new IrUnsupportedException(
+            "internal: value control-flow statement on " + (rhs.Content?.GetType().Name ?? "null")),
+    };
+
+    /// <summary>Lower a value-position <c>if</c>/<c>switch</c> whose branch(es) need statements as a C#
+    /// STATEMENT that fills a result temp. Mirrors the labeled-value-block temp-fill
+    /// (<see cref="LowerLabeledValueBlock"/>): a default-initialized temp, each branch assigning it,
+    /// then the consumer. The temp's type is the <paramref name="sink"/> when known, else the first
+    /// branch's value type. (Milestone Y, part 1.) A union-subject value-switch and a <c>|x|</c>
+    /// capture in expression position stay clear deferred errors.</summary>
+    private CStmt LowerValueIfSwitch(Item rhs, CType? sink, Func<Symbol, CStmt> consume)
     {
         var n = _blockLabelCounter++;
         var temp = _symbols.Declare(new Symbol { Name = "__vcf" + n, Kind = SymKind.Var, Type = sink ?? CType.Int });
@@ -3355,7 +3418,7 @@ internal sealed partial class ZigLowering
             Zig.SwitchExpr s         => BuildValueSwitch(s.Arg2, s.Arg5, rt),
             Zig.SwitchExprTrailing s => BuildValueSwitch(s.Arg2, s.Arg5, rt),
             _ => throw new IrUnsupportedException(
-                "internal: value control-flow statement on " + (rhs.Content?.GetType().Name ?? "null")),
+                "internal: value if/switch on " + (rhs.Content?.GetType().Name ?? "null")),
         };
         var resultType = rt.ResultType
             ?? throw new IrUnsupportedException("a value-position `if`/`switch` must yield a value in every branch");
@@ -3367,6 +3430,80 @@ internal sealed partial class ZigLowering
             new DeclStmt(new List<LocalDecl> { new(temp, new DefaultLit { Type = resultType }) }),
             filler,
             consume(temp),
+        });
+    }
+
+    /// <summary>Lower a value-position loop <c>while/for (…) { … } else v</c> (Milestone Y, part 2) as
+    /// a C# STATEMENT filling a result temp. The loop runs normally; a <c>break v</c> (unlabeled, the
+    /// innermost value loop) or <c>break :lbl v</c> (the matching labeled one) inside assigns the temp
+    /// and jumps to the end label, SKIPPING the <c>else</c> value — which is assigned only on natural
+    /// completion (no break). The end label is emitted only if a <c>break</c> targeted it (an else-only
+    /// loop never jumps there). The temp's type is the sink when known, else the first <c>break</c> /
+    /// the <c>else</c> value type. V1 cuts (deferred to the grammar): a for-RANGE / indexed / capture
+    /// value loop.</summary>
+    private CStmt LowerLoopValue(Item rhs, CType? sink, Func<Symbol, CStmt> consume)
+    {
+        string? label = null;
+        bool isFor;
+        Item condOrIter, blockItem, elseItem;
+        string? elemName = null;
+        switch (rhs.Content)
+        {
+            case Zig.WhileElseExpr w:        condOrIter = w.Arg2; blockItem = w.Arg4; elseItem = w.Arg6; isFor = false; break;
+            case Zig.ForElseExpr f:          condOrIter = f.Arg2; elemName = Tok(f.Arg5); blockItem = f.Arg7; elseItem = f.Arg9; isFor = true; break;
+            case Zig.LabeledWhileElseExpr w: label = Tok(w.Arg0); condOrIter = w.Arg4; blockItem = w.Arg6; elseItem = w.Arg8; isFor = false; break;
+            case Zig.LabeledForElseExpr f:   label = Tok(f.Arg0); condOrIter = f.Arg4; elemName = Tok(f.Arg7); blockItem = f.Arg9; elseItem = f.Arg11; isFor = true; break;
+            default: throw new IrUnsupportedException("internal: loop-value on " + (rhs.Content?.GetType().Name ?? "null"));
+        }
+
+        var n = _loopValueCounter++;
+        var endLabel = "__lv" + n + "_end";
+        var temp = _symbols.Declare(new Symbol { Name = "__lv" + n, Kind = SymKind.Var, Type = sink ?? CType.Int });
+        var target = new LoopValueTarget { Temp = temp, EndLabel = endLabel, Label = label, Sink = sink, ResultType = sink };
+
+        // Lower the loop with the value target active so a `break v` inside resolves to it. The cond /
+        // iterable is lowered before the body (it can't `break`), so it never references the temp.
+        _loopValues.Push(target);
+        CStmt loop = isFor
+            ? LowerForSlice(LowerExpr(condOrIter), elemName!, null, blockItem, byRef: false)
+            : new While(LowerExpr(condOrIter), LowerBlock(blockItem));
+        _loopValues.Pop();
+
+        // The `else` value supplies the result on NORMAL completion. A `break v` jumped to `endLabel`,
+        // skipping this. Sink it at the now-known result type (a `break` may have fixed it).
+        var elseSink = target.ResultType ?? target.Sink;
+        var elseVal = elseSink is { } sk ? LowerExprSink(elseItem, sk) : LowerExpr(elseItem);
+        target.ResultType ??= elseVal.Type;
+        var resultType = target.ResultType;
+        temp.Type = resultType;
+
+        var stmts = new List<CStmt>
+        {
+            new DeclStmt(new List<LocalDecl> { new(temp, new DefaultLit { Type = resultType }) }),
+            loop,
+            new ExprStmt(new Assign(null, LvRef(target), elseVal) { Type = resultType }),
+        };
+        if (target.BreakUsed) { stmts.Add(new Labeled(endLabel, new Block(new List<CStmt>()))); }
+        stmts.Add(consume(temp));
+        return new Seq(stmts);
+    }
+
+    /// <summary>An lvalue reference to a value-loop result temp at its (now-resolved) type.</summary>
+    private static VarRef LvRef(LoopValueTarget t) => new VarRef(t.Temp) { Type = t.ResultType!, IsLValue = true };
+
+    /// <summary>Lower a <c>break v</c> targeting <paramref name="target"/>: assign the value to the
+    /// loop's result temp, then <c>goto</c> its end label (skipping the loop's <c>else</c>). A braced
+    /// <see cref="Block"/> (not a brace-less <see cref="Seq"/>) so a conditional break (`if (c) break v;`)
+    /// keeps both the assign and the goto guarded. (Milestone Y, part 2.)</summary>
+    private CStmt BuildLoopBreakValue(LoopValueTarget target, Item valueItem)
+    {
+        var value = (target.ResultType ?? target.Sink) is { } sk ? LowerExprSink(valueItem, sk) : LowerExpr(valueItem);
+        target.ResultType ??= value.Type;
+        target.BreakUsed = true;
+        return new Block(new List<CStmt>
+        {
+            new ExprStmt(new Assign(null, LvRef(target), value) { Type = target.ResultType }),
+            new Goto(target.EndLabel),
         });
     }
 

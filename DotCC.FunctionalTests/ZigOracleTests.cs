@@ -1625,6 +1625,42 @@ public sealed class ZigOracleTests
             "    total = total + pick;\n" +
             "    return @intCast(total);\n" +
             "}\n", 42, "" },
+
+        // Milestone Y, part 2 — value-position loops (`while/for … else`) yielding via `break v`.
+        // `whileVal` (unlabeled break-value, 20), `labeledWhileVal` (`break :outer v` from a nested
+        // loop, 15), `forVal` (the for-over-slice search idiom, first element > 5 = 7). 20+15+7 = 42.
+        new object[] { "value_loop",
+            "fn whileVal() i32 {\n" +
+            "    var i: i32 = 0;\n" +
+            "    return while (i < 50) {\n" +
+            "        i = i + 1;\n" +
+            "        if (i == 20) break i;\n" +
+            "    } else 0;\n" +
+            "}\n" +
+            "fn labeledWhileVal() i32 {\n" +
+            "    var i: i32 = 0;\n" +
+            "    return outer: while (i < 5) {\n" +
+            "        var j: i32 = 0;\n" +
+            "        while (j < 5) {\n" +
+            "            if (i == 2 and j == 3) break :outer 15;\n" +
+            "            j = j + 1;\n" +
+            "        }\n" +
+            "        i = i + 1;\n" +
+            "    } else 0;\n" +
+            "}\n" +
+            "fn forVal(xs: []const i32) i32 {\n" +
+            "    return for (xs) |x| {\n" +
+            "        if (x > 5) break x;\n" +
+            "    } else 0;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var arr = [_]i32{ 1, 2, 7, 9 };\n" +
+            "    var total: i32 = 0;\n" +
+            "    total = total + whileVal();\n" +
+            "    total = total + labeledWhileVal();\n" +
+            "    total = total + forVal(arr[0..]);\n" +
+            "    return @intCast(total);\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
