@@ -2655,17 +2655,18 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_a_labeled_value_break_targeting_a_loop()
+    public void Rejects_a_labeled_value_break_targeting_a_statement_loop()
     {
-        // `break :lbl <value>` where `lbl` names the enclosing LOOP is the labeled-while value form
-        // (a loop used as an expression) — deferred. (The loop is a statement, so the break-with-value
-        // is reached from inside the loop body, where `lp` is on the labeled-loop stack.)
+        // `break :lbl <value>` yields from a labeled VALUE loop (Milestone Y part 2 supports that —
+        // `lbl: while/for (…) {…} else d`). But here `lp` names a labeled STATEMENT loop with no
+        // `else` (a value break needs a value loop), so it's still a clear error — guiding toward an
+        // `else`. (This is also invalid Zig: a labeled `break v` requires the loop be an expression.)
         var ex = Should.Throw<CompileException>(() => EmitZig(
             "pub fn main() u8 {\n" +
             "    lp: while (true) { break :lp 5; }\n" +
             "    return 0;\n" +
             "}\n"));
-        ex.Message.ShouldContain("labeled-while");
+        ex.Message.ShouldContain("statement loop");
     }
 
     // ---- Milestone L (part 4): switch ranges ----
@@ -3757,5 +3758,85 @@ public sealed class ZigFrontendTests
             "}\n" +
             "pub fn main() u8 { return @intCast(f(0) catch 9); }\n"));
         ex.Message.ShouldContain("error-union");
+    }
+
+    [Fact]
+    public void Lowers_a_while_else_value_loop_with_a_break_value()
+    {
+        // Milestone Y, part 2 — a `while (cond) { … break v; } else d` in value position yields `v`
+        // on break, `d` on normal completion. Lowered as a STATEMENT filling a result temp `__lv`: a
+        // `break v` → `__lv = v; goto __lv_end;` (skipping the `else`), and the `else` value assigned
+        // after the loop on natural completion.
+        var cs = EmitZig(
+            "fn f() i32 {\n" +
+            "    var i: i32 = 0;\n" +
+            "    return while (i < 50) {\n" +
+            "        i = i + 1;\n" +
+            "        if (i == 20) break i;\n" +
+            "    } else 0;\n" +
+            "}\n" +
+            "pub fn main() u8 { return @intCast(f()); }\n");
+        cs.ShouldContain("__lv");          // the value-loop result temp
+        cs.ShouldContain("goto __lv");     // a `break v` → assign + goto end
+        cs.ShouldContain("__lv0_end:");    // the end label (emitted because a break targets it)
+    }
+
+    [Fact]
+    public void Lowers_a_for_else_value_loop_over_a_slice()
+    {
+        // A `for (slice) |x| { … break x; } else d` — the search idiom — reuses the for-over-slice
+        // loop, the value target threaded so an inner `break x` fills `__lv`. (Milestone Y, part 2.)
+        var cs = EmitZig(
+            "fn first_big(xs: []const i32) i32 {\n" +
+            "    return for (xs) |x| {\n" +
+            "        if (x > 5) break x;\n" +
+            "    } else -1;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var arr = [_]i32{ 1, 9 };\n" +
+            "    return @intCast(first_big(arr[0..]));\n" +
+            "}\n");
+        cs.ShouldContain("__lv");      // value-loop temp
+        cs.ShouldContain("goto __lv"); // break-value fills it
+        cs.ShouldContain(".Len");      // a real for-over-slice loop, not a switch/ternary
+    }
+
+    [Fact]
+    public void Lowers_a_labeled_while_else_value_loop_with_an_outer_break()
+    {
+        // A labeled value loop `outer: while (…) { … break :outer v; } else d` — the `break :outer v`
+        // from an inner (statement) loop resolves to the outer value loop's temp + end label, so the
+        // goto jumps out of both loops. (Milestone Y, part 2.)
+        var cs = EmitZig(
+            "fn f() i32 {\n" +
+            "    var i: i32 = 0;\n" +
+            "    return outer: while (i < 5) {\n" +
+            "        var j: i32 = 0;\n" +
+            "        while (j < 5) {\n" +
+            "            if (i == 2 and j == 3) break :outer 15;\n" +
+            "            j = j + 1;\n" +
+            "        }\n" +
+            "        i = i + 1;\n" +
+            "    } else 0;\n" +
+            "}\n" +
+            "pub fn main() u8 { return @intCast(f()); }\n");
+        cs.ShouldContain("__lv");      // the outer value loop's temp
+        cs.ShouldContain("= 15;");     // the `break :outer 15` assigns it
+        cs.ShouldContain("goto __lv"); // and jumps to the end label, out of both loops
+    }
+
+    [Fact]
+    public void Omits_the_end_label_for_an_else_only_value_loop()
+    {
+        // A value loop with NO `break` (only the `else` path) never jumps to the end label — so it is
+        // omitted, avoiding a C# unreferenced-label warning (CS0164). (Milestone Y, part 2.)
+        var cs = EmitZig(
+            "fn f() i32 {\n" +
+            "    var i: i32 = 0;\n" +
+            "    return while (i < 3) { i = i + 1; } else 42;\n" +
+            "}\n" +
+            "pub fn main() u8 { return @intCast(f()); }\n");
+        cs.ShouldContain("__lv");          // the value temp + else assignment still emitted
+        cs.ShouldNotContain("__lv0_end:"); // but no end label (no break targets it)
     }
 }

@@ -230,6 +230,7 @@ symbols:
   - DeclMods       # 152 align/linksection modifier(s) between a typed decl's Type and `=` (non-empty)
   - 'comptime'     # 153 `comptime EXPR` value prefix — force compile-time evaluation (Milestone T)
   - 'inline'       # 154 `inline for/while` — comptime loop UNROLLING (Milestone T, part 3)
+  - LoopExpr       # 155 a value-position `while`/`for … else …` loop (a RhsExpr; Milestone Y, part 2)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -409,6 +410,10 @@ productions:
       - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', Stmt], action: stmtWhileCapture }
       - { lhs: Stmt, rhs: ['break', ';'],    action: stmtBreak }
       - { lhs: Stmt, rhs: ['continue', ';'], action: stmtContinue }
+      # `break v;` — an UNLABELED break carrying a VALUE (Milestone Y, part 2), yielding `v` from the
+      # innermost value-position loop (`while/for … else`). After `break`, an RhsExpr-first token
+      # selects this over `break ;` (`;`) and the labeled forms (`:`) — all three lookaheads disjoint.
+      - { lhs: Stmt, rhs: ['break', RhsExpr, ';'], action: stmtBreakValue }
       # `break :blk v;` — a labeled break carrying a VALUE, yielding it from the enclosing
       # labeled block `:blk` (Milestone L, part 2). After `break`, the `:` lookahead selects this
       # over the bare `break ;` (distinct tokens, conflict-free). The lowering assigns the value to
@@ -611,6 +616,13 @@ productions:
       # break, below); the temp-fill lowering lives in ZigLowering (it only appears as a full
       # `=`/`return`/assignment RHS — an if/switch-expr arm or sub-expression position errors).
       - { lhs: RhsExpr, rhs: [LabeledBlock] }
+      # A value-position loop (Milestone Y, part 2) — a `while`/`for` with an `else` clause is an
+      # EXPRESSION: it yields a `break v` value, or the `else` value on normal completion (the
+      # idiomatic search loop `const found = for (xs) |x| { if (p(x)) break x; } else null;`). Same
+      # structural trick as IfExpr/SwitchExpr/LabeledBlock: a RhsExpr alternative, NOT a Primary, out
+      # of the operator cascade. `while`/`for` at statement start stay LoopStmt (a different context);
+      # the value form is reached only after `=`/`return`/an init — like the if/switch expressions.
+      - { lhs: RhsExpr, rhs: [LoopExpr] }
 
   - derivation: none
     rules:
@@ -618,6 +630,15 @@ productions:
       - { lhs: SwitchExpr, rhs: ['switch', '(', Expr, ')', '{', Prongs, '}'],      action: switchExpr }
       - { lhs: SwitchExpr, rhs: ['switch', '(', Expr, ')', '{', Prongs, ',', '}'], action: switchExprTrailing }
       - { lhs: LabeledBlock, rhs: [IDENT, ':', Block], action: labeledBlock }
+      # The value-position loops. A braced `Block` body (the value form runs statements and yields via
+      # `break v`); the `else RhsExpr` clause supplies the value on normal completion. The `while`-else
+      # and the most common `for (slice) |x|`-else forms, each optionally labeled (`lbl: … else …`,
+      # so `break :lbl v` targets it). V1 cuts (deferred): a for-RANGE / indexed `|x,i|` / capture-while
+      # value loop, and a brace-less value-loop body.
+      - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', Block, 'else', RhsExpr],                          action: whileElseExpr }
+      - { lhs: LoopExpr, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', Block, 'else', RhsExpr],           action: forElseExpr }
+      - { lhs: LoopExpr, rhs: [IDENT, ':', 'while', '(', Expr, ')', Block, 'else', RhsExpr],              action: labeledWhileElseExpr }
+      - { lhs: LoopExpr, rhs: [IDENT, ':', 'for', '(', Expr, ')', '|', IDENT, '|', Block, 'else', RhsExpr], action: labeledForElseExpr }
 
   - derivation: leftmost
     rules:
