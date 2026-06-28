@@ -451,15 +451,18 @@ productions:
       - { lhs: LoopStmt, rhs: ['for', '(', Expr, '..', Expr, ')', '|', IDENT, '|', Stmt], action: stmtForRange }
       # for-over-slice. `for (s) |x| body` iterates the elements; `for (s, 0..) |x, i| body`
       # also binds the usize index. Conflict-free against the range form: after `for ( Expr`,
-      # the lookahead selects — `..` → range, `)` → slice, `,` → slice+index. (`|*x|` by-ref
-      # capture and a non-zero index start are deferred.)
+      # the lookahead selects — `..` → range, `)` → slice, `,` → slice+index. (The by-ref `|*x|`
+      # forms are below; a non-zero index start `for (s, 5..)` is deferred.)
       - { lhs: LoopStmt, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', Stmt], action: stmtForSlice }
       - { lhs: LoopStmt, rhs: ['for', '(', Expr, ',', Expr, '..', ')', '|', IDENT, ',', IDENT, '|', Stmt], action: stmtForSliceIdx }
       # `for (s) |*x| body` — BY-REFERENCE element capture (Milestone M, part 4): `x` is a `*T` into
       # the slice, so `x.* = …` writes through to the element. After the capture `'|'`, a `'*'`
       # lookahead selects this over the by-value `'|' IDENT '|'` form (distinct tokens) — conflict-free.
-      # (The by-ref + index combo `for (s, 0..) |*x, i|` is deferred.)
       - { lhs: LoopStmt, rhs: ['for', '(', Expr, ')', '|', '*', IDENT, '|', Stmt], action: stmtForSliceRef }
+      # `for (s, 0..) |*x, i| body` — the BY-REFERENCE element capture WITH the usize index (Milestone
+      # Z). Same `'*'`-after-`'|'` lookahead selects it over the by-value indexed `'|' IDENT ',' …` form
+      # — conflict-free; `x` is a `*T` into the slice and `i` the index.
+      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ',', Expr, '..', ')', '|', '*', IDENT, ',', IDENT, '|', Stmt], action: stmtForSliceIdxRef }
       # A loop is a statement; and a `label:` may prefix one — `outer: while (…) { … break :outer; }`
       # (Milestone L, part 3). `IDENT ':' LoopStmt` reuses the same `:` lookahead trick as the value-
       # block: at statement start an IDENT also begins an Expr, but a Primary is never followed by

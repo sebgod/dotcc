@@ -1686,6 +1686,39 @@ public sealed class ZigOracleTests
             "    const b = Shape{ .square = 12 };\n" +
             "    return @intCast(area(a) + area(b));\n" +
             "}\n", 42, "" },
+
+        // Milestone Z — `for (s, 0..) |*e, i|`: a BY-REFERENCE element capture WITH the usize index.
+        // `e.* = e.* + i` adds each element's index in place: {10,10,10,10} -> {10,11,12,13} (sum 46);
+        // 46 - 4 = 42.
+        new object[] { "for_idx_byref",
+            "fn scaleByIndex(xs: []i32) void {\n" +
+            "    for (xs, 0..) |*e, i| {\n" +
+            "        e.* = e.* + @as(i32, @intCast(i));\n" +
+            "    }\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var arr = [_]i32{ 10, 10, 10, 10 };\n" +
+            "    scaleByIndex(arr[0..]);\n" +
+            "    var total: i32 = 0;\n" +
+            "    for (arr[0..]) |x| {\n" +
+            "        total = total + x;\n" +
+            "    }\n" +
+            "    return @intCast(total - 4);\n" +
+            "}\n", 42, "" },
+
+        // Milestone Z — `[N:s]T` array literals with NON-ZERO sentinels. The trailing slot holds `s`,
+        // readable at index len (well-defined in both for a literal). a[3]=9 + b[2]=5 + b[0]=14 +
+        // b[1]=14 = 42. (An `undefined` sentinel array's slot is dotcc-defined but zig-undefined, so
+        // only the literal form is differentially tested.)
+        new object[] { "sentinel_array_nonzero",
+            "pub fn main() u8 {\n" +
+            "    const a: [3:9]i32 = .{ 10, 11, 12 };\n" +
+            "    const b: [2:5]i32 = .{ 14, 14 };\n" +
+            "    var total: i32 = a[3];\n" +
+            "    total = total + b[2];\n" +
+            "    total = total + b[0] + b[1];\n" +
+            "    return @intCast(total);\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
