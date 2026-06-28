@@ -1483,13 +1483,14 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_a_non_zero_sentinel_array()
+    public void Lowers_a_non_zero_sentinel_array()
     {
-        // V1 supports only the zero sentinel `:0` (a NUL-terminated buffer); a non-zero sentinel
-        // (`[3:1]u8`) is deferred with a clear error, mirroring the `[*:s]` / `[:s]` pointer cuts.
-        var ex = Should.Throw<CompileException>(() => EmitZig(
-            "pub fn main() u8 { const b: [3:1]u8 = .{ 1, 2, 3 }; return b[0]; }\n"));
-        ex.Message.ShouldContain("zero sentinel");
+        // Milestone Z lifted the zero-only restriction: a `[N:s]T` array with a non-zero sentinel
+        // appends `s` (not `0`) as the trailing slot. `[3:1]u8 = .{1,2,3}` → 4 storage slots ending
+        // in the sentinel `1`, the logical type staying the 3-element array.
+        var cs = EmitZig(
+            "pub fn main() u8 { const b: [3:1]u8 = .{ 1, 2, 3 }; return b[3]; }\n");
+        cs.ShouldContain("1, 2, 3, 1"); // the non-zero sentinel `1` appended to the stackalloc literal
     }
 
     [Fact]
@@ -3874,5 +3875,54 @@ public sealed class ZigFrontendTests
             "}\n" +
             "pub fn main() u8 { return @intCast(f(Shape{ .circle = 1 })); }\n"));
         ex.Message.ShouldContain("same payload type");
+    }
+
+    [Fact]
+    public void Lowers_a_for_slice_indexed_byref_capture()
+    {
+        // Milestone Z — `for (s, 0..) |*e, i|` binds BOTH a by-reference element (`*T`, so `e.* = …`
+        // writes through to the slice) AND the usize index. Reuses LowerForSlice with byRef + index.
+        var cs = EmitZig(
+            "fn bump(xs: []i32) void {\n" +
+            "    for (xs, 0..) |*e, i| { e.* = e.* + @as(i32, @intCast(i)); }\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var arr = [_]i32{ 1, 2 };\n" +
+            "    bump(arr[0..]);\n" +
+            "    return @intCast(arr[1]);\n" +
+            "}\n");
+        cs.ShouldContain("* e = &");  // a by-reference element pointer into the slice
+        cs.ShouldContain("*e =");      // writes through `e.*`
+    }
+
+    [Fact]
+    public void Materializes_a_nonzero_sentinel_in_an_array_literal()
+    {
+        // Milestone Z — a `[N:s]T` array literal with a NON-ZERO sentinel appends `s` (not `0`) as the
+        // trailing slot: `stackalloc i32[]{ 10, 11, 12, 9 }` (N+1 slots; the symbol's type stays the
+        // N-element array, so `.len`/slicing exclude the sentinel).
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const a: [3:9]i32 = .{ 10, 11, 12 };\n" +
+            "    return @intCast(a[3]);\n" +
+            "}\n");
+        cs.ShouldContain("10, 11, 12, 9"); // the non-zero sentinel appended to the stackalloc literal
+    }
+
+    [Fact]
+    public void Writes_a_nonzero_sentinel_into_an_undefined_sentinel_array()
+    {
+        // For an `undefined` `[N:s]T` with a non-zero sentinel, C#'s zero-fill leaves the trailing
+        // slot at 0, so dotcc writes the actual sentinel explicitly: `i32* b = stackalloc i32[3];
+        // b[2] = 7;`. (dotcc defines the sentinel of an `undefined` array — like its zero-fill of
+        // `undefined` generally; real zig leaves it undefined, so this is NOT oracle-checked.)
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var b: [2:7]i32 = undefined;\n" +
+            "    b[0] = 1; b[1] = 1;\n" +
+            "    return @intCast(b[2] + b[0] + b[1]);\n" +
+            "}\n");
+        cs.ShouldContain("stackalloc int[3]"); // N+1 slots reserved
+        cs.ShouldContain("] = 7;");             // the non-zero sentinel written into the trailing slot
     }
 }
