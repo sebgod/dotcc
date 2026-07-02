@@ -1,0 +1,4 @@
+ABI-divergent: dotcc is an LP64 compiler (`long` = 8 bytes, alignment 8 —
+matching gcc on x86-64/aarch64 Linux, which the gcc-WSL oracle validates).
+MSVC is LLP64: `long` is 4 bytes with alignment 4, so `_Alignof(long)`
+diverges by design, exactly like the `__SIZEOF_LONG__`/LP64 predefines.

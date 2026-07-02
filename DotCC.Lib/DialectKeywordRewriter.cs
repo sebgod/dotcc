@@ -110,6 +110,13 @@ internal sealed class DialectKeywordRewriter : RewritingTokenStream
             // identically). Pre-C23 they stay ordinary identifiers.
             ["typeof"]        = (2023, map["typeof"], "typeof"),
             ["typeof_unqual"] = (2023, map["typeof"], "typeof"),
+
+            // C23 makes `alignof` / `alignas` first-class keywords (the C11 forms
+            // are `_Alignof` / `_Alignas`, with the lowercase macros living in
+            // <stdalign.h>). Promote onto the existing terminals under c23;
+            // pre-C23 they stay IDs and the <stdalign.h> macro path applies.
+            ["alignof"] = (2023, map["_Alignof"], "_Alignof"),
+            ["alignas"] = (2023, map["_Alignas"], "_Alignas"),
         };
     }
 
