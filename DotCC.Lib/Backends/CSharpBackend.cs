@@ -399,6 +399,10 @@ internal sealed class CSharpBackend
         // lowering of "control never comes back". Fully qualified: the emitted
         // program has no `using System.Diagnostics.CodeAnalysis`.
         if (fn.Sym.IsNoReturn) { sb.Append("[System.Diagnostics.CodeAnalysis.DoesNotReturn]\n"); }
+        // `inline` (C99) → [MethodImpl(AggressiveInlining)] — a real JIT hint, the
+        // faithful lowering of C's "please inline this". Short spelling: the shell's
+        // usings include System.Runtime.CompilerServices.
+        if (fn.Sym.IsInline) { sb.Append("[MethodImpl(MethodImplOptions.AggressiveInlining)]\n"); }
         sb.Append($"static unsafe {Cs(retTy)} {fn.Sym.TargetName}({ps})\n");
         // C lets a goto jump INTO a nested block; C# scopes labels to their
         // block. Hoist labeled tails until every goto is legal (no-op for the
