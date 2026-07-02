@@ -420,6 +420,15 @@ symbols:
   - '#elifdef'     # 176 preprocessor conditional — else-if macro defined
   - '#elifndef'    # 177 preprocessor conditional — else-if macro NOT defined
 
+  # C23 `[[attributes]]` — the standard attribute syntax, ACCEPTED + IGNORED.
+  # Only the OPENER is a glued token: `[[` never occurs in valid C outside an
+  # attribute (an expression can't start with `[`), but a glued `]]` would
+  # mis-lex every nested subscript tail (`a[b[0]]`), so the closer is parsed
+  # as two ordinary `]` tokens.
+  - '[['           # 178 C23 attribute-specifier opener
+  - AttrList       # 179 non-terminal: comma-separated attribute list
+  - Attr           # 180 non-terminal: one attribute (ID / ns::ID / call form)
+
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
   # Item carries FnList's already-built C# source string.
@@ -644,6 +653,10 @@ productions:
       # (see Visit(C.StaticAssert)); valid programs emit nothing.
       - { lhs: Fn, rhs: ['_Static_assert', '(', E, ',', STRING, ')', ';'], action: staticAssert }
       - { lhs: Fn, rhs: ['_Static_assert', '(', E, ')', ';'],              action: staticAssertNoMsg }
+      # C23 `[[attr]]` prepending any file-scope declaration — ACCEPTED +
+      # IGNORED (gated C23 in the lowering). A chain of specifiers
+      # (`[[a]] [[b]] int f();`) recurses through the wrapper.
+      - { lhs: Fn, rhs: ['[[', AttrList, ']', ']', Fn], action: attrFn }
 
   - derivation: leftmost
     rules:
@@ -983,6 +996,12 @@ productions:
       # form above. Lowers to a comment (compile-time only).
       - { lhs: Stmt, rhs: ['_Static_assert', '(', E, ',', STRING, ')', ';'], action: staticAssertStmt }
       - { lhs: Stmt, rhs: ['_Static_assert', '(', E, ')', ';'],              action: staticAssertStmtNoMsg }
+      # C23 `[[attr]]` prepending a statement or block-scope declaration —
+      # ACCEPTED + IGNORED (gated C23). Also covers the bare
+      # attribute-declaration `[[fallthrough]];`: it wraps the EMPTY statement
+      # (a dedicated `… ';'` production would REDUCE-REDUCE against StmtEmpty
+      # on the shifted `;`).
+      - { lhs: Stmt, rhs: ['[[', AttrList, ']', ']', Stmt], action: attrStmt }
 
   # MemberList: one or more `Type ID ;` declarations inside a struct body.
   - derivation: leftmost
@@ -1518,6 +1537,28 @@ productions:
       - { lhs: WStringSeq, rhs: [WStringSeq, WSTRING], action: wstrSeqCons }
       - { lhs: WStringSeq, rhs: [WSTRING],             action: wstrSeqOne }
 
+  # C23 attribute-list interior — the inside of `[[ … ] ]`, reached only from
+  # the attrFn/attrStmt wrappers (which drop it unexamined, so none of these
+  # records ever dispatches in the IR). V1 shapes: bare ID, namespaced
+  # `ns :: ID` (`::` is two ':' tokens — dotcc has no '::' terminal), the call
+  # forms with an empty / single-expression argument (`deprecated("msg")`,
+  # `gnu::aligned(16)`), and `_Noreturn` — under -std=c23 the rewriter promotes
+  # bare `noreturn` onto the `_Noreturn` terminal BEFORE parsing, so
+  # `[[noreturn]]` arrives as a keyword, not an ID. Cuts (clear parse errors):
+  # `[[]]`, trailing/empty commas, a multi-token argument soup, and a vendor
+  # attr spelled like a keyword or typedef name (`[[gnu::const]]`).
+  - derivation: leftmost
+    rules:
+      - { lhs: AttrList, rhs: [Attr] }
+      - { lhs: AttrList, rhs: [AttrList, ',', Attr],                 action: attrListCons }
+      - { lhs: Attr, rhs: [ID],                                      action: attrIdent }
+      - { lhs: Attr, rhs: ['_Noreturn'],                             action: attrNoreturn }
+      - { lhs: Attr, rhs: [ID, ':', ':', ID],                        action: attrNamespaced }
+      - { lhs: Attr, rhs: [ID, '(', ')'],                            action: attrCallEmpty }
+      - { lhs: Attr, rhs: [ID, '(', E, ')'],                         action: attrCall }
+      - { lhs: Attr, rhs: [ID, ':', ':', ID, '(', ')'],              action: attrNsCallEmpty }
+      - { lhs: Attr, rhs: [ID, ':', ':', ID, '(', E, ')'],           action: attrNsCall }
+
 lexer:
   root:
     # Preprocessor directives — single-token matches. Longest-match in the byte
@@ -1706,6 +1747,10 @@ lexer:
     - { symbol: ')', match: '\)' }
     - { symbol: '{', match: '\{' }
     - { symbol: '}', match: '\}' }
+    # Glued `[[` (C23 attribute opener) before the single `[` — longest-match
+    # picks it only for ADJACENT brackets, which valid C never produces outside
+    # an attribute. No glued `]]` (it would break `a[b[0]]` — see symbols).
+    - { symbol: '[[', match: '\[\[' }
     - { symbol: '[', match: '\[' }
     - { symbol: ']', match: '\]' }
     - { symbol: ';', match: ';' }
