@@ -404,6 +404,13 @@ symbols:
   - '#line'        # 172 preprocessor directive — renumber __LINE__ / __FILE__
   - '__int128'     # 173 GCC 128-bit integer extension — `__int128` / `unsigned __int128`.
 
+  # `_Alignof(Type)` / `_Alignas(…)` (C11 §6.5.3.4 / §6.7.5) — alignment
+  # inspection + alignment specifier. Always keywords (reserved `_Capital_`
+  # prefix); the C23 lowercase `alignof`/`alignas` are promoted onto these by
+  # DialectKeywordRewriter (rule 2), and <stdalign.h> supplies the C11 macros.
+  - '_Alignof'     # 174 keyword (C11) — alignment of a type (an ICE)
+  - '_Alignas'     # 175 keyword (C11) — alignment specifier on a declaration
+
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
   # Item carries FnList's already-built C# source string.
@@ -747,6 +754,15 @@ productions:
       # `(`), like `sizeof`/`typeof`.
       - { lhs: Type, rhs: ['_Atomic', Type], action: typeAtomic }
       - { lhs: Type, rhs: ['_Atomic', '(', Type, ')'], action: typeAtomicParen }
+      # `_Alignas(Type) T` / `_Alignas(constexpr) T` (C11 §6.7.5) — alignment
+      # specifier, leading-Type-prefix shape like `_Atomic`. ACCEPTED + IGNORED
+      # (a C# field/local has no controllable alignment — the same no-op
+      # treatment as Zig's `align(N)` decl modifier); gated C11. The `( Type )`
+      # vs `( E )` operand split is the cast rule's TYPE_NAME disambiguation.
+      # V1: leading position only (`int _Alignas(16) x;` interleaved among the
+      # specifiers is deferred).
+      - { lhs: Type, rhs: ['_Alignas', '(', Type, ')', Type], action: typeAlignasType }
+      - { lhs: Type, rhs: ['_Alignas', '(', E, ')', Type],    action: typeAlignasExpr }
       # `enum ID` as a type reference. Lowers to plain `int` in C# since
       # enumerators are emitted as `const int` constants (not a C# enum).
       - { lhs: Type, rhs: ['enum', ID], action: typeEnum }
@@ -1374,6 +1390,12 @@ productions:
       # ID is not a TYPE_NAME) from `sizeof ( int )` / `sizeof ( typedefName )`
       # before the parser ever sees them — same lexer hack the cast rule relies on.
       - { lhs: Unary, rhs: ['sizeof', Unary], action: sizeofExpr }
+      # `_Alignof(Type)` (C11 §6.5.3.4) — alignment inspection, `sizeof(Type)`-
+      # shaped. Folds at lowering to the layout model's constant (an integer
+      # constant expression, so it composes with _Static_assert / array bounds /
+      # case labels). Type-name operand only — the GNU `_Alignof expr` extension
+      # is not provided (dotcc implements no GNU extensions).
+      - { lhs: Unary, rhs: ['_Alignof', '(', Type, ')'], action: alignofType }
       - { lhs: Unary, rhs: [Postfix] }
 
   - derivation: leftmost
@@ -1590,6 +1612,12 @@ lexer:
     # `_Atomic` (C11) — always a keyword (reserved underscore-uppercase). Both the
     # qualifier `_Atomic T` and the type-specifier `_Atomic(T)` use this token.
     - { symbol: '_Atomic', match: '_Atomic' }
+    # `_Alignof` / `_Alignas` (C11) — always keywords (reserved underscore-
+    # uppercase). The C23 lowercase `alignof`/`alignas` are promoted onto these
+    # terminals by the dialect rewriter (rule 2); pre-C23 the lowercase macros
+    # live in <stdalign.h>.
+    - { symbol: '_Alignof', match: '_Alignof' }
+    - { symbol: '_Alignas', match: '_Alignas' }
     # `_Complex` (C99) — always a keyword (reserved underscore-uppercase). The
     # lowercase `complex` is a <complex.h> macro, not a keyword.
     - { symbol: '_Complex', match: '_Complex' }

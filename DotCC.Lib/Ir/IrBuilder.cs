@@ -999,6 +999,12 @@ internal sealed partial class IrBuilder
         // scalar lvalue to seq-cst Atomic.Load/Store/*Fetch (Interlocked-backed).
         C.TypeAtomic t => AtomicType(ResolveType(t.Arg1), it),
         C.TypeAtomicParen t => AtomicType(ResolveType(t.Arg2), it),
+        // `_Alignas(Type) T` / `_Alignas(constexpr) T` (C11 §6.7.5) — the
+        // alignment specifier is ACCEPTED + IGNORED (a C# field/local has no
+        // controllable alignment; same no-op treatment as Zig's `align(N)`).
+        // Gated C11; the operand is validated but never read.
+        C.TypeAlignasType t => AlignasType(t.Arg2, t.Arg4, it),
+        C.TypeAlignasExpr t => AlignasExpr(t.Arg2, t.Arg4, it),
         C.TypePtrQualRestrict t => new CType.Pointer(ResolveType(t.Arg0)),
         C.TypeName t => ResolveTypeName(Tok(t.Arg0)),
         // `enum Tag` as a type — the registered real C# enum, or plain int if the
@@ -1106,6 +1112,71 @@ internal sealed partial class IrBuilder
     {
         Gate(2011, "_Atomic", it);
         return inner.WithQuals(TypeQual.Atomic);
+    }
+
+    /// <summary>`_Alignof(Type)` (C11 §6.5.3.4) — fold to the layout model's ABI
+    /// alignment as a <c>size_t</c>-typed literal (an integer constant expression,
+    /// so it flows into <c>_Static_assert</c> / array bounds / case labels like an
+    /// enum constant). Gated C11.</summary>
+    private CExpr FoldAlignof(C.AlignofType a, Item it)
+    {
+        Gate(2011, "_Alignof", it);
+        var align = AlignOfConst(ResolveType(a.Arg2));
+        return new LitInt(align.ToString(System.Globalization.CultureInfo.InvariantCulture), align) { Type = CType.SizeT };
+    }
+
+    /// <summary>`_Alignas(Type) T` — the align-as-type form (C11 §6.7.5). The
+    /// specifier is a NO-OP on the managed target (a C# field/local has no
+    /// controllable alignment), but the constraint still holds: the requested
+    /// alignment (the operand type's natural alignment) must not be less strict
+    /// than the declared type's own (§6.7.5p4). Gated C11.</summary>
+    private CType AlignasType(Item operandType, Item inner, Item it)
+    {
+        Gate(2011, "_Alignas", it);
+        var t = ResolveType(inner);
+        CheckAlignasStrictEnough(AlignOfConst(ResolveType(operandType)), t, it);
+        return t;
+    }
+
+    /// <summary>`_Alignas(constexpr) T` — the integer form (C11 §6.7.5). Accepted
+    /// and ignored when valid; a non-constant, non-power-of-2, or weaker-than-
+    /// natural alignment is a constraint violation (gcc rejects all three).
+    /// <c>_Alignas(0)</c> is C11's explicit no-effect case. Gated C11.</summary>
+    private CType AlignasExpr(Item alignExpr, Item inner, Item it)
+    {
+        Gate(2011, "_Alignas", it);
+        var t = ResolveType(inner);
+        if (ConstEval(BuildExpr(alignExpr)) is not { } align)
+        {
+            Diagnostics.Add(new Diagnostic(Severity.Error,
+                "requested alignment is not an integer constant", SrcPos.From(it), _file));
+        }
+        else if (align != 0)   // `_Alignas(0)` has no effect (§6.7.5p6)
+        {
+            if (align < 0 || (align & (align - 1)) != 0)
+            {
+                Diagnostics.Add(new Diagnostic(Severity.Error,
+                    "requested alignment is not a positive power of 2", SrcPos.From(it), _file));
+            }
+            else
+            {
+                CheckAlignasStrictEnough(align, t, it);
+            }
+        }
+        return t;
+    }
+
+    /// <summary>C11 §6.7.5p4: an alignment specifier shall not request an alignment
+    /// LESS strict than the declared type's natural one (dotcc can't honor a
+    /// stricter one either, but over-alignment is at worst a missed optimization —
+    /// under-alignment would change the program's meaning, so it stays an error).</summary>
+    private void CheckAlignasStrictEnough(long requested, CType declared, Item it)
+    {
+        if (requested < AlignOfConst(declared))
+        {
+            Diagnostics.Add(new Diagnostic(Severity.Error,
+                $"_Alignas alignment {requested} is less strict than the type's natural alignment", SrcPos.From(it), _file));
+        }
     }
 
     private CType ResolveSpecs(List<string> specs, SrcPos pos)
@@ -1965,6 +2036,11 @@ internal sealed partial class IrBuilder
             C.SizeofType s => new SizeOfExpr(ResolveType(s.Arg2)) { Type = CType.SizeT },
             // `sizeof expr` — the operand isn't evaluated, only its type measured.
             C.SizeofExpr s => new SizeOfExpr(BuildExpr(s.Arg1).Type) { Type = CType.SizeT },
+            // `_Alignof(Type)` (C11 §6.5.3.4) — folds immediately to the layout
+            // model's alignment (an integer constant expression, `size_t`-typed
+            // like sizeof), so it composes with _Static_assert / array bounds /
+            // case labels with no IR node of its own.
+            C.AlignofType a => FoldAlignof(a, it),
             C.OffsetofExpr o => BuildOffsetof(o),
             // `va_arg(ap, T)` — special syntax (its 2nd operand is a type).
             C.VaArgExpr v => new VaArgGet(BuildExpr(v.Arg2), ResolveType(v.Arg4)) { Type = ResolveType(v.Arg4) },
