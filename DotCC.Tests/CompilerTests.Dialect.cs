@@ -318,6 +318,8 @@ public sealed partial class CompilerTests
     [InlineData("int main() { _Static_assert(1); return 0; }", "c17", "_Static_assert with no message", "C23")]
     [InlineData("int main() { return (int)_Alignof(int); }", "c99", "_Alignof", "C11")]
     [InlineData("int main() { _Alignas(16) int x = 0; return x; }", "c99", "_Alignas", "C11")]
+    [InlineData("[[nodiscard]] int f(void) { return 1; }\nint main() { return 0; }", "c17", "[[attributes]]", "C23")]
+    [InlineData("int main() { [[maybe_unused]] int x = 0; return x; }", "c17", "[[attributes]]", "C23")]
     [InlineData("enum Color : unsigned char { Red };\nint main() { return 0; }", "c17", "enum", "C23")]
     [InlineData("#define LOG(fmt, ...) fmt\nint main() { return 0; }", "c90", "variadic macro", "C99")]
     [InlineData("#warning hi\nint main() { return 0; }", "c17", "#warning", "C23")]

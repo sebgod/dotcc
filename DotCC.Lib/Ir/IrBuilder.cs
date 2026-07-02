@@ -208,6 +208,10 @@ internal sealed partial class IrBuilder
     {
         switch (fn.Content)
         {
+            // C23 `[[attr]]` prepending a file-scope declaration — the attribute
+            // spec is ACCEPTED + IGNORED (no C# lowering carries it); gate C23,
+            // then unwrap to the inner declaration. Chained specs recurse.
+            case C.AttrFn a: Gate(2023, "[[attributes]]", fn); BuildTopLevel(a.Arg4); break;
             case C.FuncDef d: BuildFuncDef(d.Arg0, d.Arg1); break;
             case C.ExternFnDef d: BuildFuncDef(d.Arg1, d.Arg2); break;
             case C.FuncProto p: RegisterProto(p.Arg0); break;
@@ -1341,6 +1345,11 @@ internal sealed partial class IrBuilder
             // emits nothing. The message-less arity gates C23.
             case C.StaticAssertStmt s: Gate(2011, "_Static_assert", it); CheckStaticAssert(s.Arg2, s.Arg4, pos); return EmptyStmt(pos);
             case C.StaticAssertStmtNoMsg s: Gate(2023, "_Static_assert with no message", it); CheckStaticAssert(s.Arg2, null, pos); return EmptyStmt(pos);
+            // C23 `[[attr]]` prepending a statement / block-scope declaration —
+            // ACCEPTED + IGNORED; gate C23, unwrap to the inner statement. The
+            // bare attribute-declaration `[[fallthrough]];` arrives here as a
+            // wrapped EMPTY statement.
+            case C.AttrStmt s: Gate(2023, "[[attributes]]", it); return BuildStmt(s.Arg4);
             case C.StmtExpr e: return new ExprStmt(BuildExpr(e.Arg0)) { Pos = pos };
             case C.StmtEmpty: return new Block(System.Array.Empty<CStmt>()) { Pos = pos };
             case C.StmtIf s:

@@ -1,0 +1,4 @@
+C23-only surface: cl.exe's C23 [[attributes]] (and the [[gnu::aligned]]
+vendor spec gcc accepts) require /std:clatest, not the pinned /std:c17 the
+oracle drives — same opt-out shape as c23-static-assert and c23-elifdef.
+The gcc-WSL oracle validates this fixture.
