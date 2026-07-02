@@ -429,6 +429,15 @@ symbols:
   - AttrList       # 179 non-terminal: comma-separated attribute list
   - Attr           # 180 non-terminal: one attribute (ID / ns::ID / call form)
 
+  # `_Generic` (C11 §6.5.1.1) — type-generic selection. A primary expression:
+  # `_Generic(ctrl-expr, T1: e1, …, default: eD)` picks the ONE association
+  # whose type is compatible with the controlling expression's lvalue-converted
+  # type, entirely at compile time (dotcc selects at lowering — see
+  # IrBuilder.BuildGenericSelect). Always a keyword (reserved `_Capital_`).
+  - '_Generic'         # 181 keyword (C11) — type-generic selection
+  - GenericAssocList   # 182 non-terminal: comma-separated generic associations
+  - GenericAssoc       # 183 non-terminal: one `Type : E` / `default : E` arm
+
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
   # Item carries FnList's already-built C# source string.
@@ -1493,6 +1502,21 @@ productions:
       - { lhs: Primary, rhs: ['TRUE'],      action: litTrue }
       - { lhs: Primary, rhs: ['FALSE'],     action: litFalse }
       - { lhs: Primary, rhs: ['NULLPTR'],   action: litNullptr }
+      # `_Generic(ctrl, T: e, …, default: e)` (C11 §6.5.1.1) — a PRIMARY
+      # expression. The controlling expression is an assignment-expression (E —
+      # a top-level comma separates associations, the same shape as call
+      # arguments). Each association is `Type : E` or `default : E`: `default`
+      # here is expression-context, so no overlap with the switch-label
+      # production (Stmt context); an association's `Type :` likewise can't
+      # collide with struct bit-fields (member-list context). An `ID :` where
+      # the ID is not a typedef-name is a parse error — correct C (an
+      # association must name a type). Selection happens at lowering time in
+      # IrBuilder.BuildGenericSelect; only the chosen arm is lowered.
+      - { lhs: Primary, rhs: ['_Generic', '(', E, ',', GenericAssocList, ')'], action: genericSelect }
+      - { lhs: GenericAssocList, rhs: [GenericAssoc] }
+      - { lhs: GenericAssocList, rhs: [GenericAssocList, ',', GenericAssoc], action: genericAssocCons }
+      - { lhs: GenericAssoc, rhs: [Type, ':', E],       action: genericAssocType }
+      - { lhs: GenericAssoc, rhs: ['default', ':', E],  action: genericAssocDefault }
       # C23 `#embed`. The EMBED terminal is synthetic — only the onEmbed
       # preprocessor handler produces it (no lexer rule), carrying a content-hash
       # key into the byte side-table. Routing it through Primary (an expression)
@@ -1672,6 +1696,8 @@ lexer:
     # live in <stdalign.h>.
     - { symbol: '_Alignof', match: '_Alignof' }
     - { symbol: '_Alignas', match: '_Alignas' }
+    # `_Generic` (C11) — always a keyword (reserved underscore-uppercase).
+    - { symbol: '_Generic', match: '_Generic' }
     # `_Complex` (C99) — always a keyword (reserved underscore-uppercase). The
     # lowercase `complex` is a <complex.h> macro, not a keyword.
     - { symbol: '_Complex', match: '_Complex' }

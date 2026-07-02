@@ -1219,6 +1219,102 @@ internal sealed partial class IrBuilder
         return new LitInt(align.ToString(System.Globalization.CultureInfo.InvariantCulture), align) { Type = CType.SizeT };
     }
 
+    /// <summary>C11 §6.5.1.1 `_Generic(ctrl, T1: e1, …, default: eD)` — type-generic
+    /// selection, resolved entirely at lowering time (exactly as a native C compiler
+    /// does): the controlling expression is built ONLY for its synthesized type —
+    /// C says it is NOT evaluated, so its IR is discarded — the type undergoes
+    /// lvalue conversion (<see cref="LvalueConvert"/>), and the single compatible
+    /// association's expression is lowered in its place. There is no _Generic IR
+    /// node; the selection IS the selected arm (so an ICE arm composes with
+    /// `_Static_assert`/ConstEval for free). Constraint violations — no compatible
+    /// association without a `default`, duplicate compatible association types,
+    /// duplicate `default` — are collected diagnostics (gcc-shaped wording).
+    /// Compatibility is structural CType equality on unqualified association types;
+    /// an enum-typed controlling expression falls back to its integer backing when
+    /// no association names the enum itself (C leaves the compatible integer type
+    /// implementation-defined; dotcc's enums are int-backed).</summary>
+    private CExpr BuildGenericSelect(C.GenericSelect g, Item it)
+    {
+        Gate(2011, "_Generic", it);
+        // Building the controlling expr may touch builder side-state (AddressTaken,
+        // referenced-function tracking) even though the node is discarded —
+        // semantically harmless (worst case a pessimized nint global).
+        var ctrl = LvalueConvert(BuildExpr(g.Arg2).Type);
+
+        // Collect associations in source order.
+        var typed = new List<(CType Type, Item Expr, Item Assoc)>();
+        Item? defaultArm = null;
+        void Add(Item assoc)
+        {
+            switch (assoc.Content)
+            {
+                case C.GenericAssocType a:
+                    typed.Add((ResolveType(a.Arg0).Unqualified, a.Arg2, assoc));
+                    break;
+                case C.GenericAssocDefault a:
+                    if (defaultArm is not null)
+                    {
+                        Diagnostics.Add(new Diagnostic(Severity.Error,
+                            "duplicate 'default' case in '_Generic'", SrcPos.From(assoc), _file));
+                    }
+                    defaultArm = a.Arg2;
+                    break;
+            }
+        }
+        void Walk(Item node)
+        {
+            if (node.Content is C.GenericAssocCons c) { Walk(c.Arg0); Add(c.Arg2); }
+            else { Add(node); }
+        }
+        Walk(g.Arg4);
+
+        // §6.5.1.1p2: no two associations may specify compatible types. With
+        // structural compatibility that's plain CType equality.
+        for (var i = 0; i < typed.Count; i++)
+        {
+            for (var j = i + 1; j < typed.Count; j++)
+            {
+                if (typed[i].Type.Equals(typed[j].Type))
+                {
+                    // gcc-verbatim (it names no type here either).
+                    Diagnostics.Add(new Diagnostic(Severity.Error,
+                        "'_Generic' specifies two compatible types",
+                        SrcPos.From(typed[j].Assoc), _file));
+                }
+            }
+        }
+
+        foreach (var (t, expr, _) in typed)
+        {
+            if (ctrl.Equals(t)) { return BuildExpr(expr); }
+        }
+        // Enum fallback: `_Generic(color, int: …)` — the enum's backing integer.
+        if (ctrl is CType.Enum en)
+        {
+            foreach (var (t, expr, _) in typed)
+            {
+                if (en.Underlying.Unqualified.Equals(t)) { return BuildExpr(expr); }
+            }
+        }
+        if (defaultArm is not null) { return BuildExpr(defaultArm); }
+        Diagnostics.Add(new Diagnostic(Severity.Error,
+            $"'_Generic' selector of type '{ctrl.Describe()}' is not compatible with any association",
+            SrcPos.From(it), _file));
+        return new LitInt("0", 0) { Type = CType.Int }; // error recovery — compile still fails on the diagnostic
+    }
+
+    /// <summary>C11 §6.3.2.1 lvalue conversion, as `_Generic` applies it to the
+    /// controlling expression's type (C17 semantics, matching gcc/clang): the
+    /// top-level qualifiers drop, an array of T decays to pointer-to-T (element
+    /// qualifiers survive — they are part of the pointee type). A function
+    /// designator needs no wrapping: dotcc's <see cref="CType.Func"/> already IS
+    /// the function-pointer type.</summary>
+    private static CType LvalueConvert(CType t) => t.Unqualified switch
+    {
+        CType.Array a => new CType.Pointer(a.Element),
+        var u => u,
+    };
+
     /// <summary>`_Alignas(Type) T` — the align-as-type form (C11 §6.7.5). The
     /// specifier is a NO-OP on the managed target (a C# field/local has no
     /// controllable alignment), but the constraint still holds: the requested
@@ -2141,6 +2237,7 @@ internal sealed partial class IrBuilder
             // like sizeof), so it composes with _Static_assert / array bounds /
             // case labels with no IR node of its own.
             C.AlignofType a => FoldAlignof(a, it),
+            C.GenericSelect g => BuildGenericSelect(g, it),
             C.OffsetofExpr o => BuildOffsetof(o),
             // `va_arg(ap, T)` — special syntax (its 2nd operand is a type).
             C.VaArgExpr v => new VaArgGet(BuildExpr(v.Arg2), ResolveType(v.Arg4)) { Type = ResolveType(v.Arg4) },
