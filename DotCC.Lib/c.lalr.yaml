@@ -411,6 +411,15 @@ symbols:
   - '_Alignof'     # 174 keyword (C11) — alignment of a type (an ICE)
   - '_Alignas'     # 175 keyword (C11) — alignment specifier on a declaration
 
+  # `#elifdef` / `#elifndef` (C23 §6.10.1) — sugar for `#elif defined(NAME)` /
+  # `#elif !defined(NAME)`. Handled by LALR.CC's built-in conditional engine
+  # (the elifdef/elifndef roles, LALR.CC ≥ 4.4.0) — dotcc only declares the
+  # tokens + roles. NOT dialect-gated: the directive is consumed inside the
+  # engine and never reaches a dotcc hook (same ungated status as `//`
+  # comments; a skipped-branch `#elifdef` is invisible even to old gcc).
+  - '#elifdef'     # 176 preprocessor conditional — else-if macro defined
+  - '#elifndef'    # 177 preprocessor conditional — else-if macro NOT defined
+
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
   # Item carries FnList's already-built C# source string.
@@ -1526,7 +1535,11 @@ lexer:
     - { symbol: '#ifndef',  match: '#[ \t]*ifndef' }
     - { symbol: '#ifdef',   match: '#[ \t]*ifdef' }
     # `#elif` before `#else` — they don't share a prefix but `#elif` and
-    # `#endif` both start with `#e`; longest-match handles it.
+    # `#endif` both start with `#e`; longest-match handles it. The C23
+    # `#elifdef`/`#elifndef` extend the same prefix — longest-match again
+    # (`#elifndef` > `#elifdef` > `#elif`), so order here is cosmetic.
+    - { symbol: '#elifndef', match: '#[ \t]*elifndef' }
+    - { symbol: '#elifdef',  match: '#[ \t]*elifdef' }
     - { symbol: '#elif',    match: '#[ \t]*elif' }
     - { symbol: '#if',      match: '#[ \t]*if' }
     - { symbol: '#else',    match: '#[ \t]*else' }
@@ -1835,9 +1848,11 @@ preprocessor:
     '#error':   onError
     '#warning': onWarning
   conditionals:
-    if:     '#if'
-    ifdef:  '#ifdef'
-    ifndef: '#ifndef'
-    else:   '#else'
-    elif:   '#elif'
-    endif:  '#endif'
+    if:       '#if'
+    ifdef:    '#ifdef'
+    ifndef:   '#ifndef'
+    else:     '#else'
+    elif:     '#elif'
+    elifdef:  '#elifdef'
+    elifndef: '#elifndef'
+    endif:    '#endif'
