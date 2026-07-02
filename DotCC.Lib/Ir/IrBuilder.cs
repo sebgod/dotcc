@@ -360,14 +360,16 @@ internal sealed partial class IrBuilder
 
     /// <summary>A prototype declares the function (so calls resolve + we know its
     /// signature) but emits no body.</summary>
-    // ---- function markers (noreturn / deprecated) -------------------------
-    // _sawNoreturnSpec: the signature's spec resolution saw `_Noreturn` (C11; the
-    // C23 lowercase `noreturn` arrives pre-promoted onto the same terminal) —
-    // reset by RegisterProto/BuildFuncDef immediately before ExtractFnSig so only
-    // THIS declaration's specifiers count. _pendingAttrNoreturn/_pendingAttrDeprecated:
+    // ---- function markers (inline / noreturn / deprecated) ----------------
+    // _sawNoreturnSpec/_sawInlineSpec: the signature's spec resolution saw the
+    // `_Noreturn` (C11; the C23 lowercase `noreturn` arrives pre-promoted onto the
+    // same terminal) / `inline` (C99) function specifier — reset by
+    // RegisterProto/BuildFuncDef immediately before ExtractFnSig so only THIS
+    // declaration's specifiers count. _pendingAttrNoreturn/_pendingAttrDeprecated:
     // the recognized attrs of an enclosing C23 `[[…]]` specifier (BuildTopLevel's
     // AttrFn case), consumed by the wrapped function declaration and cleared on unwind.
     private bool _sawNoreturnSpec;
+    private bool _sawInlineSpec;
     private bool _pendingAttrNoreturn;
     private string? _pendingAttrDeprecated;
 
@@ -413,12 +415,14 @@ internal sealed partial class IrBuilder
     private void ApplyFnMarkers(Symbol sym)
     {
         if (_sawNoreturnSpec || _pendingAttrNoreturn) { sym.IsNoReturn = true; }
+        if (_sawInlineSpec) { sym.IsInline = true; }
         if (_pendingAttrDeprecated is { } dep && sym.Deprecated is null) { sym.Deprecated = dep; }
     }
 
     private void RegisterProto(Item fnSig)
     {
         _sawNoreturnSpec = false;
+        _sawInlineSpec = false;
         var sig = ExtractFnSig(fnSig);
         // The reduction's position is its leftmost leaf token (LALR.CC propagates
         // children[0].Position up), and the whole declaration lives in one file —
@@ -473,6 +477,7 @@ internal sealed partial class IrBuilder
     private void BuildFuncDef(Item fnSig, Item block)
     {
         _sawNoreturnSpec = false;
+        _sawInlineSpec = false;
         var sig = ExtractFnSig(fnSig);
         // A definition means this name is no longer a pure prototype → not an import.
         _protoOnlyFuncs.Remove(sig.Name);
@@ -1093,10 +1098,9 @@ internal sealed partial class IrBuilder
         // `TypeSpecList TYPE_NAME` — a function-specifier run (inline / _Noreturn)
         // immediately preceding a typedef-name: `static inline Cell *bump(…)`,
         // Lua's `l_sinline Table *gettable(…)`. The run contributes only its
-        // function-specifier facts: `inline` is dropped (no MethodImpl hint —
-        // exactly as every other inline function is lowered); `_Noreturn` is gated
-        // and recorded for the enclosing function symbol (→ [DoesNotReturn]). The
-        // TYPE_NAME is the whole base type.
+        // function-specifier facts, recorded for the enclosing function symbol:
+        // `inline` (→ [MethodImpl(AggressiveInlining)]) and `_Noreturn` (gated C11,
+        // → [DoesNotReturn]). The TYPE_NAME is the whole base type.
         C.TypeSpecThenName t => SpecsThenName(t, it),
         // C23 `typeof(expr)` / `typeof(type)` — the expr form reads the operand's
         // synthesized CType (qualifiers dropped, as `typeof_unqual` does); the type
@@ -1139,16 +1143,19 @@ internal sealed partial class IrBuilder
     private CType ResolveTypeName(string name) =>
         _typedefs.TryGetValue(name, out var t) ? t : new CType.Named(name);
 
-    /// <summary>Resolve a `TypeSpecList TYPE_NAME` type: the run's only surviving
-    /// fact is `_Noreturn` (gated C11 and recorded via <see cref="_sawNoreturnSpec"/>
-    /// for the enclosing function symbol); the typedef-name is the whole base type.</summary>
+    /// <summary>Resolve a `TypeSpecList TYPE_NAME` type: the run's surviving facts
+    /// are the function specifiers `_Noreturn` (gated C11) and `inline`, recorded
+    /// via <see cref="_sawNoreturnSpec"/>/<see cref="_sawInlineSpec"/> for the
+    /// enclosing function symbol; the typedef-name is the whole base type.</summary>
     private CType SpecsThenName(C.TypeSpecThenName t, Item it)
     {
-        if (CollectSpecs(t.Arg0).Contains("_Noreturn"))
+        var specs = CollectSpecs(t.Arg0);
+        if (specs.Contains("_Noreturn"))
         {
             Gate(2011, "_Noreturn", it);
             _sawNoreturnSpec = true;
         }
+        if (specs.Contains("inline")) { _sawInlineSpec = true; }
         return ResolveTypeName(Tok(t.Arg1));
     }
 
@@ -1324,6 +1331,7 @@ internal sealed partial class IrBuilder
 
         // Dialect gates: type-spec features newer than the selected -std=.
         if (specs.Contains("_Noreturn")) { Gate(2011, "_Noreturn", pos); _sawNoreturnSpec = true; }
+        if (specs.Contains("inline")) { _sawInlineSpec = true; } // no gate — pre-C99 rejection is structural (rule 2)
         if (base_ == "_Bool") { Gate(1999, "_Bool", pos); }
         if (lng >= 2) { Gate(1999, "long long", pos); }
         if (isComplex) { Gate(1999, "_Complex", pos); }

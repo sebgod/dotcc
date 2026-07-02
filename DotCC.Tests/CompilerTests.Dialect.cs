@@ -535,22 +535,18 @@ public sealed partial class CompilerTests
     // C99 makes `inline` a function specifier. The rewriter promotes the bare
     // `inline` ID onto the `inline` terminal, but ONLY from the C99 era on
     // (c99/c11/c17/c23 — the default c17 included). Pre-C99 `inline` stays an
-    // ordinary identifier. The flagged Type makes the FnSig path emit a
+    // ordinary identifier. The specifier marks the shared function symbol
+    // (Symbol.IsInline), and the backend emits
     // [MethodImpl(MethodImplOptions.AggressiveInlining)] on the method.
 
     [Fact]
     public void Inline_function_emits_aggressive_inlining_attribute()
     {
-        // FLAGGED: the typed-IR backend does not yet emit
-        // [MethodImpl(MethodImplOptions.AggressiveInlining)] on inline functions.
-        // The test verifies that the function is still emitted correctly (no throw,
-        // correct signature); re-point the attribute assertion once the IR gains
-        // attribute emit support.
         var src = WriteTemp("inline int sq(int x) { return x * x; } int main() { return sq(4); }");
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"));
-            // The function is emitted correctly even without the attribute.
+            emitted.ShouldContain("[MethodImpl(MethodImplOptions.AggressiveInlining)]");
             emitted.ShouldContain("internal static unsafe int sq(int x)");
         }
         finally { File.Delete(src); }
@@ -559,10 +555,6 @@ public sealed partial class CompilerTests
     [Fact]
     public void Static_and_extern_inline_both_get_the_attribute()
     {
-        // FLAGGED: the typed-IR backend does not yet emit
-        // [MethodImpl(MethodImplOptions.AggressiveInlining)] on inline functions.
-        // The test verifies both functions compile and have correct signatures;
-        // re-point once the IR gains attribute emit support.
         var src = WriteTemp("""
             static inline int cube(int x) { return x * x * x; }
             extern inline long add(long a, long b) { return a + b; }
@@ -571,8 +563,10 @@ public sealed partial class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"));
-            emitted.ShouldContain("internal static unsafe int cube(int x)");
-            emitted.ShouldContain("internal static unsafe long add(long a, long b)");
+            emitted.ShouldContain(
+                "[MethodImpl(MethodImplOptions.AggressiveInlining)]\n    internal static unsafe int cube(int x)");
+            emitted.ShouldContain(
+                "[MethodImpl(MethodImplOptions.AggressiveInlining)]\n    internal static unsafe long add(long a, long b)");
         }
         finally { File.Delete(src); }
     }
@@ -598,12 +592,8 @@ public sealed partial class CompilerTests
         // function-specifier run preceding a typedef-name return type used to fail
         // to parse (a TYPE_NAME is a separate Type production, not a TypeSpec, so
         // the spec-list couldn't absorb it). The composed `Type → TypeSpecList
-        // TYPE_NAME` production keeps the inline flag.
-        //
-        // FLAGGED: the typed-IR backend does not yet emit
-        // [MethodImpl(MethodImplOptions.AggressiveInlining)] on inline functions.
-        // The test verifies the parse succeeds and signatures are correct;
-        // re-point the attribute assertions once the IR gains attribute emit support.
+        // TYPE_NAME` production keeps the inline flag (SpecsThenName) — including
+        // through the pointer level on `bump`.
         var src = WriteTemp("""
             typedef struct { int v; } Cell;
             static inline Cell *bump(Cell *c) { c->v += 1; return c; }
@@ -613,8 +603,10 @@ public sealed partial class CompilerTests
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"));
-            emitted.ShouldContain("internal static unsafe Cell* bump(Cell* c)");
-            emitted.ShouldContain("internal static unsafe Cell make(int x)");
+            emitted.ShouldContain(
+                "[MethodImpl(MethodImplOptions.AggressiveInlining)]\n    internal static unsafe Cell* bump(Cell* c)");
+            emitted.ShouldContain(
+                "[MethodImpl(MethodImplOptions.AggressiveInlining)]\n    internal static unsafe Cell make(int x)");
         }
         finally { File.Delete(src); }
     }

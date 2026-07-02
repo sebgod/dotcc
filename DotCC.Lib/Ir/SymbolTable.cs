@@ -94,6 +94,12 @@ public sealed class Symbol
     /// <c>[System.Diagnostics.CodeAnalysis.DoesNotReturn]</c> on the emitted method.</summary>
     public bool IsNoReturn { get; set; }
 
+    /// <summary>True when the function is declared <c>inline</c> (C99; any
+    /// declaration marks the shared symbol). The C# backend surfaces it as
+    /// <c>[MethodImpl(MethodImplOptions.AggressiveInlining)]</c> — a real JIT
+    /// hint, the faithful lowering of C's "please inline this".</summary>
+    public bool IsInline { get; set; }
+
     /// <summary>Non-null when the function carries the C23 <c>[[deprecated]]</c> /
     /// <c>[[deprecated("msg")]]</c> attribute — the decoded message, or <c>""</c> for
     /// the message-less form. The C# backend surfaces it as <c>[System.Obsolete(…)]</c>,
