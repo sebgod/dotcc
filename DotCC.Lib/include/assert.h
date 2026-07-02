@@ -36,4 +36,13 @@
 #define assert(expr) __dotcc_assert(expr)
 #endif
 
+/* C11 §7.2: <assert.h> defines `static_assert` expanding to `_Static_assert`.
+   C23 removes the macro (the lowercase spelling becomes a keyword there,
+   promoted by dotcc's DialectKeywordRewriter); pre-C11 the name belongs to
+   the user. Macro expansion runs before keyword promotion, so the two
+   mechanisms compose rather than fight. */
+#if defined __STDC_VERSION__ && __STDC_VERSION__ >= 201112L && __STDC_VERSION__ < 202311L
+#define static_assert _Static_assert
+#endif
+
 #endif
