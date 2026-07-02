@@ -325,6 +325,79 @@ public sealed partial class CompilerTests
         finally { File.Delete(src); }
     }
 
+    // ---- #elifdef / #elifndef (C23) ----------------------------------------
+    // Sugar for `#elif defined(NAME)` / `#elif !defined(NAME)`, handled by
+    // LALR.CC's built-in conditional engine (the elifdef/elifndef roles).
+    // Not dialect-gated — the directive is consumed inside the engine and
+    // never reaches a dotcc hook (same ungated status as `//` comments).
+
+    [Fact]
+    public void Elifdef_selects_arm_when_macro_defined()
+    {
+        var src = WriteTemp("""
+            #define FEATURE_B 1
+            #if 0
+            int dead_a(void) { return 1; }
+            #elifdef FEATURE_B
+            int picked(void) { return 2; }
+            #else
+            int dead_c(void) { return 3; }
+            #endif
+            int main() { return picked(); }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("picked");
+            emitted.ShouldNotContain("dead_a");
+            emitted.ShouldNotContain("dead_c");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Elifndef_selects_arm_when_macro_not_defined()
+    {
+        var src = WriteTemp("""
+            #if 0
+            int dead_a(void) { return 1; }
+            #elifndef NEVER_DEFINED
+            int picked(void) { return 2; }
+            #endif
+            int main() { return picked(); }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("picked");
+            emitted.ShouldNotContain("dead_a");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Elifdef_locked_out_when_prior_arm_emitted()
+    {
+        // The arm-selection lock matches #elif: once an arm in the chain has
+        // emitted, a later #elifdef never fires even if its macro is defined.
+        var src = WriteTemp("""
+            #define FEATURE_B 1
+            #if 1
+            int first(void) { return 1; }
+            #elifdef FEATURE_B
+            int dead_b(void) { return 2; }
+            #endif
+            int main() { return first(); }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("first");
+            emitted.ShouldNotContain("dead_b");
+        }
+        finally { File.Delete(src); }
+    }
+
     [Fact]
     public void Include_angle_form_resolves_to_synthetic_stdio_header()
     {
