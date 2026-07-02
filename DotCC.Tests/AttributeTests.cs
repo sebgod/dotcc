@@ -8,12 +8,15 @@ using Xunit;
 namespace DotCC.Tests;
 
 /// <summary>
-/// Unit tests for C23 `[[attributes]]` — ACCEPTED + IGNORED. The glued `[[`
-/// opener token selects the attribute path (valid C never has adjacent `[[`
-/// outside one); the closer is two ordinary `]` tokens, so nested subscripts
-/// (`a[b[0]]`) are unaffected. The spec is dropped in the IR (gated C23);
-/// `[[fallthrough]];` parses as an attribute-wrapped empty statement.
-/// End-to-end in the `c23-attributes/` fixture.
+/// Unit tests for C23 `[[attributes]]`. The glued `[[` opener token selects the
+/// attribute path (valid C never has adjacent `[[` outside one); the closer is
+/// two ordinary `]` tokens, so nested subscripts (`a[b[0]]`) are unaffected.
+/// The recognized attrs are LOWERED: `[[noreturn]]` (and the `_Noreturn` /
+/// C23-promoted `noreturn` specifier) → `[DoesNotReturn]` on the emitted method,
+/// `[[deprecated[("msg")]]]` → `[System.Obsolete(…)]`; every other attr is
+/// ACCEPTED + IGNORED (gated C23). `[[fallthrough]];` parses as an
+/// attribute-wrapped empty statement. End-to-end in the `c23-attributes/` and
+/// `noreturn-specifier/` fixtures.
 /// </summary>
 [Collection("Attributes")]
 public sealed class AttributeTests
@@ -45,10 +48,50 @@ public sealed class AttributeTests
         {
             var emitted = Compiler.EmitCSharp(new[] { src });
             emitted.ShouldContain("static unsafe int main()");
-            // No attribute text survives into the emitted C#.
+            // No attribute SYNTAX survives into the emitted C#…
             emitted.ShouldNotContain("[[");
             emitted.ShouldNotContain("nodiscard");
             emitted.ShouldNotContain("deprecated");
+            // …but the recognized `deprecated` lowers to [Obsolete] with the
+            // decoded message (the C warning surfaces at the .NET build's call sites).
+            emitted.ShouldContain("[System.Obsolete(\"use answer\")]");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Deprecated_without_message_maps_to_bare_obsolete()
+    {
+        var src = WriteTemp("""
+            [[deprecated]] int old_api(void) { return 1; }
+            int main(void) { return 0; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("[System.Obsolete]");
+            emitted.ShouldNotContain("[System.Obsolete(");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Noreturn_attribute_on_the_prototype_marks_the_definition()
+    {
+        // The marker rides the SHARED function symbol, so spelling the attribute
+        // on the prototype alone still puts [DoesNotReturn] on the emitted method
+        // — and pre-C23 `[[noreturn]]` arrives as a plain identifier (no keyword
+        // promotion), exercising the bare-ID recognition path.
+        var src = WriteTemp("""
+            [[noreturn]] void die(void);
+            void die(void) { for (;;) {} }
+            int main(void) { return 0; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"));
+            emitted.ShouldContain("[System.Diagnostics.CodeAnalysis.DoesNotReturn]");
+            emitted.ShouldContain("static unsafe void die()");
         }
         finally { File.Delete(src); }
     }
@@ -100,6 +143,9 @@ public sealed class AttributeTests
             var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23"));
             emitted.ShouldContain("static unsafe int main()");
             emitted.ShouldNotContain("[[");
+            // The keyword-shaped Attr production feeds the same marker as the
+            // bare-ID path: [DoesNotReturn] lands on the emitted method.
+            emitted.ShouldContain("[System.Diagnostics.CodeAnalysis.DoesNotReturn]");
         }
         finally { File.Delete(src); }
     }

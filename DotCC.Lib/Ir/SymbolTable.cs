@@ -86,6 +86,20 @@ public sealed class Symbol
     /// <em>global</em> as <c>nint</c> (see <c>CSharpBackend.NintStorage</c>); the wat backend
     /// gives any address-taken local/param a linear-memory frame slot.</summary>
     public bool AddressTaken { get; set; }
+
+    /// <summary>True when the function is declared to never return to its caller —
+    /// the C11 <c>_Noreturn</c> specifier, its C23 <c>noreturn</c> spelling, or the
+    /// C23 <c>[[noreturn]]</c> attribute (any declaration marks the shared symbol).
+    /// The C# backend surfaces it as
+    /// <c>[System.Diagnostics.CodeAnalysis.DoesNotReturn]</c> on the emitted method.</summary>
+    public bool IsNoReturn { get; set; }
+
+    /// <summary>Non-null when the function carries the C23 <c>[[deprecated]]</c> /
+    /// <c>[[deprecated("msg")]]</c> attribute — the decoded message, or <c>""</c> for
+    /// the message-less form. The C# backend surfaces it as <c>[System.Obsolete(…)]</c>,
+    /// so the .NET build of the emitted program warns at call sites the way a C
+    /// compiler warns on a call to a deprecated function.</summary>
+    public string? Deprecated { get; set; }
 }
 
 /// <summary>

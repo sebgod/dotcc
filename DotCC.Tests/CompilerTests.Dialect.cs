@@ -623,13 +623,8 @@ public sealed partial class CompilerTests
     public void Noreturn_before_typedef_name_return_keeps_attribute()
     {
         // `_Noreturn` is always a keyword; preceding a typedef-named return type it
-        // composes the same way.
-        //
-        // FLAGGED: the typed-IR backend does not yet emit
-        // [System.Diagnostics.CodeAnalysis.DoesNotReturn] on _Noreturn functions.
-        // The test verifies the parse succeeds and the typedef-named return type
-        // is resolved correctly; re-point the attribute assertion once the IR
-        // gains attribute emit support.
+        // composes the same way (the `TypeSpecList TYPE_NAME` path — SpecsThenName —
+        // not the plain spec-multiset path, so this pins BOTH routes to the marker).
         var src = WriteTemp("""
             typedef int Status;
             _Noreturn Status die(void) { for (;;) {} }
@@ -637,9 +632,11 @@ public sealed partial class CompilerTests
             """);
         try
         {
-            // The typedef return type `Status` resolves to `int` in the typed IR.
-            Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"))
-                .ShouldContain("internal static unsafe int die()");
+            // The typedef return type `Status` resolves to `int` in the typed IR,
+            // and the specifier surfaces as [DoesNotReturn] on the emitted method.
+            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"));
+            emitted.ShouldContain("internal static unsafe int die()");
+            emitted.ShouldContain("[System.Diagnostics.CodeAnalysis.DoesNotReturn]");
         }
         finally { File.Delete(src); }
     }
@@ -675,16 +672,12 @@ public sealed partial class CompilerTests
     {
         // `_Noreturn` is always a keyword (reserved underscore-uppercase). The
         // body is an infinite loop so the emitted [DoesNotReturn] is honest.
-        //
-        // FLAGGED: the typed-IR backend does not yet emit
-        // [System.Diagnostics.CodeAnalysis.DoesNotReturn] on _Noreturn functions.
-        // The test verifies the function is emitted correctly; re-point the
-        // attribute assertion once the IR gains attribute emit support.
         var src = WriteTemp("_Noreturn void die(void) { for (;;) {} } int main() { return 0; }");
         try
         {
-            Compiler.EmitCSharp(new[] { src })
-                .ShouldContain("internal static unsafe void die()");
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("internal static unsafe void die()");
+            emitted.ShouldContain("[System.Diagnostics.CodeAnalysis.DoesNotReturn]");
         }
         finally { File.Delete(src); }
     }
@@ -698,6 +691,32 @@ public sealed partial class CompilerTests
             Should.Throw<CompileException>(() =>
                 Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), pedanticErrors: true))
                 .Message.ShouldContain("_Noreturn");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Stdnoreturn_header_macro_maps_to_the_specifier()
+    {
+        // C11 <stdnoreturn.h> defines `noreturn` as a macro for `_Noreturn`; macro
+        // expansion runs BEFORE keyword promotion, so the lowercase spelling works
+        // under c11/c17 through the header. Under c23 the macro withdraws
+        // (__STDC_VERSION__ >= 202311L) and the promoted keyword takes over — same
+        // header-version hygiene as <assert.h> / <stdalign.h> — so the identical
+        // source composes under every dialect from c11 on.
+        var src = WriteTemp("""
+            #include <stdnoreturn.h>
+            noreturn void die(void) { for (;;) {} }
+            int main(void) { return 0; }
+            """);
+        try
+        {
+            foreach (var std in new[] { "c11", "c17", "c23" })
+            {
+                var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse(std));
+                emitted.ShouldContain("internal static unsafe void die()");
+                emitted.ShouldContain("[System.Diagnostics.CodeAnalysis.DoesNotReturn]");
+            }
         }
         finally { File.Delete(src); }
     }
@@ -755,11 +774,6 @@ public sealed partial class CompilerTests
         // Lowercase `noreturn` is a C23 keyword (promoted onto _Noreturn). Pre-C23
         // it's an ordinary identifier, so it can name a variable; under c23 that
         // same use is a parse error — proving the rewriter's era gate.
-        //
-        // FLAGGED: the typed-IR backend does not yet emit
-        // [System.Diagnostics.CodeAnalysis.DoesNotReturn] on noreturn functions.
-        // The attribute assertion is replaced with a presence check; re-point
-        // once the IR gains attribute emit support.
         var asVar = WriteTemp("int main() { int noreturn = 5; return noreturn; }");
         var asKeyword = WriteTemp("noreturn void die(void) { for (;;) {} } int main() { return 0; }");
         try
@@ -767,9 +781,11 @@ public sealed partial class CompilerTests
             Should.NotThrow(() => Compiler.EmitCSharp(new[] { asVar }, dialect: CDialect.Parse("c17")));
             Should.Throw<CompileException>(
                 () => Compiler.EmitCSharp(new[] { asVar }, dialect: CDialect.Parse("c23")));
-            // And the keyword form: works under c23 (function emitted), parse error pre-C23.
-            Compiler.EmitCSharp(new[] { asKeyword }, dialect: CDialect.Parse("c23"))
-                .ShouldContain("internal static unsafe void die()");
+            // And the keyword form: works under c23 (function emitted, carrying
+            // [DoesNotReturn]), parse error pre-C23.
+            var emitted = Compiler.EmitCSharp(new[] { asKeyword }, dialect: CDialect.Parse("c23"));
+            emitted.ShouldContain("internal static unsafe void die()");
+            emitted.ShouldContain("[System.Diagnostics.CodeAnalysis.DoesNotReturn]");
             Should.Throw<CompileException>(
                 () => Compiler.EmitCSharp(new[] { asKeyword }, dialect: CDialect.Parse("c17")));
         }
