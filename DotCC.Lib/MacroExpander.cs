@@ -41,6 +41,7 @@ internal sealed class MacroExpander : RewritingTokenStream
     private readonly int _hashSymbol;
     private readonly int _hashHashSymbol;
     private const string VaArgsName = "__VA_ARGS__";
+    private const string VaOptName = "__VA_OPT__";
 
     public MacroExpander(ISyncIterator<Item> inner, CPreprocessor cpp) : base(inner)
     {
@@ -313,11 +314,67 @@ internal sealed class MacroExpander : RewritingTokenStream
                 new HashSet<string>(callSiteHiding, StringComparer.Ordinal));
         }
 
-        var body = macro.Body;
-        var result = new List<Item>(body.Count);
+        var result = new List<Item>(macro.Body.Count);
+        SubstituteInto(result, macro.Body, macro, paramMap, paramMapExpanded);
+        return result;
+    }
+
+    /// <summary>
+    /// The body-substitution walk over one token list, appending to
+    /// <paramref name="result"/> — factored out of <see cref="Substitute"/> so a
+    /// C23 <c>__VA_OPT__(group)</c> can recurse over its group with the same
+    /// <c>#</c> / <c>##</c> / parameter handling.
+    /// </summary>
+    private void SubstituteInto(
+        List<Item> result,
+        IReadOnlyList<Item> body,
+        MacroDef macro,
+        Dictionary<string, IReadOnlyList<Item>> paramMap,
+        Dictionary<string, IReadOnlyList<Item>> paramMapExpanded)
+    {
         for (var i = 0; i < body.Count; i++)
         {
             var bt = body[i];
+
+            // C23 `__VA_OPT__( group )` — variadic-macro comma-elision (the
+            // standardized replacement for GNU's `, ##__VA_ARGS__`): the
+            // parenthesized group expands — recursively, with full param/#/##
+            // handling — only when the variadic arguments contain at least one
+            // token; otherwise the whole construct vanishes. The emptiness test
+            // is on the RAW extras (pre-expansion), matching the standard's
+            // "consists of no pp-tokens" — so an argument that is a macro
+            // expanding to nothing still counts as present. Only meaningful in
+            // a variadic macro's body and followed by `(`; any other use passes
+            // the identifier through (a downstream parse error, the same
+            // fallback as a stray `#`).
+            if (bt.ID == _idSymbol
+                && (bt.Content as string) == VaOptName
+                && macro.IsVariadic
+                && i + 1 < body.Count
+                && body[i + 1].ID == _openParenSymbol)
+            {
+                var depth = 0;
+                var close = -1;
+                for (var j = i + 1; j < body.Count; j++)
+                {
+                    if (body[j].ID == _openParenSymbol) { depth++; }
+                    else if (body[j].ID == _closeParenSymbol && --depth == 0) { close = j; break; }
+                }
+                if (close < 0)
+                {
+                    // Unterminated group — emit verbatim (parse error downstream).
+                    result.Add(bt);
+                    continue;
+                }
+                if (paramMap[VaArgsName].Count > 0)
+                {
+                    var group = new List<Item>(close - i - 2);
+                    for (var j = i + 2; j < close; j++) { group.Add(body[j]); }
+                    SubstituteInto(result, group, macro, paramMap, paramMapExpanded);
+                }
+                i = close;
+                continue;
+            }
 
             // `LHS ## RHS` — token-paste. Lookahead at i+1 for `##` and
             // i+2 for RHS. Either side might be a formal param or a
@@ -359,7 +416,6 @@ internal sealed class MacroExpander : RewritingTokenStream
 
             result.Add(bt);
         }
-        return result;
     }
 
     /// <summary>
