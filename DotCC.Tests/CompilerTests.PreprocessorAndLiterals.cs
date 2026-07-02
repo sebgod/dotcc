@@ -398,6 +398,95 @@ public sealed partial class CompilerTests
         finally { File.Delete(src); }
     }
 
+    // ---- __VA_OPT__ (C23) ---------------------------------------------------
+    // Variadic-macro comma-elision: `__VA_OPT__(group)` expands the group only
+    // when the variadic args contain at least one RAW token (pre-expansion —
+    // the standard's "consists of no pp-tokens"). Handled in
+    // MacroExpander.SubstituteInto; the group recurses through the same
+    // #/##/param substitution. Not dialect-gated (consumed at expansion time,
+    // like #elifdef).
+
+    [Fact]
+    public void Va_opt_elides_the_comma_without_variadic_args()
+    {
+        var src = WriteTemp("""
+            #include <stdio.h>
+            #define LOG(fmt, ...) printf(fmt __VA_OPT__(,) __VA_ARGS__)
+            int main(void) {
+                LOG("plain\n");
+                LOG("%d\n", 42);
+                return 0;
+            }
+            """);
+        try
+        {
+            // Without __VA_OPT__ handling the no-arg call left `fmt ,` — a parse
+            // error. Now the comma vanishes for LOG("plain\n") and survives
+            // (carrying the arg) for LOG("%d\n", 42).
+            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23"));
+            emitted.ShouldContain("plain");
+            emitted.ShouldContain(".Arg(42)");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Va_opt_group_expands_only_with_args_and_substitutes_inside()
+    {
+        // The group carries __VA_ARGS__ itself — proving the recursive walk
+        // substitutes parameters INSIDE the group, not just splices it raw.
+        var src = WriteTemp("""
+            static int one(int a) { return a; }
+            static int two(int a, int b) { return a + b; }
+            #define CALL(f, ...) f(0 __VA_OPT__(, __VA_ARGS__))
+            int main(void) { return CALL(one) + CALL(two, 5); }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23"));
+            emitted.ShouldContain("one(0)");
+            emitted.ShouldContain("two(0, 5)");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Va_opt_treats_an_empty_trailing_arg_as_absent()
+    {
+        // `CALL(one,)` passes a variadic argument that is PRESENT but consists
+        // of no tokens — C23 says __VA_OPT__ still elides (the test is token
+        // emptiness, not arity).
+        var src = WriteTemp("""
+            static int one(int a) { return a; }
+            #define CALL(f, ...) f(0 __VA_OPT__(, __VA_ARGS__))
+            int main(void) { return CALL(one,); }
+            """);
+        try
+        {
+            Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23"))
+                .ShouldContain("one(0)");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Va_opt_in_a_non_variadic_macro_stays_an_identifier()
+    {
+        // Only a variadic macro body gives __VA_OPT__ meaning; elsewhere the
+        // identifier passes through and the downstream parse fails loudly
+        // (real C rejects it too).
+        var src = WriteTemp("""
+            #define BAD(x) x __VA_OPT__(,)
+            int main(void) { int y = BAD(1); return y; }
+            """);
+        try
+        {
+            Should.Throw<CompileException>(
+                () => Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c23")));
+        }
+        finally { File.Delete(src); }
+    }
+
     [Fact]
     public void Include_angle_form_resolves_to_synthetic_stdio_header()
     {

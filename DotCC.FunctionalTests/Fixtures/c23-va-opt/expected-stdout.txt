@@ -1,0 +1,3 @@
+no args
+with: 7 seven
+1 42
