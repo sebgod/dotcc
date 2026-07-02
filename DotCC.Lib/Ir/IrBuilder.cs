@@ -208,10 +208,19 @@ internal sealed partial class IrBuilder
     {
         switch (fn.Content)
         {
-            // C23 `[[attr]]` prepending a file-scope declaration — the attribute
-            // spec is ACCEPTED + IGNORED (no C# lowering carries it); gate C23,
-            // then unwrap to the inner declaration. Chained specs recurse.
-            case C.AttrFn a: Gate(2023, "[[attributes]]", fn); BuildTopLevel(a.Arg4); break;
+            // C23 `[[attr]]` prepending a file-scope declaration — gate C23,
+            // collect the attrs dotcc lowers (`noreturn` → [DoesNotReturn],
+            // `deprecated` → [Obsolete]; every other attr is ACCEPTED + IGNORED),
+            // then unwrap to the inner declaration, which applies them if it
+            // declares a function (ApplyFnMarkers). Chained specs recurse and
+            // accumulate; a non-function declaration ignores them (the clear).
+            case C.AttrFn a:
+                Gate(2023, "[[attributes]]", fn);
+                CollectDeclAttrs(a.Arg1);
+                BuildTopLevel(a.Arg4);
+                _pendingAttrNoreturn = false;
+                _pendingAttrDeprecated = null;
+                break;
             case C.FuncDef d: BuildFuncDef(d.Arg0, d.Arg1); break;
             case C.ExternFnDef d: BuildFuncDef(d.Arg1, d.Arg2); break;
             case C.FuncProto p: RegisterProto(p.Arg0); break;
@@ -351,13 +360,71 @@ internal sealed partial class IrBuilder
 
     /// <summary>A prototype declares the function (so calls resolve + we know its
     /// signature) but emits no body.</summary>
+    // ---- function markers (noreturn / deprecated) -------------------------
+    // _sawNoreturnSpec: the signature's spec resolution saw `_Noreturn` (C11; the
+    // C23 lowercase `noreturn` arrives pre-promoted onto the same terminal) —
+    // reset by RegisterProto/BuildFuncDef immediately before ExtractFnSig so only
+    // THIS declaration's specifiers count. _pendingAttrNoreturn/_pendingAttrDeprecated:
+    // the recognized attrs of an enclosing C23 `[[…]]` specifier (BuildTopLevel's
+    // AttrFn case), consumed by the wrapped function declaration and cleared on unwind.
+    private bool _sawNoreturnSpec;
+    private bool _pendingAttrNoreturn;
+    private string? _pendingAttrDeprecated;
+
+    /// <summary>Walk an <c>AttrList</c> collecting the attributes dotcc lowers:
+    /// `noreturn` (a bare ID pre-C23; the promoted `_Noreturn` keyword under c23)
+    /// and `deprecated` (bare or with a string-literal message). Everything else —
+    /// `nodiscard`, `maybe_unused`, `fallthrough`, vendor-namespaced attrs — is
+    /// accepted and ignored (no .NET counterpart with teeth: C# doesn't warn on
+    /// unused locals/params, and the BCL has no must-use-result attribute).</summary>
+    private void CollectDeclAttrs(Item it)
+    {
+        switch (it.Content)
+        {
+            case C.AttrListCons c: CollectDeclAttrs(c.Arg0); CollectDeclAttrs(c.Arg2); break;
+            case C.AttrNoreturn: _pendingAttrNoreturn = true; break;
+            case C.AttrIdent a when Tok(a.Arg0) == "noreturn": _pendingAttrNoreturn = true; break;
+            case C.AttrIdent a when Tok(a.Arg0) == "deprecated": _pendingAttrDeprecated ??= ""; break;
+            case C.AttrCall a when Tok(a.Arg0) == "deprecated":
+                _pendingAttrDeprecated ??= TryStringLiteral(a.Arg2) ?? "";
+                break;
+            default: break; // all other attribute shapes: accepted + ignored
+        }
+    }
+
+    /// <summary>The decoded UTF-8 text of a string-literal expression item, or null
+    /// when the expression isn't a plain string literal. Structural (AST) recognition;
+    /// adjacent segments concatenate and escapes decode through the same
+    /// single-source-of-truth decoder as string lowering.</summary>
+    private string? TryStringLiteral(Item e)
+    {
+        if (e.Content is not C.Str s) { return null; }
+        var bytes = DotCC.EmitHelpers.StringByteValues(CollectStrSegments(s.Arg0));
+        var arr = new byte[bytes.Count];
+        for (var i = 0; i < bytes.Count; i++) { arr[i] = (byte)bytes[i]; }
+        return System.Text.Encoding.UTF8.GetString(arr);
+    }
+
+    /// <summary>Apply the collected function markers to a just-declared function
+    /// symbol: the `_Noreturn` specifier seen by this signature's spec resolution
+    /// and any recognized attribute from an enclosing `[[…]]` specifier. Additive —
+    /// a marker spelled on either the prototype or the definition sticks to the
+    /// shared symbol, so the emitted method carries it either way.</summary>
+    private void ApplyFnMarkers(Symbol sym)
+    {
+        if (_sawNoreturnSpec || _pendingAttrNoreturn) { sym.IsNoReturn = true; }
+        if (_pendingAttrDeprecated is { } dep && sym.Deprecated is null) { sym.Deprecated = dep; }
+    }
+
     private void RegisterProto(Item fnSig)
     {
+        _sawNoreturnSpec = false;
         var sig = ExtractFnSig(fnSig);
         // The reduction's position is its leftmost leaf token (LALR.CC propagates
         // children[0].Position up), and the whole declaration lives in one file —
         // so the band check is reliable without inspecting the name token.
         var sym = DeclareFunc(sig, fromSystemHeader: fnSig.Position.Line >= SrcPos.SyntheticLineBase);
+        ApplyFnMarkers(sym);
         // Import-mode candidate tracking: a prototype not (yet) defined in any TU
         // is a potential native `-l` import. A definition seen later retracts it
         // (BuildFuncDef). System-header protos are flagged above and excluded at
@@ -405,6 +472,7 @@ internal sealed partial class IrBuilder
 
     private void BuildFuncDef(Item fnSig, Item block)
     {
+        _sawNoreturnSpec = false;
         var sig = ExtractFnSig(fnSig);
         // A definition means this name is no longer a pure prototype → not an import.
         _protoOnlyFuncs.Remove(sig.Name);
@@ -485,6 +553,7 @@ internal sealed partial class IrBuilder
             _fnDefSites[sig.Name] = new List<FnDefSite> { new() { Sig = fnSig, Block = block, Sym = funcSym } };
         }
 
+        ApplyFnMarkers(funcSym);
         _symbols.BeginFunction();
         _currentFnName = sig.Name; // drives the `__func__` predefined identifier
         _currentRet = (funcSym.Type as CType.Func)?.Return; // drives return const-discard
@@ -1023,11 +1092,12 @@ internal sealed partial class IrBuilder
         C.TypeAnonUnion t => ResolveAnonAggregate(it, t.Arg3, isUnion: true),
         // `TypeSpecList TYPE_NAME` — a function-specifier run (inline / _Noreturn)
         // immediately preceding a typedef-name: `static inline Cell *bump(…)`,
-        // Lua's `l_sinline Table *gettable(…)`. The spec list contributes only the
-        // inline/_Noreturn flag, which the IR drops (it emits no MethodImpl hint —
-        // exactly as every other inline function is lowered), so the TYPE_NAME is
-        // the whole base type.
-        C.TypeSpecThenName t => ResolveTypeName(Tok(t.Arg1)),
+        // Lua's `l_sinline Table *gettable(…)`. The run contributes only its
+        // function-specifier facts: `inline` is dropped (no MethodImpl hint —
+        // exactly as every other inline function is lowered); `_Noreturn` is gated
+        // and recorded for the enclosing function symbol (→ [DoesNotReturn]). The
+        // TYPE_NAME is the whole base type.
+        C.TypeSpecThenName t => SpecsThenName(t, it),
         // C23 `typeof(expr)` / `typeof(type)` — the expr form reads the operand's
         // synthesized CType (qualifiers dropped, as `typeof_unqual` does); the type
         // form unwraps to that type. The expr isn't evaluated (only its type taken).
@@ -1068,6 +1138,19 @@ internal sealed partial class IrBuilder
     /// whose spelling the backend emits verbatim.</summary>
     private CType ResolveTypeName(string name) =>
         _typedefs.TryGetValue(name, out var t) ? t : new CType.Named(name);
+
+    /// <summary>Resolve a `TypeSpecList TYPE_NAME` type: the run's only surviving
+    /// fact is `_Noreturn` (gated C11 and recorded via <see cref="_sawNoreturnSpec"/>
+    /// for the enclosing function symbol); the typedef-name is the whole base type.</summary>
+    private CType SpecsThenName(C.TypeSpecThenName t, Item it)
+    {
+        if (CollectSpecs(t.Arg0).Contains("_Noreturn"))
+        {
+            Gate(2011, "_Noreturn", it);
+            _sawNoreturnSpec = true;
+        }
+        return ResolveTypeName(Tok(t.Arg1));
+    }
 
     private List<string> CollectSpecs(Item it)
     {
@@ -1240,7 +1323,7 @@ internal sealed partial class IrBuilder
         { throw new DotCC.CompileException("`_Complex` requires a `float`, `double`, or `long double` base"); }
 
         // Dialect gates: type-spec features newer than the selected -std=.
-        if (specs.Contains("_Noreturn")) { Gate(2011, "_Noreturn", pos); }
+        if (specs.Contains("_Noreturn")) { Gate(2011, "_Noreturn", pos); _sawNoreturnSpec = true; }
         if (base_ == "_Bool") { Gate(1999, "_Bool", pos); }
         if (lng >= 2) { Gate(1999, "long long", pos); }
         if (isComplex) { Gate(1999, "_Complex", pos); }

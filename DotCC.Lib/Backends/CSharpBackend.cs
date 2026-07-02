@@ -387,6 +387,18 @@ internal sealed class CSharpBackend
         // each variadic actual to a VaArg at the call site (carries pointers too).
         if (fn.Variadic) { ps = ps.Length == 0 ? "params VaArg[] _va" : ps + ", params VaArg[] _va"; }
         var sb = new StringBuilder();
+        // C23 `[[deprecated]]` / `[[deprecated("msg")]]` → [Obsolete]: the .NET
+        // build of the emitted program warns at managed call sites, mirroring the
+        // C compiler's deprecation warning (C's is a warning, so no error:true).
+        if (fn.Sym.Deprecated is { } dep)
+        {
+            sb.Append(dep.Length == 0 ? "[System.Obsolete]\n" : $"[System.Obsolete({CsQuote(dep)})]\n");
+        }
+        // `_Noreturn` (C11) / `noreturn` / `[[noreturn]]` (C23) → [DoesNotReturn] —
+        // a real flow-analysis hint (C#'s nullable analysis honors it), the faithful
+        // lowering of "control never comes back". Fully qualified: the emitted
+        // program has no `using System.Diagnostics.CodeAnalysis`.
+        if (fn.Sym.IsNoReturn) { sb.Append("[System.Diagnostics.CodeAnalysis.DoesNotReturn]\n"); }
         sb.Append($"static unsafe {Cs(retTy)} {fn.Sym.TargetName}({ps})\n");
         // C lets a goto jump INTO a nested block; C# scopes labels to their
         // block. Hoist labeled tails until every goto is legal (no-op for the
@@ -412,6 +424,29 @@ internal sealed class CSharpBackend
         }
         Stmt(sb, body, 0);
         return sb.ToString();
+    }
+
+    /// <summary>Render decoded text as a C# string literal — for an attribute
+    /// argument like <c>[Obsolete("…")]</c>. Escapes the characters a decoded C
+    /// string message can carry that C# literals treat specially (the message was
+    /// already unescaped from its C spelling, so this is a plain re-quote).</summary>
+    private static string CsQuote(string s)
+    {
+        var sb = new StringBuilder(s.Length + 2).Append('"');
+        foreach (var ch in s)
+        {
+            switch (ch)
+            {
+                case '\\': sb.Append("\\\\"); break;
+                case '"': sb.Append("\\\""); break;
+                case '\n': sb.Append("\\n"); break;
+                case '\r': sb.Append("\\r"); break;
+                case '\t': sb.Append("\\t"); break;
+                case < ' ': sb.Append("\\u").Append(((int)ch).ToString("x4")); break;
+                default: sb.Append(ch); break;
+            }
+        }
+        return sb.Append('"').ToString();
     }
 
     // ---- comma-operator statement hoisting -------------------------------
