@@ -1,0 +1,3 @@
+int double float long unsigned int int * char * double
+3.0 4.0
+decay=1 qual=1
