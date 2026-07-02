@@ -11,20 +11,16 @@ public sealed partial class CompilerTests
 {
     // ---- _Static_assert / static_assert -----------------------------------
     // `_Static_assert` is a C11 keyword (always reserved). The C23 lowercase
-    // `static_assert` is promoted onto it by the rewriter under -std=c23.
-    // Compile-time only: dotcc parses it and drops it (typed-IR: silently;
-    // the intended final form is an inert comment).
+    // `static_assert` is promoted onto it by the rewriter under -std=c23, and
+    // <assert.h> supplies the C11 macro spelling. Compile-time only: the IR
+    // build EVALUATES the controlling expression via the unified comptime
+    // interpreter — a holding assertion emits nothing (observably identical to
+    // gcc), a zero or non-constant one is a collected compile error.
 
     [Fact]
-    public void Static_assert_file_scope_emits_a_comment_not_a_call()
+    public void Static_assert_file_scope_holds_and_emits_nothing()
     {
         // C11 two-arg form at file scope — always a keyword, so no -std needed.
-        //
-        // FLAGGED: the typed-IR backend silently drops _Static_assert rather than
-        // emitting a `/* static_assert (compile-time, not evaluated): "…" */`
-        // comment. The test verifies compilation succeeds (no throw) and the
-        // assertion text does not appear as an executable call; re-point to the
-        // comment form once the IR emits it.
         var src = WriteTemp("""
             _Static_assert(1, "always true");
             int main() { return 0; }
@@ -45,10 +41,6 @@ public sealed partial class CompilerTests
     {
         // Block scope + the C23 message-less arity. `_Static_assert` is a
         // keyword in every dialect, so this parses even under the default c17.
-        //
-        // FLAGGED: the typed-IR backend silently drops _Static_assert rather than
-        // emitting comment text. The test verifies compilation succeeds without
-        // throwing; re-point to the comment form once the IR emits it.
         var src = WriteTemp("""
             int main() {
                 _Static_assert(sizeof(int) >= 2, "int too small");
@@ -68,15 +60,89 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void Static_assert_failing_at_file_scope_is_a_compile_error()
+    {
+        // A constant-zero controlling expression fails the compile with gcc's
+        // wording, carrying the raw quoted message text.
+        var src = WriteTemp("""
+            _Static_assert(sizeof(int) == 2, "int must be 2 bytes");
+            int main() { return 0; }
+            """);
+        try
+        {
+            var ex = Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }));
+            ex.Message.ShouldContain("static assertion failed: \"int must be 2 bytes\"");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Static_assert_failing_at_block_scope_msgless_is_a_compile_error()
+    {
+        // The message-less arity fails with the bare wording (no suffix).
+        var src = WriteTemp("""
+            int main() {
+                _Static_assert(0);
+                return 0;
+            }
+            """);
+        try
+        {
+            var ex = Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }));
+            ex.Message.ShouldContain("static assertion failed");
+            ex.Message.ShouldNotContain("static assertion failed:");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Static_assert_non_constant_expression_is_rejected()
+    {
+        // The controlling expression must be an integer constant expression.
+        // A variable read — even of a `const int` — is NOT an ICE in C
+        // (gcc/clang reject it the same way).
+        var src = WriteTemp("""
+            int main() {
+                const int x = 1;
+                _Static_assert(x == 1, "not a constant expression");
+                return 0;
+            }
+            """);
+        try
+        {
+            var ex = Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { src }));
+            ex.Message.ShouldContain("expression in static assertion is not constant");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Static_assert_folds_enum_constants_and_ternary()
+    {
+        // The comptime interpreter folds the full ICE surface — enum
+        // constants, ternary, relational/logical — so a holding assertion
+        // built from them compiles clean. (Tagged enum: a bare anonymous
+        // file-scope `enum { … };` is not in the grammar yet.)
+        var src = WriteTemp("""
+            enum Dim { WIDTH = 4, HEIGHT = 8 };
+            _Static_assert(WIDTH < HEIGHT ? 1 : 0, "enum + ternary fold");
+            _Static_assert(WIDTH * HEIGHT == 32 && sizeof(char) == 1, "arithmetic folds");
+            int main() { return 0; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("static unsafe int main()");
+            emitted.ShouldNotContain("enum + ternary fold");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Lowercase_static_assert_is_a_keyword_under_c23()
     {
         // C23 promotes lowercase `static_assert` onto the `_Static_assert`
         // terminal, no <assert.h> needed.
-        //
-        // FLAGGED: the typed-IR backend silently drops static_assert rather than
-        // emitting a comment. The test verifies the keyword promotion fires (no
-        // parse error, main emitted) and the assertion text is not a live call;
-        // re-point to the comment form once the IR emits it.
         var src = WriteTemp("""
             int main() {
                 static_assert(1 + 1 == 2, "math works");
@@ -90,6 +156,30 @@ public sealed partial class CompilerTests
             emitted.ShouldContain("static unsafe int main()");
             // Assertion text not present as a live call.
             emitted.ShouldNotContain("math works");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
+    public void Lowercase_static_assert_via_assert_h_macro_under_c11()
+    {
+        // C11 §7.2: <assert.h> defines `static_assert` → `_Static_assert`,
+        // so the lowercase spelling works pre-C23 through the macro (the
+        // rewriter only promotes the keyword at c23). A failing one must
+        // still fail through the macro path.
+        var src = WriteTemp("""
+            #include <assert.h>
+            static_assert(sizeof(long) == 8, "LP64 long");
+            int main() {
+                static_assert(0, "macro path checks too");
+                return 0;
+            }
+            """);
+        try
+        {
+            var ex = Should.Throw<CompileException>(() =>
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c11")));
+            ex.Message.ShouldContain("static assertion failed: \"macro path checks too\"");
         }
         finally { File.Delete(src); }
     }

@@ -292,9 +292,12 @@ internal sealed partial class IrBuilder
             // `struct Tag;` forward declaration — C# resolves order-independently.
             case C.StructFwd: break;
             // `_Static_assert(expr[, "msg"]);` at file scope — a compile-time-only
-            // assertion. A valid program's assertion holds, so dotcc emits nothing
-            // (observably identical to gcc actually checking it). Both arities.
-            case C.StaticAssert: case C.StaticAssertNoMsg: Gate(2011, "_Static_assert", fn); break;
+            // assertion, EVALUATED here (C11 §6.7.10) via the unified comptime
+            // interpreter. A holding assertion emits nothing; a zero or non-constant
+            // controlling expression is a collected compile error. The message-less
+            // arity gates C23 (it postdates the two-arg C11 form).
+            case C.StaticAssert sa: Gate(2011, "_Static_assert", fn); CheckStaticAssert(sa.Arg2, sa.Arg4, SrcPos.From(fn)); break;
+            case C.StaticAssertNoMsg sa: Gate(2023, "_Static_assert with no message", fn); CheckStaticAssert(sa.Arg2, null, SrcPos.From(fn)); break;
             // `typedef Ret (*Name)(params);` — record Name → fn-ptr type.
             case C.TypedefFnPtr t: _typedefs[Tok(t.Arg4)] = FnPtrType(t.Arg1, t.Arg7); break;
             case C.TypedefFnPtrNoArgs t: _typedefs[Tok(t.Arg4)] = FnPtrType(t.Arg1, null); break;
@@ -1263,8 +1266,10 @@ internal sealed partial class IrBuilder
             case C.StmtStructDef s: BuildStructDef(Tok(s.Arg1), s.Arg3, null, isUnion: false); return EmptyStmt(pos);
             case C.StmtUnionDef s: BuildStructDef(Tok(s.Arg1), s.Arg3, null, isUnion: true); return EmptyStmt(pos);
             // Block-scope `_Static_assert(expr[, "msg"]);` — compile-time only,
-            // emits nothing (same as the file-scope forms). Both arities.
-            case C.StaticAssertStmt: case C.StaticAssertStmtNoMsg: return EmptyStmt(pos);
+            // evaluated exactly like the file-scope forms; a holding assertion
+            // emits nothing. The message-less arity gates C23.
+            case C.StaticAssertStmt s: Gate(2011, "_Static_assert", it); CheckStaticAssert(s.Arg2, s.Arg4, pos); return EmptyStmt(pos);
+            case C.StaticAssertStmtNoMsg s: Gate(2023, "_Static_assert with no message", it); CheckStaticAssert(s.Arg2, null, pos); return EmptyStmt(pos);
             case C.StmtExpr e: return new ExprStmt(BuildExpr(e.Arg0)) { Pos = pos };
             case C.StmtEmpty: return new Block(System.Array.Empty<CStmt>()) { Pos = pos };
             case C.StmtIf s:
@@ -2189,6 +2194,29 @@ internal sealed partial class IrBuilder
         {
             Diagnostics.Add(new Diagnostic(Severity.Warning,
                 $"{context} discards 'const' qualifier from pointer target type", pos, _file));
+        }
+    }
+
+    /// <summary>Evaluate a <c>_Static_assert(expr[, "msg"]);</c> (C11 §6.7.10) at
+    /// compile time via <see cref="ConstEval"/>. The controlling expression must be an
+    /// integer constant expression: a non-constant one (e.g. a <c>const</c> variable
+    /// read — not an ICE in C, matching gcc/clang) or a constant ZERO is a collected
+    /// compile error; non-zero holds and the declaration emits nothing. The optional
+    /// message rides as its raw quoted token text, giving gcc's exact wording
+    /// (<c>static assertion failed: "msg"</c>).</summary>
+    private void CheckStaticAssert(Item exprItem, Item? msgItem, SrcPos pos)
+    {
+        switch (ConstEval(BuildExpr(exprItem)))
+        {
+            case null:
+                Diagnostics.Add(new Diagnostic(Severity.Error,
+                    "expression in static assertion is not constant", pos, _file));
+                break;
+            case 0:
+                var suffix = msgItem is { } m ? ": " + Tok(m) : "";
+                Diagnostics.Add(new Diagnostic(Severity.Error,
+                    "static assertion failed" + suffix, pos, _file));
+                break;
         }
     }
 
