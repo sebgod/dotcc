@@ -570,6 +570,20 @@ internal sealed class CSharpBackend
                 // parens / a void cast (`(void)(a, b)`, `api_check`) to find the comma.
                 var inner = es.Expr;
                 while (inner is Paren pp) { inner = pp.Inner; }
+                // `unreachable()` (C23) → a real C# `throw`, NOT a plain call to
+                // the [DoesNotReturn] helper: C#'s CS0161 "not all code paths
+                // return" analysis only treats a literal `throw` as a control-flow
+                // terminator (it does not consult [DoesNotReturn] on a callee).
+                // Emitting the throw here lets the "can't happen" arm of a
+                // value-returning function type-check with no bogus return —
+                // exactly how __builtin_unreachable lowers to an unreachable
+                // terminator. (The runtime helper stays the resolution target for
+                // any non-statement-position use.)
+                if (IsUnreachableCall(inner))
+                {
+                    sb.Append(pad).Append("throw new System.Diagnostics.UnreachableException(\"unreachable() reached\");\n");
+                    break;
+                }
                 if (inner is CondExpr { Type.Unqualified: CType.VoidType } ct)
                 {
                     // A void-typed ternary in statement position is a real if/else
@@ -991,6 +1005,10 @@ internal sealed class CSharpBackend
     private static bool Terminates(CStmt s) => s switch
     {
         Break or Continue or Return or Goto or ZigErrorThrow => true,
+        // `unreachable()` (C23) lowers to a `throw` (see the ExprStmt emit), so a
+        // section ending in it terminates — kept in sync so the switch machinery
+        // doesn't append a dead `break;` after it (CS0162).
+        ExprStmt es => IsUnreachableCall(es.Expr),
         Block b => b.Stmts.Count > 0 && Terminates(b.Stmts[^1]),
         If f => f.Else is { } e && Terminates(f.Then) && Terminates(e),
         Labeled l => Terminates(l.Body),
@@ -999,6 +1017,17 @@ internal sealed class CSharpBackend
         DeferGuard g => Terminates(g.Body),
         _ => false,
     };
+
+    /// <summary>True when an expression is (a paren-chain around) the C23
+    /// <c>unreachable()</c> call — which the <see cref="ExprStmt"/> emitter lowers
+    /// to a <c>throw</c>. Single source of truth for that recognition so the emit
+    /// and <see cref="Terminates"/> never disagree (a disagreement would leave a
+    /// dead <c>break;</c> or a missing return path).</summary>
+    private static bool IsUnreachableCall(CExpr e)
+    {
+        while (e is Paren p) { e = p.Inner; }
+        return e is Call { Callee: "__dotcc_unreachable" };
+    }
 
     // Render a try/catch body for a SetjmpGuard. C# requires a braced block here
     // (`try stmt;` is invalid), so a single (braceless) C statement is wrapped, and

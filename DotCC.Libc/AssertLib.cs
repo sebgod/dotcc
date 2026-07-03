@@ -103,4 +103,19 @@ public static unsafe partial class Libc
             throw new AssertionFailedException(expr ?? "?");
         }
     }
+
+    /// <summary>
+    /// <c>unreachable()</c> (C23 &lt;stddef.h&gt; §7.21.1) — marks a point the
+    /// program asserts is never reached. Real C makes <em>reaching</em> it
+    /// undefined behavior; dotcc's defined behavior is a loud throw, so a logic
+    /// bug surfaces as a diagnostic instead of silently corrupting. The
+    /// synthetic <c>&lt;stddef.h&gt;</c> expands <c>unreachable()</c> to a call
+    /// here (C23 only). <c>[DoesNotReturn]</c> lets a call satisfy C#'s
+    /// reachability analysis at a switch default / function tail — the same role
+    /// <c>_Noreturn</c> plays — so it composes as the "can't get here" arm of a
+    /// value-returning function without a bogus CS0161.
+    /// </summary>
+    [System.Diagnostics.CodeAnalysis.DoesNotReturn]
+    public static void __dotcc_unreachable() =>
+        throw new System.Diagnostics.UnreachableException("unreachable() reached");
 }
