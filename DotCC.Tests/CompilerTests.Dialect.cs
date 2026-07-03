@@ -330,7 +330,7 @@ public sealed partial class CompilerTests
         try
         {
             var ex = Should.Throw<CompileException>(() =>
-                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse(std), pedanticErrors: true));
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse(std), warnings: WarningFlags.Default | WarningFlags.PedanticErrors));
             ex.Message.ShouldContain(featureNeedle);
             ex.Message.ShouldContain(stdNeedle);
         }
@@ -345,7 +345,7 @@ public sealed partial class CompilerTests
         try
         {
             Should.NotThrow(() =>
-                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c99"), pedanticErrors: true));
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c99"), warnings: WarningFlags.Default | WarningFlags.PedanticErrors));
         }
         finally { File.Delete(src); }
     }
@@ -360,7 +360,7 @@ public sealed partial class CompilerTests
         try
         {
             Should.NotThrow(() =>
-                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), pedanticErrors: true));
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), warnings: WarningFlags.Default | WarningFlags.PedanticErrors));
         }
         finally { File.Delete(src); }
     }
@@ -373,7 +373,7 @@ public sealed partial class CompilerTests
         try
         {
             Should.NotThrow(() =>
-                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), pedanticErrors: true));
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), warnings: WarningFlags.Default | WarningFlags.PedanticErrors));
         }
         finally { File.Delete(src); }
     }
@@ -452,7 +452,7 @@ public sealed partial class CompilerTests
         try
         {
             var ex = Should.Throw<CompileException>(() =>
-                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), pedanticErrors: true));
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), warnings: WarningFlags.Default | WarningFlags.PedanticErrors));
             ex.Message.ShouldContain("_Bool");
             ex.Message.ShouldContain("long long");
         }
@@ -681,7 +681,7 @@ public sealed partial class CompilerTests
         try
         {
             Should.Throw<CompileException>(() =>
-                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), pedanticErrors: true))
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), warnings: WarningFlags.Default | WarningFlags.PedanticErrors))
                 .Message.ShouldContain("_Noreturn");
         }
         finally { File.Delete(src); }

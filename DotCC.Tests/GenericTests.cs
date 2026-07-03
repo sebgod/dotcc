@@ -181,7 +181,7 @@ public sealed class GenericTests
         try
         {
             Should.Throw<CompileException>(() =>
-                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), pedanticErrors: true))
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), warnings: WarningFlags.Default | WarningFlags.PedanticErrors))
                 .Message.ShouldContain("_Generic");
         }
         finally { File.Delete(src); }

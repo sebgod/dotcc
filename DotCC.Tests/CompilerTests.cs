@@ -341,7 +341,7 @@ public sealed partial class CompilerTests
         try
         {
             Should.Throw<CompileException>(() =>
-                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"), pedanticErrors: true))
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"), warnings: WarningFlags.Default | WarningFlags.PedanticErrors))
                 .Message.ShouldContain("`auto` type inference");
         }
         finally { File.Delete(src); }

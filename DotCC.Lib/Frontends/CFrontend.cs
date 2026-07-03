@@ -32,10 +32,12 @@ internal sealed class CFrontend : IFrontend
         var includeDirs = req.IncludeDirs;
         var defines = req.Defines;
         var dialect = req.Dialect;
-        var pedantic = req.Pedantic;
-        var pedanticErrors = req.PedanticErrors;
         var names = req.Names;
-        var warnDiscardedQualifiers = req.WarnDiscardedQualifiers;
+        var warnings = req.Warnings;
+        // -Wpedantic enables the dialect-conformance gate; -pedantic-errors
+        // (Pedantic | AsErrors) escalates its diagnostics to collected errors.
+        var pedantic = (warnings & WarningFlags.Pedantic) != 0;
+        var pedanticErrors = (warnings & WarningFlags.PedanticErrors) == WarningFlags.PedanticErrors;
 
         var includeMap = Compiler.BuildIncludeMap(inputPaths, includeDirs);
         var lexerTable = C.BuildLexer();
@@ -134,7 +136,7 @@ internal sealed class CFrontend : IFrontend
         // parse (preprocessor-era) and IR build (emit-pass), then flush as warnings
         // (-pedantic) or one collected error (-pedantic-errors). Off by default.
         var gate = (pedantic || pedanticErrors) ? new DialectGate(activeDialect) : null;
-        var irBuilder = new Ir.IrBuilder(gate, names ?? new Backends.CSharpNameLegalizer(), embeds, warnDiscardedQualifiers);
+        var irBuilder = new Ir.IrBuilder(gate, names ?? new Backends.CSharpNameLegalizer(), embeds, warnings);
         var irParser = C.BuildParser(C.IdentityVisitor.Instance);
         foreach (var unitPath in inputPaths)
         {

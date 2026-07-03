@@ -37,7 +37,7 @@ public sealed class NarrowingConversionTests
         var prior = Console.Error;
         var sw = new StringWriter();
         Console.SetError(sw);
-        try { Compiler.EmitCSharp(new[] { src }, warnConversion: warnConversion); }
+        try { Compiler.EmitCSharp(new[] { src }, warnings: warnConversion ? WarningFlags.Default | WarningFlags.Conversion : WarningFlags.Default); }
         finally { Console.SetError(prior); }
         return sw.ToString();
     }

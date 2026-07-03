@@ -105,7 +105,7 @@ public sealed class ThreadLocalTests
         try
         {
             Should.Throw<CompileException>(() =>
-                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), pedanticErrors: true))
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), warnings: WarningFlags.Default | WarningFlags.PedanticErrors))
                 .Message.ShouldContain("_Thread_local");
         }
         finally { File.Delete(src); }
