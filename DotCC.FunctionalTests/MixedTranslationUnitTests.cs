@@ -34,7 +34,7 @@ public sealed class MixedTranslationUnitTests
                 File.WriteAllText(p, body);
                 paths.Add(p);
             }
-            return Compiler.EmitCSharp(paths, fileBased: false);
+            return Compiler.EmitCSharp(paths, emit: EmitMode.Csproj);
         }
         finally
         {

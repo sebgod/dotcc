@@ -14,7 +14,7 @@ namespace DotCC.FunctionalTests;
 
 /// <summary>
 /// Library-mode (<c>-shared</c>) end-to-end tests: drives
-/// <c>Compiler.EmitCSharp(libraryMode: true)</c> on an inline C string,
+/// <c>Compiler.EmitCSharp(emit: EmitMode.SharedLib)</c> on an inline C string,
 /// compiles the result with Roslyn as a <c>DynamicallyLinkedLibrary</c>,
 /// loads the assembly, and reflects on the metadata to verify:
 /// <list type="bullet">
@@ -49,8 +49,7 @@ public sealed class LibraryModeTests
                 new[] { tempC },
                 includeDirs: null,
                 defines: null,
-                fileBased: false,
-                libraryMode: true);
+                emit: EmitMode.SharedLib);
 
             // Quick textual sanity checks before doing the heavier Roslyn compile.
             program.ShouldContain("internal static class DotCcLib");
@@ -96,8 +95,7 @@ public sealed class LibraryModeTests
                 new[] { tempC },
                 includeDirs: null,
                 defines: null,
-                fileBased: false,
-                libraryMode: true);
+                emit: EmitMode.SharedLib);
             program.ShouldContain("EntryPoint = \"foo\"");
         }
         finally

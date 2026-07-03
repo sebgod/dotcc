@@ -46,7 +46,7 @@ public sealed partial class CompilerTests
         var src = WriteTemp("int main() { return 0; }");
         try
         {
-            var emitted = Compiler.EmitCSharp(new[] { src }, fileBased: false);
+            var emitted = Compiler.EmitCSharp(new[] { src }, emit: EmitMode.Csproj);
             emitted.ShouldNotContain("#:property");
         }
         finally { File.Delete(src); }

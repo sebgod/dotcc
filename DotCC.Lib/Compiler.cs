@@ -35,9 +35,9 @@ public sealed record ImportOptions(
 /// Public compiler API. Two top-level entry points:
 /// <list type="bullet">
 ///   <item><see cref="EmitCSharp"/> — compile one or more <c>.c</c> translation
-///     units to a single C# source string. Pass <c>fileBased: true</c> for a
-///     .NET 10 file-based program (with the <c>#:property AllowUnsafeBlocks</c>
-///     header); <c>fileBased: false</c> for the csproj-paired shell.</item>
+///     units to a single C# source string. The <see cref="EmitMode"/> selects the
+///     output shape (file-based program, csproj-paired shell, shared library, or
+///     object fragment).</item>
 ///   <item><see cref="Preprocess"/> — run the preprocessor only (-E mode) and
 ///     write the post-expansion token stream to a <see cref="TextWriter"/>.
 ///     Useful from tests to assert <c>#include</c> / <c>#define</c> behavior
@@ -284,24 +284,26 @@ public static class Compiler
     /// <summary>
     /// Compile <paramref name="inputPaths"/> to a single C# source string.
     /// </summary>
-    /// <param name="libraryMode">When true (frontend's <c>-shared</c> flag),
-    /// emit a NativeAOT-publishable shared-library shell: user functions
-    /// live in <c>internal static class DotCcLib</c>, and non-static C
-    /// functions get a matching <c>[UnmanagedCallersOnly]</c> wrapper in
-    /// <c>public static class DotCcExports</c>. Otherwise emit the
-    /// standalone-executable shell with a <c>return main(…);</c> entry.</param>
+    /// <param name="emit">The output shape (see <see cref="EmitMode"/>): a file-based
+    /// program (default), a csproj-paired shell, a <c>-shared</c> shared library, or an
+    /// <c>--emit=obj</c> object fragment. In <see cref="EmitMode.SharedLib"/> the emit is
+    /// a NativeAOT-publishable shared library — user functions in
+    /// <c>internal static class DotCcLib</c>, non-static C functions re-exported via
+    /// <c>[UnmanagedCallersOnly]</c> in <c>public static class DotCcExports</c>, and no
+    /// <c>main</c> required; every other shape emits the standalone-executable shell with
+    /// a <c>return main(…);</c> entry.</param>
     public static string EmitCSharp(
         IReadOnlyList<string> inputPaths,
         IReadOnlyList<string>? includeDirs = null,
         IReadOnlyList<string>? defines = null,
-        bool fileBased = true,
-        bool libraryMode = false,
+        EmitMode emit = EmitMode.File,
         CDialect? dialect = null,
-        bool asObject = false,
         bool debugHeap = false,
         ImportOptions? imports = null,
         WarningFlags warnings = WarningFlags.Default)
     {
+        var libraryMode = emit == EmitMode.SharedLib;
+        var asObject = emit == EmitMode.Object;
         var irBuilder = BuildIr(inputPaths, includeDirs, defines, dialect, warnings: warnings);
         // -Wconversion: collect narrowing-conversion warnings during codegen, then
         // flush to stderr. Off by default (the bit is clear unless -Wconversion set).
@@ -356,7 +358,7 @@ public static class Compiler
             return SerializeFragment(cg.Functions, new Dictionary<string, string>(), cg.Aliases, cg.Globals, cg.MainArity,
                 objImports, objDefs, cg.MainReturnsVoid, cg.MainReturnsErrUnion, cg.MainErrPayloadIsVoid);
         }
-        return BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, fileBased, libraryMode, cg.Exports, debugHeap, importsClass, importsAreStatic, cg.MainReturnsVoid, cg.MainReturnsErrUnion, cg.MainErrPayloadIsVoid);
+        return BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, emit, cg.Exports, debugHeap, importsClass, importsAreStatic, cg.MainReturnsVoid, cg.MainReturnsErrUnion, cg.MainErrPayloadIsVoid);
     }
 
     /// <summary>
@@ -588,7 +590,7 @@ public static class Compiler
         CDialect? dialect = null,
         WarningFlags warnings = WarningFlags.Default)
         => EmitCSharp(new[] { inputPath }, includeDirs, defines,
-                      fileBased: false, libraryMode: false, dialect, asObject: true, warnings: warnings);
+                      emit: EmitMode.Object, dialect: dialect, warnings: warnings);
 
     private static string SerializeFragment(
         string functions, IReadOnlyDictionary<string, string> typeDecls, string aliases, string globals, int mainArity,
@@ -622,9 +624,10 @@ public static class Compiler
     /// shared header's declarations), then wrap in the shell + runtime.
     /// </summary>
     public static string LinkObjects(
-        IReadOnlyList<string> objectPaths, bool fileBased = true, bool libraryMode = false, bool debugHeap = false,
+        IReadOnlyList<string> objectPaths, EmitMode emit = EmitMode.File, bool debugHeap = false,
         ImportOptions? imports = null)
     {
+        var libraryMode = emit == EmitMode.SharedLib;
         var typeByName = new Dictionary<string, string>(StringComparer.Ordinal); // first wins
         var typeOrder = new List<string>();
         var aliasLines = new List<string>();
@@ -745,7 +748,7 @@ public static class Compiler
             if (survivors.Count > 0) { importsClass = RenderImportsClass(survivors, imports, libraryMode); }
         }
         return BuildShell(mainArity, functions.ToString(), structDecls.ToString(), aliasText, globalText,
-                          fileBased, libraryMode, System.Array.Empty<EmitHelpers.Export>(), debugHeap, importsClass,
+                          emit, System.Array.Empty<EmitHelpers.Export>(), debugHeap, importsClass,
                           importsAreStatic: false, mainReturnsVoid: mainReturnsVoid,
                           mainReturnsErrUnion: mainReturnsErrUnion, mainErrPayloadIsVoid: mainErrPayloadIsVoid);
     }
@@ -1262,8 +1265,7 @@ public static class Compiler
         string structDecls,
         string usingAliases,
         string globals,
-        bool fileBased,
-        bool libraryMode,
+        EmitMode emit,
         IReadOnlyList<EmitHelpers.Export> exports,
         bool debugHeap = false,
         string importsClass = "",
@@ -1272,7 +1274,7 @@ public static class Compiler
         bool mainReturnsErrUnion = false,
         bool mainErrPayloadIsVoid = false)
     {
-        if (libraryMode)
+        if (emit == EmitMode.SharedLib)
         {
             return BuildLibraryShell(emittedFnList, structDecls, usingAliases, globals, exports, importsClass, importsAreStatic);
         }
@@ -1287,7 +1289,7 @@ public static class Compiler
         // below so the emitted .cs is self-contained even without a
         // <PackageReference Include="DotCC.Libc"> in scope.
         var runtimeBlock = _runtimeBlock.Value;
-        var header = fileBased ? "#:property AllowUnsafeBlocks=true\n\n" : string.Empty;
+        var header = emit == EmitMode.File ? "#:property AllowUnsafeBlocks=true\n\n" : string.Empty;
         // -fsanitize=address: flip the checked debug heap on before any user
         // code (or the embedded runtime) allocates, so every malloc/free
         // downstream carries the header + redzone the checked `free` validates.
