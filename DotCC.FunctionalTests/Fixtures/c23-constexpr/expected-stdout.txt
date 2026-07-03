@@ -1,0 +1,1 @@
+case=ten rows=3 cols=4 cells=12 sizeof=48 bitfield=4 sum=660 sel=int

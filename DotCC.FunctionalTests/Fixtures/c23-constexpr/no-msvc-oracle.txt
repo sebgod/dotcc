@@ -1,0 +1,5 @@
+cl.exe's C frontend does not implement C23 `constexpr` object declarations
+(a brand-new C23 keyword) — consistent with its lack of the other bare C23
+keywords (bool/true/false, enum underlying types) even under /std:clatest,
+verified on MSVC toolset 14.51 (VS 2026). The gcc oracle (-std=c2x) covers
+this fixture instead.

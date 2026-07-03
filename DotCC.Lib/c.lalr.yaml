@@ -448,6 +448,12 @@ symbols:
   # and <threads.h> supplies the C11 macro pre-C23.
   - '_Thread_local'    # 184 keyword (C11) — thread storage duration
 
+  # `constexpr` (C23 §6.7.1) — compile-time constant object declaration. NO lexer
+  # rule (same as `typeof`): the lowercase spelling lexes as an ID and
+  # DialectKeywordRewriter promotes it onto this terminal only under -std=c23, so
+  # pre-C23 code may keep using `constexpr` as an ordinary identifier.
+  - 'constexpr'        # 185 keyword (C23) — compile-time constant object
+
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
   # Item carries FnList's already-built C# source string.
@@ -872,6 +878,12 @@ productions:
       # the spec resolution, dropped from the type. File-scope only (a
       # block-scope `static _Thread_local` is a loud lowering rejection).
       - { lhs: TypeSpec, rhs: ['_Thread_local'], action: tsThreadLocal }
+      # `constexpr` (C23) — compile-time constant object declaration. Same
+      # TypeSpec treatment as _Thread_local: recorded by the spec resolution,
+      # dropped from the type. The declared name binds its ConstEval'd value
+      # (Symbol.ConstValue), so it resolves in every ICE position — array
+      # bounds, case labels, _Static_assert, bit-field widths, _Generic.
+      - { lhs: TypeSpec, rhs: ['constexpr'], action: tsConstexpr }
       # `_Complex` (C99) — complex type spec; resolves (with a float base) to
       # System.Numerics.Complex in ResolveTypeSpec.
       - { lhs: TypeSpec, rhs: ['_Complex'], action: tsComplex }

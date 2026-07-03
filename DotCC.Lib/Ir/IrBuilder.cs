@@ -337,6 +337,7 @@ internal sealed partial class IrBuilder
     private void BuildGlobalDecls(Item typeItem, Item listItem, Storage storage)
     {
         _sawThreadLocalSpec = false; // consumed below: set by THIS declaration's spec resolution
+        _sawConstexprSpec = false;   // same discipline
         WalkDeclList(typeItem, listItem, (name, initItem, type) =>
         {
             // A file-scope array has its own productions (pinned GlobalArray
@@ -347,8 +348,12 @@ internal sealed partial class IrBuilder
             }
             var sym = _symbols.Declare(new Symbol
             {
-                Name = name, Kind = SymKind.Var, Type = type, Storage = storage, IsGlobal = true,
+                Name = name, Kind = SymKind.Var, Storage = storage, IsGlobal = true,
+                // A constexpr object is const-qualified (C23 §6.7.1p5 implies it),
+                // so the standard write-to-const error covers assignments.
+                Type = _sawConstexprSpec ? type.WithQuals(TypeQual.Const) : type,
                 IsThreadLocal = _sawThreadLocalSpec,
+                IsConstexpr = _sawConstexprSpec,
             });
             if (storage != Storage.Extern)
             {
@@ -364,6 +369,7 @@ internal sealed partial class IrBuilder
                         $"'{name}': a non-zero-initialized _Thread_local is not supported (a .NET [ThreadStatic] initializer runs only on the first thread)",
                         SrcPos.From(typeItem), _file));
                 }
+                if (sym.IsConstexpr) { BindConstexpr(sym, gInit, SrcPos.From(typeItem)); }
                 Globals.Add(new GlobalVar(sym, gInit));
             }
         });
@@ -385,6 +391,10 @@ internal sealed partial class IrBuilder
     // reset + consumed by BuildGlobalDecls (block scope rejects immediately in
     // RecordDeclSpecs instead, so the flag never carries block-scope state).
     private bool _sawThreadLocalSpec;
+    // `constexpr` (C23) seen by a declaration's spec resolution — reset + consumed
+    // by BuildGlobalDecls (file scope) and BuildDeclList (block scope; C23 allows
+    // both). The declared symbol binds its ConstEval'd value.
+    private bool _sawConstexprSpec;
     private bool _pendingAttrNoreturn;
     private string? _pendingAttrDeprecated;
 
@@ -411,7 +421,67 @@ internal sealed partial class IrBuilder
                     pos, _file));
             }
         }
+        if (specs.Contains("constexpr"))
+        {
+            // No Gate: the spelling only becomes a keyword via rule-2 promotion
+            // under -std=c23, so a pre-C23 dialect rejects structurally (the ID
+            // never reaches here). C23 §6.7.1p5 forbids combining with
+            // _Thread_local.
+            if (specs.Contains("_Thread_local"))
+            {
+                Diagnostics.Add(new Diagnostic(Severity.Error,
+                    "'constexpr' may not be used with '_Thread_local'", pos, _file));
+            }
+            _sawConstexprSpec = true;
+        }
     }
+
+    /// <summary>Bind a C23 <c>constexpr</c> object's compile-time value onto its
+    /// symbol: the initializer must exist, fold via <see cref="ConstEval"/>, and be
+    /// representable in the declared type (all three are C23 constraints; the first
+    /// and last use gcc's exact wording). The value lands in
+    /// <see cref="Symbol.ConstValue"/>, which the comptime interpreter substitutes
+    /// at every use in a constant expression. V1 is the integer family — a float/
+    /// pointer/struct/array constexpr (legal C23) is a loud unsupported cut.</summary>
+    private void BindConstexpr(Symbol sym, CExpr? init, SrcPos pos)
+    {
+        if (!sym.Type.IsInteger)
+        {
+            throw new IrUnsupportedException(
+                $"'{sym.Name}': only integer constexpr objects are supported (float/pointer/struct/array constexpr is not built yet)");
+        }
+        if (init is null)
+        {
+            Diagnostics.Add(new Diagnostic(Severity.Error,
+                "'constexpr' requires an initialized data declaration", pos, _file));
+            return;
+        }
+        if (ConstEval(init) is not { } v)
+        {
+            Diagnostics.Add(new Diagnostic(Severity.Error,
+                "initializer element is not constant", pos, _file));
+            return;
+        }
+        if (!ConstexprRepresentable(v, sym.Type))
+        {
+            Diagnostics.Add(new Diagnostic(Severity.Error,
+                "'constexpr' initializer not representable in type of object", pos, _file));
+            return;
+        }
+        sym.ConstValue = v;
+    }
+
+    /// <summary>C23 §6.7.1p6: a constexpr initializer must be exactly representable
+    /// in the object's type. Derived from <see cref="CType.Prim"/>'s width +
+    /// signedness; 8-byte types accept any <c>long</c> bit pattern, and non-Prim
+    /// integer types (enum) skip the check.</summary>
+    private static bool ConstexprRepresentable(long v, CType t) => t.Unqualified switch
+    {
+        CType.Prim { Bytes: 8 } => true,
+        CType.Prim { Signed: true, Bytes: var b } => v >= -(1L << (b * 8 - 1)) && v < 1L << (b * 8 - 1),
+        CType.Prim { Signed: false, Bytes: var b } => v >= 0 && v < 1L << (b * 8),
+        _ => true,
+    };
 
     /// <summary>Walk an <c>AttrList</c> collecting the attributes dotcc lowers:
     /// `noreturn` (a bare ID pre-C23; the promoted `_Noreturn` keyword under c23)
@@ -1226,6 +1296,7 @@ internal sealed partial class IrBuilder
         C.TsInline => "inline",
         C.TsNoreturn => "_Noreturn",
         C.TsThreadLocal => "_Thread_local",
+        C.TsConstexpr => "constexpr",
         C.TsComplex => "_Complex",
         _ => throw new IrUnsupportedException(TypeName(spec)),
     };
@@ -1420,7 +1491,7 @@ internal sealed partial class IrBuilder
                 case "long": lng++; break;
                 // C99 _Complex — every width widens to the double-backed Complex.
                 case "_Complex": isComplex = true; break;
-                case "inline" or "_Noreturn" or "_Thread_local": break; // ignored for type purposes here
+                case "inline" or "_Noreturn" or "_Thread_local" or "constexpr": break; // ignored for type purposes here
                 case "void": base_ = "void"; baseCount++; break;
                 case "char": base_ = "char"; baseCount++; break;
                 case "int": base_ = "int"; baseCount++; break;
@@ -1912,10 +1983,16 @@ internal sealed partial class IrBuilder
         {
             if (scalars.Count > 0) { stmts.Add(new DeclStmt(scalars.ToArray())); scalars.Clear(); }
         }
+        _sawConstexprSpec = false; // consumed below (C23 allows block-scope constexpr)
         WalkDeclList(typeItem, listItem, (name, initItem, type) =>
         {
             if (type.Unqualified is CType.Array)
             {
+                if (_sawConstexprSpec)
+                {
+                    throw new IrUnsupportedException(
+                        $"'{name}': only integer constexpr objects are supported (float/pointer/struct/array constexpr is not built yet)");
+                }
                 // Same lowering as a standalone fixed-size array decl: the symbol
                 // keeps the (possibly nested) array type so sizeof/the length idiom
                 // resolve; the stackalloc extent is the flattened product.
@@ -1933,9 +2010,17 @@ internal sealed partial class IrBuilder
                     null));
                 return;
             }
-            var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type, Storage = Storage.Auto });
+            var sym = _symbols.Declare(new Symbol
+            {
+                Name = name, Kind = SymKind.Var, Storage = Storage.Auto,
+                // const-qualified for the same write-to-const coverage as the
+                // file-scope form.
+                Type = _sawConstexprSpec ? type.WithQuals(TypeQual.Const) : type,
+                IsConstexpr = _sawConstexprSpec,
+            });
             CExpr? sInit = null;
             if (initItem is { } ii) { sInit = BuildExpr(ii); EnsureNotEmbed(sInit); CheckQualifierDiscard(sInit, sym.Type, SrcPos.From(ii), "initialization"); }
+            if (sym.IsConstexpr) { BindConstexpr(sym, sInit, SrcPos.From(typeItem)); }
             scalars.Add(new LocalDecl(sym, sInit));
         });
         Flush();
