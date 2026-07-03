@@ -382,6 +382,13 @@ jobs:
       ZIG_VERSION: '0.16.0'
       ZIG_SHA256: '70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00'
       DOTCC_RUN_ZIG_ORACLE: '1'
+      # Share zig's caches across all oracle invocations. Each test case builds in
+      # a fresh Guid work dir, so zig's LOCAL cache (.zig-cache under the build cwd)
+      # would otherwise be cold for every one of the ~138 programs; pinning both
+      # cache dirs turns the repeated stdlib/compiler-rt work into cache hits.
+      # (ZigOracle.RunProcess inherits the job env, so this reaches every spawn.)
+      ZIG_LOCAL_CACHE_DIR: /tmp/zig-local-cache
+      ZIG_GLOBAL_CACHE_DIR: /tmp/zig-global-cache
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -440,6 +447,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # Windows Defender's real-time scan hooks every file create and every
+      # first-execute; the oracle writes ~138 fresh .exe files plus zig-cache
+      # trees, each scanned synchronously. Excluding the ephemeral CI dirs is
+      # safe (nothing in them outlives the job) and is a well-known ~2x for
+      # compile-heavy Windows CI. Best-effort: a cmdlet failure only costs the
+      # speedup, so warn rather than fail the leg.
+      - name: Exclude work/cache dirs from Defender real-time scanning
+        shell: pwsh
+        run: |
+          $paths = @($env:GITHUB_WORKSPACE, $env:RUNNER_TEMP, $env:TEMP)
+          try {
+            Add-MpPreference -ExclusionPath $paths
+            Write-Host "Defender exclusions added: $($paths -join '; ')"
+          } catch {
+            Write-Warning "Add-MpPreference failed ($_) - continuing without exclusions"
+          }
+
       - name: Setup .NET
         uses: actions/setup-dotnet@v5
         with:
@@ -476,6 +500,15 @@ jobs:
         run: dotnet build dotcc.sln -c Release --no-restore --nologo -p:UseLocalLalrCc=false
 
       - name: Zig differential oracle
+        # Same shared-cache rationale as the Linux leg (each case's fresh work dir
+        # would otherwise cold-start zig's local cache ~138 times) — but it matters
+        # far more here: NTFS small-file I/O + Defender scanning make the re-derived
+        # cache the dominant cost (this leg ran 4.4x slower than ubuntu on
+        # identical-CPU runners while the compute-bound Build step ran 1.0x).
+        # Step-level env because the `runner` context is not available in job env.
+        env:
+          ZIG_LOCAL_CACHE_DIR: ${{ runner.temp }}\zig-local-cache
+          ZIG_GLOBAL_CACHE_DIR: ${{ runner.temp }}\zig-global-cache
         run: >
           dotnet test DotCC.FunctionalTests/DotCC.FunctionalTests.csproj
           -c Release --no-build --nologo --filter "FullyQualifiedName~ZigOracleTests"
