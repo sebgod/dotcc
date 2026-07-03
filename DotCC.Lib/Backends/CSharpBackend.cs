@@ -1474,6 +1474,7 @@ internal sealed class CSharpBackend
             case LitFloat f: return (_target.RenderFloatLit(f), PPrimary);
             case LitStr s: return (DotCC.EmitHelpers.EncodeStringLiteral(s.Segments), PPrimary);
             case LitU16Str s: return (DotCC.EmitHelpers.EncodeU16StringLiteral(s.Segments), PPrimary);
+            case LitU32Str s: return (DotCC.EmitHelpers.EncodeU32StringLiteral(s.Segments), PPrimary);
             case NullPtr: return ("null", PPrimary);
             // A `comptime EXPR` (Milestone T) is resolved to a literal before emit — render that.
             case ComptimeFold cf: return Render(cf.Resolved

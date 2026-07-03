@@ -342,6 +342,17 @@ public abstract record CType
     /// diagnostics/<c>sizeof</c>; the backend renders both to <c>char</c>, so every
     /// <c>char</c>-coercion rule applies unchanged.</summary>
     public static readonly CType WChar = new Prim("wchar_t", 2, true, false);
+
+    /// <summary>C11 <c>char32_t</c> (<c>&lt;uchar.h&gt;</c>) — an unsigned 32-bit code
+    /// unit (<c>uint_least32_t</c>). dotcc lowers it to C# <c>uint</c> (a plain 32-bit
+    /// unsigned integer, NOT <see cref="System.Text.Rune"/> — char32_t is any value,
+    /// not a validated scalar), so <c>char32_t*</c> arithmetic walks 4 bytes and a
+    /// <c>U"…"</c> literal carries real UTF-32 (one code unit per Unicode scalar — an
+    /// astral char is ONE char32_t, unlike the two UTF-16 units of <see cref="Char16"/>).
+    /// A distinct Prim (not <see cref="UInt"/>) so the backend keeps type fidelity for
+    /// diagnostics/<c>sizeof</c>; it renders to <c>uint</c>, which is already a fully
+    /// wired C# integer type (no coercion-table entry needed, unlike <c>char</c>).</summary>
+    public static readonly CType Char32 = new Prim("char32_t", 4, true, false);
     public static readonly CType Int = new Prim("int", 4, true, true);
     public static readonly CType UInt = new Prim("unsigned int", 4, true, false);
     public static readonly CType Long = new Prim("long", 8, true, true);

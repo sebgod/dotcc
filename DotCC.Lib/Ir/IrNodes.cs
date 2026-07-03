@@ -65,6 +65,13 @@ public sealed record LitStr(IReadOnlyList<string> Segments) : CExpr;
 /// the 16-bit-code-unit sibling of <see cref="LitStr"/>.</summary>
 public sealed record LitU16Str(IReadOnlyList<string> Segments) : CExpr;
 
+/// <summary>A C11 <c>char32_t</c> string literal (<c>U"…"</c>) — the raw adjacent
+/// quoted segments with the <c>U</c> prefix already stripped. Decays to
+/// <c>char32_t*</c> (C# <c>uint*</c>). The backend lowers it to a pooled, pinned
+/// <c>Libc.L32("…")</c> pointer over UTF-32 data — the 32-bit-code-unit sibling of
+/// <see cref="LitU16Str"/> (one code unit per Unicode scalar).</summary>
+public sealed record LitU32Str(IReadOnlyList<string> Segments) : CExpr;
+
 /// <summary>A reference to a resolved variable / parameter / function.</summary>
 public sealed record VarRef(Symbol Sym) : CExpr;
 

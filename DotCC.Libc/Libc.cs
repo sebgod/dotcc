@@ -667,6 +667,33 @@ public static unsafe partial class Libc
         return (char*)actual;
     }
 
+    // char32_t (UTF-32) string-literal pool — the 32-bit sibling of the L16 pool.
+    // C# has no `u32` RVA literal, so a U"…" literal can't ride the zero-copy L(...)
+    // path either; pin its UTF-32 data on the POH ONCE, cached per distinct literal.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, IntPtr> _u32Literals =
+        new(StringComparer.Ordinal);
+
+    /// <summary><c>L32("…")</c> — return a stable <c>uint*</c> (= char32_t*) to a
+    /// pinned, NUL-terminated copy of a C11 <c>U"…"</c> literal's UTF-32 data. The
+    /// argument is a C# (UTF-16) string literal that already includes its trailing NUL
+    /// char; <see cref="System.Text.Encoding.UTF32"/> folds it — surrogate pairs and
+    /// all — into little-endian 4-byte code units (dotcc is LP64/LE, so the encoded
+    /// byte stream IS the <c>uint</c> array). Each distinct literal is pinned once on
+    /// the POH and rooted for the program's life, exactly like <see cref="L16"/>.</summary>
+    public static uint* L32(string s)
+    {
+        if (_u32Literals.TryGetValue(s, out var hit)) { return (uint*)hit; }   // lock-free hot path
+        // Reuse the BCL's UTF-16 → UTF-32 fold: GetBytes yields LE 4-byte scalars,
+        // no BOM, and encodes the trailing '\0' as a zero code unit (the terminator).
+        var bytes = System.Text.Encoding.UTF32.GetBytes(s);
+        var arr = GC.AllocateUninitializedArray<uint>(bytes.Length / 4, pinned: true);
+        System.Buffer.BlockCopy(bytes, 0, arr, 0, bytes.Length);
+        var ptr = (IntPtr)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(arr));
+        var actual = _u32Literals.GetOrAdd(s, ptr);
+        if (actual == ptr) { lock (_globalArrayRoots) { _globalArrayRoots.Add(arr); } }
+        return (uint*)actual;
+    }
+
     // ── <signal.h> ─────────────────────────────────────────────────────
 
     private static unsafe delegate*<int, void> _sigintHandler;

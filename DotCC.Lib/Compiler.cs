@@ -215,6 +215,8 @@ public static class Compiler
                         // pre-seeded in IrBuilder._typedefs to CType.Char16 → C# char.
         "wchar_t",      // <wchar.h> — likewise pre-seeded in IrBuilder._typedefs to
                         // CType.WChar → C# char (dotcc's MSVC-shaped 16-bit wchar_t).
+        "char32_t",     // <uchar.h> — C11 UTF-32 code unit. Pre-seeded in
+                        // IrBuilder._typedefs to CType.Char32 → C# uint.
     };
 
     /// <summary>
