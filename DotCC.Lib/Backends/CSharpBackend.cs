@@ -725,6 +725,11 @@ internal sealed class CSharpBackend
                 sb.Append(pad).Append($"for ({init}; {cond}; {post})\n");
                 WithNormalBreak(() => Nested(sb, fr.Body, ind));
                 break;
+            case FallthroughMarker:
+                // C23 `[[fallthrough]];` — no codegen. RenderSwitch synthesizes the
+                // fall-through `goto case` regardless (the marker does NOT terminate);
+                // it exists only to suppress the -Wimplicit-fallthrough warning.
+                break;
             default:
                 throw new IrUnsupportedException("codegen stmt " + s.GetType().Name);
         }

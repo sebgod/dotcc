@@ -513,6 +513,18 @@ internal sealed partial class IrBuilder
         }
     }
 
+    /// <summary>True when an <c>AttrList</c> contains the C23 <c>[[fallthrough]]</c>
+    /// attribute (a bare identifier). Recognized structurally — like the attributes in
+    /// <see cref="CollectDeclAttrs"/> — but kept separate: fallthrough attaches to a
+    /// statement (a switch fall-through point), not to a declared symbol, so it drives
+    /// <see cref="CheckImplicitFallthrough"/> rather than a <c>_pendingAttr*</c> flag.</summary>
+    private bool AttrListHasFallthrough(Item it) => it.Content switch
+    {
+        C.AttrListCons c => AttrListHasFallthrough(c.Arg0) || AttrListHasFallthrough(c.Arg2),
+        C.AttrIdent a => Tok(a.Arg0) == "fallthrough",
+        _ => false,
+    };
+
     /// <summary>The decoded UTF-8 text of a string-literal expression item, or null
     /// when the expression isn't a plain string literal. Structural (AST) recognition;
     /// adjacent segments concatenate and escapes decode through the same
@@ -1669,8 +1681,12 @@ internal sealed partial class IrBuilder
             // C23 `[[attr]]` prepending a statement / block-scope declaration —
             // ACCEPTED + IGNORED; gate C23, unwrap to the inner statement. The
             // bare attribute-declaration `[[fallthrough]];` arrives here as a
-            // wrapped EMPTY statement.
-            case C.AttrStmt s: Gate(2023, "[[attributes]]", it); return BuildStmt(s.Arg4);
+            // wrapped EMPTY statement — it alone leaves a trace (a FallthroughMarker)
+            // so BuildSwitch's -Wimplicit-fallthrough check can see it was intended.
+            case C.AttrStmt s:
+                Gate(2023, "[[attributes]]", it);
+                if (AttrListHasFallthrough(s.Arg1)) { return new FallthroughMarker { Pos = pos }; }
+                return BuildStmt(s.Arg4);
             case C.StmtExpr e:
             {
                 var stmtExpr = BuildExpr(e.Arg0);
@@ -1796,7 +1812,67 @@ internal sealed partial class IrBuilder
         foreach (var it in raw) { Walk(it); }
         Flush();
         _symbols.ExitScope();
+        if ((_warnings & WarningFlags.ImplicitFallthrough) != 0) { CheckImplicitFallthrough(sections); }
         return new Switch(subject, sections) { Pos = pos };
+    }
+
+    /// <summary>gcc/clang <c>-Wimplicit-fallthrough</c> (opt-in): warn on a NON-EMPTY
+    /// switch section that falls through into the next label without a C23
+    /// <c>[[fallthrough]];</c> marker. The last section is exempt (nothing follows to
+    /// fall INTO), and a genuinely empty section — stacked labels like
+    /// <c>case 0: case 1:</c> — is merged into the next by <see cref="BuildSwitch"/>, so
+    /// neither of those fires. A section that ends control flow (break/return/goto/
+    /// <c>unreachable()</c>) doesn't fall through. The warning fires EXACTLY when the
+    /// backend would synthesize an implicit <c>goto case</c> and no marker excused it —
+    /// so it can't disagree with the emitted code. gcc-verbatim wording.</summary>
+    private void CheckImplicitFallthrough(IReadOnlyList<SwitchSection> sections)
+    {
+        for (var i = 0; i < sections.Count - 1; i++)   // last section: nothing to fall INTO
+        {
+            var body = sections[i].Body;
+            if (body.Count == 0) { continue; }                  // empty (stacked labels) — fine
+            var last = body[^1];
+            if (EndsWithFallthrough(last)) { continue; }        // explicit [[fallthrough]]; — fine
+            if (StmtTerminates(last)) { continue; }             // break/return/goto/unreachable — fine
+            Diagnostics.Add(new Diagnostic(Severity.Warning, "this statement may fall through", last.Pos, _file));
+        }
+    }
+
+    /// <summary>True when a statement's effective last statement is a
+    /// <see cref="FallthroughMarker"/> — recursing into a trailing lone <c>{ … }</c>
+    /// block so <c>case X: { …; [[fallthrough]]; }</c> is recognized as well as the
+    /// brace-less <c>case X: …; [[fallthrough]];</c>. Mirrors the block-recursion in
+    /// <see cref="StmtTerminates"/>.</summary>
+    private static bool EndsWithFallthrough(CStmt s) => s switch
+    {
+        FallthroughMarker => true,
+        Block b => b.Stmts.Count > 0 && EndsWithFallthrough(b.Stmts[^1]),
+        _ => false,
+    };
+
+    /// <summary>Does control flow leave this statement without falling out the bottom?
+    /// The IR-side mirror of <c>CSharpBackend.Terminates</c> (kept in step with it), used
+    /// by the <c>-Wimplicit-fallthrough</c> check so the warning matches the code the
+    /// backend actually synthesizes. <c>unreachable()</c> lowers to a <c>throw</c>, so a
+    /// case ending in it terminates too.</summary>
+    private static bool StmtTerminates(CStmt s) => s switch
+    {
+        Break or Continue or Return or Goto or ZigErrorThrow => true,
+        ExprStmt es => IsUnreachableExpr(es.Expr),
+        Block b => b.Stmts.Count > 0 && StmtTerminates(b.Stmts[^1]),
+        If f => f.Else is { } e && StmtTerminates(f.Then) && StmtTerminates(e),
+        Labeled l => StmtTerminates(l.Body),
+        DeferGuard g => StmtTerminates(g.Body),
+        _ => false,
+    };
+
+    /// <summary>True when an expression is (a paren-chain around) the C23
+    /// <c>unreachable()</c> call — which both backends lower to a <c>throw</c>. Mirrors
+    /// <c>CSharpBackend.IsUnreachableCall</c>.</summary>
+    private static bool IsUnreachableExpr(CExpr e)
+    {
+        while (e is Paren p) { e = p.Inner; }
+        return e is Call { Callee: "__dotcc_unreachable" };
     }
 
     /// <summary>True when a statement is a <c>case</c>/<c>default</c> label,

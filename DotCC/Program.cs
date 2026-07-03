@@ -79,6 +79,10 @@ internal static class Program
         {
             Description = "Suppress the warning for an implicit conversion that discards a const qualifier from a pointer's pointee (passing/assigning/returning a const T* where a T* is expected). On by default, like gcc -Wdiscarded-qualifiers. Does NOT affect the write-to-const error.",
         };
+        var wimplicitFallthroughOpt = new Option<bool>("-Wimplicit-fallthrough")
+        {
+            Description = "Warn on a non-empty switch case that falls through to the next label without a [[fallthrough]]; marker (C23). Off by default, like gcc/clang (needs -Wextra or an explicit opt-in). A comment such as /* fall through */ does NOT suppress it — dotcc strips comments in the preprocessor, so only the attribute does.",
+        };
         var sanitizeOpt = new Option<string?>("-fsanitize")
         {
             Description = "Enable a sanitizer. Only 'address' is modeled: routes the emitted program's malloc/calloc/realloc/free through a checked debug heap (redzone overflow + bad/double-free detection, a heap-only subset of clang's -fsanitize=address). DOTCC_DEBUG_HEAP=1 is the runtime-override equivalent.",
@@ -113,7 +117,7 @@ internal static class Program
         var root = new RootCommand("dotcc — a C compiler frontend that transpiles to .NET 10 / C# 14.")
         {
             inputArg, outOpt, emitOpt, targetOpt, preprocessOpt, includeOpt, defineOpt, compileOpt, sharedOpt, stdOpt,
-            pedanticOpt, pedanticErrorsOpt, wconversionOpt, wnoDiscardedQualifiersOpt, sanitizeOpt, mdOpt, mmdOpt, mfOpt, mtOpt, linkOpt, libDirOpt,
+            pedanticOpt, pedanticErrorsOpt, wconversionOpt, wnoDiscardedQualifiersOpt, wimplicitFallthroughOpt, sanitizeOpt, mdOpt, mmdOpt, mfOpt, mtOpt, linkOpt, libDirOpt,
         };
         // Accept-and-ignore unknown flags (-Wall, -O2, -g, -f*, -m*, …) instead
         // of erroring out, so dotcc survives being driven by ./configure / make,
@@ -161,6 +165,7 @@ internal static class Program
             var warnings = WarningFlags.None;
             if (!parse.GetValue(wnoDiscardedQualifiersOpt)) { warnings |= WarningFlags.DiscardedQualifiers; }
             if (parse.GetValue(wconversionOpt)) { warnings |= WarningFlags.Conversion; }
+            if (parse.GetValue(wimplicitFallthroughOpt)) { warnings |= WarningFlags.ImplicitFallthrough; }
             if (parse.GetValue(pedanticErrorsOpt)) { warnings |= WarningFlags.PedanticErrors; }
             else if (parse.GetValue(pedanticOpt)) { warnings |= WarningFlags.Pedantic; }
             // -fsanitize=address[,...]: enable the checked debug heap. Other

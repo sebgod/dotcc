@@ -529,6 +529,11 @@ internal sealed partial class WatBackend
                 EmitSwitch(sw);
                 break;
 
+            case FallthroughMarker:
+                // C23 `[[fallthrough]];` — a marker for the -Wimplicit-fallthrough
+                // check only; no codegen.
+                break;
+
             case CaseLabelStmt:
                 throw new IrUnsupportedException("a case/default label nested inside another statement (Duff's device) is not supported on the wat target");
 
