@@ -462,6 +462,14 @@ symbols:
   - U32CHAR        # 187 char32_t char constant — U'x'
   - U32StringSeq   # 188 non-terminal: a run of adjacent U"…" literals
 
+  # C23 char8_t literals (<uchar.h>). `u8"…"` is a UTF-8 string (char8_t* → C#
+  # byte*); `u8'x'` is a char8_t constant. dotcc's plain narrow strings are
+  # ALREADY UTF-8, so u8"…" lowers on the SAME byte path (Libc.L(…u8)) — the
+  # `u8`-prefixed lexer rules below must precede the `u"…"` / STRING rules.
+  - U8STRING       # 189 char8_t string literal — u8"…"
+  - U8CHAR         # 190 char8_t char constant — u8'x'
+  - U8StringSeq    # 191 non-terminal: a run of adjacent u8"…" literals
+
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
   # Item carries FnList's already-built C# source string.
@@ -657,6 +665,9 @@ productions:
       # char32_t file-scope array from a U"…" literal (same shapes, 32-bit decode).
       - { lhs: Fn, rhs: [Type, ID, ArrDims, '=', U32StringSeq, ';'],        action: globalU32CharArrStrSized }
       - { lhs: Fn, rhs: [Type, ID, '[', ']', '=', U32StringSeq, ';'],       action: globalU32CharArrStr }
+      # char8_t file-scope array from a u8"…" literal (same shapes, UTF-8 byte decode).
+      - { lhs: Fn, rhs: [Type, ID, ArrDims, '=', U8StringSeq, ';'],         action: globalU8CharArrStrSized }
+      - { lhs: Fn, rhs: [Type, ID, '[', ']', '=', U8StringSeq, ';'],        action: globalU8CharArrStr }
       # `static` file-scope arrays — internal linkage is a no-op (never exported),
       # so each lowers identically to its plain counterpart; `static` is consumed.
       - { lhs: Fn, rhs: ['static', Type, ID, ArrDims, ';'],                           action: globalStaticArr }
@@ -671,6 +682,8 @@ productions:
       - { lhs: Fn, rhs: ['static', Type, ID, '[', ']', '=', WStringSeq, ';'],          action: globalStaticWCharArrStr }
       - { lhs: Fn, rhs: ['static', Type, ID, ArrDims, '=', U32StringSeq, ';'],         action: globalStaticU32CharArrStrSized }
       - { lhs: Fn, rhs: ['static', Type, ID, '[', ']', '=', U32StringSeq, ';'],        action: globalStaticU32CharArrStr }
+      - { lhs: Fn, rhs: ['static', Type, ID, ArrDims, '=', U8StringSeq, ';'],          action: globalStaticU8CharArrStrSized }
+      - { lhs: Fn, rhs: ['static', Type, ID, '[', ']', '=', U8StringSeq, ';'],         action: globalStaticU8CharArrStr }
       # File-scope `static T x = { … };` — static struct/union AGGREGATE init, the
       # file-scope twin of stmtStaticStructInit. Same emitter (a once-initialised
       # DotCcGlobals field), just no name mangling. Disjoint from the array forms
@@ -1005,6 +1018,8 @@ productions:
       - { lhs: Stmt, rhs: ['static', Type, ID, '[', ']', '=', WStringSeq, ';'],          action: stmtStaticWCharArrStr }
       - { lhs: Stmt, rhs: ['static', Type, ID, ArrDims, '=', U32StringSeq, ';'],         action: stmtStaticU32CharArrStrSized }
       - { lhs: Stmt, rhs: ['static', Type, ID, '[', ']', '=', U32StringSeq, ';'],        action: stmtStaticU32CharArrStr }
+      - { lhs: Stmt, rhs: ['static', Type, ID, ArrDims, '=', U8StringSeq, ';'],           action: stmtStaticU8CharArrStrSized }
+      - { lhs: Stmt, rhs: ['static', Type, ID, '[', ']', '=', U8StringSeq, ';'],          action: stmtStaticU8CharArrStr }
       # Block-scope `static T x = { … };` — a static struct/union AGGREGATE
       # initializer (Lua's `static const expdesc ef = {VKINT, {0}, NO_JUMP,
       # NO_JUMP}`). Like the static-array forms, lowers to a once-initialised
@@ -1211,6 +1226,9 @@ productions:
       # char32_t block-scope array from a U"…" literal (→ uint* stackalloc copy).
       - { lhs: Decl, rhs: [Type, ID, '[', ']', '=', U32StringSeq], action: declU32CharArrStr }
       - { lhs: Decl, rhs: [Type, ID, ArrDims, '=', U32StringSeq],  action: declU32CharArrStrSized }
+      # char8_t block-scope array from a u8"…" literal (→ byte* stackalloc copy).
+      - { lhs: Decl, rhs: [Type, ID, '[', ']', '=', U8StringSeq], action: declU8CharArrStr }
+      - { lhs: Decl, rhs: [Type, ID, ArrDims, '=', U8StringSeq],  action: declU8CharArrStrSized }
       # Struct aggregate initializer: `Point p = {1, 2};`. The visitor looks
       # up the struct's field names from a side map populated by StructDef /
       # TypedefStruct / UnionDef, then emits `Point p = new Point { x = 1,
@@ -1525,6 +1543,10 @@ productions:
       # Lowers to a stable, pooled `Libc.L16("…")` pointer (UTF-16). U16StringSeq
       # folds adjacent `u"a" u"b"`.
       - { lhs: Primary, rhs: [U16StringSeq], action: u16str }
+      # `u8"…"` — C23 char8_t (UTF-8) string literal (decays to char8_t* → C#
+      # byte*). Lowers on the SAME byte path as a plain string (dotcc strings are
+      # already UTF-8); U8StringSeq folds adjacent `u8"a" u8"b"`.
+      - { lhs: Primary, rhs: [U8StringSeq], action: u8str }
       # `U"…"` — C11 char32_t string literal (decays to char32_t* → C# uint*).
       # Lowers to a stable, pooled `Libc.L32("…")` pointer (UTF-32, one code unit
       # per Unicode scalar). U32StringSeq folds adjacent `U"a" U"b"`.
@@ -1540,6 +1562,8 @@ productions:
       # `u'x'` — C11 char16_t char constant. Unlike a plain char constant (type
       # int), this has type char16_t; lowers to a char16_t-typed integer value.
       - { lhs: Primary, rhs: [U16CHAR],     action: u16chr }
+      # `u8'x'` — C23 char8_t char constant (type char8_t → C# byte).
+      - { lhs: Primary, rhs: [U8CHAR],      action: u8chr }
       # `U'x'` — C11 char32_t char constant (type char32_t → C# uint), lowered
       # like u'x' but tagged 32-bit.
       - { lhs: Primary, rhs: [U32CHAR],     action: u32chr }
@@ -1619,6 +1643,13 @@ productions:
     rules:
       - { lhs: U32StringSeq, rhs: [U32StringSeq, U32STRING], action: u32strSeqCons }
       - { lhs: U32StringSeq, rhs: [U32STRING],               action: u32strSeqOne }
+
+  # Adjacent char8_t string-literal concatenation — `u8"a" u8"b"` → one u8-string.
+  # (Mixing prefixed + unprefixed, `u8"a" "b"`, is deferred — out of V1 scope.)
+  - derivation: leftmost
+    rules:
+      - { lhs: U8StringSeq, rhs: [U8StringSeq, U8STRING], action: u8strSeqCons }
+      - { lhs: U8StringSeq, rhs: [U8STRING],             action: u8strSeqOne }
 
   # C23 attribute-list interior — the inside of `[[ … ] ]`, reached only from
   # the attrFn/attrStmt wrappers (which drop it unexamined, so none of these
@@ -1873,10 +1904,14 @@ lexer:
     # IRxParser doesn't support `.` as wildcard, so the escape continuation
     # is an explicit character class of the C standard escape chars.
     # Relies on alternation `|` in IRxParser, added upstream in LALR.CC.
+    # C23 char8_t string literal `u8"…"` — a UTF-8 string. Listed BEFORE U16STRING
+    # so `u8"…"` matches here (longest-match: `u"…"` can't match `u8"…"` anyway,
+    # since after `u` comes `8` not `"`, but the ordering makes the intent explicit).
+    # Lowers on the same byte path as a plain STRING (dotcc strings are UTF-8).
+    - { symbol: U8STRING, match: 'u8"(\\["\\nrtbf0v''/aex0-9]|[^"\\])*"' }
     # C11 char16_t string literal `u"…"` — same body as STRING with a `u` prefix.
     # Listed before STRING; longest-match already prefers `u"…"` over `u` + `"…"`,
-    # but the ordering makes the intent explicit. (`u8"…"` stays unmatched — out of
-    # scope for now — and falls back to ID + STRING → parse-error.)
+    # but the ordering makes the intent explicit.
     - { symbol: U16STRING, match: 'u"(\\["\\nrtbf0v''/aex0-9]|[^"\\])*"' }
     # C11 char32_t string literal `U"…"` — same body with a capital-`U` prefix
     # (→ char32_t* → C# uint*, 32-bit UTF-32). Listed before STRING; an identifier
@@ -1887,6 +1922,13 @@ lexer:
     # identifier `L` can never be immediately followed by `"` in valid C).
     - { symbol: WSTRING, match: 'L"(\\["\\nrtbf0v''/aex0-9]|[^"\\])*"' }
     - { symbol: STRING, match: '"(\\["\\nrtbf0v''/aex0-9]|[^"\\])*"' }
+    # C23 char8_t char constant `u8'x'` — the five CHAR forms with a `u8` prefix.
+    # Listed before the `u'x'` rules (longest-match; `u'…'` can't match `u8'…'`).
+    - { symbol: U8CHAR, match: 'u8''\\x[0-9a-fA-F]+''' }
+    - { symbol: U8CHAR, match: 'u8''\\[0-7][0-7][0-7]''' }
+    - { symbol: U8CHAR, match: 'u8''\\[0-7][0-7]''' }
+    - { symbol: U8CHAR, match: 'u8''\\[abefnrtv0-7\\''"?]''' }
+    - { symbol: U8CHAR, match: 'u8''[^''\\]''' }
     # C11 char16_t char constant `u'x'` — the five CHAR forms with a `u` prefix.
     - { symbol: U16CHAR, match: 'u''\\x[0-9a-fA-F]+''' }
     - { symbol: U16CHAR, match: 'u''\\[0-7][0-7][0-7]''' }

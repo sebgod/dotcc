@@ -1,0 +1,5 @@
+MSVC's C-mode char8_t / u8"…" support (via <uchar.h>, C23) is version- and
+/std:-dependent and not reliably present in cl.exe's C front-end, so this
+fixture would spuriously fail the MSVC oracle. char8_t is unsigned char (1 byte)
+on every data model, so there is no ABI divergence to validate here — the gcc
+oracle (-std=c2x) authoritatively covers this C23 Unicode feature.
