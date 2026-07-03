@@ -220,6 +220,7 @@ internal sealed partial class IrBuilder
                 BuildTopLevel(a.Arg4);
                 _pendingAttrNoreturn = false;
                 _pendingAttrDeprecated = null;
+                _pendingAttrNodiscard = null;
                 break;
             case C.FuncDef d: BuildFuncDef(d.Arg0, d.Arg1); break;
             case C.ExternFnDef d: BuildFuncDef(d.Arg1, d.Arg2); break;
@@ -397,6 +398,10 @@ internal sealed partial class IrBuilder
     private bool _sawConstexprSpec;
     private bool _pendingAttrNoreturn;
     private string? _pendingAttrDeprecated;
+    // The recognized C23 `[[nodiscard]]` / `[[nodiscard("reason")]]` of an enclosing
+    // `[[…]]` specifier (null = absent, "" = message-less), consumed by the wrapped
+    // function declaration (ApplyFnMarkers → Symbol.Nodiscard) and cleared on unwind.
+    private string? _pendingAttrNodiscard;
 
     /// <summary>Record the function/storage specifiers a resolved spec run may
     /// carry — `_Noreturn` (gated C11) and `inline` for the enclosing function
@@ -500,6 +505,10 @@ internal sealed partial class IrBuilder
             case C.AttrCall a when Tok(a.Arg0) == "deprecated":
                 _pendingAttrDeprecated ??= TryStringLiteral(a.Arg2) ?? "";
                 break;
+            case C.AttrIdent a when Tok(a.Arg0) == "nodiscard": _pendingAttrNodiscard ??= ""; break;
+            case C.AttrCall a when Tok(a.Arg0) == "nodiscard":
+                _pendingAttrNodiscard ??= TryStringLiteral(a.Arg2) ?? "";
+                break;
             default: break; // all other attribute shapes: accepted + ignored
         }
     }
@@ -527,6 +536,26 @@ internal sealed partial class IrBuilder
         if (_sawNoreturnSpec || _pendingAttrNoreturn) { sym.IsNoReturn = true; }
         if (_sawInlineSpec) { sym.IsInline = true; }
         if (_pendingAttrDeprecated is { } dep && sym.Deprecated is null) { sym.Deprecated = dep; }
+        if (_pendingAttrNodiscard is { } nd && sym.Nodiscard is null) { sym.Nodiscard = nd; }
+    }
+
+    /// <summary>Warn (gcc <c>-Wunused-result</c>, on by default — the attribute's
+    /// whole purpose is to diagnose the discard) when a call whose callee is declared
+    /// C23 <c>[[nodiscard]]</c> has its non-void result thrown away in statement
+    /// position. A <c>(void)f()</c> cast suppresses it for free: <see cref="BuildCast"/>
+    /// lowers <c>(void)expr</c> to the operand with its <see cref="CType"/> set to
+    /// <see cref="CType.Void"/>, so the discarded value is void-typed here and the
+    /// check skips — exactly C's suppression idiom. gcc-verbatim wording.</summary>
+    private void CheckNodiscardDiscarded(CExpr discarded, SrcPos pos)
+    {
+        if (discarded is Call { CalleeSym: { Nodiscard: { } reason } sym } call
+            && call.Type.Unqualified is not CType.VoidType)
+        {
+            var suffix = reason.Length > 0 ? $": \"{reason}\"" : "";
+            Diagnostics.Add(new Diagnostic(Severity.Warning,
+                $"ignoring return value of '{sym.Name}', declared with attribute 'nodiscard'{suffix}",
+                pos, _file));
+        }
     }
 
     private void RegisterProto(Item fnSig)
@@ -1642,7 +1671,12 @@ internal sealed partial class IrBuilder
             // bare attribute-declaration `[[fallthrough]];` arrives here as a
             // wrapped EMPTY statement.
             case C.AttrStmt s: Gate(2023, "[[attributes]]", it); return BuildStmt(s.Arg4);
-            case C.StmtExpr e: return new ExprStmt(BuildExpr(e.Arg0)) { Pos = pos };
+            case C.StmtExpr e:
+            {
+                var stmtExpr = BuildExpr(e.Arg0);
+                CheckNodiscardDiscarded(stmtExpr, pos);
+                return new ExprStmt(stmtExpr) { Pos = pos };
+            }
             case C.StmtEmpty: return new Block(System.Array.Empty<CStmt>()) { Pos = pos };
             case C.StmtIf s:
             {

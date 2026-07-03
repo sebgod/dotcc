@@ -119,6 +119,14 @@ public sealed class Symbol
     /// <c>&amp;</c> work; runtime behavior is identical).</summary>
     public bool IsConstexpr { get; init; }
 
+    /// <summary>Non-null when the function carries the C23 <c>[[nodiscard]]</c> /
+    /// <c>[[nodiscard("reason")]]</c> attribute — the decoded reason, or <c>""</c> for
+    /// the message-less form. Unlike the others this drives no C# attribute (the BCL
+    /// has no must-use-result marker); instead <see cref="IrBuilder"/> emits a
+    /// gcc-shaped warning when a call's non-void result is discarded in statement
+    /// position (a <c>(void)</c> cast suppresses it, as in C).</summary>
+    public string? Nodiscard { get; set; }
+
     /// <summary>Non-null when the function carries the C23 <c>[[deprecated]]</c> /
     /// <c>[[deprecated("msg")]]</c> attribute — the decoded message, or <c>""</c> for
     /// the message-less form. The C# backend surfaces it as <c>[System.Obsolete(…)]</c>,
