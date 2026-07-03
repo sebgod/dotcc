@@ -21,7 +21,7 @@ Bird's-eye scorecard — the detailed per-area tables below are the source of tr
 
 | Area | Standing | Covered | Gaps / out of scope |
 |---|---|---|---|
-| **Lexical** | ✅ Complete | every comment, identifier, integer (dec/hex/octal/binary, `u`/`l` suffixes, digit separators), float (incl. hex-float and the `L` suffix), char, and string (adjacent concatenation, high-byte) form, 16-bit wide literals (`L"…"`/`L'x'` and `u"…"`/`u'x'` → C# `char`) and 32-bit wide literals (`U"…"`/`U'x'` → C# `uint`, one UTF-32 code unit per Unicode scalar) | ❌ `u8"…"` literals (char8_t — nice-to-have, demand-driven) · 🚫 trigraphs, digraphs |
+| **Lexical** | ✅ Complete | every comment, identifier, integer (dec/hex/octal/binary, `u`/`l` suffixes, digit separators), float (incl. hex-float and the `L` suffix), char, and string (adjacent concatenation, high-byte) form, and **all** encoding-prefixed literals: `u8"…"`/`u8'x'` (char8_t → C# `byte`, UTF-8), `u"…"`/`u'x'` and `L"…"`/`L'x'` (char16_t/wchar_t → C# `char`, UTF-16), `U"…"`/`U'x'` (char32_t → C# `uint`, one UTF-32 code unit per Unicode scalar) | 🚫 trigraphs, digraphs |
 | **Types** | ✅ Near-complete | `int`…`long long`, `float`/`double`/`long double`, `_Complex`, `_Float128`, pointers, arrays (multi-dim, decay, ptr-to-array), `struct`/`union`/`enum`/`typedef`, function pointers, `const`/`volatile`/`restrict`, `sizeof(type)` + `sizeof expr`, bit-fields (packed MSVC layout — values + sizeof faithful), compound literals (struct/scalar/array, any position) | 🚫 VLAs · ❌ `_BitInt(N)`, `_Decimal32/64/128` (nice-to-have) |
 | **Operators** | ✅ Complete | all arithmetic / relational / logical / bitwise / assignment / compound-assignment, `++`/`--`, ternary, comma, `sizeof`, `_Alignof` (folds to a constant), `_Generic` (compile-time type selection), cast, call, `.`/`->`, subscript | — |
 | **Statements** | ✅ Complete | `if`/`else`, `switch`/`case`, `while`, `do`/`while`, `for` (all clauses optional), `break`, `continue`, `return`, `goto`+labels, blocks (with shadow-renaming), empty stmt | — |
@@ -66,6 +66,7 @@ Bird's-eye scorecard — the detailed per-area tables below are the source of tr
 |---|---|---|
 | `int` | ✅ | Lowered to C# `int` |
 | `char` | ✅ | Lowered to C# `byte` (so `char*` arithmetic walks bytes) |
+| `char8_t` (C23 `<uchar.h>`) | ✅ | Lowered to C# `byte` — an 8-bit UTF-8 code unit (like dotcc's `char`). A distinct `CType.Char8` Prim for type fidelity; renders to `byte`, so every byte-coercion rule applies unchanged. Pre-registered in `PredefinedTypeNames`. With the `u8"…"` / `u8'x'` literals — which reuse the existing UTF-8 narrow-string path (`Libc.L(…u8)`), since dotcc strings are already UTF-8. |
 | `char16_t` (C11 `<uchar.h>`) | ✅ | Lowered to C# `char` — a 16-bit UTF-16 code unit (so `char16_t*` walks 2 bytes and bridges to `string`/`Span<char>`). Pre-registered in `PredefinedTypeNames`. With the `u"…"` / `u'x'` literals — see the Lexical table. A narrowing store needs an explicit `(char)` cast (no implicit `int`→`char` in C#, even for constants). |
 | `char32_t` (C11 `<uchar.h>`) | ✅ | Lowered to C# `uint` — a 32-bit UTF-32 code unit (so `char32_t*` walks 4 bytes; NOT `System.Text.Rune`, since a char32_t is any value). A distinct `CType.Char32` Prim for type fidelity; `uint` is already a fully-wired C# integer, so no coercion-table change was needed. Pre-registered in `PredefinedTypeNames`. With the `U"…"` / `U'x'` literals (pooled `Libc.L32`) — see the Lexical table. An astral scalar is ONE code unit (unlike the two surrogate units of a `char16_t` string). |
 | `wchar_t` (`<wchar.h>`) | ✅ | Lowered to C# `char` — dotcc's **MSVC-shaped 16-bit** wchar_t (unsigned UTF-16, `sizeof == 2`, `__SIZEOF_WCHAR_T__ == 2`), the sibling of `char16_t`. A distinct `CType.WChar` Prim for type fidelity; renders to `char`, so every `char`-coercion rule applies unchanged. Pre-registered in `PredefinedTypeNames`. With `L"…"` / `L'x'` and the full `wcs*`/`wmem*`/`wcsto*` library. gcc's 32-bit wchar_t diverges by design (MSVC oracle validates). |
@@ -547,7 +548,7 @@ miscompiles** — every gap below fails at parse/lex time or is explicitly flagg
 - ✅ `_Generic` (generic selection) — resolved at lowering time on the controlling expression's synthesized `CType`. See the Beyond-C99 table.
 - ✅ Anonymous `struct` / `union` members — fields promoted into the parent (struct inlined; union lifted to a nested explicit-layout type + access rewrite). See the Beyond-C99 table.
 - ✅ `_Thread_local` (→ `[ThreadStatic]`, zero-init file-scope). (`_Atomic` + full `<stdatomic.h>` ✅, `_Noreturn` ✅, `_Static_assert`/`static_assert` ✅ evaluated at compile time, `_Alignof` ✅ folds / `_Alignas` ✅ checked-then-ignored — see the Beyond-C99 table.)
-- ✅ `char16_t` (`u"…"`/`u'x'`) and `wchar_t` (`L"…"`/`L'x'`) — both lower to C# `char` (16-bit UTF-16); `char32_t` (`U"…"`/`U'x'`) lowers to C# `uint` (32-bit UTF-32, one code unit per scalar); see the Lexical/Types tables. ⛔ Only the `u8"…"` prefix (char8_t) stays unparsed.
+- ✅ Every encoding-prefixed literal: `char8_t` (`u8"…"`/`u8'x'` → C# `byte`, UTF-8), `char16_t` (`u"…"`/`u'x'`) and `wchar_t` (`L"…"`/`L'x'`) → C# `char` (16-bit UTF-16), `char32_t` (`U"…"`/`U'x'`) → C# `uint` (32-bit UTF-32, one code unit per scalar); see the Lexical/Types tables. ⛔ Only the explicit multibyte↔wide *conversion* functions (`mbrtowc`/`c8rtomb`/…) stay unimplemented.
 
 **C23**
 - ⛔ `_BitInt(N)` (nice-to-have). (`constexpr` ✅ — integer objects, folded into every ICE position; `typeof` / `typeof_unqual` ✅ — see the Beyond-C99 table.)
@@ -626,8 +627,9 @@ What remains is **partial / best-effort behaviour**, tracked inline as 🟡 rows
 ## Out of scope (won't implement)
 
 Listed here so we don't relitigate them. All marked 🚫 above. (Scope review 2026-07-03: these
-five are the TRULY won't-do set; `_BitInt(N)`, `_Decimal32/64/128`, and the `u8`/`char8_t`
-cluster moved to the nice-to-have list below. `char32_t`/`U"…"` since shipped — 2026-07-04.)
+five are the TRULY won't-do set; `_BitInt(N)` and `_Decimal32/64/128` moved to the nice-to-have
+list below. The whole `char8_t`/`char32_t`/`u8`/`U` literal cluster since shipped — 2026-07-04;
+only the explicit multibyte↔wide *conversion* functions remain nice-to-have.)
 
 - **Variable-length arrays (VLAs)** — rarely used, made optional in C11, and a managed-runtime mismatch (unbounded stack growth). A 1-D runtime extent incidentally lowers to `stackalloc`, but full VLA support isn't pursued.
 - **Trigraphs / digraphs** — removed in C23, never useful.
@@ -642,7 +644,7 @@ materialized. Marked ❌ in the tables (with the design sketch at each row).
 
 - **`_BitInt(N)`** — N ≤ 128 onto the smallest fitting C# integer with width-masked arithmetic; arbitrary N needs a software wide-int type.
 - **`_Decimal32/64/128`** — needs a clean-room software IEEE 754 decimal type (the `Float128` precedent); .NET's `decimal` (96-bit-mantissa scaled integer, max ≈ 7.92×10²⁸, no ±∞/NaN) can't even carry `_Decimal32`'s 10⁹⁶ exponent range.
-- **`u8"…"` / `char8_t` literals / multibyte↔wide conversion** — `char8_t` (C23) would lower to C# `byte` and `u8"…"` rides dotcc's existing UTF-8 narrow-string path (near-free); the explicit multibyte↔wide conversion model (`mbrtowc`/`wcrtomb`/`mbsrtowcs`/`mbstate_t`, plus `<uchar.h>`'s `mbrtoc16`/`c16rtomb`/…) would be a separate increment — dotcc has only the implicit UTF-8↔UTF-16 bridge today, no locale/multibyte machinery. (`char32_t` (`U"…"`/`U'x'` → C# `uint`, 32-bit UTF-32) is now supported; `wchar_t` AND `char16_t` — both 16-bit, mapping cleanly onto C# `char` — ARE supported, including the full `wcs*`/`wmem*`/`wcsto*` wide-string library **and wide I/O**: character/line (`fputwc`/`fgetwc`/`fputws`/`fgetws`/…) and formatted (`wprintf`/`fwprintf`/`swprintf`, `wscanf`/`fwscanf`/`swscanf`). See the Lexical/Types/libc tables. dotcc commits to the MSVC-shaped 16-bit `wchar_t` rather than treating its platform-divergent width as a blocker.)
+- **Multibyte↔wide conversion functions** — the explicit conversion model (`mbrtowc`/`wcrtomb`/`mbsrtowcs`/`mbstate_t`, plus `<uchar.h>`'s `mbrtoc8`/`c8rtomb`/`mbrtoc16`/`c16rtomb`/`mbrtoc32`/`c32rtomb`) would be a separate increment — dotcc has only the implicit UTF-8↔UTF-16 bridge today, no locale/multibyte machinery. (All the wide/UTF *types and literals* ARE supported now: `char8_t` (`u8"…"` → C# `byte`), `char16_t`/`wchar_t` (`u"…"`/`L"…"` → C# `char`, 16-bit), `char32_t` (`U"…"` → C# `uint`, 32-bit) — plus the full `wcs*`/`wmem*`/`wcsto*` wide-string library **and wide I/O**: character/line (`fputwc`/`fgetwc`/`fputws`/`fgetws`/…) and formatted (`wprintf`/`fwprintf`/`swprintf`, `wscanf`/`fwscanf`/`swscanf`). See the Lexical/Types/libc tables. dotcc commits to the MSVC-shaped 16-bit `wchar_t` rather than treating its platform-divergent width as a blocker.)
 
 ## Synthetic system headers + runtime
 

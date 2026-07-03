@@ -323,6 +323,15 @@ public abstract record CType
     public static readonly CType Char = new Prim("char", 1, true, true);
     public static readonly CType SChar = new Prim("signed char", 1, true, true);
     public static readonly CType UChar = new Prim("unsigned char", 1, true, false);
+
+    /// <summary>C23 <c>char8_t</c> (<c>&lt;uchar.h&gt;</c>) — an unsigned 8-bit UTF-8
+    /// code unit (<c>unsigned char</c>). dotcc lowers it to C# <c>byte</c>, exactly
+    /// like <see cref="Char"/> (dotcc's <c>char</c> IS <c>byte</c>), so a <c>u8"…"</c>
+    /// literal rides the existing narrow UTF-8 string path (<c>Libc.L(…u8)</c>) with
+    /// no new machinery. A distinct Prim (not <see cref="Char"/> / <see cref="UChar"/>)
+    /// purely for type fidelity (<c>_Generic</c>, diagnostics); it renders to
+    /// <c>byte</c>, so every byte-coercion rule applies unchanged.</summary>
+    public static readonly CType Char8 = new Prim("char8_t", 1, true, false);
     public static readonly CType Short = new Prim("short", 2, true, true);
     public static readonly CType UShort = new Prim("unsigned short", 2, true, false);
 

@@ -104,6 +104,7 @@ internal sealed class CSharpTarget : ITarget
     {
         "_Bool" => "CBool",
         "char" => "byte",
+        "char8_t" => "byte",    // C23 char8_t → C# byte (an 8-bit UTF-8 code unit)
         "signed char" => "sbyte",
         "unsigned char" => "byte",
         "short" => "short",
