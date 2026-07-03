@@ -1,4 +1,0 @@
-C23-only preprocessor surface: cl.exe's #elifdef/#elifndef support requires
-/std:clatest (not the pinned /std:c17 the oracle drives), so the fixture is
-validated by the gcc-WSL oracle instead — same opt-out shape as
-c23-static-assert.

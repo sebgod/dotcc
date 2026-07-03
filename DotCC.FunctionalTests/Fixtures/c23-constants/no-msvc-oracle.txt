@@ -1,3 +1,4 @@
-MSVC's C frontend has no -std:c23 and rejects the bare C23 keyword
-constants (`bool`/`true`/`false`/`nullptr`) without <stdbool.h>/<stddef.h>.
-The gcc oracle (-std=c2x) covers this fixture instead.
+cl.exe does not implement the bare C23 keyword constants (`bool`/`true`/
+`false`/`nullptr`) even under /std:clatest — C2065 "'bool': undeclared
+identifier" (verified on MSVC toolset 14.51, VS 2026). The gcc oracle
+(-std=c2x) covers this fixture instead.
