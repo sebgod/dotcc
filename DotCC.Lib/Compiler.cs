@@ -230,13 +230,11 @@ public static class Compiler
         IReadOnlyList<string>? includeDirs,
         IReadOnlyList<string>? defines,
         CDialect? dialect,
-        bool pedantic,
-        bool pedanticErrors,
         Ir.INameLegalizer? names = null,
-        bool warnDiscardedQualifiers = true)
+        WarningFlags warnings = WarningFlags.Default)
     {
         var request = new Frontends.FrontendRequest(
-            inputPaths, includeDirs, defines, dialect, pedantic, pedanticErrors, names, warnDiscardedQualifiers);
+            inputPaths, includeDirs, defines, dialect, names, warnings);
         var anyZig = inputPaths.Any(IsZigSource);
         var anyC = inputPaths.Any(p => !IsZigSource(p));
         if (anyZig && anyC) { return BuildMixedIr(request); }
@@ -299,19 +297,15 @@ public static class Compiler
         bool fileBased = true,
         bool libraryMode = false,
         CDialect? dialect = null,
-        bool pedantic = false,
-        bool pedanticErrors = false,
         bool asObject = false,
-        bool warnConversion = false,
         bool debugHeap = false,
         ImportOptions? imports = null,
-        bool warnDiscardedQualifiers = true)
+        WarningFlags warnings = WarningFlags.Default)
     {
-        var irBuilder = BuildIr(inputPaths, includeDirs, defines, dialect, pedantic, pedanticErrors,
-            warnDiscardedQualifiers: warnDiscardedQualifiers);
+        var irBuilder = BuildIr(inputPaths, includeDirs, defines, dialect, warnings: warnings);
         // -Wconversion: collect narrowing-conversion warnings during codegen, then
-        // flush to stderr. Off by default (no gate → no checks).
-        var convGate = warnConversion ? new ConversionGate() : null;
+        // flush to stderr. Off by default (the bit is clear unless -Wconversion set).
+        var convGate = (warnings & WarningFlags.Conversion) != 0 ? new ConversionGate() : null;
         var cg = Backends.CSharpBackend.Run(irBuilder, convGate);
         if (convGate is { HasAny: true })
         {
@@ -549,10 +543,9 @@ public static class Compiler
         IReadOnlyList<string>? includeDirs = null,
         IReadOnlyList<string>? defines = null,
         CDialect? dialect = null,
-        bool pedantic = false,
-        bool pedanticErrors = false)
+        WarningFlags warnings = WarningFlags.Default)
     {
-        var irBuilder = BuildIr(inputPaths, includeDirs, defines, dialect, pedantic, pedanticErrors, new Backends.WatNameLegalizer());
+        var irBuilder = BuildIr(inputPaths, includeDirs, defines, dialect, new Backends.WatNameLegalizer(), warnings);
         return Backends.WatBackend.Run(irBuilder);
     }
 
@@ -593,10 +586,9 @@ public static class Compiler
         IReadOnlyList<string>? includeDirs = null,
         IReadOnlyList<string>? defines = null,
         CDialect? dialect = null,
-        bool pedantic = false,
-        bool pedanticErrors = false)
+        WarningFlags warnings = WarningFlags.Default)
         => EmitCSharp(new[] { inputPath }, includeDirs, defines,
-                      fileBased: false, libraryMode: false, dialect, pedantic, pedanticErrors, asObject: true);
+                      fileBased: false, libraryMode: false, dialect, asObject: true, warnings: warnings);
 
     private static string SerializeFragment(
         string functions, IReadOnlyDictionary<string, string> typeDecls, string aliases, string globals, int mainArity,

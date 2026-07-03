@@ -112,7 +112,7 @@ public sealed class AtomicTests
         try
         {
             var ex = Should.Throw<CompileException>(() =>
-                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c99"), pedantic: true, pedanticErrors: true));
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c99"), warnings: WarningFlags.Default | WarningFlags.PedanticErrors));
             ex.Message.ShouldContain("_Atomic");
             ex.Message.ShouldContain("C11");
         }

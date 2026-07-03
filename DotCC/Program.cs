@@ -156,10 +156,13 @@ internal static class Program
             var compileFlag = parse.GetValue(compileOpt);
             var sharedFlag = parse.GetValue(sharedOpt);
             var stdValue = parse.GetValue(stdOpt);
-            var pedanticFlag = parse.GetValue(pedanticOpt);
-            var pedanticErrorsFlag = parse.GetValue(pedanticErrorsOpt);
-            var wconversionFlag = parse.GetValue(wconversionOpt);
-            var warnDiscardedQualifiers = !parse.GetValue(wnoDiscardedQualifiersOpt);
+            // Fold the individual -W / -pedantic flags into one WarningFlags value
+            // threaded through the pipeline (see DotCC.WarningFlags).
+            var warnings = WarningFlags.None;
+            if (!parse.GetValue(wnoDiscardedQualifiersOpt)) { warnings |= WarningFlags.DiscardedQualifiers; }
+            if (parse.GetValue(wconversionOpt)) { warnings |= WarningFlags.Conversion; }
+            if (parse.GetValue(pedanticErrorsOpt)) { warnings |= WarningFlags.PedanticErrors; }
+            else if (parse.GetValue(pedanticOpt)) { warnings |= WarningFlags.Pedantic; }
             // -fsanitize=address[,...]: enable the checked debug heap. Other
             // sanitizers aren't modeled — warn and carry on rather than error
             // (./configure probes sanitizers and shouldn't fail the build).
@@ -214,8 +217,8 @@ internal static class Program
                 emit = EmitKind.File;
             }
 
-            return Run(inputs, output, emit, target, preprocessOnly, includes, defines, sharedFlag, dialect, pedanticFlag, pedanticErrorsFlag,
-                       mdFlag, mmdFlag, depFile, depTargets, wconversionFlag, debugHeapFlag, imports, warnDiscardedQualifiers);
+            return Run(inputs, output, emit, target, preprocessOnly, includes, defines, sharedFlag, dialect,
+                       mdFlag, mmdFlag, depFile, depTargets, debugHeapFlag, imports, warnings);
         });
 
         return root.Parse(args).Invoke();
@@ -233,16 +236,13 @@ internal static class Program
         string[] defines,
         bool libraryMode,
         CDialect dialect,
-        bool pedantic,
-        bool pedanticErrors,
         bool genDeps,
         bool genDepsNoSystem,
         string? depFile,
         string[] depTargets,
-        bool warnConversion = false,
         bool debugHeap = false,
         ImportOptions? imports = null,
-        bool warnDiscardedQualifiers = true)
+        WarningFlags warnings = WarningFlags.Default)
     {
         imports ??= ImportOptions.Empty;
         if (preprocessOnly)
@@ -264,7 +264,7 @@ internal static class Program
             {
                 Console.Error.WriteLine("dotcc: warning: -l/-L native library imports are ignored for --target=wat");
             }
-            return RunWat(inputPaths, outputPath, includeDirs, defines, dialect, pedantic, pedanticErrors);
+            return RunWat(inputPaths, outputPath, includeDirs, defines, dialect, warnings);
         }
 
         // Separate compilation: `--emit=obj a.c -o a.cs` compiles ONE translation
@@ -282,7 +282,7 @@ internal static class Program
             var objOut = outputPath ?? Path.ChangeExtension(Path.GetFileName(inputPaths[0]), ".cs");
             try
             {
-                var frag = Compiler.EmitObject(inputPaths[0], includeDirs, defines, dialect, pedantic, pedanticErrors);
+                var frag = Compiler.EmitObject(inputPaths[0], includeDirs, defines, dialect, warnings);
                 File.WriteAllText(objOut, frag);
             }
             catch (CompileException ex)
@@ -326,12 +326,9 @@ internal static class Program
                     fileBased: emit == EmitKind.File && !libraryMode,
                     libraryMode: libraryMode,
                     dialect: dialect,
-                    pedantic: pedantic,
-                    pedanticErrors: pedanticErrors,
-                    warnConversion: warnConversion,
-                    warnDiscardedQualifiers: warnDiscardedQualifiers,
                     debugHeap: debugHeap,
-                    imports: imports);
+                    imports: imports,
+                    warnings: warnings);
         }
         catch (CompileException ex)
         {
@@ -427,8 +424,7 @@ internal static class Program
         string[] includeDirs,
         string[] defines,
         CDialect dialect,
-        bool pedantic,
-        bool pedanticErrors)
+        WarningFlags warnings)
     {
         var sources = inputPaths.Where(p => p.EndsWith(".c", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (sources.Length == 0)
@@ -439,7 +435,7 @@ internal static class Program
         string wat;
         try
         {
-            wat = Compiler.EmitWat(sources, includeDirs, defines, dialect, pedantic, pedanticErrors);
+            wat = Compiler.EmitWat(sources, includeDirs, defines, dialect, warnings);
         }
         catch (CompileException ex)
         {

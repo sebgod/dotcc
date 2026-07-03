@@ -39,7 +39,7 @@ public sealed class ConstCheckTests
         var prior = Console.Error;
         var sw = new StringWriter();
         Console.SetError(sw);
-        try { return (Compiler.EmitCSharp(new[] { path }, warnDiscardedQualifiers: warnDiscard), sw.ToString()); }
+        try { return (Compiler.EmitCSharp(new[] { path }, warnings: warnDiscard ? WarningFlags.Default : WarningFlags.None), sw.ToString()); }
         finally { Console.SetError(prior); File.Delete(path); }
     }
 
@@ -221,7 +221,7 @@ public sealed class ConstCheckTests
         try
         {
             Should.Throw<CompileException>(() =>
-                Compiler.EmitCSharp(new[] { path }, warnDiscardedQualifiers: false));
+                Compiler.EmitCSharp(new[] { path }, warnings: WarningFlags.None));
         }
         finally { File.Delete(path); }
     }

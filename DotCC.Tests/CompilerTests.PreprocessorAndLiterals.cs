@@ -115,7 +115,7 @@ public sealed partial class CompilerTests
         try
         {
             Should.Throw<CompileException>(() =>
-                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), pedanticErrors: true))
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), warnings: WarningFlags.Default | WarningFlags.PedanticErrors))
                 .Message.ShouldContain("hex float literal");
         }
         finally { File.Delete(src); }
@@ -140,7 +140,7 @@ public sealed partial class CompilerTests
         try
         {
             Should.Throw<CompileException>(() =>
-                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"), pedanticErrors: true))
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"), warnings: WarningFlags.Default | WarningFlags.PedanticErrors))
                 .Message.ShouldContain("binary integer literal");
         }
         finally { File.Delete(src); }
@@ -168,7 +168,7 @@ public sealed partial class CompilerTests
         try
         {
             Should.Throw<CompileException>(() =>
-                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"), pedanticErrors: true))
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"), warnings: WarningFlags.Default | WarningFlags.PedanticErrors))
                 .Message.ShouldContain("digit separator");
         }
         finally { File.Delete(src); }
@@ -249,7 +249,7 @@ public sealed partial class CompilerTests
         try
         {
             Should.Throw<CompileException>(() =>
-                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), pedanticErrors: true))
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), warnings: WarningFlags.Default | WarningFlags.PedanticErrors))
                 .Message.ShouldContain("_Complex");
         }
         finally { File.Delete(src); }
@@ -1289,7 +1289,7 @@ public sealed partial class CompilerTests
         try
         {
             Should.Throw<CompileException>(() =>
-                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), pedanticErrors: true))
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), warnings: WarningFlags.Default | WarningFlags.PedanticErrors))
                 .Message.ShouldContain("compound literals");
         }
         finally { File.Delete(src); }
@@ -1416,7 +1416,7 @@ public sealed partial class CompilerTests
         try
         {
             Should.Throw<CompileException>(() =>
-                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), pedanticErrors: true))
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), warnings: WarningFlags.Default | WarningFlags.PedanticErrors))
                 .Message.ShouldContain("array designators");
         }
         finally { File.Delete(src); }
@@ -1455,7 +1455,7 @@ public sealed partial class CompilerTests
         try
         {
             Should.Throw<CompileException>(() =>
-                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"), pedanticErrors: true))
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c17"), warnings: WarningFlags.Default | WarningFlags.PedanticErrors))
                 .Message.ShouldContain("empty initializer");
         }
         finally { File.Delete(src); }
@@ -1488,7 +1488,7 @@ public sealed partial class CompilerTests
         try
         {
             Should.Throw<CompileException>(() =>
-                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), pedanticErrors: true))
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c90"), warnings: WarningFlags.Default | WarningFlags.PedanticErrors))
                 .Message.ShouldContain("flexible array member");
         }
         finally { File.Delete(src); }
@@ -1582,7 +1582,7 @@ public sealed partial class CompilerTests
         try
         {
             Should.Throw<CompileException>(() =>
-                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c99"), pedanticErrors: true))
+                Compiler.EmitCSharp(new[] { src }, dialect: CDialect.Parse("c99"), warnings: WarningFlags.Default | WarningFlags.PedanticErrors))
                 .Message.ShouldContain("anonymous struct/union");
         }
         finally { File.Delete(src); }

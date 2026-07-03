@@ -142,15 +142,15 @@ internal sealed partial class IrBuilder
     // -Wdiscarded-qualifiers). On by default; `-Wno-discarded-qualifiers` clears it.
     // Does NOT affect the write-to-const ERROR — that's a constraint violation, not
     // a suppressible warning.
-    private readonly bool _warnDiscard;
+    private readonly WarningFlags _warnings;
 
     internal IrBuilder(DotCC.DialectGate? gate, INameLegalizer names,
-        IReadOnlyDictionary<string, byte[]>? embeds = null, bool warnDiscardedQualifiers = true)
+        IReadOnlyDictionary<string, byte[]>? embeds = null, WarningFlags warnings = WarningFlags.Default)
     {
         _gate = gate;
         _symbols = new SymbolTable(names);
         _embeds = embeds ?? new Dictionary<string, byte[]>();
-        _warnDiscard = warnDiscardedQualifiers;
+        _warnings = warnings;
         // <uchar.h> char16_t is a pre-registered type name (Compiler.PredefinedTypeNames)
         // rather than a real typedef, so seed its resolution here — straight to the
         // Char16 Prim (→ C# char) instead of the verbatim CType.Named fallback the
@@ -2615,7 +2615,7 @@ internal sealed partial class IrBuilder
     /// const (<c>T*</c> → <c>const T*</c>) is always allowed.</summary>
     private void CheckQualifierDiscard(CExpr value, CType target, SrcPos pos, string context)
     {
-        if (!_warnDiscard || pos.IsSystemHeader || Unparen(value) is Cast) { return; }
+        if ((_warnings & WarningFlags.DiscardedQualifiers) == 0 || pos.IsSystemHeader || Unparen(value) is Cast) { return; }
         if (PointeeOf(value.Type) is { } sp && PointeeOf(target) is { } tp && sp.IsConst && !tp.IsConst)
         {
             Diagnostics.Add(new Diagnostic(Severity.Warning,

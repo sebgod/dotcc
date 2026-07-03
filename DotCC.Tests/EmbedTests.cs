@@ -194,7 +194,7 @@ public sealed class EmbedTests
                 """);
             var ex = Should.Throw<CompileException>(() => Compiler.EmitCSharp(
                 new[] { mainPath }, includeDirs: new[] { dir },
-                dialect: CDialect.Parse("c17"), pedantic: true, pedanticErrors: true));
+                dialect: CDialect.Parse("c17"), warnings: WarningFlags.Default | WarningFlags.PedanticErrors));
             ex.Message.ShouldContain("#embed");
         }
         finally { try { Directory.Delete(dir, recursive: true); } catch { /* best-effort */ } }

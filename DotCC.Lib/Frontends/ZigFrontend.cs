@@ -24,7 +24,7 @@ internal sealed class ZigFrontend : IFrontend
     {
         var names = request.Names ?? new Backends.CSharpNameLegalizer();
         var ir = new IrBuilder(null, names, new Dictionary<string, byte[]>(StringComparer.Ordinal),
-                               request.WarnDiscardedQualifiers);
+                               request.Warnings);
         AddUnits(ir, request.InputPaths, names);
 
         var errors = ir.Diagnostics.Where(d => d.Severity == Severity.Error).ToList();

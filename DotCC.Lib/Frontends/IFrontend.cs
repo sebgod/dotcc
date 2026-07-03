@@ -28,15 +28,13 @@ internal interface IFrontend
 /// knobs are general enough that any larger source language carries some form of
 /// them: a set of input units, header/include search dirs, predefined symbols, a
 /// dialect/standard version, strictness flags, the target's identifier policy, and
-/// const-qualifier diagnostics. A frontend that has no analogue for a field simply
-/// ignores it (Zig has no preprocessor <c>Defines</c>, for instance).
+/// the enabled diagnostic warnings. A frontend that has no analogue for a field
+/// simply ignores it (Zig has no preprocessor <c>Defines</c>, for instance).
 /// </summary>
 internal sealed record FrontendRequest(
     IReadOnlyList<string> InputPaths,
     IReadOnlyList<string>? IncludeDirs = null,
     IReadOnlyList<string>? Defines = null,
     CDialect? Dialect = null,
-    bool Pedantic = false,
-    bool PedanticErrors = false,
     INameLegalizer? Names = null,
-    bool WarnDiscardedQualifiers = true);
+    WarningFlags Warnings = WarningFlags.Default);
