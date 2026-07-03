@@ -60,10 +60,13 @@ public sealed class Symbol
     /// value type <c>T</c> in place, so every shared <see cref="VarRef"/> sees it.</summary>
     public required CType Type { get; set; }
     public Storage Storage { get; init; } = Storage.None;
-    /// <summary>For an <see cref="SymKind.EnumConst"/>: its integer value. C enums
-    /// lower to plain integer constants (dotcc emits the literal value at each
-    /// use), sidestepping C#'s enum-arithmetic restrictions.</summary>
-    public long ConstValue { get; init; }
+    /// <summary>For an <see cref="SymKind.EnumConst"/> or a C23 <c>constexpr</c>
+    /// object (<see cref="IsConstexpr"/>): its integer value. C enums lower to plain
+    /// integer constants (dotcc emits the literal value at each use), sidestepping
+    /// C#'s enum-arithmetic restrictions; a constexpr binds it after its initializer
+    /// is built + folded (hence settable), so the name resolves in every ICE
+    /// position via <c>ConstEval</c>.</summary>
+    public long ConstValue { get; set; }
     /// <summary>The identifier the backend emits (set by
     /// <see cref="SymbolTable.Declare"/> via the target's <see cref="INameLegalizer"/>:
     /// escaped, and uniquified when the target forbids shadowing).</summary>
@@ -107,6 +110,14 @@ public sealed class Symbol
     /// [ThreadStatic] initializer would run on the first thread only, breaking C's
     /// "every thread starts at the initial value".</summary>
     public bool IsThreadLocal { get; init; }
+
+    /// <summary>True for a C23 <c>constexpr</c> object declaration. The symbol's
+    /// <see cref="Type"/> is const-qualified (writes reject via the standard
+    /// const-correctness error) and <see cref="ConstValue"/> holds the folded
+    /// initializer, which <c>ConstEval</c> substitutes at every use in a constant
+    /// expression — the emitted C# stays an ordinary field/local (reads and
+    /// <c>&amp;</c> work; runtime behavior is identical).</summary>
+    public bool IsConstexpr { get; init; }
 
     /// <summary>Non-null when the function carries the C23 <c>[[deprecated]]</c> /
     /// <c>[[deprecated("msg")]]</c> attribute — the decoded message, or <c>""</c> for

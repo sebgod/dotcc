@@ -307,6 +307,17 @@ internal sealed partial class IrBuilder
             // Outside a frame (`_comptimeFrame` null — plain const folding) a variable read is not a
             // compile-time constant, so these fall through to null.
             case VarRef v:
+                // A C23 `constexpr` object IS its value in any constant expression —
+                // this single substitution lights up every ICE position at once
+                // (array bounds, case labels, _Static_assert, bit-field widths,
+                // _Generic). Checked before the frame: a constexpr is never a
+                // frame-bound param, and a comptime call body may legitimately
+                // read one.
+                if (v.Sym.IsConstexpr)
+                {
+                    var ct = v.Sym.Type.Unqualified;
+                    return new CtInt(v.Sym.ConstValue, ct is CType.Prim or CType.Enum ? ct : CType.Int);
+                }
                 return _comptimeFrame is { } fr && fr.TryGetValue(v.Sym, out var bound) ? bound : null;
 
             case Assign a:

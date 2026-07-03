@@ -123,6 +123,12 @@ internal sealed class DialectKeywordRewriter : RewritingTokenStream
             // Promote onto the existing terminal under c23; pre-C23 it stays an
             // ID and the <threads.h> macro path applies.
             ["thread_local"] = (2023, map["_Thread_local"], "_Thread_local"),
+
+            // C23 `constexpr` — compile-time constant object declaration. A brand-new
+            // lowercase keyword with no `_Capital_` alias, so the terminal exists ONLY
+            // via this promotion (no lexer rule): pre-C23 `constexpr` remains a valid
+            // ordinary identifier.
+            ["constexpr"] = (2023, map["constexpr"], "constexpr"),
         };
     }
 
