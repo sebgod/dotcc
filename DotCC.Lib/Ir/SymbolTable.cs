@@ -100,6 +100,14 @@ public sealed class Symbol
     /// hint, the faithful lowering of C's "please inline this".</summary>
     public bool IsInline { get; set; }
 
+    /// <summary>True when the object has THREAD storage duration — C11
+    /// <c>_Thread_local</c> (C23 <c>thread_local</c>) or Zig <c>threadlocal var</c>.
+    /// The C# backend emits <c>[ThreadStatic]</c> on the global's field. Constraint
+    /// (enforced at build time): only a zero/default initializer — a .NET
+    /// [ThreadStatic] initializer would run on the first thread only, breaking C's
+    /// "every thread starts at the initial value".</summary>
+    public bool IsThreadLocal { get; init; }
+
     /// <summary>Non-null when the function carries the C23 <c>[[deprecated]]</c> /
     /// <c>[[deprecated("msg")]]</c> attribute — the decoded message, or <c>""</c> for
     /// the message-less form. The C# backend surfaces it as <c>[System.Obsolete(…)]</c>,

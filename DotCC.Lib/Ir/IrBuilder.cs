@@ -336,6 +336,7 @@ internal sealed partial class IrBuilder
     /// an <c>extern</c> one is registered for resolution only (no field).</summary>
     private void BuildGlobalDecls(Item typeItem, Item listItem, Storage storage)
     {
+        _sawThreadLocalSpec = false; // consumed below: set by THIS declaration's spec resolution
         WalkDeclList(typeItem, listItem, (name, initItem, type) =>
         {
             // A file-scope array has its own productions (pinned GlobalArray
@@ -347,12 +348,22 @@ internal sealed partial class IrBuilder
             var sym = _symbols.Declare(new Symbol
             {
                 Name = name, Kind = SymKind.Var, Type = type, Storage = storage, IsGlobal = true,
+                IsThreadLocal = _sawThreadLocalSpec,
             });
             if (storage != Storage.Extern)
             {
                 _definedGlobalNames.Add(name); // a real definition — satisfies any extern decl
                 CExpr? gInit = null;
                 if (initItem is { } ii) { gInit = BuildExpr(ii); EnsureNotEmbed(gInit); CheckQualifierDiscard(gInit, sym.Type, SrcPos.From(ii), "initialization"); }
+                // A .NET [ThreadStatic] initializer runs on the FIRST thread only,
+                // so C's "every thread starts at the initial value" holds only for
+                // the zero/default value .NET gives every thread's slot anyway.
+                if (sym.IsThreadLocal && gInit is not null && ConstEval(gInit) is not 0)
+                {
+                    Diagnostics.Add(new Diagnostic(Severity.Error,
+                        $"'{name}': a non-zero-initialized _Thread_local is not supported (a .NET [ThreadStatic] initializer runs only on the first thread)",
+                        SrcPos.From(typeItem), _file));
+                }
                 Globals.Add(new GlobalVar(sym, gInit));
             }
         });
@@ -370,8 +381,37 @@ internal sealed partial class IrBuilder
     // AttrFn case), consumed by the wrapped function declaration and cleared on unwind.
     private bool _sawNoreturnSpec;
     private bool _sawInlineSpec;
+    // `_Thread_local` (C11) seen by a FILE-SCOPE declaration's spec resolution —
+    // reset + consumed by BuildGlobalDecls (block scope rejects immediately in
+    // RecordDeclSpecs instead, so the flag never carries block-scope state).
+    private bool _sawThreadLocalSpec;
     private bool _pendingAttrNoreturn;
     private string? _pendingAttrDeprecated;
+
+    /// <summary>Record the function/storage specifiers a resolved spec run may
+    /// carry — `_Noreturn` (gated C11) and `inline` for the enclosing function
+    /// symbol, `_Thread_local` (gated C11) for the enclosing file-scope variable
+    /// declaration. Shared by <see cref="ResolveSpecs"/> and
+    /// <see cref="SpecsThenName"/> so both the spec-multiset and the
+    /// typedef-name routes behave identically. A block-scope `_Thread_local`
+    /// (even `static _Thread_local`, which C allows) is a loud V1 rejection —
+    /// dotcc lowers thread-locals as file-scope [ThreadStatic] fields only.</summary>
+    private void RecordDeclSpecs(List<string> specs, SrcPos pos)
+    {
+        if (specs.Contains("_Noreturn")) { Gate(2011, "_Noreturn", pos); _sawNoreturnSpec = true; }
+        if (specs.Contains("inline")) { _sawInlineSpec = true; } // no gate — pre-C99 rejection is structural (rule 2)
+        if (specs.Contains("_Thread_local"))
+        {
+            Gate(2011, "_Thread_local", pos);
+            if (_symbols.AtFileScope) { _sawThreadLocalSpec = true; }
+            else
+            {
+                Diagnostics.Add(new Diagnostic(Severity.Error,
+                    "'_Thread_local' at block scope is not supported (dotcc lowers thread-locals as file-scope [ThreadStatic] fields only)",
+                    pos, _file));
+            }
+        }
+    }
 
     /// <summary>Walk an <c>AttrList</c> collecting the attributes dotcc lowers:
     /// `noreturn` (a bare ID pre-C23; the promoted `_Noreturn` keyword under c23)
@@ -1144,18 +1184,12 @@ internal sealed partial class IrBuilder
         _typedefs.TryGetValue(name, out var t) ? t : new CType.Named(name);
 
     /// <summary>Resolve a `TypeSpecList TYPE_NAME` type: the run's surviving facts
-    /// are the function specifiers `_Noreturn` (gated C11) and `inline`, recorded
-    /// via <see cref="_sawNoreturnSpec"/>/<see cref="_sawInlineSpec"/> for the
-    /// enclosing function symbol; the typedef-name is the whole base type.</summary>
+    /// are the function/storage specifiers (`_Noreturn`, `inline`,
+    /// `_Thread_local` — see <see cref="RecordDeclSpecs"/>); the typedef-name is
+    /// the whole base type.</summary>
     private CType SpecsThenName(C.TypeSpecThenName t, Item it)
     {
-        var specs = CollectSpecs(t.Arg0);
-        if (specs.Contains("_Noreturn"))
-        {
-            Gate(2011, "_Noreturn", it);
-            _sawNoreturnSpec = true;
-        }
-        if (specs.Contains("inline")) { _sawInlineSpec = true; }
+        RecordDeclSpecs(CollectSpecs(t.Arg0), SrcPos.From(it));
         return ResolveTypeName(Tok(t.Arg1));
     }
 
@@ -1191,6 +1225,7 @@ internal sealed partial class IrBuilder
         C.TsInt128 => "__int128",
         C.TsInline => "inline",
         C.TsNoreturn => "_Noreturn",
+        C.TsThreadLocal => "_Thread_local",
         C.TsComplex => "_Complex",
         _ => throw new IrUnsupportedException(TypeName(spec)),
     };
@@ -1385,7 +1420,7 @@ internal sealed partial class IrBuilder
                 case "long": lng++; break;
                 // C99 _Complex — every width widens to the double-backed Complex.
                 case "_Complex": isComplex = true; break;
-                case "inline" or "_Noreturn": break; // ignored for type purposes here
+                case "inline" or "_Noreturn" or "_Thread_local": break; // ignored for type purposes here
                 case "void": base_ = "void"; baseCount++; break;
                 case "char": base_ = "char"; baseCount++; break;
                 case "int": base_ = "int"; baseCount++; break;
@@ -1426,8 +1461,7 @@ internal sealed partial class IrBuilder
         { throw new DotCC.CompileException("`_Complex` requires a `float`, `double`, or `long double` base"); }
 
         // Dialect gates: type-spec features newer than the selected -std=.
-        if (specs.Contains("_Noreturn")) { Gate(2011, "_Noreturn", pos); _sawNoreturnSpec = true; }
-        if (specs.Contains("inline")) { _sawInlineSpec = true; } // no gate — pre-C99 rejection is structural (rule 2)
+        RecordDeclSpecs(specs, pos);
         if (base_ == "_Bool") { Gate(1999, "_Bool", pos); }
         if (lng >= 2) { Gate(1999, "long long", pos); }
         if (isComplex) { Gate(1999, "_Complex", pos); }

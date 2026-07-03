@@ -120,6 +120,11 @@ internal sealed class CSharpBackend
         var globals = new StringBuilder();
         foreach (var g in unit.Globals)
         {
+            // C11 `_Thread_local` / Zig `threadlocal` — thread storage duration:
+            // every thread gets its own zero-initialized slot. (The builder rejects
+            // a non-zero initializer — a [ThreadStatic] initializer runs on the
+            // first thread only, which would break C's per-thread-initial-value.)
+            if (g.Sym.IsThreadLocal) { globals.Append("    [ThreadStatic]\n"); }
             // A pointer/fn-ptr global whose address is taken is stored as `nint` so
             // Unsafe.AsPointer / Volatile.* accept it (CS0306) — the init pointer
             // value is cast to nint, reads cast back. (Backend decision from the

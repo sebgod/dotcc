@@ -1719,6 +1719,18 @@ public sealed class ZigOracleTests
             "    total = total + b[0] + b[1];\n" +
             "    return @intCast(total);\n" +
             "}\n", 42, "" },
+
+        // `threadlocal var` (completion-milestone part 2, the C _Thread_local twofer) —
+        // thread storage duration → [ThreadStatic]. Single-threaded observable (dotcc's
+        // Zig subset has no std.Thread): the main thread reads/writes its own slot,
+        // starting at the zero initial value every thread gets.
+        new object[] { "threadlocal_var",
+            "threadlocal var tl_count: i32 = 0;\n" +
+            "pub fn main() u8 {\n" +
+            "    tl_count = 40;\n" +
+            "    tl_count = tl_count + 2;\n" +
+            "    return @intCast(tl_count);\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
