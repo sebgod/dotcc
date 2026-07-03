@@ -325,7 +325,7 @@ Synthetic header at `DotCC.Lib/include/stdint.h` declares the fixed-width intege
 | `intmax_t` / `uintmax_t` | ✅ | `long` / `unsigned long`. |
 | `INT8_MIN` / `MAX`, `UINT8_MAX`, …, `INT64_MIN` / `MAX`, `UINT64_MAX` | ✅ | `#define` numeric literals — usable as integer constant expressions. |
 | `INTPTR_MIN` / `MAX`, `UINTPTR_MAX`, `SIZE_MAX`, `PTRDIFF_MIN` / `MAX`, `INTMAX_MIN` / `MAX`, `UINTMAX_MAX` | ✅ | All alias the `INT64`/`UINT64` macros (LP64). |
-| `int_least8_t` / `int_fast8_t` / etc. families | ❌ | C99-optional — rarely seen in modern code. Same shape as the fixed-width forms above when added. |
+| `int_least8_t` / `int_fast8_t` / etc. families | ✅ | C99 minimum-width + fastest-minimum-width integer families (7.18.1.2/.3) + their MIN/MAX limit macros (7.18.2.2/.3). Header-only typedefs in `<stdint.h>`. The least types are the exact-width types; the fast types follow **glibc's LP64 (x86-64 / aarch64-Linux) mapping exactly** — `int_fast8_t` is `signed char`, but `int_fast16/32/64_t` are all `long` (the 64-bit machine word, NOT the narrow width) — so `sizeof` and the limit macros stay byte-identical to the gcc oracle. Fixture `c99-stdint-fast/` (gcc `-std=c17`-validated; MSVC opts out — LLP64 maps the fast types to 32-bit int, a data-model divergence); unit tests `StdintFamiliesTests`. |
 | Format-string macros `PRId32` etc. | ✅ | Live in `<inttypes.h>` (now shipped — see its section below). |
 
 ### `limits.h`

@@ -1,0 +1,5 @@
+MSVC is LLP64 and maps int_fast16_t/int_fast32_t to 32-bit `int` (and `long`
+is 4 bytes), so sizeof(int_fast16_t) is 4 and the > 2^31 fast16 value truncates
+— dotcc is LP64 and maps the fast types to 64-bit `long` (glibc x86-64 parity),
+a deliberate data-model divergence like the other sizeof fixtures. The gcc
+oracle (LP64 on Linux x64/arm64) validates this fixture.
