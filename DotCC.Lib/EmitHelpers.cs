@@ -341,6 +341,61 @@ internal static class EmitHelpers
         }
     }
 
+    // ---- char32_t (UTF-32) literals -------------------------------------
+    // A char32_t literal is a sequence of UTF-32 code units (one per Unicode
+    // scalar). Decoding yields UTF-16 StrItems — a source astral char arrives as a
+    // surrogate PAIR (two items), which is exactly correct UTF-16 — so we let the
+    // BCL fold UTF-16 → UTF-32 (System.Text.Rune) rather than hand-rolling
+    // surrogate arithmetic. That's the char32_t payoff: `U"😀"` is ONE code unit
+    // (+ NUL), whereas the char16_t `u"😀"` is two surrogates (+ NUL).
+
+    /// <summary>Rebuild the decoded body of adjacent wide segments as a UTF-16 C#
+    /// string: source chars pass through (an astral char stays a surrogate pair) and
+    /// a decoded escape ≥ U+10000 is expanded to its surrogate pair. The shared step
+    /// for both the char32_t code-unit count and the emitted <c>L32</c> literal.</summary>
+    private static string DecodeWideBodyToUtf16(IReadOnlyList<string> rawQuotedSegments)
+    {
+        // 0x1FFFFF is a CONTIGUOUS 21-bit mask that covers the whole Unicode range
+        // (max scalar U+10FFFF) — NOT 0x10FFFF, which is the max value but not a
+        // bitmask (0x1F600 & 0x10FFFF would clear the 0x0F0000 nibble → 0xF600).
+        var items = new List<StrItem>();
+        foreach (var seg in rawQuotedSegments) { DecodeCStringBody(StripStrQuotes(seg), items, 0x1FFFFF); }
+        var sb = new StringBuilder(items.Count);
+        foreach (var it in items)
+        {
+            if (it.Value >= 0x10000 && Rune.IsValid(it.Value)) { sb.Append(char.ConvertFromUtf32(it.Value)); }
+            else { sb.Append((char)(it.Value & 0xFFFF)); }
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>Decode adjacent <c>U"…"</c> segments (each already <c>U</c>-prefix
+    /// stripped to a plain quoted lexeme) to their UTF-32 code units — Unicode
+    /// scalars — EXCLUDING the NUL terminator (the caller appends / zero-pads). The
+    /// BCL's rune enumeration folds UTF-16 surrogate pairs into single scalars. Used
+    /// to lower <c>char32_t s[] = U"…"</c> to a mutable C# <c>uint</c> buffer.</summary>
+    internal static List<int> StringU32Values(IReadOnlyList<string> rawQuotedSegments)
+    {
+        var body = DecodeWideBodyToUtf16(rawQuotedSegments);
+        var units = new List<int>(body.Length);
+        foreach (var r in body.EnumerateRunes()) { units.Add(r.Value); }
+        return units;
+    }
+
+    /// <summary>Encode adjacent <c>U"…"</c> segments to the lowered
+    /// <c>Libc.L32("…")</c> expression — a pooled, pinned <c>uint*</c> (= char32_t*)
+    /// over UTF-32 data. The emitted argument is a C# UTF-16 string literal (an astral
+    /// scalar as its surrogate pair); <c>Libc.L32</c> folds it back to UTF-32 at
+    /// runtime via the BCL. A trailing <c> </c> NUL-terminates the pointer.</summary>
+    internal static string EncodeU32StringLiteral(IReadOnlyList<string> rawQuotedSegments)
+    {
+        var body = DecodeWideBodyToUtf16(rawQuotedSegments);
+        var sb = new StringBuilder("Libc.L32(\"");
+        foreach (var ch in body) { AppendCsStringChar(sb, ch); }
+        sb.Append("\\u0000\")");   // NUL terminator
+        return sb.ToString();
+    }
+
     // ---- hexadecimal floating constants ---------------------------------
 
     /// <summary>Parse a hexadecimal floating constant (<c>0xH.HHp±E</c>, C99 / Zig

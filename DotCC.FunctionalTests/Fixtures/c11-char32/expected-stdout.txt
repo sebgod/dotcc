@@ -1,0 +1,5 @@
+sizeof=4
+ch=65
+s0=72 s1=105
+len=2 65 66
+emoji_len=2 first=128512 second=90

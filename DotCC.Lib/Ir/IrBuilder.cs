@@ -160,6 +160,9 @@ internal sealed partial class IrBuilder
         // typedef) — seed it to the WChar Prim (→ C# char; dotcc's MSVC-shaped
         // 16-bit wchar_t). See CType.WChar.
         _typedefs["wchar_t"] = CType.WChar;
+        // <uchar.h> char32_t is likewise a pre-registered type name — seed it to the
+        // Char32 Prim (→ C# uint; a 32-bit UTF-32 code unit). See CType.Char32.
+        _typedefs["char32_t"] = CType.Char32;
     }
 
     /// <summary>Flag a feature introduced in <paramref name="era"/> (ISO year) when
@@ -242,6 +245,8 @@ internal sealed partial class IrBuilder
                 or C.GlobalStaticU16CharArrStr or C.GlobalStaticU16CharArrStrSized
                 or C.GlobalWCharArrStr or C.GlobalWCharArrStrSized
                 or C.GlobalStaticWCharArrStr or C.GlobalStaticWCharArrStrSized
+                or C.GlobalU32CharArrStr or C.GlobalU32CharArrStrSized
+                or C.GlobalStaticU32CharArrStr or C.GlobalStaticU32CharArrStrSized
                 or C.GlobalStaticStructInit when AlreadySeenTopLevel(fn):
                 break;
             case C.GlobalDeclList g: BuildGlobalDecls(g.Arg0, g.Arg1, Storage.Static); break;
@@ -261,15 +266,20 @@ internal sealed partial class IrBuilder
             case C.GlobalStaticCharArrStr g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg6, null, null); break;
             case C.GlobalStaticCharArrStrSized g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg5, g.Arg3, null); break;
             // char16_t file-scope arrays from a u"…" literal (same shapes, u16 decode).
-            case C.GlobalU16CharArrStr g: BuildGlobalCharArr(g.Arg0, g.Arg1, g.Arg5, null, null, u16: true); break;
-            case C.GlobalU16CharArrStrSized g: BuildGlobalCharArr(g.Arg0, g.Arg1, g.Arg4, g.Arg2, null, u16: true); break;
-            case C.GlobalStaticU16CharArrStr g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg6, null, null, u16: true); break;
-            case C.GlobalStaticU16CharArrStrSized g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg5, g.Arg3, null, u16: true); break;
+            case C.GlobalU16CharArrStr g: BuildGlobalCharArr(g.Arg0, g.Arg1, g.Arg5, null, null, wide: true); break;
+            case C.GlobalU16CharArrStrSized g: BuildGlobalCharArr(g.Arg0, g.Arg1, g.Arg4, g.Arg2, null, wide: true); break;
+            case C.GlobalStaticU16CharArrStr g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg6, null, null, wide: true); break;
+            case C.GlobalStaticU16CharArrStrSized g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg5, g.Arg3, null, wide: true); break;
             // wchar_t file-scope arrays from an L"…" literal (same shapes, 16-bit decode).
-            case C.GlobalWCharArrStr g: BuildGlobalCharArr(g.Arg0, g.Arg1, g.Arg5, null, null, u16: true); break;
-            case C.GlobalWCharArrStrSized g: BuildGlobalCharArr(g.Arg0, g.Arg1, g.Arg4, g.Arg2, null, u16: true); break;
-            case C.GlobalStaticWCharArrStr g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg6, null, null, u16: true); break;
-            case C.GlobalStaticWCharArrStrSized g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg5, g.Arg3, null, u16: true); break;
+            case C.GlobalWCharArrStr g: BuildGlobalCharArr(g.Arg0, g.Arg1, g.Arg5, null, null, wide: true); break;
+            case C.GlobalWCharArrStrSized g: BuildGlobalCharArr(g.Arg0, g.Arg1, g.Arg4, g.Arg2, null, wide: true); break;
+            case C.GlobalStaticWCharArrStr g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg6, null, null, wide: true); break;
+            case C.GlobalStaticWCharArrStrSized g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg5, g.Arg3, null, wide: true); break;
+            // char32_t file-scope arrays from a U"…" literal (same shapes, 32-bit decode).
+            case C.GlobalU32CharArrStr g: BuildGlobalCharArr(g.Arg0, g.Arg1, g.Arg5, null, null, wide: true); break;
+            case C.GlobalU32CharArrStrSized g: BuildGlobalCharArr(g.Arg0, g.Arg1, g.Arg4, g.Arg2, null, wide: true); break;
+            case C.GlobalStaticU32CharArrStr g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg6, null, null, wide: true); break;
+            case C.GlobalStaticU32CharArrStrSized g: BuildGlobalCharArr(g.Arg1, g.Arg2, g.Arg5, g.Arg3, null, wide: true); break;
             // `extern T a[N];` / `extern T a[];` — declaration only (storage elsewhere).
             case C.ExternArr g: BuildExternArr(g.Arg1, g.Arg2, g.Arg3); break;
             case C.ExternArrIncomplete g: BuildExternArr(g.Arg1, g.Arg2, null); break;
@@ -1662,10 +1672,12 @@ internal sealed partial class IrBuilder
             // Block-scope `static char a[] = "…"` / sized — pinned global char array.
             case C.StmtStaticCharArrStr s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg6, null) with { Pos = pos };
             case C.StmtStaticCharArrStrSized s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg5, s.Arg3) with { Pos = pos };
-            case C.StmtStaticU16CharArrStr s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg6, null, u16: true) with { Pos = pos };
-            case C.StmtStaticU16CharArrStrSized s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg5, s.Arg3, u16: true) with { Pos = pos };
-            case C.StmtStaticWCharArrStr s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg6, null, u16: true) with { Pos = pos };
-            case C.StmtStaticWCharArrStrSized s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg5, s.Arg3, u16: true) with { Pos = pos };
+            case C.StmtStaticU16CharArrStr s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg6, null, wide: true) with { Pos = pos };
+            case C.StmtStaticU16CharArrStrSized s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg5, s.Arg3, wide: true) with { Pos = pos };
+            case C.StmtStaticWCharArrStr s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg6, null, wide: true) with { Pos = pos };
+            case C.StmtStaticWCharArrStrSized s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg5, s.Arg3, wide: true) with { Pos = pos };
+            case C.StmtStaticU32CharArrStr s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg6, null, wide: true) with { Pos = pos };
+            case C.StmtStaticU32CharArrStrSized s: return BuildStaticLocalCharArr(s.Arg1, s.Arg2, s.Arg5, s.Arg3, wide: true) with { Pos = pos };
             // Block-scope aggregate TYPE definitions (`struct cD { … };` inside a
             // function body — the block-scope enum forms are handled below). A
             // type has no storage, so C allows this; dotcc hoists the definition
@@ -1962,10 +1974,12 @@ internal sealed partial class IrBuilder
         // `char s[] = "hi";` (implicit size) / `char buf[N] = "hi";` (explicit, zero-padded).
         C.DeclCharArrStr d => BuildDeclCharArrStr(d.Arg0, d.Arg1, null, d.Arg5),
         C.DeclCharArrStrSized d => BuildDeclCharArrStr(d.Arg0, d.Arg1, CharArrSize(d.Arg2), d.Arg4),
-        C.DeclU16CharArrStr d => BuildDeclCharArrStr(d.Arg0, d.Arg1, null, d.Arg5, u16: true),
-        C.DeclU16CharArrStrSized d => BuildDeclCharArrStr(d.Arg0, d.Arg1, CharArrSize(d.Arg2), d.Arg4, u16: true),
-        C.DeclWCharArrStr d => BuildDeclCharArrStr(d.Arg0, d.Arg1, null, d.Arg5, u16: true),
-        C.DeclWCharArrStrSized d => BuildDeclCharArrStr(d.Arg0, d.Arg1, CharArrSize(d.Arg2), d.Arg4, u16: true),
+        C.DeclU16CharArrStr d => BuildDeclCharArrStr(d.Arg0, d.Arg1, null, d.Arg5, wide: true),
+        C.DeclU16CharArrStrSized d => BuildDeclCharArrStr(d.Arg0, d.Arg1, CharArrSize(d.Arg2), d.Arg4, wide: true),
+        C.DeclWCharArrStr d => BuildDeclCharArrStr(d.Arg0, d.Arg1, null, d.Arg5, wide: true),
+        C.DeclWCharArrStrSized d => BuildDeclCharArrStr(d.Arg0, d.Arg1, CharArrSize(d.Arg2), d.Arg4, wide: true),
+        C.DeclU32CharArrStr d => BuildDeclCharArrStr(d.Arg0, d.Arg1, null, d.Arg5, wide: true),
+        C.DeclU32CharArrStrSized d => BuildDeclCharArrStr(d.Arg0, d.Arg1, CharArrSize(d.Arg2), d.Arg4, wide: true),
         C.DeclStructInit d => BuildDeclStructInit(d),
         // `T x = { .field = … };` — C99 designated struct/union initializer.
         C.DeclStructDesignated d => BuildLocalInit(d.Arg1, ResolveType(d.Arg0), BuildStructDesignated(ResolveType(d.Arg0), d.Arg4)),
@@ -2405,10 +2419,12 @@ internal sealed partial class IrBuilder
             C.Str => BuildStr(it),
             C.U16str => BuildU16Str(it),
             C.Wstr => BuildWStr(it),
+            C.U32str => BuildU32Str(it),
             C.Embed em => BuildEmbed(em),
             C.Chr c => BuildChr(c),
             C.U16chr c => BuildU16Chr(c),
             C.Wchr c => BuildWChr(c),
+            C.U32chr c => BuildU32Chr(c),
             C.Var v => BuildVar(v),
             C.Paren p => BuildExpr(p.Arg1) is var inner ? new Paren(inner) { Type = inner.Type, IsLValue = inner.IsLValue } : throw new InvalidOperationException(),
             C.Add b => Bin(BinOp.Add, b.Arg0, b.Arg2),
@@ -3021,6 +3037,17 @@ internal sealed partial class IrBuilder
         return new LitU16Str(segs) { Type = new CType.Array(CType.WChar, units.Count + 1) };
     }
 
+    private CExpr BuildU32Str(Item it)
+    {
+        // U"…" — a char32_t string literal: type char32_t[N] (N = UTF-32 code units
+        // incl. NUL), decaying to char32_t* in use. One code unit per Unicode scalar
+        // (StringU32Values folds UTF-16 surrogate pairs), so an astral char counts as
+        // ONE element — unlike the u"…" path's two. The backend re-encodes via L32.
+        var segs = CollectWideStrSegments(((C.U32str)it.Content).Arg0);
+        var units = DotCC.EmitHelpers.StringU32Values(segs);
+        return new LitU32Str(segs) { Type = new CType.Array(CType.Char32, units.Count + 1) };
+    }
+
     /// <summary>The constant array bound of a char-array string declarator's
     /// <c>ArrDims</c> (single dimension, constant-folded).</summary>
     private int CharArrSize(Item arrDims)
@@ -3052,16 +3079,17 @@ internal sealed partial class IrBuilder
     }
 
     /// <summary>Collect adjacent wide string-literal segments of a
-    /// <c>U16StringSeq</c> (<c>u"…"</c>) or a <c>WStringSeq</c> (<c>L"…"</c>), in
-    /// source order, with the encoding prefix (<c>u</c>/<c>L</c>) stripped so each
-    /// is a plain quoted lexeme the shared 16-bit decoder (<c>StringU16Values</c>)
-    /// accepts unchanged. char16_t and dotcc's MSVC-shaped 16-bit wchar_t decode
-    /// identically, so one collector serves both literal kinds.</summary>
+    /// <c>U16StringSeq</c> (<c>u"…"</c>), a <c>WStringSeq</c> (<c>L"…"</c>), or a
+    /// <c>U32StringSeq</c> (<c>U"…"</c>), in source order, with the encoding prefix
+    /// (<c>u</c>/<c>U</c>/<c>L</c>) stripped so each is a plain quoted lexeme the
+    /// shared decoders (<c>StringU16Values</c> / <c>StringU32Values</c>) accept
+    /// unchanged. char16_t and dotcc's MSVC-shaped 16-bit wchar_t decode identically
+    /// (16-bit); char32_t decodes 32-bit — the caller picks by element type.</summary>
     private List<string> CollectWideStrSegments(Item strSeq)
     {
         var segs = new List<string>();
         static string StripPrefix(string raw) =>
-            raw.Length >= 1 && raw[0] is 'u' or 'L' ? raw[1..] : raw;
+            raw.Length >= 1 && raw[0] is 'u' or 'U' or 'L' ? raw[1..] : raw;
         void Walk(Item node)
         {
             switch (node.Content)
@@ -3070,6 +3098,8 @@ internal sealed partial class IrBuilder
                 case C.U16strSeqOne so: segs.Add(StripPrefix(Tok(so.Arg0))); break;
                 case C.WstrSeqCons sc: Walk(sc.Arg0); segs.Add(StripPrefix(Tok(sc.Arg1))); break;
                 case C.WstrSeqOne so: segs.Add(StripPrefix(Tok(so.Arg0))); break;
+                case C.U32strSeqCons sc: Walk(sc.Arg0); segs.Add(StripPrefix(Tok(sc.Arg1))); break;
+                case C.U32strSeqOne so: segs.Add(StripPrefix(Tok(so.Arg0))); break;
                 default: segs.Add(StripPrefix(Tok(node))); break;
             }
         }
@@ -3077,15 +3107,28 @@ internal sealed partial class IrBuilder
         return segs;
     }
 
+    /// <summary>Decode a char-array string initializer's literal to its element
+    /// values (excluding the NUL the caller appends), picking the width from how the
+    /// literal was spelled and the array's element type: a narrow <c>"…"</c> decodes
+    /// to UTF-8 bytes; a wide literal decodes to UTF-16 code units, except a
+    /// <c>char32_t</c> element decodes the <c>U"…"</c> to UTF-32 code units (one per
+    /// Unicode scalar). Shared by the block-scope / file-scope / static-local char
+    /// array builders so all three route char32_t identically.</summary>
+    private List<int> WideArrValues(CType elem, Item strSeqItem, bool wide)
+    {
+        if (!wide) { return DotCC.EmitHelpers.StringByteValues(CollectStrSegments(strSeqItem)); }
+        return elem is CType.Prim { Name: "char32_t" }
+            ? DotCC.EmitHelpers.StringU32Values(CollectWideStrSegments(strSeqItem))
+            : DotCC.EmitHelpers.StringU16Values(CollectWideStrSegments(strSeqItem));
+    }
+
     /// <summary><c>char s[] = "hi";</c> — a mutable char array initialised from a
     /// string. Lowers to a byte stackalloc of the decoded bytes plus the NUL;
     /// an explicit size zero-pads (or, exact-fit, may drop the NUL — C's rule).</summary>
-    private CStmt BuildDeclCharArrStr(Item typeItem, Item nameItem, int? explicitSize, Item strSeqItem, bool u16 = false)
+    private CStmt BuildDeclCharArrStr(Item typeItem, Item nameItem, int? explicitSize, Item strSeqItem, bool wide = false)
     {
         var elem = ResolveType(typeItem);
-        var bytes = u16
-            ? DotCC.EmitHelpers.StringU16Values(CollectWideStrSegments(strSeqItem))
-            : DotCC.EmitHelpers.StringByteValues(CollectStrSegments(strSeqItem));
+        var bytes = WideArrValues(elem, strSeqItem, wide);
         bytes.Add(0);                                   // NUL
         var count = explicitSize ?? bytes.Count;
         var inits = new List<CExpr>(count);
@@ -3140,6 +3183,21 @@ internal sealed partial class IrBuilder
         var value = DecodeCharConstant(raw[2..^1]);   // strip the `L'` prefix and `'`
         var inner = new LitInt(value.ToString(System.Globalization.CultureInfo.InvariantCulture), value) { Type = CType.Int };
         return new Cast(CType.WChar, inner) { Type = CType.WChar };
+    }
+
+    private CExpr BuildU32Chr(C.U32chr c)
+    {
+        // U'x' — a C11 char32_t character constant (type char32_t → C# uint, not int).
+        // Same decode + explicit-cast lowering as u'x' (see BuildU16Chr): a bare int
+        // inner literal wrapped in a (char32_t)→(uint) cast tags the value's type. C#
+        // DOES allow a constant int→uint conversion, so the backend may elide the cast
+        // when the value fits — the Cast's Type keeps char32_t fidelity either way.
+        var raw = Tok(c.Arg0);   // U'x'
+        var lit0 = new LitInt("0", 0) { Type = CType.Int };
+        if (raw is null || raw.Length < 4) { return new Cast(CType.Char32, lit0) { Type = CType.Char32 }; }
+        var value = DecodeCharConstant(raw[2..^1]);   // strip the `U'` prefix and `'`
+        var inner = new LitInt(value.ToString(System.Globalization.CultureInfo.InvariantCulture), value) { Type = CType.Int };
+        return new Cast(CType.Char32, inner) { Type = CType.Char32 };
     }
 
     /// <summary>Decode the body of a C character constant (the chars between the

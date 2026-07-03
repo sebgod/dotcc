@@ -433,12 +433,10 @@ internal sealed partial class IrBuilder
     /// <summary>A file-scope / static-local char array initialized from a string
     /// literal (<c>char tag[] = "…"</c>) — a pinned byte array of the decoded bytes
     /// plus the NUL, zero-padded to an explicit size (or truncated, C's rule).</summary>
-    private void BuildGlobalCharArr(Item typeItem, Item nameItem, Item strSeqItem, Item? dimsItem, string? csName, bool u16 = false)
+    private void BuildGlobalCharArr(Item typeItem, Item nameItem, Item strSeqItem, Item? dimsItem, string? csName, bool wide = false)
     {
         var elem = ResolveType(typeItem);
-        var bytes = u16
-            ? DotCC.EmitHelpers.StringU16Values(CollectWideStrSegments(strSeqItem))
-            : DotCC.EmitHelpers.StringByteValues(CollectStrSegments(strSeqItem));
+        var bytes = WideArrValues(elem, strSeqItem, wide);
         bytes.Add(0);   // NUL
         var dims = dimsItem is { } di ? TryConstDims(di) : null;
         var total = dims is { Count: >= 1 } ? dims.Aggregate(1, (a, b) => a * b) : bytes.Count;
@@ -476,10 +474,10 @@ internal sealed partial class IrBuilder
 
     /// <summary>A block-scope <c>static char a[] = "…"</c> — a pinned global char
     /// array under a mangled name (the statement emits nothing).</summary>
-    private CStmt BuildStaticLocalCharArr(Item typeItem, Item nameItem, Item strSeqItem, Item? dimsItem, bool u16 = false)
+    private CStmt BuildStaticLocalCharArr(Item typeItem, Item nameItem, Item strSeqItem, Item? dimsItem, bool wide = false)
     {
         var csName = $"{_symbols.Escape(Tok(nameItem))}__s{_staticLocalSeq++}";
-        BuildGlobalCharArr(typeItem, nameItem, strSeqItem, dimsItem, csName, u16);
+        BuildGlobalCharArr(typeItem, nameItem, strSeqItem, dimsItem, csName, wide);
         return new DeclStmt(System.Array.Empty<LocalDecl>());
     }
 }

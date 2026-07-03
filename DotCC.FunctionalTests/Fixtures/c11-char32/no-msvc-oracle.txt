@@ -1,0 +1,6 @@
+MSVC's C-mode char32_t / U"…" support (via <uchar.h>) is version- and
+/std:-dependent and not reliably present in cl.exe's C front-end, so this
+fixture would spuriously fail the MSVC oracle. char32_t is a 32-bit unsigned
+code unit on both data models (LP64 and LLP64), so there is no ABI divergence
+to validate here — the gcc oracle (-std=c11) authoritatively covers this C11
+Unicode feature.

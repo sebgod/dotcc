@@ -110,6 +110,7 @@ internal sealed class CSharpTarget : ITarget
         "unsigned short" => "ushort",
         "char16_t" => "char",   // C11 char16_t → C# char (both 16-bit UTF-16 code units)
         "wchar_t" => "char",    // wchar_t → C# char — dotcc's MSVC-shaped 16-bit UTF-16 wchar_t
+        "char32_t" => "uint",   // C11 char32_t → C# uint (a 32-bit UTF-32 code unit)
         "int" => "int",
         "unsigned int" => "uint",
         "long" => "long",
