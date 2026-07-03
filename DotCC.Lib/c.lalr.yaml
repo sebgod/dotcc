@@ -438,6 +438,16 @@ symbols:
   - GenericAssocList   # 182 non-terminal: comma-separated generic associations
   - GenericAssoc       # 183 non-terminal: one `Type : E` / `default : E` arm
 
+  # `_Thread_local` (C11 §6.7.1) — thread storage duration. Parsed as a
+  # TypeSpec (the same route as the `inline`/`_Noreturn` function specifiers —
+  # zero production duplication across the Global* decl family); the spec
+  # resolution records it and drops it from the type, and the global-decl
+  # builder marks the symbol → the C# backend emits `[ThreadStatic]` on the
+  # DotCcGlobals field. Always a keyword (reserved `_Capital_`); the C23
+  # lowercase `thread_local` is promoted onto it by DialectKeywordRewriter,
+  # and <threads.h> supplies the C11 macro pre-C23.
+  - '_Thread_local'    # 184 keyword (C11) — thread storage duration
+
 productions:
   # Start production. Single-non-terminal — trimmed at parse time so the root
   # Item carries FnList's already-built C# source string.
@@ -857,6 +867,11 @@ productions:
       # `_Noreturn` (C11) — function specifier → [DoesNotReturn]. Same TypeSpec
       # treatment as inline; TypeFromSpec flags it and the FnSig path emits it.
       - { lhs: TypeSpec, rhs: ['_Noreturn'], action: tsNoreturn }
+      # `_Thread_local` (C11) — thread storage duration → [ThreadStatic] on the
+      # global's field. Same TypeSpec treatment as inline/_Noreturn: recorded by
+      # the spec resolution, dropped from the type. File-scope only (a
+      # block-scope `static _Thread_local` is a loud lowering rejection).
+      - { lhs: TypeSpec, rhs: ['_Thread_local'], action: tsThreadLocal }
       # `_Complex` (C99) — complex type spec; resolves (with a float base) to
       # System.Numerics.Complex in ResolveTypeSpec.
       - { lhs: TypeSpec, rhs: ['_Complex'], action: tsComplex }
@@ -1698,6 +1713,10 @@ lexer:
     - { symbol: '_Alignas', match: '_Alignas' }
     # `_Generic` (C11) — always a keyword (reserved underscore-uppercase).
     - { symbol: '_Generic', match: '_Generic' }
+    # `_Thread_local` (C11) — always a keyword (reserved underscore-uppercase).
+    # The C23 lowercase `thread_local` is promoted onto this terminal by the
+    # dialect rewriter; pre-C23 the macro lives in <threads.h>.
+    - { symbol: '_Thread_local', match: '_Thread_local' }
     # `_Complex` (C99) — always a keyword (reserved underscore-uppercase). The
     # lowercase `complex` is a <complex.h> macro, not a keyword.
     - { symbol: '_Complex', match: '_Complex' }

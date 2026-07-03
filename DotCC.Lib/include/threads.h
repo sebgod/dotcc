@@ -41,4 +41,13 @@ int  mtx_trylock(mtx_t* mtx);
 int  mtx_unlock(mtx_t* mtx);
 void mtx_destroy(mtx_t* mtx);
 
+/* C11 7.26.1: thread_local expands to _Thread_local (-> [ThreadStatic] on the
+   emitted global's field). C23 makes lowercase thread_local a first-class
+   keyword (promoted by DialectKeywordRewriter) and deprecates the macro, so -
+   like <assert.h>'s static_assert and <stdnoreturn.h>'s noreturn - it is only
+   defined for C11 <= __STDC_VERSION__ < C23. */
+#if defined __STDC_VERSION__ && __STDC_VERSION__ >= 201112L && __STDC_VERSION__ < 202311L
+#define thread_local _Thread_local
+#endif
+
 #endif

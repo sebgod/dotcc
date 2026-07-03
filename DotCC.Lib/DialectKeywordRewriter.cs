@@ -117,6 +117,12 @@ internal sealed class DialectKeywordRewriter : RewritingTokenStream
             // pre-C23 they stay IDs and the <stdalign.h> macro path applies.
             ["alignof"] = (2023, map["_Alignof"], "_Alignof"),
             ["alignas"] = (2023, map["_Alignas"], "_Alignas"),
+
+            // C23 makes `thread_local` a first-class keyword (the C11 form is
+            // `_Thread_local`, with the lowercase macro living in <threads.h>).
+            // Promote onto the existing terminal under c23; pre-C23 it stays an
+            // ID and the <threads.h> macro path applies.
+            ["thread_local"] = (2023, map["_Thread_local"], "_Thread_local"),
         };
     }
 

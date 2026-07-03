@@ -447,7 +447,7 @@ internal sealed partial class ZigLowering
                 // alias recorded in pass 0, which emits no decl) or a runtime global — both are
                 // resolved by the global pass below (LowerTopLevelGlobals), so skip them here.
                 case Zig.ConstDecl or Zig.ConstDeclTyped or Zig.VarDecl or Zig.VarDeclTyped
-                  or Zig.ConstDeclTypedMods or Zig.VarDeclTypedMods: break;
+                  or Zig.ConstDeclTypedMods or Zig.VarDeclTypedMods or Zig.VarDeclThreadLocal: break;
                 default: throw new IrUnsupportedException("zig top-level decl: " + (d.Content?.GetType().Name ?? "null"));
             }
         }
@@ -507,6 +507,9 @@ internal sealed partial class ZigLowering
                 // ignored (no-op on the managed target); RhsExpr is one slot right of the Type.
                 case Zig.ConstDeclTypedMods d: LowerGlobal(d.Arg1, d.Arg3, d.Arg6); break;  // const IDENT : Type DeclMods = RhsExpr ;
                 case Zig.VarDeclTypedMods d:   LowerGlobal(d.Arg1, d.Arg3, d.Arg6); break;  // var IDENT : Type DeclMods = RhsExpr ;
+                // `threadlocal var x: T = 0;` — thread storage duration → [ThreadStatic] on the
+                // emitted field (the C `_Thread_local` twofer; same marker, same constraint).
+                case Zig.VarDeclThreadLocal d: LowerGlobal(d.Arg2, d.Arg4, d.Arg6, threadLocal: true); break;
             }
         }
     }
@@ -517,8 +520,18 @@ internal sealed partial class ZigLowering
     /// record a <see cref="GlobalVar"/>. Scalar, aggregate (struct via <see cref="StructInit"/>),
     /// and <c>[N]T</c> array / <c>undefined</c> globals are supported (Milestone K). The initializer
     /// is lowered at module scope, so it must be a constant / module-resolvable value.</summary>
-    private void LowerGlobal(Item nameTok, Item? typeItem, Item rhsItem)
+    private void LowerGlobal(Item nameTok, Item? typeItem, Item rhsItem, bool threadLocal = false)
     {
+        // `threadlocal` V1: a zero-initialized SCALAR only. The array/aggregate
+        // paths below don't carry the marker (their pinned backing store is
+        // process-wide by construction), and a non-zero initializer breaks under
+        // .NET [ThreadStatic] (the initializer runs on the first thread only) —
+        // both are loud rejections, checked where they'd otherwise lower.
+        if (threadLocal && (IsSentinelArrayType(typeItem) || rhsItem.Content is Zig.UndefinedLit or Zig.LabeledBlock))
+        {
+            throw new IrUnsupportedException(
+                $"threadlocal '{Tok(nameTok)}': only a zero-initialized scalar threadlocal is supported");
+        }
         // A labeled value-block initializes via runtime statements (a temp + control flow); a global
         // must be comptime-initialized, so it can't host one. Clear error (not the generic
         // expression-position one, which would read oddly for a global).
@@ -567,14 +580,28 @@ internal sealed partial class ZigLowering
         // backing store exposed as a stable `T*` (the same store a C file-scope array uses).
         if (init is StackArray sa)
         {
+            if (threadLocal)
+            {
+                throw new IrUnsupportedException(
+                    $"threadlocal '{Tok(nameTok)}': only a zero-initialized scalar threadlocal is supported");
+            }
             AddArrayGlobal(Tok(nameTok), (CType.Array)sa.Type,
                 new PinnedArray(sa.Element, sa.Elems, null) { Type = new CType.Pointer(sa.Element) });
             return;
+        }
+        // A .NET [ThreadStatic] initializer runs on the FIRST thread only, so C's/
+        // Zig's "every thread starts at the initial value" holds only for the
+        // zero/default value every thread's slot gets anyway.
+        if (threadLocal && _ir.ConstEval(init) is not 0)
+        {
+            throw new IrUnsupportedException(
+                $"threadlocal '{Tok(nameTok)}': a non-zero initializer is not supported (a .NET [ThreadStatic] initializer runs only on the first thread)");
         }
         var type = declared ?? init.Type ?? CType.Int;
         var sym = _symbols.Declare(new Symbol
         {
             Name = Tok(nameTok), Kind = SymKind.Var, Type = type, Storage = Storage.Static, IsGlobal = true,
+            IsThreadLocal = threadLocal,
         });
         _ir.Globals.Add(new GlobalVar(sym, init));
     }
@@ -1867,6 +1894,11 @@ internal sealed partial class ZigLowering
             case Zig.ConstDeclTyped d:  return DeclOrComptime(d.Arg1, d.Arg3, d.Arg5);
             case Zig.VarDecl d:         return DeclOf(d.Arg1, null, d.Arg3);
             case Zig.VarDeclTyped d:    return DeclOf(d.Arg1, d.Arg3, d.Arg5);
+            // The shared VarDecl nonterminal lets a statement-position `threadlocal var` parse;
+            // real zig allows `threadlocal` only at container level, so reject it like zig does.
+            case Zig.VarDeclThreadLocal:
+                throw new IrUnsupportedException(
+                    "'threadlocal' is only allowed on a container-level `var` (a function-local threadlocal is rejected by real zig too)");
             // `const/var x: T align(N)/linksection(".s") = e;` (Milestone R, part 5) — the modifiers
             // are a no-op on the managed target, so lower exactly like the unmodified typed decl
             // (the DeclMods arg is ignored). RhsExpr is one slot right of the Type (DeclMods between).

@@ -231,6 +231,8 @@ symbols:
   - 'comptime'     # 153 `comptime EXPR` value prefix — force compile-time evaluation (Milestone T)
   - 'inline'       # 154 `inline for/while` — comptime loop UNROLLING (Milestone T, part 3)
   - LoopExpr       # 155 a value-position `while`/`for … else …` loop (a RhsExpr; Milestone Y, part 2)
+  - 'threadlocal'  # 156 `threadlocal var` — thread storage duration on a container-level var
+                   #     (→ [ThreadStatic]; twofer with C `_Thread_local`, completion milestone part 2)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -340,6 +342,11 @@ productions:
       - { lhs: VarDecl, rhs: ['const', IDENT, ':', Type, '=', RhsExpr, ';'], action: constDeclTyped }
       - { lhs: VarDecl, rhs: ['var', IDENT, '=', RhsExpr, ';'],             action: varDecl }
       - { lhs: VarDecl, rhs: ['var', IDENT, ':', Type, '=', RhsExpr, ';'],  action: varDeclTyped }
+      # `threadlocal var x: T = v;` — thread storage duration (typed form only;
+      # the idiomatic spelling). VarDecl is shared between top level and
+      # statement position, so a statement-position `threadlocal` parses and is
+      # REJECTED in lowering (real zig allows it only at container level).
+      - { lhs: VarDecl, rhs: ['threadlocal', 'var', IDENT, ':', Type, '=', RhsExpr, ';'], action: varDeclThreadLocal }
       # A typed const/var with `align(N)` and/or `linksection(".s")` modifiers between the Type and `=`
       # (Milestone R, part 5). DeclMods is NON-EMPTY (the no-modifier case is the rule above) — after
       # `Type`, the `align`/`linksection` vs `=` lookahead is disjoint, conflict-free. ACCEPTED +
@@ -1048,6 +1055,7 @@ lexer:
     - { symbol: 'pub',    match: 'pub' }
     - { symbol: 'const',  match: 'const' }
     - { symbol: 'var',    match: 'var' }
+    - { symbol: 'threadlocal', match: 'threadlocal' }
     - { symbol: 'return', match: 'return' }
     - { symbol: 'if',     match: 'if' }
     - { symbol: 'else',   match: 'else' }
