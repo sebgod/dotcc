@@ -478,6 +478,14 @@ public sealed record SwitchSection(IReadOnlyList<SwitchLabel> Labels, IReadOnlyL
 /// label inside a nested block, which is the known Duff's limitation).</summary>
 public sealed record CaseLabelStmt(CExpr? CaseExpr, CStmt Body) : CStmt;
 
+/// <summary>A C23 <c>[[fallthrough]];</c> marker (opt-in <c>-Wimplicit-fallthrough</c>).
+/// dotcc's switch lowering already synthesizes C's implicit fall-through jump, so the
+/// attribute carries NO codegen — this node exists only so <see cref="IrBuilder.BuildSwitch"/>
+/// can tell an intentional fall-through from an accidental one and suppress the warning on the
+/// former. Emits nothing (both backends) and does NOT terminate control flow, so the
+/// synthesized <c>goto case</c> is still appended after it.</summary>
+public sealed record FallthroughMarker : CStmt;
+
 /// <summary>A <c>case E:</c> (<see cref="CaseExpr"/> set) or <c>default:</c>
 /// (null) label. The case expression must be a constant per C# rules — an integer
 /// literal, or an enumerator which codegen decays to <c>(int)EnumName.Member</c>
