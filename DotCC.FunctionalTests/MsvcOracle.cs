@@ -62,8 +62,12 @@ internal static class MsvcOracle
     /// returning captured stdout. Compilation + run happen in
     /// <paramref name="workDir"/> (created if missing). Throws on cl
     /// failure with the captured diagnostics in the message.
+    /// <paramref name="stdFlag"/> is the cl language-mode switch (e.g.
+    /// <c>/std:c11</c>) or null for cl's default mode — required because
+    /// cl's default C mode is legacy C89+extensions, where C11 syntax like
+    /// <c>_Generic</c> is a hard syntax error (C2059).
     /// </summary>
-    public static string CompileAndRun(string[] csources, string workDir, string[]? runArgs = null)
+    public static string CompileAndRun(string[] csources, string workDir, string? stdFlag = null, string[]? runArgs = null)
     {
         EnsureInitialised();
         if (_clExePath is null || _vcvarsEnv is null)
@@ -104,6 +108,7 @@ internal static class MsvcOracle
         };
         ApplyCachedEnv(cl);
         cl.ArgumentList.Add("/nologo");
+        if (stdFlag is not null) { cl.ArgumentList.Add(stdFlag); }
         cl.ArgumentList.Add($"/Fe:{exeName}");
         foreach (var n in localNames) { cl.ArgumentList.Add(n); }
 

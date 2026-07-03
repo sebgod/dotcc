@@ -1,4 +1,0 @@
-C23-only surface: __VA_OPT__ needs cl.exe's conformant preprocessor and
-/std:clatest, not the pinned /std:c17 the oracle drives — same opt-out
-shape as c23-static-assert / c23-elifdef / c23-attributes. The gcc-WSL
-oracle validates this fixture.

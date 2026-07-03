@@ -1,1 +1,3 @@
-MSVC has no C23 frontend (no /std:c23), so it cannot parse `enum E : T`.
+cl.exe does not implement C23 enum underlying types even under
+/std:clatest — `enum E : T` is C2059 "syntax error: ':'" (verified on MSVC
+toolset 14.51, VS 2026). The gcc oracle (-std=c2x) covers this fixture.

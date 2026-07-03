@@ -100,16 +100,19 @@ public sealed class MsvcOracleTests
             inputPaths: match.sources,
             includeDirs: new[] { dir },
             defines: null,
-            fileBased: false);
+            fileBased: false,
+            dialect: CDialect.Parse(match.std));
         var dotccOut = FixtureRunner.CompileAndRun(emitted, Array.Empty<string>())
             .ReplaceLineEndings("\n").TrimEnd('\n');
 
         // MSVC path: copy sources to an isolated work dir, build with cl,
-        // run, capture stdout.
+        // run, capture stdout. The fixture's dialect maps to cl's /std:
+        // switch — cl's default C mode is legacy C89+extensions and errors
+        // on C11 syntax (e.g. _Generic → C2059).
         var workDir = Path.Combine(
             Path.GetTempPath(),
             $"dotcc-msvc-{name}-{Guid.NewGuid():N}");
-        var msvcOut = MsvcOracle.CompileAndRun(match.sources, workDir)
+        var msvcOut = MsvcOracle.CompileAndRun(match.sources, workDir, MsvcStdFor(match.std))
             .ReplaceLineEndings("\n").TrimEnd('\n');
 
         // dotcc must match MSVC byte-for-byte. If this fails, dotcc's
@@ -157,6 +160,22 @@ public sealed class MsvcOracleTests
             $"Committed expected-stdout.txt for '{name}' no longer matches MSVC's live output. " +
             $"Re-run with {RegenBaselineEnv}=1 to refresh the baseline.");
     }
+
+    /// <summary>
+    /// Map dotcc's dialect name to the <c>/std:</c> switch cl.exe accepts
+    /// (the MSVC mirror of the gcc oracle's <c>GccStdFor</c>). cl has no
+    /// mode below C11 — <c>c90</c>/<c>c99</c> map to null (cl's default
+    /// legacy C89+extensions mode, the closest available) — and spells
+    /// C23 <c>clatest</c> on the versions we target.
+    /// </summary>
+    private static string? MsvcStdFor(string dotccStd) => dotccStd switch
+    {
+        "c90" or "c99" => null,
+        "c11" => "/std:c11",
+        "c17" or "c18" => "/std:c17",
+        "c23" => "/std:clatest",
+        _ => null,
+    };
 
     /// <summary>
     /// Resolve the source-tree path to a fixture's

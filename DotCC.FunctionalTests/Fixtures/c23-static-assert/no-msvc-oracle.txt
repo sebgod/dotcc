@@ -1,4 +1,0 @@
-MSVC's C frontend has no -std:c23, so the bare C23 lowercase
-`static_assert` keyword (no <assert.h> include) and the message-less
-`static_assert(expr);` arity don't compile under cl.exe. The gcc oracle
-(-std=c2x) covers this fixture instead.

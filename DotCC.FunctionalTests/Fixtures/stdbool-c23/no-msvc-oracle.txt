@@ -1,3 +1,4 @@
-MSVC's C frontend has no /std:c23, so it keeps <stdbool.h>'s bool/true/false
-macros (prints "bool-macro") rather than the C23 keyword behavior this fixture
-asserts. The gcc oracle (-std=c2x) covers it instead.
+cl.exe compiles this under /std:clatest but keeps <stdbool.h>'s macro
+definition of bool (prints "bool-macro") rather than the C23 first-class
+keyword behavior this fixture asserts ("bool-keyword") — verified on MSVC
+toolset 14.51, VS 2026. The gcc oracle (-std=c2x) covers it instead.
