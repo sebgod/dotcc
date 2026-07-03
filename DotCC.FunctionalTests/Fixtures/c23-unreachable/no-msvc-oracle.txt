@@ -1,0 +1,5 @@
+cl.exe does not provide C23 `unreachable()` even under /std:clatest — its
+<stddef.h> doesn't define the macro, so cl treats `unreachable()` as an
+undeclared function (C4715 "not all control paths return a value" + LNK2019
+"unresolved external symbol unreachable"), verified on MSVC toolset 14.51
+(VS 2026). The gcc oracle (-std=c2x) covers this fixture instead.
