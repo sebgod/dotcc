@@ -1759,7 +1759,7 @@ public sealed class ZigOracleTests
         string dotccStdout;
         try
         {
-            var emitted = Compiler.EmitCSharp(new[] { zigPath }, fileBased: false);
+            var emitted = Compiler.EmitCSharp(new[] { zigPath }, emit: EmitMode.Csproj);
             (dotccStdout, dotccExit) = FixtureRunner.CompileAndRunCapturingExit(emitted, Array.Empty<string>());
         }
         finally { File.Delete(zigPath); }
@@ -1952,7 +1952,7 @@ public sealed class ZigOracleTests
         string dotccStdout;
         try
         {
-            var emitted = Compiler.EmitCSharp(new[] { cPath, zigPath }, fileBased: false);
+            var emitted = Compiler.EmitCSharp(new[] { cPath, zigPath }, emit: EmitMode.Csproj);
             (dotccStdout, dotccExit) = FixtureRunner.CompileAndRunCapturingExit(emitted, Array.Empty<string>());
 
             // zig path: build + run the SAME input set (CompileAndRun lists the sibling .c alongside

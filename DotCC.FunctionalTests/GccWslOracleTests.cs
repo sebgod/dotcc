@@ -138,7 +138,7 @@ public sealed class GccWslOracleTests
             inputPaths: match.sources,
             includeDirs: new[] { dir },
             defines: null,
-            fileBased: false,
+            emit: EmitMode.Csproj,
             dialect: CDialect.Parse(match.std));
         var dotccOut = FixtureRunner.CompileAndRun(emitted, Array.Empty<string>())
             .ReplaceLineEndings("\n").TrimEnd('\n');

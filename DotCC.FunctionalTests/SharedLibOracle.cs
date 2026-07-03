@@ -83,7 +83,7 @@ internal static class SharedLibOracle
         var libC = Path.Combine(workDir, "lib.c");
         File.WriteAllText(libC, libCSource);
         var program = Compiler.EmitCSharp(
-            new[] { libC }, includeDirs: null, defines: null, fileBased: false, libraryMode: true);
+            new[] { libC }, includeDirs: null, defines: null, emit: EmitMode.SharedLib);
         File.WriteAllText(Path.Combine(workDir, "Program.cs"), program);
         File.WriteAllText(Path.Combine(workDir, AsmName + ".csproj"),
             Compiler.BuildGeneratedCsproj(libraryMode: true, assemblyName: AsmName));
@@ -136,7 +136,7 @@ internal static class SharedLibOracle
         var libC = Path.Combine(libDir, "lib.c");
         File.WriteAllText(libC, libCSource);
         File.WriteAllText(Path.Combine(libDir, "Program.cs"),
-            Compiler.EmitCSharp(new[] { libC }, includeDirs: null, defines: null, fileBased: false, libraryMode: true));
+            Compiler.EmitCSharp(new[] { libC }, includeDirs: null, defines: null, emit: EmitMode.SharedLib));
         File.WriteAllText(Path.Combine(libDir, AsmName + ".csproj"),
             Compiler.BuildGeneratedCsproj(libraryMode: true, assemblyName: AsmName));
 
@@ -144,7 +144,7 @@ internal static class SharedLibOracle
         var consC = Path.Combine(consDir, "consumer.c");
         File.WriteAllText(consC, dotccConsumerCSource);
         File.WriteAllText(Path.Combine(consDir, "Program.cs"),
-            Compiler.EmitCSharp(new[] { consC }, includeDirs: null, defines: null, fileBased: false, libraryMode: false));
+            Compiler.EmitCSharp(new[] { consC }, includeDirs: null, defines: null, emit: EmitMode.Csproj));
         File.WriteAllText(Path.Combine(consDir, ConsumerAsmName + ".csproj"),
             Compiler.BuildGeneratedCsproj(libraryMode: false, assemblyName: ConsumerAsmName));
 
@@ -193,7 +193,7 @@ internal static class SharedLibOracle
         var imports = new ImportOptions(new[] { importName }, new[] { ToShellPath(workDir) }, Array.Empty<string>());
         File.WriteAllText(Path.Combine(workDir, "Program.cs"),
             Compiler.EmitCSharp(new[] { consC }, includeDirs: null, defines: null,
-                fileBased: false, libraryMode: false, imports: imports));
+                emit: EmitMode.Csproj, imports: imports));
         File.WriteAllText(Path.Combine(workDir, ImportConsumerAsmName + ".csproj"),
             Compiler.BuildGeneratedCsproj(libraryMode: false, assemblyName: ImportConsumerAsmName));
 
@@ -233,7 +233,7 @@ internal static class SharedLibOracle
         var libC = Path.Combine(libDir, "lib.c");
         File.WriteAllText(libC, libCSource);
         File.WriteAllText(Path.Combine(libDir, "Program.cs"),
-            Compiler.EmitCSharp(new[] { libC }, includeDirs: null, defines: null, fileBased: false, libraryMode: true));
+            Compiler.EmitCSharp(new[] { libC }, includeDirs: null, defines: null, emit: EmitMode.SharedLib));
         File.WriteAllText(Path.Combine(libDir, AsmName + ".csproj"),
             Compiler.BuildGeneratedCsproj(libraryMode: true, assemblyName: AsmName));
 
@@ -243,7 +243,7 @@ internal static class SharedLibOracle
         var imports = new ImportOptions(new[] { AsmName }, new[] { ToShellPath(workDir) }, Array.Empty<string>());
         File.WriteAllText(Path.Combine(consDir, "Program.cs"),
             Compiler.EmitCSharp(new[] { consC }, includeDirs: null, defines: null,
-                fileBased: false, libraryMode: false, imports: imports));
+                emit: EmitMode.Csproj, imports: imports));
         File.WriteAllText(Path.Combine(consDir, ImportConsumerAsmName + ".csproj"),
             Compiler.BuildGeneratedCsproj(libraryMode: false, assemblyName: ImportConsumerAsmName));
 
@@ -288,7 +288,7 @@ internal static class SharedLibOracle
         var imports = new ImportOptions(Array.Empty<string>(), Array.Empty<string>(), new[] { archivePath });
         File.WriteAllText(Path.Combine(workDir, "Program.cs"),
             Compiler.EmitCSharp(new[] { consC }, includeDirs: null, defines: null,
-                fileBased: false, libraryMode: false, imports: imports));
+                emit: EmitMode.Csproj, imports: imports));
         File.WriteAllText(Path.Combine(workDir, ImportConsumerAsmName + ".csproj"),
             Compiler.BuildGeneratedCsproj(libraryMode: false, assemblyName: ImportConsumerAsmName,
                 staticArchives: new[] { archivePath }));

@@ -226,6 +226,32 @@ internal static class Program
 
     private enum EmitKind { Csproj, File, Build, Obj }
 
+    /// <summary>
+    /// <c>EmitKind</c> → <see cref="EmitMode"/> flattening, as a C# 14 extension member so the
+    /// one call site reads as <c>emit.ToEmitMode(libraryMode)</c>. Declared inside
+    /// <see cref="Program"/> (a top-level static class, as extension blocks require) so the
+    /// private <see cref="EmitKind"/> receiver stays private.
+    /// </summary>
+    extension(EmitKind emit)
+    {
+        /// <summary>
+        /// Flatten the CLI's <c>(EmitKind, -shared)</c> pair into the library's single
+        /// <see cref="EmitMode"/> output-shape knob. <c>-shared</c> always wins (a shared
+        /// library is csproj-shaped, never file-based), so only a non-library
+        /// <c>--emit=file</c> stays file-based — exactly the old
+        /// <c>fileBased: emit == File &amp;&amp; !libraryMode</c>. <see cref="EmitKind.Obj"/> is
+        /// handled earlier (via <see cref="Compiler.EmitObject"/>) and never reaches here;
+        /// <see cref="EmitKind.Build"/> emits the same csproj shell as
+        /// <see cref="EmitKind.Csproj"/> (the build step is a separate CLI action).
+        /// </summary>
+        private EmitMode ToEmitMode(bool libraryMode) => emit switch
+        {
+            _ when libraryMode => EmitMode.SharedLib,
+            EmitKind.File      => EmitMode.File,
+            _                  => EmitMode.Csproj,
+        };
+    }
+
     private static int Run(
         string[] inputPaths,
         string? outputPath,
@@ -315,16 +341,16 @@ internal static class Program
                 !p.EndsWith(".c", System.StringComparison.OrdinalIgnoreCase)
                 && !p.EndsWith(".zig", System.StringComparison.OrdinalIgnoreCase));
         string program;
+        var emitMode = emit.ToEmitMode(libraryMode);
         try
         {
             program = linking
-                ? Compiler.LinkObjects(inputPaths, fileBased: emit == EmitKind.File && !libraryMode, libraryMode: libraryMode, debugHeap: debugHeap, imports: imports)
+                ? Compiler.LinkObjects(inputPaths, emit: emitMode, debugHeap: debugHeap, imports: imports)
                 : Compiler.EmitCSharp(
                     inputPaths,
                     includeDirs,
                     defines,
-                    fileBased: emit == EmitKind.File && !libraryMode,
-                    libraryMode: libraryMode,
+                    emit: emitMode,
                     dialect: dialect,
                     debugHeap: debugHeap,
                     imports: imports,
