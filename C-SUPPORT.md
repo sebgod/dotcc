@@ -143,7 +143,7 @@ Bird's-eye scorecard — the detailed per-area tables below are the source of tr
 | Call `f(a, b)`, `f()` | ✅ | `Postfix` productions. **Function-pointer calls:** both the direct form `fp(args)` and the deref form `(*fp)(args)` work — in C the deref is a no-op (the function decays back to the pointer), so dotcc drops it (C# calls fn pointers directly; `*fp` is CS0193). Covers fn-ptr locals, params, and struct fields. Fixture `fnptr-deref-call/`. |
 | Member access `.` / `->` | ✅ | Both lowered verbatim (C# accepts `->` on pointers in unsafe context). A compound base (`(p - 1)->m`, `(*pp)->m`, `((T*)x)->m`) keeps its parens for correct precedence. See the `struct` member-access row in the Types table; fixtures `struct-point/`, `ptr-arith-arrow/`. |
 | `_Alignof` (C11) | ✅ | `_Alignof(Type)` — folds at lowering to the layout model's ABI alignment (`AlignOfConst`, the same engine Zig's `@alignOf` uses), `size_t`-typed. An integer constant expression, so it composes with `_Static_assert` / array bounds / case labels. Type-name operand only (the GNU `_Alignof expr` extension is not provided). C23 lowercase `alignof` via rule-2 promotion; `<stdalign.h>` supplies the C11 macro. Gated C11. Fixture `c11-alignof/` (gcc-oracle; MSVC opts out — LLP64 `long`); unit tests `AlignofTests`. |
-| `_Generic` (C11) | ❌ | C11 type-generic dispatch — complex; low priority |
+| `_Generic` (C11) | ✅ | C11 type-generic dispatch, resolved at lowering time on the controlling expression's synthesized `CType`. Full detail in the Beyond-C99 table row; fixture `c11-generic/`, unit tests `GenericTests`. |
 
 ## Statements
 
@@ -543,9 +543,9 @@ miscompiles** — every gap below fails at parse/lex time or is explicitly flagg
 - ✅ `inline` — function specifier → `[MethodImpl(AggressiveInlining)]` (see the Declarations table).
 
 **C11**
-- ⛔ `_Generic` (generic selection).
+- ✅ `_Generic` (generic selection) — resolved at lowering time on the controlling expression's synthesized `CType`. See the Beyond-C99 table.
 - ✅ Anonymous `struct` / `union` members — fields promoted into the parent (struct inlined; union lifted to a nested explicit-layout type + access rewrite). See the Beyond-C99 table.
-- ⛔ `_Thread_local`. (`_Atomic` + full `<stdatomic.h>` ✅, `_Noreturn` ✅, `_Static_assert`/`static_assert` ✅ evaluated at compile time, `_Alignof` ✅ folds / `_Alignas` ✅ checked-then-ignored — see the Beyond-C99 table.)
+- ✅ `_Thread_local` (→ `[ThreadStatic]`, zero-init file-scope). (`_Atomic` + full `<stdatomic.h>` ✅, `_Noreturn` ✅, `_Static_assert`/`static_assert` ✅ evaluated at compile time, `_Alignof` ✅ folds / `_Alignas` ✅ checked-then-ignored — see the Beyond-C99 table.)
 - ✅ `char16_t` (`u"…"`/`u'x'`) and `wchar_t` (`L"…"`/`L'x'`) — both lower to C# `char` (16-bit UTF-16); see the Lexical/Types tables. ⛔ The other encoding prefixes `U"…"` (char32_t) / `u8"…"` stay unparsed.
 
 **C23**

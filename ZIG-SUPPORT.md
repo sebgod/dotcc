@@ -195,9 +195,9 @@ supported — see the Allocators section),
 `union { … }` — are all now ✅ as of Milestone R; data-only `struct`/`enum`/`union`
 **with methods** — struct/enum/union methods + the `const Self = @This();` self-type alias
 + namespaced VALUE `const`s + namespaced mutable `var`s ARE supported — see below),
-explicit error-SET declarations (`error{A,B}` —
-inferred `!T` + `error.X` ARE supported), `async`/`suspend`, inline assembly. (Both
-`.{…}` and typed `T{…}` init lists ARE supported, including `&T{…}` —
+`async`/`suspend`, inline assembly. (Explicit error-SET declarations `error{A,B}`,
+inferred `!T`, and `error.X` ARE supported — Milestones N/X, see the error-unions rows.
+Both `.{…}` and typed `T{…}` init lists ARE supported, including `&T{…}` —
 address-of-a-temporary — via a materialized block-local temp.)
 
 ### Why these are out of scope — the reasoning, not just the line
