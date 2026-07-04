@@ -540,13 +540,48 @@ internal sealed partial class ZigLowering
             throw new IrUnsupportedException(
                 $"a labeled value-block can't initialize the global '{Tok(nameTok)}' (a global needs a comptime value)");
         }
-        // A `[N:0]T` sentinel array's N+1 reservation is materialized only at the local-decl
-        // stackalloc (part 4); the pinned global store has no such hook yet, so reject it clearly
-        // rather than silently dropping the sentinel slot (deferred — declare it as a local).
-        if (IsSentinelArrayType(typeItem))
+        // A `[N:s]T` sentinel array GLOBAL — reserve ONE extra trailing slot for the sentinel in the
+        // pinned, program-lifetime backing store (the local-decl stackalloc does the same, part 4 /
+        // Milestone Z). The symbol keeps the LOGICAL `CType.Array(element, N)` type (so `.len` /
+        // slicing exclude the sentinel), while the store lays down N+1 slots. Mirrors the local path.
+        if (typeItem is { Content: Zig.TySentArray } sentType)
         {
-            throw new IrUnsupportedException(
-                $"a global `[N:0]T` sentinel array '{Tok(nameTok)}' is deferred (declare it as a local)");
+            var inv = CultureInfo.InvariantCulture;
+            var sArr = (CType.Array)LowerType(sentType);       // non-null (pattern-bound)
+            var sN = (int)(sArr.Count ?? 0);
+            var sVal = SentinelArrayValue(sentType);
+            var sentLit = new LitInt(sVal.ToString(inv), sVal) { Type = CType.Int };
+            var ptrTy = new CType.Pointer(sArr.Element);
+            if (rhsItem.Content is Zig.UndefinedLit)
+            {
+                // `undefined`: a ZERO sentinel rides C#'s zero-fill (reserve N+1). A NON-ZERO sentinel
+                // needs the value written into the trailing slot — a pinned static store can't
+                // post-write, so lay down an explicit `[0×N, s]` element list instead.
+                if (sVal == 0)
+                {
+                    var np1 = sN + 1;
+                    AddArrayGlobal(Tok(nameTok), sArr, new PinnedArray(sArr.Element, null,
+                        new LitInt(np1.ToString(inv), np1) { Type = CType.Int }) { Type = ptrTy });
+                }
+                else
+                {
+                    var zeros = new List<CExpr>();
+                    for (var k = 0; k < sN; k++) { zeros.Add(new LitInt("0", 0) { Type = CType.Int }); }
+                    zeros.Add(sentLit);
+                    AddArrayGlobal(Tok(nameTok), sArr, new PinnedArray(sArr.Element, zeros, null) { Type = ptrTy });
+                }
+                return;
+            }
+            // An array literal (`.{…}` / `[N]T{…}`) → a StackArray; append the sentinel to its elems so
+            // the pinned store lays down N+1 slots (`g[N]` reads the sentinel back).
+            if (LowerExprSink(rhsItem, sArr) is not StackArray sSa)
+            {
+                throw new IrUnsupportedException(
+                    $"a `[N:s]T` sentinel array global '{Tok(nameTok)}' must be initialized with an array literal (`.{{…}}` / `[N]T{{…}}`) or `undefined`");
+            }
+            var sElems = new List<CExpr>(sSa.Elems) { sentLit };
+            AddArrayGlobal(Tok(nameTok), sArr, new PinnedArray(sSa.Element, sElems, null) { Type = ptrTy });
+            return;
         }
         var declared = typeItem is not null ? LowerType(typeItem) : null;
         // `[N]T = undefined` → a zeroed, pinned, program-lifetime backing store (the array-literal
