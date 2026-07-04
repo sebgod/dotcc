@@ -8,11 +8,12 @@
 extern fn printf(format: [*c]const u8, ...) c_int;
 
 // A struct container bound to a `const` (Zig: types are values). Lowers to a real C#
-// `unsafe struct Point` via the SAME aggregate machinery the C frontend uses.
-const Point = struct { x: u8, y: u8 };
+// `unsafe struct Point` via the SAME aggregate machinery the C frontend uses. The `pub`
+// visibility modifier is peeled (Unwrap) — a no-op in dotcc's single-module emit.
+pub const Point = struct { x: u8, y: u8 };
 
-// An enum with an explicit underlying type → C# `enum Color : byte` (members auto-increment).
-const Color = enum(u8) { red, green, blue };
+// A `pub` enum with an explicit underlying type → C# `enum Color : byte` (members auto-increment).
+pub const Color = enum(u8) { red, green, blue };
 
 // A `*Point` parameter — Zig has no `->`, so `p.x` auto-derefs (dotcc emits C#'s `->`).
 fn sumPoint(p: *Point) u8 {

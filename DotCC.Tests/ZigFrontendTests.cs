@@ -764,6 +764,28 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_pub_wrapped_container_decls()
+    {
+        // A container decl may be `pub`-wrapped (`pub const P = struct/enum/union {…}`) — `Unwrap`
+        // peels the modifier (a no-op in single-module emit) so the container lowers exactly like a
+        // bare one. Grouping the container forms under `ContainerDecl` lets one peel cover them all.
+        var cs = EmitZig(
+            "pub const Point = struct { x: i32, y: i32 };\n" +
+            "pub const Kind = enum { a, b, c };\n" +
+            "pub const Num = union(enum) { i: i32, f: f32 };\n" +
+            "pub fn main() u8 {\n" +
+            "    const p = Point{ .x = 10, .y = 20 };\n" +
+            "    const k = Kind.b;\n" +
+            "    const n = Num{ .i = 12 };\n" +
+            "    _ = n;\n" +
+            "    return @intCast(p.x + @as(i32, @intFromEnum(k)));\n" +
+            "}\n");
+        cs.ShouldContain("unsafe struct Point");   // pub struct still emits the struct
+        cs.ShouldContain("enum Kind");             // pub enum → real C# enum
+        cs.ShouldContain("Num");                   // pub union emitted
+    }
+
+    [Fact]
     public void Lowers_typed_struct_literal_in_value_and_sink_less_positions()
     {
         // The TYPED form `Point{ .x = … }` (Zig's CurlySuffixExpr) names its own type, so —
