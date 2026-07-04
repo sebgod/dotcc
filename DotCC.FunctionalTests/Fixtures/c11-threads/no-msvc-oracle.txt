@@ -1,0 +1,4 @@
+MSVC's C front-end has no <threads.h> (C11 threads landed late and unevenly in
+cl.exe's C mode), so this fixture would not compile under the MSVC oracle. The
+always-on FixtureTests run the program in-process and validate its deterministic
+output.

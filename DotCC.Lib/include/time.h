@@ -30,6 +30,14 @@ time_t time(time_t* t);
 clock_t clock(void);
 double difftime(time_t end, time_t beginning);
 
+/* C11 struct timespec + timespec_get (§7.27). Like `struct tm`, the body is
+   the runtime Libc.timespec struct — parsed via the usual `struct ID` rule and
+   surfaced through `using static Libc;` — so it is NOT redeclared here (fields
+   for reference: time_t tv_sec; long tv_nsec;). Also used by <threads.h>'s
+   timed calls, which #include this header. */
+#define TIME_UTC 1
+int timespec_get(struct timespec* ts, int base);
+
 /* Calendar conversions. gmtime/localtime/asctime/ctime return a pointer
    into a reused static buffer (overwritten by the next call). */
 struct tm* gmtime(time_t* timer);

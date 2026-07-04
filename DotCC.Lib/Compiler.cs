@@ -203,6 +203,8 @@ public static class Compiler
         "VaList",       // <stdarg.h> — va_list cursor (Libc.VaList value type)
         "thrd_t",       // <threads.h> — opaque thread handle (Libc.thrd_t struct)
         "mtx_t",        // <threads.h> — opaque mutex handle (Libc.mtx_t struct)
+        "cnd_t",        // <threads.h> — opaque condition-variable handle (Libc.cnd_t)
+        "tss_t",        // <threads.h> — opaque thread-specific-storage key (Libc.tss_t)
         "div_t",        // <stdlib.h> — div() result (Libc.div_t struct)
         "ldiv_t",       // <stdlib.h> — ldiv() result (Libc.ldiv_t struct)
         "lldiv_t",      // <stdlib.h> — lldiv() result (Libc.lldiv_t struct)

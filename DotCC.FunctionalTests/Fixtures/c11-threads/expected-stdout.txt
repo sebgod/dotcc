@@ -1,0 +1,10 @@
+sum=4000
+once=1
+cnd=84
+tss=7 dtor=1
+equal=1
+exit=42
+timedlock=4
+cndwait=4
+sleep=0
+detach=ok

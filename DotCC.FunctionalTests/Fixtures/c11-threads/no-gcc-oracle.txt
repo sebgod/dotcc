@@ -1,0 +1,5 @@
+C11 <threads.h> requires linking libpthread (-pthread), which the gcc-in-WSL
+oracle harness does not pass, so this fixture would fail to link under gcc. The
+program is validated end-to-end by the always-on FixtureTests (dotcc emit →
+Roslyn compile → in-process run), which actually executes every threading
+primitive and checks the deterministic stdout.
