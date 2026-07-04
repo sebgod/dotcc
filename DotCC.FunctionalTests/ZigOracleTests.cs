@@ -693,6 +693,29 @@ public sealed class ZigOracleTests
             "    return 42;\n" +
             "}\n", 42, "q=\"x\" u=A\na\nb" },
 
+        // Curated std.mem helpers + the @memcpy/@memset builtins over slices, plus the `&array`
+        // (`*[N]T` → `[]T`) slice coercion they rely on. eql (equal / not-equal), copyForwards,
+        // @memset (fill), @memcpy (copy). Exits 42.
+        new object[] { "std_mem_basic",
+            "const std = @import(\"std\");\n" +
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "fn countL(s: []const u8) usize { return s.len; }\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = [_]u8{ 1, 2, 3 };\n" +
+            "    const b = [_]u8{ 1, 2, 3 };\n" +
+            "    const c = [_]u8{ 1, 2, 4 };\n" +
+            "    const eqAB: c_int = if (std.mem.eql(u8, &a, &b)) 1 else 0;\n" +
+            "    const eqAC: c_int = if (std.mem.eql(u8, &a, &c)) 1 else 0;\n" +
+            "    var dst = [_]u8{ 0, 0, 0 };\n" +
+            "    std.mem.copyForwards(u8, &dst, &a);\n" +
+            "    var buf = [_]u8{ 9, 9, 9, 9 };\n" +
+            "    @memset(&buf, 7);\n" +
+            "    var b2 = [_]u8{ 0, 0, 0 };\n" +
+            "    @memcpy(&b2, &a);\n" +
+            "    _ = printf(\"eql=%d%d len=%d copy=%d%d%d set=%d cpy=%d%d%d\\n\", eqAB, eqAC, @as(c_int, @intCast(countL(&a))), @as(c_int, dst[0]), @as(c_int, dst[1]), @as(c_int, dst[2]), @as(c_int, buf[0]), @as(c_int, b2[0]), @as(c_int, b2[1]), @as(c_int, b2[2]));\n" +
+            "    return 42;\n" +
+            "}\n", 42, "eql=10 len=3 copy=123 set=7 cpy=123" },
+
         // --- Milestone J: result-location cast builtins (exit-code only — they prove the cast
         // SEMANTICS against real zig precisely, without the variadic-printf typing distraction) ---
         // @intCast narrows a wide usize to u8 — the result type comes from the binding, not an arg.

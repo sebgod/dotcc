@@ -2250,6 +2250,73 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_std_mem_eql_and_copyForwards()
+    {
+        // `std.mem.eql(T, a, b)` → `ZigMem.Eql<T>`; `std.mem.copyForwards(T, dest, src)` →
+        // `ZigMem.CopyForwards<T>`. Both take the element type as arg0; the slice args coerce a
+        // `&array` (`*[N]T`) to a `[]T` / `[]const T` fat pointer.
+        var cs = EmitZig(
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = [_]u8{ 1, 2, 3 };\n" +
+            "    const b = [_]u8{ 1, 2, 3 };\n" +
+            "    var d = [_]u8{ 0, 0, 0 };\n" +
+            "    const eq: u8 = if (std.mem.eql(u8, &a, &b)) 1 else 0;\n" +
+            "    std.mem.copyForwards(u8, &d, &a);\n" +
+            "    return eq + d[0];\n" +
+            "}\n");
+        cs.ShouldContain("ZigMem.Eql<byte>(");
+        cs.ShouldContain("ZigMem.CopyForwards<byte>(");
+        cs.ShouldContain("new ConstSlice<byte>(a,");   // &array → []const u8 coercion
+    }
+
+    [Fact]
+    public void Lowers_memcpy_and_memset_builtins_as_bare_statements()
+    {
+        // `@memset(dest, v)` → `ZigMem.Set<T>`; `@memcpy(dest, src)` → `ZigMem.CopyForwards<T>`.
+        // Element type inferred from the dest. Both are void, so they render as BARE statements —
+        // NOT `_ = ZigMem.…` (which would be a `_ = <void>` C# error).
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var buf = [_]u8{ 9, 9, 9, 9 };\n" +
+            "    @memset(&buf, 7);\n" +
+            "    var b2 = [_]u8{ 0, 0, 0 };\n" +
+            "    const a = [_]u8{ 1, 2, 3 };\n" +
+            "    @memcpy(&b2, &a);\n" +
+            "    return buf[0] + b2[0];\n" +
+            "}\n");
+        cs.ShouldContain("ZigMem.Set<byte>(");
+        cs.ShouldContain("ZigMem.CopyForwards<byte>(");
+        cs.ShouldNotContain("_ = ZigMem.");   // void mem calls are bare statements
+    }
+
+    [Fact]
+    public void Coerces_addr_of_array_to_a_slice_parameter()
+    {
+        // Zig's `*[N]T` → `[]T`: passing `&arr` where a `[]const T` slice is expected (a pre-existing
+        // coercion gap the std.mem work closed — `CoerceToSlice` now strips the address-of).
+        var cs = EmitZig(
+            "fn n(s: []const u8) usize { return s.len; }\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = [_]u8{ 1, 2, 3 };\n" +
+            "    return @intCast(n(&a));\n" +
+            "}\n");
+        cs.ShouldContain("new ConstSlice<byte>(a,");
+    }
+
+    [Fact]
+    public void Rejects_an_unmodeled_std_mem_member()
+    {
+        // dotcc models a curated std.mem subset; anything else is a clear, specific error (not a
+        // silent miscompile) — "fail loudly, grow deliberately".
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 { var a = [_]u8{ 1, 2 }; std.mem.reverse(u8, &a); return 0; }\n"));
+        ex.Message.ShouldContain("std.mem.reverse");
+        ex.Message.ShouldContain("not modeled");
+    }
+
+    [Fact]
     public void Lowers_escaped_quote_and_unicode_escape_in_a_string()
     {
         // `\"` is an escaped quote (the old `"[^"]*"` rule truncated there); `\u{NNNN}` expands to
