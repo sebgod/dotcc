@@ -686,16 +686,21 @@ internal sealed partial class ZigLowering
         => (e.sym, e.ps, e.body, container);
 
     /// <summary>Unwrap a top-level decl's optional visibility/linkage modifier — <c>pub</c>
-    /// (<see cref="Zig.PubFn"/>), <c>export</c> (<see cref="Zig.ExportFn"/>), or <c>pub export</c>
-    /// (<see cref="Zig.PubExportFn"/>) — to its inner declaration; an unmodified decl is returned
+    /// (<see cref="Zig.PubFn"/>/<see cref="Zig.PubVar"/>), <c>export</c> (<see cref="Zig.ExportFn"/>/
+    /// <see cref="Zig.ExportVar"/>), or <c>pub export</c> (<see cref="Zig.PubExportFn"/>/
+    /// <see cref="Zig.PubExportVar"/>) — to its inner declaration; an unmodified decl is returned
     /// unchanged. Both modifiers are a no-op in a single-file console program (every non-static
-    /// function is already export-eligible under <c>-shared</c>), so peeling lets all the existing
-    /// FnDef handling apply. (D1 container decls are not modifier-wrappable yet.)</summary>
+    /// function is already export-eligible under <c>-shared</c>; a data export under <c>-shared</c>
+    /// is a documented V1 cut), so peeling lets all the existing FnDef / global handling apply.
+    /// (D1 container decls are not modifier-wrappable yet.)</summary>
     private static Item Unwrap(Item decl) => decl.Content switch
     {
-        Zig.PubFn p        => p.Arg1,   // `pub FnDef`
-        Zig.ExportFn e     => e.Arg1,   // `export FnDef` (Milestone R)
-        Zig.PubExportFn pe => pe.Arg2,  // `pub export FnDef` (Milestone R)
+        Zig.PubFn p         => p.Arg1,   // `pub FnDef`
+        Zig.ExportFn e      => e.Arg1,   // `export FnDef` (Milestone R)
+        Zig.PubExportFn pe  => pe.Arg2,  // `pub export FnDef` (Milestone R)
+        Zig.PubVar p        => p.Arg1,   // `pub VarDecl` (exported/public data)
+        Zig.ExportVar e     => e.Arg1,   // `export VarDecl`
+        Zig.PubExportVar pe => pe.Arg2,  // `pub export VarDecl`
         _ => decl,
     };
 

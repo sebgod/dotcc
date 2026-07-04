@@ -8,8 +8,15 @@
 // `extern "c" fn …;` carries the optional library/calling-convention string after
 // `extern`. dotcc accepts it and lowers it like a plain `extern fn` (routed to its
 // libc-shaped runtime by bare name).
+//
+// The same peeling extends to exported / public DATA: `export const`/`export var`,
+// `pub const`/`pub var`, and `pub export const` each lower as an ordinary global (the
+// modifier is a no-op in a console program; a `-shared` data export is a documented cut).
 
 extern "c" fn printf(format: [*c]const u8, ...) c_int;
+
+export const tag: u8 = 7; // an exported data constant
+pub var used: u8 = 0; // a public mutable data global
 
 export fn add(a: u8, b: u8) u8 {
     return a + b;
@@ -20,7 +27,8 @@ pub export fn mul(a: u8, b: u8) u8 {
 }
 
 pub fn main() u8 {
+    used = tag; // write the exported const into the public var
     const r = add(mul(20, 2), 2); // 20*2 = 40, + 2 = 42
-    _ = printf("r=%d\n", @as(c_int, r));
+    _ = printf("r=%d used=%d\n", @as(c_int, r), @as(c_int, used));
     return r;
 }

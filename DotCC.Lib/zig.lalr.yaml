@@ -257,6 +257,14 @@ productions:
       # follows; after `pub`, `export` vs `fn`/`const`/`var` is a disjoint 1-token shift — conflict-free.
       - { lhs: Decl, rhs: ['export', FnDef],        action: exportFn }
       - { lhs: Decl, rhs: ['pub', 'export', FnDef], action: pubExportFn }
+      # `export const`/`export var` (and `pub export`) — EXPORTED DATA. Like `export fn`, Unwrap peels
+      # the modifier to the inner VarDecl, so all existing global handling applies; the export/pub
+      # modifier is a no-op in a console program (a `-shared` data export is a documented V1 cut).
+      # After `export`, `const`/`var` (a VarDecl) vs `fn` (a FnDef) is a disjoint 1-token shift;
+      # likewise after `pub export` — conflict-free. (`pub VarDecl` already exists above; its Unwrap
+      # peeling ships with these, so a top-level `pub const`/`var` global now works too.)
+      - { lhs: Decl, rhs: ['export', VarDecl],        action: exportVar }
+      - { lhs: Decl, rhs: ['pub', 'export', VarDecl], action: pubExportVar }
       # extern fn PROTOTYPE — no body, ends with `;`; linked with -lc (PEG:
       # `KEYWORD_extern STRINGLITERALSINGLE? FnProto SEMICOLON`). The optional `extern "c"`
       # library/calling-convention string (Milestone R, part 4) is accepted and lowered like a plain

@@ -1210,6 +1210,26 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_export_and_pub_data_globals_like_ordinary_ones()
+    {
+        // `export const`/`export var`, `pub const`/`pub var`, and `pub export const` are EXPORTED /
+        // public DATA; dotcc peels the modifier (Unwrap) and lowers each as an ordinary global (the
+        // modifier is a no-op in a console program; a `-shared` data export is a documented cut).
+        var cs = EmitZig(
+            "export const answer: i32 = 42;\n" +
+            "pub const greeting: i32 = 7;\n" +
+            "pub var counter: i32 = 0;\n" +
+            "export var total: i32 = 0;\n" +
+            "pub export const shared: i32 = 3;\n" +
+            "pub fn main() u8 { counter = answer; total = greeting + shared; return @intCast(total); }\n");
+        cs.ShouldContain("answer = 42");   // export const → an ordinary global field
+        cs.ShouldContain("greeting = 7");  // pub const
+        cs.ShouldContain("counter");       // pub var (mutable global)
+        cs.ShouldContain("total");         // export var
+        cs.ShouldContain("shared = 3");    // pub export const
+    }
+
+    [Fact]
     public void Lowers_an_extern_c_fn_prototype_like_a_plain_extern_fn()
     {
         // `extern "c" fn` — the optional library/calling-convention string after `extern`. Lowered
