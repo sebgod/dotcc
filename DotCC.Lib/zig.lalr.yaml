@@ -392,6 +392,28 @@ productions:
       # `… else Stmt` above (no Stmt begins with `|`) — conflict-free, same rightmost group.
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', Stmt, 'else', '|', IDENT, '|', Stmt], action: stmtIfCaptureErrElse }
 
+      # Payload-capturing `while` — mirrors the if-capture family, in the same rightmost/dangling-else
+      # group (the `else` shift-reduce is resolved identically). `while (opt) |x| body` binds an
+      # optional's payload each iteration; the loop exits (running an `else`, if present) when the
+      # payload is null. A `'|'` after the condition `')'` selects the capture form (no Stmt begins
+      # with `'|'`); the LoopStmt LHS lets a `label:` prefix it. Lowered by LowerWhileCapture (desugars
+      # to `while (true) { var __cap = cond; if (has) { bind; body } else { [else]; break; } }`).
+      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', Stmt],                 action: stmtWhileCapture }
+      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', Stmt, 'else', Stmt],   action: stmtWhileCaptureElse }
+      # `while (eu) |x| body else |e| elsebody` — error-union capture-while: bind the success payload
+      # each turn; on error bind `e`, run the else-branch, then exit. After the body's `else`, a `'|'`
+      # selects this over the plain `… else Stmt` above (no Stmt begins with `'|'`) — conflict-free,
+      # exactly like stmtIfCaptureErrElse.
+      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', Stmt, 'else', '|', IDENT, '|', Stmt], action: stmtWhileCaptureErrElse }
+      # `while (opt) |x| : (cont) body` — capture-while WITH a continue-expression (runs after each
+      # iteration AND on `continue`), lowered to the C `For` IR (post = cont) so `continue` runs the
+      # cont — faithful to Zig, like the non-capture stmtWhileCont pair. After `'|' IDENT '|'`, a `':'`
+      # selects the cont form (disjoint from a Stmt-first body / an `else`). The `: (Expr = RhsExpr)`
+      # assign form and `: (Expr)` bare form mirror stmtWhileContAssign / stmtWhileCont. (A cont + else
+      # combination is not modeled — rare.)
+      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', ':', '(', Expr, '=', RhsExpr, ')', Stmt], action: stmtWhileCaptureContAssign }
+      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', ':', '(', Expr, ')', Stmt],               action: stmtWhileCaptureCont }
+
   - derivation: none
     rules:
       # The while/for loops are `LoopStmt` (not `Stmt` directly) so a `label:` prefix can wrap any
@@ -407,14 +429,9 @@ productions:
       # The `=` vs `)` after the inner Expr is a clean shift/reduce decision.
       - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', ':', '(', Expr, '=', RhsExpr, ')', Stmt], action: stmtWhileContAssign }
       - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', ':', '(', Expr, ')', Stmt],               action: stmtWhileCont }
-      # `while (opt) |x| body` — optional payload capture-while (Milestone M, part 2). Each iteration
-      # re-evaluates the condition; while it yields a payload, `x` is bound and the body runs, else the
-      # loop exits. After the condition `')'` a `'|'` lookahead selects this over the plain
-      # `while (Expr) Stmt` (no Stmt begins with `'|'`) — conflict-free. A `LoopStmt` (like the other
-      # while/for forms) so a `label:` may prefix it; the lowering desugars to `while (true) { var
-      # __cap = cond; if (has) { var x = …; body } else break; }`, so labeled break/continue compose.
-      # (The `: (cont)` continue-expr capture-while and the while-`else` clause are deferred.)
-      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', Stmt], action: stmtWhileCapture }
+      # NOTE: the payload-capturing `while` family (`while (opt) |x| …`, its `else` / `else |e|`
+      # completions, and the `: (cont)` continue-expr form) lives in the dangling-else `rightmost`
+      # group with the `if`-capture family (below) — the `else` shift-reduce needs identical handling.
       - { lhs: Stmt, rhs: ['break', ';'],    action: stmtBreak }
       - { lhs: Stmt, rhs: ['continue', ';'], action: stmtContinue }
       # `break v;` — an UNLABELED break carrying a VALUE (Milestone Y, part 2), yielding `v` from the

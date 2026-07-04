@@ -953,6 +953,28 @@ public sealed class ZigOracleTests
             "    return @as(u8, @intCast(sum));\n" + // 36 + 6
             "}\n", 42, "" },
 
+        // While-story completion: a capture-while `else` (runs on natural exit), a capture-while with
+        // a continue-expression `: (cont)`, an error-union capture-while `else |e|`, and a for-slice
+        // with a NON-ZERO index start `for (s, 5..)`. Exits 42.
+        new object[] { "while_completion",
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "const E = error{ Stop };\n" +
+            "fn nextLT(i: *i32, n: i32) ?i32 { if (i.* < n) { i.* += 1; return i.*; } return null; }\n" +
+            "fn step(i: *i32) E!i32 { if (i.* < 3) { i.* += 1; return i.*; } return error.Stop; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var a: i32 = 0; var s1: i32 = 0;\n" +
+            "    while (nextLT(&a, 3)) |v| { s1 += v; } else { s1 += 100; }\n" +      // 6 + 100 = 106
+            "    var b: i32 = 0; var cnt: i32 = 0; var s2: i32 = 0;\n" +
+            "    while (nextLT(&b, 4)) |v| : (cnt = cnt + 1) { s2 += v; }\n" +         // s2=10 cnt=4
+            "    var c: i32 = 0; var s3: i32 = 0; var code: i32 = 0;\n" +
+            "    while (step(&c)) |v| { s3 += v; } else |e| { code = if (e == error.Stop) 9 else 1; }\n" + // s3=6 code=9
+            "    const arr = [_]u8{ 10, 20, 30 };\n" +
+            "    var acc: i32 = 0;\n" +
+            "    for (arr[0..], 5..) |x, idx| { acc += @as(i32, x) + @as(i32, @intCast(idx)); }\n" + // 78
+            "    _ = printf(\"s1=%d s2=%d cnt=%d s3=%d code=%d acc=%d\\n\", s1, s2, cnt, s3, code, acc);\n" +
+            "    return 42;\n" +
+            "}\n", 42, "s1=106 s2=10 cnt=4 s3=6 code=9 acc=78" },
+
         // --- Milestone M (part 3): error-union capture in `if` (exit-code only) ---
         // Payload capture `|x|` on success + the error branch on failure, both via `else |_|` (the
         // both-compiler-valid subset: real zig REJECTS a plain `else` on an error union and rejects
