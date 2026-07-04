@@ -59,10 +59,27 @@ internal sealed class CSharpTarget : ITarget
         CType.Allocator => "Allocator",
         // A Zig tuple `struct { T1, T2, … }` → `System.ValueTuple<T1, …>` (Milestone G).
         // Arity-uniform — including arity 1 (`System.ValueTuple<T>`), where C#'s `(T)` shorthand
-        // would be a parenthesised expression, not a tuple.
-        CType.Tuple tup => "System.ValueTuple<" + string.Join(", ", tup.Elements.Select(e => RenderType(e.Unqualified))) + ">",
+        // would be a parenthesised expression, not a tuple. Empty → the non-generic `System.ValueTuple`;
+        // arity > 7 nests via the 8th `TRest` field (`ValueTuple<T1..T7, ValueTuple<T8..>>`).
+        CType.Tuple tup => RenderValueTuple(tup.Elements),
         _ => throw new IrUnsupportedException("C# target cannot render type " + t.GetType().Name),
     };
+
+    /// <summary>Render a <c>System.ValueTuple</c> type of arbitrary arity: empty → the non-generic
+    /// <c>System.ValueTuple</c>; 1..7 → <c>ValueTuple&lt;T1, …&gt;</c>; &gt; 7 → the first 7 plus an
+    /// 8th <c>TRest</c> that is itself a <c>ValueTuple</c> of the remaining elements (C#'s open-arity
+    /// ValueTuple nesting).</summary>
+    private string RenderValueTuple(IReadOnlyList<CType> elems)
+    {
+        if (elems.Count == 0) { return "System.ValueTuple"; }
+        if (elems.Count <= 7)
+        {
+            return "System.ValueTuple<" + string.Join(", ", elems.Select(e => RenderType(e.Unqualified))) + ">";
+        }
+        var head = string.Join(", ", elems.Take(7).Select(e => RenderType(e.Unqualified)));
+        var rest = RenderValueTuple(elems.Skip(7).ToList());
+        return "System.ValueTuple<" + head + ", " + rest + ">";
+    }
 
     public string RenderIntLit(LitInt lit) =>
         lit.Type.Unqualified is CType.Prim { Integer: true, Bytes: >= 16 } p128
