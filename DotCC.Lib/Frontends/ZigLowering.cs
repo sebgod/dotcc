@@ -5590,8 +5590,12 @@ internal sealed partial class ZigLowering
         // allocator vtable uses). `*const fn (…) R` / `?*const fn (…) R` reach here as the pointee
         // and are collapsed to the bare Func by PointerTo / LowerOptional. Params are named
         // (`IDENT : Type`); their names are irrelevant to the type, only the types matter.
-        Zig.TyFn f       => new CType.Func(LowerType(f.Arg4), LowerParamTypes(f.Arg2), Variadic: false),
+        Zig.TyFn f       => new CType.Func(LowerType(f.Arg4), LowerFnTypeParams(f.Arg2), Variadic: false),
         Zig.TyFnNoArgs f => new CType.Func(LowerType(f.Arg3), System.Array.Empty<CType>(), Variadic: false),
+        // `!T`-returning fn-pointer types: the return is an error union `!T` (like fnDefErr). The
+        // Func's Return carries the CType.ErrorUnion, so a bound fn-ptr's result is an ErrUnion<T>.
+        Zig.TyFnErr f       => new CType.Func(new CType.ErrorUnion(LowerType(f.Arg5)), LowerFnTypeParams(f.Arg2), Variadic: false),
+        Zig.TyFnNoArgsErr f => new CType.Func(new CType.ErrorUnion(LowerType(f.Arg4)), System.Array.Empty<CType>(), Variadic: false),
         // `@This()` — Zig's reflective self-type → the container currently being lowered, so
         // `self: @This()` / `self: *@This()` name the receiver without repeating the type name.
         // The `const Self = @This();` alias form (the common Zig idiom) is also supported — it
@@ -5719,6 +5723,26 @@ internal sealed partial class ZigLowering
                     "a variadic / unnamed parameter in a function-pointer type is not supported yet");
             }
             types.Add(LowerType(pm.Arg2));
+        }
+        return types;
+    }
+
+    /// <summary>Extract the parameter types of a function-pointer TYPE's <c>FnTypeParams</c> list —
+    /// each element is either a bare <c>Type</c> (<see cref="Zig.FnTypeParamUnnamed"/>, the common
+    /// unnamed form) or <c>IDENT : Type</c> (<see cref="Zig.FnTypeParamNamed"/>, the name ignored —
+    /// only the types matter to the Func type).</summary>
+    private IReadOnlyList<CType> LowerFnTypeParams(Item paramsItem)
+    {
+        var types = new List<CType>();
+        foreach (var p in Flatten(paramsItem))
+        {
+            types.Add(p.Content switch
+            {
+                Zig.FnTypeParamUnnamed u => LowerType(u.Arg0),
+                Zig.FnTypeParamNamed n   => LowerType(n.Arg2),
+                _ => throw new IrUnsupportedException(
+                    "a function-pointer-type parameter must be a `Type` or `IDENT : Type`"),
+            });
         }
         return types;
     }
@@ -6009,6 +6033,8 @@ internal sealed partial class ZigLowering
                 case Zig.TupleTypesCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [TupleTypes, ',', Type]
                 case Zig.TupleTypesOne o:  stack.Push(o.Arg0); break;
                 case Zig.TupleTypesTrail t: stack.Push(t.Arg0); break;
+                case Zig.FnTypeParamsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [FnTypeParam, ',', FnTypeParams] (right-recursive)
+                case Zig.FnTypeParamsOne o:  stack.Push(o.Arg0); break;
                 case Zig.DestructBindsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [DestructBinds, ',', DestructBind]
                 case Zig.DestructBindsOne o:  stack.Push(o.Arg0); break;
                 default: ordered.Add(n); break;
