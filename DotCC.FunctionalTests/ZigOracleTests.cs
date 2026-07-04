@@ -1178,6 +1178,22 @@ public sealed class ZigOracleTests
             "    _ = printf(\"a=%d b=%d c=%d\\n\", a, b, c);\n" +
             "    return @as(u8, @intCast(a + b + c));\n" +          // 22 + 6 + 7 = 35
             "}\n", 35, "a=22 b=6 c=7" },
+        // ANF Phase B — a value-position control-flow construct in a SUB-expression, made reachable by
+        // the `( RhsExpr )` Primary + hoisted like Phase A: a block-bodied `if`, a `switch`-expression,
+        // a labeled block, and a `for`-else loop, each inside `X + (…)`. 22 + 12 + 4 + 4 = 42.
+        new object[] { "anf_value_controlflow_subexpr",
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "pub fn main() u8 {\n" +
+            "    const c = true;\n" +
+            "    const k: i32 = 1;\n" +
+            "    const a: i32 = 2 + (if (c) blk: { break :blk @as(i32, 20); } else @as(i32, 0));\n" +
+            "    const b: i32 = 5 + (switch (k) { 1 => @as(i32, 7), else => @as(i32, 0) });\n" +
+            "    const d: i32 = 1 + (blk: { const t: i32 = 3; break :blk t; });\n" +
+            "    const arr = [_]i32{ 1, 2, 3 };\n" +
+            "    const e: i32 = for (arr[0..]) |x| { if (x == 2) break @as(i32, 4); } else @as(i32, 0);\n" +
+            "    _ = printf(\"a=%d b=%d d=%d e=%d\\n\", a, b, d, e);\n" +
+            "    return @intCast(a + b + d + e);\n" + // 22 + 12 + 4 + 4 = 42
+            "}\n", 42, "a=22 b=12 d=4 e=4" },
         // open-ended slicing `s[lo..]`: the high bound is the source length. Slice source via
         // `.len` (21+14+7 = 42); array source through the offset element pointer (t[0], t.len);
         // a closed re-slice still works. Element read proves `.ptr + lo`; lengths prove `len - lo`.

@@ -4403,7 +4403,36 @@ internal sealed partial class ZigLowering
                 }
                 throw new IrUnsupportedException($"unresolved identifier '{name}'");
             }
-            case Zig.Grouped g: { var inner = LowerExpr(g.Arg1); return new Paren(inner) { Type = inner.Type }; }
+            case Zig.Grouped g:
+            {
+                // A parenthesized value-position control-flow construct — `( if … )` / `( switch … )` /
+                // `( blk: {…} )` / `( while/for … else … )` — used in a SUB-expression (Phase B of the
+                // ANF milestone). It lowers to a STATEMENT filling a result temp (LowerValueIfSwitch /
+                // LowerLabeledValueBlock / LowerLoopValue), so hoist that statement to the buffer and
+                // evaluate to the temp. The sink is unknown here (the paren's use decides it), so the
+                // temp type is inferred from the first branch/break value.
+                if (IsValueControlFlowStmt(g.Arg1) || g.Arg1.Content is Zig.LabeledBlock)
+                {
+                    var savedImpure = _hoistImpureSeen;
+                    Symbol? captured = null;
+                    // The consumer captures the result temp and contributes nothing (an empty Seq) — the
+                    // whole temp-filling statement goes to the buffer and the paren evaluates to the temp.
+                    Func<Symbol, CStmt> cap = sym => { captured = sym; return new Seq(new List<CStmt>()); };
+                    CStmt filled = g.Arg1.Content is Zig.LabeledBlock lbg
+                        ? LowerLabeledValueBlock(Tok(lbg.Arg0), lbg.Arg2, null, cap)
+                        : LowerValueControlFlowStmt(g.Arg1, null, cap);
+                    _hoistImpureSeen = savedImpure;   // internals are sequenced in the buffer
+                    var buf = RequireHoistable("value if/switch/block/loop in a sub-expression");
+                    if (captured is not { } vsym)
+                    {
+                        throw new IrUnsupportedException("internal: value control-flow did not bind a result temp");
+                    }
+                    buf.Add(filled);
+                    return new VarRef(vsym) { Type = vsym.Type };
+                }
+                var inner = LowerExpr(g.Arg1);
+                return new Paren(inner) { Type = inner.Type };
+            }
 
             // if (cond) a else b  — the if-EXPRESSION, lowered to a ternary. Both
             // branches are RhsExpr; the backend wraps the condition in Cond.B.
