@@ -1609,14 +1609,20 @@ internal sealed class CSharpBackend
             case TupleNew tn:
             {
                 var tt = (CType.Tuple)tn.TupleType.Unqualified;
-                var typeArgs = string.Join(", ", tt.Elements.Select(e => Cs(e.Unqualified)));
-                var args = string.Join(", ", tn.Elements.Select((e, i) => Coerced(e, tt.Elements[i])));
-                return ($"new System.ValueTuple<{typeArgs}>({args})", PPrimary);
+                var vals = tn.Elements.Select((e, i) => Coerced(e, tt.Elements[i])).ToList();
+                return (BuildValueTupleCtor(tt.Elements, vals), PPrimary);
             }
             // A Zig tuple index `t[N]` (Milestone G) → `<tuple>.Item{N+1}` (ValueTuple's 1-based
-            // fields). Also the per-binder read a destructure desugars into.
+            // fields). Also the per-binder read a destructure desugars into. For an index ≥ 7 the
+            // element lives in the nested `TRest` ValueTuple: chain `.Rest` (one per 7) then `.Item`.
             case TupleIndex ti:
-                return ($"{Sub(ti.Tuple, PPostfix)}.Item{ti.Index + 1}", PPostfix);
+            {
+                var sbTi = new StringBuilder(Sub(ti.Tuple, PPostfix));
+                var tiIdx = ti.Index;
+                while (tiIdx >= 7) { sbTi.Append(".Rest"); tiIdx -= 7; }
+                sbTi.Append(".Item").Append(tiIdx + 1);
+                return (sbTi.ToString(), PPostfix);
+            }
             // A bare unresolved identifier: the backend escapes the raw name.
             case NameRef nr: return (DotCC.EmitHelpers.Id(nr.RawName), PPrimary);
             // An enumerator of a real enum: EnumName.Member (member access). If a
@@ -2434,6 +2440,26 @@ internal sealed class CSharpBackend
         "va_copy" => $"{Expr(c.Args[0])} = {Sub(c.Args[1], PAssign)}",
         _ => null,
     };
+
+    /// <summary>Build a <c>System.ValueTuple</c> constructor of arbitrary arity from the element
+    /// types + already-rendered element values: empty → <c>default(System.ValueTuple)</c>; 1..7 → a
+    /// flat <c>new ValueTuple&lt;…&gt;(…)</c>; &gt; 7 → the first 7 plus an 8th <c>TRest</c> argument
+    /// that is itself a nested ValueTuple ctor of the remaining elements (C#'s ValueTuple nesting).</summary>
+    private string BuildValueTupleCtor(IReadOnlyList<CType> types, IReadOnlyList<string> vals)
+    {
+        if (types.Count == 0) { return "default(System.ValueTuple)"; }
+        if (types.Count <= 7)
+        {
+            var ta = string.Join(", ", types.Select(t => Cs(t.Unqualified)));
+            return $"new System.ValueTuple<{ta}>({string.Join(", ", vals)})";
+        }
+        var headTypes = string.Join(", ", types.Take(7).Select(t => Cs(t.Unqualified)));
+        var restTypes = types.Skip(7).ToList();
+        var restTypeStr = Cs(new CType.Tuple(restTypes));   // the nested TRest ValueTuple type
+        var headVals = string.Join(", ", vals.Take(7));
+        var restCtor = BuildValueTupleCtor(restTypes, vals.Skip(7).ToList());
+        return $"new System.ValueTuple<{headTypes}, {restTypeStr}>({headVals}, {restCtor})";
+    }
 
     private string CallText(Call c)
     {
