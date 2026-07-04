@@ -124,8 +124,23 @@ internal static class FixtureRunner
         }
         pe.Position = 0;
 
-        // Fresh ALC so each fixture run is isolated.
-        var alc = new AssemblyLoadContext($"dotcc-fixture-{Guid.NewGuid():N}", isCollectible: true);
+        // Fresh ALC so each fixture run is isolated. NON-collectible on purpose:
+        // emitted programs take the address of file-scope statics via
+        // `Unsafe.AsPointer(ref staticField)`, which is only sound when the static
+        // lives in NON-MOVING storage — the contract every real dotcc deployment
+        // runs under (a normal, non-collectible load context keeps non-GC statics
+        // in the fixed loader heap). A *collectible* ALC instead stores non-GC
+        // statics in a movable managed array, so a compacting GC can relocate a
+        // static between the `AsPointer` and the dereference. Single-threaded
+        // fixtures never notice (nothing triggers a GC mid-expression), but the
+        // multi-threaded `c11-threads` fixture hammers `&cnt_mtx` from 4 threads
+        // while the runtime allocates: a GC on one thread could relocate the mutex
+        // handle out from under another's `mtx_lock`, which then silently misses
+        // the side table and skips the lock — an intermittent lost-update race
+        // (sum=3979 not 4000). Loading non-collectibly matches the deployment
+        // contract and removes the relocation, at the cost of not unloading the
+        // per-fixture assemblies (they were never explicitly unloaded anyway).
+        var alc = new AssemblyLoadContext($"dotcc-fixture-{Guid.NewGuid():N}", isCollectible: false);
         var asm = alc.LoadFromStream(pe);
         var entry = asm.EntryPoint
             ?? throw new InvalidOperationException("emitted assembly has no entry point");
