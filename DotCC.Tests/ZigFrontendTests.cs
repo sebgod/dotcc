@@ -3158,18 +3158,35 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_a_catch_capture_in_a_sub_expression()
+    public void Hoists_a_side_effecting_catch_in_a_sub_expression()
     {
-        // The capture / lazy catch needs a statement context (the bind is a statement); a
-        // sub-expression position (here a call argument) is a clear deferred error.
-        var ex = Should.Throw<CompileException>(() => EmitZig(
-            "fn mk(ok: bool) !bool { if (ok) return true; return error.Bad; }\n" +
-            "fn id(x: bool) bool { return x; }\n" +
+        // ANF (sub-expression positions): a side-effecting `catch` in a SUB-expression (not a full
+        // RHS) is hoisted to a `__anfN` temp before the enclosing statement — the lazy ternary runs
+        // in the buffer, and the containing expression reads the temp.
+        var cs = EmitZig(
+            "fn mk(ok: bool) !i32 { if (ok) return 7; return error.Bad; }\n" +
+            "fn dflt() i32 { return 13; }\n" +
             "pub fn main() u8 {\n" +
-            "    const v = id(mk(false) catch |e| (e == error.Bad));\n" +
-            "    return if (v) 1 else 0;\n" +
-            "}\n"));
-        ex.Message.ShouldContain("catch |e|");
+            "    const v: i32 = 1 + (mk(false) catch dflt());\n" + // catch is a sub-operand of `+`
+            "    return @as(u8, @intCast(v));\n" +
+            "}\n");
+        cs.ShouldContain("__cE.IsErr");             // the lazy catch machinery ran (hoisted)
+        cs.ShouldContain("__anf");                  // a result temp was hoisted before the decl
+        cs.ShouldContain("1 + __anf");              // the containing `+` reads the hoisted temp
+    }
+
+    [Fact]
+    public void Rejects_a_hoisted_catch_past_a_side_effecting_operand()
+    {
+        // Eval-order correctness: a `catch` can't be hoisted before the statement if a side effect was
+        // already evaluated earlier in the same statement (`f() + (a catch b)` must run `f()` first).
+        // A clear error (not a silent reorder) — the user binds it to a `const` first.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "fn mk(ok: bool) !i32 { if (ok) return 5; return error.Bad; }\n" +
+            "fn f() i32 { return 1; }\n" +
+            "fn dflt() i32 { return 2; }\n" +
+            "pub fn main() u8 { return @as(u8, @intCast(f() + (mk(false) catch dflt()))); }\n"));
+        ex.Message.ShouldContain("side-effecting operand");
     }
 
     [Fact]
@@ -3240,15 +3257,18 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_a_catch_return_in_a_sub_expression()
+    public void Hoists_a_control_flow_fallback_in_a_sub_expression()
     {
-        // The control-flow fallback needs a statement context — a sub-expression (call arg) is a clear
-        // deferred error.
-        var ex = Should.Throw<CompileException>(() => EmitZig(
-            "fn mk(ok: bool) !i32 { if (ok) return 1; return error.Bad; }\n" +
-            "fn id(x: i32) i32 { return x; }\n" +
-            "pub fn main() u8 { const v = id(mk(false) catch return 0); return @as(u8, @intCast(v)); }\n"));
-        ex.Message.ShouldContain("catch return");
+        // ANF: `a orelse return x` / `a catch return x` in a SUB-expression hoists — the conditional
+        // `return` and the payload capture become buffer statements before the enclosing statement,
+        // and the construct evaluates to the payload temp.
+        var cs = EmitZig(
+            "fn pick(b: bool) ?i32 { if (b) return 20; return null; }\n" +
+            "fn g(b: bool) u8 { const v: i32 = 10 + (pick(b) orelse return 7); return @as(u8, @intCast(v)); }\n" +
+            "pub fn main() u8 { return g(true); }\n");
+        cs.ShouldContain("__cf.HasValue");   // the control-flow fallback lowered (hoisted)
+        cs.ShouldContain("return 7;");       // the early-return on the none path
+        cs.ShouldContain("10 + __anf");      // the containing `+` reads the hoisted payload temp
     }
 
     [Fact]
