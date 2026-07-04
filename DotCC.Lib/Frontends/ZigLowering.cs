@@ -1674,9 +1674,43 @@ internal sealed partial class ZigLowering
                 var cpDest = LowerExprSink(argItems[1], new CType.Slice(cpElem));
                 var cpSrc = LowerExprSink(argItems[2], new CType.Slice(cpElem.WithQuals(TypeQual.Const)));
                 return new ZigMemCall("CopyForwards", cpElem, new List<CExpr> { cpDest, cpSrc }) { Type = CType.Void };
+            case "span":
+                // std.mem.span(ptr) — a NUL-sentinel pointer `[*:0]T` → the `[]const T` slice before
+                // the sentinel (dotcc's V1 sentinel = 0, erased in the type; the common `[*:0]const u8`
+                // C-string case). The element comes from the pointer's pointee.
+                if (argItems.Count != 1)
+                {
+                    throw new IrUnsupportedException($"zig `std.mem.span` expects (pointer); got {argItems.Count} argument(s)");
+                }
+                var spArg = LowerExpr(argItems[0]);
+                if (spArg.Type.Unqualified is not CType.Pointer sp)
+                {
+                    throw new IrUnsupportedException(
+                        $"zig `std.mem.span` expects a sentinel-terminated pointer (`[*:0]T`), got {spArg.Type.Describe()}");
+                }
+                var spElem = sp.Pointee.Unqualified;
+                return new ZigMemCall("SpanZ", spElem, new List<CExpr> { spArg })
+                {
+                    Type = new CType.Slice(spElem.WithQuals(TypeQual.Const)),
+                };
+            case "zeroes":
+                // std.mem.zeroes(T) — an all-zero value of T → C#'s `default(T)` (zero-fills a scalar
+                // or a struct uniformly). An ARRAY/slice type is a documented cut (arrays lower to a
+                // pointer, so `default` would be a null pointer, not a zeroed array).
+                if (argItems.Count != 1)
+                {
+                    throw new IrUnsupportedException($"zig `std.mem.zeroes` expects (type); got {argItems.Count} argument(s)");
+                }
+                var zt = LowerType(argItems[0]);
+                if (zt.Unqualified is CType.Array or CType.Slice)
+                {
+                    throw new IrUnsupportedException(
+                        "zig `std.mem.zeroes` of an array/slice type is not modeled yet (scalar and struct types are supported)");
+                }
+                return new DefaultLit { Type = zt };
             default:
                 throw new IrUnsupportedException(
-                    $"zig `std.mem.{methodName}` is not modeled yet (supported: eql, copyForwards)");
+                    $"zig `std.mem.{methodName}` is not modeled yet (supported: eql, copyForwards, span, zeroes)");
         }
     }
 

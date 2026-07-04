@@ -716,6 +716,21 @@ public sealed class ZigOracleTests
             "    return 42;\n" +
             "}\n", 42, "eql=10 len=3 copy=123 set=7 cpy=123" },
 
+        // std.mem.span (NUL-sentinel `[*:0]const u8` C-string → a `[]const u8` slice, length excludes
+        // the sentinel) and std.mem.zeroes (an all-zero scalar + struct). Exits 42.
+        new object[] { "std_mem_span_zeroes",
+            "const std = @import(\"std\");\n" +
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "const Point = struct { x: i32, y: i32 };\n" +
+            "pub fn main() u8 {\n" +
+            "    const p: [*:0]const u8 = \"hello\";\n" +
+            "    const s = std.mem.span(p);\n" +
+            "    const zi: i32 = std.mem.zeroes(i32);\n" +
+            "    const zp = std.mem.zeroes(Point);\n" +
+            "    _ = printf(\"span len=%d first=%c zeroes i=%d px=%d py=%d\\n\", @as(c_int, @intCast(s.len)), @as(c_int, s[0]), zi, zp.x, zp.y);\n" +
+            "    return 42;\n" +
+            "}\n", 42, "span len=5 first=h zeroes i=0 px=0 py=0" },
+
         // --- Milestone J: result-location cast builtins (exit-code only — they prove the cast
         // SEMANTICS against real zig precisely, without the variadic-printf typing distraction) ---
         // @intCast narrows a wide usize to u8 — the result type comes from the binding, not an arg.
