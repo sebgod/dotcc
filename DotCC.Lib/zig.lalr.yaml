@@ -1196,6 +1196,13 @@ lexer:
     # `0x1.8p3` / `1.5` win over the integer prefix. Hex float uses a `p`/`P` binary exponent.
     - { symbol: FLOAT,   match: '0x[0-9a-fA-F_]+(\.[0-9a-fA-F_]+)?[pP][+\-]?[0-9_]+' }
     - { symbol: FLOAT,   match: '[0-9][0-9_]*\.[0-9_]+([eE][+\-]?[0-9_]+)?' }
+    # Exponent-only decimal float `1e10` / `4E2` — a decimal exponent with NO fraction dot (Zig allows
+    # it; genuinely common). Longest-match keeps `0x1e5` a hex INTEGER (the hex rule matches through
+    # the `e` digit and further) and makes `1e10` a FLOAT (4 chars beat the 1-char decimal INTEGER
+    # match). `[eE]` covers both exponent spellings; `_` in the exponent digits is stripped by
+    # LowerZigFloat like every other separator. Zig's radix prefix stays lowercase (`0X`/`0O`/`0B` are
+    # a Zig compile error — "base prefix must be lowercase" — so they are deliberately NOT lexed here).
+    - { symbol: FLOAT,   match: '[0-9][0-9_]*[eE][+\-]?[0-9_]+' }
     - { symbol: INTEGER, match: '0x[0-9a-fA-F_]+' }
     - { symbol: INTEGER, match: '0o[0-7_]+' }
     - { symbol: INTEGER, match: '0b[01_]+' }

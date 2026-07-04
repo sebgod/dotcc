@@ -121,7 +121,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 
 | Feature | Status | Notes |
 |---|---|---|
-| integer / float / string literals | ✅ | decimal **+ `0x`/`0o`/`0b` radix + `_` separators** (see Lexer); float incl. hex `0x1.8p3`; string reuses C escape decoding (`\n \t \\ \" \xNN`) **+ `\u{…}` + multiline `\\`** |
+| integer / float / string literals | ✅ | decimal **+ `0x`/`0o`/`0b` radix + `_` separators** (see Lexer); float incl. hex `0x1.8p3` **+ exponent-only `1e10`**; string reuses C escape decoding (`\n \t \\ \" \xNN`) **+ `\u{…}` (incl. non-BMP) + multiline `\\`** |
 | `true` / `false` | ✅ | boolean literals — a `bool` value (→ C# `true`/`false`, stored in the normalising `CBool`) |
 | char literal `'x'` | ✅ | Zig's `comptime_int` = the codepoint → an integer literal (`'A'` → 65). Escapes `\n \t \r \\ \' \xNN` + octal decode via the shared string-escape machinery, plus `\u{NNNN}` (decoded Zig-side). **Deferred:** a `\u{…}` codepoint > 0xFFFF (lowered as a single int — surrogate handling deferred) |
 | identifiers, `(grouped)` | ✅ | |
@@ -179,10 +179,10 @@ program's libc call is handled. No `@cImport`, no header harvest.
 |---|---|
 | decimal integers, floats, `"…"` strings, char literals `'x'` (`\n \t \\ \' \xNN`), `//` line comments, `@name` builtins | ✅ |
 | hex/octal/binary integers `0x1F`/`0o17`/`0b1010` + `_` digit separators `1_000_000` | ✅ | radix + `_` decoded in `DecodeZigInt` (Zig's `0o` octal / `_` separator, UNLIKE C's bare-`0` / `'`); the literal's carrier type is the narrowest of int/uint/long/ulong holding it |
-| hex float `0x1.8p3` + underscored float `1_000.5` | ✅ | hex float has no C# syntax → converted to a round-trippable decimal via the shared `EmitHelpers.LowerHexFloat` |
+| hex float `0x1.8p3` + underscored float `1_000.5` + exponent-only float `1e10`/`4E2` | ✅ | hex float has no C# syntax → converted to a round-trippable decimal via the shared `EmitHelpers.LowerHexFloat`; an exponent-only decimal (no fraction dot) is a distinct FLOAT lexer rule and passes through as a C# double verbatim |
 | multiline `\\` strings | ✅ | a run of `\\`-prefixed lines folded into one literal, lines joined by `\n`; escapes are NOT processed (raw content), matching Zig |
-| `\u{NNNN}` unicode escapes (string + char), escaped-quote `\"` in a string | ✅ | `\u{…}` expands to its UTF-8 bytes Zig-side (the shared decoder is untouched); `\"` is an escaped quote (the old `"[^"]*"` rule truncated there) |
-| `\u{…}` with a codepoint > 0xFFFF, `1e10` (exponent-only, no point), `0X`/`0O`/`0B` (uppercase prefix) | 🚫 | non-BMP `\u{…}` in a char literal lowers as a single int (surrogate handling deferred); exponent-only float + uppercase radix prefix not lexed yet |
+| `\u{NNNN}` unicode escapes (string + char, incl. codepoints > 0xFFFF), escaped-quote `\"` in a string | ✅ | in a STRING, `\u{…}` expands to its UTF-8 bytes Zig-side via `char.ConvertFromUtf32` (the shared decoder is untouched) — a non-BMP codepoint like U+1F600 becomes its 4 UTF-8 bytes, no special surrogate handling; in a CHAR, the value is the codepoint itself as an int (a `comptime_int`, exactly as Zig models it), so non-BMP needs no surrogate either; `\"` is an escaped quote (the old `"[^"]*"` rule truncated there) |
+| `0X`/`0O`/`0B` (uppercase radix prefix) | 🚫 | **not valid Zig** — real zig rejects it (`error: base prefix must be lowercase`), so it's deliberately not lexed (adding it would accept programs the reference compiler rejects). The `DecodeZigInt`/`LowerZigFloat` decoders already tolerate an uppercase prefix defensively, but the lexer never produces one |
 
 ## Out of scope (the dialect line)
 
