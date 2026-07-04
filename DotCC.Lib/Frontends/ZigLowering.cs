@@ -4367,6 +4367,13 @@ internal sealed partial class ZigLowering
                 {
                     s.AddressTaken = true;
                 }
+                // `&fn` (address of a function) is a fn-POINTER VALUE — collapse pointer-to-function to
+                // the bare `CType.Func` (matching the `*const fn (…)` type collapse), so an INFERRED
+                // `const f = &fn;` global/local is itself callable (a `Pointer(Func)` would not be).
+                if (operand.Type.Unqualified is CType.Func)
+                {
+                    return new Unary(UnOp.AddrOf, operand) { Type = operand.Type };
+                }
                 return new Unary(UnOp.AddrOf, operand) { Type = new CType.Pointer(operand.Type) };
             }
             // `try e` — unwrap the error union's payload, or propagate its error by throwing
