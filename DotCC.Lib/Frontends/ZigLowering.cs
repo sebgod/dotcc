@@ -1625,6 +1625,15 @@ internal sealed partial class ZigLowering
     /// <c>[N]T</c> keeps its full element count.</summary>
     private CExpr CoerceToSlice(CExpr value, CType.Slice sliceType)
     {
+        // Zig's `*[N]T` → `[]T`: `&arr` (address-of an array) coerces to a slice. Strip the
+        // address-of to recover the array lvalue — a Zig array already lowers to its element pointer
+        // (a `T*` in emitted C#), which is exactly the pointer `SliceNew` wants, and its element
+        // count comes from the array type. (A bare `*[N]T` pointer VALUE that isn't a literal `&arr`
+        // is rarer; it falls through to the array check below and reports a clear coercion error.)
+        if (value is Unary { Op: UnOp.AddrOf, Operand: var arr } && arr.Type.Unqualified is CType.Array)
+        {
+            value = arr;
+        }
         if (value.Type.Unqualified is not CType.Array { Count: { } n })
         {
             throw new IrUnsupportedException(
@@ -1635,6 +1644,67 @@ internal sealed partial class ZigLowering
         var elem = sliceType.Element;
         return new SliceNew(value, lenLit, elem.Unqualified, elem.IsConst) { Type = sliceType };
     }
+
+    /// <summary>Lower a curated <c>std.mem.&lt;name&gt;(…)</c> call (the byte-blit / compare cluster).
+    /// <c>eql(T, a, b)</c> and <c>copyForwards(T, dest, source)</c> take an explicit element type as
+    /// the first argument; the slice arguments coerce at a <c>[]T</c> / <c>[]const T</c> sink (so a
+    /// <c>&amp;array</c> promotes to a slice via <see cref="CoerceToSlice"/>). Both lower to a
+    /// <see cref="ZigMemCall"/> rendered as <c>ZigMem.{Method}&lt;T&gt;(…)</c>. An unmodeled member is
+    /// a clear error — dotcc models no general <c>std</c>.</summary>
+    private CExpr LowerStdMemCall(string methodName, IReadOnlyList<Item> argItems)
+    {
+        switch (methodName)
+        {
+            case "eql":
+                if (argItems.Count != 3)
+                {
+                    throw new IrUnsupportedException($"zig `std.mem.eql` expects (type, a, b); got {argItems.Count} argument(s)");
+                }
+                var eqElem = LowerType(argItems[0]).Unqualified;
+                var eqSink = new CType.Slice(eqElem.WithQuals(TypeQual.Const));
+                var eqA = LowerExprSink(argItems[1], eqSink);
+                var eqB = LowerExprSink(argItems[2], eqSink);
+                return new ZigMemCall("Eql", eqElem, new List<CExpr> { eqA, eqB }) { Type = CType.Bool };
+            case "copyForwards":
+                if (argItems.Count != 3)
+                {
+                    throw new IrUnsupportedException($"zig `std.mem.copyForwards` expects (type, dest, source); got {argItems.Count} argument(s)");
+                }
+                var cpElem = LowerType(argItems[0]).Unqualified;
+                var cpDest = LowerExprSink(argItems[1], new CType.Slice(cpElem));
+                var cpSrc = LowerExprSink(argItems[2], new CType.Slice(cpElem.WithQuals(TypeQual.Const)));
+                return new ZigMemCall("CopyForwards", cpElem, new List<CExpr> { cpDest, cpSrc }) { Type = CType.Void };
+            default:
+                throw new IrUnsupportedException(
+                    $"zig `std.mem.{methodName}` is not modeled yet (supported: eql, copyForwards)");
+        }
+    }
+
+    /// <summary>Lower a <c>@memcpy</c>/<c>@memset</c> slice operand, inferring the element type from
+    /// the operand itself (a <c>[]T</c> slice, a <c>[N]T</c> array, or <c>&amp;array</c> = <c>*[N]T</c>)
+    /// rather than an explicit type argument. Returns the coerced slice expression and reports the
+    /// (unqualified) element type via <paramref name="element"/>. When <paramref name="wantConst"/>
+    /// the target slice is <c>[]const T</c> (a read source); otherwise <c>[]T</c> (a write dest).</summary>
+    private CExpr LowerMemSlice(Item item, bool wantConst, out CType element)
+    {
+        var lowered = LowerExpr(item);
+        element = SliceElementOf(lowered).Unqualified;
+        if (lowered.Type.Unqualified is CType.Slice) { return lowered; }
+        var elemQ = wantConst ? element.WithQuals(TypeQual.Const) : element;
+        return CoerceToSlice(lowered, new CType.Slice(elemQ));
+    }
+
+    /// <summary>The element type of a lowered slice-like operand — a <c>[]T</c> slice, a <c>[N]T</c>
+    /// array, or a pointer-to-array (<c>&amp;array</c> = <c>*[N]T</c>) — used to infer <c>@memcpy</c>/
+    /// <c>@memset</c>'s element type from its dest without an explicit type argument.</summary>
+    private static CType SliceElementOf(CExpr e) => e.Type.Unqualified switch
+    {
+        CType.Slice s => s.Element,
+        CType.Array a => a.Element,
+        CType.Pointer { Pointee.Unqualified: CType.Array pa } => pa.Element,
+        _ => throw new IrUnsupportedException(
+            $"expected a slice, array, or `&array` operand, got {e.Type.Describe()}"),
+    };
 
     /// <summary>Lower a slice expression <c>base[lo..hi]</c> to a fat-pointer
     /// <see cref="SliceNew"/> <c>{ base.ptr + lo, hi - lo }</c>. When <paramref name="hi"/> is
@@ -1803,10 +1873,31 @@ internal sealed partial class ZigLowering
             case "@intCast" or "@truncate" or "@ptrCast" or "@bitCast"
                 or "@floatFromInt" or "@intFromFloat" or "@floatCast" or "@enumFromInt":
                 return LowerResultLocationBuiltin(bname, bargs, sink);
+            case "@memcpy":
+                // `@memcpy(dest, source)` — copy `source.len` elements into `dest` (equal lengths in
+                // Zig; a forward element copy). The element type is inferred from the dest operand.
+                if (bargs.Count != 2)
+                {
+                    throw new IrUnsupportedException($"zig `@memcpy` expects (dest, source); got {bargs.Count} argument(s)");
+                }
+                var mcDest = LowerMemSlice(bargs[0], wantConst: false, out var mcElem);
+                var mcSrc = LowerMemSlice(bargs[1], wantConst: true, out _);
+                return new ZigMemCall("CopyForwards", mcElem, new List<CExpr> { mcDest, mcSrc }) { Type = CType.Void };
+            case "@memset":
+                // `@memset(dest, value)` — set every element of `dest` to `value` (lowered at the
+                // element-type sink, so a `comptime_int` like `7` becomes `(byte)7`).
+                if (bargs.Count != 2)
+                {
+                    throw new IrUnsupportedException($"zig `@memset` expects (dest, value); got {bargs.Count} argument(s)");
+                }
+                var msDest = LowerMemSlice(bargs[0], wantConst: false, out var msElem);
+                var msVal = LowerExprSink(bargs[1], msElem);
+                return new ZigMemCall("Set", msElem, new List<CExpr> { msDest, msVal }) { Type = CType.Void };
             default:
                 throw new IrUnsupportedException(
                     $"zig builtin '{bname}' not lowered yet (supported: @as, @intCast, @truncate, @ptrCast, @bitCast, " +
-                    "@floatFromInt, @intFromFloat, @floatCast, @enumFromInt, @alignCast, @intFromEnum, @sizeOf, @alignOf, @offsetOf, @errorName)");
+                    "@floatFromInt, @intFromFloat, @floatCast, @enumFromInt, @alignCast, @intFromEnum, @sizeOf, @alignOf, " +
+                    "@offsetOf, @errorName, @memcpy, @memset)");
         }
     }
 
@@ -4569,6 +4660,14 @@ internal sealed partial class ZigLowering
     private CExpr LowerMethodCall(Zig.Field fld, IReadOnlyList<Item> argItems)
     {
         var methodName = Tok(fld.Arg2);
+
+        // --- curated `std.mem` helpers (a static call on the std.mem namespace) ---
+        // Routed before the generic dispatch. dotcc models no `std` in general — only this curated
+        // set of the most common slice utilities; an unmodeled member is a clear, specific error.
+        if (TryResolveStdPath(fld.Arg0, out var stdNs) && stdNs == "std.mem")
+        {
+            return LowerStdMemCall(methodName, argItems);
+        }
 
         // --- Zig allocators (Milestone F), before the generic method dispatch ---
         // `std.heap.FixedBufferAllocator.init(buf)` — a static call on the std FBA type.

@@ -229,6 +229,17 @@ public sealed record PinnedArray(CType Element, IReadOnlyList<CExpr>? Elems, CEx
 /// default throw like <c>SliceNew</c>).</summary>
 public sealed record ArrayByValReturn(CExpr Source, CType Element, int Count) : CExpr;
 
+/// <summary>A curated <c>std.mem</c> helper or <c>@memcpy</c>/<c>@memset</c> mem-builtin, rendered
+/// as <c>ZigMem.{Method}&lt;{Element}&gt;(args)</c> (the runtime <see cref="Libc.ZigMem"/> class,
+/// auto-spliced like <see cref="Libc.ZigAlloc"/>). The BACKEND supplies the C# element-type name
+/// from <see cref="Element"/> (the frontend renders no C# types) — the same shape
+/// <see cref="AllocCall"/> / <see cref="ArrayByValReturn"/> use for their generic runtime calls.
+/// One node covers <c>eql</c> (→ <see cref="CExpr.Type"/> <c>bool</c>), <c>copyForwards</c> /
+/// <c>@memcpy</c> / <c>@memset</c> (→ <c>void</c>), and <c>span</c> (→ a <c>[]const T</c> slice).
+/// Zig-lowering / C#-target only (the C front-end never produces it; the wat backend, which Zig
+/// never targets, leaves it on the default throw like <see cref="SliceNew"/>).</summary>
+public sealed record ZigMemCall(string Method, CType Element, IReadOnlyList<CExpr> Args) : CExpr;
+
 /// <summary>The stack-value replacement for a promoted <c>malloc</c> — the
 /// malloc→stack peephole rewrites <c>T* p = (T*)malloc(sizeof(T))</c> (used only
 /// via <c>-&gt;</c> and freed, never escaping) to <c>T p = new T()</c>. Codegen

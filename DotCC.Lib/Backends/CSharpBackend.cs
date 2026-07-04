@@ -1594,6 +1594,15 @@ internal sealed class CSharpBackend
                 var elem = Cs(abr.Element.Unqualified);
                 return ($"ZigAlloc.CopyArrayResult<{elem}>({Expr(abr.Source)}, {abr.Count})", PPostfix);
             }
+            // A curated `std.mem` helper / `@memcpy` / `@memset` → `ZigMem.{Method}<{elem}>(args)`.
+            // The frontend fixes the method + element type + args; the backend supplies the C# element
+            // name and renders the args (slice fat pointers, a value, or a sentinel pointer).
+            case ZigMemCall zm:
+            {
+                var elem = Cs(zm.Element.Unqualified);
+                var callArgs = string.Join(", ", zm.Args.Select(x => Expr(x)));
+                return ($"ZigMem.{zm.Method}<{elem}>({callArgs})", PPostfix);
+            }
             // A Zig tuple literal `.{ a, b }` (Milestone G) → `new System.ValueTuple<T1, …>(e1, …)`,
             // each element coerced to its declared element type. Arity-uniform (incl. 1) — the
             // `(a, b)` shorthand has no 1-tuple form, so the explicit `ValueTuple` ctor is used.
@@ -2264,7 +2273,10 @@ internal sealed class CSharpBackend
         // valid statement expression. FreeCall/DestroyCall are void, so they MUST be recognized here
         // (a `_ = <void>` discard is a C# error); a discarded AllocCall/CreateCall is a normal
         // `_ = recv.Alloc(...)`, also fine as a stmt.
-        Assign or Call or IndirectCall or AllocCall or FreeCall or CreateCall or DestroyCall or ReallocCall => true,
+        // A curated std.mem / mem-builtin call renders as a method call. The void forms
+        // (CopyForwards / Set) MUST be recognized (a `_ = <void>` discard is a C# error);
+        // an invocation-expression is a legal C# statement whatever its return type.
+        Assign or Call or IndirectCall or AllocCall or FreeCall or CreateCall or DestroyCall or ReallocCall or ZigMemCall => true,
         Unary u => u.Op is UnOp.PreInc or UnOp.PreDec or UnOp.PostInc or UnOp.PostDec,
         Paren p => IsStmtExpr(p.Inner),
         _ => false,
