@@ -2305,6 +2305,37 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_std_mem_span_and_zeroes()
+    {
+        // `std.mem.span(ptr)` → `ZigMem.SpanZ<T>` (NUL-sentinel scan → `[]const T`); `std.mem.zeroes(T)`
+        // → C#'s `default(T)` (zero scalar / struct).
+        var cs = EmitZig(
+            "const std = @import(\"std\");\n" +
+            "const Point = struct { x: i32, y: i32 };\n" +
+            "pub fn main() u8 {\n" +
+            "    const p: [*:0]const u8 = \"hi\";\n" +
+            "    const s = std.mem.span(p);\n" +
+            "    const zi: i32 = std.mem.zeroes(i32);\n" +
+            "    const zp = std.mem.zeroes(Point);\n" +
+            "    return @intCast(s.len + @as(usize, @intCast(zi + zp.x)));\n" +
+            "}\n");
+        cs.ShouldContain("ZigMem.SpanZ<byte>(");
+        cs.ShouldContain("default(");          // zeroes → default(T)
+    }
+
+    [Fact]
+    public void Rejects_std_mem_zeroes_of_an_array_type()
+    {
+        // An array `zeroes` would need a zeroed array VALUE; arrays lower to a pointer, so `default`
+        // is a null pointer — a clear cut, not a silent wrong value.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 { const z = std.mem.zeroes([4]u8); return z[0]; }\n"));
+        ex.Message.ShouldContain("zeroes");
+        ex.Message.ShouldContain("array");
+    }
+
+    [Fact]
     public void Rejects_an_unmodeled_std_mem_member()
     {
         // dotcc models a curated std.mem subset; anything else is a clear, specific error (not a

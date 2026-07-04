@@ -49,4 +49,27 @@ public static class ZigMem
         T* d = dest.Ptr;
         for (ulong i = 0; i < dest.Len; i++) { d[i] = value; }
     }
+
+    /// <summary><c>std.mem.span(ptr)</c> for a NUL-sentinel pointer (<c>[*:0]T</c>, dotcc's V1
+    /// sentinel = 0) — scan to the first all-zero element and return the <c>[]const T</c> slice
+    /// BEFORE it (the length excludes the sentinel, exactly as Zig). The scan is byte-wise so it
+    /// covers any unmanaged element type with a zero sentinel; the common case is the <c>char*</c>
+    /// C-string <c>[*:0]const u8</c>. Returns a const slice (dotcc erases the sentinel, so a mutable
+    /// <c>[:0]T</c> result is a documented cut).</summary>
+    public static unsafe ConstSlice<T> SpanZ<T>(T* p) where T : unmanaged
+    {
+        ulong n = 0;
+        while (!IsZeroElem(p + n)) { n++; }
+        return new ConstSlice<T>(p, n);
+    }
+
+    /// <summary>True when the element at <paramref name="p"/> is all-zero bytes — the sentinel test
+    /// for <see cref="SpanZ{T}"/>. Byte-wise so it is AOT-clean and works for any unmanaged
+    /// element type without an equality constraint.</summary>
+    private static unsafe bool IsZeroElem<T>(T* p) where T : unmanaged
+    {
+        byte* b = (byte*)p;
+        for (int k = 0; k < sizeof(T); k++) { if (b[k] != 0) { return false; } }
+        return true;
+    }
 }
