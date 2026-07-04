@@ -726,8 +726,9 @@ internal sealed partial class ZigLowering
     /// <see cref="Zig.PubExportVar"/>) — to its inner declaration; an unmodified decl is returned
     /// unchanged. Both modifiers are a no-op in a single-file console program (every non-static
     /// function is already export-eligible under <c>-shared</c>; a data export under <c>-shared</c>
-    /// is a documented V1 cut), so peeling lets all the existing FnDef / global handling apply.
-    /// (D1 container decls are not modifier-wrappable yet.)</summary>
+    /// is a documented V1 cut), so peeling lets all the existing FnDef / global / container handling
+    /// apply. A `pub` container (<see cref="Zig.PubContainer"/>) peels to the inner struct/enum/union
+    /// decl (an in-FUNCTION container decl is still a cut — it'd need on-the-fly type registration).</summary>
     private static Item Unwrap(Item decl) => decl.Content switch
     {
         Zig.PubFn p         => p.Arg1,   // `pub FnDef`
@@ -736,6 +737,7 @@ internal sealed partial class ZigLowering
         Zig.PubVar p        => p.Arg1,   // `pub VarDecl` (exported/public data)
         Zig.ExportVar e     => e.Arg1,   // `export VarDecl`
         Zig.PubExportVar pe => pe.Arg2,  // `pub export VarDecl`
+        Zig.PubContainer p  => p.Arg1,   // `pub const P = struct/enum/union {…}` (public container)
         _ => decl,
     };
 

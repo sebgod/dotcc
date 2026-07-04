@@ -1329,6 +1329,23 @@ public sealed class ZigOracleTests
             "    return @intCast(total);\n" +
             "}\n", 10, "counter=42 total=10" },
 
+        // `pub`-wrapped container decls (struct / enum / union(enum)) — the modifier is peeled and
+        // each lowers exactly like a bare container. p.x+p.y=30, Kind.b=1, Num{.i=12} switched = 12.
+        new object[] { "pub_container",
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "pub const Point = struct { x: i32, y: i32 };\n" +
+            "pub const Kind = enum { a, b, c };\n" +
+            "pub const Num = union(enum) { i: i32, f: f32 };\n" +
+            "pub fn main() u8 {\n" +
+            "    const p = Point{ .x = 10, .y = 20 };\n" +
+            "    const k = Kind.b;\n" +
+            "    const n = Num{ .i = 12 };\n" +
+            "    var nv: c_int = 0;\n" +
+            "    switch (n) { .i => |v| { nv = v; }, .f => {} }\n" +
+            "    _ = printf(\"p=%d k=%d n=%d\\n\", p.x + p.y, @as(c_int, @intFromEnum(k)), nv);\n" +
+            "    return @intCast(p.x);\n" + // 10
+            "}\n", 10, "p=30 k=1 n=12" },
+
         // Declaration modifiers (Milestone R, part 5): callconv / align / linksection — all no-ops on
         // the managed target, accepted for round-trippability. `linksection` on a global var, `callconv`
         // on a function, `align` on a local. tag(11)=12, buf=30+12=42; stdout proves the value.

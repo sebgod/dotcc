@@ -234,6 +234,7 @@ symbols:
   - 'threadlocal'  # 156 `threadlocal var` — thread storage duration on a container-level var
   - FnTypeParams   # 157 fn-pointer-TYPE param list (optionally-named: `Type` or `IDENT : Type`)
   - FnTypeParam    # 158 one fn-pointer-type param — a bare `Type` (unnamed) or `IDENT : Type` (named)
+  - ContainerDecl  # 159 a struct/enum/union container decl (groups the forms so `pub` wraps them all)
                    #     (→ [ThreadStatic]; twofer with C `_Thread_local`, completion milestone part 2)
 
 productions:
@@ -267,6 +268,14 @@ productions:
       # peeling ships with these, so a top-level `pub const`/`var` global now works too.)
       - { lhs: Decl, rhs: ['export', VarDecl],        action: exportVar }
       - { lhs: Decl, rhs: ['pub', 'export', VarDecl], action: pubExportVar }
+      # A container decl (struct/enum/union, incl. extern/packed — grouped under `ContainerDecl`
+      # below) is a Decl, optionally `pub`-wrapped. `Decl -> ContainerDecl` is transparent (a bare
+      # container passes through unchanged); `Decl -> pub ContainerDecl` adds the visibility modifier
+      # (a no-op in single-module emit — Unwrap peels it). After `pub const IDENT =`, the token after
+      # `=` splits VarDecl (an RhsExpr) vs ContainerDecl (struct/enum/union/extern/packed) — the same
+      # clean 1-token decision the non-pub `const IDENT =` makes, so conflict-free.
+      - { lhs: Decl, rhs: [ContainerDecl] }
+      - { lhs: Decl, rhs: ['pub', ContainerDecl], action: pubContainer }
       # extern fn PROTOTYPE — no body, ends with `;`; linked with -lc (PEG:
       # `KEYWORD_extern STRINGLITERALSINGLE? FnProto SEMICOLON`). The optional `extern "c"`
       # library/calling-convention string (Milestone R, part 4) is accepted and lowered like a plain
@@ -284,8 +293,8 @@ productions:
       # container `const` inside a function body is deferred — it'd need these on Stmt too).
       # An empty `struct {}` (a zero-size marker / namespace) is allowed; `enum {}` is not
       # (Zig rejects a memberless enum). The fixed-underlying form is `enum(u8) { … }`.
-      - { lhs: Decl, rhs: ['const', IDENT, '=', 'struct', '{', FieldDecls, '}', ';'],          action: structDecl }
-      - { lhs: Decl, rhs: ['const', IDENT, '=', 'struct', '{', '}', ';'],                       action: structDeclEmpty }
+      - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'struct', '{', FieldDecls, '}', ';'],          action: structDecl }
+      - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'struct', '{', '}', ';'],                       action: structDeclEmpty }
       # Layout-controlled structs (Milestone R): `extern struct` → C-ABI sequential layout
       # ([StructLayout(Sequential)]); `packed struct` → byte-packed, no inter-field padding
       # ([StructLayout(Sequential, Pack=1)]). The token right after `=` (`extern` / `packed`)
@@ -294,10 +303,10 @@ productions:
       # bit-backing-integer model only when fields are byte-multiples summing to an ABI size;
       # sub-byte bit-packed fields stay a cut (see ZIG-SUPPORT.md). Empty `extern/packed struct {}`
       # is not accepted (a useless zero-size aggregate — a documented cut).
-      - { lhs: Decl, rhs: ['const', IDENT, '=', 'extern', 'struct', '{', FieldDecls, '}', ';'], action: externStructDecl }
-      - { lhs: Decl, rhs: ['const', IDENT, '=', 'packed', 'struct', '{', FieldDecls, '}', ';'], action: packedStructDecl }
-      - { lhs: Decl, rhs: ['const', IDENT, '=', 'enum', '{', EnumFields, '}', ';'],             action: enumDecl }
-      - { lhs: Decl, rhs: ['const', IDENT, '=', 'enum', '(', Type, ')', '{', EnumFields, '}', ';'], action: enumDeclTyped }
+      - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'extern', 'struct', '{', FieldDecls, '}', ';'], action: externStructDecl }
+      - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'packed', 'struct', '{', FieldDecls, '}', ';'], action: packedStructDecl }
+      - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'enum', '{', EnumFields, '}', ';'],             action: enumDecl }
+      - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'enum', '(', Type, ')', '{', EnumFields, '}', ';'], action: enumDeclTyped }
       # Tagged union (Milestone D3 + R): `const U = union(enum) { a: T, b, … };` (auto-inferred tag)
       # and `const U = union(SomeEnum) { … };` (Milestone R — an EXISTING named enum as the tag). The
       # token right after `union (` selects: the `enum` keyword → the auto form, any other IDENT → the
@@ -308,9 +317,9 @@ productions:
       # ([StructLayout(Explicit)], every variant at offset 0) WITHOUT the outer __tag/__payload, so it
       # is NOT a ZigUnionInfo; Zig's safe-mode active-field tracking / type-pun checks aren't modeled
       # (same-field read/write is faithful — see ZIG-SUPPORT.md).
-      - { lhs: Decl, rhs: ['const', IDENT, '=', 'union', '(', 'enum', ')', '{', UnionVariants, '}', ';'], action: unionDeclEnum }
-      - { lhs: Decl, rhs: ['const', IDENT, '=', 'union', '(', IDENT, ')', '{', UnionVariants, '}', ';'], action: unionDeclTagged }
-      - { lhs: Decl, rhs: ['const', IDENT, '=', 'union', '{', UnionVariants, '}', ';'],                  action: unionDeclUntagged }
+      - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'union', '(', 'enum', ')', '{', UnionVariants, '}', ';'], action: unionDeclEnum }
+      - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'union', '(', IDENT, ')', '{', UnionVariants, '}', ';'], action: unionDeclTagged }
+      - { lhs: ContainerDecl, rhs: ['const', IDENT, '=', 'union', '{', UnionVariants, '}', ';'],                  action: unionDeclUntagged }
 
   # FnProto (subset): `fn name(params) RetType Block`. RetType may carry the
   # inferred-error-set leading `!` (`fn f() !void`), distinct from ErrUnion's
