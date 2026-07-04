@@ -3241,16 +3241,89 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Defers_an_error_union_capture_while()
+    public void Lowers_a_capture_while_with_an_else_clause()
     {
-        // An error-union capture-while is deferred — a clear error (not a silent miscompile).
+        // `while (opt) |x| body else elsebody` — the else runs on natural exit (payload null). The
+        // exit branch of the desugared `if` becomes `{ elsebody; break; }` (not a bare `break`).
+        var cs = EmitZig(
+            "fn nextLT(i: *i32, max: i32) ?i32 { if (i.* >= max) return null; const v = i.*; i.* += 1; return v; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var i: i32 = 0;\n" +
+            "    var sum: i32 = 0;\n" +
+            "    while (nextLT(&i, 3)) |v| { sum += v; } else { sum += 100; }\n" +
+            "    return @as(u8, @intCast(sum));\n" +
+            "}\n");
+        cs.ShouldContain("while (Cond.B(true))");
+        cs.ShouldContain("int v = __cap.Value;");
+        cs.ShouldContain("sum += 100");   // the else body runs on natural exit
+        cs.ShouldContain("break;");
+    }
+
+    [Fact]
+    public void Lowers_a_capture_while_with_a_continue_expression()
+    {
+        // `while (opt) |x| : (cont) body` → the C `For` IR (post = cont), so `continue` runs the cont.
+        var cs = EmitZig(
+            "fn nextLT(i: *i32, max: i32) ?i32 { if (i.* >= max) return null; const v = i.*; i.* += 1; return v; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var i: i32 = 0;\n" +
+            "    var cnt: i32 = 0;\n" +
+            "    var sum: i32 = 0;\n" +
+            "    while (nextLT(&i, 4)) |v| : (cnt = cnt + 1) { sum += v; }\n" +
+            "    return @as(u8, @intCast(sum + cnt));\n" +
+            "}\n");
+        cs.ShouldContain("for (");            // the cont form lowers to a `for` (post = cont)
+        cs.ShouldContain("cnt = cnt + 1");    // the continue-expression as the for post
+        cs.ShouldContain("int v = __cap.Value;");
+    }
+
+    [Fact]
+    public void Lowers_an_error_union_capture_while_with_else_capture()
+    {
+        // `while (eu) |x| body else |e| elsebody` — bind the success payload each turn; on error bind
+        // `e` (the flat code) and run the else-branch, then break. Mirrors the if-capture error arm.
+        var cs = EmitZig(
+            "const E = error{ Stop };\n" +
+            "fn step(i: *i32) E!i32 { if (i.* < 3) { i.* += 1; return i.*; } return error.Stop; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var i: i32 = 0;\n" +
+            "    var sum: i32 = 0;\n" +
+            "    var code: i32 = 0;\n" +
+            "    while (step(&i)) |v| { sum += v; } else |e| { code = if (e == error.Stop) 9 else 1; }\n" +
+            "    return @as(u8, @intCast(sum + code));\n" +
+            "}\n");
+        cs.ShouldContain("Cond.B(__cap.IsErr)");   // error branch = the `if` test
+        cs.ShouldContain("__cap.Value");           // success binding
+        cs.ShouldContain("__cap.Code");            // the captured error code
+        cs.ShouldContain("break;");
+    }
+
+    [Fact]
+    public void Lowers_a_for_slice_with_a_non_zero_index_start()
+    {
+        // `for (s, N..) |x, i|` — the index capture starts at N (not 0): `var i = __i + N;`.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const arr = [_]u8{ 10, 20, 30 };\n" +
+            "    var acc: i32 = 0;\n" +
+            "    for (arr[0..], 5..) |x, idx| { acc += @as(i32, x) + @as(i32, @intCast(idx)); }\n" +
+            "    return @as(u8, @intCast(acc));\n" +
+            "}\n");
+        cs.ShouldContain("__i + (ulong)5");   // index starts at 5, not 0
+    }
+
+    [Fact]
+    public void Rejects_an_error_union_capture_while_without_else_capture()
+    {
+        // An error-union capture-while must handle the error — a bare `while (eu) |x| {}` with no
+        // `else |e|` is a clear error (not a silent drop of the error path).
         var ex = Should.Throw<CompileException>(() => EmitZig(
             "fn mk(ok: bool) !i32 { if (ok) return 7; return error.Bad; }\n" +
             "pub fn main() u8 {\n" +
             "    while (mk(true)) |x| { _ = x; }\n" +
             "    return 0;\n" +
             "}\n"));
-        ex.Message.ShouldContain("while");
+        ex.Message.ShouldContain("else |e|");
     }
 
     [Fact]

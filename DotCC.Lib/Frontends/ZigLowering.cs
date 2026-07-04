@@ -2130,6 +2130,25 @@ internal sealed partial class ZigLowering
             // `while (opt) |x| body` — optional payload capture-while (Milestone M, part 2). See
             // LowerWhileCapture (desugars to `while (true) { … if (has) { bind; body } else break; }`).
             case Zig.StmtWhileCapture w: return LowerWhileCapture(w.Arg2, Tok(w.Arg5), w.Arg7);
+            // `while (opt) |x| body else elsebody` — the else runs on natural exit (payload null / a
+            // user `break` skips it, matching Zig). `while (eu) |x| body else |e| elsebody` — the error
+            // branch binds `e` and runs elsebody, then exits.
+            case Zig.StmtWhileCaptureElse w:
+                return LowerWhileCapture(w.Arg2, Tok(w.Arg5), w.Arg7, (w.Arg9, null));
+            case Zig.StmtWhileCaptureErrElse w:
+                return LowerWhileCapture(w.Arg2, Tok(w.Arg5), w.Arg7, (w.Arg12, Tok(w.Arg10)));
+            // `while (opt) |x| : (cont) body` — capture-while with a continue-expression → the C `For`
+            // IR (post = cont), so `continue` runs the cont. The assign form builds an `Assign` post
+            // (like stmtWhileContAssign); the bare-expr form a plain one.
+            case Zig.StmtWhileCaptureCont w:
+                return LowerWhileCapture(w.Arg2, Tok(w.Arg5), w.Arg11, null, LowerExpr(w.Arg9));
+            case Zig.StmtWhileCaptureContAssign w:
+            {
+                var cLhs = LowerExpr(w.Arg9);
+                var cRhs = LowerExpr(w.Arg11);
+                return LowerWhileCapture(w.Arg2, Tok(w.Arg5), w.Arg13, null,
+                    new Assign(null, cLhs, cRhs) { Type = cLhs.Type });
+            }
 
             // `break;` / `continue;` — reuse the C IR loop-control nodes (the C# backend
             // renders them verbatim; valid inside the while/for forms above).
@@ -3120,7 +3139,8 @@ internal sealed partial class ZigLowering
     /// existing labeled-loop machinery. A value optional <c>?T</c> tests <c>__cap.HasValue</c> / binds
     /// <c>.Value</c>; a niche optional pointer tests non-null / binds the pointer itself. <c>_</c> tests
     /// without binding. An error-union or non-optional condition is a clear error.</summary>
-    private CStmt LowerWhileCapture(Item condItem, string capName, Item bodyItem)
+    private CStmt LowerWhileCapture(Item condItem, string capName, Item bodyItem,
+        (Item body, string? errName)? elseInfo = null, CExpr? contPost = null)
     {
         var cond = LowerExpr(condItem);
         var ct = cond.Type.Unqualified;
@@ -3128,50 +3148,110 @@ internal sealed partial class ZigLowering
         var capTmp = _symbols.Declare(new Symbol { Name = "__cap", Kind = SymKind.Var, Type = cond.Type });
         var capRef = new VarRef(capTmp) { Type = cond.Type, IsLValue = true };
 
-        CExpr test;
-        CExpr payloadInit;
-        CType payloadType;
-        if (ct is CType.Optional opt)
+        List<CStmt> loopBody;
+
+        // Error-union capture-while: bind the success payload each turn; on error, bind `e` (the flat
+        // `ushort Code`) and run the mandatory `else |e|` branch, then break. Structured like
+        // LowerIfCapture's error-union arm (error branch = the C# `if`, success = `else`, so no `!`).
+        if (ct is CType.ErrorUnion eu)
         {
-            test = new Member(capRef, "HasValue", false) { Type = CType.Bool };
-            payloadInit = new Member(capRef, "Value", false) { Type = opt.Inner };
-            payloadType = opt.Inner;
-        }
-        else if (ct is CType.Pointer)
-        {
-            test = capRef;        // Cond.B(void*) tests non-null
-            payloadInit = capRef; // the unwrapped pointer is the same value
-            payloadType = cond.Type;
-        }
-        else if (ct is CType.ErrorUnion)
-        {
-            throw new IrUnsupportedException(
-                "zig error-union capture `while (eu) |x|` not lowered yet (Milestone M)");
+            if (elseInfo is not { errName: { } errName, body: var eErrBody })
+            {
+                throw new IrUnsupportedException(
+                    "zig error-union capture `while (eu) |x|` requires an `else |e|` clause to handle the error");
+            }
+            var okStmts = new List<CStmt>();
+            _symbols.EnterScope();
+            if (capName != "_")
+            {
+                var okSym = _symbols.Declare(new Symbol { Name = capName, Kind = SymKind.Var, Type = eu.Payload });
+                okStmts.Add(new DeclStmt(new List<LocalDecl> { new(okSym, new Member(capRef, "Value", false) { Type = eu.Payload }) }));
+            }
+            okStmts.Add(LowerStmt(bodyItem));
+            _symbols.ExitScope();
+
+            var errStmts = new List<CStmt>();
+            _symbols.EnterScope();
+            if (errName != "_")
+            {
+                var errSym = _symbols.Declare(new Symbol { Name = errName, Kind = SymKind.Var, Type = CType.ErrorSet });
+                errStmts.Add(new DeclStmt(new List<LocalDecl> { new(errSym, new Member(capRef, "Code", false) { Type = CType.ErrorSet }) }));
+            }
+            errStmts.Add(LowerStmt(eErrBody));
+            errStmts.Add(new Break());
+            _symbols.ExitScope();
+
+            var isErr = new Member(capRef, "IsErr", false) { Type = CType.Bool };
+            loopBody = new List<CStmt>
+            {
+                new DeclStmt(new List<LocalDecl> { new(capTmp, cond) }),
+                new If(isErr, new Block(errStmts), new Block(okStmts)),
+            };
         }
         else
         {
-            throw new IrUnsupportedException(
-                "zig `while (...) |x|` requires an optional condition");
+            CExpr test;
+            CExpr payloadInit;
+            CType payloadType;
+            if (ct is CType.Optional opt)
+            {
+                test = new Member(capRef, "HasValue", false) { Type = CType.Bool };
+                payloadInit = new Member(capRef, "Value", false) { Type = opt.Inner };
+                payloadType = opt.Inner;
+            }
+            else if (ct is CType.Pointer)
+            {
+                test = capRef;        // Cond.B(void*) tests non-null
+                payloadInit = capRef; // the unwrapped pointer is the same value
+                payloadType = cond.Type;
+            }
+            else
+            {
+                throw new IrUnsupportedException(
+                    "zig `while (...) |x|` requires an optional condition");
+            }
+            if (elseInfo is { errName: not null })
+            {
+                throw new IrUnsupportedException(
+                    "zig `while (optional) |x| … else |e|`: an optional has no error to capture (use a plain `else`)");
+            }
+
+            // then-branch: bind the payload, then the user body, with `x` in scope while lowering it.
+            var thenStmts = new List<CStmt>();
+            _symbols.EnterScope();
+            if (capName != "_")
+            {
+                var capSym = _symbols.Declare(new Symbol { Name = capName, Kind = SymKind.Var, Type = payloadType });
+                thenStmts.Add(new DeclStmt(new List<LocalDecl> { new(capSym, payloadInit) }));
+            }
+            thenStmts.Add(LowerStmt(bodyItem));
+            _symbols.ExitScope();
+
+            // exit branch (payload null): run the `else` body (if any), then break. Kept a bare
+            // `break` when there's no else, preserving the plain capture-while emit shape.
+            CStmt exitBranch;
+            if (elseInfo is { body: var elseBody })
+            {
+                exitBranch = new Block(new List<CStmt> { LowerStmt(elseBody), new Break() });
+            }
+            else
+            {
+                exitBranch = new Break();
+            }
+
+            loopBody = new List<CStmt>
+            {
+                new DeclStmt(new List<LocalDecl> { new(capTmp, cond) }),
+                new If(test, new Block(thenStmts), exitBranch),
+            };
         }
 
-        // then-branch: bind the payload, then the user body, with `x` in scope while lowering it.
-        var thenStmts = new List<CStmt>();
-        _symbols.EnterScope();
-        if (capName != "_")
-        {
-            var capSym = _symbols.Declare(new Symbol { Name = capName, Kind = SymKind.Var, Type = payloadType });
-            thenStmts.Add(new DeclStmt(new List<LocalDecl> { new(capSym, payloadInit) }));
-        }
-        thenStmts.Add(LowerStmt(bodyItem));
-        _symbols.ExitScope();
-
-        // body: re-eval the condition, then bind+run or break.
-        var loopBody = new List<CStmt>
-        {
-            new DeclStmt(new List<LocalDecl> { new(capTmp, cond) }),
-            new If(test, new Block(thenStmts), new Break()),
-        };
-        return new While(new LitBool(true) { Type = CType.Bool }, new Block(loopBody));
+        // body: re-eval the condition each turn (via the fresh __cap), then bind+run or exit. A
+        // continue-expression (`: (cont)`) lowers to the C `For` post, so `continue` runs the cont.
+        var trueLit = new LitBool(true) { Type = CType.Bool };
+        return contPost is null
+            ? new While(trueLit, new Block(loopBody))
+            : new For(null, trueLit, contPost, new Block(loopBody));
     }
 
     /// <summary>Dispatch a <c>switch</c> statement: lower the subject once, then route a
