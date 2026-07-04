@@ -3503,6 +3503,23 @@ public sealed class ZigFrontendTests
     // ---- Milestone W, part 1a — function-pointer types + anyopaque -------
 
     [Fact]
+    public void Lowers_fn_pointer_globals_incl_inferred_and_forward_ref()
+    {
+        // A fn-pointer GLOBAL — typed (`const h: *const fn (i32) i32 = &laterFn;`) or INFERRED
+        // (`const alias = &laterFn;`) — is callable, and may forward-reference a function declared
+        // LATER (functions are registered before globals). The inferred form needs `&fn` to be a bare
+        // `CType.Func` fn-ptr value, not `Pointer(Func)`.
+        var cs = EmitZig(
+            "const handler: *const fn (i32) i32 = &laterFn;\n" +
+            "const alias = &laterFn;\n" +
+            "fn laterFn(x: i32) i32 { return x * 2; }\n" +
+            "pub fn main() u8 { return @intCast(handler(10) + alias(11)); }\n"); // 20 + 22 = 42
+        cs.ShouldContain("&laterFn");   // the function's address bound to the global
+        cs.ShouldContain("handler(10)");
+        cs.ShouldContain("alias(11)");  // the inferred fn-ptr global is callable
+    }
+
+    [Fact]
     public void Lowers_a_function_pointer_type_to_a_managed_delegate_pointer()
     {
         // `*const fn (a: i32, b: i32) i32` → a managed `delegate*<int, int, int>` (the vtable shape);

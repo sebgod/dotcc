@@ -12,6 +12,11 @@
 
 const E = error{ Bad };
 
+// A fn-pointer GLOBAL that forward-references a function declared LATER — typed and inferred.
+// (Functions are registered before globals, so the forward reference resolves.)
+const adder: *const fn (i32, i32) i32 = &add;
+const adder2 = &add; // inferred fn-ptr global (`&fn` is a callable `CType.Func` value)
+
 fn bump(ctx: *anyopaque, by: i32) i32 {
     const p: *i32 = @ptrCast(@alignCast(ctx));
     p.* = p.* + by;
@@ -45,6 +50,7 @@ pub fn main() u8 {
     const h: *const fn (i32) E!i32 = dbl; //    !T-returning
     if (g(1, 2) != 3) return 0; // sanity — leave `acc` (42) as the exit unless wrong
     if ((h(3) catch 0) != 6) return 0;
+    if (adder(1, 2) != adder2(1, 2)) return 0; // both fn-ptr globals call the same `add`
 
     return @intCast(acc);
 }
