@@ -1319,6 +1319,12 @@ internal sealed partial class ZigLowering
         {
             return BuildTupleInit(fields, null);   // inferred tuple (no sink, e.g. `const t = .{a, b};`)
         }
+        // An EMPTY `.{}` with no struct/union sink is an empty tuple (`const t = .{};`) — a zero-field
+        // ValueTuple. (At a Named struct/union sink it zero-inits that aggregate, handled below.)
+        if (fields.Count == 0 && sink?.Unqualified is not CType.Named)
+        {
+            return BuildTupleInit(fields, sink?.Unqualified as CType.Tuple);
+        }
         // Named struct / union — needs a known struct result type.
         if (sink?.Unqualified is not CType.Named named)
         {
@@ -1342,11 +1348,6 @@ internal sealed partial class ZigLowering
         {
             throw new IrUnsupportedException(
                 $"zig tuple literal has {posItems.Count} element(s) but the target tuple has {sink.Elements.Count}");
-        }
-        if (posItems.Count is 0 or > 7)
-        {
-            throw new IrUnsupportedException(
-                $"zig tuple literal arity {posItems.Count} is not supported (1..7; an empty tuple and arity > 7 are deferred)");
         }
         var elems = new List<CExpr>();
         var types = new List<CType>();
@@ -5426,11 +5427,6 @@ internal sealed partial class ZigLowering
     private CType LowerTupleType(Item tupleTypes)
     {
         var elems = Flatten(tupleTypes).Select(LowerType).ToList();
-        if (elems.Count is 0 or > 7)
-        {
-            throw new IrUnsupportedException(
-                $"zig tuple type arity {elems.Count} is not supported (1..7; an empty tuple and arity > 7 are deferred)");
-        }
         return new CType.Tuple(elems);
     }
 

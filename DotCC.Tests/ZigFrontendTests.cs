@@ -1988,6 +1988,25 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_an_empty_tuple_and_an_over_seven_arity_tuple()
+    {
+        // An empty `.{}` (no struct sink) → the non-generic `System.ValueTuple`; an arity > 7 tuple
+        // nests via the 8th `TRest` field (`ValueTuple<T1..T7, ValueTuple<T8..>>`), and an index ≥ 7
+        // reads through `.Rest`.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const e = .{};\n" +
+            "    _ = e;\n" +
+            "    const t = .{ @as(u8, 1), @as(u8, 2), @as(u8, 3), @as(u8, 4), @as(u8, 5), @as(u8, 6), @as(u8, 7), @as(u8, 8), @as(u8, 9) };\n" +
+            "    return t[0] + t[7] + t[8];\n" + // 1 + 8 + 9 = 18
+            "}\n");
+        cs.ShouldContain("default(System.ValueTuple)");   // empty tuple `.{}`
+        cs.ShouldContain("System.ValueTuple<byte, byte>>"); // the nested TRest (>7 arity)
+        cs.ShouldContain(".Rest.Item1");                   // t[7] reads through the nested tuple
+        cs.ShouldContain(".Rest.Item2");                   // t[8]
+    }
+
+    [Fact]
     public void Rejects_a_literal_mixing_positional_and_named_fields()
     {
         // A Zig `.{…}` is a tuple (all-positional) OR a struct (all-named), never a mix. dotcc

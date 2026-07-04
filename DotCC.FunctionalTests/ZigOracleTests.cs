@@ -557,6 +557,15 @@ public sealed class ZigOracleTests
         // A tuple LITERAL bound to a var, indexed by literal subscript (`t[0]`/`t[1]` → `.ItemN`).
         new object[] { "tuple_index",
             "pub fn main() u8 { const t = .{ @as(u8, 20), @as(u8, 22) }; return t[0] + t[1]; }\n", 42, "" },
+        // An empty tuple `.{}` (non-generic ValueTuple) and an arity-9 tuple (> 7 → ValueTuple TRest
+        // nesting; an index ≥ 7 reads through `.Rest`). 1 + 7 + 8 + 9 = 25.
+        new object[] { "tuple_empty_and_wide",
+            "pub fn main() u8 {\n" +
+            "    const e = .{};\n" +
+            "    _ = e;\n" +
+            "    const t = .{ @as(u8, 1), @as(u8, 2), @as(u8, 3), @as(u8, 4), @as(u8, 5), @as(u8, 6), @as(u8, 7), @as(u8, 8), @as(u8, 9) };\n" +
+            "    return t[0] + t[6] + t[7] + t[8];\n" + // 1 + 7 + 8 + 9 = 25
+            "}\n", 25, "" },
         // Destructure straight from an inline positional literal (its tuple type is inferred).
         new object[] { "tuple_destructure_literal",
             "pub fn main() u8 { const a, const b = .{ @as(u8, 40), @as(u8, 2) }; return a + b; }\n", 42, "" },
