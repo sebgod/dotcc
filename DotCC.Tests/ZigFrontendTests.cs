@@ -1514,13 +1514,16 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_a_global_sentinel_array()
+    public void Lowers_a_global_sentinel_array_reserving_the_extra_slot()
     {
-        // The N+1 reservation is materialized only at the local-decl stackalloc; a pinned global
-        // store has no such hook yet, so a global `[N:0]T` is rejected (not silently truncated).
-        var ex = Should.Throw<CompileException>(() => EmitZig(
-            "const g: [3:0]u8 = .{ 1, 2, 3 };\npub fn main() u8 { return g[0]; }\n"));
-        ex.Message.ShouldContain("deferred");
+        // A `[N:s]T` GLOBAL reserves N+1 slots in the pinned store (like the local stackalloc): a
+        // literal appends the sentinel to its element list; the symbol keeps the logical `[N]T` type
+        // (so `.len`/slicing exclude the sentinel, and `g[N]` reads it back).
+        var cs = EmitZig(
+            "const g: [3:9]i32 = .{ 1, 2, 3 };\n" +          // literal → 4 slots ending in 9
+            "var z: [2:0]u8 = undefined;\n" +                // undefined zero-sentinel → 3 zeroed slots
+            "pub fn main() u8 { z[0] = 5; return @intCast(g[0] + g[3] + z[0]); }\n"); // 1 + 9 + 5 = 15
+        cs.ShouldContain(", 9");   // the sentinel appended to the pinned literal store
     }
 
     // --- Milestone O part 5: non-escaping stack-slice peephole ---------------

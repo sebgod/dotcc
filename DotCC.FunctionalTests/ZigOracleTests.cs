@@ -1177,6 +1177,19 @@ public sealed class ZigOracleTests
             "    return @as(u8, @intCast(sum));\n" + // 42
             "}\n", 42, "" },
 
+        // A `[N:s]T` sentinel array GLOBAL — the pinned store reserves N+1 slots (like the local
+        // stackalloc): a literal appends the sentinel, `undefined` reserves a zeroed slot. `g[3]`
+        // reads the non-zero sentinel 9; `g.len` = 3 (excludes it). 1 + 9 + 5 = 15.
+        new object[] { "sentinel_array_global",
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "const g: [3:9]i32 = .{ 1, 2, 3 };\n" +
+            "var z: [2:0]u8 = undefined;\n" +
+            "pub fn main() u8 {\n" +
+            "    z[0] = 5;\n" +
+            "    _ = printf(\"g0=%d g3=%d len=%d z0=%d\\n\", g[0], g[3], @as(c_int, @intCast(g.len)), @as(c_int, z[0]));\n" +
+            "    return @intCast(g[0] + g[3] + z[0]);\n" + // 1 + 9 + 5 = 15
+            "}\n", 15, "g0=1 g3=9 len=3 z0=5" },
+
         // Non-escaping stack-slice peephole (Milestone O, part 5): a page_allocator (devirt'd
         // C-heap) byte slice that is constant-size, freed, and used only via s[i]/s.len is demoted
         // to a `stackalloc` backing on dotcc (the heap alloc/free vanish). Real zig heap-allocs +
