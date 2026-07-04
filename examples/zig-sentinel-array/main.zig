@@ -4,13 +4,17 @@
 // while the logical length stays N. So a `[N:0]u8` literal of N bytes is a valid NUL-terminated
 // C string with no hand-written terminator. dotcc lowers it to the same `stackalloc` an `[N]T`
 // local uses, grown by one zeroed slot — the symbol's type is the N-element array, so indexing
-// and slicing behave like `[N]T`; the extra slot is the sentinel, readable at `buf[N]`.
+// and slicing behave like `[N]T`; the extra slot is the sentinel, readable at `buf[N]`. A GLOBAL
+// `[N:s]T` gets the same N+1 reservation in its pinned, program-lifetime backing store.
 //
 //   dotcc:    dotnet run --project DotCC -c Release -- examples/zig-sentinel-array/main.zig --emit=file -o out.cs
 //             dotnet run out.cs ; echo $?            # -> 42
 //   real zig: zig build-exe main.zig -lc && ./main ; echo $?
 
 extern fn printf(format: [*c]const u8, ...) c_int;
+
+// A GLOBAL sentinel array — the pinned store reserves the sentinel slot (index 3 reads 0).
+const gbuf: [3:0]u8 = .{ 1, 2, 3 };
 
 pub fn main() u8 {
     // 5 logical bytes summing to 42; index 5 is the reserved sentinel slot (must read back 0).
@@ -25,7 +29,11 @@ pub fn main() u8 {
     if (buf[5] != 0) {
         sum = 0; // sentinel violated → force a wrong (non-42) exit
     }
+    // The global's sentinel slot is reserved + zeroed too (gbuf.len is 3; gbuf[3] is the sentinel).
+    if (gbuf[3] != 0) {
+        sum = 0;
+    }
 
-    _ = printf("sum=%u sentinel=%u\n", sum, @as(c_uint, buf[5]));
+    _ = printf("sum=%u sentinel=%u gbuf0=%u\n", sum, @as(c_uint, buf[5]), @as(c_uint, gbuf[0]));
     return @as(u8, @intCast(sum)); // 42
 }
