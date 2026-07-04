@@ -1160,6 +1160,24 @@ public sealed class ZigOracleTests
             "    sum += deref(null);\n" + // 5
             "    return @as(u8, @intCast(sum));\n" + // 42
             "}\n", 42, "" },
+        // ANF (sub-expression positions): a `catch` with a side-effecting fallback and an
+        // `orelse return` used INSIDE a larger expression (not a full RHS) — hoisted to a temp before
+        // the enclosing statement (decl-init / assignment / return). a=2+20=22, b=1+5=6, c=g(-1)=7 → 35.
+        new object[] { "anf_subexpr",
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "const E = error{ Bad };\n" +
+            "fn mk(ok: bool) E!i32 { if (ok) return 5; return error.Bad; }\n" +
+            "fn dflt() i32 { return 20; }\n" +
+            "fn find(x: i32) ?i32 { if (x > 0) return x; return null; }\n" +
+            "fn g(x: i32) i32 { return 100 + (find(x) orelse return 7); }\n" +
+            "pub fn main() u8 {\n" +
+            "    const a: i32 = 2 + (mk(false) catch dflt());\n" + // decl-init sub-expr catch: 22
+            "    var b: i32 = 0;\n" +
+            "    b = 1 + (mk(true) catch dflt());\n" +             // assign sub-expr catch: 6
+            "    const c: i32 = g(-1);\n" +                        // orelse return 7 → 7
+            "    _ = printf(\"a=%d b=%d c=%d\\n\", a, b, c);\n" +
+            "    return @as(u8, @intCast(a + b + c));\n" +          // 22 + 6 + 7 = 35
+            "}\n", 35, "a=22 b=6 c=7" },
         // open-ended slicing `s[lo..]`: the high bound is the source length. Slice source via
         // `.len` (21+14+7 = 42); array source through the offset element pointer (t[0], t.len);
         // a closed re-slice still works. Element read proves `.ptr + lo`; lengths prove `len - lo`.

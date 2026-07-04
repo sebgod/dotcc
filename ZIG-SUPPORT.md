@@ -154,10 +154,10 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `undefined` | ✅ | uninitialized storage. An array local takes the stackalloc path; a scalar → `default(T)` (a zeroed over-approximation — a correct program writes before reading) |
 | postfix `.?` (optional unwrap) | ✅ | value optional → `.Value` (panics on none); optional pointer → identity (V1: no null-check) |
 | `a orelse b` (value RHS) | ✅ | value optional → C# `??` (single-eval, lazy `b`); pointer → `a != null ? a : b` (simple LHS) |
-| `a orelse return [v]` / `a catch return [v]` (control-flow fallback) | ✅ | the unwrapped payload, or — on none / error — an EARLY `return` from the current function (Milestone N, part 6). Lowered structurally at a `const`/`var` initializer or a statement: hoist the operand, `if (none / error) { return …; }`, then bind the payload. The `return` wraps correctly in a `!T` fn (incl. `return error.X`). Both a value (`return v`) and void (`return`) form. (`a catch \|e\| return e` is just `try a` — use `try`.) **Deferred:** a sub-expression position; `break`/`continue` control-flow fallbacks |
+| `a orelse return [v]` / `a catch return [v]` (control-flow fallback) | ✅ | the unwrapped payload, or — on none / error — an EARLY `return` from the current function (Milestone N, part 6). Lowered structurally at a `const`/`var` initializer or a statement: hoist the operand, `if (none / error) { return …; }`, then bind the payload. The `return` wraps correctly in a `!T` fn (incl. `return error.X`). Both a value (`return v`) and void (`return`) form. (`a catch \|e\| return e` is just `try a` — use `try`.) Also works in a SUB-expression (`100 + (a orelse return v)`) via the ANF statement-hoist. **Deferred:** `break`/`continue` control-flow fallbacks |
 | prefix `try` | ✅ | unwrap an error union's payload, or PROPAGATE its error out of the enclosing `!T` fn (exception-based early-return, modeled on the setjmp lowering). `try e;` as a statement works too |
-| `e catch fallback` | ✅ | the payload on success, else the fallback. A simple, side-effect-free fallback keeps the eager `ErrUnion.Catch(a, b)`; a SIDE-EFFECTING fallback (Milestone N, part 3) lowers LAZILY — the union is hoisted to a single-eval temp and `b` runs only on error via a ternary `__cE.IsErr ? b : __cE.Value`. The lazy/capturing forms need a statement context (a `const`/`var` initializer); a side-effecting fallback in a sub-expression is still rejected |
-| `e catch \|err\| fallback` (catch capture) | ✅ | binds the error to `err` for the fallback `b` (Milestone N, part 3), lowered lazily — hoist the union, bind `ushort err = __cE.Code;`, then `__cE.IsErr ? b : __cE.Value` so `b` (which may use `err`, e.g. `err == error.Bad`) runs only on error. As a `const`/`var` initializer. **Deferred:** the control-flow fallback `catch return` / `catch \|e\| return e` (clusters with `orelse return`); the capture in a sub-expression / statement position |
+| `e catch fallback` | ✅ | the payload on success, else the fallback. A simple, side-effect-free fallback keeps the eager `ErrUnion.Catch(a, b)`; a SIDE-EFFECTING fallback (Milestone N, part 3) lowers LAZILY — the union is hoisted to a single-eval temp and `b` runs only on error via a ternary `__cE.IsErr ? b : __cE.Value`. A side-effecting fallback in a SUB-expression (`x + (a catch b())`) is hoisted to a `__anf` temp before the enclosing statement (the ANF pass) — subject to the eval-order guard (rejected if a side effect was evaluated earlier in the same statement) |
+| `e catch \|err\| fallback` (catch capture) | ✅ | binds the error to `err` for the fallback `b` (Milestone N, part 3), lowered lazily — hoist the union, bind `ushort err = __cE.Code;`, then `__cE.IsErr ? b : __cE.Value` so `b` (which may use `err`, e.g. `err == error.Bad`) runs only on error. As a `const`/`var` initializer or, in a SUB-expression, hoisted via the ANF pass (same eval-order guard). **Deferred:** the control-flow fallback `catch \|e\| return e` (`catch return` clusters with `orelse return`, above) |
 | `error.Foo` (bare error value) | ✅ | a first-class error VALUE (Milestone N, part 1) — usable outside `return error.Foo;`: bound to a `const`/`var`, captured (`else \|e\|` / future `catch \|e\|`), and compared. V1 erases the named set into one flat global code space, so an `error.Foo` lowers to its stable `ushort` code, typed `CType.ErrorSet`. (Explicit `error{A,B}` set decls / named `E!T` distinct from `anyerror!T` are still deferred) |
 | `e == error.Foo` / `e != error.Foo` (error-value equality) | ✅ | error-value comparison (Milestone N, part 1) — equal codes mean equal errors, so `==`/`!=` lower to the ordinary integer comparison of the flat codes. Works on a bound error too (`else \|e\|` / a `const`), which un-erases the Milestone M part-3 cut (a USED named `\|e\|` is now valid in both compilers) |
 | `switch (e) { error.Foo => …, else => … }` (error switch) | ✅ | switch on an error value (Milestone N, part 2) — an error value IS its flat `ushort` code, so this lowers to an ORDINARY integer `switch` on the code (each `error.Foo` prong → a `case <code>:`, `else` → `default:`). Rode in on part 1's representation — no new lowering. The error is commonly captured from `else \|e\|` first; an `anyerror!T` (open set) requires the `else` |
@@ -330,10 +330,13 @@ statement context (a `const`/`var` initializer).
 **V1 limits** (documented, not silent): the error SET is erased to one flat global code
 space (`!T` / `anyerror!T` / `E!T` lower identically; an `error.Foo` value is its code); the
 payload must be a value type (an error union over a *pointer* is deferred — a C# generic can't
-take a pointer arg); a side-effecting / capturing `catch` is a `const`/`var` initializer only (a
-sub-expression position keeps the eager-only rule). The control-flow fallbacks `catch return [v]` /
-`orelse return [v]` (Milestone N part 6) ARE supported (a `const`/`var` initializer or a statement;
-an early `return` on the error / none path); `catch |e| return e` is just `try` (use `try`). An
+take a pointer arg); a side-effecting / capturing `catch` lowers lazily. In a SUB-expression
+(`x + (a catch b())`) it — and the control-flow fallbacks `catch return`/`orelse return` — are
+hoisted to a `__anf` temp before the enclosing statement (the ANF statement-hoist), preserving
+eval order: hoisting past a side effect evaluated earlier in the same statement is a clear error
+(bind it to a `const` first) rather than a silent reorder. The control-flow fallbacks `catch return
+[v]` / `orelse return [v]` (Milestone N part 6) also work at a full RHS or statement (an early
+`return` on the error / none path); `catch |e| return e` is just `try` (use `try`). An
 error-union `main`
 (`!void` / `!u8`, Milestone N part 4) IS supported — an error from main reports its flat code to
 stderr and exits 1 (real zig prints the error NAME + a trace; the name awaits the un-erased set).
@@ -623,6 +626,9 @@ rejects, not silently accept more.
   `MathError!i32` return type — the erased set, members returned via `error.X` and handled with `catch`),
   `examples/zig-catch-orelse-return` (control-flow fallbacks: `mk(a) catch return error.NoX` (error
   union early-return) + `pick(b) orelse return 0` (optional early-return) inside a `!i32` function),
+  `examples/zig-anf-subexpr` (catch/orelse in SUB-expression positions — the ANF statement-hoist: a
+  side-effecting `catch` and an `orelse return` used inside `x + (…)`, lifted to a temp before the
+  enclosing statement, eval-order-preserving),
   `examples/zig-wrap-ops` (wrapping arithmetic: `+%=`/`-%=`/`*%=` overflow on `u8`, a `z -% 2`
   underflow, and a `u8 +% u8` that wraps at the operand width before widening to `u32`),
   `examples/zig-sat-ops` (saturating arithmetic: unsigned `+|=`/`-|=`/`*|=` clamp to 255 / floor at

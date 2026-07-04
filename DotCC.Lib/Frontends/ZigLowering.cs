@@ -63,6 +63,27 @@ internal sealed partial class ZigLowering
     /// distinct temp names (Milestone G).</summary>
     private int _tupleTempCounter;
 
+    /// <summary>The ANF statement-hoist buffer (the "sub-expression positions" milestone). When
+    /// non-null, a value-producing construct that lowers to STATEMENTS — a side-effecting/capturing
+    /// <c>catch</c>, a <c>catch return</c>/<c>orelse return</c> — appearing in a SUB-expression
+    /// position appends its pre-statements + a result temp here and evaluates to a bare
+    /// <see cref="VarRef"/>; the enclosing statement then runs the buffer first (a brace-less
+    /// <see cref="Seq"/>, so the temps stay in scope). Installed by <see cref="Hoisted"/> only at
+    /// eval-safe statement points (return / expr-stmt / assignment / decl init) — NOT a loop
+    /// condition (a per-iteration re-eval), where it stays null and the construct is rejected.</summary>
+    private List<CStmt>? _hoist;
+
+    /// <summary>True once a SIDE-EFFECTING evaluation (a call) has occurred in the current
+    /// <see cref="_hoist"/> scope BEFORE the point being lowered. A construct that wants to hoist
+    /// checks this FIRST: hoisting past a prior side effect would reorder it (the hoisted pre runs
+    /// before the statement, hence before the earlier side effect), so that case is rejected. A
+    /// hoisted construct's OWN internals are sequenced into the buffer, so they restore the flag
+    /// (they don't count against a later hoist). See <see cref="Hoisted"/>.</summary>
+    private bool _hoistImpureSeen;
+
+    /// <summary>Monotonic counter for ANF result temporaries (<c>__anfN</c>).</summary>
+    private int _anfTempCounter;
+
     /// <summary>An enclosing labeled value-block (<c>blk: { … break :blk v; }</c>) being lowered
     /// (Milestone L, part 2). Each <c>break :blk v</c> assigns <c>v</c> to the block's result
     /// <see cref="Temp"/> and jumps to <see cref="EndLabel"/>; the surrounding statement then reads
@@ -2075,42 +2096,47 @@ internal sealed partial class ZigLowering
             // `const a, const b = e;` (Milestone G) — destructure a tuple value: single-eval the
             // RHS, then bind each name to its positional element. See LowerDestructure.
             case Zig.StmtDestructure sd: return LowerDestructure(sd);
-            case Zig.StmtReturn r:      return LowerReturn(r.Arg1);
+            // `return E;` — E may contain a hoistable catch/orelse in a sub-expression (ANF), so lower
+            // under a hoist buffer (the hoisted temps run before the `return`).
+            case Zig.StmtReturn r:      return Hoisted(() => LowerReturn(r.Arg1));
             case Zig.StmtReturnVoid:    return LowerReturnVoid();
             // `a catch return [x];` / `a orelse return [x];` as a STATEMENT (Milestone N, part 6) —
             // a control-flow early-out; the unwrapped value is discarded (common for a `!void` `a`).
             case Zig.StmtExpr e when IsControlFlowFallback(e.Arg0, out var cfL, out var cfC, out var cfR):
                 return LowerControlFlowFallback(cfL, cfC, cfR, null);
-            case Zig.StmtExpr e:        return new ExprStmt(LowerExpr(e.Arg0));
+            case Zig.StmtExpr e:        return Hoisted(() => new ExprStmt(LowerExpr(e.Arg0)));
 
             // `x = value;`  → an assignment used as a statement. `_ = value;` is Zig's
             // explicit DISCARD (it forbids ignoring a non-void result) — lower it to a
             // bare expression statement, evaluated for its side effects.
+            // A `catch`/`orelse` in the RHS (or a discarded `_ = f(a catch b())`) may hoist (ANF), so
+            // lower the assignment under a hoist buffer.
             case Zig.StmtAssign a:
-            {
-                if (a.Arg0.Content is Zig.Ident lhs && Tok(lhs.Arg0) == "_")
+                return Hoisted(() =>
                 {
-                    return new ExprStmt(LowerExpr(a.Arg2));
-                }
-                var target = LowerExpr(a.Arg0);
-                // `x = blk: { … break :blk v; };` — a labeled value-block assignment (Milestone L,
-                // part 2): temp-fill against the lvalue's type, then assign the result temp into it.
-                if (a.Arg2.Content is Zig.LabeledBlock lb)
-                {
-                    return LowerLabeledValueBlock(Tok(lb.Arg0), lb.Arg2, target.Type,
-                        temp => new ExprStmt(new Assign(null, target, new VarRef(temp) { Type = temp.Type }) { Type = target.Type }));
-                }
-                // `x = switch (y) { … blk: {…} };` / `x = if (c) blk:{…} else …;` — a value-position
-                // if/switch with a statement-producing branch (Milestone Y, part 1): temp-fill against
-                // the lvalue's type, then assign the result temp into it.
-                if (IsValueControlFlowStmt(a.Arg2))
-                {
-                    return LowerValueControlFlowStmt(a.Arg2, target.Type,
-                        temp => new ExprStmt(new Assign(null, target, new VarRef(temp) { Type = temp.Type }) { Type = target.Type }));
-                }
-                var value = LowerExprSink(a.Arg2, target.Type);   // target type is the sink (`x = .member;`)
-                return new ExprStmt(new Assign(null, target, value) { Type = target.Type });
-            }
+                    if (a.Arg0.Content is Zig.Ident lhs && Tok(lhs.Arg0) == "_")
+                    {
+                        return new ExprStmt(LowerExpr(a.Arg2));
+                    }
+                    var target = LowerExpr(a.Arg0);
+                    // `x = blk: { … break :blk v; };` — a labeled value-block assignment (Milestone L,
+                    // part 2): temp-fill against the lvalue's type, then assign the result temp into it.
+                    if (a.Arg2.Content is Zig.LabeledBlock lb)
+                    {
+                        return LowerLabeledValueBlock(Tok(lb.Arg0), lb.Arg2, target.Type,
+                            temp => new ExprStmt(new Assign(null, target, new VarRef(temp) { Type = temp.Type }) { Type = target.Type }));
+                    }
+                    // `x = switch (y) { … blk: {…} };` / `x = if (c) blk:{…} else …;` — a value-position
+                    // if/switch with a statement-producing branch (Milestone Y, part 1): temp-fill against
+                    // the lvalue's type, then assign the result temp into it.
+                    if (IsValueControlFlowStmt(a.Arg2))
+                    {
+                        return LowerValueControlFlowStmt(a.Arg2, target.Type,
+                            temp => new ExprStmt(new Assign(null, target, new VarRef(temp) { Type = temp.Type }) { Type = target.Type }));
+                    }
+                    var value = LowerExprSink(a.Arg2, target.Type);   // target type is the sink (`x = .member;`)
+                    return new ExprStmt(new Assign(null, target, value) { Type = target.Type });
+                });
 
             // `x op= y` (compound assignment) → the shared Assign node with a non-null CompoundOp.
             // Each operator maps to the SAME BinOp the matching Zig binary op uses (Add/Sub/…), so
@@ -2294,7 +2320,14 @@ internal sealed partial class ZigLowering
             ? new Seq(new List<CStmt>())
             : DeclOf(nameTok, typeItem, initExpr);
 
+    // `const`/`var x = init;` — lower under an ANF hoist buffer so a catch/orelse in a SUB-expression
+    // of the initializer (`const r = 1 + (a catch b());`) lifts to a temp before the decl. A
+    // WHOLE-init catch / control-flow fallback is intercepted at the top of DeclOfInner (its own
+    // statement lowering), leaving the buffer empty, so this wrap is a no-op for those.
     private CStmt DeclOf(Item nameTok, Item? typeItem, Item initExpr)
+        => Hoisted(() => DeclOfInner(nameTok, typeItem, initExpr));
+
+    private CStmt DeclOfInner(Item nameTok, Item? typeItem, Item initExpr)
     {
         // Compute the declared type FIRST: a result-located init (`.member` / `.{…}`) needs
         // it as its sink, so resolve the annotation before lowering the initializer.
@@ -4129,6 +4162,78 @@ internal sealed partial class ZigLowering
         return pre.Count == 1 ? pre[0] : new Seq(pre);
     }
 
+    // ---- ANF statement-hoist (the "sub-expression positions" milestone) --------------------------
+    //
+    // A value-producing construct that lowers to STATEMENTS (a side-effecting/capturing `catch`, a
+    // `catch return` / `orelse return`) works at a full RHS (const/var/return/assignment) but not in
+    // a SUB-expression (`x + (a catch b())`). The ANF hoist lifts it to a temp before the enclosing
+    // statement: `Hoisted` installs a per-statement buffer at each eval-safe point, and the construct
+    // appends its pre-statements + a result temp and evaluates to a bare VarRef. Correctness rides on
+    // `_hoistImpureSeen`: hoisting past an earlier side effect would reorder it, so that is rejected.
+
+    /// <summary>Lower a statement (via <paramref name="lower"/>) under a fresh ANF hoist buffer, then
+    /// prepend any hoisted statements as a brace-less <see cref="Seq"/> (the result temps stay in the
+    /// enclosing block scope). A statement with no hoist returns unchanged. Installed only at
+    /// eval-safe statement points — NOT a loop condition (re-evaluated per iteration).</summary>
+    private CStmt Hoisted(Func<CStmt> lower)
+    {
+        var savedBuf = _hoist;
+        var savedImpure = _hoistImpureSeen;
+        _hoist = new List<CStmt>();
+        _hoistImpureSeen = false;
+        try
+        {
+            var stmt = lower();
+            if (_hoist.Count == 0) { return stmt; }
+            var seq = new List<CStmt>(_hoist) { stmt };
+            return new Seq(seq);
+        }
+        finally
+        {
+            _hoist = savedBuf;
+            _hoistImpureSeen = savedImpure;
+        }
+    }
+
+    /// <summary>Guard + finish a sub-expression hoist: reject when not in a hoistable position
+    /// (<see cref="_hoist"/> null) or when a side effect was already evaluated earlier in the
+    /// statement (<see cref="_hoistImpureSeen"/> — hoisting past it would reorder). Otherwise lower
+    /// the construct (its own internals don't count toward a LATER hoist — restore the flag), append
+    /// its <paramref name="pre"/>-computing statements + a <c>__anfN</c> result temp to the buffer,
+    /// and return a bare <see cref="VarRef"/> to that temp.</summary>
+    private CExpr HoistLowered(string what, List<CStmt> pre, CExpr value, bool savedImpure)
+    {
+        // Restore the impurity watermark to its PRE-construct value: the construct's own internals
+        // (lowered by the caller) are sequenced into the buffer, so they don't block a LATER sibling
+        // hoist. RequireHoistable then rejects only a reordering hazard against a PRIOR side effect.
+        _hoistImpureSeen = savedImpure;
+        var buf = RequireHoistable(what);
+        var sym = _symbols.Declare(new Symbol { Name = "__anf" + _anfTempCounter++, Kind = SymKind.Var, Type = value.Type });
+        buf.AddRange(pre);
+        buf.Add(new DeclStmt(new List<LocalDecl> { new(sym, value) }));
+        return new VarRef(sym) { Type = value.Type };
+    }
+
+    /// <summary>Return the active hoist buffer, or throw a clear error when a statement-lowering
+    /// construct appears where it can't be hoisted: no active buffer (e.g. a loop condition), or
+    /// after an earlier side effect in the same statement (a reordering hazard — bind to a
+    /// <c>const</c> first). Returning the (non-null) buffer avoids a null-forgiving deref at the
+    /// call site.</summary>
+    private List<CStmt> RequireHoistable(string what)
+    {
+        if (_hoist is not { } buf)
+        {
+            throw new IrUnsupportedException(
+                $"zig `{what}` is lowered as a `const`/`var` initializer, `return`, assignment, or expression statement — this position (e.g. a loop condition) isn't hoistable; bind it to a `const` first");
+        }
+        if (_hoistImpureSeen)
+        {
+            throw new IrUnsupportedException(
+                $"zig `{what}` in a sub-expression can't be hoisted past an earlier side-effecting operand in the same statement — bind it to a `const` first");
+        }
+        return buf;
+    }
+
     /// <summary>True when an item is an <c>error.Foo</c> literal, yielding the error name.</summary>
     private static bool IsErrorLit(Item it, out string name)
     {
@@ -4660,27 +4765,47 @@ internal sealed partial class ZigLowering
             // position only the eager form is available.
             case Zig.CatchOp c:
             {
+                // Lower ONCE (snapshot the impurity watermark first — the union operand is a call that
+                // sets it). A simple, side-effect-free fallback → the eager `ErrUnion.Catch` (no pre,
+                // the union call legitimately counts as a side effect). A side-effecting fallback →
+                // pre-statements; hoist them to a temp before the enclosing statement (the ANF pass).
+                var savedC = _hoistImpureSeen;
                 var (pre, value) = LowerCatchValue(c.Arg0, null, c.Arg2);
-                if (pre.Count == 0) { return value; }   // simple, side-effect-free → eager ZigCatch
-                throw new IrUnsupportedException(
-                    "zig `catch` with a side-effecting fallback is only lowered as a `const`/`var` initializer (other positions deferred)");
+                if (pre.Count == 0) { return value; }
+                return HoistLowered("catch", pre, value, savedC);
             }
             // `a catch |e| b` (Milestone N, part 3) — bind the error to `e` for the fallback `b`,
-            // evaluated lazily (only on error). Needs a statement context (the bind is a statement),
-            // so it is only lowered as a `const`/`var` initializer (see DeclOf).
-            case Zig.CatchCapture:
-                throw new IrUnsupportedException(
-                    "zig `catch |e| …` capture is only lowered as a `const`/`var` initializer (other positions deferred)");
+            // evaluated lazily (only on error). The bind is a statement, so hoist it (ANF).
+            case Zig.CatchCapture cc:
+            {
+                var savedCc = _hoistImpureSeen;
+                var (pre, value) = LowerCatchValue(cc.Arg0, Tok(cc.Arg3), cc.Arg5);
+                return HoistLowered("catch |e|", pre, value, savedCc);
+            }
 
             // `a catch return [x]` / `a orelse return [x]` (control-flow fallback) — the `return` is a
-            // statement, so these lower structurally only as a `const`/`var` initializer or a
-            // statement (handled in DeclOf / LowerStmt), never as a sub-expression.
-            case Zig.CatchReturn:
-            case Zig.CatchReturnVoid:
-            case Zig.OrElseReturn:
-            case Zig.OrElseReturnVoid:
-                throw new IrUnsupportedException(
-                    "zig `catch return` / `orelse return` is only lowered as a `const`/`var` initializer or a statement (sub-expression position deferred)");
+            // statement. In a full-RHS position DeclOf/LowerStmt handle it; in a SUB-expression it is
+            // hoisted to a temp before the enclosing statement (ANF): the conditional `return` and the
+            // payload capture become buffer statements, and the construct evaluates to the payload temp.
+            case Zig.CatchReturn or Zig.CatchReturnVoid or Zig.OrElseReturn or Zig.OrElseReturnVoid:
+            {
+                IsControlFlowFallback(expr, out var cfLhs, out var cfIsCatch, out var cfRet);
+                var buf = RequireHoistable(cfIsCatch ? "catch return" : "orelse return");
+                var savedImpure = _hoistImpureSeen;
+                Symbol? anfSym = null;
+                var cfStmt = LowerControlFlowFallback(cfLhs, cfIsCatch, cfRet, payload =>
+                {
+                    anfSym = _symbols.Declare(new Symbol { Name = "__anf" + _anfTempCounter++, Kind = SymKind.Var, Type = payload.Type });
+                    return new DeclStmt(new List<LocalDecl> { new(anfSym, payload) });
+                });
+                _hoistImpureSeen = savedImpure;   // the construct's internals are sequenced in the buffer
+                if (anfSym is not { } payloadSym)
+                {
+                    throw new IrUnsupportedException("internal: control-flow fallback did not bind a payload");
+                }
+                buf.Add(cfStmt);
+                return new VarRef(payloadSym) { Type = payloadSym.Type };
+            }
 
             // A bare `error.Foo` value (Milestone N): the error's stable code in the flat global
             // set, typed `CType.ErrorSet` (rendered `ushort`). This makes error values usable
@@ -4712,6 +4837,17 @@ internal sealed partial class ZigLowering
     /// field callee → <see cref="LowerMethodCall"/> (a UFCS instance method or a static/associated
     /// function). An indirect / function-pointer callee is still deferred.</summary>
     private CExpr LowerCall(Item calleeItem, Item? argListItem)
+    {
+        var result = LowerCallInner(calleeItem, argListItem);
+        // A call is a side effect, evaluated AFTER its arguments. Mark the ANF impurity watermark so a
+        // LATER sibling `catch`/`orelse` in the same statement is NOT hoisted past this call (which
+        // would reorder it). An argument's own `catch`/`orelse` was already lowered (and checked)
+        // inside LowerCallInner, BEFORE this set — so `f(a catch b)` still hoists cleanly.
+        if (_hoist is not null) { _hoistImpureSeen = true; }
+        return result;
+    }
+
+    private CExpr LowerCallInner(Item calleeItem, Item? argListItem)
     {
         var argItems = argListItem is null ? new List<Item>() : Flatten(argListItem);
 
