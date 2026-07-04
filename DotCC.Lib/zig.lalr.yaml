@@ -891,7 +891,14 @@ productions:
       - { lhs: Primary, rhs: [INTEGER],             action: intLit }
       - { lhs: Primary, rhs: [FLOAT],               action: floatLit }
       - { lhs: Primary, rhs: [STRING],              action: strLit }
-      - { lhs: Primary, rhs: ['(', Expr, ')'],      action: grouped }
+      # A parenthesized value: `( Expr )` grouping OR a parenthesized VALUE-position control-flow
+      # construct — `( if … )` / `( switch … )` / `( blk: {…} )` / `( while/for … else … )`. Using
+      # `RhsExpr` (which subsumes Expr) makes these reachable as a Primary WITHOUT putting the bare
+      # control-flow forms in the operator cascade (the parens delimit them, so no S/R conflict — the
+      # `RhsExpr` disambiguation is the same one used at a statement RHS). The lowering hoists a
+      # control-flow value out to a temp before the enclosing statement (the ANF pass); a plain
+      # `( Expr )` stays a `Paren`.
+      - { lhs: Primary, rhs: ['(', RhsExpr, ')'],   action: grouped }
       - { lhs: Primary, rhs: [BUILTIN, '(', ArgList, ')'], action: builtinCall }
       - { lhs: Primary, rhs: [BUILTIN, '(', ')'],           action: builtinCallNoArgs }
       - { lhs: Primary, rhs: ['null'],              action: nullLit }

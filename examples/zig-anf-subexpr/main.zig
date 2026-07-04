@@ -7,6 +7,9 @@
 // A-normal-form transform. Eval order is preserved: a side effect to the LEFT of the construct makes
 // the hoist a clear error (bind it to a `const` first) rather than a silent reorder.
 //
+// The same hoist reaches a parenthesized VALUE-position `if`/`switch`/labeled-block/loop in a
+// sub-expression (`x + (if (c) blk: {…} else …)`) — the `( RhsExpr )` grammar makes it a Primary.
+//
 //   dotcc:    dotnet run --project DotCC -c Release -- examples/zig-anf-subexpr/main.zig --emit=file -o out.cs
 //             dotnet run out.cs ; echo $?            # -> 42
 //   real zig: zig build-exe main.zig -lc && ./main ; echo $?
@@ -45,6 +48,13 @@ pub fn main() u8 {
     // `orelse return` hoisted out of a sub-expression (here `g` returns 7 on the none path).
     const c: i32 = g(-1); // 7
 
-    _ = printf("a=%d b=%d c=%d\n", a, b, c);
+    // Phase B: a parenthesized value-position control-flow construct in a sub-expression also hoists
+    // — here a BLOCK-BODIED `if` (a simple bare-expr `if` would stay an inline ternary, no hoist).
+    const d: i32 = 1 + (if (a > 0) blk: {
+        break :blk @as(i32, 4);
+    } else @as(i32, 0)); // 5
+    if (d != 5) return 0; // sanity — leaves the exit at 42
+
+    _ = printf("a=%d b=%d c=%d d=%d\n", a, b, c, d);
     return @as(u8, @intCast(a + b + c)); // 29 + 6 + 7 = 42
 }

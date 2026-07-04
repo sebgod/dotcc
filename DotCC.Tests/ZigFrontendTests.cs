@@ -3272,6 +3272,38 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Hoists_a_parenthesized_value_if_in_a_sub_expression()
+    {
+        // ANF Phase B: a parenthesized value-position control-flow construct — here a BLOCK-BODIED
+        // `if` — in a sub-expression. `( RhsExpr )` makes it a Primary; a block-bodied branch lowers
+        // to a statement filling a `__vcf` temp, which is hoisted before the enclosing statement.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const c = true;\n" +
+            "    const r: i32 = 2 + (if (c) blk: { break :blk @as(i32, 40); } else @as(i32, 0));\n" +
+            "    return @as(u8, @intCast(r));\n" +
+            "}\n");
+        cs.ShouldContain("__vcf");        // the value-if lowered to a result-temp fill (hoisted)
+        cs.ShouldContain("2 + __vcf");    // the containing `+` reads the hoisted temp
+    }
+
+    [Fact]
+    public void Keeps_a_parenthesized_simple_value_if_as_an_inline_ternary()
+    {
+        // A SIMPLE (bare-expr) value-if in a paren needs no hoist — it stays a C# ternary inline. (The
+        // `( RhsExpr )` grammar is what lets it PARSE in a sub-expression; only block-bodied branches
+        // hoist.)
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const c = true;\n" +
+            "    const r: i32 = 1 + (if (c) @as(i32, 20) else @as(i32, 8));\n" +
+            "    return @as(u8, @intCast(r));\n" +
+            "}\n");
+        cs.ShouldContain("? (int)20 : (int)8");   // inline ternary, no hoist
+        cs.ShouldNotContain("__vcf");
+    }
+
+    [Fact]
     public void Lowers_an_optional_capture_while()
     {
         // `while (opt) |x| { … }` → `while (true) { var __cap = cond; if (__cap.HasValue) { var x =
