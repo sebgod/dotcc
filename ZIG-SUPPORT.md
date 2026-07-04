@@ -36,7 +36,8 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `pub fn main() void` | ✅ | void-returning main — shell calls it for effect, returns 0 |
 | `pub fn main() u8` | ✅ | the `u8` return is the process exit code |
 | `pub fn …` | ✅ | `pub` unwrapped (visibility is a no-op in our single-module emit) |
-| `export fn …` / `pub export fn …` | ✅ | C-ABI external-linkage modifier (Milestone R, part 4) — unwrapped to the inner function, which lowers like an ordinary one (every non-static function is already export-eligible under `-shared`, so the modifier is a no-op in a console program). Scoped to functions; `export const`/`export var` (exported data) is deferred |
+| `export fn …` / `pub export fn …` | ✅ | C-ABI external-linkage modifier (Milestone R, part 4) — unwrapped to the inner function, which lowers like an ordinary one (every non-static function is already export-eligible under `-shared`, so the modifier is a no-op in a console program) |
+| `export const`/`var`, `pub const`/`var`, `pub export const`/`var` (data) | ✅ | exported / public DATA globals — `Unwrap` peels the modifier to the inner `const`/`var`, which lowers as an ordinary global (the same path plain top-level `const`/`var` take). The modifier is a no-op in a console program. **Cut:** actually EXPORTING the data symbol under `-shared` (NativeAOT data-symbol export) — the modifier is dropped, not surfaced across the C ABI |
 | Parameters `name: Type` | ✅ | names + types ride into the C# signature; faithful signedness |
 | Forward references | ✅ | two-pass lowering (Zig has no prototypes) — a call may precede the callee |
 | `extern fn f(p: T) Ret;` | ✅ | libc/FFI prototype (no body); routed by bare name, linked with `-lc` |

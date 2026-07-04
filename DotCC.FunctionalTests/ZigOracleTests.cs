@@ -1284,6 +1284,22 @@ public sealed class ZigOracleTests
             "    return r;\n" +
             "}\n", 42, "r=42" },
 
+        // Exported / public DATA globals: `export const`/`export var`, `pub const`/`pub var`, and
+        // `pub export const` — the modifier is peeled (Unwrap) and each lowers as an ordinary global.
+        new object[] { "export_data",
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "export const answer: i32 = 42;\n" +
+            "pub const greeting: i32 = 7;\n" +
+            "pub var counter: i32 = 0;\n" +
+            "export var total: i32 = 0;\n" +
+            "pub export const shared: i32 = 3;\n" +
+            "pub fn main() u8 {\n" +
+            "    counter = answer;\n" +
+            "    total = greeting + shared;\n" + // 7 + 3 = 10
+            "    _ = printf(\"counter=%d total=%d\\n\", counter, total);\n" +
+            "    return @intCast(total);\n" +
+            "}\n", 10, "counter=42 total=10" },
+
         // Declaration modifiers (Milestone R, part 5): callconv / align / linksection — all no-ops on
         // the managed target, accepted for round-trippability. `linksection` on a global var, `callconv`
         // on a function, `align` on a local. tag(11)=12, buf=30+12=42; stdout proves the value.
