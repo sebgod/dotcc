@@ -3478,6 +3478,25 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_unnamed_param_and_error_returning_function_pointer_types()
+    {
+        // A fn-pointer type's params may be UNNAMED (`fn (i32, i32) i32`, the common Zig form) as well
+        // as named; and the return may be an error union (`fn (i32) E!i32`) → the Func's Return is a
+        // `CType.ErrorUnion` → `delegate*<int, ErrUnion<int>>`.
+        var cs = EmitZig(
+            "const E = error{ Bad };\n" +
+            "fn add(a: i32, b: i32) i32 { return a + b; }\n" +
+            "fn checked(x: i32) E!i32 { if (x < 0) return error.Bad; return x * 2; }\n" +
+            "pub fn main() u8 {\n" +
+            "    const f: *const fn (i32, i32) i32 = &add;\n" +   // unnamed params
+            "    const h: *const fn (i32) E!i32 = &checked;\n" +  // !T-returning
+            "    return @intCast(f(10, 5) + (h(4) catch 0));\n" + // 15 + 8 = 23
+            "}\n");
+        cs.ShouldContain("delegate*<int, int, int>");    // unnamed-param fn-ptr type
+        cs.ShouldContain("ErrUnion<int>>");              // the !T return → delegate*<int, ErrUnion<int>>
+    }
+
+    [Fact]
     public void Calls_indirectly_through_a_function_pointer_value()
     {
         // Calling `op(40, 2)` where `op` is a fn-pointer LOCAL lowers to an indirect call — `op(40, 2)`

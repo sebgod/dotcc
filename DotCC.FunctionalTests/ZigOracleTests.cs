@@ -86,6 +86,22 @@ public sealed class ZigOracleTests
             "    _ = f2(&acc, 2);\n" +
             "    return @intCast(acc);\n" +
             "}\n", 42, "" },
+        // Fn-pointer TYPES with UNNAMED params (`fn (i32, i32) i32`) and an ERROR-UNION return
+        // (`fn (i32) E!i32`), alongside the named form. f(10,5)=15, g(3)=-3, h(4) catch 0 = 8 → 20.
+        new object[] { "fn_ptr_unnamed_err",
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "const E = error{ Bad };\n" +
+            "fn add(a: i32, b: i32) i32 { return a + b; }\n" +
+            "fn neg(x: i32) i32 { return -x; }\n" +
+            "fn checked(x: i32) E!i32 { if (x < 0) return error.Bad; return x * 2; }\n" +
+            "pub fn main() u8 {\n" +
+            "    const f: *const fn (i32, i32) i32 = &add;\n" +
+            "    const g: *const fn (x: i32) i32 = &neg;\n" +
+            "    const h: *const fn (i32) E!i32 = &checked;\n" +
+            "    const r = f(10, 5) + g(3) + (h(4) catch 0);\n" + // 15 + -3 + 8 = 20
+            "    _ = printf(\"r=%d\\n\", r);\n" +
+            "    return @intCast(r);\n" +
+            "}\n", 20, "r=20" },
         // A user-constructed custom std.mem.Allocator (Milestone W, part 1b): a hand-written bump
         // allocator whose state lives behind the opaque ctx, bound to the real 4-fn VTable
         // (alloc/resize/remap/free, each carrying std.mem.Alignment + []u8 + ret_addr). main builds

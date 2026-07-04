@@ -232,6 +232,8 @@ symbols:
   - 'inline'       # 154 `inline for/while` — comptime loop UNROLLING (Milestone T, part 3)
   - LoopExpr       # 155 a value-position `while`/`for … else …` loop (a RhsExpr; Milestone Y, part 2)
   - 'threadlocal'  # 156 `threadlocal var` — thread storage duration on a container-level var
+  - FnTypeParams   # 157 fn-pointer-TYPE param list (optionally-named: `Type` or `IDENT : Type`)
+  - FnTypeParam    # 158 one fn-pointer-type param — a bare `Type` (unnamed) or `IDENT : Type` (named)
                    #     (→ [ThreadStatic]; twofer with C `_Thread_local`, completion milestone part 2)
 
 productions:
@@ -800,11 +802,14 @@ productions:
       # C-frontend convention). CONFLICT-FREE with the Decl-level `fn IDENT (…)`: after `fn`, the next
       # token disambiguates — a Type-position fn has `(` (this rule), a FnDef has `IDENT`; and a Type
       # never appears at the top-level Decl position, so no parser state holds both items. Params are
-      # REUSED (so the params are `IDENT : Type` — real zig accepts named params in a fn-pointer type;
-      # an UNNAMED-param fn type `fn (i32) i32` is a documented cut). A `!T` error-union return or a
-      # `callconv` on a fn-pointer type are deferred.
-      - { lhs: Type, rhs: ['fn', '(', Params, ')', Type], action: tyFn }
-      - { lhs: Type, rhs: ['fn', '(', ')', Type],         action: tyFnNoArgs }
+      # `FnTypeParams` — an optionally-named list (`IDENT : Type` OR a bare `Type`), so BOTH the named
+      # `fn (a: i32) i32` and the unnamed `fn (i32) i32` forms parse (real zig accepts both; the names
+      # are ignored). A leading-`!` return `fn (…) !T` (anyerror error union) mirrors the fnDefErr form;
+      # a `callconv` on a fn-pointer type is still deferred.
+      - { lhs: Type, rhs: ['fn', '(', FnTypeParams, ')', Type],      action: tyFn }
+      - { lhs: Type, rhs: ['fn', '(', ')', Type],                    action: tyFnNoArgs }
+      - { lhs: Type, rhs: ['fn', '(', FnTypeParams, ')', '!', Type], action: tyFnErr }
+      - { lhs: Type, rhs: ['fn', '(', ')', '!', Type],               action: tyFnNoArgsErr }
       - { lhs: Type, rhs: [ErrUnion] }
 
   - derivation: none
@@ -820,6 +825,20 @@ productions:
       - { lhs: TupleTypes, rhs: [TupleTypes, ',', Type], action: tupleTypesCons }
       - { lhs: TupleTypes, rhs: [Type],                  action: tupleTypesOne }
       - { lhs: TupleTypes, rhs: [TupleTypes, ','],       action: tupleTypesTrail }
+
+  # Function-pointer-TYPE param list — each param is OPTIONALLY named: a bare `Type` (the common
+  # unnamed form `fn (i32) i32`) or `IDENT : Type` (named, the name ignored). Distinct from a fn-DEF
+  # `Param` (always named). The named-vs-unnamed choice is a per-param 1-token decision: after an
+  # IDENT, a `:` shifts the named form, while `,`/`)` (∉ FOLLOW of the `:` shift) reduces the IDENT as
+  # a type-name Type — conflict-free.
+  - derivation: leftmost
+    rules:
+      - { lhs: FnTypeParams, rhs: [FnTypeParam, ',', FnTypeParams], action: fnTypeParamsCons }
+      - { lhs: FnTypeParams, rhs: [FnTypeParam],                    action: fnTypeParamsOne }
+  - derivation: none
+    rules:
+      - { lhs: FnTypeParam, rhs: [Type],             action: fnTypeParamUnnamed }
+      - { lhs: FnTypeParam, rhs: [IDENT, ':', Type], action: fnTypeParamNamed }
 
   # Postfix chain (left-assoc): field access, deref, optional-unwrap, index, call.
   - derivation: leftmost
