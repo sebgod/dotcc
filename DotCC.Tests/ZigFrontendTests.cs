@@ -2222,15 +2222,46 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_exponent_only_float_literals()
+    {
+        // A decimal float with an exponent but NO fraction dot (`1e3`, `4E2`) — Zig allows it, but the
+        // old FLOAT lexer rule required a `.`, so `1e3` mis-lexed as `INTEGER 1` + `IDENT e3` and the
+        // parse failed. It now lexes as one FLOAT and passes through as a C# double literal verbatim.
+        var cs = EmitZig(
+            "const A: f64 = 1e3;\n" +   // 1000.0 — lowercase e
+            "const B: f64 = 4E2;\n" +   // 400.0  — uppercase E
+            "pub fn main() u8 { return 0; }\n");
+        cs.ShouldContain("A = 1e3");
+        cs.ShouldContain("B = 4E2");
+    }
+
+    [Fact]
+    public void Lowers_a_non_bmp_char_literal_to_its_codepoint_int()
+    {
+        // A Zig char literal is a `comptime_int` equal to the codepoint, so a non-BMP `\u{…}` needs no
+        // surrogate handling — it lowers to the plain integer codepoint (U+1F600 😀 = 128512), exactly
+        // as a BMP one does (U+263A ☺ = 9786). (A small-int SINK that can't hold it is a type-fit error,
+        // which real Zig rejects too; the literal itself is faithful.)
+        var cs = EmitZig(
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "pub fn main() u8 { _ = printf(\"%d %d\", @as(c_int, '\\u{1F600}'), @as(c_int, '\\u{263A}')); return 0; }\n");
+        cs.ShouldContain("128512");   // U+1F600 codepoint (non-BMP)
+        cs.ShouldContain("9786");     // U+263A codepoint (BMP)
+    }
+
+    [Fact]
     public void Lowers_escaped_quote_and_unicode_escape_in_a_string()
     {
         // `\"` is an escaped quote (the old `"[^"]*"` rule truncated there); `\u{NNNN}` expands to
         // its UTF-8 bytes — U+2764 (❤) = E2 9D A4, which (being > 0x7F) routes to the byte-array path.
+        // A non-BMP codepoint (U+1F600 😀 = F0 9F 98 80, 4 bytes) also works: `char.ConvertFromUtf32`
+        // yields the surrogate-pair string that UTF-8 then encodes as four bytes — no special handling.
         var cs = EmitZig(
             "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
-            "pub fn main() u8 { _ = printf(\"a\\\"b\"); _ = printf(\"\\u{2764}\"); return 0; }\n");
-        cs.ShouldContain("a\\\"b");               // the escaped quote survived into the u8 literal
-        cs.ShouldContain("0xE2, 0x9D, 0xA4");     // U+2764 UTF-8 bytes
+            "pub fn main() u8 { _ = printf(\"a\\\"b\"); _ = printf(\"\\u{2764}\\u{1F600}\"); return 0; }\n");
+        cs.ShouldContain("a\\\"b");                            // the escaped quote survived into the u8 literal
+        cs.ShouldContain("0xE2, 0x9D, 0xA4");                  // U+2764 UTF-8 bytes (BMP)
+        cs.ShouldContain("0xF0, 0x9F, 0x98, 0x80");            // U+1F600 UTF-8 bytes (non-BMP, surrogate-safe)
     }
 
     [Fact]

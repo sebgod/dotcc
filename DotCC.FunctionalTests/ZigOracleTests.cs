@@ -667,15 +667,18 @@ public sealed class ZigOracleTests
             "    const c: u8 = 0b0_100;\n" +   // 4
             "    return a + b + c;\n" +
             "}\n", 42, "" },
-        // A hex float `0x1.8p3` (= 12.0, no C# syntax → decimal) and an underscored decimal float.
+        // A hex float `0x1.8p3` (= 12.0, no C# syntax → decimal), an underscored decimal float, and
+        // exponent-only floats with no fraction dot (`1e3`, `4E2` — Zig allows them; both e/E spellings).
         new object[] { "lexer_floats",
             "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
             "pub fn main() u8 {\n" +
             "    const hf: f64 = 0x1.8p3;\n" + // 12.0
             "    const df: f64 = 1_5.0;\n" +   // 15.0
-            "    _ = printf(\"%.1f %.1f\\n\", hf, df);\n" +
+            "    const ef: f64 = 1e3;\n" +     // 1000.0 (exponent-only, lowercase e)
+            "    const eg: f64 = 4E2;\n" +     // 400.0  (exponent-only, uppercase E)
+            "    _ = printf(\"%.1f %.1f %.1f %.1f\\n\", hf, df, ef, eg);\n" +
             "    return 42;\n" +
-            "}\n", 42, "12.0 15.0" },
+            "}\n", 42, "12.0 15.0 1000.0 400.0" },
         // Escaped quote `\"`, a `\u{41}` unicode escape ('A'), and a `\\`-prefixed multiline string
         // (lines joined by `\n`, no trailing newline). stdout: q="x" u=A / a / b.
         new object[] { "lexer_strings",
