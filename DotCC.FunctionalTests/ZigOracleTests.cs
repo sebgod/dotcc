@@ -102,6 +102,17 @@ public sealed class ZigOracleTests
             "    _ = printf(\"r=%d\\n\", r);\n" +
             "    return @intCast(r);\n" +
             "}\n", 20, "r=20" },
+        // Fn-pointer GLOBALS — typed + INFERRED — that FORWARD-REFERENCE a function declared later
+        // (functions are registered before globals). handler(10)=20, alias(11)=22 → 42.
+        new object[] { "fn_ptr_global",
+            "extern fn printf(format: [*c]const u8, ...) c_int;\n" +
+            "const handler: *const fn (i32) i32 = &laterFn;\n" +
+            "const alias = &laterFn;\n" +
+            "fn laterFn(x: i32) i32 { return x * 2; }\n" +
+            "pub fn main() u8 {\n" +
+            "    _ = printf(\"%d %d\\n\", handler(10), alias(11));\n" +
+            "    return @intCast(handler(10) + alias(11));\n" +
+            "}\n", 42, "20 22" },
         // A user-constructed custom std.mem.Allocator (Milestone W, part 1b): a hand-written bump
         // allocator whose state lives behind the opaque ctx, bound to the real 4-fn VTable
         // (alloc/resize/remap/free, each carrying std.mem.Alignment + []u8 + ret_addr). main builds
