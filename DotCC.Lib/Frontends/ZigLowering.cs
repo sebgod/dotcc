@@ -183,6 +183,23 @@ internal sealed partial class ZigLowering
     /// lowering, mirroring how <see cref="_currentFnRet"/> tracks the active return type.</summary>
     private string? _currentContainer;
 
+    /// <summary>The name of the function whose body is currently being lowered (pass 2) — the prefix
+    /// for an in-function container's mangled IR type name (wall-plan W2, <c>&lt;fn&gt;__&lt;P&gt;</c>).
+    /// Set/cleared around each body in <see cref="LowerFnBody"/>.</summary>
+    private string _currentFnName = "";
+
+    /// <summary>Mangled IR type names of every in-function container registered so far (wall-plan W2)
+    /// — the dup guard, since <see cref="IrBuilder.RegisterStructType"/> silently no-ops a repeat name
+    /// (so a redeclared local would otherwise miscompile). Global for the build: a mangled name is
+    /// unique per (function, container), and the IR type it names is emitted once program-wide.</summary>
+    private readonly HashSet<string> _localContainers = new(System.StringComparer.Ordinal);
+
+    /// <summary>Plain-name → previous <see cref="_containerTypes"/> binding shadowed by an in-function
+    /// container in the CURRENT body (wall-plan W2), restored at body exit so a local <c>const Point =
+    /// struct{…}</c> does NOT leak its type into a sibling function (the mangled IR type stays
+    /// registered globally — this only scopes the plain-name alias). Reset per function.</summary>
+    private readonly List<(string Name, CType? Prev)> _localContainerShadows = new();
+
     /// <summary>Per container name, each <c>const Self = @This();</c> alias → the container's own
     /// type. A container-scoped self alias is the ubiquitous Zig idiom for naming the receiver type
     /// inside its methods without repeating the container name (any alias name works, not just

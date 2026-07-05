@@ -117,6 +117,27 @@ methods beyond the curated set error loudly (resolver behavior, as today).
   reject loudly (oracle-aligned).
 
 ### W2 — in-function containers (S/M — the already-named cut, now load-bearing)
+
+> ✅ **DONE 2026-07-06** (branch `feat/zig-in-fn-containers`). Shipped struct-only,
+> fields-only. Grammar: ONE new production `Stmt -> ContainerDecl` — conflict-free
+> (the `const IDENT = struct/enum/…` split already resolves at the Decl level; the
+> shared post-`=` productions resolve it identically under Stmt). Lowering:
+> `LowerLocalStruct` registers the layout on the fly during pass-2 body lowering
+> under a function-mangled IR name (`<fn>__<P>`) — unique per (function, container),
+> so two bodies' like-named-but-differently-shaped locals never collide (RegisterStructType
+> is idempotent-by-name, so a self-guard `_localContainers` also rejects a real
+> redeclaration loudly). The plain name → mangled type goes into `_containerTypes`
+> **shadow-saved** (`_localContainerShadows`) and restored at body exit, so a local
+> `Point` does NOT leak over a top-level `Point` in a sibling function (the one flat-map
+> leak that WOULD be a miscompile of a valid program — fixed here, a down-payment on
+> W3's scoping obligation). Self-referential fields (`next: *P`) resolve (mapping
+> installed before the layout). Emits no runtime decl. **V1 cuts (loud):** local
+> enum/union (struct only), method / const member in a local struct (need the pass-1
+> free-function / container-const machinery). Validation: unit 1473/1473 (+6
+> `ZigInFnContainerTests`), zig oracle 153/153 (new `in-fn-struct`, byte-identical vs
+> real zig 0.17: `p=3,4 area=42 sum=60`), functional 215/0, `examples/zig-in-fn-struct/`.
+> This is the reify-a-struct primitive W4 calls.
+
 `const Point = struct { x: i32, y: i32 };` inside a fn body → register the
 container into the module type section ON THE FLY during body lowering (today
 only the top-level pre-registration pass exists). Mangle on collision

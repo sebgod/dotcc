@@ -78,6 +78,17 @@ internal sealed partial class ZigLowering
             case Zig.VarDeclThreadLocal:
                 throw new IrUnsupportedException(
                     "'threadlocal' is only allowed on a container-level `var` (a function-local threadlocal is rejected by real zig too)");
+            // An in-function container decl (wall-plan W2): `const P = struct { … };` inside a body.
+            // Registered on the fly into the module type section (top-level containers pre-register in
+            // pass 0; a local one is first seen here mid-pass-2) and emits NO runtime statement. V1:
+            // struct only (all three layouts); a local enum/union is a loud cut.
+            case Zig.StructDecl s:       return LowerLocalStruct(Tok(s.Arg1), s.Arg5, AggregateLayout.Default);
+            case Zig.StructDeclEmpty s:  return LowerLocalStruct(Tok(s.Arg1), null,   AggregateLayout.Default);
+            case Zig.ExternStructDecl s: return LowerLocalStruct(Tok(s.Arg1), s.Arg6, AggregateLayout.Sequential);
+            case Zig.PackedStructDecl s: return LowerLocalStruct(Tok(s.Arg1), s.Arg6, AggregateLayout.Packed);
+            case Zig.EnumDecl or Zig.EnumDeclTyped or Zig.UnionDeclEnum or Zig.UnionDeclTagged or Zig.UnionDeclUntagged:
+                throw new IrUnsupportedException(
+                    "zig: an in-function `enum`/`union` declaration is not supported yet (wall-plan W2 is struct-only); declare it at top/container level");
             // `const/var x: T align(N)/linksection(".s") = e;` (Milestone R, part 5) — the modifiers
             // are a no-op on the managed target, so lower exactly like the unmodified typed decl
             // (the DeclMods arg is ignored). RhsExpr is one slot right of the Type (DeclMods between).

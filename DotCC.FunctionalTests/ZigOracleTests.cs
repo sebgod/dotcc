@@ -1973,6 +1973,30 @@ public sealed class ZigOracleTests
             "    }\n" +
             "}\n", 0,
             "sum=42\nacc=43\nmaybe=7" },
+
+        // In-function container declarations (wall-plan W2) — a `const P = struct { … };` inside a
+        // body. Exercises a local struct + `.{…}` init + field reads in main, two functions each
+        // declaring a same-named-but-differently-shaped local `Rect` (distinct mangled IR types in
+        // dotcc, distinct scopes in zig), all fields-only. dotcc registers each on the fly under a
+        // function-mangled name; matching real zig's stdout proves the layouts + scoping end-to-end.
+        new object[] { "in-fn-struct",
+            "extern fn printf(fmt: [*:0]const u8, ...) c_int;\n" +
+            "fn area() i32 {\n" +
+            "    const Rect = struct { w: i32, h: i32 };\n" +
+            "    const r: Rect = .{ .w = 6, .h = 7 };\n" +
+            "    return r.w * r.h;\n" +
+            "}\n" +
+            "fn sum() i32 {\n" +
+            "    const Rect = struct { a: i32, b: i32, c: i32 };\n" +
+            "    const r: Rect = .{ .a = 10, .b = 20, .c = 30 };\n" +
+            "    return r.a + r.b + r.c;\n" +
+            "}\n" +
+            "pub fn main() void {\n" +
+            "    const Point = struct { x: i32, y: i32 };\n" +
+            "    const p: Point = .{ .x = 3, .y = 4 };\n" +
+            "    _ = printf(\"p=%d,%d area=%d sum=%d\\n\", p.x, p.y, area(), sum());\n" +
+            "}\n", 0,
+            "p=3,4 area=42 sum=60" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
