@@ -149,6 +149,8 @@ internal sealed partial class ZigLowering
     private void LowerFnBody(Symbol funcSym, List<(string name, CType type)> paramInfos, Item body)
     {
         _currentFnRet = (funcSym.Type as CType.Func)?.Return;
+        _currentFnName = funcSym.Name;   // the mangle prefix for an in-function container (wall-plan W2)
+        _localContainerShadows.Clear();  // per-function: local containers scope to this body
         _currentFnHasErrdefer = false;   // set lazily as `errdefer`s are encountered (Milestone H)
         // The declared error set for the foreign-error return check (Milestone X, part 3); resolved
         // NOW (pass 2 — all `const E = error{…}` set decls are processed by here). Null (unconstrained)
@@ -170,6 +172,16 @@ internal sealed partial class ZigLowering
         // function's names (BeginFunction cleared `_usedNames`; ExitScope would not).
         blk = PromoteStackSlices(blk);
         _symbols.ExitScope();
+        // Un-shadow: restore any `_containerTypes` plain-name binding an in-function container
+        // overwrote (wall-plan W2), so a local `const Point = struct{…}` doesn't leak into the next
+        // function. Reverse order handles a name shadowed twice in one body. The mangled IR type
+        // stays registered globally (it must — the backend emits it once).
+        for (int i = _localContainerShadows.Count - 1; i >= 0; i--)
+        {
+            var (nm, prev) = _localContainerShadows[i];
+            if (prev is { } p) { _containerTypes[nm] = p; } else { _containerTypes.Remove(nm); }
+        }
+        _localContainerShadows.Clear();
 
         _ir.Functions.Add(new FuncDef(funcSym, paramSyms, blk, false));
     }
@@ -191,6 +203,41 @@ internal sealed partial class ZigLowering
             fields.Add(new StructField(Tok(f.Arg0), LowerType(f.Arg2)));
         }
         _ir.RegisterStructType(name, fields, isUnion: false, layout);
+    }
+
+    /// <summary>Register an in-function <c>const P = struct { … };</c> (wall-plan W2) on the fly
+    /// during body lowering. Top-level containers pre-register in pass 0; a LOCAL one is first seen
+    /// here, so it registers its field layout into the shared IR aggregate table under a
+    /// function-mangled name (<c>&lt;fn&gt;__&lt;P&gt;</c>) — unique per (function, container), so two
+    /// bodies' like-named locals never collide in the IR — and maps the PLAIN name to that type in
+    /// <see cref="_containerTypes"/> (shadow-saved, restored at body exit) so the rest of the body
+    /// resolves <c>P</c> / <c>.{ … }</c> / <c>p.field</c> exactly like a top-level struct. Emits no
+    /// statement (a type decl is not runtime code). V1: fields only — a method / <c>const</c> member
+    /// needs the pass-1 free-function / container-const machinery that only the top-level passes run,
+    /// so it's a loud cut.</summary>
+    private CStmt LowerLocalStruct(string name, Item? membersItem, AggregateLayout layout)
+    {
+        var (fields, methods, consts) = membersItem is { } m
+            ? SplitMembers(m)
+            : (new List<Item>(), new List<Item>(), new List<Item>());
+        if (methods.Count > 0 || consts.Count > 0)
+        {
+            throw new IrUnsupportedException(
+                $"zig: an in-function container (`{name}`) is fields-only in V1 (wall-plan W2) — a method "
+                + "or `const` member needs the top-level container machinery; declare it at top/container level");
+        }
+        var mangled = _currentFnName.Length > 0 ? $"{_currentFnName}__{name}" : name;
+        if (!_localContainers.Add(mangled))
+        {
+            throw new IrUnsupportedException($"zig: duplicate in-function container `{name}` in `{_currentFnName}`");
+        }
+        // Shadow the plain name → the mangled type BEFORE registering the layout, so a
+        // self-referential field (`next: *P`) resolves; the previous binding (a top-level type of the
+        // same name, or nothing) is restored at body exit (see LowerFnBody).
+        _localContainerShadows.Add((name, _containerTypes.TryGetValue(name, out var prev) ? prev : null));
+        _containerTypes[name] = new CType.Named(mangled);
+        RegisterStruct(mangled, fields, layout);
+        return new Seq(new List<CStmt>());   // no runtime decl — mirrors a top-level container
     }
 
     /// <summary>Split a struct container body (<c>FieldDecls</c> = a list of <c>Member</c>) into

@@ -525,6 +525,14 @@ productions:
       - { lhs: Stmt, rhs: ['return', RhsExpr, ';'],         action: stmtReturn }
       - { lhs: Stmt, rhs: ['return', ';'],                   action: stmtReturnVoid }
       - { lhs: Stmt, rhs: [VarDecl] }
+      # An in-function container decl (wall-plan W2): `const P = struct { … };` inside a body.
+      # ContainerDecl is otherwise a top-level `Decl` (line ~277); admitting it here too lets a
+      # local struct/enum/union parse. CONFLICT-FREE for the same reason the Decl-level pair is:
+      # after `const IDENT =`, the token `struct`/`enum`/`union`/`extern`/`packed` selects
+      # ContainerDecl while anything else drives VarDecl's RhsExpr — the split lives in the shared
+      # productions after `=`, so it resolves identically under Stmt. (V1 lowers struct only; a local
+      # enum/union is a loud cut, and methods/const members inside a local struct too.)
+      - { lhs: Stmt, rhs: [ContainerDecl] }
       # `comptime var i = …;` / `comptime const i = …;` — a compile-time value declaration (Milestone
       # T, part 3, for `inline while`). The lowering tracks the value at lowering time and emits NO
       # runtime decl; references substitute the current value as a literal. After `comptime`, the
