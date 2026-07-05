@@ -130,14 +130,12 @@ internal sealed partial class ZigLowering
 
             // `const List = std.ArrayList(i32);` — a curated generic std type in value position; the
             // CallArgs resolves through LowerType exactly as in type position (wall-plan W0).
-            case Zig.CallArgs ca when TryResolveStdPath(ca.Arg0, out var gp) && gp == "std.ArrayList":
+            case Zig.CallArgs ca when TryResolveStdPath(ca.Arg0, out var gp) && StdGenericTypes.ContainsKey(gp):
                 type = LowerType(rhs);
                 return true;
 
             // `const A = std.mem.Allocator;` — a dotted std TYPE path aliased to a name.
-            case Zig.Field when TryResolveStdPath(rhs, out var fp)
-                && fp is "std.mem.Allocator" or "std.mem.Allocator.VTable" or "std.mem.Alignment"
-                      or "std.heap.FixedBufferAllocator" or "std.heap.ArenaAllocator":
+            case Zig.Field when TryResolveStdPath(rhs, out var fp) && StdTypes.ContainsKey(fp):
                 type = LowerStdType(rhs);
                 return true;
 
@@ -243,9 +241,8 @@ internal sealed partial class ZigLowering
         {
             return true;
         }
-        if (TryResolveStdPath(expr, out var path) && (path is "std.heap.page_allocator" or "std.heap.c_allocator"))
+        if (TryResolveStdPath(expr, out var path) && StdAllocatorValues.TryGetValue(path, out kind))
         {
-            kind = AllocKind.CHeap;
             return true;
         }
         kind = AllocKind.CHeap;
@@ -363,13 +360,14 @@ internal sealed partial class ZigLowering
         // `@TypeOf(expr)` in TYPE position (wall-plan W1) — e.g. `var y: @TypeOf(x) = x;` or a
         // param/return annotation. The operand's synthesized type; unevaluated (see TypeOfBuiltin).
         Zig.BuiltinCall b when Tok(b.Arg0) == "@TypeOf" => TypeOfBuiltin(b.Arg2),
-        // `std.ArrayList(T)` in TYPE position (wall-plan W0) — the curated generic std type.
-        // A call parses in type position via the ordinary Suffix chain (Type → ErrUnion →
-        // Suffix → callArgs), so NO grammar change: resolve the callee's std path and
-        // instantiate the curated CType.ZigList. A composed form (`*std.ArrayList(T)`,
-        // `?std.ArrayList(T)`, a fn param/return) rides the surrounding Type productions.
-        Zig.CallArgs ca when TryResolveStdPath(ca.Arg0, out var gp) && gp == "std.ArrayList"
-            => new CType.ZigList(LowerSingleTypeArg(ca.Arg2, "std.ArrayList")),
+        // A curated GENERIC std type in TYPE position (`std.ArrayList(T)`, wall-plan W0). A
+        // call parses in type position via the ordinary Suffix chain (Type → ErrUnion →
+        // Suffix → callArgs), so NO grammar change: resolve the callee's std path against
+        // the StdGenericTypes registry and instantiate over the lowered element. A composed
+        // form (`*std.ArrayList(T)`, `?std.ArrayList(T)`, a fn param/return) rides the
+        // surrounding Type productions.
+        Zig.CallArgs ca when TryResolveStdPath(ca.Arg0, out var gp) && StdGenericTypes.TryGetValue(gp, out var makeGeneric)
+            => makeGeneric(LowerSingleTypeArg(ca.Arg2, gp)),
         _ => throw new IrUnsupportedException("zig type: " + (type.Content?.GetType().Name ?? "null")),
     };
 
@@ -386,26 +384,58 @@ internal sealed partial class ZigLowering
         return LowerType(args[0]);
     }
 
-    /// <summary>Lower a dotted std type (Milestone F): <c>std.mem.Allocator</c> → the runtime
-    /// <see cref="CType.Allocator"/> fat pointer; <c>std.heap.FixedBufferAllocator</c> → the
-    /// concrete <see cref="CType.Named"/> bump allocator. Any other dotted type errors — either a
-    /// chain not rooted at a std import (so not a known type at all) or an unmodeled std path.</summary>
+    // ---- the curated-std registry ------------------------------------------
+    //
+    // ONE row per modeled std path, consulted by every position that resolves a
+    // dotted std path (type position, type-alias RHS, value position, the
+    // known-allocator predicate) — so adding a curated path is a table edit, not a
+    // hunt across dispatch ladders, and the "not modeled" error messages list the
+    // curated set straight from the table keys. Bespoke METHOD-call handling
+    // (the std.mem helper cluster, FixedBufferAllocator/ArenaAllocator .init, the
+    // ArrayList member set) stays hand-written in LowerMethodCall — each of those
+    // is genuine lowering logic, not a name→node mapping.
+
+    /// <summary>Non-generic std paths that resolve in TYPE position → the CType factory.
+    /// (The runtime carrier types — VTable / Alignment / FBA / Arena — live in ZigAlloc.cs.)</summary>
+    private static readonly Dictionary<string, System.Func<CType>> StdTypes = new(System.StringComparer.Ordinal)
+    {
+        ["std.mem.Allocator"] = static () => new CType.Allocator(),
+        // A user-constructed custom allocator (Milestone W, part 1b): the vtable struct type
+        // and the alignment a vtable function receives.
+        ["std.mem.Allocator.VTable"] = static () => new CType.Named(VTableTypeName),
+        ["std.mem.Alignment"] = static () => new CType.Named(AlignmentTypeName),
+        ["std.heap.FixedBufferAllocator"] = static () => new CType.Named(FbaTypeName),
+        ["std.heap.ArenaAllocator"] = static () => new CType.Named(ArenaTypeName),
+    };
+
+    /// <summary>GENERIC std paths — spelled as a CALL with one type argument in type position
+    /// (<c>std.ArrayList(i32)</c>, wall-plan W0) → the factory over the lowered element type.</summary>
+    private static readonly Dictionary<string, System.Func<CType, CType>> StdGenericTypes = new(System.StringComparer.Ordinal)
+    {
+        ["std.ArrayList"] = static elem => new CType.ZigList(elem),
+    };
+
+    /// <summary>Std paths that are a VALUE — the statically-known default allocators, each →
+    /// its <see cref="AllocKind"/> (the devirtualization discriminator; both rows today are the
+    /// C heap, so a value use materializes <c>ZigAlloc.CHeap()</c>).</summary>
+    private static readonly Dictionary<string, AllocKind> StdAllocatorValues = new(System.StringComparer.Ordinal)
+    {
+        ["std.heap.page_allocator"] = AllocKind.CHeap,
+        ["std.heap.c_allocator"] = AllocKind.CHeap,
+    };
+
+    /// <summary>Lower a dotted std type (Milestone F): a <see cref="StdTypes"/> row — e.g.
+    /// <c>std.mem.Allocator</c> → the runtime <see cref="CType.Allocator"/> fat pointer,
+    /// <c>std.heap.FixedBufferAllocator</c> → the concrete <see cref="CType.Named"/> bump
+    /// allocator. Any other dotted type errors — either a chain not rooted at a std import
+    /// (so not a known type at all) or an unmodeled std path.</summary>
     private CType LowerStdType(Item f)
     {
         if (TryResolveStdPath(f, out var path))
         {
-            return path switch
-            {
-                "std.mem.Allocator" => new CType.Allocator(),
-                // A user-constructed custom allocator (Milestone W, part 1b): the vtable struct type
-                // and the alignment a vtable function receives. Both → runtime types in ZigAlloc.cs.
-                "std.mem.Allocator.VTable" => new CType.Named(VTableTypeName),
-                "std.mem.Alignment" => new CType.Named(AlignmentTypeName),
-                "std.heap.FixedBufferAllocator" => new CType.Named(FbaTypeName),
-                "std.heap.ArenaAllocator" => new CType.Named(ArenaTypeName),
-                _ => throw new IrUnsupportedException(
-                    $"zig type `{path}` is not modeled (std types: std.mem.Allocator, std.mem.Allocator.VTable, std.mem.Alignment, std.heap.FixedBufferAllocator, std.heap.ArenaAllocator)"),
-            };
+            if (StdTypes.TryGetValue(path, out var make)) { return make(); }
+            throw new IrUnsupportedException(
+                $"zig type `{path}` is not modeled (std types: {string.Join(", ", StdTypes.Keys)})");
         }
         throw new IrUnsupportedException(
             $"zig type: a dotted type `{Tok(((Zig.Field)f.Content!).Arg2)}` that is not a modeled std path");
