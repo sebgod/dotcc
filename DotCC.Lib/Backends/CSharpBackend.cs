@@ -541,7 +541,14 @@ internal sealed class CSharpBackend
                 EmitDeclStmt(tmp, d, pad);
                 _canHoist = prev;
                 FlushPending(sb, pad);
+                // C23 `[[maybe_unused]]` → bracket the local(s) with a scoped
+                // warning suppression: CS0168 (declared, never used) + CS0219
+                // (assigned, never used). The faithful lowering of "don't warn if
+                // this stays unused" — the hoisted side effects above are NOT
+                // wrapped (they aren't the unused local).
+                if (d.MaybeUnused) { sb.Append(pad).Append("#pragma warning disable CS0168, CS0219 // C23 maybe_unused\n"); }
                 sb.Append(tmp);
+                if (d.MaybeUnused) { sb.Append(pad).Append("#pragma warning restore CS0168, CS0219\n"); }
                 break;
             }
             case ArrayDecl a:
