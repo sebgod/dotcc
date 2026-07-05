@@ -50,6 +50,24 @@ used where WE author the body (curated runtime types, W0).
 ## Milestones
 
 ### W0 — curated `std.ArrayList(T)` (S/M, independent — the appetizer, no wall-breaking needed)
+
+> ✅ **DONE 2026-07-05** (branch `feat/zig-arraylist`). Shipped as planned with ONE
+> plan correction: the pinned zig 0.17 has ONLY the **unmanaged** API — `init(alloc)`
+> no longer exists (probed: "no member named 'init'"; zig 0.15 re-pointed
+> `std.ArrayList` at the unmanaged variant) — so the curated surface is `.empty` +
+> per-call allocator (`append(alloc, v)`, `deinit(alloc)`), `pop() → ?T`, `items`,
+> `capacity`, `appendSlice`, `clearRetainingCapacity`; the managed API is rejected BY
+> NAME with the migration hint. NO grammar change (the type-position call parses via
+> `Type → ErrUnion → Suffix → callArgs`); `CType.ZigList(Element)` + `ZigListCall` IR
+> (instance methods — a C# struct method on an lvalue mutates in place) + the
+> `ZigList<T>` runtime. `capacity`'s VALUE is a documented non-observable (dotcc
+> doubles; zig's curve differs — 16 vs 33). GOTCHA: the OOM literal must be
+> Int-typed (a UShort LitInt renders `1u` → CS1503 against `ushort oom`).
+> Validation: unit 1458/1458 (+12), zig oracle 151/151 LOCALLY incl. the new
+> `arraylist` differential (byte-identical), functional 215/0,
+> `examples/zig-arraylist/`. Cuts: pointer-to-list receivers, `insert`/`remove`/
+> `toOwnedSlice`/… (loud, demand-driven).
+
 `std.ArrayList(i32)` via the curated-paths resolver → a hand-written C# generic
 runtime type (`ZigList<T>`, unmanaged T), allocator-bridged like ZigAlloc:
 `init(alloc)` stores the fat-pointer allocator, `deinit`/`append`/`appendSlice`/

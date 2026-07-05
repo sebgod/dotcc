@@ -240,6 +240,19 @@ public sealed record ArrayByValReturn(CExpr Source, CType Element, int Count) : 
 /// never targets, leaves it on the default throw like <see cref="SliceNew"/>).</summary>
 public sealed record ZigMemCall(string Method, CType Element, IReadOnlyList<CExpr> Args) : CExpr;
 
+/// <summary>A curated <c>std.ArrayList(T)</c> member call (wall-plan W0), rendered as
+/// <c>{Recv}.{Method}(args)</c> — an INSTANCE method on the runtime <c>ZigList&lt;T&gt;</c>
+/// value type, so calling it on an lvalue receiver mutates the list in place (zig's
+/// <c>*Self</c> methods on an addressable list). The generic element type rides the
+/// receiver's <c>ZigList&lt;T&gt;</c> C# type — no explicit type argument at the call site.
+/// One node covers <c>append</c>/<c>appendSlice</c> (→ <see cref="CExpr.Type"/>
+/// <c>ErrorUnion(void)</c>, the OOM code appended by the lowering as a trailing arg),
+/// <c>pop</c> (→ <c>Optional(T)</c>), and <c>deinit</c>/<c>clearRetainingCapacity</c>
+/// (→ <c>void</c>). Zig-lowering / C#-target only (the C front-end never produces it; the
+/// wat backend, which Zig never targets, leaves it on the default throw like
+/// <see cref="ZigMemCall"/>).</summary>
+public sealed record ZigListCall(CExpr Recv, string Method, IReadOnlyList<CExpr> Args) : CExpr;
+
 /// <summary>The stack-value replacement for a promoted <c>malloc</c> — the
 /// malloc→stack peephole rewrites <c>T* p = (T*)malloc(sizeof(T))</c> (used only
 /// via <c>-&gt;</c> and freed, never escaping) to <c>T p = new T()</c>. Codegen

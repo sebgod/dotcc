@@ -1651,6 +1651,15 @@ internal sealed partial class ZigLowering
                 return BuildVoidVariant(uinfo, Tok(el.Arg1));
             case Zig.EnumLit el when sink?.Unqualified is CType.Enum en:  // '.' IDENT
                 return ResolveEnumLit(Tok(el.Arg1), en);
+            // `.empty` at a curated `std.ArrayList(T)` sink (wall-plan W0) — zig's decl literal
+            // for the empty unmanaged list is exactly `default`: a null pointer with zero
+            // length/capacity (the first growing call allocates). Any other decl literal on a
+            // list sink is an unmodeled member — clear error, never a silent zero.
+            case Zig.EnumLit el when sink?.Unqualified is CType.ZigList:
+                return Tok(el.Arg1) == "empty"
+                    ? new DefaultLit { Type = sink }
+                    : throw new IrUnsupportedException(
+                        $"zig std.ArrayList has no modeled decl literal `.{Tok(el.Arg1)}` (only `.empty`)");
             case Zig.AnonStructInit:
             case Zig.AnonStructInitEmpty:
                 return LowerStructInit(expr, sink);
@@ -4618,6 +4627,20 @@ internal sealed partial class ZigLowering
                         _ => throw new IrUnsupportedException($"slice has no field '{fieldName}' (only .len / .ptr)"),
                     };
                 }
+                // Curated `std.ArrayList(T)` fields (wall-plan W0): `items` — the occupied
+                // prefix as a mutable `[]T` (subscript / `.len` / `for (list.items) |x|` all
+                // ride the ordinary slice lowering on the result) — and `capacity`. The runtime
+                // ZigList<T> exposes them as `Items` / `Cap`; anything else is a clear error.
+                if (structExpr.Type.Unqualified is CType.ZigList zlist)
+                {
+                    return fieldName switch
+                    {
+                        "items" => new Member(structExpr, "Items", arrow) { Type = new CType.Slice(zlist.Element) },
+                        "capacity" => new Member(structExpr, "Cap", arrow) { Type = CType.ULong, IsLValue = true },
+                        _ => throw new IrUnsupportedException(
+                            $"zig std.ArrayList has no modeled field '{fieldName}' (only .items / .capacity)"),
+                    };
+                }
                 // Fixed-array `.len` — a `[N]T`'s length is the comptime-known element count N
                 // (Zig). The array lowered to a pointer (no runtime length field), so fold to a
                 // literal. A fixed array has no `.ptr` (that's a slice / many-item-pointer field —
@@ -4998,6 +5021,17 @@ internal sealed partial class ZigLowering
             return LowerStdMemCall(methodName, argItems);
         }
 
+        // A member call on the `std.ArrayList(T)` TYPE (`std.ArrayList(i32).init(alloc)`) is
+        // the pre-0.15 MANAGED API, which no longer exists in the pinned zig — reject it by
+        // name with the migration path (the generic std-path error would only say `std`).
+        if (fld.Arg0.Content is Zig.CallArgs mca && TryResolveStdPath(mca.Arg0, out var mlPath) && mlPath == "std.ArrayList")
+        {
+            throw new IrUnsupportedException(
+                "zig std.ArrayList's managed API (`std.ArrayList(T).init(alloc)` + allocator-less calls) was removed in zig 0.15 — "
+                + "use the unmanaged API: `var list: std.ArrayList(T) = .empty;` with a per-call allocator "
+                + "(`try list.append(alloc, v)`, `list.deinit(alloc)`)");
+        }
+
         // --- Zig allocators (Milestone F), before the generic method dispatch ---
         // `std.heap.FixedBufferAllocator.init(buf)` — a static call on the std FBA type.
         if (methodName == "init" && TryResolveStdPath(fld.Arg0, out var basePath) && basePath == "std.heap.FixedBufferAllocator")
@@ -5074,6 +5108,15 @@ internal sealed partial class ZigLowering
             return new Call("ZigAlloc.ArenaDeinit", new List<CExpr> { arenaAddr },
                 new List<CType> { new CType.Pointer(new CType.Named(ArenaTypeName)) }, null) { Type = CType.Void };
         }
+        // Curated `std.ArrayList(T)` member calls (wall-plan W0) — routed on the receiver's
+        // ZigList type before the generic container dispatch (a runtime type, not a
+        // Zig-declared container). Mutating methods are INSTANCE methods on the runtime
+        // struct, so calling on an lvalue receiver mutates in place (zig's `*Self` methods);
+        // the allocator is an explicit per-call argument (the unmanaged API, zig 0.15+).
+        if (recv.Type.Unqualified is CType.ZigList listTy)
+        {
+            return LowerZigListCall(recv, listTy, methodName, argItems);
+        }
         if (!TryContainerName(recv.Type, out var container))
         {
             throw new IrUnsupportedException(
@@ -5091,6 +5134,93 @@ internal sealed partial class ZigLowering
         }
         var receiver = AdjustReceiver(recv, mfn.Params[0]);
         return BuildCall(msym, argItems, receiver);
+    }
+
+    /// <summary>Lower a curated <c>std.ArrayList(T)</c> member call (wall-plan W0) to a
+    /// <see cref="ZigListCall"/> on the runtime <c>ZigList&lt;T&gt;</c> instance. The unmanaged
+    /// API only (zig 0.15+ re-pointed <c>std.ArrayList</c> at it): every growing call takes the
+    /// allocator explicitly, <c>append</c>/<c>appendSlice</c> return <c>!void</c> (so <c>try</c>
+    /// composes, <c>error.OutOfMemory</c> on exhaustion), <c>pop</c> returns <c>?T</c>. An
+    /// unmodeled member is a clear error naming the curated set — never a silent drop.</summary>
+    private CExpr LowerZigListCall(CExpr recv, CType.ZigList listTy, string methodName, IReadOnlyList<Item> argItems)
+    {
+        var elem = listTy.Element;
+        switch (methodName)
+        {
+            case "append":
+            {
+                RequireListArgs(methodName, argItems, 2, "(alloc, item)");
+                var a = LowerListAllocatorArg(methodName, argItems[0]);
+                var item = LowerExprSink(argItems[1], elem);   // result-located at the element type
+                return new ZigListCall(recv, "Append", new List<CExpr> { a, item, OomLit() })
+                { Type = new CType.ErrorUnion(CType.Void) };
+            }
+            case "appendSlice":
+            {
+                RequireListArgs(methodName, argItems, 2, "(alloc, slice)");
+                var a = LowerListAllocatorArg(methodName, argItems[0]);
+                // `&arr` / a `[N]T` value coerces to a slice exactly as at any other slice sink.
+                var s = CoerceToSlice(LowerExpr(argItems[1]), new CType.Slice(elem));
+                return new ZigListCall(recv, "AppendSlice", new List<CExpr> { a, s, OomLit() })
+                { Type = new CType.ErrorUnion(CType.Void) };
+            }
+            case "pop":
+            {
+                RequireListArgs(methodName, argItems, 0, "()");
+                return new ZigListCall(recv, "Pop", new List<CExpr>()) { Type = new CType.Optional(elem) };
+            }
+            case "deinit":
+            {
+                RequireListArgs(methodName, argItems, 1, "(alloc)");
+                var a = LowerListAllocatorArg(methodName, argItems[0]);
+                return new ZigListCall(recv, "Deinit", new List<CExpr> { a }) { Type = CType.Void };
+            }
+            case "clearRetainingCapacity":
+            {
+                RequireListArgs(methodName, argItems, 0, "()");
+                return new ZigListCall(recv, "ClearRetainingCapacity", new List<CExpr>()) { Type = CType.Void };
+            }
+            default:
+                throw new IrUnsupportedException(
+                    $"zig std.ArrayList has no modeled member '{methodName}' (curated: append, appendSlice, pop, deinit, clearRetainingCapacity, items, capacity)");
+        }
+    }
+
+    /// <summary>Arity check for a curated list member — a clear error naming the expected shape.</summary>
+    private static void RequireListArgs(string method, IReadOnlyList<Item> argItems, int count, string shape)
+    {
+        if (argItems.Count != count)
+        {
+            throw new IrUnsupportedException(
+                $"zig std.ArrayList `.{method}{shape}` takes {count} argument(s); got {argItems.Count}");
+        }
+    }
+
+    /// <summary>Lower the explicit allocator argument of an unmanaged-API list call. A std
+    /// default path (<c>std.heap.c_allocator</c>) materializes a runtime <c>Allocator</c> via
+    /// the ordinary expression lowering; anything not Allocator-typed is a clear error (the
+    /// managed pre-0.15 API — <c>init(alloc)</c> + allocator-less calls — is NOT modeled,
+    /// matching the pinned zig, which no longer has it).</summary>
+    private CExpr LowerListAllocatorArg(string method, Item arg)
+    {
+        var a = LowerExpr(arg);
+        if (a.Type.Unqualified is not CType.Allocator)
+        {
+            throw new IrUnsupportedException(
+                $"zig std.ArrayList `.{method}` expects a std.mem.Allocator as its first argument, got {a.Type.Describe()}");
+        }
+        return a;
+    }
+
+    /// <summary>The <c>error.OutOfMemory</c> code as a literal argument — the same flat-set code
+    /// <see cref="AllocCall"/> carries in <c>OomCode</c>. Typed <c>int</c> (NOT ushort): a plain
+    /// in-range constant literal converts implicitly to the runtime's <c>ushort oom</c>
+    /// parameter, whereas a UShort-typed literal renders with a <c>u</c> suffix (uint), which
+    /// C# refuses to narrow (CS1503).</summary>
+    private CExpr OomLit()
+    {
+        var code = ErrorCode("OutOfMemory");
+        return new LitInt(code.ToString(System.Globalization.CultureInfo.InvariantCulture), code) { Type = CType.Int };
     }
 
     /// <summary>Try to lower an allocator method call <c>a.alloc(T, n)</c> / <c>a.free(s)</c> /
@@ -5777,8 +5907,28 @@ internal sealed partial class ZigLowering
         // registers a container-scoped type alias (see RegisterContainerConsts / ResolveSelfAlias)
         // so `Self` resolves here through LowerTypeName.
         Zig.BuiltinCallNoArgs b when Tok(b.Arg0) == "@This" => CurrentContainerType(),
+        // `std.ArrayList(T)` in TYPE position (wall-plan W0) — the curated generic std type.
+        // A call parses in type position via the ordinary Suffix chain (Type → ErrUnion →
+        // Suffix → callArgs), so NO grammar change: resolve the callee's std path and
+        // instantiate the curated CType.ZigList. A composed form (`*std.ArrayList(T)`,
+        // `?std.ArrayList(T)`, a fn param/return) rides the surrounding Type productions.
+        Zig.CallArgs ca when TryResolveStdPath(ca.Arg0, out var gp) && gp == "std.ArrayList"
+            => new CType.ZigList(LowerSingleTypeArg(ca.Arg2, "std.ArrayList")),
         _ => throw new IrUnsupportedException("zig type: " + (type.Content?.GetType().Name ?? "null")),
     };
+
+    /// <summary>Lower the single type argument of a curated generic std type
+    /// (<c>std.ArrayList(i32)</c> — wall-plan W0): flatten the parsed ArgList, require exactly
+    /// one argument, and lower it as a Type. A wrong arity is a clear error naming the path.</summary>
+    private CType LowerSingleTypeArg(Item argList, string path)
+    {
+        var args = Flatten(argList);
+        if (args.Count != 1)
+        {
+            throw new IrUnsupportedException($"zig `{path}(…)` takes exactly one type argument; got {args.Count}");
+        }
+        return LowerType(args[0]);
+    }
 
     /// <summary>Lower a dotted std type (Milestone F): <c>std.mem.Allocator</c> → the runtime
     /// <see cref="CType.Allocator"/> fat pointer; <c>std.heap.FixedBufferAllocator</c> → the

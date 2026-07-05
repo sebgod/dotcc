@@ -1630,6 +1630,14 @@ internal sealed class CSharpBackend
                 var callArgs = string.Join(", ", zm.Args.Select(x => Expr(x)));
                 return ($"ZigMem.{zm.Method}<{elem}>({callArgs})", PPostfix);
             }
+            // A curated `std.ArrayList(T)` member call → `{recv}.{Method}(args)` — an instance
+            // method on the runtime ZigList<T> struct (mutates the lvalue receiver in place).
+            // The element type rides the receiver's C# type, so no explicit <T> is needed.
+            case ZigListCall zl:
+            {
+                var callArgs = string.Join(", ", zl.Args.Select(x => Expr(x)));
+                return ($"{Sub(zl.Recv, PPostfix)}.{zl.Method}({callArgs})", PPostfix);
+            }
             // A Zig tuple literal `.{ a, b }` (Milestone G) → `new System.ValueTuple<T1, …>(e1, …)`,
             // each element coerced to its declared element type. Arity-uniform (incl. 1) — the
             // `(a, b)` shorthand has no 1-tuple form, so the explicit `ValueTuple` ctor is used.
@@ -2309,7 +2317,8 @@ internal sealed class CSharpBackend
         // A curated std.mem / mem-builtin call renders as a method call. The void forms
         // (CopyForwards / Set) MUST be recognized (a `_ = <void>` discard is a C# error);
         // an invocation-expression is a legal C# statement whatever its return type.
-        Assign or Call or IndirectCall or AllocCall or FreeCall or CreateCall or DestroyCall or ReallocCall or ZigMemCall => true,
+        // ZigListCall likewise — deinit/clearRetainingCapacity are void statements.
+        Assign or Call or IndirectCall or AllocCall or FreeCall or CreateCall or DestroyCall or ReallocCall or ZigMemCall or ZigListCall => true,
         Unary u => u.Op is UnOp.PreInc or UnOp.PreDec or UnOp.PostInc or UnOp.PostDec,
         Paren p => IsStmtExpr(p.Inner),
         _ => false,
