@@ -524,12 +524,19 @@ internal sealed partial class IrBuilder
         _ => true,
     };
 
-    /// <summary>Walk an <c>AttrList</c> collecting the attributes dotcc lowers:
-    /// `noreturn` (a bare ID pre-C23; the promoted `_Noreturn` keyword under c23)
-    /// and `deprecated` (bare or with a string-literal message). Everything else —
-    /// `nodiscard`, `maybe_unused`, `fallthrough`, vendor-namespaced attrs — is
-    /// accepted and ignored (no .NET counterpart with teeth: C# doesn't warn on
-    /// unused locals/params, and the BCL has no must-use-result attribute).</summary>
+    /// <summary>Walk a DECLARATION's <c>AttrList</c> collecting the attributes that
+    /// stick to the declared function symbol: `noreturn` (a bare ID pre-C23; the
+    /// promoted `_Noreturn` keyword under c23) → [DoesNotReturn], `deprecated` (bare
+    /// or with a string-literal message) → [Obsolete], and `nodiscard` (bare or with
+    /// a reason) → the -Wunused-result discard warning. The remaining C23 standard
+    /// attributes carry nothing HERE: `maybe_unused` has teeth only on a block-scope
+    /// declaration (handled on the built DeclStmt — see the `C.AttrStmt` case, not
+    /// this decl path; on a function/global C# never warns, so it's a true no-op),
+    /// `fallthrough` attaches to a statement (<see cref="AttrListHasFallthrough"/>),
+    /// and `unsequenced` / `reproducible` are purity hints with no teeth-bearing .NET
+    /// counterpart — mapping them to the vestigial [Pure] (the JIT ignores it) would
+    /// be cosmetic, so they are recognized-standard-but-DELIBERATELY-inert. Vendor
+    /// namespaced attrs (`gnu::aligned(N)`, …) are likewise accepted + ignored.</summary>
     private void CollectDeclAttrs(Item it)
     {
         switch (it.Content)
@@ -558,6 +565,18 @@ internal sealed partial class IrBuilder
     {
         C.AttrListCons c => AttrListHasFallthrough(c.Arg0) || AttrListHasFallthrough(c.Arg2),
         C.AttrIdent a => Tok(a.Arg0) == "fallthrough",
+        _ => false,
+    };
+
+    /// <summary>True when an <c>AttrList</c> contains the C23 <c>[[maybe_unused]]</c>
+    /// attribute (a bare identifier). Kept separate from <see cref="CollectDeclAttrs"/>
+    /// for the same reason as fallthrough: it attaches to the STATEMENT (a block-scope
+    /// declaration whose local(s) might go unread), not to a declared function symbol,
+    /// so it rides the built <see cref="DeclStmt"/> — see the <c>C.AttrStmt</c> case.</summary>
+    private bool AttrListHasMaybeUnused(Item it) => it.Content switch
+    {
+        C.AttrListCons c => AttrListHasMaybeUnused(c.Arg0) || AttrListHasMaybeUnused(c.Arg2),
+        C.AttrIdent a => Tok(a.Arg0) == "maybe_unused",
         _ => false,
     };
 
@@ -1753,14 +1772,23 @@ internal sealed partial class IrBuilder
             case C.StaticAssertStmt s: Gate(2011, "_Static_assert", it); CheckStaticAssert(s.Arg2, s.Arg4, pos); return EmptyStmt(pos);
             case C.StaticAssertStmtNoMsg s: Gate(2023, "_Static_assert with no message", it); CheckStaticAssert(s.Arg2, null, pos); return EmptyStmt(pos);
             // C23 `[[attr]]` prepending a statement / block-scope declaration —
-            // ACCEPTED + IGNORED; gate C23, unwrap to the inner statement. The
-            // bare attribute-declaration `[[fallthrough]];` arrives here as a
-            // wrapped EMPTY statement — it alone leaves a trace (a FallthroughMarker)
-            // so BuildSwitch's -Wimplicit-fallthrough check can see it was intended.
+            // gate C23, then unwrap to the inner statement. Two recognized attrs
+            // carry meaning here; every other shape is accepted + ignored:
+            //   `[[fallthrough]];` arrives as a wrapped EMPTY statement and leaves a
+            //     FallthroughMarker so BuildSwitch's -Wimplicit-fallthrough check
+            //     sees the fall-through was intended.
+            //   `[[maybe_unused]]` on a block-scope declaration rides the built
+            //     DeclStmt (MaybeUnused=true) so the backend suppresses C#'s
+            //     unused-local warning — the faithful lowering of "don't warn if
+            //     unused". Only a sole DeclStmt is flagged (the common `int x;` /
+            //     `int x = e;` case); a multi-kind split (Seq / ArrayDecl / Block)
+            //     leaves the attribute inert (a documented V1 limit).
             case C.AttrStmt s:
                 Gate(2023, "[[attributes]]", it);
                 if (AttrListHasFallthrough(s.Arg1)) { return new FallthroughMarker { Pos = pos }; }
-                return BuildStmt(s.Arg4);
+                var inner = BuildStmt(s.Arg4);
+                if (inner is DeclStmt decl && AttrListHasMaybeUnused(s.Arg1)) { return decl with { MaybeUnused = true }; }
+                return inner;
             case C.StmtExpr e:
             {
                 var stmtExpr = BuildExpr(e.Arg0);

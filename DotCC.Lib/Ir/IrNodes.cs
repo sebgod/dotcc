@@ -417,7 +417,20 @@ public sealed record Seq(IReadOnlyList<CStmt> Stmts) : CStmt;
 
 /// <summary>One or more local declarations from a single declaration statement
 /// (<c>int a = 0, b;</c>).</summary>
-public sealed record DeclStmt(IReadOnlyList<LocalDecl> Decls) : CStmt;
+public sealed record DeclStmt(IReadOnlyList<LocalDecl> Decls) : CStmt
+{
+    /// <summary>Set when the C23 <c>[[maybe_unused]]</c> attribute prefixed this
+    /// block-scope declaration. The C# backend brackets the emitted local(s) with
+    /// <c>#pragma warning disable / restore CS0168</c> (declared, never used) +
+    /// <c>CS0219</c> (assigned, never used) — the faithful lowering of C's "don't
+    /// warn if this stays unused". An init-only flag (default <c>false</c>) so the
+    /// many <c>new DeclStmt(…)</c> temp sites are untouched and rewrite passes that
+    /// re-emit with <c>with { … }</c> preserve it. No counterpart on a
+    /// function/file-scope declaration — C# never warns on an unused
+    /// <c>internal</c>/<c>public</c> member, so <c>[[maybe_unused]]</c> there is a
+    /// genuine no-op.</summary>
+    public bool MaybeUnused { get; init; }
+}
 
 /// <summary>An expression used for its side effects (<c>a = b;</c>, <c>f();</c>).</summary>
 public sealed record ExprStmt(CExpr Expr) : CStmt;

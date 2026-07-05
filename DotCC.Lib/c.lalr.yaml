@@ -420,7 +420,12 @@ symbols:
   - '#elifdef'     # 176 preprocessor conditional — else-if macro defined
   - '#elifndef'    # 177 preprocessor conditional — else-if macro NOT defined
 
-  # C23 `[[attributes]]` — the standard attribute syntax, ACCEPTED + IGNORED.
+  # C23 `[[attributes]]` — the standard attribute syntax. Always PARSED; the
+  # recognized ones LOWER (`noreturn`→[DoesNotReturn], `deprecated`→[Obsolete],
+  # `nodiscard`→discard warning, `fallthrough`→suppresses -Wimplicit-fallthrough,
+  # `maybe_unused` on a local→CS0168/CS0219 suppression pragma) and the rest —
+  # `unsequenced`/`reproducible` (inert purity hints) + vendor `gnu::…` — are
+  # accepted + ignored; see IrBuilder's CollectDeclAttrs / AttrStmt handling.
   # Only the OPENER is a glued token: `[[` never occurs in valid C outside an
   # attribute (an expression can't start with `[`), but a glued `]]` would
   # mis-lex every nested subscript tail (`a[b[0]]`), so the closer is parsed
@@ -1652,8 +1657,10 @@ productions:
       - { lhs: U8StringSeq, rhs: [U8STRING],             action: u8strSeqOne }
 
   # C23 attribute-list interior — the inside of `[[ … ] ]`, reached only from
-  # the attrFn/attrStmt wrappers (which drop it unexamined, so none of these
-  # records ever dispatches in the IR). V1 shapes: bare ID, namespaced
+  # the attrFn/attrStmt wrappers. No generated-visitor dispatch: IrBuilder walks
+  # these records STRUCTURALLY (CollectDeclAttrs / AttrListHasFallthrough /
+  # AttrListHasMaybeUnused) to pick out the recognized attrs and drops the rest.
+  # V1 shapes: bare ID, namespaced
   # `ns :: ID` (`::` is two ':' tokens — dotcc has no '::' terminal), the call
   # forms with an empty / single-expression argument (`deprecated("msg")`,
   # `gnu::aligned(16)`), and `_Noreturn` — under -std=c23 the rewriter promotes
