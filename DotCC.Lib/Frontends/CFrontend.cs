@@ -128,9 +128,9 @@ internal sealed class CFrontend : IFrontend
         // raw by the identity visitor) is bound to a typed AST by IrBuilder, then
         // CSharpBackend prints it precedence-aware. The wat backend is the peer; the
         // retired bottom-up string emitter is gone — its shared identifier /
-        // string-literal / export helpers live on in EmitHelpers.
-        // TODO(ir): port the remaining cross-cutting concern the legacy two-pass
-        // owned that the IR doesn't yet — malloc→stack promotion — as an IR pass.
+        // string-literal / export helpers live on in EmitHelpers, and the last
+        // cross-cutting concern it owned (malloc→stack promotion) now runs as an
+        // IR pass (IrBuilder.MallocPromote).
         //
         // -pedantic dialect gating: collect features that postdate -std= during
         // parse (preprocessor-era) and IR build (emit-pass), then flush as warnings
