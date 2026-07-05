@@ -130,6 +130,7 @@ internal sealed partial class IrBuilder
                 if (sj.TryBody is { } tb) { CollectMallocDecls(tb, into); }
                 if (sj.CatchBody is { } cb) { CollectMallocDecls(cb, into); }
                 break;
+            case SetjmpCapture sc: CollectMallocDecls(sc.Body, into); break;
         }
     }
 
@@ -192,6 +193,9 @@ internal sealed partial class IrBuilder
                 if (sj.TryBody is { } tb) { CollectMallocBuffers(tb, into, inLoop); }
                 if (sj.CatchBody is { } cb) { CollectMallocBuffers(cb, into, inLoop); }
                 break;
+            // A goto-restart capture body re-runs like a loop, so a stackalloc inside would
+            // leak a frame per longjmp (CA2014) — collect its buffers as inLoop.
+            case SetjmpCapture sc: CollectMallocBuffers(sc.Body, into, inLoop: true); break;
         }
     }
 
@@ -257,6 +261,7 @@ internal sealed partial class IrBuilder
         Switch sw => SafeExpr(sw.Subject, sym, buffer) && sw.Sections.All(sec => sec.Body.All(st => UsesAreSafe(st, sym, buffer))),
         SetjmpGuard sj => SafeExpr(sj.Env, sym, buffer) && (sj.TryBody is null || UsesAreSafe(sj.TryBody, sym, buffer))
                           && (sj.CatchBody is null || UsesAreSafe(sj.CatchBody, sym, buffer)),
+        SetjmpCapture sc => SafeExpr(sc.Env, sym, buffer) && SafeExpr(sc.Target, sym, buffer) && UsesAreSafe(sc.Body, sym, buffer),
         ArrayDecl ad => SafeExpr(ad.CountExpr, sym, buffer) && (ad.Inits?.All(x => SafeExpr(x, sym, buffer)) ?? true),
         _ => false,
     };
@@ -289,6 +294,7 @@ internal sealed partial class IrBuilder
                 case CaseLabelStmt cl: S(cl.Body); break;
                 case Switch sw: foreach (var sec in sw.Sections) { foreach (var x in sec.Body) { S(x); } } break;
                 case SetjmpGuard sj: if (sj.TryBody is { } tb) { S(tb); } if (sj.CatchBody is { } cb) { S(cb); } break;
+                case SetjmpCapture sc: S(sc.Body); break;
             }
         }
         S(s);
@@ -370,6 +376,7 @@ internal sealed partial class IrBuilder
             case CaseLabelStmt cl: return cl with { CaseExpr = RewriteMallocExprN(cl.CaseExpr, ctx), Body = RewriteMallocStmt(cl.Body, ctx)! };
             case Switch sw: return sw with { Subject = RewriteMallocExpr(sw.Subject, ctx), Sections = sw.Sections.Select(sec => sec with { Body = sec.Body.Select(x => RewriteMallocStmt(x, ctx)).Where(x => x is not null).Select(x => x!).ToList() }).ToList() };
             case SetjmpGuard sj: return sj with { Env = RewriteMallocExpr(sj.Env, ctx), TryBody = sj.TryBody is { } tb ? RewriteMallocStmt(tb, ctx) : null, CatchBody = sj.CatchBody is { } cb ? RewriteMallocStmt(cb, ctx) : null };
+            case SetjmpCapture sc: return sc with { Env = RewriteMallocExpr(sc.Env, ctx), Target = RewriteMallocExpr(sc.Target, ctx), Body = RewriteMallocStmt(sc.Body, ctx)! };
             case ArrayDecl ad: return ad with { CountExpr = RewriteMallocExprN(ad.CountExpr, ctx), Inits = ad.Inits?.Select(x => RewriteMallocExpr(x, ctx)).ToList() };
             default: return s;
         }

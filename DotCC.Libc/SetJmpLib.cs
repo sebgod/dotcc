@@ -13,9 +13,8 @@ namespace DotCC.Libc;
 /// Real C's <c>setjmp</c> "returns twice" — once normally (0) and a
 /// second time after <c>longjmp</c> (the longjmp value). That's
 /// not expressible in structured C# control flow. The dotcc lowering
-/// recognises specific syntactic patterns where <c>setjmp</c> appears
-/// in an <c>if</c> condition and rewrites the whole <c>if/else</c>
-/// into a <c>try / catch when</c> block. <c>longjmp</c> throws a
+/// recognises specific syntactic patterns and rewrites them into a
+/// <c>try / catch when</c> block. <c>longjmp</c> throws a
 /// <see cref="LongJmpException"/> carrying the token + value; the
 /// <c>catch when</c> filter matches the right setjmp.
 /// </para>
@@ -25,7 +24,14 @@ namespace DotCC.Libc;
 /// <list type="bullet">
 ///   <item><c>if (setjmp(env)) { recovery } else { normal }</c></item>
 ///   <item><c>if (setjmp(env) == 0) { normal } else { recovery }</c></item>
+///   <item><c>switch (setjmp(env)) { case 0: …; case N: …; }</c> — VALUE
+///     capture: the switch dispatches on the actual longjmp value.</item>
+///   <item><c>int r = setjmp(env); switch (r) { … }</c> / <c>if (r == N) …</c>,
+///     and <c>r = setjmp(env);</c> into a pre-declared simple variable.</item>
 /// </list>
+/// The value-capture shapes lower via a goto-restart: the enclosing region
+/// re-runs from a synthetic label with <c>r</c> holding the jump value each
+/// time a matching <c>longjmp</c> is caught — faithful "returns twice".
 /// One bonus over real C: finally blocks DO run during the longjmp
 /// unwind (.NET exception semantics). That's strictly better than
 /// real <c>longjmp</c>, which silently skips through cleanup code —
