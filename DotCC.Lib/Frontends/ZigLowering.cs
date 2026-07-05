@@ -265,6 +265,18 @@ internal sealed partial class ZigLowering
     /// self-alias / container-const tracking.</summary>
     private readonly Dictionary<string, string> _imports = new(System.StringComparer.Ordinal);
 
+    /// <summary>Type-as-value aliases (wall-plan W1 — the comptime-type foundation): the bound name
+    /// of a <c>const T = &lt;type&gt;;</c> → the resolved <see cref="CType"/>. Zig's "types are values"
+    /// core (see <c>zig.lalr.yaml</c> header): a type expression is reachable in value position via
+    /// <c>CurlySuffix → Type</c>, so <c>const T = i32;</c> / <c>const P = *T;</c> / <c>const O = ?T;</c>
+    /// / <c>const T = @TypeOf(x);</c> already PARSE — this map is the lowering-side recognition
+    /// (<see cref="TryComptimeConstBinding"/>). Comptime — no runtime decl (<see cref="IsComptimeBound"/>);
+    /// a later use of the alias in a type position resolves here through <see cref="LowerTypeName"/>, so
+    /// <c>var x: T = 5;</c> / <c>*T</c> / <c>[]T</c> compose over the aliased element for free. Function-flat
+    /// (no nested-scope shadowing), like the import / self-alias tracking; a comptime-type-valued
+    /// interpreter <c>TypeVal</c> arrives with W3 (a comptime FUNCTION returning a type).</summary>
+    private readonly Dictionary<string, CType> _typeAliases = new(System.StringComparer.Ordinal);
+
     /// <summary>Bindings to a PROVABLE allocator (Milestone F/U): a <c>const a =
     /// std.heap.page_allocator;</c> (or <c>c_allocator</c>) records <c>a → CHeap</c>; a <c>const a =
     /// fba.allocator();</c> over a known <c>FixedBufferAllocator</c> local records <c>a → Fba</c>
@@ -5735,7 +5747,111 @@ internal sealed partial class ZigLowering
             _errorSetMembers[name] = new HashSet<string>(System.StringComparer.Ordinal);  // `error{}` — no members
             return true;
         }
+        // A type-as-value alias (wall-plan W1): `const T = i32;` / `const P = *T;` / `const List =
+        // std.ArrayList(i32);` / `const T = @TypeOf(x);`. Recorded LAST — the import / allocator /
+        // error-set forms above are the more specific comptime bindings; anything else that lowers to
+        // a TYPE is an alias. Emits no decl (returns true → the caller drops the statement); a use of
+        // `T` in a type position resolves through LowerTypeName. This serves BOTH the top-level pass-0
+        // binding and the in-function `DeclOrComptime` path, so a local `const T = @TypeOf(a);` works
+        // (the monomorphization-shaped case — the operand is in scope in a body).
+        if (TryTypeAliasRhs(rhs, out var aliasType))
+        {
+            _typeAliases[name] = aliasType;
+            return true;
+        }
         return false;
+    }
+
+    /// <summary>Recognize a <c>const</c> RHS that is a TYPE expression (wall-plan W1), lowering it to
+    /// the aliased <see cref="CType"/>. Two unambiguous shapes plus a guarded identifier:
+    /// <list type="bullet">
+    /// <item>a type-former node (<c>*T</c>, <c>?T</c>, <c>[]T</c>, <c>[N]T</c>, <c>E!T</c>, a tuple /
+    /// fn-pointer type, a curated <c>std.ArrayList(T)</c> / <c>std.mem.Allocator</c>) — these can only
+    /// be types, so lower directly;</item>
+    /// <item><c>@TypeOf(expr)</c> — the operand's synthesized type (unevaluated);</item>
+    /// <item>a bare identifier that <see cref="IsTypeName"/> confirms is a type (a primitive, a
+    /// container, an existing alias, a self-alias, or an error set) — so <c>const y = someValue;</c>
+    /// (a value) is NOT misread as an alias and falls through to a normal const.</item>
+    /// </list>
+    /// Returns false for any non-type RHS (→ an ordinary value const / global).</summary>
+    private bool TryTypeAliasRhs(Item rhs, out CType type)
+    {
+        switch (rhs.Content)
+        {
+            // Type-former prefixes/suffixes — unambiguously a type (no value spelling collides).
+            case Zig.TyPointer or Zig.TyPtrConst or Zig.TyCPtr or Zig.TyCPtrConst
+              or Zig.TyManyPtr or Zig.TyManyPtrConst or Zig.TySentPtr or Zig.TySentPtrConst
+              or Zig.TyOptional or Zig.TySlice or Zig.TySliceConst or Zig.TySentSlice or Zig.TySentSliceConst
+              or Zig.TyArray or Zig.TySentArray or Zig.ErrUnion or Zig.TyTuple
+              or Zig.TyFn or Zig.TyFnNoArgs or Zig.TyFnErr or Zig.TyFnNoArgsErr:
+                type = LowerType(rhs);
+                return true;
+
+            // `@TypeOf(expr)` — the operand's synthesized type, unevaluated.
+            case Zig.BuiltinCall b when Tok(b.Arg0) == "@TypeOf":
+                type = TypeOfBuiltin(b.Arg2);
+                return true;
+
+            // `const List = std.ArrayList(i32);` — a curated generic std type in value position; the
+            // CallArgs resolves through LowerType exactly as in type position (wall-plan W0).
+            case Zig.CallArgs ca when TryResolveStdPath(ca.Arg0, out var gp) && gp == "std.ArrayList":
+                type = LowerType(rhs);
+                return true;
+
+            // `const A = std.mem.Allocator;` — a dotted std TYPE path aliased to a name.
+            case Zig.Field when TryResolveStdPath(rhs, out var fp)
+                && fp is "std.mem.Allocator" or "std.mem.Allocator.VTable" or "std.mem.Alignment"
+                      or "std.heap.FixedBufferAllocator" or "std.heap.ArenaAllocator":
+                type = LowerStdType(rhs);
+                return true;
+
+            // A bare identifier — an alias ONLY if it names a type (guarded so a value const isn't stolen).
+            case Zig.Ident id when IsTypeName(Tok(id.Arg0)):
+                type = LowerTypeName(Tok(id.Arg0));
+                return true;
+
+            default:
+                type = CType.Int;
+                return false;
+        }
+    }
+
+    /// <summary>True when <paramref name="name"/> names a TYPE in the current lowering context — a
+    /// registered container, an existing type alias, a container-scoped self-alias, an error set, or
+    /// a Zig primitive (<see cref="TryLowerPrim"/>). The discriminator that keeps a bare-identifier
+    /// <c>const</c> RHS (<c>const y = x;</c>) from being misread as a type alias.</summary>
+    private bool IsTypeName(string name)
+        => _typeAliases.ContainsKey(name)
+        || _containerTypes.ContainsKey(name)
+        || ResolveSelfAlias(name) is not null
+        || _errorSets.Contains(name)
+        || name == "anyerror"
+        || TryLowerPrim(name, out _);
+
+    /// <summary>The type of a <c>@TypeOf(expr)</c> (wall-plan W1): lower the single operand only to
+    /// read its synthesized <see cref="CType"/>. Zig's <c>@TypeOf</c> does NOT evaluate its operand,
+    /// so the lowering runs into a THROWAWAY hoist buffer — any incidental ANF temp is discarded, the
+    /// operand's would-be side effects never reach the body. A wrong arity is a clear error.</summary>
+    private CType TypeOfBuiltin(Item argList)
+    {
+        var args = Flatten(argList);
+        if (args.Count != 1)
+        {
+            throw new IrUnsupportedException($"zig `@TypeOf` takes exactly one operand; got {args.Count}");
+        }
+        var savedBuf = _hoist;
+        var savedImpure = _hoistImpureSeen;
+        _hoist = new List<CStmt>();   // throwaway — @TypeOf's operand is unevaluated
+        try
+        {
+            return LowerExpr(args[0]).Type
+                ?? throw new IrUnsupportedException("zig `@TypeOf`: the operand has no statically known type");
+        }
+        finally
+        {
+            _hoist = savedBuf;
+            _hoistImpureSeen = savedImpure;
+        }
     }
 
     /// <summary>Walk an <c>error{ A, B, … }</c> member list (the right-recursive <c>ErrSetList</c>)
@@ -5804,7 +5920,8 @@ internal sealed partial class ZigLowering
     /// recorded by <see cref="TryComptimeConstBinding"/> (a module import or a known-default
     /// allocator) — so pass 1 skips its (non-existent) top-level decl.</summary>
     private bool IsComptimeBound(string name)
-        => _imports.ContainsKey(name) || _defaultAllocatorBindings.ContainsKey(name) || _errorSets.Contains(name);
+        => _imports.ContainsKey(name) || _defaultAllocatorBindings.ContainsKey(name)
+        || _errorSets.Contains(name) || _typeAliases.ContainsKey(name);
 
     /// <summary>Strip the surrounding double quotes from a Zig string-literal lexeme. Used only
     /// for the simple identifier-shaped module name in <c>@import("…")</c> (no escapes).</summary>
@@ -5907,6 +6024,9 @@ internal sealed partial class ZigLowering
         // registers a container-scoped type alias (see RegisterContainerConsts / ResolveSelfAlias)
         // so `Self` resolves here through LowerTypeName.
         Zig.BuiltinCallNoArgs b when Tok(b.Arg0) == "@This" => CurrentContainerType(),
+        // `@TypeOf(expr)` in TYPE position (wall-plan W1) — e.g. `var y: @TypeOf(x) = x;` or a
+        // param/return annotation. The operand's synthesized type; unevaluated (see TypeOfBuiltin).
+        Zig.BuiltinCall b when Tok(b.Arg0) == "@TypeOf" => TypeOfBuiltin(b.Arg2),
         // `std.ArrayList(T)` in TYPE position (wall-plan W0) — the curated generic std type.
         // A call parses in type position via the ordinary Suffix chain (Type → ErrUnion →
         // Suffix → callArgs), so NO grammar change: resolve the callee's std path and
@@ -5981,6 +6101,18 @@ internal sealed partial class ZigLowering
     private CType LowerTypeName(string name)
     {
         if (ResolveSelfAlias(name) is { } alias) { return alias; }
+        // A `const T = <type>;` type alias (wall-plan W1) — resolved ahead of containers/primitives so
+        // an aliased name (`var x: T = 5;`, `*T`, `[]T`) composes through the ordinary type prefixes.
+        if (_typeAliases.TryGetValue(name, out var aliased)) { return aliased; }
+        // `type` is Zig's type-of-types — a comptime-ONLY type. A runtime `var t: type` (or a
+        // `fn f(t: type)` param, which is W3's comptime param) is illegal in real zig too; reject
+        // loudly rather than fall through to LowerPrim's opaque "not supported" message.
+        if (name == "type")
+        {
+            throw new IrUnsupportedException(
+                "zig: `type` is a comptime-only type — a runtime `var`/param of type `type` is illegal "
+                + "(use a `const Alias = SomeType;` type alias, or a `comptime` parameter once generics land)");
+        }
         if (_containerTypes.TryGetValue(name, out var ct)) { return ct; }
         // An error-set name used as a plain VALUE type — `fn f(e: E)`, `var x: E`, a non-`!T`
         // error return `fn g() E` — or the open `anyerror`. Lowers to the flat erased error code
@@ -6274,42 +6406,57 @@ internal sealed partial class ZigLowering
     /// (width-correct on dotcc's target; a dedicated pointer-width type is a later
     /// refinement). <c>comptime_int</c>/<c>comptime_float</c> and the bigger/arbitrary
     /// <c>iN</c>/<c>uN</c> widths are deferred.</summary>
-    private static CType LowerPrim(string name) => name switch
+    private static CType LowerPrim(string name)
+        => TryLowerPrim(name, out var t)
+            ? t
+            : throw new IrUnsupportedException($"zig type '{name}' not supported yet (slice)");
+
+    /// <summary>Resolve a Zig primitive type name to its <see cref="CType"/> WITHOUT throwing on a
+    /// miss — the non-throwing sibling of <see cref="LowerPrim"/>, so <see cref="IsTypeName"/> (and
+    /// the type-alias recognizer) can probe "is this a primitive type?" as a boolean rather than
+    /// catching an exception for control flow.</summary>
+    private static bool TryLowerPrim(string name, out CType type)
     {
-        "void" => CType.Void,
-        // `anyopaque` (Milestone W, part 1a) — Zig's opaque type, used only behind a pointer
-        // (`*anyopaque` / `?*anyopaque`) as a type-erased context. Maps to C's `void`, so `*anyopaque`
-        // → `void*` and `?*anyopaque` → a nullable `void*` (the pointer niche), exactly like C.
-        "anyopaque" => CType.Void,
-        "bool" => CType.Bool,
-        "i8"  => CType.SChar,    // → C# sbyte
-        "u8"  => CType.UChar,    // → C# byte
-        "i16" => CType.Short,
-        "u16" => CType.UShort,
-        "i32" => CType.Int,
-        "u32" => CType.UInt,
-        "i64" => CType.Long,
-        "u64" => CType.ULong,
-        "i128" => CType.Int128,  // → C# System.Int128
-        "u128" => CType.UInt128, // → C# System.UInt128
-        "isize" => CType.Long,   // LP64: pointer-width signed
-        "usize" => CType.ULong,  // LP64: pointer-width unsigned (== size_t)
-        "f32" => CType.Float,
-        "f64" => CType.Double,
-        // C-ABI types for `extern fn` libc FFI (LP64, matching dotcc's __LP64__ trio:
-        // `c_long`/`c_ulong` are 8 bytes). These map onto the same well-known prims the
-        // C frontend uses, so RenderType + the coercion tables already cover them.
-        "c_char" => CType.Char,
-        "c_short" => CType.Short,
-        "c_ushort" => CType.UShort,
-        "c_int" => CType.Int,
-        "c_uint" => CType.UInt,
-        "c_long" => CType.Long,
-        "c_ulong" => CType.ULong,
-        "c_longlong" => CType.LongLong,
-        "c_ulonglong" => CType.ULongLong,
-        _ => throw new IrUnsupportedException($"zig type '{name}' not supported yet (slice)"),
-    };
+        CType? t = name switch
+        {
+            "void" => CType.Void,
+            // `anyopaque` (Milestone W, part 1a) — Zig's opaque type, used only behind a pointer
+            // (`*anyopaque` / `?*anyopaque`) as a type-erased context. Maps to C's `void`, so `*anyopaque`
+            // → `void*` and `?*anyopaque` → a nullable `void*` (the pointer niche), exactly like C.
+            "anyopaque" => CType.Void,
+            "bool" => CType.Bool,
+            "i8"  => CType.SChar,    // → C# sbyte
+            "u8"  => CType.UChar,    // → C# byte
+            "i16" => CType.Short,
+            "u16" => CType.UShort,
+            "i32" => CType.Int,
+            "u32" => CType.UInt,
+            "i64" => CType.Long,
+            "u64" => CType.ULong,
+            "i128" => CType.Int128,  // → C# System.Int128
+            "u128" => CType.UInt128, // → C# System.UInt128
+            "isize" => CType.Long,   // LP64: pointer-width signed
+            "usize" => CType.ULong,  // LP64: pointer-width unsigned (== size_t)
+            "f32" => CType.Float,
+            "f64" => CType.Double,
+            // C-ABI types for `extern fn` libc FFI (LP64, matching dotcc's __LP64__ trio:
+            // `c_long`/`c_ulong` are 8 bytes). These map onto the same well-known prims the
+            // C frontend uses, so RenderType + the coercion tables already cover them.
+            "c_char" => CType.Char,
+            "c_short" => CType.Short,
+            "c_ushort" => CType.UShort,
+            "c_int" => CType.Int,
+            "c_uint" => CType.UInt,
+            "c_long" => CType.Long,
+            "c_ulong" => CType.ULong,
+            "c_longlong" => CType.LongLong,
+            "c_ulonglong" => CType.ULongLong,
+            _ => null,
+        };
+        if (t is { } resolved) { type = resolved; return true; }
+        type = CType.Void;
+        return false;
+    }
 
     // ---- helpers ---------------------------------------------------------
 
