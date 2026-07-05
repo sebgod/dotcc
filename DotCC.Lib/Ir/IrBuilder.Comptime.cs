@@ -602,16 +602,25 @@ internal sealed partial class IrBuilder
         }
     }
 
+    /// <summary>Symbol → <see cref="FuncDef"/> index over <see cref="Functions"/>, keyed by
+    /// reference identity (<see cref="Symbol"/> is a plain class — the same instance is shared by
+    /// the declaration and every call site, so the default comparer is exactly right). Built
+    /// lazily and re-synced by count — <see cref="Functions"/> is append-only (both front-ends
+    /// only <c>Add</c>), so a count mismatch is the complete invalidation signal. Replaces a
+    /// per-call linear scan of the function list.</summary>
+    private readonly Dictionary<Symbol, FuncDef> _funcDefIndex = new();
+
     /// <summary>The lowered <see cref="FuncDef"/> for a callee symbol, by reference identity (the
     /// same <see cref="Symbol"/> instance is shared by the declaration and every call site), or null
     /// if the function has no lowered body (extern / not a user function).</summary>
     private FuncDef? FindFuncDef(Symbol sym)
     {
-        foreach (var f in Functions)
+        if (_funcDefIndex.Count != Functions.Count)
         {
-            if (ReferenceEquals(f.Sym, sym)) { return f; }
+            _funcDefIndex.Clear();
+            foreach (var f in Functions) { _funcDefIndex[f.Sym] = f; }
         }
-        return null;
+        return _funcDefIndex.TryGetValue(sym, out var fn) ? fn : null;
     }
 
     /// <summary>Re-type a comptime scalar to a target arithmetic type (so a parameter binding /
