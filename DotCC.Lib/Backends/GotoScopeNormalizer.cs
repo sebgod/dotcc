@@ -91,6 +91,9 @@ internal static class GotoScopeNormalizer
                 case DoWhile dw: Walk(dw.Body); return;
                 case For fo: Walk(fo.Init); Walk(fo.Body); return;
                 case SetjmpGuard sj: Walk(sj.TryBody); Walk(sj.CatchBody); return;
+                // The capture's own goto-restart label/goto are backend-synthetic (never IR
+                // nodes), so only its body carries user gotos/labels to normalize.
+                case SetjmpCapture sc: Walk(sc.Body); return;
                 case CaseLabelStmt cl: Walk(cl.Body); return;
                 case Switch sw:
                     switchDepth++;
@@ -212,6 +215,7 @@ internal static class GotoScopeNormalizer
                 TryBody = sj.TryBody is { } tb ? RewriteStmt(tb) : null,
                 CatchBody = sj.CatchBody is { } cb ? RewriteStmt(cb) : null,
             },
+            SetjmpCapture sc => sc with { Body = RewriteStmt(sc.Body) },
             CaseLabelStmt cl => cl with { Body = RewriteStmt(cl.Body) },
             Switch sw => sw with
             {

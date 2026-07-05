@@ -689,6 +689,26 @@ internal sealed class CSharpBackend
                 GuardBody(sb, sj.CatchBody, ind);
                 break;
             }
+            case SetjmpCapture sc:
+            {
+                // Value-capturing setjmp — real C's "returns twice" via goto-restart. Arm a
+                // fresh token, label the try, and on a matching longjmp write the jump value
+                // into the capture target and re-run the body from the label. The target was
+                // reset to 0 by a preceding decl/assignment (the direct-return value), so the
+                // body's switch/if on it takes the normal path first, the recovery path after.
+                var envc = Expr(sc.Env);
+                var label = $"__setjmp_{sc.Id}";
+                sb.Append(pad).Append($"{envc} = new Libc.LongJmpToken();\n");
+                sb.Append(pad).Append(label).Append(":\n");
+                sb.Append(pad).Append("try\n");
+                GuardBody(sb, sc.Body, ind);
+                sb.Append(pad).Append($"catch (Libc.LongJmpException __jmp) when (__jmp.Token == {envc})\n");
+                sb.Append(pad).Append("{\n");
+                sb.Append(Pad(ind + 1)).Append($"{Expr(sc.Target)} = ({Cs(sc.Target.Type)})__jmp.Value;\n");
+                sb.Append(Pad(ind + 1)).Append($"goto {label};\n");
+                sb.Append(pad).Append("}\n");
+                break;
+            }
             case DeferGuard dg:
             {
                 // `defer` → try/finally (cleanup on every exit); `errdefer` → try/catch that

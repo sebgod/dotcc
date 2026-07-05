@@ -1,0 +1,4 @@
+protected block
+raising 5
+handled error 5
+after (r=5)

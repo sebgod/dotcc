@@ -51,6 +51,22 @@ internal sealed partial class IrBuilder
     private readonly Dictionary<string, CType.Enum> _enumTypes = new(StringComparer.Ordinal);
     private readonly HashSet<string> _emittedTypes = new(StringComparer.Ordinal);
     private string _file = "";
+    // Every `setjmp(env)` call built in the CURRENT function, by reference identity
+    // (records are value-equal, so a reference comparer is required to tell two
+    // textually-identical calls apart — and the tracked object is the post-clone one
+    // BuildExpr actually puts in the tree), mapped to its source position. A recogniser
+    // (the `if`-guard SetjmpGuardOf, the value-capture rewrite, the switch-subject
+    // wrap) REMOVES the call it consumes; anything left once the body is built is a
+    // setjmp in a shape dotcc can't model (a loop/ternary condition, a nested
+    // sub-expression, a bare discarded call) — which would otherwise silently lower to
+    // the always-0 runtime stub and turn a `longjmp` into an uncaught exception. So a
+    // survivor is a loud CompileException (RejectStraySetjmp), never a silent
+    // miscompile.
+    private readonly Dictionary<Call, SrcPos> _setjmpCalls =
+        new(ReferenceEqualityComparer.Instance);
+    // Monotonic id for the goto-restart label + synthetic capture var of a
+    // value-capturing setjmp (SetjmpCapture) — program-unique across all functions.
+    private int _setjmpSeq;
     // The name of the function currently being built — the value of the C99
     // predefined identifier `__func__` inside its body.
     private string _currentFnName = "";
@@ -731,6 +747,7 @@ internal sealed partial class IrBuilder
 
         ApplyFnMarkers(funcSym);
         _symbols.BeginFunction();
+        _setjmpCalls.Clear(); // per-function stray-setjmp tracking (see the field)
         _currentFnName = sig.Name; // drives the `__func__` predefined identifier
         _currentRet = (funcSym.Type as CType.Func)?.Return; // drives return const-discard
         _symbols.EnterScope(); // parameter scope
@@ -739,10 +756,40 @@ internal sealed partial class IrBuilder
         {
             paramSyms.Add(_symbols.Declare(new Symbol { Name = pName, Kind = SymKind.Param, Type = pType }));
         }
-        var body = PromoteMallocs(BuildBlock(block));
+        var built = BuildBlock(block);
+        // Reject a setjmp in an unmodeled position BEFORE malloc-promote — it may re-clone
+        // a stray call's containing expression and orphan the tracked reference.
+        RejectStraySetjmp();
+        var body = PromoteMallocs(built);
         _symbols.ExitScope();
 
         Functions.Add(new FuncDef(funcSym, paramSyms, body, sig.Variadic));
+    }
+
+    /// <summary>After a function body is built, any <c>setjmp</c> call NOT claimed by a
+    /// recogniser (<see cref="SetjmpGuardOf"/>, <see cref="RewriteSetjmpCaptures"/>, the
+    /// switch-subject wrap) is in a shape dotcc can't faithfully model — it would lower to
+    /// the always-0 runtime stub and a `longjmp` at it would become an uncaught exception.
+    /// Reject it loudly (constraint: no silent miscompiles), naming the supported shapes.</summary>
+    private void RejectStraySetjmp()
+    {
+        if (_setjmpCalls.Count == 0) { return; }
+        // Report the earliest stray for a stable message; positions are line/column.
+        SrcPos where = default;
+        var first = true;
+        foreach (var pos in _setjmpCalls.Values)
+        {
+            if (first || pos.Line < where.Line || (pos.Line == where.Line && pos.Column < where.Column))
+            { where = pos; first = false; }
+        }
+        _setjmpCalls.Clear();
+        throw new DotCC.CompileException(
+            $"setjmp at {where}: this use of setjmp is not supported. dotcc recognises setjmp only as "
+            + "an `if` guard — `if (setjmp(env))` / `if (setjmp(env) == 0)` — as a value capture "
+            + "— `T r = setjmp(env);` (or `r = setjmp(env);`) followed by a `switch`/`if` on `r` — "
+            + "or a `switch (setjmp(env)) { … }`. Rewrite the call into one of these shapes "
+            + "(setjmp in a loop/ternary condition, a nested sub-expression, or a discarded call "
+            + "cannot be modeled as structured control flow).");
     }
 
     private Symbol DeclareFunc(FnSig sig, bool fromSystemHeader = false)
@@ -1634,6 +1681,9 @@ internal sealed partial class IrBuilder
                     else { sawNonDecl = true; }
                     stmts.Add(BuildStmt(x));
                 });
+                // Desugar a value-capturing `T r = setjmp(env); …rest…` — the rest of THIS
+                // block is the goto-restart body, so recognition is necessarily block-level.
+                stmts = RewriteSetjmpCaptures(stmts);
                 _symbols.ExitScope();
                 break;
             case C.BlockEmpty:
@@ -1837,6 +1887,20 @@ internal sealed partial class IrBuilder
         Flush();
         _symbols.ExitScope();
         if ((_warnings & WarningFlags.ImplicitFallthrough) != 0) { CheckImplicitFallthrough(sections); }
+        // `switch (setjmp(env)) { … }` — a value-capturing setjmp whose region is exactly
+        // this switch. Rewrite the subject to a synthetic capture var reset to 0 and wrap
+        // the switch in a goto-restart SetjmpCapture (real C's "returns twice"), so a
+        // `longjmp(env, v)` re-runs the switch with the matching case reached.
+        if (IsSetjmpCall(subject, out var env, out var call))
+        {
+            _setjmpCalls.Remove(call);
+            var sym = _symbols.Declare(new Symbol { Name = "__sjval" + _setjmpSeq, Kind = SymKind.Var, Type = CType.Int, Storage = Storage.Auto });
+            var vref = new VarRef(sym) { Type = CType.Int, IsLValue = true };
+            var decl = new DeclStmt(new[] { new LocalDecl(sym, ZeroLit()) }) { Pos = pos };
+            var sw = new Switch(vref, sections) { Pos = pos };
+            var cap = new SetjmpCapture(env, vref, sw, _setjmpSeq++) { Pos = pos };
+            return new Block(new CStmt[] { decl, cap }) { Pos = pos };
+        }
         return new Switch(subject, sections) { Pos = pos };
     }
 
@@ -1922,23 +1986,26 @@ internal sealed partial class IrBuilder
     ///     is true on the direct (zero) return, so the then-branch is normal.</item>
     ///   <item><c>if (setjmp(env) != 0) recovery [else normal]</c> — the inverse.</item>
     /// </list></summary>
-    private static CStmt? SetjmpGuardOf(CExpr cond, CStmt then, CStmt? els, SrcPos pos)
+    private CStmt? SetjmpGuardOf(CExpr cond, CStmt then, CStmt? els, SrcPos pos)
     {
         // Bare `if (setjmp(env)) …` — truthy only on the longjmp re-entry, so the
         // then-branch is the recovery (catch) and the absent/else side is the
         // normal (try) path.
-        if (IsSetjmpCall(cond, out var bareEnv))
+        if (IsSetjmpCall(cond, out var bareEnv, out var bareCall))
         {
+            _setjmpCalls.Remove(bareCall);
             return new SetjmpGuard(bareEnv, TryBody: els, CatchBody: then) { Pos = pos };
         }
         // `setjmp(env) == 0` / `!= 0`, either operand order.
         if (cond is Binary { Op: BinOp.Eq or BinOp.Ne } b)
         {
             CExpr? env = null;
-            if (IsSetjmpCall(b.Left, out var e1) && IsZeroLit(b.Right)) { env = e1; }
-            else if (IsSetjmpCall(b.Right, out var e2) && IsZeroLit(b.Left)) { env = e2; }
-            if (env is not null)
+            Call? call = null;
+            if (IsSetjmpCall(b.Left, out var e1, out var c1) && IsZeroLit(b.Right)) { env = e1; call = c1; }
+            else if (IsSetjmpCall(b.Right, out var e2, out var c2) && IsZeroLit(b.Left)) { env = e2; call = c2; }
+            if (env is not null && call is not null)
             {
+                _setjmpCalls.Remove(call);
                 // `== 0` is true on the direct (zero) return; `!= 0` is true on the
                 // re-entry. The "true on direct return" branch is the try (normal)
                 // body; the other is the catch (recovery).
@@ -1951,17 +2018,27 @@ internal sealed partial class IrBuilder
         return null;
     }
 
-    /// <summary>True when <paramref name="e"/> is a direct call to <c>setjmp</c>
-    /// (parens peeled); yields the env-token argument expression.</summary>
-    private static bool IsSetjmpCall(CExpr e, out CExpr env)
+    /// <summary>True when the name <c>setjmp</c> is shadowed by a local variable/parameter in
+    /// the current scope — then a <c>setjmp(...)</c> call is an ordinary indirect call through
+    /// that variable (e.g. a function pointer named <c>setjmp</c>, chibi/Lua-style), NOT the libc
+    /// <c>setjmp</c>, so none of the setjmp recognition/rejection applies to it.</summary>
+    private bool SetjmpShadowed() => _symbols.Resolve("setjmp") is { Kind: SymKind.Var or SymKind.Param };
+
+    /// <summary>True when <paramref name="e"/> is a direct call to the libc <c>setjmp</c>
+    /// (parens peeled, and not shadowed by a local of that name); yields the env-token argument
+    /// expression and the <see cref="Call"/> node itself (so the recogniser can claim it out of
+    /// <see cref="_setjmpCalls"/>).</summary>
+    private bool IsSetjmpCall(CExpr e, out CExpr env, out Call call)
     {
         while (e is Paren p) { e = p.Inner; }
-        if (e is Call { Callee: "setjmp", Args: { Count: 1 } a })
+        if (e is Call { Callee: "setjmp", Args: { Count: 1 } a } c && !SetjmpShadowed())
         {
             env = a[0];
+            call = c;
             return true;
         }
         env = null!;
+        call = null!;
         return false;
     }
 
@@ -1971,6 +2048,64 @@ internal sealed partial class IrBuilder
     {
         while (e is Paren p) { e = p.Inner; }
         return e is LitInt { Value: 0 };
+    }
+
+    /// <summary>The <c>int</c>-typed literal <c>0</c> — the value a captured setjmp
+    /// starts at (its direct return) before the goto-restart body re-runs it.</summary>
+    private static CExpr ZeroLit() => new LitInt("0", 0) { Type = CType.Int };
+
+    /// <summary>Recognise a VALUE-CAPTURING <c>setjmp</c> at block level and desugar the
+    /// capture PLUS the rest of the block into a goto-restart <see cref="SetjmpCapture"/>:
+    /// <list type="bullet">
+    ///   <item><c>T r = setjmp(env); …rest…</c> — the decl becomes <c>T r = 0;</c>, and the
+    ///     rest of the block is the re-runnable body.</item>
+    ///   <item><c>r = setjmp(env); …rest…</c> — same, for a pre-declared simple <c>r</c>
+    ///     (a VarRef target only; a side-effecting lvalue is left as a stray → rejected).</item>
+    /// </list>
+    /// The rest re-runs on each matching <c>longjmp</c> with <c>r</c> holding the jump value, so
+    /// the <c>switch</c>/<c>if</c> on <c>r</c> in the rest reaches the recovery path — real C's
+    /// "returns twice". Recurses so a SECOND value-capture in the same block nests cleanly.
+    /// The bare <c>switch (setjmp(env))</c> form is handled where the switch is built
+    /// (<see cref="BuildSwitch"/>), since its region is self-contained.</summary>
+    private List<CStmt> RewriteSetjmpCaptures(List<CStmt> stmts)
+    {
+        for (var i = 0; i < stmts.Count; i++)
+        {
+            // Shape #1: `T r = setjmp(env);` (a sole-declarator decl).
+            if (stmts[i] is DeclStmt { Decls: { Count: 1 } ds } declStmt
+                && ds[0].Init is { } init && IsSetjmpCall(init, out var env1, out var call1))
+            {
+                _setjmpCalls.Remove(call1);
+                var target = new VarRef(ds[0].Sym) { Type = ds[0].Sym.Type, IsLValue = true };
+                var reset = declStmt with { Decls = new[] { ds[0] with { Init = ZeroLit() } } };
+                return BuildCaptureTail(stmts, i, env1, target, reset);
+            }
+            // Shape #2: `r = setjmp(env);` into a pre-declared SIMPLE var (VarRef only —
+            // a Member/Index/Deref target could double-evaluate a side effect across the
+            // reset + the catch write, so it's left unrecognised and rejected loudly).
+            if (stmts[i] is ExprStmt { Expr: Assign { CompoundOp: null, Target: VarRef tgt, Value: { } rhs } } es
+                && IsSetjmpCall(rhs, out var env2, out var call2))
+            {
+                _setjmpCalls.Remove(call2);
+                var reset = es with { Expr = new Assign(null, tgt, ZeroLit()) { Type = tgt.Type, Pos = es.Pos } };
+                return BuildCaptureTail(stmts, i, env2, tgt, reset);
+            }
+        }
+        return stmts;
+    }
+
+    /// <summary>Build the <c>pre… ; reset ; SetjmpCapture(rest)</c> statement list for a
+    /// value-capturing setjmp found at index <paramref name="i"/>. The rest of the block
+    /// (statements after the capture) is recursively rewritten — so nested captures nest —
+    /// and becomes the re-runnable body.</summary>
+    private List<CStmt> BuildCaptureTail(List<CStmt> stmts, int i, CExpr env, CExpr target, CStmt reset)
+    {
+        var pos = stmts[i].Pos;
+        var tail = RewriteSetjmpCaptures(stmts.GetRange(i + 1, stmts.Count - i - 1));
+        var result = stmts.GetRange(0, i);
+        result.Add(reset);
+        result.Add(new SetjmpCapture(env, target, new Block(tail) { Pos = pos }, _setjmpSeq++) { Pos = pos });
+        return result;
     }
 
     /// <summary>A declaration in statement position. The grammar wraps the
@@ -2514,7 +2649,16 @@ internal sealed partial class IrBuilder
             C.CommaOp => BuildCommaOp(it),
             _ => throw new IrUnsupportedException(TypeName(it.Content)),
         };
-        return e with { Pos = pos };
+        var result = e with { Pos = pos };
+        // Track every libc setjmp call by the FINAL (post-Pos-clone) object — the reference that
+        // actually lands in the IR tree — so a recogniser can claim it by identity through
+        // the shallow statement clones. `e with {…}` above would orphan a reference taken in
+        // BuildCall, so this must be here, after the clone. An unclaimed survivor is a stray
+        // (unsupported shape) rejected by RejectStraySetjmp once the body is built. A `setjmp`
+        // SHADOWED by a local (a fn-ptr named `setjmp`) is an ordinary call, not the libc one —
+        // excluded here so it neither triggers recognition nor gets rejected.
+        if (result is Call { Callee: "setjmp" } sjCall && !SetjmpShadowed()) { _setjmpCalls[sjCall] = pos; }
+        return result;
     }
 
     private CExpr BuildTernary(C.Ternary t)

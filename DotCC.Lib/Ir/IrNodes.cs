@@ -453,6 +453,27 @@ public sealed record Labeled(string Name, CStmt Body) : CStmt;
 /// and matched on, so nested setjmps stay disambiguated by token identity.</summary>
 public sealed record SetjmpGuard(CExpr Env, CStmt? TryBody, CStmt? CatchBody) : CStmt;
 
+/// <summary>The desugared form of a VALUE-CAPTURING <c>setjmp</c> — <c>T r =
+/// setjmp(env); …rest…</c> / <c>r = setjmp(env); …rest…</c> / <c>switch
+/// (setjmp(env)) {…}</c>. Unlike <see cref="SetjmpGuard"/> (an <c>if</c> that only
+/// tests zero-vs-nonzero), this preserves the actual value <c>longjmp</c> passes,
+/// which the <c>rest</c> (a <c>switch</c>/<c>if</c> on <see cref="Target"/>) branches
+/// on. Real C's "setjmp returns twice" is modeled faithfully with goto-restart —
+/// the backend emits:
+/// <code>
+///   Env = new LongJmpToken();
+///   __setjmp_Id:
+///   try { Body }
+///   catch (LongJmpException __jmp) when (__jmp.Token == Env)
+///   { Target = (T)__jmp.Value; goto __setjmp_Id; }
+/// </code>
+/// <see cref="Body"/> runs first with <see cref="Target"/> already reset to 0 (a
+/// preceding decl/assignment the builder emits); a matching <c>longjmp</c> is caught,
+/// <see cref="Target"/> takes the jump value, and the body re-runs from the label —
+/// so its own branch on the value diverges to the recovery path exactly as C resumes
+/// after <c>setjmp</c>. The synthetic label is unique via <see cref="Id"/>.</summary>
+public sealed record SetjmpCapture(CExpr Env, CExpr Target, CStmt Body, int Id) : CStmt;
+
 /// <summary>A Zig <c>defer</c> / <c>errdefer</c>-guarded region (Milestone H). Produced
 /// by <c>ZigLowering</c>'s block restructuring: each <c>defer</c>/<c>errdefer</c> wraps the
 /// statements that follow it within its block, so nesting in lexical order yields Zig's LIFO

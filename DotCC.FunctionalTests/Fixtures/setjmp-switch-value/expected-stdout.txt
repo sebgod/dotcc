@@ -1,0 +1,6 @@
+start
+advance: step=1
+phase one (100)
+advance: step=2
+phase two (200), stop
+end

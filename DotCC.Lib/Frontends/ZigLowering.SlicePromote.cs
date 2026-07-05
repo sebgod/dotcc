@@ -137,6 +137,8 @@ internal sealed partial class ZigLowering
                 if (sj.TryBody is { } tb) { CollectSliceAllocs(tb, into, inLoop); }
                 if (sj.CatchBody is { } cb) { CollectSliceAllocs(cb, into, inLoop); }
                 break;
+            // C-only node (Zig never produces it), handled for node-coverage symmetry.
+            case SetjmpCapture sc: CollectSliceAllocs(sc.Body, into, inLoop: true); break;
         }
     }
 
@@ -302,6 +304,7 @@ internal sealed partial class ZigLowering
             case CaseLabelStmt cl: return cl with { Body = RewriteSliceStmt(cl.Body, promote)! };
             case Switch sw: return sw with { Sections = sw.Sections.Select(sec => sec with { Body = sec.Body.Select(x => RewriteSliceStmt(x, promote)).Where(x => x is not null).Select(x => x!).ToList() }).ToList() };
             case SetjmpGuard sj: return sj with { TryBody = sj.TryBody is { } tb ? RewriteSliceStmt(tb, promote) : null, CatchBody = sj.CatchBody is { } cb ? RewriteSliceStmt(cb, promote) : null };
+            case SetjmpCapture sc: return sc with { Body = RewriteSliceStmt(sc.Body, promote)! };
             default: return s;
         }
     }
