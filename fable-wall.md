@@ -142,6 +142,16 @@ primitive W4 calls from inside the interpreter.
 - **Re-entrancy audit**: ZigLowering per-fn state (hoist buffer, scope stack,
   temp counters) must save/restore around a nested instantiation — the setjmp
   lesson (post-clone identity) says probe this with a failing test FIRST.
+- **Scoping formalization (queued here deliberately — from the 2026-07-06
+  compiler review)**: ZigLowering's name→binding maps are FUNCTION-FLAT today
+  (`_imports`, `_typeAliases`, `_defaultAllocatorBindings`, `_errorSets`, …) — a
+  local binding leaks across functions. Individually each is a documented
+  accept-more leniency (never a miscompile of a valid program), but
+  monomorphization makes it load-bearing: an instantiation's `T ↦ i32` binding
+  MUST NOT leak into or collide with a sibling instantiation's `T ↦ f64`. Fold
+  the flat maps into a scoped environment (per-fn / per-instantiation frame
+  stack, pushed around each re-lower) as part of W3's frame machinery — it is a
+  prerequisite of the re-entrancy audit above, not an optional cleanup.
 
 ### W4 — type-returning functions (L — the ArrayList shape)
 `fn Pair(comptime T: type) type { return struct { a: T, b: T }; }` —
