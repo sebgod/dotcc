@@ -80,6 +80,7 @@ public abstract record CType
         ErrorSetType => "anyerror",
         Slice s => "[]" + (s.Element.IsConst ? "const " : "") + s.Element.Unqualified.Describe(),
         Allocator => "std.mem.Allocator",
+        ZigList l => "std.ArrayList(" + l.Element.Describe() + ")",
         Tuple t => "struct { " + string.Join(", ", t.Elements.Select(e => e.Describe())) + " }",
         _ => GetType().Name,
     };
@@ -270,6 +271,21 @@ public abstract record CType
         // A fat pointer: a data pointer (8) plus a nuint length (8). @sizeOf([]T) is not in
         // scope for Milestone E, so an exact-layout guarantee isn't needed here.
         public override int SizeOf => 16;
+    }
+
+    /// <summary>Zig's curated <c>std.ArrayList(T)</c> (wall-plan W0) — the modern UNMANAGED
+    /// array list (no stored allocator; growing calls take one explicitly). The C# backend
+    /// lowers it to the runtime <c>ZigList&lt;T&gt;</c> value type
+    /// (<c>DotCC.Libc/ZigList.cs</c>): <c>{ ptr, len, capacity }</c>. Zig's <c>.empty</c> decl
+    /// literal is <c>default</c>; the curated member set (<c>append</c> / <c>appendSlice</c> /
+    /// <c>pop</c> / <c>deinit</c> / <c>clearRetainingCapacity</c> / <c>items</c> /
+    /// <c>capacity</c>) routes to the runtime in the Zig lowering, and an unmodeled member is a
+    /// clear error. The C front-end never produces it; only the C# target renders it.</summary>
+    public sealed record ZigList(CType Element) : CType
+    {
+        // { T* ptr; ulong len; ulong cap } = 24. @sizeOf(std.ArrayList(T)) isn't a lowered
+        // surface feature, so an exact-layout guarantee isn't needed here.
+        public override int SizeOf => 24;
     }
 
     /// <summary>Zig's <c>std.mem.Allocator</c> (Milestone F) — a fat pointer

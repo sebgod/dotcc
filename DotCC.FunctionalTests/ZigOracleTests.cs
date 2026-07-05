@@ -1910,6 +1910,39 @@ public sealed class ZigOracleTests
             "    tl_count = tl_count + 2;\n" +
             "    return @intCast(tl_count);\n" +
             "}\n", 42, "" },
+
+        // Curated `std.ArrayList(T)` (wall-plan W0) — the modern UNMANAGED array list
+        // (zig 0.15+: `.empty`, per-call allocator, `pop()` → ?T). Exercises the type in
+        // annotation position, `.empty`, try+append growth across the initial capacity,
+        // items subscript/len, pop's optional, a for-over-items sum, appendSlice from
+        // `&array`, and defer deinit. `capacity` is deliberately NOT printed: its VALUE is
+        // the growth policy's implementation detail (dotcc doubles; zig's curve is
+        // super-linear and version-dependent), so it isn't an oracle-comparable observable.
+        new object[] { "arraylist",
+            "const std = @import(\"std\");\n" +
+            "extern fn printf(fmt: [*:0]const u8, ...) c_int;\n" +
+            "pub fn main() !void {\n" +
+            "    const alloc = std.heap.c_allocator;\n" +
+            "    var list: std.ArrayList(i32) = .empty;\n" +
+            "    defer list.deinit(alloc);\n" +
+            "    var i: i32 = 0;\n" +
+            "    while (i < 10) : (i = i + 1) {\n" +
+            "        try list.append(alloc, i * 3);\n" +
+            "    }\n" +
+            "    _ = printf(\"len=%zu first=%d last=%d\\n\", list.items.len, list.items[0], list.items[9]);\n" +
+            "    const popped = list.pop();\n" +
+            "    if (popped) |v| {\n" +
+            "        _ = printf(\"popped=%d len=%zu\\n\", v, list.items.len);\n" +
+            "    }\n" +
+            "    var sum: i32 = 0;\n" +
+            "    for (list.items) |x| {\n" +
+            "        sum = sum + x;\n" +
+            "    }\n" +
+            "    const tail = [2]i32{ 100, 200 };\n" +
+            "    try list.appendSlice(alloc, &tail);\n" +
+            "    _ = printf(\"sum=%d after=%zu back=%d\\n\", sum, list.items.len, list.items[10]);\n" +
+            "}\n", 0,
+            "len=10 first=0 last=27\npopped=27 len=9\nsum=108 after=11 back=200" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

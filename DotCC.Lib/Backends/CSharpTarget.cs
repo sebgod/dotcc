@@ -57,6 +57,9 @@ internal sealed class CSharpTarget : ITarget
         // A Zig `std.mem.Allocator` → the runtime `Allocator` fat-pointer value type
         // (Milestone F). The concrete `FixedBufferAllocator` is a `CType.Named` (renders its name).
         CType.Allocator => "Allocator",
+        // Zig's curated `std.ArrayList(T)` → the runtime `ZigList<T>` value type (wall-plan W0).
+        // The element renders unqualified, like the slice above.
+        CType.ZigList zl => "ZigList<" + RenderType(zl.Element.Unqualified) + ">",
         // A Zig tuple `struct { T1, T2, … }` → `System.ValueTuple<T1, …>` (Milestone G).
         // Arity-uniform — including arity 1 (`System.ValueTuple<T>`), where C#'s `(T)` shorthand
         // would be a parenthesised expression, not a tuple. Empty → the non-generic `System.ValueTuple`;
