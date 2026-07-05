@@ -78,6 +78,30 @@ ladder even starts; validates allocator-under-generics. Cut: `std.ArrayList`
 methods beyond the curated set error loudly (resolver behavior, as today).
 
 ### W1 — `type` as a comptime VALUE (M — the foundation)
+
+> ✅ **DONE 2026-07-06** (branch `feat/zig-type-values`). Shipped as a LOWERING-only
+> increment — NO grammar change (Zig's "types are values": the `const T = <type>;`
+> RHS already parses via `CurlySuffix → Type`, so `const T = i32;` / `*T` / `?T` /
+> `[]T` / `@TypeOf(x)` / `std.ArrayList(i32)` all reach lowering as type-former
+> Items). A new function-flat `_typeAliases` map is recognized in
+> `TryComptimeConstBinding` (which BOTH the top-level pass-0 and the in-function
+> `DeclOrComptime` paths call — so a local `const T = @TypeOf(a);` works for free),
+> suppressed from a runtime global by `IsComptimeBound`, and resolved by
+> `LowerTypeName` ahead of containers/primitives. `@TypeOf(expr)` → the operand's
+> synthesized `CType`, unevaluated (lowered into a throwaway hoist buffer). A runtime
+> `var t: type` is rejected loudly. **PLAN CORRECTION:** the interpreter `TypeVal`
+> variant was NOT added — for W1 a lowering-time type env is sufficient and adding an
+> unconsumed interpreter variant would be dead code; `TypeVal` moves to W3, where a
+> comptime FUNCTION genuinely computes/returns a type. `LowerPrim` refactored to a
+> non-throwing `TryLowerPrim` for the "is this a type name?" probe. Validation: unit
+> 1467/1467 (+9 `ZigTypeValueTests`), zig oracle 152/152 (new `type-value`
+> differential, byte-identical vs real zig 0.17), functional 215/0,
+> `examples/zig-type-values/`. **Known leniency:** `_typeAliases` is function-flat
+> (like `_imports`) — a local alias name leaks across functions (accept-more, not a
+> miscompile of a valid program); W3's per-instantiation frames formalize scoping.
+> **Cut:** top-level `const T = @TypeOf(global)` (globals aren't lowered at pass 0);
+> nested type paths (`Container.Inner`).
+
 - Interpreter value domain += `TypeVal` (carries a `CType`, plus the container
   AST handle for W4's struct values).
 - `const T = i32;` — a comptime binding whose value is a type; `var x: T = 5;`

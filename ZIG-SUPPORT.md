@@ -11,10 +11,12 @@ for free — including the libc routing that makes `printf` print.
 This is an honest **subset dialect**, not full Zig: the grammar parses a
 C-shaped value/type core, and lowering grows behind it deliberately ("fail
 loudly, grow on purpose" — anything unlowered throws `IrUnsupportedException`
-rather than miscompiling). Value-`comptime` IS supported (Milestone T); comptime
-**types** / generics / `anytype` are not lowered yet — no longer "out of scope
-by design" but a **planned monomorphization arc** (the wall-breaking plan,
-`fable-wall.md`; reasoning updated below). `std` is **not** modeled in general —
+rather than miscompiling). Value-`comptime` IS supported (Milestone T), and the
+comptime-**type** arc has begun: type-as-value aliases (`const T = i32;`, with
+`*T`/`?T`/`[]T` composing over the alias) and `@TypeOf` ship as **wall-plan W1**,
+`std.ArrayList(T)` as W0. Full generics / `anytype` / type-returning functions are
+not lowered yet — the rest of a **planned monomorphization arc** (the wall-breaking
+plan, `fable-wall.md`; reasoning updated below). `std` is **not** modeled in general —
 only a curated set of paths resolves: the
 allocator paths (`std.mem.Allocator`, `std.heap.page_allocator`/`c_allocator`/`FixedBufferAllocator`/`ArenaAllocator`;
 see the Allocators section), a few `std.mem` slice helpers (`eql`, `copyForwards`,
@@ -90,6 +92,8 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | namespaced mutable `var NAME = …;` | ✅ | a container-level `var` (Milestone R, part 6) — a namespaced mutable global, lowered to a real `public static` field of `DotCcGlobals` under a mangled `Container_NAME`. `Type.NAME` reads/writes it (an lvalue: `Cfg.counter = …` / `+= …`). The init may reference a sibling const by bare name. **V1: scalar only** (an array/aggregate container var is rejected) |
 | receiver type `self: @This()` | ✅ | `@This()` resolves to the enclosing container type (so `self: @This()` / `self: *@This()` name the receiver without repeating the name); explicit `self: P` / `self: *P` also work |
 | self-type alias `const Self = @This();` | ✅ | a container-level `const` aliasing the container's own type inside its methods (the ubiquitous Zig idiom; any alias name). Resolves as a param/return/local type (`self: Self`, `… ) Self`), the base of a static call (`Self.init(…)`), and a typed literal (`Self{…}`) — all to the container, scoped per-container (two containers may each declare `const Self = @This();`). A **non-`@This()`** container `const` is a namespaced value constant (supported — see the row above), distinct from this self-type alias |
+| type-as-value alias `const T = <type>;` (wall-plan W1) | ✅ | Zig's "types are values": a `const` binds a NAME to a TYPE, resolved in any type position (`var x: T = …;`, a param/return/field). The RHS already parses via the `CurlySuffix → Type` value path (no grammar change); recognized in lowering and recorded as a function-flat type alias with **no runtime decl**. A type prefix composes over the alias for free (`const P = *T;` → `int*`, `?T`, `[]T`, `[N]T`) — including alias-of-alias. A curated `std` type (`const List = std.ArrayList(i32);`, `const A = std.mem.Allocator;`) can be aliased too. Works at top level (source order — a forward struct ref is a V1 cut) and locally in a body (the monomorphization-shaped `const T = @TypeOf(a);`). Oracle `type-value`; example `examples/zig-type-values/`; unit `ZigTypeValueTests`. **Cut:** `type` as a runtime `var`/param type is rejected loudly (comptime-only — a `comptime` param is W3) |
+| `@TypeOf(expr)` (wall-plan W1) | ✅ | the operand's synthesized `CType`, UNEVALUATED (the operand lowers into a throwaway hoist buffer, so no side effect reaches the body). Usable in a type position (`var y: @TypeOf(x) = …;`, a param/return type) and as a `const` type alias (`const T = @TypeOf(x);`) |
 | `const C = enum(T) { … };` / `enum { … }` | ✅ | container decl → C# `enum C : T` (default underlying `int`); members auto-increment or take an explicit constant value. `@intFromEnum` decays to the underlying int. Methods (above) and a `const Self = @This();` alias are allowed in the body |
 | `const U = union(enum) { a: T, b, … };` | ✅ | tagged union → the faithful C tagged-union shape: an outer struct `{ U_Tag __tag; U_Payload __payload; }` whose `__payload` is a NESTED `[StructLayout(Explicit)]` union overlaying every payload variant at offset 0 (the shared C-union machinery) — so payloads share storage, matching Zig's memory model. A void variant (`b`) is tag-only; an all-void union has no `__payload`. Construct with `.{ .a = v }` / `U{ .a = v }` (payload) or `.b` at a union sink (void). Direct `u.a` reads `u.__payload.a` (unchecked, like Zig release mode). Methods (above) and a `const Self = @This();` alias are allowed in the body |
 | `const U = union(SomeEnum) { a: T, b, … };` | ✅ | explicit-tag tagged union (Milestone R, part 1) — the discriminant is an EXISTING named enum rather than a synthesized `U_Tag`. Reuses the whole tagged-union lowering 1:1 (outer `{ __tag, __payload }`, switch on `__tag`, payload capture); only the tag enum source differs, so the `__tag` field is typed by the named enum and each variant's tag VALUE is that enum member's value (a non-zero / out-of-order enum drives the discriminant). Each variant must name a member of the tag enum (an extra enum member with no variant is tolerated — a V1 leniency) |
@@ -179,7 +183,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `@sizeOf(T)` | ✅ | the byte size as `usize` → the C `sizeof` IR (folded for a user aggregate via the layout model, else C#'s `sizeof(T)`) |
 | `@memcpy(dest, src)` / `@memset(dest, value)` | ✅ | the mem builtins over slices → the runtime `ZigMem.CopyForwards` / `ZigMem.Set`. Element type inferred from the dest operand (a `[]T` slice, a `[N]T` array, or `&array`); `@memset`'s value lowers at the element sink. Both are void → rendered as bare statements. `@memcpy` reuses the forward-copy helper (correct for its non-overlapping, equal-length contract) |
 | `@alignOf(T)` / `@offsetOf(T, "f")` | ✅ | Milestone T, part 4 — both are comptime values computed from dotcc's layout model (C-ABI / natural alignment). `@alignOf(T)` folds straight to a literal (the ABI alignment; a struct = the max field alignment). `@offsetOf(T, "field")` reuses the C `offsetof` IR — it folds in a comptime-required position (an array bound `[@offsetOf(T,"m")]u8`) and renders the .NET blittable-layout offset at a runtime use. Use an `extern struct` to pin the C field layout when an exact offset must match real zig (a plain Zig struct may reorder fields) |
-| other `@builtin(...)` (`@typeInfo`/`@TypeOf`/`@field`/…) | 🚫 | reflection / comptime — not lowered today (see below). `@TypeOf` is planned (wall-breaking arc W1 — the lowered expr's synthesized `CType` already exists everywhere); `@typeInfo`/`@field` full reflection stays out unless a narrow curated subset earns demand |
+| other `@builtin(...)` (`@typeInfo`/`@field`/…) | 🚫 | full reflection / comptime — not lowered today (see below); `@TypeOf` is now supported (row in the Types table, wall-plan W1). `@typeInfo`/`@field` stay out unless a narrow curated subset earns demand |
 | wrapping ops `+% -% *%` (+ `op%=`) | ✅ | two's-complement wrap (Milestone P, part 1) — see the operators table above |
 | saturating ops `+\| -\| *\|` (+ `op\|=`) | ✅ | clamp-to-range (Milestone P, part 2) — see the operators table above |
 
@@ -198,11 +202,12 @@ program's libc call is handled. No `@cImport`, no header harvest.
 
 Two tiers, since the wall-breaking plan (`fable-wall.md`, 2026-07-05):
 
-**Planned — not lowered today (loud errors), no longer ruled out:** comptime **TYPES**
-(a `comptime` expression that produces or consumes a `type` — value-comptime
-IS supported, see below), generics / `anytype`, and *widening* the curated `std`
-set further (`std.debug.print` — W6; **`std.ArrayList(T)` SHIPPED as W0**, see the
-Types table). Today `@import("std")` resolves
+**Planned — the arc is underway (W0/W1 shipped), the rest are loud errors:** the
+comptime-**type** foundation SHIPPED — type-as-value aliases (`const T = i32;`, with
+`*T`/`?T`/`[]T` composing) and `@TypeOf` (**wall-plan W1**, see the Types table).
+Still to come: generics / `comptime` params / `anytype` / type-returning functions
+(W3–W5) and *widening* the curated `std` set further (`std.debug.print` — W6;
+**`std.ArrayList(T)` SHIPPED as W0**). Today `@import("std")` resolves
 only the curated paths: the allocator paths (`std.mem.Allocator` +
 `std.heap.page_allocator`/`c_allocator`/`FixedBufferAllocator`/`ArenaAllocator`,
 with `alloc`/`free`/`create`/`destroy`/`realloc` — see the Allocators section),

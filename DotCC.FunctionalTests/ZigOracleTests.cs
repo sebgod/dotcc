@@ -1943,6 +1943,36 @@ public sealed class ZigOracleTests
             "    _ = printf(\"sum=%d after=%zu back=%d\\n\", sum, list.items.len, list.items[10]);\n" +
             "}\n", 0,
             "len=10 first=0 last=27\npopped=27 len=9\nsum=108 after=11 back=200" },
+
+        // Type-as-value foundation (wall-plan W1) — Zig's "types are values": a `const` binds a
+        // NAME to a TYPE (`const Elem = i32;`), a prefix composes over another alias
+        // (`const ElemPtr = *Elem;`), and `@TypeOf(expr)` yields an expression's type both in a
+        // type position (`const y: @TypeOf(x) = …;`) and as a `const` alias (`const T = @TypeOf(x);`).
+        // An optional over the alias (`?Elem`) rides the value-optional lowering. dotcc emits no
+        // runtime decl for an alias — proven end-to-end by matching real zig's stdout byte-for-byte.
+        new object[] { "type-value",
+            "extern fn printf(fmt: [*:0]const u8, ...) c_int;\n" +
+            "const Elem = i32;\n" +
+            "fn addElems(a: Elem, b: Elem) Elem { return a + b; }\n" +
+            "const ElemPtr = *Elem;\n" +
+            "fn bump(p: ElemPtr) void { p.* = p.* + 1; }\n" +
+            "pub fn main() void {\n" +
+            "    const x: Elem = 20;\n" +
+            "    const y: @TypeOf(x) = 22;\n" +
+            "    _ = printf(\"sum=%d\\n\", addElems(x, y));\n" +
+            "    const T = @TypeOf(x);\n" +
+            "    var acc: T = 0;\n" +
+            "    acc = acc + x;\n" +
+            "    acc = acc + y;\n" +
+            "    bump(&acc);\n" +
+            "    _ = printf(\"acc=%d\\n\", acc);\n" +
+            "    var maybe: ?Elem = null;\n" +
+            "    maybe = 7;\n" +
+            "    if (maybe) |v| {\n" +
+            "        _ = printf(\"maybe=%d\\n\", v);\n" +
+            "    }\n" +
+            "}\n", 0,
+            "sum=42\nacc=43\nmaybe=7" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
