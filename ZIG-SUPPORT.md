@@ -11,8 +11,11 @@ for free — including the libc routing that makes `printf` print.
 This is an honest **subset dialect**, not full Zig: the grammar parses a
 C-shaped value/type core, and lowering grows behind it deliberately ("fail
 loudly, grow on purpose" — anything unlowered throws `IrUnsupportedException`
-rather than miscompiling). `comptime` and generics are out of scope by design;
-`std` is **not** modeled in general — only a curated set of paths resolves: the
+rather than miscompiling). Value-`comptime` IS supported (Milestone T); comptime
+**types** / generics / `anytype` are not lowered yet — no longer "out of scope
+by design" but a **planned monomorphization arc** (the wall-breaking plan,
+`fable-wall.md`; reasoning updated below). `std` is **not** modeled in general —
+only a curated set of paths resolves: the
 allocator paths (`std.mem.Allocator`, `std.heap.page_allocator`/`c_allocator`/`FixedBufferAllocator`/`ArenaAllocator`;
 see the Allocators section) and a few `std.mem` slice helpers (`eql`, `copyForwards`,
 `span`, `zeroes`); everything else errors clearly. Legend: ✅
@@ -174,7 +177,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `@sizeOf(T)` | ✅ | the byte size as `usize` → the C `sizeof` IR (folded for a user aggregate via the layout model, else C#'s `sizeof(T)`) |
 | `@memcpy(dest, src)` / `@memset(dest, value)` | ✅ | the mem builtins over slices → the runtime `ZigMem.CopyForwards` / `ZigMem.Set`. Element type inferred from the dest operand (a `[]T` slice, a `[N]T` array, or `&array`); `@memset`'s value lowers at the element sink. Both are void → rendered as bare statements. `@memcpy` reuses the forward-copy helper (correct for its non-overlapping, equal-length contract) |
 | `@alignOf(T)` / `@offsetOf(T, "f")` | ✅ | Milestone T, part 4 — both are comptime values computed from dotcc's layout model (C-ABI / natural alignment). `@alignOf(T)` folds straight to a literal (the ABI alignment; a struct = the max field alignment). `@offsetOf(T, "field")` reuses the C `offsetof` IR — it folds in a comptime-required position (an array bound `[@offsetOf(T,"m")]u8`) and renders the .NET blittable-layout offset at a runtime use. Use an `extern struct` to pin the C field layout when an exact offset must match real zig (a plain Zig struct may reorder fields) |
-| other `@builtin(...)` (`@typeInfo`/`@TypeOf`/`@field`/…) | 🚫 | reflection / comptime — out of scope (see below) |
+| other `@builtin(...)` (`@typeInfo`/`@TypeOf`/`@field`/…) | 🚫 | reflection / comptime — not lowered today (see below). `@TypeOf` is planned (wall-breaking arc W1 — the lowered expr's synthesized `CType` already exists everywhere); `@typeInfo`/`@field` full reflection stays out unless a narrow curated subset earns demand |
 | wrapping ops `+% -% *%` (+ `op%=`) | ✅ | two's-complement wrap (Milestone P, part 1) — see the operators table above |
 | saturating ops `+\| -\| *\|` (+ `op\|=`) | ✅ | clamp-to-range (Milestone P, part 2) — see the operators table above |
 
@@ -191,48 +194,73 @@ program's libc call is handled. No `@cImport`, no header harvest.
 
 ## Out of scope (the dialect line)
 
-comptime **TYPES** (a `comptime` expression that produces or consumes a `type` — value-comptime
-IS supported, see below), generics / `anytype`, `@import("std")` beyond the curated
-allocator paths (`std.mem.Allocator` + `std.heap.page_allocator`/`c_allocator`/
-`FixedBufferAllocator`/`ArenaAllocator`, with `alloc`/`free`/`create`/`destroy`/`realloc`, ARE
-supported — see the Allocators section),
-`opaque` (the union kinds — tagged `union(enum)`, explicit-tag `union(SomeEnum)`, and untagged
-`union { … }` — are all now ✅ as of Milestone R; data-only `struct`/`enum`/`union`
+Two tiers, since the wall-breaking plan (`fable-wall.md`, 2026-07-05):
+
+**Planned — not lowered today (loud errors), no longer ruled out:** comptime **TYPES**
+(a `comptime` expression that produces or consumes a `type` — value-comptime
+IS supported, see below), generics / `anytype`, and *widening* the curated `std`
+set (`std.ArrayList(T)`, `std.debug.print`). Today `@import("std")` still resolves
+only the curated paths: the allocator paths (`std.mem.Allocator` +
+`std.heap.page_allocator`/`c_allocator`/`FixedBufferAllocator`/`ArenaAllocator`,
+with `alloc`/`free`/`create`/`destroy`/`realloc` — see the Allocators section) and
+the `std.mem` slice helpers; everything else errors clearly.
+
+**Permanent:** `async`/`suspend`, inline assembly (the managed-target root below —
+that reasoning still holds and is not relitigated), and a FULL `std` model (`std`
+stays curated-paths forever; the arc widens the set, never the model).
+
+(`opaque` type declarations stay 🚫 too — neither tier claims them; a small
+demand-driven item, unrelated to the comptime arc.)
+
+(For orientation, things once on this line that ARE now supported: the
+union kinds — tagged `union(enum)`, explicit-tag `union(SomeEnum)`, and untagged
+`union { … }` — are all ✅ as of Milestone R; data-only `struct`/`enum`/`union`
 **with methods** — struct/enum/union methods + the `const Self = @This();` self-type alias
-+ namespaced VALUE `const`s + namespaced mutable `var`s ARE supported — see below),
-`async`/`suspend`, inline assembly. (Explicit error-SET declarations `error{A,B}`,
++ namespaced VALUE `const`s + namespaced mutable `var`s ARE supported — see below.
+Explicit error-SET declarations `error{A,B}`,
 inferred `!T`, and `error.X` ARE supported — Milestones N/X, see the error-unions rows.
 Both `.{…}` and typed `T{…}` init lists ARE supported, including `&T{…}` —
 address-of-a-temporary — via a materialized block-local temp.)
 
-### Why these are out of scope — the reasoning, not just the line
+### Why these are out (and which half is coming back) — the reasoning, not just the line
 
 The cuts aren't arbitrary. dotcc is a **syntax-directed transpiler**: it lowers parsed
-syntax to a C-shaped IR and emits C# (or wat). It has **no compile-time evaluation
-engine**, and it targets a **managed VM**, not native machine code. Nearly every item
-above falls out of one of those two facts.
+syntax to a C-shaped IR and emits C# (or wat). It hosts a compile-time **value**
+evaluator (Milestone T) but no type-level semantic analyzer, and it targets a
+**managed VM**, not native machine code. Every item above falls out of one of those
+two roots — and the two roots now have different fates: the comptime root is a
+**planned arc** (`fable-wall.md`, 2026-07-05), the managed-target root is permanent.
 
-**The comptime root** — catches comptime **types**, generics / `anytype`, and a real `std`.
-These are one wall. comptime splits cleanly in two by one rule: does the evaluation produce a
+**The comptime root (planned)** — catches comptime **types**, generics / `anytype`, and a
+curated-only `std`. comptime splits cleanly in two by one rule: does the evaluation produce a
 **value** or a **type**? Value-comptime — `comptime EXPR`, a `comptime fib(10)` call, comptime
 constants and array bounds — **IS supported** (Milestone T): dotcc hosts a small tree-walking
 interpreter over its own typed IR (the same engine the C `#if` / array-bound folder uses), with
-call frames, loops, and an eval-step budget. What stays out is comptime **types**: a `comptime`
-expression that produces or consumes a `type` (a `type`-returning fn, `comptime T: type`, comptime
-struct construction). That half is *generative* — it monomorphizes the IR — and needs an
-interleaved semantic analyzer (Zig's `Sema` shape), a different compiler than dotcc's bottom-up
-pipeline. Zig generics are comptime-driven **monomorphization** — a fresh,
-differently-*shaped* function body instantiated per type at each call site — so they can't
-map onto C# generics (which can't change a body's shape per `T`, and have no notion of a
-*value*- or *type*-valued generic argument); doing it yourself needs the interpreter.
-Generics ⊂ comptime. And `std` is generics- and comptime-soaked top to bottom, so a
-faithful `std` needs both — hence the curated-paths resolver (model only what maps cleanly
-to the runtime: the allocator, libc; error loudly on the rest) instead of a real `std`
-model. The biggest tuple/`.{…}` consumer — `std.fmt`'s `print("{} {}", .{a, b})` — lives
-here too (comptime reflection over the arg tuple), and is already side-stepped by routing
+call frames, loops, and an eval-step budget. What isn't lowered yet is comptime **types**: a
+`comptime` expression that produces or consumes a `type` (a `type`-returning fn, `comptime T:
+type`, comptime struct construction). That half is *generative* — it monomorphizes the IR.
+An earlier revision of this section ruled it out as "needs an interleaved semantic analyzer
+(Zig's `Sema` shape), a different compiler than dotcc's bottom-up pipeline" — **that
+conclusion was too strong**. A *general* Sema, yes; but Zig generics are comptime-driven
+**monomorphization** — a fresh, differently-*shaped* function body instantiated per type at
+each call site — and that specific shape fits dotcc: **demand-driven, memoized re-lowering of
+retained ASTs**, keyed per call site's resolved comptime arguments, with the Milestone-T
+interpreter providing the binding frames (the C front-end already retains function subtrees;
+`_Generic`'s lowering-time type matcher and `constexpr`'s ConstEval substitution are the other
+accumulated ingredients). What remains true: a generic body can't map onto an **open C#
+generic** (C# can't change a body's shape per `T`, and has no *value*- or *type*-valued
+generic argument) — so user code emits one concrete method/struct per instantiation
+(`max__i32`), and open C# generics appear only in runtime types WE author (`Slice<T>`,
+`ErrUnion<T>`, the planned `ZigList<T>`). Generics ⊂ comptime. `std` is generics- and
+comptime-soaked top to bottom, so the curated-paths resolver stays the model (model only what
+maps cleanly to the runtime: the allocator, libc, the `std.mem` helpers; error loudly on the
+rest) — the arc *widens* the curated set (`std.ArrayList(T)`, `std.debug.print` with a
+lowering-time format-string parse instead of comptime reflection), it never attempts a real
+`std`. The biggest tuple/`.{…}` consumer — `std.fmt`'s `print("{} {}", .{a, b})` — lives
+here (comptime reflection over the arg tuple), and is side-stepped today by routing
 formatting through `extern fn printf` + libc.
 
-**The managed-target root** — catches inline assembly and `async`/`suspend`. Inline `asm`
+**The managed-target root (permanent)** — catches inline assembly and `async`/`suspend`. Inline `asm`
 emits raw target machine code; the C# and wat backends run on a VM with nowhere to put it
 (C# has no inline-asm escape hatch) — untranslatable by construction, the same wall the C
 front-end hits. `async`/`suspend` is a double miss: Zig's stackless coroutines with an
