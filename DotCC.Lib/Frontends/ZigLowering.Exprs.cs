@@ -246,14 +246,15 @@ internal sealed partial class ZigLowering
                 // `.init(…)` CALL never reaches here — the callee Field goes through LowerMethodCall.)
                 if (TryResolveStdPath(expr, out var stdPath))
                 {
-                    return stdPath switch
-                    {
-                        "std.heap.page_allocator" or "std.heap.c_allocator" => MaterializeCHeap(),
-                        "std.mem.Allocator" or "std.heap.FixedBufferAllocator" => throw new IrUnsupportedException(
-                            $"zig `{stdPath}` is a type, not a value"),
-                        _ => throw new IrUnsupportedException(
-                            $"zig std path `{stdPath}` is not modeled (values: std.heap.page_allocator / std.heap.c_allocator)"),
-                    };
+                    // Both StdAllocatorValues rows are the C heap today, so a value use
+                    // materializes the one runtime fat pointer; a distinct AllocKind row would
+                    // switch on the kind here. A curated TYPE path used as a value gets the
+                    // specific "type, not a value" message; the rest the registry-derived list.
+                    if (StdAllocatorValues.ContainsKey(stdPath)) { return MaterializeCHeap(); }
+                    throw new IrUnsupportedException(
+                        StdTypes.ContainsKey(stdPath) || StdGenericTypes.ContainsKey(stdPath)
+                            ? $"zig `{stdPath}` is a type, not a value"
+                            : $"zig std path `{stdPath}` is not modeled (values: {string.Join(" / ", StdAllocatorValues.Keys)})");
                 }
                 if (fld.Arg0.Content is Zig.Ident cbid
                     && _symbols.Resolve(Tok(cbid.Arg0)) is null
