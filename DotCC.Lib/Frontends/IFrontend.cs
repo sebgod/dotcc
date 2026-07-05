@@ -13,7 +13,8 @@ namespace DotCC.Frontends;
 /// then projects onto its surface language. So a second source language (Zig, …) is
 /// "implement <see cref="IFrontend"/> again", exactly as a second target is
 /// "implement <see cref="ITarget"/> again" — neither has to untangle the other.
-/// <para>Implementations live in <c>DotCC.Frontends</c> (today: <c>CFrontend</c>).</para>
+/// <para>Implementations live in <c>DotCC.Frontends</c>: <c>CFrontend</c> and
+/// <c>ZigFrontend</c> (whose binder is <c>ZigLowering</c>).</para>
 /// </summary>
 internal interface IFrontend
 {
