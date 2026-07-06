@@ -15,8 +15,9 @@ namespace DotCC.Tests;
 /// call reuses it. The comptime value is baked into the body as a literal, and a comptime-known <c>if</c>
 /// inside an instance folds to its taken branch (so a recursive generic like <c>fib</c> prunes its base
 /// case and terminates instead of instantiating forever). The instance bodies lower from a re-entrancy-safe
-/// worklist drained after pass 2. V1 cuts (loud): a <c>comptime T: type</c> TYPE param (W3b), a generic
-/// METHOD, and a non-constant comptime argument. End-to-end in the <c>comptime-param</c> zig-oracle program.
+/// worklist drained after pass 2. V1 cuts (loud): a generic METHOD and a non-constant comptime argument.
+/// (A <c>comptime T: type</c> TYPE param is now supported — see <see cref="ZigComptimeTypeParamTests"/>,
+/// wall-plan W3b.) End-to-end in the <c>comptime-param</c> zig-oracle program.
 /// </summary>
 [Collection("ZigFrontend")]
 public sealed class ZigComptimeParamTests
@@ -118,17 +119,6 @@ public sealed class ZigComptimeParamTests
             pub fn main() u8 { var k: i32 = 3; return @intCast(addN(k, 5)); }
             """));
         ex.Message.ShouldContain("compile-time-known");
-    }
-
-    [Fact]
-    public void Comptime_type_parameter_is_rejected_as_W3b()
-    {
-        // A `comptime T: type` TYPE parameter is the next brick (W3b) — a clear, specific cut.
-        var ex = Should.Throw<Exception>(() => EmitZig("""
-            fn id(comptime T: type, x: T) T { return x; }
-            pub fn main() u8 { return id(u8, 42); }
-            """));
-        ex.Message.ShouldContain("W3b");
     }
 
     [Fact]

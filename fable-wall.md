@@ -176,6 +176,36 @@ primitive W4 calls from inside the interpreter.
 > for free via symbol-identity keying; it becomes load-bearing at W3b (a `const U = T;`
 > body alias in two instances would collide in the function-flat `_typeAliases`).
 
+> ✅ **W3b DONE 2026-07-06** (branch `feat/zig-comptime-type-params`) — comptime **TYPE**
+> params, the core generic case. **NO grammar change** — the W3a production `Param ->
+> 'comptime' IDENT ':' Type` already parses `comptime T: type` (`type` lexes as a plain
+> `Zig.Ident`); W3a merely REJECTED it. Shipped: `ParamInfo` now carries the RAW type AST +
+> a `ParamKind` (Runtime / ComptimeValue / ComptimeType) and lowers lazily — because a
+> type-param generic's runtime/return types DEPEND on `T`, its signature CANNOT be lowered
+> at template time. `DeclareFn` gives such a generic a placeholder symbol (never called
+> directly) + retains the template. At a call, `InstantiateGeneric` resolves each type arg
+> in the CALLER's env (`LowerType`, so an alias → its aliased type — **keyed by RESOLVED
+> type**, `const I=i32; maxOf(I,…) ≡ maxOf(i32,…)`), mangles by the resolved type
+> (`MangleType`: `i32`/`u32`/`f64`/`bool`/name/`p_…`), seeds `_typeAliases[T]` SHADOW-SAVED,
+> and lowers the concrete per-instance signature (`int maxOf__i32(int,int)` vs `double
+> maxOf__f64(double,double)`). The instance body drains from the SAME W3a worklist; the body
+> re-seeds `T` (shadow-saved via `_typeAliasShadows`, restored at body exit like W2's
+> `_localContainerShadows`), so `@sizeOf(T)` / a local `var x: T` / a cast resolve. **Scoping
+> answer:** the plan wanted a general flat-maps→frames refactor; the shadow-save/restore of
+> the type-param seed (both around the call-site signature lowering AND around the body) is
+> the load-bearing part — because draining is SEQUENTIAL at top level, save/restore isolates
+> `T↦i32` from a sibling/nested `T↦f64` with NO global frame stack. A body-local `const U =
+> T;` keeps the W1 alias leniency (re-declared per instance, never stale-read across them).
+> The broad flat-maps→frames refactor stays deferred (a cleanup, not a correctness gap under
+> sequential draining). **W3b cuts (loud) → W4 inherits:** a `type`-RETURNING function
+> (`fn Pair(comptime T: type) type` — reified via W2's on-the-fly registration, W4); a
+> generic METHOD; a comptime `if (T == i32)` type-comparison in a body (needs interpreter
+> type VALUES — deferred from W1); a type-FORMER type argument (`maxOf([]u8, …)` — doesn't
+> parse in an argument position). Validation: unit 1488/1488 (+7 `ZigComptimeTypeParamTests`,
+> −1 the flipped W3a rejection pin), zig oracle 155/155 (new `comptime-type-param`,
+> byte-identical vs real zig 0.17: `max_i32=7 max_f64=2.5` / `add_i64=105 add_f32=3.5` /
+> `sz_i32=4 sz_i64=8 sz_f64=8`), functional 215/0, `examples/zig-comptime-type-param/`.
+
 - Grammar: `comptime IDENT : Type` param form (+ `type` as the param type via
   W1's spelling). `anytype` params reserved for W5.
 - A call to a fn with comptime params does NOT lower the callee once:
@@ -234,7 +264,7 @@ because W0 covers more urgent ground.
 
 ```
 W0 (appetizer, independent) ──────────────────────────────┐
-W1 type-values → W2 in-fn containers → W3a value-comptime params ✅ → W3b type params → W4 type-returning fns → W5 anytype
+W1 type-values → W2 in-fn containers → W3a value-comptime params ✅ → W3b type params ✅ → W4 type-returning fns → W5 anytype
 W6 std.debug.print (independent) ──────────────────────────┘
 ```
 
@@ -243,10 +273,14 @@ validation, oracle programs hand-checked against zig 0.17 rules before push).
 W3 was the risk center — SPLIT (as pre-authorized): **W3a (value-comptime params)
 SHIPPED** with the full monomorphization spine (worklist, memoization, mangling,
 call-site rewrite, comptime-if folding); the re-entrancy audit concluded a deferred
-worklist (no synchronous re-entry). **W3b (type params) is next** — the harder half:
-the signature depends on `T`, so it must lower per-instantiation (unlike W3a's
-template-time signatures), and the flat-maps→frames scoping refactor becomes
-load-bearing there (a body-local `const U = T;` must not collide across instances).
+worklist (no synchronous re-entry). **W3a + W3b SHIPPED** — the full monomorphization
+spine plus the harder type-param half (per-instantiation signatures, keyed by resolved
+type; the type-param seed is shadow-saved around both the call-site signature lowering and
+the instance body, which — because draining is sequential at top level — isolates `T↦i32`
+from a sibling/nested `T↦f64` without a general frame-stack refactor). **W4
+(type-returning functions) is next** — `fn Pair(comptime T: type) type { return struct
+{…}; }` reifies via W2's on-the-fly registration, running the body in the interpreter at
+lowering time; then W5 `anytype`, W6 `std.debug.print`.
 
 ## What stays behind the wall (do not relitigate — the reasoning still holds)
 
