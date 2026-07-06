@@ -205,8 +205,8 @@ skeleton, *before* committing to the Python frontend.
 ## 2. Zig — ✅ BUILT: a second `IFrontend` on the shared IR (Milestones A–D merged)
 
 **No longer an idea — it shipped.** The Zig front-end is merged to `main`: a `.zig`
-input is parsed by [`DotCC.Lib/zig.lalr.yaml`](DotCC.Lib/zig.lalr.yaml) (→ generated
-`DotCC.Zig`), lowered by [`ZigLowering`](DotCC.Lib/Frontends/ZigLowering.cs) to the same
+input is parsed by [`DotCC.Lib/zig.lalr.yaml`](../DotCC.Lib/zig.lalr.yaml) (→ generated
+`DotCC.Zig`), lowered by [`ZigLowering`](../DotCC.Lib/Frontends/ZigLowering.cs) to the same
 typed IR as C, and emitted by the same C# backend + runtime. Milestones A–D are done —
 primitive/pointer/optional/error-union types, `extern fn` libc FFI + variadic `printf`,
 control flow (`break`/`continue`/`switch`/range-`for`), and data (`struct`/`enum`/

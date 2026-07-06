@@ -64,5 +64,5 @@ native cdecl export ABI stays proven — not just the managed metadata
 > function type into a `delegate* unmanaged[Cdecl]<…>` so the call meets the
 > library's cdecl exports. That dotcc-consumes-dotcc round-trip is itself a
 > `shared-lib-oracle` test (see the `dlfcn.h` row in
-> [`C-SUPPORT.md`](../../C-SUPPORT.md)). Resolving a library's `extern`s *implicitly*
+> [`C-SUPPORT.md`](../../docs/C-SUPPORT.md)). Resolving a library's `extern`s *implicitly*
 > (linker-style, no `dlopen`) still needs dotcc's planned **import mode**.

@@ -6,7 +6,7 @@ through dotcc (C→.NET 10/C# transpiler), links, and runs — and `testes/all.l
 back) completes with `final OK !!!`. All 28 individual test files pass under the
 `_U=true` user-test harness too. For the full feature history see
 [`ROADMAP.md`](ROADMAP.md); for the language-feature matrix see
-[`../../C-SUPPORT.md`](../../C-SUPPORT.md).
+[`../../docs/C-SUPPORT.md`](../../docs/C-SUPPORT.md).
 
 ## How to run the suite
 

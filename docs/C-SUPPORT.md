@@ -671,7 +671,7 @@ The runtime embedding is what makes dotcc's emit **single-source-of-truth**. The
 
 Forward-looking tracker for *tooling* (distinct from the language/libc coverage above): how dotcc plugs into real build systems. Same legend (✅ done · 🟡 partial · ❌ not yet · 🚫 out of scope).
 
-dotcc plugs into CMake as a real `CMAKE_C_COMPILER` — you write a plain `project(... C)` + `add_executable()` and CMake's own compile→link graph drives dotcc. Demo + how-it-works: [`examples/cmake-demo/`](examples/cmake-demo/).
+dotcc plugs into CMake as a real `CMAKE_C_COMPILER` — you write a plain `project(... C)` + `add_executable()` and CMake's own compile→link graph drives dotcc. Demo + how-it-works: [`examples/cmake-demo/`](../examples/cmake-demo/).
 
 | Item | Status | Notes |
 |---|---|---|

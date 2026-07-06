@@ -38,7 +38,7 @@ Essentially **all of C89/C99, and most of C11/C23** that maps cleanly onto .NET:
 
 It also lowers a real POSIX surface onto the BCL: filesystem and process control, `getpid`/`getppid`/`kill`/`raise` forwarding to the host OS, C11 `<threads.h>`, **BSD sockets** (`<sys/socket.h>`/`<netinet/in.h>`/`<arpa/inet.h>`) over `System.Net.Sockets` — blocking IPv4 TCP/UDP, the same code running on Linux *and* Windows (no Winsock split) — and **dynamic loading** (`<dlfcn.h>`: `dlopen`/`dlsym`/`dlclose`/`dlerror`) over .NET's `NativeLibrary`, where a `dlsym` result cast directly to a function type is lowered to a `delegate* unmanaged[Cdecl]<…>` so the native call uses the C calling convention. The same fn-ptr machinery backs implicit **`-l`/`-L` import mode** — an undefined, called prototype that isn't runtime-provided is bound to a prebuilt native library's export at startup (GOT-style, ld.so search order), with no `dlopen` in the source. dotcc advertises what it actually provides via `_POSIX_VERSION`, and defines no compile-time OS-identity macro (one binary picks the OS at runtime).
 
-The feature-by-feature tracker — every lexical form, type, operator, statement, libc function, and what's partial or out of scope — lives in **[C-SUPPORT.md](C-SUPPORT.md)**. There are no known silent miscompiles: every gap fails loudly at compile time.
+The feature-by-feature tracker — every lexical form, type, operator, statement, libc function, and what's partial or out of scope — lives in **[C-SUPPORT.md](docs/C-SUPPORT.md)**. There are no known silent miscompiles: every gap fails loudly at compile time.
 
 Out of scope by design: VLAs, wide string literals, trigraphs/digraphs, `_BitInt(N)`, GNU extensions.
 
@@ -57,7 +57,7 @@ pub fn main() u8 {
 
 This is an honest, **growing subset** of Zig, not the whole language. Working today: primitive / pointer / optional (`?T`) / error-union (`!T`) types; `extern fn` libc FFI and variadic `printf`; control flow (`if` / `while` / `break` / `continue` / `switch` / range-`for`); and data — `struct`, `enum`, methods + UFCS, and tagged `union(enum)` with `switch` captures. **Slices are next.** Every program is validated against the *real* `zig` compiler by an opt-in differential oracle (`DOTCC_RUN_ZIG_ORACLE=1`) that runs in CI on Linux and Windows.
 
-The feature-by-feature Zig tracker is **[ZIG-SUPPORT.md](ZIG-SUPPORT.md)**; the design rationale for growing new front-ends on the shared IR lives in **[FRONTEND-IDEAS.md](FRONTEND-IDEAS.md)**.
+The feature-by-feature Zig tracker is **[ZIG-SUPPORT.md](docs/ZIG-SUPPORT.md)**; the design rationale for growing new front-ends on the shared IR lives in **[FRONTEND-IDEAS.md](docs/FRONTEND-IDEAS.md)**.
 
 ## Usage
 

@@ -2,9 +2,9 @@
 
 What dotcc's **Zig front-end** supports today. The Zig axis is the second
 implementer of the `IFrontend` seam (the C front-end is the first): a `.zig`
-input is lexed + parsed by the LALR(1) grammar in [`DotCC.Lib/zig.lalr.yaml`](DotCC.Lib/zig.lalr.yaml)
+input is lexed + parsed by the LALR(1) grammar in [`DotCC.Lib/zig.lalr.yaml`](../DotCC.Lib/zig.lalr.yaml)
 (→ generated `DotCC.Zig`), lowered to the neutral typed IR by
-[`ZigLowering`](DotCC.Lib/Frontends/ZigLowering.cs), and emitted by the **same**
+[`ZigLowering`](../DotCC.Lib/Frontends/ZigLowering.cs), and emitted by the **same**
 C# backend + shell as C. So the lowered surface inherits dotcc's whole runtime
 for free — including the libc routing that makes `printf` print.
 
