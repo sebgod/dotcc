@@ -476,6 +476,13 @@ internal sealed partial class ZigLowering
         // rewriting). Declaring every signature up front lets a call forward-reference any
         // function — including a sibling method.
         var entries = new List<(Symbol sym, List<(string name, CType type)> ps, Item body, string? container)>();
+        // Add a free function's pass-1 result to the pass-2 body list — UNLESS it's a generic
+        // (a comptime-param template, wall-plan W3a): a generic has no base body to lower; a call
+        // instantiates a specialized body per resolved value, drained after pass 2.
+        void AddFnEntry((Symbol sym, List<(string name, CType type)> ps, Item body) e)
+        {
+            if (!_genericFns.ContainsKey(e.sym)) { entries.Add(AsEntry(e, null)); }
+        }
         foreach (var decl in decls)
         {
             var d = Unwrap(decl);   // unwrap `pub`
@@ -487,10 +494,10 @@ internal sealed partial class ZigLowering
                 case Zig.ExternCFnProtoNoArgs f: DeclareExternFn(f.Arg3, null, f.Arg6); break;     // extern "c" fn IDENT ( ) Type ;
                 // The optional CallConv (Milestone R, part 5) sits between `)` and the return, so the
                 // return type + body are one slot further right than the pre-CallConv layout.
-                case Zig.FnDef f:          entries.Add(AsEntry(DeclareFn(f.Arg1, f.Arg3, f.Arg6, f.Arg7), null)); break;
-                case Zig.FnDefNoArgs f:    entries.Add(AsEntry(DeclareFn(f.Arg1, null, f.Arg5, f.Arg6), null)); break;
-                case Zig.FnDefErr f:       entries.Add(AsEntry(DeclareFn(f.Arg1, f.Arg3, f.Arg7, f.Arg8, errUnion: true), null)); break;   // `!T` return → ErrorUnion(T)
-                case Zig.FnDefNoArgsErr f: entries.Add(AsEntry(DeclareFn(f.Arg1, null, f.Arg6, f.Arg7, errUnion: true), null)); break;
+                case Zig.FnDef f:          AddFnEntry(DeclareFn(f.Arg1, f.Arg3, f.Arg6, f.Arg7)); break;
+                case Zig.FnDefNoArgs f:    AddFnEntry(DeclareFn(f.Arg1, null, f.Arg5, f.Arg6)); break;
+                case Zig.FnDefErr f:       AddFnEntry(DeclareFn(f.Arg1, f.Arg3, f.Arg7, f.Arg8, errUnion: true)); break;   // `!T` return → ErrorUnion(T)
+                case Zig.FnDefNoArgsErr f: AddFnEntry(DeclareFn(f.Arg1, null, f.Arg6, f.Arg7, errUnion: true)); break;
                 // Container decls were handled in pass 0 — skip here.
                 case Zig.StructDecl or Zig.StructDeclEmpty or Zig.ExternStructDecl or Zig.PackedStructDecl or Zig.EnumDecl or Zig.EnumDeclTyped or Zig.UnionDeclEnum or Zig.UnionDeclTagged or Zig.UnionDeclUntagged: break;
                 // A top-level `const`/`var` is either a comptime binding (an `@import`/allocator
@@ -521,6 +528,18 @@ internal sealed partial class ZigLowering
             _currentContainer = container;
             LowerFnBody(sym, ps, body);
             _currentContainer = null;
+        }
+
+        // Pass 2.5 (wall-plan W3a): drain the monomorphization worklist. A generic call enqueued a
+        // request during pass 2 (or during an earlier drained instance); each instance body lowers HERE,
+        // at top level — never nested in another body's lowering — so the per-fn lowering state starts
+        // clean (the re-entrancy-safe design the plan's audit demanded). A cursor loop (not a fixed
+        // count) picks up transitive / recursive instantiations an instance body enqueues; the total is
+        // bounded by MaxInstantiations (enforced at enqueue). Runs BEFORE the comptime-fold pass so a
+        // `comptime EXPR` inside an instance body is resolved alongside the base-body folds below.
+        for (var i = 0; i < _pendingInstantiations.Count; i++)
+        {
+            LowerInstantiationBody(_pendingInstantiations[i]);
         }
 
         // Pass 3 (Milestone T): resolve every deferred `comptime EXPR`. All function bodies are now

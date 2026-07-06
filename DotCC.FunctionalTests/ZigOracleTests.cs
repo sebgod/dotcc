@@ -1997,6 +1997,29 @@ public sealed class ZigOracleTests
             "    _ = printf(\"p=%d,%d area=%d sum=%d\\n\", p.x, p.y, area(), sum());\n" +
             "}\n", 0,
             "p=3,4 area=42 sum=60" },
+        // GENERIC FUNCTIONS via comptime VALUE params (wall-plan W3a — call-site monomorphization).
+        // addN(10,·)/addN(100,·) → distinct baked-literal instances; powi bakes the loop bound;
+        // fib is a RECURSIVE generic — each fib(n-1) folds to a constant arg, transitively
+        // instantiating fib__9…fib__0 (the worklist + memoization). addN 15/105, pow 1024/81, fib10=55.
+        new object[] { "comptime-param",
+            "extern fn printf(fmt: [*:0]const u8, ...) c_int;\n" +
+            "fn addN(comptime N: i32, x: i32) i32 { return x + N; }\n" +
+            "fn powi(comptime n: u32, x: i64) i64 {\n" +
+            "    var r: i64 = 1;\n" +
+            "    var i: u32 = 0;\n" +
+            "    while (i < n) : (i = i + 1) { r = r * x; }\n" +
+            "    return r;\n" +
+            "}\n" +
+            "fn fib(comptime n: u32) u64 {\n" +
+            "    if (n < 2) return n;\n" +
+            "    return fib(n - 1) + fib(n - 2);\n" +
+            "}\n" +
+            "pub fn main() void {\n" +
+            "    _ = printf(\"addN10=%d addN100=%d\\n\", addN(10, 5), addN(100, 5));\n" +
+            "    _ = printf(\"pow2_10=%lld pow3_4=%lld\\n\", powi(10, 2), powi(4, 3));\n" +
+            "    _ = printf(\"fib10=%llu\\n\", fib(10));\n" +
+            "}\n", 0,
+            "addN10=15 addN100=105\npow2_10=1024 pow3_4=81\nfib10=55" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
