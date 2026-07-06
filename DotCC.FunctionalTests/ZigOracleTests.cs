@@ -2020,6 +2020,23 @@ public sealed class ZigOracleTests
             "    _ = printf(\"fib10=%llu\\n\", fib(10));\n" +
             "}\n", 0,
             "addN10=15 addN100=105\npow2_10=1024 pow3_4=81\nfib10=55" },
+
+        // GENERIC FUNCTIONS via comptime TYPE params (wall-plan W3b — per-instantiation signatures).
+        // maxOf/addOf specialize their parameter+return type per type argument (i32/f64, i64/f32), so
+        // each `__i32`/`__f64`/… instance has a DIFFERENT concrete signature; sizeOfType resolves `T`
+        // inside the body via @sizeOf. `const I = i32;` proves an alias keys the same resolved instance.
+        new object[] { "comptime-type-param",
+            "extern fn printf(fmt: [*:0]const u8, ...) c_int;\n" +
+            "fn maxOf(comptime T: type, a: T, b: T) T { return if (a > b) a else b; }\n" +
+            "fn addOf(comptime T: type, a: T, b: T) T { return a + b; }\n" +
+            "fn sizeOfType(comptime T: type) i32 { return @intCast(@sizeOf(T)); }\n" +
+            "const I = i32;\n" +
+            "pub fn main() void {\n" +
+            "    _ = printf(\"max_i32=%d max_f64=%.1f\\n\", maxOf(I, 3, 7), maxOf(f64, 2.5, 1.5));\n" +
+            "    _ = printf(\"add_i64=%lld add_f32=%.1f\\n\", addOf(i64, 100, 5), @as(f64, addOf(f32, 1.5, 2.0)));\n" +
+            "    _ = printf(\"sz_i32=%d sz_i64=%d sz_f64=%d\\n\", sizeOfType(i32), sizeOfType(i64), sizeOfType(f64));\n" +
+            "}\n", 0,
+            "max_i32=7 max_f64=2.5\nadd_i64=105 add_f32=3.5\nsz_i32=4 sz_i64=8 sz_f64=8" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
