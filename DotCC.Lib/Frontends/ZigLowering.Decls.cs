@@ -22,11 +22,15 @@ internal sealed partial class ZigLowering
     private (Symbol sym, List<(string name, CType type)> ps, Item body) DeclareFn(
         Item nameTok, Item? paramsItem, Item retType, Item body, bool errUnion = false, string? mangledName = null)
     {
+        // Collect parameters BEFORE the return type: a `comptime X: type` TYPE param (W3b) is rejected
+        // here (in CollectParamInfos → LowerComptimeParamType), which must win over lowering a
+        // T-dependent return type (`fn id(comptime T: type, x: T) T` — the `T` return would otherwise
+        // throw a confusing "unknown type" first, since W3a lowers the signature at template time).
+        var allParams = CollectParamInfos(paramsItem, out var variadic);
         var ret = LowerType(retType);
         // A `!T` return (Zig's inferred error set) wraps the payload in an error union;
         // V1 erases the set, so the leading `!` just marks the union (see CType.ErrorUnion).
         if (errUnion) { ret = new CType.ErrorUnion(ret); }
-        var paramInfos = CollectParamInfos(paramsItem, out var variadic);
         // Zig allows `...` ONLY in an extern prototype — a non-extern variadic fn is
         // a compile error. Reject it the same way (faithful to Zig; our subset has no
         // way to access varargs from a Zig body anyway).
@@ -36,19 +40,39 @@ internal sealed partial class ZigLowering
                 $"function '{Tok(nameTok)}': a non-extern Zig function cannot be variadic (use `extern fn`)");
         }
 
+        // A `comptime`-value parameter (wall-plan W3a) has NO runtime storage — it is a
+        // monomorphization key, not a signature slot. The RUNTIME parameters (the rest) are what the
+        // function symbol's signature and body carry; the comptime ones are baked per instantiation.
+        var runtimeParams = allParams.Where(p => !p.IsComptime).Select(p => (p.Name, p.Type)).ToList();
+
         var funcSym = _symbols.Declare(new Symbol
         {
             // A method is lowered to a free function under its mangled `TypeName_method` name
             // (so it can be `&fn`-addressed and called directly); a plain function keeps its name.
             Name = mangledName ?? Tok(nameTok),
             Kind = SymKind.Func,
-            Type = new CType.Func(ret, paramInfos.Select(p => p.type).ToList(), false),
+            Type = new CType.Func(ret, runtimeParams.Select(p => p.Type).ToList(), false),
             IsGlobal = true,
         });
         // Stash the raw return-type AST so the body can resolve its declared error set in pass 2
         // (the set decls aren't processed until pass 1.5) for the foreign-error return check.
         if (ret is CType.ErrorUnion) { _fnErrorReturnTypes[funcSym] = (retType, errUnion); }
-        return (funcSym, paramInfos, body);
+
+        // Any comptime param → a GENERIC (wall-plan W3a): retain the template (all params + the raw
+        // return/body ASTs) and DON'T lower a base body (the caller skips it via `AddFnEntry`); a call
+        // instantiates a specialized body per resolved value. A comptime-param METHOD is a loud cut —
+        // methods pass a `mangledName`, so that discriminates it (W3a is free functions only).
+        if (allParams.Any(p => p.IsComptime))
+        {
+            if (mangledName is not null)
+            {
+                throw new IrUnsupportedException(
+                    $"function '{Tok(nameTok)}': a `comptime`-parameter (generic) method is not supported yet "
+                    + "(wall-plan W3a is free functions only)");
+            }
+            _genericFns[funcSym] = new GenericFnInfo(funcSym, allParams, retType, errUnion, body);
+        }
+        return (funcSym, runtimeParams, body);
     }
 
     /// <summary>Pass 1 for a struct method: declare it as a free function named
@@ -87,15 +111,17 @@ internal sealed partial class ZigLowering
         return AsEntry(e, container);
     }
 
-    /// <summary>Collect a parameter list's <c>(name, type)</c> infos in source order,
-    /// detecting the variadic marker <c>...</c> (Zig's <c>DOT3</c> ParamDecl). The
-    /// marker carries no name/type, so it is excluded from the infos and instead sets
-    /// <paramref name="variadic"/>; it must be the LAST parameter (C / Zig both require
-    /// the fixed params to precede the pack).</summary>
-    private List<(string name, CType type)> CollectParamInfos(Item? paramsItem, out bool variadic)
+    /// <summary>Collect a parameter list's <see cref="ParamInfo"/>s in source order — each carrying
+    /// its <c>(name, type, isComptime)</c> — detecting the variadic marker <c>...</c> (Zig's
+    /// <c>DOT3</c> ParamDecl). The marker carries no name/type, so it is excluded from the infos and
+    /// instead sets <paramref name="variadic"/>; it must be the LAST parameter (C / Zig both require
+    /// the fixed params to precede the pack). A <c>comptime</c>-qualified parameter (wall-plan W3a)
+    /// records <c>IsComptime = true</c> — <see cref="DeclareFn"/> splits those out as the
+    /// monomorphization keys.</summary>
+    private List<ParamInfo> CollectParamInfos(Item? paramsItem, out bool variadic)
     {
         variadic = false;
-        var infos = new List<(string name, CType type)>();
+        var infos = new List<ParamInfo>();
         if (paramsItem is null) { return infos; }
 
         var ps = Flatten(paramsItem);
@@ -111,7 +137,10 @@ internal sealed partial class ZigLowering
                     variadic = true;
                     break;
                 case Zig.Param pm:
-                    infos.Add((Tok(pm.Arg0), LowerType(pm.Arg2)));
+                    infos.Add(new ParamInfo(Tok(pm.Arg0), LowerType(pm.Arg2), IsComptime: false));
+                    break;
+                case Zig.ParamComptime pm:   // 'comptime' IDENT ':' Type
+                    infos.Add(new ParamInfo(Tok(pm.Arg1), LowerComptimeParamType(pm.Arg3, Tok(pm.Arg1)), IsComptime: true));
                     break;
                 default:
                     throw new IrUnsupportedException("zig param: " + (ps[i].Content?.GetType().Name ?? "null"));
@@ -133,11 +162,18 @@ internal sealed partial class ZigLowering
     {
         var ret = LowerType(retType);
         var paramInfos = CollectParamInfos(paramsItem, out var variadic);
+        // An `extern fn` is a C-ABI prototype — a `comptime` parameter (a monomorphization key, not an
+        // ABI slot) makes no sense on one, and real zig rejects it too. Reject loudly.
+        if (paramInfos.Any(p => p.IsComptime))
+        {
+            throw new IrUnsupportedException(
+                $"extern fn '{Tok(nameTok)}': an `extern` prototype cannot have a `comptime` parameter");
+        }
         _symbols.Declare(new Symbol
         {
             Name = Tok(nameTok),
             Kind = SymKind.Func,
-            Type = new CType.Func(ret, paramInfos.Select(p => p.type).ToList(), variadic),
+            Type = new CType.Func(ret, paramInfos.Select(p => p.Type).ToList(), variadic),
             IsGlobal = true,
             FromSystemHeader = true,
         });
@@ -145,9 +181,25 @@ internal sealed partial class ZigLowering
 
     /// <summary>Pass 2: lower a function body. Params share the function's top scope
     /// (a top-block redecl of a param name is an error in C; Zig likewise), so they
-    /// are declared inside the function scope before the body.</summary>
+    /// are declared inside the function scope before the body. A plain (non-generic) body has no
+    /// comptime seeds — a generic INSTANCE body (wall-plan W3a) routes through
+    /// <see cref="LowerFnBodyCore"/> directly with its comptime-value seeds.</summary>
     private void LowerFnBody(Symbol funcSym, List<(string name, CType type)> paramInfos, Item body)
+        => LowerFnBodyCore(funcSym, paramInfos, body, comptimeSeeds: null);
+
+    /// <summary>The shared body-lowering core (pass 2 for a plain function, the worklist drain for a
+    /// generic instance). <paramref name="comptimeSeeds"/> — non-null only for a monomorphized instance
+    /// (wall-plan W3a) — declares each <c>comptime</c>-value parameter as an in-scope symbol with NO
+    /// runtime decl and records its resolved value in <see cref="_comptimeVars"/>, so body references
+    /// substitute the literal (the <c>comptime var</c> mechanism). Because each instance seeds a FRESH
+    /// symbol, distinct instantiations' values never collide (see the class doc's scoping note).</summary>
+    private void LowerFnBodyCore(Symbol funcSym, List<(string name, CType type)> paramInfos, Item body,
+        IReadOnlyList<(string name, long value, CType type)>? comptimeSeeds)
     {
+        // A generic INSTANCE body (comptime seeds present) unlocks comptime control flow — comptime-if
+        // folding + dead-code-after-a-comptime-terminator (wall-plan W3a). Set here; the drain never
+        // nests a body in another, so a plain set/overwrite per call is sufficient (no save/restore).
+        _inGenericInstance = comptimeSeeds is not null;
         _currentFnRet = (funcSym.Type as CType.Func)?.Return;
         _currentFnName = funcSym.Name;   // the mangle prefix for an in-function container (wall-plan W2)
         _localContainerShadows.Clear();  // per-function: local containers scope to this body
@@ -162,6 +214,17 @@ internal sealed partial class ZigLowering
                 : null;
         _symbols.BeginFunction();
         _symbols.EnterScope();
+        // Seed comptime-value parameters BEFORE the runtime params + body (wall-plan W3a): a fresh
+        // in-scope symbol per seed, its value in _comptimeVars, no runtime decl — references fold to
+        // the literal. (A runtime param and a comptime param never share a name in valid Zig.)
+        if (comptimeSeeds is not null)
+        {
+            foreach (var (name, value, type) in comptimeSeeds)
+            {
+                var seedSym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type });
+                _comptimeVars[seedSym] = (value, type);
+            }
+        }
         var paramSyms = paramInfos
             .Select(p => _symbols.Declare(new Symbol { Name = p.name, Kind = SymKind.Param, Type = p.type }))
             .ToList();

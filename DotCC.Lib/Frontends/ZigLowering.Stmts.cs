@@ -48,7 +48,16 @@ internal sealed partial class ZigLowering
             {
                 case Zig.StmtDefer d:    cleanupBody = d.Arg1; onErrorOnly = false; break;
                 case Zig.StmtErrdefer d: cleanupBody = d.Arg1; onErrorOnly = true;  break;
-                default:                 stmts.Add(LowerStmt(it)); continue;
+                default:
+                    var lowered = LowerStmt(it);
+                    stmts.Add(lowered);
+                    // In a generic instance (wall-plan W3a), a statement that comptime-folded to an
+                    // unconditional terminator (a taken `if (n < 2) return n;`) makes the REST of the
+                    // block comptime-DEAD — stop, so a pruned branch's generic calls (the sibling
+                    // `return fib(n-1)+fib(n-2)`) never instantiate. Sound in general (dead code after a
+                    // proven terminator), gated to instance bodies so ordinary lowering is untouched.
+                    if (_inGenericInstance && Terminates(lowered)) { return stmts; }
+                    continue;
             }
             // An `errdefer` makes the function's later `return error.X` propagate via a thrown
             // ZigErrorReturn (so it reaches this catch) — flagged BEFORE lowering the rest, so every
@@ -172,8 +181,8 @@ internal sealed partial class ZigLowering
 
             // if (cond) then [else else]  — `then`/`else`/`body` are themselves Stmts
             // (a single statement or a brace Block), which LowerStmt handles uniformly.
-            case Zig.StmtIf f:          return new If(LowerExpr(f.Arg2), LowerStmt(f.Arg4), null);
-            case Zig.StmtIfElse f:      return new If(LowerExpr(f.Arg2), LowerStmt(f.Arg4), LowerStmt(f.Arg6));
+            case Zig.StmtIf f:          return LowerIfStmt(f.Arg2, f.Arg4, null);
+            case Zig.StmtIfElse f:      return LowerIfStmt(f.Arg2, f.Arg4, f.Arg6);
 
             // `if (opt) |x| then [else else]` — payload-capturing `if` (Milestone M). Binds the
             // optional's payload (value `?T` or niche pointer) — or, with `else |e|`, an
@@ -1099,6 +1108,25 @@ internal sealed partial class ZigLowering
     /// The condition is hoisted to a single-eval temp unless it is already a bare variable (the test
     /// and the binding both read it). A capture name of <c>_</c> tests without binding. An
     /// <paramref name="errCapName"/> (an <c>else |e|</c>) is only valid on an error union.</summary>
+    /// <summary>Lower a plain <c>if</c> statement. In a generic INSTANCE body (wall-plan W3a) a
+    /// COMPTIME-KNOWN condition — one <see cref="IrBuilder.ConstEval"/> folds, because a comptime
+    /// parameter substitutes a literal (e.g. <c>n &lt; 2</c>) — is a Zig comptime-if: only the TAKEN
+    /// branch is lowered, so the dead branch's generic calls never instantiate. Combined with the
+    /// block-level dead-code stop (<see cref="LowerStmtsWithDefers"/>), that's what lets a recursive
+    /// comptime generic (<c>fib</c>) prune its base case and terminate. A RUNTIME condition (ConstEval
+    /// returns null), or any <c>if</c> outside an instance body, lowers to the ordinary two-armed
+    /// <see cref="If"/> — the condition is lowered exactly once either way.</summary>
+    private CStmt LowerIfStmt(Item condItem, Item thenItem, Item? elseItem)
+    {
+        var cond = LowerExpr(condItem);
+        if (_inGenericInstance && _ir.ConstEval(cond) is { } cv)
+        {
+            if (cv != 0) { return LowerStmt(thenItem); }
+            return elseItem is { } taken ? LowerStmt(taken) : new Seq(new List<CStmt>());
+        }
+        return new If(cond, LowerStmt(thenItem), elseItem is { } el ? LowerStmt(el) : null);
+    }
+
     private CStmt LowerIfCapture(Item condItem, string capName, Item thenItem, Item? elseItem, string? errCapName)
     {
         var cond = LowerExpr(condItem);

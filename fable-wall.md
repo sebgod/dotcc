@@ -145,6 +145,37 @@ only the top-level pre-registration pass exists). Mangle on collision
 primitive W4 calls from inside the interpreter.
 
 ### W3 — generic functions: `comptime` params + monomorphization (L — the core)
+
+> ✅ **W3a DONE 2026-07-06** (branch `feat/zig-comptime-params`) — comptime **VALUE**
+> params, the monomorphization SPINE. Shipped: grammar `Param -> 'comptime' IDENT ':'
+> Type` (one production, conflict-free — leading `comptime` terminal ⇒ disjoint
+> FIRST-set). A comptime-value param makes the fn a TEMPLATE (`_genericFns`, retained
+> AST); it is NOT lowered in pass 2 (skipped via `AddFnEntry`), its symbol carries only
+> the RUNTIME-param signature. A call routes to `InstantiateGeneric`: `ConstEval` each
+> comptime arg → resolved value, mangle `fn__value` (= memo key; negatives spell `nV`),
+> declare the instance symbol once, enqueue. **Re-entrancy audit CONCLUSION: a DEFERRED
+> WORKLIST, not synchronous re-entry** — the per-fn state (temp counters, hoist buffer,
+> label/loop stacks, `_currentFn*`, symbol scope) makes mid-body re-entry untenable, so
+> instances drain AFTER pass 2 (cursor loop, picks up transitive/recursive appends;
+> `MaxInstantiations=1024` backstop) — each body lowers at top level, clean state. Each
+> instance seeds its comptime params into `_comptimeVars` (the existing `comptime var`
+> mechanism) keyed by a FRESH symbol → `N↦10` and `N↦100` are inherently isolated (the
+> **scoping obligation's value-param answer** — symbol-identity keying, no frame stack
+> needed). Bonus: **comptime-if folding + dead-code-after-a-comptime-terminator** (gated
+> on `_inGenericInstance`) — a comptime-known `if` folds to its taken branch and code
+> after a taken `return` is dropped, so a RECURSIVE generic (`fib`) prunes its base case
+> and terminates. Validation: unit 1482/1482 (+9 `ZigComptimeParamTests`), zig oracle
+> 154/154 (new `comptime-param`, byte-identical vs real zig 0.17:
+> `addN10=15…/pow…/fib10=55`), functional 215/0, `examples/zig-comptime-param/`.
+> **W3a cuts → W3b inherits:** comptime TYPE params (`comptime T: type` — the signature
+> then DEPENDS on T, so it must lower per-instantiation, not at template time — this is
+> the big lever); a generic METHOD; a value-dependent type (`[n]u8` — same template-time
+> signature limitation); a non-`ConstEval`-able comptime arg (a call needs `comptime f()`);
+> a comptime-if in EXPRESSION (ternary) position (folded only as a statement today).
+> **The flat-maps→frames scoping refactor is NOT yet done** — value-param isolation came
+> for free via symbol-identity keying; it becomes load-bearing at W3b (a `const U = T;`
+> body alias in two instances would collide in the function-flat `_typeAliases`).
+
 - Grammar: `comptime IDENT : Type` param form (+ `type` as the param type via
   W1's spelling). `anytype` params reserved for W5.
 - A call to a fn with comptime params does NOT lower the callee once:
@@ -202,15 +233,20 @@ because W0 covers more urgent ground.
 ## Sequencing
 
 ```
-W0 (appetizer, independent) ──────────────────┐
-W1 type-values → W2 in-fn containers → W3 monomorphization → W4 type-returning fns → W5 anytype
-W6 std.debug.print (independent) ──────────────┘
+W0 (appetizer, independent) ──────────────────────────────┐
+W1 type-values → W2 in-fn containers → W3a value-comptime params ✅ → W3b type params → W4 type-returning fns → W5 anytype
+W6 std.debug.print (independent) ──────────────────────────┘
 ```
 
 Each W = one lalr-feature-loop increment (own branch/PR, three-legged
 validation, oracle programs hand-checked against zig 0.17 rules before push).
-W3 is the risk center — consider splitting (W3a value-comptime params only,
-W3b type params) if the re-entrancy audit turns up dragons.
+W3 was the risk center — SPLIT (as pre-authorized): **W3a (value-comptime params)
+SHIPPED** with the full monomorphization spine (worklist, memoization, mangling,
+call-site rewrite, comptime-if folding); the re-entrancy audit concluded a deferred
+worklist (no synchronous re-entry). **W3b (type params) is next** — the harder half:
+the signature depends on `T`, so it must lower per-instantiation (unlike W3a's
+template-time signatures), and the flat-maps→frames scoping refactor becomes
+load-bearing there (a body-local `const U = T;` must not collide across instances).
 
 ## What stays behind the wall (do not relitigate — the reasoning still holds)
 

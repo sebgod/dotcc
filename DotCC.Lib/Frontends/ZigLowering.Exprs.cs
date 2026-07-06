@@ -596,9 +596,12 @@ internal sealed partial class ZigLowering
         var name = Tok(id.Arg0);
         var sym = _symbols.Resolve(name)
             ?? throw new IrUnsupportedException($"call to unresolved name '{name}'");
-        // A real (named) function → a direct, by-name call.
+        // A real (named) function → a direct, by-name call. A GENERIC (comptime-param template,
+        // wall-plan W3a) instead instantiates a specialized body per resolved comptime-argument tuple
+        // and calls the mangled instance.
         if (sym.Kind is SymKind.Func && sym.Type.Unqualified is CType.Func)
         {
+            if (_genericFns.TryGetValue(sym, out var generic)) { return InstantiateGeneric(sym, generic, argItems); }
             return BuildCall(sym, argItems, receiver: null);
         }
         // A fn-pointer VALUE — a `delegate*` local / parameter typed `CType.Func` (Milestone W,
