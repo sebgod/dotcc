@@ -2077,13 +2077,31 @@ public sealed class ZigOracleTests
             "    _ = printf(\"x=%d len=%d\\n\", getX(p), @as(i32, @intCast(firstLen(arr[0..]))));\n" +
             "}\n", 0,
             "add_i=7 add_f=4.0\nmax_i=7 max_f=4.5\nx=42 len=4" },
+
+        // std.debug.print (wall-plan W6 — the biggest remaining std idiom, last brick of the arc). The
+        // comptime format is parsed at lowering time and its {…} placeholders paired positionally with
+        // the tuple; it lowers to fprintf(stderr, …) — so (like real Zig) the output is on STDERR, which
+        // the harness now captures and folds into the compared output. {d}/{s}/{c}/{x}/{X}, {{ }} braces,
+        // and a literal % are all exercised; {d} on an i64 prints the full 64-bit value.
+        new object[] { "debug-print",
+            "const std = @import(\"std\");\n" +
+            "const Point = struct { x: i32, y: i32 };\n" +
+            "pub fn main() void {\n" +
+            "    const n: i32 = 42;\n" +
+            "    const big: i64 = 5000000000;\n" +
+            "    const p = Point{ .x = 3, .y = 7 };\n" +
+            "    std.debug.print(\"hello {s}! n={d} big={d}\\n\", .{ \"world\", n, big });\n" +
+            "    std.debug.print(\"hex={x} up={X} char={c}\\n\", .{ 255, 255, 65 });\n" +
+            "    std.debug.print(\"point {{x={d}, y={d}}} pct=100%\\n\", .{ p.x, p.y });\n" +
+            "}\n", 0,
+            "hello world! n=42 big=5000000000\nhex=ff up=FF char=A\npoint {x=3, y=7} pct=100%" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
 
     [Theory]
     [MemberData(nameof(Programs))]
-    public void Dotcc_matches_zig(string name, string program, int expectedExit, string expectedStdout)
+    public void Dotcc_matches_zig(string name, string program, int expectedExit, string expectedOutput)
     {
         if (!ZigRunRequested)
         {
@@ -2102,11 +2120,13 @@ public sealed class ZigOracleTests
         var zigPath = Path.Combine(Path.GetTempPath(), $"dotcc-zig-oracle-{name}-{Guid.NewGuid():N}.zig");
         File.WriteAllText(zigPath, program);
         int dotccExit;
-        string dotccStdout;
+        string dotccStdout, dotccStderr;
         try
         {
             var emitted = Compiler.EmitCSharp(new[] { zigPath }, emit: EmitMode.Csproj);
-            (dotccStdout, dotccExit) = FixtureRunner.CompileAndRunCapturingExit(emitted, Array.Empty<string>());
+            // Capture BOTH streams: `std.debug.print` (wall-plan W6) — like real Zig — writes to stderr,
+            // not stdout, so an stdout-only assertion would pass vacuously against it.
+            (dotccStdout, dotccStderr, dotccExit) = FixtureRunner.CompileAndRunCapturingStreams(emitted, Array.Empty<string>());
         }
         finally { File.Delete(zigPath); }
 
@@ -2117,13 +2137,26 @@ public sealed class ZigOracleTests
         File.WriteAllText(zigSrc, program);
         try
         {
-            var (zigStdout, zigExit) = ZigOracle.CompileAndRun(zigSrc, workDir);
+            var (zigStdout, zigStderr, zigExit) = ZigOracle.CompileAndRunStreams(zigSrc, workDir);
 
-            // Both observables — exit code AND stdout — must agree with real zig.
             dotccExit.ShouldBe(zigExit, $"dotcc's Zig path diverges from real zig on '{name}' (exit code)");
             dotccExit.ShouldBe(expectedExit, $"'{name}' did not produce the expected exit code");
             Norm(dotccStdout).ShouldBe(Norm(zigStdout), $"dotcc's Zig path diverges from real zig on '{name}' (stdout)");
-            Norm(dotccStdout).ShouldBe(expectedStdout, $"'{name}' did not produce the expected stdout");
+
+            // STDERR is compared ONLY on the success path (exit 0) — that's where `std.debug.print`
+            // output lives (wall-plan W6). On an error-exit, real Zig dumps a debug stack trace to
+            // stderr (absolute source paths + addresses + an unwind) that is inherently non-reproducible
+            // and that dotcc deliberately does NOT replicate (it maps an unhandled error to a clean exit
+            // 1, stdout untouched), so stderr is not comparable there — only the exit code + stdout are.
+            // The committed expected output is therefore the combined stdout+stderr on success, or just
+            // stdout on an error-exit (each stream captured separately and concatenated in a fixed order,
+            // so the comparison is order-stable; no oracle program interleaves the two).
+            if (zigExit == 0)
+            {
+                Norm(dotccStderr).ShouldBe(Norm(zigStderr), $"dotcc's Zig path diverges from real zig on '{name}' (stderr)");
+            }
+            var actual = zigExit == 0 ? dotccStdout + dotccStderr : dotccStdout;
+            Norm(actual).ShouldBe(expectedOutput, $"'{name}' did not produce the expected output");
         }
         finally
         {

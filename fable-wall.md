@@ -309,6 +309,34 @@ concrete type; a miss errors PER-INSTANTIATION with the trace — exactly real
 Zig's (and C++ templates') behavior, oracle-aligned.
 
 ### W6 — curated `std.debug.print` / basic `std.fmt` (M — separable any time)
+
+> ✅ **W6 DONE 2026-07-06** (branch `feat/zig-debug-print`) — curated `std.debug.print`, the last brick.
+> `std.debug.print("{d} {s}\n", .{n, s})` writes to STDERR (as real Zig does). NO grammar change — it's
+> a curated method-call path in `LowerMethodCall` (like the `std.mem` helpers), hooked when
+> `TryResolveStdPath(fld.Arg0) == "std.debug"`. The comptime format literal is parsed AT LOWERING TIME
+> (`TranslateZigDebugFormat`) walking the ESCAPED lexeme so backslash escapes pass through untouched:
+> `{{`/`}}` → literal braces, a literal `%` → `%%`, and each `{spec}` → the C conversion, pairing
+> positionally with the tuple elements (extracted from the `.{…}` `AnonStructInit`). Lowers to
+> `new Call("fprintf", [stderrRef, fmtLitStr, args…])` — the backend's existing printf-family fluent path
+> emits `fprintf(stderr, "…").Arg(…).Done()`. **KEY INSIGHT (kept the format translation trivial):** the
+> runtime `PrintfBuilder` keys formatting off the actual `.Arg(…)` overload (int/long/ulong/byte*), NOT the
+> length modifier — so `{d}`/`{}` → `%d` for EVERY integer width (an i64 `{d}` prints the full 64-bit
+> value), `{x}`/`{X}`→`%x`/`%X`, `{c}`→`%c`, `{s}`→`%s`; no `%lld`/`%zu` bookkeeping needed. `stderr` is a
+> synthetic `VarRef` to a `FromSystemHeader` Symbol (TargetName `stderr`, rendered verbatim, surfaced by
+> `using static Libc`, routed to `Console.Error` by the runtime `WriterFor`). **HARNESS CHANGE (stderr was
+> the real design constraint):** `std.debug.print` → stderr, but the oracle discarded zig's stderr and the
+> functional harness captured only `Console.Out` — so an stdout assertion would pass VACUOUSLY. Added
+> `FixtureRunner.CompileAndRunCapturingStreams` (captures `Console.Error` too) + `ZigOracle.CompileAndRunStreams`
+> (returns the binary's stderr); `Dotcc_matches_zig` now compares the COMBINED `stdout+stderr` (each captured
+> separately, concatenated in a fixed order → order-stable; no oracle program mixes the two). All existing
+> cases have empty stderr, so combined == stdout == their expected. **Cuts (loud):** a float / bool / slice /
+> struct arg (Zig's decimal-float / true-false / .len-bytes formatting can't match a C conversion
+> byte-for-byte); a width/named specifier (`{d:0>5}`) / `{any}`; a non-literal format; a non-`print`
+> `std.debug` member. Validation: unit 1510/1510 (+9 `ZigDebugPrintTests`), functional 215/0,
+> `examples/zig-debug-print/`; the `debug-print` zig-oracle (hand-checked valid zig 0.17, dotcc stderr
+> byte-output `hello world! n=42 big=5000000000` / `hex=ff up=FF char=A` / `point {x=3, y=7} pct=100%`)
+> runs in CI. **The entire planned arc W0–W6 is now COMPLETE.**
+
 The biggest remaining std idiom: `std.debug.print("{d} {s}\n", .{n, s})`.
 No reflection needed (AOT rule): dotcc parses the format string AT LOWERING TIME
 (the printf-builder precedent) and pairs placeholders with the tuple elements
@@ -320,10 +348,14 @@ because W0 covers more urgent ground.
 ## Sequencing
 
 ```
-W0 (appetizer, independent) ──────────────────────────────┐
-W1 type-values → W2 in-fn containers → W3a value-comptime params ✅ → W3b type params ✅ → W4 type-returning fns ✅ → W5 anytype ✅
-W6 std.debug.print (independent) ──────────────────────────┘
+W0 ✅ (appetizer, independent) ────────────────────────────┐
+W1 type-values ✅ → W2 in-fn containers ✅ → W3a value-comptime params ✅ → W3b type params ✅ → W4 type-returning fns ✅ → W5 anytype ✅
+W6 std.debug.print ✅ (independent) ────────────────────────┘
 ```
+
+**★ The entire planned arc W0–W6 is COMPLETE (all merged to main).** What's left is only
+deliberate, non-arc work: widening the curated `std` set on demand (behind the same
+curated-paths resolver), and the permanent exclusions below.
 
 Each W = one lalr-feature-loop increment (own branch/PR, three-legged
 validation, oracle programs hand-checked against zig 0.17 rules before push).
@@ -343,9 +375,14 @@ brick). **W5 (`anytype`) SHIPPED** — as predicted "cheap after W3": no grammar
 `ParamKind.AnyType` routed through the W3b per-instantiation branch, the one new idea being the
 HYBRID nature (a monomorphization key AND a runtime slot; the type inferred via `@TypeOf(arg)`,
 seeded into `_anytypeSeeds` so a `@TypeOf(param)` signature resolves, the arg still passed at
-runtime). The **generative core (W1–W5) is now complete**; only **W6 `std.debug.print`** (a
-curated-std widening, independent of the arc — needs no comptime reflection, just a lowering-time
-format-string parse) remains on the planned ladder.
+runtime). **W6 (`std.debug.print`) SHIPPED** — a curated method-call path (no grammar change), the
+comptime format parsed at lowering time and lowered to a stderr `fprintf` over the existing
+printf-builder; the format translation stayed trivial because the runtime builder keys off the
+`.Arg(…)` overload, not the length modifier. The stderr target forced a small harness change
+(capture + compare `Console.Error` / the binary's stderr, folded into the combined-output
+comparison). **The entire planned arc W0–W6 is now COMPLETE and merged to main.** What remains is
+only deliberate non-arc work: widening the curated `std` set on demand, and the permanent
+exclusions below.
 
 ## What stays behind the wall (do not relitigate — the reasoning still holds)
 
@@ -353,12 +390,20 @@ format-string parse) remains on the planned ladder.
   scheduler), AND removed from pinned zig 0.17 (the oracle literally cannot
   validate it).
 - **Inline `asm`** — both backends target a VM; untranslatable by construction.
-- **Full `std` fidelity** — std stays curated-paths forever; W0/W6 widen the
-  curated set, they don't change the model.
+- **`std` — three honest tiers, NOT one flat "curated forever"** (corrected 2026-07-06;
+  full reasoning in ZIG-SUPPORT.md § "Why these are out"): (1) **leaf std** (`std.mem`,
+  `std.math`, `ArrayList`) is ordinary Zig and can increasingly be *compiled from upstream
+  source* as the front-end fills in — curation (`ZigList<T>`, the `std.mem` helpers, W6's
+  format parse) is a *shortcut*, not a language wall; (2) **std's comptime-reflection codegen**
+  (`switch (@typeInfo(T))` that `std.fmt`/`std.meta` lean on) is the one real *unbuilt* brick —
+  buildable on the Milestone-T interpreter, just not built; (3) **std's platform floor**
+  (`std.os`/`std.fs`/`std.Thread` = syscalls + inline `asm`) is the ONLY permanent part — a
+  managed target has no syscall surface, so it must be *redirected* onto the BCL like C's libc
+  already is, not lowered.
 - **Safe-mode overflow traps on plain `+`** — implementable (C# `checked`) but a
   semantics/perf FLIP, not a feature add; separate decision if ever.
-- `@typeInfo` full reflection / `usingnamespace` — curate narrow subsets only on
-  demonstrated demand.
+- `@typeInfo` full reflection / `usingnamespace` — narrow subsets only on demonstrated
+  demand (this IS tier (2) above — the unbuilt-but-buildable brick).
 
 ## Doc debt to pay as bricks fall
 
