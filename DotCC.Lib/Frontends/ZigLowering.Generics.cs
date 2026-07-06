@@ -306,4 +306,149 @@ internal sealed partial class ZigLowering
         foreach (var ch in s) { sb.Append(char.IsLetterOrDigit(ch) ? ch : '_'); }
         return sb.ToString();
     }
+
+    // ---- type-returning functions (wall-plan W4) -------------------------
+
+    /// <summary>A type-RETURNING generic function's retained template (wall-plan W4):
+    /// <c>fn Pair(comptime T: type) type { return struct { a: T, b: T }; }</c>. Unlike an ordinary
+    /// generic (which emits a specialized runtime BODY), a type-returning function is a COMPTIME type
+    /// constructor — it emits no runtime code; a call in a type position REIFIES a fresh struct per
+    /// resolved type argument (<c>Pair__i32</c>, memoized). Carries the template symbol, its
+    /// (all-comptime-TYPE) params, and the raw body AST (a single <c>return struct {…}</c>).</summary>
+    private readonly record struct TypeReturningGenericInfo(Symbol Template, IReadOnlyList<ParamInfo> Params, Item Body);
+
+    /// <summary>Type-returning generic function symbols → their retained template (wall-plan W4).
+    /// Populated in pass 1 (<see cref="DeclareFn"/>); a call to one in a type position (or a type-alias
+    /// RHS) routes to <see cref="EvalTypeReturningCall"/> via <see cref="TryEvalTypeReturningCall"/>.
+    /// Never lowered as a runtime function (skipped in the pass-1 body list, like a generic).</summary>
+    private readonly Dictionary<Symbol, TypeReturningGenericInfo> _typeReturningGenerics = new();
+
+    /// <summary>Recognize a call to a type-returning generic (wall-plan W4) — <c>Pair(i32)</c> in a
+    /// type / type-alias position — and evaluate it to the reified <see cref="CType"/>. Handles both the
+    /// with-args (<see cref="Zig.CallArgs"/>) and no-args (<see cref="Zig.CallNoArgs"/>) call shapes; the
+    /// callee must be a bare identifier bound to a symbol in <see cref="_typeReturningGenerics"/>.
+    /// Returns false for any other node (a curated std generic, a runtime call, a non-call), so the
+    /// caller falls through to its normal handling.</summary>
+    private bool TryEvalTypeReturningCall(Item maybeCall, out CType type)
+    {
+        type = CType.Void;
+        Item calleeItem;
+        IReadOnlyList<Item> args;
+        switch (maybeCall.Content)
+        {
+            case Zig.CallArgs ca:   calleeItem = ca.Arg0; args = Flatten(ca.Arg2); break;
+            case Zig.CallNoArgs cn: calleeItem = cn.Arg0; args = System.Array.Empty<Item>(); break;
+            default: return false;
+        }
+        if (calleeItem.Content is Zig.Ident id
+            && _symbols.Resolve(Tok(id.Arg0)) is { } sym
+            && _typeReturningGenerics.TryGetValue(sym, out var info))
+        {
+            type = EvalTypeReturningCall(sym, info, args);
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>Evaluate (or reuse) a type-returning generic at a use site (wall-plan W4): resolve each
+    /// comptime TYPE argument to a concrete type in the CALLER's env (an alias → its aliased type, so the
+    /// instance is keyed by the RESOLVED type — <c>Pair(i32)</c> ≡ <c>Pair(I)</c> for <c>const I=i32</c>),
+    /// mangle by the resolved types (<c>Pair__i32</c>), and REIFY the returned <c>struct {…}</c> under
+    /// that name — its fields lowered with the type params seeded into <see cref="_typeAliases"/>
+    /// (shadow-saved), so <c>a: T</c> becomes the concrete field type and <c>next: ?*@This()</c> a
+    /// self-pointer. Memoized: the mangled type is registered in <see cref="_containerTypes"/> BEFORE the
+    /// fields lower, so a self-referential field / a recursive <c>Pair(T)</c> inside the body resolves to
+    /// the in-progress type, and a repeat call reuses it. Returns the reified <see cref="CType.Named"/>.
+    /// V1: fields-only (a method / <c>const</c> member in the returned struct is a loud cut), a single
+    /// <c>return struct {…}</c> body.</summary>
+    private CType EvalTypeReturningCall(Symbol templateSym, TypeReturningGenericInfo info, IReadOnlyList<Item> argItems)
+    {
+        if (argItems.Count != info.Params.Count)
+        {
+            throw new IrUnsupportedException(
+                $"call to type-returning generic '{templateSym.Name}': expected {info.Params.Count} type argument(s), got {argItems.Count}");
+        }
+        // Resolve each comptime TYPE argument in the caller's env → seeds + mangle tokens. (DeclareFn
+        // guaranteed every parameter of a type-returning generic is a `comptime T: type`.)
+        var typeSeeds = new List<(string name, CType type)>(argItems.Count);
+        var mangleTokens = new List<string>(argItems.Count);
+        for (var i = 0; i < info.Params.Count; i++)
+        {
+            var argType = LowerType(argItems[i]).Unqualified;
+            typeSeeds.Add((info.Params[i].Name, argType));
+            mangleTokens.Add(MangleType(argType));
+        }
+        var mangled = mangleTokens.Count == 0 ? templateSym.Name : templateSym.Name + "__" + string.Join("_", mangleTokens);
+
+        // Memoized — also short-circuits a self-referential field / recursive use, since the mapping is
+        // installed BELOW before the fields are lowered.
+        if (_containerTypes.TryGetValue(mangled, out var existing)) { return existing; }
+
+        // Extract the returned struct's members from the single-`return struct {…}` body, splitting off
+        // (and rejecting) any method / const member — V1 is fields-only (like the W2 in-fn container).
+        var membersItem = TypeReturnedStructMembers(templateSym.Name, info.Body);
+        var (fields, methods, consts) = membersItem is { } m
+            ? SplitMembers(m)
+            : (new List<Item>(), new List<Item>(), new List<Item>());
+        if (methods.Count > 0 || consts.Count > 0)
+        {
+            throw new IrUnsupportedException(
+                $"type-returning generic '{templateSym.Name}': the returned `struct` is fields-only in V1 (wall-plan W4) — "
+                + "a method or `const` member in the returned type is not supported yet");
+        }
+
+        // Seed the type params (shadow-saved) + point @This() at the in-progress type, reify, restore.
+        var typeShadows = new List<(string name, CType? prev)>(typeSeeds.Count);
+        foreach (var (name, type) in typeSeeds)
+        {
+            typeShadows.Add((name, _typeAliases.TryGetValue(name, out var pv) ? pv : (CType?)null));
+            _typeAliases[name] = type;
+        }
+        var savedContainer = _currentContainer;
+        var mangledType = new CType.Named(mangled);
+        _containerTypes[mangled] = mangledType;   // memo + @This() target; BEFORE reify for self-ref
+        _currentContainer = mangled;
+        try
+        {
+            RegisterStruct(mangled, fields);
+        }
+        finally
+        {
+            _currentContainer = savedContainer;
+            for (var i = typeShadows.Count - 1; i >= 0; i--)
+            {
+                var (name, prev) = typeShadows[i];
+                if (prev is { } p) { _typeAliases[name] = p; } else { _typeAliases.Remove(name); }
+            }
+        }
+        return mangledType;
+    }
+
+    /// <summary>Extract the member list of a type-returning generic's returned <c>struct {…}</c>
+    /// (wall-plan W4). V1 requires the body to be a SINGLE <c>return struct {…};</c> — a
+    /// <see cref="Zig.ReturnStructType"/> (its <c>FieldDecls</c>) or an empty
+    /// <see cref="Zig.ReturnStructTypeEmpty"/> (returns null → zero fields). Any other body (a non-struct
+    /// return, extra statements, control flow) is a loud cut.</summary>
+    private Item? TypeReturnedStructMembers(string fnName, Item body)
+    {
+        IReadOnlyList<Item> stmts = body.Content switch
+        {
+            Zig.Block b => Flatten(b.Arg1),
+            _ => System.Array.Empty<Item>(),
+        };
+        if (stmts.Count != 1)
+        {
+            throw new IrUnsupportedException(
+                $"type-returning generic '{fnName}': V1 supports a single `return struct {{ … }};` body (wall-plan W4) — "
+                + "extra statements / control flow (a comptime `if (T == …)` branch) are not supported yet");
+        }
+        return stmts[0].Content switch
+        {
+            Zig.ReturnStructType rst => rst.Arg3,   // FieldDecls
+            Zig.ReturnStructTypeEmpty => null,       // `return struct {};` — zero fields
+            _ => throw new IrUnsupportedException(
+                $"type-returning generic '{fnName}': V1's body must be `return struct {{ … }};` (wall-plan W4) — "
+                + "returning a non-struct type (a bare `T`, an enum / union, a type-former) is not supported yet"),
+        };
+    }
 }

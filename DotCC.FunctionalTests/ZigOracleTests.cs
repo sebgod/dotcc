@@ -2037,6 +2037,25 @@ public sealed class ZigOracleTests
             "    _ = printf(\"sz_i32=%d sz_i64=%d sz_f64=%d\\n\", sizeOfType(i32), sizeOfType(i64), sizeOfType(f64));\n" +
             "}\n", 0,
             "max_i32=7 max_f64=2.5\nadd_i64=105 add_f32=3.5\nsz_i32=4 sz_i64=8 sz_f64=8" },
+
+        // TYPE-RETURNING functions (wall-plan W4 — the ArrayList shape). `Pair(T)`/`Node(T)` REIFY a
+        // fresh struct per resolved type argument (Pair__i32 / Pair__f64 / Node__i32); a field typed
+        // `T` gets the concrete type, `?*const @This()` a self-pointer. `const PairI32 = Pair(i32)` is
+        // a top-level alias (resolved once the fn is declared); the head→tail chain derefs the self-ptr.
+        new object[] { "type-returning-fn",
+            "extern fn printf(fmt: [*:0]const u8, ...) c_int;\n" +
+            "fn Pair(comptime T: type) type { return struct { a: T, b: T }; }\n" +
+            "fn Node(comptime T: type) type { return struct { value: T, next: ?*const @This() }; }\n" +
+            "const PairI32 = Pair(i32);\n" +
+            "pub fn main() void {\n" +
+            "    const pi: PairI32 = .{ .a = 3, .b = 4 };\n" +
+            "    const pf: Pair(f64) = .{ .a = 1.5, .b = 2.5 };\n" +
+            "    const tail: Node(i32) = .{ .value = 20, .next = null };\n" +
+            "    const head: Node(i32) = .{ .value = 10, .next = &tail };\n" +
+            "    _ = printf(\"pi=%d,%d pf=%.1f,%.1f\\n\", pi.a, pi.b, pf.a, pf.b);\n" +
+            "    _ = printf(\"head=%d tail=%d\\n\", head.value, head.next.?.value);\n" +
+            "}\n", 0,
+            "pi=3,4 pf=1.5,2.5\nhead=10 tail=20" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

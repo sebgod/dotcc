@@ -489,7 +489,12 @@ internal sealed partial class ZigLowering
         // instantiates a specialized body per resolved value, drained after pass 2.
         void AddFnEntry((Symbol sym, List<(string name, CType type)> ps, Item body) e)
         {
-            if (!_genericFns.ContainsKey(e.sym)) { entries.Add(AsEntry(e, null)); }
+            // A generic (W3a/W3b) has no base body to lower; a type-returning generic (W4) emits no
+            // runtime code at all (each use reifies a type) — skip both from the pass-2 body list.
+            if (!_genericFns.ContainsKey(e.sym) && !_typeReturningGenerics.ContainsKey(e.sym))
+            {
+                entries.Add(AsEntry(e, null));
+            }
         }
         foreach (var decl in decls)
         {
@@ -576,8 +581,16 @@ internal sealed partial class ZigLowering
         {
             switch (Unwrap(decl).Content)
             {
-                case Zig.ConstDecl d      when !IsComptimeBound(Tok(d.Arg1)): LowerGlobal(d.Arg1, null,   d.Arg3); break;  // const IDENT = RhsExpr ;
-                case Zig.ConstDeclTyped d when !IsComptimeBound(Tok(d.Arg1)): LowerGlobal(d.Arg1, d.Arg3, d.Arg5); break;  // const IDENT : Type = RhsExpr ;
+                // Re-attempt the comptime-const binding now that pass 1 has declared every function: a
+                // top-level `const P = Pair(i32);` whose RHS calls a type-returning generic (wall-plan
+                // W4) couldn't resolve in pass 0 (the fn wasn't declared yet), so it records the type
+                // alias HERE and emits no global. A plain runtime const still returns false → a global.
+                case Zig.ConstDecl d      when !IsComptimeBound(Tok(d.Arg1)):
+                    if (!TryComptimeConstBinding(Tok(d.Arg1), d.Arg3)) { LowerGlobal(d.Arg1, null, d.Arg3); }
+                    break;  // const IDENT = RhsExpr ;
+                case Zig.ConstDeclTyped d when !IsComptimeBound(Tok(d.Arg1)):
+                    if (!TryComptimeConstBinding(Tok(d.Arg1), d.Arg5)) { LowerGlobal(d.Arg1, d.Arg3, d.Arg5); }
+                    break;  // const IDENT : Type = RhsExpr ;
                 case Zig.VarDecl d:        LowerGlobal(d.Arg1, null,   d.Arg3); break;  // var IDENT = RhsExpr ;
                 case Zig.VarDeclTyped d:   LowerGlobal(d.Arg1, d.Arg3, d.Arg5); break;  // var IDENT : Type = RhsExpr ;
                 // A typed global with align/linksection modifiers (Milestone R, part 5) — modifiers

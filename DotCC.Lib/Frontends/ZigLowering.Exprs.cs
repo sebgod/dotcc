@@ -596,6 +596,15 @@ internal sealed partial class ZigLowering
         var name = Tok(id.Arg0);
         var sym = _symbols.Resolve(name)
             ?? throw new IrUnsupportedException($"call to unresolved name '{name}'");
+        // A type-returning generic (wall-plan W4) is a COMPTIME type constructor — calling it in value
+        // position is meaningless; it must appear in a TYPE position (a type annotation / alias / typed
+        // literal), where LowerType reifies it. Reject a value-position call clearly.
+        if (_typeReturningGenerics.ContainsKey(sym))
+        {
+            throw new IrUnsupportedException(
+                $"'{name}' is a type-returning generic — use it in a TYPE position (`const x: {name}(…) = …` / "
+                + $"`{name}(…){{…}}`), not as a value");
+        }
         // A real (named) function → a direct, by-name call. A GENERIC (comptime-param template,
         // wall-plan W3a) instead instantiates a specialized body per resolved comptime-argument tuple
         // and calls the mangled instance.
