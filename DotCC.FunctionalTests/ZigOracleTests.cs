@@ -2056,6 +2056,27 @@ public sealed class ZigOracleTests
             "    _ = printf(\"head=%d tail=%d\\n\", head.value, head.next.?.value);\n" +
             "}\n", 0,
             "pi=3,4 pf=1.5,2.5\nhead=10 tail=20" },
+
+        // ANYTYPE parameters (wall-plan W5 — the monomorphization capstone). An `anytype` param's type
+        // is INFERRED from the argument (`@TypeOf(arg)`), then keys a specialization like a comptime TYPE
+        // param — but the arg is ALSO passed at runtime. add/maxOf specialize per inferred pair (i32/f64),
+        // the `@TypeOf(a)` return following suit; getX/firstLen show duck-typed member access (`.x` on a
+        // struct, `.len` on a slice) lowering against the inferred concrete type.
+        new object[] { "anytype-param",
+            "extern fn printf(fmt: [*:0]const u8, ...) c_int;\n" +
+            "const Point = struct { x: i32, y: i32 };\n" +
+            "fn add(a: anytype, b: anytype) @TypeOf(a) { return a + b; }\n" +
+            "fn maxOf(a: anytype, b: anytype) @TypeOf(a) { return if (a > b) a else b; }\n" +
+            "fn getX(p: anytype) i32 { return p.x; }\n" +
+            "fn firstLen(s: anytype) usize { return s.len; }\n" +
+            "pub fn main() void {\n" +
+            "    _ = printf(\"add_i=%d add_f=%.1f\\n\", add(@as(i32, 3), @as(i32, 4)), add(@as(f64, 1.5), @as(f64, 2.5)));\n" +
+            "    _ = printf(\"max_i=%d max_f=%.1f\\n\", maxOf(@as(i32, 7), @as(i32, 2)), maxOf(@as(f64, 1.5), @as(f64, 4.5)));\n" +
+            "    const p = Point{ .x = 42, .y = 7 };\n" +
+            "    const arr = [_]i32{ 1, 2, 3, 4 };\n" +
+            "    _ = printf(\"x=%d len=%d\\n\", getX(p), @as(i32, @intCast(firstLen(arr[0..]))));\n" +
+            "}\n", 0,
+            "add_i=7 add_f=4.0\nmax_i=7 max_f=4.5\nx=42 len=4" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

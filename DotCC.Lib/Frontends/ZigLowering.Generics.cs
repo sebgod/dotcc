@@ -9,11 +9,11 @@ using LALR.CC.LexicalGrammar;
 
 namespace DotCC.Frontends;
 
-/// <summary>Generic functions — call-site monomorphization (wall-plan W3a/W3b). A <c>comptime</c>
-/// parameter turns a function into a TEMPLATE: it is NOT lowered once; a call instantiates a
-/// SPECIALIZED body per resolved comptime-argument tuple (C++-template-style monomorphization over
+/// <summary>Generic functions — call-site monomorphization (wall-plan W3a/W3b/W5). A <c>comptime</c>
+/// or <c>anytype</c> parameter turns a function into a TEMPLATE: it is NOT lowered once; a call
+/// instantiates a SPECIALIZED body per resolved-argument tuple (C++-template-style monomorphization over
 /// the retained AST), emitted under a deterministic mangled name and memoized by key so a repeat call
-/// reuses it. Two kinds of comptime parameter:
+/// reuses it. Three kinds of monomorphization-key parameter:
 /// <list type="bullet">
 /// <item><b>VALUE</b> (<c>comptime N: i32</c>, wall-plan W3a) — the resolved integer is baked into the
 /// body as a literal; the signature does NOT depend on it, so it is lowered once at template time.</item>
@@ -23,6 +23,14 @@ namespace DotCC.Frontends;
 /// concrete <see cref="CType"/>, seeded into <see cref="_typeAliases"/> so the signature (and later the
 /// body) resolve <c>T</c> through <see cref="LowerTypeName"/>; the instance is mangled by the resolved
 /// TYPE (<c>max__i32</c> / <c>max__f64</c>) — an alias for the same type keys the same instance.</item>
+/// <item><b>ANYTYPE</b> (<c>a: anytype</c>, wall-plan W5) — a HYBRID of a TYPE key and a runtime slot.
+/// Unlike a comptime TYPE param (an explicit type argument, consumed at compile time), an anytype
+/// param's type is INFERRED from the actual argument (<c>T := @TypeOf(arg)</c>, <see cref="InferArgType"/>)
+/// AND the argument is still passed at runtime. The inferred type keys / mangles the instance and is
+/// seeded into <see cref="_anytypeSeeds"/> so a signature spelled <c>@TypeOf(param)</c> resolves; the
+/// instance body binds the param as an ordinary runtime symbol of the inferred type, so duck-typed use
+/// (member access, arithmetic) lowers against the concrete type, a mismatch failing PER INSTANTIATION.
+/// The signature depends on the inferred type, so — like a TYPE param — it is lowered per instance.</item>
 /// </list>
 ///
 /// <para>RE-ENTRANCY (the audit the plan mandated FIRST): the body lowering carries a lot of per-fn
@@ -70,16 +78,27 @@ internal sealed partial class ZigLowering
         /// <summary>A <c>comptime T: type</c> TYPE parameter — a monomorphization key that makes the
         /// signature depend on the resolved type (W3b).</summary>
         ComptimeType,
+        /// <summary>An <c>a: anytype</c> INFERRED-type parameter (wall-plan W5) — a monomorphization key
+        /// like a comptime TYPE param, but the type is inferred from the ACTUAL ARGUMENT
+        /// (<c>@TypeOf(arg)</c>) rather than passed explicitly, AND the argument is still passed at
+        /// runtime (unlike a <see cref="ComptimeType"/> arg, which is a type spelling consumed at compile
+        /// time). So an anytype param is a HYBRID: it seeds the instance's type environment (keying the
+        /// specialization) and ALSO occupies a runtime signature slot.</summary>
+        AnyType,
     }
 
     /// <summary>One parameter of a function signature, carrying its RAW type AST (lowered lazily — a
     /// type-param generic's runtime-parameter and return types depend on <c>T</c> and can only resolve
     /// per-instantiation, once <c>T</c> is bound) and its <see cref="ParamKind"/>. The variadic marker
     /// <c>...</c> is tracked separately (it has no name/type). For a <see cref="ParamKind.ComptimeType"/>
-    /// param the <see cref="TypeAst"/> is the <c>type</c> keyword itself and is never lowered.</summary>
+    /// param the <see cref="TypeAst"/> is the <c>type</c> keyword and is never lowered; for a
+    /// <see cref="ParamKind.AnyType"/> param it is the <c>anytype</c> keyword and is likewise never
+    /// lowered (the type is inferred from the argument).</summary>
     private readonly record struct ParamInfo(string Name, Item TypeAst, ParamKind Kind)
     {
-        /// <summary>True for either comptime kind — a monomorphization key, not a runtime slot.</summary>
+        /// <summary>True for either comptime kind — a monomorphization key with NO runtime slot. An
+        /// <see cref="ParamKind.AnyType"/> param is deliberately EXCLUDED (it is a key AND a runtime
+        /// slot); callers that mean "any kind that makes the function generic" test the kinds directly.</summary>
         public bool IsComptime => Kind is ParamKind.ComptimeValue or ParamKind.ComptimeType;
     }
 
@@ -172,15 +191,23 @@ internal sealed partial class ZigLowering
         var mangleTokens = new List<string>();
         var typeSeeds = new List<(string name, CType type)>();
         var valueSeeds = new List<(string name, long value, CType type)>();
+        var anytypeSeeds = new List<(string name, CType type)>();
         var runtimeArgItems = new List<Item>();
 
-        // Phase 1 — resolve comptime TYPE args in the CALLER's environment (a type-arg spelled as an
-        // alias resolves to its aliased type, so it keys the same instance as the underlying type).
+        // Phase 1 — resolve each comptime TYPE arg in the CALLER's environment (a type-arg spelled as an
+        // alias resolves to its aliased type, so it keys the same instance as the underlying type), and
+        // INFER each `anytype` arg's type from the actual argument (`T := @TypeOf(arg)`, wall-plan W5).
         for (var i = 0; i < g.Params.Count; i++)
         {
-            if (g.Params[i].Kind != ParamKind.ComptimeType) { continue; }
-            var argType = LowerType(argItems[i]).Unqualified;
-            typeSeeds.Add((g.Params[i].Name, argType));
+            switch (g.Params[i].Kind)
+            {
+                case ParamKind.ComptimeType:
+                    typeSeeds.Add((g.Params[i].Name, LowerType(argItems[i]).Unqualified));
+                    break;
+                case ParamKind.AnyType:
+                    anytypeSeeds.Add((g.Params[i].Name, InferArgType(argItems[i])));
+                    break;
+            }
         }
 
         // Phase 2 — seed the resolved type args (shadow-saved), so a later parameter / return type that
@@ -190,6 +217,15 @@ internal sealed partial class ZigLowering
         {
             typeShadows.Add((name, _typeAliases.TryGetValue(name, out var pv) ? pv : (CType?)null));
             _typeAliases[name] = type;
+        }
+        // Seed each inferred `anytype` type (shadow-saved) so a signature spelled `@TypeOf(param)` (a
+        // return type or a later parameter) resolves through TypeOfBuiltin — the param is not yet an
+        // in-scope symbol at signature-lowering time (it becomes one only in the instance body).
+        var anytypeShadows = new List<(string name, CType? prev)>();
+        foreach (var (name, type) in anytypeSeeds)
+        {
+            anytypeShadows.Add((name, _anytypeSeeds.TryGetValue(name, out var pv) ? pv : (CType?)null));
+            _anytypeSeeds[name] = type;
         }
         Symbol instanceSym;
         try
@@ -216,6 +252,13 @@ internal sealed partial class ZigLowering
                         mangleTokens.Add(v >= 0 ? v.ToString(inv) : "n" + (-(System.Int128)v).ToString(inv));
                         valueSeeds.Add((g.Params[i].Name, v, LowerType(g.Params[i].TypeAst)));
                         break;
+                    case ParamKind.AnyType:
+                        // A hybrid (wall-plan W5): its inferred type keys the specialization AND the
+                        // argument is passed at runtime — so it contributes BOTH a mangle token and a
+                        // runtime argument (unlike a comptime TYPE arg, which is compile-time-only).
+                        mangleTokens.Add(MangleType(_anytypeSeeds[g.Params[i].Name]));
+                        runtimeArgItems.Add(argItems[i]);
+                        break;
                     default:
                         runtimeArgItems.Add(argItems[i]);
                         break;
@@ -232,11 +275,13 @@ internal sealed partial class ZigLowering
                         + $"'{mangled}' — a runaway recursive generic (an ever-changing comptime value)?");
                 }
                 // Lower the concrete signature against the seeded type env — runtime parameter types +
-                // the return type may reference a type param. (For a value-only generic no type is seeded,
-                // so this is exactly the W3a template-time signature.)
+                // the return type may reference a type param or `@TypeOf(anytypeParam)`. An `anytype`
+                // param (W5) is a runtime slot whose type is the inferred one (not lowered from an AST).
+                // (For a value-only generic no type is seeded, so this is exactly the W3a template-time
+                // signature.) Preserves parameter order, so it aligns with `runtimeArgItems`.
                 var runtimeParams = g.Params
-                    .Where(p => p.Kind == ParamKind.Runtime)
-                    .Select(p => (p.Name, LowerType(p.TypeAst)))
+                    .Where(p => p.Kind is ParamKind.Runtime or ParamKind.AnyType)
+                    .Select(p => (p.Name, p.Kind == ParamKind.AnyType ? _anytypeSeeds[p.Name] : LowerType(p.TypeAst)))
                     .ToList();
                 var ret = LowerType(g.RetType);
                 if (g.ErrUnion) { ret = new CType.ErrorUnion(ret); }
@@ -262,10 +307,41 @@ internal sealed partial class ZigLowering
                 var (name, prev) = typeShadows[i];
                 if (prev is { } p) { _typeAliases[name] = p; } else { _typeAliases.Remove(name); }
             }
+            // Restore the `anytype` seeds (W5) — the instance BODY resolves each such param through its
+            // in-scope symbol (declared with the inferred type in `runtimeParams`), so the seed is only
+            // needed for the signature lowering here.
+            for (var i = anytypeShadows.Count - 1; i >= 0; i--)
+            {
+                var (name, prev) = anytypeShadows[i];
+                if (prev is { } p) { _anytypeSeeds[name] = p; } else { _anytypeSeeds.Remove(name); }
+            }
         }
         // The runtime arguments are the CALLER's expressions — lower them (in BuildCall) in the restored
-        // caller type env, coercing to the instance's now-concrete parameter types.
+        // caller type env, coercing to the instance's now-concrete parameter types. An `anytype`
+        // argument is among them (a runtime slot), coerced to its inferred parameter type.
         return BuildCall(instanceSym, runtimeArgItems, receiver: null);
+    }
+
+    /// <summary>Infer an <c>anytype</c> argument's type at a call site (wall-plan W5) — Zig's
+    /// <c>@TypeOf(actual arg)</c>. Lowers the argument expression into a THROWAWAY hoist buffer (like
+    /// <see cref="TypeOfBuiltin"/>) purely to read its synthesized <see cref="CType"/>; the real
+    /// argument is lowered AGAIN in <see cref="BuildCall"/> for the runtime call, so any side effect is
+    /// emitted exactly once (the inference lowering here is discarded).</summary>
+    private CType InferArgType(Item argItem)
+    {
+        var savedBuf = _hoist;
+        var savedImpure = _hoistImpureSeen;
+        _hoist = new List<CStmt>();   // throwaway — the inference lowering is discarded
+        try
+        {
+            return (LowerExpr(argItem).Type
+                ?? throw new IrUnsupportedException("zig `anytype` argument has no statically known type")).Unqualified;
+        }
+        finally
+        {
+            _hoist = savedBuf;
+            _hoistImpureSeen = savedImpure;
+        }
     }
 
     /// <summary>Lower one queued instantiation body (drained after pass 2). Hands the pre-resolved

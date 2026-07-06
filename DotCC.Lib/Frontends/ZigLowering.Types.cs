@@ -181,6 +181,13 @@ internal sealed partial class ZigLowering
         {
             throw new IrUnsupportedException($"zig `@TypeOf` takes exactly one operand; got {args.Count}");
         }
+        // `@TypeOf(anytypeParam)` while lowering an `anytype` generic's per-instance signature (wall-plan
+        // W5): return the param's inferred concrete type directly — it is seeded at the call site but is
+        // not yet an in-scope symbol, so the LowerExpr path below would fail to resolve it.
+        if (args[0].Content is Zig.Ident aid && _anytypeSeeds.TryGetValue(Tok(aid.Arg0), out var seeded))
+        {
+            return seeded;
+        }
         var savedBuf = _hoist;
         var savedImpure = _hoistImpureSeen;
         _hoist = new List<CStmt>();   // throwaway — @TypeOf's operand is unevaluated

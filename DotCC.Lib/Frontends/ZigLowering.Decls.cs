@@ -64,20 +64,23 @@ internal sealed partial class ZigLowering
 
         var hasComptime = allParams.Any(p => p.IsComptime);
         var hasTypeParam = allParams.Any(p => p.Kind == ParamKind.ComptimeType);
-        // A generic (any comptime param) is a TEMPLATE, and a generic METHOD is a loud cut — a method
-        // passes a `mangledName`, so that discriminates it (W3a/W3b are free functions only).
-        if (hasComptime && mangledName is not null)
+        var hasAnyType = allParams.Any(p => p.Kind == ParamKind.AnyType);
+        // A generic (any comptime OR `anytype` param) is a TEMPLATE, and a generic METHOD is a loud cut —
+        // a method passes a `mangledName`, so that discriminates it (W3/W5 are free functions only).
+        if ((hasComptime || hasAnyType) && mangledName is not null)
         {
             throw new IrUnsupportedException(
-                $"function '{Tok(nameTok)}': a `comptime`-parameter (generic) method is not supported yet "
-                + "(wall-plan W3a/W3b is free functions only)");
+                $"function '{Tok(nameTok)}': a generic method (a `comptime` or `anytype` parameter) is not supported yet "
+                + "(wall-plan W3/W5 is free functions only)");
         }
 
-        if (hasTypeParam)
+        if (hasTypeParam || hasAnyType)
         {
-            // A `comptime T: type` TYPE parameter (wall-plan W3b) makes later parameter / return types
-            // depend on `T`, so the signature CANNOT be lowered here (template time) — it is lowered per
-            // instantiation once `T` is bound (InstantiateGeneric).
+            // A `comptime T: type` TYPE parameter (wall-plan W3b) OR an `a: anytype` inferred-type
+            // parameter (wall-plan W5) makes later parameter / return types depend on a type not known at
+            // template time — an explicit type argument (W3b) or the actual argument's inferred
+            // `@TypeOf` (W5) — so the signature CANNOT be lowered here; it is lowered per instantiation
+            // once the type(s) are bound (InstantiateGeneric).
             // The template symbol carries a placeholder signature — it is never called directly; every
             // call routes through InstantiateGeneric to a mangled, concretely-typed instance.
             var tmpl = _symbols.Declare(new Symbol
@@ -188,7 +191,10 @@ internal sealed partial class ZigLowering
                     variadic = true;
                     break;
                 case Zig.Param pm:
-                    infos.Add(new ParamInfo(Tok(pm.Arg0), pm.Arg2, ParamKind.Runtime));
+                    // `a: anytype` (wall-plan W5) — an inferred-type parameter (a monomorphization key
+                    // AND a runtime slot); a plain `a: T` is an ordinary runtime parameter.
+                    infos.Add(new ParamInfo(Tok(pm.Arg0), pm.Arg2,
+                        IsAnyTypeKeyword(pm.Arg2) ? ParamKind.AnyType : ParamKind.Runtime));
                     break;
                 case Zig.ParamComptime pm:   // 'comptime' IDENT ':' Type
                     infos.Add(new ParamInfo(Tok(pm.Arg1), pm.Arg3,
@@ -207,6 +213,14 @@ internal sealed partial class ZigLowering
     private static bool IsTypeKeyword(Item typeItem)
         => typeItem.Content is Zig.Ident id && Tok(id.Arg0) == "type";
 
+    /// <summary>True when a parameter's type-position AST is the <c>anytype</c> keyword (Zig's
+    /// inferred-type parameter, wall-plan W5) spelled as a bare identifier — the discriminator that
+    /// classifies a <see cref="ParamKind.AnyType"/> parameter. Like <c>type</c> (W1/W3b), <c>anytype</c>
+    /// is not a reserved lexer token; it lexes as an ordinary identifier and parses as a bare
+    /// <c>Type</c>, so no grammar change is needed.</summary>
+    private static bool IsAnyTypeKeyword(Item typeItem)
+        => typeItem.Content is Zig.Ident id && Tok(id.Arg0) == "anytype";
+
     /// <summary>Declare an <c>extern fn</c> prototype: a function symbol with no body
     /// (so no <see cref="FuncDef"/>). <c>FromSystemHeader = true</c> marks it as
     /// externally provided (libc, linked with <c>-lc</c>) — exactly the marker the C
@@ -220,12 +234,12 @@ internal sealed partial class ZigLowering
     {
         var ret = LowerType(retType);
         var paramInfos = CollectParamInfos(paramsItem, out var variadic);
-        // An `extern fn` is a C-ABI prototype — a `comptime` parameter (a monomorphization key, not an
-        // ABI slot) makes no sense on one, and real zig rejects it too. Reject loudly.
-        if (paramInfos.Any(p => p.IsComptime))
+        // An `extern fn` is a C-ABI prototype — a `comptime` or `anytype` parameter (a monomorphization
+        // key, not an ABI slot) makes no sense on one, and real zig rejects it too. Reject loudly.
+        if (paramInfos.Any(p => p.IsComptime || p.Kind == ParamKind.AnyType))
         {
             throw new IrUnsupportedException(
-                $"extern fn '{Tok(nameTok)}': an `extern` prototype cannot have a `comptime` parameter");
+                $"extern fn '{Tok(nameTok)}': an `extern` prototype cannot have a `comptime` or `anytype` parameter");
         }
         _symbols.Declare(new Symbol
         {
