@@ -277,6 +277,32 @@ falls out of the interpreter for free — that's the shape-changing power C#
 generics can't express and monomorphization can.
 
 ### W5 — `anytype` (M — cheap after W3)
+
+> ✅ **W5 DONE 2026-07-06** (branch `feat/zig-anytype`) — `anytype` parameters, the
+> monomorphization capstone. **NO grammar change** (`anytype` lexes as a bare identifier and
+> parses as a `Type` via `Param -> IDENT ':' Type`, exactly like `type` in W1/W3b — it was only
+> a comment in the grammar). Shipped as predicted "cheap after W3": a new `ParamKind.AnyType`
+> classified in `CollectParamInfos` (a `Zig.Param` whose type is the `anytype` keyword), routed
+> through the SAME W3b per-instantiation branch in `DeclareFn` (`hasTypeParam || hasAnyType` →
+> placeholder symbol + `_genericFns` template). The one genuinely NEW idea is the HYBRID nature:
+> an anytype param is a monomorphization key AND a runtime slot (a comptime TYPE arg is neither —
+> it's a compile-time-only type spelling). In `InstantiateGeneric`: phase 1 INFERS each anytype
+> param's type from the actual argument via `InferArgType` (a throwaway-hoist `LowerExpr(arg).Type`,
+> mirroring `TypeOfBuiltin` so the real arg lowers once in `BuildCall`); the inferred type is seeded
+> (shadow-saved) into a new `_anytypeSeeds` map, mangled into the instance name (`add__i32_i32`), AND
+> the arg is added to `runtimeArgItems` + the param to `runtimeParams` with the inferred type. The
+> `@TypeOf(param)` signature-resolution problem (the param isn't an in-scope symbol at signature-lowering
+> time) is solved by `TypeOfBuiltin` consulting `_anytypeSeeds` FIRST, ahead of its LowerExpr path — so
+> a `@TypeOf(a)` return type resolves to the inferred seed. In the instance BODY the param is an ordinary
+> runtime symbol of the inferred type (no seed needed), so duck-typed use (`p.x`, `s.len`, arithmetic)
+> lowers against the concrete type; a mismatch fails per-instantiation. **Cuts (loud):** a generic METHOD
+> (free functions only, like W3); an `anytype` param on an `extern` prototype (rejected in `DeclareExternFn`,
+> no C-ABI slot); a `comptime x: anytype` (redundant) is not classified specially. Validation: unit
+> 1501/1501 (+7 `ZigAnytypeParamTests`), functional 215/0, `examples/zig-anytype/`; the `anytype-param`
+> zig-oracle (opt-in; hand-checked valid zig 0.17, dotcc byte-output `add_i=7 add_f=4.0` / `max_i=7
+> max_f=4.5` / `x=42 len=4`) runs in CI. **GOTCHA (the recurring one):** the oracle program must be
+> valid in BOTH — `@as`-type the args and `@intCast` the usize→i32.
+
 Per-call-site inference: for each anytype param, T := @TypeOf(actual arg), then
 the W3 key machinery. Duck-typed member access in the body lowers against the
 concrete type; a miss errors PER-INSTANTIATION with the trace — exactly real
@@ -295,7 +321,7 @@ because W0 covers more urgent ground.
 
 ```
 W0 (appetizer, independent) ──────────────────────────────┐
-W1 type-values → W2 in-fn containers → W3a value-comptime params ✅ → W3b type params ✅ → W4 type-returning fns ✅ → W5 anytype
+W1 type-values → W2 in-fn containers → W3a value-comptime params ✅ → W3b type params ✅ → W4 type-returning fns ✅ → W5 anytype ✅
 W6 std.debug.print (independent) ──────────────────────────┘
 ```
 
@@ -313,8 +339,13 @@ from a sibling/nested `T↦f64` without a general frame-stack refactor). **W4
 reifies a fresh struct per resolved type argument via W2's on-the-fly registration (a
 plan correction: V1's single-`return struct` body needs no interpreter run, just seeded
 lowering-time reification — the interpreter + comptime-`if` branching moves to a later
-brick). **W5 (`anytype`) is next** — per-call-site `T := @TypeOf(actual arg)` then the W3
-key machinery; then W6 `std.debug.print`. The generative core (W1–W4) is complete.
+brick). **W5 (`anytype`) SHIPPED** — as predicted "cheap after W3": no grammar change, a new
+`ParamKind.AnyType` routed through the W3b per-instantiation branch, the one new idea being the
+HYBRID nature (a monomorphization key AND a runtime slot; the type inferred via `@TypeOf(arg)`,
+seeded into `_anytypeSeeds` so a `@TypeOf(param)` signature resolves, the arg still passed at
+runtime). The **generative core (W1–W5) is now complete**; only **W6 `std.debug.print`** (a
+curated-std widening, independent of the arc — needs no comptime reflection, just a lowering-time
+format-string parse) remains on the planned ladder.
 
 ## What stays behind the wall (do not relitigate — the reasoning still holds)
 

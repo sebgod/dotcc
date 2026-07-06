@@ -302,6 +302,14 @@ internal sealed partial class ZigLowering
     /// interpreter <c>TypeVal</c> arrives with W3 (a comptime FUNCTION returning a type).</summary>
     private readonly Dictionary<string, CType> _typeAliases = new(System.StringComparer.Ordinal);
 
+    /// <summary><c>anytype</c>-parameter name → its inferred concrete type (wall-plan W5), seeded
+    /// (shadow-saved) only while lowering a generic instance's SIGNATURE at the call site
+    /// (<see cref="InstantiateGeneric"/>) — so a return / parameter type spelled <c>@TypeOf(param)</c>
+    /// resolves to the inferred type even though the param is not yet an in-scope symbol (it becomes one
+    /// in the instance body). Consulted by <see cref="TypeOfBuiltin"/> ahead of the throwaway-hoist
+    /// operand lowering. Empty outside an anytype instantiation.</summary>
+    private readonly Dictionary<string, CType> _anytypeSeeds = new(System.StringComparer.Ordinal);
+
     /// <summary>Bindings to a PROVABLE allocator (Milestone F/U): a <c>const a =
     /// std.heap.page_allocator;</c> (or <c>c_allocator</c>) records <c>a → CHeap</c>; a <c>const a =
     /// fba.allocator();</c> over a known <c>FixedBufferAllocator</c> local records <c>a → Fba</c>

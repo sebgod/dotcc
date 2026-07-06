@@ -21,9 +21,12 @@ W3a**, **generic functions via `comptime` TYPE params** (`fn maxOf(comptime T: t
 a: T, b: T) T` — a per-instantiation signature keyed by the resolved type, `maxOf__i32`
 / `maxOf__f64`) as **wall-plan W3b**, and **type-RETURNING functions** (`fn Pair(comptime
 T: type) type { return struct { a: T, b: T }; }` — a comptime type constructor that reifies
-a fresh struct per resolved type argument, `Pair__i32`) as **wall-plan W4**. `anytype`
-is not lowered yet — the rest of a **planned monomorphization arc** (the wall-breaking
-plan, `fable-wall.md`; reasoning updated below). `std` is **not** modeled in general —
+a fresh struct per resolved type argument, `Pair__i32`) as **wall-plan W4**, and **generic
+functions via `anytype` params** (`fn add(a: anytype, b: anytype) @TypeOf(a)` — the parameter
+type is INFERRED from the argument and keys a specialization, `add__i32_i32` / `add__f64_f64`)
+as **wall-plan W5**. That completes the **generative core** of the monomorphization arc
+(the wall-breaking plan, `fable-wall.md`; reasoning updated below) — the only planned brick
+left is a curated `std.debug.print` (W6). `std` is **not** modeled in general —
 only a curated set of paths resolves: the
 allocator paths (`std.mem.Allocator`, `std.heap.page_allocator`/`c_allocator`/`FixedBufferAllocator`/`ArenaAllocator`;
 see the Allocators section), a few `std.mem` slice helpers (`eql`, `copyForwards`,
@@ -105,6 +108,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | generic fn — `comptime` VALUE param (wall-plan W3a) | ✅ | `fn addN(comptime N: i32, x: i32) i32` — a `comptime`-value parameter makes the function a TEMPLATE (no runtime storage for the param). A call **monomorphizes**: the comptime arg is `ConstEval`-folded, and a SPECIALIZED body is emitted per resolved value under a mangled name (`addN__10`, `addN__100`) — memoized so a repeat call reuses it, the value baked into the body as a literal. Bodies lower from a re-entrancy-safe worklist drained after pass 2. A comptime-known `if` inside an instance folds to its taken branch (Zig comptime-if), so a RECURSIVE generic (`fn fib(comptime n: u32) …`) prunes its base case and terminates. Oracle `comptime-param`; example `examples/zig-comptime-param/`; unit `ZigComptimeParamTests`. **Cuts (loud):** a generic METHOD; a value-dependent type (`fn f(comptime n: usize, a: [n]u8)` — a VALUE-only signature lowers at template time); a comptime arg that isn't `ConstEval`-able (a call needs explicit `comptime f()`); a comptime-if in EXPRESSION position (a recursive generic written that way hits the instantiation cap) |
 | generic fn — `comptime` TYPE param (wall-plan W3b) | ✅ | `fn maxOf(comptime T: type, a: T, b: T) T` — a `comptime T: type` parameter makes the later parameter/return types DEPEND on the resolved type, so — unlike a VALUE param (W3a) — the SIGNATURE cannot be lowered at template time. Each call resolves the type argument to a concrete type, seeds `T` (shadow-saved so a nested/sibling `T` doesn't collide), and lowers a SPECIALIZED signature + body under a mangled name keyed by the RESOLVED type: `maxOf(i32,…)` → `int maxOf__i32(int,int)`, `maxOf(f64,…)` → `double maxOf__f64(double,double)`. An alias for a type keys the SAME instance (`const I = i32; maxOf(I,…)` ≡ `maxOf(i32,…)`). `T` resolves inside the body too (`@sizeOf(T)`, a local `var x: T`, a cast). Reuses the W3a worklist + memoization. Oracle `comptime-type-param`; example `examples/zig-comptime-type-param/`; unit `ZigComptimeTypeParamTests`. **Cuts (loud):** a generic METHOD; a comptime `if (T == i32)` type-comparison in the body (needs interpreter type values); a type-FORMER type argument (`maxOf([]u8, …)` — doesn't parse in argument position yet) |
 | type-RETURNING function (wall-plan W4) | ✅ | `fn Pair(comptime T: type) type { return struct { a: T, b: T }; }` — a COMPTIME type constructor (emits no runtime code). Each use in a TYPE position (`const p: Pair(i32)`, a param/field, a typed literal `Pair(i32){…}`) or a type alias (`const P = Pair(i32);`) REIFIES a fresh struct per resolved type argument (`Pair__i32`, `Pair__f64`), memoized so the same argument reuses one struct — keyed by the RESOLVED type (`const I=i32; Pair(I)` ≡ `Pair(i32)`). A field typed `T` gets the concrete type; `?*@This()` becomes a self-pointer (the mapping is installed before the fields lower, so a self-referential / recursive type resolves). Reuses the W2 on-the-fly struct registration (mangled name, shadow-saved type-param seed). No grammar change beyond `return struct {…}` (a `struct` is not an `RhsExpr`, so `return struct` is a conflict-free 1-token shift). Oracle `type-returning-fn`; example `examples/zig-type-returning-fn/`; unit `ZigTypeReturningFnTests`. **Cuts (loud):** a method / `const` member in the returned struct (fields-only, like W2); a non-struct return (a bare `T`, an enum / union, a type-former); a multi-statement / comptime-`if`-branching body; a runtime / `comptime`-VALUE parameter on the type function |
+| generic fn — `anytype` param (wall-plan W5) | ✅ | `fn add(a: anytype, b: anytype) @TypeOf(a)` — an `anytype` parameter has NO written type: its type is INFERRED from the actual argument (`@TypeOf(arg)`), then keys a specialization like a comptime TYPE param (W3b) — but the argument is ALSO passed at runtime (a HYBRID: monomorphization key AND runtime slot, unlike a comptime TYPE arg which is a compile-time-only type spelling). Each call infers each anytype param's type, mangles by the inferred types (`add__i32_i32` / `add__f64_f64`), and lowers a SPECIALIZED signature + body — the `@TypeOf(param)` return type follows suit, resolving through the inferred seed. The body binds the param as an ordinary runtime symbol of the inferred type, so **duck-typed** use lowers against the concrete type (`p.x` on a struct, `s.len` on a slice, arithmetic); a use the inferred type doesn't support fails PER INSTANTIATION (real-Zig / C++-template behavior). Reuses the W3 worklist + memoization; **no grammar change** (`anytype` lexes as a bare identifier and parses as a `Type`, like `type`). Oracle `anytype-param`; example `examples/zig-anytype/`; unit `ZigAnytypeParamTests`. **Cuts (loud):** a generic METHOD (free functions only, like W3); an `anytype` parameter on an `extern` prototype (no C-ABI slot). A `comptime x: anytype` (redundant) is not classified specially |
 | `const C = enum(T) { … };` / `enum { … }` | ✅ | container decl → C# `enum C : T` (default underlying `int`); members auto-increment or take an explicit constant value. `@intFromEnum` decays to the underlying int. Methods (above) and a `const Self = @This();` alias are allowed in the body |
 | `const U = union(enum) { a: T, b, … };` | ✅ | tagged union → the faithful C tagged-union shape: an outer struct `{ U_Tag __tag; U_Payload __payload; }` whose `__payload` is a NESTED `[StructLayout(Explicit)]` union overlaying every payload variant at offset 0 (the shared C-union machinery) — so payloads share storage, matching Zig's memory model. A void variant (`b`) is tag-only; an all-void union has no `__payload`. Construct with `.{ .a = v }` / `U{ .a = v }` (payload) or `.b` at a union sink (void). Direct `u.a` reads `u.__payload.a` (unchecked, like Zig release mode). Methods (above) and a `const Self = @This();` alias are allowed in the body |
 | `const U = union(SomeEnum) { a: T, b, … };` | ✅ | explicit-tag tagged union (Milestone R, part 1) — the discriminant is an EXISTING named enum rather than a synthesized `U_Tag`. Reuses the whole tagged-union lowering 1:1 (outer `{ __tag, __payload }`, switch on `__tag`, payload capture); only the tag enum source differs, so the `__tag` field is typed by the named enum and each variant's tag VALUE is that enum member's value (a non-zero / out-of-order enum drives the discriminant). Each variant must name a member of the tag enum (an extra enum member with no variant is tolerated — a V1 leniency) |
@@ -213,7 +217,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 
 Two tiers, since the wall-breaking plan (`fable-wall.md`, 2026-07-05):
 
-**Planned — the arc is underway (W0/W1/W2/W3a/W3b/W4 shipped), the rest are loud errors:** the
+**Planned — the arc's GENERATIVE CORE is complete (W0/W1/W2/W3a/W3b/W4/W5 shipped), the rest are loud errors:** the
 comptime-**type** foundation SHIPPED — type-as-value aliases (`const T = i32;`, with
 `*T`/`?T`/`[]T` composing) and `@TypeOf` (**wall-plan W1**), in-function struct
 decls (**W2**, the reify-a-struct primitive), **generic functions via `comptime`
@@ -221,11 +225,13 @@ VALUE params** (**W3a** — call-site monomorphization: one specialized, memoize
 per resolved value, with comptime-if folding so recursive generics terminate),
 **generic functions via `comptime` TYPE params** (**W3b** — the core generic case: the
 signature DEPENDS on `T`, so it is lowered per-instantiation, keyed by the resolved type
-so an alias for `i32` shares the `__i32` instance), and **type-RETURNING functions**
+so an alias for `i32` shares the `__i32` instance), **type-RETURNING functions**
 (**W4** — a comptime type constructor `fn Pair(comptime T: type) type { return struct {…}; }`
-that reifies a fresh struct per resolved type argument via the W2 primitive) — all in the
+that reifies a fresh struct per resolved type argument via the W2 primitive), and **generic
+functions via `anytype` params** (**W5** — the parameter type is INFERRED from the argument
+and keys a specialization, with duck-typed body use failing per-instantiation) — all in the
 Types table. Still to come:
-`anytype` (**W5**) and *widening* the curated `std` set further (`std.debug.print` —
+*widening* the curated `std` set further (`std.debug.print` —
 W6; **`std.ArrayList(T)` SHIPPED as W0**). Today `@import("std")` resolves
 only the curated paths: the allocator paths (`std.mem.Allocator` +
 `std.heap.page_allocator`/`c_allocator`/`FixedBufferAllocator`/`ArenaAllocator`,
@@ -233,8 +239,21 @@ with `alloc`/`free`/`create`/`destroy`/`realloc` — see the Allocators section)
 the `std.mem` slice helpers, and `std.ArrayList(T)`; everything else errors clearly.
 
 **Permanent:** `async`/`suspend`, inline assembly (the managed-target root below —
-that reasoning still holds and is not relitigated), and a FULL `std` model (`std`
-stays curated-paths forever; the arc widens the set, never the model).
+that reasoning still holds and is not relitigated), and `std`'s **platform floor**
+(`std.os` / `std.fs` / `std.Thread` bottom out in raw syscalls, per-OS structs, and
+`std.os.linux` inline `asm`; a managed target has no syscall surface, so these must be
+*redirected* onto the BCL — exactly as C's libc already is — not lowered from source).
+
+**Buildable, not built (deliberately NOT called permanent — the earlier "full `std`
+stays curated-paths forever" line overstated it):** `std` *is* Zig, so it flows through
+the same front-end as user code — there is no *language* barrier. Its comptime-light,
+platform-free leaves (`std.mem`, most of `std.math`, `ArrayList`) can increasingly be
+**compiled from the upstream source** as the front-end fills in; the curated runtime
+types (`ZigList<T>`, the `std.mem` helpers) are a *shortcut*, not a wall. The one real
+unbuilt brick between here and pervasive `std` is std's **comptime-reflection codegen** —
+a `switch (@typeInfo(T))` over a type's shape that `std.fmt` / `std.meta` lean on
+top-to-bottom — which is buildable on the Milestone-T interpreter but not built yet
+(W6 side-steps it for `std.debug.print` via a lowering-time format-string parse).
 
 (`opaque` type declarations stay 🚫 too — neither tier claims them; a small
 demand-driven item, unrelated to the comptime arc.)
@@ -278,14 +297,25 @@ accumulated ingredients). What remains true: a generic body can't map onto an **
 generic** (C# can't change a body's shape per `T`, and has no *value*- or *type*-valued
 generic argument) — so user code emits one concrete method/struct per instantiation
 (`max__i32`), and open C# generics appear only in runtime types WE author (`Slice<T>`,
-`ErrUnion<T>`, the planned `ZigList<T>`). Generics ⊂ comptime. `std` is generics- and
-comptime-soaked top to bottom, so the curated-paths resolver stays the model (model only what
-maps cleanly to the runtime: the allocator, libc, the `std.mem` helpers; error loudly on the
-rest) — the arc *widens* the curated set (`std.ArrayList(T)`, `std.debug.print` with a
-lowering-time format-string parse instead of comptime reflection), it never attempts a real
-`std`. The biggest tuple/`.{…}` consumer — `std.fmt`'s `print("{} {}", .{a, b})` — lives
-here (comptime reflection over the arg tuple), and is side-stepped today by routing
-formatting through `extern fn printf` + libc.
+`ErrUnion<T>`, the planned `ZigList<T>`). Generics ⊂ comptime. `std` itself is
+*Zig* — it flows through the same front-end as user code, so "curated" is a **shortcut, not a
+language wall**. It splits into three honest tiers, not one flat "curated forever":
+(1) **leaf std** — the comptime-light, platform-free pieces (`std.mem`, most of `std.math`,
+`ArrayList`) — can increasingly be **compiled from the upstream source** as the front-end
+fills in; the curated runtime types (`ZigList<T>`, the `std.mem` helpers) are just a
+head-start, and the honest move is to drop the curation as coverage grows.
+(2) **std's comptime-reflection core** — `switch (@typeInfo(T))` codegen over a type's shape,
+which `std.fmt` / `std.meta` lean on top-to-bottom — is the one real *unbuilt* brick: buildable
+on the Milestone-T interpreter (return a comptime type-info struct the interpreter can switch on
+and emit per-field code from), just not built, and the reason "compile real `std.fmt`" isn't
+free today. (3) **std's platform floor** — `std.os` / `std.fs` / `std.Thread` bottoming out in
+syscalls + inline `asm` — genuinely can't be *lowered* onto a managed VM; it must be *redirected*
+onto the BCL, the same seam C's hand-written libc runtime already is. So the arc *widens* the
+curated set (`std.ArrayList(T)`, `std.debug.print` with a lowering-time format-string parse
+instead of comptime reflection) while the reflection engine is unbuilt, and leans on upstream
+source where it can — only tier (3) is truly permanent. The biggest tuple/`.{…}` consumer —
+`std.fmt`'s `print("{} {}", .{a, b})` — lives in tier (2) (comptime reflection over the arg
+tuple), and is side-stepped today by routing formatting through `extern fn printf` + libc.
 
 **The managed-target root (permanent)** — catches inline assembly and `async`/`suspend`. Inline `asm`
 emits raw target machine code; the C# and wat backends run on a VM with nowhere to put it
