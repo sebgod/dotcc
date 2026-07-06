@@ -34,6 +34,34 @@ internal sealed partial class ZigLowering
                 $"function '{Tok(nameTok)}': a non-extern Zig function cannot be variadic (use `extern fn`)");
         }
 
+        // A `type`-RETURNING function (wall-plan W4): `fn Pair(comptime T: type) type { return struct
+        // {…}; }`. It is a COMPTIME type constructor, not a runtime function — it emits no code; each
+        // use in a type position REIFIES a fresh struct per resolved type argument. Retain the template
+        // (params + body) for EvalTypeReturningCall; the placeholder symbol is never called directly.
+        if (IsTypeKeyword(retType))
+        {
+            if (mangledName is not null)
+            {
+                throw new IrUnsupportedException(
+                    $"function '{Tok(nameTok)}': a `type`-returning method is not supported yet (wall-plan W4 is free functions only)");
+            }
+            if (allParams.Any(p => p.Kind != ParamKind.ComptimeType))
+            {
+                throw new IrUnsupportedException(
+                    $"function '{Tok(nameTok)}': a `type`-returning function's parameters must all be `comptime T: type` "
+                    + "in V1 (wall-plan W4) — a runtime or `comptime`-VALUE parameter is not supported yet");
+            }
+            var tRet = _symbols.Declare(new Symbol
+            {
+                Name = Tok(nameTok),
+                Kind = SymKind.Func,
+                Type = new CType.Func(CType.Void, new List<CType>(), false),
+                IsGlobal = true,
+            });
+            _typeReturningGenerics[tRet] = new TypeReturningGenericInfo(tRet, allParams, body);
+            return (tRet, new List<(string name, CType type)>(), body);
+        }
+
         var hasComptime = allParams.Any(p => p.IsComptime);
         var hasTypeParam = allParams.Any(p => p.Kind == ParamKind.ComptimeType);
         // A generic (any comptime param) is a TEMPLATE, and a generic METHOD is a loud cut — a method
@@ -49,15 +77,7 @@ internal sealed partial class ZigLowering
         {
             // A `comptime T: type` TYPE parameter (wall-plan W3b) makes later parameter / return types
             // depend on `T`, so the signature CANNOT be lowered here (template time) — it is lowered per
-            // instantiation once `T` is bound (InstantiateGeneric). A `type`-RETURNING function is the
-            // next brick (W4): reject it clearly rather than let the per-instance `type` return blow up
-            // with LowerTypeName's opaque "comptime-only" message.
-            if (IsTypeKeyword(retType))
-            {
-                throw new IrUnsupportedException(
-                    $"function '{Tok(nameTok)}': a `type`-returning function (`fn {Tok(nameTok)}(...) type`) is "
-                    + "wall-plan W4, not yet supported — W3b supports functions whose PARAMETER/return types depend on a `comptime T: type`");
-            }
+            // instantiation once `T` is bound (InstantiateGeneric).
             // The template symbol carries a placeholder signature — it is never called directly; every
             // call routes through InstantiateGeneric to a mangled, concretely-typed instance.
             var tmpl = _symbols.Declare(new Symbol

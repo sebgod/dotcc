@@ -532,6 +532,16 @@ productions:
       - { lhs: Stmt, rhs: ['inline', LoopStmt], action: inlineLoop }
       - { lhs: Stmt, rhs: ['return', RhsExpr, ';'],         action: stmtReturn }
       - { lhs: Stmt, rhs: ['return', ';'],                   action: stmtReturnVoid }
+      # A type-returning function's body (wall-plan W4): `fn Pair(comptime T: type) type { return
+      # struct { … }; }`. A `struct { … }` is NOT an RhsExpr (kept out deliberately — see the
+      # ContainerDecl comment), so `return struct` is a clean 1-token shift decision disjoint from
+      # `return RhsExpr` (no RhsExpr starts with `struct`) — conflict-free, exactly like `const IDENT
+      # = struct` vs `const IDENT = RhsExpr`. Fields-only (reuses FieldDecls); the returned anonymous
+      # struct is REIFIED per instantiation at each `Pair(i32)` use site (see EvalTypeReturningCall).
+      # A method / non-struct return / multi-statement body is a loud cut in lowering (or a parse
+      # error for a method, since FieldDecls admits no `fn`).
+      - { lhs: Stmt, rhs: ['return', 'struct', '{', FieldDecls, '}', ';'], action: returnStructType }
+      - { lhs: Stmt, rhs: ['return', 'struct', '{', '}', ';'],             action: returnStructTypeEmpty }
       - { lhs: Stmt, rhs: [VarDecl] }
       # An in-function container decl (wall-plan W2): `const P = struct { … };` inside a body.
       # ContainerDecl is otherwise a top-level `Decl` (line ~277); admitting it here too lets a

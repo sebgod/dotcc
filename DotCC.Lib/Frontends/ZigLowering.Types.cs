@@ -134,6 +134,14 @@ internal sealed partial class ZigLowering
                 type = LowerType(rhs);
                 return true;
 
+            // `const P = Pair(i32);` / `const E = Empty();` — a call to a USER type-returning generic
+            // (wall-plan W4) bound to a name. Reifies the returned struct and records the alias. (At
+            // top level this resolves in the pass-1.5 re-try, once the fn is declared — see
+            // LowerTopLevelGlobals.)
+            case Zig.CallArgs or Zig.CallNoArgs when TryEvalTypeReturningCall(rhs, out var trt):
+                type = trt;
+                return true;
+
             // `const A = std.mem.Allocator;` — a dotted std TYPE path aliased to a name.
             case Zig.Field when TryResolveStdPath(rhs, out var fp) && StdTypes.ContainsKey(fp):
                 type = LowerStdType(rhs);
@@ -368,6 +376,13 @@ internal sealed partial class ZigLowering
         // surrounding Type productions.
         Zig.CallArgs ca when TryResolveStdPath(ca.Arg0, out var gp) && StdGenericTypes.TryGetValue(gp, out var makeGeneric)
             => makeGeneric(LowerSingleTypeArg(ca.Arg2, gp)),
+        // A USER type-returning generic (wall-plan W4) in TYPE position — `Pair(i32)` / a no-arg
+        // `Empty()`. Reifies (or reuses) the returned struct per resolved type argument. Checked after
+        // the std generic (disjoint: a std generic has a dotted `std.…` Field callee, a user one a bare
+        // identifier). A composed form (`*Pair(i32)`, `?Pair(i32)`, `[]Pair(i32)`) rides the surrounding
+        // Type productions, exactly like the std generic.
+        Zig.CallArgs when TryEvalTypeReturningCall(type, out var userTy) => userTy,
+        Zig.CallNoArgs when TryEvalTypeReturningCall(type, out var userTyNoArg) => userTyNoArg,
         _ => throw new IrUnsupportedException("zig type: " + (type.Content?.GetType().Name ?? "null")),
     };
 

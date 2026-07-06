@@ -236,6 +236,37 @@ primitive W4 calls from inside the interpreter.
   prerequisite of the re-entrancy audit above, not an optional cleanup.
 
 ### W4 — type-returning functions (L — the ArrayList shape)
+
+> ✅ **W4 DONE 2026-07-06** (branch `feat/zig-type-returning-fn`) — type-RETURNING
+> functions, the last generative brick. `fn Pair(comptime T: type) type { return struct { a:
+> T, b: T }; }` is a COMPTIME type constructor (emits no runtime code); each use in a TYPE
+> position REIFIES a fresh struct per resolved type argument (`Pair__i32`, `Pair__f64`),
+> memoized. **Plan correction:** the body does NOT need the full ComptimeInterpreter — V1's
+> body is a single `return struct {…}`, so reification is a focused lowering-time op (seed the
+> type params, register the struct via the W2 primitive), not an interpreter run. The
+> interpreter (and `if (T==f32)` comptime branching in the body) moves to a later brick.
+> **ONE grammar production:** `Stmt -> 'return' 'struct' '{' FieldDecls '}' ';'` (+ empty) —
+> a `struct` is not an `RhsExpr` (kept out deliberately), so `return struct` is a conflict-free
+> 1-token shift, exactly like `const IDENT = struct`. Full-built clean. Lowering: `DeclareFn`
+> detects `IsTypeKeyword(retType)` → registers a `TypeReturningGenericInfo` (placeholder symbol +
+> params + body), never lowered as a runtime fn (`AddFnEntry` skips it, like a generic).
+> `EvalTypeReturningCall` (hooked into `LowerType`'s CallArgs/CallNoArgs case, `TryTypeAliasRhs`,
+> and a pass-1.5 re-try for top-level `const P = Pair(i32)`): resolves each type arg in the
+> caller's env (alias → resolved type ⇒ keyed by RESOLVED type), mangles by `MangleType`, and
+> reifies via `RegisterStruct` with the type params seeded (shadow-saved) into `_typeAliases`.
+> `@This()` resolves to the in-progress type (`_currentContainer` + the `_containerTypes[mangled]`
+> mapping installed BEFORE the fields lower), so a self-referential `?*const @This()` field / a
+> recursive `Pair(T)` in the body works; memoized by mangled name. Fields-only (a method / const
+> in the returned struct is a loud cut, like W2). **Ordering:** a type fn used in another fn's
+> SIGNATURE must be declared earlier (pass-1 signature lowering is source-order); bodies (pass 2)
+> and top-level aliases (pass-1.5 re-try) work regardless — a documented cut. **W4 cuts (loud) →
+> later:** a method / const member in the returned struct; a non-struct return (bare `T`, enum /
+> union, type-former); a multi-statement / comptime-`if`-branching body (the interpreter case);
+> a runtime / comptime-VALUE parameter on the type fn. Validation: unit 1494/1494 (+6
+> `ZigTypeReturningFnTests`), zig oracle 156/156 (new `type-returning-fn`, byte-identical vs real
+> zig 0.17: `pi=3,4 pf=1.5,2.5` / `head=10 tail=20`), functional 215/0,
+> `examples/zig-type-returning-fn/`.
+
 `fn Pair(comptime T: type) type { return struct { a: T, b: T }; }` —
 `const P = Pair(i32);` runs the body IN THE INTERPRETER at lowering time
 (existing frames + step budget); `return struct {…}` reifies via W2's on-the-fly
@@ -264,7 +295,7 @@ because W0 covers more urgent ground.
 
 ```
 W0 (appetizer, independent) ──────────────────────────────┐
-W1 type-values → W2 in-fn containers → W3a value-comptime params ✅ → W3b type params ✅ → W4 type-returning fns → W5 anytype
+W1 type-values → W2 in-fn containers → W3a value-comptime params ✅ → W3b type params ✅ → W4 type-returning fns ✅ → W5 anytype
 W6 std.debug.print (independent) ──────────────────────────┘
 ```
 
@@ -278,9 +309,12 @@ spine plus the harder type-param half (per-instantiation signatures, keyed by re
 type; the type-param seed is shadow-saved around both the call-site signature lowering and
 the instance body, which — because draining is sequential at top level — isolates `T↦i32`
 from a sibling/nested `T↦f64` without a general frame-stack refactor). **W4
-(type-returning functions) is next** — `fn Pair(comptime T: type) type { return struct
-{…}; }` reifies via W2's on-the-fly registration, running the body in the interpreter at
-lowering time; then W5 `anytype`, W6 `std.debug.print`.
+(type-returning functions) SHIPPED** — `fn Pair(comptime T: type) type { return struct {…}; }`
+reifies a fresh struct per resolved type argument via W2's on-the-fly registration (a
+plan correction: V1's single-`return struct` body needs no interpreter run, just seeded
+lowering-time reification — the interpreter + comptime-`if` branching moves to a later
+brick). **W5 (`anytype`) is next** — per-call-site `T := @TypeOf(actual arg)` then the W3
+key machinery; then W6 `std.debug.print`. The generative core (W1–W4) is complete.
 
 ## What stays behind the wall (do not relitigate — the reasoning still holds)
 
