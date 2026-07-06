@@ -79,6 +79,15 @@ internal static class ZigOracle
     /// </summary>
     public static (string stdout, int exit) CompileAndRun(string rootZig, string workDir, string[]? runArgs = null)
     {
+        var (stdout, _, exit) = CompileAndRunStreams(rootZig, workDir, runArgs);
+        return (stdout, exit);
+    }
+
+    /// <summary>As <see cref="CompileAndRun"/>, but also returns the produced binary's
+    /// <c>stderr</c> — needed to validate <c>std.debug.print</c> (wall-plan W6), which
+    /// real Zig writes to stderr, not stdout.</summary>
+    public static (string stdout, string stderr, int exit) CompileAndRunStreams(string rootZig, string workDir, string[]? runArgs = null)
+    {
         EnsureInitialised();
         if (!_available)
         {
@@ -128,8 +137,8 @@ internal static class ZigOracle
 
         // ── run produced binary ──
         var binPath = Path.Combine(workDir, binName);
-        var (rOut, _, rExit) = RunProcess(binPath, workDir, runArgs ?? Array.Empty<string>());
-        return (rOut, rExit);
+        var (rOut, rErr, rExit) = RunProcess(binPath, workDir, runArgs ?? Array.Empty<string>());
+        return (rOut, rErr, rExit);
     }
 
     /// <summary>Copy <paramref name="src"/> into <paramref name="destDir"/> under

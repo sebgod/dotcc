@@ -25,8 +25,10 @@ a fresh struct per resolved type argument, `Pair__i32`) as **wall-plan W4**, and
 functions via `anytype` params** (`fn add(a: anytype, b: anytype) @TypeOf(a)` — the parameter
 type is INFERRED from the argument and keys a specialization, `add__i32_i32` / `add__f64_f64`)
 as **wall-plan W5**. That completes the **generative core** of the monomorphization arc
-(the wall-breaking plan, `fable-wall.md`; reasoning updated below) — the only planned brick
-left is a curated `std.debug.print` (W6). `std` is **not** modeled in general —
+(the wall-breaking plan, `fable-wall.md`; reasoning updated below), and **`std.debug.print`**
+(`std.debug.print("{d} {s}\n", .{n, s})` — the comptime format parsed at lowering time, its
+`{…}` placeholders paired positionally with the tuple and lowered to a stderr `fprintf`) lands
+as **wall-plan W6** — so the **entire planned arc W0–W6 is now complete**. `std` is **not** modeled in general —
 only a curated set of paths resolves: the
 allocator paths (`std.mem.Allocator`, `std.heap.page_allocator`/`c_allocator`/`FixedBufferAllocator`/`ArenaAllocator`;
 see the Allocators section), a few `std.mem` slice helpers (`eql`, `copyForwards`,
@@ -91,6 +93,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | tuple `struct { T1, T2, … }` | ✅ | an anonymous **positional** struct → C# `System.ValueTuple<…>` (Milestone G — see the **Tuples** section). Valid as a return / param / var type; a positional literal `.{a, b}` constructs it, `t[N]` (literal `N`) reads `.ItemN+1`, and `const a, const b = e` destructures. **Any arity:** empty `.{}` → the non-generic `System.ValueTuple`; arity > 7 nests via C#'s 8th `TRest` field (an index ≥ 7 reads through `.Rest`). **Runtime subset only:** comptime / type-valued fields and a mixed positional+named literal are rejected |
 | `std.mem.Allocator` | ✅ | the allocator fat pointer `{ ptr, vtable }` → the runtime `Allocator` value type (see the **Allocators** section). `std.heap.FixedBufferAllocator` / `std.heap.ArenaAllocator` are the concrete second / third allocators. A **user-constructed** allocator works too (Milestone W, part 1b): `std.mem.Allocator.VTable` → the runtime 4-fn `AllocatorVTable` and `std.mem.Alignment` → the `Alignment` value type, so a hand-written `std.mem.Allocator{ .ptr, .vtable }` + `VTable{…}` literal lowers and dispatches indirectly. Any OTHER `std.*` type errors clearly |
 | `std.mem.eql` / `copyForwards` / `span` / `zeroes` | ✅ | curated `std.mem` helpers → the runtime `ZigMem` class (`DotCC.Libc/ZigMem.cs`, auto-spliced like `ZigAlloc`). `eql(T,a,b)` = equal length AND identical contents (byte-wise, = element equality for the scalar element types it's used with); `copyForwards(T,dest,src)` = copy `src.len` elements front-to-back; `span(ptr)` = a NUL-sentinel `[*:0]T` pointer → the `[]const T` slice before the sentinel (byte-wise scan); `zeroes(T)` = an all-zero value → C#'s `default(T)`. Slice args coerce a `&array` (`*[N]T`). Any OTHER `std.mem.*` member errors clearly — `std` is a curated-paths resolver, not a general model. **Cuts:** `span` yields a `[]const T` even from a mutable `[*:0]T`, and assumes sentinel 0 (dotcc erases the sentinel); `zeroes` of an ARRAY/slice type (arrays lower to a pointer, so `default` would be null) |
+| `std.debug.print(fmt, .{args})` (curated — wall-plan W6) | ✅ | the biggest remaining `std` idiom. Like real Zig it writes to **STDERR** (not stdout). The comptime format string is parsed AT LOWERING TIME (no reflection — the AOT rule) and its `{…}` placeholders paired POSITIONALLY with the argument tuple's elements, each translated to the equivalent C `printf` conversion; the whole thing lowers to `fprintf(stderr, "…").Arg(…).Done()` over dotcc's existing printf-builder. Because the runtime builder keys off the actual `.Arg(…)` overload, no length modifier is needed — `{d}`/`{}` → `%d` for **every** integer width (a `{d}` on an `i64` prints the full 64-bit value), `{x}`/`{X}` → `%x`/`%X`, `{c}` → `%c`, `{s}` → `%s`. `{{`/`}}` fold to literal braces; a literal `%` is doubled to `%%`. Curated set: `{}`, `{d}`, `{s}`, `{c}`, `{x}`, `{X}` on integer / string-pointer arguments. Oracle `debug-print` (asserts against real zig's stderr); example `examples/zig-debug-print/`; unit `ZigDebugPrintTests`. **Cuts (loud):** a float / bool / slice / struct argument (Zig's decimal-float / `true`-`false` / `.len`-bytes formatting can't be matched byte-for-byte by a C conversion); a width / alignment / named specifier (`{d:0>5}`, `{[name]}`) or `{any}`; a non-literal format string; a non-`print` `std.debug` member |
 | `*[N]T` → `[]T` coercion (`&array` to a slice) | ✅ | Zig's pointer-to-array → slice coercion: `&arr` (`*[N]T`) passed where a `[]T`/`[]const T` is expected promotes to a fat pointer over the array's `N` elements. `CoerceToSlice` strips the address-of; the array already lowers to its element pointer. (Previously only a bare array / string literal coerced.) |
 | `std.ArrayList(T)` (curated — wall-plan W0) | ✅ | The modern **UNMANAGED** array list (zig 0.15+ re-pointed `std.ArrayList` at it; the managed `init(alloc)` API no longer exists in the pinned zig and is rejected BY NAME with the migration hint). → the runtime `ZigList<T>` value type (`{ ptr, len, capacity }`, `DotCC.Libc/ZigList.cs`). The type parses in TYPE position through the ordinary Suffix chain (`Type → ErrUnion → Suffix → callArgs` — **no grammar change**) and resolves to `CType.ZigList(Element)`. Curated surface: `.empty` (→ `default` — exactly zig's decl literal), `append`/`appendSlice` (→ `!void`, `error.OutOfMemory` on exhaustion, so `try` composes; the allocator is an explicit per-call argument), `pop` (→ `?T`), `deinit`, `clearRetainingCapacity`, `items` (→ a mutable `[]T` — subscript / `.len` / `for (list.items) \|x\|` ride the slice lowering), `capacity`. Mutating members lower to INSTANCE methods on the runtime struct via the `ZigListCall` IR node (a C# struct method on an lvalue receiver mutates in place — zig's `*Self` shape). **Fidelity note:** `capacity`'s VALUE is the growth policy's detail (dotcc doubles from 8; real zig's curve is super-linear + version-dependent), so it isn't an oracle-comparable observable. Unmodeled members error naming the curated set. Oracle `arraylist` (byte-identical vs real zig 0.17); example `examples/zig-arraylist/`; unit `ZigArrayListTests` + `ZigListRuntimeTests`. **Cuts:** a pointer-to-list receiver (`(*std.ArrayList(T)).append` auto-deref), `insert`/`orderedRemove`/`swapRemove`/`getLast`/`toOwnedSlice` etc. (loud errors, demand-driven) |
 | stack-slice peephole | ✅ | non-escaping stack-slice promotion (Milestone O, part 5 — the Zig analogue of the C `malloc`→`stackalloc` peephole). `const s = try a.alloc(u8, N); …s[i]/s.len…; a.free(s);` where the allocator is the **devirtualized C-heap default** (`page_allocator`/`c_allocator` → `Libc.malloc`), `N` is a compile-time constant ≤ 1024, the element is 1-byte, the decl isn't in a loop, and `s` never escapes (only `s[i]`/`s.len`/`a.free(s)`) → demoted to `byte* __slicebufK = stackalloc byte[N]; Slice<byte> s = new Slice<byte>(__slicebufK, N);`, the `free` dropped. The slice keeps its `Slice<T>` type (no `s[i]`/`s.len` rewrite). Conservative: any unmodeled use, a return / store / `s.ptr` exposure, a non-constant size, no `free`, or an INDIRECT/FBA allocator (`Receiver != null`) keeps it on the heap. **Cuts:** the `catch` form (only `try`), `defer a.free(s)` (only an explicit free), wider-than-byte elements |
@@ -217,7 +220,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 
 Two tiers, since the wall-breaking plan (`fable-wall.md`, 2026-07-05):
 
-**Planned — the arc's GENERATIVE CORE is complete (W0/W1/W2/W3a/W3b/W4/W5 shipped), the rest are loud errors:** the
+**The planned arc W0–W6 is COMPLETE — later work only *widens the curated `std` set*, the rest are loud errors:** the
 comptime-**type** foundation SHIPPED — type-as-value aliases (`const T = i32;`, with
 `*T`/`?T`/`[]T` composing) and `@TypeOf` (**wall-plan W1**), in-function struct
 decls (**W2**, the reify-a-struct primitive), **generic functions via `comptime`
@@ -227,16 +230,16 @@ per resolved value, with comptime-if folding so recursive generics terminate),
 signature DEPENDS on `T`, so it is lowered per-instantiation, keyed by the resolved type
 so an alias for `i32` shares the `__i32` instance), **type-RETURNING functions**
 (**W4** — a comptime type constructor `fn Pair(comptime T: type) type { return struct {…}; }`
-that reifies a fresh struct per resolved type argument via the W2 primitive), and **generic
+that reifies a fresh struct per resolved type argument via the W2 primitive), **generic
 functions via `anytype` params** (**W5** — the parameter type is INFERRED from the argument
-and keys a specialization, with duck-typed body use failing per-instantiation) — all in the
-Types table. Still to come:
-*widening* the curated `std` set further (`std.debug.print` —
-W6; **`std.ArrayList(T)` SHIPPED as W0**). Today `@import("std")` resolves
+and keys a specialization, with duck-typed body use failing per-instantiation), and
+**`std.debug.print`** (**W6** — the comptime format parsed at lowering time, its `{…}`
+placeholders paired positionally with the tuple, lowered to a stderr `fprintf`) — all in the
+Types table. Today `@import("std")` resolves
 only the curated paths: the allocator paths (`std.mem.Allocator` +
 `std.heap.page_allocator`/`c_allocator`/`FixedBufferAllocator`/`ArenaAllocator`,
 with `alloc`/`free`/`create`/`destroy`/`realloc` — see the Allocators section),
-the `std.mem` slice helpers, and `std.ArrayList(T)`; everything else errors clearly.
+the `std.mem` slice helpers, `std.ArrayList(T)`, and `std.debug.print`; everything else errors clearly.
 
 **Permanent:** `async`/`suspend`, inline assembly (the managed-target root below —
 that reasoning still holds and is not relitigated), and `std`'s **platform floor**

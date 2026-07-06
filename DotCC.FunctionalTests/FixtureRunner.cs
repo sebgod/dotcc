@@ -64,9 +64,23 @@ internal static class FixtureRunner
     /// <c>&lt;Main&gt;$</c> returns <c>int</c> when the program's <c>main</c>
     /// does, and a <c>void</c> entry yields 0. The Zig oracle needs this — a Zig
     /// program with no I/O is observed only by its exit code until
-    /// <c>@cImport</c> brings stdout into reach.
+    /// <c>@cImport</c> brings stdout into reach. Captures <c>stdout</c> only;
+    /// use <see cref="CompileAndRunCapturingStreams"/> when stderr matters
+    /// (e.g. <c>std.debug.print</c>, which writes to stderr).
     /// </summary>
     public static (string stdout, int exit) CompileAndRunCapturingExit(string csharpSource, string[] args)
+    {
+        var (stdout, _, exit) = CompileAndRunCapturingStreams(csharpSource, args);
+        return (stdout, exit);
+    }
+
+    /// <summary>
+    /// As <see cref="CompileAndRunCapturingExit"/>, but captures <b>both</b>
+    /// <c>Console.Out</c> and <c>Console.Error</c> so a caller can assert on
+    /// stderr too — needed for <c>std.debug.print</c> (wall-plan W6), which (like
+    /// real Zig) writes to stderr, not stdout.
+    /// </summary>
+    public static (string stdout, string stderr, int exit) CompileAndRunCapturingStreams(string csharpSource, string[] args)
     {
         // Strip the file-based-program directive — Roslyn doesn't parse it
         // (it's a `dotnet run --file` thing). The rest of the source compiles
@@ -146,11 +160,14 @@ internal static class FixtureRunner
             ?? throw new InvalidOperationException("emitted assembly has no entry point");
 
         var captured = new StringWriter();
+        var capturedErr = new StringWriter();
         int exitCode = 0;
         lock (_consoleLock)
         {
             var prevOut = Console.Out;
+            var prevErr = Console.Error;
             Console.SetOut(captured);
+            Console.SetError(capturedErr);
             try
             {
                 // Top-level-statements entry point: `<Main>$(string[] args)`.
@@ -174,9 +191,10 @@ internal static class FixtureRunner
             finally
             {
                 Console.SetOut(prevOut);
+                Console.SetError(prevErr);
             }
         }
-        return (captured.ToString(), exitCode);
+        return (captured.ToString(), capturedErr.ToString(), exitCode);
     }
 
     /// <summary>

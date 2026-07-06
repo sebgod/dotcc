@@ -712,6 +712,13 @@ internal sealed partial class ZigLowering
             return LowerStdMemCall(methodName, argItems);
         }
 
+        // --- curated `std.debug.print` (wall-plan W6) --- the biggest remaining std idiom. Like the
+        // std.mem helpers it's a curated path, not a general std model; only `print` is modeled.
+        if (TryResolveStdPath(fld.Arg0, out var stdDbg) && stdDbg == "std.debug")
+        {
+            return LowerStdDebugCall(methodName, argItems);
+        }
+
         // A member call on the `std.ArrayList(T)` TYPE (`std.ArrayList(i32).init(alloc)`) is
         // the pre-0.15 MANAGED API, which no longer exists in the pinned zig — reject it by
         // name with the migration path (the generic std-path error would only say `std`).
