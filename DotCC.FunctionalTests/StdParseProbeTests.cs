@@ -174,6 +174,11 @@ public sealed class StdParseProbeTests
         var pct = total == 0 ? 0.0 : 100.0 * ok / total;
         var sb = new StringBuilder();
         sb.Append("# dotcc Zig-std parse-probe (road-to-zig-std.md S0)\n");
+        // A UTC timestamp so a committed snapshot is self-dating: `git diff` on the
+        // tracked report (docs/plans/std-parse-probe.report.txt) is the campaign's
+        // progress log — each milestone regenerates + re-commits, and the timestamp
+        // + coverage line say when each version was measured.
+        sb.Append($"generated: {DateTime.UtcNow:yyyy-MM-dd'T'HH:mm:ss'Z'} (UTC)\n");
         sb.Append($"std dir : {stdDir}  (found via {how})\n");
         sb.Append($"grammar : DotCC.Lib/zig.lalr.yaml\n");
         sb.Append($"files   : {total}\n");
