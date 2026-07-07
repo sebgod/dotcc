@@ -150,6 +150,13 @@ yet, so there's no consumer); parse-only discovery via env / `zig env` suffices.
 Not wired as a CI gate — a ratcheting coverage floor lands once coverage is
 meaningful (post-S9-first-bricks).
 
+**Progress log:** `docs/plans/std-parse-probe.report.txt` is a committed,
+self-timestamped snapshot of the full ranked report (every bucket + its
+`expected one of: …` context). **Regenerate and re-commit it after each brick
+lands** — `git diff` on that file is the campaign's progress: the coverage line
+climbs and buckets drop off. It's the only durable copy (std isn't vendored); the
+`generated:` UTC line and `parse-clean:` line date each version.
+
 ### S1 — module graph + namespace values (L; co-design with S2)
 
 - `ZigModule` = (canonical path, parse tree, **decl table**). The decl table is
