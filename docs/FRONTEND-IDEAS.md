@@ -463,13 +463,14 @@ not Swift objects that *integrate* first-class with C# objects. Note the symmetr
 **3b's advantage is largest exactly where 3a is hardest (classes/ARC) and smallest
 where 3a is already trivial (pure value-type `Geometry`).**
 
-**Status:** idea. If Swift specifically is the goal, **3b (Swift→Wasm→dotcc→.NET)**
-is probably the shorter path than a source frontend; a source frontend only pays off
-if we want Swift *syntax* first-class in the dotcc world. Cheapest probe for 3b: take
-one Embedded `Geometry` function, `swiftc`-compile it to Wasm, and see how small the
-instruction/import surface actually is — and whether the Embedded runtime comes
-bundled (case a) or as imports (case b). (Embedded-Swift-*to-Wasm* is an emerging
-toolchain combo, so that split is empirical; the ARC data-flow above holds either way.)
+**Status: ➜ PLANNED (2026-07-07) — [`plans/fable-wasm.md`](plans/fable-wasm.md).**
+3b is the committed route (the probe below is its milestone WF0); a source frontend
+(3a) stays unplanned and only pays off if we want Swift *syntax* first-class in the
+dotcc world. Original probe sketch, kept for context: take one Embedded `Geometry`
+function, `swiftc`-compile it to Wasm, and see how small the instruction/import
+surface actually is — and whether the Embedded runtime comes bundled (case a) or as
+imports (case b). (Embedded-Swift-*to-Wasm* is an emerging toolchain combo, so that
+split is empirical; the ARC data-flow above holds either way.)
 
 ---
 
@@ -553,8 +554,10 @@ spans both sides of the Wasm boundary. Two distinct payoffs, one solid and one f
   small, clean modules (Swift/Rust/C → wasm, WASI imports) *first*; the self-eating
   round-trip is the victory lap.
 
-**Status:** idea — possibly the most strategic one here; would change the calculus on
-every other entry (Swift especially). Cheapest probe: `llvm-cbe → C → dotcc` on one
+**Status: ➜ PLANNED (2026-07-07) — the Wasm half is [`plans/fable-wasm.md`](plans/fable-wasm.md)**
+(binary-`.wasm` frontend, C#-source backend kept, IL backend explicitly deferred; the
+"measure the real instruction/import surface" probe below became its milestone WF0).
+The LLVM-IR half stays an idea. Original probe sketch: `llvm-cbe → C → dotcc` on one
 small module, *or* a hand-written `.wasm` through a stub wat frontend — measure how
 much instruction/import surface a real module actually exercises.
 
