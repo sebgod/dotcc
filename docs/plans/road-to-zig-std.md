@@ -129,6 +129,27 @@ in-process); keep it off the default path like the oracles. Expect the first
 report to be dominated by trivia (`test` blocks, quoted identifiers, missing
 operators) — that's the point.
 
+**Status: ✅ DONE (2026-07-07).** `DotCC.Lib/Frontends/ZigParseProbe.cs` is the
+parse-only engine (lex → parse, no lowering; every failure classified, never
+throws); `DotCC.FunctionalTests/StdParseProbeTests.cs` is the opt-in walker +
+ranker (`DotCC.Tests/ZigParseProbeTests.cs` pins the classifier always-on, no
+zig install needed). Re-run the progress bar with:
+
+```bash
+export PATH="$PATH:$HOME/AppData/Local/Programs/Zig"        # zig on PATH (win-arm64 dev box)
+DOTCC_RUN_STD_PROBE=1 \
+  DOTCC_ZIG_LIB_DIR="…/Zig/lib" \                           # or omit → auto via `zig env`
+  DOTCC_STD_PROBE_OUT=/tmp/std-probe.txt \                  # optional; else OS temp
+  dotnet test DotCC.FunctionalTests -c Release --filter FullyQualifiedName~StdParseProbeTests
+```
+
+**Baseline: 32 / 553 files parse-clean = 5.8%** (grammar `zig.lalr.yaml` at
+`fa60b53`). The measured S9 ranking is folded into S9 below — it replaced the
+guessed order. `--zig-lib-dir` CLI flag is deferred to S1 (nothing lowers std
+yet, so there's no consumer); parse-only discovery via env / `zig env` suffices.
+Not wired as a CI gate — a ratcheting coverage floor lands once coverage is
+meaningful (post-S9-first-bricks).
+
 ### S1 — module graph + namespace values (L; co-design with S2)
 
 - `ZigModule` = (canonical path, parse tree, **decl table**). The decl table is
@@ -272,7 +293,31 @@ The brick W1 and W4 both explicitly deferred:
 
 ### S9 — surface-debt bricks (many S/M; parallel any time; wall-finder-ranked)
 
-Seed list (each its own loop increment; S0's report re-ranks):
+**Measured ranking (first S0 run, 2026-07-07 — 5.8% baseline).** The parse
+wall-finder ranks the gaps by *files that fail on this construct first* (not
+total uses; fixing the top of the list unblocks whole files). The head:
+
+| Files | Construct (first-fail) | Brick |
+|---|---|---|
+| ~150 | **top-level container fields** — the file-is-a-struct idiom (`bytes: T,` / `graph: *Graph,` at file scope) | grammar: allow container-body decls at the top level |
+| 51 | **`@"quoted"` identifiers** (`.@"io-uring"`) — lexer can't tokenize `@"` | lexer rule (also unblocks `std.builtin.Type` tags) |
+| 35 | **trailing comma in fn params** (multi-line signatures) | grammar: optional trailing `,` in Params |
+| 29 | **struct field default values** (`field: T = null,`) | grammar + lowering: field initializer |
+| 28 | **`++` / `**` operators** (`lowercase ++ uppercase`) | lexer + lowering (comptime array/string concat/repeat) |
+| 27 | **`test` blocks** with a bare-ident name (`test encode {`) | parse-and-DROP (see below) |
+| 23 | **`callconv(...)`** on fn types (`fn (…) callconv(.c) void`) | parse-and-honor → native-callconv marker |
+| 13 | **compound assign in while-continue** (`: (idx += 12)`) | grammar: allow `op=` in the continue clause |
+| 12 | **anonymous named-field struct types** (`struct { a: u32, b: Fe }` return) | grammar: named fields in an inline struct type (today tuple-only) |
+| 10 | **top-level `comptime {}` blocks** | parse-and-DROP (analysis-only in std) |
+|  8 | **`packed struct(u16)`** explicit backing int | grammar + the packed-struct brick below |
+
+Lower buckets (each 1–7 files): `align(N)`, `enum`/`union`/`packed`/`struct` in
+value position, `..` ranges, `extern var`, `inline fn`, labeled-block `{…}` as
+an expression, `=>` prong shapes. The full per-file report (with the
+`expected one of: …` context) is what the probe writes to `DOTCC_STD_PROBE_OUT`
+— regenerate it after each brick to watch the number climb.
+
+Seed list (each its own loop increment; ranked by the table above, not guesswork):
 - **`test "…" {}` + container-level `comptime {}`: parse and DROP** (1857
   blocks) — the single biggest parse-coverage lever, near-zero risk.
 - **Quoted identifiers `@"…"`** (if not already landed with S5).
