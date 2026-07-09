@@ -152,10 +152,13 @@ boundary, not a monolith:
   `fd_write`, `proc_exit`, `random_get`, `clock_time_get`, args/env stubs. WASI is
   libc-shaped and `DotCC.Libc` already is a libc — each function routes to the
   obvious existing primitive. Grown demand-driven, loud on the rest.
-- **T3 — the Embedded Swift runtime floor** (if any). Empirical: Embedded Swift
-  usually **bundles** its runtime (allocator + refcount functions become ordinary
-  in-module code — invisible to dotcc, tier T0); if the probe shows imports instead
-  (`posix_memalign`, `putchar`, …), shim that short, known list. WF0 answers which.
+- **T3 — the Embedded Swift runtime floor.** ✅ **WF0 measured it: bundled.** The
+  Geometry-shaped module carries 62 in-module functions and *zero* non-WASI imports —
+  the allocator + refcount + math runtime is ordinary in-module code (tier T0/WF3
+  memory ops), not a host ABI. T3 is effectively empty for value-typed Swift; the
+  only floor is the T2 WASI reactor set (`args_*`, `fd_*`, `proc_exit`,
+  `random_get`). Re-measure if a class-ful / `-no-static-stdlib` build ever imports a
+  runtime symbol; shim that short list then.
 
 Unknown imports: reject loudly, named, at lift time — never a linker-style silent
 stub.
@@ -189,23 +192,56 @@ day one**: dotcc already *emits* wat, and the wat oracle already assembles it.
 Sizes: S < M < L. Every milestone lands with always-on unit pins + its opt-in
 oracle leg, per the house discipline. Loud cuts throughout.
 
-### WF0 — the surface probe (S/M) — *measure before building*
+### WF0 — the surface probe (S/M) — *measure before building* — ✅ DONE (2026-07-09)
 
 The S0 wall-finder lesson, applied: **inventory real modules before writing the
-lifter.** A `WasmModuleProbe` (reader skeleton: section decode + opcode/import
-histogram — this *is* WF1's first increment) run over:
-  (a) dotcc's own emitted wat corpus assembled with wat2wasm,
-  (b) one Embedded Swift function (`@_expose(wasm)`, `-target wasm32-unknown-none-wasm
-      -enable-experimental-feature Embedded -wmo`) — toolchain acquisition on
-      win-arm64 is itself a WF0 deliverable (fallback: build the fixture in WSL/CI
-      and commit the blob),
-  (c) one clang `--target=wasm32` C file and one Rust `no_std` function, for spread.
-Deliverables: committed, timestamped report
-(`docs/plans/wasm-surface-probe.report.txt`, the std-probe pattern) answering:
-which post-MVP features do real producers emit (multivalue? reference-types
-encoding?), is the Swift runtime bundled or imported (T3), how big is the real
-import surface, do exports carry usable names. **The WF2–WF7 feature lists below
-get corrected against this measurement.**
+lifter.** A `WasmModuleProbe` (`DotCC.Lib/Wasm/`, reader skeleton: section decode +
+opcode/import histogram + structural post-MVP feature detection — this *is* WF1's
+first increment, fail-soft like `ZigParseProbe`) run over:
+  (a) dotcc's own emitted wat corpus — all 146 inline programs from `WatOracleTests`,
+      harvested off the `[InlineData]` metadata (zero duplication) and assembled with
+      wat2wasm;
+  (b) one Embedded Swift module (`@_expose(wasm)`, `-target wasm32-unknown-wasip1
+      -enable-experimental-feature Embedded -wmo -static-stdlib`) — **built on
+      win-arm64 with the host swiftc 6.3.1 + the swift.org wasm SDK bundle** (the
+      "biggest logistics unknown" — resolved; exact runbook in
+      `DotCC.FunctionalTests/WasmProbeModules/README.md`);
+  (c) one clang `--target=wasm32` C file and one zig `wasm32-freestanding` module.
+Deliverables (all landed): `WasmSurfaceProbeTests` (opt-in, `DOTCC_RUN_WASM_PROBE=1`),
+committed producer blobs + sources under `WasmProbeModules/`, and the committed
+timestamped report `docs/plans/wasm-surface-probe.report.txt`.
+
+**Findings (the measurement that corrects the feature lists below):**
+- **The Embedded Swift runtime is BUNDLED, not imported.** The Geometry-shaped
+  module has **62 functions in-module and zero non-WASI imports** — allocator +
+  refcount + math are ordinary in-module code (tier T0/WF3 memory ops), *not* a host
+  ABI to shim. **This collapses tier T3 to near-empty for value-typed Swift** — the
+  campaign's biggest de-risking. The WASI imports it does carry (`args_get`,
+  `args_sizes_get`, `fd_close`, `fd_fdstat_get`, `fd_seek`, `fd_write`, `proc_exit`,
+  `random_get`) are the `_start` reactor floor = tier T2, and libc-shaped.
+- **`multivalue` is declared but NOT emitted.** swiftc's `target_features` custom
+  section advertises `+multivalue`, but the *actual encoding* uses no multi-result
+  type or block-type-index — the structural detector never fires. Lesson banked:
+  `target_features` is a capability manifest, not a usage record; trust the
+  histogram. **WF2 can safely defer multivalue** (D8's gate holds).
+- **`bulk-memory` and `reference-types` are non-negotiable for Swift.** The module
+  emits `memory.copy`/`memory.fill` (bulk) and a funcref table + `call_indirect` (9
+  sites) + an elem segment even for this trivial value math. So **WF5's
+  `call_indirect` is needed to run *any* real Swift**, not just fancy dispatch —
+  reorder expectations accordingly. clang's module is pure-MVP; zig's `-dynamic`
+  build is a PIC/shared shape (imported memory + `__indirect_function_table`).
+- **Export names are usable verbatim.** `@_expose(wasm, "square")` surfaces exactly
+  `square` — no demangling needed for the public API surface (WF6's name-section
+  work is a nicety for *internal* Swift-mangled names, not a blocker).
+- **The self-round-trip surface is now exact.** All 146 wat-corpus modules probe
+  clean; the histogram *is* the WF2/WF3 opcode worklist (top: `local.get`,
+  `i32.const`, `i32.add`, `call`, `if`/`block`/`loop`/`br`/`br_if`, the load/store
+  family, `i32.trunc_sat_f64_s`, `i32.extend8_s`, `select`, `br_table`,
+  `memory.size`/`grow`). Only import across the whole corpus:
+  `wasi_snapshot_preview1.fd_write` (confirms the T1 tier is exactly one function).
+- **Loud cut:** no Rust module (no `rustc` on this machine) — the probe auto-includes
+  any `*.wasm` dropped in `WasmProbeModules/`, so a Rust `no_std` fixture slots in
+  when a toolchain is around.
 
 ### WF1 — the binary reader (M)
 

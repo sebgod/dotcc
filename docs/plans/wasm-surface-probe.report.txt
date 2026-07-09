@@ -1,0 +1,211 @@
+# dotcc wasm surface probe (fable-wasm.md WF0)
+generated: 2026-07-09T23:31:52Z (UTC)
+probe    : DotCC.Lib/Wasm/WasmModuleProbe.cs (fail-soft reader skeleton)
+corpus   : (a) 146 modules — dotcc wat backend over the WatOracleTests inline corpus (EmitWat + wat2wasm)
+           (b)(c) 3 committed producer modules (DotCC.FunctionalTests/WasmProbeModules)
+
+## (a) dotcc's own wat corpus — the self-round-trip surface
+status   : 146 ok, 0 malformed
+features : nontrapping-fptoint, sign-extension
+imports  : wasi_snapshot_preview1.fd_write (func)
+
+opcode histogram — every instruction the wat backend emitted, i.e. the
+exact lift surface WF2/WF3 must cover first (count / modules-using / mnemonic):
+  12735   139  local.get
+  12255   146  i32.const
+   5309   146  end
+   4452   134  local.set
+   3265   117  i32.add
+   2219   112  call
+   2148   101  if
+   1367   109  i32.sub
+   1196    89  i32.store8
+    970   111  br_if
+    969    92  else
+    924   118  block
+    871   114  br
+    847   109  loop
+    837    74  i64.const
+    788   102  global.get
+    588   100  i32.store
+    580    88  i32.ge_s
+    536   105  i32.eq
+    476    52  i32.load
+    473   146  return
+    445    95  i32.eqz
+    427    56  i32.shl
+    391    99  i32.lt_s
+    365    76  i32.wrap_i64
+    348    85  i32.and
+    319   102  global.set
+    316    88  i32.load8_u
+    260   120  drop
+    245    49  i64.and
+    243    73  i64.eqz
+    212    47  i64.extend_i32_u
+    207    49  i64.shr_u
+    177    54  i32.gt_s
+    155    73  i32.ne
+    145    81  i32.le_s
+    139    49  i32.or
+    108    79  i32.shr_u
+    102    64  f64.const
+     93    59  i32.lt_u
+     83    34  i32.div_u
+     83    34  i32.rem_u
+     83    64  i64.lt_s
+     76    49  i64.reinterpret_f64
+     72    49  i64.sub
+     60    18  i32.mul
+     57    34  i32.gt_u
+     57    38  i64.add
+     57    38  i64.or
+     52    50  i64.mul
+     42    28  i64.extend_i32_s
+     41    41  i64.div_u
+     41    41  i64.rem_u
+     40    38  i64.gt_u
+     40    29  local.tee
+     35    13  i32.ge_u
+     23    22  unreachable
+     17    17  i64.shl
+     14    14  i32.trunc_sat_f64_s
+     14     7  memory.size
+     13     8  select
+     11     7  f64.div
+      9     6  i32.load8_s
+      8     8  br_table
+      7     7  f64.mul
+      7     7  i32.le_u
+      7     7  memory.grow
+      6     6  f64.add
+      6     6  f64.neg
+      5     5  f64.convert_i32_s
+      5     2  f64.store
+      3     2  f32.const
+      3     2  f64.load
+      2     2  i32.rem_s
+      2     2  i32.trunc_sat_f32_s
+      1     1  f32.add
+      1     1  f32.convert_i32_s
+      1     1  f32.mul
+      1     1  f64.lt
+      1     1  i32.extend8_s
+      1     1  i64.eq
+
+## (b)(c) producer modules
+
+### geom-embedded-swift.wasm (19,180 bytes)
+status   : ok
+sections : type(170), import(286), function(63), table(7), memory(3), global(19), export(60), elem(11), code(15154), data(1106), custom:name(1986), custom:producers(127), custom:target_features(148)
+counts   : 62 funcs, 21 types, 1 tables, 1 memories, 3 globals, 1 elems, 3 datas, name section
+imports  : wasi_snapshot_preview1.args_get (func), wasi_snapshot_preview1.args_sizes_get (func), wasi_snapshot_preview1.fd_close (func), wasi_snapshot_preview1.fd_fdstat_get (func), wasi_snapshot_preview1.fd_seek (func), wasi_snapshot_preview1.fd_write (func), wasi_snapshot_preview1.proc_exit (func), wasi_snapshot_preview1.random_get (func)
+exports  : memory (memory), _start (func), square (func), vec_length (func), dot (func), imax (func), fib (func)
+features : bulk-memory, reference-types
+target_features: +bulk-memory, +bulk-memory-opt, +call-indirect-overlong, +multivalue, +mutable-globals, +nontrapping-fptoint, +reference-types, +sign-ext
+opcodes  : 6817 instructions, 64 distinct mnemonics
+   1848     1  local.get
+   1089     1  i32.const
+    522     1  local.set
+    384     1  end
+    333     1  i32.store
+    300     1  br_if
+    290     1  block
+    282     1  i32.add
+    282     1  local.tee
+    251     1  i32.load
+    163     1  i32.and
+    125     1  br
+    104     1  call
+     83     1  i32.eqz
+     83     1  i32.sub
+     57     1  unreachable
+     55     1  i32.or
+     48     1  i32.eq
+     46     1  i32.shl
+     45     1  global.get
+     40     1  i32.ne
+     32     1  i32.shr_u
+     28     1  return
+     26     1  global.set
+     25     1  loop
+     24     1  i64.store
+     23     1  i32.gt_u
+     22     1  i64.const
+     20     1  select
+     18     1  i32.lt_u
+     15     1  f64.store
+     14     1  i32.load8_u
+     13     1  drop
+     12     1  i32.ge_s
+     11     1  i32.ge_u
+     10     1  i32.le_u
+     10     1  i32.rotl
+      9     1  call_indirect
+      8     1  i32.lt_s
+      7     1  f64.load
+      5     1  i32.clz
+      5     1  i32.store8
+      5     1  i32.wrap_i64
+      5     1  i32.xor
+      5     1  i64.extend_i32_s
+      4     1  f64.mul
+      3     1  i32.ctz
+      3     1  i32.div_s
+      3     1  i32.gt_s
+      3     1  i64.extend_i32_u
+      3     1  i64.load
+      2     1  f64.add
+      2     1  i64.mul
+      2     1  i64.shr_u
+      1     1  f64.sqrt
+      1     1  i32.div_u
+      1     1  i32.le_s
+      1     1  i32.mul
+      1     1  i32.rem_u
+      1     1  i32.shr_s
+      1     1  memory.copy
+      1     1  memory.fill
+      1     1  memory.grow
+      1     1  memory.size
+
+### square-clang.wasm (640 bytes)
+status   : ok
+sections : type(21), function(5), memory(3), global(70), export(209), code(34), custom:name(84), custom:producers(38), custom:target_features(148)
+counts   : 4 funcs, 4 types, 0 tables, 1 memories, 11 globals, 0 elems, 0 datas, name section
+imports  : (none)
+exports  : memory (memory), __wasm_call_ctors (func), square (func), rotate (func), hyp (func), __dso_handle (global), __data_end (global), __stack_low (global), __stack_high (global), __global_base (global), __heap_base (global), __heap_end (global), __memory_base (global), __table_base (global), __wasm_first_page_end (global)
+features : (none — pure MVP)
+target_features: +bulk-memory, +bulk-memory-opt, +call-indirect-overlong, +multivalue, +mutable-globals, +nontrapping-fptoint, +reference-types, +sign-ext
+opcodes  : 39 instructions, 7 distinct mnemonics
+     15     1  end
+     11     1  i32.const
+      8     1  local.get
+      2     1  f64.mul
+      1     1  f64.add
+      1     1  i32.mul
+      1     1  i32.rotl
+
+### square-zig.wasm (186 bytes)
+status   : ok
+sections : custom:dylink.0(15), type(16), import(90), function(4), export(18), code(23)
+counts   : 3 funcs, 3 types, 0 tables, 0 memories, 0 globals, 0 elems, 0 datas
+imports  : env.memory (memory), env.__indirect_function_table (table), env.__memory_base (global), env.__table_base (global)
+exports  : fma32 (func), square (func)
+features : reference-types
+note     : custom section "dylink.0" (15 bytes) — skipped
+opcodes  : 11 instructions, 5 distinct mnemonics
+      5     1  local.get
+      3     1  end
+      1     1  f32.add
+      1     1  f32.mul
+      1     1  i32.mul
+
+## WF0 questions -> answers (from the measurements above)
+post-MVP features per producer:
+  dotcc-wat : nontrapping-fptoint, sign-extension
+  geom-embedded-swift.wasm : bulk-memory, reference-types
+  square-clang.wasm : (none)
+  square-zig.wasm : reference-types
+swift runtime (geom-embedded-swift.wasm): 62 functions in-module; no non-WASI imports — the Embedded Swift runtime is BUNDLED (tier T2, not T3)
+swift exports (geom-embedded-swift.wasm): memory (memory), _start (func), square (func), vec_length (func), dot (func), imax (func), fib (func) — @_expose names survive verbatim
