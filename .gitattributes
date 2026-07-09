@@ -12,3 +12,7 @@
 *.sh  text eol=lf
 *.py  text eol=lf
 *.yml text eol=lf
+
+# Committed .wasm probe fixtures (fable-wasm.md WF0) are the cached reference bytes —
+# pin binary so no eol smudge can ever corrupt a blob (auto-detect would too; intent).
+*.wasm binary

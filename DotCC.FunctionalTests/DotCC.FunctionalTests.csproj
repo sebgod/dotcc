@@ -56,6 +56,10 @@
     <None Include="Fixtures\**\*.txt" CopyToOutputDirectory="PreserveNewest" />
     <!-- C23 #embed data files (resolved next to the TU at compile time). -->
     <None Include="Fixtures\**\*.bin" CopyToOutputDirectory="PreserveNewest" />
+    <!-- WF0 wasm surface-probe modules (fable-wasm.md): committed .wasm blobs built
+         once per toolchain; sources + exact build commands sit alongside in
+         WasmProbeModules/README.md (the sidecar-is-the-reference pattern). -->
+    <None Include="WasmProbeModules\**\*.wasm" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
