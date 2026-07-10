@@ -115,10 +115,14 @@ header .tag {
     overflow: hidden;
 }
 .cm-host .cm-editor { flex: 1; height: 100%; }
-.cm-host .cm-scroller {
+.cm-host .cm-scroller,
+.cm-host .cm-content {
     font-family: var(--mono);
     font-size: .86rem;
     line-height: 1.45;
+    /* Show C operators as plain ASCII — no <=, >=, ++, -> ligatures. */
+    font-variant-ligatures: none;
+    font-feature-settings: "liga" 0, "calt" 0;
 }
 /* oneDark ships its own palette; drop its border-radius so it sits flush. */
 .cm-host .cm-editor.cm-focused { outline: none; }
@@ -210,6 +214,9 @@ pre {
     line-height: 1.45;
     white-space: pre-wrap;
     word-break: break-word;
+    /* Show C operators as plain ASCII — no <=, >=, -> ligatures. */
+    font-variant-ligatures: none;
+    font-feature-settings: "liga" 0, "calt" 0;
 }
 pre.code { color: var(--muted); }
 pre.stdout { color: var(--fg); }
