@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk.BlazorWebAssembly">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <OverrideHtmlAssetPlaceholders>true</OverrideHtmlAssetPlaceholders>
+    <!-- The web sandbox is a consumer of DotCC.Lib, not a shipped package, and not
+         part of the test chain (docs/plans/fable-web.md, D6). It opts out of the
+         repo's Central Package Management so the Blazor deps carry their own
+         versions without touching Directory.Packages.props. -->
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <IsPackable>false</IsPackable>
+    <!-- A C compiler doesn't need culture data; dropping ICU trims the payload. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- The generated LALR parse tables are huge primitive-array literals; trimming
+         must not touch DotCC.Lib (reflection over embedded resources + the tables). -->
+    <TrimMode>partial</TrimMode>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly" Version="10.0.9" />
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.DevServer" Version="10.0.9" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DotCC.Lib\DotCC.Lib.csproj" />
+  </ItemGroup>
+
+  <!-- Keep DotCC.Lib whole: the parse tables + embedded system headers are reached
+       structurally / via manifest resources, which the trimmer can't see. -->
+  <ItemGroup>
+    <TrimmerRootAssembly Include="DotCC.Lib" />
+  </ItemGroup>
+
+</Project>
