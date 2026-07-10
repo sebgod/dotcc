@@ -30,7 +30,7 @@
                 </select>
             </label>
         </div>
-        <textarea @bind="_source" @bind:event="oninput" spellcheck="false"></textarea>
+        <div id="@EditorId" class="cm-host"></div>
         <div class="controls">
             <button class="run" @onclick="RunAsync" disabled="@_busy">
                 @(_busy ? "Running…" : "▶ Run")
@@ -116,9 +116,14 @@
     private const string WorkDir = "/work";
     private const string SourcePath = WorkDir + "/source.c";
 
+    // The CodeMirror instance lives in JS (window.dotccEditor); `_source` is the
+    // authoritative C# copy, pulled from the editor right before each compile/share.
+    private const string EditorId = "editor";
+
     /// <summary>On first render, adopt any program packed into a "#src=…" share
-    /// link so playground links round-trip. JS interop is only legal once the
-    /// component has rendered (this app is client-side WASM, no prerender).</summary>
+    /// link so playground links round-trip, then mount the CodeMirror editor with
+    /// the resolved source. JS interop is only legal once the component has
+    /// rendered (this app is client-side WASM, no prerender).</summary>
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
         if (!firstRender) { return; }
@@ -127,11 +132,17 @@
         {
             _source = shared;
             _example = "(shared link)";
-            StateHasChanged();
         }
+        await JS.InvokeVoidAsync("dotccEditor.create", EditorId, _source);
+        if (!string.IsNullOrEmpty(shared)) { StateHasChanged(); }
     }
 
-    private void OnExampleChanged(ChangeEventArgs e)
+    /// <summary>Pull the live editor text into <see cref="_source"/> before a
+    /// compile or share (the buffer of record is CodeMirror's, not the C# field).</summary>
+    private async Task SyncFromEditor() =>
+        _source = await JS.InvokeAsync<string>("dotccEditor.getValue", EditorId);
+
+    private async Task OnExampleChanged(ChangeEventArgs e)
     {
         var name = e.Value?.ToString();
         var picked = Array.Find(Examples, x => x.Name == name);
@@ -142,11 +153,13 @@
             _ran = false;
             _diagnostics = "";
             _hasError = false;
+            await JS.InvokeVoidAsync("dotccEditor.setValue", EditorId, picked.Source);
         }
     }
 
     private async Task ShareAsync()
     {
+        await SyncFromEditor();
         var url = await JS.InvokeAsync<string>("dotccSandbox.makeShareLink", _source);
         _hint = url.Length > 60 ? "link copied to clipboard ✓" : url;
         StateHasChanged();
@@ -158,6 +171,8 @@
         _diagnostics = "";
         _hasError = false;
         StateHasChanged();
+
+        await SyncFromEditor();
 
         // Compile on the .NET side: source -> wat (and C# / -E, for the view tabs).
         string? wat = null;

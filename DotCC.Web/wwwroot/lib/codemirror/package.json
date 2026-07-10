@@ -1,0 +1,14 @@
+{
+  "name": "dotcc-codemirror-bundle",
+  "private": true,
+  "type": "module",
+  "description": "Build a self-contained CodeMirror 6 editor bundle for the dotcc web sandbox (no CDN, D3).",
+  "dependencies": {
+    "@codemirror/commands": "^6",
+    "@codemirror/lang-cpp": "^6",
+    "@codemirror/language": "^6",
+    "@codemirror/state": "^6",
+    "@codemirror/theme-one-dark": "^6",
+    "@codemirror/view": "^6"
+  }
+}

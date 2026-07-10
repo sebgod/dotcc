@@ -219,8 +219,17 @@ Landed in reviewable slices:
   and re-hydrated on boot. Verified headless (CDP): factorial regression + FizzBuzz
   run, `-E` shows the token stream (incl. MEMFS-resolved `stdio.h`), share-link
   round-trips (UTF-8 safe).
-- **Slice B (next)** — CodeMirror 6 (D4), the vendoring lift.
-- **Slice C** — Zig toggle (D7), multi-file MEMFS tabs, `-std=`/`-W` flag toggles.
+- **Slice B ✅ (2026-07-10)** — **CodeMirror 6** (D4), the vendoring lift. CM6 ships
+  as ES modules meant to be app-bundled (no official browser file), so we bundle our
+  own with esbuild → one self-contained 410 KB IIFE and commit it (D3, no CDN),
+  vendored under `wwwroot/lib/codemirror/` with `LICENSE` (MIT), a provenance README,
+  and the `entry.mjs` + `package.json` build inputs for byte-reproducible regen. The
+  bundle exposes `window.dotccEditor` (`create`/`getValue`/`setValue`); `Home.razor`
+  mounts it, pulls text on Run/Share, pushes on example-select / share-load. Packages:
+  `@codemirror/{view,state,commands,language,lang-cpp,theme-one-dark}` (C highlighting
+  + oneDark). Verified headless (CDP): editor mounts, regression + FizzBuzz + `-E` +
+  share still green.
+- **Slice C (next)** — Zig toggle (D7), multi-file MEMFS tabs, `-std=`/`-W` flag toggles.
 
 Full WEB2 scope:
 CodeMirror 6 (D4) with C highlighting; output tabs — **Run / C# / wat / -E
