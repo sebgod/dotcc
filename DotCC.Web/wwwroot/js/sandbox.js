@@ -99,5 +99,56 @@ window.dotccSandbox = (function () {
     }
   }
 
-  return { assembleAndRun };
+  // --- share-links (WEB2) -------------------------------------------------
+  // Source is deflate-compressed and base64url-packed into the URL fragment, so
+  // a playground link is fully self-contained — no server, no storage, no dep.
+  // Uses the native CompressionStream API (no pako/lz-string vendoring).
+
+  const enc = new TextEncoder();
+  const dec = new TextDecoder();
+
+  function b64urlFromBytes(bytes) {
+    let s = "";
+    for (let i = 0; i < bytes.length; i++) { s += String.fromCharCode(bytes[i]); }
+    return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+
+  function bytesFromB64url(b64) {
+    const s = b64.replace(/-/g, "+").replace(/_/g, "/");
+    const bin = atob(s);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) { out[i] = bin.charCodeAt(i); }
+    return out;
+  }
+
+  async function pipe(bytes, stream) {
+    const writer = stream.writable.getWriter();
+    writer.write(bytes);
+    writer.close();
+    return new Uint8Array(await new Response(stream.readable).arrayBuffer());
+  }
+
+  /** Compress `source` and build a shareable "#src=…" URL; also copies it to the
+   *  clipboard (best effort). Returns the URL string. */
+  async function makeShareLink(source) {
+    const packed = await pipe(enc.encode(source), new CompressionStream("deflate-raw"));
+    const url = `${location.origin}${location.pathname}#src=${b64urlFromBytes(packed)}`;
+    try { await navigator.clipboard.writeText(url); } catch { /* clipboard may be blocked; URL still returned */ }
+    // Reflect it in the address bar too, without adding a history entry.
+    try { history.replaceState(null, "", url); } catch { /* non-fatal */ }
+    return url;
+  }
+
+  /** If the current URL carries a "#src=…" fragment, decompress and return the
+   *  source; otherwise return null. */
+  async function readShareSource() {
+    const m = /[#&]src=([^&]+)/.exec(location.hash);
+    if (!m) { return null; }
+    try {
+      const bytes = await pipe(bytesFromB64url(m[1]), new DecompressionStream("deflate-raw"));
+      return dec.decode(bytes);
+    } catch { return null; }
+  }
+
+  return { assembleAndRun, makeShareLink, readShareSource };
 })();

@@ -87,7 +87,25 @@ header .tag {
     color: var(--muted);
 }
 
-.pane-head { padding: .4rem .7rem; }
+.pane-head {
+    padding: .4rem .7rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: .5rem;
+}
+
+.examples { display: flex; align-items: center; gap: .35rem; }
+.examples select {
+    background: var(--panel);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: .3rem;
+    font-family: var(--mono);
+    font-size: .74rem;
+    padding: .12rem .3rem;
+    cursor: pointer;
+}
 
 textarea {
     flex: 1;
@@ -124,6 +142,18 @@ button.run {
     cursor: pointer;
 }
 button.run:disabled { opacity: .55; cursor: default; }
+
+button.share {
+    background: transparent;
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: .35rem;
+    padding: .38rem .7rem;
+    font-size: .82rem;
+    cursor: pointer;
+}
+button.share:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+button.share:disabled { opacity: .55; cursor: default; }
 
 .hint { color: var(--muted); font-size: .78rem; }
 

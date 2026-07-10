@@ -206,8 +206,23 @@ the `fd_write`/`proc_exit` shim capturing fd 1/2 → `main()` exit code); `Home.
 `1! = 1 … 6! = 720`, exit 0. Cut to WEB2: CodeMirror, examples, Zig toggle,
 multi-file, share-links. Deploy (GH Pages) is WEB4.
 
-### WEB2 — the sandbox proper (M)
+### WEB2 — the sandbox proper (M) — 🚧 IN PROGRESS
 
+Landed in reviewable slices:
+
+- **Slice A ✅ (2026-07-10)** — editor polish, no new deps: the **`-E` tokens tab**
+  (4th output view, via `Compiler.Preprocess`), the **examples dropdown** (D8 —
+  Factorial / FizzBuzz / Fibonacci / GCD / Primes, curated to the integer+`printf`
+  surface the wat backend runs today), and **share-links** — source deflate-packed
+  into a `#src=…` URL fragment via the native `CompressionStream` API (no
+  lz-string/pako vendoring), copied to clipboard + reflected in the address bar,
+  and re-hydrated on boot. Verified headless (CDP): factorial regression + FizzBuzz
+  run, `-E` shows the token stream (incl. MEMFS-resolved `stdio.h`), share-link
+  round-trips (UTF-8 safe).
+- **Slice B (next)** — CodeMirror 6 (D4), the vendoring lift.
+- **Slice C** — Zig toggle (D7), multi-file MEMFS tabs, `-std=`/`-W` flag toggles.
+
+Full WEB2 scope:
 CodeMirror 6 (D4) with C highlighting; output tabs — **Run / C# / wat / -E
 tokens** (the look-inside-the-compiler view); multi-file tabs backed by MEMFS
 `/src/` (D5); the examples dropdown (D8); warning-flag toggles if cheap
