@@ -1,0 +1,89 @@
+name: pages
+
+# Deploy the DotCC.Web in-browser sandbox to GitHub Pages (fable-web.md WEB4).
+#
+# DotCC.Web is a standalone Blazor WebAssembly app that runs the dotcc compiler
+# (DotCC.Lib) in the browser and executes C via the wat backend + libwabt.js — a
+# fully static site, no server (see the project README under DotCC.Web/). It lives
+# OUTSIDE dotcc.sln + CPM, so the main `ci` workflow never builds it; this workflow
+# is its sole CI, and publishes it to https://sebgod.github.io/dotcc/.
+#
+# Runs on pushes to main that touch the app or the compiler it embeds (so the live
+# sandbox tracks the latest compiler), and on manual dispatch for a forced redeploy.
+# Pure managed publish target is browser-wasm (OS-neutral), so ubuntu publishes fine.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'DotCC.Web/**'
+      - 'DotCC.Lib/**'
+      - 'DotCC.Libc/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; let an in-flight deploy finish rather than cancelling it
+# (a half-applied Pages deploy is worse than a slightly stale one).
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      # Blazor WASM Release publish relinks the runtime natively (Emscripten) to
+      # tree-shake it smaller; the wasm-tools workload provides that toolchain.
+      - name: Install wasm-tools workload
+        run: dotnet workload install wasm-tools
+
+      # NuGet LALR.CC path (no sibling checkout in CI), same as the main ci workflow.
+      - name: Publish DotCC.Web (Release)
+        run: dotnet publish DotCC.Web/DotCC.Web.csproj -c Release -o publish -p:UseLocalLalrCc=false --nologo
+
+      - name: Rewrite base href for the /dotcc/ project-site subpath
+        run: |
+          set -euo pipefail
+          idx="publish/wwwroot/index.html"
+          # github.io serves this project site under /dotcc/, not root. Local dev
+          # keeps <base href="/" />; patch only the published copy.
+          sed -i 's|<base href="/" />|<base href="/dotcc/" />|' "$idx"
+          grep -q '<base href="/dotcc/" />' "$idx" || { echo "base href not rewritten"; exit 1; }
+
+      - name: SPA 404 fallback + .nojekyll
+        run: |
+          set -euo pipefail
+          # Jekyll strips _framework/ (leading underscore) — .nojekyll disables Jekyll.
+          touch publish/wwwroot/.nojekyll
+          # Static hosts 404 on client-side deep links; GitHub Pages serves 404.html
+          # for unknown paths, so a copy of index.html makes routes resolve.
+          cp publish/wwwroot/index.html publish/wwwroot/404.html
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: publish/wwwroot
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
