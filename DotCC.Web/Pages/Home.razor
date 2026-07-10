@@ -1,520 +1,104 @@
 @page "/"
-@using System.IO
-@using System.Text
-@using DotCC
-@inject IJSRuntime JS
 
-<PageTitle>dotcc — C to .NET/wasm, in your browser</PageTitle>
+<PageTitle>dotcc — compile C &amp; Zig to .NET / WebAssembly, in your browser</PageTitle>
 
-<header>
-    <h1>dotcc <span class="tag">web sandbox</span></h1>
-    <p class="blurb">
-        A clang-shaped <strong>C&nbsp;→&nbsp;.NET/C#</strong> compiler with a
-        WebAssembly backend — compiled to wasm and running <em>entirely in this
-        tab</em>. Your code is transpiled by the real compiler, assembled to wasm,
-        and executed here. Nothing leaves your browser.
+<section class="hero">
+    <h1>Compile <span class="hl-c">C</span> and <span class="hl-zig">Zig</span> to <span class="hl-net">.NET&nbsp;/&nbsp;C#</span></h1>
+    <p class="lede">
+        <strong>dotcc</strong> is a clang-shaped compiler front-end that transpiles C — and
+        Zig — to AOT-clean C&nbsp;14 on .NET&nbsp;10, with a second WebAssembly-text backend.
+        Two languages, one typed IR, two back-ends. This whole page runs the <em>real</em>
+        compiler, itself compiled to wasm, entirely in your browser tab.
     </p>
-</header>
+    <div class="cta-row">
+        <a class="cta primary" href="sandbox">Open the sandbox →</a>
+        <a class="cta" href="coverage">Browse coverage</a>
+        <a class="cta ghost" href="https://github.com/sebgod/dotcc" target="_blank" rel="noopener">Source on GitHub ↗</a>
+    </div>
+</section>
 
-<div class="sandbox">
-    <section class="editor">
-        <div class="pane-head">
-            <label class="lang">language:
-                <select @onchange="OnLangChanged">
-                    <option value="c" selected="@(_lang == "c")">C</option>
-                    <option value="zig" selected="@(_lang == "zig")">Zig</option>
-                </select>
-            </label>
-            <span class="filename">@SourceFileName</span>
-            <label class="examples">
-                example:
-                <select @onchange="OnExampleChanged">
-                    @foreach (var ex in CurrentExamples)
-                    {
-                        <option value="@ex.Name" selected="@(ex.Name == _example)">@ex.Name</option>
-                    }
-                </select>
-            </label>
+<section class="arch">
+    <h2>N front-ends × M back-ends, meeting at one typed IR</h2>
+    <div class="nm">
+        <div class="nm-col">
+            <span class="nm-label">front-ends</span>
+            <div class="nm-node c">C</div>
+            <div class="nm-node zig">Zig</div>
         </div>
-        <div id="@EditorId" class="cm-host"></div>
-        <div class="controls">
-            <button class="run" @onclick="RunAsync" disabled="@_busy">
-                @(_busy ? "Running…" : "▶ Run")
-            </button>
-            <button class="share" @onclick="ShareAsync" disabled="@_busy" title="Copy a self-contained link to this program">
-                🔗 Share
-            </button>
-            <span class="hint">@_hint</span>
+        <div class="nm-arrow" aria-hidden="true">→</div>
+        <div class="nm-core">
+            typed IR
+            <small>a <code>CType</code> on every node</small>
         </div>
-        @if (_lang == "c")
-        {
-            <div class="flags">
-                <label class="std">-std=
-                    <select @bind="_std">
-                        <option value="c90">c90</option>
-                        <option value="c99">c99</option>
-                        <option value="c11">c11</option>
-                        <option value="c17">c17</option>
-                        <option value="c23">c23</option>
-                    </select>
-                </label>
-                <label><input type="checkbox" @bind="_wConversion" /> -Wconversion</label>
-                <label><input type="checkbox" @bind="_wFallthrough" /> -Wimplicit-fallthrough</label>
-                <label><input type="checkbox" @bind="_pedantic" /> -pedantic</label>
-            </div>
-        }
-    </section>
+        <div class="nm-arrow" aria-hidden="true">→</div>
+        <div class="nm-col">
+            <span class="nm-label">back-ends</span>
+            <div class="nm-node net">C# / .NET</div>
+            <div class="nm-node wat">WebAssembly</div>
+        </div>
+    </div>
+    <p class="arch-note">
+        Each front-end lexes and parses its own LALR(1) grammar, then lowers into the
+        <em>same</em> IR; every back-end realizes that one IR. No pairwise special-casing —
+        today's 2×2 is C, Zig → C#, wat. Adding a language is a new front-end; adding a
+        target is a new back-end. They meet in the middle.
+    </p>
+</section>
 
-    <section class="output">
-        <div class="tabs">
-            @foreach (var t in Tabs)
-            {
-                <button class="@(t == _tab ? "tab active" : "tab")" @onclick="() => Select(t)">@t</button>
-            }
-        </div>
-        <div class="pane-body">
-            @if (_tab == "Output")
-            {
-                @if (_ran)
-                {
-                    <pre class="stdout">@_stdout</pre>
-                    @if (!string.IsNullOrEmpty(_stderr))
-                    {
-                        <div class="stream-label">stderr</div>
-                        <pre class="stderr">@_stderr</pre>
-                    }
-                    <div class="exit @(_exitCode == 0 ? "ok" : "nonzero")">exit code: @_exitCode</div>
-                }
-                else
-                {
-                    <div class="empty">Press Run to compile and execute.</div>
-                }
-            }
-            else if (_tab == "wat")
-            {
-                <pre class="code">@(_wat ?? "")</pre>
-            }
-            else if (_tab == "C#")
-            {
-                <pre class="code">@(_csharp ?? "")</pre>
-            }
-            else if (_tab == "-E")
-            {
-                <pre class="code">@(_preprocessed ?? "")</pre>
-            }
-        </div>
-        @if (!string.IsNullOrEmpty(_diagnostics))
-        {
-            <div class="diagnostics @(_hasError ? "err" : "warn")">
-                <pre>@_diagnostics</pre>
-            </div>
-        }
-    </section>
-</div>
+<section class="cards">
+    <h2>Try it in the sandbox</h2>
+    <div class="card-grid">
+        <a class="card" href="@Deep("c", "Factorial")">
+            <span class="card-tag c">C</span>
+            <h3>Recursion &amp; printf</h3>
+            <p>A recursive factorial with formatted output — compiled to wasm and run in-tab, stdout captured live.</p>
+            <span class="card-go">Open →</span>
+        </a>
+        <a class="card" href="@Deep("c", "Primes")">
+            <span class="card-tag c">C</span>
+            <h3>Loops &amp; control flow</h3>
+            <p>A prime sieve over nested <code>for</code> loops with <code>break</code> — the integer core the wat backend runs today.</p>
+            <span class="card-go">Open →</span>
+        </a>
+        <a class="card" href="@Deep("zig", "Hello (std.debug.print)")">
+            <span class="card-tag zig">Zig</span>
+            <h3>std.debug.print</h3>
+            <p>Idiomatic Zig — <code>while (i &lt;= n) : (i += 1)</code> and a curated <code>std.debug.print</code> writing to stderr.</p>
+            <span class="card-go">Open →</span>
+        </a>
+        <a class="card" href="@Deep("zig", "Squares (extern printf)")">
+            <span class="card-tag zig">Zig</span>
+            <h3>C interop from Zig</h3>
+            <p>A variadic <code>extern fn printf</code> — Zig lowering onto the same runtime the C front-end uses, output on stdout.</p>
+            <span class="card-go">Open →</span>
+        </a>
+    </div>
+</section>
+
+<section class="pipe">
+    <h2>How a run works</h2>
+    <p class="pipe-intro">
+        Nothing leaves your browser. The C# back-end targets the CLR (a normal .NET program);
+        the <strong>wat</strong> back-end is what makes execution possible here — a browser tab
+        can run WebAssembly without a server, so the sandbox uses it end to end:
+    </p>
+    <ol class="pipe-steps">
+        <li><span class="step-n">1</span> Your source is staged in an in-browser (MEMFS) filesystem.</li>
+        <li><span class="step-n">2</span> dotcc — running as wasm — parses it and lowers to the typed IR.</li>
+        <li><span class="step-n">3</span> The <code>wat</code> back-end emits WebAssembly text.</li>
+        <li><span class="step-n">4</span> <code>wabt.js</code> assembles that text to a wasm module.</li>
+        <li><span class="step-n">5</span> A tiny WASI shim runs <code>main()</code>, capturing stdout / stderr and the exit code.</li>
+    </ol>
+    <p class="pipe-note">
+        The <strong>C#</strong> and <strong>-E</strong> tabs in the sandbox show the same compile
+        projected the other ways — the look-inside-the-compiler view.
+    </p>
+</section>
 
 @code {
-    // The active front-end language: "c" or "zig". Drives the file extension dotcc
-    // dispatches on, which examples/flags/tabs show, and whether the C-only knobs
-    // (-std, warning flags, -E) apply. Zig has no C preprocessor and one fixed
-    // dialect, so those are hidden and the compile runs dialect=null / default warnings.
-    private string _lang = "c";
-
-    // The tab set: run output, then the "look inside the compiler" views — the wat
-    // the backend emits, the C# projection, and (C only) the -E token stream.
-    private string[] Tabs => _lang == "zig"
-        ? new[] { "Output", "wat", "C#" }
-        : new[] { "Output", "wat", "C#", "-E" };
-    private string _tab = "Output";
-
-    private string _source = CExamples[0].Source;
-    private string _example = CExamples[0].Name;
-    private string? _wat;
-    private string? _csharp;
-    private string? _preprocessed;
-    private string _stdout = "";
-    private string _stderr = "";
-    private int _exitCode;
-    private string _diagnostics = "";
-    private bool _hasError;
-    private bool _ran;
-    private bool _busy;
-    private string _hint = "first run warms the compiler (~a few seconds)";
-
-    // Compiler-option flags (read at Run time; passed to EmitWat/EmitCSharp/Preprocess).
-    private string _std = "c17";
-    private bool _wConversion;
-    private bool _wFallthrough;
-    private bool _pedantic;
-
-    private void Select(string t) => _tab = t;
-
-    // dotcc reads inputs off the (Emscripten in-memory) filesystem, so we stage the
-    // editor buffer there — WEB0 confirmed the include-scan works over MEMFS. The file
-    // extension is load-bearing: dotcc dispatches frontend by it (.c → C, .zig → Zig).
-    private const string WorkDir = "/work";
-    private string SourcePath => WorkDir + (_lang == "zig" ? "/source.zig" : "/source.c");
-
-    /// <summary>The staged input file's basename, shown in the editor pane head.</summary>
-    private string SourceFileName => _lang == "zig" ? "source.zig" : "source.c";
-
-    /// <summary>The example set for the active front-end language.</summary>
-    private Example[] CurrentExamples => _lang == "zig" ? ZigExamples : CExamples;
-
-    // The CodeMirror instance lives in JS (window.dotccEditor); `_source` is the
-    // authoritative C# copy, pulled from the editor right before each compile/share.
-    private const string EditorId = "editor";
-
-    /// <summary>On first render, adopt any program packed into a "#src=…" share
-    /// link so playground links round-trip, then mount the CodeMirror editor with
-    /// the resolved source. JS interop is only legal once the component has
-    /// rendered (this app is client-side WASM, no prerender).</summary>
-    protected override async Task OnAfterRenderAsync(bool firstRender)
-    {
-        if (!firstRender) { return; }
-        var shared = await JS.InvokeAsync<string?>("dotccSandbox.readShareSource");
-        if (!string.IsNullOrEmpty(shared))
-        {
-            _source = shared;
-            _example = "(shared link)";
-        }
-        await JS.InvokeVoidAsync("dotccEditor.create", EditorId, _source);
-        if (!string.IsNullOrEmpty(shared)) { StateHasChanged(); }
-    }
-
-    /// <summary>Pull the live editor text into <see cref="_source"/> before a
-    /// compile or share (the buffer of record is CodeMirror's, not the C# field).</summary>
-    private async Task SyncFromEditor() =>
-        _source = await JS.InvokeAsync<string>("dotccEditor.getValue", EditorId);
-
-    private async Task OnExampleChanged(ChangeEventArgs e)
-    {
-        var name = e.Value?.ToString();
-        var picked = Array.Find(CurrentExamples, x => x.Name == name);
-        if (picked is not null)
-        {
-            _source = picked.Source;
-            _example = picked.Name;
-            _ran = false;
-            _diagnostics = "";
-            _hasError = false;
-            await JS.InvokeVoidAsync("dotccEditor.setValue", EditorId, picked.Source);
-        }
-    }
-
-    /// <summary>Switch the active front-end language. Loads that language's first
-    /// example into the editor (the previous language's source wouldn't parse),
-    /// drops the C-only -E tab when leaving C, and clears any prior run state.</summary>
-    private async Task OnLangChanged(ChangeEventArgs e)
-    {
-        var lang = e.Value?.ToString();
-        if (lang != "c" && lang != "zig") { return; }
-        _lang = lang;
-        var first = CurrentExamples[0];
-        _source = first.Source;
-        _example = first.Name;
-        _ran = false;
-        _diagnostics = "";
-        _hasError = false;
-        if (_tab == "-E") { _tab = "Output"; }
-        await JS.InvokeVoidAsync("dotccEditor.setValue", EditorId, first.Source);
-    }
-
-    private async Task ShareAsync()
-    {
-        await SyncFromEditor();
-        var url = await JS.InvokeAsync<string>("dotccSandbox.makeShareLink", _source);
-        _hint = url.Length > 60 ? "link copied to clipboard ✓" : url;
-        StateHasChanged();
-    }
-
-    private async Task RunAsync()
-    {
-        _busy = true;
-        _diagnostics = "";
-        _hasError = false;
-        StateHasChanged();
-
-        await SyncFromEditor();
-
-        // Compile on the .NET side: source -> wat (and C# / -E, for the view tabs).
-        string? wat = null;
-        try
-        {
-            Directory.CreateDirectory(WorkDir);
-            File.WriteAllText(SourcePath, _source);
-
-            // Zig has no C preprocessor / -std dialect / C-warning gates — compile it
-            // with dialect=null and default warnings, and skip the -E pass entirely.
-            CDialect? dialect = _lang == "c" ? Dialect() : null;
-            var warnings = _lang == "c" ? Warnings() : WarningFlags.Default;
-
-            wat = Emit(() => Compiler.EmitWat(new[] { SourcePath }, dialect: dialect, warnings: warnings), out var watWarnings);
-            _wat = wat;
-            // The C# projection and -E token stream are pure string passes too — cheap
-            // to keep both view tabs live alongside a run. EmitCSharp is ALSO the source
-            // of -Wconversion (a codegen-time gate the wat path doesn't run), so capture
-            // its warnings too; both run the shared dialect gate, so dedupe against wat's
-            // to avoid repeating -pedantic lines.
-            string csWarnings = "";
-            try { _csharp = Emit(() => Compiler.EmitCSharp(new[] { SourcePath }, dialect: dialect, warnings: warnings), out csWarnings); }
-            catch { _csharp = "// (C# emit unavailable for this program)"; }
-            _preprocessed = dialect is { } d ? Preprocess(d) : null;
-
-            var diag = DedupeLines(watWarnings, csWarnings);
-            if (!string.IsNullOrWhiteSpace(diag)) { SetDiag(diag, isError: false); }
-        }
-        catch (CompileException ex)
-        {
-            SetDiag(ex.Message, isError: true);
-        }
-        catch (Exception ex)
-        {
-            SetDiag($"internal: {ex.GetType().Name}: {ex.Message}", isError: true);
-        }
-
-        // Assemble + run in the browser via wabt + the fd_write shim.
-        if (wat is not null)
-        {
-            try
-            {
-                var result = await JS.InvokeAsync<RunResult>("dotccSandbox.assembleAndRun", wat);
-                if (result.Ok)
-                {
-                    _stdout = result.Stdout ?? "";
-                    _stderr = result.Stderr ?? "";
-                    _exitCode = result.ExitCode;
-                    _ran = true;
-                    _tab = "Output";
-                }
-                else
-                {
-                    SetDiag($"{result.Stage} error: {result.Error}", isError: true);
-                }
-            }
-            catch (Exception ex)
-            {
-                SetDiag($"run host error: {ex.Message}", isError: true);
-            }
-        }
-
-        _busy = false;
-        StateHasChanged();
-    }
-
-    /// <summary>Run a compiler entry point while capturing the diagnostics it writes
-    /// to <see cref="Console.Error"/> (warnings), restoring the previous writer after.</summary>
-    private static string Emit(Func<string> emit, out string warnings)
-    {
-        var capture = new StringWriter();
-        var previous = Console.Error;
-        Console.SetError(capture);
-        try { return emit(); }
-        finally { Console.SetError(previous); warnings = capture.ToString(); }
-    }
-
-    /// <summary>Selected <c>-std=</c> dialect for the compile.</summary>
-    private CDialect Dialect() => CDialect.Parse(_std);
-
-    /// <summary>The warning bit set from the flag checkboxes, over the compiler default.</summary>
-    private WarningFlags Warnings()
-    {
-        var w = WarningFlags.Default;
-        if (_wConversion) { w |= WarningFlags.Conversion; }
-        if (_wFallthrough) { w |= WarningFlags.ImplicitFallthrough; }
-        if (_pedantic) { w |= WarningFlags.Pedantic; }
-        return w;
-    }
-
-    /// <summary>Merge diagnostic blocks into distinct, order-preserving lines — the
-    /// wat and C# passes both run the shared dialect gate, so a -pedantic line would
-    /// otherwise appear twice.</summary>
-    private static string DedupeLines(params string[] blocks)
-    {
-        var seen = new List<string>();
-        foreach (var b in blocks)
-        {
-            foreach (var raw in b.Split('\n'))
-            {
-                var line = raw.TrimEnd('\r');
-                if (line.Length > 0 && !seen.Contains(line)) { seen.Add(line); }
-            }
-        }
-        return string.Join("\n", seen);
-    }
-
-    /// <summary>Render the -E preprocessor token stream for the current source
-    /// (best effort — a lex failure surfaces as a comment rather than blocking a run).</summary>
-    private string Preprocess(CDialect dialect)
-    {
-        try
-        {
-            var sw = new StringWriter();
-            Compiler.Preprocess(new[] { SourcePath }, sw, dialect: dialect);
-            return sw.ToString();
-        }
-        catch (Exception ex)
-        {
-            return $"// (-E unavailable: {ex.Message})";
-        }
-    }
-
-    private void SetDiag(string text, bool isError)
-    {
-        _diagnostics = text.Trim();
-        _hasError = isError;
-        if (isError) { _ran = false; }
-    }
-
-    /// <summary>Marshalled result of <c>dotccSandbox.assembleAndRun</c>.</summary>
-    private sealed class RunResult
-    {
-        public bool Ok { get; set; }
-        public int ExitCode { get; set; }
-        public string? Stdout { get; set; }
-        public string? Stderr { get; set; }
-        public string? Stage { get; set; }
-        public string? Error { get; set; }
-    }
-
-    /// <summary>A named starter program (C or Zig). Kept to the surface the wat
-    /// backend runs today — integer arithmetic plus the <c>printf</c>/
-    /// <c>std.debug.print</c> I/O the fd_write shim carries; wider constructs get
-    /// added as the wat backend grows.</summary>
-    private sealed record Example(string Name, string Source);
-
-    private static readonly Example[] CExamples =
-    {
-        new("Factorial",
-            """
-            #include <stdio.h>
-
-            int factorial(int n) {
-                return n <= 1 ? 1 : n * factorial(n - 1);
-            }
-
-            int main(void) {
-                for (int i = 1; i <= 6; i++)
-                    printf("%d! = %d\n", i, factorial(i));
-                return 0;
-            }
-
-            """),
-        new("FizzBuzz",
-            """
-            #include <stdio.h>
-
-            int main(void) {
-                for (int i = 1; i <= 15; i++) {
-                    if (i % 15 == 0)     printf("FizzBuzz\n");
-                    else if (i % 3 == 0) printf("Fizz\n");
-                    else if (i % 5 == 0) printf("Buzz\n");
-                    else                 printf("%d\n", i);
-                }
-                return 0;
-            }
-
-            """),
-        new("Fibonacci",
-            """
-            #include <stdio.h>
-
-            int main(void) {
-                int a = 0, b = 1;
-                for (int i = 0; i < 10; i++) {
-                    printf("%d ", a);
-                    int next = a + b;
-                    a = b;
-                    b = next;
-                }
-                printf("\n");
-                return 0;
-            }
-
-            """),
-        new("GCD (Euclid)",
-            """
-            #include <stdio.h>
-
-            int gcd(int a, int b) {
-                while (b != 0) {
-                    int t = b;
-                    b = a % b;
-                    a = t;
-                }
-                return a;
-            }
-
-            int main(void) {
-                printf("gcd(48, 36) = %d\n", gcd(48, 36));
-                printf("gcd(17, 5)  = %d\n", gcd(17, 5));
-                return 0;
-            }
-
-            """),
-        new("Primes",
-            """
-            #include <stdio.h>
-
-            int main(void) {
-                for (int n = 2; n < 30; n++) {
-                    int is_prime = 1;
-                    for (int d = 2; d * d <= n; d++)
-                        if (n % d == 0) { is_prime = 0; break; }
-                    if (is_prime) printf("%d ", n);
-                }
-                printf("\n");
-                return 0;
-            }
-
-            """),
-    };
-
-    // Zig starter programs, each within the same wat-runnable surface the C set is:
-    // std.debug.print (→ stderr), variadic extern printf (→ stdout), and arithmetic
-    // observed as the process exit code. All three were verified end-to-end through
-    // the libwabt + fd_write path this sandbox uses.
-    private static readonly Example[] ZigExamples =
-    {
-        new("Hello (std.debug.print)",
-            """
-            const std = @import("std");
-
-            // std.debug.print writes to stderr (exactly as real Zig does).
-            pub fn main() void {
-                std.debug.print("Hello from {s}!\n", .{"Zig"});
-                var i: i32 = 1;
-                while (i <= 5) : (i += 1) {
-                    std.debug.print("{d} squared is {d}\n", .{ i, i * i });
-                }
-            }
-
-            """),
-        new("Squares (extern printf)",
-            """
-            // A variadic C extern — printf routes to stdout through dotcc's printf builder.
-            extern fn printf(format: [*c]const u8, ...) c_int;
-
-            pub fn main() u8 {
-                var i: c_int = 1;
-                while (i <= 5) : (i += 1) {
-                    _ = printf("%d^2 = %d\n", i, i * i);
-                }
-                return 0;
-            }
-
-            """),
-        new("Sum (exit code)",
-            """
-            // No I/O — the result is observed as the process exit code (see it below).
-            pub fn main() u8 {
-                var sum: u8 = 0;
-                var i: u8 = 1;
-                while (i <= 9) : (i += 1) {
-                    sum = sum + i;
-                }
-                return sum; // 1+2+...+9 = 45
-            }
-
-            """),
-    };
+    /// <summary>Build a sandbox deep-link that pre-selects a language + starter example
+    /// (read by <c>Sandbox.AdoptDeepLink</c>). The example name is URL-encoded so
+    /// spaces / parens in names like "Hello (std.debug.print)" round-trip.</summary>
+    private static string Deep(string lang, string example)
+        => $"sandbox?lang={lang}&ex={Uri.EscapeDataString(example)}";
 }

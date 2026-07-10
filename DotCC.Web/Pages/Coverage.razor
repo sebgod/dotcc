@@ -1,0 +1,75 @@
+@page "/coverage"
+
+<PageTitle>dotcc — language coverage (C &amp; Zig)</PageTitle>
+
+<section class="cov-head">
+    <h1>Language coverage</h1>
+    <p class="lede">
+        dotcc's coverage is tracked feature-by-feature in the repo docs — <strong>the source
+        of truth</strong>. This is the highlight reel; the full tables (and what's deliberately
+        out of scope) live there, updated as each feature lands.
+    </p>
+    <div class="cta-row">
+        <a class="cta" href="https://github.com/sebgod/dotcc/blob/main/docs/C-SUPPORT.md" target="_blank" rel="noopener">Full C support ↗</a>
+        <a class="cta" href="https://github.com/sebgod/dotcc/blob/main/docs/ZIG-SUPPORT.md" target="_blank" rel="noopener">Full Zig support ↗</a>
+    </div>
+</section>
+
+<div class="cov-grid">
+    <section class="cov-panel">
+        <h2><span class="card-tag c">C</span> C90 · C99 · C11 · C23</h2>
+        <ul class="cov-list">
+            <li><b>Types</b> — integer / float / pointer (LP64, 8-byte pointers), <code>struct</code>/<code>union</code>/<code>enum</code>, <code>typedef</code>, const-correctness, <code>_Bool</code>, and the <code>char16_t</code>/<code>char32_t</code>/<code>char8_t</code>/<code>wchar_t</code> family.</li>
+            <li><b>Operators &amp; statements</b> — the full expression + statement set, <code>_Generic</code>, compound literals, <code>sizeof</code>/<code>_Alignof</code> folding.</li>
+            <li><b>Preprocessor</b> — <code>#include</code>/<code>#define</code>/<code>#if</code>, function-like macros, <code>__VA_OPT__</code>, <code>#elifdef</code>, C23 <code>#embed</code>, <code>__has_include</code>.</li>
+            <li><b>C11 / C23</b> — <code>_Static_assert</code>, <code>_Thread_local</code>, <code>constexpr</code>, and <code>[[attributes]]</code> (<code>noreturn</code>, <code>deprecated</code>, <code>nodiscard</code>, <code>maybe_unused</code>).</li>
+            <li><b>Standard library</b> — the <code>printf</code> family, <code>&lt;string.h&gt;</code>, <code>&lt;math.h&gt;</code>, <code>&lt;stdlib.h&gt;</code>, C11 <code>&lt;threads.h&gt;</code>, BSD sockets, POSIX stubs.</li>
+            <li><b>Dialects</b> — <code>-std=c90…c23</code>, <code>-pedantic</code>, and warning flags (<code>-Wconversion</code>, <code>-Wimplicit-fallthrough</code>).</li>
+        </ul>
+        <p class="cov-try">Try:
+            <a href="@Deep("c", "Factorial")">Factorial</a> ·
+            <a href="@Deep("c", "FizzBuzz")">FizzBuzz</a> ·
+            <a href="@Deep("c", "GCD (Euclid)")">GCD</a>
+        </p>
+    </section>
+
+    <section class="cov-panel">
+        <h2><span class="card-tag zig">Zig</span> 0.17 front-end</h2>
+        <ul class="cov-list">
+            <li><b>Core</b> — <code>fn</code>, <code>const</code>/<code>var</code>, full arithmetic incl. wrapping / saturating ops, <code>if</code>/<code>while</code>/<code>for</code>/<code>switch</code>, labeled loops.</li>
+            <li><b>Aggregates</b> — <code>struct</code>/<code>enum</code>/<code>union</code> (tagged &amp; untagged) with methods (UFCS), tuples, slices &amp; sentinel-terminated types.</li>
+            <li><b>Error handling</b> — optionals (<code>?T</code>), error unions (<code>!T</code>), <code>try</code>/<code>catch</code>/<code>orelse</code>, <code>defer</code>/<code>errdefer</code>.</li>
+            <li><b>Allocators</b> — <code>std.mem.Allocator</code>, page / FixedBuffer / Arena, <code>create</code>/<code>destroy</code>/<code>realloc</code>, compile-time devirtualization of the default.</li>
+            <li><b>Comptime &amp; generics</b> — comptime values, comptime <em>type</em> params, type-returning functions, and <code>anytype</code> — the full generative core.</li>
+            <li><b>std &amp; interop</b> — curated <code>std.ArrayList(T)</code>, <code>std.mem.*</code>, <code>std.debug.print</code>; C ABI via <code>extern fn</code> + <code>-lc</code>.</li>
+        </ul>
+        <p class="cov-try">Try:
+            <a href="@Deep("zig", "Hello (std.debug.print)")">Hello</a> ·
+            <a href="@Deep("zig", "Squares (extern printf)")">Squares</a> ·
+            <a href="@Deep("zig", "Sum (exit code)")">Sum</a>
+        </p>
+    </section>
+</div>
+
+<section class="cov-note">
+    <h2>Two back-ends, one IR</h2>
+    <p>
+        <strong>C# / .NET</strong> is the full-fidelity target — everything above lowers to
+        AOT-clean, <code>unsafe</code> C# 14 that preserves C's observable semantics (overflow,
+        signedness, evaluation order). The <strong>wat</strong> back-end runs the integer +
+        <code>printf</code> / <code>std.debug.print</code> core, and it's what powers the
+        in-browser <a href="sandbox">sandbox</a> — a browser can execute WebAssembly with no
+        server. Both realize the <em>same</em> typed IR; the difference is the substrate.
+    </p>
+    <p class="cov-outscope">
+        Deliberately out of scope (see the docs for the reasoning): async / <code>inline asm</code>,
+        and — for now — the parts of a language's standard library that bottom out in platform
+        syscalls (they get BCL-redirected, not compiled from source).
+    </p>
+</section>
+
+@code {
+    /// <summary>Sandbox deep-link (see <c>Home.Deep</c> / <c>Sandbox.AdoptDeepLink</c>).</summary>
+    private static string Deep(string lang, string example)
+        => $"sandbox?lang={lang}&ex={Uri.EscapeDataString(example)}";
+}
