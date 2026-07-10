@@ -27,6 +27,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `DotCC/` | Clang-shaped CLI exe (`PublishAot=true`, assembly name `dotcc`) via `System.CommandLine` — ~150 lines, no compiler logic. All testable logic lives in `DotCC.Lib`, reachable in-process from both test projects. |
 | `DotCC.Tests/` | xUnit v3 + Shouldly unit tests: emit pins over inline sources + direct `Libc` function tests. Fast, no I/O beyond a temp file. |
 | `DotCC.FunctionalTests/` | End-to-end fixture tests (dotcc → Roslyn in-process → invoke → compare stdout to the committed sidecar) + the opt-in differential oracles. No test spawns `dotcc.exe`. |
+| `DotCC.Web/` | Blazor WebAssembly **in-browser sandbox** (fable-web.md, WEB1): runs `DotCC.Lib` as wasm, compiles C via `EmitWat`, assembles with vendored `libwabt.js`, runs via a `fd_write` shim. Refs `DotCC.Lib` only; **outside `dotcc.sln` + CPM**, so CI never builds it (its own GH Pages workflow does — WEB4). |
 | `examples/` | Hand-written programs demonstrating the language surface; independent from test fixtures. |
 
 ## Build & test commands

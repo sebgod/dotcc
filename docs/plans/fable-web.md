@@ -189,14 +189,22 @@ flat-array fix makes it unnecessary, and its `mono-aot-cross` workers are a heav
 build. The `DotCC.Web.Spike` project + the node/CDP harness are archived in the
 session scratchpad (not committed — WEB1 builds the real `DotCC.Web`).
 
-### WEB1 — the run pipeline, ugly (M)
+### WEB1 — the run pipeline, ugly (M) — ✅ DONE (2026-07-10)
 
-The end-to-end sandbox with a placeholder UI: one `<textarea>`, a Run button,
-an output pane. `DotCC.Web/` project scaffolded properly (D6), `libwabt.js`
-vendored + pinned with its README, the JS shim module (`wat2wasm` wrapper +
-instantiate + `fd_write` capture + `main()` return code), Blazor↔JS interop
-seam, diagnostics pane fed by `CompileException` + captured stderr. The
-known-good corpus samples run; an unsupported program shows its loud error.
+The end-to-end sandbox, functional (plain `<textarea>`, not yet CodeMirror). Landed:
+`DotCC.Web/` Blazor WASM project (D6 — refs `DotCC.Lib` only, `IsPackable=false`,
+out of the CPM chain + `dotcc.sln`, so untouched by CI; `InvariantGlobalization` +
+`DotCC.Lib` as a `TrimmerRootAssembly` to keep the parse tables/embedded headers
+whole); `libwabt.js` (wabt.js 1.0.36) vendored + pinned under `wwwroot/lib/wabt/`
+with its provenance README (D3); `wwwroot/js/sandbox.js` — the run interop
+(`parseWat().toBinary()` with the WF0 feature flags → `WebAssembly.instantiate` →
+the `fd_write`/`proc_exit` shim capturing fd 1/2 → `main()` exit code); `Home.razor`
+— source editor, Run, **Output / wat / C#** panes, diagnostics fed by
+`CompileException` + `Console.Error` capture; source staged to MEMFS `/work/` (D5).
+**Verified in headless Edge (CDP):** the default factorial program boots, compiles
+(C→wat by dotcc-in-wasm), assembles + runs in-browser, and the output pane shows
+`1! = 1 … 6! = 720`, exit 0. Cut to WEB2: CodeMirror, examples, Zig toggle,
+multi-file, share-links. Deploy (GH Pages) is WEB4.
 
 ### WEB2 — the sandbox proper (M)
 
