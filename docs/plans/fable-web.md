@@ -250,13 +250,25 @@ language toggle per D7's WEB0 verdict. Share-links: source LZ-compressed into
 the URL fragment via the native `CompressionStream` API — shareable playground
 links with no server and no dependency.
 
-### WEB3 — the story pages (S/M)
+### WEB3 — the story pages (S/M) — ✅ DONE (2026-07-11)
 
-Landing page (what dotcc is, the one-screen architecture, the pitch line) +
-coverage pages adapted from `docs/C-SUPPORT.md` / `ZIG-SUPPORT.md` +
-"how it works" from `architecture.md`. Every page links into the sandbox with a
-pre-loaded example demonstrating the feature it describes (deep-link = a
-share-link). Keep the docs the source of truth; the site adapts, never forks.
+A shared top nav (**Home · Sandbox · Coverage · GitHub**) over three pages:
+**Home (`/`)** — the landing: a colour-coded pitch (C · Zig → .NET / C#), the
+N-front-ends × M-back-ends architecture as a one-screen CSS diagram (C, Zig →
+typed IR → C#, WebAssembly), four "try it" cards, and a *how a run works*
+pipeline. **Sandbox (`/sandbox`)** — moved off `/`; share-links follow (they
+self-reference `location.pathname`), and a `?lang=c|zig&ex=<name>` **deep-link**
+(`Sandbox.AdoptDeepLink`, a tiny query parse — no WebUtilities dep) lets the
+story pages open it on a specific program. **Coverage (`/coverage`)** — a curated
+C + Zig highlight reel that links to the full `docs/C-SUPPORT.md` /
+`ZIG-SUPPORT.md` on GitHub (the docs stay the source of truth; the site
+summarizes, never forks), each panel with sandbox try-links. Deep-link = the
+share-link mechanism's simpler cousin (existing curated examples by name).
+Verified headless (CDP, 16/16): landing hero + nav + cards; a Zig deep-link
+boots the sandbox pre-selected + RUNS (`std.debug.print` → stderr); coverage
+panels + doc + try-links; client-side nav. Cut vs the original sketch: a
+dedicated "how it works" page from `architecture.md` (folded into the landing's
+pipeline section instead) and inline-source deep-links (by example name for now).
 
 ### WEB4 — GitHub Pages deployment (S) — ✅ DONE + LIVE (2026-07-10)
 
