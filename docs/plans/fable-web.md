@@ -258,14 +258,22 @@ coverage pages adapted from `docs/C-SUPPORT.md` / `ZIG-SUPPORT.md` +
 pre-loaded example demonstrating the feature it describes (deep-link = a
 share-link). Keep the docs the source of truth; the site adapts, never forks.
 
-### WEB4 — GitHub Pages deployment (S)
+### WEB4 — GitHub Pages deployment (S) — 🚧 workflow landed (goes live on merge)
 
-`.github/workflows/pages.yml`: publish `DotCC.Web` (Release, trimmed, Brotli) →
-`upload-pages-artifact` → `deploy-pages`, on push to main. `<base href="/dotcc/">`,
-`.nojekyll`, SPA 404 fallback. A smoke-check step: after publish, a node script
-drives the vendored `libwabt.js` + shim over one committed `.wat` to prove the
-JS half of the pipeline in CI (the Blazor half is already covered by the .NET
-suites — `EmitWat` doesn't change behavior by being hosted in a browser).
+`.github/workflows/pages.yml` (added): on push to main (touching `DotCC.Web`/
+`DotCC.Lib`/`DotCC.Libc`) or manual dispatch — install `wasm-tools`, `dotnet publish`
+`DotCC.Web` (Release, native-relinked runtime, Brotli), rewrite `<base href>` `/` →
+`/dotcc/` in the published `index.html` only (local dev stays root), `touch .nojekyll`
+(Jekyll would strip `_framework/`), `cp index.html 404.html` (SPA deep-link fallback),
+`upload-pages-artifact` → `deploy-pages`. Pages enabled via the REST API
+(`build_type=workflow`), so no manual Settings step. Target URL:
+`https://sebgod.github.io/dotcc/`.
+
+Deferred to a follow-up: the **CI smoke-check** (a node script driving the vendored
+`libwabt.js` + fd_write shim over one committed `.wat`, proving the JS half in CI —
+the Blazor half is already covered by the .NET suites; `EmitWat` doesn't change
+behaviour by being browser-hosted). The run path is verified today via the headless
+Edge/CDP harness (WEB1/WEB2).
 
 ### WEB5 — flexes (stretch, unordered)
 
