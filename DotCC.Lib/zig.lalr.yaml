@@ -236,6 +236,9 @@ symbols:
   - FnTypeParam    # 158 one fn-pointer-type param — a bare `Type` (unnamed) or `IDENT : Type` (named)
   - ContainerDecl  # 159 a struct/enum/union container decl (groups the forms so `pub` wraps them all)
                    #     (→ [ThreadStatic]; twofer with C `_Thread_local`, completion milestone part 2)
+  - AssignOp       # 160 the assignment operator inside a `while (…) : (lhs op rhs)` continue-expression
+                   #     (`=` | any compound `+=`/…/wrap `+%=`/saturating `+|=`), so the continue clause
+                   #     accepts the full Zig AssignExpr operator set — not just plain `=`.
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -435,11 +438,11 @@ productions:
       # `while (opt) |x| : (cont) body` — capture-while WITH a continue-expression (runs after each
       # iteration AND on `continue`), lowered to the C `For` IR (post = cont) so `continue` runs the
       # cont — faithful to Zig, like the non-capture stmtWhileCont pair. After `'|' IDENT '|'`, a `':'`
-      # selects the cont form (disjoint from a Stmt-first body / an `else`). The `: (Expr = RhsExpr)`
+      # selects the cont form (disjoint from a Stmt-first body / an `else`). The `: (Expr AssignOp RhsExpr)`
       # assign form and `: (Expr)` bare form mirror stmtWhileContAssign / stmtWhileCont. (A cont + else
       # combination is not modeled — rare.)
-      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', ':', '(', Expr, '=', RhsExpr, ')', Stmt], action: stmtWhileCaptureContAssign }
-      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', ':', '(', Expr, ')', Stmt],               action: stmtWhileCaptureCont }
+      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', ':', '(', Expr, AssignOp, RhsExpr, ')', Stmt], action: stmtWhileCaptureContAssign }
+      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', ':', '(', Expr, ')', Stmt],                    action: stmtWhileCaptureCont }
 
   - derivation: none
     rules:
@@ -451,11 +454,36 @@ productions:
       # `while (cond) : (cont) body` — the continue-expression runs after each iteration
       # (and on `continue`), exactly like C's `for(; cond; cont)`, so it lowers to the C IR
       # `For` (no init). Zig's PEG: `WhilePrefix (COLON LPAREN AssignExpr RPAREN)? Block`. The
-      # cont is an AssignExpr, but our `Expr` cascade has no assignment, so the common
-      # `: (i = i + 1)` form gets its own production; a bare-expr cont (`: (step())`) the other.
-      # The `=` vs `)` after the inner Expr is a clean shift/reduce decision.
-      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', ':', '(', Expr, '=', RhsExpr, ')', Stmt], action: stmtWhileContAssign }
-      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', ':', '(', Expr, ')', Stmt],               action: stmtWhileCont }
+      # cont is an AssignExpr, but our `Expr` cascade has no assignment, so an assignment cont
+      # `: (lhs op rhs)` gets its own production over the `AssignOp` operator nonterminal (the
+      # canonical `: (i += 1)` and plain `: (i = i + 1)`), and a bare-expr cont (`: (step())`)
+      # the other. The op-vs-`)` after the inner Expr is a clean shift/reduce decision.
+      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', ':', '(', Expr, AssignOp, RhsExpr, ')', Stmt], action: stmtWhileContAssign }
+      - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', ':', '(', Expr, ')', Stmt],                    action: stmtWhileCont }
+      # The assignment operator inside a continue-expression. Every op the statement-level
+      # assignment family accepts (plain `=`, the compound `+=`…`^=`, the wrapping `+%=`…`*%=`,
+      # and the saturating `+|=`…`*|=`) reduces to `AssignOp` — so the continue clause covers
+      # the full Zig AssignExpr surface. Each form's lowering mirrors the matching Stmt case
+      # (see stmtAddAssign / stmtAddWrapAssign / stmtAddSatAssign) but yields the For-post CExpr.
+      # A lone op token reduces to AssignOp only inside `: (Expr . op RhsExpr)`, a distinct state
+      # from statement assignment (raw token), so no shift/reduce conflict.
+      - { lhs: AssignOp, rhs: ['='],   action: aopAssign }
+      - { lhs: AssignOp, rhs: ['+='],  action: aopAdd }
+      - { lhs: AssignOp, rhs: ['-='],  action: aopSub }
+      - { lhs: AssignOp, rhs: ['*='],  action: aopMul }
+      - { lhs: AssignOp, rhs: ['/='],  action: aopDiv }
+      - { lhs: AssignOp, rhs: ['%='],  action: aopMod }
+      - { lhs: AssignOp, rhs: ['<<='], action: aopShl }
+      - { lhs: AssignOp, rhs: ['>>='], action: aopShr }
+      - { lhs: AssignOp, rhs: ['&='],  action: aopBitAnd }
+      - { lhs: AssignOp, rhs: ['|='],  action: aopBitOr }
+      - { lhs: AssignOp, rhs: ['^='],  action: aopBitXor }
+      - { lhs: AssignOp, rhs: ['+%='], action: aopAddWrap }
+      - { lhs: AssignOp, rhs: ['-%='], action: aopSubWrap }
+      - { lhs: AssignOp, rhs: ['*%='], action: aopMulWrap }
+      - { lhs: AssignOp, rhs: ['+|='], action: aopAddSat }
+      - { lhs: AssignOp, rhs: ['-|='], action: aopSubSat }
+      - { lhs: AssignOp, rhs: ['*|='], action: aopMulSat }
       # NOTE: the payload-capturing `while` family (`while (opt) |x| …`, its `else` / `else |e|`
       # completions, and the `: (cont)` continue-expr form) lives in the dangling-else `rightmost`
       # group with the `if`-capture family (below) — the `else` shift-reduce needs identical handling.

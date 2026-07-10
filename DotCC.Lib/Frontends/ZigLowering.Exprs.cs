@@ -1261,6 +1261,12 @@ internal sealed partial class ZigLowering
     /// side effects, so a non-repeatable target (an index/deref reached through a call) is a clear
     /// deferred error rather than a silent double-eval.</summary>
     private CStmt SatCompoundAssign(Item targetItem, string helper, Item valueItem)
+        => new ExprStmt(SatCompoundAssignExpr(targetItem, helper, valueItem));
+
+    /// <summary>The <c>Assign</c> CExpr for a saturating compound assignment <c>x op|= y</c>
+    /// (<c>x = ZigMath.Sat…(x, y)</c>) — the core shared by the statement form (wrapped in an
+    /// <see cref="ExprStmt"/>) and the <c>while (…) : (i +|= 1)</c> continue-expression.</summary>
+    private CExpr SatCompoundAssignExpr(Item targetItem, string helper, Item valueItem)
     {
         var target = LowerExpr(targetItem);
         if (!IsRepeatableLValue(target))
@@ -1273,7 +1279,7 @@ internal sealed partial class ZigLowering
         var value = LowerExprSink(valueItem, target.Type);
         var call = new Call($"ZigMath.{helper}", new List<CExpr> { target, CoerceToPeer(value, target.Type) })
             { Type = target.Type };
-        return new ExprStmt(new Assign(null, target, call) { Type = target.Type });
+        return new Assign(null, target, call) { Type = target.Type };
     }
 
     /// <summary>True when <paramref name="e"/> is an lvalue that can be re-evaluated without side
