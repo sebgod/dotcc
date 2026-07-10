@@ -58,12 +58,15 @@ the compiler** (source → tokens → C# → wat, stage by stage).
 
 - **D1 — Blazor WebAssembly, not NativeAOT-LLVM, not a server.** GitHub Pages
   serves static files only, so the compiler must run client-side. Blazor WASM
-  loads `DotCC.Lib` as ordinary managed .NET in the browser — **zero compiler
-  changes**. NativeAOT-LLVM (dotcc as one standalone `dotcc.wasm`) is smaller and
-  faster but the .NET→browser LLVM path is still experimental — it is the named
-  **v2 flex** (and the self-eating showcase feeds the wasm-frontend campaign's
-  WF8), not the v1 plan. No server also means: no compile API to abuse, nothing
-  to operate, nothing to fall over.
+  loads `DotCC.Lib` as ordinary managed .NET in the browser — nearly **zero
+  compiler changes**: WEB0 found one (the generated LALR parse table's oversized
+  `.cctor` broke the wasm *interpreter*) and fixed it once, in the LALR.CC
+  generator (flat RVA-backed tables — see WEB0), so it runs on the lightweight
+  **interpreted** path with **no AOT/Emscripten**. NativeAOT-LLVM (dotcc as one
+  standalone `dotcc.wasm`) is smaller and faster but the .NET→browser LLVM path is
+  still experimental — it is the named **v2 flex** (and the self-eating showcase
+  feeds the wasm-frontend campaign's WF8), not the v1 plan. No server also means:
+  no compile API to abuse, nothing to operate, nothing to fall over.
 - **D2 — The run path is the wat backend, and only the wat backend.** C# output
   is *displayed* (it's a string) but never executed in-browser — running it would
   mean shipping Roslyn to the browser (huge) and `unsafe` codegen on a runtime
@@ -139,20 +142,52 @@ the compiler** (source → tokens → C# → wat, stage by stage).
 Sizes: S < M < L. The WF0/S0 lesson holds: **the first milestone is a measuring
 spike, and later feature lists are provisional until it lands.**
 
-### WEB0 — the feasibility spike (S) — *measure before building*
+### WEB0 — the feasibility spike (S) — *measure before building* — ✅ DONE (2026-07-10)
 
-A throwaway-quality Blazor page (not the real UI) that answers, with numbers
-committed into this plan:
-  (a) does `DotCC.Lib` load + run under Blazor WASM at all (LALR.CC parse-table
-      init, embedded resources, `Console.SetError` capture);
-  (b) does `EmitWat` over a MEMFS-written `/src/main.c` work **unchanged**,
-      including a user header next to it (D5's decider);
-  (c) payload size (Brotli, after trimming) and cold-start latency (first
-      `EmitWat` call — the lazy parser-table cost) on a realistic connection;
-  (d) does a `.zig` sample survive `EmitWat` (D7's decider);
-  (e) does vendored `libwabt.js` assemble a dotcc-emitted module and does the
-      ported `fd_write` shim run it (the full pipeline, once, end to end).
-Deliverable: this section rewritten with the measurements; go/no-go on D5/D7.
+A throwaway-quality Blazor page (`DotCC.Web.Spike`, referencing `DotCC.Lib`)
+driven by a headless-Edge/CDP harness. **All five questions answered — GO.**
+
+**The one real wall (found and cleared).** `DotCC.Lib` loads on the wasm runtime,
+but the *first* `EmitWat` blew up: `InvalidProgramException: … 'DotCC.C:.cctor':
+locals size too big`. Root cause: the LALR generator emitted the parse table as a
+single 2-D `Action[,]` element-initialiser — for the C grammar **858 × 193 ≈
+165 000 inline `new Action(...)`**, one temporary local per cell — which overflows
+the Mono/WASM **interpreter's** 16-bit per-method frame. NativeAOT and the desktop
+CLR compile it fine; only the browser interpreter chokes. **Fix (landed in
+LALR.CC):** `TablesEmitter` now emits the table as two flat constant primitive
+arrays (`byte[] _actionTypes` + `int[] _actionParams`) that Roslyn lowers to a
+single `RuntimeHelpers.InitializeArray` over a `.data` RVA blob, rebuilt into the
+`Action[,]` by a tiny loop → trivial `.cctor`, runs on the interpreter. This
+**removes any need for AOT** (the campaign runs on the lightweight interpreted
+Blazor path). A gotcha banked: the backing arrays must be declared *before* the
+`ParseTable` field — C# runs static field initialisers in declaration order.
+Ships as a LALR.CC release + dotcc NuGet cutover.
+
+**Measurements (interpreted path, this box, 2026-07-10):**
+- **(a) loads:** ✅ `DotCC.Lib` initializes under Blazor WASM.
+- **(b) `EmitWat` over MEMFS:** ✅ **works unchanged** — wrote `/src/main.c` +
+  `/src/util.h` to Emscripten MEMFS, `Compiler.EmitWat(["/src/main.c"])` produced
+  6.8 KB of wat with the `#include "util.h"` **resolved by the stock
+  FileSystemEnumerable include-scan**. **D5 = MEMFS; no string-source overload
+  needed.**
+- **(c) payload + latency:** **3.31 MB Brotli** over the wire (13.2 MB raw) — .NET
+  runtime ~1.5 MB + `DotCC.Lib` 0.48 MB + ICU ~0.4 MB (trim with
+  `InvariantGlobalization`, a C compiler needs no culture data). Compile latency
+  **~3.4 s per `EmitWat`** (cold 3.8 s), the interpreter tax — usable for a
+  click-Run-wait-a-beat sandbox (show a spinner); AOT or hot-path optimisation is
+  a later lever, not a blocker.
+- **(d) Zig through `EmitWat`:** ✅ a `.zig` sample lowered to wat (274 chars).
+  **D7 = the Zig toggle is viable** (at least for wat-backend-covered surface;
+  `std.debug.print`-class gaps remain wat-backend worklist, as planned).
+- **(e) full JS pipeline:** ✅ dotcc's native `.wat` → vendored `libwabt.js`
+  `parseWat().toBinary()` (716 B wasm) → `WebAssembly.instantiate` + the `fd_write`
+  shim ported verbatim from `WatOracleTests` → `main()` ran, stdout exactly
+  `web0=42\n`. Same V8 + wabt + shim the browser uses.
+
+Cut: AOT was trialled as the no-code-change alternative but **abandoned** — the
+flat-array fix makes it unnecessary, and its `mono-aot-cross` workers are a heavy
+build. The `DotCC.Web.Spike` project + the node/CDP harness are archived in the
+session scratchpad (not committed — WEB1 builds the real `DotCC.Web`).
 
 ### WEB1 — the run pipeline, ugly (M)
 
