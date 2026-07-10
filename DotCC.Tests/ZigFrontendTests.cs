@@ -182,6 +182,42 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_a_compound_assignment_while_continue_expression()
+    {
+        // `while (cond) : (i += 1) body` — the canonical Zig loop. The continue-expression
+        // now accepts the full assignment-operator set (not just plain `=`), so `i += 1`
+        // lowers to the same native compound-assign in the C `for`-post that a statement
+        // `i += 1;` produces (see the AssignOp grammar nonterminal + ContAssignPost).
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var s: i32 = 0;\n" +
+            "    var i: i32 = 0;\n" +
+            "    while (i < 5) : (i += 1) { s += i; }\n" +
+            "    return @intCast(s);\n" +
+            "}\n");
+        cs.ShouldContain("for (; Cond.B(");   // the while → for lowering
+        cs.ShouldContain("; i += 1)");         // compound-assign continue-expr in the post
+    }
+
+    [Fact]
+    public void Lowers_a_shift_assign_while_continue_and_still_accepts_plain_assign()
+    {
+        // A non-additive compound op in the continue (`p <<= 1`) rides the same path; and the
+        // legacy plain `=` continue (`i = i + 1`) still lowers exactly as before — the widening
+        // is a superset, byte-identical on the `=` form.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var p: i32 = 1;\n" +
+            "    while (p < 16) : (p <<= 1) {}\n" +
+            "    var i: i32 = 0;\n" +
+            "    while (i < 3) : (i = i + 1) {}\n" +
+            "    return @intCast(p);\n" +
+            "}\n");
+        cs.ShouldContain("; p <<= 1)");        // shift-assign continue-expr
+        cs.ShouldContain("; i = i + 1)");      // plain-assign continue-expr, unchanged
+    }
+
+    [Fact]
     public void Rejects_a_nonterminating_comptime_evaluation()
     {
         // The eval-step budget is the non-termination backstop (Zig's @setEvalBranchQuota): a

@@ -209,6 +209,17 @@ public sealed class ZigOracleTests
         new object[] { "loop_while_cont",
             "pub fn main() u8 { var sum: u8 = 0; var i: u8 = 0; " +
             "while (i < 5) : (i = i + 1) { sum = sum + i; } return sum; }\n", 10, "" },
+        // The IDIOMATIC compound-assign continue `: (i += 1)` — the canonical Zig loop. The continue
+        // clause now accepts the full assignment-operator set (not just plain `=`), so this parses and
+        // must match real zig exactly. Mirrors loop_while_cont with `+=`: sum 0..4 = 10.
+        new object[] { "loop_compound_cont",
+            "pub fn main() u8 { var sum: u8 = 0; var i: u8 = 0; " +
+            "while (i < 5) : (i += 1) { sum += i; } return sum; }\n", 10, "" },
+        // A non-additive compound op in the continue (`p <<= 1`): p walks 1,2,4,8,16 (5 iterations
+        // while p <= 16), the body counting each → 5. Exercises a shift-assign continue vs real zig.
+        new object[] { "loop_shift_cont",
+            "pub fn main() u8 { var n: u8 = 0; var p: u8 = 1; " +
+            "while (p <= 16) : (p <<= 1) { n = n + 1; } return n; }\n", 5, "" },
         // SWITCH (Milestone C2). Single / multi-value / else prongs, no fall-through.
         // classify(2) hits the `1, 2` multi-value prong → 20.
         new object[] { "switch_multi",

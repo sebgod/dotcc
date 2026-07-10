@@ -194,17 +194,13 @@ internal sealed partial class ZigLowering
 
             // `while (cond) : (cont) body` → the C IR `For` (no init): the cont runs after each
             // iteration AND on `continue`, exactly matching C's for-update — so `continue`
-            // inside the loop runs the cont, faithful to Zig. The assignment cont (`i = i + 1`)
-            // builds an Assign CExpr post (mirroring StmtAssign); the bare-expr cont a plain one.
+            // inside the loop runs the cont, faithful to Zig. The assignment cont (`i += 1`,
+            // `i = i + 1`, …) builds an Assign CExpr post over the AssignOp operator (mirroring the
+            // Stmt assignment family via ContAssignPost); the bare-expr cont a plain one.
             case Zig.StmtWhileCont w:
                 return new For(null, LowerExpr(w.Arg2), LowerExpr(w.Arg6), LowerStmt(w.Arg8));
             case Zig.StmtWhileContAssign w:
-            {
-                var post = LowerExpr(w.Arg6);
-                var postVal = LowerExpr(w.Arg8);
-                var postAssign = new Assign(null, post, postVal) { Type = post.Type };
-                return new For(null, LowerExpr(w.Arg2), postAssign, LowerStmt(w.Arg10));
-            }
+                return new For(null, LowerExpr(w.Arg2), ContAssignPost(w.Arg6, w.Arg7, w.Arg8), LowerStmt(w.Arg10));
 
             // `while (opt) |x| body` — optional payload capture-while (Milestone M, part 2). See
             // LowerWhileCapture (desugars to `while (true) { … if (has) { bind; body } else break; }`).
@@ -218,16 +214,13 @@ internal sealed partial class ZigLowering
                 return LowerWhileCapture(w.Arg2, Tok(w.Arg5), w.Arg7, (w.Arg12, Tok(w.Arg10)));
             // `while (opt) |x| : (cont) body` — capture-while with a continue-expression → the C `For`
             // IR (post = cont), so `continue` runs the cont. The assign form builds an `Assign` post
-            // (like stmtWhileContAssign); the bare-expr form a plain one.
+            // over the AssignOp operator (via ContAssignPost, like stmtWhileContAssign); the bare-expr
+            // form a plain one.
             case Zig.StmtWhileCaptureCont w:
                 return LowerWhileCapture(w.Arg2, Tok(w.Arg5), w.Arg11, null, LowerExpr(w.Arg9));
             case Zig.StmtWhileCaptureContAssign w:
-            {
-                var cLhs = LowerExpr(w.Arg9);
-                var cRhs = LowerExpr(w.Arg11);
                 return LowerWhileCapture(w.Arg2, Tok(w.Arg5), w.Arg13, null,
-                    new Assign(null, cLhs, cRhs) { Type = cLhs.Type });
-            }
+                    ContAssignPost(w.Arg9, w.Arg10, w.Arg11));
 
             // `break;` / `continue;` — reuse the C IR loop-control nodes (the C# backend
             // renders them verbatim; valid inside the while/for forms above).
@@ -314,11 +307,59 @@ internal sealed partial class ZigLowering
     /// <c>x = x op y</c> desugar would double-evaluate it). The RHS is sink-typed to the target
     /// type for parity with plain <see cref="Zig.StmtAssign"/> (harmless for a numeric RHS).</summary>
     private CStmt CompoundAssign(Item targetItem, BinOp op, Item valueItem)
+        => new ExprStmt(CompoundAssignExpr(targetItem, op, valueItem));
+
+    /// <summary>The <c>Assign</c> CExpr for <c>target op= value</c> (a non-null <see cref="BinOp"/>) —
+    /// the core shared by the statement form (wrapped in an <see cref="ExprStmt"/>) and the
+    /// <c>while (…) : (i += 1)</c> continue-expression (used directly as the <see cref="For"/> post).</summary>
+    private CExpr CompoundAssignExpr(Item targetItem, BinOp op, Item valueItem)
     {
         var target = LowerExpr(targetItem);
         var value = LowerExprSink(valueItem, target.Type);
-        return new ExprStmt(new Assign(op, target, value) { Type = target.Type });
+        return new Assign(op, target, value) { Type = target.Type };
     }
+
+    /// <summary>The plain-<c>=</c> continue-expression post (<c>while (…) : (i = i + 1)</c>) — a
+    /// null-op <see cref="Assign"/> CExpr, byte-identical to the legacy <c>=</c>-only form this
+    /// widening replaced.</summary>
+    private CExpr PlainAssignPost(Item lhsItem, Item rhsItem)
+    {
+        var lhs = LowerExpr(lhsItem);
+        var rhs = LowerExpr(rhsItem);
+        return new Assign(null, lhs, rhs) { Type = lhs.Type };
+    }
+
+    /// <summary>Build the <see cref="For"/>-post CExpr for a <c>while (…) : (lhs op rhs)</c>
+    /// continue-expression, dispatching on the <c>AssignOp</c> operator node. Each arm mirrors the
+    /// matching statement-level assignment case: plain <c>=</c> → a null-op Assign; a compound or
+    /// wrapping op → an Assign carrying the same <see cref="BinOp"/> (wrap folds to the same node,
+    /// like <c>stmtAddWrapAssign</c>); a saturating op → the <c>ZigMath.Sat…</c> clamp assignment.
+    /// Shared by the plain (<see cref="Zig.StmtWhileContAssign"/>) and capture-while
+    /// (<see cref="Zig.StmtWhileCaptureContAssign"/>) continue forms.</summary>
+    private CExpr ContAssignPost(Item lhsItem, Item opItem, Item rhsItem) => opItem.Content switch
+    {
+        Zig.AopAssign  => PlainAssignPost(lhsItem, rhsItem),
+        Zig.AopAdd     => CompoundAssignExpr(lhsItem, BinOp.Add, rhsItem),
+        Zig.AopSub     => CompoundAssignExpr(lhsItem, BinOp.Sub, rhsItem),
+        Zig.AopMul     => CompoundAssignExpr(lhsItem, BinOp.Mul, rhsItem),
+        Zig.AopDiv     => CompoundAssignExpr(lhsItem, BinOp.Div, rhsItem),
+        Zig.AopMod     => CompoundAssignExpr(lhsItem, BinOp.Mod, rhsItem),
+        Zig.AopShl     => CompoundAssignExpr(lhsItem, BinOp.Shl, rhsItem),
+        Zig.AopShr     => CompoundAssignExpr(lhsItem, BinOp.Shr, rhsItem),
+        Zig.AopBitAnd  => CompoundAssignExpr(lhsItem, BinOp.BitAnd, rhsItem),
+        Zig.AopBitOr   => CompoundAssignExpr(lhsItem, BinOp.BitOr, rhsItem),
+        Zig.AopBitXor  => CompoundAssignExpr(lhsItem, BinOp.BitXor, rhsItem),
+        // Wrapping ops fold to the same node as the plain compound: a native C# `target op= rhs`
+        // already truncates to the LHS width in the unchecked context (two's-complement wrap).
+        Zig.AopAddWrap => CompoundAssignExpr(lhsItem, BinOp.Add, rhsItem),
+        Zig.AopSubWrap => CompoundAssignExpr(lhsItem, BinOp.Sub, rhsItem),
+        Zig.AopMulWrap => CompoundAssignExpr(lhsItem, BinOp.Mul, rhsItem),
+        Zig.AopAddSat  => SatCompoundAssignExpr(lhsItem, "SatAdd", rhsItem),
+        Zig.AopSubSat  => SatCompoundAssignExpr(lhsItem, "SatSub", rhsItem),
+        Zig.AopMulSat  => SatCompoundAssignExpr(lhsItem, "SatMul", rhsItem),
+        _ => throw new IrUnsupportedException(
+            $"unexpected while-continue assignment operator: {opItem.Content?.GetType().Name ?? "null"}"),
+    };
 
     /// <summary>Lower a local <c>const</c> declaration, intercepting a comptime allocator /
     /// namespace binding first (Milestone F): <c>const std = @import("std");</c> /
