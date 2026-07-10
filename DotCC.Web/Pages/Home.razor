@@ -40,6 +40,20 @@
             </button>
             <span class="hint">@_hint</span>
         </div>
+        <div class="flags">
+            <label class="std">-std=
+                <select @bind="_std">
+                    <option value="c90">c90</option>
+                    <option value="c99">c99</option>
+                    <option value="c11">c11</option>
+                    <option value="c17">c17</option>
+                    <option value="c23">c23</option>
+                </select>
+            </label>
+            <label><input type="checkbox" @bind="_wConversion" /> -Wconversion</label>
+            <label><input type="checkbox" @bind="_wFallthrough" /> -Wimplicit-fallthrough</label>
+            <label><input type="checkbox" @bind="_pedantic" /> -pedantic</label>
+        </div>
     </section>
 
     <section class="output">
@@ -108,6 +122,12 @@
     private bool _ran;
     private bool _busy;
     private string _hint = "first run warms the compiler (~a few seconds)";
+
+    // Compiler-option flags (read at Run time; passed to EmitWat/EmitCSharp/Preprocess).
+    private string _std = "c17";
+    private bool _wConversion;
+    private bool _wFallthrough;
+    private bool _pedantic;
 
     private void Select(string t) => _tab = t;
 
@@ -181,15 +201,23 @@
             Directory.CreateDirectory(WorkDir);
             File.WriteAllText(SourcePath, _source);
 
-            wat = Emit(() => Compiler.EmitWat(new[] { SourcePath }), out var watWarnings);
-            _wat = wat;
-            // The C# projection and -E token stream are pure string passes too —
-            // cheap to keep both view tabs live alongside a run.
-            try { _csharp = Emit(() => Compiler.EmitCSharp(new[] { SourcePath }), out _); }
-            catch { _csharp = "// (C# emit unavailable for this program)"; }
-            _preprocessed = Preprocess();
+            var dialect = Dialect();
+            var warnings = Warnings();
 
-            if (!string.IsNullOrWhiteSpace(watWarnings)) { SetDiag(watWarnings, isError: false); }
+            wat = Emit(() => Compiler.EmitWat(new[] { SourcePath }, dialect: dialect, warnings: warnings), out var watWarnings);
+            _wat = wat;
+            // The C# projection and -E token stream are pure string passes too — cheap
+            // to keep both view tabs live alongside a run. EmitCSharp is ALSO the source
+            // of -Wconversion (a codegen-time gate the wat path doesn't run), so capture
+            // its warnings too; both run the shared dialect gate, so dedupe against wat's
+            // to avoid repeating -pedantic lines.
+            string csWarnings = "";
+            try { _csharp = Emit(() => Compiler.EmitCSharp(new[] { SourcePath }, dialect: dialect, warnings: warnings), out csWarnings); }
+            catch { _csharp = "// (C# emit unavailable for this program)"; }
+            _preprocessed = Preprocess(dialect);
+
+            var diag = DedupeLines(watWarnings, csWarnings);
+            if (!string.IsNullOrWhiteSpace(diag)) { SetDiag(diag, isError: false); }
         }
         catch (CompileException ex)
         {
@@ -240,14 +268,44 @@
         finally { Console.SetError(previous); warnings = capture.ToString(); }
     }
 
+    /// <summary>Selected <c>-std=</c> dialect for the compile.</summary>
+    private CDialect Dialect() => CDialect.Parse(_std);
+
+    /// <summary>The warning bit set from the flag checkboxes, over the compiler default.</summary>
+    private WarningFlags Warnings()
+    {
+        var w = WarningFlags.Default;
+        if (_wConversion) { w |= WarningFlags.Conversion; }
+        if (_wFallthrough) { w |= WarningFlags.ImplicitFallthrough; }
+        if (_pedantic) { w |= WarningFlags.Pedantic; }
+        return w;
+    }
+
+    /// <summary>Merge diagnostic blocks into distinct, order-preserving lines — the
+    /// wat and C# passes both run the shared dialect gate, so a -pedantic line would
+    /// otherwise appear twice.</summary>
+    private static string DedupeLines(params string[] blocks)
+    {
+        var seen = new List<string>();
+        foreach (var b in blocks)
+        {
+            foreach (var raw in b.Split('\n'))
+            {
+                var line = raw.TrimEnd('\r');
+                if (line.Length > 0 && !seen.Contains(line)) { seen.Add(line); }
+            }
+        }
+        return string.Join("\n", seen);
+    }
+
     /// <summary>Render the -E preprocessor token stream for the current source
     /// (best effort — a lex failure surfaces as a comment rather than blocking a run).</summary>
-    private string Preprocess()
+    private string Preprocess(CDialect dialect)
     {
         try
         {
             var sw = new StringWriter();
-            Compiler.Preprocess(new[] { SourcePath }, sw);
+            Compiler.Preprocess(new[] { SourcePath }, sw, dialect: dialect);
             return sw.ToString();
         }
         catch (Exception ex)
