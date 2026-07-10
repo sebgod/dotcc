@@ -258,7 +258,13 @@ coverage pages adapted from `docs/C-SUPPORT.md` / `ZIG-SUPPORT.md` +
 pre-loaded example demonstrating the feature it describes (deep-link = a
 share-link). Keep the docs the source of truth; the site adapts, never forks.
 
-### WEB4 — GitHub Pages deployment (S) — 🚧 workflow landed (goes live on merge)
+### WEB4 — GitHub Pages deployment (S) — ✅ DONE + LIVE (2026-07-10)
+
+**Live at <https://sebgod.github.io/dotcc/>.** First deploy green (build 3m16s +
+deploy 11s); verified end-to-end against the LIVE URL in headless Edge (CDP): boots,
+compiles C→wat in-browser, runs, and all WEB2 features (CodeMirror, examples, `-E`,
+share-links, `-Wconversion` toggle) pass. Setup is documented in `DotCC.Web/README.md`.
+
 
 `.github/workflows/pages.yml` (added): on push to main (touching `DotCC.Web`/
 `DotCC.Lib`/`DotCC.Libc`) or manual dispatch — install `wasm-tools`, `dotnet publish`
