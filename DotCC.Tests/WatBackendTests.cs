@@ -27,6 +27,16 @@ public sealed class WatBackendTests
         finally { File.Delete(path); }
     }
 
+    /// <summary>Emit wat for a Zig translation unit (the <c>.zig</c> extension routes
+    /// <see cref="Compiler.EmitWat"/> to the Zig front-end, same shared IR + backend).</summary>
+    private static string WatZig(string body)
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"dotcc-wat-{System.Guid.NewGuid():N}.zig");
+        File.WriteAllText(path, body);
+        try { return Compiler.EmitWat(new[] { path }); }
+        finally { File.Delete(path); }
+    }
+
     [Fact]
     public void module_defines_and_exports_main()
     {
@@ -221,6 +231,52 @@ public sealed class WatBackendTests
         wat.ShouldContain("global.set $__ob");     // sink aimed at the buffer
         wat.ShouldContain("call $__sink_end");
         wat.ShouldNotContain("call $sprintf");
+    }
+
+    [Fact]
+    public void fprintf_to_stdout_reuses_the_printf_expansion_at_the_default_fd()
+    {
+        // fprintf(stdout, …) is the same inline expansion as printf; stdout is the
+        // sink's default fd (1), so no $__fd flip is emitted.
+        var wat = Wat("#include <stdio.h>\nint main(void){ fprintf(stdout, \"n=%d\\n\", 42); return 0; }");
+        wat.ShouldContain("call $__pf_int_s");
+        wat.ShouldContain("call $__write");
+        wat.ShouldNotContain("call $fprintf");        // not a runtime function
+    }
+
+    [Fact]
+    public void fprintf_to_stderr_flips_the_sink_fd_to_2_and_restores_it()
+    {
+        // fprintf(stderr, …) points the sink at fd 2 for the duration of the call,
+        // then restores fd 1 (stdout) so later prints are unaffected.
+        var wat = Wat("#include <stdio.h>\nint main(void){ fprintf(stderr, \"e=%d\\n\", 7); return 0; }");
+        wat.ShouldContain("(global $__fd");           // the selectable output fd
+        wat.ShouldContain("i32.const 2");             // stderr fd
+        wat.ShouldContain("global.set $__fd");
+        wat.ShouldContain("global.get $__fd");        // $__write consults it
+    }
+
+    [Fact]
+    public void fprintf_to_a_non_standard_stream_is_rejected()
+    {
+        // Only stdout/stderr map to WASI fds; a real FILE* has no wat runtime, so it
+        // fails loud rather than miscompiling to the wrong fd.
+        Should.Throw<CompileException>(() => Wat(
+            "#include <stdio.h>\nint main(void){ FILE* f = fopen(\"x\", \"w\"); fprintf(f, \"hi\"); return 0; }"));
+    }
+
+    [Fact]
+    public void zig_std_debug_print_lowers_to_a_void_fprintf_on_stderr()
+    {
+        // std.debug.print → fprintf(stderr, …), and that fprintf is VOID-typed (unlike
+        // C's int fprintf) — so the expansion must route to fd 2 AND leave nothing on
+        // the stack (a stray result would unbalance a void statement and the wasm
+        // validator would reject the module). Pins the emission; the void stack-balance
+        // is exercised at runtime by the libwabt harness.
+        var wat = WatZig("const std = @import(\"std\");\npub fn main() void {\n    std.debug.print(\"x={d}\\n\", .{@as(i32, 5)});\n}\n");
+        wat.ShouldContain("global.set $__fd");
+        wat.ShouldContain("i32.const 2");            // stderr fd
+        wat.ShouldContain("call $__pf_int_s");       // the {d} conversion
     }
 
     [Fact]

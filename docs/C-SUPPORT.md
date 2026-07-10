@@ -221,7 +221,7 @@ The runtime surface dotcc-emitted programs link against. Each function routes to
 | Function | Status | Notes |
 |---|---|---|
 | `printf` | ✅ | Fluent `PrintfBuilder`; specs `%d %i %o %x %X %u %c %f %e %g %s %%` (`%o` is unsigned octal, with the `#` flag forcing a leading 0) |
-| `fprintf` | ✅ | Primitive; takes `FILE* stream`. `PrintfBuilder` binds the `FILE`'s `TextWriter` (`WriterFor`) so it stays FILE-agnostic |
+| `fprintf` | ✅ | Primitive; takes `FILE* stream`. `PrintfBuilder` binds the `FILE`'s `TextWriter` (`WriterFor`) so it stays FILE-agnostic. Under **`--target=wat`** (no libc runtime) it's inline-expanded like `printf`, with `stdout`/`stderr` mapped to WASI fds 1/2 via a `$__fd` global the sink writes through; a non-standard `FILE*` is rejected loud (`WatBackendTests.fprintf_*`) |
 | `sprintf` | ✅ | Fluent `SprintfBuilder` (same `.Arg(…).Done()` lowering as `printf`); writes formatted output into `byte*`, NUL-terminates. Fixture `sprintf-snprintf/`. |
 | `snprintf` | ✅ | Bounded `sprintf`; the `size_t n` bound is coerced to the builder's `int n` for an unsigned/wider operand. Returns count-that-would-have-been-written per C99. Fixture `sprintf-snprintf/`. |
 | `scanf`, `fscanf`, `sscanf` | ✅ | `ScanfReader`; specs `%d %i %f %e %g %s %c`. `fscanf` takes `FILE*` (binds the `FILE`'s `TextReader` via `ReaderFor`) |

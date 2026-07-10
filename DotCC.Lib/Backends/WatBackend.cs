@@ -224,12 +224,14 @@ internal sealed partial class WatBackend
         }
         if (usesIo)
         {
-            // The output sink for the byte primitives: $__ob = -1 means fd 1 (printf);
-            // otherwise it's a write cursor into linear memory (sprintf), bounded by
-            // $__oend, with $__ocount tracking the total chars the format produced.
+            // The output sink for the byte primitives: $__ob = -1 means fd mode (the
+            // fd_write target fd is $__fd, default 1 = stdout; fprintf(stderr,…) flips
+            // it to 2); otherwise $__ob is a write cursor into linear memory (sprintf),
+            // bounded by $__oend, with $__ocount tracking the total chars produced.
             m.Append("  (global $__ob (mut i32) (i32.const -1))\n");
             m.Append("  (global $__oend (mut i32) (i32.const 0))\n");
             m.Append("  (global $__ocount (mut i32) (i32.const 0))\n");
+            m.Append("  (global $__fd (mut i32) (i32.const 1))\n");
         }
         if (usesBn)
         {
@@ -1111,6 +1113,7 @@ internal sealed partial class WatBackend
         // runtime function); a user-defined one, if any, wins and routes through the
         // generic path below.
         if (c.Callee == "printf" && !_defined.Contains("printf")) { EmitPrintf(c); return; }
+        if (c.Callee == "fprintf" && !_defined.Contains("fprintf")) { EmitFprintf(c); return; }
         if (c.Callee == "sprintf" && !_defined.Contains("sprintf")) { EmitSprintf(c, bounded: false); return; }
         if (c.Callee == "snprintf" && !_defined.Contains("snprintf")) { EmitSprintf(c, bounded: true); return; }
 
@@ -1186,6 +1189,59 @@ internal sealed partial class WatBackend
         var fmt = FormatLiteral(c, 0, "printf");
         EmitFormatExpansion(fmt, c, firstArg: 1);
         Line("i32.const 0");
+    }
+
+    /// <summary>Expand <c>fprintf(stream, fmt, …)</c> with a string-literal format. The
+    /// stream must be a standard one this backend can map to a WASI fd — <c>stdout</c>
+    /// (1) or <c>stderr</c> (2), recognised structurally by the stream symbol's name;
+    /// a real <c>FILE*</c> would need a runtime we don't have in wat, so anything else
+    /// fails loud. Points <c>$__fd</c> at the target fd, runs the shared printf-family
+    /// expansion (so <c>{d}</c>/<c>{s}</c>/… all work), then restores the stdout default.
+    /// This is the path Zig's <c>std.debug.print</c> lowers onto (fprintf to stderr).</summary>
+    private void EmitFprintf(Call c)
+    {
+        var fd = StdStreamFd(c.Args.Count > 0 ? c.Args[0] : null);
+        if (fd < 0)
+        {
+            throw new IrUnsupportedException(
+                "fprintf to a non-standard stream is unsupported in --target=wat (only stdout/stderr map to WASI fds)");
+        }
+        var fmt = FormatLiteral(c, 1, "fprintf");
+        if (fd != 1)
+        {
+            Line($"i32.const {fd}");
+            Line("global.set $__fd");
+        }
+        // The stream operand (a bare stdout/stderr VarRef, no side effects) is not
+        // evaluated — its identity was consumed above to pick the fd.
+        EmitFormatExpansion(fmt, c, firstArg: 2);
+        if (fd != 1)
+        {
+            Line("i32.const 1");
+            Line("global.set $__fd");   // restore stdout as the default sink
+        }
+        // Leave the (ignored) char-count result ONLY when the call is used for its
+        // value — Zig's std.debug.print lowers to a VOID-typed fprintf, so leaving a
+        // value there would unbalance the stack (the void statement won't drop it).
+        if (c.Type.Unqualified is not CType.VoidType) { Line("i32.const 0"); }
+    }
+
+    /// <summary>Map a standard-stream operand to its WASI fd (<c>stdout</c>→1,
+    /// <c>stderr</c>→2), or -1 if it isn't a recognised standard-stream reference.
+    /// Casts are peeled — a <c>FILE*</c> parameter position wraps the bare stream
+    /// symbol in an implicit conversion.</summary>
+    private static int StdStreamFd(CExpr? stream)
+    {
+        while (stream is Cast cast) { stream = cast.Operand; }
+        // Zig's std.debug.print builds a VarRef to a synthesized `stderr` symbol; C's
+        // stdout/stderr resolve to a NameRef (dotcc's lenient path — they bind against
+        // Libc statics at C# compile time, with no wat-side declaration).
+        return stream switch
+        {
+            VarRef { Sym.Name: "stdout" } or NameRef { RawName: "stdout" } => 1,
+            VarRef { Sym.Name: "stderr" } or NameRef { RawName: "stderr" } => 2,
+            _ => -1,
+        };
     }
 
     /// <summary>Expand <c>sprintf</c>/<c>snprintf</c> with a string-literal format:
@@ -1556,14 +1612,14 @@ internal sealed partial class WatBackend
     global.get $__ob
     i32.const -1
     i32.eq
-    if                           ;; fd 1 — one iovec, one fd_write
+    if                           ;; fd mode — one iovec, one fd_write to $__fd
       i32.const {{IoScratch}}
       local.get $ptr
       i32.store
       i32.const {{IoScratch + 4}}
       local.get $len
       i32.store
-      i32.const 1
+      global.get $__fd           ;; target fd (1 = stdout, 2 = stderr)
       i32.const {{IoScratch}}
       i32.const 1
       i32.const {{IoScratch + 8}}

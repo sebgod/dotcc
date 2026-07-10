@@ -457,10 +457,12 @@ internal static class Program
         CDialect dialect,
         WarningFlags warnings)
     {
-        var sources = inputPaths.Where(p => p.EndsWith(".c", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var sources = inputPaths.Where(p =>
+            p.EndsWith(".c", StringComparison.OrdinalIgnoreCase) ||
+            p.EndsWith(".zig", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (sources.Length == 0)
         {
-            Console.Error.WriteLine("dotcc: error: --target=wat needs .c source input");
+            Console.Error.WriteLine("dotcc: error: --target=wat needs .c or .zig source input");
             return 1;
         }
         string wat;
