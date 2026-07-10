@@ -15,8 +15,11 @@ name: lua
 # own non-zero exit on failure (braces, via pipefail).
 
 on:
+  # push runs only on the default branch (i.e. merges). Feature-branch commits are
+  # covered by the pull_request trigger below, which re-fires on every push to an open
+  # PR — so a PR'd branch runs each suite ONCE, not twice (a feat/** push + the PR).
   push:
-    branches: [main, 'feat/**']
+    branches: [main]
   pull_request:
     branches: [main]
   schedule:
