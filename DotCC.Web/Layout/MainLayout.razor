@@ -1,10 +1,23 @@
 @inherits LayoutComponentBase
 
-<main class="app">
-    @Body
-    <footer>
-        Powered by <a href="https://github.com/sebgod/dotcc" target="_blank" rel="noopener">dotcc</a>,
-        compiled to WebAssembly with Blazor. wat assembled by
-        <a href="https://github.com/AssemblyScript/wabt.js" target="_blank" rel="noopener">wabt.js</a>.
-    </footer>
-</main>
+<div class="site">
+    <nav class="topnav">
+        <div class="topnav-inner">
+            <a class="brand" href="">dotcc <span class="brand-tag">C · Zig → .NET / wasm</span></a>
+            <div class="navlinks">
+                <NavLink class="navlink" href="" Match="NavLinkMatch.All">Home</NavLink>
+                <NavLink class="navlink" href="sandbox">Sandbox</NavLink>
+                <NavLink class="navlink" href="coverage">Coverage</NavLink>
+                <a class="navlink ext" href="https://github.com/sebgod/dotcc" target="_blank" rel="noopener">GitHub ↗</a>
+            </div>
+        </div>
+    </nav>
+    <main class="app">
+        @Body
+        <footer>
+            Powered by <a href="https://github.com/sebgod/dotcc" target="_blank" rel="noopener">dotcc</a>,
+            compiled to WebAssembly with Blazor. wat assembled by
+            <a href="https://github.com/AssemblyScript/wabt.js" target="_blank" rel="noopener">wabt.js</a>.
+        </footer>
+    </main>
+</div>
