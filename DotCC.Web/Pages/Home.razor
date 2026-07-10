@@ -19,11 +19,17 @@
 <div class="sandbox">
     <section class="editor">
         <div class="pane-head">
-            <span>source.c</span>
+            <label class="lang">language:
+                <select @onchange="OnLangChanged">
+                    <option value="c" selected="@(_lang == "c")">C</option>
+                    <option value="zig" selected="@(_lang == "zig")">Zig</option>
+                </select>
+            </label>
+            <span class="filename">@SourceFileName</span>
             <label class="examples">
                 example:
                 <select @onchange="OnExampleChanged">
-                    @foreach (var ex in Examples)
+                    @foreach (var ex in CurrentExamples)
                     {
                         <option value="@ex.Name" selected="@(ex.Name == _example)">@ex.Name</option>
                     }
@@ -40,25 +46,28 @@
             </button>
             <span class="hint">@_hint</span>
         </div>
-        <div class="flags">
-            <label class="std">-std=
-                <select @bind="_std">
-                    <option value="c90">c90</option>
-                    <option value="c99">c99</option>
-                    <option value="c11">c11</option>
-                    <option value="c17">c17</option>
-                    <option value="c23">c23</option>
-                </select>
-            </label>
-            <label><input type="checkbox" @bind="_wConversion" /> -Wconversion</label>
-            <label><input type="checkbox" @bind="_wFallthrough" /> -Wimplicit-fallthrough</label>
-            <label><input type="checkbox" @bind="_pedantic" /> -pedantic</label>
-        </div>
+        @if (_lang == "c")
+        {
+            <div class="flags">
+                <label class="std">-std=
+                    <select @bind="_std">
+                        <option value="c90">c90</option>
+                        <option value="c99">c99</option>
+                        <option value="c11">c11</option>
+                        <option value="c17">c17</option>
+                        <option value="c23">c23</option>
+                    </select>
+                </label>
+                <label><input type="checkbox" @bind="_wConversion" /> -Wconversion</label>
+                <label><input type="checkbox" @bind="_wFallthrough" /> -Wimplicit-fallthrough</label>
+                <label><input type="checkbox" @bind="_pedantic" /> -pedantic</label>
+            </div>
+        }
     </section>
 
     <section class="output">
         <div class="tabs">
-            @foreach (var t in _tabs)
+            @foreach (var t in Tabs)
             {
                 <button class="@(t == _tab ? "tab active" : "tab")" @onclick="() => Select(t)">@t</button>
             }
@@ -104,13 +113,21 @@
 </div>
 
 @code {
-    // The tab set: run output, then the three "look inside the compiler" views —
-    // the wat the backend emits, the C# projection, and the -E token stream.
-    private readonly string[] _tabs = { "Output", "wat", "C#", "-E" };
+    // The active front-end language: "c" or "zig". Drives the file extension dotcc
+    // dispatches on, which examples/flags/tabs show, and whether the C-only knobs
+    // (-std, warning flags, -E) apply. Zig has no C preprocessor and one fixed
+    // dialect, so those are hidden and the compile runs dialect=null / default warnings.
+    private string _lang = "c";
+
+    // The tab set: run output, then the "look inside the compiler" views — the wat
+    // the backend emits, the C# projection, and (C only) the -E token stream.
+    private string[] Tabs => _lang == "zig"
+        ? new[] { "Output", "wat", "C#" }
+        : new[] { "Output", "wat", "C#", "-E" };
     private string _tab = "Output";
 
-    private string _source = Examples[0].Source;
-    private string _example = Examples[0].Name;
+    private string _source = CExamples[0].Source;
+    private string _example = CExamples[0].Name;
     private string? _wat;
     private string? _csharp;
     private string? _preprocessed;
@@ -132,9 +149,16 @@
     private void Select(string t) => _tab = t;
 
     // dotcc reads inputs off the (Emscripten in-memory) filesystem, so we stage the
-    // editor buffer there — WEB0 confirmed the include-scan works over MEMFS.
+    // editor buffer there — WEB0 confirmed the include-scan works over MEMFS. The file
+    // extension is load-bearing: dotcc dispatches frontend by it (.c → C, .zig → Zig).
     private const string WorkDir = "/work";
-    private const string SourcePath = WorkDir + "/source.c";
+    private string SourcePath => WorkDir + (_lang == "zig" ? "/source.zig" : "/source.c");
+
+    /// <summary>The staged input file's basename, shown in the editor pane head.</summary>
+    private string SourceFileName => _lang == "zig" ? "source.zig" : "source.c";
+
+    /// <summary>The example set for the active front-end language.</summary>
+    private Example[] CurrentExamples => _lang == "zig" ? ZigExamples : CExamples;
 
     // The CodeMirror instance lives in JS (window.dotccEditor); `_source` is the
     // authoritative C# copy, pulled from the editor right before each compile/share.
@@ -165,7 +189,7 @@
     private async Task OnExampleChanged(ChangeEventArgs e)
     {
         var name = e.Value?.ToString();
-        var picked = Array.Find(Examples, x => x.Name == name);
+        var picked = Array.Find(CurrentExamples, x => x.Name == name);
         if (picked is not null)
         {
             _source = picked.Source;
@@ -175,6 +199,24 @@
             _hasError = false;
             await JS.InvokeVoidAsync("dotccEditor.setValue", EditorId, picked.Source);
         }
+    }
+
+    /// <summary>Switch the active front-end language. Loads that language's first
+    /// example into the editor (the previous language's source wouldn't parse),
+    /// drops the C-only -E tab when leaving C, and clears any prior run state.</summary>
+    private async Task OnLangChanged(ChangeEventArgs e)
+    {
+        var lang = e.Value?.ToString();
+        if (lang != "c" && lang != "zig") { return; }
+        _lang = lang;
+        var first = CurrentExamples[0];
+        _source = first.Source;
+        _example = first.Name;
+        _ran = false;
+        _diagnostics = "";
+        _hasError = false;
+        if (_tab == "-E") { _tab = "Output"; }
+        await JS.InvokeVoidAsync("dotccEditor.setValue", EditorId, first.Source);
     }
 
     private async Task ShareAsync()
@@ -201,8 +243,10 @@
             Directory.CreateDirectory(WorkDir);
             File.WriteAllText(SourcePath, _source);
 
-            var dialect = Dialect();
-            var warnings = Warnings();
+            // Zig has no C preprocessor / -std dialect / C-warning gates — compile it
+            // with dialect=null and default warnings, and skip the -E pass entirely.
+            CDialect? dialect = _lang == "c" ? Dialect() : null;
+            var warnings = _lang == "c" ? Warnings() : WarningFlags.Default;
 
             wat = Emit(() => Compiler.EmitWat(new[] { SourcePath }, dialect: dialect, warnings: warnings), out var watWarnings);
             _wat = wat;
@@ -214,7 +258,7 @@
             string csWarnings = "";
             try { _csharp = Emit(() => Compiler.EmitCSharp(new[] { SourcePath }, dialect: dialect, warnings: warnings), out csWarnings); }
             catch { _csharp = "// (C# emit unavailable for this program)"; }
-            _preprocessed = Preprocess(dialect);
+            _preprocessed = dialect is { } d ? Preprocess(d) : null;
 
             var diag = DedupeLines(watWarnings, csWarnings);
             if (!string.IsNullOrWhiteSpace(diag)) { SetDiag(diag, isError: false); }
@@ -332,12 +376,13 @@
         public string? Error { get; set; }
     }
 
-    /// <summary>A named starter program. Kept to the integer + <c>printf</c> surface
-    /// the wat backend runs today (same feature set as the verified factorial demo);
-    /// wider constructs get added as the wat backend grows.</summary>
+    /// <summary>A named starter program (C or Zig). Kept to the surface the wat
+    /// backend runs today — integer arithmetic plus the <c>printf</c>/
+    /// <c>std.debug.print</c> I/O the fd_write shim carries; wider constructs get
+    /// added as the wat backend grows.</summary>
     private sealed record Example(string Name, string Source);
 
-    private static readonly Example[] Examples =
+    private static readonly Example[] CExamples =
     {
         new("Factorial",
             """
@@ -419,6 +464,55 @@
                 }
                 printf("\n");
                 return 0;
+            }
+
+            """),
+    };
+
+    // Zig starter programs, each within the same wat-runnable surface the C set is:
+    // std.debug.print (→ stderr), variadic extern printf (→ stdout), and arithmetic
+    // observed as the process exit code. All three were verified end-to-end through
+    // the libwabt + fd_write path this sandbox uses.
+    private static readonly Example[] ZigExamples =
+    {
+        new("Hello (std.debug.print)",
+            """
+            const std = @import("std");
+
+            // std.debug.print writes to stderr (exactly as real Zig does).
+            pub fn main() void {
+                std.debug.print("Hello from {s}!\n", .{"Zig"});
+                var i: i32 = 1;
+                while (i <= 5) : (i += 1) {
+                    std.debug.print("{d} squared is {d}\n", .{ i, i * i });
+                }
+            }
+
+            """),
+        new("Squares (extern printf)",
+            """
+            // A variadic C extern — printf routes to stdout through dotcc's printf builder.
+            extern fn printf(format: [*c]const u8, ...) c_int;
+
+            pub fn main() u8 {
+                var i: c_int = 1;
+                while (i <= 5) : (i += 1) {
+                    _ = printf("%d^2 = %d\n", i, i * i);
+                }
+                return 0;
+            }
+
+            """),
+        new("Sum (exit code)",
+            """
+            // No I/O — the result is observed as the process exit code (see it below).
+            pub fn main() u8 {
+                var sum: u8 = 0;
+                var i: u8 = 1;
+                while (i <= 9) : (i += 1) {
+                    sum = sum + i;
+                }
+                return sum; // 1+2+...+9 = 45
             }
 
             """),

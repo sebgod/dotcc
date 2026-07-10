@@ -95,8 +95,8 @@ header .tag {
     gap: .5rem;
 }
 
-.examples { display: flex; align-items: center; gap: .35rem; }
-.examples select {
+.examples, .lang { display: flex; align-items: center; gap: .35rem; }
+.examples select, .lang select {
     background: var(--panel);
     color: var(--fg);
     border: 1px solid var(--border);
@@ -106,6 +106,8 @@ header .tag {
     padding: .12rem .3rem;
     cursor: pointer;
 }
+/* The staged input file's name, sitting between the language + example selectors. */
+.filename { color: var(--muted); font-style: italic; }
 
 /* CodeMirror host — the vendored bundle mounts a .cm-editor inside. */
 .cm-host {
