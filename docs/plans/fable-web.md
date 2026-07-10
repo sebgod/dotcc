@@ -229,7 +229,17 @@ Landed in reviewable slices:
   `@codemirror/{view,state,commands,language,lang-cpp,theme-one-dark}` (C highlighting
   + oneDark). Verified headless (CDP): editor mounts, regression + FizzBuzz + `-E` +
   share still green.
-- **Slice C (next)** — Zig toggle (D7), multi-file MEMFS tabs, `-std=`/`-W` flag toggles.
+- **Slice C ✅ (2026-07-10)** — **compiler-flag toggles**: a `-std=` dialect picker
+  (`c90/c99/c11/c17/c23`, via `CDialect.Parse`) + `-Wconversion` / `-Wimplicit-fallthrough`
+  / `-pedantic` checkboxes (via `WarningFlags`), read at Run time and threaded into
+  `EmitWat` / `EmitCSharp` / `Preprocess`. Diagnostics are captured from BOTH emit
+  passes and deduped (both run the shared dialect gate, so `-pedantic` lines would
+  otherwise repeat; `-Wconversion` is a codegen-time gate only the C# pass runs).
+  Verified headless (CDP): a narrowing `long`→`char` is silent with `-Wconversion` off
+  and warns when on (`implicit conversion … may lose data … [-Wconversion]`).
+- **Slice D (next)** — Zig toggle (D7) — needs an empirical Zig→wat measurement first
+  (`std.debug.print` may exceed the wat backend's fd-1 surface; ship only examples that
+  actually run) — and multi-file MEMFS tabs.
 
 Full WEB2 scope:
 CodeMirror 6 (D4) with C highlighting; output tabs — **Run / C# / wat / -E

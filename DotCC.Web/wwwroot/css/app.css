@@ -158,6 +158,31 @@ button.share:disabled { opacity: .55; cursor: default; }
 
 .hint { color: var(--muted); font-size: .78rem; }
 
+.flags {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: .1rem 1rem;
+    padding: .45rem .7rem;
+    border-top: 1px solid var(--border);
+    background: var(--panel-2);
+    font-family: var(--mono);
+    font-size: .74rem;
+    color: var(--muted);
+}
+.flags label { display: inline-flex; align-items: center; gap: .3rem; cursor: pointer; }
+.flags input[type="checkbox"] { accent-color: var(--accent); cursor: pointer; }
+.flags select {
+    background: var(--panel);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: .3rem;
+    font-family: var(--mono);
+    font-size: .72rem;
+    padding: .1rem .25rem;
+    cursor: pointer;
+}
+
 .tabs { display: flex; }
 .tab {
     background: transparent;
