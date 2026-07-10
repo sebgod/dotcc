@@ -107,20 +107,21 @@ header .tag {
     cursor: pointer;
 }
 
-textarea {
+/* CodeMirror host — the vendored bundle mounts a .cm-editor inside. */
+.cm-host {
     flex: 1;
-    resize: none;
-    border: 0;
-    outline: none;
-    background: var(--panel);
-    color: var(--fg);
+    display: flex;
+    min-height: 300px;
+    overflow: hidden;
+}
+.cm-host .cm-editor { flex: 1; height: 100%; }
+.cm-host .cm-scroller {
     font-family: var(--mono);
     font-size: .86rem;
     line-height: 1.45;
-    padding: .7rem;
-    tab-size: 4;
-    min-height: 300px;
 }
+/* oneDark ships its own palette; drop its border-radius so it sits flush. */
+.cm-host .cm-editor.cm-focused { outline: none; }
 
 .controls {
     display: flex;
