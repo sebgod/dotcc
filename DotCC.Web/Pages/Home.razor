@@ -18,13 +18,27 @@
 
 <div class="sandbox">
     <section class="editor">
-        <div class="pane-head">source.c</div>
+        <div class="pane-head">
+            <span>source.c</span>
+            <label class="examples">
+                example:
+                <select @onchange="OnExampleChanged">
+                    @foreach (var ex in Examples)
+                    {
+                        <option value="@ex.Name" selected="@(ex.Name == _example)">@ex.Name</option>
+                    }
+                </select>
+            </label>
+        </div>
         <textarea @bind="_source" @bind:event="oninput" spellcheck="false"></textarea>
         <div class="controls">
             <button class="run" @onclick="RunAsync" disabled="@_busy">
                 @(_busy ? "Running…" : "▶ Run")
             </button>
-            <span class="hint">first run warms the compiler (~a few seconds)</span>
+            <button class="share" @onclick="ShareAsync" disabled="@_busy" title="Copy a self-contained link to this program">
+                🔗 Share
+            </button>
+            <span class="hint">@_hint</span>
         </div>
     </section>
 
@@ -61,6 +75,10 @@
             {
                 <pre class="code">@(_csharp ?? "")</pre>
             }
+            else if (_tab == "-E")
+            {
+                <pre class="code">@(_preprocessed ?? "")</pre>
+            }
         </div>
         @if (!string.IsNullOrEmpty(_diagnostics))
         {
@@ -72,23 +90,16 @@
 </div>
 
 @code {
-    private const string DefaultSource =
-        "#include <stdio.h>\n\n" +
-        "int factorial(int n) {\n" +
-        "    return n <= 1 ? 1 : n * factorial(n - 1);\n" +
-        "}\n\n" +
-        "int main(void) {\n" +
-        "    for (int i = 1; i <= 6; i++)\n" +
-        "        printf(\"%d! = %d\\n\", i, factorial(i));\n" +
-        "    return 0;\n" +
-        "}\n";
-
-    private readonly string[] _tabs = { "Output", "wat", "C#" };
+    // The tab set: run output, then the three "look inside the compiler" views —
+    // the wat the backend emits, the C# projection, and the -E token stream.
+    private readonly string[] _tabs = { "Output", "wat", "C#", "-E" };
     private string _tab = "Output";
 
-    private string _source = DefaultSource;
+    private string _source = Examples[0].Source;
+    private string _example = Examples[0].Name;
     private string? _wat;
     private string? _csharp;
+    private string? _preprocessed;
     private string _stdout = "";
     private string _stderr = "";
     private int _exitCode;
@@ -96,6 +107,7 @@
     private bool _hasError;
     private bool _ran;
     private bool _busy;
+    private string _hint = "first run warms the compiler (~a few seconds)";
 
     private void Select(string t) => _tab = t;
 
@@ -104,6 +116,42 @@
     private const string WorkDir = "/work";
     private const string SourcePath = WorkDir + "/source.c";
 
+    /// <summary>On first render, adopt any program packed into a "#src=…" share
+    /// link so playground links round-trip. JS interop is only legal once the
+    /// component has rendered (this app is client-side WASM, no prerender).</summary>
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) { return; }
+        var shared = await JS.InvokeAsync<string?>("dotccSandbox.readShareSource");
+        if (!string.IsNullOrEmpty(shared))
+        {
+            _source = shared;
+            _example = "(shared link)";
+            StateHasChanged();
+        }
+    }
+
+    private void OnExampleChanged(ChangeEventArgs e)
+    {
+        var name = e.Value?.ToString();
+        var picked = Array.Find(Examples, x => x.Name == name);
+        if (picked is not null)
+        {
+            _source = picked.Source;
+            _example = picked.Name;
+            _ran = false;
+            _diagnostics = "";
+            _hasError = false;
+        }
+    }
+
+    private async Task ShareAsync()
+    {
+        var url = await JS.InvokeAsync<string>("dotccSandbox.makeShareLink", _source);
+        _hint = url.Length > 60 ? "link copied to clipboard ✓" : url;
+        StateHasChanged();
+    }
+
     private async Task RunAsync()
     {
         _busy = true;
@@ -111,7 +159,7 @@
         _hasError = false;
         StateHasChanged();
 
-        // Compile on the .NET side: source -> wat (and C#, for the view tab).
+        // Compile on the .NET side: source -> wat (and C# / -E, for the view tabs).
         string? wat = null;
         try
         {
@@ -120,9 +168,11 @@
 
             wat = Emit(() => Compiler.EmitWat(new[] { SourcePath }), out var watWarnings);
             _wat = wat;
-            // The C# projection is a pure string too — cheap to keep the tab live.
+            // The C# projection and -E token stream are pure string passes too —
+            // cheap to keep both view tabs live alongside a run.
             try { _csharp = Emit(() => Compiler.EmitCSharp(new[] { SourcePath }), out _); }
             catch { _csharp = "// (C# emit unavailable for this program)"; }
+            _preprocessed = Preprocess();
 
             if (!string.IsNullOrWhiteSpace(watWarnings)) { SetDiag(watWarnings, isError: false); }
         }
@@ -175,6 +225,22 @@
         finally { Console.SetError(previous); warnings = capture.ToString(); }
     }
 
+    /// <summary>Render the -E preprocessor token stream for the current source
+    /// (best effort — a lex failure surfaces as a comment rather than blocking a run).</summary>
+    private string Preprocess()
+    {
+        try
+        {
+            var sw = new StringWriter();
+            Compiler.Preprocess(new[] { SourcePath }, sw);
+            return sw.ToString();
+        }
+        catch (Exception ex)
+        {
+            return $"// (-E unavailable: {ex.Message})";
+        }
+    }
+
     private void SetDiag(string text, bool isError)
     {
         _diagnostics = text.Trim();
@@ -192,4 +258,96 @@
         public string? Stage { get; set; }
         public string? Error { get; set; }
     }
+
+    /// <summary>A named starter program. Kept to the integer + <c>printf</c> surface
+    /// the wat backend runs today (same feature set as the verified factorial demo);
+    /// wider constructs get added as the wat backend grows.</summary>
+    private sealed record Example(string Name, string Source);
+
+    private static readonly Example[] Examples =
+    {
+        new("Factorial",
+            """
+            #include <stdio.h>
+
+            int factorial(int n) {
+                return n <= 1 ? 1 : n * factorial(n - 1);
+            }
+
+            int main(void) {
+                for (int i = 1; i <= 6; i++)
+                    printf("%d! = %d\n", i, factorial(i));
+                return 0;
+            }
+
+            """),
+        new("FizzBuzz",
+            """
+            #include <stdio.h>
+
+            int main(void) {
+                for (int i = 1; i <= 15; i++) {
+                    if (i % 15 == 0)     printf("FizzBuzz\n");
+                    else if (i % 3 == 0) printf("Fizz\n");
+                    else if (i % 5 == 0) printf("Buzz\n");
+                    else                 printf("%d\n", i);
+                }
+                return 0;
+            }
+
+            """),
+        new("Fibonacci",
+            """
+            #include <stdio.h>
+
+            int main(void) {
+                int a = 0, b = 1;
+                for (int i = 0; i < 10; i++) {
+                    printf("%d ", a);
+                    int next = a + b;
+                    a = b;
+                    b = next;
+                }
+                printf("\n");
+                return 0;
+            }
+
+            """),
+        new("GCD (Euclid)",
+            """
+            #include <stdio.h>
+
+            int gcd(int a, int b) {
+                while (b != 0) {
+                    int t = b;
+                    b = a % b;
+                    a = t;
+                }
+                return a;
+            }
+
+            int main(void) {
+                printf("gcd(48, 36) = %d\n", gcd(48, 36));
+                printf("gcd(17, 5)  = %d\n", gcd(17, 5));
+                return 0;
+            }
+
+            """),
+        new("Primes",
+            """
+            #include <stdio.h>
+
+            int main(void) {
+                for (int n = 2; n < 30; n++) {
+                    int is_prime = 1;
+                    for (int d = 2; d * d <= n; d++)
+                        if (n % d == 0) { is_prime = 0; break; }
+                    if (is_prime) printf("%d ", n);
+                }
+                printf("\n");
+                return 0;
+            }
+
+            """),
+    };
 }
