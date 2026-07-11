@@ -414,8 +414,32 @@ internal sealed partial class ZigLowering
         return code;
     }
 
-    private static string Tok(Item it) => it.Content as string
-        ?? throw new IrUnsupportedException("expected a token lexeme");
+    private static string Tok(Item it) => NormalizeIdent(it.Content as string
+        ?? throw new IrUnsupportedException("expected a token lexeme"));
+
+    /// <summary>
+    /// Normalizes a raw token lexeme into the name the rest of lowering uses. A Zig quoted
+    /// identifier <c>@"…"</c> (road-to-zig-std S9) is folded to its inner text with any character
+    /// that isn't C#-identifier-legal mangled to <c>_</c>, so it can key maps and be emitted
+    /// directly. Every other lexeme (operators, keywords, plain identifiers, <c>@name</c> builtins)
+    /// is returned unchanged — none of them start with <c>@"</c>.
+    /// </summary>
+    private static string NormalizeIdent(string lexeme)
+    {
+        if (lexeme.Length < 3 || lexeme[0] != '@' || lexeme[1] != '"' || lexeme[^1] != '"')
+        {
+            return lexeme;
+        }
+        var inner = lexeme[2..^1];
+        var sb = new System.Text.StringBuilder(inner.Length + 1);
+        // A leading digit can't start a C# identifier — prefix `_` so `@"0"` becomes `_0`.
+        if (inner.Length > 0 && char.IsAsciiDigit(inner[0])) { sb.Append('_'); }
+        foreach (var c in inner)
+        {
+            sb.Append(char.IsAsciiLetterOrDigit(c) || c == '_' ? c : '_');
+        }
+        return sb.Length == 0 ? "_" : sb.ToString();
+    }
 
     public void Lower(Item root)
     {
@@ -539,6 +563,13 @@ internal sealed partial class ZigLowering
                 // block's side effects (asserts / `@compileError` guards) are out of scope until the
                 // comptime engine lands (S4–S7); dropping matches "a normal build" for std source.
                 case Zig.TestDeclNamed or Zig.TestDeclIdent or Zig.TestDeclAnon or Zig.TopComptime: break;
+                // A top-level container FIELD means this file is being used as an instantiable
+                // struct type (`@This()` at file scope). We PARSE it (road-to-zig-std S9, the largest
+                // std parse bucket), but reifying the file-as-struct — a synthesized named type whose
+                // members are these fields plus every sibling decl — is the S1 lift, not yet done.
+                // Fail loudly so the gap is visible rather than silently mis-lowered.
+                case Zig.TopField: throw new IrUnsupportedException(
+                    "top-level container field (file-as-struct type) is not yet lowered (road-to-zig-std S1)");
                 default: throw new IrUnsupportedException("zig top-level decl: " + (d.Content?.GetType().Name ?? "null"));
             }
         }

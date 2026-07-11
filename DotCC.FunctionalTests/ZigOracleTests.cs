@@ -234,6 +234,11 @@ public sealed class ZigOracleTests
         new object[] { "struct_field_default",
             "const S = struct { n: i32 = 7, m: i32 };\n" +
             "pub fn main() u8 { const s: S = .{ .m = 3 }; return @intCast(s.n + s.m); }\n", 10, "" },
+        // road-to-zig-std S9 — a quoted identifier `@"a-b"` (Zig's reserved-word / arbitrary-string
+        // escape hatch) lexes to a plain IDENT and mangles to the C# name `a_b`. Real zig accepts the
+        // same declaration and use, so exit matches: 42.
+        new object[] { "quoted_ident",
+            "pub fn main() u8 { const @\"a-b\": u8 = 42; return @\"a-b\"; }\n", 42, "" },
         // SWITCH (Milestone C2). Single / multi-value / else prongs, no fall-through.
         // classify(2) hits the `1, 2` multi-value prong → 20.
         new object[] { "switch_multi",

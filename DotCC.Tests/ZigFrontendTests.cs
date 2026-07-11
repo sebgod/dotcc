@@ -4421,4 +4421,31 @@ public sealed class ZigFrontendTests
             "}\n");
         cs.ShouldContain("n = 7"); // the default materialized into the struct init, not left C#-zero
     }
+
+    [Fact]
+    public void Parses_but_defers_a_file_as_struct_top_level_field()
+    {
+        // road-to-zig-std S9 — a Zig file is an implicit struct, so it may carry container fields at
+        // the top level (`bit_len: usize = 0,`). We now PARSE this (the largest std parse bucket), but
+        // reifying the whole file as an instantiable struct type is the S1 lift, so lowering must fail
+        // LOUDLY rather than silently drop the field. Parse-accept + honest deferral, not a bad emit.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "bit_len: usize = 0,\n" +
+            "pub fn main() u8 {\n    return 0;\n}\n"));
+        ex.Message.ShouldContain("file-as-struct");
+    }
+
+    [Fact]
+    public void Lexes_a_quoted_identifier_and_mangles_it_to_a_csharp_name()
+    {
+        // road-to-zig-std S9 — `@"…"` is Zig's quoted identifier (the reserved-word / arbitrary-string
+        // escape hatch). It lexes to a plain IDENT; Tok strips the `@"`/`"` and mangles any char that
+        // isn't C#-identifier-legal to `_`, so `@"a-b"` becomes `a_b` — used consistently at the
+        // declaration and at the use, so the two still refer to the same local.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const @\"a-b\": u8 = 42;\n" +
+            "    return @\"a-b\";\n}\n");
+        cs.ShouldContain("a_b");
+    }
 }
