@@ -3826,6 +3826,24 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Honors_callconv_c_on_a_function_pointer_type_as_native_cdecl()
+    {
+        // `callconv(.c)` on a fn-POINTER type is a call-ABI annotation → the Func is marked
+        // IsNativeCallConv, so the C# backend renders `delegate* unmanaged[Cdecl]<…>` instead of the
+        // managed `delegate*<…>`. This is std's C-ABI fn-ptr typedef shape (e.g.
+        // std/c/darwin/dispatch.zig: `*const fn (?*anyopaque) callconv(.c) void`). road-to-zig-std S9.
+        // The type sits in PARAMETER position so it renders in the signature without a bind/coercion.
+        var cs = EmitZig(
+            "fn setCb(cb: *const fn (?*anyopaque) callconv(.c) void) void { _ = cb; }\n" +
+            "pub fn main() u8 { return 0; }\n");
+        // Scope the assertion to setCb's signature — the spliced Libc runtime legitimately contains
+        // MANAGED `delegate*<void*, void>` fn-ptrs (threads/tss), so a bare ShouldNotContain would
+        // false-positive on those.
+        cs.ShouldContain("setCb(delegate* unmanaged[Cdecl]<void*, void> cb)");  // native C-ABI param
+        cs.ShouldNotContain("setCb(delegate*<");                                // NOT the managed form
+    }
+
+    [Fact]
     public void Lowers_unnamed_param_and_error_returning_function_pointer_types()
     {
         // A fn-pointer type's params may be UNNAMED (`fn (i32, i32) i32`, the common Zig form) as well
