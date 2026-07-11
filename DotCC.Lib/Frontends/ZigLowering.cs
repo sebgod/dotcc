@@ -218,6 +218,14 @@ internal sealed partial class ZigLowering
     /// value const — a namespaced constant — is not lowered yet; it needs top-level globals.)</summary>
     private readonly Dictionary<string, Dictionary<string, CType>> _selfAliases = new(System.StringComparer.Ordinal);
 
+    /// <summary>Per <c>(struct name, field name)</c>, the RAW default-value AST of a
+    /// <c>field: T = default</c> declaration (std S9). Stored unlowered and materialized lazily — a
+    /// <c>.{…}</c> literal that OMITS the field appends <c>LowerExprSink(default, fieldType)</c>
+    /// (see <see cref="BuildStructInit"/>), so a NON-ZERO default is honored (a zero default already
+    /// matched C#'s zero-init). Keyed by the registered struct name, so a mangled in-function
+    /// container (<c>&lt;fn&gt;__&lt;P&gt;</c>) and a top-level struct never collide.</summary>
+    private readonly Dictionary<(string Struct, string Field), Item> _structFieldDefaults = new();
+
     /// <summary>Per container name, each namespaced VALUE <c>const</c> member → its (optional type
     /// annotation + ) right-hand-side expression, stored unlowered. A container-level <c>const</c>
     /// is a comptime constant in Zig, so a <c>Type.NAME</c> use inlines the expression — lowered

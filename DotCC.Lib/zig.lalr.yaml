@@ -1099,6 +1099,11 @@ productions:
   - derivation: none
     rules:
       - { lhs: FieldDecl, rhs: [IDENT, ':', Type], action: structField }
+      # A field with a DEFAULT value (`bit_len: usize = 0,` / `next: ?*Node = null,`) — 29 std files
+      # fail first on the `=`, and it's a hard requirement for the file-is-a-struct idiom. After
+      # `IDENT : Type` the `=` (default) vs `,`/`}` (bare field) decision is a clean 1-token split.
+      # The default is materialized only for fields OMITTED from a `.{…}` literal (see BuildStructInit).
+      - { lhs: FieldDecl, rhs: [IDENT, ':', Type, '=', Expr], action: structFieldDefault }
 
   # Enum body as a MEMBER list (right-recursive over EnumMember, like struct's FieldDecls) — so
   # value members, methods (`fn`/`pub fn`), and consts (`const Self = @This();`) interleave. The

@@ -361,8 +361,19 @@ internal sealed partial class ZigLowering
         var fields = new List<StructField>();
         foreach (var fd in fieldItems)
         {
-            var f = (Zig.StructField)fd.Content!;   // FieldDecl -> IDENT ':' Type
-            fields.Add(new StructField(Tok(f.Arg0), LowerType(f.Arg2)));
+            switch (fd.Content)
+            {
+                case Zig.StructField f:          // FieldDecl -> IDENT ':' Type
+                    fields.Add(new StructField(Tok(f.Arg0), LowerType(f.Arg2)));
+                    break;
+                case Zig.StructFieldDefault f:   // FieldDecl -> IDENT ':' Type '=' Expr
+                    var fname = Tok(f.Arg0);
+                    fields.Add(new StructField(fname, LowerType(f.Arg2)));
+                    _structFieldDefaults[(name, fname)] = f.Arg4;   // raw default AST — lowered lazily on omission
+                    break;
+                default:
+                    throw new IrUnsupportedException("zig struct field: " + (fd.Content?.GetType().Name ?? "null"));
+            }
         }
         _ir.RegisterStructType(name, fields, isUnion: false, layout);
     }
@@ -937,6 +948,7 @@ internal sealed partial class ZigLowering
     private CExpr BuildStructInit(IReadOnlyList<Item> fieldInitItems, CType.Named named)
     {
         var members = new List<FieldInit>();
+        var written = new HashSet<string>(System.StringComparer.Ordinal);
         foreach (var fiItem in fieldInitItems)
         {
             var fi = (Zig.FieldInit)fiItem.Content!;   // FieldInit -> '.' IDENT '=' Expr
@@ -944,6 +956,21 @@ internal sealed partial class ZigLowering
             var ftype = _ir.StructFieldType(named, fname)
                 ?? throw new IrUnsupportedException($"struct '{named.Name}' has no field '{fname}'");
             members.Add(new FieldInit(fname, ftype, LowerExprSink(fi.Arg3, ftype)));
+            written.Add(fname);
+        }
+        // Materialize a declared default (`field: T = expr`, std S9) for any field OMITTED from the
+        // literal — Zig fills it from the field's default. Fields with NO default that are omitted keep
+        // C#'s zero-init (a documented leniency; Zig would require them to be set).
+        if (_ir.StructFieldsOf(named.Name) is { } allFields)
+        {
+            foreach (var f in allFields)
+            {
+                if (written.Contains(f.Name)) { continue; }
+                if (_structFieldDefaults.TryGetValue((named.Name, f.Name), out var defItem))
+                {
+                    members.Add(new FieldInit(f.Name, f.Type, LowerExprSink(defItem, f.Type)));
+                }
+            }
         }
         return new StructInit(members) { Type = named };
     }

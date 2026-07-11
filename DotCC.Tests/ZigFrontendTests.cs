@@ -4406,4 +4406,19 @@ public sealed class ZigFrontendTests
             "}\n");
         cs.ShouldContain("main");
     }
+
+    [Fact]
+    public void Materializes_an_omitted_struct_field_default()
+    {
+        // road-to-zig-std S9 — a struct field with a default (`n: i32 = 7`) is materialized when a
+        // `.{…}` literal OMITS it; a written field (`m`) overrides. This is the NON-ZERO case where
+        // C#'s zero-init would be wrong: the literal `.{ .m = 3 }` must fill `n = 7`, so s.n+s.m = 10.
+        var cs = EmitZig(
+            "const S = struct { n: i32 = 7, m: i32 };\n" +
+            "pub fn main() u8 {\n" +
+            "    const s: S = .{ .m = 3 };\n" +
+            "    return @intCast(s.n + s.m);\n" +
+            "}\n");
+        cs.ShouldContain("n = 7"); // the default materialized into the struct init, not left C#-zero
+    }
 }
