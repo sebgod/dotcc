@@ -719,6 +719,14 @@ internal sealed partial class ZigLowering
             return LowerStdDebugCall(methodName, argItems);
         }
 
+        // --- curated `std.testing` assertions (`dotcc zig test`) --- `expect` / `expectEqual`, each
+        // returning an error union so a `try` propagates a failing assertion to the test's boundary
+        // (and thence to the generated test runner). A curated path, like the ones above.
+        if (TryResolveStdPath(fld.Arg0, out var stdTest) && stdTest == "std.testing")
+        {
+            return LowerStdTestingCall(methodName, argItems);
+        }
+
         // A member call on the `std.ArrayList(T)` TYPE (`std.ArrayList(i32).init(alloc)`) is
         // the pre-0.15 MANAGED API, which no longer exists in the pinned zig — reject it by
         // name with the migration path (the generic std-path error would only say `std`).

@@ -25,7 +25,7 @@ internal sealed class ZigFrontend : IFrontend
         var names = request.Names ?? new Backends.CSharpNameLegalizer();
         var ir = new IrBuilder(null, names, new Dictionary<string, byte[]>(StringComparer.Ordinal),
                                request.Warnings);
-        AddUnits(ir, request.InputPaths, names);
+        AddUnits(ir, request.InputPaths, names, request.TestMode);
 
         var errors = ir.Diagnostics.Where(d => d.Severity == Severity.Error).ToList();
         if (errors.Count > 0)
@@ -46,7 +46,7 @@ internal sealed class ZigFrontend : IFrontend
     /// — one shared module, one emit (the C side's structs/enums/globals preserved),
     /// cross-language calls resolving as bare-name <c>DotCcProgram</c> methods. The
     /// caller owns diagnostic flushing.</summary>
-    internal static void AddUnits(IrBuilder ir, IReadOnlyList<string> paths, INameLegalizer names)
+    internal static void AddUnits(IrBuilder ir, IReadOnlyList<string> paths, INameLegalizer names, bool testMode = false)
     {
         var lexerTable = Zig.BuildLexer();
         // One error-code registry shared across the build's units — a given `error.Foo`
@@ -75,7 +75,7 @@ internal sealed class ZigFrontend : IFrontend
             {
                 throw new CompileException($"parse failed in {Path.GetFileName(path)}: {root}");
             }
-            new ZigLowering(ir, names, errorCodes).Lower(root);
+            new ZigLowering(ir, names, errorCodes, testMode).Lower(root);
         }
         // Carry the flat error set to the backend so it can emit the `@errorName` code→name
         // table (Milestone X). Merge into any existing map (a mixed build lowers C first, but C

@@ -80,6 +80,14 @@ internal sealed partial class IrBuilder
     public List<EnumTypeDef> Enums { get; } = new();
     public List<Diagnostic> Diagnostics { get; } = new();
 
+    /// <summary>Zig test-mode manifest: each <c>test "name" {}</c> block, lowered to a runnable
+    /// <c>anyerror!void</c> function that is recorded in <see cref="Functions"/> like any other,
+    /// paired with its display name (in source order). Populated ONLY when the Zig front-end runs
+    /// in test mode (<c>dotcc zig test</c>); empty otherwise. The backend hands it to the shell so
+    /// the emitted program's entry point runs each test and reports pass/fail instead of calling
+    /// <c>main</c>.</summary>
+    public List<(string Name, Symbol Sym)> Tests { get; } = new();
+
     /// <summary>The Zig front-end's flat error set: each <c>error.Foo</c> name → its stable
     /// <c>ushort</c> code (1-based). Populated by <c>ZigFrontend.AddUnits</c> after lowering all
     /// units; consumed by the backend to emit the <c>__zigErrorName</c> code→name table that

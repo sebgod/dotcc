@@ -127,6 +127,33 @@ internal sealed partial class ZigLowering
         return (funcSym, runtimeParams, body);
     }
 
+    // Monotonic index for synthesized test-function names (`__zigtest_0`, …) — program-unique.
+    private int _testSeq;
+
+    /// <summary>Test mode (<c>dotcc zig test</c>): lower a <c>test "name"/ident/(anon) { … }</c> block
+    /// to a runnable <c>anyerror!void</c> free function named <c>__zigtest_N</c>, register it in the IR
+    /// test manifest (<see cref="IrBuilder.Tests"/>) with its display name, and return the pass-1 entry
+    /// so its body lowers in pass 2 exactly like a normal function. A test PASSES when its body returns
+    /// normally and FAILS when it returns an error — a <c>try</c> that propagates, or an explicit
+    /// <c>return error.X</c> — so the synthesized return type is an error union, and (unlike
+    /// <see cref="DeclareFn"/>) NO declared error set is recorded, leaving it unconstrained
+    /// (<c>anyerror</c>), the permissive behavior a test body needs. The fn is left non-static so the
+    /// generated runner (BuildShell test mode) can call it by bare name through
+    /// <c>using static DotCcProgram;</c>, like <c>main</c>.</summary>
+    private (Symbol sym, List<(string name, CType type)> ps, Item body) DeclareTest(string? displayName, Item body)
+    {
+        var index = _testSeq++;
+        var sym = _symbols.Declare(new Symbol
+        {
+            Name = "__zigtest_" + index,
+            Kind = SymKind.Func,
+            Type = new CType.Func(new CType.ErrorUnion(CType.Void), new List<CType>(), false),
+            IsGlobal = true,
+        });
+        _ir.Tests.Add((displayName ?? "test." + index, sym));
+        return (sym, new List<(string name, CType type)>(), body);
+    }
+
     /// <summary>Pass 1 for a struct method: declare it as a free function named
     /// <c>TypeName_method</c> (its receiver, if any, is the ordinary first parameter, so the
     /// body lowers exactly like a free function — <c>self.x</c> is plain field access) and record

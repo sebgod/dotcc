@@ -327,6 +327,12 @@ an expression, `=>` prong shapes. The full per-file report (with the
 Seed list (each its own loop increment; ranked by the table above, not guesswork):
 - **`test "…" {}` + container-level `comptime {}`: parse and DROP** (1857
   blocks) — the single biggest parse-coverage lever, near-zero risk.
+  **DONE + extended (2026-07-12):** test blocks parse, and a `test` **run** mode landed —
+  `dotcc zig test <file>` lowers each `test "…" {}` to an `anyerror!void` function and a generated
+  entry point runs them (OK/FAIL + summary, non-zero exit on failure), with curated
+  `std.testing.expect`/`expectEqual`. This is the **harness the G-goals need** — running a real `std`
+  slice's own tests from source and diffing against the `zig test` oracle. (Container-level
+  `comptime {}` stays dropped until the comptime engine, S4–S7.)
 - **Quoted identifiers `@"…"`** (if not already landed with S5).
 - **Arbitrary-width ints** (`u1`…`u128`, `u21` for Unicode): round up to the
   smallest C# container (byte/ushort/uint/ulong/UInt128) + mask at stores and

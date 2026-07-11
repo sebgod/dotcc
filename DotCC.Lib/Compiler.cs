@@ -64,10 +64,11 @@ public static partial class Compiler
         IReadOnlyList<string>? defines,
         CDialect? dialect,
         Ir.INameLegalizer? names = null,
-        WarningFlags warnings = WarningFlags.Default)
+        WarningFlags warnings = WarningFlags.Default,
+        bool testMode = false)
     {
         var request = new Frontends.FrontendRequest(
-            inputPaths, includeDirs, defines, dialect, names, warnings);
+            inputPaths, includeDirs, defines, dialect, names, warnings, testMode);
         var anyZig = inputPaths.Any(IsZigSource);
         var anyC = inputPaths.Any(p => !IsZigSource(p));
         if (anyZig && anyC) { return BuildMixedIr(request); }
@@ -133,11 +134,12 @@ public static partial class Compiler
         CDialect? dialect = null,
         bool debugHeap = false,
         ImportOptions? imports = null,
-        WarningFlags warnings = WarningFlags.Default)
+        WarningFlags warnings = WarningFlags.Default,
+        bool testMode = false)
     {
         var libraryMode = emit == EmitMode.SharedLib;
         var asObject = emit == EmitMode.Object;
-        var irBuilder = BuildIr(inputPaths, includeDirs, defines, dialect, warnings: warnings);
+        var irBuilder = BuildIr(inputPaths, includeDirs, defines, dialect, warnings: warnings, testMode: testMode);
         // -Wconversion: collect narrowing-conversion warnings during codegen, then
         // flush to stderr. Off by default (the bit is clear unless -Wconversion set).
         var convGate = (warnings & WarningFlags.Conversion) != 0 ? new ConversionGate() : null;
@@ -171,8 +173,9 @@ public static partial class Compiler
             }
         }
         // Library mode doesn't need a `main` (the .dll is consumed through its
-        // exports); object mode links later. Exe mode requires an entry point.
-        if (!asObject && !libraryMode && cg.MainArity < 0)
+        // exports); object mode links later; TEST mode runs the test manifest, not
+        // `main` (a test file legitimately has none). Exe mode requires an entry point.
+        if (!asObject && !libraryMode && !testMode && cg.MainArity < 0)
         {
             throw new CompileException("no `main` function defined in any translation unit.");
         }
@@ -191,7 +194,7 @@ public static partial class Compiler
             return SerializeFragment(cg.Functions, new Dictionary<string, string>(), cg.Aliases, cg.Globals, cg.MainArity,
                 objImports, objDefs, cg.MainReturnsVoid, cg.MainReturnsErrUnion, cg.MainErrPayloadIsVoid);
         }
-        return BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, emit, cg.Exports, debugHeap, importsClass, importsAreStatic, cg.MainReturnsVoid, cg.MainReturnsErrUnion, cg.MainErrPayloadIsVoid);
+        return BuildShell(cg.MainArity, cg.Functions, cg.Structs, cg.Aliases, cg.Globals, emit, cg.Exports, debugHeap, importsClass, importsAreStatic, cg.MainReturnsVoid, cg.MainReturnsErrUnion, cg.MainErrPayloadIsVoid, testMode, cg.Tests);
     }
 
     /// <summary>

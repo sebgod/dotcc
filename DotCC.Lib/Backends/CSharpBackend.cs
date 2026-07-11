@@ -23,7 +23,8 @@ internal sealed record CSharpBackendResult(
     IReadOnlyList<DotCC.EmitHelpers.Export> Exports,
     bool MainReturnsVoid = false,
     bool MainReturnsErrUnion = false,
-    bool MainErrPayloadIsVoid = false);
+    bool MainErrPayloadIsVoid = false,
+    IReadOnlyList<(string Name, string FnName)>? Tests = null);
 
 /// <summary>
 /// Lowers the typed IR to low-level unsafe C# text. Deliberately DUMB: every
@@ -144,7 +145,14 @@ internal sealed class CSharpBackend
         foreach (var t in unit.Types) { structs.Append(cg.StructText(t)); }
         foreach (var en in unit.Enums) { structs.Append(cg.EnumText(en)); }
 
-        return new CSharpBackendResult(fns.ToString(), structs.ToString(), Aliases: "", globals.ToString(), mainArity, exports, mainReturnsVoid, mainReturnsErrUnion, mainErrPayloadIsVoid);
+        // Zig test-mode manifest (empty for a normal build): each test's display name paired with the
+        // emitted method name (TargetName — the same spelling `Func` above prints at line ~411), so the
+        // shell's test runner can call each `__zigtest_N()` by bare name.
+        var tests = unit.Tests.Count > 0
+            ? unit.Tests.Select(t => (t.Name, t.Sym.TargetName)).ToList()
+            : null;
+
+        return new CSharpBackendResult(fns.ToString(), structs.ToString(), Aliases: "", globals.ToString(), mainArity, exports, mainReturnsVoid, mainReturnsErrUnion, mainErrPayloadIsVoid, tests);
     }
 
     // ---- type declarations -----------------------------------------------

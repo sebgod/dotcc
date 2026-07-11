@@ -6,6 +6,7 @@
 | Flag | Meaning |
 |---|---|
 | `dotcc <a.c> <b.c>` | Compile translation units (whole-program). Default: write `Program.cs + dotcc-out.csproj` to `./a.out-cs/`. **`.cs` inputs are object fragments → linked** (see `--emit=obj`). |
+| `dotcc zig test <f.zig>` | **Subcommand** (zig-CLI-shaped). Compile the input's `test "…" {}` blocks and **run** them (like `zig test`): each block lowers to an `anyerror!void` function, and a generated entry point runs each, printing `OK`/`FAIL` per test + a summary, exiting non-zero if any fails. `main` is ignored. Assertions: curated `std.testing.expect`/`expectEqual`. Emits a self-contained file-based program and runs it via `dotnet run` (CLI-tool territory, like `--emit=build`). The harness for running real `std` tests from source (road-to-zig-std). Other `zig` subcommands (`build`/`cc`/`build-exe`/`run`) are future scope. |
 | `-o <path>` | Output: a directory for csproj/build, a file for `file`/`obj`. **Inferred when omitted** (`obj` → `<src>.cs`, csproj/build → `./a.out-cs/`, file → stdout). |
 | `--emit=file` | Single .NET 10 file-based program (`#:property AllowUnsafeBlocks=true`). To `-o <file>` if given, else stdout. |
 | `--emit=csproj` | Default — `Program.cs` + paired csproj to `-o` dir. |
