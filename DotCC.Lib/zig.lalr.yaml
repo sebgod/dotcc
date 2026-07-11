@@ -291,6 +291,16 @@ productions:
       - { lhs: Decl, rhs: ['test', IDENT, Block],  action: testDeclIdent }
       - { lhs: Decl, rhs: ['test', Block],          action: testDeclAnon }
       - { lhs: Decl, rhs: ['comptime', Block],      action: topComptime }
+      # A Zig SOURCE FILE is itself an implicit struct, so it may carry container FIELDS at the
+      # top level — `name: Type,` / `name: Type = default,` — interleaved with its decls (PEG:
+      # a file's `ContainerMembers` mixes `ContainerField` and `Decl`). This is the single biggest
+      # parse-coverage bucket in std (road-to-zig-std S9: ~100 files, e.g. BitStack.zig). We reuse
+      # the existing `FieldDecl` non-terminal; no top-level form starts with a bare IDENT, so the
+      # shift on IDENT is conflict-free. Top-level fields are always comma-terminated (they precede
+      # further members), so only the `FieldDecl ','` form is needed. Parsing them ADVANCES coverage;
+      # actually treating the file as an instantiable struct type is the larger S1 lift, so lowering
+      # throws loudly (pass 1) until then.
+      - { lhs: Decl, rhs: [FieldDecl, ','], action: topField }
       # extern fn PROTOTYPE — no body, ends with `;`; linked with -lc (PEG:
       # `KEYWORD_extern STRINGLITERALSINGLE? FnProto SEMICOLON`). The optional `extern "c"`
       # library/calling-convention string (Milestone R, part 4) is accepted and lowered like a plain
@@ -1320,6 +1330,13 @@ lexer:
     # Atoms. FLOAT before INTEGER (longest-match picks float for `1.5` / `0x1.8p3`).
     # Builtin `@name` before IDENT.
     - { symbol: BUILTIN, match: '@[a-zA-Z_][a-zA-Z_0-9]*' }
+    # Quoted identifier `@"…"` — Zig's escape hatch for using a reserved word or an arbitrary
+    # string as an identifier (PEG: `IDENTIFIER <- … / "@" STRINGLITERALSINGLE`), e.g. the enum
+    # literal `.@"struct"` or a field named `@"align"`. It LEXES to an ordinary IDENT so the parser
+    # treats it exactly like a name; ZigLowering.Tok strips the `@"`/`"` and mangles it to a C#-safe
+    # identifier. Disjoint from BUILTIN (which needs a letter after `@`, never a quote), so ordering
+    # is moot; placed here for the "builtin `@name` before IDENT" grouping. road-to-zig-std S9.
+    - { symbol: IDENT,   match: '@"(\\.|[^"\\])*"' }
     # Multiline string: one or more `\\`-prefixed lines (joined with `\n`, decoded RAW — Zig
     # multiline strings process NO escapes). Backslash leads no other Zig token, so a `\\`-led
     # lexeme is unambiguous; disjoint lead from the quoted form (`"`), order vs it is moot. A
