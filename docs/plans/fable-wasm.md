@@ -243,6 +243,14 @@ timestamped report `docs/plans/wasm-surface-probe.report.txt`.
   any `*.wasm` dropped in `WasmProbeModules/`, so a Rust `no_std` fixture slots in
   when a toolchain is around.
 
+**WF0 now has a public face + a live consumer (2026-07-11).** `Compiler.ProbeWasm(byte[])
+→ string` exposes the probe (read-only, fail-soft) beyond the opt-in test, and the web
+sandbox's `wasm` tab (`fable-web.md` WEB6) calls it on the binary it assembles in-browser
+— dotcc reading back the wasm dotcc itself produced. This is the "Tier 1" wasm-in-sandbox
+increment: it needs no external toolchain and does **not** lift (that is WF1/WF2 below).
+Tier 2 (probe a pre-built Embedded Swift `.wasm` asset in the sandbox) and Tier 3 (lift
+dotcc's own wasm — the WF2 heart / WF8 self-eating round-trip) remain.
+
 ### WF1 — the binary reader (M)
 
 Full MVP+D8 decode into an in-memory `WasmModule` model: type/import/function/

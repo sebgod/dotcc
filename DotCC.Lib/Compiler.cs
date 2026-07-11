@@ -215,6 +215,57 @@ public static partial class Compiler
     }
 
     /// <summary>
+    /// Inventory a binary <c>.wasm</c> module and render a human-readable summary —
+    /// section layout, entity counts, import/export surfaces, the post-MVP features
+    /// the encoding uses, and a ranked opcode histogram. This is the public face of
+    /// the WF0 surface reader (<see cref="Wasm.WasmModuleProbe"/>); it is READ-ONLY —
+    /// dotcc cannot yet lift wasm to IR (WF1/WF2), so this reports structure, it does
+    /// not compile. Fail-soft like the probe: a malformed module yields a summary that
+    /// says so rather than throwing. Used by the web sandbox to show the shape of the
+    /// wasm dotcc itself assembles (fable-web.md WEB6 / fable-wasm.md).
+    /// </summary>
+    public static string ProbeWasm(byte[] module)
+    {
+        ArgumentNullException.ThrowIfNull(module);
+        var report = Wasm.WasmModuleProbe.Probe(module);
+        return FormatProbeReport(report, module.Length);
+    }
+
+    /// <summary>Render a single <see cref="Wasm.WasmProbeReport"/> as the compact,
+    /// per-module summary the sandbox displays — the same field shape as the WF0
+    /// corpus report's per-module block (<c>WasmSurfaceProbeTests.AppendModule</c>),
+    /// plus the full ranked opcode histogram (a single sandbox module is small).</summary>
+    private static string FormatProbeReport(Wasm.WasmProbeReport r, int byteLength)
+    {
+        var sb = new StringBuilder();
+        sb.Append($"dotcc wasm probe — {byteLength:N0} bytes (read-only inventory; dotcc cannot yet lift wasm)\n");
+        sb.Append($"status   : {(r.Status == Wasm.WasmProbeStatus.Ok ? "ok" : "MALFORMED")}\n");
+        sb.Append($"sections : {(r.Sections.Count == 0 ? "(none)" : string.Join(", ", r.Sections.Select(s => $"{s.Name}({s.Size})")))}\n");
+        sb.Append(
+            $"counts   : {r.FunctionCount} funcs, {r.TypeCount} types, {r.TableCount} tables, " +
+            $"{r.MemoryCount} memories, {r.GlobalCount} globals, {r.ElemCount} elems, {r.DataCount} datas" +
+            $"{(r.HasStart ? ", start fn" : "")}{(r.HasNameSection ? ", name section" : "")}\n");
+        sb.Append($"imports  : {(r.Imports.Count == 0 ? "(none)" : string.Join(", ", r.Imports.Select(i => $"{i.Module}.{i.Name} ({i.Kind})")))}\n");
+        sb.Append($"exports  : {(r.Exports.Count == 0 ? "(none)" : string.Join(", ", r.Exports.Select(e => $"{e.Name} ({e.Kind})")))}\n");
+        sb.Append($"features : {(r.Features.Count == 0 ? "(none — pure MVP)" : string.Join(", ", r.Features))}\n");
+        if (r.TargetFeatures.Count != 0)
+        {
+            sb.Append($"target_features: {string.Join(", ", r.TargetFeatures)}\n");
+        }
+        foreach (var note in r.Notes)
+        {
+            sb.Append($"note     : {note}\n");
+        }
+        sb.Append($"opcodes  : {r.InstructionCount} instructions, {r.Opcodes.Count} distinct mnemonics\n");
+        // Ranked count desc, then mnemonic asc — the lift surface a future WF2 must cover first.
+        foreach (var (mnemonic, count) in r.Opcodes.OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key, StringComparer.Ordinal))
+        {
+            sb.Append($"  {count,5}  {mnemonic}\n");
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
     /// Run the preprocessor over <paramref name="inputPaths"/> and write the
     /// post-expansion token stream (one line per token, prefixed with the
     /// input filename comment) to <paramref name="output"/>.
