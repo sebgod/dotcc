@@ -346,6 +346,12 @@ productions:
     rules:
       - { lhs: Params, rhs: [Param, ',', Params], action: paramsCons }
       - { lhs: Params, rhs: [Param],               action: paramsOne }
+      # Optional trailing comma on a multi-line signature (`fn f(\n a: T,\n b: U,\n)`) — 36 std
+      # files fail first on this. `)` ∉ FIRST(Param), so after `Param ,` the shift-a-new-Param
+      # (Param-start lookahead) vs reduce-this-trailing-comma (`)` lookahead) decision is a clean
+      # 1-token split — same reasoning as TupleTypes/FieldInits trailing forms. Lowered like a
+      # bare `Param` (the comma is cosmetic).
+      - { lhs: Params, rhs: [Param, ','],          action: paramsTrail }
 
   - derivation: none
     rules:
@@ -915,6 +921,8 @@ productions:
     rules:
       - { lhs: FnTypeParams, rhs: [FnTypeParam, ',', FnTypeParams], action: fnTypeParamsCons }
       - { lhs: FnTypeParams, rhs: [FnTypeParam],                    action: fnTypeParamsOne }
+      # Trailing comma on a multi-line fn-TYPE signature — same clean split as Params above.
+      - { lhs: FnTypeParams, rhs: [FnTypeParam, ','],              action: fnTypeParamsTrail }
   - derivation: none
     rules:
       - { lhs: FnTypeParam, rhs: [Type],             action: fnTypeParamUnnamed }
