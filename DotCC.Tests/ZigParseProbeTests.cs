@@ -24,11 +24,34 @@ public sealed class ZigParseProbeTests
     }
 
     [Fact]
+    public void Accepts_a_test_block()
+    {
+        // A top-level `test` block used to be one of the biggest std parse gaps; road-to-zig-std S9
+        // now parses (and drops) it. This pins that it lexes AND parses clean — the win the probe
+        // should count, not a gap. (Was a ParseError pin before the `test`/comptime brick landed.)
+        var r = ZigParseProbe.TryParse("test \"x\" { }\npub fn main() u8 { return 0; }\n");
+        r.Status.ShouldBe(ZigParseStatus.Ok);
+        r.Message.ShouldBeNull();
+    }
+
+    [Fact]
+    public void Accepts_a_quoted_identifier()
+    {
+        // A `@"quoted"` identifier — Zig's reserved-word / arbitrary-string escape hatch. The lexer
+        // now has a rule for `@` followed by `"` (road-to-zig-std S9), so `@"a-b"` lexes as an IDENT
+        // and parses clean. (Was a LexError pin before the quoted-identifier brick landed.)
+        var r = ZigParseProbe.TryParse("pub fn main() u8 { const @\"a-b\": u8 = 42; return @\"a-b\"; }\n");
+        r.Status.ShouldBe(ZigParseStatus.Ok);
+        r.Message.ShouldBeNull();
+    }
+
+    [Fact]
     public void Classifies_a_grammar_gap_as_ParseError()
     {
-        // A top-level `test` block — one of the biggest std parse gaps. `test` lexes as an
-        // ordinary IDENT the top-level grammar has no production for → a parse (not lex) error.
-        var r = ZigParseProbe.TryParse("test \"x\" { }\npub fn main() u8 { return 0; }\n");
+        // An incomplete decl — `const x =` with no initializer expression. Every token lexes, but the
+        // grammar has no production for an empty RHS, so the parser rejects it → a parse (not lex)
+        // error. Permanently invalid Zig, so this stays a stable ParseError pin as the grammar grows.
+        var r = ZigParseProbe.TryParse("const x = ;\n");
         r.Status.ShouldBe(ZigParseStatus.ParseError);
         r.Message.ShouldNotBeNull();
     }
@@ -36,9 +59,10 @@ public sealed class ZigParseProbeTests
     [Fact]
     public void Classifies_an_untokenizable_byte_as_LexError()
     {
-        // A `@"quoted"` identifier — the lexer has no rule for `@` followed by `"` (0x40),
-        // so it fails before the parser sees a token. 51 std files fail here first.
-        var r = ZigParseProbe.TryParse("const x = .@\"io-uring\";\n");
+        // `$` (0x24) has no lexer rule and is never used in Zig, so the lexer fails before the parser
+        // sees a token. A stable LexError pin — unlike `@` (now a quoted-identifier lead), `$` will
+        // never become tokenizable.
+        var r = ZigParseProbe.TryParse("const x = $;\n");
         r.Status.ShouldBe(ZigParseStatus.LexError);
         r.Message.ShouldNotBeNull();
     }
