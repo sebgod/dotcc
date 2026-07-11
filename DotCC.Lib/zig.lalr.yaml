@@ -237,6 +237,7 @@ symbols:
   - ContainerDecl  # 159 a struct/enum/union container decl (groups the forms so `pub` wraps them all)
                    #     (→ [ThreadStatic]; twofer with C `_Thread_local`, completion milestone part 2)
   - AssignOp       # 160 the assignment operator inside a `while (…) : (lhs op rhs)` continue-expression
+  - 'test'         # 161 `test "name"/ident/(anon) { … }` block — parsed + DROPPED (analysis-only in std)
                    #     (`=` | any compound `+=`/…/wrap `+%=`/saturating `+|=`), so the continue clause
                    #     accepts the full Zig AssignExpr operator set — not just plain `=`.
 
@@ -279,6 +280,17 @@ productions:
       # clean 1-token decision the non-pub `const IDENT =` makes, so conflict-free.
       - { lhs: Decl, rhs: [ContainerDecl] }
       - { lhs: Decl, rhs: ['pub', ContainerDecl], action: pubContainer }
+      # A `test` block (`test "name" {…}` / `test ident {…}` / `test {…}`) and a container-level
+      # `comptime {}` block are ANALYSIS-ONLY in std — a normal build neither runs tests nor needs
+      # the comptime side effects — so dotcc parses and DROPS them (road-to-zig-std S9: 1857 test
+      # blocks, the single biggest parse-coverage lever; near-zero risk). `test` is a distinct
+      # keyword, so its three forms split cleanly on the next token (STRING / IDENT / `{`).
+      # `comptime {` at Decl level is a clean shift — no other top-level form starts with `comptime`,
+      # and the Stmt-level `comptime Block` lives in a disjoint parser state.
+      - { lhs: Decl, rhs: ['test', STRING, Block], action: testDeclNamed }
+      - { lhs: Decl, rhs: ['test', IDENT, Block],  action: testDeclIdent }
+      - { lhs: Decl, rhs: ['test', Block],          action: testDeclAnon }
+      - { lhs: Decl, rhs: ['comptime', Block],      action: topComptime }
       # extern fn PROTOTYPE — no body, ends with `;`; linked with -lc (PEG:
       # `KEYWORD_extern STRINGLITERALSINGLE? FnProto SEMICOLON`). The optional `extern "c"`
       # library/calling-convention string (Milestone R, part 4) is accepted and lowered like a plain
@@ -1212,6 +1224,9 @@ lexer:
     - { symbol: 'errdefer', match: 'errdefer' }
     - { symbol: 'comptime', match: 'comptime' }
     - { symbol: 'inline',   match: 'inline' }
+    # `test` is a reserved keyword in Zig, so promoting it never steals an identifier. Longest-match
+    # keeps `testing`/`tests` as IDENT; first-rule-wins on the 4-char tie makes bare `test` the keyword.
+    - { symbol: 'test',     match: 'test' }
 
     # Multi-char operators (longest-match handles overlaps; listed first for clarity).
     - { symbol: '==', match: '==' }

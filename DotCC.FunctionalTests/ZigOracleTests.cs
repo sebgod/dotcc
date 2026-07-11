@@ -220,6 +220,14 @@ public sealed class ZigOracleTests
         new object[] { "loop_shift_cont",
             "pub fn main() u8 { var n: u8 = 0; var p: u8 = 1; " +
             "while (p <= 16) : (p <<= 1) { n = n + 1; } return n; }\n", 5, "" },
+        // road-to-zig-std S9 — a `test "…" {}` block and a container-level `comptime {}` block are
+        // analysis-only; dotcc parses and DROPS both. Built as an EXECUTABLE, real zig likewise never
+        // runs the test and evaluates the side-effect-free comptime block silently, so exit + stdout
+        // match exactly: main returns 42.
+        new object[] { "test_and_comptime_dropped",
+            "test \"never runs in an exe\" { const a: i32 = 1; _ = a; }\n" +
+            "comptime { const c: i32 = 2; _ = c; }\n" +
+            "pub fn main() u8 { return 42; }\n", 42, "" },
         // SWITCH (Milestone C2). Single / multi-value / else prongs, no fall-through.
         // classify(2) hits the `1, 2` multi-value prong → 20.
         new object[] { "switch_multi",

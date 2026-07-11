@@ -526,6 +526,11 @@ internal sealed partial class ZigLowering
                 // resolved by the global pass below (LowerTopLevelGlobals), so skip them here.
                 case Zig.ConstDecl or Zig.ConstDeclTyped or Zig.VarDecl or Zig.VarDeclTyped
                   or Zig.ConstDeclTypedMods or Zig.VarDeclTypedMods or Zig.VarDeclThreadLocal: break;
+                // `test` blocks and a container-level `comptime {}` are analysis-only — parsed and
+                // DROPPED (road-to-zig-std S9). A normal build never runs tests, and the comptime
+                // block's side effects (asserts / `@compileError` guards) are out of scope until the
+                // comptime engine lands (S4–S7); dropping matches "a normal build" for std source.
+                case Zig.TestDeclNamed or Zig.TestDeclIdent or Zig.TestDeclAnon or Zig.TopComptime: break;
                 default: throw new IrUnsupportedException("zig top-level decl: " + (d.Content?.GetType().Name ?? "null"));
             }
         }

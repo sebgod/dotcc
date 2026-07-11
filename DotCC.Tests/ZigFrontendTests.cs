@@ -4353,4 +4353,57 @@ public sealed class ZigFrontendTests
             "}\n");
         cs.ShouldContain("apply(");
     }
+
+    [Fact]
+    public void Drops_a_named_and_anonymous_test_block()
+    {
+        // road-to-zig-std S9 — `test "…" {}` / `test {}` blocks are analysis-only; dotcc parses and
+        // DROPS them (a normal build never runs tests). The block bodies are never lowered, yet the
+        // program compiles and only `main` is emitted — the test-name string never reaches the output.
+        var cs = EmitZig(
+            "test \"addition\" {\n" +
+            "    const x = 1 + 1;\n" +
+            "    _ = x;\n" +
+            "}\n" +
+            "test {\n" +
+            "    const w = 9;\n" +
+            "    _ = w;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return 7;\n" +
+            "}\n");
+        cs.ShouldContain("main");
+        cs.ShouldNotContain("addition"); // the test name string is dropped, not emitted
+    }
+
+    [Fact]
+    public void Drops_a_bare_ident_test_block()
+    {
+        // The bare-identifier test-name form (`test encode {`) that std uses (e.g. `test decode {`).
+        var cs = EmitZig(
+            "test encode {\n" +
+            "    const y: i32 = 2;\n" +
+            "    _ = y;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return 3;\n" +
+            "}\n");
+        cs.ShouldContain("main");
+    }
+
+    [Fact]
+    public void Drops_a_container_level_comptime_block()
+    {
+        // A container-level `comptime {}` block is analysis-only in std — parsed and DROPPED (the
+        // comptime engine that would evaluate its guards is S4–S7). `main` still compiles and runs.
+        var cs = EmitZig(
+            "comptime {\n" +
+            "    const z: i32 = 4;\n" +
+            "    _ = z;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return 5;\n" +
+            "}\n");
+        cs.ShouldContain("main");
+    }
 }
