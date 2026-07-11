@@ -863,6 +863,7 @@ internal sealed partial class ZigLowering
                 case Zig.StmtsOne o:   stack.Push(o.Arg0); break;
                 case Zig.ParamsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [Param, ',', Params]
                 case Zig.ParamsOne o:  stack.Push(o.Arg0); break;
+                case Zig.ParamsTrail t: stack.Push(t.Arg0); break;  // [Param, ','] trailing comma
                 case Zig.ArgsCons c:   stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [Expr, ',', ArgList]
                 case Zig.ArgsOne o:    stack.Push(o.Arg0); break;
                 case Zig.ProngsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [Prongs, ',', Prong] (left-recursive)
@@ -883,6 +884,7 @@ internal sealed partial class ZigLowering
                 case Zig.TupleTypesTrail t: stack.Push(t.Arg0); break;
                 case Zig.FnTypeParamsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [FnTypeParam, ',', FnTypeParams] (right-recursive)
                 case Zig.FnTypeParamsOne o:  stack.Push(o.Arg0); break;
+                case Zig.FnTypeParamsTrail t: stack.Push(t.Arg0); break;  // [FnTypeParam, ','] trailing comma
                 case Zig.DestructBindsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [DestructBinds, ',', DestructBind]
                 case Zig.DestructBindsOne o:  stack.Push(o.Arg0); break;
                 default: ordered.Add(n); break;

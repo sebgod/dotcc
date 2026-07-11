@@ -4315,4 +4315,42 @@ public sealed class ZigFrontendTests
         cs.ShouldContain("stackalloc int[3]"); // N+1 slots reserved
         cs.ShouldContain("] = 7;");             // the non-zero sentinel written into the trailing slot
     }
+
+    [Fact]
+    public void Accepts_a_trailing_comma_in_a_multiline_param_list()
+    {
+        // road-to-zig-std S9 — the idiomatic multi-line signature ends the last param with a comma
+        // (`b: i32,\n)`); 36 std files fail first on it. The trailing comma is cosmetic: the fn
+        // lowers exactly as the one-line, no-trailing-comma form.
+        var cs = EmitZig(
+            "fn add(\n" +
+            "    a: i32,\n" +
+            "    b: i32,\n" +
+            ") i32 {\n" +
+            "    return a + b;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return @intCast(add(2, 3));\n" +
+            "}\n");
+        cs.ShouldContain("add(int a, int b)");
+    }
+
+    [Fact]
+    public void Accepts_a_trailing_comma_in_a_fn_type_param_list()
+    {
+        // Same trailing-comma allowance on a fn-POINTER-type signature (FnTypeParams) — a `*const fn`
+        // parameter whose own multi-line param list ends with a comma. Grammar-accepted; the callee
+        // signature is unaffected by the cosmetic comma.
+        var cs = EmitZig(
+            "fn dbl(x: i32) i32 { return x * 2; }\n" +
+            "fn apply(f: *const fn (\n" +
+            "    x: i32,\n" +
+            ") i32, v: i32) i32 {\n" +
+            "    return f(v);\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return @intCast(apply(&dbl, 5));\n" +
+            "}\n");
+        cs.ShouldContain("apply(");
+    }
 }
