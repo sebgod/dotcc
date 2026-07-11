@@ -1114,6 +1114,13 @@ internal sealed partial class IrBuilder
         return enumType;
     }
 
+    /// <summary>The full declared field list of the registered struct/union
+    /// <paramref name="name"/> (in declaration order), or <c>null</c> when no aggregate is
+    /// registered under that name. Lets the Zig frontend enumerate a struct's fields to
+    /// materialize defaults for any omitted from a <c>.{…}</c> literal.</summary>
+    internal IReadOnlyList<StructField>? StructFieldsOf(string name) =>
+        _structFields.TryGetValue(name, out var fields) ? fields : null;
+
     /// <summary>The declared type of <paramref name="field"/> on the struct/union that
     /// <paramref name="structType"/> names (pointer levels peeled, mirroring
     /// <see cref="MemberType"/>), or <c>null</c> when the type isn't a registered aggregate
