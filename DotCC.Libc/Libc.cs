@@ -6,6 +6,7 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 
 namespace DotCC.Libc;
 
@@ -91,7 +92,7 @@ public static unsafe partial class Libc
     // Live blocks are threaded through a singly-linked list in their headers
     // (no managed collection — embed/AOT clean): header = [magic|size|next|pad].
     private static byte* _dbgHead = null;
-    private static readonly object _dbgLock = new();
+    private static readonly Lock _dbgLock = new();
 
     /// <summary>Allocate a checked block and return the user pointer.</summary>
     internal static void* DbgAlloc(nuint size, bool zero)
