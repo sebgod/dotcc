@@ -98,6 +98,36 @@ public sealed class WasmModuleProbeTests
     }
 
     [Fact]
+    public void Compiler_ProbeWasm_renders_a_readable_summary()
+    {
+        // The public Compiler.ProbeWasm shim (behind the sandbox's wasm tab, fable-web.md WEB6)
+        // formats the WF0 inventory as human-readable text. Same "add" module as above.
+        var module = Module(
+            Section(1, Leb(1), new byte[] { 0x60, 0x02, 0x7F, 0x7F, 0x01, 0x7F }),
+            Section(3, Leb(1), Leb(0)),
+            Section(7, Leb(1), Str("add"), new byte[] { 0x00 }, Leb(0)),
+            Section(10, Leb(1), FuncBody(NoLocals, new byte[] { 0x20, 0x00, 0x20, 0x01, 0x6A, 0x0B })));
+
+        var summary = DotCC.Compiler.ProbeWasm(module);
+
+        summary.ShouldContain("status   : ok");
+        summary.ShouldContain("1 funcs");
+        summary.ShouldContain("add (func)");
+        summary.ShouldContain("local.get");  // the ranked opcode histogram is rendered
+        summary.ShouldContain("read-only");   // states plainly that dotcc can't lift wasm yet
+    }
+
+    [Fact]
+    public void Compiler_ProbeWasm_reports_malformed_without_throwing()
+    {
+        // The probe's fail-soft contract survives the public shim: bad bytes yield a summary
+        // that says MALFORMED rather than throwing (the sandbox must never crash on a bad blob).
+        var summary = DotCC.Compiler.ProbeWasm(new byte[] { 0x01, 0x02, 0x03, 0x04 });
+
+        summary.ShouldContain("MALFORMED");
+    }
+
+    [Fact]
     public void Import_surface_is_enumerated()
     {
         // (import "wasi_snapshot_preview1" "fd_write" (func (type 0)))

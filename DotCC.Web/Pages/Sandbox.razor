@@ -95,6 +95,21 @@
             {
                 <pre class="code">@(_wat ?? "")</pre>
             }
+            else if (_tab == "wasm")
+            {
+                @if (!string.IsNullOrEmpty(_wasmReport))
+                {
+                    <div class="wasm-actions">
+                        <button class="download" @onclick="DownloadWasmAsync">⬇ Download .wasm</button>
+                        <span class="hint">dotcc read its own assembled binary back — this is the WF0 wasm-frontend inventory (read-only; lifting is future work)</span>
+                    </div>
+                    <pre class="code">@_wasmReport</pre>
+                }
+                else
+                {
+                    <div class="empty">Run a program to assemble a wasm binary and inventory it here.</div>
+                }
+            }
             else if (_tab == "C#")
             {
                 <pre class="code">@(_csharp ?? "")</pre>
@@ -123,8 +138,8 @@
     // The tab set: run output, then the "look inside the compiler" views — the wat
     // the backend emits, the C# projection, and (C only) the -E token stream.
     private string[] Tabs => _lang == "zig"
-        ? new[] { "Output", "wat", "C#" }
-        : new[] { "Output", "wat", "C#", "-E" };
+        ? new[] { "Output", "wat", "wasm", "C#" }
+        : new[] { "Output", "wat", "wasm", "C#", "-E" };
     private string _tab = "Output";
 
     private string _source = CExamples[0].Source;
@@ -132,6 +147,10 @@
     private string? _wat;
     private string? _csharp;
     private string? _preprocessed;
+    // The read-only WF0 inventory of the wasm binary the browser just assembled from
+    // our wat (fable-web.md WEB6): section layout, counts, import/export surface,
+    // features, opcode histogram. dotcc reading back the wasm dotcc itself produced.
+    private string? _wasmReport;
     private string _stdout = "";
     private string _stderr = "";
     private int _exitCode;
@@ -336,11 +355,33 @@
             {
                 SetDiag($"run host error: {ex.Message}", isError: true);
             }
+
+            // Inventory the binary the browser just assembled — dotcc reading back its
+            // own wasm output through the WF0 probe (read-only; no lifting yet). The
+            // binary is null when assembly itself failed, in which case the tab stays empty.
+            _wasmReport = null;
+            try
+            {
+                var b64 = await JS.InvokeAsync<string?>("dotccSandbox.getLastWasmBase64");
+                if (!string.IsNullOrEmpty(b64))
+                {
+                    _wasmReport = Compiler.ProbeWasm(Convert.FromBase64String(b64));
+                }
+            }
+            catch (Exception ex)
+            {
+                _wasmReport = $"(wasm probe unavailable: {ex.Message})";
+            }
         }
 
         _busy = false;
         StateHasChanged();
     }
+
+    /// <summary>Download the wasm binary the browser assembled on the last run —
+    /// the same bytes the wasm tab inventoried (a pure-JS Blob download).</summary>
+    private async Task DownloadWasmAsync() =>
+        await JS.InvokeVoidAsync("dotccSandbox.downloadLastWasm", "sandbox.wasm");
 
     /// <summary>Run a compiler entry point while capturing the diagnostics it writes
     /// to <see cref="Console.Error"/> (warnings), restoring the previous writer after.</summary>

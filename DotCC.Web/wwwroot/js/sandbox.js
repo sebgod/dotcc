@@ -12,6 +12,11 @@
 // resolves to the wabt API.
 window.dotccSandbox = (function () {
   let wabtPromise = null;
+  // The most recently assembled wasm binary (Uint8Array), kept so the sandbox can
+  // probe it (Compiler.ProbeWasm — the read-only WF0 inventory, fable-web.md WEB6)
+  // and offer it for download. Cleared at the start of every assemble; set only once
+  // toBinary() succeeds, so it is null whenever the last compile failed to assemble.
+  let lastWasm = null;
 
   /** Lazily initialise wabt once; reused across runs. */
   function wabt() {
@@ -34,6 +39,7 @@ window.dotccSandbox = (function () {
    */
   async function assembleAndRun(wat) {
     let mod = null;
+    lastWasm = null;
     try {
       const w = await wabt();
       mod = w.parseWat("sandbox.wat", wat, {
@@ -43,6 +49,9 @@ window.dotccSandbox = (function () {
         mutable_globals: true,
       });
       const { buffer } = mod.toBinary({ log: false });
+      // Keep a copy: toBinary()'s buffer is a view over wabt-owned memory freed by
+      // mod.destroy() in the finally, so snapshot it before running.
+      lastWasm = buffer.slice();
       return await run(buffer);
     } catch (e) {
       return { ok: false, stage: "assemble", error: String((e && e.message) || e) };
@@ -150,5 +159,42 @@ window.dotccSandbox = (function () {
     } catch { return null; }
   }
 
-  return { assembleAndRun, makeShareLink, readShareSource };
+  // --- wasm inventory + download (WEB6) -----------------------------------
+  // The assembled binary is handed to Blazor as standard base64 (Compiler.ProbeWasm
+  // decodes it with Convert.FromBase64String), and offered as a .wasm download.
+
+  /** Standard base64 (padded, +/ alphabet) of a Uint8Array, chunked so a large
+   *  buffer doesn't blow String.fromCharCode's argument limit. */
+  function b64Std(bytes) {
+    let s = "";
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      s += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return btoa(s);
+  }
+
+  /** The last assembled wasm binary as base64, or null if the last compile didn't
+   *  assemble. Blazor probes this for the wasm tab. */
+  function getLastWasmBase64() {
+    return lastWasm ? b64Std(lastWasm) : null;
+  }
+
+  /** Trigger a browser download of the last assembled wasm binary. Returns false
+   *  when there is nothing to download (no successful assemble yet). */
+  function downloadLastWasm(filename) {
+    if (!lastWasm) { return false; }
+    const blob = new Blob([lastWasm], { type: "application/wasm" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename || "sandbox.wasm";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return true;
+  }
+
+  return { assembleAndRun, makeShareLink, readShareSource, getLastWasmBase64, downloadLastWasm };
 })();

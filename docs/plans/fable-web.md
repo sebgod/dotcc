@@ -304,6 +304,44 @@ Edge/CDP harness (WEB1/WEB2).
   exists, emit `.wasm` bytes directly and drop `libwabt.js` from the pipeline
   (one less vendored dep; the wat *text* tab stays, it's the readable view).
 
+### WEB6 — the wasm inventory tab (S) — ✅ DONE (2026-07-11)
+
+The first concrete meeting of the two wasm campaigns, ahead of WF8's self-eating
+round-trip: the sandbox now **reads the wasm it produces**. A new **`wasm` tab**
+shows the WF0 probe inventory of the binary the browser just assembled from our
+`wat` — section layout, entity counts, import/export surface, the post-MVP
+features the encoding uses, and a ranked opcode histogram — plus a **Download
+`.wasm`** button.
+
+This is the *Tier 1* of the "wasm example in the sandbox" design, and the honest
+one: it needs **no external toolchain** (not the Swift compiler, not clang) — the
+wasm is the artifact dotcc genuinely assembles in-tab, and the reader is the WF0
+probe dotcc genuinely has. It is deliberately **read-only**: dotcc cannot yet
+lift wasm → IR (that is `fable-wasm.md` WF1/WF2), so the tab says so rather than
+implying a round-trip that doesn't exist.
+
+Shape (one lib change, the rest is web):
+
+- **`Compiler.ProbeWasm(byte[]) → string`** — the public face of the internal
+  `WasmModuleProbe` (`DotCC.Lib/Compiler.cs`); formats one module as the same
+  per-module summary the WF0 corpus report uses, plus the full ranked histogram.
+  Read-only, fail-soft (a malformed blob yields a summary that says so, never a
+  throw). Pinned in `DotCC.Tests/WasmModuleProbeTests.cs`.
+- **`sandbox.js`** captures `toBinary()`'s buffer (snapshotted with `.slice()`
+  before `mod.destroy()` frees the wabt-owned memory) into `lastWasm`, and
+  exposes `getLastWasmBase64` (standard base64 → `Convert.FromBase64String`) and
+  `downloadLastWasm` (a `Blob` download).
+- **`Sandbox.razor`** adds the tab, probes `getLastWasmBase64` after each run, and
+  renders the report + download button.
+
+Remaining tiers (future, not this milestone): **Tier 2** — probe a pre-built
+Embedded Swift `.wasm` shipped as a vendored `wwwroot/` asset (concretely shows
+the fable-wasm *input target* without a toolchain, still read-only); **Tier 3** —
+actually lift a `.wasm` to C#/wat (the WF2 heart), whose first visible win is
+round-tripping dotcc's *own* simple wasm, since real Swift output uses
+bulk-memory + reference-types + `call_indirect` + linear memory (WF0's finding)
+and won't lift through an early T0 slice.
+
 ## Validation story
 
 - **The corpus is the oracle.** The sandbox's run path is `EmitWat` (covered by
@@ -343,8 +381,9 @@ Edge/CDP harness (WEB1/WEB2).
 Not a server or a compile API (static files only). Not a general web IDE — no
 accounts, no persistence beyond share-links. Not a package/deps story. Not the
 wasm *frontend* campaign (`fable-wasm.md` consumes `.wasm`; this produces it —
-they meet only at the shared wat-oracle corpus and, eventually, WF8/WEB5's
-self-eating flex). Not a rewrite of the docs — the site adapts `docs/`, which
+they meet at the shared wat-oracle corpus, at the WF0 read-only probe surfaced in
+WEB6's `wasm` tab, and eventually at WF8/WEB5's self-eating flex; the sandbox
+never *lifts* wasm — that stays in `fable-wasm.md`). Not a rewrite of the docs — the site adapts `docs/`, which
 remains the source of truth. And not marketing over substance: every claim on
 the page is backed by a runnable example in the sandbox.
 
