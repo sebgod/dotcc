@@ -125,6 +125,11 @@ internal static class Program
         // tokens land in parse.UnmatchedTokens; we warn once and carry on.
         root.TreatUnmatchedTokensAsErrors = false;
 
+        // `dotcc zig <subcommand>` — a zig-CLI-shaped surface over the same pipeline. Today only
+        // `zig test` is modeled (compile a .zig file's `test "…" {}` blocks and run them, like
+        // `zig test`); `zig build`/`cc`/`build-exe`/`run` are future scope (see docs/cli.md).
+        root.Subcommands.Add(BuildZigCommand());
+
         root.SetAction(parse =>
         {
             var rawInputs = parse.GetValue(inputArg) ?? Array.Empty<string>();
@@ -485,6 +490,81 @@ internal static class Program
             Console.WriteLine(wat);
         }
         return 0;
+    }
+
+    /// <summary>
+    /// Build the <c>zig</c> subcommand tree. Today it carries one leaf, <c>zig test</c> — the
+    /// zig-CLI-shaped entry that compiles a <c>.zig</c> file's <c>test "…" {}</c> blocks and runs
+    /// them (dotcc's own test runner). The rest of zig's CLI (<c>build</c>, <c>cc</c>,
+    /// <c>build-exe</c>, <c>run</c>) is deliberate future scope.
+    /// </summary>
+    private static Command BuildZigCommand()
+    {
+        var testInputs = new Argument<string[]>("inputs")
+        {
+            Description = ".zig source files whose `test \"…\" {}` blocks to compile and run.",
+            Arity = ArgumentArity.OneOrMore,
+        };
+        var testCmd = new Command("test", "Compile a .zig file's tests and run them (like `zig test`).")
+        {
+            testInputs,
+        };
+        testCmd.SetAction(parse => RunZigTest(parse.GetValue(testInputs) ?? Array.Empty<string>()));
+        return new Command("zig", "Zig-specific subcommands (a zig-CLI-shaped surface over dotcc).")
+        {
+            testCmd,
+        };
+    }
+
+    /// <summary>
+    /// <c>dotcc zig test &lt;files&gt;</c> — emit the inputs' <c>test</c> blocks as a self-contained
+    /// file-based test-runner program (<see cref="Compiler.EmitCSharp"/> in test mode), then compile
+    /// and run it via <c>dotnet run</c>, forwarding its exit code (0 = all tests passed). Running from
+    /// the CLI is deliberate CLI-tool territory (like <c>--emit=build</c>'s <c>dotnet build</c>) — the
+    /// library never spawns a process.
+    /// </summary>
+    private static int RunZigTest(string[] inputPaths)
+    {
+        var zig = inputPaths
+            .Where(p => p.EndsWith(".zig", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        if (zig.Length == 0)
+        {
+            Console.Error.WriteLine("dotcc: error: `zig test` needs at least one .zig input file");
+            return 1;
+        }
+        string program;
+        try
+        {
+            program = Compiler.EmitCSharp(zig, emit: EmitMode.File, testMode: true);
+        }
+        catch (CompileException ex)
+        {
+            Console.Error.WriteLine($"dotcc: {ex.Message}");
+            return 2;
+        }
+        // The emitted File program is self-contained (`#:property AllowUnsafeBlocks=true` + the
+        // spliced runtime), so a loose `.cs` runs directly via .NET 10 file-based-app support.
+        var tmp = Path.Combine(Path.GetTempPath(), $"dotcc-zigtest-{Guid.NewGuid():N}.cs");
+        File.WriteAllText(tmp, program);
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo { FileName = "dotnet" };
+            psi.ArgumentList.Add("run");
+            psi.ArgumentList.Add(tmp);
+            using var proc = System.Diagnostics.Process.Start(psi);
+            if (proc is null)
+            {
+                Console.Error.WriteLine("dotcc: error: could not start `dotnet run` for the test runner");
+                return 2;
+            }
+            proc.WaitForExit();
+            return proc.ExitCode;
+        }
+        finally
+        {
+            try { File.Delete(tmp); } catch { /* best-effort temp cleanup */ }
+        }
     }
 
     /// <summary>

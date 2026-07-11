@@ -30,7 +30,9 @@ internal interface IFrontend
 /// them: a set of input units, header/include search dirs, predefined symbols, a
 /// dialect/standard version, strictness flags, the target's identifier policy, and
 /// the enabled diagnostic warnings. A frontend that has no analogue for a field
-/// simply ignores it (Zig has no preprocessor <c>Defines</c>, for instance).
+/// simply ignores it (Zig has no preprocessor <c>Defines</c>, for instance;
+/// <c>TestMode</c> is honored only by the Zig front-end — <c>dotcc zig test</c> —
+/// and ignored by C).
 /// </summary>
 internal sealed record FrontendRequest(
     IReadOnlyList<string> InputPaths,
@@ -38,4 +40,5 @@ internal sealed record FrontendRequest(
     IReadOnlyList<string>? Defines = null,
     CDialect? Dialect = null,
     INameLegalizer? Names = null,
-    WarningFlags Warnings = WarningFlags.Default);
+    WarningFlags Warnings = WarningFlags.Default,
+    bool TestMode = false);

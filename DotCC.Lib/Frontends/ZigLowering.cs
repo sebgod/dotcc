@@ -395,11 +395,16 @@ internal sealed partial class ZigLowering
     /// <summary>Suffix for the synthesized nested payload-union type (<c>U</c> → <c>U_Payload</c>).</summary>
     private const string PayloadSuffix = "_Payload";
 
-    public ZigLowering(IrBuilder ir, INameLegalizer names, Dictionary<string, int>? errorCodes = null)
+    // Test mode (`dotcc zig test`): `test "…" {}` blocks are lowered to runnable functions
+    // and registered in the IR test manifest, rather than dropped. Set at construction.
+    private readonly bool _testMode;
+
+    public ZigLowering(IrBuilder ir, INameLegalizer names, Dictionary<string, int>? errorCodes = null, bool testMode = false)
     {
         _ir = ir;
         _symbols = new SymbolTable(names);
         _errorCodes = errorCodes ?? new Dictionary<string, int>(System.StringComparer.Ordinal);
+        _testMode = testMode;
     }
 
     /// <summary>Resolve an error name to its stable code in the flat global error set,
@@ -558,11 +563,17 @@ internal sealed partial class ZigLowering
                 // resolved by the global pass below (LowerTopLevelGlobals), so skip them here.
                 case Zig.ConstDecl or Zig.ConstDeclTyped or Zig.VarDecl or Zig.VarDeclTyped
                   or Zig.ConstDeclTypedMods or Zig.VarDeclTypedMods or Zig.VarDeclThreadLocal: break;
-                // `test` blocks and a container-level `comptime {}` are analysis-only — parsed and
-                // DROPPED (road-to-zig-std S9). A normal build never runs tests, and the comptime
-                // block's side effects (asserts / `@compileError` guards) are out of scope until the
-                // comptime engine lands (S4–S7); dropping matches "a normal build" for std source.
-                case Zig.TestDeclNamed or Zig.TestDeclIdent or Zig.TestDeclAnon or Zig.TopComptime: break;
+                // A container-level `comptime {}` is analysis-only — always DROPPED (its side effects
+                // need the comptime engine, S4–S7). A `test` block is DROPPED in a normal build too
+                // (road-to-zig-std S9); but in TEST MODE (`dotcc zig test`) each `test "…" {}` is
+                // lowered to a runnable `anyerror!void` function and registered in the IR test manifest
+                // (DeclareTest) so the emitted program's entry point runs it — the harness for running
+                // real std tests from source.
+                case Zig.TopComptime: break;
+                case Zig.TestDeclNamed t when _testMode: AddFnEntry(DeclareTest(UnquoteStringLiteral(Tok(t.Arg1)), t.Arg2)); break;
+                case Zig.TestDeclIdent t  when _testMode: AddFnEntry(DeclareTest(Tok(t.Arg1), t.Arg2)); break;
+                case Zig.TestDeclAnon t   when _testMode: AddFnEntry(DeclareTest(null, t.Arg1)); break;
+                case Zig.TestDeclNamed or Zig.TestDeclIdent or Zig.TestDeclAnon: break;   // normal build: drop
                 // A top-level container FIELD means this file is being used as an instantiable
                 // struct type (`@This()` at file scope). We PARSE it (road-to-zig-std S9, the largest
                 // std parse bucket), but reifying the file-as-struct — a synthesized named type whose

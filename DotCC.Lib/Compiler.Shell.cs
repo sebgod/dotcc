@@ -84,6 +84,37 @@ public static partial class Compiler
             """;
     }
 
+    /// <summary>Generate the <c>dotcc zig test</c> entry-point body: run each lowered test
+    /// (<c>__zigtest_N</c>, an <c>anyerror!void</c> method surfaced by <c>using static DotCcProgram;</c>)
+    /// in source order, printing <c>OK</c>/<c>FAIL</c> per test plus a summary, and returning 0 iff all
+    /// pass. A test FAILS when it returns an error (<c>ErrUnion.IsErr</c> — a propagated <c>try</c> or an
+    /// explicit <c>return error.X</c>) OR throws (a panic / <c>unreachable</c> / runtime fault); both are
+    /// caught so one failing test can't abort the run. Output is dotcc's own shape — real <c>zig test</c>
+    /// output is non-deterministic (timing), so it is deliberately NOT byte-matched.</summary>
+    private static string BuildTestEntry(IReadOnlyList<(string Name, string FnName)> tests)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append("int __passed = 0, __failed = 0;\n");
+        foreach (var (name, fn) in tests)
+        {
+            // Escape the display name for a C# string literal in the emitted runner.
+            var lit = name.Replace("\\", "\\\\").Replace("\"", "\\\"");
+            sb.Append($"            Console.Out.Write(\"test \\\"{lit}\\\" ... \");\n");
+            sb.Append("            try\n");
+            sb.Append("            {\n");
+            sb.Append($"                var __r = {fn}();\n");
+            sb.Append("                if (__r.IsErr) { Console.Out.WriteLine(\"FAIL (error \" + __r.Code + \")\"); __failed++; }\n");
+            sb.Append("                else { Console.Out.WriteLine(\"OK\"); __passed++; }\n");
+            sb.Append("            }\n");
+            sb.Append("            catch (Exception __e) { Console.Out.WriteLine(\"FAIL (\" + __e.GetType().Name + \")\"); __failed++; }\n");
+        }
+        sb.Append("            Console.Out.WriteLine(__failed == 0\n");
+        sb.Append("                ? \"All \" + __passed + \" test(s) passed.\"\n");
+        sb.Append($"                : __failed + \" of {tests.Count} test(s) failed, \" + __passed + \" passed.\");\n");
+        sb.Append("            return __failed == 0 ? 0 : 1;");
+        return sb.ToString();
+    }
+
     internal static string BuildShell(
         int mainArity,
         string emittedFnList,
@@ -97,7 +128,9 @@ public static partial class Compiler
         bool importsAreStatic = false,
         bool mainReturnsVoid = false,
         bool mainReturnsErrUnion = false,
-        bool mainErrPayloadIsVoid = false)
+        bool mainErrPayloadIsVoid = false,
+        bool testMode = false,
+        IReadOnlyList<(string Name, string FnName)>? tests = null)
     {
         if (emit == EmitMode.SharedLib)
         {
@@ -148,7 +181,13 @@ public static partial class Compiler
             }
             return isVoid ? $"{call}; return 0;" : $"return {call};";
         }
-        var entry = mainArity switch
+        // Test mode (`dotcc zig test`): the entry point IGNORES `main` (a test file usually has none)
+        // and instead runs each `test "…" {}` — lowered to an `anyerror!void` `__zigtest_N` method —
+        // reporting per-test OK/FAIL and a summary, exit 0 iff all pass. Built here so the shell frame
+        // (big-stack worker thread, `using static DotCcProgram;` bare-name calls) is reused verbatim.
+        var entry = testMode
+            ? BuildTestEntry(tests ?? System.Array.Empty<(string, string)>())
+            : mainArity switch
         {
             0 => Wrap("main()", mainReturnsVoid),
             1 => Wrap("main(args.Length)", mainReturnsVoid),
