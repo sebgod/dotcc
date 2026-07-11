@@ -360,12 +360,16 @@ internal sealed partial class ZigLowering
         // allocator vtable uses). `*const fn (…) R` / `?*const fn (…) R` reach here as the pointee
         // and are collapsed to the bare Func by PointerTo / LowerOptional. Params are named
         // (`IDENT : Type`); their names are irrelevant to the type, only the types matter.
-        Zig.TyFn f       => new CType.Func(LowerType(f.Arg4), LowerFnTypeParams(f.Arg2), Variadic: false),
-        Zig.TyFnNoArgs f => new CType.Func(LowerType(f.Arg3), System.Array.Empty<CType>(), Variadic: false),
+        // An optional `callconv(Expr)` sits between `)` and the return type (nullable CallConv), so
+        // the return type is one slot further right than the pre-CallConv layout. `callconv(.c)` /
+        // `(.C)` honors the C ABI via IsNativeCallConv (→ `delegate* unmanaged[Cdecl]`); every other
+        // convention (and the absent/epsilon case) stays managed. See IsCCallConv.
+        Zig.TyFn f       => new CType.Func(LowerType(f.Arg5), LowerFnTypeParams(f.Arg2), Variadic: false) { IsNativeCallConv = IsCCallConv(f.Arg4) },
+        Zig.TyFnNoArgs f => new CType.Func(LowerType(f.Arg4), System.Array.Empty<CType>(), Variadic: false) { IsNativeCallConv = IsCCallConv(f.Arg3) },
         // `!T`-returning fn-pointer types: the return is an error union `!T` (like fnDefErr). The
         // Func's Return carries the CType.ErrorUnion, so a bound fn-ptr's result is an ErrUnion<T>.
-        Zig.TyFnErr f       => new CType.Func(new CType.ErrorUnion(LowerType(f.Arg5)), LowerFnTypeParams(f.Arg2), Variadic: false),
-        Zig.TyFnNoArgsErr f => new CType.Func(new CType.ErrorUnion(LowerType(f.Arg4)), System.Array.Empty<CType>(), Variadic: false),
+        Zig.TyFnErr f       => new CType.Func(new CType.ErrorUnion(LowerType(f.Arg6)), LowerFnTypeParams(f.Arg2), Variadic: false) { IsNativeCallConv = IsCCallConv(f.Arg4) },
+        Zig.TyFnNoArgsErr f => new CType.Func(new CType.ErrorUnion(LowerType(f.Arg5)), System.Array.Empty<CType>(), Variadic: false) { IsNativeCallConv = IsCCallConv(f.Arg3) },
         // `@This()` — Zig's reflective self-type → the container currently being lowered, so
         // `self: @This()` / `self: *@This()` name the receiver without repeating the type name.
         // The `const Self = @This();` alias form (the common Zig idiom) is also supported — it
@@ -586,6 +590,18 @@ internal sealed partial class ZigLowering
         }
         return types;
     }
+
+    /// <summary>True when an optional <c>CallConv</c> node names the C calling convention
+    /// (<c>callconv(.c)</c> / <c>callconv(.C)</c>) — the only convention dotcc honors on a
+    /// fn-pointer type, marking the <see cref="CType.Func"/> native so the C# backend renders
+    /// a <c>delegate* unmanaged[Cdecl]&lt;…&gt;</c> instead of the managed <c>delegate*&lt;…&gt;</c>.
+    /// The absent (epsilon) <c>CallConv</c> — a null <c>Content</c> — and every other convention
+    /// return false (managed). Real Zig 0.17 spells it lowercase <c>.c</c>; <c>.C</c> is accepted
+    /// for the older spelling.</summary>
+    private static bool IsCCallConv(Item callConv) =>
+        callConv.Content is Zig.CallConv cc
+        && cc.Arg2.Content is Zig.EnumLit e
+        && Tok(e.Arg1) is "c" or "C";
 
     /// <summary>The compile-time sentinel value of a <c>[N:s]T</c> array type (Milestone Z lifts the
     /// earlier zero-only restriction). V1 requires a literal sentinel; it is materialized into the

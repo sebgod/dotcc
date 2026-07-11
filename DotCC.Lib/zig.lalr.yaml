@@ -912,12 +912,18 @@ productions:
       # never appears at the top-level Decl position, so no parser state holds both items. Params are
       # `FnTypeParams` — an optionally-named list (`IDENT : Type` OR a bare `Type`), so BOTH the named
       # `fn (a: i32) i32` and the unnamed `fn (i32) i32` forms parse (real zig accepts both; the names
-      # are ignored). A leading-`!` return `fn (…) !T` (anyerror error union) mirrors the fnDefErr form;
-      # a `callconv` on a fn-pointer type is still deferred.
-      - { lhs: Type, rhs: ['fn', '(', FnTypeParams, ')', Type],      action: tyFn }
-      - { lhs: Type, rhs: ['fn', '(', ')', Type],                    action: tyFnNoArgs }
-      - { lhs: Type, rhs: ['fn', '(', FnTypeParams, ')', '!', Type], action: tyFnErr }
-      - { lhs: Type, rhs: ['fn', '(', ')', '!', Type],               action: tyFnNoArgsErr }
+      # are ignored). A leading-`!` return `fn (…) !T` (anyerror error union) mirrors the fnDefErr form.
+      # An optional `callconv(Expr)` sits between `)` and the return type — the SAME nullable CallConv
+      # used by fnDef, conflict-free here for the identical reason (`callconv` ∉ FIRST(Type) ∪ {`!`}).
+      # Unlike fnDef (which ignores it), a fn-POINTER type honors `callconv(.c)`/`(.C)`: the marker is
+      # precisely a call-ABI annotation, so it sets CType.Func.IsNativeCallConv → the C# backend renders
+      # `delegate* unmanaged[Cdecl]<…>` instead of the managed `delegate*<…>` (std's `*const fn (…)
+      # callconv(.c) void` C-ABI fn-ptr typedefs, e.g. std/c/darwin/dispatch.zig). Other conventions
+      # stay managed (dotcc models only the cdecl-native form).
+      - { lhs: Type, rhs: ['fn', '(', FnTypeParams, ')', CallConv, Type],      action: tyFn }
+      - { lhs: Type, rhs: ['fn', '(', ')', CallConv, Type],                    action: tyFnNoArgs }
+      - { lhs: Type, rhs: ['fn', '(', FnTypeParams, ')', CallConv, '!', Type], action: tyFnErr }
+      - { lhs: Type, rhs: ['fn', '(', ')', CallConv, '!', Type],               action: tyFnNoArgsErr }
       - { lhs: Type, rhs: [ErrUnion] }
 
   - derivation: none
