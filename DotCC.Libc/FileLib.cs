@@ -6,6 +6,7 @@ using System.IO;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 
 namespace DotCC.Libc;
 
@@ -75,7 +76,7 @@ public static unsafe partial class Libc
         new FileSlot { Kind = FileSlot.K.Out },
         new FileSlot { Kind = FileSlot.K.Err },
     };
-    private static readonly object _filesLock = new();
+    private static readonly Lock _filesLock = new();
 
     // Stable native FILE structs for the std streams, so stdin/stdout/stderr
     // can hand out a fixed FILE* for the program's lifetime.

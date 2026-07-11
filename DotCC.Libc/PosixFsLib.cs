@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace DotCC.Libc;
 
@@ -48,7 +49,7 @@ public static unsafe partial class Libc
     }
 
     private static readonly Dictionary<nint, DirState> _dirs = new();
-    private static readonly object _dirsLock = new();
+    private static readonly Lock _dirsLock = new();
 
     // struct dirent (see include/dirent.h): d_name is FIRST, offset 0, 256 bytes.
     private const int DName = 256;

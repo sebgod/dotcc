@@ -2,6 +2,7 @@
 
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 
 namespace DotCC.Libc;
 
@@ -74,7 +75,7 @@ public static unsafe partial class Libc
     // modify). Native memory so the pointer never moves; the string members
     // point at pinned UTF-8 RVA literals via L(...).
     private static lconv* _lconv;
-    private static readonly object _lconvLock = new();
+    private static readonly Lock _lconvLock = new();
 
     /// <summary><c>localeconv()</c> — the current locale's numeric/monetary
     /// formatting conventions. dotcc is always the "C" locale: decimal point

@@ -4,6 +4,7 @@ using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 
 namespace DotCC.Libc;
 
@@ -296,7 +297,7 @@ public static unsafe partial class Libc
     }
 
     private static byte** _environ;
-    private static readonly object _environLock = new();
+    private static readonly Lock _environLock = new();
 
     /// <summary>POSIX <c>char **environ</c> — the whole process environment as a
     /// NULL-terminated array of NUL-terminated <c>"NAME=value"</c> UTF-8 strings.
