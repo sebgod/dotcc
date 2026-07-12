@@ -949,7 +949,7 @@ internal sealed partial class ZigLowering
     /// across the four list kinds, and the walk stops at the first non-list node (so a
     /// nested Block's own Stmts aren't pulled into the parent), so one method serves all
     /// four with no cross-contamination.</summary>
-    private static List<Item> Flatten(Item it)
+    internal static List<Item> Flatten(Item it)
     {
         var stack = new Stack<Item>();
         stack.Push(it);
