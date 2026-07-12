@@ -58,6 +58,43 @@ public sealed class ZigParseProbeTests
     }
 
     [Fact]
+    public void Accepts_nested_container_decls_as_container_members()
+    {
+        // A NESTED `const Inner = struct {…};` (also enum/union) inside a container body — road-to-zig-std
+        // S9, the top `:` parse bucket (41 std files). Container-body member lists now admit a
+        // ContainerDecl, so a container can hold its own nested named-field types (fields, methods, and
+        // nested types compose). The headline shape is the tagged-union-with-nested-struct in
+        // std/Build/Step/Compile.zig. Parse-only: lowering a nested container is still a loud cut.
+        var inStruct = ZigParseProbe.TryParse(
+            "const Outer = struct { x: u8, pub const Inner = struct { y: u8, pub fn f() void {} }; };\n");
+        inStruct.Status.ShouldBe(ZigParseStatus.Ok);
+        var inUnion = ZigParseProbe.TryParse(
+            "const U = union(enum) { file: File, pub const File = struct { source: u8 }; };\n");
+        inUnion.Status.ShouldBe(ZigParseStatus.Ok);
+        var enumInStruct = ZigParseProbe.TryParse(
+            "const Outer = struct { x: u8, const Kind = enum { a, b }; };\n");
+        enumInStruct.Status.ShouldBe(ZigParseStatus.Ok);
+    }
+
+    [Fact]
+    public void Accepts_return_and_value_bodies_in_switch_prongs()
+    {
+        // A switch prong whose body is `return [e]` or (with a payload capture) a bare value expression —
+        // road-to-zig-std S9, the `return` parse bucket + its capture sibling. The prong body is now
+        // symmetric: a Block, a `return [e]`, or any RhsExpr, both with and without a `|x|`/`|*x|` capture.
+        // Parse-only: the switch-prong lowering doesn't yet bind these bodies.
+        var ret = ZigParseProbe.TryParse(
+            "fn f(m: u8) u8 { switch (m) { 0 => return 1, else => return 2 } }\n");
+        ret.Status.ShouldBe(ZigParseStatus.Ok);
+        var retVoid = ZigParseProbe.TryParse(
+            "fn f(m: u8) void { switch (m) { 0 => return, else => return } }\n");
+        retVoid.Status.ShouldBe(ZigParseStatus.Ok);
+        var captureReturn = ZigParseProbe.TryParse(
+            "fn f(s: U) u8 { switch (s) { .a, .b => |v| return v, else => |v| return v } }\n");
+        captureReturn.Status.ShouldBe(ZigParseStatus.Ok);
+    }
+
+    [Fact]
     public void Classifies_a_grammar_gap_as_ParseError()
     {
         // An incomplete decl — `const x =` with no initializer expression. Every token lexes, but the

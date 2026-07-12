@@ -1078,6 +1078,31 @@ productions:
       # prong-separator `,` stays clean. The headline use is a switch EXPRESSION's value-yielding arm;
       # in a statement switch it's an expression statement (`1 => doThing(),`).
       - { lhs: Prong, rhs: [CaseVals, '=>', RhsExpr],                action: prongExpr }
+      # A CONTROL-FLOW prong body `v => return [expr]` (road-to-zig-std S9 — the `return` parse
+      # bucket). In Zig `return e` is a PrimaryExpr, so it can sit directly after `=>`; dotcc keeps
+      # `return` a statement, so it's admitted here as an explicit prong form (mirrors the
+      # `orElseReturn`/`catchReturn` control-flow tails). After `=>`, a `return` keyword lookahead
+      # selects these over `prong`(Block, `{`), the captures (`|`) and `prongExpr` (RhsExpr never
+      # starts with `return`) — conflict-free. Value (`return e`) vs void (`return`) split on the
+      # token after `return`, the same lookahead the statement-level `return Expr;`/`return;` uses.
+      # The headline use is the idiomatic statement-switch arm `.foo => return doThing(…),` that
+      # closes std's `switch (mode) { … => return … }` (e.g. std/Io/File/Writer.zig). Parse-only.
+      - { lhs: Prong, rhs: [CaseVals, '=>', 'return', RhsExpr],       action: prongReturn }
+      - { lhs: Prong, rhs: [CaseVals, '=>', 'return'],               action: prongReturnVoid }
+      # A CAPTURE prong with a VALUE / control-flow body — `v => |x| RhsExpr` / `v => |x| return [e]`
+      # (road-to-zig-std S9). The capture prongs above only admitted a braced Block; std pervasively
+      # writes the capture with a bare value body, e.g. `.a, .b => |s| return s,` (ConfigHeader.zig)
+      # or `.tag => |p| p.method(),`. This makes the capture prong SYMMETRIC with the non-capture one:
+      # after `| IDENT |` the body is a Block (`{`), a `return [e]` (control flow), or any other
+      # RhsExpr — the identical Block-vs-return-vs-RhsExpr decision `prong`/`prongReturn`/`prongExpr`
+      # already make conflict-free one token earlier, now just prefixed by the capture. Both the
+      # by-value `|x|` and by-reference `|*x|` captures get the value + return + void forms. Parse-only.
+      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, '|', RhsExpr],           action: prongCaptureExpr }
+      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, '|', 'return', RhsExpr], action: prongCaptureReturn }
+      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, '|', 'return'],          action: prongCaptureReturnVoid }
+      - { lhs: Prong, rhs: [CaseVals, '=>', '|', '*', IDENT, '|', RhsExpr],           action: prongCaptureRefExpr }
+      - { lhs: Prong, rhs: [CaseVals, '=>', '|', '*', IDENT, '|', 'return', RhsExpr], action: prongCaptureRefReturn }
+      - { lhs: Prong, rhs: [CaseVals, '=>', '|', '*', IDENT, '|', 'return'],          action: prongCaptureRefReturnVoid }
 
   # Case values: a comma-list of value Exprs, or `else` (the default). The `,` here never
   # clashes with the prong-separator `,` because FOLLOW(CaseVals) = { '=>' } — after a value
@@ -1131,6 +1156,18 @@ productions:
       # FOLLOW(Member). The `pub` form is symmetric with `pub FnDef` (export is a no-op today).
       - { lhs: Member, rhs: [VarDecl],         action: memberConst }
       - { lhs: Member, rhs: ['pub', VarDecl],  action: memberPubConst }
+      # A NESTED container decl (`const Inner = struct {…};` / `enum` / `union`, incl.
+      # extern/packed) as a struct-body member (road-to-zig-std S9 — the top `:` parse bucket).
+      # Reuses the file-level `Decl -> ContainerDecl` split verbatim: after `const IDENT =`, the
+      # `struct`/`enum`/`union`/`extern`/`packed` keyword selects ContainerDecl and any RhsExpr
+      # selects the VarDecl member — the identical conflict-free 1-token decision the top-level
+      # Decls list already makes (a named-field body shifts on the field `:`, a bare-type body
+      # reduces to the tuple Type), so no new parser state and `derivation: none` stays clean.
+      # This is what lets a container hold its own nested named-field types — pervasive in std,
+      # e.g. `union(enum){ …, pub const File = struct { source: LazyPath, … }; }`. Parse-only in
+      # S9; a nested container that reaches lowering is a loud cut until the bind lands.
+      - { lhs: Member, rhs: [ContainerDecl],        action: memberContainer }
+      - { lhs: Member, rhs: ['pub', ContainerDecl], action: memberPubContainer }
 
   - derivation: none
     rules:
@@ -1163,6 +1200,10 @@ productions:
       - { lhs: EnumMember, rhs: ['pub', FnDef],    action: enumMemberPubMethod }
       - { lhs: EnumMember, rhs: [VarDecl],         action: enumMemberConst }
       - { lhs: EnumMember, rhs: ['pub', VarDecl],  action: enumMemberPubConst }
+      # Nested container decl inside an enum body (road-to-zig-std S9) — same const-led
+      # ContainerDecl-vs-VarDecl split as the struct Member form above; conflict-free, parse-only.
+      - { lhs: EnumMember, rhs: [ContainerDecl],        action: enumMemberContainer }
+      - { lhs: EnumMember, rhs: ['pub', ContainerDecl], action: enumMemberPubContainer }
 
   - derivation: none
     rules:
@@ -1191,6 +1232,12 @@ productions:
       - { lhs: UnionMember, rhs: ['pub', FnDef],       action: unionMemberPubMethod }
       - { lhs: UnionMember, rhs: [VarDecl],            action: unionMemberConst }
       - { lhs: UnionMember, rhs: ['pub', VarDecl],     action: unionMemberPubConst }
+      # Nested container decl inside a union body (road-to-zig-std S9) — same const-led
+      # ContainerDecl-vs-VarDecl split as the struct Member form above; conflict-free, parse-only.
+      # (The example that names the top `:` bucket, std/Build/Step/Compile.zig, is exactly this:
+      # a `union(enum)` whose members include `pub const File = struct { … };`.)
+      - { lhs: UnionMember, rhs: [ContainerDecl],        action: unionMemberContainer }
+      - { lhs: UnionMember, rhs: ['pub', ContainerDecl], action: unionMemberPubContainer }
 
   - derivation: none
     rules:
