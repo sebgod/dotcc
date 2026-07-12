@@ -16,7 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | [`docs/cli.md`](docs/cli.md) | The full clang-shaped flag reference (`--emit` modes, `-l`/`-L` import mode, `-std=`/`-pedantic`, warning flags, `-fsanitize=address`), predefined macros, `-shared` emit shape. |
 | [`docs/testing.md`](docs/testing.md) | Test-suite anatomy + all opt-in differential oracles (MSVC / gcc-in-WSL / zig / native shared-lib) with their env vars and baseline-regen rules. |
 | [`docs/FRONTEND-IDEAS.md`](docs/FRONTEND-IDEAS.md) | Design rationale for growing new front-ends on the shared IR. |
-| `docs/plans/` | Campaign plans: `fable-c.md` / `fable-zig.md` (exhausted), `fable-wall.md` (the completed W0–W6 generics arc), `road-to-zig-std.md` (current — compiling real zig std from source), `fable-wasm.md` (active — a binary-`.wasm` frontend, end-goal consuming Embedded Swift; WF0 done), `fable-web.md` (planned — GitHub Pages site + in-browser sandbox running dotcc as wasm via Blazor + the wat backend), `import-mode.md`. |
+| `docs/plans/` | Campaign plans: `fable-c.md` / `fable-zig.md` (exhausted), `fable-wall.md` (the completed W0–W6 generics arc), `road-to-zig-std.md` (current — compiling real zig std from source), `fable-wasm.md` (active — a binary-`.wasm` frontend, end-goal consuming Embedded Swift; WF0 done), `fable-web.md` (planned — GitHub Pages site + in-browser sandbox running dotcc as wasm via Blazor + the wat backend), `import-mode.md`. **`deferred.md`** is the cross-cutting ledger of deliberate cuts still on the books (parse-only lowering gaps + deferred grammar with reasons); permanent out-of-scope stays in the SUPPORT docs. |
 
 ## Solution layout
 

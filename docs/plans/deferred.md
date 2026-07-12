@@ -1,0 +1,46 @@
+# Deferred ledger — deliberate cuts still on the books
+
+One place to look for "we chose not to do this *yet*, and here's why." Keeps deferrals
+from scattering across commit messages, PR bodies, and memories.
+
+**Scope:** things we intend to finish eventually but have *staged* — parse-only bricks
+whose lowering is a loud cut, and grammar/lowering gaps cut for a stated reason (a
+conflict, rarity, or a missing engine). **Not** permanent exclusions — those live in the
+SUPPORT docs and don't belong here:
+
+- **C** permanent out-of-scope → [`../C-SUPPORT.md`](../C-SUPPORT.md) (VLA, trigraphs, Annex-K, …).
+- **Zig** permanent exclusions → [`../ZIG-SUPPORT.md`](../ZIG-SUPPORT.md) (`async`/`await`, inline `asm`, SIMD `@Vector` — bias std to scalar instead).
+
+**Discipline:** when you defer something with a reason, add a row here (and delete it when
+it lands). A deferral that isn't written down is the thing that's "hard to keep track of."
+
+---
+
+## Zig — parse-only (parses today; lowering is a loud `IrUnsupportedException`)
+
+The road-to-zig-std S9 bricks advance *parse* coverage ahead of lowering on purpose (the
+probe is parse-only; a construct that reaches the binder fails loudly, never silently). Each
+of these parses and has a `ZigParseProbe` pin, but lowering is not wired yet:
+
+| Construct | Landed | Lowering gap |
+|---|---|---|
+| Error-set merge `A \|\| B` | #86 | erased set registered; no member-set constraint |
+| `++` concat / `**` repeat | #88 | comptime array/string concat + repeat |
+| Nested `const Inner = struct/enum/union {…};` as a container member | #89 | binding a nested container type |
+| Switch-prong bodies `=> return [e]` / `=> \|x\| body` | #89 | binding return / capture-value prong bodies |
+| Inline named-field struct **type** (`fn f() struct { a: u8 }`, `field: struct {…}`) via `AType` | #90 | `LowerType` default (loud cut) — reify the anon struct type |
+
+## Zig — deferred grammar (does NOT parse yet; cut for a reason)
+
+| Construct | Why deferred | Unblock |
+|---|---|---|
+| Inline named struct as a **value** (`const X = if (c) struct {…} else struct {…}`) | S/R conflict with `structDecl`: the value cascade (`CurlySuffix → Type`) would make `const X = struct {…}` ambiguous between a container decl and a typed value | route `const X = struct{…}` through the value path and drop `structDecl` (big lowering refactor), or a GLR/precedence escape |
+| Inline named struct under a recursive type prefix (`?struct{…}`, `[]struct{…}`) | `AType` adds the inline form only at the *top* of an annotation slot, not inside `Type`'s recursive prefixes | thread the inline form through the `?`/`*`/`[]` element positions |
+| Anonymous struct type with mixed named+positional / arity > 7 | tuple lowering bound at 7 | — |
+
+## Zig — the big open parse buckets (not cuts; just next)
+
+These are ranked live in [`std-parse-probe.report.txt`](std-parse-probe.report.txt) — the
+report *is* the worklist. Current head (2026-07-12, 31.8% parse-clean): top-level
+file-is-a-struct fields (`$`/bare-IDENT in state 0/128), `(`-in-276, value-position
+`if`/`switch`, `align(N)`. See the S9 table in [`road-to-zig-std.md`](road-to-zig-std.md).

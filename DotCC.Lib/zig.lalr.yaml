@@ -247,6 +247,12 @@ symbols:
                    #     parses today, lowering (comptime array/string concat) is deferred (loud cut).
   - '**'           # 164 array REPEAT (Zig's ASTERISK2 — a Mul-level binary op). Comptime op; parses
                    #     today, lowering (comptime array repeat) is deferred (loud cut).
+  - AType          # 165 ANNOTATION type — a `Type` plus an inline named-field struct type
+                   #     (`struct { a: u8, … }`). Used ONLY in type-annotation / return slots (field,
+                   #     param, typed var/const, union-variant payload, fn return), NEVER in the value
+                   #     cascade (CurlySuffix keeps bare `Type`), so an inline named struct stays a TYPE
+                   #     position and can't collide with the value-position `const X = struct {…}`
+                   #     (structDecl). Road-to-zig-std S9 — the `:`-in-307 residual.
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -358,10 +364,13 @@ productions:
   # infix `!` by lookahead (leading `!` appears immediately after `)`).
   - derivation: none
     rules:
-      - { lhs: FnDef, rhs: ['fn', IDENT, '(', Params, ')', CallConv, Type, Block],       action: fnDef }
-      - { lhs: FnDef, rhs: ['fn', IDENT, '(', ')', CallConv, Type, Block],               action: fnDefNoArgs }
-      - { lhs: FnDef, rhs: ['fn', IDENT, '(', Params, ')', CallConv, '!', Type, Block],  action: fnDefErr }
-      - { lhs: FnDef, rhs: ['fn', IDENT, '(', ')', CallConv, '!', Type, Block],          action: fnDefNoArgsErr }
+      # Return type is an `AType` (road-to-zig-std S9) so a fn can return an inline named struct
+      # `fn f() struct { a: u8 } { … }` (factory-returns-anon-struct, pervasive in std). `AType -> Type`
+      # is transparent, so an ordinary return type is unchanged; the retType Arg index is unmoved.
+      - { lhs: FnDef, rhs: ['fn', IDENT, '(', Params, ')', CallConv, AType, Block],       action: fnDef }
+      - { lhs: FnDef, rhs: ['fn', IDENT, '(', ')', CallConv, AType, Block],               action: fnDefNoArgs }
+      - { lhs: FnDef, rhs: ['fn', IDENT, '(', Params, ')', CallConv, '!', AType, Block],  action: fnDefErr }
+      - { lhs: FnDef, rhs: ['fn', IDENT, '(', ')', CallConv, '!', AType, Block],          action: fnDefNoArgsErr }
 
   # An optional `callconv(Expr)` between `)` and the return type (Milestone R, part 5). Epsilon when
   # absent — `callconv` ∉ FIRST(Type) ∪ {`!`}, so the reduce-ε vs shift-`callconv` decision after `)`
@@ -384,7 +393,7 @@ productions:
 
   - derivation: none
     rules:
-      - { lhs: Param, rhs: [IDENT, ':', Type], action: param }
+      - { lhs: Param, rhs: [IDENT, ':', AType], action: param }
       # A `comptime`-qualified parameter (wall-plan W3 — generic functions): `comptime n: Type`.
       # A leading `comptime` terminal makes the FIRST-set disjoint from the plain `IDENT` / `...`
       # forms, so it's a conflict-free additional Param alternative. Lowering treats a comptime
@@ -392,7 +401,7 @@ productions:
       # specialized body per resolved value (W3a); a `comptime T: type` TYPE param is W3b (rejected
       # for now). The `comptime EXPR` value-prefix (Prefix -> 'comptime' Prefix) lives elsewhere and
       # can't reach here — a Param position never derives a bare Prefix.
-      - { lhs: Param, rhs: ['comptime', IDENT, ':', Type], action: paramComptime }
+      - { lhs: Param, rhs: ['comptime', IDENT, ':', AType], action: paramComptime }
       # The variadic marker `...` is a parameter alternative (Zig's PEG: `ParamDecl
       # <- ... / DOT3`), NOT a comma-suffix after the whole list — so `,` never enters
       # FOLLOW(Params) and the paramsCons/paramsOne S/R stays clean. Grammar-accepted
@@ -404,20 +413,20 @@ productions:
   - derivation: none
     rules:
       - { lhs: VarDecl, rhs: ['const', IDENT, '=', RhsExpr, ';'],            action: constDecl }
-      - { lhs: VarDecl, rhs: ['const', IDENT, ':', Type, '=', RhsExpr, ';'], action: constDeclTyped }
+      - { lhs: VarDecl, rhs: ['const', IDENT, ':', AType, '=', RhsExpr, ';'], action: constDeclTyped }
       - { lhs: VarDecl, rhs: ['var', IDENT, '=', RhsExpr, ';'],             action: varDecl }
-      - { lhs: VarDecl, rhs: ['var', IDENT, ':', Type, '=', RhsExpr, ';'],  action: varDeclTyped }
+      - { lhs: VarDecl, rhs: ['var', IDENT, ':', AType, '=', RhsExpr, ';'],  action: varDeclTyped }
       # `threadlocal var x: T = v;` — thread storage duration (typed form only;
       # the idiomatic spelling). VarDecl is shared between top level and
       # statement position, so a statement-position `threadlocal` parses and is
       # REJECTED in lowering (real zig allows it only at container level).
-      - { lhs: VarDecl, rhs: ['threadlocal', 'var', IDENT, ':', Type, '=', RhsExpr, ';'], action: varDeclThreadLocal }
+      - { lhs: VarDecl, rhs: ['threadlocal', 'var', IDENT, ':', AType, '=', RhsExpr, ';'], action: varDeclThreadLocal }
       # A typed const/var with `align(N)` and/or `linksection(".s")` modifiers between the Type and `=`
       # (Milestone R, part 5). DeclMods is NON-EMPTY (the no-modifier case is the rule above) — after
       # `Type`, the `align`/`linksection` vs `=` lookahead is disjoint, conflict-free. ACCEPTED +
       # IGNORED: lowered exactly like the unmodified typed decl (no-op on the managed target).
-      - { lhs: VarDecl, rhs: ['const', IDENT, ':', Type, DeclMods, '=', RhsExpr, ';'], action: constDeclTypedMods }
-      - { lhs: VarDecl, rhs: ['var',   IDENT, ':', Type, DeclMods, '=', RhsExpr, ';'], action: varDeclTypedMods }
+      - { lhs: VarDecl, rhs: ['const', IDENT, ':', AType, DeclMods, '=', RhsExpr, ';'], action: constDeclTypedMods }
+      - { lhs: VarDecl, rhs: ['var',   IDENT, ':', AType, DeclMods, '=', RhsExpr, ';'], action: varDeclTypedMods }
 
   # The `align(Expr)` / `linksection(Expr)` modifier(s) on a typed const/var (Milestone R, part 5),
   # in Zig's order (align then linksection). Non-empty; the arg Exprs are never read.
@@ -946,6 +955,25 @@ productions:
       - { lhs: Type, rhs: ['fn', '(', ')', CallConv, '!', Type],               action: tyFnNoArgsErr }
       - { lhs: Type, rhs: [ErrUnion] }
 
+  # ANNOTATION type (road-to-zig-std S9 — the `:`-in-307 residual). An `AType` is a plain `Type`
+  # PLUS an inline named-field struct type `struct { a: u8, … }` (and the empty `struct {}` marker).
+  # It is used ONLY in type-annotation / return-type slots — a struct FIELD's type, a param type, a
+  # typed var/const annotation, a union-variant payload, and a fn RETURN type — NEVER in the value
+  # cascade (`CurlySuffix -> Type` stays a bare `Type`). That separation is the whole point: an inline
+  # named struct is genuinely ambiguous with the value-position `const X = struct {…}` (structDecl) —
+  # both would derive `struct { FieldDecls }` — so keeping it OUT of the value cascade means structDecl
+  # has no competitor there and the S/R conflict never forms. Within `struct {`, the FieldDecls (named)
+  # vs TupleTypes (positional, via `AType -> Type -> struct { TupleTypes }`) split on the first member's
+  # `:` — the SAME conflict-free 1-token decision structDecl already makes. `AType -> Type` is a
+  # transparent pass-through (no action), so every existing annotation lowers UNCHANGED; only the inline
+  # `struct { FieldDecls }` form is new, and it is PARSE-ONLY (LowerType's default is a loud cut until
+  # the bind lands). Recursive positions (`?struct{…}`, `[]struct{…}`) and value position stay deferred.
+  - derivation: none
+    rules:
+      - { lhs: AType, rhs: [Type] }
+      - { lhs: AType, rhs: ['struct', '{', FieldDecls, '}'], action: inlineStructType }
+      - { lhs: AType, rhs: ['struct', '{', '}'],             action: inlineStructTypeEmpty }
+
   - derivation: none
     rules:
       - { lhs: ErrUnion, rhs: [Suffix, '!', Type], action: errUnion }
@@ -1171,12 +1199,12 @@ productions:
 
   - derivation: none
     rules:
-      - { lhs: FieldDecl, rhs: [IDENT, ':', Type], action: structField }
+      - { lhs: FieldDecl, rhs: [IDENT, ':', AType], action: structField }
       # A field with a DEFAULT value (`bit_len: usize = 0,` / `next: ?*Node = null,`) — 29 std files
       # fail first on the `=`, and it's a hard requirement for the file-is-a-struct idiom. After
       # `IDENT : Type` the `=` (default) vs `,`/`}` (bare field) decision is a clean 1-token split.
       # The default is materialized only for fields OMITTED from a `.{…}` literal (see BuildStructInit).
-      - { lhs: FieldDecl, rhs: [IDENT, ':', Type, '=', Expr], action: structFieldDefault }
+      - { lhs: FieldDecl, rhs: [IDENT, ':', AType, '=', Expr], action: structFieldDefault }
 
   # Enum body as a MEMBER list (right-recursive over EnumMember, like struct's FieldDecls) — so
   # value members, methods (`fn`/`pub fn`), and consts (`const Self = @This();`) interleave. The
@@ -1241,7 +1269,7 @@ productions:
 
   - derivation: none
     rules:
-      - { lhs: UnionVariant, rhs: [IDENT, ':', Type], action: unionVariantPayload }
+      - { lhs: UnionVariant, rhs: [IDENT, ':', AType], action: unionVariantPayload }
       - { lhs: UnionVariant, rhs: [IDENT],             action: unionVariantVoid }
 
   # Anonymous struct literal `.{ .f = v, … }` — Zig's result-located init, where the type

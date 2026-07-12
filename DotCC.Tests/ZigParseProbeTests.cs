@@ -95,6 +95,26 @@ public sealed class ZigParseProbeTests
     }
 
     [Fact]
+    public void Accepts_inline_named_field_struct_types_in_annotation_positions()
+    {
+        // An inline named-field struct type `struct { a: u8, … }` in a TYPE-annotation slot — road-to-zig-std
+        // S9, the last of the `:`-in-307 bucket. Parses as a return type, a struct-field type, a param type,
+        // a `: T` var/const annotation, and a union-variant payload (the `AType` fork). Deliberately NOT in
+        // value position: `const X = struct {…}` stays a container decl, so those two never collide.
+        var ret = ZigParseProbe.TryParse("fn f() struct { a: u8 } { return .{ .a = 0 }; }\n");
+        ret.Status.ShouldBe(ZigParseStatus.Ok);
+        var field = ZigParseProbe.TryParse("const S = struct { inner: struct { a: u8, pub fn g() void {} } };\n");
+        field.Status.ShouldBe(ZigParseStatus.Ok);
+        var param = ZigParseProbe.TryParse("fn f(p: struct { a: u8 }) void { _ = p; }\n");
+        param.Status.ShouldBe(ZigParseStatus.Ok);
+        var payload = ZigParseProbe.TryParse("const U = union(enum) { one: struct { a: u8 }, two };\n");
+        payload.Status.ShouldBe(ZigParseStatus.Ok);
+        // Invariant: a value-position named struct stays a container decl (structDecl), unaffected.
+        var value = ZigParseProbe.TryParse("const X = struct { a: u8 };\n");
+        value.Status.ShouldBe(ZigParseStatus.Ok);
+    }
+
+    [Fact]
     public void Classifies_a_grammar_gap_as_ParseError()
     {
         // An incomplete decl — `const x =` with no initializer expression. Every token lexes, but the

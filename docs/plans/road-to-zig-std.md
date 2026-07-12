@@ -337,12 +337,20 @@ Seed list (each its own loop increment; ranked by the table above, not guesswork
   **(DONE 2026-07-12** — two conflict-free, parse-only grammar bricks. (1) A container
   body (`struct`/`enum`/`union`) now admits a nested `const Inner = struct/enum/union {…};`
   member (reusing the file-level `Decl → ContainerDecl` split), so a container can hold its
-  own nested named-field types — the **top `:` parse bucket, 41→20 files** (the 20 residual
-  are anonymous named-field struct *types* in value position — `fn f() struct { x: u8 }`,
-  which reduce/reduce-conflicts with `structDecl` and stays deferred). (2) A switch-prong
+  own nested named-field types — the **top `:` parse bucket, 41→20 files**. (2) A switch-prong
   body is now symmetric — `Block | return [e] | RhsExpr`, with and without a `|x|`/`|*x|`
   capture — clearing the `return`-in-prong bucket (26 files) and its capture sibling (32
   files at the next barrier). Probe **28.9%→30.7%** (160→170 files).**)**
+- **Inline named-field struct TYPES in annotation slots** **(DONE 2026-07-12** — closes the
+  rest of the `:`-in-307 bucket. A new `AType` non-terminal (= `Type` + `struct { FieldDecls
+  }`) is used in the field / param / typed-var-const / union-payload / fn-return slots — but
+  NOT the value cascade (`CurlySuffix` keeps bare `Type`), so `fn f() struct { a: u8 }` and
+  `field: struct { a: u8 }` parse while `const X = struct {…}` stays `structDecl` with no S/R
+  conflict. `AType → Type` is transparent, so every existing annotation lowers unchanged; the
+  inline form is parse-only (`LowerType` default = loud cut). Probe **30.7%→31.8%** (170→176);
+  the `:`-in-307 bucket is **gone**. **Still deferred** (see [`deferred.md`](deferred.md)):
+  inline named struct as a VALUE (`const X = if (c) struct {…} else …`, the CurlySuffix
+  conflict) and under a recursive type prefix (`?struct{…}`, `[]struct{…}`).**)**
 - **Quoted identifiers `@"…"`** (if not already landed with S5).
 - **Arbitrary-width ints** (`u1`…`u128`, `u21` for Unicode): round up to the
   smallest C# container (byte/ushort/uint/ulong/UInt128) + mask at stores and
