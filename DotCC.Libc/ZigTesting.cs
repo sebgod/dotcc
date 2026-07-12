@@ -27,6 +27,14 @@ public static class ZigTesting
     /// <summary><c>error.TestExpectedEqual</c> — a failed <c>expectEqual</c>.</summary>
     public const ushort TestExpectedEqual = 0xFF02;
 
+    /// <summary><c>error.TestUnexpectedError</c> — a failed <c>expectError</c> (the result was not
+    /// the expected error, or was not an error at all).</summary>
+    public const ushort TestUnexpectedError = 0xFF03;
+
+    /// <summary><c>error.TestExpectedEqualSlices</c> — a failed <c>expectEqualSlices</c> /
+    /// <c>expectEqualStrings</c>.</summary>
+    public const ushort TestExpectedEqualSlices = 0xFF04;
+
     /// <summary><c>std.testing.expect(ok)</c> — <c>Ok</c> when <paramref name="ok"/> is true,
     /// else an error union carrying <see cref="TestUnexpectedResult"/>. Takes <see cref="CBool"/>
     /// (not <c>bool</c>) because dotcc's boolean type (<c>CType.Bool</c>) lowers to <see cref="CBool"/>,
@@ -38,4 +46,22 @@ public static class ZigTesting
     /// equal, else an error union carrying <see cref="TestExpectedEqual"/>.</summary>
     public static ErrUnion<Unit> expectEqual<T>(T expected, T actual) where T : unmanaged, System.IEquatable<T> =>
         expected.Equals(actual) ? ErrUnion<Unit>.Ok(default) : ErrUnion<Unit>.Err(TestExpectedEqual);
+
+    /// <summary><c>std.testing.expectError(expected, actual)</c> — <c>Ok</c> when <paramref name="actual"/>
+    /// is an error whose code equals <paramref name="expected"/> (an <c>error.X</c> code); else an error
+    /// union carrying <see cref="TestUnexpectedError"/>. As in real Zig, a non-error result also fails.</summary>
+    public static ErrUnion<Unit> expectError<T>(ushort expected, ErrUnion<T> actual) where T : unmanaged =>
+        actual.IsErr && actual.Code == expected ? ErrUnion<Unit>.Ok(default) : ErrUnion<Unit>.Err(TestUnexpectedError);
+
+    /// <summary><c>std.testing.expectEqualStrings(expected, actual)</c> — byte-slice (<c>[]const u8</c>)
+    /// equality, <c>Ok</c> when equal else <see cref="TestExpectedEqualSlices"/>.</summary>
+    public static ErrUnion<Unit> expectEqualStrings(ConstSlice<byte> expected, ConstSlice<byte> actual) =>
+        expected.AsSpan().SequenceEqual(actual.AsSpan()) ? ErrUnion<Unit>.Ok(default) : ErrUnion<Unit>.Err(TestExpectedEqualSlices);
+
+    /// <summary><c>std.testing.expectEqualSlices(T, expected, actual)</c> — element-wise slice equality
+    /// (the element type <c>T</c> is inferred by C# from the operands), <c>Ok</c> when equal else
+    /// <see cref="TestExpectedEqualSlices"/>.</summary>
+    public static ErrUnion<Unit> expectEqualSlices<T>(ConstSlice<T> expected, ConstSlice<T> actual)
+        where T : unmanaged, System.IEquatable<T> =>
+        expected.AsSpan().SequenceEqual(actual.AsSpan()) ? ErrUnion<Unit>.Ok(default) : ErrUnion<Unit>.Err(TestExpectedEqualSlices);
 }

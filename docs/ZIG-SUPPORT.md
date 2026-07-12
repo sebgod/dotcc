@@ -239,8 +239,9 @@ Types table. Today `@import("std")` resolves
 only the curated paths: the allocator paths (`std.mem.Allocator` +
 `std.heap.page_allocator`/`c_allocator`/`FixedBufferAllocator`/`ArenaAllocator`,
 with `alloc`/`free`/`create`/`destroy`/`realloc` — see the Allocators section),
-the `std.mem` slice helpers, `std.ArrayList(T)`, `std.debug.print`, and `std.testing.expect`/`expectEqual`
-(the test-runner assertions — see **Test runner** below); everything else errors clearly.
+the `std.mem` slice helpers, `std.ArrayList(T)`, `std.debug.print`, and the `std.testing` assertions
+(`expect`/`expectEqual`/`expectError`/`expectEqualStrings`/`expectEqualSlices` — see **Test runner** below);
+everything else errors clearly.
 
 ### Test runner — `dotcc zig test`
 
@@ -250,9 +251,10 @@ each**, reporting `OK`/`FAIL` per test and a summary, exiting non-zero if any fa
 running real `std` tests from source. Each block lowers to a runnable `anyerror!void` function; a test
 PASSES when its body returns normally and FAILS when it returns an error (a propagated `try`, an explicit
 `return error.X`) or panics. `main` is ignored in test mode (as in real `zig test`). The curated
-assertions `std.testing.expect(ok)` and `std.testing.expectEqual(expected, actual)` return an error union
-so `try` propagates a failure to the test boundary; more assertions grow on demand. The runner's output is
-dotcc's own shape (real `zig test` output is timing-dependent, so it is not byte-matched).
+assertions — `expect(ok)`, `expectEqual(expected, actual)`, `expectError(expected_error, result)`,
+`expectEqualStrings(a, b)`, and `expectEqualSlices(T, a, b)` — each return an error union so `try`
+propagates a failure to the test boundary; more grow on demand. The runner's output is dotcc's own shape
+(real `zig test` output is timing-dependent, so it is not byte-matched).
 
 **Permanent:** `async`/`suspend`, inline assembly (the managed-target root below —
 that reasoning still holds and is not relitigated), and `std`'s **platform floor**
