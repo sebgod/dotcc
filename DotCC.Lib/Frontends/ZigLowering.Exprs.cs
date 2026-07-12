@@ -561,6 +561,17 @@ internal sealed partial class ZigLowering
                 throw new IrUnsupportedException(
                     "zig error-set merge `A || B` is only valid as a `const E = A || B;` declaration (dotcc erases error sets)");
 
+            // Array/string concat `a ++ b` and array repeat `a ** n` PARSE (road-to-zig-std S9) but do
+            // not lower yet — they are comptime aggregate operations needing the comptime-value engine
+            // (S5–S6). Loud cut until then, so a program that actually uses them fails clearly rather
+            // than miscompiling (std's uses are mostly comptime `@compileError` string building).
+            case Zig.Concat:
+                throw new IrUnsupportedException(
+                    "zig array/string concat `a ++ b` parses but is not lowered yet (needs the comptime aggregate engine, road-to-zig-std S5–S6)");
+            case Zig.Repeat:
+                throw new IrUnsupportedException(
+                    "zig array repeat `a ** n` parses but is not lowered yet (needs the comptime aggregate engine, road-to-zig-std S5–S6)");
+
             // call of a named function (bare-identifier callee).
             case Zig.CallArgs c:   return LowerCall(c.Arg0, c.Arg2);
             case Zig.CallNoArgs c: return LowerCall(c.Arg0, null);
