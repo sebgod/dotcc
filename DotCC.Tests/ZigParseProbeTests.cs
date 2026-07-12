@@ -46,6 +46,18 @@ public sealed class ZigParseProbeTests
     }
 
     [Fact]
+    public void Accepts_concat_and_repeat_operators()
+    {
+        // `++` (array/string concat) and `**` (array repeat) — road-to-zig-std S9. Both now lex as
+        // distinct tokens (not `+`/`*`) and parse at their Zig precedence (Add / Mul). Parse-only:
+        // lowering is deferred, but the probe counts the parse.
+        var concat = ZigParseProbe.TryParse("const s = \"a\" ++ \"b\";\n");
+        concat.Status.ShouldBe(ZigParseStatus.Ok);
+        var repeat = ZigParseProbe.TryParse("const a = base ** 4;\n");
+        repeat.Status.ShouldBe(ZigParseStatus.Ok);
+    }
+
+    [Fact]
     public void Classifies_a_grammar_gap_as_ParseError()
     {
         // An incomplete decl — `const x =` with no initializer expression. Every token lexes, but the

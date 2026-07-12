@@ -243,6 +243,10 @@ symbols:
   - '||'           # 162 error-set MERGE (Zig's PIPEPIPE — a Mul-level binary op, NOT boolean-or which
                    #     is `or`). dotcc erases error sets into one flat code space, so a merge is just
                    #     an (erased) error set — `const E = A || B;` registers E as an unconstrained set.
+  - '++'           # 163 array/string CONCAT (Zig's PLUS2 — an Add-level binary op). Comptime op;
+                   #     parses today, lowering (comptime array/string concat) is deferred (loud cut).
+  - '**'           # 164 array REPEAT (Zig's ASTERISK2 — a Mul-level binary op). Comptime op; parses
+                   #     today, lowering (comptime array repeat) is deferred (loud cut).
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -810,6 +814,10 @@ productions:
     rules:
       - { lhs: Add, rhs: [Add, '+', Mul], action: add }
       - { lhs: Add, rhs: [Add, '-', Mul], action: sub }
+      # Array/string CONCAT `a ++ b` (Zig's PLUS2 — an Add-level, left-assoc binary op). Parses today;
+      # lowering (comptime array/string concat) is deferred (loud cut) — the goal here is parse coverage
+      # (std's `@compileError("…" ++ @tagName(x))` and similar comptime string building).
+      - { lhs: Add, rhs: [Add, '++', Mul], action: concat }
       # Wrapping additive ops (Milestone P, part 1) — same precedence/associativity as `+`/`-`.
       - { lhs: Add, rhs: [Add, '+%', Mul], action: addWrap }
       - { lhs: Add, rhs: [Add, '-%', Mul], action: subWrap }
@@ -833,6 +841,9 @@ productions:
       # recognized as a comptime error-set binding (TryComptimeConstBinding → registers E, emits
       # nothing); anywhere else it is a loud cut. std's `error{…} || Io.Cancelable`-style set unions.
       - { lhs: Mul, rhs: [Mul, '||', Prefix], action: errSetMerge }
+      # Array REPEAT `a ** n` (Zig's ASTERISK2 — a Mul-level, left-assoc binary op). Parses today;
+      # lowering (comptime array repeat) is deferred (loud cut) — parse coverage is the goal.
+      - { lhs: Mul, rhs: [Mul, '**', Prefix], action: repeat }
       - { lhs: Mul, rhs: [Prefix] }
 
   # Value-level prefix ops (right-assoc). Below Mul, above the type-prefix level.
@@ -1268,6 +1279,10 @@ lexer:
     # Error-set MERGE `||` (Zig's PIPEPIPE). Two chars, so longest-match picks it over `|` (bitor);
     # `|` is escaped in the regex. Distinct from `|=` (compound-or) — different second char.
     - { symbol: '||', match: '\|\|' }
+    # Array/string CONCAT `++` and array REPEAT `**` (comptime ops). Longest-match picks them over
+    # `+`/`*` (and never clashes with `+%`/`+|`/`+=` / `*%`/`*|`/`*=` — different second char).
+    - { symbol: '++', match: '\+\+' }
+    - { symbol: '**', match: '\*\*' }
     - { symbol: '.*', match: '\.\*' }
     - { symbol: '.?', match: '\.\?' }
     - { symbol: '=>', match: '=>' }
