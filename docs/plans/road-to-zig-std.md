@@ -333,6 +333,16 @@ Seed list (each its own loop increment; ranked by the table above, not guesswork
   `std.testing.expect`/`expectEqual`. This is the **harness the G-goals need** — running a real `std`
   slice's own tests from source and diffing against the `zig test` oracle. (Container-level
   `comptime {}` stays dropped until the comptime engine, S4–S7.)
+- **Nested container decls as members + switch-prong value/return bodies**
+  **(DONE 2026-07-12** — two conflict-free, parse-only grammar bricks. (1) A container
+  body (`struct`/`enum`/`union`) now admits a nested `const Inner = struct/enum/union {…};`
+  member (reusing the file-level `Decl → ContainerDecl` split), so a container can hold its
+  own nested named-field types — the **top `:` parse bucket, 41→20 files** (the 20 residual
+  are anonymous named-field struct *types* in value position — `fn f() struct { x: u8 }`,
+  which reduce/reduce-conflicts with `structDecl` and stays deferred). (2) A switch-prong
+  body is now symmetric — `Block | return [e] | RhsExpr`, with and without a `|x|`/`|*x|`
+  capture — clearing the `return`-in-prong bucket (26 files) and its capture sibling (32
+  files at the next barrier). Probe **28.9%→30.7%** (160→170 files).**)**
 - **Quoted identifiers `@"…"`** (if not already landed with S5).
 - **Arbitrary-width ints** (`u1`…`u128`, `u21` for Unicode): round up to the
   smallest C# container (byte/ushort/uint/ulong/UInt128) + mask at stores and
