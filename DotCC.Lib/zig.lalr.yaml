@@ -240,6 +240,9 @@ symbols:
   - 'test'         # 161 `test "name"/ident/(anon) { … }` block — parsed + DROPPED (analysis-only in std)
                    #     (`=` | any compound `+=`/…/wrap `+%=`/saturating `+|=`), so the continue clause
                    #     accepts the full Zig AssignExpr operator set — not just plain `=`.
+  - '||'           # 162 error-set MERGE (Zig's PIPEPIPE — a Mul-level binary op, NOT boolean-or which
+                   #     is `or`). dotcc erases error sets into one flat code space, so a merge is just
+                   #     an (erased) error set — `const E = A || B;` registers E as an unconstrained set.
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -824,6 +827,12 @@ productions:
       - { lhs: Mul, rhs: [Mul, '*%', Prefix], action: mulWrap }
       # Saturating multiplicative op (Milestone P, part 2) — same precedence/associativity as `*`.
       - { lhs: Mul, rhs: [Mul, '*|', Prefix], action: mulSat }
+      # Error-set MERGE `A || B` (road-to-zig-std). In Zig's grammar `||` (merge error sets) is a
+      # Mul-level, left-assoc binary op (NOT boolean-or — that's `or`). dotcc erases error sets into
+      # one flat code space, so a merge is just an (erased) error set: `const E = A || B || C;` is
+      # recognized as a comptime error-set binding (TryComptimeConstBinding → registers E, emits
+      # nothing); anywhere else it is a loud cut. std's `error{…} || Io.Cancelable`-style set unions.
+      - { lhs: Mul, rhs: [Mul, '||', Prefix], action: errSetMerge }
       - { lhs: Mul, rhs: [Prefix] }
 
   # Value-level prefix ops (right-assoc). Below Mul, above the type-prefix level.
@@ -1256,6 +1265,9 @@ lexer:
     - { symbol: '>=', match: '>=' }
     - { symbol: '<<', match: '<<' }
     - { symbol: '>>', match: '>>' }
+    # Error-set MERGE `||` (Zig's PIPEPIPE). Two chars, so longest-match picks it over `|` (bitor);
+    # `|` is escaped in the regex. Distinct from `|=` (compound-or) — different second char.
+    - { symbol: '||', match: '\|\|' }
     - { symbol: '.*', match: '\.\*' }
     - { symbol: '.?', match: '\.\?' }
     - { symbol: '=>', match: '=>' }

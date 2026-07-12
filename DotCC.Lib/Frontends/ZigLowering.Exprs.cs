@@ -555,6 +555,12 @@ internal sealed partial class ZigLowering
                 throw new IrUnsupportedException(
                     "zig `error{…}` set literal is only valid as a `const E = error{…};` declaration or an `E!T` return-type set");
 
+            // `A || B` (error-set merge) as a VALUE is not meaningful in dotcc's erased model — it is
+            // only a `const E = A || B;` declaration (handled in TryComptimeConstBinding, emits nothing).
+            case Zig.ErrSetMerge:
+                throw new IrUnsupportedException(
+                    "zig error-set merge `A || B` is only valid as a `const E = A || B;` declaration (dotcc erases error sets)");
+
             // call of a named function (bare-identifier callee).
             case Zig.CallArgs c:   return LowerCall(c.Arg0, c.Arg2);
             case Zig.CallNoArgs c: return LowerCall(c.Arg0, null);
