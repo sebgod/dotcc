@@ -81,6 +81,53 @@ public class ZigTestRunnerTests
     }
 
     [Fact]
+    public void expectError_matches_the_expected_error_and_rejects_a_non_error()
+    {
+        var (okOut, okExit) = RunZigTest(
+            "const std = @import(\"std\");\n" +
+            "fn f(x: i32) !i32 { if (x < 0) return error.Neg; return x; }\n" +
+            "test \"is neg\" { try std.testing.expectError(error.Neg, f(-1)); }\n");
+        okOut.ShouldContain("test \"is neg\" ... OK");
+        okExit.ShouldBe(0);
+
+        // A non-error result (f(5) is Ok) must FAIL expectError, as in real Zig.
+        var (failOut, failExit) = RunZigTest(
+            "const std = @import(\"std\");\n" +
+            "fn f(x: i32) !i32 { if (x < 0) return error.Neg; return x; }\n" +
+            "test \"not an error\" { try std.testing.expectError(error.Neg, f(5)); }\n");
+        failOut.ShouldContain("test \"not an error\" ... FAIL");
+        failExit.ShouldBe(1);
+    }
+
+    [Fact]
+    public void expectEqualStrings_compares_byte_slices()
+    {
+        var (okOut, okExit) = RunZigTest(
+            "const std = @import(\"std\");\n" +
+            "test \"same\" { try std.testing.expectEqualStrings(\"abc\", \"abc\"); }\n");
+        okOut.ShouldContain("test \"same\" ... OK");
+        okExit.ShouldBe(0);
+
+        var (failOut, failExit) = RunZigTest(
+            "const std = @import(\"std\");\n" +
+            "test \"diff\" { try std.testing.expectEqualStrings(\"abc\", \"abd\"); }\n");
+        failOut.ShouldContain("test \"diff\" ... FAIL");
+        failExit.ShouldBe(1);
+    }
+
+    [Fact]
+    public void expectEqualSlices_takes_an_element_type_and_compares()
+    {
+        // A string literal is a `[]const u8`, so `expectEqualSlices(u8, …)` exercises the 3-arg
+        // (type, expected, actual) lowering distinct from expectEqualStrings.
+        var (stdout, exit) = RunZigTest(
+            "const std = @import(\"std\");\n" +
+            "test \"u8 slices\" { try std.testing.expectEqualSlices(u8, \"xy\", \"xy\"); }\n");
+        stdout.ShouldContain("test \"u8 slices\" ... OK");
+        exit.ShouldBe(0);
+    }
+
+    [Fact]
     public void A_file_with_no_tests_passes_with_zero_count()
     {
         // A `main` is IGNORED in test mode (real `zig test` runs only tests), and a file with no
