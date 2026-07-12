@@ -352,7 +352,9 @@ Seed list (each its own loop increment; ranked by the table above, not guesswork
 - **`@fieldParentPtr` / `@offsetOf` / `@bitOffsetOf`** — the layout model has
   offsets; parent-ptr is pointer arithmetic over them (156 uses; intrusive
   containers).
-- **Error-surface completion**: error-set merge `||`, `anyerror`,
+- **Error-surface completion**: error-set merge `||` **(DONE 2026-07-12** — Mul-level `||`
+  lexer/grammar + erased-set lowering; `const E = A || B;` registers an unconstrained set. Top parse
+  bucket 42→6 files, probe 25.0%→25.3%.**)**, `anyerror`,
   `@errorCast`, switch-on-error completeness, `errdefer` (audit vs Milestone H).
 - **Casts audit**: `@constCast`, `@volatileCast`, `@intFromPtr`/`@ptrFromInt`,
   `@floatFromInt`/`@intFromFloat`/`@floatCast` — fill per wall-finder hits.

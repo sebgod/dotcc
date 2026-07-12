@@ -3844,6 +3844,20 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Error_set_merge_lowers_as_an_erased_error_union()
+    {
+        // `A || B` merges error sets (Zig's Mul-level `||`, not boolean-or). dotcc erases error sets
+        // into one flat code space, so the merged set is registered (unconstrained) and `E!T` is just
+        // an erased error union over the payload. road-to-zig-std S9 (was the top parse bucket).
+        var cs = EmitZig(
+            "const A = error{ Foo };\n" +
+            "const StatError = error{ Bar } || A;\n" +
+            "fn f(x: i32) StatError!i32 { if (x < 0) return error.Foo; return x; }\n" +
+            "pub fn main() u8 { return @intCast(f(5) catch 0); }\n");
+        cs.ShouldContain("ErrUnion<int>");   // StatError!i32 → erased error union over the payload
+    }
+
+    [Fact]
     public void Lowers_unnamed_param_and_error_returning_function_pointer_types()
     {
         // A fn-pointer type's params may be UNNAMED (`fn (i32, i32) i32`, the common Zig form) as well

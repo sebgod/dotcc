@@ -83,6 +83,19 @@ internal sealed partial class ZigLowering
             _errorSetMembers[name] = new HashSet<string>(System.StringComparer.Ordinal);  // `error{}` — no members
             return true;
         }
+        // `const E = A || B || …;` — an error-set MERGE (road-to-zig-std). Zig's `||` unions error sets;
+        // dotcc erases the set into the flat global code space, so a merge is just another (erased) set.
+        // Register E as a known set name so `E!T` / an `IsTypeName(E)` check resolve, but leave it
+        // UNCONSTRAINED (no `_errorSetMembers` entry) — the union's full membership spans operands that
+        // may live in other, not-yet-resolved modules (`Io.Cancelable`), so `TryDeclaredErrorSet` treats
+        // it as `anyerror`-like and enforces no membership (matching the erased model). Emit no decl.
+        // Member `error{…}` literal operands still get their codes assigned (via LowerErrorLit paths on
+        // use); here we only need the erased type name.
+        if (rhs.Content is Zig.ErrSetMerge)
+        {
+            _errorSets.Add(name);
+            return true;
+        }
         // A type-as-value alias (wall-plan W1): `const T = i32;` / `const P = *T;` / `const List =
         // std.ArrayList(i32);` / `const T = @TypeOf(x);`. Recorded LAST — the import / allocator /
         // error-set forms above are the more specific comptime bindings; anything else that lowers to
