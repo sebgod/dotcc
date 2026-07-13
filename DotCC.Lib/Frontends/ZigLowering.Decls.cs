@@ -1485,6 +1485,17 @@ internal sealed partial class ZigLowering
                     throw new IrUnsupportedException("zig `@intFromEnum` expects an enum operand");
                 }
                 return new Cast(en.Underlying, enumOperand) { Type = en.Underlying };
+            case "@intFromBool":
+                // `@intFromBool(b)` — a bool → its integer value (0 or 1). Zig types the result `u1`;
+                // dotcc yields an `int`-typed 0/1 (exactly like a bool comparison result), which then
+                // narrows to any integer sink the same way. The operand's lowered `_Bool` (CBool)
+                // carries a defined conversion to int, so the cast is valid C#. Used by `std.ascii`'s
+                // `toUpper`/`toLower` (`@as(u8, @intFromBool(isLower(c))) << 5`).
+                if (bargs.Count != 1)
+                {
+                    throw new IrUnsupportedException($"zig `@intFromBool` expects (bool); got {bargs.Count} argument(s)");
+                }
+                return new Cast(CType.Int, LowerExpr(bargs[0])) { Type = CType.Int };
             case "@sizeOf":
                 // `@sizeOf(T)` — the byte size as `usize`. Reuses the C `sizeof` IR (folded for a
                 // user aggregate via the layout model, else C#'s `sizeof(T)`).
