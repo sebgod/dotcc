@@ -130,6 +130,18 @@ public sealed class ZigOracleTests
         new object[] { "inline_struct_return_type",
             "fn make() struct { a: u8, b: u8 } { return .{ .a = 3, .b = 4 }; }\n" +
             "pub fn main() u8 { const p = make(); return p.a + p.b; }\n", 7, "" },
+        // A NESTED `const Inner = struct {…};` inside a struct body (road-to-zig-std S9, grammar #89) —
+        // registered under a parent-mangled name, resolved by plain name inside the parent's method,
+        // built via `.{…}` and read with `i.field`. sum() = {x:3,y:4}; 3 + 4 = 7.
+        new object[] { "nested_container_struct_member",
+            "const Outer = struct {\n" +
+            "    const Inner = struct { x: u8, y: u8 };\n" +
+            "    fn sum() u8 {\n" +
+            "        const i = Inner{ .x = 3, .y = 4 };\n" +
+            "        return i.x + i.y;\n" +
+            "    }\n" +
+            "};\n" +
+            "pub fn main() u8 { return Outer.sum(); }\n", 7, "" },
         // Function-pointer types + anyopaque (Milestone W, part 1a): two ops share the signature
         // `fn (ctx: *anyopaque, by: i32) i32`, each treating its opaque ctx as a `*i32` accumulator
         // (the C void*-callback idiom). main binds each to a `*const fn (…) i32` value and calls it

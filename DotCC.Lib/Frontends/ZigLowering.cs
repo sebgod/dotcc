@@ -230,6 +230,17 @@ internal sealed partial class ZigLowering
     /// value const — a namespaced constant — is not lowered yet; it needs top-level globals.)</summary>
     private readonly Dictionary<string, Dictionary<string, CType>> _selfAliases = new(System.StringComparer.Ordinal);
 
+    /// <summary>Per parent container name, each NESTED container decl (<c>const Inner = struct {…};</c>
+    /// as a struct-body member — road-to-zig-std S9, grammar #89) → the synthesized type of the nested
+    /// struct, registered under a parent-mangled IR name (<c>Parent__Inner</c>). Scoped exactly like
+    /// <see cref="_selfAliases"/>: consulted by <see cref="ResolveNestedType"/> only while a method of
+    /// the parent is being lowered (<see cref="_currentContainer"/> set, which covers both a method
+    /// signature and its body), so the plain name <c>Inner</c> resolves inside <c>Parent</c>'s methods
+    /// without leaking globally — two parents may each nest a same-named <c>Inner</c> (pervasive in std)
+    /// without colliding. V1 registers nested STRUCTS only, fields-only; external qualified access
+    /// (<c>Parent.Inner</c>), nested enum/union, and nested-in-nested are deferred loud cuts.</summary>
+    private readonly Dictionary<string, Dictionary<string, CType>> _nestedContainerTypes = new(System.StringComparer.Ordinal);
+
     /// <summary>Per <c>(struct name, field name)</c>, the RAW default-value AST of a
     /// <c>field: T = default</c> declaration (std S9). Stored unlowered and materialized lazily — a
     /// <c>.{…}</c> literal that OMITS the field appends <c>LowerExprSink(default, fieldType)</c>
@@ -507,26 +518,29 @@ internal sealed partial class ZigLowering
             {
                 case Zig.StructDecl s:      // const IDENT = struct { Members } ;
                 {
-                    var (fields, methods, consts) = SplitMembers(s.Arg5);
+                    var (fields, methods, consts, containers) = SplitMembers(s.Arg5);
                     RegisterStruct(Tok(s.Arg1), fields);
                     RegisterContainerConsts(Tok(s.Arg1), consts);
+                    RegisterNestedContainers(Tok(s.Arg1), containers);
                     foreach (var m in methods) { containerMethods.Add((Tok(s.Arg1), m)); }
                     break;
                 }
                 case Zig.StructDeclEmpty s: RegisterStruct(Tok(s.Arg1), System.Array.Empty<Item>()); break;  // const IDENT = struct { } ;
                 case Zig.ExternStructDecl s:  // const IDENT = extern struct { Members } ;
                 {
-                    var (fields, methods, consts) = SplitMembers(s.Arg6);
+                    var (fields, methods, consts, containers) = SplitMembers(s.Arg6);
                     RegisterStruct(Tok(s.Arg1), fields, AggregateLayout.Sequential);
                     RegisterContainerConsts(Tok(s.Arg1), consts);
+                    RegisterNestedContainers(Tok(s.Arg1), containers);
                     foreach (var m in methods) { containerMethods.Add((Tok(s.Arg1), m)); }
                     break;
                 }
                 case Zig.PackedStructDecl s:  // const IDENT = packed struct { Members } ;
                 {
-                    var (fields, methods, consts) = SplitMembers(s.Arg6);
+                    var (fields, methods, consts, containers) = SplitMembers(s.Arg6);
                     RegisterStruct(Tok(s.Arg1), fields, AggregateLayout.Packed);
                     RegisterContainerConsts(Tok(s.Arg1), consts);
+                    RegisterNestedContainers(Tok(s.Arg1), containers);
                     foreach (var m in methods) { containerMethods.Add((Tok(s.Arg1), m)); }
                     break;
                 }
