@@ -36,19 +36,24 @@ internal sealed partial class ZigLowering
                 var module = UnquoteStringLiteral(Tok(sl.Arg0));
                 if (module == "std")
                 {
-                    _imports[name] = module;
+                    _imports[name] = module;   // the curated-path namespace tag (std.mem/debug/heap/testing)
+                    // If a std lib dir is configured, ALSO record the real std.zig as a navigable import,
+                    // so a NON-curated `std.<x>` (e.g. `std.ascii`) falls through to real-root navigation
+                    // (road-to-zig-std S1/S2) rather than erroring.
+                    if (_moduleGraph?.StdRootPath is { } stdPath) { _importSpecs[name] = stdPath; }
                     return true;
                 }
-                // A relative sibling import `@import("./util.zig")` — resolve through the module graph,
-                // lower it eagerly into the shared IR, and bind the name so a later `X.func(…)` resolves
-                // in that module's exports (road-to-zig-std S1). Only when a graph + importer dir are
-                // available (a graph-driven build); a standalone unit keeps the "only std" rejection.
+                // A relative sibling import `@import("./util.zig")` — record the spec; the module is
+                // resolved + prepared LAZILY on first use (ResolveImport), so std.zig's 66 re-exports
+                // don't fan out at prepare time. In a LAZY (prepared) module, ANY other spec — a bare
+                // `@import("builtin")`/`@import("root")` (S3 synthetic modules) or a not-yet-modeled
+                // sibling — is likewise recorded deferred and only errors if actually navigated, so
+                // std.zig's own `@import("builtin")` doesn't sink its prepare. A ROOT unit keeps the loud
+                // "not modeled" rejection for a non-.zig import.
                 if (_moduleGraph is not null && _importerDir is not null
-                    && module.EndsWith(".zig", System.StringComparison.Ordinal))
+                    && (_lazy || module.EndsWith(".zig", System.StringComparison.Ordinal)))
                 {
-                    var mod = _moduleGraph.Load(module, _importerDir);
-                    EnsureModulePrepared(mod);
-                    _importModules[name] = mod;
+                    _importSpecs[name] = module;
                     return true;
                 }
                 throw new IrUnsupportedException(

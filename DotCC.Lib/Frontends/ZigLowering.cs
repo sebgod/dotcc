@@ -51,10 +51,52 @@ internal sealed partial class ZigLowering
     /// against (null for an in-memory/standalone unit).</summary>
     private readonly string? _importerDir;
 
-    /// <summary>Bound name of a <c>const X = @import("./sibling.zig");</c> → the resolved (and eagerly
-    /// lowered) <see cref="ZigModule"/>, so a later <c>X.func(…)</c> resolves the callee in that module's
-    /// <see cref="ZigModule.Exports"/>. Distinct from the <c>"std"</c> namespace tag in <see cref="_imports"/>.</summary>
+    /// <summary>Bound name of a <c>const X = @import("…zig");</c> → its raw import spec (a relative
+    /// path, or the absolute <c>std.zig</c> path for <c>@import("std")</c>), recorded WITHOUT resolving —
+    /// so std.zig's 66 re-exports don't fan out at prepare time. The target module is resolved + prepared
+    /// LAZILY on first navigation/use (<see cref="ResolveImport"/>). Road-to-zig-std S1/S2.</summary>
+    private readonly Dictionary<string, string> _importSpecs = new(System.StringComparer.Ordinal);
+
+    /// <summary>Memo of a bound import name → the resolved+prepared <see cref="ZigModule"/> (populated by
+    /// <see cref="ResolveImport"/> on first use), so <c>X.func(…)</c> / a <c>X.sub</c> navigation resolves
+    /// the module without re-loading.</summary>
     private readonly Dictionary<string, ZigModule> _importModules = new(System.StringComparer.Ordinal);
+
+    /// <summary>Resolve an import bound in THIS unit by <paramref name="name"/> to its module, loading +
+    /// preparing it (lazily) on first use and memoizing. Null when <paramref name="name"/> isn't a
+    /// bound file import (e.g. an unconfigured <c>std</c>, or a plain value const).</summary>
+    internal ZigModule? ResolveImport(string name)
+    {
+        if (_importModules.TryGetValue(name, out var existing)) { return existing; }
+        if (_importSpecs.TryGetValue(name, out var spec) && _moduleGraph is not null && _importerDir is not null)
+        {
+            // Only a resolvable `.zig` file becomes a navigable module; a special import
+            // (`builtin`/`root` — S3) or a missing file isn't navigable, so return null and let the
+            // caller error if it was actually used (rather than throw a raw file-not-found here).
+            var full = System.IO.Path.IsPathRooted(spec) ? spec : System.IO.Path.Combine(_importerDir, spec);
+            if (!spec.EndsWith(".zig", System.StringComparison.Ordinal) || !System.IO.File.Exists(full))
+            {
+                return null;
+            }
+            var mod = _moduleGraph.Load(spec, _importerDir);
+            EnsureModulePrepared(mod);
+            _importModules[name] = mod;
+            return mod;
+        }
+        return null;
+    }
+
+    /// <summary>Resolve a module-navigation expression to its <see cref="ZigModule"/>: a bare import name
+    /// (<c>util</c>, <c>std</c>) or a chained re-export (<c>std.ascii</c> → <c>ascii.zig</c> via std.zig's
+    /// <c>pub const ascii = @import("ascii.zig")</c>). Navigates through each base module's own imports.
+    /// Null when the expression isn't a module path (road-to-zig-std S1/S2).</summary>
+    private ZigModule? ResolveModulePath(Item expr) => expr.Content switch
+    {
+        Zig.Ident id => ResolveImport(Tok(id.Arg0)),
+        Zig.Field f when ResolveModulePath(f.Arg0) is { Lowering: { } baseLowering } =>
+            baseLowering.ResolveImport(Tok(f.Arg2)),
+        _ => null,
+    };
 
     /// <summary>This unit's top-level function declarations (name → the declared <see cref="Symbol"/>),
     /// captured in pass 1 so an importing module can build a call against them (<see cref="ExportedFns"/>).</summary>
@@ -621,6 +663,9 @@ internal sealed partial class ZigLowering
         // Pass 2 lowers each body against the now-complete type + signature environment. An
         // `extern fn` prototype is declared in pass 1 too but has no body to lower.
         var decls = Flatten(root);
+        // Set the lazy flag BEFORE pass 0 so `@import` binding (TryComptimeConstBinding, pass 0a) knows
+        // to record a special/unmodeled import (`builtin`/`root`) as a deferred spec rather than throw.
+        _lazy = lazy;
 
         // Container methods (struct/enum/union), collected across pass 0 as mangled
         // `TypeName_method` free functions and declared in pass 1 (so a method body can
@@ -699,7 +744,6 @@ internal sealed partial class ZigLowering
         // types + consts registered above are enough for a referenced function to resolve its types.
         if (prepareOnly)
         {
-            _lazy = lazy;
             foreach (var decl in decls)
             {
                 var d = Unwrap(decl);

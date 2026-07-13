@@ -925,22 +925,6 @@ internal sealed partial class ZigLowering
     {
         var methodName = Tok(fld.Arg2);
 
-        // --- a call on an @import'ed sibling module: `mod.func(args)` (road-to-zig-std S1) ---
-        // `mod` is bound to a relative `@import("./x.zig")` (in `_importModules`), which was lowered
-        // eagerly into the same IR. Resolve `func` in that module's exports and build a direct call
-        // against its shared symbol (so the emitted call binds to the module's emitted method).
-        if (fld.Arg0.Content is Zig.Ident modId && _importModules.TryGetValue(Tok(modId.Arg0), out var importedMod))
-        {
-            // Lower the referenced function on demand (road-to-zig-std S2): its signature lowers now
-            // (so the call binds) and its body is enqueued for the top-level drain. A missing function
-            // is a loud, precise error naming the module.
-            var exportedSym = importedMod.Lowering?.EnsureDeclLowered(methodName)
-                ?? throw new IrUnsupportedException(
-                    $"zig import '{Tok(modId.Arg0)}' has no exported function '{methodName}' "
-                    + $"(module '{System.IO.Path.GetFileName(importedMod.Path)}')");
-            return BuildCall(exportedSym, argItems, receiver: null);
-        }
-
         // --- curated `std.mem` helpers (a static call on the std.mem namespace) ---
         // Routed before the generic dispatch. dotcc models no `std` in general — only this curated
         // set of the most common slice utilities; an unmodeled member is a clear, specific error.
@@ -962,6 +946,20 @@ internal sealed partial class ZigLowering
         if (TryResolveStdPath(fld.Arg0, out var stdTest) && stdTest == "std.testing")
         {
             return LowerStdTestingCall(methodName, argItems);
+        }
+
+        // --- a call navigated to an @import'ed module: `util.func(args)` / `std.ascii.isDigit(args)` ---
+        // AFTER the curated std.* fast-paths (so std.mem/debug/testing keep their curated lowering),
+        // resolve the receiver as a module path — a relative import, or the real `std` root and its
+        // re-export chain (std → ascii = @import("ascii.zig")) — and lower the referenced function on
+        // demand: its signature lowers now (so the call binds) and its body is enqueued for the
+        // top-level drain (road-to-zig-std S1/S2).
+        if (ResolveModulePath(fld.Arg0) is { } navMod)
+        {
+            var navSym = navMod.Lowering?.EnsureDeclLowered(methodName)
+                ?? throw new IrUnsupportedException(
+                    $"zig module '{System.IO.Path.GetFileName(navMod.Path)}' has no exported function '{methodName}'");
+            return BuildCall(navSym, argItems, receiver: null);
         }
 
         // A member call on the `std.ArrayList(T)` TYPE (`std.ArrayList(i32).init(alloc)`) is

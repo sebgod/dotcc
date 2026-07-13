@@ -2416,6 +2416,64 @@ public sealed class ZigOracleTests
         }
     }
 
+    /// <summary>THE road-to-zig-std G1 milestone: compile real upstream <c>std.ascii</c> FROM SOURCE.
+    /// dotcc is given only a root that does <c>@import("std")</c> and calls the ascii classifiers; it
+    /// navigates <c>std.zig</c> → <c>ascii.zig</c> (the real files, parsed resiliently) and lowers ONLY
+    /// the referenced classifiers (lazily), then must agree with real zig. Needs <c>DOTCC_ZIG_LIB_DIR</c>
+    /// so dotcc finds the same std source the oracle's zig uses.</summary>
+    [Fact]
+    public void Dotcc_matches_zig_std_ascii_from_source()
+    {
+        if (!ZigRunRequested)
+        {
+            Assert.Skip($"Zig oracle is opt-in. Set {RunZigEnv}=1 to run the std.ascii-from-source differential.");
+        }
+        if (!ZigOracle.IsAvailable)
+        {
+            Assert.Skip($"{RunZigEnv} requested but no `zig` is on PATH on this host.");
+        }
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOTCC_ZIG_LIB_DIR")))
+        {
+            Assert.Skip("DOTCC_ZIG_LIB_DIR must point at the zig lib dir so dotcc navigates the real std.ascii source.");
+        }
+
+        const string program =
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var acc: u8 = 0;\n" +
+            "    if (std.ascii.isDigit('7')) acc += 1;\n" +
+            "    if (std.ascii.isUpper('A')) acc += 2;\n" +
+            "    if (std.ascii.isLower('z')) acc += 4;\n" +
+            "    if (std.ascii.toUpper('a') == 'A') acc += 8;\n" +
+            "    if (std.ascii.toLower('Q') == 'q') acc += 16;\n" +
+            "    if (std.ascii.isWhitespace(' ')) acc += 32;\n" +
+            "    return acc;\n" +
+            "}\n";
+
+        var workDir = Path.Combine(Path.GetTempPath(), $"dotcc-zig-stdascii-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(workDir);
+        var mainPath = Path.Combine(workDir, "main.zig");
+        File.WriteAllText(mainPath, program);
+        try
+        {
+            // dotcc: compile std.ascii from REAL upstream source (navigating @import("std") → ascii.zig),
+            // lazily — only the referenced classifiers lower, not ascii's std-heavy tails.
+            var emitted = Compiler.EmitCSharp(new[] { mainPath }, emit: EmitMode.Csproj);
+            var (dotccStdout, dotccExit) = FixtureRunner.CompileAndRunCapturingExit(emitted, Array.Empty<string>());
+
+            // zig: build + run the same root; its std is the same pinned source dotcc navigated.
+            var (zigStdout, zigExit) = ZigOracle.CompileAndRun(mainPath, workDir);
+
+            dotccExit.ShouldBe(zigExit, "dotcc's std.ascii-from-source diverges from real zig (exit code)");
+            dotccExit.ShouldBe(63, "std.ascii classifiers did not produce the expected result");
+            Norm(dotccStdout).ShouldBe(Norm(zigStdout), "dotcc's std.ascii-from-source diverges from real zig (stdout)");
+        }
+        finally
+        {
+            try { Directory.Delete(workDir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
     /// <summary>MIXED <c>.c</c> + <c>.zig</c> programs (Milestone V — C↔Zig shared-heap interop).
     /// Each case is a C translation unit + a Zig <c>main</c> + expected exit + expected stdout.
     /// The unifying guarantee under test: <c>std.heap.c_allocator</c> IS the C <c>malloc</c>/<c>free</c>/

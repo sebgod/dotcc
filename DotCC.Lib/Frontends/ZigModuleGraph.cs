@@ -72,11 +72,17 @@ internal sealed class ZigModuleGraph
     private readonly Dictionary<string, ZigModule> _modules = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<ZigLowering> _lowerings = new();
 
-    public ZigModuleGraph()
+    /// <summary>The real <c>std.zig</c> root file path (from <c>--zig-lib-dir</c> / the
+    /// <c>DOTCC_ZIG_LIB_DIR</c> env), or null when no std source tree is configured — then
+    /// <c>@import("std")</c> stays purely on the curated path and a non-curated <c>std.x</c> errors.</summary>
+    internal string? StdRootPath { get; }
+
+    public ZigModuleGraph(string? stdRootPath = null)
     {
         _parser = Zig.BuildParser(Zig.IdentityVisitor.Instance);
         _lexerTable = Zig.BuildLexer();
         (_syncTerminals, _openBrackets, _closeBrackets) = BuildRecoverySets(_parser.Grammar);
+        StdRootPath = stdRootPath;
     }
 
     /// <summary>Resolve an <c>@import</c> spec to a module, parsing (resiliently) and caching on first
