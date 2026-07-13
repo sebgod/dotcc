@@ -871,8 +871,41 @@ internal sealed partial class ZigLowering
             _ => null,
         };
         if (t is { } resolved) { type = resolved; return true; }
+        // An ARBITRARY-WIDTH integer `uN` / `iN` (road-to-zig-std B3 — `u21` alone has 58 uses and
+        // `std.unicode` is unusable without them). dotcc has no sub-word integer type, so a `uN`/`iN`
+        // lowers to the smallest STANDARD width that holds N bits (a `u4` → `byte`, `u12` → `ushort`,
+        // `i7` → `sbyte`). @sizeOf matches zig (both round up to whole bytes); the extra representable
+        // range means overflow does NOT wrap at N bits — the SAME documented leniency dotcc already
+        // takes for plain `+` (no overflow trap). Sub-byte bit-PACKING inside a `packed struct` is a
+        // separate concern (dotcc byte-packs). N &gt; 128 needs BigInteger — a loud cut for now.
+        if (TryArbitraryWidthInt(name, out var awInt)) { type = awInt; return true; }
         type = CType.Void;
         return false;
+    }
+
+    /// <summary>Recognize a Zig arbitrary-width integer keyword <c>u&lt;N&gt;</c> / <c>i&lt;N&gt;</c>
+    /// (any 1..128 bit width, not just the standard powers of two the switch lists) and map it to the
+    /// smallest standard <see cref="CType"/> that holds N bits. Returns false for a non-<c>uN</c>/<c>iN</c>
+    /// name, a non-numeric tail, a zero/overlarge width (&gt; 128), or a leading zero (<c>u08</c> is not a
+    /// zig type) — so <see cref="TryLowerPrim"/> falls through to its miss.</summary>
+    private static bool TryArbitraryWidthInt(string name, out CType type)
+    {
+        type = CType.Void;
+        if (name.Length < 2 || (name[0] != 'u' && name[0] != 'i')) { return false; }
+        var digits = name.AsSpan(1);
+        if (digits.Length > 1 && digits[0] == '0') { return false; }   // no leading zero (u08, i007)
+        foreach (var ch in digits) { if (ch is < '0' or > '9') { return false; } }
+        if (!int.TryParse(digits, out var bits) || bits < 1 || bits > 128) { return false; }
+        var signed = name[0] == 'i';
+        type = bits switch
+        {
+            <= 8  => signed ? CType.SChar : CType.UChar,
+            <= 16 => signed ? CType.Short : CType.UShort,
+            <= 32 => signed ? CType.Int   : CType.UInt,
+            <= 64 => signed ? CType.Long  : CType.ULong,
+            _     => signed ? CType.Int128 : CType.UInt128,   // 65..128
+        };
+        return true;
     }
 
 }

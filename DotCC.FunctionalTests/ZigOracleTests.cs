@@ -64,6 +64,16 @@ public sealed class ZigOracleTests
         // wider signedness the UsualArithmetic fix preserves; main is the observable.
         new object[] { "i64_params",
             "fn wide(a: i64, b: i64) i64 { return a * b; }\npub fn main() u8 { return 42; }\n", 42, "" },
+        // Arbitrary-width ints `uN`/`iN` (road-to-zig-std B3) → smallest containing std width. Values
+        // chosen to fit (no wrap): u4 5+3=8, u12 100, i7 -3; 8 + 100 - 3 = 105.
+        new object[] { "arbitrary_width_ints",
+            "pub fn main() u8 {\n" +
+            "    var x: u4 = 5;\n" +
+            "    x += 3;\n" +
+            "    const y: u12 = 100;\n" +
+            "    const z: i7 = -3;\n" +
+            "    return @intCast(@as(i32, x) + y + z);\n" +
+            "}\n", 105, "" },
         // A function CALL — main invokes a named function with arguments.
         new object[] { "call",
             "fn add(a: u8, b: u8) u8 { return a + b; }\npub fn main() u8 { return add(40, 2); }\n", 42, "" },
