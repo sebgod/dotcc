@@ -34,13 +34,25 @@ internal sealed partial class ZigLowering
             if (bargs.Count == 1 && bargs[0].Content is Zig.StrLit sl)
             {
                 var module = UnquoteStringLiteral(Tok(sl.Arg0));
-                if (module != "std")
+                if (module == "std")
                 {
-                    throw new IrUnsupportedException(
-                        $"zig `@import(\"{module}\")` is not modeled — only `@import(\"std\")` (and only its allocator paths: std.mem.Allocator, std.heap.page_allocator/c_allocator/FixedBufferAllocator)");
+                    _imports[name] = module;
+                    return true;
                 }
-                _imports[name] = module;
-                return true;
+                // A relative sibling import `@import("./util.zig")` — resolve through the module graph,
+                // lower it eagerly into the shared IR, and bind the name so a later `X.func(…)` resolves
+                // in that module's exports (road-to-zig-std S1). Only when a graph + importer dir are
+                // available (a graph-driven build); a standalone unit keeps the "only std" rejection.
+                if (_moduleGraph is not null && _importerDir is not null
+                    && module.EndsWith(".zig", System.StringComparison.Ordinal))
+                {
+                    var mod = _moduleGraph.Load(module, _importerDir);
+                    EnsureModuleLowered(mod);
+                    _importModules[name] = mod;
+                    return true;
+                }
+                throw new IrUnsupportedException(
+                    $"zig `@import(\"{module}\")` is not modeled — only `@import(\"std\")` (its curated allocator/mem/debug/testing paths) and a relative `@import(\"./sibling.zig\")` are supported");
             }
         }
         if (TryKnownAllocatorKind(rhs, out var kind))

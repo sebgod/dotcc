@@ -2349,6 +2349,69 @@ public sealed class ZigOracleTests
         }
     }
 
+    /// <summary>MULTI-FILE Zig programs (road-to-zig-std S1 — the module graph). Each case is a root
+    /// <c>main.zig</c> that <c>@import</c>s a sibling by relative path + the sibling's source + expected
+    /// exit + stdout. dotcc is given ONLY the root and discovers the sibling through the module graph,
+    /// exactly as <c>zig build-exe main.zig</c> does; the differential proves the imported module lowers
+    /// into the same program and cross-module calls resolve.</summary>
+    public static IEnumerable<object[]> MultiFilePrograms => new[]
+    {
+        // main imports a sibling and calls its exported fn: add(40, 2) = 42.
+        new object[] { "import_call",
+            "const util = @import(\"util.zig\");\npub fn main() u8 { return util.add(40, 2); }\n",
+            "util.zig", "pub fn add(a: u8, b: u8) u8 { return a + b; }\n", 42, "" },
+        // A sibling that itself imports a THIRD module (transitive import), and a call chain across all
+        // three: main → a.step (→ b.two) ; 40 + 2 = 42.
+        new object[] { "import_transitive",
+            "const a = @import(\"a.zig\");\npub fn main() u8 { return a.step(40); }\n",
+            "a.zig", "const b = @import(\"b.zig\");\npub fn step(x: u8) u8 { return x + b.two(); }\n", 42, "" },
+    };
+
+    [Theory]
+    [MemberData(nameof(MultiFilePrograms))]
+    public void Dotcc_matches_zig_multifile(string name, string mainSource, string siblingName,
+        string siblingSource, int expectedExit, string expectedOutput)
+    {
+        if (!ZigRunRequested)
+        {
+            Assert.Skip($"Zig oracle is opt-in. Set {RunZigEnv}=1 to run the multi-file module-graph differential.");
+        }
+        if (!ZigOracle.IsAvailable)
+        {
+            Assert.Skip($"{RunZigEnv} requested but no `zig` is on PATH on this host.");
+        }
+
+        // One work dir holds the root + its sibling(s); both pipelines consume the same files. The
+        // `import_transitive` case needs a third module `b.zig` — supplied here so the chain resolves.
+        var workDir = Path.Combine(Path.GetTempPath(), $"dotcc-zig-multi-{name}-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(workDir);
+        var mainPath = Path.Combine(workDir, "main.zig");
+        File.WriteAllText(mainPath, mainSource);
+        File.WriteAllText(Path.Combine(workDir, siblingName), siblingSource);
+        if (name == "import_transitive")
+        {
+            File.WriteAllText(Path.Combine(workDir, "b.zig"), "pub fn two() u8 { return 2; }\n");
+        }
+        try
+        {
+            // dotcc: emit from ONLY the root; the module graph discovers the sibling(s).
+            var emitted = Compiler.EmitCSharp(new[] { mainPath }, emit: EmitMode.Csproj);
+            var (dotccStdout, dotccExit) = FixtureRunner.CompileAndRunCapturingExit(emitted, Array.Empty<string>());
+
+            // zig: build + run the same root (CompileAndRun copies the sibling .zig files alongside).
+            var (zigStdout, zigExit) = ZigOracle.CompileAndRun(mainPath, workDir);
+
+            dotccExit.ShouldBe(zigExit, $"dotcc diverges from real zig on '{name}' (exit code)");
+            dotccExit.ShouldBe(expectedExit, $"'{name}' did not produce the expected exit code");
+            Norm(dotccStdout).ShouldBe(Norm(zigStdout), $"dotcc diverges from real zig on '{name}' (stdout)");
+            Norm(dotccStdout).ShouldBe(expectedOutput, $"'{name}' did not produce the expected output");
+        }
+        finally
+        {
+            try { Directory.Delete(workDir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
     /// <summary>MIXED <c>.c</c> + <c>.zig</c> programs (Milestone V — C↔Zig shared-heap interop).
     /// Each case is a C translation unit + a Zig <c>main</c> + expected exit + expected stdout.
     /// The unifying guarantee under test: <c>std.heap.c_allocator</c> IS the C <c>malloc</c>/<c>free</c>/

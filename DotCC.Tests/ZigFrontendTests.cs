@@ -24,6 +24,34 @@ public sealed class ZigFrontendTests
         finally { File.Delete(path); }
     }
 
+    /// <summary>Emit a multi-file Zig program: writes <paramref name="mainSource"/> as <c>main.zig</c>
+    /// plus each sibling into one temp directory, then compiles ONLY <c>main.zig</c> — dotcc discovers
+    /// the siblings through the module graph the way <c>zig build-exe main.zig</c> does.</summary>
+    private static string EmitZigMulti(string mainSource, params (string name, string source)[] siblings)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"dotcc-zig-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        var mainPath = Path.Combine(dir, "main.zig");
+        File.WriteAllText(mainPath, mainSource);
+        foreach (var (name, source) in siblings) { File.WriteAllText(Path.Combine(dir, name), source); }
+        try { return Compiler.EmitCSharp(new[] { mainPath }); }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    [Fact]
+    public void Lowers_a_relative_import_and_calls_across_modules()
+    {
+        // main.zig imports a sibling and calls its exported function. Before the module graph this
+        // threw at lowering ("only @import(\"std\")"); now the sibling is parsed + lowered into the same
+        // IR and `util.add(40, 2)` binds to its exported `add` (road-to-zig-std S1). Emitting at all
+        // proves the cross-module path; the fn + call in the output confirm both modules are present.
+        var cs = EmitZigMulti(
+            "const util = @import(\"./util.zig\");\npub fn main() u8 { return util.add(40, 2); }\n",
+            ("util.zig", "pub fn add(a: u8, b: u8) u8 { return a + b; }\n"));
+        cs.ShouldContain("add");
+        cs.ShouldContain("main");
+    }
+
     [Fact]
     public void Lowers_switch_return_prongs()
     {

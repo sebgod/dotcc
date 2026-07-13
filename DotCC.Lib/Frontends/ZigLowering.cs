@@ -38,6 +38,32 @@ internal sealed partial class ZigLowering
     private readonly IrBuilder _ir;
     private readonly SymbolTable _symbols;
 
+    /// <summary>The name legalizer, kept so an <c>@import</c>ed module can be lowered with its own
+    /// <see cref="ZigLowering"/> against the same legalizer (consistent emitted names across modules).</summary>
+    private readonly INameLegalizer _names;
+
+    /// <summary>The Zig module graph (road-to-zig-std S1), or null for a standalone unit with no
+    /// cross-module imports (the pre-graph behavior — only <c>@import("std")</c> is modeled). When set,
+    /// a relative <c>@import("./x.zig")</c> resolves + lowers the sibling module through it.</summary>
+    private readonly ZigModuleGraph? _moduleGraph;
+
+    /// <summary>Directory of the file being lowered — the base a relative <c>@import</c> resolves
+    /// against (null for an in-memory/standalone unit).</summary>
+    private readonly string? _importerDir;
+
+    /// <summary>Bound name of a <c>const X = @import("./sibling.zig");</c> → the resolved (and eagerly
+    /// lowered) <see cref="ZigModule"/>, so a later <c>X.func(…)</c> resolves the callee in that module's
+    /// <see cref="ZigModule.Exports"/>. Distinct from the <c>"std"</c> namespace tag in <see cref="_imports"/>.</summary>
+    private readonly Dictionary<string, ZigModule> _importModules = new(System.StringComparer.Ordinal);
+
+    /// <summary>This unit's top-level function declarations (name → the declared <see cref="Symbol"/>),
+    /// captured in pass 1 so an importing module can build a call against them (<see cref="ExportedFns"/>).</summary>
+    private readonly Dictionary<string, Symbol> _exportedFns = new(System.StringComparer.Ordinal);
+
+    /// <summary>The top-level functions this unit declares, for an importer to call — see
+    /// <see cref="_exportedFns"/>. Meaningful after <see cref="Lower"/> has run.</summary>
+    internal IReadOnlyDictionary<string, Symbol> ExportedFns => _exportedFns;
+
     /// <summary>The flat global error set: each distinct <c>error.Foo</c> name → a stable
     /// non-zero code (0 is the success sentinel). Shared across the units of one build (the
     /// caller passes one dictionary) so a given error name gets one code program-wide — V1
@@ -443,12 +469,33 @@ internal sealed partial class ZigLowering
     // and registered in the IR test manifest, rather than dropped. Set at construction.
     private readonly bool _testMode;
 
-    public ZigLowering(IrBuilder ir, INameLegalizer names, Dictionary<string, int>? errorCodes = null, bool testMode = false)
+    public ZigLowering(IrBuilder ir, INameLegalizer names, Dictionary<string, int>? errorCodes = null,
+        bool testMode = false, ZigModuleGraph? moduleGraph = null, string? importerDir = null)
     {
         _ir = ir;
+        _names = names;
         _symbols = new SymbolTable(names);
         _errorCodes = errorCodes ?? new Dictionary<string, int>(System.StringComparer.Ordinal);
         _testMode = testMode;
+        _moduleGraph = moduleGraph;
+        _importerDir = importerDir;
+    }
+
+    /// <summary>Eagerly lower an <c>@import</c>ed module's decls into the shared IR (road-to-zig-std S1),
+    /// exactly as if the file had been passed as an input unit, and cache its exported functions on the
+    /// module. Lowered at most once per module (the <see cref="ZigModule.Lowered"/> memo, set BEFORE
+    /// lowering so an import cycle terminates — a module mid-lowering exposes no exports yet, which a
+    /// hand-written program won't hit and std's cycles resolve once laziness lands in S2). The child
+    /// lowering shares this unit's IR, legalizer, and error-code space, and carries the module's own
+    /// directory so ITS relative imports resolve.</summary>
+    private void EnsureModuleLowered(ZigModule module)
+    {
+        if (module.Lowered) { return; }
+        module.Lowered = true;
+        var dir = System.IO.Path.GetDirectoryName(module.Path);
+        var child = new ZigLowering(_ir, _names, _errorCodes, _testMode, _moduleGraph, dir);
+        child.Lower(module.Parse.Tree);
+        module.Exports = child.ExportedFns;
     }
 
     /// <summary>Resolve an error name to its stable code in the flat global error set,
@@ -588,6 +635,16 @@ internal sealed partial class ZigLowering
                 entries.Add(AsEntry(e, null));
             }
         }
+        // Record a top-level function under its source name so an importing module can build a call
+        // against its symbol (road-to-zig-std S1 cross-module resolution), then pass the entry through
+        // unchanged. (V1 exports every top-level fn, not only `pub` ones — the importer is trusted; a
+        // pub-visibility check is a later refinement.)
+        (Symbol sym, List<(string name, CType type)> ps, Item body) Export(Item nameTok,
+            (Symbol sym, List<(string name, CType type)> ps, Item body) e)
+        {
+            _exportedFns[Tok(nameTok)] = e.sym;
+            return e;
+        }
         foreach (var decl in decls)
         {
             var d = Unwrap(decl);   // unwrap `pub`
@@ -599,10 +656,10 @@ internal sealed partial class ZigLowering
                 case Zig.ExternCFnProtoNoArgs f: DeclareExternFn(f.Arg3, null, f.Arg6); break;     // extern "c" fn IDENT ( ) Type ;
                 // The optional CallConv (Milestone R, part 5) sits between `)` and the return, so the
                 // return type + body are one slot further right than the pre-CallConv layout.
-                case Zig.FnDef f:          AddFnEntry(DeclareFn(f.Arg1, f.Arg3, f.Arg6, f.Arg7)); break;
-                case Zig.FnDefNoArgs f:    AddFnEntry(DeclareFn(f.Arg1, null, f.Arg5, f.Arg6)); break;
-                case Zig.FnDefErr f:       AddFnEntry(DeclareFn(f.Arg1, f.Arg3, f.Arg7, f.Arg8, errUnion: true)); break;   // `!T` return → ErrorUnion(T)
-                case Zig.FnDefNoArgsErr f: AddFnEntry(DeclareFn(f.Arg1, null, f.Arg6, f.Arg7, errUnion: true)); break;
+                case Zig.FnDef f:          AddFnEntry(Export(f.Arg1, DeclareFn(f.Arg1, f.Arg3, f.Arg6, f.Arg7))); break;
+                case Zig.FnDefNoArgs f:    AddFnEntry(Export(f.Arg1, DeclareFn(f.Arg1, null, f.Arg5, f.Arg6))); break;
+                case Zig.FnDefErr f:       AddFnEntry(Export(f.Arg1, DeclareFn(f.Arg1, f.Arg3, f.Arg7, f.Arg8, errUnion: true))); break;   // `!T` return → ErrorUnion(T)
+                case Zig.FnDefNoArgsErr f: AddFnEntry(Export(f.Arg1, DeclareFn(f.Arg1, null, f.Arg6, f.Arg7, errUnion: true))); break;
                 // Container decls were handled in pass 0 — skip here.
                 case Zig.StructDecl or Zig.StructDeclEmpty or Zig.ExternStructDecl or Zig.PackedStructDecl or Zig.EnumDecl or Zig.EnumDeclTyped or Zig.UnionDeclEnum or Zig.UnionDeclTagged or Zig.UnionDeclUntagged: break;
                 // A top-level `const`/`var` is either a comptime binding (an `@import`/allocator

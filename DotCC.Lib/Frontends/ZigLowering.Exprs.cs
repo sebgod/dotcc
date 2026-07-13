@@ -922,6 +922,21 @@ internal sealed partial class ZigLowering
     {
         var methodName = Tok(fld.Arg2);
 
+        // --- a call on an @import'ed sibling module: `mod.func(args)` (road-to-zig-std S1) ---
+        // `mod` is bound to a relative `@import("./x.zig")` (in `_importModules`), which was lowered
+        // eagerly into the same IR. Resolve `func` in that module's exports and build a direct call
+        // against its shared symbol (so the emitted call binds to the module's emitted method).
+        if (fld.Arg0.Content is Zig.Ident modId && _importModules.TryGetValue(Tok(modId.Arg0), out var importedMod))
+        {
+            if (importedMod.Exports is null || !importedMod.Exports.TryGetValue(methodName, out var exportedSym))
+            {
+                throw new IrUnsupportedException(
+                    $"zig import '{Tok(modId.Arg0)}' has no exported function '{methodName}' "
+                    + $"(module '{System.IO.Path.GetFileName(importedMod.Path)}')");
+            }
+            return BuildCall(exportedSym, argItems, receiver: null);
+        }
+
         // --- curated `std.mem` helpers (a static call on the std.mem namespace) ---
         // Routed before the generic dispatch. dotcc models no `std` in general — only this curated
         // set of the most common slice utilities; an unmodeled member is a clear, specific error.

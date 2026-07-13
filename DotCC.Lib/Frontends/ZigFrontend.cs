@@ -52,6 +52,11 @@ internal sealed class ZigFrontend : IFrontend
         // One error-code registry shared across the build's units — a given `error.Foo`
         // name maps to one code program-wide (V1 erases the error set into a flat space).
         var errorCodes = new Dictionary<string, int>(StringComparer.Ordinal);
+        // One module graph shared across the build — resolves a relative `@import("./x.zig")` to a
+        // sibling module (parsed resiliently, lowered into this same IR on first reference), so a
+        // multi-file Zig program compiles from just its root(s) the way `zig build-exe root.zig` does
+        // (road-to-zig-std S1). Each root unit is lowered with its own directory as the import base.
+        var moduleGraph = new ZigModuleGraph();
         foreach (var path in paths)
         {
             var source = File.ReadAllText(path);
@@ -75,7 +80,7 @@ internal sealed class ZigFrontend : IFrontend
             {
                 throw new CompileException($"parse failed in {Path.GetFileName(path)}: {root}");
             }
-            new ZigLowering(ir, names, errorCodes, testMode).Lower(root);
+            new ZigLowering(ir, names, errorCodes, testMode, moduleGraph, Path.GetDirectoryName(path)).Lower(root);
         }
         // Carry the flat error set to the backend so it can emit the `@errorName` code→name
         // table (Milestone X). Merge into any existing map (a mixed build lowers C first, but C
