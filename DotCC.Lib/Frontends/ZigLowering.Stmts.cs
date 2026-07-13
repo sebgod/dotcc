@@ -1501,6 +1501,30 @@ internal sealed partial class ZigLowering
                 sections.Add(new SwitchSection(exprLabels, exprBody));
                 continue;
             }
+            // A `return`-body prong (`.variant => return [e]`) without a capture — symmetric with the
+            // non-union `LowerSwitch` (road-to-zig-std S9). `return` reuses the statement return-lowering
+            // (error-union wrapping / errdefer). The capture-BODY prong forms (`|x| return e` / `|x| e`)
+            // remain a follow-up — a capture there still hits the default loud cut below.
+            if (prongItem.Content is Zig.ProngReturn or Zig.ProngReturnVoid)
+            {
+                Item rCase;
+                List<CStmt> rBody;
+                if (prongItem.Content is Zig.ProngReturn prr)
+                {
+                    rCase = prr.Arg0;
+                    rBody = new List<CStmt> { Hoisted(() => LowerReturn(prr.Arg3)) };
+                }
+                else
+                {
+                    var prv = (Zig.ProngReturnVoid)prongItem.Content;
+                    rCase = prv.Arg0;
+                    rBody = new List<CStmt> { LowerReturnVoid() };
+                }
+                RejectUnionRange(rCase, info);
+                var rLabels = LowerCaseVals(rCase, info.TagType);
+                sections.Add(new SwitchSection(rLabels, rBody));   // `return` is a jump — no Break needed
+                continue;
+            }
             Item caseVals; string? captureName; Item block; bool captureByRef;
             switch (prongItem.Content)
             {

@@ -71,6 +71,21 @@ public sealed class ZigOracleTests
             "    }\n" +
             "}\n" +
             "pub fn main() u8 { return classify('5') + classify('x') + classify('!'); }\n", 3, "" },
+        // A tagged-union `switch` whose prongs `return` (no capture) — the union analogue of the above.
+        // area(circle)=3, area(square)=4 → 7.
+        new object[] { "union_switch_return_prongs",
+            "const Shape = union(enum) { circle: u8, square: u8 };\n" +
+            "fn area(s: Shape) u8 {\n" +
+            "    switch (s) {\n" +
+            "        .circle => return 3,\n" +
+            "        .square => return 4,\n" +
+            "    }\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const c = Shape{ .circle = 1 };\n" +
+            "    const sq = Shape{ .square = 1 };\n" +
+            "    return area(c) + area(sq);\n" +
+            "}\n", 7, "" },
         // i64 parameters: `wide` is type-checked by dotcc's emit + Roslyn with the
         // wider signedness the UsualArithmetic fix preserves; main is the observable.
         new object[] { "i64_params",
