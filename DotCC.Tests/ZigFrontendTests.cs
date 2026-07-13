@@ -94,6 +94,26 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_arbitrary_width_integer_types()
+    {
+        // Arbitrary-width `uN`/`iN` (road-to-zig-std B3 — `u21` alone has 58 std uses) → the smallest
+        // standard width holding N bits: u4→byte, u12→ushort, i7→sbyte, u100→UInt128. Previously a
+        // `LowerType` loud cut ("zig type 'u4' not supported yet"). Overflow does not wrap at N bits
+        // (dotcc's documented `+` leniency); @sizeOf still matches zig (both round to whole bytes).
+        var cs = EmitZig(
+            "fn wide(a: u4, b: u12, c: i7, d: u100) void { _ = a; _ = b; _ = c; _ = d; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var x: u4 = 5;\n" +
+            "    x += 3;\n" +
+            "    const y: u12 = 100;\n" +
+            "    const z: i7 = -3;\n" +
+            "    return @intCast(@as(i32, x) + y + z);\n" +
+            "}\n");
+        cs.ShouldContain("wide(byte a, ushort b, sbyte c, System.UInt128 d)");   // width mapping in a signature
+        cs.ShouldContain("(int)x + y + z");                                       // the u4/u12/i7 arithmetic lowered
+    }
+
+    [Fact]
     public void Emits_a_128_bit_literal_beyond_ulong_via_Parse()
     {
         // A u128 literal larger than ulong has no C# literal form (no Int128 suffix), so it
