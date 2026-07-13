@@ -103,6 +103,10 @@ public sealed class ZigOracleTests
             "    const b = Val{ .m = 20 };\n" +
             "    return get(a) + get(b);\n" +
             "}\n", 33, "" },
+        // `@intFromBool` in the exact shape std.ascii.toLower uses it: 'A'(65) is upper, so the mask is
+        // 1<<5 = 32, and 65 | 32 = 97 ('a'). Proves the builtin matches real zig.
+        new object[] { "int_from_bool",
+            "pub fn main() u8 { const c: u8 = 65; const mask: u8 = @as(u8, @intFromBool(c >= 65 and c <= 90)) << 5; return c | mask; }\n", 97, "" },
         // i64 parameters: `wide` is type-checked by dotcc's emit + Roslyn with the
         // wider signedness the UsualArithmetic fix preserves; main is the observable.
         new object[] { "i64_params",

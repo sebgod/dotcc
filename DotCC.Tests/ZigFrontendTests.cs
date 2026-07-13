@@ -64,6 +64,15 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_int_from_bool()
+    {
+        // `@intFromBool(b)` → an int 0/1. `std.ascii`'s `toUpper`/`toLower` need it
+        // (`@as(u8, @intFromBool(isLower(c))) << 5`). Emitting proves the builtin lowers.
+        var cs = EmitZig("pub fn main() u8 { const b: u8 = @as(u8, @intFromBool(3 > 2)); return b; }\n");
+        cs.ShouldContain("main");
+    }
+
+    [Fact]
     public void Lowers_a_nested_container_struct_member()
     {
         // A NESTED `const Inner = struct {…};` inside a struct body (road-to-zig-std S9, grammar #89 —
