@@ -25,6 +25,17 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_switch_return_prongs()
+    {
+        // A statement `switch` whose prongs are `=> return [e]` (road-to-zig-std S9 — parsed since #89,
+        // now lowered). Before this it threw at lowering ("zig switch prong: ProngReturn").
+        var cs = EmitZig(
+            "fn f(c: u8) u8 { switch (c) { 0 => return 1, else => return 2 } }\n" +
+            "pub fn main() u8 { return f(0) + f(9); }\n");
+        cs.ShouldContain("main");
+    }
+
+    [Fact]
     public void Lowers_zig_main_end_to_end()
     {
         // pub fn main() u8 { const x: u8 = 40; return x + 2; }  → a byte-returning

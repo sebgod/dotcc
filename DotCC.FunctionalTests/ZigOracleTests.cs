@@ -60,6 +60,17 @@ public sealed class ZigOracleTests
             "pub fn main() u8 { var i: u8 = 0; var sum: u8 = 0; while (i < 5) { sum = sum + i; i = i + 1; } return sum; }\n", 10, "" },
         new object[] { "bitnot",
             "pub fn main() u8 { const a: u8 = 0; const b: u8 = ~a; return b; }\n", 255, "" },
+        // A statement `switch` whose prongs `return` (road-to-zig-std S9 — the enum/int classify shape),
+        // with range case-values. classify('5')=1, classify('x')=2, classify('!')=0 → 3.
+        new object[] { "switch_return_prongs",
+            "fn classify(c: u8) u8 {\n" +
+            "    switch (c) {\n" +
+            "        '0'...'9' => return 1,\n" +
+            "        'a'...'z' => return 2,\n" +
+            "        else => return 0,\n" +
+            "    }\n" +
+            "}\n" +
+            "pub fn main() u8 { return classify('5') + classify('x') + classify('!'); }\n", 3, "" },
         // i64 parameters: `wide` is type-checked by dotcc's emit + Roslyn with the
         // wider signedness the UsualArithmetic fix preserves; main is the observable.
         new object[] { "i64_params",
