@@ -1496,9 +1496,9 @@ internal sealed partial class ZigLowering
             {
                 RejectUnionRange(pe.Arg0, info);
                 var exprLabels = LowerCaseVals(pe.Arg0, info.TagType);
-                var exprBody = new List<CStmt> { new ExprStmt(LowerExpr(pe.Arg2)) };
-                if (!EndsInJump(exprBody)) { exprBody.Add(new Break()); }
-                sections.Add(new SwitchSection(exprLabels, exprBody));
+                var peBody = new List<CStmt> { new ExprStmt(LowerExpr(pe.Arg2)) };
+                if (!EndsInJump(peBody)) { peBody.Add(new Break()); }
+                sections.Add(new SwitchSection(exprLabels, peBody));
                 continue;
             }
             // A `return`-body prong (`.variant => return [e]`) without a capture — symmetric with the
@@ -1525,16 +1525,37 @@ internal sealed partial class ZigLowering
                 sections.Add(new SwitchSection(rLabels, rBody));   // `return` is a jump — no Break needed
                 continue;
             }
-            Item caseVals; string? captureName; Item block; bool captureByRef;
+            // A prong body is a Block, or (road-to-zig-std S9) a bare expr / `return [e]`, each with an
+            // optional `|x|` / `|*x|` payload capture. Decompose the shape once, then lower the body
+            // INSIDE the capture scope so it sees the binding.
+            Item caseVals; string? captureName; bool captureByRef;
+            Item? blockBody = null, exprBody = null, returnBody = null;
+            var voidReturn = false;
             switch (prongItem.Content)
             {
-                case Zig.Prong p:           caseVals = p.Arg0; captureName = null;        block = p.Arg2; captureByRef = false; break;
-                case Zig.ProngCapture p:    caseVals = p.Arg0; captureName = Tok(p.Arg3); block = p.Arg5; captureByRef = false; break;
-                case Zig.ProngCaptureRef p: caseVals = p.Arg0; captureName = Tok(p.Arg4); block = p.Arg6; captureByRef = true;  break;
+                case Zig.Prong p:                     caseVals = p.Arg0; captureName = null;        captureByRef = false; blockBody  = p.Arg2; break;
+                case Zig.ProngCapture p:              caseVals = p.Arg0; captureName = Tok(p.Arg3); captureByRef = false; blockBody  = p.Arg5; break;
+                case Zig.ProngCaptureRef p:           caseVals = p.Arg0; captureName = Tok(p.Arg4); captureByRef = true;  blockBody  = p.Arg6; break;
+                case Zig.ProngCaptureExpr p:          caseVals = p.Arg0; captureName = Tok(p.Arg3); captureByRef = false; exprBody   = p.Arg5; break;
+                case Zig.ProngCaptureReturn p:        caseVals = p.Arg0; captureName = Tok(p.Arg3); captureByRef = false; returnBody = p.Arg6; break;
+                case Zig.ProngCaptureReturnVoid p:    caseVals = p.Arg0; captureName = Tok(p.Arg3); captureByRef = false; voidReturn = true;   break;
+                case Zig.ProngCaptureRefExpr p:       caseVals = p.Arg0; captureName = Tok(p.Arg4); captureByRef = true;  exprBody   = p.Arg6; break;
+                case Zig.ProngCaptureRefReturn p:     caseVals = p.Arg0; captureName = Tok(p.Arg4); captureByRef = true;  returnBody = p.Arg7; break;
+                case Zig.ProngCaptureRefReturnVoid p: caseVals = p.Arg0; captureName = Tok(p.Arg4); captureByRef = true;  voidReturn = true;   break;
                 default: throw new IrUnsupportedException("zig switch prong: " + (prongItem.Content?.GetType().Name ?? "null"));
             }
             RejectUnionRange(caseVals, info);
             var labels = LowerCaseVals(caseVals, info.TagType);   // `.variant` → EnumConstRef(U_Tag.variant)
+
+            // Lower the body statements; a `return` reuses the statement return-lowering (error-union
+            // wrapping / errdefer). For a block the statements are flattened (so a leading capture decl
+            // sits in the same scope); the other forms are a single statement.
+            List<CStmt> LowerProngBody() =>
+                blockBody is not null    ? new List<CStmt>(LowerBlock(blockBody).Stmts)
+                : exprBody is not null   ? new List<CStmt> { new ExprStmt(LowerExpr(exprBody)) }
+                : returnBody is not null ? new List<CStmt> { Hoisted(() => LowerReturn(returnBody)) }
+                : voidReturn             ? new List<CStmt> { LowerReturnVoid() }
+                : throw new IrUnsupportedException("zig switch capture prong has no body");
 
             List<CStmt> body;
             if (captureName is not null && captureName != "_")
@@ -1553,15 +1574,15 @@ internal sealed partial class ZigLowering
                 var payloadField = new Member(payloadBase, variant, false) { Type = payloadType, IsLValue = true };
                 CExpr capInit = captureByRef ? new Unary(UnOp.AddrOf, payloadField) { Type = bindType } : payloadField;
                 if (captureByRef && unionRef is VarRef { Sym: { } uvar }) { uvar.AddressTaken = true; }
-                var inner = LowerBlock(block);
+                var inner = LowerProngBody();
                 _symbols.ExitScope();
                 var combined = new List<CStmt> { new DeclStmt(new List<LocalDecl> { new(capSym, capInit) }) };
-                combined.AddRange(inner.Stmts);
+                combined.AddRange(inner);
                 body = new List<CStmt> { new Block(combined) };
             }
             else
             {
-                body = new List<CStmt> { LowerBlock(block) };
+                body = blockBody is not null ? new List<CStmt> { LowerBlock(blockBody) } : LowerProngBody();
             }
             if (!EndsInJump(body)) { body.Add(new Break()); }   // no Zig fall-through
             sections.Add(new SwitchSection(labels, body));
