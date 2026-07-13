@@ -1433,19 +1433,26 @@ internal sealed partial class ZigLowering
         var sections = new List<SwitchSection>();
         foreach (var prongItem in Flatten(prongsItem))
         {
-            if (prongItem.Content is Zig.ProngCapture or Zig.ProngCaptureRef)
+            if (prongItem.Content is Zig.ProngCapture or Zig.ProngCaptureRef
+                or Zig.ProngCaptureExpr or Zig.ProngCaptureReturn or Zig.ProngCaptureReturnVoid
+                or Zig.ProngCaptureRefExpr or Zig.ProngCaptureRefReturn or Zig.ProngCaptureRefReturnVoid)
             {
                 throw new IrUnsupportedException(
                     "zig switch payload capture `|x|` is only valid on a tagged-union switch");
             }
-            // A prong body is a braced Block (`=> { … }`) or a bare expression (`=> expr`, which in
-            // a STATEMENT switch is an expression statement, e.g. `1 => doThing()`).
+            // A prong body is a braced Block (`=> { … }`), a bare expression (`=> expr`, an expression
+            // statement here, e.g. `1 => doThing()`), or a `return` (`=> return [e]`) — the last is the
+            // common shape for an enum switch whose arms each return (e.g. `switch (order) { .lt =>
+            // return .lt, … }`). `return` bodies reuse the statement return-lowering (error-union
+            // wrapping / errdefer routing), so an `E!T` prong return propagates correctly.
             Item caseVals;
             List<CStmt> body;
             switch (prongItem.Content)
             {
-                case Zig.Prong p:      caseVals = p.Arg0;  body = new List<CStmt> { LowerBlock(p.Arg2) }; break;
-                case Zig.ProngExpr pe: caseVals = pe.Arg0; body = new List<CStmt> { new ExprStmt(LowerExpr(pe.Arg2)) }; break;
+                case Zig.Prong p:            caseVals = p.Arg0;  body = new List<CStmt> { LowerBlock(p.Arg2) }; break;
+                case Zig.ProngExpr pe:       caseVals = pe.Arg0; body = new List<CStmt> { new ExprStmt(LowerExpr(pe.Arg2)) }; break;
+                case Zig.ProngReturn pr:     caseVals = pr.Arg0; body = new List<CStmt> { Hoisted(() => LowerReturn(pr.Arg3)) }; break;
+                case Zig.ProngReturnVoid pr: caseVals = pr.Arg0; body = new List<CStmt> { LowerReturnVoid() }; break;
                 default: throw new IrUnsupportedException("zig switch prong: " + (prongItem.Content?.GetType().Name ?? "null"));
             }
             var labels = LowerCaseVals(caseVals, subject.Type); // case values compare against the subject
