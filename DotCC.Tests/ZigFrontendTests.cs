@@ -373,6 +373,33 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lazy_import_lowers_only_referenced_decls()
+    {
+        // `util` has a good `add` and a `broken` that (if lowered) calls an undefined function. `main`
+        // references only `add`, so `broken` is NEVER lowered — an unreferenced unlowerable decl is
+        // invisible, exactly the lazy-analysis semantics std needs (road-to-zig-std S2). The `broken`
+        // decl parses fine (so it's in the decl table); it just never gets lowered.
+        var cs = EmitZigMulti(
+            "const util = @import(\"./util.zig\");\npub fn main() u8 { return util.add(40, 2); }\n",
+            ("util.zig",
+                "pub fn add(a: u8, b: u8) u8 { return a + b; }\n" +
+                "pub fn broken() u8 { return doesNotExist(); }\n"));
+        cs.ShouldContain("add");
+    }
+
+    [Fact]
+    public void Lazy_import_referencing_an_unlowerable_decl_fails_loudly()
+    {
+        // Referencing `broken` DOES lower it, so its undefined-function call fails loudly — a referenced
+        // decl that can't lower is an error (the flip side of the invisibility above).
+        Should.Throw<Exception>(() => EmitZigMulti(
+            "const util = @import(\"./util.zig\");\npub fn main() u8 { return util.broken(); }\n",
+            ("util.zig",
+                "pub fn add(a: u8, b: u8) u8 { return a + b; }\n" +
+                "pub fn broken() u8 { return doesNotExist(); }\n")));
+    }
+
+    [Fact]
     public void Lowers_zig_main_end_to_end()
     {
         // pub fn main() u8 { const x: u8 = 40; return x + 2; }  → a byte-returning

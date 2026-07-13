@@ -47,7 +47,7 @@ internal sealed partial class ZigLowering
                     && module.EndsWith(".zig", System.StringComparison.Ordinal))
                 {
                     var mod = _moduleGraph.Load(module, _importerDir);
-                    EnsureModuleLowered(mod);
+                    EnsureModulePrepared(mod);
                     _importModules[name] = mod;
                     return true;
                 }
