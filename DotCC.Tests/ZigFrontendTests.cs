@@ -36,6 +36,23 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_union_switch_capture_body_prongs()
+    {
+        // A tagged-union `switch` whose prongs capture the payload AND `return`/expr WITHOUT braces
+        // (road-to-zig-std S9 — ProngCaptureReturn `|x| return e`, ProngCaptureExpr `|x| e`). Before
+        // this the capture-body forms hit the default loud cut ("zig switch prong: ProngCaptureReturn").
+        var cs = EmitZig(
+            "const Val = union(enum) { n: u8, m: u8 };\n" +
+            "fn get(v: Val) u8 { switch (v) { .n => |x| return x + 1, .m => |x| return x + 2 } }\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = Val{ .n = 10 };\n" +
+            "    return get(a);\n" +
+            "}\n");
+        cs.ShouldContain("main");
+        cs.ShouldContain("x + 1");   // the captured payload, returned from the .n prong
+    }
+
+    [Fact]
     public void Lowers_zig_main_end_to_end()
     {
         // pub fn main() u8 { const x: u8 = 40; return x + 2; }  → a byte-returning

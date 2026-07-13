@@ -86,6 +86,23 @@ public sealed class ZigOracleTests
             "    const sq = Shape{ .square = 1 };\n" +
             "    return area(c) + area(sq);\n" +
             "}\n", 7, "" },
+        // A tagged-union `switch` whose prongs capture the payload AND `return` it (`|x| return e`)
+        // or evaluate a bare expr with a capture (`|x| e`) — the capture-BODY prong forms
+        // (road-to-zig-std S9, ProngCaptureReturn/ProngCaptureExpr), no braces. get(n=10)=11,
+        // get(m=20)=22 → 33.
+        new object[] { "union_switch_capture_body_prongs",
+            "const Val = union(enum) { n: u8, m: u8 };\n" +
+            "fn get(v: Val) u8 {\n" +
+            "    switch (v) {\n" +
+            "        .n => |x| return x + 1,\n" +
+            "        .m => |x| return x + 2,\n" +
+            "    }\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = Val{ .n = 10 };\n" +
+            "    const b = Val{ .m = 20 };\n" +
+            "    return get(a) + get(b);\n" +
+            "}\n", 33, "" },
         // i64 parameters: `wide` is type-checked by dotcc's emit + Roslyn with the
         // wider signedness the UsualArithmetic fix preserves; main is the observable.
         new object[] { "i64_params",
