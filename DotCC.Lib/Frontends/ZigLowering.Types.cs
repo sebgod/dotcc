@@ -541,6 +541,9 @@ internal sealed partial class ZigLowering
     private CType LowerTypeName(string name)
     {
         if (ResolveSelfAlias(name) is { } alias) { return alias; }
+        // A nested container type (`const Inner = struct {…};` inside the current container — S9 #89),
+        // resolved by plain name while a method of the parent is being lowered.
+        if (ResolveNestedType(name) is { } nested) { return nested; }
         // A `const T = <type>;` type alias (wall-plan W1) — resolved ahead of containers/primitives so
         // an aliased name (`var x: T = 5;`, `*T`, `[]T`) composes through the ordinary type prefixes.
         if (_typeAliases.TryGetValue(name, out var aliased)) { return aliased; }
@@ -572,6 +575,17 @@ internal sealed partial class ZigLowering
         && m.TryGetValue(name, out var t)
             ? t : null;
 
+    /// <summary>Resolve a type name that is a NESTED container decl of the container whose method is
+    /// currently being lowered (<c>const Inner = struct {…};</c> inside <c>Parent</c> — road-to-zig-std
+    /// S9, grammar #89), valid only while <see cref="_currentContainer"/> is that parent — so the plain
+    /// name <c>Inner</c> resolves inside <c>Parent</c>'s methods (signature + body) without leaking, and
+    /// two parents may nest a same-named type without colliding. <c>null</c> when not such a name.</summary>
+    private CType? ResolveNestedType(string name) =>
+        _currentContainer is { } c
+        && _nestedContainerTypes.TryGetValue(c, out var m)
+        && m.TryGetValue(name, out var t)
+            ? t : null;
+
     /// <summary>Look up the container type named at a use site — a registered struct/enum/union
     /// name, or a container-scoped self alias (<c>Self</c>) when inside that container's method.
     /// Drives <c>Type.func()</c> / <c>EnumName.member</c> resolution (a self alias maps through to
@@ -581,6 +595,8 @@ internal sealed partial class ZigLowering
     {
         var alias = ResolveSelfAlias(name);
         if (alias is not null) { type = alias; return true; }
+        var nested = ResolveNestedType(name);
+        if (nested is not null) { type = nested; return true; }
         return _containerTypes.TryGetValue(name, out type!);
     }
 

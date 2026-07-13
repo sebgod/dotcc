@@ -36,6 +36,26 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_a_nested_container_struct_member()
+    {
+        // A NESTED `const Inner = struct {…};` inside a struct body (road-to-zig-std S9, grammar #89 —
+        // parses, but `SplitMembers` previously threw during the PARENT's registration, sinking it).
+        // The nested struct registers under a parent-mangled name (`Outer__Inner`) and resolves by plain
+        // name inside the parent's methods; a `.{…}` builds it and `i.field` reads it back.
+        var cs = EmitZig(
+            "const Outer = struct {\n" +
+            "    const Inner = struct { x: u8, y: u8 };\n" +
+            "    fn sum() u8 {\n" +
+            "        const i = Inner{ .x = 3, .y = 4 };\n" +
+            "        return i.x + i.y;\n" +
+            "    }\n" +
+            "};\n" +
+            "pub fn main() u8 { return Outer.sum(); }\n");
+        cs.ShouldContain("Outer__Inner");   // the parent-mangled nested type
+        cs.ShouldContain("main");
+    }
+
+    [Fact]
     public void Lowers_union_switch_capture_body_prongs()
     {
         // A tagged-union `switch` whose prongs capture the payload AND `return`/expr WITHOUT braces
@@ -77,6 +97,21 @@ public sealed class ZigFrontendTests
             "pub fn main() u8 { return f().a + g().a; }\n");
         cs.ShouldContain("__AnonStruct0");
         cs.ShouldContain("__AnonStruct1");
+    }
+
+    [Fact]
+    public void Rejects_a_nested_container_carrying_a_method_as_a_loud_cut()
+    {
+        // V1 nested containers are fields-only: a method (or `const` / further-nested container) member
+        // of the nested struct needs the top-level container machinery, so it is a precise loud cut —
+        // not a silent drop (fail loudly, grow on purpose).
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const Outer = struct {\n" +
+            "    const Inner = struct { x: u8, fn g(self: Inner) u8 { return self.x; } };\n" +
+            "    fn use() u8 { const i = Inner{ .x = 5 }; return i.x; }\n" +
+            "};\n" +
+            "pub fn main() u8 { return Outer.use(); }\n"));
+        ex.Message.ShouldContain("fields-only");
     }
 
     [Fact]

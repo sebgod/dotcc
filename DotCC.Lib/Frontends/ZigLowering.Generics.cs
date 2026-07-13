@@ -463,14 +463,14 @@ internal sealed partial class ZigLowering
         // Extract the returned struct's members from the single-`return struct {…}` body, splitting off
         // (and rejecting) any method / const member — V1 is fields-only (like the W2 in-fn container).
         var membersItem = TypeReturnedStructMembers(templateSym.Name, info.Body);
-        var (fields, methods, consts) = membersItem is { } m
+        var (fields, methods, consts, containers) = membersItem is { } m
             ? SplitMembers(m)
-            : (new List<Item>(), new List<Item>(), new List<Item>());
-        if (methods.Count > 0 || consts.Count > 0)
+            : (new List<Item>(), new List<Item>(), new List<Item>(), new List<Item>());
+        if (methods.Count > 0 || consts.Count > 0 || containers.Count > 0)
         {
             throw new IrUnsupportedException(
                 $"type-returning generic '{templateSym.Name}': the returned `struct` is fields-only in V1 (wall-plan W4) — "
-                + "a method or `const` member in the returned type is not supported yet");
+                + "a method, `const`, or nested-container member in the returned type is not supported yet");
         }
 
         // Seed the type params (shadow-saved) + point @This() at the in-progress type, reify, restore.
