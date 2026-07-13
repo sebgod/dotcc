@@ -110,6 +110,24 @@ Each S-milestone is one lalr-feature-loop increment (own branch/PR, emit pins +
 zig-oracle differential + runnable example). G-goals are integration proofs
 that retire curated shortcuts.
 
+> **Status update (2026-07-13) — S1 + S2 + G1 DONE (branch `feat/zig-module-graph`,
+> depends on LALR.CC v4.6.0 / [SharpAstro/LALR.CC#6](https://github.com/SharpAstro/LALR.CC/pull/6)).**
+> A **resilient (error-recovering) parse mode** was added to LALR.CC first
+> (`ParseInputResilient` — list-boundary panic-mode recovery), so a file's decls parse
+> independently: only the decls a program references need to parse. On top of it:
+> **S1** the module graph (`ZigModuleGraph`/`ZigModule`; `@import` a namespace value —
+> relative siblings + the real `std` root, imports recorded as deferred specs resolved on
+> first navigation); **S2** lazy decl-driven lowering (a referenced function's signature
+> lowers on demand + body enqueued for a top-level drain; an unreferenced unlowerable decl
+> is invisible, a referenced one fails loudly); **G1** `@import("std")` navigates the real
+> `std.zig` → `ascii.zig` and compiles `std.ascii`'s classifiers (isDigit/isUpper/isLower/
+> toUpper/toLower/isWhitespace + `@intFromBool`) **from real upstream source, lazily**,
+> oracle-verified == real zig (exit 63). Curated std.mem/debug/heap/testing fast-paths still
+> win (checked first). The root unit stays eager. Std root via `DOTCC_ZIG_LIB_DIR`
+> (a `--zig-lib-dir` flag is the remaining front-door polish). **Not yet done:** S3 synthetic
+> `builtin`/`root` (recorded as deferred, never navigated by ascii); S4–S7 comptime engine;
+> the heavier G-goals (G2 mem, G3 fmt, G4 ArrayList, G5 hashmap).
+
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)
 
 An opt-in test/tool (`DOTCC_RUN_STD_PROBE=1`, env `DOTCC_ZIG_LIB_DIR` or
