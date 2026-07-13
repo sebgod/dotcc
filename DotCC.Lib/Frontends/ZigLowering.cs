@@ -200,6 +200,18 @@ internal sealed partial class ZigLowering
     /// registered globally — this only scopes the plain-name alias). Reset per function.</summary>
     private readonly List<(string Name, CType? Prev)> _localContainerShadows = new();
 
+    /// <summary>Each inline named-field struct TYPE occurrence (<c>fn f() struct { a: u8 }</c>, a
+    /// field/param/var annotation — road-to-zig-std S9, grammar #90) → its synthesized IR type name.
+    /// Keyed by the AST <see cref="Item"/> reference, because a Zig struct type is nominal by its
+    /// declaration SITE: two textually-identical inline <c>struct {…}</c> forms are DISTINCT types, and
+    /// the same occurrence lowered in more than one pass must reify ONE registered type. The synthesized
+    /// name (<c>__AnonStruct&lt;n&gt;</c>) is unique program-wide, so it never collides with a user type
+    /// or an in-function W2 container. Keyed by REFERENCE (<see cref="ReferenceEqualityComparer"/>) —
+    /// <see cref="Item.Equals"/> compares the grammar symbol ID, so a value-equality dictionary would
+    /// collapse every inline <c>struct {…}</c> (all share that ID) into one type; the parse tree is
+    /// built once, so a given occurrence is the same object across passes and memoizes correctly.</summary>
+    private readonly Dictionary<Item, string> _inlineStructNames = new(ReferenceEqualityComparer.Instance);
+
     /// <summary>Alias-name → previous <see cref="_typeAliases"/> binding shadowed by a comptime-TYPE
     /// parameter seed while lowering a generic instance's signature / body (wall-plan W3b), restored so
     /// a type param <c>T ↦ i32</c> does not leak into the next drained instance / a sibling function,
