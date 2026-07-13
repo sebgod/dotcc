@@ -53,10 +53,13 @@ internal sealed class ZigFrontend : IFrontend
         // name maps to one code program-wide (V1 erases the error set into a flat space).
         var errorCodes = new Dictionary<string, int>(StringComparer.Ordinal);
         // One module graph shared across the build — resolves a relative `@import("./x.zig")` to a
-        // sibling module (parsed resiliently, lowered into this same IR on first reference), so a
+        // sibling module (parsed resiliently, lowered lazily into this same IR on first reference), so a
         // multi-file Zig program compiles from just its root(s) the way `zig build-exe root.zig` does
         // (road-to-zig-std S1). Each root unit is lowered with its own directory as the import base.
-        var moduleGraph = new ZigModuleGraph();
+        // An optional real-std source tree (from DOTCC_ZIG_LIB_DIR — a `--zig-lib-dir` flag is the
+        // eventual front door) lets a non-curated `std.<x>` navigate the real std.zig root.
+        var stdRoot = ResolveStdRoot(Environment.GetEnvironmentVariable("DOTCC_ZIG_LIB_DIR"));
+        var moduleGraph = new ZigModuleGraph(stdRoot);
         foreach (var path in paths)
         {
             var source = File.ReadAllText(path);
@@ -102,5 +105,21 @@ internal sealed class ZigFrontend : IFrontend
                 ir.ZigErrorCodes = errorCodes;
             }
         }
+    }
+
+    /// <summary>Resolve the real <c>std.zig</c> root from a configured zig lib dir, or null. Accepts
+    /// either <c>&lt;zig&gt;/lib</c> (→ <c>lib/std/std.zig</c>) or <c>&lt;zig&gt;/lib/std</c>
+    /// (→ <c>std/std.zig</c>), matching how the parse probe locates the std tree.</summary>
+    private static string? ResolveStdRoot(string? libDir)
+    {
+        if (string.IsNullOrEmpty(libDir))
+        {
+            return null;
+        }
+        foreach (var candidate in new[] { Path.Combine(libDir, "std", "std.zig"), Path.Combine(libDir, "std.zig") })
+        {
+            if (File.Exists(candidate)) { return candidate; }
+        }
+        return null;
     }
 }
