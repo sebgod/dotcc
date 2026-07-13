@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using DotCC.Ir;
 using LALR.CC;
 using LALR.CC.LexicalGrammar;
 
@@ -26,6 +27,15 @@ internal sealed class ZigModule
     public ResilientParseResult Parse { get; }
 
     private IReadOnlyList<Item>? _decls;
+
+    /// <summary>True once this module's decls have been (eagerly) lowered into the shared IR — the memo
+    /// that keeps an imported module lowered exactly once (and breaks import cycles). Set before lowering
+    /// begins so a re-entrant import during lowering doesn't recurse forever.</summary>
+    public bool Lowered { get; set; }
+
+    /// <summary>This module's exported top-level function symbols (name → the shared <see cref="Symbol"/>
+    /// the importer builds a call against), populated when the module is lowered. Null until then.</summary>
+    public IReadOnlyDictionary<string, Symbol>? Exports { get; set; }
 
     public ZigModule(string path, ResilientParseResult parse)
     {
