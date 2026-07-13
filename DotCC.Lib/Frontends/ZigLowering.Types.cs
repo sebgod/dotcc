@@ -407,8 +407,43 @@ internal sealed partial class ZigLowering
         // Type productions, exactly like the std generic.
         Zig.CallArgs when TryEvalTypeReturningCall(type, out var userTy) => userTy,
         Zig.CallNoArgs when TryEvalTypeReturningCall(type, out var userTyNoArg) => userTyNoArg,
+        // An INLINE named-field struct type (`fn f() struct { a: u8 }`, a field/param/var annotation —
+        // road-to-zig-std S9, grammar #90) → a synthesized named struct type, reified once per source
+        // site. See ReifyInlineStruct.
+        Zig.InlineStructType ist       => ReifyInlineStruct(type, ist.Arg2),
+        Zig.InlineStructTypeEmpty      => ReifyInlineStruct(type, null),
         _ => throw new IrUnsupportedException("zig type: " + (type.Content?.GetType().Name ?? "null")),
     };
+
+    /// <summary>Reify an INLINE named-field struct type (<c>fn f() struct { a: u8 }</c>, a field / param
+    /// / typed-var annotation — road-to-zig-std S9, grammar #90) into a synthesized named struct type.
+    /// A Zig struct type is nominal by its declaration SITE, so each inline <c>struct {…}</c> occurrence
+    /// is its own type: the synthesized name is memoized by the AST occurrence
+    /// (<see cref="_inlineStructNames"/>, reference-keyed), so the same site lowered across passes reifies
+    /// ONE registered type, while two distinct sites get distinct types. The field layout registers into
+    /// the shared IR aggregate table exactly like a named <c>struct {…}</c> — so a <c>.{ … }</c> literal
+    /// against this type and <c>p.field</c> access resolve through the ordinary named-struct machinery.
+    /// V1 is fields-only: a method / <c>const</c> / nested-container member is a loud cut (it needs a
+    /// named container decl — symmetric with the W2 in-fn container and the W4 returned struct).</summary>
+    private CType ReifyInlineStruct(Item occurrence, Item? fieldDecls)
+    {
+        if (_inlineStructNames.TryGetValue(occurrence, out var existing)) { return new CType.Named(existing); }
+        var name = $"__AnonStruct{_inlineStructNames.Count}";
+        // Record the name BEFORE lowering the fields, so a self-referential field (`next: ?*Self`
+        // resolved via @This()) or a re-entrant lowering of the same site sees the in-progress type.
+        _inlineStructNames[occurrence] = name;
+        var (fields, methods, consts) = fieldDecls is { } fd
+            ? SplitMembers(fd)
+            : (new List<Item>(), new List<Item>(), new List<Item>());
+        if (methods.Count > 0 || consts.Count > 0)
+        {
+            throw new IrUnsupportedException(
+                "zig: an inline `struct {…}` type is fields-only (road-to-zig-std S9) — a method or `const` "
+                + "member needs a named container decl (`const T = struct { … };`)");
+        }
+        RegisterStruct(name, fields);
+        return new CType.Named(name);
+    }
 
     /// <summary>Lower the single type argument of a curated generic std type
     /// (<c>std.ArrayList(i32)</c> — wall-plan W0): flatten the parsed ArgList, require exactly

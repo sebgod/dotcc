@@ -53,6 +53,33 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_an_inline_named_field_struct_type()
+    {
+        // An inline `struct { … }` in a RETURN-type slot (road-to-zig-std S9, grammar #90 — parses via
+        // `AType`, previously a `LowerType` loud cut) reifies a synthesized nominal struct type; a
+        // `.{ … }` literal builds it and `p.field` reads it back through the ordinary named-struct path.
+        var cs = EmitZig(
+            "fn make() struct { a: u8, b: u8 } { return .{ .a = 3, .b = 4 }; }\n" +
+            "pub fn main() u8 { const p = make(); return p.a + p.b; }\n");
+        cs.ShouldContain("main");
+        cs.ShouldContain("__AnonStruct");   // the synthesized nominal type name
+    }
+
+    [Fact]
+    public void Reifies_distinct_types_for_distinct_inline_struct_sites()
+    {
+        // Two textually-identical inline `struct {…}` occurrences are DISTINCT types (nominal by
+        // declaration site), so two synthesized names appear — the reference-keyed memo must not
+        // collapse them (Item.Equals compares the grammar symbol ID, which is shared).
+        var cs = EmitZig(
+            "fn f() struct { a: u8 } { return .{ .a = 1 }; }\n" +
+            "fn g() struct { a: u8 } { return .{ .a = 2 }; }\n" +
+            "pub fn main() u8 { return f().a + g().a; }\n");
+        cs.ShouldContain("__AnonStruct0");
+        cs.ShouldContain("__AnonStruct1");
+    }
+
+    [Fact]
     public void Lowers_zig_main_end_to_end()
     {
         // pub fn main() u8 { const x: u8 = 40; return x + 2; }  → a byte-returning

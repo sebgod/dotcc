@@ -124,6 +124,12 @@ public sealed class ZigOracleTests
         // prototypes); the two-pass lowering must resolve it.
         new object[] { "call_forward",
             "pub fn main() u8 { return add(40, 2); }\nfn add(a: u8, b: u8) u8 { return a + b; }\n", 42, "" },
+        // An INLINE named-field struct TYPE in a return-type slot (road-to-zig-std S9, grammar #90) —
+        // reified as a synthesized nominal type, built via `.{ … }`, read back with `p.field`.
+        // make() = {a:3, b:4}; 3 + 4 = 7.
+        new object[] { "inline_struct_return_type",
+            "fn make() struct { a: u8, b: u8 } { return .{ .a = 3, .b = 4 }; }\n" +
+            "pub fn main() u8 { const p = make(); return p.a + p.b; }\n", 7, "" },
         // Function-pointer types + anyopaque (Milestone W, part 1a): two ops share the signature
         // `fn (ctx: *anyopaque, by: i32) i32`, each treating its opaque ctx as a `*i32` accumulator
         // (the C void*-callback idiom). main binds each to a `*const fn (…) i32` value and calls it

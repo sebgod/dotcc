@@ -25,10 +25,12 @@ of these parses and has a `ZigParseProbe` pin, but lowering is not wired yet:
 | Construct | Landed | Lowering gap |
 |---|---|---|
 | Error-set merge `A \|\| B` | #86 | erased set registered; no member-set constraint |
-| `++` concat / `**` repeat | #88 | comptime array/string concat + repeat |
+| `++` concat / `**` repeat | #88 | comptime array/string concat + repeat (needs the S5–S6 comptime-aggregate engine) |
 | Nested `const Inner = struct/enum/union {…};` as a container member | #89 | binding a nested container type |
-| Switch-prong bodies `=> return [e]` / `=> \|x\| body` | #89 | binding return / capture-value prong bodies |
-| Inline named-field struct **type** (`fn f() struct { a: u8 }`, `field: struct {…}`) via `AType` | #90 | `LowerType` default (loud cut) — reify the anon struct type |
+
+**Lowered since** (parses *and* lowers now — moved off the gap list):
+- Switch-prong bodies `=> return [e]` / `=> |x| body` (parsed #89) — return + capture-value/ref prong bodies, non-union and tagged-union, reuse the statement return-lowering; oracle-verified.
+- Inline named-field struct **type** (`fn f() struct { a: u8 }`, `field: struct {…}`, parsed #90) — `LowerType` reifies a synthesized nominal struct type per source site (`__AnonStruct<n>`), built via `.{ … }` and read with `p.field`; oracle-verified. Fields-only (a method / `const` / nested-container member still needs a named container decl).
 
 ## Zig — deferred grammar (does NOT parse yet; cut for a reason)
 
