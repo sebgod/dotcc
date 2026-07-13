@@ -28,14 +28,11 @@ internal sealed class ZigModule
 
     private IReadOnlyList<Item>? _decls;
 
-    /// <summary>True once this module's decls have been (eagerly) lowered into the shared IR — the memo
-    /// that keeps an imported module lowered exactly once (and breaks import cycles). Set before lowering
-    /// begins so a re-entrant import during lowering doesn't recurse forever.</summary>
-    public bool Lowered { get; set; }
-
-    /// <summary>This module's exported top-level function symbols (name → the shared <see cref="Symbol"/>
-    /// the importer builds a call against), populated when the module is lowered. Null until then.</summary>
-    public IReadOnlyDictionary<string, Symbol>? Exports { get; set; }
+    /// <summary>This module's own lazy-lowering context (road-to-zig-std S2), set when the module is
+    /// first prepared. A reference resolves + lowers a function on demand through it
+    /// (<see cref="ZigLowering.EnsureDeclLowered"/>); null until prepared. Also the once-only memo that
+    /// breaks an import cycle (set before preparing).</summary>
+    public ZigLowering? Lowering { get; set; }
 
     public ZigModule(string path, ResilientParseResult parse)
     {
@@ -73,6 +70,7 @@ internal sealed class ZigModuleGraph
     private readonly IReadOnlySet<int> _openBrackets;
     private readonly IReadOnlySet<int> _closeBrackets;
     private readonly Dictionary<string, ZigModule> _modules = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<ZigLowering> _lowerings = new();
 
     public ZigModuleGraph()
     {
@@ -114,6 +112,31 @@ internal sealed class ZigModuleGraph
         using var tokens = new SyncLATokenIterator(lexer);
         var result = _parser.ParseInputResilient(tokens, _syncTerminals, _openBrackets, _closeBrackets);
         return new ZigModule(path, result);
+    }
+
+    /// <summary>Register a lazily-prepared module's lowering so the top-level drain reaches its pending
+    /// function bodies (road-to-zig-std S2).</summary>
+    internal void RegisterLowering(ZigLowering lowering) => _lowerings.Add(lowering);
+
+    /// <summary>Drain every lazy module's enqueued function bodies at TOP LEVEL, to a fixpoint. Lowering a
+    /// body may reference more decls (in this or another module) or prepare a NEW module, so this loops
+    /// until no registered module has pending bodies. Called once after the root units are lowered.</summary>
+    internal void DrainAll()
+    {
+        bool any;
+        do
+        {
+            any = false;
+            for (var i = 0; i < _lowerings.Count; i++)
+            {
+                if (_lowerings[i].HasPendingBodies)
+                {
+                    _lowerings[i].DrainPendingBodies();
+                    any = true;
+                }
+            }
+        }
+        while (any);
     }
 
     /// <summary>The Zig recovery sets for <see cref="Parser.ParseInputResilient"/>, resolved by symbol

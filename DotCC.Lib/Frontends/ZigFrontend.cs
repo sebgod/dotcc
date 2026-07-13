@@ -82,6 +82,10 @@ internal sealed class ZigFrontend : IFrontend
             }
             new ZigLowering(ir, names, errorCodes, testMode, moduleGraph, Path.GetDirectoryName(path)).Lower(root);
         }
+        // Drain every lazily-imported module's referenced function bodies at top level (road-to-zig-std
+        // S2). References were collected while the roots lowered; this lowers exactly those decls (and
+        // their transitive references) to a fixpoint — an unreferenced std-heavy decl never lowers.
+        moduleGraph.DrainAll();
         // Carry the flat error set to the backend so it can emit the `@errorName` code→name
         // table (Milestone X). Merge into any existing map (a mixed build lowers C first, but C
         // contributes no Zig error names; this also stays correct if a future C path adds some).

@@ -64,6 +64,80 @@ internal sealed partial class ZigLowering
     /// <see cref="_exportedFns"/>. Meaningful after <see cref="Lower"/> has run.</summary>
     internal IReadOnlyDictionary<string, Symbol> ExportedFns => _exportedFns;
 
+    // ---- lazy (decl-driven) lowering for an imported module (road-to-zig-std S2) ----------------
+
+    /// <summary>True for a module lowered LAZILY (an <c>@import</c>ed module, prepared via
+    /// <see cref="Lower"/> with <c>prepareOnly</c>): its container types are registered up front, but a
+    /// function's signature + body are lowered only when referenced (<see cref="EnsureDeclLowered"/>).
+    /// A leaf like <c>std.ascii</c> thus compiles only the classifiers a program touches — its
+    /// std-heavy tails (<c>allocLowerString</c>, <c>HexEscape.format</c>) never lower, matching upstream
+    /// "analyze only what's referenced". False for a root unit (eager, unchanged).</summary>
+    private bool _lazy;
+
+    /// <summary>In a lazy module, each top-level function name → its raw decl AST (unlowered), so a
+    /// reference can lower exactly that function on demand. Built in <see cref="Lower"/>'s prepare pass.</summary>
+    private readonly Dictionary<string, Item> _moduleFnDecls = new(System.StringComparer.Ordinal);
+
+    /// <summary>Names in a lazy module whose signature has already been declared (the demand memo, so a
+    /// second reference — or a self/mutual call — resolves the existing symbol instead of re-declaring).</summary>
+    private readonly HashSet<string> _lazyDeclared = new(System.StringComparer.Ordinal);
+
+    /// <summary>Lazy-module function bodies awaiting lowering, enqueued by <see cref="EnsureDeclLowered"/>
+    /// (signature now, body later) and drained at TOP LEVEL by <see cref="DrainPendingBodies"/> — never
+    /// nested inside another body's lowering, the re-entrancy discipline the monomorphization worklist
+    /// already follows. A body drained here may reference more decls (a sibling call), which enqueue and
+    /// are picked up by the same cursor loop.</summary>
+    private readonly List<(Symbol sym, List<(string name, CType type)> ps, Item body)> _pendingModuleBodies = new();
+
+    /// <summary>Cursor into <see cref="_pendingModuleBodies"/> — so a repeated drain (the graph loops
+    /// until no module has pending work) resumes rather than re-lowering.</summary>
+    private int _pendingBodyCursor;
+
+    /// <summary>True while this (lazy) module still has function bodies enqueued but not yet lowered.</summary>
+    internal bool HasPendingBodies => _pendingBodyCursor < _pendingModuleBodies.Count;
+
+    /// <summary>Ensure a lazy module's function <paramref name="name"/> is DECLARED (signature lowered so
+    /// a call can bind to it) and its body ENQUEUED for the top-level drain; returns the function symbol,
+    /// or null when the module has no such top-level function (the caller then errors, or treats it as a
+    /// namespace member). A referenced function whose signature can't lower (an unmodeled std type) throws
+    /// LOUDLY here — deliberately, since the program actually reached it; an UNreferenced one is simply
+    /// never touched. Idempotent via <see cref="_lazyDeclared"/>.</summary>
+    internal Symbol? EnsureDeclLowered(string name)
+    {
+        if (_lazyDeclared.Contains(name)) { return _symbols.Resolve(name); }
+        if (!_moduleFnDecls.TryGetValue(name, out var d)) { return null; }
+        _lazyDeclared.Add(name);
+        var e = d.Content switch
+        {
+            Zig.FnDef f          => DeclareFn(f.Arg1, f.Arg3, f.Arg6, f.Arg7),
+            Zig.FnDefNoArgs f    => DeclareFn(f.Arg1, null, f.Arg5, f.Arg6),
+            Zig.FnDefErr f       => DeclareFn(f.Arg1, f.Arg3, f.Arg7, f.Arg8, errUnion: true),
+            Zig.FnDefNoArgsErr f => DeclareFn(f.Arg1, null, f.Arg6, f.Arg7, errUnion: true),
+            _ => throw new IrUnsupportedException("lazy module decl is not a function: " + (d.Content?.GetType().Name ?? "null")),
+        };
+        _exportedFns[name] = e.sym;
+        // A generic / type-returning template has no base body to lower (an instantiation body is drained
+        // via the monomorphization worklist); everything else enqueues its body for the top-level drain.
+        if (!_genericFns.ContainsKey(e.sym) && !_typeReturningGenerics.ContainsKey(e.sym))
+        {
+            _pendingModuleBodies.Add(e);
+        }
+        return e.sym;
+    }
+
+    /// <summary>Lower every enqueued lazy-module body (from the cursor onward). Runs at TOP LEVEL only.
+    /// A body may reference a sibling (declaring + enqueuing it) — the cursor loop picks those up. V1
+    /// drains bodies only; a referenced lazy decl needing the monomorphization/comptime worklists is a
+    /// loud gap to fill when a G-goal hits it.</summary>
+    internal void DrainPendingBodies()
+    {
+        while (_pendingBodyCursor < _pendingModuleBodies.Count)
+        {
+            var e = _pendingModuleBodies[_pendingBodyCursor++];
+            LowerFnBody(e.sym, e.ps, e.body);
+        }
+    }
+
     /// <summary>The flat global error set: each distinct <c>error.Foo</c> name → a stable
     /// non-zero code (0 is the success sentinel). Shared across the units of one build (the
     /// caller passes one dictionary) so a given error name gets one code program-wide — V1
@@ -481,21 +555,22 @@ internal sealed partial class ZigLowering
         _importerDir = importerDir;
     }
 
-    /// <summary>Eagerly lower an <c>@import</c>ed module's decls into the shared IR (road-to-zig-std S1),
-    /// exactly as if the file had been passed as an input unit, and cache its exported functions on the
-    /// module. Lowered at most once per module (the <see cref="ZigModule.Lowered"/> memo, set BEFORE
-    /// lowering so an import cycle terminates — a module mid-lowering exposes no exports yet, which a
-    /// hand-written program won't hit and std's cycles resolve once laziness lands in S2). The child
-    /// lowering shares this unit's IR, legalizer, and error-code space, and carries the module's own
-    /// directory so ITS relative imports resolve.</summary>
-    private void EnsureModuleLowered(ZigModule module)
+    /// <summary>Prepare an <c>@import</c>ed module for LAZY lowering (road-to-zig-std S2): give it its own
+    /// child <see cref="ZigLowering"/> (sharing this unit's IR, legalizer, and error-code space, carrying
+    /// the module's own directory so ITS relative imports resolve), registered so the top-level drain
+    /// reaches its bodies, and run only the prepare pass (register container types + build the function
+    /// decl table). A function is lowered ON DEMAND when referenced (<see cref="EnsureDeclLowered"/>), so
+    /// a leaf like <c>std.ascii</c> compiles only the classifiers a program touches. Prepared once per
+    /// module (the <see cref="ZigModule.Lowering"/> memo, set BEFORE preparing so an import cycle
+    /// terminates).</summary>
+    private void EnsureModulePrepared(ZigModule module)
     {
-        if (module.Lowered) { return; }
-        module.Lowered = true;
+        if (module.Lowering is not null) { return; }
         var dir = System.IO.Path.GetDirectoryName(module.Path);
         var child = new ZigLowering(_ir, _names, _errorCodes, _testMode, _moduleGraph, dir);
-        child.Lower(module.Parse.Tree);
-        module.Exports = child.ExportedFns;
+        module.Lowering = child;
+        _moduleGraph?.RegisterLowering(child);
+        child.Lower(module.Parse.Tree, prepareOnly: true, lazy: true);
     }
 
     /// <summary>Resolve an error name to its stable code in the flat global error set,
@@ -537,7 +612,7 @@ internal sealed partial class ZigLowering
         return sb.Length == 0 ? "_" : sb.ToString();
     }
 
-    public void Lower(Item root)
+    public void Lower(Item root, bool prepareOnly = false, bool lazy = false)
     {
         // Three passes. Pass 0 registers container TYPES (struct/enum) so a signature,
         // body, or another container's field can reference one declared later (a forward /
@@ -616,6 +691,29 @@ internal sealed partial class ZigLowering
                 case Zig.UnionDeclTagged u: foreach (var m in RegisterUnionTagged(Tok(u.Arg1), Tok(u.Arg5), u.Arg8)) { containerMethods.Add((Tok(u.Arg1), m)); } break;  // const IDENT = union(SomeEnum) { UnionMembers } ;
                 case Zig.UnionDeclUntagged u: foreach (var m in RegisterUnionUntagged(Tok(u.Arg1), u.Arg5)) { containerMethods.Add((Tok(u.Arg1), m)); } break;  // const IDENT = union { UnionMembers } ;
             }
+        }
+
+        // For a lazily-lowered imported module (road-to-zig-std S2), stop after registration: record
+        // each top-level function's raw decl so a reference can lower exactly that function on demand
+        // (EnsureDeclLowered), and skip the eager signature / global / body passes entirely. Container
+        // types + consts registered above are enough for a referenced function to resolve its types.
+        if (prepareOnly)
+        {
+            _lazy = lazy;
+            foreach (var decl in decls)
+            {
+                var d = Unwrap(decl);
+                Item? fnName = d.Content switch
+                {
+                    Zig.FnDef f          => f.Arg1,
+                    Zig.FnDefNoArgs f    => f.Arg1,
+                    Zig.FnDefErr f       => f.Arg1,
+                    Zig.FnDefNoArgsErr f => f.Arg1,
+                    _ => null,
+                };
+                if (fnName is not null) { _moduleFnDecls[Tok(fnName)] = d; }
+            }
+            return;
         }
 
         // Pass 1: function signatures. Free functions first (a top-level decl), then struct

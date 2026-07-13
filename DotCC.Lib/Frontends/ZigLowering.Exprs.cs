@@ -812,8 +812,11 @@ internal sealed partial class ZigLowering
                 + (calleeItem.Content?.GetType().Name ?? "null") + ")");
         }
         var name = Tok(id.Arg0);
-        var sym = _symbols.Resolve(name)
-            ?? throw new IrUnsupportedException($"call to unresolved name '{name}'");
+        var sym = _symbols.Resolve(name);
+        // In a lazy module, a bare call to a not-yet-lowered SIBLING declares it on demand (its body is
+        // enqueued for the top-level drain), so `isPrint` can call `isAscii`/`isControl` (road-to-zig-std S2).
+        if (sym is null && _lazy) { sym = EnsureDeclLowered(name); }
+        if (sym is null) { throw new IrUnsupportedException($"call to unresolved name '{name}'"); }
         // A type-returning generic (wall-plan W4) is a COMPTIME type constructor — calling it in value
         // position is meaningless; it must appear in a TYPE position (a type annotation / alias / typed
         // literal), where LowerType reifies it. Reject a value-position call clearly.
@@ -928,12 +931,13 @@ internal sealed partial class ZigLowering
         // against its shared symbol (so the emitted call binds to the module's emitted method).
         if (fld.Arg0.Content is Zig.Ident modId && _importModules.TryGetValue(Tok(modId.Arg0), out var importedMod))
         {
-            if (importedMod.Exports is null || !importedMod.Exports.TryGetValue(methodName, out var exportedSym))
-            {
-                throw new IrUnsupportedException(
+            // Lower the referenced function on demand (road-to-zig-std S2): its signature lowers now
+            // (so the call binds) and its body is enqueued for the top-level drain. A missing function
+            // is a loud, precise error naming the module.
+            var exportedSym = importedMod.Lowering?.EnsureDeclLowered(methodName)
+                ?? throw new IrUnsupportedException(
                     $"zig import '{Tok(modId.Arg0)}' has no exported function '{methodName}' "
                     + $"(module '{System.IO.Path.GetFileName(importedMod.Path)}')");
-            }
             return BuildCall(exportedSym, argItems, receiver: null);
         }
 
