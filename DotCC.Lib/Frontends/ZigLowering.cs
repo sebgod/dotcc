@@ -212,6 +212,27 @@ internal sealed partial class ZigLowering
     /// built once, so a given occurrence is the same object across passes and memoizes correctly.</summary>
     private readonly Dictionary<Item, string> _inlineStructNames = new(ReferenceEqualityComparer.Instance);
 
+    /// <summary>The comptime VALUE of each <c>const</c> that binds a comptime-known literal (a string or
+    /// an integer today) — the seed of the comptime-value engine (road-to-zig-std S5). Populated as a
+    /// side effect of <see cref="TryComptimeConstBinding"/> (the runtime decl still emits, so a runtime
+    /// use of the name is unaffected); consulted by <see cref="EvalComptimeValue"/> so a comptime context
+    /// — today only a <c>++</c>/<c>**</c> operand or repeat count — resolves the name to its literal and
+    /// folds (<c>const p = "a"; const m = p ++ "b";</c>, <c>const n = 3; const r = s ** n;</c>). Keyed by
+    /// NAME (function-flat, like <see cref="_typeAliases"/> — the W1 leniency); a later re-binding
+    /// overwrites, which matches the sequential monomorphization drain. Scalar/string only in V1 — an
+    /// aggregate (array/struct) comptime value is the next S5 sub-brick.</summary>
+    private readonly Dictionary<string, CExpr> _comptimeValues = new(System.StringComparer.Ordinal);
+
+    /// <summary>The comptime ARRAY value of each <c>const</c> bound to a typed array literal
+    /// (<c>const a = [_]u8{1,2};</c> — road-to-zig-std S5) — stored as its RAW element-type item + raw
+    /// positional element items, NOT a lowered value, so recording is pure (no lowering, safe in any
+    /// pass incl. top-level pass 0) and a <c>++</c>/<c>**</c> use re-feeds the shared
+    /// <see cref="BuildArrayInit"/> at the merged extent exactly like a direct <c>[_]T{…}</c> operand —
+    /// preserving every element form (char/enum-lit/nested) that <see cref="LowerArrayElems"/> handles.
+    /// Separate from <see cref="_comptimeValues"/> (scalar/string) because the array fold works on raw
+    /// AST items, not a lowered <see cref="StackArray"/>. Name-keyed, same leniency.</summary>
+    private readonly Dictionary<string, (Item ElemTypeItem, IReadOnlyList<Item> Items)> _comptimeArrayConsts = new(System.StringComparer.Ordinal);
+
     /// <summary>Alias-name → previous <see cref="_typeAliases"/> binding shadowed by a comptime-TYPE
     /// parameter seed while lowering a generic instance's signature / body (wall-plan W3b), restored so
     /// a type param <c>T ↦ i32</c> does not leak into the next drained instance / a sibling function,

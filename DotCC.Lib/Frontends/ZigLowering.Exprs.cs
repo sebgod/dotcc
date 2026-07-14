@@ -561,16 +561,13 @@ internal sealed partial class ZigLowering
                 throw new IrUnsupportedException(
                     "zig error-set merge `A || B` is only valid as a `const E = A || B;` declaration (dotcc erases error sets)");
 
-            // Array/string concat `a ++ b` and array repeat `a ** n` PARSE (road-to-zig-std S9) but do
-            // not lower yet — they are comptime aggregate operations needing the comptime-value engine
-            // (S5–S6). Loud cut until then, so a program that actually uses them fails clearly rather
-            // than miscompiling (std's uses are mostly comptime `@compileError` string building).
-            case Zig.Concat:
-                throw new IrUnsupportedException(
-                    "zig array/string concat `a ++ b` parses but is not lowered yet (needs the comptime aggregate engine, road-to-zig-std S5–S6)");
-            case Zig.Repeat:
-                throw new IrUnsupportedException(
-                    "zig array repeat `a ** n` parses but is not lowered yet (needs the comptime aggregate engine, road-to-zig-std S5–S6)");
+            // Array/string concat `a ++ b` and array repeat `a ** n` are COMPTIME aggregate operations.
+            // V1 folds the LITERAL case (road-to-zig-std S9): string literals (`"a" ++ "b"`) and typed
+            // array literals (`[_]u8{1,2} ++ [_]u8{3}`). A non-literal operand (a comptime const, `@typeName`,
+            // an anon `.{…}` needing sink inference) still needs the comptime-value engine (S5–S6) and is a
+            // loud cut inside the fold helpers.
+            case Zig.Concat cc: return LowerConcat(cc.Arg0, cc.Arg2);
+            case Zig.Repeat rp: return LowerRepeat(rp.Arg0, rp.Arg2);
 
             // call of a named function (bare-identifier callee).
             case Zig.CallArgs c:   return LowerCall(c.Arg0, c.Arg2);
@@ -578,6 +575,210 @@ internal sealed partial class ZigLowering
 
             default: throw new IrUnsupportedException("zig expression: " + (expr.Content?.GetType().Name ?? "null"));
         }
+    }
+
+    // The cap on a `**` repeat count / a folded literal element count — a guard so a pathological
+    // `"x" ** 1_000_000_000` can't blow up the segment/element list (well beyond any real use).
+    private const long MaxRepeat = 1 << 16;
+
+    /// <summary>Lower a Zig comptime concat <c>a ++ b</c>. V1 folds the LITERAL case:
+    /// <list type="bullet">
+    /// <item>two STRING literals → a single string literal whose raw quoted segments are the operands'
+    /// segments concatenated — exactly C's adjacent-string-literal concatenation, reusing the identical
+    /// decode/encode path (<see cref="DotCC.EmitHelpers"/>), so escapes / UTF-8 / the trailing NUL are
+    /// handled once and the bytes are identical;</item>
+    /// <item>two TYPED ARRAY literals of the same element type (<c>[_]u8{1,2} ++ [_]u8{3}</c>) → one array
+    /// literal over the merged positional elements, re-fed through the shared <see cref="BuildArrayInit"/>
+    /// (so the result is byte-identical to writing the merged literal directly).</item>
+    /// </list>
+    /// A non-literal operand (a comptime const, <c>@typeName</c>, a sink-needing anon <c>.{…}</c>, or a
+    /// mismatched element type) still needs the comptime aggregate engine (road-to-zig-std S5–S6) and is a
+    /// loud cut.</summary>
+    private CExpr LowerConcat(Item leftItem, Item rightItem)
+    {
+        // String fold — each operand resolved to a comptime STRING value (a literal, a `const` bound to
+        // one, or a nested `++`/`**` fold), then segments concatenated.
+        if (TryFoldStringConcat(leftItem, rightItem) is { } str) { return str; }
+        // Array-shaped fold — each operand is a typed `[N]T{…}` literal, a `const` bound to one, or an
+        // anon `.{…}` (element type BORROWED from the other, typed operand). The merged positional items
+        // re-feed the one BuildArrayInit the plain `[_]T{…}` uses.
+        var lIsArr = TryArrayOperand(leftItem, out var lElem, out var lItems);
+        var rIsArr = TryArrayOperand(rightItem, out var rElem, out var rItems);
+        if (lIsArr && rIsArr)
+        {
+            var elem = lElem ?? rElem;
+            if (elem is null)
+            {
+                throw new IrUnsupportedException(
+                    "zig `a ++ b`: both operands are untyped anon `.{…}` — the common element/tuple type needs the "
+                    + "comptime aggregate engine (road-to-zig-std S5); give one operand an explicit `[_]T{…}` type");
+            }
+            if (lElem is not null && rElem is not null && !lElem.Equals(rElem))
+            {
+                throw new IrUnsupportedException(
+                    $"zig `a ++ b`: array element types differ ({lElem.Describe()} vs {rElem.Describe()})");
+            }
+            var merged = new List<Item>(lItems.Count + rItems.Count);
+            merged.AddRange(lItems);
+            merged.AddRange(rItems);
+            return BuildArrayInit(merged, new CType.Array(elem, null));   // inferred length = element count
+        }
+        throw new IrUnsupportedException(
+            "zig `a ++ b`: only string / array-literal concatenation (incl. a `const` bound to a comptime string/array, "
+            + "and an anon `.{…}` borrowing a typed operand's element type) is lowered (road-to-zig-std S9/S5); an "
+            + "`@typeName`-of-user-type or a non-literal operand needs the fuller comptime aggregate engine (S5–S6)");
+    }
+
+    /// <summary>Fold <c>a ++ b</c> when both operands are comptime STRING values (a string literal, a
+    /// <c>const</c> bound to one, or a nested string <c>++</c>/<c>**</c>): concatenate the raw quoted
+    /// segments (C adjacent-string-literal concatenation, reusing the shared encode path so escapes /
+    /// UTF-8 / NUL are handled once). Returns null when either operand is not a comptime string — the
+    /// caller then tries the array-literal fold or the loud cut.</summary>
+    private LitStr? TryFoldStringConcat(Item leftItem, Item rightItem)
+    {
+        if (EvalComptimeValue(leftItem) is LitStr ls && EvalComptimeValue(rightItem) is LitStr rs)
+        {
+            var segs = new List<string>(ls.Segments.Count + rs.Segments.Count);
+            segs.AddRange(ls.Segments);
+            segs.AddRange(rs.Segments);
+            DotCC.EmitHelpers.EncodeStringLiteral(segs, out var byteLen);
+            return new LitStr(segs) { Type = new CType.Array(CType.Char, byteLen) };
+        }
+        return null;
+    }
+
+    /// <summary>Lower a Zig comptime repeat <c>a ** n</c> with a comptime-integer count. V1 folds the
+    /// LITERAL case, symmetric with <see cref="LowerConcat"/>: a STRING literal repeats its raw segments
+    /// (<c>"x" ** 3</c> → the pooled literal <c>"xxx"</c>); a TYPED ARRAY literal repeats its positional
+    /// elements through the shared <see cref="BuildArrayInit"/>. <c>n == 0</c> is a loud cut for arrays (an
+    /// empty array literal is unsupported) and yields the empty string literal for strings. A non-literal
+    /// operand, a non-constant count, or a negative / oversized count is a loud cut (the general case needs
+    /// the comptime aggregate engine, S5–S6).</summary>
+    private CExpr LowerRepeat(Item leftItem, Item countItem)
+    {
+        // The count resolves to a comptime integer (a literal or a `const` bound to one).
+        if (EvalComptimeValue(countItem) is not LitInt { Value: { } n } || n < 0 || n > MaxRepeat)
+        {
+            throw new IrUnsupportedException(
+                $"zig `a ** n`: the repeat count must be a comptime integer in [0, {MaxRepeat}]"
+                + " (a non-constant count needs the comptime aggregate engine, S5–S6)");
+        }
+        // String fold — the operand resolved to a comptime string value, segments repeated.
+        if (EvalComptimeValue(leftItem) is LitStr ls)
+        {
+            var segs = new List<string>(ls.Segments.Count * (int)n);
+            for (var i = 0; i < n; i++) { segs.AddRange(ls.Segments); }
+            DotCC.EmitHelpers.EncodeStringLiteral(segs, out var byteLen);
+            return new LitStr(segs) { Type = new CType.Array(CType.Char, byteLen) };
+        }
+        // Array-literal fold — a typed `[N]T{…}` or a `const` bound to one (an anon `.{…} ** n` has no
+        // element type to borrow, so it stays a loud cut below).
+        if (TryArrayOperand(leftItem, out var elem, out var items) && elem is not null)
+        {
+            var merged = new List<Item>(items.Count * (int)n);
+            for (var i = 0; i < n; i++) { merged.AddRange(items); }
+            return BuildArrayInit(merged, new CType.Array(elem, null));   // n == 0 → empty → BuildArrayInit loud-cuts
+        }
+        throw new IrUnsupportedException(
+            "zig `a ** n`: only string / typed-array-literal repeat (incl. a `const` bound to a comptime string/array) "
+            + "is lowered (road-to-zig-std S9); an untyped anon `.{…}` operand or a non-literal operand needs the fuller "
+            + "comptime aggregate engine (S5–S6)");
+    }
+
+    /// <summary>Evaluate an expression to a comptime VALUE, or null if it is not comptime-known in the
+    /// forms V1 handles (road-to-zig-std S5 seed). Today: a string literal (→ <see cref="LitStr"/>), an
+    /// integer literal (→ <see cref="LitInt"/>), a bare name bound to a comptime literal
+    /// (<see cref="_comptimeValues"/>), or a nested string <c>++</c>/<c>**</c> fold. Never throws — it
+    /// only lowers the pure literal forms and otherwise returns null, so it is safe to call
+    /// speculatively (incl. while recording a <c>const</c> binding in any pass). Consumed by the
+    /// <c>++</c>/<c>**</c> folds; the natural growth point as the comptime engine lands
+    /// (<c>@typeName</c>, aggregate values, comptime calls).</summary>
+    private CExpr? EvalComptimeValue(Item item) => item.Content switch
+    {
+        Zig.StrLit => LowerExpr(item),   // pure — → LitStr
+        Zig.IntLit => LowerExpr(item),   // pure — → LitInt (with a folded Value)
+        Zig.Ident id => _comptimeValues.GetValueOrDefault(Tok(id.Arg0)),
+        Zig.Grouped g => EvalComptimeValue(g.Arg1),   // `(expr)` — unwrap so a parenthesized fold composes
+        Zig.Concat c => TryFoldStringConcat(c.Arg0, c.Arg2),
+        Zig.Repeat r => TryFoldStringRepeat(r.Arg0, r.Arg2),
+        Zig.BuiltinCall b => TryEvalTypeNameBuiltin(b),   // `@typeName(T)` → comptime string (else null)
+        _ => null,
+    };
+
+    /// <summary>Evaluate <c>@typeName(T)</c> to a comptime string value, or null if it is not that
+    /// builtin or the type is not spellable (see <see cref="ZigTypeSpelling"/>). Non-throwing — the
+    /// comptime-value path (<see cref="EvalComptimeValue"/>) needs a null-return, not the loud cut
+    /// <see cref="LowerBuiltinCall"/> raises, so an unspellable operand falls through to the loud cut
+    /// there or the caller's own.</summary>
+    private LitStr? TryEvalTypeNameBuiltin(Zig.BuiltinCall b)
+    {
+        if (Tok(b.Arg0) != "@typeName") { return null; }
+        var args = Flatten(b.Arg2);
+        return args.Count == 1 && ZigTypeSpelling(args[0]) is { } spelling ? ZigStringLiteral(spelling) : null;
+    }
+
+    /// <summary>Fold <c>a ** n</c> when the operand is a comptime STRING value and the count a comptime
+    /// integer — the string-repeat counterpart of <see cref="TryFoldStringConcat"/>, used both by
+    /// <see cref="LowerRepeat"/> and by <see cref="EvalComptimeValue"/> (so a nested `s ** n` inside a
+    /// larger fold resolves). Returns null when the operand is not a comptime string or the count not a
+    /// valid comptime integer.</summary>
+    private LitStr? TryFoldStringRepeat(Item leftItem, Item countItem)
+    {
+        if (EvalComptimeValue(leftItem) is LitStr ls
+            && EvalComptimeValue(countItem) is LitInt { Value: { } n } && n >= 0 && n <= MaxRepeat)
+        {
+            var segs = new List<string>(ls.Segments.Count * (int)n);
+            for (var i = 0; i < n; i++) { segs.AddRange(ls.Segments); }
+            DotCC.EmitHelpers.EncodeStringLiteral(segs, out var byteLen);
+            return new LitStr(segs) { Type = new CType.Array(CType.Char, byteLen) };
+        }
+        return null;
+    }
+
+    /// <summary>Recognize an ARRAY-SHAPED operand of a comptime <c>++</c>/<c>**</c> fold and yield its
+    /// <paramref name="element"/> type + RAW positional element items (re-lowered by
+    /// <see cref="BuildArrayInit"/> at the merged extent). Three forms:
+    /// <list type="bullet">
+    /// <item>a DIRECT typed array literal <c>[N]T{…}</c> / <c>[_]T{…}</c> — <paramref name="element"/> is
+    /// its element type;</item>
+    /// <item>a bare name bound to an array-literal <c>const</c> (<see cref="_comptimeArrayConsts"/>) —
+    /// same, lowering the recorded element-type item now (body-lowering time, safe);</item>
+    /// <item>an anon <c>.{…}</c> — items only, with <paramref name="element"/> <c>null</c> (the type is
+    /// BORROWED from the other, typed operand by the caller; two untyped anons are a loud cut).</item>
+    /// </list>
+    /// Also unwraps a <c>(grouped)</c> operand. Returns false for any non-array operand (a string
+    /// literal, a non-literal expression) — those take the string path or the loud cut.</summary>
+    private bool TryArrayOperand(Item item, out CType? element, out IReadOnlyList<Item> posItems)
+    {
+        // `(expr)` — unwrap so a parenthesized array operand composes.
+        if (item.Content is Zig.Grouped g) { return TryArrayOperand(g.Arg1, out element, out posItems); }
+        // A DIRECT typed array literal `[N]T{…}` / `[_]T{…}`.
+        if (item.Content is Zig.TypedStructInit { Arg0.Content: Zig.TyArray ta } tsi)
+        {
+            element = LowerType(ta.Arg3);
+            posItems = Flatten(tsi.Arg2);
+            return true;
+        }
+        // A `const` bound to an array literal (road-to-zig-std S5) — the raw items were recorded WITHOUT
+        // lowering; lower the element TYPE now (body-lowering time, safe) and re-feed BuildArrayInit.
+        if (item.Content is Zig.Ident id && _comptimeArrayConsts.TryGetValue(Tok(id.Arg0), out var rec))
+        {
+            element = LowerType(rec.ElemTypeItem);
+            posItems = rec.Items;
+            return true;
+        }
+        // An anon `.{…}` — the element type is inferred from the OTHER operand (null here); the items
+        // lower at that borrowed element type via BuildArrayInit. (A named `.field =` element is rejected
+        // there — an array literal is all-positional.)
+        if (item.Content is Zig.AnonStructInit anon)
+        {
+            element = null;
+            posItems = Flatten(anon.Arg2);
+            return true;
+        }
+        element = null;
+        posItems = [];
+        return false;
     }
 
     /// <summary>Lower a call. Two callee shapes: a bare identifier bound to a named function

@@ -108,6 +108,18 @@ internal sealed partial class ZigLowering
             _typeAliases[name] = aliasType;
             return true;
         }
+        // A comptime-known scalar/string literal (`const p = "foo";` / `const n = 3;`) — record its VALUE
+        // (road-to-zig-std S5 seed) so a comptime context (a `++`/`**` operand or count) can resolve the
+        // name and fold. SIDE EFFECT only: fall through to `return false` so the ordinary runtime decl
+        // still emits (a runtime use of the name is unaffected). EvalComptimeValue never throws and
+        // recognizes only pure string/int forms, so this is safe in every pass (incl. top-level pass 0).
+        if (EvalComptimeValue(rhs) is { } comptimeVal) { _comptimeValues[name] = comptimeVal; }
+        // A comptime ARRAY literal (`const a = [_]u8{1,2};`) — record its raw element-type + element
+        // items (no lowering, so safe in any pass) for a later `++`/`**` fold (see TryArrayLiteralParts).
+        else if (rhs.Content is Zig.TypedStructInit { Arg0.Content: Zig.TyArray ta } arrLit)
+        {
+            _comptimeArrayConsts[name] = (ta.Arg3, Flatten(arrLit.Arg2));
+        }
         return false;
     }
 

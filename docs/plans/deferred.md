@@ -25,7 +25,8 @@ of these parses and has a `ZigParseProbe` pin, but lowering is not wired yet:
 | Construct | Landed | Lowering gap |
 |---|---|---|
 | Error-set merge `A \|\| B` | #86 | erased set registered; no member-set constraint |
-| `++` concat / `**` repeat | #88 | comptime array/string concat + repeat (needs the S5–S6 comptime-aggregate engine) |
+| `++` concat / `**` repeat | #88 | **literals + comptime STRING/INT/ARRAY consts + `@typeName` + a type-BORROWING anon `.{…}` operand now fold** (S9/S5 — string/typed-array literals; a `const` bound to a comptime string/int (`_comptimeValues`) or array (`_comptimeArrayConsts`); `@typeName(T)` for a primitive/slice/pointer/optional via source-spelling; an anon `.{…}` operand borrows a typed operand's element type). Only cut now: two UNTYPED anon `.{…}` operands (`.{1} ++ .{2}` — common-type/tuple inference) and `@typeName` of a USER type (zig's file-qualified `file.Name`) |
+| `@typeName(T)` of a user type / alias | S5 | zig's fully-qualified `file.Name` (or an alias's resolved name) — dotcc lacks the file-qualification scheme; primitives + composed-of-primitives fold |
 | Nested `const Inner = enum/union {…};` as a container member | #89 | V1 binds nested STRUCTS (fields-only, plain-name in parent methods); nested enum/union + external `Parent.Inner` qualified access deferred |
 
 **Lowered since** (parses *and* lowers now — moved off the gap list):

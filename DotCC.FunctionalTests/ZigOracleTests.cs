@@ -142,6 +142,57 @@ public sealed class ZigOracleTests
             "    }\n" +
             "};\n" +
             "pub fn main() u8 { return Outer.sum(); }\n", 7, "" },
+        // Comptime string concat `++` folded to a single string literal (road-to-zig-std S9). s = "abcd",
+        // t = "xyz"; ('d'-'a') + ('z'-'x') = 3 + 2 = 5. (The `**` repeat fold is exercised by the always-on
+        // unit pin only — the pinned oracle zig 0.17.0-dev.667 tokenizes `**` as `*` `*` and rejects the
+        // syntax outright, even for canonical `"=" ** 5`, so it can't validate a `**` program.)
+        new object[] { "string_concat",
+            "pub fn main() u8 {\n" +
+            "    const s = \"ab\" ++ \"cd\";\n" +
+            "    const t = \"xy\" ++ \"z\";\n" +
+            "    return s[3] - s[0] + t[2] - t[0];\n" +
+            "}\n", 5, "" },
+        // Comptime ARRAY-literal concat `++` folded to one array literal over the merged elements
+        // (road-to-zig-std S9). a = {1,2,3,4}; a[0] + a[3] = 1 + 4 = 5. (Array `**` repeat, like string
+        // `**`, can't be oracle-tested — zig 0.17.0-dev.667 rejects `**` syntax; it has an always-on pin.)
+        new object[] { "array_literal_concat",
+            "pub fn main() u8 {\n" +
+            "    const a = [_]u8{ 1, 2 } ++ [_]u8{ 3, 4 };\n" +
+            "    return a[0] + a[3];\n" +
+            "}\n", 5, "" },
+        // Comptime-CONST string operands (road-to-zig-std S5 seed): `prefix` (a const string) and a
+        // parenthesized chained `++` both resolve to comptime values and fold. msg = "abcd", chain = "xyz";
+        // ('d'-'a') + ('z'-'x') = 3 + 2 = 5.
+        new object[] { "comptime_const_concat",
+            "const prefix = \"ab\";\n" +
+            "pub fn main() u8 {\n" +
+            "    const msg = prefix ++ \"cd\";\n" +
+            "    const chain = (\"x\" ++ \"y\") ++ \"z\";\n" +
+            "    return msg[3] - msg[0] + chain[2] - chain[0];\n" +
+            "}\n", 5, "" },
+        // A comptime-CONST ARRAY operand (road-to-zig-std S5): `base` (a const array) folds into a `++`
+        // with a literal. a = {1,2,3,4}; a[0] + a[3] = 1 + 4 = 5.
+        new object[] { "comptime_const_array_concat",
+            "const base = [_]u8{ 1, 2 };\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = base ++ [_]u8{ 3, 4 };\n" +
+            "    return a[0] + a[3];\n" +
+            "}\n", 5, "" },
+        // `@typeName(T)` for a primitive + a composed slice (road-to-zig-std S5 reflection): the source
+        // spelling matches zig byte-for-byte. a = "u8", b = "[]const u8"; 'u'(117) + '8'(56) - '['(91) = 82.
+        new object[] { "typename_primitive",
+            "pub fn main() u8 {\n" +
+            "    const a = @typeName(u8);\n" +
+            "    const b = @typeName([]const u8);\n" +
+            "    return a[0] + a[1] - b[0];\n" +
+            "}\n", 82, "" },
+        // An anon `.{…}` `++` operand borrows the element type from the typed operand (road-to-zig-std S5).
+        // a = {1,2,3,4}; a[0] + a[3] = 1 + 4 = 5.
+        new object[] { "anon_init_concat",
+            "pub fn main() u8 {\n" +
+            "    const a = [_]u8{ 1, 2 } ++ .{ 3, 4 };\n" +
+            "    return a[0] + a[3];\n" +
+            "}\n", 5, "" },
         // Function-pointer types + anyopaque (Milestone W, part 1a): two ops share the signature
         // `fn (ctx: *anyopaque, by: i32) i32`, each treating its opaque ctx as a `*i32` accumulator
         // (the C void*-callback idiom). main binds each to a `*const fn (…) i32` value and calls it
