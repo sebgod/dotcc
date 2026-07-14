@@ -1,5 +1,7 @@
 #nullable enable
 
+using System.Runtime.CompilerServices;
+
 namespace DotCC.Libc;
 
 /// <summary>
@@ -60,6 +62,94 @@ public static class ZigMath
         => T.IsNegative(T.MinValue)
             ? ClampSigned<T>(System.Int128.CreateTruncating(a) * System.Int128.CreateTruncating(b))
             : ClampUnsigned<T>(System.UInt128.CreateTruncating(a) * System.UInt128.CreateTruncating(b));
+
+    // ---- Zig math builtins (road-to-zig-std B3) — each maps to a BCL/generic-math primitive.
+    // The Zig front-end coerces both operands to their peer integer type, so C# infers T and the
+    // op runs at the right width. @min/@max/@rem/@divTrunc are ordinary; @mod/@divFloor differ from
+    // C#'s truncating `%`/`/` for a negative divisor (they follow the DIVISOR's sign / round toward
+    // negative infinity); @popCount counts set bits (width-agnostic — leading zero bits add nothing).
+
+    /// <summary><c>@min(a, b)</c> — the lesser operand (Zig's variadic <c>@min</c>, V1 binary).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static T Min<T>(T a, T b) where T : System.Numerics.IBinaryInteger<T> => a < b ? a : b;
+
+    /// <summary><c>@max(a, b)</c> — the greater operand.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static T Max<T>(T a, T b) where T : System.Numerics.IBinaryInteger<T> => a > b ? a : b;
+
+    /// <summary><c>@rem(a, b)</c> — truncated remainder (sign of the DIVIDEND) — identical to C#'s
+    /// <c>%</c>, wrapped for a uniform builtin surface.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static T Rem<T>(T a, T b) where T : System.Numerics.IBinaryInteger<T> => a % b;
+
+    /// <summary><c>@divTrunc(a, b)</c> — division rounding toward zero — identical to C#'s <c>/</c>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static T DivTrunc<T>(T a, T b) where T : System.Numerics.IBinaryInteger<T> => a / b;
+
+    /// <summary><c>@mod(a, b)</c> — floored modulo: the result takes the sign of the DIVISOR (unlike
+    /// C#'s <c>%</c>, sign of the dividend). For an unsigned <typeparamref name="T"/> the two coincide.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static T Mod<T>(T a, T b) where T : System.Numerics.IBinaryInteger<T>
+    {
+        var r = a % b;
+        return !T.IsZero(r) && (T.IsNegative(r) != T.IsNegative(b)) ? r + b : r;
+    }
+
+    /// <summary><c>@divFloor(a, b)</c> — division rounding toward negative infinity (unlike C#'s <c>/</c>,
+    /// toward zero). For non-negative operands the two coincide.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static T DivFloor<T>(T a, T b) where T : System.Numerics.IBinaryInteger<T>
+    {
+        var q = a / b;
+        var r = a % b;
+        return !T.IsZero(r) && (T.IsNegative(r) != T.IsNegative(b)) ? q - T.One : q;
+    }
+
+    /// <summary><c>@popCount(x)</c> — the number of set bits. Width-agnostic: the value's leading
+    /// zero bits (in <typeparamref name="T"/>'s storage) contribute nothing, so counting in
+    /// <typeparamref name="T"/>'s own width matches Zig's logical width. Returns <c>int</c>
+    /// (a small count), as Zig's <c>@popCount</c> yields a suitably-sized integer.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static int PopCount<T>(T x) where T : System.Numerics.IBinaryInteger<T>
+        => int.CreateTruncating(T.PopCount(x));
+
+    /// <summary><c>@clz(x)</c> — count LEADING zero bits, within <typeparamref name="T"/>'s bit width
+    /// (<c>T.LeadingZeroCount</c> counts in T's represented width, so <c>@clz(u8)</c> counts in 8 bits,
+    /// <c>@clz(u16)</c> in 16 — matching Zig for the standard widths dotcc maps 1:1). <c>@clz(0)</c> is
+    /// the full bit width. Returns <c>int</c>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static int Clz<T>(T x) where T : System.Numerics.IBinaryInteger<T>
+        => int.CreateTruncating(T.LeadingZeroCount(x));
+
+    /// <summary><c>@ctz(x)</c> — count TRAILING zero bits, within <typeparamref name="T"/>'s bit width.
+    /// <c>@ctz(0)</c> is the full bit width (<c>T.TrailingZeroCount(T.Zero)</c> yields it). Returns
+    /// <c>int</c>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static int Ctz<T>(T x) where T : System.Numerics.IBinaryInteger<T>
+        => int.CreateTruncating(T.TrailingZeroCount(x));
+
+    /// <summary><c>@byteSwap(x)</c> — reverse the byte order of <typeparamref name="T"/>. Writes the
+    /// value's bytes little-endian, reverses them, and reads them back — a generic form that works for
+    /// any <see cref="System.Numerics.IBinaryInteger{T}"/> width (exact for the whole-byte standard
+    /// widths dotcc maps 1:1; a `u8` byteswap is the identity). The read signedness is derived from
+    /// <c>T.AllBitsSet</c> (−1 for a signed <typeparamref name="T"/>, max for unsigned) — immaterial at
+    /// the exact width, but the API requires it.</summary>
+    public static T ByteSwap<T>(T x) where T : System.Numerics.IBinaryInteger<T>
+    {
+        var n = x.GetByteCount();
+        System.Span<byte> buf = stackalloc byte[n];
+        x.WriteLittleEndian(buf);
+        buf.Reverse();
+        return T.ReadLittleEndian(buf, isUnsigned: !T.IsNegative(T.AllBitsSet));
+    }
+
+    /// <summary>The magnitude of an integer as an unsigned 128-bit value — the exact-width backbone of
+    /// <c>@abs</c>, which returns the UNSIGNED peer of <c>iN</c> (so <c>@abs(i8 -128) == u8 128</c>,
+    /// which a signed <c>Math.Abs</c> would overflow). The lowering casts this result to the operand's
+    /// unsigned peer type.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static System.UInt128 Abs128<T>(T x) where T : System.Numerics.IBinaryInteger<T>
+        => System.UInt128.CreateTruncating(System.Int128.Abs(System.Int128.CreateTruncating(x)));
 
     /// <summary>Clamp an exact signed 128-bit result to <c>[T.MinValue, T.MaxValue]</c> and
     /// truncate back to <typeparamref name="T"/> (used for every signed op and for all

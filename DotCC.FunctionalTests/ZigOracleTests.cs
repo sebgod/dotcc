@@ -117,6 +117,39 @@ public sealed class ZigOracleTests
             "    const z: i7 = -3;\n" +
             "    return @intCast(@as(i32, x) + y + z);\n" +
             "}\n", 105, "" },
+        // Math builtins (road-to-zig-std B3) → ZigMath helpers. min 3, max 2, mod(-7,3)=2 (floored),
+        // divFloor(-7,3)=-3, rem(7,3)=1, divTrunc(7,3)=2, popCount(0b1011)=3. 3+2+2-3+1+2+3+4 = 14.
+        new object[] { "math_builtins",
+            "pub fn main() u8 {\n" +
+            "    const mn = @as(i32, @min(3, 7));\n" +
+            "    const mx = @as(i32, @max(1, 2));\n" +
+            "    const md = @as(i32, @mod(@as(i8, -7), 3));\n" +
+            "    const df = @as(i32, @divFloor(@as(i8, -7), 3));\n" +
+            "    const rm = @as(i32, @rem(@as(i8, 7), 3));\n" +
+            "    const dt = @as(i32, @divTrunc(@as(i8, 7), 3));\n" +
+            "    const pc = @as(i32, @popCount(@as(u8, 11)));\n" +
+            "    return @intCast(mn + mx + md + df + rm + dt + pc + 4);\n" +
+            "}\n", 14, "" },
+        // @clz/@ctz (bit-zero counts within the type width) + @intFromPtr (address → usize; used as a
+        // DETERMINISTIC pointer difference). clz(0b00010000 in u8)=3, ctz=4, &a[1]-&a[0]=1 → 3+4+1 = 8.
+        new object[] { "bit_ptr_builtins",
+            "pub fn main() u8 {\n" +
+            "    const x: u8 = 0b00010000;\n" +
+            "    const lz = @clz(x);\n" +
+            "    const tz = @ctz(x);\n" +
+            "    var a = [_]u8{ 0, 0, 0 };\n" +
+            "    const d = @intFromPtr(&a[1]) - @intFromPtr(&a[0]);\n" +
+            "    return @intCast(@as(u32, lz) + tz + d);\n" +
+            "}\n", 8, "" },
+        // @byteSwap (reverse byte order) + @abs (magnitude → the operand's UNSIGNED peer type).
+        // byteSwap(0x0102 u16)=0x0201, &0xFF=1; @abs(i8 -5)=5, @abs(i32 -100)=100. 1+5+100-100 = 6.
+        new object[] { "byteswap_abs_builtins",
+            "pub fn main() u8 {\n" +
+            "    const bs: u16 = @byteSwap(@as(u16, 0x0102));\n" +
+            "    const a1: u32 = @abs(@as(i8, -5));\n" +
+            "    const a2: u32 = @abs(@as(i32, -100));\n" +
+            "    return @intCast((bs & 0xFF) + a1 + a2 - 100);\n" +
+            "}\n", 6, "" },
         // A function CALL — main invokes a named function with arguments.
         new object[] { "call",
             "fn add(a: u8, b: u8) u8 { return a + b; }\npub fn main() u8 { return add(40, 2); }\n", 42, "" },
