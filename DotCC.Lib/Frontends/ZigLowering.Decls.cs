@@ -1549,6 +1549,63 @@ internal sealed partial class ZigLowering
                 }
                 return ZigStringLiteral(spelling);
             }
+            // Math builtins (road-to-zig-std B3) → `ZigMath.<helper><T>` over the peer-resolved operand
+            // type. @min/@max/@rem/@divTrunc are ordinary; @mod/@divFloor follow the divisor's sign /
+            // round toward -inf (unlike C#'s truncating %//). Zig's @min/@max are variadic — V1 binary.
+            case "@min":      return MathBin2("Min", bname, bargs);
+            case "@max":      return MathBin2("Max", bname, bargs);
+            case "@rem":      return MathBin2("Rem", bname, bargs);
+            case "@divTrunc": return MathBin2("DivTrunc", bname, bargs);
+            case "@mod":      return MathBin2("Mod", bname, bargs);
+            case "@divFloor": return MathBin2("DivFloor", bname, bargs);
+            case "@popCount":
+                // `@popCount(x)` — set-bit count (width-agnostic; leading zeros add nothing). → int.
+                return new Call("ZigMath.PopCount", new List<CExpr> { LowerExpr(BitCountArg("@popCount", bargs)) }) { Type = CType.Int };
+            case "@clz":
+                // `@clz(x)` — leading-zero count within x's bit width (exact for the standard widths
+                // dotcc maps 1:1; an arbitrary `uN` counts in its containing width — a documented edge).
+                return new Call("ZigMath.Clz", new List<CExpr> { LowerExpr(BitCountArg("@clz", bargs)) }) { Type = CType.Int };
+            case "@ctz":
+                // `@ctz(x)` — trailing-zero count within x's bit width.
+                return new Call("ZigMath.Ctz", new List<CExpr> { LowerExpr(BitCountArg("@ctz", bargs)) }) { Type = CType.Int };
+            case "@intFromPtr":
+                // `@intFromPtr(p)` — the pointer's address as `usize` → an unchecked cast to `ulong`
+                // (the LP64 pointer-width). The VALUE is a runtime address (nondeterministic), so a
+                // program observing it must derive something stable (a pointer difference, an alignment
+                // remainder, a null check) — exactly as in real zig.
+                if (bargs.Count != 1)
+                {
+                    throw new IrUnsupportedException($"zig `@intFromPtr` expects (pointer); got {bargs.Count} argument(s)");
+                }
+                return new Cast(CType.ULong, LowerExpr(bargs[0])) { Type = CType.ULong };
+            case "@byteSwap":
+                // `@byteSwap(x)` — reverse byte order → ZigMath.ByteSwap<T> (same type). Exact for the
+                // whole-byte standard widths dotcc maps 1:1 (an odd `u24`-style width is a documented edge).
+                if (bargs.Count != 1)
+                {
+                    throw new IrUnsupportedException($"zig `@byteSwap` expects (integer); got {bargs.Count} argument(s)");
+                }
+                var bswArg = LowerExpr(bargs[0]);
+                return new Call("ZigMath.ByteSwap", new List<CExpr> { bswArg }) { Type = bswArg.Type };
+            case "@abs":
+            {
+                // `@abs(x)` — magnitude. Zig's `@abs(iN)` returns the UNSIGNED peer `uN` (so
+                // `@abs(i8 -128)` = `u8 128`, which a same-width signed abs would overflow): compute the
+                // magnitude in 128-bit (ZigMath.Abs128) and cast to the operand's unsigned peer. An
+                // already-unsigned operand is the identity; a float operand is a loud cut (V1).
+                if (bargs.Count != 1)
+                {
+                    throw new IrUnsupportedException($"zig `@abs` expects (number); got {bargs.Count} argument(s)");
+                }
+                var absArg = LowerExpr(bargs[0]);
+                if (absArg.Type.Unqualified is not CType.Prim { Integer: true } absPrim)
+                {
+                    throw new IrUnsupportedException("zig `@abs` V1 supports an integer operand (float `@abs` is not lowered yet)");
+                }
+                if (!absPrim.Signed) { return absArg; }   // @abs of an unsigned int is the identity
+                var absU = UnsignedPeerInt(absArg.Type);
+                return new Cast(absU, new Call("ZigMath.Abs128", new List<CExpr> { absArg }) { Type = CType.UInt128 }) { Type = absU };
+            }
             case "@errorName":
                 // `@errorName(e)` → the error's name as `[]const u8` (real zig: `[:0]const u8`).
                 // The operand is a flat `ushort` error code; the name comes from the runtime
@@ -1600,7 +1657,8 @@ internal sealed partial class ZigLowering
                 throw new IrUnsupportedException(
                     $"zig builtin '{bname}' not lowered yet (supported: @as, @intCast, @truncate, @ptrCast, @bitCast, " +
                     "@floatFromInt, @intFromFloat, @floatCast, @enumFromInt, @alignCast, @intFromEnum, @sizeOf, @alignOf, " +
-                    "@offsetOf, @typeName, @errorName, @memcpy, @memset)");
+                    "@offsetOf, @typeName, @min, @max, @rem, @divTrunc, @mod, @divFloor, @popCount, @clz, @ctz, @byteSwap, @abs, " +
+                    "@intFromPtr, @errorName, @memcpy, @memset)");
         }
     }
 
@@ -1632,6 +1690,47 @@ internal sealed partial class ZigLowering
         DotCC.EmitHelpers.EncodeStringLiteral(segs, out var byteLen);
         return new LitStr(segs) { Type = new CType.Array(CType.Char, byteLen) };
     }
+
+    /// <summary>Lower a two-operand Zig math builtin (<c>@min</c>/<c>@max</c>/<c>@rem</c>/<c>@divTrunc</c>/
+    /// <c>@mod</c>/<c>@divFloor</c>) to a <c>ZigMath.&lt;helper&gt;&lt;T&gt;</c> call
+    /// (<see cref="DotCC.Libc.ZigMath"/>). Zig has no integer promotion, so the result type is the
+    /// peer-resolved operand type (<see cref="PeerIntType"/>); both operands coerce to it so C# infers
+    /// the generic <c>T</c> and the op runs at the right width (evaluated once, as call arguments — no
+    /// double-eval). <c>@min</c>/<c>@max</c> are variadic in Zig; V1 handles the binary form and makes a
+    /// wider call a clear arity error.</summary>
+    private CExpr MathBin2(string helper, string zigName, IReadOnlyList<Item> bargs)
+    {
+        if (bargs.Count != 2)
+        {
+            throw new IrUnsupportedException(
+                $"zig `{zigName}` expects (a, b); got {bargs.Count} argument(s)"
+                + (zigName is "@min" or "@max" ? " (variadic `@min`/`@max` beyond two operands is not lowered yet)" : ""));
+        }
+        var a = LowerExpr(bargs[0]);
+        var b = LowerExpr(bargs[1]);
+        var t = PeerIntType(a, b);
+        return new Call($"ZigMath.{helper}", new List<CExpr> { CoerceToPeer(a, t), CoerceToPeer(b, t) }) { Type = t };
+    }
+
+    /// <summary>Validate + return the single integer argument of a bit-count builtin
+    /// (<c>@popCount</c>/<c>@clz</c>/<c>@ctz</c>) — a clear arity error otherwise.</summary>
+    private static Item BitCountArg(string zigName, IReadOnlyList<Item> bargs)
+        => bargs.Count == 1
+            ? bargs[0]
+            : throw new IrUnsupportedException($"zig `{zigName}` expects (integer); got {bargs.Count} argument(s)");
+
+    /// <summary>The unsigned peer of a signed integer <see cref="CType.Prim"/> (same byte width,
+    /// <c>Signed = false</c>) — for <c>@abs</c>, whose result type is <c>uN</c> for an <c>iN</c> operand.
+    /// An already-unsigned or non-integer type is returned unchanged.</summary>
+    private static CType UnsignedPeerInt(CType t) => t.Unqualified switch
+    {
+        CType.Prim { Integer: true, Signed: true, Bytes: 1 } => CType.UChar,
+        CType.Prim { Integer: true, Signed: true, Bytes: 2 } => CType.UShort,
+        CType.Prim { Integer: true, Signed: true, Bytes: 4 } => CType.UInt,
+        CType.Prim { Integer: true, Signed: true, Bytes: 8 } => CType.ULong,
+        CType.Prim { Integer: true, Signed: true, Bytes: 16 } => CType.UInt128,
+        _ => t,
+    };
 
     /// <summary>Lower a result-location cast builtin at its sink. Each is single-arg; the cast
     /// TARGET is the <paramref name="sink"/> (Zig infers it from the result location, unlike

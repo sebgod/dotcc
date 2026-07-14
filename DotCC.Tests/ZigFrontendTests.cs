@@ -265,6 +265,77 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_math_builtins_to_ZigMath_helpers()
+    {
+        // @min/@max/@rem/@divTrunc/@mod/@divFloor/@popCount (road-to-zig-std B3) → `ZigMath.<helper>`
+        // calls over the peer-resolved operand type (evaluated once). Previously loud cuts.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const mn = @min(@as(i8, 3), 7);\n" +
+            "    const mx = @max(@as(i8, 1), 2);\n" +
+            "    const rm = @rem(@as(i8, 7), 3);\n" +
+            "    const dt = @divTrunc(@as(i8, 7), 3);\n" +
+            "    const md = @mod(@as(i8, -7), 3);\n" +
+            "    const df = @divFloor(@as(i8, -7), 3);\n" +
+            "    const pc = @popCount(@as(u8, 11));\n" +
+            "    return @intCast(mn + mx + rm + dt + md + (df + 4) + pc);\n" +
+            "}\n");
+        cs.ShouldContain("ZigMath.Min");
+        cs.ShouldContain("ZigMath.Max");
+        cs.ShouldContain("ZigMath.Rem");
+        cs.ShouldContain("ZigMath.DivTrunc");
+        cs.ShouldContain("ZigMath.Mod");
+        cs.ShouldContain("ZigMath.DivFloor");
+        cs.ShouldContain("ZigMath.PopCount");
+    }
+
+    [Fact]
+    public void Rejects_variadic_min_beyond_two_operands_as_a_loud_cut()
+    {
+        // Zig's `@min`/`@max` are variadic; V1 lowers the binary form and makes a wider call a clear
+        // arity error (not a silent wrong result).
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 { return @min(1, 2, 3); }\n"));
+        ex.Message.ShouldContain("variadic");
+    }
+
+    [Fact]
+    public void Lowers_bit_and_ptr_builtins_clz_ctz_intFromPtr()
+    {
+        // @clz/@ctz (leading/trailing zero count within the type width) → ZigMath.Clz/Ctz; @intFromPtr
+        // (address as usize) → an unchecked `(ulong)ptr` cast (road-to-zig-std B3). Previously loud cuts.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const x: u8 = 0b00010000;\n" +
+            "    const lz = @clz(x);\n" +
+            "    const tz = @ctz(x);\n" +
+            "    var a = [_]u8{ 0, 0, 0 };\n" +
+            "    const d = @intFromPtr(&a[1]) - @intFromPtr(&a[0]);\n" +
+            "    return @intCast(@as(u32, lz) + tz + d);\n" +
+            "}\n");
+        cs.ShouldContain("ZigMath.Clz");
+        cs.ShouldContain("ZigMath.Ctz");
+        cs.ShouldContain("(ulong)");   // @intFromPtr cast
+    }
+
+    [Fact]
+    public void Lowers_byteSwap_and_abs_builtins()
+    {
+        // @byteSwap → ZigMath.ByteSwap<T> (same type); @abs → ZigMath.Abs128 cast to the operand's
+        // UNSIGNED peer (Zig's `@abs(iN)` → `uN`), so `@abs(i8)` → `(byte)…`, `@abs(i32)` → `(uint)…`.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const bs: u16 = @byteSwap(@as(u16, 0x0102));\n" +
+            "    const a1: u32 = @abs(@as(i8, -5));\n" +
+            "    const a2: u32 = @abs(@as(i32, -100));\n" +
+            "    return @intCast((bs & 0xFF) + a1 + a2 - 100);\n" +
+            "}\n");
+        cs.ShouldContain("ZigMath.ByteSwap");
+        cs.ShouldContain("(byte)ZigMath.Abs128");    // i8 → unsigned peer u8
+        cs.ShouldContain("(uint)ZigMath.Abs128");    // i32 → unsigned peer u32
+    }
+
+    [Fact]
     public void Lowers_zig_main_end_to_end()
     {
         // pub fn main() u8 { const x: u8 = 40; return x + 2; }  → a byte-returning
