@@ -17,7 +17,12 @@ name: ci
 # Windows job reuses the same separate restore→build→test step structure, so it
 # stays clear of the LALR.CC.dll copy-lock flake the org switched away from.
 #
-# dotcc ships no NuGet package, so there is no pack/publish job (unlike LALR.CC).
+# dotcc ships no NuGet package, so there is no PACK job (unlike LALR.CC). It does,
+# though, publish the clang-shaped `dotcc` exe as NativeAOT (PublishAot=true), and
+# nothing else here exercises the EXE's ILC closure — shared-lib-oracle drives ILC
+# only for the -shared .so. So an aot-publish job below publishes + smoke-tests the
+# exe to catch trim/AOT regressions (the periodic `dotnet publish` check CLAUDE.md
+# asks for), which is a distinct ILC entry point from the .so round-trip.
 #
 # In CI the sibling LALR.CC working copy is absent, so Directory.Build.props
 # auto-selects NuGet mode; we still pass -p:UseLocalLalrCc=false to pin that
@@ -75,6 +80,16 @@ name: ci
 #                 deliberately omitted: zig 0.16.0's aarch64-windows build segfaults on
 #                 build-exe (the x86_64 build is fine) — arm64 emit/grammar coverage
 #                 still rides build-test-windows-arm64.
+#   aot-publish — NativeAOT-publish the clang-shaped `dotcc` exe (PublishAot fires
+#                 only on `dotnet publish`, never on build/test), then smoke-test the
+#                 PUBLISHED binary end-to-end: a no-input run must give the clang-shaped
+#                 error (proves CLI wiring survives trimming), and a real C -> C# emit
+#                 must produce a file-based program (proves the compiler path — LALR
+#                 tables, preprocessor, backend — works AOT). This is the only job that
+#                 covers the exe's ILC closure; a trim/reflection regression fails the
+#                 publish (analyzer diagnostics are errors under PublishAot) or the smoke
+#                 test rather than shipping silently. clang + zlib1g-dev are the ILC
+#                 linker deps (same toolchain shared-lib-oracle installs).
 
 on:
   # push runs only on the default branch (i.e. merges). Feature-branch commits are
@@ -515,3 +530,59 @@ jobs:
         run: >
           dotnet test DotCC.FunctionalTests/DotCC.FunctionalTests.csproj
           -c Release --no-build --nologo --filter "FullyQualifiedName~ZigOracleTests"
+
+  aot-publish:
+    # NativeAOT-publish the clang-shaped `dotcc` exe and smoke-test the produced
+    # binary. PublishAot=true is set on DotCC.csproj but fires ONLY on `dotnet
+    # publish` — a normal build/test never invokes ILC — so without this job the
+    # exe's trim/AOT closure (System.CommandLine dispatch + the whole compile path)
+    # ships untested. shared-lib-oracle drives ILC too, but only for the -shared .so,
+    # a different entry point. If a new dependency or reflection use breaks the trim
+    # closure, the publish fails here (PublishAot promotes trim/AOT analyzer
+    # diagnostics to errors); if it merely breaks at runtime, the end-to-end smoke
+    # test below catches it. The periodic `dotnet publish` regression check CLAUDE.md
+    # asks for, now continuous.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      # The NativeAOT linker is clang; zlib1g-dev is its runtime dep — the same ILC
+      # toolchain shared-lib-oracle installs.
+      - name: Install NativeAOT toolchain (clang + zlib)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang zlib1g-dev
+          clang --version
+
+      - name: Restore
+        run: dotnet restore dotcc.sln
+
+      # PublishAot fires here (never on build/test). NuGet path per CI convention.
+      - name: AOT publish (Release) — the clang-shaped dotcc exe
+        run: >
+          dotnet publish DotCC/DotCC.csproj -c Release -o aot-publish --nologo
+          -p:UseLocalLalrCc=false
+
+      # Smoke-test the PUBLISHED NativeAOT binary end-to-end: (1) no input files ->
+      # the clang-shaped error on a non-zero exit proves the CLI wiring survives
+      # trimming; (2) a real C -> C# emit proves the compiler path (LALR tables,
+      # preprocessor, backend) runs AOT — where a trim/reflection regression would
+      # actually bite. Fail loudly rather than let a broken binary pass silently.
+      - name: Smoke-test the published binary
+        run: |
+          set -euo pipefail
+          bin="aot-publish/dotcc"
+          test -x "$bin" || { echo "published dotcc binary not found at $bin"; exit 1; }
+          # No input files -> clang-shaped error, non-zero exit.
+          if "$bin" 2> err.txt; then echo "expected non-zero exit for no input files"; cat err.txt; exit 1; fi
+          grep -q "no input files" err.txt || { echo "unexpected no-input stderr:"; cat err.txt; exit 1; }
+          # Real emit path -> a .NET 10 file-based program (#:property AllowUnsafeBlocks).
+          "$bin" --emit=file examples/hello/main.c examples/hello/math.c > out.cs
+          grep -q "AllowUnsafeBlocks" out.cs || { echo "emit produced no file-based program:"; cat out.cs; exit 1; }
+          echo "AOT publish + smoke test OK"
