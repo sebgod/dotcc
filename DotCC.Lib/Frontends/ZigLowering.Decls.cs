@@ -1529,6 +1529,26 @@ internal sealed partial class ZigLowering
                 var offMemberType = _ir.StructFieldType(offNamed, offField);
                 return new OffsetOf(offStruct, new[] { offField }, offMemberType) { Type = CType.ULong };
             }
+            case "@typeName":
+            {
+                // `@typeName(T)` — the type's name as a comptime `[:0]const u8` string (road-to-zig-std
+                // S5, the reflection brick's first slice). Read the SOURCE spelling off the type AST so
+                // it matches zig byte-for-byte (`@typeName([]const u8)` == "[]const u8"); V1 covers
+                // primitives + slice/pointer/optional compositions of them. A user type resolves to
+                // zig's FILE-QUALIFIED name (`main.Foo`), which dotcc can't reproduce, so it (and an
+                // alias, which zig resolves to the underlying name) is a loud cut.
+                if (bargs.Count != 1)
+                {
+                    throw new IrUnsupportedException($"zig `@typeName` expects (type); got {bargs.Count} argument(s)");
+                }
+                if (ZigTypeSpelling(bargs[0]) is not { } spelling)
+                {
+                    throw new IrUnsupportedException(
+                        "zig `@typeName` V1 supports a primitive type or a slice/pointer/optional of one; a user type's "
+                        + "fully-qualified name (zig's `file.Name`) and an alias are not modeled yet (road-to-zig-std S5 reflection)");
+                }
+                return ZigStringLiteral(spelling);
+            }
             case "@errorName":
                 // `@errorName(e)` → the error's name as `[]const u8` (real zig: `[:0]const u8`).
                 // The operand is a flat `ushort` error code; the name comes from the runtime
@@ -1580,8 +1600,37 @@ internal sealed partial class ZigLowering
                 throw new IrUnsupportedException(
                     $"zig builtin '{bname}' not lowered yet (supported: @as, @intCast, @truncate, @ptrCast, @bitCast, " +
                     "@floatFromInt, @intFromFloat, @floatCast, @enumFromInt, @alignCast, @intFromEnum, @sizeOf, @alignOf, " +
-                    "@offsetOf, @errorName, @memcpy, @memset)");
+                    "@offsetOf, @typeName, @errorName, @memcpy, @memset)");
         }
+    }
+
+    /// <summary>The zig SOURCE spelling of a type AST, for <c>@typeName</c> (road-to-zig-std S5) — read
+    /// off the AST so it is byte-identical to real zig: a primitive keyword verbatim (<c>u8</c>,
+    /// <c>usize</c>, …), or a slice / pointer / optional composed of a spellable element
+    /// (<c>[]const u8</c>, <c>*u8</c>, <c>?i32</c>). Returns null for anything else — a bare identifier
+    /// that is NOT a primitive (a user type or an alias, whose <c>@typeName</c> is zig's file-qualified
+    /// / resolved name, not the source token), or a type former V1 does not spell — so
+    /// <see cref="LowerBuiltinCall"/> makes it a precise loud cut rather than emit a wrong name.</summary>
+    private string? ZigTypeSpelling(Item typeAst) => typeAst.Content switch
+    {
+        Zig.Ident id when TryLowerPrim(Tok(id.Arg0), out _) => Tok(id.Arg0),
+        Zig.TySlice s      => ZigTypeSpelling(s.Arg2) is { } e ? "[]" + e : null,
+        Zig.TySliceConst s => ZigTypeSpelling(s.Arg3) is { } e ? "[]const " + e : null,
+        Zig.TyPointer p    => ZigTypeSpelling(p.Arg1) is { } e ? "*" + e : null,
+        Zig.TyPtrConst p   => ZigTypeSpelling(p.Arg2) is { } e ? "*const " + e : null,
+        Zig.TyOptional o   => ZigTypeSpelling(o.Arg1) is { } e ? "?" + e : null,
+        _ => null,
+    };
+
+    /// <summary>Build a <see cref="LitStr"/> from a plain (unquoted, escape-free) string — the shared
+    /// shape a Zig string literal lowers to (a quoted segment through the C string encoder, typed
+    /// <c>char[N]</c> incl. the NUL). Used by <c>@typeName</c>; the spelling is ASCII with no quote /
+    /// backslash, so it needs no escaping.</summary>
+    private static LitStr ZigStringLiteral(string text)
+    {
+        var segs = new List<string> { "\"" + text + "\"" };
+        DotCC.EmitHelpers.EncodeStringLiteral(segs, out var byteLen);
+        return new LitStr(segs) { Type = new CType.Array(CType.Char, byteLen) };
     }
 
     /// <summary>Lower a result-location cast builtin at its sink. Each is single-arg; the cast

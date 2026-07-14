@@ -115,6 +115,156 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_string_concat_operator()
+    {
+        // `a ++ b` on string literals (road-to-zig-std S9 — parses since #88, previously a loud cut)
+        // folds to a single string literal: the raw quoted segments concatenate exactly like C adjacent
+        // string literals, reusing the shared decode/encode path so the bytes are identical.
+        var cs = EmitZig(
+            "pub fn main() u8 { const s = \"ab\" ++ \"cd\"; return s[3] - s[0]; }\n");
+        cs.ShouldContain("abcd");   // the folded content, one pooled literal
+    }
+
+    [Fact]
+    public void Lowers_string_repeat_operator()
+    {
+        // `a ** n` on a string literal with a comptime-integer count folds to the repeated literal.
+        // (dotcc's grammar #88 tokenizes `**` as one repeat operator, matching zig's DOCUMENTED
+        // semantics; the pinned oracle zig 0.17.0-dev.667 has a tokenizer quirk that splits `**` into
+        // `* *` and rejects the syntax, so `**` is covered by this always-on pin, not an oracle case.)
+        var cs = EmitZig(
+            "pub fn main() u8 { const r = \"z\" ** 3; return r[0] - r[2]; }\n");
+        cs.ShouldContain("zzz");
+    }
+
+    [Fact]
+    public void Lowers_array_literal_concat_operator()
+    {
+        // `[_]T{…} ++ [_]T{…}` folds to one array literal over the merged positional elements, re-fed
+        // through the shared BuildArrayInit (road-to-zig-std S9). a = {1,2,3,4}.
+        var cs = EmitZig(
+            "pub fn main() u8 { const a = [_]u8{ 1, 2 } ++ [_]u8{ 3, 4 }; return a[0] + a[3]; }\n");
+        cs.ShouldContain("1, 2, 3, 4");   // the merged stackalloc array literal
+    }
+
+    [Fact]
+    public void Lowers_array_literal_repeat_operator()
+    {
+        // `[_]T{…} ** n` folds to the element list repeated n times, through the same BuildArrayInit.
+        var cs = EmitZig(
+            "pub fn main() u8 { const b = [_]u8{ 7 } ** 3; return b[0] + b[2]; }\n");
+        cs.ShouldContain("7, 7, 7");
+    }
+
+    [Fact]
+    public void Folds_a_comptime_const_string_concat_operand()
+    {
+        // A `const` bound to a comptime string is a comptime VALUE (road-to-zig-std S5 seed): a `++`
+        // operand naming it resolves through `_comptimeValues` and folds — `prefix ++ "bar"` → "foobar".
+        var cs = EmitZig(
+            "const prefix = \"foo\";\n" +
+            "pub fn main() u8 { const msg = prefix ++ \"bar\"; return msg[0]; }\n");
+        cs.ShouldContain("foobar");
+    }
+
+    [Fact]
+    public void Folds_a_comptime_const_repeat_count_and_chained_concat()
+    {
+        // A `const` int drives a `**` count (`s ** n`); a chained `++` over a const string value folds
+        // transitively (`chain_a` is itself a folded comptime string).
+        var cs = EmitZig(
+            "const n = 3;\n" +
+            "pub fn main() u8 {\n" +
+            "    const rep = \"x\" ** n;\n" +
+            "    const chain_a = \"a\" ++ \"b\";\n" +
+            "    const chain_b = chain_a ++ \"c\";\n" +
+            "    return rep[0] + chain_b[0];\n" +
+            "}\n");
+        cs.ShouldContain("xxx");
+        cs.ShouldContain("abc");
+    }
+
+    [Fact]
+    public void Folds_a_comptime_const_array_concat_and_repeat_operand()
+    {
+        // A `const` bound to an ARRAY literal is a comptime array value (road-to-zig-std S5): `base ++ …`
+        // and `base ** n` fold, re-feeding the shared BuildArrayInit (raw items recorded, no lowering).
+        var cs = EmitZig(
+            "const base = [_]u8{ 1, 2 };\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = base ++ [_]u8{ 3, 4 };\n" +
+            "    const b = base ** 2;\n" +
+            "    return a[3] + b[3];\n" +
+            "}\n");
+        cs.ShouldContain("1, 2, 3, 4");   // const-array ++ literal
+        cs.ShouldContain("1, 2, 1, 2");   // const-array ** 2
+    }
+
+    [Fact]
+    public void Lowers_typeName_of_primitive_and_composed_types()
+    {
+        // `@typeName(T)` reads the SOURCE spelling off the type AST, so it matches zig byte-for-byte
+        // (road-to-zig-std S5 reflection brick): a primitive verbatim, a slice/pointer/optional composed.
+        // Composes in a `++` fold too (via EvalComptimeValue).
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const a = @typeName(u8);\n" +
+            "    const b = @typeName([]const u8);\n" +
+            "    const c = @typeName(u8) ++ \"!\";\n" +
+            "    return a[0] + b[0] + c[2];\n" +
+            "}\n");
+        cs.ShouldContain("\"u8\\0\"");          // primitive spelling
+        cs.ShouldContain("[]const u8");         // composed slice spelling, verbatim
+        cs.ShouldContain("u8!");                // composed with a `++` fold
+    }
+
+    [Fact]
+    public void Rejects_typeName_of_a_user_type_as_a_loud_cut()
+    {
+        // A user type's `@typeName` is zig's FILE-QUALIFIED name (`main.Foo`), which dotcc can't
+        // reproduce — so it is a precise loud cut, not a wrong (source-token) name.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const Foo = struct { x: u8 };\n" +
+            "pub fn main() u8 { const s = @typeName(Foo); return s[0]; }\n"));
+        ex.Message.ShouldContain("@typeName");
+    }
+
+    [Fact]
+    public void Folds_an_anon_init_concat_operand_borrowing_the_element_type()
+    {
+        // An anon `.{…}` `++` operand has no explicit type; it BORROWS the element type from the other,
+        // typed operand (road-to-zig-std S5) — on either side — then folds through the shared BuildArrayInit.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const a = [_]u8{ 1, 2 } ++ .{ 3, 4 };\n" +
+            "    const b = .{ 5, 6 } ++ [_]u8{ 7 };\n" +
+            "    return a[3] + b[2];\n" +
+            "}\n");
+        cs.ShouldContain("1, 2, 3, 4");   // anon borrows u8 from the left operand
+        cs.ShouldContain("5, 6, 7");      // anon borrows u8 from the right operand
+    }
+
+    [Fact]
+    public void Rejects_two_untyped_anon_concat_operands_as_a_loud_cut()
+    {
+        // Two untyped anon `.{…}` operands supply no element type to borrow — the common-type/tuple
+        // inference needs the fuller comptime engine, so it is a precise loud cut.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 { const a = .{ 1, 2 } ++ .{ 3, 4 }; return a[0]; }\n"));
+        ex.Message.ShouldContain("untyped anon");
+    }
+
+    [Fact]
+    public void Rejects_a_non_literal_concat_operand_as_a_loud_cut()
+    {
+        // A comptime literal (or a `const` bound to one) folds; a genuinely RUNTIME operand (a `var`) is
+        // not a comptime value, so it stays a PRECISE loud cut — not a silent drop or miscompile.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 { var x: u8 = 1; const s = \"a\" ++ x; return s[0]; }\n"));
+        ex.Message.ShouldContain("S5");
+    }
+
+    [Fact]
     public void Lowers_zig_main_end_to_end()
     {
         // pub fn main() u8 { const x: u8 = 40; return x + 2; }  → a byte-returning

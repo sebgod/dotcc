@@ -251,6 +251,18 @@ The brick W1 and W4 both explicitly deferred:
   CType-derived info (typeName needs the pre-mangling Zig spelling; keep a
   reverse map).
 
+**Pre-engine down-payment landed (2026-07-13, PR #95):** the LITERAL `++`/`**` case
+already folds without the interpreter — string literals via the shared string
+encode path, typed array literals (`[_]T{…}`) via the shared `BuildArrayInit`
+(`LowerConcat`/`LowerRepeat` in `ZigLowering.Exprs.cs`). What remains a loud cut is
+precisely a **non-literal** comptime operand — a comptime-const bound to a literal
+(`const p = "x"; p ++ y`), an `@typeName(T)` result, a sink-needing anon `.{…}`.
+That residue is *exactly* this S5 sub-brick: once a comptime `const` binds a comptime
+VALUE (string/aggregate) and `@typeName` yields a comptime string, `LowerConcat`/
+`LowerRepeat` fold them with no new operator logic. **Do NOT special-case const-string
+propagation for `++`/`**` alone — it is the engine's core (`_comptimeValues`), built
+once here, consumed by `++`/`**`, `@typeName`, comptime-`if`, and array-extent consts.**
+
 ### S6 — `inline for` over aggregates + `@field` (M)
 
 - Extend the existing range-unroller: `inline for (info.@"struct".fields) |f|`
