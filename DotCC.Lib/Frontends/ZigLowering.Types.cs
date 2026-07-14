@@ -444,14 +444,14 @@ internal sealed partial class ZigLowering
         // Record the name BEFORE lowering the fields, so a self-referential field (`next: ?*Self`
         // resolved via @This()) or a re-entrant lowering of the same site sees the in-progress type.
         _inlineStructNames[occurrence] = name;
-        var (fields, methods, consts) = fieldDecls is { } fd
+        var (fields, methods, consts, containers) = fieldDecls is { } fd
             ? SplitMembers(fd)
-            : (new List<Item>(), new List<Item>(), new List<Item>());
-        if (methods.Count > 0 || consts.Count > 0)
+            : (new List<Item>(), new List<Item>(), new List<Item>(), new List<Item>());
+        if (methods.Count > 0 || consts.Count > 0 || containers.Count > 0)
         {
             throw new IrUnsupportedException(
-                "zig: an inline `struct {…}` type is fields-only (road-to-zig-std S9) — a method or `const` "
-                + "member needs a named container decl (`const T = struct { … };`)");
+                "zig: an inline `struct {…}` type is fields-only (road-to-zig-std S9) — a method, `const`, or "
+                + "nested-container member needs a named container decl (`const T = struct { … };`)");
         }
         RegisterStruct(name, fields);
         return new CType.Named(name);
