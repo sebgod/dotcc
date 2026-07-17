@@ -51,8 +51,25 @@ jobs:
         run: dotnet workload install wasm-tools
 
       # NuGet LALR.CC path (no sibling checkout in CI), same as the main ci workflow.
-      - name: Publish DotCC.Web (Release)
-        run: dotnet publish DotCC.Web/DotCC.Web.csproj -c Release -o publish -p:UseLocalLalrCc=false --nologo
+      #
+      # RunAOTCompilation: mono-aot-cross compiles the managed code to native wasm at
+      # publish time (fable-web.md WEB7) — the target is the ~3.4 s interpreted EmitWat
+      # latency measured in WEB0. Deliberately CI-only (never on the local win-arm64
+      # box); plain AOT on ubuntu-x64 first — if this job ever hits the sgen-alloc.c:409
+      # 0xC0000409 assertion, the known workarounds are _AOT_InternalForceInterpretAssemblies
+      # (identity = the .dll file name) plus -p:WasmDedup=false.
+      - name: Publish DotCC.Web (Release, AOT)
+        run: dotnet publish DotCC.Web/DotCC.Web.csproj -c Release -o publish -p:UseLocalLalrCc=false -p:RunAOTCompilation=true --nologo
+
+      # The payload budget is part of the campaign's validation story: WEB0 measured
+      # 3.31 MB Brotli interpreted; AOT buys latency at a payload cost — keep it visible.
+      - name: Report published payload size
+        run: |
+          set -euo pipefail
+          echo "publish/wwwroot on-disk:"
+          du -sh publish/wwwroot
+          echo "Brotli (.br) payload total (what the browser actually downloads):"
+          find publish/wwwroot -name '*.br' -printf '%s\n' | awk '{s+=$1} END {printf "%.2f MB\n", s/1024/1024}'
 
       - name: Rewrite base href for the /dotcc/ project-site subpath
         run: |
@@ -78,6 +95,9 @@ jobs:
           path: publish/wwwroot
 
   deploy:
+    # Deploy only from main — a branch workflow_dispatch is a build-only validation
+    # run (e.g. proving an AOT publish compiles before it can touch the live site).
+    if: github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     environment:
