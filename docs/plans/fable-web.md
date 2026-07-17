@@ -360,7 +360,7 @@ round-tripping dotcc's *own* simple wasm, since real Swift output uses
 bulk-memory + reference-types + `call_indirect` + linear memory (WF0's finding)
 and won't lift through an early T0 slice.
 
-### WEB7 — AOT the Pages publish (S) — 🚧 IN FLIGHT (2026-07-17)
+### WEB7 — AOT the Pages publish (S) — ✅ DONE (2026-07-17, PR #100)
 
 Reverses WEB0's "no AOT needed" cut **for the CI deploy only**, on new evidence
 from the tianwen web-showcase session (2026-07-17): `RunAOTCompilation=true` on a
@@ -387,6 +387,24 @@ Shape:
   brotli). Accept ≈+5 MB brotli for the latency win; if the payload or the
   publish time blows out with no measured latency win, revert the flag — the
   interpreted path stays the local/dev default regardless.
+
+**Outcome (measured live, headless-Edge CDP, this box, 2026-07-17):** plain AOT
+compiled first try on ubuntu-x64 — no workarounds needed, publish +~3 min
+(`AOT'ing 35 assemblies`, incl. `DotCC.Lib` + CoreLib). Before/after on the
+deployed site, same harness, fresh profile each:
+
+| | interpreted (pre-merge) | AOT (deployed) |
+|---|---|---|
+| payload (brotli) | 3.31 MB | **5.03 MB** (+1.7 MB, well under budget) |
+| Blazor boot | 1.2 s | 2.1 s |
+| C Run round-trip (cold/warm) | 2.8 s / 2.4 s | **0.92 s / 0.55 s** (≈4×) |
+| Zig Run round-trip | — | **~0.2 s**, output correct |
+
+Both language paths verified end-to-end on the AOT build (C factorial → stdout
+exact, exit 0; Zig `std.debug.print` → stderr exact, exit 0), so the illink
+"may change behavior" caveat is smoke-tested, not just assumed. The Run
+round-trip includes the unchanged JS half (wabt assemble + wasm execute), so
+the `EmitWat` core sped up by more than the end-to-end 4×.
 
 ## Validation story
 
