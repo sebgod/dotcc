@@ -23,7 +23,7 @@ public sealed class LibcSocketTests
 {
     // Linux/glibc numeric values — exactly what the synthetic headers hand the C
     // program (and what SocketLib interprets internally).
-    private const int AF_INET = 2, SOCK_STREAM = 1, SOCK_DGRAM = 2;
+    private const int AF_UNIX = 1, AF_INET = 2, SOCK_STREAM = 1, SOCK_DGRAM = 2;
     private const int SOL_SOCKET = 1, SO_REUSEADDR = 2, SHUT_WR = 1;
 
     /// <summary>Fill a 16-byte <c>sockaddr_in</c> for 127.0.0.1:<paramref name="port"/>
@@ -189,18 +189,114 @@ public sealed class LibcSocketTests
     }
 
     [Fact]
-    public unsafe void socket_rejects_unsupported_families_at_create()
+    public unsafe void socket_rejects_af_inet6_at_create()
     {
-        // The address layer is AF_INET-only, so AF_INET6/AF_UNIX must fail loudly
-        // at socket() with EAFNOSUPPORT — not hand back a dead-end fd that every
-        // subsequent bind/connect/accept would fail on.
-        const int AF_UNIX = 1, AF_INET6 = 10;
+        // AF_INET6's sockaddr_in6 marshalling isn't modeled yet, so socket() must
+        // fail loudly with EAFNOSUPPORT — not hand back a dead-end fd that every
+        // subsequent bind/connect would fail on. (AF_UNIX IS supported — below.)
+        const int AF_INET6 = 10;
         errno = 0;
         socket(AF_INET6, SOCK_STREAM, 0).ShouldBe(-1);
         errno.ShouldBe(EAFNOSUPPORT);
-        errno = 0;
-        socket(AF_UNIX, SOCK_STREAM, 0).ShouldBe(-1);
-        errno.ShouldBe(EAFNOSUPPORT);
+    }
+
+    [Fact]
+    public async Task unix_domain_stream_echo_roundtrips()
+    {
+        string path = UniqueSocketPath();
+        int srv = OpenUnixListener(path);
+        srv.ShouldBeGreaterThanOrEqualTo(0);
+        try
+        {
+            // Reuse EchoOnce (fd-generic): accept one connection, drain, echo back.
+            var server = Task.Run(() => EchoOnce(srv), TestContext.Current.CancellationToken);
+            UnixEchoClientRoundtrips(path).ShouldBeTrue();
+            close(srv);
+            await server.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        }
+        finally
+        {
+            close(srv);
+            try { System.IO.File.Delete(path); } catch { /* best-effort cleanup */ }
+        }
+    }
+
+    [Fact]
+    public unsafe void unix_getsockname_reads_back_bound_path()
+    {
+        // Exercises the sockaddr_un write path: bind to a pathname, then read it
+        // back — proves UnixDomainSocketEndPoint round-trips through WriteSockaddr.
+        string path = UniqueSocketPath();
+        int srv = socket(AF_UNIX, SOCK_STREAM, 0);
+        srv.ShouldBeGreaterThanOrEqualTo(0);
+        try
+        {
+            byte* sa = stackalloc byte[128];
+            uint len = MakeUnix(sa, path);
+            bind(srv, sa, len).ShouldBe(0);
+
+            byte* got = stackalloc byte[128];
+            uint glen = 128;
+            getsockname(srv, got, &glen).ShouldBe(0);
+            ((ushort*)got)[0].ShouldBe((ushort)AF_UNIX);        // sun_family
+            Encoding.UTF8.GetString(got + 2, (int)strlen(got + 2)).ShouldBe(path);
+        }
+        finally
+        {
+            close(srv);
+            try { System.IO.File.Delete(path); } catch { /* best-effort cleanup */ }
+        }
+    }
+
+    private static string UniqueSocketPath() =>
+        System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+            "dotcc-uds-" + System.Guid.NewGuid().ToString("N").Substring(0, 8) + ".sock");
+
+    /// <summary>Fill a <c>sockaddr_un</c> for <paramref name="path"/> (family host
+    /// order; NUL-terminated <c>sun_path</c>); returns the used length.</summary>
+    private static unsafe uint MakeUnix(byte* sa, string path)
+    {
+        *(ushort*)sa = AF_UNIX;
+        var bytes = Encoding.UTF8.GetBytes(path);
+        for (int i = 0; i < bytes.Length; i++) { sa[2 + i] = bytes[i]; }
+        sa[2 + bytes.Length] = 0;
+        return (uint)(2 + bytes.Length + 1);
+    }
+
+    /// <summary>socket(AF_UNIX) → bind(path) → listen; returns the listening fd.</summary>
+    private static unsafe int OpenUnixListener(string path)
+    {
+        int srv = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (srv < 0) { return srv; }
+        byte* sa = stackalloc byte[128];
+        uint len = MakeUnix(sa, path);
+        if (bind(srv, sa, len) != 0 || listen(srv, 1) != 0) { close(srv); return -1; }
+        return srv;
+    }
+
+    /// <summary>Connect over AF_UNIX, send a message, half-close, read the echo,
+    /// compare. True iff the round-trip matched.</summary>
+    private static unsafe bool UnixEchoClientRoundtrips(string path)
+    {
+        int cli = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (cli < 0) { return false; }
+        byte* peer = stackalloc byte[128];
+        uint len = MakeUnix(peer, path);
+        if (connect(cli, peer, len) != 0) { close(cli); return false; }
+
+        byte* msg = stackalloc byte[64];
+        int mlen = Encoding.ASCII.GetBytes("hello unix socket", new Span<byte>(msg, 64));
+        int off = 0;
+        while (off < mlen) { long w = send(cli, msg + off, (ulong)(mlen - off), 0); if (w <= 0) { close(cli); return false; } off += (int)w; }
+        shutdown(cli, SHUT_WR);
+
+        byte* rbuf = stackalloc byte[256];
+        int total = 0;
+        long g;
+        while (total < 256 && (g = recv(cli, rbuf + total, (ulong)(256 - total), 0)) > 0) { total += (int)g; }
+        bool ok = total == mlen && new ReadOnlySpan<byte>(rbuf, total).SequenceEqual(new ReadOnlySpan<byte>(msg, mlen));
+        close(cli);
+        return ok;
     }
 
     [Fact]
