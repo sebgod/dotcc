@@ -188,6 +188,8 @@ Cut: AOT was trialled as the no-code-change alternative but **abandoned** — th
 flat-array fix makes it unnecessary, and its `mono-aot-cross` workers are a heavy
 build. The `DotCC.Web.Spike` project + the node/CDP harness are archived in the
 session scratchpad (not committed — WEB1 builds the real `DotCC.Web`).
+*(Retried for the CI deploy only on 2026-07-17 — see WEB7; the cut's reasoning
+was about the local box and about necessity, not about AOT being broken.)*
 
 ### WEB1 — the run pipeline, ugly (M) — ✅ DONE (2026-07-10)
 
@@ -298,6 +300,22 @@ Edge/CDP harness (WEB1/WEB2).
 - **NativeAOT-LLVM `dotcc.wasm`** (D1's v2): one standalone module, no .NET
   runtime download — and the artifact the wasm-frontend campaign's WF8
   self-eating round-trip wants anyway.
+  - **Feasibility probed 2026-07-15 — must be x64 CI, NOT the local win-arm64
+    box.** The runtime-less NativeAOT-LLVM compiler is not a clean package add:
+    the `dotnet-experimental` feed's `Microsoft.DotNet.ILCompiler.LLVM` is frozen
+    at .NET 6 (latest `6.0.0-preview.7.21429.2`, 2021) — a win-arm64 host package
+    exists but is 4+ yrs stale, incompatible with net10. Current NativeAOT-LLVM is
+    a `dotnet/runtimelab` feature branch (build-from-source), and its host compiler
+    is x64-only. `wasi-experimental` is installable but its NativeAOT sub-path has
+    the same x64-host constraint. **The only locally-buildable "compiler→wasm" on
+    this box is Mono-AOT** (`Microsoft.NETCore.App.Runtime.AOT.win-arm64.Cross.browser-wasm`
+    + `Microsoft.NET.Runtime.Emscripten.3.1.56.*.win-arm64` are both present via the
+    `wasm-tools` workload): a `wasmbrowser` + `RunAOTCompilation` app AOT-compiles
+    `DotCC.Lib` to wasm (fast, no interpreter) and drops Blazor — but it still ships
+    a trimmed **Mono runtime** (so *not* runtime-less), and it is the `mono-aot-cross`
+    job that thrashed the interactive box on 2026-07-10. Conclusion: pursue the
+    runtime-less flex as an **x64 `workflow_dispatch` CI spike** (build `dotcc.wasm`,
+    smoke-run under wasmtime), gated as an experimental switch off the v1 Blazor path.
 - **Offline PWA manifest** (D3 already makes it work offline once cached).
 - **A "compiler explorer" diff view** — two dialect/flag settings side by side.
 - **Direct binary emit** — once the wasm-frontend campaign's encoder knowledge
@@ -341,6 +359,34 @@ actually lift a `.wasm` to C#/wat (the WF2 heart), whose first visible win is
 round-tripping dotcc's *own* simple wasm, since real Swift output uses
 bulk-memory + reference-types + `call_indirect` + linear memory (WF0's finding)
 and won't lift through an early T0 slice.
+
+### WEB7 — AOT the Pages publish (S) — 🚧 IN FLIGHT (2026-07-17)
+
+Reverses WEB0's "no AOT needed" cut **for the CI deploy only**, on new evidence
+from the tianwen web-showcase session (2026-07-17): `RunAOTCompilation=true` on a
+Blazor WASM Pages publish is a proven, no-code-change lever — tianwen measured
+**24×/42×** on compute-bound paths at **+5 MB brotli** (16 → 21 MB). dotcc's
+candidate win is the **~3.4 s interpreted `EmitWat` latency** (WEB0 measurement
+(c)); the sandbox's compile step is exactly the compute-bound shape AOT pays for.
+
+Shape:
+
+- `pages.yml`'s publish gains `-p:RunAOTCompilation=true`. The flag lives in the
+  **workflow, not the csproj** — local dev builds stay interpreted, and the
+  2026-07-10 box-thrash rule stands (no `mono-aot-cross` on the interactive box).
+- The deploy job is gated to `main`, so a **branch `workflow_dispatch` is a
+  build-only validation run** — AOT is proven to compile on CI before it can
+  touch the live site.
+- **Plain AOT first on ubuntu-x64.** The win-arm64 sgen crash (0xC0000409,
+  `sgen-alloc.c:409 '*p == NULL'` — tianwen hit it on P/Invoke-dense assemblies
+  and the `WasmDedup` synthesized `aot-instances.dll`) has local workarounds if
+  CI ever needs them: `_AOT_InternalForceInterpretAssemblies` (identity must be
+  the `.dll` file name) + `-p:WasmDedup=false`; excluded assemblies stay
+  interpreted.
+- **Budget check:** the workflow now prints the published payload size (raw +
+  brotli). Accept ≈+5 MB brotli for the latency win; if the payload or the
+  publish time blows out with no measured latency win, revert the flag — the
+  interpreted path stays the local/dev default regardless.
 
 ## Validation story
 
