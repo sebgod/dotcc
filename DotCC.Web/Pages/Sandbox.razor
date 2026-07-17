@@ -112,6 +112,13 @@
             }
             else if (_tab == "C#")
             {
+                @if (!string.IsNullOrEmpty(_csharp))
+                {
+                    <div class="emit-actions">
+                        <button class="download" @onclick="DownloadCSharpAsync">⬇ Download .cs</button>
+                        <span class="hint">a self-contained .NET 10 file-based program — save it and replay natively with: dotnet run program.cs</span>
+                    </div>
+                }
                 <pre class="code">@(_csharp ?? "")</pre>
             }
             else if (_tab == "-E")
@@ -382,6 +389,12 @@
     /// the same bytes the wasm tab inventoried (a pure-JS Blob download).</summary>
     private async Task DownloadWasmAsync() =>
         await JS.InvokeVoidAsync("dotccSandbox.downloadLastWasm", "sandbox.wasm");
+
+    /// <summary>Download the emitted C# from the last run. The emit is the
+    /// --emit=file shape (a .NET 10 file-based program with its #:property
+    /// directives inline), so the saved file runs as-is via `dotnet run`.</summary>
+    private async Task DownloadCSharpAsync() =>
+        await JS.InvokeVoidAsync("dotccSandbox.downloadText", "program.cs", _csharp ?? "", "text/x-csharp");
 
     /// <summary>Run a compiler entry point while capturing the diagnostics it writes
     /// to <see cref="Console.Error"/> (warnings), restoring the previous writer after.</summary>

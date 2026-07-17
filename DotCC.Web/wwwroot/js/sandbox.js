@@ -180,21 +180,33 @@ window.dotccSandbox = (function () {
     return lastWasm ? b64Std(lastWasm) : null;
   }
 
-  /** Trigger a browser download of the last assembled wasm binary. Returns false
-   *  when there is nothing to download (no successful assemble yet). */
-  function downloadLastWasm(filename) {
-    if (!lastWasm) { return false; }
-    const blob = new Blob([lastWasm], { type: "application/wasm" });
+  /** Trigger a browser download of a Blob via a transient object-URL anchor. */
+  function downloadBlob(filename, blob) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = filename || "sandbox.wasm";
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  /** Trigger a browser download of the last assembled wasm binary. Returns false
+   *  when there is nothing to download (no successful assemble yet). */
+  function downloadLastWasm(filename) {
+    if (!lastWasm) { return false; }
+    downloadBlob(filename || "sandbox.wasm", new Blob([lastWasm], { type: "application/wasm" }));
     return true;
   }
 
-  return { assembleAndRun, makeShareLink, readShareSource, getLastWasmBase64, downloadLastWasm };
+  /** Trigger a browser download of a text artifact (e.g. the emitted C#). The
+   *  text lives Blazor-side, so it is passed in rather than snapshotted here. */
+  function downloadText(filename, text, mime) {
+    downloadBlob(filename || "download.txt",
+      new Blob([text ?? ""], { type: (mime || "text/plain") + ";charset=utf-8" }));
+    return true;
+  }
+
+  return { assembleAndRun, makeShareLink, readShareSource, getLastWasmBase64, downloadLastWasm, downloadText };
 })();
