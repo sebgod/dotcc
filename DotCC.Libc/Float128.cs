@@ -21,12 +21,12 @@ namespace DotCC.Libc;
 ///         digits, <c>LDBL_DIG = 33</c> on platforms where this is
 ///         <c>long double</c>)</item>
 /// </list>
-/// This file is Stage 1a: representation, constants, predicates, exact
+/// Complete: representation, constants, predicates, exact
 /// <c>double</c>→binary128 widening, correctly-rounded binary128→<c>double</c>
-/// narrowing, sign ops, and IEEE comparison. Correctly-rounded arithmetic
-/// (+ − × ÷ √ fma) and the generic-math interface surface land in later
-/// stages, validated bit-for-bit against gcc's <c>long double</c> (binary128)
-/// oracle.
+/// narrowing, sign ops, IEEE comparison, correctly-rounded arithmetic
+/// (+ − × ÷ √ fma), the transcendental set, decimal formatting/parsing, and
+/// the generic-math interface surface — validated bit-for-bit against gcc's
+/// <c>long double</c> (binary128) oracle.
 /// </remarks>
 public readonly struct Float128 : IEquatable<Float128>, IComparable<Float128>,
     IBinaryFloatingPointIeee754<Float128>, IMinMaxValue<Float128>

@@ -4,8 +4,10 @@ One place to look for "we chose not to do this *yet*, and here's why." Keeps def
 from scattering across commit messages, PR bodies, and memories.
 
 **Scope:** things we intend to finish eventually but have *staged* — parse-only bricks
-whose lowering is a loud cut, and grammar/lowering gaps cut for a stated reason (a
-conflict, rarity, or a missing engine). **Not** permanent exclusions — those live in the
+whose lowering is a loud cut, grammar/lowering gaps cut for a stated reason (a
+conflict, rarity, or a missing engine), and **runtime-fidelity divergences** (libc/Zig
+runtime functions whose behavior measurably differs from the real thing, surfaced by
+audit). **Not** permanent exclusions — those live in the
 SUPPORT docs and don't belong here:
 
 - **C** permanent out-of-scope → [`../C-SUPPORT.md`](../C-SUPPORT.md) (VLA, trigraphs, Annex-K, …).
@@ -15,6 +17,31 @@ SUPPORT docs and don't belong here:
 it lands). A deferral that isn't written down is the thing that's "hard to keep track of."
 
 ---
+
+## Runtime fidelity
+
+Source: the 2026-07-17 runtime audit (all 40 `DotCC.Libc/*.cs` files, every public function,
+diffed against the SUPPORT-doc rows). Verdict: the "no silent lies" invariant held *almost*
+everywhere — the POSIX tier table, threads fidelity notes, and locale/setjmp rows were all
+accurate. These are the divergences the audit surfaced that were **not** yet on the books
+(each SUPPORT row now carries its caveat and points here); all are finishable, none blocks
+current programs:
+
+| Gap | Divergence | Fix sketch |
+|---|---|---|
+| `printf`/`fprintf` (+ `w*`) return value | always `0`, C returns bytes written (`sprintf`/`snprintf` are correct) | count bytes in `PrintfBuilder.Done()` — the builder already sees every write |
+| `scanf` out-of-set specs (`%x` `%o` `%u` `%n` `%[…]`) | silent no-conversion (match count honest, but no loud failure) | reject at **lowering time** — the emitter already walks the format for printf (W6 precedent); unknown spec → `CompileException` |
+| `scanf` field width / length modifiers | parsed but ignored (`%3d` reads unbounded — silently *different value*) | honor width in `ScanfReader` loops (bound the reads); length modifiers select the existing overloads |
+| `realpath` | lexical `Path.GetFullPath` only — no symlink dereference | walk components via `FileSystemInfo.LinkTarget`/`ResolveLinkTarget` (net6+, AOT-clean) |
+| `setsockopt(SO_REUSEPORT)` | silently substitutes `ReuseAddress` + success; `getsockopt` EINVAL | either fail honestly (ENOPROTOOPT) or keep the substitution but document + make `getsockopt` read it back |
+| `socket(AF_INET6/AF_UNIX)` | fd creates, then every addr call dead-ends `EAFNOSUPPORT` | reject at `socket()` (EAFNOSUPPORT at create — loud at the source) until IPv6/Unix marshalling lands; also fix the `socket()` docstring claiming they're supported |
+| Zig allocator `Alignment` | FBA: no rounding at all (even natural); Arena: hardcoded 16; CHeap: malloc default | round `EndIndex` up to the requested alignment in `FbaAlloc` (one line); arena honors requests > 16 by over-padding; CHeap ≤16 is fine (document) |
+| Zig FBA `free` of the last allocation | no-op; real Zig reclaims it | compare the freed slice's end to `EndIndex`, rewind if equal (real Zig's own trick) |
+| Wide-format transcode cache | keyed by pointer **address** — a mutated format buffer at the same address serves stale text | key by content hash, or skip the cache for non-RVA pointers |
+
+Doc-rot fixed by the same audit (no action left): the `signal.h` row's stale "deferred to
+standalone-REPL" note (functions landed), `Float128.cs`'s stale "later stages" header comment
+(everything landed), and `realpath` misfiled under the faithful tier.
 
 ## Zig — parse-only (parses today; lowering is a loud `IrUnsupportedException`)
 
