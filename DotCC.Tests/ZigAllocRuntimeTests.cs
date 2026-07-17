@@ -85,6 +85,86 @@ public sealed class ZigAllocRuntimeTests
     }
 
     [Fact]
+    public unsafe void Fixed_buffer_allocator_aligns_each_allocation_pointer()
+    {
+        // A bump allocator over a byte buffer must still hand back pointers aligned to the
+        // element's alignment (real zig aligns the pointer up; dotcc caps alignment at 16).
+        byte* buf = stackalloc byte[64];
+        var fba = FixedBufferAllocator.Init(buf, 64);
+        var a = ZigAlloc.FbaAllocator(&fba);
+
+        var r1 = a.Alloc<byte>(1, Oom);   // 1-byte alloc can land at any offset
+        r1.IsErr.ShouldBeFalse();
+
+        var r4 = a.Alloc<int>(1, Oom);    // 4-byte element -> a 4-aligned pointer
+        r4.IsErr.ShouldBeFalse();
+        ((nuint)r4.Value.Ptr % 4).ShouldBe((nuint)0);
+
+        var r8 = a.Alloc<long>(1, Oom);   // 8-byte element -> an 8-aligned pointer
+        r8.IsErr.ShouldBeFalse();
+        ((nuint)r8.Value.Ptr % 8).ShouldBe((nuint)0);
+    }
+
+    [Fact]
+    public unsafe void Fixed_buffer_allocator_reclaims_the_last_allocation_on_free()
+    {
+        byte* buf = stackalloc byte[64];
+        var fba = FixedBufferAllocator.Init(buf, 64);
+        var a = ZigAlloc.FbaAllocator(&fba);
+
+        var r1 = a.Alloc<byte>(8, Oom);
+        fba.EndIndex.ShouldBe(8UL);
+        var r2 = a.Alloc<byte>(8, Oom);
+        fba.EndIndex.ShouldBe(16UL);
+
+        // Freeing the LAST allocation rewinds the bump cursor (real zig's isLastAllocation)...
+        a.Free(r2.Value);
+        fba.EndIndex.ShouldBe(8UL);
+
+        // ...so the next allocation reuses exactly that reclaimed space.
+        var r3 = a.Alloc<byte>(4, Oom);
+        r3.IsErr.ShouldBeFalse();
+        fba.EndIndex.ShouldBe(12UL);
+        ((nuint)r3.Value.Ptr).ShouldBe((nuint)r2.Value.Ptr);
+    }
+
+    [Fact]
+    public unsafe void Fixed_buffer_allocator_free_of_a_non_last_allocation_is_a_no_op()
+    {
+        byte* buf = stackalloc byte[64];
+        var fba = FixedBufferAllocator.Init(buf, 64);
+        var a = ZigAlloc.FbaAllocator(&fba);
+
+        var r1 = a.Alloc<byte>(8, Oom);
+        _ = a.Alloc<byte>(8, Oom);
+        fba.EndIndex.ShouldBe(16UL);
+
+        // Freeing r1 (not the top of the bump stack) can't be reclaimed -> no-op, no corruption.
+        a.Free(r1.Value);
+        fba.EndIndex.ShouldBe(16UL);
+    }
+
+    [Fact]
+    public unsafe void Fixed_buffer_allocator_devirt_free_reclaims_the_last_allocation()
+    {
+        // The FBA-site-devirtualized path (AllocFba/FreeFba) must reclaim the last allocation too.
+        byte* buf = stackalloc byte[64];
+        var fba = FixedBufferAllocator.Init(buf, 64);
+
+        var r1 = ZigAlloc.AllocFba<byte>(&fba, 8, Oom);
+        var r2 = ZigAlloc.AllocFba<byte>(&fba, 8, Oom);
+        r1.IsErr.ShouldBeFalse();
+        r2.IsErr.ShouldBeFalse();
+        fba.EndIndex.ShouldBe(16UL);
+
+        ZigAlloc.FreeFba(&fba, r2.Value);
+        fba.EndIndex.ShouldBe(8UL);
+
+        var r3 = ZigAlloc.AllocFba<byte>(&fba, 2, Oom);
+        ((nuint)r3.Value.Ptr).ShouldBe((nuint)r2.Value.Ptr);
+    }
+
+    [Fact]
     public unsafe void Indirect_dispatch_through_the_materialized_c_heap_vtable()
     {
         // The materialized default allocator: dispatch goes through the vtable's alloc /

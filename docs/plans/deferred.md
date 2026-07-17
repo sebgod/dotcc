@@ -37,13 +37,22 @@ current programs.
 - `setsockopt(SO_REUSEPORT)`→`ReuseAddress` is now a **documented, symmetric** substitution
   (`getsockopt` reads the same bit back).
 
+**Landed 2026-07-17** (the low-hanging Zig allocator fruits — `DotCC.Libc/ZigAlloc.cs`):
+- `FixedBufferAllocator` now **honors the requested `Alignment`** — `FbaAlloc` aligns the bump
+  pointer up exactly like real zig's `alignPointerOffset` (the pad is charged to the cursor), and the
+  devirtualized `AllocFba`/`CreateFba`/`ReallocFba` sites feed the real `AlignOf<T>` instead of
+  `default(0)`. `AlignOf<T>` is now a single shared source of truth capped at 16 — which is why the
+  C heap (≥16-aligned) and the arena (16-aligned data start, 16-rounded bumps) satisfy every request
+  dotcc can generate *by construction*, so neither needed a code change (documented in place).
+- `FixedBufferAllocator.free`/`FreeFba`/`DestroyFba` now **reclaim the last allocation** — real zig's
+  `isLastAllocation` trick (the freed region ends exactly at the bump cursor ⇒ rewind by its length);
+  freeing an earlier region stays a correct no-op. Pins in `ZigAllocRuntimeTests`.
+
 **Still open:**
 
 | Gap | Divergence | Fix sketch |
 |---|---|---|
 | `realpath` | lexical `Path.GetFullPath` only — no symlink dereference | walk components via `FileSystemInfo.LinkTarget`/`ResolveLinkTarget` (net6+, AOT-clean) |
-| Zig allocator `Alignment` | FBA: no rounding at all (even natural); Arena: hardcoded 16; CHeap: malloc default | round `EndIndex` up to the requested alignment in `FbaAlloc` (one line); arena honors requests > 16 by over-padding; CHeap ≤16 is fine (document) |
-| Zig FBA `free` of the last allocation | no-op; real Zig reclaims it | compare the freed slice's end to `EndIndex`, rewind if equal (real Zig's own trick) |
 | Wide-format transcode cache | keyed by pointer **address** — a mutated format buffer at the same address serves stale text | key by content hash, or skip the cache for non-RVA pointers |
 
 Doc-rot fixed by the audit (no action left): the `signal.h` row's stale "deferred to
