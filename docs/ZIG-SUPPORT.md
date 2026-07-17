@@ -517,14 +517,17 @@ runtime-selected allocator pays the indirect dispatch. Examples: `examples/zig-a
 zig answers from page rounding), so use `realloc`. `arena.reset(mode)` and a non-allocator backing
 are deferred.
 
-**Alignment fidelity (2026-07-17 runtime audit):** the `std.mem.Alignment` parameter threaded
-through the vtable is **accepted but not honored** by the shipped allocators — `FbaAlloc` does
-**no alignment rounding at all** (allocate 1 byte then a `u64` → the `u64` lands at offset 1;
-tolerated by x64/arm64 loads but wrong by Zig semantics and fatal for atomics), `ArenaAlloc`
-hardcodes a 16-byte round-up regardless of the request, and `CHeapAlloc` gives whatever `malloc`
-gives (natural ≤16). An `align(32+)` request is silently unmet everywhere. Also: FBA's `free`
-is a no-op even for the **most-recent allocation**, which real Zig's FBA reclaims. Both staged
-in [`plans/deferred.md`](plans/deferred.md#runtime-fidelity). `std` is a known-paths resolver, not a real std model — anything outside the
+**Alignment + free fidelity (fixed 2026-07-17, from the runtime audit):** the `std.mem.Alignment`
+parameter threaded through the vtable is now **honored** by `FixedBufferAllocator` — `FbaAlloc` aligns
+its bump pointer up exactly like real zig's `alignPointerOffset` (allocate 1 byte then a `u64` → the
+`u64` lands at the next 8-aligned offset), and the devirtualized `AllocFba`/`CreateFba`/`ReallocFba`
+sites feed the real per-type alignment. `ArenaAlloc` (16-aligned data start + 16-rounded bumps) and
+`CHeapAlloc` (`malloc`, ≥16-aligned) satisfy every request *by construction* because dotcc's
+`AlignOf<T>` caps alignment at 16 — an `align(32+)` request is still over-modeled rather than exact
+(one theoretical cut, unreachable from dotcc's type-derived alignment). And FBA's `free` now
+**reclaims the most-recent allocation** (real zig's `isLastAllocation` — the freed region ends at the
+bump cursor ⇒ rewind), so `alloc; free; alloc` reuses the space; freeing an earlier region stays a
+correct no-op. `std` is a known-paths resolver, not a real std model — anything outside the
 allocator paths above errors clearly. The C **heap** IS shared with the C front-end (Milestone V):
 `std.heap.c_allocator` and C `malloc`/`free`/`realloc` are the same heap, so in a mixed `.c` + `.zig`
 program memory allocated by one side is read / freed / resized by the other (see **C↔Zig shared-heap

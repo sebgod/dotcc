@@ -63,10 +63,11 @@ public unsafe struct AllocatorVTable
 /// <summary>
 /// Models Zig's <c>std.mem.Alignment</c> (Milestone W) — a power-of-two byte alignment threaded
 /// through the allocator vtable. Real zig stores <c>log2(bytes)</c> in an <c>enum(u6)</c>; dotcc
-/// carries the byte count directly and exposes <see cref="toByteUnits"/> (identity). The request
-/// is advisory: dotcc's C heap (and a typical custom allocator) over-aligns, so the exact value is
-/// unobservable for typical programs. <b>Cut:</b> <c>@intFromEnum</c> (the log2) is not modeled —
-/// use <c>.toByteUnits()</c>.
+/// carries the byte count directly and exposes <see cref="toByteUnits"/> (identity). The
+/// <see cref="FixedBufferAllocator"/> genuinely honors the request (it aligns its bump pointer up);
+/// the C heap and arena over-align (≥16-aligned) and dotcc's <see cref="ZigAlloc.AlignOf{T}"/> caps
+/// requests at 16, so on those two the exact value is satisfied by construction. <b>Cut:</b>
+/// <c>@intFromEnum</c> (the log2) is not modeled — use <c>.toByteUnits()</c>.
 /// </summary>
 public readonly struct Alignment
 {
@@ -114,17 +115,10 @@ public unsafe struct Allocator
     public void Free<T>(Slice<T> s) where T : unmanaged
         => Vtable.free(Ctx, new Slice<byte>((byte*)s.Ptr, s.Len * (ulong)sizeof(T)), AlignOf<T>(), 0);
 
-    /// <summary>The byte alignment dotcc passes for an element type <typeparamref name="T"/> — the
-    /// largest power of two ≤ <c>min(sizeof(T), 16)</c>. Advisory (the C heap over-aligns); a custom
-    /// allocator that honors it rounds its cursor. .NET has no <c>alignof</c>, so this size-derived
-    /// value is an approximation — exact alignment is not modeled (documented in <see cref="Alignment"/>).</summary>
-    private static Alignment AlignOf<T>() where T : unmanaged
-    {
-        ulong s = (ulong)sizeof(T);
-        ulong a = 1;
-        while ((a << 1) <= s && (a << 1) <= 16) { a <<= 1; }
-        return new Alignment(a);
-    }
+    /// <summary>The byte alignment dotcc passes for an element type <typeparamref name="T"/>.
+    /// Delegates to <see cref="ZigAlloc.AlignOf{T}"/> — the single source of truth shared with the
+    /// devirtualized allocator paths — so the vtable and devirt paths request identical alignment.</summary>
+    private static Alignment AlignOf<T>() where T : unmanaged => ZigAlloc.AlignOf<T>();
 
     /// <summary><c>a.create(T)</c> — allocate one <typeparamref name="T"/> through the vtable
     /// (Milestone U). The address is carried back as a <c>nuint</c>: a pointer cannot be the
@@ -243,6 +237,21 @@ public unsafe struct ArenaAllocator
 /// </summary>
 public static unsafe class ZigAlloc
 {
+    /// <summary>The byte alignment dotcc requests for an element type <typeparamref name="T"/> — the
+    /// largest power of two ≤ <c>min(sizeof(T), 16)</c>. The single source of truth: both the vtable
+    /// path (<see cref="Allocator"/>) and the devirtualized allocator sites feed it, so a given
+    /// source allocation requests the same alignment either way. .NET has no <c>alignof</c>, so this
+    /// size-derived value is an approximation — exact alignment is not modeled (documented in
+    /// <see cref="Alignment"/>). It caps at 16, which is why the C heap (≥16-aligned) and the arena
+    /// (16-aligned data start) satisfy every request dotcc can generate.</summary>
+    internal static Alignment AlignOf<T>() where T : unmanaged
+    {
+        ulong s = (ulong)sizeof(T);
+        ulong a = 1;
+        while ((a << 1) <= s && (a << 1) <= 16) { a <<= 1; }
+        return new Alignment(a);
+    }
+
     // ---- C heap (the statically-known default) ---------------------------
 
     /// <summary>Raw C-heap allocation — the vtable's <c>alloc</c> for a materialized default
@@ -301,14 +310,23 @@ public static unsafe class ZigAlloc
 
     // ---- FixedBufferAllocator (the second allocator) ---------------------
 
-    /// <summary>Raw FBA allocation — bump <see cref="FixedBufferAllocator.EndIndex"/>; return
-    /// null when the request would overflow the buffer (Zig's <c>error.OutOfMemory</c>).</summary>
+    /// <summary>Raw FBA allocation — align the next pointer up to the requested
+    /// <paramref name="alignment"/> (exactly as real zig's <c>alignPointerOffset</c> does: the pad
+    /// is charged to the bump cursor), then bump <see cref="FixedBufferAllocator.EndIndex"/>. Returns
+    /// null when the aligned request would overflow the buffer (Zig's <c>error.OutOfMemory</c>).</summary>
     private static byte* FbaAlloc(void* ctx, ulong len, Alignment alignment, ulong retAddr)
     {
         var self = (FixedBufferAllocator*)ctx;
-        ulong end = self->EndIndex + len;
+        ulong a = alignment.toByteUnits();
+        if (a < 1) { a = 1; }
+        // Offset needed to align (buffer base + cursor) up to `a`; real zig aligns the POINTER, not
+        // just the index, so the buffer's own base address participates.
+        nuint cur = (nuint)(self->Buffer + self->EndIndex);
+        ulong pad = (ulong)((((cur + (nuint)a - 1) & ~((nuint)a - 1))) - cur);
+        ulong adjusted = self->EndIndex + pad;
+        ulong end = adjusted + len;
         if (end > self->Capacity) { return null; }
-        byte* p = self->Buffer + self->EndIndex;
+        byte* p = self->Buffer + adjusted;
         self->EndIndex = end;
         return p;
     }
@@ -318,10 +336,18 @@ public static unsafe class ZigAlloc
     private static CBool FbaResize(void* ctx, Slice<byte> memory, Alignment alignment, ulong newLen, ulong retAddr) => false;
     private static byte* FbaRemap(void* ctx, Slice<byte> memory, Alignment alignment, ulong newLen, ulong retAddr) => null;
 
-    /// <summary>Raw FBA free — a no-op. A bump allocator only reclaims by resetting the whole
-    /// arena; per-slice free is a no-op (matches Zig's FBA for any but the last allocation, and
-    /// is observationally fine for dotcc's exit-code oracle).</summary>
-    private static void FbaFree(void* ctx, Slice<byte> memory, Alignment alignment, ulong retAddr) { }
+    /// <summary>Raw FBA free — reclaim the space iff this is the LAST allocation (real zig's
+    /// <c>isLastAllocation</c> trick: the freed region ends exactly at the bump cursor, so the cursor
+    /// rewinds by its length). Freeing any earlier region is a no-op — a bump allocator can only pop
+    /// the top. The alignment pad ahead of the region is intentionally not reclaimed (matches zig).</summary>
+    private static void FbaFree(void* ctx, Slice<byte> memory, Alignment alignment, ulong retAddr)
+    {
+        var self = (FixedBufferAllocator*)ctx;
+        if ((byte*)memory.Ptr + memory.Len == self->Buffer + self->EndIndex)
+        {
+            self->EndIndex -= memory.Len;
+        }
+    }
 
     /// <summary><c>fba.allocator()</c> — produce an <see cref="Allocator"/> fat pointer whose
     /// context is the FBA and whose vtable bumps it. The caller passes <c>&amp;fba</c>, so the
@@ -336,26 +362,41 @@ public static unsafe class ZigAlloc
     public static ErrUnion<Slice<T>> AllocFba<T>(FixedBufferAllocator* self, ulong n, ushort oom) where T : unmanaged
     {
         ulong bytes = n * (ulong)sizeof(T);
-        byte* p = FbaAlloc(self, bytes, default, 0);
+        byte* p = FbaAlloc(self, bytes, AlignOf<T>(), 0);
         return p == null
             ? ErrUnion<Slice<T>>.Err(oom)
             : ErrUnion<Slice<T>>.Ok(new Slice<T>((T*)p, n));
     }
 
-    /// <summary>The FBA-site-devirtualized <c>a.free(slice)</c> — a no-op (an FBA reclaims only by
-    /// reset), mirroring <see cref="FbaFree"/>.</summary>
-    public static void FreeFba<T>(FixedBufferAllocator* self, Slice<T> s) where T : unmanaged { }
+    /// <summary>The FBA-site-devirtualized <c>a.free(slice)</c> — reclaims the space iff it is the
+    /// last allocation, mirroring <see cref="FbaFree"/> (real zig's <c>isLastAllocation</c>).</summary>
+    public static void FreeFba<T>(FixedBufferAllocator* self, Slice<T> s) where T : unmanaged
+    {
+        ulong bytes = s.Len * (ulong)sizeof(T);
+        if ((byte*)s.Ptr + bytes == self->Buffer + self->EndIndex)
+        {
+            self->EndIndex -= bytes;
+        }
+    }
 
     /// <summary>The FBA-site-devirtualized <c>a.create(T)</c> (Milestone U) — a direct FBA bump of
     /// <c>sizeof(T)</c> bytes; the address rides as a <c>nuint</c> (see <see cref="Allocator.Create{T}"/>).</summary>
     public static ErrUnion<nuint> CreateFba<T>(FixedBufferAllocator* self, ushort oom) where T : unmanaged
     {
-        byte* p = FbaAlloc(self, (ulong)sizeof(T), default, 0);
+        byte* p = FbaAlloc(self, (ulong)sizeof(T), AlignOf<T>(), 0);
         return p == null ? ErrUnion<nuint>.Err(oom) : ErrUnion<nuint>.Ok((nuint)p);
     }
 
-    /// <summary>The FBA-site-devirtualized <c>a.destroy(p)</c> — a no-op, mirroring <see cref="FbaFree"/>.</summary>
-    public static void DestroyFba<T>(FixedBufferAllocator* self, T* p) where T : unmanaged { }
+    /// <summary>The FBA-site-devirtualized <c>a.destroy(p)</c> — reclaims the object iff it is the
+    /// last allocation, mirroring <see cref="FreeFba{T}"/>.</summary>
+    public static void DestroyFba<T>(FixedBufferAllocator* self, T* p) where T : unmanaged
+    {
+        ulong bytes = (ulong)sizeof(T);
+        if ((byte*)p + bytes == self->Buffer + self->EndIndex)
+        {
+            self->EndIndex -= bytes;
+        }
+    }
 
     // ---- realloc (Milestone U) -------------------------------------------
 
@@ -380,7 +421,7 @@ public static unsafe class ZigAlloc
     public static ErrUnion<Slice<T>> ReallocFba<T>(FixedBufferAllocator* self, Slice<T> old, ulong n, ushort oom) where T : unmanaged
     {
         ulong bytes = n * (ulong)sizeof(T);
-        byte* p = FbaAlloc(self, bytes, default, 0);
+        byte* p = FbaAlloc(self, bytes, AlignOf<T>(), 0);
         if (p == null) { return ErrUnion<Slice<T>>.Err(oom); }
         ulong keep = old.Len < n ? old.Len : n;
         System.Buffer.MemoryCopy(old.Ptr, p, (long)bytes, (long)(keep * (ulong)sizeof(T)));
