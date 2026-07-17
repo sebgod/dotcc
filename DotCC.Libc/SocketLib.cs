@@ -134,19 +134,20 @@ public static unsafe partial class Libc
     // ---- <sys/socket.h> calls ----------------------------------------------
 
     /// <summary><c>socket(domain, type, protocol)</c> — create a socket fd.
-    /// IPv4/IPv6/Unix domains; STREAM/DGRAM types; the SOCK_NONBLOCK/SOCK_CLOEXEC
-    /// type flags are stripped (non-blocking is deferred — degrades to blocking,
-    /// like <c>fcntl(O_NONBLOCK)</c>). Returns the fd, or -1.</summary>
+    /// <b>IPv4 only</b> (<c>AF_INET</c>); STREAM/DGRAM types; the
+    /// SOCK_NONBLOCK/SOCK_CLOEXEC type flags are stripped (non-blocking is
+    /// deferred — degrades to blocking, like <c>fcntl(O_NONBLOCK)</c>). Returns
+    /// the fd, or -1. <c>AF_INET6</c>/<c>AF_UNIX</c> are rejected here with
+    /// <c>EAFNOSUPPORT</c> rather than creating an fd that every address-taking
+    /// call (bind/connect/accept/…) would then fail — the whole address layer is
+    /// AF_INET-only, so the honest failure is at create time, not a dead-end fd.</summary>
     public static int socket(int domain, int type, int protocol)
     {
-        var af = domain switch
-        {
-            AF_INET => AddressFamily.InterNetwork,
-            AF_INET6 => AddressFamily.InterNetworkV6,
-            AF_UNIX => AddressFamily.Unix,
-            _ => AddressFamily.Unknown,
-        };
-        if (af == AddressFamily.Unknown) { errno = EAFNOSUPPORT; return -1; }
+        // Only AF_INET is marshallable today (TryReadSockaddrIn / sockaddr_in).
+        // Fail loudly at create for the families whose address paths don't exist
+        // yet, instead of handing back a socket that can never be used.
+        if (domain != AF_INET) { errno = EAFNOSUPPORT; return -1; }
+        var af = AddressFamily.InterNetwork;
 
         int baseType = type & ~(SOCK_NONBLOCK | SOCK_CLOEXEC);
         var st = baseType switch
@@ -297,6 +298,11 @@ public static unsafe partial class Libc
                 switch (optname)
                 {
                     case SO_REUSEADDR: sock.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, ival); break;
+                    // SO_REUSEPORT (per-socket load-balanced port sharing) has no .NET
+                    // equivalent; a single managed process can't self-load-balance anyway,
+                    // so it's mapped to ReuseAddress (the closest useful behavior — quick
+                    // rebind). Documented substitution, NOT silent: getsockopt(SO_REUSEPORT)
+                    // reads back the same ReuseAddress bit, so the round-trip is consistent.
                     case SO_REUSEPORT: sock.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, ival); break;
                     case SO_KEEPALIVE: sock.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, ival); break;
                     case SO_BROADCAST: sock.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.Broadcast, ival); break;
@@ -331,6 +337,9 @@ public static unsafe partial class Libc
                     SO_ERROR => 0,
                     SO_TYPE => sock.SocketType == SocketType.Dgram ? SOCK_DGRAM : SOCK_STREAM,
                     SO_REUSEADDR => (int)sock.GetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress)!,
+                    // Symmetric with setsockopt's documented SO_REUSEPORT→ReuseAddress
+                    // substitution — reads back the same bit so a set/get round-trip agrees.
+                    SO_REUSEPORT => (int)sock.GetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress)!,
                     SO_KEEPALIVE => (int)sock.GetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive)!,
                     SO_RCVBUF => sock.ReceiveBufferSize,
                     SO_SNDBUF => sock.SendBufferSize,

@@ -32,11 +32,23 @@ public unsafe ref struct PrintfBuilder
 {
     private readonly TextWriter _w;
     private byte* _fmt;
+    private int _count;   // UTF-8 bytes written so far — printf's return value (C99 §7.21.6.3)
 
     public PrintfBuilder(TextWriter writer, byte* fmt)
     {
         _w = writer;
         _fmt = fmt;
+        _count = 0;
+    }
+
+    /// <summary>Write <paramref name="s"/> to the sink and accumulate its UTF-8
+    /// byte length into the running output count that <see cref="Done"/> returns.
+    /// Every emitting path routes through here (or bumps <c>_count</c> directly for
+    /// a single literal byte) so the count matches the bytes actually transmitted.</summary>
+    private void Emit(string s)
+    {
+        _w.Write(s);
+        _count += System.Text.Encoding.UTF8.GetByteCount(s);
     }
 
     /// <summary>
@@ -93,7 +105,7 @@ public unsafe ref struct PrintfBuilder
                 break;
             default: s = v.ToString(ci); break;
         }
-        _w.Write(ApplyWidth(s, spec));
+        Emit(ApplyWidth(s, spec));
         return this;
     }
 
@@ -122,7 +134,7 @@ public unsafe ref struct PrintfBuilder
                 s = FormatFloat(v, spec, ci);
                 break;
         }
-        _w.Write(ApplyWidth(s, spec));
+        Emit(ApplyWidth(s, spec));
         return this;
     }
 
@@ -273,7 +285,7 @@ public unsafe ref struct PrintfBuilder
         };
         if (spec.Plus && nonNeg) { s = "+" + s; }
         else if (spec.Space && nonNeg) { s = " " + s; }
-        _w.Write(ApplyWidth(s, spec));
+        Emit(ApplyWidth(s, spec));
         return this;
     }
 
@@ -308,7 +320,7 @@ public unsafe ref struct PrintfBuilder
                 break;
             default: s = v.ToString(ci); break;
         }
-        _w.Write(ApplyWidth(s, spec));
+        Emit(ApplyWidth(s, spec));
         return this;
     }
 
@@ -328,7 +340,7 @@ public unsafe ref struct PrintfBuilder
             case (byte)'o': s = AltOctal(FormatOctal(v), spec); break;
             default: s = v.ToString(ci); break;
         }
-        _w.Write(ApplyWidth(s, spec));
+        Emit(ApplyWidth(s, spec));
         return this;
     }
 
@@ -374,7 +386,7 @@ public unsafe ref struct PrintfBuilder
             // shadow the BCL type at file scope via `using unsafe IntPtr = int*;`.
             s = ((System.IntPtr)v).ToString("X");
         }
-        _w.Write(ApplyWidth(s, spec));
+        Emit(ApplyWidth(s, spec));
         return this;
     }
 
@@ -415,14 +427,15 @@ public unsafe ref struct PrintfBuilder
         {
             s = ((System.IntPtr)v).ToString("X");
         }
-        _w.Write(ApplyWidth(s, spec));
+        Emit(ApplyWidth(s, spec));
         return this;
     }
 
     /// <summary>
     /// Flush the literal text remaining after the last consumed <c>%</c>
-    /// spec. Returns <c>0</c> for simplicity — real C printf returns the
-    /// byte count, which our callers don't currently consult.
+    /// spec and return the number of UTF-8 bytes written across the whole
+    /// format — printf's C99 §7.21.6.3 return value. (dotcc never signals the
+    /// negative output-error case; the sinks are managed writers that throw.)
     /// </summary>
     public int Done()
     {
@@ -431,12 +444,13 @@ public unsafe ref struct PrintfBuilder
             if (*_fmt == (byte)'%' && _fmt[1] == (byte)'%')
             {
                 _w.Write('%');
+                _count++;
                 _fmt += 2;
                 continue;
             }
             WriteUtf8Codepoint(ref _fmt);
         }
-        return 0;
+        return _count;
     }
 
     private Spec ConsumeUntilSpec()
@@ -449,6 +463,7 @@ public unsafe ref struct PrintfBuilder
                 if (*_fmt == (byte)'%')
                 {
                     _w.Write('%');
+                    _count++;
                     _fmt++;
                     continue;
                 }
@@ -551,12 +566,13 @@ public unsafe ref struct PrintfBuilder
     private void WriteUtf8Codepoint(ref byte* p)
     {
         byte b = *p;
-        if (b < 0x80) { _w.Write((char)b); p++; return; }
+        if (b < 0x80) { _w.Write((char)b); _count++; p++; return; }
         int len = 1;
         if ((b & 0xE0) == 0xC0) { len = 2; }
         else if ((b & 0xF0) == 0xE0) { len = 3; }
         else if ((b & 0xF8) == 0xF0) { len = 4; }
         _w.Write(System.Text.Encoding.UTF8.GetString(p, len));
+        _count += len;
         p += len;
     }
 }
