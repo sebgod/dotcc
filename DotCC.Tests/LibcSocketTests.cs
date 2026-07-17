@@ -187,4 +187,39 @@ public sealed class LibcSocketTests
         bind(99999, sa, 16).ShouldBe(-1);
         errno.ShouldBe(EBADF);
     }
+
+    [Fact]
+    public unsafe void socket_rejects_unsupported_families_at_create()
+    {
+        // The address layer is AF_INET-only, so AF_INET6/AF_UNIX must fail loudly
+        // at socket() with EAFNOSUPPORT — not hand back a dead-end fd that every
+        // subsequent bind/connect/accept would fail on.
+        const int AF_UNIX = 1, AF_INET6 = 10;
+        errno = 0;
+        socket(AF_INET6, SOCK_STREAM, 0).ShouldBe(-1);
+        errno.ShouldBe(EAFNOSUPPORT);
+        errno = 0;
+        socket(AF_UNIX, SOCK_STREAM, 0).ShouldBe(-1);
+        errno.ShouldBe(EAFNOSUPPORT);
+    }
+
+    [Fact]
+    public unsafe void so_reuseport_set_get_roundtrips()
+    {
+        // SO_REUSEPORT maps to ReuseAddress (documented substitution); the fix made
+        // the round-trip consistent — getsockopt reads back what setsockopt stored.
+        const int SO_REUSEPORT = 15;
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        fd.ShouldBeGreaterThanOrEqualTo(0);
+        try
+        {
+            int one = 1;
+            setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, 4).ShouldBe(0);
+            int got = 0;
+            uint len = 4;
+            getsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &got, &len).ShouldBe(0);
+            got.ShouldNotBe(0);
+        }
+        finally { close(fd); }
+    }
 }

@@ -25,21 +25,28 @@ diffed against the SUPPORT-doc rows). Verdict: the "no silent lies" invariant he
 everywhere — the POSIX tier table, threads fidelity notes, and locale/setjmp rows were all
 accurate. These are the divergences the audit surfaced that were **not** yet on the books
 (each SUPPORT row now carries its caveat and points here); all are finishable, none blocks
-current programs:
+current programs.
+
+**Landed 2026-07-17** (the low-hanging C fruits — moved off the list):
+- `printf`/`fprintf` (+ `w*`) now **return the byte count** (was always 0) — `PrintfBuilder`
+  accumulates UTF-8 bytes through a counting `Emit` and returns the total from `Done()`.
+- `scanf` now **supports `%x`/`%X`/`%o`/`%u`**, **honors max field width**, and **throws
+  loudly** on a spec the routed overload can't satisfy (`%n`, `%[…]`, or a format/arg-type
+  mismatch) instead of a silent no-op — closing the fail-loudly-invariant hole.
+- `socket(AF_INET6/AF_UNIX)` **fails at create with `EAFNOSUPPORT`** (loud, not a dead-end fd).
+- `setsockopt(SO_REUSEPORT)`→`ReuseAddress` is now a **documented, symmetric** substitution
+  (`getsockopt` reads the same bit back).
+
+**Still open:**
 
 | Gap | Divergence | Fix sketch |
 |---|---|---|
-| `printf`/`fprintf` (+ `w*`) return value | always `0`, C returns bytes written (`sprintf`/`snprintf` are correct) | count bytes in `PrintfBuilder.Done()` — the builder already sees every write |
-| `scanf` out-of-set specs (`%x` `%o` `%u` `%n` `%[…]`) | silent no-conversion (match count honest, but no loud failure) | reject at **lowering time** — the emitter already walks the format for printf (W6 precedent); unknown spec → `CompileException` |
-| `scanf` field width / length modifiers | parsed but ignored (`%3d` reads unbounded — silently *different value*) | honor width in `ScanfReader` loops (bound the reads); length modifiers select the existing overloads |
 | `realpath` | lexical `Path.GetFullPath` only — no symlink dereference | walk components via `FileSystemInfo.LinkTarget`/`ResolveLinkTarget` (net6+, AOT-clean) |
-| `setsockopt(SO_REUSEPORT)` | silently substitutes `ReuseAddress` + success; `getsockopt` EINVAL | either fail honestly (ENOPROTOOPT) or keep the substitution but document + make `getsockopt` read it back |
-| `socket(AF_INET6/AF_UNIX)` | fd creates, then every addr call dead-ends `EAFNOSUPPORT` | reject at `socket()` (EAFNOSUPPORT at create — loud at the source) until IPv6/Unix marshalling lands; also fix the `socket()` docstring claiming they're supported |
 | Zig allocator `Alignment` | FBA: no rounding at all (even natural); Arena: hardcoded 16; CHeap: malloc default | round `EndIndex` up to the requested alignment in `FbaAlloc` (one line); arena honors requests > 16 by over-padding; CHeap ≤16 is fine (document) |
 | Zig FBA `free` of the last allocation | no-op; real Zig reclaims it | compare the freed slice's end to `EndIndex`, rewind if equal (real Zig's own trick) |
 | Wide-format transcode cache | keyed by pointer **address** — a mutated format buffer at the same address serves stale text | key by content hash, or skip the cache for non-RVA pointers |
 
-Doc-rot fixed by the same audit (no action left): the `signal.h` row's stale "deferred to
+Doc-rot fixed by the audit (no action left): the `signal.h` row's stale "deferred to
 standalone-REPL" note (functions landed), `Float128.cs`'s stale "later stages" header comment
 (everything landed), and `realpath` misfiled under the faithful tier.
 

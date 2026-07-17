@@ -146,6 +146,26 @@ public sealed unsafe class LibcTests
             .ShouldBe("100");
 
     [Fact]
+    public void printf_returns_bytes_written()
+    {
+        // C99 §7.21.6.3: printf returns the number of characters transmitted.
+        // "n=42" is 4 bytes (was always 0 before the 2026-07-17 fidelity fix).
+        int n = 0;
+        CaptureStdout(() => n = printf(L("n=%d\0"u8)).Arg(42).Done());
+        n.ShouldBe(4);
+    }
+
+    [Fact]
+    public void printf_return_count_is_utf8_bytes_not_chars()
+    {
+        // The count is UTF-8 bytes actually transmitted: "café" = c a f é,
+        // and é encodes as two UTF-8 bytes → 5, not the 4 chars.
+        int n = 0;
+        CaptureStdout(() => n = printf(L("%s\0"u8)).Arg(L("café\0"u8)).Done());
+        n.ShouldBe(5);
+    }
+
+    [Fact]
     public void fprintf_to_stdout_routes_to_stdout() =>
         CaptureStdout(() => fprintf(stdout, L("hello %d\0"u8)).Arg(7).Done())
             .ShouldBe("hello 7");
@@ -339,6 +359,70 @@ public sealed unsafe class LibcTests
         var matched = sscanf(L("7\0"u8), L("%d %f\0"u8)).Read(&n).Read(&f).Done();
         matched.ShouldBe(1);
         n.ShouldBe(7);
+    }
+
+    [Fact]
+    public void sscanf_x_reads_hex_int()
+    {
+        int x = 0;
+        var matched = sscanf(L("ff\0"u8), L("%x\0"u8)).Read(&x).Done();
+        matched.ShouldBe(1);
+        x.ShouldBe(255);
+    }
+
+    [Fact]
+    public void sscanf_o_reads_octal_int()
+    {
+        int x = 0;
+        sscanf(L("17\0"u8), L("%o\0"u8)).Read(&x).Done();
+        x.ShouldBe(15); // 017 octal
+    }
+
+    [Fact]
+    public void sscanf_u_reads_unsigned_int()
+    {
+        int x = 0;
+        sscanf(L("123\0"u8), L("%u\0"u8)).Read(&x).Done();
+        x.ShouldBe(123);
+    }
+
+    [Fact]
+    public void sscanf_honors_max_field_width_on_int()
+    {
+        // "%2d" reads at most 2 chars → 12, leaving "345" for the next conversion.
+        int a = 0, b = 0;
+        var matched = sscanf(L("12345\0"u8), L("%2d%3d\0"u8)).Read(&a).Read(&b).Done();
+        matched.ShouldBe(2);
+        a.ShouldBe(12);
+        b.ShouldBe(345);
+    }
+
+    [Fact]
+    public void sscanf_honors_max_field_width_on_string()
+    {
+        var buf = (byte*)malloc(32);
+        try
+        {
+            memset(buf, 0xFF, 32);
+            sscanf(L("hello\0"u8), L("%3s\0"u8)).Read(buf).Done();
+            strcmp(buf, L("hel\0"u8)).ShouldBe(0);
+        }
+        finally { free(buf); }
+    }
+
+    [Fact]
+    public void sscanf_unsupported_spec_throws_loudly()
+    {
+        // A %n (chars-read) has no implementation — must fail loudly, not silently
+        // skip (the dotcc "never silently wrong" contract). Target is heap-allocated
+        // because a lambda can't capture the address of a local (CS1686).
+        var p = (int*)malloc(sizeof(int));
+        try
+        {
+            Should.Throw<System.FormatException>(() =>
+                sscanf(L("42\0"u8), L("%n\0"u8)).Read(p).Done());
+        }
+        finally { free(p); }
     }
 
     [Fact]
