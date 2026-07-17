@@ -134,20 +134,24 @@ public static unsafe partial class Libc
     // ---- <sys/socket.h> calls ----------------------------------------------
 
     /// <summary><c>socket(domain, type, protocol)</c> — create a socket fd.
-    /// <b>IPv4 only</b> (<c>AF_INET</c>); STREAM/DGRAM types; the
-    /// SOCK_NONBLOCK/SOCK_CLOEXEC type flags are stripped (non-blocking is
-    /// deferred — degrades to blocking, like <c>fcntl(O_NONBLOCK)</c>). Returns
-    /// the fd, or -1. <c>AF_INET6</c>/<c>AF_UNIX</c> are rejected here with
-    /// <c>EAFNOSUPPORT</c> rather than creating an fd that every address-taking
-    /// call (bind/connect/accept/…) would then fail — the whole address layer is
-    /// AF_INET-only, so the honest failure is at create time, not a dead-end fd.</summary>
+    /// <c>AF_INET</c> (IPv4) and <c>AF_UNIX</c> (Unix-domain, pathname form) are
+    /// supported; STREAM/DGRAM types; the SOCK_NONBLOCK/SOCK_CLOEXEC type flags
+    /// are stripped (non-blocking is deferred — degrades to blocking, like
+    /// <c>fcntl(O_NONBLOCK)</c>). Returns the fd, or -1. <c>AF_INET6</c> is
+    /// rejected here with <c>EAFNOSUPPORT</c> (its <c>sockaddr_in6</c> marshalling
+    /// isn't modeled yet) — a loud create-time failure, not a dead-end fd.</summary>
     public static int socket(int domain, int type, int protocol)
     {
-        // Only AF_INET is marshallable today (TryReadSockaddrIn / sockaddr_in).
-        // Fail loudly at create for the families whose address paths don't exist
-        // yet, instead of handing back a socket that can never be used.
-        if (domain != AF_INET) { errno = EAFNOSUPPORT; return -1; }
-        var af = AddressFamily.InterNetwork;
+        AddressFamily af;
+        switch (domain)
+        {
+            case AF_INET: af = AddressFamily.InterNetwork; break;
+            case AF_UNIX: af = AddressFamily.Unix; break;
+            // AF_INET6 needs a sockaddr_in6 reader/writer (scope id, 16-byte addr)
+            // that doesn't exist yet — fail loudly at create rather than hand back
+            // an fd whose every address call would fail.
+            default: errno = EAFNOSUPPORT; return -1;
+        }
 
         int baseType = type & ~(SOCK_NONBLOCK | SOCK_CLOEXEC);
         var st = baseType switch
@@ -158,13 +162,16 @@ public static unsafe partial class Libc
         };
         if (st == SocketType.Unknown) { errno = EPROTONOSUPPORT; return -1; }
 
-        var pt = protocol switch
-        {
-            0 => st == SocketType.Stream ? ProtocolType.Tcp : ProtocolType.Udp,
-            IPPROTO_TCP => ProtocolType.Tcp,
-            IPPROTO_UDP => ProtocolType.Udp,
-            _ => ProtocolType.Unspecified,
-        };
+        // Unix-domain sockets carry no IP protocol; the others default by type.
+        var pt = af == AddressFamily.Unix
+            ? ProtocolType.Unspecified
+            : protocol switch
+            {
+                0 => st == SocketType.Stream ? ProtocolType.Tcp : ProtocolType.Udp,
+                IPPROTO_TCP => ProtocolType.Tcp,
+                IPPROTO_UDP => ProtocolType.Udp,
+                _ => ProtocolType.Unspecified,
+            };
         try { return RegisterSocketSlot(new Socket(af, st, pt)); }
         catch (SocketException ex) { errno = SocketErrno(ex.SocketErrorCode); return -1; }
     }
@@ -173,7 +180,7 @@ public static unsafe partial class Libc
     public static int bind(int fd, void* addr, uint addrlen)
     {
         if (SockByFd(fd, out var err) is not { } sock) { errno = err; return -1; }
-        if (!TryReadSockaddrIn(addr, addrlen, out var ep, out var aerr)) { errno = aerr; return -1; }
+        if (!TryReadSockaddr(addr, addrlen, out var ep, out var aerr)) { errno = aerr; return -1; }
         try { sock.Bind(ep); return 0; }
         catch (SocketException ex) { errno = SocketErrno(ex.SocketErrorCode); return -1; }
     }
@@ -195,11 +202,10 @@ public static unsafe partial class Libc
         try
         {
             var conn = sock.Accept();
-            if (addr != null && addrlen != null && *addrlen >= 16 && conn.RemoteEndPoint is IPEndPoint rep)
+            if (addr != null && addrlen != null && conn.RemoteEndPoint is { } peer)
             {
-                WriteSockaddrIn(addr, rep);
+                WriteSockaddr(peer, addr, addrlen);   // AF_INET or AF_UNIX; truncates per POSIX
             }
-            if (addrlen != null) { *addrlen = 16; }
             return RegisterSocketSlot(conn);
         }
         catch (SocketException ex) { errno = SocketErrno(ex.SocketErrorCode); return -1; }
@@ -209,7 +215,7 @@ public static unsafe partial class Libc
     public static int connect(int fd, void* addr, uint addrlen)
     {
         if (SockByFd(fd, out var err) is not { } sock) { errno = err; return -1; }
-        if (!TryReadSockaddrIn(addr, addrlen, out var ep, out var aerr)) { errno = aerr; return -1; }
+        if (!TryReadSockaddr(addr, addrlen, out var ep, out var aerr)) { errno = aerr; return -1; }
         try { sock.Connect(ep); return 0; }
         catch (SocketException ex) { errno = SocketErrno(ex.SocketErrorCode); return -1; }
     }
@@ -238,7 +244,7 @@ public static unsafe partial class Libc
         if (s == null) { errno = EBADF; return -1; }
         if (dest == null) { return SocketSendFrom(s, buf, len, flags); }
         if (s.Socket is not { } sock) { errno = ENOTSOCK; return -1; }
-        if (!TryReadSockaddrIn(dest, destlen, out var ep, out var aerr)) { errno = aerr; return -1; }
+        if (!TryReadSockaddr(dest, destlen, out var ep, out var aerr)) { errno = aerr; return -1; }
         int n = (int)Math.Min(len, int.MaxValue);
         try { return sock.SendTo(new ReadOnlySpan<byte>(buf, n), ToSocketFlags(flags), ep); }
         catch (SocketException ex) { errno = SocketErrno(ex.SocketErrorCode); return -1; }
@@ -362,7 +368,7 @@ public static unsafe partial class Libc
     public static int getsockname(int fd, void* addr, uint* addrlen)
     {
         if (SockByFd(fd, out var err) is not { } sock) { errno = err; return -1; }
-        return FillEndpoint(sock.LocalEndPoint, addr, addrlen);
+        return WriteSockaddr(sock.LocalEndPoint, addr, addrlen);
     }
 
     /// <summary><c>getpeername(fd, addr, addrlen)</c> — the connected peer's
@@ -370,15 +376,51 @@ public static unsafe partial class Libc
     public static int getpeername(int fd, void* addr, uint* addrlen)
     {
         if (SockByFd(fd, out var err) is not { } sock) { errno = err; return -1; }
-        return FillEndpoint(sock.RemoteEndPoint, addr, addrlen);
+        return WriteSockaddr(sock.RemoteEndPoint, addr, addrlen);
     }
 
-    private static int FillEndpoint(EndPoint? ep, void* addr, uint* addrlen)
+    /// <summary>Write a .NET endpoint into a C <c>struct sockaddr</c>, dispatching
+    /// on its concrete type: <see cref="IPEndPoint"/> → <c>sockaddr_in</c>,
+    /// <see cref="UnixDomainSocketEndPoint"/> → <c>sockaddr_un</c>. Truncates to the
+    /// caller's buffer and reports the full length in <paramref name="addrlen"/>
+    /// (POSIX getsockname/accept semantics), so a short buffer is not an error.</summary>
+    private static int WriteSockaddr(EndPoint? ep, void* addr, uint* addrlen)
     {
-        if (addr == null || addrlen == null || *addrlen < 16) { errno = EINVAL; return -1; }
-        if (ep is IPEndPoint ip) { WriteSockaddrIn(addr, ip); *addrlen = 16; return 0; }
-        errno = ENOTCONN;
-        return -1;
+        if (addr == null || addrlen == null) { errno = EINVAL; return -1; }
+        switch (ep)
+        {
+            case IPEndPoint ip:
+            {
+                byte* tmp = stackalloc byte[16];
+                WriteSockaddrIn(tmp, ip);
+                CopyTruncated(tmp, 16, addr, addrlen);
+                return 0;
+            }
+            case UnixDomainSocketEndPoint ud:
+            {
+                var path = Encoding.UTF8.GetBytes(ud.ToString() ?? "");
+                byte* tmp = stackalloc byte[128];
+                Unsafe.WriteUnaligned(tmp, (ushort)AF_UNIX);        // sun_family (host order)
+                int plen = Math.Min(path.Length, 125);              // family(2)+path+NUL ≤ 128
+                for (int i = 0; i < plen; i++) { tmp[2 + i] = path[i]; }
+                tmp[2 + plen] = 0;                                  // NUL-terminate sun_path
+                CopyTruncated(tmp, 2 + plen + 1, addr, addrlen);
+                return 0;
+            }
+            default:
+                errno = ENOTCONN;
+                return -1;
+        }
+    }
+
+    /// <summary>Copy <paramref name="srclen"/> bytes into the caller's buffer,
+    /// truncating to <c>*dstlen</c>, then set <c>*dstlen</c> to the FULL length
+    /// (POSIX: the stored address is truncated but the real size is reported).</summary>
+    private static void CopyTruncated(byte* src, int srclen, void* dst, uint* dstlen)
+    {
+        int copy = (int)Math.Min((uint)srclen, *dstlen);
+        new ReadOnlySpan<byte>(src, copy).CopyTo(new Span<byte>(dst, copy));
+        *dstlen = (uint)srclen;
     }
 
     // ---- <arpa/inet.h> byte-order + address conversion ---------------------
@@ -436,6 +478,40 @@ public static unsafe partial class Libc
     }
 
     // ---- helpers -----------------------------------------------------------
+
+    /// <summary>Read a C <c>struct sockaddr</c> into the matching .NET endpoint,
+    /// dispatching on the family in its first two bytes: <c>AF_INET</c> →
+    /// <c>sockaddr_in</c> → <see cref="IPEndPoint"/>; <c>AF_UNIX</c> → <c>sockaddr_un</c>
+    /// (NUL-terminated pathname <c>sun_path</c>) → <see cref="UnixDomainSocketEndPoint"/>.
+    /// Any other family is a loud <c>EAFNOSUPPORT</c>.</summary>
+    private static bool TryReadSockaddr(void* addr, uint addrlen, out EndPoint ep, out int err)
+    {
+        ep = null!;
+        err = 0;
+        if (addr == null || addrlen < 2) { err = EINVAL; return false; }
+        ushort fam = Unsafe.ReadUnaligned<ushort>((byte*)addr);   // sa_family is host order
+        switch (fam)
+        {
+            case AF_INET:
+                if (!TryReadSockaddrIn(addr, addrlen, out var ip, out err)) { return false; }
+                ep = ip;
+                return true;
+            case AF_UNIX:
+            {
+                // sockaddr_un: sun_family (2 bytes) then a NUL-terminated sun_path.
+                byte* path = (byte*)addr + 2;
+                int max = (int)addrlen - 2;
+                int len = 0;
+                while (len < max && path[len] != 0) { len++; }
+                if (len == 0) { err = EINVAL; return false; }   // unnamed/abstract not modeled
+                ep = new UnixDomainSocketEndPoint(Encoding.UTF8.GetString(path, len));
+                return true;
+            }
+            default:
+                err = EAFNOSUPPORT;
+                return false;
+        }
+    }
 
     /// <summary>Read a <c>struct sockaddr_in</c> (family native; port + 4-byte
     /// address in network order; 16 bytes total) into an <see cref="IPEndPoint"/>.</summary>

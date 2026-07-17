@@ -5,9 +5,10 @@
    System.Net.Sockets (DotCC.Libc.SocketLib). Faithful blocking IPv4 TCP+UDP on
    every host (Linux/Windows alike — no Winsock split). The constants are the
    Linux/glibc numeric values (dotcc is LP64/Linux-shaped), so the same C program
-   means the same thing here as it does to gcc-on-Linux. Deferred: non-blocking
+   means the same thing here as it does to gcc-on-Linux. Unix-domain sockets
+   (AF_UNIX, pathname form) work too — see <sys/un.h>. Deferred: non-blocking
    (O_NONBLOCK degrades to blocking), select/poll over mixed fd sets, IPv6,
-   Unix-domain, getaddrinfo — see C-SUPPORT.md. */
+   getaddrinfo — see C-SUPPORT.md. */
 
 #include <sys/types.h>   /* ssize_t, size_t */
 
