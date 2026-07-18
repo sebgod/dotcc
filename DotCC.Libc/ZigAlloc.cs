@@ -150,6 +150,28 @@ public unsafe struct Allocator
         Free(old);
         return fresh;
     }
+
+    /// <summary><c>a.resize(slice, n)</c> — attempt an IN-PLACE resize (no move) through the vtable's
+    /// <see cref="AllocatorVTable.resize"/> fn, returning whether it succeeded (Zig's <c>bool</c>).
+    /// The answer is whatever the concrete runtime allocator gives: an <see cref="FixedBufferAllocator"/>
+    /// applies its last-allocation logic (grow the top block if the buffer has room, shrink any block),
+    /// while the C heap and arena always report <c>false</c> (they can't grow/shrink in place, so the
+    /// caller falls back to a copying realloc). No <c>ret_addr</c> is threaded (0), matching the other
+    /// dispatch helpers.</summary>
+    public CBool Resize<T>(Slice<T> s, ulong n) where T : unmanaged
+        => Vtable.resize(Ctx, new Slice<byte>((byte*)s.Ptr, s.Len * (ulong)sizeof(T)), AlignOf<T>(), n * (ulong)sizeof(T), 0);
+
+    /// <summary><c>a.remap(slice, n)</c> — resize-possibly-moving through the vtable's
+    /// <see cref="AllocatorVTable.remap"/> fn. Returns the (possibly relocated) slice of
+    /// <paramref name="n"/> elements on success, or <c>null</c> (Zig's <c>?[]T</c>) when the
+    /// allocator can't honor it. dotcc's allocators never actually move a block (an FBA remaps in
+    /// place; the C heap / arena return null), so a non-null result carries the same pointer with the
+    /// new length — but the shape follows real zig, which is free to relocate.</summary>
+    public Slice<T>? Remap<T>(Slice<T> s, ulong n) where T : unmanaged
+    {
+        byte* p = Vtable.remap(Ctx, new Slice<byte>((byte*)s.Ptr, s.Len * (ulong)sizeof(T)), AlignOf<T>(), n * (ulong)sizeof(T), 0);
+        return p == null ? null : new Slice<T>((T*)p, n);
+    }
 }
 
 /// <summary>

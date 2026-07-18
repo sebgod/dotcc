@@ -773,6 +773,30 @@ public sealed class ZigOracleTests
             "    return sum;\n" +
             "}\n" +
             "pub fn main() u8 { return run() catch 1; }\n", 42, "" },
+        // opaque_resize_remap — the SAME resize/remap dance, but through an OPAQUE `std.mem.Allocator`
+        // parameter (indirect vtable dispatch, not a devirt'd FBA). Backed by an FBA in main so the
+        // in-place answer is deterministic and matches real zig byte-for-byte. 3*4 + 15 + 15 = 42.
+        new object[] { "opaque_resize_remap",
+            "const std = @import(\"std\");\n" +
+            "fn run(a: std.mem.Allocator) !u8 {\n" +
+            "    var s = try a.alloc(u8, 4);\n" +
+            "    var i: usize = 0;\n" +
+            "    while (i < 4) : (i += 1) { s[i] = 3; }\n" +
+            "    s = a.remap(s, 6) orelse return 2;\n" +
+            "    if (s.len != 6) return 3;\n" +
+            "    s[4] = 15;\n" +
+            "    s[5] = 15;\n" +
+            "    var sum: u8 = 0;\n" +
+            "    var j: usize = 0;\n" +
+            "    while (j < s.len) : (j += 1) { sum += s[j]; }\n" +
+            "    if (!a.resize(s, 3)) return 4;\n" +
+            "    return sum;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var buffer: [64]u8 = undefined;\n" +
+            "    var fba = std.heap.FixedBufferAllocator.init(&buffer);\n" +
+            "    return run(fba.allocator()) catch 1;\n" +
+            "}\n", 42, "" },
         // TUPLES (Milestone G). The headline use: a function returns a tuple `struct { u8, u8 }`
         // and the caller destructures it with `const a, const b = mm();` → C# ValueTuple +
         // `.Item1`/`.Item2`. 20 + 22 = 42.

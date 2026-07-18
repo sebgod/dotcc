@@ -2276,14 +2276,39 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_resize_and_remap_on_the_page_dependent_paths()
+    public void Lowers_resize_and_remap_on_an_opaque_allocator()
     {
-        // resize/remap stay a clear error on the C-heap default AND an opaque `std.mem.Allocator`:
-        // their in-place result is allocator-page-dependent (real zig answers from malloc_usable_size
-        // / page rounding), so a guess would diverge from the oracle — use `realloc` there.
+        // On an OPAQUE `std.mem.Allocator` parameter, resize/remap dispatch through the vtable
+        // (`recv.Resize<T>` / `recv.Remap<T>`) — the answer is whatever the concrete runtime
+        // allocator gives. No devirt (not a provable FBA), no page-dependency guess.
+        var cs = EmitZig(
+            "const std = @import(\"std\");\n" +
+            "fn go(a: std.mem.Allocator) !u8 {\n" +
+            "    var s = try a.alloc(u8, 4);\n" +
+            "    s = a.remap(s, 6) orelse return 2;\n" +
+            "    if (!a.resize(s, 3)) return 3;\n" +
+            "    return s[0];\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var buffer: [64]u8 = undefined;\n" +
+            "    var fba = std.heap.FixedBufferAllocator.init(&buffer);\n" +
+            "    return go(fba.allocator()) catch 1;\n" +
+            "}\n");
+        cs.ShouldContain(".Remap<byte>(");                    // remap → indirect vtable dispatch
+        cs.ShouldContain(".Resize<byte>(");                   // resize → indirect vtable dispatch
+        cs.ShouldNotContain("ZigAlloc.RemapFba<byte>(&");     // NOT devirt'd (opaque, not a provable FBA)
+        cs.ShouldNotContain("ZigAlloc.ResizeFba<byte>(&");
+    }
+
+    [Fact]
+    public void Rejects_resize_and_remap_on_the_c_heap_devirt_default()
+    {
+        // resize/remap stay a clear error ONLY on the statically-known C-heap default (a devirt
+        // site): its in-place result is allocator-page-dependent (real zig answers from
+        // malloc_usable_size / page rounding), so a devirtualized guess would diverge from the
+        // oracle — use `realloc` there, or route through an opaque allocator / an FBA.
         foreach (var method in new[] { "resize", "remap" })
         {
-            // C-heap default (devirtualizable but page-dependent).
             var cheap = Should.Throw<CompileException>(() => EmitZig(
                 "const std = @import(\"std\");\n" +
                 "fn run() !u8 {\n" +
@@ -2294,19 +2319,33 @@ public sealed class ZigFrontendTests
                 "    return s[0];\n" +
                 "}\n" +
                 "pub fn main() u8 { return run() catch 1; }\n"));
-            cheap.Message.ShouldContain("provable FixedBufferAllocator");
-
-            // An opaque `std.mem.Allocator` parameter (indirect dispatch).
-            var opaque_ = Should.Throw<CompileException>(() => EmitZig(
-                "const std = @import(\"std\");\n" +
-                "fn go(a: std.mem.Allocator) !u8 {\n" +
-                "    const s = try a.alloc(u8, 2);\n" +
-                "    _ = a." + method + "(s, 4);\n" +
-                "    return s[0];\n" +
-                "}\n" +
-                "pub fn main() u8 { return go(std.heap.page_allocator) catch 1; }\n"));
-            opaque_.Message.ShouldContain("provable FixedBufferAllocator");
+            cheap.Message.ShouldContain("C-heap default is deferred");
         }
+    }
+
+    [Fact]
+    public void Lowers_aligned_alloc_on_both_forks()
+    {
+        // `a.alignedAlloc(T, alignment, n)` carries an extra comptime alignment arg; dotcc drops it
+        // (its alignment model caps at 16, satisfied by construction / honored up to natural) and
+        // lowers exactly like `alloc` — devirt on a provable FBA, indirect on an opaque allocator.
+        var cs = EmitZig(
+            "const std = @import(\"std\");\n" +
+            "fn viaOpaque(a: std.mem.Allocator) !usize {\n" +
+            "    const s = try a.alignedAlloc(u32, null, 3);\n" +
+            "    return s.len;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var buffer: [64]u8 = undefined;\n" +
+            "    var fba = std.heap.FixedBufferAllocator.init(&buffer);\n" +
+            "    const a = fba.allocator();\n" +
+            "    const s = a.alignedAlloc(u32, null, 2) catch return 1;\n" +
+            "    const n = viaOpaque(fba.allocator()) catch return 2;\n" +
+            "    const total: u8 = @intCast(s.len + n);\n" +
+            "    return total;\n" +
+            "}\n");
+        cs.ShouldContain("ZigAlloc.AllocFba<uint>(&fba,");    // provable FBA site → devirt alloc
+        cs.ShouldContain(".Alloc<uint>(");                    // opaque site → indirect vtable alloc
     }
 
     [Fact]
