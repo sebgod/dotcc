@@ -1265,15 +1265,36 @@ internal sealed partial class ZigLowering
                 };
                 return true;
             }
-            case "resize":   // in-place resize → bool (deferred — see below)
-            case "remap":    // resize-possibly-moving → ?[]T (deferred — see below)
+            case "resize":   // in-place resize → bool
+            case "remap":    // resize-possibly-moving → ?[]T
+            {
                 // `resize` returns whether the block grew/shrank IN PLACE (no move); `remap` returns
-                // the possibly-moved slice or null. Both outcomes are allocator-page-dependent (real
-                // zig's page_allocator answers from page rounding), so matching the true/false / null
-                // observably would need per-allocator in-place tracking dotcc doesn't model yet. Clear
-                // deferred error rather than a divergent guess — use `.realloc` (which always works).
-                throw new IrUnsupportedException(
-                    $"zig allocator `.{methodName}` is deferred (its in-place / optional result is allocator-page-dependent); use `.realloc`");
+                // the possibly-moved slice or null. A FixedBufferAllocator answers both DETERMINISTICALLY
+                // (its last-allocation logic — see ZigAlloc.FbaResize), so a PROVABLE FBA site is wired.
+                // The C-heap default and an opaque allocator stay deferred: their in-place result is
+                // page-dependent (real zig answers from malloc_usable_size / page rounding), so a guess
+                // would diverge from the oracle — use `.realloc` there (which always works).
+                if (fbaCtx is null)
+                {
+                    throw new IrUnsupportedException(
+                        $"zig allocator `.{methodName}` is only supported on a provable FixedBufferAllocator "
+                        + "(the C-heap / opaque in-place result is allocator-page-dependent); use `.realloc`");
+                }
+                if (argItems.Count != 2)
+                {
+                    throw new IrUnsupportedException($"zig allocator `.{methodName}` expects (slice, new count); got {argItems.Count} argument(s)");
+                }
+                var oldSlice = LowerExpr(argItems[0]);
+                if (oldSlice.Type.Unqualified is not CType.Slice sl)
+                {
+                    throw new IrUnsupportedException($"zig allocator `.{methodName}` expects a slice argument, got {oldSlice.Type.Describe()}");
+                }
+                var newCount = LowerExpr(argItems[1]);
+                result = methodName == "resize"
+                    ? new ResizeCall(recv, oldSlice, sl.Element, newCount, fbaCtx) { Type = CType.Bool }
+                    : new RemapCall(recv, oldSlice, sl.Element, newCount, fbaCtx) { Type = new CType.Optional(new CType.Slice(sl.Element)) };
+                return true;
+            }
             default:   // unreachable: the caller only dispatches the allocator method names above
                 return false;
         }

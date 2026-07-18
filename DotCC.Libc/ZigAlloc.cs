@@ -331,10 +331,36 @@ public static unsafe class ZigAlloc
         return p;
     }
 
-    /// <summary>Raw FBA resize/remap — never succeeds in place (false / null); part of the 4-fn
-    /// vtable shape (see <see cref="AllocatorVTable.resize"/>).</summary>
-    private static CBool FbaResize(void* ctx, Slice<byte> memory, Alignment alignment, ulong newLen, ulong retAddr) => false;
-    private static byte* FbaRemap(void* ctx, Slice<byte> memory, Alignment alignment, ulong newLen, ulong retAddr) => null;
+    /// <summary>Raw FBA resize — change a block's length IN PLACE (no move), returning whether it
+    /// succeeded, exactly as real zig's <c>FixedBufferAllocator.resize</c>. The LAST allocation can
+    /// grow (if the buffer has room) or shrink (rewinding the cursor); any earlier block can only
+    /// shrink in place (a grow would collide with the block above it) — a grow of a non-last block
+    /// fails, a shrink is a no-op success. Deterministic (no page rounding), which is why resize is
+    /// wired for a provable FBA but stays deferred for the C heap / opaque allocators.</summary>
+    private static CBool FbaResize(void* ctx, Slice<byte> memory, Alignment alignment, ulong newLen, ulong retAddr)
+    {
+        var self = (FixedBufferAllocator*)ctx;
+        bool isLast = (byte*)memory.Ptr + memory.Len == self->Buffer + self->EndIndex;
+        if (!isLast)
+        {
+            return newLen <= memory.Len;   // a non-last block: shrink is a no-op success, grow fails
+        }
+        if (newLen <= memory.Len)
+        {
+            self->EndIndex -= memory.Len - newLen;   // shrink the last block: rewind the cursor
+            return true;
+        }
+        ulong add = newLen - memory.Len;
+        if (self->EndIndex + add > self->Capacity) { return false; }   // grow the last block if room
+        self->EndIndex += add;
+        return true;
+    }
+
+    /// <summary>Raw FBA remap — resize-possibly-moving; returns the (unchanged) pointer on success or
+    /// null. An FBA never moves a block, so remap IS resize: real zig's
+    /// <c>return if (resize(…)) memory.ptr else null;</c>.</summary>
+    private static byte* FbaRemap(void* ctx, Slice<byte> memory, Alignment alignment, ulong newLen, ulong retAddr)
+        => FbaResize(ctx, memory, alignment, newLen, retAddr) != 0 ? (byte*)memory.Ptr : null;
 
     /// <summary>Raw FBA free — reclaim the space iff this is the LAST allocation (real zig's
     /// <c>isLastAllocation</c> trick: the freed region ends exactly at the bump cursor, so the cursor
@@ -426,6 +452,21 @@ public static unsafe class ZigAlloc
         ulong keep = old.Len < n ? old.Len : n;
         System.Buffer.MemoryCopy(old.Ptr, p, (long)bytes, (long)(keep * (ulong)sizeof(T)));
         return ErrUnion<Slice<T>>.Ok(new Slice<T>((T*)p, n));
+    }
+
+    /// <summary>The FBA-site-devirtualized <c>a.resize(slice, n)</c> — a direct <see cref="FbaResize"/>
+    /// over the <c>&amp;fba</c> context; returns whether the block was resized in place (Zig's
+    /// <c>bool</c>). No allocation, no move: the caller keeps using <c>slice.ptr[0..n]</c> on success.</summary>
+    public static CBool ResizeFba<T>(FixedBufferAllocator* self, Slice<T> s, ulong n) where T : unmanaged
+        => FbaResize(self, new Slice<byte>((byte*)s.Ptr, s.Len * (ulong)sizeof(T)), AlignOf<T>(), n * (ulong)sizeof(T), 0);
+
+    /// <summary>The FBA-site-devirtualized <c>a.remap(slice, n)</c> — a direct <see cref="FbaRemap"/>.
+    /// Returns the resized slice (same pointer — an FBA never moves) on success, or <c>null</c> (Zig's
+    /// <c>?[]T</c> none) when the in-place resize can't be honored.</summary>
+    public static Slice<T>? RemapFba<T>(FixedBufferAllocator* self, Slice<T> s, ulong n) where T : unmanaged
+    {
+        byte* p = FbaRemap(self, new Slice<byte>((byte*)s.Ptr, s.Len * (ulong)sizeof(T)), AlignOf<T>(), n * (ulong)sizeof(T), 0);
+        return p == null ? null : new Slice<T>((T*)p, n);
     }
 
     // ---- ArenaAllocator (the third allocator, Milestone U) ---------------

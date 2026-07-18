@@ -748,6 +748,31 @@ public sealed class ZigOracleTests
             "    return r;\n" +
             "}\n" +
             "pub fn main() u8 { return grow(std.heap.page_allocator) catch 1; }\n", 42, "" },
+        // resize_remap_fba — in-place resize/remap on a PROVABLE FixedBufferAllocator (the only wired
+        // path; the C-heap / opaque forms stay a loud deferred error, their result being
+        // page-dependent). `remap` grows the last allocation (same pointer, contents preserved) →
+        // `?[]u8` consumed by `orelse`; `resize` shrinks the last allocation in place → `bool`.
+        // 3*4 + 15 + 15 = 42.
+        new object[] { "resize_remap_fba",
+            "const std = @import(\"std\");\n" +
+            "fn run() !u8 {\n" +
+            "    var buffer: [64]u8 = undefined;\n" +
+            "    var fba = std.heap.FixedBufferAllocator.init(&buffer);\n" +
+            "    const a = fba.allocator();\n" +
+            "    var s = try a.alloc(u8, 4);\n" +
+            "    var i: usize = 0;\n" +
+            "    while (i < 4) : (i += 1) { s[i] = 3; }\n" +
+            "    s = a.remap(s, 6) orelse return 2;\n" +
+            "    if (s.len != 6) return 3;\n" +
+            "    s[4] = 15;\n" +
+            "    s[5] = 15;\n" +
+            "    var sum: u8 = 0;\n" +
+            "    var j: usize = 0;\n" +
+            "    while (j < s.len) : (j += 1) { sum += s[j]; }\n" +
+            "    if (!a.resize(s, 3)) return 4;\n" +
+            "    return sum;\n" +
+            "}\n" +
+            "pub fn main() u8 { return run() catch 1; }\n", 42, "" },
         // TUPLES (Milestone G). The headline use: a function returns a tuple `struct { u8, u8 }`
         // and the caller destructures it with `const a, const b = mm();` → C# ValueTuple +
         // `.Item1`/`.Item2`. 20 + 22 = 42.

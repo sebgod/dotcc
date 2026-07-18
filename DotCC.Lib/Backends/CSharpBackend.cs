@@ -1620,6 +1620,23 @@ internal sealed class CSharpBackend
                     ? ($"ZigAlloc.ReallocCHeap<{elem}>({Expr(rc.OldSlice)}, {n}, {rc.OomCode})", PPostfix)
                     : ($"{Sub(rc.Receiver, PPostfix)}.Realloc<{elem}>({Expr(rc.OldSlice)}, {n}, {rc.OomCode})", PPostfix);
             }
+            // A Zig allocator `a.resize(slice, n)` — an in-place resize (bool). Only the FBA-devirt
+            // fork is emitted (the lowering rejects the page-dependent C-heap/opaque paths), so FbaCtx
+            // is always non-null: a direct `ZigAlloc.ResizeFba<T>(&fba, slice, n)`.
+            case ResizeCall zc:
+            {
+                var elem = Cs(zc.Element.Unqualified);
+                var n = Coerced(zc.NewCount, CType.ULong);
+                return ($"ZigAlloc.ResizeFba<{elem}>({Expr(zc.FbaCtx)}, {Expr(zc.OldSlice)}, {n})", PPostfix);
+            }
+            // A Zig allocator `a.remap(slice, n)` — resize-possibly-moving (?[]T). FBA-devirt only,
+            // like resize: `ZigAlloc.RemapFba<T>(&fba, slice, n)` → `Slice<T>?` (null = couldn't remap).
+            case RemapCall mc:
+            {
+                var elem = Cs(mc.Element.Unqualified);
+                var n = Coerced(mc.NewCount, CType.ULong);
+                return ($"ZigAlloc.RemapFba<{elem}>({Expr(mc.FbaCtx)}, {Expr(mc.OldSlice)}, {n})", PPostfix);
+            }
             // An array-by-value return (the Milestone K cut, made sound). Copy the N elements of the
             // source array (a `T*`) into a heap-owned buffer so the returned pointer outlives the
             // callee frame — Zig arrays are value types. The source renders as a `T*` (an array var
@@ -2326,7 +2343,7 @@ internal sealed class CSharpBackend
         // (CopyForwards / Set) MUST be recognized (a `_ = <void>` discard is a C# error);
         // an invocation-expression is a legal C# statement whatever its return type.
         // ZigListCall likewise — deinit/clearRetainingCapacity are void statements.
-        Assign or Call or IndirectCall or AllocCall or FreeCall or CreateCall or DestroyCall or ReallocCall or ZigMemCall or ZigListCall => true,
+        Assign or Call or IndirectCall or AllocCall or FreeCall or CreateCall or DestroyCall or ReallocCall or ResizeCall or RemapCall or ZigMemCall or ZigListCall => true,
         Unary u => u.Op is UnOp.PreInc or UnOp.PreDec or UnOp.PostInc or UnOp.PostDec,
         Paren p => IsStmtExpr(p.Inner),
         _ => false,
