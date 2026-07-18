@@ -243,6 +243,60 @@ public sealed class ZigAllocRuntimeTests
     }
 
     [Fact]
+    public unsafe void Opaque_resize_through_an_fba_backed_vtable_grows_and_shrinks()
+    {
+        // The indirect path an OPAQUE `std.mem.Allocator` takes: dispatch through the vtable's
+        // `resize` fn. Backed by an FBA, the answer is the deterministic last-allocation logic.
+        byte* buf = stackalloc byte[64];
+        var fba = FixedBufferAllocator.Init(buf, 64);
+        var a = ZigAlloc.FbaAllocator(&fba);   // an opaque Allocator over the FBA
+
+        var r = a.Alloc<byte>(4, Oom);
+        r.IsErr.ShouldBeFalse();
+        fba.EndIndex.ShouldBe(4UL);
+
+        (a.Resize(r.Value, 8) != 0).ShouldBeTrue();                        // grow the last block in place
+        fba.EndIndex.ShouldBe(8UL);
+        (a.Resize(new Slice<byte>(r.Value.Ptr, 8), 3) != 0).ShouldBeTrue(); // shrink it back
+        fba.EndIndex.ShouldBe(3UL);
+    }
+
+    [Fact]
+    public unsafe void Opaque_remap_through_an_fba_backed_vtable_returns_the_new_slice()
+    {
+        byte* buf = stackalloc byte[64];
+        var fba = FixedBufferAllocator.Init(buf, 64);
+        var a = ZigAlloc.FbaAllocator(&fba);
+
+        var r = a.Alloc<byte>(4, Oom);
+        r.Value[0] = 9;
+
+        var m = a.Remap(r.Value, 6);   // grow via the vtable's remap
+        m.HasValue.ShouldBeTrue();
+        ((nuint)m!.Value.Ptr).ShouldBe((nuint)r.Value.Ptr);   // an FBA never moves
+        m.Value.Len.ShouldBe(6UL);
+        ((int)m.Value[0]).ShouldBe(9);                        // preserved prefix
+        fba.EndIndex.ShouldBe(6UL);
+    }
+
+    [Fact]
+    public unsafe void Opaque_resize_and_remap_on_the_c_heap_vtable_report_no_in_place()
+    {
+        // dotcc's C-heap allocator can't grow/shrink in place, so its vtable's resize is always
+        // false and remap always null — a valid Allocator whose caller falls back to a copying
+        // realloc. (This is why the C-heap DEVIRT site stays a loud cut: it can't honor in place,
+        // but real zig's page/c allocator sometimes can, so a devirt guess would diverge.)
+        var a = ZigAlloc.CHeap();
+        var r = a.Alloc<byte>(4, Oom);
+        r.IsErr.ShouldBeFalse();
+
+        (a.Resize(r.Value, 8) != 0).ShouldBeFalse();
+        a.Remap(r.Value, 8).HasValue.ShouldBeFalse();
+
+        a.Free(r.Value);
+    }
+
+    [Fact]
     public unsafe void Indirect_dispatch_through_the_materialized_c_heap_vtable()
     {
         // The materialized default allocator: dispatch goes through the vtable's alloc /

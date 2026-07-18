@@ -1620,22 +1620,31 @@ internal sealed class CSharpBackend
                     ? ($"ZigAlloc.ReallocCHeap<{elem}>({Expr(rc.OldSlice)}, {n}, {rc.OomCode})", PPostfix)
                     : ($"{Sub(rc.Receiver, PPostfix)}.Realloc<{elem}>({Expr(rc.OldSlice)}, {n}, {rc.OomCode})", PPostfix);
             }
-            // A Zig allocator `a.resize(slice, n)` — an in-place resize (bool). Only the FBA-devirt
-            // fork is emitted (the lowering rejects the page-dependent C-heap/opaque paths), so FbaCtx
-            // is always non-null: a direct `ZigAlloc.ResizeFba<T>(&fba, slice, n)`.
+            // A Zig allocator `a.resize(slice, n)` — an in-place resize (bool). FbaCtx → devirt FBA
+            // resize; else the opaque vtable dispatch `recv.Resize<T>(slice, n)`. The lowering defers the
+            // both-null C-heap-devirt case, so Receiver is non-null in the else fork (bound via pattern
+            // to prove it to flow analysis rather than a null-forgiving `!`).
             case ResizeCall zc:
             {
                 var elem = Cs(zc.Element.Unqualified);
                 var n = Coerced(zc.NewCount, CType.ULong);
-                return ($"ZigAlloc.ResizeFba<{elem}>({Expr(zc.FbaCtx)}, {Expr(zc.OldSlice)}, {n})", PPostfix);
+                if (zc.FbaCtx is { } fctx)
+                    return ($"ZigAlloc.ResizeFba<{elem}>({Expr(fctx)}, {Expr(zc.OldSlice)}, {n})", PPostfix);
+                if (zc.Receiver is not { } recv)
+                    throw new IrUnsupportedException("zig allocator `.resize` reached the backend with no FBA context and no receiver");
+                return ($"{Sub(recv, PPostfix)}.Resize<{elem}>({Expr(zc.OldSlice)}, {n})", PPostfix);
             }
-            // A Zig allocator `a.remap(slice, n)` — resize-possibly-moving (?[]T). FBA-devirt only,
-            // like resize: `ZigAlloc.RemapFba<T>(&fba, slice, n)` → `Slice<T>?` (null = couldn't remap).
+            // A Zig allocator `a.remap(slice, n)` — resize-possibly-moving (?[]T). FbaCtx → devirt FBA
+            // remap; else opaque vtable dispatch `recv.Remap<T>(slice, n)` → `Slice<T>?` (null = no remap).
             case RemapCall mc:
             {
                 var elem = Cs(mc.Element.Unqualified);
                 var n = Coerced(mc.NewCount, CType.ULong);
-                return ($"ZigAlloc.RemapFba<{elem}>({Expr(mc.FbaCtx)}, {Expr(mc.OldSlice)}, {n})", PPostfix);
+                if (mc.FbaCtx is { } fctx)
+                    return ($"ZigAlloc.RemapFba<{elem}>({Expr(fctx)}, {Expr(mc.OldSlice)}, {n})", PPostfix);
+                if (mc.Receiver is not { } recv)
+                    throw new IrUnsupportedException("zig allocator `.remap` reached the backend with no FBA context and no receiver");
+                return ($"{Sub(recv, PPostfix)}.Remap<{elem}>({Expr(mc.OldSlice)}, {n})", PPostfix);
             }
             // An array-by-value return (the Milestone K cut, made sound). Copy the N elements of the
             // source array (a `T*`) into a heap-owned buffer so the returned pointer outlives the

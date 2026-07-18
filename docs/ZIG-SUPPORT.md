@@ -498,29 +498,35 @@ allocator that frees wholesale at `deinit()`). The full method surface is `alloc
 | `a.realloc(slice, n)` on the provable default | **DIRECT** `ZigAlloc.ReallocCHeap<T>` (a `Libc.realloc`); preserves contents up to the smaller of old/new |
 | `var fba = std.heap.FixedBufferAllocator.init(&buf);` | `FixedBufferAllocator.Init((byte*)buf, N)` |
 | `var arena = std.heap.ArenaAllocator.init(backing);` … `arena.deinit();` | `ArenaAllocator.Init(backing)` … `ZigAlloc.ArenaDeinit(&arena)` (frees the chunk chain; pairs with `defer`) |
-| `const a = fba.allocator();` (a **provable** FBA local) | **DEVIRTUALIZED** (Milestone U): no decl; `a.alloc/free/create/destroy/realloc/resize/remap` → direct `ZigAlloc.*Fba<T>(&fba, …)` (no vtable) |
+| `const a = fba.allocator();` (a **provable** FBA local) | **DEVIRTUALIZED** (Milestone U): no decl; `a.alloc/alignedAlloc/free/create/destroy/realloc/resize/remap` → direct `ZigAlloc.*Fba<T>(&fba, …)` (no vtable) |
 | `fba.allocator()` / `arena.allocator()` (passed, not bound) | `ZigAlloc.FbaAllocator(&fba)` / `ArenaToAllocator(&arena)` → a runtime `Allocator` (opaque) |
-| any method on an **opaque** `a` (a `std.mem.Allocator` param, an arena's allocator, a passed `fba.allocator()`) | **INDIRECT** `a.Alloc<T>` / `Free<T>` / `Create<T>` / `Destroy<T>` / `Realloc<T>` — the genuine `vtable->…(ctx, …)` dispatch (`Realloc` emulated via alloc+copy+free over the 2-fn vtable) |
+| any method on an **opaque** `a` (a `std.mem.Allocator` param, an arena's allocator, a passed `fba.allocator()`) | **INDIRECT** `a.Alloc<T>` / `Free<T>` / `Create<T>` / `Destroy<T>` / `Realloc<T>` / `Resize<T>` / `Remap<T>` — the genuine `vtable->…(ctx, …)` dispatch (`Realloc` emulated via alloc+copy+free; `Resize`/`Remap` call the vtable's own `resize`/`remap` fn) |
+| `a.alignedAlloc(T, alignment, n)` | lowered like `alloc` (devirt or indirect per the receiver); the comptime alignment arg is dropped — dotcc's alignment model caps at 16, honored up to natural (see **Alignment fidelity** below) |
 | the default passed to an opaque `std.mem.Allocator` sink | materialized `ZigAlloc.CHeap()` (a runtime fat pointer; its vtable still reaches the C heap) |
 | `std.mem.Allocator{ .ptr = &state, .vtable = &vt }` + a `std.mem.Allocator.VTable{…}` literal (Milestone W, part 1b) | a runtime `Allocator` over the user's 4-fn vtable (`alloc`/`resize`/`remap`/`free` bound as `delegate*` fields, each carrying `std.mem.Alignment` + `[]u8` + `ret_addr`); methods dispatch **INDIRECT** through it |
 
 So the C-heap default AND a provable `fba.allocator()` site stay direct calls; only a genuinely
 runtime-selected allocator pays the indirect dispatch. Examples: `examples/zig-alloc`,
 `examples/zig-create`, `examples/zig-arena`, `examples/zig-realloc`,
-`examples/zig-resize-remap` (in-place resize/remap on a FixedBufferAllocator),
+`examples/zig-resize-remap` (in-place resize/remap on a provable FixedBufferAllocator),
+`examples/zig-opaque-allocator` (the same resize/remap through an opaque `std.mem.Allocator` param — indirect vtable dispatch),
 `examples/zig-custom-allocator` (a hand-written bump allocator behind a user `std.mem.Allocator`).
 
 **V1 limits** (documented, not silent): two allocator sites are *provable* — the C-heap default
 (`page_allocator`/`c_allocator`) and a bound `const a = fba.allocator();` over a known
 `FixedBufferAllocator` local (Milestone U); every `std.mem.Allocator` parameter, an arena's
 `allocator()`, and a cross-function FBA stay opaque (indirect). `resize` (bool, in-place) and
-`remap` (`?[]T`) are wired **on a provable FixedBufferAllocator** — real zig's deterministic
-last-allocation logic (`ZigAlloc.FbaResize`: grow/shrink the top block, shrink-a-non-last is a
-no-op success, grow-a-non-last fails; `remap` is resize + return-same-pointer-or-null). On the
-C-heap default and an **opaque** `std.mem.Allocator` they stay a clear deferred error — that
-in-place result is allocator-page-dependent (real zig answers from `malloc_usable_size` / page
-rounding), so a guess would diverge from the oracle; use `realloc` there. `arena.reset(mode)` and a
-non-allocator backing are deferred.
+`remap` (`?[]T`) are wired on **both live forks**: a **provable FixedBufferAllocator** devirtualizes
+to real zig's deterministic last-allocation logic (`ZigAlloc.FbaResize`: grow/shrink the top block,
+shrink-a-non-last is a no-op success, grow-a-non-last fails; `remap` is resize +
+return-same-pointer-or-null), and an **opaque** `std.mem.Allocator` dispatches through the vtable's
+own `resize`/`remap` fn (`Allocator.Resize<T>`/`Remap<T>`) — the answer is whatever the concrete
+runtime allocator gives (an FBA behind the opaque handle is deterministic; dotcc's C heap / arena
+report no-in-place, so the caller copies). Only the **statically-known C-heap default** (a *devirt*
+site, `page_allocator`/`c_allocator`) stays a clear deferred error: its in-place result is
+allocator-page-dependent (real zig answers from `malloc_usable_size` / page rounding), so a
+*devirtualized* guess would diverge from the oracle — use `realloc` there, or route through an
+opaque allocator / an FBA. `arena.reset(mode)` and a non-allocator backing are deferred.
 
 **Alignment + free fidelity (fixed 2026-07-17, from the runtime audit):** the `std.mem.Alignment`
 parameter threaded through the vtable is now **honored** by `FixedBufferAllocator` — `FbaAlloc` aligns

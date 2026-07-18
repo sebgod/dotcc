@@ -987,7 +987,7 @@ internal sealed partial class ZigLowering
         // `a.alloc(T, n)` / `a.free(s)` (and the deferred `create`/`destroy`) on a known-default
         // (→ devirt) or an Allocator-typed receiver (→ indirect). A same-named method on a
         // non-allocator receiver falls through to the generic dispatch below.
-        if (methodName is "alloc" or "free" or "create" or "destroy" or "realloc" or "resize" or "remap"
+        if (methodName is "alloc" or "alignedAlloc" or "free" or "create" or "destroy" or "realloc" or "resize" or "remap"
             && TryLowerAllocatorMethod(fld, methodName, argItems, out var allocExpr))
         {
             return allocExpr;
@@ -1190,13 +1190,21 @@ internal sealed partial class ZigLowering
         switch (methodName)
         {
             case "alloc":
+            case "alignedAlloc":   // (type, comptime alignment, count) → Error![]align(a) T
             {
-                if (argItems.Count != 2)
+                // `alignedAlloc` carries an extra comptime alignment arg between the type and count.
+                // dotcc's alignment model caps at 16 (ZigAlloc.AlignOf) and satisfies that by
+                // construction on the C heap / arena while the FBA aligns up to it, so the requested
+                // alignment is not threaded through — it is honored up to dotcc's natural alignment and
+                // over-alignment (> the element's, or > 16) is the same documented cut as elsewhere.
+                // The alignment arg is dropped (it is comptime and has no runtime effect here).
+                int wantArgs = methodName == "alignedAlloc" ? 3 : 2;
+                if (argItems.Count != wantArgs)
                 {
-                    throw new IrUnsupportedException($"zig allocator `.alloc` expects (type, count); got {argItems.Count} argument(s)");
+                    throw new IrUnsupportedException($"zig allocator `.{methodName}` expects ({(methodName == "alignedAlloc" ? "type, alignment, count" : "type, count")}); got {argItems.Count} argument(s)");
                 }
                 var elem = LowerType(argItems[0]);
-                var count = LowerExpr(argItems[1]);
+                var count = LowerExpr(argItems[wantArgs - 1]);
                 result = new AllocCall(recv, elem, count, ErrorCode("OutOfMemory"), fbaCtx)
                 {
                     Type = new CType.ErrorUnion(new CType.Slice(elem)),
@@ -1269,16 +1277,19 @@ internal sealed partial class ZigLowering
             case "remap":    // resize-possibly-moving → ?[]T
             {
                 // `resize` returns whether the block grew/shrank IN PLACE (no move); `remap` returns
-                // the possibly-moved slice or null. A FixedBufferAllocator answers both DETERMINISTICALLY
-                // (its last-allocation logic — see ZigAlloc.FbaResize), so a PROVABLE FBA site is wired.
-                // The C-heap default and an opaque allocator stay deferred: their in-place result is
-                // page-dependent (real zig answers from malloc_usable_size / page rounding), so a guess
-                // would diverge from the oracle — use `.realloc` there (which always works).
-                if (fbaCtx is null)
+                // the possibly-moved slice or null. Two live forks: a PROVABLE FBA site devirtualizes
+                // (fbaCtx set — ZigAlloc.ResizeFba/RemapFba); an opaque Allocator dispatches through the
+                // vtable (recv set — recv.Resize/Remap, whose answer is whatever the concrete runtime
+                // allocator gives). Only the C-heap DEVIRT case (both null — `std.heap.page_allocator`
+                // resolved statically) stays deferred: its in-place result is page-dependent (real zig
+                // answers from malloc_usable_size / page rounding), so a devirtualized guess would
+                // diverge from the oracle — use `.realloc` there (which always works).
+                if (fbaCtx is null && recv is null)
                 {
                     throw new IrUnsupportedException(
-                        $"zig allocator `.{methodName}` is only supported on a provable FixedBufferAllocator "
-                        + "(the C-heap / opaque in-place result is allocator-page-dependent); use `.realloc`");
+                        $"zig allocator `.{methodName}` on the statically-known C-heap default is deferred "
+                        + "(the in-place page/malloc_usable_size result would diverge from real zig); "
+                        + "use `.realloc`, or route through an opaque `std.mem.Allocator` / a FixedBufferAllocator");
                 }
                 if (argItems.Count != 2)
                 {
