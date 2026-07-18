@@ -2254,13 +2254,37 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_deferred_resize_and_remap()
+    public void Lowers_resize_and_remap_on_a_provable_fba()
     {
-        // `resize` (bool, in-place) / `remap` (?[]T) are deferred — their result is allocator-page-
-        // dependent — so they're a clear error, not a divergent guess. Use `realloc`.
+        // `a.resize(s, n)` → bool / `a.remap(s, n)` → ?[]T on a PROVABLE FixedBufferAllocator
+        // devirtualize to a direct `ZigAlloc.ResizeFba` / `RemapFba` over `&fba` (real zig's
+        // deterministic last-allocation logic — no vtable, no page dependency).
+        var cs = EmitZig(
+            "const std = @import(\"std\");\n" +
+            "fn run() !u8 {\n" +
+            "    var buffer: [64]u8 = undefined;\n" +
+            "    var fba = std.heap.FixedBufferAllocator.init(&buffer);\n" +
+            "    const a = fba.allocator();\n" +
+            "    var s = try a.alloc(u8, 4);\n" +
+            "    s = a.remap(s, 6) orelse return 2;\n" +
+            "    if (!a.resize(s, 3)) return 3;\n" +
+            "    return s[0];\n" +
+            "}\n" +
+            "pub fn main() u8 { return run() catch 1; }\n");
+        cs.ShouldContain("ZigAlloc.RemapFba<byte>(&fba,");    // remap → devirt'd (?[]u8, no vtable)
+        cs.ShouldContain("ZigAlloc.ResizeFba<byte>(&fba,");   // resize → devirt'd (bool, no vtable)
+    }
+
+    [Fact]
+    public void Rejects_resize_and_remap_on_the_page_dependent_paths()
+    {
+        // resize/remap stay a clear error on the C-heap default AND an opaque `std.mem.Allocator`:
+        // their in-place result is allocator-page-dependent (real zig answers from malloc_usable_size
+        // / page rounding), so a guess would diverge from the oracle — use `realloc` there.
         foreach (var method in new[] { "resize", "remap" })
         {
-            var ex = Should.Throw<CompileException>(() => EmitZig(
+            // C-heap default (devirtualizable but page-dependent).
+            var cheap = Should.Throw<CompileException>(() => EmitZig(
                 "const std = @import(\"std\");\n" +
                 "fn run() !u8 {\n" +
                 "    const a = std.heap.page_allocator;\n" +
@@ -2270,7 +2294,18 @@ public sealed class ZigFrontendTests
                 "    return s[0];\n" +
                 "}\n" +
                 "pub fn main() u8 { return run() catch 1; }\n"));
-            ex.Message.ShouldContain("deferred");
+            cheap.Message.ShouldContain("provable FixedBufferAllocator");
+
+            // An opaque `std.mem.Allocator` parameter (indirect dispatch).
+            var opaque_ = Should.Throw<CompileException>(() => EmitZig(
+                "const std = @import(\"std\");\n" +
+                "fn go(a: std.mem.Allocator) !u8 {\n" +
+                "    const s = try a.alloc(u8, 2);\n" +
+                "    _ = a." + method + "(s, 4);\n" +
+                "    return s[0];\n" +
+                "}\n" +
+                "pub fn main() u8 { return go(std.heap.page_allocator) catch 1; }\n"));
+            opaque_.Message.ShouldContain("provable FixedBufferAllocator");
         }
     }
 

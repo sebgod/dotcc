@@ -389,6 +389,23 @@ public sealed record DestroyCall(CExpr? Receiver, CExpr Ptr, CType Element, CExp
 /// Zig-lowering / C#-target only.</summary>
 public sealed record ReallocCall(CExpr? Receiver, CExpr OldSlice, CType Element, CExpr NewCount, int OomCode, CExpr? FbaCtx = null) : CExpr;
 
+/// <summary>A Zig allocator <c>a.resize(slice, n)</c> — in-place resize (no move), Zig's <c>bool</c>.
+/// <see cref="OldSlice"/> is the existing slice, <see cref="Element"/> its element type,
+/// <see cref="NewCount"/> the new element count. <see cref="CExpr.Type"/> is <c>_Bool</c> (the
+/// runtime <c>CBool</c>). Only the FBA-devirt fork is emitted: <see cref="FbaCtx"/> is non-null ⇒
+/// <c>ZigAlloc.ResizeFba&lt;T&gt;(&amp;fba, slice, n)</c>. The C-heap / opaque paths stay a loud
+/// deferred error at lowering (their in-place result is page-dependent), so <see cref="Receiver"/>
+/// is always null here. Zig-lowering / C#-target only.</summary>
+public sealed record ResizeCall(CExpr? Receiver, CExpr OldSlice, CType Element, CExpr NewCount, CExpr FbaCtx) : CExpr;
+
+/// <summary>A Zig allocator <c>a.remap(slice, n)</c> — resize-possibly-moving, Zig's <c>?[]T</c>
+/// (the resized slice, or null when it can't be honored). An FBA never moves, so remap IS resize:
+/// success returns the same pointer with the new length. <see cref="CExpr.Type"/> is
+/// <c>Optional(Slice(Element))</c>. Only the FBA-devirt fork is emitted (<see cref="FbaCtx"/>
+/// non-null ⇒ <c>ZigAlloc.RemapFba&lt;T&gt;(&amp;fba, slice, n)</c>); the C-heap / opaque paths stay
+/// a loud deferred error at lowering. Zig-lowering / C#-target only.</summary>
+public sealed record RemapCall(CExpr? Receiver, CExpr OldSlice, CType Element, CExpr NewCount, CExpr FbaCtx) : CExpr;
+
 /// <summary>A Zig tuple literal <c>.{ a, b, … }</c> (Milestone G), at a tuple sink or with an
 /// inferred type. <see cref="Elements"/> are the positional element expressions in order;
 /// <see cref="TupleType"/> is the <see cref="CType.Tuple"/> produced (and <see cref="CExpr.Type"/>).

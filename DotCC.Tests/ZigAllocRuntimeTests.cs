@@ -165,6 +165,84 @@ public sealed class ZigAllocRuntimeTests
     }
 
     [Fact]
+    public unsafe void Fba_resize_grows_and_shrinks_the_last_allocation_in_place()
+    {
+        byte* buf = stackalloc byte[64];
+        var fba = FixedBufferAllocator.Init(buf, 64);
+
+        var r = ZigAlloc.AllocFba<byte>(&fba, 4, Oom);
+        fba.EndIndex.ShouldBe(4UL);
+
+        // Grow the last allocation in place: succeeds, cursor advances, pointer is unchanged.
+        (ZigAlloc.ResizeFba(&fba, r.Value, 8) != 0).ShouldBeTrue();
+        fba.EndIndex.ShouldBe(8UL);
+
+        // Shrink the last allocation in place: succeeds, cursor rewinds.
+        (ZigAlloc.ResizeFba(&fba, new Slice<byte>(r.Value.Ptr, 8), 3) != 0).ShouldBeTrue();
+        fba.EndIndex.ShouldBe(3UL);
+    }
+
+    [Fact]
+    public unsafe void Fba_resize_of_a_non_last_block_only_shrinks()
+    {
+        byte* buf = stackalloc byte[64];
+        var fba = FixedBufferAllocator.Init(buf, 64);
+
+        var first = ZigAlloc.AllocFba<byte>(&fba, 4, Oom);
+        _ = ZigAlloc.AllocFba<byte>(&fba, 4, Oom);   // `first` is no longer the top of the bump stack
+        fba.EndIndex.ShouldBe(8UL);
+
+        // A non-last block can't grow (would collide with the block above it) — no cursor change.
+        (ZigAlloc.ResizeFba(&fba, first.Value, 6) != 0).ShouldBeFalse();
+        fba.EndIndex.ShouldBe(8UL);
+
+        // A non-last shrink is a no-op success (the freed tail can't be reclaimed mid-stack).
+        (ZigAlloc.ResizeFba(&fba, first.Value, 2) != 0).ShouldBeTrue();
+        fba.EndIndex.ShouldBe(8UL);
+    }
+
+    [Fact]
+    public unsafe void Fba_resize_grow_past_capacity_fails_without_advancing()
+    {
+        byte* buf = stackalloc byte[8];
+        var fba = FixedBufferAllocator.Init(buf, 8);
+
+        var r = ZigAlloc.AllocFba<byte>(&fba, 4, Oom);
+        (ZigAlloc.ResizeFba(&fba, r.Value, 100) != 0).ShouldBeFalse();   // 100 > 8 capacity
+        fba.EndIndex.ShouldBe(4UL);
+    }
+
+    [Fact]
+    public unsafe void Fba_remap_returns_the_same_pointer_on_success()
+    {
+        byte* buf = stackalloc byte[64];
+        var fba = FixedBufferAllocator.Init(buf, 64);
+
+        var r = ZigAlloc.AllocFba<byte>(&fba, 4, Oom);
+        r.Value[0] = 9;
+
+        // An FBA never moves, so a successful remap returns the SAME pointer with the new length.
+        var m = ZigAlloc.RemapFba(&fba, r.Value, 6);
+        m.HasValue.ShouldBeTrue();
+        ((nuint)m!.Value.Ptr).ShouldBe((nuint)r.Value.Ptr);
+        m.Value.Len.ShouldBe(6UL);
+        ((int)m.Value[0]).ShouldBe(9);   // the preserved prefix
+        fba.EndIndex.ShouldBe(6UL);
+    }
+
+    [Fact]
+    public unsafe void Fba_remap_returns_null_when_it_cannot_grow()
+    {
+        byte* buf = stackalloc byte[8];
+        var fba = FixedBufferAllocator.Init(buf, 8);
+
+        var r = ZigAlloc.AllocFba<byte>(&fba, 4, Oom);
+        var m = ZigAlloc.RemapFba(&fba, r.Value, 100);   // past the 8-byte buffer
+        m.HasValue.ShouldBeFalse();
+        fba.EndIndex.ShouldBe(4UL);                      // a failed remap must not advance the cursor
+    }
+
+    [Fact]
     public unsafe void Indirect_dispatch_through_the_materialized_c_heap_vtable()
     {
         // The materialized default allocator: dispatch goes through the vtable's alloc /
