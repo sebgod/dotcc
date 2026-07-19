@@ -479,15 +479,54 @@ internal sealed partial class ZigLowering
             throw new IrUnsupportedException(
                 $"call to type-returning generic '{templateSym.Name}': expected {info.Params.Count} type argument(s), got {argItems.Count}");
         }
-        // Resolve each comptime TYPE argument in the caller's env → seeds + mangle tokens. (DeclareFn
-        // guaranteed every parameter of a type-returning generic is a `comptime T: type`.)
-        var typeSeeds = new List<(string name, CType type)>(argItems.Count);
+        var inv = CultureInfo.InvariantCulture;
+        // Resolve each comptime argument (road-to-zig-std S4b widens W4's TYPE-only params): a TYPE arg →
+        // its resolved type; a VALUE arg → a comptime value; an OPTIONAL value arg → a comptime null /
+        // payload. Each contributes a mangle token, so the reified struct is keyed by the resolved args.
+        var typeSeeds = new List<(string name, CType type)>();
+        var valueSeeds = new List<(string name, long value, CType type)>();
+        var optionalSeeds = new List<(string name, bool hasValue, long value, CType inner)>();
         var mangleTokens = new List<string>(argItems.Count);
         for (var i = 0; i < info.Params.Count; i++)
         {
-            var argType = LowerType(argItems[i]).Unqualified;
-            typeSeeds.Add((info.Params[i].Name, argType));
-            mangleTokens.Add(MangleType(argType));
+            var p = info.Params[i];
+            if (p.Kind == ParamKind.ComptimeType)
+            {
+                var at = LowerType(argItems[i]).Unqualified;
+                typeSeeds.Add((p.Name, at));
+                mangleTokens.Add(MangleType(at));
+            }
+            else if (LowerType(p.TypeAst).Unqualified is CType.Optional optP)
+            {
+                // A comptime OPTIONAL value param `comptime x: ?T` — a comptime null or known payload.
+                if (IsComptimeNull(argItems[i]))
+                {
+                    mangleTokens.Add("optnull");
+                    optionalSeeds.Add((p.Name, false, 0, optP.Inner));
+                }
+                else
+                {
+                    if (_ir.ConstEval(LowerExpr(argItems[i])) is not { } ov)
+                    {
+                        throw new IrUnsupportedException(
+                            $"call to type-returning generic '{templateSym.Name}': the `comptime {p.Name}: ?T` argument "
+                            + "must be a comptime null or a compile-time-known payload");
+                    }
+                    mangleTokens.Add("opt" + (ov >= 0 ? ov.ToString(inv) : "n" + (-(System.Int128)ov).ToString(inv)));
+                    optionalSeeds.Add((p.Name, true, ov, optP.Inner));
+                }
+            }
+            else
+            {
+                if (_ir.ConstEval(LowerExpr(argItems[i])) is not { } vv)
+                {
+                    throw new IrUnsupportedException(
+                        $"call to type-returning generic '{templateSym.Name}': the `comptime {p.Name}` argument "
+                        + "must be a compile-time-known value");
+                }
+                mangleTokens.Add(vv >= 0 ? vv.ToString(inv) : "n" + (-(System.Int128)vv).ToString(inv));
+                valueSeeds.Add((p.Name, vv, LowerType(p.TypeAst)));
+            }
         }
         var mangled = mangleTokens.Count == 0 ? templateSym.Name : templateSym.Name + "__" + string.Join("_", mangleTokens);
 
@@ -495,32 +534,43 @@ internal sealed partial class ZigLowering
         // installed BELOW before the fields are lowered.
         if (_containerTypes.TryGetValue(mangled, out var existing)) { return existing; }
 
-        // Extract the returned struct's members from the single-`return struct {…}` body, splitting off
-        // (and rejecting) any method / const member — V1 is fields-only (like the W2 in-fn container).
-        var membersItem = TypeReturnedStructMembers(templateSym.Name, info.Body);
-        var (fields, methods, consts, containers) = membersItem is { } m
-            ? SplitMembers(m)
-            : (new List<Item>(), new List<Item>(), new List<Item>(), new List<Item>());
-        if (methods.Count > 0 || consts.Count > 0 || containers.Count > 0)
-        {
-            throw new IrUnsupportedException(
-                $"type-returning generic '{templateSym.Name}': the returned `struct` is fields-only in V1 (wall-plan W4) — "
-                + "a method, `const`, or nested-container member in the returned type is not supported yet");
-        }
-
-        // Seed the type params (shadow-saved) + point @This() at the in-progress type, reify, restore.
-        var typeShadows = new List<(string name, CType? prev)>(typeSeeds.Count);
-        foreach (var (name, type) in typeSeeds)
-        {
-            typeShadows.Add((name, _typeAliases.TryGetValue(name, out var pv) ? pv : (CType?)null));
-            _typeAliases[name] = type;
-        }
-        var savedContainer = _currentContainer;
         var mangledType = new CType.Named(mangled);
-        _containerTypes[mangled] = mangledType;   // memo + @This() target; BEFORE reify for self-ref
-        _currentContainer = mangled;
+        var savedContainer = _currentContainer;
+        var typeShadows = new List<(string name, CType? prev)>();
+        // A scope for the value/optional comptime seeds (so the body's captured-if conditions + array
+        // extents resolve); the type-param seeds ride _typeAliases (shadow-saved), like the W4 path.
+        _symbols.EnterScope();
         try
         {
+            foreach (var (name, type) in typeSeeds)
+            {
+                typeShadows.Add((name, _typeAliases.TryGetValue(name, out var pv) ? pv : (CType?)null));
+                _typeAliases[name] = type;
+            }
+            foreach (var (name, value, type) in valueSeeds)
+            {
+                var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type });
+                _comptimeVars[sym] = (value, type);
+            }
+            foreach (var (name, hasValue, value, inner) in optionalSeeds)
+            {
+                var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = new CType.Optional(inner) });
+                _comptimeOptionalVars[sym] = (hasValue, value, inner);
+            }
+            // Process the body: leading `const NAME = <type>;` locals become scoped type aliases (the RHS
+            // may be a captured-if that folds to a type — S4b pt2 / S4c), then the final `return struct {…}`.
+            var fieldsItem = ProcessTypeReturningBody(templateSym.Name, info.Body, typeShadows);
+            var (fields, methods, consts, containers) = fieldsItem is { } m
+                ? SplitMembers(m)
+                : (new List<Item>(), new List<Item>(), new List<Item>(), new List<Item>());
+            if (methods.Count > 0 || consts.Count > 0 || containers.Count > 0)
+            {
+                throw new IrUnsupportedException(
+                    $"type-returning generic '{templateSym.Name}': the returned `struct` is fields-only in V1 (wall-plan W4) — "
+                    + "a method, `const`, or nested-container member in the returned type is not supported yet");
+            }
+            _containerTypes[mangled] = mangledType;   // memo + @This() target; BEFORE reify for self-ref
+            _currentContainer = mangled;
             RegisterStruct(mangled, fields);
         }
         finally
@@ -531,35 +581,73 @@ internal sealed partial class ZigLowering
                 var (name, prev) = typeShadows[i];
                 if (prev is { } p) { _typeAliases[name] = p; } else { _typeAliases.Remove(name); }
             }
+            _symbols.ExitScope();
         }
         return mangledType;
     }
 
-    /// <summary>Extract the member list of a type-returning generic's returned <c>struct {…}</c>
-    /// (wall-plan W4). V1 requires the body to be a SINGLE <c>return struct {…};</c> — a
-    /// <see cref="Zig.ReturnStructType"/> (its <c>FieldDecls</c>) or an empty
-    /// <see cref="Zig.ReturnStructTypeEmpty"/> (returns null → zero fields). Any other body (a non-struct
-    /// return, extra statements, control flow) is a loud cut.</summary>
-    private Item? TypeReturnedStructMembers(string fnName, Item body)
+    /// <summary>Process a type-returning generic's body (wall-plan W4, extended by road-to-zig-std S4c):
+    /// zero or more leading <c>const NAME = &lt;type&gt;;</c> type-alias locals followed by the final
+    /// <c>return struct {…};</c>. Each leading alias is resolved to a <see cref="CType"/> (its RHS may be a
+    /// captured-<c>if</c> that folds to a type — <see cref="ResolveTypeReturningAliasRhs"/>) and registered
+    /// into <see cref="_typeAliases"/> (shadow-saved via <paramref name="typeShadows"/>, restored by the
+    /// caller), so a later alias / a field type can reference it. Returns the returned struct's
+    /// <c>FieldDecls</c> item (or null for <c>return struct {};</c>). A non-const leading statement, a
+    /// non-<c>return struct</c> tail, or an empty body is a loud cut.</summary>
+    private Item? ProcessTypeReturningBody(string fnName, Item body, List<(string name, CType? prev)> typeShadows)
     {
         IReadOnlyList<Item> stmts = body.Content switch
         {
             Zig.Block b => Flatten(b.Arg1),
             _ => System.Array.Empty<Item>(),
         };
-        if (stmts.Count != 1)
+        if (stmts.Count == 0)
         {
             throw new IrUnsupportedException(
-                $"type-returning generic '{fnName}': V1 supports a single `return struct {{ … }};` body (wall-plan W4) — "
-                + "extra statements / control flow (a comptime `if (T == …)` branch) are not supported yet");
+                $"type-returning generic '{fnName}': an empty body — expected `[const NAME = <type>;]* return struct {{…}};`");
         }
-        return stmts[0].Content switch
+        for (var i = 0; i < stmts.Count - 1; i++)
+        {
+            if (stmts[i].Content is not Zig.ConstDecl cd)
+            {
+                throw new IrUnsupportedException(
+                    $"type-returning generic '{fnName}': a leading body statement must be a `const NAME = <type>;` "
+                    + $"type alias (road-to-zig-std S4c) — got {stmts[i].Content?.GetType().Name ?? "null"}");
+            }
+            var aliasName = Tok(cd.Arg1);
+            var aliasType = ResolveTypeReturningAliasRhs(fnName, aliasName, cd.Arg3);
+            typeShadows.Add((aliasName, _typeAliases.TryGetValue(aliasName, out var pv) ? pv : (CType?)null));
+            _typeAliases[aliasName] = aliasType;
+        }
+        return stmts[^1].Content switch
         {
             Zig.ReturnStructType rst => rst.Arg3,   // FieldDecls
             Zig.ReturnStructTypeEmpty => null,       // `return struct {};` — zero fields
             _ => throw new IrUnsupportedException(
-                $"type-returning generic '{fnName}': V1's body must be `return struct {{ … }};` (wall-plan W4) — "
-                + "returning a non-struct type (a bare `T`, an enum / union, a type-former) is not supported yet"),
+                $"type-returning generic '{fnName}': the body's final statement must be `return struct {{ … }};` "
+                + "(wall-plan W4) — returning a non-struct type (a bare `T`, an enum / union) is not supported yet"),
         };
+    }
+
+    /// <summary>Resolve a type-returning body's <c>const NAME = &lt;rhs&gt;;</c> alias RHS to a
+    /// <see cref="CType"/> (road-to-zig-std S4b pt2). A captured-<c>if</c> on a comptime-known optional
+    /// (<c>if (opt) |x| TypeA else TypeB</c>) FOLDS to the taken branch's type — <c>null</c> → the else,
+    /// a payload → the then with <c>x</c> bound to the literal; the branch is lowered as a TYPE. Any other
+    /// RHS is lowered as an ordinary type expression. This is how <c>std.ArrayList</c>'s
+    /// <c>Aligned(T, alignment)</c> selects <c>const Slice = if (alignment) |a| …align(a)… else []T;</c>.</summary>
+    private CType ResolveTypeReturningAliasRhs(string fnName, string aliasName, Item rhs)
+    {
+        var cur = rhs;
+        while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
+        if (cur.Content is Zig.IfExprCapture ic && TryComptimeOptionalCond(ic.Arg2, out var copt))
+        {
+            if (!copt.HasValue) { return LowerType(ic.Arg9); }   // comptime null → the else-branch type
+            _symbols.EnterScope();
+            BindFoldedCapture(Tok(ic.Arg5), copt.Value, copt.Inner);
+            var t = LowerType(ic.Arg7);                          // payload → the then-branch type, `x` bound
+            _symbols.ExitScope();
+            return t;
+        }
+        return LowerType(rhs);
     }
 }

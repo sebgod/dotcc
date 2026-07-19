@@ -45,11 +45,12 @@ internal sealed partial class ZigLowering
                 throw new IrUnsupportedException(
                     $"function '{Tok(nameTok)}': a `type`-returning method is not supported yet (wall-plan W4 is free functions only)");
             }
-            if (allParams.Any(p => p.Kind != ParamKind.ComptimeType))
+            if (allParams.Any(p => p.Kind is ParamKind.Runtime or ParamKind.AnyType))
             {
                 throw new IrUnsupportedException(
-                    $"function '{Tok(nameTok)}': a `type`-returning function's parameters must all be `comptime T: type` "
-                    + "in V1 (wall-plan W4) — a runtime or `comptime`-VALUE parameter is not supported yet");
+                    $"function '{Tok(nameTok)}': a `type`-returning function's parameters must be `comptime` "
+                    + "(a `comptime T: type` or a `comptime x: V` value/optional param; road-to-zig-std S4b) — "
+                    + "a runtime or `anytype` parameter is not supported");
             }
             var tRet = _symbols.Declare(new Symbol
             {

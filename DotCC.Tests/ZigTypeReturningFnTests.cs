@@ -124,4 +124,48 @@ public sealed class ZigTypeReturningFnTests
             """));
         ex.Message.ShouldContain("comptime");
     }
+
+    [Fact]
+    public void Type_returning_generic_folds_a_captured_if_to_a_type_in_a_multi_statement_body()
+    {
+        // road-to-zig-std S4b pt2 + S4c — a type-returning generic with a comptime `?T` param whose
+        // MULTI-statement body computes a type via a captured-`if` fold, then returns a struct using it.
+        // The `Aligned(T, alignment)` `const Slice = if (alignment) |a| … else []T;` shape.
+        var cs = EmitZig("""
+            fn Store(comptime T: type, comptime cap: ?u8) type {
+                const Slice = if (cap) |n| [n]T else []T;
+                return struct { data: Slice, len: usize };
+            }
+            pub fn main() u8 {
+                var a: Store(u8, 3) = undefined;
+                a.data[0] = 42; a.len = 1;
+                return a.data[0];
+            }
+            """);
+        cs.ShouldContain("Store__u8_opt3");   // instance keyed by the resolved type + comptime optional payload
+        // The `const Slice = if (cap) |n| [n]T else []T` folded to `[3]u8` (a fixed-buffer field), not a
+        // slice — the payload branch was taken with n bound to 3.
+        cs.ShouldContain("fixed byte data[3]");    // the then (fixed-array) branch
+        cs.ShouldNotContain("Slice<byte> data");   // NOT the else (slice) branch for the payload instance
+    }
+
+    [Fact]
+    public void Type_returning_generic_folds_a_null_optional_to_the_else_type()
+    {
+        // The `null` argument selects the else-branch type (`[]T` → a Slice field) — the std.ArrayList
+        // `Aligned(T, null)` path.
+        var cs = EmitZig("""
+            fn Store(comptime T: type, comptime cap: ?u8) type {
+                const Slice = if (cap) |n| [n]T else []T;
+                return struct { data: Slice, len: usize };
+            }
+            pub fn main() u8 {
+                var buf = [_]u8{ 42, 0 };
+                const s: Store(u8, null) = .{ .data = &buf, .len = 2 };
+                return s.data[0];
+            }
+            """);
+        cs.ShouldContain("Store__u8_optnull");
+        cs.ShouldContain("Slice<byte> data");   // the else (slice) branch was folded for `null`
+    }
 }
