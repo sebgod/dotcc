@@ -56,6 +56,11 @@ public sealed class ZigOracleTests
             "pub fn main() u8 { const x: u8 = 40; const y: u8 = if (x > 10) x else 0; return y + 2; }\n", 42, "" },
         new object[] { "if_stmt",
             "pub fn main() u8 { var x: u8 = 0; if (3 > 2) { x = 42; } else { x = 1; } return x; }\n", 42, "" },
+        // if_capture_expr — a VALUE-position captured if `if (opt) |x| thenE else elseE` (S4a). Binds
+        // the payload in the then-branch; the null path takes the else. pick(41)=42, pick(null)=0 → 42.
+        new object[] { "if_capture_expr",
+            "fn pick(opt: ?u8) u8 { return if (opt) |x| x + 1 else 0; }\n" +
+            "pub fn main() u8 { return pick(41) + pick(null); }\n", 42, "" },
         new object[] { "while_sum",
             "pub fn main() u8 { var i: u8 = 0; var sum: u8 = 0; while (i < 5) { sum = sum + i; i = i + 1; } return sum; }\n", 10, "" },
         new object[] { "bitnot",

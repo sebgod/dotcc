@@ -771,6 +771,11 @@ productions:
   - derivation: none
     rules:
       - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', RhsExpr, 'else', RhsExpr], action: ifExpr }
+      # Value-position captured `if` — `if (opt) |x| thenExpr else elseExpr` (S4a). The `|` after the
+      # `)` cannot start a RhsExpr (it is only an infix bitwise-or), so this is conflict-free with the
+      # plain ifExpr above. `else` is mandatory (an expression yields a value on both paths). Mirrors
+      # the statement forms `stmtIfCapture*`; the optional/pointer payload binds `x` in the then-branch.
+      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', RhsExpr, 'else', RhsExpr], action: ifExprCapture }
       - { lhs: SwitchExpr, rhs: ['switch', '(', Expr, ')', '{', Prongs, '}'],      action: switchExpr }
       - { lhs: SwitchExpr, rhs: ['switch', '(', Expr, ')', '{', Prongs, ',', '}'], action: switchExprTrailing }
       - { lhs: LabeledBlock, rhs: [IDENT, ':', Block], action: labeledBlock }

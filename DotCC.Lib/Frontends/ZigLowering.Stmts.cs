@@ -1276,6 +1276,85 @@ internal sealed partial class ZigLowering
         return ifStmt;
     }
 
+    /// <summary>Lower a VALUE-position captured <c>if</c> — <c>if (opt) |x| thenE else elseE</c> (S4a),
+    /// the expression sibling of <see cref="LowerIfCapture"/>. A pure ternary can't bind the payload
+    /// <c>x</c>, so this hoists (ANF): a result temp is declared before the enclosing statement and
+    /// assigned by a real <c>if</c> whose then-branch binds <c>x = opt.Value</c> (or the unwrapped
+    /// pointer). <c>else</c> is mandatory (the grammar requires it — a value is yielded on both paths).
+    /// The optional / optional-pointer forms mirror <see cref="LowerIfCapture"/>; an error-union value
+    /// <c>if</c> is a separate (later) shape. Like the value <c>IfExpr</c> ternary, the branch
+    /// expressions are lowered as values (a side-effecting sub-expression that itself hoists would be a
+    /// shared latent limitation — the common case is pure branches / a comptime-known optional).</summary>
+    private CExpr LowerIfCaptureExpr(Item condItem, string capName, Item thenItem, Item elseItem)
+    {
+        var buf = RequireHoistable("value `if (opt) |x| … else …`");
+        var savedImpure = _hoistImpureSeen;
+
+        var cond = LowerExpr(condItem);
+        var ct = cond.Type.Unqualified;
+
+        // Single-eval the condition (a bare var is already re-readable; anything else binds to a temp).
+        CExpr condRef;
+        if (cond is VarRef)
+        {
+            condRef = cond;
+        }
+        else
+        {
+            var ctmp = _symbols.Declare(new Symbol { Name = "__ifcapc" + _anfTempCounter++, Kind = SymKind.Var, Type = cond.Type });
+            buf.Add(new DeclStmt(new List<LocalDecl> { new(ctmp, cond) }));
+            condRef = new VarRef(ctmp) { Type = cond.Type, IsLValue = true };
+        }
+
+        CExpr test;
+        CExpr payloadInit;
+        CType payloadType;
+        if (ct is CType.Optional opt)
+        {
+            test = new Member(condRef, "HasValue", false) { Type = CType.Bool };
+            payloadInit = new Member(condRef, "Value", false) { Type = opt.Inner };
+            payloadType = opt.Inner;
+        }
+        else if (ct is CType.Pointer)
+        {
+            test = condRef;          // Cond.B(void*) tests non-null
+            payloadInit = condRef;   // the unwrapped pointer is the same value
+            payloadType = cond.Type;
+        }
+        else
+        {
+            throw new IrUnsupportedException(
+                "zig value-position `if (...) |x| ... else ...` requires an optional or optional-pointer condition");
+        }
+
+        // then-branch: bind the payload to `x`, then lower the then value (which may use `x`).
+        var thenStmts = new List<CStmt>();
+        _symbols.EnterScope();
+        if (capName != "_")
+        {
+            var capSym = _symbols.Declare(new Symbol { Name = capName, Kind = SymKind.Var, Type = payloadType });
+            thenStmts.Add(new DeclStmt(new List<LocalDecl> { new(capSym, payloadInit) }));
+        }
+        var thenVal = LowerExpr(thenItem);
+        _symbols.ExitScope();
+
+        var elseVal = LowerExpr(elseItem);
+        var resultType = thenVal.Type;
+
+        // A result temp (declared before the statement), assigned by each branch of a real `if`.
+        var resSym = _symbols.Declare(new Symbol { Name = "__ifcap" + _anfTempCounter++, Kind = SymKind.Var, Type = resultType });
+        _hoistImpureSeen = savedImpure;   // the construct's internals are sequenced into the buffer
+        buf.Add(new DeclStmt(new List<LocalDecl> { new(resSym, new DefaultLit { Type = resultType }) }));
+        var resRef = new VarRef(resSym) { Type = resultType, IsLValue = true };
+        thenStmts.Add(new ExprStmt(new Assign(null, resRef, thenVal) { Type = resultType }));
+        var elseBlock = new Block(new List<CStmt>
+        {
+            new ExprStmt(new Assign(null, resRef, elseVal) { Type = resultType }),
+        });
+        buf.Add(new If(test, new Block(thenStmts), elseBlock));
+        return new VarRef(resSym) { Type = resultType };
+    }
+
     /// <summary>Lower an optional capture-<c>while</c> <c>while (opt) |x| body</c> (Milestone M, part
     /// 2). The condition is re-evaluated EACH iteration (it commonly advances an iterator), so it lives
     /// inside the loop body — a fresh <c>__cap</c> per turn. When it yields a payload, bind <c>x</c> and
