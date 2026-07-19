@@ -963,6 +963,30 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_a_value_position_captured_if_over_an_optional()
+    {
+        // `const v = if (opt) |x| thenE else elseE;` (S4a) — a captured if in VALUE position can't be a
+        // pure ternary (it binds `x`), so it hoists to a result temp assigned by a real `if` whose
+        // then-branch binds `x = opt.Value`.
+        var cs = EmitZig(
+            "fn pick(opt: ?u8) u8 { const v = if (opt) |x| x + 1 else 0; return v; }\n" +
+            "pub fn main() u8 { return pick(41); }\n");
+        cs.ShouldContain(".HasValue");                 // the optional test
+        cs.ShouldContain("__ifcap");                   // the hoisted result temp
+        cs.ShouldContain(".Value");                    // the payload bind (x = opt.Value)
+    }
+
+    [Fact]
+    public void Rejects_a_value_position_captured_if_on_a_non_optional()
+    {
+        // Like the statement form, the value-position captured if requires an optional (or optional
+        // pointer) condition — an integer condition is a clear error.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 { const v = if (@as(u8, 1)) |x| x else 0; return v; }\n"));
+        ex.Message.ShouldContain("optional");
+    }
+
+    [Fact]
     public void Lowers_a_function_call_including_forward_reference()
     {
         // main calls add, which is defined AFTER it — the two-pass lowering declares
