@@ -373,6 +373,40 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_overflow_tuple_builtins()
+    {
+        // @addWithOverflow/@subWithOverflow/@mulWithOverflow/@shlWithOverflow (road-to-zig-std B3) →
+        // `ZigMath.<helper><T>` returning Zig's `struct { T, u1 }` as a `(T, byte)` ValueTuple, so the
+        // result destructures (`const r, const o = …`) and indexes (`t[1]`) through the tuple path.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const r1, const o1 = @addWithOverflow(@as(u8, 200), 100);\n" +
+            "    const sub = @subWithOverflow(@as(u8, 5), 10);\n" +
+            "    const mul = @mulWithOverflow(@as(u8, 20), 20);\n" +
+            "    const shl = @shlWithOverflow(@as(u8, 3), 7);\n" +
+            "    const flags: u8 = @as(u8, o1) + @as(u8, sub[1]) + @as(u8, mul[1]) + @as(u8, shl[1]);\n" +
+            "    return r1 + flags;\n" +
+            "}\n");
+        cs.ShouldContain("ZigMath.AddWithOverflow(");
+        cs.ShouldContain("ZigMath.SubWithOverflow(");
+        cs.ShouldContain("ZigMath.MulWithOverflow(");
+        cs.ShouldContain("ZigMath.ShlWithOverflow(");
+    }
+
+    [Fact]
+    public void Rejects_overflow_builtin_on_a_128_bit_operand()
+    {
+        // The overflow flag is derived in a 128-bit accumulator, so a 128-bit operation can't have its
+        // overflow detected — a clear cut rather than a silently-wrong flag.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const r = @addWithOverflow(@as(u128, 3), 4);\n" +
+            "    return @intCast(r[0]);\n" +
+            "}\n"));
+        ex.Message.ShouldContain("128-bit operand");
+    }
+
+    [Fact]
     public void Lazy_import_lowers_only_referenced_decls()
     {
         // `util` has a good `add` and a `broken` that (if lowered) calls an undefined function. `main`
@@ -2477,8 +2511,10 @@ public sealed class ZigFrontendTests
             "pub fn main() u8 { const a, const b = .{ @as(u8, 4), @as(u8, 6) }; return a + b; }\n");
         cs.ShouldContain("byte a = (byte)4;");
         cs.ShouldContain("byte b = (byte)6;");
-        cs.ShouldNotContain("__tup");          // no snapshot temp for a literal RHS
-        cs.ShouldNotContain("ValueTuple");     // no tuple value constructed at all
+        cs.ShouldNotContain("__tup");                   // no snapshot temp for a literal RHS
+        cs.ShouldNotContain("new System.ValueTuple");   // no tuple value constructed at all (the spliced
+                                                        // runtime mentions "ValueTuple" in doc comments, so
+                                                        // assert against the CONSTRUCTION, not the substring)
     }
 
     [Fact]

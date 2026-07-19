@@ -154,6 +154,20 @@ public sealed class ZigOracleTests
             "    const a2: u32 = @abs(@as(i32, -100));\n" +
             "    return @intCast((bs & 0xFF) + a1 + a2 - 100);\n" +
             "}\n", 6, "" },
+        // overflow_builtins — @addWithOverflow/@subWithOverflow/@mulWithOverflow/@shlWithOverflow
+        // (road-to-zig-std B3) return `struct { T, u1 }`, destructured (`const r1, const o1 = …`) or
+        // indexed (`t[1]`). u8: 200+100 -> .{44,1}; 5-10 -> .{251,1}; 20*20 -> .{144,1};
+        // 3<<7=384 -> .{128,1}; i8: 100+100 -> .{-56,1}. flags = 1+1+1+1 (=4) + signed 1 = 5; 44+5 = 49.
+        new object[] { "overflow_builtins",
+            "pub fn main() u8 {\n" +
+            "    const r1, const o1 = @addWithOverflow(@as(u8, 200), 100);\n" +
+            "    const sub = @subWithOverflow(@as(u8, 5), 10);\n" +
+            "    const mul = @mulWithOverflow(@as(u8, 20), 20);\n" +
+            "    const shl = @shlWithOverflow(@as(u8, 3), 7);\n" +
+            "    const sadd = @addWithOverflow(@as(i8, 100), 100);\n" +
+            "    const flags: u8 = @as(u8, o1) + @as(u8, sub[1]) + @as(u8, mul[1]) + @as(u8, shl[1]) + @as(u8, sadd[1]);\n" +
+            "    return r1 + flags;\n" +
+            "}\n", 49, "" },
         // A function CALL — main invokes a named function with arguments.
         new object[] { "call",
             "fn add(a: u8, b: u8) u8 { return a + b; }\npub fn main() u8 { return add(40, 2); }\n", 42, "" },
