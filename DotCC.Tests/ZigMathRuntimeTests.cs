@@ -85,4 +85,49 @@ public sealed class ZigMathRuntimeTests
         ZigMath.SatMul<long>(long.MinValue, -1).ShouldBe(long.MaxValue);
         ZigMath.SatMul<sbyte>(7, 6).ShouldBe((sbyte)42); // no saturation
     }
+
+    // ---- overflow-detecting arithmetic: (wrapped, 0/1 flag) — Zig's `struct { T, u1 }` ----
+
+    [Fact]
+    public void AddWithOverflow_reports_the_wrapped_result_and_flag()
+    {
+        var (r, o) = ZigMath.AddWithOverflow<byte>(200, 100);
+        r.ShouldBe((byte)44); o.ShouldBe((byte)1);              // 300 wraps to 44
+        var (r2, o2) = ZigMath.AddWithOverflow<byte>(5, 10);
+        r2.ShouldBe((byte)15); o2.ShouldBe((byte)0);            // no overflow
+        var (rs, os) = ZigMath.AddWithOverflow<sbyte>(100, 100);
+        rs.ShouldBe((sbyte)-56); os.ShouldBe((byte)1);          // 200 wraps to -56 (signed)
+    }
+
+    [Fact]
+    public void SubWithOverflow_uses_the_signed_accumulator_for_an_unsigned_borrow()
+    {
+        var (r, o) = ZigMath.SubWithOverflow<byte>(5, 10);
+        r.ShouldBe((byte)251); o.ShouldBe((byte)1);             // -5 wraps to 251
+        var (r2, o2) = ZigMath.SubWithOverflow<byte>(200, 100);
+        r2.ShouldBe((byte)100); o2.ShouldBe((byte)0);
+        var (rs, os) = ZigMath.SubWithOverflow<sbyte>(-100, 100);
+        rs.ShouldBe((sbyte)56); os.ShouldBe((byte)1);           // -200 wraps to 56
+    }
+
+    [Fact]
+    public void MulWithOverflow_reports_the_low_bits_and_flag()
+    {
+        var (r, o) = ZigMath.MulWithOverflow<byte>(20, 20);
+        r.ShouldBe((byte)144); o.ShouldBe((byte)1);             // 400 & 0xFF
+        var (r2, o2) = ZigMath.MulWithOverflow<byte>(6, 7);
+        r2.ShouldBe((byte)42); o2.ShouldBe((byte)0);
+        // usize (u64): the 128-bit accumulator still captures the true product exactly.
+        var (ru, ou) = ZigMath.MulWithOverflow<ulong>(ulong.MaxValue, 2);
+        ru.ShouldBe(ulong.MaxValue - 1); ou.ShouldBe((byte)1);
+    }
+
+    [Fact]
+    public void ShlWithOverflow_sets_the_flag_when_high_bits_are_lost()
+    {
+        var (r, o) = ZigMath.ShlWithOverflow<byte>(1, 7);
+        r.ShouldBe((byte)128); o.ShouldBe((byte)0);             // 1<<7 = 128 fits in u8
+        var (r2, o2) = ZigMath.ShlWithOverflow<byte>(3, 7);
+        r2.ShouldBe((byte)128); o2.ShouldBe((byte)1);           // 384 -> 128, a set bit shifted out
+    }
 }

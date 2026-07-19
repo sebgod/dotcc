@@ -6,8 +6,11 @@ namespace DotCC.Libc;
 
 /// <summary>
 /// The runtime backing for the Zig front-end's SATURATING arithmetic operators
-/// (<c>+| -| *|</c> and their compound forms <c>+|= -|= *|=</c>; Milestone P, part 2).
-/// Auto-spliced into every emitted program (the <c>DotCC.Libc/*.cs</c>
+/// (<c>+| -| *|</c> and their compound forms <c>+|= -|= *|=</c>; Milestone P, part 2), the
+/// integer math builtins (<c>@min</c>/<c>@max</c>/<c>@rem</c>/<c>@divTrunc</c>/<c>@mod</c>/
+/// <c>@divFloor</c>/<c>@popCount</c>/<c>@clz</c>/<c>@ctz</c>/<c>@byteSwap</c>/<c>@abs</c>), and the
+/// overflow-detecting builtins (<c>@addWithOverflow</c>/<c>@subWithOverflow</c>/<c>@mulWithOverflow</c>/
+/// <c>@shlWithOverflow</c>; road-to-zig-std B3). Auto-spliced into every emitted program (the <c>DotCC.Libc/*.cs</c>
 /// <c>&lt;EmbeddedResource&gt;</c> glob) and compiled into <c>DotCC.Libc.dll</c> for the unit
 /// tests, exactly like <see cref="Slice{T}"/> / <see cref="ErrUnion{T}"/> / the allocator types.
 /// </summary>
@@ -62,6 +65,45 @@ public static class ZigMath
         => T.IsNegative(T.MinValue)
             ? ClampSigned<T>(System.Int128.CreateTruncating(a) * System.Int128.CreateTruncating(b))
             : ClampUnsigned<T>(System.UInt128.CreateTruncating(a) * System.UInt128.CreateTruncating(b));
+
+    // ---- Overflow-detecting arithmetic (road-to-zig-std B3) — @addWithOverflow & friends.
+    // Each returns Zig's `struct { T, u1 }` as a C# `(T, byte)` ValueTuple: the WRAPPED result
+    // (truncated to T, exactly like `+%`/`-%`/`*%`) plus a 0/1 overflow flag. Computed EXACTLY in a
+    // 128-bit accumulator — every operand the lowering routes here is <= 64-bit (a 128-bit operand is
+    // a loud cut, since detecting its overflow would need a still-wider accumulator) — then the flag
+    // is set when truncating the exact result back to T changed the value. Signedness is the
+    // per-instantiation constant `T.IsNegative(T.MinValue)` (the JIT folds the dead branch), and
+    // subtraction always uses the signed accumulator (an unsigned difference can go negative, e.g.
+    // `u8: 5 -% 10`) — mirroring the saturating helpers above.
+
+    /// <summary><c>@addWithOverflow(a, b)</c> → <c>.{ a +% b, overflow }</c>.</summary>
+    public static (T, byte) AddWithOverflow<T>(T a, T b)
+        where T : System.Numerics.IBinaryInteger<T>, System.Numerics.IMinMaxValue<T>
+        => T.IsNegative(T.MinValue)
+            ? OverflowSigned<T>(System.Int128.CreateTruncating(a) + System.Int128.CreateTruncating(b))
+            : OverflowUnsigned<T>(System.UInt128.CreateTruncating(a) + System.UInt128.CreateTruncating(b));
+
+    /// <summary><c>@subWithOverflow(a, b)</c> → <c>.{ a -% b, overflow }</c>. Always the signed
+    /// accumulator (the difference can be negative even for an unsigned <typeparamref name="T"/>).</summary>
+    public static (T, byte) SubWithOverflow<T>(T a, T b)
+        where T : System.Numerics.IBinaryInteger<T>, System.Numerics.IMinMaxValue<T>
+        => OverflowSigned<T>(System.Int128.CreateTruncating(a) - System.Int128.CreateTruncating(b));
+
+    /// <summary><c>@mulWithOverflow(a, b)</c> → <c>.{ a *% b, overflow }</c>.</summary>
+    public static (T, byte) MulWithOverflow<T>(T a, T b)
+        where T : System.Numerics.IBinaryInteger<T>, System.Numerics.IMinMaxValue<T>
+        => T.IsNegative(T.MinValue)
+            ? OverflowSigned<T>(System.Int128.CreateTruncating(a) * System.Int128.CreateTruncating(b))
+            : OverflowUnsigned<T>(System.UInt128.CreateTruncating(a) * System.UInt128.CreateTruncating(b));
+
+    /// <summary><c>@shlWithOverflow(a, shift)</c> → <c>.{ a &lt;&lt;% shift, overflow }</c>; the overflow
+    /// bit is set when the shift loses any high bits (truncating the exact 128-bit shift changed the
+    /// value). The shift amount is a small non-negative count (Zig's <c>Log2(T)</c>).</summary>
+    public static (T, byte) ShlWithOverflow<T>(T a, int shift)
+        where T : System.Numerics.IBinaryInteger<T>, System.Numerics.IMinMaxValue<T>
+        => T.IsNegative(T.MinValue)
+            ? OverflowSigned<T>(System.Int128.CreateTruncating(a) << shift)
+            : OverflowUnsigned<T>(System.UInt128.CreateTruncating(a) << shift);
 
     // ---- Zig math builtins (road-to-zig-std B3) — each maps to a BCL/generic-math primitive.
     // The Zig front-end coerces both operands to their peer integer type, so C# infers T and the
@@ -171,5 +213,25 @@ public static class ZigMath
     {
         var hi = System.UInt128.CreateTruncating(T.MaxValue);
         return wide > hi ? T.MaxValue : T.CreateTruncating(wide);
+    }
+
+    /// <summary>Truncate an exact SIGNED 128-bit result to <typeparamref name="T"/> and pair it with a
+    /// 0/1 overflow flag — set when widening the truncated value back doesn't recover the exact result
+    /// (i.e. bits were lost). Used for every signed op, all subtraction, and unsigned results carried
+    /// through the signed accumulator.</summary>
+    private static (T, byte) OverflowSigned<T>(System.Int128 wide)
+        where T : System.Numerics.IBinaryInteger<T>
+    {
+        T wrapped = T.CreateTruncating(wide);
+        return (wrapped, System.Int128.CreateTruncating(wrapped) != wide ? (byte)1 : (byte)0);
+    }
+
+    /// <summary>Truncate an exact UNSIGNED 128-bit result to <typeparamref name="T"/> and pair it with a
+    /// 0/1 overflow flag (set when truncation lost bits). Used for unsigned add/mul/shl.</summary>
+    private static (T, byte) OverflowUnsigned<T>(System.UInt128 wide)
+        where T : System.Numerics.IBinaryInteger<T>
+    {
+        T wrapped = T.CreateTruncating(wide);
+        return (wrapped, System.UInt128.CreateTruncating(wrapped) != wide ? (byte)1 : (byte)0);
     }
 }
