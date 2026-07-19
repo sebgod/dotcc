@@ -1170,6 +1170,19 @@ internal sealed partial class ZigLowering
 
     private CStmt LowerIfCapture(Item condItem, string capName, Item thenItem, Item? elseItem, string? errCapName)
     {
+        // Comptime fold (S4b): a captured `if` on a comptime-known optional (a `comptime x: ?T` seed)
+        // selects the taken branch at lowering time. `null` → the else (empty if absent); a known payload
+        // → the then with `x` bound to the literal. Only for the plain optional form (no `else |e|`).
+        if (errCapName is null && TryComptimeOptionalCond(condItem, out var copt))
+        {
+            if (!copt.HasValue) { return elseItem is { } el ? LowerStmt(el) : new Seq(new List<CStmt>()); }
+            _symbols.EnterScope();
+            BindFoldedCapture(capName, copt.Value, copt.Inner);
+            var folded = LowerStmt(thenItem);
+            _symbols.ExitScope();
+            return folded;
+        }
+
         var cond = LowerExpr(condItem);
         var ct = cond.Type.Unqualified;
 
@@ -1285,8 +1298,52 @@ internal sealed partial class ZigLowering
     /// <c>if</c> is a separate (later) shape. Like the value <c>IfExpr</c> ternary, the branch
     /// expressions are lowered as values (a side-effecting sub-expression that itself hoists would be a
     /// shared latent limitation — the common case is pure branches / a comptime-known optional).</summary>
+    /// <summary>True when a captured-<c>if</c> condition is a comptime-known OPTIONAL — a bare identifier
+    /// (optionally parenthesized) resolving to a <c>comptime x: ?T</c> generic seed in
+    /// <see cref="_comptimeOptionalVars"/>. Yields the seed (<c>HasValue</c> / payload <c>Value</c> /
+    /// <c>Inner</c> type) so <see cref="LowerIfCapture"/> / <see cref="LowerIfCaptureExpr"/> can fold to
+    /// the taken branch at lowering time (road-to-zig-std S4b).</summary>
+    private bool TryComptimeOptionalCond(Item condItem, out (bool HasValue, long Value, CType Inner) info)
+    {
+        info = default;
+        var cur = condItem;
+        while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
+        return cur.Content is Zig.Ident id
+            && _symbols.Resolve(Tok(id.Arg0)) is { } sym
+            && _comptimeOptionalVars.TryGetValue(sym, out info);
+    }
+
+    /// <summary>Bind a folded captured-<c>if</c> payload <paramref name="capName"/> to its comptime
+    /// literal for the taken then-branch (road-to-zig-std S4b). A narrow UNSIGNED inner type
+    /// (<c>u8</c>/<c>u16</c>) is bound as <c>int</c> so the folded literal renders as a bare <c>N</c>
+    /// (the value always fits) rather than <c>Nu</c> — a <c>uint</c> literal would not implicitly assign
+    /// to a <c>byte</c>/<c>ushort</c> sink (CS0266). Wider / signed inners keep their type. <c>_</c>
+    /// binds nothing. The caller wraps this in a fresh scope.</summary>
+    private void BindFoldedCapture(string capName, long value, CType inner)
+    {
+        if (capName == "_") { return; }
+        var bindType = inner.Unqualified is CType.Prim { Integer: true, Signed: false, Bytes: <= 2 }
+            ? CType.Int
+            : inner;
+        var capSym = _symbols.Declare(new Symbol { Name = capName, Kind = SymKind.Var, Type = bindType });
+        _comptimeVars[capSym] = (value, bindType);
+    }
+
     private CExpr LowerIfCaptureExpr(Item condItem, string capName, Item thenItem, Item elseItem)
     {
+        // Comptime fold (S4b): if the condition is a comptime-known optional (a generic instance's
+        // `comptime x: ?T` seed), select the taken branch NOW — no runtime test, no hoist. A comptime
+        // `null` yields the else; a comptime-known payload yields the then with `x` bound to the literal.
+        if (TryComptimeOptionalCond(condItem, out var copt))
+        {
+            if (!copt.HasValue) { return LowerExpr(elseItem); }
+            _symbols.EnterScope();
+            BindFoldedCapture(capName, copt.Value, copt.Inner);
+            var folded = LowerExpr(thenItem);
+            _symbols.ExitScope();
+            return folded;
+        }
+
         var buf = RequireHoistable("value `if (opt) |x| … else …`");
         var savedImpure = _hoistImpureSeen;
 

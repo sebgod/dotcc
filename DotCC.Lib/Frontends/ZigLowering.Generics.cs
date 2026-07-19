@@ -122,7 +122,8 @@ internal sealed partial class ZigLowering
         GenericFnInfo Generic,
         IReadOnlyList<(string name, long value, CType type)> ValueSeeds,
         IReadOnlyList<(string name, CType type)> TypeSeeds,
-        IReadOnlyList<(string name, CType type)> RuntimeParams);
+        IReadOnlyList<(string name, CType type)> RuntimeParams,
+        IReadOnlyList<(string name, bool hasValue, long value, CType inner)> OptionalSeeds);
 
     /// <summary>Generic (comptime-param) function symbols → their retained template. Populated in
     /// pass 1 (<see cref="DeclareFn"/>), consulted at every call site (<c>LowerCallInner</c>) so a
@@ -191,6 +192,7 @@ internal sealed partial class ZigLowering
         var mangleTokens = new List<string>();
         var typeSeeds = new List<(string name, CType type)>();
         var valueSeeds = new List<(string name, long value, CType type)>();
+        var optionalSeeds = new List<(string name, bool hasValue, long value, CType inner)>();
         var anytypeSeeds = new List<(string name, CType type)>();
         var runtimeArgItems = new List<Item>();
 
@@ -240,6 +242,30 @@ internal sealed partial class ZigLowering
                         mangleTokens.Add(MangleType(typeSeeds.First(s => s.name == g.Params[i].Name).type));
                         break;
                     case ParamKind.ComptimeValue:
+                        // A comptime OPTIONAL value param `comptime x: ?T` (road-to-zig-std S4b): the arg
+                        // is a comptime `null` (no runtime rep) or a comptime-known payload. Seed it into
+                        // _comptimeOptionalVars so a captured `if (x) |y| … else …` folds at lowering time.
+                        if (LowerType(g.Params[i].TypeAst).Unqualified is CType.Optional optParam)
+                        {
+                            if (IsComptimeNull(argItems[i]))
+                            {
+                                mangleTokens.Add("optnull");
+                                optionalSeeds.Add((g.Params[i].Name, false, 0, optParam.Inner));
+                            }
+                            else
+                            {
+                                var optArgExpr = LowerExpr(argItems[i]);
+                                if (_ir.ConstEval(optArgExpr) is not { } ov)
+                                {
+                                    throw new IrUnsupportedException(
+                                        $"call to generic '{templateSym.Name}': the `comptime {g.Params[i].Name}: ?T` argument must be "
+                                        + "a comptime `null` or a compile-time-known payload");
+                                }
+                                mangleTokens.Add("opt" + (ov >= 0 ? ov.ToString(inv) : "n" + (-(System.Int128)ov).ToString(inv)));
+                                optionalSeeds.Add((g.Params[i].Name, true, ov, optParam.Inner));
+                            }
+                            break;
+                        }
                         var argExpr = LowerExpr(argItems[i]);
                         if (_ir.ConstEval(argExpr) is not { } v)
                         {
@@ -296,7 +322,7 @@ internal sealed partial class ZigLowering
                 // its declared error set in LowerFnBodyCore (the same lazy resolution a plain fn gets).
                 if (ret is CType.ErrorUnion) { _fnErrorReturnTypes[instanceSym] = (g.RetType, g.ErrUnion); }
                 _instantiations[mangled] = instanceSym;
-                _pendingInstantiations.Add(new PendingInstantiation(instanceSym, g, valueSeeds, typeSeeds, runtimeParams));
+                _pendingInstantiations.Add(new PendingInstantiation(instanceSym, g, valueSeeds, typeSeeds, runtimeParams, optionalSeeds));
             }
         }
         finally
@@ -351,7 +377,16 @@ internal sealed partial class ZigLowering
     /// seeds the type aliases (shadow-saved) so the body substitutes literals / resolves <c>T</c>. Runs
     /// at top level (never nested), so the per-fn lowering state starts clean.</summary>
     private void LowerInstantiationBody(PendingInstantiation p)
-        => LowerFnBodyCore(p.Instance, p.RuntimeParams, p.Generic.Body, p.ValueSeeds, p.TypeSeeds);
+        => LowerFnBodyCore(p.Instance, p.RuntimeParams, p.Generic.Body, p.ValueSeeds, p.TypeSeeds, p.OptionalSeeds);
+
+    /// <summary>True when a generic argument is a comptime <c>null</c> — a bare <c>null</c> literal
+    /// (optionally parenthesized). The comptime-optional seed for such an argument has no payload.</summary>
+    private static bool IsComptimeNull(Item arg)
+    {
+        var cur = arg;
+        while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
+        return cur.Content is Zig.NullLit;
+    }
 
     /// <summary>Mangle a resolved comptime TYPE argument into an identifier-safe, structurally-unique
     /// token for the instance name (wall-plan W3b) — <c>i32</c>/<c>u32</c>/<c>f64</c>/<c>bool</c> for

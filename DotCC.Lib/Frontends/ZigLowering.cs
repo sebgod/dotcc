@@ -448,6 +448,16 @@ internal sealed partial class ZigLowering
     /// source order, matching Zig's sequential comptime semantics. No runtime decl is ever emitted.</summary>
     private readonly Dictionary<Symbol, (long Value, CType Type)> _comptimeVars = new();
 
+    /// <summary>Comptime-known OPTIONAL value parameters (road-to-zig-std S4b) — a generic instance's
+    /// <c>comptime x: ?T</c> seed, keyed by the seed Symbol's identity. <c>HasValue</c> distinguishes a
+    /// comptime <c>null</c> (which has no runtime representation) from a comptime-known payload
+    /// <c>Value</c> (of type <c>Inner</c>). A captured <c>if (x) |y| … else …</c> whose condition is one
+    /// of these FOLDS at lowering time to the taken branch (binding <c>y</c> to the literal payload) —
+    /// this is how <c>std.ArrayList</c>'s <c>Aligned(T, alignment)</c> selects its <c>Slice</c> type when
+    /// <c>alignment</c> is a comptime <c>?mem.Alignment</c>. Lowering-tier only (the interpreter's
+    /// value/type firewall stays closed — types are computed here, as in W1/W4).</summary>
+    private readonly Dictionary<Symbol, (bool HasValue, long Value, CType Inner)> _comptimeOptionalVars = new();
+
     /// <summary>The container whose <c>const</c> RHS is currently being re-lowered (Milestone R, part
     /// 6) — lets a bare (unqualified) identifier in that RHS resolve to a SIBLING container const. Null
     /// outside a container-const re-lower (so an unresolved bare ident still errors as before).</summary>
