@@ -2277,6 +2277,13 @@ public sealed class ZigOracleTests
             "    _ = printf(\"fib10=%llu\\n\", fib(10));\n" +
             "}\n", 0,
             "addN10=15 addN100=105\npow2_10=1024 pow3_4=81\nfib10=55" },
+        // comptime_optional_fold — a `comptime opt: ?T` value param whose captured `if` FOLDS at
+        // instantiation (road-to-zig-std S4b): a payload arg selects the then (binding the capture to the
+        // literal), `null` selects the else. The user-generic analog of std.ArrayList's Aligned(T,
+        // alignment) Slice selection. choose(41)=42, choose(null)=0 → 42.
+        new object[] { "comptime_optional_fold",
+            "fn choose(comptime opt: ?u8) u8 { return if (opt) |x| x + 1 else 0; }\n" +
+            "pub fn main() u8 { return choose(41) + choose(null); }\n", 42, "" },
 
         // GENERIC FUNCTIONS via comptime TYPE params (wall-plan W3b — per-instantiation signatures).
         // maxOf/addOf specialize their parameter+return type per type argument (i32/f64, i64/f32), so

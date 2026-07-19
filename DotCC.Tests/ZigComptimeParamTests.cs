@@ -147,4 +147,38 @@ public sealed class ZigComptimeParamTests
         cs.ShouldNotContain("unused__");   // no specialized instance
         cs.ShouldNotContain("int unused(");  // no template body either
     }
+
+    [Fact]
+    public void Comptime_optional_value_param_folds_the_captured_if()
+    {
+        // road-to-zig-std S4b — a `comptime opt: ?T` param whose value-position captured `if` FOLDS at
+        // instantiation: a payload arg takes the then (binding `x` to the literal), a `null` arg takes
+        // the else. No runtime `HasValue` test survives in either instance. The user-generic analog of
+        // std.ArrayList's `Aligned(T, alignment)` alignment selection.
+        var cs = EmitZig("""
+            fn choose(comptime opt: ?u8) u8 { return if (opt) |x| x + 1 else 0; }
+            pub fn main() u8 { return choose(41) + choose(null); }
+            """);
+        cs.ShouldContain("choose__opt41");    // payload instance
+        cs.ShouldContain("choose__optnull");  // null instance
+        cs.ShouldNotContain(".HasValue");      // folded at lowering — no runtime optional test
+        cs.ShouldNotContain("__ifcap");        // and no hoisted runtime result temp
+    }
+
+    [Fact]
+    public void Comptime_optional_value_param_folds_in_statement_position_too()
+    {
+        // The same fold applies to the STATEMENT captured-if form inside a generic instance.
+        var cs = EmitZig("""
+            fn pick(comptime opt: ?u8) u8 {
+                var r: u8 = 7;
+                if (opt) |x| { r = x; } else { r = 0; }
+                return r;
+            }
+            pub fn main() u8 { return pick(42) + pick(null); }
+            """);
+        cs.ShouldContain("pick__opt42");
+        cs.ShouldContain("pick__optnull");
+        cs.ShouldNotContain(".HasValue");   // folded — no runtime optional test
+    }
 }

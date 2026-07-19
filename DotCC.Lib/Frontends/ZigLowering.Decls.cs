@@ -300,12 +300,13 @@ internal sealed partial class ZigLowering
     /// note).</summary>
     private void LowerFnBodyCore(Symbol funcSym, IReadOnlyList<(string name, CType type)> paramInfos, Item body,
         IReadOnlyList<(string name, long value, CType type)>? comptimeSeeds,
-        IReadOnlyList<(string name, CType type)>? typeSeeds = null)
+        IReadOnlyList<(string name, CType type)>? typeSeeds = null,
+        IReadOnlyList<(string name, bool hasValue, long value, CType inner)>? optionalSeeds = null)
     {
-        // A generic INSTANCE body (comptime value or type seeds present) unlocks comptime control flow —
-        // comptime-if folding + dead-code-after-a-comptime-terminator (wall-plan W3a). Set here; the
-        // drain never nests a body in another, so a plain set/overwrite per call is sufficient.
-        _inGenericInstance = comptimeSeeds is not null || typeSeeds is not null;
+        // A generic INSTANCE body (comptime value / type / optional seeds present) unlocks comptime
+        // control flow — comptime-if folding + dead-code-after-a-comptime-terminator (wall-plan W3a). Set
+        // here; the drain never nests a body in another, so a plain set/overwrite per call is sufficient.
+        _inGenericInstance = comptimeSeeds is not null || typeSeeds is not null || optionalSeeds is not null;
         _currentFnRet = (funcSym.Type as CType.Func)?.Return;
         _currentFnName = funcSym.Name;   // the mangle prefix for an in-function container (wall-plan W2)
         _localContainerShadows.Clear();  // per-function: local containers scope to this body
@@ -341,6 +342,17 @@ internal sealed partial class ZigLowering
             {
                 var seedSym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type });
                 _comptimeVars[seedSym] = (value, type);
+            }
+        }
+        // Seed comptime-OPTIONAL value parameters (road-to-zig-std S4b): a fresh in-scope `?T` symbol per
+        // seed recorded in _comptimeOptionalVars, no runtime decl. A captured `if (x) |y| … else …` on one
+        // folds to the taken branch during lowering (see the fold in LowerIfCapture / LowerIfCaptureExpr).
+        if (optionalSeeds is not null)
+        {
+            foreach (var (name, hasValue, value, inner) in optionalSeeds)
+            {
+                var seedSym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = new CType.Optional(inner) });
+                _comptimeOptionalVars[seedSym] = (hasValue, value, inner);
             }
         }
         var paramSyms = paramInfos
