@@ -2284,6 +2284,23 @@ public sealed class ZigOracleTests
         new object[] { "comptime_optional_fold",
             "fn choose(comptime opt: ?u8) u8 { return if (opt) |x| x + 1 else 0; }\n" +
             "pub fn main() u8 { return choose(41) + choose(null); }\n", 42, "" },
+        // type_returning_optional_fold — a type-returning generic whose MULTI-statement body computes a
+        // type via a captured-`if` fold on a comptime `?T` param (road-to-zig-std S4b pt2 / S4c): the
+        // `std.ArrayList` `Aligned(T, alignment)` `const Slice = if (alignment) |a| … else []T;` shape.
+        // Store(u8,3) → data:[3]u8 (payload branch, n=3); Store(u8,null) → data:[]u8 (else branch).
+        // 20 + 22 = 42.
+        new object[] { "type_returning_optional_fold",
+            "fn Store(comptime T: type, comptime cap: ?u8) type {\n" +
+            "    const Slice = if (cap) |n| [n]T else []T;\n" +
+            "    return struct { data: Slice, len: usize };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var arr: Store(u8, 3) = undefined;\n" +
+            "    arr.data[0] = 20; arr.data[1] = 0; arr.data[2] = 0; arr.len = 1;\n" +
+            "    var buf = [_]u8{ 22, 0 };\n" +
+            "    const sl: Store(u8, null) = .{ .data = &buf, .len = 2 };\n" +
+            "    return arr.data[0] + sl.data[0];\n" +
+            "}\n", 42, "" },
 
         // GENERIC FUNCTIONS via comptime TYPE params (wall-plan W3b — per-instantiation signatures).
         // maxOf/addOf specialize their parameter+return type per type argument (i32/f64, i64/f32), so
