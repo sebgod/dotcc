@@ -77,6 +77,26 @@ of these parses and has a `ZigParseProbe` pin, but lowering is not wired yet:
 - Inline named-field struct **type** (`fn f() struct { a: u8 }`, `field: struct {…}`, parsed #90) — `LowerType` reifies a synthesized nominal struct type per source site (`__AnonStruct<n>`), built via `.{ … }` and read with `p.field`; oracle-verified. Fields-only (a method / `const` / nested-container member still needs a named container decl).
 - Nested `const Inner = struct {…};` as a struct-body member (parsed #89) — bound under a parent-mangled name (`Outer__Inner`), resolved by plain name inside the parent's methods, built via `.{…}` and read with `i.field`; oracle-verified. Fields-only (a method / `const` / further-nested container is a precise loud cut); nested enum/union + external `Parent.Inner` qualified access still deferred.
 
+## Zig — bad emit (transpiles "successfully" but the emitted C# does NOT compile)
+
+The worst category — it breaks the fail-loudly invariant, since dotcc exits 0 and the error only
+surfaces when the C# is compiled. All three were found by a lowering sweep around the G4
+reified-methods brick (each reproduces on a plain/ordinary construct, so none is generic-specific).
+Each needs its own focused fix.
+
+| Gap | Repro | Emitted / error | Fix sketch |
+|---|---|---|---|
+| A `[N]T` field initialized from a struct LITERAL | `const B = struct { items: [4]u8, len: usize }; … return .{ .items = undefined, .len = 0 };` | `new B { items = default(byte*), len = 0 }` → **CS1666** "cannot use fixed size buffers contained in unfixed expressions" | a `fixed` buffer field can't be assigned in an object initializer at all: build the value into a local, `fixed`-pin it and fill (or skip the member for an `undefined` array — the field is already default-initialized). Work-around today: `var s: T = undefined; s.len = 0;` |
+| A comptime VALUE param typed by an earlier comptime TYPE param | `fn C(comptime T: type, comptime start: T) type` | loud (not bad emit): `zig type 'T' not supported yet` | `EvalTypeReturningCall` resolves all args in one loop but installs the type seeds into `_typeAliases` only AFTER it, so a later param's type can't see `T`. Install each seed inside the loop (params bind left-to-right, as in zig). Not load-bearing for `Aligned` (its `alignment` is `?mem.Alignment`, not `T`-typed) — but IS what `SentinelSlice(comptime s: T)` needs |
+
+**Fixed 2026-08-08** (was in this section's spirit, landed with the G4 methods brick): a narrow
+UNSIGNED (`u8`/`u16`) comptime VALUE seed substituted as `40u` — a `uint` literal that will not
+implicitly assign to a `byte`/`ushort` sink (**CS0266**). Reproduced on a plain W3a generic
+(`fn mk(comptime start: u8) u8 { return start; }` → `return 40u;`). Normalized in the single
+`ComptimeVarLit` substitution point (narrow-unsigned → `int`, value-preserving), which is the same
+rule `BindFoldedCapture` already applied on the captured-`if` path — so every comptime-var path
+(W3a value seed, `comptime var`, `inline for` capture, reified-method seeds) now shares it.
+
 ## Zig — deferred grammar (does NOT parse yet; cut for a reason)
 
 | Construct | Why deferred | Unblock |

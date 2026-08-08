@@ -470,8 +470,11 @@ internal sealed partial class ZigLowering
     /// self-pointer. Memoized: the mangled type is registered in <see cref="_containerTypes"/> BEFORE the
     /// fields lower, so a self-referential field / a recursive <c>Pair(T)</c> inside the body resolves to
     /// the in-progress type, and a repeat call reuses it. Returns the reified <see cref="CType.Named"/>.
-    /// V1: fields-only (a method / <c>const</c> member in the returned struct is a loud cut), a single
-    /// <c>return struct {…}</c> body.</summary>
+    /// Members: fields, <c>const</c>s (including <c>const Self = @This();</c>) and METHODS are all
+    /// reified (road-to-zig-std G4) — each method is declared immediately under the mangled container (so
+    /// a call site resolves it through <see cref="_methods"/>) and its BODY is deferred to
+    /// <see cref="_pendingReifiedMethods"/>, drained at top level like a monomorphized instance. A nested
+    /// container member is still a loud cut.</summary>
     private CType EvalTypeReturningCall(Symbol templateSym, TypeReturningGenericInfo info, IReadOnlyList<Item> argItems)
     {
         if (argItems.Count != info.Params.Count)
@@ -563,15 +566,33 @@ internal sealed partial class ZigLowering
             var (fields, methods, consts, containers) = fieldsItem is { } m
                 ? SplitMembers(m)
                 : (new List<Item>(), new List<Item>(), new List<Item>(), new List<Item>());
-            if (methods.Count > 0 || consts.Count > 0 || containers.Count > 0)
+            if (containers.Count > 0)
             {
                 throw new IrUnsupportedException(
-                    $"type-returning generic '{templateSym.Name}': the returned `struct` is fields-only in V1 (wall-plan W4) — "
-                    + "a method, `const`, or nested-container member in the returned type is not supported yet");
+                    $"type-returning generic '{templateSym.Name}': a nested container member "
+                    + "(`const Inner = struct {…};`) in the returned type is not supported yet (road-to-zig-std G4)");
             }
             _containerTypes[mangled] = mangledType;   // memo + @This() target; BEFORE reify for self-ref
             _currentContainer = mangled;
             RegisterStruct(mangled, fields);
+            // `const Self = @This();` → a self alias scoped to the MANGLED container, plus any value
+            // const — both keyed by the mangled name, so a method's `self: *Self` and a `S.NAME` use
+            // resolve exactly like an ordinary container's. Runs after _containerTypes[mangled] is set
+            // (the self alias reads it) and before the methods (their signatures may spell `Self`).
+            RegisterContainerConsts(mangled, consts);
+            // Each method: declare the signature NOW — while the comptime type/value seeds are live, so a
+            // `v: T` parameter lowers to the concrete type — and defer the BODY. The signature is reached
+            // by call sites through `_methods[mangled]` (not by name lookup), so declaring it inside this
+            // reification's scope is fine; the body must NOT lower here, because a reification is
+            // triggered mid-signature/mid-body from an arbitrary type position and LowerFnBodyCore would
+            // clobber the in-flight per-function state (the same re-entrancy rule as W3a's worklist).
+            foreach (var methodDef in methods)
+            {
+                var me = DeclareMethod(mangled, methodDef);
+                _currentContainer = mangled;   // DeclareMethod clears it; the next signature needs it back
+                _pendingReifiedMethods.Add(new PendingReifiedMethod(
+                    me.sym, mangled, me.ps, me.body, typeSeeds, valueSeeds, optionalSeeds));
+            }
         }
         finally
         {
@@ -584,6 +605,48 @@ internal sealed partial class ZigLowering
             _symbols.ExitScope();
         }
         return mangledType;
+    }
+
+    /// <summary>A METHOD of a reified type-returning generic's struct, awaiting body lowering
+    /// (road-to-zig-std G4). Same re-entrancy rule as <see cref="PendingInstantiation"/>: the reification
+    /// that produced it runs from an arbitrary type position (a signature, a global initializer, another
+    /// body), so lowering the method body inline would clobber the in-flight per-function state. The body
+    /// is therefore deferred and drained at top level. Carries the mangled container (so <c>@This()</c>,
+    /// <c>Self</c> and sibling-method calls resolve while the body lowers) and the reification's comptime
+    /// seeds, re-applied per body so the method's own references to <c>T</c> / a comptime value param
+    /// resolve to the same concrete types the signature was built from.</summary>
+    private sealed record PendingReifiedMethod(
+        Symbol Method,
+        string Container,
+        IReadOnlyList<(string name, CType type)> RuntimeParams,
+        Item Body,
+        IReadOnlyList<(string name, CType type)> TypeSeeds,
+        IReadOnlyList<(string name, long value, CType type)> ValueSeeds,
+        IReadOnlyList<(string name, bool hasValue, long value, CType inner)> OptionalSeeds);
+
+    /// <summary>Reified-generic method bodies awaiting lowering, drained at top level alongside
+    /// <see cref="_pendingInstantiations"/> (each drain can enqueue into the other: a method body may call
+    /// a generic, and a generic instance may name a reified type). Enqueued by
+    /// <see cref="EvalTypeReturningCall"/>.</summary>
+    private readonly List<PendingReifiedMethod> _pendingReifiedMethods = new();
+
+    /// <summary>Lower one deferred reified-generic method body (road-to-zig-std G4) at top level. Sets
+    /// <see cref="_currentContainer"/> to the mangled container for the duration — exactly what pass 2
+    /// does for an ordinary container's method — so <c>@This()</c>, a <c>Self</c> alias, a sibling method
+    /// call and field access all resolve; then re-applies the reification's comptime seeds through the
+    /// shared <see cref="LowerFnBodyCore"/>, so the body's <c>T</c> matches its signature's.</summary>
+    private void LowerReifiedMethodBody(PendingReifiedMethod p)
+    {
+        var saved = _currentContainer;
+        _currentContainer = p.Container;
+        try
+        {
+            LowerFnBodyCore(p.Method, p.RuntimeParams, p.Body, p.ValueSeeds, p.TypeSeeds, p.OptionalSeeds);
+        }
+        finally
+        {
+            _currentContainer = saved;
+        }
     }
 
     /// <summary>Process a type-returning generic's body (wall-plan W4, extended by road-to-zig-std S4c):

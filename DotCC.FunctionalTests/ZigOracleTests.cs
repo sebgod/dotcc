@@ -2338,6 +2338,47 @@ public sealed class ZigOracleTests
             "}\n", 0,
             "pi=3,4 pf=1.5,2.5\nhead=10 tail=20" },
 
+        // generic-container-methods (road-to-zig-std G4) — a type-returning generic whose reified struct
+        // carries METHODS + `const` members, the ArrayList-shaped generic container. Proves: `const Self =
+        // @This()` resolves to the REIFIED type in a `*Self` receiver; a receiverless `init()` is reachable
+        // through the alias (`S.init()` — the `.empty`/`init` constructor idiom); a sibling method call
+        // inside a method body binds to the same mangled instance; a `const` member inlines via `Self.NAME`;
+        // and two distinct instantiations (u8 / i32) get INDEPENDENT method sets over their own field types.
+        new object[] { "generic-container-methods",
+            "extern fn printf(fmt: [*:0]const u8, ...) c_int;\n" +
+            "fn Stack(comptime T: type, comptime cap: usize) type {\n" +
+            "    return struct {\n" +
+            "        items: [cap]T,\n" +
+            "        len: usize,\n" +
+            "        const Self = @This();\n" +
+            "        const CAP = cap;\n" +
+            "        pub fn init() Self { var s: Self = undefined; s.len = 0; return s; }\n" +
+            "        pub fn push(self: *Self, v: T) void { self.items[self.len] = v; self.len = self.len + 1; }\n" +
+            "        pub fn pop(self: *Self) T { self.len = self.len - 1; return self.items[self.len]; }\n" +
+            "        pub fn count(self: *const Self) usize { return self.len; }\n" +
+            "        pub fn capacity(self: *const Self) usize { _ = self; return Self.CAP; }\n" +
+            "        pub fn sum(self: *const Self) T {\n" +
+            "            var total: T = 0;\n" +
+            "            var i: usize = 0;\n" +
+            "            while (i < self.count()) : (i = i + 1) { total = total + self.items[i]; }\n" +
+            "            return total;\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "const ByteStack = Stack(u8, 8);\n" +
+            "const IntStack = Stack(i32, 4);\n" +
+            "pub fn main() void {\n" +
+            "    var bs = ByteStack.init();\n" +
+            "    bs.push(10); bs.push(32);\n" +
+            "    _ = printf(\"u8 n=%llu cap=%llu sum=%d\\n\", bs.count(), bs.capacity(), bs.sum());\n" +
+            "    const top = bs.pop();\n" +
+            "    _ = printf(\"u8 top=%d left=%llu\\n\", top, bs.count());\n" +
+            "    var is = IntStack.init();\n" +
+            "    is.push(-5); is.push(105);\n" +
+            "    _ = printf(\"i32 n=%llu cap=%llu sum=%d\\n\", is.count(), is.capacity(), is.sum());\n" +
+            "}\n", 0,
+            "u8 n=2 cap=8 sum=42\nu8 top=32 left=1\ni32 n=2 cap=4 sum=100" },
+
         // ANYTYPE parameters (wall-plan W5 — the monomorphization capstone). An `anytype` param's type
         // is INFERRED from the argument (`@TypeOf(arg)`), then keys a specialization like a comptime TYPE
         // param — but the arg is ALSO passed at runtime. add/maxOf specialize per inferred pair (i32/f64),
