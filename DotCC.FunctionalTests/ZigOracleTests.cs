@@ -2613,6 +2613,73 @@ public sealed class ZigOracleTests
         }
     }
 
+    /// <summary>The CURATED allocators must keep working while a real std source tree is configured.
+    /// Upstream re-exports its allocators as whole FILES
+    /// (<c>pub const FixedBufferAllocator = @import("heap/FixedBufferAllocator.zig");</c>), so with
+    /// <c>DOTCC_ZIG_LIB_DIR</c> set the path is both a curated type and a navigable module — and
+    /// navigation used to win, making real-std navigation and the curated allocators mutually exclusive
+    /// (6 oracle programs failed with the std root set, silently, because the suite's default
+    /// configuration doesn't set one). This is the leg that keeps the two configurations from drifting
+    /// apart again against the SHAPES of real upstream source; the always-on structural pins run over a
+    /// synthetic tree in <c>ZigCuratedStdVsNavigationTests</c>. Needs <c>DOTCC_ZIG_LIB_DIR</c>, like the
+    /// std.ascii differential above.</summary>
+    [Fact]
+    public void Dotcc_matches_zig_for_curated_allocators_with_real_std_configured()
+    {
+        if (!ZigRunRequested)
+        {
+            Assert.Skip($"Zig oracle is opt-in. Set {RunZigEnv}=1 to run the curated-allocators-with-real-std differential.");
+        }
+        if (!ZigOracle.IsAvailable)
+        {
+            Assert.Skip($"{RunZigEnv} requested but no `zig` is on PATH on this host.");
+        }
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOTCC_ZIG_LIB_DIR")))
+        {
+            Assert.Skip("DOTCC_ZIG_LIB_DIR must point at the zig lib dir so the curated-vs-navigation collision is live.");
+        }
+
+        // Both curated allocator types, each reached through the dotted std path that also names a real
+        // upstream file: the FBA over a stack buffer, and an arena over the page allocator.
+        const string program =
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf: [256]u8 = undefined;\n" +
+            "    var fba = std.heap.FixedBufferAllocator.init(&buf);\n" +
+            "    const fa = fba.allocator();\n" +
+            "    const s = fa.alloc(u8, 4) catch return 1;\n" +
+            "    s[0] = 10;\n" +
+            "    s[1] = 30;\n" +
+            "    const from_fba = s[0] + s[1];\n" +
+            "    fa.free(s);\n" +
+            "    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);\n" +
+            "    defer arena.deinit();\n" +
+            "    const aa = arena.allocator();\n" +
+            "    const t = aa.alloc(u8, 2) catch return 2;\n" +
+            "    t[0] = 2;\n" +
+            "    return from_fba + t[0];\n" +
+            "}\n";
+
+        var workDir = Path.Combine(Path.GetTempPath(), $"dotcc-zig-stdalloc-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(workDir);
+        var mainPath = Path.Combine(workDir, "main.zig");
+        File.WriteAllText(mainPath, program);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { mainPath }, emit: EmitMode.Csproj);
+            var (dotccStdout, dotccExit) = FixtureRunner.CompileAndRunCapturingExit(emitted, Array.Empty<string>());
+            var (zigStdout, zigExit) = ZigOracle.CompileAndRun(mainPath, workDir);
+
+            dotccExit.ShouldBe(zigExit, "dotcc's curated allocators diverge from real zig with a std root configured (exit code)");
+            dotccExit.ShouldBe(42, "the curated allocators did not produce the expected result");
+            Norm(dotccStdout).ShouldBe(Norm(zigStdout));
+        }
+        finally
+        {
+            try { Directory.Delete(workDir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
     /// <summary>MIXED <c>.c</c> + <c>.zig</c> programs (Milestone V — C↔Zig shared-heap interop).
     /// Each case is a C translation unit + a Zig <c>main</c> + expected exit + expected stdout.
     /// The unifying guarantee under test: <c>std.heap.c_allocator</c> IS the C <c>malloc</c>/<c>free</c>/
