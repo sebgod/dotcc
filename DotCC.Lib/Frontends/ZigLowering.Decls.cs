@@ -1056,8 +1056,9 @@ internal sealed partial class ZigLowering
             var fname = Tok(fi.Arg1);
             var ftype = _ir.StructFieldType(named, fname)
                 ?? throw new IrUnsupportedException($"struct '{named.Name}' has no field '{fname}'");
+            written.Add(fname);   // set before the array check, so the defaults pass doesn't re-add it
+            if (IsInlineArrayMember(named.Name, fname, ftype, fi.Arg3)) { continue; }
             members.Add(new FieldInit(fname, ftype, LowerExprSink(fi.Arg3, ftype)));
-            written.Add(fname);
         }
         // Materialize a declared default (`field: T = expr`, std S9) for any field OMITTED from the
         // literal — Zig fills it from the field's default. Fields with NO default that are omitted keep
@@ -1069,11 +1070,31 @@ internal sealed partial class ZigLowering
                 if (written.Contains(f.Name)) { continue; }
                 if (_structFieldDefaults.TryGetValue((named.Name, f.Name), out var defItem))
                 {
+                    if (IsInlineArrayMember(named.Name, f.Name, f.Type, defItem)) { continue; }
                     members.Add(new FieldInit(f.Name, f.Type, LowerExprSink(defItem, f.Type)));
                 }
             }
         }
         return new StructInit(members) { Type = named };
+    }
+
+    /// <summary>True when a struct-literal member targets an ARRAY field and must be DROPPED from the
+    /// initializer. An array field is INLINE storage — the C# backend renders it as a <c>fixed</c> buffer
+    /// (or an <c>[InlineArray]</c> wrapper), neither of which can be assigned inside an object
+    /// initializer: <c>new B { items = … }</c> is <b>CS1666</b> ("cannot use fixed size buffers contained
+    /// in unfixed expressions"), which dotcc used to emit silently — a bad emit, the worst failure class.
+    /// Zig's <c>undefined</c> asks for no particular contents, so the member is simply dropped and C#'s
+    /// zero-init stands (a zeroed over-approximation, exactly as for <c>var x: T = undefined</c>). Any
+    /// other value would need element-wise stores into a pinned buffer, which an initializer EXPRESSION
+    /// cannot express, so it is a precise loud cut naming the workaround.</summary>
+    private static bool IsInlineArrayMember(string structName, string fieldName, CType fieldType, Item valueItem)
+    {
+        if (fieldType.Unqualified is not CType.Array) { return false; }
+        if (valueItem.Content is Zig.UndefinedLit) { return true; }
+        throw new IrUnsupportedException(
+            $"struct '{structName}': field '{fieldName}' is an array — inline array storage can't be "
+            + "initialized from a struct literal (only `undefined` can); build the value first and assign "
+            + $"the elements (`var v: {structName} = undefined; v.{fieldName}[0] = …;`)");
     }
 
     /// <summary>The field types of the runtime <c>AllocatorVTable</c> — Zig's

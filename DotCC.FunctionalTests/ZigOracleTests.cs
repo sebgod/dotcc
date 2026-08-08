@@ -2352,7 +2352,10 @@ public sealed class ZigOracleTests
             "        len: usize,\n" +
             "        const Self = @This();\n" +
             "        const CAP = cap;\n" +
-            "        pub fn init() Self { var s: Self = undefined; s.len = 0; return s; }\n" +
+            // The idiomatic constructor: a result-located struct literal whose ARRAY field is
+            // `undefined`. That member is dropped from the emitted object initializer (a C# `fixed`
+            // buffer can't be assigned there — it used to emit CS1666-invalid C# silently).
+            "        pub fn init() Self { return .{ .items = undefined, .len = 0 }; }\n" +
             "        pub fn push(self: *Self, v: T) void { self.items[self.len] = v; self.len = self.len + 1; }\n" +
             "        pub fn pop(self: *Self) T { self.len = self.len - 1; return self.items[self.len]; }\n" +
             "        pub fn count(self: *const Self) usize { return self.len; }\n" +
