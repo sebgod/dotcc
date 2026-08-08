@@ -157,6 +157,28 @@ public sealed class ZigTypeReturningFnTests
     }
 
     [Fact]
+    public void Reified_type_is_reachable_directly_as_a_call_base()
+    {
+        // `Box(u8).make(…)` — the idiomatic spelling (`std.ArrayList(u8).init(…)`) names the reified
+        // container directly, with no intervening alias. An ordinary call base (`getBox().get()`) must
+        // still lower as an instance method on the returned value, not be mistaken for a static call.
+        var cs = EmitZig("""
+            fn Box(comptime T: type) type {
+                return struct {
+                    v: T,
+                    const Self = @This();
+                    pub fn make(x: T) Self { var s: Self = undefined; s.v = x; return s; }
+                    pub fn get(self: *const Self) T { return self.v; }
+                };
+            }
+            fn getBox() Box(u8) { return Box(u8).make(7); }
+            pub fn main() u8 { return Box(u8).make(35).v + getBox().get(); }
+            """);
+        cs.ShouldContain("Box__u8_make(35)");   // static call straight off the generic call base
+        cs.ShouldContain("Box__u8_get(");       // and the ordinary call base still resolves as instance
+    }
+
+    [Fact]
     public void Value_const_in_the_returned_struct_is_reified()
     {
         // A `const` member of the returned struct registers against the mangled container, so the

@@ -468,8 +468,10 @@ peephole (or delete it):
      declared under the mangled container (so it lowers to the ordinary `Container_method` free
      function and call sites bind through `_methods`) with its BODY deferred to a top-level drain —
      the W3a re-entrancy rule, since a reification fires from an arbitrary type position. The drain
-     re-applies the reification's comptime seeds so the body's `T` matches its signature's. A type
-     ALIAS also became a static-call base, so the `S.init()` constructor idiom is reachable. Oracle
+     re-applies the reification's comptime seeds so the body's `T` matches its signature's. A
+     receiverless method is reachable both through a type ALIAS and directly off the generic call
+     (`std.ArrayList(u8).init(…)`), so the `init`/`.empty` constructor idiom works either way; and a
+     reified type nests (a `Box(T)` field / return inside `Wrap(T)`, verified against zig). Oracle
      `generic-container-methods` == zig; example `examples/zig-generic-container/`. **Still cut:** a
      nested container member, and a generic / `type`-returning METHOD — the latter is exactly
      `Aligned`'s nested `pub fn SentinelSlice(comptime s: T) type`, so it returns as a G4 blocker

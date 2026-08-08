@@ -2376,8 +2376,11 @@ public sealed class ZigOracleTests
             "    var is = IntStack.init();\n" +
             "    is.push(-5); is.push(105);\n" +
             "    _ = printf(\"i32 n=%llu cap=%llu sum=%d\\n\", is.count(), is.capacity(), is.sum());\n" +
+            "    var ds = Stack(u8, 2).init();\n" +
+            "    ds.push(1); ds.push(2);\n" +
+            "    _ = printf(\"direct n=%llu cap=%llu sum=%d\\n\", ds.count(), ds.capacity(), ds.sum());\n" +
             "}\n", 0,
-            "u8 n=2 cap=8 sum=42\nu8 top=32 left=1\ni32 n=2 cap=4 sum=100" },
+            "u8 n=2 cap=8 sum=42\nu8 top=32 left=1\ni32 n=2 cap=4 sum=100\ndirect n=2 cap=2 sum=3" },
 
         // ANYTYPE parameters (wall-plan W5 — the monomorphization capstone). An `anytype` param's type
         // is INFERRED from the argument (`@TypeOf(arg)`), then keys a specialization like a comptime TYPE
