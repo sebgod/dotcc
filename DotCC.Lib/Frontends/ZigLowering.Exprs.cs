@@ -1016,6 +1016,25 @@ internal sealed partial class ZigLowering
             return BuildCall(staticSym, argItems, receiver: null);
         }
 
+        // (A2) `Generic(args).func(…)` — the base is a call to a type-returning generic (wall-plan W4),
+        // naming the REIFIED container directly instead of through an alias. This is the idiomatic
+        // spelling (`std.ArrayList(u8).init(…)`), so a reified struct's static methods must be reachable
+        // this way and not only via `const L = ArrayList(u8);` (road-to-zig-std G4). Evaluating the base
+        // reifies it — memoized, so a repeat call reuses the one instance — and then the method resolves
+        // exactly like (A). `TryEvalTypeReturningCall` returns false (no side effect) for any other call
+        // base, so an ordinary `getBox().get()` still falls through to (B).
+        if (fld.Arg0.Content is Zig.CallArgs or Zig.CallNoArgs
+            && TryEvalTypeReturningCall(fld.Arg0, out var reifiedBase)
+            && ContainerTypeName(reifiedBase) is { } reifiedName)
+        {
+            if (!_methods.TryGetValue(reifiedName, out var reifiedMethods)
+                || !reifiedMethods.TryGetValue(methodName, out var reifiedSym))
+            {
+                throw new IrUnsupportedException($"'{reifiedName}' has no function '{methodName}'");
+            }
+            return BuildCall(reifiedSym, argItems, receiver: null);
+        }
+
         // (B) `expr.method(args)` — the base is an instance of a container type.
         var recv = LowerExpr(fld.Arg0);
         // `fba.allocator()` / `arena.allocator()` — a FixedBufferAllocator (Milestone F) or an
