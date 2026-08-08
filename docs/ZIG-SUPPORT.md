@@ -192,7 +192,7 @@ program's libc call is handled. No `@cImport`, no header harvest.
 | `switch (e) { error.Foo => …, else => … }` (error switch) | ✅ | switch on an error value (Milestone N, part 2) — an error value IS its flat `ushort` code, so this lowers to an ORDINARY integer `switch` on the code (each `error.Foo` prong → a `case <code>:`, `else` → `default:`). Rode in on part 1's representation — no new lowering. The error is commonly captured from `else \|e\|` first; an `anyerror!T` (open set) requires the `else` |
 | `const E = error{ A, B };` (error-set declaration) | ✅ | an explicit named error set (Milestone N, part 5). dotcc erases the set into the flat global code space, so the decl is COMPTIME — it registers the member names (each a stable code) and emits NO runtime decl. `E` serves as the (erased) set in an `E!T` return type (same `ErrUnion<T>` as `anyerror!T`; an inline `error{A}!T` works the same way) AND as a plain VALUE type — `fn f(e: E)`, `var x: E`, a non-`!T` return `fn worst() E` (Milestone X, part 3b) — which lowers to the flat `ushort` code (the error value itself). `E.member` access (Milestone X, part 2) and `@errorName` (part 1) are supported; set MEMBERSHIP is checked (part 3a — a `return` of a foreign error / an undeclared `E.member` is rejected). **Deferred:** distinct per-set code spaces (membership stays a single flat space, checked but not type-distinct) |
 | postfix `.field` | ✅ | struct field access → the shared `Member` IR (field type from the aggregate table). Zig has no `->`, so `p.field` on a `*T` auto-derefs (emits C# `->`). `EnumName.member` resolves here too → an `EnumConstRef` |
-| `.{ .f = v, … }` (anonymous struct literal) | ✅ | result-located → `new T { f = v }` from the sink type (a typed decl, return, assignment, call arg, or field). Empty `.{}` zero-inits |
+| `.{ .f = v, … }` (anonymous struct literal) | ✅ | result-located → `new T { f = v }` from the sink type (a typed decl, return, assignment, call arg, or field). Empty `.{}` zero-inits. A field with a declared default (`f: T = expr`) that the literal omits is materialized from that default. **An ARRAY field is inline storage** — a C# `fixed` buffer, which C# cannot assign inside an object initializer at all (CS1666) — so `.items = undefined` DROPS the member (C#'s zero-init stands; `undefined` asks for no particular contents) and any other value is a **loud cut**: build the value first and store the elements (`var v: T = undefined; v.items[0] = …;`) |
 | `T{ .f = v, … }` (typed struct literal) | ✅ | Zig's `CurlySuffixExpr <- TypeExpr InitList?` — the type is named, so NO sink is needed; valid in any position, incl. sink-less ones like `(T{…}).field`. A dedicated `CurlySuffix` grammar level (above `Type`) makes it conflict-free against `fn f() RetType {` (the return type stays a raw `Type`, no init list) — no rewriter. `&T{…}` (address of a temporary) materializes a block-local temp and takes its address (the same shared-backend path as C's `&(T){…}`) |
 | `.{ a, b, … }` (positional tuple literal) | ✅ | result-located → `new System.ValueTuple<…>(a, b)` (Milestone G); element types come from a tuple sink, or are inferred from the elements (`const t = .{a, b};`). Shares the `.{…}` surface with the named struct literal — a literal that MIXES positional + named is rejected |
 | `.enumLiteral` | ✅ | a bare `.member` resolves against its sink (typed decl / return / assignment / call arg / switch subject) → an `EnumConstRef` (`EnumName.member`). Untyped (no sink) is rejected, as Zig requires |
@@ -245,8 +245,14 @@ only the curated paths: the allocator paths (`std.mem.Allocator` +
 `std.heap.page_allocator`/`c_allocator`/`FixedBufferAllocator`/`ArenaAllocator`,
 with `alloc`/`free`/`create`/`destroy`/`realloc` — see the Allocators section),
 the `std.mem` slice helpers, `std.ArrayList(T)`, `std.debug.print`, and the `std.testing` assertions
-(`expect`/`expectEqual`/`expectError`/`expectEqualStrings`/`expectEqualSlices` — see **Test runner** below);
-everything else errors clearly.
+(`expect`/`expectEqual`/`expectError`/`expectEqualStrings`/`expectEqualSlices` — see **Test runner** below).
+**Plus, when a real std source tree is configured** (`DOTCC_ZIG_LIB_DIR` — road-to-zig-std S1/S2/G1),
+a NON-curated path navigates the actual upstream files and lowers LAZILY (only the decls a program
+references), which is how real `std.ascii` compiles from source today. A curated path always wins over
+navigation — upstream re-exports its allocators as whole files, so `std.heap.FixedBufferAllocator` is
+both, and only the curated model can lower it. With no std tree configured, anything non-curated errors
+clearly. (Still missing in the other direction: a non-curated std path in TYPE position can't yet fall
+back to navigation — plan blocker S4d.)
 
 ### Test runner — `dotcc zig test`
 

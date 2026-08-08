@@ -71,58 +71,53 @@ of these parses and has a `ZigParseProbe` pin, but lowering is not wired yet:
 | `++` concat / `**` repeat | #88 | **literals + comptime STRING/INT/ARRAY consts + `@typeName` + a type-BORROWING anon `.{…}` operand now fold** (S9/S5 — string/typed-array literals; a `const` bound to a comptime string/int (`_comptimeValues`) or array (`_comptimeArrayConsts`); `@typeName(T)` for a primitive/slice/pointer/optional via source-spelling; an anon `.{…}` operand borrows a typed operand's element type). Only cut now: two UNTYPED anon `.{…}` operands (`.{1} ++ .{2}` — common-type/tuple inference) and `@typeName` of a USER type (zig's file-qualified `file.Name`) |
 | `@typeName(T)` of a user type / alias | S5 | zig's fully-qualified `file.Name` (or an alias's resolved name) — dotcc lacks the file-qualification scheme; primitives + composed-of-primitives fold |
 | Nested `const Inner = enum/union {…};` as a container member | #89 | V1 binds nested STRUCTS (fields-only, plain-name in parent methods); nested enum/union + external `Parent.Inner` qualified access deferred |
+| A `[N]T` field set to real contents in a struct literal (`.{ .items = [_]u8{1,2}, … }`) | — | an array field is inline storage (a C# `fixed` buffer), which can't be assigned in an object initializer; only `undefined` lowers (the member is dropped). Real contents need the literal built into a local + element-wise stores through the ANF hoist — doable, just not built. Work-around: `var v: T = undefined; v.items[0] = …;` |
 
 **Lowered since** (parses *and* lowers now — moved off the gap list):
 - Switch-prong bodies `=> return [e]` / `=> |x| body` (parsed #89) — return + capture-value/ref prong bodies, non-union and tagged-union, reuse the statement return-lowering; oracle-verified.
 - Inline named-field struct **type** (`fn f() struct { a: u8 }`, `field: struct {…}`, parsed #90) — `LowerType` reifies a synthesized nominal struct type per source site (`__AnonStruct<n>`), built via `.{ … }` and read with `p.field`; oracle-verified. Fields-only (a method / `const` / nested-container member still needs a named container decl).
 - Nested `const Inner = struct {…};` as a struct-body member (parsed #89) — bound under a parent-mangled name (`Outer__Inner`), resolved by plain name inside the parent's methods, built via `.{…}` and read with `i.field`; oracle-verified. Fields-only (a method / `const` / further-nested container is a precise loud cut); nested enum/union + external `Parent.Inner` qualified access still deferred.
 
-## Zig — real-std navigation vs the curated std (mutually exclusive today)
-
-**Setting `DOTCC_ZIG_LIB_DIR` breaks the curated allocator path.** With the std root
-configured, `@import("std")` navigates REAL upstream source (S1/G1), and 6 zig-oracle
-programs that pass without it fail with a loud
-`zig type 'FixedBufferAllocator' not supported yet (slice)` (also `ArenaAllocator`, and a
-user `Node` through the same path): `arena`, `alloc_fba`, `alloc_oom`, `opaque_resize_remap`,
-`resize_remap_fba`, `alloc_param`. Measured 2026-08-08 and **reproduced identically on
-`main`** — pre-existing, not caused by the G4 methods work; the full oracle is green in its
-default (no-lib-dir) configuration, which is what CI runs.
-
-So the S1 design note "curated `std.mem`/`debug`/`heap`/`testing` fast-paths still win
-(checked first)" does **not** hold for `std.heap.*` *types* — only, apparently, for the
-value/method paths. `std.heap.FixedBufferAllocator.init(&buf)` in a type / static-call position reaches
-real-source navigation and dies there instead of falling back to the curated type.
-
-**Why this matters for G4:** the end state — real `std.ArrayList` from source, allocating
-through an allocator — needs real-std navigation and allocators *at the same time*, which is
-exactly the combination that is broken today. Ranks alongside the plan's blocker (4) (S4d
-type-position module-graph fallback); the two are the same seam viewed from opposite sides
-(one can't reach source, the other can't fall back from it).
-
-**Fix sketch:** make the curated-std peephole authoritative in TYPE position too — check
-`StdTypes`/`StdGenericTypes` before `ResolveModulePath` in `LowerType`'s `Zig.Field` case —
-and add a regression leg that runs the oracle suite WITH the lib dir set, so the two
-configurations can't drift apart again unnoticed.
-
 ## Zig — bad emit (transpiles "successfully" but the emitted C# does NOT compile)
 
 The worst category — it breaks the fail-loudly invariant, since dotcc exits 0 and the error only
-surfaces when the C# is compiled. All three were found by a lowering sweep around the G4
-reified-methods brick (each reproduces on a plain/ordinary construct, so none is generic-specific).
-Each needs its own focused fix.
+surfaces when the C# is compiled. **Currently EMPTY.** Keep it that way: a construct dotcc can't
+lower correctly must throw, not emit C# that won't build.
 
-| Gap | Repro | Emitted / error | Fix sketch |
-|---|---|---|---|
-| A `[N]T` field initialized from a struct LITERAL | `const B = struct { items: [4]u8, len: usize }; … return .{ .items = undefined, .len = 0 };` | `new B { items = default(byte*), len = 0 }` → **CS1666** "cannot use fixed size buffers contained in unfixed expressions" | a `fixed` buffer field can't be assigned in an object initializer at all: build the value into a local, `fixed`-pin it and fill (or skip the member for an `undefined` array — the field is already default-initialized). Work-around today: `var s: T = undefined; s.len = 0;` |
-| A comptime VALUE param typed by an earlier comptime TYPE param | `fn C(comptime T: type, comptime start: T) type` | loud (not bad emit): `zig type 'T' not supported yet` | `EvalTypeReturningCall` resolves all args in one loop but installs the type seeds into `_typeAliases` only AFTER it, so a later param's type can't see `T`. Install each seed inside the loop (params bind left-to-right, as in zig). Not load-bearing for `Aligned` (its `alignment` is `?mem.Alignment`, not `T`-typed) — but IS what `SentinelSlice(comptime s: T)` needs |
+Four gaps were found by the lowering sweep around the G4 reified-methods brick (2026-08-08) — each
+reproduced on a plain/ordinary construct, so none was generic-specific — and all four are now fixed:
 
-**Fixed 2026-08-08** (was in this section's spirit, landed with the G4 methods brick): a narrow
-UNSIGNED (`u8`/`u16`) comptime VALUE seed substituted as `40u` — a `uint` literal that will not
-implicitly assign to a `byte`/`ushort` sink (**CS0266**). Reproduced on a plain W3a generic
-(`fn mk(comptime start: u8) u8 { return start; }` → `return 40u;`). Normalized in the single
-`ComptimeVarLit` substitution point (narrow-unsigned → `int`, value-preserving), which is the same
-rule `BindFoldedCapture` already applied on the captured-`if` path — so every comptime-var path
-(W3a value seed, `comptime var`, `inline for` capture, reified-method seeds) now shares it.
+- **A narrow UNSIGNED (`u8`/`u16`) comptime VALUE seed** substituted as `40u`, a `uint` literal that
+  will not implicitly assign to a `byte`/`ushort` sink (**CS0266**). Repro: `fn mk(comptime start: u8)
+  u8 { return start; }` → `return 40u;`. Normalized in the single `ComptimeVarLit` substitution point
+  (narrow-unsigned → `int`, value-preserving) — the same rule `BindFoldedCapture` already applied on
+  the captured-`if` path, so every comptime-var path (W3a value seed, `comptime var`, `inline for`
+  capture, reified-method seeds) now shares it. Landed with the G4 methods brick.
+- **A `[N]T` field initialized from a struct LITERAL** — `return .{ .items = undefined, .len = 0 };`
+  emitted `new B { items = default(byte*), len = 0 }` → **CS1666** ("cannot use fixed size buffers
+  contained in unfixed expressions"), because an array field is inline storage (a `fixed` buffer /
+  `[InlineArray]` wrapper) and cannot be assigned in an object initializer at all. `BuildStructInit`
+  now DROPS an `undefined` array member (zig's `undefined` asks for no particular contents, so C#'s
+  zero-init stands) and loudly rejects any other value, which would need element-wise stores into a
+  pinned buffer. Fixed 2026-08-09.
+- **A comptime VALUE param typed by an earlier comptime TYPE param** (`fn C(comptime T: type,
+  comptime start: T) type`) — loud, not a bad emit, but the same sweep. `EvalTypeReturningCall`
+  resolved all arguments in ONE loop and installed the type seeds only afterwards, so a later
+  parameter's declared type couldn't see `T`. Now two-phase like `InstantiateGeneric` (type args in
+  the caller's env first, then seed and read the rest), i.e. parameters bind left-to-right as in zig.
+  This is what `Aligned`'s nested `SentinelSlice(comptime s: T)` needs. Fixed 2026-08-09.
+- **`DOTCC_ZIG_LIB_DIR` and the curated allocators were mutually exclusive.** With a std root
+  configured, `@import("std")` navigates REAL upstream source (S1/G1) — and upstream re-exports its
+  allocators as whole FILES, so `std.heap.FixedBufferAllocator` was both a curated type and a
+  navigable module. Navigation sat above the curated `.init` fast-paths in `LowerMethodCall`, won, and
+  died lowering upstream's own `init`: 6 oracle programs (`arena`, `alloc_fba`, `alloc_oom`,
+  `opaque_resize_remap`, `resize_remap_fba`, `alloc_param`) failed with the std root set, invisibly,
+  since CI runs the default configuration. Navigation is now guarded by a registry-driven
+  `IsCuratedStdPath`, restoring S1's "the curated set is checked first" rule in the one position where
+  it didn't hold. The full oracle is green in BOTH configurations, and an opt-in leg
+  (`Dotcc_matches_zig_for_curated_allocators_with_real_std_configured`) keeps them from drifting
+  apart. Fixed 2026-08-09. **The complementary direction is still open** — a NON-curated std TYPE
+  cannot fall back to navigation; that is the plan's G4 blocker (4), S4d.
 
 ## Zig — deferred grammar (does NOT parse yet; cut for a reason)
 

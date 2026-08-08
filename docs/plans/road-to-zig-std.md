@@ -474,8 +474,10 @@ peephole (or delete it):
      reified type nests (a `Box(T)` field / return inside `Wrap(T)`, verified against zig). Oracle
      `generic-container-methods` == zig; example `examples/zig-generic-container/`. **Still cut:** a
      nested container member, and a generic / `type`-returning METHOD — the latter is exactly
-     `Aligned`'s nested `pub fn SentinelSlice(comptime s: T) type`, so it returns as a G4 blocker
-     (it also needs the left-to-right comptime-param binding noted in `deferred.md`).
+     `Aligned`'s nested `pub fn SentinelSlice(comptime s: T) type`, so it returns as a G4 blocker.
+     (Its other prerequisite, LEFT-TO-RIGHT comptime-param binding — `comptime start: T` typed by an
+     earlier `comptime T: type` — **✅ DONE 2026-08-09**: `EvalTypeReturningCall` now resolves
+     arguments in the same two phases `InstantiateGeneric` does.)
   2. **`std.ArrayList(T)` is `array_list.Aligned(T, null)`** — a type-returning fn whose
      body returns *another, cross-module* type-returning call. W4 rejects non-struct
      returns (`Non_struct_return_is_rejected` pin). New capability.
@@ -486,6 +488,11 @@ peephole (or delete it):
      cases throw instead of falling through to `ResolveModulePath`, and the curated
      `StdGenericTypes["std.ArrayList"] → ZigList` peephole intercepts first — so
      `std.ArrayList`/`std.mem.Alignment` cannot reach source at all today.
+     The OPPOSITE direction of the same seam is now closed (2026-08-09): a curated path is never
+     navigated, so configuring a std root no longer breaks the curated allocators (they were mutually
+     exclusive — 6 oracle programs failed with `DOTCC_ZIG_LIB_DIR` set). The full zig oracle is green
+     in BOTH configurations, and an opt-in leg runs WITH the std root so they can't drift apart again.
+     S4d is what remains: letting a non-curated std TYPE fall back to source.
   5. Smaller, each bounded: `@memmove` (only `@memcpy` exists), `Allocator.Error!T`
      error-union methods (Milestone X reuse, but `Allocator.Error` set-member navigation is
      new), `comptime sentinel: T` params, `std.atomic.cache_line` const-nav + `comptime_int`
