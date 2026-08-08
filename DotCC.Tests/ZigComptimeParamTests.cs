@@ -181,4 +181,26 @@ public sealed class ZigComptimeParamTests
         cs.ShouldContain("pick__optnull");
         cs.ShouldNotContain(".HasValue");   // folded — no runtime optional test
     }
+
+    [Fact]
+    public void Narrow_unsigned_comptime_value_substitutes_without_a_uint_suffix()
+    {
+        // A `u8`/`u16` comptime VALUE seed must substitute as a bare `N`, not `Nu`: the backend suffixes an
+        // unsigned-typed literal with `u`, and a `uint` literal does not implicitly assign to a `byte`
+        // sink — so `40u` emitted C# that failed to COMPILE (CS0266) even though dotcc exited 0. The value
+        // always fits `int`, so substituting at `int` is value-preserving. (Same rule the captured-`if`
+        // fold already applied; now shared by every comptime-var substitution path.)
+        var cs = EmitZig("""
+            const S = struct { n: u8 };
+            fn mk(comptime start: u8) u8 { return start; }
+            fn mkS(comptime start: u8) S { return .{ .n = start }; }
+            fn mk16(comptime start: u16) u16 { return start; }
+            pub fn main() u8 { return mk(40) + mkS(2).n + @as(u8, @intCast(mk16(300) - 300)); }
+            """);
+        cs.ShouldContain("return 40;");     // NOT `return 40u;` — would not assign to a `byte` return
+        cs.ShouldContain("n = 2");
+        cs.ShouldNotContain("40u");
+        cs.ShouldNotContain("2u;");
+        cs.ShouldNotContain("300u");        // u16 is narrow too
+    }
 }

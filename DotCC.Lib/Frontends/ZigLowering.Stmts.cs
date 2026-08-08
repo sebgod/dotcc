@@ -1032,9 +1032,18 @@ internal sealed partial class ZigLowering
 
     /// <summary>The literal a <c>comptime var</c> reference substitutes to — its current value at the
     /// declared type (a negative value as <c>-(magnitude)</c>, mirroring how the interpreter splices a
-    /// signed constant).</summary>
+    /// signed constant).
+    /// <para>A narrow UNSIGNED type (<c>u8</c>/<c>u16</c>) substitutes at <c>int</c> instead: the backend
+    /// renders an unsigned-typed literal with a <c>u</c> suffix, and a <c>uint</c> literal does not
+    /// implicitly assign to a <c>byte</c>/<c>ushort</c> sink (CS0266) — so <c>comptime n: u8</c> used as a
+    /// field/return value emitted invalid C#. The value always fits <c>int</c>, so this is
+    /// value-preserving. Same normalization (and reason) as <see cref="BindFoldedCapture"/>, applied here
+    /// so EVERY comptime-var substitution path shares it: a W3a comptime-VALUE parameter seed, a
+    /// <c>comptime var</c>, an <c>inline for</c> capture, and a reified generic's method-body
+    /// seeds.</para></summary>
     private static CExpr ComptimeVarLit(long v, CType t)
     {
+        if (t.Unqualified is CType.Prim { Integer: true, Signed: false, Bytes: <= 2 }) { t = CType.Int; }
         if (v >= 0)
         {
             return new LitInt(v.ToString(System.Globalization.CultureInfo.InvariantCulture), v) { Type = t };
