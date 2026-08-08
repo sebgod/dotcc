@@ -309,4 +309,54 @@ public sealed class ZigTypeReturningFnTests
         cs.ShouldContain("Store__u8_optnull");
         cs.ShouldContain("Slice<byte> data");   // the else (slice) branch was folded for `null`
     }
+
+    [Fact]
+    public void Comptime_value_param_typed_by_an_earlier_type_param_binds_left_to_right()
+    {
+        // Zig binds parameters LEFT TO RIGHT, so `comptime start: T` is typed by the `comptime T: type`
+        // that precedes it. The arguments used to be resolved in ONE loop with the type seeds installed
+        // only afterwards, so `T` was unresolvable in a later parameter's declared type ("zig type 'T'
+        // not supported yet"); they now resolve in two phases like an ordinary generic's call site.
+        var cs = EmitZig("""
+            fn Counter(comptime T: type, comptime start: T) type {
+                return struct {
+                    n: T,
+                    fn init() @This() { return .{ .n = start }; }
+                };
+            }
+            pub fn main() u8 {
+                const C = Counter(u8, 40);
+                const c = C.init();
+                return c.n + 2;
+            }
+            """);
+        cs.ShouldContain("Counter__u8_40");        // keyed by the resolved type AND the resolved value
+        cs.ShouldContain("byte n;");               // the field took `T` = u8
+        cs.ShouldContain("n = 40");                // the value seed substituted (and NOT as `40u`)
+    }
+
+    [Fact]
+    public void A_type_argument_resolves_in_the_callers_environment_not_the_callees()
+    {
+        // The counterpart hazard of seeding left-to-right: the seeds must NOT be installed while the
+        // CALLER's own argument expressions are still being read. Here the outer reification binds `A`
+        // to i32 and passes it as `Pair`'s SECOND argument — while `Pair`'s FIRST parameter is also
+        // named `A`. The second argument means the caller's `A` (i32), so the pair is `u8` + `i32`.
+        var cs = EmitZig("""
+            fn Pair(comptime A: type, comptime B: type) type {
+                return struct { a: A, b: B };
+            }
+            fn Outer(comptime A: type) type {
+                return struct { p: Pair(u8, A) };
+            }
+            pub fn main() u8 {
+                var o: Outer(i32) = undefined;
+                o.p.a = 40;
+                o.p.b = 2;
+                return o.p.a + @as(u8, @intCast(o.p.b));
+            }
+            """);
+        cs.ShouldContain("Pair__u8_i32");      // NOT Pair__u8_u8 — `A` was read in the caller's env
+        cs.ShouldNotContain("Pair__u8_u8");
+    }
 }

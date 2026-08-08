@@ -474,7 +474,13 @@ internal sealed partial class ZigLowering
     /// reified (road-to-zig-std G4) — each method is declared immediately under the mangled container (so
     /// a call site resolves it through <see cref="_methods"/>) and its BODY is deferred to
     /// <see cref="_pendingReifiedMethods"/>, drained at top level like a monomorphized instance. A nested
-    /// container member is still a loud cut.</summary>
+    /// container member is still a loud cut.
+    /// <para>Arguments resolve in TWO phases, exactly like <see cref="InstantiateGeneric"/>: every TYPE
+    /// argument first, in the CALLER's environment (so a callee parameter sharing a name with a caller
+    /// alias can't shadow it mid-read), then the seeds are installed and the remaining parameters read
+    /// under them — which is what lets a later parameter's declared type spell an earlier type parameter
+    /// (<c>fn Counter(comptime T: type, comptime start: T) type</c>; parameters bind LEFT TO RIGHT, as in
+    /// zig).</para></summary>
     private CType EvalTypeReturningCall(Symbol templateSym, TypeReturningGenericInfo info, IReadOnlyList<Item> argItems)
     {
         if (argItems.Count != info.Params.Count)
@@ -490,121 +496,150 @@ internal sealed partial class ZigLowering
         var valueSeeds = new List<(string name, long value, CType type)>();
         var optionalSeeds = new List<(string name, bool hasValue, long value, CType inner)>();
         var mangleTokens = new List<string>(argItems.Count);
+
+        // Phase 1 — resolve every comptime TYPE argument in the CALLER's type environment (an alias
+        // resolves to its aliased type, so the reification is keyed by the RESOLVED type). Deliberately
+        // BEFORE any seed is installed: an argument expression belongs to the caller, so a callee
+        // parameter that happens to share a name with a caller alias must not shadow it while the
+        // caller's own arguments are still being read. Same two-phase shape as InstantiateGeneric.
         for (var i = 0; i < info.Params.Count; i++)
         {
-            var p = info.Params[i];
-            if (p.Kind == ParamKind.ComptimeType)
+            if (info.Params[i].Kind == ParamKind.ComptimeType)
             {
-                var at = LowerType(argItems[i]).Unqualified;
-                typeSeeds.Add((p.Name, at));
-                mangleTokens.Add(MangleType(at));
+                typeSeeds.Add((info.Params[i].Name, LowerType(argItems[i]).Unqualified));
             }
-            else if (LowerType(p.TypeAst).Unqualified is CType.Optional optP)
+        }
+
+        // Phase 2 — seed the resolved type args (shadow-saved) BEFORE the remaining parameters are
+        // read, so a later parameter's declared type can spell an earlier type parameter
+        // (`fn Counter(comptime T: type, comptime start: T) type` — parameters bind LEFT TO RIGHT, as
+        // in zig). The same seeds stay installed through the body reification below; the leading
+        // type-alias locals `ProcessTypeReturningBody` binds append to the same shadow list, and the
+        // outer `finally` restores the caller's environment however this returns (including the
+        // memo hit).
+        var typeShadows = new List<(string name, CType? prev)>();
+        foreach (var (name, type) in typeSeeds)
+        {
+            typeShadows.Add((name, _typeAliases.TryGetValue(name, out var pv) ? pv : (CType?)null));
+            _typeAliases[name] = type;
+        }
+        try
+        {
+            // Mangle in PARAMETER order (types and values interleave by position) so the key is
+            // deterministic, and resolve each comptime VALUE / OPTIONAL argument against the seeded types.
+            for (var i = 0; i < info.Params.Count; i++)
             {
-                // A comptime OPTIONAL value param `comptime x: ?T` — a comptime null or known payload.
-                if (IsComptimeNull(argItems[i]))
+                var p = info.Params[i];
+                if (p.Kind == ParamKind.ComptimeType)
                 {
-                    mangleTokens.Add("optnull");
-                    optionalSeeds.Add((p.Name, false, 0, optP.Inner));
+                    mangleTokens.Add(MangleType(typeSeeds.First(s => s.name == p.Name).type));
+                }
+                else if (LowerType(p.TypeAst).Unqualified is CType.Optional optP)
+                {
+                    // A comptime OPTIONAL value param `comptime x: ?T` — a comptime null or known payload.
+                    if (IsComptimeNull(argItems[i]))
+                    {
+                        mangleTokens.Add("optnull");
+                        optionalSeeds.Add((p.Name, false, 0, optP.Inner));
+                    }
+                    else
+                    {
+                        if (_ir.ConstEval(LowerExpr(argItems[i])) is not { } ov)
+                        {
+                            throw new IrUnsupportedException(
+                                $"call to type-returning generic '{templateSym.Name}': the `comptime {p.Name}: ?T` argument "
+                                + "must be a comptime null or a compile-time-known payload");
+                        }
+                        mangleTokens.Add("opt" + (ov >= 0 ? ov.ToString(inv) : "n" + (-(System.Int128)ov).ToString(inv)));
+                        optionalSeeds.Add((p.Name, true, ov, optP.Inner));
+                    }
                 }
                 else
                 {
-                    if (_ir.ConstEval(LowerExpr(argItems[i])) is not { } ov)
+                    if (_ir.ConstEval(LowerExpr(argItems[i])) is not { } vv)
                     {
                         throw new IrUnsupportedException(
-                            $"call to type-returning generic '{templateSym.Name}': the `comptime {p.Name}: ?T` argument "
-                            + "must be a comptime null or a compile-time-known payload");
+                            $"call to type-returning generic '{templateSym.Name}': the `comptime {p.Name}` argument "
+                            + "must be a compile-time-known value");
                     }
-                    mangleTokens.Add("opt" + (ov >= 0 ? ov.ToString(inv) : "n" + (-(System.Int128)ov).ToString(inv)));
-                    optionalSeeds.Add((p.Name, true, ov, optP.Inner));
+                    mangleTokens.Add(vv >= 0 ? vv.ToString(inv) : "n" + (-(System.Int128)vv).ToString(inv));
+                    valueSeeds.Add((p.Name, vv, LowerType(p.TypeAst)));
                 }
             }
-            else
+            var mangled = mangleTokens.Count == 0 ? templateSym.Name : templateSym.Name + "__" + string.Join("_", mangleTokens);
+
+            // Memoized — also short-circuits a self-referential field / recursive use, since the mapping is
+            // installed BELOW before the fields are lowered.
+            if (_containerTypes.TryGetValue(mangled, out var existing)) { return existing; }
+
+            var mangledType = new CType.Named(mangled);
+            var savedContainer = _currentContainer;
+            // A scope for the value/optional comptime seeds (so the body's captured-if conditions + array
+            // extents resolve); the type-param seeds already ride _typeAliases, installed by phase 2.
+            _symbols.EnterScope();
+            try
             {
-                if (_ir.ConstEval(LowerExpr(argItems[i])) is not { } vv)
+                foreach (var (name, value, type) in valueSeeds)
+                {
+                    var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type });
+                    _comptimeVars[sym] = (value, type);
+                }
+                foreach (var (name, hasValue, value, inner) in optionalSeeds)
+                {
+                    var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = new CType.Optional(inner) });
+                    _comptimeOptionalVars[sym] = (hasValue, value, inner);
+                }
+                // Process the body: leading `const NAME = <type>;` locals become scoped type aliases (the RHS
+                // may be a captured-if that folds to a type — S4b pt2 / S4c), then the final `return struct {…}`.
+                var fieldsItem = ProcessTypeReturningBody(templateSym.Name, info.Body, typeShadows);
+                var (fields, methods, consts, containers) = fieldsItem is { } m
+                    ? SplitMembers(m)
+                    : (new List<Item>(), new List<Item>(), new List<Item>(), new List<Item>());
+                if (containers.Count > 0)
                 {
                     throw new IrUnsupportedException(
-                        $"call to type-returning generic '{templateSym.Name}': the `comptime {p.Name}` argument "
-                        + "must be a compile-time-known value");
+                        $"type-returning generic '{templateSym.Name}': a nested container member "
+                        + "(`const Inner = struct {…};`) in the returned type is not supported yet (road-to-zig-std G4)");
                 }
-                mangleTokens.Add(vv >= 0 ? vv.ToString(inv) : "n" + (-(System.Int128)vv).ToString(inv));
-                valueSeeds.Add((p.Name, vv, LowerType(p.TypeAst)));
+                _containerTypes[mangled] = mangledType;   // memo + @This() target; BEFORE reify for self-ref
+                _currentContainer = mangled;
+                RegisterStruct(mangled, fields);
+                // `const Self = @This();` → a self alias scoped to the MANGLED container, plus any value
+                // const — both keyed by the mangled name, so a method's `self: *Self` and a `S.NAME` use
+                // resolve exactly like an ordinary container's. Runs after _containerTypes[mangled] is set
+                // (the self alias reads it) and before the methods (their signatures may spell `Self`).
+                RegisterContainerConsts(mangled, consts);
+                // Each method: declare the signature NOW — while the comptime type/value seeds are live, so a
+                // `v: T` parameter lowers to the concrete type — and defer the BODY. The signature is reached
+                // by call sites through `_methods[mangled]` (not by name lookup), so declaring it inside this
+                // reification's scope is fine; the body must NOT lower here, because a reification is
+                // triggered mid-signature/mid-body from an arbitrary type position and LowerFnBodyCore would
+                // clobber the in-flight per-function state (the same re-entrancy rule as W3a's worklist).
+                foreach (var methodDef in methods)
+                {
+                    var me = DeclareMethod(mangled, methodDef);
+                    _currentContainer = mangled;   // DeclareMethod clears it; the next signature needs it back
+                    _pendingReifiedMethods.Add(new PendingReifiedMethod(
+                        me.sym, mangled, me.ps, me.body, typeSeeds, valueSeeds, optionalSeeds));
+                }
             }
-        }
-        var mangled = mangleTokens.Count == 0 ? templateSym.Name : templateSym.Name + "__" + string.Join("_", mangleTokens);
-
-        // Memoized — also short-circuits a self-referential field / recursive use, since the mapping is
-        // installed BELOW before the fields are lowered.
-        if (_containerTypes.TryGetValue(mangled, out var existing)) { return existing; }
-
-        var mangledType = new CType.Named(mangled);
-        var savedContainer = _currentContainer;
-        var typeShadows = new List<(string name, CType? prev)>();
-        // A scope for the value/optional comptime seeds (so the body's captured-if conditions + array
-        // extents resolve); the type-param seeds ride _typeAliases (shadow-saved), like the W4 path.
-        _symbols.EnterScope();
-        try
-        {
-            foreach (var (name, type) in typeSeeds)
+            finally
             {
-                typeShadows.Add((name, _typeAliases.TryGetValue(name, out var pv) ? pv : (CType?)null));
-                _typeAliases[name] = type;
+                _currentContainer = savedContainer;
+                _symbols.ExitScope();
             }
-            foreach (var (name, value, type) in valueSeeds)
-            {
-                var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type });
-                _comptimeVars[sym] = (value, type);
-            }
-            foreach (var (name, hasValue, value, inner) in optionalSeeds)
-            {
-                var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = new CType.Optional(inner) });
-                _comptimeOptionalVars[sym] = (hasValue, value, inner);
-            }
-            // Process the body: leading `const NAME = <type>;` locals become scoped type aliases (the RHS
-            // may be a captured-if that folds to a type — S4b pt2 / S4c), then the final `return struct {…}`.
-            var fieldsItem = ProcessTypeReturningBody(templateSym.Name, info.Body, typeShadows);
-            var (fields, methods, consts, containers) = fieldsItem is { } m
-                ? SplitMembers(m)
-                : (new List<Item>(), new List<Item>(), new List<Item>(), new List<Item>());
-            if (containers.Count > 0)
-            {
-                throw new IrUnsupportedException(
-                    $"type-returning generic '{templateSym.Name}': a nested container member "
-                    + "(`const Inner = struct {…};`) in the returned type is not supported yet (road-to-zig-std G4)");
-            }
-            _containerTypes[mangled] = mangledType;   // memo + @This() target; BEFORE reify for self-ref
-            _currentContainer = mangled;
-            RegisterStruct(mangled, fields);
-            // `const Self = @This();` → a self alias scoped to the MANGLED container, plus any value
-            // const — both keyed by the mangled name, so a method's `self: *Self` and a `S.NAME` use
-            // resolve exactly like an ordinary container's. Runs after _containerTypes[mangled] is set
-            // (the self alias reads it) and before the methods (their signatures may spell `Self`).
-            RegisterContainerConsts(mangled, consts);
-            // Each method: declare the signature NOW — while the comptime type/value seeds are live, so a
-            // `v: T` parameter lowers to the concrete type — and defer the BODY. The signature is reached
-            // by call sites through `_methods[mangled]` (not by name lookup), so declaring it inside this
-            // reification's scope is fine; the body must NOT lower here, because a reification is
-            // triggered mid-signature/mid-body from an arbitrary type position and LowerFnBodyCore would
-            // clobber the in-flight per-function state (the same re-entrancy rule as W3a's worklist).
-            foreach (var methodDef in methods)
-            {
-                var me = DeclareMethod(mangled, methodDef);
-                _currentContainer = mangled;   // DeclareMethod clears it; the next signature needs it back
-                _pendingReifiedMethods.Add(new PendingReifiedMethod(
-                    me.sym, mangled, me.ps, me.body, typeSeeds, valueSeeds, optionalSeeds));
-            }
+            return mangledType;
         }
         finally
         {
-            _currentContainer = savedContainer;
+            // Restore the caller's type environment. Covers the phase-2 seeds AND any leading body-local
+            // alias `ProcessTypeReturningBody` appended, on every exit path — including the memo hit.
             for (var i = typeShadows.Count - 1; i >= 0; i--)
             {
                 var (name, prev) = typeShadows[i];
                 if (prev is { } p) { _typeAliases[name] = p; } else { _typeAliases.Remove(name); }
             }
-            _symbols.ExitScope();
         }
-        return mangledType;
     }
 
     /// <summary>A METHOD of a reified type-returning generic's struct, awaiting body lowering
