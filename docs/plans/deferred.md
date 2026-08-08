@@ -77,6 +77,33 @@ of these parses and has a `ZigParseProbe` pin, but lowering is not wired yet:
 - Inline named-field struct **type** (`fn f() struct { a: u8 }`, `field: struct {…}`, parsed #90) — `LowerType` reifies a synthesized nominal struct type per source site (`__AnonStruct<n>`), built via `.{ … }` and read with `p.field`; oracle-verified. Fields-only (a method / `const` / nested-container member still needs a named container decl).
 - Nested `const Inner = struct {…};` as a struct-body member (parsed #89) — bound under a parent-mangled name (`Outer__Inner`), resolved by plain name inside the parent's methods, built via `.{…}` and read with `i.field`; oracle-verified. Fields-only (a method / `const` / further-nested container is a precise loud cut); nested enum/union + external `Parent.Inner` qualified access still deferred.
 
+## Zig — real-std navigation vs the curated std (mutually exclusive today)
+
+**Setting `DOTCC_ZIG_LIB_DIR` breaks the curated allocator path.** With the std root
+configured, `@import("std")` navigates REAL upstream source (S1/G1), and 6 zig-oracle
+programs that pass without it fail with a loud
+`zig type 'FixedBufferAllocator' not supported yet (slice)` (also `ArenaAllocator`, and a
+user `Node` through the same path): `arena`, `alloc_fba`, `alloc_oom`, `opaque_resize_remap`,
+`resize_remap_fba`, `alloc_param`. Measured 2026-08-08 and **reproduced identically on
+`main`** — pre-existing, not caused by the G4 methods work; the full oracle is green in its
+default (no-lib-dir) configuration, which is what CI runs.
+
+So the S1 design note "curated `std.mem`/`debug`/`heap`/`testing` fast-paths still win
+(checked first)" does **not** hold for `std.heap.*` *types* — only, apparently, for the
+value/method paths. `std.heap.FixedBufferAllocator.init(&buf)` in a type / static-call position reaches
+real-source navigation and dies there instead of falling back to the curated type.
+
+**Why this matters for G4:** the end state — real `std.ArrayList` from source, allocating
+through an allocator — needs real-std navigation and allocators *at the same time*, which is
+exactly the combination that is broken today. Ranks alongside the plan's blocker (4) (S4d
+type-position module-graph fallback); the two are the same seam viewed from opposite sides
+(one can't reach source, the other can't fall back from it).
+
+**Fix sketch:** make the curated-std peephole authoritative in TYPE position too — check
+`StdTypes`/`StdGenericTypes` before `ResolveModulePath` in `LowerType`'s `Zig.Field` case —
+and add a regression leg that runs the oracle suite WITH the lib dir set, so the two
+configurations can't drift apart again unnoticed.
+
 ## Zig — bad emit (transpiles "successfully" but the emitted C# does NOT compile)
 
 The worst category — it breaks the fail-loudly invariant, since dotcc exits 0 and the error only
