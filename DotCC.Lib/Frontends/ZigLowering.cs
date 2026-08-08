@@ -869,9 +869,24 @@ internal sealed partial class ZigLowering
         // count) picks up transitive / recursive instantiations an instance body enqueues; the total is
         // bounded by MaxInstantiations (enforced at enqueue). Runs BEFORE the comptime-fold pass so a
         // `comptime EXPR` inside an instance body is resolved alongside the base-body folds below.
-        for (var i = 0; i < _pendingInstantiations.Count; i++)
+        // Two mutually-feeding worklists share this drain (road-to-zig-std G4 added the second): a
+        // generic instance body may name a reified type-returning generic (enqueueing its methods), and a
+        // reified method body may call a generic (enqueueing an instance). So alternate cursors until BOTH
+        // are exhausted rather than draining each once. Terminates because each list only grows on a fresh
+        // memo miss — a new mangled instance (capped by MaxInstantiations) or a new mangled reified
+        // container (memoized in _containerTypes before its members bind).
+        var instCursor = 0;
+        var reifiedCursor = 0;
+        while (instCursor < _pendingInstantiations.Count || reifiedCursor < _pendingReifiedMethods.Count)
         {
-            LowerInstantiationBody(_pendingInstantiations[i]);
+            for (; instCursor < _pendingInstantiations.Count; instCursor++)
+            {
+                LowerInstantiationBody(_pendingInstantiations[instCursor]);
+            }
+            for (; reifiedCursor < _pendingReifiedMethods.Count; reifiedCursor++)
+            {
+                LowerReifiedMethodBody(_pendingReifiedMethods[reifiedCursor]);
+            }
         }
 
         // Pass 3 (Milestone T): resolve every deferred `comptime EXPR`. All function bodies are now

@@ -463,12 +463,17 @@ peephole (or delete it):
   **Scope measured against the pinned `lib/std/array_list.zig` (2484 lines) + `std.zig:52`,
   2026-07-19 — this is a multi-brick sub-campaign (~8–15 bricks), not a couple of
   increments.** Read the source before sizing it; the blockers in order of weight:
-  1. **The returned struct has ~40 METHODS** plus `const Self = @This()`, `const Slice = …`,
-     and a nested `pub fn SentinelSlice(comptime s: T) type`. W4 reification is
-     **fields-only** — a method or `const` member in the returned struct is a loud cut
-     (`Method_in_the_returned_struct_is_rejected` pin). Lifting this is full
-     monomorphized-generic-container reification: **the tentpole**, comparable in size to
-     a good chunk of the W-series.
+  1. ~~**The returned struct has ~40 METHODS**~~ — **✅ DONE 2026-08-08 (the tentpole).** A reified
+     struct now carries `const` members (incl. `const Self = @This();`) and METHODS: each method is
+     declared under the mangled container (so it lowers to the ordinary `Container_method` free
+     function and call sites bind through `_methods`) with its BODY deferred to a top-level drain —
+     the W3a re-entrancy rule, since a reification fires from an arbitrary type position. The drain
+     re-applies the reification's comptime seeds so the body's `T` matches its signature's. A type
+     ALIAS also became a static-call base, so the `S.init()` constructor idiom is reachable. Oracle
+     `generic-container-methods` == zig; example `examples/zig-generic-container/`. **Still cut:** a
+     nested container member, and a generic / `type`-returning METHOD — the latter is exactly
+     `Aligned`'s nested `pub fn SentinelSlice(comptime s: T) type`, so it returns as a G4 blocker
+     (it also needs the left-to-right comptime-param binding noted in `deferred.md`).
   2. **`std.ArrayList(T)` is `array_list.Aligned(T, null)`** — a type-returning fn whose
      body returns *another, cross-module* type-returning call. W4 rejects non-struct
      returns (`Non_struct_return_is_rejected` pin). New capability.

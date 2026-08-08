@@ -616,17 +616,24 @@ internal sealed partial class ZigLowering
             ? t : null;
 
     /// <summary>Look up the container type named at a use site — a registered struct/enum/union
-    /// name, or a container-scoped self alias (<c>Self</c>) when inside that container's method.
-    /// Drives <c>Type.func()</c> / <c>EnumName.member</c> resolution (a self alias maps through to
-    /// the real container type, so <c>Self.init(…)</c> binds to the same mangled method as the
-    /// explicit name).</summary>
+    /// name, a container-scoped self alias (<c>Self</c>) when inside that container's method, or a
+    /// type ALIAS bound to one. Drives <c>Type.func()</c> / <c>EnumName.member</c> resolution (a self
+    /// alias maps through to the real container type, so <c>Self.init(…)</c> binds to the same mangled
+    /// method as the explicit name).</summary>
     private bool TryLookupContainerType(string name, out CType type)
     {
         var alias = ResolveSelfAlias(name);
         if (alias is not null) { type = alias; return true; }
         var nested = ResolveNestedType(name);
         if (nested is not null) { type = nested; return true; }
-        return _containerTypes.TryGetValue(name, out type!);
+        if (_containerTypes.TryGetValue(name, out type!)) { return true; }
+        // A type ALIAS naming a container — `const S = Stack(u8, 4); S.init()` (road-to-zig-std G4). A
+        // REIFIED type-returning generic has no source-level name of its own (its mangled name is
+        // synthesized), so the alias is the only way to reach its static methods / consts; treat it
+        // exactly like the container's own name. Safe for a non-container alias (`const I = i32;`):
+        // every caller additionally guards on ContainerTypeName / CType.Enum, so such an alias falls
+        // through to the ordinary value paths unchanged.
+        return _typeAliases.TryGetValue(name, out type!);
     }
 
     /// <summary>Lower a Zig optional payload type: a pointer (or function-pointer) payload stays a
