@@ -128,6 +128,32 @@ that retire curated shortcuts.
 > `builtin`/`root` (recorded as deferred, never navigated by ascii); S4–S7 comptime engine;
 > the heavier G-goals (G2 mem, G3 fmt, G4 ArrayList, G5 hashmap).
 
+> **Status update (2026-07-19) — S4a/S4b/S4c DONE** (PRs #107 `576c534`, #108 `6622fb5`,
+> #109 `95a0ef6`+`bf6cdee`; all merged to `main`, per-job CI green). Driven by the G4
+> prerequisite hunt, so each is a bounded brick rather than the whole S4:
+> **#107** the `@addWithOverflow` family → `ZigMath.<op>WithOverflow<T>` returning zig's
+> `struct{T, u1}` as a `(T, byte)` tuple (128-bit operand = loud cut). **S4a/#108**
+> value-position captured `if` (`const v = if (opt) |x| a else b`) — one conflict-free
+> `IfExpr` grammar alt + `LowerIfCaptureExpr` (ANF-hoist to a result temp). **S4b part 1**
+> comptime `?T` value params + folding that captured `if` at instantiation
+> (`_comptimeOptionalVars`, mangled `__optnull`/`__opt<v>`). **S4b part 2 + S4c** the same
+> fold in TYPE position inside a type-returning generic, plus multi-statement
+> type-returning bodies (`ProcessTypeReturningBody` admits leading `const NAME = <type>;`
+> aliases before the `return struct {…}`, lifting W4's single-statement V1 cut) — so
+> `Store(u8, 3)` reifies a `[3]u8` field and `Store(u8, null)` a `[]u8` slice, which is
+> exactly `array_list.Aligned(T, alignment)`'s shape.
+>
+> **Architectural rule these respected:** the comptime interpreter
+> (`IrBuilder.Comptime.cs`) still has **no `TypeVal`** — the value/type firewall stands.
+> Type computation happens at the *lowering* tier (the W1/W4 tradition), so S4's
+> "interpreter TypeVal" framing below is satisfied by lowering-tier folding, not by
+> breaching the firewall. Keep it that way.
+>
+> **Still not done:** S4d (type-position module-graph fallback — see G4's scope note),
+> S3, S5–S7, G2–G5. Parse coverage is unchanged by design (32.0%): these were
+> lowering-*depth* bricks, though S4a did retire the `'|' in state 518` probe bucket
+> (10 files' first failure — value-position captures in `std/Io/Reader.zig` et al).
+
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)
 
 An opt-in test/tool (`DOTCC_RUN_STD_PROBE=1`, env `DOTCC_ZIG_LIB_DIR` or
@@ -433,6 +459,37 @@ peephole (or delete it):
   source.
 - **G4 `std.ArrayList` from source** — retires `ZigList<T>` for source-mode
   (keep the curated type as the recognized fast path if compile time warrants).
+
+  **Scope measured against the pinned `lib/std/array_list.zig` (2484 lines) + `std.zig:52`,
+  2026-07-19 — this is a multi-brick sub-campaign (~8–15 bricks), not a couple of
+  increments.** Read the source before sizing it; the blockers in order of weight:
+  1. **The returned struct has ~40 METHODS** plus `const Self = @This()`, `const Slice = …`,
+     and a nested `pub fn SentinelSlice(comptime s: T) type`. W4 reification is
+     **fields-only** — a method or `const` member in the returned struct is a loud cut
+     (`Method_in_the_returned_struct_is_rejected` pin). Lifting this is full
+     monomorphized-generic-container reification: **the tentpole**, comparable in size to
+     a good chunk of the W-series.
+  2. **`std.ArrayList(T)` is `array_list.Aligned(T, null)`** — a type-returning fn whose
+     body returns *another, cross-module* type-returning call. W4 rejects non-struct
+     returns (`Non_struct_return_is_rejected` pin). New capability.
+  3. **Mutable slices pervade** (`self.items.len += 1`, `self.items.ptr = new_memory.ptr`),
+     but `Slice<T>.Len` is `readonly` — the fat pointer is immutable by design. Needs a
+     mutable-slice form or an emitter rewrite that reconstructs the slice on field-assign.
+  4. **S4d — type-position module-graph fallback**: `LowerType`'s `Zig.CallArgs`/`Zig.Field`
+     cases throw instead of falling through to `ResolveModulePath`, and the curated
+     `StdGenericTypes["std.ArrayList"] → ZigList` peephole intercepts first — so
+     `std.ArrayList`/`std.mem.Alignment` cannot reach source at all today.
+  5. Smaller, each bounded: `@memmove` (only `@memcpy` exists), `Allocator.Error!T`
+     error-union methods (Milestone X reuse, but `Allocator.Error` set-member navigation is
+     new), `comptime sentinel: T` params, `std.atomic.cache_line` const-nav + `comptime_int`
+     in `growCapacity`.
+
+  **Already cleared** (the edges, #106–#109): opaque-allocator `resize`/`remap`/
+  `alignedAlloc`, `@addWithOverflow` + tuple destructuring, `@max`/`+|`, `@memcpy`, and the
+  `Aligned`-shaped type-returning generic with a comptime-optional param (S4b/S4c). The
+  `alignment = null` path — which is what `std.ArrayList` *is* — skips
+  `a.toByteUnits() == @alignOf(T)`, so `std.mem.Alignment`'s comptime-enum handling is
+  largely dodged for the default instantiation.
 - **G5 `std.AutoHashMap`** — the graduation exam: hash-fn selection via
   `@typeInfo`, heavy comptime, aggregate reflection end-to-end.
 

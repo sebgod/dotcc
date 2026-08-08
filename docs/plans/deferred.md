@@ -88,6 +88,8 @@ of these parses and has a `ZigParseProbe` pin, but lowering is not wired yet:
 ## Zig — the big open parse buckets (not cuts; just next)
 
 These are ranked live in [`std-parse-probe.report.txt`](std-parse-probe.report.txt) — the
-report *is* the worklist. Current head (2026-07-12, 31.8% parse-clean): top-level
-file-is-a-struct fields (`$`/bare-IDENT in state 0/128), `(`-in-276, value-position
-`if`/`switch`, `align(N)`. See the S9 table in [`road-to-zig-std.md`](road-to-zig-std.md).
+report *is* the worklist. Current head (2026-08-08, 32.0% parse-clean): top-level
+file-is-a-struct fields (`$`/bare-IDENT in state 0/128, 25 files each), `)`-in-440 (23),
+`(`-in-276 (20), statement-position `if`/`switch` in a value slot (15 each), `align(N)`.
+S4a retired the former `'|'`-in-518 bucket (value-position captures). See the S9 table in
+[`road-to-zig-std.md`](road-to-zig-std.md).
