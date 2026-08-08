@@ -959,7 +959,16 @@ internal sealed partial class ZigLowering
         // re-export chain (std → ascii = @import("ascii.zig")) — and lower the referenced function on
         // demand: its signature lowers now (so the call binds) and its body is enqueued for the
         // top-level drain (road-to-zig-std S1/S2).
-        if (ResolveModulePath(fld.Arg0) is { } navMod)
+        //
+        // A path the CURATED model owns is never navigated. Upstream std re-exports its allocators as
+        // whole FILES (`pub const FixedBufferAllocator = @import("heap/FixedBufferAllocator.zig");`), so
+        // with a real std tree configured (DOTCC_ZIG_LIB_DIR) `std.heap.FixedBufferAllocator` IS a
+        // navigable module and navigation would beat the curated allocator below — then die lowering
+        // upstream's own `init` signature. That made real-std navigation and the curated allocators
+        // mutually exclusive; the guard restores S1's stated rule that the curated set is checked first
+        // in EVERY position. (The complementary direction — a NON-curated std TYPE falling back to
+        // navigation — is the separate S4d lift.)
+        if (!IsCuratedStdPath(fld.Arg0) && ResolveModulePath(fld.Arg0) is { } navMod)
         {
             var navSym = navMod.Lowering?.EnsureDeclLowered(methodName)
                 ?? throw new IrUnsupportedException(
@@ -988,6 +997,15 @@ internal sealed partial class ZigLowering
         if (methodName == "init" && TryResolveStdPath(fld.Arg0, out var arenaBase) && arenaBase == "std.heap.ArenaAllocator")
         {
             return LowerArenaInit(argItems);
+        }
+        // Any OTHER member call on a curated std TYPE: the model owns the path (so it was not
+        // navigated above) but doesn't provide this function — say so precisely, instead of falling
+        // through to the instance path and reporting the type as "a type, not a value".
+        if (TryResolveStdPath(fld.Arg0, out var curatedBase) && StdTypes.ContainsKey(curatedBase))
+        {
+            throw new IrUnsupportedException(
+                $"zig `{curatedBase}` has no modeled function '{methodName}' — dotcc curates these std "
+                + "types, and models `init` on std.heap.FixedBufferAllocator / std.heap.ArenaAllocator");
         }
         // `a.alloc(T, n)` / `a.free(s)` (and the deferred `create`/`destroy`) on a known-default
         // (→ devirt) or an Allocator-typed receiver (→ indirect). A same-named method on a

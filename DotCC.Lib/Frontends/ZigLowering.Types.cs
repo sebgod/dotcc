@@ -527,6 +527,17 @@ internal sealed partial class ZigLowering
         ["std.heap.c_allocator"] = AllocKind.CHeap,
     };
 
+    /// <summary>True when a dotted expression resolves to a std path the CURATED model OWNS — a
+    /// <see cref="StdTypes"/>, <see cref="StdGenericTypes"/> or <see cref="StdAllocatorValues"/> row.
+    /// The discriminator that keeps real-std source navigation (road-to-zig-std S1/S2, active when a
+    /// <c>DOTCC_ZIG_LIB_DIR</c> std tree is configured) from shadowing a curated path: upstream re-exports
+    /// its allocators as whole files, so <c>std.heap.FixedBufferAllocator</c> is BOTH a curated type and a
+    /// navigable module, and only the curated model can lower it. Registry-driven, so curating a new path
+    /// automatically makes it win — no second list to keep in sync.</summary>
+    private bool IsCuratedStdPath(Item expr)
+        => TryResolveStdPath(expr, out var path)
+        && (StdTypes.ContainsKey(path) || StdGenericTypes.ContainsKey(path) || StdAllocatorValues.ContainsKey(path));
+
     /// <summary>Lower a dotted std type (Milestone F): a <see cref="StdTypes"/> row — e.g.
     /// <c>std.mem.Allocator</c> → the runtime <see cref="CType.Allocator"/> fat pointer,
     /// <c>std.heap.FixedBufferAllocator</c> → the concrete <see cref="CType.Named"/> bump
