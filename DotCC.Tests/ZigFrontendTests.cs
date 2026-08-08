@@ -5009,4 +5009,38 @@ public sealed class ZigFrontendTests
             "    return @\"a-b\";\n}\n");
         cs.ShouldContain("a_b");
     }
+
+    [Fact]
+    public void Undefined_array_field_in_a_struct_literal_is_dropped_from_the_initializer()
+    {
+        // An array field is INLINE storage — a C# `fixed` buffer, which cannot be assigned inside an
+        // object initializer (CS1666). dotcc used to emit `new B { items = default(byte*), len = 0 }`
+        // and exit 0, so the failure only surfaced when the C# was compiled — a BAD EMIT. `undefined`
+        // asks for no particular contents, so the member is dropped and C#'s zero-init stands.
+        var cs = EmitZig(
+            "const B = struct {\n" +
+            "    items: [4]u8,\n" +
+            "    len: usize,\n" +
+            "    fn make() B { return .{ .items = undefined, .len = 0 }; }\n" +
+            "};\n" +
+            "pub fn main() u8 { const b = B.make(); return @intCast(b.len + 42); }\n");
+        cs.ShouldContain("public fixed byte items[4];");   // the field is still inline storage
+        cs.ShouldContain("new B { len = 0 }");             // …and is absent from the initializer
+        cs.ShouldNotContain("items = ");
+    }
+
+    [Fact]
+    public void A_non_undefined_array_field_in_a_struct_literal_is_rejected()
+    {
+        // The other half of the same rule: an array field with real contents would need element-wise
+        // stores into a pinned buffer, which an initializer EXPRESSION can't express. A loud cut
+        // naming the workaround — never a silent CS1666.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const B = struct { items: [4]u8, len: usize };\n" +
+            "pub fn main() u8 {\n" +
+            "    const b: B = .{ .items = [_]u8{ 1, 2, 3, 4 }, .len = 4 };\n" +
+            "    return @intCast(b.len);\n}\n"));
+        ex.Message.ShouldContain("'items' is an array");
+        ex.Message.ShouldContain("var v: B = undefined");
+    }
 }

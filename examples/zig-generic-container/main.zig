@@ -33,9 +33,10 @@ fn Stack(comptime T: type, comptime cap: usize) type {
         // through the alias an instantiation is bound to (`ByteStack.init()`) and equally straight off
         // the generic call (`Stack(u8, 2).init()`, as `std.ArrayList(u8).init(…)` is written).
         pub fn init() Self {
-            var s: Self = undefined;
-            s.len = 0;
-            return s;
+            // A result-located struct literal. The `items` member is inline array storage, so it is
+            // dropped from the emitted C# object initializer (a `fixed` buffer can't be assigned
+            // there) — `undefined` asks for no particular contents anyway.
+            return .{ .items = undefined, .len = 0 };
         }
 
         pub fn push(self: *Self, v: T) void {
