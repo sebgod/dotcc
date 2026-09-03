@@ -9,7 +9,7 @@ level) so that they stop being the only copy, on one machine, outside version co
 dotcc's compile-a-snippet sandbox — WEB7 (PR #100, the same day) turned `RunAOTCompilation` on
 for the Pages publish regardless, measuring 4× Run latency for +1.7 MB brotli. The durable part
 of that note is the **win-arm64 `mono-aot-cross` crash + its workarounds** (which WEB7 did not
-need on ubuntu-x64 CI, and which the next person to try AOT locally will) plus the re-confirmed
+need on ubuntu-x64 CI, but which anyone reproducing an AOT publish locally will hit) plus the re-confirmed
 cuts (NativeAOT-LLVM, WASI, threads).
 
 ---

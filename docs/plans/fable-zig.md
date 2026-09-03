@@ -1,6 +1,6 @@
 # Zig front-end — session findings (2026-07-02, Fable)
 
-> Untracked scratch notes from the "what's next for C/Zig support" survey.
+> Scratch notes (tracked since the 2026-07-07 docs reorg) from the "what's next for C/Zig support" survey.
 > Snapshot of main at `4a43106` (Milestones Y/Z merged 2026-06-29, PRs #33/#34).
 > **Re-verified current 2026-07-03 at main `3dbc80a`** — every claim below
 > cross-checked against ZIG-SUPPORT.md and `ZigLowering.cs`; only the

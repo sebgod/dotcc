@@ -1,6 +1,6 @@
 # Breaking "the wall" — comptime types / generics / anytype (2026-07-05, Fable)
 
-> Untracked scratch plan, sibling to `fable-zig.md` / `fable-c.md`. Snapshot of
+> Scratch plan (tracked since the 2026-07-07 docs reorg), sibling to `fable-zig.md` / `fable-c.md`. Snapshot of
 > main at `77dd565` (both prior scratch plans fully exhausted — every
 > implementable item shipped; see their status markers).
 >
