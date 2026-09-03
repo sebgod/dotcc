@@ -297,6 +297,10 @@ Edge/CDP harness (WEB1/WEB2).
 
 ### WEB5 — flexes (stretch, unordered)
 
+> Cross-repo notes bearing on these: [`fable-web.findings.md`](fable-web.findings.md)
+> — the AOT picture (tianwen) and the reusable `<WebGlCanvas>` host component (chess),
+> in case the sandbox ever grows a canvas.
+
 - **NativeAOT-LLVM `dotcc.wasm`** (D1's v2): one standalone module, no .NET
   runtime download — and the artifact the wasm-frontend campaign's WF8
   self-eating round-trip wants anyway.
@@ -361,6 +365,10 @@ bulk-memory + reference-types + `call_indirect` + linear memory (WF0's finding)
 and won't lift through an early T0 slice.
 
 ### WEB7 — AOT the Pages publish (S) — ✅ DONE (2026-07-17, PR #100)
+
+> The evidence behind this milestone (and the win-arm64 `mono-aot-cross` crash +
+> workarounds you need to reproduce it *locally*) is recorded verbatim in
+> [`fable-web.findings.md`](fable-web.findings.md).
 
 Reverses WEB0's "no AOT needed" cut **for the CI deploy only**, on new evidence
 from the tianwen web-showcase session (2026-07-17): `RunAOTCompilation=true` on a
