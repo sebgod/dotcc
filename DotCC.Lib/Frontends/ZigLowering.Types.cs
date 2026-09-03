@@ -541,18 +541,39 @@ internal sealed partial class ZigLowering
     /// <summary>Lower a dotted std type (Milestone F): a <see cref="StdTypes"/> row — e.g.
     /// <c>std.mem.Allocator</c> → the runtime <see cref="CType.Allocator"/> fat pointer,
     /// <c>std.heap.FixedBufferAllocator</c> → the concrete <see cref="CType.Named"/> bump
-    /// allocator. Any other dotted type errors — either a chain not rooted at a std import
-    /// (so not a known type at all) or an unmodeled std path.</summary>
+    /// allocator — or, when no curated row claims the path, the type the MODULE GRAPH resolves it to
+    /// (road-to-zig-std S4d: <c>util.Point</c>, <c>std.ascii.Pair</c>). Errors when neither has it: a
+    /// navigable module that declares no such type says so by file + name, an unmodeled <c>std.…</c>
+    /// path lists the curated types, and a chain rooted at neither is not a known type at all.</summary>
     private CType LowerStdType(Item f)
     {
-        if (TryResolveStdPath(f, out var path))
+        // The CURATED model is checked FIRST, in type position as in every other (road-to-zig-std S1's
+        // rule; see IsCuratedStdPath for why that ordering is load-bearing).
+        var isStdPath = TryResolveStdPath(f, out var path);
+        if (isStdPath && StdTypes.TryGetValue(path, out var make))
         {
-            if (StdTypes.TryGetValue(path, out var make)) { return make(); }
+            return make();
+        }
+        // Not a curated path: fall back to REAL-SOURCE navigation (road-to-zig-std S4d) — the type
+        // analogue of the expression-position fallback in LowerMethodCall. `mod.Name` (`util.Point`,
+        // `std.ascii.Pair`) resolves `mod` to its module and reads `Name` from the container types that
+        // module registered when it was prepared. A resolvable module that declares no such type is a
+        // LOUD error naming both, not a fall-through: the program did reach it.
+        var member = (Zig.Field)f.Content!;
+        if (!IsCuratedStdPath(f) && ResolveModulePath(member.Arg0) is { } navMod)
+        {
+            var name = Tok(member.Arg2);
+            if (navMod.Lowering?.ResolveExportedType(name) is { } navType) { return navType; }
+            throw new IrUnsupportedException(
+                $"zig module '{System.IO.Path.GetFileName(navMod.Path)}' declares no type '{name}'");
+        }
+        if (isStdPath)
+        {
             throw new IrUnsupportedException(
                 $"zig type `{path}` is not modeled (std types: {string.Join(", ", StdTypes.Keys)})");
         }
         throw new IrUnsupportedException(
-            $"zig type: a dotted type `{Tok(((Zig.Field)f.Content!).Arg2)}` that is not a modeled std path");
+            $"zig type: a dotted type `{Tok(member.Arg2)}` that is not a modeled std path");
     }
 
     /// <summary>Lower a tuple TYPE body (the <c>T1, T2, …</c> inside <c>struct { … }</c> at a Type

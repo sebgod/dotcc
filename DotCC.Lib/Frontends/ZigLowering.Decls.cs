@@ -155,6 +155,18 @@ internal sealed partial class ZigLowering
         return (sym, new List<(string name, CType type)>(), body);
     }
 
+    /// <summary>A method declaration's own name, without declaring anything — so a lazily-prepared
+    /// module can index its methods by name (see <c>_lazyMethodDecls</c>) and declare one only when it
+    /// is actually called. The four shapes match <see cref="DeclareMethod"/>'s switch.</summary>
+    private static string MethodNameOf(Item fnDef) => Tok(fnDef.Content switch
+    {
+        Zig.FnDef f          => f.Arg1,
+        Zig.FnDefNoArgs f    => f.Arg1,
+        Zig.FnDefErr f       => f.Arg1,
+        Zig.FnDefNoArgsErr f => f.Arg1,
+        _ => throw new IrUnsupportedException("zig method: " + (fnDef.Content?.GetType().Name ?? "null")),
+    });
+
     /// <summary>Pass 1 for a struct method: declare it as a free function named
     /// <c>TypeName_method</c> (its receiver, if any, is the ordinary first parameter, so the
     /// body lowers exactly like a free function — <c>self.x</c> is plain field access) and record

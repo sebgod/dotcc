@@ -53,6 +53,141 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void Lowers_a_type_declared_in_an_imported_module()
+    {
+        // The TYPE-position half of module navigation (road-to-zig-std S4d): `util.Point` in an
+        // annotation resolves through the module graph to the struct the sibling declares. Only
+        // FUNCTIONS could be reached across modules before — a dotted type went to the std-type
+        // registry and threw ("a dotted type `Point` that is not a modeled std path").
+        var cs = EmitZigMulti(
+            "const util = @import(\"./util.zig\");\n" +
+            "pub fn main() u8 { const p: util.Point = .{ .x = 40, .y = 2 }; return p.x + p.y; }\n",
+            ("util.zig", "pub const Point = struct { x: u8, y: u8 };\n"));
+        cs.ShouldContain("struct Point");
+        cs.ShouldContain("new Point {");
+    }
+
+    [Fact]
+    public void Lowers_a_type_returning_generic_declared_in_an_imported_module()
+    {
+        // A module-qualified call in a type slot — `list.Box(u8)`, the shape `std.ArrayList(T)` has.
+        // The template lives in the sibling, so it reifies in THAT module's environment; the comptime
+        // TYPE argument still resolves in the caller's (it is spelled at the call site). The method
+        // proves the reified container's deferred bodies are drained for a lazily-lowered module too.
+        var cs = EmitZigMulti(
+            "const list = @import(\"./list.zig\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var box: list.Box(u8) = .{ .first = 2, .len = 40 };\n" +
+            "    box.len += 0;\n" +
+            "    return @intCast(box.total());\n" +
+            "}\n",
+            ("list.zig",
+                "pub fn Box(comptime T: type) type {\n" +
+                "    return struct {\n" +
+                "        first: T,\n" +
+                "        len: usize,\n" +
+                "        const Self = @This();\n" +
+                "        pub fn total(self: Self) usize { return self.len + self.first; }\n" +
+                "    };\n" +
+                "}\n"));
+        cs.ShouldContain("struct Box__u8");
+        cs.ShouldContain("Box__u8_total(Box__u8 self)");
+    }
+
+    [Fact]
+    public void A_type_returning_generic_from_an_imported_module_keys_on_the_resolved_type()
+    {
+        // The W3b memo rule holds across the module seam: two instantiations of the same imported
+        // template with DIFFERENT resolved type arguments reify two distinct containers, and an alias
+        // (`const E = u8;`) resolves in the CALLER's environment before keying — so `Box(E)` is
+        // `Box(u8)`, one reified type, not a third.
+        var cs = EmitZigMulti(
+            "const list = @import(\"./list.zig\");\n" +
+            "const E = u8;\n" +
+            "pub fn main() u8 {\n" +
+            "    const a: list.Box(u8) = .{ .first = 1 };\n" +
+            "    const b: list.Box(E) = .{ .first = 1 };\n" +
+            "    const c: list.Box(u16) = .{ .first = 40 };\n" +
+            "    return @intCast(a.first + b.first + c.first);\n" +
+            "}\n",
+            ("list.zig",
+                "pub fn Box(comptime T: type) type { return struct { first: T }; }\n"));
+        cs.ShouldContain("struct Box__u8");
+        cs.ShouldContain("struct Box__u16");
+    }
+
+    [Fact]
+    public void Calls_a_method_on_a_type_declared_in_an_imported_module()
+    {
+        // A navigated type has to be USABLE, not just nameable. A prepared module deliberately does not
+        // declare its methods (that would lower their signatures, and an unreferenced decl must stay
+        // invisible — road-to-zig-std S2), so the first CALL declares the method in ITS module and
+        // enqueues the body for that module's drain (EnsureMethodDeclared).
+        var cs = EmitZigMulti(
+            "const geom = @import(\"./geom.zig\");\n" +
+            "pub fn main() u8 { const p: geom.Point = .{ .x = 40, .y = 2 }; return p.sum(); }\n",
+            ("geom.zig",
+                "pub const Point = struct {\n" +
+                "    x: u8,\n" +
+                "    y: u8,\n" +
+                "    pub fn sum(self: Point) u8 { return self.x + self.y; }\n" +
+                "};\n"));
+        cs.ShouldContain("Point_sum(Point self)");   // declared AND its body drained
+        cs.ShouldContain("Point_sum(p)");            // the call site binds to it
+    }
+
+    [Fact]
+    public void Resolves_a_member_of_an_enum_declared_in_an_imported_module()
+    {
+        // The enum-member table is keyed by the enum's (program-unique) name and shared down the
+        // @import chain, so `.y` at a sink typed by an IMPORTED enum resolves — the same reasoning as
+        // the method table.
+        var cs = EmitZigMulti(
+            "const geom = @import(\"./geom.zig\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const a: geom.Axis = .y;\n" +
+            "    return if (a == .y) 42 else 0;\n" +
+            "}\n",
+            ("geom.zig", "pub const Axis = enum { x, y };\n"));
+        cs.ShouldContain("Axis.y");
+    }
+
+    [Fact]
+    public void Rejects_a_type_an_imported_module_does_not_declare()
+    {
+        // A resolvable module with no such type is a loud error naming the FILE and the type, so the
+        // message says where dotcc looked (road-to-zig-std S4d).
+        var ex = Should.Throw<CompileException>(() => EmitZigMulti(
+            "const util = @import(\"./util.zig\");\n" +
+            "pub fn main() u8 { const p: util.Nope = .{ .x = 1 }; _ = p; return 0; }\n",
+            ("util.zig", "pub const Point = struct { x: u8 };\n")));
+        ex.Message.ShouldContain("util.zig");
+        ex.Message.ShouldContain("Nope");
+    }
+
+    [Fact]
+    public void Rejects_two_imported_modules_declaring_different_types_under_one_name()
+    {
+        // Cross-module type references make same-named aggregates reachable, and the emitted C# can
+        // carry only ONE type per name — a container is registered under its plain source name, so the
+        // second definition would be silently dropped and every use of it would read the first one's
+        // layout. That is now a loud error (module-qualified type naming is the real fix — see
+        // docs/plans/deferred.md).
+        var ex = Should.Throw<CompileException>(() => EmitZigMulti(
+            "const a = @import(\"./a.zig\");\n" +
+            "const b = @import(\"./b.zig\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const p: a.Shape = .{ .x = 1 };\n" +
+            "    const q: b.Shape = .{ .y = 2 };\n" +
+            "    return p.x + q.y;\n" +
+            "}\n",
+            ("a.zig", "pub const Shape = struct { x: u8 };\n"),
+            ("b.zig", "pub const Shape = struct { y: u8 };\n")));
+        ex.Message.ShouldContain("Shape");
+        ex.Message.ShouldContain("silently dropped");
+    }
+
+    [Fact]
     public void Lowers_switch_return_prongs()
     {
         // A statement `switch` whose prongs are `=> return [e]` (road-to-zig-std S9 — parsed since #89,

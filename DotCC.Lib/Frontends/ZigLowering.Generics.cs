@@ -458,7 +458,42 @@ internal sealed partial class ZigLowering
             type = EvalTypeReturningCall(sym, info, args);
             return true;
         }
+        // A MODULE-QUALIFIED callee (`array_list.Aligned(u8)`, `std.array_list.Aligned(u8)`) — the
+        // type-position half of module-graph navigation (road-to-zig-std S4d). The template lives in the
+        // imported module, so the reification runs THERE (its body's types resolve in its own
+        // environment); only the comptime TYPE arguments resolve here, in the caller's, since the
+        // argument expressions are the caller's. A curated path is never navigated (S1's rule).
+        if (calleeItem.Content is Zig.Field fld
+            && !IsCuratedStdPath(calleeItem)
+            && ResolveModulePath(fld.Arg0) is { Lowering: { } nav }
+            && nav.TryEvalExportedTypeReturningCall(Tok(fld.Arg2), args, caller: this) is { } navType)
+        {
+            type = navType;
+            return true;
+        }
         return false;
+    }
+
+    /// <summary>Reify a type-returning generic THIS module exports, called from
+    /// <paramref name="caller"/> (road-to-zig-std S4d). Declares the decl on demand
+    /// (<see cref="EnsureDeclLowered"/> — in a lazy module a template is only a retained AST until
+    /// something references it), then evaluates it exactly as a local call would, except that the
+    /// comptime TYPE arguments are resolved in the CALLER's type environment: the argument expressions
+    /// (<c>Aligned(MyAlias)</c>) belong to the caller, while the template's body and parameter types
+    /// belong here. Null when this module exports no such type-returning generic, so the caller can
+    /// fall through to its own handling.
+    /// <para>V1 cut: a non-type comptime argument (a <c>comptime n: usize</c> value) is evaluated in
+    /// THIS module's environment, so a literal works but a caller-scoped named constant fails loudly
+    /// with the ordinary "must be a compile-time-known value" error rather than being read from the
+    /// caller (docs/plans/deferred.md).</para></summary>
+    internal CType? TryEvalExportedTypeReturningCall(string name, IReadOnlyList<Item> argItems, ZigLowering caller)
+    {
+        if (EnsureDeclLowered(name) is not { } sym
+            || !_typeReturningGenerics.TryGetValue(sym, out var info))
+        {
+            return null;
+        }
+        return EvalTypeReturningCall(sym, info, argItems, typeArgScope: caller);
     }
 
     /// <summary>Evaluate (or reuse) a type-returning generic at a use site (wall-plan W4): resolve each
@@ -481,8 +516,13 @@ internal sealed partial class ZigLowering
     /// under them — which is what lets a later parameter's declared type spell an earlier type parameter
     /// (<c>fn Counter(comptime T: type, comptime start: T) type</c>; parameters bind LEFT TO RIGHT, as in
     /// zig).</para></summary>
-    private CType EvalTypeReturningCall(Symbol templateSym, TypeReturningGenericInfo info, IReadOnlyList<Item> argItems)
+    private CType EvalTypeReturningCall(Symbol templateSym, TypeReturningGenericInfo info,
+        IReadOnlyList<Item> argItems, ZigLowering? typeArgScope = null)
     {
+        // Whose type environment the comptime TYPE arguments are read in: this module's for an ordinary
+        // local call, the CALLER's when the template was reached through the module graph (S4d) — the
+        // arguments are spelled at the call site, so they resolve there.
+        var argScope = typeArgScope ?? this;
         if (argItems.Count != info.Params.Count)
         {
             throw new IrUnsupportedException(
@@ -506,7 +546,7 @@ internal sealed partial class ZigLowering
         {
             if (info.Params[i].Kind == ParamKind.ComptimeType)
             {
-                typeSeeds.Add((info.Params[i].Name, LowerType(argItems[i]).Unqualified));
+                typeSeeds.Add((info.Params[i].Name, argScope.LowerType(argItems[i]).Unqualified));
             }
         }
 

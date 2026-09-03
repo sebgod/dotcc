@@ -119,6 +119,19 @@ reproduced on a plain/ordinary construct, so none was generic-specific — and a
   apart. Fixed 2026-08-09. **The complementary direction is still open** — a NON-curated std TYPE
   cannot fall back to navigation; that is the plan's G4 blocker (4), S4d.
 
+## Zig — the module seam (navigation works; these edges don't)
+
+Type-position navigation landed 2026-09-03 (road-to-zig-std S4d): a non-curated dotted type, and a
+module-qualified call in a type slot, resolve through the module graph, and a navigated type carries
+its methods + enum members. These edges of the same seam are deliberate V1 cuts — each is LOUD.
+
+| Gap | Divergence | Fix sketch |
+|---|---|---|
+| Container types are registered under their PLAIN source name | Two modules declaring `struct Options {…}` collide; `IrBuilder.RegisterStructType` now THROWS rather than silently keeping the first (which was a wrong-layout miscompile waiting for the first cross-module type reference). Real std has many same-named containers, so this will fire as the G-goals grow | module-qualified container naming (S1's stated `std__mem__…` rule, never implemented for containers): register a lazy module's containers as `<module>__<Name>`, keep its own `_containerTypes` keyed by the plain name → the mangled `CType.Named`, and thread the mangled name through pass 0a/0b's ~18 registration sites (methods/consts/nested containers key off it already) |
+| A cross-module container `const` (`k.Cfg.MAX`) | Not resolved — the value path reports `unresolved identifier 'k'` (a 3-segment value chain through a module). Container consts ARE registered, in the owning module's tables | give the value path the same owner lookup the type path got, or share the container-const table through `ZigImportScope` like the method + enum-member tables |
+| A comptime VALUE argument to an imported type-returning generic | Evaluated in the OWNING module's environment, so a literal works but a caller-scoped named constant fails with "must be a compile-time-known value" | pre-resolve non-type comptime args in the caller (the two-phase split already threads the caller's scope for TYPE args) |
+| A type-returning body that returns another type-returning CALL | `pub fn ArrayList(comptime T: type) type { return Aligned(T, null); }` — exactly what `std.ArrayList` is — hits W4's "the body's final statement must be `return struct { … };`". Now REACHABLE (the module-qualified call resolves), which is the S4d dividend | G4 blocker 2: admit a `return <type-expr>;` body by evaluating it as a type and returning it, instead of requiring a struct literal |
+
 ## Zig — deferred grammar (does NOT parse yet; cut for a reason)
 
 | Construct | Why deferred | Unblock |

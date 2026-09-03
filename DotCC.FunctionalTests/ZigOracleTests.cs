@@ -2508,6 +2508,49 @@ public sealed class ZigOracleTests
         new object[] { "import_transitive",
             "const a = @import(\"a.zig\");\npub fn main() u8 { return a.step(40); }\n",
             "a.zig", "const b = @import(\"b.zig\");\npub fn step(x: u8) u8 { return x + b.two(); }\n", 42, "" },
+        // A TYPE declared in the imported module, used in an annotation (road-to-zig-std S4d):
+        // 40 + 2 = 42. Only functions crossed the module seam before.
+        new object[] { "import_type",
+            "const util = @import(\"util.zig\");\n" +
+            "pub fn main() u8 { const p: util.Point = .{ .x = 40, .y = 2 }; return p.x + p.y; }\n",
+            "util.zig", "pub const Point = struct { x: u8, y: u8 };\n", 42, "" },
+        // A METHOD on a type the imported module declares — declared on demand at the call site and
+        // lowered in its own module (S4d): 40 + 2 = 42.
+        new object[] { "import_type_method",
+            "const geom = @import(\"geom.zig\");\n" +
+            "pub fn main() u8 { const p: geom.Point = .{ .x = 40, .y = 2 }; return p.sum(); }\n",
+            "geom.zig",
+            "pub const Point = struct {\n" +
+            "    x: u8,\n" +
+            "    y: u8,\n" +
+            "    pub fn sum(self: Point) u8 { return self.x + self.y; }\n" +
+            "};\n", 42, "" },
+        // An ENUM the imported module declares, with a bare `.member` literal at an imported-enum sink.
+        new object[] { "import_enum_member",
+            "const geom = @import(\"geom.zig\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const a: geom.Axis = .y;\n" +
+            "    return if (a == .y) 42 else 0;\n" +
+            "}\n",
+            "geom.zig", "pub const Axis = enum { x, y };\n", 42, "" },
+        // A type-returning GENERIC declared in the imported module, instantiated in a type slot and
+        // called through — the shape `std.ArrayList(T)` has (S4d × G4): 40 + 2 = 42.
+        new object[] { "import_generic_type",
+            "const list = @import(\"list.zig\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var box: list.Box(u8) = .{ .first = 2, .len = 40 };\n" +
+            "    box.len += 0;\n" +
+            "    return @intCast(box.total());\n" +
+            "}\n",
+            "list.zig",
+            "pub fn Box(comptime T: type) type {\n" +
+            "    return struct {\n" +
+            "        first: T,\n" +
+            "        len: usize,\n" +
+            "        const Self = @This();\n" +
+            "        pub fn total(self: Self) usize { return self.len + self.first; }\n" +
+            "    };\n" +
+            "}\n", 42, "" },
     };
 
     [Theory]
