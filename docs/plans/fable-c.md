@@ -1,6 +1,6 @@
 # C front-end — next-batch plan (2026-07-03, Fable)
 
-> Untracked scratch notes, sibling to `fable-zig.md`. Snapshot of main at
+> Scratch notes (tracked since the 2026-07-07 docs reorg), sibling to `fable-zig.md`. Snapshot of main at
 > `3dbc80a` (constexpr merged — the C11/C23 completion milestone is DONE and the
 > ❌ roadmap column is empty; see `~/.claude/plans/c11-c23-completion.md`).
 > This file plans the follow-up batch picked from the 2026-07-03 coverage sweep:
