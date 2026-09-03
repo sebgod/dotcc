@@ -50,6 +50,26 @@ internal sealed class ZigModule
 }
 
 /// <summary>
+/// The lowering tables one <c>@import</c> chain SHARES — a root unit creates one and every module it
+/// imports (transitively) is handed the same instance, the way the flat error-code space already was.
+/// Each table is keyed by a name that is unique across the emitted program (a container's, an enum's),
+/// so sharing is what lets a call site reach a member of a type another module declared — the read side
+/// of type-position navigation (road-to-zig-std S4d). Two independent ROOT units get separate scopes:
+/// they see each other only through <c>@import</c>, exactly as before.
+/// </summary>
+internal sealed class ZigImportScope
+{
+    /// <summary>Per container name, method name → the mangled free function it lowered to.</summary>
+    public Dictionary<string, Dictionary<string, Symbol>> Methods { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>Per enum name, member name → its enum-constant symbol.</summary>
+    public Dictionary<string, Dictionary<string, Symbol>> EnumMembers { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>(container, method) → the module that owns an as-yet-undeclared lazy method + its AST.</summary>
+    public Dictionary<(string container, string method), (ZigLowering owner, Item decl)> LazyMethodDecls { get; } = new();
+}
+
+/// <summary>
 /// The Zig module graph (road-to-zig-std S1): resolves <c>@import</c> specs to <see cref="ZigModule"/>s
 /// and caches one module per canonical path, so an import cycle (legal and common in std) loads each
 /// file once. Files are parsed <em>resiliently</em> (<see cref="Parser.ParseInputResilient"/>) so a decl

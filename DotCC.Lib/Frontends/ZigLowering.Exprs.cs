@@ -1027,7 +1027,7 @@ internal sealed partial class ZigLowering
             && ContainerTypeName(baseTy) is { } typeName
             && _symbols.Resolve(Tok(bid.Arg0)) is null)
         {
-            if (!_methods.TryGetValue(typeName, out var byType) || !byType.TryGetValue(methodName, out var staticSym))
+            if (EnsureMethodDeclared(typeName, methodName) is not { } staticSym)
             {
                 throw new IrUnsupportedException($"'{typeName}' has no function '{methodName}'");
             }
@@ -1045,8 +1045,7 @@ internal sealed partial class ZigLowering
             && TryEvalTypeReturningCall(fld.Arg0, out var reifiedBase)
             && ContainerTypeName(reifiedBase) is { } reifiedName)
         {
-            if (!_methods.TryGetValue(reifiedName, out var reifiedMethods)
-                || !reifiedMethods.TryGetValue(methodName, out var reifiedSym))
+            if (EnsureMethodDeclared(reifiedName, methodName) is not { } reifiedSym)
             {
                 throw new IrUnsupportedException($"'{reifiedName}' has no function '{methodName}'");
             }
@@ -1105,7 +1104,7 @@ internal sealed partial class ZigLowering
             throw new IrUnsupportedException(
                 $"zig method call `.{methodName}()` needs a struct (or pointer-to-struct) receiver, got {recv.Type.Describe()}");
         }
-        if (!_methods.TryGetValue(container, out var methods) || !methods.TryGetValue(methodName, out var msym))
+        if (EnsureMethodDeclared(container, methodName) is not { } msym)
         {
             throw new IrUnsupportedException($"struct '{container}' has no method '{methodName}'");
         }

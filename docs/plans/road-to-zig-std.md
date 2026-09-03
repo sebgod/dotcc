@@ -154,6 +154,42 @@ that retire curated shortcuts.
 > lowering-*depth* bricks, though S4a did retire the `'|' in state 518` probe bucket
 > (10 files' first failure — value-position captures in `std/Io/Reader.zig` et al).
 
+> **Status update (2026-09-03) — S4d DONE.** Module navigation now reaches **types**, not just
+> functions. Before this, `LowerType`'s dotted (`Zig.Field`) case went to the curated std-type
+> registry and threw when it missed, and its call (`Zig.CallArgs`) case only recognized a curated
+> generic or a locally-declared template — so no type from another module, real `std` included, could
+> be named at all. Now:
+> - a dotted type no curated row claims resolves through the module graph to that module's registered
+>   container (`ResolveExportedType`), with a loud error naming the FILE and the type when it has none;
+> - a module-qualified call in a type slot (`list.Box(u8)`, `std.array_list.Aligned(u8)` — the shape
+>   `std.ArrayList(T)` has) reifies the imported template **in its own module's environment**, keyed by
+>   the type argument resolved in the **caller's** (the arguments are spelled at the call site);
+> - the curated set is still checked FIRST, in type position as everywhere else (`IsCuratedStdPath`),
+>   with a synthetic `mem.zig` whose `Allocator` cannot lower pinning that ordering.
+>
+> Making a navigated type *usable* rather than merely nameable took three companion fixes, each a gap
+> the brick newly exposed: a lazy module now **drains the generic-instance and reified-method
+> worklists** the way pass 2.5 does for a root (otherwise a reified type's methods were declared and
+> never lowered — a bad emit); the **method** and **enum-member** tables are now shared down the
+> `@import` chain (`ZigImportScope`), since both are keyed by a name that is unique across the emitted
+> program; and a prepared module's **container methods are declared on first call**
+> (`EnsureMethodDeclared`) rather than at prepare time, which would have lowered signatures for
+> unreferenced decls and defeated S2's whole point.
+>
+> One silent hazard was closed on the way: `IrBuilder.RegisterStructType` was idempotent-by-name and
+> **ignored** a second, differently-shaped aggregate — invisible while imported types were unreachable,
+> a wrong-layout miscompile the moment they weren't. It now throws. The real fix is module-qualified
+> container naming ([`deferred.md`](deferred.md)).
+>
+> Validation: 8 emit pins (sibling-module + synthetic-std-tree) + 4 new zig-oracle programs
+> (`import_type`, `import_type_method`, `import_enum_member`, `import_generic_type`) + the runnable
+> `examples/zig-module-types/`, byte-identical to real zig 0.17.0-dev.667 at exit 42.
+>
+> **Reached but still cut** (each loud, each a next brick): G4 blocker 2 — a type-returning body that
+> returns another type-returning CALL (`pub fn ArrayList(comptime T) type { return Aligned(T, null); }`)
+> still hits W4's "must be `return struct {…}`"; a cross-module container `const`
+> (`k.Cfg.MAX`); and a comptime VALUE argument that is a caller-scoped named constant.
+
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)
 
 An opt-in test/tool (`DOTCC_RUN_STD_PROBE=1`, env `DOTCC_ZIG_LIB_DIR` or
@@ -484,10 +520,15 @@ peephole (or delete it):
   3. **Mutable slices pervade** (`self.items.len += 1`, `self.items.ptr = new_memory.ptr`),
      but `Slice<T>.Len` is `readonly` — the fat pointer is immutable by design. Needs a
      mutable-slice form or an emitter rewrite that reconstructs the slice on field-assign.
-  4. **S4d — type-position module-graph fallback**: `LowerType`'s `Zig.CallArgs`/`Zig.Field`
-     cases throw instead of falling through to `ResolveModulePath`, and the curated
-     `StdGenericTypes["std.ArrayList"] → ZigList` peephole intercepts first — so
-     `std.ArrayList`/`std.mem.Alignment` cannot reach source at all today.
+  4. ~~**S4d — type-position module-graph fallback**~~ — **✅ DONE 2026-09-03** (see the status update
+     above). `LowerType`'s dotted and call cases now fall through to `ResolveModulePath`, so a
+     non-curated std TYPE reaches source; a navigated type carries its methods and enum members. The
+     curated `StdGenericTypes["std.ArrayList"] → ZigList` peephole still intercepts `std.ArrayList`
+     itself by design — retiring that peephole is G4's own step, once blockers 2/3/5 are cleared.
+     The original entry, for the record: `LowerType`'s `Zig.CallArgs`/`Zig.Field`
+     cases threw instead of falling through to `ResolveModulePath`, and the curated
+     peephole intercepted first — so
+     `std.ArrayList`/`std.mem.Alignment` could not reach source at all.
      The OPPOSITE direction of the same seam is now closed (2026-08-09): a curated path is never
      navigated, so configuring a std root no longer breaks the curated allocators (they were mutually
      exclusive — 6 oracle programs failed with `DOTCC_ZIG_LIB_DIR` set). The full zig oracle is green

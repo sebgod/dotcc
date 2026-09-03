@@ -251,8 +251,23 @@ a NON-curated path navigates the actual upstream files and lowers LAZILY (only t
 references), which is how real `std.ascii` compiles from source today. A curated path always wins over
 navigation — upstream re-exports its allocators as whole files, so `std.heap.FixedBufferAllocator` is
 both, and only the curated model can lower it. With no std tree configured, anything non-curated errors
-clearly. (Still missing in the other direction: a non-curated std path in TYPE position can't yet fall
-back to navigation — plan blocker S4d.)
+clearly.
+
+**Navigation reaches TYPES, not just functions** (road-to-zig-std **S4d**). A dotted type that no
+curated row claims (`util.Point`, `std.ascii.Pair`) resolves through the module graph to the container
+that module declares; a module-qualified call in a type slot (`list.Box(u8)`,
+`std.array_list.Aligned(u8)` — the shape `std.ArrayList(T)` has) reifies the imported template, in
+*its* module's environment, keyed by the type argument resolved in the *caller's*. A navigated type is
+usable, not merely nameable: its **methods** are declared on first call (a prepared module deliberately
+doesn't declare them up front — an unreferenced decl must stay invisible) and its **enum members**
+resolve at a sink typed by it. A resolvable module that declares no such type is a loud error naming
+both the file and the type. Oracle `import_type` / `import_type_method` / `import_enum_member` /
+`import_generic_type`; example `examples/zig-module-types/`; unit `ZigFrontendTests` +
+`ZigCuratedStdVsNavigationTests`. **Cuts (loud):** a cross-module container `const` (`k.Cfg.MAX`); a
+comptime VALUE argument that is a caller-scoped named constant (a literal is fine); and a
+type-returning body that returns another type-returning CALL (`return Aligned(T, null);` — what
+`std.ArrayList` itself is), which still hits W4's `return struct {…}` rule. See
+[`plans/deferred.md`](plans/deferred.md).
 
 ### Test runner — `dotcc zig test`
 

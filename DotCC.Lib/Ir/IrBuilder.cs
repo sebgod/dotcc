@@ -1098,9 +1098,23 @@ internal sealed partial class IrBuilder
     /// <summary>Register a Zig struct/union under <paramref name="name"/>: add it to the
     /// emitted <see cref="Types"/> list AND the field/union layout tables so member access
     /// and <c>sizeof</c>/<c>offsetof</c> resolve through the same compile-time model the C
-    /// frontend uses. Idempotent on the name (a second registration is ignored).</summary>
+    /// frontend uses. Idempotent on the name — a second registration of the SAME shape is ignored,
+    /// but one that would silently REDEFINE an existing aggregate (same name, different fields or
+    /// union-ness) throws: the emitted C# has one type per name, so the second definition would be
+    /// dropped and every use of it would read the first one's layout. Two Zig modules each declaring
+    /// <c>struct Options {…}</c> is the way to hit this (a container type is registered under its plain
+    /// source name — module-qualified naming is the real fix, see docs/plans/deferred.md); a loud error
+    /// beats a silent miscompile.</summary>
     internal void RegisterStructType(string name, List<StructField> fields, bool isUnion, AggregateLayout layout = AggregateLayout.Default)
     {
+        if (_structFields.TryGetValue(name, out var already)
+            && (isUnion != _structIsUnion[name] || !already.SequenceEqual(fields)))
+        {
+            throw new IrUnsupportedException(
+                $"two different aggregates are both named '{name}' — the emitted C# can only carry one, so the "
+                + "second definition would be silently dropped (Zig: two modules declaring a same-named "
+                + "struct/union; module-qualified type naming is the fix)");
+        }
         if (_emittedTypes.Add(name))
         {
             _structFields[name] = fields;

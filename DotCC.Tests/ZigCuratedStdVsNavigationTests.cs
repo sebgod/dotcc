@@ -40,12 +40,32 @@ public sealed class ZigCuratedStdVsNavigationTests
         Directory.CreateDirectory(Path.Combine(std, "heap"));
         File.WriteAllText(Path.Combine(std, "std.zig"),
             "pub const heap = @import(\"heap.zig\");\n" +
-            "pub const ascii = @import(\"ascii.zig\");\n");
+            "pub const ascii = @import(\"ascii.zig\");\n" +
+            "pub const mem = @import(\"mem.zig\");\n" +
+            "pub const array_list = @import(\"array_list.zig\");\n");
+        // `std.mem.Allocator` is a CURATED type and (here, as upstream) also a navigable module member —
+        // the type-position twin of the heap/FixedBufferAllocator.zig collision. Its field type is the
+        // unlowerable marker, so if type-position navigation ever beat the curated model the compile
+        // would fail loudly on it (road-to-zig-std S4d must not regress S1's curated-first rule).
+        File.WriteAllText(Path.Combine(std, "mem.zig"),
+            $"pub const Allocator = struct {{ marker: {NavigationMarker} }};\n");
+        // A type-returning generic reached through the module graph, carrying a method — the shape
+        // `std.ArrayList` has (road-to-zig-std G4 × S4d).
+        File.WriteAllText(Path.Combine(std, "array_list.zig"),
+            "pub fn Aligned(comptime T: type) type {\n" +
+            "    return struct {\n" +
+            "        first: T,\n" +
+            "        len: usize,\n" +
+            "        const Self = @This();\n" +
+            "        pub fn total(self: Self) usize { return self.len + self.first; }\n" +
+            "    };\n" +
+            "}\n");
         File.WriteAllText(Path.Combine(std, "heap.zig"),
             "pub const FixedBufferAllocator = @import(\"heap/FixedBufferAllocator.zig\");\n");
         File.WriteAllText(Path.Combine(std, "heap", "FixedBufferAllocator.zig"),
             $"pub fn init(buffer: []u8) {NavigationMarker} {{ return buffer; }}\n");
         File.WriteAllText(Path.Combine(std, "ascii.zig"),
+            "pub const Pair = struct { a: u8, b: u8 };\n" +
             "pub fn isDigit(c: u8) bool { return c >= '0' and c <= '9'; }\n");
         return Path.Combine(root, "lib");
     }
@@ -128,5 +148,74 @@ public sealed class ZigCuratedStdVsNavigationTests
             "}\n"));
         ex.Message.ShouldContain("std.heap.FixedBufferAllocator");
         ex.Message.ShouldContain("initNoRetry");
+    }
+
+    [Fact]
+    public void A_non_curated_std_TYPE_navigates_to_real_source()
+    {
+        // road-to-zig-std S4d — the type-position half of navigation. `std.ascii.Pair` is not a curated
+        // type, so it resolves through the module graph to the struct `ascii.zig` declares, lowered from
+        // that source. Before S4d every dotted type that wasn't a curated row threw ("zig type
+        // `std.ascii.Pair` is not modeled"), so no std TYPE could reach real source at all.
+        var cs = EmitWithStdTree(
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const p: std.ascii.Pair = .{ .a = 40, .b = 2 };\n" +
+            "    return p.a + p.b;\n" +
+            "}\n");
+        cs.ShouldContain("struct Pair");    // the navigated module's own declaration, emitted
+        cs.ShouldContain("new Pair {");
+    }
+
+    [Fact]
+    public void A_curated_std_TYPE_is_not_navigated_in_type_position()
+    {
+        // S1's ordering rule, now in type position too: `std.mem.Allocator` is curated, so it lowers to
+        // dotcc's runtime fat pointer and the navigable `mem.zig` member is never consulted — that
+        // file's marker field type would fail the compile loudly if navigation won.
+        var cs = EmitWithStdTree(
+            "const std = @import(\"std\");\n" +
+            "fn takes(a: std.mem.Allocator) u8 { _ = a; return 42; }\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf: [64]u8 = undefined;\n" +
+            "    var fba = std.heap.FixedBufferAllocator.init(&buf);\n" +
+            "    return takes(fba.allocator());\n" +
+            "}\n");
+        cs.ShouldNotContain(NavigationMarker);
+    }
+
+    [Fact]
+    public void A_non_curated_std_GENERIC_type_navigates_and_carries_its_methods()
+    {
+        // The other type-position shape: a module-qualified CALL in a type slot
+        // (`std.array_list.Aligned(u8)`) — what `std.ArrayList(T)` is. The template lives in the
+        // navigated module, so it reifies THERE, and its methods still have to reach the emitted
+        // program: a lazy module must drain the reified-method worklist the way pass 2.5 does for a root.
+        var cs = EmitWithStdTree(
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var box: std.array_list.Aligned(u8) = .{ .first = 2, .len = 40 };\n" +
+            "    box.len += 0;\n" +
+            "    return @intCast(box.total());\n" +
+            "}\n");
+        cs.ShouldContain("struct Aligned__u8");                     // reified per resolved type arg
+        cs.ShouldContain("Aligned__u8_total(Aligned__u8 self)");    // …and its method BODY was drained
+    }
+
+    [Fact]
+    public void A_type_the_navigated_module_does_not_declare_is_rejected_by_name()
+    {
+        // A resolvable module that declares no such type is a loud error naming both — never a
+        // fall-through to the old "not a modeled std path" message, which wouldn't say which file was
+        // searched.
+        var ex = Should.Throw<CompileException>(() => EmitWithStdTree(
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const p: std.ascii.Nope = .{ .a = 1 };\n" +
+            "    _ = p;\n" +
+            "    return 0;\n" +
+            "}\n"));
+        ex.Message.ShouldContain("ascii.zig");
+        ex.Message.ShouldContain("Nope");
     }
 }

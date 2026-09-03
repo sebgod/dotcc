@@ -129,14 +129,26 @@ internal sealed partial class ZigLowering
     /// nested inside another body's lowering, the re-entrancy discipline the monomorphization worklist
     /// already follows. A body drained here may reference more decls (a sibling call), which enqueue and
     /// are picked up by the same cursor loop.</summary>
-    private readonly List<(Symbol sym, List<(string name, CType type)> ps, Item body)> _pendingModuleBodies = new();
+    /// <para><c>container</c> is non-null for a method body (declared on demand by
+    /// <see cref="EnsureMethodDeclared"/>), so the drain can set <see cref="_currentContainer"/> around it
+    /// the way pass 2 does — a <c>@This()</c> in the body has to resolve to its container.</para>
+    private readonly List<(Symbol sym, List<(string name, CType type)> ps, Item body, string? container)> _pendingModuleBodies = new();
 
     /// <summary>Cursor into <see cref="_pendingModuleBodies"/> — so a repeated drain (the graph loops
     /// until no module has pending work) resumes rather than re-lowering.</summary>
     private int _pendingBodyCursor;
 
-    /// <summary>True while this (lazy) module still has function bodies enqueued but not yet lowered.</summary>
-    internal bool HasPendingBodies => _pendingBodyCursor < _pendingModuleBodies.Count;
+    /// <summary>Cursors into the two worklists a lazy module shares with pass 2.5 — see
+    /// <see cref="DrainPendingBodies"/>.</summary>
+    private int _pendingInstCursor;
+    private int _pendingReifiedCursor;
+
+    /// <summary>True while this (lazy) module still has work enqueued but not yet lowered — a referenced
+    /// function body, a monomorphized generic instance, or a reified type-returning generic's method.</summary>
+    internal bool HasPendingBodies =>
+        _pendingBodyCursor < _pendingModuleBodies.Count
+        || _pendingInstCursor < _pendingInstantiations.Count
+        || _pendingReifiedCursor < _pendingReifiedMethods.Count;
 
     /// <summary>Ensure a lazy module's function <paramref name="name"/> is DECLARED (signature lowered so
     /// a call can bind to it) and its body ENQUEUED for the top-level drain; returns the function symbol,
@@ -162,21 +174,82 @@ internal sealed partial class ZigLowering
         // via the monomorphization worklist); everything else enqueues its body for the top-level drain.
         if (!_genericFns.ContainsKey(e.sym) && !_typeReturningGenerics.ContainsKey(e.sym))
         {
-            _pendingModuleBodies.Add(e);
+            _pendingModuleBodies.Add((e.sym, e.ps, e.body, null));
         }
         return e.sym;
     }
 
-    /// <summary>Lower every enqueued lazy-module body (from the cursor onward). Runs at TOP LEVEL only.
-    /// A body may reference a sibling (declaring + enqueuing it) — the cursor loop picks those up. V1
-    /// drains bodies only; a referenced lazy decl needing the monomorphization/comptime worklists is a
-    /// loud gap to fill when a G-goal hits it.</summary>
+    /// <summary>Ensure the method <paramref name="method"/> of container <paramref name="container"/> is
+    /// declared, wherever it was written, and return its symbol — the method analogue of
+    /// <see cref="EnsureDeclLowered"/> (road-to-zig-std S4d). A method declared eagerly (a root unit's) is
+    /// already in <see cref="_methods"/> and this is a plain read; one belonging to a LAZILY-prepared
+    /// module is declared here, on first call, and its body enqueued for that module's drain. Null when no
+    /// such method exists anywhere, so the caller reports it by name.</summary>
+    private Symbol? EnsureMethodDeclared(string container, string method)
+    {
+        if (_methods.TryGetValue(container, out var known) && known.TryGetValue(method, out var sym))
+        {
+            return sym;
+        }
+        if (!_lazyMethodDecls.TryGetValue((container, method), out var pending))
+        {
+            return null;
+        }
+        // Declared BY ITS OWNER: the signature's types (and the body's) are spelled in that module's
+        // source, so they must resolve in that module's environment, not the caller's.
+        var owner = pending.owner;
+        var e = owner.DeclareMethod(container, pending.decl);
+        owner._pendingModuleBodies.Add((e.sym, e.ps, e.body, container));
+        return e.sym;
+    }
+
+    /// <summary>A type this module DECLARES, by its source name — the cross-module read behind
+    /// type-position navigation (road-to-zig-std S4d), the type analogue of
+    /// <see cref="EnsureDeclLowered"/>. Needs no on-demand work: a prepared module registers all of its
+    /// container types (structs / unions / enums, with their consts and nested containers) in pass 0,
+    /// before any laziness kicks in, so the lookup is a plain read. Null when this module declares no
+    /// such type — the caller reports that loudly, naming the module.
+    /// <para>The returned <see cref="CType"/> carries the container's PLAIN source name, which is also
+    /// the emitted C# type name; two modules declaring a same-named aggregate therefore collide, and
+    /// <see cref="IrBuilder.RegisterStructType"/> throws rather than silently dropping the second.
+    /// Module-qualified naming is the real fix (docs/plans/deferred.md).</para></summary>
+    internal CType? ResolveExportedType(string name) =>
+        _containerTypes.TryGetValue(name, out var t) ? t : null;
+
+    /// <summary>Lower everything this lazy module has enqueued (from each cursor onward). Runs at TOP
+    /// LEVEL only. A body may reference a sibling (declaring + enqueuing it) — the cursor loops pick
+    /// those up. Since road-to-zig-std S4d this covers all three worklists a lazy module can gather
+    /// (referenced bodies, generic instances, reified type-returning generics' methods), not bodies
+    /// alone: a navigated type may reify in this module, and its methods would otherwise be declared
+    /// and never lowered. A referenced decl needing the deferred `comptime`-fold pass is still a gap to
+    /// fill when a G-goal hits it.</summary>
     internal void DrainPendingBodies()
     {
-        while (_pendingBodyCursor < _pendingModuleBodies.Count)
+        // The lazy-module analogue of pass 2.5, over three mutually-feeding worklists: a referenced
+        // function's body may call a generic (enqueueing an instance) or name a reified type-returning
+        // generic (enqueueing its methods, road-to-zig-std G4), and either of those bodies may reference
+        // another sibling decl. So alternate the cursors until all three are exhausted rather than
+        // draining each once. Every list only grows on a fresh memo miss (a new mangled instance, capped
+        // by MaxInstantiations; a new mangled reified container, memoized before its members bind; a
+        // not-yet-declared decl name), so this terminates. Reached through the graph's own fixpoint loop
+        // (ZigModuleGraph.DrainAll), which re-visits a module that gained work while another drained.
+        while (HasPendingBodies)
         {
-            var e = _pendingModuleBodies[_pendingBodyCursor++];
-            LowerFnBody(e.sym, e.ps, e.body);
+            while (_pendingBodyCursor < _pendingModuleBodies.Count)
+            {
+                var e = _pendingModuleBodies[_pendingBodyCursor++];
+                _currentContainer = e.container;   // a method body's `@This()`, as in pass 2
+                LowerFnBody(e.sym, e.ps, e.body);
+                _currentContainer = null;
+            }
+            for (; _pendingInstCursor < _pendingInstantiations.Count; _pendingInstCursor++)
+            {
+                LowerInstantiationBody(_pendingInstantiations[_pendingInstCursor]);
+            }
+            for (; _pendingReifiedCursor < _pendingReifiedMethods.Count; _pendingReifiedCursor++)
+            {
+                LowerReifiedMethodBody(_pendingReifiedMethods[_pendingReifiedCursor]);
+            }
         }
     }
 
@@ -309,15 +382,38 @@ internal sealed partial class ZigLowering
     /// <c>EnumName.member</c> (a <see cref="Zig.Field"/> whose base names an enum) and the
     /// bare <c>.member</c> literal at a typed sink (<see cref="ResolveEnumLit"/>) — each
     /// lowering to an <see cref="EnumConstRef"/>, rendered by the shared backend as
-    /// <c>EnumName.member</c>.</summary>
-    private readonly Dictionary<string, Dictionary<string, Symbol>> _enumMembers = new(System.StringComparer.Ordinal);
+    /// <c>EnumName.member</c>.
+    /// <para>SHARED down the <c>@import</c> chain for the same reason as <see cref="_methods"/>: an
+    /// enum's members belong to the enum, and its name is unique across the emitted program, so an
+    /// imported enum's <c>.member</c> resolves at a call site in another module (road-to-zig-std
+    /// S4d — before it, no imported type could be named at all).</para></summary>
+    private readonly Dictionary<string, Dictionary<string, Symbol>> _enumMembers;
 
     /// <summary>Per container (struct) name, each method name → the mangled free-function
     /// <see cref="Symbol"/> it lowers to (<c>TypeName_method</c>). Populated in pass 1 (so a
     /// method body can forward-reference a sibling method) and consulted by
     /// <see cref="LowerMethodCall"/> to rewrite a UFCS instance call (<c>p.method(…)</c>) or a
-    /// static/associated call (<c>Type.func(…)</c>) to that free function.</summary>
-    private readonly Dictionary<string, Dictionary<string, Symbol>> _methods = new(System.StringComparer.Ordinal);
+    /// static/associated call (<c>Type.func(…)</c>) to that free function.
+    /// <para>SHARED down the <c>@import</c> chain (a prepared module gets its parent's table, like
+    /// <see cref="_errorCodes"/>): a method belongs to its container, and a container's name is unique
+    /// across the emitted program — <see cref="IrBuilder.RegisterStructType"/> now enforces that — so one
+    /// table lets a call site reach a method declared by ANOTHER module, which is what a navigated type
+    /// (road-to-zig-std S4d) or a cross-module reified generic needs. Two independent ROOT units keep
+    /// separate tables, exactly as before: they see each other only through <c>@import</c>.</para></summary>
+    private readonly Dictionary<string, Dictionary<string, Symbol>> _methods;
+
+    /// <summary>Container methods a LAZILY-prepared module declares but has not lowered — keyed by
+    /// (container, method) → the module that owns them plus the raw method AST. A prepared module stops
+    /// after registering types (road-to-zig-std S2), so declaring its methods' signatures then would
+    /// defeat the point: an unreferenced method whose signature names an unlowerable type must stay
+    /// invisible. They are declared on FIRST CALL instead (<see cref="EnsureMethodDeclared"/>) — the
+    /// method analogue of <see cref="EnsureDeclLowered"/>. Shared down the <c>@import</c> chain, so a
+    /// call site in another module finds both the AST and the module that must lower it.</summary>
+    private readonly Dictionary<(string container, string method), (ZigLowering owner, Item decl)> _lazyMethodDecls;
+
+    /// <summary>The tables this unit shares with every module it imports (transitively) — see
+    /// <see cref="ZigImportScope"/>. Held so a prepared child can be handed the same scope.</summary>
+    private readonly ZigImportScope _shared;
 
     /// <summary>The container (struct) whose method signature / body is currently being lowered,
     /// so a <c>@This()</c> type resolves to it (null outside a method — a <c>@This()</c> there is
@@ -596,8 +692,13 @@ internal sealed partial class ZigLowering
     private readonly bool _testMode;
 
     public ZigLowering(IrBuilder ir, INameLegalizer names, Dictionary<string, int>? errorCodes = null,
-        bool testMode = false, ZigModuleGraph? moduleGraph = null, string? importerDir = null)
+        bool testMode = false, ZigModuleGraph? moduleGraph = null, string? importerDir = null,
+        ZigImportScope? shared = null)
     {
+        _shared = shared ?? new ZigImportScope();
+        _methods = _shared.Methods;
+        _enumMembers = _shared.EnumMembers;
+        _lazyMethodDecls = _shared.LazyMethodDecls;
         _ir = ir;
         _names = names;
         _symbols = new SymbolTable(names);
@@ -619,7 +720,7 @@ internal sealed partial class ZigLowering
     {
         if (module.Lowering is not null) { return; }
         var dir = System.IO.Path.GetDirectoryName(module.Path);
-        var child = new ZigLowering(_ir, _names, _errorCodes, _testMode, _moduleGraph, dir);
+        var child = new ZigLowering(_ir, _names, _errorCodes, _testMode, _moduleGraph, dir, _shared);
         module.Lowering = child;
         _moduleGraph?.RegisterLowering(child);
         child.Lower(module.Parse.Tree, prepareOnly: true, lazy: true);
@@ -766,6 +867,15 @@ internal sealed partial class ZigLowering
                     _ => null,
                 };
                 if (fnName is not null) { _moduleFnDecls[Tok(fnName)] = d; }
+            }
+            // The container methods collected above are NOT declared (that would lower their signatures,
+            // defeating laziness — an unreferenced method naming an unlowerable type must stay
+            // invisible). Their ASTs are recorded instead, and the first CALL declares one
+            // (EnsureMethodDeclared, road-to-zig-std S4d): now that a navigated type can be named, its
+            // methods have to be callable too.
+            foreach (var (container, fnDef) in containerMethods)
+            {
+                _lazyMethodDecls[(container, MethodNameOf(fnDef))] = (this, fnDef);
             }
             return;
         }
