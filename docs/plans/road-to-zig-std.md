@@ -227,6 +227,38 @@ that retire curated shortcuts.
 > `examples/zig-typeinfo/`, byte-identical to real zig 0.17.0-dev.667 at exit 42. Parse coverage
 > is unchanged by design (32.0%) — this is a lowering-depth brick.
 
+> **Status update (2026-09-04) — S5b DONE: a zig integer's DECLARED width rides its type binding.**
+> The debt S5a deliberately took on, paid the next brick. dotcc widens an arbitrary-width `uN`/`iN`
+> to the smallest standard width (`u21` → a 32-bit `uint`), so `@typeInfo(T).int.bits` could only be
+> answered from a literal spelling. Now the declared width travels WITH the binding — seeded,
+> shadow-saved and restored in lockstep with `_typeAliases` — so it answers through a
+> `comptime T: type` param, an alias (`const Cp = u21;`), and a W4 reified generic's type argument.
+>
+> **The buried half was the instance KEY.** `MangleType` keys an integer by its LOWERED width, so
+> `u21` and `u32` mangled *identically* and shared one memoized instance — whichever instantiated
+> first would have dictated the other's `bits`. `MangleTypeSeed` now keys by the declared width when
+> it differs, making them distinct specializations, which is also what zig means (they ARE different
+> types). Every standard spelling declares exactly its lowered width, so **no existing mangled name
+> changed** — only a narrow width gets a new one.
+>
+> **Why the width rides ALONGSIDE the type and not ON it.** `CType.Prim` is a record with value
+> equality: a width-carrying `u21` would stop comparing equal to `u32` and perturb coercion, peer
+> typing, and every memoization key in the front end — a far larger blast radius than this one
+> question warrants, and it would break the documented `uN`-widening leniency that existing programs
+> rely on. Widening the type-SEED tuple instead (`TypeSeed(Name, Type, DeclaredBits)`) made the
+> compiler enumerate every site that had to change, which is how the W4 reification path and the
+> body-alias shadow list were found rather than guessed at.
+>
+> **Still cut, and probably permanently:** an `anytype` param or `@TypeOf(expr)`, where the type is
+> inferred from a VALUE and no spelling survives anywhere — that would need the width on `CType`
+> after all. Recorded in [`deferred.md`](deferred.md).
+>
+> Validation: 6 emit pins (through a param / an alias / the `u21`-vs-`u32` non-collision / an
+> unchanged standard-width name / the nested same-named-param shadow restore / the remaining cut) —
+> the S5a "loud cut" pin flipped to the new behaviour — 2 zig-oracle programs
+> (`typeinfo_bits_generic`, `typeinfo_bits_nested_shadow`), and `examples/zig-typeinfo/` grew a
+> `generic` line, still byte-identical to real zig 0.17.0-dev.667 at exit 42.
+
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)
 
 An opt-in test/tool (`DOTCC_RUN_STD_PROBE=1`, env `DOTCC_ZIG_LIB_DIR` or
@@ -351,6 +383,9 @@ The brick W1 and W4 both explicitly deferred:
   reuse `MangleType` as the canonical key.
 
 ### S5 — `@typeInfo` + comptime aggregate values (L; the heart of B2)
+
+**S5b ✅ DONE (2026-09-04)** — the declared integer width rides a type binding, so `bits` answers
+through a `comptime T: type` param / alias and `u21`/`u32` key distinct instances. Status update above.
 
 **S5a ✅ DONE (2026-09-04)** — the SCALAR half: `@typeInfo(T)` synthesized from `CType`,
 the comptime `switch` over it (all three switch positions) with payload capture, and the

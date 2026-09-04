@@ -2472,6 +2472,26 @@ public sealed class ZigOracleTests
             "    const len: u8 = @typeInfo([4]u8).array.len;\n" +
             "    return @intCast(n + m + len);\n" +
             "}\n", 42, "" },
+        // The declared width now rides a comptime `type` param and an alias. This program is the
+        // regression guard for the instance KEY: `u21` and `u32` lower to the same `uint`, so before
+        // the width joined the mangle they shared one memoized instance and one `bits` answer — this
+        // would have returned 21+21 or 32+32, not 21+32. 21+32+21+7-39 = 42.
+        new object[] { "typeinfo_bits_generic",
+            "fn bitsOf(comptime T: type) u16 { return @typeInfo(T).int.bits; }\n" +
+            "const Cp = u21;\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = bitsOf(u21);\n" +
+            "    const b = bitsOf(u32);\n" +
+            "    const c = bitsOf(Cp);\n" +
+            "    const d = bitsOf(i7);\n" +
+            "    return @intCast(a + b + c + d - 39);\n" +
+            "}\n", 42, "" },
+        // The width is shadow-saved and restored in lockstep with the type binding: BOTH params are
+        // named `T`, so a missed restore would give `outer` the inner instance's 7. 7 + 21 + 14 = 42.
+        new object[] { "typeinfo_bits_nested_shadow",
+            "fn inner(comptime T: type) u16 { return @typeInfo(T).int.bits; }\n" +
+            "fn outer(comptime T: type) u16 { return inner(u7) + @typeInfo(T).int.bits; }\n" +
+            "pub fn main() u8 { return @intCast(outer(u21) + 14); }\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
