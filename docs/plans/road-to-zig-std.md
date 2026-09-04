@@ -259,6 +259,54 @@ that retire curated shortcuts.
 > (`typeinfo_bits_generic`, `typeinfo_bits_nested_shadow`), and `examples/zig-typeinfo/` grew a
 > `generic` line, still byte-identical to real zig 0.17.0-dev.667 at exit 42.
 
+> **Status update (2026-09-04) — S5c DONE: the member lists + membership builtins.**
+> S5's "aggregate half" — and the pinned zig made it FAR smaller than this plan assumed. The plan
+> was written against the older `fields: []const StructField` API, a comptime slice of comptime
+> STRUCTS, which really would have needed a general aggregate value domain. This zig
+> (0.17.0-dev.667) instead exposes **parallel arrays**: `field_names: []const [:0]const u8`,
+> `field_types: []const type`, `field_values: []const comptime_int`. Each is homogeneous, so what
+> was actually needed is a comptime LIST of one element kind. Measured against the pinned source,
+> that is also where the uses are: `.field_names.len` ×167, `.field_names[i]` ×34.
+>
+> Landed: the lists themselves (built from dotcc's OWN registries — `IrBuilder.StructFieldsOf` for a
+> struct/union's declared fields in order, `IrBuilder.Enums` for an enum's members in order — never
+> by compiling `std/lang.zig`), their `.len`, a bounds-checked comptime index, a `const` binding
+> (decl dropped, like every comptime-only name), `tag_type`, and the membership builtins
+> `@hasField` / `@hasDecl` plus comptime-named `@field(x, "n")` (73 + 220 uses). Still all
+> lowering-tier: no list reaches the IR.
+>
+> **Two refusals, both the same shape of judgement `bits` made in S5b.**
+> - `decl_names` is cut: dotcc's container-const and method registries are NAME-KEYED, so a
+>   declaration-ORDER list is not available. `@hasDecl` works precisely because membership needs no
+>   order — the error says so rather than implying the whole area is missing.
+> - `tag_type` is answered only for a SPELLED tag (`enum(u8) {…}`). zig INFERS an untyped enum's tag
+>   as the smallest unsigned int holding its largest member (`u2` for four members) while dotcc
+>   defaults to `int` — reporting that would disagree on the width and on `@sizeOf`. A new
+>   `_enumsWithSpelledTag` set records which is which.
+>
+> **Gotcha worth keeping:** `TryFoldTypeInfoListType` runs SPECULATIVELY from the type-alias probe
+> (`const first = names[0];`), so a non-type element must return false, not throw — otherwise a
+> perfectly good string element becomes a hard error before the value fold ever sees it. Same rule
+> `EvalComptimeValue` has always had.
+>
+> **What this does NOT include:** `inline for` over a member list (95 uses in 37 files) — that is
+> S6, and it is now the single highest-value brick left, since the lists it iterates all exist.
+>
+> **A version split this brick surfaced (and the docs had wrong).** dotcc's front end targets zig
+> **0.17-dev** — the version whose std the campaign compiles from source, and which the grammar
+> tracks. The CI oracle pins **0.16.0**, the newest DURABLE tagged release: dev/master tarballs are
+> GC'd off ziglang.org's index within days (the former 0.17-dev.667 pin is already gone), so a dev
+> pin would rot CI. That was fine while every oracle program used the stable core — but the member
+> lists are exactly where the two versions differ, since 0.16 still has `fields: []const
+> StructField`. So there is deliberately **no member-list oracle program**: the surface is covered by
+> emit pins plus a by-hand run against the local 0.17-dev install, and gains a CI differential the
+> moment 0.17.0 is tagged (checked: 0.16.0 is still the newest tag). `docs/testing.md` claimed CI
+> pinned 0.17.0-dev.667 — it never did since the pin moved; that is now corrected.
+>
+> Validation: 9 emit pins + 1 zig-oracle program (`typeinfo_membership` — the membership builtins are
+> version-stable), and `examples/zig-typeinfo/` grew `members` + `ask` lines — seven lines now, still
+> byte-identical to real zig 0.17.0-dev.667 at exit 42 (0.17-dev only, by the same split).
+
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)
 
 An opt-in test/tool (`DOTCC_RUN_STD_PROBE=1`, env `DOTCC_ZIG_LIB_DIR` or
@@ -383,6 +431,11 @@ The brick W1 and W4 both explicitly deferred:
   reuse `MangleType` as the canonical key.
 
 ### S5 — `@typeInfo` + comptime aggregate values (L; the heart of B2)
+
+**S5c ✅ DONE (2026-09-04)** — the member LISTS (`field_names`/`field_types`/`field_values`),
+`tag_type`, and `@hasField`/`@hasDecl`/`@field`. The pinned zig's parallel-array shape made this
+much smaller than the bullets below (written against the older slice-of-structs API) imply — what
+remains of them is `decl_names` ordering and `inline for`, which is S6. Status update above.
 
 **S5b ✅ DONE (2026-09-04)** — the declared integer width rides a type binding, so `bits` answers
 through a `comptime T: type` param / alias and `u21`/`u32` key distinct instances. Status update above.

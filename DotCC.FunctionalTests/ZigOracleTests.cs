@@ -2492,6 +2492,36 @@ public sealed class ZigOracleTests
             "fn inner(comptime T: type) u16 { return @typeInfo(T).int.bits; }\n" +
             "fn outer(comptime T: type) u16 { return inner(u7) + @typeInfo(T).int.bits; }\n" +
             "pub fn main() u8 { return @intCast(outer(u21) + 14); }\n", 42, "" },
+        // NOTE: there is deliberately NO member-list oracle program here. dotcc's front end targets
+        // zig 0.17-dev (the campaign compiles real std from 0.17.0-dev.667, and the grammar tracks it),
+        // where `@typeInfo(T).@"struct"` exposes the PARALLEL ARRAYS `field_names` / `field_types` /
+        // `field_values`. The CI oracle pins the newest DURABLE tagged release, 0.16.0 (dev tarballs are
+        // GC'd off the download index within days — see the zig-oracle job comment), and 0.16.0 still has
+        // the older `fields: []const StructField` shape. So a member-list program cannot be valid in both
+        // compilers at once: it is covered by emit pins (ZigFrontendTests) plus a by-hand run against the
+        // 0.17-dev install, and gains a differential here the moment 0.17.0 is tagged. The membership
+        // builtins below ARE version-stable, so they get a real differential.
+        // Membership + comptime-named field access. `@hasDecl` sees both a container `const` and a
+        // METHOD. The absent names take their `else` arms — their weighted true-arms (10, 20) would
+        // blow the total, so a constant-true fold could not reach 42. 1+0+4+8+0+29 = 42.
+        new object[] { "typeinfo_membership",
+            "const P = struct {\n" +
+            "    x: i32,\n" +
+            "    y: i32,\n" +
+            "    const K: i32 = 7;\n" +
+            "    fn get(self: P) i32 { return self.x; }\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    const a: u8 = if (@hasField(P, \"x\")) 1 else 0;\n" +
+            "    const b: u8 = if (@hasField(P, \"q\")) 10 else 0;\n" +
+            "    const c: u8 = if (@hasDecl(P, \"get\")) 4 else 0;\n" +
+            "    const d: u8 = if (@hasDecl(P, \"K\")) 8 else 0;\n" +
+            "    const e: u8 = if (@hasDecl(P, \"nope\")) 20 else 0;\n" +
+            "    var p = P{ .x = 27, .y = 2 };\n" +
+            "    p.x += 0;\n" +
+            "    const fx: u8 = @intCast(@field(p, \"x\") + @field(p, \"y\"));\n" +
+            "    return a + b + c + d + e + fx;\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

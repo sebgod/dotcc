@@ -246,7 +246,10 @@ internal sealed partial class ZigLowering
             {
                 // A `@typeInfo(T)` payload field (road-to-zig-std S5) folds to a literal before any
                 // runtime meaning is considered — the base is a comptime `std.builtin.Type` value, not
-                // a variable or a container, so no other arm below could resolve it.
+                // a variable or a container, so no other arm below could resolve it. The member-LIST
+                // use (`field_names.len`) is checked first: its base is itself a payload field, so the
+                // plain payload fold would see `.len` on a list and have nothing to say about it.
+                if (TryFoldTypeInfoListValue(expr, out var tiListValue)) { return tiListValue; }
                 if (TryFoldTypeInfoValue(expr, out var tiValue)) { return tiValue; }
                 var fieldName = Tok(fld.Arg2);
                 // A dotted std path used as a VALUE (Milestone F): the C-heap default
@@ -393,6 +396,9 @@ internal sealed partial class ZigLowering
             }
             case Zig.Index ix:
             {
+                // A comptime member-list index (`field_names[0]`) folds to a literal — the base is a
+                // comptime list with no runtime storage, so it must be caught before LowerExpr sees it.
+                if (TryFoldTypeInfoListValue(expr, out var tiIdx)) { return tiIdx; }
                 var baseExpr = LowerExpr(ix.Arg0);
                 var idx = LowerExpr(ix.Arg2);
                 // A tuple subscript `t[N]` (N a literal) reads the Nth element → `.ItemN+1`
