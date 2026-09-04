@@ -125,6 +125,16 @@ internal sealed partial class ZigLowering
             _typeAliases[name] = aliasType;
             return true;
         }
+        // `const info = @typeInfo(T);` / `const i = @typeInfo(T).int;` — a comptime reflection value
+        // (road-to-zig-std S5). Recorded and the decl DROPPED (return true): a `std.builtin.Type` has
+        // no runtime representation in dotcc, so the name exists only for later folds (`i.bits`, a
+        // `switch (info)`). Placed after the alias check so `@typeInfo(T).pointer.child` — which IS a
+        // type — is claimed there instead.
+        if (TryEvalTypeInfo(rhs, out var tiBinding))
+        {
+            _typeInfoBindings[name] = tiBinding;
+            return true;
+        }
         // A comptime-known scalar/string literal (`const p = "foo";` / `const n = 3;`) — record its VALUE
         // (road-to-zig-std S5 seed) so a comptime context (a `++`/`**` operand or count) can resolve the
         // name and fold. SIDE EFFECT only: fall through to `return false` so the ordinary runtime decl
@@ -182,6 +192,12 @@ internal sealed partial class ZigLowering
             // LowerTopLevelGlobals.)
             case Zig.CallArgs or Zig.CallNoArgs when TryEvalTypeReturningCall(rhs, out var trt):
                 type = trt;
+                return true;
+
+            // `const C = @typeInfo(T).pointer.child;` — a reflected child TYPE aliased to a name
+            // (road-to-zig-std S5). Before the std-path case: no std path is rooted at a builtin call.
+            case Zig.Field when TryFoldTypeInfoType(rhs, out var tiChild):
+                type = tiChild;
                 return true;
 
             // `const A = std.mem.Allocator;` — a dotted std TYPE path aliased to a name.
@@ -340,6 +356,10 @@ internal sealed partial class ZigLowering
     private CType LowerType(Item type) => type.Content switch
     {
         Zig.Ident id => LowerTypeName(Tok(id.Arg0)),
+        // `@typeInfo(T).<kind>.child` in a TYPE position (road-to-zig-std S5) — the child type of a
+        // pointer / slice / optional / array kind. Checked before the std-path resolver: the base is
+        // a comptime `std.builtin.Type` value, which no std path claims.
+        Zig.Field when TryFoldTypeInfoType(type, out var tiChild) => tiChild,
         // A dotted std type (Milestone F): `std.mem.Allocator` → the runtime Allocator fat
         // pointer; `std.heap.FixedBufferAllocator` → the concrete bump allocator. Any other std
         // path in type position errors clearly (`std` is a known-paths resolver, not a real model).

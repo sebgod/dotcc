@@ -2423,6 +2423,55 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"point {{x={d}, y={d}}} pct=100%\\n\", .{ p.x, p.y });\n" +
             "}\n", 0,
             "hello world! n=42 big=5000000000\nhex=ff up=FF char=A\npoint {x=3, y=7} pct=100%" },
+        // @typeInfo — comptime reflection folded at lowering time (road-to-zig-std S5). The headline
+        // shape: `switch (@typeInfo(T))` dispatches on the kind, once per instantiation. 1+2+3+4+5+6+0
+        // = 21, doubled = 42.
+        new object[] { "typeinfo_kind",
+            "fn kindOf(comptime T: type) u8 {\n" +
+            "    return switch (@typeInfo(T)) {\n" +
+            "        .int => 1,\n" +
+            "        .float => 2,\n" +
+            "        .bool => 3,\n" +
+            "        .pointer => 4,\n" +
+            "        .optional => 5,\n" +
+            "        .array => 6,\n" +
+            "        else => 0,\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const sum = kindOf(u8) + kindOf(f64) + kindOf(bool) + kindOf(*u8) + kindOf(?u8) + kindOf([3]u8) + kindOf(void);\n" +
+            "    return sum * 2;\n" +
+            "}\n", 42, "" },
+        // A prong CAPTURE binding the payload, plus `signedness` — which is exactly recoverable from
+        // the lowered type, so it is answered rather than cut. 1*40 + 0 + 9*2 - 16 = 42.
+        new object[] { "typeinfo_signedness",
+            "fn signBit(comptime T: type) u8 {\n" +
+            "    return switch (@typeInfo(T)) {\n" +
+            "        .int => |i| if (i.signedness == .signed) 1 else 0,\n" +
+            "        else => 9,\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 { return signBit(i32) * 40 + signBit(u32) + signBit(f32) * 2 - 16; }\n", 42, "" },
+        // The declared-width fidelity rule: dotcc widens `u21` to a 32-bit `uint`, so `bits` is read
+        // off the SOURCE spelling (the rule @typeName follows) and agrees with zig — 21, not 32. This
+        // case is the one that would silently diverge if the lowered width were reported instead.
+        new object[] { "typeinfo_bits",
+            "pub fn main() u8 {\n" +
+            "    const a: u16 = @typeInfo(u21).int.bits;\n" +
+            "    const b: u16 = @typeInfo(i7).int.bits;\n" +
+            "    const c: u16 = @typeInfo(f64).float.bits;\n" +
+            "    return @intCast(a + b + c - 50);\n" +
+            "}\n", 42, "" },
+        // `.child` is a TYPE (folded in a type position) and `.len` a comptime integer. 36 + 2 + 4 = 42.
+        new object[] { "typeinfo_child",
+            "pub fn main() u8 {\n" +
+            "    const C = @typeInfo(?u32).optional.child;\n" +
+            "    const A = @typeInfo([4]u8).array.child;\n" +
+            "    const n: C = 36;\n" +
+            "    const m: A = 2;\n" +
+            "    const len: u8 = @typeInfo([4]u8).array.len;\n" +
+            "    return @intCast(n + m + len);\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
