@@ -38,6 +38,18 @@ public sealed class ZigFrontendTests
         finally { Directory.Delete(dir, recursive: true); }
     }
 
+    /// <summary>Just the user program out of a full emit — the <c>DotCcProgram</c> class, up to the
+    /// banner that starts the next emitted section. Every emit also splices in the whole embedded
+    /// Libc runtime, so a NEGATIVE assertion ("the fold left no `switch` behind") has to be made
+    /// against the user's own lowered code or it matches something in the runtime instead.</summary>
+    private static string UserCode(string cs)
+    {
+        var start = cs.IndexOf("static unsafe class DotCcProgram", StringComparison.Ordinal);
+        if (start < 0) { return cs; }
+        var end = cs.IndexOf("\n// ----", start, StringComparison.Ordinal);
+        return end < 0 ? cs[start..] : cs[start..end];
+    }
+
     [Fact]
     public void Lowers_a_relative_import_and_calls_across_modules()
     {
@@ -5177,5 +5189,220 @@ public sealed class ZigFrontendTests
             "    return @intCast(b.len);\n}\n"));
         ex.Message.ShouldContain("'items' is an array");
         ex.Message.ShouldContain("var v: B = undefined");
+    }
+
+    // ---- @typeInfo — comptime reflection, folded at lowering time (road-to-zig-std S5) ----
+
+    [Fact]
+    public void Switch_over_typeInfo_folds_to_the_taken_prong()
+    {
+        // The headline S5 shape (200 uses in real std): `switch (@typeInfo(T))` asks "which kind is
+        // T", and the answer is known at lowering time — so the whole switch collapses to the one
+        // taken arm. Each instantiation gets its own folded constant; no runtime switch survives.
+        var cs = EmitZig(
+            "fn kindOf(comptime T: type) u8 {\n" +
+            "    return switch (@typeInfo(T)) {\n" +
+            "        .int => 1,\n" +
+            "        .float => 2,\n" +
+            "        .bool => 3,\n" +
+            "        else => 0,\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 { return kindOf(u8) + kindOf(f64) + kindOf(bool) + kindOf(void); }\n");
+        var user = UserCode(cs);
+        user.ShouldContain("kindOf__u8");
+        user.ShouldContain("kindOf__f64");
+        user.ShouldContain("kindOf__bool");
+        user.ShouldContain("kindOf__void");
+        user.ShouldNotContain("switch");   // nothing of the switch reaches the emit
+    }
+
+    [Fact]
+    public void A_prong_the_type_does_not_take_is_never_lowered()
+    {
+        // Why folding — rather than lowering every arm and selecting — is the only workable design:
+        // each arm of a `switch (@typeInfo(T))` is written for a DIFFERENT kind, so the arms that do
+        // not apply would not even lower for this type. Here the `.@"struct"` arm asks for `.fields`
+        // (a loud S6 cut), and lowering `kindOf(u8)` must never touch it.
+        var cs = EmitZig(
+            "fn kindOf(comptime T: type) u8 {\n" +
+            "    return switch (@typeInfo(T)) {\n" +
+            "        .int => 1,\n" +
+            "        .@\"struct\" => @intCast(@typeInfo(T).@\"struct\".fields.len),\n" +
+            "        else => 0,\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 { return kindOf(u8); }\n");
+        UserCode(cs).ShouldContain("return 1;");
+        UserCode(cs).ShouldNotContain("fields");
+    }
+
+    [Fact]
+    public void A_quoted_tag_prong_dispatches_on_a_user_struct_and_enum()
+    {
+        // `.@"struct"` / `.@"enum"` are the QUOTED tags std spells (a keyword can't be a bare enum
+        // literal). They reach the fold already folded to their inner text by NormalizeIdent, so they
+        // compare against the synthesized tag with no special casing.
+        var cs = EmitZig(
+            "const P = struct { x: i32 };\n" +
+            "const E = enum { a, b };\n" +
+            "fn kindOf(comptime T: type) u8 {\n" +
+            "    return switch (@typeInfo(T)) {\n" +
+            "        .@\"struct\" => 7,\n" +
+            "        .@\"enum\" => 9,\n" +
+            "        else => 0,\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 { return kindOf(P) + kindOf(E); }\n");
+        cs.ShouldContain("return 7;");
+        cs.ShouldContain("return 9;");
+    }
+
+    [Fact]
+    public void A_prong_capture_binds_the_payload_and_signedness_folds()
+    {
+        // `.int => |i| …` binds the payload, and `i.signedness == .signed` folds to a boolean literal.
+        // Signedness IS exactly recoverable from the lowered type — dotcc's width widening never
+        // changes a type's signedness — so it is answered rather than cut.
+        var cs = EmitZig(
+            "fn signBit(comptime T: type) u8 {\n" +
+            "    return switch (@typeInfo(T)) {\n" +
+            "        .int => |i| if (i.signedness == .signed) 1 else 0,\n" +
+            "        else => 9,\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 { return signBit(i32) + signBit(u32) + signBit(f32); }\n");
+        cs.ShouldContain("Cond.B(true) ? 1 : 0");    // i32 — signed
+        cs.ShouldContain("Cond.B(false) ? 1 : 0");   // u32 — unsigned
+        cs.ShouldContain("return 9;");               // f32 — not an int at all
+    }
+
+    [Fact]
+    public void Declared_int_width_comes_from_the_source_spelling()
+    {
+        // The fidelity rule. dotcc widens an arbitrary-width `uN`/`iN` to the smallest standard width
+        // (`u21` → a 32-bit `uint`), so the LOWERED type no longer knows it was declared with 21.
+        // `bits` is therefore read off the source spelling — the rule `@typeName` already follows —
+        // and so agrees with real zig (21, not 32).
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const a: u16 = @typeInfo(u21).int.bits;\n" +
+            "    const b: u16 = @typeInfo(i7).int.bits;\n" +
+            "    const c: u16 = @typeInfo(f64).float.bits;\n" +
+            "    return @intCast(a + b + c - 50);\n}\n");
+        cs.ShouldContain("ushort a = 21;");
+        cs.ShouldContain("ushort b = 7;");
+        cs.ShouldContain("ushort c = 64;");
+    }
+
+    [Fact]
+    public void Declared_int_width_through_a_type_param_is_a_loud_cut()
+    {
+        // The other half of the fidelity rule, and the point of the design: through a comptime `type`
+        // param the spelling is gone, so dotcc CANNOT tell a `u21` instantiation from a `u32` one.
+        // Answering 32 would silently disagree with zig's 21, so it refuses — a wrong comptime
+        // constant is worse than a missing feature.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "fn bitsOf(comptime T: type) u16 { return @typeInfo(T).int.bits; }\n" +
+            "pub fn main() u8 { return @intCast(bitsOf(u32)); }\n"));
+        ex.Message.ShouldContain("declared width");
+        ex.Message.ShouldContain("source spelling");
+    }
+
+    [Fact]
+    public void Child_of_an_optional_or_array_resolves_in_a_type_position()
+    {
+        // `.child` is a TYPE, so it folds from the type positions (a `const` alias here). Exactly
+        // recoverable from the lowered type — no spelling needed.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const C = @typeInfo(?u32).optional.child;\n" +
+            "    const A = @typeInfo([4]u8).array.child;\n" +
+            "    const n: C = 36;\n" +
+            "    const m: A = 2;\n" +
+            "    const len: u8 = @typeInfo([4]u8).array.len;\n" +
+            "    return @intCast(n + m + len);\n}\n");
+        cs.ShouldContain("uint n = 36;");
+        cs.ShouldContain("byte m = 2;");
+        cs.ShouldContain("byte len = 4;");   // `int`-typed, so the literal renders bare and fits any sink
+    }
+
+    [Fact]
+    public void Is_const_reports_the_pointee_qualification()
+    {
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const a = @typeInfo([]const u8).pointer.is_const;\n" +
+            "    const b = @typeInfo([]u8).pointer.is_const;\n" +
+            "    return if (a and !b) 42 else 0;\n}\n");
+        cs.ShouldContain("true");
+        cs.ShouldContain("false");
+    }
+
+    [Fact]
+    public void A_typeInfo_const_binds_a_comptime_value_and_emits_no_decl()
+    {
+        // `const info = @typeInfo(T);` has no runtime representation — the name exists only for later
+        // folds, so the declaration is DROPPED rather than emitted as some synthesized struct.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    const info = @typeInfo(i32);\n" +
+            "    return switch (info) { .int => 42, else => 0 };\n}\n");
+        UserCode(cs).ShouldContain("return 42;");
+        UserCode(cs).ShouldNotContain("info");
+    }
+
+    [Fact]
+    public void Reading_an_inactive_typeInfo_tag_is_rejected()
+    {
+        // Zig rejects reading an inactive union field; so does dotcc, rather than inventing a payload.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 { const b: u16 = @typeInfo(u8).float.bits; return @intCast(b); }\n"));
+        ex.Message.ShouldContain("active");
+        ex.Message.ShouldContain("`int`");
+    }
+
+    [Fact]
+    public void A_field_or_decl_list_is_a_loud_cut_naming_S6()
+    {
+        // `.fields` / `.decls` are comptime SLICES of comptime aggregates — the `inline for` brick,
+        // not this one. Loud, and it names where the capability lands.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const P = struct { x: i32, y: i32 };\n" +
+            "pub fn main() u8 { return @typeInfo(P).@\"struct\".fields.len; }\n"));
+        ex.Message.ShouldContain("comptime SLICE");
+        ex.Message.ShouldContain("S6");
+    }
+
+    [Fact]
+    public void Pointer_size_is_a_loud_cut_because_dotcc_collapses_pointer_kinds()
+    {
+        // `*T`, `[*]T` and `[*c]T` all lower to one C pointer, so the pointer SIZE class genuinely is
+        // not recoverable — cut rather than guessed at `.one`.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 { const s = @typeInfo(*u8).pointer.size; return if (s == .one) 42 else 0; }\n"));
+        ex.Message.ShouldContain("pointer SIZE class");
+    }
+
+    [Fact]
+    public void TypeInfo_used_as_a_runtime_value_is_rejected()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "fn take(x: u8) u8 { return x; }\n" +
+            "pub fn main() u8 { return take(@typeInfo(u8)); }\n"));
+        ex.Message.ShouldContain("no runtime representation");
+    }
+
+    [Fact]
+    public void A_comptime_switch_with_no_matching_prong_and_no_else_is_rejected()
+    {
+        // Real zig would reject the switch as non-exhaustive; dotcc says so rather than silently
+        // falling through to nothing.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "fn kindOf(comptime T: type) u8 {\n" +
+            "    return switch (@typeInfo(T)) { .int => 1, .float => 2 };\n" +
+            "}\n" +
+            "pub fn main() u8 { return kindOf(bool); }\n"));
+        ex.Message.ShouldContain("no prong matches");
     }
 }

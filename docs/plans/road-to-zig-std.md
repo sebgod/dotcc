@@ -190,6 +190,43 @@ that retire curated shortcuts.
 > still hits W4's "must be `return struct {…}`"; a cross-module container `const`
 > (`k.Cfg.MAX`); and a comptime VALUE argument that is a caller-scoped named constant.
 
+> **Status update (2026-09-04) — S5a DONE: `@typeInfo` + the comptime `switch` over it.**
+> The first slice of S5's reflection engine, sized so it answers only what it can answer
+> exactly. `ZigLowering.TypeInfo.cs` synthesizes the `std.builtin.Type` value **directly from
+> the resolved `CType`** — never by compiling `std/lang.zig` for its layout, exactly as the real
+> compiler treats that union — and every consumer folds at the LOWERING tier, so the S4
+> architectural rule holds unchanged: the comptime interpreter still has **no `TypeVal`**.
+> - `switch (@typeInfo(T))` (200 uses in real std) selects its prong at lowering time and lowers
+>   **only that arm**. That is not an optimization: every other arm is written for a different
+>   kind and would not lower for this type — a `.@"struct"` arm asking for `.fields` must never
+>   be visited while instantiating at `u8`. The quoted tags dispatch with no special casing
+>   (`NormalizeIdent` already folds `@"struct"` → `struct`), and one `SelectComptimeProng` serves
+>   all three switch positions (statement, expression, value-temp filler).
+> - A `|i|` prong capture binds the payload (shadow-saved, the W2/W3b pattern);
+>   `const info = @typeInfo(T);` binds a comptime-only name and emits **no decl**.
+> - Fields: `signedness` (and `== .signed` folding to a bool literal), `child` (a TYPE, so it
+>   resolves in type positions), `is_const`, `len`, `bits`.
+>
+> **The fidelity rule this brick is really about.** dotcc widens an arbitrary-width `uN`/`iN` to
+> the smallest standard width (`u21` → a 32-bit `uint`), so the LOWERED type no longer knows its
+> declared width. `bits` is therefore read off the **source spelling** — the rule `@typeName`
+> already follows — giving 21 for `@typeInfo(u21)`; asked through a type alias or a
+> `comptime T: type` param, where the spelling is gone, it is a **loud cut** rather than a
+> silent 32. A missing feature is recoverable; a wrong comptime constant is not. Carrying the
+> declared width on the type (which C23 `_BitInt(N)` would want too) is the brick that lifts it.
+>
+> **Still cut, each loud:** `fields`/`decls` (comptime SLICES of comptime aggregates — that is
+> S5's aggregate value domain + S6's `inline for`, the real heart of B2); `pointer.size` (dotcc
+> collapses `*T`/`[*]T`/`[*c]T` to one C pointer, so the size class is genuinely not
+> recoverable); `@field`/`@hasDecl`/`@hasField`; a `|*x|` by-ref capture; a block-bodied prong in
+> value position. `.child` of a `[]const T` carries dotcc's element `const` where zig's does not
+> — a divergence recorded in [`deferred.md`](deferred.md), not exercised by the oracle.
+>
+> Validation: 13 emit pins (every fold path + every loud cut) + 4 zig-oracle programs
+> (`typeinfo_kind`, `typeinfo_signedness`, `typeinfo_bits`, `typeinfo_child`) + the runnable
+> `examples/zig-typeinfo/`, byte-identical to real zig 0.17.0-dev.667 at exit 42. Parse coverage
+> is unchanged by design (32.0%) — this is a lowering-depth brick.
+
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)
 
 An opt-in test/tool (`DOTCC_RUN_STD_PROBE=1`, env `DOTCC_ZIG_LIB_DIR` or
@@ -314,6 +351,14 @@ The brick W1 and W4 both explicitly deferred:
   reuse `MangleType` as the canonical key.
 
 ### S5 — `@typeInfo` + comptime aggregate values (L; the heart of B2)
+
+**S5a ✅ DONE (2026-09-04)** — the SCALAR half: `@typeInfo(T)` synthesized from `CType`,
+the comptime `switch` over it (all three switch positions) with payload capture, and the
+exactly-recoverable fields (`signedness`, `child`, `is_const`, `len`, plus `bits` from the
+source spelling). Quoted tags fell out for free — `@"…"` was already an S9 lexer brick. See
+the 2026-09-04 status update above for the fidelity rule and the cuts. **What remains below
+is the AGGREGATE half**, which is the genuinely large part: comptime struct/slice values,
+`fields`/`decls`, and the union-with-payload interpreter values.
 
 - Interpreter aggregates: comptime struct values, comptime slices/arrays of
   values, comptime strings (`[]const u8`). (Scalar-only today — this sub-brick

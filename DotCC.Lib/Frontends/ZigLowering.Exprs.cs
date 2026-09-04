@@ -244,6 +244,10 @@ internal sealed partial class ZigLowering
             // pointer auto-derefs (emit `->`). The field type comes from the shared aggregate table.
             case Zig.Field fld:
             {
+                // A `@typeInfo(T)` payload field (road-to-zig-std S5) folds to a literal before any
+                // runtime meaning is considered — the base is a comptime `std.builtin.Type` value, not
+                // a variable or a container, so no other arm below could resolve it.
+                if (TryFoldTypeInfoValue(expr, out var tiValue)) { return tiValue; }
                 var fieldName = Tok(fld.Arg2);
                 // A dotted std path used as a VALUE (Milestone F): the C-heap default
                 // (`std.heap.page_allocator`/`c_allocator`) materializes a runtime Allocator; a std
@@ -1471,6 +1475,13 @@ internal sealed partial class ZigLowering
     /// boolean (the backend renders those as an integer-valued <c>(CBool)(…)</c>).</summary>
     private CExpr Bin(BinOp op, Item l, Item r)
     {
+        // `<comptime tag> == .member` (road-to-zig-std S5) — `@typeInfo(T).int.signedness == .unsigned`
+        // and friends fold to a boolean literal here, before either side is lowered: the tag has no
+        // runtime value to compare, and folding is what lets the surrounding comptime `if` prune.
+        if (op is BinOp.Eq or BinOp.Ne && TryFoldComptimeTagCompare(l, r, op == BinOp.Ne, out var tagCmp))
+        {
+            return tagCmp;
+        }
         // `==` / `!=` may compare an enum value against a bare `.member` literal (`self == .red`),
         // which Zig result-locates against the other operand's enum type — so those two operands
         // get the enum-aware lowering; everything else lowers both sides plainly.

@@ -1718,12 +1718,21 @@ internal sealed partial class ZigLowering
                 var msDest = LowerMemSlice(bargs[0], wantConst: false, out var msElem);
                 var msVal = LowerExprSink(bargs[1], msElem);
                 return new ZigMemCall("Set", msElem, new List<CExpr> { msDest, msVal }) { Type = CType.Void };
+            case "@typeInfo":
+                // Reaching here means a `@typeInfo(T)` was used where a RUNTIME value is wanted — every
+                // comptime position (a field access, a `switch` subject, a `const` binding) folds it
+                // before this point (see ZigLowering.TypeInfo.cs). A `std.builtin.Type` has no runtime
+                // representation in dotcc, so this is the honest error rather than a synthesized value.
+                throw new IrUnsupportedException(
+                    "zig `@typeInfo(T)` is a comptime value with no runtime representation — use it in a comptime "
+                    + "position (`switch (@typeInfo(T))`, `@typeInfo(T).int.signedness`, `const info = @typeInfo(T);`), "
+                    + "not as a runtime value");
             default:
                 throw new IrUnsupportedException(
                     $"zig builtin '{bname}' not lowered yet (supported: @as, @intCast, @truncate, @ptrCast, @bitCast, " +
                     "@floatFromInt, @intFromFloat, @floatCast, @enumFromInt, @alignCast, @intFromEnum, @sizeOf, @alignOf, " +
-                    "@offsetOf, @typeName, @min, @max, @rem, @divTrunc, @mod, @divFloor, @popCount, @clz, @ctz, @byteSwap, @abs, " +
-                    "@intFromPtr, @errorName, @memcpy, @memset)");
+                    "@offsetOf, @typeName, @typeInfo, @min, @max, @rem, @divTrunc, @mod, @divFloor, @popCount, @clz, @ctz, " +
+                    "@byteSwap, @abs, @intFromPtr, @errorName, @memcpy, @memset)");
         }
     }
 

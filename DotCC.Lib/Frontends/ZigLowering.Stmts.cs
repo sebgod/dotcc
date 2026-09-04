@@ -1551,6 +1551,27 @@ internal sealed partial class ZigLowering
     /// subject to the plain <see cref="LowerSwitch"/>.</summary>
     private CStmt LowerSwitchStmt(Item subjectItem, Item prongsItem)
     {
+        // A COMPTIME subject — `switch (@typeInfo(T))` / `switch (info.signedness)` — selects its
+        // prong at lowering time and lowers ONLY that one (road-to-zig-std S5).
+        if (SelectComptimeProng(subjectItem, prongsItem, out var ctPayload) is { } ctProng)
+        {
+            EnterComptimeProng(ctProng, ctPayload);
+            try
+            {
+                return ctProng switch
+                {
+                    { Block: { } blk } => LowerBlock(blk),
+                    { Expr: { } e } => new ExprStmt(LowerExpr(e)),
+                    { Return: { } r } => Hoisted(() => LowerReturn(r)),
+                    { ReturnsVoid: true } => LowerReturnVoid(),
+                    _ => new Seq(new List<CStmt>()),
+                };
+            }
+            finally
+            {
+                ExitComptimeProng();
+            }
+        }
         var subject = LowerExpr(subjectItem);
         var u = subject.Type.Unqualified;
         var uname = u switch
@@ -1929,6 +1950,21 @@ internal sealed partial class ZigLowering
     /// increment) and a tagged-union payload capture `|x|` in expression position.</summary>
     private CExpr LowerSwitchExpr(Item subjectItem, Item prongsItem, CType? sink)
     {
+        // A COMPTIME subject folds to the selected prong's value (road-to-zig-std S5) — which is also
+        // what makes a `|i|` capture work in expression position, where a RUNTIME switch expression
+        // still can't bind one (there is nothing to bind at comptime: the payload is the fold).
+        if (SelectComptimeProng(subjectItem, prongsItem, out var ctPayload) is { } ctProng)
+        {
+            if (ctProng.Expr is not { } ctValue)
+            {
+                throw new IrUnsupportedException(
+                    "zig `switch (@typeInfo(T))` in value position: the selected prong must yield a value "
+                    + "(`.int => expr`); a block-bodied prong needs a `const`/`return` statement context");
+            }
+            EnterComptimeProng(ctProng, ctPayload);
+            try { return LowerExprSink(ctValue, sink); }
+            finally { ExitComptimeProng(); }
+        }
         var subject = LowerExpr(subjectItem);
         var arms = new List<SwitchExprArm>();
         foreach (var prongItem in Flatten(prongsItem))
@@ -2165,6 +2201,21 @@ internal sealed partial class ZigLowering
     /// prong / <c>|x|</c> capture in a switch expression stay clear deferred errors.</summary>
     private CStmt BuildValueSwitch(Item subjectItem, Item prongsItem, ValueTempTarget rt)
     {
+        // A COMPTIME subject (road-to-zig-std S5) fills the result temp from the one selected prong —
+        // the statement-context sibling of the fold in LowerSwitchExpr, reached when a prong needs
+        // statements to produce its value (a block body / a labeled `break :blk v`).
+        if (SelectComptimeProng(subjectItem, prongsItem, out var ctPayload) is { } ctProng)
+        {
+            if (ctProng.Expr is not { } ctValue)
+            {
+                throw new IrUnsupportedException(
+                    "zig `switch (@typeInfo(T))` in value position: the selected prong must yield a value "
+                    + "(`.int => expr` or `.int => blk: {… break :blk v;}`)");
+            }
+            EnterComptimeProng(ctProng, ctPayload);
+            try { return FillValueTemp(ctValue, rt); }
+            finally { ExitComptimeProng(); }
+        }
         var subject = LowerExpr(subjectItem);
         var uname = subject.Type.Unqualified switch
         {
