@@ -139,6 +139,13 @@ internal sealed partial class ZigLowering
             _typeInfoBindings[name] = tiBinding;
             return true;
         }
+        // `const names = @typeInfo(T).@"struct".field_names;` — a comptime member LIST (S5c), bound
+        // and the decl DROPPED for the same reason: it has no runtime representation.
+        if (TryFoldTypeInfoList(rhs, out var tiList))
+        {
+            _typeInfoLists[name] = tiList;
+            return true;
+        }
         // A comptime-known scalar/string literal (`const p = "foo";` / `const n = 3;`) — record its VALUE
         // (road-to-zig-std S5 seed) so a comptime context (a `++`/`**` operand or count) can resolve the
         // name and fold. SIDE EFFECT only: fall through to `return false` so the ordinary runtime decl
@@ -202,6 +209,12 @@ internal sealed partial class ZigLowering
             // (road-to-zig-std S5). Before the std-path case: no std path is rooted at a builtin call.
             case Zig.Field when TryFoldTypeInfoType(rhs, out var tiChild):
                 type = tiChild;
+                return true;
+
+            // `const Tag = @typeInfo(E).@"enum".tag_type;` / `const F = @typeInfo(T).@"struct"
+            // .field_types[0];` — a reflected TYPE from the member-list payloads (S5c).
+            case Zig.Field or Zig.Index when TryFoldTypeInfoListType(rhs, out var tiListTy):
+                type = tiListTy;
                 return true;
 
             // `const A = std.mem.Allocator;` — a dotted std TYPE path aliased to a name.
@@ -364,6 +377,10 @@ internal sealed partial class ZigLowering
         // pointer / slice / optional / array kind. Checked before the std-path resolver: the base is
         // a comptime `std.builtin.Type` value, which no std path claims.
         Zig.Field when TryFoldTypeInfoType(type, out var tiChild) => tiChild,
+        // `@typeInfo(E).@"enum".tag_type` — the same shape, from the member-list payloads (S5c).
+        Zig.Field when TryFoldTypeInfoListType(type, out var tiTag) => tiTag,
+        // `@typeInfo(T).@"struct".field_types[0]` — a TYPE element of a comptime member list (S5c).
+        Zig.Index when TryFoldTypeInfoListType(type, out var tiElem) => tiElem,
         // A dotted std type (Milestone F): `std.mem.Allocator` → the runtime Allocator fat
         // pointer; `std.heap.FixedBufferAllocator` → the concrete bump allocator. Any other std
         // path in type position errors clearly (`std` is a known-paths resolver, not a real model).

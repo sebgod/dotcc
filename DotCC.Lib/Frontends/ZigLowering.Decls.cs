@@ -828,6 +828,11 @@ internal sealed partial class ZigLowering
         var name = Tok(nameTok);
         var (fieldItems, methods, consts) = SplitEnumMembers(membersItem);
         var underlying = underlyingType is not null ? LowerType(underlyingType) : CType.Int;
+        // Remember whether the SOURCE spelled the tag type. zig INFERS one for an untyped enum (the
+        // smallest unsigned int holding the largest member — `u2` for four members) while dotcc
+        // defaults to `int`, so reporting an inferred tag through `@typeInfo(E).@"enum".tag_type`
+        // would disagree with zig on its width and @sizeOf. Only a spelled tag is answered there.
+        if (underlyingType is not null) { _enumsWithSpelledTag.Add(Tok(nameTok)); }
         var enumType = new CType.Enum(name, underlying);
         var members = new List<EnumMember>();
         var memberSyms = new Dictionary<string, Symbol>(System.StringComparer.Ordinal);
@@ -1724,6 +1729,15 @@ internal sealed partial class ZigLowering
                 var msDest = LowerMemSlice(bargs[0], wantConst: false, out var msElem);
                 var msVal = LowerExprSink(bargs[1], msElem);
                 return new ZigMemCall("Set", msElem, new List<CExpr> { msDest, msVal }) { Type = CType.Void };
+            case "@hasField":
+            case "@hasDecl":
+                // Comptime MEMBERSHIP (road-to-zig-std S5c) — folds to a boolean literal from the same
+                // registries the member lists read; unlike `decl_names` it needs no declaration order.
+                return TryEvalMembershipBuiltin(b)
+                    ?? throw new IrUnsupportedException($"zig `{bname}`: not a membership query");
+            case "@field":
+                // Comptime-NAMED field access — re-enters the ordinary member path once the name folds.
+                return LowerFieldBuiltin(bargs);
             case "@typeInfo":
                 // Reaching here means a `@typeInfo(T)` was used where a RUNTIME value is wanted — every
                 // comptime position (a field access, a `switch` subject, a `const` binding) folds it
@@ -1737,7 +1751,8 @@ internal sealed partial class ZigLowering
                 throw new IrUnsupportedException(
                     $"zig builtin '{bname}' not lowered yet (supported: @as, @intCast, @truncate, @ptrCast, @bitCast, " +
                     "@floatFromInt, @intFromFloat, @floatCast, @enumFromInt, @alignCast, @intFromEnum, @sizeOf, @alignOf, " +
-                    "@offsetOf, @typeName, @typeInfo, @min, @max, @rem, @divTrunc, @mod, @divFloor, @popCount, @clz, @ctz, " +
+                    "@offsetOf, @typeName, @typeInfo, @hasField, @hasDecl, @field, @min, @max, @rem, @divTrunc, @mod, @divFloor, " +
+                    "@popCount, @clz, @ctz, " +
                     "@byteSwap, @abs, @intFromPtr, @errorName, @memcpy, @memset)");
         }
     }

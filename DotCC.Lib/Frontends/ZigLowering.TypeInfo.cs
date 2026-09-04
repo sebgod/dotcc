@@ -18,16 +18,24 @@ namespace DotCC.Frontends;
 /// <c>signedness</c>, <c>child</c>, <c>is_const</c> and <c>len</c> are read straight off the
 /// <see cref="CType"/> and are always right. <c>bits</c> is NOT: dotcc widens an arbitrary-width
 /// <c>uN</c>/<c>iN</c> to the smallest standard width (<c>u21</c> → a 32-bit <c>uint</c>), so the
-/// lowered type no longer knows it was declared with 21. It is therefore answered only from the
-/// SOURCE SPELLING at the <c>@typeInfo</c> site — the same rule <c>@typeName</c> already follows —
-/// and is a loud cut through a type binding (an alias, a comptime type param) until the declared
-/// width rides on the type. A silently-32 answer where zig says 21 is the one outcome worth
-/// refusing.</para>
+/// lowered type no longer knows it was declared with 21. It is therefore answered from the SOURCE
+/// SPELLING — the same rule <c>@typeName</c> already follows — which S5b then made travel WITH a
+/// type binding (see <see cref="_declaredIntBits"/>), so a <c>comptime T: type</c> param answers it
+/// too. Only an <c>anytype</c> param / <c>@TypeOf(expr)</c>, where the type is inferred from a
+/// VALUE and no spelling survives, is still refused. A silently-32 answer where zig says 21 is the
+/// one outcome worth refusing.</para>
 ///
-/// <para>V1 covers the scalar kinds and the tag of every other kind, so a <c>switch</c> over
-/// <c>@typeInfo(T)</c> dispatches on any type; an aggregate kind's <c>fields</c>/<c>decls</c> is a
-/// loud cut naming S6 (they are comptime SLICES of aggregates, which is the <c>inline for</c>
-/// brick, not this one).</para></summary>
+/// <para>This file covers the scalar kinds and the tag of every kind, so a <c>switch</c> over
+/// <c>@typeInfo(T)</c> dispatches on ANY type. The aggregate kinds' member LISTS
+/// (<c>field_names</c> / <c>field_types</c> / <c>field_values</c>) live in
+/// <c>ZigLowering.TypeInfo.Lists.cs</c> (S5c).</para>
+///
+/// <para><b>Version note.</b> dotcc models zig <b>0.17-dev</b>'s <c>std.builtin.Type</c> — the
+/// version whose std the campaign compiles from source. 0.16 and earlier expose
+/// <c>fields</c>/<c>decls</c> as slices of field STRUCTS instead of the parallel arrays; the CI
+/// oracle pins 0.16.0 (the newest DURABLE tag — dev tarballs are GC'd off the download index), so
+/// the member-list surface is validated by emit pins plus a by-hand 0.17-dev run rather than a CI
+/// differential. See the note in <c>ZigOracleTests</c>.</para></summary>
 internal sealed partial class ZigLowering
 {
     /// <summary>A folded <c>@typeInfo(T)</c> value: the active <c>std.builtin.Type</c> union TAG
@@ -252,12 +260,22 @@ internal sealed partial class ZigLowering
                 value = new LitInt(count.ToString(System.Globalization.CultureInfo.InvariantCulture), count) { Type = CType.Int };
                 return true;
 
-            case (_, "fields") or (_, "decls") or (_, "field_names") or (_, "field_types")
-                or (_, "field_values") or (_, "decl_names"):
+            // The member LISTS (road-to-zig-std S5c) fold in their own path — reaching here means one
+            // was used as a bare VALUE, which it cannot be: a comptime list has no runtime form.
+            case (_, "field_names") or (_, "field_types") or (_, "field_values"):
                 throw new IrUnsupportedException(
-                    $"zig `@typeInfo({info.Type.Describe()}).{info.Tag}.{field}`: a field/decl list is a comptime SLICE of "
-                    + "comptime aggregates, which needs the aggregate value domain and `inline for` over it "
-                    + "(road-to-zig-std S6)");
+                    $"zig `@typeInfo({info.Type.Describe()}).{info.Tag}.{field}` is a comptime member LIST with no runtime "
+                    + "representation — read its `.len`, index it at a comptime index, or bind it to a `const`");
+
+            // `fields` / `decls` are the OLDER `std.builtin.Type` shape (a slice of field STRUCTS). The
+            // pinned zig replaced them with the parallel `field_names` / `field_types` / `field_values`
+            // arrays, so pointing at those is more useful than implementing a shape zig no longer has.
+            case (_, "fields") or (_, "decls"):
+                throw new IrUnsupportedException(
+                    $"zig `@typeInfo({info.Type.Describe()}).{info.Tag}.{field}`: dotcc models zig 0.17-dev's "
+                    + "`std.builtin.Type`, which replaced the `fields`/`decls` slice-of-structs with the parallel "
+                    + "arrays `field_names` / `field_types` / `field_values` — use those. (Zig 0.16 and earlier "
+                    + "spell it the old way; dotcc tracks 0.17-dev, the version whose std it compiles.)");
 
             case ("pointer", "size"):
                 throw new IrUnsupportedException(

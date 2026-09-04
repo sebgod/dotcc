@@ -19,19 +19,34 @@
 // VALUE and no spelling survives anywhere. dotcc raises a clear error there rather than answer 32
 // where real zig says 21 — a missing feature is recoverable, a wrong comptime constant is not.
 //
+// NOTE: the `members` line below uses zig 0.17-dev's `field_names` / `field_values`, which replaced
+// 0.16's `fields: []const StructField`. dotcc targets 0.17-dev (the version whose std it compiles),
+// so building this with real zig needs 0.17-dev too — the rest of the file works on either.
+//
 //   dotnet run --project DotCC -c Release -- --emit=file examples/zig-typeinfo/main.zig > out.cs
-//   dotnet out.cs   # prints the four lines below, exits 42
+//   dotnet out.cs   # prints the seven lines below, exits 42
 //
 // Output:
 //   kind    u8=int f64=float bool=bool []u8=pointer ?u32=optional [4]u8=array P=struct
 //   int     u21 bits=21 signed=0 | i7 bits=7 signed=1
 //   generic bitsOf(u21)=21 bitsOf(u32)=32 bitsOf(Cp)=21
 //   child   ?u32 holds a 4-byte value | [4]u8 has 4 elements
+//   members P has 2 fields, first starts x | E has 4, third value is 2
+//   ask     hasField(P,"x")=1 hasField(P,"q")=0 hasDecl(P,"sum")=1 | field(p,"x")=40
 //   sum     40 + 2 = 42
 
 extern fn printf(fmt: [*:0]const u8, ...) c_int;
 
-const P = struct { x: i32, y: i32 };
+const P = struct {
+    x: i32,
+    y: i32,
+    /// A DECL rather than a field — `@hasDecl` finds it, `@hasField` does not.
+    fn sum(self: P) i32 { return self.x + self.y; }
+};
+
+/// A spelled tag type. An INFERRED one is a loud cut: zig picks the smallest unsigned int that
+/// holds the largest member, dotcc defaults to `int`, and reporting that would disagree on width.
+const E = enum(u8) { a, b, c, d };
 
 /// An alias for a narrow width — it carries the declared width like the spelling does, and keys the
 /// same specialization as writing `u21` at the call site.
@@ -74,7 +89,7 @@ pub fn main() u8 {
         kindName(?u32), kindName([4]u8), kindName(P));
 
     // `bits` from the source spelling — 21 and 7, the DECLARED widths, not the 32/8 dotcc lowers
-    // them to. Through a `comptime T: type` param this is a deliberate loud cut instead.
+    // them to.
     const bits21: u16 = @typeInfo(u21).int.bits;
     const bits7: u16 = @typeInfo(i7).int.bits;
     _ = printf("int     u21 bits=%d signed=%d | i7 bits=%d signed=%d\n",
@@ -89,6 +104,24 @@ pub fn main() u8 {
     const len: u8 = @typeInfo([4]u8).array.len;
     const childSize: u8 = @sizeOf(Child);
     _ = printf("child   ?u32 holds a %d-byte value | [4]u8 has %d elements\n", childSize, len);
+
+    // The parallel MEMBER LISTS this zig exposes — `field_names` / `field_types` / `field_values`
+    // rather than a slice of field structs. `.len` and a comptime index both fold to literals.
+    const nf: u8 = @typeInfo(P).@"struct".field_names.len;
+    const names = @typeInfo(P).@"struct".field_names;
+    const ne: u8 = @typeInfo(E).@"enum".field_names.len;
+    const ev: u8 = @typeInfo(E).@"enum".field_values[2];
+    _ = printf("members P has %d fields, first starts %c | E has %d, third value is %d\n",
+        nf, names[0][0], ne, ev);
+
+    // Membership needs no declaration ORDER, which is why these work where `decl_names` does not.
+    var p = P{ .x = 40, .y = 2 };
+    p.x += 0;
+    const hx: u8 = if (@hasField(P, "x")) 1 else 0;
+    const hq: u8 = if (@hasField(P, "q")) 1 else 0;
+    const hd: u8 = if (@hasDecl(P, "sum")) 1 else 0;
+    _ = printf("ask     hasField(P,\"x\")=%d hasField(P,\"q\")=%d hasDecl(P,\"sum\")=%d | field(p,\"x\")=%d\n",
+        hx, hq, hd, @field(p, "x"));
 
     const a: Child = 40;
     const b: Child = @typeInfo([4]u8).array.len / 2;

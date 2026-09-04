@@ -5433,15 +5433,167 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void A_field_or_decl_list_is_a_loud_cut_naming_S6()
+    public void The_old_fields_and_decls_shape_points_at_the_parallel_arrays()
     {
-        // `.fields` / `.decls` are comptime SLICES of comptime aggregates — the `inline for` brick,
-        // not this one. Loud, and it names where the capability lands.
+        // `fields` / `decls` are the OLDER `std.builtin.Type` shape (a slice of field STRUCTS), which
+        // zig 0.17-dev replaced with parallel arrays. dotcc models 0.17-dev — the version whose std it
+        // compiles — so the error points at what that zig has AND names the split, since a reader on
+        // 0.16 is not writing invalid code, just code for a different version.
         var ex = Should.Throw<CompileException>(() => EmitZig(
             "const P = struct { x: i32, y: i32 };\n" +
             "pub fn main() u8 { return @typeInfo(P).@\"struct\".fields.len; }\n"));
-        ex.Message.ShouldContain("comptime SLICE");
-        ex.Message.ShouldContain("S6");
+        ex.Message.ShouldContain("parallel arrays");
+        ex.Message.ShouldContain("field_names");
+        ex.Message.ShouldContain("0.16");
+    }
+
+    // ---- @typeInfo member lists + membership builtins (road-to-zig-std S5c) ----
+
+    [Fact]
+    public void Field_name_and_value_lists_fold_to_length_and_elements()
+    {
+        // `.field_names.len` is the commonest reflection operation in real std by a wide margin (167
+        // uses); indexing is next (34). Both fold to literals — the list itself never reaches the IR.
+        var cs = EmitZig(
+            "const P = struct { x: i32, y: u8, z: bool };\n" +
+            "const E = enum(u8) { a, b, c, d };\n" +
+            "pub fn main() u8 {\n" +
+            "    const nf: u8 = @typeInfo(P).@\"struct\".field_names.len;\n" +
+            "    const ne: u8 = @typeInfo(E).@\"enum\".field_names.len;\n" +
+            "    const v: u8 = @typeInfo(E).@\"enum\".field_values[2];\n" +
+            "    return nf + ne + v;\n}\n");
+        UserCode(cs).ShouldContain("byte nf = 3;");
+        UserCode(cs).ShouldContain("byte ne = 4;");
+        UserCode(cs).ShouldContain("byte v = 2;");
+    }
+
+    [Fact]
+    public void A_field_name_element_folds_to_a_string_literal()
+    {
+        // A NAME element is a comptime string, so it folds to the same pooled UTF-8 literal any zig
+        // string does — and a list bound to a `const` emits no decl of its own.
+        var cs = EmitZig(
+            "const P = struct { xy: i32, z: u8 };\n" +
+            "pub fn main() u8 {\n" +
+            "    const names = @typeInfo(P).@\"struct\".field_names;\n" +
+            "    const first = names[0];\n" +
+            "    return first[0];\n}\n");
+        UserCode(cs).ShouldContain("Libc.L(\"xy\\0\"u8)");
+        UserCode(cs).ShouldNotContain("names");   // the list binding itself is dropped
+    }
+
+    [Fact]
+    public void A_field_type_element_resolves_in_a_type_position()
+    {
+        // `field_types[i]` is a TYPE, so it is served from the type positions — here as a `const`
+        // alias and then as an annotation.
+        var cs = EmitZig(
+            "const P = struct { x: i32, y: u8 };\n" +
+            "pub fn main() u8 {\n" +
+            "    const Second = @typeInfo(P).@\"struct\".field_types[1];\n" +
+            "    const s: Second = 42;\n" +
+            "    return s;\n}\n");
+        UserCode(cs).ShouldContain("byte s = 42;");
+    }
+
+    [Fact]
+    public void A_spelled_enum_tag_type_resolves_but_an_inferred_one_is_a_loud_cut()
+    {
+        // zig INFERS an untyped enum's tag type as the smallest unsigned int holding its largest
+        // member (`u2` for four members); dotcc defaults to `int`. Answering there would disagree on
+        // the width and on @sizeOf, so only a SPELLED tag is reported — the same shape of judgement
+        // `bits` makes about a declared width.
+        var cs = EmitZig(
+            "const E = enum(u8) { a, b };\n" +
+            "pub fn main() u8 {\n" +
+            "    const Tag = @typeInfo(E).@\"enum\".tag_type;\n" +
+            "    const t: Tag = 42;\n" +
+            "    return t;\n}\n");
+        UserCode(cs).ShouldContain("byte t = 42;");
+
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const E = enum { a, b, c, d };\n" +
+            "pub fn main() u8 {\n" +
+            "    const Tag = @typeInfo(E).@\"enum\".tag_type;\n" +
+            "    const t: Tag = 3;\n" +
+            "    return t;\n}\n"));
+        ex.Message.ShouldContain("INFERRED");
+        ex.Message.ShouldContain("Spell the tag");
+    }
+
+    [Fact]
+    public void HasField_and_hasDecl_fold_to_boolean_literals()
+    {
+        // Membership needs no declaration ORDER, which is exactly why these work while `decl_names`
+        // does not — dotcc's const/method registries are name-keyed.
+        var cs = EmitZig(
+            "const P = struct {\n" +
+            "    x: i32,\n" +
+            "    const K: i32 = 7;\n" +
+            "    fn get(self: P) i32 { return self.x; }\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    const a: u8 = if (@hasField(P, \"x\")) 1 else 0;\n" +
+            "    const b: u8 = if (@hasField(P, \"q\")) 1 else 0;\n" +
+            "    const c: u8 = if (@hasDecl(P, \"get\")) 1 else 0;\n" +
+            "    const d: u8 = if (@hasDecl(P, \"K\")) 1 else 0;\n" +
+            "    const e: u8 = if (@hasDecl(P, \"nope\")) 1 else 0;\n" +
+            "    return a + b + c + d + e;\n}\n");
+        UserCode(cs).ShouldContain("Cond.B(true)");
+        UserCode(cs).ShouldContain("Cond.B(false)");
+    }
+
+    [Fact]
+    public void Field_builtin_is_ordinary_member_access_once_the_name_folds()
+    {
+        // `@field(x, "name")` re-enters the shared member path rather than duplicating it, so the
+        // emitted access is indistinguishable from `x.name`.
+        var cs = EmitZig(
+            "const P = struct { x: i32, y: i32 };\n" +
+            "pub fn main() u8 {\n" +
+            "    var p = P{ .x = 40, .y = 2 };\n" +
+            "    p.x += 0;\n" +
+            "    return @intCast(@field(p, \"x\") + @field(p, \"y\"));\n}\n");
+        UserCode(cs).ShouldContain("p.x + p.y");
+    }
+
+    [Fact]
+    public void A_member_list_used_as_a_bare_value_is_rejected()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const P = struct { x: i32 };\n" +
+            "fn take(n: u8) u8 { return n; }\n" +
+            "pub fn main() u8 { return take(@typeInfo(P).@\"struct\".field_names); }\n"));
+        ex.Message.ShouldContain("comptime member LIST");
+    }
+
+    [Fact]
+    public void A_member_list_index_must_be_comptime_and_in_bounds()
+    {
+        var oob = Should.Throw<CompileException>(() => EmitZig(
+            "const P = struct { x: i32 };\n" +
+            "pub fn main() u8 { const n = @typeInfo(P).@\"struct\".field_names[3]; return n[0]; }\n"));
+        oob.Message.ShouldContain("out of bounds");
+
+        var dyn = Should.Throw<CompileException>(() => EmitZig(
+            "const P = struct { x: i32 };\n" +
+            "pub fn main() u8 {\n" +
+            "    var i: usize = 0;\n" +
+            "    i += 0;\n" +
+            "    const n = @typeInfo(P).@\"struct\".field_names[i];\n" +
+            "    return n[0];\n}\n"));
+        dyn.Message.ShouldContain("comptime-known");
+    }
+
+    [Fact]
+    public void Decl_names_is_a_loud_cut_because_the_registries_are_name_keyed()
+    {
+        // Honest about WHY: membership works, ordering does not.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const P = struct { x: i32 };\n" +
+            "pub fn main() u8 { return @typeInfo(P).@\"struct\".decl_names.len; }\n"));
+        ex.Message.ShouldContain("DECLARATION-ORDER");
+        ex.Message.ShouldContain("@hasDecl");
     }
 
     [Fact]
