@@ -223,11 +223,14 @@ internal sealed partial class ZigLowering
         {
             throw new IrUnsupportedException($"zig `{name}` expects (type, name); got {args.Count} argument(s)");
         }
-        if (args[1].Content is not Zig.StrLit lit)
+        // A string literal, or a name bound to one by an `inline for` capture (road-to-zig-std S6) —
+        // `inline for (field_names) |f| { if (@hasField(T, f)) … }` is the shape this serves.
+        if (ComptimeStringArg(args[1]) is not { } member)
         {
-            throw new IrUnsupportedException($"zig `{name}`: the member name must be a comptime string literal");
+            throw new IrUnsupportedException(
+                $"zig `{name}`: the member name must be a comptime string — a literal, or an `inline for` capture "
+                + "over a member list");
         }
-        var member = UnquoteStringLiteral(Tok(lit.Arg0));
         var type = LowerType(args[0]);
         var present = name == "@hasField"
             ? (FieldsOfAggregate(type)?.Any(x => x.Name == member) ?? false)
@@ -256,11 +259,14 @@ internal sealed partial class ZigLowering
         {
             throw new IrUnsupportedException($"zig `@field` expects (value, name); got {bargs.Count} argument(s)");
         }
-        if (bargs[1].Content is not Zig.StrLit lit)
+        // As for `@hasField`: a literal, or an `inline for` capture over `field_names` — which is
+        // exactly the `inline for (field_names) |f| … @field(x, f) …` idiom S6 exists to serve.
+        if (ComptimeStringArg(bargs[1]) is not { } fieldName)
         {
-            throw new IrUnsupportedException("zig `@field`: the field name must be a comptime string literal");
+            throw new IrUnsupportedException(
+                "zig `@field`: the field name must be a comptime string — a literal, or an `inline for` capture "
+                + "over a member list");
         }
-        var fieldName = UnquoteStringLiteral(Tok(lit.Arg0));
         var receiver = LowerExpr(bargs[0]);
         var isPtr = receiver.Type.Unqualified is CType.Pointer;
         var fieldType = _ir.StructFieldType(receiver.Type, fieldName)

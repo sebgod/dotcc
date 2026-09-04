@@ -307,6 +307,46 @@ that retire curated shortcuts.
 > version-stable), and `examples/zig-typeinfo/` grew `members` + `ask` lines — seven lines now, still
 > byte-identical to real zig 0.17.0-dev.667 at exit 42 (0.17-dev only, by the same split).
 
+> **Status update (2026-09-04) — S6 DONE: `inline for` over a comptime list.**
+> The consumer S5c's lists were built for. A member list has no runtime representation, so a plain
+> `for` cannot walk one; `inline for` can, because it is not a loop — it UNROLLS at lowering time
+> into one copy of the body per element. The existing unroller could not be reused as-is: it binds
+> each capture to a runtime symbol initialized by an emitted `const cap = …;`, and a list element may
+> be a TYPE (no runtime slot exists) or a comptime STRING (which `@field` must read at lowering
+> time). So the capture is seeded into the same name-keyed maps an ordinary comptime binding uses —
+> `_typeAliases` for a type, `_comptimeValues` (+ a new `_comptimeStrings` for the name half) for a
+> string or integer — and shadow-restored after every copy, exactly as W3b seeds a type parameter.
+>
+> **The shapes were measured, not guessed, and that changed the brick.** The plan above assumed one
+> form. In the pinned std the PARALLEL two-list form is the commonest member-list shape by a
+> distance: `inline for (info.field_names, info.field_types) |field_name, field_type|` ×17, against
+> ×11 for the single-list form, ×12 for `(list, 0..) |x, i|`, and ×21 for a `[_]type{…}` literal
+> walked as `|T|`. The parallel form needed the one grammar production this brick adds
+> (`Expr ',' Expr ')'`, conflict-free against the indexed form by the same 1-token lookahead the
+> block already documents: `..` selects one, `)` the other). All four shapes then fall out of a
+> single unroll over N index-parallel lists — `0..` is modelled as a synthesized list of its own
+> indices, so there is no second code path.
+>
+> `@field` / `@hasField` / `@hasDecl` now take their member name from a literal **or** a capture
+> (`ComptimeStringArg`), which is what makes `inline for (field_names) |f| … @field(v, f) …` — one
+> generic body reaching every field of a struct it has never seen — work at all. Nothing dynamic
+> survives: the emitted C# holds the field accesses and nothing else.
+>
+> **Unlike S5c, this brick DOES get a CI differential.** The unroll is one code path regardless of
+> where the list came from, so exercising it over `[_]type{…}` literals — which mention `@typeInfo`
+> nowhere — puts the type-list, parallel and indexed shapes under a real compiler on CI's zig 0.16.0
+> as well. Only the member-list OPERAND stays oracle-less until 0.17.0 is tagged. Worth remembering
+> as a general move: when a version split blocks an oracle, look for a version-stable operand that
+> reaches the same code.
+>
+> **Cuts (all loud):** a RUNTIME parallel `for (a, b) |x, y|` (the grammar now accepts it; only the
+> comptime form lowers); parallel lists of unequal length; an index capture not starting at 0; an
+> anonymous `.{…}` / `&.{…}` type list (needs sink inference); `break`/`continue` in an unrolled body
+> (there is no loop left to target); the 4096-copy unroll cap.
+>
+> Validation: 13 emit pins + 1 zig-oracle program (`inline_for_comptime_lists`), and a new
+> `examples/zig-inline-for-lists/` — eight lines, exit 42, identical to real zig 0.17.0-dev.667.
+
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)
 
 An opt-in test/tool (`DOTCC_RUN_STD_PROBE=1`, env `DOTCC_ZIG_LIB_DIR` or
@@ -478,14 +518,22 @@ once here, consumed by `++`/`**`, `@typeName`, comptime-`if`, and array-extent c
 
 ### S6 — `inline for` over aggregates + `@field` (M)
 
-- Extend the existing range-unroller: `inline for (info.@"struct".fields) |f|`
-  unrolls over a comptime slice value, binding the capture to a comptime
-  aggregate per iteration (each iteration lowers with the capture seeded, the
-  W3a `_comptimeVars` shape).
-- `inline while` (121 uses) rides the same machinery (condition folds per
-  iteration; the comptime-var mutation loop already exists from Milestone T).
-- `@field(x, "name")` with a comptime name → rewritten to an ordinary field
-  access at lowering time (the AOT rule: no runtime reflection, ever).
+**S6 ✅ DONE (2026-09-04)** — `inline for` over a comptime list, in all four shapes real std
+writes: a single list, two lists in PARALLEL (the commonest, and the one grammar production this
+brick added), a list alongside its indices, and a `[_]type{…}` literal. The capture binds COMPTIME
+(a type into `_typeAliases`, a string/integer into `_comptimeValues`) and is shadow-restored per
+copy. `@field` / `@hasField` / `@hasDecl` accept a captured name. Status update above.
+
+The bullets below were written against the older `fields` API and the assumption of a single
+operand shape; what actually landed is recorded in the status update. Two of them were already
+true when the brick started:
+- `inline while` (121 uses) has ridden the same machinery since Milestone T.
+- `@field(x, "name")` with a literal name landed in S5c.
+
+Still open here: **`inline for` over a comptime list of AGGREGATES** — which the pinned zig does
+not need, since it exposes parallel arrays of scalars rather than a slice of field structs. If a
+later zig reverts to `fields: []const StructField`, that is the shape to build.
+
 - This + S5 is precisely what `std.fmt.format`'s per-field loops need.
 
 ### S7 — reification builtins + `@compileError` (M)

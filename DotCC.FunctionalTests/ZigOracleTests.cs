@@ -2492,6 +2492,24 @@ public sealed class ZigOracleTests
             "fn inner(comptime T: type) u16 { return @typeInfo(T).int.bits; }\n" +
             "fn outer(comptime T: type) u16 { return inner(u7) + @typeInfo(T).int.bits; }\n" +
             "pub fn main() u8 { return @intCast(outer(u21) + 14); }\n", 42, "" },
+        // `inline for` over a COMPTIME LIST (road-to-zig-std S6), in the three shapes that are
+        // version-stable: a `[_]type{…}` literal, two lists walked in PARALLEL, and a list with an
+        // index capture. None of them mentions `@typeInfo`, so — unlike the member-list forms below —
+        // this program is valid under 0.16.0 as well and gets a real differential. 15 + 9 + 18 = 42.
+        new object[] { "inline_for_comptime_lists",
+            "pub fn main() u8 {\n" +
+            "    var total: usize = 0;\n" +
+            "    inline for ([_]type{ u8, u16, u32, u64 }) |T| {\n" +
+            "        total += @sizeOf(T);\n" +
+            "    }\n" +
+            "    inline for ([_]type{ u8, u16 }, [_]type{ u32, u64 }) |A, B| {\n" +
+            "        total += @sizeOf(B) - @sizeOf(A);\n" +
+            "    }\n" +
+            "    inline for ([_]type{ u8, u16, u64 }, 0..) |T, i| {\n" +
+            "        total += @sizeOf(T) * i;\n" +
+            "    }\n" +
+            "    return @intCast(total);\n" +
+            "}\n", 42, "" },
         // NOTE: there is deliberately NO member-list oracle program here. dotcc's front end targets
         // zig 0.17-dev (the campaign compiles real std from 0.17.0-dev.667, and the grammar tracks it),
         // where `@typeInfo(T).@"struct"` exposes the PARALLEL ARRAYS `field_names` / `field_types` /
@@ -2500,7 +2518,10 @@ public sealed class ZigOracleTests
         // the older `fields: []const StructField` shape. So a member-list program cannot be valid in both
         // compilers at once: it is covered by emit pins (ZigFrontendTests) plus a by-hand run against the
         // 0.17-dev install, and gains a differential here the moment 0.17.0 is tagged. The membership
-        // builtins below ARE version-stable, so they get a real differential.
+        // builtins below ARE version-stable, so they get a real differential — as does the S6
+        // `inline_for_comptime_lists` program above, which is why it iterates `[_]type{…}` literals
+        // rather than member lists: the UNROLL is the same code path either way, so exercising it over
+        // a version-stable operand still puts it under a real compiler.
         // Membership + comptime-named field access. `@hasDecl` sees both a container `const` and a
         // METHOD. The absent names take their `else` arms — their weighted true-arms (10, 20) would
         // blow the total, so a constant-true fold could not reach 42. 1+0+4+8+0+29 = 42.

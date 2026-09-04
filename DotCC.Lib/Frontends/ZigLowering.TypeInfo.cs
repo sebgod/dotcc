@@ -265,7 +265,8 @@ internal sealed partial class ZigLowering
             case (_, "field_names") or (_, "field_types") or (_, "field_values"):
                 throw new IrUnsupportedException(
                     $"zig `@typeInfo({info.Type.Describe()}).{info.Tag}.{field}` is a comptime member LIST with no runtime "
-                    + "representation — read its `.len`, index it at a comptime index, or bind it to a `const`");
+                    + "representation — read its `.len`, index it at a comptime index, walk it with `inline for` "
+                    + "(a plain `for` cannot: there is nothing to iterate at runtime), or bind it to a `const`");
 
             // `fields` / `decls` are the OLDER `std.builtin.Type` shape (a slice of field STRUCTS). The
             // pinned zig replaced them with the parallel `field_names` / `field_types` / `field_values`

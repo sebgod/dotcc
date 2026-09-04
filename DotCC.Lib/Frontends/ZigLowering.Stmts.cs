@@ -287,6 +287,14 @@ internal sealed partial class ZigLowering
             // `for (s, 0..) |x, i| body` — also bind the usize index (counter + start).
             case Zig.StmtForSliceIdx f:  // for '(' Expr ',' Expr '..' ')' '|' IDENT ',' IDENT '|' Stmt
                 return LowerForSlice(LowerExpr(f.Arg2), Tok(f.Arg8), (Tok(f.Arg10), LowerExpr(f.Arg4)), f.Arg12, byRef: false);
+            // `for (a, b) |x, y| body` — the PARALLEL form (road-to-zig-std S6). Only the COMPTIME
+            // form is lowered: a member list has no runtime representation, so the useful case is
+            // always `inline for`. A runtime lockstep walk over two slices is a separate feature.
+            case Zig.StmtForSlicePair:
+                throw new IrUnsupportedException(
+                    "zig parallel `for (a, b) |x, y|` is supported only as an `inline for` over comptime "
+                    + "member lists (road-to-zig-std S6) — a runtime lockstep walk over two slices is not "
+                    + "lowered yet");
             // `for (s, 0..) |*x, i| body` — BY-REFERENCE element capture WITH the usize index
             // (Milestone Z): `x` is a `*T` into the slice (so `x.* = …` writes through), `i` the index.
             case Zig.StmtForSliceIdxRef f:  // for '(' Expr ',' Expr '..' ')' '|' '*' IDENT ',' IDENT '|' Stmt
@@ -800,6 +808,43 @@ internal sealed partial class ZigLowering
                     k => new LitInt((lo + k).ToString(System.Globalization.CultureInfo.InvariantCulture), lo + k) { Type = CType.ULong });
             }
 
+            // `inline for (<comptime list>) |x|` — over a `@typeInfo` member list or a `[_]type{…}`
+            // literal (road-to-zig-std S6): the consumer S5c's lists exist for. A comptime list has
+            // no runtime representation, so these three cases MUST precede the runtime-array case
+            // below, and the capture binds comptime (UnrollComptimeFor), not as an emitted `const`.
+            case Zig.StmtForSlice cf when TryComptimeIterable(cf.Arg2, out var cl):
+                return UnrollComptimeFor(new[] { (cl, Tok(cf.Arg5)) }, cf.Arg7);
+
+            // `inline for (a, b) |x, y|` — two lists walked in lockstep. Measured in the pinned std
+            // this is the DOMINANT member-list shape (`(field_names, field_types)`, 17 uses). Both
+            // operands must be comptime lists: a comptime list paired with a runtime slice cannot be
+            // unrolled at all, so naming that beats a downstream type error.
+            case Zig.StmtForSlicePair cp when TryComptimeIterable(cp.Arg2, out var cl0):
+            {
+                if (!TryComptimeIterable(cp.Arg4, out var cl1))
+                {
+                    throw new IrUnsupportedException(
+                        "`inline for` over parallel operands requires BOTH to be comptime lists "
+                        + $"(`{cl0.Label}` is one; the second operand is not)");
+                }
+                return UnrollComptimeFor(new[] { (cl0, Tok(cp.Arg7)), (cl1, Tok(cp.Arg9)) }, cp.Arg11);
+            }
+
+            // `inline for (list, 0..) |x, i|` — the list alongside its own indices, which is just a
+            // second index-parallel operand (IndexList). The index must start at 0, as everywhere
+            // else dotcc accepts `for (s, N..)`.
+            case Zig.StmtForSliceIdx ci when TryComptimeIterable(ci.Arg2, out var cli):
+            {
+                if (_ir.ConstEval(LowerExpr(ci.Arg4)) is not 0)
+                {
+                    throw new IrUnsupportedException(
+                        "`inline for` over a comptime list with an index capture must start the index at 0 "
+                        + "(`for (list, 0..) |x, i|`)");
+                }
+                return UnrollComptimeFor(
+                    new[] { (cli, Tok(ci.Arg8)), (IndexList(cli.Count), Tok(ci.Arg10)) }, ci.Arg12);
+            }
+
             // `inline for (arr) |x|` — over a fixed array of comptime-known length. The operand must be
             // a named array variable (so each element read `arr[k]` is side-effect-free across copies);
             // the capture binds to the element by value.
@@ -833,10 +878,11 @@ internal sealed partial class ZigLowering
             default:
                 throw new IrUnsupportedException(
                     "`inline` is only supported on a counted `for (lo..hi) |i|` range loop, a "
-                    + "`for (arr) |x|` over a fixed array, or an `inline while (c) : (i = …)` with a "
-                    + "`comptime var` counter (comptime unrolling) — the indexed `|x, i|` / by-ref "
-                    + "`|*x|` `for` forms, `inline for` over a slice, and a bare/expr-cont `inline "
-                    + "while` are not supported yet");
+                    + "`for (arr) |x|` over a fixed array, a `for` over a comptime member list "
+                    + "(single, parallel `(a, b) |x, y|`, or indexed `(list, 0..) |x, i|`), or an "
+                    + "`inline while (c) : (i = …)` with a `comptime var` counter (comptime "
+                    + "unrolling) — the by-ref `|*x|` `for` forms, `inline for` over a runtime "
+                    + "slice, and a bare/expr-cont `inline while` are not supported yet");
         }
     }
 

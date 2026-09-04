@@ -88,6 +88,13 @@ internal sealed partial class ZigLowering
                 {
                     return LowerContainerConst(cc, name, sib.typeItem, sib.rhs);
                 }
+                // A name bound to a COMPTIME value with no runtime symbol — today an `inline for`
+                // capture over a member list of strings or enum values (road-to-zig-std S6), which
+                // deliberately emits no `const`. Substituting the folded literal is what makes the
+                // capture usable as an ordinary value (printed, compared, passed) inside the body.
+                // Narrow by construction: an ordinary comptime `const` also emits its runtime decl,
+                // so it resolves as a symbol above and never reaches here.
+                if (_comptimeValues.TryGetValue(name, out var comptimeBound)) { return comptimeBound; }
                 throw new IrUnsupportedException($"unresolved identifier '{name}'");
             }
             case Zig.Grouped g:

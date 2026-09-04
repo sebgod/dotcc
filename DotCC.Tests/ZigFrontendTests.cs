@@ -5627,4 +5627,203 @@ public sealed class ZigFrontendTests
             "pub fn main() u8 { return kindOf(bool); }\n"));
         ex.Message.ShouldContain("no prong matches");
     }
+
+    // ---- `inline for` over a comptime list (road-to-zig-std S6) ----
+
+    [Fact]
+    public void Inline_for_over_field_names_unrolls_one_copy_per_field()
+    {
+        // The headline shape: walk `field_names`, reach each field through `@field`. The loop is gone
+        // and what remains is one plain field access per field, in declaration order.
+        var cs = EmitZig(
+            "const P = struct { x: i32, y: i32, z: i32 };\n" +
+            "pub fn main() u8 {\n" +
+            "    var p = P{ .x = 1, .y = 2, .z = 3 };\n" +
+            "    var sum: i32 = 0;\n" +
+            "    inline for (@typeInfo(P).@\"struct\".field_names) |name| { sum += @field(p, name); }\n" +
+            "    return @intCast(sum);\n" +
+            "}\n");
+        UserCode(cs).ShouldContain("sum += p.x;");
+        UserCode(cs).ShouldContain("sum += p.y;");
+        UserCode(cs).ShouldContain("sum += p.z;");
+        UserCode(cs).ShouldNotContain("for (");     // nothing iterates at runtime
+        UserCode(cs).ShouldNotContain("name");      // the capture has no runtime slot
+    }
+
+    [Fact]
+    public void Inline_for_over_parallel_name_and_type_lists_binds_both_captures()
+    {
+        // The DOMINANT shape in real std (17 uses): two index-parallel lists, a name and a type. The
+        // type capture binds as a type alias, so `@sizeOf(T)` resolves per iteration.
+        var cs = EmitZig(
+            "const P = struct { a: u8, b: u32 };\n" +
+            "pub fn main() u8 {\n" +
+            "    var n: u32 = 0;\n" +
+            "    inline for (@typeInfo(P).@\"struct\".field_names, @typeInfo(P).@\"struct\".field_types) |name, T| {\n" +
+            "        _ = name;\n" +
+            "        n += @sizeOf(T);\n" +
+            "    }\n" +
+            "    return @intCast(n);\n" +
+            "}\n");
+        UserCode(cs).ShouldContain("sizeof(byte)");
+        UserCode(cs).ShouldContain("sizeof(uint)");
+    }
+
+    [Fact]
+    public void Inline_for_with_an_index_capture_binds_each_index_as_a_literal()
+    {
+        // `(list, 0..)` — the index is a second index-parallel list of its own indices, so each copy
+        // gets its ordinal folded in.
+        var cs = EmitZig(
+            "const P = struct { x: i32, y: i32, z: i32 };\n" +
+            "pub fn main() u8 {\n" +
+            "    var n: u32 = 0;\n" +
+            "    inline for (@typeInfo(P).@\"struct\".field_names, 0..) |name, i| { _ = name; n += i; }\n" +
+            "    return @intCast(n);\n" +
+            "}\n");
+        UserCode(cs).ShouldContain("n += (uint)(0);");
+        UserCode(cs).ShouldContain("n += (uint)(1);");
+        UserCode(cs).ShouldContain("n += (uint)(2);");
+    }
+
+    [Fact]
+    public void Inline_for_over_a_type_list_literal_binds_each_type()
+    {
+        // `[_]type{…}` — 21 uses in the pinned std, and the commonest source of a `|T|` capture.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var n: u32 = 0;\n" +
+            "    inline for ([_]type{ u8, u16, u32 }) |T| { n += @sizeOf(T); }\n" +
+            "    return @intCast(n);\n" +
+            "}\n");
+        UserCode(cs).ShouldContain("sizeof(byte)");
+        UserCode(cs).ShouldContain("sizeof(ushort)");
+        UserCode(cs).ShouldContain("sizeof(uint)");
+    }
+
+    [Fact]
+    public void Inline_for_over_enum_field_values_folds_each_member_value()
+    {
+        var cs = EmitZig(
+            "const E = enum(u8) { a, b, c, d };\n" +
+            "pub fn main() u8 {\n" +
+            "    var n: u32 = 0;\n" +
+            "    inline for (@typeInfo(E).@\"enum\".field_values) |v| { n += v; }\n" +
+            "    return @intCast(n);\n" +
+            "}\n");
+        UserCode(cs).ShouldContain("n += (uint)(3);");   // 0 + 1 + 2 + 3, each folded
+    }
+
+    [Fact]
+    public void A_name_capture_reaches_hasField_as_a_comptime_string()
+    {
+        // The capture is a comptime STRING, so it answers a membership question at lowering time —
+        // which is what makes `inline for (field_names) |f| … @hasField(T, f) …` work at all.
+        var cs = EmitZig(
+            "const P = struct { x: i32, y: i32 };\n" +
+            "pub fn main() u8 {\n" +
+            "    var n: u8 = 0;\n" +
+            "    inline for (@typeInfo(P).@\"struct\".field_names) |f| { if (@hasField(P, f)) { n += 1; } }\n" +
+            "    return n;\n" +
+            "}\n");
+        UserCode(cs).ShouldContain("Cond.B(true)");
+        UserCode(cs).ShouldNotContain("Cond.B(false)");
+    }
+
+    [Fact]
+    public void A_capture_restores_the_binding_it_shadowed()
+    {
+        // The capture seeds the same name-keyed maps an ordinary comptime binding uses, so it MUST
+        // restore what it displaced: after the loop `T` is the outer alias again. Without the
+        // restore the trailing `@sizeOf(T)` would report the last field's width.
+        var cs = EmitZig(
+            "const P = struct { a: i32, b: i32 };\n" +
+            "const T = u8;\n" +
+            "pub fn main() u8 {\n" +
+            "    var n: u32 = 0;\n" +
+            "    inline for (@typeInfo(P).@\"struct\".field_types) |T| { n += @sizeOf(T); }\n" +
+            "    const after: u32 = @sizeOf(T);\n" +
+            "    return @intCast(n + after);\n" +
+            "}\n");
+        UserCode(cs).ShouldContain("sizeof(int)");
+        UserCode(cs).ShouldContain("sizeof(byte)");
+    }
+
+    [Fact]
+    public void A_plain_for_over_a_member_list_says_to_use_inline_for()
+    {
+        // A member list has no runtime representation, so a runtime `for` cannot walk one — and the
+        // error names the construct that can.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const P = struct { x: i32, y: i32 };\n" +
+            "pub fn main() u8 { for (@typeInfo(P).@\"struct\".field_names) |n| { _ = n; } return 0; }\n"));
+        ex.Message.ShouldContain("inline for");
+    }
+
+    [Fact]
+    public void Parallel_lists_of_unequal_length_are_rejected()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const P = struct { x: i32, y: i32 };\n" +
+            "const E = enum(u8) { a, b, c };\n" +
+            "pub fn main() u8 {\n" +
+            "    inline for (@typeInfo(P).@\"struct\".field_names, @typeInfo(E).@\"enum\".field_values) |n, v| {\n" +
+            "        _ = n; _ = v;\n" +
+            "    }\n" +
+            "    return 0;\n" +
+            "}\n"));
+        ex.Message.ShouldContain("equal lengths");
+    }
+
+    [Fact]
+    public void A_parallel_inline_for_needs_both_operands_to_be_comptime_lists()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const P = struct { x: i32, y: i32 };\n" +
+            "pub fn main() u8 {\n" +
+            "    var a = [_]u8{ 1, 2 };\n" +
+            "    inline for (@typeInfo(P).@\"struct\".field_names, a) |n, v| { _ = n; _ = v; }\n" +
+            "    return 0;\n" +
+            "}\n"));
+        ex.Message.ShouldContain("BOTH to be comptime lists");
+    }
+
+    [Fact]
+    public void An_index_capture_over_a_comptime_list_must_start_at_zero()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const P = struct { x: i32, y: i32 };\n" +
+            "pub fn main() u8 {\n" +
+            "    inline for (@typeInfo(P).@\"struct\".field_names, 1..) |n, i| { _ = n; _ = i; }\n" +
+            "    return 0;\n" +
+            "}\n"));
+        ex.Message.ShouldContain("start the index at 0");
+    }
+
+    [Fact]
+    public void Break_inside_an_unrolled_comptime_for_is_rejected()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const P = struct { x: i32, y: i32 };\n" +
+            "pub fn main() u8 {\n" +
+            "    inline for (@typeInfo(P).@\"struct\".field_names) |n| { _ = n; break; }\n" +
+            "    return 0;\n" +
+            "}\n"));
+        ex.Message.ShouldContain("no enclosing loop to target");
+    }
+
+    [Fact]
+    public void A_runtime_parallel_for_over_two_slices_is_a_named_cut()
+    {
+        // The grammar accepts `for (a, b) |x, y|`; only the comptime form is lowered, and the error
+        // says which.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var a = [_]u8{ 1, 2 };\n" +
+            "    var b = [_]u8{ 3, 4 };\n" +
+            "    for (a, b) |x, y| { _ = x; _ = y; }\n" +
+            "    return 0;\n" +
+            "}\n"));
+        ex.Message.ShouldContain("runtime lockstep walk");
+    }
 }
