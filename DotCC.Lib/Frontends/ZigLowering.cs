@@ -476,8 +476,10 @@ internal sealed partial class ZigLowering
     /// a type param <c>T ↦ i32</c> does not leak into the next drained instance / a sibling function,
     /// and a nested instantiation whose type param shares the name <c>T</c> does not clobber the outer
     /// one. The proven W2 shadow pattern (<see cref="_localContainerShadows"/>), applied to the
-    /// function-flat type-alias map; reset per body / per instantiation signature.</summary>
-    private readonly List<(string Name, CType? Prev)> _typeAliasShadows = new();
+    /// function-flat type-alias map; reset per body / per instantiation signature. Carries the
+    /// previous <see cref="_declaredIntBits"/> entry too, so the declared width that rides alongside
+    /// a type binding is saved and restored in lockstep with the binding itself.</summary>
+    private readonly List<(string Name, CType? Prev, int? PrevBits)> _typeAliasShadows = new();
 
     /// <summary>Per container name, each <c>const Self = @This();</c> alias → the container's own
     /// type. A container-scoped self alias is the ubiquitous Zig idiom for naming the receiver type

@@ -123,6 +123,10 @@ internal sealed partial class ZigLowering
         if (TryTypeAliasRhs(rhs, out var aliasType))
         {
             _typeAliases[name] = aliasType;
+            // `const Cp = u21;` — the DECLARED integer width rides the alias, since the lowered type
+            // widened it away (see _declaredIntBits). Cleared when the RHS declares none, so a
+            // re-binding of the same name never inherits the previous alias's width.
+            SetDeclaredIntBits(name, DeclaredBitsOfTypeArg(rhs));
             return true;
         }
         // `const info = @typeInfo(T);` / `const i = @typeInfo(T).int;` — a comptime reflection value

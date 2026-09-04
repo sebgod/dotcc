@@ -313,7 +313,7 @@ internal sealed partial class ZigLowering
     /// note).</summary>
     private void LowerFnBodyCore(Symbol funcSym, IReadOnlyList<(string name, CType type)> paramInfos, Item body,
         IReadOnlyList<(string name, long value, CType type)>? comptimeSeeds,
-        IReadOnlyList<(string name, CType type)>? typeSeeds = null,
+        IReadOnlyList<TypeSeed>? typeSeeds = null,
         IReadOnlyList<(string name, bool hasValue, long value, CType inner)>? optionalSeeds = null)
     {
         // A generic INSTANCE body (comptime value / type / optional seeds present) unlocks comptime
@@ -340,10 +340,15 @@ internal sealed partial class ZigLowering
         // resolves `T` (in a local type / cast / @sizeOf(T)) to the concrete type through LowerTypeName.
         if (typeSeeds is not null)
         {
-            foreach (var (name, type) in typeSeeds)
+            foreach (var (name, type, bits) in typeSeeds)
             {
-                _typeAliasShadows.Add((name, _typeAliases.TryGetValue(name, out var prev) ? prev : (CType?)null));
+                _typeAliasShadows.Add((name,
+                                       _typeAliases.TryGetValue(name, out var prev) ? prev : (CType?)null,
+                                       _declaredIntBits.TryGetValue(name, out var pb) ? pb : (int?)null));
                 _typeAliases[name] = type;
+                // The DECLARED width rides with the type (see _declaredIntBits) so the body's
+                // `@typeInfo(T).int.bits` answers what the caller spelled, not the widened lowering.
+                SetDeclaredIntBits(name, bits);
             }
         }
         // Seed comptime-value parameters BEFORE the runtime params + body (wall-plan W3a): a fresh
@@ -392,7 +397,8 @@ internal sealed partial class ZigLowering
         // does not leak into the next drained instance / a sibling function (see the value-param note).
         for (int i = _typeAliasShadows.Count - 1; i >= 0; i--)
         {
-            var (nm, prev) = _typeAliasShadows[i];
+            var (nm, prev, prevBits) = _typeAliasShadows[i];
+            SetDeclaredIntBits(nm, prevBits);
             if (prev is { } p) { _typeAliases[nm] = p; } else { _typeAliases.Remove(nm); }
         }
         _typeAliasShadows.Clear();

@@ -117,11 +117,18 @@ internal sealed partial class ZigLowering
     /// (re-entrancy-safe — see the class doc), so its <see cref="LowerFnBodyCore"/> runs in a clean
     /// between-functions state. Carries the per-instance runtime parameter list + the comptime VALUE and
     /// TYPE seeds resolved at the call site, so the body lowers against the concrete signature.</summary>
+    /// <summary>One resolved <c>comptime T: type</c> argument: the parameter name, the type it
+    /// resolved to, and — when the source SPELLED an integer width — that declared width. The width
+    /// travels with the seed because the lowered type cannot carry it: dotcc widens `uN`/`iN` to the
+    /// smallest standard width, so `u21` and `u32` are the same `CType`. See
+    /// <see cref="_declaredIntBits"/> for why this rides alongside the type rather than on it.</summary>
+    private readonly record struct TypeSeed(string Name, CType Type, int? DeclaredBits);
+
     private sealed record PendingInstantiation(
         Symbol Instance,
         GenericFnInfo Generic,
         IReadOnlyList<(string name, long value, CType type)> ValueSeeds,
-        IReadOnlyList<(string name, CType type)> TypeSeeds,
+        IReadOnlyList<TypeSeed> TypeSeeds,
         IReadOnlyList<(string name, CType type)> RuntimeParams,
         IReadOnlyList<(string name, bool hasValue, long value, CType inner)> OptionalSeeds);
 
@@ -190,7 +197,7 @@ internal sealed partial class ZigLowering
 
         var inv = CultureInfo.InvariantCulture;
         var mangleTokens = new List<string>();
-        var typeSeeds = new List<(string name, CType type)>();
+        var typeSeeds = new List<TypeSeed>();
         var valueSeeds = new List<(string name, long value, CType type)>();
         var optionalSeeds = new List<(string name, bool hasValue, long value, CType inner)>();
         var anytypeSeeds = new List<(string name, CType type)>();
@@ -204,7 +211,10 @@ internal sealed partial class ZigLowering
             switch (g.Params[i].Kind)
             {
                 case ParamKind.ComptimeType:
-                    typeSeeds.Add((g.Params[i].Name, LowerType(argItems[i]).Unqualified));
+                    // The declared width rides the seed: `f(u21)` and `f(u32)` resolve to the SAME
+                    // CType, so without it they would key one instance and share one `bits` answer.
+                    typeSeeds.Add(new TypeSeed(g.Params[i].Name, LowerType(argItems[i]).Unqualified,
+                                               DeclaredBitsOfTypeArg(argItems[i])));
                     break;
                 case ParamKind.AnyType:
                     anytypeSeeds.Add((g.Params[i].Name, InferArgType(argItems[i])));
@@ -214,11 +224,14 @@ internal sealed partial class ZigLowering
 
         // Phase 2 — seed the resolved type args (shadow-saved), so a later parameter / return type that
         // references `T`, and a comptime VALUE param whose type is `T`, resolve while we lower them.
-        var typeShadows = new List<(string name, CType? prev)>();
-        foreach (var (name, type) in typeSeeds)
+        var typeShadows = new List<(string name, CType? prev, int? prevBits)>();
+        foreach (var (name, type, bits) in typeSeeds)
         {
-            typeShadows.Add((name, _typeAliases.TryGetValue(name, out var pv) ? pv : (CType?)null));
+            typeShadows.Add((name,
+                             _typeAliases.TryGetValue(name, out var pv) ? pv : (CType?)null,
+                             _declaredIntBits.TryGetValue(name, out var pb) ? pb : (int?)null));
             _typeAliases[name] = type;
+            SetDeclaredIntBits(name, bits);
         }
         // Seed each inferred `anytype` type (shadow-saved) so a signature spelled `@TypeOf(param)` (a
         // return type or a later parameter) resolves through TypeOfBuiltin — the param is not yet an
@@ -239,7 +252,7 @@ internal sealed partial class ZigLowering
                 switch (g.Params[i].Kind)
                 {
                     case ParamKind.ComptimeType:
-                        mangleTokens.Add(MangleType(typeSeeds.First(s => s.name == g.Params[i].Name).type));
+                        mangleTokens.Add(MangleTypeSeed(typeSeeds.First(s => s.Name == g.Params[i].Name)));
                         break;
                     case ParamKind.ComptimeValue:
                         // A comptime OPTIONAL value param `comptime x: ?T` (road-to-zig-std S4b): the arg
@@ -330,8 +343,9 @@ internal sealed partial class ZigLowering
             // Restore the caller's type env — the seeds are re-applied per instance at drain time.
             for (var i = typeShadows.Count - 1; i >= 0; i--)
             {
-                var (name, prev) = typeShadows[i];
+                var (name, prev, prevBits) = typeShadows[i];
                 if (prev is { } p) { _typeAliases[name] = p; } else { _typeAliases.Remove(name); }
+                SetDeclaredIntBits(name, prevBits);
             }
             // Restore the `anytype` seeds (W5) — the instance BODY resolves each such param through its
             // in-scope symbol (declared with the inferred type in `runtimeParams`), so the seed is only
@@ -407,6 +421,26 @@ internal sealed partial class ZigLowering
             CType.Pointer ptr => "p_" + MangleType(ptr.Pointee),
             _ => SanitizeIdent(t.Describe()),
         };
+    }
+
+    /// <summary>Mangle a resolved comptime-TYPE argument for the instance key, honouring the DECLARED
+    /// integer width when the source spelled one that the lowered type cannot represent. <see
+    /// cref="MangleType"/> keys an integer by its LOWERED width (<c>Bytes * 8</c>), so <c>u21</c> and
+    /// <c>u32</c> — both lowered to <c>uint</c> — would mangle identically and share one memoized
+    /// instance; whichever instantiated first would then dictate the other's
+    /// <c>@typeInfo(T).int.bits</c>. Keying by the declared width instead makes them distinct
+    /// instances, which is also what zig means (they ARE different types). Every STANDARD spelling
+    /// declares exactly its lowered width, so this is byte-identical to <see cref="MangleType"/>
+    /// there — no existing instance name changes.</summary>
+    private static string MangleTypeSeed(TypeSeed seed)
+    {
+        if (seed.DeclaredBits is { } bits
+            && seed.Type.Unqualified is CType.Prim { Integer: true, Name: not "_Bool" } p
+            && bits != p.Bytes * 8)
+        {
+            return (p.Signed ? "i" : "u") + bits.ToString(CultureInfo.InvariantCulture);
+        }
+        return MangleType(seed.Type);
     }
 
     /// <summary>Replace every non-alphanumeric character with <c>_</c>, so an arbitrary type spelling
@@ -532,7 +566,7 @@ internal sealed partial class ZigLowering
         // Resolve each comptime argument (road-to-zig-std S4b widens W4's TYPE-only params): a TYPE arg →
         // its resolved type; a VALUE arg → a comptime value; an OPTIONAL value arg → a comptime null /
         // payload. Each contributes a mangle token, so the reified struct is keyed by the resolved args.
-        var typeSeeds = new List<(string name, CType type)>();
+        var typeSeeds = new List<TypeSeed>();
         var valueSeeds = new List<(string name, long value, CType type)>();
         var optionalSeeds = new List<(string name, bool hasValue, long value, CType inner)>();
         var mangleTokens = new List<string>(argItems.Count);
@@ -546,7 +580,11 @@ internal sealed partial class ZigLowering
         {
             if (info.Params[i].Kind == ParamKind.ComptimeType)
             {
-                typeSeeds.Add((info.Params[i].Name, argScope.LowerType(argItems[i]).Unqualified));
+                // The declared integer width is read in the CALLER's scope too — the argument is
+                // spelled there, so a caller-side alias for `u21` resolves to 21 the same way.
+                typeSeeds.Add(new TypeSeed(info.Params[i].Name,
+                                           argScope.LowerType(argItems[i]).Unqualified,
+                                           argScope.DeclaredBitsOfTypeArg(argItems[i])));
             }
         }
 
@@ -557,11 +595,14 @@ internal sealed partial class ZigLowering
         // type-alias locals `ProcessTypeReturningBody` binds append to the same shadow list, and the
         // outer `finally` restores the caller's environment however this returns (including the
         // memo hit).
-        var typeShadows = new List<(string name, CType? prev)>();
-        foreach (var (name, type) in typeSeeds)
+        var typeShadows = new List<(string name, CType? prev, int? prevBits)>();
+        foreach (var (name, type, bits) in typeSeeds)
         {
-            typeShadows.Add((name, _typeAliases.TryGetValue(name, out var pv) ? pv : (CType?)null));
+            typeShadows.Add((name,
+                             _typeAliases.TryGetValue(name, out var pv) ? pv : (CType?)null,
+                             _declaredIntBits.TryGetValue(name, out var pb) ? pb : (int?)null));
             _typeAliases[name] = type;
+            SetDeclaredIntBits(name, bits);
         }
         try
         {
@@ -572,7 +613,7 @@ internal sealed partial class ZigLowering
                 var p = info.Params[i];
                 if (p.Kind == ParamKind.ComptimeType)
                 {
-                    mangleTokens.Add(MangleType(typeSeeds.First(s => s.name == p.Name).type));
+                    mangleTokens.Add(MangleTypeSeed(typeSeeds.First(s => s.Name == p.Name)));
                 }
                 else if (LowerType(p.TypeAst).Unqualified is CType.Optional optP)
                 {
@@ -676,8 +717,9 @@ internal sealed partial class ZigLowering
             // alias `ProcessTypeReturningBody` appended, on every exit path — including the memo hit.
             for (var i = typeShadows.Count - 1; i >= 0; i--)
             {
-                var (name, prev) = typeShadows[i];
+                var (name, prev, prevBits) = typeShadows[i];
                 if (prev is { } p) { _typeAliases[name] = p; } else { _typeAliases.Remove(name); }
+                SetDeclaredIntBits(name, prevBits);
             }
         }
     }
@@ -695,7 +737,7 @@ internal sealed partial class ZigLowering
         string Container,
         IReadOnlyList<(string name, CType type)> RuntimeParams,
         Item Body,
-        IReadOnlyList<(string name, CType type)> TypeSeeds,
+        IReadOnlyList<TypeSeed> TypeSeeds,
         IReadOnlyList<(string name, long value, CType type)> ValueSeeds,
         IReadOnlyList<(string name, bool hasValue, long value, CType inner)> OptionalSeeds);
 
@@ -732,7 +774,7 @@ internal sealed partial class ZigLowering
     /// caller), so a later alias / a field type can reference it. Returns the returned struct's
     /// <c>FieldDecls</c> item (or null for <c>return struct {};</c>). A non-const leading statement, a
     /// non-<c>return struct</c> tail, or an empty body is a loud cut.</summary>
-    private Item? ProcessTypeReturningBody(string fnName, Item body, List<(string name, CType? prev)> typeShadows)
+    private Item? ProcessTypeReturningBody(string fnName, Item body, List<(string name, CType? prev, int? prevBits)> typeShadows)
     {
         IReadOnlyList<Item> stmts = body.Content switch
         {
@@ -754,7 +796,9 @@ internal sealed partial class ZigLowering
             }
             var aliasName = Tok(cd.Arg1);
             var aliasType = ResolveTypeReturningAliasRhs(fnName, aliasName, cd.Arg3);
-            typeShadows.Add((aliasName, _typeAliases.TryGetValue(aliasName, out var pv) ? pv : (CType?)null));
+            typeShadows.Add((aliasName,
+                             _typeAliases.TryGetValue(aliasName, out var pv) ? pv : (CType?)null,
+                             _declaredIntBits.TryGetValue(aliasName, out var pb) ? pb : (int?)null));
             _typeAliases[aliasName] = aliasType;
         }
         return stmts[^1].Content switch

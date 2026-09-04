@@ -52,6 +52,40 @@ internal sealed partial class ZigLowering
     /// shadow pattern (<see cref="_typeAliasShadows"/>) applied to the reflection bindings.</summary>
     private readonly List<(string Name, ZigTypeInfo? Prev)> _typeInfoShadows = new();
 
+    /// <summary>Each type-binding name → the DECLARED bit width of the zig integer bound to it, when
+    /// that width is not recoverable from the lowered type. dotcc widens an arbitrary-width
+    /// <c>uN</c>/<c>iN</c> to the smallest standard width (<c>u21</c> → a 32-bit <c>uint</c>), so the
+    /// `CType` alone cannot answer <c>@typeInfo(T).int.bits</c>; this rides ALONGSIDE
+    /// <see cref="_typeAliases"/> — seeded, shadowed and restored in lockstep with it — so a
+    /// <c>comptime T: type</c> param, an alias, and a reified generic all carry the width the source
+    /// spelled. Deliberately NOT a property of <see cref="CType"/>: `Prim` has value equality, so a
+    /// width-carrying `u21` would stop comparing equal to `u32` and change coercion, peer typing and
+    /// every memoization key in the front end — a far larger blast radius than this one question
+    /// warrants.</summary>
+    private readonly Dictionary<string, int> _declaredIntBits = new(System.StringComparer.Ordinal);
+
+    /// <summary>Set or clear a name's declared integer width — the write half of
+    /// <see cref="_declaredIntBits"/>, used both to seed a binding and to restore a shadowed one, so
+    /// "no recorded width" and "width W" round-trip through the same call.</summary>
+    private void SetDeclaredIntBits(string name, int? bits)
+    {
+        if (bits is { } b) { _declaredIntBits[name] = b; } else { _declaredIntBits.Remove(name); }
+    }
+
+    /// <summary>The declared bit width of a type ARGUMENT's AST — its own spelling
+    /// (<see cref="DeclaredBitsFromSpelling"/>) when it is a primitive keyword, else the width already
+    /// recorded for the name it references, so a width survives a chain of bindings
+    /// (<c>const I = u21; f(I)</c> keys and answers exactly as <c>f(u21)</c> does).</summary>
+    private int? DeclaredBitsOfTypeArg(Item typeAst)
+    {
+        if (DeclaredBitsFromSpelling(typeAst) is { } spelled) { return spelled; }
+        var cur = typeAst;
+        while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
+        return cur.Content is Zig.Ident id && _declaredIntBits.TryGetValue(Tok(id.Arg0), out var bound)
+            ? bound
+            : null;
+    }
+
     /// <summary>The <c>std.builtin.Type</c> union tag for a resolved type — what a
     /// <c>switch (@typeInfo(T))</c> prong matches. Tags are spelled as
     /// <see cref="NormalizeIdent"/> leaves them, so the quoted source forms <c>.@"struct"</c> /
@@ -140,7 +174,7 @@ internal sealed partial class ZigLowering
                     throw new IrUnsupportedException($"zig `@typeInfo` expects (type); got {args.Count} argument(s)");
                 }
                 var t = LowerType(args[0]);
-                info = new ZigTypeInfo(TypeInfoTag(t), t, DeclaredBitsFromSpelling(args[0]));
+                info = new ZigTypeInfo(TypeInfoTag(t), t, DeclaredBitsOfTypeArg(args[0]));
                 return true;
             }
 
@@ -186,10 +220,11 @@ internal sealed partial class ZigLowering
                 if (info.DeclaredBits is not { } bits)
                 {
                     throw new IrUnsupportedException(
-                        $"zig `@typeInfo({info.Type.Describe()}).{info.Tag}.bits`: the declared width is only known from "
-                        + "the source spelling (`@typeInfo(u21)`), not through a type alias or a comptime `type` param — "
-                        + "dotcc widens `uN`/`iN` to the smallest standard width, so reporting the lowered width would "
-                        + "disagree with zig (road-to-zig-std S5: the declared width has to ride on the type first)");
+                        $"zig `@typeInfo({info.Type.Describe()}).{info.Tag}.bits`: the declared width is not known here. "
+                        + "It rides a type SPELLING — `@typeInfo(u21)` directly, or a `comptime T: type` / alias bound to "
+                        + "one — but an `anytype` param or `@TypeOf(expr)` yields only the lowered type, and dotcc widens "
+                        + "`uN`/`iN` to the smallest standard width (`u21` → a 32-bit `uint`), so reporting that width "
+                        + "would disagree with zig. Spell the type, or pass it as a `comptime T: type`");
                 }
                 value = new LitInt(bits.ToString(System.Globalization.CultureInfo.InvariantCulture), bits) { Type = CType.Int };
                 return true;

@@ -9,11 +9,15 @@
 // That folding is not an optimization, it is the only thing that works: each arm of such a switch
 // is written for a DIFFERENT kind, so the arms a given T does not take would not lower at all.
 //
-// The interesting half is what dotcc REFUSES. `bits` is read off the SOURCE spelling, never off the
-// lowered type, because dotcc widens an arbitrary-width `uN` to the smallest standard width — `u21`
-// becomes a 32-bit `uint`. Asked through a `comptime T: type` param, where the spelling is gone,
-// dotcc raises a clear error rather than answer 32 where real zig says 21. A missing feature is
-// recoverable; a wrong comptime constant is not.
+// The interesting half is `bits`. dotcc widens an arbitrary-width `uN` to the smallest standard
+// width — `u21` becomes a 32-bit `uint` — so the lowered type cannot answer it. The DECLARED width
+// therefore travels with the type binding: spelled directly, through a `comptime T: type` param, or
+// through an alias, `@typeInfo(…).int.bits` says 21. It also keys the instance, so `bitsOf(u21)` and
+// `bitsOf(u32)` are separate specializations rather than one shared answer.
+//
+// What is still refused: an `anytype` param or `@TypeOf(expr)`, where the type is inferred from a
+// VALUE and no spelling survives anywhere. dotcc raises a clear error there rather than answer 32
+// where real zig says 21 — a missing feature is recoverable, a wrong comptime constant is not.
 //
 //   dotnet run --project DotCC -c Release -- --emit=file examples/zig-typeinfo/main.zig > out.cs
 //   dotnet out.cs   # prints the four lines below, exits 42
@@ -21,12 +25,24 @@
 // Output:
 //   kind    u8=int f64=float bool=bool []u8=pointer ?u32=optional [4]u8=array P=struct
 //   int     u21 bits=21 signed=0 | i7 bits=7 signed=1
+//   generic bitsOf(u21)=21 bitsOf(u32)=32 bitsOf(Cp)=21
 //   child   ?u32 holds a 4-byte value | [4]u8 has 4 elements
 //   sum     40 + 2 = 42
 
 extern fn printf(fmt: [*:0]const u8, ...) c_int;
 
 const P = struct { x: i32, y: i32 };
+
+/// An alias for a narrow width — it carries the declared width like the spelling does, and keys the
+/// same specialization as writing `u21` at the call site.
+const Cp = u21;
+
+/// The width through a comptime `type` param. `bitsOf(u21)` and `bitsOf(u32)` are DISTINCT
+/// specializations: both resolve to a 32-bit `uint`, so keying by the lowered type alone would make
+/// them one function with one answer.
+fn bitsOf(comptime T: type) u16 {
+    return @typeInfo(T).int.bits;
+}
 
 /// The type's kind as a printable name — the headline `switch (@typeInfo(T))` dispatch. Folded per
 /// instantiation, so each call site emits the string constant directly.
@@ -63,6 +79,10 @@ pub fn main() u8 {
     const bits7: u16 = @typeInfo(i7).int.bits;
     _ = printf("int     u21 bits=%d signed=%d | i7 bits=%d signed=%d\n",
         bits21, isSigned(u21), bits7, isSigned(i7));
+
+    // …and through a comptime `type` param, where the spelling reaches the callee on the seed.
+    _ = printf("generic bitsOf(u21)=%d bitsOf(u32)=%d bitsOf(Cp)=%d\n",
+        bitsOf(u21), bitsOf(u32), bitsOf(Cp));
 
     // `.child` is a TYPE, so it resolves in a type position; `.len` is a comptime integer.
     const Child = @typeInfo(?u32).optional.child;

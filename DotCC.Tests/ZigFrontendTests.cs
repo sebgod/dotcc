@@ -5296,17 +5296,87 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Declared_int_width_through_a_type_param_is_a_loud_cut()
+    public void Declared_int_width_rides_a_comptime_type_param()
     {
-        // The other half of the fidelity rule, and the point of the design: through a comptime `type`
-        // param the spelling is gone, so dotcc CANNOT tell a `u21` instantiation from a `u32` one.
-        // Answering 32 would silently disagree with zig's 21, so it refuses — a wrong comptime
-        // constant is worse than a missing feature.
-        var ex = Should.Throw<CompileException>(() => EmitZig(
+        // S5a cut this: through a comptime `type` param the spelling was gone, so dotcc could not tell
+        // a `u21` instantiation from a `u32` one and refused rather than answer 32. The width now
+        // rides the SEED alongside the resolved type, so both answer what the caller spelled.
+        var cs = EmitZig(
             "fn bitsOf(comptime T: type) u16 { return @typeInfo(T).int.bits; }\n" +
-            "pub fn main() u8 { return @intCast(bitsOf(u32)); }\n"));
-        ex.Message.ShouldContain("declared width");
-        ex.Message.ShouldContain("source spelling");
+            "pub fn main() u8 { return @intCast(bitsOf(u21) + bitsOf(i7) - 28); }\n");
+        UserCode(cs).ShouldContain("bitsOf__u21");
+        UserCode(cs).ShouldContain("return 21;");
+        UserCode(cs).ShouldContain("bitsOf__i7");
+        UserCode(cs).ShouldContain("return 7;");
+    }
+
+    [Fact]
+    public void A_narrow_width_and_its_lowered_width_key_distinct_instances()
+    {
+        // The regression this brick really guards. `MangleType` keys an integer by its LOWERED width,
+        // and `u21` lowers to a 32-bit `uint` — so `bitsOf(u21)` and `bitsOf(u32)` mangled IDENTICALLY
+        // and shared one memoized instance. Whichever instantiated first would have dictated the
+        // other's answer. Keying by the DECLARED width separates them, which is also what zig means:
+        // they are different types.
+        var cs = EmitZig(
+            "fn bitsOf(comptime T: type) u16 { return @typeInfo(T).int.bits; }\n" +
+            "pub fn main() u8 { return @intCast(bitsOf(u21) + bitsOf(u32) - 11); }\n");
+        UserCode(cs).ShouldContain("bitsOf__u21");
+        UserCode(cs).ShouldContain("bitsOf__u32");
+        UserCode(cs).ShouldContain("return 21;");
+        UserCode(cs).ShouldContain("return 32;");
+    }
+
+    [Fact]
+    public void A_standard_width_instance_name_is_unchanged()
+    {
+        // The other side of that key change: every STANDARD spelling declares exactly its lowered
+        // width, so its mangled name must be byte-identical to what it was before — a narrow width is
+        // the only thing that gets a new instance name.
+        var cs = EmitZig(
+            "fn idOf(comptime T: type, v: T) T { return v; }\n" +
+            "pub fn main() u8 { return idOf(u8, 42); }\n");
+        UserCode(cs).ShouldContain("idOf__u8");
+    }
+
+    [Fact]
+    public void Declared_int_width_rides_a_type_alias()
+    {
+        // `const Cp = u21;` — the alias carries the width too, and keys the SAME instance as spelling
+        // `u21` directly (an alias resolves to its aliased type, the standing W3b rule).
+        var cs = EmitZig(
+            "fn bitsOf(comptime T: type) u16 { return @typeInfo(T).int.bits; }\n" +
+            "const Cp = u21;\n" +
+            "pub fn main() u8 { return @intCast(bitsOf(Cp) + @typeInfo(Cp).int.bits); }\n");
+        UserCode(cs).ShouldContain("bitsOf__u21");
+        UserCode(cs).ShouldContain("return 21;");
+        UserCode(cs).ShouldContain("+ 21");     // the direct `@typeInfo(Cp)` folds through the alias too
+    }
+
+    [Fact]
+    public void A_nested_generic_sharing_a_param_name_restores_the_outer_width()
+    {
+        // The risky part of carrying a width alongside a binding: the seed is function-flat, so it is
+        // shadow-saved and restored in lockstep with the type binding itself. Here BOTH params are
+        // named `T` — if the restore missed the width, `outer`'s 21 would come back as `inner`'s 7.
+        var cs = EmitZig(
+            "fn inner(comptime T: type) u16 { return @typeInfo(T).int.bits; }\n" +
+            "fn outer(comptime T: type) u16 { return inner(u7) + @typeInfo(T).int.bits; }\n" +
+            "pub fn main() u8 { return @intCast(outer(u21) + 14); }\n");
+        UserCode(cs).ShouldContain("inner__u7() + 21");
+    }
+
+    [Fact]
+    public void Declared_int_width_is_still_a_loud_cut_through_anytype()
+    {
+        // What remains genuinely unknowable: an `anytype` param's type is INFERRED from a value, and
+        // `@TypeOf(x)` on a `u21` variable yields the widened `uint` — no spelling anywhere. Still a
+        // loud cut, and the message now names which case it is.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "fn bitsOfVal(a: anytype) u16 { return @typeInfo(@TypeOf(a)).int.bits; }\n" +
+            "pub fn main() u8 { const x: u21 = 1; return @intCast(bitsOfVal(x)); }\n"));
+        ex.Message.ShouldContain("declared width is not known here");
+        ex.Message.ShouldContain("anytype");
     }
 
     [Fact]
