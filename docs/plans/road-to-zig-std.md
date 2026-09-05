@@ -347,6 +347,55 @@ that retire curated shortcuts.
 > Validation: 13 emit pins + 1 zig-oracle program (`inline_for_comptime_lists`), and a new
 > `examples/zig-inline-for-lists/` — eight lines, exit 42, identical to real zig 0.17.0-dev.667.
 
+> **Status update (2026-09-06) — S7 DONE: reification builtins + `@compileError`.**
+> The direction opposite to S5: `@typeInfo` reads a type's description out, `@Int` builds a type back
+> in from one. `ZigLowering.Reify.cs`, **no grammar change** — a builtin call already parses.
+> - **`@Int(signedness, bits)`** (207 uses) is the whole of the family that pays, and it needed
+>   **`@bitSizeOf`** (431 uses) to be worth anything, since that is the operand of most of its calls.
+>   Both go through the S5b declared-width machinery rather than the lowered type: `@bitSizeOf(u21)`
+>   is 21, not the 32 dotcc widens it to, and the width a constructed type was BUILT with rides its
+>   binding the same way a spelling does — so the two halves round-trip
+>   (`@typeInfo(@Int(.unsigned, @bitSizeOf(u21))).int.bits` is 21).
+> - **The aggregate constructors are cut, and the measurement is why.** `@Pointer` ×14, `@Struct`
+>   ×5, `@Enum` ×4, `@Union` ×3 — and every one takes comptime AGGREGATE arguments (a field-name
+>   array, a `*const [N]type`, an attributes struct) that dotcc has no engine for. Reifying from a
+>   half-understood description would emit a wrong layout. `@Vector` (475 uses) is named separately:
+>   it is SIMD, a whole execution model, not a hole in the reflection arc.
+>
+> **The `@compileError` subtlety was smaller than the plan feared, and the measurement is again why.**
+> The plan called for threading a poison value through the folder. But zig's own reference specifies
+> the diagnostic on ANALYSIS — "this function, when semantically analyzed, causes a compile error…
+> there are several ways that code avoids being semantically checked, such as using `if` or `switch`
+> with compile time constants" — and lowering IS dotcc's analysis, with those very folds already in
+> place since S5a/W3a. Counted in the pin, that is where the uses live: **231 of 595 are an `else =>`
+> prong** of a `switch` over `@typeInfo`, the arm S5a never lowers; the rest are comptime `if` guards
+> inside `comptime T: type` functions. So raising on sight is correct for them, and no poison is
+> needed.
+>
+> **One shape does need it**, and it is one the campaign walks straight into: a top-level
+> `pub const NAME = @compileError("use X instead");` — a deprecation tombstone, 25 in the pin,
+> including `std/meta.zig` and `std/os/windows.zig`. Zig analyses a declaration only when something
+> references it, so firing at the declaration would make those modules unimportable. Hence a poisoned
+> NAME: the binding records the message and emits nothing, and the diagnostic is raised at the
+> reference — in a value position and a type position alike. **`@setEvalBranchQuota`** (80 uses) now
+> raises the interpreter's step budget and never lowers it, which is zig's own rule for it.
+>
+> **Unlike S5c, both halves get a CI differential.** The `@Type`-to-`@Int`/`@Struct`/`@Enum` split
+> already landed in **0.16.0** — verified against that version's own language reference, not assumed
+> — so the pinned oracle compiler has `@Int`, and `@bitSizeOf` is ancient. Two new oracle programs
+> rather than the version-split hole S5c had to ship with.
+>
+> **Cuts (all loud):** the aggregate constructors above; `@Vector`; a width outside 1..128; a
+> non-comptime width; a non-signedness tag; `@Int` in a value position; `@bitSizeOf` of an AGGREGATE
+> (zig's answer is the byte size in bits and dotcc byte-packs its own layout, so the error points at
+> `@sizeOf(T) * 8` as the deliberate opt-in). A `fn X(comptime T: type) type { return @Int(…); }`
+> hits W4's pre-existing "must `return struct {…}`" — only 4 uses in the pin, and lifting it is a W4
+> brick (the bigger prize there is the 44 bodies that return a delegating CALL).
+>
+> Validation: 23 emit pins + 2 zig-oracle programs (`reify_int_and_bitsizeof`,
+> `compile_error_guards_fold_away`), and a new `examples/zig-reify/` — five lines, exit 42,
+> byte-identical to real zig 0.17.0-dev.667.
+
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)
 
 An opt-in test/tool (`DOTCC_RUN_STD_PROBE=1`, env `DOTCC_ZIG_LIB_DIR` or
@@ -537,6 +586,12 @@ later zig reverts to `fields: []const StructField`, that is the shape to build.
 - This + S5 is precisely what `std.fmt.format`'s per-field loops need.
 
 ### S7 — reification builtins + `@compileError` (M)
+
+**S7 ✅ DONE (2026-09-06)** — `@Int` + `@bitSizeOf` (the operand that makes it useful), the
+compile-time diagnostics, and a measured cut of the aggregate constructors. Status update above.
+The `@compileError` bullet below anticipated a poison value threaded through the folder; what the
+language actually specifies is analysis-time firing, which the existing folds already give — the one
+place a poison IS needed is the top-level tombstone, and that is what landed.
 
 - `@Int(signedness, bits)` (207 uses) → `CType` integer constructor — after
   S9's arbitrary-width brick, arbitrary `bits` values work. `@Pointer`,

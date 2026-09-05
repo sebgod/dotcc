@@ -1561,6 +1561,27 @@ internal sealed partial class ZigLowering
                     throw new IrUnsupportedException($"zig `@sizeOf` expects (type); got {bargs.Count} argument(s)");
                 }
                 return new SizeOfExpr(LowerType(bargs[0])) { Type = CType.ULong };
+            case "@bitSizeOf":
+                // `@bitSizeOf(T)` — the width in BITS (road-to-zig-std S7), answered from the declared
+                // spelling so an arbitrary-width `u21` reports 21 and not the 32 it widened to.
+                return BitSizeOfBuiltin(bargs);
+            case "@compileError":
+                // Reaching here means the branch survived comptime folding — which is exactly when zig
+                // raises it ("when semantically analyzed"). See ZigLowering.Reify.cs.
+                return CompileErrorBuiltin(bargs);
+            case "@compileLog":
+                return CompileLogBuiltin(bargs);
+            case "@setEvalBranchQuota":
+                // Honored as a STATEMENT (see LowerStmt), where zig's `void` result puts it. In a value
+                // position there is nothing to yield, so say so rather than invent one.
+                throw new IrUnsupportedException(
+                    "zig `@setEvalBranchQuota(n)` yields `void` — use it as a statement, not as a value");
+            case "@Int" or "@Struct" or "@Union" or "@Enum" or "@Pointer" or "@Fn" or "@Tuple" or "@Vector":
+                // The reification family builds a TYPE. In a value position the useful thing to say is
+                // which position it belongs in; the family's own cuts live in TryLowerReifyBuiltin.
+                throw new IrUnsupportedException(
+                    $"zig `{bname}(…)` constructs a TYPE — use it in a type position (`const T = {bname}(…);`, a "
+                    + $"parameter / return annotation, or `@as({bname}(…), x)`), not as a value");
             case "@alignOf":
             {
                 // `@alignOf(T)` — the ABI alignment as `usize` (Milestone T, part 4). Always a
@@ -1751,7 +1772,8 @@ internal sealed partial class ZigLowering
                 throw new IrUnsupportedException(
                     $"zig builtin '{bname}' not lowered yet (supported: @as, @intCast, @truncate, @ptrCast, @bitCast, " +
                     "@floatFromInt, @intFromFloat, @floatCast, @enumFromInt, @alignCast, @intFromEnum, @sizeOf, @alignOf, " +
-                    "@offsetOf, @typeName, @typeInfo, @hasField, @hasDecl, @field, @min, @max, @rem, @divTrunc, @mod, @divFloor, " +
+                    "@bitSizeOf, @offsetOf, @typeName, @typeInfo, @hasField, @hasDecl, @field, @Int, @compileError, " +
+                    "@compileLog, @setEvalBranchQuota, @min, @max, @rem, @divTrunc, @mod, @divFloor, " +
                     "@popCount, @clz, @ctz, " +
                     "@byteSwap, @abs, @intFromPtr, @errorName, @memcpy, @memset)");
         }

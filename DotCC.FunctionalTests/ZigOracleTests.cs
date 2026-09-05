@@ -2543,6 +2543,53 @@ public sealed class ZigOracleTests
             "    const fx: u8 = @intCast(@field(p, \"x\") + @field(p, \"y\"));\n" +
             "    return a + b + c + d + e + fx;\n" +
             "}\n", 42, "" },
+        // The REIFICATION builtins (road-to-zig-std S7). Unlike the member lists above, `@Int` and
+        // `@bitSizeOf` ARE version-stable — 0.16.0 already has the `@Type`-to-`@Int`/`@Struct`/`@Enum`
+        // split, and `@bitSizeOf` is ancient — so this brick gets a real differential on both halves.
+        // A constructed type has to hold values as well as report a width, hence the two round-trip
+        // terms that contribute 0. 21 + 9 + 1 + 16 - 5 = 42.
+        new object[] { "reify_int_and_bitsizeof",
+            "const E = enum(u16) { a, b };\n" +
+            "fn widthOf(comptime T: type) i32 { return @bitSizeOf(T); }\n" +
+            "pub fn main() u8 {\n" +
+            "    const Wide = @Int(.unsigned, 21);\n" +
+            "    const Narrow = @Int(.signed, 9);\n" +
+            "    var x: Wide = 1000;\n" +
+            "    var y: Narrow = -5;\n" +
+            "    x += 0;\n" +
+            "    y += 0;\n" +
+            "    var total: i32 = 0;\n" +
+            "    total += @bitSizeOf(Wide);\n" +
+            "    total += widthOf(Narrow);\n" +
+            "    total += @bitSizeOf(bool);\n" +
+            "    total += @bitSizeOf(E);\n" +
+            "    total -= @bitSizeOf(u5);\n" +
+            "    total += @as(i32, x) - 1000;\n" +
+            "    total += @as(i32, y) + 5;\n" +
+            "    return @intCast(total);\n" +
+            "}\n", 42, "" },
+        // `@compileError` where it is NOT reached — the half that matters, since 231 of its 595 uses in
+        // the pinned std are an `else =>` guard and the rest are comptime `if` guards. Every diagnostic
+        // here would fire if the folds failed, so the program compiling AT ALL under both compilers is
+        // the assertion; a real zig that analysed any of them would fail the build outright. The
+        // top-level `REMOVED` is the deprecation-tombstone shape: inert until something names it.
+        // 21 + 21 = 42.
+        new object[] { "compile_error_guards_fold_away",
+            "pub const REMOVED = @compileError(\"use something else\");\n" +
+            "fn onlyInts(comptime T: type) i32 {\n" +
+            "    return switch (@typeInfo(T)) {\n" +
+            "        .int => @bitSizeOf(T),\n" +
+            "        else => @compileError(\"onlyInts wants an integer, got \" ++ @typeName(T)),\n" +
+            "    };\n" +
+            "}\n" +
+            "fn narrow(comptime T: type) i32 {\n" +
+            "    if (@bitSizeOf(T) > 64) @compileError(\"too wide for narrow()\");\n" +
+            "    return @bitSizeOf(T);\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    @setEvalBranchQuota(10000);\n" +
+            "    return @intCast(onlyInts(u21) + narrow(u21));\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

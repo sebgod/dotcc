@@ -114,6 +114,12 @@ internal sealed partial class ZigLowering
             // a control-flow early-out; the unwrapped value is discarded (common for a `!void` `a`).
             case Zig.StmtExpr e when IsControlFlowFallback(e.Arg0, out var cfL, out var cfC, out var cfR):
                 return LowerControlFlowFallback(cfL, cfC, cfR, null);
+            // `@setEvalBranchQuota(n);` — a COMPTIME budget setter (road-to-zig-std S7). It is a
+            // statement because zig types it `void`; it raises the interpreter's step budget and emits
+            // nothing, so no `_ = …;` discard is left behind.
+            case Zig.StmtExpr { Arg0.Content: Zig.BuiltinCall q } when Tok(q.Arg0) == "@setEvalBranchQuota":
+                SetEvalBranchQuota(Flatten(q.Arg2));
+                return new Seq(new List<CStmt>());
             case Zig.StmtExpr e:        return Hoisted(() => new ExprStmt(LowerExpr(e.Arg0)));
 
             // `x = value;`  → an assignment used as a statement. `_ = value;` is Zig's
