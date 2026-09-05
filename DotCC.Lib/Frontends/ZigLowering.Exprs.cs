@@ -95,6 +95,9 @@ internal sealed partial class ZigLowering
                 // Narrow by construction: an ordinary comptime `const` also emits its runtime decl,
                 // so it resolves as a symbol above and never reaches here.
                 if (_comptimeValues.TryGetValue(name, out var comptimeBound)) { return comptimeBound; }
+                // A `const X = @compileError("…");` tombstone named in a VALUE position (road-to-zig-std
+                // S7) — the declaration was inert; the reference is what zig analyses, so raise here.
+                RaiseIfPoisoned(name);
                 throw new IrUnsupportedException($"unresolved identifier '{name}'");
             }
             case Zig.Grouped g:

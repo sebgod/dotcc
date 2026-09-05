@@ -89,6 +89,14 @@ internal sealed partial class ZigLowering
         if (DeclaredBitsFromSpelling(typeAst) is { } spelled) { return spelled; }
         var cur = typeAst;
         while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
+        // A CONSTRUCTED `@Int(.unsigned, 21)` (road-to-zig-std S7) knows its width just as exactly as
+        // the spelling `u21` does — it was built from it — so the constructor's own argument is the
+        // answer. Read from the site's recorded width rather than re-evaluated (see _reifiedIntBits).
+        if (cur.Content is Zig.BuiltinCall { } bc && Tok(bc.Arg0) == "@Int"
+            && _reifiedIntBits.TryGetValue(bc.Arg2, out var reified))
+        {
+            return reified;
+        }
         return cur.Content is Zig.Ident id && _declaredIntBits.TryGetValue(Tok(id.Arg0), out var bound)
             ? bound
             : null;

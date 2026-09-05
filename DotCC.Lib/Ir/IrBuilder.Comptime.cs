@@ -69,7 +69,16 @@ internal sealed partial class IrBuilder
     // (later parts) lean on it to reject a non-terminating comptime computation
     // (Zig's `@setEvalBranchQuota` exists for exactly this reason).
     private int _comptimeSteps;
-    private const int ComptimeStepBudget = 4_000_000;
+
+    /// <summary>The budget dotcc has always used, and the floor
+    /// <see cref="ComptimeStepBudget"/> can never be lowered below.</summary>
+    internal const int DefaultComptimeStepBudget = 4_000_000;
+
+    /// <summary>The eval-step budget in force. Raised by Zig's <c>@setEvalBranchQuota</c>
+    /// (road-to-zig-std S7) and never lowered — zig's own rule for that builtin, and the reason the
+    /// unit mismatch is harmless: zig counts BACKWARD BRANCHES while this counts eval STEPS, a
+    /// strictly finer unit, so a quota that suffices there suffices here when taken as a floor.</summary>
+    internal long ComptimeStepBudget { get; set; } = DefaultComptimeStepBudget;
 
     // The largest comptime array (element count) the interpreter will materialize — a backstop on
     // a `var t: [N]T = undefined;` with an absurd N (the fill loop is step-budgeted, but the array
@@ -94,8 +103,8 @@ internal sealed partial class IrBuilder
         if (++_comptimeSteps > ComptimeStepBudget)
         {
             throw new IrUnsupportedException(
-                "comptime evaluation exceeded the step budget — a non-terminating comptime expression? "
-                + "(dotcc does not model Zig's @setEvalBranchQuota)");
+                $"comptime evaluation exceeded the step budget ({ComptimeStepBudget}) — a non-terminating "
+                + "comptime expression? Zig's `@setEvalBranchQuota(n)` raises it (never lowers it)");
         }
     }
 

@@ -5826,4 +5826,302 @@ public sealed class ZigFrontendTests
             "}\n"));
         ex.Message.ShouldContain("runtime lockstep walk");
     }
+
+    // ---- reification builtins + `@compileError` (road-to-zig-std S7) ----
+
+    [Fact]
+    public void Int_builtin_constructs_the_integer_type_its_arguments_name()
+    {
+        // `@Int(.unsigned, 18)` IS `u18`, so it goes through the one widening rule the front end has:
+        // 21 bits lands in a 32-bit `uint`, 9 signed bits in a 16-bit `short`.
+        var cs = EmitZig(
+            "const Wide = @Int(.unsigned, 21);\n" +
+            "const Narrow = @Int(.signed, 9);\n" +
+            "pub fn main() u8 {\n" +
+            "    var a: Wide = 1000;\n" +
+            "    var b: Narrow = -5;\n" +
+            "    _ = a; _ = b;\n" +
+            "    return 0;\n" +
+            "}\n");
+        UserCode(cs).ShouldContain("uint a = 1000;");
+        UserCode(cs).ShouldContain("short b = (short)(-5);");
+    }
+
+    [Fact]
+    public void An_Int_builtins_width_rides_the_binding_it_is_given()
+    {
+        // The S5b fidelity rule, applied to a CONSTRUCTED type: the lowered `uint` no longer knows it
+        // was built with 21, so the width is carried alongside the binding — and `@typeInfo` answers 21,
+        // not the 32 the widened type would report.
+        var cs = EmitZig(
+            "const Wide = @Int(.unsigned, 21);\n" +
+            "pub fn main() u8 { return @intCast(@typeInfo(Wide).int.bits); }\n");
+        UserCode(cs).ShouldContain("21");
+        UserCode(cs).ShouldNotContain("32");
+    }
+
+    [Fact]
+    public void Int_takes_its_signedness_from_a_folded_typeInfo()
+    {
+        // The 17 uses that are not a `.unsigned` / `.signed` literal read it off another type. A
+        // signedness is exactly recoverable (widening never changes it), so this folds.
+        var cs = EmitZig(
+            "const Src = @Int(.signed, 9);\n" +
+            "const Same = @Int(@typeInfo(Src).int.signedness, 12);\n" +
+            "pub fn main() u8 {\n" +
+            "    var x: Same = -7;\n" +
+            "    _ = x;\n" +
+            "    return 0;\n" +
+            "}\n");
+        UserCode(cs).ShouldContain("short x = (short)(-7);");   // signed, 12 bits -> short
+    }
+
+    [Fact]
+    public void Int_over_bitSizeOf_round_trips_a_declared_width()
+    {
+        // The two halves compose: `@bitSizeOf` reads a width out, `@Int` builds it back, and the result
+        // still answers 21 — which is what makes `@Int(.unsigned, @bitSizeOf(T))` (the commonest shape
+        // in the pin) mean what it says.
+        var cs = EmitZig(
+            "const Same = @Int(.unsigned, @bitSizeOf(u21));\n" +
+            "pub fn main() u8 { return @intCast(@typeInfo(Same).int.bits); }\n");
+        UserCode(cs).ShouldContain("21");
+    }
+
+    [Fact]
+    public void BitSizeOf_reports_the_declared_width_not_the_widened_one()
+    {
+        // The whole point of routing through the declared spelling: `u21` occupies a 32-bit `uint` in
+        // the emitted C#, and zig still says its bit size is 21.
+        var cs = EmitZig(
+            "pub fn main() u8 { return @intCast(@bitSizeOf(u21)); }\n");
+        UserCode(cs).ShouldContain("return (byte)21;");
+    }
+
+    [Fact]
+    public void BitSizeOf_answers_the_scalar_kinds_exactly()
+    {
+        // `bool` is ONE bit in zig (its width as a packed-struct field), not the byte dotcc stores it
+        // in; `void` is zero; a pointer and `usize` are 64 on this LP64 target.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var n: u32 = 0;\n" +
+            "    n += @bitSizeOf(bool);\n" +
+            "    n += @bitSizeOf(void);\n" +
+            "    n += @bitSizeOf(usize);\n" +
+            "    n += @bitSizeOf(*u8);\n" +
+            "    n += @bitSizeOf(f32);\n" +
+            "    return @intCast(n);\n" +
+            "}\n");
+        UserCode(cs).ShouldContain("n += (uint)(1);");
+        UserCode(cs).ShouldContain("n += (uint)(0);");
+        UserCode(cs).ShouldContain("n += (uint)(64);");
+        UserCode(cs).ShouldContain("n += (uint)(32);");
+    }
+
+    [Fact]
+    public void BitSizeOf_of_an_enum_is_its_tag_width()
+    {
+        var cs = EmitZig(
+            "const E = enum(u16) { a, b };\n" +
+            "pub fn main() u8 { return @intCast(@bitSizeOf(E)); }\n");
+        UserCode(cs).ShouldContain("return (byte)16;");
+    }
+
+    [Fact]
+    public void BitSizeOf_travels_with_a_comptime_type_parameter()
+    {
+        // The S5b machinery is what makes this work: the width rides the `comptime T: type` binding, so
+        // a generic reports the width the CALLER spelled rather than the one the lowered type kept.
+        var cs = EmitZig(
+            "fn widthOf(comptime T: type) i32 { return @bitSizeOf(T); }\n" +
+            "pub fn main() u8 { return @intCast(widthOf(u21) + widthOf(u8)); }\n");
+        UserCode(cs).ShouldContain("return 21;");
+        UserCode(cs).ShouldContain("return 8;");
+    }
+
+    [Fact]
+    public void A_compileError_in_a_folded_away_switch_prong_never_fires()
+    {
+        // 231 of the 595 uses in the pinned std are exactly this: an `else =>` guard on a `switch` over
+        // `@typeInfo`. S5a lowers only the taken prong, so the guard is never analysed — which is what
+        // zig specifies ("several ways that code avoids being semantically checked").
+        var cs = EmitZig(
+            "fn onlyInts(comptime T: type) i32 {\n" +
+            "    return switch (@typeInfo(T)) {\n" +
+            "        .int => @bitSizeOf(T),\n" +
+            "        else => @compileError(\"onlyInts wants an integer\"),\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 { return @intCast(onlyInts(u7)); }\n");
+        UserCode(cs).ShouldContain("return 7;");
+        UserCode(cs).ShouldNotContain("onlyInts wants an integer");
+    }
+
+    [Fact]
+    public void A_compileError_in_a_folded_away_comptime_if_never_fires()
+    {
+        // The other guard shape: a comptime-known `if` inside a generic instance. W3a's fold drops the
+        // dead arm, so the diagnostic is not reached.
+        var cs = EmitZig(
+            "fn need(comptime T: type) i32 {\n" +
+            "    if (@bitSizeOf(T) > 64) @compileError(\"too wide\");\n" +
+            "    return @bitSizeOf(T);\n" +
+            "}\n" +
+            "pub fn main() u8 { return @intCast(need(u8)); }\n");
+        UserCode(cs).ShouldContain("return 8;");
+        UserCode(cs).ShouldNotContain("too wide");
+    }
+
+    [Fact]
+    public void A_compileError_declaration_is_inert_until_the_name_is_referenced()
+    {
+        // The DEPRECATION TOMBSTONE (25 in the pin, incl. std/meta.zig and std/os/windows.zig). Zig
+        // analyses a declaration only when something names it; firing at the declaration would make
+        // those modules unimportable. It emits nothing at all.
+        var cs = EmitZig(
+            "pub const OLD_NAME = @compileError(\"use NEW_NAME instead\");\n" +
+            "pub fn main() u8 { return 3; }\n");
+        UserCode(cs).ShouldContain("return 3;");
+        UserCode(cs).ShouldNotContain("OLD_NAME");
+        UserCode(cs).ShouldNotContain("use NEW_NAME instead");
+    }
+
+    [Fact]
+    public void SetEvalBranchQuota_is_accepted_and_emits_nothing()
+    {
+        // A comptime BUDGET setter with no runtime effect — and no leftover `_ = …;` discard either.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    @setEvalBranchQuota(50000);\n" +
+            "    return 7;\n" +
+            "}\n");
+        UserCode(cs).ShouldContain("return 7;");
+        UserCode(cs).ShouldNotContain("setEvalBranchQuota");
+        UserCode(cs).ShouldNotContain("50000");
+    }
+
+    [Fact]
+    public void A_reached_compileError_raises_the_authors_message()
+    {
+        // Reaching it IS the semantic analysis zig raises on — so it fires, carrying the message.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 { @compileError(\"this build is not supported\"); }\n"));
+        ex.Message.ShouldContain("this build is not supported");
+    }
+
+    [Fact]
+    public void A_compileError_message_carries_the_type_that_failed()
+    {
+        // `"…" ++ @typeName(T)` is how std names the offending type in the diagnostic; reading the
+        // message as comptime TEXT is what puts that name in dotcc's error too.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "fn noFloats(comptime T: type) i32 {\n" +
+            "    return switch (@typeInfo(T)) {\n" +
+            "        .int => 1,\n" +
+            "        else => @compileError(\"unsupported type: \" ++ @typeName(T)),\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 { return @intCast(noFloats(f32)); }\n"));
+        ex.Message.ShouldContain("unsupported type: f32");
+    }
+
+    [Fact]
+    public void Referencing_a_poisoned_declaration_raises_its_message()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub const OLD_NAME = @compileError(\"use NEW_NAME instead\");\n" +
+            "pub fn main() u8 { return OLD_NAME; }\n"));
+        ex.Message.ShouldContain("OLD_NAME");
+        ex.Message.ShouldContain("use NEW_NAME instead");
+    }
+
+    [Fact]
+    public void A_poisoned_declaration_raises_in_a_type_position_too()
+    {
+        // A tombstone standing in for a removed TYPE — the same reference rule, the other position.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub const Handle = @compileError(\"use std.fs.File instead\");\n" +
+            "fn f(h: Handle) u8 { _ = h; return 0; }\n" +
+            "pub fn main() u8 { return f(0); }\n"));
+        ex.Message.ShouldContain("use std.fs.File instead");
+    }
+
+    [Fact]
+    public void The_aggregate_reification_builtins_are_named_cuts()
+    {
+        // `@Struct`/`@Union`/`@Enum`/`@Pointer` take comptime AGGREGATE arguments; the cut says so
+        // rather than half-reifying a layout.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const S = @Struct(.auto, null, &.{\"a\"}, &.{u8}, &.{.{}});\n" +
+            "pub fn main() u8 { var s: S = undefined; _ = s; return 0; }\n"));
+        ex.Message.ShouldContain("comptime AGGREGATE arguments");
+    }
+
+    [Fact]
+    public void A_vector_type_is_a_named_cut_for_being_SIMD()
+    {
+        // 475 uses, and none of them are a reflection gap — it is a whole execution model dotcc's
+        // scalar backend does not have. Named separately so it does not read as "S7 is unfinished".
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const V = @Vector(4, u8);\n" +
+            "pub fn main() u8 { var v: V = undefined; _ = v; return 0; }\n"));
+        ex.Message.ShouldContain("SIMD");
+    }
+
+    [Fact]
+    public void Int_in_a_value_position_says_it_is_a_type()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 { return @Int(.unsigned, 8); }\n"));
+        ex.Message.ShouldContain("constructs a TYPE");
+    }
+
+    [Fact]
+    public void Int_rejects_a_tag_that_is_not_a_signedness()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const T = @Int(.little, 8);\n" +
+            "pub fn main() u8 { var x: T = 0; _ = x; return 0; }\n"));
+        ex.Message.ShouldContain("not a signedness");
+    }
+
+    [Fact]
+    public void Int_rejects_a_bit_width_that_is_not_comptime_known()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "fn g(n: u16) u8 { var x: @Int(.unsigned, n) = 0; _ = x; return 0; }\n" +
+            "pub fn main() u8 { return g(3); }\n"));
+        ex.Message.ShouldContain("must be a comptime-known integer");
+    }
+
+    [Fact]
+    public void Int_rejects_a_width_outside_the_modeled_range()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const Huge = @Int(.unsigned, 256);\n" +
+            "pub fn main() u8 { var x: Huge = 0; _ = x; return 0; }\n"));
+        ex.Message.ShouldContain("1..128");
+    }
+
+    [Fact]
+    public void BitSizeOf_of_an_aggregate_is_refused_rather_than_approximated()
+    {
+        // dotcc byte-packs its own layout, so an aggregate's bit size may disagree with zig's. The cut
+        // points at `@sizeOf(T) * 8` — the same approximation, opted into deliberately.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const P = struct { a: u8, b: u32 };\n" +
+            "pub fn main() u8 { return @bitSizeOf(P); }\n"));
+        ex.Message.ShouldContain("@sizeOf(T) * 8");
+    }
+
+    [Fact]
+    public void CompileLog_fails_the_build_as_it_does_in_zig()
+    {
+        // Zig prints the arguments AND adds a compilation error, so a log left in a codebase cannot be
+        // missed. A loud error carrying the logged text is the faithful lowering.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "pub fn main() u8 { @compileLog(\"width is \" ++ @typeName(u8)); return 0; }\n"));
+        ex.Message.ShouldContain("width is u8");
+    }
 }

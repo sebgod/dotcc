@@ -60,6 +60,19 @@ internal sealed partial class ZigLowering
                     $"zig `@import(\"{module}\")` is not modeled — only `@import(\"std\")` (its curated allocator/mem/debug/testing paths) and a relative `@import(\"./sibling.zig\")` are supported");
             }
         }
+        // `pub const MACH_PORT_RIGHT = @compileError("use MACH.PORT.RIGHT");` — a DEPRECATION TOMBSTONE
+        // (road-to-zig-std S7; 25 of them in the pinned std, incl. std/meta.zig and std/os/windows.zig).
+        // Zig analyses a declaration only when something references it, so the tombstone is inert until
+        // named: record the message, emit no decl, and raise at the REFERENCE (see RaiseIfPoisoned).
+        // Firing here instead would make importing those modules impossible.
+        if (rhs.Content is Zig.BuiltinCall ce && Tok(ce.Arg0) == "@compileError")
+        {
+            var msgArgs = Flatten(ce.Arg2);
+            _poisonedConsts[name] = msgArgs.Count == 1
+                ? ComptimeMessageText(msgArgs[0]) ?? UnreadableMessage
+                : UnreadableMessage;
+            return true;
+        }
         if (TryKnownAllocatorKind(rhs, out var kind))
         {
             _defaultAllocatorBindings[name] = kind;
@@ -189,6 +202,13 @@ internal sealed partial class ZigLowering
             // `@TypeOf(expr)` — the operand's synthesized type, unevaluated.
             case Zig.BuiltinCall b when Tok(b.Arg0) == "@TypeOf":
                 type = TypeOfBuiltin(b.Arg2);
+                return true;
+
+            // `const MaskInt = @Int(.unsigned, @bitSizeOf(T));` — a CONSTRUCTED type bound to a name
+            // (road-to-zig-std S7). The width it was built with rides the binding through
+            // SetDeclaredIntBits / DeclaredBitsOfTypeArg, so `@typeInfo(MaskInt).int.bits` answers.
+            case Zig.BuiltinCall rb when TryLowerReifyBuiltin(rb, out var reified):
+                type = reified;
                 return true;
 
             // `const List = std.ArrayList(i32);` — a curated generic std type in value position; the
@@ -462,6 +482,10 @@ internal sealed partial class ZigLowering
         // `@TypeOf(expr)` in TYPE position (wall-plan W1) — e.g. `var y: @TypeOf(x) = x;` or a
         // param/return annotation. The operand's synthesized type; unevaluated (see TypeOfBuiltin).
         Zig.BuiltinCall b when Tok(b.Arg0) == "@TypeOf" => TypeOfBuiltin(b.Arg2),
+        // A type-CONSTRUCTING builtin (road-to-zig-std S7): `@Int(.unsigned, @bitSizeOf(T))` builds an
+        // integer type; the aggregate constructors of the same family are loud cuts. See
+        // TryLowerReifyBuiltin — checked after @TypeOf/@This, which are their own cases above.
+        Zig.BuiltinCall rb when TryLowerReifyBuiltin(rb, out var reified) => reified,
         // A curated GENERIC std type in TYPE position (`std.ArrayList(T)`, wall-plan W0). A
         // call parses in type position via the ordinary Suffix chain (Type → ErrUnion →
         // Suffix → callArgs), so NO grammar change: resolve the callee's std path against
@@ -642,6 +666,9 @@ internal sealed partial class ZigLowering
     /// would throw on it.</summary>
     private CType LowerTypeName(string name)
     {
+        // A `const X = @compileError("…");` tombstone named in a TYPE position (road-to-zig-std S7) —
+        // the reference is what zig analyses, so this is where the author's message is raised.
+        RaiseIfPoisoned(name);
         if (ResolveSelfAlias(name) is { } alias) { return alias; }
         // A nested container type (`const Inner = struct {…};` inside the current container — S9 #89),
         // resolved by plain name while a method of the parent is being lowered.
