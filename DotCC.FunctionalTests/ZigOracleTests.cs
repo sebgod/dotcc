@@ -2590,6 +2590,24 @@ public sealed class ZigOracleTests
             "    @setEvalBranchQuota(10000);\n" +
             "    return @intCast(onlyInts(u21) + narrow(u21));\n" +
             "}\n", 42, "" },
+        // The synthetic `builtin` module (road-to-zig-std S3). Every branch here is decided at
+        // COMPILE time by the target description, so agreeing with real zig means dotcc's synthetic
+        // module describes the same host real zig does. Deliberately does NOT read `builtin.mode`:
+        // dotcc reports `.ReleaseFast` on purpose (it does not trap integer overflow) while
+        // `zig build-exe` defaults to `.Debug` - a divergence by design, and the one member that
+        // could not be differentially tested without passing `-OReleaseFast`. 1+2+4+8+16+32 = 63.
+        new object[] { "builtin_target_queries",
+            "const builtin = @import(\"builtin\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var n: u32 = 0;\n" +
+            "    if (builtin.link_libc) { n += 1; } else { n += 100; }\n" +
+            "    if (builtin.single_threaded) { n += 200; } else { n += 2; }\n" +
+            "    if (builtin.os.tag == .plan9) { n += 400; } else { n += 4; }\n" +
+            "    if (builtin.cpu.arch == .avr) { n += 800; } else { n += 8; }\n" +
+            "    if (builtin.target.abi == .gnu or builtin.target.abi == .none) { n += 16; } else { n += 1600; }\n" +
+            "    if (builtin.is_test) { n += 3200; } else { n += 32; }\n" +
+            "    return @intCast(n - 21);\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

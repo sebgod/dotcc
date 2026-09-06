@@ -68,11 +68,22 @@ internal sealed partial class ZigLowering
     internal ZigModule? ResolveImport(string name)
     {
         if (_importModules.TryGetValue(name, out var existing)) { return existing; }
-        if (_importSpecs.TryGetValue(name, out var spec) && _moduleGraph is not null && _importerDir is not null)
+        if (!_importSpecs.TryGetValue(name, out var spec) || _moduleGraph is null) { return null; }
+        // A SYNTHETIC module (`builtin` / `root` — road-to-zig-std S3): generated as Zig source and
+        // prepared exactly like a file module, so navigation into it needs no second rule. Checked
+        // BEFORE the importer-directory requirement below — a generated module has no directory to
+        // resolve against, so an in-memory unit can ask about the target just as a file can.
+        if (ZigSyntheticModules.IsSyntheticSpec(spec) && _moduleGraph.LoadSynthetic(spec) is { } synth)
         {
-            // Only a resolvable `.zig` file becomes a navigable module; a special import
-            // (`builtin`/`root` — S3) or a missing file isn't navigable, so return null and let the
-            // caller error if it was actually used (rather than throw a raw file-not-found here).
+            EnsureModulePrepared(synth);
+            _importModules[name] = synth;
+            return synth;
+        }
+        if (_importerDir is not null)
+        {
+            // Only a resolvable `.zig` file becomes a navigable module; a missing file isn't navigable,
+            // so return null and let the caller error if it was actually used (rather than throw a raw
+            // file-not-found here).
             var full = System.IO.Path.IsPathRooted(spec) ? spec : System.IO.Path.Combine(_importerDir, spec);
             if (!spec.EndsWith(".zig", System.StringComparison.Ordinal) || !System.IO.File.Exists(full))
             {

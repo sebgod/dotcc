@@ -43,6 +43,15 @@ internal sealed partial class ZigLowering
                     if (_moduleGraph?.StdRootPath is { } stdPath) { _importSpecs[name] = stdPath; }
                     return true;
                 }
+                // `@import("builtin")` / `@import("root")` — the compiler-provided modules, generated as
+                // Zig source and resolved through the ordinary module path (road-to-zig-std S3). Recorded
+                // for BOTH a root unit and a lazy std module: std's own files import `builtin` constantly,
+                // and so does user code asking about the target.
+                if (ZigSyntheticModules.IsSyntheticSpec(module) && _moduleGraph is not null)
+                {
+                    _importSpecs[name] = module;
+                    return true;
+                }
                 // A relative sibling import `@import("./util.zig")` — record the spec; the module is
                 // resolved + prepared LAZILY on first use (ResolveImport), so std.zig's 66 re-exports
                 // don't fan out at prepare time. In a LAZY (prepared) module, ANY other spec — a bare
@@ -164,6 +173,11 @@ internal sealed partial class ZigLowering
         // name and fold. SIDE EFFECT only: fall through to `return false` so the ordinary runtime decl
         // still emits (a runtime use of the name is unaffected). EvalComptimeValue never throws and
         // recognizes only pure string/int forms, so this is safe in every pass (incl. top-level pass 0).
+        // A comptime AGGREGATE / enum-literal binding (road-to-zig-std S3a) — `const cpu: Cpu =
+        // .{ .arch = .aarch64 };` / `const mode = .ReleaseFast;`. Recorded the same SIDE-EFFECT way and
+        // for the same reason: a struct or enum constant is an ordinary runtime value too, so the decl
+        // still emits and only a comptime QUESTION about it folds.
+        RecordComptimeAggregateBinding(name, rhs);
         if (EvalComptimeValue(rhs) is { } comptimeVal) { _comptimeValues[name] = comptimeVal; }
         // A comptime ARRAY literal (`const a = [_]u8{1,2};`) — record its raw element-type + element
         // items (no lowering, so safe in any pass) for a later `++`/`**` fold (see TryArrayLiteralParts).

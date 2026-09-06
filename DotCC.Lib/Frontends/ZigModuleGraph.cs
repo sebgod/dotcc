@@ -116,6 +116,19 @@ internal sealed class ZigModuleGraph
         return LoadPath(full);
     }
 
+    /// <summary>Resolve a SYNTHETIC module — <c>builtin</c> / <c>root</c>, the compiler-provided
+    /// modules with no file on disk (road-to-zig-std S3). Generated as Zig source and cached under a
+    /// virtual path, so from here on it is an ordinary <see cref="ZigModule"/>: the same parse, the
+    /// same lazy preparation, the same navigation. Null when the spec names no synthetic module.</summary>
+    public ZigModule? LoadSynthetic(string spec)
+    {
+        if (ZigSyntheticModules.PathForSpec(spec) is not { } path) { return null; }
+        if (_modules.TryGetValue(path, out var existing)) { return existing; }
+        var module = ParseSource(path, ZigSyntheticModules.SourceForPath(path));
+        _modules[path] = module;
+        return module;
+    }
+
     /// <summary>Resolve a canonical file path to a module (parse + cache on first touch).</summary>
     public ZigModule LoadPath(string path)
     {

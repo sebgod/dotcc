@@ -98,6 +98,16 @@ internal sealed partial class ZigLowering
                 // A `const X = @compileError("…");` tombstone named in a VALUE position (road-to-zig-std
                 // S7) — the declaration was inert; the reference is what zig analyses, so raise here.
                 RaiseIfPoisoned(name);
+                // A bound IMPORT reaching the value path means a navigation into it found nothing and
+                // fell back to lowering the base. Saying so beats "unresolved identifier", which reads
+                // as if the import itself were missing — and it is the failure a synthetic module
+                // produces most (road-to-zig-std S3: `root` is empty by design, so every probe misses).
+                if (_importSpecs.TryGetValue(name, out var importedSpec))
+                {
+                    throw new IrUnsupportedException(
+                        $"zig: `{name}` is the imported module `{importedSpec}`, not a value — the declaration "
+                        + "named on it is one dotcc does not model");
+                }
                 throw new IrUnsupportedException($"unresolved identifier '{name}'");
             }
             case Zig.Grouped g:
@@ -261,6 +271,11 @@ internal sealed partial class ZigLowering
                 // plain payload fold would see `.len` on a list and have nothing to say about it.
                 if (TryFoldTypeInfoListValue(expr, out var tiListValue)) { return tiListValue; }
                 if (TryFoldTypeInfoValue(expr, out var tiValue)) { return tiValue; }
+                // A comptime constant a MODULE exports — `builtin.link_libc`, `builtin.cpu.arch`
+                // (road-to-zig-std S3a). Restricted to module-rooted reads on purpose: a local struct
+                // constant's field access still lowers to an ordinary runtime field read, so nothing
+                // that worked before changes shape. A cross-module constant had no lowering at all.
+                if (TryFoldImportedComptimeValue(expr, out var importedValue)) { return importedValue; }
                 var fieldName = Tok(fld.Arg2);
                 // A dotted std path used as a VALUE (Milestone F): the C-heap default
                 // (`std.heap.page_allocator`/`c_allocator`) materializes a runtime Allocator; a std
@@ -727,6 +742,12 @@ internal sealed partial class ZigLowering
         Zig.Concat c => TryFoldStringConcat(c.Arg0, c.Arg2),
         Zig.Repeat r => TryFoldStringRepeat(r.Arg0, r.Arg2),
         Zig.BuiltinCall b => TryEvalTypeNameBuiltin(b),   // `@typeName(T)` → comptime string (else null)
+        // NOT a module-qualified constant (`builtin.link_libc`), deliberately: this runs during pass 0
+        // of module PREPARATION, and resolving a module path from here would prepare the target module
+        // as a side effect of merely RECORDING a const — the eager fan-out S2's laziness exists to
+        // prevent ("std.zig's 66 re-exports don't fan out at prepare time"). A cross-module constant
+        // folds at LOWERING time instead, in the Field case of LowerExpr and in the comptime-condition
+        // fold, where resolving another module is exactly what is wanted (road-to-zig-std S3a).
         _ => null,
     };
 

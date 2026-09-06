@@ -396,6 +396,73 @@ that retire curated shortcuts.
 > `compile_error_guards_fold_away`), and a new `examples/zig-reify/` — five lines, exit 42,
 > byte-identical to real zig 0.17.0-dev.667.
 
+> **Status update (2026-09-06) — S3 DONE: the synthetic `builtin` + `root` modules, and the
+> comptime struct constants they need.** Started as G3 and became S3 by measurement: probing
+> `std.fmt.bufPrint` against the real tree walls at `zig type 'Mode' not supported` — the generated
+> `builtin` module, which the plan already sequences ahead of the G-goals.
+>
+> **S3a — comptime STRUCT CONSTANTS** (`ZigLowering.ComptimeAggregate.cs`) had to come first, and
+> that was not in the plan. The two things every platform-conditional in std asks are
+> `builtin.cpu.arch` (172 uses) and `builtin.os.tag` (92) — both a FIELD READ of a struct constant,
+> which S5 left with no comptime domain at all (it folds types exactly, and scalars, but never an
+> aggregate VALUE). Without an answer they lower to a runtime comparison and BOTH arms of every
+> `if (builtin.cpu.arch == .x86_64)` get lowered — dragging in the inline asm, syscalls and per-arch
+> code the branch exists to avoid. A platform query has to fold or the module graph cannot walk std.
+> So: a `const` RHS that is a struct literal records a field map (a SIDE EFFECT — the runtime decl
+> still emits), a field read folds to a tag or a scalar, and `LowerIfStmt` gained a comptime-condition
+> fold covering `==`/`!=` on tags, a module-exported bool, and `and`/`or`/`!` over those.
+>
+> **S3b — the synthetic modules** (`ZigSyntheticModules.cs`) are generated as ZIG SOURCE TEXT and fed
+> through the ordinary module path, exactly as the plan prescribed: no special lowering, no second
+> navigation rule, and an unprovided member fails with the same "no such declaration" a file module
+> gives. They are **duck-typed** — bare enum literals and anonymous struct literals — because real
+> zig's `builtin.zig` is only ~55 lines but every line is typed against `std.Target`, which is
+> `Target.zig` (3,824 lines) plus `Target/`'s per-architecture feature tables (33,488 lines),
+> all describing hardware dotcc does not target. `root` is EMPTY on purpose: std probes it for
+> optional overrides, and a program that declares none is what an empty module describes.
+>
+> **One regression, caught by the real-std oracles and worth remembering.** The first cut also folded
+> a module-qualified constant inside `EvalComptimeValue` — which runs during pass 0 of module
+> PREPARATION. Recording a `const` then resolved a module path as a side effect, preparing the target
+> module eagerly: precisely the fan-out S2's laziness exists to prevent ("std.zig's 66 re-exports
+> don't fan out at prepare time"). Seven real-std oracle programs failed. The fold belongs at LOWERING
+> time only — `LowerExpr`'s field case and the comptime-condition fold — where resolving another
+> module is exactly what is wanted. **Prepare-time recording must stay pure of resolution.**
+>
+> **Two target choices are load-bearing**, both the plan's: `link_libc = true` (biases std toward
+> libc-backed paths, which land on `extern fn`s dotcc's runtime implements) and `mode = .ReleaseFast`
+> (dotcc does not trap integer overflow, so claiming a safe mode would have std emit checks dotcc does
+> not honour). The second DIVERGES from `zig build-exe`'s `.Debug` default — found by the differential,
+> which is why the oracle program reads every other member and not that one. `abi` was corrected from
+> a guessed `.msvc` to `.gnu` on Windows once `zig env` showed real zig's own host triple.
+>
+> **Cuts (all loud):** the `std.Target` METHODS (`cpu.has(…)` ×19, `target.isGnuLibC()`,
+> `ptrBitWidth()` — ~30 call sites), each needing a real type to hang on; a same-file struct
+> constant's field read (only MODULE-QUALIFIED folds — see the scope note in ZIG-SUPPORT.md);
+> `@hasDecl(root, …)`, which needs `@hasDecl` over a module rather than a container type.
+>
+> Validation: 11 emit pins + 1 zig-oracle program (`builtin_target_queries`, version-stable and
+> differentially verified) + `examples/zig-target-builtin/` — two lines, exit 42, byte-identical to
+> real zig 0.17.0-dev.667, with ZERO `if` statements surviving in `main`.
+>
+> **★ The G3 road, re-measured.** G3's bullet below says "`std.fmt` scalar formatting", written when
+> the format loop lived there. In the pinned zig it does NOT: `std/fmt.zig` keeps only the comptime
+> `Placeholder`/`Parser` types, and the `{}`-placeholder driver moved to
+> **`std/Io/Writer.zig:616` `pub fn print(w: *Writer, comptime fmt, args)`** (2,955 lines, importing
+> `File`, `Limit` and `ArrayList`). Reading it, the remaining bricks are:
+> 1. **the W4 lift** — with S3 done, probing `std.fmt` now walls at `zig type: CallArgs`, a
+>    type-position CALL in std/fmt.zig's own declarations. This is W4's "a type-returning body must
+>    `return struct {…}`" cut, the same one S7's measurement pointed at (44 bodies return a
+>    delegating call, 20 a `switch`/`if`). **This is the next brick, and it is shared with G4.**
+> 2. **comptime slice/string VALUES** — `Writer.print` keeps `comptime var literal: []const u8 = ""`
+>    and grows it with `++` across an unrolled loop, and slices the format string `fmt[a..b]`.
+> 3. **`inline while (true)` with a comptime `break`** — dotcc's unroller needs a folding condition;
+>    this is an unbounded loop whose exit is a comptime-known `break`.
+> 4. **a comptime CALL returning a struct** — `std.fmt.Placeholder.parse(&arr)`, read field-wise.
+> 5. **the `Writer` itself** — a vtable-shaped struct over a `[]u8` with a `drain` fn pointer. The
+>    `.fixed(buf)` form needs no OS, so `bufPrint` is reachable before the S8 platform floor is;
+>    `std.debug.print` (stderr) is not.
+
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)
 
 An opt-in test/tool (`DOTCC_RUN_STD_PROBE=1`, env `DOTCC_ZIG_LIB_DIR` or
@@ -485,6 +552,12 @@ climbs and buckets drop off. It's the only durable copy (std isn't vendored); th
   hundred decls, not thousands.
 
 ### S3 — synthetic `builtin` + `root` modules (S/M)
+
+**S3 ✅ DONE (2026-09-06)** — both modules, generated as Zig source and fed through the ordinary
+module path exactly as the bullets below prescribe. What the bullets did NOT anticipate is that the
+module is useless without **comptime struct constants** (S3a): `builtin.cpu.arch` and
+`builtin.os.tag` are field reads, and a platform conditional that does not fold lowers both arms.
+Status update above, including the re-measured G3 road.
 
 - Generate `builtin.zig` **as Zig source text** at compile start (exactly what
   real zig does per-target) and feed it through the normal S1 module path — no
