@@ -370,6 +370,16 @@ internal sealed partial class ZigLowering
             payload = info;
             return true;
         }
+        // A comptime AGGREGATE field holding an enum literal (road-to-zig-std S3a) — `builtin.cpu.arch`,
+        // `builtin.os.tag`, `builtin.mode`. This is what makes a platform conditional FOLD instead of
+        // lowering both arms, which matters because the untaken arm is the inline asm / syscall /
+        // per-arch code the branch exists to avoid. Checked after the `@typeInfo` producers, which are
+        // the more specific shapes.
+        if (TryReadComptimeAggregateField(expr) is { Tag: { } aggTag })
+        {
+            tag = aggTag;
+            return true;
+        }
         return false;
     }
 

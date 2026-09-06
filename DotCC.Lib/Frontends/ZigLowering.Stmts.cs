@@ -1220,6 +1220,16 @@ internal sealed partial class ZigLowering
     /// <see cref="If"/> — the condition is lowered exactly once either way.</summary>
     private CStmt LowerIfStmt(Item condItem, Item thenItem, Item? elseItem)
     {
+        // A COMPTIME TAG condition (road-to-zig-std S3a) — `builtin.cpu.arch == .x86_64`,
+        // `builtin.os.tag != .windows`. Folded before the operand is lowered at all, because the
+        // untaken arm is exactly the platform code that must not be lowered: the inline asm, the
+        // syscall wrappers, the per-arch intrinsics the branch exists to avoid. See LowerBinary's
+        // own tag fold, which is where the comparison would otherwise settle to a runtime bool.
+        if (TryFoldComptimeCondition(condItem) is { } tagCond)
+        {
+            if (tagCond) { return LowerStmt(thenItem); }
+            return elseItem is { } tagTaken ? LowerStmt(tagTaken) : new Seq(new List<CStmt>());
+        }
         var cond = LowerExpr(condItem);
         if (_inGenericInstance && _ir.ConstEval(cond) is { } cv)
         {
@@ -1227,6 +1237,49 @@ internal sealed partial class ZigLowering
             return elseItem is { } taken ? LowerStmt(taken) : new Seq(new List<CStmt>());
         }
         return new If(cond, LowerStmt(thenItem), elseItem is { } el ? LowerStmt(el) : null);
+    }
+
+    /// <summary>Settle an <c>if</c> condition at lowering time when it is a COMPTIME question — a tag
+    /// comparison (<c>builtin.os.tag == .windows</c>) or a module-exported boolean constant
+    /// (<c>builtin.link_libc</c>). Null when it is not one, so the ordinary two-armed lowering runs.
+    ///
+    /// <para>Deliberately narrower than "any condition <see cref="IrBuilder.ConstEval"/> settles":
+    /// that wider rule is what zig itself does, but it would change the emitted shape of every
+    /// existing <c>if</c> over a constant, and nothing measured needs it. These two forms are what a
+    /// platform conditional is made of, and they had no runtime meaning to lose.</para></summary>
+    private bool? TryFoldComptimeCondition(Item condItem)
+    {
+        var cur = condItem;
+        while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
+        if (cur.Content is Zig.CmpEq eq && TryFoldComptimeTagCompare(eq.Arg0, eq.Arg2, negate: false, out var eqVal))
+        {
+            return eqVal is LitBool { Value: var e } && e;
+        }
+        if (cur.Content is Zig.CmpNe ne && TryFoldComptimeTagCompare(ne.Arg0, ne.Arg2, negate: true, out var neVal))
+        {
+            return neVal is LitBool { Value: var n } && n;
+        }
+        // `if (builtin.link_libc)` / `if (!builtin.single_threaded)` — a module-exported bool.
+        if (cur.Content is Zig.PreNot not)
+        {
+            return TryFoldComptimeCondition(not.Arg1) is { } inner ? !inner : null;
+        }
+        // `and` / `or` over two comptime questions — `builtin.os.tag == .linux and builtin.link_libc`.
+        // BOTH sides must settle: a half-comptime condition still has a runtime half to evaluate, and
+        // short-circuiting past it would drop that evaluation.
+        if (cur.Content is Zig.BoolAnd conj)
+        {
+            return TryFoldComptimeCondition(conj.Arg0) is { } la && TryFoldComptimeCondition(conj.Arg2) is { } ra
+                ? la && ra
+                : null;
+        }
+        if (cur.Content is Zig.BoolOr disj)
+        {
+            return TryFoldComptimeCondition(disj.Arg0) is { } lo && TryFoldComptimeCondition(disj.Arg2) is { } ro
+                ? lo || ro
+                : (bool?)null;
+        }
+        return TryFoldImportedComptimeValue(cur, out var v) && v is LitBool { Value: var b } ? b : null;
     }
 
     private CStmt LowerIfCapture(Item condItem, string capName, Item thenItem, Item? elseItem, string? errCapName)

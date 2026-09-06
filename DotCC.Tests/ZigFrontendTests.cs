@@ -2647,9 +2647,11 @@ public sealed class ZigFrontendTests
     [Fact]
     public void Rejects_an_unmodeled_std_import()
     {
-        // `std` is a known-paths resolver, not a real std model — a non-`std` import errors.
+        // `std` is a known-paths resolver, not a real std model — an import that names neither a
+        // relative `.zig` file nor a compiler-provided module errors. (`builtin` USED to be the
+        // example here; it resolves since road-to-zig-std S3 — see the synthetic-module pins.)
         var ex = Should.Throw<CompileException>(() => EmitZig(
-            "const builtin = @import(\"builtin\");\n" +
+            "const other = @import(\"some_package\");\n" +
             "pub fn main() u8 { return 0; }\n"));
         ex.Message.ShouldContain("not modeled");
     }
@@ -6123,5 +6125,161 @@ public sealed class ZigFrontendTests
         var ex = Should.Throw<CompileException>(() => EmitZig(
             "pub fn main() u8 { @compileLog(\"width is \" ++ @typeName(u8)); return 0; }\n"));
         ex.Message.ShouldContain("width is u8");
+    }
+
+    // ---- the synthetic `builtin` / `root` modules (road-to-zig-std S3) ----
+
+    [Fact]
+    public void A_platform_conditional_folds_to_exactly_one_arm()
+    {
+        // THE property S3 exists for. Not "the answer is right" — the answer is host-dependent — but
+        // that the `if` is GONE: only one arm survives lowering. The untaken arm of a std platform
+        // branch is the inline asm, the syscall wrapper, the per-arch intrinsic that the branch exists
+        // to avoid, and lowering it would sink the module.
+        var cs = EmitZig(
+            "const builtin = @import(\"builtin\");\n" +
+            "pub fn main() u8 {\n" +
+            "    if (builtin.os.tag == .plan9) { return 9; } else { return 4; }\n" +
+            "}\n");
+        UserCode(cs).ShouldNotContain("if (");
+        UserCode(cs).ShouldContain("return 4;");
+        UserCode(cs).ShouldNotContain("return 9;");
+    }
+
+    [Fact]
+    public void A_cpu_arch_query_folds_the_same_way()
+    {
+        // 172 uses in the pinned std, the single commonest thing asked of `builtin`. `.avr` is chosen
+        // as the false arm because dotcc will never run on one, so the test is host-independent.
+        var cs = EmitZig(
+            "const builtin = @import(\"builtin\");\n" +
+            "pub fn main() u8 {\n" +
+            "    if (builtin.cpu.arch == .avr) { return 1; } else { return 42; }\n" +
+            "}\n");
+        UserCode(cs).ShouldNotContain("if (");
+        UserCode(cs).ShouldContain("return 42;");
+    }
+
+    [Fact]
+    public void A_boolean_target_constant_folds()
+    {
+        // `link_libc` (99 uses) is a plain bool, and dotcc reports it TRUE on purpose: it biases std
+        // toward the libc-backed paths, which land on `extern fn`s the C-shaped runtime implements.
+        var cs = EmitZig(
+            "const builtin = @import(\"builtin\");\n" +
+            "pub fn main() u8 {\n" +
+            "    if (builtin.link_libc) { return 42; } else { return 1; }\n" +
+            "}\n");
+        UserCode(cs).ShouldNotContain("if (");
+        UserCode(cs).ShouldContain("return 42;");
+    }
+
+    [Fact]
+    public void A_negated_and_combined_target_condition_folds()
+    {
+        // `and` / `or` / `!` over comptime questions — the shape a real guard is written in. Both
+        // sides must settle, so a half-comptime condition still lowers normally.
+        var cs = EmitZig(
+            "const builtin = @import(\"builtin\");\n" +
+            "pub fn main() u8 {\n" +
+            "    if (!builtin.is_test and builtin.link_libc) { return 42; } else { return 1; }\n" +
+            "}\n");
+        UserCode(cs).ShouldNotContain("if (");
+        UserCode(cs).ShouldContain("return 42;");
+    }
+
+    [Fact]
+    public void A_switch_over_a_target_tag_lowers_only_the_taken_prong()
+    {
+        // The other half of a platform dispatch. The comptime `switch` fold (S5a) was already
+        // unconditional; what S3a adds is a subject it can evaluate.
+        var cs = EmitZig(
+            "const builtin = @import(\"builtin\");\n" +
+            "pub fn main() u8 {\n" +
+            "    switch (builtin.cpu.arch) {\n" +
+            "        .avr => { return 1; },\n" +
+            "        .msp430 => { return 2; },\n" +
+            "        else => { return 42; },\n" +
+            "    }\n" +
+            "}\n");
+        UserCode(cs).ShouldContain("return 42;");
+        UserCode(cs).ShouldNotContain("switch");
+    }
+
+    [Fact]
+    public void The_target_triple_chains_through_nested_fields()
+    {
+        // `builtin.target.cpu.arch` — 100 uses read `target`, which carries the same descriptors one
+        // level down. A nested comptime aggregate is what makes the chain fold rather than stopping
+        // at the first field.
+        var cs = EmitZig(
+            "const builtin = @import(\"builtin\");\n" +
+            "pub fn main() u8 {\n" +
+            "    if (builtin.target.cpu.arch == .avr) { return 1; } else { return 42; }\n" +
+            "}\n");
+        UserCode(cs).ShouldNotContain("if (");
+        UserCode(cs).ShouldContain("return 42;");
+    }
+
+    [Fact]
+    public void The_builtin_module_emits_no_code_of_its_own()
+    {
+        // It is a description, not a library: nothing in it should reach the emitted program.
+        var cs = EmitZig(
+            "const builtin = @import(\"builtin\");\n" +
+            "pub fn main() u8 { return @intCast(@intFromBool(builtin.link_libc) * 42); }\n");
+        UserCode(cs).ShouldNotContain("link_libc");
+        UserCode(cs).ShouldNotContain("zig_backend");
+        UserCode(cs).ShouldNotContain("stage2_llvm");
+    }
+
+    [Fact]
+    public void Importing_root_binds_and_emits_nothing()
+    {
+        // `root` is the root compilation unit as std sees it, and dotcc's is EMPTY on purpose: a
+        // program that declares no `std_options` override is exactly what an empty module describes.
+        var cs = EmitZig(
+            "const root = @import(\"root\");\n" +
+            "pub fn main() u8 { return 42; }\n");
+        UserCode(cs).ShouldContain("return 42;");
+        UserCode(cs).ShouldNotContain("root");
+    }
+
+    [Fact]
+    public void Naming_an_undeclared_member_of_a_synthetic_module_says_which_module()
+    {
+        // The failure a synthetic module produces most, so it had better read well: `root` is empty by
+        // design, so every probe of it misses.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const root = @import(\"root\");\n" +
+            "pub fn main() u8 { return root.std_options; }\n"));
+        ex.Message.ShouldContain("imported module");
+        ex.Message.ShouldContain("root");
+    }
+
+    [Fact]
+    public void A_target_method_call_is_a_named_cut()
+    {
+        // `builtin.cpu.has(…)` / `builtin.target.ptrBitWidth()` — about 30 call sites in the pin. A
+        // method needs a real type to hang on, and dotcc's `builtin` is deliberately duck-typed, so
+        // these fail rather than being guessed at.
+        var ex = Should.Throw<CompileException>(() => EmitZig(
+            "const builtin = @import(\"builtin\");\n" +
+            "pub fn main() u8 { return if (builtin.target.isGnuLibC()) 1 else 0; }\n"));
+        ex.Message.ShouldNotBeNullOrEmpty();
+    }
+
+    [Fact]
+    public void A_local_struct_constants_field_is_not_folded()
+    {
+        // The deliberate line: only a MODULE-QUALIFIED read folds. A same-file constant keeps its
+        // ordinary runtime field access, because every other name-keyed comptime map here is guarded
+        // on the name not resolving to a runtime symbol — and a constant that emits its declaration
+        // always has one. Pinned so the scope decision is visible rather than assumed.
+        var cs = EmitZig(
+            "const Cpu = struct { arch: u8 };\n" +
+            "const cpu: Cpu = .{ .arch = 3 };\n" +
+            "pub fn main() u8 { return cpu.arch; }\n");
+        UserCode(cs).ShouldContain("cpu.arch");
     }
 }
