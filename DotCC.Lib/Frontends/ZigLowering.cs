@@ -1546,6 +1546,8 @@ internal sealed partial class ZigLowering
         }
         var prev = _currentConstContainer;
         _currentConstContainer = container;
+        // A reified struct's const may read its comptime params (`pub const max = if (cap) |n| n else 0;`).
+        using var seeds = EnterReifiedSeeds(container);
         try
         {
             var sink = typeItem is not null ? LowerType(typeItem) : null;

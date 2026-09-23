@@ -1080,6 +1080,8 @@ internal sealed partial class ZigLowering
                 if (_structFieldDefaults.TryGetValue((named.Name, f.Name), out var defItem))
                 {
                     if (IsInlineArrayMember(named.Name, f.Name, f.Type, defItem)) { continue; }
+                    // A reified struct's default may read its comptime params (`n: u8 = n`).
+                    using var seeds = EnterReifiedSeeds(named.Name);
                     members.Add(new FieldInit(f.Name, f.Type, LowerExprSink(defItem, f.Type)));
                 }
             }

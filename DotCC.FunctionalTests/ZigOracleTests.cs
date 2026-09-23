@@ -3003,6 +3003,20 @@ public sealed class ZigOracleTests
             "    const b: Outer(u16, null) = .{ .pair = .{ .k = 0, .v = 0 }, .items = &narrow };\n" +
             "    return @as(u8, @intCast(a.pair.k + a.items[0] + a.items[1])) + a.pair.v + b.items[0] + 2;\n" +
             "}\n", 42, "" },
+        new object[] { "reified_value_seeds",
+            "fn Buf(comptime cap: ?u8, comptime n: u8) type {\n" +
+            "    return struct {\n" +
+            "        len: u8 = n,\n" +
+            "        pub const max = if (cap) |c| c else 0;\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const A = Buf(30, 2);\n" +
+            "    const b: A = .{};\n" +
+            "    const B = Buf(null, 10);\n" +
+            "    const c: B = .{};\n" +
+            "    return A.max + b.len + B.max + c.len;\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

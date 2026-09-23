@@ -30,6 +30,63 @@ internal sealed partial class ZigLowering
         public void Dispose() => _owner._currentContainer = _saved;
     }
 
+    /// <summary>Restores what <see cref="EnterReifiedSeeds"/> installed: the type aliases its type seeds
+    /// shadowed, and the symbol scope its value / optional seeds were declared in.</summary>
+    private readonly ref struct ReifiedSeedScope
+    {
+        private readonly ZigLowering? _owner;
+        private readonly List<(string Name, CType? Prev, int? PrevBits)>? _shadows;
+
+        internal ReifiedSeedScope(ZigLowering? owner, List<(string Name, CType? Prev, int? PrevBits)>? shadows)
+        {
+            _owner = owner;
+            _shadows = shadows;
+        }
+
+        public void Dispose()
+        {
+            if (_owner is not { } o || _shadows is not { } sh) { return; }
+            for (var i = sh.Count - 1; i >= 0; i--)
+            {
+                var (name, prev, prevBits) = sh[i];
+                if (prev is { } p) { o._typeAliases[name] = p; } else { o._typeAliases.Remove(name); }
+                o.SetDeclaredIntBits(name, prevBits);
+            }
+            o._symbols.ExitScope();
+        }
+    }
+
+    /// <summary>Re-install the comptime seeds a REIFIED container was instantiated with (road-to-zig-std
+    /// G4/G5), around lowering one of its members lazily: a field default materialized in a struct
+    /// literal, or a <c>Type.NAME</c> const. Both are stored raw and lowered at the USE site, where the
+    /// instantiation's <c>T</c> / <c>cap</c> / <c>n</c> are otherwise out of scope (the method-body drain
+    /// re-applies them the same way). A no-op for any other container.</summary>
+    private ReifiedSeedScope EnterReifiedSeeds(string container)
+    {
+        if (!_reifiedSeeds.TryGetValue(container, out var seeds)) { return new ReifiedSeedScope(null, null); }
+        _symbols.EnterScope();
+        var shadows = new List<(string Name, CType? Prev, int? PrevBits)>();
+        foreach (var (name, type, bits) in seeds.Types)
+        {
+            shadows.Add((name,
+                         _typeAliases.TryGetValue(name, out var prev) ? prev : (CType?)null,
+                         _declaredIntBits.TryGetValue(name, out var pb) ? pb : (int?)null));
+            _typeAliases[name] = type;
+            SetDeclaredIntBits(name, bits);
+        }
+        foreach (var (name, value, type) in seeds.Values)
+        {
+            var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type });
+            _comptimeVars[sym] = (value, type);
+        }
+        foreach (var (name, hasValue, value, inner) in seeds.Optionals)
+        {
+            var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = new CType.Optional(inner) });
+            _comptimeOptionalVars[sym] = (hasValue, value, inner);
+        }
+        return new ReifiedSeedScope(this, shadows);
+    }
+
     /// <summary>Make <paramref name="container"/> the current container until the returned guard is
     /// disposed — the scope <c>@This()</c>, a <c>Self</c> alias, a nested type name and a sibling method
     /// resolve in.</summary>

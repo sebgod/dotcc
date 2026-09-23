@@ -814,6 +814,7 @@ internal sealed partial class ZigLowering
                         + "(`const Inner = struct {…};`) in the returned type is not supported yet (road-to-zig-std G4)");
                 }
                 _containerTypes[mangled] = mangledType;   // memo + @This() target; BEFORE reify for self-ref
+                _reifiedSeeds[mangled] = (typeSeeds, valueSeeds, optionalSeeds);
                 _currentContainer = mangled;
                 // TYPE const members (`pub const Slice = if (alignment) |a| … else []T;` in Aligned,
                 // `pub const Unmanaged = HashMapUnmanaged(K, V, …);` in HashMap) are evaluated NOW, while
@@ -898,6 +899,13 @@ internal sealed partial class ZigLowering
     /// a generic, and a generic instance may name a reified type). Enqueued by
     /// <see cref="EvalTypeReturningCall"/>.</summary>
     private readonly List<PendingReifiedMethod> _pendingReifiedMethods = new();
+
+    /// <summary>Each reified container's comptime seeds, by its mangled name, so a member lowered lazily
+    /// later (a field default, a <c>Type.NAME</c> const) can see them again (<see cref="EnterReifiedSeeds"/>).</summary>
+    private readonly Dictionary<string, (IReadOnlyList<TypeSeed> Types,
+        IReadOnlyList<(string name, long value, CType type)> Values,
+        IReadOnlyList<(string name, bool hasValue, long value, CType inner)> Optionals)> _reifiedSeeds
+        = new(System.StringComparer.Ordinal);
 
     /// <summary>Lower one deferred reified-generic method body (road-to-zig-std G4) at top level. Sets
     /// <see cref="_currentContainer"/> to the mangled container for the duration — exactly what pass 2
