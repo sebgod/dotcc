@@ -103,6 +103,15 @@ internal sealed partial class ZigLowering
         {
             return called;
         }
+        // An error union's width is its payload's (`fn charToDigit(…) (error{InvalidCharacter}!u8)`).
+        if (cur.Content is Zig.ErrUnion eu) { return DeclaredBitsOfTypeArg(eu.Arg2); }
+        // `@TypeOf(x)`: the width the VALUE `x` carries (road-to-zig-std G3 — an `anytype` parameter's, a
+        // typed local's, a `.len`'s), so `maxInt(@TypeOf(x))` in std.math.cast / sqrt has its answer.
+        if (cur.Content is Zig.BuiltinCall { } tof && Tok(tof.Arg0) == "@TypeOf" && Flatten(tof.Arg2) is { Count: 1 } tofArgs)
+        {
+            if (tofArgs[0].Content is Zig.Ident aid && _anytypeSeedBits.TryGetValue(Tok(aid.Arg0), out var seeded)) { return seeded; }
+            return DeclaredBitsOfValue(tofArgs[0]);
+        }
         // A module-qualified alias (`std.fmt.ArgSetType`, `pub const ArgSetType = u32;`): the owning
         // module recorded the width its alias spelled (Writer.print asks `@typeInfo(…).int.bits` of it).
         if (cur.Content is Zig.Field qf && ResolveModulePath(qf.Arg0)?.Lowering is { } owner)
@@ -112,6 +121,129 @@ internal sealed partial class ZigLowering
         return cur.Content is Zig.Ident id && _declaredIntBits.TryGetValue(Tok(id.Arg0), out var bound)
             ? bound
             : null;
+    }
+
+    /// <summary>The declared integer width each VALUE symbol's type carries where the source spelled it (a
+    /// typed local, a parameter, a capture over a spelled element type), the value-level counterpart of
+    /// <see cref="_declaredIntBits"/>, so <c>@typeInfo(@TypeOf(x)).int.bits</c> is answered exactly rather
+    /// than refused. Reference-keyed by symbol; a symbol with no entry has no known spelling.</summary>
+    private readonly Dictionary<Symbol, int> _valueBits = new();
+
+    /// <summary>The declared width of the ELEMENT type of each slice / array / many-pointer VALUE symbol
+    /// (<c>buf: []const Character</c>), so an index, a slice of it, or a <c>for</c> capture over it carries one.</summary>
+    private readonly Dictionary<Symbol, int> _valueElemBits = new();
+
+    /// <summary>Each generic `anytype` parameter's declared width while its instance's SIGNATURE lowers
+    /// (the <see cref="_anytypeSeeds"/> counterpart; shadow-restored with it).</summary>
+    private readonly Dictionary<string, int> _anytypeSeedBits = new(System.StringComparer.Ordinal);
+
+    /// <summary>Each function's parameter list with raw type ASTs, so its body can give every parameter
+    /// symbol the width its type spelled (<see cref="RecordParamBits"/>).</summary>
+    private readonly Dictionary<Symbol, IReadOnlyList<ParamInfo>> _fnParamInfos = new();
+
+    /// <summary>Each generic instance's `anytype` parameter widths, read from the call site's arguments.</summary>
+    private readonly Dictionary<Symbol, Dictionary<string, int>> _instanceAnytypeBits = new();
+
+    /// <summary>The declared width a VALUE expression's type carries, or null when no spelling is known:
+    /// a symbol's recorded width, a slice / array <c>.len</c> (<c>usize</c>), an element of a value whose
+    /// element width is known, <c>@as(T, e)</c> / <c>@intCast</c>-free spellings.</summary>
+    private int? DeclaredBitsOfValue(Item e) => e.Content switch
+    {
+        Zig.Grouped g => DeclaredBitsOfValue(g.Arg1),
+        Zig.Ident id => _symbols.Resolve(Tok(id.Arg0)) is { } s && _valueBits.TryGetValue(s, out var b) ? b : null,
+        Zig.Field f when Tok(f.Arg2) == "len" => 64,
+        Zig.Index ix => DeclaredElemBitsOfValue(ix.Arg0),
+        Zig.BuiltinCall bc when Tok(bc.Arg0) == "@as" && Flatten(bc.Arg2) is { Count: 2 } asArgs => DeclaredBitsOfTypeArg(asArgs[0]),
+        // Negation / complement / `try` keep their operand's type (zig has no C integer promotion).
+        Zig.PreNeg n => DeclaredBitsOfValue(n.Arg1),
+        Zig.PreBitNot n => DeclaredBitsOfValue(n.Arg1),
+        Zig.PreTry t => DeclaredBitsOfValue(t.Arg1),
+        _ => null,
+    };
+
+    /// <summary>The declared width a LOWERED expression carries, for what the AST alone cannot resolve: a
+    /// call's callee (its declared return width, <see cref="_fnReturnBits"/>: <c>iterator.length()</c>,
+    /// <c>try charToDigit(…)</c>), a variable, a slice length, through <c>try</c> and parentheses.</summary>
+    private int? DeclaredBitsOfLowered(CExpr e) => e switch
+    {
+        Paren p => DeclaredBitsOfLowered(p.Inner),
+        ZigTry t => DeclaredBitsOfLowered(t.Inner),
+        VarRef v => _valueBits.TryGetValue(v.Sym, out var b) ? b : null,
+        Call { CalleeSym: { } s } => _fnReturnBits.TryGetValue(s, out var rb) ? rb : null,
+        Member { Field: "Len" } => 64,
+        Unary { Op: UnOp.Neg or UnOp.BitNot } u => DeclaredBitsOfLowered(u.Operand),
+        _ => null,
+    };
+
+    /// <summary>The width a value argument's type carries (<see cref="DeclaredBitsOfValue"/>, then, if the
+    /// AST alone does not say, the LOWERED argument's; lowered into a throwaway hoist, since this is a
+    /// question about its type and the call lowers the argument itself).</summary>
+    private int? DeclaredBitsOfArgument(Item arg)
+    {
+        if (DeclaredBitsOfValue(arg) is { } bits) { return bits; }
+        using var hoist = EnterThrowawayHoist();
+        return DeclaredBitsOfLowered(LowerExpr(arg));
+    }
+
+    /// <summary>Each function's declared RETURN width, where its return type spelled one (read per instance
+    /// with its seeds live), so a call's result carries it (<see cref="DeclaredBitsOfLowered"/>).</summary>
+    private readonly Dictionary<Symbol, int> _fnReturnBits = new();
+
+    /// <summary>The declared width of a slice / array VALUE's ELEMENT type, or null (see
+    /// <see cref="_valueElemBits"/>): a symbol's record, carried through <c>&amp;x</c>, slicing and a value
+    /// <c>if</c> whose arms agree.</summary>
+    private int? DeclaredElemBitsOfValue(Item e) => e.Content switch
+    {
+        Zig.Grouped g => DeclaredElemBitsOfValue(g.Arg1),
+        Zig.Ident id => _symbols.Resolve(Tok(id.Arg0)) is { } s && _valueElemBits.TryGetValue(s, out var b) ? b : null,
+        Zig.PreAddrOf a => DeclaredElemBitsOfValue(a.Arg1),
+        Zig.SliceRange sr => DeclaredElemBitsOfValue(sr.Arg0),
+        Zig.SliceOpen so => DeclaredElemBitsOfValue(so.Arg0),
+        Zig.SliceRangeSentinel srs => DeclaredElemBitsOfValue(srs.Arg0),
+        Zig.SliceOpenSentinel sos => DeclaredElemBitsOfValue(sos.Arg0),
+        Zig.IfExpr ie when DeclaredElemBitsOfValue(ie.Arg4) is { } t && DeclaredElemBitsOfValue(ie.Arg6) == t => t,
+        _ => null,
+    };
+
+    /// <summary>The declared width of the ELEMENT of a slice / array / many-pointer TYPE spelling, or null.</summary>
+    private int? ElemBitsOfTypeAst(Item typeAst) => typeAst.Content switch
+    {
+        Zig.TySlice s => DeclaredBitsOfTypeArg(s.Arg2),
+        Zig.TySliceConst s => DeclaredBitsOfTypeArg(s.Arg3),
+        Zig.TyArray a => DeclaredBitsOfTypeArg(a.Arg3),
+        Zig.TyManyPtr p => DeclaredBitsOfTypeArg(p.Arg1),
+        Zig.TyManyPtrConst p => DeclaredBitsOfTypeArg(p.Arg2),
+        _ => null,
+    };
+
+    /// <summary>Record a value symbol's declared width and element width (see <see cref="_valueBits"/>).</summary>
+    private void RecordValueBits(Symbol sym, int? bits, int? elemBits)
+    {
+        if (bits is { } b) { _valueBits[sym] = b; }
+        if (elemBits is { } eb) { _valueElemBits[sym] = eb; }
+    }
+
+    /// <summary>Give each parameter symbol of <paramref name="fn"/>'s body the width its type spelled (read
+    /// with the body's comptime seeds live, so <c>x: T</c> is <c>T</c>'s width), or, for an `anytype`
+    /// parameter of an instance, the width its call-site argument carried.</summary>
+    private void RecordParamBits(Symbol fn, IReadOnlyList<Symbol> paramSyms)
+    {
+        if (!_fnParamInfos.TryGetValue(fn, out var infos)) { return; }
+        _instanceAnytypeBits.TryGetValue(fn, out var anyBits);
+        foreach (var ps in paramSyms)
+        {
+            var at = -1;
+            for (var i = 0; i < infos.Count; i++) { if (infos[i].Name == ps.Name) { at = i; break; } }
+            if (at < 0) { continue; }
+            var info = infos[at];
+            if (info.Kind == ParamKind.AnyType)
+            {
+                if (anyBits is not null && anyBits.TryGetValue(ps.Name, out var ab)) { _valueBits[ps] = ab; }
+                continue;
+            }
+            if (info.Kind != ParamKind.Runtime) { continue; }
+            RecordValueBits(ps, DeclaredBitsOfTypeArg(info.TypeAst), ElemBitsOfTypeAst(info.TypeAst));
+        }
     }
 
     /// <summary>The declared integer width of this module's top-level type alias

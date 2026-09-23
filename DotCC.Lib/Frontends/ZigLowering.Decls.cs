@@ -22,6 +22,20 @@ internal sealed partial class ZigLowering
     private (Symbol sym, List<(string name, CType type)> ps, Item body) DeclareFn(
         Item nameTok, Item? paramsItem, Item retType, Item body, bool errUnion = false, string? mangledName = null)
     {
+        var declared = DeclareFnCore(nameTok, paramsItem, retType, body, errUnion, mangledName);
+        // The raw parameter ASTs, so the body can give each parameter the width its type spelled, and the
+        // return width, so a call's result carries it.
+        _fnParamInfos[declared.sym] = CollectParamInfos(paramsItem, out _);
+        if (!_genericFns.ContainsKey(declared.sym) && DeclaredBitsOfTypeArg(retType) is { } retBits)
+        {
+            _fnReturnBits[declared.sym] = retBits;
+        }
+        return declared;
+    }
+
+    private (Symbol sym, List<(string name, CType type)> ps, Item body) DeclareFnCore(
+        Item nameTok, Item? paramsItem, Item retType, Item body, bool errUnion, string? mangledName)
+    {
         // Classify the parameters (raw type ASTs — lowered lazily, since a type-param generic's runtime
         // parameter/return types depend on `T`). Detect the variadic marker too.
         var allParams = CollectParamInfos(paramsItem, out var variadic);
@@ -404,6 +418,7 @@ internal sealed partial class ZigLowering
         var paramSyms = paramInfos
             .Select(p => _symbols.Declare(new Symbol { Name = p.name, Kind = SymKind.Param, Type = p.type }))
             .ToList();
+        RecordParamBits(funcSym, paramSyms);
         var blk = LowerBlock(body);
         // Milestone O part 5 — demote a non-escaping, freed, constant-size byte slice allocated
         // through the devirtualized C-heap default (`page_allocator`/`c_allocator`) to a `stackalloc`

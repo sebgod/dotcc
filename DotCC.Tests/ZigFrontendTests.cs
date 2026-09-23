@@ -5384,16 +5384,26 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Declared_int_width_is_still_a_loud_cut_through_anytype()
+    public void Declared_int_width_through_anytype_is_the_width_the_value_was_spelled_with()
     {
-        // What remains genuinely unknowable: an `anytype` param's type is INFERRED from a value, and
-        // `@TypeOf(x)` on a `u21` variable yields the widened `uint` — no spelling anywhere. Still a
-        // loud cut, and the message now names which case it is.
+        // An `anytype` param's type is inferred from a value, and `@TypeOf(x)` on a `u21` variable lowers to
+        // the widened `uint`; the WIDTH now rides the value (road-to-zig-std G3), so it is answered: 21.
+        var cs = EmitZig(
+            "fn bitsOfVal(a: anytype) u16 { return @typeInfo(@TypeOf(a)).int.bits; }\n" +
+            "pub fn main() u8 { const x: u21 = 1; return @intCast(bitsOfVal(x)); }\n");
+        cs.ShouldContain("return 21;");
+    }
+
+    [Fact]
+    public void Declared_int_width_through_anytype_is_a_loud_cut_when_the_value_has_no_spelling()
+    {
+        // A value with no spelled width anywhere (arithmetic over an untyped literal and a runtime value)
+        // still refuses rather than answer the widened width.
         var ex = Should.Throw<CompileException>(() => EmitZig(
             "fn bitsOfVal(a: anytype) u16 { return @typeInfo(@TypeOf(a)).int.bits; }\n" +
-            "pub fn main() u8 { const x: u21 = 1; return @intCast(bitsOfVal(x)); }\n"));
+            "fn get() u21 { return 1; }\n" +
+            "pub fn main() u8 { var y: u21 = 1; y += 0; return @intCast(bitsOfVal(y * get())); }\n"));
         ex.Message.ShouldContain("declared width is not known here");
-        ex.Message.ShouldContain("anytype");
     }
 
     [Fact]

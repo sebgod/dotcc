@@ -358,6 +358,7 @@ internal sealed partial class ZigLowering
         var optionalSeeds = new List<(string name, bool hasValue, long value, CType inner)>();
         var stringSeeds = new List<(string name, LitStr value)>();
         var anytypeSeeds = new List<(string name, CType type)>();
+        var anytypeBits = new Dictionary<string, int>(System.StringComparer.Ordinal);
         var fnSeeds = new List<(string name, ZigLowering owner, Symbol fn)>();
         var runtimeArgItems = new List<Item>();
 
@@ -376,6 +377,8 @@ internal sealed partial class ZigLowering
                     break;
                 case ParamKind.AnyType:
                     anytypeSeeds.Add((g.Params[i].Name, argScope.InferArgType(argItems[i])));
+                    // The argument's declared width, where its value carries one (road-to-zig-std G3).
+                    if (argScope.DeclaredBitsOfArgument(argItems[i]) is { } argBits) { anytypeBits[g.Params[i].Name] = argBits; }
                     break;
             }
         }
@@ -395,10 +398,13 @@ internal sealed partial class ZigLowering
         // return type or a later parameter) resolves through TypeOfBuiltin — the param is not yet an
         // in-scope symbol at signature-lowering time (it becomes one only in the instance body).
         var anytypeShadows = new List<(string name, CType? prev)>();
+        var anytypeBitShadows = new List<(string name, int? prev)>();
         foreach (var (name, type) in anytypeSeeds)
         {
             anytypeShadows.Add((name, _anytypeSeeds.TryGetValue(name, out var pv) ? pv : (CType?)null));
             _anytypeSeeds[name] = type;
+            anytypeBitShadows.Add((name, _anytypeSeedBits.TryGetValue(name, out var pb) ? pb : null));
+            if (anytypeBits.TryGetValue(name, out var ab)) { _anytypeSeedBits[name] = ab; } else { _anytypeSeedBits.Remove(name); }
         }
         Symbol instanceSym;
         try
@@ -489,7 +495,12 @@ internal sealed partial class ZigLowering
                         // A hybrid (wall-plan W5): its inferred type keys the specialization AND the
                         // argument is passed at runtime — so it contributes BOTH a mangle token and a
                         // runtime argument (unlike a comptime TYPE arg, which is compile-time-only).
-                        mangleTokens.Add(MangleType(_anytypeSeeds[g.Params[i].Name]));
+                        // A declared width other than the lowered type's own (`u21` in a `uint`) keys its own
+                        // instance, since `@typeInfo(@TypeOf(x)).int.bits` differs between them.
+                        var anyType = _anytypeSeeds[g.Params[i].Name];
+                        mangleTokens.Add(MangleType(anyType)
+                            + (anytypeBits.TryGetValue(g.Params[i].Name, out var mb) && anyType.Unqualified is CType.Prim { Integer: true } mp
+                               && mb != mp.Bytes * 8 ? "w" + mb.ToString(inv) : ""));
                         runtimeArgItems.Add(argItems[i]);
                         break;
                     default:
@@ -543,6 +554,9 @@ internal sealed partial class ZigLowering
                     if (TryEvalComptimeIntBody(g, valueSeeds, optionalSeeds) is { } value) { _comptimeIntValues[instanceSym] = value; }
                 }
                 _instantiations[mangled] = instanceSym;
+                _fnParamInfos[instanceSym] = g.Params;
+                if (DeclaredBitsOfTypeArg(g.RetType) is { } instRetBits) { _fnReturnBits[instanceSym] = instRetBits; }
+                if (anytypeBits.Count > 0) { _instanceAnytypeBits[instanceSym] = anytypeBits; }
                 _pendingInstantiations.Add(new PendingInstantiation(instanceSym, g, valueSeeds, typeSeeds, runtimeParams, optionalSeeds, stringSeeds, fnSeeds));
             }
         }
@@ -562,6 +576,11 @@ internal sealed partial class ZigLowering
             {
                 var (name, prev) = anytypeShadows[i];
                 if (prev is { } p) { _anytypeSeeds[name] = p; } else { _anytypeSeeds.Remove(name); }
+            }
+            for (var i = anytypeBitShadows.Count - 1; i >= 0; i--)
+            {
+                var (name, prev) = anytypeBitShadows[i];
+                if (prev is { } pb) { _anytypeSeedBits[name] = pb; } else { _anytypeSeedBits.Remove(name); }
             }
         }
         // The runtime arguments are the CALLER's expressions — lowered (in BuildCall) in the restored

@@ -124,6 +124,28 @@ internal sealed partial class ZigLowering
             case Zig.StmtExpr { Arg0.Content: Zig.BuiltinCall q } when Tok(q.Arg0) == "@setEvalBranchQuota":
                 SetEvalBranchQuota(Flatten(q.Arg2));
                 return new Seq(new List<CStmt>());
+            // `@disableInstrumentation();` / `@disableIntrinsics();` (std's panic and memcpy paths): hints to
+            // zig's own codegen, with nothing for dotcc to emit.
+            case Zig.StmtExpr { Arg0.Content: Zig.BuiltinCallNoArgs hint }
+                when Tok(hint.Arg0) is "@disableInstrumentation" or "@disableIntrinsics":
+                return new Seq(new List<CStmt>());
+            // `comptime assert(c);` (std.math.cast's `comptime assert(@typeInfo(T) == .int);`): the assertion is
+            // checked NOW. False is zig's compile error; true emits nothing. An `assert` returns void, which
+            // the deferred comptime fold cannot splice, so it is never deferred. A condition that does not
+            // fold here is taken on trust (a leniency: zig would evaluate it).
+            case Zig.StmtExpr { Arg0.Content: Zig.PreComptime { Arg1.Content: Zig.CallArgs ac } }
+                when IsAssertCallee(ac.Arg0) && Flatten(ac.Arg2) is { Count: 1 } assertArgs:
+            {
+                bool? holds = TryFoldComptimeCondition(assertArgs[0]);
+                if (holds is null)
+                {
+                    CExpr cond;
+                    using (EnterThrowawayHoist()) { cond = LowerExpr(assertArgs[0]); }
+                    holds = _ir.ConstEval(cond) is { } cv ? cv != 0 : null;
+                }
+                if (holds == false) { throw new IrUnsupportedException("zig: a `comptime assert(…)` failed (a compile error in zig)"); }
+                return new Seq(new List<CStmt>());
+            }
             case Zig.StmtExpr e:        return Hoisted(() => new ExprStmt(LowerExpr(e.Arg0)));
 
             // `x = value;`  → an assignment used as a statement. `_ = value;` is Zig's
@@ -283,7 +305,7 @@ internal sealed partial class ZigLowering
 
             // `for (s) |x| body` — iterate a slice's elements (x = a per-iteration copy).
             case Zig.StmtForSlice f:     // for '(' Expr ')' '|' IDENT '|' Stmt
-                return LowerForSlice(LowerExpr(f.Arg2), Tok(f.Arg5), null, f.Arg7, byRef: false);
+                return LowerForSlice(LowerExpr(f.Arg2), Tok(f.Arg5), null, f.Arg7, byRef: false, DeclaredElemBitsOfValue(f.Arg2));
             // `for (s) |*x| body` — BY-REFERENCE element capture: x is a `*T` into the slice (Milestone M, part 4).
             case Zig.StmtForSliceRef f:  // for '(' Expr ')' '|' '*' IDENT '|' Stmt
                 return LowerForSlice(LowerExpr(f.Arg2), Tok(f.Arg6), null, f.Arg8, byRef: true);
@@ -662,6 +684,9 @@ internal sealed partial class ZigLowering
             IsConstexpr = folded is not null, ConstValue = folded ?? 0,
         });
         if (declared is null && init is LitStr) { _stringLiteralSyms.Add(sym2); }
+        RecordValueBits(sym2,
+            typeItem is { } ti ? DeclaredBitsOfTypeArg(ti) : DeclaredBitsOfValue(initExpr) ?? DeclaredBitsOfLowered(init),
+            typeItem is { } te ? ElemBitsOfTypeAst(te) : DeclaredElemBitsOfValue(initExpr));
         // A `void` local (`var unit: void = {};`) has no storage and no C# spelling: the name stays
         // declared, so a use of it is an (erasable) void read, and the declaration emits nothing.
         if (type.Unqualified is CType.VoidType && IsErasableVoid(init)) { return new Seq(new List<CStmt>()); }
@@ -1966,6 +1991,15 @@ internal sealed partial class ZigLowering
             return new ExprStmt(new Assign(null, target, value) { Type = target.Type });
         });
 
+    /// <summary>True when a callee names <c>assert</c> (a bare alias, <c>const assert = std.debug.assert;</c>,
+    /// or a dotted <c>std.debug.assert</c>).</summary>
+    private static bool IsAssertCallee(Item callee) => callee.Content switch
+    {
+        Zig.Ident id => Tok(id.Arg0) == "assert",
+        Zig.Field f => Tok(f.Arg2) == "assert",
+        _ => false,
+    };
+
     /// <summary>True for a runtime loop statement (every <c>LoopStmt</c> form), which gets an unlabeled
     /// break target (<see cref="LowerLoopWithBreakTarget"/>).</summary>
     private static bool IsRuntimeLoopStmt(object? content) => content is
@@ -2332,7 +2366,8 @@ internal sealed partial class ZigLowering
         return new Block(pre);
     }
 
-    private CStmt LowerForSlice(CExpr sliceExpr, string elemName, (string name, CExpr start)? index, Item bodyItem, bool byRef)
+    private CStmt LowerForSlice(CExpr sliceExpr, string elemName, (string name, CExpr start)? index, Item bodyItem, bool byRef,
+        int? elemBits = null)
     {
         if (sliceExpr.Type.Unqualified is not CType.Slice slc)
         {
@@ -2368,6 +2403,7 @@ internal sealed partial class ZigLowering
         var elemType = byRef ? new CType.Pointer(slc.Element) : slc.Element;
         CExpr elemInit = byRef ? new Unary(UnOp.AddrOf, elemAccess) { Type = elemType } : elemAccess;
         var elemSym = _symbols.Declare(new Symbol { Name = elemName, Kind = SymKind.Var, Type = elemType });
+        if (!byRef) { RecordValueBits(elemSym, elemBits, null); }
         var bodyStmts = new List<CStmt> { new DeclStmt(new List<LocalDecl> { new(elemSym, elemInit) }) };
         if (index is { } idx)
         {

@@ -1035,6 +1035,14 @@ internal sealed class CSharpBackend
     private void Nested(StringBuilder sb, CStmt s, int ind)
     {
         if (s is Block) { Stmt(sb, s, ind); return; }
+        // A brace-less Seq of other than one statement cannot stand as an embedded statement: an EMPTY one
+        // (a folded comptime `if`) would leave `else` bare and absorb the NEXT statement, and several would
+        // leave all but the first unconditional. Brace it; nothing an arm declares may leak past it anyway.
+        if (s is Seq { Stmts.Count: not 1 } seq)
+        {
+            Stmt(sb, new Block(seq.Stmts), ind);
+            return;
+        }
         var before = _hoistedCount;
         var tmp = new StringBuilder();
         Stmt(tmp, s, ind + 1);

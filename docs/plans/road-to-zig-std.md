@@ -716,6 +716,11 @@ that retire curated shortcuts.
 
 > **Then the other probes (2026-09-24).** Each advanced to a wall that is a real design question rather
 > than a gap:
+> - **`std.fmt.parseInt` RUNS from source**, == real zig (the `Dotcc_matches_zig_std_fmt_parse_int_from_source`
+>   differential: signed, a base prefix, `_` separators, overflow). The last walls were the declared width
+>   an `anytype` argument's VALUE carries (now tracked per value), `comptime assert`,
+>   `@disableInstrumentation()`, and a backend bad emit: a folded-away `else if` arm left a bare `else` that
+>   absorbed the next statement (any multi-statement or empty arm is now braced). Before that:
 > - `std.fmt.parseInt`: a local comptime alias of another module's GENERIC function chosen by a comptime
 >   switch (`const add = switch (sign) { .pos => math.add, … }`), comptime bools from type comparisons, a
 >   value `if` that folds, a value switch with a `return` arm, variadic `@min` / `@max`, parenthesized

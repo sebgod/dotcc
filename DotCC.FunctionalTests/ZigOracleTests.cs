@@ -3842,6 +3842,58 @@ public sealed class ZigOracleTests
         }
     }
 
+    /// <summary><c>std.fmt.parseInt</c> compiled from REAL upstream std and diffed against real zig
+    /// (road-to-zig-std G3): its comptime function alias (<c>const add = switch (sign) { .pos => math.add, … }</c>),
+    /// <c>std.math.cast</c>'s <c>maxInt(@TypeOf(x))</c> over an <c>anytype</c> argument (the declared width a value
+    /// carries), <c>comptime assert</c>, and a folded <c>else if</c> arm. Signed and unsigned, with a sign,
+    /// an underscore separator and a base prefix; an overflow is an error. 40 + 7 - 5 + 0 = 42. Needs
+    /// <c>DOTCC_ZIG_LIB_DIR</c>.</summary>
+    [Fact]
+    public void Dotcc_matches_zig_std_fmt_parse_int_from_source()
+    {
+        if (!ZigRunRequested)
+        {
+            Assert.Skip($"Zig oracle is opt-in. Set {RunZigEnv}=1 to run the std.fmt.parseInt differential.");
+        }
+        if (!ZigOracle.IsAvailable)
+        {
+            Assert.Skip($"{RunZigEnv} requested but no `zig` is on PATH on this host.");
+        }
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOTCC_ZIG_LIB_DIR")))
+        {
+            Assert.Skip("DOTCC_ZIG_LIB_DIR must point at the zig lib dir so dotcc navigates the real std.fmt source.");
+        }
+
+        const string program =
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = std.fmt.parseInt(u8, \"4_0\", 10) catch return 1;\n" +
+            "    const b = std.fmt.parseInt(u8, \"0x7\", 0) catch return 2;\n" +
+            "    const c = std.fmt.parseInt(i8, \"-5\", 10) catch return 3;\n" +
+            "    const over = std.fmt.parseInt(u8, \"300\", 10) catch 0;\n" +
+            "    return @intCast(@as(i16, a) + b + c + over);\n" +
+            "}\n";
+
+        var workDir = Path.Combine(Path.GetTempPath(), $"dotcc-zig-stdparseint-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(workDir);
+        var mainPath = Path.Combine(workDir, "main.zig");
+        File.WriteAllText(mainPath, program);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { mainPath }, emit: EmitMode.Csproj);
+            var (dotccStdout, dotccExit) = FixtureRunner.CompileAndRunCapturingExit(emitted, Array.Empty<string>());
+            var (zigStdout, zigExit) = ZigOracle.CompileAndRun(mainPath, workDir);
+
+            dotccExit.ShouldBe(zigExit, "dotcc's std.fmt.parseInt from source diverges from real zig (exit code)");
+            dotccExit.ShouldBe(42, "std.fmt.parseInt did not produce the expected result");
+            Norm(dotccStdout).ShouldBe(Norm(zigStdout), "dotcc's std.fmt.parseInt from source diverges from real zig (stdout)");
+        }
+        finally
+        {
+            try { Directory.Delete(workDir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
     /// <summary>The comptime-call engine V1 against REAL upstream std: <c>std.math.maxInt</c> /
     /// <c>minInt</c> return <c>comptime_int</c>, so every call folds at compile time (including the 64-bit
     /// extremes, a declared <c>u21</c> width, and a use inside a runtime comparison). Needs
