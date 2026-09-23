@@ -274,6 +274,10 @@ internal sealed partial class ZigLowering
         }
     }
 
+    /// <summary>True when <paramref name="fn"/> is one of this module's GENERIC templates (a
+    /// <c>comptime</c> / <c>anytype</c> parameter), which a call instantiates rather than calls.</summary>
+    internal bool IsGenericTemplate(Symbol fn) => _genericFns.ContainsKey(fn);
+
     /// <summary>True when <paramref name="fn"/> is one of this module's comptime-only instances
     /// (<see cref="_comptimeOnlyFns"/>).</summary>
     internal bool IsComptimeOnlyFn(Symbol fn) => _comptimeOnlyFns.Contains(fn);

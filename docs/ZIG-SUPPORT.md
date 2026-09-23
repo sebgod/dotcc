@@ -318,7 +318,14 @@ analyse-on-reference rule. A lazy module's top-level VALUE `const` (mem.zig's
 named, its annotation the sink, since zig evaluates a top-level const's initializer at comptime (a
 const depending on itself is a loud dependency-loop error; oracle `lazy_value_consts`, unit
 `ZigLazyValueConstTests`). A prong's case list may end in a trailing comma (`.a,\n .b,\n => …`), and
-`@inComptime()` is `false` in the code dotcc lowers. Oracle `import_file_struct`; example `examples/zig-file-struct/`; unit
+`@inComptime()` is `false` in the code dotcc lowers. A local comptime ALIAS of a function
+(`const add = switch (sign) { .pos => math.add, .neg => math.sub };` in std.fmt.parseIntWithSign, a
+generic of another module chosen by a comptime switch or `if`) emits no decl, and a call through it
+instantiates the function it names (oracle `fn_alias_and_comptime_values`; unit `ZigFnAliasTests`).
+Around it: a comptime BOOL bound from a type comparison (`const is_comptime = @TypeOf(x) ==
+comptime_int;`), a value `if` whose condition folds lowering only its taken arm, a value switch with a
+`return` arm, variadic `@min` / `@max` folding when comptime-known, and a parenthesized type
+(`fn add(…) (error{Overflow}!T)`). Oracle `import_file_struct`; example `examples/zig-file-struct/`; unit
 `ZigFileStructTests`. **A GENERIC top-level function is a method too** (`w.print(fmt, args)`, with
 `fn print(w: *Writer, comptime fmt: []const u8, args: anytype)`): called on an instance it instantiates
 in its own module with the receiver as the runtime first argument (auto-ref'd like any method's), and

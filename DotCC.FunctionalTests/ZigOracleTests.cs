@@ -3459,6 +3459,62 @@ public sealed class ZigOracleTests
             "    if (!@inComptime() and use_wide) return base + 2;\n" +
             "    return base;\n" +
             "}\n", 42, "" },
+        // std.fmt.parseIntWithSign's shapes (road-to-zig-std G3): a local comptime alias of another module's
+        // GENERIC function picked by a comptime switch (`const add = switch (sign) { .pos => math.add, … }`),
+        // a parenthesized error-union return type, a comptime bool from a TYPE comparison, a value `if` on
+        // one, a value switch with a `return` arm, variadic `@max`, and a lazy module's helper named from two
+        // different bodies. 14 + 7 + 5 + 7 + 4 + 1 + 2 + 5 - 3 = 42.
+        new object[] { "fn_alias_and_comptime_values",
+            "const m = @import(\"m.zig\");\n" +
+            "fn apply(comptime sign: enum { pos, neg }, a: u8, b: u8) u8 {\n" +
+            "    const op = switch (sign) {\n" +
+            "        .pos => m.add,\n" +
+            "        .neg => m.sub,\n" +
+            "    };\n" +
+            "    return op(u8, a, b) catch 0;\n" +
+            "}\n" +
+            "fn pick(comptime T: type, x: T) u8 {\n" +
+            "    const is_byte = T == u8;\n" +
+            "    if (!is_byte) return 0;\n" +
+            "    return if (T == u8) x else 0;\n" +
+            "}\n" +
+            "fn digit(c: u8) error{Bad}!u8 {\n" +
+            "    const v = switch (c) {\n" +
+            "        '0'...'9' => c - '0',\n" +
+            "        else => return error.Bad,\n" +
+            "    };\n" +
+            "    return v;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const n: u8 = @max(3, 7, 5);\n" +
+            "    const d = digit('4') catch 0;\n" +
+            "    const bad = digit('x') catch 1;\n" +
+            "    return apply(.pos, 10, 4) + apply(.neg, 9, 2) + pick(u8, 5) + n + d + bad + m.first(1) + m.second(2) - 3;\n" +
+            "}\n",
+            "m.zig",
+            "pub fn add(comptime T: type, a: T, b: T) (error{Overflow}!T) {\n" +
+            "    const r = @addWithOverflow(a, b);\n" +
+            "    if (r[1] != 0) return error.Overflow;\n" +
+            "    return r[0];\n" +
+            "}\n" +
+            "\n" +
+            "pub fn sub(comptime T: type, a: T, b: T) (error{Overflow}!T) {\n" +
+            "    const r = @subWithOverflow(a, b);\n" +
+            "    if (r[1] != 0) return error.Overflow;\n" +
+            "    return r[0];\n" +
+            "}\n" +
+            "\n" +
+            "fn twice(x: u8) u8 {\n" +
+            "    return x * 2;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn first(x: u8) u8 {\n" +
+            "    return twice(x);\n" +
+            "}\n" +
+            "\n" +
+            "pub fn second(x: u8) u8 {\n" +
+            "    return twice(x) + 1;\n" +
+            "}\n", 42, "" },
         new object[] { "vtable_literal",
             "const Writer = @import(\"Writer.zig\");\n" +
             "pub fn main() u8 {\n" +

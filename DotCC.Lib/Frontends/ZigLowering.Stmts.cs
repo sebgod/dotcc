@@ -432,9 +432,87 @@ internal sealed partial class ZigLowering
     /// alias (<see cref="TryComptimeConstBinding"/>) and emit nothing (an empty <see cref="Seq"/>).
     /// Any other <c>const</c> is an ordinary <see cref="DeclOf"/>.</summary>
     private CStmt DeclOrComptime(Item nameTok, Item? typeItem, Item initExpr)
-        => TryComptimeConstBinding(Tok(nameTok), initExpr)
-            ? new Seq(new List<CStmt>())
-            : DeclOf(nameTok, typeItem, initExpr, isConst: true);
+    {
+        // `const add = switch (sign) { .pos => math.add, .neg => math.sub };` (std.fmt.parseIntWithSign):
+        // a comptime alias of a FUNCTION, here a generic of another module picked by a comptime switch.
+        // It has no runtime value to hold (a generic has no single address); a call through it
+        // instantiates the function it names (see the bare-call path).
+        if (typeItem is null && TryResolveFnAlias(initExpr) is { } fnAlias)
+        {
+            _fnAliases[Tok(nameTok)] = fnAlias;
+            return new Seq(new List<CStmt>());
+        }
+        if (TryComptimeConstBinding(Tok(nameTok), initExpr)) { return new Seq(new List<CStmt>()); }
+        // `const is_comptime = @TypeOf(x) == comptime_int;` (std.math.cast): a TYPE comparison (or a comptime
+        // tag test) is a comptime bool with no runtime operands to hold, so it binds the folded literal.
+        if (typeItem is null && TryFoldComptimeCondition(initExpr) is { } flag)
+        {
+            _comptimeValues[Tok(nameTok)] = new LitBool(flag) { Type = CType.Bool };
+            return new Seq(new List<CStmt>());
+        }
+        return DeclOf(nameTok, typeItem, initExpr, isConst: true);
+    }
+
+    /// <summary>Local comptime aliases of a function (see <see cref="DeclOrComptime"/>): name → the
+    /// module that owns the function and its symbol. Function-flat, like the other comptime bindings.</summary>
+    private readonly Dictionary<string, (ZigLowering Owner, Symbol Sym)> _fnAliases = new(System.StringComparer.Ordinal);
+
+    /// <summary>The function a comptime <c>const</c> initializer names, or null: a module-qualified
+    /// GENERIC function (<c>math.add</c>), or a <c>switch</c> / <c>if</c> whose comptime-known subject
+    /// selects an arm that names one. A non-generic function is left to the ordinary path, where it is a
+    /// fn-pointer value.</summary>
+    private (ZigLowering Owner, Symbol Sym)? TryResolveFnAlias(Item rhs)
+    {
+        switch (rhs.Content)
+        {
+            case Zig.Grouped g:
+                return TryResolveFnAlias(g.Arg1);
+            case Zig.Field f when ResolveModulePath(f.Arg0)?.Lowering is { } owner
+                               && owner.ResolveExportedDecl(Tok(f.Arg2)) is { } decl
+                               && decl.Sym.Kind == SymKind.Func && decl.Owner.IsGenericTemplate(decl.Sym):
+                return decl;
+            case Zig.SwitchExpr or Zig.SwitchExprTrailing:
+            {
+                var (subjectItem, prongsItem) = rhs.Content switch
+                {
+                    Zig.SwitchExpr s => (s.Arg2, s.Arg5),
+                    Zig.SwitchExprTrailing s => (s.Arg2, s.Arg5),
+                    _ => throw new System.InvalidOperationException(),
+                };
+                if (!LooksLikeFnAliasArms(prongsItem)) { return null; }
+                CExpr subject;
+                using (EnterThrowawayHoist()) { subject = LowerExpr(subjectItem); }
+                if (_ir.ConstEval(subject) is not { } v) { return null; }
+                Item? elseArm = null;
+                foreach (var prong in Flatten(prongsItem))
+                {
+                    if (prong.Content is not Zig.ProngExpr pe) { return null; }
+                    if (pe.Arg0.Content is Zig.CaseElse) { elseArm = pe.Arg2; continue; }
+                    foreach (var label in LowerCaseVals(pe.Arg0, subject.Type))
+                    {
+                        if (label.HiExpr is null && label.CaseExpr is { } ce && _ir.ConstEval(ce) == v)
+                        {
+                            return TryResolveFnAlias(pe.Arg2);
+                        }
+                    }
+                }
+                return elseArm is { } ea ? TryResolveFnAlias(ea) : null;
+            }
+            case Zig.IfExpr e:
+            {
+                CExpr cond;
+                using (EnterThrowawayHoist()) { cond = LowerExpr(e.Arg2); }
+                return _ir.ConstEval(cond) is { } c ? TryResolveFnAlias(c != 0 ? e.Arg4 : e.Arg6) : null;
+            }
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>True when every arm of a switch is a bare dotted path (<c>.pos =&gt; math.add</c>): the only
+    /// shape <see cref="TryResolveFnAlias"/> evaluates, so an ordinary value switch is never lowered twice.</summary>
+    private static bool LooksLikeFnAliasArms(Item prongsItem)
+        => Flatten(prongsItem).All(p => p.Content is Zig.ProngExpr { Arg2.Content: Zig.Field });
 
     // `const`/`var x = init;` — lower under an ANF hoist buffer so a catch/orelse in a SUB-expression
     // of the initializer (`const r = 1 + (a catch b());`) lifts to a temp before the decl. A
@@ -1390,6 +1468,12 @@ internal sealed partial class ZigLowering
             return TryFoldComptimeCondition(disj.Arg0) is { } lo && TryFoldComptimeCondition(disj.Arg2) is { } ro
                 ? lo || ro
                 : (bool?)null;
+        }
+        // A comptime bool bound earlier in the body (`const is_comptime = @TypeOf(x) == comptime_int;`).
+        if (cur.Content is Zig.Ident bid && _symbols.Resolve(Tok(bid.Arg0)) is null
+            && _comptimeValues.TryGetValue(Tok(bid.Arg0), out var boundBool) && boundBool is LitBool { Value: var bb })
+        {
+            return bb;
         }
         return TryFoldImportedComptimeValue(cur, out var v) && v is LitBool { Value: var b } ? b : null;
     }
@@ -2401,6 +2485,8 @@ internal sealed partial class ZigLowering
         {
             Zig.Prong or Zig.ProngCapture or Zig.ProngCaptureRef => true,
             Zig.ProngJump or Zig.ProngCaptureJump => true,   // a `break` / `continue` arm is a statement
+            // `else => return error.InvalidCharacter` (std.fmt.charToDigit): a returning arm is a statement too.
+            Zig.ProngReturn or Zig.ProngReturnVoid or Zig.ProngCaptureReturn or Zig.ProngCaptureReturnVoid => true,
             Zig.ProngExpr pe => pe.Arg2.Content is Zig.LabeledBlock,
             _ => false,
         });
@@ -2436,6 +2522,7 @@ internal sealed partial class ZigLowering
         // the first branch's FillValueTemp fixes rt.ResultType so a sink-less switch/if still types.
         CStmt filler = rhs.Content switch
         {
+            Zig.IfExpr e when TryFoldComptimeCondition(e.Arg2) is { } taken => FillValueTemp(taken ? e.Arg4 : e.Arg6, rt),
             Zig.IfExpr e => new If(LowerExpr(e.Arg2),
                                    new Block(new List<CStmt> { FillValueTemp(e.Arg4, rt) }),
                                    new Block(new List<CStmt> { FillValueTemp(e.Arg6, rt) })),

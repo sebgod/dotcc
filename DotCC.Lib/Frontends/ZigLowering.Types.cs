@@ -443,6 +443,8 @@ internal sealed partial class ZigLowering
     private CType LowerType(Item type) => type.Content switch
     {
         Zig.Ident id => LowerTypeName(Tok(id.Arg0)),
+        // A parenthesized type (`fn add(…) (error{Overflow}!T)` in std.math) is its inner type.
+        Zig.Grouped g => LowerType(g.Arg1),
         // `@typeInfo(T).<kind>.child` in a TYPE position (road-to-zig-std S5) — the child type of a
         // pointer / slice / optional / array kind. Checked before the std-path resolver: the base is
         // a comptime `std.builtin.Type` value, which no std path claims.

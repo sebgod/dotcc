@@ -172,7 +172,11 @@ internal sealed partial class ZigLowering
     /// never touched. Idempotent via <see cref="_lazyDeclared"/>.</summary>
     internal Symbol? EnsureDeclLowered(string name)
     {
-        if (_lazyDeclared.Contains(name)) { return _symbols.Resolve(name); }
+        // The module's own table, not a scope lookup: a function declared lazily lands in whatever scope
+        // was current at its FIRST reference (a function body's), so once that body is done a later
+        // reference could no longer resolve it by scope (std.fmt.charToDigit, first named in one instance
+        // body, then called from another).
+        if (_lazyDeclared.Contains(name)) { return _exportedFns.GetValueOrDefault(name); }
         if (!_moduleFnDecls.TryGetValue(name, out var d)) { return null; }
         var e = d.Content switch
         {

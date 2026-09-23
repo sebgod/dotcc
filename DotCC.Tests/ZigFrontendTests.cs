@@ -454,8 +454,11 @@ public sealed class ZigFrontendTests
         // calls over the peer-resolved operand type (evaluated once). Previously loud cuts.
         var cs = EmitZig(
             "pub fn main() u8 {\n" +
-            "    const mn = @min(@as(i8, 3), 7);\n" +
-            "    const mx = @max(@as(i8, 1), 2);\n" +
+            // RUNTIME operands for @min/@max: comptime-known ones fold to their literal.
+            "    var lo: i8 = 3;\n" +
+            "    lo += 0;\n" +
+            "    const mn = @min(lo, 7);\n" +
+            "    const mx = @max(lo, 2);\n" +
             "    const rm = @rem(@as(i8, 7), 3);\n" +
             "    const dt = @divTrunc(@as(i8, 7), 3);\n" +
             "    const md = @mod(@as(i8, -7), 3);\n" +
@@ -476,13 +479,19 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_variadic_min_beyond_two_operands_as_a_loud_cut()
+    public void Variadic_min_and_max_fold_when_comptime_known_and_nest_at_runtime()
     {
-        // Zig's `@min`/`@max` are variadic; V1 lowers the binary form and makes a wider call a clear
-        // arity error (not a silent wrong result).
-        var ex = Should.Throw<CompileException>(() => EmitZig(
-            "pub fn main() u8 { return @min(1, 2, 3); }\n"));
-        ex.Message.ShouldContain("variadic");
+        // Zig's `@min`/`@max` are variadic (road-to-zig-std G3): all-constant operands fold to a literal
+        // (so `@Int(s, @max(8, bits))` has its width), and runtime ones nest the binary helper.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var r: u8 = 9;\n" +
+            "    r += 0;\n" +
+            "    const k: u8 = @min(4, 2, 3);\n" +
+            "    return @max(r, k, 1);\n" +
+            "}\n");
+        cs.ShouldContain("byte k = 2;");
+        cs.ShouldContain("ZigMath.Max(ZigMath.Max(");
     }
 
     [Fact]
@@ -5279,8 +5288,9 @@ public sealed class ZigFrontendTests
             "    };\n" +
             "}\n" +
             "pub fn main() u8 { return signBit(i32) + signBit(u32) + signBit(f32); }\n");
-        cs.ShouldContain("Cond.B(true) ? 1 : 0");    // i32 — signed
-        cs.ShouldContain("Cond.B(false) ? 1 : 0");   // u32 — unsigned
+        // The value `if` on the folded signedness selects its arm at lowering time (road-to-zig-std G3).
+        cs.ShouldMatch(@"byte signBit__i32\(\)\s*\{\s*return 1;");   // i32 — signed
+        cs.ShouldMatch(@"byte signBit__u32\(\)\s*\{\s*return 0;");   // u32 — unsigned
         cs.ShouldContain("return 9;");               // f32 — not an int at all
     }
 

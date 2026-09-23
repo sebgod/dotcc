@@ -167,6 +167,10 @@ internal sealed partial class ZigLowering
             // branches are RhsExpr; the backend wraps the condition in Cond.B.
             case Zig.IfExpr e:
             {
+                // A comptime condition (a TYPE comparison `Result == Accumulate` in std.fmt.parseIntWithSign,
+                // a comptime tag) selects its arm at lowering time, as a statement `if`'s does: the other arm
+                // may not even lower (it may name a value only the taken arm's types admit).
+                if (TryFoldComptimeCondition(e.Arg2) is { } taken) { return LowerExpr(taken ? e.Arg4 : e.Arg6); }
                 var then = LowerExpr(e.Arg4);
                 return new CondExpr(LowerExpr(e.Arg2), then, LowerExpr(e.Arg6)) { Type = then.Type };
             }
@@ -936,6 +940,11 @@ internal sealed partial class ZigLowering
         {
             if (aliased.Owner != this) { return CallExportedDecl(aliased.Owner, aliased.Sym, argItems); }
             sym = aliased.Sym;
+        }
+        // A local comptime alias of a function (`const add = switch (sign) { .pos => math.add, … };`).
+        if (sym is null && _fnAliases.TryGetValue(name, out var fnAlias))
+        {
+            return CallExportedDecl(fnAlias.Owner, fnAlias.Sym, argItems);
         }
         if (sym is null) { throw new IrUnsupportedException($"call to unresolved name '{name}'"); }
         // A type-returning generic (wall-plan W4) is a COMPTIME type constructor — calling it in value

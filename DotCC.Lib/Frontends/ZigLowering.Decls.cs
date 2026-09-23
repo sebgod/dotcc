@@ -1883,6 +1883,26 @@ internal sealed partial class ZigLowering
     /// wider call a clear arity error.</summary>
     private CExpr MathBin2(string helper, string zigName, IReadOnlyList<Item> bargs)
     {
+        // `@min` / `@max` are variadic in zig, and a comptime-known result is a comptime value: `@Int(s,
+        // @max(8, info.int.bits))` (std.fmt.parseIntWithSign) needs its width during lowering.
+        if (zigName is "@min" or "@max" && bargs.Count >= 2)
+        {
+            var operands = bargs.Select(LowerExpr).ToList();
+            var values = new List<long>(operands.Count);
+            foreach (var o in operands) { if (_ir.ConstEval(o) is { } v) { values.Add(v); } }
+            var peer = operands.Skip(1).Aggregate(operands[0].Type, (acc, o) => PeerIntType(new DefaultLit { Type = acc }, o));
+            if (values.Count == operands.Count)
+            {
+                var r = zigName == "@max" ? values.Max() : values.Min();
+                return new LitInt(r.ToString(System.Globalization.CultureInfo.InvariantCulture), r) { Type = peer };
+            }
+            var acc = CoerceToPeer(operands[0], peer);
+            for (var i = 1; i < operands.Count; i++)
+            {
+                acc = new Call($"ZigMath.{helper}", new List<CExpr> { acc, CoerceToPeer(operands[i], peer) }) { Type = peer };
+            }
+            return acc;
+        }
         if (bargs.Count != 2)
         {
             throw new IrUnsupportedException(
