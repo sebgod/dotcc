@@ -547,6 +547,31 @@ that retire curated shortcuts.
 > Validation: 6 emit pins (`ZigNestedContainerTests`) + 1 superseded cut pin flipped positive + the
 > `nested_containers` zig-oracle program + `examples/zig-nested-containers/`, exit 42 == real zig.
 
+> **Status update (2026-09-23) — statement-shaped `catch` / `orelse` fallbacks** (bufPrint wall 1). A
+> grammar brick with outsized reach: after `catch` / `orelse` only a VALUE parsed, so every
+> `catch |err| switch (err) {…}` (498 in the pin), `catch {…}` (150), `orelse {…}` (105), `orelse break`
+> (102), `orelse continue` (44) and `catch |e| return e` was a parse error — and under the resilient parse
+> a parse error drops the WHOLE enclosing function, silently, until something references it. Two new
+> nonterminals (`FallbackArm`, `CaptureArm`), conflict-free except for `break :label`, which a `rightmost`
+> group resolves as zig does. The lowering generalizes the Milestone N `catch return` machinery to an ARM
+> and reuses it through all three positions, so no new IR node; a `switch` arm fills a result whose
+> prongs yield or jump, including the ubiquitous `else => |e| return e` capture prong.
+>
+> **A latent miscompile, found by the oracle program:** `return e;` of a runtime error VALUE in a `!T`
+> function lowered as a SUCCESS (`ErrUnion.Ok(e)` — the code as the payload). It needed the two
+> error-return IR nodes (`ErrUnionErr`, `ZigErrorThrow`) to carry a code EXPRESSION instead of an `int`
+> constant — generalized in place rather than adding a third Zig-only node.
+>
+> Parse probe **32.0% → 33.8%** (177 → 187 files), the `'switch' in state 571` bucket gone — and the file
+> count understates it, since a file that still fails elsewhere had been losing each such FUNCTION too.
+> `std.fmt.bufPrint` now PARSES and is found; its next wall is a cross-module generic call —
+> "call to 'bufPrint': expected 0 argument(s), got 3" (a lazily-prepared `comptime fmt` + `args: anytype`
+> template reached from another module), ahead of walls 2 (decl literal `.fixed(buf)`) and 3 (container
+> naming).
+>
+> Validation: 8 emit pins (`ZigFallbackArmTests`) + 2 zig-oracle programs (`fallback_arms`,
+> `fallback_switch_capture_prong`), == real zig 0.17.0-dev.667.
+
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)
 
 An opt-in test/tool (`DOTCC_RUN_STD_PROBE=1`, env `DOTCC_ZIG_LIB_DIR` or

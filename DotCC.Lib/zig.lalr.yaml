@@ -253,6 +253,11 @@ symbols:
                    #     cascade (CurlySuffix keeps bare `Type`), so an inline named struct stays a TYPE
                    #     position and can't collide with the value-position `const X = struct {…}`
                    #     (structDecl). Road-to-zig-std S9 — the `:`-in-307 residual.
+  - FallbackArm    # 166 a STATEMENT-shaped `catch`/`orelse` fallback — `break [:l [v]]`, `continue [:l]`,
+                   #     a `{ … }` block, or a `switch` (road-to-zig-std: ~1,000 std sites). Every form starts
+                   #     with a token outside FIRST(BoolOr), so it never competes with a value fallback.
+  - CaptureArm     # 167 the fallback after `catch |e|` — a FallbackArm, or `return [v]` (the no-capture
+                   #     `catch return` keeps its own productions, so `return` lives only here)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -733,7 +738,35 @@ productions:
       - { lhs: OrElse, rhs: [OrElse, 'orelse', 'return'],         action: orElseReturnVoid }
       - { lhs: OrElse, rhs: [OrElse, 'catch', 'return', BoolOr],  action: catchReturn }
       - { lhs: OrElse, rhs: [OrElse, 'catch', 'return'],          action: catchReturnVoid }
+      # STATEMENT-shaped fallbacks (road-to-zig-std — ~1,000 sites in the pinned std: `catch |err| switch
+      # (err) {…}` alone is 498, `catch {…}` 150, `orelse {…}` 105, `orelse break` 102). The fallback runs
+      # only on the error / none path: a `break`/`continue` (optionally labeled, a labeled break optionally
+      # carrying a value), a braced block, or a `switch` whose prongs yield the payload type or jump. Each
+      # arm opens with `break`/`continue`/`{`/`switch`/`return`, none in FIRST(BoolOr), so the arm-vs-value
+      # choice is one token of lookahead — the same split the `return` forms above already use.
+      - { lhs: OrElse, rhs: [OrElse, 'orelse', FallbackArm],                  action: orElseArm }
+      - { lhs: OrElse, rhs: [OrElse, 'catch', FallbackArm],                   action: catchArm }
+      - { lhs: OrElse, rhs: [OrElse, 'catch', '|', IDENT, '|', CaptureArm],   action: catchCaptureArm }
       - { lhs: OrElse, rhs: [BoolOr] }
+
+  # `rightmost` so a `:` after `break`/`continue` SHIFTS into the label (the dangling-else device):
+  # `:` is in FOLLOW(OrElse) only through a sentinel slice `s[a..b :0]`, where a bare `break` end
+  # operand is meaningless — so `x orelse break :outer` always means the label, exactly as in zig.
+  - derivation: rightmost
+    rules:
+      - { lhs: FallbackArm, rhs: ['break'],                     action: fbBreak }
+      - { lhs: FallbackArm, rhs: ['break', ':', IDENT],         action: fbBreakLabel }
+      - { lhs: FallbackArm, rhs: ['break', ':', IDENT, BoolOr], action: fbBreakLabelValue }
+      - { lhs: FallbackArm, rhs: ['continue'],                  action: fbContinue }
+      - { lhs: FallbackArm, rhs: ['continue', ':', IDENT],      action: fbContinueLabel }
+      - { lhs: FallbackArm, rhs: [Block],                       action: fbBlock }
+      - { lhs: FallbackArm, rhs: [SwitchExpr],                  action: fbSwitch }
+      - { lhs: CaptureArm,  rhs: [FallbackArm] }
+      # `catch |e| return v` — VALUE form only. A void `catch |e| return;` would leave `e` unused, which
+      # zig rejects, so it has no legitimate use; and with it the parser would face `return` vs `return
+      # BoolOr` on an IDENT lookahead that FOLLOW(OrElse) also contains, which resolved to the void form
+      # and misparsed `return e` as `return;` + a stray `e`. Value-only has no such choice.
+      - { lhs: CaptureArm,  rhs: ['return', BoolOr],            action: fbReturn }
 
   # ===== slice 2a: control-flow as expression =====
   # A value-position expression is either an operator-expression (the cascade,

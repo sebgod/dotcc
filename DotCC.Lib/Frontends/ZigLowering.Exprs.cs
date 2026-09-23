@@ -570,13 +570,16 @@ internal sealed partial class ZigLowering
             // statement. In a full-RHS position DeclOf/LowerStmt handle it; in a SUB-expression it is
             // hoisted to a temp before the enclosing statement (ANF): the conditional `return` and the
             // payload capture become buffer statements, and the construct evaluates to the payload temp.
-            case Zig.CatchReturn or Zig.CatchReturnVoid or Zig.OrElseReturn or Zig.OrElseReturnVoid:
+            // The statement-shaped arms (road-to-zig-std) — `orelse break`, `catch |err| switch (err) {…}`,
+            // `orelse { …; return; }` — take exactly the same hoist: a conditional arm, then the payload.
+            case Zig.CatchReturn or Zig.CatchReturnVoid or Zig.OrElseReturn or Zig.OrElseReturnVoid
+              or Zig.OrElseArm or Zig.CatchArm or Zig.CatchCaptureArm:
             {
-                IsControlFlowFallback(expr, out var cfLhs, out var cfIsCatch, out var cfRet);
-                var buf = RequireHoistable(cfIsCatch ? "catch return" : "orelse return");
+                IsControlFlowFallback(expr, out var cfLhs, out var cfIsCatch, out var cfCap, out var cfArm);
+                var buf = RequireHoistable(cfIsCatch ? "catch (control-flow fallback)" : "orelse (control-flow fallback)");
                 var savedImpure = _hoistImpureSeen;
                 Symbol? anfSym = null;
-                var cfStmt = LowerControlFlowFallback(cfLhs, cfIsCatch, cfRet, payload =>
+                var cfStmt = LowerControlFlowFallback(cfLhs, cfIsCatch, cfCap, cfArm, payload =>
                 {
                     anfSym = _symbols.Declare(new Symbol { Name = "__anf" + _anfTempCounter++, Kind = SymKind.Var, Type = payload.Type });
                     return new DeclStmt(new List<LocalDecl> { new(anfSym, payload) });

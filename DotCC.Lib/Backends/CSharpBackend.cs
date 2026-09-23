@@ -746,7 +746,7 @@ internal sealed class CSharpBackend
                 break;
             }
             case ZigErrorThrow zt:
-                sb.Append(pad).Append($"throw new ZigErrorReturn((ushort){zt.Code});\n");
+                sb.Append(pad).Append($"throw new ZigErrorReturn((ushort)({Expr(zt.Code)}));\n");
                 break;
             case For fr:
                 var init = fr.Init switch
@@ -1536,7 +1536,7 @@ internal sealed class CSharpBackend
             {
                 var eu = (CType.ErrorUnion)err.Type;
                 var ts = eu.Payload is CType.VoidType ? "Unit" : Cs(eu.Payload);
-                return ($"ErrUnion<{ts}>.Err({err.Code})", PPrimary);
+                return ($"ErrUnion<{ts}>.Err({Expr(err.Code)})", PPrimary);
             }
             // `try e` → ErrUnion.Try(e): the payload on success, else throw ZigErrorReturn
             // (caught at the enclosing `!T` function's emitted try/catch boundary — see Func).
