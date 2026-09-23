@@ -118,19 +118,68 @@ public sealed class ZigFileStructTests
         ex.Message.ShouldContain("NoSuchType");
     }
 
+    private const string BoxGeneric = Box + """
+
+        pub fn addAny(b: *Box, comptime k: u8, n: anytype) void {
+            b.value += k + n;
+        }
+        """;
+
     [Fact]
-    public void A_generic_function_called_through_a_file_struct_type_is_a_loud_cut()
+    public void A_generic_function_called_on_a_file_struct_instance_instantiates_with_the_receiver()
     {
-        // `w.print(fmt, args)` is the next brick. Binding the template's placeholder signature would
-        // report a bogus arity; the cut names the construct instead.
+        // `w.print(fmt, args)`'s shape: the receiver fills the runtime first parameter, the comptime and
+        // `anytype` arguments key the instance, and the call is a method call on the instance.
+        var cs = EmitZigMulti("""
+            const Box = @import("Box.zig");
+            pub fn main() u8 {
+                var b: Box = .init(30);
+                b.addAny(4, @as(u8, 2));
+                b.addAny(4, @as(u8, 1));
+                return b.value;
+            }
+            """, ("Box.zig", BoxGeneric));
+        cs.ShouldContain("Box__addAny__4_u8(&b, (byte)2);");
+        cs.ShouldContain("Box__addAny__4_u8(&b, (byte)1);");
+        cs.ShouldContain("static unsafe void Box__addAny__4_u8(Box__Box* b, byte n)");
+    }
+
+    [Fact]
+    public void A_generic_function_called_statically_through_a_file_struct_type_instantiates()
+    {
+        // Through the import (`Box.addAny(&b, …)`, module navigation) and, inside the module, through its
+        // `@This()` alias (a container type, whose static call binds the template's placeholder signature
+        // unless it is routed to the owner's generic instantiation).
+        var cs = EmitZigMulti("""
+            const Box = @import("Box.zig");
+            pub fn main() u8 {
+                var b: Box = .init(38);
+                Box.addAny(&b, 1, @as(u8, 1));
+                b.twice();
+                return b.value;
+            }
+            """, ("Box.zig", BoxGeneric + """
+
+            pub fn twice(b: *Box) void {
+                Box.addAny(b, 1, @as(u8, 0));
+            }
+            """));
+        cs.ShouldContain("Box__addAny__1_u8(&b, (byte)1);");
+        cs.ShouldContain("Box__addAny__1_u8(b, (byte)0);");
+    }
+
+    [Fact]
+    public void A_file_struct_method_the_parse_skipped_raises_its_parse_error()
+    {
+        // `Writer.print` was reported as "no method 'print'", hiding a parse wall inside its body.
         var ex = Should.Throw<Exception>(() => EmitZigMulti("""
             const Box = @import("Box.zig");
             pub fn main() u8 {
                 var b: Box = .init(40);
-                b.addAny(@as(u8, 2));
+                b.broken();
                 return b.value;
             }
-            """, ("Box.zig", Box + "\npub fn addAny(b: *Box, n: anytype) void {\n    b.value += n;\n}\n")));
-        ex.Message.ShouldContain("called through its file-as-struct type");
+            """, ("Box.zig", Box + "\npub fn broken(b: *Box) void {\n    b.value += ;\n}\n")));
+        ex.Message.ShouldContain("zig `broken` in Box.zig did not parse");
     }
 }

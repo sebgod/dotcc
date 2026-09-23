@@ -1137,6 +1137,13 @@ internal sealed partial class ZigLowering
             && ContainerTypeName(baseTy) is { } typeName
             && _symbols.Resolve(Tok(bid.Arg0)) is null)
         {
+            // A GENERIC top-level function of a file-as-struct module, called through the type (inside
+            // the module, `const Writer = @This(); Writer.print(w, …)`): an ordinary exported generic call.
+            if (_shared.FileStructOwners.TryGetValue(typeName, out var staticOwner)
+                && staticOwner.FileStructGenericTemplate(methodName) is { } template)
+            {
+                return CallExportedDecl(staticOwner, template, argItems);
+            }
             if (EnsureMethodDeclared(typeName, methodName) is not { } staticSym)
             {
                 throw new IrUnsupportedException($"'{typeName}' has no function '{methodName}'");
@@ -1224,6 +1231,16 @@ internal sealed partial class ZigLowering
         {
             throw new IrUnsupportedException(
                 $"zig method call `.{methodName}()` needs a struct (or pointer-to-struct) receiver, got {recv.Type.Describe()}");
+        }
+        // A GENERIC top-level function of a file-as-struct module called on an instance
+        // (`w.print(fmt, args)`, road-to-zig-std G3): instantiate it in its own module with the receiver as
+        // its first argument, then call the instance as a method.
+        if (_shared.FileStructOwners.TryGetValue(container, out var fileOwner)
+            && fileOwner.TryResolveFileStructGenericMethod(methodName, fld.Arg0, argItems, caller: this) is { } generic)
+        {
+            var gfn = (CType.Func)generic.Instance.Type.Unqualified;
+            var gcall = BuildCall(generic.Instance, generic.RuntimeArgs, AdjustReceiver(recv, gfn.Params[0]));
+            return FoldIfComptimeOnly(fileOwner, generic.Instance, gcall);
         }
         if (EnsureMethodDeclared(container, methodName) is not { } msym)
         {

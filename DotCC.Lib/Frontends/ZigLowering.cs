@@ -245,8 +245,8 @@ internal sealed partial class ZigLowering
     /// those up. Since road-to-zig-std S4d this covers all three worklists a lazy module can gather
     /// (referenced bodies, generic instances, reified type-returning generics' methods), not bodies
     /// alone: a navigated type may reify in this module, and its methods would otherwise be declared
-    /// and never lowered. A referenced decl needing the deferred `comptime`-fold pass is still a gap to
-    /// fill when a G-goal hits it.</summary>
+    /// and never lowered. A deferred <c>comptime</c> fold in any of these bodies resolves with every
+    /// other module's, after the graph drains (<see cref="ZigModuleGraph.ResolveComptimeFolds"/>).</summary>
     internal void DrainPendingBodies()
     {
         // The lazy-module analogue of pass 2.5, over three mutually-feeding worklists: a referenced
@@ -510,19 +510,35 @@ internal sealed partial class ZigLowering
 
     /// <summary>This module's top-level function <paramref name="name"/>, as a method of its file-as-struct
     /// container: declared on demand in a lazy module, read from pass 1 in a root unit. Null when there is
-    /// no such function. A GENERIC one is a loud cut: calling its template symbol as a method would bind
-    /// the placeholder signature, and a receiver-carrying instantiation is the next brick.</summary>
+    /// no such function; one the resilient parse SKIPPED raises its parse error instead, since "no such
+    /// method" would hide the real wall (<c>Writer.print</c>). A GENERIC one never reaches here from a
+    /// call: on an instance (<c>w.print(fmt, args)</c>) the method call instantiates it
+    /// (<see cref="TryResolveFileStructGenericMethod"/>), and through the type (<c>Writer.print(w, …)</c>)
+    /// it is an ordinary exported generic call (<see cref="FileStructGenericTemplate"/>). Any other
+    /// generic use is a loud cut, as its template symbol carries only a placeholder signature.</summary>
     private Symbol? FileStructFn(string name)
     {
-        var sym = _lazy ? EnsureDeclLowered(name) : _exportedFns.GetValueOrDefault(name);
+        var sym = FileStructFnSymbol(name);
+        if (sym is null) { RaiseIfSkippedDecl(name); }
         if (sym is not null && (_genericFns.ContainsKey(sym) || _typeReturningGenerics.ContainsKey(sym)))
         {
             throw new IrUnsupportedException(
                 $"'{_fileStem}.{name}' is a generic (a `comptime` / `anytype` parameter, or a `type` return) "
-                + "called through its file-as-struct type, which is not supported yet (road-to-zig-std G3)");
+                + "used through its file-as-struct type other than as a call, which is not supported yet (road-to-zig-std G3)");
         }
         return sym;
     }
+
+    /// <summary>This module's top-level function <paramref name="name"/> when it is a GENERIC template
+    /// (a <c>comptime</c> / <c>anytype</c> parameter), for a call through its file-as-struct type; null
+    /// for any other function or none.</summary>
+    internal Symbol? FileStructGenericTemplate(string name)
+        => _fileContainer is not null && FileStructFnSymbol(name) is { } sym && _genericFns.ContainsKey(sym) ? sym : null;
+
+    /// <summary>The symbol of this module's top-level function <paramref name="name"/>, declaring it on
+    /// demand in a lazy module (see <see cref="FileStructFn"/>), or null.</summary>
+    private Symbol? FileStructFnSymbol(string name)
+        => _lazy ? EnsureDeclLowered(name) : _exportedFns.GetValueOrDefault(name);
 
     /// <summary>Each top-level <c>const</c> whose RHS is a dotted path rooted at an import
     /// (<c>const Writer = std.Io.Writer;</c>) → that RHS, recorded WITHOUT resolving (so preparing a

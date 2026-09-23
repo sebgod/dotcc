@@ -3291,6 +3291,32 @@ public sealed class ZigOracleTests
             "pub fn add(b: *Box, n: u8) void {\n" +
             "    b.value += n;\n" +
             "}\n", 42, "" },
+        // A GENERIC top-level function of a file-as-struct module called on an instance, the shape of
+        // std.Io.Writer's `w.print(fmt, args)` (road-to-zig-std G3): a comptime value and an `anytype`
+        // argument instantiate it, and an error-union generic composes with `catch`.
+        // 30 + 4 + 6 + 0 + 2 = 42.
+        new object[] { "file_struct_generic_method",
+            "const Writer = @import(\"Writer.zig\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var w: Writer = .{};\n" +
+            "    w.put(30, @as(u8, 4));\n" +
+            "    w.put(6, @as(u16, 0));\n" +
+            "    w.putStr(\"ab\") catch return 1;\n" +
+            "    return w.total;\n" +
+            "}\n",
+            "Writer.zig",
+            "const Writer = @This();\n" +
+            "\n" +
+            "total: u8 = 0,\n" +
+            "\n" +
+            "pub fn put(w: *Writer, comptime n: u8, x: anytype) void {\n" +
+            "    w.total += n + @as(u8, @intCast(x));\n" +
+            "}\n" +
+            "\n" +
+            "pub fn putStr(w: *Writer, comptime s: []const u8) error{Full}!void {\n" +
+            "    if (w.total > 200) return error.Full;\n" +
+            "    w.total += @intCast(s.len);\n" +
+            "}\n", 42, "" },
         // RE-EXPORTED declarations (std's `pub const indexOfScalar = findScalar;` shape, 633 in the pin):
         // a function, a generic, a type-returning generic and a container type, each named through a
         // `pub const` alias in lib.zig, plus a root alias of an imported function (no runtime global).

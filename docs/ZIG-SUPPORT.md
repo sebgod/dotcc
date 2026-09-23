@@ -314,8 +314,12 @@ reaches nearly every other file. A container of an IMPORTED module that cannot l
 `Limit` enum, whose `math.maxInt(usize)` member needs the comptime engine) no longer sinks the whole
 import: it is withdrawn and raises its original message where something first names it, zig's
 analyse-on-reference rule. Oracle `import_file_struct`; example `examples/zig-file-struct/`; unit
-`ZigFileStructTests`. **Cuts (loud):** a GENERIC function called through the file-as-struct type
-(`w.print(fmt, args)`, bufPrint's next wall). **A pointer to a container that could not lower is
+`ZigFileStructTests`. **A GENERIC top-level function is a method too** (`w.print(fmt, args)`, with
+`fn print(w: *Writer, comptime fmt: []const u8, args: anytype)`): called on an instance it instantiates
+in its own module with the receiver as the runtime first argument (auto-ref'd like any method's), and
+called through the type (`Box.addAny(&b, …)` via the import, `Writer.print(w, …)` via the module's own
+`@This()` alias) it is an ordinary exported generic call (oracle `file_struct_generic_method`). A method
+the resilient parse SKIPPED raises its parse error instead of "no method". **A pointer to a container that could not lower is
 OPAQUE** (`void*`): zig never needs a pointee's layout to size a pointer, so `Writer.VTable.sendFile`'s
 `*File.Reader` lowers although `File` sits on the platform floor (`handle: std.posix.fd_t`). A container
 that holds a failed one BY VALUE (`File.Reader`'s `file: File`) fails with it, to a fixpoint, and is not

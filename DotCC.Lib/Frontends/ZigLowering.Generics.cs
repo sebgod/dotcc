@@ -234,6 +234,31 @@ internal sealed partial class ZigLowering
         Symbol sym, IReadOnlyList<Item> argItems, ZigLowering caller)
         => _genericFns.TryGetValue(sym, out var g) ? ResolveGenericInstance(sym, g, argItems, caller) : null;
 
+    /// <summary>Instantiate this module's GENERIC top-level function <paramref name="name"/> called as a
+    /// method of its file-as-struct type on an instance (road-to-zig-std G3): <c>w.print(fmt, args)</c> is
+    /// <c>print(w, fmt, args)</c> with <c>fn print(w: *Writer, comptime fmt: []const u8, args: anytype)</c>.
+    /// The receiver item fills parameter 0, which must be a runtime (or <c>anytype</c>) parameter, and the
+    /// rest are read in <paramref name="caller"/> as for any exported generic. Returns the instance and the
+    /// runtime argument items AFTER the receiver (the caller passes the receiver itself, adjusted to the
+    /// instance's first parameter), or null when <paramref name="name"/> is not a generic function here.</summary>
+    internal (Symbol Instance, IReadOnlyList<Item> RuntimeArgs)? TryResolveFileStructGenericMethod(
+        string name, Item receiverItem, IReadOnlyList<Item> argItems, ZigLowering caller)
+    {
+        if (_fileContainer is null || FileStructFnSymbol(name) is not { } sym || !_genericFns.TryGetValue(sym, out var g))
+        {
+            return null;
+        }
+        if (g.Params.Count == 0 || g.Params[0].Kind is not (ParamKind.Runtime or ParamKind.AnyType))
+        {
+            throw new IrUnsupportedException(
+                $"'{_fileStem}.{name}' called on an instance needs a runtime first parameter to take the receiver");
+        }
+        var all = new List<Item>(argItems.Count + 1) { receiverItem };
+        all.AddRange(argItems);
+        var (instance, runtimeArgs) = ResolveGenericInstance(sym, g, all, caller);
+        return (instance, runtimeArgs.Skip(1).ToList());
+    }
+
     /// <summary>The body of <see cref="InstantiateGeneric"/>: resolve (or reuse) the instance a call
     /// selects, and return it with the runtime argument items still to be lowered. Every argument
     /// expression is read in <paramref name="argScope"/> — this module for a local call, the calling
