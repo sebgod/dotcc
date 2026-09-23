@@ -214,8 +214,10 @@ internal sealed partial class ZigLowering
     /// silently-32 answer where zig says 21 is the one outcome worth refusing.</summary>
     private int ZigBitWidth(Item typeAst)
     {
-        if (DeclaredBitsOfTypeArg(typeAst) is { } declared) { return declared; }
+        // Lower FIRST: a constructed type's width (an `@Int` site, a type-returning call) is recorded by
+        // the lowering itself, so asking before it would miss it and fall through to the widened width.
         var type = LowerType(typeAst);
+        if (DeclaredBitsOfTypeArg(typeAst) is { } declared) { return declared; }
         if (ExactBitWidth(type) is { } exact) { return exact; }
         throw new IrUnsupportedException(
             $"zig `@bitSizeOf({type.Describe()})`: only a scalar (integer, float, bool, void, pointer) or an "

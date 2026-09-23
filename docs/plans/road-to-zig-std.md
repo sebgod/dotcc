@@ -463,6 +463,58 @@ that retire curated shortcuts.
 >    `.fixed(buf)` form needs no OS, so `bufPrint` is reachable before the S8 platform floor is;
 >    `std.debug.print` (stderr) is not.
 
+> **Status update (2026-09-23) — the W4 lift DONE: a type-returning body is EVALUATED, not
+> pattern-matched** (G3 road item 1 and G4 blocker 2, one brick). `ZigLowering.TypeBody.cs`, **no grammar
+> change** — every shape already parsed (`return RhsExpr;`, statement `if`/`switch`), it just hit W4's
+> "must `return struct {…}`" wall.
+>
+> **Measured first**, against the pinned std's ~250 `fn …(…) type {` bodies: 110 are `return struct`
+> (all W4 had); **28 are a one-line delegating CALL** (`std.ArrayList`, `array_list.Managed`,
+> `array_hash_map.Auto`, …), 16 `return switch`, and the rest open with a comptime `if`/`switch`/`const`
+> before returning. So the body is now walked in order as comptime code: a `const` binds a TYPE alias or
+> a comptime VALUE; an `if` / captured `if` / statement `switch` whose condition folds contributes only
+> its taken arm; a reached `@compileError` raises; the first `return` reached is the answer. `return
+> struct {…}` reifies exactly as before — **anything else IS the result**.
+>
+> **The decision that matters: a delegating instance reifies nothing.** It is memoized under its own
+> mangled name to the type its body returned, so `List(u8)`, `Aligned(u8, null)` and an early-returning
+> `Aligned(u8, 1)` resolve to ONE C# struct. That is zig's type identity — the oracle program's load-bearing
+> line is `const b: Aligned(u8, 1) = a;` with `a: List(u8)`, which real zig accepts only because all
+> three are the same type. A body depending on its own instance is a loud dependency-loop error (zig's
+> own diagnosis) instead of a stack overflow.
+>
+> **Real std, from source, oracle-identical:** `std.meta.Child` (`return switch (@typeInfo(T))`),
+> `std.meta.Elem` (a STATEMENT switch with returning prongs, a nested switch on the pointer payload's
+> `size`, fall-through `{}` prongs, and a trailing `@compileError`), `std.math.Log2Int` / `Log2IntCeil`
+> (`if (T == comptime_int)`, typed comptime value consts, `@clz`, `@Int`). Each pulled in one small
+> companion, all general:
+> - **type equality** `T == u8` folds as a comptime condition — width-aware, since `u21` and `u32` both
+>   lower to `uint` but are different zig types; `T == comptime_int` is false for any bound `T`;
+> - **`.size` of a SLICE** answers `.slice` (a raw pointer's size class stays the S5a cut);
+> - **`@clz`/`@ctz`/`@popCount` count in the operand's ZIG width.** A real bug, runtime included:
+>   `bits - 1` on a `u16` gets C's promotion to `int` in the IR, so `@clz` counted 32 bits (clz(63) =
+>   26, a width of −10). zig has no promotion; the operand is now narrowed back to its zig type, and a
+>   comptime-known operand folds to its literal;
+> - **`@bitSizeOf` lowers its operand BEFORE asking the declared width** — a constructed type's width
+>   (an `@Int` site, now also a type-returning call site) is recorded by the lowering itself, so asking
+>   first silently fell through to the widened width.
+>
+> **Cuts (loud):** a type-body statement with no comptime meaning — notably `std.debug.assert(…)`, which
+> 11 crypto bodies open with (the honest fix evaluates it at comptime); a condition that does not fold; a
+> block/`return` prong in a VALUE-position type switch; a raw pointer's `.size`.
+>
+> **What this reaches, and the next walls (measured):** `std.array_list.Aligned(u8, null)` now resolves
+> PAST its body, and walls inside at `zig type: CallArgs` (its method signatures — G4 blockers 3/5, not
+> this brick). `std.fmt.bufPrint` walls at **`zig type 'Mode'`** — `std.fmt.Number`'s field `mode: Mode`
+> names a NESTED enum declared later in the same struct; that nested-container lookup is the next G3
+> brick, ahead of road items 2–5 above.
+>
+> Validation: 19 emit pins (`ZigTypeBodyTests`) + 2 superseded pins flipped to positive + the
+> `type_body_delegation` zig-oracle program (version-stable, runs on CI's 0.16.0) + a real-std
+> differential `Dotcc_matches_zig_std_type_functions_from_source` (local, needs `DOTCC_ZIG_LIB_DIR`) +
+> `examples/zig-type-body/` — output byte-identical to real zig 0.17.0-dev.667, exit 42. Full zig oracle
+> 207/207 locally WITH the std root; unit 1740/1740.
+
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)
 
 An opt-in test/tool (`DOTCC_RUN_STD_PROBE=1`, env `DOTCC_ZIG_LIB_DIR` or
@@ -823,9 +875,11 @@ peephole (or delete it):
      (Its other prerequisite, LEFT-TO-RIGHT comptime-param binding — `comptime start: T` typed by an
      earlier `comptime T: type` — **✅ DONE 2026-08-09**: `EvalTypeReturningCall` now resolves
      arguments in the same two phases `InstantiateGeneric` does.)
-  2. **`std.ArrayList(T)` is `array_list.Aligned(T, null)`** — a type-returning fn whose
-     body returns *another, cross-module* type-returning call. W4 rejects non-struct
-     returns (`Non_struct_return_is_rejected` pin). New capability.
+  2. ~~**`std.ArrayList(T)` is `array_list.Aligned(T, null)`**~~ — **✅ DONE 2026-09-23 (the W4
+     lift).** A type-returning body is evaluated at comptime; a `return <type-expr>` — including a
+     cross-module delegating call — IS the result, memoized so the delegating and delegate spellings
+     name one type. `std.array_list.Aligned(u8, null)` now resolves past its body and walls inside at
+     its method signatures (blockers 3/5).
   3. **Mutable slices pervade** (`self.items.len += 1`, `self.items.ptr = new_memory.ptr`),
      but `Slice<T>.Len` is `readonly` — the fat pointer is immutable by design. Needs a
      mutable-slice form or an emitter rewrite that reconstructs the slice on field-assign.

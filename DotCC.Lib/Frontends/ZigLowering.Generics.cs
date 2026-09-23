@@ -489,7 +489,8 @@ internal sealed partial class ZigLowering
             && _symbols.Resolve(Tok(id.Arg0)) is { } sym
             && _typeReturningGenerics.TryGetValue(sym, out var info))
         {
-            type = EvalTypeReturningCall(sym, info, args);
+            type = EvalTypeReturningCall(sym, info, args, out var localBits);
+            RecordTypeCallBits(maybeCall, localBits);
             return true;
         }
         // A MODULE-QUALIFIED callee (`array_list.Aligned(u8)`, `std.array_list.Aligned(u8)`) — the
@@ -500,9 +501,10 @@ internal sealed partial class ZigLowering
         if (calleeItem.Content is Zig.Field fld
             && !IsCuratedStdPath(calleeItem)
             && ResolveModulePath(fld.Arg0) is { Lowering: { } nav }
-            && nav.TryEvalExportedTypeReturningCall(Tok(fld.Arg2), args, caller: this) is { } navType)
+            && nav.TryEvalExportedTypeReturningCall(Tok(fld.Arg2), args, caller: this) is { } navResult)
         {
-            type = navType;
+            type = navResult.Type;
+            RecordTypeCallBits(maybeCall, navResult.Bits);
             return true;
         }
         return false;
@@ -520,14 +522,23 @@ internal sealed partial class ZigLowering
     /// THIS module's environment, so a literal works but a caller-scoped named constant fails loudly
     /// with the ordinary "must be a compile-time-known value" error rather than being read from the
     /// caller (docs/plans/deferred.md).</para></summary>
-    internal CType? TryEvalExportedTypeReturningCall(string name, IReadOnlyList<Item> argItems, ZigLowering caller)
+    internal (CType Type, int? Bits)? TryEvalExportedTypeReturningCall(string name, IReadOnlyList<Item> argItems, ZigLowering caller)
     {
         if (EnsureDeclLowered(name) is not { } sym
             || !_typeReturningGenerics.TryGetValue(sym, out var info))
         {
             return null;
         }
-        return EvalTypeReturningCall(sym, info, argItems, typeArgScope: caller);
+        var type = EvalTypeReturningCall(sym, info, argItems, out var bits, typeArgScope: caller);
+        return (type, bits);
+    }
+
+    /// <summary>Record (or clear) the declared integer width a type-returning call site just resolved to
+    /// — see <see cref="_typeCallBits"/>. A struct result carries none; a delegating one carries its
+    /// returned type's (<c>fn U(comptime n: u16) type { return @Int(.unsigned, n); }</c>).</summary>
+    private void RecordTypeCallBits(Item callSite, int? bits)
+    {
+        if (bits is { } b) { _typeCallBits[callSite] = b; } else { _typeCallBits.Remove(callSite); }
     }
 
     /// <summary>Evaluate (or reuse) a type-returning generic at a use site (wall-plan W4): resolve each
@@ -551,8 +562,9 @@ internal sealed partial class ZigLowering
     /// (<c>fn Counter(comptime T: type, comptime start: T) type</c>; parameters bind LEFT TO RIGHT, as in
     /// zig).</para></summary>
     private CType EvalTypeReturningCall(Symbol templateSym, TypeReturningGenericInfo info,
-        IReadOnlyList<Item> argItems, ZigLowering? typeArgScope = null)
+        IReadOnlyList<Item> argItems, out int? declaredBits, ZigLowering? typeArgScope = null)
     {
+        declaredBits = null;
         // Whose type environment the comptime TYPE arguments are read in: this module's for an ordinary
         // local call, the CALLER's when the template was reached through the module graph (S4d) — the
         // arguments are spelled at the call site, so they resolve there.
@@ -650,8 +662,20 @@ internal sealed partial class ZigLowering
             var mangled = mangleTokens.Count == 0 ? templateSym.Name : templateSym.Name + "__" + string.Join("_", mangleTokens);
 
             // Memoized — also short-circuits a self-referential field / recursive use, since the mapping is
-            // installed BELOW before the fields are lowered.
+            // installed BELOW before the fields are lowered. A DELEGATING instance (the W4 lift) memoizes
+            // the type its body returned instead, under its own name.
+            if (_delegatedTypes.TryGetValue(mangled, out var delegated))
+            {
+                declaredBits = delegated.Bits;
+                return delegated.Type;
+            }
             if (_containerTypes.TryGetValue(mangled, out var existing)) { return existing; }
+            if (!_typeBodiesInProgress.Add(mangled))
+            {
+                throw new IrUnsupportedException(
+                    $"type-returning generic '{templateSym.Name}': the instance `{mangled}` depends on itself "
+                    + "(its body returns a type that needs the instance being computed — zig reports a dependency loop)");
+            }
 
             var mangledType = new CType.Named(mangled);
             var savedContainer = _currentContainer;
@@ -672,8 +696,24 @@ internal sealed partial class ZigLowering
                 }
                 // Process the body: leading `const NAME = <type>;` locals become scoped type aliases (the RHS
                 // may be a captured-if that folds to a type — S4b pt2 / S4c), then the final `return struct {…}`.
-                var fieldsItem = ProcessTypeReturningBody(templateSym.Name, info.Body, typeShadows);
-                var (fields, methods, consts, containers) = fieldsItem is { } m
+                TypeBodyResult bodyResult;
+                try
+                {
+                    bodyResult = ProcessTypeReturningBody(templateSym.Name, info.Body, typeShadows);
+                }
+                finally
+                {
+                    _typeBodiesInProgress.Remove(mangled);
+                }
+                // `return <type expression>;` (the W4 lift): the body DELEGATED — its result is a type that
+                // already exists (another instance, a primitive, `@Int(…)`), so nothing is reified here.
+                if (!bodyResult.IsStruct && bodyResult.Delegated is { } delegatedType)
+                {
+                    _delegatedTypes[mangled] = (delegatedType, bodyResult.DelegatedBits);
+                    declaredBits = bodyResult.DelegatedBits;
+                    return delegatedType;
+                }
+                var (fields, methods, consts, containers) = bodyResult.Fields is { } m
                     ? SplitMembers(m)
                     : (new List<Item>(), new List<Item>(), new List<Item>(), new List<Item>());
                 if (containers.Count > 0)
@@ -766,70 +806,6 @@ internal sealed partial class ZigLowering
         }
     }
 
-    /// <summary>Process a type-returning generic's body (wall-plan W4, extended by road-to-zig-std S4c):
-    /// zero or more leading <c>const NAME = &lt;type&gt;;</c> type-alias locals followed by the final
-    /// <c>return struct {…};</c>. Each leading alias is resolved to a <see cref="CType"/> (its RHS may be a
-    /// captured-<c>if</c> that folds to a type — <see cref="ResolveTypeReturningAliasRhs"/>) and registered
-    /// into <see cref="_typeAliases"/> (shadow-saved via <paramref name="typeShadows"/>, restored by the
-    /// caller), so a later alias / a field type can reference it. Returns the returned struct's
-    /// <c>FieldDecls</c> item (or null for <c>return struct {};</c>). A non-const leading statement, a
-    /// non-<c>return struct</c> tail, or an empty body is a loud cut.</summary>
-    private Item? ProcessTypeReturningBody(string fnName, Item body, List<(string name, CType? prev, int? prevBits)> typeShadows)
-    {
-        IReadOnlyList<Item> stmts = body.Content switch
-        {
-            Zig.Block b => Flatten(b.Arg1),
-            _ => System.Array.Empty<Item>(),
-        };
-        if (stmts.Count == 0)
-        {
-            throw new IrUnsupportedException(
-                $"type-returning generic '{fnName}': an empty body — expected `[const NAME = <type>;]* return struct {{…}};`");
-        }
-        for (var i = 0; i < stmts.Count - 1; i++)
-        {
-            if (stmts[i].Content is not Zig.ConstDecl cd)
-            {
-                throw new IrUnsupportedException(
-                    $"type-returning generic '{fnName}': a leading body statement must be a `const NAME = <type>;` "
-                    + $"type alias (road-to-zig-std S4c) — got {stmts[i].Content?.GetType().Name ?? "null"}");
-            }
-            var aliasName = Tok(cd.Arg1);
-            var aliasType = ResolveTypeReturningAliasRhs(fnName, aliasName, cd.Arg3);
-            typeShadows.Add((aliasName,
-                             _typeAliases.TryGetValue(aliasName, out var pv) ? pv : (CType?)null,
-                             _declaredIntBits.TryGetValue(aliasName, out var pb) ? pb : (int?)null));
-            _typeAliases[aliasName] = aliasType;
-        }
-        return stmts[^1].Content switch
-        {
-            Zig.ReturnStructType rst => rst.Arg3,   // FieldDecls
-            Zig.ReturnStructTypeEmpty => null,       // `return struct {};` — zero fields
-            _ => throw new IrUnsupportedException(
-                $"type-returning generic '{fnName}': the body's final statement must be `return struct {{ … }};` "
-                + "(wall-plan W4) — returning a non-struct type (a bare `T`, an enum / union) is not supported yet"),
-        };
-    }
-
-    /// <summary>Resolve a type-returning body's <c>const NAME = &lt;rhs&gt;;</c> alias RHS to a
-    /// <see cref="CType"/> (road-to-zig-std S4b pt2). A captured-<c>if</c> on a comptime-known optional
-    /// (<c>if (opt) |x| TypeA else TypeB</c>) FOLDS to the taken branch's type — <c>null</c> → the else,
-    /// a payload → the then with <c>x</c> bound to the literal; the branch is lowered as a TYPE. Any other
-    /// RHS is lowered as an ordinary type expression. This is how <c>std.ArrayList</c>'s
-    /// <c>Aligned(T, alignment)</c> selects <c>const Slice = if (alignment) |a| …align(a)… else []T;</c>.</summary>
-    private CType ResolveTypeReturningAliasRhs(string fnName, string aliasName, Item rhs)
-    {
-        var cur = rhs;
-        while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
-        if (cur.Content is Zig.IfExprCapture ic && TryComptimeOptionalCond(ic.Arg2, out var copt))
-        {
-            if (!copt.HasValue) { return LowerType(ic.Arg9); }   // comptime null → the else-branch type
-            _symbols.EnterScope();
-            BindFoldedCapture(Tok(ic.Arg5), copt.Value, copt.Inner);
-            var t = LowerType(ic.Arg7);                          // payload → the then-branch type, `x` bound
-            _symbols.ExitScope();
-            return t;
-        }
-        return LowerType(rhs);
-    }
+    // The body EVALUATOR (ProcessTypeReturningBody and the comptime type-expression folds it uses)
+    // lives in ZigLowering.TypeBody.cs — the W4 lift (road-to-zig-std G4 blocker 2).
 }

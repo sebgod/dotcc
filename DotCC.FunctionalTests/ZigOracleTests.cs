@@ -2608,6 +2608,54 @@ public sealed class ZigOracleTests
             "    if (builtin.is_test) { n += 3200; } else { n += 32; }\n" +
             "    return @intCast(n - 21);\n" +
             "}\n", 42, "" },
+        // The W4 lift (road-to-zig-std G4 blocker 2): a type-returning body EVALUATED at comptime.
+        // `List` DELEGATES (`std.ArrayList`'s own `return array_list.Aligned(T, null);`), `Aligned` opens
+        // with a comptime `if` that returns early for a known alignment, `Child` folds a `switch` over
+        // `@typeInfo`, `Fit`/`Wider` fold an `if` on a value / a type comparison, and `U` returns `@Int`.
+        // The load-bearing line is `const b: Aligned(u8, 1) = a;` — zig accepts it only because
+        // `Aligned(u8, 1)`, `Aligned(u8, null)` and `List(u8)` are ONE type, which is exactly what the
+        // delegation memo has to reproduce. Version-stable (0.16.0's `@Int` split already landed).
+        // 10 + 5 + 7 + 10 + 10 + 0 = 42.
+        new object[] { "type_body_delegation",
+            "fn Aligned(comptime T: type, comptime alignment: ?u8) type {\n" +
+            "    if (alignment) |a| {\n" +
+            "        if (a == 1) return Aligned(T, null);\n" +
+            "    }\n" +
+            "    return struct { v: T };\n" +
+            "}\n" +
+            "fn List(comptime T: type) type {\n" +
+            "    return Aligned(T, null);\n" +
+            "}\n" +
+            "fn Child(comptime T: type) type {\n" +
+            "    return switch (@typeInfo(T)) {\n" +
+            "        .pointer => |info| info.child,\n" +
+            "        .optional => |info| info.child,\n" +
+            "        else => @compileError(\"expected a pointer or an optional\"),\n" +
+            "    };\n" +
+            "}\n" +
+            "fn Fit(comptime n: u16) type {\n" +
+            "    return if (n > 255) u16 else u8;\n" +
+            "}\n" +
+            "fn Wider(comptime T: type) type {\n" +
+            "    return if (T == u8) u16 else T;\n" +
+            "}\n" +
+            "fn U(comptime n: u16) type {\n" +
+            "    return @Int(.unsigned, n);\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const a: List(u8) = .{ .v = 10 };\n" +
+            "    const b: Aligned(u8, 1) = a;\n" +
+            "    const c: Child(*u16) = 5;\n" +
+            "    const d: Fit(300) = 7;\n" +
+            "    const e: Wider(u8) = 300;\n" +
+            "    var total: u32 = b.v;\n" +
+            "    total += c;\n" +
+            "    total += d;\n" +
+            "    total += e - 290;\n" +
+            "    total += @bitSizeOf(U(21)) - 11;\n" +
+            "    total += @bitSizeOf(Fit(200)) - 8;\n" +
+            "    return @intCast(total);\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
@@ -2834,6 +2882,67 @@ public sealed class ZigOracleTests
             dotccExit.ShouldBe(zigExit, "dotcc's std.ascii-from-source diverges from real zig (exit code)");
             dotccExit.ShouldBe(63, "std.ascii classifiers did not produce the expected result");
             Norm(dotccStdout).ShouldBe(Norm(zigStdout), "dotcc's std.ascii-from-source diverges from real zig (stdout)");
+        }
+        finally
+        {
+            try { Directory.Delete(workDir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    /// <summary>The W4 lift against REAL upstream std: <c>std.meta.Child</c> (a <c>return switch</c> over
+    /// <c>@typeInfo</c>), <c>std.meta.Elem</c> (a STATEMENT switch with returning prongs, a nested switch on
+    /// a pointer's size class, and a trailing <c>@compileError</c>), and <c>std.math.Log2Int</c> /
+    /// <c>Log2IntCeil</c> (comptime value consts, <c>@clz</c> at a <c>u16</c> width, <c>@Int</c>) — each
+    /// compiled from source, then diffed against real zig. Needs <c>DOTCC_ZIG_LIB_DIR</c>, like the
+    /// std.ascii differential; the four have the same shape in the pinned 0.17-dev std dotcc tracks.
+    /// 30 + 4 + 2 + 5 + 1, and both widths are 6 bits (so the last two terms add 0) = 42.</summary>
+    [Fact]
+    public void Dotcc_matches_zig_std_type_functions_from_source()
+    {
+        if (!ZigRunRequested)
+        {
+            Assert.Skip($"Zig oracle is opt-in. Set {RunZigEnv}=1 to run the std type-function differential.");
+        }
+        if (!ZigOracle.IsAvailable)
+        {
+            Assert.Skip($"{RunZigEnv} requested but no `zig` is on PATH on this host.");
+        }
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOTCC_ZIG_LIB_DIR")))
+        {
+            Assert.Skip("DOTCC_ZIG_LIB_DIR must point at the zig lib dir so dotcc navigates the real std.meta / std.math source.");
+        }
+
+        const string program =
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const a: std.meta.Child(*u8) = 30;\n" +
+            "    const b: std.meta.Elem([]const u16) = 4;\n" +
+            "    const c: std.meta.Elem([3]u8) = 2;\n" +
+            "    const d: std.math.Log2Int(u64) = 5;\n" +
+            "    const e: std.math.Log2IntCeil(u32) = 1;\n" +
+            "    var total: u32 = a;\n" +
+            "    total += b;\n" +
+            "    total += c;\n" +
+            "    total += d;\n" +
+            "    total += e;\n" +
+            "    total += @bitSizeOf(std.math.Log2Int(u64)) - 6;\n" +
+            "    total += @bitSizeOf(std.math.Log2IntCeil(u32)) - 6;\n" +
+            "    return @intCast(total);\n" +
+            "}\n";
+
+        var workDir = Path.Combine(Path.GetTempPath(), $"dotcc-zig-stdtypefns-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(workDir);
+        var mainPath = Path.Combine(workDir, "main.zig");
+        File.WriteAllText(mainPath, program);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { mainPath }, emit: EmitMode.Csproj);
+            var (dotccStdout, dotccExit) = FixtureRunner.CompileAndRunCapturingExit(emitted, Array.Empty<string>());
+            var (zigStdout, zigExit) = ZigOracle.CompileAndRun(mainPath, workDir);
+
+            dotccExit.ShouldBe(zigExit, "dotcc's std type functions from source diverge from real zig (exit code)");
+            dotccExit.ShouldBe(42, "std.meta / std.math type functions did not produce the expected result");
+            Norm(dotccStdout).ShouldBe(Norm(zigStdout), "dotcc's std type functions from source diverge from real zig (stdout)");
         }
         finally
         {
