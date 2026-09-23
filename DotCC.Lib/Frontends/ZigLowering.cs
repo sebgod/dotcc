@@ -231,10 +231,13 @@ internal sealed partial class ZigLowering
     /// <para>The lookup key is the container's plain SOURCE name; the returned <see cref="CType"/> carries
     /// its module-qualified emitted name (<c>&lt;module&gt;__&lt;Name&gt;</c>, <see cref="QualifyTypeName"/>),
     /// so two modules may each declare a same-named aggregate.</para></summary>
-    internal CType? ResolveExportedType(string name)
+    internal CType? ResolveExportedType(string name) => ResolveExportedType(name, 0);
+
+    private CType? ResolveExportedType(string name, int hops)
     {
         RaiseIfPoisoned(name);   // a container whose lazy registration failed raises at this reference
-        return _containerTypes.TryGetValue(name, out var t) ? t : null;
+        // A re-export (`pub const Pair = inner.Pair;`) names a type declared elsewhere.
+        return _containerTypes.TryGetValue(name, out var t) ? t : ResolveAliasedType(name, hops);
     }
 
     /// <summary>Lower everything this lazy module has enqueued (from each cursor onward). Runs at TOP
@@ -528,6 +531,68 @@ internal sealed partial class ZigLowering
     /// the name is that module's type.</summary>
     private readonly Dictionary<string, Item> _moduleAliasPaths = new(System.StringComparer.Ordinal);
 
+    /// <summary>Each TOP-LEVEL <c>const NAME = &lt;name or dotted path&gt;;</c> → its RHS, unresolved: a
+    /// candidate DECLARATION alias (road-to-zig-std G3/G5). std re-exports constantly, 633 times in the
+    /// pin: <c>pub const indexOfScalar = findScalar;</c> in <c>mem.zig</c>,
+    /// <c>pub const AutoHashMap = hash_map.AutoHashMap;</c> in <c>std.zig</c>. A lookup of NAME that finds no
+    /// declaration of its own follows the RHS (<see cref="ResolveExportedDecl"/>); recording resolves
+    /// nothing, so preparing a module never fans out into what it re-exports. Top-level only, unlike the
+    /// function-flat comptime maps, so a body's <c>const y = x;</c> can never pose as a re-export.</summary>
+    private readonly Dictionary<string, Item> _declAliases = new(System.StringComparer.Ordinal);
+
+    /// <summary>How many re-export hops a lookup follows before giving up: std's deepest chain is two
+    /// or three, so this only bounds a cycle (<c>const a = b; const b = a;</c>).</summary>
+    private const int MaxAliasHops = 16;
+
+    /// <summary>The FUNCTION declaration that <paramref name="name"/> names in this module, following
+    /// re-export aliases (<see cref="_declAliases"/>) across modules: the module that OWNS it and its
+    /// symbol, declared on demand in its owner. A generic template comes back as its template symbol, for
+    /// the owner to instantiate (the owner's environment spells its signature). Null when no function is
+    /// reachable under that name, so a caller can report it or try another reading.</summary>
+    internal (ZigLowering Owner, Symbol Sym)? ResolveExportedDecl(string name) => ResolveExportedDecl(name, 0);
+
+    private (ZigLowering Owner, Symbol Sym)? ResolveExportedDecl(string name, int hops)
+    {
+        if ((_lazy ? EnsureDeclLowered(name) : _exportedFns.GetValueOrDefault(name)) is { } sym)
+        {
+            return (this, sym);
+        }
+        if (hops >= MaxAliasHops || !_declAliases.TryGetValue(name, out var rhs)) { return null; }
+        return rhs.Content switch
+        {
+            Zig.Ident id => ResolveExportedDecl(Tok(id.Arg0), hops + 1),
+            Zig.Field f => ResolveModulePath(f.Arg0)?.Lowering?.ResolveExportedDecl(Tok(f.Arg2), hops + 1),
+            _ => null,
+        };
+    }
+
+    /// <summary>The TYPE that <paramref name="name"/> names through a re-export alias
+    /// (<c>pub const Pair = inner.Pair;</c>), following the chain like <see cref="ResolveExportedDecl"/>:
+    /// a container another module declares, or a file-as-struct module. Null when the alias leads to no
+    /// type.</summary>
+    private CType? ResolveAliasedType(string name, int hops)
+    {
+        if (hops >= MaxAliasHops || !_declAliases.TryGetValue(name, out var rhs)) { return null; }
+        return rhs.Content switch
+        {
+            Zig.Ident id => _containerTypes.GetValueOrDefault(Tok(id.Arg0)) ?? ResolveAliasedType(Tok(id.Arg0), hops + 1),
+            Zig.Field f => ResolveModulePath(rhs)?.Lowering?.FileStructType
+                ?? ResolveModulePath(f.Arg0)?.Lowering?.ResolveExportedType(Tok(f.Arg2), hops + 1),
+            _ => null,
+        };
+    }
+
+    /// <summary>True when a top-level <c>const</c> is comptime-only because it aliases something with no
+    /// runtime value: a module (a namespace or a file-as-struct type), a type, or a function. The root
+    /// unit's global pass skips such a binding rather than lowering <c>util.f</c> as a value.</summary>
+    private bool IsComptimeOnlyAlias(string name)
+        => IsModuleAlias(name)
+        || (_declAliases.ContainsKey(name)
+            // Only a function OWNED elsewhere: a same-file `const f2 = f;` keeps its fn-pointer global,
+            // so `&f2` and passing `f2` as a value still work.
+            && (ResolveExportedDecl(name) is { Owner: var owner } && owner != this
+                || ResolveAliasedType(name, 0) is not null));
+
     /// <summary>True when <paramref name="name"/> is a recorded <see cref="_moduleAliasPaths"/> chain that
     /// resolves to a module: a namespace (or a file-as-struct type), never a runtime value.</summary>
     private bool IsModuleAlias(string name)
@@ -544,7 +609,13 @@ internal sealed partial class ZigLowering
         var module = _moduleAliasPaths.TryGetValue(name, out var path) ? ResolveModulePath(path)
             : _importSpecs.ContainsKey(name) ? ResolveImport(name)
             : null;
-        if (module?.Lowering?.FileStructType is not { } fileType) { return false; }
+        // The path may also end at a TYPE a module declares (`const Pair = lib.Pair;`), rather than at a
+        // file-as-struct module.
+        var fileType = module?.Lowering?.FileStructType
+            ?? (module is null && path?.Content is Zig.Field pf
+                ? ResolveModulePath(pf.Arg0)?.Lowering?.ResolveExportedType(Tok(pf.Arg2))
+                : null);
+        if (fileType is null) { return false; }
         _typeAliases[name] = fileType;
         type = fileType;
         return true;
@@ -921,6 +992,15 @@ internal sealed partial class ZigLowering
         // before pass 0a so a `const Writer = @This();` binding, and any container whose field points
         // back at the file type, resolves; the field layout registers in pass 0b like any struct's.
         var topFields = decls.Select(d => Unwrap(d).Content).OfType<Zig.TopField>().Select(t => t.Arg0).ToList();
+
+        // Record every top-level `const NAME = name;` / `= a.b.c;` as a candidate re-export, unresolved.
+        foreach (var d in decls.Select(Unwrap))
+        {
+            if (d.Content is Zig.ConstDecl { Arg3.Content: Zig.Ident or Zig.Field } alias)
+            {
+                _declAliases[Tok(alias.Arg1)] = alias.Arg3;
+            }
+        }
         if (topFields.Count > 0)
         {
             // The stem is a file name, so it may hold any character (`my-file.zig`): keep it identifier-safe.
@@ -1221,7 +1301,7 @@ internal sealed partial class ZigLowering
                 // alias HERE and emits no global. A plain runtime const still returns false → a global.
                 // A name bound to a module path (`const math = std.math;`, or a file-as-struct TYPE) is
                 // comptime-only, with no runtime value (G3).
-                case Zig.ConstDecl d      when !IsComptimeBound(Tok(d.Arg1)) && !IsModuleAlias(Tok(d.Arg1)):
+                case Zig.ConstDecl d      when !IsComptimeBound(Tok(d.Arg1)) && !IsComptimeOnlyAlias(Tok(d.Arg1)):
                     if (!TryComptimeConstBinding(Tok(d.Arg1), d.Arg3)) { LowerGlobal(d.Arg1, null, d.Arg3, isConst: true); }
                     break;  // const IDENT = RhsExpr ;
                 case Zig.ConstDeclTyped d when !IsComptimeBound(Tok(d.Arg1)):

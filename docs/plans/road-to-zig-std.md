@@ -599,7 +599,7 @@ that retire curated shortcuts.
 > programs (`import_generic_fn`, `string_literal_len`, `decl_literals`, `import_decl_literal`),
 > == real zig 0.17.0-dev.667.
 
-> **Status update (2026-09-23, desktop) — a file as a struct type** (bufPrint's wall 1, the S1 cut).
+> **Status update (2026-09-23, desktop): a file as a struct type** (bufPrint's wall 1, the S1 cut).
 >
 > 1. **File-as-struct.** A file with top-level fields registers them as a struct
 >    (`Io_Writer__Writer`), `@This()` at file scope names it, and a method or static call on it routes
@@ -627,6 +627,31 @@ that retire curated shortcuts.
 > (exit 42). Unit 1778/1778; functional with the local zig oracle and real std 440/0, == real zig
 > 0.17.0-dev.667 (the build was gone from ziglang.org; fetched from a community mirror and
 > minisign-verified against zig's key).
+
+> **Status update (2026-09-23, desktop): re-exports + curated namespaces per member** (G2/G5 front
+> door). An eight-entry-point probe against real std (bufPrint, parseInt, maxInt, mem.eql,
+> mem.indexOfScalar, array_list.Aligned, AutoHashMap, mem.sort) found two cheap gates in front of
+> most of them:
+>
+> 1. **A curated std namespace claimed every member.** `std.mem.indexOfScalar` stopped at "not
+>    modeled yet" even with a std tree configured. `CuratedStdNamespaceFns` now lists what each of
+>    `std.mem` / `std.debug` / `std.testing` lowers by hand; any other member navigates to source.
+> 2. **Re-exported declarations** (633 in the pin). `ResolveExportedDecl` follows a top-level
+>    `const NAME = name;` / `= mod.name;` to the module that owns the function, generic,
+>    type-returning generic or type, recorded syntactically so preparing a module never fans out.
+>
+> A bad emit surfaced on the way and was fixed in #124: module-qualifying an imported function glued
+> the prefix onto the ESCAPED name (`inner__@double`).
+>
+> **Re-measured:** `indexOfScalar` → `findScalar` now instantiates in `mem.zig`, and
+> `std.AutoHashMap(u32, u8)` resolves through `std.zig`. They converge on two shared walls: a
+> sibling GENERIC call inside an imported module (`findScalarPos`, and parseInt's
+> `parseIntWithSign`), and a module-qualified type CALL in a type position (`zig type: CallArgs`,
+> for both `hash_map` and `array_list.Aligned(u8, null)`). Then `comptime_int` (maxInt, 380 uses) and
+> the `{}` void value (mem.sort).
+>
+> Validation: 7 pins (`ZigReexportTests` 5, `ZigCuratedStdVsNavigationTests` 2) + zig-oracle program
+> `import_reexports` == real zig 0.17.0-dev.667.
 
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)
 

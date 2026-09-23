@@ -3094,6 +3094,38 @@ public sealed class ZigOracleTests
             "pub fn add(b: *Box, n: u8) void {\n" +
             "    b.value += n;\n" +
             "}\n", 42, "" },
+        // RE-EXPORTED declarations (std's `pub const indexOfScalar = findScalar;` shape, 633 in the pin):
+        // a function, a generic, a type-returning generic and a container type, each named through a
+        // `pub const` alias in lib.zig, plus a root alias of an imported function (no runtime global).
+        // 20 + (3 + 4 + 5 + 10) = 42.
+        new object[] { "import_reexports",
+            "const lib = @import(\"lib.zig\");\n" +
+            "const plus = lib.plus;\n" +
+            "const P = lib.Pair;\n" +
+            "pub fn main() u8 {\n" +
+            "    const p: P = .{ .a = 3, .b = 4 };\n" +
+            "    const b: lib.Crate(u8) = .{ .v = 5 };\n" +
+            "    return plus(lib.largest(u8, 20, 7), p.a + p.b + b.v + lib.twice(5));\n" +
+            "}\n",
+            "lib.zig",
+            "pub fn add(a: u8, b: u8) u8 {\n" +
+            "    return a + b;\n" +
+            "}\n" +
+            "pub const plus = add;\n" +
+            "pub fn maxOf(comptime T: type, a: T, b: T) T {\n" +
+            "    return if (a > b) a else b;\n" +
+            "}\n" +
+            "pub const largest = maxOf;\n" +
+            "pub fn Box(comptime T: type) type {\n" +
+            "    return struct { v: T };\n" +
+            "}\n" +
+            "pub const Crate = Box;\n" +
+            "const Inner = struct { a: u8, b: u8 };\n" +
+            "pub const Pair = Inner;\n" +
+            "fn double(x: u8) u8 {\n" +
+            "    return x + x;\n" +
+            "}\n" +
+            "pub const twice = double;\n", 42, "" },
     };
 
     [Theory]

@@ -310,7 +310,17 @@ import: it is withdrawn and raises its original message where something first na
 analyse-on-reference rule. Oracle `import_file_struct`; example `examples/zig-file-struct/`; unit
 `ZigFileStructTests`. **Cuts (loud):** a GENERIC function called through the file-as-struct type
 (`w.print(fmt, args)`, bufPrint's next wall); a pointer FIELD to a container that could not lower fails
-the struct holding it (see [`plans/deferred.md`](plans/deferred.md)). **Imported functions are
+the struct holding it (see [`plans/deferred.md`](plans/deferred.md)). **RE-EXPORTS resolve** (road-to-zig-std G3/G5; 633 in the pin): a top-level
+`const NAME = name;` or `const NAME = mod.name;` names a declaration made elsewhere, and a lookup of
+NAME follows the chain to the module that owns it: a function or generic (`pub const indexOfScalar =
+findScalar;`, which instantiates in its own module), a type-returning generic
+(`pub const AutoHashMap = hash_map.AutoHashMap;` in a type position), a container type
+(`pub const Pair = inner.Pair;`, also through a root alias `const P = lib.Pair;`). A root alias of an
+imported function is a call, not a runtime global; a same-file `const f2 = f;` keeps its
+function-pointer global. Oracle `import_reexports`; unit `ZigReexportTests`. **Curated std namespaces
+claim only their curated members:** with a std tree configured, `std.mem.X` / `std.debug.X` /
+`std.testing.X` for a member dotcc does not model lowers from real source instead of stopping at "not
+modeled yet" (unit `ZigCuratedStdVsNavigationTests`). **Imported functions are
 module-qualified in the emitted C#** too (`util__f`, `util__maxOf__u8`), since every module's functions
 share one emitted class. **Cuts (loud):** a cross-module container `const` (`k.Cfg.MAX`).
 **Container names are

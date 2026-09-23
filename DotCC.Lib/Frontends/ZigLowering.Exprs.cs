@@ -888,6 +888,13 @@ internal sealed partial class ZigLowering
         // In a lazy module, a bare call to a not-yet-lowered SIBLING declares it on demand (its body is
         // enqueued for the top-level drain), so `isPrint` can call `isAscii`/`isControl` (road-to-zig-std S2).
         if (sym is null && _lazy) { sym = EnsureDeclLowered(name); }
+        // A re-export alias (`pub const indexOfScalar = findScalar;`, `const f = util.f;`): call the
+        // declaration it names, in its own module when that is another one.
+        if (sym is null && ResolveExportedDecl(name) is { } aliased)
+        {
+            if (aliased.Owner != this) { return CallExportedDecl(aliased.Owner, aliased.Sym, argItems); }
+            sym = aliased.Sym;
+        }
         if (sym is null) { throw new IrUnsupportedException($"call to unresolved name '{name}'"); }
         // A type-returning generic (wall-plan W4) is a COMPTIME type constructor — calling it in value
         // position is meaningless; it must appear in a TYPE position (a type annotation / alias / typed
@@ -993,6 +1000,15 @@ internal sealed partial class ZigLowering
     /// <c>expr.method(args)</c> — the base value is the receiver, adjusted (Zig UFCS auto-ref/
     /// deref) to the method's declared first-parameter form. Both rewrite to the mangled free
     /// function <c>TypeName_method</c> recorded in <see cref="_methods"/>.</summary>
+    /// <summary>Call a function that <paramref name="owner"/> declares, from this module: a GENERIC
+    /// export (a <c>comptime</c> / <c>anytype</c> parameter, <c>std.fmt.bufPrint</c>) instantiates in its
+    /// OWN module with the arguments read here (road-to-zig-std G3), since calling the template symbol
+    /// directly would bind its empty placeholder signature; anything else is a direct call.</summary>
+    private CExpr CallExportedDecl(ZigLowering owner, Symbol sym, IReadOnlyList<Item> argItems)
+        => owner.TryResolveExportedGenericInstance(sym, argItems, caller: this) is { } inst
+            ? BuildCall(inst.Instance, inst.RuntimeArgs, receiver: null)
+            : BuildCall(sym, argItems, receiver: null);
+
     private CExpr LowerMethodCall(Zig.Field fld, IReadOnlyList<Item> argItems)
     {
         var methodName = Tok(fld.Arg2);
@@ -1038,18 +1054,11 @@ internal sealed partial class ZigLowering
         // navigation — is the separate S4d lift.)
         if (!IsCuratedStdPath(fld.Arg0) && ResolveModulePath(fld.Arg0) is { } navMod)
         {
-            var navSym = navMod.Lowering?.EnsureDeclLowered(methodName)
+            // Through any re-export (`pub const indexOfScalar = findScalar;`), to the module that owns it.
+            var nav = navMod.Lowering?.ResolveExportedDecl(methodName)
                 ?? throw new IrUnsupportedException(
                     $"zig module '{System.IO.Path.GetFileName(navMod.Path)}' has no exported function '{methodName}'");
-            // A GENERIC export (a `comptime` / `anytype` parameter — `std.fmt.bufPrint`) instantiates in
-            // its OWN module, with the arguments read here (road-to-zig-std G3); calling the template
-            // symbol directly would bind its empty placeholder signature.
-            if (navMod.Lowering is { } navLowering
-                && navLowering.TryResolveExportedGenericInstance(navSym, argItems, caller: this) is { } inst)
-            {
-                return BuildCall(inst.Instance, inst.RuntimeArgs, receiver: null);
-            }
-            return BuildCall(navSym, argItems, receiver: null);
+            return CallExportedDecl(nav.Owner, nav.Sym, argItems);
         }
 
         // A member call on the `std.ArrayList(T)` TYPE (`std.ArrayList(i32).init(alloc)`) is

@@ -593,12 +593,14 @@ internal sealed partial class ZigLowering
     /// scope too, so a caller-side named <c>const</c> folds like a literal.</para></summary>
     internal (CType Type, int? Bits)? TryEvalExportedTypeReturningCall(string name, IReadOnlyList<Item> argItems, ZigLowering caller)
     {
-        if (EnsureDeclLowered(name) is not { } sym
-            || !_typeReturningGenerics.TryGetValue(sym, out var info))
+        // Through any re-export (`pub const AutoHashMap = hash_map.AutoHashMap;`): the template is
+        // evaluated by the module that declares it.
+        if (ResolveExportedDecl(name) is not { Owner: var owner, Sym: var sym }
+            || !owner._typeReturningGenerics.TryGetValue(sym, out var info))
         {
             return null;
         }
-        var type = EvalTypeReturningCall(sym, info, argItems, out var bits, typeArgScope: caller);
+        var type = owner.EvalTypeReturningCall(sym, info, argItems, out var bits, typeArgScope: caller);
         return (type, bits);
     }
 
