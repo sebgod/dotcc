@@ -653,6 +653,27 @@ that retire curated shortcuts.
 > Validation: 7 pins (`ZigReexportTests` 5, `ZigCuratedStdVsNavigationTests` 2) + zig-oracle program
 > `import_reexports` == real zig 0.17.0-dev.667.
 
+> **Status update (2026-09-23, desktop): std's everyday syntax, void, and reified type consts.**
+> Walking the eight-probe list turned up mostly PARSE gaps behind declarations the resilient parser
+> had silently skipped. A reference to such a declaration now raises its parse error ("zig
+> `findScalarPos` in mem.zig did not parse ...") instead of "unresolved name", which is what made
+> the rest findable. Landed: `comptime if` statements and anonymous `enum {…}` types; the void value
+> `{}` with void parameters, locals and returns erased by type (a `void` parameter had been a live
+> bad emit); `align(E)` pointer / slice types, general sentinels in types and slicing, trailing call
+> commas and `inline fn` (so `array_list.Aligned`, i.e. std.ArrayList, parses end to end); member
+> `comptime {}` blocks, block continue expressions, and `orelse return <ident>` (a silent LALR.CC
+> group-precedence resolution, pre-existing); sibling type-returning calls in a lazy module; TYPE
+> const members of a reified struct (`pub const Slice = …`, `pub const Unmanaged = …`).
+>
+> **Probes re-measured:** `std.mem.eql` runs (curated); `indexOfScalar` reaches findScalarPos, which
+> reads a top-level value const of mem.zig (a lazy module lowers none yet; and folding it honestly
+> selects std's @Vector paths, a backend-identity decision recorded in the plan's task list);
+> `parseInt` parses to a `switch (…) {…};` used as an `if` body; `maxInt` needs `comptime_int` (the
+> comptime-call engine); `array_list.Aligned(u8, null)` reaches `SentinelSlice`, a type-returning
+> METHOD; `AutoHashMap` reaches hash_map's Custom, which parses to a runtime multi-object
+> `for (a, b, c) |x, y, z|` (592 in std); `mem.sort` reaches std.sort.asc's closure idiom
+> (`struct { pub fn inner … }.inner`); `bufPrint` still walls on the `Writer.VTable` pointer chain.
+
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)
 
 An opt-in test/tool (`DOTCC_RUN_STD_PROBE=1`, env `DOTCC_ZIG_LIB_DIR` or
