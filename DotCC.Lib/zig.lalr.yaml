@@ -271,6 +271,8 @@ symbols:
   - TypeArm        # 172 an inline `enum {…}` / `struct {…}` as an arm of a TYPE-choosing `if` (debug.zig's
                    #     `pub const State = if (runtime_safety) enum { unlocked, locked } else enum { unknown };`).
                    #     No RhsExpr starts with `enum` / `struct`, so after `if ( Expr )` it is a clean shift.
+  - TestBlock      # 173 a `test "name"/ident/(anon) { … }` block as a CONTAINER member (std.math.Order's
+                   #     `test invert { … }` inside the enum body), parsed and DROPPED like the top-level form.
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -1366,6 +1368,11 @@ productions:
       # A container-level `comptime { … }` block (hash_map.zig's `comptime { assert(@sizeOf(Metadata) == 1); }`):
       # analysis-only, dropped like the top-level form (topComptime). `comptime` starts no other member.
       - { lhs: Member, rhs: ['comptime', Block],      action: memberComptime }
+      # A `test` block inside a container body: `test` starts no other member, so it is a clean shift.
+      - { lhs: Member, rhs: [TestBlock],              action: memberTest }
+      - { lhs: TestBlock, rhs: ['test', STRING, Block], action: testBlockNamed }
+      - { lhs: TestBlock, rhs: ['test', IDENT, Block],  action: testBlockIdent }
+      - { lhs: TestBlock, rhs: ['test', Block],         action: testBlockAnon }
       # A container-level `const` member, reusing the existing VarDecl nonterminal. V1 lowers only
       # the ubiquitous self-type alias `const Self = @This();` (any alias name; RHS `@This()`) —
       # naming the container type inside its own methods without repeating it; a non-`@This()`
@@ -1423,6 +1430,7 @@ productions:
       - { lhs: EnumMember, rhs: ['inline', FnDef],        action: enumMemberInlineMethod }
       - { lhs: EnumMember, rhs: ['pub', 'inline', FnDef], action: enumMemberPubInlineMethod }
       - { lhs: EnumMember, rhs: ['comptime', Block],      action: enumMemberComptime }
+      - { lhs: EnumMember, rhs: [TestBlock],              action: enumMemberTest }
       - { lhs: EnumMember, rhs: [VarDecl],         action: enumMemberConst }
       - { lhs: EnumMember, rhs: ['pub', VarDecl],  action: enumMemberPubConst }
       # Nested container decl inside an enum body (road-to-zig-std S9) — same const-led
@@ -1458,6 +1466,7 @@ productions:
       - { lhs: UnionMember, rhs: ['inline', FnDef],        action: unionMemberInlineMethod }
       - { lhs: UnionMember, rhs: ['pub', 'inline', FnDef], action: unionMemberPubInlineMethod }
       - { lhs: UnionMember, rhs: ['comptime', Block],      action: unionMemberComptime }
+      - { lhs: UnionMember, rhs: [TestBlock],              action: unionMemberTest }
       - { lhs: UnionMember, rhs: [VarDecl],            action: unionMemberConst }
       - { lhs: UnionMember, rhs: ['pub', VarDecl],     action: unionMemberPubConst }
       # Nested container decl inside a union body (road-to-zig-std S9) — same const-led

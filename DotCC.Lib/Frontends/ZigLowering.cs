@@ -593,6 +593,10 @@ internal sealed partial class ZigLowering
 
     /// <summary>Lower a reference to this lazy module's top-level value const <paramref name="name"/>, or
     /// null when it declares none (see <see cref="_lazyValueConsts"/>).</summary>
+    /// <summary>A top-level VALUE const this (lazily prepared) module declares, lowered here for a read
+    /// from another module (<c>std.atomic.cache_line</c>); null when it declares no such const.</summary>
+    internal CExpr? LowerExportedValueConst(string name) => LowerLazyValueConst(name);
+
     private CExpr? LowerLazyValueConst(string name)
     {
         if (!_lazy || !_lazyValueConsts.TryGetValue(name, out var vc)) { return null; }
@@ -602,6 +606,14 @@ internal sealed partial class ZigLowering
         }
         try
         {
+            // `pub const cache_line: comptime_int = switch (builtin.cpu.arch) { … };` (std.atomic): a
+            // comptime-only integer folds to its literal; it has no runtime type to lower.
+            if (vc.typeItem?.Content is Zig.Ident { Arg0: var ctTok } && Tok(ctTok) == "comptime_int")
+            {
+                return _ir.ConstEval(LowerExprSink(vc.rhs, CType.Long)) is { } ct
+                    ? new LitInt(ct.ToString(System.Globalization.CultureInfo.InvariantCulture), ct) { Type = CType.Long }
+                    : throw new IrUnsupportedException($"zig `const {name}: comptime_int` must be compile-time-known");
+            }
             var sink = vc.typeItem is { } t ? LowerType(t) : null;
             return LowerExprSink(vc.rhs, sink);
         }

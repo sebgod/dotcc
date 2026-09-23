@@ -771,7 +771,11 @@ that retire curated shortcuts.
 >   `comptime_optional_forwarding`), then `toOwnedSliceSentinel`'s `comptime sentinel: T` (a generic method,
 >   done), then `.empty` of a container another module declares (lowered by its owner, oracle
 >   `cross_module_decl_literal`), the empty slice `&.{}` / `&[_]T{}`, a bare sibling call, and `@memmove`.
->   It stops at a value-position `switch` with a VOID block prong.
+>   Then a `catch |e| switch` over a `!void` (a statement switch now), `test` blocks inside container bodies
+>   (std.math.Order; `std.math.order` now runs from source == zig), `comptime_int` locals and lazy consts, and
+>   non-curated std VALUES read across modules. It stops at `std.atomic.cache_line =
+>   cacheLineForCpu(builtin.cpu)`, a function over the real `std.Target.Cpu`: dotcc's TARGET identity again
+>   (the task-#20 family; `builtin` is duck-typed precisely to avoid std.Target's CPU tables).
 
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)
 

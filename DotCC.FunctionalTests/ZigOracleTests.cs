@@ -3453,6 +3453,49 @@ public sealed class ZigOracleTests
             "    const q: [*]const u8 = &arr;\n" +
             "    return h.first() + q[0] - 1;\n" +
             "}\n", 42, "" },
+        // Forms from the array_list / std.math probes (road-to-zig-std G4): a `catch |e| switch` over a `!void`
+        // nobody binds is a statement switch (a void block prong with a `return`); `test` blocks inside enum and
+        // struct bodies are dropped; a `comptime_int` local folds. (10 + 1) + 12 + 2 * 9 + 1 = 42.
+        new object[] { "void_catch_switch_and_member_tests",
+            "const Order = enum {\n" +
+            "    lt,\n" +
+            "    eq,\n" +
+            "    gt,\n" +
+            "    pub fn flip(o: Order) Order {\n" +
+            "        return switch (o) {\n" +
+            "            .lt => .gt,\n" +
+            "            .eq => .eq,\n" +
+            "            .gt => .lt,\n" +
+            "        };\n" +
+            "    }\n" +
+            "    test flip {\n" +
+            "        _ = Order.lt.flip();\n" +
+            "    }\n" +
+            "};\n" +
+            "const Box = struct {\n" +
+            "    n: u8,\n" +
+            "    test \"a test inside a struct body\" {}\n" +
+            "};\n" +
+            "fn shrink(ok: bool) error{OutOfMemory}!void {\n" +
+            "    if (!ok) return error.OutOfMemory;\n" +
+            "}\n" +
+            "fn tryShrink(b: *Box, ok: bool) void {\n" +
+            "    shrink(ok) catch |e| switch (e) {\n" +
+            "        error.OutOfMemory => {\n" +
+            "            b.n += 10;\n" +
+            "            return;\n" +
+            "        },\n" +
+            "    };\n" +
+            "    b.n += 1;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const step: comptime_int = 3 * 4;\n" +
+            "    var b: Box = .{ .n = 0 };\n" +
+            "    tryShrink(&b, false);\n" +
+            "    tryShrink(&b, true);\n" +
+            "    const o = Order.lt.flip();\n" +
+            "    return b.n + step + @as(u8, @intFromEnum(o)) * 9 + 1;\n" +
+            "}\n", 42, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -4230,6 +4273,54 @@ public sealed class ZigOracleTests
             dotccExit.ShouldBe(zigExit, "dotcc's std.fmt.parseInt from source diverges from real zig (exit code)");
             dotccExit.ShouldBe(42, "std.fmt.parseInt did not produce the expected result");
             Norm(dotccStdout).ShouldBe(Norm(zigStdout), "dotcc's std.fmt.parseInt from source diverges from real zig (stdout)");
+        }
+        finally
+        {
+            try { Directory.Delete(workDir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    /// <summary><c>std.math.order</c> from REAL upstream std (road-to-zig-std G4): its <c>Order</c> enum carries
+    /// a <c>test invert { … }</c> block inside the enum body, which dotcc now parses and drops, and the call
+    /// is an <c>anytype</c> generic instantiated in std.math.</summary>
+    [Fact]
+    public void Dotcc_matches_zig_std_math_order_from_source()
+    {
+        if (!ZigRunRequested)
+        {
+            Assert.Skip($"Zig oracle is opt-in. Set {RunZigEnv}=1 to run the std.math.order differential.");
+        }
+        if (!ZigOracle.IsAvailable)
+        {
+            Assert.Skip($"{RunZigEnv} requested but no `zig` is on PATH on this host.");
+        }
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOTCC_ZIG_LIB_DIR")))
+        {
+            Assert.Skip("DOTCC_ZIG_LIB_DIR must point at the zig lib dir so dotcc navigates the real std.math source.");
+        }
+
+        const string program =
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const a: u32 = 1;\n" +
+            "    const lt: u8 = switch (std.math.order(a, 2)) { .lt => 40, .eq => 0, .gt => 0 };\n" +
+            "    const gt: u8 = if (std.math.order(a, 0) == .gt) 2 else 0;\n" +
+            "    return lt + gt;\n" +
+            "}\n";
+
+        var workDir = Path.Combine(Path.GetTempPath(), $"dotcc-zig-stdorder-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(workDir);
+        var mainPath = Path.Combine(workDir, "main.zig");
+        File.WriteAllText(mainPath, program);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { mainPath }, emit: EmitMode.Csproj);
+            var (dotccStdout, dotccExit) = FixtureRunner.CompileAndRunCapturingExit(emitted, Array.Empty<string>());
+            var (zigStdout, zigExit) = ZigOracle.CompileAndRun(mainPath, workDir);
+
+            dotccExit.ShouldBe(zigExit, "dotcc's std.math.order from source diverges from real zig (exit code)");
+            dotccExit.ShouldBe(42, "std.math.order did not produce the expected result");
+            Norm(dotccStdout).ShouldBe(Norm(zigStdout), "dotcc's std.math.order from source diverges from real zig (stdout)");
         }
         finally
         {

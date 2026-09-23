@@ -327,6 +327,14 @@ internal sealed partial class ZigLowering
                     // switch on the kind here. A curated TYPE path used as a value gets the
                     // specific "type, not a value" message; the rest the registry-derived list.
                     if (StdAllocatorValues.ContainsKey(stdPath)) { return MaterializeCHeap(); }
+                    // Any other std VALUE (`std.atomic.cache_line`, array_list's growth policy) is the real
+                    // std's: a top-level value const of the module the path names, lowered there.
+                    if (!StdTypes.ContainsKey(stdPath) && !StdGenericTypes.ContainsKey(stdPath)
+                        && ResolveModulePath(fld.Arg0) is { Lowering: { } valueOwner }
+                        && valueOwner.LowerExportedValueConst(fieldName) is { } exportedValue)
+                    {
+                        return exportedValue;
+                    }
                     throw new IrUnsupportedException(
                         StdTypes.ContainsKey(stdPath) || StdGenericTypes.ContainsKey(stdPath)
                             ? $"zig `{stdPath}` is a type, not a value"
