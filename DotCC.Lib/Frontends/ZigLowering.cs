@@ -454,12 +454,32 @@ internal sealed partial class ZigLowering
     /// Keyed by the AST <see cref="Item"/> reference, because a Zig struct type is nominal by its
     /// declaration SITE: two textually-identical inline <c>struct {…}</c> forms are DISTINCT types, and
     /// the same occurrence lowered in more than one pass must reify ONE registered type. The synthesized
-    /// name (<c>__AnonStruct&lt;n&gt;</c>) is unique program-wide, so it never collides with a user type
+    /// name (<c>__AnonStruct&lt;n&gt;</c>, module-qualified in an imported module since the counter is per
+    /// module) is unique program-wide, so it never collides with a user type
     /// or an in-function W2 container. Keyed by REFERENCE (<see cref="ReferenceEqualityComparer"/>) —
     /// <see cref="Item.Equals"/> compares the grammar symbol ID, so a value-equality dictionary would
     /// collapse every inline <c>struct {…}</c> (all share that ID) into one type; the parse tree is
     /// built once, so a given occurrence is the same object across passes and memoizes correctly.</summary>
     private readonly Dictionary<Item, string> _inlineStructNames = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>This module's IR-name prefix when it is an IMPORTED module (module-qualified container
+    /// naming), null for a root unit — whose names stay exactly as spelled, so a single-file program's
+    /// emitted C# is unchanged. Applied by <see cref="QualifyTypeName"/> to every container IR name the
+    /// module mints: top-level containers (and so their nested ones, which derive from the parent), W4
+    /// reified generic instances and inline anonymous structs. Assigned by the importer
+    /// (<see cref="ZigImportScope.ModulePrefixFor"/>).</summary>
+    private readonly string? _modulePrefix;
+
+    /// <summary>The IR name for a container this module declares under source name
+    /// <paramref name="name"/>: <c>prefix__name</c> in an imported module, the name itself in a root unit.
+    /// The plain source name still resolves inside the module (it maps to the qualified type); only the
+    /// EMITTED name is qualified, which is what has to be unique program-wide.
+    /// <para>A ROOT unit's name is qualified too when it is one the runtime declares
+    /// (<see cref="RuntimeTypeNames"/> — <c>const Allocator = struct {…}</c> would otherwise emit a second
+    /// C# <c>Allocator</c> and fail to build): <c>root__Allocator</c>.</para></summary>
+    private string QualifyTypeName(string name) => _modulePrefix is { } p
+        ? $"{p}__{name}"
+        : RuntimeTypeNames.IsReserved(name) ? $"root__{name}" : name;
 
     /// <summary>The comptime VALUE of each <c>const</c> that binds a comptime-known literal (a string or
     /// an integer today) — the seed of the comptime-value engine (road-to-zig-std S5). Populated as a
@@ -712,8 +732,9 @@ internal sealed partial class ZigLowering
 
     public ZigLowering(IrBuilder ir, INameLegalizer names, Dictionary<string, int>? errorCodes = null,
         bool testMode = false, ZigModuleGraph? moduleGraph = null, string? importerDir = null,
-        ZigImportScope? shared = null)
+        ZigImportScope? shared = null, string? modulePrefix = null)
     {
+        _modulePrefix = modulePrefix;
         _shared = shared ?? new ZigImportScope();
         _methods = _shared.Methods;
         _enumMembers = _shared.EnumMembers;
@@ -739,7 +760,9 @@ internal sealed partial class ZigLowering
     {
         if (module.Lowering is not null) { return; }
         var dir = System.IO.Path.GetDirectoryName(module.Path);
-        var child = new ZigLowering(_ir, _names, _errorCodes, _testMode, _moduleGraph, dir, _shared);
+        var stdDir = _moduleGraph?.StdRootPath is { } stdRoot ? System.IO.Path.GetDirectoryName(stdRoot) : null;
+        var child = new ZigLowering(_ir, _names, _errorCodes, _testMode, _moduleGraph, dir, _shared,
+            modulePrefix: _shared.ModulePrefixFor(module.Path, stdDir));
         module.Lowering = child;
         _moduleGraph?.RegisterLowering(child);
         child.Lower(module.Parse.Tree, prepareOnly: true, lazy: true);
@@ -810,7 +833,7 @@ internal sealed partial class ZigLowering
         // an ordinary container in every respect — enum or struct or union, with methods, consts and its
         // own nested members — and only its NAME differs; the plain name resolves through the parent
         // chain (ResolveNestedType), and qualified (`Number.Mode`) through the parent's nested map.
-        var pass0 = CollectPass0Decls(decls);
+        var pass0 = CollectPass0Decls(decls, QualifyTypeName);
 
         // Pass 0a: register every container NAME first (a struct/union as a `CType.Named`
         // placeholder, an enum fully — enums are self-contained int constants), so pass 0b
@@ -851,6 +874,14 @@ internal sealed partial class ZigLowering
             finally
             {
                 _currentContainer = saved;
+            }
+            // A top-level container of an IMPORTED module registered under its qualified IR name
+            // (`fmt__Alignment`); the module's own code — and an importer navigating `fmt.Alignment` —
+            // still spells it plainly, so map the source name to the same type.
+            if (parent is null && ContainerDeclName(content) is { } plainName && plainName != name
+                && _containerTypes.TryGetValue(name, out var qualifiedType))
+            {
+                _containerTypes[plainName] = qualifiedType;
             }
             // A nested container: scope its plain name to the parent, AFTER it is registered (an enum's
             // `CType.Enum` only exists once RegisterEnumZig has run).
@@ -1329,10 +1360,12 @@ internal sealed partial class ZigLowering
     /// apply. A `pub` container (<see cref="Zig.PubContainer"/>) peels to the inner struct/enum/union
     /// decl (an in-FUNCTION container decl is still a cut — it'd need on-the-fly type registration).</summary>
     /// <summary>Pass 0's work list (see <see cref="Lower"/>): each top-level decl's unwrapped content in
-    /// source order, a container one carrying its registration NAME, with every struct's nested
+    /// source order, a container one carrying its registration NAME (qualified by <paramref name="qualify"/>
+    /// — the module prefix of an imported module, see <see cref="QualifyTypeName"/>), with every struct's nested
     /// container members spliced in directly after it (recursively) under the parent-mangled name
     /// <c>Parent__Inner</c> and their parent's name. A non-container decl carries a null name.</summary>
-    private static List<(string? Name, object? Content, string? Parent)> CollectPass0Decls(IReadOnlyList<Item> decls)
+    private static List<(string? Name, object? Content, string? Parent)> CollectPass0Decls(IReadOnlyList<Item> decls,
+        Func<string, string> qualify)
     {
         var list = new List<(string? Name, object? Content, string? Parent)>();
         foreach (var decl in decls)
@@ -1340,7 +1373,7 @@ internal sealed partial class ZigLowering
             var content = Unwrap(decl).Content;
             if (ContainerDeclName(content) is { } name)
             {
-                AddContainer(name, content, null);
+                AddContainer(qualify(name), content, null);
             }
             else
             {

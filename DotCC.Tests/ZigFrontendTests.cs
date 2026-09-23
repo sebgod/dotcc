@@ -75,8 +75,8 @@ public sealed class ZigFrontendTests
             "const util = @import(\"./util.zig\");\n" +
             "pub fn main() u8 { const p: util.Point = .{ .x = 40, .y = 2 }; return p.x + p.y; }\n",
             ("util.zig", "pub const Point = struct { x: u8, y: u8 };\n"));
-        cs.ShouldContain("struct Point");
-        cs.ShouldContain("new Point {");
+        cs.ShouldContain("struct util__Point");   // module-qualified: an imported module's container
+        cs.ShouldContain("new util__Point {");
     }
 
     [Fact]
@@ -102,8 +102,8 @@ public sealed class ZigFrontendTests
                 "        pub fn total(self: Self) usize { return self.len + self.first; }\n" +
                 "    };\n" +
                 "}\n"));
-        cs.ShouldContain("struct Box__u8");
-        cs.ShouldContain("Box__u8_total(Box__u8 self)");
+        cs.ShouldContain("struct list__Box__u8");
+        cs.ShouldContain("list__Box__u8_total(list__Box__u8 self)");
     }
 
     [Fact]
@@ -124,8 +124,8 @@ public sealed class ZigFrontendTests
             "}\n",
             ("list.zig",
                 "pub fn Box(comptime T: type) type { return struct { first: T }; }\n"));
-        cs.ShouldContain("struct Box__u8");
-        cs.ShouldContain("struct Box__u16");
+        cs.ShouldContain("struct list__Box__u8");
+        cs.ShouldContain("struct list__Box__u16");
     }
 
     [Fact]
@@ -144,8 +144,8 @@ public sealed class ZigFrontendTests
                 "    y: u8,\n" +
                 "    pub fn sum(self: Point) u8 { return self.x + self.y; }\n" +
                 "};\n"));
-        cs.ShouldContain("Point_sum(Point self)");   // declared AND its body drained
-        cs.ShouldContain("Point_sum(p)");            // the call site binds to it
+        cs.ShouldContain("geom__Point_sum(geom__Point self)");   // declared AND its body drained
+        cs.ShouldContain("geom__Point_sum(p)");                   // the call site binds to it
     }
 
     [Fact]
@@ -178,14 +178,13 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_two_imported_modules_declaring_different_types_under_one_name()
+    public void Two_imported_modules_may_declare_same_named_types()
     {
         // Cross-module type references make same-named aggregates reachable, and the emitted C# can
-        // carry only ONE type per name — a container is registered under its plain source name, so the
-        // second definition would be silently dropped and every use of it would read the first one's
-        // layout. That is now a loud error (module-qualified type naming is the real fix — see
-        // docs/plans/deferred.md).
-        var ex = Should.Throw<CompileException>(() => EmitZigMulti(
+        // carry only ONE type per name. Once a loud error (the registry refused the second `Shape`);
+        // module-qualified container naming now registers an imported module's containers as
+        // `<module>__<Name>`, so both exist side by side and each use reads its own layout.
+        var cs = EmitZigMulti(
             "const a = @import(\"./a.zig\");\n" +
             "const b = @import(\"./b.zig\");\n" +
             "pub fn main() u8 {\n" +
@@ -194,9 +193,9 @@ public sealed class ZigFrontendTests
             "    return p.x + q.y;\n" +
             "}\n",
             ("a.zig", "pub const Shape = struct { x: u8 };\n"),
-            ("b.zig", "pub const Shape = struct { y: u8 };\n")));
-        ex.Message.ShouldContain("Shape");
-        ex.Message.ShouldContain("silently dropped");
+            ("b.zig", "pub const Shape = struct { y: u8 };\n"));
+        cs.ShouldContain("struct a__Shape");
+        cs.ShouldContain("struct b__Shape");
     }
 
     [Fact]

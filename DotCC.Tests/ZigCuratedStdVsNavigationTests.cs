@@ -163,8 +163,8 @@ public sealed class ZigCuratedStdVsNavigationTests
             "    const p: std.ascii.Pair = .{ .a = 40, .b = 2 };\n" +
             "    return p.a + p.b;\n" +
             "}\n");
-        cs.ShouldContain("struct Pair");    // the navigated module's own declaration, emitted
-        cs.ShouldContain("new Pair {");
+        cs.ShouldContain("struct ascii__Pair");    // the navigated module's own declaration, emitted
+        cs.ShouldContain("new ascii__Pair {");
     }
 
     [Fact]
@@ -198,8 +198,8 @@ public sealed class ZigCuratedStdVsNavigationTests
             "    box.len += 0;\n" +
             "    return @intCast(box.total());\n" +
             "}\n");
-        cs.ShouldContain("struct Aligned__u8");                     // reified per resolved type arg
-        cs.ShouldContain("Aligned__u8_total(Aligned__u8 self)");    // …and its method BODY was drained
+        cs.ShouldContain("struct array_list__Aligned__u8");                                // reified per resolved type arg
+        cs.ShouldContain("array_list__Aligned__u8_total(array_list__Aligned__u8 self)");  // …and its method BODY was drained
     }
 
     [Fact]

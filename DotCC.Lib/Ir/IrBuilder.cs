@@ -1076,6 +1076,7 @@ internal sealed partial class IrBuilder
     private void BuildStructDef(string? tag, Item memberList, string? alias, bool isUnion)
     {
         var canonical = tag ?? alias ?? throw new IrUnsupportedException("struct with neither tag nor typedef name");
+        RejectReservedTypeName(canonical, isUnion ? "union" : "struct");
         var fields = BuildStructFields(memberList, canonical);
         if (_emittedTypes.Add(canonical))
         {
@@ -1101,19 +1102,20 @@ internal sealed partial class IrBuilder
     /// frontend uses. Idempotent on the name — a second registration of the SAME shape is ignored,
     /// but one that would silently REDEFINE an existing aggregate (same name, different fields or
     /// union-ness) throws: the emitted C# has one type per name, so the second definition would be
-    /// dropped and every use of it would read the first one's layout. Two Zig modules each declaring
-    /// <c>struct Options {…}</c> is the way to hit this (a container type is registered under its plain
-    /// source name — module-qualified naming is the real fix, see docs/plans/deferred.md); a loud error
-    /// beats a silent miscompile.</summary>
+    /// dropped and every use of it would read the first one's layout. An imported Zig module's containers
+    /// are registered under module-qualified names (<c>fmt__Options</c>), so two modules no longer meet
+    /// here; what remains is two C translation units defining a different <c>struct</c> of one tag, or a
+    /// name clash no qualification covers — a loud error beats a silent miscompile.</summary>
     internal void RegisterStructType(string name, List<StructField> fields, bool isUnion, AggregateLayout layout = AggregateLayout.Default)
     {
+        RejectReservedTypeName(name, isUnion ? "union" : "struct");
         if (_structFields.TryGetValue(name, out var already)
             && (isUnion != _structIsUnion[name] || !already.SequenceEqual(fields)))
         {
             throw new IrUnsupportedException(
                 $"two different aggregates are both named '{name}' — the emitted C# can only carry one, so the "
-                + "second definition would be silently dropped (Zig: two modules declaring a same-named "
-                + "struct/union; module-qualified type naming is the fix)");
+                + "second definition would be silently dropped (C: two translation units defining a different "
+                + $"`struct {name}`)");
         }
         if (_emittedTypes.Add(name))
         {
@@ -1131,14 +1133,28 @@ internal sealed partial class IrBuilder
     /// (tag type and members, in order) is ignored — but one that would REDEFINE it throws, exactly as
     /// <see cref="RegisterStructType"/> does: the emitted C# carries one enum per name, so the second
     /// definition's members would be silently dropped while its uses resolved against the first (a
-    /// type/codegen mismatch — two Zig modules each declaring <c>const Kind = enum {…}</c>, until
-    /// container names are module-qualified).</summary>
+    /// type/codegen mismatch). An imported Zig module's enums are module-qualified, so this guards the
+    /// C multi-TU case and any clash qualification does not cover.</summary>
     internal CType.Enum RegisterEnumType(string name, CType underlying, List<EnumMember> members)
     {
         if (!AddEnumDef(name, underlying, members)) { return _enumTypes[name]; }
         var enumType = new CType.Enum(name, underlying);
         _enumTypes[name] = enumType;
         return enumType;
+    }
+
+    /// <summary>Refuse a user type whose emitted name is one the runtime or the program shell already
+    /// declares at the top level (<see cref="RuntimeTypeNames"/>) — it would transpile and then fail to
+    /// build with C# CS0101, the "bad emit" the fail-loudly rule forbids. The Zig front-end never reaches
+    /// this (it qualifies such a name); a C tag does, and renaming it is the author's call.</summary>
+    private static void RejectReservedTypeName(string name, string kind)
+    {
+        if (RuntimeTypeNames.IsReserved(name))
+        {
+            throw new IrUnsupportedException(
+                $"the {kind} name '{name}' is reserved: dotcc's runtime declares a type of that name in the emitted "
+                + "program, so the two would collide (rename the type)");
+        }
     }
 
     /// <summary>Add an <see cref="EnumTypeDef"/> to the emitted enum set — the one place both front-ends
@@ -1149,6 +1165,7 @@ internal sealed partial class IrBuilder
     /// legal C that dotcc's single emitted program cannot represent; Zig: two modules' same-named enums.)</summary>
     private bool AddEnumDef(string name, CType underlying, List<EnumMember> members)
     {
+        RejectReservedTypeName(name, "enum");
         if (Enums.FirstOrDefault(e => e.Name == name) is { } existing)
         {
             if (!existing.Underlying.Equals(underlying) || !existing.Members.SequenceEqual(members))
@@ -1156,7 +1173,7 @@ internal sealed partial class IrBuilder
                 throw new IrUnsupportedException(
                     $"two different enums are both named '{name}' — the emitted C# can only carry one, so the "
                     + "second definition would be silently dropped (C: two translation units defining a different "
-                    + $"`enum {name}`; Zig: two modules declaring a same-named enum)");
+                    + $"`enum {name}`)");
             }
             return false;
         }
@@ -1302,6 +1319,7 @@ internal sealed partial class IrBuilder
     /// of that type — unlike an anonymous member, the fields are NOT promoted.</summary>
     private void AddNamedNested(string? tag, Item innerMemberList, string member, List<StructField> parentFields, bool isUnion)
     {
+        if (tag is not null) { RejectReservedTypeName(tag, isUnion ? "union" : "struct"); }
         var typeName = tag ?? $"__Anon{_anonAggrSeq++}";
         if (_emittedTypes.Add(typeName))
         {

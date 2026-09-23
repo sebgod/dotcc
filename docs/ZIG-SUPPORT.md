@@ -290,7 +290,12 @@ resolve at a sink typed by it. A resolvable module that declares no such type is
 both the file and the type. Oracle `import_type` / `import_type_method` / `import_enum_member` /
 `import_generic_type`; example `examples/zig-module-types/`; unit `ZigFrontendTests` +
 `ZigCuratedStdVsNavigationTests`. **Cuts (loud):** a cross-module container `const` (`k.Cfg.MAX`); a
-comptime VALUE argument that is a caller-scoped named constant (a literal is fine). (A type-returning
+comptime VALUE argument that is a caller-scoped named constant (a literal is fine). **Container names are
+module-qualified in the emitted C#** (2026-09-23): an imported module's containers, reified generic instances
+and inline anonymous structs emit as `<module>__<Name>` (`fmt__Alignment`, `list__Box__u8`; the module's
+path relative to the std root, else its file stem), while its own code and its importers still spell the
+plain name — so two modules may declare the same name, and a root-module type named like one of dotcc's
+runtime types (`Allocator`, `Slice`, …) emits as `root__Allocator`. (A type-returning
 body that returns another, module-qualified type-returning CALL — `return array_list.Aligned(T, null);`,
 what `std.ArrayList` itself is — resolves since the W4 lift.) See
 [`plans/deferred.md`](plans/deferred.md).
