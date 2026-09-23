@@ -236,18 +236,10 @@ internal sealed partial class ZigLowering
     private void BindTypeBodyComptimeValue(string fnName, string name, Item? typeAst, Item rhs)
     {
         var declared = typeAst is { } ta ? LowerType(ta) : null;
-        var savedBuf = _hoist;
-        var savedImpure = _hoistImpureSeen;
-        _hoist = new List<CStmt>();
         CExpr value;
-        try
+        using (EnterThrowawayHoist())
         {
             value = LowerExpr(rhs);
-        }
-        finally
-        {
-            _hoist = savedBuf;
-            _hoistImpureSeen = savedImpure;
         }
         if (_ir.ConstEval(value) is not { } v)
         {
@@ -304,17 +296,9 @@ internal sealed partial class ZigLowering
     private bool FoldTypeBodyCondition(string fnName, Item cond)
     {
         if (TryFoldComptimeCondition(cond) is { } folded) { return folded; }
-        var savedBuf = _hoist;
-        var savedImpure = _hoistImpureSeen;
-        _hoist = new List<CStmt>();
-        try
+        using (EnterThrowawayHoist())
         {
             if (_ir.ConstEval(LowerExpr(cond)) is { } v) { return v != 0; }
-        }
-        finally
-        {
-            _hoist = savedBuf;
-            _hoistImpureSeen = savedImpure;
         }
         throw new IrUnsupportedException(
             $"type-returning generic '{fnName}': an `if` condition must be compile-time-known "

@@ -369,19 +369,9 @@ internal sealed partial class ZigLowering
     /// emitted exactly once (the inference lowering here is discarded).</summary>
     private CType InferArgType(Item argItem)
     {
-        var savedBuf = _hoist;
-        var savedImpure = _hoistImpureSeen;
-        _hoist = new List<CStmt>();   // throwaway — the inference lowering is discarded
-        try
-        {
-            return (LowerExpr(argItem).Type
-                ?? throw new IrUnsupportedException("zig `anytype` argument has no statically known type")).Unqualified;
-        }
-        finally
-        {
-            _hoist = savedBuf;
-            _hoistImpureSeen = savedImpure;
-        }
+        using var _ = EnterThrowawayHoist();   // the inference lowering is discarded
+        return (LowerExpr(argItem).Type
+            ?? throw new IrUnsupportedException("zig `anytype` argument has no statically known type")).Unqualified;
     }
 
     /// <summary>Lower one queued instantiation body (drained after pass 2). Hands the pre-resolved
@@ -680,7 +670,9 @@ internal sealed partial class ZigLowering
             }
 
             var mangledType = new CType.Named(mangled);
-            var savedContainer = _currentContainer;
+            // The body below re-targets _currentContainer more than once (DeclareMethod clears it); the
+            // guard restores the caller's on every exit path, including the delegated early return.
+            using var containerRestore = EnterContainer(_currentContainer);
             // A scope for the value/optional comptime seeds (so the body's captured-if conditions + array
             // extents resolve); the type-param seeds already ride _typeAliases, installed by phase 2.
             _symbols.EnterScope();
@@ -748,7 +740,6 @@ internal sealed partial class ZigLowering
             }
             finally
             {
-                _currentContainer = savedContainer;
                 _symbols.ExitScope();
             }
             return mangledType;
@@ -796,16 +787,8 @@ internal sealed partial class ZigLowering
     /// shared <see cref="LowerFnBodyCore"/>, so the body's <c>T</c> matches its signature's.</summary>
     private void LowerReifiedMethodBody(PendingReifiedMethod p)
     {
-        var saved = _currentContainer;
-        _currentContainer = p.Container;
-        try
-        {
-            LowerFnBodyCore(p.Method, p.RuntimeParams, p.Body, p.ValueSeeds, p.TypeSeeds, p.OptionalSeeds);
-        }
-        finally
-        {
-            _currentContainer = saved;
-        }
+        using var _ = EnterContainer(p.Container);
+        LowerFnBodyCore(p.Method, p.RuntimeParams, p.Body, p.ValueSeeds, p.TypeSeeds, p.OptionalSeeds);
     }
 
     // The body EVALUATOR (ProcessTypeReturningBody and the comptime type-expression folds it uses)
