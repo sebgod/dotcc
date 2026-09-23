@@ -2955,6 +2955,31 @@ public sealed class ZigOracleTests
             "    const s = S{ .a = 30 };\n" +
             "    return s.a + total + pick(null, 6);\n" +
             "}\n", 42, "" },
+        // A `switch` STATEMENT closed by `;` as the body of an `if` / capture `if` (zig's expression
+        // statement; fmt.zig's parseIntWithSign). classify('b') = 30 + 10 + 2, classify(null) = 2.
+        new object[] { "switch_statement_semicolon",
+            "fn classify(x: ?u8) u8 {\n" +
+            "    var r: u8 = 0;\n" +
+            "    if (x) |c| switch (c) {\n" +
+            "        'b' => {\n" +
+            "            r = 30;\n" +
+            "        },\n" +
+            "        'x' => {\n" +
+            "            r = 1;\n" +
+            "        },\n" +
+            "        else => {},\n" +
+            "    };\n" +
+            "    if (r > 0) switch (r) {\n" +
+            "        30 => {\n" +
+            "            r += 10;\n" +
+            "        },\n" +
+            "        else => {},\n" +
+            "    };\n" +
+            "    return r + 2;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return classify('b') + classify(null) - 2;\n" +
+            "}\n", 42, "" },
         // TYPE const members of a reified struct (road-to-zig-std G4/G5; Aligned's `Slice`, HashMap's
         // `Unmanaged`): declared after the fields they type, evaluated with the instantiation's seeds.
         // 30 + 1 + 1 + 6 + 2 + 2 = 42.

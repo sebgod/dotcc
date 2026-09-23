@@ -128,6 +128,32 @@ public sealed class ZigStdParseBricksTests
     }
 
     [Fact]
+    public void A_switch_statement_closed_by_a_semicolon_parses_as_an_if_body()
+    {
+        // fmt.zig's parseIntWithSign: `if (x) |c| switch (c) { … };` (zig's expression statement), and the
+        // `;` shared with a `comptime if (c) STMT;` resolves to the switch (both readings mean the same).
+        var cs = EmitZig("""
+            fn classify(x: ?u8) u8 {
+                var r: u8 = 0;
+                if (x) |c| switch (c) {
+                    'b' => {
+                        r = 40;
+                    },
+                    else => {},
+                };
+                comptime if (true) switch (1) {
+                    else => {},
+                };
+                return r + 2;
+            }
+            pub fn main() u8 {
+                return classify('b');
+            }
+            """);
+        cs.ShouldContain("r = 40;");
+    }
+
+    [Fact]
     public void A_sibling_type_returning_generic_in_an_imported_module_is_declared_on_demand()
     {
         // hash_map.zig's `AutoHashMap` body names its sibling `HashMap(…)` by bare name; a lazy module had

@@ -514,6 +514,20 @@ productions:
       - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', ':', '(', Expr, AssignOp, RhsExpr, ')', Stmt], action: stmtWhileCaptureContAssign }
       - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', ':', '(', Expr, ')', Stmt],                    action: stmtWhileCaptureCont }
 
+  # `switch (x) { prong, … }` as a STATEMENT. Each prong is `CaseVals => Block`; Zig switch has NO
+  # fall-through, so the lowering appends a `break` to each section. The trailing-comma forms differ only
+  # by the optional comma after the last prong. The `;`-closed forms are zig's expression statement: a
+  # `switch` in a non-block statement position (the body of an `if` / capture `if`) takes a closing `;`,
+  # as in fmt.zig's parseIntWithSign `if (x) |c| switch (c) { … };`. That `;` is ambiguous with the one
+  # closing `comptime if (c) STMT;`, and either reading means the same, so this group is RIGHTMOST:
+  # the switch takes the `;` (the dangling-else resolution).
+  - derivation: rightmost
+    rules:
+      - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', '{', Prongs, '}'],      action: stmtSwitch }
+      - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', '{', Prongs, ',', '}'], action: stmtSwitchTrailing }
+      - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', '{', Prongs, '}', ';'],      action: stmtSwitchSemi }
+      - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', '{', Prongs, ',', '}', ';'], action: stmtSwitchTrailingSemi }
+
   - derivation: none
     rules:
       # The while/for loops are `LoopStmt` (not `Stmt` directly) so a `label:` prefix can wrap any
@@ -594,8 +608,6 @@ productions:
       # Zig switch has NO fall-through, so the lowering appends a `break` to each section
       # (the C# backend would otherwise synthesize C's fall-through). The two productions
       # differ only by an optional trailing comma after the last prong.
-      - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', '{', Prongs, '}'],      action: stmtSwitch }
-      - { lhs: Stmt, rhs: ['switch', '(', Expr, ')', '{', Prongs, ',', '}'], action: stmtSwitchTrailing }
       # `for (start..end) |i| body` — the range `for`. Lowers to the C IR
       # `for (usize i = start; i < end; i++) body`; the `|i|` capture is the usize loop index
       # (Zig's range-for index type). The body is a Stmt (single statement or a block), like

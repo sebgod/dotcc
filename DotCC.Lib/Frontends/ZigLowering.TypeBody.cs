@@ -121,6 +121,12 @@ internal sealed partial class ZigLowering
                 case Zig.StmtSwitchTrailing sw:
                     if (WalkComptimeSwitchStmt(fnName, sw.Arg2, sw.Arg5, typeShadows) is { } rs2) { return rs2; }
                     break;
+                case Zig.StmtSwitchSemi sw:
+                    if (WalkComptimeSwitchStmt(fnName, sw.Arg2, sw.Arg5, typeShadows) is { } rs3) { return rs3; }
+                    break;
+                case Zig.StmtSwitchTrailingSemi sw:
+                    if (WalkComptimeSwitchStmt(fnName, sw.Arg2, sw.Arg5, typeShadows) is { } rs4) { return rs4; }
+                    break;
                 // `@compileError("…");` REACHED — every arm that avoids it has already folded away, which is
                 // exactly zig's rule for it (std.meta.Elem ends with one after its switch).
                 case Zig.StmtExpr { Arg0.Content: Zig.BuiltinCall ce } when Tok(ce.Arg0) == "@compileError":

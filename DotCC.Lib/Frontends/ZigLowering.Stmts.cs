@@ -286,6 +286,8 @@ internal sealed partial class ZigLowering
             // the plain and trailing-comma forms). A tagged-union subject takes the capture path.
             case Zig.StmtSwitch s:         return LowerSwitchStmt(s.Arg2, s.Arg5);
             case Zig.StmtSwitchTrailing s: return LowerSwitchStmt(s.Arg2, s.Arg5);
+            case Zig.StmtSwitchSemi s:         return LowerSwitchStmt(s.Arg2, s.Arg5);
+            case Zig.StmtSwitchTrailingSemi s: return LowerSwitchStmt(s.Arg2, s.Arg5);
 
             // `for (start..end) |i| body` → C `for (usize i = start; i < end; i++) body`. The
             // capture `i` is the usize loop index (its own scope so it doesn't leak); the end
