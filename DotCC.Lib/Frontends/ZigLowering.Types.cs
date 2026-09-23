@@ -418,6 +418,9 @@ internal sealed partial class ZigLowering
         // A dotted std type (Milestone F): `std.mem.Allocator` → the runtime Allocator fat
         // pointer; `std.heap.FixedBufferAllocator` → the concrete bump allocator. Any other std
         // path in type position errors clearly (`std` is a known-paths resolver, not a real model).
+        // `Number.Mode` — a NESTED container named through its parent (qualified). Checked before the
+        // std-path resolver: a local container name is never a std path.
+        Zig.Field when TryResolveQualifiedNestedType(type) is { } qualified => qualified,
         Zig.Field => LowerStdType(type),
         // Pointer types. `*T` and the C-pointer `[*c]T` both lower to a plain
         // `T*` (the C-pointer's null/arithmetic semantics ARE C's pointer). The
@@ -718,16 +721,49 @@ internal sealed partial class ZigLowering
         && m.TryGetValue(name, out var t)
             ? t : null;
 
-    /// <summary>Resolve a type name that is a NESTED container decl of the container whose method is
-    /// currently being lowered (<c>const Inner = struct {…};</c> inside <c>Parent</c> — road-to-zig-std
-    /// S9, grammar #89), valid only while <see cref="_currentContainer"/> is that parent — so the plain
-    /// name <c>Inner</c> resolves inside <c>Parent</c>'s methods (signature + body) without leaking, and
-    /// two parents may nest a same-named type without colliding. <c>null</c> when not such a name.</summary>
-    private CType? ResolveNestedType(string name) =>
-        _currentContainer is { } c
-        && _nestedContainerTypes.TryGetValue(c, out var m)
-        && m.TryGetValue(name, out var t)
-            ? t : null;
+    /// <summary>Resolve a type name that is a NESTED container decl of the container currently in scope
+    /// (<c>const Inner = struct {…};</c> inside <c>Parent</c> — road-to-zig-std S9, grammar #89) or of
+    /// any container enclosing it, valid only while <see cref="_currentContainer"/> is that container or
+    /// a descendant — its fields, consts, method signatures and bodies — so the plain name <c>Inner</c>
+    /// resolves without leaking, and two parents may nest a same-named type without colliding.
+    /// <c>null</c> when not such a name.</summary>
+    private CType? ResolveNestedType(string name)
+    {
+        // Innermost first, then outward through the enclosing containers — zig's lexical scoping, so a
+        // nested type's own method or field can name a sibling nested type (or an uncle) plainly.
+        for (var c = _currentContainer; c is not null; c = _containerParents.GetValueOrDefault(c))
+        {
+            if (_nestedContainerTypes.TryGetValue(c, out var m) && m.TryGetValue(name, out var t)) { return t; }
+        }
+        return null;
+    }
+
+    /// <summary>Resolve <c>Parent.Inner</c> (or <c>Outer.Mid.Inner</c>) to a NESTED container type, or
+    /// null when the base is not a container this module declares or has no such nested member — so the
+    /// caller falls through to the std / module-graph resolvers unchanged. The base resolves the way a
+    /// bare type name does (<see cref="TryLookupContainerType"/>, which also sees an in-scope nested
+    /// name), then each segment steps into that container's nested map.</summary>
+    private CType? TryResolveQualifiedNestedType(Item dotted)
+    {
+        if (dotted.Content is not Zig.Field f) { return null; }
+        CType? baseType = f.Arg0.Content switch
+        {
+            Zig.Ident id when TryLookupContainerType(Tok(id.Arg0), out var ct) => ct,
+            Zig.Field => TryResolveQualifiedNestedType(f.Arg0),
+            _ => null,
+        };
+        var baseName = baseType?.Unqualified switch
+        {
+            CType.Named n => n.Name,
+            CType.Enum e => e.Name,
+            _ => null,
+        };
+        return baseName is not null
+            && _nestedContainerTypes.TryGetValue(baseName, out var nested)
+            && nested.TryGetValue(Tok(f.Arg2), out var inner)
+                ? inner
+                : null;
+    }
 
     /// <summary>Look up the container type named at a use site — a registered struct/enum/union
     /// name, a container-scoped self alias (<c>Self</c>) when inside that container's method, or a

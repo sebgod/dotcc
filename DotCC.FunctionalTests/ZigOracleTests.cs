@@ -2656,6 +2656,58 @@ public sealed class ZigOracleTests
             "    total += @bitSizeOf(Fit(200)) - 8;\n" +
             "    return @intCast(total);\n" +
             "}\n", 42, "" },
+        // NESTED containers as full containers — the wall `std.fmt.bufPrint` hit first: `std.fmt.Number`
+        // has a field `mode: Mode = .decimal` typed by a nested `pub const Mode = enum {…}` declared AFTER
+        // it, carrying a method. Also a grandchild naming an uncle plainly (`k: K` inside `A.B`), a
+        // three-segment qualified type (`A.B.C`), a qualified enum member (`Number.Mode.decimal`) and a
+        // qualified const + static call (`A.P.EXTRA`, `A.P.two()`). Declarations never sit BETWEEN fields —
+        // zig rejects that, and dotcc is lenient about it. 16 + 10 + 10 + 4 + 2 = 42.
+        new object[] { "nested_containers",
+            "const Number = struct {\n" +
+            "    mode: Mode = .decimal,\n" +
+            "    width: ?usize = null,\n" +
+            "\n" +
+            "    pub const Mode = enum {\n" +
+            "        decimal,\n" +
+            "        hex,\n" +
+            "\n" +
+            "        pub fn base(mode: Mode) u8 {\n" +
+            "            return switch (mode) {\n" +
+            "                .decimal => 10,\n" +
+            "                .hex => 16,\n" +
+            "            };\n" +
+            "        }\n" +
+            "    };\n" +
+            "};\n" +
+            "const A = struct {\n" +
+            "    b: B,\n" +
+            "\n" +
+            "    pub const K = enum { x, y };\n" +
+            "    pub const B = struct {\n" +
+            "        k: K,\n" +
+            "        c: C,\n" +
+            "\n" +
+            "        pub const C = struct { v: u8 };\n" +
+            "    };\n" +
+            "    pub const P = struct {\n" +
+            "        pub const EXTRA: u8 = 4;\n" +
+            "        pub fn two() u8 {\n" +
+            "            return 2;\n" +
+            "        }\n" +
+            "    };\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    const n: Number = .{ .mode = .hex };\n" +
+            "    const d: Number.Mode = Number.Mode.decimal;\n" +
+            "    const a: A = .{ .b = .{ .k = .y, .c = .{ .v = 10 } } };\n" +
+            "    const c: A.B.C = a.b.c;\n" +
+            "    var total: u8 = n.mode.base();\n" +
+            "    total += d.base();\n" +
+            "    total += c.v;\n" +
+            "    if (a.b.k == .y) total += A.P.EXTRA;\n" +
+            "    total += A.P.two();\n" +
+            "    return total;\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

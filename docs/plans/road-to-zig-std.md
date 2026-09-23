@@ -515,6 +515,38 @@ that retire curated shortcuts.
 > `examples/zig-type-body/` — output byte-identical to real zig 0.17.0-dev.667, exit 42. Full zig oracle
 > 207/207 locally WITH the std root; unit 1740/1740.
 
+> **Status update (2026-09-23, same branch) — NESTED containers as full containers** (the wall the W4 lift
+> measured next). `std.fmt.Number` opens with `mode: Mode = .decimal`, a field typed by a nested
+> `pub const Mode = enum {…}` declared AFTER it, carrying a method. dotcc's nested containers were
+> structs only, fields-only, and visible only inside the parent's METHODS — registered after the parent's
+> own field layout, so no field could name one.
+>
+> **The design: flatten, don't special-case.** Pass 0 now iterates a work list (`CollectPass0Decls`) in
+> which every struct's nested container members are spliced in right after their parent under a
+> parent-mangled name (`Number__Mode`, `A__B__C`), and both 0a and 0b run over it. A nested container is
+> therefore an ORDINARY container — any kind, methods, consts, deeper nesting — and the ~18 registration
+> sites just take the name from the list instead of the token (the same threading the deferred
+> module-qualified-naming item needs, now half done). What makes it nested is only name resolution: the
+> plain name walks the lexical parent chain (`_containerParents`) from whatever container is in scope,
+> and pass 0 now registers each container WITH itself as the current scope, so a sibling field — and
+> `@This()` in a field — resolves. Qualified `Parent.Inner` works in type and value position (enum
+> member, const, static call).
+>
+> **bufPrint re-measured — three walls, each its own brick:**
+> 1. **grammar:** `w.print(fmt, args) catch |err| switch (err) {…};` — a `catch |e|` whose RHS is a
+>    `switch` expression does not parse (state 571), so the resilient parse drops `bufPrint` whole
+>    ("fmt.zig has no exported function 'bufPrint'");
+> 2. **decl literals:** `var w: Writer = .fixed(buf);` — zig's result-location call on a type's own decl
+>    (`Writer.fixed`), currently "only a bare-identifier or `base.method` callee";
+> 3. **naming:** `std.fmt`'s top-level `Alignment` enum collides with dotcc's runtime `Alignment` carrier
+>    (C# CS0101) — the deferred module-qualified container naming, now observed against real std.
+>
+> **Cuts:** a nested container in an ENUM/UNION body; a cross-MODULE qualified nested type
+> (`std.fmt.Number.Mode` spelled in another file); a nested container in a W4-reified struct.
+>
+> Validation: 6 emit pins (`ZigNestedContainerTests`) + 1 superseded cut pin flipped positive + the
+> `nested_containers` zig-oracle program + `examples/zig-nested-containers/`, exit 42 == real zig.
+
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)
 
 An opt-in test/tool (`DOTCC_RUN_STD_PROBE=1`, env `DOTCC_ZIG_LIB_DIR` or

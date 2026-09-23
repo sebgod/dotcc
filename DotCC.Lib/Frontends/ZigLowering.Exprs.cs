@@ -320,6 +320,18 @@ internal sealed partial class ZigLowering
                 {
                     return ResolveEnumLit(fieldName, en);
                 }
+                // `Number.Mode.decimal` / `Outer.Inner.NAME` — the same two forms through a QUALIFIED
+                // nested container base (a nested enum's member, a nested container's const).
+                if (fld.Arg0.Content is Zig.Field && TryResolveQualifiedNestedType(fld.Arg0) is { } qualifiedBase)
+                {
+                    if (qualifiedBase.Unqualified is CType.Enum qen) { return ResolveEnumLit(fieldName, qen); }
+                    if (ContainerTypeName(qualifiedBase) is { } qContainer
+                        && _containerConsts.TryGetValue(qContainer, out var qconsts)
+                        && qconsts.TryGetValue(fieldName, out var qentry))
+                    {
+                        return LowerContainerConst(qContainer, fieldName, qentry.typeItem, qentry.rhs);
+                    }
+                }
                 // `E.member` where E is a registered error set (Milestone X, part 2) — the
                 // set-qualified form of `error.member`, resolving to the same flat code (membership
                 // erased). A USE as a value: bound to a const/var, compared (`x == E.member`), a
@@ -1073,6 +1085,17 @@ internal sealed partial class ZigLowering
                 throw new IrUnsupportedException($"'{typeName}' has no function '{methodName}'");
             }
             return BuildCall(staticSym, argItems, receiver: null);
+        }
+        // (A1) `Outer.Inner.func(args)` — the same static call through a QUALIFIED nested container.
+        if (fld.Arg0.Content is Zig.Field
+            && TryResolveQualifiedNestedType(fld.Arg0) is { } qualifiedTy
+            && ContainerTypeName(qualifiedTy) is { } qualifiedName)
+        {
+            if (EnsureMethodDeclared(qualifiedName, methodName) is not { } qStaticSym)
+            {
+                throw new IrUnsupportedException($"'{qualifiedName}' has no function '{methodName}'");
+            }
+            return BuildCall(qStaticSym, argItems, receiver: null);
         }
 
         // (A2) `Generic(args).func(…)` — the base is a call to a type-returning generic (wall-plan W4),

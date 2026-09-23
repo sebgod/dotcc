@@ -506,12 +506,18 @@ internal sealed partial class ZigLowering
     /// as a struct-body member — road-to-zig-std S9, grammar #89) → the synthesized type of the nested
     /// struct, registered under a parent-mangled IR name (<c>Parent__Inner</c>). Scoped exactly like
     /// <see cref="_selfAliases"/>: consulted by <see cref="ResolveNestedType"/> only while a method of
-    /// the parent is being lowered (<see cref="_currentContainer"/> set, which covers both a method
-    /// signature and its body), so the plain name <c>Inner</c> resolves inside <c>Parent</c>'s methods
-    /// without leaking globally — two parents may each nest a same-named <c>Inner</c> (pervasive in std)
-    /// without colliding. V1 registers nested STRUCTS only, fields-only; external qualified access
-    /// (<c>Parent.Inner</c>), nested enum/union, and nested-in-nested are deferred loud cuts.</summary>
+    /// the parent (or a container nested inside it) is in scope — its fields, consts and methods, i.e.
+    /// while <see cref="_currentContainer"/> is it or a descendant — so the plain name <c>Inner</c>
+    /// resolves without leaking globally, and two parents may each nest a same-named <c>Inner</c>
+    /// (pervasive in std) without colliding. Any container kind nests (struct / enum / union, with
+    /// methods and consts, to any depth — pass 0 registers each as an ordinary container), and
+    /// <c>Parent.Inner</c> resolves qualified through this map too.</summary>
     private readonly Dictionary<string, Dictionary<string, CType>> _nestedContainerTypes = new(System.StringComparer.Ordinal);
+
+    /// <summary>A nested container's (mangled) name → its enclosing container's name — the lexical
+    /// scope chain <see cref="ResolveNestedType"/> walks, so a nested container's own members (and a
+    /// grandchild's) can name a sibling or an outer nested type by its plain name, as zig allows.</summary>
+    private readonly Dictionary<string, string> _containerParents = new(System.StringComparer.Ordinal);
 
     /// <summary>Per <c>(struct name, field name)</c>, the RAW default-value AST of a
     /// <c>field: T = default</c> declaration (std S9). Stored unlowered and materialized lazily — a
@@ -797,68 +803,114 @@ internal sealed partial class ZigLowering
         // keyed only by the container NAME (see DeclareMethod / LowerMethodCall).
         var containerMethods = new List<(string container, Item fnDef)>();
 
+        // The pass-0 work list: every top-level decl in source order, with each struct's NESTED
+        // container members (`pub const Mode = enum {…};` inside `const Number = struct {…}` — std.fmt's
+        // shape) spliced in right after their parent, under a parent-mangled name (`Number__Mode`, unique
+        // so two parents' like-named nested types never collide in the IR). A nested container is then
+        // an ordinary container in every respect — enum or struct or union, with methods, consts and its
+        // own nested members — and only its NAME differs; the plain name resolves through the parent
+        // chain (ResolveNestedType), and qualified (`Number.Mode`) through the parent's nested map.
+        var pass0 = CollectPass0Decls(decls);
+
         // Pass 0a: register every container NAME first (a struct/union as a `CType.Named`
         // placeholder, an enum fully — enums are self-contained int constants), so pass 0b
         // can resolve a struct field that points to a struct/enum declared further down. An enum
         // is fully registered here (incl. its consts), so its methods are collected here too.
-        foreach (var decl in decls)
+        foreach (var (containerName, content, parent) in pass0)
         {
-            switch (Unwrap(decl).Content)
+            if (containerName is not { } name)
             {
-                case Zig.StructDecl s:        _containerTypes[Tok(s.Arg1)] = new CType.Named(Tok(s.Arg1)); break;
-                case Zig.StructDeclEmpty s:   _containerTypes[Tok(s.Arg1)] = new CType.Named(Tok(s.Arg1)); break;
-                case Zig.ExternStructDecl s:  _containerTypes[Tok(s.Arg1)] = new CType.Named(Tok(s.Arg1)); break;  // const IDENT = extern struct { … } ;
-                case Zig.PackedStructDecl s:  _containerTypes[Tok(s.Arg1)] = new CType.Named(Tok(s.Arg1)); break;  // const IDENT = packed struct { … } ;
-                case Zig.EnumDecl e:        foreach (var m in RegisterEnumZig(e.Arg1, null, e.Arg5)) { containerMethods.Add((Tok(e.Arg1), m)); } break;       // const IDENT = enum { EnumFields } ;
-                case Zig.EnumDeclTyped e:   foreach (var m in RegisterEnumZig(e.Arg1, e.Arg5, e.Arg8)) { containerMethods.Add((Tok(e.Arg1), m)); } break;     // const IDENT = enum ( Type ) { EnumFields } ;
-                case Zig.UnionDeclEnum u:     _containerTypes[Tok(u.Arg1)] = new CType.Named(Tok(u.Arg1)); break;  // const IDENT = union(enum) { … } ;
-                case Zig.UnionDeclTagged u:   _containerTypes[Tok(u.Arg1)] = new CType.Named(Tok(u.Arg1)); break;  // const IDENT = union(SomeEnum) { … } ;
-                case Zig.UnionDeclUntagged u: _containerTypes[Tok(u.Arg1)] = new CType.Named(Tok(u.Arg1)); break;  // const IDENT = union { … } ;
-                // A top-level comptime allocator/namespace binding (`const std = @import("std");`)
-                // — recorded HERE in pass 0 so a pass-1 signature (`fn f(a: std.mem.Allocator)`)
-                // resolves the import alias. Emits no decl (Milestone F). A non-comptime const
-                // falls through (rejected in pass 1 as an unsupported top-level global).
-                case Zig.ConstDecl d:      TryComptimeConstBinding(Tok(d.Arg1), d.Arg3); break;  // const IDENT = RhsExpr ;
-                case Zig.ConstDeclTyped d: TryComptimeConstBinding(Tok(d.Arg1), d.Arg5); break;  // const IDENT : Type = RhsExpr ;
+                switch (content)
+                {
+                    // A top-level comptime allocator/namespace binding (`const std = @import("std");`)
+                    // — recorded HERE in pass 0 so a pass-1 signature (`fn f(a: std.mem.Allocator)`)
+                    // resolves the import alias. Emits no decl (Milestone F). A non-comptime const
+                    // falls through (rejected in pass 1 as an unsupported top-level global).
+                    case Zig.ConstDecl d:      TryComptimeConstBinding(Tok(d.Arg1), d.Arg3); break;  // const IDENT = RhsExpr ;
+                    case Zig.ConstDeclTyped d: TryComptimeConstBinding(Tok(d.Arg1), d.Arg5); break;  // const IDENT : Type = RhsExpr ;
+                }
+                continue;
+            }
+            var saved = _currentContainer;
+            _currentContainer = name;   // an enum's member values / consts resolve in its own scope
+            try
+            {
+                switch (content)
+                {
+                    case Zig.StructDecl:        _containerTypes[name] = new CType.Named(name); break;
+                    case Zig.StructDeclEmpty:   _containerTypes[name] = new CType.Named(name); break;
+                    case Zig.ExternStructDecl:  _containerTypes[name] = new CType.Named(name); break;  // const IDENT = extern struct { … } ;
+                    case Zig.PackedStructDecl:  _containerTypes[name] = new CType.Named(name); break;  // const IDENT = packed struct { … } ;
+                    case Zig.EnumDecl e:        foreach (var m in RegisterEnumZig(name, null, e.Arg5)) { containerMethods.Add((name, m)); } break;       // const IDENT = enum { EnumFields } ;
+                    case Zig.EnumDeclTyped e:   foreach (var m in RegisterEnumZig(name, e.Arg5, e.Arg8)) { containerMethods.Add((name, m)); } break;     // const IDENT = enum ( Type ) { EnumFields } ;
+                    case Zig.UnionDeclEnum:     _containerTypes[name] = new CType.Named(name); break;  // const IDENT = union(enum) { … } ;
+                    case Zig.UnionDeclTagged:   _containerTypes[name] = new CType.Named(name); break;  // const IDENT = union(SomeEnum) { … } ;
+                    case Zig.UnionDeclUntagged: _containerTypes[name] = new CType.Named(name); break;  // const IDENT = union { … } ;
+                }
+            }
+            finally
+            {
+                _currentContainer = saved;
+            }
+            // A nested container: scope its plain name to the parent, AFTER it is registered (an enum's
+            // `CType.Enum` only exists once RegisterEnumZig has run).
+            if (parent is { } parentName && _containerTypes.TryGetValue(name, out var nestedType))
+            {
+                _containerParents[name] = parentName;
+                if (!_nestedContainerTypes.TryGetValue(parentName, out var nestedMap))
+                {
+                    nestedMap = new Dictionary<string, CType>(System.StringComparer.Ordinal);
+                    _nestedContainerTypes[parentName] = nestedMap;
+                }
+                nestedMap[ContainerDeclName(content) ?? name] = nestedType;
             }
         }
         // Pass 0b: build struct field layouts (field types now resolve through 0a), register each
-        // struct's/union's consts, and collect their methods.
-        foreach (var decl in decls)
+        // struct's/union's consts, and collect their methods. Each runs with the container as the
+        // current scope, so a field typed by a NESTED container (`mode: Mode`) resolves — as does
+        // `@This()` in a field.
+        foreach (var (containerName, content, _) in pass0)
         {
-            switch (Unwrap(decl).Content)
+            if (containerName is not { } name) { continue; }
+            var saved = _currentContainer;
+            _currentContainer = name;
+            try
             {
-                case Zig.StructDecl s:      // const IDENT = struct { Members } ;
+                switch (content)
                 {
-                    var (fields, methods, consts, containers) = SplitMembers(s.Arg5);
-                    RegisterStruct(Tok(s.Arg1), fields);
-                    RegisterContainerConsts(Tok(s.Arg1), consts);
-                    RegisterNestedContainers(Tok(s.Arg1), containers);
-                    foreach (var m in methods) { containerMethods.Add((Tok(s.Arg1), m)); }
-                    break;
+                    case Zig.StructDecl s:      // const IDENT = struct { Members } ;
+                    {
+                        var (fields, methods, consts, _) = SplitMembers(s.Arg5);
+                        RegisterStruct(name, fields);
+                        RegisterContainerConsts(name, consts);
+                        foreach (var m in methods) { containerMethods.Add((name, m)); }
+                        break;
+                    }
+                    case Zig.StructDeclEmpty: RegisterStruct(name, System.Array.Empty<Item>()); break;  // const IDENT = struct { } ;
+                    case Zig.ExternStructDecl s:  // const IDENT = extern struct { Members } ;
+                    {
+                        var (fields, methods, consts, _) = SplitMembers(s.Arg6);
+                        RegisterStruct(name, fields, AggregateLayout.Sequential);
+                        RegisterContainerConsts(name, consts);
+                        foreach (var m in methods) { containerMethods.Add((name, m)); }
+                        break;
+                    }
+                    case Zig.PackedStructDecl s:  // const IDENT = packed struct { Members } ;
+                    {
+                        var (fields, methods, consts, _) = SplitMembers(s.Arg6);
+                        RegisterStruct(name, fields, AggregateLayout.Packed);
+                        RegisterContainerConsts(name, consts);
+                        foreach (var m in methods) { containerMethods.Add((name, m)); }
+                        break;
+                    }
+                    case Zig.UnionDeclEnum u:   foreach (var m in RegisterUnion(name, u.Arg8)) { containerMethods.Add((name, m)); } break;  // const IDENT = union(enum) { UnionMembers } ;
+                    case Zig.UnionDeclTagged u: foreach (var m in RegisterUnionTagged(name, Tok(u.Arg5), u.Arg8)) { containerMethods.Add((name, m)); } break;  // const IDENT = union(SomeEnum) { UnionMembers } ;
+                    case Zig.UnionDeclUntagged u: foreach (var m in RegisterUnionUntagged(name, u.Arg5)) { containerMethods.Add((name, m)); } break;  // const IDENT = union { UnionMembers } ;
                 }
-                case Zig.StructDeclEmpty s: RegisterStruct(Tok(s.Arg1), System.Array.Empty<Item>()); break;  // const IDENT = struct { } ;
-                case Zig.ExternStructDecl s:  // const IDENT = extern struct { Members } ;
-                {
-                    var (fields, methods, consts, containers) = SplitMembers(s.Arg6);
-                    RegisterStruct(Tok(s.Arg1), fields, AggregateLayout.Sequential);
-                    RegisterContainerConsts(Tok(s.Arg1), consts);
-                    RegisterNestedContainers(Tok(s.Arg1), containers);
-                    foreach (var m in methods) { containerMethods.Add((Tok(s.Arg1), m)); }
-                    break;
-                }
-                case Zig.PackedStructDecl s:  // const IDENT = packed struct { Members } ;
-                {
-                    var (fields, methods, consts, containers) = SplitMembers(s.Arg6);
-                    RegisterStruct(Tok(s.Arg1), fields, AggregateLayout.Packed);
-                    RegisterContainerConsts(Tok(s.Arg1), consts);
-                    RegisterNestedContainers(Tok(s.Arg1), containers);
-                    foreach (var m in methods) { containerMethods.Add((Tok(s.Arg1), m)); }
-                    break;
-                }
-                case Zig.UnionDeclEnum u:   foreach (var m in RegisterUnion(Tok(u.Arg1), u.Arg8)) { containerMethods.Add((Tok(u.Arg1), m)); } break;  // const IDENT = union(enum) { UnionMembers } ;
-                case Zig.UnionDeclTagged u: foreach (var m in RegisterUnionTagged(Tok(u.Arg1), Tok(u.Arg5), u.Arg8)) { containerMethods.Add((Tok(u.Arg1), m)); } break;  // const IDENT = union(SomeEnum) { UnionMembers } ;
-                case Zig.UnionDeclUntagged u: foreach (var m in RegisterUnionUntagged(Tok(u.Arg1), u.Arg5)) { containerMethods.Add((Tok(u.Arg1), m)); } break;  // const IDENT = union { UnionMembers } ;
+            }
+            finally
+            {
+                _currentContainer = saved;
             }
         }
 
@@ -1276,6 +1328,65 @@ internal sealed partial class ZigLowering
     /// is a documented V1 cut), so peeling lets all the existing FnDef / global / container handling
     /// apply. A `pub` container (<see cref="Zig.PubContainer"/>) peels to the inner struct/enum/union
     /// decl (an in-FUNCTION container decl is still a cut — it'd need on-the-fly type registration).</summary>
+    /// <summary>Pass 0's work list (see <see cref="Lower"/>): each top-level decl's unwrapped content in
+    /// source order, a container one carrying its registration NAME, with every struct's nested
+    /// container members spliced in directly after it (recursively) under the parent-mangled name
+    /// <c>Parent__Inner</c> and their parent's name. A non-container decl carries a null name.</summary>
+    private static List<(string? Name, object? Content, string? Parent)> CollectPass0Decls(IReadOnlyList<Item> decls)
+    {
+        var list = new List<(string? Name, object? Content, string? Parent)>();
+        foreach (var decl in decls)
+        {
+            var content = Unwrap(decl).Content;
+            if (ContainerDeclName(content) is { } name)
+            {
+                AddContainer(name, content, null);
+            }
+            else
+            {
+                list.Add((null, content, null));
+            }
+        }
+        return list;
+
+        void AddContainer(string name, object? content, string? parent)
+        {
+            list.Add((name, content, parent));
+            Item? members = content switch
+            {
+                Zig.StructDecl s       => s.Arg5,
+                Zig.ExternStructDecl s => s.Arg6,
+                Zig.PackedStructDecl s => s.Arg6,
+                _ => null,
+            };
+            if (members is null) { return; }
+            foreach (var nested in SplitMembers(members).containers)
+            {
+                var nestedContent = nested.Content;
+                if (ContainerDeclName(nestedContent) is { } inner)
+                {
+                    AddContainer($"{name}__{inner}", nestedContent, name);
+                }
+            }
+        }
+    }
+
+    /// <summary>The declared (source) name of a container decl — <c>Mode</c> for
+    /// <c>const Mode = enum {…};</c> — or null when the node is not a container decl.</summary>
+    private static string? ContainerDeclName(object? content) => content switch
+    {
+        Zig.StructDecl s        => Tok(s.Arg1),
+        Zig.StructDeclEmpty s   => Tok(s.Arg1),
+        Zig.ExternStructDecl s  => Tok(s.Arg1),
+        Zig.PackedStructDecl s  => Tok(s.Arg1),
+        Zig.EnumDecl e          => Tok(e.Arg1),
+        Zig.EnumDeclTyped e     => Tok(e.Arg1),
+        Zig.UnionDeclEnum u     => Tok(u.Arg1),
+        Zig.UnionDeclTagged u   => Tok(u.Arg1),
+        Zig.UnionDeclUntagged u => Tok(u.Arg1),
+        _ => null,
+    };
+
     private static Item Unwrap(Item decl) => decl.Content switch
     {
         Zig.PubFn p         => p.Arg1,   // `pub FnDef`

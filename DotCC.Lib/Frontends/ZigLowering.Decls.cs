@@ -479,8 +479,8 @@ internal sealed partial class ZigLowering
     /// function, so <c>pub</c> carries no extra meaning yet (export visibility for a single-file
     /// program is a no-op) and is dropped here. A NESTED container decl member
     /// (<c>const Inner = struct {…};</c>, road-to-zig-std S9 grammar #89) is collected into
-    /// <paramref name="containers"/> (the inner <c>ContainerDecl</c> item), bound by
-    /// <see cref="RegisterNestedContainers"/>.</summary>
+    /// <paramref name="containers"/> (the inner <c>ContainerDecl</c> item), which pass 0 registers as an
+    /// ordinary container under a parent-mangled name (see <c>CollectPass0Decls</c>).</summary>
     private static (List<Item> fields, List<Item> methods, List<Item> consts, List<Item> containers) SplitMembers(Item membersItem)
     {
         var fields = new List<Item>();
@@ -503,61 +503,6 @@ internal sealed partial class ZigLowering
             }
         }
         return (fields, methods, consts, containers);
-    }
-
-    /// <summary>Bind each NESTED container decl member of <paramref name="parentName"/> (a
-    /// <c>const Inner = struct {…};</c> inside a struct body — road-to-zig-std S9, grammar #89). V1
-    /// registers nested STRUCTS only, fields-only: the nested struct's field layout registers into the
-    /// shared IR aggregate table under a parent-mangled name (<c>Parent__Inner</c>, unique so two
-    /// parents' like-named nested types never collide), and the plain name <c>Inner</c> maps into
-    /// <see cref="_nestedContainerTypes"/> scoped to <paramref name="parentName"/> — so a method of the
-    /// parent resolves <c>Inner</c> / <c>Inner{…}</c> / <c>i.field</c> through the ordinary named-struct
-    /// machinery. A nested enum/union, a nested struct carrying methods/consts or its OWN nested
-    /// container, and external qualified access (<c>Parent.Inner</c>) are deferred loud cuts.</summary>
-    private void RegisterNestedContainers(string parentName, IReadOnlyList<Item> containers)
-    {
-        foreach (var c in containers)
-        {
-            switch (c.Content)
-            {
-                case Zig.StructDecl s:      RegisterNestedStruct(parentName, Tok(s.Arg1), s.Arg5, AggregateLayout.Default); break;      // const IDENT = struct { … } ;
-                case Zig.StructDeclEmpty s: RegisterNestedStruct(parentName, Tok(s.Arg1), null, AggregateLayout.Default); break;        // const IDENT = struct { } ;
-                case Zig.ExternStructDecl s: RegisterNestedStruct(parentName, Tok(s.Arg1), s.Arg6, AggregateLayout.Sequential); break;  // const IDENT = extern struct { … } ;
-                case Zig.PackedStructDecl s: RegisterNestedStruct(parentName, Tok(s.Arg1), s.Arg6, AggregateLayout.Packed); break;      // const IDENT = packed struct { … } ;
-                default:
-                    throw new IrUnsupportedException(
-                        "zig: a nested container `" + (c.Content?.GetType().Name ?? "null")
-                        + "` inside `" + parentName + "` is not lowered yet (road-to-zig-std S9: V1 binds nested STRUCTS only; "
-                        + "declare a nested enum/union at top level)");
-            }
-        }
-    }
-
-    /// <summary>Register one nested struct member (<see cref="RegisterNestedContainers"/>): mangle the
-    /// name to <c>Parent__Inner</c>, register its field layout, and scope the plain name to the parent
-    /// in <see cref="_nestedContainerTypes"/>. Fields-only — a method / <c>const</c> / further-nested
-    /// container member of the nested struct is a loud cut (it needs the top-level container machinery
-    /// the file-scope passes drive; a nested struct is not in that decl list).</summary>
-    private void RegisterNestedStruct(string parentName, string innerName, Item? membersItem, AggregateLayout layout)
-    {
-        var (fields, methods, consts, containers) = membersItem is { } m
-            ? SplitMembers(m)
-            : (new List<Item>(), new List<Item>(), new List<Item>(), new List<Item>());
-        if (methods.Count > 0 || consts.Count > 0 || containers.Count > 0)
-        {
-            throw new IrUnsupportedException(
-                $"zig: the nested container `{parentName}.{innerName}` is fields-only in V1 (road-to-zig-std S9) — "
-                + "a method, `const`, or further-nested container member needs a top-level container decl");
-        }
-        var mangled = $"{parentName}__{innerName}";
-        _containerTypes[mangled] = new CType.Named(mangled);  // so a self-referential field (`next: *Parent__Inner`) resolves
-        RegisterStruct(mangled, fields, layout);
-        if (!_nestedContainerTypes.TryGetValue(parentName, out var nested))
-        {
-            nested = new Dictionary<string, CType>(System.StringComparer.Ordinal);
-            _nestedContainerTypes[parentName] = nested;
-        }
-        nested[innerName] = new CType.Named(mangled);
     }
 
     /// <summary>Split an enum body (<c>EnumFields</c> = a list of <c>EnumMember</c>) into its value
@@ -823,16 +768,15 @@ internal sealed partial class ZigLowering
     /// <c>enum(T)</c> base, else C's default <see cref="CType.Int"/>. Returns the body's method
     /// items (each a <c>FnDef</c>) for declaration in pass 1, and registers its consts (e.g.
     /// <c>const Self = @This();</c> → the enum type).</summary>
-    private List<Item> RegisterEnumZig(Item nameTok, Item? underlyingType, Item membersItem)
+    private List<Item> RegisterEnumZig(string name, Item? underlyingType, Item membersItem)
     {
-        var name = Tok(nameTok);
         var (fieldItems, methods, consts) = SplitEnumMembers(membersItem);
         var underlying = underlyingType is not null ? LowerType(underlyingType) : CType.Int;
         // Remember whether the SOURCE spelled the tag type. zig INFERS one for an untyped enum (the
         // smallest unsigned int holding the largest member — `u2` for four members) while dotcc
         // defaults to `int`, so reporting an inferred tag through `@typeInfo(E).@"enum".tag_type`
         // would disagree with zig on its width and @sizeOf. Only a spelled tag is answered there.
-        if (underlyingType is not null) { _enumsWithSpelledTag.Add(Tok(nameTok)); }
+        if (underlyingType is not null) { _enumsWithSpelledTag.Add(name); }
         var enumType = new CType.Enum(name, underlying);
         var members = new List<EnumMember>();
         var memberSyms = new Dictionary<string, Symbol>(System.StringComparer.Ordinal);
