@@ -3760,6 +3760,41 @@ public sealed class ZigOracleTests
     /// into the same program and cross-module calls resolve.</summary>
     public static IEnumerable<object[]> MultiFilePrograms => new[]
     {
+        // std.Target's shape (road-to-zig-std, the target-identity segment T1/T2): a module-qualified NESTED
+        // type (`tgt.Cpu.Arch`, `tgt.Cpu.Arch.Family`: the module prefix, then the owner's nested containers)
+        // and a container nested in an ENUM body, with methods (`arch.family()`). 64 - 16 - 38 + 10 + 22 = 42.
+        new object[] { "module_nested_enum_types",
+            "const tgt = @import(\"tgt.zig\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const a: tgt.Cpu.Arch = .aarch64;\n" +
+            "    const f: tgt.Cpu.Arch.Family = a.family();\n" +
+            "    const c: tgt.Cpu = .{ .arch = .avr };\n" +
+            "    const fam_bonus: u8 = if (f == .arm) 10 else 0;\n" +
+            "    return a.ptrBits() - c.arch.ptrBits() - 38 + fam_bonus + 22;\n" +
+            "}\n",
+            "tgt.zig",
+            "pub const Cpu = struct {\n" +
+            "    arch: Arch,\n" +
+            "    pub const Arch = enum {\n" +
+            "        x86_64,\n" +
+            "        aarch64,\n" +
+            "        avr,\n" +
+            "        pub const Family = enum { x86, arm, avr };\n" +
+            "        pub fn family(arch: Arch) Family {\n" +
+            "            return switch (arch) {\n" +
+            "                .x86_64 => .x86,\n" +
+            "                .aarch64 => .arm,\n" +
+            "                .avr => .avr,\n" +
+            "            };\n" +
+            "        }\n" +
+            "        pub fn ptrBits(arch: Arch) u8 {\n" +
+            "            return switch (arch.family()) {\n" +
+            "                .avr => 16,\n" +
+            "                else => 64,\n" +
+            "            };\n" +
+            "        }\n" +
+            "    };\n" +
+            "};\n", 42, "" },
         // Module-qualified type paths from user code: a static call through `h.H` (`h.H.hash(0, 0)`) and a type
         // alias rooted at an inline import (`const H2 = @import("h.zig").H;`). 42 + 41 - 41 = 42.
         new object[] { "module_qualified_type_paths",
@@ -4451,6 +4486,54 @@ public sealed class ZigOracleTests
             dotccExit.ShouldBe(zigExit, "dotcc's std.fmt.parseInt from source diverges from real zig (exit code)");
             dotccExit.ShouldBe(42, "std.fmt.parseInt did not produce the expected result");
             Norm(dotccStdout).ShouldBe(Norm(zigStdout), "dotcc's std.fmt.parseInt from source diverges from real zig (stdout)");
+        }
+        finally
+        {
+            try { Directory.Delete(workDir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    /// <summary><c>std.Target.Cpu.Arch.endian()</c> from REAL upstream Target.zig (the target-identity segment,
+    /// T1/T2): a type nested two containers deep in another module, whose enum body nests `Family`.</summary>
+    [Fact]
+    public void Dotcc_matches_zig_std_target_arch_from_source()
+    {
+        if (!ZigRunRequested)
+        {
+            Assert.Skip($"Zig oracle is opt-in. Set {RunZigEnv}=1 to run the std.Target differential.");
+        }
+        if (!ZigOracle.IsAvailable)
+        {
+            Assert.Skip($"{RunZigEnv} requested but no `zig` is on PATH on this host.");
+        }
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOTCC_ZIG_LIB_DIR")))
+        {
+            Assert.Skip("DOTCC_ZIG_LIB_DIR must point at the zig lib dir so dotcc navigates the real std.Target source.");
+        }
+
+        const string program =
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const a: std.Target.Cpu.Arch = .x86_64;\n" +
+            "    const b: std.Target.Cpu.Arch = .powerpc;\n" +
+            "    const little: u8 = if (a.endian() == .little) 40 else 0;\n" +
+            "    const big: u8 = if (b.endian() == .big) 2 else 0;\n" +
+            "    return little + big;\n" +
+            "}\n";
+
+        var workDir = Path.Combine(Path.GetTempPath(), $"dotcc-zig-stdtarget-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(workDir);
+        var mainPath = Path.Combine(workDir, "main.zig");
+        File.WriteAllText(mainPath, program);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { mainPath }, emit: EmitMode.Csproj);
+            var (dotccStdout, dotccExit) = FixtureRunner.CompileAndRunCapturingExit(emitted, Array.Empty<string>());
+            var (zigStdout, zigExit) = ZigOracle.CompileAndRun(mainPath, workDir);
+
+            dotccExit.ShouldBe(zigExit, "dotcc's std.Target.Cpu.Arch from source diverges from real zig (exit code)");
+            dotccExit.ShouldBe(42, "std.Target.Cpu.Arch.endian did not produce the expected result");
+            Norm(dotccStdout).ShouldBe(Norm(zigStdout), "dotcc's std.Target.Cpu.Arch from source diverges from real zig (stdout)");
         }
         finally
         {

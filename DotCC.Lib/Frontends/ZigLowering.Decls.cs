@@ -616,10 +616,43 @@ internal sealed partial class ZigLowering
                 case Zig.EnumMemberTest: break;       // a `test` block (std.math.Order's `test invert`): dropped
                 case Zig.EnumMemberConst mc:     consts.Add(mc.Arg0); break;   // VarDecl
                 case Zig.EnumMemberPubConst mc:  consts.Add(mc.Arg1); break;   // 'pub' VarDecl
+                // A NESTED container (std.Target.Cpu.Arch's `pub const Family = enum {…}`): registered by pass 0
+                // under a parent-mangled name (NestedContainerItems), not here.
+                case Zig.EnumMemberContainer or Zig.EnumMemberPubContainer: break;
                 default: throw new IrUnsupportedException("zig enum member: " + (m.Content?.GetType().Name ?? "null"));
             }
         }
         return (fields, methods, consts);
+    }
+
+    /// <summary>The nested container decl items of a container of ANY kind: a struct body's (SplitMembers), an
+    /// enum's (std.Target.Cpu.Arch nests `Family`) and a union's. Empty for a container with a body of none.</summary>
+    private static IReadOnlyList<Item> NestedContainerItems(object? content)
+    {
+        IEnumerable<Item> FromEnum(Item members) => Flatten(members).Select(m => m.Content switch
+        {
+            Zig.EnumMemberContainer c => c.Arg0,
+            Zig.EnumMemberPubContainer c => c.Arg1,
+            _ => null,
+        }).OfType<Item>();
+        IEnumerable<Item> FromUnion(Item members) => Flatten(members).Select(m => m.Content switch
+        {
+            Zig.UnionMemberContainer c => c.Arg0,
+            Zig.UnionMemberPubContainer c => c.Arg1,
+            _ => null,
+        }).OfType<Item>();
+        return content switch
+        {
+            Zig.StructDecl s => SplitMembers(s.Arg5).containers,
+            Zig.ExternStructDecl s => SplitMembers(s.Arg6).containers,
+            Zig.PackedStructDecl s => SplitMembers(s.Arg6).containers,
+            Zig.EnumDecl e => FromEnum(e.Arg5).ToList(),
+            Zig.EnumDeclTyped e => FromEnum(e.Arg8).ToList(),
+            Zig.UnionDeclEnum u => FromUnion(u.Arg8).ToList(),
+            Zig.UnionDeclTagged u => FromUnion(u.Arg8).ToList(),
+            Zig.UnionDeclUntagged u => FromUnion(u.Arg5).ToList(),
+            _ => System.Array.Empty<Item>(),
+        };
     }
 
     /// <summary>Split a union body (<c>UnionVariants</c> = a list of <c>UnionMember</c>) into its
@@ -645,6 +678,7 @@ internal sealed partial class ZigLowering
                 case Zig.UnionMemberTest: break;       // a `test` block: dropped
                 case Zig.UnionMemberConst mc:       consts.Add(mc.Arg0); break;     // VarDecl
                 case Zig.UnionMemberPubConst mc:    consts.Add(mc.Arg1); break;     // 'pub' VarDecl
+                case Zig.UnionMemberContainer or Zig.UnionMemberPubContainer: break;   // nested: see NestedContainerItems
                 default: throw new IrUnsupportedException("zig union member: " + (m.Content?.GetType().Name ?? "null"));
             }
         }

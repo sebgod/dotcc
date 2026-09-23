@@ -1820,14 +1820,7 @@ internal sealed partial class ZigLowering
                 if (ContainerDeclName(nested.Content) is not { } inner) { continue; }
                 var name = $"{p}__{inner}";
                 list.Add((name, nested.Content, p));
-                Item? members = nested.Content switch
-                {
-                    Zig.StructDecl s => s.Arg5,
-                    Zig.ExternStructDecl s => s.Arg6,
-                    Zig.PackedStructDecl s => s.Arg6,
-                    _ => null,
-                };
-                if (members is not null) { Add(name, SplitMembers(members).containers); }
+                Add(name, NestedContainerItems(nested.Content));
             }
         }
         Add(parent, containers);
@@ -1855,15 +1848,7 @@ internal sealed partial class ZigLowering
         void AddContainer(string name, object? content, string? parent)
         {
             list.Add((name, content, parent));
-            Item? members = content switch
-            {
-                Zig.StructDecl s       => s.Arg5,
-                Zig.ExternStructDecl s => s.Arg6,
-                Zig.PackedStructDecl s => s.Arg6,
-                _ => null,
-            };
-            if (members is null) { return; }
-            foreach (var nested in SplitMembers(members).containers)
+            foreach (var nested in NestedContainerItems(content))
             {
                 var nestedContent = nested.Content;
                 if (ContainerDeclName(nestedContent) is { } inner)

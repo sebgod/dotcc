@@ -840,6 +840,9 @@ internal sealed partial class ZigLowering
             throw new IrUnsupportedException(
                 $"zig module '{System.IO.Path.GetFileName(navMod.Path)}' declares no type '{name}'");
         }
+        // `std.Target.Cpu.Arch`: a type NESTED in a container another module declares — the module prefix,
+        // then the owner's nested containers / type consts, segment by segment.
+        if (!IsCuratedStdPath(f) && TryResolveModuleNestedType(f) is { } nestedInModule) { return nestedInModule.Type; }
         if (isStdPath)
         {
             throw new IrUnsupportedException(
@@ -1007,6 +1010,32 @@ internal sealed partial class ZigLowering
             if (_nestedContainerTypes.TryGetValue(c, out var m) && m.TryGetValue(name, out var t)) { return t; }
         }
         return null;
+    }
+
+    /// <summary>A module-qualified NESTED type (<c>std.Target.Cpu.Arch</c>): the first segment after a module is a
+    /// type that module declares, and each further one a nested container or type const of the previous, looked
+    /// up in the module that owns it. Returns the type with its owner, or null.</summary>
+    private (CType Type, ZigLowering Owner)? TryResolveModuleNestedType(Item dotted)
+    {
+        if (dotted.Content is not Zig.Field f) { return null; }
+        var name = Tok(f.Arg2);
+        if (ResolveModulePath(f.Arg0) is { Lowering: { } module } && module.ResolveExportedType(name) is { } top)
+        {
+            return (top, module);
+        }
+        if (f.Arg0.Content is not Zig.Field || TryResolveModuleNestedType(f.Arg0) is not { } outer) { return null; }
+        var outerName = outer.Type.Unqualified switch
+        {
+            CType.Named n => n.Name,
+            CType.Enum e => e.Name,
+            _ => null,
+        };
+        if (outerName is null) { return null; }
+        if (outer.Owner._nestedContainerTypes.TryGetValue(outerName, out var nested) && nested.TryGetValue(name, out var inner))
+        {
+            return (inner, outer.Owner);
+        }
+        return outer.Owner.TryContainerTypeConst(outerName, name) is { } typeConst ? (typeConst, outer.Owner) : null;
     }
 
     /// <summary>Resolve <c>Parent.Inner</c> (or <c>Outer.Mid.Inner</c>) to a NESTED container type, or to a

@@ -791,6 +791,27 @@ that retire curated shortcuts.
 >   cacheLineForCpu(builtin.cpu)`, a function over the real `std.Target.Cpu`: dotcc's TARGET identity again
 >   (the task-#20 family; `builtin` is duck-typed precisely to avoid std.Target's CPU tables).
 
+### The target-identity segment (decided 2026-09-24)
+
+Four probes stop at the same question: what dotcc's target IS. `std.simd.suggestVectorLength` (indexOfScalar,
+mem.sort), `builtin.cpu.arch.endian()` (std.mem's `native_endian`, under AutoHashMap), and
+`std.atomic.cache_line = cacheLineForCpu(builtin.cpu)` (ArrayList). **Decision: model a REAL
+`std.Target.Cpu`**, so std's own functions answer from source, rather than curating each answer. The
+maintainer's refinement: dotcc is a .NET program, so it fills that value from the HOST through .NET's own
+facts at dotcc's compile time (`RuntimeInformation.ProcessArchitecture`, `BitConverter.IsLittleEndian`,
+`System.Runtime.Intrinsics.X86.Avx2.IsSupported`, `Arm.AdvSimd.IsSupported`, …), as zig's default
+`-mcpu=native` does; and `@Vector(N, T)` lowers to `Vector128<T>` / `Vector256<T>`, which the JIT compiles to
+SSE/AVX/NEON. A build on a newer CPU stays CORRECT on an older one (the intrinsic vector types have software
+fallbacks), so taking the build host's features is safe. The answer is fixed at compile time, as in zig: the
+vector length feeds TYPES.
+
+- **T1 ✅** cross-module qualified nested types (`std.Target.Cpu.Arch`).
+- **T2 ✅** a container nested in an enum body; `std.Target.Cpu.Arch.endian()` runs from Target.zig == zig.
+- **T3** the synthetic `builtin.cpu` as a typed `std.Target.Cpu` value filled from the intrinsics.
+- **T4** comptime evaluation over that value (`featureSetHas`, `cacheLineForCpu`, `suggestVectorLengthForCpu`):
+  comptime struct / array values, the same engine #10's `std.fmt.ArgState` needs.
+- **T5** `@Vector(N, T)` → `Vector128<T>` / `Vector256<T>`, with `@splat`, element-wise ops, `@reduce`.
+
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)
 
 An opt-in test/tool (`DOTCC_RUN_STD_PROBE=1`, env `DOTCC_ZIG_LIB_DIR` or

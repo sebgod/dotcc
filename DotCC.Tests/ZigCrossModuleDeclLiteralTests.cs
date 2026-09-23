@@ -106,4 +106,36 @@ public sealed class ZigCrossModuleDeclLiteralTests
         cs.ShouldContain("h__H_hash(0, 0)");
         cs.ShouldContain("h__H b = h__H_init(1);");
     }
+
+    [Fact]
+    public void A_module_qualified_nested_type_and_an_enum_nested_container_resolve()
+    {
+        // std.Target's shape: `tgt.Cpu.Arch` and `tgt.Cpu.Arch.Family` (the module prefix, then the owner's
+        // nested containers), where `Family` is nested in an ENUM body.
+        var cs = EmitZigPair("""
+            const tgt = @import("tgt.zig");
+            pub fn main() u8 {
+                const a: tgt.Cpu.Arch = .aarch64;
+                const f: tgt.Cpu.Arch.Family = a.family();
+                return if (f == .arm) 42 else 0;
+            }
+            """, "tgt.zig", """
+            pub const Cpu = struct {
+                arch: Arch,
+                pub const Arch = enum {
+                    x86_64,
+                    aarch64,
+                    pub const Family = enum { x86, arm };
+                    pub fn family(arch: Arch) Family {
+                        return switch (arch) {
+                            .x86_64 => .x86,
+                            .aarch64 => .arm,
+                        };
+                    }
+                };
+            };
+            """);
+        cs.ShouldContain("tgt__Cpu__Arch a = tgt__Cpu__Arch.aarch64;");
+        cs.ShouldContain("tgt__Cpu__Arch__Family f = tgt__Cpu__Arch_family(a);");
+    }
 }
