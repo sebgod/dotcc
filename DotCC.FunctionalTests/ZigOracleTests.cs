@@ -3433,6 +3433,26 @@ public sealed class ZigOracleTests
             "    const w = Store(u16).widen(u32, 30);\n" +
             "    return @intCast(a * 2 + b + w + 4);\n" +
             "}\n", 42, "" },
+        // zig's `*[N]T` -> `[*]T` coercion (hash_map's FieldIterator `.metadata = &self.metadata`): the address
+        // of an array, a field's or a local's, at a many-pointer sink is its first element's. It used to emit
+        // `&arr`, a pointer to the element pointer (CS0266). 40 + 2 + 1 - 1 = 42.
+        new object[] { "array_address_to_many_pointer",
+            "const Holder = struct {\n" +
+            "    vals: [3]u8,\n" +
+            "    pub fn first(self: *const Holder) u8 {\n" +
+            "        const p: [*]const u8 = &self.vals;\n" +
+            "        return p[0] + p[2];\n" +
+            "    }\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    var h: Holder = undefined;\n" +
+            "    h.vals[0] = 40;\n" +
+            "    h.vals[1] = 0;\n" +
+            "    h.vals[2] = 2;\n" +
+            "    const arr = [3]u8{ 1, 2, 3 };\n" +
+            "    const q: [*]const u8 = &arr;\n" +
+            "    return h.first() + q[0] - 1;\n" +
+            "}\n", 42, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

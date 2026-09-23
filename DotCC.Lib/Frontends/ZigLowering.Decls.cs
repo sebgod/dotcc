@@ -1434,6 +1434,17 @@ internal sealed partial class ZigLowering
                 {
                     return CoerceToSlice(lowered, slc);
                 }
+                // `*[N]T` → `[*]T` at a many-pointer sink (`.marks = &self.marks` in hash_map's
+                // FieldIterator): the address of an array is its first element's, which is what the array
+                // itself already renders as (a local's element pointer, a field's fixed buffer or inline-array
+                // element pointer), C's array decay. `&arr` would instead be a pointer to that pointer.
+                if (sink?.Unqualified is CType.Pointer { Pointee: var sinkElem }
+                    && lowered is Unary { Op: UnOp.AddrOf, Operand: var arrOperand }
+                    && arrOperand.Type.Unqualified is CType.Array { Element: var arrElem }
+                    && arrElem.Unqualified.Equals(sinkElem.Unqualified))
+                {
+                    return arrOperand;
+                }
                 return lowered;
             }
         }
