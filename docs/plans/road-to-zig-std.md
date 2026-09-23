@@ -769,7 +769,9 @@ that retire curated shortcuts.
 > - `array_list.Aligned(u8, null)` is past `SentinelSlice` and stops at `AlignedManaged(T, alignment)`,
 >   which forwards the owner's comptime OPTIONAL seed as an argument (done, oracle
 >   `comptime_optional_forwarding`), then `toOwnedSliceSentinel`'s `comptime sentinel: T` (a generic method,
->   done). It stops at `.empty` of a container another module declares: a cross-module decl-literal VALUE.
+>   done), then `.empty` of a container another module declares (lowered by its owner, oracle
+>   `cross_module_decl_literal`), the empty slice `&.{}` / `&[_]T{}`, a bare sibling call, and `@memmove`.
+>   It stops at a value-position `switch` with a VOID block prong.
 
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)
 

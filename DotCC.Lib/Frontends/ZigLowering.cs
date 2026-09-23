@@ -1646,8 +1646,11 @@ internal sealed partial class ZigLowering
         }
         var prev = _currentConstContainer;
         _currentConstContainer = container;
-        // A reified struct's const may read its comptime params (`pub const max = if (cap) |n| n else 0;`).
+        // A reified struct's const may read its comptime params (`pub const max = if (cap) |n| n else 0;`),
+        // and any const is evaluated in its container's scope (`pub const empty: Self = .{ … };`, read as a
+        // decl literal from another module).
         using var seeds = EnterReifiedSeeds(container);
+        using var scope = EnterContainer(container);
         try
         {
             var sink = typeItem is not null ? LowerType(typeItem) : null;

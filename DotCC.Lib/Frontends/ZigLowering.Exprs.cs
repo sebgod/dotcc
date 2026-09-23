@@ -1016,6 +1016,15 @@ internal sealed partial class ZigLowering
         {
             return CallExportedDecl(fnAlias.Owner, fnAlias.Sym, argItems);
         }
+        // A bare call to a function of the container in scope or one enclosing it (`self.* = init(allocator);`
+        // inside AlignedManaged): zig resolves a container's declarations lexically, as `Self.init(…)`.
+        if (sym is null)
+        {
+            for (var c = _currentContainer; c is not null; c = _containerParents.GetValueOrDefault(c))
+            {
+                if (EnsureMethodDeclared(c, name) is { } sibling) { return CallStaticMethod(sibling, argItems); }
+            }
+        }
         if (sym is null) { throw new IrUnsupportedException($"call to unresolved name '{name}'"); }
         // A type-returning generic (wall-plan W4) is a COMPTIME type constructor — calling it in value
         // position is meaningless; it must appear in a TYPE position (a type annotation / alias / typed

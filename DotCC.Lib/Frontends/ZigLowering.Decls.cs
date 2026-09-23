@@ -696,6 +696,7 @@ internal sealed partial class ZigLowering
             {
                 consts = new Dictionary<string, (Item?, Item)>(System.StringComparer.Ordinal);
                 _containerConsts[container] = consts;
+                _shared.ContainerConstOwners[container] = this;
             }
             if (!consts.TryAdd(cname, (typeItem, rhs)))
             {
@@ -1343,19 +1344,35 @@ internal sealed partial class ZigLowering
 
     /// <summary>Lower a decl-literal VALUE <c>.name</c> at a sink of container type
     /// <paramref name="container"/> — the container's <c>const name</c>, re-lowered like a
-    /// <c>Container.name</c> read (<see cref="LowerContainerConst"/>). V1 reads the consts of containers
-    /// THIS module declares; one declared in another module is a loud cut (its const RHS must lower in its
-    /// owner, which the value path does not route to yet — the call form does).</summary>
+    /// <c>Container.name</c> read (<see cref="LowerContainerConst"/>). A container another module declares
+    /// (array_list's reified <c>Aligned(u8, null)</c> with its <c>pub const empty</c>) has its const lowered
+    /// by that module, where its RHS and the instance's comptime seeds resolve, as the call form
+    /// (<see cref="LowerDeclLiteralCall"/>) already routes through the shared method registry.</summary>
     private CExpr LowerDeclLiteralValue(string container, string name)
     {
         if (_containerConsts.TryGetValue(container, out var consts) && consts.TryGetValue(name, out var entry))
         {
             return LowerContainerConst(container, name, entry.typeItem, entry.rhs);
         }
-        throw new IrUnsupportedException(
-            $"decl literal `.{name}`: '{container}' has no `const {name}` in this module "
-            + "(a decl-literal VALUE of a container declared in another module is not lowered yet)");
+        if (_shared.ContainerConstOwners.TryGetValue(container, out var owner) && owner != this)
+        {
+            return owner.LowerDeclLiteralValue(container, name);
+        }
+        throw new IrUnsupportedException($"decl literal `.{name}`: '{container}' has no `const {name}`");
     }
+
+    /// <summary>True for an empty aggregate literal that spells a zero-length array: <c>.{}</c>, or a typed
+    /// <c>[_]T{}</c> / <c>[0]T{}</c>.</summary>
+    private bool IsEmptyArrayLiteral(Item literal) => literal.Content switch
+    {
+        Zig.AnonStructInitEmpty => true,
+        Zig.TypedStructInitEmpty { Arg0.Content: Zig.TyArray ta } => ta.Arg1.Content switch
+        {
+            Zig.Ident id => Tok(id.Arg0) == "_",                       // `[_]T{}`: the extent is inferred, 0
+            _ => _ir.ConstEval(LowerExpr(ta.Arg1)) is 0,               // `[0]T{}`
+        },
+        _ => false,
+    };
 
     /// <summary>Lower an expression that has a known result type (a "sink"): the two
     /// result-located Zig forms — a bare enum literal <c>.member</c> and an anonymous struct
@@ -1414,6 +1431,13 @@ internal sealed partial class ZigLowering
             // subject already selects one arm at lowering time.
             case Zig.ComptimeSwitchExpr c: return LowerExprSink(c.Arg1, sink);
             case Zig.ComptimeIfExpr c:     return LowerExprSink(c.Arg1, sink);
+            // `&.{}` / `&[_]T{}` at a slice sink is the EMPTY slice (array_list's `pub const empty: Self =
+            // .{ .items = &.{}, .capacity = 0 }`, AlignedManaged's `.items = &[_]T{}`): the address of a
+            // zero-length array, a null pointer with length 0.
+            case Zig.PreAddrOf emptyAddr when sink?.Unqualified is CType.Slice emptySlice && IsEmptyArrayLiteral(emptyAddr.Arg1):
+                return new SliceNew(new NullPtr { Type = new CType.Pointer(emptySlice.Element.Unqualified) },
+                    new LitInt("0", 0) { Type = CType.ULong }, emptySlice.Element.Unqualified, emptySlice.Element.IsConst)
+                { Type = emptySlice };
             // `&.{ … }` at a `*const S` sink (std.Io.Writer.fixed's `.vtable = &.{ .drain = fixedDrain, … }`):
             // the literal is result-located at `S`, and a comptime-known one lives in static storage.
             case Zig.PreAddrOf pa when pa.Arg1.Content is Zig.AnonStructInit
@@ -1882,6 +1906,16 @@ internal sealed partial class ZigLowering
                 var mcDest = LowerMemSlice(bargs[0], wantConst: false, out var mcElem);
                 var mcSrc = LowerMemSlice(bargs[1], wantConst: true, out _);
                 return new ZigMemCall("CopyForwards", mcElem, new List<CExpr> { mcDest, mcSrc }) { Type = CType.Void };
+            case "@memmove":
+                // `@memmove(dest, source)` — `@memcpy` for OVERLAPPING operands (a backward copy when dest is
+                // past source), array_list's in-place shift.
+                if (bargs.Count != 2)
+                {
+                    throw new IrUnsupportedException($"zig `@memmove` expects (dest, source); got {bargs.Count} argument(s)");
+                }
+                var mmDest = LowerMemSlice(bargs[0], wantConst: false, out var mmElem);
+                var mmSrc = LowerMemSlice(bargs[1], wantConst: true, out _);
+                return new ZigMemCall("Move", mmElem, new List<CExpr> { mmDest, mmSrc }) { Type = CType.Void };
             case "@memset":
                 // `@memset(dest, value)` — set every element of `dest` to `value` (lowered at the
                 // element-type sink, so a `comptime_int` like `7` becomes `(byte)7`).
@@ -1917,7 +1951,7 @@ internal sealed partial class ZigLowering
                     "@bitSizeOf, @offsetOf, @typeName, @typeInfo, @hasField, @hasDecl, @field, @Int, @compileError, " +
                     "@compileLog, @setEvalBranchQuota, @min, @max, @rem, @divTrunc, @mod, @divFloor, " +
                     "@popCount, @clz, @ctz, " +
-                    "@byteSwap, @abs, @intFromPtr, @errorName, @memcpy, @memset)");
+                    "@byteSwap, @abs, @intFromPtr, @errorName, @memcpy, @memmove, @memset)");
         }
     }
 

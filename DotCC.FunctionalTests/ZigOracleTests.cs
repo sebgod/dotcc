@@ -3601,6 +3601,38 @@ public sealed class ZigOracleTests
     /// into the same program and cross-module calls resolve.</summary>
     public static IEnumerable<object[]> MultiFilePrograms => new[]
     {
+        // array_list's surface (road-to-zig-std G4): a decl literal VALUE (`.empty`) of a container the
+        // SIBLING declares is lowered by that module, in the container's scope (`empty: Self`); the empty
+        // slice spelled `&.{}` and `&[_]T{}`; a bare sibling call (`self.* = fromEmpty();`); and `@memmove`
+        // over overlapping operands. 0 + 0 + (2 + 30 + 4 + 4) + 2 = 42.
+        new object[] { "cross_module_decl_literal",
+            "const list = @import(\"list.zig\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var a: list.List(u8) = .empty;\n" +
+            "    a.used = 5;\n" +
+            "    a.reset();\n" +
+            "    var buf = [_]u8{ 1, 2, 30, 4 };\n" +
+            "    list.List(u8).shiftLeft(&buf);\n" +
+            "    return @intCast(a.items.len + a.used + buf[0] + buf[1] + buf[2] + buf[3] + 2);\n" +
+            "}\n",
+            "list.zig",
+            "pub fn List(comptime T: type) type {\n" +
+            "    return struct {\n" +
+            "        items: []T,\n" +
+            "        used: usize,\n" +
+            "        const Self = @This();\n" +
+            "        pub const empty: Self = .{ .items = &.{}, .used = 0 };\n" +
+            "        pub fn fromEmpty() Self {\n" +
+            "            return .{ .items = &[_]T{}, .used = 0 };\n" +
+            "        }\n" +
+            "        pub fn reset(self: *Self) void {\n" +
+            "            self.* = fromEmpty();\n" +
+            "        }\n" +
+            "        pub fn shiftLeft(buf: []T) void {\n" +
+            "            @memmove(buf[0 .. buf.len - 1], buf[1..]);\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n", 42, "" },
         // Module-qualified container naming: the root AND the imported module each declare a `Shape`
         // struct and a `Kind` enum with DIFFERENT layouts/members. The emitted C# carries one type per
         // name, so this used to be a loud "two different aggregates" error (and, for the enum, a silent

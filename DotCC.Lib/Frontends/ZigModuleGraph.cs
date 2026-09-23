@@ -84,6 +84,11 @@ internal sealed class ZigImportScope
     /// its template and drains its instances), so a call from any module in the chain instantiates it.</summary>
     public Dictionary<Symbol, ZigLowering> GenericMethodOwners { get; } = new();
 
+    /// <summary>A container's IR name → the module holding its VALUE consts, so a decl literal
+    /// (<c>var list: std.array_list.Aligned(u8, null) = .empty;</c>) written in another module lowers the
+    /// const where it was declared.</summary>
+    public Dictionary<string, ZigLowering> ContainerConstOwners { get; } = new(StringComparer.Ordinal);
+
     private readonly Dictionary<string, string> _modulePrefixes = new(StringComparer.Ordinal);
     private readonly HashSet<string> _usedPrefixes = new(StringComparer.Ordinal);
 

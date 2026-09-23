@@ -42,6 +42,23 @@ public static class ZigMem
         for (ulong i = 0; i < source.Len; i++) { d[i] = s[i]; }
     }
 
+    /// <summary><c>@memmove(dest, source)</c> — copy <c>source.len</c> elements into <c>dest</c> where the two
+    /// may OVERLAP (array_list's in-place shifts): the direction is chosen so every element is read before it
+    /// is overwritten, as C's <c>memmove</c>.</summary>
+    public static unsafe void Move<T>(Slice<T> dest, ConstSlice<T> source) where T : unmanaged
+    {
+        T* d = dest.Ptr;
+        T* s = source.Ptr;
+        if (d <= s)
+        {
+            for (ulong i = 0; i < source.Len; i++) { d[i] = s[i]; }
+        }
+        else
+        {
+            for (ulong i = source.Len; i > 0; i--) { d[i - 1] = s[i - 1]; }
+        }
+    }
+
     /// <summary><c>@memset(dest, value)</c> — set every element of <c>dest</c> to
     /// <paramref name="value"/>.</summary>
     public static unsafe void Set<T>(Slice<T> dest, T value) where T : unmanaged
