@@ -109,6 +109,22 @@ public sealed class ZigCrossModuleGenericTests
     }
 
     [Fact]
+    public void An_imported_function_named_like_a_csharp_keyword_is_qualified_then_escaped()
+    {
+        // `double` is a C# keyword, which the legalizer escapes as `@double`; the module prefix has to go
+        // on the source name, not on the escaped one (`util__@double` does not parse).
+        var cs = EmitZigMulti("""
+            const util = @import("util.zig");
+            pub fn main() u8 {
+                return util.double(21);
+            }
+            """, ("util.zig", "pub fn double(x: u8) u8 {\n    return x + x;\n}\n"));
+        cs.ShouldContain("static unsafe byte util__double(byte x)");
+        cs.ShouldContain("return util__double(21);");
+        cs.ShouldNotContain("__@");
+    }
+
+    [Fact]
     public void A_runtime_string_for_a_comptime_string_parameter_is_rejected()
     {
         var ex = Should.Throw<Exception>(() => EmitZigMulti("""
