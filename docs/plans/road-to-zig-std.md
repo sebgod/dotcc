@@ -762,7 +762,13 @@ that retire curated shortcuts.
 >   const bare (`slot_tombstone`). Then `@typeInfo(Hash).int.bits` / `@typeInfo(FingerPrint).int.bits` over
 >   container type consts (they now carry the width they spelled). It stops at `AutoContext(K)`, whose
 >   `hash` / `eql` are container CONSTS bound to closure-idiom function values (`pub const hash =
->   getAutoHashFn(K, @This());`), called as methods.
+>   getAutoHashFn(K, @This());`), called as methods. Then those fell (container-const function values as
+>   methods, `comptime {}` guards with `if` / `@compileError` / `assert` in closure-idiom bodies, `@branchHint`,
+>   `comptime` keeping its result location, the curated `Alignment`'s `fromByteUnits` / `forward` /
+>   `backward` / `check`, a `switch` as an `and` / `or` operand, and a lazy module's top-level CALL consts
+>   evaluated only when named, so hash/crc.zig's `Crc(u3, .{ … })` no longer sinks std.hash). It stops in
+>   `std.mem.asBytes(&key)` (Wyhash's input): `AsBytesReturnType` reads `@typeInfo(P).pointer.size`, which
+>   dotcc cannot recover (`*T` and `[*]T` lower to one C pointer), under an `assert` in a type body.
 > - `std.mem.sort`: the closure idiom (`return struct { pub fn inner … }.inner;`) and comptime FUNCTION
 >   parameters landed, with an inline `@import(…).name` re-export, `noalias`, by-reference pair captures
 >   and `comptime { … }` prongs; then, past the value-width brick and a nested statement `switch` in

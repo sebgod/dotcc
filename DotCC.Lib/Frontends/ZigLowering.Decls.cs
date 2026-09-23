@@ -1339,6 +1339,12 @@ internal sealed partial class ZigLowering
     /// checked against the sink here; the ordinary store coercion does that.</summary>
     private CExpr LowerDeclLiteralCall(string container, string name, IReadOnlyList<Item> argItems)
     {
+        // The curated `std.mem.Alignment` (the runtime carrier) models `.fromByteUnits(n)` directly.
+        if (container == AlignmentTypeName && name == "fromByteUnits" && argItems.Count == 1)
+        {
+            return new Call("Alignment.fromByteUnits", new List<CExpr> { LowerExprSink(argItems[0], CType.ULong) },
+                new List<CType> { CType.ULong }, null) { Type = new CType.Named(AlignmentTypeName) };
+        }
         var fn = EnsureMethodDeclared(container, name)
             ?? throw new IrUnsupportedException(
                 $"decl literal `.{name}(…)`: '{container}' has no function '{name}'");
@@ -1434,6 +1440,18 @@ internal sealed partial class ZigLowering
             // subject already selects one arm at lowering time.
             case Zig.ComptimeSwitchExpr c: return LowerExprSink(c.Arg1, sink);
             case Zig.ComptimeIfExpr c:     return LowerExprSink(c.Arg1, sink);
+            // `comptime e` keeps its result location (hash_map's `const max_align: Alignment = comptime
+            // .fromByteUnits(…);`, a decl literal that needs the sink to resolve), then folds as LowerExpr's does.
+            case Zig.PreComptime pc when sink is not null:
+            {
+                var inner = LowerExprSink(pc.Arg1, sink);
+                // Only a SCALAR folds through the interpreter; an aggregate or curated value (the runtime
+                // `Alignment` carrier) is a pure expression that stays as it is.
+                if (inner.Type.Unqualified is not CType.Prim) { return inner; }
+                var fold = new ComptimeFold(inner) { Type = inner.Type };
+                _pendingComptimeFolds.Add(fold);
+                return fold;
+            }
             // `&.{}` / `&[_]T{}` at a slice sink is the EMPTY slice (array_list's `pub const empty: Self =
             // .{ .items = &.{}, .capacity = 0 }`, AlignedManaged's `.items = &[_]T{}`): the address of a
             // zero-length array, a null pointer with length 0.

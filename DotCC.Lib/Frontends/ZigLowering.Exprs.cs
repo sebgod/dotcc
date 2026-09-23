@@ -232,6 +232,8 @@ internal sealed partial class ZigLowering
             // boolean (short-circuit)
             case Zig.BoolOr a:  return Bin(BinOp.LogOr, a.Arg0, a.Arg2);
             case Zig.BoolAnd a: return Bin(BinOp.LogAnd, a.Arg0, a.Arg2);
+            case Zig.BoolOrSwitch a:  return Bin(BinOp.LogOr, a.Arg0, a.Arg2);    // `a or switch (…) {…}`
+            case Zig.BoolAndSwitch a: return Bin(BinOp.LogAnd, a.Arg0, a.Arg2);   // `a and switch (…) {…}`
             // bitwise / shift
             case Zig.BitAnd a:  return Bin(BinOp.BitAnd, a.Arg0, a.Arg2);
             case Zig.BitXor a:  return Bin(BinOp.BitXor, a.Arg0, a.Arg2);
@@ -1160,6 +1162,35 @@ internal sealed partial class ZigLowering
             ? FoldIfComptimeOnly(owner, inst.Instance, BuildCall(inst.Instance, inst.RuntimeArgs, receiver: null))
             : BuildCall(sym, argItems, receiver: null);
 
+    /// <summary>The function a container CONST names (<c>pub const hash = getAutoHashFn(K, @This());</c> in
+    /// hash_map's AutoContext, the closure idiom's function value), or null when <paramref name="container"/>
+    /// declares no such const or it is not a comptime function value. Resolved by the module holding the
+    /// const, in the container's scope with its comptime seeds live, and memoized.</summary>
+    private Symbol? ContainerFnConst(string container, string name)
+    {
+        var owner = _shared.ContainerConstOwners.TryGetValue(container, out var o) ? o : this;
+        return owner.OwnContainerFnConst(container, name);
+    }
+
+    /// <summary>The owner-side half of <see cref="ContainerFnConst"/>.</summary>
+    private Symbol? OwnContainerFnConst(string container, string name)
+    {
+        if (_containerFnConsts.TryGetValue((container, name), out var known)) { return known; }
+        if (!_containerConsts.TryGetValue(container, out var consts) || !consts.TryGetValue(name, out var entry)
+            || entry.typeItem is not null)
+        {
+            return null;
+        }
+        using var seeds = EnterReifiedSeeds(container);
+        using var scope = EnterContainer(container);
+        var fn = TryResolveComptimeFnValue(entry.rhs, this)?.Fn;
+        _containerFnConsts[(container, name)] = fn;
+        return fn;
+    }
+
+    /// <summary>Memo of <see cref="OwnContainerFnConst"/>: (container, const) → the function it names, or null.</summary>
+    private readonly Dictionary<(string Container, string Name), Symbol?> _containerFnConsts = new();
+
     /// <summary>Call a container function through its type (<c>Self.init(…)</c>, <c>Map(K, V).init(…)</c>): a
     /// direct call, or, for a GENERIC method, an instantiation in the module that owns it.</summary>
     private CExpr CallStaticMethod(Symbol method, IReadOnlyList<Item> argItems)
@@ -1282,7 +1313,7 @@ internal sealed partial class ZigLowering
             {
                 return CallExportedDecl(staticOwner, template, argItems);
             }
-            if (EnsureMethodDeclared(typeName, methodName) is not { } staticSym)
+            if ((EnsureMethodDeclared(typeName, methodName) ?? ContainerFnConst(typeName, methodName)) is not { } staticSym)
             {
                 throw new IrUnsupportedException($"'{typeName}' has no function '{methodName}'");
             }
@@ -1311,7 +1342,7 @@ internal sealed partial class ZigLowering
             && TryEvalTypeReturningCall(fld.Arg0, out var reifiedBase)
             && ContainerTypeName(reifiedBase) is { } reifiedName)
         {
-            if (EnsureMethodDeclared(reifiedName, methodName) is not { } reifiedSym)
+            if ((EnsureMethodDeclared(reifiedName, methodName) ?? ContainerFnConst(reifiedName, methodName)) is not { } reifiedSym)
             {
                 throw new IrUnsupportedException($"'{reifiedName}' has no function '{methodName}'");
             }
@@ -1361,6 +1392,33 @@ internal sealed partial class ZigLowering
         // Zig-declared container). Mutating methods are INSTANCE methods on the runtime
         // struct, so calling on an lvalue receiver mutates in place (zig's `*Self` methods);
         // the allocator is an explicit per-call argument (the unmanaged API, zig 0.15+).
+        // The curated `std.mem.Alignment` carrier's methods (std-internal code names them: hash_map's
+        // `max_align.forward(total)`): static helpers on the runtime `Alignment`, receiver first.
+        if (recv.Type.Unqualified is CType.Named { Name: AlignmentTypeName })
+        {
+            (string Helper, CType Ret, int Arity)? alignMethod = methodName switch
+            {
+                "toByteUnits" => ("Alignment.ToByteUnits", CType.ULong, 0),
+                "forward" => ("Alignment.Forward", CType.ULong, 1),
+                "backward" => ("Alignment.Backward", CType.ULong, 1),
+                "check" => ("Alignment.Check", CType.Bool, 1),
+                _ => null,
+            };
+            if (alignMethod is not { } am || argItems.Count != am.Arity)
+            {
+                throw new IrUnsupportedException(
+                    $"zig std.mem.Alignment has no modeled member '{methodName}' taking {argItems.Count} argument(s) "
+                    + "(curated: toByteUnits(), forward(addr), backward(addr), check(addr), fromByteUnits(n))");
+            }
+            var alignArgs = new List<CExpr> { recv };
+            var alignTypes = new List<CType> { recv.Type };
+            foreach (var a in argItems)
+            {
+                alignArgs.Add(LowerExprSink(a, CType.ULong));
+                alignTypes.Add(CType.ULong);
+            }
+            return new Call(am.Helper, alignArgs, alignTypes, null) { Type = am.Ret };
+        }
         if (recv.Type.Unqualified is CType.ZigList listTy)
         {
             return LowerZigListCall(recv, listTy, methodName, argItems);
@@ -1382,6 +1440,18 @@ internal sealed partial class ZigLowering
         }
         if (EnsureMethodDeclared(container, methodName) is not { } msym)
         {
+            // A container CONST bound to a function value (hash_map's AutoContext: `pub const hash =
+            // getAutoHashFn(K, @This());`) called on an instance: the function, with the receiver first.
+            if (ContainerFnConst(container, methodName) is { } constFn)
+            {
+                var cfnType = (CType.Func)constFn.Type.Unqualified;
+                if (cfnType.Params.Count == 0)
+                {
+                    throw new IrUnsupportedException(
+                        $"'{container}.{methodName}' takes no parameters — call it as `{container}.{methodName}(…)`, not on an instance");
+                }
+                return BuildCall(constFn, argItems, AdjustReceiver(recv, cfnType.Params[0]));
+            }
             // A FIELD holding a function pointer (`w.vtable.drain(w, data, n)`, std.Io.Writer's dispatch):
             // zig calls the field's value, with no receiver, each argument result-located against the
             // pointer's parameter type, like a call through a fn-pointer local.

@@ -252,12 +252,29 @@ internal sealed partial class ZigLowering
     /// so two modules may each declare a same-named aggregate.</para></summary>
     internal CType? ResolveExportedType(string name) => ResolveExportedType(name, 0);
 
+    /// <summary>A lazy module's top-level consts whose RHS is a CALL, not evaluated at prepare (see pass 0):
+    /// name → the call. The first TYPE-position use evaluates one (<see cref="TryDeferredTypeAlias"/>).</summary>
+    private readonly Dictionary<string, Item> _deferredTypeCalls = new(System.StringComparer.Ordinal);
+
+    /// <summary>Evaluate the deferred top-level call <paramref name="name"/> as a type alias, on its first use
+    /// as a type: true (and the alias registered, with its declared width) when it denotes a type. Consumed
+    /// either way, so a call that turns out to be a VALUE stays the lazy value const it already is.</summary>
+    private bool TryDeferredTypeAlias(string name, out CType type)
+    {
+        type = CType.Int;
+        if (!_deferredTypeCalls.Remove(name, out var rhs) || !TryTypeAliasRhs(rhs, out type)) { return false; }
+        _typeAliases[name] = type;
+        SetDeclaredIntBits(name, DeclaredBitsOfTypeArg(rhs));
+        return true;
+    }
+
     private CType? ResolveExportedType(string name, int hops)
     {
         RaiseIfPoisoned(name);   // a container whose lazy registration failed raises at this reference
         if (_containerTypes.TryGetValue(name, out var t)) { return t; }
         // A top-level type ALIAS (`pub const ArgSetType = u32;` in fmt.zig), recorded in pass 0.
         if (_typeAliases.TryGetValue(name, out var alias)) { return alias; }
+        if (TryDeferredTypeAlias(name, out var deferred)) { return deferred; }
         // A re-export (`pub const Pair = inner.Pair;`) names a type declared elsewhere.
         return ResolveAliasedType(name, hops);
     }
@@ -1199,6 +1216,13 @@ internal sealed partial class ZigLowering
                     // — recorded HERE in pass 0 so a pass-1 signature (`fn f(a: std.mem.Allocator)`)
                     // resolves the import alias. Emits no decl (Milestone F). A non-comptime const
                     // falls through (rejected in pass 1 as an unsupported top-level global).
+                    // In a LAZY module a CALL on the right (`pub const Crc3Gsm = Crc(u3, .{ … });` in hash/crc.zig)
+                    // is not evaluated at prepare: zig analyses a declaration only when it is referenced, and
+                    // preparing std.hash must not run every CRC instantiation. It is a deferred type-alias
+                    // candidate (TryDeferredTypeAlias) and, like any unclaimed const, a lazy value const.
+                    case Zig.ConstDecl d when _lazy && d.Arg3.Content is Zig.CallArgs or Zig.CallNoArgs:
+                        _deferredTypeCalls[Tok(d.Arg1)] = d.Arg3;
+                        break;
                     case Zig.ConstDecl d:      TryComptimeConstBinding(Tok(d.Arg1), d.Arg3); break;  // const IDENT = RhsExpr ;
                     case Zig.ConstDeclTyped d: TryComptimeConstBinding(Tok(d.Arg1), d.Arg5); break;  // const IDENT : Type = RhsExpr ;
                 }

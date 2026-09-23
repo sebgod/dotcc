@@ -3524,6 +3524,52 @@ public sealed class ZigOracleTests
             "    const fp = T.Metadata.takeFingerprint(0xFF00_0000_0000_0000);\n" +
             "    return T.bits() - 57 + fp - 127 + 42;\n" +
             "}\n", 42, "" },
+        // std.HashMap's auto-context and hashing forms (road-to-zig-std G4): a container const bound to a
+        // closure-idiom function value called as a method, on an instance and through the type; a closure body
+        // opening with a `comptime { if (…) @compileError(…); }` guard; `and switch (…) {…}`; `@branchHint`;
+        // the curated `std.mem.Alignment` (`comptime .fromByteUnits`, `.forward`, `.toByteUnits`); and a
+        // `@typeInfo` binding stepped into its `.pointer` payload. 20 + 2 + 16 + 1 + 1 + 8 - 6 = 42.
+        new object[] { "container_fn_consts_and_hints",
+            "const std = @import(\"std\");\n" +
+            "fn getDoubler(comptime K: type, comptime Context: type) (fn (Context, K) u64) {\n" +
+            "    comptime {\n" +
+            "        if (K == []const u8) @compileError(\"no slices\");\n" +
+            "    }\n" +
+            "    return struct {\n" +
+            "        fn run(ctx: Context, key: K) u64 {\n" +
+            "            _ = ctx;\n" +
+            "            return @as(u64, key) * 2;\n" +
+            "        }\n" +
+            "    }.run;\n" +
+            "}\n" +
+            "fn Ctx(comptime K: type) type {\n" +
+            "    return struct {\n" +
+            "        pub const hash = getDoubler(K, @This());\n" +
+            "    };\n" +
+            "}\n" +
+            "const Size = enum { one, many, slice };\n" +
+            "fn unique(ptr_is_one: bool, size: Size) bool {\n" +
+            "    return ptr_is_one and switch (size) {\n" +
+            "        .one, .many => true,\n" +
+            "        .slice => false,\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const c: Ctx(u32) = .{};\n" +
+            "    const h = c.hash(10);\n" +
+            "    const via_type = Ctx(u32).hash(c, 1);\n" +
+            "    const a: std.mem.Alignment = comptime .fromByteUnits(8);\n" +
+            "    const fwd = a.forward(13);\n" +
+            "    const info = @typeInfo(*const u16);\n" +
+            "    const Child = info.pointer.child;\n" +
+            "    const is_const: u64 = @as(Child, 1);\n" +
+            "    var hot: u64 = 0;\n" +
+            "    if (unique(true, .many)) {\n" +
+            "        @branchHint(.likely);\n" +
+            "        hot = 1;\n" +
+            "    }\n" +
+            "    return @intCast(h + via_type + fwd + is_const + hot + a.toByteUnits() - 6);\n" +
+            "}\n", 42, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -3672,6 +3718,25 @@ public sealed class ZigOracleTests
     /// into the same program and cross-module calls resolve.</summary>
     public static IEnumerable<object[]> MultiFilePrograms => new[]
     {
+        // A lazily prepared module's top-level CALL consts are evaluated only when named (zig analyses a
+        // declaration on reference): `Unused = Gen(.{ .width = 7 })` takes a comptime STRUCT argument dotcc
+        // cannot evaluate, and it used to sink the module's preparation, losing `Bytes` too. 40 + 2 = 42.
+        new object[] { "deferred_type_calls",
+            "const gen = @import(\"gen.zig\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const p: gen.Bytes = .{ .a = 40, .b = 2 };\n" +
+            "    return p.a + p.b;\n" +
+            "}\n",
+            "gen.zig",
+            "pub const Options = struct { width: u8 };\n" +
+            "pub fn Gen(comptime opts: Options) type {\n" +
+            "    return struct { v: @Int(.unsigned, opts.width) };\n" +
+            "}\n" +
+            "pub fn Pair(comptime T: type) type {\n" +
+            "    return struct { a: T, b: T };\n" +
+            "}\n" +
+            "pub const Unused = Gen(.{ .width = 7 });\n" +
+            "pub const Bytes = Pair(u8);\n", 42, "" },
         // array_list's surface (road-to-zig-std G4): a decl literal VALUE (`.empty`) of a container the
         // SIBLING declares is lowered by that module, in the container's scope (`empty: Self`); the empty
         // slice spelled `&.{}` and `&[_]T{}`; a bare sibling call (`self.* = fromEmpty();`); and `@memmove`

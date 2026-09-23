@@ -331,6 +331,7 @@ internal sealed partial class ZigLowering
     /// <c>const</c> RHS (<c>const y = x;</c>) from being misread as a type alias.</summary>
     private bool IsTypeName(string name)
         => _typeAliases.ContainsKey(name)
+        || (_deferredTypeCalls.ContainsKey(name) && TryDeferredTypeAlias(name, out _))
         || _containerTypes.ContainsKey(name)
         || ResolveSelfAlias(name) is not null
         || _errorSets.Contains(name)
@@ -862,6 +863,7 @@ internal sealed partial class ZigLowering
         if (_containerTypes.TryGetValue(name, out var ct)) { return ct; }
         // A name bound to a file-as-struct MODULE (`const Writer = std.Io.Writer;`), resolved on demand.
         if (TryResolveModuleTypeAlias(name, out var fileType)) { return fileType; }
+        if (TryDeferredTypeAlias(name, out var deferredAlias)) { return deferredAlias; }
         // An error-set name used as a plain VALUE type — `fn f(e: E)`, `var x: E`, a non-`!T`
         // error return `fn g() E` — or the open `anyerror`. Lowers to the flat erased error code
         // (`CType.ErrorSet`, rendered `ushort`): the error VALUE itself, NOT an `E!T` error union
@@ -1016,6 +1018,7 @@ internal sealed partial class ZigLowering
         if (nested is not null) { type = nested; return true; }
         if (_containerTypes.TryGetValue(name, out type!)) { return true; }
         if (!_typeAliases.ContainsKey(name) && TryResolveModuleTypeAlias(name, out type)) { return true; }
+        if (TryDeferredTypeAlias(name, out type)) { return true; }
         // A type ALIAS naming a container — `const S = Stack(u8, 4); S.init()` (road-to-zig-std G4). A
         // REIFIED type-returning generic has no source-level name of its own (its mangled name is
         // synthesized), so the alias is the only way to reach its static methods / consts; treat it

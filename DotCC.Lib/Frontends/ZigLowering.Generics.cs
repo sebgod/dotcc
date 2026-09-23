@@ -698,9 +698,19 @@ internal sealed partial class ZigLowering
     /// instance stands for (<c>std.sort.asc(u8)</c>).</summary>
     private readonly Dictionary<Symbol, Symbol> _fnValueOfInstance = new();
 
-    /// <summary>The single statement of a closure-idiom body, or null.</summary>
+    /// <summary>The <c>return struct { … }.member;</c> of a closure-idiom body, or null. Leading <c>comptime { … }</c>
+    /// blocks (hash_map's getAutoHashFn asserts and raises its `@compileError` there) are analysis-only and
+    /// may precede it.</summary>
     private static Zig.ReturnStructMember? ClosureIdiomReturn(Item body)
-        => BodyStatements(body) is { Count: 1 } one && one[0].Content is Zig.ReturnStructMember r ? r : null;
+    {
+        var stmts = BodyStatements(body);
+        if (stmts.Count == 0 || stmts[^1].Content is not Zig.ReturnStructMember r) { return null; }
+        for (var i = 0; i < stmts.Count - 1; i++)
+        {
+            if (stmts[i].Content is not Zig.ComptimeBlock) { return null; }
+        }
+        return r;
+    }
 
     /// <summary>Reify the anonymous struct of a closure-idiom <c>return struct { … }.member;</c> in the scope
     /// of function (or instance) <paramref name="owner"/>, and return the method <paramref name="member"/>.

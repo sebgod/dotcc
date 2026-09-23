@@ -905,11 +905,16 @@ productions:
   - derivation: leftmost
     rules:
       - { lhs: BoolOr, rhs: [BoolOr, 'or', BoolAnd], action: boolOr }
+      # A `switch` as the RIGHT operand of `or` / `and` (std.meta.hasUniqueRepresentation:
+      # `!ptr.attrs.@"allowzero" and switch (ptr.size) { … }`). No Compare starts with `switch`, so after
+      # the operator it is a clean shift; the value switch stays out of the rest of the operator cascade.
+      - { lhs: BoolOr, rhs: [BoolOr, 'or', SwitchExpr], action: boolOrSwitch }
       - { lhs: BoolOr, rhs: [BoolAnd] }
 
   - derivation: leftmost
     rules:
       - { lhs: BoolAnd, rhs: [BoolAnd, 'and', Compare], action: boolAnd }
+      - { lhs: BoolAnd, rhs: [BoolAnd, 'and', SwitchExpr], action: boolAndSwitch }
       - { lhs: BoolAnd, rhs: [Compare] }
 
   # Compare is non-associative (PEG: `BitwiseExpr (CompareOp BitwiseExpr)?`) — no

@@ -126,6 +126,10 @@ internal sealed partial class ZigLowering
             case Zig.StmtExpr { Arg0.Content: Zig.BuiltinCall q } when Tok(q.Arg0) == "@setEvalBranchQuota":
                 SetEvalBranchQuota(Flatten(q.Arg2));
                 return new Seq(new List<CStmt>());
+            // `@branchHint(.cold);` (hash_map's grow path, std's error paths): a layout hint to zig's optimizer
+            // that must be a block's first statement; dotcc has nothing to emit for it.
+            case Zig.StmtExpr { Arg0.Content: Zig.BuiltinCall branchHint } when Tok(branchHint.Arg0) == "@branchHint":
+                return new Seq(new List<CStmt>());
             // `@disableInstrumentation();` / `@disableIntrinsics();` (std's panic and memcpy paths): hints to
             // zig's own codegen, with nothing for dotcc to emit.
             case Zig.StmtExpr { Arg0.Content: Zig.BuiltinCallNoArgs hint }
@@ -1306,12 +1310,53 @@ internal sealed partial class ZigLowering
             case Zig.StmtWhile w:
                 ExecuteComptimeWhile(w.Arg2, null, w.Arg4);
                 break;
+            // `if (K == []const u8) @compileError(…);` (hash_map's getAutoHashFn): the condition folds and
+            // only the taken branch runs, which is where zig raises a `@compileError`.
+            case Zig.StmtIf i:
+                if (FoldComptimeBlockCondition(i.Arg2)) { ExecuteComptimeStmt(i.Arg4); }
+                break;
+            case Zig.StmtIfElse i:
+                ExecuteComptimeStmt(FoldComptimeBlockCondition(i.Arg2) ? i.Arg4 : i.Arg6);
+                break;
+            // `@compileError("…");` reached at comptime raises the author's message.
+            case Zig.StmtExpr { Arg0.Content: Zig.BuiltinCall ce } when Tok(ce.Arg0) == "@compileError":
+                LowerExpr(s.Content is Zig.StmtExpr se ? se.Arg0 : s);
+                break;
+            // `assert(c);` / `std.debug.assert(c);`: checked when `c` folds; otherwise an analysis-only
+            // assertion with nothing to run.
+            case Zig.StmtExpr { Arg0.Content: Zig.CallArgs { Arg0.Content: Zig.Ident or Zig.Field } ac }
+                when CalleeLastName(ac.Arg0) == "assert" && Flatten(ac.Arg2) is { Count: 1 } assertArgs:
+                if (TryFoldComptimeCondition(assertArgs[0]) is false)
+                {
+                    throw new IrUnsupportedException("zig: a comptime assertion failed (`assert` in a `comptime` block)");
+                }
+                break;
             default:
                 throw new IrUnsupportedException(
                     $"comptime block: statement '{s.Content?.GetType().Name}' is not supported — only "
                     + "var/const decls, assignments to a comptime var, and `while` loops run at comptime");
         }
     }
+
+    /// <summary>The condition of an <c>if</c> inside a <c>comptime { … }</c> block, which must be compile-time
+    /// known: a comptime question (<see cref="TryFoldComptimeCondition"/>) or a folded integer.</summary>
+    private bool FoldComptimeBlockCondition(Item cond)
+    {
+        if (TryFoldComptimeCondition(cond) is { } folded) { return folded; }
+        using (EnterThrowawayHoist())
+        {
+            if (_ir.ConstEval(LowerExpr(cond)) is { } v) { return v != 0; }
+        }
+        throw new IrUnsupportedException("zig: an `if` in a `comptime` block needs a compile-time-known condition");
+    }
+
+    /// <summary>The last name of a callee (<c>assert</c> for <c>assert</c> and <c>std.debug.assert</c>), or null.</summary>
+    private static string? CalleeLastName(Item callee) => callee.Content switch
+    {
+        Zig.Ident id => Tok(id.Arg0),
+        Zig.Field f => Tok(f.Arg2),
+        _ => null,
+    };
 
     /// <summary>Apply a comptime assignment <c>lhs = rhs</c> inside a <c>comptime { … }</c> block: the
     /// target must resolve to a tracked comptime var (its bare name, NOT substituted), the value folds
@@ -1582,6 +1627,18 @@ internal sealed partial class ZigLowering
         {
             return TryFoldComptimeCondition(conj.Arg0) is { } la && TryFoldComptimeCondition(conj.Arg2) is { } ra
                 ? la && ra
+                : null;
+        }
+        if (cur.Content is Zig.BoolAndSwitch conjSw)
+        {
+            return TryFoldComptimeCondition(conjSw.Arg0) is { } lsw && TryFoldComptimeCondition(conjSw.Arg2) is { } rsw
+                ? lsw && rsw
+                : null;
+        }
+        if (cur.Content is Zig.BoolOrSwitch disjSw)
+        {
+            return TryFoldComptimeCondition(disjSw.Arg0) is { } losw && TryFoldComptimeCondition(disjSw.Arg2) is { } rosw
+                ? losw || rosw
                 : null;
         }
         if (cur.Content is Zig.BoolOr disj)

@@ -78,6 +78,22 @@ public readonly struct Alignment
 
     /// <summary>Zig's <c>Alignment.toByteUnits()</c> — the alignment in bytes.</summary>
     public ulong toByteUnits() => _bytes;
+
+    /// <summary>Zig's <c>Alignment.fromByteUnits(n)</c> — the alignment of <paramref name="bytes"/> bytes (a
+    /// power of two), as std's hash_map spells its buffer alignment (<c>comptime .fromByteUnits(…)</c>).</summary>
+    public static Alignment fromByteUnits(ulong bytes) => new(bytes);
+
+    /// <summary><c>a.toByteUnits()</c> called on a curated <c>std.mem.Alignment</c> value (emitted statically).</summary>
+    public static ulong ToByteUnits(Alignment a) => a._bytes;
+
+    /// <summary><c>a.forward(address)</c> — <paramref name="address"/> rounded UP to the alignment.</summary>
+    public static ulong Forward(Alignment a, ulong address) => (address + a._bytes - 1) & ~(a._bytes - 1);
+
+    /// <summary><c>a.backward(address)</c> — <paramref name="address"/> rounded DOWN to the alignment.</summary>
+    public static ulong Backward(Alignment a, ulong address) => address & ~(a._bytes - 1);
+
+    /// <summary><c>a.check(address)</c> — whether <paramref name="address"/> is aligned.</summary>
+    public static bool Check(Alignment a, ulong address) => (address & (a._bytes - 1)) == 0;
 }
 
 /// <summary>

@@ -389,6 +389,9 @@ internal sealed partial class ZigLowering
         value = null!;
         if (expr.Content is not Zig.Field f || !TryEvalTypeInfo(f.Arg0, out var info)) { return false; }
         var field = Tok(f.Arg2);
+        // `@typeInfo(P).pointer` / `info.pointer` is the union's PAYLOAD step, not a value field
+        // (std.mem.AsBytesReturnType binds `const pointer = @typeInfo(P).pointer;`): not folded here.
+        if (IsTypeInfoTag(field)) { return false; }
         switch (info.Tag, field)
         {
             case ("int", "bits") or ("float", "bits"):
