@@ -76,7 +76,7 @@ public static unsafe partial class Libc
         new FileSlot { Kind = FileSlot.K.Out },
         new FileSlot { Kind = FileSlot.K.Err },
     };
-    private static readonly Lock _filesLock = new();
+    private static readonly System.Threading.Lock _filesLock = new();   // qualified: a user type may be named `Lock`
 
     // Stable native FILE structs for the std streams, so stdin/stdout/stderr
     // can hand out a fixed FILE* for the program's lifetime.

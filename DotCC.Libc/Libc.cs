@@ -92,7 +92,7 @@ public static unsafe partial class Libc
     // Live blocks are threaded through a singly-linked list in their headers
     // (no managed collection — embed/AOT clean): header = [magic|size|next|pad].
     private static byte* _dbgHead = null;
-    private static readonly Lock _dbgLock = new();
+    private static readonly System.Threading.Lock _dbgLock = new();   // qualified: a user type may be named `Lock`
 
     /// <summary>Allocate a checked block and return the user pointer.</summary>
     internal static void* DbgAlloc(nuint size, bool zero)

@@ -297,7 +297,7 @@ public static unsafe partial class Libc
     }
 
     private static byte** _environ;
-    private static readonly Lock _environLock = new();
+    private static readonly System.Threading.Lock _environLock = new();   // qualified: a user type may be named `Lock`
 
     /// <summary>POSIX <c>char **environ</c> — the whole process environment as a
     /// NULL-terminated array of NUL-terminated <c>"NAME=value"</c> UTF-8 strings.

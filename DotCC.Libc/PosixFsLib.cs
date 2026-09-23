@@ -49,7 +49,7 @@ public static unsafe partial class Libc
     }
 
     private static readonly Dictionary<nint, DirState> _dirs = new();
-    private static readonly Lock _dirsLock = new();
+    private static readonly System.Threading.Lock _dirsLock = new();   // qualified: a user type may be named `Lock`
 
     // struct dirent (see include/dirent.h): d_name is FIRST, offset 0, 256 bytes.
     private const int DName = 256;
