@@ -1,7 +1,6 @@
 #nullable enable
 
 using System.Collections.Generic;
-using DotCC.Backends;
 using DotCC.Ir;
 using Shouldly;
 using Xunit;
@@ -9,8 +8,8 @@ using Xunit;
 namespace DotCC.Tests;
 
 /// <summary>
-/// Direct pins for the IR's aggregate registries — <see cref="IrBuilder.RegisterStructType"/> and
-/// <see cref="IrBuilder.RegisterEnumType"/>, the shared seam a second front-end registers its types
+/// Direct pins for the IR's aggregate registries — <see cref="IrModule.RegisterStructType"/> and
+/// <see cref="IrModule.RegisterEnumType"/>, the shared seam a second front-end registers its types
 /// through. The emitted C# carries exactly one type per name, so both must be idempotent on an
 /// identical re-registration and must THROW on a conflicting one: silently keeping the first
 /// definition while uses resolve against the second is a type/codegen mismatch (the enum registry had
@@ -18,7 +17,7 @@ namespace DotCC.Tests;
 /// </summary>
 public sealed class IrAggregateRegistryTests
 {
-    private static IrBuilder NewBuilder() => new(null, new CSharpNameLegalizer());
+    private static IrModule NewBuilder() => new();
 
     [Fact]
     public void An_identical_enum_re_registration_is_idempotent()

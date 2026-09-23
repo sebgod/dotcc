@@ -15,16 +15,15 @@ namespace DotCC.Frontends;
 /// <see cref="CFrontend"/>. Parses each <c>.zig</c> unit with the generated
 /// <see cref="DotCC.Zig"/> grammar (lexer → LA iterator → LALR parser; no
 /// preprocessor/rewriters — Zig has none) and lowers it to the neutral IR via
-/// <see cref="ZigLowering"/>, returning the same <see cref="IrBuilder"/> any backend
+/// <see cref="ZigLowering"/>, returning the same <see cref="IrModule"/> any backend
 /// consumes. So a Zig program flows through the existing C#/wat targets unchanged.
 /// </summary>
 internal sealed class ZigFrontend : IFrontend
 {
-    public IrBuilder BuildIr(FrontendRequest request)
+    public IrModule BuildIr(FrontendRequest request)
     {
         var names = request.Names ?? new Backends.CSharpNameLegalizer();
-        var ir = new IrBuilder(null, names, new Dictionary<string, byte[]>(StringComparer.Ordinal),
-                               request.Warnings);
+        var ir = new IrModule();
         AddUnits(ir, request.InputPaths, names, request.TestMode);
 
         var errors = ir.Diagnostics.Where(d => d.Severity == Severity.Error).ToList();
@@ -42,11 +41,11 @@ internal sealed class ZigFrontend : IFrontend
     /// <summary>Parse every <c>.zig</c> unit and lower it INTO <paramref name="ir"/>
     /// (no builder creation, no diagnostic flush). Factored out of
     /// <see cref="BuildIr"/> so a mixed <c>.c</c> + <c>.zig</c> whole-program build can
-    /// lower the Zig units into the C front-end's already-built <see cref="IrBuilder"/>
+    /// lower the Zig units into the C front-end's already-built <see cref="IrModule"/>
     /// — one shared module, one emit (the C side's structs/enums/globals preserved),
     /// cross-language calls resolving as bare-name <c>DotCcProgram</c> methods. The
     /// caller owns diagnostic flushing.</summary>
-    internal static void AddUnits(IrBuilder ir, IReadOnlyList<string> paths, INameLegalizer names, bool testMode = false)
+    internal static void AddUnits(IrModule ir, IReadOnlyList<string> paths, INameLegalizer names, bool testMode = false)
     {
         var lexerTable = Zig.BuildLexer();
         // One error-code registry shared across the build's units — a given `error.Foo`

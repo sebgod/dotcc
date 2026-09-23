@@ -35,7 +35,7 @@ namespace DotCC.Frontends;
 /// </summary>
 internal sealed partial class ZigLowering
 {
-    private readonly IrBuilder _ir;
+    private readonly IrModule _ir;
     private readonly SymbolTable _symbols;
 
     /// <summary>The name legalizer, kept so an <c>@import</c>ed module can be lowered with its own
@@ -222,7 +222,7 @@ internal sealed partial class ZigLowering
     /// such type — the caller reports that loudly, naming the module.
     /// <para>The returned <see cref="CType"/> carries the container's PLAIN source name, which is also
     /// the emitted C# type name; two modules declaring a same-named aggregate therefore collide, and
-    /// <see cref="IrBuilder.RegisterStructType"/> throws rather than silently dropping the second.
+    /// <see cref="IrModule.RegisterStructType"/> throws rather than silently dropping the second.
     /// Module-qualified naming is the real fix (docs/plans/deferred.md).</para></summary>
     internal CType? ResolveExportedType(string name) =>
         _containerTypes.TryGetValue(name, out var t) ? t : null;
@@ -407,7 +407,7 @@ internal sealed partial class ZigLowering
     /// static/associated call (<c>Type.func(…)</c>) to that free function.
     /// <para>SHARED down the <c>@import</c> chain (a prepared module gets its parent's table, like
     /// <see cref="_errorCodes"/>): a method belongs to its container, and a container's name is unique
-    /// across the emitted program — <see cref="IrBuilder.RegisterStructType"/> now enforces that — so one
+    /// across the emitted program — <see cref="IrModule.RegisterStructType"/> now enforces that — so one
     /// table lets a call site reach a method declared by ANOTHER module, which is what a navigated type
     /// (road-to-zig-std S4d) or a cross-module reified generic needs. Two independent ROOT units keep
     /// separate tables, exactly as before: they see each other only through <c>@import</c>.</para></summary>
@@ -438,7 +438,7 @@ internal sealed partial class ZigLowering
     private string _currentFnName = "";
 
     /// <summary>Mangled IR type names of every in-function container registered so far (wall-plan W2)
-    /// — the dup guard, since <see cref="IrBuilder.RegisterStructType"/> silently no-ops a repeat name
+    /// — the dup guard, since <see cref="IrModule.RegisterStructType"/> silently no-ops a repeat name
     /// (so a redeclared local would otherwise miscompile). Global for the build: a mangled name is
     /// unique per (function, container), and the IR type it names is emitted once program-wide.</summary>
     private readonly HashSet<string> _localContainers = new(System.StringComparer.Ordinal);
@@ -730,7 +730,7 @@ internal sealed partial class ZigLowering
     // and registered in the IR test manifest, rather than dropped. Set at construction.
     private readonly bool _testMode;
 
-    public ZigLowering(IrBuilder ir, INameLegalizer names, Dictionary<string, int>? errorCodes = null,
+    public ZigLowering(IrModule ir, INameLegalizer names, Dictionary<string, int>? errorCodes = null,
         bool testMode = false, ZigModuleGraph? moduleGraph = null, string? importerDir = null,
         ZigImportScope? shared = null, string? modulePrefix = null)
     {

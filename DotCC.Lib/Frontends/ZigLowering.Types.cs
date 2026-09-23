@@ -867,7 +867,7 @@ internal sealed partial class ZigLowering
     /// <summary>Const-evaluate a <c>[N]T</c> array size. A bare integer literal <c>N</c> takes a
     /// fast path through <see cref="DecodeZigInt"/> (so a radix / underscored size <c>[0x10]u8</c>
     /// is accepted with no symbol context); any other form is lowered and folded by the shared
-    /// <see cref="IrBuilder.ConstEval"/> comptime interpreter (Milestone T) — so a computed size
+    /// <see cref="IrModule.ConstEval"/> comptime interpreter (Milestone T) — so a computed size
     /// <c>[N * 2]</c> or a container-const size <c>[SIZE]</c> now works. Throws on a non-constant size.</summary>
     private int ConstEvalArraySize(Item sizeExpr)
     {

@@ -20,8 +20,8 @@ namespace DotCC.Frontends;
 /// that is also where the uses are: <c>.field_names.len</c> ×167, <c>.field_names[i]</c> ×34.</para>
 ///
 /// <para>Everything folds at the LOWERING tier like the rest of S5 — the lists are built from
-/// dotcc's own registries (<see cref="IrBuilder.StructFieldsOf"/> for a struct/union's declared
-/// fields in order, <see cref="IrBuilder.Enums"/> for an enum's members in order), never by
+/// dotcc's own registries (<see cref="IrModule.StructFieldsOf"/> for a struct/union's declared
+/// fields in order, <see cref="IrModule.Enums"/> for an enum's members in order), never by
 /// compiling <c>std/lang.zig</c>. No list reaches the IR: it is consumed by <c>.len</c>, by a
 /// comptime index, or by a binding, each of which folds to a literal or a type.</para></summary>
 internal sealed partial class ZigLowering
@@ -60,7 +60,7 @@ internal sealed partial class ZigLowering
         => type.Unqualified is CType.Named n ? _ir.StructFieldsOf(n.Name) : null;
 
     /// <summary>The MEMBERS of an enum type in declaration order, or null when the type is not a
-    /// registered enum. Read off <see cref="IrBuilder.Enums"/> — an ordered list, unlike the
+    /// registered enum. Read off <see cref="IrModule.Enums"/> — an ordered list, unlike the
     /// name-keyed member-symbol map, which is exactly why this reads the IR registry.</summary>
     private IReadOnlyList<EnumMember>? MembersOfEnum(CType type)
         => type.Unqualified is CType.Enum e

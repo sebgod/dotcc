@@ -133,7 +133,7 @@ internal sealed partial class ZigLowering
 
     /// <summary>Test mode (<c>dotcc zig test</c>): lower a <c>test "name"/ident/(anon) { … }</c> block
     /// to a runnable <c>anyerror!void</c> free function named <c>__zigtest_N</c>, register it in the IR
-    /// test manifest (<see cref="IrBuilder.Tests"/>) with its display name, and return the pass-1 entry
+    /// test manifest (<see cref="IrModule.Tests"/>) with its display name, and return the pass-1 entry
     /// so its body lowers in pass 2 exactly like a normal function. A test PASSES when its body returns
     /// normally and FAILS when it returns an error — a <c>try</c> that propagates, or an explicit
     /// <c>return error.X</c> — so the synthesized return type is an error union, and (unlike
@@ -411,7 +411,7 @@ internal sealed partial class ZigLowering
     /// <summary>Register a Zig <c>struct</c> declaration: build its field layout (each
     /// <c>name: Type</c> field's type resolved through <see cref="LowerType"/>, so it can
     /// reference any container registered in pass 0) and hand it to the shared IR aggregate
-    /// table via <see cref="IrBuilder.RegisterStructType"/>. <paramref name="fieldItems"/> are
+    /// table via <see cref="IrModule.RegisterStructType"/>. <paramref name="fieldItems"/> are
     /// the body's field members (each a <see cref="Zig.StructField"/>), already split out from
     /// any methods by <see cref="SplitMembers"/>; empty for a <c>struct {}</c>.</summary>
     private void RegisterStruct(string name, IReadOnlyList<Item> fieldItems, AggregateLayout layout = AggregateLayout.Default)
@@ -762,7 +762,7 @@ internal sealed partial class ZigLowering
     /// <summary>Register a Zig <c>enum</c> declaration: assign each member its value
     /// (explicit <c>= value</c> via <see cref="ZigConstEval"/>, else auto-incremented from
     /// the previous, starting at 0), build the shared <see cref="EnumTypeDef"/> via
-    /// <see cref="IrBuilder.RegisterEnumType"/>, and record a per-member
+    /// <see cref="IrModule.RegisterEnumType"/>, and record a per-member
     /// <see cref="SymKind.EnumConst"/> symbol (so <c>Color.red</c> / a sink-typed
     /// <c>.red</c> resolve to an <see cref="EnumConstRef"/>). The underlying type is the
     /// <c>enum(T)</c> base, else C's default <see cref="CType.Int"/>. Returns the body's method
@@ -812,7 +812,7 @@ internal sealed partial class ZigLowering
 
     /// <summary>Const-fold a lowered enum-member initializer to its integer value, or null
     /// if it is not a compile-time constant. Routed through the shared
-    /// <see cref="IrBuilder.ConstEval"/> interpreter (Milestone T), so a Zig enum value
+    /// <see cref="IrModule.ConstEval"/> interpreter (Milestone T), so a Zig enum value
     /// may now be any constant expression — binary arithmetic/bitwise/shift, parens,
     /// sizeof, a reference to an earlier member — not just a literal or unary of one.</summary>
     private long? ZigConstEval(CExpr e) => _ir.ConstEval(e);
@@ -832,7 +832,7 @@ internal sealed partial class ZigLowering
     /// <summary>Lower an anonymous struct literal <c>.{ .f = v, … }</c> against the struct
     /// type its sink names (Zig's result-location inference). Each <c>.field = value</c>
     /// pairs the field with its declared type (looked up via
-    /// <see cref="IrBuilder.StructFieldType"/>) so the value coerces as C would at the
+    /// <see cref="IrModule.StructFieldType"/>) so the value coerces as C would at the
     /// store; the value is itself lowered at that field type as its sink (so a nested
     /// <c>.{…}</c> or <c>.member</c> resolves). An omitted field takes C#'s zero default —
     /// matching C's partial-init / Zig's required-field rule isn't enforced in D1. An empty
@@ -1009,7 +1009,7 @@ internal sealed partial class ZigLowering
 
     /// <summary>Shared back half of both struct-literal forms (anonymous `.{…}` and typed
     /// `Type{…}`): turn the `.field = expr` items into <see cref="FieldInit"/>s against a known
-    /// struct type. Each field's declared type (via <see cref="IrBuilder.StructFieldType"/>) is
+    /// struct type. Each field's declared type (via <see cref="IrModule.StructFieldType"/>) is
     /// the value's sink, so a nested `.{…}`/`.member` resolves; an unknown field errors
     /// precisely. An omitted field takes C#'s zero default (D1 doesn't enforce Zig's
     /// required-field rule).</summary>

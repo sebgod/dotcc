@@ -55,7 +55,7 @@ dotnet publish DotCC -c Release                        # AOT publish — exe nam
 
 ## Architecture in one screen (full reference: [`docs/architecture.md`](docs/architecture.md))
 
-N frontends × M backends meeting at one **typed IR** — today C and Zig → C# and wat, but **not a full 2×2**: the Zig-only IR nodes (`ZigTry`, `AllocCall`, tuples, error unions, …) are C#-target-only, so Zig × wat covers little beyond `std.debug.print`; and the C binder lives inside `IrBuilder` rather than beside it (details: [`docs/architecture.md`](docs/architecture.md)). Two seams: `IFrontend` (lex/parse a language, bind it into the `IrBuilder`) and `ITarget` + per-target backend printers.
+N frontends × M backends meeting at one **typed IR** — today C and Zig → C# and wat, but **not a full 2×2**: the Zig-only IR nodes (`ZigTry`, `AllocCall`, tuples, error unions, …) are C#-target-only, so Zig × wat covers little beyond `std.debug.print` (details: [`docs/architecture.md`](docs/architecture.md)). The neutral IR is `IrModule` (outputs, aggregate registries + layout model, `ConstEval`); the C binder is `IrBuilder`, the Zig binder `ZigLowering` — peers that both bind into an `IrModule`. Two seams: `IFrontend` (lex/parse a language, bind it into an `IrModule`) and `ITarget` + per-target backend printers.
 
 ```
 .c file → BytesLexer

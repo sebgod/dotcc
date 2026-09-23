@@ -12,7 +12,7 @@ using DotCC.Ir;
 /// <summary>
 /// Lowers the typed IR to WebAssembly text (<c>.wat</c>) — the second backend
 /// behind <see cref="ITarget"/>, a peer of <see cref="CSharpBackend"/> rather than a
-/// rewrite of the pipeline (both consume the same <see cref="IrBuilder"/> via
+/// rewrite of the pipeline (both consume the same <see cref="IrModule"/> via
 /// <see cref="DotCC.Compiler.BuildIr"/>). Where CSharpBackend prints precedence-driven
 /// infix C#, this emits a post-order instruction stream for wasm's stack machine:
 /// an expression pushes its operands then its operator, statements lower to wasm's
@@ -180,12 +180,12 @@ internal sealed partial class WatBackend
 
     private WatBackend() { _out = _sb; }
 
-    public static string Run(IrBuilder unit) => new WatBackend().Module(unit);
+    public static string Run(IrModule unit) => new WatBackend().Module(unit);
 
     /// <summary>Assemble the module: emit the function bodies first (interning string
     /// literals into data segments), then wrap them with the linear memory, the stack
     /// pointer global, the data segments, and the <c>main</c> export.</summary>
-    private string Module(IrBuilder unit)
+    private string Module(IrModule unit)
     {
         foreach (var fn in unit.Functions) { _defined.Add(fn.Sym.Name); }
 

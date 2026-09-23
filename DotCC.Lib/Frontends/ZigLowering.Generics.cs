@@ -62,7 +62,7 @@ namespace DotCC.Frontends;
 /// signature is lowered at template time — but a mixed <c>comptime T: type</c> generic DOES lower its
 /// signature per instance, so a later param typed <c>T</c> is fully supported); a comptime <c>if
 /// (T == i32)</c> type-comparison inside a body needs interpreter type values (a later brick); and a
-/// comptime VALUE argument must be <see cref="IrBuilder.ConstEval"/>-able, a comptime TYPE argument must
+/// comptime VALUE argument must be <see cref="IrModule.ConstEval"/>-able, a comptime TYPE argument must
 /// name a type (a bare primitive / container / alias — a type-FORMER argument like <c>[]u8</c> does not
 /// parse in argument position yet).</para></summary>
 internal sealed partial class ZigLowering
@@ -160,7 +160,7 @@ internal sealed partial class ZigLowering
     /// <summary>True while lowering a generic INSTANCE body (wall-plan W3a) — set in
     /// <see cref="LowerFnBodyCore"/> when comptime value or type seeds are present. It unlocks Zig's
     /// comptime control-flow inside the specialized body: an <c>if</c> whose condition is comptime-known
-    /// (<see cref="IrBuilder.ConstEval"/> folds it, because a comptime value param substitutes a literal)
+    /// (<see cref="IrModule.ConstEval"/> folds it, because a comptime value param substitutes a literal)
     /// is folded to just its taken branch (<see cref="LowerIfStmt"/>), and code after a comptime-taken
     /// terminator is dropped as comptime-dead (<see cref="LowerStmtsWithDefers"/>). Together these let a
     /// recursive comptime generic (<c>fib</c>: <c>if (n &lt; 2) return n; return fib(n-1)+fib(n-2);</c>)
@@ -178,7 +178,7 @@ internal sealed partial class ZigLowering
     /// "key by resolved type" rule).</item>
     /// <item>The resolved type args are seeded into <see cref="_typeAliases"/> (shadow-saved), so the
     /// per-instance SIGNATURE — runtime parameter types + the return type, which may reference <c>T</c> —
-    /// lowers; a comptime VALUE argument is <see cref="IrBuilder.ConstEval"/>-folded (a non-constant is a
+    /// lowers; a comptime VALUE argument is <see cref="IrModule.ConstEval"/>-folded (a non-constant is a
     /// loud error).</item>
     /// <item>The resolved value + type tuple forms the mangled name (<c>max__i32</c>; <c>fn__10</c>; a
     /// negative value spells <c>n10</c>), the memoization key. On first sight the instance symbol is

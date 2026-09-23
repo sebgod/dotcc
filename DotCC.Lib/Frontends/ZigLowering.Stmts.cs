@@ -1211,7 +1211,7 @@ internal sealed partial class ZigLowering
     /// and the binding both read it). A capture name of <c>_</c> tests without binding. An
     /// <paramref name="errCapName"/> (an <c>else |e|</c>) is only valid on an error union.</summary>
     /// <summary>Lower a plain <c>if</c> statement. In a generic INSTANCE body (wall-plan W3a) a
-    /// COMPTIME-KNOWN condition — one <see cref="IrBuilder.ConstEval"/> folds, because a comptime
+    /// COMPTIME-KNOWN condition — one <see cref="IrModule.ConstEval"/> folds, because a comptime
     /// parameter substitutes a literal (e.g. <c>n &lt; 2</c>) — is a Zig comptime-if: only the TAKEN
     /// branch is lowered, so the dead branch's generic calls never instantiate. Combined with the
     /// block-level dead-code stop (<see cref="LowerStmtsWithDefers"/>), that's what lets a recursive
@@ -1243,7 +1243,7 @@ internal sealed partial class ZigLowering
     /// comparison (<c>builtin.os.tag == .windows</c>) or a module-exported boolean constant
     /// (<c>builtin.link_libc</c>). Null when it is not one, so the ordinary two-armed lowering runs.
     ///
-    /// <para>Deliberately narrower than "any condition <see cref="IrBuilder.ConstEval"/> settles":
+    /// <para>Deliberately narrower than "any condition <see cref="IrModule.ConstEval"/> settles":
     /// that wider rule is what zig itself does, but it would change the emitted shape of every
     /// existing <c>if</c> over a constant, and nothing measured needs it. These two forms are what a
     /// platform conditional is made of, and they had no runtime meaning to lose.</para></summary>

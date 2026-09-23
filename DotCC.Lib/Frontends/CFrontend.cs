@@ -12,7 +12,8 @@ namespace DotCC.Frontends;
 /// The C front-end: the lex → preprocess → (macro / dialect-keyword / typedef /
 /// sizeof) rewriters → LALR parse → typed-IR bind pipeline, behind the
 /// <see cref="IFrontend"/> seam. Owns no output-language knowledge; it produces the
-/// neutral <see cref="Ir.IrBuilder"/> a backend then projects.
+/// neutral <see cref="Ir.IrModule"/> a backend then projects (bound by the C binder,
+/// <see cref="Ir.IrBuilder"/>).
 /// </summary>
 internal sealed class CFrontend : IFrontend
 {
@@ -20,13 +21,13 @@ internal sealed class CFrontend : IFrontend
     /// The target-neutral front half of the pipeline: lex, preprocess, parse and
     /// bind every translation unit to the typed IR, flushing the source-level
     /// diagnostics (IR errors/warnings and <c>-pedantic</c> dialect gating) along
-    /// the way. The result is the backend-agnostic <see cref="Ir.IrBuilder"/> a
+    /// the way. The result is the backend-agnostic <see cref="Ir.IrModule"/> a
     /// backend then projects onto its own surface — <see cref="EmitCSharp"/> (C#)
     /// or the wat target. Splitting the pipeline here is what makes "one front-end,
     /// many targets" real rather than aspirational: every backend consumes the same
     /// IR, none re-runs the parse.
     /// </summary>
-    public Ir.IrBuilder BuildIr(FrontendRequest req)
+    public Ir.IrModule BuildIr(FrontendRequest req)
     {
         var inputPaths = req.InputPaths;
         var includeDirs = req.IncludeDirs;
@@ -162,6 +163,7 @@ internal sealed class CFrontend : IFrontend
             }
             foreach (var d in gate.Diagnostics) { Console.Error.WriteLine("dotcc: warning: " + d); }
         }
-        return irBuilder;
+        irBuilder.PublishImportAnalysis();
+        return irBuilder.Module;
     }
 }
