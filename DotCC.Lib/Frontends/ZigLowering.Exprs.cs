@@ -108,6 +108,7 @@ internal sealed partial class ZigLowering
                         $"zig: `{name}` is the imported module `{importedSpec}`, not a value — the declaration "
                         + "named on it is one dotcc does not model");
                 }
+                RaiseIfSkippedDecl(name);   // declared here, but the declaration did not parse
                 throw new IrUnsupportedException($"unresolved identifier '{name}'");
             }
             case Zig.Grouped g:

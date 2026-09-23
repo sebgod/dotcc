@@ -117,6 +117,32 @@ public sealed class ZigReexportTests
     }
 
     [Fact]
+    public void A_referenced_declaration_that_did_not_parse_names_the_parse_error()
+    {
+        // An imported module is parsed resiliently: a declaration that does not parse is skipped so the
+        // rest of the file stays usable. Referencing it used to read "call to unresolved name", which
+        // sent the search the wrong way (std's findScalarPos, parseIntWithSign). A reference to it now
+        // raises the parse error; the module's other declarations still work.
+        const string util = "pub fn ok() u8 {\n    return 42;\n}\npub fn broken() u8 {\n    return 1 +;\n}\n";
+        var cs = EmitZigMulti("""
+            const util = @import("util.zig");
+            pub fn main() u8 {
+                return util.ok();
+            }
+            """, ("util.zig", util));
+        cs.ShouldContain("util__ok()");
+
+        var ex = Should.Throw<Exception>(() => EmitZigMulti("""
+            const util = @import("util.zig");
+            pub fn main() u8 {
+                return util.broken();
+            }
+            """, ("util.zig", util)));
+        ex.Message.ShouldContain("zig `broken` in util.zig did not parse");
+        ex.Message.ShouldContain("line 5");
+    }
+
+    [Fact]
     public void A_re_export_cycle_is_an_error_not_a_hang()
     {
         var ex = Should.Throw<Exception>(() => EmitZigMulti("""

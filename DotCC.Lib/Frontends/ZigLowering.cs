@@ -557,13 +557,35 @@ internal sealed partial class ZigLowering
         {
             return (this, sym);
         }
-        if (hops >= MaxAliasHops || !_declAliases.TryGetValue(name, out var rhs)) { return null; }
+        if (hops >= MaxAliasHops || !_declAliases.TryGetValue(name, out var rhs))
+        {
+            RaiseIfSkippedDecl(name);   // the name IS declared here, but that declaration did not parse
+            return null;
+        }
         return rhs.Content switch
         {
             Zig.Ident id => ResolveExportedDecl(Tok(id.Arg0), hops + 1),
             Zig.Field f => ResolveModulePath(f.Arg0)?.Lowering?.ResolveExportedDecl(Tok(f.Arg2), hops + 1),
             _ => null,
         };
+    }
+
+    /// <summary>The imported module this lowering prepared (null for a root unit, which is parsed
+    /// strictly, so it never has a skipped declaration).</summary>
+    private ZigModule? _module;
+
+    /// <summary>Raise the real wall when <paramref name="name"/> is a top-level declaration of this
+    /// module that the resilient parse skipped: "did not parse", with the parse error, instead of the
+    /// "unresolved name" a lookup would otherwise report. A no-op for any other name.</summary>
+    internal void RaiseIfSkippedDecl(string name)
+    {
+        if (_module?.SkippedDecls.TryGetValue(name, out var error) is not true) { return; }
+        // The parser's message ends with the full expected-symbol list; the head is what locates it.
+        var message = error.Message;
+        var cut = message.IndexOf("; expected one of", System.StringComparison.Ordinal);
+        if (cut > 0) { message = message[..cut]; }
+        throw new IrUnsupportedException(
+            $"zig `{name}` in {System.IO.Path.GetFileName(_module.Path)} did not parse, so it cannot be used: {message}");
     }
 
     /// <summary>The TYPE that <paramref name="name"/> names through a re-export alias
@@ -917,6 +939,7 @@ internal sealed partial class ZigLowering
             modulePrefix: _shared.ModulePrefixFor(module.Path, stdDir),
             fileStem: System.IO.Path.GetFileNameWithoutExtension(module.Path));
         module.Lowering = child;
+        child._module = module;
         _moduleGraph?.RegisterLowering(child);
         child.Lower(module.Parse.Tree, prepareOnly: true, lazy: true);
     }

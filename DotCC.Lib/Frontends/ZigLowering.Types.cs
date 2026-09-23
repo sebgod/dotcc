@@ -676,6 +676,7 @@ internal sealed partial class ZigLowering
             if (navMod.Lowering?.ResolveExportedType(name) is { } navType) { return navType; }
             // `std.Io.Writer` spelled directly: the member is itself a file-as-struct module.
             if (ResolveModulePath(f)?.Lowering?.FileStructType is { } fileType) { return fileType; }
+            navMod.Lowering?.RaiseIfSkippedDecl(name);
             throw new IrUnsupportedException(
                 $"zig module '{System.IO.Path.GetFileName(navMod.Path)}' declares no type '{name}'");
         }

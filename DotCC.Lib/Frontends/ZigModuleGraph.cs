@@ -34,11 +34,19 @@ internal sealed class ZigModule
     /// breaks an import cycle (set before preparing).</summary>
     public ZigLowering? Lowering { get; set; }
 
-    public ZigModule(string path, ResilientParseResult parse)
+    public ZigModule(string path, ResilientParseResult parse,
+        IReadOnlyDictionary<string, ParseErrorInfo>? skippedDecls = null)
     {
         Path = path;
         Parse = parse;
+        SkippedDecls = skippedDecls ?? new Dictionary<string, ParseErrorInfo>(StringComparer.Ordinal);
     }
+
+    /// <summary>Each top-level declaration the resilient parse SKIPPED, by name → the error that
+    /// skipped it. A skipped decl is absent from <see cref="Decls"/>, so without this a reference to it
+    /// reads as "unresolved name" and hides the real wall, which is a parse gap
+    /// (<c>findScalarPos</c> in <c>mem.zig</c>: a <c>comptime if</c> statement).</summary>
+    public IReadOnlyDictionary<string, ParseErrorInfo> SkippedDecls { get; }
 
     /// <summary>Top-level declarations that parsed cleanly, in source order (a skipped decl is absent
     /// here and recorded in <see cref="Errors"/>). Flattened via the shared <see cref="ZigLowering"/>
@@ -126,6 +134,11 @@ internal sealed class ZigModuleGraph
     private readonly IReadOnlySet<int> _syncTerminals;
     private readonly IReadOnlySet<int> _openBrackets;
     private readonly IReadOnlySet<int> _closeBrackets;
+
+    /// <summary>The grammar ids <see cref="FindSkippedDecls"/> scans for: a declaration keyword, then
+    /// the IDENT it names.</summary>
+    private readonly int _identId;
+    private readonly HashSet<int> _declKeywordIds;
     private readonly Dictionary<string, ZigModule> _modules = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<ZigLowering> _lowerings = new();
 
@@ -139,6 +152,10 @@ internal sealed class ZigModuleGraph
         _parser = Zig.BuildParser(Zig.IdentityVisitor.Instance);
         _lexerTable = Zig.BuildLexer();
         (_syncTerminals, _openBrackets, _closeBrackets) = BuildRecoverySets(_parser.Grammar);
+        var names = _parser.Grammar.SymbolNames;
+        int Id(string name) => Array.FindIndex(names, n => n.Name == name);
+        _identId = Id("IDENT");
+        _declKeywordIds = new HashSet<int> { Id("fn"), Id("const"), Id("var") };
         StdRootPath = stdRootPath;
     }
 
@@ -187,7 +204,45 @@ internal sealed class ZigModuleGraph
         using var lexer = BytesLexer.FromString(source, _lexerTable);
         using var tokens = new SyncLATokenIterator(lexer);
         var result = _parser.ParseInputResilient(tokens, _syncTerminals, _openBrackets, _closeBrackets);
-        return new ZigModule(path, result);
+        return new ZigModule(path, result, result.Errors.Count == 0 ? null : FindSkippedDecls(source, result.Errors));
+    }
+
+    /// <summary>Name the top-level declaration each parse error skipped. The error records only where
+    /// skipping began, inside the declaration, so re-lex the file (only a file that HAD errors) and take
+    /// the last top-level <c>fn NAME</c> / <c>const NAME</c> / <c>var NAME</c> before that point, at
+    /// bracket depth 0 so a method or local inside it does not count. The first error of a declaration
+    /// names it.</summary>
+    private Dictionary<string, ParseErrorInfo> FindSkippedDecls(string source, IReadOnlyList<ParseErrorInfo> errors)
+    {
+        var starts = new List<(long offset, string name)>();
+        using (var lexer = BytesLexer.FromString(source, _lexerTable))
+        {
+            var depth = 0;
+            var pendingDeclKeyword = false;
+            while (lexer.MoveNext() && lexer.Current is { } t && t.ID != Item.EOF.ID)
+            {
+                if (_openBrackets.Contains(t.ID)) { depth++; }
+                else if (_closeBrackets.Contains(t.ID)) { depth = Math.Max(0, depth - 1); }
+                if (depth == 0 && pendingDeclKeyword && t.ID == _identId && t.Content is string name)
+                {
+                    starts.Add((t.Position.ByteOffset, name));
+                }
+                pendingDeclKeyword = depth == 0 && _declKeywordIds.Contains(t.ID);
+            }
+        }
+        var skipped = new Dictionary<string, ParseErrorInfo>(StringComparer.Ordinal);
+        foreach (var error in errors)
+        {
+            var at = error.SkippedFrom.ByteOffset;
+            string? owner = null;
+            foreach (var (offset, name) in starts)
+            {
+                if (offset > at) { break; }
+                owner = name;
+            }
+            if (owner is not null) { skipped.TryAdd(owner, error); }
+        }
+        return skipped;
     }
 
     /// <summary>Register a lazily-prepared module's lowering so the top-level drain reaches its pending
