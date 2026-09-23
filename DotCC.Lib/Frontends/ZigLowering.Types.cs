@@ -961,6 +961,8 @@ internal sealed partial class ZigLowering
         {
             Zig.Ident id when TryLookupContainerType(Tok(id.Arg0), out var ct) => ct,
             Zig.Field => TryResolveQualifiedNestedType(f.Arg0),
+            // Through a type call: `Outer(u16, null).Managed`, `std.ArrayList(u8).Slice`-shaped.
+            Zig.CallArgs or Zig.CallNoArgs => TryEvalTypeReturningCall(f.Arg0, out var called) ? called : null,
             _ => null,
         };
         var baseName = baseType?.Unqualified switch

@@ -439,23 +439,14 @@ internal sealed partial class ZigLowering
                         }
                         if (valueParamType is CType.Optional optParam)
                         {
-                            if (IsComptimeNull(argItems[i]))
+                            if (!argScope.TryComptimeOptionalArg(argItems[i], out var hasOpt, out var ov))
                             {
-                                mangleTokens.Add("optnull");
-                                optionalSeeds.Add((g.Params[i].Name, false, 0, optParam.Inner));
+                                throw new IrUnsupportedException(
+                                    $"call to generic '{templateSym.Name}': the `comptime {g.Params[i].Name}: ?T` argument must be "
+                                    + "a comptime `null` or a compile-time-known payload");
                             }
-                            else
-                            {
-                                var optArgExpr = argScope.LowerExpr(argItems[i]);
-                                if (_ir.ConstEval(optArgExpr) is not { } ov)
-                                {
-                                    throw new IrUnsupportedException(
-                                        $"call to generic '{templateSym.Name}': the `comptime {g.Params[i].Name}: ?T` argument must be "
-                                        + "a comptime `null` or a compile-time-known payload");
-                                }
-                                mangleTokens.Add("opt" + (ov >= 0 ? ov.ToString(inv) : "n" + (-(System.Int128)ov).ToString(inv)));
-                                optionalSeeds.Add((g.Params[i].Name, true, ov, optParam.Inner));
-                            }
+                            mangleTokens.Add(OptionalMangleToken(hasOpt, ov));
+                            optionalSeeds.Add((g.Params[i].Name, hasOpt, ov, optParam.Inner));
                             break;
                         }
                         // A comptime STRING param `comptime fmt: []const u8` (road-to-zig-std G3 — the
@@ -759,6 +750,38 @@ internal sealed partial class ZigLowering
 
     /// <summary>True when a generic argument is a comptime <c>null</c> — a bare <c>null</c> literal
     /// (optionally parenthesized). The comptime-optional seed for such an argument has no payload.</summary>
+    /// <summary>Read a comptime OPTIONAL argument in this (the caller's) scope: a <c>null</c> literal, the
+    /// caller's own comptime optional seed passed on by name (array_list's <c>Aligned(T, alignment)</c>
+    /// forwarding <c>alignment</c> to <c>AlignedManaged</c>), or a compile-time-known payload. False when it
+    /// is none of those.</summary>
+    private bool TryComptimeOptionalArg(Item arg, out bool hasValue, out long value)
+    {
+        hasValue = false;
+        value = 0;
+        if (IsComptimeNull(arg)) { return true; }
+        var cur = arg;
+        while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
+        if (cur.Content is Zig.Ident id && _symbols.Resolve(Tok(id.Arg0)) is { } sym
+            && _comptimeOptionalVars.TryGetValue(sym, out var seeded))
+        {
+            hasValue = seeded.HasValue;
+            value = seeded.Value;
+            return true;
+        }
+        if (_ir.ConstEval(LowerExpr(arg)) is not { } v) { return false; }
+        hasValue = true;
+        value = v;
+        return true;
+    }
+
+    /// <summary>The instance-name token of a comptime optional argument: <c>optnull</c>, or <c>opt</c> and
+    /// the payload (<c>n</c> marks a negative one).</summary>
+    private static string OptionalMangleToken(bool hasValue, long value)
+    {
+        var inv = CultureInfo.InvariantCulture;
+        return !hasValue ? "optnull" : "opt" + (value >= 0 ? value.ToString(inv) : "n" + (-(System.Int128)value).ToString(inv));
+    }
+
     private static bool IsComptimeNull(Item arg)
     {
         var cur = arg;
@@ -1069,23 +1092,16 @@ internal sealed partial class ZigLowering
                 }
                 else if (LowerType(p.TypeAst).Unqualified is CType.Optional optP)
                 {
-                    // A comptime OPTIONAL value param `comptime x: ?T` — a comptime null or known payload.
-                    if (IsComptimeNull(argItems[i]))
+                    // A comptime OPTIONAL value param `comptime x: ?T` — a comptime null or known payload,
+                    // or the caller's own comptime optional passed on (`AlignedManaged(T, alignment)`).
+                    if (!argScope.TryComptimeOptionalArg(argItems[i], out var hasOpt, out var ov))
                     {
-                        mangleTokens.Add("optnull");
-                        optionalSeeds.Add((p.Name, false, 0, optP.Inner));
+                        throw new IrUnsupportedException(
+                            $"call to type-returning generic '{templateSym.Name}': the `comptime {p.Name}: ?T` argument "
+                            + "must be a comptime null or a compile-time-known payload");
                     }
-                    else
-                    {
-                        if (_ir.ConstEval(argScope.LowerExpr(argItems[i])) is not { } ov)
-                        {
-                            throw new IrUnsupportedException(
-                                $"call to type-returning generic '{templateSym.Name}': the `comptime {p.Name}: ?T` argument "
-                                + "must be a comptime null or a compile-time-known payload");
-                        }
-                        mangleTokens.Add("opt" + (ov >= 0 ? ov.ToString(inv) : "n" + (-(System.Int128)ov).ToString(inv)));
-                        optionalSeeds.Add((p.Name, true, ov, optP.Inner));
-                    }
+                    mangleTokens.Add(OptionalMangleToken(hasOpt, ov));
+                    optionalSeeds.Add((p.Name, hasOpt, ov, optP.Inner));
                 }
                 else
                 {

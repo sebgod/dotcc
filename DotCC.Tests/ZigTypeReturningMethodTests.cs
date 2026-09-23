@@ -87,4 +87,31 @@ public sealed class ZigTypeReturningMethodTests
         cs.ShouldContain("unsafe struct Shapes_Pair__u8");
         cs.ShouldContain("unsafe struct Shapes_Pair__u16");
     }
+
+    [Fact]
+    public void A_reified_struct_forwards_its_own_comptime_optional_to_another_type_call()
+    {
+        // array_list's shape: `Aligned(T, alignment)` names `AlignedManaged(T, alignment)`, passing on the
+        // comptime optional it was itself instantiated with, null or a payload; and a type const named
+        // through a type call (`Outer(u16, null).Managed`).
+        var cs = EmitZig("""
+            fn Inner(comptime T: type, comptime bonus: ?u8) type {
+                return struct { v: T };
+            }
+            fn Outer(comptime T: type, comptime bonus: ?u8) type {
+                return struct {
+                    inner: Inner(T, bonus),
+                    pub const Managed = Inner(T, bonus);
+                };
+            }
+            pub fn main() u8 {
+                const a: Outer(u16, 30) = .{ .inner = .{ .v = 40 } };
+                const b: Outer(u16, null).Managed = .{ .v = 2 };
+                return @intCast(a.inner.v + b.v);
+            }
+            """);
+        cs.ShouldContain("public Inner__u16_opt30 inner;");
+        cs.ShouldContain("unsafe struct Inner__u16_optnull");
+        cs.ShouldContain("Inner__u16_optnull b = ");
+    }
 }

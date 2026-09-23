@@ -3353,6 +3353,31 @@ public sealed class ZigOracleTests
             "    while (kit.next()) |k| sum += k;\n" +
             "    return @intCast(sum + 16);\n" +
             "}\n", 42, "" },
+        // array_list's forwarding shape (road-to-zig-std G4): a reified struct passes the comptime OPTIONAL it
+        // was instantiated with on to another type call (`Aligned(T, alignment)` naming `AlignedManaged(T,
+        // alignment)`), null or a payload, and a type const is named through a type call
+        // (`Outer(u16, null).Managed`). (10 + 30) + (2 + 0) = 42.
+        new object[] { "comptime_optional_forwarding",
+            "fn Inner(comptime T: type, comptime bonus: ?u8) type {\n" +
+            "    return struct {\n" +
+            "        v: T,\n" +
+            "        pub fn total(self: @This()) u8 {\n" +
+            "            const extra: u8 = if (bonus) |b| b else 0;\n" +
+            "            return @as(u8, @intCast(self.v)) + extra;\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "fn Outer(comptime T: type, comptime bonus: ?u8) type {\n" +
+            "    return struct {\n" +
+            "        inner: Inner(T, bonus),\n" +
+            "        pub const Managed = Inner(T, bonus);\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const a: Outer(u16, 30) = .{ .inner = .{ .v = 10 } };\n" +
+            "    const b: Outer(u16, null).Managed = .{ .v = 2 };\n" +
+            "    return a.inner.total() + b.total();\n" +
+            "}\n", 42, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
