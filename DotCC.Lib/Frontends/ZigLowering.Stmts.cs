@@ -1259,6 +1259,17 @@ internal sealed partial class ZigLowering
         {
             return neVal is LitBool { Value: var n } && n;
         }
+        // `T == u8` / `T != Elem` — a TYPE comparison (the W4 lift; `std.meta`/`std.math` type bodies
+        // ask it). Only when BOTH operands are types — a type has no runtime value, so there is no runtime
+        // comparison this could be stealing.
+        if (cur.Content is Zig.CmpEq teq && TryFoldTypeEquality(teq.Arg0, teq.Arg2) is { } typesEqual)
+        {
+            return typesEqual;
+        }
+        if (cur.Content is Zig.CmpNe tne && TryFoldTypeEquality(tne.Arg0, tne.Arg2) is { } typesDiffer)
+        {
+            return !typesDiffer;
+        }
         // `if (builtin.link_libc)` / `if (!builtin.single_threaded)` — a module-exported bool.
         if (cur.Content is Zig.PreNot not)
         {
@@ -1281,6 +1292,29 @@ internal sealed partial class ZigLowering
         }
         return TryFoldImportedComptimeValue(cur, out var v) && v is LitBool { Value: var b } ? b : null;
     }
+
+    /// <summary>Compare two TYPE operands at comptime, or null when either is not a type (so the caller
+    /// keeps looking). Types compare by their resolved <see cref="CType"/> AND their declared integer
+    /// width: dotcc widens <c>u21</c> and <c>u32</c> to the same C# <c>uint</c>, but they are different
+    /// types in zig, and <c>T == u32</c> must say so.</summary>
+    private bool? TryFoldTypeEquality(Item left, Item right)
+    {
+        // `T == comptime_int` (std.math.Log2Int's first line). dotcc has no comptime-int TYPE — a
+        // `comptime T: type` is always bound to a concrete lowered type — so against a real type it is
+        // simply false.
+        if (IsComptimeNumberTypeName(right) && TryTypeAliasRhs(left, out _)) { return false; }
+        if (IsComptimeNumberTypeName(left) && TryTypeAliasRhs(right, out _)) { return false; }
+        if (!TryTypeAliasRhs(left, out var lt)) { return null; }
+        var lb = DeclaredBitsOfTypeArg(left);
+        if (!TryTypeAliasRhs(right, out var rt)) { return null; }
+        var rb = DeclaredBitsOfTypeArg(right);
+        return lt.Unqualified.Equals(rt.Unqualified) && lb == rb;
+    }
+
+    /// <summary>True for the bare names <c>comptime_int</c> / <c>comptime_float</c> — zig's untyped
+    /// compile-time number types, which dotcc never binds a type parameter to.</summary>
+    private static bool IsComptimeNumberTypeName(Item item)
+        => item.Content is Zig.Ident id && Tok(id.Arg0) is "comptime_int" or "comptime_float";
 
     private CStmt LowerIfCapture(Item condItem, string capName, Item thenItem, Item? elseItem, string? errCapName)
     {

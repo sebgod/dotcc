@@ -18,8 +18,9 @@ namespace DotCC.Tests;
 /// members (including <c>const Self = @This();</c>) and METHODS — each method declared under the mangled
 /// container with its body deferred to a top-level drain, so it lowers to the same
 /// <c>Container_method</c> free function an ordinary container's method does. Remaining loud cuts: a
-/// NESTED container member, a non-struct return, a runtime parameter on the type function, and (inherited
-/// from W3/W4/W5) a generic or <c>type</c>-returning METHOD.</para>
+/// NESTED container member, a runtime parameter on the type function, and (inherited
+/// from W3/W4/W5) a generic or <c>type</c>-returning METHOD. A non-struct return (<c>return T;</c>, a
+/// delegating call) is no longer a cut — see <c>ZigTypeBodyTests</c> (the W4 lift).</para>
 /// End-to-end in the <c>type-returning-fn</c> and <c>generic-container-methods</c> zig-oracle programs.
 /// </summary>
 [Collection("ZigFrontend")]
@@ -241,17 +242,6 @@ public sealed class ZigTypeReturningFnTests
             pub fn main() u8 { const b: Box(u8) = .{ .v = 5 }; return b.v; }
             """));
         ex.Message.ShouldContain("`type`-returning method");
-    }
-
-    [Fact]
-    public void Non_struct_return_is_rejected()
-    {
-        // V1's body must be `return struct {…};` — returning a bare type (`return T;`) is a cut.
-        var ex = Should.Throw<Exception>(() => EmitZig("""
-            fn Id(comptime T: type) type { return T; }
-            pub fn main() u8 { const x: Id(u8) = 42; return x; }
-            """));
-        ex.Message.ShouldContain("non-struct");
     }
 
     [Fact]

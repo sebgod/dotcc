@@ -96,14 +96,15 @@ public sealed class ZigComptimeTypeParamTests
     }
 
     [Fact]
-    public void Type_returning_function_is_rejected_as_W4()
+    public void Type_returning_function_returning_a_bare_type_aliases_it()
     {
-        // `fn F(comptime T: type) type { … }` returns a TYPE — the next brick (W4), a clear cut.
-        var ex = Should.Throw<Exception>(() => EmitZig("""
+        // `fn F(comptime T: type) type { … }` returns a TYPE — once a W4 cut for anything but
+        // `return struct {…}`, now evaluated at comptime (the W4 lift): `Box(u8)` IS `u8`.
+        var cs = EmitZig("""
             fn Box(comptime T: type) type { return T; }
             pub fn main() u8 { const B = Box(u8); const x: B = 42; return x; }
-            """));
-        ex.Message.ShouldContain("W4");
+            """);
+        cs.ShouldContain("byte x = 42");
     }
 
     [Fact]

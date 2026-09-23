@@ -97,6 +97,12 @@ internal sealed partial class ZigLowering
         {
             return reified;
         }
+        // A call to a type-returning generic (the W4 lift) — the width its body's returned type carried
+        // (`fn U(comptime n: u16) type { return @Int(.unsigned, n); }` → `U(21)` is 21 bits).
+        if (cur.Content is Zig.CallArgs or Zig.CallNoArgs && _typeCallBits.TryGetValue(cur, out var called))
+        {
+            return called;
+        }
         return cur.Content is Zig.Ident id && _declaredIntBits.TryGetValue(Tok(id.Arg0), out var bound)
             ? bound
             : null;
@@ -362,6 +368,15 @@ internal sealed partial class ZigLowering
                     $"zig `@typeInfo({sInfo.Type.Describe()}).{sInfo.Tag}.signedness`: only an `int` carries a signedness");
             }
             tag = sInfo.Type.Unqualified is CType.Prim { Signed: true } ? "signed" : "unsigned";
+            return true;
+        }
+        // `<info>.size` on a SLICE — `.slice`, the one pointer size class dotcc's lowering keeps (a slice is
+        // its own `CType.Slice`). `*T` / `[*]T` / `[*c]T` share one C pointer, so for those the size stays the
+        // loud cut TryFoldTypeInfoValue raises (std.meta.Elem switches on it).
+        if (expr.Content is Zig.Field sz && Tok(sz.Arg2) == "size" && TryEvalTypeInfo(sz.Arg0, out var zInfo)
+            && zInfo.Tag == "pointer" && zInfo.Type.Unqualified is CType.Slice)
+        {
+            tag = "slice";
             return true;
         }
         if (TryEvalTypeInfo(expr, out var info))

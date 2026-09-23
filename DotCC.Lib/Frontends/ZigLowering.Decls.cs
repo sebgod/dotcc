@@ -1657,14 +1657,14 @@ internal sealed partial class ZigLowering
             case "@shlWithOverflow": return OverflowShl(bname, bargs);
             case "@popCount":
                 // `@popCount(x)` — set-bit count (width-agnostic; leading zeros add nothing). → int.
-                return new Call("ZigMath.PopCount", new List<CExpr> { LowerExpr(BitCountArg("@popCount", bargs)) }) { Type = CType.Int };
+                return FoldBitCount("PopCount", BitCountArg("@popCount", bargs));
             case "@clz":
                 // `@clz(x)` — leading-zero count within x's bit width (exact for the standard widths
                 // dotcc maps 1:1; an arbitrary `uN` counts in its containing width — a documented edge).
-                return new Call("ZigMath.Clz", new List<CExpr> { LowerExpr(BitCountArg("@clz", bargs)) }) { Type = CType.Int };
+                return FoldBitCount("Clz", BitCountArg("@clz", bargs));
             case "@ctz":
                 // `@ctz(x)` — trailing-zero count within x's bit width.
-                return new Call("ZigMath.Ctz", new List<CExpr> { LowerExpr(BitCountArg("@ctz", bargs)) }) { Type = CType.Int };
+                return FoldBitCount("Ctz", BitCountArg("@ctz", bargs));
             case "@intFromPtr":
                 // `@intFromPtr(p)` — the pointer's address as `usize` → an unchecked cast to `ulong`
                 // (the LP64 pointer-width). The VALUE is a runtime address (nondeterministic), so a
@@ -1886,6 +1886,82 @@ internal sealed partial class ZigLowering
                 $"zig `{zigName}` on a 128-bit operand is not lowered yet (overflow is computed in a 128-bit "
                 + "accumulator, which can't detect a 128-bit overflow); use a <= 64-bit integer");
         }
+    }
+
+    /// <summary>A bit-count builtin (<c>@popCount</c>/<c>@clz</c>/<c>@ctz</c>) → <c>ZigMath.&lt;helper&gt;</c>,
+    /// or its literal when the operand is compile-time-known and its type is a standard width. That fold is
+    /// what lets a comptime computation use one — <c>std.math.Log2Int</c>'s
+    /// <c>const log2_bits = 16 - @clz(bits - 1);</c> sizes the type it returns — and it counts in the same
+    /// width the runtime helper would, so the two can never disagree.
+    /// <para>That width is the operand's ZIG type (<see cref="ZigIntOperandType"/>), not its lowered one:
+    /// the IR types <c>bits - 1</c> on a <c>u16</c> with C's promotion to <c>int</c>, but zig has no
+    /// promotion — it is a <c>u16</c>, and <c>@clz</c> counts in 16 bits. The operand is narrowed back to
+    /// that type (a truncating cast, zig's own wrap-on-overflow in ReleaseFast) before counting, at comptime
+    /// and at runtime alike.</para></summary>
+    private CExpr FoldBitCount(string helper, Item argItem)
+    {
+        var arg = LowerExpr(argItem);
+        if (ZigIntOperandType(argItem) is CType.Prim { Integer: true } zt
+            && arg.Type?.Unqualified is CType.Prim { Integer: true } lt
+            && zt.SizeOf < lt.SizeOf)
+        {
+            arg = new Cast(zt, arg) { Type = zt };
+        }
+        if (_ir.ConstEval(arg) is { } v
+            && arg.Type?.Unqualified is CType.Prim { Integer: true, Name: not "_Bool", Bytes: 1 or 2 or 4 or 8 } p)
+        {
+            var width = p.Bytes * 8;
+            var bits = unchecked((ulong)v) & (width == 64 ? ulong.MaxValue : (1UL << width) - 1);
+            var n = helper switch
+            {
+                "PopCount" => System.Numerics.BitOperations.PopCount(bits),
+                "Clz"      => bits == 0 ? width : System.Numerics.BitOperations.LeadingZeroCount(bits) - (64 - width),
+                _          => bits == 0 ? width : System.Numerics.BitOperations.TrailingZeroCount(bits),
+            };
+            return new LitInt(n.ToString(System.Globalization.CultureInfo.InvariantCulture), n) { Type = CType.Int };
+        }
+        return new Call("ZigMath." + helper, new List<CExpr> { arg }) { Type = CType.Int };
+    }
+
+    /// <summary>The ZIG type of an integer operand expression, or null when it is an untyped
+    /// <c>comptime_int</c> (a literal, or arithmetic over literals) or a shape this does not follow. Zig has
+    /// no integer promotion: arithmetic takes its operands' peer type, with an untyped literal yielding to
+    /// the typed side — so <c>bits - 1</c> on a <c>u16</c> is a <c>u16</c>. A leaf is a name (its declared
+    /// symbol type, which for a comptime const is its annotation) or an <c>@as(T, …)</c>.</summary>
+    private CType? ZigIntOperandType(Item it)
+    {
+        switch (it.Content)
+        {
+            case Zig.Grouped g: return ZigIntOperandType(g.Arg1);
+            case Zig.Add a:     return PeerZigType(a.Arg0, a.Arg2);
+            case Zig.Sub a:     return PeerZigType(a.Arg0, a.Arg2);
+            case Zig.Mul a:     return PeerZigType(a.Arg0, a.Arg2);
+            case Zig.AddWrap a: return PeerZigType(a.Arg0, a.Arg2);
+            case Zig.SubWrap a: return PeerZigType(a.Arg0, a.Arg2);
+            case Zig.MulWrap a: return PeerZigType(a.Arg0, a.Arg2);
+            case Zig.DivOp a:   return PeerZigType(a.Arg0, a.Arg2);
+            case Zig.ModOp a:   return PeerZigType(a.Arg0, a.Arg2);
+            case Zig.BitAnd a:  return PeerZigType(a.Arg0, a.Arg2);
+            case Zig.BitOr a:   return PeerZigType(a.Arg0, a.Arg2);
+            case Zig.BitXor a:  return PeerZigType(a.Arg0, a.Arg2);
+            case Zig.Shl a:     return ZigIntOperandType(a.Arg0);   // a shift keeps its LEFT operand's type
+            case Zig.Shr a:     return ZigIntOperandType(a.Arg0);
+            case Zig.Ident id:  return _symbols.Resolve(Tok(id.Arg0))?.Type?.Unqualified;
+            case Zig.BuiltinCall b when Tok(b.Arg0) == "@as" && Flatten(b.Arg2) is [var asType, _]:
+                return LowerType(asType).Unqualified;
+            default: return null;
+        }
+    }
+
+    /// <summary>The peer type of two zig operands (<see cref="ZigIntOperandType"/>): an untyped side yields
+    /// to the typed one; two typed sides take the wider (they are equal in valid zig).</summary>
+    private CType? PeerZigType(Item l, Item r)
+    {
+        var lt = ZigIntOperandType(l);
+        var rt = ZigIntOperandType(r);
+        if (lt is null) { return rt; }
+        if (rt is null) { return lt; }
+        return lt.SizeOf >= rt.SizeOf ? lt : rt;
     }
 
     /// <summary>Validate + return the single integer argument of a bit-count builtin

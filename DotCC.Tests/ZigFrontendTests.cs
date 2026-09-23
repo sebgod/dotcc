@@ -461,7 +461,10 @@ public sealed class ZigFrontendTests
             "    const dt = @divTrunc(@as(i8, 7), 3);\n" +
             "    const md = @mod(@as(i8, -7), 3);\n" +
             "    const df = @divFloor(@as(i8, -7), 3);\n" +
-            "    const pc = @popCount(@as(u8, 11));\n" +
+            // A RUNTIME operand: a comptime-known one folds to its literal (the W4 lift's bit-count fold).
+            "    var pv: u8 = 11;\n" +
+            "    pv += 0;\n" +
+            "    const pc = @popCount(pv);\n" +
             "    return @intCast(mn + mx + rm + dt + md + (df + 4) + pc);\n" +
             "}\n");
         cs.ShouldContain("ZigMath.Min");
