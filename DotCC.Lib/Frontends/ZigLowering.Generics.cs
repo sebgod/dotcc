@@ -130,7 +130,8 @@ internal sealed partial class ZigLowering
         IReadOnlyList<(string name, long value, CType type)> ValueSeeds,
         IReadOnlyList<TypeSeed> TypeSeeds,
         IReadOnlyList<(string name, CType type)> RuntimeParams,
-        IReadOnlyList<(string name, bool hasValue, long value, CType inner)> OptionalSeeds);
+        IReadOnlyList<(string name, bool hasValue, long value, CType inner)> OptionalSeeds,
+        IReadOnlyList<(string name, LitStr value)> StringSeeds);
 
     /// <summary>Generic (comptime-param) function symbols → their retained template. Populated in
     /// pass 1 (<see cref="DeclareFn"/>), consulted at every call site (<c>LowerCallInner</c>) so a
@@ -189,6 +190,31 @@ internal sealed partial class ZigLowering
     /// caller's context) — the comptime ones are baked into the specialized body / signature.</summary>
     private CExpr InstantiateGeneric(Symbol templateSym, GenericFnInfo g, IReadOnlyList<Item> argItems)
     {
+        var (instanceSym, runtimeArgItems) = ResolveGenericInstance(templateSym, g, argItems, argScope: this);
+        return BuildCall(instanceSym, runtimeArgItems, receiver: null);
+    }
+
+    /// <summary>Instantiate a generic function THIS module exports, called from <paramref name="caller"/>
+    /// through the module graph (<c>std.fmt.bufPrint(&amp;buf, "{d}", .{42})</c> — road-to-zig-std G3).
+    /// The template, its signature and its instance body belong HERE (they resolve in this module's
+    /// environment and drain with this module's pending bodies); the ARGUMENTS belong to the caller — a
+    /// comptime type argument, a comptime value, an <c>anytype</c> argument's inferred type are all read
+    /// in the caller's scope, exactly as <see cref="TryEvalExportedTypeReturningCall"/> reads a
+    /// type-returning generic's. Returns the instance and the runtime argument items for the CALLER to
+    /// lower in its own <see cref="BuildCall"/>, or null when <paramref name="sym"/> is not a generic
+    /// template here (an ordinary function — the caller calls it directly).</summary>
+    internal (Symbol Instance, IReadOnlyList<Item> RuntimeArgs)? TryResolveExportedGenericInstance(
+        Symbol sym, IReadOnlyList<Item> argItems, ZigLowering caller)
+        => _genericFns.TryGetValue(sym, out var g) ? ResolveGenericInstance(sym, g, argItems, caller) : null;
+
+    /// <summary>The body of <see cref="InstantiateGeneric"/>: resolve (or reuse) the instance a call
+    /// selects, and return it with the runtime argument items still to be lowered. Every argument
+    /// expression is read in <paramref name="argScope"/> — this module for a local call, the calling
+    /// module for one reached through the module graph — while everything the template itself spells
+    /// (parameter types, the return type) is read here.</summary>
+    private (Symbol Instance, IReadOnlyList<Item> RuntimeArgs) ResolveGenericInstance(
+        Symbol templateSym, GenericFnInfo g, IReadOnlyList<Item> argItems, ZigLowering argScope)
+    {
         if (argItems.Count != g.Params.Count)
         {
             throw new IrUnsupportedException(
@@ -200,6 +226,7 @@ internal sealed partial class ZigLowering
         var typeSeeds = new List<TypeSeed>();
         var valueSeeds = new List<(string name, long value, CType type)>();
         var optionalSeeds = new List<(string name, bool hasValue, long value, CType inner)>();
+        var stringSeeds = new List<(string name, LitStr value)>();
         var anytypeSeeds = new List<(string name, CType type)>();
         var runtimeArgItems = new List<Item>();
 
@@ -213,11 +240,11 @@ internal sealed partial class ZigLowering
                 case ParamKind.ComptimeType:
                     // The declared width rides the seed: `f(u21)` and `f(u32)` resolve to the SAME
                     // CType, so without it they would key one instance and share one `bits` answer.
-                    typeSeeds.Add(new TypeSeed(g.Params[i].Name, LowerType(argItems[i]).Unqualified,
-                                               DeclaredBitsOfTypeArg(argItems[i])));
+                    typeSeeds.Add(new TypeSeed(g.Params[i].Name, argScope.LowerType(argItems[i]).Unqualified,
+                                               argScope.DeclaredBitsOfTypeArg(argItems[i])));
                     break;
                 case ParamKind.AnyType:
-                    anytypeSeeds.Add((g.Params[i].Name, InferArgType(argItems[i])));
+                    anytypeSeeds.Add((g.Params[i].Name, argScope.InferArgType(argItems[i])));
                     break;
             }
         }
@@ -258,7 +285,8 @@ internal sealed partial class ZigLowering
                         // A comptime OPTIONAL value param `comptime x: ?T` (road-to-zig-std S4b): the arg
                         // is a comptime `null` (no runtime rep) or a comptime-known payload. Seed it into
                         // _comptimeOptionalVars so a captured `if (x) |y| … else …` folds at lowering time.
-                        if (LowerType(g.Params[i].TypeAst).Unqualified is CType.Optional optParam)
+                        var valueParamType = LowerType(g.Params[i].TypeAst).Unqualified;
+                        if (valueParamType is CType.Optional optParam)
                         {
                             if (IsComptimeNull(argItems[i]))
                             {
@@ -267,7 +295,7 @@ internal sealed partial class ZigLowering
                             }
                             else
                             {
-                                var optArgExpr = LowerExpr(argItems[i]);
+                                var optArgExpr = argScope.LowerExpr(argItems[i]);
                                 if (_ir.ConstEval(optArgExpr) is not { } ov)
                                 {
                                     throw new IrUnsupportedException(
@@ -279,7 +307,24 @@ internal sealed partial class ZigLowering
                             }
                             break;
                         }
-                        var argExpr = LowerExpr(argItems[i]);
+                        // A comptime STRING param `comptime fmt: []const u8` (road-to-zig-std G3 — the
+                        // shape of every std formatting entry point): the argument must be a comptime
+                        // string (a literal, a comptime const, a `++` fold). It has no integer value for
+                        // ConstEval, so it keys the instance by a digest of its bytes and seeds the body
+                        // as a comptime string, the way an `inline for` capture over field names is.
+                        if (IsByteSliceOrArray(valueParamType))
+                        {
+                            if (argScope.EvalComptimeValue(argItems[i]) is not LitStr str)
+                            {
+                                throw new IrUnsupportedException(
+                                    $"call to generic '{templateSym.Name}': the `comptime {g.Params[i].Name}` argument must be a "
+                                    + "compile-time-known string (a literal, a comptime const, or a `++` / `**` fold)");
+                            }
+                            mangleTokens.Add(MangleComptimeString(str));
+                            stringSeeds.Add((g.Params[i].Name, str));
+                            break;
+                        }
+                        var argExpr = argScope.LowerExpr(argItems[i]);
                         if (_ir.ConstEval(argExpr) is not { } v)
                         {
                             throw new IrUnsupportedException(
@@ -335,7 +380,7 @@ internal sealed partial class ZigLowering
                 // its declared error set in LowerFnBodyCore (the same lazy resolution a plain fn gets).
                 if (ret is CType.ErrorUnion) { _fnErrorReturnTypes[instanceSym] = (g.RetType, g.ErrUnion); }
                 _instantiations[mangled] = instanceSym;
-                _pendingInstantiations.Add(new PendingInstantiation(instanceSym, g, valueSeeds, typeSeeds, runtimeParams, optionalSeeds));
+                _pendingInstantiations.Add(new PendingInstantiation(instanceSym, g, valueSeeds, typeSeeds, runtimeParams, optionalSeeds, stringSeeds));
             }
         }
         finally
@@ -356,11 +401,47 @@ internal sealed partial class ZigLowering
                 if (prev is { } p) { _anytypeSeeds[name] = p; } else { _anytypeSeeds.Remove(name); }
             }
         }
-        // The runtime arguments are the CALLER's expressions — lower them (in BuildCall) in the restored
+        // The runtime arguments are the CALLER's expressions — lowered (in BuildCall) in the restored
         // caller type env, coercing to the instance's now-concrete parameter types. An `anytype`
         // argument is among them (a runtime slot), coerced to its inferred parameter type.
-        return BuildCall(instanceSym, runtimeArgItems, receiver: null);
+        return (instanceSym, runtimeArgItems);
     }
+
+    /// <summary>True for a byte slice or byte array type (<c>[]const u8</c>, <c>[N]u8</c>) — the declared
+    /// type of a comptime STRING parameter.</summary>
+    private static bool IsByteSliceOrArray(CType t) => t switch
+    {
+        CType.Slice s => IsByte(s.Element),
+        CType.Array a => IsByte(a.Element),
+        _ => false,
+    };
+
+    /// <summary>True for an 8-bit integer element type (<c>u8</c>/<c>i8</c>, qualifiers ignored).</summary>
+    private static bool IsByte(CType t) => t.Unqualified is CType.Prim { Bytes: 1, Integer: true };
+
+    /// <summary>Mangle a comptime STRING argument into an identifier-safe instance-name token: <c>s</c>
+    /// plus a 32-bit FNV-1a digest of the literal's source segments. A digest rather than the text itself,
+    /// since a format string is arbitrary bytes and can be long; deterministic, so the same string keys
+    /// the same instance in every build. A collision would silently share one instance between two
+    /// strings, so a second string hashing to a taken token is caught by <see cref="_stringInstanceKeys"/>.</summary>
+    private string MangleComptimeString(LitStr str)
+    {
+        var text = string.Join("\0", str.Segments);
+        var h = 2166136261u;
+        foreach (var ch in text) { h = unchecked((h ^ ch) * 16777619u); }
+        var token = "s" + h.ToString("x8", CultureInfo.InvariantCulture);
+        if (_stringInstanceKeys.TryGetValue(token, out var seen) && seen != text)
+        {
+            throw new IrUnsupportedException(
+                $"zig: two comptime string arguments hash to the same instance token '{token}' — rename one of them");
+        }
+        _stringInstanceKeys[token] = text;
+        return token;
+    }
+
+    /// <summary>Each comptime-string mangle token → the string it was minted for, so a digest collision
+    /// fails loudly instead of sharing an instance (see <see cref="MangleComptimeString"/>).</summary>
+    private readonly Dictionary<string, string> _stringInstanceKeys = new(System.StringComparer.Ordinal);
 
     /// <summary>Infer an <c>anytype</c> argument's type at a call site (wall-plan W5) — Zig's
     /// <c>@TypeOf(actual arg)</c>. Lowers the argument expression into a THROWAWAY hoist buffer (like
@@ -381,7 +462,7 @@ internal sealed partial class ZigLowering
     /// seeds the type aliases (shadow-saved) so the body substitutes literals / resolves <c>T</c>. Runs
     /// at top level (never nested), so the per-fn lowering state starts clean.</summary>
     private void LowerInstantiationBody(PendingInstantiation p)
-        => LowerFnBodyCore(p.Instance, p.RuntimeParams, p.Generic.Body, p.ValueSeeds, p.TypeSeeds, p.OptionalSeeds);
+        => LowerFnBodyCore(p.Instance, p.RuntimeParams, p.Generic.Body, p.ValueSeeds, p.TypeSeeds, p.OptionalSeeds, p.StringSeeds);
 
     /// <summary>True when a generic argument is a comptime <c>null</c> — a bare <c>null</c> literal
     /// (optionally parenthesized). The comptime-optional seed for such an argument has no payload.</summary>

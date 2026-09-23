@@ -220,10 +220,9 @@ internal sealed partial class ZigLowering
     /// container types (structs / unions / enums, with their consts and nested containers) in pass 0,
     /// before any laziness kicks in, so the lookup is a plain read. Null when this module declares no
     /// such type — the caller reports that loudly, naming the module.
-    /// <para>The returned <see cref="CType"/> carries the container's PLAIN source name, which is also
-    /// the emitted C# type name; two modules declaring a same-named aggregate therefore collide, and
-    /// <see cref="IrModule.RegisterStructType"/> throws rather than silently dropping the second.
-    /// Module-qualified naming is the real fix (docs/plans/deferred.md).</para></summary>
+    /// <para>The lookup key is the container's plain SOURCE name; the returned <see cref="CType"/> carries
+    /// its module-qualified emitted name (<c>&lt;module&gt;__&lt;Name&gt;</c>, <see cref="QualifyTypeName"/>),
+    /// so two modules may each declare a same-named aggregate.</para></summary>
     internal CType? ResolveExportedType(string name) =>
         _containerTypes.TryGetValue(name, out var t) ? t : null;
 
@@ -1114,16 +1113,16 @@ internal sealed partial class ZigLowering
                 // W4) couldn't resolve in pass 0 (the fn wasn't declared yet), so it records the type
                 // alias HERE and emits no global. A plain runtime const still returns false → a global.
                 case Zig.ConstDecl d      when !IsComptimeBound(Tok(d.Arg1)):
-                    if (!TryComptimeConstBinding(Tok(d.Arg1), d.Arg3)) { LowerGlobal(d.Arg1, null, d.Arg3); }
+                    if (!TryComptimeConstBinding(Tok(d.Arg1), d.Arg3)) { LowerGlobal(d.Arg1, null, d.Arg3, isConst: true); }
                     break;  // const IDENT = RhsExpr ;
                 case Zig.ConstDeclTyped d when !IsComptimeBound(Tok(d.Arg1)):
-                    if (!TryComptimeConstBinding(Tok(d.Arg1), d.Arg5)) { LowerGlobal(d.Arg1, d.Arg3, d.Arg5); }
+                    if (!TryComptimeConstBinding(Tok(d.Arg1), d.Arg5)) { LowerGlobal(d.Arg1, d.Arg3, d.Arg5, isConst: true); }
                     break;  // const IDENT : Type = RhsExpr ;
                 case Zig.VarDecl d:        LowerGlobal(d.Arg1, null,   d.Arg3); break;  // var IDENT = RhsExpr ;
                 case Zig.VarDeclTyped d:   LowerGlobal(d.Arg1, d.Arg3, d.Arg5); break;  // var IDENT : Type = RhsExpr ;
                 // A typed global with align/linksection modifiers (Milestone R, part 5) — modifiers
                 // ignored (no-op on the managed target); RhsExpr is one slot right of the Type.
-                case Zig.ConstDeclTypedMods d: LowerGlobal(d.Arg1, d.Arg3, d.Arg6); break;  // const IDENT : Type DeclMods = RhsExpr ;
+                case Zig.ConstDeclTypedMods d: LowerGlobal(d.Arg1, d.Arg3, d.Arg6, isConst: true); break;  // const IDENT : Type DeclMods = RhsExpr ;
                 case Zig.VarDeclTypedMods d:   LowerGlobal(d.Arg1, d.Arg3, d.Arg6); break;  // var IDENT : Type DeclMods = RhsExpr ;
                 // `threadlocal var x: T = 0;` — thread storage duration → [ThreadStatic] on the
                 // emitted field (the C `_Thread_local` twofer; same marker, same constraint).
@@ -1137,8 +1136,13 @@ internal sealed partial class ZigLowering
     /// against that sink, declare the global symbol in the (module) scope so bodies resolve it, and
     /// record a <see cref="GlobalVar"/>. Scalar, aggregate (struct via <see cref="StructInit"/>),
     /// and <c>[N]T</c> array / <c>undefined</c> globals are supported (Milestone K). The initializer
-    /// is lowered at module scope, so it must be a constant / module-resolvable value.</summary>
-    private void LowerGlobal(Item nameTok, Item? typeItem, Item rhsItem, bool threadLocal = false)
+    /// is lowered at module scope, so it must be a constant / module-resolvable value.
+    /// <para>An integer <c>const</c> (<paramref name="isConst"/>) whose initializer folds also carries
+    /// the folded value, the way a C23 <c>constexpr</c> does (<see cref="Symbol.IsConstexpr"/>): a zig
+    /// container-level <c>const</c> IS comptime-known, so its name must fold wherever a constant is
+    /// required — a comptime argument (<c>addN(N, 3)</c>), an array extent. The emitted field is
+    /// unchanged.</para></summary>
+    private void LowerGlobal(Item nameTok, Item? typeItem, Item rhsItem, bool threadLocal = false, bool isConst = false)
     {
         // `threadlocal` V1: a zero-initialized SCALAR only. The array/aggregate
         // paths below don't carry the marker (their pinned backing store is
@@ -1251,11 +1255,15 @@ internal sealed partial class ZigLowering
                 $"threadlocal '{Tok(nameTok)}': a non-zero initializer is not supported (a .NET [ThreadStatic] initializer runs only on the first thread)");
         }
         var type = declared ?? init.Type ?? CType.Int;
+        var folded = isConst && type.Unqualified is CType.Prim { Integer: true } ? _ir.ConstEval(init) : null;
         var sym = _symbols.Declare(new Symbol
         {
             Name = Tok(nameTok), Kind = SymKind.Var, Type = type, Storage = Storage.Static, IsGlobal = true,
             IsThreadLocal = threadLocal,
+            IsConstexpr = folded is not null,
+            ConstValue = folded ?? 0,
         });
+        if (declared is null && init is LitStr) { _stringLiteralSyms.Add(sym); }
         _ir.Globals.Add(new GlobalVar(sym, init));
     }
 

@@ -314,12 +314,14 @@ internal sealed partial class ZigLowering
     private void LowerFnBodyCore(Symbol funcSym, IReadOnlyList<(string name, CType type)> paramInfos, Item body,
         IReadOnlyList<(string name, long value, CType type)>? comptimeSeeds,
         IReadOnlyList<TypeSeed>? typeSeeds = null,
-        IReadOnlyList<(string name, bool hasValue, long value, CType inner)>? optionalSeeds = null)
+        IReadOnlyList<(string name, bool hasValue, long value, CType inner)>? optionalSeeds = null,
+        IReadOnlyList<(string name, LitStr value)>? stringSeeds = null)
     {
         // A generic INSTANCE body (comptime value / type / optional seeds present) unlocks comptime
         // control flow — comptime-if folding + dead-code-after-a-comptime-terminator (wall-plan W3a). Set
         // here; the drain never nests a body in another, so a plain set/overwrite per call is sufficient.
-        _inGenericInstance = comptimeSeeds is not null || typeSeeds is not null || optionalSeeds is not null;
+        _inGenericInstance = comptimeSeeds is not null || typeSeeds is not null || optionalSeeds is not null
+            || stringSeeds is not null;
         _currentFnRet = (funcSym.Type as CType.Func)?.Return;
         _currentFnName = funcSym.Name;   // the mangle prefix for an in-function container (wall-plan W2)
         _localContainerShadows.Clear();  // per-function: local containers scope to this body
@@ -373,6 +375,16 @@ internal sealed partial class ZigLowering
                 _comptimeOptionalVars[seedSym] = (hasValue, value, inner);
             }
         }
+        // Seed comptime STRING parameters (road-to-zig-std G3 — `comptime fmt: []const u8`): the name binds
+        // the literal in _comptimeValues with no runtime symbol, so a reference substitutes the string and
+        // a comptime use (`fmt ++ "!"`, a nested generic call passing `fmt` on) folds. Shadow-saved,
+        // since the map is function-flat; restored at body exit below.
+        var stringShadows = new List<(string name, CExpr? prev)>();
+        foreach (var (name, value) in stringSeeds ?? [])
+        {
+            stringShadows.Add((name, _comptimeValues.TryGetValue(name, out var prevValue) ? prevValue : null));
+            _comptimeValues[name] = value;
+        }
         var paramSyms = paramInfos
             .Select(p => _symbols.Declare(new Symbol { Name = p.name, Kind = SymKind.Param, Type = p.type }))
             .ToList();
@@ -402,6 +414,11 @@ internal sealed partial class ZigLowering
             if (prev is { } p) { _typeAliases[nm] = p; } else { _typeAliases.Remove(nm); }
         }
         _typeAliasShadows.Clear();
+        for (int i = stringShadows.Count - 1; i >= 0; i--)
+        {
+            var (nm, prev) = stringShadows[i];
+            if (prev is { } p) { _comptimeValues[nm] = p; } else { _comptimeValues.Remove(nm); }
+        }
 
         _ir.Functions.Add(new FuncDef(funcSym, paramSyms, blk, false));
     }
@@ -1268,6 +1285,19 @@ internal sealed partial class ZigLowering
         }
     }
 
+    /// <summary>Locals and globals bound, without an annotation, to a string literal (<c>const s = "abc";</c>)
+    /// — zig types such a binding <c>*const [3:0]u8</c>, whose <c>.len</c> is 3, but the lowered symbol
+    /// carries the literal's C array type <c>char[4]</c> (the NUL counted). Recorded so
+    /// <see cref="IsStringLiteralValue"/> answers for a reference to one exactly as for the literal itself.
+    /// Keyed by symbol identity.</summary>
+    private readonly HashSet<Symbol> _stringLiteralSyms = new();
+
+    /// <summary>True when <paramref name="value"/> is a zig string literal (<c>*const [N:0]u8</c>) — the
+    /// literal itself, a comptime string substituted for a name, or a reference to a binding of one —
+    /// whose lowered array type counts the NUL sentinel that zig's <c>.len</c> excludes.</summary>
+    private bool IsStringLiteralValue(CExpr value)
+        => value is LitStr || value is VarRef v && _stringLiteralSyms.Contains(v.Sym);
+
     /// <summary>Coerce an array or string-literal value into a slice fat pointer at a
     /// <c>[]T</c> / <c>[]const T</c> sink (Zig's array→slice coercion). A string literal is
     /// <c>*const [N:0]u8</c> — its <c>.len</c> excludes the sentinel NUL, so the count is the
@@ -1289,7 +1319,7 @@ internal sealed partial class ZigLowering
             throw new IrUnsupportedException(
                 $"cannot coerce {value.Type.Describe()} to slice {sliceType.Describe()} (need an array or string literal)");
         }
-        long count = value is LitStr ? n - 1 : n;   // string literal drops the trailing NUL
+        long count = IsStringLiteralValue(value) ? n - 1 : n;   // string literal drops the trailing NUL
         var lenLit = new LitInt(count.ToString(CultureInfo.InvariantCulture), count) { Type = CType.ULong };
         var elem = sliceType.Element;
         return new SliceNew(value, lenLit, elem.Unqualified, elem.IsConst) { Type = sliceType };

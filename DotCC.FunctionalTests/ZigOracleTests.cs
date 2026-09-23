@@ -2809,6 +2809,30 @@ public sealed class ZigOracleTests
             "    total += soften(7) catch 0; // 7\n" +
             "    return total;\n" +
             "}\n", 42, "" },
+        // A string literal's `.len` excludes its NUL sentinel (zig types it `*const [N:0]u8`) — directly,
+        // through a local or a global `const` bound to one, and through the slice coercion of such a
+        // binding; dotcc's lowered `char[N+1]` counted the NUL in `.len` (a found miscompile). Plus a named
+        // integer `const` as a comptime argument, which folds like a literal. 3+5+4+3+5+22 = 42.
+        new object[] { "string_literal_len",
+            "const G = \"hello\";\n" +
+            "const N: u8 = 20;\n" +
+            "fn sliceLen(s: []const u8) usize {\n" +
+            "    return s.len;\n" +
+            "}\n" +
+            "fn addN(comptime n: u8, x: u8) u8 {\n" +
+            "    return x + n;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const s = \"abc\";\n" +
+            "    var total: usize = 0;\n" +
+            "    total += s.len;\n" +
+            "    total += G.len;\n" +
+            "    total += \"wxyz\".len;\n" +
+            "    total += sliceLen(s);\n" +
+            "    total += sliceLen(G);\n" +
+            "    total += addN(N, 2);\n" +
+            "    return @intCast(total);\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
@@ -2956,6 +2980,38 @@ public sealed class ZigOracleTests
             "        const Self = @This();\n" +
             "        pub fn total(self: Self) usize { return self.len + self.first; }\n" +
             "    };\n" +
+            "}\n", 42, "" },
+        // GENERIC functions declared in the imported module — each monomorphization-key kind, with the
+        // arguments spelled in the CALLER (a caller-side type alias, a caller-side named `const`, a
+        // caller-side comptime string): a `comptime T: type`, a `comptime n: u8`, an `anytype`, and a
+        // `comptime s: []const u8` (the `std.fmt.bufPrint` shape — road-to-zig-std G3). The call used to
+        // bind the template's empty placeholder signature ("expected 0 argument(s), got 3").
+        // 10 + 23 + 6 + 3 = 42.
+        new object[] { "import_generic_fn",
+            "const util = @import(\"util.zig\");\n" +
+            "const N: u8 = 20;\n" +
+            "const S = \"abc\";\n" +
+            "pub fn main() u8 {\n" +
+            "    const T = u8;\n" +
+            "    const m = util.maxOf(T, 10, 7);\n" +
+            "    const a = util.addN(N, 3);\n" +
+            "    const t = util.twice(@as(u8, 3));\n" +
+            "    const l = util.lenOf(S);\n" +
+            "    if (l != util.lenOf(\"xyz\")) return 1;\n" +
+            "    return m + a + t + l;\n" +
+            "}\n",
+            "util.zig",
+            "pub fn maxOf(comptime T: type, a: T, b: T) T {\n" +
+            "    return if (a > b) a else b;\n" +
+            "}\n" +
+            "pub fn addN(comptime n: u8, x: u8) u8 {\n" +
+            "    return x + n;\n" +
+            "}\n" +
+            "pub fn twice(x: anytype) @TypeOf(x) {\n" +
+            "    return x + x;\n" +
+            "}\n" +
+            "pub fn lenOf(comptime s: []const u8) u8 {\n" +
+            "    return @intCast(s.len);\n" +
             "}\n", 42, "" },
     };
 

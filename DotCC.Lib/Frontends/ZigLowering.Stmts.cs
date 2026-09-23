@@ -524,6 +524,7 @@ internal sealed partial class ZigLowering
         var init = LowerExprSink(initExpr, declared);
         var type = declared ?? init.Type ?? CType.Int;
         var sym2 = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = type });
+        if (declared is null && init is LitStr) { _stringLiteralSyms.Add(sym2); }
         return new DeclStmt(new List<LocalDecl> { new(sym2, init) });
     }
 
