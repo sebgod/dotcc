@@ -3142,6 +3142,32 @@ public sealed class ZigOracleTests
             "    sortBy(u8, &b, desc);\n" +
             "    return a[2] + b[2] + inc(xs[1]) - 22 + p + kind(u8) - 2;\n" +
             "}\n", 42, "" },
+        // A nested `switch` as a STATEMENT prong body (std.math.sqrt's `.int => |I| switch (I.signedness) {
+        // .unsigned => return …, … }`): its prongs return, which a switch EXPRESSION's may not; a comptime
+        // subject and a runtime one. 10 + 20 + 1 + 2 + 0 + 9 = 42.
+        new object[] { "nested_statement_switch",
+            "fn kind(comptime T: type) u8 {\n" +
+            "    switch (@typeInfo(T)) {\n" +
+            "        .int => |info| switch (info.signedness) {\n" +
+            "            .signed => return 10,\n" +
+            "            .unsigned => return 20,\n" +
+            "        },\n" +
+            "        else => return 1,\n" +
+            "    }\n" +
+            "}\n" +
+            "fn pick(x: u8) u8 {\n" +
+            "    switch (x) {\n" +
+            "        0 => switch (x + 1) {\n" +
+            "            1 => return 2,\n" +
+            "            else => {},\n" +
+            "        },\n" +
+            "        else => {},\n" +
+            "    }\n" +
+            "    return 0;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return kind(i8) + kind(u16) + kind(bool) + pick(0) + pick(3) + 9;\n" +
+            "}\n", 42, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

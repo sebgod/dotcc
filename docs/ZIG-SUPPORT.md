@@ -332,7 +332,8 @@ body is `return struct { pub fn inner … }.inner;` stands for that method (its 
 instance is created, with the instance's seeds); a comptime function argument (a function name, a comptime
 function parameter passed along, or such a call) keys the callee's instance and is called directly; the idiom
 also works in expression position (`const inc = struct { fn f … }.f;`). With it: an inline `@import("…").name`
-re-export, `noalias` (ignored), by-reference pair captures `|*a, *b|`, and a `comptime { … }` prong body
+re-export, `noalias` (ignored), by-reference pair captures `|*a, *b|`, a nested `switch` as a statement prong
+body whose prongs return (std.math.sqrt; oracle `nested_statement_switch`), and a `comptime { … }` prong body
 (oracle `closure_idiom_fn_params`; unit `ZigClosureIdiomTests`). **Cut:** the expression-position idiom's
 methods drain without the enclosing instance's seeds. Oracle `import_file_struct`; example `examples/zig-file-struct/`; unit
 `ZigFileStructTests`. **A GENERIC top-level function is a method too** (`w.print(fmt, args)`, with

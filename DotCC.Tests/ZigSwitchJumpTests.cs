@@ -105,4 +105,27 @@ public sealed class ZigSwitchJumpTests
         cs.ShouldContain("__blk0 = 24;");            // `break :blk 24`
         cs.ShouldContain("goto __loop1_swbrk;");     // `break` in the `catch |e| switch`
     }
+
+    [Fact]
+    public void A_nested_switch_prong_body_is_a_statement_whose_prongs_may_return()
+    {
+        // std.math.sqrt: `.int => |I| switch (I.signedness) { .signed => @compileError(…), .unsigned => return … }`.
+        var cs = EmitZig("""
+            fn pick(x: u8) u8 {
+                switch (x) {
+                    0 => switch (x + 1) {
+                        1 => return 2,
+                        else => {},
+                    },
+                    else => {},
+                }
+                return 0;
+            }
+            pub fn main() u8 {
+                return pick(0) + 40;
+            }
+            """);
+        cs.ShouldMatch(@"case 0:\s*switch");
+        cs.ShouldContain("return 2;");
+    }
 }

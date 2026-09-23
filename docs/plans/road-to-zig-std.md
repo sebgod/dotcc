@@ -737,8 +737,9 @@ that retire curated shortcuts.
 >   reified type).
 > - `std.mem.sort`: the closure idiom (`return struct { pub fn inner … }.inner;`) and comptime FUNCTION
 >   parameters landed, with an inline `@import(…).name` re-export, `noalias`, by-reference pair captures
->   and `comptime { … }` prongs; std.sort.block now lowers far enough to call `std.math.sqrt(items.len)`,
->   where it meets parseInt's wall: the declared width of an `anytype` argument.
+>   and `comptime { … }` prongs; then, past the value-width brick and a nested statement `switch` in
+>   std.math.sqrt, std.sort.block reaches `std.simd.suggestVectorLength` through std.mem, the same
+>   TARGET-identity decision as indexOfScalar. **Two of the eight probes now wait on that one decision.**
 > - `array_list.Aligned(u8, null)` still reaches `SentinelSlice`, a type-returning METHOD (G4).
 
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)

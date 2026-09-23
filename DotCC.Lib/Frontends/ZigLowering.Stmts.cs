@@ -1991,6 +1991,17 @@ internal sealed partial class ZigLowering
             return new ExprStmt(new Assign(null, target, value) { Type = target.Type });
         });
 
+    /// <summary>Lower a statement switch's bare-expression prong body. A nested <c>switch</c> there is itself a
+    /// STATEMENT (std.math.sqrt's <c>.int =&gt; |I| switch (I.signedness) { .unsigned =&gt; return …, … }</c>), so
+    /// its prongs may return or raise, which a switch EXPRESSION's may not; anything else is an expression
+    /// statement.</summary>
+    private CStmt LowerProngExprStmt(Item e) => e.Content switch
+    {
+        Zig.SwitchExpr s => LowerSwitchStmt(s.Arg2, s.Arg5),
+        Zig.SwitchExprTrailing s => LowerSwitchStmt(s.Arg2, s.Arg5),
+        _ => new ExprStmt(LowerExpr(e)),
+    };
+
     /// <summary>True when a callee names <c>assert</c> (a bare alias, <c>const assert = std.debug.assert;</c>,
     /// or a dotted <c>std.debug.assert</c>).</summary>
     private static bool IsAssertCallee(Item callee) => callee.Content switch
@@ -2078,7 +2089,7 @@ internal sealed partial class ZigLowering
                 return ctProng switch
                 {
                     { Block: { } blk } => LowerBlock(blk),
-                    { Expr: { } e } => new ExprStmt(LowerExpr(e)),
+                    { Expr: { } e } => LowerProngExprStmt(e),
                     { Return: { } r } => Hoisted(() => LowerReturn(r)),
                     { ReturnsVoid: true } => LowerReturnVoid(),
                     { Jump: { } j } => LowerProngJump(j),
@@ -2136,7 +2147,7 @@ internal sealed partial class ZigLowering
             switch (prongItem.Content)
             {
                 case Zig.Prong p:            caseVals = p.Arg0;  body = new List<CStmt> { LowerBlock(p.Arg2) }; break;
-                case Zig.ProngExpr pe:       caseVals = pe.Arg0; body = new List<CStmt> { new ExprStmt(LowerExpr(pe.Arg2)) }; break;
+                case Zig.ProngExpr pe:       caseVals = pe.Arg0; body = new List<CStmt> { LowerProngExprStmt(pe.Arg2) }; break;
                 case Zig.ProngReturn pr:     caseVals = pr.Arg0; body = new List<CStmt> { Hoisted(() => LowerReturn(pr.Arg3)) }; break;
                 case Zig.ProngReturnVoid pr: caseVals = pr.Arg0; body = new List<CStmt> { LowerReturnVoid() }; break;
                 case Zig.ProngJump pj:       caseVals = pj.Arg0; body = new List<CStmt> { LowerProngJump(pj.Arg2) }; break;
