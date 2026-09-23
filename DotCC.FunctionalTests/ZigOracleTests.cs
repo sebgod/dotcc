@@ -2708,6 +2708,107 @@ public sealed class ZigOracleTests
             "    total += A.P.two();\n" +
             "    return total;\n" +
             "}\n", 42, "" },
+        // STATEMENT-shaped `catch`/`orelse` fallbacks (road-to-zig-std — ~1,000 std sites, each a parse
+        // error that dropped its whole function, `std.fmt.bufPrint` among them): `catch |err| switch
+        // (err)` whose prongs yield or jump, `catch { return …; }` / `orelse { return …; }`, `catch |e|
+        // return e` (an ERROR return of the runtime code — it used to be wrapped as the success payload),
+        // `orelse continue` / `orelse break`, a labeled `break :blk v`, and a discarded `catch {}`.
+        // 100 + 50 + 7 + 3 + 9 + 2 + 29 = 200; 200 - 158 = 42.
+        new object[] { "fallback_arms",
+            "const E = error{ Bad, Worse };\n" +
+            "\n" +
+            "fn parse(x: u8) E!u8 {\n" +
+            "    if (x == 0) return error.Bad;\n" +
+            "    if (x == 1) return error.Worse;\n" +
+            "    return x;\n" +
+            "}\n" +
+            "\n" +
+            "fn lookup(x: u8) ?u8 {\n" +
+            "    return if (x > 5) x else null;\n" +
+            "}\n" +
+            "\n" +
+            "// `catch |err| switch (err)` — the 498-site shape: prongs yield a value or jump.\n" +
+            "fn classify(x: u8) E!u8 {\n" +
+            "    const v = parse(x) catch |err| switch (err) {\n" +
+            "        error.Bad => 100,\n" +
+            "        error.Worse => return error.Worse,\n" +
+            "    };\n" +
+            "    return v;\n" +
+            "}\n" +
+            "\n" +
+            "// `catch { … }` / `orelse { … }` blocks that never fall through.\n" +
+            "fn orDefault(x: u8) u8 {\n" +
+            "    const v = parse(x) catch {\n" +
+            "        return 7;\n" +
+            "    };\n" +
+            "    const w = lookup(v) orelse {\n" +
+            "        return 3;\n" +
+            "    };\n" +
+            "    return w;\n" +
+            "}\n" +
+            "\n" +
+            "// `catch |e| return e` — capture + return.\n" +
+            "fn passthrough(x: u8) E!u8 {\n" +
+            "    const v = parse(x) catch |e| return e;\n" +
+            "    return v + 1;\n" +
+            "}\n" +
+            "\n" +
+            "// `orelse break` / `orelse continue` / labeled break with a value.\n" +
+            "fn loops() u32 {\n" +
+            "    var total: u32 = 0;\n" +
+            "    var i: u8 = 0;\n" +
+            "    while (i < 10) : (i += 1) {\n" +
+            "        const v = lookup(i) orelse continue;\n" +
+            "        if (v == 9) {\n" +
+            "            const w = lookup(0) orelse break;\n" +
+            "            total += w;\n" +
+            "        }\n" +
+            "        total += v;\n" +
+            "    }\n" +
+            "    const found = blk: {\n" +
+            "        const x = lookup(8) orelse break :blk 0;\n" +
+            "        break :blk x;\n" +
+            "    };\n" +
+            "    return total + found;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var total: u32 = 0;\n" +
+            "    total += classify(0) catch 0; // 100\n" +
+            "    total += classify(1) catch 50; // 50\n" +
+            "    total += orDefault(0); // 7\n" +
+            "    total += orDefault(2); // 3\n" +
+            "    total += orDefault(9); // 9\n" +
+            "    total += passthrough(1) catch 2; // 2\n" +
+            "    // statement-position `catch {}` on a discarded result\n" +
+            "    _ = parse(0) catch {};\n" +
+            "    total += loops(); // 6+7+8 = 21, +8 = 29\n" +
+            "    return @intCast(total - 158); // 200 - 158 = 42\n" +
+            "}\n", 42, "" },
+        // The `else => |e| return e` capture prong that ends most `catch |err| switch (err)` blocks in
+        // std: the capture binds the error, the prong returns it, a matched prong yields a value.
+        // 30 + 5 + 7 = 42.
+        new object[] { "fallback_switch_capture_prong",
+            "const E = error{ Bad, Worse, Worst };\n" +
+            "fn parse(x: u8) E!u8 {\n" +
+            "    if (x == 0) return error.Bad;\n" +
+            "    if (x == 1) return error.Worse;\n" +
+            "    if (x == 2) return error.Worst;\n" +
+            "    return x;\n" +
+            "}\n" +
+            "fn soften(x: u8) E!u8 {\n" +
+            "    return parse(x) catch |err| switch (err) {\n" +
+            "        error.Bad => 30,\n" +
+            "        else => |e| return e,\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var total: u8 = 0;\n" +
+            "    total += soften(0) catch 0; // 30\n" +
+            "    total += soften(1) catch 5; // 5 (Worse propagated)\n" +
+            "    total += soften(7) catch 0; // 7\n" +
+            "    return total;\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

@@ -306,11 +306,12 @@ public sealed record NullCoalesce(CExpr Left, CExpr Right) : CExpr;
 /// Zig-lowering / C#-target construct (Milestone B2).</summary>
 public sealed record ErrUnionOk(CExpr? Payload) : CExpr;
 
-/// <summary>A Zig <c>return error.Foo;</c>, lowered to an error error union —
-/// <c>ErrUnion&lt;T&gt;.Err(code)</c>. <see cref="Code"/> is the error's stable code in the
-/// flat global error set (non-zero). <see cref="CExpr.Type"/> is the
-/// <see cref="CType.ErrorUnion"/> the function returns. Zig-lowering / C#-target only.</summary>
-public sealed record ErrUnionErr(int Code) : CExpr;
+/// <summary>A Zig <c>return error.Foo;</c> (or <c>return e;</c> of a runtime error VALUE — a
+/// <c>catch |e|</c> capture), lowered to an error error union — <c>ErrUnion&lt;T&gt;.Err(code)</c>.
+/// <see cref="Code"/> is the error's code in the flat global error set: a constant literal for a
+/// named error, or any <see cref="CType.ErrorSet"/>-typed expression for a value. <see cref="CExpr.Type"/>
+/// is the <see cref="CType.ErrorUnion"/> the function returns. Zig-lowering / C#-target only.</summary>
+public sealed record ErrUnionErr(CExpr Code) : CExpr;
 
 /// <summary>A Zig <c>try e</c> — unwrap the payload of the error union <see cref="Inner"/>,
 /// or propagate its error by throwing <c>ZigErrorReturn</c> (caught at the enclosing
@@ -536,8 +537,9 @@ public sealed record DeferGuard(CStmt Body, CStmt Cleanup, bool OnErrorOnly) : C
 /// C# <c>catch</c> can't observe a direct return — so when the enclosing function carries an
 /// <c>errdefer</c>, the error return is routed through this throw instead, so it propagates
 /// through the errdefer <c>catch</c>(es) on the stack (and the <c>!T</c> boundary catch still
-/// converts it back to an <c>Err</c>). Flow-terminating, like a C# <c>throw</c>.</summary>
-public sealed record ZigErrorThrow(int Code) : CStmt;
+/// converts it back to an <c>Err</c>). Flow-terminating, like a C# <c>throw</c>. <see cref="Code"/>
+/// is a constant literal or a runtime error value, exactly as for <see cref="ErrUnionErr"/>.</summary>
+public sealed record ZigErrorThrow(CExpr Code) : CStmt;
 
 /// <summary>A C <c>switch (Subject) { … }</c>, lowered to a C# switch. The body is
 /// pre-grouped into <see cref="Sections"/> (the grammar parses <c>case E:</c> /

@@ -112,8 +112,8 @@ internal sealed partial class ZigLowering
             case Zig.StmtReturnVoid:    return LowerReturnVoid();
             // `a catch return [x];` / `a orelse return [x];` as a STATEMENT (Milestone N, part 6) —
             // a control-flow early-out; the unwrapped value is discarded (common for a `!void` `a`).
-            case Zig.StmtExpr e when IsControlFlowFallback(e.Arg0, out var cfL, out var cfC, out var cfR):
-                return LowerControlFlowFallback(cfL, cfC, cfR, null);
+            case Zig.StmtExpr e when IsControlFlowFallback(e.Arg0, out var cfL, out var cfC, out var cfCap, out var cfArm):
+                return LowerControlFlowFallback(cfL, cfC, cfCap, cfArm, null);
             // `@setEvalBranchQuota(n);` — a COMPTIME budget setter (road-to-zig-std S7). It is a
             // statement because zig types it `void`; it raises the interpreter's step budget and emits
             // nothing, so no `_ = …;` discard is left behind.
@@ -132,6 +132,12 @@ internal sealed partial class ZigLowering
                 {
                     if (a.Arg0.Content is Zig.Ident lhs && Tok(lhs.Arg0) == "_")
                     {
+                        // `_ = a catch {};` / `_ = a orelse break;` — the value is DISCARDED, so the
+                        // fallback arm needs no payload (a void block is fine here, as in zig).
+                        if (IsControlFlowFallback(a.Arg2, out var dL, out var dC, out var dCap, out var dArm))
+                        {
+                            return LowerControlFlowFallback(dL, dC, dCap, dArm, null);
+                        }
                         return new ExprStmt(LowerExpr(a.Arg2));
                     }
                     var target = LowerExpr(a.Arg0);
@@ -423,9 +429,9 @@ internal sealed partial class ZigLowering
         // `const v = a catch return [x];` / `const v = a orelse return [x];` (Milestone N, part 6) —
         // a control-flow fallback. On the error/none path the `return` runs (early-out); on success
         // `v` binds the unwrapped payload.
-        if (IsControlFlowFallback(initExpr, out var cfLhs, out var cfCatch, out var cfRet))
+        if (IsControlFlowFallback(initExpr, out var cfLhs, out var cfCatch, out var cfCap, out var cfArm))
         {
-            return LowerControlFlowFallback(cfLhs, cfCatch, cfRet, payload =>
+            return LowerControlFlowFallback(cfLhs, cfCatch, cfCap, cfArm, payload =>
             {
                 var ptype = declared ?? payload.Type ?? CType.Int;
                 var psym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = ptype });
@@ -2367,20 +2373,59 @@ internal sealed partial class ZigLowering
             throw new IrUnsupportedException(
                 "a tagged-union value-switch with block prongs (`const x = switch (u) { .v => blk: {…} }`) is not supported yet");
         }
-        var sections = new List<SwitchSection>();
-        foreach (var prongItem in Flatten(prongsItem))
+        // A `|x|` prong capture of a plain (non-union) subject binds the subject's own value — the
+        // `else => |e| return e` idiom that ends most `catch |err| switch (err) {…}` blocks in std. The
+        // subject is read once into a temp when a capture needs it again (it may be a call).
+        var pre = new List<CStmt>();
+        var prongs = Flatten(prongsItem);
+        if (subject is not VarRef && prongs.Any(p => p.Content is Zig.ProngCaptureExpr or Zig.ProngCaptureReturn or Zig.ProngCaptureReturnVoid))
         {
-            if (prongItem.Content is not Zig.ProngExpr pe)
-            {
-                throw new IrUnsupportedException(
-                    "a value-position switch prong must yield a value (`v => expr` or `v => blk: {… break :blk v;}`); " +
-                    "a void block prong or a `|x|` capture in a switch expression is not supported yet");
-            }
-            var fill = FillValueTemp(pe.Arg2, rt);
-            var labels = LowerCaseVals(pe.Arg0, subject.Type);
-            sections.Add(new SwitchSection(labels, new List<CStmt> { fill, new Break() }));
+            var st = _symbols.Declare(new Symbol { Name = "__sw" + _blockLabelCounter++, Kind = SymKind.Var, Type = subject.Type });
+            pre.Add(new DeclStmt(new List<LocalDecl> { new(st, subject) }));
+            subject = new VarRef(st) { Type = subject.Type, IsLValue = true };
         }
-        return new Switch(subject, sections);
+        var sections = new List<SwitchSection>();
+        foreach (var prongItem in prongs)
+        {
+            // Each prong either YIELDS the value (fill the temp) or JUMPS (`=> return v`), which is how
+            // a value switch reports the cases it cannot answer — the prong never reaches the consumer.
+            var (caseVals, capture, body) = prongItem.Content switch
+            {
+                Zig.ProngExpr pe                => (pe.Arg0, (string?)null, (Func<CStmt>)(() => FillValueTemp(pe.Arg2, rt))),
+                Zig.ProngReturn pr              => (pr.Arg0, null, () => LowerReturn(pr.Arg3)),
+                Zig.ProngReturnVoid pv          => (pv.Arg0, null, () => LowerReturnVoid()),
+                Zig.ProngCaptureExpr ce         => (ce.Arg0, Tok(ce.Arg3), () => FillValueTemp(ce.Arg5, rt)),
+                Zig.ProngCaptureReturn cr       => (cr.Arg0, Tok(cr.Arg3), () => LowerReturn(cr.Arg6)),
+                Zig.ProngCaptureReturnVoid cv   => (cv.Arg0, Tok(cv.Arg3), () => LowerReturnVoid()),
+                _ => throw new IrUnsupportedException(
+                    "a value-position switch prong must yield a value (`v => expr` or `v => blk: {… break :blk v;}`) "
+                    + "or jump (`v => return …`); a void block prong or a `|*x|` capture in a switch expression is not supported yet"),
+            };
+            var labels = LowerCaseVals(caseVals, subject.Type);
+            var stmts = new List<CStmt>();
+            _symbols.EnterScope();
+            try
+            {
+                if (capture is { } cap && cap != "_")
+                {
+                    var capSym = _symbols.Declare(new Symbol { Name = cap, Kind = SymKind.Var, Type = subject.Type });
+                    stmts.Add(new DeclStmt(new List<LocalDecl> { new(capSym, subject) }));
+                }
+                var stmt = body();
+                stmts.Add(stmt);
+                // A jump needs no `break` (and an unreachable `break` after `return` is a C# warning).
+                if (stmt is not Return) { stmts.Add(new Break()); }
+            }
+            finally
+            {
+                _symbols.ExitScope();
+            }
+            sections.Add(new SwitchSection(labels, new List<CStmt> { new Block(stmts) }));
+        }
+        var sw = new Switch(subject, sections);
+        if (pre.Count == 0) { return sw; }
+        pre.Add(sw);
+        return new Seq(pre);
     }
 
     /// <summary>True when a lowered statement list provably ends control flow (so no
@@ -2447,11 +2492,22 @@ internal sealed partial class ZigLowering
                 // ZigErrorReturn so it passes through the errdefer catch(es) on the stack (a C#
                 // catch can't observe a direct return); the `!T` boundary catch converts it back
                 // to an Err. Without an errdefer, keep the direct, exception-free Err return.
-                if (_currentFnHasErrdefer) { return new ZigErrorThrow(ErrorCode(errName)); }
-                return new Return(new ErrUnionErr(ErrorCode(errName)) { Type = eu });
+                var code = ErrorCode(errName);
+                var codeLit = new LitInt(code.ToString(CultureInfo.InvariantCulture), code) { Type = CType.ErrorSet };
+                if (_currentFnHasErrdefer) { return new ZigErrorThrow(codeLit); }
+                return new Return(new ErrUnionErr(codeLit) { Type = eu });
             }
             var v = LowerExpr(valueItem);
             if (v.Type.Unqualified is CType.ErrorUnion) { return new Return(v); }
+            // `return e;` where `e` is an error VALUE (a `catch |e|` / `else => |e|` capture) — an ERROR
+            // return of that runtime code, not a success wrapping it as the payload. (Unless the payload
+            // type IS an error set — `!anyerror`, where returning one as a value is a success; zig types
+            // that the same way: an error value coerces to the error half only when it isn't the payload.)
+            if (v.Type.Unqualified is CType.ErrorSetType && eu.Payload.Unqualified is not CType.ErrorSetType)
+            {
+                if (_currentFnHasErrdefer) { return new ZigErrorThrow(v); }
+                return new Return(new ErrUnionErr(v) { Type = eu });
+            }
             return new Return(new ErrUnionOk(v) { Type = eu });
         }
         // An array-by-value return (the Milestone K cut, made sound). A `[N]T`-returning function
@@ -2539,20 +2595,73 @@ internal sealed partial class ZigLowering
         return new VarRef(tmp) { Type = union.Type, IsLValue = true };
     }
 
-    /// <summary>Recognize a control-flow <c>catch</c>/<c>orelse</c> fallback (Milestone N, part 6) —
-    /// <c>a catch return [v]</c> / <c>a orelse return [v]</c> — yielding the left operand, whether it
-    /// is a <c>catch</c> (vs <c>orelse</c>), and the optional return value (null = <c>return;</c>).</summary>
-    private static bool IsControlFlowFallback(Item it, out Item lhs, out bool isCatch, out Item? retVal)
+    /// <summary>Recognize a control-flow <c>catch</c>/<c>orelse</c> fallback — one whose failure path
+    /// runs a STATEMENT rather than yielding a value: <c>a catch return [v]</c> / <c>a orelse return
+    /// [v]</c> (Milestone N, part 6), and the statement-shaped arms (road-to-zig-std): <c>break
+    /// [:l [v]]</c>, <c>continue [:l]</c>, a <c>{ … }</c> block, a <c>switch</c>, and after a capture
+    /// <c>catch |e| return [v]</c>. Yields the left operand, whether it is a <c>catch</c> (vs
+    /// <c>orelse</c>), the <c>|e|</c> capture name (catch only; null when absent), and the ARM node that
+    /// <see cref="LowerFallbackArm"/> dispatches on (for the legacy return forms, the node itself).</summary>
+    private static bool IsControlFlowFallback(Item it, out Item lhs, out bool isCatch, out string? capture, out Item arm)
     {
+        capture = null;
+        arm = it;
         switch (it.Content)
         {
-            case Zig.OrElseReturn r:     lhs = r.Arg0; isCatch = false; retVal = r.Arg3; return true;
-            case Zig.OrElseReturnVoid r: lhs = r.Arg0; isCatch = false; retVal = null;   return true;
-            case Zig.CatchReturn r:      lhs = r.Arg0; isCatch = true;  retVal = r.Arg3; return true;
-            case Zig.CatchReturnVoid r:  lhs = r.Arg0; isCatch = true;  retVal = null;   return true;
-            default: lhs = it; isCatch = false; retVal = null; return false;
+            case Zig.OrElseReturn r:     lhs = r.Arg0; isCatch = false; return true;
+            case Zig.OrElseReturnVoid r: lhs = r.Arg0; isCatch = false; return true;
+            case Zig.CatchReturn r:      lhs = r.Arg0; isCatch = true;  return true;
+            case Zig.CatchReturnVoid r:  lhs = r.Arg0; isCatch = true;  return true;
+            case Zig.OrElseArm o:        lhs = o.Arg0; isCatch = false; arm = o.Arg2; return true;
+            case Zig.CatchArm c:         lhs = c.Arg0; isCatch = true;  arm = c.Arg2; return true;
+            case Zig.CatchCaptureArm c:  lhs = c.Arg0; isCatch = true;  arm = c.Arg5; capture = Tok(c.Arg3); return true;
+            default: lhs = it; isCatch = false; return false;
         }
     }
+
+    /// <summary>Lower a control-flow fallback's ARM (see <see cref="IsControlFlowFallback"/>) to the
+    /// statement that runs on the error / none path. Every form reuses the ordinary statement lowering
+    /// of the same construct — a <c>return</c>, a (labeled) <c>break</c> / <c>continue</c>, a block —
+    /// so a fallback arm means exactly what that statement means where it stands. The value-yielding
+    /// <c>switch</c> arm is handled by the caller (it fills a result, it is not a jump).</summary>
+    private CStmt LowerFallbackArm(Item arm) => arm.Content switch
+    {
+        Zig.OrElseReturn r   => LowerReturn(r.Arg3),
+        Zig.CatchReturn r    => LowerReturn(r.Arg3),
+        Zig.OrElseReturnVoid or Zig.CatchReturnVoid => LowerReturnVoid(),
+        Zig.FbReturn r       => LowerReturn(r.Arg1),
+        Zig.FbBreak          => new Break(),
+        Zig.FbContinue       => new Continue(),
+        Zig.FbBreakLabel b   => LowerLabeledLoopJump(Tok(b.Arg2), isContinue: false),
+        Zig.FbBreakLabelValue b => LowerLabeledBreak(Tok(b.Arg2), b.Arg3),
+        Zig.FbContinueLabel c => LowerLabeledLoopJump(Tok(c.Arg2), isContinue: true),
+        Zig.FbBlock b        => LowerStmt(b.Arg0),
+        _ => throw new IrUnsupportedException("internal: fallback arm " + (arm.Content?.GetType().Name ?? "null")),
+    };
+
+    /// <summary>Whether a fallback arm can finish NORMALLY — i.e. fall off its end into the code after
+    /// it. A jump never does; a block does unless its last statement is itself a jump (or
+    /// <c>unreachable</c> / <c>@panic</c>). Where the fallback must produce the payload (a <c>const v = a
+    /// orelse { … };</c>), an arm that can fall through would leave <c>v</c> without a value — zig rejects
+    /// that as a type error (a <c>void</c> block where a <c>T</c> is expected), and so does dotcc.</summary>
+    private static bool ArmCanFallThrough(Item arm) => arm.Content switch
+    {
+        Zig.FbBlock b => b.Arg0.Content is not Zig.Block blk || Flatten(blk.Arg1) is not { Count: > 0 } stmts
+                         || !IsNoReturnStmt(stmts[^1]),
+        _ => false,
+    };
+
+    /// <summary>A statement that never completes normally: a <c>return</c>, a <c>break</c> /
+    /// <c>continue</c> (labeled or not), <c>unreachable;</c>, or a <c>@panic(…)</c> / <c>@trap()</c> call.
+    /// Conservative — a nested <c>if</c> whose both arms jump still counts as falling through.</summary>
+    private static bool IsNoReturnStmt(Item stmt) => stmt.Content switch
+    {
+        Zig.StmtReturn or Zig.StmtReturnVoid or Zig.StmtBreak or Zig.StmtContinue
+          or Zig.StmtBreakValue or Zig.StmtBreakLabelValue or Zig.StmtBreakLabel or Zig.StmtContinueLabel => true,
+        Zig.StmtExpr { Arg0.Content: Zig.Ident u } when Tok(u.Arg0) == "unreachable" => true,   // an identifier in this grammar
+        Zig.StmtExpr { Arg0.Content: Zig.BuiltinCall bc } when Tok(bc.Arg0) is "@panic" or "@trap" => true,
+        _ => false,
+    };
 
     /// <summary>Lower a control-flow <c>catch</c>/<c>orelse</c> fallback (Milestone N, part 6): <c>a
     /// catch return [v]</c> / <c>a orelse return [v]</c>. The left operand — an error union (for
@@ -2563,7 +2672,7 @@ internal sealed partial class ZigLowering
     /// by <paramref name="bind"/> (a decl initializer binds it; an expression-statement passes null
     /// and discards it). Emitted as <c>{ var __cf = a; if (Cond.B(&lt;none/error&gt;)) { return …; }
     /// [bind(payload)] }</c>.</summary>
-    private CStmt LowerControlFlowFallback(Item lhsItem, bool isCatch, Item? retValItem, Func<CExpr, CStmt>? bind)
+    private CStmt LowerControlFlowFallback(Item lhsItem, bool isCatch, string? capture, Item arm, Func<CExpr, CStmt>? bind)
     {
         var lhs = LowerExpr(lhsItem);
         var pre = new List<CStmt>();
@@ -2583,7 +2692,7 @@ internal sealed partial class ZigLowering
         {
             if (ct is not CType.ErrorUnion eu)
             {
-                throw new IrUnsupportedException("zig `catch return` requires an error-union left operand");
+                throw new IrUnsupportedException("zig `catch` with a control-flow fallback requires an error-union left operand");
             }
             test = new Member(lhsRef, "IsErr", false) { Type = CType.Bool };
             payload = new Member(lhsRef, "Value", false) { Type = eu.Payload };
@@ -2610,11 +2719,57 @@ internal sealed partial class ZigLowering
         }
         else
         {
-            throw new IrUnsupportedException("zig `orelse return` requires an optional left operand");
+            throw new IrUnsupportedException("zig `orelse` with a control-flow fallback requires an optional left operand");
         }
 
-        var ret = retValItem is null ? LowerReturnVoid() : LowerReturn(retValItem);
-        pre.Add(new If(test, new Block(new List<CStmt> { ret }), null));
+        // A value-yielding `switch` arm fills a result declared in the ENCLOSING scope (the consumer
+        // reads it after the `if`), so it is declared before the failure path's own scope opens.
+        Symbol? switchResult = arm.Content is Zig.FbSwitch
+            ? _symbols.Declare(new Symbol { Name = "__cfv" + _anfTempCounter++, Kind = SymKind.Var, Type = payload.Type })
+            : null;
+        // The failure path, in its own scope: `catch |e|` binds the error code first (a `_` binds
+        // nothing), then the arm runs.
+        _symbols.EnterScope();
+        try
+        {
+            var onFail = new List<CStmt>();
+            if (capture is { } cap && cap != "_")
+            {
+                var errSym = _symbols.Declare(new Symbol { Name = cap, Kind = SymKind.Var, Type = CType.ErrorSet });
+                onFail.Add(new DeclStmt(new List<LocalDecl> { new(errSym, new Member(lhsRef, "Code", false) { Type = CType.ErrorSet }) }));
+            }
+            if (arm.Content is Zig.FbSwitch fs && switchResult is { } result)
+            {
+                // A value-yielding `switch` arm (`a catch |err| switch (err) { error.X => 0, else => return err }`)
+                // FILLS a result on the failure path — each prong a value or a jump — and the success path
+                // fills it with the payload, so the consumer reads one temp either way.
+                var resultRef = new VarRef(result) { Type = payload.Type, IsLValue = true };
+                onFail.Add(LowerValueControlFlowStmt(fs.Arg0, payload.Type, temp =>
+                    new ExprStmt(new Assign(null, resultRef, new VarRef(temp) { Type = temp.Type }) { Type = payload.Type })));
+                pre.Add(new DeclStmt(new List<LocalDecl> { new(result, null) }));
+                pre.Add(new If(test, new Block(onFail),
+                    new Block(new List<CStmt> { new ExprStmt(new Assign(null, resultRef, payload) { Type = payload.Type }) })));
+                // The consumer binds AFTER the failure scope closes (below) — a `const v = …` must be
+                // visible to the statements that follow, not only inside the arm.
+                payload = new VarRef(result) { Type = payload.Type };
+            }
+            else
+            {
+                if (bind is not null && ArmCanFallThrough(arm))
+                {
+                    throw new IrUnsupportedException(
+                        $"zig `{(isCatch ? "catch" : "orelse")} {{ … }}`: where the fallback must produce a value, the block must "
+                        + "not fall through — end it with `return`, `break`, `continue` or `unreachable` (a `void` block is not a "
+                        + "value of the payload type; zig rejects this too)");
+                }
+                onFail.Add(LowerFallbackArm(arm));
+                pre.Add(new If(test, new Block(onFail), null));
+            }
+        }
+        finally
+        {
+            _symbols.ExitScope();
+        }
         if (bind is not null) { pre.Add(bind(payload)); }
         return pre.Count == 1 ? pre[0] : new Seq(pre);
     }
