@@ -3,7 +3,7 @@
 > Extracted from CLAUDE.md (2026-07-07) — the full architecture reference. CLAUDE.md keeps
 > a one-screen summary and points here.
 
-The compiler is an N-frontend × M-backend frame meeting at one **typed IR**. Two seams hold it: `IFrontend` (`Frontends/IFrontend.cs` — lex/parse a source language and bind it to the IR, returning the `IrBuilder`) and `ITarget` + the per-target backend classes (`Ir/Target.cs`, `Backends/` — project the neutral IR onto an output language). Today that's two front-ends and two backends — but **not a full 2×2**, and the seams are less symmetric than the frame suggests (measured by the 2026-09 architecture review):
+The compiler is an N-frontend × M-backend frame meeting at one **typed IR**. Two seams hold it: `IFrontend` (`Frontends/IFrontend.cs` — lex/parse a source language and bind it to the IR, returning the `IrModule`) and `ITarget` + the per-target backend classes (`Ir/Target.cs`, `Backends/` — project the neutral IR onto an output language). Today that's two front-ends and two backends — but **not a full 2×2**, and the seams are less symmetric than the frame suggests (measured by the 2026-09 architecture review):
 
 - **Zig × wat is mostly unbuilt.** The IR carries ~25 node types that only the Zig lowering produces
   (`ZigTry`, `ZigCatch`, `AllocCall`/`FreeCall`/…, `TupleLiteral`/`TupleIndex`, `SwitchExpr`,
@@ -12,11 +12,15 @@ The compiler is an N-frontend × M-backend frame meeting at one **typed IR**. Tw
   (the web sandbox's C side) and, for Zig, only programs whose lowering stays inside the C-shaped node
   set — in practice `std.debug.print` (→ `fprintf(stderr, …)`) over scalars. Tracked in
   [`plans/deferred.md`](plans/deferred.md). C × C#, C × wat and Zig × C# are real.
-- **The C binder lives inside `IrBuilder`.** `Ir/IrBuilder.cs` is both the neutral IR API (types,
-  symbols, the aggregate registries, `ConstEval`) and the C front-end's parse-tree binder — `CFrontend`
-  is pipeline glue that hands the raw tree to `IrBuilder.AddUnit`. The Zig front-end is a separate peer
-  (`Frontends/ZigLowering*.cs`) that reaches the shared IR through a small internal API. A third
-  front-end should follow the Zig shape, not grow `IrBuilder`.
+- **The neutral IR is `IrModule`; the C binder is `IrBuilder`.** `Ir/IrModule.cs` (+ `IrModule.Comptime.cs`)
+  is what every front-end builds into and every backend reads: the output lists (functions, globals,
+  emitted aggregates/enums, diagnostics, the Zig test manifest and error table), the aggregate/enum
+  registries with their compile-time layout model, and the comptime interpreter (`ConstEval`). It knows
+  no source language. `Ir/IrBuilder.cs` is the C front-end's parse-tree binder (every `case C.*`), and
+  builds into its `Module`; `Frontends/ZigLowering*.cs` is the Zig binder, a peer holding an `IrModule`
+  directly. Until the 2026-09 architecture review these were one class — the C binder WAS the IR, and
+  the Zig front-end constructed a whole C binder just to host its output. A third front-end follows the
+  Zig shape: bind into an `IrModule`.
 
 What IS uniform: every expression carries a `CType`, both front-ends lower to the same statement /
 expression node set for everything C-shaped (control flow, calls, arithmetic, aggregates), and the C#
@@ -38,7 +42,7 @@ The C front half is a straight pull-pipe:
         → BuildShell(...)          (wrap the emitted fn list in a .NET 10 program shell — C# target only)
 ```
 
-The Zig front half is the same shape behind the same seam (`ZigFrontend`): its own lexer/parser from `zig.lalr.yaml`, then `ZigLowering` binds the Zig parse tree to the **same** `IrBuilder` — a mixed `.c` + `.zig` input set lowers both into one IR module. Everything from the IR down (backends, shell, runtime) is shared and frontend-agnostic.
+The Zig front half is the same shape behind the same seam (`ZigFrontend`): its own lexer/parser from `zig.lalr.yaml`, then `ZigLowering` binds the Zig parse tree to the **same** `IrModule` — a mixed `.c` + `.zig` input set lowers both into one IR module. Everything from the IR down (backends, shell, runtime) is shared and frontend-agnostic.
 
 The five token-rewriting stages are all `RewritingTokenStream` subclasses (an upstream LALR.CC base class owning the iterator plumbing — ready queue, look-ahead buffer, exhaustion flag — and exposing a `ProcessToken` hook plus `Emit` / `CollectUntil` / `TryReadNext`). One subclass per policy, mechanics shared; future contextual-keyword/DSL rewriters plug in the same way.
 
@@ -49,7 +53,8 @@ The stage *mechanics* are owned by SharpAstro.LALR.CC. `DotCC.Lib` contributes:
 - `MacroExpander` — function-like macro calls (paren-balanced arg collection + multi-pass rescan).
 - `DialectKeywordRewriter` — dialect-aware keyword promotion ("rule 2"). A data table maps `(identifier spelling → MinVersion + target terminal)`; an `ID` is promoted only when the active `CDialect.Version ≥ MinVersion`. **`CDialect.Version` is keyed by ISO year (1990/1999/2011/2017/2023) so the gate `Version >= year` is monotonic** — keying by the short `90/99/11/17/23` suffix sorts `c11` below `c99` and silently mis-gates (a real past bug). Why rule 2 and not the binder: keywords spelled like identifiers (`inline`/`bool`/`true`/…) can't be gated post-parse — `int true = 5;` is valid older code. Under an older `-std=` the spelling stays an identifier, so the feature is simply unavailable there (a structural rejection, no `DialectGate` row needed). Sits after `MacroExpander` (a header's `#define bool _Bool` wins) and before `TypeNameRewriter`. Genuinely new *syntax* (`_BitInt`, `_Generic`) is gated in the IR binder instead; `_Capital_` keywords are always accepted.
 - `TypeNameRewriter` — the C lexer hack: tracks typedef-bound names, promotes matching `ID` → `TYPE_NAME` so `Color * x;` routes as a declaration.
-- `IrBuilder` (`Ir/`, partials: `.Comptime` — the unified compile-time interpreter both front-ends share, `.Aggregates`, `.MallocPromote`) — binds C parse trees to the typed IR (`IrNodes.cs`: `CExpr`/`CStmt` records, every expression carrying a `CType`), runs the IR-level checks (`-Wconversion`, qualifier discard, implicit fallthrough) and passes (malloc→stack promotion). `ZigLowering` (`Frontends/`) is the Zig peer, binding into the same builder.
+- `IrModule` (`Ir/IrModule.cs`, partial `.Comptime` — the unified compile-time interpreter both front-ends share) — the neutral IR: output lists, aggregate/enum registries + layout model, `ConstEval`.
+- `IrBuilder` (`Ir/`, partials: `.Aggregates`, `.MallocPromote`) — the C binder: binds C parse trees to the typed IR (`IrNodes.cs`: `CExpr`/`CStmt` records, every expression carrying a `CType`), runs the IR-level checks (`-Wconversion`, qualifier discard, implicit fallthrough) and passes (malloc→stack promotion). `ZigLowering` (`Frontends/`) is the Zig peer, binding into the same `IrModule`.
 - `SymbolTable` + `INameLegalizer` — shared name resolution: the table owns the neutral mechanism (scope tracking + collision counting), the target owns the policy (`CSharpNameLegalizer`: reserved-word escaping, **block-scope local renaming** for CS0136 — a colliding decl gets a fresh `name__k`).
 - `CSharpBackend` + `CSharpTarget`, `WatBackend` + `WatTarget` (`Backends/`) — per-target printers over the IR; `ITarget` carries the type/literal spelling so the IR namespace never depends on an output language. `GotoScopeNormalizer` fixes C#'s label/decl scoping rules; the wat backend lowers `goto` via a CFG dispatch loop (`WatBackend.Cfg`).
 - `BuildShell` — C# scaffolding around emitted functions (top-level statements + entry-point wiring, struct/typedef section, `using static Libc`, embedded-runtime splice point); argv UTF-8 marshalling for `int main(int, char**)`.

@@ -9,7 +9,7 @@ namespace DotCC.Frontends;
 /// A source language's front half of the pipeline — the N-axis seam mirroring
 /// <see cref="ITarget"/> on the M (backend) axis. A frontend lexes/parses its own
 /// source language and binds it to the neutral typed IR, returning the
-/// backend-agnostic <see cref="IrBuilder"/> that any <see cref="ITarget"/> backend
+/// backend-agnostic <see cref="IrModule"/> that any <see cref="ITarget"/> backend
 /// then projects onto its surface language. So a second source language (Zig, …) is
 /// "implement <see cref="IFrontend"/> again", exactly as a second target is
 /// "implement <see cref="ITarget"/> again" — neither has to untangle the other.
@@ -20,8 +20,8 @@ internal interface IFrontend
 {
     /// <summary>Lex, parse and bind every input translation unit to the typed IR,
     /// flushing source-level diagnostics, and return the resulting
-    /// <see cref="IrBuilder"/>.</summary>
-    IrBuilder BuildIr(FrontendRequest request);
+    /// <see cref="IrModule"/>.</summary>
+    IrModule BuildIr(FrontendRequest request);
 }
 
 /// <summary>

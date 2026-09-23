@@ -29,7 +29,7 @@ internal sealed record CSharpBackendResult(
 /// <summary>
 /// Lowers the typed IR to low-level unsafe C# text. Deliberately DUMB: every
 /// semantic decision (types, coercions, name resolution, control flow) was made
-/// upstream by <see cref="IrBuilder"/> and the IR passes, so this just prints.
+/// upstream by the front-ends and the IR passes, so this just prints.
 /// Phase 0 covers the vertical slice; it grows alongside the builder until the
 /// IR path reaches parity with the legacy emitter.
 /// </summary>
@@ -45,7 +45,7 @@ internal sealed class CSharpBackend
     /// spelling — replaces the type model's old baked-in <c>CsType</c> property.</summary>
     private string Cs(CType t) => _target.RenderType(t);
 
-    public static CSharpBackendResult Run(IrBuilder unit, DotCC.ConversionGate? convGate = null)
+    public static CSharpBackendResult Run(IrModule unit, DotCC.ConversionGate? convGate = null)
     {
         var cg = new CSharpBackend { _convGate = convGate };
         // C tag namespace vs ordinary namespace: collect globals whose name an

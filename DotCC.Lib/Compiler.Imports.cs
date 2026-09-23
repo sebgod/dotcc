@@ -17,10 +17,10 @@ public static partial class Compiler
     /// <summary>
     /// Select the functions an import (<c>-l</c>) compile must bind against, emitting the
     /// V1 scope-cut warnings to stderr (variadic / global-name collision / extern data).
-    /// Candidates are <see cref="Ir.IrBuilder.ProtoOnlyReferenced"/> (proto-only, called,
+    /// Candidates are <see cref="Ir.IrModule.ProtoOnlyReferenced"/> (proto-only, called,
     /// not from a synthetic header) minus those cuts. Sorted by name for deterministic emit.
     /// </summary>
-    private static List<Ir.Symbol> ComputeImportCandidates(Ir.IrBuilder ir, ImportOptions imports)
+    private static List<Ir.Symbol> ComputeImportCandidates(Ir.IrModule ir, ImportOptions imports)
     {
         var globalNames = new HashSet<string>(ir.Globals.Select(g => g.Sym.Name), StringComparer.Ordinal);
         var result = new List<Ir.Symbol>();

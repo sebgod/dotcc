@@ -27,7 +27,7 @@ namespace DotCC.Ir;
 // <see cref="System.Int128"/> so a comptime computation that genuinely exceeds
 // 64 bits (now that the i128/u128/__int128 types exist) has somewhere to live.
 // ---------------------------------------------------------------------------
-internal sealed partial class IrBuilder
+internal sealed partial class IrModule
 {
     /// <summary>A side-effect-free compile-time VALUE — the result of evaluating
     /// the C/Zig value subset at dotcc compile time. No <c>type</c> variant and no
@@ -174,7 +174,7 @@ internal sealed partial class IrBuilder
     /// partial-init rule. Anonymous padding bit-fields have no member, so they are skipped.</summary>
     private CExpr SpliceStruct(CtStruct s)
     {
-        if (s.Type.Unqualified is not CType.Named named || !_structFields.TryGetValue(named.Name, out var fields))
+        if (s.Type.Unqualified is not CType.Named named || !StructFields.TryGetValue(named.Name, out var fields))
         {
             throw new IrUnsupportedException("comptime struct value cannot be spliced (unknown struct type)");
         }
@@ -200,7 +200,7 @@ internal sealed partial class IrBuilder
             if (p.Name == "_Bool") { return new CtBool(false); }
             return p.Integer ? new CtInt(System.Int128.Zero, t) : new CtFloat(0.0, t);
         }
-        if (u is CType.Named named && _structFields.TryGetValue(named.Name, out var fields))
+        if (u is CType.Named named && StructFields.TryGetValue(named.Name, out var fields))
         {
             var map = new Dictionary<string, ComptimeValue>(System.StringComparer.Ordinal);
             foreach (var f in fields)

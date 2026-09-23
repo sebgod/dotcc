@@ -52,13 +52,13 @@ public static partial class Compiler
 {
     /// <summary>
     /// Dispatch the inputs to the right <see cref="Frontends.IFrontend"/> and return the
-    /// neutral <see cref="Ir.IrBuilder"/> the backends consume (<see cref="EmitCSharp"/>
+    /// neutral <see cref="Ir.IrModule"/> the backends consume (<see cref="EmitCSharp"/>
     /// / the wat path). A <c>.zig</c>-only set routes to the Zig front-end; an all-C set
     /// to the C front-end; a MIXED <c>.c</c> + <c>.zig</c> set lowers both into one
     /// shared module (see <see cref="BuildMixedIr"/>). Kept as a private shim so the
     /// existing call sites stay unchanged.
     /// </summary>
-    private static Ir.IrBuilder BuildIr(
+    private static Ir.IrModule BuildIr(
         IReadOnlyList<string> inputPaths,
         IReadOnlyList<string>? includeDirs,
         IReadOnlyList<string>? defines,
@@ -83,7 +83,7 @@ public static partial class Compiler
     /// The C group is built first via <see cref="Frontends.CFrontend"/> (so its
     /// preprocessor/dialect-gate machinery, struct/enum/global emission, and C
     /// diagnostics all run normally); the Zig group then lowers INTO that same
-    /// <see cref="Ir.IrBuilder"/> through <see cref="Frontends.ZigFrontend.AddUnits"/>,
+    /// <see cref="Ir.IrModule"/> through <see cref="Frontends.ZigFrontend.AddUnits"/>,
     /// sharing the one name legalizer. The whole program therefore emits once down the
     /// existing backend path — structs preserved — and a call across the language
     /// boundary resolves at the C# level (every function is a <c>DotCcProgram</c>
@@ -91,7 +91,7 @@ public static partial class Compiler
     /// the Zig group's diagnostics are flushed here (the C front-end already flushed
     /// its own), so a C warning isn't printed twice.
     /// </summary>
-    private static Ir.IrBuilder BuildMixedIr(Frontends.FrontendRequest request)
+    private static Ir.IrModule BuildMixedIr(Frontends.FrontendRequest request)
     {
         var sharedNames = request.Names ?? new Backends.CSharpNameLegalizer();
         var cPaths = request.InputPaths.Where(p => !IsZigSource(p)).ToList();

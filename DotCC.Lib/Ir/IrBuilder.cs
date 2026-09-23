@@ -28,6 +28,31 @@ public sealed class IrUnsupportedException : DotCC.CompileException
 /// </summary>
 internal sealed partial class IrBuilder
 {
+    /// <summary>The neutral IR module this C binder builds into — the output lists, the aggregate
+    /// registries and their layout model, and the comptime interpreter. The backends and the Zig
+    /// front-end see only this (<see cref="IrModule"/>); the members below are this binder's own
+    /// shorthand for it, so the C binding code reads as it always has.</summary>
+    internal IrModule Module { get; } = new();
+
+    private List<FuncDef> Functions => Module.Functions;
+    private List<GlobalVar> Globals => Module.Globals;
+    private List<StructTypeDef> Types => Module.Types;
+    private List<EnumTypeDef> Enums => Module.Enums;
+    internal List<Diagnostic> Diagnostics => Module.Diagnostics;
+    private Dictionary<string, List<StructField>> _structFields => Module.StructFields;
+    private Dictionary<string, bool> _structIsUnion => Module.StructIsUnion;
+    private HashSet<string> _packedStructs => Module.PackedStructs;
+    private Dictionary<string, CType.Enum> _enumTypes => Module.EnumTypes;
+    private HashSet<string> _emittedTypes => Module.EmittedTypes;
+    private long? SizeOfConst(CType t) => Module.SizeOfConst(t);
+    private int AlignOfConst(CType t) => Module.AlignOfConst(t);
+    private int? OffsetOfConstPath(string structName, IReadOnlyList<string> path) => Module.OffsetOfConstPath(structName, path);
+    private static string? StructCanonical(CType t) => IrModule.StructCanonical(t);
+    private static void RejectReservedTypeName(string name, string kind) => IrModule.RejectReservedTypeName(name, kind);
+    private bool AddEnumDef(string name, CType underlying, List<EnumMember> members) => Module.AddEnumDef(name, underlying, members);
+    private IReadOnlyList<StructField>? StructFieldsOf(string name) => Module.StructFieldsOf(name);
+    internal long? ConstEval(CExpr e) => Module.ConstEval(e);
+
     private readonly SymbolTable _symbols;
     // Typedef name → its underlying type. Unlike the legacy emitter (which emits
     // `using` aliases and resolves names textually), the IR resolves a typedef
@@ -35,21 +60,6 @@ internal sealed partial class IrBuilder
     // SizeOf, no alias directive needed. Populated in declaration order, so a
     // chained typedef (`typedef size_t mysize;`) resolves through the table.
     private readonly Dictionary<string, CType> _typedefs = new(StringComparer.Ordinal);
-    // Struct/union name → its fields, so member access can resolve a field's
-    // type. Keyed by the canonical (tag, or anonymous-typedef alias) name.
-    private readonly Dictionary<string, List<StructField>> _structFields = new(StringComparer.Ordinal);
-    // Whether each registered aggregate is a union — drives the compile-time layout
-    // model (offsetof folding) and is set alongside every _structFields entry.
-    private readonly Dictionary<string, bool> _structIsUnion = new(StringComparer.Ordinal);
-    // Byte-packed structs (Zig `packed struct`): the compile-time layout model drops
-    // inter-field padding + aligns to 1 for these, so `@sizeOf`/`offsetof` match the
-    // emitted [StructLayout(Sequential, Pack=1)] runtime layout. (Zig front-end only.)
-    private readonly HashSet<string> _packedStructs = new(StringComparer.Ordinal);
-    // Enum tag → its resolved CType.Enum, so `enum Tag` as a type resolves to the
-    // real enum (not plain int). Anonymous-but-typedef'd enums are reached through
-    // _typedefs instead (the alias maps to the same CType.Enum).
-    private readonly Dictionary<string, CType.Enum> _enumTypes = new(StringComparer.Ordinal);
-    private readonly HashSet<string> _emittedTypes = new(StringComparer.Ordinal);
     private string _file = "";
     // Every `setjmp(env)` call built in the CURRENT function, by reference identity
     // (records are value-equal, so a reference comparer is required to tell two
@@ -74,26 +84,6 @@ internal sealed partial class IrBuilder
     // `return <const T*>` from a `T*`-returning function trip the const-discard check.
     private CType? _currentRet;
 
-    public List<FuncDef> Functions { get; } = new();
-    public List<GlobalVar> Globals { get; } = new();
-    public List<StructTypeDef> Types { get; } = new();
-    public List<EnumTypeDef> Enums { get; } = new();
-    public List<Diagnostic> Diagnostics { get; } = new();
-
-    /// <summary>Zig test-mode manifest: each <c>test "name" {}</c> block, lowered to a runnable
-    /// <c>anyerror!void</c> function that is recorded in <see cref="Functions"/> like any other,
-    /// paired with its display name (in source order). Populated ONLY when the Zig front-end runs
-    /// in test mode (<c>dotcc zig test</c>); empty otherwise. The backend hands it to the shell so
-    /// the emitted program's entry point runs each test and reports pass/fail instead of calling
-    /// <c>main</c>.</summary>
-    public List<(string Name, Symbol Sym)> Tests { get; } = new();
-
-    /// <summary>The Zig front-end's flat error set: each <c>error.Foo</c> name → its stable
-    /// <c>ushort</c> code (1-based). Populated by <c>ZigFrontend.AddUnits</c> after lowering all
-    /// units; consumed by the backend to emit the <c>__zigErrorName</c> code→name table that
-    /// backs <c>@errorName</c> (Milestone X, part 1). Null/empty for a C-only program or a Zig
-    /// program that never names an error.</summary>
-    public IReadOnlyDictionary<string, int>? ZigErrorCodes { get; set; }
 
     /// <summary>
     /// Functions a native import (`-l`) library must resolve: declared by prototype,
@@ -104,6 +94,14 @@ internal sealed partial class IrBuilder
     /// signature can't become a function pointer. Empty unless the program calls an
     /// undefined non-system prototype; computed on demand (cheap, post-build).
     /// </summary>
+    /// <summary>Publish the import-mode analysis onto <see cref="Module"/> (call after every unit is
+    /// added), where the emit pass reads it.</summary>
+    internal void PublishImportAnalysis()
+    {
+        Module.ProtoOnlyReferenced = ProtoOnlyReferenced;
+        Module.ExternDataReferenced = ExternDataReferenced;
+    }
+
     public IReadOnlyDictionary<string, Symbol> ProtoOnlyReferenced
     {
         get
@@ -962,110 +960,6 @@ internal sealed partial class IrBuilder
         return (CType?)enumType ?? CType.Int;
     }
 
-    /// <summary>The constant byte size of a type — the layout model for a user
-    /// aggregate (so the size is exact for an array bound), else the type's own
-    /// <see cref="CType.SizeOf"/>.</summary>
-    private long? SizeOfConst(CType t) =>
-        t.Unqualified is CType.Named n && _structFields.ContainsKey(n.Name) ? Layout(t).Size : t.SizeOf;
-
-    // ---- compile-time C-ABI layout (for offsetof / sizeof folding) --------
-    // The .NET blittable layout dotcc emits (sequential structs, explicit unions,
-    // natural alignment on this LP64 target) matches the C ABI for the types it
-    // models, so size/offset can be computed at compile time — which an array bound
-    // like `char padding[offsetof(T, m)]` requires (Lua's alignment-union trick).
-
-    /// <summary>The ABI alignment (in bytes) of a type — the comptime value of Zig's
-    /// <c>@alignOf(T)</c> (Milestone T, part 4). A pure compile-time constant on this LP64 target, so
-    /// the Zig front-end folds it straight to a literal; surfaced here because <see cref="Layout"/> is
-    /// private and the layout model (natural alignment, struct = max field alignment) lives in this
-    /// type.</summary>
-    internal int AlignOfConst(CType t) => Layout(t).Align;
-
-    /// <summary>The (size, alignment) in bytes of a type under the C ABI / .NET
-    /// blittable layout.</summary>
-    private (int Size, int Align) Layout(CType t)
-    {
-        switch (t.Unqualified)
-        {
-            case CType.Prim p: return (p.Bytes, p.Bytes);
-            case CType.Pointer or CType.Func: return (8, 8);
-            case CType.Array a:
-            {
-                var (es, ea) = Layout(a.FlatElement);
-                var count = 1;
-                for (CType c = a; c is CType.Array ca; c = ca.Element) { count *= ca.Count ?? 0; }
-                return (es * count, ea);
-            }
-            case CType.Named n: return LayoutAggregate(n.Name);
-            default: return (0, 1);
-        }
-    }
-
-    /// <summary>The (size, alignment) of a registered struct/union: sequential
-    /// fields each aligned up to their own alignment for a struct; all overlaid at 0
-    /// for a union. The total rounds up to the aggregate's alignment.</summary>
-    private (int Size, int Align) LayoutAggregate(string name)
-    {
-        if (!_structFields.TryGetValue(name, out var fields)) { return (0, 1); } // opaque/unknown
-        var isUnion = _structIsUnion.GetValueOrDefault(name);
-        var packed = _packedStructs.Contains(name);   // byte-packed: no inter-field padding, align 1
-        int align = 1, size = 0, off = 0;
-        foreach (var f in fields)
-        {
-            var (fs, fa) = Layout(f.Type);
-            if (packed) { fa = 1; }
-            if (fa > align) { align = fa; }
-            if (isUnion) { if (fs > size) { size = fs; } }
-            else { off = RoundUp(off, fa) + fs; }
-        }
-        return (RoundUp(isUnion ? size : off, align), align);
-    }
-
-    /// <summary>The byte offset of a (possibly nested) member-designator within
-    /// struct <paramref name="structName"/> — per-level offsets summed, each
-    /// intermediate level resolved through its member's type. Null if any level
-    /// isn't modelled.</summary>
-    private int? OffsetOfConstPath(string structName, IReadOnlyList<string> path)
-    {
-        var total = 0;
-        var current = structName;
-        for (var i = 0; i < path.Count; i++)
-        {
-            var seg = path[i];
-            if (OffsetOfConst(current, seg) is not { } off
-                || !_structFields.TryGetValue(current, out var fields)) { return null; }
-            total += off;
-            if (i == path.Count - 1) { break; }   // final segment — no deeper level to name
-            CType? segType = null;
-            foreach (var f in fields)
-            {
-                if (f.Name == seg) { segType = f.Type; break; }
-            }
-            if ((segType?.Unqualified as CType.Named)?.Name is not { } next) { return null; }
-            current = next;
-        }
-        return total;
-    }
-
-    /// <summary>The byte offset of <paramref name="member"/> within struct
-    /// <paramref name="structName"/> (0 for any union member), or null if unknown.</summary>
-    private int? OffsetOfConst(string structName, string member)
-    {
-        if (!_structFields.TryGetValue(structName, out var fields)) { return null; }
-        if (_structIsUnion.GetValueOrDefault(structName)) { return 0; }
-        var packed = _packedStructs.Contains(structName);   // byte-packed: no inter-field padding
-        var off = 0;
-        foreach (var f in fields)
-        {
-            var (fs, fa) = Layout(f.Type);
-            if (!packed) { off = RoundUp(off, fa); }
-            if (f.Name == member) { return off; }
-            off += fs;
-        }
-        return null;
-    }
-
-    private static int RoundUp(int v, int align) => align <= 1 ? v : (v + align - 1) / align * align;
 
     // ---- structs / unions ------------------------------------------------
 
@@ -1088,121 +982,6 @@ internal sealed partial class IrBuilder
         if (alias is not null) { _typedefs[alias] = new CType.Named(canonical); }
     }
 
-    // ---- shared aggregate API for a second frontend (Zig) -----------------
-    // The struct/enum field tables (_structFields / _structIsUnion / _enumTypes) are
-    // private to the C build, but the registries they feed (Types / Enums) and the
-    // layout/field-type model are frontend-neutral. These `internal` shims let the Zig
-    // frontend register the SAME def records and resolve field types through the SAME
-    // tables — no duplication, no behavior change for C, AOT-clean. The first shared-code
-    // addition since the IFrontend seam (Zig Milestone D); see ZigLowering.
-
-    /// <summary>Register a Zig struct/union under <paramref name="name"/>: add it to the
-    /// emitted <see cref="Types"/> list AND the field/union layout tables so member access
-    /// and <c>sizeof</c>/<c>offsetof</c> resolve through the same compile-time model the C
-    /// frontend uses. Idempotent on the name — a second registration of the SAME shape is ignored,
-    /// but one that would silently REDEFINE an existing aggregate (same name, different fields or
-    /// union-ness) throws: the emitted C# has one type per name, so the second definition would be
-    /// dropped and every use of it would read the first one's layout. An imported Zig module's containers
-    /// are registered under module-qualified names (<c>fmt__Options</c>), so two modules no longer meet
-    /// here; what remains is two C translation units defining a different <c>struct</c> of one tag, or a
-    /// name clash no qualification covers — a loud error beats a silent miscompile.</summary>
-    internal void RegisterStructType(string name, List<StructField> fields, bool isUnion, AggregateLayout layout = AggregateLayout.Default)
-    {
-        RejectReservedTypeName(name, isUnion ? "union" : "struct");
-        if (_structFields.TryGetValue(name, out var already)
-            && (isUnion != _structIsUnion[name] || !already.SequenceEqual(fields)))
-        {
-            throw new IrUnsupportedException(
-                $"two different aggregates are both named '{name}' — the emitted C# can only carry one, so the "
-                + "second definition would be silently dropped (C: two translation units defining a different "
-                + $"`struct {name}`)");
-        }
-        if (_emittedTypes.Add(name))
-        {
-            _structFields[name] = fields;
-            _structIsUnion[name] = isUnion;
-            if (layout == AggregateLayout.Packed) { _packedStructs.Add(name); }
-            Types.Add(new StructTypeDef(name, fields, isUnion, layout));
-        }
-    }
-
-    /// <summary>Register a Zig enum under <paramref name="name"/> with the given underlying
-    /// integer type and members, mapping the name to its <see cref="CType.Enum"/> (so the
-    /// name resolves as a real enum type) and emitting an <see cref="EnumTypeDef"/>. Returns
-    /// the <see cref="CType.Enum"/>. Idempotent on the name — a second registration of the SAME shape
-    /// (tag type and members, in order) is ignored — but one that would REDEFINE it throws, exactly as
-    /// <see cref="RegisterStructType"/> does: the emitted C# carries one enum per name, so the second
-    /// definition's members would be silently dropped while its uses resolved against the first (a
-    /// type/codegen mismatch). An imported Zig module's enums are module-qualified, so this guards the
-    /// C multi-TU case and any clash qualification does not cover.</summary>
-    internal CType.Enum RegisterEnumType(string name, CType underlying, List<EnumMember> members)
-    {
-        if (!AddEnumDef(name, underlying, members)) { return _enumTypes[name]; }
-        var enumType = new CType.Enum(name, underlying);
-        _enumTypes[name] = enumType;
-        return enumType;
-    }
-
-    /// <summary>Refuse a user type whose emitted name is one the runtime or the program shell already
-    /// declares at the top level (<see cref="RuntimeTypeNames"/>) — it would transpile and then fail to
-    /// build with C# CS0101, the "bad emit" the fail-loudly rule forbids. The Zig front-end never reaches
-    /// this (it qualifies such a name); a C tag does, and renaming it is the author's call.</summary>
-    private static void RejectReservedTypeName(string name, string kind)
-    {
-        if (RuntimeTypeNames.IsReserved(name))
-        {
-            throw new IrUnsupportedException(
-                $"the {kind} name '{name}' is reserved: dotcc's runtime declares a type of that name in the emitted "
-                + "program, so the two would collide (rename the type)");
-        }
-    }
-
-    /// <summary>Add an <see cref="EnumTypeDef"/> to the emitted enum set — the one place both front-ends
-    /// go through. Returns false when an IDENTICAL definition (tag type and members, in order) is already
-    /// registered, and throws when a DIFFERENT one is: the emitted C# has one enum per name, so the second
-    /// would be dropped while its members' uses rendered against the first — a silent wrong value when a
-    /// member name is shared. (C: two translation units each defining a different <c>enum color</c>,
-    /// legal C that dotcc's single emitted program cannot represent; Zig: two modules' same-named enums.)</summary>
-    private bool AddEnumDef(string name, CType underlying, List<EnumMember> members)
-    {
-        RejectReservedTypeName(name, "enum");
-        if (Enums.FirstOrDefault(e => e.Name == name) is { } existing)
-        {
-            if (!existing.Underlying.Equals(underlying) || !existing.Members.SequenceEqual(members))
-            {
-                throw new IrUnsupportedException(
-                    $"two different enums are both named '{name}' — the emitted C# can only carry one, so the "
-                    + "second definition would be silently dropped (C: two translation units defining a different "
-                    + $"`enum {name}`)");
-            }
-            return false;
-        }
-        Enums.Add(new EnumTypeDef(name, underlying, members));
-        return true;
-    }
-
-    /// <summary>The full declared field list of the registered struct/union
-    /// <paramref name="name"/> (in declaration order), or <c>null</c> when no aggregate is
-    /// registered under that name. Lets the Zig frontend enumerate a struct's fields to
-    /// materialize defaults for any omitted from a <c>.{…}</c> literal.</summary>
-    internal IReadOnlyList<StructField>? StructFieldsOf(string name) =>
-        _structFields.TryGetValue(name, out var fields) ? fields : null;
-
-    /// <summary>The declared type of <paramref name="field"/> on the struct/union that
-    /// <paramref name="structType"/> names (pointer levels peeled, mirroring
-    /// <see cref="MemberType"/>), or <c>null</c> when the type isn't a registered aggregate
-    /// or has no such field — so the Zig frontend can raise a precise diagnostic rather than
-    /// silently defaulting to <see cref="CType.Int"/> as the C member access does.</summary>
-    internal CType? StructFieldType(CType structType, string field)
-    {
-        var t = structType.Unqualified;
-        while (t is CType.Pointer p) { t = p.Pointee.Unqualified; }
-        if (t is CType.Named n && _structFields.TryGetValue(n.Name, out var fields))
-        {
-            foreach (var f in fields) { if (f.Name == field) { return f.Type; } }
-        }
-        return null;
-    }
 
     /// <summary>Promoted (anonymous-aggregate) field map: per owning struct/union,
     /// each promoted inner field name → (the hidden container field, the nested
@@ -2812,13 +2591,6 @@ internal sealed partial class IrBuilder
         return new Member(base_, field, arrow) { Type = MemberType(base_, field), IsLValue = true };
     }
 
-    /// <summary>The canonical struct/union name an expression's type names (pointer
-    /// levels peeled), or null if it isn't an aggregate.</summary>
-    private static string? StructCanonical(CType t)
-    {
-        while (t is CType.Pointer p) { t = p.Pointee; }
-        return (t.Unqualified as CType.Named)?.Name;
-    }
 
     private CExpr BuildCast(C.Cast c)
     {

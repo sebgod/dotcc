@@ -60,8 +60,8 @@ internal sealed partial class ZigLowering
 
     /// <summary>The comptime eval-step budget in force, raised by <c>@setEvalBranchQuota</c> and never
     /// lowered (see <see cref="SetEvalBranchQuota"/>). Starts at the
-    /// <see cref="IrBuilder.DefaultComptimeStepBudget"/> dotcc has always used.</summary>
-    private long _evalStepBudget = IrBuilder.DefaultComptimeStepBudget;
+    /// <see cref="IrModule.DefaultComptimeStepBudget"/> dotcc has always used.</summary>
+    private long _evalStepBudget = IrModule.DefaultComptimeStepBudget;
 
     /// <summary>The width each lowered <c>@Int(…)</c> SITE was constructed with, keyed by AST
     /// reference like <see cref="_inlineStructNames"/>. dotcc widens <c>u21</c> to a 32-bit
