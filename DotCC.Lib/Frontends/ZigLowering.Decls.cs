@@ -138,7 +138,9 @@ internal sealed partial class ZigLowering
     private Symbol DeclareFnSymbol(Symbol sym, bool qualify = true)
     {
         _symbols.Declare(sym);
-        if (qualify && _modulePrefix is { } prefix) { sym.TargetName = $"{prefix}__{sym.TargetName}"; }
+        // Qualify the SOURCE name and escape once: the legalizer escapes a C# keyword (`double` →
+        // `@double`), and a prefix glued onto that (`m__@double`) is not an identifier.
+        if (qualify && _modulePrefix is { } prefix) { sym.TargetName = _names.Escape($"{prefix}__{sym.Name}"); }
         return sym;
     }
 
