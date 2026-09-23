@@ -3192,6 +3192,29 @@ public sealed class ZigOracleTests
             "pub fn main() u8 {\n" +
             "    return countBraces(\"a{}b{}c{\") * 8 + 2;\n" +
             "}\n", 42, "" },
+        // std.Io.Writer.print's comptime string var (road-to-zig-std G3): `comptime var literal: []const u8 =
+        // "";` grown by `literal = literal ++ fmt[0..i];` (a comptime slice of the comptime format string) and by
+        // a literal, read through `.len`. "hello!{}" is 8 bytes: 8 * 5 + 2 = 42.
+        new object[] { "comptime_string_var",
+            "fn literalPart(comptime fmt: []const u8) usize {\n" +
+            "    comptime var literal: []const u8 = \"\";\n" +
+            "    comptime var i = 0;\n" +
+            "    inline while (i < fmt.len) : (i += 1) {\n" +
+            "        switch (fmt[i]) {\n" +
+            "            '{' => break,\n" +
+            "            else => {},\n" +
+            "        }\n" +
+            "    }\n" +
+            "    literal = literal ++ fmt[0..i];\n" +
+            "    literal = literal ++ \"!\";\n" +
+            "    if (literal.len != 0) {\n" +
+            "        literal = literal ++ fmt[i..];\n" +
+            "    }\n" +
+            "    return literal.len;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return @intCast(literalPart(\"hello{}\") * 5 + 2);\n" +
+            "}\n", 42, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

@@ -713,6 +713,19 @@ that retire curated shortcuts.
 > The IR interpreter already models comptime structs and arrays (`CtStruct` / `CtArray`), so the
 > likely shape is to run the unrolled loop's comptime state through it rather than to grow a second
 > domain at the lowering tier.
+>
+> **Progress (2026-09-24):** item 2 (comptime `break` / `continue` in an unrolled `inline while`, with a
+> bare `inline while (true)`, a stepping `: (i += 1)`, comptime-var updates in the body, and a
+> `switch` over a comptime value folding while unrolling) and the STRING half of item 1 (a comptime
+> string var grown by `++` over comptime slices) are done: print's literal scan now folds exactly
+> (oracles `comptime_format_scan`, `comptime_string_var`). What stops `print` now is the STRUCT half of
+> item 1, `comptime var arg_state: std.fmt.ArgState = .{ … }` with `arg_state.nextArg(pos)` at comptime.
+> Two design facts decide its shape: the methods take `self: *@This()`, and the IR interpreter has no
+> pointer values (the T-milestone firewall); and the method bodies belong to a LAZY module, so they
+> are not lowered when print's unrolled body needs their results. The candidate shape: bind the
+> comptime struct as the interpreter's mutable `CtStruct`, let a pointer to it be the struct itself
+> (in-place mutation is then by-reference for free), and interpret the method from its lowered body,
+> lowering that body on demand first (which needs the re-entrancy guard the drains have).
 
 > **Then the other probes (2026-09-24).** Each advanced to a wall that is a real design question rather
 > than a gap:

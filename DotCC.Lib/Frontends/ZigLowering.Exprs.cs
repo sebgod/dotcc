@@ -77,6 +77,8 @@ internal sealed partial class ZigLowering
                     // A `comptime var`/`comptime const` (Milestone T) — substitute its CURRENT
                     // lowering-time value as a literal, so an `inline while` condition / body folds.
                     if (_comptimeVars.TryGetValue(sym, out var cv)) { return ComptimeVarLit(cv.Value, cv.Type); }
+                    // A comptime STRING var (`comptime var literal: []const u8 = "";`): its current value.
+                    if (_comptimeStringVars.TryGetValue(sym, out var csv)) { return csv; }
                     return new VarRef(sym) { Type = sym.Type, IsLValue = sym.Kind is SymKind.Var or SymKind.Param };
                 }
                 // A lazy module's top-level function named as a VALUE (`.drain = fixedDrain` in
@@ -828,7 +830,12 @@ internal sealed partial class ZigLowering
     {
         Zig.StrLit => LowerExpr(item),   // pure — → LitStr
         Zig.IntLit => LowerExpr(item),   // pure — → LitInt (with a folded Value)
-        Zig.Ident id => _comptimeValues.GetValueOrDefault(Tok(id.Arg0)),
+        Zig.Ident id => _symbols.Resolve(Tok(id.Arg0)) is { } csym && _comptimeStringVars.TryGetValue(csym, out var csv)
+            ? csv
+            : _comptimeValues.GetValueOrDefault(Tok(id.Arg0)),
+        // `fmt[a..b]` / `fmt[a..]` over a comptime string with comptime bounds: the sub-string.
+        Zig.SliceRange sr => TrySliceComptimeString(sr.Arg0, sr.Arg2, sr.Arg4),
+        Zig.SliceOpen so => TrySliceComptimeString(so.Arg0, so.Arg2, null),
         Zig.Grouped g => EvalComptimeValue(g.Arg1),   // `(expr)` — unwrap so a parenthesized fold composes
         Zig.Concat c => TryFoldStringConcat(c.Arg0, c.Arg2),
         Zig.Repeat r => TryFoldStringRepeat(r.Arg0, r.Arg2),
@@ -841,6 +848,39 @@ internal sealed partial class ZigLowering
         // fold, where resolving another module is exactly what is wanted (road-to-zig-std S3a).
         _ => null,
     };
+
+    /// <summary>Each <c>comptime var</c> holding a comptime STRING (std.Io.Writer.print's
+    /// <c>comptime var literal: []const u8 = "";</c>), by symbol → its current value, updated by assignments
+    /// at lowering time (<see cref="TryAssignComptimeVar"/>) and substituted where it is read.</summary>
+    private readonly Dictionary<Symbol, LitStr> _comptimeStringVars = new();
+
+    /// <summary>A comptime slice of a comptime string (<c>fmt[start..end]</c>), or null when the base is not
+    /// a comptime string or a bound does not fold. Built from the decoded bytes, each spelled <c>\xNN</c>.</summary>
+    private LitStr? TrySliceComptimeString(Item baseItem, Item loItem, Item? hiItem)
+    {
+        if (EvalComptimeValue(baseItem) is not LitStr str) { return null; }
+        var bytes = DotCC.EmitHelpers.StringByteValues(str.Segments);
+        long? lo, hi;
+        using (EnterThrowawayHoist())
+        {
+            lo = _ir.ConstEval(LowerExpr(loItem));
+            hi = hiItem is { } h ? _ir.ConstEval(LowerExpr(h)) : bytes.Count;
+        }
+        if (lo is not { } l || hi is not { } e || l < 0 || e > bytes.Count || l > e) { return null; }
+        return ComptimeStringFromBytes(bytes.Skip((int)l).Take((int)(e - l)));
+    }
+
+    /// <summary>A string literal holding exactly <paramref name="bytes"/>, each spelled as a <c>\xNN</c> escape
+    /// (so any byte round-trips through the shared C-string decoder), typed as its NUL-terminated array.</summary>
+    private static LitStr ComptimeStringFromBytes(IEnumerable<int> bytes)
+    {
+        var sb = new System.Text.StringBuilder("\"");
+        foreach (var b in bytes) { sb.Append("\\x").Append(b.ToString("X2", System.Globalization.CultureInfo.InvariantCulture)); }
+        sb.Append('"');
+        var segs = new List<string> { sb.ToString() };
+        DotCC.EmitHelpers.EncodeStringLiteral(segs, out var byteLen);
+        return new LitStr(segs) { Type = new CType.Array(CType.Char, byteLen) };
+    }
 
     /// <summary>Evaluate <c>@typeName(T)</c> to a comptime string value, or null if it is not that
     /// builtin or the type is not spellable (see <see cref="ZigTypeSpelling"/>). Non-throwing — the

@@ -359,11 +359,19 @@ internal sealed partial class ZigLowering
     /// when the target is not a comptime var.</summary>
     private CStmt? TryAssignComptimeVar(Item targetItem, BinOp? op, Item valueItem)
     {
-        if (targetItem.Content is not Zig.Ident id || _symbols.Resolve(Tok(id.Arg0)) is not { } sym
-            || !_comptimeVars.TryGetValue(sym, out var cur))
+        if (targetItem.Content is not Zig.Ident id || _symbols.Resolve(Tok(id.Arg0)) is not { } sym) { return null; }
+        // A comptime STRING var: `literal = literal ++ fmt[start..end];` folds to its new value.
+        if (_comptimeStringVars.ContainsKey(sym))
         {
-            return null;
+            if (op is not null || EvalComptimeValue(valueItem) is not LitStr newStr)
+            {
+                throw new IrUnsupportedException(
+                    $"zig: `comptime var {sym.Name}` (a comptime string) can only be assigned a compile-time-known string");
+            }
+            _comptimeStringVars[sym] = newStr;
+            return new Seq(new List<CStmt>());
         }
+        if (!_comptimeVars.TryGetValue(sym, out var cur)) { return null; }
         CExpr value;
         using (EnterThrowawayHoist()) { value = LowerExpr(valueItem); }
         if (op is { } bop)
@@ -1218,6 +1226,14 @@ internal sealed partial class ZigLowering
             default:
                 throw new IrUnsupportedException(
                     "`comptime` here is only supported on a `var`/`const` value declaration");
+        }
+        // A comptime STRING var (`comptime var literal: []const u8 = "";`, std.Io.Writer.print).
+        if (EvalComptimeValue(initItem) is LitStr initStr)
+        {
+            var stype = typeItem is { } st ? LowerType(st) : initStr.Type;
+            var ssym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = stype });
+            _comptimeStringVars[ssym] = initStr;
+            return;
         }
         var initExpr = LowerExpr(initItem);
         var ctype = typeItem is { } ti ? LowerType(ti) : initExpr.Type;

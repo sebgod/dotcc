@@ -70,4 +70,44 @@ public sealed class ZigComptimeScanTests
             """));
         ex.Message.ShouldContain("not comptime control flow");
     }
+
+    [Fact]
+    public void A_comptime_string_var_grows_by_comptime_slices_and_folds_to_its_length()
+    {
+        var cs = EmitZig("""
+            fn literalPart(comptime fmt: []const u8) usize {
+                comptime var literal: []const u8 = "";
+                comptime var i = 0;
+                inline while (i < fmt.len) : (i += 1) {
+                    switch (fmt[i]) {
+                        '{' => break,
+                        else => {},
+                    }
+                }
+                literal = literal ++ fmt[0..i];
+                literal = literal ++ "!";
+                return literal.len;
+            }
+            pub fn main() u8 {
+                return @intCast(literalPart("hello{}") * 7);
+            }
+            """);
+        cs.ShouldMatch(@"ulong literalPart__s[0-9a-f]+\(\)\s*\{[\s{}]*return 6");
+    }
+
+    [Fact]
+    public void A_comptime_string_var_assigned_a_runtime_value_is_a_loud_error()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig("""
+            fn f(s: []const u8) usize {
+                comptime var literal: []const u8 = "";
+                literal = s;
+                return literal.len;
+            }
+            pub fn main() u8 {
+                return @intCast(f("x"));
+            }
+            """));
+        ex.Message.ShouldContain("can only be assigned a compile-time-known string");
+    }
 }
