@@ -455,6 +455,8 @@ internal sealed partial class ZigLowering
         Zig.ProngCaptureReturnVoid p => new ZigProng(p.Arg0, Tok(p.Arg3),  null,   null,   null,   true),
         Zig.ProngJump p              => new ZigProng(p.Arg0, null,         null,   null,   null,   false, p.Arg2),
         Zig.ProngAssign p            => new ZigProng(p.Arg0, null,         null,   null,   null,   false, Assign: p),
+        // A `comptime { … }` body is walked as a block: a comptime-selected prong runs at lowering time anyway.
+        Zig.ProngComptimeBlock p     => new ZigProng(p.Arg0, null,         p.Arg3, null,   null,   false),
         Zig.ProngCaptureJump p       => new ZigProng(p.Arg0, Tok(p.Arg3),  null,   null,   null,   false, p.Arg5),
         Zig.ProngCaptureRef or Zig.ProngCaptureRefExpr or Zig.ProngCaptureRefReturn or Zig.ProngCaptureRefReturnVoid
             => throw new IrUnsupportedException(

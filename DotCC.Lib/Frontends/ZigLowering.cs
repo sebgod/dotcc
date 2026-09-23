@@ -109,8 +109,23 @@ internal sealed partial class ZigLowering
             ?? (_moduleAliasPaths.TryGetValue(Tok(id.Arg0), out var aliased) ? ResolveModulePath(aliased) : null),
         Zig.Field f when ResolveModulePath(f.Arg0) is { Lowering: { } baseLowering } =>
             baseLowering.ResolveImport(Tok(f.Arg2)),
+        // An INLINE import (`pub const block = @import("sort/block.zig").block;` in sort.zig): the spec is
+        // registered under a synthetic import name, so it resolves (and memoizes) exactly as `const x =
+        // @import("…");` does.
+        Zig.BuiltinCall b when Tok(b.Arg0) == "@import" && Flatten(b.Arg2) is { Count: 1 } ia
+                               && ia[0].Content is Zig.StrLit sl =>
+            ResolveInlineImport(Tok(sl.Arg0).Trim('"')),
         _ => null,
     };
+
+    /// <summary>Resolve an inline <c>@import("spec")</c> (see <see cref="ResolveModulePath"/>) through the
+    /// ordinary import table, under the synthetic name <c>@import:spec</c>.</summary>
+    private ZigModule? ResolveInlineImport(string spec)
+    {
+        var name = "@import:" + spec;
+        _importSpecs.TryAdd(name, spec);
+        return ResolveImport(name);
+    }
 
     /// <summary>This unit's top-level function declarations (name → the declared <see cref="Symbol"/>),
     /// captured in pass 1 so an importing module can build a call against them (<see cref="ExportedFns"/>).</summary>

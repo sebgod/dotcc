@@ -266,6 +266,8 @@ symbols:
   - ProngJump      # 170 a JUMP prong body: `break [:l [v]]` / `continue [:l]` (`'{', '}' => break,` in
                    #     Writer.print; about 330 in std). A separate symbol from FallbackArm, whose
                    #     block and `switch` arms would compete with the Block / RhsExpr prongs.
+  - NOALIAS        # 171 the `noalias` parameter qualifier (`noalias a: *T` in std.mem.swap), IGNORED by the
+                   #     lexer: an aliasing promise to the optimizer, with no meaning for a C# pointer.
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -636,6 +638,11 @@ productions:
       - { lhs: LoopStmt, rhs: ['for', '(', Expr, ',', Expr, ',', ')', '|', IDENT, ',', IDENT, '|', Stmt], action: stmtForSlicePairTrail }
       - { lhs: LoopStmt, rhs: ['for', '(', Expr, ',', Expr, ',', Expr, ')', '|', IDENT, ',', IDENT, ',', IDENT, '|', Stmt], action: stmtForSliceTriple }
       - { lhs: LoopStmt, rhs: ['for', '(', Expr, ',', Expr, ',', Expr, ',', ')', '|', IDENT, ',', IDENT, ',', IDENT, '|', Stmt], action: stmtForSliceTripleTrail }
+      # BY-REFERENCE captures in the pair form (std.mem.swap's `for (a_bytes, b_bytes) |*ab, *bb|`): a
+      # leading `*` (vs IDENT) at each capture position is a distinct terminal, so each shape is a shift.
+      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ',', Expr, ')', '|', '*', IDENT, ',', '*', IDENT, '|', Stmt], action: stmtForPairRefRef }
+      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ',', Expr, ')', '|', '*', IDENT, ',', IDENT, '|', Stmt],      action: stmtForPairRefVal }
+      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ',', Expr, ')', '|', IDENT, ',', '*', IDENT, '|', Stmt],      action: stmtForPairValRef }
       # `for (s) |*x| body` — BY-REFERENCE element capture (Milestone M, part 4): `x` is a `*T` into
       # the slice, so `x.* = …` writes through to the element. After the capture `'|'`, a `'*'`
       # lookahead selects this over the by-value `'|' IDENT '|'` form (distinct tokens) — conflict-free.
@@ -672,6 +679,10 @@ productions:
       # error for a method, since FieldDecls admits no `fn`).
       - { lhs: Stmt, rhs: ['return', 'struct', '{', FieldDecls, '}', ';'], action: returnStructType }
       - { lhs: Stmt, rhs: ['return', 'struct', '{', '}', ';'],             action: returnStructTypeEmpty }
+      # `return struct { pub fn inner(…) … }.inner;` — zig's CLOSURE idiom (std.sort.asc; 22 in std): the
+      # function returns a METHOD of an anonymous struct as a comptime function value. After the closing
+      # `}`, a `.` (not `;`) selects this form: distinct terminals, a shift either way.
+      - { lhs: Stmt, rhs: ['return', 'struct', '{', FieldDecls, '}', '.', IDENT, ';'], action: returnStructMember }
       - { lhs: Stmt, rhs: [VarDecl] }
       # An in-function container decl (wall-plan W2): `const P = struct { … };` inside a body.
       # ContainerDecl is otherwise a top-level `Decl` (line ~277); admitting it here too lets a
@@ -1175,6 +1186,10 @@ productions:
       # enum literal). An empty `.{}` zero-inits the (sink-typed) struct.
       - { lhs: Primary, rhs: ['.', '{', FieldInits, '}'], action: anonStructInit }
       - { lhs: Primary, rhs: ['.', '{', '}'],             action: anonStructInitEmpty }
+      # The closure idiom in EXPRESSION position (std/sort/block.zig: `const lessThan = if (builtin.mode ==
+      # .Debug) struct { fn lessThan(…) … }.lessThan else lessThanFn;`): a method of an anonymous struct as a
+      # function value. The trailing `.` IDENT is required, which keeps it apart from a struct TYPE.
+      - { lhs: Primary, rhs: ['struct', '{', FieldDecls, '}', '.', IDENT], action: structMemberExpr }
       # `error.Foo` — an error-value literal. `error` is a distinct keyword token, so this
       # never collides with the `Suffix '.' IDENT` field access (which starts from a
       # Primary/IDENT). After `error`, a `'.'` selects the value literal and a `'{'` the set
@@ -1277,6 +1292,9 @@ productions:
       # An ASSIGNMENT prong body `v => lhs = rhs` (hash_map's `.stage2_llvm => _ = &dbHelper,`): no Prong is
       # ever followed by `=`, so after the body's `Expr` the `=` shifts into this form, conflict-free.
       - { lhs: Prong, rhs: [CaseVals, '=>', Expr, '=', RhsExpr],         action: prongAssign }
+      # A `comptime { … }` prong body (std.math.sqrt's `.comptime_int => comptime { … }`): after `comptime`,
+      # a `{` starts no Prefix (the `comptime` value operator's operand), so this is a clean shift.
+      - { lhs: Prong, rhs: [CaseVals, '=>', 'comptime', Block],          action: prongComptimeBlock }
       - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, '|', ProngJump], action: prongCaptureJump }
 
   # The jump forms. FOLLOW(Prong) is `,` / `}`, so a label after `:` and a value after the label are
@@ -1524,6 +1542,8 @@ lexer:
     - { symbol: 'errdefer', match: 'errdefer' }
     - { symbol: 'comptime', match: 'comptime' }
     - { symbol: 'inline',   match: 'inline' }
+    # `noalias` is a keyword (first-rule-wins on the 7-char tie with IDENT), dropped: see NOALIAS.
+    - { symbol: NOALIAS,    match: 'noalias', action: ignore }
     # `test` is a reserved keyword in Zig, so promoting it never steals an identifier. Longest-match
     # keeps `testing`/`tests` as IDENT; first-rule-wins on the 4-char tie makes bare `test` the keyword.
     - { symbol: 'test',     match: 'test' }

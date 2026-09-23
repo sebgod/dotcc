@@ -326,7 +326,15 @@ instantiates the function it names (oracle `fn_alias_and_comptime_values`; unit 
 Around it: a comptime BOOL bound from a type comparison (`const is_comptime = @TypeOf(x) ==
 comptime_int;`), a value `if` whose condition folds lowering only its taken arm, a value switch with a
 `return` arm, variadic `@min` / `@max` folding when comptime-known, and a parenthesized type
-(`fn add(…) (error{Overflow}!T)`). Oracle `import_file_struct`; example `examples/zig-file-struct/`; unit
+(`fn add(…) (error{Overflow}!T)`). **The CLOSURE idiom and comptime FUNCTION parameters** (std.mem.sort's
+`comptime lessThanFn: fn (@TypeOf(context), lhs: T, rhs: T) bool` given `std.sort.asc(u8)`): a function whose
+body is `return struct { pub fn inner … }.inner;` stands for that method (its anonymous struct reifies when the
+instance is created, with the instance's seeds); a comptime function argument (a function name, a comptime
+function parameter passed along, or such a call) keys the callee's instance and is called directly; the idiom
+also works in expression position (`const inc = struct { fn f … }.f;`). With it: an inline `@import("…").name`
+re-export, `noalias` (ignored), by-reference pair captures `|*a, *b|`, and a `comptime { … }` prong body
+(oracle `closure_idiom_fn_params`; unit `ZigClosureIdiomTests`). **Cut:** the expression-position idiom's
+methods drain without the enclosing instance's seeds. Oracle `import_file_struct`; example `examples/zig-file-struct/`; unit
 `ZigFileStructTests`. **A GENERIC top-level function is a method too** (`w.print(fmt, args)`, with
 `fn print(w: *Writer, comptime fmt: []const u8, args: anytype)`): called on an instance it instantiates
 in its own module with the receiver as the runtime first argument (auto-ref'd like any method's), and

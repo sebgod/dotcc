@@ -131,7 +131,8 @@ internal sealed partial class ZigLowering
         IReadOnlyList<TypeSeed> TypeSeeds,
         IReadOnlyList<(string name, CType type)> RuntimeParams,
         IReadOnlyList<(string name, bool hasValue, long value, CType inner)> OptionalSeeds,
-        IReadOnlyList<(string name, LitStr value)> StringSeeds);
+        IReadOnlyList<(string name, LitStr value)> StringSeeds,
+        IReadOnlyList<(string name, ZigLowering owner, Symbol fn)>? FnSeeds = null);
 
     /// <summary>Generic (comptime-param) function symbols → their retained template. Populated in
     /// pass 1 (<see cref="DeclareFn"/>), consulted at every call site (<c>LowerCallInner</c>) so a
@@ -357,6 +358,7 @@ internal sealed partial class ZigLowering
         var optionalSeeds = new List<(string name, bool hasValue, long value, CType inner)>();
         var stringSeeds = new List<(string name, LitStr value)>();
         var anytypeSeeds = new List<(string name, CType type)>();
+        var fnSeeds = new List<(string name, ZigLowering owner, Symbol fn)>();
         var runtimeArgItems = new List<Item>();
 
         // Phase 1 — resolve each comptime TYPE arg in the CALLER's environment (a type-arg spelled as an
@@ -415,6 +417,20 @@ internal sealed partial class ZigLowering
                         // is a comptime `null` (no runtime rep) or a comptime-known payload. Seed it into
                         // _comptimeOptionalVars so a captured `if (x) |y| … else …` folds at lowering time.
                         var valueParamType = LowerType(g.Params[i].TypeAst).Unqualified;
+                        // A comptime FUNCTION value (`comptime lessThanFn: fn (…) bool`, std.mem.sort): the
+                        // function it names keys the instance, and calls in the body go straight to it.
+                        if (valueParamType is CType.Func)
+                        {
+                            if (TryResolveComptimeFnValue(argItems[i], argScope) is not { } fnValue)
+                            {
+                                throw new IrUnsupportedException(
+                                    $"call to generic '{templateSym.Name}': the `comptime {g.Params[i].Name}` function argument must name "
+                                    + "a function at compile time (a function, a comptime function parameter, or a closure-idiom call)");
+                            }
+                            mangleTokens.Add(fnValue.Fn.Name);
+                            fnSeeds.Add((g.Params[i].Name, fnValue.Owner, fnValue.Fn));
+                            break;
+                        }
                         if (valueParamType is CType.Optional optParam)
                         {
                             if (IsComptimeNull(argItems[i]))
@@ -513,13 +529,21 @@ internal sealed partial class ZigLowering
                 // An error-union generic: register the instance's raw return-type AST so its body resolves
                 // its declared error set in LowerFnBodyCore (the same lazy resolution a plain fn gets).
                 if (ret is CType.ErrorUnion) { _fnErrorReturnTypes[instanceSym] = (g.RetType, g.ErrUnion); }
+                // The closure idiom (`fn asc(comptime T: type) fn (…) bool { return struct { … }.inner; }`):
+                // reify the anonymous struct NOW, with this instance's seeds live, so a comptime function
+                // argument can name the method before the instance body is drained.
+                if (ret.Unqualified is CType.Func && ClosureIdiomReturn(g.Body) is { } closure)
+                {
+                    _fnValueOfInstance[instanceSym] = ReifyClosureStruct(mangled, closure.Arg3, Tok(closure.Arg6),
+                        typeSeeds, valueSeeds, optionalSeeds);
+                }
                 if (comptimeOnly)
                 {
                     _comptimeOnlyFns.Add(instanceSym);
                     if (TryEvalComptimeIntBody(g, valueSeeds, optionalSeeds) is { } value) { _comptimeIntValues[instanceSym] = value; }
                 }
                 _instantiations[mangled] = instanceSym;
-                _pendingInstantiations.Add(new PendingInstantiation(instanceSym, g, valueSeeds, typeSeeds, runtimeParams, optionalSeeds, stringSeeds));
+                _pendingInstantiations.Add(new PendingInstantiation(instanceSym, g, valueSeeds, typeSeeds, runtimeParams, optionalSeeds, stringSeeds, fnSeeds));
             }
         }
         finally
@@ -601,7 +625,118 @@ internal sealed partial class ZigLowering
     /// seeds the type aliases (shadow-saved) so the body substitutes literals / resolves <c>T</c>. Runs
     /// at top level (never nested), so the per-fn lowering state starts clean.</summary>
     private void LowerInstantiationBody(PendingInstantiation p)
-        => LowerFnBodyCore(p.Instance, p.RuntimeParams, p.Generic.Body, p.ValueSeeds, p.TypeSeeds, p.OptionalSeeds, p.StringSeeds);
+    {
+        // A `comptime f: fn (…) R` parameter is bound to the function it was given for this instance's body
+        // (a call `f(…)` resolves through `_fnAliases`); the caller's own aliases are put back afterwards.
+        var shadows = new List<(string name, (ZigLowering, Symbol)? prev)>();
+        foreach (var (name, owner, fn) in p.FnSeeds ?? System.Array.Empty<(string, ZigLowering, Symbol)>())
+        {
+            shadows.Add((name, _fnAliases.TryGetValue(name, out var prev) ? prev : null));
+            _fnAliases[name] = (owner, fn);
+        }
+        try
+        {
+            LowerFnBodyCore(p.Instance, p.RuntimeParams, p.Generic.Body, p.ValueSeeds, p.TypeSeeds, p.OptionalSeeds, p.StringSeeds);
+        }
+        finally
+        {
+            foreach (var (name, prev) in shadows)
+            {
+                if (prev is { } pv) { _fnAliases[name] = pv; } else { _fnAliases.Remove(name); }
+            }
+        }
+    }
+
+    /// <summary>Each instance whose body returns a method of an anonymous struct (the closure idiom,
+    /// <c>return struct { pub fn inner … }.inner;</c>) → that method: the comptime FUNCTION value the
+    /// instance stands for (<c>std.sort.asc(u8)</c>).</summary>
+    private readonly Dictionary<Symbol, Symbol> _fnValueOfInstance = new();
+
+    /// <summary>The single statement of a closure-idiom body, or null.</summary>
+    private static Zig.ReturnStructMember? ClosureIdiomReturn(Item body)
+        => BodyStatements(body) is { Count: 1 } one && one[0].Content is Zig.ReturnStructMember r ? r : null;
+
+    /// <summary>Reify the anonymous struct of a closure-idiom <c>return struct { … }.member;</c> in the scope
+    /// of function (or instance) <paramref name="owner"/>, and return the method <paramref name="member"/>.
+    /// Memoized per owner (<c>&lt;owner&gt;__Anon</c>). Methods are declared now, while any comptime seeds
+    /// are live, and their bodies deferred with those seeds, as a reified generic's methods are. Fields are a
+    /// loud cut: the idiom's struct is a namespace for its functions.</summary>
+    private Symbol ReifyClosureStruct(string owner, Item fieldDecls, string member,
+        IReadOnlyList<TypeSeed> typeSeeds,
+        IReadOnlyList<(string name, long value, CType type)> valueSeeds,
+        IReadOnlyList<(string name, bool hasValue, long value, CType inner)> optionalSeeds)
+    {
+        var anon = owner + "__Anon";
+        if (!_containerTypes.ContainsKey(anon))
+        {
+            var (fields, methods, consts, containers) = SplitMembers(fieldDecls);
+            if (fields.Count > 0 || containers.Count > 0)
+            {
+                throw new IrUnsupportedException(
+                    $"zig `return struct {{ … }}.{member};` in '{owner}': the anonymous struct may declare only functions and "
+                    + "consts (the closure idiom), not fields or nested containers");
+            }
+            _containerTypes[anon] = new CType.Named(anon);
+            using var container = EnterContainer(anon);
+            RegisterStruct(anon, fields);
+            RegisterContainerConsts(anon, consts);
+            foreach (var methodDef in methods)
+            {
+                var me = DeclareMethod(anon, methodDef);
+                _currentContainer = anon;
+                _pendingReifiedMethods.Add(new PendingReifiedMethod(me.sym, anon, me.ps, me.body, typeSeeds, valueSeeds, optionalSeeds));
+            }
+        }
+        return _methods.TryGetValue(anon, out var ms) && ms.TryGetValue(member, out var sym)
+            ? sym
+            : throw new IrUnsupportedException($"zig `return struct {{ … }}.{member};` in '{owner}': the struct declares no function '{member}'");
+    }
+
+    /// <summary>The function a COMPTIME function-typed argument names (<c>comptime lessThanFn: fn (…) bool</c>
+    /// given <c>std.sort.asc(u8)</c>, a function name, or a function parameter passed along), read in
+    /// <paramref name="argScope"/>: the owning module and the function's symbol, or null.</summary>
+    private (ZigLowering Owner, Symbol Fn)? TryResolveComptimeFnValue(Item arg, ZigLowering argScope)
+    {
+        switch (arg.Content)
+        {
+            case Zig.Grouped g:
+                return TryResolveComptimeFnValue(g.Arg1, argScope);
+            case Zig.Ident id:
+            {
+                var name = Tok(id.Arg0);
+                if (argScope._fnAliases.TryGetValue(name, out var alias)) { return alias; }
+                var sym = argScope._symbols.Resolve(name) ?? (argScope._lazy ? argScope.EnsureDeclLowered(name) : null);
+                return sym is { Kind: SymKind.Func } && !argScope._genericFns.ContainsKey(sym) ? (argScope, sym) : null;
+            }
+            case Zig.CallArgs or Zig.CallNoArgs:
+            {
+                var (callee, args) = arg.Content switch
+                {
+                    Zig.CallArgs ca => (ca.Arg0, (IReadOnlyList<Item>)Flatten(ca.Arg2)),
+                    Zig.CallNoArgs cn => (cn.Arg0, (IReadOnlyList<Item>)System.Array.Empty<Item>()),
+                    _ => throw new System.InvalidOperationException(),
+                };
+                (ZigLowering owner, Symbol template)? target = callee.Content switch
+                {
+                    Zig.Ident cid when argScope._symbols.Resolve(Tok(cid.Arg0)) is { } s && argScope._genericFns.ContainsKey(s) => (argScope, s),
+                    Zig.Ident cid when argScope._symbols.Resolve(Tok(cid.Arg0)) is null && argScope._lazy
+                                    && argScope.EnsureDeclLowered(Tok(cid.Arg0)) is { } ls && argScope._genericFns.ContainsKey(ls) => (argScope, ls),
+                    Zig.Field cf when argScope.ResolveModulePath(cf.Arg0)?.Lowering is { } mod
+                                   && mod.ResolveExportedDecl(Tok(cf.Arg2)) is { } d && d.Owner.IsGenericTemplate(d.Sym) => (d.Owner, d.Sym),
+                    _ => null,
+                };
+                if (target is not { } t || t.owner.TryResolveExportedGenericInstance(t.template, args, argScope) is not { } inst)
+                {
+                    return null;
+                }
+                return t.owner._fnValueOfInstance.TryGetValue(inst.Instance, out var fnValue) ? (t.owner, fnValue) : null;
+            }
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>The body of <see cref="InstantiateGeneric"/>: resolve (or reuse) the instance a call
 
     /// <summary>True when a generic argument is a comptime <c>null</c> — a bare <c>null</c> literal
     /// (optionally parenthesized). The comptime-optional seed for such an argument has no payload.</summary>

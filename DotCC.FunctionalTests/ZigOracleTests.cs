@@ -3080,6 +3080,68 @@ public sealed class ZigOracleTests
             "    }\n" +
             "    return total + pairs - n + 27 + bonus;\n" +
             "}\n", 42, "" },
+        // The CLOSURE idiom (std.sort.asc's `return struct { pub fn inner … }.inner;`, road-to-zig-std G3)
+        // and COMPTIME function parameters (`comptime lessThan: fn (@TypeOf(context), T, T) bool`, what
+        // std.mem.sort takes): a function value keys each instance and is called directly, also passed along
+        // to another generic; the idiom in expression position; `noalias`; a by-reference pair capture; and a
+        // `comptime { … }` prong body. 40 + 2 + 23 - 22 + 0 + 1 - 2 = 42.
+        new object[] { "closure_idiom_fn_params",
+            "fn asc(comptime T: type) fn (void, T, T) bool {\n" +
+            "    return struct {\n" +
+            "        pub fn inner(_: void, a: T, b: T) bool {\n" +
+            "            return a < b;\n" +
+            "        }\n" +
+            "    }.inner;\n" +
+            "}\n" +
+            "fn desc(_: void, a: u8, b: u8) bool {\n" +
+            "    return a > b;\n" +
+            "}\n" +
+            "fn insertionSort(comptime T: type, items: []T, context: anytype, comptime lessThan: fn (@TypeOf(context), T, T) bool) void {\n" +
+            "    var i: usize = 1;\n" +
+            "    while (i < items.len) : (i += 1) {\n" +
+            "        const x = items[i];\n" +
+            "        var j = i;\n" +
+            "        while (j > 0 and lessThan(context, x, items[j - 1])) : (j -= 1) {\n" +
+            "            items[j] = items[j - 1];\n" +
+            "        }\n" +
+            "        items[j] = x;\n" +
+            "    }\n" +
+            "}\n" +
+            "fn sortBy(comptime T: type, items: []T, comptime lessThan: fn (void, T, T) bool) void {\n" +
+            "    insertionSort(T, items, {}, lessThan);\n" +
+            "}\n" +
+            "fn swap(noalias a: *u8, noalias b: *u8) void {\n" +
+            "    const t = a.*;\n" +
+            "    a.* = b.*;\n" +
+            "    b.* = t;\n" +
+            "}\n" +
+            "fn kind(comptime T: type) u8 {\n" +
+            "    switch (@typeInfo(T)) {\n" +
+            "        .int => return 1,\n" +
+            "        .comptime_int => comptime {\n" +
+            "            return 2;\n" +
+            "        },\n" +
+            "        else => return 0,\n" +
+            "    }\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const inc = struct {\n" +
+            "        fn f(x: u8) u8 {\n" +
+            "            return x + 1;\n" +
+            "        }\n" +
+            "    }.f;\n" +
+            "    var xs = [_]u8{ 1, 2 };\n" +
+            "    const ys = [_]u8{ 10, 20 };\n" +
+            "    for (&xs, ys) |*x, y| x.* += y;\n" +
+            "    var p: u8 = 1;\n" +
+            "    var q: u8 = 0;\n" +
+            "    swap(&p, &q);\n" +
+            "    var a = [_]u8{ 3, 40, 1 };\n" +
+            "    insertionSort(u8, &a, {}, asc(u8));\n" +
+            "    var b = [_]u8{ 2, 9, 5 };\n" +
+            "    sortBy(u8, &b, desc);\n" +
+            "    return a[2] + b[2] + inc(xs[1]) - 22 + p + kind(u8) - 2;\n" +
+            "}\n", 42, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

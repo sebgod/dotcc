@@ -730,8 +730,10 @@ that retire curated shortcuts.
 >   prong body, and a parse-skip diagnostic through a same-module alias (`HashMapUnmanaged = Custom`)
 >   let `Custom` parse whole. It stops at G4's nested-container cut (`Entry`, `Iterator` inside the
 >   reified type).
-> - `std.mem.sort`: `return struct { pub fn inner … }.inner;` returns a comptime FUNCTION value, passed
->   as `comptime lessThanFn: fn (…) bool`: a parse form plus comptime function values keying an instance.
+> - `std.mem.sort`: the closure idiom (`return struct { pub fn inner … }.inner;`) and comptime FUNCTION
+>   parameters landed, with an inline `@import(…).name` re-export, `noalias`, by-reference pair captures
+>   and `comptime { … }` prongs; std.sort.block now lowers far enough to call `std.math.sqrt(items.len)`,
+>   where it meets parseInt's wall: the declared width of an `anytype` argument.
 > - `array_list.Aligned(u8, null)` still reaches `SentinelSlice`, a type-returning METHOD (G4).
 
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)

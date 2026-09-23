@@ -216,6 +216,15 @@ internal sealed partial class ZigLowering
 
             // `break;` / `continue;` — reuse the C IR loop-control nodes (the C# backend
             // renders them verbatim; valid inside the while/for forms above).
+            // `return struct { pub fn inner … }.inner;` (the closure idiom): return the method as a function
+            // value. An instance reified it when it was created; a plain function reifies it here.
+            case Zig.ReturnStructMember rsm:
+            {
+                var method = ReifyClosureStruct(_currentFnName, rsm.Arg3, Tok(rsm.Arg6),
+                    System.Array.Empty<TypeSeed>(), System.Array.Empty<(string, long, CType)>(),
+                    System.Array.Empty<(string, bool, long, CType)>());
+                return new Return(new VarRef(method) { Type = method.Type });
+            }
             case Zig.StmtBreak:    return LowerUnlabeledBreak();
             case Zig.StmtContinue: return new Continue();
 
@@ -294,6 +303,12 @@ internal sealed partial class ZigLowering
                 return LowerForParallel(new[] { f.Arg2, f.Arg4, f.Arg6 }, new[] { Tok(f.Arg9), Tok(f.Arg11), Tok(f.Arg13) }, f.Arg15);
             case Zig.StmtForSliceTripleTrail f:
                 return LowerForParallel(new[] { f.Arg2, f.Arg4, f.Arg6 }, new[] { Tok(f.Arg10), Tok(f.Arg12), Tok(f.Arg14) }, f.Arg16);
+            case Zig.StmtForPairRefRef f:
+                return LowerForParallel(new[] { f.Arg2, f.Arg4 }, new[] { Tok(f.Arg8), Tok(f.Arg11) }, f.Arg13, new[] { true, true });
+            case Zig.StmtForPairRefVal f:
+                return LowerForParallel(new[] { f.Arg2, f.Arg4 }, new[] { Tok(f.Arg8), Tok(f.Arg10) }, f.Arg12, new[] { true, false });
+            case Zig.StmtForPairValRef f:
+                return LowerForParallel(new[] { f.Arg2, f.Arg4 }, new[] { Tok(f.Arg7), Tok(f.Arg10) }, f.Arg12, new[] { false, true });
             // `for (s, 0..) |*x, i| body` — BY-REFERENCE element capture WITH the usize index
             // (Milestone Z): `x` is a `*T` into the slice (so `x.* = …` writes through), `i` the index.
             case Zig.StmtForSliceIdxRef f:  // for '(' Expr ',' Expr '..' ')' '|' '*' IDENT ',' IDENT '|' Stmt
@@ -466,14 +481,39 @@ internal sealed partial class ZigLowering
             }
             case Zig.IfExpr e:
             {
+                // std/sort/block.zig: `if (builtin.mode == .Debug) struct { … }.lessThan else lessThanFn`.
+                if (TryFoldComptimeCondition(e.Arg2) is { } taken) { return TryResolveFnAlias(taken ? e.Arg4 : e.Arg6); }
                 CExpr cond;
                 using (EnterThrowawayHoist()) { cond = LowerExpr(e.Arg2); }
                 return _ir.ConstEval(cond) is { } c ? TryResolveFnAlias(c != 0 ? e.Arg4 : e.Arg6) : null;
             }
+            // An arm naming a comptime FUNCTION parameter (`else lessThanFn`), or a closure-idiom method.
+            case Zig.Ident fid when _fnAliases.TryGetValue(Tok(fid.Arg0), out var passed):
+                return passed;
+            case Zig.StructMemberExpr sme:
+                return (this, ReifyClosureExpr(rhs, sme));
             default:
                 return null;
         }
     }
+
+    /// <summary>Reify a closure-idiom struct in EXPRESSION position (<c>struct { fn f … }.f</c>) and return
+    /// the method, memoized per source site. Its method bodies drain without the enclosing instance's
+    /// comptime seeds (a V1 cut the only std site, block.zig's Debug-mode arm, never reaches in the
+    /// ReleaseFast mode dotcc reports).</summary>
+    private Symbol ReifyClosureExpr(Item site, Zig.StructMemberExpr sme)
+    {
+        if (_closureSites.TryGetValue(site, out var known)) { return known; }
+        var owner = $"{_currentFnName}__L{_closureSites.Count}";
+        var sym = ReifyClosureStruct(owner, sme.Arg2, Tok(sme.Arg5),
+            System.Array.Empty<TypeSeed>(), System.Array.Empty<(string, long, CType)>(),
+            System.Array.Empty<(string, bool, long, CType)>());
+        _closureSites[site] = sym;
+        return sym;
+    }
+
+    /// <summary>Each closure-idiom expression site → its reified method (<see cref="ReifyClosureExpr"/>).</summary>
+    private readonly Dictionary<Item, Symbol> _closureSites = new(ReferenceEqualityComparer.Instance);
 
     /// <summary>True when every arm of a switch is a bare dotted path (<c>.pos =&gt; math.add</c>): the only
     /// shape <see cref="TryResolveFnAlias"/> evaluates, so an ordinary value switch is never lowered twice.</summary>
@@ -1934,7 +1974,8 @@ internal sealed partial class ZigLowering
         or Zig.StmtWhileCaptureCont or Zig.StmtWhileCaptureContAssign
         or Zig.StmtForRange or Zig.StmtForSlice or Zig.StmtForSliceRef or Zig.StmtForSliceIdx
         or Zig.StmtForSliceIdxRef or Zig.StmtForSlicePair or Zig.StmtForSlicePairTrail
-        or Zig.StmtForSliceTriple or Zig.StmtForSliceTripleTrail;
+        or Zig.StmtForSliceTriple or Zig.StmtForSliceTripleTrail
+        or Zig.StmtForPairRefRef or Zig.StmtForPairRefVal or Zig.StmtForPairValRef;
 
     /// <summary>Lower a runtime loop with an unlabeled break target (<see cref="LoopBreakTarget"/>), so a
     /// <c>break</c> inside a <c>switch</c> in its body exits the loop, as in zig. The label is emitted
@@ -2066,6 +2107,9 @@ internal sealed partial class ZigLowering
                 case Zig.ProngReturnVoid pr: caseVals = pr.Arg0; body = new List<CStmt> { LowerReturnVoid() }; break;
                 case Zig.ProngJump pj:       caseVals = pj.Arg0; body = new List<CStmt> { LowerProngJump(pj.Arg2) }; break;
                 case Zig.ProngAssign pa:     caseVals = pa.Arg0; body = new List<CStmt> { LowerAssignStmt(pa.Arg2, pa.Arg4) }; break;
+                // A runtime switch cannot run a `comptime { … }` arm; zig requires a comptime subject for one.
+                case Zig.ProngComptimeBlock:
+                    throw new IrUnsupportedException("zig `=> comptime { … }` prong in a switch whose subject is not comptime-known");
                 default: throw new IrUnsupportedException("zig switch prong: " + (prongItem.Content?.GetType().Name ?? "null"));
             }
             var labels = LowerCaseVals(caseVals, subject.Type); // case values compare against the subject
@@ -2232,7 +2276,8 @@ internal sealed partial class ZigLowering
     /// Each object is a slice (an array coerces to one) read once into a temp. zig asserts the lengths are
     /// equal; dotcc walks the FIRST object's length and does not check, its ReleaseFast stance on safety
     /// checks. A <c>_</c> capture binds nothing.</summary>
-    private CStmt LowerForParallel(IReadOnlyList<Item> objectItems, IReadOnlyList<string> captures, Item bodyItem)
+    private CStmt LowerForParallel(IReadOnlyList<Item> objectItems, IReadOnlyList<string> captures, Item bodyItem,
+        IReadOnlyList<bool>? byRef = null)
     {
         var pre = new List<CStmt>();
         var slices = new List<(CExpr Ref, CType.Slice Type)>(objectItems.Count);
@@ -2273,8 +2318,11 @@ internal sealed partial class ZigLowering
             var (sref, st) = slices[k];
             var ptr = new Member(sref, "Ptr", false) { Type = new CType.Pointer(st.Element) };
             var elem = new DotCC.Ir.Index(ptr, iRef) { Type = st.Element, IsLValue = true };
-            var sym = _symbols.Declare(new Symbol { Name = captures[k], Kind = SymKind.Var, Type = st.Element });
-            bodyStmts.Add(new DeclStmt(new List<LocalDecl> { new(sym, elem) }));
+            // `|*x|` binds a pointer INTO the object (`x.* = …` writes through), `|x|` a per-iteration copy.
+            var capType = byRef is { } br && br[k] ? new CType.Pointer(st.Element) : st.Element;
+            CExpr capInit = capType is CType.Pointer ? new Unary(UnOp.AddrOf, elem) { Type = capType } : elem;
+            var sym = _symbols.Declare(new Symbol { Name = captures[k], Kind = SymKind.Var, Type = capType });
+            bodyStmts.Add(new DeclStmt(new List<LocalDecl> { new(sym, capInit) }));
         }
         bodyStmts.Add(LowerStmt(bodyItem));
         _symbols.ExitScope();
