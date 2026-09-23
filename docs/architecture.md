@@ -3,7 +3,24 @@
 > Extracted from CLAUDE.md (2026-07-07) — the full architecture reference. CLAUDE.md keeps
 > a one-screen summary and points here.
 
-The compiler is an N-frontend × M-backend frame meeting at one **typed IR**. Two seams hold it: `IFrontend` (`Frontends/IFrontend.cs` — lex/parse a source language and bind it to the IR, returning the `IrBuilder`) and `ITarget` + the per-target backend classes (`Ir/Target.cs`, `Backends/` — project the neutral IR onto an output language). Today that's 2×2 (C, Zig → C#, wat) with no pairwise special-casing.
+The compiler is an N-frontend × M-backend frame meeting at one **typed IR**. Two seams hold it: `IFrontend` (`Frontends/IFrontend.cs` — lex/parse a source language and bind it to the IR, returning the `IrBuilder`) and `ITarget` + the per-target backend classes (`Ir/Target.cs`, `Backends/` — project the neutral IR onto an output language). Today that's two front-ends and two backends — but **not a full 2×2**, and the seams are less symmetric than the frame suggests (measured by the 2026-09 architecture review):
+
+- **Zig × wat is mostly unbuilt.** The IR carries ~25 node types that only the Zig lowering produces
+  (`ZigTry`, `ZigCatch`, `AllocCall`/`FreeCall`/…, `TupleLiteral`/`TupleIndex`, `SwitchExpr`,
+  `OptionalOrElse`, `ErrUnionOk`/`ErrUnionErr`, …; each doc-commented "Zig-lowering / C#-target only"),
+  and `WatBackend` renders none of them — they fall to its loud default. So `--target=wat` compiles C
+  (the web sandbox's C side) and, for Zig, only programs whose lowering stays inside the C-shaped node
+  set — in practice `std.debug.print` (→ `fprintf(stderr, …)`) over scalars. Tracked in
+  [`plans/deferred.md`](plans/deferred.md). C × C#, C × wat and Zig × C# are real.
+- **The C binder lives inside `IrBuilder`.** `Ir/IrBuilder.cs` is both the neutral IR API (types,
+  symbols, the aggregate registries, `ConstEval`) and the C front-end's parse-tree binder — `CFrontend`
+  is pipeline glue that hands the raw tree to `IrBuilder.AddUnit`. The Zig front-end is a separate peer
+  (`Frontends/ZigLowering*.cs`) that reaches the shared IR through a small internal API. A third
+  front-end should follow the Zig shape, not grow `IrBuilder`.
+
+What IS uniform: every expression carries a `CType`, both front-ends lower to the same statement /
+expression node set for everything C-shaped (control flow, calls, arithmetic, aggregates), and the C#
+backend has no front-end-specific rendering for those.
 
 The C front half is a straight pull-pipe:
 

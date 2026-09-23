@@ -96,11 +96,33 @@ of these parses and has a `ZigParseProbe` pin, but lowering is not wired yet:
 - Inline named-field struct **type** (`fn f() struct { a: u8 }`, `field: struct {…}`, parsed #90) — `LowerType` reifies a synthesized nominal struct type per source site (`__AnonStruct<n>`), built via `.{ … }` and read with `p.field`; oracle-verified. Fields-only (a method / `const` / nested-container member still needs a named container decl).
 - Nested `const Inner = struct {…};` as a struct-body member (parsed #89) — bound under a parent-mangled name (`Outer__Inner`), resolved by plain name inside the parent's methods, built via `.{…}` and read with `i.field`; oracle-verified. **Since G3 (2026-09-23) a full container:** any kind (enum/union too), with methods, consts and further nesting; resolvable from a sibling FIELD (`std.fmt.Number.mode: Mode`) and qualified (`Parent.Inner`, `A.B.C`, `Number.Mode.decimal`, `A.P.two()`).
 
+## Zig × wat — the backend gap (loud, but wide)
+
+The Zig lowering produces ~25 IR node types the C front-end never does (`ZigTry`, `ZigCatch`,
+`ZigMemCall`, `ZigListCall`, `AllocCall`/`FreeCall`/`CreateCall`/`DestroyCall`/`ReallocCall`/
+`ResizeCall`/`RemapCall`, `TupleLiteral`/`TupleIndex`, `BitCast`, `SwitchExpr`, `ArrayByValueReturn`,
+`OptionalOrElse`, `ErrUnionOk`/`ErrUnionErr`, `ZigErrorThrow`, …). `CSharpBackend` renders all of them;
+`WatBackend` renders none — each falls to its default `the wat target does not yet support …` error, so
+this is a LOUD gap, not a miscompile. Zig × wat therefore works only for programs whose lowering stays
+inside the C-shaped node set (the web sandbox's Zig toggle runs `std.debug.print` over scalars).
+Building it out is a backend campaign of its own — error unions and `try` need a wasm exception or
+multi-value strategy, allocators a linear-memory heap, slices a fat-pointer layout — and is not
+scheduled. (Found by the 2026-09 architecture review; the docs used to call the frame a full "2×2".)
+
 ## Zig — bad emit (transpiles "successfully" but the emitted C# does NOT compile)
 
 The worst category — it breaks the fail-loudly invariant, since dotcc exits 0 and the error only
 surfaces when the C# is compiled. **Currently EMPTY.** Keep it that way: a construct dotcc can't
 lower correctly must throw, not emit C# that won't build.
+
+It was NOT empty for a stretch of 2026-09-23 — the architecture review caught the ledger saying so
+while a measured case sat in the module-seam table below: `std.fmt`'s top-level `Alignment` enum was
+emitted under its plain name and collided with dotcc's own runtime `Alignment` carrier (C# CS0101),
+and two modules' same-named containers either threw (structs) or silently kept the first definition
+(enums). Fixed by **module-qualified container naming** — an imported module's containers, reified
+generic instances and inline anonymous structs emit as `<module>__<Name>` (`fmt__Alignment`,
+`list__Box__u8`), the module's own code and its importers still spelling the plain name — plus a
+collision guard on the enum registry matching the struct one. Oracle `import_same_named_types`.
 
 Four gaps were found by the lowering sweep around the G4 reified-methods brick (2026-08-08) — each
 reproduced on a plain/ordinary construct, so none was generic-specific — and all four are now fixed:
@@ -145,7 +167,6 @@ its methods + enum members. These edges of the same seam are deliberate V1 cuts 
 
 | Gap | Divergence | Fix sketch |
 |---|---|---|
-| Container types are registered under their PLAIN source name | Two modules declaring `struct Options {…}` collide; `IrBuilder.RegisterStructType` now THROWS rather than silently keeping the first (which was a wrong-layout miscompile waiting for the first cross-module type reference). Real std has many same-named containers, so this will fire as the G-goals grow — and it already fires against dotcc's OWN runtime: `std.fmt`'s top-level `Alignment` enum collides with the runtime `Alignment` carrier (`std.mem.Alignment`), a C# CS0101 the moment `std.fmt.Number` is instantiated (measured 2026-09-23) | module-qualified container naming (S1's stated `std__mem__…` rule, never implemented for containers): register a lazy module's containers as `<module>__<Name>`, keep its own `_containerTypes` keyed by the plain name → the mangled `CType.Named`, and thread the mangled name through pass 0a/0b's ~18 registration sites (methods/consts/nested containers key off it already) |
 | A cross-module container `const` (`k.Cfg.MAX`) | Not resolved — the value path reports `unresolved identifier 'k'` (a 3-segment value chain through a module). Container consts ARE registered, in the owning module's tables | give the value path the same owner lookup the type path got, or share the container-const table through `ZigImportScope` like the method + enum-member tables |
 | A comptime VALUE argument to an imported type-returning generic | Evaluated in the OWNING module's environment, so a literal works but a caller-scoped named constant fails with "must be a compile-time-known value" | pre-resolve non-type comptime args in the caller (the two-phase split already threads the caller's scope for TYPE args) |
 
