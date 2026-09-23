@@ -1227,6 +1227,24 @@ internal sealed partial class ZigLowering
         }
         if (EnsureMethodDeclared(container, methodName) is not { } msym)
         {
+            // A FIELD holding a function pointer (`w.vtable.drain(w, data, n)`, std.Io.Writer's dispatch):
+            // zig calls the field's value, with no receiver, each argument result-located against the
+            // pointer's parameter type, like a call through a fn-pointer local.
+            if (_ir.StructFieldType(recv.Type, methodName)?.Unqualified is CType.Func fieldFn)
+            {
+                if (argItems.Count != fieldFn.Params.Count)
+                {
+                    throw new IrUnsupportedException(
+                        $"call through fn-pointer field '{container}.{methodName}': expected {fieldFn.Params.Count} argument(s), got {argItems.Count}");
+                }
+                var callee = new Member(recv, methodName, recv.Type.Unqualified is CType.Pointer) { Type = fieldFn, IsLValue = true };
+                var fieldArgs = new List<CExpr>(argItems.Count);
+                for (var i = 0; i < argItems.Count; i++)
+                {
+                    fieldArgs.Add(LowerExprSink(argItems[i], fieldFn.Params[i]));
+                }
+                return new IndirectCall(callee, fieldArgs) { Type = fieldFn.Return };
+            }
             throw new IrUnsupportedException($"struct '{container}' has no method '{methodName}'");
         }
         var mfn = (CType.Func)msym.Type.Unqualified;

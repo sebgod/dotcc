@@ -1159,6 +1159,11 @@ internal sealed partial class ZigLowering
                 using (EnterContainer(fileStruct)) { RegisterStruct(fileStruct, topFields); }
             });
         }
+        if (_lazy)
+        {
+            var moduleContainers = pass0.Select(p => p.Name).OfType<string>();
+            FailDependentContainers(_fileContainer is { } fs ? moduleContainers.Append(fs) : moduleContainers);
+        }
 
         // For a lazily-lowered imported module (road-to-zig-std S2), stop after registration: record
         // each top-level function's raw decl so a reference can lower exactly that function on demand

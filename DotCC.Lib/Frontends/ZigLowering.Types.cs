@@ -463,8 +463,8 @@ internal sealed partial class ZigLowering
         // pointee `const` rides as a TypeQual so const-correctness sees it; it
         // doesn't change the C# spelling (`[*c]const u8` and `[*c]u8` are both
         // `byte*`). `[*c]const u8` is exactly the type of printf's format param.
-        Zig.TyPointer p    => PointerTo(LowerType(p.Arg1)),
-        Zig.TyPtrConst p   => PointerTo(LowerType(p.Arg2).WithQuals(TypeQual.Const)),
+        Zig.TyPointer p    => PointerTo(LowerPointee(p.Arg1)),
+        Zig.TyPtrConst p   => PointerTo(LowerPointee(p.Arg2).WithQuals(TypeQual.Const)),
         Zig.TyCPtr p       => new CType.Pointer(LowerType(p.Arg1)),
         Zig.TyCPtrConst p  => new CType.Pointer(LowerType(p.Arg2).WithQuals(TypeQual.Const)),
         // `[*]T` / `[*]const T` many-item pointers (Milestone O, part 2) — like `[*c]`,
@@ -488,8 +488,8 @@ internal sealed partial class ZigLowering
         Zig.TySliceConst s => new CType.Slice(LowerType(s.Arg3).WithQuals(TypeQual.Const)),
         // The aligned forms (`*align(4) const T`, `[]align(a) T`): the same types. Alignment is not tracked
         // (C# pointers carry none), so the `align(E)` operand is not even lowered.
-        Zig.TyPointerAlign p      => PointerTo(LowerType(p.Arg2)),
-        Zig.TyPtrConstAlign p     => PointerTo(LowerType(p.Arg3).WithQuals(TypeQual.Const)),
+        Zig.TyPointerAlign p      => PointerTo(LowerPointee(p.Arg2)),
+        Zig.TyPtrConstAlign p     => PointerTo(LowerPointee(p.Arg3).WithQuals(TypeQual.Const)),
         Zig.TyManyPtrAlign p      => new CType.Pointer(LowerType(p.Arg2)),
         Zig.TyManyPtrConstAlign p => new CType.Pointer(LowerType(p.Arg3).WithQuals(TypeQual.Const)),
         Zig.TySliceAlign s        => new CType.Slice(LowerType(s.Arg3)),
@@ -925,6 +925,20 @@ internal sealed partial class ZigLowering
     /// type — keeping every downstream call / coercion / sizeof path identical to C's.</summary>
     private static CType PointerTo(CType pointee) =>
         pointee.Unqualified is CType.Func ? pointee : new CType.Pointer(pointee);
+
+    /// <summary>Lower a single-item pointer's pointee, or <c>void</c> (an OPAQUE pointer) when the pointee
+    /// is a lazy module's container whose registration failed (road-to-zig-std G3). A pointer needs no
+    /// layout of what it points to, so a signature that merely passes one along lowers: <c>std.Io.Writer</c>'s
+    /// <c>VTable.sendFile</c> takes a <c>*File.Reader</c>, and <c>File</c> sits on the platform floor
+    /// (<c>handle: std.posix.fd_t</c>), yet a program formatting into a buffer never touches a file. A use
+    /// that needs the layout (a field access, a deref, a by-value copy) still fails loudly, on the
+    /// <c>void*</c>. Only a lazy module's container can be failed (a root unit's is an error where it
+    /// stands), so user code keeps its direct diagnostics.</summary>
+    private CType LowerPointee(Item pointee)
+    {
+        try { return LowerType(pointee); }
+        catch (ZigFailedContainerException) { return CType.Void; }
+    }
 
     /// <summary>Lower a function-pointer type's parameter list (the reused <c>Params</c>: each a
     /// named <c>IDENT : Type</c>) to its element types — the names are irrelevant to the type. A

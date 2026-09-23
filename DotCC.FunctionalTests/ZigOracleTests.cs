@@ -3044,6 +3044,20 @@ public sealed class ZigOracleTests
             "    if (maxInt(u64) == 18446744073709551615) r += 12;\n" +
             "    return r;\n" +
             "}\n", 42, "" },
+        // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
+        // `w.vtable.drain(…)` dispatch shape).
+        new object[] { "fn_pointer_field_call",
+            "const Ops = struct {\n" +
+            "    f: *const fn (x: u8) u8,\n" +
+            "};\n" +
+            "fn twice(x: u8) u8 {\n" +
+            "    return x * 2;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const o = Ops{ .f = twice };\n" +
+            "    const p = &o;\n" +
+            "    return o.f(20) + p.f(1);\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

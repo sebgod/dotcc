@@ -2,6 +2,7 @@
 
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using DotCC.Ir;
 using LALR.CC.LexicalGrammar;
 
@@ -362,9 +363,16 @@ internal sealed partial class ZigLowering
         }
         if (_failedContainers.TryGetValue(name, out var failure))
         {
-            throw new IrUnsupportedException($"zig container `{name}` could not be lowered: " + failure);
+            throw new ZigFailedContainerException(name, failure);
         }
     }
+
+    /// <summary>A reference to a lazy module's container whose registration failed (see
+    /// <see cref="_failedContainers"/>). Its own type, so the one position that can do without the
+    /// container's layout, the pointee of a single-item pointer (<see cref="LowerPointee"/>), tells it
+    /// apart from every other unsupported construct without reading the message.</summary>
+    private sealed class ZigFailedContainerException(string container, string failure)
+        : IrUnsupportedException($"zig container `{container}` could not be lowered: " + failure);
 
     /// <summary>Each container of a LAZY module whose registration failed (road-to-zig-std G3), by its
     /// IR and its source name → the failure. Preparing a module registers all of its containers up front,
@@ -374,6 +382,118 @@ internal sealed partial class ZigLowering
     /// REFERENCE, the tombstone rule above applied to a container. A root unit stays eager: its own
     /// containers are the program, and one that cannot lower is an error where it stands.</summary>
     private readonly Dictionary<string, string> _failedContainers = new(System.StringComparer.Ordinal);
+
+    /// <summary>After a lazy module's containers are registered, carry each failure to the containers that
+    /// depend on it (road-to-zig-std G3). Registration runs in declaration order, so a container can
+    /// register BEFORE one it embeds fails: std's <c>File.Reader</c> holds <c>file: File</c>, and the
+    /// file-as-struct <c>File</c> fails last, on <c>handle: std.posix.fd_t</c>. To a fixpoint, a container
+    /// holding a failed one BY VALUE (a field, an array or optional of one, a by-value fn-pointer
+    /// parameter) fails too and is withdrawn from the program; a POINTER to a failed container becomes an
+    /// opaque <c>void*</c>, as <see cref="LowerPointee"/> makes it for a pointer lowered after the
+    /// failure.</summary>
+    private void FailDependentContainers(IEnumerable<string> names)
+    {
+        var candidates = names.Distinct().ToList();
+        bool changed;
+        do
+        {
+            changed = false;
+            foreach (var name in candidates)
+            {
+                if (_failedContainers.ContainsKey(name)) { continue; }
+                foreach (var agg in AggregatesOf(name))
+                {
+                    if (!_ir.StructFields.TryGetValue(agg, out var fields)) { continue; }
+                    var badField = fields.FirstOrDefault(f => WithoutFailedContainers(f.Type) is null);
+                    if (badField.Name is not { } bad || FailedContainerIn(badField.Type) is not { } dep) { continue; }
+                    var message = $"zig container `{name}` could not be lowered: its field `{bad}` holds `{dep}` by value, "
+                                  + $"and zig container `{dep}` could not be lowered: " + _failedContainers[dep];
+                    foreach (var a in AggregatesOf(name)) { _ir.WithdrawStructType(a); }
+                    var aliases = _containerTypes.Where(kv => kv.Value is CType.Named cn && cn.Name == name)
+                                                 .Select(kv => kv.Key).ToList();
+                    foreach (var n in aliases)
+                    {
+                        _containerTypes.Remove(n);
+                        _failedContainers[n] = message;
+                    }
+                    _failedContainers[name] = message;
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        while (changed);
+        // What survives may still POINT at a failed container: retype those fields to an opaque pointer.
+        foreach (var name in candidates.Where(n => !_failedContainers.ContainsKey(n)))
+        {
+            foreach (var agg in AggregatesOf(name))
+            {
+                if (!_ir.StructFields.TryGetValue(agg, out var fields)) { continue; }
+                var rewritten = fields.Select(f => f with { Type = WithoutFailedContainers(f.Type) ?? f.Type }).ToList();
+                if (!rewritten.SequenceEqual(fields)) { _ir.ReplaceStructFields(agg, rewritten); }
+            }
+        }
+    }
+
+    /// <summary>The emitted aggregates a container owns: its own struct and, for a tagged union, its
+    /// payload union.</summary>
+    private IEnumerable<string> AggregatesOf(string name)
+    {
+        yield return name;
+        if (_unions.TryGetValue(name, out var u) && u.PayloadTypeName is { } payload) { yield return payload; }
+    }
+
+    /// <summary><paramref name="t"/> with every pointer to a failed container (see
+    /// <see cref="_failedContainers"/>) made opaque (<c>void*</c>, qualifiers kept), or null when it holds
+    /// a failed container BY VALUE, which no rewrite can express.</summary>
+    private CType? WithoutFailedContainers(CType t)
+    {
+        switch (t)
+        {
+            case CType.Named n:
+                return _failedContainers.ContainsKey(n.Name) ? null : t;
+            case CType.Pointer { Pointee: CType.Named pn } p when _failedContainers.ContainsKey(pn.Name):
+                return p with { Pointee = CType.Void.WithQuals(pn.Quals) };
+            case CType.Pointer p:
+                return WithoutFailedContainers(p.Pointee) is { } pte ? p with { Pointee = pte } : null;
+            case CType.Array a:
+                return WithoutFailedContainers(a.Element) is { } ae ? a with { Element = ae } : null;
+            case CType.Optional o:
+                return WithoutFailedContainers(o.Inner) is { } oi ? o with { Inner = oi } : null;
+            case CType.Slice s:
+                return WithoutFailedContainers(s.Element) is { } se ? s with { Element = se } : null;
+            case CType.ErrorUnion eu:
+                return WithoutFailedContainers(eu.Payload) is { } ep ? eu with { Payload = ep } : null;
+            case CType.Func f:
+            {
+                if (WithoutFailedContainers(f.Return) is not { } r) { return null; }
+                var ps = new List<CType>(f.Params.Count);
+                foreach (var p in f.Params)
+                {
+                    if (WithoutFailedContainers(p) is not { } fp) { return null; }
+                    ps.Add(fp);
+                }
+                return f with { Return = r, Params = ps };
+            }
+            default:
+                return t;
+        }
+    }
+
+    /// <summary>The first failed container <paramref name="t"/> holds by value (the reason
+    /// <see cref="WithoutFailedContainers"/> returned null), for the diagnostic.</summary>
+    private string? FailedContainerIn(CType t) => t switch
+    {
+        CType.Named n => _failedContainers.ContainsKey(n.Name) ? n.Name : null,
+        CType.Pointer { Pointee: CType.Named pn } when _failedContainers.ContainsKey(pn.Name) => null,
+        CType.Pointer p => FailedContainerIn(p.Pointee),
+        CType.Array a => FailedContainerIn(a.Element),
+        CType.Optional o => FailedContainerIn(o.Inner),
+        CType.Slice s => FailedContainerIn(s.Element),
+        CType.ErrorUnion eu => FailedContainerIn(eu.Payload),
+        CType.Func f => FailedContainerIn(f.Return) ?? f.Params.Select(FailedContainerIn).FirstOrDefault(x => x is not null),
+        _ => null,
+    };
 
     /// <summary>Run one container's pass-0 registration, isolating a failure in a LAZY module (see
     /// <see cref="_failedContainers"/>): the container is withdrawn from the type table, so nothing

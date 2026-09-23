@@ -210,6 +210,27 @@ internal sealed partial class IrModule
         }
     }
 
+    /// <summary>Withdraw a registered struct / union so it is not emitted: a lazy Zig module's container
+    /// found, after registering, to hold a container that could not be lowered (road-to-zig-std G3,
+    /// <c>ZigLowering.FailDependentContainers</c>). A no-op for a name that is not registered.</summary>
+    internal void WithdrawStructType(string name)
+    {
+        if (!EmittedTypes.Remove(name)) { return; }
+        StructFields.Remove(name);
+        StructIsUnion.Remove(name);
+        PackedStructs.Remove(name);
+        Types.RemoveAll(t => t.Name == name);
+    }
+
+    /// <summary>Replace a registered struct / union's field list (same names, rewritten types) in both the
+    /// field table and the emitted type definition, keeping its position in <see cref="Types"/>.</summary>
+    internal void ReplaceStructFields(string name, List<StructField> fields)
+    {
+        StructFields[name] = fields;
+        var i = Types.FindIndex(t => t.Name == name);
+        if (i >= 0) { Types[i] = Types[i] with { Fields = fields }; }
+    }
+
     /// <summary>Register a Zig enum under <paramref name="name"/> with the given underlying
     /// integer type and members, mapping the name to its <see cref="CType.Enum"/> (so the
     /// name resolves as a real enum type) and emitting an <see cref="EnumTypeDef"/>. Returns
