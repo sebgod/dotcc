@@ -1255,13 +1255,14 @@ internal sealed partial class ZigLowering
                 {
                     if (c.Content is Zig.ConstDecl typeConst && IsTypeConstMember(typeConst.Arg3))
                     {
-                        var (memberType, _) = LowerComptimeTypeExpr(templateSym.Name, typeConst.Arg3);
+                        var (memberType, memberBits) = LowerComptimeTypeExpr(templateSym.Name, typeConst.Arg3);
                         if (!_selfAliases.TryGetValue(mangled, out var scoped))
                         {
                             scoped = new Dictionary<string, CType>(System.StringComparer.Ordinal);
                             _selfAliases[mangled] = scoped;
                         }
                         scoped[Tok(typeConst.Arg1)] = memberType;
+                        if (memberBits is { } mb) { _typeConstBits[(mangled, Tok(typeConst.Arg1))] = mb; }
                         continue;
                     }
                     valueConsts.Add(c);

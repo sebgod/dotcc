@@ -920,7 +920,9 @@ internal sealed partial class ZigLowering
             {
                 // The shape test inside the scope too: it may evaluate a member call (`Pair(u8)`).
                 if (!IsTypeConstMember(entry.Item2)) { return null; }
-                resolved = LowerComptimeTypeExpr(container, entry.Item2).Type;
+                var (lowered, bits) = LowerComptimeTypeExpr(container, entry.Item2);
+                resolved = lowered;
+                if (bits is { } b) { _typeConstBits[(container, name)] = b; }
             }
             if (!_selfAliases.TryGetValue(container, out var scoped))
             {
@@ -931,6 +933,23 @@ internal sealed partial class ZigLowering
             return resolved;
         }
         finally { _typeConstsInFlight.Remove((container, name)); }
+    }
+
+    /// <summary>The declared integer width each container TYPE const spelled (hash_map's
+    /// <c>pub const Hash = u64;</c>, Metadata's <c>const FingerPrint = u7;</c>), keyed by (container, name), so
+    /// <c>@typeInfo(FingerPrint).int.bits</c> answers 7, not the 8 of the byte it lowers to.</summary>
+    private readonly Dictionary<(string Container, string Name), int> _typeConstBits = new();
+
+    /// <summary>The declared width of the container type const <paramref name="name"/> visible from the current
+    /// container (innermost first), or null.</summary>
+    private int? ContainerTypeConstBits(string name)
+    {
+        for (var c = _currentContainer; c is not null; c = _containerParents.GetValueOrDefault(c))
+        {
+            if (_typeConstBits.TryGetValue((c, name), out var bits)) { return bits; }
+            if (_selfAliases.TryGetValue(c, out var aliases) && aliases.ContainsKey(name)) { return null; }
+        }
+        return null;
     }
 
     /// <summary>The (container, name) type consts <see cref="ResolveContainerTypeConst"/> is evaluating, so a

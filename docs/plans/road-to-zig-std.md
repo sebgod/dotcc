@@ -759,8 +759,10 @@ that retire curated shortcuts.
 >   (`const std = @import("std.zig"); const mem = std.mem;` makes `mem.Allocator` the runtime allocator).
 >   Then the GENERIC METHOD cut fell (`fetchRemoveAdapted(…, ctx: anytype)`, oracle `generic_methods`), with a
 >   type const naming a qualified one (`Size = Unmanaged.Size`) and a method body naming its container's
->   const bare (`slot_tombstone`). It stops at `@typeInfo(…).int.bits` over a value whose declared width
->   dotcc cannot prove (the fidelity rule refuses to guess).
+>   const bare (`slot_tombstone`). Then `@typeInfo(Hash).int.bits` / `@typeInfo(FingerPrint).int.bits` over
+>   container type consts (they now carry the width they spelled). It stops at `AutoContext(K)`, whose
+>   `hash` / `eql` are container CONSTS bound to closure-idiom function values (`pub const hash =
+>   getAutoHashFn(K, @This());`), called as methods.
 > - `std.mem.sort`: the closure idiom (`return struct { pub fn inner … }.inner;`) and comptime FUNCTION
 >   parameters landed, with an inline `@import(…).name` re-export, `noalias`, by-reference pair captures
 >   and `comptime { … }` prongs; then, past the value-width brick and a nested statement `switch` in

@@ -3496,6 +3496,34 @@ public sealed class ZigOracleTests
             "    const o = Order.lt.flip();\n" +
             "    return b.n + step + @as(u8, @intFromEnum(o)) * 9 + 1;\n" +
             "}\n", 42, "" },
+        // A container TYPE const carries the width it spelled into `@typeInfo(…).int.bits` (hash_map's
+        // Metadata.takeFingerprint): `Hash = u64` gives 64 and `FingerPrint = u7` gives 7, bare and qualified,
+        // not the 64 / 8 of the C# types they lower to. (64 - 7) - 57 + 127 - 127 + 42 = 42.
+        new object[] { "container_type_const_widths",
+            "fn Table(comptime K: type) type {\n" +
+            "    return struct {\n" +
+            "        k: K,\n" +
+            "        pub const Hash = u64;\n" +
+            "        const Metadata = packed struct {\n" +
+            "            const FingerPrint = u7;\n" +
+            "            fingerprint: FingerPrint = 0,\n" +
+            "            used: u1 = 0,\n" +
+            "            pub fn takeFingerprint(hash: Hash) FingerPrint {\n" +
+            "                const hash_bits = @typeInfo(Hash).int.bits;\n" +
+            "                const fp_bits = @typeInfo(FingerPrint).int.bits;\n" +
+            "                return @as(FingerPrint, @truncate(hash >> (hash_bits - fp_bits)));\n" +
+            "            }\n" +
+            "        };\n" +
+            "        pub fn bits() u8 {\n" +
+            "            return @typeInfo(Hash).int.bits - @typeInfo(Metadata.FingerPrint).int.bits;\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const T = Table(u16);\n" +
+            "    const fp = T.Metadata.takeFingerprint(0xFF00_0000_0000_0000);\n" +
+            "    return T.bits() - 57 + fp - 127 + 42;\n" +
+            "}\n", 42, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

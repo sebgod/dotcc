@@ -118,9 +118,19 @@ internal sealed partial class ZigLowering
         {
             return owner.ExportedDeclaredBits(Tok(qf.Arg2));
         }
-        return cur.Content is Zig.Ident id && _declaredIntBits.TryGetValue(Tok(id.Arg0), out var bound)
-            ? bound
-            : null;
+        // A container's type const named qualified (`Metadata.FingerPrint`): the width it spelled.
+        if (cur.Content is Zig.Field cf && MemberBaseType(cf.Arg0)?.Unqualified is CType.Named { Name: var baseContainer })
+        {
+            TryContainerTypeConst(baseContainer, Tok(cf.Arg2));   // evaluated (and its width recorded) on first use
+            return _typeConstBits.TryGetValue((baseContainer, Tok(cf.Arg2)), out var qualifiedBits) ? qualifiedBits : null;
+        }
+        if (cur.Content is Zig.Ident id)
+        {
+            if (_declaredIntBits.TryGetValue(Tok(id.Arg0), out var bound)) { return bound; }
+            // A container TYPE const (`pub const Hash = u64;` in hash_map) carries the width it spelled.
+            return ContainerTypeConstBits(Tok(id.Arg0));
+        }
+        return null;
     }
 
     /// <summary>The declared integer width each VALUE symbol's type carries where the source spelled it (a

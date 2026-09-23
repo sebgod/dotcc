@@ -139,4 +139,33 @@ public sealed class ZigContainerScopeTests
         cs.ShouldNotMatch(@"\.locked\b|locked = ");
         cs.ShouldMatch(@"void Guard_lock\(Guard\* g\)\s*\{\s*return;\s*\}");
     }
+
+    [Fact]
+    public void A_container_type_const_carries_the_width_it_spelled_into_typeInfo()
+    {
+        // hash_map's Metadata: `@typeInfo(FingerPrint).int.bits` is 7 (the spelling `u7`), not the 8 of the
+        // byte it lowers to; bare, qualified (`Metadata.FingerPrint`) and through a reified owner (`Hash`).
+        var cs = EmitZig("""
+            fn Table(comptime K: type) type {
+                return struct {
+                    k: K,
+                    pub const Hash = u64;
+                    const Metadata = packed struct {
+                        const FingerPrint = u7;
+                        fingerprint: FingerPrint = 0,
+                        pub fn fpBits() u8 { return @typeInfo(FingerPrint).int.bits; }
+                    };
+                    pub fn bits() u8 {
+                        return @typeInfo(Hash).int.bits - @typeInfo(Metadata.FingerPrint).int.bits;
+                    }
+                };
+            }
+            pub fn main() u8 {
+                const T = Table(u16);
+                return T.bits() - T.Metadata.fpBits() + 92;
+            }
+            """);
+        cs.ShouldContain("return 7;");
+        cs.ShouldContain("return (byte)(64 - 7);");
+    }
 }
