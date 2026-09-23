@@ -220,6 +220,10 @@ internal sealed partial class ZigLowering
             case Zig.TyPointer or Zig.TyPtrConst or Zig.TyCPtr or Zig.TyCPtrConst
               or Zig.TyManyPtr or Zig.TyManyPtrConst or Zig.TySentPtr or Zig.TySentPtrConst
               or Zig.TyOptional or Zig.TySlice or Zig.TySliceConst or Zig.TySentSlice or Zig.TySentSliceConst
+              or Zig.TyPointerAlign or Zig.TyPtrConstAlign or Zig.TyManyPtrAlign or Zig.TyManyPtrConstAlign
+              or Zig.TySliceAlign or Zig.TySliceConstAlign
+              or Zig.TySentSliceExpr or Zig.TySentSliceConstExpr or Zig.TySentSliceAlignExpr
+              or Zig.TySentSliceConstAlignExpr or Zig.TySentPtrExpr or Zig.TySentPtrConstExpr
               or Zig.TyArray or Zig.TySentArray or Zig.ErrUnion or Zig.TyTuple
               or Zig.TyFn or Zig.TyFnNoArgs or Zig.TyFnErr or Zig.TyFnNoArgsErr:
                 type = LowerType(rhs);
@@ -459,6 +463,21 @@ internal sealed partial class ZigLowering
         // [[CType.Slice]].
         Zig.TySlice s      => new CType.Slice(LowerType(s.Arg2)),
         Zig.TySliceConst s => new CType.Slice(LowerType(s.Arg3).WithQuals(TypeQual.Const)),
+        // The aligned forms (`*align(4) const T`, `[]align(a) T`): the same types. Alignment is not tracked
+        // (C# pointers carry none), so the `align(E)` operand is not even lowered.
+        Zig.TyPointerAlign p      => PointerTo(LowerType(p.Arg2)),
+        Zig.TyPtrConstAlign p     => PointerTo(LowerType(p.Arg3).WithQuals(TypeQual.Const)),
+        Zig.TyManyPtrAlign p      => new CType.Pointer(LowerType(p.Arg2)),
+        Zig.TyManyPtrConstAlign p => new CType.Pointer(LowerType(p.Arg3).WithQuals(TypeQual.Const)),
+        Zig.TySliceAlign s        => new CType.Slice(LowerType(s.Arg3)),
+        Zig.TySliceConstAlign s   => new CType.Slice(LowerType(s.Arg4).WithQuals(TypeQual.Const)),
+        // A general sentinel (`[:s]T`, `[*:null]T`), erased in the type exactly as `[:0]`'s is.
+        Zig.TySentSliceExpr s           => new CType.Slice(LowerType(s.Arg4)),
+        Zig.TySentSliceConstExpr s      => new CType.Slice(LowerType(s.Arg5).WithQuals(TypeQual.Const)),
+        Zig.TySentSliceAlignExpr s      => new CType.Slice(LowerType(s.Arg5)),
+        Zig.TySentSliceConstAlignExpr s => new CType.Slice(LowerType(s.Arg6).WithQuals(TypeQual.Const)),
+        Zig.TySentPtrExpr p             => new CType.Pointer(LowerType(p.Arg5)),
+        Zig.TySentPtrConstExpr p        => new CType.Pointer(LowerType(p.Arg6).WithQuals(TypeQual.Const)),
         // Sentinel-terminated types (Milestone O, part 3 — the C-string shape; V1 sentinel = 0).
         // `[*:0]T` is a NUL-terminated many-item pointer (C's `char*`) → a bare `T*`, like `[*]`;
         // `[:0]T` is a NUL-terminated slice → CType.Slice, like `[]T`. The sentinel is a type-level
@@ -533,6 +552,10 @@ internal sealed partial class ZigLowering
         Zig.InlineStructType ist       => ReifyInlineStruct(type, ist.Arg2),
         Zig.InlineEnumType iet         => ReifyInlineEnum(type, iet.Arg2),
         Zig.InlineStructTypeEmpty      => ReifyInlineStruct(type, null),
+        // A call in a type position that no case above could evaluate: name the callee and where it is
+        // written, since "CallArgs" alone gave no way to find which of a std module's calls it was.
+        Zig.CallArgs uca => throw UnevaluatedTypeCall(uca.Arg0),
+        Zig.CallNoArgs ucn => throw UnevaluatedTypeCall(ucn.Arg0),
         _ => throw new IrUnsupportedException("zig type: " + (type.Content?.GetType().Name ?? "null")),
     };
 
@@ -564,6 +587,27 @@ internal sealed partial class ZigLowering
         }
         RegisterStruct(name, fields);
         return new CType.Named(name);
+    }
+
+    /// <summary>The error for a call in a type position that is not a type-returning generic dotcc could
+    /// evaluate, naming the callee's dotted spelling and its file and line.</summary>
+    private IrUnsupportedException UnevaluatedTypeCall(Item callee)
+    {
+        static string Spell(Item e) => e.Content switch
+        {
+            Zig.Ident id => Tok(id.Arg0),
+            Zig.Field f => Spell(f.Arg0) + "." + Tok(f.Arg2),
+            _ => e.Content?.GetType().Name ?? "?",
+        };
+        static int Line(Item e) => e.Content switch
+        {
+            Zig.Ident id => id.Arg0.Position.Line,
+            Zig.Field f => Line(f.Arg0),
+            _ => 0,
+        };
+        return new IrUnsupportedException(
+            $"zig type: `{Spell(callee)}(…)` in a type position is not a type-returning generic dotcc could "
+            + $"evaluate ({_fileStem ?? "?"}.zig line {Line(callee)})");
     }
 
     /// <summary>The enum twin of <see cref="ReifyInlineStruct"/>: an anonymous <c>enum { pos, neg }</c> in a

@@ -292,7 +292,7 @@ internal sealed class ZigModuleGraph
         var sync = new HashSet<int>
         {
             Id("fn"), Id("pub"), Id("const"), Id("var"), Id("extern"),
-            Id("export"), Id("comptime"), Id("threadlocal"), Id("test"), Id("IDENT"),
+            Id("export"), Id("comptime"), Id("threadlocal"), Id("test"), Id("IDENT"), Id("inline"),
         };
         var open = new HashSet<int> { Id("{"), Id("("), Id("[") };
         var close = new HashSet<int> { Id("}"), Id(")"), Id("]") };

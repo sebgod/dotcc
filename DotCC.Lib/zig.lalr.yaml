@@ -260,6 +260,9 @@ symbols:
                    #     `catch return` keeps its own productions, so `return` lives only here)
   - Arg            # 168 one call ARGUMENT: an Expr, or `{}` the void value (std passes it 108 times, the
                    #     `context: void` of std.sort). Kept out of Expr so `{` never competes with a Block.
+  - PtrAlign       # 169 `align(E)` inside a pointer / slice type (`*align(4) const T`, `[]align(a) T`):
+                   #     561 uses in std, 548 of them the six shapes below. Parsed, and not tracked: C#
+                   #     pointers carry no alignment, as `align` on a declaration is already a no-op.
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -276,6 +279,10 @@ productions:
     rules:
       - { lhs: Decl, rhs: [FnDef] }
       - { lhs: Decl, rhs: ['pub', FnDef],  action: pubFn }
+      # `inline fn` / `pub inline fn` (379 in std; `math.maxInt` is one). A hint to the optimizer that
+      # lowers as an ordinary function. `inline` starts no other declaration, so it is a clean shift.
+      - { lhs: Decl, rhs: ['inline', FnDef],        action: inlineFn }
+      - { lhs: Decl, rhs: ['pub', 'inline', FnDef], action: pubInlineFn }
       - { lhs: Decl, rhs: [VarDecl] }
       - { lhs: Decl, rhs: ['pub', VarDecl], action: pubVar }
       # `export fn` / `pub export fn` (Milestone R, part 4) — force C-ABI external linkage. dotcc
@@ -981,6 +988,24 @@ productions:
       # `[]const T` — a const slice. The `const` after `]` is unambiguous (no Type starts
       # with a bare `const`), so it stays conflict-free against `[]T` / `[Expr]T`.
       - { lhs: Type, rhs: ['[', ']', 'const', Type], action: tySliceConst }
+      # The same pointer / slice forms with an alignment (`PtrAlign`, symbol 169). `align` is a keyword,
+      # outside FIRST(Type), so after `*` / `[*]` / `[ ]` it is a 1-token shift decision.
+      - { lhs: Type, rhs: ['*', PtrAlign, Type],                action: tyPointerAlign }
+      - { lhs: Type, rhs: ['*', PtrAlign, 'const', Type],       action: tyPtrConstAlign }
+      - { lhs: Type, rhs: ['[*]', PtrAlign, Type],              action: tyManyPtrAlign }
+      - { lhs: Type, rhs: ['[*]', PtrAlign, 'const', Type],     action: tyManyPtrConstAlign }
+      - { lhs: Type, rhs: ['[', ']', PtrAlign, Type],           action: tySliceAlign }
+      - { lhs: Type, rhs: ['[', ']', PtrAlign, 'const', Type],  action: tySliceConstAlign }
+      # A GENERAL sentinel (`[:s]T`, `[:sentinel]const T`, `[*:null]T`; 77 uses in std, Aligned's
+      # SentinelSlice among them). `[:0]` / `[*:0]` stay their own single tokens; any other sentinel
+      # lexes as `[` `:` Expr `]`, and `:` is outside FIRST(Expr) and `]`, so after `[` (or `[` `*`)
+      # it is a 1-token shift decision. The sentinel is erased in the type, exactly as `[:0]`'s is.
+      - { lhs: Type, rhs: ['[', ':', Expr, ']', Type],                     action: tySentSliceExpr }
+      - { lhs: Type, rhs: ['[', ':', Expr, ']', 'const', Type],            action: tySentSliceConstExpr }
+      - { lhs: Type, rhs: ['[', ':', Expr, ']', PtrAlign, Type],           action: tySentSliceAlignExpr }
+      - { lhs: Type, rhs: ['[', ':', Expr, ']', PtrAlign, 'const', Type],  action: tySentSliceConstAlignExpr }
+      - { lhs: Type, rhs: ['[', '*', ':', Expr, ']', Type],                action: tySentPtrExpr }
+      - { lhs: Type, rhs: ['[', '*', ':', Expr, ']', 'const', Type],       action: tySentPtrConstExpr }
       - { lhs: Type, rhs: ['[', Expr, ']', Type], action: tyArray }
       # `[N:0]T` sentinel-terminated array (Milestone O, part 4) — N+1 elements of storage (the
       # trailing slot holds the sentinel 0), logical length N. Conflict-free against `tyArray`:
@@ -1084,6 +1109,10 @@ productions:
       # Expr-start) selects this production. Valid only on a known-length source (slice
       # or array); a bare pointer has no length (rejected in lowering, as Zig does).
       - { lhs: Suffix, rhs: [Suffix, '[', Expr, '..', ']'], action: sliceOpen }
+      # Sentinel-terminated slicing `a[lo .. hi :s]` / `a[lo .. :s]` (73 in std; array_list's
+      # toOwnedSliceSentinel). `:` follows no Expr anywhere else, so it is a 1-token shift decision.
+      - { lhs: Suffix, rhs: [Suffix, '[', Expr, '..', Expr, ':', Expr, ']'], action: sliceRangeSentinel }
+      - { lhs: Suffix, rhs: [Suffix, '[', Expr, '..', ':', Expr, ']'],       action: sliceOpenSentinel }
       - { lhs: Suffix, rhs: [Suffix, '(', ArgList, ')'], action: callArgs }
       - { lhs: Suffix, rhs: [Suffix, '(', ')'],          action: callNoArgs }
       - { lhs: Suffix, rhs: [Primary] }
@@ -1141,10 +1170,17 @@ productions:
     rules:
       - { lhs: ArgList, rhs: [Arg, ',', ArgList], action: argsCons }
       - { lhs: ArgList, rhs: [Arg],                action: argsOne }
+      # A trailing comma (`f(a, b,)`, zig fmt's layout for every multi-line call). Right
+      # recursion makes it clean: after `Arg ','`, a `)` reduces here and anything else starts an Arg.
+      - { lhs: ArgList, rhs: [Arg, ','],           action: argsTrail }
 
   # A call argument (symbol 168): an ordinary Expr (a transparent pass-through, so every existing
   # argument lowers unchanged) or `{}`, zig's void value. `{` is not in FIRST(Expr), so the choice is a
   # 1-token shift decision.
+  - derivation: none
+    rules:
+      - { lhs: PtrAlign, rhs: ['align', '(', Expr, ')'], action: ptrAlign }
+
   - derivation: none
     rules:
       - { lhs: Arg, rhs: [Expr] }
@@ -1247,6 +1283,8 @@ productions:
       - { lhs: Member, rhs: [FieldDecl],       action: memberFieldLast }
       - { lhs: Member, rhs: [FnDef],           action: memberMethod }
       - { lhs: Member, rhs: ['pub', FnDef],    action: memberPubMethod }
+      - { lhs: Member, rhs: ['inline', FnDef],        action: memberInlineMethod }
+      - { lhs: Member, rhs: ['pub', 'inline', FnDef], action: memberPubInlineMethod }
       # A container-level `const` member, reusing the existing VarDecl nonterminal. V1 lowers only
       # the ubiquitous self-type alias `const Self = @This();` (any alias name; RHS `@This()`) —
       # naming the container type inside its own methods without repeating it; a non-`@This()`
@@ -1299,6 +1337,8 @@ productions:
       - { lhs: EnumMember, rhs: [EnumField],       action: enumMemberFieldLast }
       - { lhs: EnumMember, rhs: [FnDef],           action: enumMemberMethod }
       - { lhs: EnumMember, rhs: ['pub', FnDef],    action: enumMemberPubMethod }
+      - { lhs: EnumMember, rhs: ['inline', FnDef],        action: enumMemberInlineMethod }
+      - { lhs: EnumMember, rhs: ['pub', 'inline', FnDef], action: enumMemberPubInlineMethod }
       - { lhs: EnumMember, rhs: [VarDecl],         action: enumMemberConst }
       - { lhs: EnumMember, rhs: ['pub', VarDecl],  action: enumMemberPubConst }
       # Nested container decl inside an enum body (road-to-zig-std S9) — same const-led
@@ -1331,6 +1371,8 @@ productions:
       - { lhs: UnionMember, rhs: [UnionVariant],       action: unionMemberVariantLast }
       - { lhs: UnionMember, rhs: [FnDef],              action: unionMemberMethod }
       - { lhs: UnionMember, rhs: ['pub', FnDef],       action: unionMemberPubMethod }
+      - { lhs: UnionMember, rhs: ['inline', FnDef],        action: unionMemberInlineMethod }
+      - { lhs: UnionMember, rhs: ['pub', 'inline', FnDef], action: unionMemberPubInlineMethod }
       - { lhs: UnionMember, rhs: [VarDecl],            action: unionMemberConst }
       - { lhs: UnionMember, rhs: ['pub', VarDecl],     action: unionMemberPubConst }
       # Nested container decl inside a union body (road-to-zig-std S9) — same const-led

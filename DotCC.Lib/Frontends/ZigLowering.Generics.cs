@@ -568,6 +568,18 @@ internal sealed partial class ZigLowering
             RecordTypeCallBits(maybeCall, localBits);
             return true;
         }
+        // A SIBLING in a lazy module that is not declared yet (hash_map.zig's `AutoHashMap` body calls
+        // `HashMap(…)`), or a re-export of a type-returning generic: declare it on demand in whichever
+        // module owns it, and evaluate it there (a skipped declaration raises its parse error instead).
+        if (calleeItem.Content is Zig.Ident sid
+            && _symbols.Resolve(Tok(sid.Arg0)) is null
+            && ResolveExportedDecl(Tok(sid.Arg0)) is { Owner: var owner, Sym: var siblingSym }
+            && owner._typeReturningGenerics.TryGetValue(siblingSym, out var siblingInfo))
+        {
+            type = owner.EvalTypeReturningCall(siblingSym, siblingInfo, args, out var siblingBits, typeArgScope: this);
+            RecordTypeCallBits(maybeCall, siblingBits);
+            return true;
+        }
         // A MODULE-QUALIFIED callee (`array_list.Aligned(u8)`, `std.array_list.Aligned(u8)`) — the
         // type-position half of module-graph navigation (road-to-zig-std S4d). The template lives in the
         // imported module, so the reification runs THERE (its body's types resolve in its own

@@ -486,6 +486,14 @@ internal sealed partial class ZigLowering
             case Zig.SliceOpen so:
                 return BuildSlice(LowerExpr(so.Arg0), LowerExpr(so.Arg2), null);
 
+            // Sentinel-terminated slicing `a[lo .. hi :s]` / `a[lo .. :s]`: the same slice, since a
+            // sentinel is erased in the type (as `[:0]T`'s is). zig asserts `a[hi] == s` only in a SAFE
+            // build mode, and dotcc reports `.ReleaseFast`, so the check is not emitted.
+            case Zig.SliceRangeSentinel srs:
+                return BuildSlice(LowerExpr(srs.Arg0), LowerExpr(srs.Arg2), LowerExpr(srs.Arg4));
+            case Zig.SliceOpenSentinel sos:
+                return BuildSlice(LowerExpr(sos.Arg0), LowerExpr(sos.Arg2), null);
+
             // `.?` optional unwrap. A value optional (CType.Optional → C# `T?`) unwraps via
             // `.Value` (panics on none, matching Zig's `.?`-on-null). An optional POINTER is
             // a bare `T*`, so unwrapping is the identity (the non-null pointer is the same

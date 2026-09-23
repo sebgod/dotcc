@@ -1631,6 +1631,8 @@ internal sealed partial class ZigLowering
     private static Item Unwrap(Item decl) => decl.Content switch
     {
         Zig.PubFn p         => p.Arg1,   // `pub FnDef`
+        Zig.InlineFn i      => i.Arg1,   // `inline FnDef` (an optimizer hint; lowers as a plain fn)
+        Zig.PubInlineFn pi  => pi.Arg2,  // `pub inline FnDef`
         Zig.ExportFn e      => e.Arg1,   // `export FnDef` (Milestone R)
         Zig.PubExportFn pe  => pe.Arg2,  // `pub export FnDef` (Milestone R)
         Zig.PubVar p        => p.Arg1,   // `pub VarDecl` (exported/public data)
@@ -1667,6 +1669,7 @@ internal sealed partial class ZigLowering
                 case Zig.ParamsTrail t: stack.Push(t.Arg0); break;  // [Param, ','] trailing comma
                 case Zig.ArgsCons c:   stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [Expr, ',', ArgList]
                 case Zig.ArgsOne o:    stack.Push(o.Arg0); break;
+                case Zig.ArgsTrail t:  stack.Push(t.Arg0); break;  // [Arg, ','] trailing comma
                 case Zig.ProngsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [Prongs, ',', Prong] (left-recursive)
                 case Zig.ProngsOne o:  stack.Push(o.Arg0); break;
                 case Zig.CaseValsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [Expr, ',', CaseVals]

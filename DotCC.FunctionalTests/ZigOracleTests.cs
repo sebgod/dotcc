@@ -2906,6 +2906,31 @@ public sealed class ZigOracleTests
             "    const v = {};\n" +
             "    return hits + larger(v, 2, 1, &lessThan) + larger(unit, 0, 20, &lessThan);\n" +
             "}\n", 42, "" },
+        // The parse gaps that kept std.array_list.Aligned from parsing (road-to-zig-std S9/G4): `inline fn`
+        // (top level and member), a general sentinel in a type and a slicing expression (zig's Debug mode
+        // checks `buf[2] == 3`), `align(E)` pointer / slice types, a trailing comma in a call.
+        // (40 + 2) + 3 - 3 = 42.
+        new object[] { "std_parse_bricks",
+            "const Box = struct {\n" +
+            "    v: u8,\n" +
+            "    pub inline fn get(self: Box) u8 {\n" +
+            "        return self.v;\n" +
+            "    }\n" +
+            "};\n" +
+            "inline fn add(a: u8, b: u8) u8 {\n" +
+            "    return a + b;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const buf = [_]u8{ 40, 2, 3 };\n" +
+            "    const s: [:3]const u8 = buf[0..2 :3];\n" +
+            "    const p: *align(1) const u8 = &buf[1];\n" +
+            "    const all: []align(1) const u8 = &buf;\n" +
+            "    const b = Box{ .v = add(\n" +
+            "        s[0],\n" +
+            "        p.*,\n" +
+            "    ) };\n" +
+            "    return b.get() + @as(u8, @intCast(all.len)) - 3;\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

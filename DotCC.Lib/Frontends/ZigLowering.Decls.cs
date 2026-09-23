@@ -528,6 +528,8 @@ internal sealed partial class ZigLowering
                 case Zig.MemberFieldLast mf: fields.Add(mf.Arg0); break;       // FieldDecl       → StructField
                 case Zig.MemberMethod mm:    methods.Add(mm.Arg0); break;      // FnDef
                 case Zig.MemberPubMethod mm: methods.Add(mm.Arg1); break;      // 'pub' FnDef
+                case Zig.MemberInlineMethod mm:    methods.Add(mm.Arg1); break; // 'inline' FnDef
+                case Zig.MemberPubInlineMethod mm: methods.Add(mm.Arg2); break; // 'pub' 'inline' FnDef
                 case Zig.MemberConst mc:     consts.Add(mc.Arg0); break;       // VarDecl
                 case Zig.MemberPubConst mc:  consts.Add(mc.Arg1); break;       // 'pub' VarDecl
                 case Zig.MemberContainer cc:    containers.Add(cc.Arg0); break; // ContainerDecl
@@ -555,6 +557,8 @@ internal sealed partial class ZigLowering
                 case Zig.EnumMemberFieldLast mf: fields.Add(mf.Arg0); break;   // EnumField
                 case Zig.EnumMemberMethod mm:    methods.Add(mm.Arg0); break;  // FnDef
                 case Zig.EnumMemberPubMethod mm: methods.Add(mm.Arg1); break;  // 'pub' FnDef
+                case Zig.EnumMemberInlineMethod mm:    methods.Add(mm.Arg1); break;  // 'inline' FnDef
+                case Zig.EnumMemberPubInlineMethod mm: methods.Add(mm.Arg2); break;  // 'pub' 'inline' FnDef
                 case Zig.EnumMemberConst mc:     consts.Add(mc.Arg0); break;   // VarDecl
                 case Zig.EnumMemberPubConst mc:  consts.Add(mc.Arg1); break;   // 'pub' VarDecl
                 default: throw new IrUnsupportedException("zig enum member: " + (m.Content?.GetType().Name ?? "null"));
@@ -580,6 +584,8 @@ internal sealed partial class ZigLowering
                 case Zig.UnionMemberVariantLast mv: variants.Add(mv.Arg0); break;   // UnionVariant
                 case Zig.UnionMemberMethod mm:      methods.Add(mm.Arg0); break;    // FnDef
                 case Zig.UnionMemberPubMethod mm:   methods.Add(mm.Arg1); break;    // 'pub' FnDef
+                case Zig.UnionMemberInlineMethod mm:    methods.Add(mm.Arg1); break;    // 'inline' FnDef
+                case Zig.UnionMemberPubInlineMethod mm: methods.Add(mm.Arg2); break;    // 'pub' 'inline' FnDef
                 case Zig.UnionMemberConst mc:       consts.Add(mc.Arg0); break;     // VarDecl
                 case Zig.UnionMemberPubConst mc:    consts.Add(mc.Arg1); break;     // 'pub' VarDecl
                 default: throw new IrUnsupportedException("zig union member: " + (m.Content?.GetType().Name ?? "null"));
