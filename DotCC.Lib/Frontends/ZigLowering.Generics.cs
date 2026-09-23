@@ -823,8 +823,10 @@ internal sealed partial class ZigLowering
     /// generic (which emits a specialized runtime BODY), a type-returning function is a COMPTIME type
     /// constructor — it emits no runtime code; a call in a type position REIFIES a fresh struct per
     /// resolved type argument (<c>Pair__i32</c>, memoized). Carries the template symbol, its
-    /// (all-comptime-TYPE) params, and the raw body AST (a single <c>return struct {…}</c>).</summary>
-    private readonly record struct TypeReturningGenericInfo(Symbol Template, IReadOnlyList<ParamInfo> Params, Item Body);
+    /// (all-comptime-TYPE) params, and the raw body AST (a single <c>return struct {…}</c>). A container
+    /// MEMBER carries its <c>Owner</c> container, whose scope and comptime seeds its body is evaluated in.</summary>
+    private readonly record struct TypeReturningGenericInfo(Symbol Template, IReadOnlyList<ParamInfo> Params, Item Body,
+        string? Owner = null);
 
     /// <summary>Type-returning generic function symbols → their retained template (wall-plan W4).
     /// Populated in pass 1 (<see cref="DeclareFn"/>); a call to one in a type position (or a type-alias
@@ -857,6 +859,15 @@ internal sealed partial class ZigLowering
             RecordTypeCallBits(maybeCall, localBits);
             return true;
         }
+        // A type-returning METHOD: named bare inside its container or one it encloses (hash_map's
+        // `FieldIterator(K)`), or through a container type (`Self.SentinelSlice(s)`).
+        if (TypeReturningMethodCallee(calleeItem) is { } methodSym
+            && _typeReturningGenerics.TryGetValue(methodSym, out var methodInfo))
+        {
+            type = EvalTypeReturningCall(methodSym, methodInfo, args, out var methodBits);
+            RecordTypeCallBits(maybeCall, methodBits);
+            return true;
+        }
         // A SIBLING in a lazy module that is not declared yet (hash_map.zig's `AutoHashMap` body calls
         // `HashMap(…)`), or a re-export of a type-returning generic: declare it on demand in whichever
         // module owns it, and evaluate it there (a skipped declaration raises its parse error instead).
@@ -884,6 +895,54 @@ internal sealed partial class ZigLowering
             return true;
         }
         return false;
+    }
+
+    /// <summary>The type-returning METHOD a call's callee names, or null: a bare name found in
+    /// <see cref="_methods"/> of the current container or any lexically enclosing one, or
+    /// <c>Container.name</c> through a container type (a self alias included).</summary>
+    private Symbol? TypeReturningMethodCallee(Item callee)
+    {
+        switch (callee.Content)
+        {
+            case Zig.Ident id when _symbols.Resolve(Tok(id.Arg0)) is null:
+                for (var c = _currentContainer; c is not null; c = _containerParents.GetValueOrDefault(c))
+                {
+                    if (_methods.TryGetValue(c, out var ms) && ms.TryGetValue(Tok(id.Arg0), out var s)
+                        && _typeReturningGenerics.ContainsKey(s))
+                    {
+                        return s;
+                    }
+                }
+                return null;
+            case Zig.Field f when MemberBaseType(f.Arg0)?.Unqualified is CType.Named n:
+                return _methods.TryGetValue(n.Name, out var owned) && owned.TryGetValue(Tok(f.Arg2), out var m)
+                    && _typeReturningGenerics.ContainsKey(m)
+                    ? m
+                    : null;
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>The container type a member access is made through, when its base spells one: a name
+    /// (<c>Self</c>, <c>Shapes</c>), a type call (<c>Box(u16).Elem()</c>) or a qualified nested type; else null.</summary>
+    private CType? MemberBaseType(Item baseItem) => baseItem.Content switch
+    {
+        Zig.Ident id => TryLookupContainerType(Tok(id.Arg0), out var ct) ? ct : null,
+        Zig.CallArgs or Zig.CallNoArgs => TryEvalTypeReturningCall(baseItem, out var called) ? called : null,
+        Zig.Field => TryResolveQualifiedNestedType(baseItem),
+        _ => null,
+    };
+
+    /// <summary>The container whose recorded comptime seeds a member of <paramref name="container"/> sees:
+    /// the nearest reified instance on its lexical parent chain, or null.</summary>
+    private string? ReifiedAncestor(string container)
+    {
+        for (string? c = container; c is not null; c = _containerParents.GetValueOrDefault(c))
+        {
+            if (_reifiedSeeds.ContainsKey(c)) { return c; }
+        }
+        return null;
     }
 
     /// <summary>Reify a type-returning generic THIS module exports, called from
@@ -945,6 +1004,11 @@ internal sealed partial class ZigLowering
         // local call, the CALLER's when the template was reached through the module graph (S4d) — the
         // arguments are spelled at the call site, so they resolve there.
         var argScope = typeArgScope ?? this;
+        // A type-returning METHOD evaluates in its owner's scope, with the owner's comptime seeds live: the
+        // body of hash_map's `FieldIterator` names the instance's `Metadata`, and its arguments name `K`.
+        var ownerSeedsKey = info.Owner is { } ownerName ? ReifiedAncestor(ownerName) : null;
+        using var ownerSeedScope = EnterReifiedSeeds(ownerSeedsKey ?? "");
+        using var ownerScope = EnterContainer(info.Owner ?? _currentContainer);
         if (argItems.Count != info.Params.Count)
         {
             throw new IrUnsupportedException(
@@ -1036,7 +1100,8 @@ internal sealed partial class ZigLowering
                 }
             }
             // Module-qualified in an imported module: two modules may each declare a `fn Box(comptime T)`.
-            var baseName = QualifyTypeName(templateSym.Name);
+            // (A member's template name already carries its owner's, which is qualified.)
+            var baseName = info.Owner is not null ? templateSym.Name : QualifyTypeName(templateSym.Name);
             var mangled = mangleTokens.Count == 0 ? baseName : baseName + "__" + string.Join("_", mangleTokens);
 
             // Memoized — also short-circuits a self-referential field / recursive use, since the mapping is
@@ -1097,6 +1162,18 @@ internal sealed partial class ZigLowering
                     ? SplitMembers(m)
                     : (new List<Item>(), new List<Item>(), new List<Item>(), new List<Item>());
                 _containerTypes[mangled] = mangledType;   // memo + @This() target; BEFORE reify for self-ref
+                if (info.Owner is { } lexicalOwner)
+                {
+                    // A method-made instance is lexically inside its owner (it sees the owner's nested types),
+                    // and its deferred bodies re-enter the owner's seeds too, its own LAST so they win a clash.
+                    _containerParents[mangled] = lexicalOwner;
+                    if (ownerSeedsKey is { } osk && _reifiedSeeds.TryGetValue(osk, out var os))
+                    {
+                        typeSeeds = [.. os.Types, .. typeSeeds];
+                        valueSeeds = [.. os.Values, .. valueSeeds];
+                        optionalSeeds = [.. os.Optionals, .. optionalSeeds];
+                    }
+                }
                 _reifiedSeeds[mangled] = (typeSeeds, valueSeeds, optionalSeeds);
                 _currentContainer = mangled;
                 // TYPE const members (`pub const Slice = if (alignment) |a| … else []T;` in Aligned,
@@ -1104,6 +1181,22 @@ internal sealed partial class ZigLowering
                 // this instantiation's comptime seeds are live, into aliases scoped to the mangled container
                 // (the `const Self = @This();` map), so a FIELD typed by one (`items: Slice`) resolves.
                 // Every other const stays a lazily-lowered value const.
+                // NESTED containers (hash_map's `pub const Entry = struct {…};`, `Iterator`, … inside Custom's
+                // returned struct): flattened to `<mangled>__Name` and scoped to the instance, exactly as pass 0
+                // flattens a module's, with this instance's seeds live (their fields may be typed `K` / `V`); their
+                // methods are deferred with the seeds like the instance's own. NAMED first, before any type const
+                // that uses one (`FieldIterator(K)` reifies a struct whose field points at `Mark`); laid out after
+                // the type consts, and before the instance's own fields.
+                var nestedDecls = CollectNestedContainers(mangled, containers);
+                var nestedMethods = new List<(string container, Item fnDef)>();
+                foreach (var (nName, nContent, nParent) in nestedDecls)
+                {
+                    RegisterContainerName(nName, nContent, nestedMethods);
+                    ScopeNestedContainer(nName, nContent, nParent);
+                }
+                _currentContainer = mangled;
+                // TYPE-returning member functions first: a type const may call one (`KeyIterator = FieldIterator(K)`).
+                methods = DeclareTypeReturningMembers(mangled, methods);
                 var valueConsts = new List<Item>();
                 foreach (var c in consts)
                 {
@@ -1121,18 +1214,7 @@ internal sealed partial class ZigLowering
                     valueConsts.Add(c);
                 }
                 consts = valueConsts;
-                // NESTED containers (hash_map's `pub const Entry = struct {…};`, `Iterator`, … inside Custom's
-                // returned struct): flattened to `<mangled>__Name` and scoped to the instance, exactly as pass 0
-                // flattens a module's, with this instance's seeds live (their fields may be typed `K` / `V`); their
-                // methods are deferred with the seeds like the instance's own. Named before any field or type
-                // const that uses them, laid out before the instance's own fields.
-                var nestedDecls = CollectNestedContainers(mangled, containers);
-                var nestedMethods = new List<(string container, Item fnDef)>();
-                foreach (var (nName, nContent, nParent) in nestedDecls)
-                {
-                    RegisterContainerName(nName, nContent, nestedMethods);
-                    ScopeNestedContainer(nName, nContent, nParent);
-                }
+                // Their bodies: after the type consts, which a nested field may name (`index: Size`).
                 foreach (var (nName, nContent, _) in nestedDecls)
                 {
                     RegisterContainerBody(nName, nContent, nestedMethods);

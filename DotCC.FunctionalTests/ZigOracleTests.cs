@@ -3289,6 +3289,70 @@ public sealed class ZigOracleTests
             "    o.lock();\n" +
             "    return before + after + @as(u8, @intFromEnum(l.state)) + @as(u8, @intFromEnum(o.state));\n" +
             "}\n", 42, "" },
+        // A TYPE-returning container member (road-to-zig-std G4, hash_map's FieldIterator): reached through
+        // type consts (`KeyIterator = FieldIterator(K)`) and through `Self.FieldIterator(K)`, reified per owner
+        // instance and argument, evaluated with the owner's seeds live, and the struct it makes walks the
+        // owner's nested `Mark` through a many-pointer. Used entries: 10 + 12 + 1 + 3 = 26, + 16 = 42.
+        new object[] { "type_returning_methods",
+            "fn Table(comptime K: type, comptime V: type) type {\n" +
+            "    return struct {\n" +
+            "        keys: [3]K,\n" +
+            "        values: [3]V,\n" +
+            "        marks: [3]Mark,\n" +
+            "        const Self = @This();\n" +
+            "        const Mark = struct {\n" +
+            "            used: bool,\n" +
+            "            pub fn isUsed(m: Mark) bool {\n" +
+            "                return m.used;\n" +
+            "            }\n" +
+            "        };\n" +
+            "        pub const KeyIterator = FieldIterator(K);\n" +
+            "        pub const ValueIterator = FieldIterator(V);\n" +
+            "        fn FieldIterator(comptime T: type) type {\n" +
+            "            return struct {\n" +
+            "                len: usize,\n" +
+            "                marks: [*]const Mark,\n" +
+            "                items: [*]const T,\n" +
+            "                pub fn next(self: *@This()) ?T {\n" +
+            "                    while (self.len > 0) {\n" +
+            "                        self.len -= 1;\n" +
+            "                        const used = self.marks[0].isUsed();\n" +
+            "                        const item = self.items[0];\n" +
+            "                        self.marks += 1;\n" +
+            "                        self.items += 1;\n" +
+            "                        if (used) {\n" +
+            "                            return item;\n" +
+            "                        }\n" +
+            "                    }\n" +
+            "                    return null;\n" +
+            "                }\n" +
+            "            };\n" +
+            "        }\n" +
+            "        pub fn valueIterator(self: *const Self) ValueIterator {\n" +
+            "            return .{ .len = 3, .marks = self.marks[0..].ptr, .items = self.values[0..].ptr };\n" +
+            "        }\n" +
+            "        pub fn keyIterator(self: *const Self) Self.FieldIterator(K) {\n" +
+            "            return .{ .len = 3, .marks = self.marks[0..].ptr, .items = self.keys[0..].ptr };\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var t: Table(u16, u8) = undefined;\n" +
+            "    const keys = [3]u16{ 1, 2, 3 };\n" +
+            "    const values = [3]u8{ 10, 20, 12 };\n" +
+            "    const used = [3]bool{ true, false, true };\n" +
+            "    for (0..3) |i| {\n" +
+            "        t.keys[i] = keys[i];\n" +
+            "        t.values[i] = values[i];\n" +
+            "        t.marks[i] = .{ .used = used[i] };\n" +
+            "    }\n" +
+            "    var sum: u16 = 0;\n" +
+            "    var vit = t.valueIterator();\n" +
+            "    while (vit.next()) |v| sum += v;\n" +
+            "    var kit = t.keyIterator();\n" +
+            "    while (kit.next()) |k| sum += k;\n" +
+            "    return @intCast(sum + 16);\n" +
+            "}\n", 42, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

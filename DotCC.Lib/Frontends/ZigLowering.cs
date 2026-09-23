@@ -755,6 +755,15 @@ internal sealed partial class ZigLowering
     /// <para>A ROOT unit's name is qualified too when it is one the runtime declares
     /// (<see cref="RuntimeTypeNames"/> — <c>const Allocator = struct {…}</c> would otherwise emit a second
     /// C# <c>Allocator</c> and fail to build): <c>root__Allocator</c>.</para></summary>
+    /// <summary>True when an import spec, read relative to this module's directory, names the configured
+    /// std ROOT (<c>std.zig</c> itself, as std's own files import it).</summary>
+    private bool IsStdRootSpec(string spec)
+    {
+        if (_moduleGraph?.StdRootPath is not { } stdRoot || _importerDir is null) { return false; }
+        var full = System.IO.Path.GetFullPath(System.IO.Path.IsPathRooted(spec) ? spec : System.IO.Path.Combine(_importerDir, spec));
+        return string.Equals(full, System.IO.Path.GetFullPath(stdRoot), System.StringComparison.OrdinalIgnoreCase);
+    }
+
     private string QualifyTypeName(string name) => _modulePrefix is { } p
         ? $"{p}__{name}"
         : RuntimeTypeNames.IsReserved(name) ? $"root__{name}" : name;
@@ -1714,7 +1723,8 @@ internal sealed partial class ZigLowering
             {
                 case Zig.StructDecl s:      // const IDENT = struct { Members } ;
                 {
-                    var (fields, fnDefs, consts, _) = SplitMembers(s.Arg5);
+                    var (fields, allFns, consts, _) = SplitMembers(s.Arg5);
+                    var fnDefs = DeclareTypeReturningMembers(name, allFns);
                     RegisterContainerConsts(name, consts);   // first: a field may be typed by a type const
                     RegisterStruct(name, fields);
                     foreach (var m in fnDefs) { methods.Add((name, m)); }
@@ -1723,7 +1733,8 @@ internal sealed partial class ZigLowering
                 case Zig.StructDeclEmpty: RegisterStruct(name, System.Array.Empty<Item>()); break;  // const IDENT = struct { } ;
                 case Zig.ExternStructDecl s:  // const IDENT = extern struct { Members } ;
                 {
-                    var (fields, fnDefs, consts, _) = SplitMembers(s.Arg6);
+                    var (fields, allFns, consts, _) = SplitMembers(s.Arg6);
+                    var fnDefs = DeclareTypeReturningMembers(name, allFns);
                     RegisterContainerConsts(name, consts);   // first: a field may be typed by a type const
                     RegisterStruct(name, fields, AggregateLayout.Sequential);
                     foreach (var m in fnDefs) { methods.Add((name, m)); }
@@ -1731,7 +1742,8 @@ internal sealed partial class ZigLowering
                 }
                 case Zig.PackedStructDecl s:  // const IDENT = packed struct { Members } ;
                 {
-                    var (fields, fnDefs, consts, _) = SplitMembers(s.Arg6);
+                    var (fields, allFns, consts, _) = SplitMembers(s.Arg6);
+                    var fnDefs = DeclareTypeReturningMembers(name, allFns);
                     RegisterContainerConsts(name, consts);   // first: a field may be typed by a type const
                     RegisterStruct(name, fields, AggregateLayout.Packed);
                     foreach (var m in fnDefs) { methods.Add((name, m)); }

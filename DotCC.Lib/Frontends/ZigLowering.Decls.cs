@@ -52,13 +52,11 @@ internal sealed partial class ZigLowering
         // {…}; }`. It is a COMPTIME type constructor, not a runtime function — it emits no code; each
         // use in a type position REIFIES a fresh struct per resolved type argument. Retain the template
         // (params + body) for EvalTypeReturningCall; the placeholder symbol is never called directly.
+        // A MEMBER of a container (hash_map's `fn FieldIterator(comptime T: type) type`, array_list's
+        // `SentinelSlice`) is the same template under the mangled name, remembering its OWNER: its body is
+        // evaluated in the owner's scope, with the owner's comptime seeds live.
         if (IsTypeKeyword(retType))
         {
-            if (mangledName is not null)
-            {
-                throw new IrUnsupportedException(
-                    $"function '{Tok(nameTok)}': a `type`-returning method is not supported yet (wall-plan W4 is free functions only)");
-            }
             if (allParams.Any(p => p.Kind is ParamKind.Runtime or ParamKind.AnyType))
             {
                 throw new IrUnsupportedException(
@@ -68,12 +66,13 @@ internal sealed partial class ZigLowering
             }
             var tRet = DeclareFnSymbol(new Symbol
             {
-                Name = Tok(nameTok),
+                Name = mangledName ?? Tok(nameTok),
                 Kind = SymKind.Func,
                 Type = new CType.Func(CType.Void, new List<CType>(), false),
                 IsGlobal = true,
             });
-            _typeReturningGenerics[tRet] = new TypeReturningGenericInfo(tRet, allParams, body);
+            _typeReturningGenerics[tRet] = new TypeReturningGenericInfo(tRet, allParams, body,
+                mangledName is not null ? _currentContainer : null);
             return (tRet, new List<(string name, CType type)>(), body);
         }
 
@@ -183,6 +182,32 @@ internal sealed partial class ZigLowering
         });
         _ir.Tests.Add((displayName ?? "test." + index, sym));
         return (sym, new List<(string name, CType type)>(), body);
+    }
+
+    /// <summary>True when a container member function returns <c>type</c>: a comptime type constructor
+    /// (<c>fn FieldIterator(comptime T: type) type</c>), not a runtime method.</summary>
+    private static bool IsTypeReturningFnDef(Item fnDef) => fnDef.Content switch
+    {
+        Zig.FnDef f => IsTypeKeyword(f.Arg6),
+        Zig.FnDefNoArgs f => IsTypeKeyword(f.Arg5),
+        _ => false,
+    };
+
+    /// <summary>Declare a container's TYPE-returning member functions now, and return the others. A
+    /// template's declaration lowers no type, so it can run before the container's type consts and fields
+    /// (hash_map's <c>pub const KeyIterator = FieldIterator(K);</c> names one), and it has no runtime body
+    /// to queue. <see cref="_currentContainer"/> survives the call (DeclareMethod clears it).</summary>
+    private List<Item> DeclareTypeReturningMembers(string container, IReadOnlyList<Item> fnDefs)
+    {
+        var runtime = new List<Item>();
+        foreach (var fnDef in fnDefs)
+        {
+            if (!IsTypeReturningFnDef(fnDef)) { runtime.Add(fnDef); continue; }
+            var prev = _currentContainer;
+            try { DeclareMethod(container, fnDef); }
+            finally { _currentContainer = prev; }
+        }
+        return runtime;
     }
 
     /// <summary>A method declaration's own name, without declaring anything — so a lazily-prepared

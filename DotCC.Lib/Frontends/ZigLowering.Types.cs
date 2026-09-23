@@ -63,6 +63,11 @@ internal sealed partial class ZigLowering
                     && (_lazy || module.EndsWith(".zig", System.StringComparison.Ordinal)))
                 {
                     _importSpecs[name] = module;
+                    // std's own files import their root by path (`const std = @import("std.zig");`). That
+                    // binding is the `std` namespace too, so std-internal code names a curated surface
+                    // (`mem.Allocator`, the runtime allocator `std.heap.page_allocator` produces) exactly
+                    // as user code does.
+                    if (IsStdRootSpec(module)) { _imports[name] = "std"; }
                     return true;
                 }
                 throw new IrUnsupportedException(
@@ -371,7 +376,12 @@ internal sealed partial class ZigLowering
     /// name as its root (e.g. <c>"std.heap.page_allocator"</c>) regardless of the alias spelling.
     /// Works in both expression and type position (same AST shape). Returns <c>false</c> for any
     /// chain not rooted at an <see cref="_imports"/> alias.</summary>
-    private bool TryResolveStdPath(Item expr, out string path)
+    private bool TryResolveStdPath(Item expr, out string path) => TryResolveStdPath(expr, out path, MaxAliasHops);
+
+    /// <summary><see cref="TryResolveStdPath(Item, out string)"/>, following a module alias at the root
+    /// (<c>const mem = std.mem;</c> in hash_map.zig, so <c>mem.Allocator</c> is <c>std.mem.Allocator</c>)
+    /// at most <paramref name="hops"/> times.</summary>
+    private bool TryResolveStdPath(Item expr, out string path, int hops)
     {
         path = "";
         var segments = new List<string>();
@@ -381,9 +391,15 @@ internal sealed partial class ZigLowering
             segments.Add(Tok(f.Arg2));
             cur = f.Arg0;
         }
-        if (cur.Content is not Zig.Ident id || !_imports.TryGetValue(Tok(id.Arg0), out var module))
+        if (cur.Content is not Zig.Ident id) { return false; }
+        if (!_imports.TryGetValue(Tok(id.Arg0), out var module))
         {
-            return false;
+            if (hops == 0 || !_moduleAliasPaths.TryGetValue(Tok(id.Arg0), out var aliasPath)
+                || !TryResolveStdPath(aliasPath, out var aliased, hops - 1))
+            {
+                return false;
+            }
+            module = aliased;
         }
         segments.Add(module);
         segments.Reverse();
@@ -872,29 +888,43 @@ internal sealed partial class ZigLowering
     {
         for (var c = _currentContainer; c is not null; c = _containerParents.GetValueOrDefault(c))
         {
-            if (!_containerConsts.TryGetValue(c, out var consts)
-                || !consts.TryGetValue(name, out var entry)
-                || entry.Item1 is not null
-                || !_typeConstsInFlight.Add((c, name)))
-            {
-                continue;
-            }
-            try
-            {
-                if (!IsTypeConstMember(entry.Item2)) { continue; }
-                CType resolved;
-                using (EnterContainer(c)) { resolved = LowerComptimeTypeExpr(c, entry.Item2).Type; }
-                if (!_selfAliases.TryGetValue(c, out var scoped))
-                {
-                    scoped = new Dictionary<string, CType>(System.StringComparer.Ordinal);
-                    _selfAliases[c] = scoped;
-                }
-                scoped[name] = resolved;
-                return resolved;
-            }
-            finally { _typeConstsInFlight.Remove((c, name)); }
+            if (TryContainerTypeConst(c, name) is { } resolved) { return resolved; }
         }
         return null;
+    }
+
+    /// <summary>The TYPE const <paramref name="name"/> of exactly <paramref name="container"/>, evaluated on
+    /// first use in that container's scope and cached as a scoped alias; null when it declares no such type
+    /// const. The one-container step of <see cref="ResolveContainerTypeConst"/>, and what a qualified
+    /// <c>Shapes.Bytes</c> asks.</summary>
+    private CType? TryContainerTypeConst(string container, string name)
+    {
+        if (_selfAliases.TryGetValue(container, out var known) && known.TryGetValue(name, out var cached)) { return cached; }
+        if (!_containerConsts.TryGetValue(container, out var consts)
+            || !consts.TryGetValue(name, out var entry)
+            || entry.Item1 is not null
+            || !_typeConstsInFlight.Add((container, name)))
+        {
+            return null;
+        }
+        try
+        {
+            CType resolved;
+            using (EnterContainer(container))
+            {
+                // The shape test inside the scope too: it may evaluate a member call (`Pair(u8)`).
+                if (!IsTypeConstMember(entry.Item2)) { return null; }
+                resolved = LowerComptimeTypeExpr(container, entry.Item2).Type;
+            }
+            if (!_selfAliases.TryGetValue(container, out var scoped))
+            {
+                scoped = new Dictionary<string, CType>(System.StringComparer.Ordinal);
+                _selfAliases[container] = scoped;
+            }
+            scoped[name] = resolved;
+            return resolved;
+        }
+        finally { _typeConstsInFlight.Remove((container, name)); }
     }
 
     /// <summary>The (container, name) type consts <see cref="ResolveContainerTypeConst"/> is evaluating, so a
@@ -918,9 +948,10 @@ internal sealed partial class ZigLowering
         return null;
     }
 
-    /// <summary>Resolve <c>Parent.Inner</c> (or <c>Outer.Mid.Inner</c>) to a NESTED container type, or
-    /// null when the base is not a container this module declares or has no such nested member — so the
-    /// caller falls through to the std / module-graph resolvers unchanged. The base resolves the way a
+    /// <summary>Resolve <c>Parent.Inner</c> (or <c>Outer.Mid.Inner</c>) to a NESTED container type, or to a
+    /// TYPE const of the parent (<c>Shapes.Bytes</c>, <c>Map.KeyIterator</c>), or null when the base is not a
+    /// container this module declares or has no such member — so the caller falls through to the std /
+    /// module-graph resolvers unchanged. The base resolves the way a
     /// bare type name does (<see cref="TryLookupContainerType"/>, which also sees an in-scope nested
     /// name), then each segment steps into that container's nested map.</summary>
     private CType? TryResolveQualifiedNestedType(Item dotted)
@@ -938,11 +969,10 @@ internal sealed partial class ZigLowering
             CType.Enum e => e.Name,
             _ => null,
         };
-        return baseName is not null
-            && _nestedContainerTypes.TryGetValue(baseName, out var nested)
-            && nested.TryGetValue(Tok(f.Arg2), out var inner)
-                ? inner
-                : null;
+        if (baseName is null) { return null; }
+        return _nestedContainerTypes.TryGetValue(baseName, out var nested) && nested.TryGetValue(Tok(f.Arg2), out var inner)
+            ? inner
+            : TryContainerTypeConst(baseName, Tok(f.Arg2));
     }
 
     /// <summary>Look up the container type named at a use site — a registered struct/enum/union

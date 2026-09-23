@@ -233,16 +233,18 @@ public sealed class ZigTypeReturningFnTests
     }
 
     [Fact]
-    public void Type_returning_method_in_the_returned_struct_is_rejected()
+    public void Type_returning_method_in_the_returned_struct_sees_the_owner_seeds()
     {
-        // Likewise the standing W4 cut — a `type`-returning METHOD (`Aligned`'s nested `SentinelSlice`).
-        var ex = Should.Throw<Exception>(() => EmitZig("""
+        // Once the standing W4 cut: a `type`-returning METHOD (`Aligned`'s nested `SentinelSlice`) is a
+        // comptime type constructor under its owner, evaluated with the owner's seeds live, so `Elem()`
+        // delegates to the instance's `T`.
+        var cs = EmitZig("""
             fn Box(comptime T: type) type {
                 return struct { v: T, pub fn Elem() type { return T; } };
             }
-            pub fn main() u8 { const b: Box(u8) = .{ .v = 5 }; return b.v; }
-            """));
-        ex.Message.ShouldContain("`type`-returning method");
+            pub fn main() u8 { const b: Box(u16) = .{ .v = 5 }; const e: Box(u16).Elem() = b.v; return @intCast(e); }
+            """);
+        cs.ShouldContain("ushort e = b.v;");
     }
 
     [Fact]
