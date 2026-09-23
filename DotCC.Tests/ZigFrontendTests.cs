@@ -5829,21 +5829,6 @@ public sealed class ZigFrontendTests
         ex.Message.ShouldContain("no enclosing loop to target");
     }
 
-    [Fact]
-    public void A_runtime_parallel_for_over_two_slices_is_a_named_cut()
-    {
-        // The grammar accepts `for (a, b) |x, y|`; only the comptime form is lowered, and the error
-        // says which.
-        var ex = Should.Throw<CompileException>(() => EmitZig(
-            "pub fn main() u8 {\n" +
-            "    var a = [_]u8{ 1, 2 };\n" +
-            "    var b = [_]u8{ 3, 4 };\n" +
-            "    for (a, b) |x, y| { _ = x; _ = y; }\n" +
-            "    return 0;\n" +
-            "}\n"));
-        ex.Message.ShouldContain("runtime lockstep walk");
-    }
-
     // ---- reification builtins + `@compileError` (road-to-zig-std S7) ----
 
     [Fact]

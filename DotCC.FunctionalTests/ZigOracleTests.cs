@@ -3044,6 +3044,42 @@ public sealed class ZigOracleTests
             "    if (maxInt(u64) == 18446744073709551615) r += 12;\n" +
             "    return r;\n" +
             "}\n", 42, "" },
+        // A RUNTIME multi-object `for` (road-to-zig-std G5; hash_map's `for (metadata, keys, values)
+        // |m, k, v|`): three objects with a trailing comma (an array pointer, an array, a slice) and a
+        // `continue` / `break`; a pair whose body breaks out of a switch; a pair with a `_` capture; and an
+        // ASSIGNMENT prong body (`.stage2_llvm => _ = &dbHelper,`). 44 + 0 - 30 + 27 + 1 = 42.
+        new object[] { "multi_object_for",
+            "pub fn main() u8 {\n" +
+            "    const used = [_]bool{ true, false, true, true };\n" +
+            "    const keys = [_]u8{ 1, 2, 3, 4 };\n" +
+            "    var vals = [_]u8{ 10, 20, 30, 40 };\n" +
+            "    var total: u8 = 0;\n" +
+            "    for (\n" +
+            "        &used,\n" +
+            "        &keys,\n" +
+            "        vals[0..],\n" +
+            "    ) |m, k, v| {\n" +
+            "        if (!m) continue;\n" +
+            "        total += k + v;\n" +
+            "        if (k == 3) break;\n" +
+            "    }\n" +
+            "    var pairs: u8 = 0;\n" +
+            "    for (keys, vals) |k, v| {\n" +
+            "        switch (k) {\n" +
+            "            4 => break,\n" +
+            "            else => {},\n" +
+            "        }\n" +
+            "        pairs += v - k * 10;\n" +
+            "    }\n" +
+            "    var n: u8 = 0;\n" +
+            "    for (keys[0..2], vals[0..2],) |_, v| n += v;\n" +
+            "    var bonus: u8 = 0;\n" +
+            "    switch (n) {\n" +
+            "        30 => bonus = 1,\n" +
+            "        else => _ = &bonus,\n" +
+            "    }\n" +
+            "    return total + pairs - n + 27 + bonus;\n" +
+            "}\n", 42, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

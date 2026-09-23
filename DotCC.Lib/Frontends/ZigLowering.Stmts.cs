@@ -132,46 +132,7 @@ internal sealed partial class ZigLowering
             // A `catch`/`orelse` in the RHS (or a discarded `_ = f(a catch b())`) may hoist (ANF), so
             // lower the assignment under a hoist buffer.
             case Zig.StmtAssign a:
-                return Hoisted(() =>
-                {
-                    if (a.Arg0.Content is Zig.Ident lhs && Tok(lhs.Arg0) == "_")
-                    {
-                        // `_ = a catch {};` / `_ = a orelse break;` — the value is DISCARDED, so the
-                        // fallback arm needs no payload (a void block is fine here, as in zig).
-                        if (IsControlFlowFallback(a.Arg2, out var dL, out var dC, out var dCap, out var dArm))
-                        {
-                            return LowerControlFlowFallback(dL, dC, dCap, dArm, null);
-                        }
-                        var discarded = LowerExpr(a.Arg2);
-                        // `_ = ctx;` over a `void` value (an unused `context: void` parameter) has nothing to
-                        // evaluate and no C# spelling: it emits nothing.
-                        if (discarded.Type.Unqualified is CType.VoidType && IsErasableVoid(discarded))
-                        {
-                            return new Seq(new List<CStmt>());
-                        }
-                        return new ExprStmt(discarded);
-                    }
-                    var target = LowerExpr(a.Arg0);
-                    // `x = blk: { … break :blk v; };` — a labeled value-block assignment (Milestone L,
-                    // part 2): temp-fill against the lvalue's type, then assign the result temp into it.
-                    if (a.Arg2.Content is Zig.LabeledBlock lb)
-                    {
-                        return LowerLabeledValueBlock(Tok(lb.Arg0), lb.Arg2, target.Type,
-                            temp => new ExprStmt(new Assign(null, target, new VarRef(temp) { Type = temp.Type }) { Type = target.Type }));
-                    }
-                    // `x = switch (y) { … blk: {…} };` / `x = if (c) blk:{…} else …;` — a value-position
-                    // if/switch with a statement-producing branch (Milestone Y, part 1): temp-fill against
-                    // the lvalue's type, then assign the result temp into it.
-                    if (IsValueControlFlowStmt(a.Arg2))
-                    {
-                        return LowerValueControlFlowStmt(a.Arg2, target.Type,
-                            temp => new ExprStmt(new Assign(null, target, new VarRef(temp) { Type = temp.Type }) { Type = target.Type }));
-                    }
-                    var value = LowerExprSink(a.Arg2, target.Type);   // target type is the sink (`x = .member;`)
-                    // Storing a void value into void storage (`unit = {};`) moves no data.
-                    if (target.Type.Unqualified is CType.VoidType && IsErasableVoid(value)) { return new Seq(new List<CStmt>()); }
-                    return new ExprStmt(new Assign(null, target, value) { Type = target.Type });
-                });
+                return LowerAssignStmt(a.Arg0, a.Arg2);
 
             // `x op= y` (compound assignment) → the shared Assign node with a non-null CompoundOp.
             // Each operator maps to the SAME BinOp the matching Zig binary op uses (Add/Sub/…), so
@@ -323,11 +284,16 @@ internal sealed partial class ZigLowering
             // `for (a, b) |x, y| body` — the PARALLEL form (road-to-zig-std S6). Only the COMPTIME
             // form is lowered: a member list has no runtime representation, so the useful case is
             // always `inline for`. A runtime lockstep walk over two slices is a separate feature.
-            case Zig.StmtForSlicePair:
-                throw new IrUnsupportedException(
-                    "zig parallel `for (a, b) |x, y|` is supported only as an `inline for` over comptime "
-                    + "member lists (road-to-zig-std S6) — a runtime lockstep walk over two slices is not "
-                    + "lowered yet");
+            // `for (a, b) |x, y|` / `for (a, b, c) |x, y, z|` at RUNTIME: a lockstep walk (road-to-zig-std
+            // G5). The `inline for` over comptime member lists takes the parallel pair before this.
+            case Zig.StmtForSlicePair f:
+                return LowerForParallel(new[] { f.Arg2, f.Arg4 }, new[] { Tok(f.Arg7), Tok(f.Arg9) }, f.Arg11);
+            case Zig.StmtForSlicePairTrail f:
+                return LowerForParallel(new[] { f.Arg2, f.Arg4 }, new[] { Tok(f.Arg8), Tok(f.Arg10) }, f.Arg12);
+            case Zig.StmtForSliceTriple f:
+                return LowerForParallel(new[] { f.Arg2, f.Arg4, f.Arg6 }, new[] { Tok(f.Arg9), Tok(f.Arg11), Tok(f.Arg13) }, f.Arg15);
+            case Zig.StmtForSliceTripleTrail f:
+                return LowerForParallel(new[] { f.Arg2, f.Arg4, f.Arg6 }, new[] { Tok(f.Arg10), Tok(f.Arg12), Tok(f.Arg14) }, f.Arg16);
             // `for (s, 0..) |*x, i| body` — BY-REFERENCE element capture WITH the usize index
             // (Milestone Z): `x` is a `*T` into the slice (so `x.* = …` writes through), `i` the index.
             case Zig.StmtForSliceIdxRef f:  // for '(' Expr ',' Expr '..' ')' '|' '*' IDENT ',' IDENT '|' Stmt
@@ -1915,6 +1881,51 @@ internal sealed partial class ZigLowering
         _ => false,
     };
 
+    /// <summary>Lower an assignment statement <c>lhs = rhs;</c> (also a prong body <c>v =&gt; lhs = rhs</c>): a
+    /// discard <c>_ = e</c>, a value-block / value-control-flow RHS temp-filled against the lvalue, or a plain
+    /// store with the lvalue's type as the sink. Under an ANF hoist buffer, like every statement.</summary>
+    private CStmt LowerAssignStmt(Item lhsItem, Item rhsItem)
+        => Hoisted(() =>
+        {
+            if (lhsItem.Content is Zig.Ident lhs && Tok(lhs.Arg0) == "_")
+            {
+                // `_ = a catch {};` / `_ = a orelse break;` — the value is DISCARDED, so the
+                // fallback arm needs no payload (a void block is fine here, as in zig).
+                if (IsControlFlowFallback(rhsItem, out var dL, out var dC, out var dCap, out var dArm))
+                {
+                    return LowerControlFlowFallback(dL, dC, dCap, dArm, null);
+                }
+                var discarded = LowerExpr(rhsItem);
+                // `_ = ctx;` over a `void` value (an unused `context: void` parameter) has nothing to
+                // evaluate and no C# spelling: it emits nothing.
+                if (discarded.Type.Unqualified is CType.VoidType && IsErasableVoid(discarded))
+                {
+                    return new Seq(new List<CStmt>());
+                }
+                return new ExprStmt(discarded);
+            }
+            var target = LowerExpr(lhsItem);
+            // `x = blk: { … break :blk v; };` — a labeled value-block assignment (Milestone L,
+            // part 2): temp-fill against the lvalue's type, then assign the result temp into it.
+            if (rhsItem.Content is Zig.LabeledBlock lb)
+            {
+                return LowerLabeledValueBlock(Tok(lb.Arg0), lb.Arg2, target.Type,
+                    temp => new ExprStmt(new Assign(null, target, new VarRef(temp) { Type = temp.Type }) { Type = target.Type }));
+            }
+            // `x = switch (y) { … blk: {…} };` / `x = if (c) blk:{…} else …;` — a value-position
+            // if/switch with a statement-producing branch (Milestone Y, part 1): temp-fill against
+            // the lvalue's type, then assign the result temp into it.
+            if (IsValueControlFlowStmt(rhsItem))
+            {
+                return LowerValueControlFlowStmt(rhsItem, target.Type,
+                    temp => new ExprStmt(new Assign(null, target, new VarRef(temp) { Type = temp.Type }) { Type = target.Type }));
+            }
+            var value = LowerExprSink(rhsItem, target.Type);   // target type is the sink (`x = .member;`)
+            // Storing a void value into void storage (`unit = {};`) moves no data.
+            if (target.Type.Unqualified is CType.VoidType && IsErasableVoid(value)) { return new Seq(new List<CStmt>()); }
+            return new ExprStmt(new Assign(null, target, value) { Type = target.Type });
+        });
+
     /// <summary>True for a runtime loop statement (every <c>LoopStmt</c> form), which gets an unlabeled
     /// break target (<see cref="LowerLoopWithBreakTarget"/>).</summary>
     private static bool IsRuntimeLoopStmt(object? content) => content is
@@ -1922,7 +1933,8 @@ internal sealed partial class ZigLowering
         or Zig.StmtWhileCapture or Zig.StmtWhileCaptureElse or Zig.StmtWhileCaptureErrElse
         or Zig.StmtWhileCaptureCont or Zig.StmtWhileCaptureContAssign
         or Zig.StmtForRange or Zig.StmtForSlice or Zig.StmtForSliceRef or Zig.StmtForSliceIdx
-        or Zig.StmtForSliceIdxRef or Zig.StmtForSlicePair;
+        or Zig.StmtForSliceIdxRef or Zig.StmtForSlicePair or Zig.StmtForSlicePairTrail
+        or Zig.StmtForSliceTriple or Zig.StmtForSliceTripleTrail;
 
     /// <summary>Lower a runtime loop with an unlabeled break target (<see cref="LoopBreakTarget"/>), so a
     /// <c>break</c> inside a <c>switch</c> in its body exits the loop, as in zig. The label is emitted
@@ -1995,6 +2007,7 @@ internal sealed partial class ZigLowering
                     { Return: { } r } => Hoisted(() => LowerReturn(r)),
                     { ReturnsVoid: true } => LowerReturnVoid(),
                     { Jump: { } j } => LowerProngJump(j),
+                    { Assign: { } pa } => LowerAssignStmt(pa.Arg2, pa.Arg4),
                     _ => new Seq(new List<CStmt>()),
                 };
             }
@@ -2052,6 +2065,7 @@ internal sealed partial class ZigLowering
                 case Zig.ProngReturn pr:     caseVals = pr.Arg0; body = new List<CStmt> { Hoisted(() => LowerReturn(pr.Arg3)) }; break;
                 case Zig.ProngReturnVoid pr: caseVals = pr.Arg0; body = new List<CStmt> { LowerReturnVoid() }; break;
                 case Zig.ProngJump pj:       caseVals = pj.Arg0; body = new List<CStmt> { LowerProngJump(pj.Arg2) }; break;
+                case Zig.ProngAssign pa:     caseVals = pa.Arg0; body = new List<CStmt> { LowerAssignStmt(pa.Arg2, pa.Arg4) }; break;
                 default: throw new IrUnsupportedException("zig switch prong: " + (prongItem.Content?.GetType().Name ?? "null"));
             }
             var labels = LowerCaseVals(caseVals, subject.Type); // case values compare against the subject
@@ -2213,6 +2227,63 @@ internal sealed partial class ZigLowering
     /// The element capture <c>x</c> is a per-iteration copy (Zig's by-value <c>|x|</c>; the by-ref
     /// <c>|*x|</c> form is deferred). The slice is hoisted to <c>__s</c> unless it is already a bare
     /// variable, so <c>.Len</c>/<c>.Ptr</c> aren't re-evaluated with side effects.</summary>
+    /// <summary>Lower a runtime multi-object <c>for (a, b, c) |x, y, z| body</c> (road-to-zig-std G5): one
+    /// index walks every object in lockstep, each capture a per-iteration copy of its object's element.
+    /// Each object is a slice (an array coerces to one) read once into a temp. zig asserts the lengths are
+    /// equal; dotcc walks the FIRST object's length and does not check, its ReleaseFast stance on safety
+    /// checks. A <c>_</c> capture binds nothing.</summary>
+    private CStmt LowerForParallel(IReadOnlyList<Item> objectItems, IReadOnlyList<string> captures, Item bodyItem)
+    {
+        var pre = new List<CStmt>();
+        var slices = new List<(CExpr Ref, CType.Slice Type)>(objectItems.Count);
+        foreach (var item in objectItems)
+        {
+            var value = LowerExpr(item);
+            // An array, or a pointer to one (`&used`), walks as a slice over it.
+            if (value.Type.Unqualified is CType.Array arr) { value = CoerceToSlice(value, new CType.Slice(arr.Element)); }
+            else if (value.Type.Unqualified is CType.Pointer { Pointee: var pte } && pte.Unqualified is CType.Array parr)
+            {
+                value = CoerceToSlice(value, new CType.Slice(parr.Element));
+            }
+            if (value.Type.Unqualified is not CType.Slice slc)
+            {
+                throw new IrUnsupportedException(
+                    $"zig multi-object `for`: each object must be a slice or an array; got {value.Type.Describe()}");
+            }
+            CExpr sliceRef = value;
+            if (value is not VarRef)
+            {
+                var tmp = _symbols.Declare(new Symbol { Name = "__s", Kind = SymKind.Var, Type = value.Type });
+                pre.Add(new DeclStmt(new List<LocalDecl> { new(tmp, value) }));
+                sliceRef = new VarRef(tmp) { Type = value.Type, IsLValue = true };
+            }
+            slices.Add((sliceRef, slc));
+        }
+        _symbols.EnterScope();
+        var iSym = _symbols.Declare(new Symbol { Name = "__i", Kind = SymKind.Var, Type = CType.ULong });
+        var iRef = new VarRef(iSym) { Type = CType.ULong, IsLValue = true };
+        var init = new DeclStmt(new List<LocalDecl> { new(iSym, new LitInt("0", 0) { Type = CType.ULong }) });
+        var len = new Member(slices[0].Ref, "Len", false) { Type = CType.ULong, IsLValue = true };
+        var cond = new Binary(BinOp.Lt, iRef, len) { Type = CType.Int };
+        var post = new Unary(UnOp.PostInc, iRef) { Type = CType.ULong };
+        var bodyStmts = new List<CStmt>();
+        for (var k = 0; k < slices.Count; k++)
+        {
+            if (captures[k] == "_") { continue; }
+            var (sref, st) = slices[k];
+            var ptr = new Member(sref, "Ptr", false) { Type = new CType.Pointer(st.Element) };
+            var elem = new DotCC.Ir.Index(ptr, iRef) { Type = st.Element, IsLValue = true };
+            var sym = _symbols.Declare(new Symbol { Name = captures[k], Kind = SymKind.Var, Type = st.Element });
+            bodyStmts.Add(new DeclStmt(new List<LocalDecl> { new(sym, elem) }));
+        }
+        bodyStmts.Add(LowerStmt(bodyItem));
+        _symbols.ExitScope();
+        var forStmt = new For(init, cond, post, new Block(bodyStmts));
+        if (pre.Count == 0) { return forStmt; }
+        pre.Add(forStmt);
+        return new Block(pre);
+    }
+
     private CStmt LowerForSlice(CExpr sliceExpr, string elemName, (string name, CExpr start)? index, Item bodyItem, bool byRef)
     {
         if (sliceExpr.Type.Unqualified is not CType.Slice slc)

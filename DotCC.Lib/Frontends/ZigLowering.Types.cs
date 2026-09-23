@@ -630,6 +630,17 @@ internal sealed partial class ZigLowering
             Zig.Field f => Line(f.Arg0),
             _ => 0,
         };
+        // A declaration the resilient parse SKIPPED is the real wall (hash_map's `Custom`, reached through
+        // `pub const HashMapUnmanaged = Custom;`): raise its parse error, in whichever module owns it.
+        switch (callee.Content)
+        {
+            case Zig.Ident id:
+                RaiseIfSkippedAlongAliases(Tok(id.Arg0));
+                break;
+            case Zig.Field f when ResolveModulePath(f.Arg0)?.Lowering is { } owner:
+                owner.RaiseIfSkippedAlongAliases(Tok(f.Arg2));
+                break;
+        }
         return new IrUnsupportedException(
             $"zig type: `{Spell(callee)}(…)` in a type position is not a type-returning generic dotcc could "
             + $"evaluate ({_fileStem ?? "?"}.zig line {Line(callee)})");

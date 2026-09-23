@@ -714,6 +714,26 @@ that retire curated shortcuts.
 > likely shape is to run the unrolled loop's comptime state through it rather than to grow a second
 > domain at the lowering tier.
 
+> **Then the other probes (2026-09-24).** Each advanced to a wall that is a real design question rather
+> than a gap:
+> - `std.fmt.parseInt`: a local comptime alias of another module's GENERIC function chosen by a comptime
+>   switch (`const add = switch (sign) { .pos => math.add, … }`), comptime bools from type comparisons, a
+>   value `if` that folds, a value switch with a `return` arm, variadic `@min` / `@max`, parenthesized
+>   types, and a latent lazy-declaration scoping bug all fell. It now stops at `math.cast(u8, c)`'s
+>   `maxInt(@TypeOf(x))`: the declared width of an `anytype` argument, which the `@typeInfo` fidelity
+>   rule refuses (a `u5` value lowers to `byte`, like a `u8`). Fix sketch in deferred.md.
+> - `std.mem.indexOfScalar`: a lazy module's top-level value consts now lower where they are named
+>   (`use_vectors_for_comparison`), with trailing-comma case lists and `@inComptime()`. It stops at
+>   `std.simd.suggestVectorLength(T)` (a `?comptime_int` over `builtin.cpu`), which is dotcc's TARGET
+>   identity: the honest answer is null (scalars), a decision for the user (deferred.md).
+> - `std.AutoHashMap`: the runtime multi-object `for (metadata, keys, values) |m, k, v|`, an assignment
+>   prong body, and a parse-skip diagnostic through a same-module alias (`HashMapUnmanaged = Custom`)
+>   let `Custom` parse whole. It stops at G4's nested-container cut (`Entry`, `Iterator` inside the
+>   reified type).
+> - `std.mem.sort`: `return struct { pub fn inner … }.inner;` returns a comptime FUNCTION value, passed
+>   as `comptime lessThanFn: fn (…) bool`: a parse form plus comptime function values keying an instance.
+> - `array_list.Aligned(u8, null)` still reaches `SentinelSlice`, a type-returning METHOD (G4).
+
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)
 
 An opt-in test/tool (`DOTCC_RUN_STD_PROBE=1`, env `DOTCC_ZIG_LIB_DIR` or

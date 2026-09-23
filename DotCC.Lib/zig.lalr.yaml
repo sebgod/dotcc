@@ -629,6 +629,13 @@ productions:
       # pinned std this is the DOMINANT member-list shape (`inline for (info.field_names,
       # info.field_types) |field_name, field_type|`, 17 uses vs 11 single-list).
       - { lhs: LoopStmt, rhs: ['for', '(', Expr, ',', Expr, ')', '|', IDENT, ',', IDENT, '|', Stmt], action: stmtForSlicePair }
+      # A THREE-object runtime `for (a, b, c) |x, y, z|` (40 in std; hash_map's `for (metadata, keys,
+      # values) |m, k, v|`, road-to-zig-std G5), and a trailing comma after the last object (zig fmt's
+      # one-object-per-line layout). After `Expr ',' Expr`, a `,` then `Expr` / `)` extends this family
+      # and `..` / `)` select the forms above; each is a distinct terminal, so every decision is a shift.
+      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ',', Expr, ',', ')', '|', IDENT, ',', IDENT, '|', Stmt], action: stmtForSlicePairTrail }
+      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ',', Expr, ',', Expr, ')', '|', IDENT, ',', IDENT, ',', IDENT, '|', Stmt], action: stmtForSliceTriple }
+      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ',', Expr, ',', Expr, ',', ')', '|', IDENT, ',', IDENT, ',', IDENT, '|', Stmt], action: stmtForSliceTripleTrail }
       # `for (s) |*x| body` — BY-REFERENCE element capture (Milestone M, part 4): `x` is a `*T` into
       # the slice, so `x.* = …` writes through to the element. After the capture `'|'`, a `'*'`
       # lookahead selects this over the by-value `'|' IDENT '|'` form (distinct tokens) — conflict-free.
@@ -1267,6 +1274,9 @@ productions:
       # statements and admits them here as explicit prong forms, like `return`. `break`/`continue` are in
       # no other prong body's FIRST set, so the choice is one token of lookahead.
       - { lhs: Prong, rhs: [CaseVals, '=>', ProngJump],                  action: prongJump }
+      # An ASSIGNMENT prong body `v => lhs = rhs` (hash_map's `.stage2_llvm => _ = &dbHelper,`): no Prong is
+      # ever followed by `=`, so after the body's `Expr` the `=` shifts into this form, conflict-free.
+      - { lhs: Prong, rhs: [CaseVals, '=>', Expr, '=', RhsExpr],         action: prongAssign }
       - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, '|', ProngJump], action: prongCaptureJump }
 
   # The jump forms. FOLLOW(Prong) is `,` / `}`, so a label after `:` and a value after the label are

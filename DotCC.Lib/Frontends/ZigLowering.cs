@@ -655,6 +655,18 @@ internal sealed partial class ZigLowering
     /// <summary>Raise the real wall when <paramref name="name"/> is a top-level declaration of this
     /// module that the resilient parse skipped: "did not parse", with the parse error, instead of the
     /// "unresolved name" a lookup would otherwise report. A no-op for any other name.</summary>
+    /// <summary><see cref="RaiseIfSkippedDecl"/> for <paramref name="name"/> and each same-module alias it
+    /// names in turn (<c>pub const HashMapUnmanaged = Custom;</c>), up to <see cref="MaxAliasHops"/>.</summary>
+    internal void RaiseIfSkippedAlongAliases(string name)
+    {
+        for (var hops = 0; hops < MaxAliasHops; hops++)
+        {
+            RaiseIfSkippedDecl(name);
+            if (!_declAliases.TryGetValue(name, out var rhs) || rhs.Content is not Zig.Ident next) { return; }
+            name = Tok(next.Arg0);
+        }
+    }
+
     internal void RaiseIfSkippedDecl(string name)
     {
         if (_module?.SkippedDecls.TryGetValue(name, out var error) is not true) { return; }

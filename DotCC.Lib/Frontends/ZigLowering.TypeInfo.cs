@@ -439,7 +439,7 @@ internal sealed partial class ZigLowering
     /// shape the comptime fold needs in all three switch positions (statement, expression, and the
     /// value-temp filler) without each re-deriving it from the eight capture productions.</summary>
     private sealed record ZigProng(Item CaseVals, string? CaptureName, Item? Block, Item? Expr, Item? Return, bool ReturnsVoid,
-        Item? Jump = null);
+        Item? Jump = null, Zig.ProngAssign? Assign = null);
 
     /// <summary>Decompose a prong into <see cref="ZigProng"/>. A by-reference capture
     /// (<c>|*x|</c>) is rejected: a comptime <c>@typeInfo</c> value has no storage to point at.</summary>
@@ -454,6 +454,7 @@ internal sealed partial class ZigLowering
         Zig.ProngCaptureReturn p     => new ZigProng(p.Arg0, Tok(p.Arg3),  null,   null,   p.Arg6, false),
         Zig.ProngCaptureReturnVoid p => new ZigProng(p.Arg0, Tok(p.Arg3),  null,   null,   null,   true),
         Zig.ProngJump p              => new ZigProng(p.Arg0, null,         null,   null,   null,   false, p.Arg2),
+        Zig.ProngAssign p            => new ZigProng(p.Arg0, null,         null,   null,   null,   false, Assign: p),
         Zig.ProngCaptureJump p       => new ZigProng(p.Arg0, Tok(p.Arg3),  null,   null,   null,   false, p.Arg5),
         Zig.ProngCaptureRef or Zig.ProngCaptureRefExpr or Zig.ProngCaptureRefReturn or Zig.ProngCaptureRefReturnVoid
             => throw new IrUnsupportedException(
