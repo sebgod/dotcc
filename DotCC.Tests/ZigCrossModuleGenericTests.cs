@@ -58,10 +58,11 @@ public sealed class ZigCrossModuleGenericTests
             """, ("util.zig", Util));
         // One specialized instance per call, keyed by the caller's resolved arguments — the caller-side
         // alias `T` resolved in the CALLER to `u8`; the comptime value baked in; the anytype inferred.
-        cs.ShouldContain("maxOf__u8(10, 7)");
-        cs.ShouldContain("addN__20(3)");
-        cs.ShouldContain("twice__u8((byte)3)");
-        cs.ShouldContain("static unsafe byte maxOf__u8(byte a, byte b)");
+        // Each instance emits under its module's prefix (`util__`), like any function the import declares.
+        cs.ShouldContain("util__maxOf__u8(10, 7)");
+        cs.ShouldContain("util__addN__20(3)");
+        cs.ShouldContain("util__twice__u8((byte)3)");
+        cs.ShouldContain("static unsafe byte util__maxOf__u8(byte a, byte b)");
         cs.ShouldNotContain("maxOf()");   // the placeholder template signature is never called
     }
 
@@ -80,12 +81,31 @@ public sealed class ZigCrossModuleGenericTests
         var call = System.Text.RegularExpressions.Regex.Match(
             cs, @"return \(byte\)\((\w+)\(\) \+ (\w+)\(\) \+ (\w+)\(\)\);");
         call.Success.ShouldBeTrue();
-        call.Groups[1].Value.ShouldStartWith("lenOf__s");
+        call.Groups[1].Value.ShouldStartWith("util__lenOf__s");
         call.Groups[2].Value.ShouldBe(call.Groups[1].Value);
         call.Groups[3].Value.ShouldNotBe(call.Groups[1].Value);
-        System.Text.RegularExpressions.Regex.Matches(cs, @"static unsafe byte lenOf__s[0-9a-f]{8}\(\)").Count.ShouldBe(2);
+        System.Text.RegularExpressions.Regex.Matches(cs, @"static unsafe byte util__lenOf__s[0-9a-f]{8}\(\)").Count.ShouldBe(2);
         cs.ShouldContain("return (byte)3UL;");
         cs.ShouldContain("return (byte)5UL;");
+    }
+
+    [Fact]
+    public void An_imported_function_emits_under_its_module_prefix()
+    {
+        // Every module's functions land in ONE emitted class, so `util.f` and the root's own `f` were two
+        // `static byte f()` methods: C# CS0111, from a dotcc run that exited 0 (a bad emit).
+        var cs = EmitZigMulti("""
+            const util = @import("util.zig");
+            fn f() u8 {
+                return 2;
+            }
+            pub fn main() u8 {
+                return util.f() + f();
+            }
+            """, ("util.zig", "pub fn f() u8 {\n    return 40;\n}\n"));
+        cs.ShouldContain("static unsafe byte util__f()");
+        cs.ShouldContain("static unsafe byte f()");
+        cs.ShouldContain("util__f() + f()");
     }
 
     [Fact]
