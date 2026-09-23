@@ -548,10 +548,15 @@ internal sealed partial class ZigLowering
     /// re-export aliases (<see cref="_declAliases"/>) across modules: the module that OWNS it and its
     /// symbol, declared on demand in its owner. A generic template comes back as its template symbol, for
     /// the owner to instantiate (the owner's environment spells its signature). Null when no function is
-    /// reachable under that name, so a caller can report it or try another reading.</summary>
-    internal (ZigLowering Owner, Symbol Sym)? ResolveExportedDecl(string name) => ResolveExportedDecl(name, 0);
+    /// reachable under that name, so a caller can report it or try another reading.
+    /// <para><paramref name="raiseIfSkipped"/> is for a site that will fail when this returns null (a call
+    /// being lowered): it raises the parse error of a skipped declaration instead. A PROBE (a type-position
+    /// reading, a comptime-only check) leaves it false, since a probe that misses falls through to another
+    /// reading, e.g. the curated `std.mem.zeroes` behind a skipped `mem.zig` declaration of that name.</para></summary>
+    internal (ZigLowering Owner, Symbol Sym)? ResolveExportedDecl(string name, bool raiseIfSkipped = false)
+        => ResolveExportedDecl(name, 0, raiseIfSkipped);
 
-    private (ZigLowering Owner, Symbol Sym)? ResolveExportedDecl(string name, int hops)
+    private (ZigLowering Owner, Symbol Sym)? ResolveExportedDecl(string name, int hops, bool raiseIfSkipped)
     {
         if ((_lazy ? EnsureDeclLowered(name) : _exportedFns.GetValueOrDefault(name)) is { } sym)
         {
@@ -559,13 +564,14 @@ internal sealed partial class ZigLowering
         }
         if (hops >= MaxAliasHops || !_declAliases.TryGetValue(name, out var rhs))
         {
-            RaiseIfSkippedDecl(name);   // the name IS declared here, but that declaration did not parse
+            // The name IS declared here, but that declaration did not parse.
+            if (raiseIfSkipped) { RaiseIfSkippedDecl(name); }
             return null;
         }
         return rhs.Content switch
         {
-            Zig.Ident id => ResolveExportedDecl(Tok(id.Arg0), hops + 1),
-            Zig.Field f => ResolveModulePath(f.Arg0)?.Lowering?.ResolveExportedDecl(Tok(f.Arg2), hops + 1),
+            Zig.Ident id => ResolveExportedDecl(Tok(id.Arg0), hops + 1, raiseIfSkipped),
+            Zig.Field f => ResolveModulePath(f.Arg0)?.Lowering?.ResolveExportedDecl(Tok(f.Arg2), hops + 1, raiseIfSkipped),
             _ => null,
         };
     }

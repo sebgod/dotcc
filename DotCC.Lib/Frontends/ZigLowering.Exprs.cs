@@ -902,7 +902,7 @@ internal sealed partial class ZigLowering
         if (sym is null && _lazy) { sym = EnsureDeclLowered(name); }
         // A re-export alias (`pub const indexOfScalar = findScalar;`, `const f = util.f;`): call the
         // declaration it names, in its own module when that is another one.
-        if (sym is null && ResolveExportedDecl(name) is { } aliased)
+        if (sym is null && ResolveExportedDecl(name, raiseIfSkipped: true) is { } aliased)
         {
             if (aliased.Owner != this) { return CallExportedDecl(aliased.Owner, aliased.Sym, argItems); }
             sym = aliased.Sym;
@@ -1080,7 +1080,7 @@ internal sealed partial class ZigLowering
         if (!IsCuratedStdPath(fld.Arg0) && ResolveModulePath(fld.Arg0) is { } navMod)
         {
             // Through any re-export (`pub const indexOfScalar = findScalar;`), to the module that owns it.
-            var nav = navMod.Lowering?.ResolveExportedDecl(methodName)
+            var nav = navMod.Lowering?.ResolveExportedDecl(methodName, raiseIfSkipped: true)
                 ?? throw new IrUnsupportedException(
                     $"zig module '{System.IO.Path.GetFileName(navMod.Path)}' has no exported function '{methodName}'");
             return CallExportedDecl(nav.Owner, nav.Sym, argItems);

@@ -50,7 +50,10 @@ public sealed class ZigCuratedStdVsNavigationTests
         File.WriteAllText(Path.Combine(std, "mem.zig"),
             $"pub const Allocator = struct {{ marker: {NavigationMarker} }};\n" +
             // `twice` is a member the curated std.mem set does NOT model, so it must reach this source.
-            "pub fn twice(x: u8) u8 { return x + x; }\n");
+            "pub fn twice(x: u8) u8 { return x + x; }\n" +
+            // A CURATED member whose upstream declaration does not parse (real mem.zig's `zeroes` doesn't):
+            // the skipped declaration must not shadow the curated lowering.
+            "pub fn zeroes(comptime T: type) T {\n    return 1 +;\n}\n");
         // A type-returning generic reached through the module graph, carrying a method — the shape
         // `std.ArrayList` has (road-to-zig-std G4 × S4d).
         File.WriteAllText(Path.Combine(std, "array_list.zig"),
@@ -148,6 +151,22 @@ public sealed class ZigCuratedStdVsNavigationTests
             "}\n");
         cs.ShouldContain("ZigMem.Eql<byte>(");   // curated
         cs.ShouldContain("mem__twice(21)");      // navigated, module-qualified
+    }
+
+    [Fact]
+    public void A_skipped_upstream_declaration_does_not_shadow_a_curated_member()
+    {
+        // A type-position PROBE (`std.mem.zeroes(T)` could be a type-returning call) went through the
+        // re-export resolver, which raised "did not parse" for the skipped upstream `zeroes` instead of
+        // missing and letting the curated lowering answer (oracle `std_mem_span_zeroes`).
+        var cs = EmitWithStdTree(
+            "const std = @import(\"std\");\n" +
+            "const P = struct { x: u8, y: u8 };\n" +
+            "pub fn main() u8 {\n" +
+            "    const p = std.mem.zeroes(P);\n" +
+            "    return p.x + p.y + 42;\n" +
+            "}\n");
+        cs.ShouldNotContain("did not parse");
     }
 
     [Fact]
