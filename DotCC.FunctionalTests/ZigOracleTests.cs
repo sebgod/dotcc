@@ -2833,6 +2833,34 @@ public sealed class ZigOracleTests
             "    total += addN(N, 2);\n" +
             "    return @intCast(total);\n" +
             "}\n", 42, "" },
+        // DECL LITERALS (zig 0.14+; road-to-zig-std G3 — bufPrint's `var w: Writer = .fixed(buf);`): a
+        // `.name(args)` / `.name()` call and a bare `.name` value at a struct result location name the
+        // RESULT type's own declaration — at a typed `var`/`const`, a parameter, and a `return`.
+        // 10 + 0 (take) + 2 + 0 + 30 = 42.
+        new object[] { "decl_literals",
+            "const Counter = struct {\n" +
+            "    n: u8,\n" +
+            "    pub const zero: Counter = .{ .n = 0 };\n" +
+            "    pub fn init(n: u8) Counter {\n" +
+            "        return .{ .n = n };\n" +
+            "    }\n" +
+            "    pub fn fixed() Counter {\n" +
+            "        return .{ .n = 2 };\n" +
+            "    }\n" +
+            "};\n" +
+            "fn make() Counter {\n" +
+            "    return .init(30);\n" +
+            "}\n" +
+            "fn take(c: Counter) u8 {\n" +
+            "    return c.n;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var a: Counter = .init(10);\n" +
+            "    const b: Counter = .fixed();\n" +
+            "    const z: Counter = .zero;\n" +
+            "    a.n += take(.init(0));\n" +
+            "    return a.n + b.n + z.n + make().n;\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
@@ -3013,6 +3041,25 @@ public sealed class ZigOracleTests
             "pub fn lenOf(comptime s: []const u8) u8 {\n" +
             "    return @intCast(s.len);\n" +
             "}\n", 42, "" },
+        // A DECL LITERAL on a container the IMPORTED module declares — the function resolves on the
+        // result type and lowers in its own module: 40 + 2 = 42.
+        new object[] { "import_decl_literal",
+            "const geom = @import(\"geom.zig\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const p: geom.Point = .init(40, 2);\n" +
+            "    return p.sum();\n" +
+            "}\n",
+            "geom.zig",
+            "pub const Point = struct {\n" +
+            "    x: u8,\n" +
+            "    y: u8,\n" +
+            "    pub fn init(x: u8, y: u8) Point {\n" +
+            "        return .{ .x = x, .y = y };\n" +
+            "    }\n" +
+            "    pub fn sum(self: Point) u8 {\n" +
+            "        return self.x + self.y;\n" +
+            "    }\n" +
+            "};\n", 42, "" },
     };
 
     [Theory]

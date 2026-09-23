@@ -870,6 +870,14 @@ internal sealed partial class ZigLowering
             return LowerMethodCall(fld, argItems);
         }
 
+        // `.name(args)` reaching here had no container-typed result location (LowerExprSink takes the
+        // decl literal when it does) — zig rejects it the same way, for want of a type to look `name` up in.
+        if (calleeItem.Content is Zig.EnumLit declLit)
+        {
+            throw new IrUnsupportedException(
+                $"decl literal `.{Tok(declLit.Arg1)}(…)` needs a struct/union result type to resolve against "
+                + "(a typed `const`/`var`, a typed parameter, a `return` of a typed function)");
+        }
         if (calleeItem.Content is not Zig.Ident id)
         {
             throw new IrUnsupportedException("zig call: only a bare-identifier or `base.method` callee is lowered yet (got "
