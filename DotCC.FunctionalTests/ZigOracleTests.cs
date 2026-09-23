@@ -2861,6 +2861,28 @@ public sealed class ZigOracleTests
             "    a.n += take(.init(0));\n" +
             "    return a.n + b.n + z.n + make().n;\n" +
             "}\n", 42, "" },
+        // A `comptime if` statement and an anonymous `enum { … }` parameter type (road-to-zig-std S9, the
+        // parse gaps behind std's findScalarPos and parseIntWithSign). The block arms run at comptime,
+        // assigning the `comptime var`. 20 + 2 + 20 + 0 = 42.
+        new object[] { "comptime_if_anon_enum",
+            "fn weight(comptime T: type) u8 {\n" +
+            "    comptime var w: u8 = 1;\n" +
+            "    comptime if (@sizeOf(T) > 1) {\n" +
+            "        w = 20;\n" +
+            "    } else {\n" +
+            "        w = 2;\n" +
+            "    };\n" +
+            "    return w;\n" +
+            "}\n" +
+            "fn sign(comptime s: enum { pos, neg }, x: u8) u8 {\n" +
+            "    return switch (s) {\n" +
+            "        .pos => x,\n" +
+            "        .neg => 0,\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return weight(u32) + weight(u8) + sign(.pos, 20) + sign(.neg, 7);\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

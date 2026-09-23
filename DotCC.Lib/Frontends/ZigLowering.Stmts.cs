@@ -195,6 +195,10 @@ internal sealed partial class ZigLowering
             // (a single statement or a brace Block), which LowerStmt handles uniformly.
             case Zig.StmtIf f:          return LowerIfStmt(f.Arg2, f.Arg4, null);
             case Zig.StmtIfElse f:      return LowerIfStmt(f.Arg2, f.Arg4, f.Arg6);
+            case Zig.StmtComptimeIf f:     return LowerComptimeIfStmt(f.Arg3, f.Arg5, null);
+            case Zig.StmtComptimeIfElse f: return LowerComptimeIfStmt(f.Arg3, f.Arg5, f.Arg7);
+            case Zig.StmtComptimeIfSemi f:     return LowerComptimeIfStmt(f.Arg3, f.Arg5, null);
+            case Zig.StmtComptimeIfElseSemi f: return LowerComptimeIfStmt(f.Arg3, f.Arg5, f.Arg7);
 
             // `if (opt) |x| then [else else]` — payload-capturing `if` (Milestone M). Binds the
             // optional's payload (value `?T` or niche pointer) — or, with `else |e|`, an
@@ -1225,6 +1229,32 @@ internal sealed partial class ZigLowering
     /// comptime generic (<c>fib</c>) prune its base case and terminate. A RUNTIME condition (ConstEval
     /// returns null), or any <c>if</c> outside an instance body, lowers to the ordinary two-armed
     /// <see cref="If"/> — the condition is lowered exactly once either way.</summary>
+    /// <summary>Lower a <c>comptime if (c) then [else e]</c> statement: the condition is evaluated at
+    /// compile time, so it MUST fold (a tag question, or anything <see cref="IrModule.ConstEval"/>
+    /// settles, a comptime var or capture included), and only the taken arm is lowered. A condition that
+    /// does not fold is an error, as in zig, rather than a quiet runtime <c>if</c>.</summary>
+    private CStmt LowerComptimeIfStmt(Item condItem, Item thenItem, Item? elseItem)
+    {
+        var taken = TryFoldComptimeCondition(condItem)
+            ?? (_ir.ConstEval(LowerExpr(condItem)) is { } cv
+                ? cv != 0
+                : throw new IrUnsupportedException(
+                    "zig `comptime if`: the condition is not known at compile time"));
+        if (taken) { return LowerComptimeArm(thenItem); }
+        return elseItem is { } other ? LowerComptimeArm(other) : new Seq(new List<CStmt>());
+    }
+
+    /// <summary>Lower the taken arm of a <c>comptime if</c>. Everything under <c>comptime</c> runs at
+    /// compile time, so a block or an assignment is EXECUTED by the comptime evaluator
+    /// (<see cref="LowerComptimeBlock"/>: <c>w = 20;</c> updates the <c>comptime var w</c>, and emits
+    /// nothing) rather than lowered as runtime code, which would store into a substituted literal. Any
+    /// other arm is compile-time control flow over the enclosing unrolled code (<c>break</c> out of an
+    /// <c>inline for</c>, a <c>return</c>) and lowers as the statement it is.</summary>
+    private CStmt LowerComptimeArm(Item arm)
+        => arm.Content is Zig.Block or Zig.BlockEmpty or Zig.StmtAssign
+            ? LowerComptimeBlock(arm)
+            : LowerStmt(arm);
+
     private CStmt LowerIfStmt(Item condItem, Item thenItem, Item? elseItem)
     {
         // A COMPTIME TAG condition (road-to-zig-std S3a) — `builtin.cpu.arch == .x86_64`,

@@ -531,6 +531,7 @@ internal sealed partial class ZigLowering
         // road-to-zig-std S9, grammar #90) → a synthesized named struct type, reified once per source
         // site. See ReifyInlineStruct.
         Zig.InlineStructType ist       => ReifyInlineStruct(type, ist.Arg2),
+        Zig.InlineEnumType iet         => ReifyInlineEnum(type, iet.Arg2),
         Zig.InlineStructTypeEmpty      => ReifyInlineStruct(type, null),
         _ => throw new IrUnsupportedException("zig type: " + (type.Content?.GetType().Name ?? "null")),
     };
@@ -563,6 +564,27 @@ internal sealed partial class ZigLowering
         }
         RegisterStruct(name, fields);
         return new CType.Named(name);
+    }
+
+    /// <summary>The enum twin of <see cref="ReifyInlineStruct"/>: an anonymous <c>enum { pos, neg }</c> in a
+    /// type slot (std's <c>parseIntWithSign(…, comptime sign: enum { pos, neg })</c>) reifies ONE enum per
+    /// source site (<c>__AnonEnum&lt;n&gt;</c>, module-qualified in an imported module), memoized by the
+    /// occurrence, so every instance of a generic whose parameter spells it shares the type. Fields-only,
+    /// like the inline struct: a method or <c>const</c> member needs a named <c>const E = enum {…};</c>.</summary>
+    private CType ReifyInlineEnum(Item occurrence, Item enumFields)
+    {
+        if (_inlineStructNames.TryGetValue(occurrence, out var existing)) { return _containerTypes[existing]; }
+        var (_, methods, consts) = SplitEnumMembers(enumFields);
+        if (methods.Count > 0 || consts.Count > 0)
+        {
+            throw new IrUnsupportedException(
+                "zig: an inline `enum {…}` type is fields-only — a method or `const` member needs a named "
+                + "enum decl (`const E = enum { … };`)");
+        }
+        var name = QualifyTypeName($"__AnonEnum{_inlineStructNames.Count}");   // shares the per-module counter
+        _inlineStructNames[occurrence] = name;
+        using (EnterContainer(name)) { RegisterEnumZig(name, null, enumFields); }
+        return _containerTypes[name];
     }
 
     /// <summary>Lower the single type argument of a curated generic std type

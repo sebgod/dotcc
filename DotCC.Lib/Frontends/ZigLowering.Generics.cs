@@ -324,7 +324,11 @@ internal sealed partial class ZigLowering
                             stringSeeds.Add((g.Params[i].Name, str));
                             break;
                         }
-                        var argExpr = argScope.LowerExpr(argItems[i]);
+                        // An ENUM-typed param (`comptime sign: enum { pos, neg }`) is the result location
+                        // its bare `.pos` argument resolves against; zig result-locates it the same way.
+                        var argExpr = valueParamType is CType.Enum
+                            ? argScope.LowerExprSink(argItems[i], valueParamType)
+                            : argScope.LowerExpr(argItems[i]);
                         if (_ir.ConstEval(argExpr) is not { } v)
                         {
                             throw new IrUnsupportedException(

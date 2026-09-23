@@ -456,6 +456,18 @@ productions:
     rules:
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', Stmt],                 action: stmtIf }
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', Stmt, 'else', Stmt],   action: stmtIfElse }
+      # `comptime if (c) stmt [else stmt]` — an `if` STATEMENT evaluated at compile time (std's
+      # findScalarPos: `comptime if (block_x_len < 4) break;` inside an `inline for`). The condition must
+      # fold; the untaken arm is never lowered. In this rightmost group so `else` binds as for a plain
+      # `if`. After `comptime`, `if` is disjoint from FIRST(VarDecl), FIRST(Block) and FIRST(Prefix) (an
+      # `if` EXPRESSION lives only in RhsExpr), so the existing `comptime` forms keep their lookahead.
+      - { lhs: Stmt, rhs: ['comptime', 'if', '(', Expr, ')', Stmt],                 action: stmtComptimeIf }
+      - { lhs: Stmt, rhs: ['comptime', 'if', '(', Expr, ')', Stmt, 'else', Stmt],   action: stmtComptimeIfElse }
+      # zig parses `comptime if …` as an EXPRESSION statement, so a block-bodied one takes a closing `;`
+      # (`comptime if (c) {…} else {…};`). Both spellings are accepted: `;` cannot start a Stmt, so the
+      # shift after the last arm is unambiguous.
+      - { lhs: Stmt, rhs: ['comptime', 'if', '(', Expr, ')', Stmt, ';'],               action: stmtComptimeIfSemi }
+      - { lhs: Stmt, rhs: ['comptime', 'if', '(', Expr, ')', Stmt, 'else', Stmt, ';'], action: stmtComptimeIfElseSemi }
       # Payload-capturing `if` (Milestone M): `if (opt) |x| then [else …]` binds an optional's
       # payload (or, in part 3, an error-union's success value) in the then-branch. After the
       # condition `')'`, a `'|'` lookahead selects the capture form — no Stmt begins with `'|'`
@@ -1018,6 +1030,9 @@ productions:
       - { lhs: AType, rhs: [Type] }
       - { lhs: AType, rhs: ['struct', '{', FieldDecls, '}'], action: inlineStructType }
       - { lhs: AType, rhs: ['struct', '{', '}'],             action: inlineStructTypeEmpty }
+      # The enum twin: `comptime sign: enum { pos, neg }` (std's parseIntWithSign). Same annotation-only
+      # slot, so the value-position `const E = enum {…}` (enumDecl) keeps no competitor.
+      - { lhs: AType, rhs: ['enum', '{', EnumFields, '}'],   action: inlineEnumType }
 
   - derivation: none
     rules:
