@@ -111,7 +111,8 @@ internal sealed partial class ZigLowering
         IReadOnlyList<ParamInfo> Params,
         Item RetType,
         bool ErrUnion,
-        Item Body);
+        Item Body,
+        string? Owner = null);
 
     /// <summary>A queued instantiation body to lower after pass 2. Drained at top level
     /// (re-entrancy-safe — see the class doc), so its <see cref="LowerFnBodyCore"/> runs in a clean
@@ -350,6 +351,11 @@ internal sealed partial class ZigLowering
             throw new IrUnsupportedException(
                 $"call to generic '{templateSym.Name}': expected {g.Params.Count} argument(s), got {argItems.Count}");
         }
+        // A generic METHOD's signature is spelled in its owner's scope, with the owner's comptime seeds live
+        // (`key: K` in a HashMap instance); its body is drained there too (LowerInstantiationBody).
+        var ownerSeedsKey = g.Owner is { } ownerName ? ReifiedAncestor(ownerName) : null;
+        using var ownerSeedScope = EnterReifiedSeeds(ownerSeedsKey ?? "");
+        using var ownerScope = EnterContainer(g.Owner ?? _currentContainer);
 
         var inv = CultureInfo.InvariantCulture;
         var mangleTokens = new List<string>();
@@ -514,12 +520,33 @@ internal sealed partial class ZigLowering
                 // param (W5) is a runtime slot whose type is the inferred one (not lowered from an AST).
                 // (For a value-only generic no type is seeded, so this is exactly the W3a template-time
                 // signature.) Preserves parameter order, so it aligns with `runtimeArgItems`.
-                var runtimeParams = g.Params
-                    .Where(p => p.Kind is ParamKind.Runtime or ParamKind.AnyType)
-                    .Select(p => (p.Name, p.Kind == ParamKind.AnyType ? _anytypeSeeds[p.Name] : LowerType(p.TypeAst)))
-                    .ToList();
+                // The comptime VALUE / OPTIONAL seeds are bound while the signature lowers, so a type spelled
+                // with one resolves (array_list's `… !SentinelSlice(sentinel)` for `comptime sentinel: T`).
+                List<(string, CType)> runtimeParams;
                 var comptimeOnly = !g.ErrUnion && g.RetType.Content is Zig.Ident retId && Tok(retId.Arg0) == "comptime_int";
-                var ret = comptimeOnly ? CType.Int128 : LowerType(g.RetType);
+                CType ret;
+                _symbols.EnterScope();
+                try
+                {
+                    foreach (var (name, value, type) in valueSeeds)
+                    {
+                        _comptimeVars[_symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type })] = (value, type);
+                    }
+                    foreach (var (name, hasValue, value, inner) in optionalSeeds)
+                    {
+                        var optSym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = new CType.Optional(inner) });
+                        _comptimeOptionalVars[optSym] = (hasValue, value, inner);
+                    }
+                    runtimeParams = g.Params
+                        .Where(p => p.Kind is ParamKind.Runtime or ParamKind.AnyType)
+                        .Select(p => (p.Name, p.Kind == ParamKind.AnyType ? _anytypeSeeds[p.Name] : LowerType(p.TypeAst)))
+                        .ToList();
+                    ret = comptimeOnly ? CType.Int128 : LowerType(g.RetType);
+                }
+                finally
+                {
+                    _symbols.ExitScope();
+                }
                 if (g.ErrUnion) { ret = new CType.ErrorUnion(ret); }
                 instanceSym = DeclareFnSymbol(new Symbol
                 {
@@ -527,7 +554,7 @@ internal sealed partial class ZigLowering
                     Kind = SymKind.Func,
                     Type = new CType.Func(ret, runtimeParams.Select(p => p.Item2).ToList(), false),
                     IsGlobal = true,
-                });
+                }, qualify: g.Owner is null);   // a method's mangled name carries its (qualified) owner
                 // An error-union generic: register the instance's raw return-type AST so its body resolves
                 // its declared error set in LowerFnBodyCore (the same lazy resolution a plain fn gets).
                 if (ret is CType.ErrorUnion) { _fnErrorReturnTypes[instanceSym] = (g.RetType, g.ErrUnion); }
@@ -548,6 +575,13 @@ internal sealed partial class ZigLowering
                 _fnParamInfos[instanceSym] = g.Params;
                 if (DeclaredBitsOfTypeArg(g.RetType) is { } instRetBits) { _fnReturnBits[instanceSym] = instRetBits; }
                 if (anytypeBits.Count > 0) { _instanceAnytypeBits[instanceSym] = anytypeBits; }
+                // A method instance's body re-enters its owner's seeds too, its own LAST so they win a clash.
+                if (ownerSeedsKey is { } osk && _reifiedSeeds.TryGetValue(osk, out var os))
+                {
+                    typeSeeds = [.. os.Types, .. typeSeeds];
+                    valueSeeds = [.. os.Values, .. valueSeeds];
+                    optionalSeeds = [.. os.Optionals, .. optionalSeeds];
+                }
                 _pendingInstantiations.Add(new PendingInstantiation(instanceSym, g, valueSeeds, typeSeeds, runtimeParams, optionalSeeds, stringSeeds, fnSeeds));
             }
         }
@@ -646,6 +680,8 @@ internal sealed partial class ZigLowering
         }
         try
         {
+            // A generic METHOD's instance lowers inside its owner (`Self`, sibling methods, nested types).
+            using var container = EnterContainer(p.Generic.Owner ?? _currentContainer);
             LowerFnBodyCore(p.Instance, p.RuntimeParams, p.Generic.Body, p.ValueSeeds, p.TypeSeeds, p.OptionalSeeds, p.StringSeeds);
         }
         finally
@@ -694,6 +730,7 @@ internal sealed partial class ZigLowering
             {
                 var me = DeclareMethod(anon, methodDef);
                 _currentContainer = anon;
+                if (IsFnTemplate(me.sym)) { continue; }
                 _pendingReifiedMethods.Add(new PendingReifiedMethod(me.sym, anon, me.ps, me.body, typeSeeds, valueSeeds, optionalSeeds));
             }
         }
@@ -1238,6 +1275,7 @@ internal sealed partial class ZigLowering
                 foreach (var (nContainer, nDef) in nestedMethods)
                 {
                     var nm = DeclareMethod(nContainer, nDef);
+                    if (IsFnTemplate(nm.sym)) { continue; }   // a generic method instantiates per call
                     _pendingReifiedMethods.Add(new PendingReifiedMethod(
                         nm.sym, nContainer, nm.ps, nm.body, typeSeeds, valueSeeds, optionalSeeds));
                 }
@@ -1258,6 +1296,7 @@ internal sealed partial class ZigLowering
                 {
                     var me = DeclareMethod(mangled, methodDef);
                     _currentContainer = mangled;   // DeclareMethod clears it; the next signature needs it back
+                    if (IsFnTemplate(me.sym)) { continue; }   // a generic method instantiates per call
                     _pendingReifiedMethods.Add(new PendingReifiedMethod(
                         me.sym, mangled, me.ps, me.body, typeSeeds, valueSeeds, optionalSeeds));
                 }

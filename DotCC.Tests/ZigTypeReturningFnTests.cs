@@ -17,9 +17,9 @@ namespace DotCC.Tests;
 /// <para>road-to-zig-std G4 lifted the fields-only V1 cut: the reified struct also carries <c>const</c>
 /// members (including <c>const Self = @This();</c>) and METHODS — each method declared under the mangled
 /// container with its body deferred to a top-level drain, so it lowers to the same
-/// <c>Container_method</c> free function an ordinary container's method does. Remaining loud cuts: a
-/// NESTED container member, a runtime parameter on the type function, and (inherited
-/// from W3/W4/W5) a generic or <c>type</c>-returning METHOD. A non-struct return (<c>return T;</c>, a
+/// <c>Container_method</c> free function an ordinary container's method does. NESTED containers, generic
+/// methods and <c>type</c>-returning methods are no longer cuts (2026-09-24); a runtime parameter on the
+/// type function still is. A non-struct return (<c>return T;</c>, a
 /// delegating call) is no longer a cut — see <c>ZigTypeBodyTests</c> (the W4 lift).</para>
 /// End-to-end in the <c>type-returning-fn</c> and <c>generic-container-methods</c> zig-oracle programs.
 /// </summary>
@@ -215,11 +215,10 @@ public sealed class ZigTypeReturningFnTests
     }
 
     [Fact]
-    public void Generic_method_in_the_returned_struct_is_rejected()
+    public void Generic_method_in_the_returned_struct_instantiates_under_the_instance()
     {
-        // A method of the reified struct is an ordinary method, so it inherits the standing W3/W5 cut: a
-        // `comptime`/`anytype` parameter on a METHOD is not supported (free functions only).
-        var ex = Should.Throw<Exception>(() => EmitZig("""
+        // Once a cut: a generic METHOD of a reified struct instantiates under the instance, with its seeds.
+        var cs = EmitZig("""
             fn Box(comptime T: type) type {
                 return struct {
                     v: T,
@@ -228,8 +227,8 @@ public sealed class ZigTypeReturningFnTests
                 };
             }
             pub fn main() u8 { const b: Box(u8) = .{ .v = 5 }; return b.as(u8); }
-            """));
-        ex.Message.ShouldContain("generic method");
+            """);
+        cs.ShouldContain("byte Box__u8_as__u8(Box__u8* self)");
     }
 
     [Fact]

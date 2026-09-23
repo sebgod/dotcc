@@ -79,16 +79,15 @@ internal sealed partial class ZigLowering
         var hasComptime = allParams.Any(p => p.IsComptime);
         var hasTypeParam = allParams.Any(p => p.Kind == ParamKind.ComptimeType);
         var hasAnyType = allParams.Any(p => p.Kind == ParamKind.AnyType);
-        // A generic (any comptime OR `anytype` param) is a TEMPLATE, and a generic METHOD is a loud cut —
-        // a method passes a `mangledName`, so that discriminates it (W3/W5 are free functions only).
-        if ((hasComptime || hasAnyType) && mangledName is not null)
-        {
-            throw new IrUnsupportedException(
-                $"function '{Tok(nameTok)}': a generic method (a `comptime` or `anytype` parameter) is not supported yet "
-                + "(wall-plan W3/W5 is free functions only)");
-        }
+        // A generic (any comptime OR `anytype` param) is a TEMPLATE. A generic METHOD (a `mangledName`:
+        // hash_map's `fetchRemoveAdapted(self, key: anytype, ctx: anytype)`) is the same template under its
+        // mangled name, remembering its OWNER, whose scope and comptime seeds its instances are lowered in;
+        // the shared import scope records which module holds it, so a call from any module instantiates it.
+        var owner = mangledName is not null ? _currentContainer : null;
 
-        if (hasTypeParam || hasAnyType)
+        // A generic METHOD always defers its signature: a comptime VALUE parameter may spell one of its
+        // types (array_list's `toOwnedSliceSentinel(…, comptime sentinel: T) !SentinelSlice(sentinel)`).
+        if (hasTypeParam || hasAnyType || (hasComptime && owner is not null))
         {
             // A `comptime T: type` TYPE parameter (wall-plan W3b) OR an `a: anytype` inferred-type
             // parameter (wall-plan W5) makes later parameter / return types depend on a type not known at
@@ -99,12 +98,13 @@ internal sealed partial class ZigLowering
             // call routes through InstantiateGeneric to a mangled, concretely-typed instance.
             var tmpl = DeclareFnSymbol(new Symbol
             {
-                Name = Tok(nameTok),
+                Name = mangledName ?? Tok(nameTok),
                 Kind = SymKind.Func,
                 Type = new CType.Func(CType.Void, new List<CType>(), false),
                 IsGlobal = true,
             });
-            _genericFns[tmpl] = new GenericFnInfo(tmpl, allParams, retType, errUnion, body);
+            _genericFns[tmpl] = new GenericFnInfo(tmpl, allParams, retType, errUnion, body, owner);
+            if (owner is not null) { _shared.GenericMethodOwners[tmpl] = this; }
             return (tmpl, new List<(string name, CType type)>(), body);
         }
 
@@ -136,7 +136,8 @@ internal sealed partial class ZigLowering
         // (the caller skips it via `AddFnEntry`); a call instantiates a specialized body per value.
         if (hasComptime)
         {
-            _genericFns[funcSym] = new GenericFnInfo(funcSym, allParams, retType, errUnion, body);
+            _genericFns[funcSym] = new GenericFnInfo(funcSym, allParams, retType, errUnion, body, owner);
+            if (owner is not null) { _shared.GenericMethodOwners[funcSym] = this; }
         }
         return (funcSym, runtimeParams, body);
     }
@@ -183,6 +184,11 @@ internal sealed partial class ZigLowering
         _ir.Tests.Add((displayName ?? "test." + index, sym));
         return (sym, new List<(string name, CType type)>(), body);
     }
+
+    /// <summary>True when <paramref name="fn"/> is a TEMPLATE rather than a function with a body of its own:
+    /// a generic (instantiated per call) or a type-returning one (evaluated in type positions). A method
+    /// declaration that returns one queues no body.</summary>
+    private bool IsFnTemplate(Symbol fn) => _genericFns.ContainsKey(fn) || _typeReturningGenerics.ContainsKey(fn);
 
     /// <summary>True when a container member function returns <c>type</c>: a comptime type constructor
     /// (<c>fn FieldIterator(comptime T: type) type</c>), not a runtime method.</summary>

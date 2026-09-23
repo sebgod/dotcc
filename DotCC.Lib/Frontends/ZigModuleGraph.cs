@@ -80,6 +80,10 @@ internal sealed class ZigImportScope
     /// methods (road-to-zig-std G3: <c>Io/Writer.zig</c> declares fields at file scope).</summary>
     public Dictionary<string, ZigLowering> FileStructOwners { get; } = new(StringComparer.Ordinal);
 
+    /// <summary>A GENERIC container method's template symbol → the module that declared it (and so holds
+    /// its template and drains its instances), so a call from any module in the chain instantiates it.</summary>
+    public Dictionary<Symbol, ZigLowering> GenericMethodOwners { get; } = new();
+
     private readonly Dictionary<string, string> _modulePrefixes = new(StringComparer.Ordinal);
     private readonly HashSet<string> _usedPrefixes = new(StringComparer.Ordinal);
 

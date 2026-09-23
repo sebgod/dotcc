@@ -757,15 +757,19 @@ that retire curated shortcuts.
 >   `FieldIterator`, a type-returning METHOD, fell (evaluated in its owner's scope, oracle
 >   `type_returning_methods`), and std-internal code now names curated surfaces as user code does
 >   (`const std = @import("std.zig"); const mem = std.mem;` makes `mem.Allocator` the runtime allocator).
->   It stops at a GENERIC METHOD, `fetchRemoveAdapted(…, ctx: anytype)`: the W3/W5 method cut.
+>   Then the GENERIC METHOD cut fell (`fetchRemoveAdapted(…, ctx: anytype)`, oracle `generic_methods`), with a
+>   type const naming a qualified one (`Size = Unmanaged.Size`) and a method body naming its container's
+>   const bare (`slot_tombstone`). It stops at `@typeInfo(…).int.bits` over a value whose declared width
+>   dotcc cannot prove (the fidelity rule refuses to guess).
 > - `std.mem.sort`: the closure idiom (`return struct { pub fn inner … }.inner;`) and comptime FUNCTION
 >   parameters landed, with an inline `@import(…).name` re-export, `noalias`, by-reference pair captures
 >   and `comptime { … }` prongs; then, past the value-width brick and a nested statement `switch` in
 >   std.math.sqrt, std.sort.block reaches `std.simd.suggestVectorLength` through std.mem, the same
 >   TARGET-identity decision as indexOfScalar. **Two of the eight probes now wait on that one decision.**
 > - `array_list.Aligned(u8, null)` is past `SentinelSlice` and stops at `AlignedManaged(T, alignment)`,
->   which forwards the owner's comptime OPTIONAL seed as an argument; behind it, `toOwnedSliceSentinel`'s
->   `comptime sentinel: T` is the same generic-method cut as hash_map's.
+>   which forwards the owner's comptime OPTIONAL seed as an argument (done, oracle
+>   `comptime_optional_forwarding`), then `toOwnedSliceSentinel`'s `comptime sentinel: T` (a generic method,
+>   done). It stops at `.empty` of a container another module declares: a cross-module decl-literal VALUE.
 
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)
 
@@ -1122,8 +1126,9 @@ peephole (or delete it):
      (`std.ArrayList(u8).init(…)`), so the `init`/`.empty` constructor idiom works either way; and a
      reified type nests (a `Box(T)` field / return inside `Wrap(T)`, verified against zig). Oracle
      `generic-container-methods` == zig; example `examples/zig-generic-container/`. **Still cut:** a
-     generic METHOD (the nested container member and the `type`-returning METHOD cuts both fell
-     2026-09-24; the latter was `Aligned`'s nested `pub fn SentinelSlice(comptime s: T) type`).
+     nothing on the method side: the nested container member, the `type`-returning METHOD
+     (`Aligned`'s `pub fn SentinelSlice(comptime s: T) type`) and the generic METHOD cuts all fell
+     2026-09-24.
      (Its other prerequisite, LEFT-TO-RIGHT comptime-param binding — `comptime start: T` typed by an
      earlier `comptime T: type` — **✅ DONE 2026-08-09**: `EvalTypeReturningCall` now resolves
      arguments in the same two phases `InstantiateGeneric` does.)

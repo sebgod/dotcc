@@ -3378,6 +3378,61 @@ public sealed class ZigOracleTests
             "    const b: Outer(u16, null).Managed = .{ .v = 2 };\n" +
             "    return a.inner.total() + b.total();\n" +
             "}\n", 42, "" },
+        // GENERIC container methods (road-to-zig-std G4, the W3/W5 method cut lifted): an `anytype` context
+        // (hash_map's `ctx: anytype`), a `comptime` value typed by the owner's `K` (array_list's `comptime
+        // sentinel: T`), and a static generic through the type. 3 matches * 2 + 2 + 30 + 4 = 42.
+        new object[] { "generic_methods",
+            "fn Store(comptime K: type) type {\n" +
+            "    return struct {\n" +
+            "        keys: [4]K,\n" +
+            "        len: usize,\n" +
+            "        const Self = @This();\n" +
+            "        pub fn init() Self {\n" +
+            "            return .{ .keys = undefined, .len = 0 };\n" +
+            "        }\n" +
+            "        pub fn add(self: *Self, key: K) void {\n" +
+            "            self.keys[self.len] = key;\n" +
+            "            self.len += 1;\n" +
+            "        }\n" +
+            "        // anytype: the context is duck-typed (hash_map's `ctx: anytype`).\n" +
+            "        pub fn countAdapted(self: *const Self, key: anytype, ctx: anytype) usize {\n" +
+            "            var n: usize = 0;\n" +
+            "            for (self.keys[0..self.len]) |k| {\n" +
+            "                if (ctx.eql(key, k)) n += 1;\n" +
+            "            }\n" +
+            "            return n;\n" +
+            "        }\n" +
+            "        // comptime value parameter typed by the owner's K (array_list's `comptime sentinel: T`).\n" +
+            "        pub fn countOf(self: Self, comptime needle: K) usize {\n" +
+            "            var n: usize = 0;\n" +
+            "            for (self.keys[0..self.len]) |k| {\n" +
+            "                if (k == needle) n += 1;\n" +
+            "            }\n" +
+            "            return n;\n" +
+            "        }\n" +
+            "        // a static generic called through the type.\n" +
+            "        pub fn widen(comptime T: type, k: K) T {\n" +
+            "            return @intCast(k);\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "const ModCtx = struct {\n" +
+            "    m: u16,\n" +
+            "    pub fn eql(self: ModCtx, a: u16, b: u16) bool {\n" +
+            "        return a % self.m == b % self.m;\n" +
+            "    }\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    var s = Store(u16).init();\n" +
+            "    s.add(3);\n" +
+            "    s.add(13);\n" +
+            "    s.add(7);\n" +
+            "    s.add(3);\n" +
+            "    const a = s.countAdapted(@as(u16, 23), ModCtx{ .m = 10 });\n" +
+            "    const b = s.countOf(3);\n" +
+            "    const w = Store(u16).widen(u32, 30);\n" +
+            "    return @intCast(a * 2 + b + w + 4);\n" +
+            "}\n", 42, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

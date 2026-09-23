@@ -16,8 +16,9 @@ namespace DotCC.Tests;
 /// mangles the instance and seeds the signature (so a <c>@TypeOf(param)</c> return type resolves), while
 /// the instance body binds the parameter as an ordinary runtime symbol of the inferred type — so
 /// duck-typed use (member access, arithmetic) lowers against the concrete type, a mismatch failing PER
-/// INSTANTIATION (real Zig / C++-template behavior). Reuses the W3 worklist + memoization. V1 cuts
-/// (loud): a generic METHOD, and an <c>anytype</c> parameter on an <c>extern</c> prototype. End-to-end in
+/// INSTANTIATION (real Zig / C++-template behavior). Reuses the W3 worklist + memoization. An
+/// <c>anytype</c> METHOD instantiates under its container (see <c>ZigGenericMethodTests</c>). V1 cut
+/// (loud): an <c>anytype</c> parameter on an <c>extern</c> prototype. End-to-end in
 /// the <c>anytype-param</c> zig-oracle program.
 /// </summary>
 [Collection("ZigFrontend")]
@@ -108,17 +109,17 @@ public sealed class ZigAnytypeParamTests
     }
 
     [Fact]
-    public void Anytype_method_is_rejected()
+    public void Anytype_method_instantiates_per_argument_type()
     {
-        // W5, like W3, is free functions only — a generic method needs the top-level-pass machinery.
-        var ex = Should.Throw<Exception>(() => EmitZig("""
+        // Once a cut (W5 was free functions only): an `anytype` METHOD instantiates under its container.
+        var cs = EmitZig("""
             const S = struct {
                 v: i32,
                 fn get(self: S, x: anytype) i32 { return self.v + @as(i32, @intCast(x)); }
             };
             pub fn main() u8 { const s: S = .{ .v = 5 }; return @intCast(s.get(@as(i32, 3))); }
-            """));
-        ex.Message.ShouldContain("method");
+            """);
+        cs.ShouldMatch(@"int S_get__\w+\(S self, int x\)");
     }
 
     [Fact]

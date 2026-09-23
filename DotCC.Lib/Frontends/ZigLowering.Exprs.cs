@@ -96,8 +96,9 @@ internal sealed partial class ZigLowering
                 // A bare (unqualified) sibling container const (Milestone R, part 6): inside a
                 // container const's RHS re-lower (`_currentConstContainer` set), an unresolved name may
                 // name a SIBLING const — inline it (comptime), or one of an ENCLOSING container's, zig's
-                // lexical scoping for a nested container. Outside that, the unresolved error holds.
-                for (var cc = _currentConstContainer; cc is not null; cc = _containerParents.GetValueOrDefault(cc))
+                // lexical scoping for a nested container. A METHOD body sees its container's consts the same
+                // way (`self == slot_tombstone` in hash_map's Metadata). Outside those, the unresolved error holds.
+                for (var cc = _currentConstContainer ?? _currentContainer; cc is not null; cc = _containerParents.GetValueOrDefault(cc))
                 {
                     if (_containerConsts.TryGetValue(cc, out var sibs) && sibs.TryGetValue(name, out var sib))
                     {
@@ -1142,6 +1143,18 @@ internal sealed partial class ZigLowering
             ? FoldIfComptimeOnly(owner, inst.Instance, BuildCall(inst.Instance, inst.RuntimeArgs, receiver: null))
             : BuildCall(sym, argItems, receiver: null);
 
+    /// <summary>Call a container function through its type (<c>Self.init(…)</c>, <c>Map(K, V).init(…)</c>): a
+    /// direct call, or, for a GENERIC method, an instantiation in the module that owns it.</summary>
+    private CExpr CallStaticMethod(Symbol method, IReadOnlyList<Item> argItems)
+    {
+        if (_shared.GenericMethodOwners.TryGetValue(method, out var owner) && owner._genericFns.TryGetValue(method, out var g))
+        {
+            var (instance, runtimeArgs) = owner.ResolveGenericInstance(method, g, argItems, argScope: this);
+            return FoldIfComptimeOnly(owner, instance, BuildCall(instance, runtimeArgs, receiver: null));
+        }
+        return BuildCall(method, argItems, receiver: null);
+    }
+
     private CExpr LowerMethodCall(Zig.Field fld, IReadOnlyList<Item> argItems)
     {
         var methodName = Tok(fld.Arg2);
@@ -1256,7 +1269,7 @@ internal sealed partial class ZigLowering
             {
                 throw new IrUnsupportedException($"'{typeName}' has no function '{methodName}'");
             }
-            return BuildCall(staticSym, argItems, receiver: null);
+            return CallStaticMethod(staticSym, argItems);
         }
         // (A1) `Outer.Inner.func(args)` — the same static call through a QUALIFIED nested container.
         if (fld.Arg0.Content is Zig.Field
@@ -1267,7 +1280,7 @@ internal sealed partial class ZigLowering
             {
                 throw new IrUnsupportedException($"'{qualifiedName}' has no function '{methodName}'");
             }
-            return BuildCall(qStaticSym, argItems, receiver: null);
+            return CallStaticMethod(qStaticSym, argItems);
         }
 
         // (A2) `Generic(args).func(…)` — the base is a call to a type-returning generic (wall-plan W4),
@@ -1285,7 +1298,7 @@ internal sealed partial class ZigLowering
             {
                 throw new IrUnsupportedException($"'{reifiedName}' has no function '{methodName}'");
             }
-            return BuildCall(reifiedSym, argItems, receiver: null);
+            return CallStaticMethod(reifiedSym, argItems);
         }
 
         // (B) `expr.method(args)` — the base is an instance of a container type.
@@ -1371,6 +1384,23 @@ internal sealed partial class ZigLowering
                 return new IndirectCall(callee, fieldArgs) { Type = fieldFn.Return };
             }
             throw new IrUnsupportedException($"struct '{container}' has no method '{methodName}'");
+        }
+        // A GENERIC method (a `comptime` / `anytype` parameter): instantiate it in the module that owns it,
+        // the receiver filling parameter 0 as it would in `Type.method(recv, …)`.
+        if (_shared.GenericMethodOwners.TryGetValue(msym, out var genericOwner)
+            && genericOwner._genericFns.TryGetValue(msym, out var genericMethod))
+        {
+            if (genericMethod.Params.Count == 0 || genericMethod.Params[0].Kind is not (ParamKind.Runtime or ParamKind.AnyType))
+            {
+                throw new IrUnsupportedException(
+                    $"'{container}.{methodName}' called on an instance needs a runtime first parameter to take the receiver");
+            }
+            var withReceiver = new List<Item>(argItems.Count + 1) { fld.Arg0 };
+            withReceiver.AddRange(argItems);
+            var (instance, runtimeArgs) = genericOwner.ResolveGenericInstance(msym, genericMethod, withReceiver, argScope: this);
+            var ifn = (CType.Func)instance.Type.Unqualified;
+            var icall = BuildCall(instance, runtimeArgs.Skip(1).ToList(), AdjustReceiver(recv, ifn.Params[0]));
+            return FoldIfComptimeOnly(genericOwner, instance, icall);
         }
         var mfn = (CType.Func)msym.Type.Unqualified;
         if (mfn.Params.Count == 0)

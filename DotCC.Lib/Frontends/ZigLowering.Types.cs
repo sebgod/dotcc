@@ -271,6 +271,12 @@ internal sealed partial class ZigLowering
                 type = tiListTy;
                 return true;
 
+            // `pub const Size = Unmanaged.Size;` (std.HashMap) — a container's nested type or type const,
+            // named qualified. Before the std-path case: a local container name is never a std path.
+            case Zig.Field when TryResolveQualifiedNestedType(rhs) is { } qualified:
+                type = qualified;
+                return true;
+
             // `const A = std.mem.Allocator;` — a dotted std TYPE path aliased to a name.
             case Zig.Field when TryResolveStdPath(rhs, out var fp) && StdTypes.ContainsKey(fp):
                 type = LowerStdType(rhs);

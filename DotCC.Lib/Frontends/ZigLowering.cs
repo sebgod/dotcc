@@ -237,7 +237,7 @@ internal sealed partial class ZigLowering
         // source, so they must resolve in that module's environment, not the caller's.
         var owner = pending.owner;
         var e = owner.DeclareMethod(container, pending.decl);
-        owner._pendingModuleBodies.Add((e.sym, e.ps, e.body, container));
+        if (!owner.IsFnTemplate(e.sym)) { owner._pendingModuleBodies.Add((e.sym, e.ps, e.body, container)); }
         return e.sym;
     }
 
@@ -1341,7 +1341,11 @@ internal sealed partial class ZigLowering
                 default: throw new IrUnsupportedException("zig top-level decl: " + (d.Content?.GetType().Name ?? "null"));
             }
         }
-        foreach (var (container, fnDef) in containerMethods) { entries.Add(DeclareMethod(container, fnDef)); }
+        foreach (var (container, fnDef) in containerMethods)
+        {
+            var me = DeclareMethod(container, fnDef);
+            if (!IsFnTemplate(me.sym)) { entries.Add(me); }   // a generic method instantiates per call
+        }
 
         // Pass 1.5: runtime top-level globals. Lowered AFTER every function/method signature
         // (so a global initializer may reference a function) and BEFORE the bodies (so a body
