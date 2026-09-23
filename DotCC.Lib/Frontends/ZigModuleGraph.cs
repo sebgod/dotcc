@@ -67,6 +67,39 @@ internal sealed class ZigImportScope
 
     /// <summary>(container, method) → the module that owns an as-yet-undeclared lazy method + its AST.</summary>
     public Dictionary<(string container, string method), (ZigLowering owner, Item decl)> LazyMethodDecls { get; } = new();
+
+    private readonly Dictionary<string, string> _modulePrefixes = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _usedPrefixes = new(StringComparer.Ordinal);
+
+    /// <summary>The IR-name prefix for an IMPORTED module's containers (module-qualified container
+    /// naming): the module's path relative to the std root when it lives there (<c>fmt</c>,
+    /// <c>Io_Writer</c>), else its file stem (<c>util</c>), sanitized to an identifier and de-duplicated
+    /// across this import chain (<c>util_2</c>) — so two modules' same-named containers, and a std
+    /// container named like one of dotcc's runtime types (<c>std.fmt.Alignment</c>), never share an
+    /// emitted C# type name. Stable per module path (memoized).</summary>
+    public string ModulePrefixFor(string modulePath, string? stdDir)
+    {
+        if (_modulePrefixes.TryGetValue(modulePath, out var known)) { return known; }
+        string rel;
+        if (stdDir is not null
+            && modulePath.StartsWith(stdDir, StringComparison.OrdinalIgnoreCase)
+            && modulePath.Length > stdDir.Length)
+        {
+            rel = modulePath[stdDir.Length..].TrimStart('/', '\\');
+        }
+        else
+        {
+            rel = System.IO.Path.GetFileName(modulePath);
+        }
+        if (rel.EndsWith(".zig", StringComparison.OrdinalIgnoreCase)) { rel = rel[..^4]; }
+        var sb = new System.Text.StringBuilder(rel.Length);
+        foreach (var ch in rel) { sb.Append(char.IsAsciiLetterOrDigit(ch) ? ch : '_'); }
+        var baseName = sb.Length == 0 || char.IsAsciiDigit(sb[0]) ? "m" + sb : sb.ToString();
+        var prefix = baseName;
+        for (var n = 2; !_usedPrefixes.Add(prefix); n++) { prefix = baseName + "_" + n; }
+        _modulePrefixes[modulePath] = prefix;
+        return prefix;
+    }
 }
 
 /// <summary>

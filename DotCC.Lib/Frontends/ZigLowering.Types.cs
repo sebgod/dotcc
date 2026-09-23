@@ -539,7 +539,7 @@ internal sealed partial class ZigLowering
     private CType ReifyInlineStruct(Item occurrence, Item? fieldDecls)
     {
         if (_inlineStructNames.TryGetValue(occurrence, out var existing)) { return new CType.Named(existing); }
-        var name = $"__AnonStruct{_inlineStructNames.Count}";
+        var name = QualifyTypeName($"__AnonStruct{_inlineStructNames.Count}");   // the counter is per module
         // Record the name BEFORE lowering the fields, so a self-referential field (`next: ?*Self`
         // resolved via @This()) or a re-entrant lowering of the same site sees the in-progress type.
         _inlineStructNames[occurrence] = name;

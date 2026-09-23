@@ -229,7 +229,7 @@ public sealed class ZigTypeBodyTests
                 "    if (alignment) |a| { if (a == 1) return Aligned(T, null); }\n" +
                 "    return struct { first: T };\n" +
                 "}\n"));
-        cs.ShouldContain("struct Aligned__u8_optnull");
+        cs.ShouldContain("struct list__Aligned__u8_optnull");   // reified in (and named for) list.zig
         cs.ShouldNotContain("List__u8");
     }
 

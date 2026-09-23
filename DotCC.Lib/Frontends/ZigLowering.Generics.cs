@@ -659,7 +659,9 @@ internal sealed partial class ZigLowering
                     valueSeeds.Add((p.Name, vv, LowerType(p.TypeAst)));
                 }
             }
-            var mangled = mangleTokens.Count == 0 ? templateSym.Name : templateSym.Name + "__" + string.Join("_", mangleTokens);
+            // Module-qualified in an imported module: two modules may each declare a `fn Box(comptime T)`.
+            var baseName = QualifyTypeName(templateSym.Name);
+            var mangled = mangleTokens.Count == 0 ? baseName : baseName + "__" + string.Join("_", mangleTokens);
 
             // Memoized — also short-circuits a self-referential field / recursive use, since the mapping is
             // installed BELOW before the fields are lowered. A DELEGATING instance (the W4 lift) memoizes

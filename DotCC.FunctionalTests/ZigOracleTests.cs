@@ -2784,6 +2784,26 @@ public sealed class ZigOracleTests
     /// into the same program and cross-module calls resolve.</summary>
     public static IEnumerable<object[]> MultiFilePrograms => new[]
     {
+        // Module-qualified container naming: the root AND the imported module each declare a `Shape`
+        // struct and a `Kind` enum with DIFFERENT layouts/members. The emitted C# carries one type per
+        // name, so this used to be a loud "two different aggregates" error (and, for the enum, a silent
+        // first-definition-wins); the import's containers now emit as `shapes__Shape` / `shapes__Kind`.
+        // 30 + 10 + 2 = 42.
+        new object[] { "import_same_named_types",
+            "const shapes = @import(\"shapes.zig\");\n" +
+            "const Shape = struct { w: u8 };\n" +
+            "const Kind = enum { a, b };\n" +
+            "pub fn main() u8 {\n" +
+            "    const mine: Shape = .{ .w = 30 };\n" +
+            "    const theirs: shapes.Shape = .{ .h = 10, .d = 2 };\n" +
+            "    const k: Kind = .b;\n" +
+            "    const t: shapes.Kind = .z;\n" +
+            "    if (k != .b or t != .z) return 1;\n" +
+            "    return mine.w + theirs.h + theirs.d;\n" +
+            "}\n",
+            "shapes.zig",
+            "pub const Shape = struct { h: u8, d: u8 };\n" +
+            "pub const Kind = enum { x, y, z };\n", 42, "" },
         // main imports a sibling and calls its exported fn: add(40, 2) = 42.
         new object[] { "import_call",
             "const util = @import(\"util.zig\");\npub fn main() u8 { return util.add(40, 2); }\n",
