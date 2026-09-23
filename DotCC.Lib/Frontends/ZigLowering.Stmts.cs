@@ -208,6 +208,11 @@ internal sealed partial class ZigLowering
             case Zig.StmtIfCapture f:        return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, null, null);
             case Zig.StmtIfCaptureElse f:    return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, f.Arg9, null);
             case Zig.StmtIfCaptureErrElse f: return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, f.Arg12, Tok(f.Arg10));
+            // `if (c) return x else …;` — a `return Expr` then-arm (ReturnArm), otherwise the same `if`.
+            case Zig.StmtIfReturnElse f:           return LowerIfStmt(f.Arg2, f.Arg4, f.Arg6);
+            case Zig.StmtIfCaptureReturnElse f:    return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, f.Arg9, null);
+            case Zig.StmtIfCaptureReturnErrElse f: return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, f.Arg12, Tok(f.Arg10));
+            case Zig.ReturnArm r:                  return Hoisted(() => LowerReturn(r.Arg1));
             case Zig.StmtWhile w:       return new While(LowerExpr(w.Arg2), LowerStmt(w.Arg4));
 
             // `while (cond) : (cont) body` → the C IR `For` (no init): the cont runs after each
@@ -1338,6 +1343,84 @@ internal sealed partial class ZigLowering
         }
     }
 
+    /// <summary>Fold a call to a generic of THIS module whose parameters are all <c>comptime T: type</c> and whose
+    /// body is one <c>return &lt;question&gt;;</c> (auto_hash's <c>typeContainsSlice</c>): the arguments bind as
+    /// type aliases (shadow-saved), the question folds through <see cref="TryFoldComptimeCondition"/>, and the
+    /// caller's environment is restored. Null when the call is not of that shape or the question does not fold.</summary>
+    private bool? TryFoldComptimeBoolCall(Item call)
+    {
+        if (call.Content is not Zig.CallArgs ca || _comptimeBoolCallDepth > 16) { return null; }
+        (ZigLowering Owner, Symbol Sym)? target = ca.Arg0.Content switch
+        {
+            Zig.Ident id when (_symbols.Resolve(Tok(id.Arg0)) ?? (_lazy ? EnsureDeclLowered(Tok(id.Arg0)) : null)) is { } local
+                => (this, local),
+            // `std.meta.hasUniqueRepresentation(Key)`: the owner asks the question with the caller's types.
+            Zig.Field f when !IsCuratedStdPath(ca.Arg0) && ResolveModulePath(f.Arg0)?.Lowering is { } mod
+                             && mod.ResolveExportedDecl(Tok(f.Arg2)) is { } exported
+                => (exported.Owner, exported.Sym),
+            _ => null,
+        };
+        if (target is not { } t || !t.Owner._genericFns.TryGetValue(t.Sym, out var g)) { return null; }
+        var args = Flatten(ca.Arg2);
+        if (args.Count != g.Params.Count || g.Params.Any(p => p.Kind != ParamKind.ComptimeType)) { return null; }
+        var resolved = args.Select(a => (LowerType(a).Unqualified, DeclaredBitsOfTypeArg(a))).ToList();
+        return t.Owner.FoldBoolCallBody(g, resolved);
+    }
+
+    /// <summary>The owner-side half of <see cref="TryFoldComptimeBoolCall"/>: with the type parameters of
+    /// <paramref name="g"/> bound to <paramref name="resolved"/>, fold its single <c>return</c>.</summary>
+    private bool? FoldBoolCallBody(GenericFnInfo g, IReadOnlyList<(CType Type, int? Bits)> resolved)
+    {
+        if (_comptimeBoolCallDepth > 16 || BodyStatements(g.Body) is not { Count: 1 } stmts || stmts[0].Content is not Zig.StmtReturn ret)
+        {
+            return null;
+        }
+        var shadows = new List<(string Name, CType? Prev, int? PrevBits)>();
+        _comptimeBoolCallDepth++;
+        try
+        {
+            for (var i = 0; i < g.Params.Count; i++)
+            {
+                var pname = g.Params[i].Name;
+                shadows.Add((pname, _typeAliases.TryGetValue(pname, out var pv) ? pv : null,
+                             _declaredIntBits.TryGetValue(pname, out var pb) ? pb : null));
+                _typeAliases[pname] = resolved[i].Type;
+                SetDeclaredIntBits(pname, resolved[i].Bits);
+            }
+            return TryFoldComptimeCondition(ret.Arg1);
+        }
+        finally
+        {
+            _comptimeBoolCallDepth--;
+            for (var i = shadows.Count - 1; i >= 0; i--)
+            {
+                var (pname, prev, prevBits) = shadows[i];
+                if (prev is { } p) { _typeAliases[pname] = p; } else { _typeAliases.Remove(pname); }
+                SetDeclaredIntBits(pname, prevBits);
+            }
+        }
+    }
+
+    /// <summary>Fold a comparison whose operands are compile-time constants, or null (a runtime operand, or
+    /// one that does not lower here). Lowered into a throwaway hoist, so nothing it touches is emitted.</summary>
+    private bool? TryConstEvalCondition(Item cond)
+    {
+        try
+        {
+            using (EnterThrowawayHoist())
+            {
+                return _ir.ConstEval(LowerExpr(cond)) is { } v ? v != 0 : null;
+            }
+        }
+        catch (IrUnsupportedException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>The nesting depth of <see cref="TryFoldComptimeBoolCall"/>, bounding a recursive question.</summary>
+    private int _comptimeBoolCallDepth;
+
     /// <summary>The condition of an <c>if</c> inside a <c>comptime { … }</c> block, which must be compile-time
     /// known: a comptime question (<see cref="TryFoldComptimeCondition"/>) or a folded integer.</summary>
     private bool FoldComptimeBlockCondition(Item cond)
@@ -1673,9 +1756,35 @@ internal sealed partial class ZigLowering
                 Zig.SwitchExprTrailing s => (s.Arg2, s.Arg5),
                 _ => throw new System.InvalidOperationException(),
             };
-            return SelectComptimeProng(subject, prongs, out _) is { CaptureName: null, Expr: { } chosen }
-                ? TryFoldComptimeCondition(chosen)
-                : null;
+            if (SelectComptimeProng(subject, prongs, out var chosenPayload) is not { Expr: { } chosen } chosenProng) { return null; }
+            if (chosenProng.CaptureName is null) { return TryFoldComptimeCondition(chosen); }
+            // `.int => |info| @sizeOf(T) * 8 == info.bits` (std.meta.hasUniqueRepresentation): the capture
+            // binds the tag's payload for the prong's question.
+            EnterComptimeProng(chosenProng, chosenPayload);
+            try { return TryFoldComptimeCondition(chosen); }
+            finally { ExitComptimeProng(); }
+        }
+        // `if (comptime typeContainsSlice(Key)) @compileError(…)` (std.hash.autoHash): a comptime call to a
+        // generic whose parameters are all comptime TYPES and whose body is `return <question>;` folds by
+        // asking the question with the arguments bound, so the guarded `@compileError` is never analysed.
+        if (cur.Content is Zig.PreComptime { Arg1: var comptimeCall } && TryFoldComptimeBoolCall(comptimeCall) is { } called)
+        {
+            return called;
+        }
+        // The same question asked without `comptime` (`if (std.meta.hasUniqueRepresentation(Key))` in autoHash):
+        // a function of TYPES only, with a single `return`, is pure, so its answer is the same at comptime.
+        if (cur.Content is Zig.CallArgs && TryFoldComptimeBoolCall(cur) is { } plainCalled)
+        {
+            return plainCalled;
+        }
+        // A comparison inside the body of a comptime TYPE question (`@sizeOf(T) * 8 == info.bits` in
+        // hasUniqueRepresentation): there every operand is comptime by construction (the function takes only
+        // types), so the interpreter's answer is the question's. NOT folded elsewhere: ConstEval reads a local
+        // `const` through its initializer with plain integer arithmetic, which is not a wrapping `u8`'s.
+        if (_comptimeBoolCallDepth > 0 && cur.Content is Zig.CmpEq or Zig.CmpNe or Zig.CmpLt or Zig.CmpGt or Zig.CmpLe or Zig.CmpGe
+            && TryConstEvalCondition(cur) is { } compared)
+        {
+            return compared;
         }
         if (cur.Content is Zig.TrueLit) { return true; }
         if (cur.Content is Zig.FalseLit) { return false; }

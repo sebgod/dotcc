@@ -459,10 +459,13 @@ public sealed class ZigFrontendTests
             "    lo += 0;\n" +
             "    const mn = @min(lo, 7);\n" +
             "    const mx = @max(lo, 2);\n" +
-            "    const rm = @rem(@as(i8, 7), 3);\n" +
-            "    const dt = @divTrunc(@as(i8, 7), 3);\n" +
-            "    const md = @mod(@as(i8, -7), 3);\n" +
-            "    const df = @divFloor(@as(i8, -7), 3);\n" +
+            // RUNTIME operands for the division helpers too: two constants fold (a quotient may size an array).
+            "    var sv: i8 = 7;\n" +
+            "    sv += 0;\n" +
+            "    const rm = @rem(sv, 3);\n" +
+            "    const dt = @divTrunc(sv, 3);\n" +
+            "    const md = @mod(-sv, 3);\n" +
+            "    const df = @divFloor(-sv, 3);\n" +
             // A RUNTIME operand: a comptime-known one folds to its literal (the W4 lift's bit-count fold).
             "    var pv: u8 = 11;\n" +
             "    pv += 0;\n" +
@@ -1105,7 +1108,7 @@ public sealed class ZigFrontendTests
         var cs = EmitZig(
             "pub fn main() u8 {\n" +
             "    var x: u8 = 0;\n" +
-            "    if (3 > 2) { x = 42; } else { x = 1; }\n" +
+            "    if (x < 2) { x = 42; } else { x = 1; }\n" +   // a RUNTIME condition (`3 > 2` folds, as in zig)
             "    while (x > 100) { x = x + 1; }\n" +
             "    return x;\n}\n");
         cs.ShouldContain("if (Cond.B(");

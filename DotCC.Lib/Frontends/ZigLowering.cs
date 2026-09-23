@@ -105,10 +105,9 @@ internal sealed partial class ZigLowering
     {
         // A bare name is an import, or an ALIAS of a module path (`const math = std.math;`, recorded
         // unresolved in _moduleAliasPaths), which is how std spells nearly every cross-file reference.
-        Zig.Ident id => ResolveImport(Tok(id.Arg0))
-            ?? (_moduleAliasPaths.TryGetValue(Tok(id.Arg0), out var aliased) ? ResolveModulePath(aliased) : null),
+        Zig.Ident id => ResolveNamedModule(Tok(id.Arg0)),
         Zig.Field f when ResolveModulePath(f.Arg0) is { Lowering: { } baseLowering } =>
-            baseLowering.ResolveImport(Tok(f.Arg2)),
+            baseLowering.ResolveNamedModule(Tok(f.Arg2)),
         // An INLINE import (`pub const block = @import("sort/block.zig").block;` in sort.zig): the spec is
         // registered under a synthetic import name, so it resolves (and memoizes) exactly as `const x =
         // @import("…");` does.
@@ -117,6 +116,16 @@ internal sealed partial class ZigLowering
             ResolveInlineImport(Tok(sl.Arg0).Trim('"')),
         _ => null,
     };
+
+    /// <summary>The module a top-level NAME of this module denotes: an import, an alias of a module path
+    /// (<c>const math = std.math;</c>), or a re-export of another module name (std.zig's
+    /// <c>pub const builtin = lang;</c>, so <c>std.builtin.Endian</c> is lang.zig's). Null when it names none.</summary>
+    private ZigModule? ResolveNamedModule(string name)
+        => ResolveImport(name)
+        ?? (_moduleAliasPaths.TryGetValue(name, out var aliased) ? ResolveModulePath(aliased)
+            : _declAliases.TryGetValue(name, out var reexport) && reexport.Content is Zig.Ident or Zig.Field
+                ? ResolveModulePath(reexport)
+                : null);
 
     /// <summary>Resolve an inline <c>@import("spec")</c> (see <see cref="ResolveModulePath"/>) through the
     /// ordinary import table, under the synthetic name <c>@import:spec</c>.</summary>

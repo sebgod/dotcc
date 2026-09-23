@@ -768,7 +768,13 @@ that retire curated shortcuts.
 >   `backward` / `check`, a `switch` as an `and` / `or` operand, and a lazy module's top-level CALL consts
 >   evaluated only when named, so hash/crc.zig's `Crc(u3, .{ … })` no longer sinks std.hash). It stops in
 >   `std.mem.asBytes(&key)` (Wyhash's input): `AsBytesReturnType` reads `@typeInfo(P).pointer.size`, which
->   dotcc cannot recover (`*T` and `[*]T` lower to one C pointer), under an `assert` in a type body.
+>   dotcc cannot recover (`*T` and `[*]T` lower to one C pointer), under an `assert` in a type body. `asBytes`
+>   is curated instead (a byte slice over the item). Then auto_hash's forms fell (`if … return … else`,
+>   `inline` prongs, `.undefined`/`.null`, comptime type questions folding across modules, a type-choosing
+>   `switch`, `@call`, `@divExact`, `&arr` as `*[N]T`), with two latent bugs found and fixed: a method declared
+>   on demand mid-body cleared that body's container scope (DeclareMethod set it to null instead of
+>   restoring it), and an enum member named `default` was not escaped. It stops at std.mem's
+>   `native_endian = builtin.cpu.arch.endian()`: a METHOD on the synthetic `builtin`, a target question.
 > - `std.mem.sort`: the closure idiom (`return struct { pub fn inner … }.inner;`) and comptime FUNCTION
 >   parameters landed, with an inline `@import(…).name` re-export, `noalias`, by-reference pair captures
 >   and `comptime { … }` prongs; then, past the value-width brick and a nested statement `switch` in

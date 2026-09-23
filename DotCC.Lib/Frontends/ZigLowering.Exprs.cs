@@ -261,6 +261,13 @@ internal sealed partial class ZigLowering
                 {
                     return new Unary(UnOp.AddrOf, operand) { Type = operand.Type };
                 }
+                // `&arr` of a LOCAL or MEMBER array is its `*[N]T`, and in C# an array already renders as its
+                // element pointer, the same address: so the pointer-to-array is the array expression itself,
+                // retyped (`const p = &arr;` is `byte* p = arr;`, not the element pointer's own address).
+                if (operand.Type.Unqualified is CType.Array && operand is VarRef { Sym.IsGlobal: false } or Member)
+                {
+                    return operand with { Type = new CType.Pointer(operand.Type) };
+                }
                 return new Unary(UnOp.AddrOf, operand) { Type = new CType.Pointer(operand.Type) };
             }
             // `try e` — unwrap the error union's payload, or propagate its error by throwing
@@ -987,8 +994,12 @@ internal sealed partial class ZigLowering
     }
 
     private CExpr LowerCallInner(Item calleeItem, Item? argListItem)
+        => LowerCallItems(calleeItem, argListItem is null ? new List<Item>() : Flatten(argListItem));
+
+    /// <summary>The body of <see cref="LowerCallInner"/> over already-split argument items, so a call spelled
+    /// another way (<c>@call(modifier, f, .{ a, b })</c>) lowers exactly as <c>f(a, b)</c>.</summary>
+    private CExpr LowerCallItems(Item calleeItem, List<Item> argItems)
     {
-        var argItems = argListItem is null ? new List<Item>() : Flatten(argListItem);
 
         // `base.method(args)` — a method (UFCS) or associated-function call.
         if (calleeItem.Content is Zig.Field fld)

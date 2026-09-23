@@ -248,9 +248,14 @@ internal sealed partial class ZigLowering
         }
         var methodName = Tok(nameTok);
 
-        _currentContainer = container;
-        var e = DeclareFn(nameTok, paramsItem, retType, body, errUnion: errUnion, mangledName: container + "_" + methodName);
-        _currentContainer = null;
+        // The container is the signature's scope, and the caller's is RESTORED after: a method declared on
+        // demand in the middle of another body (a lazy module's `H.init(seed)` inside `H.hash`) must not
+        // clear that body's container, or its next bare container const (`secret[1]`) goes unresolved.
+        (Symbol sym, List<(string name, CType type)> ps, Item body) e;
+        using (EnterContainer(container))
+        {
+            e = DeclareFn(nameTok, paramsItem, retType, body, errUnion: errUnion, mangledName: container + "_" + methodName);
+        }
 
         if (!_methods.TryGetValue(container, out var methods))
         {
@@ -1370,6 +1375,17 @@ internal sealed partial class ZigLowering
         throw new IrUnsupportedException($"decl literal `.{name}`: '{container}' has no `const {name}`");
     }
 
+    /// <summary>A pointer-to-array value (<c>*[N]T</c>: <c>&amp;arr</c>, or a parameter so typed) seen as the array it
+    /// points at, with that array type, or (null, null). The two share one C# representation (the element
+    /// pointer), so the array is the same expression retyped; an explicit <c>&amp;</c> strips back to its operand.</summary>
+    private static (CExpr? Array, CType.Array? Type) PointedArray(CExpr value)
+    {
+        if (value.Type.Unqualified is not CType.Pointer { Pointee.Unqualified: CType.Array pa }) { return (null, null); }
+        return value is Unary { Op: UnOp.AddrOf, Operand: var addressed }
+            ? (addressed, pa)
+            : (value with { Type = pa }, pa);
+    }
+
     /// <summary>True for an empty aggregate literal that spells a zero-length array: <c>.{}</c>, or a typed
     /// <c>[_]T{}</c> / <c>[0]T{}</c>.</summary>
     private bool IsEmptyArrayLiteral(Item literal) => literal.Content switch
@@ -1479,13 +1495,18 @@ internal sealed partial class ZigLowering
                 {
                     return CoerceToSlice(lowered, slc);
                 }
+                // A plain value at an ERROR-UNION sink (`fn unwrap(v: anyerror!u8)` called as `unwrap(5)`) is its
+                // success variant, as zig coerces it; an error union or an error code passes as it is.
+                if (sink?.Unqualified is CType.ErrorUnion okSink && lowered.Type.Unqualified is not (CType.ErrorUnion or CType.ErrorSetType))
+                {
+                    return new ErrUnionOk(lowered) { Type = okSink };
+                }
                 // `*[N]T` → `[*]T` at a many-pointer sink (`.marks = &self.marks` in hash_map's
                 // FieldIterator): the address of an array is its first element's, which is what the array
                 // itself already renders as (a local's element pointer, a field's fixed buffer or inline-array
                 // element pointer), C's array decay. `&arr` would instead be a pointer to that pointer.
                 if (sink?.Unqualified is CType.Pointer { Pointee: var sinkElem }
-                    && lowered is Unary { Op: UnOp.AddrOf, Operand: var arrOperand }
-                    && arrOperand.Type.Unqualified is CType.Array { Element: var arrElem }
+                    && PointedArray(lowered) is ({ } arrOperand, { Element: var arrElem })
                     && arrElem.Unqualified.Equals(sinkElem.Unqualified))
                 {
                     return arrOperand;
@@ -1520,10 +1541,7 @@ internal sealed partial class ZigLowering
         // (a `T*` in emitted C#), which is exactly the pointer `SliceNew` wants, and its element
         // count comes from the array type. (A bare `*[N]T` pointer VALUE that isn't a literal `&arr`
         // is rarer; it falls through to the array check below and reports a clear coercion error.)
-        if (value is Unary { Op: UnOp.AddrOf, Operand: var arr } && arr.Type.Unqualified is CType.Array)
-        {
-            value = arr;
-        }
+        if (PointedArray(value) is ({ } arr, _)) { value = arr; }
         if (value.Type.Unqualified is not CType.Array { Count: { } n })
         {
             throw new IrUnsupportedException(
@@ -1598,9 +1616,33 @@ internal sealed partial class ZigLowering
                         "zig `std.mem.zeroes` of an array/slice type is not modeled yet (scalar and struct types are supported)");
                 }
                 return new DefaultLit { Type = zt };
+            case "asBytes":
+            {
+                // std.mem.asBytes(ptr) — the bytes of the single item `ptr` points at (Wyhash's input in
+                // std.hash_map's auto-hash). zig types it `*[@sizeOf(T)]u8`; dotcc gives the byte SLICE over
+                // the same memory, which is what every consumer coerces it to (`[]const u8`), since a pointer
+                // to an array would render as a pointer to the element pointer. Curated because the source
+                // (`AsBytesReturnType` / `CopyPtrAttrs`) builds a pointer type from comptime attribute
+                // structs and the pointer size class, which dotcc does not model.
+                if (argItems.Count != 1)
+                {
+                    throw new IrUnsupportedException($"zig `std.mem.asBytes` expects (ptr); got {argItems.Count} argument(s)");
+                }
+                var abPtr = LowerExpr(argItems[0]);
+                if (abPtr.Type.Unqualified is not CType.Pointer { Pointee: var abPointee }
+                    || _ir.SizeOfConst(abPointee) is not { } abSize)
+                {
+                    throw new IrUnsupportedException(
+                        $"zig `std.mem.asBytes` expects a pointer to a sized item, got {abPtr.Type.Describe()}");
+                }
+                var abElem = abPointee.IsConst ? CType.UChar.WithQuals(TypeQual.Const) : CType.UChar;
+                var abBytes = new Cast(new CType.Pointer(abElem), abPtr) { Type = new CType.Pointer(abElem) };
+                var abLen = new LitInt(abSize.ToString(CultureInfo.InvariantCulture), abSize) { Type = CType.ULong };
+                return new SliceNew(abBytes, abLen, CType.UChar, abElem.IsConst) { Type = new CType.Slice(abElem) };
+            }
             default:
                 throw new IrUnsupportedException(
-                    $"zig `std.mem.{methodName}` is not modeled yet (supported: eql, copyForwards, span, zeroes)");
+                    $"zig `std.mem.{methodName}` is not modeled yet (supported: eql, copyForwards, span, zeroes, asBytes)");
         }
     }
 
@@ -1642,6 +1684,9 @@ internal sealed partial class ZigLowering
         CExpr basePtr;
         CType element;
         CExpr? sourceLen;   // the known source length, used for an open-ended high bound
+        // A pointer to an ARRAY (`*[N]T`, what `&arr` is and what zig's `ptr[0..48]` produces) slices like the
+        // array: its length is N. `&arr` strips back to the array itself; any other such pointer is dereferenced.
+        if (PointedArray(baseExpr) is ({ } pointedArray, _)) { baseExpr = pointedArray; }
         switch (baseExpr.Type.Unqualified)
         {
             case CType.Slice s:
@@ -1832,6 +1877,9 @@ internal sealed partial class ZigLowering
             case "@max":      return MathBin2("Max", bname, bargs);
             case "@rem":      return MathBin2("Rem", bname, bargs);
             case "@divTrunc": return MathBin2("DivTrunc", bname, bargs);
+            // `@divExact(a, b)` asserts the division is exact (safety-checked in debug builds only), so its
+            // value is the truncating quotient; dotcc reports ReleaseFast and does not trap.
+            case "@divExact": return MathBin2("DivTrunc", bname, bargs);
             case "@mod":      return MathBin2("Mod", bname, bargs);
             case "@divFloor": return MathBin2("DivFloor", bname, bargs);
             // Overflow-detecting arithmetic (road-to-zig-std B3) → `ZigMath.<helper><T>` returning
@@ -1927,6 +1975,23 @@ internal sealed partial class ZigLowering
                 var mcDest = LowerMemSlice(bargs[0], wantConst: false, out var mcElem);
                 var mcSrc = LowerMemSlice(bargs[1], wantConst: true, out _);
                 return new ZigMemCall("CopyForwards", mcElem, new List<CExpr> { mcDest, mcSrc }) { Type = CType.Void };
+            case "@call":
+            {
+                // `@call(.always_inline, Hasher.update, .{ hasher, bytes })` (std.hash.autoHash): the
+                // modifier only steers zig's inliner, so this is the ordinary call `callee(args…)`.
+                if (bargs.Count != 3)
+                {
+                    throw new IrUnsupportedException($"zig `@call` expects (modifier, function, .{{ args }}); got {bargs.Count} argument(s)");
+                }
+                var callArgs = bargs[2].Content switch
+                {
+                    Zig.AnonStructInitEmpty => new List<Item>(),
+                    Zig.AnonStructInit tuple when Flatten(tuple.Arg2).All(f => f.Content is Zig.FieldInitPositional)
+                        => Flatten(tuple.Arg2).Select(f => f.Content is Zig.FieldInitPositional pos ? pos.Arg0 : f).ToList(),
+                    _ => throw new IrUnsupportedException("zig `@call`: the arguments must be a positional tuple literal `.{ a, b }`"),
+                };
+                return LowerCallItems(bargs[1], callArgs);
+            }
             case "@memmove":
                 // `@memmove(dest, source)` — `@memcpy` for OVERLAPPING operands (a backward copy when dest is
                 // past source), array_list's in-place shift.
@@ -1972,7 +2037,7 @@ internal sealed partial class ZigLowering
                     "@bitSizeOf, @offsetOf, @typeName, @typeInfo, @hasField, @hasDecl, @field, @Int, @compileError, " +
                     "@compileLog, @setEvalBranchQuota, @min, @max, @rem, @divTrunc, @mod, @divFloor, " +
                     "@popCount, @clz, @ctz, " +
-                    "@byteSwap, @abs, @intFromPtr, @errorName, @memcpy, @memmove, @memset)");
+                    "@byteSwap, @abs, @intFromPtr, @errorName, @memcpy, @memmove, @memset, @divExact, @call, @branchHint)");
         }
     }
 
@@ -2043,6 +2108,20 @@ internal sealed partial class ZigLowering
         var a = LowerExpr(bargs[0]);
         var b = LowerExpr(bargs[1]);
         var t = PeerIntType(a, b);
+        // Two compile-time constants fold, so a quotient can size an array (`*const [@divExact(@typeInfo(T).int
+        // .bits, 8)]u8` in std.mem.readInt): the same arithmetic ZigMath performs at runtime.
+        if (_ir.ConstEval(a) is { } av && _ir.ConstEval(b) is { } bv && bv != 0)
+        {
+            long? folded = helper switch
+            {
+                "DivTrunc" => av / bv,
+                "DivFloor" => (av / bv) - ((av % bv != 0) && ((av < 0) != (bv < 0)) ? 1 : 0),
+                "Rem" => av % bv,
+                "Mod" => ((av % bv) + bv) % bv,
+                _ => null,
+            };
+            if (folded is { } f) { return new LitInt(f.ToString(System.Globalization.CultureInfo.InvariantCulture), f) { Type = t }; }
+        }
         return new Call($"ZigMath.{helper}", new List<CExpr> { CoerceToPeer(a, t), CoerceToPeer(b, t) }) { Type = t };
     }
 

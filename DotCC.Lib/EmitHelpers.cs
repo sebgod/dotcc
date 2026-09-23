@@ -51,9 +51,10 @@ internal static class EmitHelpers
         // implicitly converts to any pointer type — see <stddef.h>'s
         // `#define NULL null`), and a macro-supplied `null` is indistinguishable
         // from a user variable named `null`, so a variable named `null` stays
-        // the lone residual edge. `default` is also omitted: it's a C keyword
-        // (never a C identifier) and dotcc emits it for value-init.
-        "abstract", "as", "base", "bool", "break", "byte", "case", "catch",
+        // the lone residual edge. `default` IS escaped: it is never a C identifier (a C keyword), but
+        // it is an ordinary ZIG name (std.builtin.SymbolVisibility's `default` member), and dotcc's
+        // own value-init `default` is spelled directly, never through this escaper.
+        "abstract", "as", "base", "bool", "break", "byte", "case", "catch", "default",
         "char", "checked", "class", "const", "continue", "decimal",
         "delegate", "do", "double", "else", "enum", "event", "explicit",
         "extern", "false", "finally", "fixed", "float", "for", "foreach",

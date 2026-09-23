@@ -3570,6 +3570,48 @@ public sealed class ZigOracleTests
             "    }\n" +
             "    return @intCast(h + via_type + fwd + is_const + hot + a.toByteUnits() - 6);\n" +
             "}\n", 42, "" },
+        // Forms std.hash's auto-hash path reaches (road-to-zig-std G4): `if (c) return a else return b;`,
+        // `if (v) |x| return x else |_| return 0;`, `.undefined`/`.null` enum literals with an `inline else`, a
+        // comptime type question folding so its `@compileError` guard is never analysed, the curated
+        // `std.mem.asBytes`, `&arr` as a `*[N]T` sliced open-ended, `@divExact`, `@call`, and a plain value at
+        // an `anyerror!u8` argument. 30 + 5 + 3 + 4 + 4 + 2 + 2 + 12 - 20 = 42.
+        new object[] { "hash_path_forms",
+            "const std = @import(\"std\");\n" +
+            "fn isSlice(comptime T: type) bool {\n" +
+            "    return switch (@typeInfo(T)) {\n" +
+            "        .pointer => |info| info.size == .slice,\n" +
+            "        else => false,\n" +
+            "    };\n" +
+            "}\n" +
+            "fn pick(c: bool) u8 {\n" +
+            "    if (c) return 30 else return 1;\n" +
+            "}\n" +
+            "fn unwrap(v: anyerror!u8) u8 {\n" +
+            "    if (v) |x| return x else |_| return 0;\n" +
+            "}\n" +
+            "fn kind(comptime T: type) u8 {\n" +
+            "    return switch (@typeInfo(T)) {\n" +
+            "        .undefined, .null => 0,\n" +
+            "        .int => 3,\n" +
+            "        inline else => 7,\n" +
+            "    };\n" +
+            "}\n" +
+            "fn add(a: u8, b: u8) u8 {\n" +
+            "    return a + b;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    if (comptime isSlice(u32)) @compileError(\"u32 is no slice\");\n" +
+            "    var key: u32 = 0x01020304;\n" +
+            "    _ = &key;\n" +
+            "    const bytes = std.mem.asBytes(&key);\n" +
+            "    const arr = [4]u8{ 1, 2, 3, 4 };\n" +
+            "    const p = &arr;\n" +
+            "    const tail = p[2..];\n" +
+            "    const q: u8 = @divExact(8, 4);\n" +
+            "    const total = pick(true) + unwrap(5) + kind(u32) + @as(u8, @intCast(bytes.len)) + bytes[0] +\n" +
+            "        @as(u8, @intCast(tail.len)) + q + @call(.auto, add, .{ 10, 2 });\n" +
+            "    return total - 20;\n" +
+            "}\n", 42, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -3718,6 +3760,27 @@ public sealed class ZigOracleTests
     /// into the same program and cross-module calls resolve.</summary>
     public static IEnumerable<object[]> MultiFilePrograms => new[]
     {
+        // A method declared ON DEMAND in the middle of another body (a lazy module's `H.init(seed)` inside
+        // `H.hash`) must not clear that body's container scope: its next bare container const (`secret[1]`)
+        // resolved to nothing (std.hash.Wyhash's shape). 40 ^ 0 + 0 + 2 = 42.
+        new object[] { "lazy_method_container_scope",
+            "const hmod = @import(\"h.zig\");\n" +
+            "const H = hmod.H;\n" +
+            "pub fn main() u8 {\n" +
+            "    return @intCast(H.hash(0, 0));\n" +
+            "}\n",
+            "h.zig",
+            "pub const H = struct {\n" +
+            "    const secret = [_]u64{ 40, 2 };\n" +
+            "    a: u64,\n" +
+            "    pub fn init(seed: u64) H {\n" +
+            "        return .{ .a = seed ^ secret[0] };\n" +
+            "    }\n" +
+            "    pub fn hash(seed: u64, n: u64) u64 {\n" +
+            "        const h = H.init(seed);\n" +
+            "        return h.a + n + secret[1];\n" +
+            "    }\n" +
+            "};\n", 42, "" },
         // A lazily prepared module's top-level CALL consts are evaluated only when named (zig analyses a
         // declaration on reference): `Unused = Gen(.{ .width = 7 })` takes a comptime STRUCT argument dotcc
         // cannot evaluate, and it used to sink the module's preparation, losing `Bytes` too. 40 + 2 = 42.

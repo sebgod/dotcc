@@ -271,6 +271,13 @@ internal sealed partial class ZigLowering
                 type = tiListTy;
                 return true;
 
+            // `const Hasher = switch (@typeInfo(@TypeOf(hasher))) { .pointer => |ptr| ptr.child, else => @TypeOf(hasher) };`
+            // (std.hash.autoHash): a switch over a comptime TAG whose selected prong is a type. A switch that
+            // yields a value instead is left to the value path (the type evaluation declines, loudly or not).
+            case Zig.SwitchExpr or Zig.SwitchExprTrailing when TrySwitchTypeAlias(rhs, out var switched):
+                type = switched;
+                return true;
+
             // `pub const Size = Unmanaged.Size;` (std.HashMap) — a container's nested type or type const,
             // named qualified. Before the std-path case: a local container name is never a std path.
             case Zig.Field when TryResolveQualifiedNestedType(rhs) is { } qualified:
@@ -290,6 +297,29 @@ internal sealed partial class ZigLowering
             default:
                 type = CType.Int;
                 return false;
+        }
+    }
+
+    /// <summary>A switch over a comptime tag that selects a TYPE (see <see cref="TryTypeAliasRhs"/>): its type, or
+    /// false when the subject is not a comptime tag or the selected prong is not a type.</summary>
+    private bool TrySwitchTypeAlias(Item rhs, out CType type)
+    {
+        type = CType.Int;
+        var (subject, prongs) = rhs.Content switch
+        {
+            Zig.SwitchExpr s => (s.Arg2, s.Arg5),
+            Zig.SwitchExprTrailing s => (s.Arg2, s.Arg5),
+            _ => (null, null),
+        };
+        if (subject is null || prongs is null || !TryEvalComptimeTag(subject, out _, out _)) { return false; }
+        try
+        {
+            type = LowerComptimeTypeSwitch("switch", subject, prongs).Type;
+            return true;
+        }
+        catch (IrUnsupportedException)
+        {
+            return false;   // a value-yielding comptime switch: not an alias
         }
     }
 
@@ -751,7 +781,7 @@ internal sealed partial class ZigLowering
     /// source navigation (road-to-zig-std G2, the curated-first rule applied per member).</summary>
     private static readonly Dictionary<string, HashSet<string>> CuratedStdNamespaceFns = new(System.StringComparer.Ordinal)
     {
-        ["std.mem"] = new(System.StringComparer.Ordinal) { "eql", "copyForwards", "span", "zeroes" },
+        ["std.mem"] = new(System.StringComparer.Ordinal) { "eql", "copyForwards", "span", "zeroes", "asBytes" },
         ["std.debug"] = new(System.StringComparer.Ordinal) { "print" },
         ["std.testing"] = new(System.StringComparer.Ordinal)
             { "expect", "expectEqual", "expectError", "expectEqualStrings", "expectEqualSlices" },

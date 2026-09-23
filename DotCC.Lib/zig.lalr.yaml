@@ -273,6 +273,9 @@ symbols:
                    #     No RhsExpr starts with `enum` / `struct`, so after `if ( Expr )` it is a clean shift.
   - TestBlock      # 173 a `test "name"/ident/(anon) { … }` block as a CONTAINER member (std.math.Order's
                    #     `test invert { … }` inside the enum body), parsed and DROPPED like the top-level form.
+  - ReturnArm      # 174 `return Expr` as the THEN arm of an `if` statement with an `else` (zig's then-arm is an
+                   #     expression, so no `;`): `if (c) return 1 else return 2;`, std.meta.eql's
+                   #     `if (b) |b_p| return eql(a_p, b_p) else |_| return false;`.
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -501,6 +504,12 @@ productions:
       # then-Stmt's `else`, a `|` lookahead selects this error-capture form over the plain
       # `… else Stmt` above (no Stmt begins with `|`) — conflict-free, same rightmost group.
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', Stmt, 'else', '|', IDENT, '|', Stmt], action: stmtIfCaptureErrElse }
+      # A `return Expr` then-arm with no `;` of its own, ended by the `else` (the `;` ends the else arm).
+      # After `return Expr`, `else` selects the arm and `;` the ordinary return statement: a 1-token split.
+      - { lhs: ReturnArm, rhs: ['return', Expr], action: returnArm }
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', ReturnArm, 'else', Stmt], action: stmtIfReturnElse }
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', ReturnArm, 'else', Stmt], action: stmtIfCaptureReturnElse }
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', ReturnArm, 'else', '|', IDENT, '|', Stmt], action: stmtIfCaptureReturnErrElse }
 
       # Payload-capturing `while` — mirrors the if-capture family, in the same rightmost/dangling-else
       # group (the `else` shift-reduce is resolved identically). `while (opt) |x| body` binds an
@@ -1195,6 +1204,10 @@ productions:
       - { lhs: Primary, rhs: ['false'],             action: falseLit }
       - { lhs: Primary, rhs: [CHAR],                action: charLit }
       - { lhs: Primary, rhs: ['.', IDENT],          action: enumLit }
+      # `.undefined` / `.null` — the `std.builtin.Type` tags named after keywords (auto_hash's
+      # `switch (@typeInfo(Key)) { .undefined, .null, … }`). After `.` the keyword is a clean shift.
+      - { lhs: Primary, rhs: ['.', 'undefined'],    action: enumLitUndefined }
+      - { lhs: Primary, rhs: ['.', 'null'],         action: enumLitNull }
       # Anonymous struct literal `.{ … }` (Milestone D1). The leading `.` is the SAME token
       # as enumLit's; they split cleanly on the next symbol (`{` → struct literal, IDENT →
       # enum literal). An empty `.{}` zero-inits the (sink-typed) struct.
@@ -1310,6 +1323,17 @@ productions:
       # a `{` starts no Prefix (the `comptime` value operator's operand), so this is a clean shift.
       - { lhs: Prong, rhs: [CaseVals, '=>', 'comptime', Block],          action: prongComptimeBlock }
       - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, '|', ProngJump], action: prongCaptureJump }
+      # An `inline` prong (std.meta.eql's `inline else => |val, tag| …`, Target.zig's `inline else => |f|`):
+      # `inline` starts no CaseVals, so it is a clean shift wrapping any prong. A PAYLOAD + TAG capture
+      # `|val, tag|` splits from `|val|` on the `,` after the first name.
+      - { lhs: Prong, rhs: ['inline', Prong], action: inlineProng }
+      # A capture `if` with NO `else` as a (void) prong body — auto_hash's `.optional => if (key) |k| hash(…),`.
+      # Its body is a plain Expr ended by `,` / `}`, where an `else` would continue the if-EXPRESSION prong
+      # (whose arms are RhsExprs): a 1-token split, with no dangling else to resolve.
+      - { lhs: Prong, rhs: [CaseVals, '=>', 'if', '(', Expr, ')', '|', IDENT, '|', Expr], action: prongIfCapture }
+      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, ',', IDENT, '|', Block],             action: prongCaptureTag }
+      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, ',', IDENT, '|', RhsExpr],           action: prongCaptureTagExpr }
+      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, ',', IDENT, '|', 'return', RhsExpr], action: prongCaptureTagReturn }
 
   # The jump forms. FOLLOW(Prong) is `,` / `}`, so a label after `:` and a value after the label are
   # clean shift decisions (neither `,` nor `}` starts an RhsExpr).

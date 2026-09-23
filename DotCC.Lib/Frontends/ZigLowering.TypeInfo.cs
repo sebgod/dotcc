@@ -584,7 +584,7 @@ internal sealed partial class ZigLowering
     /// shape the comptime fold needs in all three switch positions (statement, expression, and the
     /// value-temp filler) without each re-deriving it from the eight capture productions.</summary>
     private sealed record ZigProng(Item CaseVals, string? CaptureName, Item? Block, Item? Expr, Item? Return, bool ReturnsVoid,
-        Item? Jump = null, Zig.ProngAssign? Assign = null);
+        Item? Jump = null, Zig.ProngAssign? Assign = null, string? Cut = null);
 
     /// <summary>Decompose a prong into <see cref="ZigProng"/>. A by-reference capture
     /// (<c>|*x|</c>) is rejected: a comptime <c>@typeInfo</c> value has no storage to point at.</summary>
@@ -603,6 +603,17 @@ internal sealed partial class ZigLowering
         // A `comptime { … }` body is walked as a block: a comptime-selected prong runs at lowering time anyway.
         Zig.ProngComptimeBlock p     => new ZigProng(p.Arg0, null,         p.Arg3, null,   null,   false),
         Zig.ProngCaptureJump p       => new ZigProng(p.Arg0, Tok(p.Arg3),  null,   null,   null,   false, p.Arg5),
+        // `inline` only matters to a RUNTIME switch (one instantiated prong per case); a comptime-selected
+        // switch takes one prong anyway.
+        Zig.InlineProng p            => DecomposeProng(p.Arg1),
+        // `|val, tag|`: the payload capture folds as `|val|`; a use of the tag name stays unresolved (loud).
+        Zig.ProngCaptureTag p        => new ZigProng(p.Arg0, Tok(p.Arg3),  p.Arg7, null,   null,   false),
+        Zig.ProngCaptureTagExpr p    => new ZigProng(p.Arg0, Tok(p.Arg3),  null,   p.Arg7, null,   false),
+        Zig.ProngCaptureTagReturn p  => new ZigProng(p.Arg0, Tok(p.Arg3),  null,   null,   p.Arg8, false),
+        // A no-`else` capture `if` body: its case values are readable, so an unselected prong is fine; a
+        // comptime-SELECTED one is a loud cut (see SelectComptimeProng).
+        Zig.ProngIfCapture p         => new ZigProng(p.Arg0, null,         null,   null,   null,   false,
+            Cut: "zig switch prong `=> if (x) |v| …` with no `else` is not supported yet as a selected comptime prong"),
         Zig.ProngCaptureRef or Zig.ProngCaptureRefExpr or Zig.ProngCaptureRefReturn or Zig.ProngCaptureRefReturnVoid
             => throw new IrUnsupportedException(
                 "zig `switch (@typeInfo(T)) { … => |*x| … }`: a comptime `std.builtin.Type` value has no storage, so it "
@@ -617,6 +628,16 @@ internal sealed partial class ZigLowering
     /// generic, never demand a field the type does not have, and never fail to compile. That is the
     /// whole point of the fold: <c>switch (@typeInfo(T))</c> is how std asks "which kind is T", and
     /// every non-taken arm is written for a different kind.</summary>
+    /// <summary>The tag an enum literal names: <c>.int</c>, and the keyword-named <c>.undefined</c> / <c>.null</c>;
+    /// null for any other node.</summary>
+    private static string? EnumLitName(Item lit) => lit.Content switch
+    {
+        Zig.EnumLit el => Tok(el.Arg1),
+        Zig.EnumLitUndefined => "undefined",
+        Zig.EnumLitNull => "null",
+        _ => null,
+    };
+
     private ZigProng? SelectComptimeProng(Item subjectItem, Item prongsItem, out ZigTypeInfo? payload)
     {
         if (!TryEvalComptimeTag(subjectItem, out var tag, out payload)) { return null; }
@@ -633,15 +654,15 @@ internal sealed partial class ZigLowering
                         "zig `switch (@typeInfo(T))`: a `lo...hi` range is not a tag — prongs match `.int` / `.pointer` / "
                         + "`.@\"struct\"` literals or `else`");
                 }
-                if (lo.Content is not Zig.EnumLit el)
+                if (EnumLitName(lo) is not { } litName)
                 {
                     throw new IrUnsupportedException(
                         "zig `switch (@typeInfo(T))`: a prong's case value must be a `.tag` enum literal or `else`");
                 }
-                if (Tok(el.Arg1) == tag) { return prong; }
+                if (litName == tag) { return prong.Cut is { } cut ? throw new IrUnsupportedException(cut) : prong; }
             }
         }
-        if (elseProng is not null) { return elseProng; }
+        if (elseProng is not null) { return elseProng.Cut is { } elseCut ? throw new IrUnsupportedException(elseCut) : elseProng; }
         throw new IrUnsupportedException(
             $"zig `switch` over a comptime `.{tag}`: no prong matches it and there is no `else` "
             + "(real zig would reject the switch as non-exhaustive)");
