@@ -365,6 +365,25 @@ internal sealed partial class ZigLowering
     /// <summary>Active labeled loops, innermost on top — see <see cref="LabeledLoopTarget"/>.</summary>
     private readonly Stack<LabeledLoopTarget> _labeledLoops = new();
 
+    /// <summary>Where an UNLABELED <c>break</c> goes when a <c>switch</c> statement sits between it and its
+    /// loop. zig's <c>break</c> in a prong exits the enclosing LOOP, but the prong lowers into a C#
+    /// <c>switch</c>, where a bare <c>break</c> exits only the switch (a silent miscompile: the loop kept
+    /// iterating). Such a break is a <c>goto</c> to <see cref="BreakLabel"/>, placed just after the loop
+    /// when used. <see cref="SwitchDepth"/> counts the statement switches entered since this loop.</summary>
+    private sealed class LoopBreakTarget
+    {
+        public required string BreakLabel { get; init; }
+        public bool Used { get; set; }
+        public int SwitchDepth { get; set; }
+    }
+
+    /// <summary>Every runtime loop being lowered, innermost on top (see <see cref="LoopBreakTarget"/>).</summary>
+    private readonly Stack<LoopBreakTarget> _loopBreakTargets = new();
+
+    /// <summary>The loop statement <see cref="LowerLoopWithBreakTarget"/> is lowering right now, so the
+    /// re-entry into <see cref="LowerStmt"/> lowers it instead of wrapping it again.</summary>
+    private Item? _loopBeingWrapped;
+
     /// <summary>Monotonic counter for labeled-loop break / continue labels (<c>__loopN_brk</c> /
     /// <c>__loopN_cont</c>), one per labeled loop (Milestone L, part 3).</summary>
     private int _loopLabelCounter;

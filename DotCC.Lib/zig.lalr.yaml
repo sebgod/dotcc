@@ -263,6 +263,9 @@ symbols:
   - PtrAlign       # 169 `align(E)` inside a pointer / slice type (`*align(4) const T`, `[]align(a) T`):
                    #     561 uses in std, 548 of them the six shapes below. Parsed, and not tracked: C#
                    #     pointers carry no alignment, as `align` on a declaration is already a no-op.
+  - ProngJump      # 170 a JUMP prong body: `break [:l [v]]` / `continue [:l]` (`'{', '}' => break,` in
+                   #     Writer.print; about 330 in std). A separate symbol from FallbackArm, whose
+                   #     block and `switch` arms would compete with the Block / RhsExpr prongs.
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -1253,6 +1256,22 @@ productions:
       - { lhs: Prong, rhs: [CaseVals, '=>', '|', '*', IDENT, '|', RhsExpr],           action: prongCaptureRefExpr }
       - { lhs: Prong, rhs: [CaseVals, '=>', '|', '*', IDENT, '|', 'return', RhsExpr], action: prongCaptureRefReturn }
       - { lhs: Prong, rhs: [CaseVals, '=>', '|', '*', IDENT, '|', 'return'],          action: prongCaptureRefReturnVoid }
+      # A JUMP prong body `v => break`, `v => continue :outer`, `v => |e| break :blk e` (road-to-zig-std
+      # G3). In zig `break`/`continue` are expressions, so they sit directly after `=>`; dotcc keeps them
+      # statements and admits them here as explicit prong forms, like `return`. `break`/`continue` are in
+      # no other prong body's FIRST set, so the choice is one token of lookahead.
+      - { lhs: Prong, rhs: [CaseVals, '=>', ProngJump],                  action: prongJump }
+      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, '|', ProngJump], action: prongCaptureJump }
+
+  # The jump forms. FOLLOW(Prong) is `,` / `}`, so a label after `:` and a value after the label are
+  # clean shift decisions (neither `,` nor `}` starts an RhsExpr).
+  - derivation: none
+    rules:
+      - { lhs: ProngJump, rhs: ['break'],                       action: pjBreak }
+      - { lhs: ProngJump, rhs: ['break', ':', IDENT],           action: pjBreakLabel }
+      - { lhs: ProngJump, rhs: ['break', ':', IDENT, RhsExpr],  action: pjBreakLabelValue }
+      - { lhs: ProngJump, rhs: ['continue'],                    action: pjContinue }
+      - { lhs: ProngJump, rhs: ['continue', ':', IDENT],        action: pjContinueLabel }
 
   # Case values: a comma-list of value Exprs, or `else` (the default). The `,` here never
   # clashes with the prong-separator `,` because FOLLOW(CaseVals) = { '=>' } — after a value

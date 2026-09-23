@@ -427,7 +427,8 @@ internal sealed partial class ZigLowering
     /// and exactly one body form (a braced block, a bare value expression, or a <c>return</c>). The
     /// shape the comptime fold needs in all three switch positions (statement, expression, and the
     /// value-temp filler) without each re-deriving it from the eight capture productions.</summary>
-    private sealed record ZigProng(Item CaseVals, string? CaptureName, Item? Block, Item? Expr, Item? Return, bool ReturnsVoid);
+    private sealed record ZigProng(Item CaseVals, string? CaptureName, Item? Block, Item? Expr, Item? Return, bool ReturnsVoid,
+        Item? Jump = null);
 
     /// <summary>Decompose a prong into <see cref="ZigProng"/>. A by-reference capture
     /// (<c>|*x|</c>) is rejected: a comptime <c>@typeInfo</c> value has no storage to point at.</summary>
@@ -441,6 +442,8 @@ internal sealed partial class ZigLowering
         Zig.ProngCaptureExpr p       => new ZigProng(p.Arg0, Tok(p.Arg3),  null,   p.Arg5, null,   false),
         Zig.ProngCaptureReturn p     => new ZigProng(p.Arg0, Tok(p.Arg3),  null,   null,   p.Arg6, false),
         Zig.ProngCaptureReturnVoid p => new ZigProng(p.Arg0, Tok(p.Arg3),  null,   null,   null,   true),
+        Zig.ProngJump p              => new ZigProng(p.Arg0, null,         null,   null,   null,   false, p.Arg2),
+        Zig.ProngCaptureJump p       => new ZigProng(p.Arg0, Tok(p.Arg3),  null,   null,   null,   false, p.Arg5),
         Zig.ProngCaptureRef or Zig.ProngCaptureRefExpr or Zig.ProngCaptureRefReturn or Zig.ProngCaptureRefReturnVoid
             => throw new IrUnsupportedException(
                 "zig `switch (@typeInfo(T)) { … => |*x| … }`: a comptime `std.builtin.Type` value has no storage, so it "

@@ -74,6 +74,10 @@ internal sealed partial class ZigLowering
 
     private CStmt LowerStmt(Item stmt)
     {
+        if (IsRuntimeLoopStmt(stmt.Content) && !ReferenceEquals(_loopBeingWrapped, stmt))
+        {
+            return LowerLoopWithBreakTarget(stmt);
+        }
         switch (stmt.Content)
         {
             // A `const` may be a comptime allocator/namespace binding (`const std = @import("std");`,
@@ -251,7 +255,7 @@ internal sealed partial class ZigLowering
 
             // `break;` / `continue;` — reuse the C IR loop-control nodes (the C# backend
             // renders them verbatim; valid inside the while/for forms above).
-            case Zig.StmtBreak:    return new Break();
+            case Zig.StmtBreak:    return LowerUnlabeledBreak();
             case Zig.StmtContinue: return new Continue();
 
             // `break v;` — an unlabeled value break (Milestone Y, part 2): yield `v` from the innermost
@@ -813,8 +817,20 @@ internal sealed partial class ZigLowering
             Label = label, BreakLabel = "__loop" + n + "_brk", ContLabel = "__loop" + n + "_cont",
         };
         _labeledLoops.Push(t);
-        var loop = LowerStmt(loopItem);   // a While / For / DoWhile; break/continue :lbl read `t`
-        _labeledLoops.Pop();
+        // The loop is its own unlabeled break target too (a `break` in a `switch` in its body), sharing
+        // the break label, so LowerStmt must not wrap it again: the continue label is appended to the
+        // loop's own body below, which a wrapping Seq would hide.
+        var unlabeled = new LoopBreakTarget { BreakLabel = t.BreakLabel };
+        _loopBreakTargets.Push(unlabeled);
+        _loopBeingWrapped = loopItem;
+        CStmt loop;
+        try { loop = LowerStmt(loopItem); }   // a While / For / DoWhile; break/continue :lbl read `t`
+        finally
+        {
+            _loopBreakTargets.Pop();
+            _labeledLoops.Pop();
+        }
+        if (unlabeled.Used) { t.BreakUsed = true; }
         if (t.ContUsed) { loop = WithLoopBody(loop, body => AppendLabel(body, t.ContLabel)); }
         var stmts = new List<CStmt> { loop };
         if (t.BreakUsed) { stmts.Add(new Labeled(t.BreakLabel, new Block(new List<CStmt>()))); }
@@ -1765,7 +1781,71 @@ internal sealed partial class ZigLowering
     /// tagged-union subject (a value or pointer-to a registered <c>union(enum)</c>) to
     /// <see cref="LowerUnionSwitch"/> (the tag-discriminant + payload-capture path) and any other
     /// subject to the plain <see cref="LowerSwitch"/>.</summary>
+    /// <summary>True for a runtime loop statement (every <c>LoopStmt</c> form), which gets an unlabeled
+    /// break target (<see cref="LowerLoopWithBreakTarget"/>).</summary>
+    private static bool IsRuntimeLoopStmt(object? content) => content is
+        Zig.StmtWhile or Zig.StmtWhileCont or Zig.StmtWhileContAssign or Zig.StmtWhileContBlock
+        or Zig.StmtWhileCapture or Zig.StmtWhileCaptureElse or Zig.StmtWhileCaptureErrElse
+        or Zig.StmtWhileCaptureCont or Zig.StmtWhileCaptureContAssign
+        or Zig.StmtForRange or Zig.StmtForSlice or Zig.StmtForSliceRef or Zig.StmtForSliceIdx
+        or Zig.StmtForSliceIdxRef or Zig.StmtForSlicePair;
+
+    /// <summary>Lower a runtime loop with an unlabeled break target (<see cref="LoopBreakTarget"/>), so a
+    /// <c>break</c> inside a <c>switch</c> in its body exits the loop, as in zig. The label is emitted
+    /// after the loop only when such a break used it; otherwise the loop lowers exactly as before.</summary>
+    private CStmt LowerLoopWithBreakTarget(Item loopItem)
+    {
+        var t = new LoopBreakTarget { BreakLabel = "__loop" + _loopLabelCounter++ + "_swbrk" };
+        _loopBreakTargets.Push(t);
+        _loopBeingWrapped = loopItem;
+        CStmt loop;
+        try { loop = LowerStmt(loopItem); }
+        finally { _loopBreakTargets.Pop(); }
+        return t.Used
+            ? new Seq(new List<CStmt> { loop, new Labeled(t.BreakLabel, new Block(new List<CStmt>())) })
+            : loop;
+    }
+
+    /// <summary>An unlabeled <c>break</c>: a plain C# <c>break</c>, unless a <c>switch</c> statement sits
+    /// between it and its loop, where it is a <c>goto</c> past the loop (<see cref="LoopBreakTarget"/>).</summary>
+    private CStmt LowerUnlabeledBreak()
+    {
+        if (_loopBreakTargets.TryPeek(out var t) && t.SwitchDepth > 0)
+        {
+            t.Used = true;
+            return new Goto(t.BreakLabel);
+        }
+        return new Break();
+    }
+
+    /// <summary>Lower a <c>switch</c> statement, counting it as a barrier for an unlabeled <c>break</c>
+    /// in its prongs (<see cref="LoopBreakTarget"/>).</summary>
     private CStmt LowerSwitchStmt(Item subjectItem, Item prongsItem)
+        => WithSwitchBarrier(() => LowerSwitchStmtCore(subjectItem, prongsItem));
+
+    /// <summary>Run <paramref name="lowerSwitch"/>, which builds a C# <c>switch</c>, as a barrier for an
+    /// unlabeled <c>break</c> in its prongs (<see cref="LoopBreakTarget"/>).</summary>
+    private CStmt WithSwitchBarrier(Func<CStmt> lowerSwitch)
+    {
+        var loop = _loopBreakTargets.Count > 0 ? _loopBreakTargets.Peek() : null;
+        if (loop is not null) { loop.SwitchDepth++; }
+        try { return lowerSwitch(); }
+        finally { if (loop is not null) { loop.SwitchDepth--; } }
+    }
+
+    /// <summary>Lower a JUMP prong body (<c>=&gt; break</c>, <c>=&gt; continue :outer</c>,
+    /// <c>=&gt; break :blk v</c>) exactly as the matching statement lowers.</summary>
+    private CStmt LowerProngJump(Item jump) => jump.Content switch
+    {
+        Zig.PjBreak => LowerUnlabeledBreak(),
+        Zig.PjBreakLabel b => LowerLabeledLoopJump(Tok(b.Arg2), isContinue: false),
+        Zig.PjBreakLabelValue b => LowerLabeledBreak(Tok(b.Arg2), b.Arg3),
+        Zig.PjContinue => new Continue(),
+        Zig.PjContinueLabel c => LowerLabeledLoopJump(Tok(c.Arg2), isContinue: true),
+        _ => throw new IrUnsupportedException("zig switch jump prong: " + (jump.Content?.GetType().Name ?? "null")),
+    };
+
+    private CStmt LowerSwitchStmtCore(Item subjectItem, Item prongsItem)
     {
         // A COMPTIME subject — `switch (@typeInfo(T))` / `switch (info.signedness)` — selects its
         // prong at lowering time and lowers ONLY that one (road-to-zig-std S5).
@@ -1780,6 +1860,7 @@ internal sealed partial class ZigLowering
                     { Expr: { } e } => new ExprStmt(LowerExpr(e)),
                     { Return: { } r } => Hoisted(() => LowerReturn(r)),
                     { ReturnsVoid: true } => LowerReturnVoid(),
+                    { Jump: { } j } => LowerProngJump(j),
                     _ => new Seq(new List<CStmt>()),
                 };
             }
@@ -1817,7 +1898,8 @@ internal sealed partial class ZigLowering
         {
             if (prongItem.Content is Zig.ProngCapture or Zig.ProngCaptureRef
                 or Zig.ProngCaptureExpr or Zig.ProngCaptureReturn or Zig.ProngCaptureReturnVoid
-                or Zig.ProngCaptureRefExpr or Zig.ProngCaptureRefReturn or Zig.ProngCaptureRefReturnVoid)
+                or Zig.ProngCaptureRefExpr or Zig.ProngCaptureRefReturn or Zig.ProngCaptureRefReturnVoid
+                or Zig.ProngCaptureJump)
             {
                 throw new IrUnsupportedException(
                     "zig switch payload capture `|x|` is only valid on a tagged-union switch");
@@ -1835,6 +1917,7 @@ internal sealed partial class ZigLowering
                 case Zig.ProngExpr pe:       caseVals = pe.Arg0; body = new List<CStmt> { new ExprStmt(LowerExpr(pe.Arg2)) }; break;
                 case Zig.ProngReturn pr:     caseVals = pr.Arg0; body = new List<CStmt> { Hoisted(() => LowerReturn(pr.Arg3)) }; break;
                 case Zig.ProngReturnVoid pr: caseVals = pr.Arg0; body = new List<CStmt> { LowerReturnVoid() }; break;
+                case Zig.ProngJump pj:       caseVals = pj.Arg0; body = new List<CStmt> { LowerProngJump(pj.Arg2) }; break;
                 default: throw new IrUnsupportedException("zig switch prong: " + (prongItem.Content?.GetType().Name ?? "null"));
             }
             var labels = LowerCaseVals(caseVals, subject.Type); // case values compare against the subject
@@ -1911,7 +1994,7 @@ internal sealed partial class ZigLowering
             // optional `|x|` / `|*x|` payload capture. Decompose the shape once, then lower the body
             // INSIDE the capture scope so it sees the binding.
             Item caseVals; string? captureName; bool captureByRef;
-            Item? blockBody = null, exprBody = null, returnBody = null;
+            Item? blockBody = null, exprBody = null, returnBody = null, jumpBody = null;
             var voidReturn = false;
             switch (prongItem.Content)
             {
@@ -1924,6 +2007,8 @@ internal sealed partial class ZigLowering
                 case Zig.ProngCaptureRefExpr p:       caseVals = p.Arg0; captureName = Tok(p.Arg4); captureByRef = true;  exprBody   = p.Arg6; break;
                 case Zig.ProngCaptureRefReturn p:     caseVals = p.Arg0; captureName = Tok(p.Arg4); captureByRef = true;  returnBody = p.Arg7; break;
                 case Zig.ProngCaptureRefReturnVoid p: caseVals = p.Arg0; captureName = Tok(p.Arg4); captureByRef = true;  voidReturn = true;   break;
+                case Zig.ProngJump p:                 caseVals = p.Arg0; captureName = null;        captureByRef = false; jumpBody   = p.Arg2; break;
+                case Zig.ProngCaptureJump p:          caseVals = p.Arg0; captureName = Tok(p.Arg3); captureByRef = false; jumpBody   = p.Arg5; break;
                 default: throw new IrUnsupportedException("zig switch prong: " + (prongItem.Content?.GetType().Name ?? "null"));
             }
             RejectUnionRange(caseVals, info);
@@ -1937,6 +2022,7 @@ internal sealed partial class ZigLowering
                 : exprBody is not null   ? new List<CStmt> { new ExprStmt(LowerExpr(exprBody)) }
                 : returnBody is not null ? new List<CStmt> { Hoisted(() => LowerReturn(returnBody)) }
                 : voidReturn             ? new List<CStmt> { LowerReturnVoid() }
+                : jumpBody is not null   ? new List<CStmt> { LowerProngJump(jumpBody) }
                 : throw new IrUnsupportedException("zig switch capture prong has no body");
 
             List<CStmt> body;
@@ -2257,6 +2343,7 @@ internal sealed partial class ZigLowering
         Flatten(prongsItem).Any(p => p.Content switch
         {
             Zig.Prong or Zig.ProngCapture or Zig.ProngCaptureRef => true,
+            Zig.ProngJump or Zig.ProngCaptureJump => true,   // a `break` / `continue` arm is a statement
             Zig.ProngExpr pe => pe.Arg2.Content is Zig.LabeledBlock,
             _ => false,
         });
@@ -2416,6 +2503,9 @@ internal sealed partial class ZigLowering
     /// tagged-union value-switch (tag dispatch + payload capture in value position) and a void block
     /// prong / <c>|x|</c> capture in a switch expression stay clear deferred errors.</summary>
     private CStmt BuildValueSwitch(Item subjectItem, Item prongsItem, ValueTempTarget rt)
+        => WithSwitchBarrier(() => BuildValueSwitchCore(subjectItem, prongsItem, rt));
+
+    private CStmt BuildValueSwitchCore(Item subjectItem, Item prongsItem, ValueTempTarget rt)
     {
         // A COMPTIME subject (road-to-zig-std S5) fills the result temp from the one selected prong —
         // the statement-context sibling of the fold in LowerSwitchExpr, reached when a prong needs
@@ -2449,7 +2539,8 @@ internal sealed partial class ZigLowering
         // subject is read once into a temp when a capture needs it again (it may be a call).
         var pre = new List<CStmt>();
         var prongs = Flatten(prongsItem);
-        if (subject is not VarRef && prongs.Any(p => p.Content is Zig.ProngCaptureExpr or Zig.ProngCaptureReturn or Zig.ProngCaptureReturnVoid))
+        if (subject is not VarRef && prongs.Any(p => p.Content is Zig.ProngCaptureExpr or Zig.ProngCaptureReturn
+                                                              or Zig.ProngCaptureReturnVoid or Zig.ProngCaptureJump))
         {
             var st = _symbols.Declare(new Symbol { Name = "__sw" + _blockLabelCounter++, Kind = SymKind.Var, Type = subject.Type });
             pre.Add(new DeclStmt(new List<LocalDecl> { new(st, subject) }));
@@ -2468,6 +2559,8 @@ internal sealed partial class ZigLowering
                 Zig.ProngCaptureExpr ce         => (ce.Arg0, Tok(ce.Arg3), () => FillValueTemp(ce.Arg5, rt)),
                 Zig.ProngCaptureReturn cr       => (cr.Arg0, Tok(cr.Arg3), () => LowerReturn(cr.Arg6)),
                 Zig.ProngCaptureReturnVoid cv   => (cv.Arg0, Tok(cv.Arg3), () => LowerReturnVoid()),
+                Zig.ProngJump pj                => (pj.Arg0, null, () => LowerProngJump(pj.Arg2)),
+                Zig.ProngCaptureJump cj         => (cj.Arg0, Tok(cj.Arg3), () => LowerProngJump(cj.Arg5)),
                 _ => throw new IrUnsupportedException(
                     "a value-position switch prong must yield a value (`v => expr` or `v => blk: {… break :blk v;}`) "
                     + "or jump (`v => return …`); a void block prong or a `|*x|` capture in a switch expression is not supported yet"),
@@ -2484,8 +2577,8 @@ internal sealed partial class ZigLowering
                 }
                 var stmt = body();
                 stmts.Add(stmt);
-                // A jump needs no `break` (and an unreachable `break` after `return` is a C# warning).
-                if (stmt is not Return) { stmts.Add(new Break()); }
+                // A jump needs no `break` (and an unreachable `break` after one is a C# warning).
+                if (!Terminates(stmt)) { stmts.Add(new Break()); }
             }
             finally
             {
@@ -2709,7 +2802,7 @@ internal sealed partial class ZigLowering
         Zig.CatchReturn r    => LowerReturn(r.Arg3),
         Zig.OrElseReturnVoid or Zig.CatchReturnVoid => LowerReturnVoid(),
         Zig.FbReturn r       => LowerReturn(r.Arg1),
-        Zig.FbBreak          => new Break(),
+        Zig.FbBreak          => LowerUnlabeledBreak(),
         Zig.FbContinue       => new Continue(),
         Zig.FbBreakLabel b   => LowerLabeledLoopJump(Tok(b.Arg2), isContinue: false),
         Zig.FbBreakLabelValue b => LowerLabeledBreak(Tok(b.Arg2), b.Arg3),

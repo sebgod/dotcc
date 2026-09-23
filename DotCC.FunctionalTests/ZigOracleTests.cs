@@ -3058,6 +3058,64 @@ public sealed class ZigOracleTests
             "    const p = &o;\n" +
             "    return o.f(20) + p.f(1);\n" +
             "}\n", 42, "" },
+        // An unlabeled `break` in a switch prong exits the LOOP (a C# `break` there would exit only the
+        // switch, and the loop kept iterating: dotcc returned 90). i = 3, n = 10 * 2 = 20.
+        new object[] { "switch_break_exits_loop",
+            "pub fn main() u8 {\n" +
+            "    var i: u8 = 0;\n" +
+            "    var n: u8 = 0;\n" +
+            "    while (i < 10) : (i += 1) {\n" +
+            "        switch (i) {\n" +
+            "            1 => {\n" +
+            "                continue;\n" +
+            "            },\n" +
+            "            3 => {\n" +
+            "                break;\n" +
+            "            },\n" +
+            "            else => {},\n" +
+            "        }\n" +
+            "        n += 10;\n" +
+            "    }\n" +
+            "    return i + n;\n" +
+            "}\n", 23, "" },
+        // Bare JUMP prong bodies (std.Io.Writer.print's `'{', '}' => break,`): `continue`, `continue :l`,
+        // `break` in a labeled loop, `break :blk v`, and `break` / `continue` in a `catch |e| switch`.
+        // i = 7, n = 5 (0, 3, 4, 5, 6), v = 24, k = 3, sum = 1 + 0 + 2 = 3: 42.
+        new object[] { "switch_jump_prongs",
+            "fn f(x: u8) error{ A, B }!u8 {\n" +
+            "    if (x == 3) return error.A;\n" +
+            "    if (x == 1) return error.B;\n" +
+            "    return x;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var i: u8 = 0;\n" +
+            "    var n: u8 = 0;\n" +
+            "    outer: while (i < 20) : (i += 1) {\n" +
+            "        switch (i) {\n" +
+            "            1 => continue,\n" +
+            "            2 => continue :outer,\n" +
+            "            7 => break,\n" +
+            "            else => {},\n" +
+            "        }\n" +
+            "        n += 1;\n" +
+            "    }\n" +
+            "    const v: u8 = blk: {\n" +
+            "        switch (n) {\n" +
+            "            5 => break :blk 24,\n" +
+            "            else => break :blk 0,\n" +
+            "        }\n" +
+            "    };\n" +
+            "    var k: u8 = 0;\n" +
+            "    var sum: u8 = 1;\n" +
+            "    while (k < 10) : (k += 1) {\n" +
+            "        const x = f(k) catch |e| switch (e) {\n" +
+            "            error.A => break,\n" +
+            "            error.B => continue,\n" +
+            "        };\n" +
+            "        sum += x;\n" +
+            "    }\n" +
+            "    return i + n + v + k + sum;\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
