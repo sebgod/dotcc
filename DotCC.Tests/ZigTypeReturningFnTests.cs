@@ -200,17 +200,18 @@ public sealed class ZigTypeReturningFnTests
     }
 
     [Fact]
-    public void Nested_container_in_the_returned_struct_is_rejected()
+    public void Nested_container_in_the_returned_struct_is_flattened_under_the_instance()
     {
-        // The remaining member cut: a nested container decl in the reified struct would need the nested
-        // type bound under a parent-mangled name scoped to a REIFIED parent — deferred, so it's loud.
-        var ex = Should.Throw<Exception>(() => EmitZig("""
+        // Once a cut: a nested container decl in the reified struct is bound under the INSTANCE's mangled
+        // name (`Outer__u8__Inner`), exactly as pass 0 flattens a top-level container's nested types.
+        var cs = EmitZig("""
             fn Outer(comptime T: type) type {
-                return struct { v: T, const Inner = struct { z: u8 }; };
+                return struct { v: T, i: Inner = .{ .z = 2 }, const Inner = struct { z: u8 }; };
             }
-            pub fn main() u8 { const o: Outer(u8) = .{ .v = 1 }; return o.v; }
-            """));
-        ex.Message.ShouldContain("nested container member");
+            pub fn main() u8 { const o: Outer(u8) = .{ .v = 40 }; return o.v + o.i.z; }
+            """);
+        cs.ShouldContain("unsafe struct Outer__u8__Inner");
+        cs.ShouldContain("public Outer__u8__Inner i;");
     }
 
     [Fact]

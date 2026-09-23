@@ -1096,12 +1096,6 @@ internal sealed partial class ZigLowering
                 var (fields, methods, consts, containers) = bodyResult.Fields is { } m
                     ? SplitMembers(m)
                     : (new List<Item>(), new List<Item>(), new List<Item>(), new List<Item>());
-                if (containers.Count > 0)
-                {
-                    throw new IrUnsupportedException(
-                        $"type-returning generic '{templateSym.Name}': a nested container member "
-                        + "(`const Inner = struct {…};`) in the returned type is not supported yet (road-to-zig-std G4)");
-                }
                 _containerTypes[mangled] = mangledType;   // memo + @This() target; BEFORE reify for self-ref
                 _reifiedSeeds[mangled] = (typeSeeds, valueSeeds, optionalSeeds);
                 _currentContainer = mangled;
@@ -1127,6 +1121,29 @@ internal sealed partial class ZigLowering
                     valueConsts.Add(c);
                 }
                 consts = valueConsts;
+                // NESTED containers (hash_map's `pub const Entry = struct {…};`, `Iterator`, … inside Custom's
+                // returned struct): flattened to `<mangled>__Name` and scoped to the instance, exactly as pass 0
+                // flattens a module's, with this instance's seeds live (their fields may be typed `K` / `V`); their
+                // methods are deferred with the seeds like the instance's own. Named before any field or type
+                // const that uses them, laid out before the instance's own fields.
+                var nestedDecls = CollectNestedContainers(mangled, containers);
+                var nestedMethods = new List<(string container, Item fnDef)>();
+                foreach (var (nName, nContent, nParent) in nestedDecls)
+                {
+                    RegisterContainerName(nName, nContent, nestedMethods);
+                    ScopeNestedContainer(nName, nContent, nParent);
+                }
+                foreach (var (nName, nContent, _) in nestedDecls)
+                {
+                    RegisterContainerBody(nName, nContent, nestedMethods);
+                }
+                foreach (var (nContainer, nDef) in nestedMethods)
+                {
+                    var nm = DeclareMethod(nContainer, nDef);
+                    _pendingReifiedMethods.Add(new PendingReifiedMethod(
+                        nm.sym, nContainer, nm.ps, nm.body, typeSeeds, valueSeeds, optionalSeeds));
+                }
+                _currentContainer = mangled;
                 RegisterStruct(mangled, fields);
                 // `const Self = @This();` → a self alias scoped to the MANGLED container, plus any value
                 // const — both keyed by the mangled name, so a method's `self: *Self` and a `S.NAME` use

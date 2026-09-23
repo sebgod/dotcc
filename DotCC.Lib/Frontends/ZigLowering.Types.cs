@@ -309,6 +309,7 @@ internal sealed partial class ZigLowering
         {
             Zig.IfExpr ie => IsTypeConstMember(ie.Arg4),
             Zig.IfExprCapture ic => IsTypeConstMember(ic.Arg7),
+            Zig.IfExprTypeArms => true,
             _ => IsTypeFormer(cur) || TryTypeAliasRhs(cur, out _),
         };
     }
@@ -820,6 +821,7 @@ internal sealed partial class ZigLowering
         // the reference is what zig analyses, so this is where the author's message is raised.
         RaiseIfPoisoned(name);
         if (ResolveSelfAlias(name) is { } alias) { return alias; }
+        if (ResolveContainerTypeConst(name) is { } typeConst) { return typeConst; }
         // A nested container type (`const Inner = struct {…};` inside the current container — S9 #89),
         // resolved by plain name while a method of the parent is being lowered.
         if (ResolveNestedType(name) is { } nested) { return nested; }
@@ -850,11 +852,54 @@ internal sealed partial class ZigLowering
     /// <summary>Resolve a type name that is a container-scoped self alias (<c>const Self =
     /// @This();</c>), valid only while a method of the declaring container is being lowered
     /// (<see cref="_currentContainer"/> set). Returns <c>null</c> when it is not such an alias.</summary>
-    private CType? ResolveSelfAlias(string name) =>
-        _currentContainer is { } c
-        && _selfAliases.TryGetValue(c, out var m)
-        && m.TryGetValue(name, out var t)
-            ? t : null;
+    private CType? ResolveSelfAlias(string name)
+    {
+        // Innermost first, then outward: a nested container sees its enclosing container's aliases and type
+        // consts (hash_map's `Iterator` names `Custom`'s `Size`), zig's lexical scoping.
+        for (var c = _currentContainer; c is not null; c = _containerParents.GetValueOrDefault(c))
+        {
+            if (_selfAliases.TryGetValue(c, out var m) && m.TryGetValue(name, out var t)) { return t; }
+        }
+        return null;
+    }
+
+    /// <summary>Resolve a type name that is a TYPE const member of the container in scope or of one enclosing
+    /// it (hash_map's <c>const Metadata = packed struct { const FingerPrint = u7; fingerprint: FingerPrint, … }</c>),
+    /// evaluated on first use with that container current and cached as a scoped alias, so a field, a
+    /// signature or a body names it plainly. A reified instance evaluates its own type consts eagerly, while
+    /// its seeds are live; this is the lazy path for every other container. <c>null</c> when not such a name.</summary>
+    private CType? ResolveContainerTypeConst(string name)
+    {
+        for (var c = _currentContainer; c is not null; c = _containerParents.GetValueOrDefault(c))
+        {
+            if (!_containerConsts.TryGetValue(c, out var consts)
+                || !consts.TryGetValue(name, out var entry)
+                || entry.Item1 is not null
+                || !_typeConstsInFlight.Add((c, name)))
+            {
+                continue;
+            }
+            try
+            {
+                if (!IsTypeConstMember(entry.Item2)) { continue; }
+                CType resolved;
+                using (EnterContainer(c)) { resolved = LowerComptimeTypeExpr(c, entry.Item2).Type; }
+                if (!_selfAliases.TryGetValue(c, out var scoped))
+                {
+                    scoped = new Dictionary<string, CType>(System.StringComparer.Ordinal);
+                    _selfAliases[c] = scoped;
+                }
+                scoped[name] = resolved;
+                return resolved;
+            }
+            finally { _typeConstsInFlight.Remove((c, name)); }
+        }
+        return null;
+    }
+
+    /// <summary>The (container, name) type consts <see cref="ResolveContainerTypeConst"/> is evaluating, so a
+    /// const whose shape test names itself does not recurse.</summary>
+    private readonly HashSet<(string Container, string Name)> _typeConstsInFlight = new();
 
     /// <summary>Resolve a type name that is a NESTED container decl of the container currently in scope
     /// (<c>const Inner = struct {…};</c> inside <c>Parent</c> — road-to-zig-std S9, grammar #89) or of
@@ -909,6 +954,7 @@ internal sealed partial class ZigLowering
     {
         var alias = ResolveSelfAlias(name);
         if (alias is not null) { type = alias; return true; }
+        if (ResolveContainerTypeConst(name) is { } typeConst) { type = typeConst; return true; }
         var nested = ResolveNestedType(name);
         if (nested is not null) { type = nested; return true; }
         if (_containerTypes.TryGetValue(name, out type!)) { return true; }

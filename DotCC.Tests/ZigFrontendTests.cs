@@ -4023,7 +4023,8 @@ public sealed class ZigFrontendTests
         // hoist.)
         var cs = EmitZig(
             "pub fn main() u8 {\n" +
-            "    const c = true;\n" +
+            "    var c = true;\n" +
+            "    _ = &c;\n" +   // a RUNTIME condition: a comptime-known `const c` folds the if away
             "    const r: i32 = 1 + (if (c) @as(i32, 20) else @as(i32, 8));\n" +
             "    return @as(u8, @intCast(r));\n" +
             "}\n");

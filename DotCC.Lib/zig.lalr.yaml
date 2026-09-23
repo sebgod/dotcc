@@ -268,6 +268,9 @@ symbols:
                    #     block and `switch` arms would compete with the Block / RhsExpr prongs.
   - NOALIAS        # 171 the `noalias` parameter qualifier (`noalias a: *T` in std.mem.swap), IGNORED by the
                    #     lexer: an aliasing promise to the optimizer, with no meaning for a C# pointer.
+  - TypeArm        # 172 an inline `enum {…}` / `struct {…}` as an arm of a TYPE-choosing `if` (debug.zig's
+                   #     `pub const State = if (runtime_safety) enum { unlocked, locked } else enum { unknown };`).
+                   #     No RhsExpr starts with `enum` / `struct`, so after `if ( Expr )` it is a clean shift.
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -875,6 +878,10 @@ productions:
   - derivation: none
     rules:
       - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', RhsExpr, 'else', RhsExpr], action: ifExpr }
+      # An `if` choosing between two inline container TYPES (a type const's RHS, folded at lowering time).
+      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', TypeArm, 'else', TypeArm], action: ifExprTypeArms }
+      - { lhs: TypeArm, rhs: ['enum', '{', EnumFields, '}'],   action: typeArmEnum }
+      - { lhs: TypeArm, rhs: ['struct', '{', FieldDecls, '}'], action: typeArmStruct }
       # Value-position captured `if` — `if (opt) |x| thenExpr else elseExpr` (S4a). The `|` after the
       # `)` cannot start a RhsExpr (it is only an infix bitwise-or), so this is conflict-free with the
       # plain ifExpr above. `else` is mandatory (an expression yields a value on both paths). Mirrors
@@ -1389,7 +1396,9 @@ productions:
       # fail first on the `=`, and it's a hard requirement for the file-is-a-struct idiom. After
       # `IDENT : Type` the `=` (default) vs `,`/`}` (bare field) decision is a clean 1-token split.
       # The default is materialized only for fields OMITTED from a `.{…}` literal (see BuildStructInit).
-      - { lhs: FieldDecl, rhs: [IDENT, ':', AType, '=', Expr], action: structFieldDefault }
+      # The default is a value-position RhsExpr, so an `if` may choose it (debug.zig's SafetyLock:
+      # `state: State = if (runtime_safety) .unlocked else .unknown,`); `,` / `}` still end it.
+      - { lhs: FieldDecl, rhs: [IDENT, ':', AType, '=', RhsExpr], action: structFieldDefault }
 
   # Enum body as a MEMBER list (right-recursive over EnumMember, like struct's FieldDecls) — so
   # value members, methods (`fn`/`pub fn`), and consts (`const Self = @This();`) interleave. The

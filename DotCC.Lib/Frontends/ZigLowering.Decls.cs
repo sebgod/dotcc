@@ -472,7 +472,7 @@ internal sealed partial class ZigLowering
                 case Zig.StructField f:          // FieldDecl -> IDENT ':' Type
                     fields.Add(new StructField(Tok(f.Arg0), LowerType(f.Arg2)));
                     break;
-                case Zig.StructFieldDefault f:   // FieldDecl -> IDENT ':' Type '=' Expr
+                case Zig.StructFieldDefault f:   // FieldDecl -> IDENT ':' Type '=' RhsExpr
                     var fname = Tok(f.Arg0);
                     fields.Add(new StructField(fname, LowerType(f.Arg2)));
                     _structFieldDefaults[(name, fname)] = f.Arg4;   // raw default AST — lowered lazily on omission
@@ -1102,9 +1102,20 @@ internal sealed partial class ZigLowering
                 if (_structFieldDefaults.TryGetValue((named.Name, f.Name), out var defItem))
                 {
                     if (IsInlineArrayMember(named.Name, f.Name, f.Type, defItem)) { continue; }
-                    // A reified struct's default may read its comptime params (`n: u8 = n`).
+                    // A reified struct's default may read its comptime params (`n: u8 = n`), and any
+                    // default may name a sibling const (`fingerprint: FingerPrint = free` in hash_map's
+                    // Metadata): it is evaluated in its container's scope, not the literal's.
                     using var seeds = EnterReifiedSeeds(named.Name);
-                    members.Add(new FieldInit(f.Name, f.Type, LowerExprSink(defItem, f.Type)));
+                    var prevConstContainer = _currentConstContainer;
+                    _currentConstContainer = named.Name;
+                    try
+                    {
+                        using (EnterContainer(named.Name))
+                        {
+                            members.Add(new FieldInit(f.Name, f.Type, LowerExprSink(defItem, f.Type)));
+                        }
+                    }
+                    finally { _currentConstContainer = prevConstContainer; }
                 }
             }
         }
@@ -1358,6 +1369,14 @@ internal sealed partial class ZigLowering
                 return LowerBuiltinCall(b, sink);
             // A switch EXPRESSION at a typed sink (`const x: T = switch (y) { … }`) — each arm's
             // value lowers at `sink`, so a result-located arm (`.member` / `.{…}` / a cast) resolves.
+            // An if-EXPRESSION carries the sink into both arms, so `if (c) .a else .b` resolves each enum
+            // literal against the result type; a comptime condition selects one arm, as LowerExpr's does.
+            case Zig.IfExpr ie when sink is not null:
+            {
+                if (TryFoldComptimeCondition(ie.Arg2) is { } taken) { return LowerExprSink(taken ? ie.Arg4 : ie.Arg6, sink); }
+                var then = LowerExprSink(ie.Arg4, sink);
+                return new CondExpr(LowerExpr(ie.Arg2), then, LowerExprSink(ie.Arg6, sink)) { Type = then.Type };
+            }
             case Zig.SwitchExpr s:         return LowerSwitchExpr(s.Arg2, s.Arg5, sink);
             case Zig.SwitchExprTrailing s: return LowerSwitchExpr(s.Arg2, s.Arg5, sink);
             // `comptime switch` / `comptime if` in value position: the inner form, whose comptime-known

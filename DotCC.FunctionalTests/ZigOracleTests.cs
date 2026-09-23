@@ -3215,6 +3215,80 @@ public sealed class ZigOracleTests
             "pub fn main() u8 {\n" +
             "    return @intCast(literalPart(\"hello{}\") * 5 + 2);\n" +
             "}\n", 42, "" },
+        // Nested containers of a reified struct (road-to-zig-std G3, hash_map's `Custom`): `Entry` (with a
+        // method) and `Metadata` flatten to `Map__u16_u8__Entry` / `__Metadata` per instance, and Metadata's own
+        // TYPE const `FingerPrint = u7` types its field, whose default names the sibling const `free`.
+        // 39 + 2 + 1 + 0 = 42.
+        new object[] { "reified_nested_containers",
+            "fn Map(comptime K: type, comptime V: type) type {\n" +
+            "    return struct {\n" +
+            "        head: Entry,\n" +
+            "        meta: Metadata = .{},\n" +
+            "        const Self = @This();\n" +
+            "        pub const Entry = struct {\n" +
+            "            key: K,\n" +
+            "            value: V,\n" +
+            "            pub fn sum(e: Entry) u8 {\n" +
+            "                return @as(u8, @intCast(e.key)) + e.value;\n" +
+            "            }\n" +
+            "        };\n" +
+            "        const Metadata = packed struct {\n" +
+            "            const FingerPrint = u7;\n" +
+            "            const free: FingerPrint = 1;\n" +
+            "            fingerprint: FingerPrint = free,\n" +
+            "            used: u1 = 0,\n" +
+            "        };\n" +
+            "        pub fn first(self: Self) Entry {\n" +
+            "            return self.head;\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const M = Map(u16, u8);\n" +
+            "    const m: M = .{ .head = .{ .key = 39, .value = 2 } };\n" +
+            "    const e: M.Entry = m.first();\n" +
+            "    return e.sum() + m.meta.fingerprint + m.meta.used;\n" +
+            "}\n", 42, "" },
+        // debug.zig's SafetyLock shape, mode-independent: a module-level bool folded through a `switch` over
+        // `builtin.cpu.arch`, a type const that is an `if` over two inline enum types, a field default that
+        // chooses with an `if`, and a method whose tail after `if (!checked) return;` zig never analyses (it
+        // names `.locked`, which the other arm's enum lacks). 0 + 40 + 2 (locked) + 0 (unknown) = 42.
+        new object[] { "comptime_type_arms",
+            "const builtin = @import(\"builtin\");\n" +
+            "const checked = switch (builtin.cpu.arch) {\n" +
+            "    .avr, .msp430 => false,\n" +
+            "    else => true,\n" +
+            "};\n" +
+            "const unchecked = !checked;\n" +
+            "const Guard = struct {\n" +
+            "    state: State = if (checked) .unlocked else .unknown,\n" +
+            "    pub const State = if (checked) enum { unknown, unlocked, locked } else enum { unknown };\n" +
+            "    pub fn lock(l: *Guard) void {\n" +
+            "        if (!checked) return;\n" +
+            "        l.state = .locked;\n" +
+            "    }\n" +
+            "    pub fn isLocked(l: Guard) bool {\n" +
+            "        if (!checked) return false;\n" +
+            "        return l.state == .locked;\n" +
+            "    }\n" +
+            "};\n" +
+            "const Off = struct {\n" +
+            "    state: State = if (unchecked) .unlocked else .unknown,\n" +
+            "    pub const State = if (unchecked) enum { unknown, unlocked, locked } else enum { unknown };\n" +
+            "    pub fn lock(o: *Off) void {\n" +
+            "        if (!unchecked) return;\n" +
+            "        o.state = .locked;\n" +
+            "    }\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    var l: Guard = .{};\n" +
+            "    const before: u8 = if (l.isLocked()) 1 else 0;\n" +
+            "    l.lock();\n" +
+            "    const after: u8 = if (l.isLocked()) 40 else 0;\n" +
+            "    var o: Off = .{};\n" +
+            "    o.lock();\n" +
+            "    return before + after + @as(u8, @intFromEnum(l.state)) + @as(u8, @intFromEnum(o.state));\n" +
+            "}\n", 42, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

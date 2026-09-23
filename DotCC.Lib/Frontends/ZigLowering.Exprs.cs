@@ -95,12 +95,14 @@ internal sealed partial class ZigLowering
                 }
                 // A bare (unqualified) sibling container const (Milestone R, part 6): inside a
                 // container const's RHS re-lower (`_currentConstContainer` set), an unresolved name may
-                // name a SIBLING const — inline it (comptime). Outside that, the unresolved error holds.
-                if (_currentConstContainer is { } cc
-                    && _containerConsts.TryGetValue(cc, out var sibs)
-                    && sibs.TryGetValue(name, out var sib))
+                // name a SIBLING const — inline it (comptime), or one of an ENCLOSING container's, zig's
+                // lexical scoping for a nested container. Outside that, the unresolved error holds.
+                for (var cc = _currentConstContainer; cc is not null; cc = _containerParents.GetValueOrDefault(cc))
                 {
-                    return LowerContainerConst(cc, name, sib.typeItem, sib.rhs);
+                    if (_containerConsts.TryGetValue(cc, out var sibs) && sibs.TryGetValue(name, out var sib))
+                    {
+                        return LowerContainerConst(cc, name, sib.typeItem, sib.rhs);
+                    }
                 }
                 // A name bound to a COMPTIME value with no runtime symbol — today an `inline for`
                 // capture over a member list of strings or enum values (road-to-zig-std S6), which

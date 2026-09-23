@@ -542,7 +542,8 @@ that retire curated shortcuts.
 >    (C# CS0101) — the deferred module-qualified container naming, now observed against real std.
 >
 > **Cuts:** a nested container in an ENUM/UNION body; a cross-MODULE qualified nested type
-> (`std.fmt.Number.Mode` spelled in another file); a nested container in a W4-reified struct.
+> (`std.fmt.Number.Mode` spelled in another file). (A nested container in a W4-reified struct: done
+> 2026-09-24, flattened per instance.)
 >
 > Validation: 6 emit pins (`ZigNestedContainerTests`) + 1 superseded cut pin flipped positive + the
 > `nested_containers` zig-oracle program + `examples/zig-nested-containers/`, exit 42 == real zig.
@@ -746,8 +747,14 @@ that retire curated shortcuts.
 >   identity: the honest answer is null (scalars), a decision for the user (deferred.md).
 > - `std.AutoHashMap`: the runtime multi-object `for (metadata, keys, values) |m, k, v|`, an assignment
 >   prong body, and a parse-skip diagnostic through a same-module alias (`HashMapUnmanaged = Custom`)
->   let `Custom` parse whole. It stops at G4's nested-container cut (`Entry`, `Iterator` inside the
->   reified type).
+>   let `Custom` parse whole. Then G4's nested-container cut fell: a reified type's nested containers
+>   (`Entry`, `Iterator`, the packed `Metadata`) flatten to `<instance>__Name` with the instance's seeds,
+>   a container's own TYPE const (`const FingerPrint = u7;`) types its field, and a field default names a
+>   sibling const (`= free`). On the way, debug.zig's `SafetyLock`: an `if` choosing between two inline
+>   enum TYPES, a field default that is a value `if`, a module-level bool (`runtime_safety`) folded
+>   through a `switch (builtin.mode)` while containers still register, and the tail after a comptime-taken
+>   `return` left unanalysed, as zig does (oracles `reified_nested_containers`, `comptime_type_arms`). It
+>   stops at `FieldIterator`, a type-returning METHOD: the same G4 wall as `SentinelSlice` below.
 > - `std.mem.sort`: the closure idiom (`return struct { pub fn inner … }.inner;`) and comptime FUNCTION
 >   parameters landed, with an inline `@import(…).name` re-export, `noalias`, by-reference pair captures
 >   and `comptime { … }` prongs; then, past the value-width brick and a nested statement `switch` in
@@ -1110,7 +1117,7 @@ peephole (or delete it):
      (`std.ArrayList(u8).init(…)`), so the `init`/`.empty` constructor idiom works either way; and a
      reified type nests (a `Box(T)` field / return inside `Wrap(T)`, verified against zig). Oracle
      `generic-container-methods` == zig; example `examples/zig-generic-container/`. **Still cut:** a
-     nested container member, and a generic / `type`-returning METHOD — the latter is exactly
+     generic / `type`-returning METHOD (the nested container member cut fell 2026-09-24) — the latter is exactly
      `Aligned`'s nested `pub fn SentinelSlice(comptime s: T) type`, so it returns as a G4 blocker.
      (Its other prerequisite, LEFT-TO-RIGHT comptime-param binding — `comptime start: T` typed by an
      earlier `comptime T: type` — **✅ DONE 2026-08-09**: `EvalTypeReturningCall` now resolves

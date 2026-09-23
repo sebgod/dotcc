@@ -353,6 +353,18 @@ internal sealed partial class ZigLowering
                     _symbols.ExitScope();
                 }
             }
+            // `if (c) enum {…} else enum {…}`: the condition folds, and the chosen arm reifies as the inline
+            // type it spells (one type per source site, as in an annotation).
+            case Zig.IfExprTypeArms ta:
+            {
+                var arm = FoldTypeBodyCondition(fnName, ta.Arg2) ? ta.Arg4 : ta.Arg6;
+                return arm.Content switch
+                {
+                    Zig.TypeArmEnum e => (ReifyInlineEnum(arm, e.Arg2), null),
+                    Zig.TypeArmStruct s => (ReifyInlineStruct(arm, s.Arg2), null),
+                    _ => throw new IrUnsupportedException("zig type arm: " + (arm.Content?.GetType().Name ?? "null")),
+                };
+            }
             case Zig.SwitchExpr se:
                 return LowerComptimeTypeSwitch(fnName, se.Arg2, se.Arg5);
             case Zig.SwitchExprTrailing st:

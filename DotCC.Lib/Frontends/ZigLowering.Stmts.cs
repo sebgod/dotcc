@@ -51,12 +51,14 @@ internal sealed partial class ZigLowering
                 default:
                     var lowered = LowerStmt(it);
                     stmts.Add(lowered);
-                    // In a generic instance (wall-plan W3a), a statement that comptime-folded to an
-                    // unconditional terminator (a taken `if (n < 2) return n;`) makes the REST of the
-                    // block comptime-DEAD — stop, so a pruned branch's generic calls (the sibling
-                    // `return fib(n-1)+fib(n-2)`) never instantiate. Sound in general (dead code after a
-                    // proven terminator), gated to instance bodies so ordinary lowering is untouched.
-                    if (_inGenericInstance && Terminates(lowered)) { return stmts; }
+                    // A statement that comptime-folded to an unconditional terminator (a taken
+                    // `if (n < 2) return n;` in a generic instance, wall-plan W3a; debug.zig's
+                    // `if (!runtime_safety) return;` under dotcc's ReleaseFast) makes the REST of the
+                    // block comptime-DEAD, which zig does not analyse: stop, so a pruned branch's generic
+                    // calls never instantiate and a name only the other mode declares (`.locked`) is never
+                    // resolved. Sound everywhere: zig rejects unreachable code after a plain terminator,
+                    // so only a folded one can have statements after it.
+                    if (Terminates(lowered)) { return stmts; }
                     continue;
             }
             // An `errdefer` makes the function's later `return error.X` propagate via a thrown
@@ -1582,6 +1584,32 @@ internal sealed partial class ZigLowering
         {
             return bb;
         }
+        // A module-level comptime bool (`if (runtime_safety)` in debug.zig), folded from its declaration, so
+        // the question has an answer while containers are still registering, before any global exists, and
+        // stays foldable once it is one (zig forbids a local shadowing a declaration, so the name is it).
+        if (cur.Content is Zig.Ident tid && Tok(tid.Arg0) is var topName
+            && _symbols.Resolve(topName) is null or { IsGlobal: true }
+            && _topLevelConstRhs.TryGetValue(topName, out var topRhs) && _foldingTopLevelConsts.Add(topName))
+        {
+            try { return TryFoldComptimeCondition(topRhs); }
+            finally { _foldingTopLevelConsts.Remove(topName); }
+        }
+        // `switch (builtin.mode) { .Debug, .ReleaseSafe => true, … }`: a switch over a comptime tag folds to
+        // the value of the prong it selects.
+        if (cur.Content is Zig.SwitchExpr or Zig.SwitchExprTrailing)
+        {
+            var (subject, prongs) = cur.Content switch
+            {
+                Zig.SwitchExpr s => (s.Arg2, s.Arg5),
+                Zig.SwitchExprTrailing s => (s.Arg2, s.Arg5),
+                _ => throw new System.InvalidOperationException(),
+            };
+            return SelectComptimeProng(subject, prongs, out _) is { CaptureName: null, Expr: { } chosen }
+                ? TryFoldComptimeCondition(chosen)
+                : null;
+        }
+        if (cur.Content is Zig.TrueLit) { return true; }
+        if (cur.Content is Zig.FalseLit) { return false; }
         return TryFoldImportedComptimeValue(cur, out var v) && v is LitBool { Value: var b } ? b : null;
     }
 
