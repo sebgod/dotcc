@@ -3168,6 +3168,30 @@ public sealed class ZigOracleTests
             "pub fn main() u8 {\n" +
             "    return kind(i8) + kind(u16) + kind(bool) + pick(0) + pick(3) + 9;\n" +
             "}\n", 42, "" },
+        // std.Io.Writer.print's comptime format SCAN (road-to-zig-std G3, the format engine's first brick): a
+        // bare `inline while (true)` around an `inline while (i < fmt.len) : (i += 1)`, a comptime `switch
+        // (fmt[i])` over the comptime string whose `break` ends the unrolling, and `comptime var` updates in
+        // the body. "a{}b{}c{" has five braces: 5 * 8 + 2 = 42.
+        new object[] { "comptime_format_scan",
+            "fn countBraces(comptime fmt: []const u8) u8 {\n" +
+            "    comptime var i = 0;\n" +
+            "    comptime var n = 0;\n" +
+            "    inline while (true) {\n" +
+            "        inline while (i < fmt.len) : (i += 1) {\n" +
+            "            switch (fmt[i]) {\n" +
+            "                '{', '}' => break,\n" +
+            "                else => {},\n" +
+            "            }\n" +
+            "        }\n" +
+            "        if (i >= fmt.len) break;\n" +
+            "        n += 1;\n" +
+            "        i += 1;\n" +
+            "    }\n" +
+            "    return n;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return countBraces(\"a{}b{}c{\") * 8 + 2;\n" +
+            "}\n", 42, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

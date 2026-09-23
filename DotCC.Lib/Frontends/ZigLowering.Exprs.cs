@@ -473,6 +473,22 @@ internal sealed partial class ZigLowering
                 // A comptime member-list index (`field_names[0]`) folds to a literal — the base is a
                 // comptime list with no runtime storage, so it must be caught before LowerExpr sees it.
                 if (TryFoldTypeInfoListValue(expr, out var tiIdx)) { return tiIdx; }
+                // `fmt[i]` over a comptime STRING with a comptime index (std.Io.Writer.print's format scan)
+                // is that byte, a comptime value, so a `switch (fmt[i])` over it folds.
+                if (EvalComptimeValue(ix.Arg0) is LitStr cstr)
+                {
+                    CExpr ciExpr;
+                    using (EnterThrowawayHoist()) { ciExpr = LowerExpr(ix.Arg2); }
+                    if (_ir.ConstEval(ciExpr) is { } ci)
+                    {
+                        var bytes = DotCC.EmitHelpers.StringByteValues(cstr.Segments);
+                        if (ci >= 0 && ci < bytes.Count)
+                        {
+                            return new LitInt(bytes[(int)ci].ToString(System.Globalization.CultureInfo.InvariantCulture), bytes[(int)ci])
+                            { Type = LowerPrim("u8") };
+                        }
+                    }
+                }
                 var baseExpr = LowerExpr(ix.Arg0);
                 var idx = LowerExpr(ix.Arg2);
                 // A tuple subscript `t[N]` (N a literal) reads the Nth element → `.ItemN+1`

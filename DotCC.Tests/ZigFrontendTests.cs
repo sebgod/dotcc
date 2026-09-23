@@ -952,16 +952,17 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_a_bare_inline_while_without_a_continue_expr()
+    public void Unrolls_a_bare_inline_while_whose_body_advances_a_comptime_var()
     {
-        // Only the continue-expression form `inline while (c) : (i = …)` is unrolled in V1; a bare
-        // `inline while (c) body` (counter mutated in the body) is a clear deferred error.
-        var ex = Should.Throw<CompileException>(() => EmitZig(
+        // A bare `inline while (c) body` (road-to-zig-std G3, std.Io.Writer.print's outer loop): the body's
+        // assignment to the `comptime var` runs at lowering time, so the condition advances and the
+        // unrolling stops; the var's final value substitutes after the loop.
+        var cs = EmitZig(
             "pub fn main() u8 {\n" +
             "    comptime var i: u8 = 0;\n" +
             "    inline while (i < 3) { i = i + 1; }\n" +
-            "    return i + 39;\n}\n"));
-        ex.Message.ShouldContain("inline while");
+            "    return i + 39;\n}\n");
+        cs.ShouldContain("3 + 39");
     }
 
     [Fact]

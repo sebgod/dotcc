@@ -351,7 +351,33 @@ internal sealed partial class ZigLowering
     /// <c>x = x op y</c> desugar would double-evaluate it). The RHS is sink-typed to the target
     /// type for parity with plain <see cref="Zig.StmtAssign"/> (harmless for a numeric RHS).</summary>
     private CStmt CompoundAssign(Item targetItem, BinOp op, Item valueItem)
-        => new ExprStmt(CompoundAssignExpr(targetItem, op, valueItem));
+        => TryAssignComptimeVar(targetItem, op, valueItem) ?? new ExprStmt(CompoundAssignExpr(targetItem, op, valueItem));
+
+    /// <summary>An assignment to a <c>comptime var</c> (<c>i += 1;</c> in an unrolled <c>inline while</c>, std.Io.Writer
+    /// .print's scan): executed NOW, at lowering time, updating the value later references substitute; it
+    /// emits nothing. A runtime value is a loud error (zig rejects storing one into a comptime var). Null
+    /// when the target is not a comptime var.</summary>
+    private CStmt? TryAssignComptimeVar(Item targetItem, BinOp? op, Item valueItem)
+    {
+        if (targetItem.Content is not Zig.Ident id || _symbols.Resolve(Tok(id.Arg0)) is not { } sym
+            || !_comptimeVars.TryGetValue(sym, out var cur))
+        {
+            return null;
+        }
+        CExpr value;
+        using (EnterThrowawayHoist()) { value = LowerExpr(valueItem); }
+        if (op is { } bop)
+        {
+            value = new Binary(bop, new LitInt(cur.Value.ToString(CultureInfo.InvariantCulture), cur.Value) { Type = cur.Type }, value)
+            { Type = CType.Long };
+        }
+        if (_ir.ConstEval(value) is not { } next)
+        {
+            throw new IrUnsupportedException($"zig: `comptime var {sym.Name}` can only be assigned a compile-time-known value");
+        }
+        _comptimeVars[sym] = (next, cur.Type);
+        return new Seq(new List<CStmt>());
+    }
 
     /// <summary>The <c>Assign</c> CExpr for <c>target op= value</c> (a non-null <see cref="BinOp"/>) —
     /// the core shared by the statement form (wrapped in an <see cref="ExprStmt"/>) and the
@@ -1063,7 +1089,11 @@ internal sealed partial class ZigLowering
             // each round folds the condition (with the counter substituted in), unrolls a body copy,
             // then applies the continue-expr to advance the counter — all at lowering time.
             case Zig.StmtWhileContAssign w:
-                return UnrollInlineWhile(w.Arg2, w.Arg6, w.Arg8, w.Arg10);
+                return UnrollInlineWhile(w.Arg2, w.Arg6, w.Arg7, w.Arg8, w.Arg10);
+            // `inline while (true) { … }` with no continue-expression (std.Io.Writer.print's outer loop): it
+            // unrolls until a comptime `break`.
+            case Zig.StmtWhile w:
+                return UnrollInlineWhile(w.Arg2, null, null, null, w.Arg4);
 
             default:
                 throw new IrUnsupportedException(
@@ -1084,47 +1114,77 @@ internal sealed partial class ZigLowering
     /// <c>break</c>/<c>continue</c> in the body, a non-comptime-var counter, or a non-foldable
     /// condition / continue value are clear errors. The unroll count is capped (a non-terminating
     /// comptime condition otherwise loops forever).</summary>
-    private CStmt UnrollInlineWhile(Item condItem, Item contLhsItem, Item contRhsItem, Item bodyItem)
+    private CStmt UnrollInlineWhile(Item condItem, Item? contLhsItem, Item? contOpItem, Item? contRhsItem, Item bodyItem)
     {
         // The continue-expr target must resolve (WITHOUT substitution) to a tracked comptime var.
-        if (contLhsItem.Content is not Zig.Ident contId
-            || _symbols.Resolve(Tok(contId.Arg0)) is not { } contSym
-            || !_comptimeVars.ContainsKey(contSym))
+        Symbol? contSym = null;
+        if (contLhsItem is not null)
         {
-            throw new IrUnsupportedException(
-                "`inline while` requires a `comptime var` loop counter advanced by the "
-                + "continue-expression (`comptime var i = …; inline while (i < N) : (i = i + step) { … }`)");
+            if (contLhsItem.Content is not Zig.Ident contId
+                || _symbols.Resolve(Tok(contId.Arg0)) is not { } cs
+                || !_comptimeVars.ContainsKey(cs))
+            {
+                throw new IrUnsupportedException(
+                    "`inline while` requires a `comptime var` loop counter advanced by the "
+                    + "continue-expression (`comptime var i = …; inline while (i < N) : (i += step) { … }`)");
+            }
+            contSym = cs;
         }
 
+        // A comptime `break` / `continue` in the body is comptime control (road-to-zig-std G3): a copy that
+        // ends in `break` is the last one (the continue-expression does not run), one that ends in
+        // `continue` just goes on. Under a `switch` a `break` lowers to a goto this target names.
+        var target = new LoopBreakTarget { BreakLabel = "__inl" + _loopLabelCounter++ + "_brk" };
         var copies = new List<CStmt>();
-        while (true)
+        _inlineUnrollDepth++;
+        _loopBreakTargets.Push(target);
+        try
         {
-            if (_ir.ConstEval(LowerExpr(condItem)) is not { } cond)
+            while (true)
             {
-                throw new IrUnsupportedException("`inline while` condition must be compile-time-known");
+                if (TryFoldComptimeCondition(condItem) is not { } holds)
+                {
+                    holds = _ir.ConstEval(LowerExpr(condItem)) is { } cond
+                        ? cond != 0
+                        : throw new IrUnsupportedException("`inline while` condition must be compile-time-known");
+                }
+                if (!holds) { break; }
+                if (copies.Count >= InlineUnrollCap)
+                {
+                    throw new IrUnsupportedException(
+                        $"`inline while` exceeded the unroll cap ({InlineUnrollCap}) — a non-terminating comptime condition?");
+                }
+                // Unroll one body copy (the comptime counter substitutes to its current value within it).
+                _symbols.EnterScope();
+                var body = LowerStmt(bodyItem);
+                _symbols.ExitScope();
+                var (trimmed, jump) = TrimTrailingJump(body, target.BreakLabel);
+                if (HasLoopEscape(trimmed) || ContainsGotoTo(trimmed, target.BreakLabel))
+                {
+                    throw new IrUnsupportedException(
+                        "a `break`/`continue` inside an `inline while` body that is not comptime control flow (the loop "
+                        + "is unrolled, so a runtime-conditional one has no loop to leave) is not supported yet");
+                }
+                copies.Add(trimmed is Block ? trimmed : new Block(new List<CStmt> { trimmed }));
+                if (jump is Break) { break; }
+                if (contSym is null || contLhsItem is not { } lhsItem || contRhsItem is not { } rhsItem) { continue; }
+                // Advance the counter: fold the continue-expr (with the current value), store it back.
+                CExpr step = LowerExpr(rhsItem);
+                if (contOpItem is not null && CompoundOpOf(contOpItem) is { } op)
+                {
+                    step = new Binary(op, LowerExpr(lhsItem), step) { Type = CType.Long };
+                }
+                if (_ir.ConstEval(step) is not { } next)
+                {
+                    throw new IrUnsupportedException("`inline while` continue-expression must be compile-time-known");
+                }
+                _comptimeVars[contSym] = (next, _comptimeVars[contSym].Type);
             }
-            if (cond == 0) { break; }
-            if (copies.Count >= InlineUnrollCap)
-            {
-                throw new IrUnsupportedException(
-                    $"`inline while` exceeded the unroll cap ({InlineUnrollCap}) — a non-terminating comptime condition?");
-            }
-            // Unroll one body copy (the comptime counter substitutes to its current value within it).
-            _symbols.EnterScope();
-            var body = LowerStmt(bodyItem);
-            _symbols.ExitScope();
-            if (HasLoopEscape(body))
-            {
-                throw new IrUnsupportedException(
-                    "`break`/`continue` inside an `inline while` body is not supported yet (the loop is unrolled)");
-            }
-            copies.Add(body is Block ? body : new Block(new List<CStmt> { body }));
-            // Advance the counter: fold the continue-expr RHS (with the current value), store it back.
-            if (_ir.ConstEval(LowerExpr(contRhsItem)) is not { } next)
-            {
-                throw new IrUnsupportedException("`inline while` continue-expression must be compile-time-known");
-            }
-            _comptimeVars[contSym] = (next, _comptimeVars[contSym].Type);
+        }
+        finally
+        {
+            _loopBreakTargets.Pop();
+            _inlineUnrollDepth--;
         }
         return new Seq(copies);
     }
@@ -1950,7 +2010,7 @@ internal sealed partial class ZigLowering
     /// discard <c>_ = e</c>, a value-block / value-control-flow RHS temp-filled against the lvalue, or a plain
     /// store with the lvalue's type as the sink. Under an ANF hoist buffer, like every statement.</summary>
     private CStmt LowerAssignStmt(Item lhsItem, Item rhsItem)
-        => Hoisted(() =>
+        => TryAssignComptimeVar(lhsItem, null, rhsItem) ?? Hoisted(() =>
         {
             if (lhsItem.Content is Zig.Ident lhs && Tok(lhs.Arg0) == "_")
             {
@@ -2000,6 +2060,104 @@ internal sealed partial class ZigLowering
         Zig.SwitchExpr s => LowerSwitchStmt(s.Arg2, s.Arg5),
         Zig.SwitchExprTrailing s => LowerSwitchStmt(s.Arg2, s.Arg5),
         _ => new ExprStmt(LowerExpr(e)),
+    };
+
+    /// <summary>How many <c>inline</c> loops are being unrolled around the current statement.</summary>
+    private int _inlineUnrollDepth;
+
+    /// <summary>The prong a switch over a comptime-known integer subject takes (case values, ranges, then
+    /// <c>else</c>), or null when the subject does not fold or the prong captures.</summary>
+    private ZigProng? TrySelectConstProng(Item subjectItem, Item prongsItem)
+    {
+        CExpr subject;
+        using (EnterThrowawayHoist()) { subject = LowerExpr(subjectItem); }
+        if (_ir.ConstEval(subject) is not { } v) { return null; }
+        ZigProng? elseProng = null;
+        foreach (var prongItem in Flatten(prongsItem))
+        {
+            var prong = DecomposeProng(prongItem);
+            if (prong.CaptureName is { } cap && cap != "_") { return null; }
+            if (prong.CaseVals.Content is Zig.CaseElse) { elseProng = prong; continue; }
+            foreach (var label in LowerCaseVals(prong.CaseVals, subject.Type))
+            {
+                if (label.CaseExpr is not { } ce || _ir.ConstEval(ce) is not { } lo) { return null; }
+                var hi = label.HiExpr is { } he ? _ir.ConstEval(he) : lo;
+                if (hi is null) { return null; }
+                if (v >= lo && v <= hi) { return prong; }
+            }
+        }
+        return elseProng;
+    }
+
+    /// <summary>Lower the one prong a comptime subject selected (a block, a value, a <c>return</c>, a jump, an
+    /// assignment), as a statement.</summary>
+    private CStmt LowerSelectedProng(ZigProng prong) => prong switch
+    {
+        { Block: { } blk } => LowerBlock(blk),
+        { Expr: { } e } => LowerProngExprStmt(e),
+        { Return: { } r } => Hoisted(() => LowerReturn(r)),
+        { ReturnsVoid: true } => LowerReturnVoid(),
+        { Jump: { } j } => LowerProngJump(j),
+        { Assign: { } pa } => LowerAssignStmt(pa.Arg2, pa.Arg4),
+        _ => new Seq(new List<CStmt>()),
+    };
+
+    /// <summary>A copy of an unrolled body with its TRAILING jump removed, and which jump it was: a <c>break</c>
+    /// (a plain one, or the goto the inline loop's break target lowers to under a switch), a
+    /// <c>continue</c>, or none. Only the last statement is inspected, through nested blocks.</summary>
+    private static (CStmt Body, CStmt? Jump) TrimTrailingJump(CStmt s, string breakLabel)
+    {
+        switch (s)
+        {
+            case Break or Continue:
+                return (new Seq(new List<CStmt>()), s);
+            case Goto g when g.Label == breakLabel:
+                return (new Seq(new List<CStmt>()), new Break());
+            case Block { Stmts.Count: > 0 } b:
+            {
+                var (last, jump) = TrimTrailingJump(b.Stmts[^1], breakLabel);
+                if (jump is null) { return (s, null); }
+                var stmts = new List<CStmt>(b.Stmts.Take(b.Stmts.Count - 1)) { last };
+                return (new Block(stmts), jump);
+            }
+            case Seq { Stmts.Count: > 0 } q:
+            {
+                var (last, jump) = TrimTrailingJump(q.Stmts[^1], breakLabel);
+                if (jump is null) { return (s, null); }
+                var stmts = new List<CStmt>(q.Stmts.Take(q.Stmts.Count - 1)) { last };
+                return (new Seq(stmts), jump);
+            }
+            default:
+                return (s, null);
+        }
+    }
+
+    /// <summary>True when a statement contains a <c>goto</c> to <paramref name="label"/> anywhere.</summary>
+    private static bool ContainsGotoTo(CStmt s, string label) => s switch
+    {
+        Goto g => g.Label == label,
+        Block b => b.Stmts.Any(x => ContainsGotoTo(x, label)),
+        Seq q => q.Stmts.Any(x => ContainsGotoTo(x, label)),
+        If i => ContainsGotoTo(i.Then, label) || (i.Else is { } e && ContainsGotoTo(e, label)),
+        Labeled l => ContainsGotoTo(l.Body, label),
+        _ => false,
+    };
+
+    /// <summary>The binary operator of a compound continue-expression assignment (<c>i += 1</c>), or null
+    /// for a plain <c>=</c>.</summary>
+    private static BinOp? CompoundOpOf(Item opItem) => opItem.Content switch
+    {
+        Zig.AopAdd or Zig.AopAddWrap => BinOp.Add,
+        Zig.AopSub or Zig.AopSubWrap => BinOp.Sub,
+        Zig.AopMul or Zig.AopMulWrap => BinOp.Mul,
+        Zig.AopDiv => BinOp.Div,
+        Zig.AopMod => BinOp.Mod,
+        Zig.AopShl => BinOp.Shl,
+        Zig.AopShr => BinOp.Shr,
+        Zig.AopBitAnd => BinOp.BitAnd,
+        Zig.AopBitOr => BinOp.BitOr,
+        Zig.AopBitXor => BinOp.BitXor,
+        _ => null,
     };
 
     /// <summary>True when a callee names <c>assert</c> (a bare alias, <c>const assert = std.debug.assert;</c>,
@@ -2079,6 +2237,13 @@ internal sealed partial class ZigLowering
 
     private CStmt LowerSwitchStmtCore(Item subjectItem, Item prongsItem)
     {
+        // While an `inline` loop unrolls, a switch over a comptime-known VALUE (`switch (fmt[i])` in
+        // std.Io.Writer.print) selects its prong now, as zig does: the loop's comptime control (a `break`
+        // in the taken prong) must be known to know when to stop unrolling.
+        if (_inlineUnrollDepth > 0 && TrySelectConstProng(subjectItem, prongsItem) is { } constProng)
+        {
+            return LowerSelectedProng(constProng);
+        }
         // A COMPTIME subject — `switch (@typeInfo(T))` / `switch (info.signedness)` — selects its
         // prong at lowering time and lowers ONLY that one (road-to-zig-std S5).
         if (SelectComptimeProng(subjectItem, prongsItem, out var ctPayload) is { } ctProng)
