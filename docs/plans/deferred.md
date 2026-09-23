@@ -168,7 +168,7 @@ its methods + enum members. These edges of the same seam are deliberate V1 cuts 
 | Gap | Divergence | Fix sketch |
 |---|---|---|
 | A cross-module container `const` (`k.Cfg.MAX`) | Not resolved — the value path reports `unresolved identifier 'k'` (a 3-segment value chain through a module). Container consts ARE registered, in the owning module's tables | give the value path the same owner lookup the type path got, or share the container-const table through `ZigImportScope` like the method + enum-member tables |
-| A comptime VALUE argument to an imported type-returning generic | Evaluated in the OWNING module's environment, so a literal works but a caller-scoped named constant fails with "must be a compile-time-known value" | pre-resolve non-type comptime args in the caller (the two-phase split already threads the caller's scope for TYPE args) |
+| A decl-literal VALUE (`.name`, no call) of a container another module declares | Its `const` RHS has to lower in its owner module; the value path reads this module's container consts only (the CALL form `.init(…)` resolves anywhere, through the shared method registry) | route through the owner module like `EnsureMethodDeclared` does for methods |
 
 ## Zig — deferred grammar (does NOT parse yet; cut for a reason)
 
