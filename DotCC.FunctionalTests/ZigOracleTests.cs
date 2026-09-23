@@ -3060,6 +3060,40 @@ public sealed class ZigOracleTests
             "        return self.x + self.y;\n" +
             "    }\n" +
             "};\n", 42, "" },
+        // A FILE used as a struct type (road-to-zig-std G3, `std.Io.Writer`'s shape): top-level fields
+        // make Box.zig the `Box` type, and its top-level functions its methods, reached by a decl
+        // literal, a static call and a method call. The root's own `init(u8) u8` sits beside Box's
+        // `init(u8) Box`, which emitted as two C# `init(byte)` methods before imported functions were
+        // module-qualified. b: 30 + 11 = 41, get = 42; c: 0, get = 1; 42 + 1 - init(1) = 42.
+        new object[] { "import_file_struct",
+            "const Box = @import(\"Box.zig\");\n" +
+            "fn init(v: u8) u8 {\n" +
+            "    return v;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var b: Box = .init(30);\n" +
+            "    b.add(11);\n" +
+            "    var c = Box.init(0);\n" +
+            "    c.add(b.get() - 42);\n" +
+            "    return b.get() + c.get() - init(1);\n" +
+            "}\n",
+            "Box.zig",
+            "const Box = @This();\n" +
+            "\n" +
+            "value: u8,\n" +
+            "bump: u8 = 1,\n" +
+            "\n" +
+            "pub fn init(v: u8) Box {\n" +
+            "    return .{ .value = v };\n" +
+            "}\n" +
+            "\n" +
+            "pub fn get(b: *const Box) u8 {\n" +
+            "    return b.value + b.bump;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn add(b: *Box, n: u8) void {\n" +
+            "    b.value += n;\n" +
+            "}\n", 42, "" },
     };
 
     [Theory]

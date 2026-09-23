@@ -360,5 +360,41 @@ internal sealed partial class ZigLowering
         {
             throw new IrUnsupportedException($"zig `{name}` is declared as `@compileError`: " + message);
         }
+        if (_failedContainers.TryGetValue(name, out var failure))
+        {
+            throw new IrUnsupportedException($"zig container `{name}` could not be lowered: " + failure);
+        }
+    }
+
+    /// <summary>Each container of a LAZY module whose registration failed (road-to-zig-std G3), by its
+    /// IR and its source name → the failure. Preparing a module registers all of its containers up front,
+    /// but zig analyses one only when something names it: <c>std.Io</c>'s <c>Limit</c> enum has a member
+    /// <c>unlimited = math.maxInt(usize)</c>, which needs the comptime engine, and a program writing to a
+    /// <c>std.Io.Writer</c> never touches it. So the failure is recorded and raised at the first
+    /// REFERENCE, the tombstone rule above applied to a container. A root unit stays eager: its own
+    /// containers are the program, and one that cannot lower is an error where it stands.</summary>
+    private readonly Dictionary<string, string> _failedContainers = new(System.StringComparer.Ordinal);
+
+    /// <summary>Run one container's pass-0 registration, isolating a failure in a LAZY module (see
+    /// <see cref="_failedContainers"/>): the container is withdrawn from the type table, so nothing
+    /// resolves a half-registered type, and its names raise the recorded message when referenced.
+    /// Returns false when the registration failed.</summary>
+    private bool RegisterContainerIsolated(string name, string? plainName, System.Action register)
+    {
+        if (!_lazy) { register(); return true; }
+        try
+        {
+            register();
+            return true;
+        }
+        catch (IrUnsupportedException ex)
+        {
+            foreach (var n in new[] { name, plainName ?? name })
+            {
+                _containerTypes.Remove(n);
+                _failedContainers[n] = ex.Message;
+            }
+            return false;
+        }
     }
 }

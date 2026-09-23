@@ -599,6 +599,35 @@ that retire curated shortcuts.
 > programs (`import_generic_fn`, `string_literal_len`, `decl_literals`, `import_decl_literal`),
 > == real zig 0.17.0-dev.667.
 
+> **Status update (2026-09-23, desktop) — a file as a struct type** (bufPrint's wall 1, the S1 cut).
+>
+> 1. **File-as-struct.** A file with top-level fields registers them as a struct
+>    (`Io_Writer__Writer`), `@This()` at file scope names it, and a method or static call on it routes
+>    to the module's own top-level function (so `fixed` lowers once, however it is reached).
+> 2. **Module-path aliases.** `const Writer = std.Io.Writer;` / `const math = std.math;` are recorded
+>    unresolved (preparing a module must not fan out) and resolve on demand: to the file's type in a
+>    type position, to the module in every navigation.
+> 3. **Imported function names are module-qualified.** Measured while probing: `util.f` beside a
+>    root `f` emitted two `static byte f()` (CS0111, from a dotcc run that exited 0). The container
+>    naming fix earlier today had left functions out. Now `util__f`.
+> 4. **A lazy module's container fails only where named.** Reaching `std.Io.Writer` prepares
+>    `Io.zig`, whose `Limit` enum needs `math.maxInt` at comptime; registration failures in a lazy
+>    module are withdrawn and raised at the first reference instead of sinking the import.
+>
+> **bufPrint re-measured:** past the `Writer` type, its layout walls on a CHAIN: `Writer.VTable.sendFile`
+> takes a `*File.Reader`, `File/Reader.zig` is itself a file-struct holding `file: File`, and
+> `File.handle: Handle` is `std.posix.fd_t`, a platform alias. Every link is a pointer or a field
+> dotcc must lay out, though bufPrint never calls `sendFile`. Next brick: a pointer to a container that
+> could not lower becomes an OPAQUE pointer raising on use (zig never needs a pointee's layout to size
+> a pointer). Behind it stay wall 2 (`w.print` as a GENERIC method, now a loud cut naming the
+> file-as-struct path) and wall 3 (the comptime format engine).
+>
+> Validation: 5 emit pins (`ZigFileStructTests`) + 1 updated (`ZigFrontendTests`, the old deferral pin
+> is now positive) + 1 zig-oracle program (`import_file_struct`) + example `examples/zig-file-struct/`
+> (exit 42). Unit 1778/1778; functional with the local zig oracle and real std 440/0, == real zig
+> 0.17.0-dev.667 (the build was gone from ziglang.org; fetched from a community mirror and
+> minisign-verified against zig's key).
+
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)
 
 An opt-in test/tool (`DOTCC_RUN_STD_PROBE=1`, env `DOTCC_ZIG_LIB_DIR` or

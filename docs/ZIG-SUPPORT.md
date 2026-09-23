@@ -295,7 +295,24 @@ both the file and the type. Oracle `import_type` / `import_type_method` / `impor
 `std.fmt.bufPrint`'s wall): a call `util.f(args)` to a `comptime` / `anytype` export instantiates in
 *its* module, while every argument — a type, a comptime value, a comptime string, an `anytype`
 argument's inferred type — is read in the *caller's* scope (oracle `import_generic_fn`; unit
-`ZigCrossModuleGenericTests`). **Cuts (loud):** a cross-module container `const` (`k.Cfg.MAX`).
+`ZigCrossModuleGenericTests`). **A FILE can be a struct type** (road-to-zig-std G3, `std.Io.Writer`'s
+shape): a file with container fields at file scope (`vtable: *const VTable, buffer: []u8, end: usize = 0,`)
+IS a struct, named by `@This()` at file scope. Its fields register as an ordinary struct
+(`Io_Writer__Writer`; a root unit's is `root__<file stem>`), and its top-level functions are its
+methods: a decl literal (`var w: Writer = .fixed(buf)`), a static call (`Writer.fixed(buf)`) and a
+method call (`w.buffered()`) all reach the one top-level function, lowered on demand like any lazy decl.
+The module is named in a type position through its import (`const Box = @import("Box.zig");`) or
+through an ALIAS of a module path (`const Writer = std.Io.Writer;`), and a module-path alias navigates
+like the import it names in every position (`const math = std.math; math.maxInt(…)`), which is how std
+reaches nearly every other file. A container of an IMPORTED module that cannot lower (`std.Io`'s
+`Limit` enum, whose `math.maxInt(usize)` member needs the comptime engine) no longer sinks the whole
+import: it is withdrawn and raises its original message where something first names it, zig's
+analyse-on-reference rule. Oracle `import_file_struct`; example `examples/zig-file-struct/`; unit
+`ZigFileStructTests`. **Cuts (loud):** a GENERIC function called through the file-as-struct type
+(`w.print(fmt, args)`, bufPrint's next wall); a pointer FIELD to a container that could not lower fails
+the struct holding it (see [`plans/deferred.md`](plans/deferred.md)). **Imported functions are
+module-qualified in the emitted C#** too (`util__f`, `util__maxOf__u8`), since every module's functions
+share one emitted class. **Cuts (loud):** a cross-module container `const` (`k.Cfg.MAX`).
 **Container names are
 module-qualified in the emitted C#** (2026-09-23): an imported module's containers, reified generic instances
 and inline anonymous structs emit as `<module>__<Name>` (`fmt__Alignment`, `list__Box__u8`; the module's

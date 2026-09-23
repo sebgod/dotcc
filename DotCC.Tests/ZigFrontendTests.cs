@@ -5135,16 +5135,17 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Parses_but_defers_a_file_as_struct_top_level_field()
+    public void A_top_level_field_makes_the_root_file_a_struct_type()
     {
-        // road-to-zig-std S9 — a Zig file is an implicit struct, so it may carry container fields at
-        // the top level (`bit_len: usize = 0,`). We now PARSE this (the largest std parse bucket), but
-        // reifying the whole file as an instantiable struct type is the S1 lift, so lowering must fail
-        // LOUDLY rather than silently drop the field. Parse-accept + honest deferral, not a bad emit.
-        var ex = Should.Throw<CompileException>(() => EmitZig(
-            "bit_len: usize = 0,\n" +
-            "pub fn main() u8 {\n    return 0;\n}\n"));
-        ex.Message.ShouldContain("file-as-struct");
+        // road-to-zig-std S9 parsed it; G3 lowers it. A Zig file is an implicit struct, so container
+        // fields at the top level (`bit_len: usize = 3,`) make the FILE an instantiable type, named by
+        // `@This()` at file scope. A root unit's type is `root__<file stem>`, with the default honored.
+        var cs = EmitZig(
+            "const Self = @This();\n" +
+            "bit_len: usize = 3,\n" +
+            "pub fn main() u8 {\n    const s: Self = .{};\n    return @intCast(s.bit_len);\n}\n");
+        cs.ShouldMatch(@"struct root__\w+");
+        cs.ShouldContain("bit_len = 3");
     }
 
     [Fact]
