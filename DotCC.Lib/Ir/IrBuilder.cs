@@ -957,7 +957,7 @@ internal sealed partial class IrBuilder
         if (enumType is not null)
         {
             if (tag is not null) { _enumTypes[tag] = enumType; }
-            if (Enums.All(e => e.Name != enumName)) { Enums.Add(new EnumTypeDef(enumName!, underlying, members)); }
+            AddEnumDef(enumType.Name, underlying, members);
         }
         return (CType?)enumType ?? CType.Int;
     }
@@ -1127,13 +1127,41 @@ internal sealed partial class IrBuilder
     /// <summary>Register a Zig enum under <paramref name="name"/> with the given underlying
     /// integer type and members, mapping the name to its <see cref="CType.Enum"/> (so the
     /// name resolves as a real enum type) and emitting an <see cref="EnumTypeDef"/>. Returns
-    /// the <see cref="CType.Enum"/>. Idempotent on the name.</summary>
+    /// the <see cref="CType.Enum"/>. Idempotent on the name — a second registration of the SAME shape
+    /// (tag type and members, in order) is ignored — but one that would REDEFINE it throws, exactly as
+    /// <see cref="RegisterStructType"/> does: the emitted C# carries one enum per name, so the second
+    /// definition's members would be silently dropped while its uses resolved against the first (a
+    /// type/codegen mismatch — two Zig modules each declaring <c>const Kind = enum {…}</c>, until
+    /// container names are module-qualified).</summary>
     internal CType.Enum RegisterEnumType(string name, CType underlying, List<EnumMember> members)
     {
+        if (!AddEnumDef(name, underlying, members)) { return _enumTypes[name]; }
         var enumType = new CType.Enum(name, underlying);
         _enumTypes[name] = enumType;
-        if (Enums.All(e => e.Name != name)) { Enums.Add(new EnumTypeDef(name, underlying, members)); }
         return enumType;
+    }
+
+    /// <summary>Add an <see cref="EnumTypeDef"/> to the emitted enum set — the one place both front-ends
+    /// go through. Returns false when an IDENTICAL definition (tag type and members, in order) is already
+    /// registered, and throws when a DIFFERENT one is: the emitted C# has one enum per name, so the second
+    /// would be dropped while its members' uses rendered against the first — a silent wrong value when a
+    /// member name is shared. (C: two translation units each defining a different <c>enum color</c>,
+    /// legal C that dotcc's single emitted program cannot represent; Zig: two modules' same-named enums.)</summary>
+    private bool AddEnumDef(string name, CType underlying, List<EnumMember> members)
+    {
+        if (Enums.FirstOrDefault(e => e.Name == name) is { } existing)
+        {
+            if (!existing.Underlying.Equals(underlying) || !existing.Members.SequenceEqual(members))
+            {
+                throw new IrUnsupportedException(
+                    $"two different enums are both named '{name}' — the emitted C# can only carry one, so the "
+                    + "second definition would be silently dropped (C: two translation units defining a different "
+                    + $"`enum {name}`; Zig: two modules declaring a same-named enum)");
+            }
+            return false;
+        }
+        Enums.Add(new EnumTypeDef(name, underlying, members));
+        return true;
     }
 
     /// <summary>The full declared field list of the registered struct/union
