@@ -114,6 +114,24 @@ public sealed class ZigCrossModuleGenericTests
     }
 
     [Fact]
+    public void A_caller_named_const_folds_as_a_cross_module_type_returning_argument()
+    {
+        // The type-returning path read a comptime VALUE argument in the template's module, so a
+        // caller-scoped `const` was unresolvable there; it is read in the caller now, like a type arg.
+        var cs = EmitZigMulti("""
+            const list = @import("list.zig");
+            const CAP: u8 = 3;
+            pub fn main() u8 { const s: list.Store(u8, CAP) = .{ .n = 42 }; return s.n; }
+            """, ("list.zig", """
+            pub fn Store(comptime T: type, comptime cap: u8) type {
+                _ = cap;
+                return struct { n: T };
+            }
+            """));
+        cs.ShouldContain("list__Store__u8_3 s");
+    }
+
+    [Fact]
     public void A_string_literal_len_excludes_the_nul_sentinel()
     {
         // zig types a string literal `*const [N:0]u8`, so `.len` is N — the lowered `char[N+1]` used to

@@ -589,10 +589,8 @@ internal sealed partial class ZigLowering
     /// (<c>Aligned(MyAlias)</c>) belong to the caller, while the template's body and parameter types
     /// belong here. Null when this module exports no such type-returning generic, so the caller can
     /// fall through to its own handling.
-    /// <para>V1 cut: a non-type comptime argument (a <c>comptime n: usize</c> value) is evaluated in
-    /// THIS module's environment, so a literal works but a caller-scoped named constant fails loudly
-    /// with the ordinary "must be a compile-time-known value" error rather than being read from the
-    /// caller (docs/plans/deferred.md).</para></summary>
+    /// <para>A non-type comptime argument (a <c>comptime n: usize</c> value) is read in the caller's
+    /// scope too, so a caller-side named <c>const</c> folds like a literal.</para></summary>
     internal (CType Type, int? Bits)? TryEvalExportedTypeReturningCall(string name, IReadOnlyList<Item> argItems, ZigLowering caller)
     {
         if (EnsureDeclLowered(name) is not { } sym
@@ -708,7 +706,7 @@ internal sealed partial class ZigLowering
                     }
                     else
                     {
-                        if (_ir.ConstEval(LowerExpr(argItems[i])) is not { } ov)
+                        if (_ir.ConstEval(argScope.LowerExpr(argItems[i])) is not { } ov)
                         {
                             throw new IrUnsupportedException(
                                 $"call to type-returning generic '{templateSym.Name}': the `comptime {p.Name}: ?T` argument "
@@ -720,7 +718,7 @@ internal sealed partial class ZigLowering
                 }
                 else
                 {
-                    if (_ir.ConstEval(LowerExpr(argItems[i])) is not { } vv)
+                    if (_ir.ConstEval(argScope.LowerExpr(argItems[i])) is not { } vv)
                     {
                         throw new IrUnsupportedException(
                             $"call to type-returning generic '{templateSym.Name}': the `comptime {p.Name}` argument "
