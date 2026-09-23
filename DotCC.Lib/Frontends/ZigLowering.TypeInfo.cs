@@ -103,10 +103,21 @@ internal sealed partial class ZigLowering
         {
             return called;
         }
+        // A module-qualified alias (`std.fmt.ArgSetType`, `pub const ArgSetType = u32;`): the owning
+        // module recorded the width its alias spelled (Writer.print asks `@typeInfo(…).int.bits` of it).
+        if (cur.Content is Zig.Field qf && ResolveModulePath(qf.Arg0)?.Lowering is { } owner)
+        {
+            return owner.ExportedDeclaredBits(Tok(qf.Arg2));
+        }
         return cur.Content is Zig.Ident id && _declaredIntBits.TryGetValue(Tok(id.Arg0), out var bound)
             ? bound
             : null;
     }
+
+    /// <summary>The declared integer width of this module's top-level type alias
+    /// <paramref name="name"/> (see <see cref="_declaredIntBits"/>), for an importer naming it through a
+    /// module path; null when it recorded none.</summary>
+    internal int? ExportedDeclaredBits(string name) => _declaredIntBits.TryGetValue(name, out var b) ? b : null;
 
     /// <summary>The <c>std.builtin.Type</c> union tag for a resolved type — what a
     /// <c>switch (@typeInfo(T))</c> prong matches. Tags are spelled as

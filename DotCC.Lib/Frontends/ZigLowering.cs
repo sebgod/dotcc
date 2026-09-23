@@ -236,8 +236,11 @@ internal sealed partial class ZigLowering
     private CType? ResolveExportedType(string name, int hops)
     {
         RaiseIfPoisoned(name);   // a container whose lazy registration failed raises at this reference
+        if (_containerTypes.TryGetValue(name, out var t)) { return t; }
+        // A top-level type ALIAS (`pub const ArgSetType = u32;` in fmt.zig), recorded in pass 0.
+        if (_typeAliases.TryGetValue(name, out var alias)) { return alias; }
         // A re-export (`pub const Pair = inner.Pair;`) names a type declared elsewhere.
-        return _containerTypes.TryGetValue(name, out var t) ? t : ResolveAliasedType(name, hops);
+        return ResolveAliasedType(name, hops);
     }
 
     /// <summary>Lower everything this lazy module has enqueued (from each cursor onward). Runs at TOP

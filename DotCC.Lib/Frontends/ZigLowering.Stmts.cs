@@ -434,16 +434,16 @@ internal sealed partial class ZigLowering
     private CStmt DeclOrComptime(Item nameTok, Item? typeItem, Item initExpr)
         => TryComptimeConstBinding(Tok(nameTok), initExpr)
             ? new Seq(new List<CStmt>())
-            : DeclOf(nameTok, typeItem, initExpr);
+            : DeclOf(nameTok, typeItem, initExpr, isConst: true);
 
     // `const`/`var x = init;` — lower under an ANF hoist buffer so a catch/orelse in a SUB-expression
     // of the initializer (`const r = 1 + (a catch b());`) lifts to a temp before the decl. A
     // WHOLE-init catch / control-flow fallback is intercepted at the top of DeclOfInner (its own
     // statement lowering), leaving the buffer empty, so this wrap is a no-op for those.
-    private CStmt DeclOf(Item nameTok, Item? typeItem, Item initExpr)
-        => Hoisted(() => DeclOfInner(nameTok, typeItem, initExpr));
+    private CStmt DeclOf(Item nameTok, Item? typeItem, Item initExpr, bool isConst = false)
+        => Hoisted(() => DeclOfInner(nameTok, typeItem, initExpr, isConst));
 
-    private CStmt DeclOfInner(Item nameTok, Item? typeItem, Item initExpr)
+    private CStmt DeclOfInner(Item nameTok, Item? typeItem, Item initExpr, bool isConst)
     {
         // Compute the declared type FIRST: a result-located init (`.member` / `.{…}`) needs
         // it as its sink, so resolve the annotation before lowering the initializer.
@@ -568,7 +568,15 @@ internal sealed partial class ZigLowering
         }
         var init = LowerExprSink(initExpr, declared);
         var type = declared ?? init.Type ?? CType.Int;
-        var sym2 = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = type });
+        // A local `const` whose integer initializer folds IS that value in every comptime question, as a
+        // top-level one is (and as zig has it): `const max_format_args = @typeInfo(ArgSetType).int.bits;`
+        // makes std.Io.Writer.print's `if (field_names.len > max_format_args) @compileError(…)` fold.
+        var folded = isConst && type.Unqualified is CType.Prim { Integer: true } ? _ir.ConstEval(init) : null;
+        var sym2 = _symbols.Declare(new Symbol
+        {
+            Name = Tok(nameTok), Kind = SymKind.Var, Type = type,
+            IsConstexpr = folded is not null, ConstValue = folded ?? 0,
+        });
         if (declared is null && init is LitStr) { _stringLiteralSyms.Add(sym2); }
         // A `void` local (`var unit: void = {};`) has no storage and no C# spelling: the name stays
         // declared, so a use of it is an (erasable) void read, and the declaration emits nothing.

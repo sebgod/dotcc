@@ -67,6 +67,10 @@ internal sealed partial class ZigLowering
             ? _ir.Enums.FirstOrDefault(d => d.Name == e.Name)?.Members
             : null;
 
+    /// <summary>A tuple's field names, its positions spelled as decimal strings, as zig names them.</summary>
+    private static IReadOnlyList<string> TupleFieldNames(CType.Tuple t)
+        => Enumerable.Range(0, t.Elements.Count).Select(i => i.ToString(System.Globalization.CultureInfo.InvariantCulture)).ToList();
+
     /// <summary>Fold a <c>@typeInfo</c> payload field that yields a member LIST — the parallel
     /// arrays <c>field_names</c> / <c>field_types</c> / <c>field_values</c>. Returns false when the
     /// expression is not such an access. A list asked of a kind that has none, and the member lists
@@ -99,6 +103,13 @@ internal sealed partial class ZigLowering
                     list = new ZigComptimeList { Label = field, Strings = nm.Select(x => x.Name).ToList() };
                     return true;
                 }
+                // A TUPLE (`@TypeOf(.{ 42, "x" })`, the args of every std format call) is a struct whose
+                // fields are named by position: "0", "1", ... (std.Io.Writer.print reads them).
+                if (info.Type.Unqualified is CType.Tuple nt)
+                {
+                    list = new ZigComptimeList { Label = field, Strings = TupleFieldNames(nt) };
+                    return true;
+                }
                 throw new IrUnsupportedException(
                     $"zig `@typeInfo({info.Type.Describe()}).{info.Tag}.field_names`: only a registered struct / union / "
                     + "enum has declared fields");
@@ -107,6 +118,11 @@ internal sealed partial class ZigLowering
                 if (FieldsOfAggregate(info.Type) is { } tf)
                 {
                     list = new ZigComptimeList { Label = field, Types = tf.Select(x => x.Type).ToList() };
+                    return true;
+                }
+                if (info.Type.Unqualified is CType.Tuple tt)
+                {
+                    list = new ZigComptimeList { Label = field, Types = tt.Elements };
                     return true;
                 }
                 throw new IrUnsupportedException(

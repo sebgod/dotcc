@@ -693,6 +693,26 @@ that retire curated shortcuts.
 > (`.{42}`), then the format engine proper: a `comptime var` struct with comptime method calls
 > (`std.fmt.ArgState`), `comptime std.fmt.Placeholder.parse(&array)`, `@field(args, name)`, and
 > `printValue`. `std.math.maxInt` now runs; the other probes stand as in the previous block.
+>
+> Then the tuple wall fell too, with `print`'s prelude: `@typeInfo` member lists over a tuple (its
+> positions `"0"`, `"1"`, …), a module-qualified type alias (`std.fmt.ArgSetType`) with its declared
+> width, a local `const` that folds (so the `field_names.len > max_format_args` `@compileError` guard
+> prunes), and `@as(comptime_int, n)`.
+>
+> **The format engine is the next SEGMENT, not a brick.** `print`'s loop is comptime code over a
+> lowering-tier value domain dotcc does not have yet (its comptime vars are integers, by the T-milestone
+> firewall). Measured on the pinned `Writer.print`, it needs, in order:
+> 1. a comptime STRUCT var mutated by comptime method calls (`comptime var arg_state: std.fmt.ArgState
+>    = .{ … }; arg_state.nextArg(pos)`), and a comptime STRING var grown by `++` over comptime slices
+>    of a comptime string (`literal = literal ++ fmt[start..end];`);
+> 2. `break` / `continue` inside an `inline while` (the scan `inline while (i < fmt.len) : (i += 1)
+>    { switch (fmt[i]) { '{', '}' => break, else => {} } }`), today a loud cut;
+> 3. a comptime CALL returning an aggregate with a tagged union (`comptime
+>    std.fmt.Placeholder.parse(&placeholder_array)`), then a comptime `switch` over that union;
+> 4. `@field(args, field_names[k])` on a tuple, and the `printValue` type dispatch (to `printInt`).
+> The IR interpreter already models comptime structs and arrays (`CtStruct` / `CtArray`), so the
+> likely shape is to run the unrolled loop's comptime state through it rather than to grow a second
+> domain at the lowering tier.
 
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)
 

@@ -492,7 +492,9 @@ public sealed class ZigFrontendTests
         // (address as usize) → an unchecked `(ulong)ptr` cast (road-to-zig-std B3). Previously loud cuts.
         var cs = EmitZig(
             "pub fn main() u8 {\n" +
-            "    const x: u8 = 0b00010000;\n" +
+            // A RUNTIME operand (a comptime-known `const` folds instead, as it does in zig).
+            "    var x: u8 = 0b00010000;\n" +
+            "    _ = &x;\n" +
             "    const lz = @clz(x);\n" +
             "    const tz = @ctz(x);\n" +
             "    var a = [_]u8{ 0, 0, 0 };\n" +

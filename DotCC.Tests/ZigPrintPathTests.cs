@@ -127,4 +127,46 @@ public sealed class ZigPrintPathTests
         cs.ShouldContain("throw new System.Diagnostics.UnreachableException(");
         cs.ShouldNotContain("maxInt__");   // evaluated during registration, never emitted
     }
+
+    [Fact]
+    public void A_tuple_types_member_lists_are_its_positions()
+    {
+        // `@typeInfo(@TypeOf(args)).@"struct".field_names` over the args of a format call (zig 0.17's
+        // parallel arrays; the CI oracle's 0.16.0 has none, so this is pinned here).
+        var cs = EmitMulti("""
+            fn count(args: anytype) u8 {
+                const info = @typeInfo(@TypeOf(args));
+                const names = info.@"struct".field_names;
+                const n: u8 = names.len;
+                return n + names[1][0];
+            }
+            pub fn main() u8 {
+                return count(.{ @as(u8, 1), @as(u16, 2) });
+            }
+            """);
+        cs.ShouldContain("byte n = 2;");
+        cs.ShouldContain("49");   // '1', the second field's name
+    }
+
+    [Fact]
+    public void A_module_qualified_type_alias_carries_its_declared_width_and_a_local_const_folds()
+    {
+        var cs = EmitMulti("""
+            const m = @import("m.zig");
+            fn check(comptime n: usize) u8 {
+                const max = @typeInfo(m.Word).int.bits;
+                if (n > max) {
+                    @compileError("too many");
+                }
+                @setEvalBranchQuota(@as(comptime_int, n) * 1000);
+                return @intCast(max + n);
+            }
+            pub fn main() u8 {
+                const w: m.Word = 8;
+                return check(2) + @as(u8, @intCast(w));
+            }
+            """, ("m.zig", "pub const Word = u21;\n"));
+        cs.ShouldContain("int max = 21;");   // the SPELLED width, although u21 lowers to uint
+        cs.ShouldContain("uint w = 8;");
+    }
 }

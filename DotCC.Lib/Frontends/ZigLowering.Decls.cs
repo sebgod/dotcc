@@ -1590,6 +1590,9 @@ internal sealed partial class ZigLowering
                 {
                     throw new IrUnsupportedException($"zig `@as` expects (type, value); got {bargs.Count} argument(s)");
                 }
+                // `@as(comptime_int, fmt.len)` (std.Io.Writer.print's eval-quota upcast): an UNTYPED comptime
+                // number has no C# type to cast to, and the value itself is the answer.
+                if (IsComptimeNumberTypeName(bargs[0])) { return LowerExpr(bargs[1]); }
                 var asTarget = LowerType(bargs[0]);
                 return new Cast(asTarget, LowerExprSink(bargs[1], asTarget)) { Type = asTarget };
             case "@intFromEnum":

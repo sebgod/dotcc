@@ -3417,6 +3417,25 @@ public sealed class ZigOracleTests
         // std.Io.Writer.fixed's shape: `.vtable = &.{ .drain = fixedDrain }` puts a comptime-known literal in
         // STATIC storage (both writers share one vtable address), its unset field takes its default, and
         // the lazy module's `fixedDrain` is a function named as a VALUE. 40 + 1 + 1 = 42.
+        // The prelude of std.Io.Writer.print: a module-qualified type ALIAS (`std.fmt.ArgSetType = u32`)
+        // with its declared width, a local `const` that folds so the `@compileError` guard prunes, and
+        // `@as(comptime_int, n)` in `@setEvalBranchQuota`. 32 + 2 + 8 = 42.
+        new object[] { "print_prelude",
+            "const m = @import(\"m.zig\");\n" +
+            "fn check(comptime n: usize) u8 {\n" +
+            "    const max = @typeInfo(m.Word).int.bits;\n" +
+            "    if (n > max) {\n" +
+            "        @compileError(\"too many\");\n" +
+            "    }\n" +
+            "    @setEvalBranchQuota(@as(comptime_int, n) * 1000);\n" +
+            "    return @intCast(max + n);\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const w: m.Word = 8;\n" +
+            "    return check(2) + @as(u8, @intCast(w));\n" +
+            "}\n",
+            "m.zig",
+            "pub const Word = u32;\n", 42, "" },
         new object[] { "vtable_literal",
             "const Writer = @import(\"Writer.zig\");\n" +
             "pub fn main() u8 {\n" +
