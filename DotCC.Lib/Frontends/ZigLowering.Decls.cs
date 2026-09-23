@@ -835,7 +835,14 @@ internal sealed partial class ZigLowering
             }
             if (valExpr is not null)
             {
-                next = ZigConstEval(LowerExpr(valExpr))
+                var lowered = LowerExpr(valExpr);
+                next = ZigConstEval(lowered)
+                    // An `enum(u64)` / `enum(usize)` member above long.MaxValue (std.Io.Limit's
+                    // `unlimited = std.math.maxInt(usize)`) is kept as its 64-bit pattern.
+                    ?? (underlying.Unqualified is CType.Prim { Integer: true, Signed: false, Bytes: 8 }
+                        && _ir.ConstEval128(lowered) is { } wide && wide >= 0 && wide <= ulong.MaxValue
+                            ? unchecked((long)(ulong)wide)
+                            : (long?)null)
                     ?? throw new IrUnsupportedException($"enum '{name}' member '{mName}': value must be a constant integer expression");
             }
             members.Add(new EnumMember(mName, next));
@@ -1338,6 +1345,16 @@ internal sealed partial class ZigLowering
             // value lowers at `sink`, so a result-located arm (`.member` / `.{…}` / a cast) resolves.
             case Zig.SwitchExpr s:         return LowerSwitchExpr(s.Arg2, s.Arg5, sink);
             case Zig.SwitchExprTrailing s: return LowerSwitchExpr(s.Arg2, s.Arg5, sink);
+            // `comptime switch` / `comptime if` in value position: the inner form, whose comptime-known
+            // subject already selects one arm at lowering time.
+            case Zig.ComptimeSwitchExpr c: return LowerExprSink(c.Arg1, sink);
+            case Zig.ComptimeIfExpr c:     return LowerExprSink(c.Arg1, sink);
+            // `&.{ … }` at a `*const S` sink (std.Io.Writer.fixed's `.vtable = &.{ .drain = fixedDrain, … }`):
+            // the literal is result-located at `S`, and a comptime-known one lives in static storage.
+            case Zig.PreAddrOf pa when pa.Arg1.Content is Zig.AnonStructInit
+                                    && sink?.Unqualified is CType.Pointer { Pointee: var pointee }
+                                    && pointee.Unqualified is CType.Named:
+                return LowerAddressOfStructLiteral(pa.Arg1, pointee);
             // `var x: T = undefined;` (scalar) → `default(T)` (Zig's uninitialized; a zeroed
             // over-approximation). An array sink is handled earlier in DeclOf (stackalloc).
             case Zig.UndefinedLit:

@@ -1781,6 +1781,48 @@ internal sealed partial class ZigLowering
     /// tagged-union subject (a value or pointer-to a registered <c>union(enum)</c>) to
     /// <see cref="LowerUnionSwitch"/> (the tag-discriminant + payload-capture path) and any other
     /// subject to the plain <see cref="LowerSwitch"/>.</summary>
+    /// <summary>Lower <c>&amp;.{ … }</c> result-located at a pointer to <paramref name="pointee"/>. zig puts a
+    /// comptime-known literal in static storage (every evaluation yields the same address), so its
+    /// struct value becomes a synthesized static global and the expression its address: std's VTable
+    /// instances (<c>.vtable = &amp;.{ .drain = fixedDrain, .flush = noopFlush }</c>). A literal with a
+    /// runtime field (a stack temporary in zig) is a loud cut.</summary>
+    private CExpr LowerAddressOfStructLiteral(Item literal, CType pointee)
+    {
+        var value = LowerExprSink(literal, pointee.Unqualified);
+        if (!IsStaticInitializer(value))
+        {
+            throw new IrUnsupportedException(
+                "zig `&.{ … }` with a runtime-known field (a pointer to a stack temporary) is not supported yet; "
+                + "a comptime-known one (constants, function names) is");
+        }
+        var sym = _symbols.Declare(new Symbol
+        {
+            Name = $"{_modulePrefix ?? "root"}__anon{_anonStaticCounter++}", Kind = SymKind.Var, Type = value.Type,
+            Storage = Storage.Static, IsGlobal = true,
+        });
+        _ir.Globals.Add(new GlobalVar(sym, value));
+        sym.AddressTaken = true;
+        var global = new VarRef(sym) { Type = value.Type, IsLValue = true };
+        return new Unary(UnOp.AddrOf, global) { Type = new CType.Pointer(pointee) };
+    }
+
+    /// <summary>Counter for the static globals <see cref="LowerAddressOfStructLiteral"/> synthesizes.</summary>
+    private int _anonStaticCounter;
+
+    /// <summary>True when <paramref name="e"/> is comptime-known data a static initializer can hold: a
+    /// literal, an enum constant, a function address, a default, or a struct literal of those.</summary>
+    private static bool IsStaticInitializer(CExpr e) => e switch
+    {
+        LitInt or LitFloat or LitBool or EnumConstRef or NullPtr or DefaultLit => true,
+        VarRef { Sym.Kind: SymKind.Func } => true,
+        Unary { Op: UnOp.AddrOf, Operand: VarRef { Sym.Kind: SymKind.Func } } => true,
+        Cast c => IsStaticInitializer(c.Operand),
+        Paren p => IsStaticInitializer(p.Inner),
+        ComptimeFold { Resolved: { } r } => IsStaticInitializer(r),
+        StructInit si => si.Members.All(m => IsStaticInitializer(m.Value)),
+        _ => false,
+    };
+
     /// <summary>True for a runtime loop statement (every <c>LoopStmt</c> form), which gets an unlabeled
     /// break target (<see cref="LowerLoopWithBreakTarget"/>).</summary>
     private static bool IsRuntimeLoopStmt(object? content) => content is
@@ -2330,6 +2372,11 @@ internal sealed partial class ZigLowering
         Zig.IfExpr e             => e.Arg4.Content is Zig.LabeledBlock || e.Arg6.Content is Zig.LabeledBlock,
         Zig.SwitchExpr s         => SwitchExprNeedsStmt(s.Arg5),
         Zig.SwitchExprTrailing s => SwitchExprNeedsStmt(s.Arg5),
+        // `comptime switch` / `comptime if`: the inner form decides. The `comptime` asks zig to evaluate
+        // it at compile time; dotcc's lowering already folds the arm whenever the subject is
+        // comptime-known, and a runtime subject (which zig rejects here) keeps its runtime lowering.
+        Zig.ComptimeSwitchExpr c => IsValueControlFlowStmt(c.Arg1),
+        Zig.ComptimeIfExpr c     => IsValueControlFlowStmt(c.Arg1),
         // A value-position loop (`while/for … else`, Milestone Y part 2) ALWAYS needs the statement
         // lowering — a loop that yields via `break v` / an `else` value can't be a C# expression.
         Zig.WhileElseExpr or Zig.ForElseExpr or Zig.LabeledWhileElseExpr or Zig.LabeledForElseExpr => true,
@@ -2356,6 +2403,8 @@ internal sealed partial class ZigLowering
     private CStmt LowerValueControlFlowStmt(Item rhs, CType? sink, Func<Symbol, CStmt> consume) => rhs.Content switch
     {
         Zig.IfExpr or Zig.SwitchExpr or Zig.SwitchExprTrailing => LowerValueIfSwitch(rhs, sink, consume),
+        Zig.ComptimeSwitchExpr c => LowerValueControlFlowStmt(c.Arg1, sink, consume),
+        Zig.ComptimeIfExpr c     => LowerValueControlFlowStmt(c.Arg1, sink, consume),
         Zig.WhileElseExpr or Zig.ForElseExpr or Zig.LabeledWhileElseExpr or Zig.LabeledForElseExpr
             => LowerLoopValue(rhs, sink, consume),
         _ => throw new IrUnsupportedException(
@@ -2601,6 +2650,7 @@ internal sealed partial class ZigLowering
     private static bool Terminates(CStmt s) => s switch
     {
         Return or Break or Continue or Goto => true,
+        ExprStmt { Expr: Call { Callee: "__dotcc_unreachable" } } => true,   // `unreachable` lowers to a throw
         Block b => b.Stmts.Count > 0 && Terminates(b.Stmts[^1]),
         If f => f.Else is { } e && Terminates(f.Then) && Terminates(e),
         _ => false,

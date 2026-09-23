@@ -831,6 +831,12 @@ productions:
       # set, so the alternative is conflict-free. Reuses the same `Prongs`, whose bodies may now
       # be a bare value Expr (`v => e`) — a switch expression's prongs YIELD a value.
       - { lhs: RhsExpr, rhs: [SwitchExpr] }
+      # `comptime switch (…) {…}` / `comptime if (…) a else b` in value position (road-to-zig-std G3:
+      # std.Io.Writer.print's `const arg_pos = comptime switch (placeholder.arg) {…}`; 12 in std). The
+      # `comptime` Prefix operator reaches only the Expr cascade, which neither form is in; after
+      # `comptime`, a `switch` / `if` lookahead starts no Prefix, so these are conflict-free.
+      - { lhs: RhsExpr, rhs: ['comptime', SwitchExpr], action: comptimeSwitchExpr }
+      - { lhs: RhsExpr, rhs: ['comptime', IfExpr],     action: comptimeIfExpr }
       # A labeled block as a VALUE (Milestone L, part 2) — `blk: { …; break :blk v; }`. Same
       # structural trick as IfExpr/SwitchExpr: a RhsExpr alternative, NOT a Primary, so it never
       # starts an Expr-cascade sub-operand. `blk:` is `IDENT ':'`; the RhsExpr cascade's other

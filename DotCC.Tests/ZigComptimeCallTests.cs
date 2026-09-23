@@ -56,20 +56,21 @@ public sealed class ZigComptimeCallTests
                 return if (span(i8) == 255) a - 213 else 0;
             }
             """);
-        cs.ShouldContain("byte a = (byte)((System.Int128)255UL);");
-        cs.ShouldContain("short b = (short)(-(System.Int128)32768UL);");
-        cs.ShouldContain("ulong c = (ulong)((System.Int128)18446744073709551615UL);");
-        cs.ShouldContain("(System.Int128)255UL == 255");   // span(i8), a comptime-only call inside another
+        // Evaluated when instantiated (the immediate path), so the literal splices straight in.
+        cs.ShouldContain("byte a = 255;");
+        cs.ShouldContain("short b = (short)(-32768);");
+        cs.ShouldContain("ulong c = (ulong)(18446744073709551615);");
+        cs.ShouldContain("(255 == 255)");   // span(i8), a comptime-only call inside another
         cs.ShouldNotContain("maxInt__");
         cs.ShouldNotContain("minInt__");
         cs.ShouldNotContain("span__");
     }
 
     [Fact]
-    public void A_comptime_int_call_into_a_lazy_module_folds_after_the_module_drains()
+    public void A_comptime_int_call_into_a_lazy_module_folds()
     {
-        // The callee's instance body lowers only in the module graph's drain, after the root's own
-        // passes, so the fold must resolve after that (not in the root's pass 3).
+        // Evaluated when instantiated in its own module; a body the immediate path cannot evaluate would
+        // stay a deferred fold, resolved after the module graph drains (not in the root's pass 3).
         var dir = Path.Combine(Path.GetTempPath(), $"dotcc-zigcc-{Guid.NewGuid():N}");
         Directory.CreateDirectory(dir);
         try
@@ -86,8 +87,8 @@ public sealed class ZigComptimeCallTests
                 }
                 """);
             var cs = Compiler.EmitCSharp(new[] { main });
-            cs.ShouldContain("x > (System.Int128)65535UL");
-            cs.ShouldContain("sbyte lo = (sbyte)(-(System.Int128)128UL);");
+            cs.ShouldContain("x > (uint)(65535)");
+            cs.ShouldContain("sbyte lo = (sbyte)(-128);");
             cs.ShouldNotContain("maxInt__");
             cs.ShouldNotContain("minInt__");
         }

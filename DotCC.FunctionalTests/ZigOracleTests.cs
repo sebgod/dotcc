@@ -3375,6 +3375,79 @@ public sealed class ZigOracleTests
             "    if (w.total > 200) return error.Full;\n" +
             "    w.total += @intCast(s.len);\n" +
             "}\n", 42, "" },
+        // Comptime value forms on std.Io.Writer.print's path (road-to-zig-std G3): `comptime switch` /
+        // `comptime if` in value position; an `enum(u64)` member of `maxInt(u64)` (std.Io.Limit's
+        // `unlimited`), which needs the comptime_int call evaluated during registration and a member value
+        // above long.MaxValue; and a statement `unreachable` prong. 30 + 2 + 5 + 4 + 1 = 42.
+        new object[] { "comptime_value_forms",
+            "const m = @import(\"m.zig\");\n" +
+            "const Limit = enum(u64) {\n" +
+            "    nothing = 0,\n" +
+            "    unlimited = m.maxInt(u64),\n" +
+            "    _,\n" +
+            "};\n" +
+            "fn pick(comptime k: u8) u8 {\n" +
+            "    const v = comptime switch (k) {\n" +
+            "        1 => 30,\n" +
+            "        else => 0,\n" +
+            "    };\n" +
+            "    const w: u8 = comptime if (k == 1) 2 else 0;\n" +
+            "    return v + w;\n" +
+            "}\n" +
+            "fn check(x: u8) u8 {\n" +
+            "    switch (x) {\n" +
+            "        0 => unreachable,\n" +
+            "        else => {},\n" +
+            "    }\n" +
+            "    return x;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const l: Limit = .unlimited;\n" +
+            "    const big: u64 = @intFromEnum(l);\n" +
+            "    var r: u8 = pick(1);\n" +
+            "    if (big == 18446744073709551615) r += 5;\n" +
+            "    if (l != .nothing) r += 4;\n" +
+            "    return r + check(1);\n" +
+            "}\n",
+            "m.zig",
+            "pub fn maxInt(comptime T: type) comptime_int {\n" +
+            "    const info = @typeInfo(T).int;\n" +
+            "    return (1 << (info.bits - @intFromBool(info.signedness == .signed))) - 1;\n" +
+            "}\n", 42, "" },
+        // std.Io.Writer.fixed's shape: `.vtable = &.{ .drain = fixedDrain }` puts a comptime-known literal in
+        // STATIC storage (both writers share one vtable address), its unset field takes its default, and
+        // the lazy module's `fixedDrain` is a function named as a VALUE. 40 + 1 + 1 = 42.
+        new object[] { "vtable_literal",
+            "const Writer = @import(\"Writer.zig\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var a: Writer = .fixed(30);\n" +
+            "    var b = Writer.fixed(0);\n" +
+            "    const same: u8 = if (a.vtable == b.vtable) 1 else 0;\n" +
+            "    return a.vtable.drain(&a, 10) + b.vtable.flush(&b) + same;\n" +
+            "}\n",
+            "Writer.zig",
+            "const Writer = @This();\n" +
+            "\n" +
+            "vtable: *const VTable,\n" +
+            "n: u8,\n" +
+            "\n" +
+            "pub const VTable = struct {\n" +
+            "    drain: *const fn (w: *Writer, x: u8) u8,\n" +
+            "    flush: *const fn (w: *Writer) u8 = noFlush,\n" +
+            "};\n" +
+            "\n" +
+            "pub fn fixed(n: u8) Writer {\n" +
+            "    return .{ .vtable = &.{ .drain = fixedDrain }, .n = n };\n" +
+            "}\n" +
+            "\n" +
+            "fn fixedDrain(w: *Writer, x: u8) u8 {\n" +
+            "    return w.n + x;\n" +
+            "}\n" +
+            "\n" +
+            "fn noFlush(w: *Writer) u8 {\n" +
+            "    _ = w;\n" +
+            "    return 1;\n" +
+            "}\n", 42, "" },
         // RE-EXPORTED declarations (std's `pub const indexOfScalar = findScalar;` shape, 633 in the pin):
         // a function, a generic, a type-returning generic and a container type, each named through a
         // `pub const` alias in lib.zig, plus a root alias of an imported function (no runtime global).

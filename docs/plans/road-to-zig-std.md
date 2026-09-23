@@ -674,6 +674,26 @@ that retire curated shortcuts.
 > `for (a, b, c) |x, y, z|` (592 in std); `mem.sort` reaches std.sort.asc's closure idiom
 > (`struct { pub fn inner … }.inner`); `bufPrint` still walls on the `Writer.VTable` pointer chain.
 
+> **Status update (2026-09-24, desktop): bufPrint reaches the format engine.** Every wall between
+> `std.fmt.bufPrint` and the body of `std.Io.Writer.print` is down (PR #125). The comptime-call engine
+> V1: a `comptime_int` return (`std.math.maxInt` / `minInt`, real std) is evaluated at the call, either
+> immediately when the body is comptime `const` bindings plus a `return` (so an enum member of
+> `maxInt(usize)` registers) or as a fold resolved after the whole module graph drains. A pointer to a
+> container that cannot lower is opaque (`VTable.sendFile`'s `*File.Reader`), and a container holding
+> one by value fails with it. A fn-pointer field is callable (`w.vtable.drain(…)`). A generic top-level
+> function of a file-as-struct is a method (`w.print(fmt, args)`). Then `print`'s own syntax and values:
+> jump prong bodies (`'{', '}' => break,`), `comptime switch` in value position, `&.{ … }` in static
+> storage (`Writer.fixed`'s vtable), a lazy module's function named as a value, `enum(u64)` members
+> above `long.MaxValue` (`std.Io.Limit`), and a statement `unreachable`.
+>
+> A **silent miscompile** fell out on the way and is fixed: zig's `break` in a switch prong exits the
+> enclosing loop, but it lowered to a C# `break` that exits only the switch (the loop kept iterating).
+>
+> **bufPrint's next wall:** `@typeInfo(@TypeOf(args)).@"struct".field_names` over a TUPLE type
+> (`.{42}`), then the format engine proper: a `comptime var` struct with comptime method calls
+> (`std.fmt.ArgState`), `comptime std.fmt.Placeholder.parse(&array)`, `@field(args, name)`, and
+> `printValue`. `std.math.maxInt` now runs; the other probes stand as in the previous block.
+
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)
 
 An opt-in test/tool (`DOTCC_RUN_STD_PROBE=1`, env `DOTCC_ZIG_LIB_DIR` or

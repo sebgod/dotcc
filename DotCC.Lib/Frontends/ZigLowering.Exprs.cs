@@ -79,6 +79,18 @@ internal sealed partial class ZigLowering
                     if (_comptimeVars.TryGetValue(sym, out var cv)) { return ComptimeVarLit(cv.Value, cv.Type); }
                     return new VarRef(sym) { Type = sym.Type, IsLValue = sym.Kind is SymKind.Var or SymKind.Param };
                 }
+                // A lazy module's top-level function named as a VALUE (`.drain = fixedDrain` in
+                // std.Io.Writer.fixed): declared on demand, like a bare call to it, then a function
+                // reference exactly as a root unit's is. A generic template has no one address to take.
+                if (_lazy && EnsureDeclLowered(name) is { } lazyFn)
+                {
+                    if (_genericFns.ContainsKey(lazyFn) || _typeReturningGenerics.ContainsKey(lazyFn))
+                    {
+                        throw new IrUnsupportedException(
+                            $"zig: generic function '{name}' used as a value (it has no single address) is not supported");
+                    }
+                    return new VarRef(lazyFn) { Type = lazyFn.Type };
+                }
                 // A bare (unqualified) sibling container const (Milestone R, part 6): inside a
                 // container const's RHS re-lower (`_currentConstContainer` set), an unresolved name may
                 // name a SIBLING const — inline it (comptime). Outside that, the unresolved error holds.
@@ -109,6 +121,13 @@ internal sealed partial class ZigLowering
                         + "named on it is one dotcc does not model");
                 }
                 RaiseIfSkippedDecl(name);   // declared here, but the declaration did not parse
+                // `unreachable` (a keyword; an identifier in this grammar) as a statement or a statement
+                // prong (`0 => unreachable,` in std.Io.Writer.print): zig's safe builds panic "reached
+                // unreachable code", and C23's `unreachable()` already lowers to that loud throw.
+                if (name == "unreachable")
+                {
+                    return new Call("__dotcc_unreachable", new List<CExpr>(), new List<CType>(), null) { Type = CType.Void };
+                }
                 throw new IrUnsupportedException($"unresolved identifier '{name}'");
             }
             case Zig.Grouped g:
@@ -159,6 +178,9 @@ internal sealed partial class ZigLowering
             // sink-carrying path is in LowerExprSink; here the arm types are inferred.
             case Zig.SwitchExpr s:         return LowerSwitchExpr(s.Arg2, s.Arg5, null);
             case Zig.SwitchExprTrailing s: return LowerSwitchExpr(s.Arg2, s.Arg5, null);
+            // `comptime switch` / `comptime if` in value position (see the LowerExprSink cases).
+            case Zig.ComptimeSwitchExpr c: return LowerExpr(c.Arg1);
+            case Zig.ComptimeIfExpr c:     return LowerExpr(c.Arg1);
 
             // A labeled value-block in a pure-expression position (an if/switch-expression arm, a
             // binary sub-operand) — it produces a value via statements, which a C# expression can't

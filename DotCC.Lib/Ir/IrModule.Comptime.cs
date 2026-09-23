@@ -122,6 +122,17 @@ internal sealed partial class IrModule
             _ => null,
         };
 
+    /// <summary>Evaluate an integer constant expression in 128 bits, for a value beyond
+    /// <c>long</c>: an <c>enum(u64)</c> member of <c>maxInt(u64)</c> (std.Io.Limit's <c>unlimited</c>).
+    /// Null when it is not a constant the interpreter folds.</summary>
+    internal System.Int128? ConstEval128(CExpr e) =>
+        TryEvalTop(e, allowCalls: false) switch
+        {
+            CtInt i => i.Value,
+            CtBool b => b.Value ? 1 : 0,
+            _ => null,
+        };
+
     /// <summary>The top-level eval entry: reset the step budget + call frame, then evaluate. A
     /// <see cref="ComptimeAbort"/> (a body construct the interpreter doesn't evaluate) maps to null
     /// (not a compile-time constant); the step-budget overflow surfaces as a loud error.</summary>

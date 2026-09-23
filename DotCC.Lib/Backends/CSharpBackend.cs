@@ -237,10 +237,15 @@ internal sealed class CSharpBackend
     {
         var sb = new StringBuilder();
         sb.Append("enum ").Append(e.Name).Append(" : ").Append(Cs(e.Underlying)).Append("\n{\n");
+        // A 64-bit UNSIGNED enum carries its members' bit patterns in the `long` value, so a member
+        // above long.MaxValue (Zig `enum(u64)`'s maxInt) prints as the unsigned value it is.
+        var unsigned64 = e.Underlying.Unqualified is CType.Prim { Integer: true, Signed: false, Bytes: 8 };
         foreach (var m in e.Members)
         {
             sb.Append("    ").Append(DotCC.EmitHelpers.Id(m.Name)).Append(" = ")
-              .Append(m.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append(",\n");
+              .Append(unsigned64
+                  ? unchecked((ulong)m.Value).ToString(System.Globalization.CultureInfo.InvariantCulture)
+                  : m.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append(",\n");
         }
         sb.Append("}\n\n");
         return sb.ToString();

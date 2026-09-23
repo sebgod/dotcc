@@ -204,6 +204,76 @@ internal sealed partial class ZigLowering
     /// <see cref="_comptimeOnlyFns"/>).</summary>
     private readonly HashSet<Symbol> _ownComptimeOnlyFns = new();
 
+    /// <summary>Each comptime-only instance whose value was evaluated when it was instantiated
+    /// (<see cref="TryEvalComptimeIntBody"/>) → that value, a spliced literal.</summary>
+    private readonly Dictionary<Symbol, CExpr> _comptimeIntValues = new();
+
+    /// <summary>Evaluate a <c>comptime_int</c> function's body NOW, with the instance's seeds live (the
+    /// comptime-call engine's immediate path): <c>std.math.maxInt(usize)</c> as an enum member value
+    /// (std.Io.Limit's <c>unlimited</c>) is needed during registration, before any deferred fold runs.
+    /// The body may bind comptime <c>const</c>s (a <c>@typeInfo</c> value, a type alias, a folded
+    /// scalar) and must then <c>return</c> a value the interpreter folds, as <c>maxInt</c> / <c>minInt</c>
+    /// do. Anything else returns null and the call stays a deferred fold (V1), which fails loudly if it
+    /// cannot fold either. Every binding made here is undone, so the caller's scope is untouched.</summary>
+    private CExpr? TryEvalComptimeIntBody(GenericFnInfo g,
+        IReadOnlyList<(string name, long value, CType type)> valueSeeds,
+        IReadOnlyList<(string name, bool hasValue, long value, CType inner)> optionalSeeds)
+    {
+        var bound = new List<(string Name, ZigTypeInfo? Info, CType? Alias, int? Bits, CExpr? Value)>();
+        _symbols.EnterScope();
+        try
+        {
+            foreach (var (name, value, type) in valueSeeds)
+            {
+                _comptimeVars[_symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type })] = (value, type);
+            }
+            foreach (var (name, hasValue, value, inner) in optionalSeeds)
+            {
+                var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = new CType.Optional(inner) });
+                _comptimeOptionalVars[sym] = (hasValue, value, inner);
+            }
+            using var hoist = EnterThrowawayHoist();
+            foreach (var stmt in BodyStatements(g.Body))
+            {
+                switch (stmt.Content)
+                {
+                    case Zig.ConstDecl cd:
+                    {
+                        var name = Tok(cd.Arg1);
+                        bound.Add((name, _typeInfoBindings.GetValueOrDefault(name), _typeAliases.GetValueOrDefault(name),
+                                   _declaredIntBits.TryGetValue(name, out var pb) ? pb : null, _comptimeValues.GetValueOrDefault(name)));
+                        if (TryComptimeConstBinding(name, cd.Arg3)) { break; }
+                        if (_ir.ConstEval(LowerExpr(cd.Arg3)) is not { } v) { return null; }
+                        var vt = CType.Long;
+                        _comptimeVars[_symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = vt })] = (v, vt);
+                        break;
+                    }
+                    case Zig.StmtReturn r:
+                        return _ir.ResolveComptimeFold(LowerExprSink(r.Arg1, CType.Int128));
+                    default:
+                        return null;
+                }
+            }
+            return null;
+        }
+        catch (IrUnsupportedException)
+        {
+            return null;   // not evaluable now: the call stays a deferred fold, which reports its own failure
+        }
+        finally
+        {
+            for (var i = bound.Count - 1; i >= 0; i--)
+            {
+                var (name, info, alias, bits, value) = bound[i];
+                if (info is { } ti) { _typeInfoBindings[name] = ti; } else { _typeInfoBindings.Remove(name); }
+                if (alias is { } a) { _typeAliases[name] = a; } else { _typeAliases.Remove(name); }
+                SetDeclaredIntBits(name, bits);
+                if (value is { } cv) { _comptimeValues[name] = cv; } else { _comptimeValues.Remove(name); }
+            }
+            _symbols.ExitScope();
+        }
+    }
+
     /// <summary>True when <paramref name="fn"/> is one of this module's comptime-only instances
     /// (<see cref="_comptimeOnlyFns"/>).</summary>
     internal bool IsComptimeOnlyFn(Symbol fn) => _comptimeOnlyFns.Contains(fn);
@@ -216,6 +286,9 @@ internal sealed partial class ZigLowering
     private CExpr FoldIfComptimeOnly(ZigLowering owner, Symbol instance, CExpr call)
     {
         if (!owner.IsComptimeOnlyFn(instance)) { return call; }
+        // Evaluated when it was instantiated (TryEvalComptimeIntBody): the value is known now, so a
+        // position that needs it during lowering (an enum member, an array extent) can use it.
+        if (owner._comptimeIntValues.TryGetValue(instance, out var known)) { return known; }
         var fold = new ComptimeFold(call) { Type = call.Type };
         _pendingComptimeFolds.Add(fold);
         return fold;
@@ -436,7 +509,11 @@ internal sealed partial class ZigLowering
                 // An error-union generic: register the instance's raw return-type AST so its body resolves
                 // its declared error set in LowerFnBodyCore (the same lazy resolution a plain fn gets).
                 if (ret is CType.ErrorUnion) { _fnErrorReturnTypes[instanceSym] = (g.RetType, g.ErrUnion); }
-                if (comptimeOnly) { _comptimeOnlyFns.Add(instanceSym); }
+                if (comptimeOnly)
+                {
+                    _comptimeOnlyFns.Add(instanceSym);
+                    if (TryEvalComptimeIntBody(g, valueSeeds, optionalSeeds) is { } value) { _comptimeIntValues[instanceSym] = value; }
+                }
                 _instantiations[mangled] = instanceSym;
                 _pendingInstantiations.Add(new PendingInstantiation(instanceSym, g, valueSeeds, typeSeeds, runtimeParams, optionalSeeds, stringSeeds));
             }
