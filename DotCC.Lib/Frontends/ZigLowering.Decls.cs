@@ -1230,6 +1230,42 @@ internal sealed partial class ZigLowering
         return new StructInit(members) { Type = new CType.Named(info.Name) };
     }
 
+    /// <summary>The container a DECL LITERAL at <paramref name="sink"/> looks its member up in — the sink's
+    /// struct/union name — or null when the sink is not a zig container (an enum sink resolves a bare
+    /// <c>.member</c> as a tag instead, and a curated std type models its own literals).</summary>
+    private static string? DeclLiteralContainer(CType? sink)
+        => sink?.Unqualified is CType.Named { Name: var name } && name is not (FbaTypeName or ArenaTypeName) ? name : null;
+
+    /// <summary>Lower a decl-literal CALL <c>.name(args)</c> at a sink of container type
+    /// <paramref name="container"/>: zig resolves <c>name</c> as a declaration of the RESULT type, so this
+    /// is exactly the associated call <c>Container.name(args)</c>. The function is found through the shared
+    /// method registry (<see cref="EnsureMethodDeclared"/>), so a container another module declares —
+    /// <c>std.Io.Writer</c>'s <c>fixed</c> — declares and lowers in its own module. Its return type is not
+    /// checked against the sink here; the ordinary store coercion does that.</summary>
+    private CExpr LowerDeclLiteralCall(string container, string name, IReadOnlyList<Item> argItems)
+    {
+        var fn = EnsureMethodDeclared(container, name)
+            ?? throw new IrUnsupportedException(
+                $"decl literal `.{name}(…)`: '{container}' has no function '{name}'");
+        return BuildCall(fn, argItems, receiver: null);
+    }
+
+    /// <summary>Lower a decl-literal VALUE <c>.name</c> at a sink of container type
+    /// <paramref name="container"/> — the container's <c>const name</c>, re-lowered like a
+    /// <c>Container.name</c> read (<see cref="LowerContainerConst"/>). V1 reads the consts of containers
+    /// THIS module declares; one declared in another module is a loud cut (its const RHS must lower in its
+    /// owner, which the value path does not route to yet — the call form does).</summary>
+    private CExpr LowerDeclLiteralValue(string container, string name)
+    {
+        if (_containerConsts.TryGetValue(container, out var consts) && consts.TryGetValue(name, out var entry))
+        {
+            return LowerContainerConst(container, name, entry.typeItem, entry.rhs);
+        }
+        throw new IrUnsupportedException(
+            $"decl literal `.{name}`: '{container}' has no `const {name}` in this module "
+            + "(a decl-literal VALUE of a container declared in another module is not lowered yet)");
+    }
+
     /// <summary>Lower an expression that has a known result type (a "sink"): the two
     /// result-located Zig forms — a bare enum literal <c>.member</c> and an anonymous struct
     /// literal <c>.{…}</c> — need that type to resolve, so they're dispatched here; every
@@ -1254,6 +1290,15 @@ internal sealed partial class ZigLowering
                     ? new DefaultLit { Type = sink }
                     : throw new IrUnsupportedException(
                         $"zig std.ArrayList has no modeled decl literal `.{Tok(el.Arg1)}` (only `.empty`)");
+            // A DECL LITERAL (zig 0.14+) at a struct/union sink: `.fixed(buf)` IS `T.fixed(buf)`, and a
+            // bare `.origin` IS `T.origin` — the member is looked up on the RESULT type, like an enum
+            // literal's tag (road-to-zig-std G3 — `var w: Writer = .fixed(buf);` in `std.fmt.bufPrint`).
+            case Zig.CallArgs { Arg0.Content: Zig.EnumLit dcl } dca when DeclLiteralContainer(sink) is { } dcc:
+                return LowerDeclLiteralCall(dcc, Tok(dcl.Arg1), Flatten(dca.Arg2));
+            case Zig.CallNoArgs { Arg0.Content: Zig.EnumLit dcl } when DeclLiteralContainer(sink) is { } dcc:
+                return LowerDeclLiteralCall(dcc, Tok(dcl.Arg1), []);
+            case Zig.EnumLit dvl when DeclLiteralContainer(sink) is { } dvc:
+                return LowerDeclLiteralValue(dvc, Tok(dvl.Arg1));
             case Zig.AnonStructInit:
             case Zig.AnonStructInitEmpty:
                 return LowerStructInit(expr, sink);
