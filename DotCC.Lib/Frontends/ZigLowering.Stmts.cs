@@ -226,6 +226,8 @@ internal sealed partial class ZigLowering
                 return new For(null, LowerExpr(w.Arg2), LowerExpr(w.Arg6), LowerStmt(w.Arg8));
             case Zig.StmtWhileContAssign w:
                 return new For(null, LowerExpr(w.Arg2), ContAssignPost(w.Arg6, w.Arg7, w.Arg8), LowerStmt(w.Arg10));
+            case Zig.StmtWhileContBlock w:
+                return new For(null, LowerExpr(w.Arg2), ContBlockPost(w.Arg6), LowerStmt(w.Arg8));
 
             // `while (opt) |x| body` — optional payload capture-while (Milestone M, part 2). See
             // LowerWhileCapture (desugars to `while (true) { … if (has) { bind; body } else break; }`).
@@ -369,6 +371,30 @@ internal sealed partial class ZigLowering
     /// like <c>stmtAddWrapAssign</c>); a saturating op → the <c>ZigMath.Sat…</c> clamp assignment.
     /// Shared by the plain (<see cref="Zig.StmtWhileContAssign"/>) and capture-while
     /// (<see cref="Zig.StmtWhileCaptureContAssign"/>) continue forms.</summary>
+    /// <summary>A BLOCK continue expression (<c>while (c) : ({ a += 1; b += 1; }) body</c>) as the loop's
+    /// update list: each statement lowers as it would anywhere, and must come out as a single expression
+    /// statement (an assignment of any kind, a call), which becomes one item of the C#
+    /// <c>for (;; a += 1, b += 1)</c> update clause (<see cref="CommaSeq"/>). A statement that needs more
+    /// (a declaration, control flow, a hoisted temporary) is a loud cut.</summary>
+    private CExpr ContBlockPost(Item blockItem)
+    {
+        var items = new List<CExpr>();
+        IReadOnlyList<Item> stmts = blockItem.Content is Zig.Block b ? Flatten(b.Arg1) : [];
+        foreach (var stmt in stmts)
+        {
+            var lowered = LowerStmt(stmt);
+            while (lowered is Seq { Stmts.Count: 1 } single) { lowered = single.Stmts[0]; }
+            if (lowered is not ExprStmt es)
+            {
+                throw new IrUnsupportedException(
+                    "zig `while (…) : ({ … })`: the continue block may hold only assignments and calls (each "
+                    + "becomes one item of the loop's update list); got " + (stmt.Content?.GetType().Name ?? "?"));
+            }
+            items.Add(es.Expr);
+        }
+        return items.Count == 1 ? items[0] : new CommaSeq(items) { Type = CType.Void };
+    }
+
     private CExpr ContAssignPost(Item lhsItem, Item opItem, Item rhsItem) => opItem.Content switch
     {
         Zig.AopAssign  => PlainAssignPost(lhsItem, rhsItem),

@@ -83,6 +83,51 @@ public sealed class ZigStdParseBricksTests
     }
 
     [Fact]
+    public void A_member_comptime_block_and_a_block_continue_expression_parse()
+    {
+        // hash_map's `comptime { assert(@sizeOf(Metadata) == 1); }` member (analysis-only, dropped) and its
+        // iterators' `while (…) : ({ a += 1; b += 1; })` (a C# for-update list).
+        var cs = EmitZig("""
+            const S = struct {
+                a: u8,
+                comptime {
+                    const z = 1;
+                    _ = z;
+                }
+            };
+            pub fn main() u8 {
+                var i: u8 = 0;
+                var total: u8 = 0;
+                while (i < 3) : ({
+                    i += 1;
+                    total += 2;
+                }) {}
+                const s = S{ .a = 36 };
+                return s.a + total;
+            }
+            """);
+        cs.ShouldContain("i += (byte)(1), total += (byte)(2))");
+    }
+
+    [Fact]
+    public void An_orelse_return_whose_value_is_an_identifier_parses()
+    {
+        // `x orelse return err` failed at `err` while `x orelse return 0` worked: a struct field default can
+        // be followed straight by the next member, so an IDENT could follow an expression, and LALR.CC's
+        // group-order precedence let the VOID form's reduce win that state. The void forms now rank last.
+        var cs = EmitZig("""
+            fn pick(x: ?u8, fallback: u8) u8 {
+                const v = x orelse return fallback;
+                return v;
+            }
+            pub fn main() u8 {
+                return pick(null, 42);
+            }
+            """);
+        cs.ShouldContain("return fallback;");
+    }
+
+    [Fact]
     public void A_sibling_type_returning_generic_in_an_imported_module_is_declared_on_demand()
     {
         // hash_map.zig's `AutoHashMap` body names its sibling `HashMap(…)` by bare name; a lazy module had

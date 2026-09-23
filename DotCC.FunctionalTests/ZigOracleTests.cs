@@ -2931,6 +2931,30 @@ public sealed class ZigOracleTests
             "    ) };\n" +
             "    return b.get() + @as(u8, @intCast(all.len)) - 3;\n" +
             "}\n", 42, "" },
+        // More of hash_map's syntax (road-to-zig-std S9/G5): a member `comptime { … }` block, a BLOCK
+        // continue expression `while (…) : ({ … })`, and `orelse return <identifier>`. 30 + 6 + 6 = 42.
+        new object[] { "hash_map_parse_bricks",
+            "const S = struct {\n" +
+            "    a: u8,\n" +
+            "    comptime {\n" +
+            "        const z = 1;\n" +
+            "        _ = z;\n" +
+            "    }\n" +
+            "};\n" +
+            "fn pick(x: ?u8, fallback: u8) u8 {\n" +
+            "    const v = x orelse return fallback;\n" +
+            "    return v;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var i: u8 = 0;\n" +
+            "    var total: u8 = 0;\n" +
+            "    while (i < 3) : ({\n" +
+            "        i += 1;\n" +
+            "        total += 2;\n" +
+            "    }) {}\n" +
+            "    const s = S{ .a = 30 };\n" +
+            "    return s.a + total + pick(null, 6);\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
