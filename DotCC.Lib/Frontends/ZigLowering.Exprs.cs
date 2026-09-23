@@ -383,6 +383,9 @@ internal sealed partial class ZigLowering
                     {
                         throw new IrUnsupportedException("array `.len` requires a compile-time-known length");
                     }
+                    // A string literal is `*const [N:0]u8` — its `.len` is N, while the lowered array
+                    // type counts the NUL too (C's `char[N+1]`), as CoerceToSlice already accounts for.
+                    if (IsStringLiteralValue(structExpr)) { arrLen--; }
                     return new LitInt(arrLen.ToString(System.Globalization.CultureInfo.InvariantCulture), arrLen) { Type = CType.ULong };
                 }
                 // Tagged-union payload access `u.variant` → `u.__payload.variant` (unchecked,
@@ -1029,6 +1032,14 @@ internal sealed partial class ZigLowering
             var navSym = navMod.Lowering?.EnsureDeclLowered(methodName)
                 ?? throw new IrUnsupportedException(
                     $"zig module '{System.IO.Path.GetFileName(navMod.Path)}' has no exported function '{methodName}'");
+            // A GENERIC export (a `comptime` / `anytype` parameter — `std.fmt.bufPrint`) instantiates in
+            // its OWN module, with the arguments read here (road-to-zig-std G3); calling the template
+            // symbol directly would bind its empty placeholder signature.
+            if (navMod.Lowering is { } navLowering
+                && navLowering.TryResolveExportedGenericInstance(navSym, argItems, caller: this) is { } inst)
+            {
+                return BuildCall(inst.Instance, inst.RuntimeArgs, receiver: null);
+            }
             return BuildCall(navSym, argItems, receiver: null);
         }
 
