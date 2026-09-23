@@ -999,15 +999,16 @@ internal sealed partial class ZigLowering
 
         // --- curated `std.mem` helpers (a static call on the std.mem namespace) ---
         // Routed before the generic dispatch. dotcc models no `std` in general — only this curated
-        // set of the most common slice utilities; an unmodeled member is a clear, specific error.
-        if (TryResolveStdPath(fld.Arg0, out var stdNs) && stdNs == "std.mem")
+        // set of the most common slice utilities. An unmodeled member is a clear, specific error without
+        // a std tree; with one (DOTCC_ZIG_LIB_DIR) it navigates to real source (TakesCuratedStdCall).
+        if (TryResolveStdPath(fld.Arg0, out var stdNs) && stdNs == "std.mem" && TakesCuratedStdCall(stdNs, methodName))
         {
             return LowerStdMemCall(methodName, argItems);
         }
 
         // --- curated `std.debug.print` (wall-plan W6) --- the biggest remaining std idiom. Like the
         // std.mem helpers it's a curated path, not a general std model; only `print` is modeled.
-        if (TryResolveStdPath(fld.Arg0, out var stdDbg) && stdDbg == "std.debug")
+        if (TryResolveStdPath(fld.Arg0, out var stdDbg) && stdDbg == "std.debug" && TakesCuratedStdCall(stdDbg, methodName))
         {
             return LowerStdDebugCall(methodName, argItems);
         }
@@ -1015,7 +1016,7 @@ internal sealed partial class ZigLowering
         // --- curated `std.testing` assertions (`dotcc zig test`) --- `expect` / `expectEqual`, each
         // returning an error union so a `try` propagates a failing assertion to the test's boundary
         // (and thence to the generated test runner). A curated path, like the ones above.
-        if (TryResolveStdPath(fld.Arg0, out var stdTest) && stdTest == "std.testing")
+        if (TryResolveStdPath(fld.Arg0, out var stdTest) && stdTest == "std.testing" && TakesCuratedStdCall(stdTest, methodName))
         {
             return LowerStdTestingCall(methodName, argItems);
         }

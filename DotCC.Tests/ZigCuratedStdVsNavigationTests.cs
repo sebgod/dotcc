@@ -48,7 +48,9 @@ public sealed class ZigCuratedStdVsNavigationTests
         // unlowerable marker, so if type-position navigation ever beat the curated model the compile
         // would fail loudly on it (road-to-zig-std S4d must not regress S1's curated-first rule).
         File.WriteAllText(Path.Combine(std, "mem.zig"),
-            $"pub const Allocator = struct {{ marker: {NavigationMarker} }};\n");
+            $"pub const Allocator = struct {{ marker: {NavigationMarker} }};\n" +
+            // `twice` is a member the curated std.mem set does NOT model, so it must reach this source.
+            "pub fn twice(x: u8) u8 { return x + x; }\n");
         // A type-returning generic reached through the module graph, carrying a method — the shape
         // `std.ArrayList` has (road-to-zig-std G4 × S4d).
         File.WriteAllText(Path.Combine(std, "array_list.zig"),
@@ -130,6 +132,47 @@ public sealed class ZigCuratedStdVsNavigationTests
             "    return 0;\n" +
             "}\n");
         cs.ShouldContain("isDigit");   // the navigated leaf lowered into the emitted program
+    }
+
+    [Fact]
+    public void An_uncurated_member_of_a_curated_std_namespace_navigates_to_real_source()
+    {
+        // road-to-zig-std G2: `std.mem` is curated per MEMBER, not as a whole path. `eql` keeps its
+        // curated lowering; `twice` is not curated, so with a std tree it lowers from `mem.zig` instead
+        // of stopping at "not modeled yet", which blocked every other std.mem function from source.
+        var cs = EmitWithStdTree(
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    if (!std.mem.eql(u8, \"ab\", \"ab\")) return 1;\n" +
+            "    return std.mem.twice(21);\n" +
+            "}\n");
+        cs.ShouldContain("ZigMem.Eql<byte>(");   // curated
+        cs.ShouldContain("mem__twice(21)");      // navigated, module-qualified
+    }
+
+    [Fact]
+    public void An_uncurated_std_namespace_member_without_a_std_tree_names_the_curated_set()
+    {
+        // With no std source to navigate, the curated error is still the most useful message.
+        var path = Path.Combine(Path.GetTempPath(), $"dotcc-zignostd-{Guid.NewGuid():N}.zig");
+        File.WriteAllText(path,
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    return std.mem.twice(21);\n" +
+            "}\n");
+        var saved = Environment.GetEnvironmentVariable(LibDirEnv);
+        Environment.SetEnvironmentVariable(LibDirEnv, null);
+        try
+        {
+            var ex = Should.Throw<CompileException>(() => Compiler.EmitCSharp(new[] { path }));
+            ex.Message.ShouldContain("std.mem.twice");
+            ex.Message.ShouldContain("supported: eql");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(LibDirEnv, saved);
+            File.Delete(path);
+        }
     }
 
     [Fact]

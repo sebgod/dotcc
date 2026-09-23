@@ -618,6 +618,25 @@ internal sealed partial class ZigLowering
         ["std.heap.c_allocator"] = AllocKind.CHeap,
     };
 
+    /// <summary>The functions each curated std NAMESPACE lowers by hand (<see cref="LowerStdMemCall"/>,
+    /// <see cref="LowerStdDebugCall"/>, <see cref="LowerStdTestingCall"/>). A namespace is not a curated
+    /// PATH the way a type is: <c>std.mem</c> also holds hundreds of functions dotcc never modeled, so only
+    /// these members claim the call; with a real std tree configured any other member falls through to
+    /// source navigation (road-to-zig-std G2, the curated-first rule applied per member).</summary>
+    private static readonly Dictionary<string, HashSet<string>> CuratedStdNamespaceFns = new(System.StringComparer.Ordinal)
+    {
+        ["std.mem"] = new(System.StringComparer.Ordinal) { "eql", "copyForwards", "span", "zeroes" },
+        ["std.debug"] = new(System.StringComparer.Ordinal) { "print" },
+        ["std.testing"] = new(System.StringComparer.Ordinal)
+            { "expect", "expectEqual", "expectError", "expectEqualStrings", "expectEqualSlices" },
+    };
+
+    /// <summary>True when the call <c>namespace.method(…)</c> takes the curated lowering: the member is
+    /// curated, or no std source tree is configured (so the curated "not modeled" message, which lists
+    /// what IS modeled, is the most useful error). False sends it to the module graph instead.</summary>
+    private bool TakesCuratedStdCall(string ns, string method)
+        => CuratedStdNamespaceFns[ns].Contains(method) || _moduleGraph?.StdRootPath is null;
+
     /// <summary>True when a dotted expression resolves to a std path the CURATED model OWNS — a
     /// <see cref="StdTypes"/>, <see cref="StdGenericTypes"/> or <see cref="StdAllocatorValues"/> row.
     /// The discriminator that keeps real-std source navigation (road-to-zig-std S1/S2, active when a
