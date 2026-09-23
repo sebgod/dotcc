@@ -68,6 +68,10 @@ internal sealed class ZigImportScope
     /// <summary>(container, method) → the module that owns an as-yet-undeclared lazy method + its AST.</summary>
     public Dictionary<(string container, string method), (ZigLowering owner, Item decl)> LazyMethodDecls { get; } = new();
 
+    /// <summary>A file-as-struct container's IR name → the module whose top-level functions are its
+    /// methods (road-to-zig-std G3: <c>Io/Writer.zig</c> declares fields at file scope).</summary>
+    public Dictionary<string, ZigLowering> FileStructOwners { get; } = new(StringComparer.Ordinal);
+
     private readonly Dictionary<string, string> _modulePrefixes = new(StringComparer.Ordinal);
     private readonly HashSet<string> _usedPrefixes = new(StringComparer.Ordinal);
 

@@ -178,6 +178,9 @@ internal sealed partial class ZigLowering
         // for the same reason: a struct or enum constant is an ordinary runtime value too, so the decl
         // still emits and only a comptime QUESTION about it folds.
         RecordComptimeAggregateBinding(name, rhs);
+        // `const Writer = std.Io.Writer;` is a path into another module, which may name a file-as-struct
+        // TYPE (road-to-zig-std G3). Recorded unresolved; a type position resolves it on demand.
+        if (rhs.Content is Zig.Field && IsImportRootedPath(rhs)) { _moduleAliasPaths[name] = rhs; }
         if (EvalComptimeValue(rhs) is { } comptimeVal) { _comptimeValues[name] = comptimeVal; }
         // A comptime ARRAY literal (`const a = [_]u8{1,2};`) — record its raw element-type + element
         // items (no lowering, so safe in any pass) for a later `++`/`**` fold (see TryArrayLiteralParts).
@@ -187,6 +190,15 @@ internal sealed partial class ZigLowering
         }
         return false;
     }
+
+    /// <summary>True when a dotted path is rooted, syntactically, at a name this unit binds to an
+    /// import (<c>std.Io.Writer</c>). Resolves nothing, so it is safe while a module is being prepared.</summary>
+    private bool IsImportRootedPath(Item expr) => expr.Content switch
+    {
+        Zig.Field f => IsImportRootedPath(f.Arg0),
+        Zig.Ident id => _importSpecs.ContainsKey(Tok(id.Arg0)),
+        _ => false,
+    };
 
     /// <summary>Recognize a <c>const</c> RHS that is a TYPE expression (wall-plan W1), lowering it to
     /// the aliased <see cref="CType"/>. Two unambiguous shapes plus a guarded identifier:
@@ -211,6 +223,13 @@ internal sealed partial class ZigLowering
               or Zig.TyArray or Zig.TySentArray or Zig.ErrUnion or Zig.TyTuple
               or Zig.TyFn or Zig.TyFnNoArgs or Zig.TyFnErr or Zig.TyFnNoArgsErr:
                 type = LowerType(rhs);
+                return true;
+
+            // `const Writer = @This();` names the innermost container, which at file scope is the file
+            // itself when it has top-level fields (road-to-zig-std G3). A namespace-only file has no
+            // type to name, so the binding falls through unchanged.
+            case Zig.BuiltinCallNoArgs tb when Tok(tb.Arg0) == "@This" && (_currentContainer ?? _fileContainer) is not null:
+                type = CurrentContainerType();
                 return true;
 
             // `@TypeOf(expr)` — the operand's synthesized type, unevaluated.
@@ -659,10 +678,10 @@ internal sealed partial class ZigLowering
     }
 
     /// <summary>The type the enclosing container's <c>@This()</c> resolves to — the struct/enum
-    /// whose method is currently being lowered. An error outside a method (no container in
-    /// scope).</summary>
+    /// whose method is currently being lowered, else the file-as-struct type when the file has
+    /// top-level fields (road-to-zig-std G3). An error when neither is in scope.</summary>
     private CType CurrentContainerType() =>
-        _currentContainer is { } c && _containerTypes.TryGetValue(c, out var t)
+        (_currentContainer ?? _fileContainer) is { } c && _containerTypes.TryGetValue(c, out var t)
             ? t
             : throw new IrUnsupportedException("zig `@This()` is only supported inside a container method");
 
@@ -693,6 +712,8 @@ internal sealed partial class ZigLowering
                 + "(use a `const Alias = SomeType;` type alias, or a `comptime` parameter once generics land)");
         }
         if (_containerTypes.TryGetValue(name, out var ct)) { return ct; }
+        // A name bound to a file-as-struct MODULE (`const Writer = std.Io.Writer;`), resolved on demand.
+        if (TryResolveModuleTypeAlias(name, out var fileType)) { return fileType; }
         // An error-set name used as a plain VALUE type — `fn f(e: E)`, `var x: E`, a non-`!T`
         // error return `fn g() E` — or the open `anyerror`. Lowers to the flat erased error code
         // (`CType.ErrorSet`, rendered `ushort`): the error VALUE itself, NOT an `E!T` error union
@@ -767,6 +788,7 @@ internal sealed partial class ZigLowering
         var nested = ResolveNestedType(name);
         if (nested is not null) { type = nested; return true; }
         if (_containerTypes.TryGetValue(name, out type!)) { return true; }
+        if (!_typeAliases.ContainsKey(name) && TryResolveModuleTypeAlias(name, out type)) { return true; }
         // A type ALIAS naming a container — `const S = Stack(u8, 4); S.init()` (road-to-zig-std G4). A
         // REIFIED type-returning generic has no source-level name of its own (its mangled name is
         // synthesized), so the alias is the only way to reach its static methods / consts; treat it

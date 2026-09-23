@@ -82,7 +82,8 @@ internal sealed class ZigFrontend : IFrontend
             {
                 throw new CompileException($"parse failed in {Path.GetFileName(path)}: {root}");
             }
-            new ZigLowering(ir, names, errorCodes, testMode, moduleGraph, Path.GetDirectoryName(path)).Lower(root);
+            new ZigLowering(ir, names, errorCodes, testMode, moduleGraph, Path.GetDirectoryName(path),
+                fileStem: Path.GetFileNameWithoutExtension(path)).Lower(root);
         }
         // Drain every lazily-imported module's referenced function bodies at top level (road-to-zig-std
         // S2). References were collected while the roots lowered; this lowers exactly those decls (and
