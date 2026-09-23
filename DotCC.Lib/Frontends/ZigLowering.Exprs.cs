@@ -120,6 +120,8 @@ internal sealed partial class ZigLowering
                         $"zig: `{name}` is the imported module `{importedSpec}`, not a value — the declaration "
                         + "named on it is one dotcc does not model");
                 }
+                // A lazy module's top-level value const (`use_vectors_for_comparison` in mem.zig).
+                if (LowerLazyValueConst(name) is { } lazyConst) { return lazyConst; }
                 RaiseIfSkippedDecl(name);   // declared here, but the declaration did not parse
                 // `unreachable` (a keyword; an identifier in this grammar) as a statement or a statement
                 // prong (`0 => unreachable,` in std.Io.Writer.print): zig's safe builds panic "reached
@@ -535,6 +537,12 @@ internal sealed partial class ZigLowering
             // carries; reached here (no sink) they error clearly. The sink-carrying forms (and
             // the sink-free `@as`/`@intFromEnum`/`@sizeOf`/`@alignCast`) share one lowering.
             case Zig.BuiltinCall b: return LowerBuiltinCall(b, null);
+            // `@inComptime()` (std.mem.eql's `!@inComptime() and …` fast-path guard): code dotcc lowers
+            // runs at runtime, so it is `false`; the comptime interpreter never evaluates this node.
+            case Zig.BuiltinCallNoArgs nb when Tok(nb.Arg0) == "@inComptime":
+                return new LitBool(false) { Type = CType.Bool };
+            case Zig.BuiltinCallNoArgs nb:
+                throw new IrUnsupportedException($"zig builtin `{Tok(nb.Arg0)}()` in value position is not supported yet");
 
             // `null` — reuse the C null-pointer node (renders C# `null`, valid for BOTH a
             // pointer sink `T*` and a value-optional sink `T?`). In Zig `null` only appears

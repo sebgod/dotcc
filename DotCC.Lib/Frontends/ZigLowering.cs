@@ -562,6 +562,36 @@ internal sealed partial class ZigLowering
     private Symbol? FileStructFnSymbol(string name)
         => _lazy ? EnsureDeclLowered(name) : _exportedFns.GetValueOrDefault(name);
 
+    /// <summary>A LAZY module's top-level value <c>const</c>s (name → optional annotation + RHS), recorded
+    /// raw by the prepare pass (road-to-zig-std G3/G5). zig evaluates a top-level <c>const</c>'s
+    /// initializer at comptime, so a reference lowers the RHS where it is named, with the annotation as
+    /// its sink, exactly as a container const is inlined (<see cref="LowerLazyValueConst"/>).</summary>
+    private readonly Dictionary<string, (Item? typeItem, Item rhs)> _lazyValueConsts = new(System.StringComparer.Ordinal);
+
+    /// <summary>The lazy value consts being lowered right now, the guard that turns a const depending on
+    /// itself into a loud error (zig reports a dependency loop) instead of a stack overflow.</summary>
+    private readonly HashSet<string> _lazyValueConstsInProgress = new(System.StringComparer.Ordinal);
+
+    /// <summary>Lower a reference to this lazy module's top-level value const <paramref name="name"/>, or
+    /// null when it declares none (see <see cref="_lazyValueConsts"/>).</summary>
+    private CExpr? LowerLazyValueConst(string name)
+    {
+        if (!_lazy || !_lazyValueConsts.TryGetValue(name, out var vc)) { return null; }
+        if (!_lazyValueConstsInProgress.Add(name))
+        {
+            throw new IrUnsupportedException($"zig: top-level `const {name}` depends on itself (a dependency loop)");
+        }
+        try
+        {
+            var sink = vc.typeItem is { } t ? LowerType(t) : null;
+            return LowerExprSink(vc.rhs, sink);
+        }
+        finally
+        {
+            _lazyValueConstsInProgress.Remove(name);
+        }
+    }
+
     /// <summary>Each top-level <c>const</c> whose RHS is a dotted path rooted at an import
     /// (<c>const Writer = std.Io.Writer;</c>) → that RHS, recorded WITHOUT resolving (so preparing a
     /// module does not fan out into every module it aliases). A type position that names one resolves it
@@ -1220,7 +1250,23 @@ internal sealed partial class ZigLowering
                     Zig.FnDefNoArgsErr f => f.Arg1,
                     _ => null,
                 };
-                if (fnName is not null) { _moduleFnDecls[Tok(fnName)] = d; }
+                if (fnName is not null) { _moduleFnDecls[Tok(fnName)] = d; continue; }
+                // A top-level VALUE const (`const use_vectors_for_comparison = use_vectors and !builtin.fuzz;`
+                // in mem.zig): recorded raw, lowered where it is named (LowerLazyValueConst). A comptime
+                // binding pass 0 already claimed (an import, a type alias, a re-export) is not a value.
+                var (constName, constType, constRhs) = d.Content switch
+                {
+                    Zig.ConstDecl c      => (Tok(c.Arg1), (Item?)null, c.Arg3),
+                    Zig.ConstDeclTyped c => (Tok(c.Arg1), c.Arg3, c.Arg5),
+                    _ => (null, null, null),
+                };
+                if (constName is not null && constRhs is not null
+                    && !_importSpecs.ContainsKey(constName) && !_typeAliases.ContainsKey(constName)
+                    && !_declAliases.ContainsKey(constName) && !_moduleAliasPaths.ContainsKey(constName)
+                    && !_containerTypes.ContainsKey(constName))
+                {
+                    _lazyValueConsts[constName] = (constType, constRhs);
+                }
             }
             // The container methods collected above are NOT declared (that would lower their signatures,
             // defeating laziness — an unreferenced method naming an unlowerable type must stay
@@ -1736,6 +1782,7 @@ internal sealed partial class ZigLowering
                 case Zig.ProngsOne o:  stack.Push(o.Arg0); break;
                 case Zig.CaseValsCons c: stack.Push(c.Arg2); stack.Push(c.Arg0); break;  // [Expr, ',', CaseVals]
                 case Zig.CaseValsOne o:  stack.Push(o.Arg0); break;
+                case Zig.CaseValsTrail t: stack.Push(t.Arg0); break;  // [Expr, ','] trailing comma
                 case Zig.FieldDeclsCons c: stack.Push(c.Arg1); stack.Push(c.Arg0); break;  // [Member, FieldDecls] (right-recursive)
                 case Zig.FieldDeclsOne o:  stack.Push(o.Arg0); break;
                 case Zig.EnumFieldsCons c: stack.Push(c.Arg1); stack.Push(c.Arg0); break;  // [EnumMember, EnumFields] (right-recursive)

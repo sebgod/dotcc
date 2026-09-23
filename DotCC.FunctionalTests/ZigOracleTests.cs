@@ -3436,6 +3436,29 @@ public sealed class ZigOracleTests
             "}\n",
             "m.zig",
             "pub const Word = u32;\n", 42, "" },
+        // A LAZY module's top-level value consts, named from a function body (mem.zig's
+        // `use_vectors_for_comparison = use_vectors and !builtin.fuzz`, road-to-zig-std G5): a chain of
+        // consts over an enum switch whose case list ends in a trailing comma, and `@inComptime()`.
+        new object[] { "lazy_value_consts",
+            "const m = @import(\"m.zig\");\n" +
+            "pub fn main() u8 {\n" +
+            "    return m.get();\n" +
+            "}\n",
+            "m.zig",
+            "const Mode = enum { fast, small, tiny };\n" +
+            "const mode: Mode = .fast;\n" +
+            "const wide = switch (mode) {\n" +
+            "    .small,\n" +
+            "    .tiny,\n" +
+            "    => false,\n" +
+            "    else => true,\n" +
+            "};\n" +
+            "const use_wide = wide and !false;\n" +
+            "const base: u8 = 40;\n" +
+            "pub fn get() u8 {\n" +
+            "    if (!@inComptime() and use_wide) return base + 2;\n" +
+            "    return base;\n" +
+            "}\n", 42, "" },
         new object[] { "vtable_literal",
             "const Writer = @import(\"Writer.zig\");\n" +
             "pub fn main() u8 {\n" +

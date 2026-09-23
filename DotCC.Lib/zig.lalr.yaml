@@ -1295,6 +1295,11 @@ productions:
       - { lhs: CaseVals, rhs: ['else'],                           action: caseElse }
       - { lhs: CaseVals, rhs: [Expr, '...', Expr],               action: caseRangeOne }
       - { lhs: CaseVals, rhs: [Expr, '...', Expr, ',', CaseVals], action: caseRangeCons }
+      # A TRAILING comma before `=>` (zig fmt's one-value-per-line layout: mem.zig's `use_vectors`
+      # lists `.stage2_aarch64,\n .stage2_powerpc,\n .stage2_riscv64,\n => false`). FOLLOW(CaseVals)
+      # is `=>`, which starts no Expr, so after `Expr ','` the `=>` lookahead cleanly reduces this form.
+      - { lhs: CaseVals, rhs: [Expr, ','],                        action: caseValsTrail }
+      - { lhs: CaseVals, rhs: [Expr, '...', Expr, ','],           action: caseRangeTrail }
 
   # ===== struct container body (Milestone D2 — a field-only list in D1) =====
   # A struct body is a list of MEMBERS: fields (`name: Type`, comma-separated) interleaved

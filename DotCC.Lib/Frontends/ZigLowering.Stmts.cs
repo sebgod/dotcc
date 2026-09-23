@@ -2263,6 +2263,8 @@ internal sealed partial class ZigLowering
             {
                 case Zig.CaseValsCons c:  items.Add((c.Arg0, null));   it = c.Arg2; continue;  // [Expr ',' CaseVals]
                 case Zig.CaseValsOne o:   items.Add((o.Arg0, null));   return items;           // [Expr]
+                case Zig.CaseValsTrail t: items.Add((t.Arg0, null));   return items;           // [Expr ','] trailing comma
+                case Zig.CaseRangeTrail r: items.Add((r.Arg0, r.Arg2)); return items;          // [Expr '...' Expr ',']
                 case Zig.CaseRangeCons r: items.Add((r.Arg0, r.Arg2)); it = r.Arg4; continue;  // [Expr '...' Expr ',' CaseVals]
                 case Zig.CaseRangeOne r:  items.Add((r.Arg0, r.Arg2)); return items;           // [Expr '...' Expr]
                 default:
@@ -2277,7 +2279,7 @@ internal sealed partial class ZigLowering
     /// EXPRESSION arm, a tagged-union switch).</summary>
     private static bool CaseValsContainsRange(Item caseVals) => caseVals.Content switch
     {
-        Zig.CaseRangeOne or Zig.CaseRangeCons => true,
+        Zig.CaseRangeOne or Zig.CaseRangeCons or Zig.CaseRangeTrail => true,
         Zig.CaseValsCons c => CaseValsContainsRange(c.Arg2),
         _ => false,
     };

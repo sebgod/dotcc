@@ -313,7 +313,12 @@ like the import it names in every position (`const math = std.math; math.maxInt(
 reaches nearly every other file. A container of an IMPORTED module that cannot lower (`std.Io`'s
 `Limit` enum, whose `math.maxInt(usize)` member needs the comptime engine) no longer sinks the whole
 import: it is withdrawn and raises its original message where something first names it, zig's
-analyse-on-reference rule. Oracle `import_file_struct`; example `examples/zig-file-struct/`; unit
+analyse-on-reference rule. A lazy module's top-level VALUE `const` (mem.zig's
+`use_vectors_for_comparison = use_vectors and !builtin.fuzz`) is recorded raw and lowered where it is
+named, its annotation the sink, since zig evaluates a top-level const's initializer at comptime (a
+const depending on itself is a loud dependency-loop error; oracle `lazy_value_consts`, unit
+`ZigLazyValueConstTests`). A prong's case list may end in a trailing comma (`.a,\n .b,\n => …`), and
+`@inComptime()` is `false` in the code dotcc lowers. Oracle `import_file_struct`; example `examples/zig-file-struct/`; unit
 `ZigFileStructTests`. **A GENERIC top-level function is a method too** (`w.print(fmt, args)`, with
 `fn print(w: *Writer, comptime fmt: []const u8, args: anytype)`): called on an instance it instantiates
 in its own module with the receiver as the runtime first argument (auto-ref'd like any method's), and
