@@ -572,6 +572,33 @@ that retire curated shortcuts.
 > Validation: 8 emit pins (`ZigFallbackArmTests`) + 2 zig-oracle programs (`fallback_arms`,
 > `fallback_switch_capture_prong`), == real zig 0.17.0-dev.667.
 
+> **Status update (2026-09-23) — generic functions across modules + decl literals** (bufPrint walls
+> 2 and 3 — the naming wall fell with the architecture review's module-qualified names).
+>
+> 1. **Cross-module generics.** A call navigated to another module did a direct call, so a GENERIC
+>    export bound its template's empty placeholder signature — bufPrint's "expected 0 argument(s),
+>    got 3". It now instantiates in the exporting module with every argument read in the caller's
+>    scope (`ResolveGenericInstance(argScope)`, the rule the type-returning path already followed,
+>    and now follows for comptime VALUE arguments as well). bufPrint's signature needed two more
+>    pieces: a comptime STRING parameter (`comptime fmt: []const u8` — keyed by a digest, seeded as a
+>    comptime string) and a named container `const` folding as a comptime argument (it now carries
+>    its value like a C23 `constexpr`). The oracle program exposed a latent miscompile: a string
+>    literal's `.len` counted its NUL (`"abc".len` was 4).
+> 2. **Decl literals.** `.name(args)` / `.name` at a struct/union result location is the result
+>    type's own declaration (`var w: Writer = .fixed(buf);`) — at every sink, and across modules for
+>    the call form.
+>
+> **bufPrint re-measured:** past the call, its body walls at the TYPE `Writer` — `std.Io.Writer` is a
+> **file-as-struct** (`Io/Writer.zig` declares top-level fields `vtable`, `buffer`, `end`), which
+> pass 1 still rejects loudly (the S1 cut). Behind it, in order: `w.print(fmt, args)` is a GENERIC
+> METHOD (the standing W3/W5 free-functions-only cut), and its body is the full comptime format
+> engine (`std.fmt` parsing the format string at comptime and dispatching on `@typeInfo` per
+> argument).
+>
+> Validation: 12 emit pins (`ZigCrossModuleGenericTests`, `ZigDeclLiteralTests`) + 4 zig-oracle
+> programs (`import_generic_fn`, `string_literal_len`, `decl_literals`, `import_decl_literal`),
+> == real zig 0.17.0-dev.667.
+
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)
 
 An opt-in test/tool (`DOTCC_RUN_STD_PROBE=1`, env `DOTCC_ZIG_LIB_DIR` or
