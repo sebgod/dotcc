@@ -2883,6 +2883,29 @@ public sealed class ZigOracleTests
             "pub fn main() u8 {\n" +
             "    return weight(u32) + weight(u8) + sign(.pos, 20) + sign(.neg, 7);\n" +
             "}\n", 42, "" },
+        // zig's VOID value `{}` and void-typed storage (std.sort's `context: void`): a void parameter
+        // (erased from the C# signature, the calls and the fn-pointer type), `{}` through an `anytype`,
+        // a void local and a store into it, `return {};`. 20 + 2 + 20 = 42.
+        new object[] { "void_value",
+            "var hits: u8 = 0;\n" +
+            "fn bump() void {\n" +
+            "    hits += 20;\n" +
+            "    return {};\n" +
+            "}\n" +
+            "fn lessThan(context: void, a: u8, b: u8) bool {\n" +
+            "    _ = context;\n" +
+            "    return a < b;\n" +
+            "}\n" +
+            "fn larger(context: anytype, a: u8, b: u8, less: *const fn (@TypeOf(context), u8, u8) bool) u8 {\n" +
+            "    return if (less(context, a, b)) b else a;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var unit: void = {};\n" +
+            "    unit = {};\n" +
+            "    bump();\n" +
+            "    const v = {};\n" +
+            "    return hits + larger(v, 2, 1, &lessThan) + larger(unit, 0, 20, &lessThan);\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

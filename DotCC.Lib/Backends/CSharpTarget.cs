@@ -30,7 +30,7 @@ internal sealed class CSharpTarget : ITarget
         // `CallConvCdecl` modifier resolves without a using. Default (managed) is
         // unchanged — `&fn` of dotcc's own methods stays a managed delegate*.
         CType.Func f => (f.IsNativeCallConv ? "delegate* unmanaged[Cdecl]<" : "delegate*<")
-            + string.Join(", ", f.Params.Select(RenderType).Append(RenderType(f.Return))) + ">",
+            + string.Join(", ", f.Params.Where(p => !CSharpBackend.IsVoidParam(p)).Select(RenderType).Append(RenderType(f.Return))) + ">",
         CType.Named n => n.Name,
         CType.Enum e => e.Name,
         CType.ComplexType => "System.Numerics.Complex",

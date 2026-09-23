@@ -258,6 +258,8 @@ symbols:
                    #     with a token outside FIRST(BoolOr), so it never competes with a value fallback.
   - CaptureArm     # 167 the fallback after `catch |e|` — a FallbackArm, or `return [v]` (the no-capture
                    #     `catch return` keeps its own productions, so `return` lives only here)
+  - Arg            # 168 one call ARGUMENT: an Expr, or `{}` the void value (std passes it 108 times, the
+                   #     `context: void` of std.sort). Kept out of Expr so `{` never competes with a Block.
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -795,6 +797,9 @@ productions:
   - derivation: none
     rules:
       - { lhs: RhsExpr, rhs: [Expr] }
+      # `x = {};` / `return {};` / `const v = {};` — the void value at a right-hand side (58 in std). Only
+      # RhsExpr reaches it, never a statement start, so it cannot be mistaken for an empty Block.
+      - { lhs: RhsExpr, rhs: ['{', '}'], action: voidValue }
       - { lhs: RhsExpr, rhs: [IfExpr] }
       # `switch` as a VALUE (Milestone L) — same structural trick as IfExpr: a RhsExpr
       # alternative, NOT a Primary, so it never starts an Expr-cascade sub-operand and never
@@ -1134,8 +1139,16 @@ productions:
 
   - derivation: leftmost
     rules:
-      - { lhs: ArgList, rhs: [Expr, ',', ArgList], action: argsCons }
-      - { lhs: ArgList, rhs: [Expr],                action: argsOne }
+      - { lhs: ArgList, rhs: [Arg, ',', ArgList], action: argsCons }
+      - { lhs: ArgList, rhs: [Arg],                action: argsOne }
+
+  # A call argument (symbol 168): an ordinary Expr (a transparent pass-through, so every existing
+  # argument lowers unchanged) or `{}`, zig's void value. `{` is not in FIRST(Expr), so the choice is a
+  # 1-token shift decision.
+  - derivation: none
+    rules:
+      - { lhs: Arg, rhs: [Expr] }
+      - { lhs: Arg, rhs: ['{', '}'], action: voidArg }
 
   # ===== switch prongs (Milestone C2) =====
   # LEFT-recursive prong list — the form that makes the optional trailing comma a clean

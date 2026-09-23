@@ -90,7 +90,7 @@ internal sealed class CSharpBackend
             else if (fn.Sym.Storage != Storage.Static && !fn.Variadic)
             {
                 var ret = fn.Sym.Type is CType.Func f ? cg.Cs(f.Return) : "int";
-                var ps = string.Join(", ", fn.Params.Select(p => $"{cg.Cs(p.Type)} {p.TargetName}"));
+                var ps = string.Join(", ", fn.Params.Where(p => !IsVoidParam(p.Type)).Select(p => $"{cg.Cs(p.Type)} {p.TargetName}"));
                 exports.Add(new DotCC.EmitHelpers.Export(fn.Sym.Name, ret, ps));
             }
         }
@@ -395,7 +395,10 @@ internal sealed class CSharpBackend
     {
         var retTy = fn.Sym.Type is CType.Func f ? f.Return : CType.Int;
         _currentRet = retTy;
-        var ps = string.Join(", ", fn.Params.Select(p => $"{Cs(p.Type)} {p.TargetName}"));
+        // A zig `void` parameter (`context: void`, std.sort's) is zero-sized with no runtime value, and C#
+        // has no void parameter: it is erased here, from every call's arguments (CallText, IndirectCall)
+        // and from delegate* types (CSharpTarget), consistently, so arity still lines up.
+        var ps = string.Join(", ", fn.Params.Where(p => !IsVoidParam(p.Type)).Select(p => $"{Cs(p.Type)} {p.TargetName}"));
         // A variadic C function gets a trailing `params VaArg[] _va`; C# converts
         // each variadic actual to a VaArg at the call site (carries pointers too).
         if (fn.Variadic) { ps = ps.Length == 0 ? "params VaArg[] _va" : ps + ", params VaArg[] _va"; }
@@ -1721,7 +1724,7 @@ internal sealed class CSharpBackend
                 ? ($"&{v.Sym.TargetName}", PUnary)
                 : QualifiedRead(v, GlobalName(v.Sym), PPrimary);
             case IndirectCall ic:
-                return ($"{Sub(ic.Callee, PPostfix)}({string.Join(", ", ic.Args.Select(a => Sub(a, PAssign)))})", PPostfix);
+                return ($"{Sub(ic.Callee, PPostfix)}({string.Join(", ", ic.Args.Where(a => !IsVoidParam(a.Type)).Select(a => Sub(a, PAssign)))})", PPostfix);
             case Paren p: return Render(p.Inner); // explicit C parens are redundant; precedence re-adds as needed
             case Cast c: return RenderCast(c);
             case BitCast bc:
@@ -2531,6 +2534,11 @@ internal sealed class CSharpBackend
         return $"new System.ValueTuple<{headTypes}, {restTypeStr}>({headVals}, {restCtor})";
     }
 
+    /// <summary>True for a zig <c>void</c> parameter (or argument) type, which the C# emit erases: C# has
+    /// no void parameter, and zig's void carries no data. A C <c>f(void)</c> never reaches here as a
+    /// parameter (the C binder reads it as an empty list).</summary>
+    internal static bool IsVoidParam(CType t) => t.Unqualified is CType.VoidType;
+
     private string CallText(Call c)
     {
         if (LowerAtomicCall(c) is { } atomic) { return atomic; }
@@ -2553,6 +2561,7 @@ internal sealed class CSharpBackend
             // A known parameter coerces the arg to its type; a variadic-tail or
             // unknown-signature arg takes C's default argument promotions — notably
             // an enum decays to its underlying int (C# has no enum→int for `.Arg`).
+            if (c.ParamTypes is { } vpts && i < vpts.Count && IsVoidParam(vpts[i])) { continue; }   // erased (see Func)
             a.Add(c.ParamTypes is { } pts && i < pts.Count
                 ? CoercedArg(c.Args[i], pts[i])
                 : Sub(DecayEnum(c.Args[i]), PAssign));

@@ -133,6 +133,12 @@ function an imported module declares, and each generic instance of one, emits as
 prototypes stay as spelled, and a method needs nothing since its container is already qualified. Unit
 `ZigCrossModuleGenericTests`; end-to-end in the oracle program `import_file_struct`.
 
+Two more, found by the real-std probes the same day and fixed with them: an imported function named
+like a C# keyword emitted as `inner__@double` (the module prefix went onto the ESCAPED name; now the
+source name is qualified and escaped once), and a zig `void` PARAMETER emitted as
+`byte f(void ctx, byte x)` (C# has no void parameter; void parameters, locals and values are now erased
+by type, see ZIG-SUPPORT's void-value row). Units `ZigCrossModuleGenericTests`, `ZigVoidValueTests`.
+
 Four gaps were found by the lowering sweep around the G4 reified-methods brick (2026-08-08) — each
 reproduced on a plain/ordinary construct, so none was generic-specific — and all four are now fixed:
 

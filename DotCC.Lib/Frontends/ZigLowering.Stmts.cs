@@ -138,7 +138,14 @@ internal sealed partial class ZigLowering
                         {
                             return LowerControlFlowFallback(dL, dC, dCap, dArm, null);
                         }
-                        return new ExprStmt(LowerExpr(a.Arg2));
+                        var discarded = LowerExpr(a.Arg2);
+                        // `_ = ctx;` over a `void` value (an unused `context: void` parameter) has nothing to
+                        // evaluate and no C# spelling: it emits nothing.
+                        if (discarded.Type.Unqualified is CType.VoidType && IsErasableVoid(discarded))
+                        {
+                            return new Seq(new List<CStmt>());
+                        }
+                        return new ExprStmt(discarded);
                     }
                     var target = LowerExpr(a.Arg0);
                     // `x = blk: { … break :blk v; };` — a labeled value-block assignment (Milestone L,
@@ -157,6 +164,8 @@ internal sealed partial class ZigLowering
                             temp => new ExprStmt(new Assign(null, target, new VarRef(temp) { Type = temp.Type }) { Type = target.Type }));
                     }
                     var value = LowerExprSink(a.Arg2, target.Type);   // target type is the sink (`x = .member;`)
+                    // Storing a void value into void storage (`unit = {};`) moves no data.
+                    if (target.Type.Unqualified is CType.VoidType && IsErasableVoid(value)) { return new Seq(new List<CStmt>()); }
                     return new ExprStmt(new Assign(null, target, value) { Type = target.Type });
                 });
 
@@ -529,6 +538,9 @@ internal sealed partial class ZigLowering
         var type = declared ?? init.Type ?? CType.Int;
         var sym2 = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = type });
         if (declared is null && init is LitStr) { _stringLiteralSyms.Add(sym2); }
+        // A `void` local (`var unit: void = {};`) has no storage and no C# spelling: the name stays
+        // declared, so a use of it is an (erasable) void read, and the declaration emits nothing.
+        if (type.Unqualified is CType.VoidType && IsErasableVoid(init)) { return new Seq(new List<CStmt>()); }
         return new DeclStmt(new List<LocalDecl> { new(sym2, init) });
     }
 
@@ -2480,6 +2492,14 @@ internal sealed partial class ZigLowering
     /// Outside an error-union function it is a plain <see cref="Return"/>.</summary>
     private CStmt LowerReturn(Item valueItem)
     {
+        // `return {};` — the void value is what a bare `return;` returns: nothing to spell in C#
+        // (`default(void)` is not an expression). In a `!void` function it is the success value.
+        if (valueItem.Content is Zig.VoidValue)
+        {
+            return _currentFnRet is CType.ErrorUnion voidEu
+                ? new Return(new ErrUnionOk(null) { Type = voidEu })
+                : new Return(null);
+        }
         // `return blk: { … break :blk v; };` — a labeled value-block return (Milestone L, part 2).
         // Temp-fill against the function's return type, then `return` the result temp. (In an error-
         // union function the wrapping below would need to apply to the temp — deferred with a clear

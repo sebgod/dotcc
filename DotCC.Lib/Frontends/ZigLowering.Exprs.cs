@@ -516,6 +516,9 @@ internal sealed partial class ZigLowering
             // before reading). At a typed sink LowerExprSink types it precisely; an array local
             // takes the dedicated stackalloc path in DeclOf.
             case Zig.UndefinedLit: return new DefaultLit { Type = CType.Int };
+            // `{}` — zig's void value. It has no runtime representation: the C# backend erases void
+            // parameters and their arguments, and a discarded one emits nothing.
+            case Zig.VoidArg or Zig.VoidValue: return new DefaultLit { Type = CType.Void };
 
             // `a orelse b`. A value optional → C#'s `??` (single-eval LHS, lazy RHS) via
             // NullCoalesce. An optional POINTER → `a != null ? a : b` (C# `??` doesn't apply
@@ -943,6 +946,12 @@ internal sealed partial class ZigLowering
     /// (<see cref="Symbol.FromSystemHeader"/>) drops the symbol so the call binds to dotcc's
     /// <c>Libc</c> runtime by bare name. Each fixed argument's parameter type is its sink (Zig
     /// result-locates call arguments), accounting for the receiver's parameter slot.</summary>
+    /// <summary>True for a void-typed argument the C# backend may erase without losing anything: the
+    /// void value itself, or a read of a void symbol. zig's <c>void</c> has no runtime representation, so
+    /// the backend drops void parameters and their arguments; a SIDE-EFFECTING void argument
+    /// (<c>f(g())</c> with <c>g</c> returning void) would lose its call that way, so it is rejected.</summary>
+    private static bool IsErasableVoid(CExpr e) => e is DefaultLit or VarRef || e is Paren p && IsErasableVoid(p.Inner);
+
     private CExpr BuildCall(Symbol sym, IReadOnlyList<Item> argItems, CExpr? receiver)
     {
         var fn = (CType.Func)sym.Type.Unqualified;
@@ -958,7 +967,14 @@ internal sealed partial class ZigLowering
         {
             var pIndex = i + paramOffset;
             var paramSink = pIndex < fn.Params.Count ? fn.Params[pIndex] : null;
-            args.Add(LowerExprSink(argItems[i], paramSink));
+            var arg = LowerExprSink(argItems[i], paramSink);
+            if (paramSink?.Unqualified is CType.VoidType && !IsErasableVoid(arg))
+            {
+                throw new IrUnsupportedException(
+                    $"call to '{sym.Name}': a side-effecting argument to a `void` parameter is not supported yet "
+                    + "(void has no runtime value, so the argument is erased); evaluate it as its own statement first");
+            }
+            args.Add(arg);
         }
 
         // A variadic callee (printf) needs AT LEAST the fixed params; the rest are the variadic
