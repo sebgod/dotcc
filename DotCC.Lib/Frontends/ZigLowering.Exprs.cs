@@ -1031,7 +1031,7 @@ internal sealed partial class ZigLowering
     /// directly would bind its empty placeholder signature; anything else is a direct call.</summary>
     private CExpr CallExportedDecl(ZigLowering owner, Symbol sym, IReadOnlyList<Item> argItems)
         => owner.TryResolveExportedGenericInstance(sym, argItems, caller: this) is { } inst
-            ? BuildCall(inst.Instance, inst.RuntimeArgs, receiver: null)
+            ? FoldIfComptimeOnly(owner, inst.Instance, BuildCall(inst.Instance, inst.RuntimeArgs, receiver: null))
             : BuildCall(sym, argItems, receiver: null);
 
     private CExpr LowerMethodCall(Zig.Field fld, IReadOnlyList<Item> argItems)

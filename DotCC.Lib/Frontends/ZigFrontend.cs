@@ -89,6 +89,9 @@ internal sealed class ZigFrontend : IFrontend
         // S2). References were collected while the roots lowered; this lowers exactly those decls (and
         // their transitive references) to a fixpoint — an unreferenced std-heavy decl never lowers.
         moduleGraph.DrainAll();
+        // Then every deferred `comptime` fold of every module (Milestone T pass 3): a fold may call a
+        // function whose body only the drain lowered (a lazy module's generic instance).
+        moduleGraph.ResolveComptimeFolds(ir);
         // Carry the flat error set to the backend so it can emit the `@errorName` code→name
         // table (Milestone X). Merge into any existing map (a mixed build lowers C first, but C
         // contributes no Zig error names; this also stays correct if a future C path adds some).

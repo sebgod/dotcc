@@ -749,10 +749,17 @@ internal sealed partial class ZigLowering
     private readonly List<(string container, string name, Item? typeItem, Item rhs)> _pendingContainerVars = new();
 
     /// <summary>Deferred <c>comptime EXPR</c> folds (Milestone T), collected as they are lowered and
-    /// resolved in a post-pass after pass 2 — when every function body is lowered, so a
-    /// <c>comptime fib(10)</c> can interpret its callee regardless of declaration order. Each node is
-    /// shared by reference in the IR; resolving it patches its <see cref="ComptimeFold.Resolved"/> in place.</summary>
-    private readonly List<ComptimeFold> _pendingComptimeFolds = new();
+    /// resolved in a post-pass once every function body is lowered, so a <c>comptime fib(10)</c> can
+    /// interpret its callee regardless of declaration order. Each node is shared by reference in the IR;
+    /// resolving it patches its <see cref="ComptimeFold.Resolved"/> in place. The queue is the module
+    /// graph's (<see cref="ZigModuleGraph.PendingComptimeFolds"/>), resolved after every module drains,
+    /// because a fold may call a function a lazy module owns (<c>std.math.maxInt(u8)</c>); a lowering
+    /// with no graph resolves its own at the end of <see cref="Lower"/>.</summary>
+    private List<ComptimeFold> _pendingComptimeFolds => _moduleGraph?.PendingComptimeFolds ?? _ownComptimeFolds;
+
+    /// <summary>The fold queue of a lowering built without a module graph (see
+    /// <see cref="_pendingComptimeFolds"/>).</summary>
+    private readonly List<ComptimeFold> _ownComptimeFolds = new();
 
     /// <summary>Lowering-time values of <c>comptime var</c> / <c>comptime const</c> locals (Milestone T,
     /// part 3 — the loop counter of an <c>inline while</c>). Keyed by Symbol IDENTITY (the same instance
@@ -1298,15 +1305,19 @@ internal sealed partial class ZigLowering
             }
         }
 
-        // Pass 3 (Milestone T): resolve every deferred `comptime EXPR`. All function bodies are now
-        // lowered (in `_ir.Functions`), so a comptime call can interpret its callee. Each fold is
-        // evaluated by the shared comptime interpreter and patched in place with the spliced literal;
-        // a non-constant `comptime` value is a loud error.
-        foreach (var fold in _pendingComptimeFolds)
+        // Pass 3 (Milestone T): resolve every deferred `comptime EXPR` once all function bodies are
+        // lowered, so a comptime call can interpret its callee. With a module graph that is after EVERY
+        // module drains (ZigFrontend calls ZigModuleGraph.ResolveComptimeFolds): the callee may be a
+        // lazy module's instance, which lowers only then. Without one, all bodies are lowered now.
+        if (_moduleGraph is null)
         {
-            fold.Resolved = _ir.ResolveComptimeFold(fold.Inner)
-                ?? throw new IrUnsupportedException(
-                    "`comptime` expression did not evaluate to a compile-time constant value");
+            foreach (var fold in _ownComptimeFolds)
+            {
+                fold.Resolved = _ir.ResolveComptimeFold(fold.Inner)
+                    ?? throw new IrUnsupportedException(
+                        "`comptime` expression did not evaluate to a compile-time constant value");
+            }
+            _ir.Functions.RemoveAll(f => _ownComptimeOnlyFns.Contains(f.Sym));
         }
     }
 

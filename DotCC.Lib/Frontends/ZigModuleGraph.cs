@@ -249,6 +249,32 @@ internal sealed class ZigModuleGraph
     /// function bodies (road-to-zig-std S2).</summary>
     internal void RegisterLowering(ZigLowering lowering) => _lowerings.Add(lowering);
 
+    /// <summary>Every deferred <c>comptime</c> fold of the build, from any module (Milestone T pass 3,
+    /// lifted to the graph). A fold may call a function another module owns, such as
+    /// <c>std.math.maxInt(u8)</c>, whose instance body lowers only in <see cref="DrainAll"/>, so the
+    /// folds resolve once every module has drained (<see cref="ResolveComptimeFolds"/>).</summary>
+    internal List<ComptimeFold> PendingComptimeFolds { get; } = new();
+
+    /// <summary>Resolve every queued comptime fold with the shared interpreter, once all function bodies
+    /// of every module are lowered. A value that does not fold is a loud error.</summary>
+    internal void ResolveComptimeFolds(IrModule ir)
+    {
+        foreach (var fold in PendingComptimeFolds)
+        {
+            fold.Resolved = ir.ResolveComptimeFold(fold.Inner)
+                ?? throw new IrUnsupportedException(
+                    "`comptime` expression did not evaluate to a compile-time constant value");
+        }
+        PendingComptimeFolds.Clear();
+        // A comptime-only function has no runtime existence: every call to it was a fold, now spliced.
+        if (ComptimeOnlyFns.Count > 0) { ir.Functions.RemoveAll(f => ComptimeOnlyFns.Contains(f.Sym)); }
+    }
+
+    /// <summary>Every comptime-only function instance of the build (a <c>comptime_int</c> return, such as
+    /// <c>std.math.maxInt(u8)</c>'s), from any module. Each call to one is a fold; the bodies exist only
+    /// for the interpreter, so <see cref="ResolveComptimeFolds"/> drops them from the emitted program.</summary>
+    internal HashSet<Symbol> ComptimeOnlyFns { get; } = new();
+
     /// <summary>Drain every lazy module's enqueued function bodies at TOP LEVEL, to a fixpoint. Lowering a
     /// body may reference more decls (in this or another module) or prepare a NEW module, so this loops
     /// until no registered module has pending bodies. Called once after the root units are lowered.</summary>

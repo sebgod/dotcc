@@ -3017,6 +3017,33 @@ public sealed class ZigOracleTests
             "    const c: B = .{};\n" +
             "    return A.max + b.len + B.max + c.len;\n" +
             "}\n", 42, "" },
+        // The comptime-call engine V1: std's own maxInt / minInt source, so the program is self-contained
+        // for the CI oracle (the real-std leg is Dotcc_matches_zig_std_math_max_min_int_from_source).
+        new object[] { "comptime_int_calls",
+            "fn maxInt(comptime T: type) comptime_int {\n" +
+            "    const info = @typeInfo(T).int;\n" +
+            "    return (1 << (info.bits - @intFromBool(info.signedness == .signed))) - 1;\n" +
+            "}\n" +
+            "fn minInt(comptime T: type) comptime_int {\n" +
+            "    const info = @typeInfo(T).int;\n" +
+            "    return switch (info.signedness) {\n" +
+            "        .unsigned => 0,\n" +
+            "        .signed => -(1 << (info.bits - 1)),\n" +
+            "    };\n" +
+            "}\n" +
+            "fn span(comptime T: type) comptime_int {\n" +
+            "    return maxInt(T) - minInt(T);\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const a: u8 = maxInt(u8);\n" +
+            "    const b: i16 = minInt(i16);\n" +
+            "    var r: u8 = 0;\n" +
+            "    if (a == 255) r += 10;\n" +
+            "    if (b == -32768) r += 10;\n" +
+            "    if (span(i8) == 255) r += 10;\n" +
+            "    if (maxInt(u64) == 18446744073709551615) r += 12;\n" +
+            "    return r;\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');
@@ -3441,6 +3468,65 @@ public sealed class ZigOracleTests
             dotccExit.ShouldBe(zigExit, "dotcc's std type functions from source diverge from real zig (exit code)");
             dotccExit.ShouldBe(42, "std.meta / std.math type functions did not produce the expected result");
             Norm(dotccStdout).ShouldBe(Norm(zigStdout), "dotcc's std type functions from source diverge from real zig (stdout)");
+        }
+        finally
+        {
+            try { Directory.Delete(workDir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    /// <summary>The comptime-call engine V1 against REAL upstream std: <c>std.math.maxInt</c> /
+    /// <c>minInt</c> return <c>comptime_int</c>, so every call folds at compile time (including the 64-bit
+    /// extremes, a declared <c>u21</c> width, and a use inside a runtime comparison). Needs
+    /// <c>DOTCC_ZIG_LIB_DIR</c>, like the std type-function differential above. 10 * 4 + 2 = 42.</summary>
+    [Fact]
+    public void Dotcc_matches_zig_std_math_max_min_int_from_source()
+    {
+        if (!ZigRunRequested)
+        {
+            Assert.Skip($"Zig oracle is opt-in. Set {RunZigEnv}=1 to run the std.math maxInt/minInt differential.");
+        }
+        if (!ZigOracle.IsAvailable)
+        {
+            Assert.Skip($"{RunZigEnv} requested but no `zig` is on PATH on this host.");
+        }
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOTCC_ZIG_LIB_DIR")))
+        {
+            Assert.Skip("DOTCC_ZIG_LIB_DIR must point at the zig lib dir so dotcc navigates the real std.math source.");
+        }
+
+        const string program =
+            "const std = @import(\"std\");\n" +
+            "const math = std.math;\n" +
+            "pub fn main() u8 {\n" +
+            "    const a: u64 = math.maxInt(u64);\n" +
+            "    const b: i64 = math.minInt(i64);\n" +
+            "    const c: i8 = math.minInt(i8);\n" +
+            "    const d: u21 = math.maxInt(u21);\n" +
+            "    var x: u32 = 70000;\n" +
+            "    _ = &x;\n" +
+            "    var r: u8 = 0;\n" +
+            "    if (x > math.maxInt(u16)) r += 10;\n" +
+            "    if (a == 18446744073709551615) r += 10;\n" +
+            "    if (b == -9223372036854775808) r += 10;\n" +
+            "    if (c == -128 and d == 2097151) r += 10;\n" +
+            "    if (math.minInt(u8) == 0) r += 2;\n" +
+            "    return r;\n" +
+            "}\n";
+
+        var workDir = Path.Combine(Path.GetTempPath(), $"dotcc-zig-stdmaxint-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(workDir);
+        var mainPath = Path.Combine(workDir, "main.zig");
+        File.WriteAllText(mainPath, program);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { mainPath }, emit: EmitMode.Csproj);
+            var (dotccStdout, dotccExit) = FixtureRunner.CompileAndRunCapturingExit(emitted, Array.Empty<string>());
+            var (zigStdout, zigExit) = ZigOracle.CompileAndRun(mainPath, workDir);
+
+            dotccExit.ShouldBe(zigExit, "dotcc's std.math maxInt/minInt from source diverge from real zig (exit code)");
+            dotccExit.ShouldBe(42, "std.math maxInt/minInt did not produce the expected result");
+            Norm(dotccStdout).ShouldBe(Norm(zigStdout), "dotcc's std.math maxInt/minInt from source diverge from real zig (stdout)");
         }
         finally
         {

@@ -614,9 +614,10 @@ internal sealed partial class IrModule
     /// <summary>Symbol → <see cref="FuncDef"/> index over <see cref="Functions"/>, keyed by
     /// reference identity (<see cref="Symbol"/> is a plain class — the same instance is shared by
     /// the declaration and every call site, so the default comparer is exactly right). Built
-    /// lazily and re-synced by count — <see cref="Functions"/> is append-only (both front-ends
-    /// only <c>Add</c>), so a count mismatch is the complete invalidation signal. Replaces a
-    /// per-call linear scan of the function list.</summary>
+    /// lazily and re-synced by count — <see cref="Functions"/> is append-only while comptime folds can
+    /// run (both front-ends only <c>Add</c>; the one removal, of Zig's comptime-only instances, happens
+    /// after the last fold resolves), so a count mismatch is the complete invalidation signal. Replaces
+    /// a per-call linear scan of the function list.</summary>
     private readonly Dictionary<Symbol, FuncDef> _funcDefIndex = new();
 
     /// <summary>The lowered <see cref="FuncDef"/> for a callee symbol, by reference identity (the

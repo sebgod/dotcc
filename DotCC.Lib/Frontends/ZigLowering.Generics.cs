@@ -191,7 +191,34 @@ internal sealed partial class ZigLowering
     private CExpr InstantiateGeneric(Symbol templateSym, GenericFnInfo g, IReadOnlyList<Item> argItems)
     {
         var (instanceSym, runtimeArgItems) = ResolveGenericInstance(templateSym, g, argItems, argScope: this);
-        return BuildCall(instanceSym, runtimeArgItems, receiver: null);
+        return FoldIfComptimeOnly(this, instanceSym, BuildCall(instanceSym, runtimeArgItems, receiver: null));
+    }
+
+    /// <summary>Instances whose declared return type is <c>comptime_int</c> (<c>std.math.maxInt</c>,
+    /// <c>minInt</c>): zig evaluates every call at compile time, since the result has no runtime type.
+    /// dotcc lowers the instance with an <see cref="CType.Int128"/> carrier (every <c>maxInt</c> /
+    /// <c>minInt</c> of a width up to 127 bits fits) and folds each call (<see cref="FoldIfComptimeOnly"/>).</summary>
+    private HashSet<Symbol> _comptimeOnlyFns => _moduleGraph?.ComptimeOnlyFns ?? _ownComptimeOnlyFns;
+
+    /// <summary>The comptime-only set of a lowering built without a module graph (see
+    /// <see cref="_comptimeOnlyFns"/>).</summary>
+    private readonly HashSet<Symbol> _ownComptimeOnlyFns = new();
+
+    /// <summary>True when <paramref name="fn"/> is one of this module's comptime-only instances
+    /// (<see cref="_comptimeOnlyFns"/>).</summary>
+    internal bool IsComptimeOnlyFn(Symbol fn) => _comptimeOnlyFns.Contains(fn);
+
+    /// <summary>Wrap a call to a comptime-only instance that <paramref name="owner"/> declares in a
+    /// deferred <see cref="ComptimeFold"/>, queued for the graph's pass 3 (the comptime-call engine V1,
+    /// road-to-zig-std G3): the shared interpreter runs the instance body once every module has drained
+    /// and splices the literal, so <c>const m: u8 = std.math.maxInt(u8);</c> is <c>255</c>. Any other call
+    /// is returned as is.</summary>
+    private CExpr FoldIfComptimeOnly(ZigLowering owner, Symbol instance, CExpr call)
+    {
+        if (!owner.IsComptimeOnlyFn(instance)) { return call; }
+        var fold = new ComptimeFold(call) { Type = call.Type };
+        _pendingComptimeFolds.Add(fold);
+        return fold;
     }
 
     /// <summary>Instantiate a generic function THIS module exports, called from <paramref name="caller"/>
@@ -371,7 +398,8 @@ internal sealed partial class ZigLowering
                     .Where(p => p.Kind is ParamKind.Runtime or ParamKind.AnyType)
                     .Select(p => (p.Name, p.Kind == ParamKind.AnyType ? _anytypeSeeds[p.Name] : LowerType(p.TypeAst)))
                     .ToList();
-                var ret = LowerType(g.RetType);
+                var comptimeOnly = !g.ErrUnion && g.RetType.Content is Zig.Ident retId && Tok(retId.Arg0) == "comptime_int";
+                var ret = comptimeOnly ? CType.Int128 : LowerType(g.RetType);
                 if (g.ErrUnion) { ret = new CType.ErrorUnion(ret); }
                 instanceSym = DeclareFnSymbol(new Symbol
                 {
@@ -383,6 +411,7 @@ internal sealed partial class ZigLowering
                 // An error-union generic: register the instance's raw return-type AST so its body resolves
                 // its declared error set in LowerFnBodyCore (the same lazy resolution a plain fn gets).
                 if (ret is CType.ErrorUnion) { _fnErrorReturnTypes[instanceSym] = (g.RetType, g.ErrUnion); }
+                if (comptimeOnly) { _comptimeOnlyFns.Add(instanceSym); }
                 _instantiations[mangled] = instanceSym;
                 _pendingInstantiations.Add(new PendingInstantiation(instanceSym, g, valueSeeds, typeSeeds, runtimeParams, optionalSeeds, stringSeeds));
             }
