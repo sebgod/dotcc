@@ -217,15 +217,7 @@ internal sealed partial class ZigLowering
         switch (rhs.Content)
         {
             // Type-former prefixes/suffixes — unambiguously a type (no value spelling collides).
-            case Zig.TyPointer or Zig.TyPtrConst or Zig.TyCPtr or Zig.TyCPtrConst
-              or Zig.TyManyPtr or Zig.TyManyPtrConst or Zig.TySentPtr or Zig.TySentPtrConst
-              or Zig.TyOptional or Zig.TySlice or Zig.TySliceConst or Zig.TySentSlice or Zig.TySentSliceConst
-              or Zig.TyPointerAlign or Zig.TyPtrConstAlign or Zig.TyManyPtrAlign or Zig.TyManyPtrConstAlign
-              or Zig.TySliceAlign or Zig.TySliceConstAlign
-              or Zig.TySentSliceExpr or Zig.TySentSliceConstExpr or Zig.TySentSliceAlignExpr
-              or Zig.TySentSliceConstAlignExpr or Zig.TySentPtrExpr or Zig.TySentPtrConstExpr
-              or Zig.TyArray or Zig.TySentArray or Zig.ErrUnion or Zig.TyTuple
-              or Zig.TyFn or Zig.TyFnNoArgs or Zig.TyFnErr or Zig.TyFnNoArgsErr:
+            case var _ when IsTypeFormer(rhs):
                 type = LowerType(rhs);
                 return true;
 
@@ -288,6 +280,37 @@ internal sealed partial class ZigLowering
                 type = CType.Int;
                 return false;
         }
+    }
+
+    /// <summary>True for a type-FORMER node (<c>*T</c>, <c>?T</c>, <c>[]T</c>, <c>[N]T</c>, <c>E!T</c>, a fn or
+    /// tuple type, and their aligned / sentinel forms): a spelling that can only be a type, so a caller
+    /// may classify it as one before lowering anything.</summary>
+    private static bool IsTypeFormer(Item item) => item.Content
+        is Zig.TyPointer or Zig.TyPtrConst or Zig.TyCPtr or Zig.TyCPtrConst
+        or Zig.TyManyPtr or Zig.TyManyPtrConst or Zig.TySentPtr or Zig.TySentPtrConst
+        or Zig.TyOptional or Zig.TySlice or Zig.TySliceConst or Zig.TySentSlice or Zig.TySentSliceConst
+        or Zig.TyPointerAlign or Zig.TyPtrConstAlign or Zig.TyManyPtrAlign or Zig.TyManyPtrConstAlign
+        or Zig.TySliceAlign or Zig.TySliceConstAlign
+        or Zig.TySentSliceExpr or Zig.TySentSliceConstExpr or Zig.TySentSliceAlignExpr
+        or Zig.TySentSliceConstAlignExpr or Zig.TySentPtrExpr or Zig.TySentPtrConstExpr
+        or Zig.TyArray or Zig.TySentArray or Zig.ErrUnion or Zig.TyTuple
+        or Zig.TyFn or Zig.TyFnNoArgs or Zig.TyFnErr or Zig.TyFnNoArgsErr;
+
+    /// <summary>True when a struct MEMBER <c>const</c>'s RHS is a TYPE: a type former, a call to a
+    /// type-returning generic, a type name, or an <c>if</c> whose then-arm is one of those
+    /// (<c>pub const Slice = if (alignment) |a| ([]align(a.toByteUnits()) T) else []T;</c>). Stricter
+    /// than a type body's shape test, because a member may equally be a VALUE const
+    /// (<c>pub const max = if (c) 3 else 4;</c>), which must keep its lazy value lowering.</summary>
+    private bool IsTypeConstMember(Item rhs)
+    {
+        var cur = rhs;
+        while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
+        return cur.Content switch
+        {
+            Zig.IfExpr ie => IsTypeConstMember(ie.Arg4),
+            Zig.IfExprCapture ic => IsTypeConstMember(ic.Arg7),
+            _ => IsTypeFormer(cur) || TryTypeAliasRhs(cur, out _),
+        };
     }
 
     /// <summary>True when <paramref name="name"/> names a TYPE in the current lowering context — a

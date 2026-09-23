@@ -2955,6 +2955,29 @@ public sealed class ZigOracleTests
             "    const s = S{ .a = 30 };\n" +
             "    return s.a + total + pick(null, 6);\n" +
             "}\n", 42, "" },
+        // TYPE const members of a reified struct (road-to-zig-std G4/G5; Aligned's `Slice`, HashMap's
+        // `Unmanaged`): declared after the fields they type, evaluated with the instantiation's seeds.
+        // 30 + 1 + 1 + 6 + 2 + 2 = 42.
+        new object[] { "reified_type_consts",
+            "fn Inner(comptime K: type, comptime V: type) type {\n" +
+            "    return struct { k: K, v: V };\n" +
+            "}\n" +
+            "fn Outer(comptime K: type, comptime cap: ?usize) type {\n" +
+            "    return struct {\n" +
+            "        pair: Pair,\n" +
+            "        items: Items,\n" +
+            "        pub const Pair = Inner(K, u8);\n" +
+            "        pub const Items = if (cap) |_| []const K else []const u8;\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const A = Outer(u16, 2);\n" +
+            "    const wide = [_]u16{ 1, 1 };\n" +
+            "    const a: A = .{ .pair = .{ .k = 30, .v = 6 }, .items = &wide };\n" +
+            "    const narrow = [_]u8{ 2, 0 };\n" +
+            "    const b: Outer(u16, null) = .{ .pair = .{ .k = 0, .v = 0 }, .items = &narrow };\n" +
+            "    return @as(u8, @intCast(a.pair.k + a.items[0] + a.items[1])) + a.pair.v + b.items[0] + 2;\n" +
+            "}\n", 42, "" },
     };
 
     private static string Norm(string s) => s.ReplaceLineEndings("\n").TrimEnd('\n');

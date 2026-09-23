@@ -815,6 +815,28 @@ internal sealed partial class ZigLowering
                 }
                 _containerTypes[mangled] = mangledType;   // memo + @This() target; BEFORE reify for self-ref
                 _currentContainer = mangled;
+                // TYPE const members (`pub const Slice = if (alignment) |a| … else []T;` in Aligned,
+                // `pub const Unmanaged = HashMapUnmanaged(K, V, …);` in HashMap) are evaluated NOW, while
+                // this instantiation's comptime seeds are live, into aliases scoped to the mangled container
+                // (the `const Self = @This();` map), so a FIELD typed by one (`items: Slice`) resolves.
+                // Every other const stays a lazily-lowered value const.
+                var valueConsts = new List<Item>();
+                foreach (var c in consts)
+                {
+                    if (c.Content is Zig.ConstDecl typeConst && IsTypeConstMember(typeConst.Arg3))
+                    {
+                        var (memberType, _) = LowerComptimeTypeExpr(templateSym.Name, typeConst.Arg3);
+                        if (!_selfAliases.TryGetValue(mangled, out var scoped))
+                        {
+                            scoped = new Dictionary<string, CType>(System.StringComparer.Ordinal);
+                            _selfAliases[mangled] = scoped;
+                        }
+                        scoped[Tok(typeConst.Arg1)] = memberType;
+                        continue;
+                    }
+                    valueConsts.Add(c);
+                }
+                consts = valueConsts;
                 RegisterStruct(mangled, fields);
                 // `const Self = @This();` → a self alias scoped to the MANGLED container, plus any value
                 // const — both keyed by the mangled name, so a method's `self: *Self` and a `S.NAME` use
