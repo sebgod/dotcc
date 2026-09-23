@@ -52,7 +52,7 @@ internal sealed partial class ZigLowering
                     + "(a `comptime T: type` or a `comptime x: V` value/optional param; road-to-zig-std S4b) — "
                     + "a runtime or `anytype` parameter is not supported");
             }
-            var tRet = _symbols.Declare(new Symbol
+            var tRet = DeclareFnSymbol(new Symbol
             {
                 Name = Tok(nameTok),
                 Kind = SymKind.Func,
@@ -84,7 +84,7 @@ internal sealed partial class ZigLowering
             // once the type(s) are bound (InstantiateGeneric).
             // The template symbol carries a placeholder signature — it is never called directly; every
             // call routes through InstantiateGeneric to a mangled, concretely-typed instance.
-            var tmpl = _symbols.Declare(new Symbol
+            var tmpl = DeclareFnSymbol(new Symbol
             {
                 Name = Tok(nameTok),
                 Kind = SymKind.Func,
@@ -106,7 +106,7 @@ internal sealed partial class ZigLowering
         var runtimeParams = allParams.Where(p => p.Kind == ParamKind.Runtime)
             .Select(p => (p.Name, LowerType(p.TypeAst))).ToList();
 
-        var funcSym = _symbols.Declare(new Symbol
+        var funcSym = DeclareFnSymbol(new Symbol
         {
             // A method is lowered to a free function under its mangled `TypeName_method` name
             // (so it can be `&fn`-addressed and called directly); a plain function keeps its name.
@@ -114,7 +114,7 @@ internal sealed partial class ZigLowering
             Kind = SymKind.Func,
             Type = new CType.Func(ret, runtimeParams.Select(p => p.Item2).ToList(), false),
             IsGlobal = true,
-        });
+        }, qualify: mangledName is null);
         // Stash the raw return-type AST so the body can resolve its declared error set in pass 2
         // (the set decls aren't processed until pass 1.5) for the foreign-error return check.
         if (ret is CType.ErrorUnion) { _fnErrorReturnTypes[funcSym] = (retType, errUnion); }
@@ -126,6 +126,20 @@ internal sealed partial class ZigLowering
             _genericFns[funcSym] = new GenericFnInfo(funcSym, allParams, retType, errUnion, body);
         }
         return (funcSym, runtimeParams, body);
+    }
+
+    /// <summary>Declare a free function's symbol. In an IMPORTED module its EMITTED name is
+    /// module-qualified (<c>util__f</c>), the function analogue of <see cref="QualifyTypeName"/>: every
+    /// module's functions land in one emitted class, so an imported <c>util.f</c> and the root's own
+    /// <c>f</c> (or two std files' <c>init</c>) would otherwise be two same-signature C# methods, a
+    /// CS0111 bad emit. The source <see cref="Symbol.Name"/> is untouched, so lookup inside the module
+    /// and from its importers is unchanged. A root unit's names stay as spelled; a method passes
+    /// <paramref name="qualify"/> false, since its mangled name already carries the qualified container.</summary>
+    private Symbol DeclareFnSymbol(Symbol sym, bool qualify = true)
+    {
+        _symbols.Declare(sym);
+        if (qualify && _modulePrefix is { } prefix) { sym.TargetName = $"{prefix}__{sym.TargetName}"; }
+        return sym;
     }
 
     // Monotonic index for synthesized test-function names (`__zigtest_0`, …) — program-unique.

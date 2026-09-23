@@ -369,7 +369,7 @@ internal sealed partial class ZigLowering
                     .ToList();
                 var ret = LowerType(g.RetType);
                 if (g.ErrUnion) { ret = new CType.ErrorUnion(ret); }
-                instanceSym = _symbols.Declare(new Symbol
+                instanceSym = DeclareFnSymbol(new Symbol
                 {
                     Name = mangled,
                     Kind = SymKind.Func,

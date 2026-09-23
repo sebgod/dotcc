@@ -124,6 +124,15 @@ generic instances and inline anonymous structs emit as `<module>__<Name>` (`fmt_
 `list__Box__u8`), the module's own code and its importers still spelling the plain name — plus a
 collision guard on the enum registry matching the struct one. Oracle `import_same_named_types`.
 
+The same afternoon the FUNCTION half of that collision turned up (the file-as-struct brick, G3): every
+module's functions land in one emitted class, and an imported function kept its plain name, so
+`util.f` beside the root's own `f` emitted two `static byte f()` methods (CS0111), and a file-as-struct's
+`init(u8) Box` beside a root `init(u8) u8` emitted two `init(byte)` methods. Fixed the same way: a free
+function an imported module declares, and each generic instance of one, emits as `<module>__<name>`
+(`util__f`, `util__maxOf__u8`); lookup by source name is unchanged, a root unit's names and `extern`
+prototypes stay as spelled, and a method needs nothing since its container is already qualified. Unit
+`ZigCrossModuleGenericTests`; end-to-end in the oracle program `import_file_struct`.
+
 Four gaps were found by the lowering sweep around the G4 reified-methods brick (2026-08-08) — each
 reproduced on a plain/ordinary construct, so none was generic-specific — and all four are now fixed:
 
