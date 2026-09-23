@@ -284,18 +284,18 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_a_nested_container_carrying_a_method_as_a_loud_cut()
+    public void Lowers_a_nested_container_carrying_a_method()
     {
-        // V1 nested containers are fields-only: a method (or `const` / further-nested container) member
-        // of the nested struct needs the top-level container machinery, so it is a precise loud cut —
-        // not a silent drop (fail loudly, grow on purpose).
-        var ex = Should.Throw<CompileException>(() => EmitZig(
+        // Once a V1 cut (nested containers were fields-only): pass 0 now registers a nested container as
+        // an ordinary one under its parent-mangled name, so its methods are collected like any other
+        // container's — `Inner.g` lowers to the `Outer__Inner_g` free function.
+        var cs = EmitZig(
             "const Outer = struct {\n" +
             "    const Inner = struct { x: u8, fn g(self: Inner) u8 { return self.x; } };\n" +
-            "    fn use() u8 { const i = Inner{ .x = 5 }; return i.x; }\n" +
+            "    fn use() u8 { const i = Inner{ .x = 5 }; return i.g(); }\n" +
             "};\n" +
-            "pub fn main() u8 { return Outer.use(); }\n"));
-        ex.Message.ShouldContain("fields-only");
+            "pub fn main() u8 { return Outer.use(); }\n");
+        cs.ShouldContain("Outer__Inner_g(");
     }
 
     [Fact]
