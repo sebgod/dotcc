@@ -297,19 +297,9 @@ internal sealed partial class ZigLowering
         {
             return seeded;
         }
-        var savedBuf = _hoist;
-        var savedImpure = _hoistImpureSeen;
-        _hoist = new List<CStmt>();   // throwaway — @TypeOf's operand is unevaluated
-        try
-        {
-            return LowerExpr(args[0]).Type
-                ?? throw new IrUnsupportedException("zig `@TypeOf`: the operand has no statically known type");
-        }
-        finally
-        {
-            _hoist = savedBuf;
-            _hoistImpureSeen = savedImpure;
-        }
+        using var _ = EnterThrowawayHoist();   // @TypeOf's operand is unevaluated
+        return LowerExpr(args[0]).Type
+            ?? throw new IrUnsupportedException("zig `@TypeOf`: the operand has no statically known type");
     }
 
     /// <summary>Walk an <c>error{ A, B, … }</c> member list (the right-recursive <c>ErrSetList</c>)

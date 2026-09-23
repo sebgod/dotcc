@@ -854,9 +854,7 @@ internal sealed partial class ZigLowering
                 }
                 continue;
             }
-            var saved = _currentContainer;
-            _currentContainer = name;   // an enum's member values / consts resolve in its own scope
-            try
+            using (EnterContainer(name))   // an enum's member values / consts resolve in its own scope
             {
                 switch (content)
                 {
@@ -870,10 +868,6 @@ internal sealed partial class ZigLowering
                     case Zig.UnionDeclTagged:   _containerTypes[name] = new CType.Named(name); break;  // const IDENT = union(SomeEnum) { … } ;
                     case Zig.UnionDeclUntagged: _containerTypes[name] = new CType.Named(name); break;  // const IDENT = union { … } ;
                 }
-            }
-            finally
-            {
-                _currentContainer = saved;
             }
             // A top-level container of an IMPORTED module registered under its qualified IR name
             // (`fmt__Alignment`); the module's own code — and an importer navigating `fmt.Alignment` —
@@ -903,9 +897,7 @@ internal sealed partial class ZigLowering
         foreach (var (containerName, content, _) in pass0)
         {
             if (containerName is not { } name) { continue; }
-            var saved = _currentContainer;
-            _currentContainer = name;
-            try
+            using (EnterContainer(name))
             {
                 switch (content)
                 {
@@ -938,10 +930,6 @@ internal sealed partial class ZigLowering
                     case Zig.UnionDeclTagged u: foreach (var m in RegisterUnionTagged(name, Tok(u.Arg5), u.Arg8)) { containerMethods.Add((name, m)); } break;  // const IDENT = union(SomeEnum) { UnionMembers } ;
                     case Zig.UnionDeclUntagged u: foreach (var m in RegisterUnionUntagged(name, u.Arg5)) { containerMethods.Add((name, m)); } break;  // const IDENT = union { UnionMembers } ;
                 }
-            }
-            finally
-            {
-                _currentContainer = saved;
             }
         }
 

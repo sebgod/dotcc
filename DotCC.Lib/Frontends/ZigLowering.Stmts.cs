@@ -2634,22 +2634,10 @@ internal sealed partial class ZigLowering
     /// eval-safe statement points — NOT a loop condition (re-evaluated per iteration).</summary>
     private CStmt Hoisted(Func<CStmt> lower)
     {
-        var savedBuf = _hoist;
-        var savedImpure = _hoistImpureSeen;
-        _hoist = new List<CStmt>();
-        _hoistImpureSeen = false;
-        try
-        {
-            var stmt = lower();
-            if (_hoist.Count == 0) { return stmt; }
-            var seq = new List<CStmt>(_hoist) { stmt };
-            return new Seq(seq);
-        }
-        finally
-        {
-            _hoist = savedBuf;
-            _hoistImpureSeen = savedImpure;
-        }
+        using var _ = EnterFreshHoist();
+        var stmt = lower();
+        if (_hoist is not { Count: > 0 } hoisted) { return stmt; }
+        return new Seq(new List<CStmt>(hoisted) { stmt });
     }
 
     /// <summary>Guard + finish a sub-expression hoist: reject when not in a hoistable position
