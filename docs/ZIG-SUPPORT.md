@@ -295,7 +295,8 @@ each is a separate decision about what dotcc's target actually is.
 
 **Navigation reaches TYPES, not just functions** (road-to-zig-std **S4d**). A dotted type that no
 curated row claims (`util.Point`, `std.ascii.Pair`) resolves through the module graph to the container
-that module declares; a module-qualified call in a type slot (`list.Box(u8)`,
+that module declares, also as the base of a static call (`h.H.hash(0, 0)`) or as a type alias rooted at an
+inline import (`const H = @import("h.zig").H;`, oracle `module_qualified_type_paths`); a module-qualified call in a type slot (`list.Box(u8)`,
 `std.array_list.Aligned(u8)` — the shape `std.ArrayList(T)` has) reifies the imported template, in
 *its* module's environment, keyed by the type argument resolved in the *caller's*. A navigated type is
 usable, not merely nameable: its **methods** are declared on first call (a prepared module deliberately

@@ -82,4 +82,28 @@ public sealed class ZigCrossModuleDeclLiteralTests
         cs.ShouldMatch(@"\*self = list__List__u8_fromEmpty\(\);");
         cs.ShouldContain("ZigMem.Move<byte>(");
     }
+
+    [Fact]
+    public void A_module_qualified_type_is_callable_and_an_inline_import_member_is_a_type_alias()
+    {
+        // `h.H.hash(…)` (a static call through a module-qualified type) and `const H2 = @import("h.zig").H;`
+        // (a type alias rooted at an inline import), both user-level spellings of what std reaches by aliases.
+        var cs = EmitZigPair("""
+            const h = @import("h.zig");
+            const H2 = @import("h.zig").H;
+            pub fn main() u8 {
+                const a = h.H.hash(0, 0);
+                const b: H2 = H2.init(1);
+                return @intCast(a + b.a - 41);
+            }
+            """, "h.zig", """
+            pub const H = struct {
+                a: u64,
+                pub fn init(seed: u64) H { return .{ .a = seed ^ 40 }; }
+                pub fn hash(seed: u64, n: u64) u64 { return H.init(seed).a + n + 2; }
+            };
+            """);
+        cs.ShouldContain("h__H_hash(0, 0)");
+        cs.ShouldContain("h__H b = h__H_init(1);");
+    }
 }

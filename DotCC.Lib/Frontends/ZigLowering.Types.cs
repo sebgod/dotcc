@@ -202,6 +202,10 @@ internal sealed partial class ZigLowering
     {
         Zig.Field f => IsImportRootedPath(f.Arg0),
         Zig.Ident id => _importSpecs.ContainsKey(Tok(id.Arg0)),
+        // `const H = @import("h.zig").H;` — rooted at an INLINE import (ResolveModulePath resolves one), in a
+        // ROOT unit only: std.zig re-exports dozens of names that way (`pub const BufMap =
+        // @import("buf_map.zig").BufMap;`), and a lazy module must not pull those modules in at prepare time.
+        Zig.BuiltinCall b => !_lazy && Tok(b.Arg0) == "@import",
         _ => false,
     };
 
@@ -1014,6 +1018,16 @@ internal sealed partial class ZigLowering
     private CType? TryResolveQualifiedNestedType(Item dotted)
     {
         if (dotted.Content is not Zig.Field f) { return null; }
+        // `h.H` with `const h = @import("h.zig");`: a type the MODULE declares (so `h.H.hash(…)` is a static
+        // call). A root unit's named import only: a lazily prepared module must not fan out into what its
+        // top-level aliases name (std.zig's `pub const BufMap = @import("buf_map.zig").BufMap;` would prepare
+        // buf_map.zig at every std import), and a std path is left to the std resolvers.
+        if (!_lazy && f.Arg0.Content is Zig.Ident && !TryResolveStdPath(dotted, out _)
+            && ResolveModulePath(f.Arg0) is { Lowering: { } moduleLowering }
+            && moduleLowering.ResolveExportedType(Tok(f.Arg2)) is { } moduleType)
+        {
+            return moduleType;
+        }
         CType? baseType = f.Arg0.Content switch
         {
             Zig.Ident id when TryLookupContainerType(Tok(id.Arg0), out var ct) => ct,

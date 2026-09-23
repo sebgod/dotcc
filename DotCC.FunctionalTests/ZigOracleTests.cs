@@ -3760,6 +3760,28 @@ public sealed class ZigOracleTests
     /// into the same program and cross-module calls resolve.</summary>
     public static IEnumerable<object[]> MultiFilePrograms => new[]
     {
+        // Module-qualified type paths from user code: a static call through `h.H` (`h.H.hash(0, 0)`) and a type
+        // alias rooted at an inline import (`const H2 = @import("h.zig").H;`). 42 + 41 - 41 = 42.
+        new object[] { "module_qualified_type_paths",
+            "const h = @import(\"h.zig\");\n" +
+            "const H2 = @import(\"h.zig\").H;\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = h.H.hash(0, 0);\n" +
+            "    const b: H2 = H2.init(1);\n" +
+            "    return @intCast(a + b.a - 41);\n" +
+            "}\n",
+            "h.zig",
+            "pub const H = struct {\n" +
+            "    const secret = [_]u64{ 40, 2 };\n" +
+            "    a: u64,\n" +
+            "    pub fn init(seed: u64) H {\n" +
+            "        return .{ .a = seed ^ secret[0] };\n" +
+            "    }\n" +
+            "    pub fn hash(seed: u64, n: u64) u64 {\n" +
+            "        const h = H.init(seed);\n" +
+            "        return h.a + n + secret[1];\n" +
+            "    }\n" +
+            "};\n", 42, "" },
         // A method declared ON DEMAND in the middle of another body (a lazy module's `H.init(seed)` inside
         // `H.hash`) must not clear that body's container scope: its next bare container const (`secret[1]`)
         // resolved to nothing (std.hash.Wyhash's shape). 40 ^ 0 + 0 + 2 = 42.
