@@ -135,6 +135,10 @@ internal sealed partial class ZigLowering
             // that must be a block's first statement; dotcc has nothing to emit for it.
             case Zig.StmtExpr { Arg0.Content: Zig.BuiltinCall branchHint } when Tok(branchHint.Arg0) == "@branchHint":
                 return new Seq(new List<CStmt>());
+            // `@setRuntimeSafety(false);` (std.math.divCeil) / `@setFloatMode(.optimized);`: zig's per-scope safety and
+            // float-mode switches. dotcc's C# is unchecked arithmetic with IEEE floats either way, so nothing to emit.
+            case Zig.StmtExpr { Arg0.Content: Zig.BuiltinCall scopeMode } when Tok(scopeMode.Arg0) is "@setRuntimeSafety" or "@setFloatMode":
+                return new Seq(new List<CStmt>());
             // `@disableInstrumentation();` / `@disableIntrinsics();` (std's panic and memcpy paths): hints to
             // zig's own codegen, with nothing for dotcc to emit.
             case Zig.StmtExpr { Arg0.Content: Zig.BuiltinCallNoArgs hint }
@@ -4048,6 +4052,8 @@ internal sealed partial class ZigLowering
         Return or Break or Continue or Goto => true,
         ExprStmt { Expr: Call { Callee: "__dotcc_unreachable" } } => true,   // `unreachable` lowers to a throw
         Block b => b.Stmts.Count > 0 && Terminates(b.Stmts[^1]),
+        // A hoisted return (`return math.powi(T, x, y) catch unreachable;` in std.math.pow): its temps come first.
+        Seq q => q.Stmts.Count > 0 && Terminates(q.Stmts[^1]),
         If f => f.Else is { } e && Terminates(f.Then) && Terminates(e),
         _ => false,
     };

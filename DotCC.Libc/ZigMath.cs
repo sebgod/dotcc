@@ -185,6 +185,18 @@ public static class ZigMath
         return T.ReadLittleEndian(buf, isUnsigned: !T.IsNegative(T.AllBitsSet));
     }
 
+    /// <summary>Zig's <c>@round</c>: to the nearest integer, a half rounding AWAY from zero (.NET's default is to even).</summary>
+    public static double RoundAway(double x) => System.Math.Round(x, System.MidpointRounding.AwayFromZero);
+
+    /// <summary>Zig's <c>@round</c> on an f32 (see <see cref="RoundAway(double)"/>).</summary>
+    public static float RoundAway(float x) => System.MathF.Round(x, System.MidpointRounding.AwayFromZero);
+
+    /// <summary>Zig's <c>@exp2</c>: 2 raised to <paramref name="x"/>.</summary>
+    public static double Exp2(double x) => System.Math.Pow(2.0, x);
+
+    /// <summary>Zig's <c>@exp2</c> on an f32.</summary>
+    public static float Exp2(float x) => System.MathF.Pow(2f, x);
+
     /// <summary>The magnitude of an integer as an unsigned 128-bit value — the exact-width backbone of
     /// <c>@abs</c>, which returns the UNSIGNED peer of <c>iN</c> (so <c>@abs(i8 -128) == u8 128</c>,
     /// which a signed <c>Math.Abs</c> would overflow). The lowering casts this result to the operand's

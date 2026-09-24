@@ -288,6 +288,101 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Float_builtins_route_to_System_Math_with_zigs_rounding()
+    {
+        var cs = EmitZig("""
+            pub fn main() u8 {
+                @setRuntimeSafety(false);
+                var x: f64 = 2.5;
+                var y: f32 = 6.25;
+                _ = .{ &x, &y };
+                const r = @round(x) + @sqrt(x * 10.0) + @abs(-x);
+                const q = @sqrt(y);
+                const f: u8 = @intFromFloat(r + q);
+                return f;
+            }
+            """);
+        // @round rounds half away from zero (C# Math.Round would round 2.5 to even); f32 keeps MathF.
+        cs.ShouldContain("double r = ZigMath.RoundAway(x) + System.Math.Sqrt(x * 10.0) + System.Math.Abs(-x);");
+        cs.ShouldContain("float q = System.MathF.Sqrt(y);");
+        cs.ShouldNotContain("setRuntimeSafety");
+    }
+
+    [Fact]
+    public void A_folded_if_returning_through_a_hoisted_catch_makes_the_rest_dead()
+    {
+        var cs = EmitZig("""
+            fn powi(comptime T: type, x: T, y: T) error{Overflow}!T {
+                if (y > 30) return error.Overflow;
+                var acc: T = if (@typeInfo(T).int.bits < 1) unreachable else 1;
+                var i: T = 0;
+                while (i < y) : (i += 1) acc *= x;
+                return acc;
+            }
+            fn pow(comptime T: type, x: T, y: T) T {
+                if (@typeInfo(T) == .int) {
+                    return powi(T, x, y) catch unreachable;
+                }
+                if (T != f32 and T != f64) {
+                    @compileError("pow not implemented");
+                }
+                return x;
+            }
+            pub fn main() u8 {
+                return @intCast(pow(u32, 3, 4));
+            }
+            """);
+        // zig never analyses the `@compileError` after the taken prong's return (task #66), and the
+        // `unreachable` arm leaves the ternary at the sink's type so the literal arm is cast.
+        cs.ShouldContain("? throw new System.Diagnostics.UnreachableException(\"unreachable() reached\") : (uint)(1))");
+    }
+
+    [Fact]
+    public void A_struct_layout_folds_and_a_packed_struct_compares_by_its_bytes()
+    {
+        var cs = EmitZig("""
+            const Flags = packed struct { lo: u4, hi: u4 };
+            const Ext = extern struct { p: u32 };
+            const Plain = struct { p: u32 };
+            fn kind(comptime T: type) u8 {
+                return switch (@typeInfo(T).@"struct".layout) {
+                    .auto => 1,
+                    .@"extern" => 2,
+                    .@"packed" => 3,
+                };
+            }
+            pub fn main() u8 {
+                const a = Flags{ .lo = 1, .hi = 2 };
+                const b = Flags{ .lo = 1, .hi = 2 };
+                return kind(Plain) * 100 + kind(Ext) * 10 + kind(Flags) + @intFromBool(a == b);
+            }
+            """);
+        // Each instance returns its folded prong (task #70); zig's packed `==` compares the backing storage.
+        cs.ShouldContain("public static bool operator ==(Flags a, Flags b) => System.MemoryExtensions.SequenceEqual(");
+        cs.ShouldNotContain("operator ==(Ext a");
+        cs.ShouldContain("(a == b)");
+    }
+
+    [Fact]
+    public void A_while_true_with_a_continue_expression_has_no_condition()
+    {
+        var cs = EmitZig("""
+            fn lastZero(s: []const u8) ?usize {
+                var i: usize = s.len;
+                while (true) : (i -= 1) {
+                    if (i == 0) return null;
+                    if (s[i - 1] == 0) return i - 1;
+                }
+            }
+            pub fn main() u8 {
+                return @intCast(lastZero(&[_]u8{ 1, 0, 2 }) orelse 9);
+            }
+            """);
+        // An empty condition lets C# see the loop never falls out (Cond.B(true) is CS0161 here).
+        cs.ShouldContain("for (; ; i -= (ulong)(1))");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

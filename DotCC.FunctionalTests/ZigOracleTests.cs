@@ -4712,6 +4712,64 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"[{s}] [{s}] [{s}]\\n\", .{ word[0..5], mut, word[6..] });\n" +
             "}\n", 0,
             "[hello] [bc] [world]" },
+        // Float builtins (tasks #67/#68/#69): @round rounds half away from zero (C#'s default is to even), an f32 stays
+        // on MathF, @setRuntimeSafety is a no-op, and `while (true) : (i -= 1)` must read as a loop that never falls out.
+        new object[] { "float_builtins",
+            "fn check(s: *u32, ok: bool, bit: u5) void {\n" +
+            "    if (ok) s.* |= @as(u32, 1) << bit;\n" +
+            "}\n" +
+            "\n" +
+            "fn lastZero(s: []const u8) ?usize {\n" +
+            "    var i: usize = s.len;\n" +
+            "    while (true) : (i -= 1) {\n" +
+            "        if (i == 0) return null;\n" +
+            "        if (s[i - 1] == 0) return i - 1;\n" +
+            "    }\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    @setRuntimeSafety(false);\n" +
+            "    var s: u32 = 0;\n" +
+            "    var half: f64 = 2.5;\n" +
+            "    var neg_half: f64 = -2.5;\n" +
+            "    var neg: f64 = -2.7;\n" +
+            "    var x32: f32 = 6.25;\n" +
+            "    _ = .{ &half, &neg_half, &neg, &x32 };\n" +
+            "    check(&s, @round(half) == 3.0, 0);\n" +
+            "    check(&s, @round(neg_half) == -3.0, 1);\n" +
+            "    check(&s, @trunc(neg) == -2.0, 2);\n" +
+            "    check(&s, @floor(neg) == -3.0, 3);\n" +
+            "    check(&s, @ceil(neg) == -2.0, 4);\n" +
+            "    check(&s, @sqrt(half * 10.0) == 5.0, 5);\n" +
+            "    check(&s, @exp2(@as(f64, 3.0)) == 8.0, 6);\n" +
+            "    check(&s, @log2(@as(f64, 8.0)) == 3.0, 7);\n" +
+            "    check(&s, @abs(neg) == 2.7, 8);\n" +
+            "    check(&s, @sin(@as(f64, 0.0)) == 0.0, 9);\n" +
+            "    check(&s, @sqrt(x32) == 2.5, 10);\n" +
+            "    check(&s, @round(x32) == 6.0, 11);\n" +
+            "    check(&s, @log10(@as(f64, 1000.0)) == 3.0, 12);\n" +
+            "    check(&s, @exp(@as(f64, 0.0)) == 1.0, 13);\n" +
+            "    check(&s, @abs(@as(f32, -0.5)) == 0.5, 14);\n" +
+            "    const z: u32 = @intCast(lastZero(&[_]u8{ 1, 0, 2, 0, 5 }).?);\n" +
+            "    return @intCast((s + z) % 251);\n" +
+            "}\n", 140, "" },
+        // A struct's layout as a comptime tag, and packed-struct `==` over the backing storage (task #70).
+        new object[] { "struct_layout_packed_eq",
+            "const Flags = packed struct { lo: u4, hi: u4 };\n" +
+            "const Ext = extern struct { p: u32 };\n" +
+            "const Plain = struct { p: u32 };\n" +
+            "fn kind(comptime T: type) u8 {\n" +
+            "    return switch (@typeInfo(T).@\"struct\".layout) {\n" +
+            "        .auto => 1,\n" +
+            "        .@\"extern\" => 2,\n" +
+            "        .@\"packed\" => 3,\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = Flags{ .lo = 1, .hi = 2 };\n" +
+            "    const b = Flags{ .lo = 1, .hi = 2 };\n" +
+            "    return kind(Plain) * 100 + kind(Ext) * 10 + kind(Flags) + @intFromBool(a == b);\n" +
+            "}\n", 124, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -5993,6 +6051,60 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // std.meta.eql from real std (task #70): `info.layout` folds to .auto / .@"extern" / .@"packed", a packed struct
+    // compares as its backing bytes (a generated ==), and the struct prong recurses through `inline for` + @field.
+    [Fact]
+    public void Dotcc_matches_zig_std_meta_eql() =>
+        MatchesZigWithRealStd("meta_eql",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const Inner = struct { x: u16, y: i8 };\n" +
+            "const Outer = struct { a: u32, in: Inner, tail: u8 };\n" +
+            "const Flags = packed struct { lo: u4, hi: u4 };\n" +
+            "const Ext = extern struct { p: u32, q: u32 };\n" +
+            "\n" +
+            "fn bit(ok: bool, n: u3) u8 {\n" +
+            "    return @as(u8, @intFromBool(ok)) << n;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const o1 = Outer{ .a = 1, .in = .{ .x = 2, .y = -3 }, .tail = 6 };\n" +
+            "    var o2 = o1;\n" +
+            "    var s: u8 = 0;\n" +
+            "    s |= bit(std.meta.eql(o1, o2), 0);\n" +
+            "    o2.in.y = 3;\n" +
+            "    s |= bit(!std.meta.eql(o1, o2), 1);\n" +
+            "    o2 = o1;\n" +
+            "    o2.tail = 9;\n" +
+            "    s |= bit(!std.meta.eql(o1, o2), 2);\n" +
+            "    s |= bit(std.meta.eql(Flags{ .lo = 1, .hi = 2 }, Flags{ .lo = 1, .hi = 2 }), 3);\n" +
+            "    s |= bit(!std.meta.eql(Flags{ .lo = 1, .hi = 2 }, Flags{ .lo = 2, .hi = 1 }), 4);\n" +
+            "    s |= bit(std.meta.eql(Ext{ .p = 7, .q = 8 }, Ext{ .p = 7, .q = 8 }), 5);\n" +
+            "    s |= bit(std.meta.eql([2]u32{ 1, 2 }, [2]u32{ 1, 2 }), 6);\n" +
+            "    s |= bit(!std.meta.eql(@as(u64, 5), @as(u64, 6)), 7);\n" +
+            "    return s;\n" +
+            "}\n", 255);
+
+    // std.math.pow / sqrt / divCeil and std.mem.lastIndexOf from real std (tasks #66 to #69): pow's integer prong
+    // returns through a hoisted `catch unreachable`, so the `@compileError` after it is dead; powi's
+    // `if (c) unreachable else 1` takes the sink's type; divCeil opens with @setRuntimeSafety; findLastLinear is a
+    // `while (true) : (i -= 1)` loop.
+    [Fact]
+    public void Dotcc_matches_zig_std_math_pow_sqrt_divceil_lastindexof() =>
+        MatchesZigWithRealStd("math_pow_lastindexof",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "pub fn main() !u8 {\n" +
+            "    const p = std.math.pow(u32, 3, 4);\n" +
+            "    const q = std.math.pow(u8, 2, 7);\n" +
+            "    const r: u32 = @intFromFloat(std.math.sqrt(@as(f64, 144.0)));\n" +
+            "    const c = try std.math.divCeil(u8, 17, 5);\n" +
+            "    const last = std.mem.lastIndexOf(u8, \"abcabc\", \"bc\") orelse 99;\n" +
+            "    const none = std.mem.lastIndexOf(u8, \"abcabc\", \"zz\") orelse 7;\n" +
+            "    std.debug.print(\"{d} {d} {d} {d} {d} {d}\\n\", .{ p, q, r, c, last, none });\n" +
+            "    return @intCast((p + q + r + c + last + none) % 256);\n" +
+            "}\n", 236);
 
     /// <summary>Run <paramref name="program"/> through dotcc (navigating the real std at <c>DOTCC_ZIG_LIB_DIR</c>) and
     /// through zig, and require both to exit alike and print the same (and, when given, with

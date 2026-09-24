@@ -229,6 +229,18 @@ internal sealed class CSharpBackend
             sb.Append("    public ").Append(Cs(f.Type)).Append(' ').Append(DotCC.EmitHelpers.Id(f.Name)).Append(";\n");
             fi++;
         }
+        if (t.Layout == AggregateLayout.Packed && !t.IsUnion)
+        {
+            // zig compares a packed struct as its backing integer (std.meta.eql's `.@"packed" => a == b`): the
+            // bytes of the storage, which the masked bit-field setters keep free of stray bits.
+            var bytes = $"System.Runtime.InteropServices.MemoryMarshal.AsBytes(new System.ReadOnlySpan<{t.Name}>(in {{0}}))";
+            sb.Append("    public static bool operator ==(").Append(t.Name).Append(" a, ").Append(t.Name).Append(" b) => System.MemoryExtensions.SequenceEqual(")
+              .Append(string.Format(System.Globalization.CultureInfo.InvariantCulture, bytes, "a")).Append(", ")
+              .Append(string.Format(System.Globalization.CultureInfo.InvariantCulture, bytes, "b")).Append(");\n");
+            sb.Append("    public static bool operator !=(").Append(t.Name).Append(" a, ").Append(t.Name).Append(" b) => !(a == b);\n");
+            sb.Append("    public override bool Equals(object o) => o is ").Append(t.Name).Append(" other && this == other;\n");
+            sb.Append("    public override int GetHashCode() => 0;\n");
+        }
         sb.Append("}\n\n");
         return wrappers.Append(sb).ToString();
     }
@@ -777,7 +789,9 @@ internal sealed class CSharpBackend
                     ExprStmt e => Expr(e.Expr),
                     _ => "",
                 };
-                var cond = fr.Cond is null ? "" : $"Cond.B({Expr(DecayEnum(fr.Cond))})";
+                // zig's `while (true) : (i -= 1)` (std.mem.findLastLinear) has no condition to spell, so C# sees the loop
+                // never falls out, as a bare `while (true)` does (CS0161 otherwise).
+                var cond = fr.Cond is null or LitBool { Value: true } ? "" : $"Cond.B({Expr(DecayEnum(fr.Cond))})";
                 var post = fr.Post is null ? "" : Expr(fr.Post);
                 sb.Append(pad).Append($"for ({init}; {cond}; {post})\n");
                 WithNormalBreak(() => Nested(sb, fr.Body, ind));

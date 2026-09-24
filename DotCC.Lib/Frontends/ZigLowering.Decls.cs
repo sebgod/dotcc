@@ -1637,7 +1637,13 @@ internal sealed partial class ZigLowering
             {
                 if (TryFoldComptimeCondition(ie.Arg2) is { } taken) { return LowerExprSink(taken ? ie.Arg4 : ie.Arg6, sink); }
                 var then = LowerExprSink(ie.Arg4, sink);
-                return new CondExpr(LowerExpr(ie.Arg2), then, LowerExprSink(ie.Arg6, sink)) { Type = then.Type };
+                var otherwise = LowerExprSink(ie.Arg6, sink);
+                // `var acc: T = if (does_one_overflow) unreachable else 1;` (std.math.powi): an `unreachable` arm has
+                // no value type, so the ternary is the sink's type and the literal arm is cast to it.
+                var condType = IsUnreachableCallExpr(then) || IsUnreachableCallExpr(otherwise)
+                    ? sink.IsArithmetic ? sink : IsUnreachableCallExpr(then) ? otherwise.Type : then.Type
+                    : then.Type;
+                return new CondExpr(LowerExpr(ie.Arg2), then, otherwise) { Type = condType };
             }
             case Zig.SwitchExpr s:         return LowerSwitchExpr(s.Arg2, s.Arg5, sink);
             case Zig.SwitchExprTrailing s: return LowerSwitchExpr(s.Arg2, s.Arg5, sink);
@@ -1750,6 +1756,31 @@ internal sealed partial class ZigLowering
            && value.Type?.Unqualified is CType.Prim { Integer: true } valuePrim && !valuePrim.Equals(optPrim)
             ? new Cast(optInner, value) { Type = optInner }
             : null;
+
+    /// <summary>True for a lowered <c>unreachable</c> (the void call the backend renders as a throw).</summary>
+    private static bool IsUnreachableCallExpr(CExpr e) => e is Call { Callee: "__dotcc_unreachable" };
+
+    /// <summary>A zig float math builtin over <paramref name="operand"/> (an f64 or f32): the matching System.Math /
+    /// System.MathF call at the operand's type, or ZigMath's where zig differs from .NET (<c>@round</c> rounds half away
+    /// from zero; <c>@exp2</c> has no .NET method).</summary>
+    private static CExpr FloatMathBuiltin(string builtin, CExpr operand)
+    {
+        var type = operand.Type.Unqualified;
+        if (type != CType.Double && type != CType.Float)
+        {
+            throw new IrUnsupportedException($"zig `{builtin}` expects a float (f32 / f64) operand, got `{operand.Type.Describe()}`");
+        }
+        var math = type == CType.Float ? "System.MathF" : "System.Math";
+        var callee = builtin switch
+        {
+            "@sqrt" => math + ".Sqrt", "@sin" => math + ".Sin", "@cos" => math + ".Cos", "@tan" => math + ".Tan",
+            "@exp" => math + ".Exp", "@log" => math + ".Log", "@log2" => math + ".Log2", "@log10" => math + ".Log10",
+            "@floor" => math + ".Floor", "@ceil" => math + ".Ceiling", "@trunc" => math + ".Truncate", "@abs" => math + ".Abs",
+            "@round" => "ZigMath.RoundAway", "@exp2" => "ZigMath.Exp2",
+            _ => throw new IrUnsupportedException($"internal: `{builtin}` is not a float math builtin"),
+        };
+        return new Call(callee, new List<CExpr> { operand }) { Type = type };
+    }
 
     /// <summary>Locals and globals bound, without an annotation, to a string literal (<c>const s = "abc";</c>)
     /// — zig types such a binding <c>*const [3:0]u8</c>, whose <c>.len</c> is 3, but the lowered symbol
@@ -2217,6 +2248,18 @@ internal sealed partial class ZigLowering
                 }
                 var bswArg = LowerExpr(bargs[0]);
                 return new Call("ZigMath.ByteSwap", new List<CExpr> { bswArg }) { Type = bswArg.Type };
+            // The float math builtins (std.math.sqrt's `@sqrt(x)`): System.Math for f64, System.MathF for f32, each
+            // at the operand's own type. An untyped float literal operand is f64 unless the result has a float sink.
+            case "@sqrt" or "@sin" or "@cos" or "@tan" or "@exp" or "@exp2" or "@log" or "@log2" or "@log10"
+                or "@floor" or "@ceil" or "@trunc" or "@round":
+            {
+                if (bargs.Count != 1)
+                {
+                    throw new IrUnsupportedException($"zig `{bname}` expects (float); got {bargs.Count} argument(s)");
+                }
+                var floatArg = sink?.Unqualified == CType.Float ? LowerExprSink(bargs[0], CType.Float) : LowerExpr(bargs[0]);
+                return FloatMathBuiltin(bname, floatArg);
+            }
             case "@abs":
             {
                 // `@abs(x)` — magnitude. Zig's `@abs(iN)` returns the UNSIGNED peer `uN` (so
@@ -2228,9 +2271,13 @@ internal sealed partial class ZigLowering
                     throw new IrUnsupportedException($"zig `@abs` expects (number); got {bargs.Count} argument(s)");
                 }
                 var absArg = LowerExpr(bargs[0]);
+                if (absArg.Type.Unqualified == CType.Double || absArg.Type.Unqualified == CType.Float)
+                {
+                    return FloatMathBuiltin("@abs", absArg);
+                }
                 if (absArg.Type.Unqualified is not CType.Prim { Integer: true } absPrim)
                 {
-                    throw new IrUnsupportedException("zig `@abs` V1 supports an integer operand (float `@abs` is not lowered yet)");
+                    throw new IrUnsupportedException("zig `@abs` supports an integer or a float operand");
                 }
                 if (!absPrim.Signed) { return absArg; }   // @abs of an unsigned int is the identity
                 var absU = UnsignedPeerInt(absArg.Type);

@@ -588,6 +588,26 @@ internal sealed partial class ZigLowering
             tag = sInfo.Type.Unqualified is CType.Prim { Signed: true } ? "signed" : "unsigned";
             return true;
         }
+        // `<info>.layout` of a struct or union (std.meta.eql's `if (info.layout == .@"packed") return a == b;`):
+        // `.auto` / `.@"extern"` / `.@"packed"`, off the layout the aggregate was registered with.
+        if (expr.Content is Zig.Field lf && Tok(lf.Arg2) == "layout" && TryEvalTypeInfo(lf.Arg0, out var lInfo))
+        {
+            if (lInfo.Tag is not ("struct" or "union"))
+            {
+                throw new IrUnsupportedException(
+                    $"zig `@typeInfo({lInfo.Type.Describe()}).{lInfo.Tag}.layout`: only a struct or union carries a layout");
+            }
+            var layout = lInfo.Type.Unqualified is CType.Named ln
+                ? _ir.Types.Find(d => d.Name == ln.Name)?.Layout ?? AggregateLayout.Default
+                : AggregateLayout.Default;
+            tag = layout switch
+            {
+                AggregateLayout.Packed => "packed",
+                AggregateLayout.Sequential => "extern",
+                _ => "auto",
+            };
+            return true;
+        }
         // `<info>.size` on a SLICE — `.slice`, the one pointer size class dotcc's lowering keeps (a slice is
         // its own `CType.Slice`). `*T` / `[*]T` / `[*c]T` share one C pointer, so for those the size stays the
         // loud cut TryFoldTypeInfoValue raises (std.meta.Elem switches on it).
