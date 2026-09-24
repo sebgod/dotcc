@@ -90,21 +90,22 @@ public sealed class ZigInFnContainerTests
     }
 
     [Fact]
-    public void Method_in_a_local_struct_is_rejected_loudly()
+    public void Method_in_a_local_struct_is_declared_under_the_function_mangled_name()
     {
-        // A method inside a local container needs the pass-1 free-function machinery only the
-        // top-level passes run — a clear V1 cut, not a silent drop.
-        var ex = Should.Throw<Exception>(() => EmitZig("""
+        // A method inside a local container (std.sort's `Context`, task #48) is declared under the
+        // container's function-mangled name, its body deferred like a reified generic's. zig answers 42.
+        var cs = EmitZig("""
             pub fn main() u8 {
                 const P = struct {
                     x: i32,
-                    fn get(self: P) i32 { return self.x; }
+                    fn get(self: @This()) i32 { return self.x + 41; }
                 };
                 const p: P = .{ .x = 1 };
-                return @intCast(p.x);
+                return @intCast(p.get());
             }
-            """));
-        ex.Message.ShouldContain("fields-only");
+            """);
+        cs.ShouldContain("internal static unsafe int main__P_get(main__P self)");
+        cs.ShouldContain("return (byte)main__P_get(p);");
     }
 
     [Fact]

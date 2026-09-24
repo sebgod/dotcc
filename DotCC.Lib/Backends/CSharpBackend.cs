@@ -197,6 +197,9 @@ internal sealed class CSharpBackend
                 fi = fj;
                 continue;
             }
+            // A zig `void` field (std.sort's `sub_ctx: @TypeOf(context)` for a `{}` context) has no storage, and C#
+            // has no void field (CS0670): it is left out, as its initializers and argument uses are erased too.
+            if (f.Type.Unqualified is CType.VoidType) { fi++; continue; }
             if (t.IsUnion) { sb.Append("    [System.Runtime.InteropServices.FieldOffset(0)]\n"); }
             // An array member is C-inline storage, not a pointer field. A primitive
             // element lowers to a C# `fixed` buffer (inline, indexable, decays to a
@@ -2332,10 +2335,12 @@ internal sealed class CSharpBackend
     private string StructInitText(StructInit si)
     {
         var sb = new StringBuilder("new ").Append(Cs(si.Type)).Append(" { ");
+        var written = 0;
         for (var i = 0; i < si.Members.Count; i++)
         {
-            if (i > 0) { sb.Append(", "); }
             var m = si.Members[i];
+            if (m.FieldType.Unqualified is CType.VoidType) { continue; }   // a `void` field has no storage (see the layout)
+            if (written++ > 0) { sb.Append(", "); }
             sb.Append(DotCC.EmitHelpers.Id(m.Name)).Append(" = ").Append(Coerced(m.Value, m.FieldType));
         }
         return sb.Append(" }").ToString();

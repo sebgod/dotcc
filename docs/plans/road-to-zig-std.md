@@ -884,7 +884,18 @@ vector length feeds TYPES.
   `Dotcc_matches_zig_std_fmt_buf_print_from_source` formats a comptime_int, `u32` / `i32` / `u8` / `u64` / `i8`
   values (negatives included) and several arguments per format, folding the bytes to a checksum (159 == zig). The
   last layer was four C# bad emits in std's integer printing (a compound assignment through `.?`, an array stored
-  through and returned from a slice deref, an `unreachable` switch arm; oracle `fmt_stores_and_returns`). What the path needed, all now in: a comptime OPTIONAL bound from `comptime switch (…) { .none => null, … }`
+  through and returned from a slice deref, an `unreachable` switch arm; oracle `fmt_stores_and_returns`).
+- **std.mem.sort RUNS from real std, == zig (2026-09-24, task #48)**: block sort and insertion sort over 60 values,
+  ascending (std.sort.asc), descending (std.sort.desc) and by a custom context and comparator (`ByMod.less`), the
+  orders folded to a checksum (differential `Dotcc_matches_zig_std_mem_sort_from_source`, 137 == zig). Needed: a
+  struct declared inside a generic WITH methods (std.sort's local `Context`), whose deferred bodies carry the
+  instance's comptime seeds and comptime function parameter; a comparator named through its container; a `void`
+  field (a `{}` context) with no storage and its reads erased; `@ptrCast` of a single-item pointer to a byte
+  slice (std.mem.swap); a folded comptime_int past `long` typed to fit (std.math.sqrt_int's `maxInt(T)`); a call
+  returning `[N]T` binding a typed array local and value generics whose signature spells a comptime parameter
+  (std.mem.reverse's `reverseVector`). And a **silent miscompile** fixed on the way: `var b = a;` of an array
+  aliased the storage (the C# rep is the element pointer) where zig copies; decls and assignments of an array VALUE
+  now copy (oracle `array_value_copies`). What the path needed, all now in: a comptime OPTIONAL bound from `comptime switch (…) { .none => null, … }`
   (`arg_pos`), so `comptime arg_state.nextArg(arg_pos) orelse @compileError(…)` never analyses its fallback; a
   tuple field named by a member-list index (`@field(args, field_names[i])`, a tuple's fields being `"0"`, `"1"`);
   a comptime byte-slice field of a comptime aggregate as a comptime string (`placeholder.specifier_arg`);

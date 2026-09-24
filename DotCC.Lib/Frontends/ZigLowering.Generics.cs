@@ -294,10 +294,24 @@ internal sealed partial class ZigLowering
         if (!owner.IsComptimeOnlyFn(instance)) { return call; }
         // Evaluated when it was instantiated (TryEvalComptimeIntBody): the value is known now, so a
         // position that needs it during lowering (an enum member, an array extent) can use it.
-        if (owner._comptimeIntValues.TryGetValue(instance, out var known)) { return known; }
+        if (owner._comptimeIntValues.TryGetValue(instance, out var known)) { return FitComptimeIntLiteral(known); }
         var fold = new ComptimeFold(call) { Type = call.Type };
         _pendingComptimeFolds.Add(fold);
         return fold;
+    }
+
+    /// <summary>A comptime_int literal typed wide enough for its value: <c>std.math.maxInt(u64)</c> folds to
+    /// 18446744073709551615, which a <c>const max = …;</c> would otherwise declare as an <c>int</c>
+    /// (std.math.sqrt_int). A value that fits its own type is returned unchanged.</summary>
+    private static CExpr FitComptimeIntLiteral(CExpr literal)
+    {
+        if (literal is not LitInt { Digits: var digits } lit
+            || !System.Int128.TryParse(digits, System.Globalization.NumberStyles.None, CultureInfo.InvariantCulture, out var v)
+            || v <= long.MaxValue)
+        {
+            return literal;
+        }
+        return lit with { Type = v <= ulong.MaxValue ? CType.ULong : CType.Int128 };
     }
 
     /// <summary>Instantiate a generic function THIS module exports, called from <paramref name="caller"/>
@@ -778,6 +792,8 @@ internal sealed partial class ZigLowering
             shadows.Add((name, _fnAliases.TryGetValue(name, out var prev) ? prev : null));
             _fnAliases[name] = (owner, fn);
         }
+        var outerInstantiation = _currentInstantiation;
+        _currentInstantiation = p;
         try
         {
             // A generic METHOD's instance lowers inside its owner (`Self`, sibling methods, nested types).
@@ -786,12 +802,17 @@ internal sealed partial class ZigLowering
         }
         finally
         {
+            _currentInstantiation = outerInstantiation;
             foreach (var (name, prev) in shadows)
             {
                 if (prev is { } pv) { _fnAliases[name] = pv; } else { _fnAliases.Remove(name); }
             }
         }
     }
+
+    /// <summary>The generic instance whose body is lowering right now, if any: a LOCAL struct declared in it
+    /// (<see cref="LowerLocalStruct"/>) hands its comptime seeds to the struct's methods.</summary>
+    private PendingInstantiation? _currentInstantiation;
 
     /// <summary>Each instance whose body returns a method of an anonymous struct (the closure idiom,
     /// <c>return struct { pub fn inner … }.inner;</c>) → that method: the comptime FUNCTION value the
@@ -888,6 +909,14 @@ internal sealed partial class ZigLowering
                 }
                 return t.owner._fnValueOfInstance.TryGetValue(inst.Instance, out var fnValue) ? (t.owner, fnValue) : null;
             }
+            // `ByMod.less` (a comparator passed to std.mem.sort): a method named through its container.
+            case Zig.Field { Arg0.Content: Zig.Ident { Arg0: var typeTok }, Arg2: var memberTok }
+                when argScope._containerTypes.TryGetValue(Tok(typeTok), out var containerType)
+                     && ContainerTypeName(containerType) is { } containerName
+                     && argScope._methods.TryGetValue(containerName, out var containerMethods)
+                     && containerMethods.TryGetValue(Tok(memberTok), out var method)
+                     && !argScope._genericFns.ContainsKey(method):
+                return (argScope, method);
             default:
                 return null;
         }
@@ -1494,7 +1523,8 @@ internal sealed partial class ZigLowering
         Item Body,
         IReadOnlyList<TypeSeed> TypeSeeds,
         IReadOnlyList<(string name, long value, CType type)> ValueSeeds,
-        IReadOnlyList<(string name, bool hasValue, long value, CType inner)> OptionalSeeds);
+        IReadOnlyList<(string name, bool hasValue, long value, CType inner)> OptionalSeeds,
+        IReadOnlyList<(string name, ZigLowering owner, Symbol fn)>? FnSeeds = null);
 
     /// <summary>Reified-generic method bodies awaiting lowering, drained at top level alongside
     /// <see cref="_pendingInstantiations"/> (each drain can enqueue into the other: a method body may call
@@ -1516,8 +1546,26 @@ internal sealed partial class ZigLowering
     /// shared <see cref="LowerFnBodyCore"/>, so the body's <c>T</c> matches its signature's.</summary>
     private void LowerReifiedMethodBody(PendingReifiedMethod p)
     {
-        using var _ = EnterContainer(p.Container);
-        LowerFnBodyCore(p.Method, p.RuntimeParams, p.Body, p.ValueSeeds, p.TypeSeeds, p.OptionalSeeds);
+        // A method of a LOCAL struct inside a generic instance (std.sort's `Context.lessThan` calling the
+        // instance's `comptime lessThanFn`) sees the instance's comptime function seeds too.
+        var shadows = new List<(string name, (ZigLowering, Symbol)? prev)>();
+        foreach (var (name, owner, fn) in p.FnSeeds ?? System.Array.Empty<(string, ZigLowering, Symbol)>())
+        {
+            shadows.Add((name, _fnAliases.TryGetValue(name, out var prev) ? prev : null));
+            _fnAliases[name] = (owner, fn);
+        }
+        try
+        {
+            using var _ = EnterContainer(p.Container);
+            LowerFnBodyCore(p.Method, p.RuntimeParams, p.Body, p.ValueSeeds, p.TypeSeeds, p.OptionalSeeds);
+        }
+        finally
+        {
+            foreach (var (name, prev) in shadows)
+            {
+                if (prev is { } pv) { _fnAliases[name] = pv; } else { _fnAliases.Remove(name); }
+            }
+        }
     }
 
     // The body EVALUATOR (ProcessTypeReturningBody and the comptime type-expression folds it uses)

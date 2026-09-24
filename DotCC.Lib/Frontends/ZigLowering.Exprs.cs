@@ -1241,7 +1241,18 @@ internal sealed partial class ZigLowering
     /// void value itself, or a read of a void symbol. zig's <c>void</c> has no runtime representation, so
     /// the backend drops void parameters and their arguments; a SIDE-EFFECTING void argument
     /// (<c>f(g())</c> with <c>g</c> returning void) would lose its call that way, so it is rejected.</summary>
-    private static bool IsErasableVoid(CExpr e) => e is DefaultLit or VarRef || e is Paren p && IsErasableVoid(p.Inner);
+    private static bool IsErasableVoid(CExpr e) => e is DefaultLit or VarRef || e is Paren p && IsErasableVoid(p.Inner)
+        // A `void` FIELD read (std.sort's `lessThanFn(ctx.sub_ctx, …)` with `context: void`) has no effect either.
+        || e is Member { Base: var fieldBase } && IsPurePath(fieldBase);
+
+    /// <summary>A variable, or a field path off one: reading it has no side effect.</summary>
+    private static bool IsPurePath(CExpr e) => e switch
+    {
+        VarRef => true,
+        Paren p => IsPurePath(p.Inner),
+        Member m => IsPurePath(m.Base),
+        _ => false,
+    };
 
     private CExpr BuildCall(Symbol sym, IReadOnlyList<Item> argItems, CExpr? receiver)
     {

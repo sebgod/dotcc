@@ -553,19 +553,20 @@ internal sealed partial class ZigLowering
     /// bodies' like-named locals never collide in the IR — and maps the PLAIN name to that type in
     /// <see cref="_containerTypes"/> (shadow-saved, restored at body exit) so the rest of the body
     /// resolves <c>P</c> / <c>.{ … }</c> / <c>p.field</c> exactly like a top-level struct. Emits no
-    /// statement (a type decl is not runtime code). V1: fields only — a method / <c>const</c> member
-    /// needs the pass-1 free-function / container-const machinery that only the top-level passes run,
-    /// so it's a loud cut.</summary>
+    /// statement (a type decl is not runtime code). Methods and <c>const</c> members (std.sort's local
+    /// <c>Context</c> with <c>lessThan</c> / <c>swap</c>) are declared under the mangled name, their bodies
+    /// deferred like a reified generic's (a body cannot lower inside the one being lowered) and carrying the
+    /// enclosing generic instance's comptime seeds. A nested container member stays a loud cut.</summary>
     private CStmt LowerLocalStruct(string name, Item? membersItem, AggregateLayout layout)
     {
         var (fields, methods, consts, containers) = membersItem is { } m
             ? SplitMembers(m)
             : (new List<Item>(), new List<Item>(), new List<Item>(), new List<Item>());
-        if (methods.Count > 0 || consts.Count > 0 || containers.Count > 0)
+        if (containers.Count > 0)
         {
             throw new IrUnsupportedException(
-                $"zig: an in-function container (`{name}`) is fields-only in V1 (wall-plan W2) — a method, "
-                + "`const`, or nested-container member needs the top-level container machinery; declare it at top/container level");
+                $"zig: an in-function container (`{name}`) declares a nested container, which needs the top-level container "
+                + "machinery; declare it at top/container level");
         }
         var mangled = _currentFnName.Length > 0 ? $"{_currentFnName}__{name}" : name;
         if (!_localContainers.Add(mangled))
@@ -578,6 +579,26 @@ internal sealed partial class ZigLowering
         _localContainerShadows.Add((name, _containerTypes.TryGetValue(name, out var prev) ? prev : null));
         _containerTypes[name] = new CType.Named(mangled);
         RegisterStruct(mangled, fields, layout);
+        if (methods.Count > 0 || consts.Count > 0)
+        {
+            var inst = _currentInstantiation;
+            var typeSeeds = inst?.TypeSeeds ?? System.Array.Empty<TypeSeed>();
+            var valueSeeds = inst?.ValueSeeds ?? System.Array.Empty<(string, long, CType)>();
+            var optionalSeeds = inst?.OptionalSeeds ?? System.Array.Empty<(string, bool, long, CType)>();
+            _reifiedSeeds[mangled] = (typeSeeds, valueSeeds, optionalSeeds);
+            // The mangled name is the container a method's `@This()` / `Self` resolves to (the plain name is only
+            // the body's alias, withdrawn at its exit, while the deferred method bodies lower later).
+            _containerTypes[mangled] = new CType.Named(mangled);
+            using var container = EnterContainer(mangled);
+            RegisterContainerConsts(mangled, consts);
+            foreach (var methodDef in methods)
+            {
+                var me = DeclareMethod(mangled, methodDef);
+                if (IsFnTemplate(me.sym)) { continue; }
+                _pendingReifiedMethods.Add(new PendingReifiedMethod(me.sym, mangled, me.ps, me.body,
+                    typeSeeds, valueSeeds, optionalSeeds, inst?.FnSeeds));
+            }
+        }
         return new Seq(new List<CStmt>());   // no runtime decl — mirrors a top-level container
     }
 
@@ -2078,6 +2099,18 @@ internal sealed partial class ZigLowering
                     throw new IrUnsupportedException($"zig `@alignCast` expects (value); got {bargs.Count} argument(s)");
                 }
                 return LowerExpr(bargs[0]);
+            // `const a_bytes: []u8 = @ptrCast(a);` with `a: *T` (std.mem.swap): a single item viewed as a slice of
+            // the sink's element type, `@sizeOf(T) / @sizeOf(elem)` elements long.
+            case "@ptrCast" when sink?.Unqualified is CType.Slice castSlice && bargs.Count == 1
+                                 && LowerExpr(bargs[0]) is { Type: CType.Pointer { Pointee: var castPointee } } castPtr
+                                 && castPointee.Unqualified is not CType.VoidType:
+            {
+                var elem = castSlice.Element.Unqualified;
+                var elemPtr = new CType.Pointer(castSlice.Element);
+                var count = castPointee.Unqualified.SizeOf / System.Math.Max(1, elem.SizeOf);
+                var len = new LitInt(count.ToString(System.Globalization.CultureInfo.InvariantCulture), count) { Type = CType.ULong };
+                return new SliceNew(new Cast(elemPtr, castPtr) { Type = elemPtr }, len, elem, castSlice.Element.IsConst) { Type = castSlice };
+            }
             case "@intCast" or "@truncate" or "@ptrCast" or "@bitCast"
                 or "@floatFromInt" or "@intFromFloat" or "@floatCast" or "@enumFromInt":
                 return LowerResultLocationBuiltin(bname, bargs, sink);

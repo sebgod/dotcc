@@ -366,6 +366,36 @@ internal sealed partial class ZigLowering
            ?? TryCompoundAssignOptionalPayload(targetItem, op, valueItem)
            ?? new ExprStmt(CompoundAssignExpr(targetItem, op, valueItem));
 
+    /// <summary>An array expression that NAMES existing storage (a local, a field, an element): read as a value it
+    /// must be copied, since its C# rep is the storage's element pointer.</summary>
+    private static bool IsArrayLvalue(CExpr e) => e is VarRef or Member or DotCC.Ir.Index || e is Paren p && IsArrayLvalue(p.Inner);
+
+    /// <summary>Declare <paramref name="sym"/> as a fresh <c>[N]T</c> local and copy <paramref name="source"/>'s elements
+    /// into it.</summary>
+    private static CStmt ArrayValueCopyDecl(Symbol sym, CType.Array arr, long count, CExpr source)
+    {
+        var countLit = new LitInt(count.ToString(CultureInfo.InvariantCulture), count) { Type = CType.Int };
+        var target = new VarRef(sym) { Type = arr, IsLValue = true };
+        return new Seq(new List<CStmt>
+        {
+            new ArrayDecl(sym, arr.Element, countLit, null),
+            new ExprStmt(ArrayElementCopy(target, source, arr, count)),
+        });
+    }
+
+    /// <summary><paramref name="count"/> elements of <paramref name="source"/> copied into <paramref name="target"/>
+    /// (both arrays, rendered as their element pointers).</summary>
+    private static CExpr ArrayElementCopy(CExpr target, CExpr source, CType.Array arr, long count)
+    {
+        var elem = arr.Element.Unqualified;
+        var len = new LitInt(count.ToString(CultureInfo.InvariantCulture), count) { Type = CType.ULong };
+        return new ZigMemCall("CopyForwards", elem, new List<CExpr>
+        {
+            new SliceNew(target, len, elem, false) { Type = new CType.Slice(elem) },
+            new SliceNew(source, len, elem, true) { Type = new CType.Slice(elem) },
+        }) { Type = CType.Void };
+    }
+
     /// <summary>Whether an expression lowers to a slice (so its <c>.*</c> is the array it views), judged by lowering it
     /// into a throwaway buffer.</summary>
     private bool IsSliceOperand(Item item)
@@ -803,6 +833,12 @@ internal sealed partial class ZigLowering
             // A CALL returning `[N]T` (std.mem.reverse's `const left_shuffled: [simd_size]T = reverseVector(…)`)
             // hands back a fresh copy the caller owns (ZigAlloc.CopyArrayResult), so binding it keeps zig's
             // by-value semantics, as the inferred `const t = f();` form already does.
+            // `const c: [3]u8 = a;`: another array's VALUE, so the local gets its own storage and a copy.
+            if (IsArrayLvalue(arrInit) && !sentinel && arr.Count is { } copyCount)
+            {
+                var csym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = arr });
+                return ArrayValueCopyDecl(csym, arr, copyCount, arrInit);
+            }
             if ((arrInit is ComptimeFold || arrInit is Call { Type: CType.Array }) && !sentinel)
             {
                 var fsym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = arr });
@@ -826,6 +862,13 @@ internal sealed partial class ZigLowering
         }
         var init = LowerExprSink(initExpr, declared);
         var type = declared ?? init.Type ?? CType.Int;
+        // `var b = a;` of an array local: zig arrays are VALUES, so `b` is a copy, not a second name for `a`'s
+        // storage (the C# rep of an array local is its element pointer, which a plain decl would share).
+        if (declared is null && type.Unqualified is CType.Array { Count: { } untypedCount } untypedArr && IsArrayLvalue(init))
+        {
+            var usym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = untypedArr });
+            return ArrayValueCopyDecl(usym, untypedArr, untypedCount, init);
+        }
         // A local `const` whose integer initializer folds IS that value in every comptime question, as a
         // top-level one is (and as zig has it): `const max_format_args = @typeInfo(ArgSetType).int.bits;`
         // makes std.Io.Writer.print's `if (field_names.len > max_format_args) @compileError(…)` fold.
@@ -2529,6 +2572,14 @@ internal sealed partial class ZigLowering
                 return new ExprStmt(new ZigMemCall("CopyForwards", copyElem, new List<CExpr> { copyDest, copySrc }) { Type = CType.Void });
             }
             var target = LowerExpr(lhsItem);
+            // `d = a;` between arrays: an element copy (the C# rep is the element pointer, so a plain assignment
+            // would alias the storage). `d = undefined;` changes nothing.
+            if (target.Type.Unqualified is CType.Array { Count: { } assignCount } assignArr && target is VarRef or Member)
+            {
+                var assigned = LowerExprSink(rhsItem, assignArr);
+                if (assigned is DefaultLit) { return new Seq(new List<CStmt>()); }
+                return new ExprStmt(ArrayElementCopy(target, assigned, assignArr, assignCount));
+            }
             // `x = blk: { … break :blk v; };` — a labeled value-block assignment (Milestone L,
             // part 2): temp-fill against the lvalue's type, then assign the result temp into it.
             if (rhsItem.Content is Zig.LabeledBlock lb)

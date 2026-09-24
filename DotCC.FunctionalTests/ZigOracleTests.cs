@@ -3975,6 +3975,76 @@ public sealed class ZigOracleTests
             "    buf[1..][0..2].* = digits2(42);\n" +
             "    return @intCast(r.? + buf[1] - '0' + buf[2] - '0' + toChar(1) - '0');\n" +
             "}\n", 41, "" },
+        // A struct declared inside a generic with METHODS (std.sort's local `Context`, task #48): its methods read the
+        // instance's comptime comparator, a `void` context field has no storage, and a comparator is named through its
+        // container (`Rev.gt`). 1*10 + 9 + 9*2 + 1 = 38.
+        new object[] { "local_struct_methods",
+            "fn sortWith(comptime T: type, items: []T, context: anytype, comptime lessThanFn: fn (@TypeOf(context), T, T) bool) void {\n" +
+            "    const Context = struct {\n" +
+            "        items: []T,\n" +
+            "        sub_ctx: @TypeOf(context),\n" +
+            "        pub fn lessThan(ctx: @This(), a: usize, b: usize) bool {\n" +
+            "            return lessThanFn(ctx.sub_ctx, ctx.items[a], ctx.items[b]);\n" +
+            "        }\n" +
+            "        pub fn swap(ctx: @This(), a: usize, b: usize) void {\n" +
+            "            const t = ctx.items[a];\n" +
+            "            ctx.items[a] = ctx.items[b];\n" +
+            "            ctx.items[b] = t;\n" +
+            "        }\n" +
+            "    };\n" +
+            "    const ctx = Context{ .items = items, .sub_ctx = context };\n" +
+            "    var i: usize = 1;\n" +
+            "    while (i < items.len) : (i += 1) {\n" +
+            "        var j = i;\n" +
+            "        while (j > 0 and ctx.lessThan(j, j - 1)) : (j -= 1) ctx.swap(j, j - 1);\n" +
+            "    }\n" +
+            "}\n" +
+            "\n" +
+            "fn lt(_: void, a: u8, b: u8) bool {\n" +
+            "    return a < b;\n" +
+            "}\n" +
+            "\n" +
+            "const Rev = struct {\n" +
+            "    fn gt(_: Rev, a: u8, b: u8) bool {\n" +
+            "        return a > b;\n" +
+            "    }\n" +
+            "};\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var xs = [_]u8{ 5, 3, 9, 1 };\n" +
+            "    sortWith(u8, &xs, {}, lt);\n" +
+            "    var ys = xs;\n" +
+            "    sortWith(u8, &ys, Rev{}, Rev.gt);\n" +
+            "    return xs[0] * 10 + xs[3] + ys[0] * 2 + ys[3];\n" +
+            "}\n", 38, "" },
+        // Arrays are VALUES: `var b = a;`, `const c: [3]u8 = a;` and `d = a;` copy, so a later write to one is not
+        // seen through another (they used to alias one buffer, a silent miscompile). 9 + 1 + 8 + 1 + 1 + 2 = 22.
+        new object[] { "array_value_copies",
+            "pub fn main() u8 {\n" +
+            "    var a = [_]u8{ 1, 2, 3 };\n" +
+            "    var b = a;\n" +
+            "    const c: [3]u8 = a;\n" +
+            "    var d: [3]u8 = undefined;\n" +
+            "    d = a;\n" +
+            "    a[0] = 9;\n" +
+            "    b[1] = 8;\n" +
+            "    return a[0] + b[0] + b[1] + c[0] + d[0] + d[1];\n" +
+            "}\n", 22, "" },
+        // `@ptrCast` of a single-item pointer to a byte slice (std.mem.swap) and a folded comptime_int past `long`
+        // (std.math.sqrt_int's `maxInt(T)`). 1 + 4 + 4 = 9.
+        new object[] { "ptrcast_slice_wide_comptime_int",
+            "fn big(comptime T: type) comptime_int {\n" +
+            "    return (1 << @bitSizeOf(T)) - 1;\n" +
+            "}\n" +
+            "fn bytes(comptime T: type, p: *T) []u8 {\n" +
+            "    return @ptrCast(p);\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const m = big(u64);\n" +
+            "    var x: u32 = 0x01020304;\n" +
+            "    const b = bytes(u32, &x);\n" +
+            "    return @intCast((m % 7) + b.len + b[0]);\n" +
+            "}\n", 9, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -5020,6 +5090,49 @@ public sealed class ZigOracleTests
             "    total +%= sum(c);\n" +
             "    return @intCast(total % 251);\n" +
             "}\n", 159);
+
+    /// <summary>std.mem.sort from source (road-to-zig-std, task #48): std.sort's block sort and insertion sort with
+    /// their local <c>Context</c> structs, std.mem.swap / reverse, std.math.sqrt_int and log2 over a comptime_int, on 60
+    /// values sorted ascending (std.sort.asc), descending (std.sort.desc) and by a custom context and comparator; the
+    /// orders are folded to a checksum so a misplaced element shows.</summary>
+    [Fact]
+    public void Dotcc_matches_zig_std_mem_sort_from_source() =>
+        MatchesZigWithRealStd("memsort",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const ByMod = struct {\n" +
+            "    m: u32,\n" +
+            "    fn less(ctx: ByMod, a: u32, b: u32) bool {\n" +
+            "        return (a % ctx.m) < (b % ctx.m) or ((a % ctx.m) == (b % ctx.m) and a < b);\n" +
+            "    }\n" +
+            "};\n" +
+            "\n" +
+            "fn check(xs: []const u32) u32 {\n" +
+            "    var t: u32 = 0;\n" +
+            "    for (xs, 0..) |x, i| t +%= x *% @as(u32, @intCast(i + 1));\n" +
+            "    return t;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var a: [60]u32 = undefined;\n" +
+            "    var seed: u32 = 12345;\n" +
+            "    for (&a) |*x| {\n" +
+            "        seed = seed *% 1103515245 +% 12345;\n" +
+            "        x.* = (seed >> 8) % 1000;\n" +
+            "    }\n" +
+            "    var b = a;\n" +
+            "    var c = a;\n" +
+            "    std.mem.sort(u32, &a, {}, std.sort.asc(u32));\n" +
+            "    std.mem.sort(u32, &b, {}, std.sort.desc(u32));\n" +
+            "    std.mem.sort(u32, &c, ByMod{ .m = 7 }, ByMod.less);\n" +
+            "    var ok: u8 = 0;\n" +
+            "    for (1..a.len) |i| {\n" +
+            "        if (a[i - 1] > a[i]) ok = 1;\n" +
+            "        if (b[i - 1] < b[i]) ok = 2;\n" +
+            "    }\n" +
+            "    const sum = check(&a) +% check(&b) +% check(&c);\n" +
+            "    return @intCast((sum % 200) + ok);\n" +
+            "}\n", 137);
 
     /// <summary>Run <paramref name="program"/> through dotcc (navigating the real std at <c>DOTCC_ZIG_LIB_DIR</c>) and
     /// through zig, and require both to exit alike and print the same (and, when given, with
