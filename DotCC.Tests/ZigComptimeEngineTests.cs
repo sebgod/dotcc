@@ -11,8 +11,10 @@ namespace DotCC.Tests;
 /// Pins for the comptime engine segment (the maintainer's choice: extend the IR interpreter). E1: a pointer
 /// to a comptime AGGREGATE is the aggregate itself, so a comptime call can hand a struct to a
 /// <c>self: *@This()</c> method, or an array to a <c>*[N]T</c> parameter, and see the mutation. Also the runtime
-/// fix that fell out: <c>buf[i]</c> through a <c>*[N]T</c> indexes the array's elements. End-to-end in the
-/// <c>comptime_pointer_to_aggregate</c> zig-oracle program.
+/// fix that fell out: <c>buf[i]</c> through a <c>*[N]T</c> indexes the array's elements. E2: a comptime value
+/// needed during lowering (an array extent, a folded optional capture) runs its callee, whose body lowers on
+/// demand, once. End-to-end in the <c>comptime_pointer_to_aggregate</c> and
+/// <c>comptime_values_during_lowering</c> zig-oracle programs.
 /// </summary>
 [Collection("ZigFrontend")]
 public sealed class ZigComptimeEngineTests
@@ -49,5 +51,56 @@ public sealed class ZigComptimeEngineTests
         cs.ShouldContain("uint t = 42u;");
         // The runtime body indexes the pointed-at array's elements.
         cs.ShouldContain("buf[1] = v;");
+    }
+
+    [Fact]
+    public void An_array_extent_calls_a_later_function_whose_body_lowers_on_demand_once()
+    {
+        var cs = EmitZig("""
+            pub fn main() u8 {
+                var i: u8 = 1;
+                while (i < 2) : (i += 1) {
+                    var buf: [three()]u8 = undefined;
+                    buf[0] = i;
+                    return buf[0] + @as(u8, buf.len);
+                }
+                return 0;
+            }
+            fn three() usize {
+                var i: usize = 0;
+                i += 3;
+                return i;
+            }
+            """);
+        cs.ShouldContain("byte* buf = stackalloc byte[3];");
+        System.Text.RegularExpressions.Regex.Matches(cs, @"static unsafe ulong three\(\)").Count.ShouldBe(1);
+    }
+
+    [Fact]
+    public void A_comptime_optional_call_folds_its_capture_both_ways()
+    {
+        var cs = EmitZig("""
+            fn blockLen(comptime T: type) ?comptime_int {
+                var n: comptime_int = 0;
+                if (@sizeOf(T) > 4) return null;
+                n = @sizeOf(T) * 8;
+                return n;
+            }
+            pub fn main() u8 {
+                var total: u8 = 1;
+                if (comptime blockLen(u16)) |bl| {
+                    total += bl;
+                }
+                if (comptime blockLen(u64)) |bl| {
+                    total += bl;
+                } else {
+                    total += 2;
+                }
+                return total;
+            }
+            """);
+        cs.ShouldContain("total += (byte)(16L);");
+        cs.ShouldContain("total += (byte)(2);");
+        cs.ShouldNotContain("__cap");
     }
 }

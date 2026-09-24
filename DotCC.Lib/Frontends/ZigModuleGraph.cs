@@ -258,6 +258,28 @@ internal sealed class ZigModuleGraph
     /// function bodies (road-to-zig-std S2).</summary>
     internal void RegisterLowering(ZigLowering lowering) => _lowerings.Add(lowering);
 
+    /// <summary>Lower <paramref name="fn"/>'s pending body now, in whichever module owns it (the comptime
+    /// engine's E2, <see cref="IrModule.DemandFuncBody"/>). False when no module has it pending.</summary>
+    internal bool TryLowerBodyOnDemand(Symbol fn)
+    {
+        foreach (var root in _roots)
+        {
+            if (root.TryLowerBodyOnDemand(fn)) { return true; }
+        }
+        for (var i = 0; i < _lowerings.Count; i++)
+        {
+            if (_lowerings[i].TryLowerBodyOnDemand(fn)) { return true; }
+        }
+        return false;
+    }
+
+    /// <summary>The root modules (the input files), which drain their own bodies and so are not in the
+    /// lazy module list, but can still own a body a comptime call demands.</summary>
+    private readonly List<ZigLowering> _roots = new();
+
+    /// <summary>Record a root module for <see cref="TryLowerBodyOnDemand"/>.</summary>
+    internal void RegisterRoot(ZigLowering lowering) => _roots.Add(lowering);
+
     /// <summary>Every deferred <c>comptime</c> fold of the build, from any module (Milestone T pass 3,
     /// lifted to the graph). A fold may call a function another module owns, such as
     /// <c>std.math.maxInt(u8)</c>, whose instance body lowers only in <see cref="DrainAll"/>, so the

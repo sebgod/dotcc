@@ -1207,7 +1207,8 @@ internal sealed partial class ZigLowering
     /// fast path through <see cref="DecodeZigInt"/> (so a radix / underscored size <c>[0x10]u8</c>
     /// is accepted with no symbol context); any other form is lowered and folded by the shared
     /// <see cref="IrModule.ConstEval"/> comptime interpreter (Milestone T) — so a computed size
-    /// <c>[N * 2]</c> or a container-const size <c>[SIZE]</c> now works. Throws on a non-constant size.</summary>
+    /// <c>[N * 2]</c> or a container-const size <c>[SIZE]</c> now works, and a call runs at compile time
+    /// (<c>[lenFor(u8)]u8</c>, the comptime engine's E2). Throws on a non-constant size.</summary>
     private int ConstEvalArraySize(Item sizeExpr)
     {
         if (sizeExpr.Content is Zig.IntLit i)
@@ -1215,7 +1216,10 @@ internal sealed partial class ZigLowering
             return (int)(DecodeZigInt(Tok(i.Arg0)).Value
                 ?? throw new IrUnsupportedException("a `[N]T` array size literal is too large"));
         }
-        return _ir.ConstEval(LowerExpr(sizeExpr)) is { } n
+        // An extent is a comptime position, so a CALL in it runs at compile time (`[lenFor(u8)]u8`): the
+        // interpreter lowers the callee's body now if it is still pending (the comptime engine's E2).
+        var size = LowerExpr(sizeExpr);
+        return (_ir.ConstEval(size) ?? (_ir.ResolveComptimeFold(size) is { } folded ? _ir.ConstEval(folded) : null)) is { } n
             ? (int)n
             : throw new IrUnsupportedException("a `[N]T` array size must be a constant integer expression");
     }
@@ -1387,8 +1391,8 @@ internal sealed partial class ZigLowering
     /// …), unlike the earlier slice that collapsed both 8-bit forms to <c>byte</c>.
     /// <c>usize</c>/<c>isize</c> map to the LP64 64-bit <c>size_t</c>/<c>long</c>
     /// (width-correct on dotcc's target; a dedicated pointer-width type is a later
-    /// refinement). <c>comptime_int</c>/<c>comptime_float</c> and the bigger/arbitrary
-    /// <c>iN</c>/<c>uN</c> widths are deferred.</summary>
+    /// refinement). <c>comptime_int</c> is the interpreter's 128 bits; <c>comptime_float</c> is
+    /// deferred.</summary>
     private static CType LowerPrim(string name)
         => TryLowerPrim(name, out var t)
             ? t
@@ -1418,6 +1422,9 @@ internal sealed partial class ZigLowering
             "u64" => CType.ULong,
             "i128" => CType.Int128,  // → C# System.Int128
             "u128" => CType.UInt128, // → C# System.UInt128
+            // `comptime_int` (the comptime engine): only a comptime evaluation ever holds one (a `var n:
+            // comptime_int` in a function a comptime call runs), so it is the interpreter's own 128 bits.
+            "comptime_int" => CType.Int128,
             "isize" => CType.Long,   // LP64: pointer-width signed
             "usize" => CType.ULong,  // LP64: pointer-width unsigned (== size_t)
             "f32" => CType.Float,

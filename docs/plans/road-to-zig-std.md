@@ -817,8 +817,13 @@ vector length feeds TYPES.
 - **E1 ✅** (the comptime engine, extending the IR interpreter by the maintainer's choice) a pointer to a
   comptime aggregate is the aggregate: `comptime total()` mutates a struct through `self: *Acc` and an array
   through `*[N]u32`. Runtime fix alongside: `buf[i]` through a `*[N]T` indexes the elements.
-- **E2** lower a callee's body ON DEMAND (re-entrantly, state snapshotted) when a comptime value is needed
-  mid-lowering, in a type position or an array extent, where the post-drain fold queue is too late.
+- **E2 ✅** a callee's body lowers ON DEMAND when a comptime value is needed mid-lowering: the interpreter
+  asks the front end (`IrModule.DemandFuncBody`), which lowers the pending body (a later pass-2 function, a
+  lazy module's body, a generic instance, a reified method) inside a `FnStateScope` that saves and restores
+  the caller's per-function state and symbol scopes; every drain skips a body already started. An array
+  extent calls at compile time (`[lenFor(u8)]u8`), `comptime f()` resolves at once when it can,
+  `comptime_int` is a type (the interpreter's 128 bits), a comptime `null` exists (`CtNull`), and
+  `if (comptime f()) |x|` over a `?comptime_int` folds both ways, which is `suggestVectorLength`'s shape.
 - **E3** comptime aggregates reaching lowering-time positions (the typed `builtin.cpu` value, ArgState).
 - **T5** `@Vector(N, T)` → `Vector128<T>` / `Vector256<T>`, with `@splat`, element-wise ops, `@reduce`.
 

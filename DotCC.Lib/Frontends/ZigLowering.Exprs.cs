@@ -293,13 +293,21 @@ internal sealed partial class ZigLowering
                 return unwrapped;
             }
             // `comptime EXPR` (Milestone T) — force compile-time evaluation of a value. The inner
-            // expression is lowered now, but wrapped in a deferred ComptimeFold and queued; it is
-            // evaluated + spliced after pass 2 (so a `comptime fib(10)` sees its callee's lowered
-            // body regardless of declaration order). The fold carries the inner expression's type.
+            // expression is lowered now and wrapped in a ComptimeFold, resolved at once if it evaluates
+            // (a pending callee body lowers on demand), else queued and evaluated + spliced after pass 2.
+            // Either way a `comptime fib(10)` sees its callee's lowered body regardless of declaration
+            // order. The fold carries the inner expression's type.
             case Zig.PreComptime p:
             {
                 var inner = LowerExpr(p.Arg1);
                 var fold = new ComptimeFold(inner) { Type = inner.Type };
+                // Evaluated NOW when it can be (the comptime engine's E2 lowers a pending callee on demand),
+                // so a position that needs the value during lowering has it; otherwise after the drain.
+                if (_ir.ResolveComptimeFold(inner) is { } now)
+                {
+                    fold.Resolved = now;
+                    return fold;
+                }
                 _pendingComptimeFolds.Add(fold);
                 return fold;
             }

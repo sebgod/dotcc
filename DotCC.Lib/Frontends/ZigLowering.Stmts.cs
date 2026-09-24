@@ -1954,6 +1954,27 @@ internal sealed partial class ZigLowering
         info = default;
         var cur = condItem;
         while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
+        // `if (comptime f()) |x|`: a comptime OPTIONAL value (the comptime engine's E2 runs the call now,
+        // lowering its body on demand), so `x` is a comptime integer and the branch folds.
+        if (cur.Content is Zig.PreComptime pc)
+        {
+            CExpr inner;
+            using (EnterThrowawayHoist()) { inner = LowerExpr(pc.Arg1); }
+            if (inner.Type?.Unqualified is not CType.Optional { Inner: var payload }) { return false; }
+            // A `?comptime_int` payload is an untyped number: bind it as a plain `long` literal.
+            if (payload.Unqualified == CType.Int128) { payload = CType.Long; }
+            switch (_ir.ResolveComptimeFold(inner))
+            {
+                case DefaultLit:
+                    info = (false, 0, payload);
+                    return true;
+                case { } lit when _ir.ConstEval(lit) is { } v:
+                    info = (true, v, payload);
+                    return true;
+                default:
+                    return false;
+            }
+        }
         return cur.Content is Zig.Ident id
             && _symbols.Resolve(Tok(id.Arg0)) is { } sym
             && _comptimeOptionalVars.TryGetValue(sym, out info);

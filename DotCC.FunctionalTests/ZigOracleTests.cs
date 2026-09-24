@@ -3641,6 +3641,55 @@ public sealed class ZigOracleTests
             "    const t = comptime total();\n" +
             "    return @intCast(t + 1);\n" +
             "}\n", 42, "" },
+        // The comptime engine, E2: a comptime value needed WHILE lowering. An array extent calls a function
+        // declared later (`[later(3)]u8`, inside a loop and a labeled block whose names the callee reuses) and
+        // a generic (`[lenFor(u8)]u8`, a `comptime_int` loop); `if (comptime blockLen(T)) |bl|` folds a
+        // `?comptime_int` both ways. Each callee body lowers on demand, once. 7 + 11 + 32 - 8 = 42.
+        new object[] { "comptime_values_during_lowering",
+            "fn lenFor(comptime T: type) comptime_int {\n" +
+            "    var n: comptime_int = 1;\n" +
+            "    var i: comptime_int = 0;\n" +
+            "    while (i < @sizeOf(T) + 2) : (i += 1) {\n" +
+            "        n *= 2;\n" +
+            "    }\n" +
+            "    return n;\n" +
+            "}\n" +
+            "fn blockLen(comptime T: type) ?comptime_int {\n" +
+            "    if (@sizeOf(T) > 4) return null;\n" +
+            "    return lenFor(T) * 2;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var total: u8 = 0;\n" +
+            "    var i: u8 = 0;\n" +
+            "    while (i < 2) : (i += 1) {\n" +
+            "        const n = blk: {\n" +
+            "            var buf: [later(3)]u8 = undefined;\n" +
+            "            buf[0] = i;\n" +
+            "            break :blk buf.len + buf[0];\n" +
+            "        };\n" +
+            "        total += @intCast(n);\n" +
+            "    }\n" +
+            "    var arr: [lenFor(u8)]u8 = undefined;\n" +
+            "    arr[0] = 3;\n" +
+            "    total += arr[0] + @as(u8, arr.len);\n" +
+            "    if (comptime blockLen(u16)) |bl| {\n" +
+            "        total += bl;\n" +
+            "    }\n" +
+            "    if (comptime blockLen(u64)) |bl| {\n" +
+            "        total += bl;\n" +
+            "    } else {\n" +
+            "        total -= 8;\n" +
+            "    }\n" +
+            "    return total;\n" +
+            "}\n" +
+            "fn later(k: usize) usize {\n" +
+            "    var s: usize = 0;\n" +
+            "    var i: usize = 0;\n" +
+            "    while (i < k) : (i += 1) {\n" +
+            "        s += 1;\n" +
+            "    }\n" +
+            "    return s;\n" +
+            "}\n", 42, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

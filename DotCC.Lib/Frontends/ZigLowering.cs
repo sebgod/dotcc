@@ -310,17 +310,24 @@ internal sealed partial class ZigLowering
             while (_pendingBodyCursor < _pendingModuleBodies.Count)
             {
                 var e = _pendingModuleBodies[_pendingBodyCursor++];
+                if (!BeginBody(e.sym)) { continue; }   // lowered on demand already (E2)
                 _currentContainer = e.container;   // a method body's `@This()`, as in pass 2
                 LowerFnBody(e.sym, e.ps, e.body);
                 _currentContainer = null;
             }
             for (; _pendingInstCursor < _pendingInstantiations.Count; _pendingInstCursor++)
             {
-                LowerInstantiationBody(_pendingInstantiations[_pendingInstCursor]);
+                if (BeginBody(_pendingInstantiations[_pendingInstCursor].Instance))
+                {
+                    LowerInstantiationBody(_pendingInstantiations[_pendingInstCursor]);
+                }
             }
             for (; _pendingReifiedCursor < _pendingReifiedMethods.Count; _pendingReifiedCursor++)
             {
-                LowerReifiedMethodBody(_pendingReifiedMethods[_pendingReifiedCursor]);
+                if (BeginBody(_pendingReifiedMethods[_pendingReifiedCursor].Method))
+                {
+                    LowerReifiedMethodBody(_pendingReifiedMethods[_pendingReifiedCursor]);
+                }
             }
         }
     }
@@ -1404,9 +1411,12 @@ internal sealed partial class ZigLowering
             LowerContainerVar(container, name, typeItem, rhs);
         }
 
-        // Pass 2: bodies. `_currentContainer` is set for a method body so its `@This()` resolves.
+        // Pass 2: bodies. `_currentContainer` is set for a method body so its `@This()` resolves. The list
+        // is kept, so a comptime call can lower a later body on demand (E2); the loop skips those.
+        _rootBodies.AddRange(entries);
         foreach (var (sym, ps, body, container) in entries)
         {
+            if (!BeginBody(sym)) { continue; }
             _currentContainer = container;
             LowerFnBody(sym, ps, body);
             _currentContainer = null;
@@ -1415,7 +1425,9 @@ internal sealed partial class ZigLowering
         // Pass 2.5 (wall-plan W3a): drain the monomorphization worklist. A generic call enqueued a
         // request during pass 2 (or during an earlier drained instance); each instance body lowers HERE,
         // at top level — never nested in another body's lowering — so the per-fn lowering state starts
-        // clean (the re-entrancy-safe design the plan's audit demanded). A cursor loop (not a fixed
+        // clean (the re-entrancy-safe design the plan's audit demanded). The one exception is a body a
+        // comptime value demanded earlier (the comptime engine's E2), which lowered under a FnStateScope
+        // that saved and restored that state; the loop skips it. A cursor loop (not a fixed
         // count) picks up transitive / recursive instantiations an instance body enqueues; the total is
         // bounded by MaxInstantiations (enforced at enqueue). Runs BEFORE the comptime-fold pass so a
         // `comptime EXPR` inside an instance body is resolved alongside the base-body folds below.
@@ -1431,11 +1443,17 @@ internal sealed partial class ZigLowering
         {
             for (; instCursor < _pendingInstantiations.Count; instCursor++)
             {
-                LowerInstantiationBody(_pendingInstantiations[instCursor]);
+                if (BeginBody(_pendingInstantiations[instCursor].Instance))
+                {
+                    LowerInstantiationBody(_pendingInstantiations[instCursor]);
+                }
             }
             for (; reifiedCursor < _pendingReifiedMethods.Count; reifiedCursor++)
             {
-                LowerReifiedMethodBody(_pendingReifiedMethods[reifiedCursor]);
+                if (BeginBody(_pendingReifiedMethods[reifiedCursor].Method))
+                {
+                    LowerReifiedMethodBody(_pendingReifiedMethods[reifiedCursor]);
+                }
             }
         }
 

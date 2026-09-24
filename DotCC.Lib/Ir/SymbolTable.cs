@@ -177,6 +177,32 @@ public sealed class SymbolTable
     /// <c>i</c>).</summary>
     public void BeginFunction() => _usedNames.Clear();
 
+    /// <summary>A function's lowering, set aside while another body lowers in the middle of it: its
+    /// block scopes (everything above file scope) and its used names.</summary>
+    internal sealed record SuspendedFunction(List<Dictionary<string, Symbol>> Scopes, string[] UsedNames);
+
+    /// <summary>Set the current function aside so a nested body lowers against file scope only, with its
+    /// own used names (the Zig comptime engine lowers a callee on demand). Undone by
+    /// <see cref="ResumeFunction"/>.</summary>
+    internal SuspendedFunction SuspendFunction()
+    {
+        var scopes = _scopes.GetRange(1, _scopes.Count - 1);
+        _scopes.RemoveRange(1, _scopes.Count - 1);
+        var used = _usedNames.ToArray();
+        _usedNames.Clear();
+        return new SuspendedFunction(scopes, used);
+    }
+
+    /// <summary>Put back a function <see cref="SuspendFunction"/> set aside, dropping whatever the nested
+    /// body left above file scope.</summary>
+    internal void ResumeFunction(SuspendedFunction saved)
+    {
+        _scopes.RemoveRange(1, _scopes.Count - 1);
+        _scopes.AddRange(saved.Scopes);
+        _usedNames.Clear();
+        _usedNames.UnionWith(saved.UsedNames);
+    }
+
     public bool AtFileScope => _scopes.Count == 1;
 
     /// <summary>Declare a symbol in the innermost scope, computing its

@@ -67,6 +67,12 @@ internal sealed partial class IrModule
     /// variant — the array is a flat by-value vector, the firewall holds.</summary>
     internal sealed record CtArray(ComptimeValue[] Elems, CType Element, CType Type) : ComptimeValue;
 
+    /// <summary>A comptime <c>null</c> (the comptime engine's E2): what a <c>?comptime_int</c> function
+    /// such as <c>std.simd.suggestVectorLength</c> returns when it has no answer. A present optional is
+    /// just its payload, so this is the only optional value there is. <see cref="Type"/> is the optional
+    /// (or pointer) type it was typed at; it splices back as <c>default(T)</c>.</summary>
+    internal sealed record CtNull(CType Type) : ComptimeValue;
+
     // The eval-step budget. Expression-only folding (Milestone T part 1) is bounded by
     // the tree size, so this is a safety net here; comptime calls / `inline` loops
     // (later parts) lean on it to reject a non-terminating comptime computation
@@ -141,12 +147,22 @@ internal sealed partial class IrModule
     /// (not a compile-time constant); the step-budget overflow surfaces as a loud error.</summary>
     private ComptimeValue? TryEvalTop(CExpr e, bool allowCalls)
     {
+        // Re-entrant: a body lowered on demand (DemandFuncBody) may fold a constant of its own while an
+        // outer evaluation is suspended mid-call, so the outer frame, budget and mode are put back.
+        var (steps, frame, calls) = (_comptimeSteps, _comptimeFrame, _comptimeAllowCalls);
         _comptimeSteps = 0;
         _comptimeFrame = null;
         _comptimeAllowCalls = allowCalls;
         try { return EvalComptime(e); }
         catch (ComptimeAbort) { return null; }
+        finally { (_comptimeSteps, _comptimeFrame, _comptimeAllowCalls) = (steps, frame, calls); }
     }
+
+    /// <summary>The comptime engine's E2 hook: asked for a callee whose body is not lowered yet, it lowers
+    /// the body now (the Zig front-end's on-demand lowering) and answers whether it did. Installed by the
+    /// Zig front-end for the length of its lowering, null otherwise (the C front-end has no deferred
+    /// bodies).</summary>
+    internal System.Func<Symbol, bool>? DemandFuncBody { get; set; }
 
     private static bool InLongRange(System.Int128 v) =>
         v >= long.MinValue && v <= long.MaxValue;
@@ -168,6 +184,7 @@ internal sealed partial class IrModule
         CtBool b => new LitBool(b.Value) { Type = CType.Bool },
         CtStruct s => SpliceStruct(s),
         CtArray a => SpliceArray(a),
+        CtNull n => new DefaultLit { Type = n.Type },
         _ => throw new IrUnsupportedException("comptime value cannot be spliced back (int/float/bool/struct/array)"),
     };
 
@@ -398,7 +415,10 @@ internal sealed partial class IrModule
                 return EvalComptime(abr.Source);
 
             case DefaultLit dl:
-                return ZeroValue(dl.Type);
+                return dl.Type.Unqualified is CType.Optional ? new CtNull(dl.Type) : ZeroValue(dl.Type);
+
+            case NullPtr np:
+                return new CtNull(np.Type);
 
             default:
                 return null;
@@ -427,6 +447,7 @@ internal sealed partial class IrModule
     private ComptimeValue? EvalCast(Cast c)
     {
         if (EvalComptime(c.Operand) is not { } v) { return null; }
+        if (v is CtNull) { return c.Target.Unqualified is CType.Optional or CType.Pointer ? new CtNull(c.Target) : null; }
         if (c.Target.Unqualified is not CType.Prim p) { return v; }
         if (p.Integer)
         {
@@ -655,7 +676,15 @@ internal sealed partial class IrModule
             _funcDefIndex.Clear();
             foreach (var f in Functions) { _funcDefIndex[f.Sym] = f; }
         }
-        return _funcDefIndex.TryGetValue(sym, out var fn) ? fn : null;
+        if (_funcDefIndex.TryGetValue(sym, out var fn)) { return fn; }
+        // Not lowered yet: ask the front-end to lower it now (E2), then look again.
+        if (DemandFuncBody is { } demand && demand(sym))
+        {
+            _funcDefIndex.Clear();
+            foreach (var f in Functions) { _funcDefIndex[f.Sym] = f; }
+            return _funcDefIndex.TryGetValue(sym, out var demanded) ? demanded : null;
+        }
+        return null;
     }
 
     /// <summary>Re-type a comptime scalar to a target arithmetic type (so a parameter binding /
