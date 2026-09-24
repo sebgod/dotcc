@@ -4837,6 +4837,68 @@ public sealed class ZigOracleTests
             "    _ = .{ &x, &y };\n" +
             "    return @bitReverse(x) + @as(u8, @bitReverse(y));\n" +
             "}\n", 102, "" },
+        // A returned `if` / switch with an error arm is the error union itself (task #72; the whole of it had been
+        // wrapped as a success, returning the error's code as the payload).
+        new object[] { "error_arm_returns",
+            "fn pick(x: u8) !u8 {\n" +
+            "    return if (x < 10) x * 2 else error.TooBig;\n" +
+            "}\n" +
+            "fn kind(x: u8) !u8 {\n" +
+            "    return switch (x) {\n" +
+            "        0 => 7,\n" +
+            "        1...5 => x + 1,\n" +
+            "        else => error.Bad,\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = pick(3) catch 100;\n" +
+            "    const b = pick(30) catch 100;\n" +
+            "    const c = kind(0) catch 50;\n" +
+            "    const d = kind(4) catch 50;\n" +
+            "    const e = kind(9) catch 50;\n" +
+            "    return a + b + c + d + e;\n" +
+            "}\n", 168, "" },
+        // `two(s[0..2].*)`: a comptime-length slice dereference passes to a `[2]u8` parameter (task #72, the shape of
+        // std.unicode.utf8Decode's `utf8Decode2(bytes[0..2].*)`).
+        new object[] { "slice_deref_array_arg",
+            "fn two(b: [2]u8) u16 {\n" +
+            "    return @as(u16, b[0]) * 256 + b[1];\n" +
+            "}\n" +
+            "fn pair(s: []const u8) u16 {\n" +
+            "    return two(s[0..2].*) + two(s[1..3].*);\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return @truncate(pair(\"\\x01\\x02\\x03\"));\n" +
+            "}\n", 5, "" },
+        // A switch choosing a type argument and a @sizeOf operand (task #73).
+        new object[] { "switch_type_argument",
+            "fn id(comptime T: type, x: T) T {\n" +
+            "    return x;\n" +
+            "}\n" +
+            "fn widen(comptime T: type, v: u8) u32 {\n" +
+            "    return @as(u32, @intCast(id(switch (@typeInfo(T).int.signedness) {\n" +
+            "        .signed => i32,\n" +
+            "        .unsigned => u32,\n" +
+            "    }, v))) + @as(u32, @sizeOf(switch (@typeInfo(T).int.signedness) {\n" +
+            "        .signed => i64,\n" +
+            "        .unsigned => u16,\n" +
+            "    }));\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return @truncate(widen(u8, 7) + widen(i8, 9));\n" +
+            "}\n", 26, "" },
+        // std.debug.print `{}` / `{any}` of a bool prints `true` / `false` (task #81), and a local bound to a comparison is a
+        // zig `bool`.
+        new object[] { "debug_print_bool",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() void {\n" +
+            "    var x: u8 = 3;\n" +
+            "    _ = &x;\n" +
+            "    const t = x > 2;\n" +
+            "    const f = x == 9;\n" +
+            "    std.debug.print(\"{} {} {any} [{}]\\n\", .{ t, f, x < 1, !f });\n" +
+            "}\n", 0,
+            "true false false [true]" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -6118,6 +6180,42 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // std.unicode from real std (task #72): utf8CountCodepoints (the ASCII fast path, truncated / invalid / overlong
+    // input), utf8Decode through `utf8Decode2(bytes[0..2].*)`, and utf8Encode. utf8ByteSequenceLength's
+    // `else => error.Utf8InvalidStartByte` had silently returned the error code as a length.
+    [Fact]
+    public void Dotcc_matches_zig_std_unicode() =>
+        MatchesZigWithRealStd("unicode",
+            "const std = @import(\"std\");\n" +
+            "const unicode = std.unicode;\n" +
+            "\n" +
+            "fn code(e: anyerror) u32 {\n" +
+            "    return switch (e) {\n" +
+            "        error.TruncatedInput => 900,\n" +
+            "        error.Utf8InvalidStartByte => 901,\n" +
+            "        else => 902,\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "fn count(s: []const u8) u32 {\n" +
+            "    const n = unicode.utf8CountCodepoints(s) catch |e| return code(e);\n" +
+            "    return @intCast(n);\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = count(\"h\\u{e9}llo \\u{1F600}\");\n" +
+            "    const b = count(\"plain ascii text that is long enough for the fast path\");\n" +
+            "    const c = count(\"\\xe2\\x82\");\n" +
+            "    const d = count(\"\\xff\");\n" +
+            "    const e = count(\"\\xc0\\x80\");\n" +
+            "    const f = count(\"\\u{20AC}\\u{20AC}\\u{20AC}\");\n" +
+            "    const cp = unicode.utf8Decode(\"\\u{20AC}\") catch 0;\n" +
+            "    var buf: [4]u8 = undefined;\n" +
+            "    const len = unicode.utf8Encode(0x1F600, &buf) catch 0;\n" +
+            "    std.debug.print(\"{d} {d} {d} {d} {d} {d} {x} {d} {x}\\n\", .{ a, b, c, d, e, f, cp, len, buf[0] });\n" +
+            "    return @truncate(a + b + c + d + e + f + cp + len + buf[3]);\n" +
+            "}\n", 255);
 
     // std.hash.Crc32 and six more CRCs from real std, bit-exact (tasks #71 / #79): Crc(W, algorithm) takes a comptime
     // struct, its lookup_table is a labeled block the interpreter runs (element-pointer stores, @bitReverse, u32 shifts that

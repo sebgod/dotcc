@@ -1376,6 +1376,14 @@ internal sealed partial class ZigLowering
             var pIndex = i + paramOffset;
             var paramSink = pIndex < fn.Params.Count ? fn.Params[pIndex] : null;
             var arg = LowerExprSink(argItems[i], paramSink);
+            // `utf8Decode2(bytes[0..2].*)` (std.unicode): the comptime-length slice stands for its array copy (see the
+            // `.*` lowering), and an array parameter is its element pointer, so the slice passes its `.Ptr`. A
+            // parameter is immutable in zig, so no copy is observable.
+            if (paramSink?.Unqualified is CType.Array { Element: var arrayParamElem } && arg.Type.Unqualified is CType.Slice
+                && argItems[i].Content is Zig.Deref)
+            {
+                arg = new Member(arg, "Ptr", false) { Type = new CType.Pointer(arrayParamElem) };
+            }
             if (paramSink?.Unqualified is CType.VoidType && !IsErasableVoid(arg))
             {
                 throw new IrUnsupportedException(

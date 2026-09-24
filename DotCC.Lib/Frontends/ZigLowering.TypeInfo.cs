@@ -454,7 +454,8 @@ internal sealed partial class ZigLowering
                 if (info.DeclaredBits is not { } bits)
                 {
                     throw new IrUnsupportedException(
-                        $"zig `@typeInfo({info.Type.Describe()}).{info.Tag}.bits`: the declared width is not known here. "
+                        $"zig `@typeInfo({info.Type.Describe()}).{info.Tag}.bits`: the declared width is not known here"
+                        + (_currentFnName.Length > 0 ? $" (in '{_currentFnName}')" : "") + ". "
                         + "It rides a type SPELLING — `@typeInfo(u21)` directly, or a `comptime T: type` / alias bound to "
                         + "one — but an `anytype` param or `@TypeOf(expr)` yields only the lowered type, and dotcc widens "
                         + "`uN`/`iN` to the smallest standard width (`u21` → a 32-bit `uint`), so reporting that width "

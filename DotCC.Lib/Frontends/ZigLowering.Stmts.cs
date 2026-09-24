@@ -967,7 +967,9 @@ internal sealed partial class ZigLowering
             return new ArrayDecl(asym, sa.Element, countLit, elems);
         }
         var init = LowerExprSink(initExpr, declared);
-        var type = declared ?? init.Type ?? CType.Int;
+        // `const t = x > 2;` is a zig `bool`, though the IR types a comparison as C's `int` (task #81): `{}` prints it
+        // `true`, and `@TypeOf(t)` is `bool`.
+        var type = declared ?? (IsZigBoolValue(init) ? CType.Bool : init.Type) ?? CType.Int;
         // `var b = a;` of an array local: zig arrays are VALUES, so `b` is a copy, not a second name for `a`'s
         // storage (the C# rep of an array local is its element pointer, which a plain decl would share).
         if (declared is null && type.Unqualified is CType.Array { Count: { } untypedCount } untypedArr && IsArrayLvalue(init))
@@ -988,6 +990,10 @@ internal sealed partial class ZigLowering
         // `const value = 42;` is a comptime_int in zig (the lowered local is an `int` carrier): an `anytype` it is
         // passed to binds it as a comptime value (ComptimeIntArgValue).
         if (declared is null && isConst && folded is not null && initExpr.Content is Zig.IntLit) { _comptimeIntLocals.Add(sym2); }
+        // A `comptime_int` const whose initializer is a CALL (std.sort.pdq's `const stack_size = math.log2(math.maxInt(usize) + 1);`)
+        // does not fold here; an array extent that names it runs the call then (task #73, see ConstEvalArraySize). Only a
+        // comptime_int: zig rejects a runtime-typed call result (`const n = f(3);`) as an extent, and so does dotcc.
+        if (isConst && folded is null && init.Type?.Unqualified is CType.Prim { IsComptimeInt: true }) { _unfoldedConstInits[sym2] = init; }
         RecordValueBits(sym2,
             typeItem is { } ti ? DeclaredBitsOfTypeArg(ti) : DeclaredBitsOfValue(initExpr) ?? DeclaredBitsOfLowered(init),
             typeItem is { } te ? ElemBitsOfTypeAst(te) : DeclaredElemBitsOfValue(initExpr));
@@ -4070,6 +4076,33 @@ internal sealed partial class ZigLowering
         return LowerExpr(call).Type.Unqualified is CType.VoidType;
     }
 
+    /// <summary>A returned switch or <c>if</c> whose arms mix error unions or error values with plain values
+    /// (std.unicode's <c>return switch (bytes.len) { 1 =&gt; bytes[0], 2 =&gt; utf8Decode2(…), … }</c>,
+    /// <c>utf8ByteSequenceLength</c>'s <c>else =&gt; error.Utf8InvalidStartByte</c>, <c>return if (ok) v else error.E;</c>):
+    /// each plain arm becomes the success of <paramref name="eu"/> and an error value its failure, so the expression is
+    /// the error union itself. Wrapping the whole of it as a success had returned an error's code as the payload,
+    /// silently. Nested arms unify the same way. Null when no arm is an error union or error value.</summary>
+    private static CExpr? UnifyErrUnionArms(CExpr value, CType.ErrorUnion eu)
+    {
+        var errorIsPayload = eu.Payload.Unqualified is CType.ErrorSetType;
+        bool IsError(CExpr v) => v.Type?.Unqualified is CType.ErrorSetType && !errorIsPayload;
+        bool NeedsUnify(CExpr v) => Unparen(v) switch
+        {
+            SwitchExpr s => s.Arms.Any(a => NeedsUnify(a.Value)),
+            CondExpr c => NeedsUnify(c.Then) || NeedsUnify(c.Else),
+            var leaf => leaf.Type?.Unqualified is CType.ErrorUnion || IsError(leaf),
+        };
+        CExpr Arm(CExpr v) => Unparen(v) switch
+        {
+            SwitchExpr s => s with { Arms = s.Arms.Select(a => a with { Value = Arm(a.Value) }).ToList(), Type = eu },
+            CondExpr c => c with { Then = Arm(c.Then), Else = Arm(c.Else), Type = eu },
+            var leaf when leaf.Type?.Unqualified is CType.ErrorUnion || leaf is Call { Callee: "__dotcc_unreachable" } => leaf,
+            var leaf when IsError(leaf) => new ErrUnionErr(leaf) { Type = eu },
+            var leaf => new ErrUnionOk(leaf) { Type = eu },
+        };
+        return Unparen(value) is SwitchExpr or CondExpr && NeedsUnify(value) ? Arm(value) : null;
+    }
+
     private CStmt LowerReturn(Item valueItem)
     {
         // `return {};` — the void value is what a bare `return;` returns: nothing to spell in C#
@@ -4153,6 +4186,7 @@ internal sealed partial class ZigLowering
                     || valueItem.Content is Zig.IfExpr && eu.Payload.Unqualified is CType.Slice
                 ? LowerExprSink(valueItem, eu.Payload)
                 : LowerExpr(valueItem);
+            if (UnifyErrUnionArms(v, eu) is { } unified) { v = unified; }
             if (v.Type.Unqualified is CType.ErrorUnion) { return new Return(v); }
             // An array (`return &[0]u8{};`) at a slice payload is that slice.
             if (eu.Payload.Unqualified is CType.Slice okSlice && (v.Type.Unqualified is CType.Array || PointedArray(v) is ({ }, _)))

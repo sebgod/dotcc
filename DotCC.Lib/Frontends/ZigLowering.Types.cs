@@ -674,6 +674,9 @@ internal sealed partial class ZigLowering
         Zig.InlineStructType ist       => ReifyInlineStruct(type, ist.Arg2),
         Zig.InlineEnumType iet         => ReifyInlineEnum(type, iet.Arg2),
         Zig.InlineStructTypeEmpty      => ReifyInlineStruct(type, null),
+        // A type chosen by a comptime switch in any type position (a parameter's, as well as a field's): the selected
+        // prong's type (task #73).
+        Zig.SwitchExpr or Zig.SwitchExprTrailing => LowerSwitchType(type),
         // A call in a type position that no case above could evaluate: name the callee and where it is
         // written, since "CallArgs" alone gave no way to find which of a std module's calls it was.
         Zig.CallArgs uca => throw UnevaluatedTypeCall(uca.Arg0),
@@ -1249,6 +1252,10 @@ internal sealed partial class ZigLowering
     /// length (see <see cref="DeclOf"/>); the symbol's type stays the N-element array.</summary>
     private static bool IsSentinelArrayType(Item? typeItem) => typeItem?.Content is Zig.TySentArray;
 
+    /// <summary>Integer <c>const</c> locals whose initializer did not fold where they were declared (a call), by symbol,
+    /// with the lowered initializer: a comptime position that names one (an array extent) runs it then.</summary>
+    private readonly Dictionary<Symbol, CExpr> _unfoldedConstInits = new();
+
     /// <summary>Const-evaluate a <c>[N]T</c> array size. A bare integer literal <c>N</c> takes a
     /// fast path through <see cref="DecodeZigInt"/> (so a radix / underscored size <c>[0x10]u8</c>
     /// is accepted with no symbol context); any other form is lowered and folded by the shared
@@ -1265,6 +1272,8 @@ internal sealed partial class ZigLowering
         // An extent is a comptime position, so a CALL in it runs at compile time (`[lenFor(u8)]u8`): the
         // interpreter lowers the callee's body now if it is still pending (the comptime engine's E2).
         var size = LowerExpr(sizeExpr);
+        // A local integer const bound to a call (`var stack: [stack_size]Range` in std.sort.pdq) folds its initializer.
+        if (size is VarRef { Sym: var sizeSym } && _unfoldedConstInits.TryGetValue(sizeSym, out var sizeInit)) { size = sizeInit; }
         return (_ir.ConstEval(size) ?? (_ir.ResolveComptimeFold(size) is { } folded ? _ir.ConstEval(folded) : null)) is { } n
             ? (int)n
             : throw new IrUnsupportedException("a `[N]T` array size must be a constant integer expression");

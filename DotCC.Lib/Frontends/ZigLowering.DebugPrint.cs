@@ -114,7 +114,7 @@ internal sealed partial class ZigLowering
     /// decoder; <c>{{</c>/<c>}}</c> fold to literal braces, a literal <c>%</c> is doubled to <c>%%</c>
     /// (printf-escaped), and the placeholder count must match the argument count (as real Zig
     /// enforces at comptime).</summary>
-    private string TranslateZigDebugFormat(string rawLexeme, IReadOnlyList<CExpr> args)
+    private string TranslateZigDebugFormat(string rawLexeme, List<CExpr> args)
     {
         // A `\\`-prefixed multiline string as a format is a rare V1 cut; a normal `"…"` literal expands
         // its `\u{…}` escapes to `\xNN` first (same reshaping the ordinary StrLit path does).
@@ -152,7 +152,16 @@ internal sealed partial class ZigLowering
                     throw new IrUnsupportedException(
                         $"zig `std.debug.print`: more `{{…}}` placeholders than the {args.Count} argument(s) supplied");
                 }
-                sb.Append(DebugConv(spec, args[ai].Type));
+                // `{}` of a bool prints `true` / `false` (task #81): the argument becomes that string.
+                if (spec.Trim() is "" or "any" && IsZigBoolValue(args[ai]))
+                {
+                    args[ai] = new CondExpr(args[ai], BoolWord("true"), BoolWord("false")) { Type = new CType.Pointer(CType.Char) };
+                    sb.Append("%s");
+                }
+                else
+                {
+                    sb.Append(DebugConv(spec, args[ai].Type));
+                }
                 ai++;
                 i = close + 1;
                 continue;
@@ -173,6 +182,24 @@ internal sealed partial class ZigLowering
                 $"zig `std.debug.print`: {args.Count} argument(s) but {ai} `{{…}}` placeholder(s) — they must match");
         }
         return "\"" + sb + "\"";
+    }
+
+    /// <summary>True for a zig `bool` value: a `_Bool`-typed expression, or a comparison / logical operator (typed
+    /// C `int` in the IR, as C types them).</summary>
+    private static bool IsZigBoolValue(CExpr e)
+    {
+        while (e is Paren p) { e = p.Inner; }
+        return e.Type?.Unqualified is CType.Prim { Name: "_Bool" }
+            || e is Binary { Op: BinOp.Eq or BinOp.Ne or BinOp.Lt or BinOp.Gt or BinOp.Le or BinOp.Ge or BinOp.LogAnd or BinOp.LogOr }
+            || e is Unary { Op: UnOp.LogNot };
+    }
+
+    /// <summary>The string literal <paramref name="word"/> (<c>true</c> / <c>false</c>) for a bool printed by <c>{}</c>.</summary>
+    private static LitStr BoolWord(string word)
+    {
+        var segs = new List<string> { "\"" + word + "\"" };
+        DotCC.EmitHelpers.EncodeStringLiteral(segs, out var byteLen);
+        return new LitStr(segs) { Type = new CType.Array(CType.Char, byteLen) };
     }
 
     /// <summary>Map one Zig format placeholder spec (the text between the braces) + its argument's type

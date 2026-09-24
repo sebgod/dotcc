@@ -473,6 +473,67 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_comptime_length_slice_dereference_passes_to_an_array_parameter()
+    {
+        var cs = EmitZig("""
+            fn two(b: [2]u8) u16 {
+                return @as(u16, b[0]) * 256 + b[1];
+            }
+            fn pair(s: []const u8) u16 {
+                return two(s[0..2].*) + two(s[1..3].*);
+            }
+            pub fn main() u8 {
+                return @truncate(pair("\x01\x02\x03"));
+            }
+            """);
+        // std.unicode.utf8Decode's `utf8Decode2(bytes[0..2].*)` (task #72): the array parameter is its element pointer.
+        cs.ShouldContain("two(new ConstSlice<byte>(s.Ptr + 0, unchecked((ulong)(2 - 0))).Ptr)");
+    }
+
+    [Fact]
+    public void A_returned_if_or_switch_with_an_error_arm_is_the_error_union_itself()
+    {
+        var cs = EmitZig("""
+            fn pick(x: u8) !u8 {
+                return if (x < 10) x * 2 else error.TooBig;
+            }
+            fn kind(x: u8) !u8 {
+                return switch (x) {
+                    0 => 7,
+                    1...5 => x + 1,
+                    else => error.Bad,
+                };
+            }
+            pub fn main() u8 {
+                const a = pick(30) catch 100;
+                const b = kind(9) catch 50;
+                return a + b;
+            }
+            """);
+        // Each arm is Ok or Err (task #72); wrapping the whole expression in Ok had returned the error code as a payload.
+        cs.ShouldContain("? ErrUnion<byte>.Ok((byte)(x * 2)) : ErrUnion<byte>.Err(");
+        cs.ShouldContain("_ => ErrUnion<byte>.Err(");
+        cs.ShouldNotContain("ErrUnion<byte>.Ok((byte)((Cond.B(");
+    }
+
+    [Fact]
+    public void Debug_print_braces_of_a_bool_prints_true_or_false()
+    {
+        var cs = EmitZig("""
+            const std = @import("std");
+            pub fn main() void {
+                var x: u8 = 3;
+                _ = &x;
+                const t = x > 2;
+                std.debug.print("{} {any}\n", .{ t, x < 1 });
+            }
+            """);
+        // A local bound to a comparison is a zig `bool` (task #81), and `{}` prints it as a word.
+        cs.ShouldContain("CBool t = ");
+        cs.ShouldContain(""".Arg((Cond.B(t) ? Libc.L("true\0"u8) : Libc.L("false\0"u8)))""");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""
