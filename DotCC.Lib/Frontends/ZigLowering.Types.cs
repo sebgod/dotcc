@@ -246,7 +246,9 @@ internal sealed partial class ZigLowering
     private bool TrySelectedTypeArm(Item subject, Item prongs, out CType type)
     {
         type = CType.Int;
-        return TrySelectTypeProng(subject, prongs) is { Expr: { } typeArm, CaptureName: null } && TryTypeAliasRhs(typeArm, out type);
+        // Over a TYPE subject, or a comptime BOOL one (`const W = switch (wide) { true => u32, false => u8 };`, task #84).
+        return (TrySelectTypeProng(subject, prongs) ?? TrySelectBoolProng(subject, prongs)) is { Expr: { } typeArm, CaptureName: null }
+               && TryTypeAliasRhs(typeArm, out type);
     }
 
     private bool TryTypeAliasRhs(Item rhs, out CType type)

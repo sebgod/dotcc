@@ -816,6 +816,8 @@ internal sealed partial class ZigLowering
         // A switch over a TYPE (std.Io.Writer.printInt's `switch (@TypeOf(value)) { isize, usize => {}, comptime_int =>
         // …, else => … }`): prongs are types, matched by type equality (declared width included).
         if (TrySelectTypeProng(subjectItem, prongsItem) is { } typeProng) { payload = null; return typeProng; }
+        // A comptime BOOL subject whose prongs are `true` / `false` (`switch (wide) { true => u32, false => u8 }`, task #84).
+        if (TrySelectBoolProng(subjectItem, prongsItem) is { } boolProng) { payload = null; return boolProng; }
         if (!TryEvalComptimeTag(subjectItem, out var tag, out payload)) { return null; }
         ZigProng? elseProng = null;
         foreach (var prongItem in Flatten(prongsItem))
@@ -842,6 +844,31 @@ internal sealed partial class ZigLowering
         throw new IrUnsupportedException(
             $"zig `switch` over a comptime `.{tag}`: no prong matches it and there is no `else` "
             + "(real zig would reject the switch as non-exhaustive)");
+    }
+
+    /// <summary>The prong a switch over a comptime-known BOOL selects, when every case value is <c>true</c> / <c>false</c>
+    /// (or <c>else</c>). Null when the prongs are not bool literals or the subject is not known at compile time.</summary>
+    private ZigProng? TrySelectBoolProng(Item subjectItem, Item prongsItem)
+    {
+        // Any switch passes through here; one whose prongs a comptime fold cannot take (a `|*x|` by-reference capture) is
+        // simply not a comptime bool switch.
+        List<ZigProng> prongs;
+        try { prongs = Flatten(prongsItem).Select(DecomposeProng).ToList(); }
+        catch (IrUnsupportedException) { return null; }
+        bool? Lit(Item it) => it.Content switch
+        {
+            Zig.TrueLit => true,
+            Zig.FalseLit => false,
+            _ => null,
+        };
+        var allBool = prongs.All(p => p.CaseVals.Content is Zig.CaseElse
+            || WalkCaseValItems(p.CaseVals).All(v => v.Hi is null && Lit(v.Lo) is not null));
+        if (!allBool || prongs.All(p => p.CaseVals.Content is Zig.CaseElse)) { return null; }
+        if (TryFoldTypeIfCondition(subjectItem) is not { } value) { return null; }
+        var chosen = prongs.FirstOrDefault(p => p.CaseVals.Content is not Zig.CaseElse
+                                                && WalkCaseValItems(p.CaseVals).Any(v => Lit(v.Lo) == value))
+                     ?? prongs.FirstOrDefault(p => p.CaseVals.Content is Zig.CaseElse);
+        return chosen is { Cut: { } cut } ? throw new IrUnsupportedException(cut) : chosen;
     }
 
     /// <summary>The prong a switch over a TYPE subject selects: <c>@TypeOf(x)</c> or a type binding, each prong's case

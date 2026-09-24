@@ -5018,6 +5018,26 @@ public sealed class ZigOracleTests
             "pub fn main() u8 {\n" +
             "    return classify(1) +% classify(6);\n" +
             "}\n", 231, "" },
+        // A switch over a comptime bool (task #84): `const W = switch (wide) { true => u32, false => u8 };` and a value switch,
+        // folded per instance.
+        new object[] { "comptime_bool_switch",
+            "fn id(comptime T: type, x: T) T {\n" +
+            "    return x;\n" +
+            "}\n" +
+            "fn widen(comptime wide: bool, v: u8) u32 {\n" +
+            "    const W = switch (wide) {\n" +
+            "        true => u32,\n" +
+            "        false => u8,\n" +
+            "    };\n" +
+            "    const k: u32 = switch (wide) {\n" +
+            "        true => 1000,\n" +
+            "        false => 1,\n" +
+            "    };\n" +
+            "    return @as(u32, id(W, v)) + @as(u32, @sizeOf(W)) * k;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return @truncate(widen(true, 7) + widen(false, 9));\n" +
+            "}\n", 177, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

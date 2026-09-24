@@ -684,6 +684,35 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_switch_over_a_comptime_bool_selects_its_prong()
+    {
+        var cs = EmitZig("""
+            fn id(comptime T: type, x: T) T {
+                return x;
+            }
+            fn widen(comptime wide: bool, v: u8) u32 {
+                const W = switch (wide) {
+                    true => u32,
+                    false => u8,
+                };
+                const k: u32 = switch (wide) {
+                    true => 1000,
+                    false => 1,
+                };
+                return @as(u32, id(W, v)) + @as(u32, @sizeOf(W)) * k;
+            }
+            pub fn main() u8 {
+                return @truncate(widen(true, 7) + widen(false, 9));
+            }
+            """);
+        // Task #84: each instance folds the switch, as a type alias and as a value.
+        cs.ShouldContain("uint k = 1000;");
+        cs.ShouldContain("return (uint)id__u32(v)");
+        cs.ShouldContain("uint k = 1;");
+        cs.ShouldContain("return (uint)id__u8(v)");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""
