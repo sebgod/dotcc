@@ -87,7 +87,9 @@ internal sealed partial class ZigLowering
 
         // A generic METHOD always defers its signature: a comptime VALUE parameter may spell one of its
         // types (array_list's `toOwnedSliceSentinel(…, comptime sentinel: T) !SentinelSlice(sentinel)`).
-        if (hasTypeParam || hasAnyType || (hasComptime && owner is not null))
+        // So does a VALUE-only generic whose signature spells a comptime parameter (std.mem's
+        // `inline fn reverseVector(comptime N: usize, comptime T: type, …) [N]T`, or `fn f(comptime N: usize) [N]u8`).
+        if (hasTypeParam || hasAnyType || (hasComptime && (owner is not null || !SignatureLowersNow(retType, allParams))))
         {
             // A `comptime T: type` TYPE parameter (wall-plan W3b) OR an `a: anytype` inferred-type
             // parameter (wall-plan W5) makes later parameter / return types depend on a type not known at
@@ -140,6 +142,23 @@ internal sealed partial class ZigLowering
             if (owner is not null) { _shared.GenericMethodOwners[funcSym] = this; }
         }
         return (funcSym, runtimeParams, body);
+    }
+
+    /// <summary>Whether a comptime-VALUE generic's return and runtime parameter types lower before any
+    /// comptime parameter is bound: false when one spells a comptime parameter (<c>[N]u8</c> for
+    /// <c>comptime N: usize</c>), so the signature is lowered per instance instead, with the value seeded.</summary>
+    private bool SignatureLowersNow(Item retType, IReadOnlyList<ParamInfo> allParams)
+    {
+        try
+        {
+            LowerType(retType);
+            foreach (var p in allParams.Where(p => p.Kind == ParamKind.Runtime)) { LowerType(p.TypeAst); }
+            return true;
+        }
+        catch (IrUnsupportedException)
+        {
+            return false;
+        }
     }
 
     /// <summary>Declare a free function's symbol. In an IMPORTED module its EMITTED name is

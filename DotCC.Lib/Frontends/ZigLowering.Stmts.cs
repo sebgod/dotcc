@@ -731,7 +731,10 @@ internal sealed partial class ZigLowering
             // hoists the resolved StackArray into `T* t = stackalloc T[]{…}` exactly as the
             // inferred-type form does. (A sentinel `[N:0]T` would need the +1 stackalloc slot, which
             // this path can't add, so a comptime sentinel array stays a clear error below.)
-            if (arrInit is ComptimeFold && !sentinel)
+            // A CALL returning `[N]T` (std.mem.reverse's `const left_shuffled: [simd_size]T = reverseVector(…)`)
+            // hands back a fresh copy the caller owns (ZigAlloc.CopyArrayResult), so binding it keeps zig's
+            // by-value semantics, as the inferred `const t = f();` form already does.
+            if ((arrInit is ComptimeFold || arrInit is Call { Type: CType.Array }) && !sentinel)
             {
                 var fsym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = arr });
                 return new DeclStmt(new List<LocalDecl> { new(fsym, arrInit) });

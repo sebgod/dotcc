@@ -3845,6 +3845,28 @@ public sealed class ZigOracleTests
             "    const k: u8 = add(3, 4);\n" +
             "    return sum + n - k + kind(5) + kind(@as(u8, 5)) - 3;\n" +
             "}\n", 42, "" },
+        // Arrays returned by value (std.mem.reverse's reverseVector): a value generic whose `[N]u8` return spells
+        // its comptime parameter (lowered per instance), a call's result binding a TYPED `[4]u8` local, and a
+        // plain array-returning function. 40 + 10 + 12 - 1 = 61.
+        new object[] { "array_return_values",
+            "fn rev(comptime N: usize, a: []const u8) [N]u8 {\n" +
+            "    var res: [N]u8 = undefined;\n" +
+            "    inline for (0..N) |i| {\n" +
+            "        res[i] = a[N - i - 1];\n" +
+            "    }\n" +
+            "    return res;\n" +
+            "}\n" +
+            "fn three() [3]u8 {\n" +
+            "    return .{ 10, 20, 12 };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const src = [_]u8{ 1, 2, 3, 4 };\n" +
+            "    const r: [4]u8 = rev(4, &src);\n" +
+            "    const t = three();\n" +
+            "    var copy: [4]u8 = undefined;\n" +
+            "    @memcpy(&copy, &r);\n" +
+            "    return copy[0] * 10 + t[0] + t[2] - r[3];\n" +
+            "}\n", 61, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

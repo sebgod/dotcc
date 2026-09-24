@@ -984,6 +984,28 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
+    public void A_value_generic_whose_return_type_spells_its_comptime_param_binds_to_a_typed_array_local()
+    {
+        // std.mem.reverse's `const left_shuffled: [simd_size]T = reverseVector(simd_size, T, left_slice);`:
+        // the `[N]u8` return is lowered per instance (N is only known there), and the call's fresh copy
+        // initializes the typed array local. zig answers 61.
+        var cs = EmitZig(
+            "fn rev(comptime N: usize, a: []const u8) [N]u8 {\n" +
+            "    var res: [N]u8 = undefined;\n" +
+            "    inline for (0..N) |i| {\n" +
+            "        res[i] = a[N - i - 1];\n" +
+            "    }\n" +
+            "    return res;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const src = [_]u8{ 1, 2, 3, 4 };\n" +
+            "    const r: [4]u8 = rev(4, &src);\n" +
+            "    return r[0] * 10 + r[3];\n}\n");
+        cs.ShouldContain("internal static unsafe byte* rev__4(ConstSlice<byte> a)");
+        cs.ShouldContain("byte* r = rev__4(new ConstSlice<byte>(src, 4UL));");
+    }
+
+    [Fact]
     public void A_comptime_if_break_in_an_inline_for_stops_the_unroll()
     {
         // zig analyses no iteration after a comptime-taken `break` (std.mem.findScalarPos relies on it to
