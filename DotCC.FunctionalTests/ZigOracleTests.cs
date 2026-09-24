@@ -4681,6 +4681,26 @@ public sealed class ZigOracleTests
             "    total += pick(&.{ 1, 2, 3, 0, 1 });\n" +
             "    return @intCast(total % 256);\n" +
             "}\n", 124, "" },
+        // A compound assignment as a switch prong body (task #64): `0 => hits += 1`, `*=`, `|=`, `-%=`, `<<=`.
+        new object[] { "compound_assign_prong",
+            "var hits: u32 = 0;\n" +
+            "pub fn main() u8 {\n" +
+            "    var bits: u8 = 0b0001;\n" +
+            "    for ([_]u8{ 0, 1, 2, 3, 1, 0 }) |x| {\n" +
+            "        switch (x) {\n" +
+            "            0 => hits += 1,\n" +
+            "            1 => hits *= 3,\n" +
+            "            2 => bits |= 0b1000,\n" +
+            "            else => hits -%= 1,\n" +
+            "        }\n" +
+            "    }\n" +
+            "    var v: u8 = 7;\n" +
+            "    switch (bits) {\n" +
+            "        9 => v <<= 2,\n" +
+            "        else => v = 0,\n" +
+            "    }\n" +
+            "    return @intCast(hits + bits + v);\n" +
+            "}\n", 44, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

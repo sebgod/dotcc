@@ -1381,9 +1381,10 @@ productions:
       # statements and admits them here as explicit prong forms, like `return`. `break`/`continue` are in
       # no other prong body's FIRST set, so the choice is one token of lookahead.
       - { lhs: Prong, rhs: [CaseVals, '=>', ProngJump],                  action: prongJump }
-      # An ASSIGNMENT prong body `v => lhs = rhs` (hash_map's `.stage2_llvm => _ = &dbHelper,`): no Prong is
-      # ever followed by `=`, so after the body's `Expr` the `=` shifts into this form, conflict-free.
-      - { lhs: Prong, rhs: [CaseVals, '=>', Expr, '=', RhsExpr],         action: prongAssign }
+      # An ASSIGNMENT prong body `v => lhs = rhs` (hash_map's `.stage2_llvm => _ = &dbHelper,`), or a compound one
+      # (`0 => hits += 1,`): no Prong is ever followed by an assignment operator, so after the body's `Expr` it shifts
+      # into this form, conflict-free (AssignOp is the continue-expression's operator set).
+      - { lhs: Prong, rhs: [CaseVals, '=>', Expr, AssignOp, RhsExpr],    action: prongAssign }
       # A `comptime { … }` prong body (std.math.sqrt's `.comptime_int => comptime { … }`): after `comptime`,
       # a `{` starts no Prefix (the `comptime` value operator's operand), so this is a clean shift.
       - { lhs: Prong, rhs: [CaseVals, '=>', 'comptime', Block],          action: prongComptimeBlock }

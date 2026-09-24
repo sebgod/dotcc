@@ -2947,7 +2947,7 @@ internal sealed partial class ZigLowering
         { Return: { } r } => Hoisted(() => LowerReturn(r)),
         { ReturnsVoid: true } => LowerReturnVoid(),
         { Jump: { } j } => LowerProngJump(j),
-        { Assign: { } pa } => LowerAssignStmt(pa.Arg2, pa.Arg4),
+        { Assign: { } pa } => LowerProngAssign(pa),
         { IfSwitch: { } isw } => LowerProngIfSwitch(isw),
         { IfCaptureReturn: { } icr } => LowerIfCapture(icr.Arg4, Tok(icr.Arg7), icr.Arg9, null, null),
         { Loop: { } loop } => LowerStmt(loop),
@@ -3012,6 +3012,10 @@ internal sealed partial class ZigLowering
         Labeled l => ContainsGotoTo(l.Body, label),
         _ => false,
     };
+
+    /// <summary>An assignment prong body: <c>v =&gt; lhs = rhs</c>, or a compound one (<c>0 =&gt; hits += 1</c>).</summary>
+    private CStmt LowerProngAssign(Zig.ProngAssign pa)
+        => CompoundOpOf(pa.Arg3) is { } op ? CompoundAssign(pa.Arg2, op, pa.Arg4) : LowerAssignStmt(pa.Arg2, pa.Arg4);
 
     /// <summary>The binary operator of a compound continue-expression assignment (<c>i += 1</c>), or null
     /// for a plain <c>=</c>.</summary>
@@ -3186,7 +3190,7 @@ internal sealed partial class ZigLowering
                 case Zig.ProngReturn pr:     caseVals = pr.Arg0; body = new List<CStmt> { Hoisted(() => LowerReturn(pr.Arg3)) }; break;
                 case Zig.ProngReturnVoid pr: caseVals = pr.Arg0; body = new List<CStmt> { LowerReturnVoid() }; break;
                 case Zig.ProngJump pj:       caseVals = pj.Arg0; body = new List<CStmt> { LowerProngJump(pj.Arg2) }; break;
-                case Zig.ProngAssign pa:     caseVals = pa.Arg0; body = new List<CStmt> { LowerAssignStmt(pa.Arg2, pa.Arg4) }; break;
+                case Zig.ProngAssign pa:     caseVals = pa.Arg0; body = new List<CStmt> { LowerProngAssign(pa) }; break;
                 case Zig.ProngIfSwitch pis:  caseVals = pis.Arg0; body = new List<CStmt> { LowerProngIfSwitch(pis) }; break;
                 case Zig.ProngLoop plp:      caseVals = plp.Arg0; body = new List<CStmt> { LowerStmt(plp.Arg2) }; break;
                 case Zig.ProngIfCaptureReturn picr:

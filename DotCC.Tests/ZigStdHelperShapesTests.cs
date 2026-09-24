@@ -243,6 +243,35 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_switch_prong_body_may_be_a_compound_assignment()
+    {
+        var cs = EmitZig("""
+            var hits: u32 = 0;
+            pub fn main() u8 {
+                var bits: u8 = 0b0001;
+                for ([_]u8{ 0, 1, 2, 3, 1, 0 }) |x| {
+                    switch (x) {
+                        0 => hits += 1,
+                        1 => hits *= 3,
+                        2 => bits |= 0b1000,
+                        else => hits -%= 1,
+                    }
+                }
+                var v: u8 = 7;
+                switch (bits) {
+                    9 => v <<= 2,
+                    else => v = 0,
+                }
+                return @intCast(hits + bits + v);
+            }
+            """);
+        cs.ShouldContain("hits += (uint)(1);");
+        cs.ShouldContain("hits *= (uint)(3);");
+        cs.ShouldContain("bits |= (byte)(8);");
+        cs.ShouldContain("v <<= 2;");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""
