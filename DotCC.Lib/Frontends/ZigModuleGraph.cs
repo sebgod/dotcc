@@ -187,7 +187,7 @@ internal sealed class ZigModuleGraph
     {
         if (ZigSyntheticModules.PathForSpec(spec) is not { } path) { return null; }
         if (_modules.TryGetValue(path, out var existing)) { return existing; }
-        var module = ParseSource(path, ZigSyntheticModules.SourceForPath(path));
+        var module = ParseSource(path, ZigSyntheticModules.SourceForPath(path, withStd: StdRootPath is not null));
         _modules[path] = module;
         return module;
     }

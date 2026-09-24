@@ -4493,6 +4493,53 @@ public sealed class ZigOracleTests
         }
     }
 
+    /// <summary><c>builtin.cpu.arch.endian()</c> with a real std (the target-identity segment, T3a): the synthetic
+    /// builtin spells the architecture as <c>std.Target.Cpu.Arch</c>, so the method is Target.zig's own, while
+    /// <c>builtin.cpu.arch == .x86_64</c> still folds as a comptime question.</summary>
+    [Fact]
+    public void Dotcc_matches_zig_std_builtin_cpu_arch_from_source()
+    {
+        if (!ZigRunRequested)
+        {
+            Assert.Skip($"Zig oracle is opt-in. Set {RunZigEnv}=1 to run the builtin.cpu.arch differential.");
+        }
+        if (!ZigOracle.IsAvailable)
+        {
+            Assert.Skip($"{RunZigEnv} requested but no `zig` is on PATH on this host.");
+        }
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOTCC_ZIG_LIB_DIR")))
+        {
+            Assert.Skip("DOTCC_ZIG_LIB_DIR must point at the zig lib dir so dotcc navigates the real std.Target source.");
+        }
+
+        const string program =
+            "const builtin = @import(\"builtin\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const little: u8 = if (builtin.cpu.arch.endian() == .little) 40 else 0;\n" +
+            "    const known: u8 = if (builtin.cpu.arch == .x86_64 or builtin.cpu.arch == .aarch64) 2 else 0;\n" +
+            "    return little + known;\n" +
+            "}\n";
+
+        var workDir = Path.Combine(Path.GetTempPath(), $"dotcc-zig-builtinarch-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(workDir);
+        var mainPath = Path.Combine(workDir, "main.zig");
+        File.WriteAllText(mainPath, program);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { mainPath }, emit: EmitMode.Csproj);
+            var (dotccStdout, dotccExit) = FixtureRunner.CompileAndRunCapturingExit(emitted, Array.Empty<string>());
+            var (zigStdout, zigExit) = ZigOracle.CompileAndRun(mainPath, workDir);
+
+            dotccExit.ShouldBe(zigExit, "dotcc's builtin.cpu.arch diverges from real zig (exit code)");
+            dotccExit.ShouldBe(42, "builtin.cpu.arch.endian did not produce the expected result");
+            Norm(dotccStdout).ShouldBe(Norm(zigStdout), "dotcc's builtin.cpu.arch diverges from real zig (stdout)");
+        }
+        finally
+        {
+            try { Directory.Delete(workDir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
     /// <summary><c>std.Target.Cpu.Arch.endian()</c> from REAL upstream Target.zig (the target-identity segment,
     /// T1/T2): a type nested two containers deep in another module, whose enum body nests `Family`.</summary>
     [Fact]

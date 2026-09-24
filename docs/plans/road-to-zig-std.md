@@ -807,7 +807,11 @@ vector length feeds TYPES.
 
 - **T1 ✅** cross-module qualified nested types (`std.Target.Cpu.Arch`).
 - **T2 ✅** a container nested in an enum body; `std.Target.Cpu.Arch.endian()` runs from Target.zig == zig.
-- **T3** the synthetic `builtin.cpu` as a typed `std.Target.Cpu` value filled from the intrinsics.
+- **T3a ✅** with a real std, the synthetic builtin spells the architecture with zig's own type
+  (`@as(std.Target.Cpu.Arch, .x86_64)`): `builtin.cpu.arch.endian()` is Target.zig's method, and
+  `builtin.cpu.arch == .x86_64` still folds. AutoHashMap is past `native_endian`.
+- **T3** the synthetic `builtin.cpu` as a typed `std.Target.Cpu` value filled from the intrinsics (a `model` and
+  a `features` set: ArrayList's `cacheLineForCpu(builtin.cpu)` passes the whole value).
 - **T4** comptime evaluation over that value (`featureSetHas`, `cacheLineForCpu`, `suggestVectorLengthForCpu`):
   comptime struct / array values, the same engine #10's `std.fmt.ArgState` needs.
 - **T5** `@Vector(N, T)` → `Vector128<T>` / `Vector256<T>`, with `@splat`, element-wise ops, `@reduce`.

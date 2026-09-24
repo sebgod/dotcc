@@ -52,9 +52,9 @@ internal static class ZigSyntheticModules
     };
 
     /// <summary>Generate the source of a synthetic module by its virtual path.</summary>
-    internal static string SourceForPath(string path) => path switch
+    internal static string SourceForPath(string path, bool withStd = false) => path switch
     {
-        BuiltinPath => BuiltinSource(),
+        BuiltinPath => BuiltinSource(withStd),
         RootPath => RootSource(),
         _ => throw new IrUnsupportedException($"zig: '{path}' is not a synthetic module"),
     };
@@ -74,7 +74,7 @@ internal static class ZigSyntheticModules
     /// <summary>The <c>builtin</c> module — the target description. Written entirely as bare enum
     /// literals and anonymous struct literals, so no nominal type is needed on either side (see the
     /// class summary).</summary>
-    private static string BuiltinSource()
+    private static string BuiltinSource(bool withStd)
     {
         var sb = new StringBuilder();
         sb.Append("// dotcc's synthetic `builtin` module (road-to-zig-std S3) — generated, not a file.\n");
@@ -127,11 +127,16 @@ internal static class ZigSyntheticModules
         sb.Append("// not the run. Each is a bare enum literal, so a `== .tag` or `switch` over it folds.\n");
         sb.Append("pub const abi = .").Append(abi).Append(";\n");
         sb.Append("pub const object_format = .").Append(ofmt).Append(";\n");
-        sb.Append("pub const cpu = .{ .arch = .").Append(arch).Append(" };\n");
+        // With a real std to navigate, the architecture carries the TYPE zig's own builtin gives it
+        // (`std.Target.Cpu.Arch`, the target-identity segment T3a), so `builtin.cpu.arch.endian()` is the
+        // enum's method from Target.zig; the tag still folds as a bare literal does.
+        var archValue = withStd ? $"@as(std.Target.Cpu.Arch, .{arch})" : $".{arch}";
+        if (withStd) { sb.Append("const std = @import(\"std\");\n"); }
+        sb.Append("pub const cpu = .{ .arch = ").Append(archValue).Append(" };\n");
         sb.Append("pub const os = .{ .tag = .").Append(os).Append(" };\n");
         // Spelled out rather than referring to `cpu` / `os` by name: the aggregate recorder reads a
         // literal, and generated text costs nothing to repeat.
-        sb.Append("pub const target = .{ .cpu = .{ .arch = .").Append(arch)
+        sb.Append("pub const target = .{ .cpu = .{ .arch = ").Append(archValue)
           .Append(" }, .os = .{ .tag = .").Append(os)
           .Append(" }, .abi = .").Append(abi)
           .Append(", .ofmt = .").Append(ofmt).Append(" };\n");

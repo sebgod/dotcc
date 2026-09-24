@@ -1361,6 +1361,19 @@ internal sealed partial class ZigLowering
         }
 
         // (B) `expr.method(args)` — the base is an instance of a container type.
+        // A method on a TYPED comptime tag of a module (`builtin.cpu.arch.endian()` in std.mem, with a real std):
+        // the receiver is that enum's constant, and the method is the enum's own, from its source.
+        if (IsModuleRooted(fld.Arg0) && TryReadComptimeAggregateField(fld.Arg0) is { Tag: { } typedTag, TagType: { } tagType, TagTypeScope: { } tagScope }
+            && tagScope.LowerType(tagType).Unqualified is CType.Enum tagEnum)
+        {
+            var tagRecv = tagScope.ResolveEnumLit(typedTag, tagEnum);
+            if (EnsureMethodDeclared(tagEnum.Name, methodName) is not { } tagMethod)
+            {
+                throw new IrUnsupportedException($"enum '{tagEnum.Name}' has no method '{methodName}'");
+            }
+            var tagFn = (CType.Func)tagMethod.Type.Unqualified;
+            return BuildCall(tagMethod, argItems, tagFn.Params.Count > 0 ? AdjustReceiver(tagRecv, tagFn.Params[0]) : null);
+        }
         var recv = LowerExpr(fld.Arg0);
         // `fba.allocator()` / `arena.allocator()` — a FixedBufferAllocator (Milestone F) or an
         // ArenaAllocator (Milestone U) hands out an Allocator fat pointer over itself. Needs `&self`
