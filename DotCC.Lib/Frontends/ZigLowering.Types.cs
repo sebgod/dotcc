@@ -247,6 +247,22 @@ internal sealed partial class ZigLowering
     {
         type = CType.Int;
         // Over a TYPE subject, or a comptime BOOL one (`const W = switch (wide) { true => u32, false => u8 };`, task #84).
+        if (TrySelectTypeProng(subject, prongs) is { Expr: { } capturedArm, CaptureName: { } typeCapture } && typeCapture != "_")
+        {
+            // `else => |T| T` over a type (std.math.gcd's `switch (@TypeOf(a, b)) { comptime_int => …, else => |T| T }`,
+            // task #86): the capture is the subject type itself, bound as an alias while the arm resolves.
+            if (!TryTypeAliasRhs(subject, out var subjectType)) { return false; }
+            var hadPrev = _typeAliases.TryGetValue(typeCapture, out var prevAlias);
+            var prevBits = _declaredIntBits.TryGetValue(typeCapture, out var pb) ? pb : (int?)null;
+            _typeAliases[typeCapture] = subjectType;
+            SetDeclaredIntBits(typeCapture, DeclaredBitsOfTypeArg(subject));
+            try { return TryTypeAliasRhs(capturedArm, out type); }
+            finally
+            {
+                if (hadPrev && prevAlias is { } restored) { _typeAliases[typeCapture] = restored; } else { _typeAliases.Remove(typeCapture); }
+                SetDeclaredIntBits(typeCapture, prevBits);
+            }
+        }
         return (TrySelectTypeProng(subject, prongs) ?? TrySelectBoolProng(subject, prongs)) is { Expr: { } typeArm, CaptureName: null }
                && TryTypeAliasRhs(typeArm, out type);
     }

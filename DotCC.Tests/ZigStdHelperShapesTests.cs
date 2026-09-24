@@ -713,6 +713,46 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Inline_prongs_type_switch_captures_and_string_literal_anytype_lengths()
+    {
+        var cs = EmitZig("""
+            fn tail(n: usize, bytes: []const u8) u32 {
+                var acc: u32 = 7;
+                switch (n) {
+                    inline 0, 1, 2 => |count| {
+                        inline for (0..count) |i| acc = acc *% 31 +% bytes[i];
+                        return acc;
+                    },
+                    inline 3...5 => |count| {
+                        acc +%= @as(u32, count) * 1000;
+                        inline for (0..count) |i| acc +%= bytes[i];
+                        return acc;
+                    },
+                    else => return 0,
+                }
+            }
+            fn length(x: anytype) usize {
+                return x.len;
+            }
+            fn Widened(comptime T: type) type {
+                return switch (T) {
+                    comptime_int => u64,
+                    else => |U| U,
+                };
+            }
+            pub fn main() u8 {
+                const w: Widened(u16) = 40000;
+                return @truncate(tail(4, "abcdef") +% @as(u32, @intCast(length("hello"))) +% w);
+            }
+            """);
+        // Task #87: one section per inline case value, its capture a comptime constant; a string literal passed as an
+        // `anytype` is its logical `[5]u8` (the stored NUL excluded, it had been 6). Task #86: `else => |U| U` over a type.
+        cs.ShouldContain("case 5UL:");
+        cs.ShouldContain("length__char_5_(Libc.L(\"hello\\0\"u8))");
+        cs.ShouldContain("ushort w = 40000;");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

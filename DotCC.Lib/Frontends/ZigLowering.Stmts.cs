@@ -478,7 +478,12 @@ internal sealed partial class ZigLowering
     private CExpr CompoundAssignExpr(Item targetItem, BinOp op, Item valueItem)
     {
         var target = LowerExpr(targetItem);
-        var value = LowerExprSink(valueItem, target.Type);
+        // A shift's count is not the target's type (std.math.gcd's `x >>= @intCast(xz)`, task #86): a cast builtin there takes
+        // C#'s `int` shift count.
+        var value = op is BinOp.Shl or BinOp.Shr && valueItem.Content is Zig.BuiltinCall { Arg0: var shiftCast }
+                    && Tok(shiftCast) is "@intCast" or "@truncate"
+            ? LowerExprSink(valueItem, CType.Int)
+            : LowerExprSink(valueItem, target.Type);
         return new Assign(op, target, value) { Type = target.Type };
     }
 
@@ -3181,6 +3186,13 @@ internal sealed partial class ZigLowering
         var sections = new List<SwitchSection>();
         foreach (var prongItem in Flatten(prongsItem))
         {
+            // `inline 0, 1, 2, 3 => |count| { … }` (std.hash.XxHash32's finalize, task #87): one section per case value, the
+            // capture a comptime constant of that value (so the body's `inline for (0..count)` unrolls).
+            if (prongItem.Content is Zig.InlineProng inlineProng)
+            {
+                sections.AddRange(LowerInlineProngSections(inlineProng.Arg1, subject));
+                continue;
+            }
             if (prongItem.Content is Zig.ProngCapture or Zig.ProngCaptureRef
                 or Zig.ProngCaptureExpr or Zig.ProngCaptureReturn or Zig.ProngCaptureReturnVoid
                 or Zig.ProngCaptureRefExpr or Zig.ProngCaptureRefReturn or Zig.ProngCaptureRefReturnVoid
@@ -3218,6 +3230,50 @@ internal sealed partial class ZigLowering
             sections.Add(new SwitchSection(labels, body));
         }
         return new Switch(subject, sections);
+    }
+
+    /// <summary>The sections of an <c>inline</c> prong of a runtime integer switch: the body instantiated once per case
+    /// value (a range expands, up to 256 values), each with its <c>|x|</c> capture bound as a comptime constant of that
+    /// value. <c>inline else</c> would need the subject type's whole value set, and is a loud cut.</summary>
+    private List<SwitchSection> LowerInlineProngSections(Item innerProng, CExpr subject)
+    {
+        var prong = DecomposeProng(innerProng);
+        if (prong.CaseVals.Content is Zig.CaseElse)
+        {
+            throw new IrUnsupportedException("zig `inline else =>` in a runtime switch is not supported yet (list the case values)");
+        }
+        long Value(Item item) => _ir.ConstEval(LowerExpr(item))
+            ?? throw new IrUnsupportedException("zig `inline` prong: a case value must be comptime-known");
+        var sections = new List<SwitchSection>();
+        foreach (var (lo, hi) in WalkCaseValItems(prong.CaseVals))
+        {
+            var first = Value(lo);
+            var last = hi is { } h ? Value(h) : first;
+            if (last - first > 256) { throw new IrUnsupportedException("zig `inline` prong: a range of more than 256 values"); }
+            for (var v = first; v <= last; v++)
+            {
+                _symbols.EnterScope();
+                CStmt lowered;
+                try
+                {
+                    if (prong.CaptureName is { } cap && cap != "_")
+                    {
+                        var capSym = _symbols.Declare(new Symbol { Name = cap, Kind = SymKind.Var, Type = subject.Type });
+                        _comptimeVars[capSym] = (v, subject.Type);
+                    }
+                    lowered = LowerSelectedProng(prong);
+                }
+                finally
+                {
+                    _symbols.ExitScope();
+                }
+                var body = new List<CStmt> { lowered };
+                if (!EndsInJump(body)) { body.Add(new Break()); }
+                var label = new LitInt(v.ToString(CultureInfo.InvariantCulture), v) { Type = subject.Type };
+                sections.Add(new SwitchSection(new List<SwitchLabel> { new SwitchLabel(label) }, body));
+            }
+        }
+        return sections;
     }
 
     /// <summary>Lower a <c>switch</c> over a tagged union: switch on the <see cref="TagFieldName"/>

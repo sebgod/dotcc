@@ -813,9 +813,19 @@ internal sealed partial class ZigLowering
     private ZigProng? SelectComptimeProng(Item subjectItem, Item prongsItem, out ZigTypeInfo? payload)
     {
         _comptimeUnionPayload = null;
+        _typeSwitchSubject = null;
         // A switch over a TYPE (std.Io.Writer.printInt's `switch (@TypeOf(value)) { isize, usize => {}, comptime_int =>
         // …, else => … }`): prongs are types, matched by type equality (declared width included).
-        if (TrySelectTypeProng(subjectItem, prongsItem) is { } typeProng) { payload = null; return typeProng; }
+        if (TrySelectTypeProng(subjectItem, prongsItem) is { } typeProng)
+        {
+            payload = null;
+            // A captured prong (`else => |U| U`) binds the subject type; EnterComptimeProng reads it.
+            if (typeProng.CaptureName is { } && TryTypeAliasRhs(subjectItem, out var capturedType))
+            {
+                _typeSwitchSubject = (capturedType, DeclaredBitsOfTypeArg(subjectItem));
+            }
+            return typeProng;
+        }
         // A comptime BOOL subject whose prongs are `true` / `false` (`switch (wide) { true => u32, false => u8 }`, task #84).
         if (TrySelectBoolProng(subjectItem, prongsItem) is { } boolProng) { payload = null; return boolProng; }
         if (!TryEvalComptimeTag(subjectItem, out var tag, out payload)) { return null; }
@@ -908,7 +918,17 @@ internal sealed partial class ZigLowering
         // not this prong actually captures.
         _typeInfoShadows.Add(("", null));
         _unionCaptureShadows.Add(("", null));
+        _typeCaptureShadows.Add(("", null, null));
         if (prong.CaptureName is not { } name || name == "_") { return; }
+        // `else => |U| U` over a TYPE subject (task #86): the capture is the subject type, bound as an alias for the arm.
+        if (payload is null && _typeSwitchSubject is { } subjectType)
+        {
+            _typeCaptureShadows[^1] = (name, _typeAliases.TryGetValue(name, out var prevType) ? prevType : null,
+                                       _declaredIntBits.TryGetValue(name, out var prevBits) ? prevBits : null);
+            _typeAliases[name] = subjectType.Type;
+            SetDeclaredIntBits(name, subjectType.Bits);
+            return;
+        }
         // A comptime union's variant payload (TryEvalComptimeUnion): the capture is that literal.
         if (payload is null && _comptimeUnionPayload is { } unionPayload)
         {
@@ -925,9 +945,23 @@ internal sealed partial class ZigLowering
         _typeInfoBindings[name] = payload;
     }
 
+    /// <summary>The subject type of the type switch <see cref="SelectComptimeProng"/> last selected a captured prong of, for
+    /// <see cref="EnterComptimeProng"/> to bind the capture to; null otherwise.</summary>
+    private (CType Type, int? Bits)? _typeSwitchSubject;
+
+    /// <summary>Type aliases a type switch's prong capture shadowed, restored by <see cref="ExitComptimeProng"/>.</summary>
+    private readonly List<(string Name, CType? Prev, int? PrevBits)> _typeCaptureShadows = new();
+
     /// <summary>Restore what <see cref="EnterComptimeProng"/> shadowed.</summary>
     private void ExitComptimeProng()
     {
+        var (typeName, typePrev, typePrevBits) = _typeCaptureShadows[^1];
+        _typeCaptureShadows.RemoveAt(_typeCaptureShadows.Count - 1);
+        if (typeName.Length > 0)
+        {
+            if (typePrev is { } tp) { _typeAliases[typeName] = tp; } else { _typeAliases.Remove(typeName); }
+            SetDeclaredIntBits(typeName, typePrevBits);
+        }
         var (unionName, unionPrev) = _unionCaptureShadows[^1];
         _unionCaptureShadows.RemoveAt(_unionCaptureShadows.Count - 1);
         if (unionName.Length > 0)

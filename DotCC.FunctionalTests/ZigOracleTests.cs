@@ -5038,6 +5038,44 @@ public sealed class ZigOracleTests
             "pub fn main() u8 {\n" +
             "    return @truncate(widen(true, 7) + widen(false, 9));\n" +
             "}\n", 177, "" },
+        // `inline a, b => |n|` prongs of a runtime switch (task #87), `else => |U| U` over a type (task #86), and a string
+        // literal passed as an `anytype` reading its logical length (it had read one more, the NUL).
+        new object[] { "inline_prongs_type_capture",
+            "fn tail(n: usize, bytes: []const u8) u32 {\n" +
+            "    var acc: u32 = 7;\n" +
+            "    switch (n) {\n" +
+            "        inline 0, 1, 2 => |count| {\n" +
+            "            inline for (0..count) |i| acc = acc *% 31 +% bytes[i];\n" +
+            "            return acc;\n" +
+            "        },\n" +
+            "        inline 3...5 => |count| {\n" +
+            "            acc +%= @as(u32, count) * 1000;\n" +
+            "            inline for (0..count) |i| acc +%= bytes[i];\n" +
+            "            return acc;\n" +
+            "        },\n" +
+            "        else => return 0,\n" +
+            "    }\n" +
+            "}\n" +
+            "\n" +
+            "fn length(x: anytype) usize {\n" +
+            "    return x.len;\n" +
+            "}\n" +
+            "\n" +
+            "fn Widened(comptime T: type) type {\n" +
+            "    return switch (T) {\n" +
+            "        comptime_int => u64,\n" +
+            "        else => |U| U,\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const s = \"abcdef\";\n" +
+            "    var total: u32 = 0;\n" +
+            "    var n: usize = 0;\n" +
+            "    while (n <= 6) : (n += 1) total +%= tail(n, s);\n" +
+            "    const w: Widened(u16) = 40000;\n" +
+            "    return @truncate(total +% @as(u32, @intCast(length(\"hello\") + length(s))) +% w);\n" +
+            "}\n", 136, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -6319,6 +6357,52 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // std.hash.XxHash32 / XxHash64 from real std (task #87): finalize's `inline 0, 1, 2, 3 => |count|` prongs over input
+    // lengths 0 to 39 and a streaming update. A string literal's anytype length had silently been one too many.
+    [Fact]
+    public void Dotcc_matches_zig_std_hash_xxhash() =>
+        MatchesZigWithRealStd("xxhash",
+            "const std = @import(\"std\");\n" +
+            "const xx = std.hash;\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const text = \"The quick brown fox jumps over the lazy dog, again and again.\";\n" +
+            "    var acc: u64 = 0;\n" +
+            "    var n: usize = 0;\n" +
+            "    while (n <= 40) : (n += 3) {\n" +
+            "        acc = acc *% 31 +% xx.XxHash32.hash(@intCast(n), text[0..n]);\n" +
+            "        acc = acc *% 31 +% xx.XxHash64.hash(n, text[0..n]);\n" +
+            "    }\n" +
+            "    var h = xx.XxHash32.init(7);\n" +
+            "    h.update(text[0..10]);\n" +
+            "    h.update(text[10..33]);\n" +
+            "    acc ^= h.final();\n" +
+            "    std.debug.print(\"{x}\\n\", .{acc});\n" +
+            "    return @truncate(acc ^ (acc >> 8) ^ (acc >> 16) ^ (acc >> 32));\n" +
+            "}\n", 186);
+
+    // std.math.gcd from real std (task #86): `switch (@TypeOf(a, b)) { comptime_int => …, else => |T| T }`, a compound shift
+    // by an @intCast count, and a comptime_int result printed.
+    [Fact]
+    public void Dotcc_matches_zig_std_math_gcd() =>
+        MatchesZigWithRealStd("math_gcd",
+            "const std = @import(\"std\");\n" +
+            "const math = std.math;\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var a: u32 = 84;\n" +
+            "    var b: u64 = 1071;\n" +
+            "    var c: u16 = 1;\n" +
+            "    _ = .{ &a, &b, &c };\n" +
+            "    const g1 = math.gcd(a, @as(u32, 36));\n" +
+            "    const g2 = math.gcd(b, @as(u64, 462));\n" +
+            "    const g3 = math.gcd(c, @as(u16, 9));\n" +
+            "    const g4 = math.gcd(@as(u8, 0), @as(u8, 5));\n" +
+            "    const g5 = math.gcd(48, 180);\n" +
+            "    std.debug.print(\"{d} {d} {d} {d} {d}\\n\", .{ g1, g2, g3, g4, g5 });\n" +
+            "    return @truncate(g1 + g2 + g3 + g4 + g5);\n" +
+            "}\n", 51);
 
     // std.unicode.utf8ValidateSlice from real std (task #82): its first-byte table is `comptime first: { … a ++ b ++ c }`
     // over @splat arrays; ASCII, 2 / 3 / 4-byte, surrogate, overlong, truncated and invalid-start inputs.

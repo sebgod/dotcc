@@ -721,8 +721,14 @@ internal sealed partial class ZigLowering
     private CType InferArgType(Item argItem)
     {
         using var _ = EnterThrowawayHoist();   // the inference lowering is discarded
-        return (LowerExpr(argItem).Type
+        var lowered = LowerExpr(argItem);
+        var type = (lowered.Type
             ?? throw new IrUnsupportedException("zig `anytype` argument has no statically known type")).Unqualified;
+        // A string literal is `*const [N:0]u8`: its logical length excludes the NUL its stored array carries, so
+        // `input.len` in the callee is N (std.hash.XxHash32.hash(0, "hello") had read 6, silently, task #87).
+        return type is CType.Array { Count: int stored } litArr && stored > 0 && IsStringLiteralValue(lowered)
+            ? new CType.Array(litArr.Element, stored - 1)
+            : type;
     }
 
     /// <summary>Each local <c>const</c> initialized by an untyped integer literal: a <c>comptime_int</c> in zig, lowered

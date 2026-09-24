@@ -301,6 +301,24 @@ public unsafe ref struct PrintfBuilder
     /// mirrors <see cref="Arg(int)"/> but with <c>long.ToString</c> so the
     /// full 64-bit value survives.
     /// </summary>
+    /// <summary>A zig <c>comptime_int</c> value (C# <see cref="System.Int128"/>, e.g. <c>const g = std.math.gcd(48, 180);</c>):
+    /// formatted by the 64-bit overload that holds it, else as its full decimal / hex digits.</summary>
+    public PrintfBuilder Arg(System.Int128 v)
+    {
+        if (v >= long.MinValue && v <= long.MaxValue) { return Arg((long)v); }
+        if (v >= 0 && v <= ulong.MaxValue) { return Arg((ulong)v); }
+        var spec = ConsumeUntilSpec();
+        var ci = CultureInfo.InvariantCulture;
+        var s = spec.Conv switch
+        {
+            (byte)'x' => (spec.Alt ? "0x" : "") + v.ToString("x", ci),
+            (byte)'X' => (spec.Alt ? "0X" : "") + v.ToString("X", ci),
+            _ => v.ToString(ci),
+        };
+        Emit(ApplyWidth(s, spec));
+        return this;
+    }
+
     public PrintfBuilder Arg(long v)
     {
         var spec = ConsumeUntilSpec();
