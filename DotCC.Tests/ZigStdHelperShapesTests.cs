@@ -140,6 +140,49 @@ public sealed class ZigStdHelperShapesTests
         cs.ShouldContain("stackalloc byte[]{  };");
     }
 
+    private const string CompoundProgram = """
+        fn firstOrNull(s: []const u8) ?u8 {
+            if (s.len == 0) return null;
+            return s[0];
+        }
+
+        pub fn main() u8 {
+            var total: u8 = 1;
+            total += if (firstOrNull("")) |_| 100 else 2;
+            total *= if (firstOrNull("B")) |_| 2 else 3;
+            return total;
+        }
+        """;
+
+    [Fact]
+    public void A_compound_assignment_hoists_a_captured_value_if()
+    {
+        var cs = EmitZig(CompoundProgram);
+        cs.ShouldContain("total += __ifcap1;");
+        cs.ShouldContain("total *= __ifcap3;");
+    }
+
+    [Fact]
+    public void A_compound_assignment_with_a_side_effecting_target_does_not_reorder_its_value()
+    {
+        Should.Throw<Exception>(() => EmitZig("""
+            fn firstOrNull(s: []const u8) ?u8 {
+                if (s.len == 0) return null;
+                return s[0];
+            }
+            var calls: u8 = 0;
+            fn bump() u8 {
+                calls += 1;
+                return calls;
+            }
+            pub fn main() u8 {
+                var buf = [_]u8{ 0, 0 };
+                buf[bump() - 1] += if (firstOrNull("x")) |c| c else 0;
+                return buf[0];
+            }
+            """)).Message.ShouldContain("can't be hoisted past an earlier side-effecting operand");
+    }
+
     [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {

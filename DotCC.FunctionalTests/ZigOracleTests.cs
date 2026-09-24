@@ -4318,6 +4318,29 @@ public sealed class ZigOracleTests
             "    total += missing;\n" +
             "    return @intCast(total);\n" +
             "}\n", 98, "" },
+        // A captured value `if` on the right of a compound assignment (task #62): `+=` / `*=` are hoist points like `=`.
+        new object[] { "compound_assign_capture_if",
+            "fn firstOrNull(s: []const u8) ?u8 {\n" +
+            "    if (s.len == 0) return null;\n" +
+            "    return s[0];\n" +
+            "}\n" +
+            "\n" +
+            "var calls: u8 = 0;\n" +
+            "fn bump() u8 {\n" +
+            "    calls += 1;\n" +
+            "    return calls;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var total: u8 = 1;\n" +
+            "    total += if (firstOrNull(\"\")) |_| 100 else 2;\n" +
+            "    total += if (firstOrNull(\"A\")) |c| c - 60 else 50;\n" +
+            "    total *= if (firstOrNull(\"B\")) |_| 2 else 3;\n" +
+            "    var buf = [_]u8{ 0, 0 };\n" +
+            "    buf[1] += if (firstOrNull(\"x\")) |c| c else 0;\n" +
+            "    buf[bump() - 1] += 3;\n" +
+            "    return total + buf[0] + calls;\n" +
+            "}\n", 20, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

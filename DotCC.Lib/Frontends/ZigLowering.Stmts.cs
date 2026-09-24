@@ -368,7 +368,9 @@ internal sealed partial class ZigLowering
     private CStmt CompoundAssign(Item targetItem, BinOp op, Item valueItem)
         => TryAssignComptimeVar(targetItem, op, valueItem)
            ?? TryCompoundAssignOptionalPayload(targetItem, op, valueItem)
-           ?? new ExprStmt(CompoundAssignExpr(targetItem, op, valueItem));
+           // A hoist point, as a plain assignment is: `total += if (opt) |_| 100 else 2;` lowers its captured `if`
+           // ahead of the statement.
+           ?? Hoisted(() => new ExprStmt(CompoundAssignExpr(targetItem, op, valueItem)));
 
     /// <summary>A statement that is just <c>unreachable</c> or <c>comptime unreachable</c>.</summary>
     private static bool IsComptimeUnreachableStmt(Item stmt)
