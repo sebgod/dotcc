@@ -4092,7 +4092,7 @@ public sealed class ZigFrontendTests
             "    while (nextLT(&i, 9)) |v| { sum += v; }\n" +
             "    return @as(u8, @intCast(sum));\n" +
             "}\n");
-        cs.ShouldContain("while (Cond.B(true))");
+        cs.ShouldContain("while (true)");
         cs.ShouldContain("int? __cap = nextLT");
         cs.ShouldContain("Cond.B(__cap.HasValue)");
         cs.ShouldContain("int v = __cap.Value;");
@@ -4126,7 +4126,7 @@ public sealed class ZigFrontendTests
             "    while (p) |q| { _ = q; p = null; }\n" +
             "    return 0;\n" +
             "}\n");
-        cs.ShouldContain("while (Cond.B(true))");
+        cs.ShouldContain("while (true)");
         cs.ShouldContain("if (Cond.B(__cap))");
         cs.ShouldContain("int* q = __cap;");
     }
@@ -4144,7 +4144,7 @@ public sealed class ZigFrontendTests
             "    while (nextLT(&i, 3)) |v| { sum += v; } else { sum += 100; }\n" +
             "    return @as(u8, @intCast(sum));\n" +
             "}\n");
-        cs.ShouldContain("while (Cond.B(true))");
+        cs.ShouldContain("while (true)");
         cs.ShouldContain("int v = __cap.Value;");
         cs.ShouldContain("sum += 100");   // the else body runs on natural exit
         cs.ShouldContain("break;");

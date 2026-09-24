@@ -89,7 +89,7 @@ public sealed class ZigVectorTests
                 return @intCast(lanes(V) + @as(usize, @intFromFloat(x)));
             }
             """);
-        cs.ShouldContain("float x = (float)(1.5);");   // `.child` is the lane type, f32
+        cs.ShouldContain("float x = 1.5F;");   // `.child` is the lane type, f32
         cs.ShouldMatch(@"ulong lanes__v4_f32\(\)\s*\{\s*return 4;");
     }
 }

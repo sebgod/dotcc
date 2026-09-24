@@ -103,6 +103,13 @@ internal sealed partial class ZigLowering
         {
             return called;
         }
+        // A switch over a TYPE (std.math.inf's `const RuntimeType = switch (Type) { else => Type, comptime_float => f128 };`):
+        // the selected arm's width, so `@typeInfo(RuntimeType).float.bits` still answers.
+        if (cur.Content is Zig.SwitchExpr or Zig.SwitchExprTrailing)
+        {
+            var (switchSubject, switchProngs) = cur.Content is Zig.SwitchExpr se ? (se.Arg2, se.Arg5) : (((Zig.SwitchExprTrailing)cur.Content).Arg2, ((Zig.SwitchExprTrailing)cur.Content).Arg5);
+            return TrySelectTypeProng(switchSubject, switchProngs) is { Expr: { } typeArm, CaptureName: null } ? DeclaredBitsOfTypeArg(typeArm) : null;
+        }
         // An error union's width is its payload's (`fn charToDigit(…) (error{InvalidCharacter}!u8)`).
         if (cur.Content is Zig.ErrUnion eu) { return DeclaredBitsOfTypeArg(eu.Arg2); }
         // So is an optional's (`fn cast(comptime T: type, x: anytype) ?T`), so an unwrapped payload keeps it.

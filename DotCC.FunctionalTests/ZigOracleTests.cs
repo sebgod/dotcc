@@ -4601,6 +4601,86 @@ public sealed class ZigOracleTests
             "    d.count = d.digits.len;\n" +
             "    return @intCast(p + d.count + d.digits[11] + capped(u8, 3) + capped(u8, 40) + capped(bool, 1));\n" +
             "}\n", 136, "" },
+        // std.fmt.parseFloat's last walls (task #59), three of them silent wrong answers: `1 << 52` of an untyped literal,
+        // `opt orelse error.E` as an error union, `buf.* = @bitCast(v)` through a `*[8]u8`; plus `while (true)`, an f32
+        // table, a switch-chosen type alias's width, `Gen(T).CONST`, and `break :blk switch (x) { 0 => break, … }`.
+        new object[] { "parse_float_core",
+            "const E = error{Bad};\n" +
+            "\n" +
+            "fn bits(comptime T: type) comptime_int {\n" +
+            "    return switch (@typeInfo(T).float.bits) {\n" +
+            "        32 => 32,\n" +
+            "        64 => 64,\n" +
+            "        else => @compileError(\"no\"),\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "fn widthOf(comptime Type: type) u32 {\n" +
+            "    const R = switch (Type) {\n" +
+            "        else => Type,\n" +
+            "        comptime_float => f64,\n" +
+            "    };\n" +
+            "    return bits(R);\n" +
+            "}\n" +
+            "\n" +
+            "fn shifted(n: u6) u64 {\n" +
+            "    return (1 << 52) | (@as(u64, 1) << n);\n" +
+            "}\n" +
+            "\n" +
+            "fn half(x: ?u8) E!u8 {\n" +
+            "    return x orelse error.Bad;\n" +
+            "}\n" +
+            "\n" +
+            "fn firstBig(xs: []const u8) u8 {\n" +
+            "    var i: usize = 0;\n" +
+            "    while (true) {\n" +
+            "        if (xs[i] > 10) return xs[i];\n" +
+            "        i += 1;\n" +
+            "    }\n" +
+            "}\n" +
+            "\n" +
+            "fn store(buf: *[8]u8, v: u64) void {\n" +
+            "    buf.* = @bitCast(v);\n" +
+            "}\n" +
+            "\n" +
+            "fn Table(comptime T: type) type {\n" +
+            "    return struct {\n" +
+            "        pub const len = if (T == f32) 3 else 5;\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "fn pick(xs: []const u8) u8 {\n" +
+            "    var i: usize = 0;\n" +
+            "    var total: u8 = 0;\n" +
+            "    while (i < xs.len) : (i += 1) {\n" +
+            "        const add: u8 = blk: {\n" +
+            "            break :blk switch (xs[i]) {\n" +
+            "                0 => break,\n" +
+            "                1, 2 => 10,\n" +
+            "                else => 1,\n" +
+            "            };\n" +
+            "        };\n" +
+            "        total += add;\n" +
+            "    }\n" +
+            "    return total;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const pows = [_]f32{ 1e0, 1e1, 1e2 };\n" +
+            "    var buf: [8]u8 = undefined;\n" +
+            "    store(&buf, 0x0102030405060708);\n" +
+            "    var total: u64 = 0;\n" +
+            "    total += widthOf(f32) + widthOf(f64);\n" +
+            "    total += (shifted(3) >> 52) + (shifted(3) & 0xff);\n" +
+            "    total += half(7) catch 0;\n" +
+            "    total += half(null) catch 100;\n" +
+            "    total += firstBig(&.{ 1, 2, 30, 4 });\n" +
+            "    total += buf[0] + buf[7];\n" +
+            "    total += Table(f32).len + Table(f64).len;\n" +
+            "    total += @intFromFloat(pows[2]);\n" +
+            "    total += pick(&.{ 1, 2, 3, 0, 1 });\n" +
+            "    return @intCast(total % 256);\n" +
+            "}\n", 124, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -5847,6 +5927,41 @@ public sealed class ZigOracleTests
             "    total += f.count();\n" +
             "    return @intCast(total);\n" +
             "}\n", 33);
+
+    /// <summary>std.fmt.parseFloat from source (road-to-zig-std, task #59): f64 and f32 over the fast path, Eisel-Lemire,
+    /// the slow big-decimal path, hex floats, subnormals, max / overflow to inf, inf / nan, signs, underscores and an
+    /// invalid input, every result folded into a bit-exact checksum (and printed, so stderr is compared too).</summary>
+    [Fact]
+    public void Dotcc_matches_zig_std_parse_float_from_source() =>
+        MatchesZigWithRealStd("parsefloat",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "fn bits(s: []const u8) u64 {\n" +
+            "    const f = std.fmt.parseFloat(f64, s) catch return 0xdead;\n" +
+            "    return @bitCast(f);\n" +
+            "}\n" +
+            "\n" +
+            "fn bits32(s: []const u8) u32 {\n" +
+            "    const f = std.fmt.parseFloat(f32, s) catch return 0xbeef;\n" +
+            "    return @bitCast(f);\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const inputs = [_][]const u8{\n" +
+            "        \"2.5\",                       \"0\",                    \"-0\",                    \"1e10\",\n" +
+            "        \"123456789012345678901234\",  \"3.141592653589793\",    \"1e-320\",                \"0x1.8p3\",\n" +
+            "        \"1_000.5\",                   \"inf\",                  \"-inf\",                  \"nan\",\n" +
+            "        \"2.2250738585072014e-308\",   \"9007199254740993\",     \"0.1\",                   \"abc\",\n" +
+            "        \"1.7976931348623157e308\",    \"1e400\",                \"7.2057594037927933e16\", \"4.9e-324\",\n" +
+            "    };\n" +
+            "    var acc: u64 = 0;\n" +
+            "    for (inputs, 0..) |s, i| {\n" +
+            "        acc = std.math.rotl(u64, acc, 7) ^ (bits(s) +% i);\n" +
+            "    }\n" +
+            "    acc ^= bits32(\"1.5\") ^ bits32(\"3.4028235e38\") ^ bits32(\"1e-45\");\n" +
+            "    std.debug.print(\"{x}\\n\", .{acc});\n" +
+            "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
+            "}\n", 112);
 
     /// <summary>Run <paramref name="program"/> through dotcc (navigating the real std at <c>DOTCC_ZIG_LIB_DIR</c>) and
     /// through zig, and require both to exit alike and print the same (and, when given, with

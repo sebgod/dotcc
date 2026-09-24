@@ -518,10 +518,16 @@ internal sealed partial class ZigLowering
                         var argExpr = valueParamType is CType.Enum
                             ? argScope.LowerExprSink(argItems[i], valueParamType)
                             : argScope.LowerExpr(argItems[i]);
-                        if (_ir.ConstEval(argExpr) is not { } v)
+                        // The interpreter's value too (a call such as std.math.nan's `mantissaOne(RuntimeType) | 1 << …`), as a
+                        // comptime_int argument's is read (ComptimeIntArgValue), within the 64 bits a seed carries.
+                        if ((_ir.ConstEval(argExpr)
+                             ?? (_ir.EvalComptimeValue(argExpr) is IrModule.CtInt { Value: var bigArg } && bigArg >= long.MinValue && bigArg <= long.MaxValue
+                                 ? (long)bigArg : null)) is not { } v)
                         {
                             throw new IrUnsupportedException(
-                                $"call to generic '{templateSym.Name}': the `comptime {g.Params[i].Name}` argument must be a "
+                                $"call to generic '{templateSym.Name}'"
+                                + (argScope._currentFnName.Length > 0 ? $" (from '{argScope._currentFnName}')" : "")
+                                + $": the `comptime {g.Params[i].Name}` argument must be a "
                                 + "compile-time-known integer constant (a literal / arithmetic / comptime value; wrap a call as `comptime f()`)");
                         }
                         // A negative value can't spell a C# identifier segment, so encode the sign;

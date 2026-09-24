@@ -681,7 +681,9 @@ internal sealed class CSharpBackend
                 }
                 break;
             case While w:
-                sb.Append(pad).Append($"while (Cond.B({Expr(DecayEnum(w.Cond))}))\n");
+                // zig's `while (true)` renders bare, so C#'s flow analysis sees the loop never falls out (a function
+                // whose every exit is inside it, std.fmt.parse_float's scanDigit, would otherwise be CS0161).
+                sb.Append(pad).Append(w.Cond is LitBool { Value: true } ? "while (true)\n" : $"while (Cond.B({Expr(DecayEnum(w.Cond))}))\n");
                 WithNormalBreak(() => Nested(sb, w.Body, ind));
                 break;
             case DoWhile dw:

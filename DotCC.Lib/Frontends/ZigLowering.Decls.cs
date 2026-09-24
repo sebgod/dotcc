@@ -1507,6 +1507,20 @@ internal sealed partial class ZigLowering
         return BuildCall(fn, argItems, receiver: null);
     }
 
+    /// <summary>The container const <paramref name="name"/> of <paramref name="container"/>, lowered by the module that
+    /// declares it (see <see cref="LowerDeclLiteralValue"/>), or null when there is none: std.fmt.parse_float's
+    /// <c>Decimal(T).min_exponent</c>, a const of a struct another module reified.</summary>
+    private CExpr? TryLowerContainerConstAnywhere(string container, string name)
+    {
+        if (_containerConsts.TryGetValue(container, out var consts) && consts.TryGetValue(name, out var entry))
+        {
+            return LowerContainerConst(container, name, entry.typeItem, entry.rhs);
+        }
+        return _shared.ContainerConstOwners.TryGetValue(container, out var owner) && owner != this
+            ? owner.TryLowerContainerConstAnywhere(container, name)
+            : null;
+    }
+
     /// <summary>Lower a decl-literal VALUE <c>.name</c> at a sink of container type
     /// <paramref name="container"/> — the container's <c>const name</c>, re-lowered like a
     /// <c>Container.name</c> read (<see cref="LowerContainerConst"/>). A container another module declares
@@ -1695,6 +1709,12 @@ internal sealed partial class ZigLowering
                     return CoerceToSlice(lowered, slc);
                 }
                 if (WidenToOptionalPayload(lowered, sink) is { } widened) { return widened; }
+                // An untyped float literal (zig's comptime_float) takes the float type it lands at, so an `f32` one renders
+                // as a C# float literal, even where no store coercion follows (a stackalloc'd `[_]f32{ 1e0, … }`).
+                if (sink?.Unqualified == CType.Float && lowered is LitFloat { } floatLit && floatLit.Type?.Unqualified != CType.Float)
+                {
+                    return floatLit with { Type = CType.Float };
+                }
                 // A plain value at an ERROR-UNION sink (`fn unwrap(v: anyerror!u8)` called as `unwrap(5)`) is its
                 // success variant, as zig coerces it; an error union or an error code passes as it is.
                 if (sink?.Unqualified is CType.ErrorUnion okSink && lowered.Type?.Unqualified is not (CType.ErrorUnion or CType.ErrorSetType))

@@ -169,7 +169,10 @@ internal sealed partial class ZigLowering
                 {
                     return new Call("__dotcc_unreachable", new List<CExpr>(), new List<CType>(), null) { Type = CType.Void };
                 }
-                throw new IrUnsupportedException($"unresolved identifier '{name}'");
+                // The enclosing function is named, since a deep std wall is otherwise hard to place.
+                throw new IrUnsupportedException(_currentFnName.Length > 0
+                    ? $"unresolved identifier '{name}' (in '{_currentFnName}')"
+                    : $"unresolved identifier '{name}'");
             }
             case Zig.Grouped g:
             {
@@ -462,6 +465,14 @@ internal sealed partial class ZigLowering
                 {
                     // A namespaced container const — re-lower its RHS (comptime; inlined per use).
                     return LowerContainerConst(cContainer, fieldName, centry.typeItem, centry.rhs);
+                }
+                // `Decimal(T).min_exponent` — a const of the struct a type-returning CALL names (std.fmt.parse_float's
+                // convertSlow): the call reifies (memoized), and the const lowers in the module that declares it.
+                if (fld.Arg0.Content is Zig.CallArgs or Zig.CallNoArgs
+                    && TryEvalTypeReturningCall(fld.Arg0, out var calledType) && ContainerTypeName(calledType) is { } calledContainer
+                    && TryLowerContainerConstAnywhere(calledContainer, fieldName) is { } calledConst)
+                {
+                    return calledConst;
                 }
                 // A namespaced container `var` (Milestone R, part 6) — `Type.name` resolves to the
                 // mangled global's VarRef (an lvalue, so `Type.name = x` / `+= x` write through it).
@@ -763,6 +774,14 @@ internal sealed partial class ZigLowering
                     && ReturnsOptionalComptimeInt(o.Arg0.Content is Zig.PreComptime lpc ? lpc.Arg1 : o.Arg0))
                 {
                     return foldedOptional is DefaultLit ? LowerExpr(o.Arg2) : foldedOptional;
+                }
+                // `opt orelse error.E` is an ERROR UNION (zig peer-resolves the payload with the error): the payload when
+                // there is one, else the error. Lowered at the payload type instead, the error's flat CODE was the value
+                // (std.fmt.parseFloat's `parseInfOrNan(…) orelse error.InvalidCharacter` returned 10.0 for "abc").
+                if (o.Arg2.Content is Zig.ErrorLit orErr && left.Type.Unqualified is CType.Optional { Inner: var orPayload })
+                {
+                    var unionType = new CType.ErrorUnion(orPayload);
+                    return new Call("ErrUnion.OrError", new List<CExpr> { left, LowerErrorLit(Tok(orErr.Arg2)) }) { Type = unionType };
                 }
                 // The fallback is at the payload's result type (`alignment orelse default_alignment`, an enum literal).
                 var right = left.Type.Unqualified is CType.Optional { Inner: var fallbackSink }
@@ -2238,6 +2257,15 @@ internal sealed partial class ZigLowering
             : (LowerExpr(l), LowerExpr(r));
         // An operator over a SIMD vector is element-wise, a comparison a lane mask (T5).
         if (TryVectorBinary(op, left, right) is { } vectorOp) { return vectorOp; }
+        // `1 << 52` (std.fmt.parse_float's `1 << (1 + fractional_bits)`, FloatInfo's `2 << 52`): an untyped literal is a
+        // comptime_int, which is unbounded, but its C# `int` would shift by the count MOD 32 (`1 << 52` == `1 << 20`, a
+        // silent wrong answer). It widens to the comptime_int carrier, unless the count is a constant below 31 (the result
+        // then fits a positive `int` exactly).
+        if (op is BinOp.Shl && left is LitInt && left.Type.Unqualified == CType.Int
+            && !(_ir.ConstEval(right) is { } shiftCount && shiftCount is >= 0 and < 31))
+        {
+            left = left with { Type = CType.ComptimeInt };
+        }
         // Pointer arithmetic on a Zig many-item pointer (`[*]T` / `[*c]T`, both lowered to
         // `CType.Pointer`): `p + i` / `p - i` yields the pointer type, and `p - q` yields a
         // signed offset (`long`). `UsualArithmetic` only knows `Prim`s — it returns `int` for a

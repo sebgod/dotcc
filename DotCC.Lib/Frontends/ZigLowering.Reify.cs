@@ -483,6 +483,10 @@ internal sealed partial class ZigLowering
                 return WithoutFailedContainers(s.Element) is { } se ? s with { Element = se } : null;
             case CType.ErrorUnion eu:
                 return WithoutFailedContainers(eu.Payload) is { } ep ? eu with { Payload = ep } : null;
+            // A curated list's element is a C# generic argument (`ZigList<T>`): a failed one fails the holder, as a by-value
+            // field does (std.Io.Dir.SelectiveWalker's `stack: std.ArrayList(StackItem)`).
+            case CType.ZigList zl:
+                return WithoutFailedContainers(zl.Element) is { } le && FailedContainerIn(zl.Element) is null ? zl with { Element = le } : null;
             case CType.Func f:
             {
                 if (WithoutFailedContainers(f.Return) is not { } r) { return null; }
@@ -510,6 +514,7 @@ internal sealed partial class ZigLowering
         CType.Optional o => FailedContainerIn(o.Inner),
         CType.Slice s => FailedContainerIn(s.Element),
         CType.ErrorUnion eu => FailedContainerIn(eu.Payload),
+        CType.ZigList zl => zl.Element is CType.Named ln && _failedContainers.ContainsKey(ln.Name) ? ln.Name : FailedContainerIn(zl.Element),
         CType.Func f => FailedContainerIn(f.Return) ?? f.Params.Select(FailedContainerIn).FirstOrDefault(x => x is not null),
         _ => null,
     };

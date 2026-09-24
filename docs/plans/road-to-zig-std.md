@@ -944,7 +944,12 @@ vector length feeds TYPES.
   type comparison folded as a call argument), then four more: a labeled switch expression (grammar; std.math.shl), a
   comptime-only struct from a type-argument call binding at compile time (FloatInfo.from), a comptime int switch with a
   `@compileError` prong folding (std.math.floatMantissaBits), and a reified struct's consts before its fields (Decimal's
-  `[max_digits]u8`). Next: another unresolved `T` in a cross-module call inside parse_float.
+  `[max_digits]u8`).
+- **★ std.fmt.parseFloat RUNS from real std, bit-exact == zig (2026-09-25, task #59 DONE)**: 23 f64 inputs and three
+  f32 ones, every path (fast, Eisel-Lemire, slow Decimal, hex, subnormal, overflow, inf / nan, invalid), 112 == zig. The
+  final walls included THREE SILENT WRONG ANSWERS: `1 << 52` of an untyped literal shifted by 52 MOD 32 in C#'s `int`;
+  `opt orelse error.E` returned the error's code as the payload; `buf.* = @bitCast(v)` through a `*[8]u8` assigned the
+  pointer. Found only because the differential compared exact bits across 26 inputs, not one happy-path value.
 - **std.bit_set RUNS from real std, == zig (2026-09-24, task #61)**: StaticBitSet / IntegerBitSet (set, toggle,
   setValue, unset, count, isSet, findFirstSet, `.full`), 33 == zig. Needed: `packed struct(T)` (declared and returned;
   grammar), `u0` in a type comparison, prefix `-%`, an integer into a `?usize` return, and `unchecked` around a

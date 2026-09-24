@@ -1215,6 +1215,16 @@ internal sealed partial class ZigLowering
     /// value is sink-typed to the result type when known, and the first such break fixes that type.</summary>
     private CStmt LowerLabeledBreak(string label, Item valueItem)
     {
+        // `break :blk switch (d.digits[0]) { 5...9 => break, 0, 1 => 2, else => 1 }` (std.fmt.parse_float's convertSlow): a
+        // switch whose prongs are not all values (a jump out of the loop here) cannot be a C# switch expression, so it is
+        // the switch as a statement, its value prongs breaking to the same label, as a labeled switch's do.
+        if (valueItem.Content is Zig.SwitchExpr or Zig.SwitchExprTrailing
+            && (valueItem.Content is Zig.SwitchExpr bs ? bs.Arg5 : ((Zig.SwitchExprTrailing)valueItem.Content).Arg5) is var breakProngs
+            && Flatten(breakProngs).Any(p => p.Content is not Zig.ProngExpr))
+        {
+            var breakSubject = valueItem.Content is Zig.SwitchExpr bss ? bss.Arg2 : ((Zig.SwitchExprTrailing)valueItem.Content).Arg2;
+            return LowerLabeledSwitchBody(label, breakSubject, breakProngs);
+        }
         // A labeled value-position loop (`lbl: while/for … else`, Milestone Y part 2) — innermost-first.
         foreach (var lv in _loopValues)
         {
@@ -2820,6 +2830,23 @@ internal sealed partial class ZigLowering
                 var copyDest = LowerMemSlice(viewedItem, wantConst: false, out var copyElem);
                 var copySrc = LowerMemSlice(rhsItem, wantConst: true, out _);
                 return new ExprStmt(new ZigMemCall("CopyForwards", copyElem, new List<CExpr> { copyDest, copySrc }) { Type = CType.Void });
+            }
+            // `buffer.* = @bitCast(value)` with `buffer: *[N]u8` (std.mem.writeInt): the value's BYTES stored into the array
+            // the pointer names. (It was once a store to the pointer itself, `buffer = BitCast<ulong, byte*>(value)`.)
+            if (lhsItem.Content is Zig.Deref { Arg0: var arrayPtrItem }
+                && rhsItem.Content is Zig.BuiltinCall { Arg0: var bitCastTok } bitCast && Tok(bitCastTok) == "@bitCast"
+                && Flatten(bitCast.Arg2) is [var bitsItem])
+            {
+                bool pointsAtArray;
+                using (EnterThrowawayHoist())
+                {
+                    pointsAtArray = LowerExpr(arrayPtrItem).Type.Unqualified is CType.Pointer { Pointee.Unqualified: CType.Array };
+                }
+                if (pointsAtArray)
+                {
+                    return new ExprStmt(new Call("System.Runtime.CompilerServices.Unsafe.WriteUnaligned",
+                        new List<CExpr> { LowerExpr(arrayPtrItem), LowerExpr(bitsItem) }) { Type = CType.Void });
+                }
             }
             var target = LowerExpr(lhsItem);
             // `d = a;` between arrays: an element copy (the C# rep is the element pointer, so a plain assignment

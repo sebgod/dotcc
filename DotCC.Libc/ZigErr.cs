@@ -101,6 +101,11 @@ public static class ErrUnion
     public static T Try<T>(ErrUnion<T> u)
         => u.IsErr ? throw new ZigErrorReturn(u.Code) : u.Value;
 
+    /// <summary><c>opt orelse error.E</c> — an error union: the payload when <paramref name="value"/> has one, else the
+    /// error <paramref name="code"/> (std.fmt.parseFloat's <c>return parseInfOrNan(…) orelse error.InvalidCharacter;</c>).</summary>
+    public static ErrUnion<T> OrError<T>(T? value, ushort code) where T : struct
+        => value is { } payload ? ErrUnion<T>.Ok(payload) : ErrUnion<T>.Err(code);
+
     /// <summary><c>u catch fallback</c> — yield the payload on success, else
     /// <paramref name="fallback"/>. No propagation. The lowering only uses this when
     /// <paramref name="fallback"/> is side-effect-free (a literal / variable), so

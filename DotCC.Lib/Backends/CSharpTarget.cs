@@ -129,7 +129,12 @@ internal sealed class CSharpTarget : ITarget
         }
         : "";
 
-    public string RenderFloatLit(LitFloat lit) => lit.Text;
+    public string RenderFloatLit(LitFloat lit)
+        // A `float`-typed literal without its suffix (a zig untyped literal at an `f32` sink: std.fmt.parse_float's
+        // `[_]f32{ 1e0, 1e1, … }`) is spelled with `F`, since C# will not narrow a double literal (CS0664).
+        => lit.Type?.Unqualified == CType.Float && lit.Text.Length > 0 && lit.Text[^1] is not ('f' or 'F')
+            ? lit.Text + "F"
+            : lit.Text;
 
     /// <summary>Map a C primitive (keyed on its canonical C name) to the C# type it
     /// lowers to. <c>char</c>→<c>byte</c> so <c>char*</c> arithmetic walks bytes;
