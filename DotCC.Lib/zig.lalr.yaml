@@ -934,6 +934,10 @@ productions:
       - { lhs: SwitchExpr, rhs: ['switch', '(', IfExpr, ')', '{', Prongs, ',', '}'], action: switchExprTrailing }
       - { lhs: SwitchExpr, rhs: ['switch', '(', Expr, ')', '{', Prongs, ',', '}'], action: switchExprTrailing }
       - { lhs: LabeledBlock, rhs: [IDENT, ':', Block], action: labeledBlock }
+      # A labeled SWITCH as a value (std.math.shl: `casted_shift_amt: switch (@typeInfo(T)) { .int => |info| { …
+      # break :casted_shift_amt v; … }, … }`): the same value block, its body the switch. After `IDENT ':'`, a
+      # `{` or a `switch` decides the form in one token.
+      - { lhs: LabeledBlock, rhs: [IDENT, ':', SwitchExpr], action: labeledSwitch }
       # The value-position loops. A braced `Block` body (the value form runs statements and yields via
       # `break v`); the `else RhsExpr` clause supplies the value on normal completion. The `while`-else
       # and the most common `for (slice) |x|`-else forms, each optionally labeled (`lbl: … else …`,

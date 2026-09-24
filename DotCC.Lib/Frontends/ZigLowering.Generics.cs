@@ -1493,12 +1493,15 @@ internal sealed partial class ZigLowering
                         nm.sym, nContainer, nm.ps, nm.body, methodTypeSeeds, valueSeeds, optionalSeeds));
                 }
                 _currentContainer = mangled;
-                RegisterStruct(mangled, fields, bodyResult.Layout);
                 // `const Self = @This();` → a self alias scoped to the MANGLED container, plus any value
                 // const — both keyed by the mangled name, so a method's `self: *Self` and a `S.NAME` use
                 // resolve exactly like an ordinary container's. Runs after _containerTypes[mangled] is set
-                // (the self alias reads it) and before the methods (their signatures may spell `Self`).
+                // (the self alias reads it), before the fields (a field may be sized by one: std.fmt.parse_float's
+                // Decimal has `digits: [max_digits]u8` with `pub const max_digits = if (MantissaT == u64) 768 else 11564;`,
+                // as a top-level container registers its consts first), and before the methods (their signatures may
+                // spell `Self`).
                 RegisterContainerConsts(mangled, consts);
+                RegisterStruct(mangled, fields, bodyResult.Layout);
                 // Each method: declare the signature NOW — while the comptime type/value seeds are live, so a
                 // `v: T` parameter lowers to the concrete type — and defer the BODY. The signature is reached
                 // by call sites through `_methods[mangled]` (not by name lookup), so declaring it inside this

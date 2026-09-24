@@ -179,15 +179,15 @@ internal sealed partial class ZigLowering
                 // LowerLabeledValueBlock / LowerLoopValue), so hoist that statement to the buffer and
                 // evaluate to the temp. The sink is unknown here (the paren's use decides it), so the
                 // temp type is inferred from the first branch/break value.
-                if (IsValueControlFlowStmt(g.Arg1) || g.Arg1.Content is Zig.LabeledBlock)
+                if (IsValueControlFlowStmt(g.Arg1) || IsLabeledValue(g.Arg1))
                 {
                     var savedImpure = _hoistImpureSeen;
                     Symbol? captured = null;
                     // The consumer captures the result temp and contributes nothing (an empty Seq) — the
                     // whole temp-filling statement goes to the buffer and the paren evaluates to the temp.
                     Func<Symbol, CStmt> cap = sym => { captured = sym; return new Seq(new List<CStmt>()); };
-                    CStmt filled = g.Arg1.Content is Zig.LabeledBlock lbg
-                        ? LowerLabeledValueBlock(Tok(lbg.Arg0), lbg.Arg2, null, cap)
+                    CStmt filled = IsLabeledValue(g.Arg1)
+                        ? LowerLabeledValue(g.Arg1, null, cap)
                         : LowerValueControlFlowStmt(g.Arg1, null, cap);
                     _hoistImpureSeen = savedImpure;   // internals are sequenced in the buffer
                     var buf = RequireHoistable("value if/switch/block/loop in a sub-expression");
@@ -235,9 +235,9 @@ internal sealed partial class ZigLowering
             // binary sub-operand) — it produces a value via statements, which a C# expression can't
             // host, so it's supported only as a full `=` / `return` / assignment RHS (intercepted in
             // DeclOf / LowerReturn / StmtAssign before reaching here). A clear deferred error.
-            case Zig.LabeledBlock lb:
+            case Zig.LabeledBlock or Zig.LabeledSwitch:
                 throw new IrUnsupportedException(
-                    $"a labeled value-block (`{Tok(lb.Arg0)}: {{ … }}`) is supported only as a full initializer, " +
+                    $"a labeled value-block (`{Tok(expr.Content is Zig.LabeledBlock lbl ? lbl.Arg0 : ((Zig.LabeledSwitch)expr.Content).Arg0)}: {{ … }}`) is supported only as a full initializer, " +
                     "`return`, or assignment right-hand side (including as a value-position if/switch branch there, " +
                     "Milestone Y part 1) — not inside a sub-expression yet");
 

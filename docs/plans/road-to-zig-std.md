@@ -941,8 +941,10 @@ vector length feeds TYPES.
   walls down (type switches and comparisons over unlowered floats, a switch-typed local, field-value `if` / `switch`,
   `&.{…}` comptime strings, `inline for` over a comptime string, `if (c) return x else y`); then three more (a type body's
   own type alias in its methods and generic-method instances, a `FloatInfo.from(T)` type probe that no longer throws, a
-  type comparison folded as a call argument). Next: a labeled switch expression (`label: switch (…) { … break :label v }`,
-  std.math.shl).
+  type comparison folded as a call argument), then four more: a labeled switch expression (grammar; std.math.shl), a
+  comptime-only struct from a type-argument call binding at compile time (FloatInfo.from), a comptime int switch with a
+  `@compileError` prong folding (std.math.floatMantissaBits), and a reified struct's consts before its fields (Decimal's
+  `[max_digits]u8`). Next: another unresolved `T` in a cross-module call inside parse_float.
 - **std.bit_set RUNS from real std, == zig (2026-09-24, task #61)**: StaticBitSet / IntegerBitSet (set, toggle,
   setValue, unset, count, isSet, findFirstSet, `.full`), 33 == zig. Needed: `packed struct(T)` (declared and returned;
   grammar), `u0` in a type comparison, prefix `-%`, an integer into a `?usize` return, and `unchecked` around a

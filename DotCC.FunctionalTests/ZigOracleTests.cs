@@ -4491,6 +4491,116 @@ public sealed class ZigOracleTests
             "    const w = b.word();\n" +
             "    return @intCast(w % 256 + (w >> 8) + b.scaled(4) + @intFromBool(check(f64)));\n" +
             "}\n", 17, "" },
+        // A labeled switch expression (road-to-zig-std, task #59; std.math.shl): value prongs, `break :r v` in block
+        // prongs, a nested switch keeping its own prongs, an `unreachable` prong.
+        new object[] { "labeled_switch",
+            "fn shiftCap(comptime T: type, amt: u32) u32 {\n" +
+            "    const capped = capped: switch (@typeInfo(T)) {\n" +
+            "        .int => |info| {\n" +
+            "            if (amt < info.bits) break :capped amt;\n" +
+            "            break :capped info.bits - 1;\n" +
+            "        },\n" +
+            "        else => 0,\n" +
+            "    };\n" +
+            "    return capped;\n" +
+            "}\n" +
+            "\n" +
+            "fn classify(x: u8) u8 {\n" +
+            "    const r = r: switch (x) {\n" +
+            "        0 => 10,\n" +
+            "        1...9 => {\n" +
+            "            if (x == 5) break :r 55;\n" +
+            "            break :r x * 2;\n" +
+            "        },\n" +
+            "        else => 99,\n" +
+            "    };\n" +
+            "    return r;\n" +
+            "}\n" +
+            "\n" +
+            "var hits: u8 = 0;\n" +
+            "\n" +
+            "fn nested(x: u8) u8 {\n" +
+            "    const r: u8 = r: switch (x) {\n" +
+            "        0 => {\n" +
+            "            switch (x) {\n" +
+            "                0 => {\n" +
+            "                    hits += 1;\n" +
+            "                },\n" +
+            "                else => {\n" +
+            "                    hits += 2;\n" +
+            "                },\n" +
+            "            }\n" +
+            "            break :r 4;\n" +
+            "        },\n" +
+            "        1 => unreachable,\n" +
+            "        else => 6,\n" +
+            "    };\n" +
+            "    return r;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    return @intCast(shiftCap(u8, 3) + shiftCap(u8, 40) + classify(0) + classify(5) + classify(7) + classify(200) % 100 + nested(0) + nested(9) + hits);\n" +
+            "}\n", 199, "" },
+        // std.fmt.parse_float's shapes (task #59): a comptime-only struct from a type-argument call feeding a comptime
+        // argument, `switch (@typeInfo(T).float.bits)` with a `@compileError` prong, a reified struct's const sizing
+        // its array field, a labeled switch over a comptime subject.
+        new object[] { "parse_float_shapes",
+            "const Info = struct { explicit_bits: comptime_int, bias: comptime_int };\n" +
+            "\n" +
+            "fn mantissaBits(comptime T: type) comptime_int {\n" +
+            "    return switch (@typeInfo(T).float.bits) {\n" +
+            "        32 => 23,\n" +
+            "        64 => 52,\n" +
+            "        else => @compileError(\"unknown floating point type \" ++ @typeName(T)),\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "fn infoOf(comptime T: type) Info {\n" +
+            "    return switch (T) {\n" +
+            "        f32 => .{ .explicit_bits = mantissaBits(T), .bias = 127 },\n" +
+            "        f64 => .{ .explicit_bits = mantissaBits(T), .bias = 1023 },\n" +
+            "        else => @compileError(\"no info\"),\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "fn product(comptime precision: u8, w: u64) u64 {\n" +
+            "    return w * precision;\n" +
+            "}\n" +
+            "\n" +
+            "fn Decimal(comptime T: type) type {\n" +
+            "    const Wide = if (T == f64) u64 else u32;\n" +
+            "    return struct {\n" +
+            "        const Self = @This();\n" +
+            "        pub const max_digits = if (Wide == u64) 12 else 6;\n" +
+            "        digits: [max_digits]u8,\n" +
+            "        count: usize,\n" +
+            "\n" +
+            "        pub fn init() Self {\n" +
+            "            var v: Self = undefined;\n" +
+            "            v.count = 0;\n" +
+            "            return v;\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "fn capped(comptime T: type, amt: u32) u32 {\n" +
+            "    return capped: switch (@typeInfo(T)) {\n" +
+            "        .int => |info| {\n" +
+            "            if (amt < info.bits) break :capped amt;\n" +
+            "            break :capped info.bits - 1;\n" +
+            "        },\n" +
+            "        else => 0,\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const info = infoOf(f64);\n" +
+            "    const p = product(info.explicit_bits + 3, 2);\n" +
+            "    var d = Decimal(f64).init();\n" +
+            "    d.digits[11] = 4;\n" +
+            "    d.count = d.digits.len;\n" +
+            "    return @intCast(p + d.count + d.digits[11] + capped(u8, 3) + capped(u8, 40) + capped(bool, 1));\n" +
+            "}\n", 136, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

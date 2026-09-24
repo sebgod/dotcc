@@ -565,6 +565,38 @@ internal sealed partial class ZigLowering
         return true;
     }
 
+    /// <summary>Bind <c>const x = f(T, U)</c>, a call whose every argument is a type and whose result struct is
+    /// comptime-only (a <c>comptime_int</c> field), as a comptime aggregate (see <see cref="DeclOrComptime"/>). False, with nothing bound, for any
+    /// other initializer, or when the call does not evaluate at compile time (then it is an ordinary runtime call).</summary>
+    private bool TryBindTypeArgumentCallConst(Item nameTok, Item initExpr)
+    {
+        if (initExpr.Content is not Zig.CallArgs call || Flatten(call.Arg2) is not { Count: > 0 } args
+            || !args.All(a => TryTypeAliasRhs(a, out _)))
+        {
+            return false;
+        }
+        CExpr inner;
+        using (EnterThrowawayHoist())
+        {
+            try { inner = LowerExpr(initExpr); }
+            catch (IrUnsupportedException) { return false; }
+        }
+        // Only a COMPTIME-ONLY struct (a `comptime_int` field, as std.fmt.parse_float's FloatInfo has): zig evaluates a call
+        // returning one at compile time. Any other call stays a runtime call, side effects included.
+        if (inner.Type?.Unqualified is not CType.Named { Name: var resultName }
+            || _ir.StructFieldsOf(resultName) is not { } resultFields
+            || !resultFields.Any(f => f.Type.Unqualified is CType.Prim { IsComptimeInt: true })
+            || _ir.ResolveComptimeFold(inner) is not StructInit resolved)
+        {
+            return false;
+        }
+        var fold = new ComptimeFold(inner) { Type = inner.Type, Resolved = resolved };
+        if (_ir.EvalComptimeValue(fold) is not { } value) { return false; }
+        var sym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = inner.Type });
+        _ir.ComptimeGlobals[sym] = value;
+        return true;
+    }
+
     private CStmt DeclOrComptime(Item nameTok, Item? typeItem, Item initExpr)
     {
         // `const add = switch (sign) { .pos => math.add, .neg => math.sub };` (std.fmt.parseIntWithSign):
@@ -584,6 +616,13 @@ internal sealed partial class ZigLowering
         // interpreter, like a `comptime var` of one (E3), so a later comptime read (`switch (placeholder.arg)`)
         // folds; a runtime read renders it where it stands.
         if (initExpr.Content is Zig.PreComptime && TryBindComptimeAggregateConst(nameTok, typeItem, initExpr))
+        {
+            return new Seq(new List<CStmt>());
+        }
+        // `const float_info = FloatInfo.from(T);` (std.fmt.parse_float): FloatInfo is comptime-only (its fields are
+        // `comptime_int`), so zig evaluates the call at compile time without the `comptime` keyword; the struct binds as
+        // the interpreter's aggregate, and `float_info.mantissa_explicit_bits + 3` can be a `comptime precision` argument.
+        if (typeItem is null && TryBindTypeArgumentCallConst(nameTok, initExpr))
         {
             return new Seq(new List<CStmt>());
         }
@@ -798,9 +837,9 @@ internal sealed partial class ZigLowering
         var declared = typeItem is not null ? LowerType(typeItem) : null;
         // `const x = blk: { … break :blk v; };` — a labeled value-block initializer. Temp-fill it
         // (the declared type, if any, is the sink), then bind `x` to the result temp.
-        if (initExpr.Content is Zig.LabeledBlock lb)
+        if (IsLabeledValue(initExpr))
         {
-            return LowerLabeledValueBlock(Tok(lb.Arg0), lb.Arg2, declared, temp =>
+            return LowerLabeledValue(initExpr, declared, temp =>
             {
                 var sym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = temp.Type });
                 return new DeclStmt(new List<LocalDecl> { new(sym, new VarRef(temp) { Type = temp.Type }) });
@@ -1105,6 +1144,32 @@ internal sealed partial class ZigLowering
     /// consumer outside can read it. The end label wraps an empty block (<c>__blkN_end: { }</c>) so a
     /// following declaration is legal — a C# label can't directly precede a declaration (CS1023).</summary>
     private CStmt LowerLabeledValueBlock(string label, Item blockItem, CType? sink, Func<Symbol, CStmt> consume)
+        => LowerLabeledValueBody(label, () => LowerBlock(blockItem), sink, consume);
+
+    /// <summary>True for a labeled value: a labeled block (<c>blk: { … }</c>) or a labeled switch
+    /// (<c>sw: switch (x) { … break :sw v; … }</c>, std.math.shl).</summary>
+    private static bool IsLabeledValue(Item item) => item.Content is Zig.LabeledBlock or Zig.LabeledSwitch;
+
+    /// <summary><see cref="LowerLabeledValueBlock"/> for either labeled value form (<see cref="IsLabeledValue"/>): a
+    /// labeled switch's body is the switch as a STATEMENT, each prong's <c>break :label v</c> filling the result temp.</summary>
+    private CStmt LowerLabeledValue(Item labeled, CType? sink, Func<Symbol, CStmt> consume) => labeled.Content switch
+    {
+        Zig.LabeledBlock lb => LowerLabeledValueBlock(Tok(lb.Arg0), lb.Arg2, sink, consume),
+        Zig.LabeledSwitch { Arg2.Content: Zig.SwitchExpr sw } ls => LowerLabeledValueBody(Tok(ls.Arg0), () => LowerLabeledSwitchBody(Tok(ls.Arg0), sw.Arg2, sw.Arg5), sink, consume),
+        Zig.LabeledSwitch { Arg2.Content: Zig.SwitchExprTrailing st } ls => LowerLabeledValueBody(Tok(ls.Arg0), () => LowerLabeledSwitchBody(Tok(ls.Arg0), st.Arg2, st.Arg5), sink, consume),
+        _ => throw new IrUnsupportedException("internal: not a labeled value: " + (labeled.Content?.GetType().Name ?? "null")),
+    };
+
+    /// <summary>A labeled switch's body: the switch as a statement, its bare value prongs breaking to <paramref name="label"/>.</summary>
+    private CStmt LowerLabeledSwitchBody(string label, Item subjectItem, Item prongsItem)
+    {
+        _pendingSwitchValueLabel = label;
+        return LowerSwitchStmt(subjectItem, prongsItem);
+    }
+
+    /// <summary>The core of <see cref="LowerLabeledValueBlock"/>: <paramref name="lowerBody"/> lowers the body while the
+    /// label's break target is pushed.</summary>
+    private CStmt LowerLabeledValueBody(string label, Func<CStmt> lowerBody, CType? sink, Func<Symbol, CStmt> consume)
     {
         var n = _blockLabelCounter++;
         var endLabel = "__blk" + n + "_end";
@@ -1113,7 +1178,7 @@ internal sealed partial class ZigLowering
         var temp = _symbols.Declare(new Symbol { Name = "__blk" + n, Kind = SymKind.Var, Type = sink ?? CType.Int });
         var target = new LabeledBlockTarget { Label = label, Temp = temp, EndLabel = endLabel, Sink = sink, ResultType = sink };
         _labeledBlocks.Push(target);
-        var body = LowerBlock(blockItem);   // each `break :label v` reads `target` via LowerLabeledBreak
+        var body = lowerBody();   // each `break :label v` reads `target` via LowerLabeledBreak
         _labeledBlocks.Pop();
         var resultType = target.ResultType
             ?? throw new IrUnsupportedException(
@@ -2499,10 +2564,10 @@ internal sealed partial class ZigLowering
     /// assignment, and the value is the block's result temp.</summary>
     private CExpr LowerCaptureBranch(Item item, CType? sink, List<CStmt>? into)
     {
-        if (item.Content is not Zig.LabeledBlock lb) { return sink is { } s ? LowerExprSink(item, s) : LowerExpr(item); }
+        if (!IsLabeledValue(item)) { return sink is { } s ? LowerExprSink(item, s) : LowerExpr(item); }
         if (into is null) { throw new IrUnsupportedException("a labeled value block as a folded `if` arm needs a statement position"); }
         Symbol? result = null;
-        into.Add(LowerLabeledValueBlock(Tok(lb.Arg0), lb.Arg2, sink, temp =>
+        into.Add(LowerLabeledValue(item, sink, temp =>
         {
             result = temp;
             return new Seq(new List<CStmt>());
@@ -2767,9 +2832,9 @@ internal sealed partial class ZigLowering
             }
             // `x = blk: { … break :blk v; };` — a labeled value-block assignment (Milestone L,
             // part 2): temp-fill against the lvalue's type, then assign the result temp into it.
-            if (rhsItem.Content is Zig.LabeledBlock lb)
+            if (IsLabeledValue(rhsItem))
             {
-                return LowerLabeledValueBlock(Tok(lb.Arg0), lb.Arg2, target.Type,
+                return LowerLabeledValue(rhsItem, target.Type,
                     temp => new ExprStmt(new Assign(null, target, new VarRef(temp) { Type = temp.Type }) { Type = target.Type }));
             }
             // `x = switch (y) { … blk: {…} };` / `x = if (c) blk:{…} else …;` — a value-position
@@ -2792,10 +2857,24 @@ internal sealed partial class ZigLowering
     /// statement.</summary>
     private CStmt LowerProngExprStmt(Item e) => e.Content switch
     {
+        // In a LABELED switch (`r: switch (x) { 0 => 10, … }`), a bare value prong is the switch's value: `break :r 10`.
+        // (`unreachable` stays the trap it is.)
+        _ when _activeSwitchValueLabel is { } valueLabel && !IsUnreachableItem(e) => LowerLabeledBreak(valueLabel, e),
         Zig.SwitchExpr s => LowerSwitchStmt(s.Arg2, s.Arg5),
         Zig.SwitchExprTrailing s => LowerSwitchStmt(s.Arg2, s.Arg5),
         _ => new ExprStmt(LowerExpr(e)),
     };
+
+    /// <summary>The label a labeled switch hands to its OWN switch statement (<see cref="LowerLabeledValue"/>), taken
+    /// by that switch as it starts, so no switch nested in one of its prongs inherits it.</summary>
+    private string? _pendingSwitchValueLabel;
+
+    /// <summary>The label of the labeled switch whose prongs are being lowered (null inside any other switch):
+    /// its bare value prongs break to it (<see cref="LowerProngExprStmt"/>).</summary>
+    private string? _activeSwitchValueLabel;
+
+    /// <summary>True when <paramref name="e"/> is the bare <c>unreachable</c>.</summary>
+    private static bool IsUnreachableItem(Item e) => e.Content is Zig.Ident { Arg0: var tok } && Tok(tok) == "unreachable";
 
     /// <summary>How many <c>inline</c> loops are being unrolled around the current statement.</summary>
     private int _inlineUnrollDepth;
@@ -2975,7 +3054,13 @@ internal sealed partial class ZigLowering
     /// <summary>Lower a <c>switch</c> statement, counting it as a barrier for an unlabeled <c>break</c>
     /// in its prongs (<see cref="LoopBreakTarget"/>).</summary>
     private CStmt LowerSwitchStmt(Item subjectItem, Item prongsItem)
-        => WithSwitchBarrier(() => LowerSwitchStmtCore(subjectItem, prongsItem));
+    {
+        var previousLabel = _activeSwitchValueLabel;
+        _activeSwitchValueLabel = _pendingSwitchValueLabel;   // this switch's own label, or null for any other switch
+        _pendingSwitchValueLabel = null;
+        try { return WithSwitchBarrier(() => LowerSwitchStmtCore(subjectItem, prongsItem)); }
+        finally { _activeSwitchValueLabel = previousLabel; }
+    }
 
     /// <summary>Run <paramref name="lowerSwitch"/>, which builds a C# <c>switch</c>, as a barrier for an
     /// unlabeled <c>break</c> in its prongs (<see cref="LoopBreakTarget"/>).</summary>
@@ -3559,7 +3644,14 @@ internal sealed partial class ZigLowering
     private CExpr? TryFoldComptimeIntSwitch(Item subjectItem, Item prongsItem, CType? sink)
     {
         var prongs = Flatten(prongsItem);
-        if (prongs.All(p => p.Content is Zig.ProngExpr)) { return null; }
+        // An all-value switch stays a runtime C# switch, unless a prong is a `@compileError` (std.math.floatMantissaBits'
+        // `else => @compileError("unknown floating point type …")`): zig never analyses an unselected prong, so a
+        // comptime-known subject must select before any other prong lowers.
+        if (prongs.All(p => p.Content is Zig.ProngExpr) && !prongs.Any(p => p.Content is Zig.ProngExpr { Arg2.Content: Zig.BuiltinCall cb }
+                                                                            && Tok(cb.Arg0) == "@compileError"))
+        {
+            return null;
+        }
         IrModule.CtInt? Eval(Item item)
         {
             using (EnterThrowawayHoist())
@@ -3621,7 +3713,7 @@ internal sealed partial class ZigLowering
     /// expression lowering (the C# ternary / switch-expression).</summary>
     private static bool IsValueControlFlowStmt(Item rhs) => rhs.Content switch
     {
-        Zig.IfExpr e             => e.Arg4.Content is Zig.LabeledBlock || e.Arg6.Content is Zig.LabeledBlock,
+        Zig.IfExpr e             => IsLabeledValue(e.Arg4) || IsLabeledValue(e.Arg6),
         Zig.SwitchExpr s         => SwitchExprNeedsStmt(s.Arg5, s.Arg2),
         Zig.SwitchExprTrailing s => SwitchExprNeedsStmt(s.Arg5, s.Arg2),
         // `comptime switch` / `comptime if`: the inner form decides. The `comptime` asks zig to evaluate
@@ -3648,7 +3740,7 @@ internal sealed partial class ZigLowering
             Zig.ProngComptimeBlock => true,
             // `else => return error.InvalidCharacter` (std.fmt.charToDigit): a returning arm is a statement too.
             Zig.ProngReturn or Zig.ProngReturnVoid or Zig.ProngCaptureReturn or Zig.ProngCaptureReturnVoid => true,
-            Zig.ProngExpr pe => pe.Arg2.Content is Zig.LabeledBlock,
+            Zig.ProngExpr pe => IsLabeledValue(pe.Arg2),
             // `.number => |v| v * 4` over a union: the capture binds a payload, which needs a statement. Over a
             // comptime `@typeInfo(T)` the capture is folded where the expression lowers, so it stays one.
             Zig.ProngCaptureExpr or Zig.ProngCaptureRefExpr or Zig.ProngCaptureTagExpr
@@ -3790,9 +3882,9 @@ internal sealed partial class ZigLowering
     /// The first branch lowered fixes <see cref="ValueTempTarget.ResultType"/>.</summary>
     private CStmt FillValueTemp(Item valueItem, ValueTempTarget rt)
     {
-        if (valueItem.Content is Zig.LabeledBlock lb)
+        if (IsLabeledValue(valueItem))
         {
-            return LowerLabeledValueBlock(Tok(lb.Arg0), lb.Arg2, rt.ResultType, blkTemp =>
+            return LowerLabeledValue(valueItem, rt.ResultType, blkTemp =>
             {
                 rt.ResultType ??= blkTemp.Type;
                 return new ExprStmt(new Assign(null, RtRef(rt), new VarRef(blkTemp) { Type = blkTemp.Type }) { Type = rt.ResultType });
@@ -3968,14 +4060,14 @@ internal sealed partial class ZigLowering
         // Temp-fill against the function's return type, then `return` the result temp. (In an error-
         // union function the wrapping below would need to apply to the temp — deferred with a clear
         // error rather than silently returning an unwrapped value.)
-        if (valueItem.Content is Zig.LabeledBlock lb)
+        if (IsLabeledValue(valueItem))
         {
             if (_currentFnRet is CType.ErrorUnion)
             {
                 throw new IrUnsupportedException(
                     "a labeled value-block `return blk: {…}` in an error-union (`!T`) function is not supported yet");
             }
-            return LowerLabeledValueBlock(Tok(lb.Arg0), lb.Arg2, _currentFnRet,
+            return LowerLabeledValue(valueItem, _currentFnRet,
                 temp => new Return(new VarRef(temp) { Type = temp.Type }));
         }
         // `return switch (y) { … blk: {…} };` / `return if (c) blk:{…} else …;` — a value-position
