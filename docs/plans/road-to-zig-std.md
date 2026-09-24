@@ -895,7 +895,17 @@ vector length feeds TYPES.
   returning `[N]T` binding a typed array local and value generics whose signature spells a comptime parameter
   (std.mem.reverse's `reverseVector`). And a **silent miscompile** fixed on the way: `var b = a;` of an array
   aliased the storage (the C# rep is the element pointer) where zig copies; decls and assignments of an array VALUE
-  now copy (oracle `array_value_copies`). What the path needed, all now in: a comptime OPTIONAL bound from `comptime switch (…) { .none => null, … }`
+  now copy (oracle `array_value_copies`).
+- **std.AutoHashMap RUNS from real std, == zig (2026-09-24, task #51)**: 200 inserts through several growths,
+  overwrites, removals, hits and misses, `count()` and an iterator (differential
+  `Dotcc_matches_zig_std_auto_hash_map_from_source`, 131 == zig). Needed: `errdefer comptime unreachable;` dropped
+  (zig's no-error-return assertion); an error union of an OPTIONAL (`!?KV`: `ErrUnion<T>` lost its `unmanaged`
+  constraint, which rejected `Nullable<T>`); a `packed struct`'s sub-byte fields as bit-fields (hash_map's one-byte
+  `Metadata`); `@ptrCast` of a struct pointer to a byte slice sized by the C# `sizeof` (std.mem.swap swapped ZERO
+  bytes before, because a named struct's CType.SizeOf is 0, so the grown map was never swapped in and the next put
+  read a null header); Wyhash's shapes (a slice at a `*const [N]u8` parameter, `@bitCast` of a byte array, a cast
+  operand starting with `*` after a non-keyword type); and `return @intCast(…)` in a `!T` function. The comptime
+  interpreter's `unreachable` diagnostic now names the functions it stopped in. What the path needed, all now in: a comptime OPTIONAL bound from `comptime switch (…) { .none => null, … }`
   (`arg_pos`), so `comptime arg_state.nextArg(arg_pos) orelse @compileError(…)` never analyses its fallback; a
   tuple field named by a member-list index (`@field(args, field_names[i])`, a tuple's fields being `"0"`, `"1"`);
   a comptime byte-slice field of a comptime aggregate as a comptime string (`placeholder.specifier_arg`);

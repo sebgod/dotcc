@@ -1002,7 +1002,8 @@ internal sealed partial class IrModule
         }
         if (c.Callee == "__dotcc_unreachable")
         {
-            throw new ComptimeAbort("`unreachable` (or a `@compileError` on a path the evaluation took)");
+            throw new ComptimeAbort("`unreachable` (or a `@compileError` on a path the evaluation took)"
+                + (_comptimeCallStack.Count > 0 ? $" in '{string.Join("' called from '", _comptimeCallStack)}'" : ""));
         }
         if (!_comptimeAllowCalls || c.CalleeSym is not { } cs)
         {
@@ -1035,6 +1036,7 @@ internal sealed partial class IrModule
 
         var saved = _comptimeFrame;
         _comptimeFrame = frame;
+        _comptimeCallStack.Push(cs.Name);
         try
         {
             EvalComptimeStmt(fn.Body);
@@ -1051,8 +1053,13 @@ internal sealed partial class IrModule
         finally
         {
             _comptimeFrame = saved;
+            _comptimeCallStack.Pop();
         }
     }
+
+    /// <summary>The functions the interpreter is inside, innermost first, for a diagnostic that names where an
+    /// evaluation stopped.</summary>
+    private readonly Stack<string> _comptimeCallStack = new();
 
     /// <summary>Symbol → <see cref="FuncDef"/> index over <see cref="Functions"/>, keyed by
     /// reference identity (<see cref="Symbol"/> is a plain class — the same instance is shared by

@@ -69,7 +69,8 @@ public sealed class ZigContainerScopeTests
                 return m.fingerprint;
             }
             """);
-        cs.ShouldContain("public byte fingerprint;");
+        // A packed struct's `u7` / `u1` fields are bit-fields of one byte (task #51), typed through the container const.
+        cs.ShouldContain("public byte fingerprint { get => (byte)(((uint)(__bf0 >> 0) & 127u));");
         cs.ShouldMatch(@"new Metadata \{ fingerprint = \(?5");
     }
 

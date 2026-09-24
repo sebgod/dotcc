@@ -4044,6 +4044,65 @@ public sealed class ZigOracleTests
             "    const b = bytes(u32, &x);\n" +
             "    return @intCast((m % 7) + b.len + b[0]);\n" +
             "}\n", 9, "" },
+        // std.hash_map's shapes (task #51): a packed struct of u7 + u1 bit-fields `@bitCast` to a byte, a struct swapped
+        // through byte views, a slice at a `*const [4]u8` parameter and `@bitCast` of the array, a u128 product of two
+        // derefs, an error union of an optional, `errdefer comptime unreachable`, `return @intCast(…)` in a `!u8`.
+        // 0 + 10 + 2 + 1 + 12 + 4 + 3 + 7 = 39.
+        new object[] { "hash_map_shapes",
+            "const Meta = packed struct {\n" +
+            "    fingerprint: u7 = 0,\n" +
+            "    used: u1 = 0,\n" +
+            "};\n" +
+            "\n" +
+            "const Pair = struct { a: u64, b: u32 };\n" +
+            "\n" +
+            "fn swapBytes(comptime T: type, a: *T, b: *T) void {\n" +
+            "    const a_bytes: []u8 = @ptrCast(a);\n" +
+            "    const b_bytes: []u8 = @ptrCast(b);\n" +
+            "    for (a_bytes, b_bytes) |*x, *y| {\n" +
+            "        const t = x.*;\n" +
+            "        x.* = y.*;\n" +
+            "        y.* = t;\n" +
+            "    }\n" +
+            "}\n" +
+            "\n" +
+            "fn readU32(bytes: *const [4]u8) u32 {\n" +
+            "    return @bitCast(bytes.*);\n" +
+            "}\n" +
+            "\n" +
+            "fn wide(a: *const u64, b: *const u64) u128 {\n" +
+            "    return @as(u128, a.*) * b.*;\n" +
+            "}\n" +
+            "\n" +
+            "fn find(xs: []const u8, x: u8) !?usize {\n" +
+            "    for (xs, 0..) |v, i| {\n" +
+            "        if (v == x) return i;\n" +
+            "    }\n" +
+            "    return null;\n" +
+            "}\n" +
+            "\n" +
+            "fn fill(out: []u8) !u8 {\n" +
+            "    errdefer comptime unreachable;\n" +
+            "    out[0] = 7;\n" +
+            "    return @intCast(out.len);\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() !u8 {\n" +
+            "    const m = Meta{ .fingerprint = 5, .used = 1 };\n" +
+            "    const as_byte: u8 = @bitCast(m);\n" +
+            "    var p = Pair{ .a = 1, .b = 2 };\n" +
+            "    var q = Pair{ .a = 10, .b = 20 };\n" +
+            "    swapBytes(Pair, &p, &q);\n" +
+            "    const data = [_]u8{ 1, 0, 0, 0, 9, 9 };\n" +
+            "    const r = readU32(data[0..4]);\n" +
+            "    const x: u64 = 3;\n" +
+            "    const y: u64 = 4;\n" +
+            "    const w = wide(&x, &y);\n" +
+            "    const idx = (try find(&data, 9)) orelse 99;\n" +
+            "    var buf: [3]u8 = undefined;\n" +
+            "    const n = try fill(&buf);\n" +
+            "    return @intCast(as_byte - 133 + p.a + q.b + r + @as(u64, @intCast(w)) + idx + n + buf[0]);\n" +
+            "}\n", 39, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -5132,6 +5191,36 @@ public sealed class ZigOracleTests
             "    const sum = check(&a) +% check(&b) +% check(&c);\n" +
             "    return @intCast((sum % 200) + ok);\n" +
             "}\n", 137);
+
+    /// <summary>std.AutoHashMap from source (road-to-zig-std, task #51): 200 inserts through several growths, overwrites,
+    /// removals, hits and misses, `count()` and an iterator, folded to a checksum. Needed std.hash's Wyhash (slices at
+    /// `*const [N]u8` parameters, `@bitCast` of byte arrays, a u128 multiply) and hash_map's packed `Metadata`, its
+    /// header arithmetic and std.mem.swap of the whole map.</summary>
+    [Fact]
+    public void Dotcc_matches_zig_std_auto_hash_map_from_source() =>
+        MatchesZigWithRealStd("autohashmap",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "pub fn main() !u8 {\n" +
+            "    var m = std.AutoHashMap(u32, u32).init(std.heap.page_allocator);\n" +
+            "    defer m.deinit();\n" +
+            "    var i: u32 = 0;\n" +
+            "    while (i < 200) : (i += 1) try m.put(i * 7, i);\n" +
+            "    i = 0;\n" +
+            "    while (i < 200) : (i += 3) try m.put(i * 7, i + 1000);\n" +
+            "    i = 0;\n" +
+            "    while (i < 200) : (i += 5) _ = m.remove(i * 7);\n" +
+            "    var sum: u32 = 0;\n" +
+            "    i = 0;\n" +
+            "    while (i < 1400) : (i += 1) {\n" +
+            "        if (m.get(i)) |v| sum +%= v *% (i + 1);\n" +
+            "    }\n" +
+            "    var it = m.iterator();\n" +
+            "    var iter_sum: u32 = 0;\n" +
+            "    while (it.next()) |e| iter_sum +%= e.key_ptr.* ^ e.value_ptr.*;\n" +
+            "    const missing: u32 = if (m.get(3) == null) 1 else 0;\n" +
+            "    return @intCast((sum +% iter_sum +% m.count() +% missing) % 251);\n" +
+            "}\n", 131);
 
     /// <summary>Run <paramref name="program"/> through dotcc (navigating the real std at <c>DOTCC_ZIG_LIB_DIR</c>) and
     /// through zig, and require both to exit alike and print the same (and, when given, with

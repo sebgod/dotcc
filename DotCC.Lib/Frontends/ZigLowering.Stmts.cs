@@ -47,6 +47,10 @@ internal sealed partial class ZigLowering
             switch (it.Content)
             {
                 case Zig.StmtDefer d:    cleanupBody = d.Arg1; onErrorOnly = false; break;
+                // `errdefer comptime unreachable;` (std.hash_map's putAssumeCapacityNoClobber): zig's compile-time
+                // assertion that no error return follows. Valid zig never runs its body, so it lowers to nothing.
+                case Zig.StmtErrdefer { Arg1: var assertItem } when IsComptimeUnreachableStmt(assertItem):
+                    continue;
                 case Zig.StmtErrdefer d: cleanupBody = d.Arg1; onErrorOnly = true;  break;
                 default:
                     var lowered = LowerStmt(it);
@@ -365,6 +369,14 @@ internal sealed partial class ZigLowering
         => TryAssignComptimeVar(targetItem, op, valueItem)
            ?? TryCompoundAssignOptionalPayload(targetItem, op, valueItem)
            ?? new ExprStmt(CompoundAssignExpr(targetItem, op, valueItem));
+
+    /// <summary>A statement that is just <c>unreachable</c> or <c>comptime unreachable</c>.</summary>
+    private static bool IsComptimeUnreachableStmt(Item stmt)
+    {
+        var e = stmt.Content is Zig.StmtExpr se ? se.Arg0 : stmt;
+        if (e.Content is Zig.PreComptime pc) { e = pc.Arg1; }
+        return e.Content is Zig.Ident { Arg0: var tok } && Tok(tok) == "unreachable";
+    }
 
     /// <summary>An array expression that NAMES existing storage (a local, a field, an element): read as a value it
     /// must be copied, since its C# rep is the storage's element pointer.</summary>
@@ -3829,7 +3841,11 @@ internal sealed partial class ZigLowering
             }
             // A result-located literal (`return .{ .named = arg_name };` in std.fmt.Parser.specifier, a `!Specifier`)
             // takes the payload type; anything else keeps its own (a call may return the error union itself).
+            // So does a result-location cast builtin (`return @intCast(total % 251);` in a `!u8` main).
             var v = valueItem.Content is Zig.AnonStructInit or Zig.AnonStructInitEmpty or Zig.EnumLit
+                    || valueItem.Content is Zig.BuiltinCall { Arg0: var castTok }
+                       && Tok(castTok) is "@intCast" or "@truncate" or "@ptrCast" or "@bitCast" or "@floatCast"
+                          or "@intFromFloat" or "@floatFromInt" or "@enumFromInt" or "@alignCast"
                 ? LowerExprSink(valueItem, eu.Payload)
                 : LowerExpr(valueItem);
             if (v.Type.Unqualified is CType.ErrorUnion) { return new Return(v); }

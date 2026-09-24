@@ -532,11 +532,11 @@ internal sealed partial class ZigLowering
             switch (fd.Content)
             {
                 case Zig.StructField f:          // FieldDecl -> IDENT ':' Type
-                    fields.Add(new StructField(Tok(f.Arg0), LowerType(f.Arg2)));
+                    fields.Add(PackedAwareField(Tok(f.Arg0), f.Arg2, layout));
                     break;
                 case Zig.StructFieldDefault f:   // FieldDecl -> IDENT ':' Type '=' RhsExpr
                     var fname = Tok(f.Arg0);
-                    fields.Add(new StructField(fname, LowerType(f.Arg2)));
+                    fields.Add(PackedAwareField(fname, f.Arg2, layout));
                     _structFieldDefaults[(name, fname)] = f.Arg4;   // raw default AST — lowered lazily on omission
                     break;
                 default:
@@ -544,6 +544,21 @@ internal sealed partial class ZigLowering
             }
         }
         _ir.RegisterStructType(name, fields, isUnion: false, layout);
+    }
+
+    /// <summary>A struct field, as a BIT-field in a <c>packed struct</c> when its integer type is declared narrower than
+    /// the type it lowers to (std.hash_map's <c>Metadata = packed struct { fingerprint: u7, used: u1 }</c>, one byte in
+    /// zig, which <c>@bitCast</c>s to a <c>u8</c>): the backend packs a run of bit-fields into shared storage units, so
+    /// the struct's size and bit positions match zig's for these byte-sized runs.</summary>
+    private StructField PackedAwareField(string name, Item typeAst, AggregateLayout layout)
+    {
+        var type = LowerType(typeAst);
+        if (layout == AggregateLayout.Packed && type.Unqualified is CType.Prim { Integer: true, Name: not "_Bool", Bytes: var bytes }
+            && DeclaredBitsOfTypeArg(typeAst) is { } bits && bits < bytes * 8)
+        {
+            return new StructField(name, type, bits);
+        }
+        return new StructField(name, type);
     }
 
     /// <summary>Register an in-function <c>const P = struct { … };</c> (wall-plan W2) on the fly
@@ -1607,6 +1622,13 @@ internal sealed partial class ZigLowering
                 {
                     return loaded;
                 }
+                // A slice at a `*[N]T` / `*const [N]T` sink (std.hash.Wyhash's `self.round(input[i..][0..48])`, std.mem.readInt's
+                // `data[0..4]`): zig coerces a comptime-length slice to a pointer to its array, which is its data pointer.
+                if (sink?.Unqualified is CType.Pointer { Pointee: var arrayPointee } arrayPtrSink
+                    && arrayPointee.Unqualified is CType.Array && lowered.Type?.Unqualified is CType.Slice)
+                {
+                    return new Member(lowered, "Ptr", false) { Type = arrayPtrSink };
+                }
                 // Array / string-literal → slice coercion at a `[]T` / `[]const T` sink (Zig's
                 // implicit `*[N]T` → `[]T` and string-literal `*const [N:0]u8` → `[]const u8`).
                 // A value already of slice type passes through (e.g. forwarding a `[]const u8`).
@@ -2107,8 +2129,23 @@ internal sealed partial class ZigLowering
             {
                 var elem = castSlice.Element.Unqualified;
                 var elemPtr = new CType.Pointer(castSlice.Element);
-                var count = castPointee.Unqualified.SizeOf / System.Math.Max(1, elem.SizeOf);
-                var len = new LitInt(count.ToString(System.Globalization.CultureInfo.InvariantCulture), count) { Type = CType.ULong };
+                // `sizeof(T) / sizeof(elem)` in the emitted C#: a struct's size is only known to the layout (CType.SizeOf
+                // is 0 for a named aggregate, which made std.mem.swap swap nothing and std.hash_map crash).
+                // A primitive's size is known here, so it stays a literal.
+                CExpr len;
+                if (castPointee.Unqualified is CType.Prim pointeePrim && elem.SizeOf > 0)
+                {
+                    var n = pointeePrim.SizeOf / elem.SizeOf;
+                    len = new LitInt(n.ToString(System.Globalization.CultureInfo.InvariantCulture), n) { Type = CType.ULong };
+                }
+                else
+                {
+                    len = new SizeOfExpr(castPointee.Unqualified) { Type = CType.ULong };
+                    if (elem.SizeOf != 1)
+                    {
+                        len = new Binary(BinOp.Div, len, new SizeOfExpr(elem) { Type = CType.ULong }) { Type = CType.ULong };
+                    }
+                }
                 return new SliceNew(new Cast(elemPtr, castPtr) { Type = elemPtr }, len, elem, castSlice.Element.IsConst) { Type = castSlice };
             }
             case "@intCast" or "@truncate" or "@ptrCast" or "@bitCast"

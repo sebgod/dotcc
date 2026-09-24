@@ -1756,6 +1756,12 @@ internal sealed class CSharpBackend
                 // Zig `@bitCast` — same-size bit reinterpret. `Unsafe.BitCast<TFrom, TTo>` is the
                 // AOT-clean primitive (it static-asserts the size match); the source type is the
                 // operand's lowered type, the destination the result-location sink.
+                // An ARRAY operand (std.mem.readInt's `@bitCast(buffer.*)` over `*const [4]u8`) renders as its element
+                // pointer, which is not the array's bits: read the target from that memory instead.
+                if (bc.Operand.Type.Unqualified is CType.Array)
+                {
+                    return ($"System.Runtime.CompilerServices.Unsafe.ReadUnaligned<{Cs(bc.Target)}>({Sub(bc.Operand, PAssign)})", PPrimary);
+                }
                 return ($"System.Runtime.CompilerServices.Unsafe.BitCast<{Cs(bc.Operand.Type)}, {Cs(bc.Target)}>({Sub(bc.Operand, PAssign)})", PPrimary);
             case SizeOfExpr so:
                 // C's `sizeof` yields `size_t` — unsigned, `ulong` in dotcc's
@@ -2248,7 +2254,16 @@ internal sealed class CSharpBackend
         {
             return ($"({Cs(c.Target)})({Cs(fv.Type)})&{fv.Sym.TargetName}", PUnary);
         }
-        var text = $"({Cs(c.Target)}){Sub(c.Operand, PUnary)}";
+        var operandText = Sub(c.Operand, PUnary);
+        var targetText = Cs(c.Target);
+        // `(System.UInt128)*a` parses as a MULTIPLICATION in C#: a cast to a NON-keyword type followed by a unary
+        // `*`, `-`, `+` or `&` is ambiguous with the binary operator, so the operand is parenthesized there (a keyword
+        // type, `(ulong)-1`, is unambiguous and keeps its shape).
+        if (operandText.Length > 0 && operandText[0] is '*' or '-' or '+' or '&' && IsBareTypeName(targetText))
+        {
+            operandText = $"({operandText})";
+        }
+        var text = $"({targetText}){operandText}";
         if (c.Target.Unqualified is CType.Prim { Integer: true } pt
             && IsConstExpr(c.Operand)
             && !(TryConstInt(c.Operand, out var cv) && ConstFitsTarget(cv, Cs(pt))))
@@ -2352,6 +2367,19 @@ internal sealed class CSharpBackend
     /// <c>Func&lt;&gt;</c> type argument (CS0306) — it must round-trip through
     /// <c>nint</c> in those forms. Covers raw pointers, function pointers, and a
     /// decayed array.</summary>
+    /// <summary>A cast target C# may read as an EXPRESSION: an identifier or dotted name (<c>System.UInt128</c>), not a
+    /// keyword type (<c>ulong</c>) or a pointer / generic type (<c>byte*</c>), which only a type can be.</summary>
+    private static bool IsBareTypeName(string t) =>
+        !CSharpKeywordTypes.Contains(t) && t.Length > 0 && (char.IsLetter(t[0]) || t[0] == '_')
+        && t.All(ch => char.IsLetterOrDigit(ch) || ch is '_' or '.');
+
+    /// <summary>The C# keyword type names, after which a cast parses unambiguously whatever the operand.</summary>
+    private static readonly HashSet<string> CSharpKeywordTypes = new(System.StringComparer.Ordinal)
+    {
+        "bool", "byte", "sbyte", "short", "ushort", "int", "uint", "long", "ulong", "nint", "nuint",
+        "float", "double", "decimal", "char", "object", "string",
+    };
+
     private static bool IsPointerType(CType t) => t.Unqualified is CType.Pointer or CType.Func or CType.Array;
 
     /// <summary>Render a comma operand standing in statement position — for the
