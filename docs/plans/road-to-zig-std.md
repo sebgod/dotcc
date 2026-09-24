@@ -814,6 +814,12 @@ vector length feeds TYPES.
   a `features` set: ArrayList's `cacheLineForCpu(builtin.cpu)` passes the whole value).
 - **T4** comptime evaluation over that value (`featureSetHas`, `cacheLineForCpu`, `suggestVectorLengthForCpu`):
   comptime struct / array values, the same engine #10's `std.fmt.ArgState` needs.
+- **E1 ✅** (the comptime engine, extending the IR interpreter by the maintainer's choice) a pointer to a
+  comptime aggregate is the aggregate: `comptime total()` mutates a struct through `self: *Acc` and an array
+  through `*[N]u32`. Runtime fix alongside: `buf[i]` through a `*[N]T` indexes the elements.
+- **E2** lower a callee's body ON DEMAND (re-entrantly, state snapshotted) when a comptime value is needed
+  mid-lowering, in a type position or an array extent, where the post-drain fold queue is too late.
+- **E3** comptime aggregates reaching lowering-time positions (the typed `builtin.cpu` value, ArgState).
 - **T5** `@Vector(N, T)` → `Vector128<T>` / `Vector256<T>`, with `@splat`, element-wise ops, `@reduce`.
 
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)

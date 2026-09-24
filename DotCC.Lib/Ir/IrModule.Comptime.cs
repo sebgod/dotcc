@@ -23,7 +23,10 @@ namespace DotCC.Ir;
 // value-comptime from sliding into type-comptime — the moment a comptime
 // expression would need a type-as-value or a comptime pointer, it simply isn't
 // a `ComptimeValue` and the eval returns null (the caller decides whether that
-// position requires a constant). Integer arithmetic is carried in
+// position requires a constant). One deliberate hole (the comptime-engine segment
+// E1): the aggregates are MUTABLE references, so a pointer to a comptime struct or
+// array evaluates to the aggregate itself (`self: *Acc`, `fill(&buf, v)`), with no
+// pointer variant; a pointer to a scalar still is not a value. Integer arithmetic is carried in
 // <see cref="System.Int128"/> so a comptime computation that genuinely exceeds
 // 64 bits (now that the i128/u128/__int128 types exist) has somewhere to live.
 // ---------------------------------------------------------------------------
@@ -317,6 +320,16 @@ internal sealed partial class IrModule
             case CondExpr q:
                 return EvalComptime(q.Cond) is { } cnd ? EvalComptime(Truthy(cnd) ? q.Then : q.Else) : null;
 
+            // A pointer to a comptime AGGREGATE is the aggregate itself (the comptime-engine segment E1): a
+            // CtStruct / CtArray is a mutable reference, so `&a` handed to a `self: *@This()` method and a
+            // store through it (`self.n += v`) mutate the caller's value in place, by-reference for free. A
+            // pointer to a SCALAR is still not a comptime value: the firewall holds for everything that
+            // would need a pointer variant.
+            case Unary { Op: UnOp.AddrOf or UnOp.Deref } pu:
+            {
+                var pointee = EvalComptime(pu.Operand);
+                return pointee is CtStruct or CtArray ? pointee : EvalUnary(pu);
+            }
             case Unary u:
                 return EvalUnary(u);
 
@@ -352,7 +365,8 @@ internal sealed partial class IrModule
             case StructInit si:
                 return EvalComptimeStructInit(si);
 
-            case Member mem when !mem.Arrow:
+            // `s.f`, and `p->f` through a pointer to a comptime struct (E1: the pointer is the struct).
+            case Member mem:
             {
                 return EvalComptime(mem.Base) is CtStruct ms && ms.Fields.TryGetValue(mem.Field, out var mv)
                     ? mv : null;
@@ -693,7 +707,7 @@ internal sealed partial class IrModule
             // A struct field — `c.field = v`. EvalComptime(m.Base) returns the SAME CtStruct the
             // frame holds (by reference), so mutating its field map writes through to the local; a
             // nested `c.inner.field = v` likewise mutates the nested struct in place.
-            case Member m when !m.Arrow && EvalComptime(m.Base) is CtStruct st:
+            case Member m when EvalComptime(m.Base) is CtStruct st:
                 var ftype = StructFieldType(st.Type, m.Field);
                 if (a.CompoundOp is { } mop)
                 {

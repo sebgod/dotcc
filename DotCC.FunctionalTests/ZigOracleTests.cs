@@ -3612,6 +3612,35 @@ public sealed class ZigOracleTests
             "        @as(u8, @intCast(tail.len)) + q + @call(.auto, add, .{ 10, 2 });\n" +
             "    return total - 20;\n" +
             "}\n", 42, "" },
+        // The comptime engine, E1: a pointer to a comptime aggregate is the aggregate itself, so `comptime total()`
+        // mutates a struct through `self: *Acc` and an array through `*[3]u32` (`fill(&buf, 4)`); and at runtime
+        // `buf[i]` through a `*[N]T` indexes the elements (it lowered to `buf + i * N`). (32 + 4 + 0 + 5) + 1 = 42.
+        new object[] { "comptime_pointer_to_aggregate",
+            "const Acc = struct {\n" +
+            "    n: u32,\n" +
+            "    fn add(self: *Acc, v: u32) void {\n" +
+            "        self.n += v;\n" +
+            "    }\n" +
+            "    fn get(self: *const Acc) u32 {\n" +
+            "        return self.n;\n" +
+            "    }\n" +
+            "};\n" +
+            "fn fill(buf: *[3]u32, v: u32) void {\n" +
+            "    buf[0] = v;\n" +
+            "    buf[2] = v + 1;\n" +
+            "}\n" +
+            "fn total() u32 {\n" +
+            "    var a = Acc{ .n = 0 };\n" +
+            "    a.add(30);\n" +
+            "    a.add(2);\n" +
+            "    var buf = [3]u32{ 0, 0, 0 };\n" +
+            "    fill(&buf, 4);\n" +
+            "    return a.get() + buf[0] + buf[1] + buf[2];\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const t = comptime total();\n" +
+            "    return @intCast(t + 1);\n" +
+            "}\n", 42, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

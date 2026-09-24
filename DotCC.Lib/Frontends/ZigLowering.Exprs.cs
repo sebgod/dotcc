@@ -536,6 +536,12 @@ internal sealed partial class ZigLowering
                     var ptr = new Member(baseExpr, "Ptr", false) { Type = new CType.Pointer(slc.Element) };
                     return new DotCC.Ir.Index(ptr, idx) { Type = slc.Element, IsLValue = true };
                 }
+                // `buf[i]` through a `*[N]T` indexes the pointed-at ARRAY's elements (zig auto-derefs), not an
+                // array of arrays: it used to lower to `(buf + i * N)`, a non-lvalue at the wrong stride.
+                if (PointedArray(baseExpr) is ({ } pointed, { Element: var pointedElem }))
+                {
+                    return new DotCC.Ir.Index(pointed, idx) { Type = pointedElem, IsLValue = true };
+                }
                 var elem = baseExpr.Type switch
                 {
                     CType.Pointer p => p.Pointee,
