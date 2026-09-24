@@ -44,9 +44,14 @@ public readonly struct ErrUnion<T>
 
     /// <summary>The success payload (meaningful only when <see cref="Code"/> == 0;
     /// <c>default</c> otherwise).</summary>
-    public readonly T Value;
+    [System.Diagnostics.CodeAnalysis.AllowNull] public readonly T Value;
 
     private ErrUnion(ushort code, T value) { Code = code; Value = value; }
+
+    /// <summary>An error union: the payload stays <c>default</c>, a struct field left unassigned. <see cref="Value"/>
+    /// is <c>AllowNull</c> because an unconstrained <typeparamref name="T"/> (a Nullable payload of <c>!?T</c>) has no
+    /// non-null default.</summary>
+    private ErrUnion(ushort code) { Code = code; }
 
     /// <summary>True when this union holds an error rather than a payload.</summary>
     public bool IsErr => Code != 0;
@@ -56,7 +61,7 @@ public readonly struct ErrUnion<T>
 
     /// <summary>An error union carrying <paramref name="code"/> (<c>return error.Foo;</c>).
     /// <paramref name="code"/> must be non-zero (0 is the success sentinel).</summary>
-    public static ErrUnion<T> Err(ushort code) => new(code, default);
+    public static ErrUnion<T> Err(ushort code) => new(code);
 }
 
 /// <summary>
