@@ -232,6 +232,7 @@ internal sealed partial class ZigLowering
             case Zig.SwitchExprTrailing s: return LowerSwitchExpr(s.Arg2, s.Arg5, null);
             // `comptime switch` / `comptime if` in value position (see the LowerExprSink cases).
             case Zig.ComptimeSwitchExpr c: return LowerExpr(c.Arg1);
+            case Zig.ComptimeLabeledBlock clb: return ComptimeLabeledBlockValue(clb.Arg1, null);
             case Zig.ComptimeIfExpr c:     return LowerExpr(c.Arg1);
 
             // A labeled value-block in a pure-expression position (an if/switch-expression arm, a
@@ -958,6 +959,31 @@ internal sealed partial class ZigLowering
             merged.AddRange(lItems);
             merged.AddRange(rItems);
             return BuildArrayInit(merged, new CType.Array(elem, null));   // inferred length = element count
+        }
+        // Two array VALUES of comptime-known length (std.unicode's `break :first a ++ b ++ c` over `@splat` locals, task
+        // #82): a new array of both lengths, element by element. Both operands are read once per element, so each must
+        // be an lvalue-like array (a local, a global, a field, or a nested concat), never a call.
+        CType? leftProbe = null, rightProbe = null;
+        using (EnterThrowawayHoist())
+        {
+            try { leftProbe = LowerExpr(leftItem).Type; rightProbe = LowerExpr(rightItem).Type; }
+            catch (IrUnsupportedException) { leftProbe = null; }
+        }
+        if (leftProbe?.Unqualified is CType.Array { Count: int ln } la && rightProbe?.Unqualified is CType.Array { Count: int rn } ra
+            && la.Element.Equals(ra.Element) && ln + rn <= MaxRepeat)
+        {
+            var left = LowerExpr(leftItem);
+            var right = LowerExpr(rightItem);
+            if (left is not (VarRef or Member or StackArray) || right is not (VarRef or Member or StackArray))
+            {
+                throw new IrUnsupportedException("zig `a ++ b` of array values: each operand must be a named array (bind a call's result to a `const` first)");
+            }
+            IEnumerable<CExpr> Elems(CExpr arr, int n) => arr is StackArray sa
+                ? sa.Elems
+                : Enumerable.Range(0, n).Select(k => (CExpr)new DotCC.Ir.Index(arr,
+                    new LitInt(k.ToString(System.Globalization.CultureInfo.InvariantCulture), k) { Type = CType.Int }) { Type = la.Element });
+            var joined = Elems(left, ln).Concat(Elems(right, rn)).ToList();
+            return new StackArray(la.Element, joined) { Type = new CType.Array(la.Element, ln + rn) };
         }
         throw new IrUnsupportedException(
             "zig `a ++ b`: only string / array-literal concatenation (incl. a `const` bound to a comptime string/array, "
@@ -2323,7 +2349,11 @@ internal sealed partial class ZigLowering
         // get the enum-aware lowering; everything else lowers both sides plainly.
         var (left, right) = op is BinOp.Eq or BinOp.Ne
             ? LowerComparisonOperands(l, r)
-            : (LowerExpr(l), LowerExpr(r));
+            // A shift amount is a result location (zig types it `Log2Int(T)`): `1 << @intCast(i)` infers a cast there.
+            : op is BinOp.Shl or BinOp.Shr && r.Content is Zig.BuiltinCall { Arg0: var shiftCast }
+                && Tok(shiftCast) is "@intCast" or "@truncate"
+                ? (LowerExpr(l), LowerExprSink(r, CType.Int))
+                : (LowerExpr(l), LowerExpr(r));
         // An operator over a SIMD vector is element-wise, a comparison a lane mask (T5).
         if (TryVectorBinary(op, left, right) is { } vectorOp) { return vectorOp; }
         // `1 << 52` (std.fmt.parse_float's `1 << (1 + fractional_bits)`, FloatInfo's `2 << 52`): an untyped literal is a

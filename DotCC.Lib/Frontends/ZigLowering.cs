@@ -1960,6 +1960,28 @@ internal sealed partial class ZigLowering
         }
     }
 
+    /// <summary><c>comptime label: { … }</c> in value position (std.unicode's <c>const first = comptime first: { … break :first
+    /// a ++ b ++ c; };</c>, task #82): run by the comptime interpreter as a const's labeled block is. An array value becomes a
+    /// static global, one per site and function instance (a generic's instances may compute different tables); anything
+    /// else is its literal.</summary>
+    private CExpr ComptimeLabeledBlockValue(Item labeled, CType? sink)
+    {
+        var key = (labeled, _currentFnName);
+        if (_comptimeBlockStatics.TryGetValue(key, out var memo)) { return new VarRef(memo) { Type = memo.Type, IsLValue = true }; }
+        var (type, init) = ComptimeLabeledBlockInit("a `comptime` block", labeled, sink);
+        if (init is not PinnedArray) { return init; }
+        var sym = _symbols.Declare(new Symbol
+        {
+            Name = "__ctblk" + _comptimeBlockStatics.Count, Kind = SymKind.Var, Type = type, Storage = Storage.Static, IsGlobal = true,
+        });
+        _ir.Globals.Add(new GlobalVar(sym, init));
+        _comptimeBlockStatics[key] = sym;
+        return new VarRef(sym) { Type = type, IsLValue = true };
+    }
+
+    /// <summary>The statics <see cref="ComptimeLabeledBlockValue"/> made, by site and function instance.</summary>
+    private readonly Dictionary<(Item Site, string Fn), Symbol> _comptimeBlockStatics = new();
+
     /// <summary>The static initializer of a global or container const computed by a labeled block (std.hash.crc's
     /// <c>const lookup_table = blk: { var table: [256]I = undefined; for (&amp;table, 0..) |*e, i| { … } break :blk table; };</c>).
     /// zig runs the block at compile time, so it is lowered into a throwaway scope, run by the comptime interpreter,

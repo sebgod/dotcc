@@ -1690,6 +1690,7 @@ internal sealed partial class ZigLowering
             // `comptime switch` / `comptime if` in value position: the inner form, whose comptime-known
             // subject already selects one arm at lowering time.
             case Zig.ComptimeSwitchExpr c: return LowerExprSink(c.Arg1, sink);
+            case Zig.ComptimeLabeledBlock clb: return ComptimeLabeledBlockValue(clb.Arg1, sink);
             case Zig.ComptimeIfExpr c:     return LowerExprSink(c.Arg1, sink);
             // A value-position capture `if` with a result type (`const a: ?Alignment = if (x) |b| … else null;`).
             case Zig.IfExprCapture ec when sink is not null:

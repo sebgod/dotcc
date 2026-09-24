@@ -850,6 +850,9 @@ productions:
       # BoolOr` on an IDENT lookahead that FOLLOW(OrElse) also contains, which resolved to the void form
       # and misparsed `return e` as `return;` + a stray `e`. Value-only has no such choice.
       - { lhs: CaptureArm,  rhs: ['return', BoolOr],            action: fbReturn }
+      # `catch |e| return switch (e) { … }` (task #80): the returned value is a switch expression, which is not in the
+      # operator cascade. After `return`, `switch` is not in FIRST(BoolOr), so one token of lookahead picks it.
+      - { lhs: CaptureArm,  rhs: ['return', SwitchExpr],        action: fbReturnSwitch }
 
   # ===== slice 2a: control-flow as expression =====
   # A value-position expression is either an operator-expression (the cascade,
@@ -883,6 +886,10 @@ productions:
       # `comptime`, a `switch` / `if` lookahead starts no Prefix, so these are conflict-free.
       - { lhs: RhsExpr, rhs: ['comptime', SwitchExpr], action: comptimeSwitchExpr }
       - { lhs: RhsExpr, rhs: ['comptime', IfExpr],     action: comptimeIfExpr }
+      # `const first = comptime first: { …; break :first a ++ b ++ c; };` (std.unicode's utf8ValidateSliceImpl, task #82):
+      # a labeled block run at compile time. After `comptime IDENT`, the `:` lookahead selects the label, as for a bare
+      # labeled block (a Primary is never followed by `:`).
+      - { lhs: RhsExpr, rhs: ['comptime', LabeledBlock], action: comptimeLabeledBlock }
       # A labeled block as a VALUE (Milestone L, part 2) — `blk: { …; break :blk v; }`. Same
       # structural trick as IfExpr/SwitchExpr: a RhsExpr alternative, NOT a Primary, so it never
       # starts an Expr-cascade sub-operand. `blk:` is `IDENT ':'`; the RhsExpr cascade's other

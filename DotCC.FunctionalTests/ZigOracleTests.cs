@@ -4980,6 +4980,44 @@ public sealed class ZigOracleTests
             "pub fn main() u8 {\n" +
             "    return codec.chars[@truncate(codec.pad & 3)] +% codec.table[7];\n" +
             "}\n", 65, "" },
+        // `catch |e| return switch (e) { … }` (task #80, grammar): the returned value is a switch over the error.
+        new object[] { "catch_return_switch",
+            "const E = error{ Truncated, BadStart, Other };\n" +
+            "fn step(x: u8) E!u8 {\n" +
+            "    return switch (x) {\n" +
+            "        0 => error.Truncated,\n" +
+            "        1 => error.BadStart,\n" +
+            "        2 => error.Other,\n" +
+            "        else => x * 2,\n" +
+            "    };\n" +
+            "}\n" +
+            "fn code(x: u8) u32 {\n" +
+            "    const v = step(x) catch |e| return switch (e) {\n" +
+            "        error.Truncated => 900,\n" +
+            "        error.BadStart => 901,\n" +
+            "        else => 902,\n" +
+            "    };\n" +
+            "    return v;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return @truncate(code(0) + code(1) + code(2) + code(7));\n" +
+            "}\n", 157, "" },
+        // `comptime first: { … break :first a ++ b; }` (task #82): a comptime labeled block builds a static table (array
+        // values joined by `++`), and a shift amount takes a cast builtin's type.
+        new object[] { "comptime_labeled_block",
+            "fn classify(c: u8) u8 {\n" +
+            "    const xx = 0xF1;\n" +
+            "    const as = 0xF0;\n" +
+            "    const first = comptime first: {\n" +
+            "        const a: [4]u8 = @splat(as);\n" +
+            "        const b: [4]u8 = @splat(xx);\n" +
+            "        break :first a ++ b;\n" +
+            "    };\n" +
+            "    return first[c & 7] +% (@as(u8, 1) << @intCast(c & 3));\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return classify(1) +% classify(6);\n" +
+            "}\n", 231, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -6261,6 +6299,24 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // std.unicode.utf8ValidateSlice from real std (task #82): its first-byte table is `comptime first: { … a ++ b ++ c }`
+    // over @splat arrays; ASCII, 2 / 3 / 4-byte, surrogate, overlong, truncated and invalid-start inputs.
+    [Fact]
+    public void Dotcc_matches_zig_std_unicode_validate() =>
+        MatchesZigWithRealStd("unicode_validate",
+            "const std = @import(\"std\");\n" +
+            "const unicode = std.unicode;\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var bits: u8 = 0;\n" +
+            "    const cases = [_][]const u8{ \"plain\", \"caf\\u{e9}\", \"\\u{1F600} ok\", \"\\xed\\xa0\\x80\", \"\\xff\", \"\\xc0\\x80\", \"\\xe2\\x82\", \"a\\u{10FFFF}z\" };\n" +
+            "    for (cases, 0..) |c, i| {\n" +
+            "        if (unicode.utf8ValidateSlice(c)) bits |= @as(u8, 1) << @intCast(i);\n" +
+            "    }\n" +
+            "    std.debug.print(\"{d}\\n\", .{bits});\n" +
+            "    return bits;\n" +
+            "}\n", 135);
 
     // std.base64 from real std (tasks #75, #78): the standard and url_safe_no_pad codecs (a global Codecs whose
     // array fields a synthesized initializer fills, @splat tables, a lazily deferred fn-pointer alias), encode,

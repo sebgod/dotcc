@@ -632,6 +632,58 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_catch_capture_may_return_a_switch_over_the_error()
+    {
+        var cs = EmitZig("""
+            const E = error{ Truncated, BadStart, Other };
+            fn step(x: u8) E!u8 {
+                return switch (x) {
+                    0 => error.Truncated,
+                    1 => error.BadStart,
+                    2 => error.Other,
+                    else => x * 2,
+                };
+            }
+            fn code(x: u8) u32 {
+                const v = step(x) catch |e| return switch (e) {
+                    error.Truncated => 900,
+                    error.BadStart => 901,
+                    else => 902,
+                };
+                return v;
+            }
+            pub fn main() u8 {
+                return @truncate(code(0) + code(1) + code(2) + code(7));
+            }
+            """);
+        // Task #80 (grammar): `catch |e| return switch (e) { … }`.
+        cs.ShouldContain("return (e switch { 1 => 900, 2 => 901, _ => 902 });");
+    }
+
+    [Fact]
+    public void A_comptime_labeled_block_is_a_static_table()
+    {
+        var cs = EmitZig("""
+            fn classify(c: u8) u8 {
+                const xx = 0xF1;
+                const as = 0xF0;
+                const first = comptime first: {
+                    const a: [4]u8 = @splat(as);
+                    const b: [4]u8 = @splat(xx);
+                    break :first a ++ b;
+                };
+                return first[c & 7] +% (@as(u8, 1) << @intCast(c & 3));
+            }
+            pub fn main() u8 {
+                return classify(1) +% classify(6);
+            }
+            """);
+        // Task #82: `comptime first: { … }` runs in the comptime interpreter (arrays `++`-joined element by element) into
+        // a static, and a shift amount takes a cast builtin's type.
+        cs.ShouldContain("__ctblk0 = Libc.GlobalArrayFrom<byte>(new byte[]{ (byte)240, (byte)240, (byte)240, (byte)240, (byte)241, (byte)241, (byte)241, (byte)241 });");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

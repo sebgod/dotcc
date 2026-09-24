@@ -4333,6 +4333,7 @@ internal sealed partial class ZigLowering
         Zig.CatchReturn r    => LowerReturn(r.Arg3),
         Zig.OrElseReturnVoid or Zig.CatchReturnVoid => LowerReturnVoid(),
         Zig.FbReturn r       => LowerReturn(r.Arg1),
+        Zig.FbReturnSwitch rs => LowerReturn(rs.Arg1),
         Zig.FbBreak          => LowerUnlabeledBreak(),
         Zig.FbContinue       => new Continue(),
         Zig.FbBreakLabel b   => LowerLabeledLoopJump(Tok(b.Arg2), isContinue: false),
