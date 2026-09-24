@@ -216,10 +216,10 @@ internal sealed partial class ZigLowering
             + $"`{argType?.Describe() ?? "?"}` (float / bool / slice / struct formatting is not supported yet — wall-plan W6)");
     }
 
-    /// <summary>Require a NUL-terminated string-pointer argument for <c>{s}</c> — a string literal /
-    /// <c>[*:0]const u8</c> / <c>[*c]const u8</c> (a byte pointer or char array). A slice (<c>[]const
-    /// u8</c>) is a V1 cut: Zig's <c>{s}</c> prints exactly <c>.len</c> bytes, while C <c>%s</c> reads to
-    /// a NUL — they can diverge, so it's rejected rather than silently mismatched.</summary>
+    /// <summary>Require a string argument for <c>{s}</c>: a NUL-terminated string pointer (a string literal /
+    /// <c>[*:0]const u8</c> / <c>[*c]const u8</c>, a byte pointer or char array), or a byte SLICE (<c>[]const u8</c>),
+    /// which the runtime builder prints as exactly <c>.len</c> bytes (its <c>Arg(ConstSlice&lt;byte&gt;)</c> overload), as
+    /// zig's <c>{s}</c> does, never reading to a NUL.</summary>
     private static void RequireStr(CType? argType)
     {
         var t = argType?.Unqualified;
@@ -227,12 +227,13 @@ internal sealed partial class ZigLowering
         {
             CType.Pointer ptr => IsByteSized(ptr.Pointee),
             CType.Array arr => IsByteSized(arr.Element),
+            CType.Slice slice => IsByteSized(slice.Element),
             _ => false,
         };
         if (ok) { return; }
         throw new IrUnsupportedException(
             $"zig `std.debug.print`: the `{{s}}` placeholder needs a NUL-terminated string pointer "
-            + $"(a string literal / `[*:0]const u8`), got `{argType?.Describe() ?? "?"}` — a slice `{{s}}` is not supported yet (wall-plan W6)");
+            + $"(a string literal / `[*:0]const u8`) or a byte slice, got `{argType?.Describe() ?? "?"}`");
     }
 
     /// <summary>True for a one-byte integer element (a <c>char</c> / <c>u8</c> / <c>i8</c>) — the element

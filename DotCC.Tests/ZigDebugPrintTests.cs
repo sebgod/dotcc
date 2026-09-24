@@ -128,13 +128,13 @@ public sealed class ZigDebugPrintTests
     }
 
     [Fact]
-    public void String_placeholder_on_a_slice_is_rejected()
+    public void String_placeholder_on_a_non_byte_slice_is_rejected()
     {
-        // Zig's {s} on a slice prints exactly .len bytes; C %s reads to a NUL — they can diverge, so a
-        // slice {s} is a V1 cut (a NUL-terminated string pointer / literal is fine).
+        // A byte slice {s} prints exactly .len bytes (task #65); a slice of wider elements is no string at all.
         var ex = Should.Throw<Exception>(() => EmitZig(StdImport + """
             pub fn main() void {
-                const s: []const u8 = "hi";
+                const words = [_]u32{ 1, 2 };
+                const s: []const u32 = &words;
                 std.debug.print("{s}\n", .{s});
             }
             """));

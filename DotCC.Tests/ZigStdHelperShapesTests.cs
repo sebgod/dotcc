@@ -272,6 +272,22 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Debug_print_s_of_a_byte_slice_passes_the_slice_itself()
+    {
+        var cs = EmitZig("""
+            const std = @import("std");
+            pub fn main() void {
+                const word: []const u8 = "hello world";
+                var buf = [_]u8{ 'a', 'b', 'c', 'd' };
+                const mut: []u8 = buf[1..3];
+                std.debug.print("[{s}] [{s}] [{s}]\n", .{ word[0..5], mut, word[6..] });
+            }
+            """);
+        // The runtime builder's slice overload prints exactly `.len` bytes; no NUL is read.
+        cs.ShouldContain(".Arg(new ConstSlice<byte>(word.Ptr + 0, unchecked((ulong)(5 - 0)))).Arg(mut)");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

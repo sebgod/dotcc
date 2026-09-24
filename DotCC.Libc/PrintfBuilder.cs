@@ -351,6 +351,20 @@ public unsafe ref struct PrintfBuilder
     /// </summary>
     public PrintfBuilder Arg(uint v) => Arg((long)v);
 
+    /// <summary>A zig byte slice for <c>%s</c> (<c>std.debug.print("{s}", .{slice})</c>): exactly <c>Len</c> bytes, with no
+    /// NUL to look for, as zig's <c>{s}</c> prints; a precision still caps it.</summary>
+    public PrintfBuilder Arg(ConstSlice<byte> v)
+    {
+        var spec = ConsumeUntilSpec();
+        var s = v.Len == 0 ? "" : System.Text.Encoding.UTF8.GetString(v.Ptr, checked((int)v.Len));
+        if (spec.Precision >= 0 && spec.Precision < s.Length) { s = s[..spec.Precision]; }
+        Emit(ApplyWidth(s, spec));
+        return this;
+    }
+
+    /// <summary>A mutable zig byte slice for <c>%s</c>: as <see cref="Arg(ConstSlice{byte})"/>.</summary>
+    public PrintfBuilder Arg(Slice<byte> v) => Arg((ConstSlice<byte>)v);
+
     public PrintfBuilder Arg(byte* v)
     {
         var spec = ConsumeUntilSpec();

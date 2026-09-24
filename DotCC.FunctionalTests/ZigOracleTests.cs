@@ -4701,6 +4701,17 @@ public sealed class ZigOracleTests
             "    }\n" +
             "    return @intCast(hits + bits + v);\n" +
             "}\n", 44, "" },
+        // std.debug.print `{s}` of a byte slice (task #65): exactly `.len` bytes, a const, a mutable and a sub-slice
+        // whose bytes are not NUL-terminated.
+        new object[] { "debug_print_slice",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() void {\n" +
+            "    const word: []const u8 = \"hello world\";\n" +
+            "    var buf = [_]u8{ 'a', 'b', 'c', 'd' };\n" +
+            "    const mut: []u8 = buf[1..3];\n" +
+            "    std.debug.print(\"[{s}] [{s}] [{s}]\\n\", .{ word[0..5], mut, word[6..] });\n" +
+            "}\n", 0,
+            "[hello] [bc] [world]" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
