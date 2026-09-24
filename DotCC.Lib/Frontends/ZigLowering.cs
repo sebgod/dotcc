@@ -1465,9 +1465,7 @@ internal sealed partial class ZigLowering
         {
             foreach (var fold in _ownComptimeFolds)
             {
-                fold.Resolved = _ir.ResolveComptimeFold(fold.Inner)
-                    ?? throw new IrUnsupportedException(
-                        "`comptime` expression did not evaluate to a compile-time constant value");
+                fold.Resolved = _ir.ResolveComptimeFold(fold.Inner) ?? throw _ir.ComptimeFoldFailure(fold.Inner);
             }
             _ir.Functions.RemoveAll(f => _ownComptimeOnlyFns.Contains(f.Sym));
         }

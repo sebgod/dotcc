@@ -2,6 +2,7 @@
 
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 
 namespace DotCC.Ir;
 
@@ -72,6 +73,30 @@ internal sealed partial class IrModule
     /// just its payload, so this is the only optional value there is. <see cref="Type"/> is the optional
     /// (or pointer) type it was typed at; it splices back as <c>default(T)</c>.</summary>
     internal sealed record CtNull(CType Type) : ComptimeValue;
+
+    /// <summary>The comptime engine's E3: comptime variables that outlive one evaluation, keyed by their
+    /// <see cref="Symbol"/>. A Zig <c>comptime var s: S = .{…}</c> of an aggregate type lives here while its
+    /// function lowers, so each <c>comptime s.method()</c> sees (and mutates) the value the previous one
+    /// left. Read after the call frame; assigned in place.</summary>
+    internal Dictionary<Symbol, ComptimeValue> ComptimeGlobals { get; } = new();
+
+    /// <summary>Evaluate <paramref name="e"/> to a comptime value, calls included (the comptime engine's
+    /// E3: the initial value of a comptime aggregate variable). Null when it is not a compile-time value.
+    /// The result is a fresh copy, never an alias of a value another variable holds.</summary>
+    internal ComptimeValue? EvalComptimeValue(CExpr e) =>
+        TryEvalTop(e, allowCalls: true) is { } v ? CloneComptime(v) : null;
+
+    /// <summary>Splice a comptime value back as an IR literal (see <see cref="Splice"/>).</summary>
+    internal CExpr SpliceComptimeValue(ComptimeValue v) => Splice(v);
+
+    /// <summary>A deep copy of a comptime value: struct and array values are mutable references, so a
+    /// value stored under a second name must not share them.</summary>
+    private static ComptimeValue CloneComptime(ComptimeValue v) => v switch
+    {
+        CtStruct s => new CtStruct(s.Fields.ToDictionary(kv => kv.Key, kv => CloneComptime(kv.Value)), s.Type),
+        CtArray a => new CtArray(a.Elems.Select(CloneComptime).ToArray(), a.Element, a.Type),
+        _ => v,
+    };
 
     // The eval-step budget. Expression-only folding (Milestone T part 1) is bounded by
     // the tree size, so this is a safety net here; comptime calls / `inline` loops
@@ -154,7 +179,8 @@ internal sealed partial class IrModule
         _comptimeFrame = null;
         _comptimeAllowCalls = allowCalls;
         try { return EvalComptime(e); }
-        catch (ComptimeAbort) { return null; }
+        catch (ComptimeAbort ex) { ComptimeMiss ??= ex.Message; return null; }
+        catch (ComptimeGoto) { return null; }   // a backward or stray jump: not evaluated
         finally { (_comptimeSteps, _comptimeFrame, _comptimeAllowCalls) = (steps, frame, calls); }
     }
 
@@ -170,8 +196,22 @@ internal sealed partial class IrModule
     /// <summary>Resolve a deferred <c>comptime EXPR</c> to a spliced literal <see cref="CExpr"/>, or
     /// null if it does not evaluate to a compile-time constant value. The Zig front-end's post-pass
     /// calls this once every function body is lowered, so a comptime call can interpret its callee.</summary>
-    internal CExpr? ResolveComptimeFold(CExpr inner) =>
-        TryEvalTop(inner, allowCalls: true) is { } v ? Splice(v) : null;
+    internal CExpr? ResolveComptimeFold(CExpr inner)
+    {
+        ComptimeMiss = null;
+        return TryEvalTop(inner, allowCalls: true) is { } v ? Splice(v) : null;
+    }
+
+    /// <summary>Why the most recent comptime evaluation stopped (the construct the interpreter does not
+    /// evaluate), for the "did not evaluate" diagnostic. Null when nothing was recorded.</summary>
+    internal string? ComptimeMiss { get; private set; }
+
+    /// <summary>The loud error for a <c>comptime</c> value that does not fold, naming where the
+    /// interpreter stopped when it knows.</summary>
+    internal IrUnsupportedException ComptimeFoldFailure(CExpr inner) => new(
+        "`comptime` expression did not evaluate to a compile-time constant value"
+        + (inner is Call { CalleeSym: { } callee } ? $" (a call to '{callee.Name}')" : "")
+        + (ComptimeMiss is { } why ? $"; the interpreter stopped at {why}" : ""));
 
     /// <summary>Re-materialize a <see cref="ComptimeValue"/> as an IR literal, so the rest of the
     /// pipeline (lower → emit) sees an ordinary constant. Int / float / bool splice to the matching
@@ -329,7 +369,8 @@ internal sealed partial class IrModule
                 // A `comptime EXPR` value. If the post-pass already resolved it, read the spliced
                 // literal; otherwise evaluate the inner inline (an array-size or other type position
                 // needs the value DURING lowering, before the post-pass runs).
-                return EvalComptime(cf.Resolved ?? cf.Inner);
+                // A LIVE reference to a comptime aggregate variable (E3) reads the current value instead.
+                return EvalComptime(cf.Live ? cf.Inner : cf.Resolved ?? cf.Inner);
 
             case Cast c:
                 return EvalCast(c);
@@ -368,7 +409,8 @@ internal sealed partial class IrModule
                     var ct = v.Sym.Type.Unqualified;
                     return new CtInt(v.Sym.ConstValue, ct is CType.Prim or CType.Enum ? ct : CType.Int);
                 }
-                return _comptimeFrame is { } fr && fr.TryGetValue(v.Sym, out var bound) ? bound : null;
+                if (_comptimeFrame is { } fr && fr.TryGetValue(v.Sym, out var bound)) { return bound; }
+                return ComptimeGlobals.TryGetValue(v.Sym, out var global) ? global : null;
 
             case Assign a:
                 return EvalComptimeAssign(a);
@@ -383,6 +425,14 @@ internal sealed partial class IrModule
                 return EvalComptimeStructInit(si);
 
             // `s.f`, and `p->f` through a pointer to a comptime struct (E1: the pointer is the struct).
+            // An OPTIONAL's `.HasValue` / `.Value` (a lowered `orelse` / `if (opt) |x|`): a present optional
+            // is its payload, an absent one a CtNull (E3).
+            case Member { Base.Type: var obt, Field: "HasValue" or "Value" } om when obt?.Unqualified is CType.Optional:
+            {
+                if (EvalComptime(om.Base) is not { } ov) { return null; }
+                if (om.Field == "HasValue") { return new CtBool(ov is not CtNull); }
+                return ov is CtNull ? throw new ComptimeAbort("comptime: `.Value` of a null optional") : ov;
+            }
             case Member mem:
             {
                 return EvalComptime(mem.Base) is CtStruct ms && ms.Fields.TryGetValue(mem.Field, out var mv)
@@ -420,7 +470,12 @@ internal sealed partial class IrModule
             case NullPtr np:
                 return new CtNull(np.Type);
 
+            // `a orelse b`: the payload, or the fallback when `a` is null (E3).
+            case NullCoalesce nc:
+                return EvalComptime(nc.Left) is { } left ? left is CtNull ? EvalComptime(nc.Right) : left : null;
+
             default:
+                ComptimeMiss ??= "a " + e.GetType().Name + " expression";
                 return null;
         }
     }
@@ -606,6 +661,15 @@ internal sealed partial class IrModule
     /// <summary>A comptime <c>continue</c> — unwinds to the nearest enclosing comptime loop.</summary>
     private sealed class ComptimeContinue : System.Exception { }
 
+    /// <summary>A comptime <c>goto</c> — unwinds to the statement list that holds its label AFTER the
+    /// jump (a labeled value block's <c>break :blk v</c> lowers to one). A backward jump is not
+    /// evaluated.</summary>
+    private sealed class ComptimeGoto : System.Exception
+    {
+        public ComptimeGoto(string label) { Label = label; }
+        public string Label { get; }
+    }
+
     /// <summary>The body contains a construct the comptime interpreter does not evaluate (a goto,
     /// a switch, a pointer/aggregate op, a read of a non-frame symbol, …). Caught at the top-level
     /// entry, where it maps to "not a compile-time constant" — the caller decides if that position
@@ -623,14 +687,45 @@ internal sealed partial class IrModule
     /// declared return type so the spliced literal carries the right carrier.</summary>
     private ComptimeValue? EvalComptimeCall(Call c)
     {
-        if (!_comptimeAllowCalls || c.CalleeSym is not { } cs) { return null; }
+        // The bit-count builtins over a value only known during the evaluation (`@popCount(self.used_args)`
+        // in std.fmt.ArgState): the runtime helpers they lower to, computed at the operand's width.
+        if (c is { Callee: "ZigMath.PopCount" or "ZigMath.Clz" or "ZigMath.Ctz", Args: [var bitArg] })
+        {
+            if (EvalComptime(bitArg) is not CtInt bi
+                || (bitArg.Type ?? bi.Type).Unqualified is not CType.Prim { Integer: true, Bytes: 1 or 2 or 4 or 8 } bp)
+            {
+                return null;
+            }
+            var width = bp.Bytes * 8;
+            var bits = unchecked((ulong)bi.Value) & (width == 64 ? ulong.MaxValue : (1UL << width) - 1);
+            var count = c.Callee switch
+            {
+                "ZigMath.PopCount" => System.Numerics.BitOperations.PopCount(bits),
+                "ZigMath.Clz" => bits == 0 ? width : System.Numerics.BitOperations.LeadingZeroCount(bits) - (64 - width),
+                _ => bits == 0 ? width : System.Numerics.BitOperations.TrailingZeroCount(bits),
+            };
+            return new CtInt(count, CType.Int);
+        }
+        if (!_comptimeAllowCalls || c.CalleeSym is not { } cs)
+        {
+            ComptimeMiss ??= $"a call to '{c.Callee}' (not a function the interpreter runs)";
+            return null;
+        }
         var fn = FindFuncDef(cs);
-        if (fn is null || fn.Variadic || fn.Params.Count != c.Args.Count) { return null; }
+        if (fn is null || fn.Variadic || fn.Params.Count != c.Args.Count)
+        {
+            ComptimeMiss ??= $"a call to '{cs.Name}' (no lowered body with {c.Args.Count} parameters)";
+            return null;
+        }
 
         var argVals = new ComptimeValue[c.Args.Count];
         for (int i = 0; i < c.Args.Count; i++)
         {
-            if (EvalComptime(c.Args[i]) is not { } av) { return null; }
+            if (EvalComptime(c.Args[i]) is not { } av)
+            {
+                ComptimeMiss ??= $"argument {i + 1} of a call to '{cs.Name}'";
+                return null;
+            }
             argVals[i] = av;
         }
 
@@ -645,6 +740,7 @@ internal sealed partial class IrModule
         try
         {
             EvalComptimeStmt(fn.Body);
+            ComptimeMiss ??= $"the end of '{cs.Name}' (no return value)";
             return null;   // fell off the end with no `return` value — treat as non-constant
         }
         catch (ComptimeReturn r)
@@ -716,22 +812,27 @@ internal sealed partial class IrModule
     /// anything else aborts.</summary>
     private ComptimeValue? EvalComptimeAssign(Assign a)
     {
-        if (_comptimeFrame is null) { throw new ComptimeAbort("comptime assignment outside a call frame"); }
         if (EvalComptime(a.Value) is not { } rhs) { return null; }
 
         switch (a.Target)
         {
             // A local / parameter.
             case VarRef vr:
+            {
+                // A frame local, else a comptime variable that outlives the evaluation (E3).
+                var store = _comptimeFrame is { } fr && fr.ContainsKey(vr.Sym) ? fr
+                    : ComptimeGlobals.ContainsKey(vr.Sym) ? ComptimeGlobals
+                    : _comptimeFrame ?? throw new ComptimeAbort("comptime assignment outside a call frame");
                 if (a.CompoundOp is { } vop)
                 {
-                    if (!_comptimeFrame.TryGetValue(vr.Sym, out var vcur) || CombineBin(vop, vcur, rhs) is not { } vcomb)
+                    if (!store.TryGetValue(vr.Sym, out var vcur) || CombineBin(vop, vcur, rhs) is not { } vcomb)
                     {
                         return null;
                     }
                     rhs = vcomb;
                 }
-                return _comptimeFrame[vr.Sym] = RetypeTo(rhs, vr.Sym.Type);
+                return store[vr.Sym] = RetypeTo(rhs, vr.Sym.Type);
+            }
 
             // A struct field — `c.field = v`. EvalComptime(m.Base) returns the SAME CtStruct the
             // frame holds (by reference), so mutating its field map writes through to the local; a
@@ -779,11 +880,18 @@ internal sealed partial class IrModule
         switch (s)
         {
             case Block b:
-                foreach (var st in b.Stmts) { EvalComptimeStmt(st); }
+                EvalComptimeList(b.Stmts);
                 break;
 
             case Seq q:
-                foreach (var st in q.Stmts) { EvalComptimeStmt(st); }
+                EvalComptimeList(q.Stmts);
+                break;
+
+            case Goto g:
+                throw new ComptimeGoto(g.Label);
+
+            case Labeled l:
+                EvalComptimeStmt(l.Body);
                 break;
 
             case DeclStmt d:
@@ -889,6 +997,29 @@ internal sealed partial class IrModule
 
             default:
                 throw new ComptimeAbort("comptime: unsupported statement " + s.GetType().Name);
+        }
+    }
+
+    /// <summary>Run a statement list, resuming at a label later in THIS list when a <c>goto</c> from
+    /// inside it names one (a labeled value block's exit). Any other jump propagates.</summary>
+    private void EvalComptimeList(IReadOnlyList<CStmt> stmts)
+    {
+        for (var k = 0; k < stmts.Count; k++)
+        {
+            try
+            {
+                EvalComptimeStmt(stmts[k]);
+            }
+            catch (ComptimeGoto g)
+            {
+                var at = -1;
+                for (var j = k + 1; j < stmts.Count && at < 0; j++)
+                {
+                    if (stmts[j] is Labeled { Name: var name } && name == g.Label) { at = j; }
+                }
+                if (at < 0) { throw; }
+                k = at - 1;
+            }
         }
     }
 }

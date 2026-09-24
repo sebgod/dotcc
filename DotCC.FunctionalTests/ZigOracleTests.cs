@@ -3690,6 +3690,56 @@ public sealed class ZigOracleTests
             "    }\n" +
             "    return s;\n" +
             "}\n", 42, "" },
+        // The comptime engine, E3: a `comptime var st: ArgState = .{…}` (std.Io.Writer.print's format-engine state)
+        // lives across statements; each `comptime st.nextArg(…) orelse …` mutates it through `self: *@This()` (a
+        // labeled `orelse init: {…}` block inside, `@popCount` at comptime) and a runtime read sees the value it
+        // has there. A runtime `x orelse fb: {…}` runs its block only on null. 21 + 21 + 0 + 0 - 1 + 1 = 42.
+        new object[] { "comptime_struct_var",
+            "const ArgState = struct {\n" +
+            "    next_arg: usize = 0,\n" +
+            "    used_args: u32 = 0,\n" +
+            "    args_len: usize,\n" +
+            "\n" +
+            "    pub fn hasUnusedArgs(self: *@This()) bool {\n" +
+            "        return @popCount(self.used_args) != self.args_len;\n" +
+            "    }\n" +
+            "\n" +
+            "    pub fn nextArg(self: *@This(), arg_index: ?usize) ?usize {\n" +
+            "        const next_index = arg_index orelse init: {\n" +
+            "            const arg = self.next_arg;\n" +
+            "            self.next_arg += 1;\n" +
+            "            break :init arg;\n" +
+            "        };\n" +
+            "        if (next_index >= self.args_len) {\n" +
+            "            return null;\n" +
+            "        }\n" +
+            "        self.used_args |= @as(u32, 1) << @as(u5, @intCast(next_index));\n" +
+            "        return next_index;\n" +
+            "    }\n" +
+            "};\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    comptime var st: ArgState = .{ .args_len = 4 };\n" +
+            "    const a = comptime st.nextArg(null) orelse 99;\n" +
+            "    const b = comptime st.nextArg(2) orelse 99;\n" +
+            "    const c = comptime st.nextArg(null) orelse 99;\n" +
+            "    var total: u8 = a + b * 10 + c;\n" +
+            "    if (comptime st.hasUnusedArgs()) {\n" +
+            "        total += 21;\n" +
+            "    }\n" +
+            "    const d = comptime st.nextArg(null) orelse 7;\n" +
+            "    const e = comptime st.nextArg(null) orelse 7;\n" +
+            "    const f = comptime st.nextArg(null) orelse 7;\n" +
+            "    total += @intCast(d + e + f - 12);\n" +
+            "    total += @as(u8, st.next_arg) - 5;\n" +
+            "    var maybe: ?u8 = null;\n" +
+            "    if (total == 42) maybe = 1;\n" +
+            "    const g = maybe orelse fb: {\n" +
+            "        total += 100;\n" +
+            "        break :fb 0;\n" +
+            "    };\n" +
+            "    return total - g + 1;\n" +
+            "}\n", 42, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

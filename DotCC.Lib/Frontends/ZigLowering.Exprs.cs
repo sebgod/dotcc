@@ -79,6 +79,17 @@ internal sealed partial class ZigLowering
                     if (_comptimeVars.TryGetValue(sym, out var cv)) { return ComptimeVarLit(cv.Value, cv.Type); }
                     // A comptime STRING var (`comptime var literal: []const u8 = "";`): its current value.
                     if (_comptimeStringVars.TryGetValue(sym, out var csv)) { return csv; }
+                    // A comptime AGGREGATE var (the comptime engine's E3): a live reference the interpreter
+                    // reads and mutates, rendered at runtime as the value it has here.
+                    if (_ir.ComptimeGlobals.TryGetValue(sym, out var agg))
+                    {
+                        return new ComptimeFold(new VarRef(sym) { Type = sym.Type, IsLValue = true })
+                        {
+                            Type = sym.Type,
+                            Live = true,
+                            Resolved = _ir.SpliceComptimeValue(agg),
+                        };
+                    }
                     return new VarRef(sym) { Type = sym.Type, IsLValue = sym.Kind is SymKind.Var or SymKind.Param };
                 }
                 // A lazy module's top-level function named as a VALUE (`.drain = fixedDrain` in
@@ -633,6 +644,12 @@ internal sealed partial class ZigLowering
             case Zig.OrElse o:
             {
                 var left = LowerExpr(o.Arg0);
+                // A comptime-known optional (`comptime st.nextArg(null) orelse @compileError(…)`, std.fmt): its
+                // payload, or the fallback when it is null; an untaken fallback is never lowered.
+                if (left is ComptimeFold { Resolved: { } known } && left.Type.Unqualified is CType.Optional)
+                {
+                    return known is DefaultLit ? LowerExpr(o.Arg2) : known;
+                }
                 var right = LowerExpr(o.Arg2);
                 if (left.Type.Unqualified is CType.Optional opt)
                 {

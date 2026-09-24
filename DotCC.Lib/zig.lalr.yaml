@@ -830,6 +830,10 @@ productions:
       - { lhs: FallbackArm, rhs: ['continue', ':', IDENT],      action: fbContinueLabel }
       - { lhs: FallbackArm, rhs: [Block],                       action: fbBlock }
       - { lhs: FallbackArm, rhs: [SwitchExpr],                  action: fbSwitch }
+      # `arg_index orelse init: { const arg = self.next_arg; self.next_arg += 1; break :init arg; }`
+      # (std.fmt.ArgState.nextArg): a labeled VALUE block runs only on the none / error path. `rightmost`
+      # shifts the `:` after the label, as for `break :l` above.
+      - { lhs: FallbackArm, rhs: [LabeledBlock],                action: fbLabeled }
       - { lhs: CaptureArm,  rhs: [FallbackArm] }
       # `catch |e| return v` — VALUE form only. A void `catch |e| return;` would leave `e` unused, which
       # zig rejects, so it has no legitimate use; and with it the parser would face `return` vs `return

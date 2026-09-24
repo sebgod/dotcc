@@ -285,6 +285,12 @@ public sealed record Paren(CExpr Inner) : CExpr;
 public sealed record ComptimeFold(CExpr Inner) : CExpr
 {
     public CExpr? Resolved { get; set; }
+
+    /// <summary>A reference to a comptime AGGREGATE variable (the Zig comptime engine's E3): the
+    /// interpreter reads <see cref="CExpr"/> <see cref="Inner"/>, the variable's CURRENT value (so a comptime
+    /// method call mutates it in place), while <see cref="Resolved"/> is the snapshot taken where the
+    /// reference was lowered, which is what a runtime use renders.</summary>
+    public bool Live { get; init; }
 }
 
 /// <summary>The null pointer constant (C23 <c>nullptr</c>). A typed node rather

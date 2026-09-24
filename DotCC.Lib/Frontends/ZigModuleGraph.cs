@@ -292,9 +292,7 @@ internal sealed class ZigModuleGraph
     {
         foreach (var fold in PendingComptimeFolds)
         {
-            fold.Resolved = ir.ResolveComptimeFold(fold.Inner)
-                ?? throw new IrUnsupportedException(
-                    "`comptime` expression did not evaluate to a compile-time constant value");
+            fold.Resolved = ir.ResolveComptimeFold(fold.Inner) ?? throw ir.ComptimeFoldFailure(fold.Inner);
         }
         PendingComptimeFolds.Clear();
         // A comptime-only function has no runtime existence: every call to it was a fold, now spliced.

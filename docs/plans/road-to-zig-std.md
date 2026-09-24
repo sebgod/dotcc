@@ -824,7 +824,16 @@ vector length feeds TYPES.
   extent calls at compile time (`[lenFor(u8)]u8`), `comptime f()` resolves at once when it can,
   `comptime_int` is a type (the interpreter's 128 bits), a comptime `null` exists (`CtNull`), and
   `if (comptime f()) |x|` over a `?comptime_int` folds both ways, which is `suggestVectorLength`'s shape.
-- **E3** comptime aggregates reaching lowering-time positions (the typed `builtin.cpu` value, ArgState).
+- **E3 ✅ (core)** a `comptime var s: S = .{…}` of a struct / array type lives in the interpreter
+  (`IrModule.ComptimeGlobals`) while its function lowers; a reference is a LIVE `ComptimeFold` (the
+  interpreter reads and mutates the current value, a runtime use renders the snapshot taken there), so
+  `comptime st.nextArg(null) orelse …` advances `std.fmt.ArgState` exactly as zig does. Alongside: the
+  `x orelse label: {…}` fallback arm (parse + lowering, runs only on null), `orelse` over a comptime-known
+  optional folds, and the interpreter runs forward `goto` / labeled statements (a labeled value block),
+  optional `.HasValue` / `.Value`, `orelse`, and `@popCount` / `@clz` / `@ctz`. The "did not evaluate"
+  error now names the call and where the interpreter stopped. Next on bufPrint: the rest of
+  `Writer.print` (`Placeholder.parse`, `printValue`). The typed `builtin.cpu` value (T3) reuses the same
+  persistence.
 - **T5** `@Vector(N, T)` → `Vector128<T>` / `Vector256<T>`, with `@splat`, element-wise ops, `@reduce`.
 
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)

@@ -1258,8 +1258,22 @@ internal sealed partial class ZigLowering
             _comptimeStringVars[ssym] = initStr;
             return;
         }
-        var initExpr = LowerExpr(initItem);
-        var ctype = typeItem is { } ti ? LowerType(ti) : initExpr.Type;
+        var declared = typeItem is { } ti ? LowerType(ti) : null;
+        var initExpr = declared is { } dt ? LowerExprSink(initItem, dt) : LowerExpr(initItem);
+        var ctype = declared ?? initExpr.Type;
+        // A comptime STRUCT or ARRAY var (the comptime engine's E3, `comptime var arg_state: ArgState =
+        // .{…}` in std.Io.Writer.print): the interpreter holds its value, and each reference is live.
+        if (ctype.Unqualified is CType.Named or CType.Array)
+        {
+            if (_ir.EvalComptimeValue(initExpr) is not { } agg)
+            {
+                throw new IrUnsupportedException(
+                    $"`comptime var {name}` initializer must be a compile-time-known value");
+            }
+            var aggSym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = ctype });
+            _ir.ComptimeGlobals[aggSym] = agg;
+            return;
+        }
         if (_ir.ConstEval(initExpr) is not { } v)
         {
             throw new IrUnsupportedException(
@@ -3621,7 +3635,7 @@ internal sealed partial class ZigLowering
         // switch (e) { error.OutOfMemory => { …; return; } };` in array_list) yields no value: it is a
         // statement switch on the failure path, so its prongs may be void blocks.
         var voidSwitch = arm.Content is Zig.FbSwitch && bind is null && payload.Type.Unqualified.Equals(CType.Void);
-        Symbol? switchResult = arm.Content is Zig.FbSwitch && !voidSwitch
+        Symbol? switchResult = arm.Content is Zig.FbSwitch or Zig.FbLabeled && !voidSwitch
             ? _symbols.Declare(new Symbol { Name = "__cfv" + _anfTempCounter++, Kind = SymKind.Var, Type = payload.Type })
             : null;
         // The failure path, in its own scope: `catch |e|` binds the error code first (a `_` binds
@@ -3649,6 +3663,18 @@ internal sealed partial class ZigLowering
                 // The consumer binds AFTER the failure scope closes (below) — a `const v = …` must be
                 // visible to the statements that follow, not only inside the arm.
                 payload = new VarRef(result) { Type = payload.Type };
+            }
+            else if (arm.Content is Zig.FbLabeled { Arg0.Content: Zig.LabeledBlock lb } && switchResult is { } blkResult)
+            {
+                // A labeled VALUE block arm (`x orelse init: { …; break :init v; }`, std.fmt.ArgState): it
+                // fills the result on the failure path only, the payload fills it otherwise.
+                var resultRef = new VarRef(blkResult) { Type = payload.Type, IsLValue = true };
+                onFail.Add(LowerLabeledValueBlock(Tok(lb.Arg0), lb.Arg2, payload.Type, temp =>
+                    new ExprStmt(new Assign(null, resultRef, new VarRef(temp) { Type = temp.Type }) { Type = payload.Type })));
+                pre.Add(new DeclStmt(new List<LocalDecl> { new(blkResult, null) }));
+                pre.Add(new If(test, new Block(onFail),
+                    new Block(new List<CStmt> { new ExprStmt(new Assign(null, resultRef, payload) { Type = payload.Type }) })));
+                payload = new VarRef(blkResult) { Type = payload.Type };
             }
             else if (voidSwitch && arm.Content is Zig.FbSwitch { Arg0.Content: var voidSw })
             {

@@ -13,8 +13,9 @@ namespace DotCC.Tests;
 /// <c>self: *@This()</c> method, or an array to a <c>*[N]T</c> parameter, and see the mutation. Also the runtime
 /// fix that fell out: <c>buf[i]</c> through a <c>*[N]T</c> indexes the array's elements. E2: a comptime value
 /// needed during lowering (an array extent, a folded optional capture) runs its callee, whose body lowers on
-/// demand, once. End-to-end in the <c>comptime_pointer_to_aggregate</c> and
-/// <c>comptime_values_during_lowering</c> zig-oracle programs.
+/// demand, once. E3: a <c>comptime var</c> of a struct type lives across statements, mutated by comptime
+/// method calls. End-to-end in the <c>comptime_pointer_to_aggregate</c>, <c>comptime_values_during_lowering</c>
+/// and <c>comptime_struct_var</c> zig-oracle programs.
 /// </summary>
 [Collection("ZigFrontend")]
 public sealed class ZigComptimeEngineTests
@@ -102,5 +103,64 @@ public sealed class ZigComptimeEngineTests
         cs.ShouldContain("total += (byte)(16L);");
         cs.ShouldContain("total += (byte)(2);");
         cs.ShouldNotContain("__cap");
+    }
+
+    [Fact]
+    public void A_comptime_struct_var_is_mutated_by_comptime_method_calls()
+    {
+        var cs = EmitZig("""
+            const St = struct {
+                next: usize = 0,
+                used: u32 = 0,
+                pub fn take(self: *@This(), want: ?usize) ?usize {
+                    const i = want orelse init: {
+                        const n = self.next;
+                        self.next += 1;
+                        break :init n;
+                    };
+                    if (i >= 3) return null;
+                    self.used |= @as(u32, 1) << @as(u5, @intCast(i));
+                    return i;
+                }
+                pub fn allUsed(self: *@This()) bool {
+                    return @popCount(self.used) == 3;
+                }
+            };
+            pub fn main() u8 {
+                comptime var st: St = .{};
+                const a = comptime st.take(null) orelse 9;
+                const b = comptime st.take(2) orelse 9;
+                const c = comptime st.take(null) orelse 9;
+                const d = comptime st.take(null) orelse 9;
+                var r: u8 = @intCast(a + b + c + d);
+                if (comptime st.allUsed()) r += 1;
+                return r;
+            }
+            """);
+        cs.ShouldContain("ulong a = 0UL;");
+        cs.ShouldContain("ulong b = 2UL;");
+        cs.ShouldContain("ulong c = 1UL;");
+        cs.ShouldContain("ulong d = 2UL;");
+        cs.ShouldContain("if (Cond.B(true))");
+        cs.ShouldNotMatch(@"\dUL \?\? ");
+    }
+
+    [Fact]
+    public void A_runtime_orelse_labeled_block_runs_only_on_null()
+    {
+        var cs = EmitZig("""
+            pub fn main() u8 {
+                var total: u8 = 1;
+                var maybe: ?u8 = null;
+                if (total == 1) maybe = 41;
+                const g = maybe orelse fb: {
+                    total += 100;
+                    break :fb 0;
+                };
+                return total + g;
+            }
+            """);
+        cs.ShouldMatch(@"if \(Cond\.B\(\(Cond\.B\(maybe\.HasValue\) \? 0 : 1\)\)\)\s*\{\s*byte __blk\d+ = default\(byte\);");
+        cs.ShouldContain("= maybe.Value;");
     }
 }
