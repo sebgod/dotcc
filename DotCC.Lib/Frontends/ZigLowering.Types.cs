@@ -907,6 +907,7 @@ internal sealed partial class ZigLowering
         // (handled separately as `Zig.ErrUnion`). Set membership stays erased at runtime; the
         // declared-set table only drives the compile-time rejection in part 3a. (Milestone X, part 3b.)
         if (name == "anyerror" || _errorSets.Contains(name)) { return CType.ErrorSet; }
+        if (TryLowerPrim(name, out var prim)) { return prim; }
         RaiseIfSkippedDecl(name);   // a type this module declares, whose declaration did not parse
         return LowerPrim(name);
     }

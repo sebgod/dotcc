@@ -551,7 +551,65 @@ internal sealed partial class ZigLowering
             tag = aggTag;
             return true;
         }
+        // A comptime tagged-UNION value (`comptime switch (placeholder.arg)` in std.Io.Writer.print, the
+        // Placeholder a comptime call returned): its active variant is the tag, its payload the capture.
+        if (TryEvalComptimeUnion(expr, out var unionTag, out var unionPayload))
+        {
+            tag = unionTag;
+            _comptimeUnionPayload = unionPayload;
+            return true;
+        }
         return false;
+    }
+
+    /// <summary>The payload of the comptime union <see cref="TryEvalComptimeTag"/> last matched, spliced to a
+    /// literal, for the selected prong's <c>|v|</c> capture (<see cref="EnterComptimeProng"/>). Null for a void
+    /// variant.</summary>
+    private CExpr? _comptimeUnionPayload;
+
+    /// <summary>What each <see cref="EnterComptimeProng"/> bound for a comptime union's capture in
+    /// <see cref="_comptimeValues"/> (an empty name when nothing), restored by <see cref="ExitComptimeProng"/>.</summary>
+    private readonly List<(string Name, CExpr? Prev)> _unionCaptureShadows = new();
+
+    /// <summary>Read a comptime tagged-union value: <paramref name="expr"/> is rooted at a comptime aggregate
+    /// (<c>const placeholder = comptime Placeholder.parse(…)</c>, held by the interpreter), and evaluates to a
+    /// union. Yields the active variant's name and its payload spliced to a literal (null for a void variant).
+    /// Anything else is false, so the switch lowers at runtime as before.</summary>
+    private bool TryEvalComptimeUnion(Item expr, out string variant, out CExpr? payload)
+    {
+        variant = "";
+        payload = null;
+        var root = expr;
+        while (root.Content is Zig.Field or Zig.Grouped)
+        {
+            root = root.Content is Zig.Field rf ? rf.Arg0 : ((Zig.Grouped)root.Content).Arg1;
+        }
+        if (root.Content is not Zig.Ident rid || _symbols.Resolve(Tok(rid.Arg0)) is not { } rootSym
+            || !_ir.ComptimeGlobals.ContainsKey(rootSym))
+        {
+            return false;
+        }
+        CExpr lowered;
+        using (EnterThrowawayHoist()) { lowered = LowerExpr(expr); }
+        if (_ir.EvalComptimeValue(lowered) is not IrModule.CtStruct value
+            || value.Type.Unqualified is not CType.Named { Name: var unionName }
+            || !_unions.TryGetValue(unionName, out var info)
+            || !value.Fields.TryGetValue(info.TagFieldName, out var tagValue) || tagValue is not IrModule.CtInt tagInt
+            || info.TagType.Unqualified is not CType.Enum tagEnum
+            || !_enumMembers.TryGetValue(tagEnum.Name, out var members))
+        {
+            return false;
+        }
+        var match = members.FirstOrDefault(m => m.Value.ConstValue == (long)tagInt.Value);
+        if (match.Key is not { } name) { return false; }
+        variant = name;
+        if (info.Variants.GetValueOrDefault(name) is not null
+            && value.Fields.GetValueOrDefault(info.PayloadFieldName) is IrModule.CtStruct payloadStruct
+            && payloadStruct.Fields.TryGetValue(name, out var payloadValue))
+        {
+            payload = _ir.SpliceComptimeValue(payloadValue);
+        }
+        return true;
     }
 
     /// <summary>Fold <c>&lt;comptime tag&gt; == .name</c> / <c>!=</c> to a boolean literal — the
@@ -640,6 +698,7 @@ internal sealed partial class ZigLowering
 
     private ZigProng? SelectComptimeProng(Item subjectItem, Item prongsItem, out ZigTypeInfo? payload)
     {
+        _comptimeUnionPayload = null;
         if (!TryEvalComptimeTag(subjectItem, out var tag, out payload)) { return null; }
         ZigProng? elseProng = null;
         foreach (var prongItem in Flatten(prongsItem))
@@ -677,7 +736,15 @@ internal sealed partial class ZigLowering
         // An empty name is the "bound nothing" marker, so Enter/Exit always pair one-for-one whether or
         // not this prong actually captures.
         _typeInfoShadows.Add(("", null));
+        _unionCaptureShadows.Add(("", null));
         if (prong.CaptureName is not { } name || name == "_") { return; }
+        // A comptime union's variant payload (TryEvalComptimeUnion): the capture is that literal.
+        if (payload is null && _comptimeUnionPayload is { } unionPayload)
+        {
+            _unionCaptureShadows[^1] = (name, _comptimeValues.GetValueOrDefault(name));
+            _comptimeValues[name] = unionPayload;
+            return;
+        }
         if (payload is null)
         {
             throw new IrUnsupportedException(
@@ -690,6 +757,12 @@ internal sealed partial class ZigLowering
     /// <summary>Restore what <see cref="EnterComptimeProng"/> shadowed.</summary>
     private void ExitComptimeProng()
     {
+        var (unionName, unionPrev) = _unionCaptureShadows[^1];
+        _unionCaptureShadows.RemoveAt(_unionCaptureShadows.Count - 1);
+        if (unionName.Length > 0)
+        {
+            if (unionPrev is { } up) { _comptimeValues[unionName] = up; } else { _comptimeValues.Remove(unionName); }
+        }
         var (name, prev) = _typeInfoShadows[^1];
         _typeInfoShadows.RemoveAt(_typeInfoShadows.Count - 1);
         if (name.Length == 0) { return; }

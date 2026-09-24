@@ -3740,6 +3740,46 @@ public sealed class ZigOracleTests
             "    };\n" +
             "    return total - g + 1;\n" +
             "}\n", 42, "" },
+        // Comptime UNION values (std.Io.Writer.print's `comptime switch (placeholder.arg)`): `const p = comptime
+        // parse(...)` lives in the interpreter, a switch over `p.arg` (comptime or not) selects its prong at lowering
+        // time with `|n|` bound to the payload, `p.arg != .number` folds, and a comptime byte-slice field
+        // (`.spec = s[1..]`) splices back as a string. 3 + 36 + 3 + 0 + 0 = 42.
+        new object[] { "comptime_union_values",
+            "const Spec = union(enum) { none, number: usize, named: []const u8 };\n" +
+            "const Ph = struct { arg: Spec, width: Spec, spec: []const u8 = \"\" };\n" +
+            "fn parse(comptime s: []const u8) Ph {\n" +
+            "    if (s.len == 0) return .{ .arg = .{ .none = {} }, .width = .none };\n" +
+            "    return .{ .arg = .{ .number = s.len }, .width = .{ .number = 7 }, .spec = s[1..] };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const p = comptime parse(\"abc\");\n" +
+            "    const pos = comptime switch (p.arg) {\n" +
+            "        .none => null,\n" +
+            "        .number => |n| n,\n" +
+            "        .named => 99,\n" +
+            "    };\n" +
+            "    const q = comptime parse(\"\");\n" +
+            "    const qpos: ?usize = comptime switch (q.arg) {\n" +
+            "        .none => null,\n" +
+            "        .number => |n| n,\n" +
+            "        .named => 99,\n" +
+            "    };\n" +
+            "    const w: usize = switch (p.width) {\n" +
+            "        .number => |x| x,\n" +
+            "        else => 0,\n" +
+            "    };\n" +
+            "    var total: u8 = @intCast(pos + 36);\n" +
+            "    if (qpos == null) total += 3;\n" +
+            "    total += @intCast(w - 7);\n" +
+            "    if (p.arg != .number) {\n" +
+            "        total += 100;\n" +
+            "    }\n" +
+            "    total += @intCast(p.spec.len - 2);\n" +
+            "    if (p.spec[1] != 'c') {\n" +
+            "        total += 100;\n" +
+            "    }\n" +
+            "    return total;\n" +
+            "}\n", 42, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

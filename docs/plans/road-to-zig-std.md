@@ -843,9 +843,18 @@ vector length feeds TYPES.
   is shared across modules; a value switch over a union fills its result through the statement union switch
   (a `|v|` capture prong included), which retires the "tagged-union value-switch with block prongs" cut;
   `x catch unreachable` in value position renders a C# `throw` expression. Multi-file oracle
-  `fmt_parse_shapes`; unit `ZigFmtParseShapesTests`. **Walls next:** `Writer.print`'s `comptime switch
-  (placeholder.arg)` over a comptime UNION value, and a runtime `Placeholder.parse` reaches
-  `std.mem.findScalarPos`'s `@Vector` path (T5).
+  `fmt_parse_shapes`; unit `ZigFmtParseShapesTests`.
+- **Comptime union and slice values ✅ (2026-09-24):** `const p = comptime parse(…)` of an aggregate lives in
+  the interpreter (E3's `ComptimeGlobals`); a switch over `p.arg`, comptime or not, selects its prong at
+  lowering time (the union's tag read by the interpreter, a `|n|` capture bound to the spliced payload), and
+  `p.arg != .number` folds. The interpreter gained comptime SLICES (`CtSlice` over a comptime array, a string
+  literal being its bytes), element pointers (`CtElemPtr`: `.Ptr`, pointer arithmetic, indexing), zero values
+  for enums / optionals / pointers / slices, and a union payload's ACTIVE variant (only it splices back, since
+  the payload is an overlaid C# struct); a byte slice splices back as a string literal; an enum tag splices
+  with a cast. Fixed alongside: `s[1..]` over a string literal counted its NUL. Oracle `comptime_union_values`.
+  **Wall next:** the comptime `Placeholder.parse(…)` call needs its body lowered, and that body reaches
+  `std.mem.findScalarPos`'s SIMD branch (guarded by `!@inComptime()` at runtime): `@Vector`, so the target
+  segment T3 → T4 → T5 is now on bufPrint's critical path too.
 - **T5** `@Vector(N, T)` → `Vector128<T>` / `Vector256<T>`, with `@splat`, element-wise ops, `@reduce`.
 
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)

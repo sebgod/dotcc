@@ -163,4 +163,44 @@ public sealed class ZigComptimeEngineTests
         cs.ShouldMatch(@"if \(Cond\.B\(\(Cond\.B\(maybe\.HasValue\) \? 0 : 1\)\)\)\s*\{\s*byte __blk\d+ = default\(byte\);");
         cs.ShouldContain("= maybe.Value;");
     }
+
+    [Fact]
+    public void A_switch_over_a_comptime_union_selects_its_prong_with_the_payload_bound()
+    {
+        var cs = EmitZig("""
+            const Spec = union(enum) { none, number: usize };
+            const Ph = struct { arg: Spec, spec: []const u8 = "" };
+            fn parse(comptime s: []const u8) Ph {
+                if (s.len == 0) return .{ .arg = .{ .none = {} } };
+                return .{ .arg = .{ .number = s.len }, .spec = s[1..] };
+            }
+            pub fn main() u8 {
+                const p = comptime parse("abc");
+                const pos = comptime switch (p.arg) {
+                    .none => 0,
+                    .number => |n| n,
+                };
+                return @intCast(pos + p.spec.len + 37);
+            }
+            """);
+        // The prong is chosen at lowering time: no runtime union switch, the payload is the literal 3.
+        cs.ShouldNotContain("__un");
+        cs.ShouldMatch(@"__vcf\d+ = 3UL;");
+        // The comptime byte slice `s[1..]` ("bc", 2 bytes: the literal's NUL is not counted) splices as a string.
+        cs.ShouldContain(@"Libc.L(""\x62\x63\0""u8), 2UL)");
+    }
+
+    [Fact]
+    public void An_open_slice_of_a_string_literal_excludes_its_nul()
+    {
+        var cs = EmitZig("""
+            fn tail(comptime s: []const u8) []const u8 {
+                return s[1..];
+            }
+            pub fn main() u8 {
+                return @intCast(tail("abc").len);
+            }
+            """);
+        cs.ShouldContain("3UL - (ulong)1");   // "abc" is 3 bytes long in zig, the NUL uncounted
+    }
 }

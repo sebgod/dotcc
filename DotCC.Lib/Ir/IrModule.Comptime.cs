@@ -59,7 +59,12 @@ internal sealed partial class IrModule
     /// <c>undefined</c>-initialized struct (<see cref="ZeroValue"/>). Still NO pointer variant — a
     /// struct value is a flat by-value record, the firewall holds (an array sibling, <c>CtArray</c>,
     /// is the next increment).</summary>
-    internal sealed record CtStruct(Dictionary<string, ComptimeValue> Fields, CType Type) : ComptimeValue;
+    internal sealed record CtStruct(Dictionary<string, ComptimeValue> Fields, CType Type) : ComptimeValue
+    {
+        /// <summary>For the payload of a tagged UNION (an overlaid C# struct), the variant last written: only
+        /// it splices back, since writing every overlaid field would let the last one clobber it.</summary>
+        public string? Active { get; set; }
+    }
 
     /// <summary>A comptime fixed-array value (Milestone T — comptime aggregates / lookup tables) —
     /// N element values, MUTABLE in place so a comptime <c>t[i] = v;</c> updates an element and a
@@ -73,6 +78,16 @@ internal sealed partial class IrModule
     /// just its payload, so this is the only optional value there is. <see cref="Type"/> is the optional
     /// (or pointer) type it was typed at; it splices back as <c>default(T)</c>.</summary>
     internal sealed record CtNull(CType Type) : ComptimeValue;
+
+    /// <summary>A comptime SLICE (the comptime engine, for std.fmt's format strings): a window of
+    /// <see cref="Length"/> elements of a comptime array starting at <see cref="Offset"/>. A string literal is a
+    /// byte array, so <c>fmt[a..b]</c>, <c>.len</c> and <c>fmt[i]</c> evaluate. <see cref="Type"/> is the slice
+    /// type; a byte slice splices back as a string literal.</summary>
+    internal sealed record CtSlice(CtArray Backing, long Offset, long Length, CType Type) : ComptimeValue;
+
+    /// <summary>A pointer to an element of a comptime array (a slice's <c>.Ptr</c>, moved by pointer
+    /// arithmetic): the one pointer the interpreter models, since it never leaves the array it points into.</summary>
+    internal sealed record CtElemPtr(CtArray Backing, long Index, CType Type) : ComptimeValue;
 
     /// <summary>The comptime engine's E3: comptime variables that outlive one evaluation, keyed by their
     /// <see cref="Symbol"/>. A Zig <c>comptime var s: S = .{…}</c> of an aggregate type lives here while its
@@ -93,7 +108,7 @@ internal sealed partial class IrModule
     /// value stored under a second name must not share them.</summary>
     private static ComptimeValue CloneComptime(ComptimeValue v) => v switch
     {
-        CtStruct s => new CtStruct(s.Fields.ToDictionary(kv => kv.Key, kv => CloneComptime(kv.Value)), s.Type),
+        CtStruct s => new CtStruct(s.Fields.ToDictionary(kv => kv.Key, kv => CloneComptime(kv.Value)), s.Type) { Active = s.Active },
         CtArray a => new CtArray(a.Elems.Select(CloneComptime).ToArray(), a.Element, a.Type),
         _ => v,
     };
@@ -225,6 +240,7 @@ internal sealed partial class IrModule
         CtStruct s => SpliceStruct(s),
         CtArray a => SpliceArray(a),
         CtNull n => new DefaultLit { Type = n.Type },
+        CtSlice sl => SpliceSlice(sl),
         _ => throw new IrUnsupportedException("comptime value cannot be spliced back (int/float/bool/struct/array)"),
     };
 
@@ -249,14 +265,53 @@ internal sealed partial class IrModule
         {
             throw new IrUnsupportedException("comptime struct value cannot be spliced (unknown struct type)");
         }
+        var isUnion = StructIsUnion.GetValueOrDefault(named.Name);
         var members = new List<FieldInit>();
         foreach (var f in fields)
         {
             if (f.Name.Length == 0) { continue; }                       // anonymous padding bit-field
+            if (isUnion && f.Name != s.Active) { continue; }            // an overlaid union: the active variant only
             if (!s.Fields.TryGetValue(f.Name, out var fv)) { continue; } // unsupplied → C# zero default
-            members.Add(new FieldInit(f.Name, f.Type, Splice(fv)));
+            // An enum field (a union's tag) takes its value as the enum type: C# has no implicit int → enum.
+            var spliced = Splice(fv);
+            if (f.Type.Unqualified is CType.Enum && fv is CtInt) { spliced = new Cast(f.Type, spliced) { Type = f.Type }; }
+            members.Add(new FieldInit(f.Name, f.Type, spliced));
         }
         return new StructInit(members) { Type = named };
+    }
+
+    /// <summary>Splice a comptime slice back. A byte slice (a comptime string, std.fmt's
+    /// <c>Placeholder.specifier_arg</c>) becomes a string literal viewed as the slice; any other element type is
+    /// not spliced yet.</summary>
+    private CExpr SpliceSlice(CtSlice sl)
+    {
+        if (sl.Type.Unqualified is not CType.Slice { Element: var elem }
+            || elem.Unqualified is not CType.Prim { Integer: true, Bytes: 1 })
+        {
+            throw new IrUnsupportedException("comptime slice value cannot be spliced (only a byte slice is, as a string)");
+        }
+        var sb = new System.Text.StringBuilder("\"");
+        for (var k = 0; k < sl.Length; k++)
+        {
+            var b = sl.Backing.Elems[sl.Offset + k] is CtInt ci ? (int)(ci.Value & 0xFF) : 0;
+            sb.Append("\\x").Append(b.ToString("X2", System.Globalization.CultureInfo.InvariantCulture));
+        }
+        sb.Append('"');
+        var segs = new List<string> { sb.ToString() };
+        DotCC.EmitHelpers.EncodeStringLiteral(segs, out var byteLen);
+        var lit = new LitStr(segs) { Type = new CType.Array(CType.Char, byteLen) };
+        var len = new LitInt(sl.Length.ToString(System.Globalization.CultureInfo.InvariantCulture), sl.Length) { Type = CType.ULong };
+        return new SliceNew(lit, len, elem, elem.IsConst) { Type = sl.Type };
+    }
+
+    /// <summary>A string literal as the comptime byte array it denotes (its NUL included, as its C type counts it).</summary>
+    private static CtArray StringBytes(LitStr ls)
+    {
+        var bytes = DotCC.EmitHelpers.StringByteValues(ls.Segments);
+        var count = ls.Type.Unqualified is CType.Array { Count: { } n } && n > bytes.Count ? n : bytes.Count + 1;
+        var elems = new ComptimeValue[count];
+        for (var k = 0; k < count; k++) { elems[k] = new CtInt(k < bytes.Count ? bytes[k] : 0, CType.UChar); }
+        return new CtArray(elems, CType.UChar, new CType.Array(CType.UChar, count));
     }
 
     /// <summary>The zero comptime value of a type — for an <c>undefined</c> / default-initialized
@@ -270,6 +325,13 @@ internal sealed partial class IrModule
         {
             if (p.Name == "_Bool") { return new CtBool(false); }
             return p.Integer ? new CtInt(System.Int128.Zero, t) : new CtFloat(0.0, t);
+        }
+        // An enum tag zeroes to its first value; an optional / pointer to null; a slice to the empty one.
+        if (u is CType.Enum) { return new CtInt(System.Int128.Zero, t); }
+        if (u is CType.Optional or CType.Pointer) { return new CtNull(t); }
+        if (u is CType.Slice { Element: var se })
+        {
+            return new CtSlice(new CtArray(System.Array.Empty<ComptimeValue>(), se, new CType.Array(se, 0)), 0, 0, t);
         }
         if (u is CType.Named named && StructFields.TryGetValue(named.Name, out var fields))
         {
@@ -391,6 +453,21 @@ internal sealed partial class IrModule
             case Unary u:
                 return EvalUnary(u);
 
+            // `s.Ptr + i` / `p - i`: an element pointer moves within its array.
+            case Binary { Op: BinOp.Add or BinOp.Sub, Left.Type: var plt } pb when plt?.Unqualified is CType.Pointer or CType.Array:
+            {
+                // An array operand (a string literal, `"abc" + 1`) decays to a pointer to its first element.
+                var leftPtr = EvalComptime(pb.Left) switch
+                {
+                    CtElemPtr ep => ep,
+                    CtArray arr => new CtElemPtr(arr, 0, new CType.Pointer(arr.Element)),
+                    _ => null,
+                };
+                if (leftPtr is not { } lp || EvalComptime(pb.Right) is not CtInt ptrStep) { return null; }
+                var moved = pb.Op == BinOp.Add ? lp.Index + (long)ptrStep.Value : lp.Index - (long)ptrStep.Value;
+                return new CtElemPtr(lp.Backing, moved, lp.Type);
+            }
+
             case Binary b:
                 return EvalBinary(b);
 
@@ -425,6 +502,14 @@ internal sealed partial class IrModule
                 return EvalComptimeStructInit(si);
 
             // `s.f`, and `p->f` through a pointer to a comptime struct (E1: the pointer is the struct).
+            case Member { Base.Type: var sbt, Field: "Ptr" or "Len" } sm when sbt?.Unqualified is CType.Slice:
+            {
+                if (EvalComptime(sm.Base) is not CtSlice slv) { return null; }
+                return sm.Field == "Len"
+                    ? new CtInt(slv.Length, CType.ULong)
+                    : new CtElemPtr(slv.Backing, slv.Offset, sm.Type);
+            }
+
             // An OPTIONAL's `.HasValue` / `.Value` (a lowered `orelse` / `if (opt) |x|`): a present optional
             // is its payload, an absent one a CtNull (E3).
             case Member { Base.Type: var obt, Field: "HasValue" or "Value" } om when obt?.Unqualified is CType.Optional:
@@ -454,9 +539,32 @@ internal sealed partial class IrModule
             // An array element read `t[i]` — the base is a comptime array, the index a comptime int.
             case Index ix:
             {
-                if (EvalComptime(ix.Base) is not CtArray arr || EvalComptime(ix.Idx) is not CtInt ixi) { return null; }
-                long n = (long)ixi.Value;
+                var (arr, start) = EvalComptime(ix.Base) switch
+                {
+                    CtArray a => (a, 0L),
+                    CtElemPtr ep => (ep.Backing, ep.Index),   // `s.Ptr[i]`, a slice's element
+                    CtSlice sl => (sl.Backing, sl.Offset),
+                    _ => ((CtArray?)null, 0L),
+                };
+                if (arr is null || EvalComptime(ix.Idx) is not CtInt ixi) { return null; }
+                long n = start + (long)ixi.Value;
                 return n >= 0 && n < arr.Elems.Length ? arr.Elems[n] : null;   // OOB → not foldable
+            }
+
+            // A string literal is its byte array; a slice is a window onto an array (std.fmt's format strings).
+            case LitStr ls:
+                return StringBytes(ls);
+
+            case SliceNew sliceNew:
+            {
+                var (backing, at) = EvalComptime(sliceNew.Ptr) switch
+                {
+                    CtArray a => (a, 0L),
+                    CtElemPtr ep => (ep.Backing, ep.Index),
+                    _ => ((CtArray?)null, 0L),
+                };
+                if (backing is null || EvalComptime(sliceNew.Len) is not CtInt sliceLen) { return null; }
+                return new CtSlice(backing, at, (long)sliceLen.Value, sliceNew.Type);
             }
 
             // A `[N]T` by-value return (Increment A's node) is transparent at comptime — the heap
@@ -490,6 +598,7 @@ internal sealed partial class IrModule
         {
             if (EvalComptime(fi.Value) is not { } v) { return null; }
             st.Fields[fi.Name] = RetypeTo(v, fi.FieldType);
+            st.Active = fi.Name;   // meaningful for a union payload: the variant written
         }
         return st;
     }

@@ -479,6 +479,22 @@ internal sealed partial class ZigLowering
     /// <c>const a = std.heap.page_allocator;</c> carry no runtime value, so they register the
     /// alias (<see cref="TryComptimeConstBinding"/>) and emit nothing (an empty <see cref="Seq"/>).
     /// Any other <c>const</c> is an ordinary <see cref="DeclOf"/>.</summary>
+    /// <summary>Bind <c>const x = comptime E</c> whose value is a struct or array into the interpreter's
+    /// comptime variables (see <see cref="DeclOrComptime"/>). False, with nothing bound, for any other value.</summary>
+    private bool TryBindComptimeAggregateConst(Item nameTok, Item? typeItem, Item initExpr)
+    {
+        var declared = typeItem is { } ti ? LowerType(ti) : null;
+        CExpr init;
+        using (EnterThrowawayHoist()) { init = declared is { } dt ? LowerExprSink(initExpr, dt) : LowerExpr(initExpr); }
+        if (init is not ComptimeFold { Resolved: StructInit or StackArray } || _ir.EvalComptimeValue(init) is not { } value)
+        {
+            return false;
+        }
+        var sym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = declared ?? init.Type });
+        _ir.ComptimeGlobals[sym] = value;
+        return true;
+    }
+
     private CStmt DeclOrComptime(Item nameTok, Item? typeItem, Item initExpr)
     {
         // `const add = switch (sign) { .pos => math.add, .neg => math.sub };` (std.fmt.parseIntWithSign):
@@ -491,6 +507,13 @@ internal sealed partial class ZigLowering
             return new Seq(new List<CStmt>());
         }
         if (TryComptimeConstBinding(Tok(nameTok), initExpr)) { return new Seq(new List<CStmt>()); }
+        // `const placeholder = comptime std.fmt.Placeholder.parse(…);`: a comptime AGGREGATE lives in the
+        // interpreter, like a `comptime var` of one (E3), so a later comptime read (`switch (placeholder.arg)`)
+        // folds; a runtime read renders it where it stands.
+        if (initExpr.Content is Zig.PreComptime && TryBindComptimeAggregateConst(nameTok, typeItem, initExpr))
+        {
+            return new Seq(new List<CStmt>());
+        }
         // `const is_comptime = @TypeOf(x) == comptime_int;` (std.math.cast): a TYPE comparison (or a comptime
         // tag test) is a comptime bool with no runtime operands to hold, so it binds the folded literal.
         if (typeItem is null && TryFoldComptimeCondition(initExpr) is { } flag)

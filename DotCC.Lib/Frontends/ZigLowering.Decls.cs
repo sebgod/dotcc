@@ -1730,6 +1730,9 @@ internal sealed partial class ZigLowering
             $"expected a slice, array, or `&array` operand, got {e.Type.Describe()}"),
     };
 
+    /// <summary>A length literal (<c>usize</c>).</summary>
+    private static LitInt ZigLen(int n) => new(n.ToString(CultureInfo.InvariantCulture), n) { Type = CType.ULong };
+
     /// <summary>Lower a slice expression <c>base[lo..hi]</c> to a fat-pointer
     /// <see cref="SliceNew"/> <c>{ base.ptr + lo, hi - lo }</c>. When <paramref name="hi"/> is
     /// null the slice is open-ended (<c>base[lo..]</c>) and the high bound is the source length:
@@ -1760,8 +1763,9 @@ internal sealed partial class ZigLowering
             case CType.Array a:
                 basePtr = baseExpr;   // decays to its element pointer
                 element = a.Element;
+                // A string literal's C array counts its NUL; zig's `"abc".len` (and so `s[1..]`'s end) does not.
                 sourceLen = a.Count is int n
-                    ? new LitInt(n.ToString(CultureInfo.InvariantCulture), n) { Type = CType.ULong }
+                    ? ZigLen(IsStringLiteralValue(baseExpr) ? n - 1 : n)
                     : null;
                 break;
             default:
