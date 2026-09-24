@@ -259,7 +259,15 @@ internal sealed partial class ZigLowering
         {
             throw new IrUnsupportedException($"zig `@compileError` expects (message); got {args.Count} argument(s)");
         }
-        throw new IrUnsupportedException("zig `@compileError`: " + (ComptimeMessageText(args[0]) ?? UnreadableMessage));
+        if (ComptimeMessageText(args[0]) is { } message)
+        {
+            throw new IrUnsupportedException("zig `@compileError`: " + message);
+        }
+        // A message built from a RUNTIME value (`parser.specifier() catch |err| @compileError(@errorName(err))`
+        // in std.fmt.Placeholder.parse): zig accepts that only on a path it evaluates at comptime, and raises
+        // it only if the evaluation takes it. dotcc lowers such a body as runtime code too, so the arm
+        // becomes the `unreachable` trap, and the comptime interpreter stops if it ever reaches it.
+        return new Call("__dotcc_unreachable", new List<CExpr>(), new List<CType>(), null) { Type = CType.Void };
     }
 
     /// <summary>What a <c>@compileError</c> / <c>@compileLog</c> message reads as when it is not

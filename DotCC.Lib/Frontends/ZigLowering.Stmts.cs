@@ -2010,17 +2010,17 @@ internal sealed partial class ZigLowering
         _comptimeVars[capSym] = (value, bindType);
     }
 
-    private CExpr LowerIfCaptureExpr(Item condItem, string capName, Item thenItem, Item elseItem)
+    private CExpr LowerIfCaptureExpr(Item condItem, string capName, Item thenItem, Item elseItem, CType? sink = null)
     {
         // Comptime fold (S4b): if the condition is a comptime-known optional (a generic instance's
         // `comptime x: ?T` seed), select the taken branch NOW — no runtime test, no hoist. A comptime
         // `null` yields the else; a comptime-known payload yields the then with `x` bound to the literal.
         if (TryComptimeOptionalCond(condItem, out var copt))
         {
-            if (!copt.HasValue) { return LowerExpr(elseItem); }
+            if (!copt.HasValue) { return LowerCaptureBranch(elseItem, sink, _hoist); }
             _symbols.EnterScope();
             BindFoldedCapture(capName, copt.Value, copt.Inner);
-            var folded = LowerExpr(thenItem);
+            var folded = LowerCaptureBranch(thenItem, sink, _hoist);
             _symbols.ExitScope();
             return folded;
         }
@@ -2073,11 +2073,12 @@ internal sealed partial class ZigLowering
             var capSym = _symbols.Declare(new Symbol { Name = capName, Kind = SymKind.Var, Type = payloadType });
             thenStmts.Add(new DeclStmt(new List<LocalDecl> { new(capSym, payloadInit) }));
         }
-        var thenVal = LowerExpr(thenItem);
+        var thenVal = LowerCaptureBranch(thenItem, sink, thenStmts);
         _symbols.ExitScope();
 
-        var elseVal = LowerExpr(elseItem);
-        var resultType = thenVal.Type;
+        var elseStmts = new List<CStmt>();
+        var elseVal = LowerCaptureBranch(elseItem, sink, elseStmts);
+        var resultType = sink ?? thenVal.Type;
 
         // A result temp (declared before the statement), assigned by each branch of a real `if`.
         var resSym = _symbols.Declare(new Symbol { Name = "__ifcap" + _anfTempCounter++, Kind = SymKind.Var, Type = resultType });
@@ -2085,12 +2086,27 @@ internal sealed partial class ZigLowering
         buf.Add(new DeclStmt(new List<LocalDecl> { new(resSym, new DefaultLit { Type = resultType }) }));
         var resRef = new VarRef(resSym) { Type = resultType, IsLValue = true };
         thenStmts.Add(new ExprStmt(new Assign(null, resRef, thenVal) { Type = resultType }));
-        var elseBlock = new Block(new List<CStmt>
-        {
-            new ExprStmt(new Assign(null, resRef, elseVal) { Type = resultType }),
-        });
-        buf.Add(new If(test, new Block(thenStmts), elseBlock));
+        elseStmts.Add(new ExprStmt(new Assign(null, resRef, elseVal) { Type = resultType }));
+        buf.Add(new If(test, new Block(thenStmts), new Block(elseStmts)));
         return new VarRef(resSym) { Type = resultType };
+    }
+
+    /// <summary>One arm's value of a value-position capture <c>if</c>, at the result type when there is one.
+    /// A labeled value block (<c>if (p.peek(0)) |b| init: { …; break :init .left; } else null</c>, std.fmt's
+    /// Placeholder.parse) needs statements: they go to <paramref name="into"/>, ahead of the arm's
+    /// assignment, and the value is the block's result temp.</summary>
+    private CExpr LowerCaptureBranch(Item item, CType? sink, List<CStmt>? into)
+    {
+        if (item.Content is not Zig.LabeledBlock lb) { return sink is { } s ? LowerExprSink(item, s) : LowerExpr(item); }
+        if (into is null) { throw new IrUnsupportedException("a labeled value block as a folded `if` arm needs a statement position"); }
+        Symbol? result = null;
+        into.Add(LowerLabeledValueBlock(Tok(lb.Arg0), lb.Arg2, sink, temp =>
+        {
+            result = temp;
+            return new Seq(new List<CStmt>());
+        }));
+        return result is { } r ? new VarRef(r) { Type = r.Type }
+            : throw new IrUnsupportedException("internal: a labeled value block produced no result");
     }
 
     /// <summary>Lower an optional capture-<c>while</c> <c>while (opt) |x| body</c> (Milestone M, part
@@ -2594,8 +2610,11 @@ internal sealed partial class ZigLowering
     /// the top of that prong's block. The subject is hoisted to a temp first (unless it is already a
     /// simple variable) so each capture re-reads it without re-evaluating a side-effecting subject
     /// expression.</summary>
-    private CStmt LowerUnionSwitch(CExpr subject, Item prongsItem, ZigUnionInfo info)
+    private CStmt LowerUnionSwitch(CExpr subject, Item prongsItem, ZigUnionInfo info, Func<Item, CStmt>? fillValue = null)
     {
+        // A VALUE switch (`const n: u8 = switch (spec) { .none => 1, .number => |v| v * 4 };`) passes
+        // `fillValue`: each prong's value expression fills the result temp instead of being a statement.
+        CStmt ProngValue(Item valueItem) => fillValue is { } fill ? fill(valueItem) : new ExprStmt(LowerExpr(valueItem));
         var isPtr = subject.Type.Unqualified is CType.Pointer;
         var pre = new List<CStmt>();
         CExpr unionRef;
@@ -2620,7 +2639,7 @@ internal sealed partial class ZigLowering
             {
                 RejectUnionRange(pe.Arg0, info);
                 var exprLabels = LowerCaseVals(pe.Arg0, info.TagType);
-                var peBody = new List<CStmt> { new ExprStmt(LowerExpr(pe.Arg2)) };
+                var peBody = new List<CStmt> { ProngValue(pe.Arg2) };
                 if (!EndsInJump(peBody)) { peBody.Add(new Break()); }
                 sections.Add(new SwitchSection(exprLabels, peBody));
                 continue;
@@ -2678,7 +2697,7 @@ internal sealed partial class ZigLowering
             // sits in the same scope); the other forms are a single statement.
             List<CStmt> LowerProngBody() =>
                 blockBody is not null    ? new List<CStmt>(LowerBlock(blockBody).Stmts)
-                : exprBody is not null   ? new List<CStmt> { new ExprStmt(LowerExpr(exprBody)) }
+                : exprBody is not null   ? new List<CStmt> { ProngValue(exprBody) }
                 : returnBody is not null ? new List<CStmt> { Hoisted(() => LowerReturn(returnBody)) }
                 : voidReturn             ? new List<CStmt> { LowerReturnVoid() }
                 : jumpBody is not null   ? new List<CStmt> { LowerProngJump(jumpBody) }
@@ -3052,8 +3071,8 @@ internal sealed partial class ZigLowering
     private static bool IsValueControlFlowStmt(Item rhs) => rhs.Content switch
     {
         Zig.IfExpr e             => e.Arg4.Content is Zig.LabeledBlock || e.Arg6.Content is Zig.LabeledBlock,
-        Zig.SwitchExpr s         => SwitchExprNeedsStmt(s.Arg5),
-        Zig.SwitchExprTrailing s => SwitchExprNeedsStmt(s.Arg5),
+        Zig.SwitchExpr s         => SwitchExprNeedsStmt(s.Arg5, s.Arg2),
+        Zig.SwitchExprTrailing s => SwitchExprNeedsStmt(s.Arg5, s.Arg2),
         // `comptime switch` / `comptime if`: the inner form decides. The `comptime` asks zig to evaluate
         // it at compile time; dotcc's lowering already folds the arm whenever the subject is
         // comptime-known, and a runtime subject (which zig rejects here) keeps its runtime lowering.
@@ -3067,8 +3086,9 @@ internal sealed partial class ZigLowering
 
     /// <summary>True when any prong of a switch EXPRESSION needs statements to yield its value — a
     /// block-bodied (<c>=&gt; { … }</c>) or capturing (<c>=&gt; |x| { … }</c>) prong, or a bare-expr
-    /// prong whose value is itself a labeled value-block (<c>=&gt; blk: { … break :blk v; }</c>).</summary>
-    private static bool SwitchExprNeedsStmt(Item prongsItem) =>
+    /// prong whose value is itself a labeled value-block (<c>=&gt; blk: { … break :blk v; }</c>), or a <c>|v| expr</c>
+    /// capture prong over a runtime <paramref name="subjectItem"/> (a union's payload).</summary>
+    private static bool SwitchExprNeedsStmt(Item prongsItem, Item subjectItem) =>
         Flatten(prongsItem).Any(p => p.Content switch
         {
             Zig.Prong or Zig.ProngCapture or Zig.ProngCaptureRef => true,
@@ -3076,6 +3096,10 @@ internal sealed partial class ZigLowering
             // `else => return error.InvalidCharacter` (std.fmt.charToDigit): a returning arm is a statement too.
             Zig.ProngReturn or Zig.ProngReturnVoid or Zig.ProngCaptureReturn or Zig.ProngCaptureReturnVoid => true,
             Zig.ProngExpr pe => pe.Arg2.Content is Zig.LabeledBlock,
+            // `.number => |v| v * 4` over a union: the capture binds a payload, which needs a statement. Over a
+            // comptime `@typeInfo(T)` the capture is folded where the expression lowers, so it stays one.
+            Zig.ProngCaptureExpr or Zig.ProngCaptureRefExpr or Zig.ProngCaptureTagExpr
+                => subjectItem.Content is not Zig.BuiltinCall { Arg0: var sb } || Tok(sb) != "@typeInfo",
             _ => false,
         });
 
@@ -3263,10 +3287,9 @@ internal sealed partial class ZigLowering
             CType.Pointer { Pointee: var pe } when pe.Unqualified is CType.Named pn => pn.Name,
             _ => null,
         };
-        if (uname is not null && _unions.ContainsKey(uname))
+        if (uname is not null && _unions.TryGetValue(uname, out var valueUnion))
         {
-            throw new IrUnsupportedException(
-                "a tagged-union value-switch with block prongs (`const x = switch (u) { .v => blk: {…} }`) is not supported yet");
+            return LowerUnionSwitch(subject, prongsItem, valueUnion, item => FillValueTemp(item, rt));
         }
         // A `|x|` prong capture of a plain (non-union) subject binds the subject's own value — the
         // `else => |e| return e` idiom that ends most `catch |err| switch (err) {…}` blocks in std. The
@@ -3404,7 +3427,11 @@ internal sealed partial class ZigLowering
                 if (_currentFnHasErrdefer) { return new ZigErrorThrow(codeLit); }
                 return new Return(new ErrUnionErr(codeLit) { Type = eu });
             }
-            var v = LowerExpr(valueItem);
+            // A result-located literal (`return .{ .named = arg_name };` in std.fmt.Parser.specifier, a `!Specifier`)
+            // takes the payload type; anything else keeps its own (a call may return the error union itself).
+            var v = valueItem.Content is Zig.AnonStructInit or Zig.AnonStructInitEmpty or Zig.EnumLit
+                ? LowerExprSink(valueItem, eu.Payload)
+                : LowerExpr(valueItem);
             if (v.Type.Unqualified is CType.ErrorUnion) { return new Return(v); }
             // `return e;` where `e` is an error VALUE (a `catch |e|` / `else => |e|` capture) — an ERROR
             // return of that runtime code, not a success wrapping it as the payload. (Unless the payload

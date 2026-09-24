@@ -276,6 +276,8 @@ symbols:
   - ReturnArm      # 174 `return Expr` as the THEN arm of an `if` statement with an `else` (zig's then-arm is an
                    #     expression, so no `;`): `if (c) return 1 else return 2;`, std.meta.eql's
                    #     `if (b) |b_p| return eql(a_p, b_p) else |_| return false;`.
+  - FieldValue     # 175 the value of a named field init: an Expr, or the void value `{}` (`.{ .none = {} }`,
+                   #     std.fmt.Parser.specifier's `return .{ .none = {} };`).
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -1261,6 +1263,12 @@ productions:
       - { lhs: Arg, rhs: [Expr] }
       - { lhs: Arg, rhs: ['{', '}'], action: voidArg }
 
+  # A named field init's value: an Expr, or `{}` (void; `{` is not in FIRST(Expr), so conflict-free).
+  - derivation: none
+    rules:
+      - { lhs: FieldValue, rhs: [Expr] }
+      - { lhs: FieldValue, rhs: ['{', '}'], action: voidValue }
+
   # ===== switch prongs (Milestone C2) =====
   # LEFT-recursive prong list — the form that makes the optional trailing comma a clean
   # 1-token shift decision (`Prongs ','` then `}` → trailing-comma Stmt, else another Prong).
@@ -1527,7 +1535,7 @@ productions:
 
   - derivation: none
     rules:
-      - { lhs: FieldInit, rhs: ['.', IDENT, '=', Expr], action: fieldInit }
+      - { lhs: FieldInit, rhs: ['.', IDENT, '=', FieldValue], action: fieldInit }
       # Positional element (Milestone G) — a tuple init `.{ a, b }` reuses the SAME FieldInits
       # list as the named struct init `.{ .f = v }` (the surface is identical until the first
       # element). Lowering rejects a literal that MIXES positional + named. A named `.IDENT =`

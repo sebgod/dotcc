@@ -831,9 +831,21 @@ vector length feeds TYPES.
   `x orelse label: {…}` fallback arm (parse + lowering, runs only on null), `orelse` over a comptime-known
   optional folds, and the interpreter runs forward `goto` / labeled statements (a labeled value block),
   optional `.HasValue` / `.Value`, `orelse`, and `@popCount` / `@clz` / `@ctz`. The "did not evaluate"
-  error now names the call and where the interpreter stopped. Next on bufPrint: the rest of
-  `Writer.print` (`Placeholder.parse`, `printValue`). The typed `builtin.cpu` value (T3) reuses the same
-  persistence.
+  error now names the call and where the interpreter stopped. The typed `builtin.cpu` value (T3) reuses the
+  same persistence.
+- **bufPrint, `Placeholder.parse` from source ✅ (2026-09-24):** `std.fmt.Placeholder.parse(…)` is a static
+  call through a type another LAZY module declares (declared and instantiated in its owner, so its body sees
+  fmt's own `Parser`); `fmt[a..b].*` / `&arr` stay comptime strings; `std.fmt.Parser` parses now
+  (`.{ .none = {} }`: a `FieldValue` nonterminal, symbol 175); a `@compileError` whose message is built from a
+  runtime value lowers to the `unreachable` trap (zig only raises it on a comptime path that takes it); a
+  capture `if` in value position takes the result sink and may have a labeled-block arm; an enum literal at an
+  optional sink; the untyped `const default_alignment = .right;` typed by its reader; the union layout table
+  is shared across modules; a value switch over a union fills its result through the statement union switch
+  (a `|v|` capture prong included), which retires the "tagged-union value-switch with block prongs" cut;
+  `x catch unreachable` in value position renders a C# `throw` expression. Multi-file oracle
+  `fmt_parse_shapes`; unit `ZigFmtParseShapesTests`. **Walls next:** `Writer.print`'s `comptime switch
+  (placeholder.arg)` over a comptime UNION value, and a runtime `Placeholder.parse` reaches
+  `std.mem.findScalarPos`'s `@Vector` path (T5).
 - **T5** `@Vector(N, T)` → `Vector128<T>` / `Vector256<T>`, with `@splat`, element-wise ops, `@reduce`.
 
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)

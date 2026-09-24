@@ -630,7 +630,10 @@ internal sealed partial class ZigLowering
     /// from another module (<c>std.atomic.cache_line</c>); null when it declares no such const.</summary>
     internal CExpr? LowerExportedValueConst(string name) => LowerLazyValueConst(name);
 
-    private CExpr? LowerLazyValueConst(string name)
+    /// <summary>Lower a lazy module's top-level value const <paramref name="name"/> where it is read. An
+    /// UNTYPED one takes <paramref name="useSink"/>, the reader's result type: `const default_alignment =
+    /// .right;` in std.fmt is an enum literal that only its use can type.</summary>
+    private CExpr? LowerLazyValueConst(string name, CType? useSink = null)
     {
         if (!_lazy || !_lazyValueConsts.TryGetValue(name, out var vc)) { return null; }
         if (!_lazyValueConstsInProgress.Add(name))
@@ -647,7 +650,7 @@ internal sealed partial class ZigLowering
                     ? new LitInt(ct.ToString(System.Globalization.CultureInfo.InvariantCulture), ct) { Type = CType.Long }
                     : throw new IrUnsupportedException($"zig `const {name}: comptime_int` must be compile-time-known");
             }
-            var sink = vc.typeItem is { } t ? LowerType(t) : null;
+            var sink = vc.typeItem is { } t ? LowerType(t) : useSink;
             return LowerExprSink(vc.rhs, sink);
         }
         finally
@@ -959,7 +962,7 @@ internal sealed partial class ZigLowering
     /// memory model (correct size). A union with only void variants has no <c>__payload</c> (it is
     /// just a tag). Holds what construction (<see cref="BuildUnionInit"/>) and a union
     /// <c>switch</c> (<see cref="LowerUnionSwitch"/>) need.</summary>
-    private sealed record ZigUnionInfo(
+    internal sealed record ZigUnionInfo(
         string Name,                    // the outer discriminated-union struct name (`U`)
         CType.Enum TagType,             // the tag enum — auto-synthesized `U_Tag`, or a named `union(SomeEnum)` enum
         string TagFieldName,
@@ -968,7 +971,7 @@ internal sealed partial class ZigLowering
         IReadOnlyDictionary<string, CType?> Variants);  // variant name → payload type (null = void)
 
     /// <summary>Registered tagged unions: the union struct name → its <see cref="ZigUnionInfo"/>.</summary>
-    private readonly Dictionary<string, ZigUnionInfo> _unions = new(System.StringComparer.Ordinal);
+    private Dictionary<string, ZigUnionInfo> _unions => _shared.Unions;   // shared: a switch in one module over another's union
 
     /// <summary>Module-import aliases (Milestone F): the bound name of a <c>const X =
     /// @import("std");</c> → the module string (<c>"std"</c>). Comptime — no runtime decl is

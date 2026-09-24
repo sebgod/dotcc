@@ -1850,8 +1850,12 @@ internal sealed class CSharpBackend
                             or BinOp.Le or BinOp.Ge or BinOp.LogAnd or BinOp.LogOr };
                     }
                     var cboolMismatch = t.Type.IsArithmetic && CBoolRendered(t.Then) != CBoolRendered(t.Else);
+                    // An `unreachable` arm (zig's `x catch unreachable`, lowered to a ternary on the error
+                    // test) is a C# throw expression: the void call has no value to give the other arm's type.
                     string Arm(CExpr a) => NoHoist(() =>
-                        cboolMismatch && CBoolRendered(a)
+                        IsUnreachableCall(a)
+                            ? "throw new System.Diagnostics.UnreachableException(\"unreachable() reached\")"
+                            : cboolMismatch && CBoolRendered(a)
                             ? CoercionCast(a, Cs(t.Type))
                             : t.Type.IsArithmetic && a.Type.IsArithmetic && Cs(a.Type.Unqualified) != Cs(t.Type)
                             ? CoercionCast(a, Cs(t.Type))

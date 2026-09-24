@@ -501,6 +501,10 @@ internal sealed partial class ZigLowering
             case Zig.Deref d:
             {
                 var operand = LowerExpr(d.Arg0);
+                // `s[a..b].*` (std.fmt's `specifier_arg[0..specifier_arg.len].*`): zig allows it only for a
+                // comptime-known length and yields an array COPY. Bound to a `const`, the copy is never
+                // written, so the slice itself stands for it; `&copy` coerces back (CoerceToSlice).
+                if (operand.Type.Unqualified is CType.Slice) { return operand; }
                 var pointee = operand.Type.Unqualified switch
                 {
                     CType.Pointer p => p.Pointee,
@@ -650,7 +654,10 @@ internal sealed partial class ZigLowering
                 {
                     return known is DefaultLit ? LowerExpr(o.Arg2) : known;
                 }
-                var right = LowerExpr(o.Arg2);
+                // The fallback is at the payload's result type (`alignment orelse default_alignment`, an enum literal).
+                var right = left.Type.Unqualified is CType.Optional { Inner: var fallbackSink }
+                    ? LowerExprSink(o.Arg2, fallbackSink)
+                    : LowerExpr(o.Arg2);
                 if (left.Type.Unqualified is CType.Optional opt)
                 {
                     return new NullCoalesce(left, right) { Type = opt.Inner };
@@ -888,6 +895,10 @@ internal sealed partial class ZigLowering
         Zig.SliceRange sr => TrySliceComptimeString(sr.Arg0, sr.Arg2, sr.Arg4),
         Zig.SliceOpen so => TrySliceComptimeString(so.Arg0, so.Arg2, null),
         Zig.Grouped g => EvalComptimeValue(g.Arg1),   // `(expr)` — unwrap so a parenthesized fold composes
+        // `fmt[a..b].*` (a comptime slice deref'd to its array) and `&arr` of one (std.Io.Writer.print's
+        // `Placeholder.parse(&placeholder_array)`): the same bytes, still a comptime string.
+        Zig.Deref d => EvalComptimeValue(d.Arg0) as LitStr,
+        Zig.PreAddrOf a => EvalComptimeValue(a.Arg1) as LitStr,
         Zig.Concat c => TryFoldStringConcat(c.Arg0, c.Arg2),
         Zig.Repeat r => TryFoldStringRepeat(r.Arg0, r.Arg2),
         Zig.BuiltinCall b => TryEvalTypeNameBuiltin(b),   // `@typeName(T)` → comptime string (else null)
@@ -1371,6 +1382,19 @@ internal sealed partial class ZigLowering
                 throw new IrUnsupportedException($"'{qualifiedName}' has no function '{methodName}'");
             }
             return CallStaticMethod(qStaticSym, argItems);
+        }
+        // (A1b) `std.fmt.Placeholder.parse(…)` — a static call through a type ANOTHER module declares, named by
+        // its module path. Also from a lazy module: this is body lowering, never a lazy module's pass 0, so
+        // resolving the path lowers only what the call needs.
+        if (fld.Arg0.Content is Zig.Field && !IsCuratedStdPath(fld.Arg0)
+            && TryResolveModuleNestedType(fld.Arg0) is { Type: var moduleTy, Owner: var tyOwner } && ContainerTypeName(moduleTy) is { } moduleTyName)
+        {
+            // Declared in the module that owns the type, so its body (and a generic's instances) resolve there.
+            if ((tyOwner.EnsureMethodDeclared(moduleTyName, methodName) ?? tyOwner.ContainerFnConst(moduleTyName, methodName)) is not { } mStaticSym)
+            {
+                throw new IrUnsupportedException($"'{moduleTyName}' has no function '{methodName}'");
+            }
+            return CallStaticMethod(mStaticSym, argItems);
         }
 
         // (A2) `Generic(args).func(…)` — the base is a call to a type-returning generic (wall-plan W4),

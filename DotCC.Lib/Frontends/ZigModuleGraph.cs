@@ -89,6 +89,11 @@ internal sealed class ZigImportScope
     /// const where it was declared.</summary>
     public Dictionary<string, ZigLowering> ContainerConstOwners { get; } = new(StringComparer.Ordinal);
 
+    /// <summary>Every tagged union's layout by its (module-qualified) IR name, so a module that switches on
+    /// or builds another module's union (`switch (placeholder.arg) { .none => … }` in Io/Writer.zig over
+    /// std.fmt.Specifier) knows it is one.</summary>
+    public Dictionary<string, ZigLowering.ZigUnionInfo> Unions { get; } = new(StringComparer.Ordinal);
+
     private readonly Dictionary<string, string> _modulePrefixes = new(StringComparer.Ordinal);
     private readonly HashSet<string> _usedPrefixes = new(StringComparer.Ordinal);
 

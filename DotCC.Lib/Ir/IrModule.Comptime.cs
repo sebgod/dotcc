@@ -706,6 +706,10 @@ internal sealed partial class IrModule
             };
             return new CtInt(count, CType.Int);
         }
+        if (c.Callee == "__dotcc_unreachable")
+        {
+            throw new ComptimeAbort("`unreachable` (or a `@compileError` on a path the evaluation took)");
+        }
         if (!_comptimeAllowCalls || c.CalleeSym is not { } cs)
         {
             ComptimeMiss ??= $"a call to '{c.Callee}' (not a function the interpreter runs)";

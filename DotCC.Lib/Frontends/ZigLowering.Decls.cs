@@ -1326,6 +1326,11 @@ internal sealed partial class ZigLowering
         {
             throw new IrUnsupportedException($"union '{info.Name}' has no variant '{variant}'");
         }
+        // `.{ .none = {} }` (std.fmt.Parser.specifier): a void variant given the void value is the bare `.none`.
+        if (payloadType is null && fi.Arg3.Content is Zig.VoidValue)
+        {
+            return BuildVoidVariant(info, variant);
+        }
         if (payloadType is null)
         {
             throw new IrUnsupportedException(
@@ -1443,6 +1448,15 @@ internal sealed partial class ZigLowering
     {
         switch (expr.Content)
         {
+            // A lazy module's UNTYPED top-level const read at a sink (`alignment: Alignment = default_alignment`
+            // with `const default_alignment = .right;`): the reader's type is the const's.
+            case Zig.Ident lid when sink is not null && _lazy && _symbols.Resolve(Tok(lid.Arg0)) is null
+                                    && LowerLazyValueConst(Tok(lid.Arg0), sink) is { } lazyAtSink:
+                return lazyAtSink;
+            // `.left` at a `?Alignment` sink (std.fmt.Placeholder.parse): the literal is the payload's, which
+            // the optional then wraps.
+            case Zig.EnumLit when sink?.Unqualified is CType.Optional { Inner: var optPayload }:
+                return LowerExprSink(expr, optPayload);
             // A bare `.variant` at a tagged-union sink constructs its VOID variant (set the tag).
             case Zig.EnumLit el when sink?.Unqualified is CType.Named n && _unions.TryGetValue(n.Name, out var uinfo):
                 return BuildVoidVariant(uinfo, Tok(el.Arg1));
@@ -1490,6 +1504,9 @@ internal sealed partial class ZigLowering
             // subject already selects one arm at lowering time.
             case Zig.ComptimeSwitchExpr c: return LowerExprSink(c.Arg1, sink);
             case Zig.ComptimeIfExpr c:     return LowerExprSink(c.Arg1, sink);
+            // A value-position capture `if` with a result type (`const a: ?Alignment = if (x) |b| … else null;`).
+            case Zig.IfExprCapture ec when sink is not null:
+                return LowerIfCaptureExpr(ec.Arg2, Tok(ec.Arg5), ec.Arg7, ec.Arg9, sink);
             // `comptime e` keeps its result location (hash_map's `const max_align: Alignment = comptime
             // .fromByteUnits(…);`, a decl literal that needs the sink to resolve), then folds as LowerExpr's does.
             case Zig.PreComptime pc when sink is not null:
@@ -1576,6 +1593,13 @@ internal sealed partial class ZigLowering
         // count comes from the array type. (A bare `*[N]T` pointer VALUE that isn't a literal `&arr`
         // is rarer; it falls through to the array check below and reports a clear coercion error.)
         if (PointedArray(value) is ({ } arr, _)) { value = arr; }
+        // `&copy` of a slice's array copy (see the `.*` lowering): the slice itself.
+        if (value is Unary { Op: UnOp.AddrOf, Operand: { Type: var copyType } copy }
+            && copyType.Unqualified is CType.Slice copySlice
+            && copySlice.Element.Unqualified.Equals(sliceType.Element.Unqualified))
+        {
+            return copy;
+        }
         if (value.Type.Unqualified is not CType.Array { Count: { } n })
         {
             throw new IrUnsupportedException(

@@ -3923,6 +3923,65 @@ public sealed class ZigOracleTests
             "        }\n" +
             "    };\n" +
             "};\n", 42, "" },
+        // std.fmt.Placeholder.parse's shapes, in an imported (lazy) module: `.{ .none = {} }` for a void variant, a
+        // `!Spec` literal return, an untyped `const default_mode = .right;` read at a field default and after
+        // `orelse`, a value `if (r.peek()) |c| blk: {...} else null` at a `?Mode` sink, a value switch over a union
+        // with a `|v|` capture prong, and `catch unreachable`. (20 + 10) + (1 + 0) + 11 = 42.
+        new object[] { "fmt_parse_shapes",
+            "const p = @import(\"spec.zig\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = p.parse(\"5<\");\n" +
+            "    const b = p.parse(\"x\");\n" +
+            "    return a.total() + b.total() + 11;\n" +
+            "}\n",
+            "spec.zig",
+            "const default_mode = .right;\n" +
+            "pub const Mode = enum { left, center, right };\n" +
+            "pub const Spec = union(enum) { none, number: u8 };\n" +
+            "const Reader = struct {\n" +
+            "    bytes: []const u8,\n" +
+            "    i: usize,\n" +
+            "    fn peek(self: *Reader) ?u8 {\n" +
+            "        return if (self.i < self.bytes.len) self.bytes[self.i] else null;\n" +
+            "    }\n" +
+            "    fn number(self: *Reader) !Spec {\n" +
+            "        if (self.peek()) |c| {\n" +
+            "            if (c >= '0' and c <= '9') {\n" +
+            "                self.i += 1;\n" +
+            "                return .{ .number = c - '0' };\n" +
+            "            }\n" +
+            "        }\n" +
+            "        return .{ .none = {} };\n" +
+            "    }\n" +
+            "};\n" +
+            "pub const Result = struct {\n" +
+            "    spec: Spec,\n" +
+            "    mode: Mode = default_mode,\n" +
+            "    pub fn total(self: Result) u8 {\n" +
+            "        const n: u8 = switch (self.spec) {\n" +
+            "            .none => 1,\n" +
+            "            .number => |v| v * 4,\n" +
+            "        };\n" +
+            "        const m: u8 = switch (self.mode) {\n" +
+            "            .left => 10,\n" +
+            "            .center => 20,\n" +
+            "            .right => 0,\n" +
+            "        };\n" +
+            "        return n + m;\n" +
+            "    }\n" +
+            "};\n" +
+            "pub fn parse(bytes: []const u8) Result {\n" +
+            "    var r: Reader = .{ .bytes = bytes, .i = 0 };\n" +
+            "    const spec = r.number() catch unreachable;\n" +
+            "    const mode: ?Mode = if (r.peek()) |c| blk: {\n" +
+            "        switch (c) {\n" +
+            "            '<' => break :blk .left,\n" +
+            "            '^' => break :blk .center,\n" +
+            "            else => break :blk null,\n" +
+            "        }\n" +
+            "    } else null;\n" +
+            "    return .{ .spec = spec, .mode = mode orelse default_mode };\n" +
+            "}\n", 42, "" },
         // Module-qualified type paths from user code: a static call through `h.H` (`h.H.hash(0, 0)`) and a type
         // alias rooted at an inline import (`const H2 = @import("h.zig").H;`). 42 + 41 - 41 = 42.
         new object[] { "module_qualified_type_paths",
