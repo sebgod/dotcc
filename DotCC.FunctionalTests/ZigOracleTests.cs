@@ -3934,14 +3934,13 @@ public sealed class ZigOracleTests
             "    const a = comptime st.nextArg(arg_pos) orelse @compileError(\"too few arguments\");\n" +
             "    return @intCast(a + 42);\n" +
             "}\n", 42, "" },
-        // `@field(args, field_names[i])` over a tuple (std.Io.Writer.print), and std.math.cast's comptime-settled
-        // `is_comptime or …` whose right side is never analysed. 41 + 1, then 42.
+        // `@field(args, "1")` over a tuple (std.Io.Writer.print names a field by position), and std.math.cast's
+        // comptime-settled `is_comptime or …` whose right side is never analysed. 41 + 1, then 42. The name is a
+        // literal, not `field_names[i]`: CI's zig 0.16.0 spells the member list `fields`, 0.17-dev `field_names`
+        // (the list-index form is unit-pinned in ZigFormatEngineTests).
         new object[] { "tuple_field_by_name",
             "fn pick(args: anytype) u8 {\n" +
-            "    const info = @typeInfo(@TypeOf(args));\n" +
-            "    const field_names = info.@\"struct\".field_names;\n" +
-            "    const i = 1;\n" +
-            "    return @field(args, field_names[i]);\n" +
+            "    return @field(args, \"1\");\n" +
             "}\n" +
             "pub fn main() u8 {\n" +
             "    return pick(.{ @as(u8, 1), @as(u8, 41) }) + 1;\n" +
