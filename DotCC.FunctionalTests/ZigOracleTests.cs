@@ -5133,6 +5133,50 @@ public sealed class ZigOracleTests
             "    total += empty.firstSet() orelse 7;\n" +
             "    return @truncate(total);\n" +
             "}\n", 118, "" },
+        // Task #90 (std.crypto.sha2 shapes): inline `asm` in a prong whose comptime condition folds false (parsed, never lowered),
+        // a comptime ARRAY argument to a type-returning generic read from a const global, an implicitly comptime
+        // `comptime_int` parameter, `align(N)` fields, and `inline for` over a comptime array value.
+        new object[] { "asm_dead_prong_comptime_array_param",
+            "const builtin = @import(\"builtin\");\n" +
+            "\n" +
+            "const Seed = [4]u32;\n" +
+            "const seed_a = Seed{ 3, 5, 7, 11 };\n" +
+            "\n" +
+            "const Param = struct { a: usize, k: u32 };\n" +
+            "\n" +
+            "fn Mixer(comptime seed: Seed, rounds: comptime_int) type {\n" +
+            "    return struct {\n" +
+            "        const Self = @This();\n" +
+            "        s: [4]u32 align(16),\n" +
+            "        count: u32 align(8) = 0,\n" +
+            "\n" +
+            "        fn init() Self {\n" +
+            "            return .{ .s = seed };\n" +
+            "        }\n" +
+            "\n" +
+            "        fn step(self: *Self) void {\n" +
+            "            const params = comptime [_]Param{ .{ .a = 0, .k = 1 }, .{ .a = 2, .k = 3 } };\n" +
+            "            inline for (params) |p| {\n" +
+            "                self.s[p.a] = self.s[p.a] *% 31 +% p.k;\n" +
+            "            }\n" +
+            "            switch (builtin.cpu.arch) {\n" +
+            "                .x86_64, .aarch64 => if (builtin.zig_backend == .stage2_c) {\n" +
+            "                    asm volatile (\"nop\");\n" +
+            "                    return;\n" +
+            "                },\n" +
+            "                else => {},\n" +
+            "            }\n" +
+            "            self.count += rounds;\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var m = Mixer(seed_a, 5).init();\n" +
+            "    m.step();\n" +
+            "    m.step();\n" +
+            "    return @truncate(m.s[0] +% m.s[2] +% m.count);\n" +
+            "}\n", 20, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -6414,6 +6458,40 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // std.crypto.hash.Md5 and sha2.Sha224 / Sha256 from real std (task #90): one-shot hashes of three inputs and a streamed
+    // update/final, every digest byte printed. The SHA-NI and ARMv8 assembly paths fold away (dotcc's target reports no `sha`).
+    [Fact]
+    public void Dotcc_matches_zig_std_crypto_hash() =>
+        MatchesZigWithRealStd("std_crypto_hash",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "fn show(label: []const u8, digest: []const u8) void {\n" +
+            "    std.debug.print(\"{s}:\", .{label});\n" +
+            "    for (digest) |b| std.debug.print(\" {x}\", .{b});\n" +
+            "    std.debug.print(\"\\n\", .{});\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    const inputs = [_][]const u8{ \"\", \"abc\", \"The quick brown fox jumps over the lazy dog, twice over and then some more text past one block\" };\n" +
+            "    for (inputs) |input| {\n" +
+            "        var md5: [16]u8 = undefined;\n" +
+            "        std.crypto.hash.Md5.hash(input, &md5, .{});\n" +
+            "        show(\"md5\", &md5);\n" +
+            "        var s224: [28]u8 = undefined;\n" +
+            "        std.crypto.hash.sha2.Sha224.hash(input, &s224, .{});\n" +
+            "        show(\"sha224\", &s224);\n" +
+            "        var s256: [32]u8 = undefined;\n" +
+            "        std.crypto.hash.sha2.Sha256.hash(input, &s256, .{});\n" +
+            "        show(\"sha256\", &s256);\n" +
+            "    }\n" +
+            "    var h = std.crypto.hash.sha2.Sha256.init(.{});\n" +
+            "    h.update(\"ab\");\n" +
+            "    h.update(\"c\");\n" +
+            "    var streamed: [32]u8 = undefined;\n" +
+            "    h.final(&streamed);\n" +
+            "    show(\"streamed\", &streamed);\n" +
+            "}\n", 0);
 
     // std.bit_set.ArrayBitSet / StaticBitSet from real std (task #88): set, setRangeValue, findFirstSet / findLastSet,
     // toggleFirstSet, the `full` constant (a labeled block over `@splat(~@as(MaskInt, 0))` and last_item_mask), eql.

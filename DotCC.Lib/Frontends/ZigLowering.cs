@@ -108,6 +108,11 @@ internal sealed partial class ZigLowering
         Zig.Ident id => ResolveNamedModule(Tok(id.Arg0)),
         Zig.Field f when ResolveModulePath(f.Arg0) is { Lowering: { } baseLowering } =>
             baseLowering.ResolveNamedModule(Tok(f.Arg2)),
+        // A module bound as a const of a NESTED container another module declares (std.crypto's
+        // `pub const hash = struct { pub const sha2 = @import("crypto/sha2.zig"); … }`, so `std.crypto.hash.sha2`).
+        Zig.Field f when f.Arg0.Content is Zig.Field && TryResolveModuleNestedType(f.Arg0) is { Type: var nestedType, Owner: var nestedOwner }
+                         && ContainerTypeName(nestedType) is { } nestedName =>
+            nestedOwner.ContainerConstModule(nestedName, Tok(f.Arg2)),
         // An INLINE import (`pub const block = @import("sort/block.zig").block;` in sort.zig): the spec is
         // registered under a synthetic import name, so it resolves (and memoizes) exactly as `const x =
         // @import("…");` does.
@@ -122,6 +127,19 @@ internal sealed partial class ZigLowering
             baseModule.ResolveNamedModule(member),
         _ => null,
     };
+
+    /// <summary>The module a container const names (<c>pub const sha2 = @import("crypto/sha2.zig");</c> inside a
+    /// namespace struct), resolved in that container's scope; null when the const is not a module path.</summary>
+    private ZigModule? ContainerConstModule(string container, string name)
+    {
+        if (!_containerConsts.TryGetValue(container, out var consts) || !consts.TryGetValue(name, out var entry)
+            || entry.typeItem is not null)
+        {
+            return null;
+        }
+        using var scope = EnterContainer(container);
+        return ResolveModulePath(entry.rhs);
+    }
 
     /// <summary>The module an <c>@field</c> base denotes: a module path, or a name bound to this file's own
     /// file-as-struct type (<c>const Target = @This();</c> in Target.zig), which is this module.</summary>
@@ -1802,8 +1820,11 @@ internal sealed partial class ZigLowering
                 throw new IrUnsupportedException(
                     $"threadlocal '{Tok(nameTok)}': only a zero-initialized scalar threadlocal is supported");
             }
-            AddArrayGlobal(Tok(nameTok), (CType.Array)sa.Type,
+            var arraySym = AddArrayGlobal(Tok(nameTok), (CType.Array)sa.Type,
                 new PinnedArray(sa.Element, sa.Elems, null) { Type = new CType.Pointer(sa.Element) });
+            // A const array is comptime-known, so a comptime use may read it (`Mixer(seed_a, 5)` passing it as a
+            // `comptime seed: [4]u32` argument): the interpreter evaluates its literal.
+            if (isConst) { _ir.ConstGlobalInits[arraySym] = sa; }
             return;
         }
         // A .NET [ThreadStatic] initializer runs on the FIRST thread only, so C's/
@@ -1870,13 +1891,15 @@ internal sealed partial class ZigLowering
     /// resolve + <c>sizeof</c> is exact) backed by the pinned <paramref name="pinned"/> store
     /// (rendered as a stable <c>T*</c>). The symbol is declared after the initializer is lowered, so
     /// a literal element can reference an earlier global but never the array itself.</summary>
-    private void AddArrayGlobal(string name, CType.Array arr, CExpr pinned)
+    /// <returns>The declared array symbol.</returns>
+    private Symbol AddArrayGlobal(string name, CType.Array arr, CExpr pinned)
     {
         var sym = _symbols.Declare(new Symbol
         {
             Name = name, Kind = SymKind.Var, Type = arr, Storage = Storage.Static, IsGlobal = true,
         });
         _ir.Globals.Add(new GlobalVar(sym, pinned));
+        return sym;
     }
 
     /// <summary>Pass 1.5: lower a container-level <c>var</c> (a namespaced mutable global, Milestone R

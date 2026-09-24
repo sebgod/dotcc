@@ -318,8 +318,13 @@ internal sealed partial class ZigLowering
                 case Zig.Param pm:
                     // `a: anytype` (wall-plan W5) — an inferred-type parameter (a monomorphization key
                     // AND a runtime slot); a plain `a: T` is an ordinary runtime parameter.
+                    // A parameter of a comptime-ONLY type is comptime without the keyword, as in zig: std.crypto.sha2's
+                    // `fn Sha2x32(comptime iv: Iv32, digest_bits: comptime_int) type`.
                     infos.Add(new ParamInfo(Tok(pm.Arg0), pm.Arg2,
-                        IsAnyTypeKeyword(pm.Arg2) ? ParamKind.AnyType : ParamKind.Runtime));
+                        IsAnyTypeKeyword(pm.Arg2) ? ParamKind.AnyType
+                        : IsTypeKeyword(pm.Arg2) ? ParamKind.ComptimeType
+                        : pm.Arg2.Content is Zig.Ident { Arg0: var ctTok } && Tok(ctTok) is "comptime_int" or "comptime_float" ? ParamKind.ComptimeValue
+                        : ParamKind.Runtime));
                     break;
                 case Zig.ParamComptime pm:   // 'comptime' IDENT ':' Type
                     infos.Add(new ParamInfo(Tok(pm.Arg1), pm.Arg3,
@@ -525,6 +530,7 @@ internal sealed partial class ZigLowering
         foreach (var fd in fieldItems)
         {
             if (fd.Content is Zig.StructFieldDefault pre) { _structFieldDecls[(name, Tok(pre.Arg0))] = (pre.Arg2, pre.Arg4); }
+            if (fd.Content is Zig.StructFieldAlignedDefault preAligned) { _structFieldDecls[(name, Tok(preAligned.Arg0))] = (preAligned.Arg2, preAligned.Arg8); }
         }
         var fields = new List<StructField>();
         foreach (var fd in fieldItems)
@@ -541,6 +547,16 @@ internal sealed partial class ZigLowering
                     var fname = Tok(f.Arg0);
                     fields.Add(PackedAwareField(fname, f.Arg2, layout));
                     _structFieldDefaults[(name, fname)] = f.Arg4;   // raw default AST — lowered lazily on omission
+                    break;
+                // `s: [8]u32 align(16)` (std.crypto.sha2): the alignment only places the field in memory, which C#'s own
+                // layout decides; the field itself is as unaligned. (A leniency: `@alignOf` / `@sizeOf` may differ from zig.)
+                case Zig.StructFieldAligned f:
+                    fields.Add(PackedAwareField(Tok(f.Arg0), f.Arg2, layout));
+                    break;
+                case Zig.StructFieldAlignedDefault f:
+                    var alignedName = Tok(f.Arg0);
+                    fields.Add(PackedAwareField(alignedName, f.Arg2, layout));
+                    _structFieldDefaults[(name, alignedName)] = f.Arg8;
                     break;
                 default:
                     throw new IrUnsupportedException("zig struct field: " + (fd.Content?.GetType().Name ?? "null"));
@@ -1231,6 +1247,8 @@ internal sealed partial class ZigLowering
         // and the `std.mem.Allocator.VTable{ .alloc, .resize, .remap, .free }` literal it points at.
         if (t.Unqualified is CType.Allocator) { return BuildAllocatorLiteral(fieldInitItems); }
         if (t.Unqualified is CType.Named { Name: VTableTypeName }) { return BuildAllocatorVTableLiteral(fieldInitItems); }
+        // An array TYPE named through an alias (std.crypto.sha2's `const Iv32 = [8]u32;` then `Iv32{ 0x6A09E667, … }`).
+        if (t.Unqualified is CType.Array { Count: not null } aliasedArray) { return BuildArrayInit(fieldInitItems, aliasedArray); }
         if (t.Unqualified is not CType.Named named)
         {
             throw new IrUnsupportedException(

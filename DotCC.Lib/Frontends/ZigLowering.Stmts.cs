@@ -1409,6 +1409,18 @@ internal sealed partial class ZigLowering
                         "`inline for` over a value requires a fixed-size array `[N]T` of comptime-known "
                         + "length (a slice's length is a runtime value)");
                 }
+                // A comptime-known array VALUE (std.crypto.md5's `const round0 = comptime [_]RoundParam{ roundParam(…), … };`):
+                // each copy binds its element as a literal, so `v[r.a]` indexes by a constant, as zig's unrolled copy does.
+                if (operand is not VarRef && _ir.EvalComptimeValue(operand) is IrModule.CtArray ctArray && ctArray.Elems.Length == n)
+                {
+                    var spliced = new List<CExpr>(n);
+                    foreach (var elem in ctArray.Elems)
+                    {
+                        spliced.Add(_ir.SpliceComptimeValue(elem)
+                            ?? throw new IrUnsupportedException("`inline for` over a comptime array: an element has no static form"));
+                    }
+                    return UnrollInlineFor(n, Tok(fs.Arg5), arr.Element, fs.Arg7, k => spliced[(int)k]);
+                }
                 if (operand is not VarRef)
                 {
                     throw new IrUnsupportedException(
@@ -2969,10 +2981,26 @@ internal sealed partial class ZigLowering
         { Jump: { } j } => LowerProngJump(j),
         { Assign: { } pa } => LowerProngAssign(pa),
         { IfSwitch: { } isw } => LowerProngIfSwitch(isw),
+        { IfBlock: { } ib } => LowerProngIfBlock(ib),
         { IfCaptureReturn: { } icr } => LowerIfCapture(icr.Arg4, Tok(icr.Arg7), icr.Arg9, null, null),
         { Loop: { } loop } => LowerStmt(loop),
         _ => new Seq(new List<CStmt>()),
     };
+
+    /// <summary>A <c>=&gt; if (c) { … }</c> prong body (std.crypto.sha2's <c>.x86_64 =&gt; if (… comptime
+    /// builtin.cpu.hasAll(.x86, &amp;.{ .sha, .avx2 })) { … asm … },</c>): a comptime-known condition keeps the block or
+    /// nothing, so a target path dotcc cannot take (inline assembly) is never lowered.</summary>
+    private CStmt LowerProngIfBlock(Zig.ProngIfBlock p)
+    {
+        // A condition the comptime questions settle, or one that lowers to a constant (`comptime builtin.cpu.hasAll(…)`
+        // folds while it lowers, and `builtin.zig_backend != .stage2_c` is an enum compare): only the taken block lowers.
+        if ((TryFoldComptimeCondition(p.Arg4) ?? TryFoldTypeIfCondition(p.Arg4)) is { } taken)
+        {
+            return taken ? LowerBlock(p.Arg6) : new Seq(new List<CStmt>());
+        }
+        var cond = LowerExpr(p.Arg4);
+        return new If(cond, LowerBlock(p.Arg6), null);
+    }
 
     /// <summary>A <c>=&gt; if (c) switch (s) { … }</c> prong body: the switch statement under an else-less <c>if</c>.
     /// A comptime-known condition keeps only the switch or nothing, so an untaken switch is never analysed.</summary>
@@ -3219,6 +3247,7 @@ internal sealed partial class ZigLowering
                 case Zig.ProngJump pj:       caseVals = pj.Arg0; body = new List<CStmt> { LowerProngJump(pj.Arg2) }; break;
                 case Zig.ProngAssign pa:     caseVals = pa.Arg0; body = new List<CStmt> { LowerProngAssign(pa) }; break;
                 case Zig.ProngIfSwitch pis:  caseVals = pis.Arg0; body = new List<CStmt> { LowerProngIfSwitch(pis) }; break;
+                case Zig.ProngIfBlock pib:   caseVals = pib.Arg0; body = new List<CStmt> { LowerProngIfBlock(pib) }; break;
                 case Zig.ProngLoop plp:      caseVals = plp.Arg0; body = new List<CStmt> { LowerStmt(plp.Arg2) }; break;
                 case Zig.ProngIfCaptureReturn picr:
                     caseVals = picr.Arg0; body = new List<CStmt> { LowerIfCapture(picr.Arg4, Tok(picr.Arg7), picr.Arg9, null, null) }; break;

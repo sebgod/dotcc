@@ -1346,12 +1346,14 @@ internal sealed partial class ZigLowering
                     mangleTokens.Add(OptionalMangleToken(hasOpt, ov));
                     optionalSeeds.Add((p.Name, hasOpt, ov, optP.Inner));
                 }
-                else if (LowerType(p.TypeAst).Unqualified is CType.Named aggParamType && !_unions.ContainsKey(aggParamType.Name))
+                else if (LowerType(p.TypeAst) is var aggParamType
+                         && (aggParamType.Unqualified is CType.Named aggNamed && !_unions.ContainsKey(aggNamed.Name)
+                             || aggParamType.Unqualified is CType.Array { Count: not null }))
                 {
                     // A comptime STRUCT value param (std.hash.crc's `Crc(comptime W: type, comptime algorithm:
-                    // Algorithm(W))`): the interpreter's value of the argument keys the instance by a digest of its
-                    // contents, and the body and its members read it as a comptime aggregate, as a generic
-                    // function's comptime struct parameter is read.
+                    // Algorithm(W))`), or an ARRAY one (std.crypto.sha2's `Sha2x32(comptime iv: Iv32, …)` with `Iv32 = [8]u32`):
+                    // the interpreter's value of the argument keys the instance by a digest of its contents, and the body
+                    // and its members read it as a comptime aggregate, as a generic function's comptime struct parameter is read.
                     var aggArg = argScope.LowerExprSink(argItems[i], aggParamType);
                     if (_ir.EvalComptimeValue(aggArg) is not { } aggValue)
                     {

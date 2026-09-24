@@ -1153,7 +1153,11 @@ internal sealed partial class ZigLowering
         // buf_map.zig at every std import), and a std path is left to the std resolvers. Inside a function BODY a lazy
         // module resolves the same way (no preparation is running then): std.Io.Writer.Allocating.sendFile's
         // `File.Handle` is File.zig's `pub const Handle`, and File's own struct (platform state) never has to lower.
-        if ((!_lazy || _currentFnName.Length > 0) && f.Arg0.Content is Zig.Ident && !TryResolveStdPath(dotted, out _)
+        // `pub const Md5 = @import("crypto/md5.zig").Md5;` inside std.crypto's `hash` namespace: an INLINE import as the base,
+        // reached only when that container type const is resolved on demand (so preparing crypto.zig never fans out).
+        if ((f.Arg0.Content is Zig.Ident && (!_lazy || _currentFnName.Length > 0) && !TryResolveStdPath(dotted, out _)
+             || f.Arg0.Content is Zig.BuiltinCall { Arg0: var importTok } && Tok(importTok) == "@import"
+                && (!_lazy || _typeConstsInFlight.Count > 0))
             && ResolveModulePath(f.Arg0) is { Lowering: { } moduleLowering }
             && moduleLowering.ResolveExportedType(Tok(f.Arg2)) is { } moduleType)
         {

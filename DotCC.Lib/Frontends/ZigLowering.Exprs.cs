@@ -746,6 +746,12 @@ internal sealed partial class ZigLowering
             }
             // `@inComptime()` (std.mem.eql's `!@inComptime() and …` fast-path guard): code dotcc lowers
             // runs at runtime, so it is `false`; the comptime interpreter never evaluates this node.
+            // Inline assembly is parsed so a comptime-dead target path (std.crypto.sha2's SHA-NI rounds) folds away; one
+            // that is actually reached has no C# form.
+            case Zig.AsmExpr or Zig.AsmVolatileExpr:
+                throw new IrUnsupportedException(
+                    "zig inline assembly (`asm`) is out of scope: dotcc targets .NET, so a reached `asm` has no lowering "
+                    + "(std guards its assembly paths behind comptime target checks, which fold away when dotcc's target lacks the feature)");
             case Zig.BuiltinCallNoArgs nb when Tok(nb.Arg0) == "@inComptime":
                 return new LitBool(false) { Type = CType.Bool };
             // `@returnAddress()`: the address an allocator records for its diagnostics (std's `rawAlloc(n, a, @returnAddress())`).

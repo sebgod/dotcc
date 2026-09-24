@@ -808,6 +808,60 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Asm_in_a_dead_prong_comptime_array_params_and_implicit_comptime_int_params()
+    {
+        var cs = EmitZig("""
+            const builtin = @import("builtin");
+
+            const Seed = [4]u32;
+            const seed_a = Seed{ 3, 5, 7, 11 };
+
+            const Param = struct { a: usize, k: u32 };
+
+            fn Mixer(comptime seed: Seed, rounds: comptime_int) type {
+                return struct {
+                    const Self = @This();
+                    s: [4]u32 align(16),
+                    count: u32 align(8) = 0,
+
+                    fn init() Self {
+                        return .{ .s = seed };
+                    }
+
+                    fn step(self: *Self) void {
+                        const params = comptime [_]Param{ .{ .a = 0, .k = 1 }, .{ .a = 2, .k = 3 } };
+                        inline for (params) |p| {
+                            self.s[p.a] = self.s[p.a] *% 31 +% p.k;
+                        }
+                        switch (builtin.cpu.arch) {
+                            .x86_64, .aarch64 => if (builtin.zig_backend == .stage2_c) {
+                                asm volatile ("nop");
+                                return;
+                            },
+                            else => {},
+                        }
+                        self.count += rounds;
+                    }
+                };
+            }
+
+            pub fn main() u8 {
+                var m = Mixer(seed_a, 5).init();
+                m.step();
+                m.step();
+                return @truncate(m.s[0] +% m.s[2] +% m.count);
+            }
+            """);
+        // Task #90 (std.crypto.sha2's shapes). `seed: Seed` (a `[4]u32` alias) is a comptime ARRAY argument read from a
+        // const global; `rounds: comptime_int` is comptime without the keyword; `align(16)` fields parse; `inline for`
+        // over a comptime array value binds each element as a literal; the `asm` sits in a prong whose condition folds false.
+        cs.ShouldContain("public fixed uint s[4];");
+        cs.ShouldContain("stackalloc uint[]{ 3u, 5u, 7u, 11u };");
+        cs.ShouldContain("Param p = new Param { a = 0UL, k = 1u };");
+        cs.ShouldContain("_5_step(&m);");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

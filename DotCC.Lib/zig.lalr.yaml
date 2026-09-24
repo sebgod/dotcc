@@ -278,6 +278,14 @@ symbols:
                    #     `if (b) |b_p| return eql(a_p, b_p) else |_| return false;`.
   - FieldValue     # 175 the value of a named field init: an Expr, or the void value `{}` (`.{ .none = {} }`,
                    #     std.fmt.Parser.specifier's `return .{ .none = {} };`).
+  - 'asm'          # 176 inline assembly, PARSED ONLY: std guards it behind comptime target checks (std.crypto.sha2's
+                   #     SHA-NI path), so a dead branch must parse; lowering one is a loud cut (asm stays out of scope).
+  - 'volatile'     # 177 `asm volatile (…)`
+  - '->'           # 178 an asm output's result type: `[ret] "=r" (-> u32)`
+  - AsmExpr        # 179 `asm [volatile] ("template" [: outputs [: inputs [: clobbers]]])`
+  - AsmTail        # 180 the `: outputs : inputs : clobbers` sections, each optional from the right
+  - AsmItems       # 181 a comma list of operands, possibly empty, trailing comma allowed
+  - AsmItem        # 182 `[name] "constraint" (expr)` or `[name] "constraint" (-> Type)`
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -1259,6 +1267,7 @@ productions:
       - { lhs: Primary, rhs: [INTEGER],             action: intLit }
       - { lhs: Primary, rhs: [FLOAT],               action: floatLit }
       - { lhs: Primary, rhs: [STRING],              action: strLit }
+      - { lhs: Primary, rhs: [AsmExpr] }
       # A parenthesized value: `( Expr )` grouping OR a parenthesized VALUE-position control-flow
       # construct — `( if … )` / `( switch … )` / `( blk: {…} )` / `( while/for … else … )`. Using
       # `RhsExpr` (which subsumes Expr) makes these reachable as a Primary WITHOUT putting the bare
@@ -1424,6 +1433,9 @@ productions:
       # `3 => if (fmt[0] == 'b' and …) switch (@typeInfo(T)) { … },`). Ended by `,` / `}` like the form above;
       # an if-EXPRESSION prong would continue with `else`, and its arms are not SwitchExprs, so no conflict.
       - { lhs: Prong, rhs: [CaseVals, '=>', 'if', '(', Expr, ')', SwitchExpr], action: prongIfSwitch }
+      # An else-less `if` whose body is a BLOCK (std.crypto.sha2's `.x86_64 => if (… comptime cpu.hasAll(…)) { … },`).
+      # Ended by `,` / `}`; an if-EXPRESSION prong continues with `else`.
+      - { lhs: Prong, rhs: [CaseVals, '=>', 'if', '(', Expr, ')', Block], action: prongIfBlock }
       # A capture `if` whose body RETURNS (std.Io.Writer.printInt's
       # `.signed => if (std.math.cast(isize, value)) |x| return printIntAny(w, x, …),`). `return` does not
       # start an Expr, so after the capture it is a 1-token split from prongIfCapture.
@@ -1534,6 +1546,10 @@ productions:
       # The default is a value-position RhsExpr, so an `if` may choose it (debug.zig's SafetyLock:
       # `state: State = if (runtime_safety) .unlocked else .unknown,`); `,` / `}` still end it.
       - { lhs: FieldDecl, rhs: [IDENT, ':', AType, '=', RhsExpr], action: structFieldDefault }
+      # A field with an alignment (std.crypto.sha2's `s: [8]u32 align(16),`). After the type, `align` is a 1-token shift
+      # (it is never in FOLLOW(AType) inside a field list otherwise).
+      - { lhs: FieldDecl, rhs: [IDENT, ':', AType, 'align', '(', Expr, ')'],                  action: structFieldAligned }
+      - { lhs: FieldDecl, rhs: [IDENT, ':', AType, 'align', '(', Expr, ')', '=', RhsExpr], action: structFieldAlignedDefault }
       # A field whose TYPE is a comptime `switch` (std.mem.SplitIterator's
       # `delimiter: switch (delimiter_type) { .sequence, .any => []const T, .scalar => T },`). `switch` is
       # not in FIRST(AType), so after `IDENT :` it is a 1-token shift.
@@ -1649,6 +1665,22 @@ productions:
       - { lhs: OrElse, rhs: [OrElse, 'orelse', 'return'],         action: orElseReturnVoid }
       - { lhs: OrElse, rhs: [OrElse, 'catch', 'return'],          action: catchReturnVoid }
 
+  # Inline assembly (std.crypto.sha2's SHA-NI / ARMv8 paths). The template is a STRING (zig allows any comptime
+  # string; std always writes a literal), so an Expr is never followed by `:` here, keeping the label invariant.
+  - derivation: none
+    rules:
+      - { lhs: AsmExpr, rhs: ['asm', '(', STRING, AsmTail, ')'],             action: asmExpr }
+      - { lhs: AsmExpr, rhs: ['asm', 'volatile', '(', STRING, AsmTail, ')'], action: asmVolatileExpr }
+      - { lhs: AsmTail, rhs: [],                                              action: asmTailNone }
+      - { lhs: AsmTail, rhs: [':', AsmItems],                                 action: asmTailOut }
+      - { lhs: AsmTail, rhs: [':', AsmItems, ':', AsmItems],                  action: asmTailIn }
+      - { lhs: AsmTail, rhs: [':', AsmItems, ':', AsmItems, ':', Expr],       action: asmTailClobbers }
+      - { lhs: AsmItems, rhs: [],                                             action: asmItemsNone }
+      - { lhs: AsmItems, rhs: [AsmItem],                                      action: asmItemsOne }
+      - { lhs: AsmItems, rhs: [AsmItem, ',', AsmItems],                       action: asmItemsCons }
+      - { lhs: AsmItem, rhs: ['[', IDENT, ']', STRING, '(', Expr, ')'],       action: asmItemExpr }
+      - { lhs: AsmItem, rhs: ['[', IDENT, ']', STRING, '(', '->', Type, ')'], action: asmItemReturn }
+
 lexer:
   root:
     # Comments first. Zig line comments `//...` (incl. `///` doc comments) — ignored
@@ -1688,6 +1720,8 @@ lexer:
     - { symbol: 'export',   match: 'export' }
     - { symbol: 'callconv', match: 'callconv' }
     - { symbol: 'align',    match: 'align' }
+    - { symbol: 'asm',      match: 'asm' }
+    - { symbol: 'volatile', match: 'volatile' }
     - { symbol: 'linksection', match: 'linksection' }
     # `errdefer` (8 chars) and `defer` (5): longest-match beats IDENT; `errdefer` vs the
     # `error` keyword — `errdefer` is longer, so it wins on its own input; `error` still
@@ -1724,6 +1758,7 @@ lexer:
     # doesn't matter — grouped here with the other multi-char ops for clarity.
     - { symbol: '+=',  match: '\+=' }
     - { symbol: '-=',  match: '\-=' }
+    - { symbol: '->',  match: '\->' }
     - { symbol: '*=',  match: '\*=' }
     - { symbol: '/=',  match: '/=' }
     - { symbol: '%=',  match: '%=' }
