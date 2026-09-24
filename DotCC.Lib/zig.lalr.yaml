@@ -703,6 +703,9 @@ productions:
       # (std.bit_set.Integer): the same reified struct, with the packed layout.
       - { lhs: Stmt, rhs: ['return', 'packed', 'struct', '{', FieldDecls, '}', ';'], action: returnPackedStructType }
       - { lhs: Stmt, rhs: ['return', 'packed', 'struct', '(', Type, ')', '{', FieldDecls, '}', ';'], action: returnPackedStructTypeBacked }
+      # `return extern struct { … };` (std.bit_set.ArrayBitSet): the reified struct with the C-ABI
+      # sequential layout, the same shape as the top-level `extern struct` decl.
+      - { lhs: Stmt, rhs: ['return', 'extern', 'struct', '{', FieldDecls, '}', ';'], action: returnExternStructType }
       # `return struct { pub fn inner(…) … }.inner;` — zig's CLOSURE idiom (std.sort.asc; 22 in std): the
       # function returns a METHOD of an anonymous struct as a comptime function value. After the closing
       # `}`, a `.` (not `;`) selects this form: distinct terminals, a shift either way.
@@ -954,6 +957,19 @@ productions:
       - { lhs: LoopExpr, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', Block, 'else', RhsExpr],           action: forElseExpr }
       - { lhs: LoopExpr, rhs: [IDENT, ':', 'while', '(', Expr, ')', Block, 'else', RhsExpr],              action: labeledWhileElseExpr }
       - { lhs: LoopExpr, rhs: [IDENT, ':', 'for', '(', Expr, ')', '|', IDENT, '|', Block, 'else', RhsExpr], action: labeledForElseExpr }
+      # `const mask = for (self.masks) |mask| { if (mask != 0) break mask; … } else return null;`
+      # (std.bit_set.ArrayBitSet.findFirstSet): the else RETURNS from the function instead of yielding, so the
+      # loop's value comes from its `break`s alone. `return` is not in FIRST(RhsExpr): a clean shift after `else`.
+      - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', Block, 'else', ReturnArm],                 action: whileElseReturnExpr }
+      # A value `while` with an assignment continue-expression (std.bit_set.ArrayBitSet.eql:
+      # `return while (i < num_masks) : (i += 1) { … break false; } else true;`). After `)`, a `:` or a `{`
+      # decides between this and the plain value `while` in one token.
+      - { lhs: LoopExpr, rhs: ['while', '(', Expr, ')', ':', '(', Expr, AssignOp, RhsExpr, ')', Block, 'else', RhsExpr], action: whileContAssignElseExpr }
+      - { lhs: LoopExpr, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', Block, 'else', ReturnArm],  action: forElseReturnExpr }
+      # The by-ref capture (`for (&self.masks) |*mask| { … break mask; } else return null;`, toggleFirstSet): the
+      # break yields the element POINTER. After `|`, a `*` or an IDENT decides the capture form in one token.
+      - { lhs: LoopExpr, rhs: ['for', '(', Expr, ')', '|', '*', IDENT, '|', Block, 'else', RhsExpr],    action: forRefElseExpr }
+      - { lhs: LoopExpr, rhs: ['for', '(', Expr, ')', '|', '*', IDENT, '|', Block, 'else', ReturnArm],  action: forRefElseReturnExpr }
 
   - derivation: leftmost
     rules:
@@ -1596,6 +1612,10 @@ productions:
     rules:
       - { lhs: UnionVariant, rhs: [IDENT, ':', AType], action: unionVariantPayload }
       - { lhs: UnionVariant, rhs: [IDENT],             action: unionVariantVoid }
+      # `undefined,` / `null,` (std.builtin.Type's void variants): zig's primitive VALUES, but plain names in a
+      # container's field list. dotcc lexes them as keywords, so the variant admits them by name.
+      - { lhs: UnionVariant, rhs: ['undefined'],       action: unionVariantVoid }
+      - { lhs: UnionVariant, rhs: ['null'],            action: unionVariantVoid }
 
   # Anonymous struct literal `.{ .f = v, … }` — Zig's result-located init, where the type
   # is inferred from the sink (a typed `const`/`var`, a `return`, a field's declared type).

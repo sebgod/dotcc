@@ -5076,6 +5076,63 @@ public sealed class ZigOracleTests
             "    const w: Widened(u16) = 40000;\n" +
             "    return @truncate(total +% @as(u32, @intCast(length(\"hello\") + length(s))) +% w);\n" +
             "}\n", 136, "" },
+        // Task #88 (std.bit_set's ArrayBitSet shapes): `return extern struct`, value loops whose `else` returns (by value and
+        // by `|*x|` capture), a value `while` with a continue-expression, and a const labeled block building a struct whose
+        // array field is non-zero. Also pins two silent miscompiles: `~@as(u64, 0) >> pad` sign-extended to all ones, and the
+        // struct's array field left zeroed.
+        new object[] { "extern_struct_value_loops",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "fn Masks(comptime n: usize) type {\n" +
+            "    return extern struct {\n" +
+            "        const Self = @This();\n" +
+            "        const pad = 64 * n - 100;\n" +
+            "        const last = ~@as(u64, 0) >> pad;\n" +
+            "        words: [n]u64,\n" +
+            "        const full: Self = full: {\n" +
+            "            var w: [n]u64 = @splat(~@as(u64, 0));\n" +
+            "            w[n - 1] = last;\n" +
+            "            break :full .{ .words = w };\n" +
+            "        };\n" +
+            "        fn firstSet(self: Self) ?usize {\n" +
+            "            var offset: usize = 0;\n" +
+            "            const word = for (self.words) |word| {\n" +
+            "                if (word != 0) break word;\n" +
+            "                offset += 64;\n" +
+            "            } else return null;\n" +
+            "            return offset + @ctz(word);\n" +
+            "        }\n" +
+            "        fn clearFirst(self: *Self) ?usize {\n" +
+            "            var offset: usize = 0;\n" +
+            "            const word = for (&self.words) |*word| {\n" +
+            "                if (word.* != 0) break word;\n" +
+            "                offset += 64;\n" +
+            "            } else return null;\n" +
+            "            const index = @ctz(word.*);\n" +
+            "            word.* &= word.* - 1;\n" +
+            "            return offset + index;\n" +
+            "        }\n" +
+            "        fn same(self: Self, other: Self) bool {\n" +
+            "            var i: usize = 0;\n" +
+            "            return while (i < n) : (i += 1) {\n" +
+            "                if (self.words[i] != other.words[i]) break false;\n" +
+            "            } else true;\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const M = Masks(2);\n" +
+            "    var m = M.full;\n" +
+            "    var total: usize = @popCount(m.words[0]) + @popCount(m.words[1]);\n" +
+            "    total += m.firstSet() orelse 99;\n" +
+            "    total += m.clearFirst() orelse 99;\n" +
+            "    total += m.firstSet() orelse 99;\n" +
+            "    total += @as(usize, @intFromBool(m.same(m))) * 10 + @as(usize, @intFromBool(m.same(M.full))) * 20;\n" +
+            "    const empty = M{ .words = @splat(0) };\n" +
+            "    total += empty.firstSet() orelse 7;\n" +
+            "    return @truncate(total);\n" +
+            "}\n", 118, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -6357,6 +6414,35 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // std.bit_set.ArrayBitSet / StaticBitSet from real std (task #88): set, setRangeValue, findFirstSet / findLastSet,
+    // toggleFirstSet, the `full` constant (a labeled block over `@splat(~@as(MaskInt, 0))` and last_item_mask), eql.
+    [Fact]
+    public void Dotcc_matches_zig_std_bit_set() =>
+        MatchesZigWithRealStd("std_bit_set",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var a = std.bit_set.ArrayBitSet(u64, 150).empty;\n" +
+            "    a.set(3);\n" +
+            "    a.set(70);\n" +
+            "    a.set(149);\n" +
+            "    a.setRangeValue(.{ .start = 10, .end = 20 }, true);\n" +
+            "    var total: usize = a.count();\n" +
+            "    total += a.findFirstSet() orelse 99;\n" +
+            "    total += a.findLastSet() orelse 99;\n" +
+            "    const first = a.toggleFirstSet() orelse 99;\n" +
+            "    total += first;\n" +
+            "    total += @intFromBool(a.isSet(3));\n" +
+            "    const full = std.bit_set.ArrayBitSet(u64, 150).full;\n" +
+            "    total += full.count();\n" +
+            "    total += @intFromBool(a.eql(a));\n" +
+            "    total += @intFromBool(a.eql(full));\n" +
+            "    var small = std.StaticBitSet(12).empty;\n" +
+            "    small.set(11);\n" +
+            "    total += small.count() + (small.findFirstSet() orelse 0);\n" +
+            "    return @truncate(total);\n" +
+            "}\n", 75);
 
     // std.hash.XxHash32 / XxHash64 from real std (task #87): finalize's `inline 0, 1, 2, 3 => |count|` prongs over input
     // lengths 0 to 39 and a streaming update. A string literal's anytype length had silently been one too many.

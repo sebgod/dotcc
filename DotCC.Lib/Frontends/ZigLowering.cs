@@ -1714,7 +1714,7 @@ internal sealed partial class ZigLowering
         if (rhsItem.Content is Zig.LabeledBlock)
         {
             var (blockType, blockValue) = ComptimeLabeledBlockInit(
-                $"the global '{Tok(nameTok)}'", rhsItem, typeItem is not null ? LowerType(typeItem) : null);
+                $"the global '{Tok(nameTok)}'", QualifyTypeName(Tok(nameTok)), rhsItem, typeItem is not null ? LowerType(typeItem) : null);
             if (blockType.Unqualified is CType.Array blockArray)
             {
                 AddArrayGlobal(Tok(nameTok), blockArray, blockValue);
@@ -1941,7 +1941,7 @@ internal sealed partial class ZigLowering
             {
                 if (!_staticContainerConsts.TryGetValue((container, name), out var blockSym))
                 {
-                    var (blockType, blockInit) = ComptimeLabeledBlockInit($"'{container}.{name}'", rhs, sink);
+                    var (blockType, blockInit) = ComptimeLabeledBlockInit($"'{container}.{name}'", $"{container}__{name}", rhs, sink);
                     blockSym = _symbols.Declare(new Symbol
                     {
                         Name = $"{container}__{name}__static", Kind = SymKind.Var, Type = blockType, Storage = Storage.Static, IsGlobal = true,
@@ -1968,7 +1968,7 @@ internal sealed partial class ZigLowering
     {
         var key = (labeled, _currentFnName);
         if (_comptimeBlockStatics.TryGetValue(key, out var memo)) { return new VarRef(memo) { Type = memo.Type, IsLValue = true }; }
-        var (type, init) = ComptimeLabeledBlockInit("a `comptime` block", labeled, sink);
+        var (type, init) = ComptimeLabeledBlockInit("a `comptime` block", "__ctblk" + _comptimeBlockStatics.Count, labeled, sink);
         if (init is not PinnedArray) { return init; }
         var sym = _symbols.Declare(new Symbol
         {
@@ -1986,8 +1986,10 @@ internal sealed partial class ZigLowering
     /// <c>const lookup_table = blk: { var table: [256]I = undefined; for (&amp;table, 0..) |*e, i| { … } break :blk table; };</c>).
     /// zig runs the block at compile time, so it is lowered into a throwaway scope, run by the comptime interpreter,
     /// and its value spliced back: a pinned array for a <c>[N]T</c> result, a literal otherwise. None of the block's
-    /// statements reach an emitted body. A block the interpreter cannot run is a loud cut that says why.</summary>
-    private (CType Type, CExpr Init) ComptimeLabeledBlockInit(string what, Item labeled, CType? declared)
+    /// statements reach an emitted body. A block the interpreter cannot run is a loud cut that says why. A struct
+    /// with array fields (std.bit_set's <c>full</c>) is built by a synthesized <c>__init_</c><paramref name="initName"/>
+    /// that copies them in after the literal.</summary>
+    private (CType Type, CExpr Init) ComptimeLabeledBlockInit(string what, string initName, Item labeled, CType? declared)
     {
         Symbol? result = null;
         CStmt lowered;
@@ -2025,7 +2027,28 @@ internal sealed partial class ZigLowering
             var elems = array.Elems.Select(e => _ir.SpliceComptimeValue(e) ?? throw Unspliceable()).ToList();
             return (arrayType, new PinnedArray(arrayType.Element, elems, null) { Type = new CType.Pointer(arrayType.Element) });
         }
-        return (type, _ir.SpliceComptimeValue(value) ?? throw Unspliceable());
+        if (_ir.SpliceComptimeValue(value) is { } spliced) { return (type, spliced); }
+        if (_ir.SpliceStructDeferringArrays(value) is not var (structInit, arrays) || type.Unqualified is not CType.Named)
+        {
+            throw Unspliceable();
+        }
+        Symbol temp;
+        _symbols.EnterScope();
+        try { temp = _symbols.Declare(new Symbol { Name = "__ctv", Kind = SymKind.Var, Type = type }); }
+        finally { _symbols.ExitScope(); }
+        var pre = new List<CStmt> { new DeclStmt(new List<LocalDecl> { new(temp, structInit) }) };
+        foreach (var (field, fieldArray, arrayValue) in arrays)
+        {
+            var elems = arrayValue.Elems.Select(e => _ir.SpliceComptimeValue(e) ?? throw Unspliceable()).ToList();
+            var bytes = (long)elems.Count * fieldArray.Element.SizeOf;
+            pre.Add(new ExprStmt(new Call("memcpy", new List<CExpr>
+            {
+                new Member(new VarRef(temp) { Type = type, IsLValue = true }, field, false) { Type = fieldArray, IsLValue = true },
+                new PinnedArray(fieldArray.Element, elems, null) { Type = new CType.Pointer(fieldArray.Element) },
+                new LitInt(bytes.ToString(CultureInfo.InvariantCulture), bytes) { Type = CType.Int },
+            }) { Type = new CType.Pointer(CType.Void) }));
+        }
+        return (type, InitFunctionCall(initName, pre, new VarRef(temp) { Type = type }));
     }
 
     /// <summary>Tag a pass-1 function entry with the container it belongs to (null for a free

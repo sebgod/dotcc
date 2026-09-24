@@ -71,10 +71,21 @@ internal sealed partial class ZigLowering
             throw new IrUnsupportedException(
                 $"type-returning generic '{fnName}': an empty body — expected `[const NAME = <type>;]* return <type>;`");
         }
-        return WalkTypeBody(fnName, stmts, typeShadows)
-            ?? throw new IrUnsupportedException(
-                $"type-returning generic '{fnName}': the body reaches its end without returning a type "
-                + "(every `return` sits in an arm that folded away)");
+        // A body's `const info = @typeInfo(T);` binds for the walk only (a reflection value has no runtime
+        // and must not leak into whatever lowering resumes after this instance is evaluated).
+        var outerTypeInfos = new Dictionary<string, ZigTypeInfo>(_typeInfoBindings, System.StringComparer.Ordinal);
+        try
+        {
+            return WalkTypeBody(fnName, stmts, typeShadows)
+                ?? throw new IrUnsupportedException(
+                    $"type-returning generic '{fnName}': the body reaches its end without returning a type "
+                    + "(every `return` sits in an arm that folded away)");
+        }
+        finally
+        {
+            _typeInfoBindings.Clear();
+            foreach (var (infoName, info) in outerTypeInfos) { _typeInfoBindings[infoName] = info; }
+        }
     }
 
     /// <summary>The statements of a body or an arm: a braced block's list, or the single statement.</summary>
@@ -107,6 +118,14 @@ internal sealed partial class ZigLowering
                     SetDeclaredIntBits(aliasName, aliasBits);
                     break;
                 }
+                // `const mask_info: std.builtin.Type = @typeInfo(MaskIntType);` (std.bit_set.Array): a reflection
+                // value, bound for the folds that read it (`mask_info != .int`, `mask_info.int.signedness`).
+                case Zig.ConstDecl ci when TryEvalTypeInfo(ci.Arg3, out var bodyInfo):
+                    _typeInfoBindings[Tok(ci.Arg1)] = bodyInfo;
+                    break;
+                case Zig.ConstDeclTyped ti when TryEvalTypeInfo(ti.Arg5, out var typedBodyInfo):
+                    _typeInfoBindings[Tok(ti.Arg1)] = typedBodyInfo;
+                    break;
                 case Zig.ConstDecl cv:
                     BindTypeBodyComptimeValue(fnName, Tok(cv.Arg1), null, cv.Arg3);
                     break;
@@ -154,6 +173,8 @@ internal sealed partial class ZigLowering
                     return new TypeBodyResult(true, pst.Arg4, null, null, AggregateLayout.Packed);
                 case Zig.ReturnPackedStructTypeBacked pbt:
                     return new TypeBodyResult(true, pbt.Arg7, null, null, AggregateLayout.Packed);   // backing type Arg5
+                case Zig.ReturnExternStructType est:
+                    return new TypeBodyResult(true, est.Arg4, null, null, AggregateLayout.Sequential);
                 case Zig.ReturnStructTypeEmpty:
                     return new TypeBodyResult(true, null, null, null);       // `return struct {};` — zero fields
                 case Zig.StmtReturn r:
@@ -320,7 +341,15 @@ internal sealed partial class ZigLowering
         if (TryFoldComptimeCondition(cond) is { } folded) { return folded; }
         using (EnterThrowawayHoist())
         {
-            if (_ir.ConstEval(LowerExpr(cond)) is { } v) { return v != 0; }
+            var lowered = LowerExpr(cond);
+            if (_ir.ConstEval(lowered) is { } v) { return v != 0; }
+            // A condition that CALLS (std.bit_set.Array's `!std.math.isPowerOfTwo(@bitSizeOf(MaskIntType))`) runs
+            // through the comptime interpreter.
+            switch (_ir.EvalComptimeValue(lowered))
+            {
+                case IrModule.CtBool { Value: var calledBool }: return calledBool;
+                case IrModule.CtInt { Value: var calledInt }: return calledInt != 0;
+            }
         }
         throw new IrUnsupportedException(
             $"type-returning generic '{fnName}': an `if` condition must be compile-time-known "

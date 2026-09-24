@@ -400,6 +400,40 @@ internal sealed partial class IrModule
         return new StructInit(members) { Type = named };
     }
 
+    /// <summary>Splice a comptime struct whose array fields hold real values (std.bit_set's <c>full</c>, a
+    /// <c>.{ .masks = masks }</c> computed by a labeled block): the object initializer of every other field, and
+    /// each non-zero array field apart, for the caller to copy in after the literal (a C# object initializer
+    /// cannot set inline array storage). Null when the value is not a struct, or a field has no static form.</summary>
+    internal (CExpr Init, List<(string Field, CType.Array Type, CtArray Value)> Arrays)? SpliceStructDeferringArrays(ComptimeValue v)
+    {
+        if (v is not CtStruct s || s.Type.Unqualified is not CType.Named named
+            || !StructFields.TryGetValue(named.Name, out var fields) || StructIsUnion.GetValueOrDefault(named.Name))
+        {
+            return null;
+        }
+        var arrays = new List<(string Field, CType.Array Type, CtArray Value)>();
+        var members = new List<FieldInit>();
+        try
+        {
+            foreach (var f in fields)
+            {
+                if (f.Name.Length == 0 || !s.Fields.TryGetValue(f.Name, out var fv)) { continue; }
+                if (f.Type.Unqualified is CType.Array arrayType)
+                {
+                    if (IsZero(fv)) { continue; }
+                    if (fv is not CtArray arrayValue) { return null; }
+                    arrays.Add((f.Name, arrayType, arrayValue));
+                    continue;
+                }
+                var spliced = Splice(fv);
+                if (f.Type.Unqualified is CType.Enum && fv is CtInt) { spliced = new Cast(f.Type, spliced) { Type = f.Type }; }
+                members.Add(new FieldInit(f.Name, f.Type, spliced));
+            }
+        }
+        catch (UnspliceableComptime) { return null; }
+        return (new StructInit(members) { Type = named }, arrays);
+    }
+
     /// <summary>Splice a comptime slice back. A byte slice (a comptime string, std.fmt's
     /// <c>Placeholder.specifier_arg</c>) becomes a string literal viewed as the slice; any other element type is
     /// not spliced yet.</summary>
@@ -796,6 +830,38 @@ internal sealed partial class IrModule
         return st;
     }
 
+    /// <summary>A comptime <c>memcpy(dst, src, bytes)</c> between two comptime arrays (or element pointers into
+    /// them): the elements are copied, each a deep copy, and the destination is returned as the call's value. Null
+    /// when either end is not a comptime array or the byte count does not divide into whole elements, so the
+    /// statement aborts the evaluation rather than being skipped.</summary>
+    private ComptimeValue? EvalComptimeMemcpy(CExpr dstArg, CExpr srcArg, CExpr bytesArg)
+    {
+        if (EvalComptime(bytesArg) is not CtInt { Value: var bytes } || bytes < 0) { return null; }
+        if (ComptimeArrayWindow(EvalComptime(dstArg)) is not var (dst, dstOffset, element)
+            || ComptimeArrayWindow(EvalComptime(srcArg)) is not var (src, srcOffset, _))
+        {
+            return null;
+        }
+        var size = element.SizeOf;
+        if (size <= 0 || bytes % size != 0) { return null; }
+        var count = (long)(bytes / size);
+        if (dstOffset + count > dst.Length || srcOffset + count > src.Length) { return null; }
+        var copied = new ComptimeValue[count];
+        for (long k = 0; k < count; k++) { copied[k] = CloneComptime(src[srcOffset + k]); }
+        for (long k = 0; k < count; k++) { dst[dstOffset + k] = copied[k]; }
+        return EvalComptime(dstArg);
+    }
+
+    /// <summary>The element storage an array-valued comptime operand denotes, with the starting index and the
+    /// element type: a whole array, an element pointer, or a slice. Null for anything else.</summary>
+    private static (ComptimeValue[] Elems, long Offset, CType Element)? ComptimeArrayWindow(ComptimeValue? v) => v switch
+    {
+        CtArray a => (a.Elems, 0, a.Element),
+        CtElemPtr p => (p.Backing.Elems, p.Index, p.Backing.Element),
+        CtSlice sl => (sl.Backing.Elems, sl.Offset, sl.Backing.Element),
+        _ => null,
+    };
+
     /// <summary>Fold a cast at comptime. An arithmetic target converts/re-types the
     /// value (int↔float, bool→int); a non-arithmetic target (a pointer cast) is
     /// transparent — the operand's value flows through unchanged, matching the legacy
@@ -834,7 +900,8 @@ internal sealed partial class IrModule
             },
             UnOp.BitNot => v switch
             {
-                CtInt i => new CtInt(~i.Value, i.Type),
+                // `~@as(u64, 0)` is 2^64 - 1, not the 128-bit -1: complemented at the operand's own width.
+                CtInt i => new CtInt(i.Type.Unqualified is CType.Prim { Integer: true } ip ? WrapToWidth(~i.Value, ip) : ~i.Value, i.Type),
                 CtBool b => new CtInt(~(b.Value ? System.Int128.One : System.Int128.Zero), CType.Int),
                 _ => null,
             },
@@ -894,7 +961,9 @@ internal sealed partial class IrModule
             BinOp.Div => c != System.Int128.Zero ? new CtInt(a / c, ty) : null,
             BinOp.Mod => c != System.Int128.Zero ? new CtInt(a % c, ty) : null,
             BinOp.Shl => new CtInt(unchecked(a << (int)c), ty),
-            BinOp.Shr => new CtInt(a >> (int)c, ty),
+            // A right shift sees the left operand at its own width: an unsigned one is never sign-extended, so
+            // `~@as(u64, 0) >> 42` (std.bit_set's last_item_mask) keeps its 22 low bits, not 128 bits of ones.
+            BinOp.Shr => new CtInt((TypeOf(l).Unqualified is CType.Prim { Integer: true } lp ? WrapToWidth(a, lp) : a) >> (int)c, ty),
             BinOp.BitAnd => new CtInt(a & c, ty),
             BinOp.BitOr => new CtInt(a | c, ty),
             BinOp.BitXor => new CtInt(a ^ c, ty),
@@ -989,6 +1058,12 @@ internal sealed partial class IrModule
     /// declared return type so the spliced literal carries the right carrier.</summary>
     private ComptimeValue? EvalComptimeCall(Call c)
     {
+        // `memcpy(&s.arr, src, bytes)`: how a struct literal's array field is filled (Zig task #78), e.g. std.bit_set's
+        // `break :full .{ .masks = masks }` in a const's labeled block. Both ends are comptime arrays, copied by element.
+        if (c is { Callee: "memcpy", Args: [var dstArg, var srcArg, var bytesArg] })
+        {
+            return EvalComptimeMemcpy(dstArg, srcArg, bytesArg);
+        }
         // The bit-count builtins over a value only known during the evaluation (`@popCount(self.used_args)`
         // in std.fmt.ArgState): the runtime helpers they lower to, computed at the operand's width.
         if (c is { Callee: "ZigMath.PopCount" or "ZigMath.Clz" or "ZigMath.Ctz", Args: [var bitArg] })
@@ -1354,10 +1429,15 @@ internal sealed partial class IrModule
             case ExprStmt e:
                 // Evaluated for its effect on the frame (assignments). An assignment of a value that is not known at
                 // compile time (a runtime `var` read in a const's initializer block) stops the evaluation; skipping it
-                // silently had left the target at its default.
-                if (EvalComptime(e.Expr) is null && e.Expr is Assign)
+                // silently had left the target at its default. A memory copy the interpreter could not perform stops it
+                // for the same reason (it had left a struct's array field zeroed).
+                if (EvalComptime(e.Expr) is null)
                 {
-                    throw new ComptimeAbort("an assignment of a value not known at compile time");
+                    if (e.Expr is Assign) { throw new ComptimeAbort("an assignment of a value not known at compile time"); }
+                    if (e.Expr is Call { Callee: "memcpy" or "memmove" or "memset" } mem)
+                    {
+                        throw new ComptimeAbort($"a `{mem.Callee}` over values not known at compile time");
+                    }
                 }
                 break;
 

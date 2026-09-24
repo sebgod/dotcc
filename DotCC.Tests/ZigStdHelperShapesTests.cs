@@ -753,6 +753,61 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Extern_struct_value_loops_and_a_struct_const_with_a_computed_array_field()
+    {
+        var cs = EmitZig("""
+            const Kind = union(enum) { null, undefined, int: u8 };
+            fn isPow2(v: u16) bool {
+                return v != 0 and (v & (v - 1)) == 0;
+            }
+            fn Words(comptime T: type) type {
+                const info = @typeInfo(T);
+                if (info != .int) @compileError("an integer");
+                if (!isPow2(@bitSizeOf(T))) @compileError("a power of two");
+                return extern struct {
+                    const Self = @This();
+                    const last = ~@as(u64, 0) >> 42;
+                    w: [2]T,
+                    const full: Self = full: {
+                        var w: [2]T = @splat(~@as(T, 0));
+                        w[1] = last;
+                        break :full .{ .w = w };
+                    };
+                    fn first(self: Self) ?usize {
+                        const word = for (self.w) |word| {
+                            if (word != 0) break word;
+                        } else return null;
+                        return @ctz(word);
+                    }
+                    fn same(self: Self, other: Self) bool {
+                        var i: usize = 0;
+                        return while (i < 2) : (i += 1) {
+                            if (self.w[i] != other.w[i]) break false;
+                        } else true;
+                    }
+                };
+            }
+            pub fn main() u8 {
+                const k = Kind{ .int = 3 };
+                const W = Words(u64);
+                const f = W.full;
+                return @truncate(k.int + (f.first() orelse 9) + @intFromBool(f.same(f)) + @popCount(f.w[1]));
+            }
+            """);
+        // Task #88 (std.bit_set.Array's shapes). `return extern struct` keeps the C layout; `null`/`undefined` are
+        // variant names (the tag member escaped for C#); a `for … else return null` value loop returns from the function
+        // on normal completion.
+        cs.ShouldContain("LayoutKind.Sequential)]\nunsafe struct Words__u64");
+        cs.ShouldContain("@null = 0,");
+        cs.ShouldContain("goto __lv0_end;");
+        // Two silent miscompiles: `~@as(u64, 0) >> 42` had sign-extended to all ones, and the labeled block's struct had
+        // lost its array field (the copy-in ran before the block's locals, and the interpreter skipped it). The const is
+        // now built by a synthesized initializer that copies the evaluated array in.
+        cs.ShouldContain("Words__u64__full__static = __init_Words__u64__full();");
+        cs.ShouldContain("new ulong[]{ 18446744073709551615UL, 4194303UL }");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

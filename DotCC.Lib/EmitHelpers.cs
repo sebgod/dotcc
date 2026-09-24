@@ -77,6 +77,10 @@ internal static class EmitHelpers
     internal static string Id(string name) =>
         _csReservedKeywords.Contains(name) ? "@" + name : name;
 
+    /// <summary><see cref="Id"/> for an enum MEMBER, which is always emitted qualified (<c>Tag.@null</c>), so the one
+    /// name <see cref="Id"/> leaves bare for C's <c>NULL</c> is escaped too: std.builtin.Type's <c>null</c> variant.</summary>
+    internal static string EnumMemberId(string name) => name == "null" ? "@null" : Id(name);
+
     // ---- C string/char escape decoding ----------------------------------
     // One element of a decoded body: either a literal source character (to be
     // UTF-8 encoded by the C# u8 literal) or a decoded escape byte (0–255).

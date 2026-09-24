@@ -273,11 +273,13 @@ internal sealed partial class ZigLowering
             // `break v;` — an unlabeled value break (Milestone Y, part 2): yield `v` from the innermost
             // value-position loop (`while/for … else`). Assigns its result temp and jumps to its end
             // label (skipping the loop's `else`).
-            case Zig.StmtBreakValue b: return LowerBreakValue(b.Arg1);
+            // The value's hoisted pre-statements (a struct literal's array copy-in, task #78) belong right before the
+            // break, after the block's own locals; the enclosing statement's hoist would run them before the block.
+            case Zig.StmtBreakValue b: return Hoisted(() => LowerBreakValue(b.Arg1));
 
             // `break :blk v;` — yield a value from the enclosing labeled value-block (Milestone L,
             // part 2). Assigns the block's result temp and jumps to its end label (LowerLabeledBreak).
-            case Zig.StmtBreakLabelValue b: return LowerLabeledBreak(Tok(b.Arg2), b.Arg3);
+            case Zig.StmtBreakLabelValue b: return Hoisted(() => LowerLabeledBreak(Tok(b.Arg2), b.Arg3));
 
             // `lbl: while/for (…) { … }` — a labeled loop (Milestone L, part 3); `break :lbl;` /
             // `continue :lbl;` exit / next-iterate it (possibly an OUTER loop) via a goto.
@@ -3127,7 +3129,7 @@ internal sealed partial class ZigLowering
     {
         Zig.PjBreak => LowerUnlabeledBreak(),
         Zig.PjBreakLabel b => LowerLabeledLoopJump(Tok(b.Arg2), isContinue: false),
-        Zig.PjBreakLabelValue b => LowerLabeledBreak(Tok(b.Arg2), b.Arg3),
+        Zig.PjBreakLabelValue b => Hoisted(() => LowerLabeledBreak(Tok(b.Arg2), b.Arg3)),
         Zig.PjContinue => new Continue(),
         Zig.PjContinueLabel c => LowerLabeledLoopJump(Tok(c.Arg2), isContinue: true),
         _ => throw new IrUnsupportedException("zig switch jump prong: " + (jump.Content?.GetType().Name ?? "null")),
@@ -3823,7 +3825,9 @@ internal sealed partial class ZigLowering
         Zig.ComptimeIfExpr c     => IsValueControlFlowStmt(c.Arg1),
         // A value-position loop (`while/for … else`, Milestone Y part 2) ALWAYS needs the statement
         // lowering — a loop that yields via `break v` / an `else` value can't be a C# expression.
-        Zig.WhileElseExpr or Zig.ForElseExpr or Zig.LabeledWhileElseExpr or Zig.LabeledForElseExpr => true,
+        Zig.WhileElseExpr or Zig.ForElseExpr or Zig.LabeledWhileElseExpr or Zig.LabeledForElseExpr
+            or Zig.WhileElseReturnExpr or Zig.ForElseReturnExpr or Zig.ForRefElseExpr or Zig.ForRefElseReturnExpr
+            or Zig.WhileContAssignElseExpr => true,
         _ => false,
     };
 
@@ -3859,6 +3863,8 @@ internal sealed partial class ZigLowering
         Zig.ComptimeSwitchExpr c => LowerValueControlFlowStmt(c.Arg1, sink, consume),
         Zig.ComptimeIfExpr c     => LowerValueControlFlowStmt(c.Arg1, sink, consume),
         Zig.WhileElseExpr or Zig.ForElseExpr or Zig.LabeledWhileElseExpr or Zig.LabeledForElseExpr
+            or Zig.WhileElseReturnExpr or Zig.ForElseReturnExpr or Zig.ForRefElseExpr or Zig.ForRefElseReturnExpr
+            or Zig.WhileContAssignElseExpr
             => LowerLoopValue(rhs, sink, consume),
         _ => throw new IrUnsupportedException(
             "internal: value control-flow statement on " + (rhs.Content?.GetType().Name ?? "null")),
@@ -3912,15 +3918,22 @@ internal sealed partial class ZigLowering
     private CStmt LowerLoopValue(Item rhs, CType? sink, Func<Symbol, CStmt> consume)
     {
         string? label = null;
-        bool isFor;
         Item condOrIter, blockItem, elseItem;
         string? elemName = null;
+        var byRef = false;
+        (Item Target, Item Op, Item Value)? contAssign = null;
         switch (rhs.Content)
         {
-            case Zig.WhileElseExpr w:        condOrIter = w.Arg2; blockItem = w.Arg4; elseItem = w.Arg6; isFor = false; break;
-            case Zig.ForElseExpr f:          condOrIter = f.Arg2; elemName = Tok(f.Arg5); blockItem = f.Arg7; elseItem = f.Arg9; isFor = true; break;
-            case Zig.LabeledWhileElseExpr w: label = Tok(w.Arg0); condOrIter = w.Arg4; blockItem = w.Arg6; elseItem = w.Arg8; isFor = false; break;
-            case Zig.LabeledForElseExpr f:   label = Tok(f.Arg0); condOrIter = f.Arg4; elemName = Tok(f.Arg7); blockItem = f.Arg9; elseItem = f.Arg11; isFor = true; break;
+            case Zig.WhileElseExpr w:        condOrIter = w.Arg2; blockItem = w.Arg4; elseItem = w.Arg6; break;
+            case Zig.ForElseExpr f:          condOrIter = f.Arg2; elemName = Tok(f.Arg5); blockItem = f.Arg7; elseItem = f.Arg9; break;
+            case Zig.LabeledWhileElseExpr w: label = Tok(w.Arg0); condOrIter = w.Arg4; blockItem = w.Arg6; elseItem = w.Arg8; break;
+            case Zig.LabeledForElseExpr f:   label = Tok(f.Arg0); condOrIter = f.Arg4; elemName = Tok(f.Arg7); blockItem = f.Arg9; elseItem = f.Arg11; break;
+            case Zig.WhileElseReturnExpr w:  condOrIter = w.Arg2; blockItem = w.Arg4; elseItem = w.Arg6; break;
+            case Zig.WhileContAssignElseExpr w:
+                condOrIter = w.Arg2; contAssign = (w.Arg6, w.Arg7, w.Arg8); blockItem = w.Arg10; elseItem = w.Arg12; break;
+            case Zig.ForElseReturnExpr f:    condOrIter = f.Arg2; elemName = Tok(f.Arg5); blockItem = f.Arg7; elseItem = f.Arg9; break;
+            case Zig.ForRefElseExpr f:       condOrIter = f.Arg2; elemName = Tok(f.Arg6); blockItem = f.Arg8; elseItem = f.Arg10; byRef = true; break;
+            case Zig.ForRefElseReturnExpr f: condOrIter = f.Arg2; elemName = Tok(f.Arg6); blockItem = f.Arg8; elseItem = f.Arg10; byRef = true; break;
             default: throw new IrUnsupportedException("internal: loop-value on " + (rhs.Content?.GetType().Name ?? "null"));
         }
 
@@ -3932,10 +3945,31 @@ internal sealed partial class ZigLowering
         // Lower the loop with the value target active so a `break v` inside resolves to it. The cond /
         // iterable is lowered before the body (it can't `break`), so it never references the temp.
         _loopValues.Push(target);
-        CStmt loop = isFor
-            ? LowerForSlice(LowerExpr(condOrIter), elemName!, null, blockItem, byRef: false)
-            : new While(LowerExpr(condOrIter), LowerBlock(blockItem));
+        // A `for` names its element capture; a `while` has none.
+        CStmt loop = elemName is { } elem
+            ? LowerForSlice(LowerExpr(condOrIter), elem, null, blockItem, byRef)
+            // `while (c) : (i += 1)` → the C `For` with that post, so a `continue` runs it (as the statement form).
+            : contAssign is { } cont
+                ? new For(null, LowerExpr(condOrIter), ContAssignPost(cont.Target, cont.Op, cont.Value), LowerBlock(blockItem))
+                : new While(LowerExpr(condOrIter), LowerBlock(blockItem));
         _loopValues.Pop();
+
+        // `… else return v`: normal completion RETURNS from the function, so the loop's value is its `break`s'
+        // alone, and the code after the loop is reached only through the end label.
+        if (elseItem.Content is Zig.ReturnArm returnArm)
+        {
+            var breakType = target.ResultType
+                ?? throw new IrUnsupportedException("a value-position loop whose `else` returns must yield its value with `break v`");
+            temp.Type = breakType;
+            return new Seq(new List<CStmt>
+            {
+                new DeclStmt(new List<LocalDecl> { new(temp, new DefaultLit { Type = breakType }) }),
+                loop,
+                Hoisted(() => LowerReturn(returnArm.Arg1)),
+                new Labeled(endLabel, new Block(new List<CStmt>())),
+                consume(temp),
+            });
+        }
 
         // The `else` value supplies the result on NORMAL completion. A `break v` jumped to `endLabel`,
         // skipping this. Sink it at the now-known result type (a `break` may have fixed it).
@@ -4393,7 +4427,7 @@ internal sealed partial class ZigLowering
         Zig.FbBreak          => LowerUnlabeledBreak(),
         Zig.FbContinue       => new Continue(),
         Zig.FbBreakLabel b   => LowerLabeledLoopJump(Tok(b.Arg2), isContinue: false),
-        Zig.FbBreakLabelValue b => LowerLabeledBreak(Tok(b.Arg2), b.Arg3),
+        Zig.FbBreakLabelValue b => Hoisted(() => LowerLabeledBreak(Tok(b.Arg2), b.Arg3)),
         Zig.FbContinueLabel c => LowerLabeledLoopJump(Tok(c.Arg2), isContinue: true),
         Zig.FbBlock b        => LowerStmt(b.Arg0),
         _ => throw new IrUnsupportedException("internal: fallback arm " + (arm.Content?.GetType().Name ?? "null")),

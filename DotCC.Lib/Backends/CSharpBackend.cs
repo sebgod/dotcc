@@ -257,7 +257,7 @@ internal sealed class CSharpBackend
         var unsigned64 = e.Underlying.Unqualified is CType.Prim { Integer: true, Signed: false, Bytes: 8 };
         foreach (var m in e.Members)
         {
-            sb.Append("    ").Append(DotCC.EmitHelpers.Id(m.Name)).Append(" = ")
+            sb.Append("    ").Append(DotCC.EmitHelpers.EnumMemberId(m.Name)).Append(" = ")
               .Append(unsigned64
                   ? unchecked((ulong)m.Value).ToString(System.Globalization.CultureInfo.InvariantCulture)
                   : m.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)).Append(",\n");
@@ -1765,7 +1765,7 @@ internal sealed class CSharpBackend
             {
                 var enumTy = Cs(ec.Sym.Type.Unqualified);
                 if (_typeShadowedGlobals.Contains(enumTy)) { enumTy = "global::" + enumTy; }
-                return ($"{enumTy}.{DotCC.EmitHelpers.Id(ec.Sym.Name)}", PPostfix);
+                return ($"{enumTy}.{DotCC.EmitHelpers.EnumMemberId(ec.Sym.Name)}", PPostfix);
             }
             // A bare function name used as a value decays to its address — C#
             // needs the explicit `&` to form a delegate* (C allows the bare name).

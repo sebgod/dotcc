@@ -2173,7 +2173,8 @@ internal sealed partial class ZigLowering
                     var rows = Enumerable.Range(0, splatCount).SelectMany(_ => row.Elems).ToList();
                     return new StackArray(row.Element, rows) { Type = splatArray };
                 }
-                if (_ir.ConstEval(splatValue) is null && splatValue is not (LitBool or LitFloat))
+                // 128-bit: `@splat(~@as(u64, 0))` (std.bit_set's `full`) is beyond `long`.
+                if (_ir.ConstEval128(splatValue) is null && splatValue is not (LitBool or LitFloat))
                 {
                     throw new IrUnsupportedException("zig `@splat` into an array needs a compile-time-known element value");
                 }
