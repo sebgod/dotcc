@@ -95,6 +95,33 @@ internal sealed partial class IrModule
     /// left. Read after the call frame; assigned in place.</summary>
     internal Dictionary<Symbol, ComptimeValue> ComptimeGlobals { get; } = new();
 
+    /// <summary>A front end's top-level CONST aggregates by symbol, with their initializers: a comptime
+    /// evaluation reading one evaluates the initializer, once (<see cref="EvalConstGlobal"/>).</summary>
+    internal Dictionary<Symbol, CExpr> ConstGlobalInits { get; } = new();
+
+    /// <summary>Each evaluated <see cref="ConstGlobalInits"/> entry (a const is never written, so one value
+    /// serves every read); null marks one being evaluated, so a self-reference stops.</summary>
+    private readonly Dictionary<Symbol, ComptimeValue?> _constGlobalValues = new();
+
+    /// <summary>The comptime value of a top-level const aggregate (see <see cref="ConstGlobalInits"/>).</summary>
+    private ComptimeValue? EvalConstGlobal(Symbol sym, CExpr init)
+    {
+        if (_constGlobalValues.TryGetValue(sym, out var known)) { return known; }
+        _constGlobalValues[sym] = null;
+        var saved = _comptimeFrame;
+        _comptimeFrame = null;   // an initializer reads no caller's locals
+        try
+        {
+            var value = EvalComptime(init);
+            _constGlobalValues[sym] = value;
+            return value;
+        }
+        finally
+        {
+            _comptimeFrame = saved;
+        }
+    }
+
     /// <summary>Evaluate <paramref name="e"/> to a comptime value, calls included (the comptime engine's
     /// E3: the initial value of a comptime aggregate variable). Null when it is not a compile-time value.
     /// The result is a fresh copy, never an alias of a value another variable holds.</summary>
@@ -214,8 +241,16 @@ internal sealed partial class IrModule
     internal CExpr? ResolveComptimeFold(CExpr inner)
     {
         ComptimeMiss = null;
-        return TryEvalTop(inner, allowCalls: true) is { } v ? Splice(v) : null;
+        if (TryEvalTop(inner, allowCalls: true) is not { } v) { return null; }
+        // A value with no C# literal form (a struct with a non-zero inline-array field: std.Target's
+        // `Feature.Set{ .ints = … }`) keeps the expression it came from. The fold's callee is interpreted, so
+        // it is pure, and running it yields the same value.
+        try { return Splice(v); }
+        catch (UnspliceableComptime) { return inner; }
     }
+
+    /// <summary>A comptime value C# cannot write as a literal (see <see cref="ResolveComptimeFold"/>).</summary>
+    private sealed class UnspliceableComptime : System.Exception { }
 
     /// <summary>Why the most recent comptime evaluation stopped (the construct the interpreter does not
     /// evaluate), for the "did not evaluate" diagnostic. Null when nothing was recorded.</summary>
@@ -272,6 +307,13 @@ internal sealed partial class IrModule
             if (f.Name.Length == 0) { continue; }                       // anonymous padding bit-field
             if (isUnion && f.Name != s.Active) { continue; }            // an overlaid union: the active variant only
             if (!s.Fields.TryGetValue(f.Name, out var fv)) { continue; } // unsupplied → C# zero default
+            // An array field is inline storage, which a C# object initializer cannot set: an all-zero one is
+            // the zero default, anything else has no literal form.
+            if (f.Type.Unqualified is CType.Array)
+            {
+                if (IsZero(fv)) { continue; }
+                throw new UnspliceableComptime();
+            }
             // An enum field (a union's tag) takes its value as the enum type: C# has no implicit int → enum.
             var spliced = Splice(fv);
             if (f.Type.Unqualified is CType.Enum && fv is CtInt) { spliced = new Cast(f.Type, spliced) { Type = f.Type }; }
@@ -303,6 +345,18 @@ internal sealed partial class IrModule
         var len = new LitInt(sl.Length.ToString(System.Globalization.CultureInfo.InvariantCulture), sl.Length) { Type = CType.ULong };
         return new SliceNew(lit, len, elem, elem.IsConst) { Type = sl.Type };
     }
+
+    /// <summary>True for a comptime value that is all zeros (an integer 0, a false, an array or struct of them).</summary>
+    private static bool IsZero(ComptimeValue v) => v switch
+    {
+        CtInt i => i.Value == 0,
+        CtBool b => !b.Value,
+        CtFloat f => f.Value == 0,
+        CtArray a => a.Elems.All(IsZero),
+        CtStruct s => s.Fields.Values.All(IsZero),
+        CtNull => true,
+        _ => false,
+    };
 
     /// <summary>A string literal as the comptime byte array it denotes (its NUL included, as its C type counts it).</summary>
     private static CtArray StringBytes(LitStr ls)
@@ -367,6 +421,13 @@ internal sealed partial class IrModule
         if (i.Value >= System.Int128.Zero)
         {
             long? fast = i.Value <= (System.Int128)long.MaxValue ? (long)i.Value : null;
+            // A narrow UNSIGNED value (`u16` from std.atomic.cacheLineForCpu): C#'s only unsigned literal is a
+            // `uint`, which does not narrow implicitly, so it is an int literal cast to the type.
+            if (i.Type.Unqualified is CType.Prim { Integer: true, Signed: false, Bytes: < 4 } && fast is { } small)
+            {
+                var intLit = new LitInt(i.Value.ToString(CultureInfo.InvariantCulture), small) { Type = CType.Int };
+                return new Cast(i.Type, intLit) { Type = i.Type };
+            }
             return new LitInt(i.Value.ToString(CultureInfo.InvariantCulture), fast) { Type = i.Type };
         }
         // Int128.MinValue has no in-range positive magnitude — splice it as a signed-decimal literal.
@@ -440,6 +501,20 @@ internal sealed partial class IrModule
             case CondExpr q:
                 return EvalComptime(q.Cond) is { } cnd ? EvalComptime(Truthy(cnd) ? q.Then : q.Else) : null;
 
+            // A value switch (`switch (cpu.arch) { .x86_64, .aarch64 => 128, … }` in std.atomic.cacheLineForCpu).
+            case SwitchExpr se:
+            {
+                if (EvalComptime(se.Subject) is not CtInt subject) { return null; }
+                CExpr? chosen = null;
+                CExpr? fallback = null;
+                foreach (var arm in se.Arms)
+                {
+                    if (arm.Labels is null) { fallback ??= arm.Value; continue; }
+                    if (arm.Labels.Any(l => LabelMatches(l, subject.Value))) { chosen = arm.Value; break; }
+                }
+                return (chosen ?? fallback) is { } value ? EvalComptime(value) : null;
+            }
+
             // A pointer to a comptime AGGREGATE is the aggregate itself (the comptime-engine segment E1): a
             // CtStruct / CtArray is a mutable reference, so `&a` handed to a `self: *@This()` method and a
             // store through it (`self.n += v`) mutate the caller's value in place, by-reference for free. A
@@ -449,6 +524,16 @@ internal sealed partial class IrModule
             {
                 var pointee = EvalComptime(pu.Operand);
                 return pointee is CtStruct or CtArray ? pointee : EvalUnary(pu);
+            }
+            // `i++` / `--i` (a lowered `for` loop's step): the compound assignment by one, yielding the old
+            // value (post) or the new one (pre).
+            case Unary { Op: UnOp.PreInc or UnOp.PreDec or UnOp.PostInc or UnOp.PostDec } step:
+            {
+                var before = EvalComptime(step.Operand);
+                var one = new LitInt("1", 1) { Type = CType.Int };
+                var op = step.Op is UnOp.PreInc or UnOp.PostInc ? BinOp.Add : BinOp.Sub;
+                var after = EvalComptimeAssign(new Assign(op, step.Operand, one) { Type = step.Operand.Type });
+                return step.Op is UnOp.PostInc or UnOp.PostDec ? before : after;
             }
             case Unary u:
                 return EvalUnary(u);
@@ -487,7 +572,8 @@ internal sealed partial class IrModule
                     return new CtInt(v.Sym.ConstValue, ct is CType.Prim or CType.Enum ? ct : CType.Int);
                 }
                 if (_comptimeFrame is { } fr && fr.TryGetValue(v.Sym, out var bound)) { return bound; }
-                return ComptimeGlobals.TryGetValue(v.Sym, out var global) ? global : null;
+                if (ComptimeGlobals.TryGetValue(v.Sym, out var global)) { return global; }
+                return ConstGlobalInits.TryGetValue(v.Sym, out var constInit) ? EvalConstGlobal(v.Sym, constInit) : null;
 
             case Assign a:
                 return EvalComptimeAssign(a);
@@ -1003,6 +1089,18 @@ internal sealed partial class IrModule
             case Goto g:
                 throw new ComptimeGoto(g.Label);
 
+            // A switch statement: run the matching section (or the default one); a `break` leaves the switch.
+            case Switch sw:
+            {
+                if (EvalComptime(sw.Subject) is not CtInt subject) { throw new ComptimeAbort("non-constant comptime switch subject"); }
+                var section = sw.Sections.FirstOrDefault(sec => sec.Labels.Any(l => l.CaseExpr is not null && LabelMatches(l, subject.Value)))
+                    ?? sw.Sections.FirstOrDefault(sec => sec.Labels.Any(l => l.CaseExpr is null));
+                if (section is null) { break; }
+                try { EvalComptimeList(section.Body); }
+                catch (ComptimeBreak) { }
+                break;
+            }
+
             case Labeled l:
                 EvalComptimeStmt(l.Body);
                 break;
@@ -1111,6 +1209,14 @@ internal sealed partial class IrModule
             default:
                 throw new ComptimeAbort("comptime: unsupported statement " + s.GetType().Name);
         }
+    }
+
+    /// <summary>True when a switch label (a value or an inclusive range) matches <paramref name="value"/>.</summary>
+    private bool LabelMatches(SwitchLabel label, System.Int128 value)
+    {
+        if (label.CaseExpr is not { } lo || EvalComptime(lo) is not CtInt low) { return false; }
+        if (label.HiExpr is null) { return low.Value == value; }
+        return EvalComptime(label.HiExpr) is CtInt high && value >= low.Value && value <= high.Value;
     }
 
     /// <summary>Run a statement list, resuming at a label later in THIS list when a <c>goto</c> from

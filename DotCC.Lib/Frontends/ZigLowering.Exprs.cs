@@ -316,6 +316,8 @@ internal sealed partial class ZigLowering
                 // so a position that needs the value during lowering has it; otherwise after the drain.
                 if (_ir.ResolveComptimeFold(inner) is { } now)
                 {
+                    // A folded `a or b` is zig's `bool`, though the IR types the operator C's `int`.
+                    if (now is LitBool) { return new ComptimeFold(inner) { Type = CType.Bool, Resolved = now }; }
                     fold.Resolved = now;
                     return fold;
                 }
@@ -348,6 +350,28 @@ internal sealed partial class ZigLowering
                 // (`std.heap.page_allocator`/`c_allocator`) materializes a runtime Allocator; a std
                 // TYPE used as a value, or any unmodeled std path, errors. (A `.alloc(…)` /
                 // `.init(…)` CALL never reaches here — the callee Field goes through LowerMethodCall.)
+                // `std.Target.x86.cpu.x86_64_v3` — a VALUE const (or an enum member) of a container ANOTHER
+                // module declares, named through the module path: lowered in the owning module, where its
+                // initializer resolves (the target-identity segment T3: a CPU model for builtin.cpu).
+                if (fld.Arg0.Content is Zig.Field && !IsCuratedStdPath(fld.Arg0)
+                    && TryResolveModuleNestedType(fld.Arg0) is { Type: var moduleType, Owner: var moduleOwner })
+                {
+                    if (moduleType.Unqualified is CType.Enum moduleEnum) { return moduleOwner.ResolveEnumLit(fieldName, moduleEnum); }
+                    if (ContainerTypeName(moduleType) is { } moduleContainer
+                        && moduleOwner._containerConsts.TryGetValue(moduleContainer, out var moduleConsts)
+                        && moduleConsts.TryGetValue(fieldName, out var moduleEntry))
+                    {
+                        return moduleOwner.LowerContainerConst(moduleContainer, fieldName, moduleEntry.typeItem, moduleEntry.rhs);
+                    }
+                }
+                // `builtin.cpu` as a VALUE (`cacheLineForCpu(builtin.cpu)`): a top-level value const of the module
+                // the base names, lowered there on demand.
+                if (!IsCuratedStdPath(fld.Arg0) && !TryResolveStdPath(expr, out _)
+                    && ResolveModulePath(fld.Arg0) is { Lowering: { } constModule }
+                    && constModule.LowerExportedValueConst(fieldName) is { } moduleConst)
+                {
+                    return moduleConst;
+                }
                 if (TryResolveStdPath(expr, out var stdPath))
                 {
                     // Both StdAllocatorValues rows are the C heap today, so a value use
@@ -1088,6 +1112,12 @@ internal sealed partial class ZigLowering
                 if (EnsureMethodDeclared(c, name) is { } sibling) { return CallStaticMethod(sibling, argItems); }
             }
         }
+        // A top-level const naming a container's function (`pub const featureSet =
+        // CpuFeature.FeatureSetFns(Feature).featureSet;` in std/Target/x86.zig): the call is that method call.
+        if (sym is null && ResolveMethodAlias(name) is { } aliasedMethod)
+        {
+            return CallStaticMethod(aliasedMethod, argItems);
+        }
         if (sym is null) { throw new IrUnsupportedException($"call to unresolved name '{name}'"); }
         // A type-returning generic (wall-plan W4) is a COMPTIME type constructor — calling it in value
         // position is meaningless; it must appear in a TYPE position (a type annotation / alias / typed
@@ -1246,6 +1276,24 @@ internal sealed partial class ZigLowering
 
     /// <summary>Call a container function through its type (<c>Self.init(…)</c>, <c>Map(K, V).init(…)</c>): a
     /// direct call, or, for a GENERIC method, an instantiation in the module that owns it.</summary>
+    /// <summary>The function a top-level const aliases, when it names a container's function through a type
+    /// (<c>pub const featureSet = CpuFeature.FeatureSetFns(Feature).featureSet;</c> in std/Target/x86.zig), resolved
+    /// in this module (the type call reifies here); null for any other const.</summary>
+    internal Symbol? ResolveMethodAlias(string name)
+    {
+        if (!_topLevelConstRhs.TryGetValue(name, out var rhs) || rhs.Content is not Zig.Field f) { return null; }
+        CType? owner = f.Arg0.Content switch
+        {
+            Zig.CallArgs or Zig.CallNoArgs => TryEvalTypeReturningCall(f.Arg0, out var called) ? called : null,
+            Zig.Ident id => TryLookupContainerType(Tok(id.Arg0), out var named) ? named : null,
+            Zig.Field => TryResolveQualifiedNestedType(f.Arg0),
+            _ => null,
+        };
+        return owner is not null && ContainerTypeName(owner) is { } container
+            ? EnsureMethodDeclared(container, Tok(f.Arg2)) ?? ContainerFnConst(container, Tok(f.Arg2))
+            : null;
+    }
+
     private CExpr CallStaticMethod(Symbol method, IReadOnlyList<Item> argItems)
     {
         if (_shared.GenericMethodOwners.TryGetValue(method, out var owner) && owner._genericFns.TryGetValue(method, out var g))
@@ -1301,6 +1349,12 @@ internal sealed partial class ZigLowering
         // navigation — is the separate S4d lift.)
         if (!IsCuratedStdPath(fld.Arg0) && ResolveModulePath(fld.Arg0) is { } navMod)
         {
+            // `std.Target.x86.featureSet(…)`: the module exports the name as a const aliasing a container's
+            // function, which the module resolves; the call and its arguments stay here.
+            if (navMod.Lowering?.ResolveMethodAlias(methodName) is { } navAliased)
+            {
+                return CallStaticMethod(navAliased, argItems);
+            }
             // Through any re-export (`pub const indexOfScalar = findScalar;`), to the module that owns it.
             var nav = navMod.Lowering?.ResolveExportedDecl(methodName, raiseIfSkipped: true)
                 ?? throw new IrUnsupportedException(

@@ -282,6 +282,22 @@ internal sealed class ZigModuleGraph
     /// lazy module list, but can still own a body a comptime call demands.</summary>
     private readonly List<ZigLowering> _roots = new();
 
+    /// <summary>The module that declares the container registered under IR name <paramref name="container"/>
+    /// (module-qualified, so unique), or null.</summary>
+    internal ZigLowering? OwnerOfContainer(string container)
+    {
+        // The prefixed (imported) modules first: a root's unprefixed names can only be its own.
+        foreach (var lowering in _lowerings)
+        {
+            if (lowering.DeclaresContainer(container)) { return lowering; }
+        }
+        foreach (var root in _roots)
+        {
+            if (root.DeclaresContainer(container)) { return root; }
+        }
+        return null;
+    }
+
     /// <summary>Record a root module for <see cref="TryLowerBodyOnDemand"/>.</summary>
     internal void RegisterRoot(ZigLowering lowering) => _roots.Add(lowering);
 

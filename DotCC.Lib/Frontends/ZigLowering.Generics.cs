@@ -950,6 +950,18 @@ internal sealed partial class ZigLowering
             RecordTypeCallBits(maybeCall, siblingBits);
             return true;
         }
+        // A type-returning method of a container ANOTHER module declares, reached through a type alias or a
+        // module path (`CpuFeature.FeatureSetFns(Feature)` with `const CpuFeature = std.Target.Cpu.Feature;`
+        // in std/Target/x86.zig): reified in the owning module, its type arguments read here.
+        if (calleeItem.Content is Zig.Field foreignField
+            && ForeignContainerOwner(foreignField.Arg0) is ({ } foreignOwner, { } foreignContainer)
+            && foreignOwner.EnsureMethodDeclared(foreignContainer, Tok(foreignField.Arg2)) is { } foreignSym
+            && foreignOwner._typeReturningGenerics.TryGetValue(foreignSym, out var foreignInfo))
+        {
+            type = foreignOwner.EvalTypeReturningCall(foreignSym, foreignInfo, args, out var foreignBits, typeArgScope: this);
+            RecordTypeCallBits(maybeCall, foreignBits);
+            return true;
+        }
         // A MODULE-QUALIFIED callee (`array_list.Aligned(u8)`, `std.array_list.Aligned(u8)`) — the
         // type-position half of module-graph navigation (road-to-zig-std S4d). The template lives in the
         // imported module, so the reification runs THERE (its body's types resolve in its own
@@ -966,6 +978,30 @@ internal sealed partial class ZigLowering
         }
         return false;
     }
+
+    /// <summary>The owning module and IR name of a container ANOTHER module declares, named by a type alias
+    /// (<c>CpuFeature</c>) or a module path (<c>std.Target.Cpu.Feature</c>); null for this module's own.</summary>
+    private (ZigLowering Owner, string Container)? ForeignContainerOwner(Item baseItem)
+    {
+        CType? type = baseItem.Content switch
+        {
+            Zig.Ident id when _symbols.Resolve(Tok(id.Arg0)) is null
+                => TryLookupContainerType(Tok(id.Arg0), out var known) ? known
+                   : TryResolveModuleTypeAlias(Tok(id.Arg0), out var aliased) ? aliased : null,
+            Zig.Field when !IsCuratedStdPath(baseItem) => TryResolveModuleNestedType(baseItem)?.Type,
+            _ => null,
+        };
+        if (type is null || ContainerTypeName(type) is not { } name) { return null; }
+        return _moduleGraph?.OwnerOfContainer(name) is { } owner && owner != this ? (owner, name) : null;
+    }
+
+    /// <summary>True when this module registered a container under IR name <paramref name="name"/>.</summary>
+    internal bool DeclaresContainer(string name) =>
+        // An imported module's containers (nested ones included) carry its unique prefix (`fmt__Placeholder`,
+        // `Target__Cpu__Feature`); a root's are its own registrations.
+        _modulePrefix is { } prefix
+            ? name.StartsWith(prefix + "__", System.StringComparison.Ordinal)
+            : _containerTypes.ContainsKey(name);
 
     /// <summary>The type-returning METHOD a call's callee names, or null: a bare name found in
     /// <see cref="_methods"/> of the current container or any lexically enclosing one, or
@@ -1104,9 +1140,19 @@ internal sealed partial class ZigLowering
             {
                 // The declared integer width is read in the CALLER's scope too — the argument is
                 // spelled there, so a caller-side alias for `u21` resolves to 21 the same way.
-                typeSeeds.Add(new TypeSeed(info.Params[i].Name,
-                                           argScope.LowerType(argItems[i]).Unqualified,
-                                           argScope.DeclaredBitsOfTypeArg(argItems[i])));
+                // A type ARGUMENT is a pure type computation (`Log2Int(@Int(.unsigned, 384))`): a wide integer
+                // may appear in it (see IntBuiltinType).
+                argScope._typeArgDepth++;
+                try
+                {
+                    typeSeeds.Add(new TypeSeed(info.Params[i].Name,
+                                               argScope.LowerType(argItems[i]).Unqualified,
+                                               argScope.DeclaredBitsOfTypeArg(argItems[i])));
+                }
+                finally
+                {
+                    argScope._typeArgDepth--;
+                }
             }
         }
 

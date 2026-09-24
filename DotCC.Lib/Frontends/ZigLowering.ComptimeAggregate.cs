@@ -70,7 +70,14 @@ internal sealed partial class ZigLowering
             // queries are all named, so a tuple is simply not this domain.
             if (init.Content is not Zig.FieldInit fi) { return null; }
             var fieldName = Tok(fi.Arg1);
-            if (ReadComptimeAggField(fi.Arg3) is not { } field) { return null; }
+            if (ReadComptimeAggField(fi.Arg3) is not { } field)
+            {
+                // A field the recorder has no domain for, but that does not make the literal a runtime one: an
+                // address (`.model = &std.Target.x86.cpu.x86_64_v3`) or a call (`.features = featureSet(…)`) in the
+                // typed synthetic `builtin.cpu`. It is left out; a read of it takes the ordinary path.
+                if (fi.Arg3.Content is Zig.PreAddrOf or Zig.CallArgs or Zig.CallNoArgs) { continue; }
+                return null;
+            }
             fields[fieldName] = field;
         }
         return new ZigComptimeAggregate(fields);

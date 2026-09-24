@@ -1202,13 +1202,21 @@ internal sealed partial class ZigLowering
     /// initializer: <c>new B { items = … }</c> is <b>CS1666</b> ("cannot use fixed size buffers contained
     /// in unfixed expressions"), which dotcc used to emit silently — a bad emit, the worst failure class.
     /// Zig's <c>undefined</c> asks for no particular contents, so the member is simply dropped and C#'s
-    /// zero-init stands (a zeroed over-approximation, exactly as for <c>var x: T = undefined</c>). Any
+    /// zero-init stands (a zeroed over-approximation, exactly as for <c>var x: T = undefined</c>); an all-zero
+    /// <c>@splat(0)</c> is exactly that zero-init. Any
     /// other value would need element-wise stores into a pinned buffer, which an initializer EXPRESSION
     /// cannot express, so it is a precise loud cut naming the workaround.</summary>
     private static bool IsInlineArrayMember(string structName, string fieldName, CType fieldType, Item valueItem)
     {
         if (fieldType.Unqualified is not CType.Array) { return false; }
         if (valueItem.Content is Zig.UndefinedLit) { return true; }
+        // `@splat(0)` (std.Target.Cpu.Feature.Set's `empty = .{ .ints = @splat(0) }`): all zeros, which C#'s
+        // zero-init of the buffer already is.
+        if (valueItem.Content is Zig.BuiltinCall { Arg0: var splatTok } splat && Tok(splatTok) == "@splat"
+            && Flatten(splat.Arg2) is [{ Content: Zig.IntLit { Arg0: var zeroTok } }] && Tok(zeroTok) == "0")
+        {
+            return true;
+        }
         throw new IrUnsupportedException(
             $"struct '{structName}': field '{fieldName}' is an array — inline array storage can't be "
             + "initialized from a struct literal (only `undefined` can); build the value first and assign "
@@ -1526,6 +1534,11 @@ internal sealed partial class ZigLowering
                 return new SliceNew(new NullPtr { Type = new CType.Pointer(emptySlice.Element.Unqualified) },
                     new LitInt("0", 0) { Type = CType.ULong }, emptySlice.Element.Unqualified, emptySlice.Element.IsConst)
                 { Type = emptySlice };
+            // `&.{ .avx2, .sse2 }` at a `[]const Feature` sink (std.Target.x86.featureSet's argument): an array
+            // literal of the slice's element type, so each element is result-located, viewed as the slice.
+            case Zig.PreAddrOf listAddr when sink?.Unqualified is CType.Slice listSlice
+                                          && listAddr.Arg1.Content is Zig.AnonStructInit:
+                return CoerceToSlice(LowerExprSink(listAddr.Arg1, new CType.Array(listSlice.Element, null)), listSlice);
             // `&.{ … }` at a `*const S` sink (std.Io.Writer.fixed's `.vtable = &.{ .drain = fixedDrain, … }`):
             // the literal is result-located at `S`, and a comptime-known one lives in static storage.
             case Zig.PreAddrOf pa when pa.Arg1.Content is Zig.AnonStructInit

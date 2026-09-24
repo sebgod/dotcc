@@ -810,8 +810,23 @@ vector length feeds TYPES.
 - **T3a ✅** with a real std, the synthetic builtin spells the architecture with zig's own type
   (`@as(std.Target.Cpu.Arch, .x86_64)`): `builtin.cpu.arch.endian()` is Target.zig's method, and
   `builtin.cpu.arch == .x86_64` still folds. AutoHashMap is past `native_endian`.
-- **T3** the synthetic `builtin.cpu` as a typed `std.Target.Cpu` value filled from the intrinsics (a `model` and
-  a `features` set: ArrayList's `cacheLineForCpu(builtin.cpu)` passes the whole value).
+- **T3 ✅ (2026-09-24)** with a real std, the synthetic `builtin.cpu` is a typed `std.Target.Cpu` read off the host:
+  `.model = &std.Target.x86.cpu.x86_64_vN` (the level the host reaches) and `.features = std.Target.x86.featureSet(&.{ … })`
+  from `System.Runtime.Intrinsics.X86` (aarch64: `generic` + `Arm.*`, unverified, T6). Reaching it needed: a value const
+  of a container another module declares (`std.Target.x86.cpu.x86_64_v3`), an alias to a nested type
+  (`const CpuModel = std.Target.Cpu.Model;`), a top-level const aliasing a reified container's method
+  (`pub const featureSet = CpuFeature.FeatureSetFns(Feature).featureSet;`) called bare or through its module, a
+  type-returning method of another module's container (`CpuFeature.FeatureSetFns(Feature)`), `@field(Target,
+  @tagName(family))` as a module path (the `has(…)` parameter type), a wider-than-128 integer as a width-only type
+  argument (`Log2Int(@Int(.unsigned, 384))`), `@splat(0)` for an inline-array field, `&.{ .a, .b }` at a slice sink,
+  a module value const read as a value (`builtin.cpu`), and in the interpreter: top-level const aggregates, `++` /
+  `--`, value and statement `switch`, a narrow unsigned splice, and the runtime expression kept when a value has no
+  C# literal form (a non-zero inline array). A folded `comptime (a or b)` is typed `bool`.
+  **Milestone: `std.array_list.Aligned(u8, null)` runs from source** (`list.append` through `page_allocator`, its
+  growth policy reading `std.atomic.cache_line = cacheLineForCpu(builtin.cpu)`), == zig; fixed on the way: runtime
+  slices are mutable (`items.len += 1`, `items.ptr = …`), `return voidCall();` in a `void` / `!void` function, and an
+  error union over a pointer rendering `ErrUnion<byte*>`. Real-std differentials
+  `Dotcc_matches_zig_std_builtin_cpu_features_from_source`, `Dotcc_matches_zig_std_array_list_from_source`.
 - **T4** comptime evaluation over that value (`featureSetHas`, `cacheLineForCpu`, `suggestVectorLengthForCpu`):
   comptime struct / array values, the same engine #10's `std.fmt.ArgState` needs.
 - **E1 ✅** (the comptime engine, extending the IR interpreter by the maintainer's choice) a pointer to a

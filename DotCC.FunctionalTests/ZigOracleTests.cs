@@ -4720,6 +4720,74 @@ public sealed class ZigOracleTests
         }
     }
 
+    /// <summary>The typed <c>builtin.cpu</c> (the target-identity segment, T3): a real <c>std.Target.Cpu</c> read off
+    /// the host through .NET's intrinsics. A comptime <c>std.atomic.cacheLineForCpu(builtin.cpu)</c> and a comptime
+    /// <c>builtin.cpu.has(…)</c> run std.Target's own code in the interpreter; the features asked about are ones
+    /// every host of the architecture has (SSE2 on x86_64, NEON on aarch64), so zig's native detection and .NET's
+    /// agree.</summary>
+    [Fact]
+    public void Dotcc_matches_zig_std_builtin_cpu_features_from_source() =>
+        MatchesZigWithRealStd("builtincpu",
+            "const std = @import(\"std\");\n" +
+            "const builtin = @import(\"builtin\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const cl = comptime std.atomic.cacheLineForCpu(builtin.cpu);\n" +
+            "    const simd = comptime (builtin.cpu.has(.x86, .sse2) or builtin.cpu.has(.aarch64, .neon));\n" +
+            "    return @intCast(cl / 4 + @as(u16, @intFromBool(simd)) * 10);\n" +
+            "}\n", 42);
+
+    /// <summary><c>std.array_list.Aligned(u8, null)</c> growing through <c>page_allocator</c>, all of it from the real
+    /// std source: the list's growth policy reads <c>std.atomic.cache_line</c>, a <c>comptime_int</c> computed by
+    /// <c>cacheLineForCpu(builtin.cpu)</c> over the typed host cpu (T3).</summary>
+    [Fact]
+    public void Dotcc_matches_zig_std_array_list_from_source() =>
+        MatchesZigWithRealStd("arraylist",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() !u8 {\n" +
+            "    const gpa = std.heap.page_allocator;\n" +
+            "    var list: std.array_list.Aligned(u8, null) = .empty;\n" +
+            "    defer list.deinit(gpa);\n" +
+            "    try list.append(gpa, 40);\n" +
+            "    try list.append(gpa, 2);\n" +
+            "    return list.items[0] + list.items[1];\n" +
+            "}\n", 42);
+
+    /// <summary>Run <paramref name="program"/> through dotcc (navigating the real std at <c>DOTCC_ZIG_LIB_DIR</c>) and
+    /// through zig, and require both to exit with <paramref name="expectedExit"/> and print the same.</summary>
+    private static void MatchesZigWithRealStd(string tag, string program, int expectedExit)
+    {
+        if (!ZigRunRequested)
+        {
+            Assert.Skip($"Zig oracle is opt-in. Set {RunZigEnv}=1 to run the real-std differential '{tag}'.");
+        }
+        if (!ZigOracle.IsAvailable)
+        {
+            Assert.Skip($"{RunZigEnv} requested but no `zig` is on PATH on this host.");
+        }
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOTCC_ZIG_LIB_DIR")))
+        {
+            Assert.Skip("DOTCC_ZIG_LIB_DIR must point at the zig lib dir so dotcc navigates the real std source.");
+        }
+        var workDir = Path.Combine(Path.GetTempPath(), $"dotcc-zig-{tag}-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(workDir);
+        var mainPath = Path.Combine(workDir, "main.zig");
+        File.WriteAllText(mainPath, program);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { mainPath }, emit: EmitMode.Csproj);
+            var (dotccStdout, dotccExit) = FixtureRunner.CompileAndRunCapturingExit(emitted, Array.Empty<string>());
+            var (zigStdout, zigExit) = ZigOracle.CompileAndRun(mainPath, workDir);
+
+            dotccExit.ShouldBe(zigExit, $"dotcc diverges from real zig on '{tag}' (exit code)");
+            dotccExit.ShouldBe(expectedExit, $"'{tag}' did not produce the expected result");
+            Norm(dotccStdout).ShouldBe(Norm(zigStdout), $"dotcc diverges from real zig on '{tag}' (stdout)");
+        }
+        finally
+        {
+            try { Directory.Delete(workDir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
     /// <summary><c>builtin.cpu.arch.endian()</c> with a real std (the target-identity segment, T3a): the synthetic
     /// builtin spells the architecture as <c>std.Target.Cpu.Arch</c>, so the method is Target.zig's own, while
     /// <c>builtin.cpu.arch == .x86_64</c> still folds as a comptime question.</summary>

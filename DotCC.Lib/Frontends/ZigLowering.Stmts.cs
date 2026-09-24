@@ -525,7 +525,7 @@ internal sealed partial class ZigLowering
         // comptime-only integer has no runtime type to hold it, so it folds and binds the literal.
         if (typeItem?.Content is Zig.Ident { Arg0: var ctTok } && Tok(ctTok) == "comptime_int")
         {
-            if (_ir.ConstEval(LowerExprSink(initExpr, CType.Long)) is not { } ctValue)
+            if (ComptimeIntValue(LowerExprSink(initExpr, CType.Long)) is not { } ctValue)
             {
                 throw new IrUnsupportedException(
                     $"zig `const {Tok(nameTok)}: comptime_int` must be initialized with a compile-time-known integer");
@@ -3392,6 +3392,13 @@ internal sealed partial class ZigLowering
     /// an error union (<c>return f();</c> where <c>f</c> returns <c>!U</c>) is returned as-is
     /// (Zig doesn't auto-unwrap); any plain value is wrapped in an <see cref="ErrUnionOk"/>.
     /// Outside an error-union function it is a plain <see cref="Return"/>.</summary>
+    /// <summary>True when a call lowers to a plain <c>void</c> (probed under a throwaway hoist).</summary>
+    private bool IsVoidCall(Item call)
+    {
+        using var _ = EnterThrowawayHoist();
+        return LowerExpr(call).Type.Unqualified is CType.VoidType;
+    }
+
     private CStmt LowerReturn(Item valueItem)
     {
         // `return {};` — the void value is what a bare `return;` returns: nothing to spell in C#
@@ -3401,6 +3408,19 @@ internal sealed partial class ZigLowering
             return _currentFnRet is CType.ErrorUnion voidEu
                 ? new Return(new ErrUnionOk(null) { Type = voidEu })
                 : new Return(null);
+        }
+        // `return unmanaged.replaceRangeAssumeCapacity(…);` in a `void` function (std.array_list): zig returns
+        // the void call's (void) value; C# forbids a value on a void return, so the call is a statement first.
+        if (_currentFnRet?.Unqualified is CType.VoidType)
+        {
+            return new Seq(new List<CStmt> { new ExprStmt(LowerExpr(valueItem)), new Return(null) });
+        }
+        // The same in a `!void` function (`return self.insertAssumeCapacity(i, item);`): run the void call, then
+        // return success.
+        if (_currentFnRet is CType.ErrorUnion { Payload: CType.VoidType } voidUnion
+            && valueItem.Content is Zig.CallArgs or Zig.CallNoArgs && IsVoidCall(valueItem))
+        {
+            return new Seq(new List<CStmt> { new ExprStmt(LowerExpr(valueItem)), new Return(new ErrUnionOk(null) { Type = voidUnion }) });
         }
         // `return blk: { … break :blk v; };` — a labeled value-block return (Milestone L, part 2).
         // Temp-fill against the function's return type, then `return` the result temp. (In an error-

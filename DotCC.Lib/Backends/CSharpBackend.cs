@@ -435,7 +435,7 @@ internal sealed class CSharpBackend
         // body that falls off the end is a Zig success, so it returns Ok(default).
         if (retTy is CType.ErrorUnion eu)
         {
-            var ts = eu.Payload is CType.VoidType ? "Unit" : Cs(eu.Payload);
+            var ts = ErrUnionPayloadArg(eu);
             sb.Append("{\n");
             sb.Append(Pad(1)).Append("try\n");
             Stmt(sb, body, 1);
@@ -1074,6 +1074,14 @@ internal sealed class CSharpBackend
         _ => false,
     };
 
+    /// <summary>The generic argument of an error union's runtime <c>ErrUnion&lt;P&gt;</c>: <c>Unit</c> for
+    /// <c>!void</c>, <c>nuint</c> for a pointer payload (a pointer cannot be a generic argument; the <c>try</c>
+    /// unwrap casts it back), else the payload's own type. The same rule the type rendering follows.</summary>
+    private string ErrUnionPayloadArg(CType.ErrorUnion eu) =>
+        eu.Payload is CType.VoidType ? "Unit"
+        : eu.Payload.Unqualified is CType.Pointer ? "nuint"
+        : Cs(eu.Payload);
+
     /// <summary>True when an expression is (a paren-chain around) the C23
     /// <c>unreachable()</c> call — which the <see cref="ExprStmt"/> emitter lowers
     /// to a <c>throw</c>. Single source of truth for that recognition so the emit
@@ -1541,9 +1549,11 @@ internal sealed class CSharpBackend
             case ErrUnionOk ok:
             {
                 var eu = (CType.ErrorUnion)ok.Type;
-                var ts = eu.Payload is CType.VoidType ? "Unit" : Cs(eu.Payload);
+                var ts = ErrUnionPayloadArg(eu);
                 var arg = ok.Payload is null ? "default"
                         : eu.Payload is CType.VoidType ? Expr(ok.Payload)  // a Unit-valued `try`-of-!void
+                        // A pointer payload rides as a `nuint` (see ErrUnionPayloadArg).
+                        : eu.Payload.Unqualified is CType.Pointer ? $"(nuint)({Expr(ok.Payload)})"
                         : Coerced(ok.Payload, eu.Payload);
                 return ($"ErrUnion<{ts}>.Ok({arg})", PPrimary);
             }
@@ -1551,8 +1561,7 @@ internal sealed class CSharpBackend
             case ErrUnionErr err:
             {
                 var eu = (CType.ErrorUnion)err.Type;
-                var ts = eu.Payload is CType.VoidType ? "Unit" : Cs(eu.Payload);
-                return ($"ErrUnion<{ts}>.Err({Expr(err.Code)})", PPrimary);
+                return ($"ErrUnion<{ErrUnionPayloadArg(eu)}>.Err({Expr(err.Code)})", PPrimary);
             }
             // `try e` → ErrUnion.Try(e): the payload on success, else throw ZigErrorReturn
             // (caught at the enclosing `!T` function's emitted try/catch boundary — see Func).

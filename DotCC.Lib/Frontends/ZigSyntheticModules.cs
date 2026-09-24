@@ -1,5 +1,7 @@
 #nullable enable
 
+using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 using DotCC.Ir;
 using System.Text;
@@ -26,8 +28,10 @@ namespace DotCC.Frontends;
 /// import it: <c>cpu</c> 196 (of which <c>cpu.arch</c> 172), <c>target</c> 100, <c>os</c> 100 (of
 /// which <c>os.tag</c> 92), <c>link_libc</c> 99, <c>zig_backend</c> 87, <c>single_threaded</c> 46,
 /// <c>mode</c> 43, <c>abi</c> 42, <c>strip_debug_info</c> 23, <c>unwind_tables</c> 21, then a tail of
-/// ≤5 each. All of them are here. The <c>std.Target</c> METHODS (<c>cpu.has(…)</c> ×19,
-/// <c>target.isGnuLibC()</c>, <c>target.ptrBitWidth()</c> — about 30 call sites) are deliberately
+/// ≤5 each. All of them are here. With a real std the <c>cpu</c> is the exception: it is a TYPED
+/// <c>std.Target.Cpu</c> read off the host (<see cref="HostCpuSource"/>, the target-identity segment T3), so
+/// <c>cpu.has(…)</c> (×19 in std) and <c>cacheLineForCpu(cpu)</c> are std.Target's own code. The <c>target</c>
+/// methods (<c>target.isGnuLibC()</c>, <c>target.ptrBitWidth()</c>, about 10 call sites) are deliberately
 /// NOT: a method needs a real type to hang on, and each one is a decision about what dotcc's target
 /// actually is. They fail loudly, which is the right outcome until one is needed.</para></summary>
 internal static class ZigSyntheticModules
@@ -132,7 +136,11 @@ internal static class ZigSyntheticModules
         // enum's method from Target.zig; the tag still folds as a bare literal does.
         var archValue = withStd ? $"@as(std.Target.Cpu.Arch, .{arch})" : $".{arch}";
         if (withStd) { sb.Append("const std = @import(\"std\");\n"); }
-        sb.Append("pub const cpu = .{ .arch = ").Append(archValue).Append(" };\n");
+        // With a real std, the cpu is a TYPED `std.Target.Cpu` read off the host (the target-identity segment
+        // T3): its model and feature set come from .NET's own intrinsics, as zig's `-mcpu=native` reads the
+        // host's, so std's comptime feature questions (`cpu.has(.x86, .avx2)`) answer for this machine.
+        if (withStd && HostCpuSource(arch) is { } typedCpu) { sb.Append(typedCpu); }
+        else { sb.Append("pub const cpu = .{ .arch = ").Append(archValue).Append(" };\n"); }
         sb.Append("pub const os = .{ .tag = .").Append(os).Append(" };\n");
         // Spelled out rather than referring to `cpu` / `os` by name: the aggregate recorder reads a
         // literal, and generated text costs nothing to repeat.
@@ -154,6 +162,98 @@ internal static class ZigSyntheticModules
         Architecture.Arm => "arm",
         _ => "aarch64",
     };
+
+    /// <summary>The host CPU as a typed <c>std.Target.Cpu</c> declaration, for an x86_64 or aarch64 host; null for
+    /// another architecture (which keeps the arch-only literal). The model is the x86-64 microarchitecture level
+    /// the host reaches (<c>x86_64</c>, <c>_v2</c>, <c>_v3</c>, <c>_v4</c>) or aarch64's <c>generic</c>; the
+    /// features are those .NET reports supported. The arm64 half is not verified on an arm64 host yet (backlog
+    /// T6, docs/plans/deferred.md).</summary>
+    internal static string? HostCpuSource(string arch)
+    {
+        var (family, model, features) = arch switch
+        {
+            "x86_64" => ("x86", HostX86Model(), HostX86Features()),
+            "aarch64" => ("aarch64", "generic", HostAarch64Features()),
+            _ => (null, null, null),
+        };
+        if (family is null || model is null || features is null) { return null; }
+        var sb = new StringBuilder();
+        sb.Append("pub const cpu: std.Target.Cpu = .{\n");
+        sb.Append("    .arch = @as(std.Target.Cpu.Arch, .").Append(arch).Append("),\n");
+        sb.Append("    .model = &std.Target.").Append(family).Append(".cpu.").Append(model).Append(",\n");
+        sb.Append("    .features = std.Target.").Append(family).Append(".featureSet(&.{ ");
+        sb.Append(string.Join(", ", features.Select(f => "." + f)));
+        sb.Append(" }),\n");
+        sb.Append("};\n");
+        return sb.ToString();
+    }
+
+    /// <summary>The x86 features the host supports, as <c>std.Target.x86.Feature</c> names: the x86-64 baseline,
+    /// then each ISA extension <c>System.Runtime.Intrinsics.X86</c> reports supported.</summary>
+    private static List<string> HostX86Features()
+    {
+        var features = new List<string> { "@\"64bit\"", "cmov", "cx8", "fxsr", "mmx", "sse", "sse2", "x87" };
+        void Add(bool supported, string name) { if (supported) { features.Add(name); } }
+        Add(System.Runtime.Intrinsics.X86.Sse3.IsSupported, "sse3");
+        Add(System.Runtime.Intrinsics.X86.Ssse3.IsSupported, "ssse3");
+        Add(System.Runtime.Intrinsics.X86.Sse41.IsSupported, "sse4_1");
+        Add(System.Runtime.Intrinsics.X86.Sse42.IsSupported, "sse4_2");
+        Add(System.Runtime.Intrinsics.X86.Sse42.IsSupported, "cx16");   // part of x86-64-v2 with SSE4.2
+        Add(System.Runtime.Intrinsics.X86.Popcnt.IsSupported, "popcnt");
+        Add(System.Runtime.Intrinsics.X86.Avx.IsSupported, "avx");
+        Add(System.Runtime.Intrinsics.X86.Avx2.IsSupported, "avx2");
+        Add(System.Runtime.Intrinsics.X86.Fma.IsSupported, "fma");
+        Add(System.Runtime.Intrinsics.X86.Bmi1.IsSupported, "bmi");
+        Add(System.Runtime.Intrinsics.X86.Bmi2.IsSupported, "bmi2");
+        Add(System.Runtime.Intrinsics.X86.Lzcnt.IsSupported, "lzcnt");
+        Add(System.Runtime.Intrinsics.X86.Aes.IsSupported, "aes");
+        Add(System.Runtime.Intrinsics.X86.Pclmulqdq.IsSupported, "pclmul");
+        Add(System.Runtime.Intrinsics.X86.AvxVnni.IsSupported, "avxvnni");
+        Add(System.Runtime.Intrinsics.X86.Avx512F.IsSupported, "avx512f");
+        Add(System.Runtime.Intrinsics.X86.Avx512BW.IsSupported, "avx512bw");
+        Add(System.Runtime.Intrinsics.X86.Avx512CD.IsSupported, "avx512cd");
+        Add(System.Runtime.Intrinsics.X86.Avx512DQ.IsSupported, "avx512dq");
+        Add(System.Runtime.Intrinsics.X86.Avx512F.VL.IsSupported, "avx512vl");
+        Add(System.Runtime.Intrinsics.X86.Avx512Vbmi.IsSupported, "avx512vbmi");
+        return features;
+    }
+
+    /// <summary>The x86-64 microarchitecture level the host reaches, as a <c>std.Target.x86.cpu</c> model name.</summary>
+    private static string HostX86Model()
+    {
+        if (System.Runtime.Intrinsics.X86.Avx512F.VL.IsSupported && System.Runtime.Intrinsics.X86.Avx512BW.IsSupported
+            && System.Runtime.Intrinsics.X86.Avx512CD.IsSupported && System.Runtime.Intrinsics.X86.Avx512DQ.IsSupported)
+        {
+            return "x86_64_v4";
+        }
+        if (System.Runtime.Intrinsics.X86.Avx2.IsSupported && System.Runtime.Intrinsics.X86.Bmi1.IsSupported
+            && System.Runtime.Intrinsics.X86.Bmi2.IsSupported && System.Runtime.Intrinsics.X86.Fma.IsSupported
+            && System.Runtime.Intrinsics.X86.Lzcnt.IsSupported)
+        {
+            return "x86_64_v3";
+        }
+        if (System.Runtime.Intrinsics.X86.Sse42.IsSupported && System.Runtime.Intrinsics.X86.Popcnt.IsSupported
+            && System.Runtime.Intrinsics.X86.Ssse3.IsSupported)
+        {
+            return "x86_64_v2";
+        }
+        return "x86_64";
+    }
+
+    /// <summary>The aarch64 features the host supports, as <c>std.Target.aarch64.Feature</c> names (unverified on
+    /// an arm64 host: backlog T6).</summary>
+    private static List<string> HostAarch64Features()
+    {
+        var features = new List<string> { "fp_armv8" };
+        void Add(bool supported, string name) { if (supported) { features.Add(name); } }
+        Add(System.Runtime.Intrinsics.Arm.AdvSimd.IsSupported, "neon");
+        Add(System.Runtime.Intrinsics.Arm.Aes.IsSupported, "aes");
+        Add(System.Runtime.Intrinsics.Arm.Crc32.IsSupported, "crc");
+        Add(System.Runtime.Intrinsics.Arm.Dp.IsSupported, "dotprod");
+        Add(System.Runtime.Intrinsics.Arm.Rdm.IsSupported, "rdm");
+        Add(System.Runtime.Intrinsics.Arm.Sha256.IsSupported, "sha2");
+        return features;
+    }
 
     /// <summary>The host OS as zig spells its <c>os.tag</c>.</summary>
     private static string HostOsTag()

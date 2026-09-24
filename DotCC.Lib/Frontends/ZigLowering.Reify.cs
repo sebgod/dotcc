@@ -120,6 +120,10 @@ internal sealed partial class ZigLowering
     /// rule in the front end, and this is it). The declared width is not lost: a binding records it
     /// via <see cref="DeclaredBitsOfTypeArg"/>, so <c>@typeInfo(@Int(.unsigned, 21)).int.bits</c>
     /// answers 21.</summary>
+    /// <summary>Above zero while a type-returning call's TYPE argument lowers (a pure type computation, where a
+    /// wider-than-128 integer may appear, see <see cref="IntBuiltinType"/>).</summary>
+    private int _typeArgDepth;
+
     private CType IntBuiltinType(Zig.BuiltinCall call)
     {
         var args = Flatten(call.Arg2);
@@ -134,6 +138,11 @@ internal sealed partial class ZigLowering
         var spelling = (signed ? "i" : "u") + bits.ToString(CultureInfo.InvariantCulture);
         if (!TryArbitraryWidthInt(spelling, out var type))
         {
+            // A WIDE integer built inside a type-returning body, or as a type-returning call's TYPE argument
+            // (`std.math.Log2Int(@Int(.unsigned, 384))` in std.Target's Feature.Set) is only a width for another type computation
+            // to read: it is carried as 128 bits with its declared width recorded above, which is what
+            // `@typeInfo(T).int.bits` answers. A runtime value of one, outside such a body, stays loud.
+            if (bits > 128 && (_typeBodiesInProgress.Count > 0 || _typeArgDepth > 0)) { return signed ? CType.Int128 : CType.UInt128; }
             throw new IrUnsupportedException(
                 $"zig `@Int(.{(signed ? "signed" : "unsigned")}, {bits})`: dotcc models integer widths 1..128 "
                 + $"(`{spelling}` is outside that range; a wider one needs BigInteger)");

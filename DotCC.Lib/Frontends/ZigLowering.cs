@@ -114,8 +114,42 @@ internal sealed partial class ZigLowering
         Zig.BuiltinCall b when Tok(b.Arg0) == "@import" && Flatten(b.Arg2) is { Count: 1 } ia
                                && ia[0].Content is Zig.StrLit sl =>
             ResolveInlineImport(Tok(sl.Arg0).Trim('"')),
+        // `@field(Target, @tagName(family))` (std.Target.Cpu.has's parameter type): a module member named by a
+        // comptime string, on a module or on this file's own `@This()`.
+        Zig.BuiltinCall fb when Tok(fb.Arg0) == "@field" && Flatten(fb.Arg2) is { Count: 2 } fa
+                               && ComptimeName(fa[1]) is { } member
+                               && FieldBaseModule(fa[0]) is { } baseModule =>
+            baseModule.ResolveNamedModule(member),
         _ => null,
     };
+
+    /// <summary>The module an <c>@field</c> base denotes: a module path, or a name bound to this file's own
+    /// file-as-struct type (<c>const Target = @This();</c> in Target.zig), which is this module.</summary>
+    private ZigLowering? FieldBaseModule(Item baseItem)
+    {
+        if (ResolveModulePath(baseItem)?.Lowering is { } module) { return module; }
+        return baseItem.Content is Zig.Ident id && _fileContainer is { } file
+               && TryLookupContainerType(Tok(id.Arg0), out var t) && ContainerTypeName(t) == file
+            ? this
+            : null;
+    }
+
+    /// <summary>A comptime NAME: a comptime string (<see cref="EvalComptimeValue"/>), or <c>@tagName(x)</c>
+    /// of a comptime enum value (a generic's <c>comptime family: Arch.Family</c> seed). Null otherwise.</summary>
+    private string? ComptimeName(Item item)
+    {
+        if (item.Content is Zig.BuiltinCall { Arg0: var tn } tb && Tok(tn) == "@tagName"
+            && Flatten(tb.Arg2) is [{ Content: Zig.Ident { Arg0: var argTok } }]
+            && _symbols.Resolve(Tok(argTok)) is { } seed && _comptimeVars.TryGetValue(seed, out var seedValue)
+            && seedValue.Type.Unqualified is CType.Enum seedEnum
+            && _enumMembers.TryGetValue(seedEnum.Name, out var members))
+        {
+            return members.FirstOrDefault(m => m.Value.ConstValue == seedValue.Value).Key;
+        }
+        return EvalComptimeValue(item) is LitStr s
+            ? new string(DotCC.EmitHelpers.StringByteValues(s.Segments).Select(b => (char)b).ToArray())
+            : null;
+    }
 
     /// <summary>The module a top-level NAME of this module denotes: an import, an alias of a module path
     /// (<c>const math = std.math;</c>), or a re-export of another module name (std.zig's
@@ -633,6 +667,11 @@ internal sealed partial class ZigLowering
     /// <summary>Lower a lazy module's top-level value const <paramref name="name"/> where it is read. An
     /// UNTYPED one takes <paramref name="useSink"/>, the reader's result type: `const default_alignment =
     /// .right;` in std.fmt is an enum literal that only its use can type.</summary>
+    /// <summary>The value of a <c>comptime_int</c> initializer. Comptime by definition, so a call in it runs
+    /// (<c>cacheLineForCpu(builtin.cpu)</c> in std.atomic), not only the call-free constant folding.</summary>
+    private long? ComptimeIntValue(CExpr init) =>
+        _ir.ConstEval(init) ?? (_ir.ResolveComptimeFold(init) is { } folded ? _ir.ConstEval(folded) : null);
+
     private CExpr? LowerLazyValueConst(string name, CType? useSink = null)
     {
         if (!_lazy || !_lazyValueConsts.TryGetValue(name, out var vc)) { return null; }
@@ -646,7 +685,7 @@ internal sealed partial class ZigLowering
             // comptime-only integer folds to its literal; it has no runtime type to lower.
             if (vc.typeItem?.Content is Zig.Ident { Arg0: var ctTok } && Tok(ctTok) == "comptime_int")
             {
-                return _ir.ConstEval(LowerExprSink(vc.rhs, CType.Long)) is { } ct
+                return ComptimeIntValue(LowerExprSink(vc.rhs, CType.Long)) is { } ct
                     ? new LitInt(ct.ToString(System.Globalization.CultureInfo.InvariantCulture), ct) { Type = CType.Long }
                     : throw new IrUnsupportedException($"zig `const {name}: comptime_int` must be compile-time-known");
             }
@@ -789,7 +828,9 @@ internal sealed partial class ZigLowering
         var fileType = module?.Lowering?.FileStructType
             ?? (module is null && path?.Content is Zig.Field pf
                 ? ResolveModulePath(pf.Arg0)?.Lowering?.ResolveExportedType(Tok(pf.Arg2))
-                : null);
+                : null)
+            // Or a NESTED type further down (`const CpuModel = std.Target.Cpu.Model;` in std/Target/x86.zig).
+            ?? (module is null && path is { Content: Zig.Field } ? TryResolveModuleNestedType(path)?.Type : null);
         if (fileType is null) { return false; }
         _typeAliases[name] = fileType;
         type = fileType;
@@ -1647,6 +1688,9 @@ internal sealed partial class ZigLowering
         });
         if (declared is null && init is LitStr) { _stringLiteralSyms.Add(sym); }
         _ir.Globals.Add(new GlobalVar(sym, init));
+        // A top-level CONST aggregate (`const cpu: std.Target.Cpu = .{…}`) is comptime-known, so a comptime
+        // call may read it (`comptime std.atomic.cacheLineForCpu(cpu)`): the interpreter evaluates its init.
+        if (isConst && type.Unqualified is CType.Named) { _ir.ConstGlobalInits[sym] = init; }
     }
 
     /// <summary>Record a <c>[N]T</c> array global: an array-typed static symbol (so references

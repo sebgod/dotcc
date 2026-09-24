@@ -15,18 +15,20 @@ namespace DotCC.Libc;
 /// nor cross the C/Zig ABI. A plain <c>{ ptr, len }</c> struct can do both, and its layout
 /// matches Zig's own slice ABI. <see cref="System.Span{T}"/> is still available as an
 /// internal bridge via <see cref="AsSpan"/> for reaching span-based BCL APIs.</para>
+/// <para>Both fields are WRITABLE, as a zig slice's are: std.ArrayList grows its <c>items</c> in place with
+/// <c>self.items.len += 1</c> and re-points it with <c>self.items.ptr = new_memory.ptr</c>.</para>
 /// <para>The data pointer is stored as <see cref="nint"/> (identical width/representation to
 /// <c>T*</c>) so the type needs no type-level <c>unsafe</c>; only the members that surface a
 /// <c>T*</c> are <c>unsafe</c>. The length is a <see cref="ulong"/> — dotcc lowers Zig's
 /// <c>usize</c> to <c>ulong</c> on its LP64 target, so <c>slice.len</c> reads as a
 /// <c>ulong</c> with no conversion friction.</para>
 /// </remarks>
-public readonly struct Slice<T> where T : unmanaged
+public struct Slice<T> where T : unmanaged
 {
-    private readonly nint _ptr;
+    private nint _ptr;
 
-    /// <summary>The element count (Zig <c>slice.len</c>).</summary>
-    public readonly ulong Len;
+    /// <summary>The element count (Zig <c>slice.len</c>), writable.</summary>
+    public ulong Len;
 
     /// <summary>Construct a slice over <paramref name="len"/> elements at
     /// <paramref name="ptr"/>.</summary>
@@ -36,8 +38,12 @@ public readonly struct Slice<T> where T : unmanaged
         Len = len;
     }
 
-    /// <summary>The data pointer (Zig <c>slice.ptr</c>).</summary>
-    public unsafe T* Ptr => (T*)_ptr;
+    /// <summary>The data pointer (Zig <c>slice.ptr</c>), writable.</summary>
+    public unsafe T* Ptr
+    {
+        readonly get => (T*)_ptr;
+        set => _ptr = (nint)value;
+    }
 
     /// <summary>Element access (Zig <c>slice[i]</c>); returns an lvalue so
     /// <c>slice[i] = …</c> works. Not bounds-checked in this build.</summary>
@@ -61,12 +67,13 @@ public readonly struct Slice<T> where T : unmanaged
 /// Same <c>{ ptr, len }</c> representation; the const-ness lives in the type, mirroring Zig
 /// (and reusing dotcc's const-discard reasoning).
 /// </summary>
-public readonly struct ConstSlice<T> where T : unmanaged
+public struct ConstSlice<T> where T : unmanaged
 {
-    private readonly nint _ptr;
+    private nint _ptr;
 
-    /// <summary>The element count (Zig <c>slice.len</c>).</summary>
-    public readonly ulong Len;
+    /// <summary>The element count (Zig <c>slice.len</c>), writable (a <c>var s: []const u8</c> can be
+    /// re-pointed; its elements cannot be written).</summary>
+    public ulong Len;
 
     /// <summary>Construct a const slice over <paramref name="len"/> elements at
     /// <paramref name="ptr"/>.</summary>
@@ -84,8 +91,12 @@ public readonly struct ConstSlice<T> where T : unmanaged
         Len = len;
     }
 
-    /// <summary>The data pointer (Zig <c>slice.ptr</c>), a pointer to const.</summary>
-    public unsafe T* Ptr => (T*)_ptr;
+    /// <summary>The data pointer (Zig <c>slice.ptr</c>), a pointer to const; writable.</summary>
+    public unsafe T* Ptr
+    {
+        readonly get => (T*)_ptr;
+        set => _ptr = (nint)value;
+    }
 
     /// <summary>Element access (Zig <c>slice[i]</c>); read-only. Not bounds-checked in this
     /// build.</summary>
