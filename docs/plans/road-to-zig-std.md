@@ -880,9 +880,11 @@ vector length feeds TYPES.
   **Wall next:** the comptime `Placeholder.parse(…)` call needs its body lowered, and that body reaches
   `std.mem.findScalarPos`'s SIMD branch (guarded by `!@inComptime()` at runtime): `@Vector`, so the target
   segment T3 → T4 → T5 is now on bufPrint's critical path too.
-  **Update (2026-09-24): bufPrint LOWERS from real std end to end** (dotcc exits 0 for
-  `std.fmt.bufPrint(&buf, "{d}", .{42})`); the emitted C# has bad-emit errors left (deferred.md, bad emit; task
-  #50). What the path needed, all now in: a comptime OPTIONAL bound from `comptime switch (…) { .none => null, … }`
+  **Update (2026-09-24): bufPrint RUNS from real std, == zig** (G3's `bufPrint` goal): real-std differential
+  `Dotcc_matches_zig_std_fmt_buf_print_from_source` formats a comptime_int, `u32` / `i32` / `u8` / `u64` / `i8`
+  values (negatives included) and several arguments per format, folding the bytes to a checksum (159 == zig). The
+  last layer was four C# bad emits in std's integer printing (a compound assignment through `.?`, an array stored
+  through and returned from a slice deref, an `unreachable` switch arm; oracle `fmt_stores_and_returns`). What the path needed, all now in: a comptime OPTIONAL bound from `comptime switch (…) { .none => null, … }`
   (`arg_pos`), so `comptime arg_state.nextArg(arg_pos) orelse @compileError(…)` never analyses its fallback; a
   tuple field named by a member-list index (`@field(args, field_names[i])`, a tuple's fields being `"0"`, `"1"`);
   a comptime byte-slice field of a comptime aggregate as a comptime string (`placeholder.specifier_arg`);

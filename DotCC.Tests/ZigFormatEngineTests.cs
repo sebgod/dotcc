@@ -149,6 +149,37 @@ public sealed class ZigFormatEngineTests
     }
 
     [Fact]
+    public void The_format_engine_s_stores_and_returns_compile_to_valid_csharp()
+    {
+        // What std.fmt's integer printing emitted as C# that did not build (task #50): a compound assignment through
+        // `.?` (C#'s Nullable.Value is read-only), an array stored through a slice deref (`buf[i..][0..2].* = …`), an
+        // array returned from a slice deref (std.fmt.digits2), and an `unreachable` switch-expression arm.
+        var cs = EmitZig("""
+            fn digits2(value: u8) [2]u8 {
+                return "00010203040506070809101112131415161718192021222324252627282930313233343536373839404142"[value * 2 ..][0..2].*;
+            }
+            fn toChar(d: u8) u8 {
+                return switch (d) {
+                    0...9 => d + '0',
+                    else => unreachable,
+                };
+            }
+            pub fn main() u8 {
+                var r: ?u32 = 3;
+                r.? *= 10;
+                r.? += 4;
+                var buf: [4]u8 = .{ 0, 0, 0, 0 };
+                buf[1..][0..2].* = digits2(42);
+                return @intCast(r.? + buf[1] - '0' + buf[2] - '0' + toChar(1) - '0');
+            }
+            """);
+        cs.ShouldContain("r = (uint?)(uint)(r.Value * (uint)(10));");
+        cs.ShouldContain("ZigMem.CopyForwards<byte>(new Slice<byte>(new Slice<byte>(buf + 1,");
+        cs.ShouldMatch(@"CopyArrayResult<byte>\(.*\)\.Ptr, 2\);");
+        cs.ShouldContain("_ => throw new System.Diagnostics.UnreachableException(\"unreachable() reached\")");
+    }
+
+    [Fact]
     public void A_field_of_a_default_initialized_module_const_is_its_default_alone()
     {
         // std.zig's `pub const options: Options = if (@hasDecl(root, "std_options")) root.std_options else .{};`:

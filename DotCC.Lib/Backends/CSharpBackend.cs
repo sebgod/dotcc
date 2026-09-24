@@ -1893,7 +1893,11 @@ internal sealed class CSharpBackend
                             : Sub(DecayEnum(l.CaseExpr!), PCond);
                     string ArmText(SwitchExprArm a) => NoHoist(() =>
                     {
-                        var val = Coerced(a.Value, sw.Type);
+                        // An `unreachable` arm (std.fmt.digitToChar's `else => unreachable`) is a throw expression:
+                        // the void call has no value of the switch's type, as in the ternary's arms.
+                        var val = IsUnreachableCall(a.Value)
+                            ? "throw new System.Diagnostics.UnreachableException(\"unreachable() reached\")"
+                            : Coerced(a.Value, sw.Type);
                         return a.Labels is null
                             ? $"_ => {val}"
                             : $"{string.Join(" or ", a.Labels.Select(LabelPat))} => {val}";

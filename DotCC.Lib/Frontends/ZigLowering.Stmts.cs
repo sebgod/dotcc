@@ -362,7 +362,32 @@ internal sealed partial class ZigLowering
     /// <c>x = x op y</c> desugar would double-evaluate it). The RHS is sink-typed to the target
     /// type for parity with plain <see cref="Zig.StmtAssign"/> (harmless for a numeric RHS).</summary>
     private CStmt CompoundAssign(Item targetItem, BinOp op, Item valueItem)
-        => TryAssignComptimeVar(targetItem, op, valueItem) ?? new ExprStmt(CompoundAssignExpr(targetItem, op, valueItem));
+        => TryAssignComptimeVar(targetItem, op, valueItem)
+           ?? TryCompoundAssignOptionalPayload(targetItem, op, valueItem)
+           ?? new ExprStmt(CompoundAssignExpr(targetItem, op, valueItem));
+
+    /// <summary>Whether an expression lowers to a slice (so its <c>.*</c> is the array it views), judged by lowering it
+    /// into a throwaway buffer.</summary>
+    private bool IsSliceOperand(Item item)
+    {
+        using var _ = EnterThrowawayHoist();
+        try { return LowerExpr(item).Type?.Unqualified is CType.Slice; }
+        catch (IrUnsupportedException) { return false; }
+    }
+
+    /// <summary><c>r.? *= 10;</c> (std.fmt.parseIntSizeSuffix): a value optional's payload is C#'s read-only
+    /// <c>Nullable&lt;T&gt;.Value</c>, so the compound assignment writes the whole optional back:
+    /// <c>r = (T?)(T)(r.Value * 10)</c> (a null <c>r</c> throws on the read, as zig's <c>.?</c> panics). Null for any
+    /// other target. The optional is read twice, so only a plain variable qualifies.</summary>
+    private CStmt? TryCompoundAssignOptionalPayload(Item targetItem, BinOp op, Item valueItem)
+    {
+        if (targetItem.Content is not Zig.Unwrap { Arg0: var optItem } || optItem.Content is not Zig.Ident) { return null; }
+        var opt = LowerExpr(optItem);
+        if (opt is not VarRef || opt.Type.Unqualified is not CType.Optional { Inner: var inner } optType) { return null; }
+        var payload = new Member(opt, "Value", false) { Type = inner };
+        var combined = new Cast(inner, new Binary(op, payload, LowerExprSink(valueItem, inner)) { Type = inner }) { Type = inner };
+        return new ExprStmt(new Assign(null, opt, new Cast(optType, combined) { Type = optType }) { Type = optType });
+    }
 
     /// <summary>An assignment to a <c>comptime var</c> (<c>i += 1;</c> in an unrolled <c>inline while</c>, std.Io.Writer
     /// .print's scan): executed NOW, at lowering time, updating the value later references substitute; it
@@ -2495,6 +2520,14 @@ internal sealed partial class ZigLowering
                 }
                 return new ExprStmt(discarded);
             }
+            // `buf[index..][0..2].* = std.fmt.digits2(…);` (std.Io.Writer.printIntAny): the deref of a slice is
+            // the ARRAY it views, so storing an array into it copies the elements, as `@memcpy` does.
+            if (lhsItem.Content is Zig.Deref { Arg0: var viewedItem } && IsSliceOperand(viewedItem))
+            {
+                var copyDest = LowerMemSlice(viewedItem, wantConst: false, out var copyElem);
+                var copySrc = LowerMemSlice(rhsItem, wantConst: true, out _);
+                return new ExprStmt(new ZigMemCall("CopyForwards", copyElem, new List<CExpr> { copyDest, copySrc }) { Type = CType.Void });
+            }
             var target = LowerExpr(lhsItem);
             // `x = blk: { … break :blk v; };` — a labeled value-block assignment (Milestone L,
             // part 2): temp-fill against the lvalue's type, then assign the result temp into it.
@@ -3769,6 +3802,12 @@ internal sealed partial class ZigLowering
         if (_currentFnRet is CType.Array retArr && retArr.Count is int retN)
         {
             var src = LowerExprSink(valueItem, retArr);
+            // `return "0001…"[value * 2 ..][0..2].*;` (std.fmt.digits2): a slice deref'd to its array lowers as the
+            // slice, whose elements start at its data pointer.
+            if (src.Type?.Unqualified is CType.Slice srcSlice)
+            {
+                src = new Member(src, "Ptr", false) { Type = new CType.Pointer(srcSlice.Element) };
+            }
             return new Return(new ArrayByValReturn(src, retArr.Element, retN) { Type = retArr });
         }
         // The return type is the sink, so `return .member;` / `return .{…};` resolve against

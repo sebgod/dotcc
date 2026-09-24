@@ -3954,6 +3954,27 @@ public sealed class ZigOracleTests
             "pub fn main() u8 {\n" +
             "    return if (wide(5)) 42 else 0;\n" +
             "}\n", 42, "" },
+        // std.fmt's integer printing, reduced (road-to-zig-std G3, task #50): a compound assignment through `.?`,
+        // an array stored through a slice deref, an array returned from one (digits2), and an `unreachable` switch
+        // arm. 34 + 4 + 2 + 1 = 41.
+        new object[] { "fmt_stores_and_returns",
+            "fn digits2(value: u8) [2]u8 {\n" +
+            "    return \"00010203040506070809101112131415161718192021222324252627282930313233343536373839404142\"[value * 2 ..][0..2].*;\n" +
+            "}\n" +
+            "fn toChar(d: u8) u8 {\n" +
+            "    return switch (d) {\n" +
+            "        0...9 => d + '0',\n" +
+            "        else => unreachable,\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var r: ?u32 = 3;\n" +
+            "    r.? *= 10;\n" +
+            "    r.? += 4;\n" +
+            "    var buf: [4]u8 = .{ 0, 0, 0, 0 };\n" +
+            "    buf[1..][0..2].* = digits2(42);\n" +
+            "    return @intCast(r.? + buf[1] - '0' + buf[2] - '0' + toChar(1) - '0');\n" +
+            "}\n", 41, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -4972,6 +4993,33 @@ public sealed class ZigOracleTests
             "    sum += at(100, 100);\n" +
             "    return @intCast(sum % 251);\n" +
             "}\n", 82);
+
+    /// <summary>std.fmt.bufPrint from source (road-to-zig-std G3): the comptime format engine (std.Io.Writer.print's scan,
+    /// std.fmt.Placeholder.parse run by the interpreter, the comptime argument bookkeeping) and the runtime integer
+    /// printing (printValue, printInt, printIntAny, std.fmt.digits2) over a comptime_int, unsigned and signed widths and
+    /// several arguments per format. The bytes are folded to one checksum, so a wrong digit shows.</summary>
+    [Fact]
+    public void Dotcc_matches_zig_std_fmt_buf_print_from_source() =>
+        MatchesZigWithRealStd("bufprint",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "fn sum(s: []const u8) u32 {\n" +
+            "    var t: u32 = 0;\n" +
+            "    for (s, 0..) |c, i| t +%= @as(u32, c) *% @as(u32, @intCast(i + 1));\n" +
+            "    return t;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf: [64]u8 = undefined;\n" +
+            "    var total: u32 = 0;\n" +
+            "    const a = std.fmt.bufPrint(&buf, \"{d}\", .{42}) catch return 1;\n" +
+            "    total +%= sum(a);\n" +
+            "    const b = std.fmt.bufPrint(&buf, \"x={d} y={d}\", .{ @as(u32, 1234), @as(i32, -56) }) catch return 2;\n" +
+            "    total +%= sum(b);\n" +
+            "    const c = std.fmt.bufPrint(&buf, \"{d}{d}{d}\", .{ @as(u8, 7), @as(u64, 1000000007), @as(i8, -128) }) catch return 3;\n" +
+            "    total +%= sum(c);\n" +
+            "    return @intCast(total % 251);\n" +
+            "}\n", 159);
 
     /// <summary>Run <paramref name="program"/> through dotcc (navigating the real std at <c>DOTCC_ZIG_LIB_DIR</c>) and
     /// through zig, and require both to exit alike and print the same (and, when given, with
