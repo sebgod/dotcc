@@ -106,6 +106,68 @@ public struct ZigList<T> where T : unmanaged
     /// <summary>zig <c>list.clearRetainingCapacity()</c> — drop the elements, keep the store.</summary>
     public void ClearRetainingCapacity() => Len = 0;
 
+    /// <summary>zig <c>list.insert(alloc, i, item)</c> — insert at <paramref name="i"/>, shifting the tail up by one.</summary>
+    public unsafe ErrUnion<Unit> Insert(Allocator a, ulong i, T item, ushort oom)
+    {
+        if (i > Len) { throw new System.IndexOutOfRangeException("zig ArrayList.insert: index out of bounds"); }
+        var ok = EnsureCap(a, Len + 1, oom);
+        if (ok.IsErr) { return ok; }
+        var p = (T*)_ptr;
+        long bytes = (long)((Len - i) * (ulong)sizeof(T));
+        System.Buffer.MemoryCopy(p + i, p + i + 1, bytes, bytes);
+        p[i] = item;
+        Len += 1;
+        return ErrUnion<Unit>.Ok(default);
+    }
+
+    /// <summary>zig <c>list.orderedRemove(i)</c> — remove and return element <paramref name="i"/>, shifting the tail down.</summary>
+    public unsafe T OrderedRemove(ulong i)
+    {
+        if (i >= Len) { throw new System.IndexOutOfRangeException("zig ArrayList.orderedRemove: index out of bounds"); }
+        var p = (T*)_ptr;
+        var removed = p[i];
+        long bytes = (long)((Len - i - 1) * (ulong)sizeof(T));
+        System.Buffer.MemoryCopy(p + i + 1, p + i, bytes, bytes);
+        Len -= 1;
+        return removed;
+    }
+
+    /// <summary>zig <c>list.swapRemove(i)</c> — remove and return element <paramref name="i"/>, moving the last one into its place.</summary>
+    public unsafe T SwapRemove(ulong i)
+    {
+        if (i >= Len) { throw new System.IndexOutOfRangeException("zig ArrayList.swapRemove: index out of bounds"); }
+        var p = (T*)_ptr;
+        var removed = p[i];
+        p[i] = p[Len - 1];
+        Len -= 1;
+        return removed;
+    }
+
+    /// <summary>zig <c>list.getLast()</c> — the last element, or <c>null</c> when the list is empty (zig 0.17-dev returns
+    /// <c>?T</c>).</summary>
+    public unsafe T? GetLast() => Len == 0 ? null : ((T*)_ptr)[Len - 1];
+
+    /// <summary>zig <c>list.ensureTotalCapacity(alloc, n)</c> — capacity for at least <paramref name="n"/> elements.</summary>
+    public ErrUnion<Unit> EnsureTotalCapacity(Allocator a, ulong n, ushort oom) => EnsureCap(a, n, oom);
+
+    /// <summary>zig <c>list.ensureUnusedCapacity(alloc, n)</c> — room for <paramref name="n"/> more elements.</summary>
+    public ErrUnion<Unit> EnsureUnusedCapacity(Allocator a, ulong n, ushort oom) => EnsureCap(a, Len + n, oom);
+
+    /// <summary>zig <c>list.appendAssumeCapacity(item)</c> — append into capacity reserved earlier.</summary>
+    public unsafe void AppendAssumeCapacity(T item)
+    {
+        if (Len >= Cap) { throw new System.InvalidOperationException("zig ArrayList.appendAssumeCapacity: no capacity left"); }
+        ((T*)_ptr)[Len] = item;
+        Len += 1;
+    }
+
+    /// <summary>zig <c>list.shrinkRetainingCapacity(n)</c> — keep the first <paramref name="n"/> elements.</summary>
+    public void ShrinkRetainingCapacity(ulong n)
+    {
+        if (n > Len) { throw new System.IndexOutOfRangeException("zig ArrayList.shrinkRetainingCapacity: new length exceeds the old"); }
+        Len = n;
+    }
+
     /// <summary>zig <c>list.deinit(alloc)</c> — return the backing store to the allocator and
     /// reset to <c>.empty</c>. Idempotent (a second call sees a null pointer), mirroring
     /// <see cref="ArenaAllocator.Deinit"/>.</summary>

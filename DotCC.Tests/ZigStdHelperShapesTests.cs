@@ -584,6 +584,54 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Array_list_index_and_capacity_members_map_onto_the_runtime_list()
+    {
+        var cs = EmitZig("""
+            const std = @import("std");
+            pub fn main() !u8 {
+                const a = std.heap.page_allocator;
+                var l: std.ArrayList(u16) = .empty;
+                defer l.deinit(a);
+                try l.appendSlice(a, &.{ 10, 20, 30 });
+                try l.insert(a, 0, 5);
+                const o = l.orderedRemove(1);
+                const s = l.swapRemove(0);
+                try l.ensureUnusedCapacity(a, 1);
+                l.appendAssumeCapacity(60);
+                l.shrinkRetainingCapacity(2);
+                const last = l.getLast() orelse 0;
+                return @intCast(o + s + last);
+            }
+            """);
+        // Task #74: each member is one runtime ZigList call; getLast is `?T` in zig 0.17-dev.
+        cs.ShouldContain(".Insert(ZigAlloc.CHeap(), 0, 5, ");
+        cs.ShouldContain(".OrderedRemove(1)");
+        cs.ShouldContain(".SwapRemove(0)");
+        cs.ShouldContain(".EnsureUnusedCapacity(ZigAlloc.CHeap(), 1, ");
+        cs.ShouldContain(".AppendAssumeCapacity(60)");
+        cs.ShouldContain(".ShrinkRetainingCapacity(2)");
+        cs.ShouldContain(".GetLast() ?? 0");
+    }
+
+    [Fact]
+    public void A_global_struct_with_an_array_field_is_built_by_an_init_function()
+    {
+        var cs = EmitZig("""
+            const alphabet = "ABCD".*;
+            const Codec = struct { chars: [4]u8, table: [8]u8, pad: u8 };
+            const codec = Codec{ .chars = alphabet, .table = @splat(0xff), .pad = '=' };
+            pub fn main() u8 {
+                return codec.chars[@truncate(codec.pad & 3)] +% codec.table[7];
+            }
+            """);
+        // Task #78: the array fields are copied in by a synthesized initializer (a C# object initializer cannot set them);
+        // task #75: `"ABCD".*` is the array itself, `@splat` fills a `[N]T`, and an index takes a cast builtin's type.
+        cs.ShouldContain("Codec codec = __init_codec();");
+        cs.ShouldContain("memcpy(__anf0.chars, ");
+        cs.ShouldContain("stackalloc byte[]{ 255, 255, 255, 255, 255, 255, 255, 255 }");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

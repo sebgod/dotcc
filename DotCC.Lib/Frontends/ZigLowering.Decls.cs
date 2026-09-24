@@ -1249,8 +1249,11 @@ internal sealed partial class ZigLowering
     /// required-field rule).</summary>
     private CExpr BuildStructInit(IReadOnlyList<Item> fieldInitItems, CType.Named named)
     {
+        // The impurity watermark BEFORE this literal: its own members' side effects move with it into the hoisted temp.
+        var savedImpure = _hoistImpureSeen;
         var members = new List<FieldInit>();
         var written = new HashSet<string>(System.StringComparer.Ordinal);
+        var arrayInits = new List<(string Name, CType.Array Type, Item Value)>();
         foreach (var fiItem in fieldInitItems)
         {
             var fi = (Zig.FieldInit)fiItem.Content!;   // FieldInit -> '.' IDENT '=' Expr
@@ -1258,6 +1261,12 @@ internal sealed partial class ZigLowering
             var ftype = _ir.StructFieldType(named, fname)
                 ?? throw new IrUnsupportedException($"struct '{named.Name}' has no field '{fname}'");
             written.Add(fname);   // set before the array check, so the defaults pass doesn't re-add it
+            // An array field with a real value (task #78) is filled after the literal, below, when the position hoists.
+            if (ftype.Unqualified is CType.Array arrField && _hoist is not null && !IsZeroArrayValue(fi.Arg3))
+            {
+                arrayInits.Add((fname, arrField, fi.Arg3));
+                continue;
+            }
             if (IsInlineArrayMember(named.Name, fname, ftype, fi.Arg3)) { continue; }
             members.Add(new FieldInit(fname, ftype, LowerExprSink(fi.Arg3, ftype)));
         }
@@ -1289,8 +1298,37 @@ internal sealed partial class ZigLowering
                 }
             }
         }
-        return new StructInit(members) { Type = named };
+        var init = new StructInit(members) { Type = named };
+        if (arrayInits.Count == 0) { return init; }
+        // `Outer{ .arr = .{ 4, 5, 6 } }` (task #78): an array field is inline storage a C# object initializer cannot
+        // set, so the literal becomes a hoisted temp whose array fields are copied in after it, element bytes and all,
+        // and the expression is that temp. Each array value is evaluated after the other fields, in field order.
+        var pre = new List<CStmt>();
+        var temp = _symbols.Declare(new Symbol { Name = "__anf" + _anfTempCounter++, Kind = SymKind.Var, Type = named });
+        pre.Add(new DeclStmt(new List<LocalDecl> { new(temp, init) }));
+        foreach (var (fname, ftype, valueItem) in arrayInits)
+        {
+            var value = LowerExprSink(valueItem, ftype);
+            var count = ftype.Count ?? throw new IrUnsupportedException($"struct '{named.Name}': field '{fname}' has no comptime length");
+            var bytes = (long)count * ftype.Element.SizeOf;
+            var dest = new Member(new VarRef(temp) { Type = named, IsLValue = true }, fname, false) { Type = ftype, IsLValue = true };
+            pre.Add(new ExprStmt(new Call("memcpy", new List<CExpr>
+            {
+                dest,
+                value,
+                new LitInt(bytes.ToString(CultureInfo.InvariantCulture), bytes) { Type = CType.Int },
+            }) { Type = new CType.Pointer(CType.Void) }));
+        }
+        _hoistImpureSeen = savedImpure;
+        RequireHoistable("zig struct literal with an array field").AddRange(pre);
+        return new VarRef(temp) { Type = named };
     }
+
+    /// <summary>True for an array field value that C#'s zero-init already is: <c>undefined</c> or <c>@splat(0)</c>.</summary>
+    private static bool IsZeroArrayValue(Item valueItem)
+        => valueItem.Content is Zig.UndefinedLit
+           || valueItem.Content is Zig.BuiltinCall { Arg0: var splatTok } splat && Tok(splatTok) == "@splat"
+              && Flatten(splat.Arg2) is [{ Content: Zig.IntLit { Arg0: var zeroTok } }] && Tok(zeroTok) == "0";
 
     /// <summary>True when a struct-literal member targets an ARRAY field and must be DROPPED from the
     /// initializer. An array field is INLINE storage — the C# backend renders it as a <c>fixed</c> buffer
@@ -2114,6 +2152,33 @@ internal sealed partial class ZigLowering
             // SIMD vectors (the target-identity segment T5, ZigLowering.Vector.cs).
             case "@splat" when sink?.Unqualified is CType.Vector splatVector:
                 return LowerSplat(bargs, splatVector);
+            // `@splat(v)` at a `[N]T` (std.base64's `.char_to_index = @splat(invalid_char)`, task #75): N copies of the element,
+            // evaluated once into a temp when it is not a plain constant.
+            case "@splat" when sink?.Unqualified is CType.Array { Count: int splatCount } splatArray:
+            {
+                if (bargs.Count != 1)
+                {
+                    throw new IrUnsupportedException($"zig `@splat` expects (value); got {bargs.Count} argument(s)");
+                }
+                if (splatCount > 4096)
+                {
+                    throw new IrUnsupportedException($"zig `@splat` into a [{splatCount}]T array is not supported yet (at most 4096 elements)");
+                }
+                var splatValue = LowerExprSink(bargs[0], splatArray.Element);
+                // A nested splat (`.fast_char_to_index = @splat(@splat(x))` at a `[4][256]u32`) repeats the inner row: one
+                // flat run of the innermost element, as a multi-dimensional array is laid out.
+                if (splatValue is StackArray row)
+                {
+                    var rows = Enumerable.Range(0, splatCount).SelectMany(_ => row.Elems).ToList();
+                    return new StackArray(row.Element, rows) { Type = splatArray };
+                }
+                if (_ir.ConstEval(splatValue) is null && splatValue is not (LitBool or LitFloat))
+                {
+                    throw new IrUnsupportedException("zig `@splat` into an array needs a compile-time-known element value");
+                }
+                var copies = Enumerable.Repeat(splatValue, splatCount).ToList();
+                return new StackArray(splatArray.Element, copies) { Type = splatArray };
+            }
             case "@reduce":
                 return LowerReduce(bargs);
             case "@select":

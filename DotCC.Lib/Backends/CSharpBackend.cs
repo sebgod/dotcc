@@ -1865,7 +1865,9 @@ internal sealed class CSharpBackend
                 // one in `_pending`.) Outside a hoistable context (e.g. a loop
                 // condition, re-evaluated each iteration) fall back to the inline
                 // stackalloc, which still binds in a pointer-initializer.
-                var lit = $"stackalloc {Cs(sa.Element)}[]{{ {string.Join(", ", sa.Elems.Select(Expr))} }}";
+                // Each element stores at the element type, as an array declaration's does (`.{ k, k + 1 }` at a `[3]u8`
+                // field: C# promotes `k + 1` to int, CS0266).
+                var lit = $"stackalloc {Cs(sa.Element)}[]{{ {string.Join(", ", sa.Elems.Select(x => Coerced(x, sa.Element)))} }}";
                 if (!_canHoist && !(_canHoistPure && sa.Elems.All(IsPure))) { return (lit, PPrimary); }
                 var name = $"__cl{_clCounter++}";
                 _pending.Add($"{Cs(sa.Element)}* {name} = {lit}");

@@ -4932,6 +4932,54 @@ public sealed class ZigOracleTests
             "pub fn main() u8 {\n" +
             "    return pick(f64) + pick(u128);\n" +
             "}\n", 44, "" },
+        // The curated ArrayList's index and capacity members (task #74): insert, orderedRemove, swapRemove,
+        // ensureUnusedCapacity, appendAssumeCapacity, shrinkRetainingCapacity.
+        new object[] { "array_list_index_members",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "pub fn main() !u8 {\n" +
+            "    const a = std.heap.page_allocator;\n" +
+            "    var l: std.ArrayList(u16) = .empty;\n" +
+            "    defer l.deinit(a);\n" +
+            "    try l.appendSlice(a, &.{ 10, 20, 30, 40, 50 });\n" +
+            "    try l.insert(a, 0, 5);\n" +
+            "    try l.insert(a, 3, 25);\n" +
+            "    const o = l.orderedRemove(1);\n" +
+            "    const s = l.swapRemove(0);\n" +
+            "    try l.ensureUnusedCapacity(a, 2);\n" +
+            "    l.appendAssumeCapacity(60);\n" +
+            "    l.appendAssumeCapacity(70);\n" +
+            "    const last = l.items[l.items.len - 1];\n" +
+            "    l.shrinkRetainingCapacity(4);\n" +
+            "    const lastOr = l.items[l.items.len - 1];\n" +
+            "    var sum: u32 = 0;\n" +
+            "    for (l.items, 0..) |x, i| sum += x * @as(u32, @intCast(i + 1));\n" +
+            "    std.debug.print(\"{d} {d} {d} {d} {d} {d}\\n\", .{ o, s, last, lastOr, l.items.len, sum });\n" +
+            "    return @intCast((sum + o + s + last + lastOr) % 251);\n" +
+            "}\n", 149, "" },
+        // A struct literal setting array fields, in a body: the literal is a hoisted temp and each array field is copied
+        // in after it (task #78; it had been a loud cut, and a C# object initializer cannot set a fixed buffer).
+        new object[] { "array_field_literal",
+            "const Inner = struct { x: u16, y: i8 };\n" +
+            "const Outer = struct { a: u32, in: Inner, arr: [3]u8, words: [2]u32 };\n" +
+            "fn make(k: u8) Outer {\n" +
+            "    return Outer{ .a = 1, .in = .{ .x = 2, .y = -3 }, .arr = .{ k, k + 1, k + 2 }, .words = .{ 100, 200 } };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const o = make(4);\n" +
+            "    var p = Outer{ .a = 9, .in = .{ .x = 1, .y = 1 }, .arr = o.arr, .words = undefined };\n" +
+            "    p.words[1] = 7;\n" +
+            "    return @truncate(o.a + o.arr[0] + o.arr[2] + o.words[1] + p.arr[1] + p.words[1]);\n" +
+            "}\n", 223, "" },
+        // A global struct with array fields (task #78) is built by a synthesized initializer; `"ABCD".*` is the array
+        // value, @splat fills a `[N]T`, and an index takes a cast builtin's type (task #75, std.base64's shapes).
+        new object[] { "global_array_field_init",
+            "const alphabet = \"ABCD\".*;\n" +
+            "const Codec = struct { chars: [4]u8, table: [8]u8, pad: u8 };\n" +
+            "const codec = Codec{ .chars = alphabet, .table = @splat(0xff), .pad = '=' };\n" +
+            "pub fn main() u8 {\n" +
+            "    return codec.chars[@truncate(codec.pad & 3)] +% codec.table[7];\n" +
+            "}\n", 65, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -6213,6 +6261,36 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // std.base64 from real std (tasks #75, #78): the standard and url_safe_no_pad codecs (a global Codecs whose
+    // array fields a synthesized initializer fills, @splat tables, a lazily deferred fn-pointer alias), encode,
+    // calcSizeForSlice, decode, and the InvalidCharacter error.
+    [Fact]
+    public void Dotcc_matches_zig_std_base64() =>
+        MatchesZigWithRealStd("base64",
+            "const std = @import(\"std\");\n" +
+            "const b64 = std.base64;\n" +
+            "\n" +
+            "pub fn main() !u8 {\n" +
+            "    var buf: [64]u8 = undefined;\n" +
+            "    const e1 = b64.standard.Encoder.encode(&buf, \"hello, world!\");\n" +
+            "    var sum: u32 = 0;\n" +
+            "    for (e1) |c| sum = sum *% 31 +% c;\n" +
+            "    var buf2: [64]u8 = undefined;\n" +
+            "    const e2 = b64.url_safe_no_pad.Encoder.encode(&buf2, \"\\xfb\\xff\\xfe?\");\n" +
+            "    for (e2) |c| sum = sum *% 31 +% c;\n" +
+            "    var out: [64]u8 = undefined;\n" +
+            "    const n = try b64.standard.Decoder.calcSizeForSlice(\"aGVsbG8sIHdvcmxkIQ==\");\n" +
+            "    try b64.standard.Decoder.decode(out[0..n], \"aGVsbG8sIHdvcmxkIQ==\");\n" +
+            "    for (out[0..n]) |c| sum = sum *% 31 +% c;\n" +
+            "    var bad: u32 = 0;\n" +
+            "    b64.standard.Decoder.decode(out[0..3], \"a$==\") catch |err| {\n" +
+            "        bad = if (err == error.InvalidCharacter) 7 else 9;\n" +
+            "    };\n" +
+            "    sum +%= bad;\n" +
+            "    std.debug.print(\"{s} {s} {s} {d} {d}\\n\", .{ e1, e2, out[0..n], n, sum });\n" +
+            "    return @truncate(sum ^ (sum >> 8) ^ n);\n" +
+            "}\n", 61);
 
     // std.mem.readVarInt from real std (task #76): big and little endian, signed and unsigned, 1 to 4 bytes into
     // u32 / i16 / i32 / u64 / i8, via `const signedness = @typeInfo(ReturnType).int.signedness;` and `@Int(signedness, …)`.

@@ -745,8 +745,27 @@ internal sealed partial class ZigLowering
                     ? new LitInt(ct.ToString(System.Globalization.CultureInfo.InvariantCulture), ct) { Type = CType.Long }
                     : throw new IrUnsupportedException($"zig `const {name}: comptime_int` must be compile-time-known");
             }
+            if (_lazyConstStatics.TryGetValue(name, out var memo)) { return new VarRef(memo) { Type = memo.Type, IsLValue = true }; }
             var sink = vc.typeItem is { } t ? LowerType(t) : useSink;
-            return LowerExprSink(vc.rhs, sink);
+            // Lowered under a fresh hoist of its own: this module's lowering has no statement in progress at a use site
+            // in another module. A value that needed statements first (std.base64's `standard = Codecs{ … }`, whose array
+            // fields are copied in after the literal, task #78) becomes a static global with a synthesized initializer.
+            CExpr value;
+            List<CStmt> pre;
+            using (EnterFreshHoist())
+            {
+                value = LowerExprSink(vc.rhs, sink);
+                pre = _hoist ?? new List<CStmt>();
+            }
+            if (pre.Count == 0) { return value; }
+            var qualified = QualifyTypeName(name);
+            var global = _symbols.Declare(new Symbol
+            {
+                Name = qualified, Kind = SymKind.Var, Type = value.Type, Storage = Storage.Static, IsGlobal = true,
+            });
+            _ir.Globals.Add(new GlobalVar(global, InitFunctionCall(qualified, pre, value)));
+            _lazyConstStatics[name] = global;
+            return new VarRef(global) { Type = global.Type, IsLValue = true };
         }
         finally
         {
@@ -1757,7 +1776,7 @@ internal sealed partial class ZigLowering
                 new LitInt(n.ToString(CultureInfo.InvariantCulture), n) { Type = CType.Int }) { Type = new CType.Pointer(uarr.Element) });
             return;
         }
-        var init = blockInit ?? LowerExprSink(rhsItem, declared);
+        var init = blockInit ?? LowerGlobalInit(Tok(nameTok), rhsItem, declared);
         // A comptime ARRAY at a global `const` (`const TBL = comptime buildTable();`) would resolve
         // (in pass 3) to a StackArray, but by then this global is already a scalar GlobalVar — the
         // StackArray would emit as an invalid `static T* TBL = stackalloc …` field initializer. The
@@ -1810,6 +1829,42 @@ internal sealed partial class ZigLowering
         // call may read it (`comptime std.atomic.cacheLineForCpu(cpu)`): the interpreter evaluates its init.
         if (isConst && type.Unqualified is CType.Named) { _ir.ConstGlobalInits[sym] = init; }
     }
+
+    /// <summary>Lower a global's initializer. One that needs statements before its value (std.base64's
+    /// <c>standard = Codecs{ .alphabet_chars = …, … }</c>: an array field is copied in after the literal, task #78) is
+    /// wrapped in a synthesized static <c>__init_NAME()</c> function, and the global is initialized by a call to it. C#
+    /// runs static initializers in declaration order, and a global the initializer reads is lowered, and so declared,
+    /// before it.</summary>
+    private CExpr LowerGlobalInit(string name, Item rhsItem, CType? declared)
+    {
+        CExpr value;
+        List<CStmt> pre;
+        using (EnterFreshHoist())
+        {
+            value = LowerExprSink(rhsItem, declared);
+            pre = _hoist ?? new List<CStmt>();
+        }
+        return pre.Count == 0 ? value : InitFunctionCall(name, pre, value);
+    }
+
+    /// <summary>A synthesized static <c>__init_NAME()</c> that runs <paramref name="pre"/> and returns <paramref name="value"/>,
+    /// and a call to it: the initializer of a global whose value needs statements first.</summary>
+    private Call InitFunctionCall(string name, List<CStmt> pre, CExpr value)
+    {
+        var fn = DeclareFnSymbol(new Symbol
+        {
+            Name = "__init_" + name,
+            Kind = SymKind.Func,
+            Type = new CType.Func(value.Type, new List<CType>(), false),
+            IsGlobal = true,
+        });
+        _ir.Functions.Add(new FuncDef(fn, new List<Symbol>(), new Block(new List<CStmt>(pre) { new Return(value) }), false));
+        return new Call(fn.Name, new List<CExpr>(), new List<CType>(), fn) { Type = value.Type };
+    }
+
+    /// <summary>A lazy module's top-level consts whose value needed statements (see <see cref="LowerLazyValueConst"/>),
+    /// memoized as static globals: each is evaluated once, as zig evaluates a top-level const once.</summary>
+    private readonly Dictionary<string, Symbol> _lazyConstStatics = new(System.StringComparer.Ordinal);
 
     /// <summary>Record a <c>[N]T</c> array global: an array-typed static symbol (so references
     /// resolve + <c>sizeof</c> is exact) backed by the pinned <paramref name="pinned"/> store

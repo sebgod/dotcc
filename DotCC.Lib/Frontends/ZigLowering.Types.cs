@@ -147,6 +147,18 @@ internal sealed partial class ZigLowering
         // `T` in a type position resolves through LowerTypeName. This serves BOTH the top-level pass-0
         // binding and the in-function `DeclOrComptime` path, so a local `const T = @TypeOf(a);` works
         // (the monomorphization-shaped case — the operand is in scope in a body).
+        // A lazy module's type-former alias that names a container declared LATER in the file (std.base64's
+        // `const decoderWithIgnoreProto = *const fn (…) Base64DecoderWithIgnore;`, task #75) cannot lower while the module is
+        // still preparing: it is deferred to its first type-position use, as a top-level type CALL is.
+        if (_lazy && _currentFnName.Length == 0 && IsTypeFormer(rhs))
+        {
+            try { _ = TryTypeAliasRhs(rhs, out _); }
+            catch (IrUnsupportedException)
+            {
+                _deferredTypeCalls[name] = rhs;
+                return true;
+            }
+        }
         if (TryTypeAliasRhs(rhs, out var aliasType))
         {
             _typeAliases[name] = aliasType;

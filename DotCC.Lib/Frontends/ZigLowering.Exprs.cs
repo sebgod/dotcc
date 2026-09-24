@@ -618,6 +618,10 @@ internal sealed partial class ZigLowering
                 // comptime-known length and yields an array COPY. Bound to a `const`, the copy is never
                 // written, so the slice itself stands for it; `&copy` coerces back (CoerceToSlice).
                 if (operand.Type.Unqualified is CType.Slice) { return operand; }
+                // `"ABC…".*` (std.base64's `standard_alphabet_chars`): a string literal is `*const [N:0]u8`, so `.*` is the
+                // array VALUE, which dotcc represents by its element pointer, the literal itself (task #75). It had been
+                // the first byte.
+                if (operand.Type.Unqualified is CType.Array && IsStringLiteralValue(operand)) { return operand; }
                 var pointee = operand.Type.Unqualified switch
                 {
                     CType.Pointer p => p.Pointee,
@@ -648,7 +652,12 @@ internal sealed partial class ZigLowering
                     }
                 }
                 var baseExpr = LowerExpr(ix.Arg0);
-                var idx = LowerExpr(ix.Arg2);
+                // An index is a `usize` result location, so a cast builtin there infers it (std.base64's
+                // `encoder.alphabet_chars[@truncate(bits >> 18 & 0x3f)]`).
+                var idx = ix.Arg2.Content is Zig.BuiltinCall { Arg0: var idxCast }
+                          && Tok(idxCast) is "@truncate" or "@intCast" or "@bitCast" or "@enumFromInt"
+                    ? LowerExprSink(ix.Arg2, CType.ULong)
+                    : LowerExpr(ix.Arg2);
                 // `v[i]` of a SIMD vector: a lane read (T5).
                 if (baseExpr.Type.Unqualified is CType.Vector laneVector) { return VectorLane(baseExpr, idx, laneVector); }
                 // A tuple subscript `t[N]` (N a literal) reads the Nth element → `.ItemN+1`
@@ -1891,9 +1900,54 @@ internal sealed partial class ZigLowering
                 RequireListArgs(methodName, argItems, 0, "()");
                 return new ZigListCall(recv, "ClearRetainingCapacity", new List<CExpr>()) { Type = CType.Void };
             }
+            // The index / capacity members (task #74): each maps 1:1 onto the runtime ZigList.
+            case "insert":
+            {
+                RequireListArgs(methodName, argItems, 3, "(alloc, index, item)");
+                var a = LowerListAllocatorArg(methodName, argItems[0]);
+                var at = LowerExprSink(argItems[1], CType.ULong);
+                var item = LowerExprSink(argItems[2], elem);
+                return new ZigListCall(recv, "Insert", new List<CExpr> { a, at, item, OomLit() })
+                { Type = new CType.ErrorUnion(CType.Void) };
+            }
+            case "orderedRemove" or "swapRemove":
+            {
+                RequireListArgs(methodName, argItems, 1, "(index)");
+                var at = LowerExprSink(argItems[0], CType.ULong);
+                return new ZigListCall(recv, methodName == "orderedRemove" ? "OrderedRemove" : "SwapRemove", new List<CExpr> { at })
+                { Type = elem };
+            }
+            case "getLast":
+            {
+                // zig 0.17-dev: `?T`, null for an empty list.
+                RequireListArgs(methodName, argItems, 0, "()");
+                return new ZigListCall(recv, "GetLast", new List<CExpr>()) { Type = new CType.Optional(elem) };
+            }
+            case "ensureTotalCapacity" or "ensureUnusedCapacity":
+            {
+                RequireListArgs(methodName, argItems, 2, "(alloc, n)");
+                var a = LowerListAllocatorArg(methodName, argItems[0]);
+                var n = LowerExprSink(argItems[1], CType.ULong);
+                return new ZigListCall(recv, methodName == "ensureTotalCapacity" ? "EnsureTotalCapacity" : "EnsureUnusedCapacity",
+                    new List<CExpr> { a, n, OomLit() }) { Type = new CType.ErrorUnion(CType.Void) };
+            }
+            case "appendAssumeCapacity":
+            {
+                RequireListArgs(methodName, argItems, 1, "(item)");
+                var item = LowerExprSink(argItems[0], elem);
+                return new ZigListCall(recv, "AppendAssumeCapacity", new List<CExpr> { item }) { Type = CType.Void };
+            }
+            case "shrinkRetainingCapacity":
+            {
+                RequireListArgs(methodName, argItems, 1, "(n)");
+                var n = LowerExprSink(argItems[0], CType.ULong);
+                return new ZigListCall(recv, "ShrinkRetainingCapacity", new List<CExpr> { n }) { Type = CType.Void };
+            }
             default:
                 throw new IrUnsupportedException(
-                    $"zig std.ArrayList has no modeled member '{methodName}' (curated: append, appendSlice, pop, deinit, clearRetainingCapacity, items, capacity)");
+                    $"zig std.ArrayList has no modeled member '{methodName}' (curated: append, appendSlice, insert, pop, "
+                    + "orderedRemove, swapRemove, getLast, ensureTotalCapacity, ensureUnusedCapacity, "
+                    + "appendAssumeCapacity, shrinkRetainingCapacity, deinit, clearRetainingCapacity, items, capacity)");
         }
     }
 

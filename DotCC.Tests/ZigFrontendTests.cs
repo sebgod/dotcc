@@ -5246,18 +5246,23 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void A_non_undefined_array_field_in_a_struct_literal_is_rejected()
+    public void A_non_undefined_array_field_in_a_struct_literal_is_copied_in_after_the_literal()
     {
-        // The other half of the same rule: an array field with real contents would need element-wise
-        // stores into a pinned buffer, which an initializer EXPRESSION can't express. A loud cut
-        // naming the workaround — never a silent CS1666.
-        var ex = Should.Throw<CompileException>(() => EmitZig(
+        // The other half of the same rule: an array field with real contents can't be set by a C# object initializer,
+        // so in a body the literal is a hoisted temp whose array field is copied in after it (task #78).
+        var cs = EmitZig(
             "const B = struct { items: [4]u8, len: usize };\n" +
             "pub fn main() u8 {\n" +
             "    const b: B = .{ .items = [_]u8{ 1, 2, 3, 4 }, .len = 4 };\n" +
-            "    return @intCast(b.len);\n}\n"));
-        ex.Message.ShouldContain("'items' is an array");
-        ex.Message.ShouldContain("var v: B = undefined");
+            "    return @intCast(b.len + b.items[3]);\n}\n");
+        cs.ShouldContain("B __anf0 = new B { len = 4 };");
+        cs.ShouldContain("memcpy(__anf0.items, ");
+        // At module scope the same statements run in a synthesized initializer, never a silent CS1666.
+        EmitZig(
+            "const B = struct { items: [4]u8, len: usize };\n" +
+            "const g: B = .{ .items = [_]u8{ 1, 2, 3, 4 }, .len = 4 };\n" +
+            "pub fn main() u8 {\n" +
+            "    return @intCast(g.len);\n}\n").ShouldContain("B g = __init_g();");
     }
 
     // ---- @typeInfo — comptime reflection, folded at lowering time (road-to-zig-std S5) ----
