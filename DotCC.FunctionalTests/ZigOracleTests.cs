@@ -4103,6 +4103,116 @@ public sealed class ZigOracleTests
             "    const n = try fill(&buf);\n" +
             "    return @intCast(as_byte - 133 + p.a + q.b + r + @as(u64, @intCast(w)) + idx + n + buf[0]);\n" +
             "}\n", 39, "" },
+        // std's string-helper shapes (tasks #52 to #55): a struct field typed by a comptime switch over an enum-literal
+        // type argument, a local struct chosen by an if-capture over a comptime optional, an `and` settling an unrolled
+        // `if`, a string literal tuple element sliced without its NUL, a value `if (switch …) |i|`, `@bitCast` of a
+        // slice's `[0..4].*`. 3 + 2 + 16 + 1 + 32 + 3 + 5 + 2 + 99 + 3 = 166.
+        new object[] { "string_shapes",
+            "fn contains(s: []const u8, c: u8) bool {\n" +
+            "    for (s) |d| {\n" +
+            "        if (d == c) return true;\n" +
+            "    }\n" +
+            "    return false;\n" +
+            "}\n" +
+            "\n" +
+            "const Kind = enum { any, scalar };\n" +
+            "\n" +
+            "fn Split(comptime k: Kind) type {\n" +
+            "    return struct {\n" +
+            "        buffer: []const u8,\n" +
+            "        index: usize,\n" +
+            "        delimiter: switch (k) {\n" +
+            "            .any => []const u8,\n" +
+            "            .scalar => u8,\n" +
+            "        },\n" +
+            "\n" +
+            "        pub fn count(self: *@This()) usize {\n" +
+            "            var n: usize = 0;\n" +
+            "            while (self.index < self.buffer.len) : (self.index += 1) {\n" +
+            "                const c = self.buffer[self.index];\n" +
+            "                const hit = switch (k) {\n" +
+            "                    .any => contains(self.delimiter, c),\n" +
+            "                    .scalar => c == self.delimiter,\n" +
+            "                };\n" +
+            "                if (hit) n += 1;\n" +
+            "            }\n" +
+            "            return n;\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "fn chunkSize(comptime vec: ?usize) usize {\n" +
+            "    const Scan = if (vec) |v|\n" +
+            "        struct {\n" +
+            "            pub const size = v;\n" +
+            "        }\n" +
+            "    else\n" +
+            "        struct {\n" +
+            "            pub const size = 1;\n" +
+            "        };\n" +
+            "    return Scan.size;\n" +
+            "}\n" +
+            "\n" +
+            "fn widest(a: []const u8) usize {\n" +
+            "    inline for (1..6) |s| {\n" +
+            "        const n = 4 << s;\n" +
+            "        if (n <= 32 and a.len <= n) {\n" +
+            "            return n;\n" +
+            "        }\n" +
+            "    }\n" +
+            "    return 7;\n" +
+            "}\n" +
+            "\n" +
+            "fn firstLen(args: anytype) usize {\n" +
+            "    const s: []const u8 = @field(args, \"0\");\n" +
+            "    return s.len;\n" +
+            "}\n" +
+            "\n" +
+            "fn find(s: []const u8, c: u8) ?usize {\n" +
+            "    for (s, 0..) |d, i| {\n" +
+            "        if (d == c) return i;\n" +
+            "    }\n" +
+            "    return null;\n" +
+            "}\n" +
+            "\n" +
+            "fn firstHit(comptime k: Kind, s: []const u8) usize {\n" +
+            "    return if (switch (k) {\n" +
+            "        .any => find(s, ';'),\n" +
+            "        .scalar => find(s, ','),\n" +
+            "    }) |i| i else 99;\n" +
+            "}\n" +
+            "\n" +
+            "fn word(s: []const u8) u32 {\n" +
+            "    const w: u32 = @bitCast(s[0..4].*);\n" +
+            "    return w % 7;\n" +
+            "}\n" +
+            "\n" +
+            "fn helper() usize {\n" +
+            "    return 5;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var sp = Split(.scalar){ .buffer = \"a,b,,c\", .index = 0, .delimiter = ',' };\n" +
+            "    var sa = Split(.any){ .buffer = \"a;b,c\", .index = 0, .delimiter = \",;\" };\n" +
+            "    const buf = \"abcdefghijklmnopqrst\";\n" +
+            "    const total = sp.count() + sa.count() + chunkSize(16) + chunkSize(null) + widest(buf) + firstLen(.{ \"abc\", 1 }) + helper() + firstHit(.any, \"ab;c\") + firstHit(.scalar, \"abc\") + word(\"abcd\");\n" +
+            "    return @intCast(total);\n" +
+            "}\n", 166, "" },
+        // ArrayList.appendSlice of `&.{ 3, 4, 5 }` (the list literal result-located at u16) viewed through
+        // std.mem.sliceAsBytes: 6 bytes summing to 12, so 18.
+        new object[] { "list_slice_as_bytes",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "pub fn main() !u8 {\n" +
+            "    const alloc = std.heap.page_allocator;\n" +
+            "    var list: std.ArrayList(u16) = .empty;\n" +
+            "    defer list.deinit(alloc);\n" +
+            "    try list.appendSlice(alloc, &.{ 3, 4, 5 });\n" +
+            "    const bytes = std.mem.sliceAsBytes(list.items);\n" +
+            "    var sum: usize = 0;\n" +
+            "    for (bytes) |b| sum += b;\n" +
+            "    return @intCast(bytes.len + sum);\n" +
+            "}\n", 18, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -5221,6 +5331,54 @@ public sealed class ZigOracleTests
             "    const missing: u32 = if (m.get(3) == null) 1 else 0;\n" +
             "    return @intCast((sum +% iter_sum +% m.count() +% missing) % 251);\n" +
             "}\n", 131);
+
+    /// <summary>A std string pipeline from source (road-to-zig-std, tasks #52 to #55): std.fmt.bufPrint with `{s}`, `{d}`
+    /// and `{x}` over a tuple holding a string literal, ArrayList.appendSlice of those pieces and of `&amp;.{ 'e', 'n', 'd' }`,
+    /// std.mem.splitScalar / tokenizeScalar, indexOf, eql, startsWith and endsWith, folded to a checksum. A string literal
+    /// tuple element must not carry its NUL into the `{s}` slice.</summary>
+    [Fact]
+    public void Dotcc_matches_zig_std_string_pipeline_from_source() =>
+        MatchesZigWithRealStd("strpipeline",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "fn check(s: []const u8) u32 {\n" +
+            "    var t: u32 = 0;\n" +
+            "    for (s, 0..) |c, i| t +%= @as(u32, c) *% @as(u32, @intCast(i + 1));\n" +
+            "    return t;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() !u8 {\n" +
+            "    const alloc = std.heap.page_allocator;\n" +
+            "    var list: std.ArrayList(u8) = .empty;\n" +
+            "    defer list.deinit(alloc);\n" +
+            "    var i: u32 = 0;\n" +
+            "    while (i < 40) : (i += 1) {\n" +
+            "        var buf: [32]u8 = undefined;\n" +
+            "        const piece = try std.fmt.bufPrint(&buf, \"{s}{d}:{x},\", .{ \"k\", i, i * 37 });\n" +
+            "        try list.appendSlice(alloc, piece);\n" +
+            "    }\n" +
+            "    try list.appendSlice(alloc, &.{ 'e', 'n', 'd' });\n" +
+            "    const text = list.items;\n" +
+            "\n" +
+            "    var total: u32 = 0;\n" +
+            "    var it = std.mem.splitScalar(u8, text, ',');\n" +
+            "    var parts: u32 = 0;\n" +
+            "    while (it.next()) |p| {\n" +
+            "        parts += 1;\n" +
+            "        total +%= check(p);\n" +
+            "    }\n" +
+            "    var tk = std.mem.tokenizeScalar(u8, \"  alpha  beta gamma   \", ' ');\n" +
+            "    while (tk.next()) |t| total +%= check(t) *% 3;\n" +
+            "\n" +
+            "    const pos = std.mem.indexOf(u8, text, \"k33:\") orelse 999;\n" +
+            "    const long_a = text[0..40];\n" +
+            "    const long_b = text[0..40];\n" +
+            "    const eq: u32 = if (std.mem.eql(u8, long_a, long_b)) 1 else 0;\n" +
+            "    const ne: u32 = if (std.mem.eql(u8, text[0..40], text[1..41])) 1 else 0;\n" +
+            "    const sw: u32 = if (std.mem.startsWith(u8, text, \"k0:0,k1:25,\")) 1 else 0;\n" +
+            "    const ew: u32 = if (std.mem.endsWith(u8, text, \",end\")) 1 else 0;\n" +
+            "    return @intCast((total +% parts +% @as(u32, @intCast(pos)) +% eq *% 7 +% ne *% 11 +% sw *% 13 +% ew *% 17) % 251);\n" +
+            "}\n", 55);
 
     /// <summary>Run <paramref name="program"/> through dotcc (navigating the real std at <c>DOTCC_ZIG_LIB_DIR</c>) and
     /// through zig, and require both to exit alike and print the same (and, when given, with

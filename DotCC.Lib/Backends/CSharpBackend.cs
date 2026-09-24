@@ -1706,7 +1706,9 @@ internal sealed class CSharpBackend
             case TupleNew tn:
             {
                 var tt = (CType.Tuple)tn.TupleType.Unqualified;
-                var vals = tn.Elements.Select((e, i) => Coerced(e, tt.Elements[i])).ToList();
+                var vals = tn.Elements.Select((e, i) => CSharpTarget.IsPointerLikeTupleElement(tt.Elements[i])
+                    ? $"(nint)({Coerced(e, tt.Elements[i])})"   // a pointer-like element rides as nint (CS0306)
+                    : Coerced(e, tt.Elements[i])).ToList();
                 return (BuildValueTupleCtor(tt.Elements, vals), PPrimary);
             }
             // A Zig tuple index `t[N]` (Milestone G) → `<tuple>.Item{N+1}` (ValueTuple's 1-based
@@ -1718,6 +1720,11 @@ internal sealed class CSharpBackend
                 var tiIdx = ti.Index;
                 while (tiIdx >= 7) { sbTi.Append(".Rest"); tiIdx -= 7; }
                 sbTi.Append(".Item").Append(tiIdx + 1);
+                // A pointer-like element is carried as nint (see CSharpTarget.TupleElementType): cast back on read.
+                if (CSharpTarget.IsPointerLikeTupleElement(ti.Element))
+                {
+                    return ($"(({Cs(ti.Element.Unqualified)})({sbTi}))", PPrimary);
+                }
                 return (sbTi.ToString(), PPostfix);
             }
             // A bare unresolved identifier: the backend escapes the raw name.
@@ -1761,6 +1768,12 @@ internal sealed class CSharpBackend
                 if (bc.Operand.Type.Unqualified is CType.Array)
                 {
                     return ($"System.Runtime.CompilerServices.Unsafe.ReadUnaligned<{Cs(bc.Target)}>({Sub(bc.Operand, PAssign)})", PPrimary);
+                }
+                // A comptime-length slice deref'd to its array (std.mem.eqlBytes' `@bitCast(a[n..][0..4].*)`) lowers as the
+                // slice: read from its data pointer the same way.
+                if (bc.Operand.Type.Unqualified is CType.Slice)
+                {
+                    return ($"System.Runtime.CompilerServices.Unsafe.ReadUnaligned<{Cs(bc.Target)}>({Sub(bc.Operand, PPostfix)}.Ptr)", PPrimary);
                 }
                 return ($"System.Runtime.CompilerServices.Unsafe.BitCast<{Cs(bc.Operand.Type)}, {Cs(bc.Target)}>({Sub(bc.Operand, PAssign)})", PPrimary);
             case SizeOfExpr so:
@@ -2586,16 +2599,19 @@ internal sealed class CSharpBackend
         if (types.Count == 0) { return "default(System.ValueTuple)"; }
         if (types.Count <= 7)
         {
-            var ta = string.Join(", ", types.Select(t => Cs(t.Unqualified)));
+            var ta = string.Join(", ", types.Select(TupleElementCs));
             return $"new System.ValueTuple<{ta}>({string.Join(", ", vals)})";
         }
-        var headTypes = string.Join(", ", types.Take(7).Select(t => Cs(t.Unqualified)));
+        var headTypes = string.Join(", ", types.Take(7).Select(TupleElementCs));
         var restTypes = types.Skip(7).ToList();
         var restTypeStr = Cs(new CType.Tuple(restTypes));   // the nested TRest ValueTuple type
         var headVals = string.Join(", ", vals.Take(7));
         var restCtor = BuildValueTupleCtor(restTypes, vals.Skip(7).ToList());
         return $"new System.ValueTuple<{headTypes}, {restTypeStr}>({headVals}, {restCtor})";
     }
+
+    /// <summary>A tuple element's C# type (a pointer-like one as <c>nint</c>, see CSharpTarget.TupleElementType).</summary>
+    private string TupleElementCs(CType t) => CSharpTarget.IsPointerLikeTupleElement(t) ? "nint" : Cs(t.Unqualified);
 
     /// <summary>True for a zig <c>void</c> parameter (or argument) type, which the C# emit erases: C# has
     /// no void parameter, and zig's void carries no data. A C <c>f(void)</c> never reaches here as a

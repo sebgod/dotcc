@@ -1329,7 +1329,13 @@ internal sealed partial class ZigLowering
                 }
                 else
                 {
-                    if (_ir.ConstEval(argScope.LowerExpr(argItems[i])) is not { } vv)
+                    // An ENUM-typed param (std.mem's `SplitIterator(T, .scalar)` with `comptime delimiter_type:
+                    // DelimiterType`) is the result location its bare `.scalar` argument resolves against.
+                    var valueParamType = LowerType(p.TypeAst);
+                    var valueArg = valueParamType.Unqualified is CType.Enum
+                        ? argScope.LowerExprSink(argItems[i], valueParamType)
+                        : argScope.LowerExpr(argItems[i]);
+                    if (_ir.ConstEval(valueArg) is not { } vv)
                     {
                         throw new IrUnsupportedException(
                             $"call to type-returning generic '{templateSym.Name}': the `comptime {p.Name}` argument "

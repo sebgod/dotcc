@@ -1153,6 +1153,13 @@ internal sealed partial class ZigLowering
                 $"decl literal `.{Tok(declLit.Arg1)}(…)` needs a struct/union result type to resolve against "
                 + "(a typed `const`/`var`, a typed parameter, a `return` of a typed function)");
         }
+        // Inside std's own mem.zig a bare `asBytes(…)` / `sliceAsBytes(…)` (std.mem.indexOf's `sliceAsBytes(haystack)`)
+        // is the curated lowering too, as `std.mem.asBytes(…)` from any other module is.
+        if (calleeItem.Content is Zig.Ident { Arg0: var curatedTok } && Tok(curatedTok) is "asBytes" or "sliceAsBytes"
+            && IsStdModule("mem.zig"))
+        {
+            return LowerStdMemCall(Tok(curatedTok), argItems);
+        }
         if (calleeItem.Content is not Zig.Ident id)
         {
             throw new IrUnsupportedException("zig call: only a bare-identifier or `base.method` callee is lowered yet (got "
@@ -1738,8 +1745,11 @@ internal sealed partial class ZigLowering
             {
                 RequireListArgs(methodName, argItems, 2, "(alloc, slice)");
                 var a = LowerListAllocatorArg(methodName, argItems[0]);
-                // `&arr` / a `[N]T` value coerces to a slice exactly as at any other slice sink.
-                var s = CoerceToSlice(LowerExpr(argItems[1]), new CType.Slice(elem));
+                // `&arr` / a `[N]T` value / `&.{ 1, 1 }` coerces to a slice exactly as at any other slice sink: lowered AT
+                // the slice (so an anonymous list literal is result-located at the element type), then coerced.
+                var sliceType = new CType.Slice(elem);
+                var sliceArg = LowerExprSink(argItems[1], sliceType);
+                var s = sliceArg.Type?.Unqualified is CType.Slice ? sliceArg : CoerceToSlice(sliceArg, sliceType);
                 return new ZigListCall(recv, "AppendSlice", new List<CExpr> { a, s, OomLit() })
                 { Type = new CType.ErrorUnion(CType.Void) };
             }

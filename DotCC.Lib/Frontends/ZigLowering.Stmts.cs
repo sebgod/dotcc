@@ -574,6 +574,9 @@ internal sealed partial class ZigLowering
             return new Seq(new List<CStmt>());
         }
         if (TryComptimeConstBinding(Tok(nameTok), initExpr)) { return new Seq(new List<CStmt>()); }
+        // `const Scan = if (std.simd.suggestVectorLength(u8)) |vec_size| struct {…} else struct {…};` (std.mem.eqlBytes):
+        // the comptime condition picks ONE struct, declared as a local container with the capture as its comptime value.
+        if (typeItem is null && TryLowerSelectedLocalStruct(Tok(nameTok), initExpr) is { } selectedStruct) { return selectedStruct; }
         // `const placeholder = comptime std.fmt.Placeholder.parse(…);`: a comptime AGGREGATE lives in the
         // interpreter, like a `comptime var` of one (E3), so a later comptime read (`switch (placeholder.arg)`)
         // folds; a runtime read renders it where it stands.
@@ -602,6 +605,51 @@ internal sealed partial class ZigLowering
             return new Seq(new List<CStmt>());
         }
         return DeclOf(nameTok, typeItem, initExpr, isConst: true);
+    }
+
+    /// <summary>A local <c>const NAME = if (c) struct {…} else struct {…};</c> or its captured form over a comptime
+    /// optional: the condition folds, and the chosen struct is declared as a local container (with methods and
+    /// consts) whose comptime value seeds include the capture (<c>vec_size</c>). Null for any other initializer; a
+    /// condition that does not fold, or an enum arm, is loud.</summary>
+    private CStmt? TryLowerSelectedLocalStruct(string name, Item initExpr)
+    {
+        Item arm;
+        var extraSeeds = new List<(string name, long value, CType type)>();
+        switch (initExpr.Content)
+        {
+            case Zig.IfExprTypeArms ta:
+                arm = (TryFoldComptimeCondition(ta.Arg2) ?? (_ir.ConstEval(LowerExpr(ta.Arg2)) is { } cv ? cv != 0 : (bool?)null))
+                      switch
+                {
+                    true => ta.Arg4,
+                    false => ta.Arg6,
+                    null => throw new IrUnsupportedException($"zig: `const {name} = if (…) struct {{…}} else …` needs a comptime condition"),
+                };
+                break;
+            case Zig.IfExprCaptureTypeArms ca:
+                if (!TryComptimeOptionalCond(ca.Arg2, out var copt))
+                {
+                    throw new IrUnsupportedException(
+                        $"zig: `const {name} = if (x) |v| struct {{…}} else …` needs a comptime-known optional");
+                }
+                if (copt.HasValue)
+                {
+                    arm = ca.Arg7;
+                    extraSeeds.Add((Tok(ca.Arg5), copt.Value, copt.Inner));
+                }
+                else
+                {
+                    arm = ca.Arg9;
+                }
+                break;
+            default:
+                return null;
+        }
+        if (arm.Content is not Zig.TypeArmStruct selected)
+        {
+            throw new IrUnsupportedException($"zig: `const {name} = if (…) …` selects a non-struct type arm, which is not lowered yet");
+        }
+        return LowerLocalStruct(name, selected.Arg2, AggregateLayout.Default, extraSeeds);
     }
 
     /// <summary>Bind <c>const arg_pos = comptime switch (placeholder.arg) { .none =&gt; null, .number =&gt; |pos| pos, … };</c>
@@ -1707,7 +1755,11 @@ internal sealed partial class ZigLowering
                 Name = captureName, Kind = SymKind.Var, Type = captureType,
                 IsConstexpr = folded is not null, ConstValue = folded ?? 0,
             });
-            var body = LowerStmt(bodyItem);
+            // A copy is analysed with its index comptime-known, so its constant conditions settle as zig's do.
+            _inlineUnrollDepth++;
+            CStmt body;
+            try { body = LowerStmt(bodyItem); }
+            finally { _inlineUnrollDepth--; }
             _symbols.ExitScope();
             // `inline for (0..2) |_|` discards the index: no declaration (an unused `_` local is CS0219).
             var copy = captureName == "_" ? new List<CStmt> { body }
@@ -1837,6 +1889,14 @@ internal sealed partial class ZigLowering
             if (tagCond) { return LowerStmt(thenItem); }
             return elseItem is { } tagTaken ? LowerStmt(tagTaken) : new Seq(new List<CStmt>());
         }
+        // In an unrolled `inline for` or a generic instance, `c and rest` with a constant-false `c` (or `c or rest` with
+        // a constant-true one) is settled whatever `rest` is, and zig analyses no dead branch: std.mem.eqlBytes' unrolled
+        // `if (n <= Scan.size and a.len <= n) { const V = @Vector(n / 2, u8); … }` must not form `@Vector(128, u8)`.
+        if ((_inlineUnrollDepth > 0 || _inGenericInstance) && TrySettleByLeftOperand(condItem) is { } settled)
+        {
+            if (settled) { return LowerStmt(thenItem); }
+            return elseItem is { } settledElse ? LowerStmt(settledElse) : new Seq(new List<CStmt>());
+        }
         var cond = LowerExpr(condItem);
         if (_inGenericInstance && _ir.ConstEval(cond) is { } cv)
         {
@@ -1844,6 +1904,33 @@ internal sealed partial class ZigLowering
             return elseItem is { } taken ? LowerStmt(taken) : new Seq(new List<CStmt>());
         }
         return new If(cond, LowerStmt(thenItem), elseItem is { } el ? LowerStmt(el) : null);
+    }
+
+    /// <summary>An <c>and</c> whose left operand is a constant false, or an <c>or</c> whose left operand is a constant true:
+    /// settled by that operand alone (the right one need not be comptime). Null otherwise.</summary>
+    private bool? TrySettleByLeftOperand(Item condItem)
+    {
+        var cur = condItem;
+        while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
+        var (left, isAnd) = cur.Content switch
+        {
+            Zig.BoolAnd a => (a.Arg0, true),
+            Zig.BoolOr o => (o.Arg0, false),
+            _ => ((Item?)null, false),
+        };
+        if (left is null) { return null; }
+        long? value;
+        using (EnterThrowawayHoist())
+        {
+            try { value = _ir.ConstEval(LowerExpr(left)); }
+            catch (IrUnsupportedException) { return null; }
+        }
+        return value switch
+        {
+            0 when isAnd => false,
+            not null and not 0 when !isAnd => true,
+            _ => null,
+        };
     }
 
     /// <summary>Settle an <c>if</c> condition at lowering time when it is a COMPTIME question — a tag

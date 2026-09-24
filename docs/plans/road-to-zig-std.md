@@ -921,6 +921,14 @@ vector length feeds TYPES.
   parameters or a `switch` return (parsed so std.Options parses; lowering those is a named cut). Oracles
   `prong_forms_type_switch`, `comptime_optional_switch`, `tuple_field_by_name`, `comptime_or_short_circuit`;
   unit `ZigFormatEngineTests`.
+- **std's string helpers RUN from real std, == zig (2026-09-24, tasks #52 to #55)**: one program doing
+  `bufPrint("{s}{d}:{x},", .{ "k", i, i * 37 })` into an ArrayList via `appendSlice`, then `splitScalar`,
+  `tokenizeScalar`, `indexOf`, `eql`, `startsWith` and `endsWith` over the text (differential
+  `Dotcc_matches_zig_std_string_pipeline_from_source`, 55 == zig). Needed: a switch-typed struct field and a value `if
+  (switch …) |x|` (grammar), a local struct selected by an if-capture over a comptime optional, the `and` / `or`
+  left-operand settle in unrolled and generic bodies, `@bitCast` of a slice deref, `sliceAsBytes`, a std file's
+  `@This()` self alias, tuple pointer elements as `nint` (CS0306), and a string literal tuple element without its NUL
+  (it printed `k\0` before, a silent wrong answer).
 - **T5 ✅ (2026-09-24)** `@Vector(N, T)` lowers to .NET's `Vector64/128/256/512<T>` by total width (a bool vector,
   what a comparison yields, is a `ulong` lane mask), and real `std.mem.indexOfScalar` runs from source through its
   SIMD path, == zig. Vector surface: `@splat`, an array / slice / `slice[i..][0..N].*` loaded at a vector sink, a list

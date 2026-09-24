@@ -82,12 +82,22 @@ internal sealed class CSharpTarget : ITarget
         if (elems.Count == 0) { return "System.ValueTuple"; }
         if (elems.Count <= 7)
         {
-            return "System.ValueTuple<" + string.Join(", ", elems.Select(e => RenderType(e.Unqualified))) + ">";
+            return "System.ValueTuple<" + string.Join(", ", elems.Select(TupleElementType)) + ">";
         }
-        var head = string.Join(", ", elems.Take(7).Select(e => RenderType(e.Unqualified)));
+        var head = string.Join(", ", elems.Take(7).Select(TupleElementType));
         var rest = RenderValueTuple(elems.Skip(7).ToList());
         return "System.ValueTuple<" + head + ", " + rest + ">";
     }
+
+    /// <summary>A tuple element's C# type: a pointer-like element (a pointer, an array, a function pointer) rides as
+    /// <c>nint</c>, since C# forbids a pointer type argument (CS0306), e.g. the string literal in std.fmt's
+    /// <c>.{ "hey", x }</c>; the backend converts it at construction and on each element read.</summary>
+    internal string TupleElementType(CType element) =>
+        IsPointerLikeTupleElement(element) ? "nint" : RenderType(element.Unqualified);
+
+    /// <summary>Whether a tuple element is carried as <c>nint</c> (see <see cref="TupleElementType"/>).</summary>
+    internal static bool IsPointerLikeTupleElement(CType element) =>
+        element.Unqualified is CType.Pointer or CType.Array or CType.Func;
 
     public string RenderIntLit(LitInt lit) =>
         lit.Type.Unqualified is CType.Prim { Integer: true, Bytes: >= 16 } p128

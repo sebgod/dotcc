@@ -897,6 +897,9 @@ productions:
       - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', RhsExpr, 'else', RhsExpr], action: ifExpr }
       # An `if` choosing between two inline container TYPES (a type const's RHS, folded at lowering time).
       - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', TypeArm, 'else', TypeArm], action: ifExprTypeArms }
+      # The captured form (std.mem.eqlBytes' `const Scan = if (std.simd.suggestVectorLength(u8)) |vec_size| struct {…}
+      # else struct {…};`): after the capture, `struct` / `enum` starts a TypeArm, not a RhsExpr.
+      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', TypeArm, 'else', TypeArm], action: ifExprCaptureTypeArms }
       - { lhs: TypeArm, rhs: ['enum', '{', EnumFields, '}'],   action: typeArmEnum }
       - { lhs: TypeArm, rhs: ['struct', '{', FieldDecls, '}'], action: typeArmStruct }
       # Value-position captured `if` — `if (opt) |x| thenExpr else elseExpr` (S4a). The `|` after the
@@ -904,6 +907,10 @@ productions:
       # plain ifExpr above. `else` is mandatory (an expression yields a value on both paths). Mirrors
       # the statement forms `stmtIfCapture*`; the optional/pointer payload binds `x` in the then-branch.
       - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', RhsExpr, 'else', RhsExpr], action: ifExprCapture }
+      # The condition may be a `switch` expression (std.mem.SplitIterator.next's
+      # `if (switch (delimiter_type) { .scalar => findScalarPos(…), … }) |delim_start| … else …`). `switch` is not
+      # in FIRST(Expr), so after `if (` it is a clean shift; the record is the same.
+      - { lhs: IfExpr, rhs: ['if', '(', SwitchExpr, ')', '|', IDENT, '|', RhsExpr, 'else', RhsExpr], action: ifExprCapture }
       - { lhs: SwitchExpr, rhs: ['switch', '(', Expr, ')', '{', Prongs, '}'],      action: switchExpr }
       # `switch (if (from < 0) @max(…) else to) { … }` (std.math.IntFittingRange): a value `if` as the subject.
       # `if` is not in FIRST(Expr), so after `switch (` it is a clean shift; the record is the same.
@@ -1476,6 +1483,10 @@ productions:
       # The default is a value-position RhsExpr, so an `if` may choose it (debug.zig's SafetyLock:
       # `state: State = if (runtime_safety) .unlocked else .unknown,`); `,` / `}` still end it.
       - { lhs: FieldDecl, rhs: [IDENT, ':', AType, '=', RhsExpr], action: structFieldDefault }
+      # A field whose TYPE is a comptime `switch` (std.mem.SplitIterator's
+      # `delimiter: switch (delimiter_type) { .sequence, .any => []const T, .scalar => T },`). `switch` is
+      # not in FIRST(AType), so after `IDENT :` it is a 1-token shift.
+      - { lhs: FieldDecl, rhs: [IDENT, ':', SwitchExpr], action: structFieldSwitch }
 
   # Enum body as a MEMBER list (right-recursive over EnumMember, like struct's FieldDecls) — so
   # value members, methods (`fn`/`pub fn`), and consts (`const Self = @This();`) interleave. The

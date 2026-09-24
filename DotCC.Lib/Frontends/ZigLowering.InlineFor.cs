@@ -172,7 +172,10 @@ internal sealed partial class ZigLowering
             var shadows = new List<ComptimeCaptureShadow>(binds.Count);
             foreach (var (list, capture) in binds) { shadows.Add(SeedComptimeCapture(capture, list, k)); }
             _symbols.EnterScope();
-            var body = LowerStmt(bodyItem);
+            _inlineUnrollDepth++;   // a copy is analysed with its capture comptime-known
+            CStmt body;
+            try { body = LowerStmt(bodyItem); }
+            finally { _inlineUnrollDepth--; }
             _symbols.ExitScope();
             // Restore innermost-first, so two captures sharing a name (`|x, x|`, which zig rejects but
             // which must not corrupt the maps here) unwind in the order they were seeded.

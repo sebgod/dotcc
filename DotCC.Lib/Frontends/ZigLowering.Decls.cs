@@ -534,6 +534,9 @@ internal sealed partial class ZigLowering
                 case Zig.StructField f:          // FieldDecl -> IDENT ':' Type
                     fields.Add(PackedAwareField(Tok(f.Arg0), f.Arg2, layout));
                     break;
+                case Zig.StructFieldSwitch f:    // FieldDecl -> IDENT ':' SwitchExpr (a comptime-selected type)
+                    fields.Add(new StructField(Tok(f.Arg0), LowerSwitchType(f.Arg2)));
+                    break;
                 case Zig.StructFieldDefault f:   // FieldDecl -> IDENT ':' Type '=' RhsExpr
                     var fname = Tok(f.Arg0);
                     fields.Add(PackedAwareField(fname, f.Arg2, layout));
@@ -544,6 +547,27 @@ internal sealed partial class ZigLowering
             }
         }
         _ir.RegisterStructType(name, fields, isUnion: false, layout);
+    }
+
+    /// <summary>The TYPE a comptime <c>switch</c> selects (std.mem.SplitIterator's
+    /// <c>delimiter: switch (delimiter_type) { .sequence, .any =&gt; []const T, .scalar =&gt; T }</c>): the subject must be
+    /// comptime-known, and the selected prong's value is lowered as a type.</summary>
+    private CType LowerSwitchType(Item switchItem)
+    {
+        var (subject, prongs) = switchItem.Content switch
+        {
+            Zig.SwitchExpr s => (s.Arg2, s.Arg5),
+            Zig.SwitchExprTrailing s => (s.Arg2, s.Arg5),
+            _ => throw new IrUnsupportedException("zig: a switch type expected; got " + (switchItem.Content?.GetType().Name ?? "null")),
+        };
+        if (SelectComptimeProng(subject, prongs, out var payload) is not { Expr: { } typeItem } prong)
+        {
+            throw new IrUnsupportedException(
+                "zig: a type spelled as a `switch` needs a comptime-known subject and a prong that names a type");
+        }
+        EnterComptimeProng(prong, payload);
+        try { return LowerType(typeItem); }
+        finally { ExitComptimeProng(); }
     }
 
     /// <summary>A struct field, as a BIT-field in a <c>packed struct</c> when its integer type is declared narrower than
@@ -572,7 +596,8 @@ internal sealed partial class ZigLowering
     /// <c>Context</c> with <c>lessThan</c> / <c>swap</c>) are declared under the mangled name, their bodies
     /// deferred like a reified generic's (a body cannot lower inside the one being lowered) and carrying the
     /// enclosing generic instance's comptime seeds. A nested container member stays a loud cut.</summary>
-    private CStmt LowerLocalStruct(string name, Item? membersItem, AggregateLayout layout)
+    private CStmt LowerLocalStruct(string name, Item? membersItem, AggregateLayout layout,
+        IReadOnlyList<(string name, long value, CType type)>? extraValueSeeds = null)
     {
         var (fields, methods, consts, containers) = membersItem is { } m
             ? SplitMembers(m)
@@ -598,7 +623,9 @@ internal sealed partial class ZigLowering
         {
             var inst = _currentInstantiation;
             var typeSeeds = inst?.TypeSeeds ?? System.Array.Empty<TypeSeed>();
-            var valueSeeds = inst?.ValueSeeds ?? System.Array.Empty<(string, long, CType)>();
+            // A comptime-selected struct's capture (`|vec_size|`) is one more value seed of the struct's members.
+            IReadOnlyList<(string, long, CType)> valueSeeds = [.. inst?.ValueSeeds ?? System.Array.Empty<(string, long, CType)>(),
+                                                               .. extraValueSeeds ?? System.Array.Empty<(string, long, CType)>()];
             var optionalSeeds = inst?.OptionalSeeds ?? System.Array.Empty<(string, bool, long, CType)>();
             _reifiedSeeds[mangled] = (typeSeeds, valueSeeds, optionalSeeds);
             // The mangled name is the container a method's `@This()` / `Self` resolves to (the plain name is only
@@ -1125,7 +1152,12 @@ internal sealed partial class ZigLowering
             {
                 var e = LowerExpr(pos.Arg0);
                 elems.Add(e);
-                types.Add(e.Type);
+                // A string literal element is zig's `*const [N:0]u8`: the element type counts the
+                // N bytes and not the sentinel NUL the lowered LitStr carries, so a later slice
+                // coercion of the field (`{s}` in std.fmt) gets zig's `.len`.
+                types.Add(IsStringLiteralValue(e) && e.Type.Unqualified is CType.Array { Count: > 0 and var n } lit
+                    ? lit with { Count = n - 1 }
+                    : e.Type);
             }
         }
         var tt = sink ?? new CType.Tuple(types);
@@ -1560,7 +1592,19 @@ internal sealed partial class ZigLowering
             // (`@intCast`/`@ptrCast`/…) infer their target from `sink`. Routed through the
             // shared lowering WITH the sink (vs LowerExpr's sink-free call).
             case Zig.BuiltinCall b:
-                return LowerBuiltinCall(b, sink);
+            {
+                var builtinValue = LowerBuiltinCall(b, sink);
+                // `@as(*const [1]u8, &c)` at a `[]const u8` parameter (std.Io.Writer.printAsciiChar): a pointer to an
+                // array coerces to a slice of it, as the ordinary path below does. So does an array value
+                // (`@field(args, "0")` of a tuple holding a string literal, whose element type drops the NUL).
+                if (sink?.Unqualified is CType.Slice builtinSlice
+                    && (builtinValue.Type?.Unqualified is CType.Array
+                        || builtinValue.Type?.Unqualified is CType.Pointer && PointedArray(builtinValue) is ({ }, _)))
+                {
+                    return CoerceToSlice(builtinValue, builtinSlice);
+                }
+                return builtinValue;
+            }
             // A switch EXPRESSION at a typed sink (`const x: T = switch (y) { … }`) — each arm's
             // value lowers at `sink`, so a result-located arm (`.member` / `.{…}` / a cast) resolves.
             // An if-EXPRESSION carries the sink into both arms, so `if (c) .a else .b` resolves each enum
@@ -1632,13 +1676,13 @@ internal sealed partial class ZigLowering
                 // Array / string-literal → slice coercion at a `[]T` / `[]const T` sink (Zig's
                 // implicit `*[N]T` → `[]T` and string-literal `*const [N:0]u8` → `[]const u8`).
                 // A value already of slice type passes through (e.g. forwarding a `[]const u8`).
-                if (sink?.Unqualified is CType.Slice slc && lowered.Type.Unqualified is not CType.Slice)
+                if (sink?.Unqualified is CType.Slice slc && lowered.Type?.Unqualified is not CType.Slice)
                 {
                     return CoerceToSlice(lowered, slc);
                 }
                 // A plain value at an ERROR-UNION sink (`fn unwrap(v: anyerror!u8)` called as `unwrap(5)`) is its
                 // success variant, as zig coerces it; an error union or an error code passes as it is.
-                if (sink?.Unqualified is CType.ErrorUnion okSink && lowered.Type.Unqualified is not (CType.ErrorUnion or CType.ErrorSetType))
+                if (sink?.Unqualified is CType.ErrorUnion okSink && lowered.Type?.Unqualified is not (CType.ErrorUnion or CType.ErrorSetType))
                 {
                     return new ErrUnionOk(lowered) { Type = okSink };
                 }
@@ -1788,9 +1832,35 @@ internal sealed partial class ZigLowering
                 var abLen = new LitInt(abSize.ToString(CultureInfo.InvariantCulture), abSize) { Type = CType.ULong };
                 return new SliceNew(abBytes, abLen, CType.UChar, abElem.IsConst) { Type = new CType.Slice(abElem) };
             }
+            case "sliceAsBytes":
+            {
+                // std.mem.sliceAsBytes(slice) — the same memory as a byte slice, `len * @sizeOf(T)` long (std.mem.indexOf /
+                // eql's haystack and needle). Curated for the same reason as asBytes: its source return type is built
+                // by `CopyPtrAttrs` through `@Pointer(size, attrs, child, null)`, which dotcc does not model.
+                if (argItems.Count != 1)
+                {
+                    throw new IrUnsupportedException($"zig `std.mem.sliceAsBytes` expects (slice); got {argItems.Count} argument(s)");
+                }
+                var sbSlice = LowerExpr(argItems[0]);
+                if (sbSlice.Type.Unqualified is not CType.Slice { Element: var sbElemType })
+                {
+                    throw new IrUnsupportedException($"zig `std.mem.sliceAsBytes` expects a slice, got {sbSlice.Type.Describe()}");
+                }
+                var sbByte = sbElemType.IsConst ? CType.UChar.WithQuals(TypeQual.Const) : CType.UChar;
+                var sbPtr = new Cast(new CType.Pointer(sbByte), new Member(sbSlice, "Ptr", false) { Type = new CType.Pointer(sbElemType) })
+                {
+                    Type = new CType.Pointer(sbByte),
+                };
+                CExpr sbLen = new Member(sbSlice, "Len", false) { Type = CType.ULong };
+                if (sbElemType.Unqualified.SizeOf != 1)
+                {
+                    sbLen = new Binary(BinOp.Mul, sbLen, new SizeOfExpr(sbElemType.Unqualified) { Type = CType.ULong }) { Type = CType.ULong };
+                }
+                return new SliceNew(sbPtr, sbLen, CType.UChar, sbByte.IsConst) { Type = new CType.Slice(sbByte) };
+            }
             default:
                 throw new IrUnsupportedException(
-                    $"zig `std.mem.{methodName}` is not modeled yet (supported: eql, copyForwards, span, zeroes, asBytes)");
+                    $"zig `std.mem.{methodName}` is not modeled yet (supported: eql, copyForwards, span, zeroes, asBytes, sliceAsBytes)");
         }
     }
 

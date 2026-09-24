@@ -788,7 +788,7 @@ internal sealed partial class ZigLowering
     /// source navigation (road-to-zig-std G2, the curated-first rule applied per member).</summary>
     private static readonly Dictionary<string, HashSet<string>> CuratedStdNamespaceFns = new(System.StringComparer.Ordinal)
     {
-        ["std.mem"] = new(System.StringComparer.Ordinal) { "eql", "copyForwards", "span", "zeroes", "asBytes" },
+        ["std.mem"] = new(System.StringComparer.Ordinal) { "eql", "copyForwards", "span", "zeroes", "asBytes", "sliceAsBytes" },
         ["std.debug"] = new(System.StringComparer.Ordinal) { "print" },
         ["std.testing"] = new(System.StringComparer.Ordinal)
             { "expect", "expectEqual", "expectError", "expectEqualStrings", "expectEqualSlices" },

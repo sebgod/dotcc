@@ -159,7 +159,14 @@ internal sealed partial class ZigLowering
         ?? (_moduleAliasPaths.TryGetValue(name, out var aliased) ? ResolveModulePath(aliased)
             : _declAliases.TryGetValue(name, out var reexport) && reexport.Content is Zig.Ident or Zig.Field
                 ? ResolveModulePath(reexport)
-                : null);
+                : IsSelfModuleAlias(name) ? _module : null);
+
+    /// <summary>A top-level <c>const NAME = @This();</c> (std's <c>const mem = @This();</c>): inside a file, <c>@This()</c> is
+    /// the file's own struct, so the name aliases this module (<c>mem.eql(…)</c> calls its own <c>eql</c>).</summary>
+    private bool IsSelfModuleAlias(string name) =>
+        _lazyValueConsts.TryGetValue(name, out var vc) && vc.typeItem is null
+        && vc.rhs.Content is Zig.BuiltinCallNoArgs { Arg0: var thisTok } && Tok(thisTok) == "@This"
+        && _symbols.Resolve(name) is null or { IsGlobal: true };
 
     /// <summary>Resolve an inline <c>@import("spec")</c> (see <see cref="ResolveModulePath"/>) through the
     /// ordinary import table, under the synthetic name <c>@import:spec</c>.</summary>
@@ -784,6 +791,14 @@ internal sealed partial class ZigLowering
     /// <summary>The imported module this lowering prepared (null for a root unit, which is parsed
     /// strictly, so it never has a skipped declaration).</summary>
     private ZigModule? _module;
+
+    /// <summary>Whether this module is the std file <paramref name="fileName"/> (directly under the std root), so a
+    /// curated std function called BARE inside it lowers like the qualified call from outside.</summary>
+    private bool IsStdModule(string fileName) =>
+        _module?.Path is { } path && _moduleGraph?.StdRootPath is { } stdRoot
+        && string.Equals(System.IO.Path.GetFullPath(path),
+                         System.IO.Path.GetFullPath(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(stdRoot) ?? "", fileName)),
+                         System.StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Raise the real wall when <paramref name="name"/> is a top-level declaration of this
     /// module that the resilient parse skipped: "did not parse", with the parse error, instead of the
