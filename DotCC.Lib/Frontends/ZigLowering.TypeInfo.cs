@@ -221,6 +221,7 @@ internal sealed partial class ZigLowering
         Zig.Field f when Tok(f.Arg2) == "len" => 64,
         Zig.Index ix => DeclaredElemBitsOfValue(ix.Arg0),
         Zig.BuiltinCall bc when Tok(bc.Arg0) == "@as" && Flatten(bc.Arg2) is { Count: 2 } asArgs => DeclaredBitsOfTypeArg(asArgs[0]),
+        Zig.BuiltinCall fb when Tok(fb.Arg0) == "@intFromBool" => 1,   // a `u1`
         // Negation / complement / `try` keep their operand's type (zig has no C integer promotion).
         Zig.PreNeg n => DeclaredBitsOfValue(n.Arg1),
         Zig.PreBitNot n => DeclaredBitsOfValue(n.Arg1),

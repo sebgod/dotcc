@@ -861,6 +861,27 @@ public sealed class ZigStdHelperShapesTests
         cs.ShouldContain("_5_step(&m);");
     }
 
+    [Theory]
+    [InlineData("const m = ~@as(u64, 0) >> 88; return @truncate(m);", "type 'u6' cannot represent integer value '88'")]
+    [InlineData("var b = true; _ = &b; return @intFromBool(b) * 10;", "type 'u1' cannot represent integer value '10'")]
+    [InlineData("var x: u8 = 3; _ = &x; return x + 300;", "type 'u8' cannot represent integer value '300'")]
+    [InlineData("var x: i8 = -3; _ = &x; return @bitCast(x - 128);", "type 'i8' cannot represent integer value '128'")]
+    public void A_comptime_operand_its_type_cannot_hold_is_rejected_as_zig_does(string body, string message)
+    {
+        // Task #91: a shift amount outside `Log2Int` of the shifted operand, and an integer literal outside its typed peer's
+        // range, are zig compile errors (the messages are zig's own); dotcc had lowered both silently.
+        Should.Throw<CompileException>(() => EmitZig("pub fn main() u8 {\n    " + body + "\n}\n")).Message.ShouldContain(message);
+    }
+
+    [Theory]
+    [InlineData("var x: u64 = 3; _ = &x; return @truncate(x >> 63);")]
+    [InlineData("const k = 1 << 40; return @truncate(k >> 33);")]
+    [InlineData("var b = true; _ = &b; return @as(u8, @intFromBool(b)) * 10;")]
+    public void A_comptime_operand_that_fits_or_is_comptime_int_is_accepted(string body)
+    {
+        Should.NotThrow(() => EmitZig("pub fn main() u8 {\n    " + body + "\n}\n"));
+    }
+
     [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {

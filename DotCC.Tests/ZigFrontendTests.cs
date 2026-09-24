@@ -6300,7 +6300,7 @@ public sealed class ZigFrontendTests
         // It is a description, not a library: nothing in it should reach the emitted program.
         var cs = EmitZig(
             "const builtin = @import(\"builtin\");\n" +
-            "pub fn main() u8 { return @intCast(@intFromBool(builtin.link_libc) * 42); }\n");
+            "pub fn main() u8 { return @intCast(@as(u8, @intFromBool(builtin.link_libc)) * 42); }\n");
         UserCode(cs).ShouldNotContain("link_libc");
         UserCode(cs).ShouldNotContain("zig_backend");
         UserCode(cs).ShouldNotContain("stage2_llvm");

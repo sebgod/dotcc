@@ -2377,6 +2377,7 @@ internal sealed partial class ZigLowering
         // pointer operand — so handle the pointer cases here, mirroring the C frontend's
         // `IrBuilder.BinaryType`. (Zig fixed arrays are values and don't decay in arithmetic, so
         // only `CType.Pointer` participates; you slice an array before pointer-walking it.)
+        RejectUnrepresentableComptimeOperand(op, l, r, left, right);
         var lPtr = left.Type.Unqualified is CType.Pointer;
         var rPtr = right.Type.Unqualified is CType.Pointer;
         var type = op switch
@@ -2389,6 +2390,61 @@ internal sealed partial class ZigLowering
             _ => CType.UsualArithmetic(left.Type, right.Type),
         };
         return new Binary(op, left, right) { Type = type };
+    }
+
+    /// <summary>Reject, as zig does, a comptime-known operand its operator's type cannot hold (task #91): a literal shift
+    /// amount that does not fit <c>Log2Int</c> of the shifted operand (<c>~@as(u64, 0) &gt;&gt; 88</c>: "type 'u6' cannot represent
+    /// integer value '88'"), and an integer literal outside the range of its typed peer (<c>@intFromBool(b) * 10</c>: "type
+    /// 'u1' cannot represent integer value '10'"). Only a width dotcc knows from the source is checked, so a comptime_int
+    /// operand (unbounded) is never rejected.</summary>
+    private void RejectUnrepresentableComptimeOperand(BinOp op, Item l, Item r, CExpr left, CExpr right)
+    {
+        if (op is BinOp.Shl or BinOp.Shr)
+        {
+            // Only a LITERAL amount is checked: a typed one (std.math.rotl's `1 +% ~ar`, `ar: Log2Int(T)`) fits by
+            // construction, and dotcc folds its constant at the carrier's width rather than the declared one.
+            var amountItem = r;
+            while (amountItem.Content is Zig.Grouped ga) { amountItem = ga.Arg1; }
+            if (left.Type.Unqualified is not CType.Prim { Integer: true, IsComptimeInt: false } shifted
+                || amountItem.Content is not Zig.IntLit
+                || _ir.ConstEval(right) is not { } amount)
+            {
+                return;
+            }
+            // A literal / comptime-known left side is comptime_int unless the source spells its width (`@as(u64, 0)`).
+            var bits = DeclaredBitsOfValue(l) ?? (_ir.ConstEval(left) is null ? DeclaredBitsOfLowered(left) ?? shifted.Bytes * 8 : null);
+            if (bits is not { } width || width <= 0) { return; }
+            var log2 = width <= 1 ? 0 : 64 - System.Numerics.BitOperations.LeadingZeroCount((ulong)(width - 1));
+            if (amount < 0 || amount >= width)
+            {
+                throw new CompileException(
+                    $"zig: type 'u{log2}' cannot represent integer value '{amount}' (a shift of a {width}-bit operand takes an amount below {width})");
+            }
+            return;
+        }
+        if (op is not (BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.Div or BinOp.Mod or BinOp.BitAnd or BinOp.BitOr or BinOp.BitXor))
+        {
+            return;
+        }
+        foreach (var (literalItem, literal, peerItem, peer) in new[] { (r, right, l, left), (l, left, r, right) })
+        {
+            if (literalItem.Content is not Zig.IntLit || _ir.ConstEval128(literal) is not { } value
+                || peer.Type.Unqualified is not CType.Prim { Integer: true, IsComptimeInt: false } peerPrim
+                || DeclaredBitsOfValue(peerItem) is not { } peerBits || peerBits is <= 0 or > 64)
+            {
+                continue;
+            }
+            // `@intFromBool` is a `u1`, whatever carrier it lowers to.
+            var signed = peerPrim.Signed && !(peerItem.Content is Zig.BuiltinCall { Arg0: var peerTok } && Tok(peerTok) == "@intFromBool");
+            var (min, max) = signed
+                ? (-(System.Int128.One << (peerBits - 1)), (System.Int128.One << (peerBits - 1)) - 1)
+                : (System.Int128.Zero, (System.Int128.One << peerBits) - 1);
+            if (value < min || value > max)
+            {
+                throw new CompileException(
+                    $"zig: type '{(signed ? "i" : "u")}{peerBits}' cannot represent integer value '{value}'");
+            }
+        }
     }
 
     /// <summary>Lower a Zig WRAPPING arithmetic operator (<c>+%</c>/<c>-%</c>/<c>*%</c>) —
