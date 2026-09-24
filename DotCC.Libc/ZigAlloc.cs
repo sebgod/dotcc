@@ -333,6 +333,20 @@ public static unsafe class ZigAlloc
     /// <see cref="Libc.free"/>.</summary>
     public static void FreeCHeap<T>(Slice<T> s) where T : unmanaged => Libc.free(s.Ptr);
 
+    /// <summary><c>allocator.dupe(T, m)</c>: allocate <c>m.len</c> elements through <paramref name="a"/> and copy
+    /// <paramref name="src"/> into them. Returns the copy, or the error code <paramref name="oom"/> when the
+    /// allocation fails.</summary>
+    public static ErrUnion<Slice<T>> Dupe<T>(Allocator a, ConstSlice<T> src, ushort oom) where T : unmanaged
+    {
+        var fresh = a.Alloc<T>(src.Len, oom);
+        if (!fresh.IsErr && src.Len > 0)
+        {
+            ulong bytes = src.Len * (ulong)sizeof(T);
+            Buffer.MemoryCopy(src.Ptr, fresh.Value.Ptr, bytes, bytes);
+        }
+        return fresh;
+    }
+
     /// <summary>The <b>devirtualized</b> <c>page_allocator.create(T)</c> — a direct
     /// <see cref="Libc.malloc"/> of <c>sizeof(T)</c> bytes, no vtable. The address is carried as a
     /// <c>nuint</c> (see <see cref="Allocator.Create{T}"/> for why).</summary>

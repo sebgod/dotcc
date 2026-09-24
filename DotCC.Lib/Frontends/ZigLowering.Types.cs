@@ -221,6 +221,14 @@ internal sealed partial class ZigLowering
     /// (a value) is NOT misread as an alias and falls through to a normal const.</item>
     /// </list>
     /// Returns false for any non-type RHS (→ an ordinary value const / global).</summary>
+    /// <summary>The type a <c>switch</c> over a TYPE subject selects (see <see cref="TrySelectTypeProng"/>), when the
+    /// selected prong is an uncaptured type expression; false for anything else, so a value switch stays a value.</summary>
+    private bool TrySelectedTypeArm(Item subject, Item prongs, out CType type)
+    {
+        type = CType.Int;
+        return TrySelectTypeProng(subject, prongs) is { Expr: { } typeArm, CaptureName: null } && TryTypeAliasRhs(typeArm, out type);
+    }
+
     private bool TryTypeAliasRhs(Item rhs, out CType type)
     {
         switch (rhs.Content)
@@ -235,6 +243,15 @@ internal sealed partial class ZigLowering
             // type to name, so the binding falls through unchanged.
             case Zig.BuiltinCallNoArgs tb when Tok(tb.Arg0) == "@This" && (_currentContainer ?? _fileContainer) is not null:
                 type = CurrentContainerType();
+                return true;
+
+            // `const M = switch (T) { f16, f32, f64 => u64, f80, f128 => u128, else => unreachable };` in a function
+            // body (std.fmt.parse_float's mantissaType, inlined): a switch over a TYPE whose selected prong names a type.
+            case Zig.SwitchExpr se when TrySelectedTypeArm(se.Arg2, se.Arg5, out var armType):
+                type = armType;
+                return true;
+            case Zig.SwitchExprTrailing st when TrySelectedTypeArm(st.Arg2, st.Arg5, out var trailingArmType):
+                type = trailingArmType;
                 return true;
 
             // `@TypeOf(expr)` — the operand's synthesized type, unevaluated.
@@ -379,20 +396,39 @@ internal sealed partial class ZigLowering
     private CType TypeOfBuiltin(Item argList)
     {
         var args = Flatten(argList);
-        if (args.Count != 1)
+        if (args.Count == 0)
         {
-            throw new IrUnsupportedException($"zig `@TypeOf` takes exactly one operand; got {args.Count}");
+            throw new IrUnsupportedException("zig `@TypeOf` takes at least one operand");
         }
+        if (args.Count == 1) { return TypeOfOperand(args[0]).Type; }
+        // `@TypeOf(val, lower, upper)` (std.math.clamp): the PEER type of the operands. A comptime_int operand
+        // (an untyped literal) yields to a fixed-width one; among fixed-width integers the widest wins.
+        CType? peer = null;
+        foreach (var arg in args)
+        {
+            var (t, comptimeInt) = TypeOfOperand(arg);
+            if (comptimeInt) { continue; }
+            peer = peer is null || t.Unqualified.SizeOf > peer.Unqualified.SizeOf ? t : peer;
+        }
+        return peer ?? CType.ComptimeInt;
+    }
+
+    /// <summary>One <c>@TypeOf</c> operand's type, and whether it is a <c>comptime_int</c> (an untyped integer
+    /// literal, or a value of <see cref="CType.ComptimeInt"/>), which yields to a fixed-width peer.</summary>
+    private (CType Type, bool ComptimeInt) TypeOfOperand(Item arg)
+    {
         // `@TypeOf(anytypeParam)` while lowering an `anytype` generic's per-instance signature (wall-plan
         // W5): return the param's inferred concrete type directly — it is seeded at the call site but is
         // not yet an in-scope symbol, so the LowerExpr path below would fail to resolve it.
-        if (args[0].Content is Zig.Ident aid && _anytypeSeeds.TryGetValue(Tok(aid.Arg0), out var seeded))
+        if (arg.Content is Zig.Ident aid && _anytypeSeeds.TryGetValue(Tok(aid.Arg0), out var seeded))
         {
-            return seeded;
+            return (seeded, seeded.Unqualified is CType.Prim { IsComptimeInt: true });
         }
         using var _ = EnterThrowawayHoist();   // @TypeOf's operand is unevaluated
-        return LowerExpr(args[0]).Type
+        var lowered = LowerExpr(arg);
+        var type = lowered.Type
             ?? throw new IrUnsupportedException("zig `@TypeOf`: the operand has no statically known type");
+        return (type, arg.Content is Zig.IntLit || type.Unqualified is CType.Prim { IsComptimeInt: true });
     }
 
     /// <summary>Walk an <c>error{ A, B, … }</c> member list (the right-recursive <c>ErrSetList</c>)

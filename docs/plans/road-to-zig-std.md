@@ -933,6 +933,14 @@ vector length feeds TYPES.
   and `&root.helper` (oracle `root_self_alias`, 60 == zig). The root unit gets a synthetic module over its own
   lowering, so every module-qualified path serves it; and a module's top-level function is now a value through
   any module path (`const f = util.helper;`), which failed through a real import too.
+- **std's small helpers RUN from real std, == zig (2026-09-24, tasks #57 to #59)**: trim, lastIndexOfScalar, count,
+  replaceScalar, reverse, math.clamp, mem.min / max, mem.join, StringHashMap, sort.insertion, eqlIgnoreCase, a padded
+  bufPrint, readInt, splitSequence and tokenizeAny in one differential (230 == zig). Needed: `@TypeOf` over several
+  operands, empty array literals, a curated `dupe`, mem.zig's `Allocator` mapped to the curated type, an array at a
+  `![]T` return, and a pure `stackalloc` hoisted out of a ternary arm. std.fmt.parseFloat is a campaign of its own: six
+  walls down (type switches and comparisons over unlowered floats, a switch-typed local, field-value `if` / `switch`,
+  `&.{…}` comptime strings, `inline for` over a comptime string, `if (c) return x else y`); next is `MantissaT` passed
+  as a type argument (`tryParseDigits(MantissaT, …)`).
 - **T5 ✅ (2026-09-24)** `@Vector(N, T)` lowers to .NET's `Vector64/128/256/512<T>` by total width (a bool vector,
   what a comparison yields, is a `ulong` lane mask), and real `std.mem.indexOfScalar` runs from source through its
   SIMD path, == zig. Vector surface: `@splat`, an array / slice / `slice[i..][0..N].*` loaded at a vector sink, a list

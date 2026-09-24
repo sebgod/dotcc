@@ -1293,6 +1293,15 @@ internal sealed partial class ZigLowering
                     new[] { (cli, Tok(ci.Arg8)), (IndexList(cli.Count), Tok(ci.Arg10)) }, ci.Arg12);
             }
 
+            // `inline for (cs) |c|` over a comptime STRING (std.fmt.parse_float's FloatStream.firstIsLower, a
+            // `comptime cs: []const u8` seed): one copy per byte, the capture bound to that byte as a literal.
+            case Zig.StmtForSlice ss when EvalComptimeValue(ss.Arg2) is LitStr csv:
+            {
+                var bytes = DotCC.EmitHelpers.StringByteValues(csv.Segments).ToList();
+                return UnrollInlineFor(bytes.Count, Tok(ss.Arg5), CType.UChar, ss.Arg7,
+                    k => new LitInt(((int)bytes[(int)k]).ToString(System.Globalization.CultureInfo.InvariantCulture), bytes[(int)k]) { Type = CType.Int });   // an int constant narrows to the u8 capture
+            }
+
             // `inline for (arr) |x|` — over a fixed array of comptime-known length. The operand must be
             // a named array variable (so each element read `arr[k]` is side-effect-free across copies);
             // the capture binds to the element by value.
@@ -2121,6 +2130,10 @@ internal sealed partial class ZigLowering
         {
             return Tok(((Zig.Ident)left.Content).Arg0) == "comptime_int" && rightType.Unqualified is CType.Prim { IsComptimeInt: true };
         }
+        // A zig float dotcc does not lower (`T == f16 or T == f32 or T == f64` in std.fmt.parseFloat) is never equal to
+        // a type that does.
+        if (IsUnmodeledPrimitiveType(right) && TryTypeAliasRhs(left, out _)) { return false; }
+        if (IsUnmodeledPrimitiveType(left) && TryTypeAliasRhs(right, out _)) { return false; }
         if (!TryTypeAliasRhs(left, out var lt)) { return null; }
         var lb = DeclaredBitsOfTypeArg(left);
         if (!TryTypeAliasRhs(right, out var rt)) { return null; }
@@ -2132,6 +2145,11 @@ internal sealed partial class ZigLowering
     /// compile-time number types, which dotcc never binds a type parameter to.</summary>
     private static bool IsComptimeNumberTypeName(Item item)
         => item.Content is Zig.Ident id && Tok(id.Arg0) is "comptime_int" or "comptime_float";
+
+    /// <summary>True for a zig primitive type name dotcc does not lower (<c>f16</c>, <c>f80</c>, <c>f128</c>,
+    /// <c>c_longdouble</c>): a comparison against one still answers, since no lowered type is it.</summary>
+    private static bool IsUnmodeledPrimitiveType(Item item)
+        => item.Content is Zig.Ident id && Tok(id.Arg0) is "f16" or "f80" or "f128" or "c_longdouble";
 
     private CStmt LowerIfCapture(Item condItem, string capName, Item thenItem, Item? elseItem, string? errCapName)
     {
@@ -3933,9 +3951,17 @@ internal sealed partial class ZigLowering
                     || valueItem.Content is Zig.BuiltinCall { Arg0: var castTok }
                        && Tok(castTok) is "@intCast" or "@truncate" or "@ptrCast" or "@bitCast" or "@floatCast"
                           or "@intFromFloat" or "@floatFromInt" or "@enumFromInt" or "@alignCast"
+                    // A value `if` at a slice payload (std.mem.join's `return if (zero) try allocator.dupe(…) else
+                    // &[0]u8{};`): each arm coerces to the slice.
+                    || valueItem.Content is Zig.IfExpr && eu.Payload.Unqualified is CType.Slice
                 ? LowerExprSink(valueItem, eu.Payload)
                 : LowerExpr(valueItem);
             if (v.Type.Unqualified is CType.ErrorUnion) { return new Return(v); }
+            // An array (`return &[0]u8{};`) at a slice payload is that slice.
+            if (eu.Payload.Unqualified is CType.Slice okSlice && (v.Type.Unqualified is CType.Array || PointedArray(v) is ({ }, _)))
+            {
+                v = CoerceToSlice(v, okSlice);
+            }
             // `return e;` where `e` is an error VALUE (a `catch |e|` / `else => |e|` capture) — an ERROR
             // return of that runtime code, not a success wrapping it as the payload. (Unless the payload
             // type IS an error set — `!anyerror`, where returning one as a value is a success; zig types
@@ -4263,6 +4289,24 @@ internal sealed partial class ZigLowering
         var stmt = lower();
         if (_hoist is not { Count: > 0 } hoisted) { return stmt; }
         return new Seq(new List<CStmt>(hoisted) { stmt });
+    }
+
+    /// <summary>A value <c>if (c) return v else w</c> (std.fmt.parse_float's FloatStream.first): the then arm leaves the
+    /// function, so the statement hoists <c>if (c) return v;</c> ahead of itself and the expression is <c>w</c>. The
+    /// condition is evaluated exactly once, before the rest of the statement, as zig does; a comptime-false one
+    /// drops the return.</summary>
+    private CExpr LowerIfReturnThen(Item condItem, Item returnedItem, Item elseItem, CType? sink)
+    {
+        if (TryFoldComptimeCondition(condItem) is false)
+        {
+            return sink is null ? LowerExpr(elseItem) : LowerExprSink(elseItem, sink);
+        }
+        var savedImpure = _hoistImpureSeen;
+        var cond = LowerExpr(condItem);
+        var early = Hoisted(() => LowerReturn(returnedItem));
+        _hoistImpureSeen = savedImpure;
+        RequireHoistable("zig value `if (c) return x else y`").Add(new If(cond, early, null));
+        return sink is null ? LowerExpr(elseItem) : LowerExprSink(elseItem, sink);
     }
 
     /// <summary>Guard + finish a sub-expression hoist: reject when not in a hoistable position

@@ -4252,6 +4252,72 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{d} {d} {d}\\n\", .{ via_type, twice(f, 1), total });\n" +
             "}\n", 0,
             "7 3 60" },
+        // std's small helpers' shapes (road-to-zig-std, tasks #57 to #59): @TypeOf over several operands, a local
+        // `switch (T)` over floats dotcc does not lower, a value switch / if as a field value, `&.{ i.base + 'a' }` as a
+        // comptime string unrolled by `inline for`, `if (c) return x else y`, dupe and `&[0]u8{}` at a `![]u8` return.
+        new object[] { "std_helper_shapes",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "fn clampLike(val: anytype, lower: anytype, upper: anytype) @TypeOf(val, lower, upper) {\n" +
+            "    return @max(lower, @min(val, upper));\n" +
+            "}\n" +
+            "\n" +
+            "fn mantissaSize(comptime T: type) usize {\n" +
+            "    const M = switch (T) {\n" +
+            "        f16, f32, f64 => u64,\n" +
+            "        f80, f128 => u128,\n" +
+            "        else => unreachable,\n" +
+            "    };\n" +
+            "    if (T == f16 or T == f32 or T == f64) {\n" +
+            "        return @sizeOf(M);\n" +
+            "    }\n" +
+            "    return 1;\n" +
+            "}\n" +
+            "\n" +
+            "const Info = struct { base: u8, max: u8 };\n" +
+            "\n" +
+            "fn info(comptime T: type) Info {\n" +
+            "    return .{ .base = switch (T) {\n" +
+            "        u64 => 10,\n" +
+            "        else => 16,\n" +
+            "    }, .max = if (T == u64) 19 else 38 };\n" +
+            "}\n" +
+            "\n" +
+            "fn hasAny(s: []const u8, comptime cs: []const u8) bool {\n" +
+            "    for (s) |c| {\n" +
+            "        inline for (cs) |d| if (c == d) return true;\n" +
+            "    }\n" +
+            "    return false;\n" +
+            "}\n" +
+            "\n" +
+            "fn hasSep(s: []const u8, comptime i: Info) bool {\n" +
+            "    return hasAny(s, &.{i.base + 'a'});\n" +
+            "}\n" +
+            "\n" +
+            "fn firstOrNull(s: []const u8) ?u8 {\n" +
+            "    return if (s.len > 0) return s[0] else null;\n" +
+            "}\n" +
+            "\n" +
+            "fn dupeOrEmpty(a: std.mem.Allocator, z: bool) ![]u8 {\n" +
+            "    return if (z) try a.dupe(u8, &[1]u8{7}) else &[0]u8{};\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() !u8 {\n" +
+            "    const a = std.heap.page_allocator;\n" +
+            "    const d = try dupeOrEmpty(a, true);\n" +
+            "    defer a.free(d);\n" +
+            "    const e = try dupeOrEmpty(a, false);\n" +
+            "    const none = [_]u8{};\n" +
+            "    const i = comptime info(u64);\n" +
+            "    const c: u16 = clampLike(@as(u16, 300), 1, 250);\n" +
+            "    var total: usize = c - 200;\n" +
+            "    total += mantissaSize(f64) + i.base + i.max + d[0] + e.len + none.len;\n" +
+            "    total += @intFromBool(hasSep(\"xk\", i)) + @intFromBool(hasSep(\"xy\", i));\n" +
+            "    total += (firstOrNull(\"A\") orelse 0) - 'A' + 1;\n" +
+            "    const missing: usize = if (firstOrNull(\"\")) |_| 100 else 2;\n" +
+            "    total += missing;\n" +
+            "    return @intCast(total);\n" +
+            "}\n", 98, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -5418,6 +5484,61 @@ public sealed class ZigOracleTests
             "    const ew: u32 = if (std.mem.endsWith(u8, text, \",end\")) 1 else 0;\n" +
             "    return @intCast((total +% parts +% @as(u32, @intCast(pos)) +% eq *% 7 +% ne *% 11 +% sw *% 13 +% ew *% 17) % 251);\n" +
             "}\n", 55);
+
+    /// <summary>std's small helpers from source (road-to-zig-std, tasks #57 and #58): trim, lastIndexOfScalar, count,
+    /// replaceScalar, reverse, math.clamp (a three-operand @TypeOf), mem.min / max, mem.join (mem.zig's own Allocator is
+    /// the curated one; dupe; `&amp;[0]u8{}`), StringHashMap, sort.insertion, ascii.eqlIgnoreCase, a padded bufPrint,
+    /// readInt, splitSequence and tokenizeAny, folded to a checksum.</summary>
+    [Fact]
+    public void Dotcc_matches_zig_std_small_helpers_from_source() =>
+        MatchesZigWithRealStd("stdhelpers",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "pub fn main() !u8 {\n" +
+            "    const a = std.heap.page_allocator;\n" +
+            "    var total: usize = 0;\n" +
+            "\n" +
+            "    total += std.mem.trim(u8, \"  ab c  \", \" \").len;\n" +
+            "    total += std.mem.lastIndexOfScalar(u8, \"abcabc\", 'b').?;\n" +
+            "    total += std.mem.count(u8, \"a,b,,c\", \",\");\n" +
+            "\n" +
+            "    var buf = [_]u8{ 1, 2, 1 };\n" +
+            "    std.mem.replaceScalar(u8, &buf, 1, 5);\n" +
+            "    std.mem.reverse(u8, &buf);\n" +
+            "    total += buf[0] * 10 + buf[1];\n" +
+            "\n" +
+            "    total += std.math.clamp(@as(u8, 250), 3, 9);\n" +
+            "    total += std.mem.min(u8, &[_]u8{ 4, 2, 9 }) + std.mem.max(u8, &[_]u8{ 4, 2, 9 });\n" +
+            "\n" +
+            "    const joined = try std.mem.join(a, \", \", &.{ \"a\", \"bc\", \"def\" });\n" +
+            "    defer a.free(joined);\n" +
+            "    total += joined.len;\n" +
+            "\n" +
+            "    var m = std.StringHashMap(u8).init(a);\n" +
+            "    defer m.deinit();\n" +
+            "    try m.put(\"x\", 4);\n" +
+            "    try m.put(\"yy\", 5);\n" +
+            "    total += m.get(\"yy\").? + m.count();\n" +
+            "\n" +
+            "    var s = [_]u8{ 3, 1, 2 };\n" +
+            "    std.sort.insertion(u8, &s, {}, std.sort.asc(u8));\n" +
+            "    total += s[0] + s[2];\n" +
+            "\n" +
+            "    total += @intFromBool(std.ascii.eqlIgnoreCase(\"HeLLo\", \"hello\"));\n" +
+            "\n" +
+            "    var out: [16]u8 = undefined;\n" +
+            "    total += (try std.fmt.bufPrint(&out, \"{d:>5}|\", .{42})).len;\n" +
+            "\n" +
+            "    const b = [_]u8{ 1, 2 };\n" +
+            "    total += std.mem.readInt(u16, &b, .little) % 200;\n" +
+            "\n" +
+            "    var it = std.mem.splitSequence(u8, \"a::b::c\", \"::\");\n" +
+            "    while (it.next()) |_| total += 1;\n" +
+            "    var tk = std.mem.tokenizeAny(u8, \" a, b ,c\", \" ,\");\n" +
+            "    while (tk.next()) |p| total += p.len;\n" +
+            "\n" +
+            "    return @intCast(total % 256);\n" +
+            "}\n", 230);
 
     /// <summary>Run <paramref name="program"/> through dotcc (navigating the real std at <c>DOTCC_ZIG_LIB_DIR</c>) and
     /// through zig, and require both to exit alike and print the same (and, when given, with

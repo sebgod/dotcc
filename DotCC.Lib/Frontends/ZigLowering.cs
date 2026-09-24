@@ -889,7 +889,8 @@ internal sealed partial class ZigLowering
             : null;
         // The path may also end at a TYPE a module declares (`const Pair = lib.Pair;`), rather than at a
         // file-as-struct module.
-        var fileType = module?.Lowering?.FileStructType
+        var fileType = CuratedStdFileType(module)
+            ?? module?.Lowering?.FileStructType
             ?? (module is null && path?.Content is Zig.Field pf
                 ? ResolveModulePath(pf.Arg0)?.Lowering?.ResolveExportedType(Tok(pf.Arg2))
                 : null)
@@ -899,6 +900,30 @@ internal sealed partial class ZigLowering
         _typeAliases[name] = fileType;
         type = fileType;
         return true;
+    }
+
+    /// <summary>The std FILES a curated type stands for, by path under the std root: std's own files name them by
+    /// import (mem.zig's <c>pub const Allocator = @import("mem/Allocator.zig");</c>), not by the <c>std.mem.Allocator</c>
+    /// path the curated set is keyed on, so the file itself has to map back to the curated type.</summary>
+    private static readonly Dictionary<string, string> CuratedStdFiles = new(System.StringComparer.Ordinal)
+    {
+        ["mem/Allocator.zig"] = "std.mem.Allocator",
+    };
+
+    /// <summary>The curated type <paramref name="module"/> stands for (<see cref="CuratedStdFiles"/>), or null when it
+    /// is not one of those std files: std.mem.join's <c>allocator: Allocator</c> is then the runtime allocator, whose
+    /// <c>alloc</c> / <c>free</c> the curated model owns, exactly as <c>std.mem.Allocator</c> from user code.</summary>
+    private CType? CuratedStdFileType(ZigModule? module)
+    {
+        if (module is null || _moduleGraph?.StdRootPath is not { } stdRoot
+            || System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(stdRoot)) is not { } stdDir)
+        {
+            return null;
+        }
+        var relative = System.IO.Path.GetRelativePath(stdDir, System.IO.Path.GetFullPath(module.Path)).Replace('\\', '/');
+        return CuratedStdFiles.TryGetValue(relative, out var curated) && StdTypes.TryGetValue(curated, out var make)
+            ? make()
+            : null;
     }
 
     /// <summary>The IR name for a container this module declares under source name

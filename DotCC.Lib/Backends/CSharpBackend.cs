@@ -529,11 +529,20 @@ internal sealed class CSharpBackend
     private string NoHoist(System.Func<string> render)
     {
         var prev = _canHoist;
+        var prevPure = _canHoistPure;
+        _canHoistPure = prev || prevPure;
         _canHoist = false;
         var text = render();
         _canHoist = prev;
+        _canHoistPure = prevPure;
         return text;
     }
+
+    /// <summary>True while rendering a conditional sub-expression (see <see cref="NoHoist"/>) of a statement that
+    /// could hoist: a SIDE-EFFECT-FREE temp (a <c>stackalloc</c> of constant elements) may still hoist, since
+    /// evaluating it unconditionally changes nothing observable. Not set where no statement can take a temp at all
+    /// (a loop condition).</summary>
+    private bool _canHoistPure;
 
     private void Stmt(StringBuilder sb, CStmt s, int ind)
     {
@@ -1841,7 +1850,7 @@ internal sealed class CSharpBackend
                 // condition, re-evaluated each iteration) fall back to the inline
                 // stackalloc, which still binds in a pointer-initializer.
                 var lit = $"stackalloc {Cs(sa.Element)}[]{{ {string.Join(", ", sa.Elems.Select(Expr))} }}";
-                if (!_canHoist) { return (lit, PPrimary); }
+                if (!_canHoist && !(_canHoistPure && sa.Elems.All(IsPure))) { return (lit, PPrimary); }
                 var name = $"__cl{_clCounter++}";
                 _pending.Add($"{Cs(sa.Element)}* {name} = {lit}");
                 return (name, PPrimary);

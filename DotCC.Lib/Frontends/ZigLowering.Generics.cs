@@ -487,7 +487,7 @@ internal sealed partial class ZigLowering
                         // as a comptime string, the way an `inline for` capture over field names is.
                         if (IsByteSliceOrArray(valueParamType))
                         {
-                            if (argScope.EvalComptimeValue(argItems[i]) is not LitStr str)
+                            if (argScope.EvalComptimeStringArg(argItems[i]) is not { } str)
                             {
                                 throw new IrUnsupportedException(
                                     $"call to generic '{templateSym.Name}': the `comptime {g.Params[i].Name}` argument must be a "

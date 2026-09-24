@@ -1169,10 +1169,11 @@ internal sealed partial class ZigLowering
     /// the backend hoists it to a block-local pointer temp when used outside an initializer). Each
     /// element lowers at the array's element type as its sink (so a nested `.{…}` / `.member`
     /// resolves). A fixed extent must match the element count; an inferred `[_]T` (Count null) takes
-    /// the element count. An empty literal is rejected — a zeroed array uses `undefined`.</summary>
+    /// the element count. An empty literal is a zero-length array (<c>&amp;[0]u8{}</c>, std.mem.join's empty result, or
+    /// <c>[_]T{}</c>); at a non-zero extent it is rejected, since a zeroed array uses `undefined`.</summary>
     private CExpr BuildArrayInit(IReadOnlyList<Item> posItems, CType.Array arr)
     {
-        if (posItems.Count == 0)
+        if (posItems.Count == 0 && arr.Count is not (null or 0))
         {
             throw new IrUnsupportedException(
                 "zig empty array literal is not supported — initialize a `[N]T` with `undefined` for a zeroed array");
@@ -1617,6 +1618,8 @@ internal sealed partial class ZigLowering
             }
             case Zig.SwitchExpr s:         return LowerSwitchExpr(s.Arg2, s.Arg5, sink);
             case Zig.SwitchExprTrailing s: return LowerSwitchExpr(s.Arg2, s.Arg5, sink);
+            case Zig.IfExprReturnThen ir when sink is not null:
+                return LowerIfReturnThen(ir.Arg2, ir.Arg5, ir.Arg7, sink);
             // `comptime switch` / `comptime if` in value position: the inner form, whose comptime-known
             // subject already selects one arm at lowering time.
             case Zig.ComptimeSwitchExpr c: return LowerExprSink(c.Arg1, sink);
@@ -1684,7 +1687,12 @@ internal sealed partial class ZigLowering
                 // success variant, as zig coerces it; an error union or an error code passes as it is.
                 if (sink?.Unqualified is CType.ErrorUnion okSink && lowered.Type?.Unqualified is not (CType.ErrorUnion or CType.ErrorSetType))
                 {
-                    return new ErrUnionOk(lowered) { Type = okSink };
+                    // An array at a `![]T` sink is a slice first (std.mem.join's `… else &[0]u8{}`).
+                    var okValue = okSink.Payload.Unqualified is CType.Slice okSlice
+                                  && (lowered.Type?.Unqualified is CType.Array || PointedArray(lowered) is ({ }, _))
+                        ? CoerceToSlice(lowered, okSlice)
+                        : lowered;
+                    return new ErrUnionOk(okValue) { Type = okSink };
                 }
                 // `*[N]T` → `[*]T` at a many-pointer sink (`.marks = &self.marks` in hash_map's
                 // FieldIterator): the address of an array is its first element's, which is what the array

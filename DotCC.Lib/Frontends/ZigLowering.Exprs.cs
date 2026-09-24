@@ -204,6 +204,8 @@ internal sealed partial class ZigLowering
                 var then = LowerExpr(e.Arg4);
                 return new CondExpr(LowerExpr(e.Arg2), then, LowerExpr(e.Arg6)) { Type = then.Type };
             }
+            case Zig.IfExprReturnThen ir:
+                return LowerIfReturnThen(ir.Arg2, ir.Arg5, ir.Arg7, null);
             // Value-position captured `if` — `if (opt) |x| thenE else elseE` (S4a). The payload binds
             // `x` in the then-branch, so a pure ternary can't express it; it hoists (ANF) to a result
             // temp assigned by a real `if`. See LowerIfCaptureExpr.
@@ -1043,6 +1045,35 @@ internal sealed partial class ZigLowering
 
     /// <summary>A string literal holding exactly <paramref name="bytes"/>, each spelled as a <c>\xNN</c> escape
     /// (so any byte round-trips through the shared C-string decoder), typed as its NUL-terminated array.</summary>
+    /// <summary>The comptime string an anonymous list of comptime-known bytes spells (<c>.{ 'e', info.exp_char_lower }</c>),
+    /// or null when an element is not positional or does not evaluate to a byte at compile time.</summary>
+    /// <summary>The comptime string a <c>comptime cs: []const u8</c> argument spells: any comptime string value, or
+    /// <c>&amp;.{ c0, c1 }</c> of comptime-known bytes (std.fmt.parse_float's <c>stream.firstIsLower(&amp;.{info.exp_char_lower})</c>).
+    /// Only at such a parameter: elsewhere an anonymous list stays the tuple or array it is.</summary>
+    private LitStr? EvalComptimeStringArg(Item arg)
+        => EvalComptimeValue(arg) as LitStr
+           ?? (arg.Content is Zig.PreAddrOf { Arg1.Content: Zig.AnonStructInit list } ? TryComptimeByteList(list.Arg2) : null);
+
+    private LitStr? TryComptimeByteList(Item fieldInits)
+    {
+        var bytes = new List<int>();
+        foreach (var element in Flatten(fieldInits))
+        {
+            if (element.Content is not Zig.FieldInitPositional pos) { return null; }
+            CExpr lowered;
+            using (EnterThrowawayHoist())
+            {
+                try { lowered = LowerExpr(pos.Arg0); }
+                catch (IrUnsupportedException) { return null; }
+            }
+            var value = _ir.ConstEval(lowered)
+                ?? (_ir.EvalComptimeValue(lowered) is IrModule.CtInt { Value: var big } && big >= 0 && big <= 255 ? (long)big : null);
+            if (value is not { } b || b is < 0 or > 255) { return null; }
+            bytes.Add((int)b);
+        }
+        return bytes.Count > 0 ? ComptimeStringFromBytes(bytes) : null;
+    }
+
     private static LitStr ComptimeStringFromBytes(IEnumerable<int> bytes)
     {
         var sb = new System.Text.StringBuilder("\"");
@@ -1499,7 +1530,7 @@ internal sealed partial class ZigLowering
         // `a.alloc(T, n)` / `a.free(s)` (and the deferred `create`/`destroy`) on a known-default
         // (→ devirt) or an Allocator-typed receiver (→ indirect). A same-named method on a
         // non-allocator receiver falls through to the generic dispatch below.
-        if (methodName is "alloc" or "alignedAlloc" or "free" or "create" or "destroy" or "realloc" or "resize" or "remap"
+        if (methodName is "alloc" or "alignedAlloc" or "dupe" or "free" or "create" or "destroy" or "realloc" or "resize" or "remap"
             && TryLowerAllocatorMethod(fld, methodName, argItems, out var allocExpr))
         {
             return allocExpr;
@@ -1869,6 +1900,28 @@ internal sealed partial class ZigLowering
                 result = new AllocCall(recv, elem, count, ErrorCode("OutOfMemory"), fbaCtx)
                 {
                     Type = new CType.ErrorUnion(new CType.Slice(elem)),
+                };
+                return true;
+            }
+            case "dupe":   // (type, slice) → Error![]T: a fresh allocation holding a copy (std.mem.join's `dupe(u8, &[1]u8{0})`)
+            {
+                if (argItems.Count != 2)
+                {
+                    throw new IrUnsupportedException($"zig allocator `.dupe` expects (type, slice); got {argItems.Count} argument(s)");
+                }
+                var elem = LowerType(argItems[0]);
+                var sliceType = new CType.Slice(elem);
+                // At a `[]const T` sink, so C# infers Dupe's `T` from the argument (no Slice → ConstSlice step).
+                var src = LowerExprSink(argItems[1], new CType.Slice(elem.WithQuals(TypeQual.Const)));
+                // One runtime call allocates AND copies, so the source is evaluated once. It takes the allocator as a
+                // value: a devirtualized receiver materializes, as it does at any opaque allocator sink.
+                var allocator = recv
+                    ?? (kind == AllocKind.Fba && fld.Arg0.Content is Zig.Ident { Arg0: var fbaTok }
+                        ? MaterializeFba(_fbaAllocatorSites[Tok(fbaTok)])
+                        : MaterializeCHeap());
+                result = new Call("ZigAlloc.Dupe", new List<CExpr> { allocator, src, OomLit() })
+                {
+                    Type = new CType.ErrorUnion(sliceType),
                 };
                 return true;
             }

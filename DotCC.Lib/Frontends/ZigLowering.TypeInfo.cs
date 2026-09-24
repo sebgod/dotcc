@@ -808,7 +808,7 @@ internal sealed partial class ZigLowering
         while (subject.Content is Zig.Grouped g) { subject = g.Arg1; }
         var isType = subject.Content is Zig.BuiltinCall { Arg0: var tb } && Tok(tb) == "@TypeOf"
                      || subject.Content is Zig.Ident ti && _typeAliases.ContainsKey(Tok(ti.Arg0)) && _symbols.Resolve(Tok(ti.Arg0)) is null;
-        if (!isType) { return null; }
+        if (!isType || !TryTypeAliasRhs(subject, out _)) { return null; }
         ZigProng? elseProng = null;
         foreach (var prongItem in Flatten(prongsItem))
         {
@@ -816,8 +816,10 @@ internal sealed partial class ZigLowering
             if (prong.CaseVals.Content is Zig.CaseElse) { elseProng = prong; continue; }
             foreach (var (lo, hi) in WalkCaseValItems(prong.CaseVals))
             {
-                if (hi is not null || TryFoldTypeEquality(subject, lo) is not { } same) { return null; }
-                if (same) { return prong.Cut is { } cut ? throw new IrUnsupportedException(cut) : prong; }
+                if (hi is not null) { return null; }
+                // A case type dotcc does not lower (std.fmt.parse_float's `f16, f32, f64 => u64, f80, f128 => u128`)
+                // is not the subject's, which did lower: it cannot match, so it is passed over.
+                if (TryFoldTypeEquality(subject, lo) is true) { return prong.Cut is { } cut ? throw new IrUnsupportedException(cut) : prong; }
             }
         }
         if (elseProng is not null) { return elseProng.Cut is { } elseCut ? throw new IrUnsupportedException(elseCut) : elseProng; }
