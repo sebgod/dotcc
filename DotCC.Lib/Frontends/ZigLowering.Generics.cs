@@ -367,6 +367,7 @@ internal sealed partial class ZigLowering
         var anytypeBits = new Dictionary<string, int>(System.StringComparer.Ordinal);
         var fnSeeds = new List<(string name, ZigLowering owner, Symbol fn)>();
         var aggregateSeeds = new List<(string name, IrModule.ComptimeValue value, CType type)>();
+        var comptimeIntArgs = new Dictionary<string, long>(System.StringComparer.Ordinal);
         var runtimeArgItems = new List<Item>();
 
         // Phase 1 — resolve each comptime TYPE arg in the CALLER's environment (a type-arg spelled as an
@@ -381,6 +382,12 @@ internal sealed partial class ZigLowering
                     // CType, so without it they would key one instance and share one `bits` answer.
                     typeSeeds.Add(new TypeSeed(g.Params[i].Name, argScope.LowerType(argItems[i]).Unqualified,
                                                argScope.DeclaredBitsOfTypeArg(argItems[i])));
+                    break;
+                // An `anytype` bound to a `comptime_int` (`log2(pos_max)` in std.math.IntFittingRange) is comptime:
+                // zig instantiates per VALUE, and `@TypeOf(x)` is `comptime_int`, so it is a value seed here.
+                case ParamKind.AnyType when argScope.ComptimeIntArgValue(argItems[i]) is { } ctIntArg:
+                    comptimeIntArgs[g.Params[i].Name] = ctIntArg;
+                    anytypeSeeds.Add((g.Params[i].Name, CType.ComptimeInt));
                     break;
                 case ParamKind.AnyType:
                     anytypeSeeds.Add((g.Params[i].Name, argScope.InferArgType(argItems[i])));
@@ -505,6 +512,10 @@ internal sealed partial class ZigLowering
                         mangleTokens.Add(v >= 0 ? v.ToString(inv) : "n" + (-(System.Int128)v).ToString(inv));
                         valueSeeds.Add((g.Params[i].Name, v, LowerType(g.Params[i].TypeAst)));
                         break;
+                    case ParamKind.AnyType when comptimeIntArgs.TryGetValue(g.Params[i].Name, out var ctInt):
+                        mangleTokens.Add("ci" + (ctInt >= 0 ? ctInt.ToString(inv) : "n" + (-(System.Int128)ctInt).ToString(inv)));
+                        valueSeeds.Add((g.Params[i].Name, ctInt, CType.ComptimeInt));
+                        break;
                     case ParamKind.AnyType:
                         // A hybrid (wall-plan W5): its inferred type keys the specialization AND the
                         // argument is passed at runtime — so it contributes BOTH a mangle token and a
@@ -558,11 +569,17 @@ internal sealed partial class ZigLowering
                         _comptimeOptionalVars[optSym] = (hasValue, value, inner);
                     }
                     runtimeParams = g.Params
-                        .Where(p => p.Kind is ParamKind.Runtime or ParamKind.AnyType)
+                        .Where(p => p.Kind is ParamKind.Runtime or ParamKind.AnyType && !comptimeIntArgs.ContainsKey(p.Name))
                         .Select(p => (p.Name, p.Kind == ParamKind.AnyType ? _anytypeSeeds[p.Name] : LowerType(p.TypeAst)))
                         .ToList();
                     ret = !comptimeOnly ? LowerType(g.RetType)
                         : g.RetType.Content is Zig.TyOptional ? new CType.Optional(CType.Int128) : CType.Int128;
+                    // `@TypeOf(x)` of a `comptime_int` argument (std.math.log2): the result is comptime-only too.
+                    if (ret.Unqualified is CType.Prim { IsComptimeInt: true } && !g.ErrUnion)
+                    {
+                        comptimeOnly = true;
+                        ret = CType.Int128;
+                    }
                 }
                 finally
                 {
@@ -682,6 +699,23 @@ internal sealed partial class ZigLowering
         using var _ = EnterThrowawayHoist();   // the inference lowering is discarded
         return (LowerExpr(argItem).Type
             ?? throw new IrUnsupportedException("zig `anytype` argument has no statically known type")).Unqualified;
+    }
+
+    /// <summary>The value of an argument whose zig type is <c>comptime_int</c>: an untyped integer literal, or
+    /// an expression of the <see cref="CType.ComptimeInt"/> type (a <c>comptime_int</c> parameter, a capture of
+    /// one, arithmetic over those), when it evaluates at compile time. Null for anything else, including a
+    /// value outside the 64-bit range comptime seeds carry today.</summary>
+    private long? ComptimeIntArgValue(Item argItem)
+    {
+        if (argItem.Content is Zig.Grouped g) { return ComptimeIntArgValue(g.Arg1); }
+        using var _ = EnterThrowawayHoist();
+        CExpr lowered;
+        try { lowered = LowerExpr(argItem); }
+        catch (IrUnsupportedException) { return null; }
+        if (argItem.Content is not Zig.IntLit && lowered.Type?.Unqualified is not CType.Prim { IsComptimeInt: true }) { return null; }
+        return _ir.ConstEval(lowered)
+            ?? (_ir.EvalComptimeValue(lowered) is IrModule.CtInt { Value: var big } && big >= long.MinValue && big <= long.MaxValue
+                ? (long)big : null);
     }
 
     /// <summary>Lower one queued instantiation body (drained after pass 2). Hands the pre-resolved
@@ -900,12 +934,14 @@ internal sealed partial class ZigLowering
         return t switch
         {
             CType.Prim { Name: "_Bool" } => "bool",
+            CType.Prim { IsComptimeInt: true } => "comptime_int",   // not `i128`, which is another type
             CType.Prim p when p.IsInteger => (p.Signed ? "i" : "u") + (p.Bytes * 8).ToString(CultureInfo.InvariantCulture),
             CType.Prim p => "f" + (p.Bytes * 8).ToString(CultureInfo.InvariantCulture),
             CType.VoidType => "void",
             CType.Named n => n.Name,
             CType.Enum e => e.Name,
             CType.Pointer ptr => "p_" + MangleType(ptr.Pointee),
+            CType.Vector v => "v" + v.Count.ToString(CultureInfo.InvariantCulture) + "_" + MangleType(v.Element),
             _ => SanitizeIdent(t.Describe()),
         };
     }

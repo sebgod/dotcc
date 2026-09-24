@@ -1488,6 +1488,9 @@ internal sealed partial class ZigLowering
                 return LowerDeclLiteralCall(dcc, Tok(dcl.Arg1), []);
             case Zig.EnumLit dvl when DeclLiteralContainer(sink) is { } dvc:
                 return LowerDeclLiteralValue(dvc, Tok(dvl.Arg1));
+            // `.{ 1, 5, 9, 5 }` at a SIMD-vector sink: one lane per element (T5).
+            case Zig.AnonStructInit vecInit when sink?.Unqualified is CType.Vector vecSink:
+                return LowerVectorLiteral(Flatten(vecInit.Arg2), vecSink);
             case Zig.AnonStructInit:
             case Zig.AnonStructInitEmpty:
                 return LowerStructInit(expr, sink);
@@ -1552,6 +1555,11 @@ internal sealed partial class ZigLowering
             default:
             {
                 var lowered = LowerExpr(expr);
+                // An array, a pointer to one, or a slice at a SIMD-vector sink is loaded (T5).
+                if (sink?.Unqualified is CType.Vector vectorSink && TryCoerceToVector(lowered, vectorSink) is { } loaded)
+                {
+                    return loaded;
+                }
                 // Array / string-literal → slice coercion at a `[]T` / `[]const T` sink (Zig's
                 // implicit `*[N]T` → `[]T` and string-literal `*const [N:0]u8` → `[]const u8`).
                 // A value already of slice type passes through (e.g. forwarding a `[]const u8`).
@@ -1883,6 +1891,13 @@ internal sealed partial class ZigLowering
                 // position there is nothing to yield, so say so rather than invent one.
                 throw new IrUnsupportedException(
                     "zig `@setEvalBranchQuota(n)` yields `void` — use it as a statement, not as a value");
+            // SIMD vectors (the target-identity segment T5, ZigLowering.Vector.cs).
+            case "@splat" when sink?.Unqualified is CType.Vector splatVector:
+                return LowerSplat(bargs, splatVector);
+            case "@reduce":
+                return LowerReduce(bargs);
+            case "@select":
+                return LowerSelect(bargs, sink);
             case "@Int" or "@Struct" or "@Union" or "@Enum" or "@Pointer" or "@Fn" or "@Tuple" or "@Vector":
                 // The reification family builds a TYPE. In a value position the useful thing to say is
                 // which position it belongs in; the family's own cuts live in TryLowerReifyBuiltin.

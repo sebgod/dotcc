@@ -1426,7 +1426,7 @@ internal sealed partial class ZigLowering
             "u128" => CType.UInt128, // → C# System.UInt128
             // `comptime_int` (the comptime engine): only a comptime evaluation ever holds one (a `var n:
             // comptime_int` in a function a comptime call runs), so it is the interpreter's own 128 bits.
-            "comptime_int" => CType.Int128,
+            "comptime_int" => CType.ComptimeInt,
             "isize" => CType.Long,   // LP64: pointer-width signed
             "usize" => CType.ULong,  // LP64: pointer-width unsigned (== size_t)
             "f32" => CType.Float,

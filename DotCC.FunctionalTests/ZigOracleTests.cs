@@ -3780,6 +3780,71 @@ public sealed class ZigOracleTests
             "    }\n" +
             "    return total;\n" +
             "}\n", 42, "" },
+        // SIMD vectors (target T5): `@Vector(16, u8)` as .NET's Vector128<byte>, `@splat`, an array loaded at a
+        // vector sink, element-wise `+`, a comparison mask, `@reduce(.Or)` / `@reduce(.Max)`, a lane read.
+        // 20 + 18 + 4 = 42.
+        new object[] { "simd_vectors",
+            "pub fn main() u8 {\n" +
+            "    const V = @Vector(16, u8);\n" +
+            "    const a: V = @splat(3);\n" +
+            "    var arr: [16]u8 = undefined;\n" +
+            "    for (&arr, 0..) |*e, i| e.* = @intCast(i);\n" +
+            "    const b: V = arr;\n" +
+            "    const c = a + b;\n" +
+            "    const m = b == @as(V, @splat(7));\n" +
+            "    var total: u8 = 0;\n" +
+            "    if (@reduce(.Or, m)) total += 20;\n" +
+            "    total += @reduce(.Max, c);\n" +
+            "    total += c[1];\n" +
+            "    return total;\n" +
+            "}\n", 42, "" },
+        // Bool vectors (T5): a list literal at a Vector256<uint> sink, `==` / `<` masks, `@select`, `@reduce` over a
+        // mask (.Or / .And) and over numbers (.Add / .Min), a mask lane read. 1 + 2 + 4 + 8 + 10 + 5 = 30.
+        new object[] { "simd_masks",
+            "pub fn main() u8 {\n" +
+            "    const V = @Vector(8, u32);\n" +
+            "    const a: V = @splat(5);\n" +
+            "    const b: V = .{ 1, 5, 9, 5, 0, 0, 0, 0 };\n" +
+            "    const m = a == b;\n" +
+            "    const picked = @select(u32, m, a, @as(V, @splat(0)));\n" +
+            "    var r: u8 = 0;\n" +
+            "    if (@reduce(.Or, m)) r += 1;\n" +
+            "    if (!@reduce(.And, m)) r += 2;\n" +
+            "    if (m[1] and !m[2]) r += 4;\n" +
+            "    const lt = b < a;\n" +
+            "    if (@reduce(.Or, lt)) r += 8;\n" +
+            "    return r + @as(u8, @intCast(@reduce(.Add, picked))) + @as(u8, @intCast(@reduce(.Min, b + a)));\n" +
+            "}\n", 30, "" },
+        // `break` / `continue` inside an unrolled `inline for` (a jump past the copies / to the end of one), and a
+        // `comptime_int` bound to `anytype` (one instance per value, `@typeInfo` says `.comptime_int`, a
+        // `@TypeOf(a)` result folds). 1 + 48 - 7 + 1 + 2 - 3 = 42.
+        new object[] { "inline_for_break_comptime_int",
+            "fn add(a: anytype, b: anytype) @TypeOf(a) {\n" +
+            "    return a + b;\n" +
+            "}\n" +
+            "fn kind(x: anytype) u8 {\n" +
+            "    return switch (@typeInfo(@TypeOf(x))) {\n" +
+            "        .comptime_int => 1,\n" +
+            "        .int => 2,\n" +
+            "        else => 3,\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var sum: u8 = 0;\n" +
+            "    inline for (0..3) |i| {\n" +
+            "        if (i == 0) continue;\n" +
+            "        sum += @intCast(i);\n" +
+            "        if (sum > 0) break;\n" +
+            "    }\n" +
+            "    var n: u8 = 0;\n" +
+            "    inline for (0..4) |j| {\n" +
+            "        const w = 32 / (1 << j);\n" +
+            "        if (w < 16) break;\n" +
+            "        n += w;\n" +
+            "    }\n" +
+            "    const k: u8 = add(3, 4);\n" +
+            "    return sum + n - k + kind(5) + kind(@as(u8, 5)) - 3;\n" +
+            "}\n", 42, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -4765,6 +4830,39 @@ public sealed class ZigOracleTests
             "    const b = comptime std.simd.suggestVectorLength(u32) orelse 0;\n" +
             "    return @intCast(a + b);\n" +
             "}\n", null);
+
+    /// <summary>std.mem.indexOfScalar from source through its SIMD path (target T5): std.mem.findScalarPos asks
+    /// std.simd.suggestVectorLength for a block length, loads `@Vector(block_len, u8)` blocks straight from the slice,
+    /// compares them against a splatted needle and finds the first hit with std.simd.firstTrue (`@select` over
+    /// std.simd.iota, `@reduce(.Min)`); its `{block_len, block_len / 2}` tail is an `inline for` whose
+    /// `comptime if (block_x_len < 4) break;` stops the unroll, and std.simd.VectorIndex reaches
+    /// std.math.IntFittingRange and log2 over a comptime_int. Hits in the unrolled loop, each tail block and the
+    /// scalar remainder, plus misses.</summary>
+    [Fact]
+    public void Dotcc_matches_zig_std_mem_index_of_scalar_simd_from_source() =>
+        MatchesZigWithRealStd("indexofscalar",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "fn at(n: usize, hit: usize) usize {\n" +
+            "    var buf: [200]u8 = undefined;\n" +
+            "    @memset(&buf, 'a');\n" +
+            "    if (hit < n) buf[hit] = 'z';\n" +
+            "    return std.mem.indexOfScalar(u8, buf[0..n], 'z') orelse 255;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var sum: usize = 0;\n" +
+            "    // Hits in the unrolled 2x32 loop, the 32 and 16 blocks, the scalar tail, and misses.\n" +
+            "    sum += at(200, 3);\n" +
+            "    sum += at(200, 40);\n" +
+            "    sum += at(200, 150);\n" +
+            "    sum += at(90, 70);\n" +
+            "    sum += at(50, 45);\n" +
+            "    sum += at(20, 19);\n" +
+            "    sum += at(5, 2);\n" +
+            "    sum += at(100, 100);\n" +
+            "    return @intCast(sum % 251);\n" +
+            "}\n", 82);
 
     /// <summary>Run <paramref name="program"/> through dotcc (navigating the real std at <c>DOTCC_ZIG_LIB_DIR</c>) and
     /// through zig, and require both to exit alike and print the same (and, when given, with

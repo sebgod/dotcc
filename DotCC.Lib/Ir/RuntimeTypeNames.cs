@@ -23,7 +23,7 @@ internal static class RuntimeTypeNames
         "Alignment", "Allocator", "AllocatorVTable", "ArenaAllocator", "ArenaChunk", "Atomic", "CBool",
         "ConstSlice", "ErrUnion", "FixedBufferAllocator", "Float128", "Libc", "NativeImports",
         "PrintfBuilder", "ScanfReader", "Slice", "SprintfBuilder", "Unit",
-        "WSprintfBuilder", "ZigAlloc", "ZigErrorReturn", "ZigList", "ZigMath", "ZigMem", "ZigTesting",
+        "WSprintfBuilder", "ZigAlloc", "ZigErrorReturn", "ZigList", "ZigMath", "ZigMem", "ZigTesting", "ZigVec",
     };
 
     /// <summary>The classes the C# program SHELL emits around the user code (<c>CSharpBackend.BuildShell</c>

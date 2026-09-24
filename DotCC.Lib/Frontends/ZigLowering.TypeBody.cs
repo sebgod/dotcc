@@ -132,6 +132,16 @@ internal sealed partial class ZigLowering
                 case Zig.StmtExpr { Arg0.Content: Zig.BuiltinCall ce } when Tok(ce.Arg0) == "@compileError":
                     CompileErrorBuiltin(Flatten(ce.Arg2));
                     break;
+                // `assert(from <= to);` (std.math.IntFittingRange): std.debug.assert over comptime operands is
+                // a compile-time check. A false one is zig's "reached unreachable" at analysis, so it is loud.
+                case Zig.StmtExpr { Arg0.Content: Zig.CallArgs call } when IsAssertCallee(call.Arg0)
+                                                                          && Flatten(call.Arg2) is [var asserted]:
+                    if (!FoldTypeBodyCondition(fnName, asserted))
+                    {
+                        throw new IrUnsupportedException(
+                            $"type-returning generic '{fnName}': a comptime `assert` failed (zig: reached unreachable code)");
+                    }
+                    break;
                 // `_ = alignment;` — zig's unused-parameter silencer, which a type body needs as much as any
                 // other (zig rejects an unused parameter). A bare NAME has nothing to evaluate; a discarded
                 // CALL would, so it stays the loud cut below.
@@ -245,7 +255,8 @@ internal sealed partial class ZigLowering
         CExpr value;
         using (EnterThrowawayHoist())
         {
-            value = LowerExpr(rhs);
+            // The annotation is the result type, so `const s: Signedness = if (…) .signed else .unsigned;` resolves.
+            value = declared is { } sink ? LowerExprSink(rhs, sink) : LowerExpr(rhs);
         }
         if (_ir.ConstEval(value) is not { } v)
         {

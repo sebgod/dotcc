@@ -34,7 +34,7 @@ The local zig `0.17.0-dev.667+0569f1f6a` install ships the full std source at
 | `@import("root")` | used by `std.zig` (the `std_options` override pattern, via `@hasDecl`) | the root module must be addressable |
 | `test "…" {}` blocks | **1857** | must parse-and-DROP or most std files won't even parse — tiny brick, giant coverage lever |
 | `packed struct` | 556 uses | sub-byte bit-packing (dotcc V1 byte-packs) becomes load-bearing |
-| `@Vector` | 447 uses | do NOT build SIMD — bias std away via target config + scalarize the remainder (see S9) |
+| `@Vector` | 447 uses | do NOT build SIMD — bias std away via target config + scalarize the remainder (see S9). **Superseded 2026-09-24 by the maintainer's target-identity decision: `@Vector` lowers to .NET's vector types (T5 ✅).** |
 | inline `asm` | 463 uses | all inside the platform floor / cpu feature probes → tier (c), redirected not lowered |
 | atomics (`@atomic*` 280, `@cmpxchg*` 54) | | `Interlocked`/`Volatile` mapping needed for `std.Thread`/`std.atomic` (tier (c) edges) |
 | `threadlocal` | 80 uses | C `_Thread_local` → `[ThreadStatic]` precedent exists; port to the Zig side |
@@ -880,7 +880,25 @@ vector length feeds TYPES.
   **Wall next:** the comptime `Placeholder.parse(…)` call needs its body lowered, and that body reaches
   `std.mem.findScalarPos`'s SIMD branch (guarded by `!@inComptime()` at runtime): `@Vector`, so the target
   segment T3 → T4 → T5 is now on bufPrint's critical path too.
-- **T5** `@Vector(N, T)` → `Vector128<T>` / `Vector256<T>`, with `@splat`, element-wise ops, `@reduce`.
+- **T5 ✅ (2026-09-24)** `@Vector(N, T)` lowers to .NET's `Vector64/128/256/512<T>` by total width (a bool vector,
+  what a comparison yields, is a `ulong` lane mask), and real `std.mem.indexOfScalar` runs from source through its
+  SIMD path, == zig. Vector surface: `@splat`, an array / slice / `slice[i..][0..N].*` loaded at a vector sink, a list
+  literal, element-wise arithmetic and bitwise ops (a scalar operand splatted), comparisons as masks, `@reduce`
+  (`.Or`/`.And`/`.Xor` over a mask, `.Add`/`.Min`/`.Max` over numbers), `@select`, a lane read, and `@typeInfo`'s
+  `.vector` (`len`, `child`); the operations route through `DotCC.Libc.ZigVec`. findScalarPos needed more than
+  vectors: `break` / `continue` inside an unrolled `inline for` (a jump past the copies / to the end of one, and a
+  copy that always breaks, a folded `comptime if (…) break;`, ends the unroll so no nonexistent `@Vector` width is
+  formed); a comptime-known `inline for` index counting as a constant; std.simd.VectorIndex's
+  `IntFittingRange(0, len - 1)`, whose type body opens with `assert(…)`, binds an enum const at its annotation and
+  switches over a comptime integer with a `|pos_max|` capture; `comptime_int` as a TYPE (`CType.ComptimeInt`, an
+  `__int128` carrier unequal to `i128`), so `log2(pos_max)` binds its `anytype` as a comptime VALUE (one instance per
+  value, zig's rule), `@typeInfo` answers `.comptime_int`, and the `.comptime_int => comptime { … return … }` prong
+  runs in place; a switch expression as a call argument (grammar); and std.simd.iota's returning `comptime { … }`
+  block lowered as a plain block. Oracles `simd_vectors` / `simd_masks` / `inline_for_break_comptime_int`, real-std
+  differential `Dotcc_matches_zig_std_mem_index_of_scalar_simd_from_source` (82: hits in the unrolled loop, both tail
+  blocks and the scalar remainder); unit `ZigVectorTests`. **Cuts:** a vector width with no .NET type
+  (`@Vector(3, u8)`), `/` `%` and shifts on vectors, `@shuffle`, a runtime bool-vector literal, a comptime_int
+  argument beyond 64 bits (sort's `log2(maxInt(usize) + 1)`, task #41).
 - **T6 (backlog)** arm64 hosts: verify and complete the `Arm` intrinsics → `std.Target.aarch64` mapping when this runs on
   arm64 (the maintainer's request, 2026-09-24; tracked in `docs/plans/deferred.md`, target identity).
 

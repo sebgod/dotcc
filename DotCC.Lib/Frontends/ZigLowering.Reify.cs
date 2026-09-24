@@ -101,13 +101,10 @@ internal sealed partial class ZigLowering
                     + "for — `@Int` is the member of the family that is modeled (road-to-zig-std S7). Spell the "
                     + "type, or build it with `@Int` when it is an integer");
 
-            // SIMD. Not a gap in the reflection arc — a whole execution model (vector registers, the
-            // `@reduce`/`@shuffle`/`@splat` family, per-lane semantics) that dotcc's scalar C# backend
-            // does not have. Named separately so its 475 uses do not read as "S7 is unfinished".
+            // SIMD: .NET's own vector types (the target-identity segment T5, ZigLowering.Vector.cs).
             case "@Vector":
-                throw new IrUnsupportedException(
-                    "zig `@Vector(len, T)` is a SIMD vector type — dotcc's backend is scalar and models no "
-                    + "vector types (`@splat`, `@reduce`, `@shuffle` likewise). Use an array `[len]T` and a loop");
+                type = VectorTypeOf(b);
+                return true;
 
             default:
                 return false;
@@ -181,7 +178,12 @@ internal sealed partial class ZigLowering
     /// every fold already installed is available here for free.</summary>
     private int ComptimeBitCount(Item item, string what)
     {
-        if (_ir.ConstEval(LowerExpr(item)) is not { } n)
+        var lowered = LowerExpr(item);
+        // A width that CALLS (std.math.IntFittingRange's `1 + log2(pos_max)`) runs through the interpreter.
+        var n = _ir.ConstEval(lowered)
+            ?? (_ir.EvalComptimeValue(lowered) is IrModule.CtInt { Value: var big } && big >= long.MinValue && big <= long.MaxValue
+                ? (long)big : null);
+        if (n is null)
         {
             throw new IrUnsupportedException(
                 $"zig `{what}`: the bit width must be a comptime-known integer (a literal, `@bitSizeOf(T)`, "
@@ -191,7 +193,7 @@ internal sealed partial class ZigLowering
         {
             throw new IrUnsupportedException($"zig `{what}`: the bit width {n} is out of range");
         }
-        return (int)n;
+        return (int)n.Value;
     }
 
     // ---- @bitSizeOf -------------------------------------------------------

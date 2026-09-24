@@ -221,6 +221,7 @@ internal sealed partial class ZigLowering
 
             // arithmetic
             case Zig.Add a:     return Bin(BinOp.Add, a.Arg0, a.Arg2);
+            case Zig.AddSwitch a: return Bin(BinOp.Add, a.Arg0, a.Arg2);   // `x + switch (…) {…}`
             case Zig.Sub a:     return Bin(BinOp.Sub, a.Arg0, a.Arg2);
             case Zig.Mul a:     return Bin(BinOp.Mul, a.Arg0, a.Arg2);
             // wrapping arithmetic (Milestone P) — two's-complement wrap at the operand width
@@ -560,6 +561,8 @@ internal sealed partial class ZigLowering
                 }
                 var baseExpr = LowerExpr(ix.Arg0);
                 var idx = LowerExpr(ix.Arg2);
+                // `v[i]` of a SIMD vector: a lane read (T5).
+                if (baseExpr.Type.Unqualified is CType.Vector laneVector) { return VectorLane(baseExpr, idx, laneVector); }
                 // A tuple subscript `t[N]` (N a literal) reads the Nth element → `.ItemN+1`
                 // (Milestone G). A tuple has no runtime indexing (the field is statically named),
                 // so a non-literal index is rejected.
@@ -2007,6 +2010,8 @@ internal sealed partial class ZigLowering
         var (left, right) = op is BinOp.Eq or BinOp.Ne
             ? LowerComparisonOperands(l, r)
             : (LowerExpr(l), LowerExpr(r));
+        // An operator over a SIMD vector is element-wise, a comparison a lane mask (T5).
+        if (TryVectorBinary(op, left, right) is { } vectorOp) { return vectorOp; }
         // Pointer arithmetic on a Zig many-item pointer (`[*]T` / `[*c]T`, both lowered to
         // `CType.Pointer`): `p + i` / `p - i` yields the pointer type, and `p - q` yields a
         // signed offset (`long`). `UsualArithmetic` only knows `Prim`s — it returns `int` for a

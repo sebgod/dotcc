@@ -272,12 +272,14 @@ internal sealed partial class ZigLowering
         // `_Bool` is an INTEGER prim in the C type model (CType.Bool == Prim("_Bool", 1, true, false)),
         // so it must be recognized before the integer arm or every `bool` would report `int`.
         CType.Prim { Name: "_Bool" } => "bool",
+        CType.Prim { IsComptimeInt: true } => "comptime_int",
         CType.Prim { Integer: true } => "int",
         CType.Prim => "float",
         CType.VoidType => "void",
         CType.Pointer or CType.Slice => "pointer",
         CType.Optional => "optional",
         CType.Array => "array",
+        CType.Vector => "vector",
         CType.Enum => "enum",
         CType.Func => "fn",
         CType.ErrorUnion => "error_union",
@@ -417,6 +419,11 @@ internal sealed partial class ZigLowering
                 value = new LitBool(pointee.IsConst) { Type = CType.Bool };
                 return true;
 
+            case ("vector", "len"):
+                var lanes = ((CType.Vector)info.Type.Unqualified).Count;
+                value = new LitInt(lanes.ToString(System.Globalization.CultureInfo.InvariantCulture), lanes) { Type = CType.Int };
+                return true;
+
             case ("array", "len"):
                 if (info.Type.Unqualified is not CType.Array { Count: { } count })
                 {
@@ -492,6 +499,7 @@ internal sealed partial class ZigLowering
             CType.Slice s => s.Element,
             CType.Optional o => o.Inner,
             CType.Array a => a.Element,
+            CType.Vector v => v.Element,
             _ => null,
         };
         if (child is null)
@@ -549,6 +557,16 @@ internal sealed partial class ZigLowering
         if (TryReadComptimeAggregateField(expr) is { Tag: { } aggTag })
         {
             tag = aggTag;
+            return true;
+        }
+        // A comptime ENUM variable (`const signedness: Signedness = if (from < 0) .signed else .unsigned;` in
+        // std.math.IntFittingRange's type body): its value mapped back to the member's name.
+        if (expr.Content is Zig.Ident { Arg0: var enumTok } && _symbols.Resolve(Tok(enumTok)) is { } enumSym
+            && _comptimeVars.TryGetValue(enumSym, out var enumVar) && enumVar.Type.Unqualified is CType.Enum varEnum
+            && _enumMembers.TryGetValue(varEnum.Name, out var varMembers)
+            && varMembers.FirstOrDefault(m => m.Value.ConstValue == enumVar.Value).Key is { } memberName)
+        {
+            tag = memberName;
             return true;
         }
         // A comptime tagged-UNION value (`comptime switch (placeholder.arg)` in std.Io.Writer.print, the

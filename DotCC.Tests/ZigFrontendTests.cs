@@ -969,16 +969,37 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_break_inside_an_inline_for()
+    public void Break_and_continue_inside_an_inline_for_jump_out_of_the_unrolled_copies()
     {
-        // A bare `break`/`continue` in an `inline for` body targets the loop, which unrolling removes —
-        // a clear deferred error, never a silent C# "break outside loop".
-        var ex = Should.Throw<CompileException>(() => EmitZig(
+        // Unrolling removes the loop, so a `break` jumps past the last copy and a `continue` to the end of
+        // its own copy (never a C# "break outside loop"). zig answers 43 (skip 0, sum 1, then break).
+        var cs = EmitZig(
             "pub fn main() u8 {\n" +
             "    var sum: u8 = 0;\n" +
-            "    inline for (0..3) |i| { sum += @intCast(i); if (sum > 0) break; }\n" +
-            "    return sum + 42;\n}\n"));
-        ex.Message.ShouldContain("inline for");
+            "    inline for (0..3) |i| { if (i == 0) continue; sum += @intCast(i); if (sum > 0) break; }\n" +
+            "    return sum + 42;\n}\n");
+        cs.ShouldMatch(@"goto __ifbrk\d+;");
+        cs.ShouldMatch(@"goto __ifbrk\d+_c0;");
+        cs.ShouldMatch(@"__ifbrk\d+:\s*\{\s*\}");
+    }
+
+    [Fact]
+    public void A_comptime_if_break_in_an_inline_for_stops_the_unroll()
+    {
+        // zig analyses no iteration after a comptime-taken `break` (std.mem.findScalarPos relies on it to
+        // never form a `@Vector` of a width that does not exist), so later copies are not lowered at all.
+        var cs = EmitZig(
+            "pub fn main() u8 {\n" +
+            "    var n: u8 = 0;\n" +
+            "    inline for (0..4) |j| {\n" +
+            "        const w = 32 / (1 << j);\n" +
+            "        comptime if (w < 16) break;\n" +
+            "        n += w;\n" +
+            "    }\n" +
+            "    return n;\n}\n");
+        cs.ShouldContain("ulong j__2 = 2UL;");   // the copy whose `w` (8) takes the break
+        cs.ShouldNotContain("j__3");             // and no copy after it
+        cs.ShouldMatch(@"int w__2 = [^;]+;\s*goto __ifbrk\d+;");
     }
 
     [Fact]
@@ -5833,15 +5854,15 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Break_inside_an_unrolled_comptime_for_is_rejected()
+    public void Break_inside_an_unrolled_comptime_for_ends_it_after_one_copy()
     {
-        var ex = Should.Throw<CompileException>(() => EmitZig(
+        var cs = EmitZig(
             "const P = struct { x: i32, y: i32 };\n" +
             "pub fn main() u8 {\n" +
             "    inline for (@typeInfo(P).@\"struct\".field_names) |n| { _ = n; break; }\n" +
             "    return 0;\n" +
-            "}\n"));
-        ex.Message.ShouldContain("no enclosing loop to target");
+            "}\n");
+        System.Text.RegularExpressions.Regex.Matches(cs, @"goto __ifbrk\d+;").Count.ShouldBe(1);
     }
 
     // ---- reification builtins + `@compileError` (road-to-zig-std S7) ----
@@ -6076,14 +6097,13 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void A_vector_type_is_a_named_cut_for_being_SIMD()
+    public void A_vector_width_dotnet_has_no_vector_type_for_is_a_named_cut()
     {
-        // 475 uses, and none of them are a reflection gap — it is a whole execution model dotcc's
-        // scalar backend does not have. Named separately so it does not read as "S7 is unfinished".
+        // `@Vector(N, T)` lowers to .NET's Vector64/128/256/512 (target T5), so its lanes must fill one of them.
         var ex = Should.Throw<CompileException>(() => EmitZig(
-            "const V = @Vector(4, u8);\n" +
+            "const V = @Vector(3, u8);\n" +
             "pub fn main() u8 { var v: V = undefined; _ = v; return 0; }\n"));
-        ex.Message.ShouldContain("SIMD");
+        ex.Message.ShouldContain("Vector64/128/256/512");
     }
 
     [Fact]

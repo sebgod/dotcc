@@ -166,7 +166,7 @@ internal sealed partial class ZigLowering
             throw new IrUnsupportedException(
                 $"`inline for` would unroll {count} iterations, exceeding the cap ({InlineUnrollCap})");
         }
-        var copies = new List<CStmt>(count);
+        var unroll = new InlineUnroll(_blockLabelCounter++);
         for (var k = 0; k < count; k++)
         {
             var shadows = new List<ComptimeCaptureShadow>(binds.Count);
@@ -177,15 +177,69 @@ internal sealed partial class ZigLowering
             // Restore innermost-first, so two captures sharing a name (`|x, x|`, which zig rejects but
             // which must not corrupt the maps here) unwind in the order they were seeded.
             for (var i = shadows.Count - 1; i >= 0; i--) { RestoreComptimeCapture(shadows[i]); }
-            if (HasLoopEscape(body))
-            {
-                throw new IrUnsupportedException(
-                    "`break`/`continue` inside an `inline for` body is not supported yet (the loop is "
-                    + "unrolled, so there is no enclosing loop to target)");
-            }
-            copies.Add(new Block(new List<CStmt> { body }));
+            if (!unroll.Add(new Block(new List<CStmt> { body }))) { break; }
         }
-        return new Seq(copies);
+        return unroll.Finish();
+    }
+
+    /// <summary>The copies of an unrolled <c>inline for</c>, with the body's <c>break</c> / <c>continue</c>
+    /// retargeted: unrolling removes the loop, so a <c>break</c> becomes a jump past the last copy and a
+    /// <c>continue</c> a jump to the end of its own copy. A copy that ALWAYS breaks (a folded
+    /// <c>comptime if (…) break;</c>) ends the unroll, since zig analyses no later iteration, which is what
+    /// keeps std.mem.findScalarPos from reaching a <c>@Vector</c> width that does not exist. A jump inside
+    /// a nested loop or switch binds to that construct and is left alone, as in
+    /// <see cref="HasLoopEscape"/>. Labels are emitted only when a jump reaches them (CS0164).</summary>
+    private sealed class InlineUnroll(int id)
+    {
+        private readonly List<CStmt> _copies = new();
+        private readonly string _breakLabel = "__ifbrk" + id.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        private bool _breakUsed;
+
+        /// <summary>Add one copy; false when it always breaks, so no later copy is lowered.</summary>
+        public bool Add(Block copy)
+        {
+            var continueLabel = _breakLabel + "_c" + _copies.Count.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var continueUsed = false;
+            var alwaysBreaks = AlwaysBreaks(copy);
+            CStmt Retarget(CStmt s)
+            {
+                switch (s)
+                {
+                    case Break:
+                        _breakUsed = true;
+                        return new Goto(_breakLabel);
+                    case Continue:
+                        continueUsed = true;
+                        return new Goto(continueLabel);
+                    case Block b: return new Block(b.Stmts.Select(Retarget).ToList());
+                    case Seq q: return new Seq(q.Stmts.Select(Retarget).ToList());
+                    case If i: return new If(i.Cond, Retarget(i.Then), i.Else is { } e ? Retarget(e) : null);
+                    case Labeled l: return new Labeled(l.Name, Retarget(l.Body));
+                    default: return s;
+                }
+            }
+            var body = (Block)Retarget(copy);
+            _copies.Add(continueUsed
+                ? new Block(new List<CStmt>(body.Stmts) { new Labeled(continueLabel, new Block(new List<CStmt>())) })
+                : body);
+            return !alwaysBreaks;
+        }
+
+        /// <summary>The unrolled statement, with the break label after the last copy when one was used.</summary>
+        public CStmt Finish()
+        {
+            if (_breakUsed) { _copies.Add(new Labeled(_breakLabel, new Block(new List<CStmt>()))); }
+            return new Seq(_copies);
+        }
+
+        /// <summary>True when a copy ends in an unconditional <c>break</c> at its own level.</summary>
+        private static bool AlwaysBreaks(CStmt s) => s switch
+        {
+            Break => true,
+            Block b => b.Stmts.Count > 0 && AlwaysBreaks(b.Stmts[^1]),
+            Seq q => q.Stmts.Count > 0 && AlwaysBreaks(q.Stmts[^1]),
+            _ => false,
+        };
     }
 
     /// <summary>Read a comptime STRING argument — a source string literal, or a name bound to one by

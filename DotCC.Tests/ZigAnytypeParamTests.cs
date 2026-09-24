@@ -43,13 +43,14 @@ public sealed class ZigAnytypeParamTests
     [Fact]
     public void Distinct_inferred_types_get_distinct_instances()
     {
-        // add(3, 4) infers (i32, i32) and add(1.5, 2.5) infers (f64, f64) — two specializations mangled
-        // by the INFERRED argument types, each a runtime slot (unlike a comptime TYPE arg). The
-        // `@TypeOf(a)` return type resolves to the first param's inferred type.
+        // add(@as(i32, 3), …) infers (i32, i32) and add(1.5, 2.5) infers (f64, f64): two specializations
+        // mangled by the INFERRED argument types, each a runtime slot (unlike a comptime TYPE arg). The
+        // `@TypeOf(a)` return type resolves to the first param's inferred type. (A bare `3` is a
+        // `comptime_int`, which instantiates per value instead: see the comptime_int pin below.)
         var cs = EmitZig("""
             fn add(a: anytype, b: anytype) @TypeOf(a) { return a + b; }
             pub fn main() u8 {
-                const i: i32 = add(3, 4);
+                const i: i32 = add(@as(i32, 3), @as(i32, 4));
                 const f: f64 = add(1.5, 2.5);
                 return @intCast(i + @as(i32, @intFromFloat(f)));
             }
@@ -66,12 +67,38 @@ public sealed class ZigAnytypeParamTests
         var cs = EmitZig("""
             fn add(a: anytype, b: anytype) @TypeOf(a) { return a + b; }
             pub fn main() u8 {
-                const x: i32 = add(1, 2);
-                const y: i32 = add(3, 4);
+                const x: i32 = add(@as(i32, 1), @as(i32, 2));
+                const y: i32 = add(@as(i32, 3), @as(i32, 4));
                 return @intCast(x + y);
             }
             """);
         Count(cs, "int add__i32_i32(").ShouldBe(1);   // one DEFINITION despite two calls
+    }
+
+    [Fact]
+    public void A_comptime_int_argument_is_a_comptime_value_and_its_type_reports_comptime_int()
+    {
+        // In zig an untyped `3` is a `comptime_int`: bound to an `anytype` it makes the parameter comptime
+        // (one instance per VALUE), `@typeInfo(@TypeOf(x))` is `.comptime_int`, and a `@TypeOf(a)` result is
+        // comptime-only, so the call folds. zig answers 7 + 10 + 200 here.
+        var cs = EmitZig("""
+            fn add(a: anytype, b: anytype) @TypeOf(a) { return a + b; }
+            fn kind(x: anytype) u8 {
+                return switch (@typeInfo(@TypeOf(x))) {
+                    .comptime_int => 1,
+                    .int => 2,
+                    else => 3,
+                };
+            }
+            pub fn main() u8 {
+                const i: i32 = add(3, 4);
+                return @intCast(i + kind(5) * 10 + kind(@as(u8, 5)) * 100);
+            }
+            """);
+        cs.ShouldContain("int i = (int)((System.Int128)7UL);");   // folded: no `add` instance runs
+        cs.ShouldNotContain("add__");
+        cs.ShouldContain("byte kind__ci5()");                     // keyed by the value, no runtime slot
+        cs.ShouldContain("byte kind__u8(byte x)");
     }
 
     [Fact]

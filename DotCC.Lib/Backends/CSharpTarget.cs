@@ -33,6 +33,11 @@ internal sealed class CSharpTarget : ITarget
             + string.Join(", ", f.Params.Where(p => !CSharpBackend.IsVoidParam(p)).Select(RenderType).Append(RenderType(f.Return))) + ">",
         CType.Named n => n.Name,
         CType.Enum e => e.Name,
+        // A Zig SIMD vector: a bool one is its lane bitmask, a numeric one .NET's vector of its width.
+        CType.Vector { IsMask: true } => "ulong",
+        CType.Vector v => "System.Runtime.Intrinsics." + (v.NetFamily
+            ?? throw new IrUnsupportedException($"zig {v.Describe()}: {v.Bits} bits has no .NET vector type (64 / 128 / 256 / 512)"))
+            + "<" + RenderType(v.Element) + ">",
         CType.ComplexType => "System.Numerics.Complex",
         CType.Float128Type => "Float128",
         // A Zig value optional `?T` → C# Nullable<T> (`T?`): null = none, `.?` = .Value,

@@ -1313,6 +1313,14 @@ internal sealed partial class ZigLowering
     /// Block-local comptime vars are scoped so they don't leak past the block.</summary>
     private CStmt LowerComptimeBlock(Item blockItem)
     {
+        // A comptime block that RETURNS the function's result (std.simd.iota's `comptime { var out: [len]T =
+        // undefined; for (&out, 0..) |*e, i| …; return @as(@Vector(len, T), out); }`) is a computation over
+        // comptime operands only, so running it at runtime gives zig's value; it lowers as a plain block.
+        if (blockItem.Content is Zig.Block { Arg1: var stmtList } && Flatten(stmtList) is { Count: > 0 } stmts
+            && stmts[^1].Content is Zig.StmtReturn)
+        {
+            return LowerBlock(blockItem);
+        }
         _symbols.EnterScope();
         ExecuteComptimeStmt(blockItem);
         _symbols.ExitScope();
@@ -1546,9 +1554,8 @@ internal sealed partial class ZigLowering
     /// <summary>Build the unrolled copies of an <c>inline for</c> body: for each of
     /// <paramref name="count"/> iterations, a block <c>{ const capture = initFor(k); body }</c> with the
     /// capture freshly declared in its own scope (sibling blocks may reuse the name in C#; the symbol
-    /// table's CS0136 rename covers any leak regardless). A bare <c>break</c>/<c>continue</c> in the
-    /// body is rejected — unrolling removes the loop, so it would have no target. The count is capped to
-    /// bound emitted-code size.</summary>
+    /// table's CS0136 rename covers any leak regardless). A <c>break</c>/<c>continue</c> in the body is
+    /// retargeted by <see cref="InlineUnroll"/>. The count is capped to bound emitted-code size.</summary>
     private CStmt UnrollInlineFor(long count, string captureName, CType captureType, Item bodyItem, System.Func<long, CExpr> initFor)
     {
         if (count > InlineUnrollCap)
@@ -1556,23 +1563,28 @@ internal sealed partial class ZigLowering
             throw new IrUnsupportedException(
                 $"`inline for` would unroll {count} iterations, exceeding the cap ({InlineUnrollCap})");
         }
-        var copies = new List<CStmt>((int)count);
+        var unroll = new InlineUnroll(_blockLabelCounter++);
         for (long k = 0; k < count; k++)
         {
             _symbols.EnterScope();
-            var sym = _symbols.Declare(new Symbol { Name = captureName, Kind = SymKind.Var, Type = captureType });
-            var decl = new DeclStmt(new List<LocalDecl> { new(sym, initFor(k)) });
+            // A comptime-known capture (a counted range's index) IS its value in every comptime question,
+            // as zig has it: `const block_x_len = block_len / (1 << j); comptime if (block_x_len < 4) break;`
+            // in std.mem.findScalarPos folds through it.
+            var init = initFor(k);
+            var folded = captureType.Unqualified is CType.Prim { Integer: true } ? _ir.ConstEval(init) : null;
+            var sym = _symbols.Declare(new Symbol
+            {
+                Name = captureName, Kind = SymKind.Var, Type = captureType,
+                IsConstexpr = folded is not null, ConstValue = folded ?? 0,
+            });
             var body = LowerStmt(bodyItem);
             _symbols.ExitScope();
-            if (HasLoopEscape(body))
-            {
-                throw new IrUnsupportedException(
-                    "`break`/`continue` inside an `inline for` body is not supported yet (the loop is "
-                    + "unrolled, so there is no enclosing loop to target)");
-            }
-            copies.Add(new Block(new List<CStmt> { decl, body }));
+            // `inline for (0..2) |_|` discards the index: no declaration (an unused `_` local is CS0219).
+            var copy = captureName == "_" ? new List<CStmt> { body }
+                : new List<CStmt> { new DeclStmt(new List<LocalDecl> { new(sym, init) }), body };
+            if (!unroll.Add(new Block(copy))) { break; }
         }
-        return new Seq(copies);
+        return unroll.Finish();
     }
 
     /// <summary>Does this statement contain a bare <c>break</c>/<c>continue</c> that would target an
@@ -2933,6 +2945,15 @@ internal sealed partial class ZigLowering
     private CStmt LowerForSlice(CExpr sliceExpr, string elemName, (string name, CExpr start)? index, Item bodyItem, bool byRef,
         int? elemBits = null)
     {
+        // `for (&arr, 0..) |*e, i|` (std.simd.iota) / `for (arr) |x|`: an array, or the address of one, is walked
+        // as a slice over it, so a by-reference capture writes the array's elements.
+        CType? walkedElem = sliceExpr.Type.Unqualified is CType.Array walkedArray ? walkedArray.Element
+            : PointedArray(sliceExpr) is (_, { Element: var pointedElem }) ? pointedElem
+            : null;
+        if (sliceExpr.Type.Unqualified is not CType.Slice && walkedElem is { } elemToWalk)
+        {
+            sliceExpr = CoerceToSlice(sliceExpr, new CType.Slice(elemToWalk));
+        }
         if (sliceExpr.Type.Unqualified is not CType.Slice slc)
         {
             throw new IrUnsupportedException($"for-over-slice needs a slice; got {sliceExpr.Type.Describe()}");
@@ -3122,6 +3143,7 @@ internal sealed partial class ZigLowering
             try { return LowerExprSink(ctValue, sink); }
             finally { ExitComptimeProng(); }
         }
+        if (TryFoldComptimeIntSwitch(subjectItem, prongsItem, sink) is { } folded) { return folded; }
         var subject = LowerExpr(subjectItem);
         var arms = new List<SwitchExprArm>();
         foreach (var prongItem in Flatten(prongsItem))
@@ -3161,6 +3183,58 @@ internal sealed partial class ZigLowering
             ?? arms.Select(a => a.Value.Type).FirstOrDefault(t => t is not null)
             ?? CType.Int;
         return new SwitchExpr(subject, arms) { Type = resultType };
+    }
+
+    /// <summary>A switch EXPRESSION over a compile-time-known integer whose prongs a runtime C# switch
+    /// expression cannot carry (a <c>|x|</c> capture): std.math.IntFittingRange's
+    /// <c>switch (to) { 0 =&gt; 0, else =&gt; |pos_max| 1 + log2(pos_max) }</c>. The subject and every case value
+    /// evaluate at compile time, the matching prong's value is lowered with its capture bound to the subject,
+    /// and nothing else is. Null when every prong is a plain <c>v =&gt; e</c> (the runtime lowering handles it,
+    /// unchanged) or the subject is not comptime-known.</summary>
+    private CExpr? TryFoldComptimeIntSwitch(Item subjectItem, Item prongsItem, CType? sink)
+    {
+        var prongs = Flatten(prongsItem);
+        if (prongs.All(p => p.Content is Zig.ProngExpr)) { return null; }
+        IrModule.CtInt? Eval(Item item)
+        {
+            using (EnterThrowawayHoist())
+            {
+                try { return _ir.EvalComptimeValue(LowerExpr(item)) as IrModule.CtInt; }
+                catch (IrUnsupportedException) { return null; }
+            }
+        }
+        if (Eval(subjectItem) is not { } subject) { return null; }
+        ZigProng? chosen = null;
+        foreach (var prongItem in prongs)
+        {
+            var prong = DecomposeProng(prongItem);
+            if (prong.CaseVals.Content is Zig.CaseElse) { chosen ??= prong; continue; }
+            foreach (var (lo, hi) in WalkCaseValItems(prong.CaseVals))
+            {
+                if (Eval(lo) is not { } low || (hi is { } h ? Eval(h) : low) is not { } high) { return null; }
+                if (subject.Value >= low.Value && subject.Value <= high.Value) { chosen = prong; goto Selected; }
+            }
+        }
+        Selected:
+        if (chosen is null)
+        {
+            throw new IrUnsupportedException(
+                $"zig `switch` over the comptime value {subject.Value}: no prong matches it and there is no `else`");
+        }
+        if (chosen.Expr is not { } value)
+        {
+            throw new IrUnsupportedException(
+                "zig `switch` over a comptime integer in value position: the selected prong must yield a value (`v => expr`)");
+        }
+        if (chosen.CaptureName is not { } capture || capture == "_") { return LowerExprSink(value, sink); }
+        var prev = _comptimeValues.GetValueOrDefault(capture);
+        _comptimeValues[capture] = _ir.SpliceComptimeValue(subject)
+            ?? throw new IrUnsupportedException($"zig `switch` capture `|{capture}|`: the comptime subject has no literal form");
+        try { return LowerExprSink(value, sink); }
+        finally
+        {
+            if (prev is { } p) { _comptimeValues[capture] = p; } else { _comptimeValues.Remove(capture); }
+        }
     }
 
     /// <summary>A result temp shared while a value-position <c>if</c>/<c>switch</c> is lowered as a
@@ -3205,6 +3279,8 @@ internal sealed partial class ZigLowering
         {
             Zig.Prong or Zig.ProngCapture or Zig.ProngCaptureRef => true,
             Zig.ProngJump or Zig.ProngCaptureJump => true,   // a `break` / `continue` arm is a statement
+            // `.comptime_int => comptime { …; return result; }` (std.math.log2): the block returns from the function.
+            Zig.ProngComptimeBlock => true,
             // `else => return error.InvalidCharacter` (std.fmt.charToDigit): a returning arm is a statement too.
             Zig.ProngReturn or Zig.ProngReturnVoid or Zig.ProngCaptureReturn or Zig.ProngCaptureReturnVoid => true,
             Zig.ProngExpr pe => pe.Arg2.Content is Zig.LabeledBlock,
@@ -3382,6 +3458,18 @@ internal sealed partial class ZigLowering
         // statements to produce its value (a block body / a labeled `break :blk v`).
         if (SelectComptimeProng(subjectItem, prongsItem, out var ctPayload) is { } ctProng)
         {
+            // A selected BLOCK prong (`.comptime_int => comptime { …; return result; }` in std.math.log2) runs in
+            // place: its `return` leaves the function, so the result temp is never read.
+            if (ctProng.Expr is null && ctProng.Block is { } ctBlock)
+            {
+                EnterComptimeProng(ctProng, ctPayload);
+                try
+                {
+                    rt.ResultType ??= CType.Int;
+                    return LowerBlock(ctBlock);
+                }
+                finally { ExitComptimeProng(); }
+            }
             if (ctProng.Expr is not { } ctValue)
             {
                 throw new IrUnsupportedException(

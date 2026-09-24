@@ -1,0 +1,215 @@
+#nullable enable
+
+using System.Collections.Generic;
+using System.Linq;
+using DotCC.Ir;
+using LALR.CC.LexicalGrammar;
+
+namespace DotCC.Frontends;
+
+/// <summary>Zig SIMD vectors, <c>@Vector(N, T)</c> (road-to-zig-std, the target-identity segment T5, by the
+/// maintainer's choice: lower to .NET's own vector types). A numeric vector is a
+/// <c>System.Runtime.Intrinsics.Vector64/128/256/512&lt;T&gt;</c> chosen by its total width, so element-wise
+/// arithmetic is the JIT's SIMD code, with a software fallback on a CPU without it; a BOOL vector, what a
+/// comparison yields, is a lane bitmask in a <c>ulong</c>. <c>@splat</c> is <c>VectorN.Create(x)</c>, an array or
+/// a slice at a vector sink is a load from its first element, a comparison is a mask (<c>ZigVec.Eq</c>, …), and
+/// <c>@reduce</c> / <c>@select</c> / a lane read route through <c>DotCC.Libc.ZigVec</c>. A width .NET has no
+/// vector type for (a <c>@Vector(3, u8)</c>) is a loud cut.</summary>
+internal sealed partial class ZigLowering
+{
+    /// <summary>Lower <c>@Vector(len, T)</c> to its <see cref="CType.Vector"/>, loud when no .NET vector fits.</summary>
+    private CType.Vector VectorTypeOf(Zig.BuiltinCall call)
+    {
+        var args = Flatten(call.Arg2);
+        if (args.Count != 2)
+        {
+            throw new IrUnsupportedException($"zig `@Vector` expects (len, T); got {args.Count} argument(s)");
+        }
+        var len = ConstEvalArraySize(args[0]);
+        var element = LowerType(args[1]);
+        var vector = new CType.Vector(element, len);
+        if (!vector.IsMask && (element.Unqualified is not CType.Prim { Name: not "_Bool" } || vector.NetFamily is null))
+        {
+            throw new IrUnsupportedException(
+                $"zig {vector.Describe()}: dotcc lowers a vector to .NET's Vector64/128/256/512, so its lanes must be "
+                + $"an integer or float type filling 8, 16, 32 or 64 bytes ({vector.Bits / 8} here)");
+        }
+        if (vector.IsMask && len > 64)
+        {
+            throw new IrUnsupportedException($"zig {vector.Describe()}: a bool vector is a 64-bit lane mask, so at most 64 lanes");
+        }
+        return vector;
+    }
+
+    /// <summary>The <c>System.Runtime.Intrinsics</c> class of a numeric vector (<c>System.Runtime.Intrinsics.Vector128</c>).</summary>
+    private static string VectorClass(CType.Vector v) => "System.Runtime.Intrinsics." + v.NetFamily;
+
+    /// <summary><c>@splat(x)</c> at a vector sink: every lane <c>x</c>. For a bool vector, every bit.</summary>
+    private CExpr LowerSplat(IReadOnlyList<Item> args, CType.Vector vector)
+    {
+        if (args.Count != 1) { throw new IrUnsupportedException($"zig `@splat` expects one argument; got {args.Count}"); }
+        var lane = LowerExprSink(args[0], vector.Element);
+        if (vector.IsMask)
+        {
+            // `@splat(true)` is the full mask, `@splat(false)` the empty one; a runtime bool picks between them.
+            var full = new Call("ZigVec.Full", new List<CExpr> { IntLit(vector.Count) }) { Type = CType.ULong };
+            return new CondExpr(lane, full, new LitInt("0", 0) { Type = CType.ULong }) { Type = vector };
+        }
+        return new Call(VectorClass(vector) + ".Create", new List<CExpr> { new Cast(vector.Element, lane) { Type = vector.Element } })
+        {
+            Type = vector,
+        };
+    }
+
+    /// <summary>A positional list literal at a vector sink: <c>VectorN.Create(e0, e1, …)</c>, one lane per element,
+    /// each at the lane type. A bool vector's literal must be comptime-known and becomes its mask constant.</summary>
+    private CExpr LowerVectorLiteral(IReadOnlyList<Item> inits, CType.Vector vector)
+    {
+        if (inits.Count != vector.Count)
+        {
+            throw new IrUnsupportedException(
+                $"zig {vector.Describe()}: a literal needs exactly {vector.Count} element(s); got {inits.Count}");
+        }
+        var lanes = new List<CExpr>(inits.Count);
+        foreach (var init in inits)
+        {
+            if (init.Content is not Zig.FieldInitPositional pos)
+            {
+                throw new IrUnsupportedException($"zig {vector.Describe()}: a vector literal lists its lanes positionally");
+            }
+            lanes.Add(LowerExprSink(pos.Arg0, vector.Element));
+        }
+        if (vector.IsMask)
+        {
+            ulong bits = 0;
+            for (var k = 0; k < lanes.Count; k++)
+            {
+                if (_ir.ConstEval(lanes[k]) is not { } on)
+                {
+                    throw new IrUnsupportedException($"zig {vector.Describe()}: a bool-vector literal must be comptime-known");
+                }
+                if (on != 0) { bits |= 1UL << k; }
+            }
+            var mask = new LitInt(bits.ToString(System.Globalization.CultureInfo.InvariantCulture), unchecked((long)bits)) { Type = CType.ULong };
+            return new Cast(vector, mask) { Type = vector };
+        }
+        return new Call(VectorClass(vector) + ".Create",
+            lanes.Select(l => (CExpr)new Cast(vector.Element, l) { Type = vector.Element }).ToList())
+        {
+            Type = vector,
+        };
+    }
+
+    /// <summary>An array, a pointer to one, or a slice at a vector sink (<c>const block: Block =
+    /// slice[i..][0..N].*;</c>): the vector loaded from its first element.</summary>
+    private CExpr? TryCoerceToVector(CExpr value, CType.Vector vector)
+    {
+        if (vector.IsMask || value.Type.Unqualified is CType.Vector) { return null; }
+        CExpr? first = value.Type.Unqualified switch
+        {
+            CType.Array => PointedArray(value) is ({ } arr, _) ? arr : value,   // an array is its element pointer
+            CType.Pointer => PointedArray(value) is ({ } parr, _) ? parr : value,
+            CType.Slice => new Member(value, "Ptr", false) { Type = new CType.Pointer(vector.Element) },
+            _ => null,
+        };
+        if (first is null) { return null; }
+        return new Call("ZigVec.Load" + vector.Bits.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            new List<CExpr> { first })
+        {
+            Type = vector,
+        };
+    }
+
+    /// <summary>A binary operator with a vector operand: arithmetic and bitwise ops are .NET's element-wise
+    /// operators; a comparison is a lane mask (<c>ZigVec.Eq</c>, …). A scalar operand is splatted to the vector's
+    /// lanes, as zig coerces it. Null when neither operand is a vector.</summary>
+    private CExpr? TryVectorBinary(BinOp op, CExpr left, CExpr right)
+    {
+        var vector = left.Type.Unqualified as CType.Vector ?? right.Type.Unqualified as CType.Vector;
+        if (vector is null) { return null; }
+        CExpr Lanes(CExpr operand) => operand.Type.Unqualified is CType.Vector ? operand
+            : new Call(VectorClass(vector) + ".Create", new List<CExpr> { new Cast(vector.Element, operand) { Type = vector.Element } }) { Type = vector };
+        var (l, r) = (Lanes(left), Lanes(right));
+        if (vector.IsMask)
+        {
+            // A bool vector's `and` / `or` / `!=` are bit operations on its mask.
+            return op switch
+            {
+                BinOp.BitAnd or BinOp.LogAnd => new Binary(BinOp.BitAnd, l, r) { Type = vector },
+                BinOp.BitOr or BinOp.LogOr => new Binary(BinOp.BitOr, l, r) { Type = vector },
+                BinOp.BitXor or BinOp.Ne => new Binary(BinOp.BitXor, l, r) { Type = vector },
+                _ => throw new IrUnsupportedException($"zig {vector.Describe()}: `{op}` on a bool vector is not lowered yet"),
+            };
+        }
+        var mask = new CType.Vector(CType.Bool, vector.Count);
+        string? compare = op switch
+        {
+            BinOp.Eq => "Eq", BinOp.Ne => "Ne", BinOp.Lt => "Lt", BinOp.Gt => "Gt", BinOp.Le => "Le", BinOp.Ge => "Ge",
+            _ => null,
+        };
+        if (compare is not null) { return new Call("ZigVec." + compare, new List<CExpr> { l, r }) { Type = mask }; }
+        if (op is BinOp.Div or BinOp.Mod or BinOp.Shl or BinOp.Shr)
+        {
+            throw new IrUnsupportedException($"zig {vector.Describe()}: `{op}` on vectors is not lowered yet");
+        }
+        return new Binary(op, l, r) { Type = vector };
+    }
+
+    /// <summary><c>@reduce(op, v)</c>: over a bool vector a mask test (<c>.Or</c> any lane, <c>.And</c> every lane,
+    /// <c>.Xor</c> an odd count), over a numeric one a <c>ZigVec.Reduce*</c>.</summary>
+    private CExpr LowerReduce(IReadOnlyList<Item> args)
+    {
+        if (args.Count != 2 || EnumLitName(args[0]) is not { } op)
+        {
+            throw new IrUnsupportedException("zig `@reduce` expects (.Op, vector) with an enum-literal operator");
+        }
+        var v = LowerExpr(args[1]);
+        if (v.Type.Unqualified is not CType.Vector vector)
+        {
+            throw new IrUnsupportedException($"zig `@reduce` needs a vector operand; got {v.Type.Describe()}");
+        }
+        if (vector.IsMask)
+        {
+            var zero = new LitInt("0", 0) { Type = CType.ULong };
+            var full = new Call("ZigVec.Full", new List<CExpr> { IntLit(vector.Count) }) { Type = CType.ULong };
+            return op switch
+            {
+                "Or" => new Binary(BinOp.Ne, v, zero) { Type = CType.Bool },
+                "And" => new Binary(BinOp.Eq, v, full) { Type = CType.Bool },
+                "Xor" => new Binary(BinOp.Ne,
+                    new Binary(BinOp.BitAnd, new Call("System.Numerics.BitOperations.PopCount", new List<CExpr> { v }) { Type = CType.Int },
+                        IntLit(1)) { Type = CType.Int },
+                    IntLit(0)) { Type = CType.Bool },
+                _ => throw new IrUnsupportedException($"zig `@reduce(.{op}, …)` over a bool vector is not meaningful"),
+            };
+        }
+        if (op is not ("Add" or "Min" or "Max"))
+        {
+            throw new IrUnsupportedException($"zig `@reduce(.{op}, …)` over a numeric vector is not lowered yet (.Add / .Min / .Max are)");
+        }
+        return new Call("ZigVec.Reduce" + op, new List<CExpr> { v }) { Type = vector.Element };
+    }
+
+    /// <summary><c>@select(T, mask, a, b)</c>: lane-wise <c>a</c> where the mask is set, else <c>b</c>.</summary>
+    private CExpr LowerSelect(IReadOnlyList<Item> args, CType? sink)
+    {
+        if (args.Count != 4) { throw new IrUnsupportedException($"zig `@select` expects (T, mask, a, b); got {args.Count}"); }
+        var mask = LowerExpr(args[1]);
+        if (mask.Type.Unqualified is not CType.Vector { IsMask: true } maskType)
+        {
+            throw new IrUnsupportedException($"zig `@select` needs a bool-vector mask; got {mask.Type.Describe()}");
+        }
+        var vector = sink?.Unqualified as CType.Vector ?? new CType.Vector(LowerType(args[0]), maskType.Count);
+        var a = LowerExprSink(args[2], vector);
+        var b = LowerExprSink(args[3], vector);
+        return new Call("ZigVec.Select", new List<CExpr> { mask, a, b }) { Type = vector };
+    }
+
+    /// <summary><c>v[i]</c>: one lane of a numeric vector, or one bit of a bool vector's mask.</summary>
+    private static CExpr VectorLane(CExpr vector, CExpr index, CType.Vector type) => type.IsMask
+        ? new Call("ZigVec.Bit", new List<CExpr> { vector, index }) { Type = CType.Bool }
+        : new Call("ZigVec.Get", new List<CExpr> { vector, index }) { Type = type.Element };
+
+    /// <summary>An <c>int</c> literal.</summary>
+    private static LitInt IntLit(int n) => new(n.ToString(System.Globalization.CultureInfo.InvariantCulture), n) { Type = CType.Int };
+}

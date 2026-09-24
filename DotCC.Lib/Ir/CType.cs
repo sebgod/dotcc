@@ -66,10 +66,12 @@ public abstract record CType
     /// output-language projection (that is the backend's <see cref="ITarget.RenderType"/>).</summary>
     public string Describe() => this switch
     {
+        Prim { IsComptimeInt: true } => "comptime_int",
         Prim p => p.Name,
         VoidType => "void",
         Pointer ptr => ptr.Pointee.Describe() + "*",
         Array a => a.Element.Describe() + "[" + (a.Count?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "") + "]",
+        Vector v => "@Vector(" + v.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) + ", " + v.Element.Describe() + ")",
         Func f => f.Return.Describe() + "(*)(" + string.Join(", ", f.Params.Select(p => p.Describe())) + ")",
         Named n => n.Name,
         Enum e => "enum " + e.Name,
@@ -93,6 +95,9 @@ public abstract record CType
     /// integer conversions and <see cref="Bytes"/> gives the width.</summary>
     public sealed record Prim(string Name, int Bytes, bool Integer, bool Signed) : CType
     {
+        /// <summary>Zig's <c>comptime_int</c> (see <see cref="ComptimeInt"/>): an <c>__int128</c> carrier that
+        /// compares unequal to a plain <c>i128</c>, so <c>@typeInfo</c> and generic keys can tell them apart.</summary>
+        public bool IsComptimeInt { get; init; }
         public override int SizeOf => Bytes;
         public override bool IsInteger => Integer;
         public override bool IsArithmetic => true;
@@ -128,6 +133,31 @@ public abstract record CType
         /// <summary>The innermost non-array element (peels all array dimensions) —
         /// the flat scalar/struct the storage holds.</summary>
         public CType FlatElement { get { var e = Element; while (e is Array a) { e = a.Element; } return e; } }
+    }
+
+    /// <summary>A Zig SIMD vector <c>@Vector(Count, Element)</c> (road-to-zig-std, the target-identity segment T5).
+    /// A numeric one renders as .NET's <c>Vector64/128/256/512&lt;T&gt;</c> by its total width; a BOOL one (what a
+    /// comparison yields) is a lane bitmask in a <c>ulong</c> (see <c>DotCC.Libc.ZigVec</c>).</summary>
+    public sealed record Vector(CType Element, int Count) : CType
+    {
+        public override int SizeOf => IsMask ? 8 : Element.SizeOf * Count;
+
+        /// <summary>True for a BOOL vector, carried as a lane bitmask.</summary>
+        public bool IsMask => Element.Unqualified is Prim { Name: "_Bool" };
+
+        /// <summary>The .NET vector type family for a numeric vector of this width (<c>Vector128</c>), or null
+        /// for a width .NET has no vector type of.</summary>
+        public string? NetFamily => (Element.SizeOf * Count) switch
+        {
+            8 => "Vector64",
+            16 => "Vector128",
+            32 => "Vector256",
+            64 => "Vector512",
+            _ => null,
+        };
+
+        /// <summary>The bit width of <see cref="NetFamily"/> (64 / 128 / 256 / 512).</summary>
+        public int Bits => Element.SizeOf * Count * 8;
     }
 
     /// <summary>A function type. Not a value type in C; carried so a function
@@ -391,6 +421,12 @@ public abstract record CType
     /// <see cref="UsualArithmetic"/> ranks them above <c>long</c> structurally on <c>Bytes</c>.</summary>
     public static readonly CType Int128 = new Prim("__int128", 16, true, true);
     public static readonly CType UInt128 = new Prim("unsigned __int128", 16, true, false);
+
+    /// <summary>Zig's <c>comptime_int</c>, the type of an untyped integer known at compile time. It renders as
+    /// <see cref="Int128"/> (the carrier every comptime-only computation already uses) but is a distinct value,
+    /// so <c>@typeInfo(@TypeOf(x))</c> answers <c>.comptime_int</c> and an <c>anytype</c> parameter bound to one
+    /// becomes a comptime VALUE parameter, instantiated per value, as in zig.</summary>
+    public static readonly CType ComptimeInt = new Prim("__int128", 16, true, true) { IsComptimeInt = true };
     public static readonly CType Float = new Prim("float", 4, false, true);
     public static readonly CType Double = new Prim("double", 8, false, true);
     public static readonly CType LongDouble = new Prim("long double", 8, false, true);

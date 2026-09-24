@@ -905,6 +905,10 @@ productions:
       # the statement forms `stmtIfCapture*`; the optional/pointer payload binds `x` in the then-branch.
       - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', RhsExpr, 'else', RhsExpr], action: ifExprCapture }
       - { lhs: SwitchExpr, rhs: ['switch', '(', Expr, ')', '{', Prongs, '}'],      action: switchExpr }
+      # `switch (if (from < 0) @max(…) else to) { … }` (std.math.IntFittingRange): a value `if` as the subject.
+      # `if` is not in FIRST(Expr), so after `switch (` it is a clean shift; the record is the same.
+      - { lhs: SwitchExpr, rhs: ['switch', '(', IfExpr, ')', '{', Prongs, '}'],    action: switchExpr }
+      - { lhs: SwitchExpr, rhs: ['switch', '(', IfExpr, ')', '{', Prongs, ',', '}'], action: switchExprTrailing }
       - { lhs: SwitchExpr, rhs: ['switch', '(', Expr, ')', '{', Prongs, ',', '}'], action: switchExprTrailing }
       - { lhs: LabeledBlock, rhs: [IDENT, ':', Block], action: labeledBlock }
       # The value-position loops. A braced `Block` body (the value form runs statements and yields via
@@ -961,6 +965,9 @@ productions:
     rules:
       - { lhs: Add, rhs: [Add, '+', Mul], action: add }
       - { lhs: Add, rhs: [Add, '-', Mul], action: sub }
+      # `x + switch (…) {…}` (std.math.IntFittingRange's width): after the operator, `switch` can only open a
+      # value switch, a clean shift, exactly as `and switch` above.
+      - { lhs: Add, rhs: [Add, '+', SwitchExpr], action: addSwitch }
       # Array/string CONCAT `a ++ b` (Zig's PLUS2 — an Add-level, left-assoc binary op). Parses today;
       # lowering (comptime array/string concat) is deferred (loud cut) — the goal here is parse coverage
       # (std's `@compileError("…" ++ @tagName(x))` and similar comptime string building).
@@ -1262,6 +1269,9 @@ productions:
     rules:
       - { lhs: Arg, rhs: [Expr] }
       - { lhs: Arg, rhs: ['{', '}'], action: voidArg }
+      # A switch EXPRESSION as an argument (std.math.log2's `math.log2_int(switch (s) { … }, x)`),
+      # transparent like the Expr arm. `switch` is not in FIRST(Expr), so it is a shift decision too.
+      - { lhs: Arg, rhs: [SwitchExpr] }
 
   # A named field init's value: an Expr, or `{}` (void; `{` is not in FIRST(Expr), so conflict-free).
   - derivation: none
