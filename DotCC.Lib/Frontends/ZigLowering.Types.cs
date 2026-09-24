@@ -166,6 +166,14 @@ internal sealed partial class ZigLowering
             _typeInfoBindings[name] = tiBinding;
             return true;
         }
+        // `const signedness = @typeInfo(ReturnType).int.signedness;` (std.mem.readVarInt, task #76) — a comptime enum
+        // TAG, bound for a later `@Int(signedness, …)` / `==` / `switch`, and the decl dropped: it has no runtime value.
+        if (rhs.Content is Zig.Field { Arg2: var tagField } && Tok(tagField) is "signedness" or "layout"
+            && TryEvalComptimeTag(rhs, out var boundTag, out _))
+        {
+            _comptimeTagBindings[name] = boundTag;
+            return true;
+        }
         // `const names = @typeInfo(T).@"struct".field_names;` — a comptime member LIST (S5c), bound
         // and the decl DROPPED for the same reason: it has no runtime representation.
         if (TryFoldTypeInfoList(rhs, out var tiList))
@@ -299,6 +307,13 @@ internal sealed partial class ZigLowering
                 type = switched;
                 return true;
 
+            // `const DT = if (@bitSizeOf(T) <= 64) u64 else u128;` (std.fmt.float.render, task #77): a comptime condition
+            // choosing between two types. A runtime condition, or an arm that is not a type, is left to the value path.
+            case Zig.IfExpr ie when TryFoldTypeIfCondition(ie.Arg2) is { } takenArm
+                                    && TryTypeAliasRhs(takenArm ? ie.Arg4 : ie.Arg6, out var ifType):
+                type = ifType;
+                return true;
+
             // `pub const Size = Unmanaged.Size;` (std.HashMap) — a container's nested type or type const,
             // named qualified. Before the std-path case: a local container name is never a std path.
             case Zig.Field when TryResolveQualifiedNestedType(rhs) is { } qualified:
@@ -319,6 +334,17 @@ internal sealed partial class ZigLowering
                 type = CType.Int;
                 return false;
         }
+    }
+
+    /// <summary>The value of an <c>if</c> condition in a type alias, when it is known at compile time (a comptime question,
+    /// or anything the const folder settles: <c>@bitSizeOf(T) &lt;= 64</c>); null otherwise. The condition is lowered into a
+    /// throwaway hoist, since a type alias emits no statement.</summary>
+    private bool? TryFoldTypeIfCondition(Item cond)
+    {
+        if (TryFoldComptimeCondition(cond) is { } folded) { return folded; }
+        using var _ = EnterThrowawayHoist();
+        try { return _ir.ConstEval(LowerExpr(cond)) is { } v ? v != 0 : null; }
+        catch (IrUnsupportedException) { return null; }
     }
 
     /// <summary>A switch over a comptime tag that selects a TYPE (see <see cref="TryTypeAliasRhs"/>): its type, or
@@ -1252,8 +1278,8 @@ internal sealed partial class ZigLowering
     /// length (see <see cref="DeclOf"/>); the symbol's type stays the N-element array.</summary>
     private static bool IsSentinelArrayType(Item? typeItem) => typeItem?.Content is Zig.TySentArray;
 
-    /// <summary>Integer <c>const</c> locals whose initializer did not fold where they were declared (a call), by symbol,
-    /// with the lowered initializer: a comptime position that names one (an array extent) runs it then.</summary>
+    /// <summary><c>comptime_int</c> <c>const</c> locals whose initializer did not fold where they were declared (a call), by
+    /// symbol, with the lowered initializer: a comptime position that names one (an array extent) runs it then.</summary>
     private readonly Dictionary<Symbol, CExpr> _unfoldedConstInits = new();
 
     /// <summary>Const-evaluate a <c>[N]T</c> array size. A bare integer literal <c>N</c> takes a
@@ -1272,7 +1298,7 @@ internal sealed partial class ZigLowering
         // An extent is a comptime position, so a CALL in it runs at compile time (`[lenFor(u8)]u8`): the
         // interpreter lowers the callee's body now if it is still pending (the comptime engine's E2).
         var size = LowerExpr(sizeExpr);
-        // A local integer const bound to a call (`var stack: [stack_size]Range` in std.sort.pdq) folds its initializer.
+        // A comptime_int local bound to a call (`var stack: [stack_size]Range` in std.sort.pdq) folds its initializer.
         if (size is VarRef { Sym: var sizeSym } && _unfoldedConstInits.TryGetValue(sizeSym, out var sizeInit)) { size = sizeInit; }
         return (_ir.ConstEval(size) ?? (_ir.ResolveComptimeFold(size) is { } folded ? _ir.ConstEval(folded) : null)) is { } n
             ? (int)n

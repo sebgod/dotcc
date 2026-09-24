@@ -534,6 +534,56 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_signedness_tag_bound_to_a_const_builds_an_int_type()
+    {
+        var cs = EmitZig("""
+            fn widen(comptime T: type, v: T) u16 {
+                const signedness = @typeInfo(T).int.signedness;
+                const W = @Int(signedness, 16);
+                const w: W = v;
+                return @bitCast(w);
+            }
+            pub fn main() u8 {
+                return @truncate(widen(i8, -3) +% widen(u8, 200));
+            }
+            """);
+        // std.mem.readVarInt's `const signedness = @typeInfo(ReturnType).int.signedness;` (task #76): a comptime tag.
+        cs.ShouldContain("short w = v;");
+        cs.ShouldContain("ushort w = v;");
+    }
+
+    [Fact]
+    public void A_type_chosen_by_a_comptime_if_compares_equal_to_its_arm()
+    {
+        var cs = EmitZig("""
+            const small = [_]u8{ 1, 2, 3 };
+            const big = [_]u8{ 7, 8, 9, 10 };
+            fn pick(comptime T: type) u8 {
+                const DT = if (@bitSizeOf(T) <= 64) u64 else u128;
+                const k: u8 = switch (DT) {
+                    u64 => 1,
+                    u128 => 2,
+                    else => 3,
+                };
+                const tables = switch (DT) {
+                    u64 => &small,
+                    u128 => &big,
+                    else => unreachable,
+                };
+                return @sizeOf(DT) + k + tables[1] + @as(u8, @intCast(tables.len));
+            }
+            pub fn main() u8 {
+                return pick(f64) + pick(u128);
+            }
+            """);
+        // std.fmt.float.render's `DT` (task #77): `DT == u64` holds (it had silently taken `else`), `&small` of an array
+        // global is its storage pointer, and `.len` reads through a pointer to an array.
+        cs.ShouldContain("byte k = 1;");
+        cs.ShouldContain("byte* tables = (byte*)small;");
+        cs.ShouldContain("unchecked((byte)(byte)3UL)");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

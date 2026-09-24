@@ -2106,6 +2106,11 @@ internal sealed class CSharpBackend
             // address via Unsafe.AsPointer: dotcc's globals are unmanaged value
             // types in non-moving static storage, so the pointer is stable. (Lua
             // leans on this: &absentkey, &dummynode_.)
+            // &arrayGlobal — an array global is stored as its element pointer (a pinned backing store), so its address
+            // IS that pointer (zig's `&small` in std.fmt.float.render's table pointers); `Unsafe.AsPointer<T*>` would not
+            // compile (CS0306).
+            case UnOp.AddrOf when u.Operand is VarRef { Sym.IsGlobal: true } arrGlobal && arrGlobal.Type.Unqualified is CType.Array:
+                return ($"({Cs(u.Type)}){Render(arrGlobal).Text}", PUnary);
             case UnOp.AddrOf when RootsAtGlobal(u.Operand):
                 return ($"({Cs(u.Type)})System.Runtime.CompilerServices.Unsafe.AsPointer(ref {BareLValue(u.Operand)})", PUnary);
             // &<rvalue> — the address of a materialized temporary: a C compound literal

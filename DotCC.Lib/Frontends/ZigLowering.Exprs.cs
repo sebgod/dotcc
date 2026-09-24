@@ -569,6 +569,13 @@ internal sealed partial class ZigLowering
                     if (IsStringLiteralValue(structExpr)) { arrLen--; }
                     return new LitInt(arrLen.ToString(System.Globalization.CultureInfo.InvariantCulture), arrLen) { Type = CType.ULong };
                 }
+                // `.len` through a pointer to an array (`tables.len` with `tables = &small`, std.fmt.float.render's table
+                // pointers): the pointee's comptime count, as zig reads it.
+                if (fieldName == "len" && structExpr.Type.Unqualified is CType.Pointer { Pointee: var lenPointee }
+                    && lenPointee.Unqualified is CType.Array { Count: int ptrArrLen })
+                {
+                    return new LitInt(ptrArrLen.ToString(System.Globalization.CultureInfo.InvariantCulture), ptrArrLen) { Type = CType.ULong };
+                }
                 // Tagged-union payload access `u.variant` → `u.__payload.variant` (unchecked,
                 // like Zig's release-mode field access; the tag isn't a user-facing field).
                 if (TryContainerName(structExpr.Type, out var cname)

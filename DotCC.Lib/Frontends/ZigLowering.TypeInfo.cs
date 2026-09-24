@@ -55,6 +55,11 @@ internal sealed partial class ZigLowering
     /// binding does not leak past its arm.</summary>
     private readonly Dictionary<string, ZigTypeInfo> _typeInfoBindings = new(System.StringComparer.Ordinal);
 
+    /// <summary>Each name bound to a comptime enum TAG read off a <c>@typeInfo</c> payload (<c>const signedness =
+    /// @typeInfo(T).int.signedness;</c>), for <see cref="TryEvalComptimeTag"/>. Name-keyed and function-flat, like
+    /// <see cref="_typeInfoBindings"/>.</summary>
+    private readonly Dictionary<string, string> _comptimeTagBindings = new(System.StringComparer.Ordinal);
+
     /// <summary>Name → previous <see cref="_typeInfoBindings"/> entry shadowed by a folded comptime
     /// <c>switch</c> prong's <c>|i|</c> capture, restored when the arm is done — the proven W2/W3b
     /// shadow pattern (<see cref="_typeAliasShadows"/>) applied to the reflection bindings.</summary>
@@ -109,6 +114,11 @@ internal sealed partial class ZigLowering
         {
             var (switchSubject, switchProngs) = cur.Content is Zig.SwitchExpr se ? (se.Arg2, se.Arg5) : (((Zig.SwitchExprTrailing)cur.Content).Arg2, ((Zig.SwitchExprTrailing)cur.Content).Arg5);
             return TrySelectTypeProng(switchSubject, switchProngs) is { Expr: { } typeArm, CaptureName: null } ? DeclaredBitsOfTypeArg(typeArm) : null;
+        }
+        // A comptime `if` choosing a type (`const DT = if (@bitSizeOf(T) <= 64) u64 else u128;`): the taken arm's width.
+        if (cur.Content is Zig.IfExpr typeIf && TryFoldTypeIfCondition(typeIf.Arg2) is { } typeIfTaken)
+        {
+            return DeclaredBitsOfTypeArg(typeIfTaken ? typeIf.Arg4 : typeIf.Arg6);
         }
         // An error union's width is its payload's (`fn charToDigit(…) (error{InvalidCharacter}!u8)`).
         if (cur.Content is Zig.ErrUnion eu) { return DeclaredBitsOfTypeArg(eu.Arg2); }
@@ -578,6 +588,13 @@ internal sealed partial class ZigLowering
         tag = "";
         payload = null;
         if (expr.Content is Zig.Grouped g) { return TryEvalComptimeTag(g.Arg1, out tag, out payload); }
+        // A name bound to a comptime tag (`const signedness = @typeInfo(T).int.signedness;`).
+        if (expr.Content is Zig.Ident tagId && _symbols.Resolve(Tok(tagId.Arg0)) is null
+            && _comptimeTagBindings.TryGetValue(Tok(tagId.Arg0), out var boundTag))
+        {
+            tag = boundTag;
+            return true;
+        }
         // `<info>.signedness` — checked BEFORE the whole-value case so the field wins over the record.
         if (expr.Content is Zig.Field f && Tok(f.Arg2) == "signedness" && TryEvalTypeInfo(f.Arg0, out var sInfo))
         {

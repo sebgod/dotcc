@@ -4899,6 +4899,39 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{} {} {any} [{}]\\n\", .{ t, f, x < 1, !f });\n" +
             "}\n", 0,
             "true false false [true]" },
+        // A comptime signedness tag bound to a const drives @Int (task #76, std.mem.readVarInt's shape).
+        new object[] { "signedness_tag_binding",
+            "fn widen(comptime T: type, v: T) u16 {\n" +
+            "    const signedness = @typeInfo(T).int.signedness;\n" +
+            "    const W = @Int(signedness, 16);\n" +
+            "    const w: W = v;\n" +
+            "    return @bitCast(w);\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return @truncate(widen(i8, -3) +% widen(u8, 200));\n" +
+            "}\n", 197, "" },
+        // A type chosen by a comptime `if` equals its arm in a type switch (task #77; it had silently taken `else`),
+        // `&array_global` is its storage pointer, and `.len` reads through a pointer to an array.
+        new object[] { "type_if_alias",
+            "const small = [_]u8{ 1, 2, 3 };\n" +
+            "const big = [_]u8{ 7, 8, 9, 10 };\n" +
+            "fn pick(comptime T: type) u8 {\n" +
+            "    const DT = if (@bitSizeOf(T) <= 64) u64 else u128;\n" +
+            "    const k: u8 = switch (DT) {\n" +
+            "        u64 => 1,\n" +
+            "        u128 => 2,\n" +
+            "        else => 3,\n" +
+            "    };\n" +
+            "    const tables = switch (DT) {\n" +
+            "        u64 => &small,\n" +
+            "        u128 => &big,\n" +
+            "        else => unreachable,\n" +
+            "    };\n" +
+            "    return @sizeOf(DT) + k + tables[1] + @as(u8, @intCast(tables.len));\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return pick(f64) + pick(u128);\n" +
+            "}\n", 44, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -6180,6 +6213,27 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // std.mem.readVarInt from real std (task #76): big and little endian, signed and unsigned, 1 to 4 bytes into
+    // u32 / i16 / i32 / u64 / i8, via `const signedness = @typeInfo(ReturnType).int.signedness;` and `@Int(signedness, …)`.
+    [Fact]
+    public void Dotcc_matches_zig_std_mem_read_var_int() =>
+        MatchesZigWithRealStd("readvarint",
+            "const std = @import(\"std\");\n" +
+            "const mem = std.mem;\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const bytes = [_]u8{ 0xff, 0x02, 0x03, 0x84 };\n" +
+            "    const a = mem.readVarInt(u32, &bytes, .big);\n" +
+            "    const b = mem.readVarInt(u32, &bytes, .little);\n" +
+            "    const c = mem.readVarInt(i16, bytes[0..2], .big);\n" +
+            "    const d = mem.readVarInt(i32, bytes[1..4], .little);\n" +
+            "    const e = mem.readVarInt(u64, bytes[0..3], .big);\n" +
+            "    const f = mem.readVarInt(i8, bytes[0..1], .little);\n" +
+            "    std.debug.print(\"{x} {x} {d} {d} {x} {d}\\n\", .{ a, b, c, d, e, f });\n" +
+            "    const mix: u32 = a ^ b ^ @as(u32, @bitCast(@as(i32, c))) ^ @as(u32, @bitCast(d)) ^ @as(u32, @truncate(e)) ^ @as(u32, @bitCast(@as(i32, f)));\n" +
+            "    return @truncate(mix ^ (mix >> 8) ^ (mix >> 16) ^ (mix >> 24));\n" +
+            "}\n", 134);
 
     // std.unicode from real std (task #72): utf8CountCodepoints (the ASCII fast path, truncated / invalid / overlong
     // input), utf8Decode through `utf8Decode2(bytes[0..2].*)`, and utf8Encode. utf8ByteSequenceLength's

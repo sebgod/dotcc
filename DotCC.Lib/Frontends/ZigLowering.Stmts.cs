@@ -2226,7 +2226,10 @@ internal sealed partial class ZigLowering
         var lb = DeclaredBitsOfTypeArg(left);
         if (!TryTypeAliasRhs(right, out var rt)) { return null; }
         var rb = DeclaredBitsOfTypeArg(right);
-        return lt.Unqualified.Equals(rt.Unqualified) && lb == rb;
+        // A side with no recorded width is its carrier's (an alias whose width was never tracked); comparing the raw null
+        // against `u64`'s 64 had made `DT == u64` false for `const DT = if (…) u64 else u128;`, silently (task #77).
+        static int? Carrier(CType t) => t.Unqualified is CType.Prim { Integer: true, Bytes: var bytes } ? bytes * 8 : null;
+        return lt.Unqualified.Equals(rt.Unqualified) && (lb ?? Carrier(lt)) == (rb ?? Carrier(rt));
     }
 
     /// <summary>True for the bare names <c>comptime_int</c> / <c>comptime_float</c> — zig's untyped
