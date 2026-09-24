@@ -105,6 +105,7 @@ internal sealed partial class ZigLowering
             case Zig.StructDeclEmpty s:  return LowerLocalStruct(Tok(s.Arg1), null,   AggregateLayout.Default);
             case Zig.ExternStructDecl s: return LowerLocalStruct(Tok(s.Arg1), s.Arg6, AggregateLayout.Sequential);
             case Zig.PackedStructDecl s: return LowerLocalStruct(Tok(s.Arg1), s.Arg6, AggregateLayout.Packed);
+            case Zig.PackedStructDeclBacked s: return LowerLocalStruct(Tok(s.Arg1), s.Arg9, AggregateLayout.Packed);
             case Zig.EnumDecl or Zig.EnumDeclTyped or Zig.UnionDeclEnum or Zig.UnionDeclTagged or Zig.UnionDeclUntagged:
                 throw new IrUnsupportedException(
                     "zig: an in-function `enum`/`union` declaration is not supported yet (wall-plan W2 is struct-only); declare it at top/container level");
@@ -2149,9 +2150,10 @@ internal sealed partial class ZigLowering
         => item.Content is Zig.Ident id && Tok(id.Arg0) is "comptime_int" or "comptime_float";
 
     /// <summary>True for a zig primitive type name dotcc does not lower (<c>f16</c>, <c>f80</c>, <c>f128</c>,
-    /// <c>c_longdouble</c>): a comparison against one still answers, since no lowered type is it.</summary>
+    /// <c>c_longdouble</c>, the zero-width <c>u0</c> / <c>i0</c>): a comparison against one still answers, since no
+    /// lowered type is it (std.bit_set's <c>if (MaskInt == u0) return;</c>).</summary>
     private static bool IsUnmodeledPrimitiveType(Item item)
-        => item.Content is Zig.Ident id && Tok(id.Arg0) is "f16" or "f80" or "f128" or "c_longdouble";
+        => item.Content is Zig.Ident id && Tok(id.Arg0) is "f16" or "f80" or "f128" or "c_longdouble" or "u0" or "i0";
 
     private CStmt LowerIfCapture(Item condItem, string capName, Item thenItem, Item? elseItem, string? errCapName)
     {

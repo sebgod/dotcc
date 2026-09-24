@@ -1474,7 +1474,7 @@ internal sealed partial class ZigLowering
                         nm.sym, nContainer, nm.ps, nm.body, typeSeeds, valueSeeds, optionalSeeds));
                 }
                 _currentContainer = mangled;
-                RegisterStruct(mangled, fields);
+                RegisterStruct(mangled, fields, bodyResult.Layout);
                 // `const Self = @This();` → a self alias scoped to the MANGLED container, plus any value
                 // const — both keyed by the mangled name, so a method's `self: *Self` and a `S.NAME` use
                 // resolve exactly like an ordinary container's. Runs after _containerTypes[mangled] is set

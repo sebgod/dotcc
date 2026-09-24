@@ -265,6 +265,14 @@ internal sealed partial class ZigLowering
             case Zig.Shr a:     return Bin(BinOp.Shr, a.Arg0, a.Arg2);
             // value prefix
             case Zig.PreNeg p:    return Pre(UnOp.Neg, p.Arg1);
+            // `-%x`: `0 -% x` at the operand's type, wrapping as the infix form does (C#'s unchecked arithmetic, narrowed back).
+            case Zig.PreNegWrap p:
+            {
+                var operand = LowerExpr(p.Arg1);
+                var t = operand.Type.Unqualified;
+                var negated = new Binary(BinOp.Sub, new LitInt("0", 0) { Type = CType.Int }, operand) { Type = t };
+                return new Cast(t, negated) { Type = t };
+            }
             case Zig.PreBitNot p: return Pre(UnOp.BitNot, p.Arg1);
             case Zig.PreNot p:    return Pre(UnOp.LogNot, p.Arg1);
             // Address-of `&x` → a `*T` pointer. Mark a var/param operand AddressTaken so

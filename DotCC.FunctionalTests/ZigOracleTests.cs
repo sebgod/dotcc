@@ -4341,6 +4341,47 @@ public sealed class ZigOracleTests
             "    buf[bump() - 1] += 3;\n" +
             "    return total + buf[0] + calls;\n" +
             "}\n", 20, "" },
+        // Backed packed structs (road-to-zig-std, task #61): `packed struct(u8)` bit-fields `@bitCast` to their byte, a
+        // returned `packed struct(u16)`, `MaskInt == u0` folding away, `-%x`, `@ctz` into a `?usize`, `~@as(u8, 0)`.
+        new object[] { "packed_struct_backed",
+            "const Flags = packed struct(u8) {\n" +
+            "    read: u1,\n" +
+            "    write: u1,\n" +
+            "    mode: u6,\n" +
+            "};\n" +
+            "\n" +
+            "fn Mask(comptime n: u16) type {\n" +
+            "    return packed struct(u16) {\n" +
+            "        const Self = @This();\n" +
+            "        pub const MaskInt = u16;\n" +
+            "        bits: MaskInt,\n" +
+            "\n" +
+            "        pub fn count(self: Self) usize {\n" +
+            "            if (MaskInt == u0) return 0;\n" +
+            "            _ = n;\n" +
+            "            return @popCount(self.bits);\n" +
+            "        }\n" +
+            "\n" +
+            "        pub fn first(self: Self) ?usize {\n" +
+            "            if (self.bits == 0) return null;\n" +
+            "            return @ctz(self.bits);\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "fn fill(comptime T: type, on: bool) T {\n" +
+            "    return -%@as(T, @intFromBool(on));\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const f = Flags{ .read = 1, .write = 0, .mode = 5 };\n" +
+            "    const raw: u8 = @bitCast(f);\n" +
+            "    const m = Mask(16){ .bits = 0b1011000 };\n" +
+            "    const full = fill(u8, true);\n" +
+            "    const none = fill(u8, false);\n" +
+            "    const all: u8 = ~@as(u8, 0);\n" +
+            "    return raw + @as(u8, @intCast(m.count())) + @as(u8, @intCast(m.first().?)) + (full - 250) + none + (all - 255);\n" +
+            "}\n", 32, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -5562,6 +5603,31 @@ public sealed class ZigOracleTests
             "\n" +
             "    return @intCast(total % 256);\n" +
             "}\n", 230);
+
+    /// <summary>std.bit_set from source (road-to-zig-std, task #61): StaticBitSet(16) (a `return packed struct(MaskInt)`)
+    /// with set / toggle / setValue / unset / count / isSet / findFirstSet, and IntegerBitSet(8)'s `.full`
+    /// (`~@as(MaskInt, 0)`).</summary>
+    [Fact]
+    public void Dotcc_matches_zig_std_bit_set_from_source() =>
+        MatchesZigWithRealStd("bitset",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var s: std.StaticBitSet(16) = .empty;\n" +
+            "    s.set(3);\n" +
+            "    s.set(9);\n" +
+            "    s.set(12);\n" +
+            "    s.toggle(3);\n" +
+            "    s.setValue(5, true);\n" +
+            "    s.unset(9);\n" +
+            "    var total: usize = s.count() * 10;\n" +
+            "    total += @intFromBool(s.isSet(12)) + @intFromBool(s.isSet(9));\n" +
+            "    total += s.findFirstSet().?;\n" +
+            "    var f: std.bit_set.IntegerBitSet(8) = .full;\n" +
+            "    f.unset(0);\n" +
+            "    total += f.count();\n" +
+            "    return @intCast(total);\n" +
+            "}\n", 33);
 
     /// <summary>Run <paramref name="program"/> through dotcc (navigating the real std at <c>DOTCC_ZIG_LIB_DIR</c>) and
     /// through zig, and require both to exit alike and print the same (and, when given, with

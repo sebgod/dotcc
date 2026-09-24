@@ -37,7 +37,8 @@ internal sealed partial class ZigLowering
     /// already-resolved type the body delegated to (<see cref="Delegated"/>) together with the declared
     /// integer width it carries (<see cref="DelegatedBits"/> — so <c>fn U() type { return u21; }</c>
     /// still answers 21, not the widened 32).</summary>
-    private readonly record struct TypeBodyResult(bool IsStruct, Item? Fields, CType? Delegated, int? DelegatedBits);
+    private readonly record struct TypeBodyResult(bool IsStruct, Item? Fields, CType? Delegated, int? DelegatedBits,
+        AggregateLayout Layout = AggregateLayout.Default);
 
     /// <summary>Mangled delegating instances → the type they resolved to, plus its declared width (the
     /// memo for a body that returns a type rather than a <c>struct {…}</c> — the struct form memoizes in
@@ -149,6 +150,10 @@ internal sealed partial class ZigLowering
                     break;
                 case Zig.ReturnStructType rst:
                     return new TypeBodyResult(true, rst.Arg3, null, null);   // FieldDecls
+                case Zig.ReturnPackedStructType pst:
+                    return new TypeBodyResult(true, pst.Arg4, null, null, AggregateLayout.Packed);
+                case Zig.ReturnPackedStructTypeBacked pbt:
+                    return new TypeBodyResult(true, pbt.Arg7, null, null, AggregateLayout.Packed);   // backing type Arg5
                 case Zig.ReturnStructTypeEmpty:
                     return new TypeBodyResult(true, null, null, null);       // `return struct {};` — zero fields
                 case Zig.StmtReturn r:

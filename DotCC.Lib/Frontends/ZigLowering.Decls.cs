@@ -735,6 +735,7 @@ internal sealed partial class ZigLowering
             Zig.StructDecl s => SplitMembers(s.Arg5).containers,
             Zig.ExternStructDecl s => SplitMembers(s.Arg6).containers,
             Zig.PackedStructDecl s => SplitMembers(s.Arg6).containers,
+            Zig.PackedStructDeclBacked s => SplitMembers(s.Arg9).containers,
             Zig.EnumDecl e => FromEnum(e.Arg5).ToList(),
             Zig.EnumDeclTyped e => FromEnum(e.Arg8).ToList(),
             Zig.UnionDeclEnum u => FromUnion(u.Arg8).ToList(),
@@ -1604,7 +1605,7 @@ internal sealed partial class ZigLowering
                 {
                     return CoerceToSlice(builtinValue, builtinSlice);
                 }
-                return builtinValue;
+                return WidenToOptionalPayload(builtinValue, sink) ?? builtinValue;
             }
             // A switch EXPRESSION at a typed sink (`const x: T = switch (y) { … }`) — each arm's
             // value lowers at `sink`, so a result-located arm (`.member` / `.{…}` / a cast) resolves.
@@ -1683,6 +1684,7 @@ internal sealed partial class ZigLowering
                 {
                     return CoerceToSlice(lowered, slc);
                 }
+                if (WidenToOptionalPayload(lowered, sink) is { } widened) { return widened; }
                 // A plain value at an ERROR-UNION sink (`fn unwrap(v: anyerror!u8)` called as `unwrap(5)`) is its
                 // success variant, as zig coerces it; an error union or an error code passes as it is.
                 if (sink?.Unqualified is CType.ErrorUnion okSink && lowered.Type?.Unqualified is not (CType.ErrorUnion or CType.ErrorSetType))
@@ -1708,6 +1710,16 @@ internal sealed partial class ZigLowering
             }
         }
     }
+
+    /// <summary>An integer of another width at an optional integer sink (std.bit_set's <c>return @ctz(mask);</c> in a
+    /// <c>?usize</c> method), cast to the payload type, since C# has no implicit <c>int</c> → <c>ulong?</c>; null for
+    /// anything else.</summary>
+    private static CExpr? WidenToOptionalPayload(CExpr value, CType? sink)
+        => sink?.Unqualified is CType.Optional { Inner: var optInner }
+           && optInner.Unqualified is CType.Prim { Integer: true } optPrim
+           && value.Type?.Unqualified is CType.Prim { Integer: true } valuePrim && !valuePrim.Equals(optPrim)
+            ? new Cast(optInner, value) { Type = optInner }
+            : null;
 
     /// <summary>Locals and globals bound, without an annotation, to a string literal (<c>const s = "abc";</c>)
     /// — zig types such a binding <c>*const [3:0]u8</c>, whose <c>.len</c> is 3, but the lowered symbol

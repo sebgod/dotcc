@@ -941,6 +941,10 @@ vector length feeds TYPES.
   walls down (type switches and comparisons over unlowered floats, a switch-typed local, field-value `if` / `switch`,
   `&.{…}` comptime strings, `inline for` over a comptime string, `if (c) return x else y`); next is `MantissaT` passed
   as a type argument (`tryParseDigits(MantissaT, …)`).
+- **std.bit_set RUNS from real std, == zig (2026-09-24, task #61)**: StaticBitSet / IntegerBitSet (set, toggle,
+  setValue, unset, count, isSet, findFirstSet, `.full`), 33 == zig. Needed: `packed struct(T)` (declared and returned;
+  grammar), `u0` in a type comparison, prefix `-%`, an integer into a `?usize` return, and `unchecked` around a
+  constant `~` narrowed to a byte. Also task #62: a compound assignment hoists a captured value `if`.
 - **T5 ✅ (2026-09-24)** `@Vector(N, T)` lowers to .NET's `Vector64/128/256/512<T>` by total width (a bool vector,
   what a comparison yields, is a `ulong` lane mask), and real `std.mem.indexOfScalar` runs from source through its
   SIMD path, == zig. Vector surface: `@splat`, an array / slice / `slice[i..][0..N].*` loaded at a vector sink, a list

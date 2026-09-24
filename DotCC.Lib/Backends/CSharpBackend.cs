@@ -1310,7 +1310,7 @@ internal sealed class CSharpBackend
             }
             var cast = $"({t2})({Expr(value)})";
             // An out-of-range CONSTANT cast is CS0221 unless wrapped in unchecked.
-            if (TryConstInt(value, out var k) && !ConstFitsTarget(k, t2))
+            if (TryConstInt(value, out var k) && !ConstFitsTarget(k, t2) || IsConstExpr(value) && HasPromotingUnary(value))
             {
                 cast = $"unchecked({cast})";
             }
@@ -2248,7 +2248,7 @@ internal sealed class CSharpBackend
     private string CoercionCast(CExpr e, string to)
     {
         var text = $"({to})({Sub(e, PUnary)})";
-        return IsIntegerCs(to) && IsConstExpr(e) && !(TryConstInt(e, out var v) && ConstFitsTarget(v, to))
+        return IsIntegerCs(to) && IsConstExpr(e) && (HasPromotingUnary(e) || !(TryConstInt(e, out var v) && ConstFitsTarget(v, to)))
             ? $"unchecked({text})"
             : text;
     }
@@ -2288,12 +2288,26 @@ internal sealed class CSharpBackend
         var text = $"({targetText}){operandText}";
         if (c.Target.Unqualified is CType.Prim { Integer: true } pt
             && IsConstExpr(c.Operand)
-            && !(TryConstInt(c.Operand, out var cv) && ConstFitsTarget(cv, Cs(pt))))
+            && (HasPromotingUnary(c.Operand) || !(TryConstInt(c.Operand, out var cv) && ConstFitsTarget(cv, Cs(pt)))))
         {
             return ($"unchecked({text})", PPrimary);
         }
         return (text, PUnary);
     }
+
+    /// <summary>True when a constant expression applies <c>~</c>: C# evaluates it on the operand PROMOTED to <c>int</c>
+    /// (<c>~(byte)0</c> is <c>-1</c>, zig's <c>~@as(u8, 0)</c> is 255), and the folder cannot see through the inner cast to
+    /// prove it fits, so the narrowing cast is wrapped in <c>unchecked</c> (std.bit_set's
+    /// <c>.full = .{ .mask = ~@as(MaskInt, 0) }</c>). A negation folds the way C# computes it, so it needs no such rule.</summary>
+    private static bool HasPromotingUnary(CExpr e) => e switch
+    {
+        Unary { Op: UnOp.BitNot } => true,
+        Unary u => HasPromotingUnary(u.Operand),
+        Paren p => HasPromotingUnary(p.Inner),
+        Cast c => HasPromotingUnary(c.Operand),
+        Binary b => HasPromotingUnary(b.Left) || HasPromotingUnary(b.Right),
+        _ => false,
+    };
 
     /// <summary>True when <paramref name="e"/> is a C constant expression — only
     /// literals, enum constants, <c>sizeof</c>, and operators over constant
