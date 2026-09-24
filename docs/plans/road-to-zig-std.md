@@ -856,6 +856,8 @@ vector length feeds TYPES.
   `std.mem.findScalarPos`'s SIMD branch (guarded by `!@inComptime()` at runtime): `@Vector`, so the target
   segment T3 → T4 → T5 is now on bufPrint's critical path too.
 - **T5** `@Vector(N, T)` → `Vector128<T>` / `Vector256<T>`, with `@splat`, element-wise ops, `@reduce`.
+- **T6 (backlog)** arm64 hosts: verify and complete the `Arm` intrinsics → `std.Target.aarch64` mapping when this runs on
+  arm64 (the maintainer's request, 2026-09-24; tracked in `docs/plans/deferred.md`, target identity).
 
 ### S0 — the wall-finder + std pin (S; do FIRST, it steers everything)
 

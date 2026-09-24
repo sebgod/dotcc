@@ -183,8 +183,19 @@ its methods + enum members. These edges of the same seam are deliberate V1 cuts 
 |---|---|---|
 | A cross-module container `const` (`k.Cfg.MAX`) | Not resolved — the value path reports `unresolved identifier 'k'` (a 3-segment value chain through a module). Container consts ARE registered, in the owning module's tables | give the value path the same owner lookup the type path got, or share the container-const table through `ZigImportScope` like the method + enum-member tables |
 | A lazy module's top-level `var` named from a function body | Unresolved: only `const`s are lowered on demand, by inlining their comptime initializer at the use site, which a mutable global cannot be | declare the `GlobalVar` on first reference (a lazy counterpart of pass 1.5), memoized per module |
-| dotcc's target identity for std's SIMD paths | Blocks BOTH `std.mem.indexOfScalar` and `std.mem.sort` (std.sort.block reaches it through std.mem). `indexOfScalar` reaches `findScalarPos`, whose vector path asks `std.simd.suggestVectorLength(T)` (a `?comptime_int` over `builtin.cpu` feature queries through `std.Target`). The honest answer for a C# target is null (scalars), which prunes the `@Vector` branch. A DECISION for the user, not a gap to fill silently | a synthetic `builtin.cpu` whose feature queries all fall through, or a curated `suggestVectorLength` returning comptime null; either way the backend/target identity is the choice |
 | A NESTED container named through a module in a type position (`io.File.Reader`, three segments) | Loud: "a dotted type `Reader` that is not a modeled std path". Two segments work (`File.Reader` with `const File = @import("File.zig");`, std's own shape), as does a module path ending at a container | resolve the leading segments as a module path, then hand the rest to the owner's qualified nested-type lookup |
+
+## Zig — target identity (`builtin.cpu`, the target-identity segment of road-to-zig-std)
+
+Decided 2026-09-24 by the maintainer: `builtin.cpu` is a real, typed `std.Target.Cpu` filled from the HOST at
+dotcc's compile time through .NET's own facts (`RuntimeInformation.ProcessArchitecture`,
+`System.Runtime.Intrinsics.X86.*.IsSupported`, `Arm.*.IsSupported`), as zig's `-mcpu=native` does, and
+`@Vector(N, T)` lowers to `Vector128<T>` / `Vector256<T>` (software fallbacks keep a build correct on an older
+CPU). Segment status: `docs/plans/road-to-zig-std.md`, "The target-identity segment".
+
+| Gap | Divergence | Fix sketch |
+|---|---|---|
+| **arm64 hosts (backlog, maintainer request 2026-09-24)** | The segment is being built and verified on the win-x64 desktop, so the x86 path (`std.Target.x86` features, an `x86_64_vN` model, `Vector256` for AVX2) is the one exercised. On an arm64 host (the laptop, a win-arm64 or linux-arm64 CI runner) the aarch64 half is unverified: the mapping from `System.Runtime.Intrinsics.Arm` (`AdvSimd`, `AdvSimd.Arm64`, `Aes`, `Crc32`, `Dp`, `Rdm`, `Sha1`, `Sha256`, and SVE where .NET exposes it) to `std.Target.aarch64` feature names, the CPU model (`generic` vs a named core), `suggestVectorLength` giving 128 bits for NEON (256 if SVE is reported), and `@Vector` staying on `Vector128<T>` (no AVX-style 256-bit path on NEON) | run the target-segment oracles on an arm64 host; complete the `Arm` → aarch64 feature table and model choice in `ZigSyntheticModules`; add an arm64 differential leg for `std.mem.indexOfScalar` / `std.simd.suggestVectorLength`. Note the CI oracle job runs on ubuntu-x64 and the laptop is the arm64 machine |
 
 ## Zig — deferred grammar (does NOT parse yet; cut for a reason)
 
