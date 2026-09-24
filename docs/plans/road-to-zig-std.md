@@ -939,8 +939,10 @@ vector length feeds TYPES.
   operands, empty array literals, a curated `dupe`, mem.zig's `Allocator` mapped to the curated type, an array at a
   `![]T` return, and a pure `stackalloc` hoisted out of a ternary arm. std.fmt.parseFloat is a campaign of its own: six
   walls down (type switches and comparisons over unlowered floats, a switch-typed local, field-value `if` / `switch`,
-  `&.{…}` comptime strings, `inline for` over a comptime string, `if (c) return x else y`); next is `MantissaT` passed
-  as a type argument (`tryParseDigits(MantissaT, …)`).
+  `&.{…}` comptime strings, `inline for` over a comptime string, `if (c) return x else y`); then three more (a type body's
+  own type alias in its methods and generic-method instances, a `FloatInfo.from(T)` type probe that no longer throws, a
+  type comparison folded as a call argument). Next: a labeled switch expression (`label: switch (…) { … break :label v }`,
+  std.math.shl).
 - **std.bit_set RUNS from real std, == zig (2026-09-24, task #61)**: StaticBitSet / IntegerBitSet (set, toggle,
   setValue, unset, count, isSet, findFirstSet, `.full`), 33 == zig. Needed: `packed struct(T)` (declared and returned;
   grammar), `u0` in a type comparison, prefix `-%`, an integer into a `?usize` return, and `unchecked` around a

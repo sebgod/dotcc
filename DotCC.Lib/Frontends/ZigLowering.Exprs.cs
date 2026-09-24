@@ -2224,6 +2224,12 @@ internal sealed partial class ZigLowering
         {
             return tagCmp;
         }
+        // A TYPE comparison anywhere a value is wanted, not only as an `if` condition
+        // (`std.debug.assert(T == f16 or T == f32 or T == f64)` in std.fmt.parse_float): types have no runtime value.
+        if (op is BinOp.Eq or BinOp.Ne && TryFoldTypeEquality(l, r) is { } typesEqual)
+        {
+            return new LitBool(op == BinOp.Eq ? typesEqual : !typesEqual) { Type = CType.Bool };
+        }
         // `==` / `!=` may compare an enum value against a bare `.member` literal (`self == .red`),
         // which Zig result-locates against the other operand's enum type — so those two operands
         // get the enum-aware lowering; everything else lowers both sides plainly.

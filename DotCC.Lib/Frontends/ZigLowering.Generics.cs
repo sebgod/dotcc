@@ -1086,7 +1086,12 @@ internal sealed partial class ZigLowering
         // in std/Target/x86.zig): reified in the owning module, its type arguments read here.
         if (calleeItem.Content is Zig.Field foreignField
             && ForeignContainerOwner(foreignField.Arg0) is ({ } foreignOwner, { } foreignContainer)
-            && foreignOwner.EnsureMethodDeclared(foreignContainer, Tok(foreignField.Arg2)) is { } foreignSym
+            // Through a FILE-as-struct type (`FloatInfo.from(T)` in std.fmt.parse_float, FloatInfo.zig): the symbol is
+            // read without declaring it, since a value-returning generic reached this way is not a type (and the
+            // declaring path rejects any non-call use of one), so the probe must just answer no.
+            && (foreignContainer == foreignOwner._fileContainer
+                    ? foreignOwner.FileStructFnSymbol(Tok(foreignField.Arg2))
+                    : foreignOwner.EnsureMethodDeclared(foreignContainer, Tok(foreignField.Arg2))) is { } foreignSym
             && foreignOwner._typeReturningGenerics.TryGetValue(foreignSym, out var foreignInfo))
         {
             type = foreignOwner.EvalTypeReturningCall(foreignSym, foreignInfo, args, out var foreignBits, typeArgScope: this);
@@ -1303,6 +1308,7 @@ internal sealed partial class ZigLowering
             _typeAliases[name] = type;
             SetDeclaredIntBits(name, bits);
         }
+        var paramTypeSeedCount = typeShadows.Count;   // the body's own type aliases append after these
         try
         {
             // Mangle in PARAMETER order (types and values interleave by position) so the key is
@@ -1420,7 +1426,20 @@ internal sealed partial class ZigLowering
                         optionalSeeds = [.. os.Optionals, .. optionalSeeds];
                     }
                 }
-                _reifiedSeeds[mangled] = (typeSeeds, valueSeeds, optionalSeeds);
+                // The body's own `const NAME = <type>;` locals (std.fmt.parse_float's `const MantissaT = mantissaType(T);` in
+                // BiasedFp) are live while the fields reify, and a METHOD names them too (`@as(MantissaT, …)` in
+                // toFloat): its body lowers later (a deferred method, or a generic method's instance through
+                // _reifiedSeeds), so they ride along as extra type seeds.
+                var methodTypeSeeds = new List<TypeSeed>(typeSeeds);
+                foreach (var (localName, _, _) in typeShadows.Skip(paramTypeSeedCount))
+                {
+                    if (_typeAliases.TryGetValue(localName, out var localType) && methodTypeSeeds.All(t => t.Name != localName))
+                    {
+                        methodTypeSeeds.Add(new TypeSeed(localName, localType,
+                            _declaredIntBits.TryGetValue(localName, out var localBits) ? localBits : null));
+                    }
+                }
+                _reifiedSeeds[mangled] = (methodTypeSeeds, valueSeeds, optionalSeeds);
                 _currentContainer = mangled;
                 // TYPE const members (`pub const Slice = if (alignment) |a| … else []T;` in Aligned,
                 // `pub const Unmanaged = HashMapUnmanaged(K, V, …);` in HashMap) are evaluated NOW, while
@@ -1471,7 +1490,7 @@ internal sealed partial class ZigLowering
                     var nm = DeclareMethod(nContainer, nDef);
                     if (IsFnTemplate(nm.sym)) { continue; }   // a generic method instantiates per call
                     _pendingReifiedMethods.Add(new PendingReifiedMethod(
-                        nm.sym, nContainer, nm.ps, nm.body, typeSeeds, valueSeeds, optionalSeeds));
+                        nm.sym, nContainer, nm.ps, nm.body, methodTypeSeeds, valueSeeds, optionalSeeds));
                 }
                 _currentContainer = mangled;
                 RegisterStruct(mangled, fields, bodyResult.Layout);
@@ -1492,7 +1511,7 @@ internal sealed partial class ZigLowering
                     _currentContainer = mangled;   // DeclareMethod clears it; the next signature needs it back
                     if (IsFnTemplate(me.sym)) { continue; }   // a generic method instantiates per call
                     _pendingReifiedMethods.Add(new PendingReifiedMethod(
-                        me.sym, mangled, me.ps, me.body, typeSeeds, valueSeeds, optionalSeeds));
+                        me.sym, mangled, me.ps, me.body, methodTypeSeeds, valueSeeds, optionalSeeds));
                 }
             }
             finally

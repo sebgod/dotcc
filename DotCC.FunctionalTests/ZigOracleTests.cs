@@ -4447,6 +4447,50 @@ public sealed class ZigOracleTests
             "    const ok: anyerror!usize = 4;\n" +
             "    return @intCast(after_puts + s.total + first + alignment.toByteUnits() + sizeOr(ok) + sizeOr(failing()));\n" +
             "}\n", 49, "" },
+        // A type-returning function's own `const MantissaT = mantissaType(T);` used by its methods, a generic one too
+        // (std.fmt.parse_float's BiasedFp.toFloat), and a type comparison folded as a call argument (task #59).
+        new object[] { "type_body_alias_methods",
+            "fn assert(ok: bool) void {\n" +
+            "    if (!ok) unreachable;\n" +
+            "}\n" +
+            "\n" +
+            "fn mantissaType(comptime T: type) type {\n" +
+            "    return switch (T) {\n" +
+            "        f16, f32, f64 => u64,\n" +
+            "        f80, f128 => u128,\n" +
+            "        else => unreachable,\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "fn Biased(comptime T: type) type {\n" +
+            "    const MantissaT = mantissaType(T);\n" +
+            "    return struct {\n" +
+            "        const Self = @This();\n" +
+            "        f: MantissaT,\n" +
+            "        e: i32,\n" +
+            "\n" +
+            "        pub fn word(self: Self) MantissaT {\n" +
+            "            var w: MantissaT = self.f;\n" +
+            "            w |= @as(MantissaT, @intCast(self.e)) << 8;\n" +
+            "            return w;\n" +
+            "        }\n" +
+            "\n" +
+            "        pub fn scaled(self: Self, comptime k: u8) MantissaT {\n" +
+            "            return self.f * @as(MantissaT, k);\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "fn check(comptime T: type) bool {\n" +
+            "    assert(T == f16 or T == f32 or T == f64);\n" +
+            "    return @sizeOf(T) == 8;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const b = Biased(f64){ .f = 3, .e = 1 };\n" +
+            "    const w = b.word();\n" +
+            "    return @intCast(w % 256 + (w >> 8) + b.scaled(4) + @intFromBool(check(f64)));\n" +
+            "}\n", 17, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

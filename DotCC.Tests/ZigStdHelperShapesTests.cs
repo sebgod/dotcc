@@ -183,6 +183,65 @@ public sealed class ZigStdHelperShapesTests
             """)).Message.ShouldContain("can't be hoisted past an earlier side-effecting operand");
     }
 
+    private const string BiasedProgram = """
+        fn assert(ok: bool) void {
+            if (!ok) unreachable;
+        }
+
+        fn mantissaType(comptime T: type) type {
+            return switch (T) {
+                f16, f32, f64 => u64,
+                f80, f128 => u128,
+                else => unreachable,
+            };
+        }
+
+        fn Biased(comptime T: type) type {
+            const MantissaT = mantissaType(T);
+            return struct {
+                const Self = @This();
+                f: MantissaT,
+                e: i32,
+
+                pub fn word(self: Self) MantissaT {
+                    var w: MantissaT = self.f;
+                    w |= @as(MantissaT, @intCast(self.e)) << 8;
+                    return w;
+                }
+
+                pub fn scaled(self: Self, comptime k: u8) MantissaT {
+                    return self.f * @as(MantissaT, k);
+                }
+            };
+        }
+
+        fn check(comptime T: type) bool {
+            assert(T == f16 or T == f32 or T == f64);
+            return @sizeOf(T) == 8;
+        }
+
+        pub fn main() u8 {
+            const b = Biased(f64){ .f = 3, .e = 1 };
+            const w = b.word();
+            return @intCast(w % 256 + (w >> 8) + b.scaled(4) + @intFromBool(check(f64)));
+        }
+        """;
+
+    [Fact]
+    public void A_type_bodys_own_type_alias_reaches_its_methods_and_generic_method_instances()
+    {
+        var cs = EmitZig(BiasedProgram);
+        cs.ShouldContain("w |= (ulong)(ulong)self.e << 8;");                  // `@as(MantissaT, …)` in a deferred method
+        cs.ShouldMatch(@"ulong Biased__f64_scaled__4\(Biased__f64 self\)\s*\{\s*return self\.f \* \(ulong\)4;");   // a generic method
+    }
+
+    [Fact]
+    public void A_type_comparison_folds_as_a_call_argument()
+    {
+        var cs = EmitZig(BiasedProgram);
+        cs.ShouldContain("assert(((CBool)(Cond.B(((CBool)(Cond.B(false) || Cond.B(false)))) || Cond.B(true))));");
+    }
+
     [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
