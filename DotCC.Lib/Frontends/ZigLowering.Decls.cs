@@ -2248,6 +2248,26 @@ internal sealed partial class ZigLowering
                 }
                 var bswArg = LowerExpr(bargs[0]);
                 return new Call("ZigMath.ByteSwap", new List<CExpr> { bswArg }) { Type = bswArg.Type };
+            case "@bitReverse":
+            {
+                // `@bitReverse(x)` (std.hash.crc's reflected polynomial) — the low N bits reversed, N the operand's
+                // declared width (a `u3` is three bits, not its carrier byte's eight).
+                if (bargs.Count != 1)
+                {
+                    throw new IrUnsupportedException($"zig `@bitReverse` expects (integer); got {bargs.Count} argument(s)");
+                }
+                var brvArg = LowerExpr(bargs[0]);
+                if (brvArg.Type.Unqualified is not CType.Prim { Integer: true, Bytes: var brvBytes })
+                {
+                    throw new IrUnsupportedException($"zig `@bitReverse` expects an integer; got {brvArg.Type.Describe()}");
+                }
+                var brvBits = DeclaredBitsOfArgument(bargs[0]) ?? brvBytes * 8;
+                return new Call("ZigMath.BitReverse", new List<CExpr>
+                {
+                    brvArg,
+                    new LitInt(brvBits.ToString(CultureInfo.InvariantCulture), brvBits) { Type = CType.Int },
+                }) { Type = brvArg.Type };
+            }
             // The float math builtins (std.math.sqrt's `@sqrt(x)`): System.Math for f64, System.MathF for f32, each
             // at the operand's own type. An untyped float literal operand is f64 unless the result has a float sink.
             case "@sqrt" or "@sin" or "@cos" or "@tan" or "@exp" or "@exp2" or "@log" or "@log2" or "@log10"

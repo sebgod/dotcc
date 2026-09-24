@@ -281,6 +281,29 @@ internal sealed partial class IrModule
         finally { (_comptimeSteps, _comptimeFrame, _comptimeAllowCalls) = (steps, frame, calls); }
     }
 
+    /// <summary>Run <paramref name="body"/> in a fresh comptime frame (calls allowed) and return the value it left in
+    /// <paramref name="result"/>: a container const computed by a labeled block (std.hash.crc's
+    /// <c>const lookup_table = blk: { … break :blk table; };</c>), which zig evaluates at compile time. Null when the
+    /// body is not something the interpreter runs; <see cref="ComptimeMiss"/> then says why.</summary>
+    internal ComptimeValue? EvalComptimeBlock(CStmt body, Symbol result)
+    {
+        var (steps, frame, calls) = (_comptimeSteps, _comptimeFrame, _comptimeAllowCalls);
+        _comptimeSteps = 0;
+        var local = new Dictionary<Symbol, ComptimeValue>();
+        _comptimeFrame = local;
+        _comptimeAllowCalls = true;
+        ComptimeMiss = null;
+        try
+        {
+            EvalComptimeStmt(body);
+            return local.TryGetValue(result, out var v) ? CloneComptime(v) : null;
+        }
+        catch (ComptimeAbort ex) { ComptimeMiss ??= ex.Message; return null; }
+        catch (ComptimeGoto) { return null; }
+        catch (ComptimeReturn) { ComptimeMiss ??= "a `return` inside a const's initializer block"; return null; }
+        finally { (_comptimeSteps, _comptimeFrame, _comptimeAllowCalls) = (steps, frame, calls); }
+    }
+
     /// <summary>The comptime engine's E2 hook: asked for a callee whose body is not lowered yet, it lowers
     /// the body now (the Zig front-end's on-demand lowering) and answers whether it did. Installed by the
     /// Zig front-end for the length of its lowering, null otherwise (the C front-end has no deferred
@@ -575,9 +598,19 @@ internal sealed partial class IrModule
             // store through it (`self.n += v`) mutate the caller's value in place, by-reference for free. A
             // pointer to a SCALAR is still not a comptime value: the firewall holds for everything that
             // would need a pointer variant.
+            // `&t[i]` / `&s.Ptr[i]`: a pointer to one element (a `for (&t, 0..) |*e, i|` capture), which the body
+            // then stores through (`e.* = v`).
+            case Unary { Op: UnOp.AddrOf, Operand: Index elemIx } pElem when ElementSlot(elemIx) is ({ } elemBacking, var elemAt):
+                return new CtElemPtr(elemBacking, elemAt, pElem.Type);
             case Unary { Op: UnOp.AddrOf or UnOp.Deref } pu:
             {
                 var pointee = EvalComptime(pu.Operand);
+                if (pu.Op == UnOp.Deref && pointee is CtElemPtr derefPtr)
+                {
+                    return derefPtr.Index >= 0 && derefPtr.Index < derefPtr.Backing.Elems.Length
+                        ? derefPtr.Backing.Elems[derefPtr.Index]
+                        : null;
+                }
                 return pointee is CtStruct or CtArray ? pointee : EvalUnary(pu);
             }
             // `i++` / `--i` (a lowered `for` loop's step): the compound assignment by one, yielding the old
@@ -691,15 +724,7 @@ internal sealed partial class IrModule
             // An array element read `t[i]` — the base is a comptime array, the index a comptime int.
             case Index ix:
             {
-                var (arr, start) = EvalComptime(ix.Base) switch
-                {
-                    CtArray a => (a, 0L),
-                    CtElemPtr ep => (ep.Backing, ep.Index),   // `s.Ptr[i]`, a slice's element
-                    CtSlice sl => (sl.Backing, sl.Offset),
-                    _ => ((CtArray?)null, 0L),
-                };
-                if (arr is null || EvalComptime(ix.Idx) is not CtInt ixi) { return null; }
-                long n = start + (long)ixi.Value;
+                if (ElementSlot(ix) is not ({ } arr, var n)) { return null; }
                 return n >= 0 && n < arr.Elems.Length ? arr.Elems[n] : null;   // OOB → not foldable
             }
 
@@ -725,7 +750,8 @@ internal sealed partial class IrModule
                 return EvalComptime(abr.Source);
 
             case DefaultLit dl:
-                return dl.Type.Unqualified is CType.Optional ? new CtNull(dl.Type) : ZeroValue(dl.Type);
+                // A pointer's default is null (a labeled block's `T* __blkN = default;` result temp, before its break).
+                return dl.Type.Unqualified is CType.Optional or CType.Pointer ? new CtNull(dl.Type) : ZeroValue(dl.Type);
 
             case NullPtr np:
                 return new CtNull(np.Type);
@@ -982,6 +1008,34 @@ internal sealed partial class IrModule
             };
             return new CtInt(count, CType.Int);
         }
+        // `@bitReverse` (std.hash.crc's comptime lookup table reflects its polynomial) and `@byteSwap`, at the width the
+        // call names (bit reverse) or the operand's carrier (byte swap).
+        if (c is { Callee: "ZigMath.BitReverse", Args: [var brArg, var brBitsArg] })
+        {
+            if (EvalComptime(brArg) is not CtInt bv || EvalComptime(brBitsArg) is not CtInt { Value: var brBits }
+                || brBits < 0 || brBits > 128)
+            {
+                return null;
+            }
+            var src = unchecked((System.UInt128)bv.Value);
+            System.UInt128 reversed = 0;
+            for (var k = 0; k < (int)brBits; k++)
+            {
+                reversed = (reversed << 1) | (src & 1);
+                src >>= 1;
+            }
+            return RetypeTo(new CtInt(unchecked((System.Int128)reversed), c.Type), c.Type);
+        }
+        if (c is { Callee: "ZigMath.ByteSwap", Args: [var bsArg] })
+        {
+            if (EvalComptime(bsArg) is not CtInt sv
+                || (bsArg.Type ?? sv.Type).Unqualified is not CType.Prim { Integer: true, Bytes: var bsBytes and (1 or 2 or 4 or 8) })
+            {
+                return null;
+            }
+            var swapped = System.Buffers.Binary.BinaryPrimitives.ReverseEndianness(unchecked((ulong)(long)sv.Value)) >> (64 - bsBytes * 8);
+            return RetypeTo(new CtInt(swapped, c.Type), c.Type);
+        }
         // `@max` / `@min` and zig's integer division builtins over values known only during the evaluation
         // (`@max(8, ceilPowerOfTwo(…))` in std.simd): the runtime helpers they lower to, over 128-bit integers.
         if (c is { Callee: "ZigMath.Max" or "ZigMath.Min" or "ZigMath.DivTrunc" or "ZigMath.DivFloor" or "ZigMath.Rem" or "ZigMath.Mod",
@@ -1094,6 +1148,16 @@ internal sealed partial class IrModule
     /// <summary>Re-type a comptime scalar to a target arithmetic type (so a parameter binding /
     /// return value carries the declared type, driving usual-arithmetic + the splice carrier).
     /// A bool target / non-arithmetic target leaves the value unchanged.</summary>
+    /// <summary><paramref name="value"/> wrapped to the width of the 1-, 2-, 4- or 8-byte integer <paramref name="p"/>
+    /// (sign-extended when it is signed). A <c>_Bool</c>, <c>comptime_int</c> or 128-bit carrier keeps the value.</summary>
+    private static System.Int128 WrapToWidth(System.Int128 value, CType.Prim p)
+    {
+        if (p.IsComptimeInt || p.Name == "_Bool" || p.Bytes is not (1 or 2 or 4 or 8)) { return value; }
+        var bits = p.Bytes * 8;
+        var low = value & ((System.Int128.One << bits) - 1);
+        return p.Signed && (low >> (bits - 1)) != 0 ? low - (System.Int128.One << bits) : low;
+    }
+
     private static ComptimeValue RetypeTo(ComptimeValue v, CType t)
     {
         if (t.Unqualified is not CType.Prim p) { return v; }
@@ -1101,7 +1165,9 @@ internal sealed partial class IrModule
         {
             return v switch
             {
-                CtInt i => new CtInt(i.Value, t),
+                // The arithmetic runs in 128 bits, so a store to a fixed-width integer wraps to its width, as the
+                // runtime conversion does (std.hash.crc's non-reflected table: `crc = (crc << 1) ^ …` on a u32).
+                CtInt i => new CtInt(WrapToWidth(i.Value, p), t),
                 CtFloat f => new CtInt((System.Int128)f.Value, t),
                 _ => v,   // a bool stays a bool
             };
@@ -1112,6 +1178,35 @@ internal sealed partial class IrModule
             CtFloat f => new CtFloat(f.Value, t),
             _ => v,
         };
+    }
+
+    /// <summary>The array and absolute element index an <see cref="Index"/> names: the base is a comptime array, an
+    /// element pointer (<c>s.Ptr[i]</c>) or a slice, the index a comptime int. Null backing when either is not.</summary>
+    private (CtArray? Backing, long Index) ElementSlot(Index ix)
+    {
+        var (arr, start) = EvalComptime(ix.Base) switch
+        {
+            CtArray a => (a, 0L),
+            CtElemPtr ep => (ep.Backing, ep.Index),
+            CtSlice sl => (sl.Backing, sl.Offset),
+            _ => ((CtArray?)null, 0L),
+        };
+        return arr is not null && EvalComptime(ix.Idx) is CtInt i ? (arr, start + (long)i.Value) : (null, 0L);
+    }
+
+    /// <summary>Store <paramref name="rhs"/> (combined with the current element under <paramref name="compoundOp"/>)
+    /// into element <paramref name="at"/> of <paramref name="arr"/>, in place.</summary>
+    private ComptimeValue? StoreElement(CtArray arr, long at, BinOp? compoundOp, ComptimeValue rhs)
+    {
+        if (at < 0 || at >= arr.Elems.Length) { throw new ComptimeAbort("comptime array index out of bounds"); }
+        if (compoundOp is { } op)
+        {
+            if (CombineBin(op, arr.Elems[at], rhs) is not { } combined) { return null; }
+            rhs = combined;
+        }
+        var stored = RetypeTo(rhs, arr.Element);
+        arr.Elems[at] = stored;
+        return stored;
     }
 
     /// <summary>Apply a comptime assignment (simple or compound) to a frame local or a struct field,
@@ -1159,19 +1254,12 @@ internal sealed partial class IrModule
                 st.Fields[m.Field] = stored;
                 return stored;
 
-            // An array element — `t[i] = v` (mutates the frame's array value in place).
-            case Index ix when EvalComptime(ix.Base) is CtArray arr:
-                if (EvalComptime(ix.Idx) is not CtInt iidx) { return null; }
-                long ai = (long)iidx.Value;
-                if (ai < 0 || ai >= arr.Elems.Length) { throw new ComptimeAbort("comptime array index out of bounds"); }
-                if (a.CompoundOp is { } iop)
-                {
-                    if (CombineBin(iop, arr.Elems[ai], rhs) is not { } icomb) { return null; }
-                    rhs = icomb;
-                }
-                var istored = RetypeTo(rhs, arr.Element);
-                arr.Elems[ai] = istored;
-                return istored;
+            // An array element — `t[i] = v`, `s.Ptr[i] = v`, or `e.* = v` through an element pointer (mutates the
+            // frame's array value in place).
+            case Index ix when ElementSlot(ix) is ({ } arr, var ai):
+                return StoreElement(arr, ai, a.CompoundOp, rhs);
+            case Unary { Op: UnOp.Deref, Operand: var derefTarget } when EvalComptime(derefTarget) is CtElemPtr targetPtr:
+                return StoreElement(targetPtr.Backing, targetPtr.Index, a.CompoundOp, rhs);
 
             default:
                 throw new ComptimeAbort("comptime assignment target must be a local variable, struct field, or array element");
@@ -1220,7 +1308,7 @@ internal sealed partial class IrModule
                     if (decl.Init is not { } init) { continue; }   // uninitialized — bound on first store
                     _comptimeFrame![decl.Sym] = EvalComptime(init) is { } v
                         ? RetypeTo(v, decl.Sym.Type)
-                        : throw new ComptimeAbort("non-constant comptime local initializer");
+                        : throw new ComptimeAbort($"the initializer of the local '{decl.Sym.Name}' (a {init.GetType().Name})");
                 }
                 break;
 
@@ -1264,7 +1352,13 @@ internal sealed partial class IrModule
             }
 
             case ExprStmt e:
-                EvalComptime(e.Expr);   // evaluated for its effect on the frame (assignments)
+                // Evaluated for its effect on the frame (assignments). An assignment of a value that is not known at
+                // compile time (a runtime `var` read in a const's initializer block) stops the evaluation; skipping it
+                // silently had left the target at its default.
+                if (EvalComptime(e.Expr) is null && e.Expr is Assign)
+                {
+                    throw new ComptimeAbort("an assignment of a value not known at compile time");
+                }
                 break;
 
             case If i:

@@ -1269,6 +1269,7 @@ internal sealed partial class ZigLowering
         var typeSeeds = new List<TypeSeed>();
         var valueSeeds = new List<(string name, long value, CType type)>();
         var optionalSeeds = new List<(string name, bool hasValue, long value, CType inner)>();
+        var aggregateSeeds = new List<(string name, IrModule.ComptimeValue value, CType type)>();
         var mangleTokens = new List<string>(argItems.Count);
 
         // Phase 1 — resolve every comptime TYPE argument in the CALLER's type environment (an alias
@@ -1339,6 +1340,22 @@ internal sealed partial class ZigLowering
                     mangleTokens.Add(OptionalMangleToken(hasOpt, ov));
                     optionalSeeds.Add((p.Name, hasOpt, ov, optP.Inner));
                 }
+                else if (LowerType(p.TypeAst).Unqualified is CType.Named aggParamType && !_unions.ContainsKey(aggParamType.Name))
+                {
+                    // A comptime STRUCT value param (std.hash.crc's `Crc(comptime W: type, comptime algorithm:
+                    // Algorithm(W))`): the interpreter's value of the argument keys the instance by a digest of its
+                    // contents, and the body and its members read it as a comptime aggregate, as a generic
+                    // function's comptime struct parameter is read.
+                    var aggArg = argScope.LowerExprSink(argItems[i], aggParamType);
+                    if (_ir.EvalComptimeValue(aggArg) is not { } aggValue)
+                    {
+                        throw new IrUnsupportedException(
+                            $"call to type-returning generic '{templateSym.Name}': the `comptime {p.Name}` argument must be a "
+                            + "compile-time-known struct value" + (_ir.ComptimeMiss is { } why ? $" (the interpreter stopped at {why})" : ""));
+                    }
+                    mangleTokens.Add("c" + IrModule.ComptimeDigest(aggValue));
+                    aggregateSeeds.Add((p.Name, aggValue, aggParamType));
+                }
                 else
                 {
                     // An ENUM-typed param (std.mem's `SplitIterator(T, .scalar)` with `comptime delimiter_type:
@@ -1397,6 +1414,11 @@ internal sealed partial class ZigLowering
                     var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = new CType.Optional(inner) });
                     _comptimeOptionalVars[sym] = (hasValue, value, inner);
                 }
+                foreach (var (name, value, type) in aggregateSeeds)
+                {
+                    var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type });
+                    _ir.ComptimeGlobals[sym] = value;
+                }
                 // Process the body: leading `const NAME = <type>;` locals become scoped type aliases (the RHS
                 // may be a captured-if that folds to a type — S4b pt2 / S4c), then the final `return struct {…}`.
                 TypeBodyResult bodyResult;
@@ -1446,6 +1468,7 @@ internal sealed partial class ZigLowering
                     }
                 }
                 _reifiedSeeds[mangled] = (methodTypeSeeds, valueSeeds, optionalSeeds);
+                if (aggregateSeeds.Count > 0) { _reifiedAggregateSeeds[mangled] = aggregateSeeds; }
                 _currentContainer = mangled;
                 // TYPE const members (`pub const Slice = if (alignment) |a| … else []T;` in Aligned,
                 // `pub const Unmanaged = HashMapUnmanaged(K, V, …);` in HashMap) are evaluated NOW, while
@@ -1573,6 +1596,29 @@ internal sealed partial class ZigLowering
         IReadOnlyList<(string name, bool hasValue, long value, CType inner)> Optionals)> _reifiedSeeds
         = new(System.StringComparer.Ordinal);
 
+    /// <summary>Each reified container's comptime STRUCT seeds (std.hash.crc's <c>algorithm</c>), by its mangled
+    /// name: bound again as comptime aggregates wherever <see cref="_reifiedSeeds"/> is re-entered.</summary>
+    private readonly Dictionary<string, List<(string name, IrModule.ComptimeValue value, CType type)>> _reifiedAggregateSeeds
+        = new(System.StringComparer.Ordinal);
+
+    /// <summary>Declare the comptime STRUCT seeds recorded for <paramref name="container"/> (or its nearest reified
+    /// ancestor) in a fresh scope. True when a scope was entered, which the caller then exits.</summary>
+    private bool EnterReifiedAggregateSeeds(string? container)
+    {
+        if (container is null || ReifiedAncestor(container) is not { } key
+            || !_reifiedAggregateSeeds.TryGetValue(key, out var seeds))
+        {
+            return false;
+        }
+        _symbols.EnterScope();
+        foreach (var (name, value, type) in seeds)
+        {
+            var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type });
+            _ir.ComptimeGlobals[sym] = value;
+        }
+        return true;
+    }
+
     /// <summary>Lower one deferred reified-generic method body (road-to-zig-std G4) at top level. Sets
     /// <see cref="_currentContainer"/> to the mangled container for the duration — exactly what pass 2
     /// does for an ordinary container's method — so <c>@This()</c>, a <c>Self</c> alias, a sibling method
@@ -1588,6 +1634,7 @@ internal sealed partial class ZigLowering
             shadows.Add((name, _fnAliases.TryGetValue(name, out var prev) ? prev : null));
             _fnAliases[name] = (owner, fn);
         }
+        var aggregateScope = EnterReifiedAggregateSeeds(p.Container);
         try
         {
             using var _ = EnterContainer(p.Container);
@@ -1595,6 +1642,7 @@ internal sealed partial class ZigLowering
         }
         finally
         {
+            if (aggregateScope) { _symbols.ExitScope(); }
             foreach (var (name, prev) in shadows)
             {
                 if (prev is { } pv) { _fnAliases[name] = pv; } else { _fnAliases.Remove(name); }

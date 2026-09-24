@@ -3537,11 +3537,16 @@ public sealed class ZigFrontendTests
     [Fact]
     public void Rejects_a_labeled_value_block_initializing_a_global()
     {
-        // A global needs a comptime value; a value-block initializes via runtime statements.
+        // A global's labeled-block initializer runs at compile time (task #79), so it may not read a runtime `var`: zig
+        // reports "unable to resolve comptime value", and dotcc rejects it too rather than leave `g` at its default.
         var ex = Should.Throw<CompileException>(() => EmitZig(
-            "const g: i32 = blk: { break :blk 5; };\n" +
+            "var r: i32 = 3;\n" +
+            "const g: i32 = blk: { break :blk r; };\n" +
             "pub fn main() u8 { return @as(u8, @intCast(g)); }\n"));
-        ex.Message.ShouldContain("comptime value");
+        ex.Message.ShouldContain("did not evaluate at compile time");
+        // A comptime-known block is its value.
+        EmitZig("const g: i32 = blk: { break :blk 5; };\n" +
+                "pub fn main() u8 { return @as(u8, @intCast(g)); }\n").ShouldContain("int g = 5;");
     }
 
     // ---- Milestone L (part 3): labeled loops + labeled break/continue ----

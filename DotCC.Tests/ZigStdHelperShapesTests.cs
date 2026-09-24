@@ -383,6 +383,96 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_const_computed_by_a_labeled_block_is_evaluated_at_compile_time()
+    {
+        var cs = EmitZig("""
+            const table = blk: {
+                var t: [4]u32 = undefined;
+                for (&t, 0..) |*e, i| {
+                    e.* = @as(u32, @intCast(i)) * 5;
+                }
+                break :blk t;
+            };
+            const S = struct {
+                const inner = blk: {
+                    var t: [4]u32 = undefined;
+                    for (&t, 0..) |*e, i| {
+                        e.* = @as(u32, @intCast(i)) + 1;
+                    }
+                    break :blk t;
+                };
+                fn get(i: usize) u32 {
+                    return inner[i];
+                }
+            };
+            pub fn main() u8 {
+                var i: usize = 3;
+                _ = &i;
+                return @truncate(table[i] + S.get(i));
+            }
+            """);
+        // zig runs the block at compile time (task #79): the static holds the values, and no loop is emitted for it.
+        cs.ShouldContain("uint* table = Libc.GlobalArrayFrom<uint>(new uint[]{ 0u, 5u, 10u, 15u });");
+        cs.ShouldContain("uint* S__inner__static = Libc.GlobalArrayFrom<uint>(new uint[]{ 1u, 2u, 3u, 4u });");
+    }
+
+    [Fact]
+    public void A_type_returning_generic_takes_a_comptime_struct_value()
+    {
+        var cs = EmitZig("""
+            fn Algo(comptime W: type) type {
+                return struct { poly: W, initial: W, refl: bool };
+            }
+            fn Crc(comptime W: type, comptime a: Algo(W)) type {
+                return struct {
+                    const Self = @This();
+                    const table = blk: {
+                        var t: [4]W = undefined;
+                        for (&t, 0..) |*e, i| {
+                            e.* = @as(W, @intCast(i)) * a.poly;
+                        }
+                        break :blk t;
+                    };
+                    crc: W,
+                    pub fn init() Self {
+                        const v = if (a.refl) a.initial + 1 else a.initial;
+                        return Self{ .crc = v };
+                    }
+                    pub fn hash(b: []const u8) W {
+                        var c = init();
+                        for (b) |x| c.crc = table[x & 3] ^ (c.crc >> 1);
+                        return c.crc;
+                    }
+                };
+            }
+            const C = Crc(u32, .{ .poly = 5, .initial = 7, .refl = true });
+            pub fn main() u8 {
+                return @truncate(C.hash("hello"));
+            }
+            """);
+        // The struct argument keys the instance by its contents (task #71), and the members read its fields.
+        cs.ShouldContain("__table__static = Libc.GlobalArrayFrom<uint>(new uint[]{ 0u, 5u, 10u, 15u });");
+        cs.ShouldContain("return (byte)Crc__u32_c");
+        cs.ShouldContain("_hash(new ConstSlice<byte>(");
+    }
+
+    [Fact]
+    public void Bit_reverse_reverses_the_declared_width()
+    {
+        var cs = EmitZig("""
+            pub fn main() u8 {
+                var x: u8 = 0b0000_0110;
+                var y: u3 = 0b011;
+                _ = .{ &x, &y };
+                return @bitReverse(x) + @as(u8, @bitReverse(y));
+            }
+            """);
+        // A `u3` in its byte carrier reverses three bits, not eight.
+        cs.ShouldContain("ZigMath.BitReverse(x, 8)");
+        cs.ShouldContain("ZigMath.BitReverse(y, 3)");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

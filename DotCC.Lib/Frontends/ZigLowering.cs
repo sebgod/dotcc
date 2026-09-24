@@ -853,7 +853,7 @@ internal sealed partial class ZigLowering
         if (hops >= MaxAliasHops || !_declAliases.TryGetValue(name, out var rhs)) { return null; }
         return rhs.Content switch
         {
-            Zig.Ident id => _containerTypes.GetValueOrDefault(Tok(id.Arg0)) ?? ResolveAliasedType(Tok(id.Arg0), hops + 1),
+            Zig.Ident id => ResolveExportedType(Tok(id.Arg0), hops + 1),   // std.hash.crc's `Crc32 = Crc32IsoHdlc`, a type-call alias
             Zig.Field f => ResolveModulePath(rhs)?.Lowering?.FileStructType
                 ?? ResolveModulePath(f.Arg0)?.Lowering?.ResolveExportedType(Tok(f.Arg2), hops + 1),
             _ => null,
@@ -1689,13 +1689,19 @@ internal sealed partial class ZigLowering
             throw new IrUnsupportedException(
                 $"threadlocal '{Tok(nameTok)}': only a zero-initialized scalar threadlocal is supported");
         }
-        // A labeled value-block initializes via runtime statements (a temp + control flow); a global
-        // must be comptime-initialized, so it can't host one. Clear error (not the generic
-        // expression-position one, which would read oddly for a global).
+        // A labeled value-block initializer (`const table = blk: { … break :blk t; };`) runs at compile time, as in
+        // zig: its value becomes the static initializer (task #79).
+        CExpr? blockInit = null;
         if (rhsItem.Content is Zig.LabeledBlock)
         {
-            throw new IrUnsupportedException(
-                $"a labeled value-block can't initialize the global '{Tok(nameTok)}' (a global needs a comptime value)");
+            var (blockType, blockValue) = ComptimeLabeledBlockInit(
+                $"the global '{Tok(nameTok)}'", rhsItem, typeItem is not null ? LowerType(typeItem) : null);
+            if (blockType.Unqualified is CType.Array blockArray)
+            {
+                AddArrayGlobal(Tok(nameTok), blockArray, blockValue);
+                return;
+            }
+            blockInit = blockValue;
         }
         // A `[N:s]T` sentinel array GLOBAL — reserve ONE extra trailing slot for the sentinel in the
         // pinned, program-lifetime backing store (the local-decl stackalloc does the same, part 4 /
@@ -1751,7 +1757,7 @@ internal sealed partial class ZigLowering
                 new LitInt(n.ToString(CultureInfo.InvariantCulture), n) { Type = CType.Int }) { Type = new CType.Pointer(uarr.Element) });
             return;
         }
-        var init = LowerExprSink(rhsItem, declared);
+        var init = blockInit ?? LowerExprSink(rhsItem, declared);
         // A comptime ARRAY at a global `const` (`const TBL = comptime buildTable();`) would resolve
         // (in pass 3) to a StackArray, but by then this global is already a scalar GlobalVar — the
         // StackArray would emit as an invalid `static T* TBL = stackalloc …` field initializer. The
@@ -1874,6 +1880,22 @@ internal sealed partial class ZigLowering
         try
         {
             var sink = typeItem is not null ? LowerType(typeItem) : null;
+            // A const computed by a labeled block (std.hash.crc's `lookup_table`) is evaluated ONCE, at compile time,
+            // into a static (task #79): re-lowering the block at each use would put its loop in every reader.
+            if (rhs.Content is Zig.LabeledBlock)
+            {
+                if (!_staticContainerConsts.TryGetValue((container, name), out var blockSym))
+                {
+                    var (blockType, blockInit) = ComptimeLabeledBlockInit($"'{container}.{name}'", rhs, sink);
+                    blockSym = _symbols.Declare(new Symbol
+                    {
+                        Name = $"{container}__{name}__static", Kind = SymKind.Var, Type = blockType, Storage = Storage.Static, IsGlobal = true,
+                    });
+                    _ir.Globals.Add(new GlobalVar(blockSym, blockInit));
+                    _staticContainerConsts[(container, name)] = blockSym;
+                }
+                return new VarRef(blockSym) { Type = blockSym.Type, IsLValue = true };
+            }
             return LowerExprSink(rhs, sink);
         }
         finally
@@ -1881,6 +1903,52 @@ internal sealed partial class ZigLowering
             _currentConstContainer = prev;
             _constResolving.Remove(key);
         }
+    }
+
+    /// <summary>The static initializer of a global or container const computed by a labeled block (std.hash.crc's
+    /// <c>const lookup_table = blk: { var table: [256]I = undefined; for (&amp;table, 0..) |*e, i| { … } break :blk table; };</c>).
+    /// zig runs the block at compile time, so it is lowered into a throwaway scope, run by the comptime interpreter,
+    /// and its value spliced back: a pinned array for a <c>[N]T</c> result, a literal otherwise. None of the block's
+    /// statements reach an emitted body. A block the interpreter cannot run is a loud cut that says why.</summary>
+    private (CType Type, CExpr Init) ComptimeLabeledBlockInit(string what, Item labeled, CType? declared)
+    {
+        Symbol? result = null;
+        CStmt lowered;
+        List<CStmt> hoisted;
+        _symbols.EnterScope();
+        try
+        {
+            using var hoist = EnterFreshHoist();
+            lowered = LowerLabeledValue(labeled, declared, temp =>
+            {
+                result = temp;
+                return new Block(new List<CStmt>());
+            });
+            hoisted = _hoist ?? new List<CStmt>();
+        }
+        finally
+        {
+            _symbols.ExitScope();
+        }
+        if (result is not { } resultSym
+            || _ir.EvalComptimeBlock(new Block([.. hoisted, lowered]), resultSym) is not { } value)
+        {
+            throw new IrUnsupportedException(
+                $"the labeled block initializing {what} did not evaluate at compile time"
+                + (_ir.ComptimeMiss is { } why ? $" (the interpreter stopped at {why})" : ""));
+        }
+        var type = declared ?? resultSym.Type;
+        IrUnsupportedException Unspliceable() => new(
+            $"the labeled block initializing {what} evaluated to a value with no static form");
+        // An array breaks out of the block decayed to a pointer (the temp is `T*`), so without an annotation the
+        // array type is the evaluated value's own.
+        if (value is IrModule.CtArray array
+            && (type.Unqualified as CType.Array ?? array.Type.Unqualified as CType.Array) is { } arrayType)
+        {
+            var elems = array.Elems.Select(e => _ir.SpliceComptimeValue(e) ?? throw Unspliceable()).ToList();
+            return (arrayType, new PinnedArray(arrayType.Element, elems, null) { Type = new CType.Pointer(arrayType.Element) });
+        }
+        return (type, _ir.SpliceComptimeValue(value) ?? throw Unspliceable());
     }
 
     /// <summary>Tag a pass-1 function entry with the container it belongs to (null for a free

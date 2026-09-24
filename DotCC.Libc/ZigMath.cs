@@ -185,6 +185,21 @@ public static class ZigMath
         return T.ReadLittleEndian(buf, isUnsigned: !T.IsNegative(T.AllBitsSet));
     }
 
+    /// <summary><c>@bitReverse(x)</c> — reverse the low <paramref name="bits"/> bits of <typeparamref name="T"/> (the
+    /// operand's declared width, so a <c>u3</c> held in a byte reverses three bits, as zig does). A signed result is
+    /// the reversed bit pattern read at the carrier's width.</summary>
+    public static T BitReverse<T>(T x, int bits) where T : System.Numerics.IBinaryInteger<T>
+    {
+        var v = System.UInt128.CreateTruncating(x);
+        System.UInt128 r = 0;
+        for (var i = 0; i < bits; i++)
+        {
+            r = (r << 1) | (v & 1);
+            v >>= 1;
+        }
+        return T.CreateTruncating(r);
+    }
+
     /// <summary>Zig's <c>@round</c>: to the nearest integer, a half rounding AWAY from zero (.NET's default is to even).</summary>
     public static double RoundAway(double x) => System.Math.Round(x, System.MidpointRounding.AwayFromZero);
 

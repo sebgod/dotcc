@@ -4770,6 +4770,73 @@ public sealed class ZigOracleTests
             "    const b = Flags{ .lo = 1, .hi = 2 };\n" +
             "    return kind(Plain) * 100 + kind(Ext) * 10 + kind(Flags) + @intFromBool(a == b);\n" +
             "}\n", 124, "" },
+        // A global and a container const computed by a labeled block run at compile time (task #79): the static holds
+        // the values, filled through `for (&t, 0..) |*e, i|` element pointers in the comptime interpreter.
+        new object[] { "labeled_block_consts",
+            "const table = blk: {\n" +
+            "    var t: [4]u32 = undefined;\n" +
+            "    for (&t, 0..) |*e, i| {\n" +
+            "        e.* = @as(u32, @intCast(i)) * 5;\n" +
+            "    }\n" +
+            "    break :blk t;\n" +
+            "};\n" +
+            "const S = struct {\n" +
+            "    const inner = blk: {\n" +
+            "        var t: [4]u32 = undefined;\n" +
+            "        for (&t, 0..) |*e, i| {\n" +
+            "            e.* = @as(u32, @intCast(i)) + 1;\n" +
+            "        }\n" +
+            "        break :blk t;\n" +
+            "    };\n" +
+            "    fn get(i: usize) u32 {\n" +
+            "        return inner[i];\n" +
+            "    }\n" +
+            "};\n" +
+            "pub fn main() u8 {\n" +
+            "    var i: usize = 3;\n" +
+            "    _ = &i;\n" +
+            "    return @truncate(table[i] + S.get(i));\n" +
+            "}\n", 19, "" },
+        // A type-returning generic with a comptime STRUCT value parameter (task #71, std.hash.crc's Crc(W, algorithm)):
+        // the struct keys the instance, and its block-built table const and methods read the struct's fields.
+        new object[] { "comptime_struct_type_param",
+            "fn Algo(comptime W: type) type {\n" +
+            "    return struct { poly: W, initial: W, refl: bool };\n" +
+            "}\n" +
+            "fn Crc(comptime W: type, comptime a: Algo(W)) type {\n" +
+            "    return struct {\n" +
+            "        const Self = @This();\n" +
+            "        const table = blk: {\n" +
+            "            var t: [4]W = undefined;\n" +
+            "            for (&t, 0..) |*e, i| {\n" +
+            "                e.* = @as(W, @intCast(i)) * a.poly;\n" +
+            "            }\n" +
+            "            break :blk t;\n" +
+            "        };\n" +
+            "        crc: W,\n" +
+            "        pub fn init() Self {\n" +
+            "            const v = if (a.refl) a.initial + 1 else a.initial;\n" +
+            "            return Self{ .crc = v };\n" +
+            "        }\n" +
+            "        pub fn hash(b: []const u8) W {\n" +
+            "            var c = init();\n" +
+            "            for (b) |x| c.crc = table[x & 3] ^ (c.crc >> 1);\n" +
+            "            return c.crc;\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "const C = Crc(u32, .{ .poly = 5, .initial = 7, .refl = true });\n" +
+            "pub fn main() u8 {\n" +
+            "    return @truncate(C.hash(\"hello\"));\n" +
+            "}\n", 15, "" },
+        // @bitReverse at the operand's declared width (task #71): a u3 in its byte reverses three bits.
+        new object[] { "bit_reverse",
+            "pub fn main() u8 {\n" +
+            "    var x: u8 = 0b0000_0110;\n" +
+            "    var y: u3 = 0b011;\n" +
+            "    _ = .{ &x, &y };\n" +
+            "    return @bitReverse(x) + @as(u8, @bitReverse(y));\n" +
+            "}\n", 102, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -6051,6 +6118,32 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // std.hash.Crc32 and six more CRCs from real std, bit-exact (tasks #71 / #79): Crc(W, algorithm) takes a comptime
+    // struct, its lookup_table is a labeled block the interpreter runs (element-pointer stores, @bitReverse, u32 shifts that
+    // wrap), and std.hash's `Crc32 = crc.Crc32` resolves through crc.zig's same-module alias. Widths 5 to 64, reflected
+    // and not, and an incremental update.
+    [Fact]
+    public void Dotcc_matches_zig_std_hash_crc() =>
+        MatchesZigWithRealStd("crc",
+            "const std = @import(\"std\");\n" +
+            "const crc = std.hash.crc;\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = std.hash.Crc32.hash(\"The quick brown fox jumps over the lazy dog\");\n" +
+            "    var inc = std.hash.Crc32.init();\n" +
+            "    inc.update(\"The quick brown fox \");\n" +
+            "    inc.update(\"jumps over the lazy dog\");\n" +
+            "    const b = inc.final();\n" +
+            "    const c = crc.Crc32Bzip2.hash(\"123456789\");\n" +
+            "    const d = crc.Crc16Arc.hash(\"123456789\");\n" +
+            "    const e = crc.Crc8Smbus.hash(\"123456789\");\n" +
+            "    const f = crc.Crc64Xz.hash(\"123456789\");\n" +
+            "    const g = crc.Crc5Usb.hash(\"123456789\");\n" +
+            "    std.debug.print(\"{x} {x} {x} {x} {x} {x} {x}\\n\", .{ a, b, c, d, e, f, g });\n" +
+            "    const mix = a ^ b ^ c ^ d ^ e ^ @as(u32, @truncate(f ^ (f >> 32))) ^ g;\n" +
+            "    return @truncate(mix ^ (mix >> 8) ^ (mix >> 16) ^ (mix >> 24));\n" +
+            "}\n", 172);
 
     // std.meta.eql from real std (task #70): `info.layout` folds to .auto / .@"extern" / .@"packed", a packed struct
     // compares as its backing bytes (a generated ==), and the struct prong recurses through `inline for` + @field.

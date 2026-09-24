@@ -84,6 +84,14 @@ internal sealed partial class ZigLowering
             var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = new CType.Optional(inner) });
             _comptimeOptionalVars[sym] = (hasValue, value, inner);
         }
+        if (_reifiedAggregateSeeds.TryGetValue(container, out var aggregates))
+        {
+            foreach (var (name, value, type) in aggregates)
+            {
+                var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type });
+                _ir.ComptimeGlobals[sym] = value;
+            }
+        }
         return new ReifiedSeedScope(this, shadows);
     }
 
