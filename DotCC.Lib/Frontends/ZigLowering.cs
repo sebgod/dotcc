@@ -159,14 +159,32 @@ internal sealed partial class ZigLowering
         ?? (_moduleAliasPaths.TryGetValue(name, out var aliased) ? ResolveModulePath(aliased)
             : _declAliases.TryGetValue(name, out var reexport) && reexport.Content is Zig.Ident or Zig.Field
                 ? ResolveModulePath(reexport)
-                : IsSelfModuleAlias(name) ? _module : null);
+                : IsSelfModuleAlias(name) ? _module
+                : IsRootSelfAlias(name) ? _rootSelfModule : null);
 
     /// <summary>A top-level <c>const NAME = @This();</c> (std's <c>const mem = @This();</c>): inside a file, <c>@This()</c> is
     /// the file's own struct, so the name aliases this module (<c>mem.eql(…)</c> calls its own <c>eql</c>).</summary>
     private bool IsSelfModuleAlias(string name) =>
         _lazyValueConsts.TryGetValue(name, out var vc) && vc.typeItem is null
-        && vc.rhs.Content is Zig.BuiltinCallNoArgs { Arg0: var thisTok } && Tok(thisTok) == "@This"
+        && vc.rhs.Content is Zig.BuiltinCallNoArgs { Arg0: var thisTok } && IsThisBuiltin(thisTok)
         && _symbols.Resolve(name) is null or { IsGlobal: true };
+
+    /// <summary>The ROOT file's analogue of <see cref="IsSelfModuleAlias"/>: a top-level <c>const root = @This();</c>
+    /// in a root file with no top-level fields (a namespace, not a file-as-struct type), not shadowed here.</summary>
+    private bool IsRootSelfAlias(string name) =>
+        _rootSelfAliases.Contains(name) && _symbols.Resolve(name) is null or { IsGlobal: true };
+
+    /// <summary>Whether a <c>BuiltinCallNoArgs</c> name token is <c>@This</c>.</summary>
+    private static bool IsThisBuiltin(Item tok) => Tok(tok) == "@This";
+
+    /// <summary>The root file's top-level <c>const NAME = @This();</c> names (see <see cref="IsRootSelfAlias"/>).</summary>
+    private readonly HashSet<string> _rootSelfAliases = new(System.StringComparer.Ordinal);
+
+    /// <summary>A root unit has no <see cref="ZigModule"/> of its own (<see cref="_module"/> is null), so one that names
+    /// itself through <c>@This()</c> gets this synthetic module, whose <see cref="ZigModule.Lowering"/> is the root's
+    /// own lowering: <c>root.helper()</c>, <c>root.Point</c> and <c>root.limit</c> then resolve by the same
+    /// module-qualified paths as <c>util.helper()</c> through an import.</summary>
+    private ZigModule? _rootSelfModule;
 
     /// <summary>Resolve an inline <c>@import("spec")</c> (see <see cref="ResolveModulePath"/>) through the
     /// ordinary import table, under the synthetic name <c>@import:spec</c>.</summary>
@@ -846,7 +864,7 @@ internal sealed partial class ZigLowering
     /// runtime value: a module (a namespace or a file-as-struct type), a type, or a function. The root
     /// unit's global pass skips such a binding rather than lowering <c>util.f</c> as a value.</summary>
     private bool IsComptimeOnlyAlias(string name)
-        => IsModuleAlias(name)
+        => IsModuleAlias(name) || _rootSelfAliases.Contains(name)
         || (_declAliases.ContainsKey(name)
             // Only a function OWNED elsewhere: a same-file `const f2 = f;` keeps its fn-pointer global,
             // so `&f2` and passing `f2` as a value still work.
@@ -1293,6 +1311,25 @@ internal sealed partial class ZigLowering
         // before pass 0a so a `const Writer = @This();` binding, and any container whose field points
         // back at the file type, resolves; the field layout registers in pass 0b like any struct's.
         var topFields = decls.Select(d => Unwrap(d).Content).OfType<Zig.TopField>().Select(t => t.Arg0).ToList();
+
+        // A ROOT namespace file naming itself (`const root = @This();`, then `root.helper()`): a lazy module
+        // records the binding as a value const and resolves it through its own ZigModule (IsSelfModuleAlias);
+        // the root has none, so it gets a synthetic one over its own tree and lowering.
+        if (!lazy && _module is null && topFields.Count == 0)
+        {
+            foreach (var d in decls.Select(Unwrap))
+            {
+                if (d.Content is Zig.ConstDecl { Arg3.Content: Zig.BuiltinCallNoArgs self } c && IsThisBuiltin(self.Arg0))
+                {
+                    _rootSelfAliases.Add(Tok(c.Arg1));
+                }
+            }
+            if (_rootSelfAliases.Count > 0)
+            {
+                var path = System.IO.Path.Combine(_importerDir ?? "", (_fileStem ?? "root") + ".zig");
+                _rootSelfModule = new ZigModule(path, new LALR.CC.ResilientParseResult(root, [])) { Lowering = this };
+            }
+        }
 
         // Record every top-level `const NAME = name;` / `= a.b.c;` as a candidate re-export, unresolved.
         foreach (var d in decls.Select(Unwrap))

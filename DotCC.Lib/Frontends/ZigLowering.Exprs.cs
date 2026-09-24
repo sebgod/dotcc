@@ -382,6 +382,19 @@ internal sealed partial class ZigLowering
                 {
                     return moduleConst;
                 }
+                // A module's top-level FUNCTION as a value (`const f = util.helper;`, `&root.helper`): declared on
+                // demand in its own module, then a function reference exactly as a bare `helper` is.
+                if (!IsCuratedStdPath(fld.Arg0) && !TryResolveStdPath(expr, out _)
+                    && ResolveModulePath(fld.Arg0) is { Lowering: { } fnModule }
+                    && fnModule.ResolveExportedDecl(fieldName, raiseIfSkipped: true) is { Sym.Kind: SymKind.Func } fnDecl)
+                {
+                    if (fnDecl.Owner.IsGenericTemplate(fnDecl.Sym))
+                    {
+                        throw new IrUnsupportedException(
+                            $"zig: generic function '{fieldName}' used as a value (it has no single address) is not supported");
+                    }
+                    return new VarRef(fnDecl.Sym) { Type = fnDecl.Sym.Type };
+                }
                 // `std.options.fmt_max_depth`: a FIELD of a module's value const (`pub const options: Options = …`
                 // in std.zig), the const lowered in its own module and the field read off it.
                 if (fld.Arg0.Content is Zig.Field { Arg0: var constModulePath, Arg2: var constNameTok }

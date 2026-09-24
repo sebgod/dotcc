@@ -4213,6 +4213,45 @@ public sealed class ZigOracleTests
             "    for (bytes) |b| sum += b;\n" +
             "    return @intCast(bytes.len + sum);\n" +
             "}\n", 18, "" },
+        // A root file naming itself (road-to-zig-std, task #56): `const root = @This();`, then root.helper(),
+        // root.Point (as a type and for a static call), root.limit, and root.helper as a function value, bare
+        // and by address. It prints (stderr is compared only on exit 0) helper(7) + 3 + twice(&helper, 7) + 40 = 60.
+        new object[] { "root_self_alias",
+            "const std = @import(\"std\");\n" +
+            "const root = @This();\n" +
+            "\n" +
+            "const limit: u8 = 3;\n" +
+            "\n" +
+            "fn helper(x: u8) u8 {\n" +
+            "    return x + 1;\n" +
+            "}\n" +
+            "\n" +
+            "const Point = struct {\n" +
+            "    x: u8,\n" +
+            "    pub fn sum(self: Point) u8 {\n" +
+            "        return self.x + root.limit;\n" +
+            "    }\n" +
+            "};\n" +
+            "\n" +
+            "fn twice(f: *const fn (u8) u8, x: u8) u8 {\n" +
+            "    return f(f(x));\n" +
+            "}\n" +
+            "\n" +
+            "fn shadow() u8 {\n" +
+            "    const r = struct {\n" +
+            "        const limit: u8 = 40;\n" +
+            "    };\n" +
+            "    return r.limit;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() void {\n" +
+            "    const p: root.Point = .{ .x = 4 };\n" +
+            "    const f = root.helper;\n" +
+            "    const via_type = root.Point.sum(p);\n" +
+            "    const total = root.helper(p.sum()) + root.limit + twice(&root.helper, via_type) + shadow();\n" +
+            "    std.debug.print(\"{d} {d} {d}\\n\", .{ via_type, twice(f, 1), total });\n" +
+            "}\n", 0,
+            "7 3 60" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

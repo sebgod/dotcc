@@ -929,6 +929,10 @@ vector length feeds TYPES.
   left-operand settle in unrolled and generic bodies, `@bitCast` of a slice deref, `sliceAsBytes`, a std file's
   `@This()` self alias, tuple pointer elements as `nint` (CS0306), and a string literal tuple element without its NUL
   (it printed `k\0` before, a silent wrong answer).
+- **A root file's `const root = @This();` (2026-09-24, task #56)**: `root.helper()`, `root.Point`, `root.limit`
+  and `&root.helper` (oracle `root_self_alias`, 60 == zig). The root unit gets a synthetic module over its own
+  lowering, so every module-qualified path serves it; and a module's top-level function is now a value through
+  any module path (`const f = util.helper;`), which failed through a real import too.
 - **T5 ✅ (2026-09-24)** `@Vector(N, T)` lowers to .NET's `Vector64/128/256/512<T>` by total width (a bool vector,
   what a comparison yields, is a `ulong` lane mask), and real `std.mem.indexOfScalar` runs from source through its
   SIMD path, == zig. Vector surface: `@splat`, an array / slice / `slice[i..][0..N].*` loaded at a vector sink, a list
