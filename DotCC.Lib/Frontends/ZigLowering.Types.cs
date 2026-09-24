@@ -1091,8 +1091,10 @@ internal sealed partial class ZigLowering
         // `h.H` with `const h = @import("h.zig");`: a type the MODULE declares (so `h.H.hash(…)` is a static
         // call). A root unit's named import only: a lazily prepared module must not fan out into what its
         // top-level aliases name (std.zig's `pub const BufMap = @import("buf_map.zig").BufMap;` would prepare
-        // buf_map.zig at every std import), and a std path is left to the std resolvers.
-        if (!_lazy && f.Arg0.Content is Zig.Ident && !TryResolveStdPath(dotted, out _)
+        // buf_map.zig at every std import), and a std path is left to the std resolvers. Inside a function BODY a lazy
+        // module resolves the same way (no preparation is running then): std.Io.Writer.Allocating.sendFile's
+        // `File.Handle` is File.zig's `pub const Handle`, and File's own struct (platform state) never has to lower.
+        if ((!_lazy || _currentFnName.Length > 0) && f.Arg0.Content is Zig.Ident && !TryResolveStdPath(dotted, out _)
             && ResolveModulePath(f.Arg0) is { Lowering: { } moduleLowering }
             && moduleLowering.ResolveExportedType(Tok(f.Arg2)) is { } moduleType)
         {

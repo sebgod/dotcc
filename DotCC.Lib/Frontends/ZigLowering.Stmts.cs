@@ -2392,7 +2392,8 @@ internal sealed partial class ZigLowering
         _comptimeVars[capSym] = (value, bindType);
     }
 
-    private CExpr LowerIfCaptureExpr(Item condItem, string capName, Item thenItem, Item elseItem, CType? sink = null)
+    private CExpr LowerIfCaptureExpr(Item condItem, string capName, Item thenItem, Item elseItem, CType? sink = null,
+        string? errCapName = null)
     {
         // Comptime fold (S4b): if the condition is a comptime-known optional (a generic instance's
         // `comptime x: ?T` seed), select the taken branch NOW — no runtime test, no hoist. A comptime
@@ -2441,10 +2442,22 @@ internal sealed partial class ZigLowering
             payloadInit = condRef;   // the unwrapped pointer is the same value
             payloadType = cond.Type;
         }
+        else if (ct is CType.ErrorUnion eu)
+        {
+            // An error union (`if (r.getSize()) |size| … else |_| …`): the success payload binds in the then arm, the
+            // error code (as in the statement form) in the else arm. A value inspection, never a `try`.
+            test = new Unary(UnOp.LogNot, new Member(condRef, "IsErr", false) { Type = CType.Bool }) { Type = CType.Bool };
+            payloadInit = new Member(condRef, "Value", false) { Type = eu.Payload };
+            payloadType = eu.Payload;
+        }
         else
         {
             throw new IrUnsupportedException(
-                "zig value-position `if (...) |x| ... else ...` requires an optional or optional-pointer condition");
+                "zig value-position `if (...) |x| ... else ...` requires an optional, optional-pointer or error-union condition");
+        }
+        if (errCapName is not null && ct is not CType.ErrorUnion)
+        {
+            throw new IrUnsupportedException("zig value `if (x) |v| … else |e| …`: only an error union has an error to capture");
         }
 
         // then-branch: bind the payload to `x`, then lower the then value (which may use `x`).
@@ -2459,7 +2472,14 @@ internal sealed partial class ZigLowering
         _symbols.ExitScope();
 
         var elseStmts = new List<CStmt>();
+        _symbols.EnterScope();
+        if (errCapName is not null && errCapName != "_")
+        {
+            var errSym = _symbols.Declare(new Symbol { Name = errCapName, Kind = SymKind.Var, Type = CType.ErrorSet });
+            elseStmts.Add(new DeclStmt(new List<LocalDecl> { new(errSym, new Member(condRef, "Code", false) { Type = CType.ErrorSet }) }));
+        }
         var elseVal = LowerCaptureBranch(elseItem, sink, elseStmts);
+        _symbols.ExitScope();
         var resultType = sink ?? thenVal.Type;
 
         // A result temp (declared before the statement), assigned by each branch of a real `if`.
@@ -2619,6 +2639,50 @@ internal sealed partial class ZigLowering
     /// tagged-union subject (a value or pointer-to a registered <c>union(enum)</c>) to
     /// <see cref="LowerUnionSwitch"/> (the tag-discriminant + payload-capture path) and any other
     /// subject to the plain <see cref="LowerSwitch"/>.</summary>
+    /// <summary>Each container const whose address was taken, by (container, name): its static global.</summary>
+    private readonly Dictionary<(string Container, string Name), Symbol> _staticContainerConsts = new();
+
+    /// <summary>The address of a container const named by <paramref name="operand"/> (a bare sibling const, or
+    /// <c>Container.name</c>), in static storage: <c>&amp;vtable</c> in std.Io.Writer.Allocating's <c>.vtable = &amp;vtable</c>.
+    /// The const was re-lowered as a VALUE at each use, so its address was a copy on the current frame, which dangles
+    /// once that frame returns (a silent crash). Memoized, so every <c>&amp;</c> is the same address, as in zig. Null when
+    /// the operand is not a container const, or its value is not a constant initializer.</summary>
+    private CExpr? TryStaticContainerConstAddress(Item operand)
+    {
+        (string Container, string Name, Item? TypeItem, Item Rhs)? found = null;
+        if (operand.Content is Zig.Ident id && _symbols.Resolve(Tok(id.Arg0)) is null)
+        {
+            for (var cc = _currentConstContainer ?? _currentContainer; cc is not null; cc = _containerParents.GetValueOrDefault(cc))
+            {
+                if (_containerConsts.TryGetValue(cc, out var sibs) && sibs.TryGetValue(Tok(id.Arg0), out var sib))
+                {
+                    found = (cc, Tok(id.Arg0), sib.typeItem, sib.rhs);
+                    break;
+                }
+            }
+        }
+        else if (operand.Content is Zig.Field { Arg0.Content: Zig.Ident baseId } f && _symbols.Resolve(Tok(baseId.Arg0)) is null
+                 && TryLookupContainerType(Tok(baseId.Arg0), out var baseType) && ContainerTypeName(baseType) is { } cn
+                 && _containerConsts.TryGetValue(cn, out var consts) && consts.TryGetValue(Tok(f.Arg2), out var member))
+        {
+            found = (cn, Tok(f.Arg2), member.typeItem, member.rhs);
+        }
+        if (found is not var (container, name, typeItem, rhs)) { return null; }
+        if (!_staticContainerConsts.TryGetValue((container, name), out var sym))
+        {
+            var value = LowerContainerConst(container, name, typeItem, rhs);
+            if (value.Type.Unqualified is not CType.Named || !IsStaticInitializer(value)) { return null; }
+            sym = _symbols.Declare(new Symbol
+            {
+                Name = $"{container}__{name}__static", Kind = SymKind.Var, Type = value.Type, Storage = Storage.Static, IsGlobal = true,
+            });
+            _ir.Globals.Add(new GlobalVar(sym, value));
+            sym.AddressTaken = true;
+            _staticContainerConsts[(container, name)] = sym;
+        }
+        return new Unary(UnOp.AddrOf, new VarRef(sym) { Type = sym.Type, IsLValue = true }) { Type = new CType.Pointer(sym.Type) };
+    }
+
     /// <summary>Lower <c>&amp;.{ … }</c> result-located at a pointer to <paramref name="pointee"/>. zig puts a
     /// comptime-known literal in static storage (every evaluation yields the same address), so its
     /// struct value becomes a synthesized static global and the expression its address: std's VTable

@@ -125,6 +125,15 @@ internal sealed partial class ZigLowering
                         return LowerContainerConst(cc, name, sib.typeItem, sib.rhs);
                     }
                 }
+                // A sibling FUNCTION named bare as a value, from the same scopes (std.Io.Writer.Allocating's
+                // `.rebase = growingRebase` in its vtable const).
+                for (var fc = _currentConstContainer ?? _currentContainer; fc is not null; fc = _containerParents.GetValueOrDefault(fc))
+                {
+                    if (EnsureMethodDeclared(fc, name) is { Kind: SymKind.Func } siblingFn && !_genericFns.ContainsKey(siblingFn))
+                    {
+                        return new VarRef(siblingFn) { Type = siblingFn.Type };
+                    }
+                }
                 // A name bound to a COMPTIME value with no runtime symbol — today an `inline for`
                 // capture over a member list of strings or enum values (road-to-zig-std S6), which
                 // deliberately emits no `const`. Substituting the folded literal is what makes the
@@ -211,6 +220,8 @@ internal sealed partial class ZigLowering
             // temp assigned by a real `if`. See LowerIfCaptureExpr.
             case Zig.IfExprCapture ec:
                 return LowerIfCaptureExpr(ec.Arg2, Tok(ec.Arg5), ec.Arg7, ec.Arg9);
+            case Zig.IfExprCaptureErr ee:
+                return LowerIfCaptureExpr(ee.Arg2, Tok(ee.Arg5), ee.Arg7, ee.Arg12, null, Tok(ee.Arg10));
             // A switch EXPRESSION reached with no result-location type (e.g. `x = switch(y){…}`
             // where the LHS type still flows in via LowerExprSink, or an inferred `const`). The
             // sink-carrying path is in LowerExprSink; here the arm types are inferred.
@@ -280,6 +291,9 @@ internal sealed partial class ZigLowering
             // single-site rule). `try` still needs error unions (Milestone B).
             case Zig.PreAddrOf p:
             {
+                // `&vtable` of a CONTAINER const (`.inner = .{ .vtable = &vtable }`): zig gives the const static
+                // storage, so every `&` is one lasting address, never a copy on the current frame.
+                if (TryStaticContainerConstAddress(p.Arg1) is { } constAddress) { return constAddress; }
                 var operand = LowerExpr(p.Arg1);
                 if (Unparen(operand) is VarRef { Sym: { Kind: SymKind.Var or SymKind.Param } s })
                 {
@@ -487,6 +501,16 @@ internal sealed partial class ZigLowering
                 {
                     ValidateSetMember(esSet, esMember);
                     return LowerErrorLit(esMember);
+                }
+                // `Allocating.drain` — a container's own FUNCTION named as a value (std.Io.Writer.Allocating's vtable
+                // literal, `.drain = Allocating.drain`): declared on demand, then a function reference as a bare one is.
+                if (fld.Arg0.Content is Zig.Ident methodBase && _symbols.Resolve(Tok(methodBase.Arg0)) is null
+                    && TryLookupContainerType(Tok(methodBase.Arg0), out var methodBaseType)
+                    && ContainerTypeName(methodBaseType) is { } methodContainer
+                    && EnsureMethodDeclared(methodContainer, fieldName) is { Kind: SymKind.Func } containerFn
+                    && !_genericFns.ContainsKey(containerFn))
+                {
+                    return new VarRef(containerFn) { Type = containerFn.Type };
                 }
                 var structExpr = LowerExpr(fld.Arg0);
                 var arrow = structExpr.Type.Unqualified is CType.Pointer;   // Zig `p.x` auto-derefs
@@ -696,6 +720,10 @@ internal sealed partial class ZigLowering
             // runs at runtime, so it is `false`; the comptime interpreter never evaluates this node.
             case Zig.BuiltinCallNoArgs nb when Tok(nb.Arg0) == "@inComptime":
                 return new LitBool(false) { Type = CType.Bool };
+            // `@returnAddress()`: the address an allocator records for its diagnostics (std's `rawAlloc(n, a, @returnAddress())`).
+            // Managed code has no return address to give, and nothing dotcc lowers reads it, so it is 0.
+            case Zig.BuiltinCallNoArgs nb when Tok(nb.Arg0) == "@returnAddress":
+                return new LitInt("0", 0) { Type = CType.ULong };
             case Zig.BuiltinCallNoArgs nb:
                 throw new IrUnsupportedException($"zig builtin `{Tok(nb.Arg0)}()` in value position is not supported yet");
 
@@ -1539,6 +1567,7 @@ internal sealed partial class ZigLowering
         // (→ devirt) or an Allocator-typed receiver (→ indirect). A same-named method on a
         // non-allocator receiver falls through to the generic dispatch below.
         if (methodName is "alloc" or "alignedAlloc" or "dupe" or "free" or "create" or "destroy" or "realloc" or "resize" or "remap"
+            or "rawAlloc" or "rawResize" or "rawRemap" or "rawFree"
             && TryLowerAllocatorMethod(fld, methodName, argItems, out var allocExpr))
         {
             return allocExpr;
@@ -1591,6 +1620,13 @@ internal sealed partial class ZigLowering
                 throw new IrUnsupportedException($"'{moduleTyName}' has no function '{methodName}'");
             }
             return CallStaticMethod(mStaticSym, argItems);
+        }
+        // A static call through a module type whose declaration did not PARSE (`std.Io.Writer.Allocating.initCapacity(…)`
+        // while Allocating had a parse gap): say so, rather than fall through to a "path not modeled" read of the base.
+        if (fld.Arg0.Content is Zig.Field { Arg0: var skippedBase, Arg2: var skippedName } && !IsCuratedStdPath(fld.Arg0)
+            && ResolveModulePath(skippedBase)?.Lowering is { } skippedOwner)
+        {
+            skippedOwner.RaiseIfSkippedDecl(Tok(skippedName));
         }
 
         // (A2) `Generic(args).func(…)` — the base is a call to a type-returning generic (wall-plan W4),
@@ -1931,6 +1967,35 @@ internal sealed partial class ZigLowering
                 {
                     Type = new CType.ErrorUnion(sliceType),
                 };
+                return true;
+            }
+            case "rawAlloc":    // (len, alignment, ret_addr) → ?[*]u8
+            case "rawResize":   // (memory, alignment, new_len, ret_addr) → bool
+            case "rawRemap":    // (memory, alignment, new_len, ret_addr) → ?[*]u8
+            case "rawFree":     // (memory, alignment, ret_addr) → void
+            {
+                // The vtable's byte-level calls (std.Io.Writer.Allocating grows its buffer through them): one runtime
+                // helper each, over the allocator as a value (a devirtualized receiver materializes).
+                var bytes = new CType.Slice(CType.UChar);
+                var alignmentType = new CType.Named(AlignmentTypeName);
+                var (helper, paramTypes, resultType) = methodName switch
+                {
+                    "rawAlloc" => ("ZigAlloc.RawAlloc", new[] { CType.ULong, alignmentType, CType.ULong }, (CType)new CType.Pointer(CType.UChar)),
+                    "rawResize" => ("ZigAlloc.RawResize", new[] { bytes, alignmentType, CType.ULong, CType.ULong }, CType.Bool),
+                    "rawRemap" => ("ZigAlloc.RawRemap", new[] { bytes, alignmentType, CType.ULong, CType.ULong }, new CType.Pointer(CType.UChar)),
+                    _ => ("ZigAlloc.RawFree", new[] { bytes, alignmentType, CType.ULong }, CType.Void),
+                };
+                if (argItems.Count != paramTypes.Length)
+                {
+                    throw new IrUnsupportedException($"zig allocator `.{methodName}` expects {paramTypes.Length} argument(s); got {argItems.Count}");
+                }
+                var allocatorValue = recv
+                    ?? (kind == AllocKind.Fba && fld.Arg0.Content is Zig.Ident { Arg0: var rawFbaTok }
+                        ? MaterializeFba(_fbaAllocatorSites[Tok(rawFbaTok)])
+                        : MaterializeCHeap());
+                var rawArgs = new List<CExpr> { allocatorValue };
+                for (var i = 0; i < paramTypes.Length; i++) { rawArgs.Add(LowerExprSink(argItems[i], paramTypes[i])); }
+                result = new Call(helper, rawArgs) { Type = resultType };
                 return true;
             }
             case "free":

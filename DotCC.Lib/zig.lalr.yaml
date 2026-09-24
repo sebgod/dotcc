@@ -919,6 +919,10 @@ productions:
       # plain ifExpr above. `else` is mandatory (an expression yields a value on both paths). Mirrors
       # the statement forms `stmtIfCapture*`; the optional/pointer payload binds `x` in the then-branch.
       - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', RhsExpr, 'else', RhsExpr], action: ifExprCapture }
+      # Over an error union, with the error captured too (std.Io.Writer.Allocating.sendFile:
+      # `if (file_reader.getSize()) |size| size - pos else |_| std.atomic.cache_line`). `|` after `else` is a clean
+      # shift, distinct from an RhsExpr start, as in the statement form.
+      - { lhs: IfExpr, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', RhsExpr, 'else', '|', IDENT, '|', RhsExpr], action: ifExprCaptureErr }
       # The condition may be a `switch` expression (std.mem.SplitIterator.next's
       # `if (switch (delimiter_type) { .scalar => findScalarPos(…), … }) |delim_start| … else …`). `switch` is not
       # in FIRST(Expr), so after `if (` it is a clean shift; the record is the same.

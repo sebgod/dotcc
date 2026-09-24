@@ -47,13 +47,12 @@ public unsafe struct AllocatorVTable
     public delegate*<void*, ulong, Alignment, ulong, byte*> alloc;
 
     /// <summary>In-place resize: <c>(ctx, memory: []u8, alignment, new_len, ret_addr) → bool</c>.
-    /// Stored for shape-fidelity (so a custom vtable matches real zig); dotcc's own <c>realloc</c>
-    /// emulates via alloc+copy+free, and <c>a.resize</c>/<c>a.remap</c> are deferred, so this is
-    /// never invoked by dotcc-lowered code today.</summary>
+    /// dotcc's own <c>realloc</c> emulates via alloc+copy+free; std code reaches this through
+    /// <c>a.rawResize</c> (<see cref="ZigAlloc.RawResize"/>) and <c>a.resize</c>.</summary>
     public delegate*<void*, Slice<byte>, Alignment, ulong, ulong, CBool> resize;
 
     /// <summary>Resize-possibly-moving: <c>(ctx, memory: []u8, alignment, new_len, ret_addr) → ?[*]u8</c>.
-    /// Stored for shape-fidelity; not invoked by dotcc dispatch (see <see cref="resize"/>).</summary>
+    /// Reached through <c>a.rawRemap</c> (<see cref="ZigAlloc.RawRemap"/>, std.Io.Writer.Allocating) and <c>a.remap</c>.</summary>
     public delegate*<void*, Slice<byte>, Alignment, ulong, ulong, byte*> remap;
 
     /// <summary>Raw free: <c>(ctx, memory: []u8, alignment, ret_addr) → void</c>.</summary>
@@ -332,6 +331,23 @@ public static unsafe class ZigAlloc
     /// <summary>The <b>devirtualized</b> <c>page_allocator.free(slice)</c> — a direct
     /// <see cref="Libc.free"/>.</summary>
     public static void FreeCHeap<T>(Slice<T> s) where T : unmanaged => Libc.free(s.Ptr);
+
+    /// <summary><c>a.rawAlloc(len, alignment, ret_addr)</c>: the vtable's byte-level alloc, null on failure
+    /// (std.Io.Writer.Allocating grows its buffer this way).</summary>
+    public static byte* RawAlloc(Allocator a, ulong len, Alignment alignment, ulong retAddr)
+        => a.Vtable.alloc(a.Ctx, len, alignment, retAddr);
+
+    /// <summary><c>a.rawResize(memory, alignment, new_len, ret_addr)</c>: whether the block resized in place.</summary>
+    public static CBool RawResize(Allocator a, Slice<byte> memory, Alignment alignment, ulong newLen, ulong retAddr)
+        => a.Vtable.resize(a.Ctx, memory, alignment, newLen, retAddr);
+
+    /// <summary><c>a.rawRemap(memory, alignment, new_len, ret_addr)</c>: the possibly-moved block, null when it could not.</summary>
+    public static byte* RawRemap(Allocator a, Slice<byte> memory, Alignment alignment, ulong newLen, ulong retAddr)
+        => a.Vtable.remap(a.Ctx, memory, alignment, newLen, retAddr);
+
+    /// <summary><c>a.rawFree(memory, alignment, ret_addr)</c>: the vtable's byte-level free.</summary>
+    public static void RawFree(Allocator a, Slice<byte> memory, Alignment alignment, ulong retAddr)
+        => a.Vtable.free(a.Ctx, memory, alignment, retAddr);
 
     /// <summary><c>allocator.dupe(T, m)</c>: allocate <c>m.len</c> elements through <paramref name="a"/> and copy
     /// <paramref name="src"/> into them. Returns the copy, or the error code <paramref name="oom"/> when the

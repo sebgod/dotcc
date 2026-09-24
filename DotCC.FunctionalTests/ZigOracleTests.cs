@@ -4382,6 +4382,71 @@ public sealed class ZigOracleTests
             "    const all: u8 = ~@as(u8, 0);\n" +
             "    return raw + @as(u8, @intCast(m.count())) + @as(u8, @intCast(m.first().?)) + (full - 250) + none + (all - 255);\n" +
             "}\n", 32, "" },
+        // std.Io.Writer.Allocating's shapes (road-to-zig-std, task #60): a vtable const of the container's own functions,
+        // `&vtable` in static storage (not a copy on a returning frame), @fieldParentPtr, rawAlloc / rawFree with
+        // @returnAddress() and Alignment.of, and a value `if (r) |n| … else |_| …` over an error union.
+        new object[] { "writer_shapes",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const Sink = struct {\n" +
+            "    const VTable = struct {\n" +
+            "        put: *const fn (s: *Inner, v: u8) void,\n" +
+            "        reset: *const fn (s: *Inner) void,\n" +
+            "    };\n" +
+            "    const Inner = struct {\n" +
+            "        vtable: *const VTable,\n" +
+            "        last: u8,\n" +
+            "    };\n" +
+            "\n" +
+            "    total: u32,\n" +
+            "    inner: Inner,\n" +
+            "\n" +
+            "    const vtable: VTable = .{\n" +
+            "        .put = Sink.put,\n" +
+            "        .reset = resetInner,\n" +
+            "    };\n" +
+            "\n" +
+            "    fn put(s: *Inner, v: u8) void {\n" +
+            "        const self: *Sink = @fieldParentPtr(\"inner\", s);\n" +
+            "        self.total += v;\n" +
+            "        s.last = v;\n" +
+            "    }\n" +
+            "\n" +
+            "    fn resetInner(s: *Inner) void {\n" +
+            "        const self: *Sink = @fieldParentPtr(\"inner\", s);\n" +
+            "        self.total = 0;\n" +
+            "    }\n" +
+            "\n" +
+            "    fn init() Sink {\n" +
+            "        return .{ .total = 0, .inner = .{ .vtable = &vtable, .last = 0 } };\n" +
+            "    }\n" +
+            "};\n" +
+            "\n" +
+            "fn sizeOr(r: anyerror!usize) usize {\n" +
+            "    return if (r) |n| n * 2 else |_| 7;\n" +
+            "}\n" +
+            "\n" +
+            "fn failing() anyerror!usize {\n" +
+            "    return error.Nope;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var s = Sink.init();\n" +
+            "    s.inner.vtable.put(&s.inner, 5);\n" +
+            "    s.inner.vtable.put(&s.inner, 9);\n" +
+            "    const after_puts = s.total + s.inner.last;\n" +
+            "    s.inner.vtable.reset(&s.inner);\n" +
+            "\n" +
+            "    const a = std.heap.page_allocator;\n" +
+            "    const alignment: std.mem.Alignment = .of(u64);\n" +
+            "    const raw = a.rawAlloc(16, alignment, @returnAddress()) orelse return 1;\n" +
+            "    raw[0] = 3;\n" +
+            "    const first = raw[0];\n" +
+            "    a.rawFree(raw[0..16], alignment, @returnAddress());\n" +
+            "\n" +
+            "    const ok: anyerror!usize = 4;\n" +
+            "    return @intCast(after_puts + s.total + first + alignment.toByteUnits() + sizeOr(ok) + sizeOr(failing()));\n" +
+            "}\n", 49, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

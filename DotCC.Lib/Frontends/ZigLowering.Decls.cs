@@ -1488,6 +1488,14 @@ internal sealed partial class ZigLowering
     private CExpr LowerDeclLiteralCall(string container, string name, IReadOnlyList<Item> argItems)
     {
         // The curated `std.mem.Alignment` (the runtime carrier) models `.fromByteUnits(n)` directly.
+        // `.of(T)` (std.Io.Writer.Allocating's `.of(u8)`): T's own alignment.
+        if (container == AlignmentTypeName && name == "of" && argItems.Count == 1)
+        {
+            var ofAlign = _ir.AlignOfConst(LowerType(argItems[0]));
+            return new Call("Alignment.fromByteUnits",
+                new List<CExpr> { new LitInt(ofAlign.ToString(System.Globalization.CultureInfo.InvariantCulture), ofAlign) { Type = CType.ULong } },
+                new List<CType> { CType.ULong }, null) { Type = new CType.Named(AlignmentTypeName) };
+        }
         if (container == AlignmentTypeName && name == "fromByteUnits" && argItems.Count == 1)
         {
             return new Call("Alignment.fromByteUnits", new List<CExpr> { LowerExprSink(argItems[0], CType.ULong) },
@@ -1628,6 +1636,8 @@ internal sealed partial class ZigLowering
             // A value-position capture `if` with a result type (`const a: ?Alignment = if (x) |b| … else null;`).
             case Zig.IfExprCapture ec when sink is not null:
                 return LowerIfCaptureExpr(ec.Arg2, Tok(ec.Arg5), ec.Arg7, ec.Arg9, sink);
+            case Zig.IfExprCaptureErr ee when sink is not null:
+                return LowerIfCaptureExpr(ee.Arg2, Tok(ee.Arg5), ee.Arg7, ee.Arg12, sink, Tok(ee.Arg10));
             // `comptime e` keeps its result location (hash_map's `const max_align: Alignment = comptime
             // .fromByteUnits(…);`, a decl literal that needs the sink to resolve), then folds as LowerExpr's does.
             case Zig.PreComptime pc when sink is not null:
@@ -2075,6 +2085,25 @@ internal sealed partial class ZigLowering
                 }
                 var align = _ir.AlignOfConst(LowerType(bargs[0]));
                 return new LitInt(align.ToString(System.Globalization.CultureInfo.InvariantCulture), align) { Type = CType.ULong };
+            }
+            case "@fieldParentPtr":
+            {
+                // `const a: *Allocating = @fieldParentPtr("writer", w);` (std.Io.Writer.Allocating's vtable callbacks): the
+                // parent's address is the field pointer minus the field's offset in the parent type the result names.
+                if (bargs.Count != 2 || bargs[0].Content is not Zig.StrLit parentFieldLit)
+                {
+                    throw new IrUnsupportedException("zig `@fieldParentPtr` expects (\"field\", field_ptr)");
+                }
+                if (sink?.Unqualified is not CType.Pointer { Pointee: var parentType } parentPtr
+                    || parentType.Unqualified is not CType.Named parentNamed)
+                {
+                    throw new IrUnsupportedException(
+                        "zig `@fieldParentPtr` needs its result type (`const p: *Parent = @fieldParentPtr(\"field\", ptr);`)");
+                }
+                var parentField = UnquoteStringLiteral(Tok(parentFieldLit.Arg0));
+                var fieldOffset = new OffsetOf(parentType, new[] { parentField }, _ir.StructFieldType(parentNamed, parentField)) { Type = CType.ULong };
+                var fieldAddress = new Cast(CType.ULong, LowerExpr(bargs[1])) { Type = CType.ULong };
+                return new Cast(parentPtr, new Binary(BinOp.Sub, fieldAddress, fieldOffset) { Type = CType.ULong }) { Type = parentPtr };
             }
             case "@offsetOf":
             {

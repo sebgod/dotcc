@@ -945,6 +945,11 @@ vector length feeds TYPES.
   setValue, unset, count, isSet, findFirstSet, `.full`), 33 == zig. Needed: `packed struct(T)` (declared and returned;
   grammar), `u0` in a type comparison, prefix `-%`, an integer into a `?usize` return, and `unchecked` around a
   constant `~` narrowed to a byte. Also task #62: a compound assignment hoists a captured value `if`.
+- **std.Io.Writer.Allocating's shapes (2026-09-24, task #60)**: container functions as vtable values, `@fieldParentPtr`,
+  raw allocator calls, `Alignment.of`, an error-union value `if |x| … else |e|`, and a SILENT CRASH fixed: `&vtable` of a
+  container const was a copy on the current frame. std.fmt.allocPrint itself stops at the platform floor (task #63):
+  the vtable names `sendFile`, whose body needs `File.Handle` = `std.posix.fd_t`. A decision (model the handle, or a
+  runtime-trap stub for an unreachable vtable slot) is pending.
 - **T5 ✅ (2026-09-24)** `@Vector(N, T)` lowers to .NET's `Vector64/128/256/512<T>` by total width (a bool vector,
   what a comparison yields, is a `ulong` lane mask), and real `std.mem.indexOfScalar` runs from source through its
   SIMD path, == zig. Vector surface: `@splat`, an array / slice / `slice[i..][0..N].*` loaded at a vector sink, a list
