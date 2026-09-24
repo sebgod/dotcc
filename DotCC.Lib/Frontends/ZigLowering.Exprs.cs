@@ -77,6 +77,15 @@ internal sealed partial class ZigLowering
                     // A `comptime var`/`comptime const` (Milestone T) — substitute its CURRENT
                     // lowering-time value as a literal, so an `inline while` condition / body folds.
                     if (_comptimeVars.TryGetValue(sym, out var cv)) { return ComptimeVarLit(cv.Value, cv.Type); }
+                    // A comptime OPTIONAL (a `comptime x: ?T` seed, `const arg_pos = comptime switch (…) { .none => null, … }`):
+                    // `null` or its payload, as a literal the interpreter and a runtime use both read.
+                    if (_comptimeOptionalVars.TryGetValue(sym, out var co))
+                    {
+                        var optType = new CType.Optional(co.Inner);
+                        return co.HasValue
+                            ? new Cast(optType, ComptimeVarLit(co.Value, co.Inner)) { Type = optType }
+                            : new DefaultLit { Type = optType };
+                    }
                     // A comptime STRING var (`comptime var literal: []const u8 = "";`): its current value.
                     if (_comptimeStringVars.TryGetValue(sym, out var csv)) { return csv; }
                     // A comptime AGGREGATE var (the comptime engine's E3): a live reference the interpreter
@@ -242,10 +251,10 @@ internal sealed partial class ZigLowering
             case Zig.CmpLe a:   return Bin(BinOp.Le, a.Arg0, a.Arg2);
             case Zig.CmpGe a:   return Bin(BinOp.Ge, a.Arg0, a.Arg2);
             // boolean (short-circuit)
-            case Zig.BoolOr a:  return Bin(BinOp.LogOr, a.Arg0, a.Arg2);
-            case Zig.BoolAnd a: return Bin(BinOp.LogAnd, a.Arg0, a.Arg2);
-            case Zig.BoolOrSwitch a:  return Bin(BinOp.LogOr, a.Arg0, a.Arg2);    // `a or switch (…) {…}`
-            case Zig.BoolAndSwitch a: return Bin(BinOp.LogAnd, a.Arg0, a.Arg2);   // `a and switch (…) {…}`
+            case Zig.BoolOr a:  return ShortCircuit(BinOp.LogOr, a.Arg0, a.Arg2);
+            case Zig.BoolAnd a: return ShortCircuit(BinOp.LogAnd, a.Arg0, a.Arg2);
+            case Zig.BoolOrSwitch a:  return ShortCircuit(BinOp.LogOr, a.Arg0, a.Arg2);    // `a or switch (…) {…}`
+            case Zig.BoolAndSwitch a: return ShortCircuit(BinOp.LogAnd, a.Arg0, a.Arg2);   // `a and switch (…) {…}`
             // bitwise / shift
             case Zig.BitAnd a:  return Bin(BinOp.BitAnd, a.Arg0, a.Arg2);
             case Zig.BitXor a:  return Bin(BinOp.BitXor, a.Arg0, a.Arg2);
@@ -372,6 +381,20 @@ internal sealed partial class ZigLowering
                     && constModule.LowerExportedValueConst(fieldName) is { } moduleConst)
                 {
                     return moduleConst;
+                }
+                // `std.options.fmt_max_depth`: a FIELD of a module's value const (`pub const options: Options = …`
+                // in std.zig), the const lowered in its own module and the field read off it.
+                if (fld.Arg0.Content is Zig.Field { Arg0: var constModulePath, Arg2: var constNameTok }
+                    && !IsCuratedStdPath(constModulePath)
+                    && ResolveModulePath(constModulePath) is { Lowering: { } aggregateModule })
+                {
+                    // A default-initialized const: only the field's default, so its struct need not lower whole.
+                    if (aggregateModule.LowerDefaultedConstField(Tok(constNameTok), fieldName) is { } defaulted) { return defaulted; }
+                    if (aggregateModule.LowerExportedValueConst(Tok(constNameTok)) is { } aggregateConst
+                        && _ir.StructFieldType(aggregateConst.Type, fieldName) is { } aggregateFieldType)
+                    {
+                        return new Member(aggregateConst, fieldName, false) { Type = aggregateFieldType };
+                    }
                 }
                 if (TryResolveStdPath(expr, out var stdPath))
                 {
@@ -938,6 +961,9 @@ internal sealed partial class ZigLowering
         Zig.Concat c => TryFoldStringConcat(c.Arg0, c.Arg2),
         Zig.Repeat r => TryFoldStringRepeat(r.Arg0, r.Arg2),
         Zig.BuiltinCall b => TryEvalTypeNameBuiltin(b),   // `@typeName(T)` → comptime string (else null)
+        // A byte-slice field of a comptime AGGREGATE the interpreter holds (std.Io.Writer.print's
+        // `placeholder.specifier_arg`, a `const placeholder = comptime Placeholder.parse(…)`).
+        Zig.Field => TryComptimeAggregateString(item),
         // NOT a module-qualified constant (`builtin.link_libc`), deliberately: this runs during pass 0
         // of module PREPARATION, and resolving a module path from here would prepare the target module
         // as a side effect of merely RECORDING a const — the eager fan-out S2's laziness exists to
@@ -946,6 +972,40 @@ internal sealed partial class ZigLowering
         // fold, where resolving another module is exactly what is wanted (road-to-zig-std S3a).
         _ => null,
     };
+
+    /// <summary><c>a or b</c> / <c>a and b</c> whose LEFT side is a settled comptime question: zig never analyses the
+    /// right side when the left decides the result (std.math.cast's <c>(is_comptime or maxInt(@TypeOf(x)) &gt; …)</c>,
+    /// where <c>maxInt(comptime_int)</c> would not compile), so it is not lowered at all. Otherwise the ordinary
+    /// runtime operator.</summary>
+    private CExpr ShortCircuit(BinOp op, Item left, Item right)
+    {
+        if (TryFoldComptimeCondition(left) is { } settled && settled == (op == BinOp.LogOr))
+        {
+            return new LitBool(settled) { Type = CType.Bool };
+        }
+        return Bin(op, left, right);
+    }
+
+    /// <summary>The comptime string a field path rooted at a comptime aggregate holds, spliced to a string literal;
+    /// null when the root is not one (checked before anything lowers, so this stays cheap and side-effect free
+    /// for every other field) or the value is not a byte slice.</summary>
+    private LitStr? TryComptimeAggregateString(Item expr)
+    {
+        var root = expr;
+        while (root.Content is Zig.Field or Zig.Grouped)
+        {
+            root = root.Content is Zig.Field rf ? rf.Arg0 : ((Zig.Grouped)root.Content).Arg1;
+        }
+        if (root.Content is not Zig.Ident rid || _symbols.Resolve(Tok(rid.Arg0)) is not { } rootSym
+            || !_ir.ComptimeGlobals.ContainsKey(rootSym))
+        {
+            return null;
+        }
+        CExpr lowered;
+        using (EnterThrowawayHoist()) { lowered = LowerExpr(expr); }
+        return _ir.EvalComptimeValue(lowered) is IrModule.CtSlice slice && _ir.SpliceComptimeValue(slice) is SliceNew { Ptr: LitStr str }
+            ? str : null;
+    }
 
     /// <summary>Each <c>comptime var</c> holding a comptime STRING (std.Io.Writer.print's
     /// <c>comptime var literal: []const u8 = "";</c>), by symbol → its current value, updated by assignments

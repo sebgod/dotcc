@@ -260,8 +260,13 @@ internal sealed partial class ZigLowering
             case Zig.Ident id when _symbols.Resolve(Tok(id.Arg0)) is null
                                    && _comptimeStrings.TryGetValue(Tok(id.Arg0), out var text):
                 return text;
+            // A member list at a comptime index (std.Io.Writer.print's `@field(args, field_names[arg_to_print])`).
+            case Zig.Index ix when TryFoldTypeInfoList(ix.Arg0, out var names) && names.Strings is { } nameList:
+                return nameList[ComptimeListIndex(names, ix.Arg2)];
+            // Any other comptime string: a comptime const, a `++` fold.
             default:
-                return null;
+                try { return ComptimeName(item); }
+                catch (IrUnsupportedException) { return null; }
         }
     }
 }

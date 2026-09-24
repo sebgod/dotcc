@@ -595,6 +595,9 @@ internal sealed partial class ZigLowering
         // the return type is one slot further right than the pre-CallConv layout. `callconv(.c)` /
         // `(.C)` honors the C ABI via IsNativeCallConv (→ `delegate* unmanaged[Cdecl]`); every other
         // convention (and the absent/epsilon case) stays managed. See IsCCallConv.
+        Zig.TyFnSwitchRet => throw new IrUnsupportedException(
+            "a function type whose return type is a `switch` expression is not lowered yet (std.Options' "
+            + "`elf_debug_info_search_paths`); fold the switch into a type alias first"),
         Zig.TyFn f       => new CType.Func(LowerType(f.Arg5), LowerFnTypeParams(f.Arg2), Variadic: false) { IsNativeCallConv = IsCCallConv(f.Arg4) },
         Zig.TyFnNoArgs f => new CType.Func(LowerType(f.Arg4), System.Array.Empty<CType>(), Variadic: false) { IsNativeCallConv = IsCCallConv(f.Arg3) },
         // `!T`-returning fn-pointer types: the return is an error union `!T` (like fnDefErr). The
@@ -1165,6 +1168,9 @@ internal sealed partial class ZigLowering
             {
                 Zig.FnTypeParamUnnamed u => LowerType(u.Arg0),
                 Zig.FnTypeParamNamed n   => LowerType(n.Arg2),
+                Zig.FnTypeParamComptime  => throw new IrUnsupportedException(
+                    "a function TYPE with a `comptime` parameter is a generic function type, which has no function-pointer "
+                    + "form (std.Options' `logFn`)"),
                 _ => throw new IrUnsupportedException(
                     "a function-pointer-type parameter must be a `Type` or `IDENT : Type`"),
             });

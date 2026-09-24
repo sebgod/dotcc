@@ -519,6 +519,13 @@ internal sealed partial class ZigLowering
     /// any methods by <see cref="SplitMembers"/>; empty for a <c>struct {}</c>.</summary>
     private void RegisterStruct(string name, IReadOnlyList<Item> fieldItems, AggregateLayout layout = AggregateLayout.Default)
     {
+        // Every defaulted field's type and default ASTs, recorded BEFORE any field type lowers: a struct whose
+        // registration fails part-way (std.Options, on `ScopeLevel`'s `@EnumLiteral()`) can still answer a
+        // read of one field of its default value (`std.options.fmt_max_depth`, see LowerDefaultedConstField).
+        foreach (var fd in fieldItems)
+        {
+            if (fd.Content is Zig.StructFieldDefault pre) { _structFieldDecls[(name, Tok(pre.Arg0))] = (pre.Arg2, pre.Arg4); }
+        }
         var fields = new List<StructField>();
         foreach (var fd in fieldItems)
         {

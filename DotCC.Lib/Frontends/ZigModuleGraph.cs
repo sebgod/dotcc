@@ -84,6 +84,10 @@ internal sealed class ZigImportScope
     /// its template and drains its instances), so a call from any module in the chain instantiates it.</summary>
     public Dictionary<Symbol, ZigLowering> GenericMethodOwners { get; } = new();
 
+    /// <summary>Each function's declared RETURN width (see ZigLowering's <c>_fnReturnBits</c>), shared: a generic
+    /// instantiated in its owner module (<c>std.math.cast(isize, v)</c>) is read from the caller's.</summary>
+    public Dictionary<Symbol, int> FnReturnBits { get; } = new();
+
     /// <summary>A container's IR name → the module holding its VALUE consts, so a decl literal
     /// (<c>var list: std.array_list.Aligned(u8, null) = .empty;</c>) written in another module lowers the
     /// const where it was declared.</summary>

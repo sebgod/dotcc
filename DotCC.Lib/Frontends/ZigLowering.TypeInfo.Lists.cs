@@ -247,6 +247,15 @@ internal sealed partial class ZigLowering
                 $"zig `{name}`: the member name must be a comptime string — a literal, or an `inline for` capture "
                 + "over a member list");
         }
+        // `@hasDecl(root, "std_options")` (std.zig's `options`): a MODULE operand asks about its top-level
+        // declarations. dotcc's synthetic `root` is empty, so std takes its defaults, as for a program that
+        // declares no overrides.
+        if (name == "@hasDecl" && args[0].Content is Zig.Ident or Zig.Field
+            && _typeAliases.GetValueOrDefault(args[0].Content is Zig.Ident mi ? Tok(mi.Arg0) : "") is null
+            && ResolveModulePath(args[0]) is { Lowering: { } declModule })
+        {
+            return new LitBool(declModule.DeclaresTopLevel(member)) { Type = CType.Bool };
+        }
         var type = LowerType(args[0]);
         var present = name == "@hasField"
             ? (FieldsOfAggregate(type)?.Any(x => x.Name == member) ?? false)
@@ -284,6 +293,14 @@ internal sealed partial class ZigLowering
                 + "over a member list");
         }
         var receiver = LowerExpr(bargs[0]);
+        // A TUPLE's fields are named by position (`"0"`, `"1"`: what `field_names` lists for `.{ a, b }`), so
+        // `@field(args, field_names[i])` in std.Io.Writer.print is its i-th element.
+        if (receiver.Type.Unqualified is CType.Tuple tuple
+            && int.TryParse(fieldName, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var position)
+            && position < tuple.Elements.Count)
+        {
+            return new TupleIndex(receiver, position, tuple.Elements[position]) { Type = tuple.Elements[position] };
+        }
         var isPtr = receiver.Type.Unqualified is CType.Pointer;
         var fieldType = _ir.StructFieldType(receiver.Type, fieldName)
             ?? throw new IrUnsupportedException(
@@ -296,7 +313,14 @@ internal sealed partial class ZigLowering
     /// served at all, and saying so beats lowering something that cannot work.</summary>
     private int ComptimeListIndex(ZigComptimeList list, Item indexItem)
     {
-        if (EvalComptimeValue(indexItem) is not LitInt { Value: { } n })
+        // A literal or comptime binding, else any index the const-folder settles (a `const` whose
+        // initializer folded, std.Io.Writer.print's `arg_to_print`).
+        long? folded = EvalComptimeValue(indexItem) is LitInt { Value: { } lit } ? lit : null;
+        if (folded is null)
+        {
+            using (EnterThrowawayHoist()) { folded = _ir.ConstEval(LowerExpr(indexItem)); }
+        }
+        if (folded is not { } n)
         {
             throw new IrUnsupportedException(
                 $"zig `{list.Label}[i]`: the index must be comptime-known (a literal or a comptime `const`) — a member "

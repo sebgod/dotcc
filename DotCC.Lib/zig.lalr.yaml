@@ -1116,6 +1116,10 @@ productions:
       - { lhs: Type, rhs: ['fn', '(', ')', CallConv, Type],                    action: tyFnNoArgs }
       - { lhs: Type, rhs: ['fn', '(', FnTypeParams, ')', CallConv, '!', Type], action: tyFnErr }
       - { lhs: Type, rhs: ['fn', '(', ')', CallConv, '!', Type],               action: tyFnNoArgsErr }
+      # A fn type whose RETURN type is a comptime `switch` (std.Options' `elf_debug_info_search_paths: ?fn (…)
+      # switch (@import("builtin").object_format) { … }`). `switch` is not in FIRST(Type), so after the
+      # CallConv it is a 1-token shift. Parsed so the declaring container parses; lowering it is a named cut.
+      - { lhs: Type, rhs: ['fn', '(', FnTypeParams, ')', CallConv, SwitchExpr], action: tyFnSwitchRet }
       - { lhs: Type, rhs: [ErrUnion] }
 
   # ANNOTATION type (road-to-zig-std S9 — the `:`-in-307 residual). An `AType` is a plain `Type`
@@ -1169,6 +1173,9 @@ productions:
     rules:
       - { lhs: FnTypeParam, rhs: [Type],             action: fnTypeParamUnnamed }
       - { lhs: FnTypeParam, rhs: [IDENT, ':', Type], action: fnTypeParamNamed }
+      # A `comptime` parameter in a function TYPE (std.Options' `logFn: fn (comptime message_level: log.Level, …)
+      # void`): parsed so the declaring container parses; lowering one is a named cut (a generic function type).
+      - { lhs: FnTypeParam, rhs: ['comptime', IDENT, ':', Type], action: fnTypeParamComptime }
 
   # Postfix chain (left-assoc): field access, deref, optional-unwrap, index, call.
   - derivation: leftmost
@@ -1272,6 +1279,8 @@ productions:
       # A switch EXPRESSION as an argument (std.math.log2's `math.log2_int(switch (s) { … }, x)`),
       # transparent like the Expr arm. `switch` is not in FIRST(Expr), so it is a shift decision too.
       - { lhs: Arg, rhs: [SwitchExpr] }
+      # And an if-EXPRESSION (std.Io.Writer.printValue's `w.writeAll(if (i < n) ", " else " }")`).
+      - { lhs: Arg, rhs: [IfExpr] }
 
   # A named field init's value: an Expr, or `{}` (void; `{` is not in FIRST(Expr), so conflict-free).
   - derivation: none
@@ -1353,6 +1362,16 @@ productions:
       # Its body is a plain Expr ended by `,` / `}`, where an `else` would continue the if-EXPRESSION prong
       # (whose arms are RhsExprs): a 1-token split, with no dangling else to resolve.
       - { lhs: Prong, rhs: [CaseVals, '=>', 'if', '(', Expr, ')', '|', IDENT, '|', Expr], action: prongIfCapture }
+      # An else-less `if` whose body is a switch statement (std.Io.Writer.printValue's
+      # `3 => if (fmt[0] == 'b' and …) switch (@typeInfo(T)) { … },`). Ended by `,` / `}` like the form above;
+      # an if-EXPRESSION prong would continue with `else`, and its arms are not SwitchExprs, so no conflict.
+      - { lhs: Prong, rhs: [CaseVals, '=>', 'if', '(', Expr, ')', SwitchExpr], action: prongIfSwitch }
+      # A capture `if` whose body RETURNS (std.Io.Writer.printInt's
+      # `.signed => if (std.math.cast(isize, value)) |x| return printIntAny(w, x, …),`). `return` does not
+      # start an Expr, so after the capture it is a 1-token split from prongIfCapture.
+      - { lhs: Prong, rhs: [CaseVals, '=>', 'if', '(', Expr, ')', '|', IDENT, '|', ReturnArm], action: prongIfCaptureReturn }
+      # A loop STATEMENT as a prong body (std.Io.Writer.writeSplat's `else => for (0..splat) |_| { … },`).
+      - { lhs: Prong, rhs: [CaseVals, '=>', LoopStmt], action: prongLoop }
       - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, ',', IDENT, '|', Block],             action: prongCaptureTag }
       - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, ',', IDENT, '|', RhsExpr],           action: prongCaptureTagExpr }
       - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, ',', IDENT, '|', 'return', RhsExpr], action: prongCaptureTagReturn }

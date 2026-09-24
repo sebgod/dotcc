@@ -365,6 +365,7 @@ internal sealed partial class ZigLowering
         var stringSeeds = new List<(string name, LitStr value)>();
         var anytypeSeeds = new List<(string name, CType type)>();
         var anytypeBits = new Dictionary<string, int>(System.StringComparer.Ordinal);
+        var anytypeTupleBits = new Dictionary<string, int?[]>(System.StringComparer.Ordinal);
         var fnSeeds = new List<(string name, ZigLowering owner, Symbol fn)>();
         var aggregateSeeds = new List<(string name, IrModule.ComptimeValue value, CType type)>();
         var comptimeIntArgs = new Dictionary<string, long>(System.StringComparer.Ordinal);
@@ -393,6 +394,8 @@ internal sealed partial class ZigLowering
                     anytypeSeeds.Add((g.Params[i].Name, argScope.InferArgType(argItems[i])));
                     // The argument's declared width, where its value carries one (road-to-zig-std G3).
                     if (argScope.DeclaredBitsOfArgument(argItems[i]) is { } argBits) { anytypeBits[g.Params[i].Name] = argBits; }
+                    // A tuple literal's per-element widths (std.fmt's `.{42}`: `@field(args, "0")` is an `int`, 32 bits).
+                    if (argScope.TupleLiteralElemBits(argItems[i]) is { } tupleBits) { anytypeTupleBits[g.Params[i].Name] = tupleBits; }
                     break;
             }
         }
@@ -613,6 +616,7 @@ internal sealed partial class ZigLowering
                 _fnParamInfos[instanceSym] = g.Params;
                 if (DeclaredBitsOfTypeArg(g.RetType) is { } instRetBits) { _fnReturnBits[instanceSym] = instRetBits; }
                 if (anytypeBits.Count > 0) { _instanceAnytypeBits[instanceSym] = anytypeBits; }
+                if (anytypeTupleBits.Count > 0) { _instanceAnytypeTupleBits[instanceSym] = anytypeTupleBits; }
                 // A method instance's body re-enters its owner's seeds too, its own LAST so they win a clash.
                 if (ownerSeedsKey is { } osk && _reifiedSeeds.TryGetValue(osk, out var os))
                 {
@@ -701,6 +705,10 @@ internal sealed partial class ZigLowering
             ?? throw new IrUnsupportedException("zig `anytype` argument has no statically known type")).Unqualified;
     }
 
+    /// <summary>Each local <c>const</c> initialized by an untyped integer literal: a <c>comptime_int</c> in zig, lowered
+    /// on an <c>int</c> carrier (see <see cref="ComptimeIntArgValue"/>).</summary>
+    private readonly HashSet<Symbol> _comptimeIntLocals = new();
+
     /// <summary>The value of an argument whose zig type is <c>comptime_int</c>: an untyped integer literal, or
     /// an expression of the <see cref="CType.ComptimeInt"/> type (a <c>comptime_int</c> parameter, a capture of
     /// one, arithmetic over those), when it evaluates at compile time. Null for anything else, including a
@@ -712,7 +720,12 @@ internal sealed partial class ZigLowering
         CExpr lowered;
         try { lowered = LowerExpr(argItem); }
         catch (IrUnsupportedException) { return null; }
-        if (argItem.Content is not Zig.IntLit && lowered.Type?.Unqualified is not CType.Prim { IsComptimeInt: true }) { return null; }
+        var untypedConst = argItem.Content is Zig.Ident { Arg0: var constTok } && _symbols.Resolve(Tok(constTok)) is { } constSym
+                           && _comptimeIntLocals.Contains(constSym);
+        if (argItem.Content is not Zig.IntLit && !untypedConst && lowered.Type?.Unqualified is not CType.Prim { IsComptimeInt: true })
+        {
+            return null;
+        }
         return _ir.ConstEval(lowered)
             ?? (_ir.EvalComptimeValue(lowered) is IrModule.CtInt { Value: var big } && big >= long.MinValue && big <= long.MaxValue
                 ? (long)big : null);

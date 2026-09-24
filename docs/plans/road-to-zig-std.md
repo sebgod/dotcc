@@ -880,6 +880,24 @@ vector length feeds TYPES.
   **Wall next:** the comptime `Placeholder.parse(…)` call needs its body lowered, and that body reaches
   `std.mem.findScalarPos`'s SIMD branch (guarded by `!@inComptime()` at runtime): `@Vector`, so the target
   segment T3 → T4 → T5 is now on bufPrint's critical path too.
+  **Update (2026-09-24): bufPrint LOWERS from real std end to end** (dotcc exits 0 for
+  `std.fmt.bufPrint(&buf, "{d}", .{42})`); the emitted C# has bad-emit errors left (deferred.md, bad emit; task
+  #50). What the path needed, all now in: a comptime OPTIONAL bound from `comptime switch (…) { .none => null, … }`
+  (`arg_pos`), so `comptime arg_state.nextArg(arg_pos) orelse @compileError(…)` never analyses its fallback; a
+  tuple field named by a member-list index (`@field(args, field_names[i])`, a tuple's fields being `"0"`, `"1"`);
+  a comptime byte-slice field of a comptime aggregate as a comptime string (`placeholder.specifier_arg`);
+  `std.options.fmt_max_depth` as ONE field's default of a default-initialized module const (std.Options itself
+  cannot lower: a generic fn-type field and `@EnumLiteral()`), with `@hasDecl(root, …)` over dotcc's empty
+  synthetic root folding false; a switch over a TYPE (`switch (@TypeOf(value))`); a statement switch over a
+  comptime value in a generic instance selecting its prong, so `invalidFmtError` prongs are never analysed; a
+  comptime-settled `or` / `and` not lowering its right side (std.math.cast's `is_comptime or maxInt(@TypeOf(x))
+  > …`); declared widths carried through `?T` returns (shared across modules now), folded and runtime captures,
+  tuple-literal `anytype` arguments per element and on through a parameter; a `const x = 42;` binding an
+  `anytype` as comptime_int; and grammar: an if- or switch-expression as a call argument, prongs
+  `=> if (c) switch …`, `=> if (x) |v| return …` and `=> for (…) …`, and function TYPES with `comptime`
+  parameters or a `switch` return (parsed so std.Options parses; lowering those is a named cut). Oracles
+  `prong_forms_type_switch`, `comptime_optional_switch`, `tuple_field_by_name`, `comptime_or_short_circuit`;
+  unit `ZigFormatEngineTests`.
 - **T5 ✅ (2026-09-24)** `@Vector(N, T)` lowers to .NET's `Vector64/128/256/512<T>` by total width (a bool vector,
   what a comparison yields, is a `ulong` lane mask), and real `std.mem.indexOfScalar` runs from source through its
   SIMD path, == zig. Vector surface: `@splat`, an array / slice / `slice[i..][0..N].*` loaded at a vector sink, a list

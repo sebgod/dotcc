@@ -3867,6 +3867,93 @@ public sealed class ZigOracleTests
             "    @memcpy(&copy, &r);\n" +
             "    return copy[0] * 10 + t[0] + t[2] - r[3];\n" +
             "}\n", 61, "" },
+        // std.Io.Writer.printValue / printInt's statement shapes (road-to-zig-std G3): `=> if (c) switch …`,
+        // `=> if (x) |v| return v`, `=> for (…) |_| {…}` prongs, and a switch over a TYPE (`switch (@TypeOf(v))`,
+        // a comptime_int argument included). 5 + 3 + 4 + 1 + 2 + 3 + 20 = 38.
+        new object[] { "prong_forms_type_switch",
+            "fn f(x: u8, fmtlen: u8) u8 {\n" +
+            "    var r: u8 = 0;\n" +
+            "    switch (fmtlen) {\n" +
+            "        3 => if (x > 1) switch (x) {\n" +
+            "            2 => r = 5,\n" +
+            "            else => r = 6,\n" +
+            "        },\n" +
+            "        4 => if (maybe(x)) |v| return v,\n" +
+            "        else => for (0..x) |_| {\n" +
+            "            r += 1;\n" +
+            "        },\n" +
+            "    }\n" +
+            "    return r;\n" +
+            "}\n" +
+            "fn maybe(x: u8) ?u8 {\n" +
+            "    return if (x > 2) x else null;\n" +
+            "}\n" +
+            "fn kind(v: anytype) u8 {\n" +
+            "    switch (@TypeOf(v)) {\n" +
+            "        u8, u16 => return 1,\n" +
+            "        comptime_int => return 2,\n" +
+            "        else => return 3,\n" +
+            "    }\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return f(2, 3) + f(3, 4) + f(4, 9) + kind(@as(u8, 1)) + kind(7) + kind(@as(i64, 1)) + 20;\n" +
+            "}\n", 38, "" },
+        // std.Io.Writer.print's argument bookkeeping (G3): a comptime union selects `.none => null`, bound as a
+        // comptime OPTIONAL, handed to a comptime method on a comptime struct var, whose `orelse @compileError(…)`
+        // fallback is never analysed. 0 + 42.
+        new object[] { "comptime_optional_switch",
+            "const ArgState = struct {\n" +
+            "    next_arg: usize = 0,\n" +
+            "    used_args: u32 = 0,\n" +
+            "    args_len: usize,\n" +
+            "    pub fn nextArg(self: *@This(), arg_index: ?usize) ?usize {\n" +
+            "        const next_index = arg_index orelse init: {\n" +
+            "            const arg = self.next_arg;\n" +
+            "            self.next_arg += 1;\n" +
+            "            break :init arg;\n" +
+            "        };\n" +
+            "        if (next_index >= self.args_len) {\n" +
+            "            return null;\n" +
+            "        }\n" +
+            "        self.used_args |= @as(u32, 1) << @as(u5, @intCast(next_index));\n" +
+            "        return next_index;\n" +
+            "    }\n" +
+            "};\n" +
+            "const Spec = union(enum) { none, number: usize };\n" +
+            "fn parse(comptime s: []const u8) Spec {\n" +
+            "    if (s.len == 0) return .{ .none = {} };\n" +
+            "    return .{ .number = s.len };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    comptime var st: ArgState = .{ .args_len = 1 };\n" +
+            "    const p = comptime parse(\"\");\n" +
+            "    const arg_pos = comptime switch (p) {\n" +
+            "        .none => null,\n" +
+            "        .number => |pos| pos,\n" +
+            "    };\n" +
+            "    const a = comptime st.nextArg(arg_pos) orelse @compileError(\"too few arguments\");\n" +
+            "    return @intCast(a + 42);\n" +
+            "}\n", 42, "" },
+        // `@field(args, field_names[i])` over a tuple (std.Io.Writer.print), and std.math.cast's comptime-settled
+        // `is_comptime or …` whose right side is never analysed. 41 + 1, then 42.
+        new object[] { "tuple_field_by_name",
+            "fn pick(args: anytype) u8 {\n" +
+            "    const info = @typeInfo(@TypeOf(args));\n" +
+            "    const field_names = info.@\"struct\".field_names;\n" +
+            "    const i = 1;\n" +
+            "    return @field(args, field_names[i]);\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return pick(.{ @as(u8, 1), @as(u8, 41) }) + 1;\n" +
+            "}\n", 42, "" },
+        new object[] { "comptime_or_short_circuit",
+            "fn wide(x: anytype) bool {\n" +
+            "    const is_comptime = @TypeOf(x) == comptime_int;\n" +
+            "    return is_comptime or @typeInfo(@TypeOf(x)).int.bits > 8;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return if (wide(5)) 42 else 0;\n" +
+            "}\n", 42, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

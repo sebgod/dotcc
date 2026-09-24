@@ -514,6 +514,7 @@ internal sealed partial class ZigLowering
         {
             return new Seq(new List<CStmt>());
         }
+        if (typeItem is null && TryBindComptimeOptionalSwitch(nameTok, initExpr)) { return new Seq(new List<CStmt>()); }
         // `const is_comptime = @TypeOf(x) == comptime_int;` (std.math.cast): a TYPE comparison (or a comptime
         // tag test) is a comptime bool with no runtime operands to hold, so it binds the folded literal.
         if (typeItem is null && TryFoldComptimeCondition(initExpr) is { } flag)
@@ -534,6 +535,49 @@ internal sealed partial class ZigLowering
             return new Seq(new List<CStmt>());
         }
         return DeclOf(nameTok, typeItem, initExpr, isConst: true);
+    }
+
+    /// <summary>Bind <c>const arg_pos = comptime switch (placeholder.arg) { .none =&gt; null, .number =&gt; |pos| pos, … };</c>
+    /// (std.Io.Writer.print) as a comptime OPTIONAL: a switch over a comptime subject with a <c>null</c> prong is
+    /// zig's <c>?T</c>, and the selected prong is either that <c>null</c> or a compile-time integer. Its later
+    /// reads (<c>arg_state.nextArg(arg_pos)</c>, run by the interpreter) then see a constant. False when the
+    /// switch has no <c>null</c> prong, its subject is not comptime-known, or the payload does not fold.</summary>
+    private bool TryBindComptimeOptionalSwitch(Item nameTok, Item initExpr)
+    {
+        var rhs = initExpr.Content is Zig.ComptimeSwitchExpr cs ? cs.Arg1 : initExpr;
+        var (subject, prongsItem) = rhs.Content switch
+        {
+            Zig.SwitchExpr s => (s.Arg2, s.Arg5),
+            Zig.SwitchExprTrailing s => (s.Arg2, s.Arg5),
+            _ => ((Item?)null, (Item?)null),
+        };
+        if (subject is null || prongsItem is null) { return false; }
+        if (!Flatten(prongsItem).Any(p => DecomposeProng(p).Expr?.Content is Zig.NullLit)) { return false; }
+        if (SelectComptimeProng(subject, prongsItem, out var payload) is not { Expr: { } value } prong) { return false; }
+        bool hasValue;
+        long v = 0;
+        CType inner = CType.ULong;
+        if (value.Content is Zig.NullLit)
+        {
+            hasValue = false;
+        }
+        else
+        {
+            EnterComptimeProng(prong, payload);
+            try
+            {
+                CExpr lowered;
+                using (EnterThrowawayHoist()) { lowered = LowerExpr(value); }
+                if (_ir.ConstEval(lowered) is not { } folded) { return false; }
+                hasValue = true;
+                v = folded;
+                if (lowered.Type?.Unqualified is CType.Prim { Integer: true, IsComptimeInt: false, Name: not "_Bool" } t) { inner = t; }
+            }
+            finally { ExitComptimeProng(); }
+        }
+        var sym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = new CType.Optional(inner) });
+        _comptimeOptionalVars[sym] = (hasValue, v, inner);
+        return true;
     }
 
     /// <summary>Local comptime aliases of a function (see <see cref="DeclOrComptime"/>): name → the
@@ -767,6 +811,9 @@ internal sealed partial class ZigLowering
             IsConstexpr = folded is not null, ConstValue = folded ?? 0,
         });
         if (declared is null && init is LitStr) { _stringLiteralSyms.Add(sym2); }
+        // `const value = 42;` is a comptime_int in zig (the lowered local is an `int` carrier): an `anytype` it is
+        // passed to binds it as a comptime value (ComptimeIntArgValue).
+        if (declared is null && isConst && folded is not null && initExpr.Content is Zig.IntLit) { _comptimeIntLocals.Add(sym2); }
         RecordValueBits(sym2,
             typeItem is { } ti ? DeclaredBitsOfTypeArg(ti) : DeclaredBitsOfValue(initExpr) ?? DeclaredBitsOfLowered(init),
             typeItem is { } te ? ElemBitsOfTypeAst(te) : DeclaredElemBitsOfValue(initExpr));
@@ -1783,6 +1830,12 @@ internal sealed partial class ZigLowering
             if (lo == true) { return true; }
             return lo == false ? TryFoldComptimeCondition(disj.Arg2) : null;
         }
+        // `@hasDecl(root, "std_options")` / `@hasField(T, "x")`: a membership question, always comptime.
+        if (cur.Content is Zig.BuiltinCall { Arg0: var memberTok } memberCall && Tok(memberTok) is "@hasDecl" or "@hasField")
+        {
+            try { return TryEvalMembershipBuiltin(memberCall)?.Value; }
+            catch (IrUnsupportedException) { return null; }
+        }
         // A comptime bool bound earlier in the body (`const is_comptime = @TypeOf(x) == comptime_int;`).
         if (cur.Content is Zig.Ident bid && _symbols.Resolve(Tok(bid.Arg0)) is null
             && _comptimeValues.TryGetValue(Tok(bid.Arg0), out var boundBool) && boundBool is LitBool { Value: var bb })
@@ -1891,11 +1944,16 @@ internal sealed partial class ZigLowering
 
     private bool? TryFoldTypeEquality(Item left, Item right)
     {
-        // `T == comptime_int` (std.math.Log2Int's first line). dotcc has no comptime-int TYPE — a
-        // `comptime T: type` is always bound to a concrete lowered type — so against a real type it is
-        // simply false.
-        if (IsComptimeNumberTypeName(right) && TryTypeAliasRhs(left, out _)) { return false; }
-        if (IsComptimeNumberTypeName(left) && TryTypeAliasRhs(right, out _)) { return false; }
+        // `T == comptime_int` (std.math.Log2Int's first line). A `comptime T: type` bound to a concrete type is
+        // never a comptime number; `@TypeOf(x)` of a comptime_int `anytype` is (CType.ComptimeInt, target T5).
+        if (IsComptimeNumberTypeName(right) && TryTypeAliasRhs(left, out var leftType))
+        {
+            return Tok(((Zig.Ident)right.Content).Arg0) == "comptime_int" && leftType.Unqualified is CType.Prim { IsComptimeInt: true };
+        }
+        if (IsComptimeNumberTypeName(left) && TryTypeAliasRhs(right, out var rightType))
+        {
+            return Tok(((Zig.Ident)left.Content).Arg0) == "comptime_int" && rightType.Unqualified is CType.Prim { IsComptimeInt: true };
+        }
         if (!TryTypeAliasRhs(left, out var lt)) { return null; }
         var lb = DeclaredBitsOfTypeArg(left);
         if (!TryTypeAliasRhs(right, out var rt)) { return null; }
@@ -1918,6 +1976,12 @@ internal sealed partial class ZigLowering
             if (!copt.HasValue) { return elseItem is { } el ? LowerStmt(el) : new Seq(new List<CStmt>()); }
             _symbols.EnterScope();
             BindFoldedCapture(capName, copt.Value, copt.Inner);
+            // The payload's declared width rides the capture (`if (comptime std.math.cast(usize, v)) |x|`: 64 bits),
+            // so an `anytype` it is passed to can answer `@typeInfo(@TypeOf(x)).int.bits`.
+            if (capName != "_" && _symbols.Resolve(capName) is { } foldedCap && DeclaredBitsOfArgument(condItem) is { } capBits)
+            {
+                RecordValueBits(foldedCap, capBits, null);
+            }
             var folded = LowerStmt(thenItem);
             _symbols.ExitScope();
             return folded;
@@ -2012,6 +2076,8 @@ internal sealed partial class ZigLowering
         if (capName != "_")
         {
             var capSym = _symbols.Declare(new Symbol { Name = capName, Kind = SymKind.Var, Type = payloadType });
+            // The payload's declared width (`if (std.math.cast(isize, v)) |x|`: 64), for an `anytype` it reaches.
+            if (DeclaredBitsOfLowered(cond) is { } runtimeCapBits) { RecordValueBits(capSym, runtimeCapBits, null); }
             thenStmts.Add(new DeclStmt(new List<LocalDecl> { new(capSym, payloadInit) }));
         }
         thenStmts.Add(LowerStmt(thenItem));
@@ -2470,7 +2536,15 @@ internal sealed partial class ZigLowering
     private ZigProng? TrySelectConstProng(Item subjectItem, Item prongsItem)
     {
         CExpr subject;
-        using (EnterThrowawayHoist()) { subject = LowerExpr(subjectItem); }
+        // A subject with no value lowering (`@typeInfo(T)`, a comptime tag) is the comptime-tag path's, not this one.
+        try
+        {
+            using (EnterThrowawayHoist()) { subject = LowerExpr(subjectItem); }
+        }
+        catch (IrUnsupportedException)
+        {
+            return null;
+        }
         if (_ir.ConstEval(subject) is not { } v) { return null; }
         ZigProng? elseProng = null;
         foreach (var prongItem in Flatten(prongsItem))
@@ -2499,8 +2573,29 @@ internal sealed partial class ZigLowering
         { ReturnsVoid: true } => LowerReturnVoid(),
         { Jump: { } j } => LowerProngJump(j),
         { Assign: { } pa } => LowerAssignStmt(pa.Arg2, pa.Arg4),
+        { IfSwitch: { } isw } => LowerProngIfSwitch(isw),
+        { IfCaptureReturn: { } icr } => LowerIfCapture(icr.Arg4, Tok(icr.Arg7), icr.Arg9, null, null),
+        { Loop: { } loop } => LowerStmt(loop),
         _ => new Seq(new List<CStmt>()),
     };
+
+    /// <summary>A <c>=&gt; if (c) switch (s) { … }</c> prong body: the switch statement under an else-less <c>if</c>.
+    /// A comptime-known condition keeps only the switch or nothing, so an untaken switch is never analysed.</summary>
+    private CStmt LowerProngIfSwitch(Zig.ProngIfSwitch p)
+    {
+        var (subject, prongs) = p.Arg6.Content switch
+        {
+            Zig.SwitchExpr s => (s.Arg2, s.Arg5),
+            Zig.SwitchExprTrailing s => (s.Arg2, s.Arg5),
+            _ => throw new IrUnsupportedException("zig `=> if (c) switch …` prong: " + (p.Arg6.Content?.GetType().Name ?? "null")),
+        };
+        if (TryFoldComptimeCondition(p.Arg4) is { } taken)
+        {
+            return taken ? LowerSwitchStmt(subject, prongs) : new Seq(new List<CStmt>());
+        }
+        var cond = LowerExpr(p.Arg4);
+        return new If(cond, new Block(new List<CStmt> { LowerSwitchStmt(subject, prongs) }), null);
+    }
 
     /// <summary>A copy of an unrolled body with its TRAILING jump removed, and which jump it was: a <c>break</c>
     /// (a plain one, or the goto the inline loop's break target lowers to under a switch), a
@@ -2637,10 +2732,13 @@ internal sealed partial class ZigLowering
 
     private CStmt LowerSwitchStmtCore(Item subjectItem, Item prongsItem)
     {
-        // While an `inline` loop unrolls, a switch over a comptime-known VALUE (`switch (fmt[i])` in
-        // std.Io.Writer.print) selects its prong now, as zig does: the loop's comptime control (a `break`
-        // in the taken prong) must be known to know when to stop unrolling.
-        if (_inlineUnrollDepth > 0 && TrySelectConstProng(subjectItem, prongsItem) is { } constProng)
+        // A switch over a comptime-known VALUE selects its prong now, as zig does. While an `inline` loop
+        // unrolls (`switch (fmt[i])` in std.Io.Writer.print) the loop's comptime control (a `break` in the
+        // taken prong) must be known to know when to stop unrolling; and in a generic instance (the scope
+        // LowerIfStmt folds a constant condition in, too) an unselected prong is never analysed
+        // (std.Io.Writer.printValue's `switch (fmt.len)` over a comptime format string, whose other prongs
+        // call `invalidFmtError`, a `@compileError`).
+        if ((_inlineUnrollDepth > 0 || _inGenericInstance) && TrySelectConstProng(subjectItem, prongsItem) is { } constProng)
         {
             return LowerSelectedProng(constProng);
         }
@@ -2651,16 +2749,7 @@ internal sealed partial class ZigLowering
             EnterComptimeProng(ctProng, ctPayload);
             try
             {
-                return ctProng switch
-                {
-                    { Block: { } blk } => LowerBlock(blk),
-                    { Expr: { } e } => LowerProngExprStmt(e),
-                    { Return: { } r } => Hoisted(() => LowerReturn(r)),
-                    { ReturnsVoid: true } => LowerReturnVoid(),
-                    { Jump: { } j } => LowerProngJump(j),
-                    { Assign: { } pa } => LowerAssignStmt(pa.Arg2, pa.Arg4),
-                    _ => new Seq(new List<CStmt>()),
-                };
+                return LowerSelectedProng(ctProng);
             }
             finally
             {
@@ -2717,6 +2806,10 @@ internal sealed partial class ZigLowering
                 case Zig.ProngReturnVoid pr: caseVals = pr.Arg0; body = new List<CStmt> { LowerReturnVoid() }; break;
                 case Zig.ProngJump pj:       caseVals = pj.Arg0; body = new List<CStmt> { LowerProngJump(pj.Arg2) }; break;
                 case Zig.ProngAssign pa:     caseVals = pa.Arg0; body = new List<CStmt> { LowerAssignStmt(pa.Arg2, pa.Arg4) }; break;
+                case Zig.ProngIfSwitch pis:  caseVals = pis.Arg0; body = new List<CStmt> { LowerProngIfSwitch(pis) }; break;
+                case Zig.ProngLoop plp:      caseVals = plp.Arg0; body = new List<CStmt> { LowerStmt(plp.Arg2) }; break;
+                case Zig.ProngIfCaptureReturn picr:
+                    caseVals = picr.Arg0; body = new List<CStmt> { LowerIfCapture(picr.Arg4, Tok(picr.Arg7), picr.Arg9, null, null) }; break;
                 // A runtime switch cannot run a `comptime { … }` arm; zig requires a comptime subject for one.
                 case Zig.ProngComptimeBlock:
                     throw new IrUnsupportedException("zig `=> comptime { … }` prong in a switch whose subject is not comptime-known");

@@ -664,6 +664,37 @@ internal sealed partial class ZigLowering
     /// from another module (<c>std.atomic.cache_line</c>); null when it declares no such const.</summary>
     internal CExpr? LowerExportedValueConst(string name) => LowerLazyValueConst(name);
 
+    /// <summary>Whether this module declares <paramref name="name"/> at top level (what <c>@hasDecl(module, name)</c>
+    /// asks): a function or variable, a value const, a container, an alias, or a declaration that failed or is a
+    /// <c>@compileError</c> tombstone (still declared, as zig's lazy analysis has it).</summary>
+    internal bool DeclaresTopLevel(string name) =>
+        _lazyValueConsts.ContainsKey(name) || _containerTypes.ContainsKey(name) || _declAliases.ContainsKey(name)
+        || _moduleAliasPaths.ContainsKey(name) || _failedContainers.ContainsKey(name) || _poisonedConsts.ContainsKey(name)
+        || ResolveExportedDecl(name) is not null;
+
+    /// <summary>One field of a top-level value const that is its struct type's DEFAULT value:
+    /// <c>pub const options: Options = if (@hasDecl(root, "std_options")) root.std_options else .{};</c> in std.zig,
+    /// read as <c>std.options.fmt_max_depth</c>. The field's default lowers alone, in this module, so the rest of
+    /// the struct (std.Options holds a generic fn type and <c>@EnumLiteral()</c> fields) never has to. Null when the
+    /// const is not such a value or the field has no recorded default.</summary>
+    internal CExpr? LowerDefaultedConstField(string constName, string fieldName)
+    {
+        if (!_lazyValueConsts.TryGetValue(constName, out var vc) || vc.typeItem?.Content is not Zig.Ident { Arg0: var typeTok })
+        {
+            return null;
+        }
+        var init = vc.rhs;
+        while (init.Content is Zig.IfExpr ie && TryFoldComptimeCondition(ie.Arg2) is { } taken) { init = taken ? ie.Arg4 : ie.Arg6; }
+        if (init.Content is not Zig.AnonStructInitEmpty) { return null; }
+        var structName = QualifyTypeName(Tok(typeTok));
+        if (!_structFieldDecls.TryGetValue((structName, fieldName), out var decl)
+            && !_structFieldDecls.TryGetValue((Tok(typeTok), fieldName), out decl))
+        {
+            return null;
+        }
+        return LowerExprSink(decl.Default, LowerType(decl.Type));
+    }
+
     /// <summary>Lower a lazy module's top-level value const <paramref name="name"/> where it is read. An
     /// UNTYPED one takes <paramref name="useSink"/>, the reader's result type: `const default_alignment =
     /// .right;` in std.fmt is an enum literal that only its use can type.</summary>
@@ -922,6 +953,10 @@ internal sealed partial class ZigLowering
     /// matched C#'s zero-init). Keyed by the registered struct name, so a mangled in-function
     /// container (<c>&lt;fn&gt;__&lt;P&gt;</c>) and a top-level struct never collide.</summary>
     private readonly Dictionary<(string Struct, string Field), Item> _structFieldDefaults = new();
+
+    /// <summary>Each defaulted struct field's declared type and default ASTs, by (struct, field), recorded before
+    /// the struct's field types lower (see <see cref="RegisterStruct"/>), so they survive a failed registration.</summary>
+    private readonly Dictionary<(string Struct, string Field), (Item Type, Item Default)> _structFieldDecls = new();
 
     /// <summary>Each top-level <c>const</c> of this module → its raw RHS, recorded before pass 0 in both
     /// lowering modes. What lets a comptime CONDITION fold a module-level bool while containers are still

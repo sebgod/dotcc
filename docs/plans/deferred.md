@@ -113,8 +113,14 @@ scheduled. (Found by the 2026-09 architecture review; the docs used to call the 
 ## Zig — bad emit (transpiles "successfully" but the emitted C# does NOT compile)
 
 The worst category — it breaks the fail-loudly invariant, since dotcc exits 0 and the error only
-surfaces when the C# is compiled. **Currently EMPTY.** Keep it that way: a construct dotcc can't
-lower correctly must throw, not emit C# that won't build.
+surfaces when the C# is compiled. Keep it EMPTY: a construct dotcc can't lower correctly must throw, not
+emit C# that won't build.
+
+**Open (measured 2026-09-24, task #50): `std.fmt.bufPrint(&buf, "{d}", .{42})`.** Every wall in front of it is
+down, so dotcc now lowers the whole path from real std (Writer.print, printValue, printInt, printIntAny) and
+exits 0, but the C# does not build: CS0200 assigning through `ulong?.Value` (2 sites), CS0131 a non-lvalue
+assignment target (4), CS1503 a `Slice<byte>` where a `byte*` is expected, CS0029 a `void` value used as a
+`byte`. It is the next brick on G3, not a construct to cut, so it is recorded here rather than made loud.
 
 It was NOT empty for a stretch of 2026-09-23 — the architecture review caught the ledger saying so
 while a measured case sat in the module-seam table below: `std.fmt`'s top-level `Alignment` enum was

@@ -5614,8 +5614,13 @@ public sealed class ZigFrontendTests
             "    const d: u8 = if (@hasDecl(P, \"K\")) 1 else 0;\n" +
             "    const e: u8 = if (@hasDecl(P, \"nope\")) 1 else 0;\n" +
             "    return a + b + c + d + e;\n}\n");
-        UserCode(cs).ShouldContain("Cond.B(true)");
-        UserCode(cs).ShouldContain("Cond.B(false)");
+        // The membership question settles the `if` at lowering time: only the taken arm lowers.
+        var user = UserCode(cs);
+        user.ShouldContain("byte a = 1;");
+        user.ShouldContain("byte b = 0;");
+        user.ShouldContain("byte c = 1;");
+        user.ShouldContain("byte d = 1;");
+        user.ShouldContain("byte e = 0;");
     }
 
     [Fact]
@@ -5801,8 +5806,9 @@ public sealed class ZigFrontendTests
             "    inline for (@typeInfo(P).@\"struct\".field_names) |f| { if (@hasField(P, f)) { n += 1; } }\n" +
             "    return n;\n" +
             "}\n");
-        UserCode(cs).ShouldContain("Cond.B(true)");
-        UserCode(cs).ShouldNotContain("Cond.B(false)");
+        // Each copy's `@hasField(P, f)` settles to true, so both increments lower with no runtime test.
+        System.Text.RegularExpressions.Regex.Matches(UserCode(cs), @"n \+= \(byte\)\(1\);").Count.ShouldBe(2);
+        UserCode(cs).ShouldNotContain("Cond.B(");
     }
 
     [Fact]
