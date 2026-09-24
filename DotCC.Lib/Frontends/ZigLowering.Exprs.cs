@@ -678,6 +678,15 @@ internal sealed partial class ZigLowering
                 {
                     return known is DefaultLit ? LowerExpr(o.Arg2) : known;
                 }
+                // A comptime-only `?comptime_int` call (`std.simd.suggestVectorLength(u8) orelse 0`) may already be its
+                // folded value: a payload literal, or `null` as a default.
+                var foldedOptional = left is ComptimeFold { Resolved: { } fk } ? fk : left;
+                if (left.Type.Unqualified is not CType.Optional and not CType.Pointer
+                    && foldedOptional is LitInt or DefaultLit or Cast { Operand: LitInt }
+                    && ReturnsOptionalComptimeInt(o.Arg0.Content is Zig.PreComptime lpc ? lpc.Arg1 : o.Arg0))
+                {
+                    return foldedOptional is DefaultLit ? LowerExpr(o.Arg2) : foldedOptional;
+                }
                 // The fallback is at the payload's result type (`alignment orelse default_alignment`, an enum literal).
                 var right = left.Type.Unqualified is CType.Optional { Inner: var fallbackSink }
                     ? LowerExprSink(o.Arg2, fallbackSink)

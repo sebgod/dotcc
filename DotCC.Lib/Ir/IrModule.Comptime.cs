@@ -79,6 +79,18 @@ internal sealed partial class IrModule
     /// (or pointer) type it was typed at; it splices back as <c>default(T)</c>.</summary>
     internal sealed record CtNull(CType Type) : ComptimeValue;
 
+    /// <summary>The result of a comptime call to a <c>void</c> function (<c>std.debug.assert(…)</c>): no value, but
+    /// not a failure either. It is only ever discarded.</summary>
+    /// <summary>A comptime ERROR (the failure side of an error union: <c>error.Overflow</c> from
+    /// <c>std.math.ceilPowerOfTwo</c>). A success is just its payload, so this is the only error-union value there is.</summary>
+    internal sealed record CtError(System.Int128 Code) : ComptimeValue;
+
+    internal sealed record CtVoid : ComptimeValue
+    {
+        /// <summary>The one void value.</summary>
+        public static readonly CtVoid Value = new();
+    }
+
     /// <summary>A comptime SLICE (the comptime engine, for std.fmt's format strings): a window of
     /// <see cref="Length"/> elements of a comptime array starting at <see cref="Offset"/>. A string literal is a
     /// byte array, so <c>fmt[a..b]</c>, <c>.len</c> and <c>fmt[i]</c> evaluate. <see cref="Type"/> is the slice
@@ -128,8 +140,51 @@ internal sealed partial class IrModule
     internal ComptimeValue? EvalComptimeValue(CExpr e) =>
         TryEvalTop(e, allowCalls: true) is { } v ? CloneComptime(v) : null;
 
-    /// <summary>Splice a comptime value back as an IR literal (see <see cref="Splice"/>).</summary>
-    internal CExpr SpliceComptimeValue(ComptimeValue v) => Splice(v);
+    /// <summary>A short, stable digest of a comptime value's contents (FNV-1a over a canonical spelling), for keying
+    /// a generic instance by a comptime STRUCT argument (<c>comptime cpu: std.Target.Cpu</c>).</summary>
+    internal static string ComptimeDigest(ComptimeValue v)
+    {
+        var sb = new System.Text.StringBuilder();
+        void Spell(ComptimeValue x)
+        {
+            switch (x)
+            {
+                case CtInt i: sb.Append('i').Append(i.Value.ToString(CultureInfo.InvariantCulture)); break;
+                case CtFloat f: sb.Append('f').Append(f.Value.ToString("R", CultureInfo.InvariantCulture)); break;
+                case CtBool b: sb.Append(b.Value ? 'T' : 'F'); break;
+                case CtNull: sb.Append('n'); break;
+                case CtArray a: sb.Append('['); foreach (var e in a.Elems) { Spell(e); sb.Append(','); } sb.Append(']'); break;
+                case CtSlice sl:
+                    sb.Append('<');
+                    for (var k = 0; k < sl.Length; k++) { Spell(sl.Backing.Elems[sl.Offset + k]); sb.Append(','); }
+                    sb.Append('>');
+                    break;
+                case CtStruct s:
+                    sb.Append('{');
+                    foreach (var kv in s.Fields.OrderBy(kv => kv.Key, System.StringComparer.Ordinal))
+                    {
+                        sb.Append(kv.Key).Append('=');
+                        Spell(kv.Value);
+                        sb.Append(';');
+                    }
+                    sb.Append('}');
+                    break;
+                default: sb.Append('?'); break;
+            }
+        }
+        Spell(v);
+        var h = 2166136261u;
+        foreach (var ch in sb.ToString()) { h = unchecked((h ^ ch) * 16777619u); }
+        return h.ToString("x8", CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>Splice a comptime value back as an IR literal (see <see cref="Splice"/>); null when it has no C#
+    /// literal form (a non-zero inline array), so a runtime use of it stays loud.</summary>
+    internal CExpr? SpliceComptimeValue(ComptimeValue v)
+    {
+        try { return Splice(v); }
+        catch (UnspliceableComptime) { return null; }
+    }
 
     /// <summary>A deep copy of a comptime value: struct and array values are mutable references, so a
     /// value stored under a second name must not share them.</summary>
@@ -596,6 +651,17 @@ internal sealed partial class IrModule
                     : new CtElemPtr(slv.Backing, slv.Offset, sm.Type);
             }
 
+            case Member { Base.Type: var ebt, Field: "IsErr" or "Value" or "Code" } em when ebt?.Unqualified is CType.ErrorUnion:
+            {
+                if (EvalComptime(em.Base) is not { } eu) { return null; }
+                return em.Field switch
+                {
+                    "IsErr" => new CtBool(eu is CtError),
+                    "Code" => eu is CtError err ? new CtInt(err.Code, CType.ErrorSet) : new CtInt(0, CType.ErrorSet),
+                    _ => eu is CtError ? throw new ComptimeAbort("comptime: `.Value` of an error") : eu,
+                };
+            }
+
             // An OPTIONAL's `.HasValue` / `.Value` (a lowered `orelse` / `if (opt) |x|`): a present optional
             // is its payload, an absent one a CtNull (E3).
             case Member { Base.Type: var obt, Field: "HasValue" or "Value" } om when obt?.Unqualified is CType.Optional:
@@ -663,6 +729,21 @@ internal sealed partial class IrModule
 
             case NullPtr np:
                 return new CtNull(np.Type);
+
+            // Error unions (std.math.ceilPowerOfTwo … `catch unreachable` in std.simd): a success is its payload, a
+            // failure a CtError; `try` passes the error out of the call, `catch` takes the fallback on one.
+            case ErrUnionOk euOk:
+                return euOk.Payload is { } okPayload ? EvalComptime(okPayload) : CtVoid.Value;
+            case ErrUnionErr euErr:
+                return EvalComptime(euErr.Code) is CtInt code ? new CtError(code.Value) : null;
+            case ZigTry zt:
+            {
+                var tried = EvalComptime(zt.Inner);
+                if (tried is CtError) { throw new ComptimeReturn { Value = tried }; }
+                return tried;
+            }
+            case ZigCatch zc:
+                return EvalComptime(zc.Union) is { } caught ? caught is CtError ? EvalComptime(zc.Fallback) : caught : null;
 
             // `a orelse b`: the payload, or the fallback when `a` is null (E3).
             case NullCoalesce nc:
@@ -901,6 +982,24 @@ internal sealed partial class IrModule
             };
             return new CtInt(count, CType.Int);
         }
+        // `@max` / `@min` and zig's integer division builtins over values known only during the evaluation
+        // (`@max(8, ceilPowerOfTwo(…))` in std.simd): the runtime helpers they lower to, over 128-bit integers.
+        if (c is { Callee: "ZigMath.Max" or "ZigMath.Min" or "ZigMath.DivTrunc" or "ZigMath.DivFloor" or "ZigMath.Rem" or "ZigMath.Mod",
+                   Args: [var lhsArg, var rhsArg] })
+        {
+            if (EvalComptime(lhsArg) is not CtInt l || EvalComptime(rhsArg) is not CtInt r) { return null; }
+            if (c.Callee is not ("ZigMath.Max" or "ZigMath.Min") && r.Value == 0) { throw new ComptimeAbort("comptime division by zero"); }
+            var result = c.Callee switch
+            {
+                "ZigMath.Max" => System.Int128.Max(l.Value, r.Value),
+                "ZigMath.Min" => System.Int128.Min(l.Value, r.Value),
+                "ZigMath.DivTrunc" => l.Value / r.Value,
+                "ZigMath.DivFloor" => l.Value / r.Value - ((l.Value % r.Value != 0) && ((l.Value < 0) != (r.Value < 0)) ? 1 : 0),
+                "ZigMath.Rem" => l.Value % r.Value,
+                _ => ((l.Value % r.Value) + r.Value) % r.Value,
+            };
+            return new CtInt(result, c.Type);
+        }
         if (c.Callee == "__dotcc_unreachable")
         {
             throw new ComptimeAbort("`unreachable` (or a `@compileError` on a path the evaluation took)");
@@ -939,11 +1038,14 @@ internal sealed partial class IrModule
         try
         {
             EvalComptimeStmt(fn.Body);
+            // A `void` function returns by falling off its end (`std.debug.assert`).
+            if (c.Type.Unqualified is CType.VoidType) { return CtVoid.Value; }
             ComptimeMiss ??= $"the end of '{cs.Name}' (no return value)";
             return null;   // fell off the end with no `return` value — treat as non-constant
         }
         catch (ComptimeReturn r)
         {
+            if (r.Value is null && c.Type.Unqualified is CType.VoidType) { return CtVoid.Value; }   // a bare `return;`
             return r.Value is { } rv ? RetypeTo(rv, c.Type) : null;
         }
         finally
@@ -1199,6 +1301,10 @@ internal sealed partial class IrModule
 
             case Return r:
                 throw new ComptimeReturn { Value = r.Value is { } rv ? EvalComptime(rv) : null };
+
+            // `return error.X;` through an errdefer boundary.
+            case ZigErrorThrow zet:
+                throw new ComptimeReturn { Value = EvalComptime(zet.Code) is CtInt thrown ? new CtError(thrown.Value) : null };
 
             case Break:
                 throw new ComptimeBreak();

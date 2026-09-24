@@ -215,6 +215,11 @@ internal static class ZigSyntheticModules
         Add(System.Runtime.Intrinsics.X86.Avx512DQ.IsSupported, "avx512dq");
         Add(System.Runtime.Intrinsics.X86.Avx512F.VL.IsSupported, "avx512vl");
         Add(System.Runtime.Intrinsics.X86.Avx512Vbmi.IsSupported, "avx512vbmi");
+        // LLVM's `prefer-256-bit` tuning (on most AVX-512 cores, where 512-bit ops throttle the clock) is the same
+        // judgement .NET's JIT makes when it keeps Vector512 unaccelerated on an AVX-512 host; zig's
+        // suggestVectorLength halves its answer for it.
+        Add(System.Runtime.Intrinsics.X86.Avx512F.IsSupported && !System.Runtime.Intrinsics.Vector512.IsHardwareAccelerated,
+            "prefer_256_bit");
         return features;
     }
 

@@ -203,4 +203,42 @@ public sealed class ZigComptimeEngineTests
             """);
         cs.ShouldContain("3UL - (ulong)1");   // "abc" is 3 bytes long in zig, the NUL uncounted
     }
+
+    [Fact]
+    public void A_comptime_struct_parameter_keys_its_instance_and_is_read_at_compile_time()
+    {
+        var cs = EmitZig("""
+            const Cfg = struct { w: u32, on: bool };
+            fn pick(comptime c: Cfg) u32 {
+                if (c.on) return c.w * 2;
+                return c.w;
+            }
+            const cfg: Cfg = .{ .w = 21, .on = true };
+            pub fn main() u8 {
+                const v = comptime pick(cfg);
+                return @intCast(v);
+            }
+            """);
+        cs.ShouldContain("uint v = 42u;");
+        cs.ShouldMatch(@"pick__c[0-9a-f]{8}");   // keyed by a digest of the struct value
+    }
+
+    [Fact]
+    public void A_settled_left_side_short_circuits_a_comptime_and()
+    {
+        var cs = EmitZig("""
+            fn flag() bool {
+                return true;
+            }
+            fn f(comptime T: type) u8 {
+                if (T == bool and flag()) return 1;
+                return 2;
+            }
+            pub fn main() u8 {
+                return f(u8);
+            }
+            """);
+        // `T == bool` is false for u8, so the `and` is false without evaluating `flag()`, as in zig.
+        cs.ShouldMatch(@"byte f__u8\(\)\s*\{\s*return 2;");
+    }
 }

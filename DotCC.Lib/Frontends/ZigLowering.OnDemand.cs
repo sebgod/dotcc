@@ -38,6 +38,20 @@ internal sealed partial class ZigLowering
     internal bool TryLowerBodyOnDemand(Symbol sym)
     {
         if (_bodiesStarted.Contains(sym)) { return false; }
+        // A body whose on-demand lowering fails is un-marked, so the top-level drain lowers it again and its
+        // error surfaces there: a speculative evaluation (TryEvalComptimeIntBody) that demanded it may swallow
+        // the exception, and a body left "started" would otherwise never be lowered at all.
+        try { return TryLowerBodyOnDemandCore(sym); }
+        catch (IrUnsupportedException)
+        {
+            _bodiesStarted.Remove(sym);
+            throw;
+        }
+    }
+
+    /// <summary>The lookup and lowering behind <see cref="TryLowerBodyOnDemand"/>.</summary>
+    private bool TryLowerBodyOnDemandCore(Symbol sym)
+    {
         if (_rootBodies.FirstOrDefault(e => ReferenceEquals(e.sym, sym)) is { body: not null } root)
         {
             using var _ = new FnStateScope(this);

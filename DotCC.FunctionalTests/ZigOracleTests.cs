@@ -4752,9 +4752,24 @@ public sealed class ZigOracleTests
             "    return list.items[0] + list.items[1];\n" +
             "}\n", 42);
 
+    /// <summary><c>std.simd.suggestVectorLength</c> (the target-identity segment, T4): the comptime question std's SIMD
+    /// paths ask, answered by std.simd's own code over the typed host <c>builtin.cpu</c>, through a comptime STRUCT
+    /// parameter (<c>comptime cpu: std.Target.Cpu</c>). The answer depends on the host's vector width, so the test
+    /// requires only that dotcc (reading .NET's intrinsics) and zig (its native CPU detection) agree.</summary>
+    [Fact]
+    public void Dotcc_matches_zig_std_simd_suggest_vector_length_from_source() =>
+        MatchesZigWithRealStd("suggestvl",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = comptime std.simd.suggestVectorLength(u8) orelse 0;\n" +
+            "    const b = comptime std.simd.suggestVectorLength(u32) orelse 0;\n" +
+            "    return @intCast(a + b);\n" +
+            "}\n", null);
+
     /// <summary>Run <paramref name="program"/> through dotcc (navigating the real std at <c>DOTCC_ZIG_LIB_DIR</c>) and
-    /// through zig, and require both to exit with <paramref name="expectedExit"/> and print the same.</summary>
-    private static void MatchesZigWithRealStd(string tag, string program, int expectedExit)
+    /// through zig, and require both to exit alike and print the same (and, when given, with
+    /// <paramref name="expectedExit"/>).</summary>
+    private static void MatchesZigWithRealStd(string tag, string program, int? expectedExit)
     {
         if (!ZigRunRequested)
         {
@@ -4779,7 +4794,7 @@ public sealed class ZigOracleTests
             var (zigStdout, zigExit) = ZigOracle.CompileAndRun(mainPath, workDir);
 
             dotccExit.ShouldBe(zigExit, $"dotcc diverges from real zig on '{tag}' (exit code)");
-            dotccExit.ShouldBe(expectedExit, $"'{tag}' did not produce the expected result");
+            if (expectedExit is { } expected) { dotccExit.ShouldBe(expected, $"'{tag}' did not produce the expected result"); }
             Norm(dotccStdout).ShouldBe(Norm(zigStdout), $"dotcc diverges from real zig on '{tag}' (stdout)");
         }
         finally

@@ -366,6 +366,7 @@ internal sealed partial class ZigLowering
         var anytypeSeeds = new List<(string name, CType type)>();
         var anytypeBits = new Dictionary<string, int>(System.StringComparer.Ordinal);
         var fnSeeds = new List<(string name, ZigLowering owner, Symbol fn)>();
+        var aggregateSeeds = new List<(string name, IrModule.ComptimeValue value, CType type)>();
         var runtimeArgItems = new List<Item>();
 
         // Phase 1 — resolve each comptime TYPE arg in the CALLER's environment (a type-arg spelled as an
@@ -472,6 +473,22 @@ internal sealed partial class ZigLowering
                             stringSeeds.Add((g.Params[i].Name, str));
                             break;
                         }
+                        // A comptime STRUCT param (`comptime cpu: std.Target.Cpu` in std.simd.suggestVectorLengthForCpu,
+                        // the target-identity segment T4): the interpreter's value of the argument keys the instance
+                        // by a digest of its contents, and the body reads it as a comptime aggregate.
+                        if (valueParamType is CType.Named && !_unions.ContainsKey(((CType.Named)valueParamType).Name))
+                        {
+                            var aggArg = argScope.LowerExprSink(argItems[i], valueParamType);
+                            if (_ir.EvalComptimeValue(aggArg) is not { } aggValue)
+                            {
+                                throw new IrUnsupportedException(
+                                    $"call to generic '{templateSym.Name}': the `comptime {g.Params[i].Name}` argument must be a "
+                                    + "compile-time-known struct value" + (_ir.ComptimeMiss is { } why ? $" (the interpreter stopped at {why})" : ""));
+                            }
+                            mangleTokens.Add("c" + IrModule.ComptimeDigest(aggValue));
+                            aggregateSeeds.Add((g.Params[i].Name, aggValue, valueParamType));
+                            break;
+                        }
                         // An ENUM-typed param (`comptime sign: enum { pos, neg }`) is the result location
                         // its bare `.pos` argument resolves against; zig result-locates it the same way.
                         var argExpr = valueParamType is CType.Enum
@@ -523,7 +540,10 @@ internal sealed partial class ZigLowering
                 // The comptime VALUE / OPTIONAL seeds are bound while the signature lowers, so a type spelled
                 // with one resolves (array_list's `… !SentinelSlice(sentinel)` for `comptime sentinel: T`).
                 List<(string, CType)> runtimeParams;
-                var comptimeOnly = !g.ErrUnion && g.RetType.Content is Zig.Ident retId && Tok(retId.Arg0) == "comptime_int";
+                // `comptime_int` and `?comptime_int` (std.simd.suggestVectorLength) results exist only at compile time:
+                // every call folds, and the instance is dropped from the program (see _comptimeOnlyFns).
+                var comptimeOnly = !g.ErrUnion && (IsComptimeIntType(g.RetType)
+                    || g.RetType.Content is Zig.TyOptional { Arg1: var optRet } && IsComptimeIntType(optRet));
                 CType ret;
                 _symbols.EnterScope();
                 try
@@ -541,7 +561,8 @@ internal sealed partial class ZigLowering
                         .Where(p => p.Kind is ParamKind.Runtime or ParamKind.AnyType)
                         .Select(p => (p.Name, p.Kind == ParamKind.AnyType ? _anytypeSeeds[p.Name] : LowerType(p.TypeAst)))
                         .ToList();
-                    ret = comptimeOnly ? CType.Int128 : LowerType(g.RetType);
+                    ret = !comptimeOnly ? LowerType(g.RetType)
+                        : g.RetType.Content is Zig.TyOptional ? new CType.Optional(CType.Int128) : CType.Int128;
                 }
                 finally
                 {
@@ -583,6 +604,7 @@ internal sealed partial class ZigLowering
                     optionalSeeds = [.. os.Optionals, .. optionalSeeds];
                 }
                 _pendingInstantiations.Add(new PendingInstantiation(instanceSym, g, valueSeeds, typeSeeds, runtimeParams, optionalSeeds, stringSeeds, fnSeeds));
+                if (aggregateSeeds.Count > 0) { _instanceAggregateSeeds[instanceSym] = aggregateSeeds; }
             }
         }
         finally
@@ -668,7 +690,38 @@ internal sealed partial class ZigLowering
     /// <see cref="LowerFnBodyCore"/>, which declares the value seeds as in-scope comptime symbols and
     /// seeds the type aliases (shadow-saved) so the body substitutes literals / resolves <c>T</c>. Runs
     /// at top level (never nested), so the per-fn lowering state starts clean.</summary>
+    /// <summary>Each instance's comptime STRUCT parameters (<c>comptime cpu: std.Target.Cpu</c>) with their values,
+    /// bound as comptime aggregates while its body lowers (<see cref="LowerInstantiationBody"/>).</summary>
+    private readonly Dictionary<Symbol, List<(string name, IrModule.ComptimeValue value, CType type)>> _instanceAggregateSeeds = new();
+
+    /// <summary>True for the bare type name <c>comptime_int</c>.</summary>
+    private static bool IsComptimeIntType(Item type) => type.Content is Zig.Ident id && Tok(id.Arg0) == "comptime_int";
+
     private void LowerInstantiationBody(PendingInstantiation p)
+    {
+        // A comptime struct parameter is a comptime aggregate the body reads (`cpu.arch`, `cpu.has(…)`): bound in a
+        // scope around the body, like `const x = comptime f();` of one.
+        var aggregateScope = _instanceAggregateSeeds.TryGetValue(p.Instance, out var aggregates);
+        if (aggregateScope)
+        {
+            _symbols.EnterScope();
+            foreach (var (name, value, type) in aggregates ?? [])
+            {
+                var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type });
+                _ir.ComptimeGlobals[sym] = value;
+            }
+        }
+        try
+        {
+            LowerInstantiationBodyCore(p);
+        }
+        finally
+        {
+            if (aggregateScope) { _symbols.ExitScope(); }
+        }
+    }
+
+    private void LowerInstantiationBodyCore(PendingInstantiation p)
     {
         // A `comptime f: fn (…) R` parameter is bound to the function it was given for this instance's body
         // (a call `f(…)` resolves through `_fnAliases`); the caller's own aliases are put back afterwards.

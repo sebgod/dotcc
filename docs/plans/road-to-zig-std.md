@@ -827,8 +827,18 @@ vector length feeds TYPES.
   slices are mutable (`items.len += 1`, `items.ptr = …`), `return voidCall();` in a `void` / `!void` function, and an
   error union over a pointer rendering `ErrUnion<byte*>`. Real-std differentials
   `Dotcc_matches_zig_std_builtin_cpu_features_from_source`, `Dotcc_matches_zig_std_array_list_from_source`.
-- **T4** comptime evaluation over that value (`featureSetHas`, `cacheLineForCpu`, `suggestVectorLengthForCpu`):
-  comptime struct / array values, the same engine #10's `std.fmt.ArgState` needs.
+- **T4 ✅ (2026-09-24)** comptime evaluation over that value: `std.simd.suggestVectorLength(u8)` runs std.simd's
+  own `suggestVectorLengthForCpu(T, comptime cpu: std.Target.Cpu)` and answers as zig does for this host (AVX2: 32
+  lanes of `u8`). Needed: a comptime STRUCT generic parameter (the instance keyed by a digest of the value, the body
+  reading it as a comptime aggregate); `?comptime_int` results comptime-only like `comptime_int` ones, and a call
+  returning one comptime by its type (`if (suggestVectorLength(T)) |n|`, `… orelse 0`); `and` / `or` folding on a
+  settled left side (zig's comptime short-circuit: `T == bool and cpu.has(…)` never analyses the right side for
+  `u8`); a question over a comptime aggregate (`cpu.has(…)`) asked of the interpreter; and in the interpreter:
+  error unions (`ceilPowerOfTwo(…) catch unreachable`, `try`), `void` calls, `@max` / `@min` and zig's division
+  builtins. An on-demand body whose lowering fails is un-marked, so its real error surfaces instead of an
+  "already started" miss. `prefer_256_bit` is reported where .NET keeps Vector512 unaccelerated on an AVX-512 host,
+  as LLVM's tuning does. Real-std differential `Dotcc_matches_zig_std_simd_suggest_vector_length_from_source`
+  (host-dependent value, equality with zig). **Next:** mem_index now stops at `@Vector` itself (T5).
 - **E1 ✅** (the comptime engine, extending the IR interpreter by the maintainer's choice) a pointer to a
   comptime aggregate is the aggregate: `comptime total()` mutates a struct through `self: *Acc` and an array
   through `*[N]u32`. Runtime fix alongside: `buf[i]` through a `*[N]T` indexes the elements.

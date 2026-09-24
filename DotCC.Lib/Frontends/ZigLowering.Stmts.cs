@@ -1740,14 +1740,15 @@ internal sealed partial class ZigLowering
         {
             return TryFoldComptimeCondition(not.Arg1) is { } inner ? !inner : null;
         }
-        // `and` / `or` over two comptime questions — `builtin.os.tag == .linux and builtin.link_libc`.
-        // BOTH sides must settle: a half-comptime condition still has a runtime half to evaluate, and
-        // short-circuiting past it would drop that evaluation.
+        // `and` / `or` over two comptime questions — `builtin.os.tag == .linux and builtin.link_libc`. A settled
+        // LEFT side that decides the result short-circuits, exactly as zig does (`T == bool and cpu.has(…)` in
+        // std.simd never analyses the right side when `T` is not `bool`): the right side is not evaluated at all,
+        // at comptime or at runtime. Otherwise both sides must settle, since a runtime half must still run.
         if (cur.Content is Zig.BoolAnd conj)
         {
-            return TryFoldComptimeCondition(conj.Arg0) is { } la && TryFoldComptimeCondition(conj.Arg2) is { } ra
-                ? la && ra
-                : null;
+            var la = TryFoldComptimeCondition(conj.Arg0);
+            if (la == false) { return false; }
+            return la == true ? TryFoldComptimeCondition(conj.Arg2) : null;
         }
         if (cur.Content is Zig.BoolAndSwitch conjSw)
         {
@@ -1763,9 +1764,9 @@ internal sealed partial class ZigLowering
         }
         if (cur.Content is Zig.BoolOr disj)
         {
-            return TryFoldComptimeCondition(disj.Arg0) is { } lo && TryFoldComptimeCondition(disj.Arg2) is { } ro
-                ? lo || ro
-                : (bool?)null;
+            var lo = TryFoldComptimeCondition(disj.Arg0);
+            if (lo == true) { return true; }
+            return lo == false ? TryFoldComptimeCondition(disj.Arg2) : null;
         }
         // A comptime bool bound earlier in the body (`const is_comptime = @TypeOf(x) == comptime_int;`).
         if (cur.Content is Zig.Ident bid && _symbols.Resolve(Tok(bid.Arg0)) is null
@@ -1825,6 +1826,12 @@ internal sealed partial class ZigLowering
         }
         if (cur.Content is Zig.TrueLit) { return true; }
         if (cur.Content is Zig.FalseLit) { return false; }
+        // A question about a comptime AGGREGATE (`cpu.has(.x86, .avx2)` over a `comptime cpu: std.Target.Cpu`
+        // parameter, `cpu.arch.isX86()`): every operand is comptime, so the interpreter's answer is the question's.
+        if (IsRootedAtComptimeAggregate(cur) && TryInterpretCondition(cur) is { } aggregateAnswer)
+        {
+            return aggregateAnswer;
+        }
         return TryFoldImportedComptimeValue(cur, out var v) && v is LitBool { Value: var b } ? b : null;
     }
 
@@ -1832,6 +1839,41 @@ internal sealed partial class ZigLowering
     /// keeps looking). Types compare by their resolved <see cref="CType"/> AND their declared integer
     /// width: dotcc widens <c>u21</c> and <c>u32</c> to the same C# <c>uint</c>, but they are different
     /// types in zig, and <c>T == u32</c> must say so.</summary>
+    /// <summary>True when an expression is a member access or method call whose innermost base names a comptime
+    /// aggregate the interpreter holds (<see cref="IrModule.ComptimeGlobals"/>): <c>cpu.has(…)</c>, <c>cpu.arch</c>.</summary>
+    private bool IsRootedAtComptimeAggregate(Item expr)
+    {
+        var cur = expr;
+        while (true)
+        {
+            switch (cur.Content)
+            {
+                case Zig.Grouped g: cur = g.Arg1; continue;
+                case Zig.Field f: cur = f.Arg0; continue;
+                case Zig.CallArgs ca: cur = ca.Arg0; continue;
+                case Zig.CallNoArgs cn: cur = cn.Arg0; continue;
+                case Zig.Ident id:
+                    return _symbols.Resolve(Tok(id.Arg0)) is { } sym && _ir.ComptimeGlobals.ContainsKey(sym);
+                default:
+                    return false;
+            }
+        }
+    }
+
+    /// <summary>Lower a condition (under a throwaway hoist) and ask the interpreter for its boolean value; null when
+    /// it does not evaluate.</summary>
+    private bool? TryInterpretCondition(Item cond)
+    {
+        CExpr lowered;
+        using (EnterThrowawayHoist()) { lowered = LowerExpr(cond); }
+        return _ir.ResolveComptimeFold(lowered) switch
+        {
+            LitBool b => b.Value,
+            LitInt i when i.Value is { } n => n != 0,
+            _ => null,
+        };
+    }
+
     private bool? TryFoldTypeEquality(Item left, Item right)
     {
         // `T == comptime_int` (std.math.Log2Int's first line). dotcc has no comptime-int TYPE — a
@@ -1986,6 +2028,46 @@ internal sealed partial class ZigLowering
     /// <see cref="_comptimeOptionalVars"/>. Yields the seed (<c>HasValue</c> / payload <c>Value</c> /
     /// <c>Inner</c> type) so <see cref="LowerIfCapture"/> / <see cref="LowerIfCaptureExpr"/> can fold to
     /// the taken branch at lowering time (road-to-zig-std S4b).</summary>
+    /// <summary>True when a call's callee is declared to return <c>?comptime_int</c> (so the call is comptime by its
+    /// type): a plain function, a generic's template, or a function of another module, by its return-type AST.</summary>
+    private bool ReturnsOptionalComptimeInt(Item call)
+    {
+        // Answered from the callee's DECLARED return type where it is a generic template (the call itself may
+        // already have folded to its payload literal).
+        var calleeAst = call.Content switch
+        {
+            Zig.CallArgs ca => ca.Arg0,
+            Zig.CallNoArgs cn => cn.Arg0,
+            _ => null,
+        };
+        if (calleeAst is not null && DeclaredReturnIsOptionalComptimeInt(calleeAst)) { return true; }
+        var callee = call.Content switch
+        {
+            Zig.CallArgs ca => ca.Arg0,
+            Zig.CallNoArgs cn => cn.Arg0,
+            _ => null,
+        };
+        if (callee is null) { return false; }
+        CExpr lowered;
+        using (EnterThrowawayHoist()) { lowered = LowerExpr(call); }
+        // The lowered return type of a `?comptime_int` is `Int128?` (comptime_int is the interpreter's 128 bits).
+        return lowered.Type?.Unqualified is CType.Optional { Inner: var inner } && inner.Unqualified == CType.Int128;
+    }
+
+    /// <summary>True when a callee names a generic whose declared return type is <c>?comptime_int</c>, found through a
+    /// module path (<c>std.simd.suggestVectorLength</c>) or by bare name.</summary>
+    private bool DeclaredReturnIsOptionalComptimeInt(Item callee)
+    {
+        (ZigLowering Owner, Symbol Sym)? decl = callee.Content switch
+        {
+            Zig.Field f when ResolveModulePath(f.Arg0)?.Lowering is { } module => module.ResolveExportedDecl(Tok(f.Arg2)),
+            Zig.Ident id => _symbols.Resolve(Tok(id.Arg0)) is { } s ? (this, s) : null,
+            _ => null,
+        };
+        return decl is { } d && d.Owner._genericFns.TryGetValue(d.Sym, out var g)
+            && g.RetType.Content is Zig.TyOptional { Arg1: var inner } && IsComptimeIntType(inner);
+    }
+
     private bool TryComptimeOptionalCond(Item condItem, out (bool HasValue, long Value, CType Inner) info)
     {
         info = default;
@@ -1993,11 +2075,18 @@ internal sealed partial class ZigLowering
         while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
         // `if (comptime f()) |x|`: a comptime OPTIONAL value (the comptime engine's E2 runs the call now,
         // lowering its body on demand), so `x` is a comptime integer and the branch folds.
-        if (cur.Content is Zig.PreComptime pc)
+        // A call returning `?comptime_int` (`if (std.simd.suggestVectorLength(T)) |block_len|` in std.mem) is
+        // comptime by its type, exactly as if it were spelled `comptime`.
+        var comptimeByType = cur.Content is Zig.CallArgs or Zig.CallNoArgs && ReturnsOptionalComptimeInt(cur);
+        if (cur.Content is Zig.PreComptime || comptimeByType)
         {
             CExpr inner;
-            using (EnterThrowawayHoist()) { inner = LowerExpr(pc.Arg1); }
-            if (inner.Type?.Unqualified is not CType.Optional { Inner: var payload }) { return false; }
+            using (EnterThrowawayHoist()) { inner = LowerExpr(cur.Content is Zig.PreComptime pc ? pc.Arg1 : cur); }
+            // A comptime-only `?comptime_int` call may already be its folded value: the payload literal itself.
+            CType payload;
+            if (inner.Type?.Unqualified is CType.Optional { Inner: var optionalPayload }) { payload = optionalPayload; }
+            else if (comptimeByType && inner is LitInt or Cast { Operand: LitInt }) { payload = inner.Type ?? CType.Long; }
+            else { return false; }
             // A `?comptime_int` payload is an untyped number: bind it as a plain `long` literal.
             if (payload.Unqualified == CType.Int128) { payload = CType.Long; }
             switch (_ir.ResolveComptimeFold(inner))
