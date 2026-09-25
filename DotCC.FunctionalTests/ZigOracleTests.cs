@@ -48,7 +48,10 @@ public sealed class ZigOracleTests
     /// statements + assignment, a prefix op, parameters, a function call (incl. forward
     /// reference), and an `extern fn` libc call that produces real OUTPUT — so a
     /// divergence pins which feature drifted from real zig.</summary>
-    public static IEnumerable<object[]> Programs => new[]
+    /// <remarks>This host's rows of <see cref="AllPrograms"/> (<see cref="TestShard"/>).</remarks>
+    public static IEnumerable<object[]> Programs => TestShard.Rows(AllPrograms);
+
+    private static IEnumerable<object[]> AllPrograms => new[]
     {
         new object[] { "arith",
             "pub fn main() u8 { const x: u8 = 40; return x + 2; }\n", 42, "" },
@@ -6664,7 +6667,10 @@ public sealed class ZigOracleTests
     /// exit + stdout. dotcc is given ONLY the root and discovers the sibling through the module graph,
     /// exactly as <c>zig build-exe main.zig</c> does; the differential proves the imported module lowers
     /// into the same program and cross-module calls resolve.</summary>
-    public static IEnumerable<object[]> MultiFilePrograms => new[]
+    /// <remarks>This host's rows of <see cref="AllMultiFilePrograms"/> (<see cref="TestShard"/>).</remarks>
+    public static IEnumerable<object[]> MultiFilePrograms => TestShard.Rows(AllMultiFilePrograms);
+
+    private static IEnumerable<object[]> AllMultiFilePrograms => new[]
     {
         // std.Target's shape (road-to-zig-std, the target-identity segment T1/T2): a module-qualified NESTED
         // type (`tgt.Cpu.Arch`, `tgt.Cpu.Arch.Family`: the module prefix, then the owner's nested containers)
@@ -8583,6 +8589,8 @@ public sealed class ZigOracleTests
     /// <c>c_allocator</c> is cross-seam-safe — real zig's <c>page_allocator</c> is mmap/VirtualAlloc, not
     /// malloc, so freeing its memory with C <c>free</c> would be UB; every program here uses
     /// <c>c_allocator</c> for memory that crosses the boundary.</summary>
+    /// <remarks>Four rows: too few to shard (<see cref="TestShard"/>), so the sharded runner gives the whole method to one
+    /// host.</remarks>
     public static IEnumerable<object[]> MixedPrograms => new[]
     {
         // alloc/free across the seam: Zig allocates 4 ints through c_allocator, C reads (sum 100) then

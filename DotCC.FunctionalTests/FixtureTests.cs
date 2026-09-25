@@ -17,7 +17,7 @@ namespace DotCC.FunctionalTests;
 public sealed class FixtureTests
 {
     public static IEnumerable<object[]> Fixtures =>
-        FixtureRunner.Discover().Select(f => new object[] { f.name, f.dir });
+        TestShard.Rows(FixtureRunner.Discover().Select(f => new object[] { f.name, f.dir }));
 
     [Theory]
     [MemberData(nameof(Fixtures))]

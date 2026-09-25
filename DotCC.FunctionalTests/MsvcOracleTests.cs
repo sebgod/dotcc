@@ -60,7 +60,7 @@ public sealed class MsvcOracleTests
         RegenRequested || Environment.GetEnvironmentVariable(RunMsvcEnv) == "1";
 
     public static System.Collections.Generic.IEnumerable<object[]> Fixtures =>
-        FixtureRunner.Discover().Select(f => new object[] { f.name, f.dir });
+        TestShard.Rows(FixtureRunner.Discover().Select(f => new object[] { f.name, f.dir }));
 
     [Theory]
     [MemberData(nameof(Fixtures))]
