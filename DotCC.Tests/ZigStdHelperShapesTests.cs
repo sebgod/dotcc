@@ -1386,6 +1386,48 @@ public sealed class ZigStdHelperShapesTests
         cs.ShouldContain("byte ns = (byte)(~small & 31);");
     }
 
+    [Theory]
+    [InlineData("var a: i32 = 7;\n    a += 0;\n    return @intCast(a / 2);", "signed integers must use @divTrunc, @divFloor, or @divExact")]
+    [InlineData("var a: i32 = 7;\n    a += 0;\n    return @intCast(a % 3);", "signed integers and floats must use @rem or @mod")]
+    [InlineData("var a: i32 = 7;\n    a += 0;\n    a /= 2;\n    return @intCast(a);", "signed integers must use @divTrunc, @divFloor, or @divExact")]
+    [InlineData("var f: f32 = 7;\n    f += 0;\n    return @intFromFloat(f % 2);", "signed integers and floats must use @rem or @mod")]
+    public void Division_of_a_runtime_signed_integer_needs_an_explicit_rounding(string body, string message)
+    {
+        // Task #98: zig rejects `/` and `%` on a signed integer (and `%` on a float) unless both operands are comptime-known.
+        Should.Throw<CompileException>(() => EmitZig("pub fn main() u8 {\n    " + body + "\n}\n")).Message.ShouldContain(message);
+    }
+
+    [Fact]
+    public void The_explicit_division_builtins_and_unsigned_or_comptime_division_lower()
+    {
+        // Task #98: @divTrunc / @divFloor / @mod / @rem, unsigned `/` and `%`, float `/`, a float `@mod` (a new ZigMath overload:
+        // it had been sent to the integer-only generic, CS0315) and comptime-known signed `/` all compile. zig returns 19.
+        var cs = EmitZig("""
+            pub fn main() u8 {
+                var a: i32 = -7;
+                a += 0;
+                var u: u32 = 17;
+                u += 0;
+                var f: f32 = 9.0;
+                f += 0;
+                const k: i32 = -9;
+                var total: i32 = 0;
+                total += @divTrunc(a, 2);
+                total += @divFloor(a, 2);
+                total += @mod(a, 3);
+                total += @rem(a, 3);
+                total += @intCast(u / 4 + u % 5);
+                total += @intFromFloat(f / 2.0);
+                total += @intFromFloat(@mod(f, 4.0));
+                total += k / 3;
+                total += -12 / 4;
+                return @intCast(total + 20);
+            }
+            """);
+        cs.ShouldContain("total += (int)ZigMath.Mod((double)f, 4.0);");
+        cs.ShouldContain("total += ZigMath.DivFloor(a, 2);");
+    }
+
     [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {

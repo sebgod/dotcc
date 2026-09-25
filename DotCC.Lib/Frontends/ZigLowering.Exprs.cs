@@ -265,8 +265,8 @@ internal sealed partial class ZigLowering
             case Zig.AddSat a:  return SatBin("SatAdd", a.Arg0, a.Arg2);
             case Zig.SubSat a:  return SatBin("SatSub", a.Arg0, a.Arg2);
             case Zig.MulSat a:  return SatBin("SatMul", a.Arg0, a.Arg2);
-            case Zig.DivOp a:   return Bin(BinOp.Div, a.Arg0, a.Arg2);
-            case Zig.ModOp a:   return Bin(BinOp.Mod, a.Arg0, a.Arg2);
+            case Zig.DivOp a:   return RejectRuntimeSignedDivision(Bin(BinOp.Div, a.Arg0, a.Arg2));
+            case Zig.ModOp a:   return RejectRuntimeSignedDivision(Bin(BinOp.Mod, a.Arg0, a.Arg2));
             // comparison (non-associative in the grammar)
             case Zig.CmpEq a:   return Bin(BinOp.Eq, a.Arg0, a.Arg2);
             case Zig.CmpNe a:   return Bin(BinOp.Ne, a.Arg0, a.Arg2);
@@ -2368,6 +2368,33 @@ internal sealed partial class ZigLowering
     /// will treat it: usual-arithmetic for arithmetic/bitwise, the promoted left type
     /// for a shift (operands promote independently), and <c>int</c> for a relational /
     /// boolean (the backend renders those as an integer-valued <c>(CBool)(…)</c>).</summary>
+    /// <summary>zig's rule for <c>/</c> and <c>%</c> (task #98): on a SIGNED integer (and, for <c>%</c>, a float) whose
+    /// operands are not both comptime-known the operator is ambiguous about rounding, so zig rejects it ("signed integers
+    /// must use @divTrunc, @divFloor, or @divExact"; "... must use @rem or @mod"). An unsigned operand, a comptime_int, a
+    /// comptime context and two comptime-known operands are all fine. Returns the division unchanged when legal.</summary>
+    private CExpr RejectRuntimeSignedDivision(CExpr division)
+    {
+        if (_comptimeDepth > 0 || division is not Binary { Op: BinOp.Div or BinOp.Mod } b) { return division; }
+        CheckZigDivision(b.Op, b.Left, b.Right);
+        return division;
+    }
+
+    /// <summary>The check behind <see cref="RejectRuntimeSignedDivision"/>, for a binary or a compound <c>/=</c> /
+    /// <c>%=</c>: the peer type is the typed operand's (a literal yields to its peer, as in zig).</summary>
+    private void CheckZigDivision(BinOp op, CExpr left, CExpr right)
+    {
+        if (_comptimeDepth > 0) { return; }
+        var peer = (left is LitInt && right is not LitInt ? right.Type : left.Type).Unqualified;
+        var signedInt = peer is CType.Prim { Integer: true, Signed: true, IsComptimeInt: false };
+        var isFloat = peer is CType.Prim { Integer: false } && peer != CType.Bool;
+        if (!signedInt && !(op == BinOp.Mod && isFloat)) { return; }
+        bool Known(CExpr e) => e is ComptimeFold || _ir.ConstEval(e) is not null;
+        if (Known(left) && Known(right)) { return; }
+        throw new CompileException(op == BinOp.Div
+            ? $"zig: division with '{peer.Describe()}' operands: signed integers must use @divTrunc, @divFloor, or @divExact"
+            : $"zig: remainder division with '{peer.Describe()}' operands: signed integers and floats must use @rem or @mod");
+    }
+
     private CExpr Bin(BinOp op, Item l, Item r)
     {
         // `<comptime tag> == .member` (road-to-zig-std S5) — `@typeInfo(T).int.signedness == .unsigned`

@@ -137,6 +137,31 @@ public static class ZigMath
         return !T.IsZero(r) && (T.IsNegative(r) != T.IsNegative(b)) ? r + b : r;
     }
 
+    /// <summary><c>@mod(a, b)</c> of floats: the floored remainder, taking the sign of the divisor (zig allows no
+    /// <c>%</c> on a runtime float, so this is how a float remainder is spelled).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static double Mod(double a, double b)
+    {
+        var r = a % b;
+        return r != 0 && (r < 0) != (b < 0) ? r + b : r;
+    }
+
+    /// <summary><c>@mod(a, b)</c> of <c>f32</c> floats (see the <c>double</c> overload).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static float Mod(float a, float b)
+    {
+        var r = a % b;
+        return r != 0 && (r < 0) != (b < 0) ? r + b : r;
+    }
+
+    /// <summary><c>@rem(a, b)</c> of floats: the truncated remainder (sign of the dividend), C#'s <c>%</c>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static double Rem(double a, double b) => a % b;
+
+    /// <summary><c>@rem(a, b)</c> of <c>f32</c> floats.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static float Rem(float a, float b) => a % b;
+
     /// <summary><c>@divFloor(a, b)</c> — division rounding toward negative infinity (unlike C#'s <c>/</c>,
     /// toward zero). For non-negative operands the two coincide.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

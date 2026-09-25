@@ -5507,6 +5507,30 @@ public sealed class ZigOracleTests
             "    total += rotl8(0b0100_0000, 3);\n" +
             "    return @intCast(total);\n" +
             "}\n", 73, "" },
+        // Task #98: the legal forms of division: @divTrunc / @divFloor / @mod / @rem of a signed integer, unsigned `/` and
+        // `%`, float `/`, a float @mod, and `/` over comptime-known signed operands. (A runtime signed `/` or `%` is rejected,
+        // as in zig; unit-pinned.)
+        new object[] { "division_builtins_and_unsigned",
+            "pub fn main() u8 {\n" +
+            "    var a: i32 = -7;\n" +
+            "    a += 0;\n" +
+            "    var u: u32 = 17;\n" +
+            "    u += 0;\n" +
+            "    var f: f32 = 9.0;\n" +
+            "    f += 0;\n" +
+            "    const k: i32 = -9;\n" +
+            "    var total: i32 = 0;\n" +
+            "    total += @divTrunc(a, 2);\n" +
+            "    total += @divFloor(a, 2);\n" +
+            "    total += @mod(a, 3);\n" +
+            "    total += @rem(a, 3);\n" +
+            "    total += @intCast(u / 4 + u % 5);\n" +
+            "    total += @intFromFloat(f / 2.0);\n" +
+            "    total += @intFromFloat(@mod(f, 4.0));\n" +
+            "    total += k / 3;\n" +
+            "    total += -12 / 4;\n" +
+            "    return @intCast(total + 20);\n" +
+            "}\n", 19, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

@@ -491,6 +491,8 @@ internal sealed partial class ZigLowering
                     && Tok(shiftCast) is "@intCast" or "@truncate"
             ? LowerExprSink(valueItem, CType.Int)
             : LowerExprSink(valueItem, target.Type);
+        // `a /= 2` / `a %= 3` follow the same signed-integer rule as `/` and `%` (task #98).
+        if (op is BinOp.Div or BinOp.Mod) { CheckZigDivision(op, target, value); }
         return new Assign(op, target, value) { Type = target.Type };
     }
 
