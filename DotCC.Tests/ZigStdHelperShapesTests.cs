@@ -1722,6 +1722,58 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Inline_union_types_lower_as_parameter_field_and_annotation_types()
+    {
+        var cs = EmitZig("""
+            fn weigh(x: union(enum) { small: u8, big: u16, none }) u16 {
+                return switch (x) {
+                    .small => |s| s,
+                    .big => |b| b * 2,
+                    .none => 1,
+                };
+            }
+
+            const Slot = struct {
+                tag: union(enum) { n: u8, pair: struct { a: u8, b: u8 } },
+                raw: union { word: u16, bytes: [2]u8 },
+            };
+
+            pub fn main() u8 {
+                var total: u16 = weigh(.{ .small = 7 }) + weigh(.{ .big = 20 }) + weigh(.none);
+                const s = Slot{ .tag = .{ .pair = .{ .a = 3, .b = 4 } }, .raw = .{ .word = 0x0102 } };
+                const extra: u16 = switch (s.tag) {
+                    .n => |v| v,
+                    .pair => |p| p.a * p.b,
+                };
+                total += extra;
+                var local: union(enum) { on: u8, off } = .off;
+                switch (local) {
+                    .off => {
+                        total += 5;
+                    },
+                    .on => {},
+                }
+                local = .{ .on = 9 };
+                switch (local) {
+                    .on => |v| {
+                        total += v;
+                    },
+                    .off => {},
+                }
+                total += s.raw.word & 0xff;
+                return @intCast(total);
+            }
+            """);
+        // Task #104: `union(enum) { … }` / `union { … }` inline as a parameter, field or local annotation type is reified per
+        // occurrence under an anonymous name, exactly like a named union, so a switch over it and its capture prongs
+        // resolve the same way. zig returns 76.
+        cs.ShouldContain("internal static unsafe ushort weigh(__AnonUnion3 x)");
+        cs.ShouldContain("tag = new __AnonUnion0 { __tag = __AnonUnion0_Tag.pair");
+        cs.ShouldContain("raw = new __AnonUnion2 { word = 258 }");
+        cs.ShouldContain("__AnonUnion4 local = new __AnonUnion4 { __tag = __AnonUnion4_Tag.off };");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

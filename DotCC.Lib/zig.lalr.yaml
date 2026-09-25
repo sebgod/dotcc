@@ -1241,6 +1241,10 @@ productions:
       # The enum twin: `comptime sign: enum { pos, neg }` (std's parseIntWithSign). Same annotation-only
       # slot, so the value-position `const E = enum {…}` (enumDecl) keeps no competitor.
       - { lhs: AType, rhs: ['enum', '{', EnumFields, '}'],   action: inlineEnumType }
+      # The union twins (task #104): `x: union(enum) { a: u8, b: u16 }` as a parameter / field / annotation type. The
+      # same annotation-only slot, so the value-position `const U = union(enum) {…}` (unionDeclEnum) keeps no competitor.
+      - { lhs: AType, rhs: ['union', '(', 'enum', ')', '{', UnionVariants, '}'], action: inlineUnionEnumType }
+      - { lhs: AType, rhs: ['union', '{', UnionVariants, '}'],                   action: inlineUnionType }
 
   - derivation: none
     rules:

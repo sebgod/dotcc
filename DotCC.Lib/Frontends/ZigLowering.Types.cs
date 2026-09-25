@@ -737,6 +737,8 @@ internal sealed partial class ZigLowering
         // site. See ReifyInlineStruct.
         Zig.InlineStructType ist       => ReifyInlineStruct(type, ist.Arg2),
         Zig.InlineEnumType iet         => ReifyInlineEnum(type, iet.Arg2),
+        Zig.InlineUnionEnumType iut    => ReifyInlineUnion(type, iut.Arg5, tagged: true),
+        Zig.InlineUnionType iuu        => ReifyInlineUnion(type, iuu.Arg2, tagged: false),
         Zig.InlineStructTypeEmpty      => ReifyInlineStruct(type, null),
         // A type chosen by a comptime switch in any type position (a parameter's, as well as a field's): the selected
         // prong's type (task #73).
@@ -828,6 +830,29 @@ internal sealed partial class ZigLowering
         var name = QualifyTypeName($"__AnonEnum{_inlineStructNames.Count}");   // shares the per-module counter
         _inlineStructNames[occurrence] = name;
         using (EnterContainer(name)) { RegisterEnumZig(name, null, enumFields); }
+        return _containerTypes[name];
+    }
+
+    /// <summary>Reify an inline <c>union(enum) { … }</c> / <c>union { … }</c> type at its occurrence (task #104,
+    /// <c>fn f(x: union(enum) { a: u8, b: u16 })</c>): registered once per occurrence under an anonymous name, exactly as a
+    /// named <c>const U = union(enum) { … };</c> is, so a switch over it and its capture prongs resolve the same way.
+    /// Fields only, like the inline enum and struct: a method needs a named union.</summary>
+    private CType ReifyInlineUnion(Item occurrence, Item variants, bool tagged)
+    {
+        if (_inlineStructNames.TryGetValue(occurrence, out var existing)) { return _containerTypes[existing]; }
+        var name = QualifyTypeName($"__AnonUnion{_inlineStructNames.Count}");   // shares the per-module counter
+        _inlineStructNames[occurrence] = name;
+        _containerTypes[name] = new CType.Named(name);
+        List<Item> methods;
+        using (EnterContainer(name))
+        {
+            methods = tagged ? RegisterUnion(name, variants) : RegisterUnionUntagged(name, variants);
+        }
+        if (methods.Count > 0)
+        {
+            throw new IrUnsupportedException(
+                "zig: an inline `union {…}` type is fields-only; a method needs a named union decl (`const U = union(enum) { … };`)");
+        }
         return _containerTypes[name];
     }
 

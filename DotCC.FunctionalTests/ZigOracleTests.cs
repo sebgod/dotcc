@@ -5733,6 +5733,47 @@ public sealed class ZigOracleTests
             "    const c: Box(u16, cheap(u16)) = .{ .k = 5, .extra = 6 };\n" +
             "    return @intCast(b.k + b.extra + @sizeOf(@TypeOf(b.extra)) * 10 + c.k + c.extra + @sizeOf(@TypeOf(c.extra)) * 20);\n" +
             "}\n", 108, "" },
+        // Inline `union(enum) { … }` / `union { … }` types (task #104) as a parameter, a struct field (one holding an inline
+        // struct payload) and a local annotation, switched over with capture prongs. zig returns 76.
+        new object[] { "inline_union_types",
+            "fn weigh(x: union(enum) { small: u8, big: u16, none }) u16 {\n" +
+            "    return switch (x) {\n" +
+            "        .small => |s| s,\n" +
+            "        .big => |b| b * 2,\n" +
+            "        .none => 1,\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "const Slot = struct {\n" +
+            "    tag: union(enum) { n: u8, pair: struct { a: u8, b: u8 } },\n" +
+            "    raw: union { word: u16, bytes: [2]u8 },\n" +
+            "};\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var total: u16 = weigh(.{ .small = 7 }) + weigh(.{ .big = 20 }) + weigh(.none);\n" +
+            "    const s = Slot{ .tag = .{ .pair = .{ .a = 3, .b = 4 } }, .raw = .{ .word = 0x0102 } };\n" +
+            "    const extra: u16 = switch (s.tag) {\n" +
+            "        .n => |v| v,\n" +
+            "        .pair => |p| p.a * p.b,\n" +
+            "    };\n" +
+            "    total += extra;\n" +
+            "    var local: union(enum) { on: u8, off } = .off;\n" +
+            "    switch (local) {\n" +
+            "        .off => {\n" +
+            "            total += 5;\n" +
+            "        },\n" +
+            "        .on => {},\n" +
+            "    }\n" +
+            "    local = .{ .on = 9 };\n" +
+            "    switch (local) {\n" +
+            "        .on => |v| {\n" +
+            "            total += v;\n" +
+            "        },\n" +
+            "        .off => {},\n" +
+            "    }\n" +
+            "    total += s.raw.word & 0xff;\n" +
+            "    return @intCast(total);\n" +
+            "}\n", 76, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
