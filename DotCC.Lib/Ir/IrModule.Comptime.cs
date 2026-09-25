@@ -319,6 +319,51 @@ internal sealed partial class IrModule
         finally { (_comptimeSteps, _comptimeFrame, _comptimeAllowCalls) = (steps, frame, calls); }
     }
 
+    /// <summary>A comptime block run ONE STATEMENT AT A TIME against a persistent frame (task #100): the front end lowers a
+    /// statement, runs it here, and the frame's locals are published to <see cref="ComptimeGlobals"/> so the NEXT statement's
+    /// lowering can fold them (std.StaticStringMap.initComptime's <c>var len_indexes: [self.max_len + 1]u32</c>, sized by what the
+    /// block computed so far). <see cref="EndComptimeSession"/> withdraws them.</summary>
+    internal sealed class ComptimeSession
+    {
+        internal readonly Dictionary<Symbol, ComptimeValue> Frame = new();
+        internal int Steps;
+    }
+
+    /// <summary>Start a <see cref="ComptimeSession"/>.</summary>
+    internal ComptimeSession BeginComptimeSession() => new();
+
+    /// <summary>Run one lowered statement of a <see cref="ComptimeSession"/>: (true, value) when it returned (the block's
+    /// result), (false, null) when it ran through, null when it does not evaluate at compile time. Its locals are published
+    /// for the lowering of the next statement.</summary>
+    internal (bool Returned, ComptimeValue? Value)? RunComptimeSessionStmt(ComptimeSession session, CStmt stmt)
+    {
+        var (steps, frame, calls) = (_comptimeSteps, _comptimeFrame, _comptimeAllowCalls);
+        _comptimeSteps = session.Steps;
+        _comptimeFrame = session.Frame;
+        _comptimeAllowCalls = true;
+        ComptimeMiss = null;
+        try
+        {
+            EvalComptimeStmt(stmt);
+            return (false, null);
+        }
+        catch (ComptimeReturn r) { return (true, r.Value is { } rv ? CloneComptime(rv) : null); }
+        catch (ComptimeAbort ex) { ComptimeMiss ??= ex.Message; return null; }
+        catch (ComptimeGoto) { return null; }
+        finally
+        {
+            session.Steps = _comptimeSteps;
+            (_comptimeSteps, _comptimeFrame, _comptimeAllowCalls) = (steps, frame, calls);
+            foreach (var (sym, value) in session.Frame) { ComptimeGlobals[sym] = value; }
+        }
+    }
+
+    /// <summary>End a <see cref="ComptimeSession"/>: its locals stop being comptime values for the lowering.</summary>
+    internal void EndComptimeSession(ComptimeSession session)
+    {
+        foreach (var sym in session.Frame.Keys) { ComptimeGlobals.Remove(sym); }
+    }
+
     /// <summary>The comptime engine's E2 hook: asked for a callee whose body is not lowered yet, it lowers
     /// the body now (the Zig front-end's on-demand lowering) and answers whether it did. Installed by the
     /// Zig front-end for the length of its lowering, null otherwise (the C front-end has no deferred
@@ -866,6 +911,19 @@ internal sealed partial class IrModule
                 for (long k = 0; k < copyCount; k++) { copied[k] = CloneComptime(srcSlice.Backing.Elems[srcSlice.Offset + k]); }
                 for (long k = 0; k < copyCount; k++) { dstElems[dstOffset + k] = copied[k]; }
                 return CtVoid.Value;
+            }
+
+            // A tuple literal (`.{ .{ "one", 1 }, .{ "two", 2 } }`, task #100): a struct keyed by position, the shape an
+            // overflow builtin's result and the splice already use.
+            case TupleNew tupleNew:
+            {
+                var fields = new Dictionary<string, ComptimeValue>(tupleNew.Elements.Count);
+                for (var k = 0; k < tupleNew.Elements.Count; k++)
+                {
+                    if (EvalComptime(tupleNew.Elements[k]) is not { } element) { return null; }
+                    fields[k.ToString(CultureInfo.InvariantCulture)] = element;
+                }
+                return new CtStruct(fields, tupleNew.TupleType);
             }
 
             // `r[1]` of a comptime tuple (an overflow builtin's result).

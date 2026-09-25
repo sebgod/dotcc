@@ -601,6 +601,18 @@ internal sealed partial class ZigLowering
                     var tupleLen = lenTuple.Elements.Count;
                     return new LitInt(tupleLen.ToString(System.Globalization.CultureInfo.InvariantCulture), tupleLen) { Type = CType.ULong };
                 }
+                // A TUPLE's `@"0"` field (std.StaticStringMap's `kv.@"0"`, task #100): its element by position, as `t[0]`. The
+                // name arrives legalized (`_0`); a tuple has no named fields, so a numeric one is always a position.
+                if (structExpr.Type.Unqualified is CType.Tuple fieldTuple
+                    && int.TryParse(fieldName.TrimStart('_'), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var position))
+                {
+                    if (position >= fieldTuple.Elements.Count)
+                    {
+                        throw new CompileException(
+                            $"zig: index {position} outside tuple of length {fieldTuple.Elements.Count}");
+                    }
+                    return new TupleIndex(structExpr, position, fieldTuple.Elements[position]) { Type = fieldTuple.Elements[position] };
+                }
                 // `.len` through a pointer to an array (`tables.len` with `tables = &small`, std.fmt.float.render's table
                 // pointers): the pointee's comptime count, as zig reads it.
                 if (fieldName == "len" && structExpr.Type.Unqualified is CType.Pointer { Pointee: var lenPointee }

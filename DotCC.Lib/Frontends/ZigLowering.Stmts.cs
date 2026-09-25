@@ -1656,31 +1656,41 @@ internal sealed partial class ZigLowering
         // return self; }`, task #100): as runtime code its pointers into the block's arrays dangle once the function returns
         // (a silent miscompile), so the struct is evaluated here and spliced with those arrays pinned.
         if (_currentFnRet?.Unqualified is not (CType.Slice or CType.Named) || _currentFnRet is not { } retSlice) { return null; }
-        Symbol result;
-        CStmt body;
+        // Lowered and run ONE STATEMENT AT A TIME (task #100): each statement's locals become comptime values the next one's
+        // lowering folds (an array sized by what the block computed so far, `[self.max_len + 1]u32`), and a `return`
+        // anywhere (`if (kvs_list.len == 0) return self;`, the final one) is the block's result.
+        var session = _ir.BeginComptimeSession();
         _symbols.EnterScope();
         _loweringForComptimeEval++;
         try
         {
-            using var hoist = EnterFreshHoist();
-            var lowered = new List<CStmt>();
-            for (var i = 0; i < stmts.Count - 1; i++) { lowered.Add(LowerStmt(stmts[i])); }
-            var value = LowerExprSink(ret.Arg1, retSlice);
-            lowered.AddRange(_hoist ?? new List<CStmt>());
-            result = _symbols.Declare(new Symbol { Name = "__ctret", Kind = SymKind.Var, Type = retSlice });
-            lowered.Add(new ExprStmt(new Assign(null, new VarRef(result) { Type = retSlice, IsLValue = true }, value) { Type = retSlice }));
-            body = new Block(lowered);
+            foreach (var stmt in stmts)
+            {
+                CStmt lowered;
+                using (var hoist = EnterFreshHoist())
+                {
+                    var main = LowerStmt(stmt);
+                    lowered = _hoist is { Count: > 0 } pre ? new Block([.. pre, main]) : main;
+                }
+                switch (_ir.RunComptimeSessionStmt(session, lowered))
+                {
+                    case null:
+                        return null;
+                    case (true, var value):
+                        return value is IrModule.CtSlice or IrModule.CtStruct && _ir.SpliceComptimeValue(value) is { } spliced
+                            ? new Return(spliced)
+                            : null;
+                }
+            }
+            return null;   // no statement returned: the block does not produce the function's result here
         }
         catch (IrUnsupportedException) { return null; }
         finally
         {
             _loweringForComptimeEval--;
             _symbols.ExitScope();
+            _ir.EndComptimeSession(session);
         }
-        return _ir.EvalComptimeBlock(body, result, returnIsResult: true) is (IrModule.CtSlice or IrModule.CtStruct) and var evaluated
-               && _ir.SpliceComptimeValue(evaluated) is { } spliced
-            ? new Return(spliced)
-            : null;
     }
 
     /// <summary>Execute one statement of a <c>comptime { … }</c> block at lowering time. Supports the
@@ -1945,6 +1955,57 @@ internal sealed partial class ZigLowering
             if (!unroll.Add(new Block(copy))) { break; }
         }
         return unroll.Finish();
+    }
+
+    /// <summary>Unroll a <c>for</c> over a TUPLE (task #100): one copy of the body per element, its capture declared at that
+    /// element's own type (a tuple of <c>.{ "one", 1 }</c> and <c>.{ "three", 3 }</c> holds two different types), with the
+    /// optional index capture its start plus the element's position. zig only iterates a tuple at comptime, which is where
+    /// std does it (a comptime-evaluated block's callee); a by-reference capture is not modeled.</summary>
+    private CStmt UnrollTupleFor(CExpr tupleExpr, CType.Tuple tuple, string elemName, bool byRef, (string name, CExpr start)? index,
+        Item bodyItem)
+    {
+        if (byRef)
+        {
+            throw new IrUnsupportedException($"zig `for` over a tuple with a by-reference capture `|*{elemName}|` is not supported");
+        }
+        var pre = new List<CStmt>();
+        var tupleRef = tupleExpr;
+        if (tupleExpr is not VarRef)
+        {
+            var tmp = _symbols.Declare(new Symbol { Name = "__tup", Kind = SymKind.Var, Type = tupleExpr.Type });
+            pre.Add(new DeclStmt(new List<LocalDecl> { new(tmp, tupleExpr) }));
+            tupleRef = new VarRef(tmp) { Type = tupleExpr.Type, IsLValue = true };
+        }
+        var unroll = new InlineUnroll(_blockLabelCounter++);
+        for (var k = 0; k < tuple.Elements.Count; k++)
+        {
+            _symbols.EnterScope();
+            var copy = new List<CStmt>();
+            if (elemName != "_")
+            {
+                var elemType = tuple.Elements[k];
+                var elemSym = _symbols.Declare(new Symbol { Name = elemName, Kind = SymKind.Var, Type = elemType });
+                copy.Add(new DeclStmt(new List<LocalDecl> { new(elemSym, new TupleIndex(tupleRef, k, elemType) { Type = elemType }) }));
+            }
+            if (index is { name: var indexName, start: var start } && indexName != "_")
+            {
+                var position = new LitInt(k.ToString(System.Globalization.CultureInfo.InvariantCulture), k) { Type = CType.ULong };
+                CExpr at = _ir.ConstEval(start) is 0 ? position : new Binary(BinOp.Add, start, position) { Type = CType.ULong };
+                var indexSym = _symbols.Declare(new Symbol
+                {
+                    Name = indexName, Kind = SymKind.Var, Type = CType.ULong,
+                    IsConstexpr = _ir.ConstEval(at) is not null, ConstValue = _ir.ConstEval(at) ?? 0,
+                });
+                copy.Add(new DeclStmt(new List<LocalDecl> { new(indexSym, at) }));
+            }
+            _inlineUnrollDepth++;
+            try { copy.Add(LowerStmt(bodyItem)); }
+            finally { _inlineUnrollDepth--; }
+            _symbols.ExitScope();
+            if (!unroll.Add(new Block(copy))) { break; }
+        }
+        pre.Add(unroll.Finish());
+        return pre.Count == 1 ? pre[0] : new Block(pre);
     }
 
     /// <summary>Does this statement contain a bare <c>break</c>/<c>continue</c> that would target an
@@ -3934,6 +3995,18 @@ internal sealed partial class ZigLowering
     private CStmt LowerForSlice(CExpr sliceExpr, string elemName, (string name, CExpr start)? index, Item bodyItem, bool byRef,
         int? elemBits = null)
     {
+        // A TUPLE (std.StaticStringMap's `for (kvs_list, 0..) |kv, i|` over `.{ .{ "one", 1 }, .{ "three", 3 } }`, task #100):
+        // its elements differ in type, so the loop can only be unrolled, as an `inline for` is.
+        if (sliceExpr.Type.Unqualified is CType.Tuple tuple)
+        {
+            // Only at comptime, as zig has it: a runtime loop cannot know which field it reads.
+            if (_loweringForComptimeEval == 0 && _comptimeDepth == 0)
+            {
+                throw new CompileException("zig: unable to resolve comptime value: tuple field index must be comptime-known "
+                    + "(iterate a tuple with `inline for`, or at comptime)");
+            }
+            return UnrollTupleFor(sliceExpr, tuple, elemName, byRef, index, bodyItem);
+        }
         // `for (&arr, 0..) |*e, i|` (std.simd.iota) / `for (arr) |x|`: an array, or the address of one, is walked
         // as a slice over it, so a by-reference capture writes the array's elements.
         CType? walkedElem = sliceExpr.Type.Unqualified is CType.Array walkedArray ? walkedArray.Element

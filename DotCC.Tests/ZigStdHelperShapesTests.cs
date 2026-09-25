@@ -2260,6 +2260,60 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_comptime_block_runs_statement_by_statement_so_later_ones_fold_earlier_results()
+    {
+        var cs = EmitZig("""
+            const Hist = struct {
+                counts: [*]const u8,
+                len: u32,
+                peak: u32 = 0,
+                label_len: u32 = 0,
+
+                inline fn build(comptime n: u32) Hist {
+                    comptime {
+                        var self = Hist{ .counts = undefined, .len = 0 };
+                        for (0..n) |i| self.peak = @max(self.peak, @as(u32, @intCast(i * 3 % 7)));
+                        // Sized by what the block computed so far.
+                        var bins: [self.peak + 1]u8 = undefined;
+                        for (&bins, 0..) |*b, i| b.* = @intCast(i + 1);
+                        const fin = bins;
+                        self.counts = &fin;
+                        self.len = self.peak + 1;
+                        const labels = .{ .{ "ab", 1 }, .{ "cde", 2 }, .{ "f", 4 } };
+                        for (labels, 0..) |l, i| self.label_len += @as(u32, l.@"0".len) * l.@"1" + @as(u32, @intCast(i));
+                        return self;
+                    }
+                }
+            };
+
+            pub fn main() u8 {
+                const h = Hist.build(6);
+                const pair = .{ "xyz", 7 };
+                return @intCast(h.counts[h.len - 1] + h.len + h.peak + h.label_len + pair.@"0".len + pair.@"1");
+            }
+            """);
+        // Task #100, step 2: std.StaticStringMap.initComptime sizes an array by what its comptime block computed so far
+        // (`[self.max_len + 1]u32`) and iterates a tuple of key/value pairs. The block is now lowered and interpreted one
+        // statement at a time, each statement's locals published as comptime values for the next one's lowering, and a
+        // tuple is iterated by unrolling with `kv.@"0"` read by position. zig returns 45.
+        cs.ShouldContain("counts = Libc.GlobalArrayFrom<byte>(new byte[]{ (byte)1, (byte)2, (byte)3, (byte)4, (byte)5, (byte)6, (byte)7 }), len = 7u, peak = 6u, label_len = 15u");
+    }
+
+    [Fact]
+    public void A_runtime_for_over_a_tuple_is_rejected_like_zig()
+    {
+        // Task #100: a tuple's elements differ in type, so zig iterates one only at comptime (or with `inline for`).
+        Should.Throw<Exception>(() => EmitZig("""
+            pub fn main() u8 {
+                const pairs = .{ .{ "ab", 1 }, .{ "cde", 2 } };
+                var t: u32 = 0;
+                for (pairs, 0..) |p, i| t += p.@"0".len * p.@"1" + @as(u32, @intCast(i));
+                return @intCast(t);
+            }
+            """)).Message.ShouldContain("tuple field index must be comptime-known");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

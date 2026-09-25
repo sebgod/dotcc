@@ -6079,6 +6079,37 @@ public sealed class ZigOracleTests
             "    const noise = churn(8);\n" +
             "    return @intCast((t.at(3) + t.len + t.peak + e.len + t.meta.count + t.meta.first[4] + e.meta.count + noise) % 256);\n" +
             "}\n", 195, "" },
+        // A comptime block run one statement at a time (task #100, step 2): an array sized by what the block computed so far and a
+        // for over a tuple of pairs read by position, the StaticStringMap.initComptime shapes. zig returns 45.
+        new object[] { "comptime_block_session",
+            "const Hist = struct {\n" +
+            "    counts: [*]const u8,\n" +
+            "    len: u32,\n" +
+            "    peak: u32 = 0,\n" +
+            "    label_len: u32 = 0,\n" +
+            "\n" +
+            "    inline fn build(comptime n: u32) Hist {\n" +
+            "        comptime {\n" +
+            "            var self = Hist{ .counts = undefined, .len = 0 };\n" +
+            "            for (0..n) |i| self.peak = @max(self.peak, @as(u32, @intCast(i * 3 % 7)));\n" +
+            "            // Sized by what the block computed so far.\n" +
+            "            var bins: [self.peak + 1]u8 = undefined;\n" +
+            "            for (&bins, 0..) |*b, i| b.* = @intCast(i + 1);\n" +
+            "            const fin = bins;\n" +
+            "            self.counts = &fin;\n" +
+            "            self.len = self.peak + 1;\n" +
+            "            const labels = .{ .{ \"ab\", 1 }, .{ \"cde\", 2 }, .{ \"f\", 4 } };\n" +
+            "            for (labels, 0..) |l, i| self.label_len += @as(u32, l.@\"0\".len) * l.@\"1\" + @as(u32, @intCast(i));\n" +
+            "            return self;\n" +
+            "        }\n" +
+            "    }\n" +
+            "};\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const h = Hist.build(6);\n" +
+            "    const pair = .{ \"xyz\", 7 };\n" +
+            "    return @intCast(h.counts[h.len - 1] + h.len + h.peak + h.label_len + pair.@\"0\".len + pair.@\"1\");\n" +
+            "}\n", 45, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
