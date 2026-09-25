@@ -983,6 +983,20 @@ internal sealed partial class ZigLowering
             $"zig type: a dotted type `{Tok(member.Arg2)}` that is not a modeled std path");
     }
 
+    /// <summary>An expression with each read of a comptime const whose initializer did not fold where it was declared
+    /// (<see cref="_unfoldedConstInits"/>: a call, <c>const ceil_bytes = comptime math.divCeil(u16, bits, 8) catch
+    /// unreachable;</c> in std.Random.int, task #117) replaced by that initializer, through arithmetic, casts and parentheses,
+    /// so a comptime position (an array extent, <c>@Int</c>'s width <c>ceil_bytes * 8</c>) can evaluate it now.</summary>
+    private CExpr InlineUnfoldedConsts(CExpr e) => e switch
+    {
+        VarRef { Sym: var sym } when _unfoldedConstInits.TryGetValue(sym, out var init) => InlineUnfoldedConsts(init),
+        Binary b => b with { Left = InlineUnfoldedConsts(b.Left), Right = InlineUnfoldedConsts(b.Right) },
+        Unary u => u with { Operand = InlineUnfoldedConsts(u.Operand) },
+        Cast c => c with { Operand = InlineUnfoldedConsts(c.Operand) },
+        Paren p => p with { Inner = InlineUnfoldedConsts(p.Inner) },
+        _ => e,
+    };
+
     /// <summary>zig's <c>void</c> as DATA (task #114): the runtime's empty <c>Unit</c> struct, since C# has no <c>void</c>
     /// element, generic argument or storage.</summary>
     private static readonly CType ZigUnitType = new CType.Named("Unit");
@@ -1442,7 +1456,7 @@ internal sealed partial class ZigLowering
         try { size = LowerExpr(sizeExpr); }
         finally { _comptimeDepth--; }
         // A comptime_int local bound to a call (`var stack: [stack_size]Range` in std.sort.pdq) folds its initializer.
-        if (size is VarRef { Sym: var sizeSym } && _unfoldedConstInits.TryGetValue(sizeSym, out var sizeInit)) { size = sizeInit; }
+        size = InlineUnfoldedConsts(size);
         return (_ir.ConstEval(size) ?? (_ir.ResolveComptimeFold(size) is { } folded ? _ir.ConstEval(folded) : null)) is { } n
             ? (int)n
             : throw new IrUnsupportedException("a `[N]T` array size must be a constant integer expression"

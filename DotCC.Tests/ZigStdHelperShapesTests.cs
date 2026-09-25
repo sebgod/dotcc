@@ -2622,6 +2622,35 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_comptime_call_caught_with_unreachable_folds_to_its_payload()
+    {
+        var cs = EmitZig("""
+            fn divCeil(comptime T: type, a: T, b: T) !T {
+                if (b == 0) return error.DivisionByZero;
+                return (a + b - 1) / b;
+            }
+
+            fn widen(comptime T: type, x: T) u64 {
+                const bits = @typeInfo(T).int.bits;
+                const ceil_bytes = comptime divCeil(u16, bits, 8) catch unreachable;
+                const Wide = @Int(.unsigned, ceil_bytes * 8);
+                const w: Wide = x;
+                return @as(u64, w) + ceil_bytes;
+            }
+
+            pub fn main() u8 {
+                return @intCast(widen(u12, 100) + widen(u3, 5));
+            }
+            """);
+        // Task #117: std.Random.int's `const ceil_bytes = comptime std.math.divCeil(u16, bits, 8) catch unreachable;` sizes
+        // `@Int(.unsigned, ceil_bytes * 8)`. zig's `comptime` takes the whole expression; dotcc's binds tighter, but its fold
+        // already evaluated the call, so the `catch` of a success is the payload (at the payload's type), and a comptime
+        // position inlines such a const through arithmetic. zig returns 108.
+        cs.ShouldContain("ushort ceil_bytes = (ushort)2;");
+        cs.ShouldContain("ushort w = x;");
+    }
+
+    [Fact]
     public void Slice_fields_read_through_a_single_pointer_to_a_slice()
     {
         var cs = EmitZig("""

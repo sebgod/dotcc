@@ -567,7 +567,7 @@ internal sealed partial class ZigLowering
     /// every fold already installed is available here for free.</summary>
     private int ComptimeBitCount(Item item, string what)
     {
-        var lowered = LowerExpr(item);
+        var lowered = InlineUnfoldedConsts(LowerExpr(item));
         // A width that CALLS (std.math.IntFittingRange's `1 + log2(pos_max)`) runs through the interpreter.
         var n = _ir.ConstEval(lowered)
             ?? (_ir.EvalComptimeValue(lowered) is IrModule.CtInt { Value: var big } && big >= long.MinValue && big <= long.MaxValue

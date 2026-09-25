@@ -4904,6 +4904,16 @@ internal sealed partial class ZigLowering
     private (List<CStmt> Pre, CExpr Value) LowerCatchValue(Item unionItem, string? capName, Item fallbackItem)
     {
         var union = LowerExpr(unionItem);
+        // `comptime f() catch unreachable` (std.Random.int's `comptime std.math.divCeil(u16, bits, 8) catch unreachable`,
+        // task #117): zig's `comptime` takes the whole expression, so it is one compile-time value. dotcc's `comptime` binds
+        // tighter, but its fold already evaluated the call: a success is the payload, and the fallback never runs.
+        if (union is ComptimeFold { Resolved: { } comptimeValue } && comptimeValue.Type?.Unqualified is not CType.ErrorUnion)
+        {
+            // At the payload's own type (`u16` from `divCeil(u16, …)`), not the literal's default `int`.
+            return (new List<CStmt>(), comptimeValue is LitInt && union.Type?.Unqualified is CType.ErrorUnion { Payload: var foldPayload }
+                ? new Cast(foldPayload, comptimeValue) { Type = foldPayload }
+                : comptimeValue);
+        }
         if (union.Type.Unqualified is not CType.ErrorUnion eu)
         {
             throw new IrUnsupportedException("zig `catch` requires an error-union left operand");

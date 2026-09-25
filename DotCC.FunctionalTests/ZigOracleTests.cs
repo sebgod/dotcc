@@ -6273,6 +6273,25 @@ public sealed class ZigOracleTests
             "    if (warm.find('x') == null) total += 1;\n" +
             "    return total;\n" +
             "}\n", 163, "" },
+        // comptime f() catch unreachable as a comptime value (task #117): the std.Random.int shape, an @Int width from a
+        // folded error-union call. zig returns 108.
+        new object[] { "comptime_catch_unreachable_width",
+            "fn divCeil(comptime T: type, a: T, b: T) !T {\n" +
+            "    if (b == 0) return error.DivisionByZero;\n" +
+            "    return (a + b - 1) / b;\n" +
+            "}\n" +
+            "\n" +
+            "fn widen(comptime T: type, x: T) u64 {\n" +
+            "    const bits = @typeInfo(T).int.bits;\n" +
+            "    const ceil_bytes = comptime divCeil(u16, bits, 8) catch unreachable;\n" +
+            "    const Wide = @Int(.unsigned, ceil_bytes * 8);\n" +
+            "    const w: Wide = x;\n" +
+            "    return @as(u64, w) + ceil_bytes;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    return @intCast(widen(u12, 100) + widen(u3, 5));\n" +
+            "}\n", 108, "" },
         // Slice fields through a single pointer to a slice (task #118): e.key_ptr.len as std.StringHashMap's iterator entries
         // read it, and a write through the pointer. zig returns 211.
         new object[] { "slice_fields_through_pointer",
