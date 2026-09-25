@@ -5866,6 +5866,27 @@ public sealed class ZigOracleTests
             "pub fn main() u8 {\n" +
             "    return @intCast((score() + other()) % 256);\n" +
             "}\n", 166, "" },
+        // A container type as a switch prong's value (task #108, std.MultiArrayList's `Elem`): struct and enum prongs selected by a
+        // comptime type switch, an unselected capture prong holding a struct with a const member. zig returns 45.
+        new object[] { "container_type_prong_value",
+            "fn Pick(comptime T: type) type {\n" +
+            "    return switch (@typeInfo(T)) {\n" +
+            "        .int => struct { lo: T, hi: T },\n" +
+            "        .@\"union\" => |u| struct {\n" +
+            "            pub const layout = u.layout;\n" +
+            "            tag: u8,\n" +
+            "        },\n" +
+            "        .@\"enum\" => enum { first, second },\n" +
+            "        else => T,\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const p: Pick(u16) = .{ .lo = 3, .hi = 40 };\n" +
+            "    const q: Pick(bool) = true;\n" +
+            "    const e: Pick(enum { a }) = .second;\n" +
+            "    return @intCast(p.lo + p.hi + @intFromBool(q) + @intFromEnum(e));\n" +
+            "}\n", 45, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

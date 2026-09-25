@@ -1915,6 +1915,36 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_container_type_is_a_switch_prong_value()
+    {
+        var cs = EmitZig("""
+            fn Pick(comptime T: type) type {
+                return switch (@typeInfo(T)) {
+                    .int => struct { lo: T, hi: T },
+                    .@"union" => |u| struct {
+                        pub const layout = u.layout;
+                        tag: u8,
+                    },
+                    .@"enum" => enum { first, second },
+                    else => T,
+                };
+            }
+
+            pub fn main() u8 {
+                const p: Pick(u16) = .{ .lo = 3, .hi = 40 };
+                const q: Pick(bool) = true;
+                const e: Pick(enum { a }) = .second;
+                return @intCast(p.lo + p.hi + @intFromBool(q) + @intFromEnum(e));
+            }
+            """);
+        // Task #108 (std.MultiArrayList's `Elem = switch (@typeInfo(T)) { .@"struct" => T, .@"union" => |u| struct { … } }`):
+        // a `struct { … }` / `enum { … }` as a prong's value, plain or with a capture. The selected prong is reified; the
+        // others only parse. zig returns 45.
+        cs.ShouldContain("__AnonStruct0 p = new __AnonStruct0 { lo = 3, hi = 40 };");
+        cs.ShouldContain("__AnonEnum2 e = __AnonEnum2.second;");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""
