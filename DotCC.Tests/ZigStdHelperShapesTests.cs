@@ -1349,6 +1349,44 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_narrow_complement_and_wrapping_op_stay_at_the_declared_width()
+    {
+        var cs = EmitZig("""
+            fn rotl8(x: u8, r: u3) u8 {
+                return x << r | x >> 1 +% ~r;
+            }
+
+            pub fn main() u8 {
+                var x: u8 = 1;
+                x += 0;
+                var h: u16 = 0x00f0;
+                h += 0;
+                var small: u5 = 3;
+                small += 0;
+                var total: u32 = 0;
+                if (~x == 254) total += 1;
+                if (~h == 0xff0f) total += 2;
+                const ns: u5 = ~small;
+                total += ns;
+                const w: u5 = small -% 5;
+                total += w;
+                const m: u3 = @as(u3, 5) *% 3;
+                total += m;
+                total += rotl8(0b1000_0001, 1);
+                total += rotl8(0b0100_0000, 3);
+                return @intCast(total);
+            }
+            """);
+        // Task #97 (silent miscompiles): `~x` of a u8 / u16 had been C#'s promoted `int` (`~1` == -2, so `~x == 254` was
+        // false), and a `u3` / `u5` complement or wrapping op had wrapped at its byte carrier: std.math.rotl(u8, 0x81, 1)'s
+        // `x >> 1 +% ~ar` became `x >> -1` (masked by C# to 31), giving 2 where zig gives 3. zig returns 73 here.
+        cs.ShouldContain("return (byte)(x << (int)(r) | x >> (int)((byte)(1 + (byte)(~r & 7) & 7)));");
+        cs.ShouldContain("(byte)~x == 254");
+        cs.ShouldContain("(ushort)~h == 65295");
+        cs.ShouldContain("byte ns = (byte)(~small & 31);");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

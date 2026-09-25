@@ -2555,8 +2555,25 @@ internal sealed partial class ZigLowering
         var left = LowerExpr(l);
         var right = LowerExpr(r);
         var t = PeerIntType(left, right);
-        var inner = new Binary(op, left, right) { Type = t };
+        CExpr inner = new Binary(op, left, right) { Type = t };
+        // An arbitrary-width unsigned operand (`u3`, std.math.rotl's `1 +% ~ar` with `ar: Log2Int(u8)`) wraps at ITS width,
+        // not its carrier's: 1 +% 6 is 7 in a u3 (task #97; it had been computed in C#'s int).
+        if ((DeclaredBitsOfValue(l) ?? DeclaredBitsOfValue(r)) is { } bits) { inner = MaskToBits(inner, t, bits); }
         return t.SizeOf < 4 ? new Cast(t, inner) { Type = t } : inner;
+    }
+
+    /// <summary><paramref name="value"/> reduced to its low <paramref name="bits"/> bits, for an unsigned
+    /// <paramref name="carrier"/> wider than that declared width (dotcc carries a <c>u3</c> in a byte); unchanged
+    /// otherwise.</summary>
+    private static CExpr MaskToBits(CExpr value, CType carrier, int bits)
+    {
+        if (carrier.Unqualified is not CType.Prim { Integer: true, Signed: false, Bytes: var bytes } || bits >= bytes * 8 || bits <= 0)
+        {
+            return value;
+        }
+        var mask = (1L << bits) - 1;
+        var maskLit = new LitInt(mask.ToString(System.Globalization.CultureInfo.InvariantCulture), mask) { Type = CType.Int };
+        return new Binary(BinOp.BitAnd, value, maskLit) { Type = CType.IntegerPromote(carrier) };
     }
 
     /// <summary>The fixed-width integer type a wrapping/saturating operator wraps (or saturates) at —
@@ -2687,6 +2704,14 @@ internal sealed partial class ZigLowering
     private CExpr Pre(UnOp op, Item operandItem)
     {
         var operand = LowerExpr(operandItem);
+        // `~x` of an unsigned integer keeps x's type, as zig has no integer promotion: `~@as(u8, 1)` is 254, not C#'s
+        // `int` -2, and a `u3` complement is masked to its three bits (std.math.rotl's `~ar`, task #97).
+        if (op == UnOp.BitNot && operand.Type.Unqualified is CType.Prim { Integer: true, Signed: false, Bytes: < 4 } narrow)
+        {
+            CExpr complement = new Unary(op, operand) { Type = CType.IntegerPromote(narrow) };
+            if ((DeclaredBitsOfValue(operandItem) ?? DeclaredBitsOfLowered(operand)) is { } bits) { complement = MaskToBits(complement, narrow, bits); }
+            return new Cast(narrow, complement) { Type = narrow };
+        }
         var type = op == UnOp.LogNot ? CType.Int : CType.IntegerPromote(operand.Type);
         return new Unary(op, operand) { Type = type };
     }

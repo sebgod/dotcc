@@ -5479,6 +5479,34 @@ public sealed class ZigOracleTests
             "    const b = comptime viaHelper();\n" +
             "    return a + b + top + five();\n" +
             "}\n", 27, "" },
+        // Task #97: `~x` of a u8 / u16 keeps its type (no C integer promotion), and a complement or wrapping op of an
+        // arbitrary-width unsigned (`u3`, `u5`) wraps at that width; std.math.rotl's `x << r | x >> 1 +% ~r` is the shape
+        // that had silently lost the rotated-out bit.
+        new object[] { "narrow_complement_and_wrap",
+            "fn rotl8(x: u8, r: u3) u8 {\n" +
+            "    return x << r | x >> 1 +% ~r;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var x: u8 = 1;\n" +
+            "    x += 0;\n" +
+            "    var h: u16 = 0x00f0;\n" +
+            "    h += 0;\n" +
+            "    var small: u5 = 3;\n" +
+            "    small += 0;\n" +
+            "    var total: u32 = 0;\n" +
+            "    if (~x == 254) total += 1;\n" +
+            "    if (~h == 0xff0f) total += 2;\n" +
+            "    const ns: u5 = ~small;\n" +
+            "    total += ns;\n" +
+            "    const w: u5 = small -% 5;\n" +
+            "    total += w;\n" +
+            "    const m: u3 = @as(u3, 5) *% 3;\n" +
+            "    total += m;\n" +
+            "    total += rotl8(0b1000_0001, 1);\n" +
+            "    total += rotl8(0b0100_0000, 3);\n" +
+            "    return @intCast(total);\n" +
+            "}\n", 73, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -6760,6 +6788,18 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // Task #97: std.math.rotl / rotr from real std for u8, u16 and u32 (rotl(u8, 0x81, 1) had silently returned 2).
+    [Fact]
+    public void Dotcc_matches_zig_std_math_rotate() =>
+        MatchesZigWithRealStd("math_rotate",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = std.math.rotl(u8, 0b1000_0001, 1);\n" +
+            "    const b = std.math.rotr(u16, 0x0001, 4);\n" +
+            "    const c = std.math.rotl(u32, 0x8000_0001, 3);\n" +
+            "    return @intCast(a + (b >> 12) + (c & 0xff));\n" +
+            "}\n", 16);
 
     // Task #96 (with #85): std.fmt.bufPrint of floats from real std, `{d}` and `{e}` of f64 and `{d}` of f32, through
     // std.fmt.float's render / binaryToDecimal / formatScientific / formatDecimal and its [326][2]u64 power-of-5 tables.
