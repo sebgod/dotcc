@@ -1444,6 +1444,27 @@ internal sealed partial class ZigLowering
         // own nested members — and only its NAME differs; the plain name resolves through the parent
         // chain (ResolveNestedType), and qualified (`Number.Mode`) through the parent's nested map.
         var pass0 = CollectPass0Decls(decls, QualifyTypeName);
+        // A lazily prepared module's function decls are recorded FIRST (a syntactic scan, nothing lowers), so a
+        // container registered below that names one resolves it on demand: std.Io.Limit's `unlimited =
+        // math.maxInt(usize)` can be lowered while math.zig itself is still being prepared (task #122).
+        if (prepareOnly)
+        {
+            foreach (var decl in decls)
+            {
+                var early = Unwrap(decl);
+                if (early.Content switch
+                    {
+                        Zig.FnDef f          => f.Arg1,
+                        Zig.FnDefNoArgs f    => f.Arg1,
+                        Zig.FnDefErr f       => f.Arg1,
+                        Zig.FnDefNoArgsErr f => f.Arg1,
+                        _ => (Item?)null,
+                    } is { } earlyName)
+                {
+                    _moduleFnDecls[Tok(earlyName)] = early;
+                }
+            }
+        }
         foreach (var decl in decls)
         {
             switch (Unwrap(decl).Content)

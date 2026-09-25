@@ -7703,6 +7703,22 @@ public sealed class ZigOracleTests
             "    return @intCast(a + (b >> 12) + (c & 0xff));\n" +
             "}\n", 16);
 
+    // Tasks #121 / #122: `{any}` of a struct (with a `u21` field) and of an integer, from real std. std.Io.Writer.printValue's
+    // format guards settle at compile time, the struct arm walks `field_names` with `@field(value, f_name)`, and
+    // std.Io.Limit's `unlimited = math.maxInt(usize)` lowers while math.zig is still being prepared.
+    [Fact]
+    public void Dotcc_matches_zig_std_fmt_any() =>
+        MatchesZigWithRealStd("fmt_any",
+            "const std = @import(\"std\");\n" +
+            "const Pt = struct { x: i32, y: u21 };\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf: [96]u8 = undefined;\n" +
+            "    const s = std.fmt.bufPrint(&buf, \"{any}|{any}\", .{ Pt{ .x = -1, .y = 70000 }, @as(u16, 513) }) catch return 99;\n" +
+            "    var sum: u32 = 0;\n" +
+            "    for (s, 0..) |c, i| sum +%= @as(u32, c) *% @as(u32, @intCast(i + 1));\n" +
+            "    return @truncate(sum +% s.len);\n" +
+            "}\n", 213);
+
     // Task #96 (with #85): std.fmt.bufPrint of floats from real std, `{d}` and `{e}` of f64 and `{d}` of f32, through
     // std.fmt.float's render / binaryToDecimal / formatScientific / formatDecimal and its [326][2]u64 power-of-5 tables.
     [Fact]
