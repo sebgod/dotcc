@@ -2911,6 +2911,50 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void An_enum_member_can_be_valued_by_the_root_units_own_function()
+    {
+        var cs = EmitZig("""
+            const Color = enum(u16) {
+                red = base() + 1,
+                green = maxOf(u8) - 5,
+                blue,
+                fn weight(self: Color) u16 {
+                    return @intFromEnum(self) % 17;
+                }
+            };
+
+            fn base() u16 {
+                return 40;
+            }
+
+            fn maxOf(comptime T: type) T {
+                return ~@as(T, 0);
+            }
+
+            const Box = struct {
+                size: u16,
+                const default_size = base() * 2;
+            };
+
+            pub fn main() u8 {
+                const b = Box{ .size = Box.default_size };
+                var total: u16 = base();
+                total += @intFromEnum(Color.red) + @intFromEnum(Color.blue);
+                total += Color.green.weight();
+                total += b.size;
+                return @truncate(total);
+            }
+            """);
+        // Task #123: the root unit registers containers before pass 1 declares its functions, so `green = maxOf(u8) - 5`
+        // declares `maxOf` early; the member's value is comptime and runs in the interpreter. Pass 1 reuses the early
+        // declaration, so `base` (also called at runtime) is emitted once. zig returns 168.
+        cs.ShouldContain("red = 41,");
+        cs.ShouldContain("green = 250,");
+        cs.ShouldContain("blue = 251,");
+        (cs.Split("ushort @base()").Length - 1).ShouldBe(1);
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

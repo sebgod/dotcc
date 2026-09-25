@@ -1364,6 +1364,8 @@ internal sealed partial class ZigLowering
         // In a lazy module, a bare call to a not-yet-lowered SIBLING declares it on demand (its body is
         // enqueued for the top-level drain), so `isPrint` can call `isAscii`/`isControl` (road-to-zig-std S2).
         if (sym is null && _lazy) { sym = EnsureDeclLowered(name); }
+        // The root unit's own function named while its containers register (task #123: `b = maxOf(u16)`).
+        if (sym is null && _registeringRootContainers) { sym = DeclareRootFnEarly(name); }
         // A re-export alias (`pub const indexOfScalar = findScalar;`, `const f = util.f;`): call the
         // declaration it names, in its own module when that is another one.
         if (sym is null && ResolveExportedDecl(name, raiseIfSkipped: true) is { } aliased)

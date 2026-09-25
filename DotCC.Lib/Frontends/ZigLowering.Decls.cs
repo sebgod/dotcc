@@ -1133,8 +1133,15 @@ internal sealed partial class ZigLowering
             }
             if (valExpr is not null)
             {
-                var lowered = LowerExpr(valExpr);
+                // A member's value is comptime (zig evaluates it where the enum is analysed): lowered as `comptime EXPR`
+                // is, so a call to one of the unit's own functions (`b = maxOf(u16) - 5`, task #123) runs in the
+                // interpreter rather than counting as a runtime call.
+                CExpr lowered;
+                _comptimeDepth++;
+                try { lowered = LowerExpr(valExpr); }
+                finally { _comptimeDepth--; }
                 next = ZigConstEval(lowered)
+                    ?? (_ir.ResolveComptimeFold(lowered) is { } folded ? ZigConstEval(folded) : null)
                     // An `enum(u64)` / `enum(usize)` member above long.MaxValue (std.Io.Limit's
                     // `unlimited = std.math.maxInt(usize)`) is kept as its 64-bit pattern.
                     ?? (underlying.Unqualified is CType.Prim { Integer: true, Signed: false, Bytes: 8 }

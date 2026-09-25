@@ -235,6 +235,44 @@ internal sealed partial class ZigLowering
     /// reference can lower exactly that function on demand. Built in <see cref="Lower"/>'s prepare pass.</summary>
     private readonly Dictionary<string, Item> _moduleFnDecls = new(System.StringComparer.Ordinal);
 
+    /// <summary>True while the ROOT unit registers its containers (pass 0): a call to one of its own functions, from an
+    /// enum member's value (<c>b = maxOf(u16)</c>), declares that function early (<see cref="DeclareRootFnEarly"/>).</summary>
+    private bool _registeringRootContainers;
+
+    /// <summary>The root unit's functions declared early, during pass 0 (<see cref="DeclareRootFnEarly"/>), by name: pass 1
+    /// takes the declaration from here instead of declaring the function a second time.</summary>
+    private readonly Dictionary<string, (Symbol sym, List<(string name, CType type)> ps, Item body)> _rootEarlyFns =
+        new(System.StringComparer.Ordinal);
+
+    /// <summary>Declare the root unit's function <paramref name="name"/> while its containers are still registering (task
+    /// #123): zig analyses a declaration when it is referenced, so an enum member valued by a call (<c>b = maxOf(u16)</c>)
+    /// needs the callee before pass 1 declares every signature. The body joins the root's bodies, so a comptime
+    /// evaluation can lower it on demand; pass 1 reuses the declaration (<see cref="DeclaredEarlyOr"/>). Null when the
+    /// root declares no such function.</summary>
+    private Symbol? DeclareRootFnEarly(string name)
+    {
+        if (_rootEarlyFns.TryGetValue(name, out var known)) { return known.sym; }
+        if (!_moduleFnDecls.TryGetValue(name, out var d)) { return null; }
+        var e = d.Content switch
+        {
+            Zig.FnDef f          => DeclareFn(f.Arg1, f.Arg3, f.Arg6, f.Arg7),
+            Zig.FnDefNoArgs f    => DeclareFn(f.Arg1, null, f.Arg5, f.Arg6),
+            Zig.FnDefErr f       => DeclareFn(f.Arg1, f.Arg3, f.Arg7, f.Arg8, errUnion: true),
+            Zig.FnDefNoArgsErr f => DeclareFn(f.Arg1, null, f.Arg6, f.Arg7, errUnion: true),
+            _ => throw new IrUnsupportedException("zig root decl is not a function: " + (d.Content?.GetType().Name ?? "null")),
+        };
+        _rootEarlyFns[name] = e;
+        _exportedFns[name] = e.sym;
+        if (!_genericFns.ContainsKey(e.sym) && !_typeReturningGenerics.ContainsKey(e.sym)) { _rootBodies.Add(AsEntry(e, null)); }
+        return e.sym;
+    }
+
+    /// <summary>The root function <paramref name="nameTok"/> names, as <see cref="DeclareRootFnEarly"/> declared it in pass
+    /// 0, or else as <paramref name="declare"/> declares it now (pass 1).</summary>
+    private (Symbol sym, List<(string name, CType type)> ps, Item body) DeclaredEarlyOr(Item nameTok,
+        System.Func<(Symbol sym, List<(string name, CType type)> ps, Item body)> declare)
+        => _rootEarlyFns.TryGetValue(Tok(nameTok), out var early) ? early : declare();
+
     /// <summary>Names in a lazy module whose signature has already been declared (the demand memo, so a
     /// second reference — or a self/mutual call — resolves the existing symbol instead of re-declaring).</summary>
     private readonly HashSet<string> _lazyDeclared = new(System.StringComparer.Ordinal);
@@ -1447,8 +1485,9 @@ internal sealed partial class ZigLowering
         var pass0 = CollectPass0Decls(decls, QualifyTypeName);
         // A lazily prepared module's function decls are recorded FIRST (a syntactic scan, nothing lowers), so a
         // container registered below that names one resolves it on demand: std.Io.Limit's `unlimited =
-        // math.maxInt(usize)` can be lowered while math.zig itself is still being prepared (task #122).
-        if (prepareOnly)
+        // math.maxInt(usize)` can be lowered while math.zig itself is still being prepared (task #122). The root
+        // unit records them too, for a container of its own naming one (task #123, DeclareRootFnEarly).
+        _registeringRootContainers = !lazy;
         {
             foreach (var decl in decls)
             {
@@ -1574,6 +1613,7 @@ internal sealed partial class ZigLowering
                 using (EnterContainer(fileStruct)) { RegisterStruct(fileStruct, topFields); }
             });
         }
+        _registeringRootContainers = false;
         if (_lazy)
         {
             var moduleContainers = pass0.Select(p => p.Name).OfType<string>();
@@ -1665,10 +1705,10 @@ internal sealed partial class ZigLowering
                 case Zig.ExternCFnProtoNoArgs f: DeclareExternFn(f.Arg3, null, f.Arg6); break;     // extern "c" fn IDENT ( ) Type ;
                 // The optional CallConv (Milestone R, part 5) sits between `)` and the return, so the
                 // return type + body are one slot further right than the pre-CallConv layout.
-                case Zig.FnDef f:          AddFnEntry(Export(f.Arg1, DeclareFn(f.Arg1, f.Arg3, f.Arg6, f.Arg7))); break;
-                case Zig.FnDefNoArgs f:    AddFnEntry(Export(f.Arg1, DeclareFn(f.Arg1, null, f.Arg5, f.Arg6))); break;
-                case Zig.FnDefErr f:       AddFnEntry(Export(f.Arg1, DeclareFn(f.Arg1, f.Arg3, f.Arg7, f.Arg8, errUnion: true))); break;   // `!T` return → ErrorUnion(T)
-                case Zig.FnDefNoArgsErr f: AddFnEntry(Export(f.Arg1, DeclareFn(f.Arg1, null, f.Arg6, f.Arg7, errUnion: true))); break;
+                case Zig.FnDef f:          AddFnEntry(Export(f.Arg1, DeclaredEarlyOr(f.Arg1, () => DeclareFn(f.Arg1, f.Arg3, f.Arg6, f.Arg7)))); break;
+                case Zig.FnDefNoArgs f:    AddFnEntry(Export(f.Arg1, DeclaredEarlyOr(f.Arg1, () => DeclareFn(f.Arg1, null, f.Arg5, f.Arg6)))); break;
+                case Zig.FnDefErr f:       AddFnEntry(Export(f.Arg1, DeclaredEarlyOr(f.Arg1, () => DeclareFn(f.Arg1, f.Arg3, f.Arg7, f.Arg8, errUnion: true)))); break;   // `!T` return → ErrorUnion(T)
+                case Zig.FnDefNoArgsErr f: AddFnEntry(Export(f.Arg1, DeclaredEarlyOr(f.Arg1, () => DeclareFn(f.Arg1, null, f.Arg6, f.Arg7, errUnion: true)))); break;
                 // Container decls were handled in pass 0 — skip here.
                 case Zig.StructDecl or Zig.StructDeclEmpty or Zig.ExternStructDecl or Zig.PackedStructDecl or Zig.PackedStructDeclBacked or Zig.EnumDecl or Zig.EnumDeclTyped or Zig.UnionDeclEnum or Zig.UnionDeclTagged or Zig.UnionDeclUntagged: break;
                 // A top-level `const`/`var` is either a comptime binding (an `@import`/allocator

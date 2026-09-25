@@ -6485,6 +6485,39 @@ public sealed class ZigOracleTests
             "    var b = B{ .v = 10 };\n" +
             "    return call(&a) + call(&b) * 2;\n" +
             "}\n", 71, "" },
+        // Task #123: enum members valued by the root unit's own functions (a plain one also called at runtime, a generic
+        // declared after the enum), and a container const valued by one.
+        new object[] { "enum_member_valued_by_own_fn",
+            "const Color = enum(u16) {\n" +
+            "    red = base() + 1,\n" +
+            "    green = maxOf(u8) - 5,\n" +
+            "    blue,\n" +
+            "    fn weight(self: Color) u16 {\n" +
+            "        return @intFromEnum(self) % 17;\n" +
+            "    }\n" +
+            "};\n" +
+            "\n" +
+            "fn base() u16 {\n" +
+            "    return 40;\n" +
+            "}\n" +
+            "\n" +
+            "fn maxOf(comptime T: type) T {\n" +
+            "    return ~@as(T, 0);\n" +
+            "}\n" +
+            "\n" +
+            "const Box = struct {\n" +
+            "    size: u16,\n" +
+            "    const default_size = base() * 2;\n" +
+            "};\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const b = Box{ .size = Box.default_size };\n" +
+            "    var total: u16 = base();\n" +
+            "    total += @intFromEnum(Color.red) + @intFromEnum(Color.blue);\n" +
+            "    total += Color.green.weight();\n" +
+            "    total += b.size;\n" +
+            "    return @truncate(total);\n" +
+            "}\n", 168, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
