@@ -5531,6 +5531,47 @@ public sealed class ZigOracleTests
             "    total += -12 / 4;\n" +
             "    return @intCast(total + 20);\n" +
             "}\n", 19, "" },
+        // Task #99: a comptime FUNCTION argument to a type-returning generic (std.StaticStringMapWithEql's
+        // `comptime eql: fn (a: []const u8, b: []const u8) bool`): one reified struct per function, each method calling
+        // its own; and a tuple's `.len`.
+        new object[] { "type_returning_comptime_fn_arg",
+            "fn sameLen(a: []const u8, b: []const u8) bool {\n" +
+            "    return a.len == b.len;\n" +
+            "}\n" +
+            "\n" +
+            "fn exact(a: []const u8, b: []const u8) bool {\n" +
+            "    if (a.len != b.len) return false;\n" +
+            "    for (a, b) |x, y| {\n" +
+            "        if (x != y) return false;\n" +
+            "    }\n" +
+            "    return true;\n" +
+            "}\n" +
+            "\n" +
+            "fn Matcher(comptime V: type, comptime eql: fn (a: []const u8, b: []const u8) bool) type {\n" +
+            "    return struct {\n" +
+            "        key: []const u8,\n" +
+            "        val: V,\n" +
+            "\n" +
+            "        fn get(self: @This(), k: []const u8) ?V {\n" +
+            "            return if (eql(self.key, k)) self.val else null;\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "fn count(comptime t: anytype) usize {\n" +
+            "    return t.len;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const loose: Matcher(u8, sameLen) = .{ .key = \"abc\", .val = 7 };\n" +
+            "    const strict: Matcher(u8, exact) = .{ .key = \"abc\", .val = 9 };\n" +
+            "    var total: usize = 0;\n" +
+            "    total += loose.get(\"xyz\") orelse 0;\n" +
+            "    total += strict.get(\"xyz\") orelse 100;\n" +
+            "    total += strict.get(\"abc\") orelse 0;\n" +
+            "    total += count(.{ 1, 2, 3 }) * 10;\n" +
+            "    return @intCast(total);\n" +
+            "}\n", 146, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

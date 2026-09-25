@@ -1352,6 +1352,9 @@ internal sealed partial class ZigLowering
         var valueSeeds = new List<(string name, long value, CType type)>();
         var optionalSeeds = new List<(string name, bool hasValue, long value, CType inner)>();
         var aggregateSeeds = new List<(string name, IrModule.ComptimeValue value, CType type)>();
+        // `comptime eql: fn (a: []const u8, b: []const u8) bool` (std.StaticStringMapWithEql, task #99): the function each
+        // comptime FUNCTION parameter names, installed as an alias while the body evaluates and for every reified method body.
+        var typeFnSeeds = new List<(string name, ZigLowering owner, Symbol fn)>();
         var mangleTokens = new List<string>(argItems.Count);
 
         // Phase 1 — resolve every comptime TYPE argument in the CALLER's type environment (an alias
@@ -1408,6 +1411,18 @@ internal sealed partial class ZigLowering
                 if (p.Kind == ParamKind.ComptimeType)
                 {
                     mangleTokens.Add(MangleTypeSeed(typeSeeds.First(s => s.Name == p.Name)));
+                }
+                else if (LowerType(p.TypeAst).Unqualified is CType.Func)
+                {
+                    // A comptime FUNCTION value: the function it names keys the instance (one struct per function).
+                    if (TryResolveComptimeFnValue(argItems[i], argScope) is not { } fnValue)
+                    {
+                        throw new IrUnsupportedException(
+                            $"call to type-returning generic '{templateSym.Name}': the `comptime {p.Name}` function argument must "
+                            + "name a function at compile time");
+                    }
+                    mangleTokens.Add("fn" + fnValue.Fn.Name);
+                    typeFnSeeds.Add((p.Name, fnValue.Owner, fnValue.Fn));
                 }
                 else if (LowerType(p.TypeAst).Unqualified is CType.Optional optP)
                 {
@@ -1510,12 +1525,22 @@ internal sealed partial class ZigLowering
                 var bodyValueLocals = new List<(string Name, long Value, CType Type)>();
                 var bodyAggregateLocals = new List<(string Name, IrModule.ComptimeValue Value, CType Type)>();
                 (_typeBodyValueLocals, _typeBodyAggregateLocals) = (bodyValueLocals, bodyAggregateLocals);
+                var fnAliasShadows = new List<(string name, (ZigLowering, Symbol)? prev)>();
+                foreach (var (fnName, fnOwner, fn) in typeFnSeeds)
+                {
+                    fnAliasShadows.Add((fnName, _fnAliases.TryGetValue(fnName, out var prevAlias) ? prevAlias : null));
+                    _fnAliases[fnName] = (fnOwner, fn);
+                }
                 try
                 {
                     bodyResult = ProcessTypeReturningBody(templateSym.Name, info.Body, typeShadows);
                 }
                 finally
                 {
+                    foreach (var (fnName, prevAlias) in fnAliasShadows)
+                    {
+                        if (prevAlias is { } restored) { _fnAliases[fnName] = restored; } else { _fnAliases.Remove(fnName); }
+                    }
                     _typeBodiesInProgress.Remove(mangled);
                     (_typeBodyValueLocals, _typeBodyAggregateLocals) = (outerValueLocals, outerAggregateLocals);
                 }
@@ -1612,7 +1637,7 @@ internal sealed partial class ZigLowering
                     var nm = DeclareMethod(nContainer, nDef);
                     if (IsFnTemplate(nm.sym)) { continue; }   // a generic method instantiates per call
                     _pendingReifiedMethods.Add(new PendingReifiedMethod(
-                        nm.sym, nContainer, nm.ps, nm.body, methodTypeSeeds, valueSeeds, optionalSeeds));
+                        nm.sym, nContainer, nm.ps, nm.body, methodTypeSeeds, valueSeeds, optionalSeeds, typeFnSeeds));
                 }
                 _currentContainer = mangled;
                 // `const Self = @This();` → a self alias scoped to the MANGLED container, plus any value
@@ -1637,7 +1662,7 @@ internal sealed partial class ZigLowering
                     _currentContainer = mangled;   // DeclareMethod clears it; the next signature needs it back
                     if (IsFnTemplate(me.sym)) { continue; }   // a generic method instantiates per call
                     _pendingReifiedMethods.Add(new PendingReifiedMethod(
-                        me.sym, mangled, me.ps, me.body, methodTypeSeeds, valueSeeds, optionalSeeds));
+                        me.sym, mangled, me.ps, me.body, methodTypeSeeds, valueSeeds, optionalSeeds, typeFnSeeds));
                 }
             }
             finally

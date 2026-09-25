@@ -1429,6 +1429,57 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_type_returning_generic_takes_a_comptime_function_argument()
+    {
+        var cs = EmitZig("""
+            fn sameLen(a: []const u8, b: []const u8) bool {
+                return a.len == b.len;
+            }
+
+            fn exact(a: []const u8, b: []const u8) bool {
+                if (a.len != b.len) return false;
+                for (a, b) |x, y| {
+                    if (x != y) return false;
+                }
+                return true;
+            }
+
+            fn Matcher(comptime V: type, comptime eql: fn (a: []const u8, b: []const u8) bool) type {
+                return struct {
+                    key: []const u8,
+                    val: V,
+
+                    fn get(self: @This(), k: []const u8) ?V {
+                        return if (eql(self.key, k)) self.val else null;
+                    }
+                };
+            }
+
+            fn count(comptime t: anytype) usize {
+                return t.len;
+            }
+
+            pub fn main() u8 {
+                const loose: Matcher(u8, sameLen) = .{ .key = "abc", .val = 7 };
+                const strict: Matcher(u8, exact) = .{ .key = "abc", .val = 9 };
+                var total: usize = 0;
+                total += loose.get("xyz") orelse 0;
+                total += strict.get("xyz") orelse 100;
+                total += strict.get("abc") orelse 0;
+                total += count(.{ 1, 2, 3 }) * 10;
+                return @intCast(total);
+            }
+            """);
+        // Task #99: `comptime eql: fn (…) bool` on a type-returning generic (std.StaticStringMapWithEql) keys one struct per
+        // function, and each reified method calls the function it was given; a tuple's `.len` is its element count.
+        // zig returns 146.
+        cs.ShouldContain("Matcher__u8_fnsameLen loose = new Matcher__u8_fnsameLen");
+        cs.ShouldContain("Matcher__u8_fnexact strict = new Matcher__u8_fnexact");
+        cs.ShouldContain("exact(self.key, k)");
+        cs.ShouldContain("sameLen(self.key, k)");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""
