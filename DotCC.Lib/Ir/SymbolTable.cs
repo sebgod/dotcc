@@ -172,6 +172,16 @@ public sealed class SymbolTable
     public void EnterScope() => _scopes.Add(new Dictionary<string, Symbol>(StringComparer.Ordinal));
     public void ExitScope() { if (_scopes.Count > 1) { _scopes.RemoveAt(_scopes.Count - 1); } }
 
+    /// <summary>How many scopes are open (the global one included), for <see cref="TruncateScopes"/>.</summary>
+    internal int Depth => _scopes.Count;
+
+    /// <summary>Close every scope opened past <paramref name="depth"/> (never the global one): what a body abandoned
+    /// part-way left open.</summary>
+    internal void TruncateScopes(int depth)
+    {
+        while (_scopes.Count > System.Math.Max(depth, 1)) { _scopes.RemoveAt(_scopes.Count - 1); }
+    }
+
     /// <summary>Begin a function body: reset the per-function used-name set so
     /// renames are scoped to the function (two functions can each have a local
     /// <c>i</c>).</summary>

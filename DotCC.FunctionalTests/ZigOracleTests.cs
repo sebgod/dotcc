@@ -7806,6 +7806,34 @@ public sealed class ZigOracleTests
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
 
+    // Task #63: a static call on std.ArrayList(T) other than the removed managed init goes to real std's
+    // array_list.Aligned(T, null) (growCapacity, as std.Io.Writer.Allocating calls it).
+    [Fact]
+    public void Dotcc_matches_zig_std_array_list_grow_capacity() =>
+        MatchesZigWithRealStd("array_list_grow_capacity",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    return @intCast(std.array_list.Aligned(u8, null).growCapacity(10) + std.ArrayList(u32).growCapacity(4));\n" +
+            "}\n", 181);
+
+    // Tasks #60 / #63: std.fmt.allocPrint from real std: std.Io.Writer.Allocating growing past its initial capacity, with
+    // {s} / {d} / {x}. Allocating's vtable names sendFile, compiled as a runtime trap (its parameter points to std.Io.File,
+    // which dotcc cannot lower; GitHub issue #126).
+    [Fact]
+    public void Dotcc_matches_zig_std_alloc_print() =>
+        MatchesZigWithRealStd("alloc_print",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "pub fn main() !u8 {\n" +
+            "    const a = std.heap.page_allocator;\n" +
+            "    const s = try std.fmt.allocPrint(a, \"{s}={d}/{x}\", .{ \"key\", @as(u32, 1234567), @as(u8, 255) });\n" +
+            "    defer a.free(s);\n" +
+            "    const long = \"a-rather-long-name-to-force-the-writer-to-grow-past-its-initial-capacity\";\n" +
+            "    const t = try std.fmt.allocPrint(a, \"{s} {s} {d}\", .{ long, long, @as(u64, 18446744073709551615) });\n" +
+            "    defer a.free(t);\n" +
+            "    return @intCast((s.len + t.len + s[0] + t[t.len - 1]) % 251);\n" +
+            "}\n", 89);
+
     // Task #126: std.mem.bytesAsValue (a write through it) and bytesToValue from a pointer to an array, a string literal and a
     // slice.
     [Fact]

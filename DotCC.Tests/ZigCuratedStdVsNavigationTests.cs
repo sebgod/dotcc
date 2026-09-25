@@ -42,7 +42,20 @@ public sealed class ZigCuratedStdVsNavigationTests
             "pub const heap = @import(\"heap.zig\");\n" +
             "pub const ascii = @import(\"ascii.zig\");\n" +
             "pub const mem = @import(\"mem.zig\");\n" +
-            "pub const array_list = @import(\"array_list.zig\");\n");
+            "pub const array_list = @import(\"array_list.zig\");\n" +
+            "pub const trapdemo = @import(\"trapdemo.zig\");\n");
+        // Task #63: `File` cannot lower (its field type does not exist, as std.Io.File's `std.posix.fd_t` does not for
+        // dotcc), so it is withdrawn; `Sink.send` takes a pointer to it and is reached only as a function VALUE (the
+        // `send_fn` field `init` fills, as std.Io.Writer.Allocating's vtable names `sendFile`).
+        File.WriteAllText(Path.Combine(std, "trapdemo.zig"),
+            "pub const File = struct { handle: UnknownFdMarker };\n" +
+            "pub const Sink = struct {\n" +
+            "    count: usize,\n" +
+            "    send_fn: *const fn (*Sink, *File) usize,\n" +
+            "    pub fn init(n: usize) Sink { return .{ .count = n, .send_fn = send }; }\n" +
+            "    pub fn send(self: *Sink, file: *File) usize { return self.count + file.handle; }\n" +
+            "    pub fn put(self: *Sink, n: usize) void { self.count += n; }\n" +
+            "};\n");
         // `std.mem.Allocator` is a CURATED type and (here, as upstream) also a navigable module member —
         // the type-position twin of the heap/FixedBufferAllocator.zig collision. Its field type is the
         // unlowerable marker, so if type-position navigation ever beat the curated model the compile
@@ -279,5 +292,36 @@ public sealed class ZigCuratedStdVsNavigationTests
             "}\n"));
         ex.Message.ShouldContain("ascii.zig");
         ex.Message.ShouldContain("Nope");
+    }
+
+    [Fact]
+    public void A_function_reached_only_as_a_value_whose_body_needs_a_withdrawn_type_becomes_a_trap()
+    {
+        // Task #63 (std.fmt.allocPrint: Writer.Allocating's vtable names sendFile, whose body needs std.Io.File): the
+        // program compiles, and `send` is a runtime trap naming itself, since no dotcc program can build its argument.
+        var cs = EmitWithStdTree(
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var s = std.trapdemo.Sink.init(40);\n" +
+            "    s.put(2);\n" +
+            "    return @intCast(s.count);\n" +
+            "}\n");
+        cs.ShouldContain("was compiled as a trap: its parameter 'file' points to a type dotcc cannot lower");
+        cs.ShouldContain("throw new System.Diagnostics.UnreachableException(\"dotcc: '");
+    }
+
+    [Fact]
+    public void A_direct_runtime_call_to_a_trapped_function_is_still_a_compile_error()
+    {
+        // The trap is for a function nothing calls directly: a runtime call reaching it from `main` raises the original
+        // failure at compile time, through the same call-graph check as a runtime call to a comptime-returning function.
+        Should.Throw<Exception>(() => EmitWithStdTree(
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var s = std.trapdemo.Sink.init(40);\n" +
+            "    var f: *std.trapdemo.File = undefined;\n" +
+            "    _ = &f;\n" +
+            "    return @intCast(std.trapdemo.Sink.send(&s, f));\n" +
+            "}\n")).Message.ShouldContain("is called at runtime, but its body cannot lower");
     }
 }

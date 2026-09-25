@@ -1669,6 +1669,24 @@ internal sealed partial class ZigLowering
         // name with the migration path (the generic std-path error would only say `std`).
         if (fld.Arg0.Content is Zig.CallArgs mca && TryResolveStdPath(mca.Arg0, out var mlPath) && mlPath == "std.ArrayList")
         {
+            // Only `init` is the removed managed constructor. The unmanaged type has static functions of its own
+            // (`std.ArrayList(u8).growCapacity(n)` in std.Io.Writer.Allocating, task #63): with a real std tree those are
+            // real std's, called on the type its `ArrayList(T)` returns (`array_list.Aligned(T, null)`), as (A2) calls
+            // a static function of any reified type.
+            // Spelled `std.ArrayList(u8)` or through an alias (`const ArrayList = std.ArrayList;` in Writer.zig): either way
+            // the std root module this unit imports.
+            if (methodName != "init"
+                && _imports.FirstOrDefault(kv => kv.Value == "std").Key is { } stdName
+                && ResolveImport(stdName) is { Lowering: { } listNav }
+                && listNav.TryEvalExportedTypeReturningCall("ArrayList", Flatten(mca.Arg2), caller: this) is { Type: var realList }
+                && ContainerTypeName(realList) is { } realListName)
+            {
+                if ((EnsureMethodDeclared(realListName, methodName) ?? ContainerFnConst(realListName, methodName)) is not { } listStatic)
+                {
+                    throw new IrUnsupportedException($"'{realListName}' has no function '{methodName}'");
+                }
+                return CallStaticMethod(listStatic, argItems);
+            }
             throw new IrUnsupportedException(
                 "zig std.ArrayList's managed API (`std.ArrayList(T).init(alloc)` + allocator-less calls) was removed in zig 0.15 — "
                 + "use the unmanaged API: `var list: std.ArrayList(T) = .empty;` with a per-call allocator "

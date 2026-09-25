@@ -500,7 +500,16 @@ internal sealed partial class ZigLowering
             .Select(p => _symbols.Declare(new Symbol { Name = p.name, Kind = SymKind.Param, Type = p.type }))
             .ToList();
         RecordParamBits(funcSym, paramSyms);
-        var blk = LowerBlock(body);
+        var bodyState = CaptureBodyState();
+        Block blk;
+        try { blk = LowerBlock(body); }
+        catch (IrUnsupportedException failure) when (WithdrawnParamTrap(funcSym, failure) is { } trap)
+        {
+            // Task #63: a body that reaches a withdrawn container, in a function nothing can call with a real argument,
+            // becomes a runtime trap. What the failed body pushed (scopes, loop and label targets, hoists) is undone.
+            RestoreBodyState(bodyState);
+            blk = trap;
+        }
         // Milestone O part 5 — demote a non-escaping, freed, constant-size byte slice allocated
         // through the devirtualized C-heap default (`page_allocator`/`c_allocator`) to a `stackalloc`
         // backing. Runs BEFORE ExitScope so the synthetic backing-buffer temp uniquifies against this

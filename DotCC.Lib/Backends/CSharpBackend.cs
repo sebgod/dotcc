@@ -642,7 +642,10 @@ internal sealed class CSharpBackend
                 // any non-statement-position use.)
                 if (IsUnreachableCall(inner))
                 {
-                    sb.Append(pad).Append("throw new System.Diagnostics.UnreachableException(\"unreachable() reached\");\n");
+                    // A trap that says why (task #63: a function compiled as a trap carries its reason as one plain string
+                    // segment, already free of quotes and backslashes); the bare form is C23's `unreachable()`.
+                    var reason = inner is Call { Args: [LitStr { Segments: [var segment] }] } ? segment : "\"unreachable() reached\"";
+                    sb.Append(pad).Append("throw new System.Diagnostics.UnreachableException(").Append(reason).Append(");\n");
                     break;
                 }
                 if (inner is CondExpr { Type.Unqualified: CType.VoidType } ct)
