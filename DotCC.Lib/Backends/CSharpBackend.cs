@@ -1889,6 +1889,9 @@ internal sealed class CSharpBackend
                 _pending.Add($"{Cs(sa.Element)}* {name} = {lit}");
                 return (name, PPrimary);
             }
+            // zig's void value `{}` where a value is spelled (stored into a `[N]void` element, a `?void` result): the
+            // runtime's empty `Unit`, as C# has no void value (task #114). A discarded one emits nothing, as before.
+            case DefaultLit { Type.Unqualified: CType.VoidType }: return ("default(Unit)", PPrimary);
             case DefaultLit: return ($"default({Cs(e.Type)})", PPrimary);
             // A promoted malloc → a zero-initialized stack struct value.
             case StackNew sn: return ($"new {Cs(sn.StructType)}()", PPrimary);

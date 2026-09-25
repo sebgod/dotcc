@@ -293,6 +293,7 @@ symbols:
   - ForObj         # 187 one object: an Expr, an open range `N..`, or a bounded range `N..M`
   - ForCaps        # 188 the captures of a multi-object `for`: `|x, *y, i, …|`, two or more
   - ForCap         # 189 one capture: `x` (a per-iteration copy) or `*x` (a pointer into the object)
+  - VoidElem       # 190 `{}`, zig's void value, as a positional list element (`[3]void{ {}, {}, {} }`, task #114)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -1743,6 +1744,10 @@ productions:
       # vs a `.member` enum-literal positional element split on the token after `.IDENT` (`=`
       # named — shift; `,`/`}` enum-literal — reduce), so they stay LALR(1)-distinct.
       - { lhs: FieldInit, rhs: [Expr], action: fieldInitPositional }
+      # `{}` as a positional element (`[3]void{ {}, {}, {} }`, task #114): through its own nonterminal, so the element is the
+      # same positional record with a void value. `{` is not in FIRST(Expr), so it stays conflict-free.
+      - { lhs: FieldInit, rhs: [VoidElem], action: fieldInitPositional }
+      - { lhs: VoidElem, rhs: ['{', '}'], action: voidValue }
 
   # The VOID `orelse return` / `catch return` forms, LAST on purpose: LALR.CC resolves a shift/reduce
   # conflict by group order (an earlier group wins) before the derivation rule ever applies. A struct

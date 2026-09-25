@@ -629,8 +629,8 @@ internal sealed partial class ZigLowering
         Zig.TyCPtrConst p  => new CType.Pointer(LowerType(p.Arg2).WithQuals(TypeQual.Const)),
         // `[*]T` / `[*]const T` many-item pointers (Milestone O, part 2) — like `[*c]`,
         // a bare `T*`. They index/slice; `.len` is unavailable (a pointer has no length).
-        Zig.TyManyPtr p     => new CType.Pointer(LowerType(p.Arg1)),
-        Zig.TyManyPtrConst p => new CType.Pointer(LowerType(p.Arg2).WithQuals(TypeQual.Const)),
+        Zig.TyManyPtr p     => new CType.Pointer(LowerDataType(p.Arg1)),
+        Zig.TyManyPtrConst p => new CType.Pointer(LowerDataType(p.Arg2).WithQuals(TypeQual.Const)),
         // `?T` optional. An optional POINTER `?*T` lowers to a bare nullable `T*` (Zig's
         // own niche — null = none, zero cost; a non-optional `*T` loses its non-null
         // guarantee, a documented leniency). A `?T` over a value type lowers to C#
@@ -644,37 +644,37 @@ internal sealed partial class ZigLowering
         // pointer). `[]const T` carries the `const` on the element, so the backend renders it
         // as `ConstSlice<T>` — element-only const, like the pointer forms above. See
         // [[CType.Slice]].
-        Zig.TySlice s      => new CType.Slice(LowerType(s.Arg2)),
-        Zig.TySliceConst s => new CType.Slice(LowerType(s.Arg3).WithQuals(TypeQual.Const)),
+        Zig.TySlice s      => new CType.Slice(LowerDataType(s.Arg2)),
+        Zig.TySliceConst s => new CType.Slice(LowerDataType(s.Arg3).WithQuals(TypeQual.Const)),
         // The aligned forms (`*align(4) const T`, `[]align(a) T`): the same types. Alignment is not tracked
         // (C# pointers carry none), so the `align(E)` operand is not even lowered.
         Zig.TyPointerAlign p      => PointerTo(LowerPointee(p.Arg2)),
         Zig.TyPtrConstAlign p     => PointerTo(LowerPointee(p.Arg3).WithQuals(TypeQual.Const)),
-        Zig.TyManyPtrAlign p      => new CType.Pointer(LowerType(p.Arg2)),
-        Zig.TyManyPtrConstAlign p => new CType.Pointer(LowerType(p.Arg3).WithQuals(TypeQual.Const)),
-        Zig.TySliceAlign s        => new CType.Slice(LowerType(s.Arg3)),
-        Zig.TySliceConstAlign s   => new CType.Slice(LowerType(s.Arg4).WithQuals(TypeQual.Const)),
+        Zig.TyManyPtrAlign p      => new CType.Pointer(LowerDataType(p.Arg2)),
+        Zig.TyManyPtrConstAlign p => new CType.Pointer(LowerDataType(p.Arg3).WithQuals(TypeQual.Const)),
+        Zig.TySliceAlign s        => new CType.Slice(LowerDataType(s.Arg3)),
+        Zig.TySliceConstAlign s   => new CType.Slice(LowerDataType(s.Arg4).WithQuals(TypeQual.Const)),
         // A general sentinel (`[:s]T`, `[*:null]T`), erased in the type exactly as `[:0]`'s is.
-        Zig.TySentSliceExpr s           => new CType.Slice(LowerType(s.Arg4)),
-        Zig.TySentSliceConstExpr s      => new CType.Slice(LowerType(s.Arg5).WithQuals(TypeQual.Const)),
-        Zig.TySentSliceAlignExpr s      => new CType.Slice(LowerType(s.Arg5)),
-        Zig.TySentSliceConstAlignExpr s => new CType.Slice(LowerType(s.Arg6).WithQuals(TypeQual.Const)),
-        Zig.TySentPtrExpr p             => new CType.Pointer(LowerType(p.Arg5)),
-        Zig.TySentPtrConstExpr p        => new CType.Pointer(LowerType(p.Arg6).WithQuals(TypeQual.Const)),
+        Zig.TySentSliceExpr s           => new CType.Slice(LowerDataType(s.Arg4)),
+        Zig.TySentSliceConstExpr s      => new CType.Slice(LowerDataType(s.Arg5).WithQuals(TypeQual.Const)),
+        Zig.TySentSliceAlignExpr s      => new CType.Slice(LowerDataType(s.Arg5)),
+        Zig.TySentSliceConstAlignExpr s => new CType.Slice(LowerDataType(s.Arg6).WithQuals(TypeQual.Const)),
+        Zig.TySentPtrExpr p             => new CType.Pointer(LowerDataType(p.Arg5)),
+        Zig.TySentPtrConstExpr p        => new CType.Pointer(LowerDataType(p.Arg6).WithQuals(TypeQual.Const)),
         // Sentinel-terminated types (Milestone O, part 3 — the C-string shape; V1 sentinel = 0).
         // `[*:0]T` is a NUL-terminated many-item pointer (C's `char*`) → a bare `T*`, like `[*]`;
         // `[:0]T` is a NUL-terminated slice → CType.Slice, like `[]T`. The sentinel is a type-level
         // annotation, not separately enforced (string literals are already NUL-terminated, so a
         // manual `while (p[n] != 0)` scan works); the auto-scan `p[0..]` on a sentinel pointer is
         // a documented cut. Const rides as a TypeQual on the element, same as the non-sentinel forms.
-        Zig.TySentPtr p      => new CType.Pointer(LowerType(p.Arg1)),
-        Zig.TySentPtrConst p => new CType.Pointer(LowerType(p.Arg2).WithQuals(TypeQual.Const)),
-        Zig.TySentSlice s      => new CType.Slice(LowerType(s.Arg1)),
-        Zig.TySentSliceConst s => new CType.Slice(LowerType(s.Arg2).WithQuals(TypeQual.Const)),
+        Zig.TySentPtr p      => new CType.Pointer(LowerDataType(p.Arg1)),
+        Zig.TySentPtrConst p => new CType.Pointer(LowerDataType(p.Arg2).WithQuals(TypeQual.Const)),
+        Zig.TySentSlice s      => new CType.Slice(LowerDataType(s.Arg1)),
+        Zig.TySentSliceConst s => new CType.Slice(LowerDataType(s.Arg2).WithQuals(TypeQual.Const)),
         // `[N]T` fixed-size array → CType.Array(element, N). N must be an integer literal
         // (a general comptime const-expr size is deferred). A `var b: [N]T` local lowers to a
         // stackalloc'd C array (see DeclOf), so slicing it (`b[lo..hi]`) yields a stack-backed slice.
-        Zig.TyArray a => new CType.Array(LowerType(a.Arg3), ConstEvalArraySize(a.Arg1)),
+        Zig.TyArray a => new CType.Array(LowerDataType(a.Arg3), ConstEvalArraySize(a.Arg1)),
         // `[N:s]T` sentinel-terminated array (Milestone O, part 4; non-zero sentinel in Milestone Z)
         // → CType.Array(element, N) — the LOGICAL length N (so `.len` / slicing exclude the sentinel,
         // like Zig). The extra trailing sentinel slot (N+1 total storage) is materialized only at the
@@ -682,7 +682,7 @@ internal sealed partial class ZigLowering
         // stays an ordinary N-element array, so a `[N:0]u8` buffer is a valid NUL-terminated C string
         // without writing the terminator. A zero sentinel rides C#'s zero-fill; a NON-ZERO sentinel is
         // written into the trailing slot explicitly (the sentinel VALUE isn't carried in the type).
-        Zig.TySentArray a => new CType.Array(LowerType(a.Arg5), ConstEvalArraySize(a.Arg1)),
+        Zig.TySentArray a => new CType.Array(LowerDataType(a.Arg5), ConstEvalArraySize(a.Arg1)),
         // Tuple TYPE `struct { T1, T2, … }` (Milestone G) → CType.Tuple → C# System.ValueTuple<…>.
         // Used as a function return type or a var/param annotation; nested tuple types compose.
         Zig.TyTuple t => LowerTupleType(t.Arg2),
@@ -983,13 +983,27 @@ internal sealed partial class ZigLowering
             $"zig type: a dotted type `{Tok(member.Arg2)}` that is not a modeled std path");
     }
 
+    /// <summary>zig's <c>void</c> as DATA (task #114): the runtime's empty <c>Unit</c> struct, since C# has no <c>void</c>
+    /// element, generic argument or storage.</summary>
+    private static readonly CType ZigUnitType = new CType.Named("Unit");
+
+    /// <summary>Lower an element type of a slice, many-item pointer, array, optional or tuple. A <c>void</c> element
+    /// (std.StaticStringMap(void)'s <c>[*]const V</c>, a <c>?void</c> result, <c>[3]void{ {}, {}, {} }</c>, task #114) is
+    /// <see cref="ZigUnitType"/>: zig stores nothing, and C# needs a real type there. A single pointer to void stays an
+    /// opaque <c>void*</c> (see <see cref="LowerPointee"/>), as does a C pointer.</summary>
+    private CType LowerDataType(Item type)
+    {
+        var lowered = LowerType(type);
+        return lowered.Unqualified is CType.VoidType ? ZigUnitType : lowered;
+    }
+
     /// <summary>Lower a tuple TYPE body (the <c>T1, T2, …</c> inside <c>struct { … }</c> at a Type
     /// position) to a <see cref="CType.Tuple"/>. V1 supports arity 1..7 (an empty tuple and
     /// arity &gt; 7 — which would need ValueTuple's <c>TRest</c> nesting — are deferred with a clear
     /// error). Each element is itself a <see cref="LowerType"/>, so nested tuple types compose.</summary>
     private CType LowerTupleType(Item tupleTypes)
     {
-        var elems = Flatten(tupleTypes).Select(LowerType).ToList();
+        var elems = Flatten(tupleTypes).Select(LowerDataType).ToList();
         return new CType.Tuple(elems);
     }
 
@@ -1297,7 +1311,7 @@ internal sealed partial class ZigLowering
     /// is wrapped in <see cref="CType.Optional"/> (→ C# <c>T?</c>).</summary>
     private CType LowerOptional(Item innerType)
     {
-        var inner = LowerType(innerType);
+        var inner = LowerDataType(innerType);
         return inner.Unqualified is CType.Pointer or CType.Func ? inner : new CType.Optional(inner);
     }
 
@@ -1319,9 +1333,16 @@ internal sealed partial class ZigLowering
     /// stands), so user code keeps its direct diagnostics.</summary>
     private CType LowerPointee(Item pointee)
     {
-        try { return LowerType(pointee); }
+        CType lowered;
+        try { lowered = LowerType(pointee); }
         catch (ZigFailedContainerException) { return CType.Void; }
+        // A `*T` with `T = void` (std.mem.swap(void, …) in std.StaticStringMap(void), task #114) points at DATA, as a slice
+        // of void does; only `*anyopaque` is an opaque `void*`.
+        return lowered.Unqualified is CType.VoidType && !IsAnyopaqueSpelling(pointee) ? ZigUnitType : lowered;
     }
+
+    /// <summary>Is this type spelled <c>anyopaque</c>, zig's opaque pointee (a <c>void*</c>, never data)?</summary>
+    private static bool IsAnyopaqueSpelling(Item type) => type.Content is Zig.Ident id && Tok(id.Arg0) == "anyopaque";
 
     /// <summary>Lower a function-pointer type's parameter list (the reused <c>Params</c>: each a
     /// named <c>IDENT : Type</c>) to its element types — the names are irrelevant to the type. A

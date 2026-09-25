@@ -1290,7 +1290,7 @@ internal sealed partial class ZigLowering
         // `[_]T` takes the element count, `[N]T` the literal N (which must match the elements).
         if (typeItem.Content is Zig.TyArray ta)
         {
-            var element = LowerType(ta.Arg3);
+            var element = LowerDataType(ta.Arg3);
             var inferred = ta.Arg1.Content is Zig.Ident id && Tok(id.Arg0) == "_";
             var arr = inferred
                 ? new CType.Array(element, null)

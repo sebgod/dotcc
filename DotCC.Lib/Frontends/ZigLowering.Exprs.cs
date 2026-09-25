@@ -1280,7 +1280,7 @@ internal sealed partial class ZigLowering
         // A DIRECT typed array literal `[N]T{…}` / `[_]T{…}`.
         if (item.Content is Zig.TypedStructInit { Arg0.Content: Zig.TyArray ta } tsi)
         {
-            element = LowerType(ta.Arg3);
+            element = LowerDataType(ta.Arg3);
             posItems = Flatten(tsi.Arg2);
             return true;
         }
@@ -1288,7 +1288,7 @@ internal sealed partial class ZigLowering
         // lowering; lower the element TYPE now (body-lowering time, safe) and re-feed BuildArrayInit.
         if (item.Content is Zig.Ident id && _comptimeArrayConsts.TryGetValue(Tok(id.Arg0), out var rec))
         {
-            element = LowerType(rec.ElemTypeItem);
+            element = LowerDataType(rec.ElemTypeItem);
             posItems = rec.Items;
             return true;
         }

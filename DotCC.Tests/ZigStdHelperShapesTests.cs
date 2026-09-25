@@ -2469,6 +2469,77 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Void_as_data_is_the_runtime_unit()
+    {
+        var cs = EmitZig("""
+            fn Map(comptime V: type) type {
+                return struct {
+                    keys: []const u8,
+                    vals: []const V,
+
+                    const Self = @This();
+
+                    fn get(self: Self, k: u8) ?V {
+                        for (self.keys, 0..) |key, i| {
+                            if (key == k) return self.vals[i];
+                        }
+                        return null;
+                    }
+
+                    fn has(self: Self, k: u8) bool {
+                        return self.get(k) != null;
+                    }
+                };
+            }
+
+            const unit_vals = [3]void{ {}, {}, {} };
+            const set = Map(void){ .keys = "abc", .vals = &unit_vals };
+            const nums = Map(u8){ .keys = "xy", .vals = &[_]u8{ 7, 9 } };
+
+            pub fn main() u8 {
+                var slots: [4]void = undefined;
+                slots[2] = {};
+                const view: []const void = &slots;
+                var many: [*]const void = &unit_vals;
+                many += 1;
+                _ = many[0];
+                var total: u32 = @intCast(view.len + unit_vals.len);
+                if (set.has('b')) total += 10;
+                if (!set.has('z')) total += 20;
+                if (set.get('c')) |_| total += 40;
+                if (nums.get('y')) |n| total += n;
+                return @intCast(total);
+            }
+            """);
+        // Task #114: std.StaticStringMap(void) stores `[*]const V` values, returns `?V`, swaps `*V`. C# has no void element,
+        // generic argument or storage, so zig's void as DATA (the element of a slice, many-pointer, array, optional or tuple,
+        // and a `*T` with T = void) is the runtime's empty `Unit`, and the void value `{}` stored there is `default(Unit)`.
+        // `{}` parses as a list element too. zig returns 86.
+        cs.ShouldContain("Unit* slots = stackalloc Unit[4];");
+        cs.ShouldContain("slots[2] = default(Unit);");
+        cs.ShouldContain("ConstSlice<Unit> view = new ConstSlice<Unit>(slots, 4UL);");
+        cs.ShouldContain("Unit? Map__void_get(Map__void self, byte k)");
+        cs.ShouldContain("unit_vals = Libc.GlobalArrayFrom<Unit>(new Unit[]{ default(Unit), default(Unit), default(Unit) });");
+    }
+
+    [Fact]
+    public void A_pointer_to_anyopaque_stays_an_opaque_void_pointer()
+    {
+        var cs = EmitZig("""
+            fn touch(ctx: *anyopaque) u8 {
+                const p: *u8 = @ptrCast(ctx);
+                return p.*;
+            }
+            pub fn main() u8 {
+                var x: u8 = 5;
+                return touch(&x);
+            }
+            """);
+        // Task #114: only `void` as data becomes `Unit`; `*anyopaque` is still C's `void*`.
+        cs.ShouldContain("touch(void* ctx)");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

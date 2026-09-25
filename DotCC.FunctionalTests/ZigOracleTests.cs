@@ -6178,6 +6178,47 @@ public sealed class ZigOracleTests
             "pub fn main() u8 {\n" +
             "    return nums.vals[1] + direct[2];\n" +
             "}\n", 12, "" },
+        // void as data (task #114): [N]void, []const void, [*]const void, ?void through a generic map, and {} as a list element;
+        // the std.StaticStringMap(void) shapes. zig returns 86.
+        new object[] { "void_as_data",
+            "fn Map(comptime V: type) type {\n" +
+            "    return struct {\n" +
+            "        keys: []const u8,\n" +
+            "        vals: []const V,\n" +
+            "\n" +
+            "        const Self = @This();\n" +
+            "\n" +
+            "        fn get(self: Self, k: u8) ?V {\n" +
+            "            for (self.keys, 0..) |key, i| {\n" +
+            "                if (key == k) return self.vals[i];\n" +
+            "            }\n" +
+            "            return null;\n" +
+            "        }\n" +
+            "\n" +
+            "        fn has(self: Self, k: u8) bool {\n" +
+            "            return self.get(k) != null;\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "const unit_vals = [3]void{ {}, {}, {} };\n" +
+            "const set = Map(void){ .keys = \"abc\", .vals = &unit_vals };\n" +
+            "const nums = Map(u8){ .keys = \"xy\", .vals = &[_]u8{ 7, 9 } };\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var slots: [4]void = undefined;\n" +
+            "    slots[2] = {};\n" +
+            "    const view: []const void = &slots;\n" +
+            "    var many: [*]const void = &unit_vals;\n" +
+            "    many += 1;\n" +
+            "    _ = many[0];\n" +
+            "    var total: u32 = @intCast(view.len + unit_vals.len);\n" +
+            "    if (set.has('b')) total += 10;\n" +
+            "    if (!set.has('z')) total += 20;\n" +
+            "    if (set.get('c')) |_| total += 40;\n" +
+            "    if (nums.get('y')) |n| total += n;\n" +
+            "    return @intCast(total);\n" +
+            "}\n", 86, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

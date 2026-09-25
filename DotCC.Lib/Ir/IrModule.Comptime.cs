@@ -630,6 +630,9 @@ internal sealed partial class IrModule
             }
             return new CtStruct(map, named);
         }
+        // The zig front end's `void` as data (`[N]void`, std.StaticStringMap(void)'s values, task #114): the runtime's
+        // empty `Unit`, which no struct registry holds, is the void value.
+        if (u is CType.Named { Name: "Unit" }) { return CtVoid.Value; }
         if (u is CType.Array arr && arr.Count is int ac)
         {
             if (ac < 0 || ac > ComptimeArrayCap) { return null; }
