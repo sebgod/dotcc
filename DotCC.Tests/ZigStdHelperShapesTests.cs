@@ -1616,6 +1616,53 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_while_capture_continue_expression_reads_the_capture()
+    {
+        var cs = EmitZig("""
+            const Node = struct {
+                v: u32,
+                next: ?*Node = null,
+            };
+
+            fn step(x: u8) ?u8 {
+                return if (x >= 40) null else x + 7;
+            }
+
+            pub fn main() u8 {
+                var c = Node{ .v = 9 };
+                var b = Node{ .v = 5, .next = &c };
+                var a = Node{ .v = 3, .next = &b };
+                var sum: u32 = 0;
+                var it: ?*Node = &a;
+                while (it) |n| : (it = n.next) {
+                    sum = sum * 10 + n.v;
+                }
+                var hops: u32 = 0;
+                var cur: ?u8 = 1;
+                outer: while (cur) |x| : (cur = step(x)) {
+                    hops += 1;
+                    if (x % 2 == 0) continue :outer;
+                    hops += 100;
+                }
+                var skipped: u32 = 0;
+                var it2: ?*Node = &a;
+                while (it2) |n| : (it2 = n.next) {
+                    if (n.v == 5) continue;
+                    skipped += n.v;
+                }
+                return @intCast((sum + hops + skipped) % 256);
+            }
+            """);
+        // Task #105: `while (it) |n| : (it = n.next)` (the std.SinglyLinkedList walk) reads the capture in the continue
+        // expression, so the capture is declared in the `for` init, whose scope spans the post and the body, and assigned
+        // each turn; a labeled `continue` still lands on the post. zig returns 10.
+        cs.ShouldContain("for (Node* n = default(Node*); ; it = n->next)");
+        cs.ShouldContain("n = __cap;");
+        cs.ShouldContain("for (byte x = default(byte); ; cur = step(x))");
+        cs.ShouldContain("goto __loop1_cont;");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

@@ -5673,6 +5673,42 @@ public sealed class ZigOracleTests
             "    if (!sorted) return 1;\n" +
             "    return @intCast(stored * 10 + sum % 97);\n" +
             "}\n", 118, "" },
+        // A capture-`while` continue expression that reads the capture (`while (it) |n| : (it = n.next)`, task #105), over a
+        // pointer optional and a value optional, with a labeled `continue` and a plain one. zig returns 10.
+        new object[] { "while_capture_cont_reads_capture",
+            "const Node = struct {\n" +
+            "    v: u32,\n" +
+            "    next: ?*Node = null,\n" +
+            "};\n" +
+            "\n" +
+            "fn step(x: u8) ?u8 {\n" +
+            "    return if (x >= 40) null else x + 7;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var c = Node{ .v = 9 };\n" +
+            "    var b = Node{ .v = 5, .next = &c };\n" +
+            "    var a = Node{ .v = 3, .next = &b };\n" +
+            "    var sum: u32 = 0;\n" +
+            "    var it: ?*Node = &a;\n" +
+            "    while (it) |n| : (it = n.next) {\n" +
+            "        sum = sum * 10 + n.v;\n" +
+            "    }\n" +
+            "    var hops: u32 = 0;\n" +
+            "    var cur: ?u8 = 1;\n" +
+            "    outer: while (cur) |x| : (cur = step(x)) {\n" +
+            "        hops += 1;\n" +
+            "        if (x % 2 == 0) continue :outer;\n" +
+            "        hops += 100;\n" +
+            "    }\n" +
+            "    var skipped: u32 = 0;\n" +
+            "    var it2: ?*Node = &a;\n" +
+            "    while (it2) |n| : (it2 = n.next) {\n" +
+            "        if (n.v == 5) continue;\n" +
+            "        skipped += n.v;\n" +
+            "    }\n" +
+            "    return @intCast((sum + hops + skipped) % 256);\n" +
+            "}\n", 10, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

@@ -255,10 +255,10 @@ internal sealed partial class ZigLowering
             // over the AssignOp operator (via ContAssignPost, like stmtWhileContAssign); the bare-expr
             // form a plain one.
             case Zig.StmtWhileCaptureCont w:
-                return LowerWhileCapture(w.Arg2, Tok(w.Arg5), w.Arg11, null, LowerExpr(w.Arg9));
+                return LowerWhileCapture(w.Arg2, Tok(w.Arg5), w.Arg11, null, () => LowerExpr(w.Arg9));
             case Zig.StmtWhileCaptureContAssign w:
                 return LowerWhileCapture(w.Arg2, Tok(w.Arg5), w.Arg13, null,
-                    ContAssignPost(w.Arg9, w.Arg10, w.Arg11));
+                    () => ContAssignPost(w.Arg9, w.Arg10, w.Arg11));
 
             // `break;` / `continue;` — reuse the C IR loop-control nodes (the C# backend
             // renders them verbatim; valid inside the while/for forms above).
@@ -2743,12 +2743,45 @@ internal sealed partial class ZigLowering
     /// which produces a real <see cref="While"/> node, so a labeled break/continue composes via the
     /// existing labeled-loop machinery. A value optional <c>?T</c> tests <c>__cap.HasValue</c> / binds
     /// <c>.Value</c>; a niche optional pointer tests non-null / binds the pointer itself. <c>_</c> tests
-    /// without binding. An error-union or non-optional condition is a clear error.</summary>
+    /// without binding. An error-union or non-optional condition is a clear error.
+    /// <para>A continue-expression (<paramref name="contPost"/>, lowered here so it sees the capture) reads the capture
+    /// too (<c>while (it) |n| : (it = n.next)</c>, the std.SinglyLinkedList walk, task #105), so the capture is then
+    /// declared in the <c>for</c> INIT, whose scope spans the post and the body, and assigned each turn.</para></summary>
     private CStmt LowerWhileCapture(Item condItem, string capName, Item bodyItem,
-        (Item body, string? errName)? elseInfo = null, CExpr? contPost = null)
+        (Item body, string? errName)? elseInfo = null, Func<CExpr>? contPost = null)
+    {
+        _symbols.EnterScope();
+        try
+        {
+            return LowerWhileCaptureCore(condItem, capName, bodyItem, elseInfo, contPost);
+        }
+        finally
+        {
+            _symbols.ExitScope();
+        }
+    }
+
+    /// <summary>The body of <see cref="LowerWhileCapture"/>, inside the scope that holds a hoisted capture.</summary>
+    private CStmt LowerWhileCaptureCore(Item condItem, string capName, Item bodyItem,
+        (Item body, string? errName)? elseInfo, Func<CExpr>? contPost)
     {
         var cond = LowerExpr(condItem);
         var ct = cond.Type.Unqualified;
+        DeclStmt? hoistedCapture = null;
+        // Bind the capture for this turn: a fresh local, or (with a continue-expression) an assignment to the one
+        // declared in the `for` init.
+        CStmt BindCapture(CType payloadType, CExpr payloadInit)
+        {
+            if (contPost is null)
+            {
+                var local = _symbols.Declare(new Symbol { Name = capName, Kind = SymKind.Var, Type = payloadType });
+                return new DeclStmt(new List<LocalDecl> { new(local, payloadInit) });
+            }
+            var hoisted = _symbols.Declare(new Symbol { Name = capName, Kind = SymKind.Var, Type = payloadType });
+            hoistedCapture = new DeclStmt(new List<LocalDecl> { new(hoisted, new DefaultLit { Type = payloadType }) });
+            return new ExprStmt(new Assign(null, new VarRef(hoisted) { Type = payloadType, IsLValue = true }, payloadInit)
+                { Type = payloadType });
+        }
 
         var capTmp = _symbols.Declare(new Symbol { Name = "__cap", Kind = SymKind.Var, Type = cond.Type });
         var capRef = new VarRef(capTmp) { Type = cond.Type, IsLValue = true };
@@ -2766,11 +2799,14 @@ internal sealed partial class ZigLowering
                     "zig error-union capture `while (eu) |x|` requires an `else |e|` clause to handle the error");
             }
             var okStmts = new List<CStmt>();
-            _symbols.EnterScope();
-            if (capName != "_")
+            if (capName != "_" && contPost is not null)
             {
-                var okSym = _symbols.Declare(new Symbol { Name = capName, Kind = SymKind.Var, Type = eu.Payload });
-                okStmts.Add(new DeclStmt(new List<LocalDecl> { new(okSym, new Member(capRef, "Value", false) { Type = eu.Payload }) }));
+                okStmts.Add(BindCapture(eu.Payload, new Member(capRef, "Value", false) { Type = eu.Payload }));
+            }
+            _symbols.EnterScope();
+            if (capName != "_" && contPost is null)
+            {
+                okStmts.Add(BindCapture(eu.Payload, new Member(capRef, "Value", false) { Type = eu.Payload }));
             }
             okStmts.Add(LowerStmt(bodyItem));
             _symbols.ExitScope();
@@ -2823,12 +2859,9 @@ internal sealed partial class ZigLowering
 
             // then-branch: bind the payload, then the user body, with `x` in scope while lowering it.
             var thenStmts = new List<CStmt>();
+            if (capName != "_" && contPost is not null) { thenStmts.Add(BindCapture(payloadType, payloadInit)); }
             _symbols.EnterScope();
-            if (capName != "_")
-            {
-                var capSym = _symbols.Declare(new Symbol { Name = capName, Kind = SymKind.Var, Type = payloadType });
-                thenStmts.Add(new DeclStmt(new List<LocalDecl> { new(capSym, payloadInit) }));
-            }
+            if (capName != "_" && contPost is null) { thenStmts.Add(BindCapture(payloadType, payloadInit)); }
             thenStmts.Add(LowerStmt(bodyItem));
             _symbols.ExitScope();
 
@@ -2856,7 +2889,7 @@ internal sealed partial class ZigLowering
         var trueLit = new LitBool(true) { Type = CType.Bool };
         return contPost is null
             ? new While(trueLit, new Block(loopBody))
-            : new For(null, trueLit, contPost, new Block(loopBody));
+            : new For(hoistedCapture, trueLit, contPost(), new Block(loopBody));
     }
 
     /// <summary>Dispatch a <c>switch</c> statement: lower the subject once, then route a

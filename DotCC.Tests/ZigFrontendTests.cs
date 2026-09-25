@@ -4168,9 +4168,10 @@ public sealed class ZigFrontendTests
             "    while (nextLT(&i, 4)) |v| : (cnt = cnt + 1) { sum += v; }\n" +
             "    return @as(u8, @intCast(sum + cnt));\n" +
             "}\n");
-        cs.ShouldContain("for (");            // the cont form lowers to a `for` (post = cont)
-        cs.ShouldContain("cnt = cnt + 1");    // the continue-expression as the for post
-        cs.ShouldContain("int v = __cap.Value;");
+        // The cont form lowers to a `for` (post = cont) whose INIT declares the capture, so the post may read it too
+        // (task #105); each turn assigns it.
+        cs.ShouldContain("for (int v = default(int); ; cnt = cnt + 1)");
+        cs.ShouldContain("v = __cap.Value;");
     }
 
     [Fact]
