@@ -88,6 +88,10 @@ internal sealed class ZigImportScope
     /// instantiated in its owner module (<c>std.math.cast(isize, v)</c>) is read from the caller's.</summary>
     public Dictionary<Symbol, int> FnReturnBits { get; } = new();
 
+    /// <summary>Each struct field's declared integer width, by (struct IR name, field), shared: std.Io.Writer.printValue reads
+    /// a user struct's field (<c>@field(value, f_name)</c>) and asks its width (task #121).</summary>
+    public Dictionary<(string Struct, string Field), int> StructFieldBits { get; } = new();
+
     /// <summary>A container's IR name → the module holding its VALUE consts, so a decl literal
     /// (<c>var list: std.array_list.Aligned(u8, null) = .empty;</c>) written in another module lowers the
     /// const where it was declared.</summary>

@@ -1948,6 +1948,9 @@ internal sealed partial class ZigLowering
         // A top-level CONST aggregate (`const cpu: std.Target.Cpu = .{…}`) is comptime-known, so a comptime
         // call may read it (`comptime std.atomic.cacheLineForCpu(cpu)`): the interpreter evaluates its init.
         if (isConst && type.Unqualified is CType.Named) { _ir.ConstGlobalInits[sym] = init; }
+        // So is a top-level string CONST (std.Io.Writer's `const ANY = "any";`, read by printValue's `comptime
+        // std.mem.eql(u8, fmt, ANY)`, task #121).
+        if (isConst && init is LitStr) { _ir.ConstGlobalInits[sym] = init; }
     }
 
     /// <summary>Lower a global's initializer. One that needs statements before its value (std.base64's

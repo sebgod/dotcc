@@ -6372,6 +6372,43 @@ public sealed class ZigOracleTests
             "    const c = toEnum(Op, \"div\");\n" +
             "    return @intFromEnum(a) * 10 + @intFromEnum(b) + @as(u8, if (c == null) 100 else 0);\n" +
             "}\n", 157, "" },
+        // Format guards over a comptime string (task #121, step 1): std.Io.Writer.printValue's b64 / is_any guards settle, so the
+        // guarded @compileError arms are never analysed; is_tuple; a struct field's declared width through anytype. zig returns 68.
+        new object[] { "comptime_format_guards",
+            "const ANY = \"any\";\n" +
+            "\n" +
+            "fn eql(a: []const u8, b: []const u8) bool {\n" +
+            "    if (a.len != b.len) return false;\n" +
+            "    for (a, b) |x, y| if (x != y) return false;\n" +
+            "    return true;\n" +
+            "}\n" +
+            "\n" +
+            "fn check(comptime fmt: []const u8) u8 {\n" +
+            "    switch (fmt.len) {\n" +
+            "        3 => if (fmt[0] == 'b' and fmt[1] == '6' and fmt[2] == '4') switch (fmt[0]) {\n" +
+            "            'b' => return 1,\n" +
+            "            else => @compileError(\"not b64: \" ++ fmt),\n" +
+            "        },\n" +
+            "        else => {},\n" +
+            "    }\n" +
+            "    const is_any = comptime eql(fmt, ANY);\n" +
+            "    if (!is_any and fmt.len > 1) @compileError(\"bad format \" ++ fmt);\n" +
+            "    return @as(u8, @intFromBool(is_any)) * 5 + 2;\n" +
+            "}\n" +
+            "\n" +
+            "fn bitsOf(v: anytype) u16 {\n" +
+            "    return @typeInfo(@TypeOf(v)).int.bits;\n" +
+            "}\n" +
+            "\n" +
+            "const Rec = struct { wide: u21, narrow: u8 };\n" +
+            "const Pair = struct { u8, u16 };\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const r = Rec{ .wide = 3, .narrow = 4 };\n" +
+            "    const tuple_flags: u8 = (if (@typeInfo(Rec).@\"struct\".is_tuple) 100 else 0) + (if (@typeInfo(Pair).@\"struct\".is_tuple) 10 else 0);\n" +
+            "    const bits: u16 = bitsOf(@field(r, \"wide\")) + bitsOf(r.narrow);\n" +
+            "    return check(\"any\") + check(\"b64\") * 20 + check(\"x\") + tuple_flags + @as(u8, @intCast(bits));\n" +
+            "}\n", 68, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

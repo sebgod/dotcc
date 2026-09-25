@@ -596,6 +596,15 @@ internal sealed partial class IrModule
         _ => false,
     };
 
+    /// <summary>The elements a comptime slice views (its window of the backing array), or null for any other value. An array
+    /// is not taken: a string literal's counts its NUL, which the slice a zig string coerces to does not.</summary>
+    private static IReadOnlyList<ComptimeValue>? ComptimeSequence(ComptimeValue? v) => v switch
+    {
+        CtSlice s when s.Offset >= 0 && s.Offset + s.Length <= s.Backing.Elems.Length
+            => new System.ArraySegment<ComptimeValue>(s.Backing.Elems, (int)s.Offset, (int)s.Length),
+        _ => null,
+    };
+
     /// <summary>A string literal as the comptime byte array it denotes (its NUL included, as its C type counts it).</summary>
     private static CtArray StringBytes(LitStr ls)
     {
@@ -936,6 +945,23 @@ internal sealed partial class IrModule
                 for (long k = 0; k < copyCount; k++) { copied[k] = CloneComptime(srcSlice.Backing.Elems[srcSlice.Offset + k]); }
                 for (long k = 0; k < copyCount; k++) { dstElems[dstOffset + k] = copied[k]; }
                 return CtVoid.Value;
+            }
+
+            // The curated `std.mem.eql` (std.Io.Writer.printValue's `const is_any = comptime std.mem.eql(u8, fmt, ANY);`,
+            // task #121): equal lengths and equal elements.
+            case ZigMemCall { Method: "Eql", Args: [var eqlLeft, var eqlRight] }:
+            {
+                if (ComptimeSequence(EvalComptime(eqlLeft)) is not { } xs || ComptimeSequence(EvalComptime(eqlRight)) is not { } ys)
+                {
+                    return null;
+                }
+                if (xs.Count != ys.Count) { return new CtBool(false); }
+                for (var k = 0; k < xs.Count; k++)
+                {
+                    if (xs[k] is not CtInt xi || ys[k] is not CtInt yi) { return null; }
+                    if (xi.Value != yi.Value) { return new CtBool(false); }
+                }
+                return new CtBool(true);
             }
 
             // A tuple literal (`.{ .{ "one", 1 }, .{ "two", 2 } }`, task #100): a struct keyed by position, the shape an

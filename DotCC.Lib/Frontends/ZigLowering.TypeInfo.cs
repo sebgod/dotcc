@@ -253,6 +253,10 @@ internal sealed partial class ZigLowering
         TupleIndex { Tuple: VarRef tv, Index: var ti } when _valueTupleElemBits.TryGetValue(tv.Sym, out var tbits) && ti < tbits.Length
             => tbits[ti],
         Member { Field: "Len" } => 64,
+        // A struct field read (`@field(value, f_name)` in std.Io.Writer.printValue's struct arm, task #121): its declared width.
+        Member { Base.Type: var objType, Field: var field }
+            when (objType?.Unqualified is CType.Pointer { Pointee: var pointee } ? pointee.Unqualified : objType?.Unqualified) is CType.Named owner
+                 && _structFieldBits.TryGetValue((owner.Name, field), out var fieldBits) => fieldBits,
         Unary { Op: UnOp.Neg or UnOp.BitNot } u => DeclaredBitsOfLowered(u.Operand),
         _ => null,
     };
@@ -270,6 +274,9 @@ internal sealed partial class ZigLowering
     /// <summary>Each function's declared RETURN width, where its return type spelled one (read per instance
     /// with its seeds live), so a call's result carries it (<see cref="DeclaredBitsOfLowered"/>).</summary>
     private Dictionary<Symbol, int> _fnReturnBits => _shared.FnReturnBits;
+
+    /// <summary>Each struct field's declared width (<see cref="ZigModuleGraph"/>'s shared table), so a field read carries it.</summary>
+    private Dictionary<(string Struct, string Field), int> _structFieldBits => _shared.StructFieldBits;
 
     /// <summary>The declared width of a slice / array VALUE's ELEMENT type, or null (see
     /// <see cref="_valueElemBits"/>): a symbol's record, carried through <c>&amp;x</c>, slicing and a value
@@ -484,6 +491,11 @@ internal sealed partial class ZigLowering
                         + "would disagree with zig. Spell the type, or pass it as a `comptime T: type`");
                 }
                 value = new LitInt(bits.ToString(System.Globalization.CultureInfo.InvariantCulture), bits) { Type = CType.Int };
+                return true;
+
+            // `info.is_tuple` (std.Io.Writer.printValue's struct arm, task #121): a tuple is a struct whose fields are positions.
+            case ("struct", "is_tuple"):
+                value = new LitBool(info.Type.Unqualified is CType.Tuple) { Type = CType.Bool };
                 return true;
 
             case ("pointer", "is_const"):

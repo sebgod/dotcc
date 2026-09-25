@@ -545,6 +545,26 @@ internal sealed partial class ZigLowering
             if (fd.Content is Zig.StructFieldDefault pre) { _structFieldDecls[(name, Tok(pre.Arg0))] = (pre.Arg2, pre.Arg4); }
             if (fd.Content is Zig.StructFieldAlignedDefault preAligned) { _structFieldDecls[(name, Tok(preAligned.Arg0))] = (preAligned.Arg2, preAligned.Arg8); }
         }
+        // Each field's declared integer width (`value: u21`), which the lowered carrier type loses (task #121). Only a type
+        // SPELLED as an integer (`u21`, `i32`) is read, off the spelling: resolving any other field type here would lower it
+        // ahead of its turn (std.Io.Limit's `math.maxInt` before math's functions are declared).
+        foreach (var fd in fieldItems)
+        {
+            var (bitsField, bitsType) = fd.Content switch
+            {
+                Zig.StructField f => (Tok(f.Arg0), f.Arg2),
+                Zig.StructFieldDefault f => (Tok(f.Arg0), f.Arg2),
+                Zig.StructFieldAligned f => (Tok(f.Arg0), f.Arg2),
+                Zig.StructFieldAlignedDefault f => (Tok(f.Arg0), f.Arg2),
+                _ => ((string?)null, (Item?)null),
+            };
+            if (bitsField is not null && bitsType is { Content: Zig.Ident { Arg0: var bitsTok } }
+                && Tok(bitsTok) is var spelled && spelled.Length > 1 && spelled[0] is 'u' or 'i'
+                && int.TryParse(spelled.AsSpan(1), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var declaredFieldBits))
+            {
+                _structFieldBits[(name, bitsField)] = declaredFieldBits;
+            }
+        }
         var fields = new List<StructField>();
         foreach (var fd in fieldItems)
         {
@@ -2239,7 +2259,16 @@ internal sealed partial class ZigLowering
                 {
                     throw new IrUnsupportedException($"zig `@intFromBool` expects (bool); got {bargs.Count} argument(s)");
                 }
-                return new Cast(CType.Int, LowerExpr(bargs[0])) { Type = CType.Int };
+                // A bool settled at compile time (a `const b = comptime …;` read, task #121) is its 0 or 1: C# does not cast a
+                // `bool` literal to `int`.
+                var boolOperand = LowerExpr(bargs[0]);
+                var settled = (boolOperand as ComptimeFold)?.Resolved ?? boolOperand;
+                if (settled is LitBool { Value: var settledBool })
+                {
+                    var bit = settledBool ? 1 : 0;
+                    return new LitInt(bit.ToString(System.Globalization.CultureInfo.InvariantCulture), bit) { Type = CType.Int };
+                }
+                return new Cast(CType.Int, boolOperand) { Type = CType.Int };
             case "@sizeOf":
                 // `@sizeOf(T)` — the byte size as `usize`. Reuses the C `sizeof` IR (folded for a
                 // user aggregate via the layout model, else C#'s `sizeof(T)`).

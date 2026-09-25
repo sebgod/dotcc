@@ -2750,6 +2750,53 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Format_guards_over_a_comptime_string_settle_at_compile_time()
+    {
+        var cs = EmitZig("""
+            const ANY = "any";
+
+            fn eql(a: []const u8, b: []const u8) bool {
+                if (a.len != b.len) return false;
+                for (a, b) |x, y| if (x != y) return false;
+                return true;
+            }
+
+            fn check(comptime fmt: []const u8) u8 {
+                switch (fmt.len) {
+                    3 => if (fmt[0] == 'b' and fmt[1] == '6' and fmt[2] == '4') switch (fmt[0]) {
+                        'b' => return 1,
+                        else => @compileError("not b64: " ++ fmt),
+                    },
+                    else => {},
+                }
+                const is_any = comptime eql(fmt, ANY);
+                if (!is_any and fmt.len > 1) @compileError("bad format " ++ fmt);
+                return @as(u8, @intFromBool(is_any)) * 5 + 2;
+            }
+
+            fn bitsOf(v: anytype) u16 {
+                return @typeInfo(@TypeOf(v)).int.bits;
+            }
+
+            const Rec = struct { wide: u21, narrow: u8 };
+            const Pair = struct { u8, u16 };
+
+            pub fn main() u8 {
+                const r = Rec{ .wide = 3, .narrow = 4 };
+                const tuple_flags: u8 = (if (@typeInfo(Rec).@"struct".is_tuple) 100 else 0) + (if (@typeInfo(Pair).@"struct".is_tuple) 10 else 0);
+                const bits: u16 = bitsOf(@field(r, "wide")) + bitsOf(r.narrow);
+                return check("any") + check("b64") * 20 + check("x") + tuple_flags + @as(u8, @intCast(bits));
+            }
+            """);
+        // Task #121, std.Io.Writer.printValue's `{any}` guards: `fmt[0] == 'b' and ...` over a comptime string, a local
+        // `const is_any = comptime eql(fmt, ANY)` (a top-level string const, curated std.mem.eql in the interpreter) and
+        // `!is_any and ...` all settle, so the guarded `@compileError` arms are never analysed; `@intFromBool` of the settled
+        // bool is its 0 or 1; `is_tuple` folds; a struct field read carries its declared width (`u21`). zig returns 68.
+        cs.ShouldContain("return (byte)((byte)1 * 5 + 2);");
+        cs.ShouldContain("bitsOf__u32w21(r.wide)");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

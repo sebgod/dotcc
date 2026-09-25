@@ -1045,6 +1045,12 @@ internal sealed partial class ZigLowering
         {
             _ir.ComptimeGlobals[sym2] = blockValue;
         }
+        // A const bound to a `comptime` bool (std.Io.Writer.printValue's `const is_any = comptime std.mem.eql(u8, fmt, ANY);`,
+        // task #121): a later `if (!is_any and …) invalidFmtError(…)` settles at compile time, as zig's does.
+        if (isConst && init is ComptimeFold { Resolved: LitBool { Value: var comptimeBool } })
+        {
+            _ir.ComptimeGlobals[sym2] = new IrModule.CtBool(comptimeBool);
+        }
         RecordValueBits(sym2,
             typeItem is { } ti ? DeclaredBitsOfTypeArg(ti) : DeclaredBitsOfValue(initExpr) ?? DeclaredBitsOfLowered(init),
             typeItem is { } te ? ElemBitsOfTypeAst(te) : DeclaredElemBitsOfValue(initExpr));
@@ -2340,6 +2346,13 @@ internal sealed partial class ZigLowering
         {
             return compared;
         }
+        // `fmt[0] == 'b'` / `fmt.len != 3` over a comptime string (std.Io.Writer.printValue's `3 => if (fmt[0] == 'b' and
+        // fmt[1] == '6' and fmt[2] == '4') switch (…)`, task #121): zig settles it at compile time and never analyses the
+        // guarded arm, whose `invalidFmtError` is a `@compileError` for any other format.
+        if (cur.Content is Zig.CmpEq or Zig.CmpNe && TryFoldComptimeStringCompare(cur) is { } stringCompared)
+        {
+            return stringCompared;
+        }
         if (cur.Content is Zig.TrueLit) { return true; }
         if (cur.Content is Zig.FalseLit) { return false; }
         // A question about a comptime AGGREGATE (`cpu.has(.x86, .avx2)` over a `comptime cpu: std.Target.Cpu`
@@ -2349,6 +2362,58 @@ internal sealed partial class ZigLowering
             return aggregateAnswer;
         }
         return TryFoldImportedComptimeValue(cur, out var v) && v is LitBool { Value: var b } ? b : null;
+    }
+
+    /// <summary>An <c>==</c> / <c>!=</c> with an operand read off a comptime STRING (a byte <c>fmt[i]</c> or its <c>.len</c>) and
+    /// the other a constant (task #121), or null when either side is not settled at compile time.</summary>
+    private bool? TryFoldComptimeStringCompare(Item comparison)
+    {
+        var (left, right, equal) = comparison.Content switch
+        {
+            Zig.CmpEq eq => (eq.Arg0, eq.Arg2, true),
+            Zig.CmpNe ne => (ne.Arg0, ne.Arg2, false),
+            _ => (comparison, comparison, true),
+        };
+        if (!IsComptimeStringRead(left) && !IsComptimeStringRead(right)) { return null; }
+        return ComptimeScalarOperand(left) is { } l && ComptimeScalarOperand(right) is { } r ? (l == r) == equal : null;
+    }
+
+    /// <summary>Is <paramref name="operand"/> a byte or the length of a comptime string?</summary>
+    private bool IsComptimeStringRead(Item operand)
+    {
+        while (operand.Content is Zig.Grouped g) { operand = g.Arg1; }
+        return operand.Content switch
+        {
+            Zig.Index ix => ComptimeStringArg(ix.Arg0) is not null,
+            Zig.Field f => Tok(f.Arg2) == "len" && ComptimeStringArg(f.Arg0) is not null,
+            _ => false,
+        };
+    }
+
+    /// <summary>The value of a comptime scalar operand: a byte of a comptime string at a constant index, its length, or a
+    /// constant (a character or integer literal). Null when it is none of those, or the string spells an escape (its raw
+    /// text is not its bytes).</summary>
+    private long? ComptimeScalarOperand(Item operand)
+    {
+        while (operand.Content is Zig.Grouped g) { operand = g.Arg1; }
+        switch (operand.Content)
+        {
+            // Only at a LITERAL index (`fmt[0]`): a `comptime var` index's constant is its declaration value, not its current one.
+            case Zig.Index { Arg2.Content: Zig.IntLit indexLit } ix when ComptimeStringArg(ix.Arg0) is { } text && !text.Contains('\\'):
+            {
+                var bytes = System.Text.Encoding.UTF8.GetBytes(text);
+                return DecodeZigInt(Tok(indexLit.Arg0)).Value is { } k && k >= 0 && k < bytes.Length ? bytes[k] : null;
+            }
+            case Zig.Field f when Tok(f.Arg2) == "len" && ComptimeStringArg(f.Arg0) is { } lenText && !lenText.Contains('\\'):
+                return System.Text.Encoding.UTF8.GetByteCount(lenText);
+            case Zig.CharLit or Zig.IntLit:
+            {
+                using var hoist = EnterThrowawayHoist();
+                return _ir.ConstEval(LowerExpr(operand));
+            }
+            default:
+                return null;
+        }
     }
 
     /// <summary>Compare two TYPE operands at comptime, or null when either is not a type (so the caller
