@@ -2453,6 +2453,22 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_global_array_literal_whose_address_is_taken_is_pinned()
+    {
+        var cs = EmitZig("""
+            const P = struct { vals: []const u8 };
+            const nums = P{ .vals = &[_]u8{ 7, 9 } };
+            const direct: []const u8 = &[_]u8{ 1, 2, 3 };
+            pub fn main() u8 {
+                return nums.vals[1] + direct[2];
+            }
+            """);
+        // Task #115: a static field's initializer cannot hold a `stackalloc` (CS1503), and the array outlives every frame.
+        cs.ShouldContain("vals = new ConstSlice<byte>(Libc.GlobalArrayFrom<byte>(new byte[]{ 7, 9 }), 2UL)");
+        cs.ShouldContain("direct = new ConstSlice<byte>(Libc.GlobalArrayFrom<byte>(new byte[]{ 1, 2, 3 }), 3UL)");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

@@ -1296,6 +1296,26 @@ public sealed partial class CompilerTests
     }
 
     [Fact]
+    public void A_file_scope_array_compound_literal_is_pinned_not_stackallocd()
+    {
+        // A file-scope compound literal has static storage (C11 6.5.2.5p5). As a static field's initializer a `stackalloc`
+        // does not even build (CS1503), so it is pinned for the program's life instead (task #115).
+        var src = WriteTemp("""
+            static int *table = (int[]){ 3, 5, 7 };
+            struct P { const int *vals; int n; };
+            static struct P p = { (const int[]){ 1, 2 }, 2 };
+            int main(void) { return table[2] + p.vals[1]; }
+            """);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { src });
+            emitted.ShouldContain("table = Libc.GlobalArrayFrom<int>(new int[]{ 3, 5, 7 });");
+            emitted.ShouldContain("vals = Libc.GlobalArrayFrom<int>(new int[]{ 1, 2 })");
+        }
+        finally { File.Delete(src); }
+    }
+
+    [Fact]
     public void Array_compound_literal_lowers_to_stackalloc()
     {
         // C99 `(int[]){…}` / `(int[N]){…}` → stackalloc. Implicit `[]` takes the

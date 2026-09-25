@@ -6169,6 +6169,15 @@ public sealed class ZigOracleTests
             "    if (small.find(\"four\") == null) total += 20;\n" +
             "    return @intCast(total % 256);\n" +
             "}\n", 58, "" },
+        // A global array literal whose address is taken (task #115): pinned for the program's life, as a struct field and as a
+        // slice const. zig returns 12.
+        new object[] { "global_array_literal_address",
+            "const P = struct { vals: []const u8 };\n" +
+            "const nums = P{ .vals = &[_]u8{ 7, 9 } };\n" +
+            "const direct: []const u8 = &[_]u8{ 1, 2, 3 };\n" +
+            "pub fn main() u8 {\n" +
+            "    return nums.vals[1] + direct[2];\n" +
+            "}\n", 12, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

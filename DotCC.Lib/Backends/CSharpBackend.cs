@@ -132,11 +132,11 @@ internal sealed class CSharpBackend
             // abstract AddressTaken fact.)
             if (NintStorage(g.Sym))
             {
-                var ninit = g.Init is { } i0 ? $" = (nint)({cg.Coerced(i0, g.Sym.Type)})" : "";
+                var ninit = g.Init is { } i0 ? $" = (nint)({cg.StaticInit(i0, g.Sym.Type)})" : "";
                 globals.Append($"    public static unsafe nint {g.Sym.TargetName}{ninit};\n");
                 continue;
             }
-            var init = g.Init is { } i ? " = " + cg.Coerced(i, g.Sym.Type) : "";
+            var init = g.Init is { } i ? " = " + cg.StaticInit(i, g.Sym.Type) : "";
             globals.Append($"    public static unsafe {cg.Cs(g.Sym.Type)} {g.Sym.TargetName}{init};\n");
         }
 
@@ -508,6 +508,20 @@ internal sealed class CSharpBackend
     /// <see cref="Nested"/> tell whether a braceless body hoisted (and so must be
     /// braced to keep the hoisted statements inside the controller).</summary>
     private int _hoistedCount;
+
+    /// <summary>True while rendering a static field's initializer (task #115): an array literal there has static storage
+    /// (zig's global `&[_]u8{ 1, 2 }`, C's file-scope compound literal), so it is pinned for the program's life rather than
+    /// a <c>stackalloc</c>, which a static initializer cannot hold.</summary>
+    private bool _staticInit;
+
+    /// <summary>Render a global's initializer, coerced to <paramref name="type"/>, with <see cref="_staticInit"/> set.</summary>
+    internal string StaticInit(CExpr init, CType type)
+    {
+        var prev = _staticInit;
+        _staticInit = true;
+        try { return Coerced(init, type); }
+        finally { _staticInit = prev; }
+    }
 
     /// <summary>Monotonic counter naming the block-local temps an array compound
     /// literal hoists to (<c>__cl0</c>, <c>__cl1</c>, …) when it appears outside
@@ -1867,7 +1881,9 @@ internal sealed class CSharpBackend
                 // stackalloc, which still binds in a pointer-initializer.
                 // Each element stores at the element type, as an array declaration's does (`.{ k, k + 1 }` at a `[3]u8`
                 // field: C# promotes `k + 1` to int, CS0266).
-                var lit = $"stackalloc {Cs(sa.Element)}[]{{ {string.Join(", ", sa.Elems.Select(x => Coerced(x, sa.Element)))} }}";
+                var elemsCs = string.Join(", ", sa.Elems.Select(x => Coerced(x, sa.Element)));
+                if (_staticInit) { return ($"Libc.GlobalArrayFrom<{Cs(sa.Element)}>(new {Cs(sa.Element)}[]{{ {elemsCs} }})", PPrimary); }
+                var lit = $"stackalloc {Cs(sa.Element)}[]{{ {elemsCs} }}";
                 if (!_canHoist && !(_canHoistPure && sa.Elems.All(IsPure))) { return (lit, PPrimary); }
                 var name = $"__cl{_clCounter++}";
                 _pending.Add($"{Cs(sa.Element)}* {name} = {lit}");
