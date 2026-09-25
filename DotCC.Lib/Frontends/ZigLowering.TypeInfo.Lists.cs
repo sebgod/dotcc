@@ -88,16 +88,20 @@ internal sealed partial class ZigLowering
         return new SliceNew(pinned, count, element, true) { Type = new CType.Slice(element) };
     }
 
-    /// <summary>The comptime value of a TUPLE argument to a <c>comptime x: anytype</c> parameter (std.StaticStringMap's
-    /// <c>initComptime(.{ .{ "one", 1 }, .{ "two", 2 } })</c>, task #100), with its tuple type; null when the argument is not
-    /// a tuple or does not evaluate at compile time (the parameter then binds as an ordinary <c>anytype</c>).</summary>
+    /// <summary>The comptime value of an AGGREGATE argument to a <c>comptime x: anytype</c> parameter, with its type: a tuple
+    /// (std.StaticStringMap's <c>initComptime(.{ .{ "one", 1 }, .{ "two", 2 } })</c>, task #100), or a comptime slice of
+    /// them (std.meta.stringToEnum's <c>initComptime(kvs)</c>, task #116). Null when the argument is neither or does not
+    /// evaluate at compile time (the parameter then binds as an ordinary <c>anytype</c>).</summary>
     private (IrModule.ComptimeValue value, CType type)? ComptimeTupleArg(Item arg)
     {
         using var hoist = EnterThrowawayHoist();
         var lowered = LowerExpr(arg);
-        return lowered.Type.Unqualified is CType.Tuple && _ir.EvalComptimeValue(lowered) is IrModule.CtStruct tupleValue
-            ? (tupleValue, lowered.Type)
-            : null;
+        return lowered.Type.Unqualified switch
+        {
+            CType.Tuple when _ir.EvalComptimeValue(lowered) is IrModule.CtStruct tupleValue => (tupleValue, lowered.Type),
+            CType.Slice when _ir.EvalComptimeValue(lowered) is IrModule.CtSlice sliceValue => (sliceValue, lowered.Type),
+            _ => null,
+        };
     }
 
     /// <summary>The comptime value of an argument bound to a <c>comptime x: []const T</c> parameter: an integer member
@@ -356,6 +360,13 @@ internal sealed partial class ZigLowering
             throw new IrUnsupportedException(
                 "zig `@field`: the field name must be a comptime string — a literal, or an `inline for` capture "
                 + "over a member list");
+        }
+        // `@field(T, name)` with `T` an enum TYPE (std.meta.stringToEnum's `.{ name, @field(T, name) }`, task #116): the member
+        // it names, as `T.name` is.
+        if (bargs[0].Content is Zig.Ident typeIdent && _symbols.Resolve(Tok(typeIdent.Arg0)) is null
+            && _typeAliases.TryGetValue(Tok(typeIdent.Arg0), out var receiverType) && receiverType.Unqualified is CType.Enum receiverEnum)
+        {
+            return ResolveEnumLit(fieldName, receiverEnum);
         }
         var receiver = LowerExpr(bargs[0]);
         // A TUPLE's fields are named by position (`"0"`, `"1"`: what `field_names` lists for `.{ a, b }`), so

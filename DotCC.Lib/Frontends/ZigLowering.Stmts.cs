@@ -331,6 +331,15 @@ internal sealed partial class ZigLowering
                 return new For(init, cond, post, body);
             }
 
+            // A plain `for` over a comptime member list in a COMPTIME context (std.meta.stringToEnum's `comptime build_kvs:
+            // { for (@typeInfo(T).@"enum".field_names, 0..) |name, i| kvs_array[i] = .{ name, @field(T, name) }; … }`, task
+            // #116): zig runs the loop at compile time, so each capture is comptime-known, which is what `inline for`'s unroll
+            // gives; a runtime loop would have nothing to iterate.
+            case Zig.StmtForSlice ctf when _comptimeDepth > 0 && TryComptimeIterable(ctf.Arg2, out var ctList):
+                return UnrollComptimeFor(new[] { (ctList, Tok(ctf.Arg5)) }, ctf.Arg7);
+            case Zig.StmtForMulti ctm when _comptimeDepth > 0 && FirstForObject(ctm.Arg2) is { } ctFirst && TryComptimeIterable(ctFirst, out _):
+                return UnrollComptimeMultiFor(ctm.Arg2, ctm.Arg5, ctm.Arg7);
+
             // `for (s) |x| body` — iterate a slice's elements (x = a per-iteration copy).
             case Zig.StmtForSlice f:     // for '(' Expr ')' '|' IDENT '|' Stmt
                 return LowerForSlice(LowerExpr(f.Arg2), Tok(f.Arg5), null, f.Arg7, byRef: false, DeclaredElemBitsOfValue(f.Arg2));
@@ -1029,6 +1038,12 @@ internal sealed partial class ZigLowering
         if (isConst && folded is null && (init.Type?.Unqualified is CType.Prim { IsComptimeInt: true } || init is ComptimeFold))
         {
             _unfoldedConstInits[sym2] = init;
+        }
+        // A const bound to a `comptime label: { … }` block (std.meta.stringToEnum's `const kvs = comptime build_kvs: { … };`,
+        // task #116) is comptime-known: its evaluated aggregate is what a later comptime use reads (`initComptime(kvs)`).
+        if (isConst && initExpr.Content is Zig.ComptimeLabeledBlock && _ir.EvalComptimeValue(init) is { } blockValue)
+        {
+            _ir.ComptimeGlobals[sym2] = blockValue;
         }
         RecordValueBits(sym2,
             typeItem is { } ti ? DeclaredBitsOfTypeArg(ti) : DeclaredBitsOfValue(initExpr) ?? DeclaredBitsOfLowered(init),

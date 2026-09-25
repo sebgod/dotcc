@@ -417,10 +417,11 @@ internal sealed partial class IrModule
         CtInt i => SpliceInt(i),
         CtFloat f => new LitFloat(FormatComptimeFloat(f.Value)) { Type = f.Type },
         CtBool b => new LitBool(b.Value) { Type = CType.Bool },
-        // A tuple (an overflow builtin's `.{ result, bit }`): its elements, in order.
+        // A tuple (an overflow builtin's `.{ result, bit }`): its elements, in order, each at its element type (an enum
+        // member in std.meta.stringToEnum's `.{ name, @field(T, name) }` is the member, not its tag integer, task #116).
         CtStruct { Type.Unqualified: CType.Tuple tupleType } ts => new TupleNew(
-            tupleType.Elements.Select((_, k) => ts.Fields.TryGetValue(k.ToString(CultureInfo.InvariantCulture), out var tv)
-                ? Splice(tv) : throw new UnspliceableComptime()).ToList(), tupleType) { Type = tupleType },
+            tupleType.Elements.Select((elementType, k) => ts.Fields.TryGetValue(k.ToString(CultureInfo.InvariantCulture), out var tv)
+                ? SpliceElement(tv, elementType.Unqualified) : throw new UnspliceableComptime()).ToList(), tupleType) { Type = tupleType },
         CtStruct s => SpliceStruct(s),
         CtArray a => SpliceArray(a),
         CtNull n => new DefaultLit { Type = n.Type },
@@ -642,6 +643,18 @@ internal sealed partial class IrModule
         // The zig front end's `void` as data (`[N]void`, std.StaticStringMap(void)'s values, task #114): the runtime's
         // empty `Unit`, which no struct registry holds, is the void value.
         if (u is CType.Named { Name: "Unit" }) { return CtVoid.Value; }
+        // A tuple (std.meta.stringToEnum's `var kvs_array: [n]struct { []const u8, T } = undefined;`, task #116): a struct keyed
+        // by position, the shape a tuple literal evaluates to.
+        if (u is CType.Tuple tuple)
+        {
+            var positional = new Dictionary<string, ComptimeValue>(tuple.Elements.Count);
+            for (var k = 0; k < tuple.Elements.Count; k++)
+            {
+                if (ZeroValue(tuple.Elements[k]) is not { } elementZero) { return null; }
+                positional[k.ToString(CultureInfo.InvariantCulture)] = elementZero;
+            }
+            return new CtStruct(positional, t);
+        }
         if (u is CType.Array arr && arr.Count is int ac)
         {
             if (ac < 0 || ac > ComptimeArrayCap) { return null; }

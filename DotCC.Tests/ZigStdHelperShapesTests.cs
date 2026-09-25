@@ -2675,6 +2675,81 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_comptime_block_loops_over_field_names_and_hands_on_a_slice_of_tuples()
+    {
+        var cs = EmitZig("""
+            const Op = enum(u8) { add = 3, sub = 5, mul = 7 };
+
+            fn Lookup(comptime T: type) type {
+                return struct {
+                    names: [*]const []const u8,
+                    values: [*]const T,
+                    len: usize,
+
+                    const Self = @This();
+
+                    inline fn init(comptime pairs: anytype) Self {
+                        comptime {
+                            var names: [pairs.len][]const u8 = undefined;
+                            var values: [pairs.len]T = undefined;
+                            fill(pairs, &names, &values);
+                            const fin_names = names;
+                            const fin_values = values;
+                            return .{ .names = &fin_names, .values = &fin_values, .len = pairs.len };
+                        }
+                    }
+
+                    fn fill(pairs: anytype, names: [][]const u8, values: []T) void {
+                        for (pairs, 0..) |kv, i| {
+                            names[i] = kv.@"0";
+                            values[i] = kv.@"1";
+                        }
+                    }
+
+                    fn get(self: Self, str: []const u8) ?T {
+                        var i: usize = 0;
+                        while (i < self.len) : (i += 1) {
+                            const n = self.names[i];
+                            if (n.len != str.len) continue;
+                            var j: usize = 0;
+                            while (j < n.len and n[j] == str[j]) : (j += 1) {}
+                            if (j == n.len) return self.values[i];
+                        }
+                        return null;
+                    }
+                };
+            }
+
+            fn toEnum(comptime T: type, str: []const u8) ?T {
+                const kvs = comptime build_kvs: {
+                    const KV = struct { []const u8, T };
+                    var kvs_array: [@typeInfo(T).@"enum".field_names.len]KV = undefined;
+                    for (@typeInfo(T).@"enum".field_names, 0..) |name, i| {
+                        kvs_array[i] = .{ name, @field(T, name) };
+                    }
+                    break :build_kvs kvs_array[0..];
+                };
+                const map = Lookup(T).init(kvs);
+                return map.get(str);
+            }
+
+            pub fn main() u8 {
+                const a = toEnum(Op, "sub") orelse return 99;
+                const b = toEnum(Op, "mul") orelse return 98;
+                const c = toEnum(Op, "div");
+                return @intFromEnum(a) * 10 + @intFromEnum(b) + @as(u8, if (c == null) 100 else 0);
+            }
+            """);
+        // Task #116, std.meta.stringToEnum's shape: in a `comptime build_kvs: { … }` block a plain `for` over
+        // `@typeInfo(T).@"enum".field_names` runs at compile time, so it unrolls with comptime captures; `@field(T, name)` of
+        // an enum TYPE is the member; the block's `[n]struct { []const u8, T }` zeroes and splices each element at its own
+        // type; and the const bound to the block is a comptime slice a `comptime pairs: anytype` parameter is keyed by.
+        // zig returns 157.
+        cs.ShouldContain("values = Libc.GlobalArrayFrom<Op>(new Op[]{ (Op)(byte)3, (Op)(byte)5, (Op)(byte)7 }), len = 3UL };");
+        cs.ShouldContain("3UL), (Op)(byte)3), new System.ValueTuple<ConstSlice<byte>, Op>(");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

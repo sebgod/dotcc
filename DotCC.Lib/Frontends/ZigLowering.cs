@@ -2139,6 +2139,7 @@ internal sealed partial class ZigLowering
         CStmt lowered;
         List<CStmt> hoisted;
         _symbols.EnterScope();
+        _comptimeDepth++;   // the block runs at compile time: its calls, and its loops over comptime lists (task #116)
         try
         {
             using var hoist = EnterFreshHoist();
@@ -2151,6 +2152,7 @@ internal sealed partial class ZigLowering
         }
         finally
         {
+            _comptimeDepth--;
             _symbols.ExitScope();
         }
         if (result is not { } resultSym
