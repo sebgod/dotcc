@@ -7806,6 +7806,25 @@ public sealed class ZigOracleTests
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
 
+    // Task #126: std.mem.bytesAsValue (a write through it) and bytesToValue from a pointer to an array, a string literal and a
+    // slice.
+    [Fact]
+    public void Dotcc_matches_zig_std_bytes_as_value() =>
+        MatchesZigWithRealStd("bytes_as_value",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const P = extern struct { a: u16, b: u16 };\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf = [_]u8{ 1, 0, 2, 0 };\n" +
+            "    const p = std.mem.bytesAsValue(P, &buf);\n" +
+            "    p.b = 7;\n" +
+            "    const lit = std.mem.bytesToValue(u32, \"\\x05\\x00\\x00\\x01\");\n" +
+            "    const sl: []const u8 = buf[0..];\n" +
+            "    const q = std.mem.bytesToValue(P, sl[0..4]);\n" +
+            "    return @intCast(buf[2] * 10 + q.a + (lit >> 24) + (lit & 0xff));\n" +
+            "}\n", 77);
+
     // Tasks #119 / #124: two generators in one program (std.Random.Pcg and Sfc64). Each std.Random.init instance's local
     // `gen.fill` casts to its OWN `Ptr` (the body alias is a seed of the in-function struct's deferred method).
     [Fact]

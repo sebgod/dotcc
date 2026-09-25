@@ -2146,9 +2146,41 @@ internal sealed partial class ZigLowering
                 }
                 return new SliceNew(sbPtr, sbLen, CType.UChar, sbByte.IsConst) { Type = new CType.Slice(sbByte) };
             }
+            case "bytesAsValue" or "bytesToValue":
+            {
+                // std.mem.bytesAsValue(T, bytes) — the bytes read as a `*T` (const when the bytes are); bytesToValue(T, bytes)
+                // is the value itself, a copy (task #126). zig's `@ptrCast` checks neither length nor alignment: the source
+                // return type, `CopyPtrAttrs(B, .one, T)`, lowers the alignment to the bytes' own, so the read is unaligned.
+                // Curated for asBytes' reason: that return type is reified through `@Pointer(size, attrs, child, null)`.
+                if (argItems.Count != 2)
+                {
+                    throw new IrUnsupportedException($"zig `std.mem.{methodName}` expects (type, bytes); got {argItems.Count} argument(s)");
+                }
+                var bvType = LowerType(argItems[0]);
+                var bvBytes = LowerExpr(argItems[1]);
+                // A string literal is zig's `*const [N:0]u8`; dotcc types it as the array, so it is read through a const slice
+                // over it. Any other array VALUE is refused below, as zig refuses it (the parameter wants a pointer).
+                if (argItems[1].Content is Zig.StrLit && bvBytes.Type.Unqualified is CType.Array { Element: var bvLitElem })
+                {
+                    bvBytes = CoerceToSlice(bvBytes, new CType.Slice(bvLitElem.WithQuals(TypeQual.Const)));
+                }
+                var (bvData, bvConst) = bvBytes.Type.Unqualified switch
+                {
+                    CType.Slice { Element: var bvElem } =>
+                        ((CExpr)new Member(bvBytes, "Ptr", false) { Type = new CType.Pointer(bvElem) }, bvElem.IsConst),
+                    CType.Pointer { Pointee: var bvPointee } =>
+                        (bvBytes, bvPointee.IsConst || bvPointee.Unqualified is CType.Array { Element.IsConst: true }),
+                    _ => throw new IrUnsupportedException(
+                        $"zig `std.mem.{methodName}` expects a pointer to bytes or a byte slice, got {bvBytes.Type.Describe()}"),
+                };
+                var bvTarget = new CType.Pointer(bvConst ? bvType.WithQuals(TypeQual.Const) : bvType);
+                var bvPtr = new Cast(bvTarget, bvData) { Type = bvTarget };
+                return methodName == "bytesAsValue" ? bvPtr : new Unary(UnOp.Deref, bvPtr) { Type = bvType };
+            }
             default:
                 throw new IrUnsupportedException(
-                    $"zig `std.mem.{methodName}` is not modeled yet (supported: eql, copyForwards, span, zeroes, asBytes, sliceAsBytes)");
+                    $"zig `std.mem.{methodName}` is not modeled yet (supported: eql, copyForwards, span, zeroes, asBytes, sliceAsBytes, "
+                    + "bytesAsValue, bytesToValue)");
         }
     }
 

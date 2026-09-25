@@ -2955,6 +2955,45 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Std_mem_bytes_as_value_reads_and_writes_through_the_bytes()
+    {
+        var cs = EmitZig("""
+            const std = @import("std");
+
+            const P = extern struct { a: u16, b: u16 };
+
+            pub fn main() u8 {
+                var buf = [_]u8{ 1, 0, 2, 0 };
+                const p = std.mem.bytesAsValue(P, &buf);
+                p.b = 7;
+                const lit = std.mem.bytesToValue(u32, "\x05\x00\x00\x01");
+                const sl: []const u8 = buf[0..];
+                const q = std.mem.bytesToValue(P, sl[0..4]);
+                return @intCast(buf[2] * 10 + q.a + (lit >> 24) + (lit & 0xff));
+            }
+            """);
+        // Task #126: std.mem.bytesAsValue / bytesToValue, curated like asBytes (their return type is reified through
+        // `@Pointer`): a pointer cast of the bytes' data pointer, from a pointer to an array, a slice or a string literal;
+        // bytesToValue reads through it. zig returns 77.
+        cs.ShouldContain("P* p = (P*)buf;");
+        cs.ShouldContain("uint lit = *(uint*)");
+        cs.ShouldContain("P q = *(P*)");
+    }
+
+    [Fact]
+    public void Std_mem_bytes_to_value_of_an_array_value_is_rejected()
+    {
+        // zig: `bytes: anytype` must be a pointer (`@typeInfo(B).pointer`); an array VALUE is a compile error there too.
+        Should.Throw<Exception>(() => EmitZig("""
+            const std = @import("std");
+            pub fn main() u8 {
+                const arr = [_]u8{ 1, 0, 2, 0 };
+                return @truncate(std.mem.bytesToValue(u32, arr));
+            }
+            """)).Message.ShouldContain("expects a pointer to bytes or a byte slice");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""
