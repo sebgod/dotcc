@@ -1442,6 +1442,13 @@ internal sealed partial class ZigLowering
             {
                 arg = new Member(arg, "Ptr", false) { Type = new CType.Pointer(arrayParamElem) };
             }
+            // An aggregate VALUE (a slice, an array, a tuple) never coerces to a scalar parameter in zig ("expected type
+            // 'u8', found '[]const [:0]const u8'"); passing one on would only make C# reject the emitted call.
+            if (paramSink?.Unqualified is CType.Prim && arg.Type.Unqualified is CType.Slice or CType.Array or CType.Tuple)
+            {
+                throw new IrUnsupportedException(
+                    $"call to '{sym.Name}': expected type {paramSink.Describe()}, found {arg.Type.Describe()}");
+            }
             if (paramSink?.Unqualified is CType.VoidType && !IsErasableVoid(arg))
             {
                 throw new IrUnsupportedException(

@@ -5262,6 +5262,72 @@ public sealed class ZigOracleTests
             "    const top: u64 = @intCast(big >> 60);\n" +
             "    return @intCast(top + counter + T.first + @as(u64, T.flag) * 100 + classify(12) + classify(0));\n" +
             "}\n", 148, "" },
+        // Task #93: `@Struct` reified as a type-returning function's result (a spelled name list, `&@splat(T)`,
+        // a per-field type list, default values through `.default_value_ptr`); `@tagName` of a comptime enum value,
+        // then `@field` by that name; a comptime struct parameter spelled in a generic method's return type.
+        new object[] { "reify_struct_and_comptime_tag_name",
+            "const Color = enum { red, green, blue };\n" +
+            "\n" +
+            "fn FieldStruct(comptime Data: type, comptime def: ?Data) type {\n" +
+            "    const default_ptr: ?*const anyopaque = if (def) |d| @ptrCast(&d) else null;\n" +
+            "    return @Struct(.auto, null, &.{ \"red\", \"green\", \"blue\" }, &@splat(Data), &@splat(.{ .default_value_ptr = default_ptr }));\n" +
+            "}\n" +
+            "\n" +
+            "fn Pair(comptime A: type, comptime B: type) type {\n" +
+            "    return @Struct(.auto, null, &.{ \"x\", \"y\" }, &.{ A, B }, &.{ .{}, .{} });\n" +
+            "}\n" +
+            "\n" +
+            "fn sum(s: FieldStruct(u8, 7)) u8 {\n" +
+            "    return s.red + s.green * 10 + s.blue;\n" +
+            "}\n" +
+            "\n" +
+            "fn keyFor(i: usize) Color {\n" +
+            "    return @enumFromInt(i);\n" +
+            "}\n" +
+            "\n" +
+            "const Opts = struct {\n" +
+            "    step: u8 = 1,\n" +
+            "};\n" +
+            "\n" +
+            "fn Bits(comptime n: u8) type {\n" +
+            "    return struct {\n" +
+            "        mask: u8 = n,\n" +
+            "\n" +
+            "        pub fn iter(self: *const @This(), comptime options: Opts) Iter(options) {\n" +
+            "            _ = self;\n" +
+            "            return .{};\n" +
+            "        }\n" +
+            "\n" +
+            "        pub fn Iter(comptime options: Opts) type {\n" +
+            "            return struct {\n" +
+            "                at: u8 = options.step,\n" +
+            "                pub fn next(self: *@This()) u8 {\n" +
+            "                    self.at += options.step;\n" +
+            "                    return self.at;\n" +
+            "                }\n" +
+            "            };\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    // @Struct: a spelled name list, `&@splat` types and default pointers, a per-field list.\n" +
+            "    const flags: FieldStruct(bool, false) = .{ .green = true };\n" +
+            "    const p: Pair(u8, u16) = .{ .x = 2, .y = 300 };\n" +
+            "    const f: u8 = if (!flags.red and flags.green and !flags.blue) 100 else 0;\n" +
+            "    var total: u8 = sum(.{ .green = 3 }) + f + p.x + @as(u8, @intCast(p.y - 290));\n" +
+            "    // @tagName of a comptime enum value, then @field by that name.\n" +
+            "    const counts: FieldStruct(u8, null) = .{ .red = 1, .green = 2, .blue = 3 };\n" +
+            "    inline for (0..3) |i| {\n" +
+            "        const key = comptime keyFor(i);\n" +
+            "        const tag = @tagName(key);\n" +
+            "        total +%= @field(counts, tag) * @as(u8, @intCast(tag.len));\n" +
+            "    }\n" +
+            "    // A comptime struct parameter spelled in a generic method's return type.\n" +
+            "    const b: Bits(5) = .{};\n" +
+            "    var it = b.iter(.{ .step = 2 });\n" +
+            "    return total +% it.next() +% b.mask;\n" +
+            "}\n", 190, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -6543,6 +6609,32 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // Task #93: std.EnumSet (init from a struct of bools, insert, iterator, initMany, unionWith / intersectWith)
+    // and std.EnumArray.initDefault from real std. They go through std.enums.EnumFieldStruct's `@Struct` with
+    // default-value pointers, `@tagName` + `@field` over the indexer's comptime keys, and std.bit_set's
+    // `iterator(self, comptime options: IteratorOptions) Iterator(options)`. The root's `.{ .blue = 100 }` fills
+    // the omitted fields from defaults the enums module recorded.
+    [Fact]
+    public void Dotcc_matches_zig_std_enums_enum_set() =>
+        MatchesZigWithRealStd("enums_enum_set",
+            "const std = @import(\"std\");\n" +
+            "const E = enum { red, green, blue, cyan, magenta };\n" +
+            "pub fn main() u8 {\n" +
+            "    var s = std.EnumSet(E).init(.{ .green = true, .cyan = true });\n" +
+            "    s.insert(.red);\n" +
+            "    var it = s.iterator();\n" +
+            "    var weight: u32 = 0;\n" +
+            "    while (it.next()) |k| weight += @intFromEnum(k) + 1;\n" +
+            "    const t = std.EnumSet(E).initMany(&.{ .red, .magenta });\n" +
+            "    const u = s.unionWith(t);\n" +
+            "    const x = s.intersectWith(t);\n" +
+            "    var a = std.EnumArray(E, u16).initDefault(7, .{ .blue = 100 });\n" +
+            "    a.set(.red, 3);\n" +
+            "    const mv: u32 = @intFromBool(s.contains(.cyan)) + @as(u32, @intFromBool(t.contains(.green))) * 2;\n" +
+            "    const total: u32 = weight * 10 + @as(u32, @intCast(u.count())) * 3 + @as(u32, @intCast(x.count())) + a.get(.blue) + a.get(.red) + a.get(.cyan) + mv;\n" +
+            "    return @intCast(total % 256);\n" +
+            "}\n", 194);
 
     // Task #89: std.enums.EnumIndexer, dense (identity layout) and sparse (sorted by value in the type body, `min` bound as
     // a comptime local and read through an alias in another module).

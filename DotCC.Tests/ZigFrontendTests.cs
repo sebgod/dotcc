@@ -5653,7 +5653,8 @@ public sealed class ZigFrontendTests
             "const P = struct { x: i32 };\n" +
             "fn take(n: u8) u8 { return n; }\n" +
             "pub fn main() u8 { return take(@typeInfo(P).@\"struct\".field_names); }\n"));
-        ex.Message.ShouldContain("comptime member LIST");
+        // `field_names` is a value now (task #93), so this is zig's own type error, not a missing representation.
+        ex.Message.ShouldContain("expected type");
     }
 
     [Fact]
@@ -5840,14 +5841,14 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void A_plain_for_over_a_member_list_says_to_use_inline_for()
+    public void A_plain_for_walks_field_names_at_runtime()
     {
-        // A member list has no runtime representation, so a runtime `for` cannot walk one — and the
-        // error names the construct that can.
-        var ex = Should.Throw<CompileException>(() => EmitZig(
+        // `field_names` is comptime memory a runtime slice may point into (task #93: a pinned array of string slices),
+        // so a plain `for` walks it, as zig does (this program returns 2 there).
+        var cs = EmitZig(
             "const P = struct { x: i32, y: i32 };\n" +
-            "pub fn main() u8 { for (@typeInfo(P).@\"struct\".field_names) |n| { _ = n; } return 0; }\n"));
-        ex.Message.ShouldContain("inline for");
+            "pub fn main() u8 { var t: usize = 0; for (@typeInfo(P).@\"struct\".field_names) |n| { t += n.len; } return @intCast(t); }\n");
+        cs.ShouldContain("new ConstSlice<byte>(Libc.L(\"x\\0\"u8), 1UL), new ConstSlice<byte>(Libc.L(\"y\\0\"u8), 1UL)");
     }
 
     [Fact]
@@ -6125,12 +6126,17 @@ public sealed class ZigFrontendTests
     [Fact]
     public void The_aggregate_reification_builtins_are_named_cuts()
     {
-        // `@Struct`/`@Union`/`@Enum`/`@Pointer` take comptime AGGREGATE arguments; the cut says so
-        // rather than half-reifying a layout.
+        // `@Union`/`@Enum`/`@Pointer` take comptime AGGREGATE arguments; the cut says so rather than half-reifying a
+        // layout. `@Struct` is modeled as a type-returning function's result (task #93), which names it; a bare
+        // `const S = @Struct(…)` has no instance to be named after.
         var ex = Should.Throw<CompileException>(() => EmitZig(
             "const S = @Struct(.auto, null, &.{\"a\"}, &.{u8}, &.{.{}});\n" +
             "pub fn main() u8 { var s: S = undefined; _ = s; return 0; }\n"));
-        ex.Message.ShouldContain("comptime AGGREGATE arguments");
+        ex.Message.ShouldContain("has no name to take");
+        var union = Should.Throw<CompileException>(() => EmitZig(
+            "const U = @Union(.auto, null, &.{\"a\"}, &.{u8}, &.{.{}});\n" +
+            "pub fn main() u8 { var u: U = undefined; _ = u; return 0; }\n"));
+        union.Message.ShouldContain("comptime AGGREGATE arguments");
     }
 
     [Fact]

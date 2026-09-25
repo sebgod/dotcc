@@ -309,7 +309,8 @@ that retire curated shortcuts.
 
 > **Status update (2026-09-04) — S6 DONE: `inline for` over a comptime list.**
 > The consumer S5c's lists were built for. A member list has no runtime representation, so a plain
-> `for` cannot walk one; `inline for` can, because it is not a loop — it UNROLLS at lowering time
+> `for` cannot walk one (later, task #93: `field_names` got one, a pinned array of string slices, so a
+> plain `for` walks that list; `field_types` still has none); `inline for` can, because it is not a loop — it UNROLLS at lowering time
 > into one copy of the body per element. The existing unroller could not be reused as-is: it binds
 > each capture to a runtime symbol initialized by an emitted `const cap = …;`, and a list element may
 > be a TYPE (no runtime slot exists) or a comptime STRING (which `@field` must read at lowering
@@ -1187,7 +1188,8 @@ place a poison IS needed is the top-level tombstone, and that is what landed.
 - `@Int(signedness, bits)` (207 uses) → `CType` integer constructor — after
   S9's arbitrary-width brick, arbitrary `bits` values work. `@Pointer`,
   `@Struct`, `@Enum`, `@Union` (≤14 uses each) follow the same 1:1 pattern,
-  demand-driven. **The old monolithic `@Type(info)` does not exist in the pin —
+  demand-driven. `@Struct` landed with task #93 (std.enums.EnumFieldStruct, for
+  EnumSet and EnumArray), as a type-returning function's result. **The old monolithic `@Type(info)` does not exist in the pin —
   don't build it.**
 - `@compileError(msg)`: an instantiation-trace-carrying diagnostic that fires
   ONLY when the branch survives comptime folding (the subtle bit — 596 uses sit

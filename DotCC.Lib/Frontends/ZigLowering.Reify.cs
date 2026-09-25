@@ -94,7 +94,13 @@ internal sealed partial class ZigLowering
             // the comptime-value engine dotcc has not built (S5 folds types, not aggregate VALUES).
             // Reifying from a partially-understood description would emit a wrong layout, so these are
             // named cuts. Their measured use count is the reason the order of work is what it is.
-            case "@Struct" or "@Union" or "@Enum" or "@Pointer" or "@Fn" or "@Tuple":
+            // `@Struct` IS modeled as the result of a type-returning function (ReifyStructBuiltin, task #93), which
+            // names the struct after its instance; anywhere else it has no name to take.
+            case "@Struct":
+                throw new IrUnsupportedException(
+                    "zig `@Struct(…)` is modeled as a type-returning function's result (`fn S(…) type { return "
+                    + "@Struct(…); }`), which names the struct after the instance; here it has no name to take");
+            case "@Union" or "@Enum" or "@Pointer" or "@Fn" or "@Tuple":
                 throw new IrUnsupportedException(
                     $"zig `{name}(…)` reifies a type from comptime AGGREGATE arguments (field-name and "
                     + "field-type arrays, an attributes struct), which dotcc has no comptime-aggregate engine "
@@ -109,6 +115,270 @@ internal sealed partial class ZigLowering
             default:
                 return false;
         }
+    }
+
+    // ---- @Struct: a struct from comptime field lists (task #93) ------------
+
+    /// <summary>Evaluate a type body's <c>return @Struct(layout, BackingInt, field_names, field_types, field_attrs)</c>
+    /// (std.enums.EnumFieldStruct) to the fields of the struct it builds. Every list is evaluated now: the names
+    /// (a spelled list, a <c>@typeInfo</c> member list or a call returning one, <c>std.meta.fieldNames(E)</c>), the
+    /// types (<c>&amp;@splat(T)</c> or a spelled list) and the attributes (<c>&amp;@splat(.{ .default_value_ptr = p })</c>),
+    /// whose default pointer is one <see cref="TryBindTypeBodyDefaultPtr"/> bound. The caller registers the struct under
+    /// the instance's name, so each instance is one type, as for <c>return struct {…}</c>.</summary>
+    private TypeBodyResult ReifyStructBuiltin(string fnName, Zig.BuiltinCall call)
+    {
+        var args = Flatten(call.Arg2);
+        if (args.Count != 5)
+        {
+            throw new IrUnsupportedException(
+                $"zig `@Struct` expects (layout, BackingInt, field_names, field_types, field_attrs); got {args.Count} argument(s)");
+        }
+        var layout = ReifiedStructLayout(args[0]);
+        if (!IsComptimeNull(args[1]))
+        {
+            throw new IrUnsupportedException(
+                $"type-returning generic '{fnName}': `@Struct` with a backing integer (a packed struct) is not modeled");
+        }
+        var names = ReifiedFieldNames(fnName, args[2]);
+        var types = ReifiedList(fnName, args[3], names.Count, "field_types", LowerType);
+        var defaults = ReifiedList(fnName, args[4], names.Count, "field_attrs", attr => ReifiedFieldDefault(fnName, attr));
+        var fields = new List<ReifiedField>(names.Count);
+        var seen = new HashSet<string>(System.StringComparer.Ordinal);
+        for (var i = 0; i < names.Count; i++)
+        {
+            if (!seen.Add(names[i]))
+            {
+                throw new IrUnsupportedException($"zig `@Struct`: duplicate struct field name '{names[i]}'");
+            }
+            fields.Add(new ReifiedField(names[i], types[i], defaults[i]));
+        }
+        return new TypeBodyResult(true, null, null, null, layout, fields);
+    }
+
+    /// <summary>Register a struct <c>@Struct</c> built (<see cref="ReifyStructBuiltin"/>): its fields, and each default in
+    /// <see cref="_reifiedFieldDefaults"/>, where a struct literal omitting that field reads it.</summary>
+    private void RegisterReifiedStruct(string name, IReadOnlyList<ReifiedField> fields, AggregateLayout layout)
+    {
+        foreach (var f in fields)
+        {
+            if (f.Default is { } d) { _reifiedFieldDefaults[(name, f.Name)] = d; }
+        }
+        _ir.RegisterStructType(name, fields.Select(f => new StructField(f.Name, f.Type)).ToList(), isUnion: false, layout);
+    }
+
+    /// <summary>Each <c>@Struct</c>-built field's default, already a literal (the other field defaults are ASTs, see
+    /// <see cref="_structFieldDefaults"/>, lowered where they are used).</summary>
+    private readonly Dictionary<(string Struct, string Field), CExpr> _reifiedFieldDefaults = new();
+
+    /// <summary><c>@Struct</c>'s layout argument: <c>.auto</c> or <c>.@"extern"</c>. A packed one needs its backing
+    /// integer, which is not modeled.</summary>
+    private static AggregateLayout ReifiedStructLayout(Item arg)
+    {
+        var cur = arg;
+        while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
+        if (cur.Content is not Zig.EnumLit lit)
+        {
+            throw new IrUnsupportedException("zig `@Struct`: the layout must be a comptime-known `.auto` or `.@\"extern\"`");
+        }
+        return Tok(lit.Arg1) switch
+        {
+            "auto" => AggregateLayout.Default,
+            "extern" => AggregateLayout.Sequential,
+            "packed" => throw new IrUnsupportedException("zig `@Struct(.@\"packed\", …)`: a packed reified struct is not modeled"),
+            var other => throw new IrUnsupportedException($"zig `@Struct`: `.{other}` is not a container layout"),
+        };
+    }
+
+    /// <summary>The field NAMES of a <c>@Struct</c>: a spelled list of string literals (<c>&amp;.{ "a", "b" }</c>), a
+    /// <c>@typeInfo</c> member list, or anything the interpreter evaluates to a slice of strings (a call returning one,
+    /// <c>std.meta.fieldNames(E)</c>).</summary>
+    private IReadOnlyList<string> ReifiedFieldNames(string fnName, Item arg)
+    {
+        if (TryFoldTypeInfoList(arg, out var list) && list.Strings is { } folded) { return folded; }
+        var cur = StripAddrOf(arg);
+        if (cur.Content is Zig.AnonStructInitEmpty) { return System.Array.Empty<string>(); }
+        if (cur.Content is Zig.AnonStructInit anon)
+        {
+            List<string>? spelled = new();
+            foreach (var init in Flatten(anon.Arg2))
+            {
+                if (init.Content is not Zig.FieldInitPositional { Arg0.Content: Zig.StrLit str }) { spelled = null; break; }
+                spelled.Add(UnquoteStringLiteral(Tok(str.Arg0)));
+            }
+            if (spelled is not null) { return spelled; }
+        }
+        var namesType = new CType.Slice(new CType.Slice(CType.UChar.WithQuals(TypeQual.Const)).WithQuals(TypeQual.Const));
+        IrModule.ComptimeValue? value;
+        using (EnterThrowawayHoist()) { value = _ir.EvalComptimeValue(LowerExprSink(arg, namesType)); }
+        IEnumerable<IrModule.ComptimeValue>? elems = value switch
+        {
+            IrModule.CtSlice sl => sl.Backing.Elems.Skip((int)sl.Offset).Take((int)sl.Length),
+            IrModule.CtArray arr => arr.Elems,
+            _ => null,
+        };
+        var names = new List<string>();
+        foreach (var e in elems ?? [])
+        {
+            if (ComptimeString(e) is not { } n) { elems = null; break; }
+            names.Add(n);
+        }
+        if (elems is null)
+        {
+            throw new IrUnsupportedException(
+                $"type-returning generic '{fnName}': `@Struct`'s field names must be comptime-known strings");
+        }
+        return names;
+    }
+
+    /// <summary>A comptime string (a slice or array of bytes) as text; null when the value is not one.</summary>
+    private static string? ComptimeString(IrModule.ComptimeValue value)
+    {
+        IEnumerable<IrModule.ComptimeValue>? bytes = value switch
+        {
+            IrModule.CtSlice sl => sl.Backing.Elems.Skip((int)sl.Offset).Take((int)sl.Length),
+            IrModule.CtArray arr => arr.Elems,
+            _ => null,
+        };
+        if (bytes is null) { return null; }
+        var sb = new System.Text.StringBuilder();
+        foreach (var b in bytes)
+        {
+            if (b is not IrModule.CtInt ci) { return null; }
+            sb.Append((char)(byte)ci.Value);
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>A per-field list argument of <c>@Struct</c> (<c>*const [n]T</c>): <c>&amp;@splat(x)</c> repeats one
+    /// element, a spelled <c>&amp;.{ a, b }</c> gives one each, and a <c>@typeInfo</c> <c>field_types</c> list gives the
+    /// types. Each element is evaluated by <paramref name="each"/>; a list of the wrong length is zig's type error.</summary>
+    private List<T> ReifiedList<T>(string fnName, Item arg, int count, string what, System.Func<Item, T> each)
+    {
+        var cur = StripAddrOf(arg);
+        if (cur.Content is Zig.BuiltinCall { Arg0: var splatTok } splat && Tok(splatTok) == "@splat" && Flatten(splat.Arg2) is [var one])
+        {
+            var element = each(one);
+            return Enumerable.Repeat(element, count).ToList();
+        }
+        List<T>? items = null;
+        if (cur.Content is Zig.AnonStructInitEmpty) { items = new List<T>(); }
+        else if (cur.Content is Zig.AnonStructInit anon
+                 && Flatten(anon.Arg2) is var inits
+                 && inits.Select(i => i.Content).OfType<Zig.FieldInitPositional>().ToList() is var positional
+                 && positional.Count == inits.Count)
+        {
+            items = positional.Select(p => each(p.Arg0)).ToList();
+        }
+        else if (typeof(T) == typeof(CType) && TryFoldTypeInfoList(arg, out var list) && list.Types is { } folded)
+        {
+            items = folded.Cast<T>().ToList();
+        }
+        if (items is null)
+        {
+            throw new IrUnsupportedException(
+                $"type-returning generic '{fnName}': `@Struct`'s {what} must be `&@splat(x)` or a spelled list `&.{{ … }}`");
+        }
+        if (items.Count != count)
+        {
+            throw new IrUnsupportedException(
+                $"zig `@Struct`: {what} has {items.Count} element(s) but there are {count} field name(s)");
+        }
+        return items;
+    }
+
+    /// <summary>One field's attributes (<c>.{ .default_value_ptr = p, .@"comptime" = false, .@"align" = null }</c>) to its
+    /// default value: null for no default. A comptime field is not modeled; an alignment is the same leniency as
+    /// <c>x: T align(N)</c> (C#'s layout places the field).</summary>
+    private CExpr? ReifiedFieldDefault(string fnName, Item attr)
+    {
+        var cur = attr;
+        while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
+        if (cur.Content is Zig.AnonStructInitEmpty) { return null; }
+        if (cur.Content is not Zig.AnonStructInit anon)
+        {
+            throw new IrUnsupportedException(
+                $"type-returning generic '{fnName}': a `@Struct` field attribute must be an anonymous literal `.{{ … }}`");
+        }
+        CExpr? def = null;
+        foreach (var init in Flatten(anon.Arg2))
+        {
+            if (init.Content is not Zig.FieldInit fi)
+            {
+                throw new IrUnsupportedException("zig `@Struct` field attributes are named: `.{ .default_value_ptr = … }`");
+            }
+            switch (Tok(fi.Arg1))
+            {
+                case "default_value_ptr":
+                    if (IsComptimeNull(fi.Arg3)) { def = null; break; }
+                    if (fi.Arg3.Content is Zig.Ident pid && _typeBodyDefaultPtrs.TryGetValue(Tok(pid.Arg0), out var pointee))
+                    {
+                        def = pointee;
+                        break;
+                    }
+                    throw new IrUnsupportedException(
+                        $"type-returning generic '{fnName}': `.default_value_ptr` must be null or a pointer to a comptime "
+                        + "default (`const p: ?*const anyopaque = if (default) |d| @ptrCast(&d) else null;`)");
+                case "comptime":
+                    if (FoldTypeBodyCondition(fnName, fi.Arg3))
+                    {
+                        throw new IrUnsupportedException("zig `@Struct`: a `comptime` field is not modeled");
+                    }
+                    break;
+                case "align":
+                    break;
+                case var other:
+                    throw new IrUnsupportedException($"zig `@Struct`: `{other}` is not a field attribute");
+            }
+        }
+        return def;
+    }
+
+    /// <summary>Bind a type-body const that is a comptime POINTER to a default value,
+    /// <c>if (field_default) |d| @ptrCast(&amp;d) else null</c> (with or without the <c>@ptrCast</c>), into
+    /// <see cref="_typeBodyDefaultPtrs"/>: the payload as a literal, or null when the optional is null. False when the
+    /// initializer is not that shape.</summary>
+    private bool TryBindTypeBodyDefaultPtr(string name, Item rhs)
+    {
+        var cur = rhs;
+        while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
+        if (cur.Content is not Zig.IfExprCapture ic || !IsComptimeNull(ic.Arg9)) { return false; }
+        var target = ic.Arg7;
+        while (target.Content is Zig.Grouped tg) { target = tg.Arg1; }
+        if (target.Content is Zig.BuiltinCall { Arg0: var castTok } cast && Tok(castTok) == "@ptrCast" && Flatten(cast.Arg2) is [var castArg])
+        {
+            target = castArg;
+        }
+        if (target.Content is not Zig.PreAddrOf { Arg1.Content: Zig.Ident pointee } || Tok(pointee.Arg0) != Tok(ic.Arg5))
+        {
+            return false;
+        }
+        if (!TryComptimeOptionalCond(ic.Arg2, out var opt))
+        {
+            throw new IrUnsupportedException(
+                $"zig `const {name}`: a pointer to a default value needs a comptime-known optional in a type body");
+        }
+        _typeBodyDefaultPtrs[name] = opt.HasValue ? ComptimeScalarLiteral(opt.Value, opt.Inner) : null;
+        return true;
+    }
+
+    /// <summary>A comptime scalar as a literal of <paramref name="type"/>: a <c>bool</c> as <c>true</c> / <c>false</c>, an
+    /// enum as its tag cast to the enum, an integer as itself.</summary>
+    private static CExpr ComptimeScalarLiteral(long value, CType type)
+    {
+        if (type.Unqualified == CType.Bool) { return new LitBool(value != 0) { Type = CType.Bool }; }
+        return type.Unqualified is CType.Enum
+            ? new Cast(type, ComptimeVarLit(value, CType.Long)) { Type = type }
+            : ComptimeVarLit(value, type);
+    }
+
+    /// <summary>The operand of <c>&amp;x</c> (or <c>x</c> itself), through parentheses.</summary>
+    private static Item StripAddrOf(Item arg)
+    {
+        var cur = arg;
+        while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
+        if (cur.Content is Zig.PreAddrOf a) { cur = a.Arg1; }
+        while (cur.Content is Zig.Grouped g2) { cur = g2.Arg1; }
+        return cur;
     }
 
     /// <summary>Lower <c>@Int(signedness, bits)</c> to the integer <see cref="CType"/> it names —

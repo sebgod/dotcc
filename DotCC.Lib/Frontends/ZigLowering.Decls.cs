@@ -1306,26 +1306,21 @@ internal sealed partial class ZigLowering
         // C#'s zero-init (a documented leniency; Zig would require them to be set).
         if (_ir.StructFieldsOf(named.Name) is { } allFields)
         {
+            // The defaults are the DECLARING module's: a literal in the root of a struct another module declares
+            // (`const s: m.S = .{ .b = 1 };`) had dropped every omitted default.
+            var owner = _moduleGraph?.OwnerOfContainer(named.Name) ?? this;
             foreach (var f in allFields)
             {
                 if (written.Contains(f.Name)) { continue; }
-                if (_structFieldDefaults.TryGetValue((named.Name, f.Name), out var defItem))
+                if (owner._structFieldDefaults.TryGetValue((named.Name, f.Name), out var defItem))
                 {
                     if (IsInlineArrayMember(named.Name, f.Name, f.Type, defItem)) { continue; }
-                    // A reified struct's default may read its comptime params (`n: u8 = n`), and any
-                    // default may name a sibling const (`fingerprint: FingerPrint = free` in hash_map's
-                    // Metadata): it is evaluated in its container's scope, not the literal's.
-                    using var seeds = EnterReifiedSeeds(named.Name);
-                    var prevConstContainer = _currentConstContainer;
-                    _currentConstContainer = named.Name;
-                    try
-                    {
-                        using (EnterContainer(named.Name))
-                        {
-                            members.Add(new FieldInit(f.Name, f.Type, LowerExprSink(defItem, f.Type)));
-                        }
-                    }
-                    finally { _currentConstContainer = prevConstContainer; }
+                    members.Add(new FieldInit(f.Name, f.Type, owner.LowerFieldDefault(named.Name, f.Type, defItem)));
+                }
+                // A `@Struct`-built field's default is already a literal (task #93).
+                else if (owner._reifiedFieldDefaults.TryGetValue((named.Name, f.Name), out var reifiedDefault))
+                {
+                    members.Add(new FieldInit(f.Name, f.Type, reifiedDefault));
                 }
             }
         }
@@ -1360,6 +1355,22 @@ internal sealed partial class ZigLowering
         => valueItem.Content is Zig.UndefinedLit
            || valueItem.Content is Zig.BuiltinCall { Arg0: var splatTok } splat && Tok(splatTok) == "@splat"
               && Flatten(splat.Arg2) is [{ Content: Zig.IntLit { Arg0: var zeroTok } }] && Tok(zeroTok) == "0";
+
+    /// <summary>Lower a struct field's declared default for a literal that omits the field. A reified struct's default
+    /// may read its comptime params (<c>n: u8 = n</c>), and any default may name a sibling const (<c>fingerprint:
+    /// FingerPrint = free</c> in hash_map's Metadata), so it is evaluated in its container's scope, not the literal's;
+    /// the caller runs this on the module that declares the struct.</summary>
+    private CExpr LowerFieldDefault(string structName, CType fieldType, Item defaultItem)
+    {
+        using var seeds = EnterReifiedSeeds(structName);
+        var prevConstContainer = _currentConstContainer;
+        _currentConstContainer = structName;
+        try
+        {
+            using (EnterContainer(structName)) { return LowerExprSink(defaultItem, fieldType); }
+        }
+        finally { _currentConstContainer = prevConstContainer; }
+    }
 
     /// <summary>True when a struct-literal member targets an ARRAY field and must be DROPPED from the
     /// initializer. An array field is INLINE storage — the C# backend renders it as a <c>fixed</c> buffer
@@ -1859,6 +1870,10 @@ internal sealed partial class ZigLowering
     /// Keyed by symbol identity.</summary>
     private readonly HashSet<Symbol> _stringLiteralSyms = new();
 
+    /// <summary>Local <c>const</c>s bound to a comptime STRING (<c>const tag = @tagName(key);</c>), with its text: a
+    /// comptime name position (<c>@field(init_values, tag)</c>) reads it. Symbol-keyed, so an inner shadow is its own.</summary>
+    private readonly Dictionary<Symbol, string> _constStringLocals = new();
+
     /// <summary>True when <paramref name="value"/> is a zig string literal (<c>*const [N:0]u8</c>) — the
     /// literal itself, a comptime string substituted for a name, or a reference to a binding of one —
     /// whose lowered array type counts the NUL sentinel that zig's <c>.len</c> excludes.</summary>
@@ -2297,6 +2312,21 @@ internal sealed partial class ZigLowering
                 }
                 return ZigStringLiteral(spelling);
             }
+            case "@tagName":
+            {
+                // `@tagName(key)` of a comptime-known enum value (std.enums.EnumSet.init's `const tag = @tagName(key);`,
+                // then `@field(init_values, tag)`): the member's name as a string literal. A runtime value would need a
+                // name table, which is not modeled.
+                if (bargs.Count != 1)
+                {
+                    throw new IrUnsupportedException($"zig `@tagName` expects (value); got {bargs.Count} argument(s)");
+                }
+                return TryComptimeTagName(bargs[0]) is { } tagName
+                    ? ZigStringLiteral(tagName)
+                    : throw new IrUnsupportedException(
+                        "zig `@tagName` is modeled for a comptime-known enum value; a runtime one needs a name table, which "
+                        + "dotcc does not emit yet");
+            }
             // Math builtins (road-to-zig-std B3) → `ZigMath.<helper><T>` over the peer-resolved operand
             // type. @min/@max/@rem/@divTrunc are ordinary; @mod/@divFloor follow the divisor's sign /
             // round toward -inf (unlike C#'s truncating %//). Zig's @min/@max are variadic — V1 binary.
@@ -2548,6 +2578,26 @@ internal sealed partial class ZigLowering
         Zig.TyOptional o   => ZigTypeSpelling(o.Arg1) is { } e ? "?" + e : null,
         _ => null,
     };
+
+    /// <summary>The member name of a comptime-known enum value (<c>@tagName</c>'s operand), or null when the operand is
+    /// not an enum or its value is not known at compile time.</summary>
+    private string? TryComptimeTagName(Item operand)
+    {
+        CExpr tagged;
+        using (EnterThrowawayHoist()) { tagged = LowerExpr(operand); }
+        // `const key = comptime Indexer.keyForIndex(i);` names its comptime fold.
+        if (tagged is VarRef { Sym: var keySym } && _unfoldedConstInits.TryGetValue(keySym, out var keyInit)) { tagged = keyInit; }
+        if (tagged.Type?.Unqualified is not CType.Enum tagEnum) { return null; }
+        var value = _ir.ConstEval(tagged)
+            ?? (_ir.EvalComptimeValue(tagged) is IrModule.CtInt { Value: var big } && big >= long.MinValue && big <= long.MaxValue
+                ? (long)big : null);
+        if (value is not { } v || MembersOfEnum(tagEnum) is not { } members) { return null; }
+        foreach (var m in members)
+        {
+            if (m.Value == v) { return m.Name; }
+        }
+        return null;
+    }
 
     /// <summary>Build a <see cref="LitStr"/> from a plain (unquoted, escape-free) string — the shared
     /// shape a Zig string literal lowers to (a quoted segment through the C string encoder, typed

@@ -617,6 +617,12 @@ internal sealed partial class ZigLowering
                         var optSym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = new CType.Optional(inner) });
                         _comptimeOptionalVars[optSym] = (hasValue, value, inner);
                     }
+                    // A comptime STRUCT param spelled in the return type (std.bit_set's `iterator(self, comptime options:
+                    // IteratorOptions) Iterator(options)`).
+                    foreach (var (name, value, type) in aggregateSeeds)
+                    {
+                        _ir.ComptimeGlobals[_symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type })] = value;
+                    }
                     runtimeParams = g.Params
                         .Where(p => p.Kind is ParamKind.Runtime or ParamKind.AnyType && !comptimeIntArgs.ContainsKey(p.Name)
                                     && !wideComptimeIntArgs.ContainsKey(p.Name))
@@ -1582,7 +1588,8 @@ internal sealed partial class ZigLowering
                 // as a top-level container registers its consts first), and before the methods (their signatures may
                 // spell `Self`).
                 RegisterContainerConsts(mangled, consts);
-                RegisterStruct(mangled, fields, bodyResult.Layout);
+                if (bodyResult.Reified is { } reified) { RegisterReifiedStruct(mangled, reified, bodyResult.Layout); }
+                else { RegisterStruct(mangled, fields, bodyResult.Layout); }
                 // Each method: declare the signature NOW — while the comptime type/value seeds are live, so a
                 // `v: T` parameter lowers to the concrete type — and defer the BODY. The signature is reached
                 // by call sites through `_methods[mangled]` (not by name lookup), so declaring it inside this

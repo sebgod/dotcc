@@ -258,6 +258,12 @@ internal sealed partial class ZigLowering
                 return ComptimeStringArg(g.Arg1);
             case Zig.StrLit s:
                 return UnquoteStringLiteral(Tok(s.Arg0));
+            // A local `const` bound to a comptime string (std.enums.EnumSet.init's `const tag = @tagName(key);`).
+            case Zig.Ident cid when _symbols.Resolve(Tok(cid.Arg0)) is { } constSym
+                                    && _constStringLocals.TryGetValue(constSym, out var constText):
+                return constText;
+            case Zig.BuiltinCall tb when Tok(tb.Arg0) == "@tagName" && Flatten(tb.Arg2) is [var tagged]:
+                return TryComptimeTagName(tagged);
             // Guarded on the name NOT naming a real symbol, for the same reason every other
             // name-keyed comptime lookup here is: the map is function-flat.
             case Zig.Ident id when _symbols.Resolve(Tok(id.Arg0)) is null

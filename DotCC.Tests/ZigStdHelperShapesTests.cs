@@ -975,6 +975,112 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Struct_builtin_reifies_one_struct_per_instance_with_its_default_values()
+    {
+        var cs = EmitZig("""
+            fn FieldStruct(comptime Data: type, comptime def: ?Data) type {
+                const default_ptr: ?*const anyopaque = if (def) |d| @ptrCast(&d) else null;
+                return @Struct(.auto, null, &.{ "a", "b", "c" }, &@splat(Data), &@splat(.{ .default_value_ptr = default_ptr }));
+            }
+
+            fn Pair(comptime A: type, comptime B: type) type {
+                return @Struct(.auto, null, &.{ "x", "y" }, &.{ A, B }, &.{ .{}, .{} });
+            }
+
+            fn sum(s: FieldStruct(u8, 7)) u8 {
+                return s.a + s.b * 10 + s.c;
+            }
+
+            pub fn main() u8 {
+                const t: FieldStruct(bool, null) = .{ .a = true, .b = false, .c = true };
+                const p: Pair(u8, u16) = .{ .x = 2, .y = 300 };
+                const n: u8 = if (t.a and !t.b and t.c) 100 else 0;
+                return sum(.{ .b = 3 }) + n + p.x + @as(u8, @intCast(p.y - 290));
+            }
+            """);
+        // Task #93: `@Struct` as a type-returning function's result is a struct named after the instance; a literal
+        // omitting a field is filled from the `.default_value_ptr` default (7), and a null default leaves none.
+        cs.ShouldContain("new FieldStruct__u8_opt7 { b = 3, a = 7, c = 7 }");
+        cs.ShouldContain("new FieldStruct__bool_optnull { a = true, b = false, c = true }");
+        cs.ShouldContain("unsafe struct Pair__u8_u16");
+        cs.ShouldContain("public ushort y;");
+    }
+
+    [Theory]
+    [InlineData("&.{ \"a\", \"a\" }", "&@splat(u8)", "&@splat(.{})", "duplicate struct field name 'a'")]
+    [InlineData("&.{ \"a\", \"b\" }", "&.{ u8 }", "&@splat(.{})", "field_types has 1 element(s) but there are 2 field name(s)")]
+    [InlineData("&.{ \"a\", \"b\" }", "&@splat(u8)", "&@splat(.{ .@\"comptime\" = true })", "a `comptime` field is not modeled")]
+    public void Struct_builtin_rejects_a_malformed_field_list(string names, string types, string attrs, string message)
+    {
+        // Task #93: zig rejects a duplicate name and a list whose length is not the name count; a comptime field is a cut.
+        var ex = Should.Throw<Exception>(() => EmitZig(
+            "fn S() type {\n    return @Struct(.auto, null, " + names + ", " + types + ", " + attrs + ");\n}\n"
+            + "pub fn main() u8 {\n    const s: S() = undefined;\n    _ = s;\n    return 0;\n}\n"));
+        ex.Message.ShouldContain(message);
+    }
+
+    [Fact]
+    public void Tag_name_of_a_comptime_enum_value_is_its_member_name()
+    {
+        var cs = EmitZig("""
+            const E = enum { a, bb, ccc };
+            fn keyFor(i: usize) E {
+                return @enumFromInt(i);
+            }
+            pub fn main() u8 {
+                var total: u8 = 0;
+                inline for (0..3) |i| {
+                    const key = comptime keyFor(i);
+                    const tag = @tagName(key);
+                    total += @intCast(tag.len * 10 + i);
+                }
+                return total + @as(u8, @intCast(@tagName(E.bb).len));
+            }
+            """);
+        // Task #93: `@tagName` of a comptime key (`comptime keyFor(i)`) is the member's name as a string literal; the
+        // enum-typed fold is cast to the enum (it had been spliced as `E key = 0UL;`, which C# rejects).
+        cs.ShouldContain("E key = (E)0;");
+        cs.ShouldContain("Libc.L(\"bb\\0\"u8)");
+        cs.ShouldContain("Libc.L(\"ccc\\0\"u8)");
+    }
+
+    [Fact]
+    public void Tag_name_of_a_runtime_enum_value_is_a_loud_cut()
+    {
+        Should.Throw<Exception>(() => EmitZig("""
+            const E = enum { a, b };
+            pub fn main() u8 {
+                var e: E = .a;
+                e = .b;
+                return @intCast(@tagName(e).len);
+            }
+            """)).Message.ShouldContain("`@tagName` is modeled for a comptime-known enum value");
+    }
+
+    [Fact]
+    public void A_literal_of_another_modules_struct_fills_its_field_defaults()
+    {
+        // A struct literal in the root of a struct another module declares had dropped every omitted default (dotcc 3,
+        // zig 62): the defaults are the declaring module's, and are lowered there.
+        var dir = Path.Combine(Path.GetTempPath(), $"dotcc-zigdef-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "m.zig"),
+                "pub const S = struct {\n    a: u8 = 5,\n    b: u8,\n};\n"
+                + "pub fn Gen(comptime n: u8) type {\n    return struct { k: u8 = n, z: u8 = 1 };\n}\n");
+            var main = Path.Combine(dir, "main.zig");
+            File.WriteAllText(main,
+                "const m = @import(\"m.zig\");\npub fn main() u8 {\n    const s: m.S = .{ .b = 1 };\n"
+                + "    const g: m.Gen(9) = .{ .z = 2 };\n    return s.a * 10 + s.b + g.k + g.z;\n}\n");
+            var cs = Compiler.EmitCSharp(new[] { main });
+            cs.ShouldContain("new m__S { b = 1, a = 5 }");
+            cs.ShouldContain("new m__Gen__9 { z = 2, k = 9 }");
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

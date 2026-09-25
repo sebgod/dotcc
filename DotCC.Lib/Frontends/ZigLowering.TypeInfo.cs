@@ -509,6 +509,12 @@ internal sealed partial class ZigLowering
                 value = new LitInt(count.ToString(System.Globalization.CultureInfo.InvariantCulture), count) { Type = CType.Int };
                 return true;
 
+            // `field_names` as a VALUE (`std.meta.fieldNames(E)` returns it): comptime memory a zig slice may point
+            // into at runtime too, so it is the names in a pinned, program-lifetime array of string slices.
+            case (_, "field_names") when TryFoldTypeInfoList(expr, out var namesList) && namesList.Strings is { } names:
+                value = NameListSlice(names);
+                return true;
+
             // The member LISTS (road-to-zig-std S5c) fold in their own path — reaching here means one
             // was used as a bare VALUE, which it cannot be: a comptime list has no runtime form.
             case (_, "field_names") or (_, "field_types") or (_, "field_values"):

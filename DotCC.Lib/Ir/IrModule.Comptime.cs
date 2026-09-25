@@ -336,7 +336,9 @@ internal sealed partial class IrModule
         // A value with no C# literal form (a struct with a non-zero inline-array field: std.Target's
         // `Feature.Set{ .ints = … }`) keeps the expression it came from. The fold's callee is interpreted, so
         // it is pure, and running it yields the same value.
-        try { return Splice(v); }
+        // An enum-typed call (`comptime Indexer.keyForIndex(i)`) evaluates to its tag integer, which C# will not store
+        // into the enum without a cast (`E key = 0UL;` had been emitted).
+        try { return inner.Type?.Unqualified is CType.Enum en ? SpliceElement(v, en) : Splice(v); }
         catch (UnspliceableComptime) { return inner; }
     }
 

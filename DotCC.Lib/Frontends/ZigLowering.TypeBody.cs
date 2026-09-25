@@ -36,9 +36,20 @@ internal sealed partial class ZigLowering
     /// (<see cref="IsStruct"/>, with its <c>FieldDecls</c> item, null for <c>struct {}</c>) or an
     /// already-resolved type the body delegated to (<see cref="Delegated"/>) together with the declared
     /// integer width it carries (<see cref="DelegatedBits"/> — so <c>fn U() type { return u21; }</c>
-    /// still answers 21, not the widened 32).</summary>
+    /// still answers 21, not the widened 32). A <c>return @Struct(…)</c> is a struct too, but its fields arrive
+    /// already evaluated (<see cref="Reified"/>) rather than as declarations to lower.</summary>
     private readonly record struct TypeBodyResult(bool IsStruct, Item? Fields, CType? Delegated, int? DelegatedBits,
-        AggregateLayout Layout = AggregateLayout.Default);
+        AggregateLayout Layout = AggregateLayout.Default, IReadOnlyList<ReifiedField>? Reified = null);
+
+    /// <summary>One field of a struct built by <c>@Struct</c>: its name, its type and its default (null when it has
+    /// none), all already evaluated at comptime.</summary>
+    private readonly record struct ReifiedField(string Name, CType Type, CExpr? Default);
+
+    /// <summary>The type body's comptime POINTERS to a default value (std.enums.EnumFieldStruct's
+    /// <c>const default_ptr: ?*const anyopaque = if (field_default) |d| @ptrCast(&amp;d) else null;</c>), by name: the
+    /// pointee as a literal, or null for a null pointer. They exist to feed <c>@Struct</c>'s
+    /// <c>.default_value_ptr</c>, and are bound for one walk only.</summary>
+    private readonly Dictionary<string, CExpr?> _typeBodyDefaultPtrs = new(System.StringComparer.Ordinal);
 
     /// <summary>Mangled delegating instances → the type they resolved to, plus its declared width (the
     /// memo for a body that returns a type rather than a <c>struct {…}</c> — the struct form memoizes in
@@ -74,6 +85,7 @@ internal sealed partial class ZigLowering
         // A body's `const info = @typeInfo(T);` binds for the walk only (a reflection value has no runtime
         // and must not leak into whatever lowering resumes after this instance is evaluated).
         var outerTypeInfos = new Dictionary<string, ZigTypeInfo>(_typeInfoBindings, System.StringComparer.Ordinal);
+        var outerDefaultPtrs = new Dictionary<string, CExpr?>(_typeBodyDefaultPtrs, System.StringComparer.Ordinal);
         try
         {
             return WalkTypeBody(fnName, stmts, typeShadows)
@@ -85,6 +97,8 @@ internal sealed partial class ZigLowering
         {
             _typeInfoBindings.Clear();
             foreach (var (infoName, info) in outerTypeInfos) { _typeInfoBindings[infoName] = info; }
+            _typeBodyDefaultPtrs.Clear();
+            foreach (var (ptrName, pointee) in outerDefaultPtrs) { _typeBodyDefaultPtrs[ptrName] = pointee; }
         }
     }
 
@@ -125,6 +139,12 @@ internal sealed partial class ZigLowering
                     break;
                 case Zig.ConstDeclTyped ti when TryEvalTypeInfo(ti.Arg5, out var typedBodyInfo):
                     _typeInfoBindings[Tok(ti.Arg1)] = typedBodyInfo;
+                    break;
+                // `const default_ptr: ?*const anyopaque = if (field_default) |d| @ptrCast(&d) else null;`: a pointer to a
+                // comptime default, for `@Struct`'s field attributes.
+                case Zig.ConstDeclTyped dp when TryBindTypeBodyDefaultPtr(Tok(dp.Arg1), dp.Arg5):
+                    break;
+                case Zig.ConstDecl dp when TryBindTypeBodyDefaultPtr(Tok(dp.Arg1), dp.Arg3):
                     break;
                 case Zig.ConstDecl cv:
                     BindTypeBodyComptimeValue(fnName, Tok(cv.Arg1), null, cv.Arg3);
@@ -177,6 +197,10 @@ internal sealed partial class ZigLowering
                     return new TypeBodyResult(true, est.Arg4, null, null, AggregateLayout.Sequential);
                 case Zig.ReturnStructTypeEmpty:
                     return new TypeBodyResult(true, null, null, null);       // `return struct {};` — zero fields
+                // `return @Struct(.auto, null, names, &@splat(Data), &@splat(.{ .default_value_ptr = p }));`
+                // (std.enums.EnumFieldStruct): a struct built from comptime field lists.
+                case Zig.StmtReturn { Arg1.Content: Zig.BuiltinCall rb } when Tok(rb.Arg0) == "@Struct":
+                    return ReifyStructBuiltin(fnName, rb);
                 case Zig.StmtReturn r:
                 {
                     // `return <type expression>;` — the function's result IS that type (a delegating call,

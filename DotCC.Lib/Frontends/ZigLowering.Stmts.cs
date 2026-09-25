@@ -994,6 +994,7 @@ internal sealed partial class ZigLowering
             IsConstexpr = folded is not null, ConstValue = folded ?? 0,
         });
         if (declared is null && init is LitStr) { _stringLiteralSyms.Add(sym2); }
+        if (isConst && declared is null && init is LitStr && ComptimeStringArg(initExpr) is { } constText) { _constStringLocals[sym2] = constText; }
         // `const value = 42;` is a comptime_int in zig (the lowered local is an `int` carrier): an `anytype` it is
         // passed to binds it as a comptime value (ComptimeIntArgValue).
         if (declared is null && isConst && folded is not null && initExpr.Content is Zig.IntLit) { _comptimeIntLocals.Add(sym2); }

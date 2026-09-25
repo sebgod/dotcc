@@ -74,6 +74,20 @@ internal sealed partial class ZigLowering
     private static IReadOnlyList<string> TupleFieldNames(CType.Tuple t)
         => Enumerable.Range(0, t.Elements.Count).Select(i => i.ToString(System.Globalization.CultureInfo.InvariantCulture)).ToList();
 
+    /// <summary>A member name list as a VALUE of zig's <c>[]const [:0]const u8</c>: each name a string literal viewed as a
+    /// slice, all of them in a pinned, program-lifetime array (the comptime memory the zig slice points into). The
+    /// interpreter reads it back as a comptime slice of strings, so a call returning it
+    /// (<c>std.meta.fieldNames(E)</c>) still folds.</summary>
+    private CExpr NameListSlice(IReadOnlyList<string> names)
+    {
+        var name = new CType.Slice(CType.UChar.WithQuals(TypeQual.Const));
+        var element = name.WithQuals(TypeQual.Const);
+        var elems = names.Select(n => CoerceToSlice(ZigStringLiteral(n), name)).ToList();
+        var pinned = new PinnedArray(element, elems, null) { Type = new CType.Pointer(element) };
+        var count = new LitInt(names.Count.ToString(System.Globalization.CultureInfo.InvariantCulture), names.Count) { Type = CType.ULong };
+        return new SliceNew(pinned, count, element, true) { Type = new CType.Slice(element) };
+    }
+
     /// <summary>The comptime value of an argument bound to a <c>comptime x: []const T</c> parameter: an integer member
     /// list (<c>@typeInfo(E).@"enum".field_values</c>) as a comptime slice of <c>comptime_int</c>, or any argument the
     /// interpreter evaluates to a slice or array. Null when it is neither.</summary>
