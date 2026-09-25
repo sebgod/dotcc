@@ -332,8 +332,9 @@ internal sealed class ZigModuleGraph
     /// <summary>Runtime call edges of the build, caller to callees, from any module (task #92).</summary>
     internal Dictionary<Symbol, HashSet<Symbol>> RuntimeCalls { get; } = new();
 
-    /// <summary>Non-inline functions of the build that return from a <c>comptime { }</c> block (task #92).</summary>
-    internal HashSet<Symbol> ComptimeReturnFns { get; } = new();
+    /// <summary>Functions of the build whose body only compiles at comptime, with the error a runtime call reports: a
+    /// non-inline one returning from a <c>comptime { }</c> block (task #92), one iterating a tuple (task #100).</summary>
+    internal Dictionary<Symbol, string> ComptimeReturnFns { get; } = new();
 
     /// <summary>zig's "function called at runtime cannot return value at comptime", once every body is lowered: see
     /// <see cref="ZigLowering.CheckComptimeReturnsAtRuntime"/>, rooted at each root module's runtime roots.</summary>

@@ -339,7 +339,8 @@ internal sealed partial class ZigLowering
                     infos.Add(new ParamInfo(Tok(pm.Arg1), pm.Arg3,
                         IsTypeKeyword(pm.Arg3) ? ParamKind.ComptimeType
                         : IsAnyTypeKeyword(pm.Arg3) ? ParamKind.AnyType
-                        : ParamKind.ComptimeValue));
+                        : ParamKind.ComptimeValue,
+                        Comptime: true));
                     break;
                 default:
                     throw new IrUnsupportedException("zig param: " + (ps[i].Content?.GetType().Name ?? "null"));
@@ -1730,6 +1731,10 @@ internal sealed partial class ZigLowering
             // `.{ 1, 5, 9, 5 }` at a SIMD-vector sink: one lane per element (T5).
             case Zig.AnonStructInit vecInit when sink?.Unqualified is CType.Vector vecSink:
                 return LowerVectorLiteral(Flatten(vecInit.Arg2), vecSink);
+            // `.{ .key = …, .value = … }` at an OPTIONAL struct sink (std.StaticStringMap.getLongestPrefix's `return .{ … }`
+            // from a `?KV` function, task #100): the literal is the payload, as zig result-locates it through the optional.
+            case Zig.AnonStructInit when sink?.Unqualified is CType.Optional { Inner.Unqualified: CType.Named optPayload }:
+                return LowerStructInit(expr, optPayload);
             case Zig.AnonStructInit:
             case Zig.AnonStructInitEmpty:
                 return LowerStructInit(expr, sink);

@@ -93,8 +93,9 @@ internal sealed partial class ZigLowering
     /// <c>...</c> is tracked separately (it has no name/type). For a <see cref="ParamKind.ComptimeType"/>
     /// param the <see cref="TypeAst"/> is the <c>type</c> keyword and is never lowered; for a
     /// <see cref="ParamKind.AnyType"/> param it is the <c>anytype</c> keyword and is likewise never
-    /// lowered (the type is inferred from the argument).</summary>
-    private readonly record struct ParamInfo(string Name, Item TypeAst, ParamKind Kind)
+    /// lowered (the type is inferred from the argument). <paramref name="Comptime"/> marks a <c>comptime</c>-keyword
+    /// <see cref="ParamKind.AnyType"/> param, whose argument is a compile-time value (task #100).</summary>
+    private readonly record struct ParamInfo(string Name, Item TypeAst, ParamKind Kind, bool Comptime = false)
     {
         /// <summary>True for either comptime kind — a monomorphization key with NO runtime slot. An
         /// <see cref="ParamKind.AnyType"/> param is deliberately EXCLUDED (it is a key AND a runtime
@@ -389,6 +390,9 @@ internal sealed partial class ZigLowering
         var runtimeArgItems = new List<Item>();
         // `anytype` parameters bound to a pointer to a container TYPE (task #85): comptime type seeds, not runtime slots.
         var typePointerArgs = new HashSet<string>(System.StringComparer.Ordinal);
+        // `comptime kvs_list: anytype` fed a tuple literal (std.StaticStringMap.initComptime, task #100): the tuple's comptime
+        // value keys the instance by digest and the body reads it as a comptime aggregate, not a runtime slot.
+        var comptimeTupleArgs = new Dictionary<string, (IrModule.ComptimeValue value, CType type)>(System.StringComparer.Ordinal);
 
         // Phase 1 — resolve each comptime TYPE arg in the CALLER's environment (a type-arg spelled as an
         // alias resolves to its aliased type, so it keys the same instance as the underlying type), and
@@ -416,6 +420,10 @@ internal sealed partial class ZigLowering
                 case ParamKind.AnyType when argScope.TypePointerArg(argItems[i]) is { } pointedType:
                     typeSeeds.Add(new TypeSeed(g.Params[i].Name, pointedType.Unqualified, null));
                     typePointerArgs.Add(g.Params[i].Name);
+                    break;
+                case ParamKind.AnyType when g.Params[i].Comptime && argScope.ComptimeTupleArg(argItems[i]) is { } tupleArg:
+                    comptimeTupleArgs[g.Params[i].Name] = tupleArg;
+                    anytypeSeeds.Add((g.Params[i].Name, tupleArg.type));
                     break;
                 case ParamKind.AnyType:
                     anytypeSeeds.Add((g.Params[i].Name, argScope.InferArgType(argItems[i])));
@@ -568,6 +576,10 @@ internal sealed partial class ZigLowering
                     case ParamKind.AnyType when typePointerArgs.Contains(g.Params[i].Name):
                         mangleTokens.Add("tp" + MangleTypeSeed(typeSeeds.First(s => s.Name == g.Params[i].Name)));
                         break;
+                    case ParamKind.AnyType when comptimeTupleArgs.TryGetValue(g.Params[i].Name, out var ctTuple):
+                        mangleTokens.Add("ct" + IrModule.ComptimeDigest(ctTuple.value));
+                        aggregateSeeds.Add((g.Params[i].Name, ctTuple.value, ctTuple.type));
+                        break;
                     case ParamKind.AnyType when comptimeIntArgs.TryGetValue(g.Params[i].Name, out var ctInt):
                         mangleTokens.Add("ci" + (ctInt >= 0 ? ctInt.ToString(inv) : "n" + (-(System.Int128)ctInt).ToString(inv)));
                         valueSeeds.Add((g.Params[i].Name, ctInt, CType.ComptimeInt));
@@ -637,7 +649,8 @@ internal sealed partial class ZigLowering
                     runtimeParams = g.Params
                         .Where(p => p.Kind is ParamKind.Runtime or ParamKind.AnyType && !comptimeIntArgs.ContainsKey(p.Name)
                                     && !typePointerArgs.Contains(p.Name)
-                                    && !wideComptimeIntArgs.ContainsKey(p.Name))
+                                    && !wideComptimeIntArgs.ContainsKey(p.Name)
+                                    && !comptimeTupleArgs.ContainsKey(p.Name))
                         .Select(p => (p.Name, p.Kind == ParamKind.AnyType ? _anytypeSeeds[p.Name] : LowerType(p.TypeAst)))
                         .ToList();
                     ret = !comptimeOnly ? LowerType(g.RetType)

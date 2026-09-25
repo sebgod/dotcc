@@ -444,16 +444,18 @@ internal sealed partial class ZigLowering
     /// <summary>The runtime call edges of a lowering built without a module graph.</summary>
     private readonly Dictionary<Symbol, HashSet<Symbol>> _ownRuntimeCalls = new();
 
-    /// <summary>Non-inline functions whose body returns from a <c>comptime { }</c> block (task #92), build-wide.</summary>
-    private HashSet<Symbol> _comptimeReturnFns => _moduleGraph?.ComptimeReturnFns ?? _ownComptimeReturnFns;
+    /// <summary>Functions whose body only compiles at comptime, build-wide, with the error a runtime call reports: a
+    /// non-inline one returning from a <c>comptime { }</c> block (task #92), one iterating a tuple (task #100).</summary>
+    private Dictionary<Symbol, string> _comptimeReturnFns => _moduleGraph?.ComptimeReturnFns ?? _ownComptimeReturnFns;
 
-    /// <summary>The comptime-return functions of a lowering built without a module graph.</summary>
-    private readonly HashSet<Symbol> _ownComptimeReturnFns = new();
+    /// <summary>The comptime-only functions of a lowering built without a module graph.</summary>
+    private readonly Dictionary<Symbol, string> _ownComptimeReturnFns = new();
 
     /// <summary>Record that the function lowering now calls <paramref name="callee"/> at runtime (task #92).</summary>
     private void RecordRuntimeCall(Symbol callee)
     {
-        if (_comptimeDepth > 0 || _currentFnSym is not { } caller) { return; }
+        // A call lowered only for the comptime interpreter (a function's `comptime { }` result block) never runs.
+        if (_comptimeDepth > 0 || _loweringForComptimeEval > 0 || _currentFnSym is not { } caller) { return; }
         if (!_runtimeCalls.TryGetValue(caller, out var callees))
         {
             callees = new HashSet<Symbol>();
@@ -468,7 +470,7 @@ internal sealed partial class ZigLowering
     /// reached only through <c>comptime f()</c>, a global initializer or a function nothing calls is not an error, as in
     /// zig, which analyzes a function only once it is referenced. A comptime-only instance is never entered.</summary>
     internal static void CheckComptimeReturnsAtRuntime(IEnumerable<Symbol> roots, Dictionary<Symbol, HashSet<Symbol>> calls,
-        HashSet<Symbol> comptimeReturnFns, HashSet<Symbol> comptimeOnlyFns)
+        Dictionary<Symbol, string> comptimeReturnFns, HashSet<Symbol> comptimeOnlyFns)
     {
         if (comptimeReturnFns.Count == 0) { return; }
         var seen = new HashSet<Symbol>();
@@ -480,10 +482,7 @@ internal sealed partial class ZigLowering
         while (work.Count > 0)
         {
             var fn = work.Pop();
-            if (comptimeReturnFns.Contains(fn))
-            {
-                throw new CompileException($"zig: function called at runtime cannot return value at comptime ('{fn.Name}')");
-            }
+            if (comptimeReturnFns.TryGetValue(fn, out var error)) { throw new CompileException(error); }
             if (!calls.TryGetValue(fn, out var callees)) { continue; }
             foreach (var callee in callees)
             {

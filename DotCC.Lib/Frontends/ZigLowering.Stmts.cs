@@ -1630,7 +1630,10 @@ internal sealed partial class ZigLowering
         {
             // Only an `inline fn` may be CALLED AT RUNTIME with such a block (task #92): a plain one is recorded, and a
             // runtime call reaching it is rejected once the whole call graph is known.
-            if (_currentFnSym is { } owner && !_zigInlineFns.Contains(owner)) { _comptimeReturnFns.Add(owner); }
+            if (_currentFnSym is { } owner && !_zigInlineFns.Contains(owner))
+            {
+                _comptimeReturnFns.TryAdd(owner, $"zig: function called at runtime cannot return value at comptime ('{owner.Name}')");
+            }
             return TryComptimeReturnBlock(stmts, ret) ?? LowerBlock(blockItem);
         }
         _symbols.EnterScope();
@@ -3999,11 +4002,16 @@ internal sealed partial class ZigLowering
         // its elements differ in type, so the loop can only be unrolled, as an `inline for` is.
         if (sliceExpr.Type.Unqualified is CType.Tuple tuple)
         {
-            // Only at comptime, as zig has it: a runtime loop cannot know which field it reads.
+            // Only at comptime, as zig has it: a runtime loop cannot know which field it reads. Outside a comptime context
+            // the function may still be one only ever called at comptime (std.StaticStringMap's initSortedKVs, called from
+            // initComptime's `comptime { }` block), so a runtime call reaching it is what is rejected, once the whole call
+            // graph is known (as task #92's comptime returns are).
             if (_loweringForComptimeEval == 0 && _comptimeDepth == 0)
             {
-                throw new CompileException("zig: unable to resolve comptime value: tuple field index must be comptime-known "
-                    + "(iterate a tuple with `inline for`, or at comptime)");
+                const string runtimeTupleFor = "zig: unable to resolve comptime value: tuple field index must be comptime-known "
+                    + "(iterate a tuple with `inline for`, or at comptime)";
+                if (_currentFnSym is not { } tupleOwner) { throw new CompileException(runtimeTupleFor); }
+                _comptimeReturnFns.TryAdd(tupleOwner, runtimeTupleFor);
             }
             return UnrollTupleFor(sliceExpr, tuple, elemName, byRef, index, bodyItem);
         }

@@ -130,6 +130,12 @@ public unsafe struct Allocator
     public void Free<T>(Slice<T> s) where T : unmanaged
         => Vtable.free(Ctx, new Slice<byte>((byte*)s.Ptr, s.Len * (ulong)sizeof(T)), AlignOf<T>(), 0);
 
+    /// <summary><c>a.free(slice)</c> of a <c>[]const T</c> (std.StaticStringMap.deinit's
+    /// <c>allocator.free(self.len_indexes[0..self.len_indexes_len])</c>): zig's <c>free</c> takes any
+    /// slice, const or not, as the memory it gives back.</summary>
+    public void Free<T>(ConstSlice<T> s) where T : unmanaged
+        => Vtable.free(Ctx, new Slice<byte>((byte*)s.Ptr, s.Len * (ulong)sizeof(T)), AlignOf<T>(), 0);
+
     /// <summary>The byte alignment dotcc passes for an element type <typeparamref name="T"/>.
     /// Delegates to <see cref="ZigAlloc.AlignOf{T}"/> — the single source of truth shared with the
     /// devirtualized allocator paths — so the vtable and devirt paths request identical alignment.</summary>

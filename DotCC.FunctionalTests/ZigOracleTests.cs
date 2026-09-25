@@ -6110,6 +6110,65 @@ public sealed class ZigOracleTests
             "    const pair = .{ \"xyz\", 7 };\n" +
             "    return @intCast(h.counts[h.len - 1] + h.len + h.peak + h.label_len + pair.@\"0\".len + pair.@\"1\");\n" +
             "}\n", 45, "" },
+        // A comptime anytype tuple argument (task #100, step 3): each table keys its own instance, a helper iterates the tuple from the
+        // comptime block only, and a ?Entry result takes a bare .{ ... } payload; the std.StaticStringMap.initComptime shapes. zig returns 58.
+        new object[] { "comptime_anytype_tuple_arg",
+            "const Entry = struct {\n" +
+            "    key: []const u8,\n" +
+            "    value: u8,\n" +
+            "};\n" +
+            "\n" +
+            "const Table = struct {\n" +
+            "    keys: [*]const []const u8,\n" +
+            "    values: [*]const u8,\n" +
+            "    len: u32,\n" +
+            "    longest: u32 = 0,\n" +
+            "\n" +
+            "    inline fn init(comptime pairs: anytype) Table {\n" +
+            "        comptime {\n" +
+            "            var keys: [pairs.len][]const u8 = undefined;\n" +
+            "            var values: [pairs.len]u8 = undefined;\n" +
+            "            var self = Table{ .keys = undefined, .values = undefined, .len = pairs.len };\n" +
+            "            fill(&self, pairs, &keys, &values);\n" +
+            "            const fin_keys = keys;\n" +
+            "            const fin_values = values;\n" +
+            "            self.keys = &fin_keys;\n" +
+            "            self.values = &fin_values;\n" +
+            "            return self;\n" +
+            "        }\n" +
+            "    }\n" +
+            "\n" +
+            "    fn fill(self: *Table, pairs: anytype, keys: [][]const u8, values: []u8) void {\n" +
+            "        for (pairs, 0..) |kv, i| {\n" +
+            "            keys[i] = kv.@\"0\";\n" +
+            "            values[i] = kv.@\"1\";\n" +
+            "            self.longest = @max(self.longest, @as(u32, @intCast(kv.@\"0\".len)));\n" +
+            "        }\n" +
+            "    }\n" +
+            "\n" +
+            "    fn find(t: Table, key: []const u8) ?Entry {\n" +
+            "        var i: u32 = 0;\n" +
+            "        while (i < t.len) : (i += 1) {\n" +
+            "            const k = t.keys[i];\n" +
+            "            if (k.len != key.len) continue;\n" +
+            "            var j: usize = 0;\n" +
+            "            while (j < k.len and k[j] == key[j]) : (j += 1) {}\n" +
+            "            if (j == k.len) return .{ .key = k, .value = t.values[i] };\n" +
+            "        }\n" +
+            "        return null;\n" +
+            "    }\n" +
+            "};\n" +
+            "\n" +
+            "const small = Table.init(.{ .{ \"one\", 1 }, .{ \"three\", 3 }, .{ \"ten\", 10 } });\n" +
+            "const other = Table.init(.{ .{ \"seven\", 7 }, .{ \"forty\", 40 } });\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var total: u32 = small.longest * 100 + other.len;\n" +
+            "    if (small.find(\"three\")) |e| total += e.value + @as(u32, @intCast(e.key.len));\n" +
+            "    if (other.find(\"forty\")) |e| total += e.value;\n" +
+            "    if (small.find(\"four\") == null) total += 20;\n" +
+            "    return @intCast(total % 256);\n" +
+            "}\n", 58, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

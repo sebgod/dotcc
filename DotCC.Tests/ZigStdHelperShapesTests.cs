@@ -2314,6 +2314,145 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_comptime_anytype_tuple_argument_keys_its_instance_and_is_iterated_at_comptime()
+    {
+        var cs = EmitZig("""
+            const Entry = struct {
+                key: []const u8,
+                value: u8,
+            };
+
+            const Table = struct {
+                keys: [*]const []const u8,
+                values: [*]const u8,
+                len: u32,
+                longest: u32 = 0,
+
+                inline fn init(comptime pairs: anytype) Table {
+                    comptime {
+                        var keys: [pairs.len][]const u8 = undefined;
+                        var values: [pairs.len]u8 = undefined;
+                        var self = Table{ .keys = undefined, .values = undefined, .len = pairs.len };
+                        fill(&self, pairs, &keys, &values);
+                        const fin_keys = keys;
+                        const fin_values = values;
+                        self.keys = &fin_keys;
+                        self.values = &fin_values;
+                        return self;
+                    }
+                }
+
+                fn fill(self: *Table, pairs: anytype, keys: [][]const u8, values: []u8) void {
+                    for (pairs, 0..) |kv, i| {
+                        keys[i] = kv.@"0";
+                        values[i] = kv.@"1";
+                        self.longest = @max(self.longest, @as(u32, @intCast(kv.@"0".len)));
+                    }
+                }
+
+                fn find(t: Table, key: []const u8) ?Entry {
+                    var i: u32 = 0;
+                    while (i < t.len) : (i += 1) {
+                        const k = t.keys[i];
+                        if (k.len != key.len) continue;
+                        var j: usize = 0;
+                        while (j < k.len and k[j] == key[j]) : (j += 1) {}
+                        if (j == k.len) return .{ .key = k, .value = t.values[i] };
+                    }
+                    return null;
+                }
+            };
+
+            const small = Table.init(.{ .{ "one", 1 }, .{ "three", 3 }, .{ "ten", 10 } });
+            const other = Table.init(.{ .{ "seven", 7 }, .{ "forty", 40 } });
+
+            pub fn main() u8 {
+                var total: u32 = small.longest * 100 + other.len;
+                if (small.find("three")) |e| total += e.value + @as(u32, @intCast(e.key.len));
+                if (other.find("forty")) |e| total += e.value;
+                if (small.find("four") == null) total += 20;
+                return @intCast(total % 256);
+            }
+            """);
+        // Task #100, step 3: std.StaticStringMap.initComptime's `comptime kvs_list: anytype` fed a tuple of pairs. The tuple's
+        // comptime value keys the instance by digest (two tables, two instances) and the body reads it as a comptime aggregate;
+        // the helper iterating it is called only from the comptime block, so zig accepts it. `return .{ … }` at a `?Entry`
+        // result is the optional's payload. zig returns 58.
+        cs.ShouldContain("values = Libc.GlobalArrayFrom<byte>(new byte[]{ (byte)1, (byte)3, (byte)10 }), len = 3u, longest = 5u");
+        cs.ShouldContain("public static unsafe Table small = Table_init__ct");
+        cs.ShouldContain("public static unsafe Table other = Table_init__ct");
+        cs.ShouldContain("return new Entry { key = k, value = t.values[i] };");
+    }
+
+    [Fact]
+    public void A_function_iterating_a_tuple_called_at_runtime_is_rejected_like_zig()
+    {
+        // Task #100: accepted while only the comptime block calls it; a runtime call reaching it is zig's error.
+        Should.Throw<Exception>(() => EmitZig("""
+            const Entry = struct {
+                key: []const u8,
+                value: u8,
+            };
+
+            const Table = struct {
+                keys: [*]const []const u8,
+                values: [*]const u8,
+                len: u32,
+                longest: u32 = 0,
+
+                inline fn init(comptime pairs: anytype) Table {
+                    comptime {
+                        var keys: [pairs.len][]const u8 = undefined;
+                        var values: [pairs.len]u8 = undefined;
+                        var self = Table{ .keys = undefined, .values = undefined, .len = pairs.len };
+                        fill(&self, pairs, &keys, &values);
+                        const fin_keys = keys;
+                        const fin_values = values;
+                        self.keys = &fin_keys;
+                        self.values = &fin_values;
+                        return self;
+                    }
+                }
+
+                fn fill(self: *Table, pairs: anytype, keys: [][]const u8, values: []u8) void {
+                    for (pairs, 0..) |kv, i| {
+                        keys[i] = kv.@"0";
+                        values[i] = kv.@"1";
+                        self.longest = @max(self.longest, @as(u32, @intCast(kv.@"0".len)));
+                    }
+                }
+
+                fn find(t: Table, key: []const u8) ?Entry {
+                    var i: u32 = 0;
+                    while (i < t.len) : (i += 1) {
+                        const k = t.keys[i];
+                        if (k.len != key.len) continue;
+                        var j: usize = 0;
+                        while (j < k.len and k[j] == key[j]) : (j += 1) {}
+                        if (j == k.len) return .{ .key = k, .value = t.values[i] };
+                    }
+                    return null;
+                }
+            };
+
+            const small = Table.init(.{ .{ "one", 1 }, .{ "three", 3 }, .{ "ten", 10 } });
+            const other = Table.init(.{ .{ "seven", 7 }, .{ "forty", 40 } });
+
+            pub fn main() u8 {
+                var total: u32 = small.longest * 100 + other.len;
+                if (small.find("three")) |e| total += e.value + @as(u32, @intCast(e.key.len));
+                if (other.find("forty")) |e| total += e.value;
+                if (small.find("four") == null) total += 20;
+                var t = small;
+                var ks: [1][]const u8 = undefined;
+                var vs: [1]u8 = undefined;
+                Table.fill(&t, .{.{ "z", 9 }}, &ks, &vs);
+                return @intCast((total + t.longest) % 256);
+            }
+            """)).Message.ShouldContain("tuple field index must be comptime-known");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

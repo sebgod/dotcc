@@ -129,6 +129,21 @@ public sealed class ZigAllocRuntimeTests
     }
 
     [Fact]
+    public unsafe void Free_accepts_a_const_slice()
+    {
+        byte* buf = stackalloc byte[64];
+        var fba = FixedBufferAllocator.Init(buf, 64);
+        var a = ZigAlloc.FbaAllocator(&fba);
+
+        var r1 = a.Alloc<uint>(4, Oom);
+        fba.EndIndex.ShouldBe(16UL);
+
+        // zig's `free` takes a `[]const T` too (std.StaticStringMap.deinit, task #100): the same memory goes back.
+        a.Free<uint>(new ConstSlice<uint>(r1.Value.Ptr, r1.Value.Len));
+        fba.EndIndex.ShouldBe(0UL);
+    }
+
+    [Fact]
     public unsafe void Fixed_buffer_allocator_free_of_a_non_last_allocation_is_a_no_op()
     {
         byte* buf = stackalloc byte[64];

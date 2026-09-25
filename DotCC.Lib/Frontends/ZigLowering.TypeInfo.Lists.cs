@@ -88,6 +88,18 @@ internal sealed partial class ZigLowering
         return new SliceNew(pinned, count, element, true) { Type = new CType.Slice(element) };
     }
 
+    /// <summary>The comptime value of a TUPLE argument to a <c>comptime x: anytype</c> parameter (std.StaticStringMap's
+    /// <c>initComptime(.{ .{ "one", 1 }, .{ "two", 2 } })</c>, task #100), with its tuple type; null when the argument is not
+    /// a tuple or does not evaluate at compile time (the parameter then binds as an ordinary <c>anytype</c>).</summary>
+    private (IrModule.ComptimeValue value, CType type)? ComptimeTupleArg(Item arg)
+    {
+        using var hoist = EnterThrowawayHoist();
+        var lowered = LowerExpr(arg);
+        return lowered.Type.Unqualified is CType.Tuple && _ir.EvalComptimeValue(lowered) is IrModule.CtStruct tupleValue
+            ? (tupleValue, lowered.Type)
+            : null;
+    }
+
     /// <summary>The comptime value of an argument bound to a <c>comptime x: []const T</c> parameter: an integer member
     /// list (<c>@typeInfo(E).@"enum".field_values</c>) as a comptime slice of <c>comptime_int</c>, or any argument the
     /// interpreter evaluates to a slice or array. Null when it is neither.</summary>
