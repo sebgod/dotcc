@@ -1460,12 +1460,19 @@ internal sealed partial class ZigLowering
                     // An ENUM-typed param (std.mem's `SplitIterator(T, .scalar)` with `comptime delimiter_type:
                     // DelimiterType`) is the result location its bare `.scalar` argument resolves against.
                     var valueParamType = LowerType(p.TypeAst);
-                    var valueArg = valueParamType.Unqualified is CType.Enum
-                        ? argScope.LowerExprSink(argItems[i], valueParamType)
-                        : argScope.LowerExpr(argItems[i]);
-                    if (_ir.ConstEval(valueArg) is not { } vv)
+                    long vv;
+                    // A `comptime x: bool` asked as a comptime QUESTION (std.array_hash_map.Auto's `!autoEqlIsCheap(K)`, a
+                    // switch over `@typeInfo(K)`, task #106) folds without lowering the call as a runtime one.
+                    if (valueParamType.Unqualified == CType.Bool && argScope.TryFoldComptimeCondition(argItems[i]) is { } question)
                     {
-                        throw new IrUnsupportedException(
+                        vv = question ? 1 : 0;
+                    }
+                    else
+                    {
+                        var valueArg = valueParamType.Unqualified is CType.Enum
+                            ? argScope.LowerExprSink(argItems[i], valueParamType)
+                            : argScope.LowerExpr(argItems[i]);
+                        vv = _ir.ConstEval(valueArg) ?? throw new IrUnsupportedException(
                             $"call to type-returning generic '{templateSym.Name}': the `comptime {p.Name}` argument "
                             + "must be a compile-time-known value");
                     }

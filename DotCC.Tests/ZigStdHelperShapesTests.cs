@@ -1663,6 +1663,41 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_comptime_bool_argument_asked_as_a_question_keys_the_instance()
+    {
+        var cs = EmitZig("""
+            fn cheap(comptime K: type) bool {
+                return switch (@typeInfo(K)) {
+                    .int, .bool => true,
+                    else => false,
+                };
+            }
+            fn Box(comptime K: type, comptime store: bool) type {
+                return struct {
+                    k: K,
+                    extra: Extra,
+                    pub const Extra = if (store) u32 else u8;
+                };
+            }
+            fn Auto(comptime K: type) type {
+                return Box(K, !cheap(K));
+            }
+            pub fn main() u8 {
+                const b: Auto(u16) = .{ .k = 3, .extra = 4 };
+                const c: Box(u16, cheap(u16)) = .{ .k = 5, .extra = 6 };
+                return @intCast(b.k + b.extra + @sizeOf(@TypeOf(b.extra)) * 10 + c.k + c.extra + @sizeOf(@TypeOf(c.extra)) * 20);
+            }
+            """);
+        // Task #106 (std.array_hash_map.Auto's `!autoEqlIsCheap(K)`): a `comptime store: bool` argument that is a comptime
+        // QUESTION (a call switching over `@typeInfo(K)`, negated or not) folds, keys the instance, and never lowers as a
+        // runtime call. zig returns 108.
+        cs.ShouldContain("Box__u16_0 b = new Box__u16_0");
+        cs.ShouldContain("Box__u16_1 c = new Box__u16_1");
+        cs.ShouldContain("public uint extra;");
+        cs.ShouldNotContain("cheap__");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

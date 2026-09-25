@@ -5709,6 +5709,30 @@ public sealed class ZigOracleTests
             "    }\n" +
             "    return @intCast((sum + hops + skipped) % 256);\n" +
             "}\n", 10, "" },
+        // A `comptime store: bool` argument to a type-returning generic that is a comptime question (`!cheap(K)` where cheap
+        // switches over `@typeInfo(K)`, task #106, std.array_hash_map.Auto's shape). zig returns 108.
+        new object[] { "comptime_bool_question_arg",
+            "fn cheap(comptime K: type) bool {\n" +
+            "    return switch (@typeInfo(K)) {\n" +
+            "        .int, .bool => true,\n" +
+            "        else => false,\n" +
+            "    };\n" +
+            "}\n" +
+            "fn Box(comptime K: type, comptime store: bool) type {\n" +
+            "    return struct {\n" +
+            "        k: K,\n" +
+            "        extra: Extra,\n" +
+            "        pub const Extra = if (store) u32 else u8;\n" +
+            "    };\n" +
+            "}\n" +
+            "fn Auto(comptime K: type) type {\n" +
+            "    return Box(K, !cheap(K));\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const b: Auto(u16) = .{ .k = 3, .extra = 4 };\n" +
+            "    const c: Box(u16, cheap(u16)) = .{ .k = 5, .extra = 6 };\n" +
+            "    return @intCast(b.k + b.extra + @sizeOf(@TypeOf(b.extra)) * 10 + c.k + c.extra + @sizeOf(@TypeOf(c.extra)) * 20);\n" +
+            "}\n", 108, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
