@@ -174,6 +174,8 @@ internal sealed partial class ZigLowering
             // widened it away (see _declaredIntBits). Cleared when the RHS declares none, so a
             // re-binding of the same name never inherits the previous alias's width.
             SetDeclaredIntBits(name, DeclaredBitsOfTypeArg(rhs));
+            // `const Ptr = @TypeOf(pointer);`: a pointer's spelled size class rides it the same way (task #119).
+            SetDeclaredPtrSize(name, aliasType.Unqualified is CType.Pointer ? PointerSizeOfTypeArg(rhs) : null);
             return true;
         }
         // `const info = @typeInfo(T);` / `const i = @typeInfo(T).int;` — a comptime reflection value

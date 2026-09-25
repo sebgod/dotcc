@@ -351,6 +351,7 @@ internal sealed partial class ZigLowering
         if (!_deferredTypeCalls.Remove(name, out var rhs) || !TryTypeAliasRhs(rhs, out type)) { return false; }
         _typeAliases[name] = type;
         SetDeclaredIntBits(name, DeclaredBitsOfTypeArg(rhs));
+        SetDeclaredPtrSize(name, type.Unqualified is CType.Pointer ? PointerSizeOfTypeArg(rhs) : null);
         return true;
     }
 

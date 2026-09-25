@@ -398,6 +398,7 @@ internal sealed partial class ZigLowering
         var anytypeSeeds = new List<(string name, CType type)>();
         var anytypeBits = new Dictionary<string, int>(System.StringComparer.Ordinal);
         var anytypeTupleBits = new Dictionary<string, int?[]>(System.StringComparer.Ordinal);
+        var anytypePtrSize = new Dictionary<string, string>(System.StringComparer.Ordinal);
         var fnSeeds = new List<(string name, ZigLowering owner, Symbol fn)>();
         var aggregateSeeds = new List<(string name, IrModule.ComptimeValue value, CType type)>();
         var comptimeIntArgs = new Dictionary<string, long>(System.StringComparer.Ordinal);
@@ -448,6 +449,8 @@ internal sealed partial class ZigLowering
                     if (argScope.DeclaredBitsOfArgument(argItems[i]) is { } argBits) { anytypeBits[g.Params[i].Name] = argBits; }
                     // A tuple literal's per-element widths (std.fmt's `.{42}`: `@field(args, "0")` is an `int`, 32 bits).
                     if (argScope.TupleLiteralElemBits(argItems[i]) is { } tupleBits) { anytypeTupleBits[g.Params[i].Name] = tupleBits; }
+                    // A pointer argument's spelled size class (task #119: std.Random.init's `pointer: anytype`).
+                    if (argScope.PointerSizeOfValue(argItems[i]) is { } argPtrSize) { anytypePtrSize[g.Params[i].Name] = argPtrSize; }
                     break;
             }
         }
@@ -468,8 +471,11 @@ internal sealed partial class ZigLowering
         // in-scope symbol at signature-lowering time (it becomes one only in the instance body).
         var anytypeShadows = new List<(string name, CType? prev)>();
         var anytypeBitShadows = new List<(string name, int? prev)>();
+        var anytypePtrSizeShadows = new List<(string name, string? prev)>();
         foreach (var (name, type) in anytypeSeeds)
         {
+            anytypePtrSizeShadows.Add((name, _anytypeSeedPtrSize.GetValueOrDefault(name)));
+            if (anytypePtrSize.TryGetValue(name, out var aps)) { _anytypeSeedPtrSize[name] = aps; } else { _anytypeSeedPtrSize.Remove(name); }
             anytypeShadows.Add((name, _anytypeSeeds.TryGetValue(name, out var pv) ? pv : (CType?)null));
             _anytypeSeeds[name] = type;
             anytypeBitShadows.Add((name, _anytypeSeedBits.TryGetValue(name, out var pb) ? pb : null));
@@ -612,9 +618,15 @@ internal sealed partial class ZigLowering
                         // A declared width other than the lowered type's own (`u21` in a `uint`) keys its own
                         // instance, since `@typeInfo(@TypeOf(x)).int.bits` differs between them.
                         var anyType = _anytypeSeeds[g.Params[i].Name];
+                        // Likewise a pointer's size class (task #119): `.one` is the plain key, `[*]T` / `[*c]T` key their
+                        // own, and a pointer no spelling classifies keys apart from all three, so an instance that reads
+                        // `@typeInfo(@TypeOf(p)).pointer.size` never answers for an argument of another class.
                         mangleTokens.Add(MangleType(anyType)
                             + (anytypeBits.TryGetValue(g.Params[i].Name, out var mb) && anyType.Unqualified is CType.Prim { Integer: true } mp
-                               && mb != mp.Bytes * 8 ? "w" + mb.ToString(inv) : ""));
+                               && mb != mp.Bytes * 8 ? "w" + mb.ToString(inv) : "")
+                            + (anyType.Unqualified is CType.Pointer
+                               ? anytypePtrSize.GetValueOrDefault(g.Params[i].Name) switch { "one" => "", "many" => "pm", "c" => "pc", _ => "pu" }
+                               : ""));
                         runtimeArgItems.Add(argItems[i]);
                         break;
                     default:
@@ -721,6 +733,7 @@ internal sealed partial class ZigLowering
                 if (DeclaredBitsOfTypeArg(g.RetType) is { } instRetBits) { _fnReturnBits[instanceSym] = instRetBits; }
                 if (anytypeBits.Count > 0) { _instanceAnytypeBits[instanceSym] = anytypeBits; }
                 if (anytypeTupleBits.Count > 0) { _instanceAnytypeTupleBits[instanceSym] = anytypeTupleBits; }
+                if (anytypePtrSize.Count > 0) { _instanceAnytypePtrSize[instanceSym] = anytypePtrSize; }
                 // A method instance's body re-enters its owner's seeds too, its own LAST so they win a clash.
                 if (ownerSeedsKey is { } osk && _reifiedSeeds.TryGetValue(osk, out var os))
                 {
@@ -753,6 +766,11 @@ internal sealed partial class ZigLowering
             {
                 var (name, prev) = anytypeBitShadows[i];
                 if (prev is { } pb) { _anytypeSeedBits[name] = pb; } else { _anytypeSeedBits.Remove(name); }
+            }
+            for (var i = anytypePtrSizeShadows.Count - 1; i >= 0; i--)
+            {
+                var (name, prev) = anytypePtrSizeShadows[i];
+                if (prev is { } ps) { _anytypeSeedPtrSize[name] = ps; } else { _anytypeSeedPtrSize.Remove(name); }
             }
         }
         // The runtime arguments are the CALLER's expressions — lowered (in BuildCall) in the restored

@@ -6409,6 +6409,49 @@ public sealed class ZigOracleTests
             "    const bits: u16 = bitsOf(@field(r, \"wide\")) + bitsOf(r.narrow);\n" +
             "    return check(\"any\") + check(\"b64\") * 20 + check(\"x\") + tuple_flags + @as(u8, @intCast(bits));\n" +
             "}\n", 68, "" },
+        // Task #119: `@typeInfo(@TypeOf(p)).pointer.size` of an anytype argument, from the pointer's spelling: `&x` and `*T`
+        // are .one, `[*]T` and a slice's `.ptr` .many, `[*c]T` .c, a slice .slice; each class keys its own instance.
+        new object[] { "pointer_size_class",
+            "const S = struct { a: u8 };\n" +
+            "\n" +
+            "fn classify(p: anytype) u8 {\n" +
+            "    const P = @TypeOf(p);\n" +
+            "    return switch (@typeInfo(P).pointer.size) {\n" +
+            "        .one => 1,\n" +
+            "        .many => 2,\n" +
+            "        .c => 3,\n" +
+            "        .slice => 4,\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "fn isOne(p: anytype) u8 {\n" +
+            "    return if (@typeInfo(@TypeOf(p)).pointer.size == .one) 10 else 20;\n" +
+            "}\n" +
+            "\n" +
+            "fn viaMany(q: [*]const u8) u8 {\n" +
+            "    return classify(q) + isOne(q);\n" +
+            "}\n" +
+            "\n" +
+            "fn viaC(q: [*c]const u8) u8 {\n" +
+            "    return classify(q);\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var s = S{ .a = 5 };\n" +
+            "    const buf = [_]u8{ 7, 8, 9 };\n" +
+            "    const sl: []const u8 = &buf;\n" +
+            "    const one: *S = &s;\n" +
+            "    var total: u8 = 0;\n" +
+            "    total += classify(&s);\n" +
+            "    total += classify(one) * 3;\n" +
+            "    total += classify(sl.ptr) * 5;\n" +
+            "    total += viaMany(&buf);\n" +
+            "    total += viaC(&buf) * 7;\n" +
+            "    total += classify(sl) * 11;\n" +
+            "    total += isOne(&s);\n" +
+            "    total += s.a;\n" +
+            "    return total;\n" +
+            "}\n", 116, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -7690,6 +7733,27 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // Task #119: std.Random.DefaultPrng (Xoshiro256) from real std: intRangeAtMost, uintLessThan, boolean, shuffle and
+    // float. std.Random.init asserts `@typeInfo(Ptr).pointer.size == .one` of the `*Xoshiro256` it is handed; the size
+    // class rides the pointer's spelling.
+    [Fact]
+    public void Dotcc_matches_zig_std_random_api() =>
+        MatchesZigWithRealStd("random_api",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var prng = std.Random.DefaultPrng.init(7);\n" +
+            "    const r = prng.random();\n" +
+            "    var t: u32 = 0;\n" +
+            "    for (0..10) |_| t += r.intRangeAtMost(u8, 1, 6);\n" +
+            "    t += r.uintLessThan(u32, 100);\n" +
+            "    t += @intFromBool(r.boolean());\n" +
+            "    var a = [_]u8{ 1, 2, 3, 4, 5, 6 };\n" +
+            "    r.shuffle(u8, &a);\n" +
+            "    const f = r.float(f64);\n" +
+            "    t += a[0] * 10 + a[5] + @as(u32, @intFromFloat(f * 10));\n" +
+            "    return @truncate(t);\n" +
+            "}\n", 56);
 
     // Task #97: std.math.rotl / rotr from real std for u8, u16 and u32 (rotl(u8, 0x81, 1) had silently returned 2).
     [Fact]

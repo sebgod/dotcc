@@ -45,7 +45,9 @@ internal sealed partial class ZigLowering
     /// rule on the class). One record serves both the whole union value and the payload of its active
     /// field — <c>@typeInfo(T)</c>, <c>@typeInfo(T).int</c> and the <c>|i|</c> captured by
     /// <c>.int =&gt; |i|</c> are the same folded thing, which is what lets one map bind all three.</summary>
-    private sealed record ZigTypeInfo(string Tag, CType Type, int? DeclaredBits);
+    /// <remarks>A pointer's spelled size class (<see cref="PointerSizeOfTypeArg"/>) rides in <c>PointerSize</c> the
+    /// same way, for <c>.pointer.size</c>.</remarks>
+    private sealed record ZigTypeInfo(string Tag, CType Type, int? DeclaredBits, string? PointerSize = null);
 
     /// <summary>Each name bound to a folded <c>@typeInfo</c> value — a <c>const i = @typeInfo(T);</c>
     /// or <c>const i = @typeInfo(T).int;</c> (no runtime decl is emitted: the value is comptime-only),
@@ -328,6 +330,10 @@ internal sealed partial class ZigLowering
             if (info.Kind == ParamKind.AnyType)
             {
                 if (anyBits is not null && anyBits.TryGetValue(ps.Name, out var ab)) { _valueBits[ps] = ab; }
+                if (_instanceAnytypePtrSize.TryGetValue(fn, out var anySizes) && anySizes.TryGetValue(ps.Name, out var anySize))
+                {
+                    _valuePtrSize[ps] = anySize;
+                }
                 if (_instanceAnytypeTupleBits.TryGetValue(fn, out var tupleBits) && tupleBits.TryGetValue(ps.Name, out var tb))
                 {
                     _valueTupleElemBits[ps] = tb;
@@ -336,6 +342,7 @@ internal sealed partial class ZigLowering
             }
             if (info.Kind != ParamKind.Runtime) { continue; }
             RecordValueBits(ps, DeclaredBitsOfTypeArg(info.TypeAst), ElemBitsOfTypeAst(info.TypeAst));
+            if (ps.Type?.Unqualified is CType.Pointer) { RecordValuePtrSize(ps, PointerSizeOfTypeArg(info.TypeAst)); }
         }
     }
 
@@ -434,7 +441,8 @@ internal sealed partial class ZigLowering
                     throw new IrUnsupportedException($"zig `@typeInfo` expects (type); got {args.Count} argument(s)");
                 }
                 var t = LowerType(args[0]);
-                info = new ZigTypeInfo(TypeInfoTag(t), t, DeclaredBitsOfTypeArg(args[0]));
+                info = new ZigTypeInfo(TypeInfoTag(t), t, DeclaredBitsOfTypeArg(args[0]),
+                                       t.Unqualified is CType.Pointer ? PointerSizeOfTypeArg(args[0]) : null);
                 return true;
             }
 
@@ -663,12 +671,13 @@ internal sealed partial class ZigLowering
             return true;
         }
         // `<info>.size` on a SLICE — `.slice`, the one pointer size class dotcc's lowering keeps (a slice is
-        // its own `CType.Slice`). `*T` / `[*]T` / `[*c]T` share one C pointer, so for those the size stays the
-        // loud cut TryFoldTypeInfoValue raises (std.meta.Elem switches on it).
+        // its own `CType.Slice`). `*T` / `[*]T` / `[*c]T` share one C pointer, so for those the size is the class
+        // the source SPELLED (task #119: std.Random.init's `@typeInfo(Ptr).pointer.size == .one`), and where no
+        // spelling gives one it stays the loud cut TryFoldTypeInfoValue raises (std.meta.Elem switches on it).
         if (expr.Content is Zig.Field sz && Tok(sz.Arg2) == "size" && TryEvalTypeInfo(sz.Arg0, out var zInfo)
-            && zInfo.Tag == "pointer" && zInfo.Type.Unqualified is CType.Slice)
+            && zInfo.Tag == "pointer" && (zInfo.Type.Unqualified is CType.Slice ? "slice" : zInfo.PointerSize) is { } sizeClass)
         {
-            tag = "slice";
+            tag = sizeClass;
             return true;
         }
         if (TryEvalTypeInfo(expr, out var info))

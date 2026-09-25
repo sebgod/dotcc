@@ -601,7 +601,7 @@ internal sealed partial class IrModule
     private static IReadOnlyList<ComptimeValue>? ComptimeSequence(ComptimeValue? v) => v switch
     {
         CtSlice s when s.Offset >= 0 && s.Offset + s.Length <= s.Backing.Elems.Length
-            => new System.ArraySegment<ComptimeValue>(s.Backing.Elems, (int)s.Offset, (int)s.Length),
+            => (IReadOnlyList<ComptimeValue>)new System.ArraySegment<ComptimeValue>(s.Backing.Elems, (int)s.Offset, (int)s.Length),
         _ => null,
     };
 

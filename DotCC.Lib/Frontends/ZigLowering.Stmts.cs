@@ -1054,6 +1054,10 @@ internal sealed partial class ZigLowering
         RecordValueBits(sym2,
             typeItem is { } ti ? DeclaredBitsOfTypeArg(ti) : DeclaredBitsOfValue(initExpr) ?? DeclaredBitsOfLowered(init),
             typeItem is { } te ? ElemBitsOfTypeAst(te) : DeclaredElemBitsOfValue(initExpr));
+        if (type.Unqualified is CType.Pointer)
+        {
+            RecordValuePtrSize(sym2, typeItem is { } tp ? PointerSizeOfTypeArg(tp) : PointerSizeOfValue(initExpr));
+        }
         // A `void` local (`var unit: void = {};`) has no storage and no C# spelling: the name stays
         // declared, so a use of it is an (erasable) void read, and the declaration emits nothing.
         if (type.Unqualified is CType.VoidType && IsErasableVoid(init)) { return new Seq(new List<CStmt>()); }

@@ -2797,6 +2797,78 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_pointer_size_class_rides_the_pointer_spelling()
+    {
+        var cs = EmitZig("""
+            const S = struct { a: u8 };
+
+            fn classify(p: anytype) u8 {
+                const P = @TypeOf(p);
+                return switch (@typeInfo(P).pointer.size) {
+                    .one => 1,
+                    .many => 2,
+                    .c => 3,
+                    .slice => 4,
+                };
+            }
+
+            fn isOne(p: anytype) u8 {
+                return if (@typeInfo(@TypeOf(p)).pointer.size == .one) 10 else 20;
+            }
+
+            fn viaMany(q: [*]const u8) u8 {
+                return classify(q) + isOne(q);
+            }
+
+            fn viaC(q: [*c]const u8) u8 {
+                return classify(q);
+            }
+
+            pub fn main() u8 {
+                var s = S{ .a = 5 };
+                const buf = [_]u8{ 7, 8, 9 };
+                const sl: []const u8 = &buf;
+                const one: *S = &s;
+                var total: u8 = 0;
+                total += classify(&s);
+                total += classify(one) * 3;
+                total += classify(sl.ptr) * 5;
+                total += viaMany(&buf);
+                total += viaC(&buf) * 7;
+                total += classify(sl) * 11;
+                total += isOne(&s);
+                total += s.a;
+                return total;
+            }
+            """);
+        // Task #119, std.Random.init's `assert(@typeInfo(Ptr).pointer.size == .one)`: `*T`, `[*]T` and `[*c]T` lower to one C
+        // pointer, so the class is read from the spelling (`&x`, a typed local, a parameter, a slice's `.ptr`) and each class
+        // keys its own instance of a generic that reads it. zig returns 116.
+        cs.ShouldContain("classify__p_S(S* p)");
+        cs.ShouldContain("classify__p_u8pm(byte* p)");
+        cs.ShouldContain("classify__p_u8pc(byte* p)");
+        cs.ShouldContain("isOne__p_S(S* p)");
+        cs.ShouldContain("isOne__p_u8pm(byte* p)");
+    }
+
+    [Fact]
+    public void A_pointer_whose_size_class_no_spelling_gives_is_still_rejected()
+    {
+        Should.Throw<Exception>(() => EmitZig("""
+            var store = [_]u8{ 1, 2 };
+            fn get() [*]u8 {
+                return &store;
+            }
+            fn classify(p: anytype) u8 {
+                return if (@typeInfo(@TypeOf(p)).pointer.size == .one) 1 else 2;
+            }
+            pub fn main() u8 {
+                return classify(get());
+            }
+            """)).Message.ShouldContain("pointer SIZE class is not recoverable");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""
