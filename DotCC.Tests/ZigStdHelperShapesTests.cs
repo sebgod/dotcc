@@ -1945,6 +1945,63 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_multi_object_for_takes_any_objects_and_captures()
+    {
+        var cs = EmitZig("""
+            pub fn main() u8 {
+                const src = [_]u8{ 1, 2, 3, 4 };
+                var dst: [4]u8 = undefined;
+                const scale = [_]u8{ 10, 20, 30, 40 };
+                for (src, &dst, scale) |s, *d, k| {
+                    d.* = s + k;
+                }
+                var weighted: u32 = 0;
+                for (dst, scale, 0..) |d, k, i| {
+                    weighted += @as(u32, d) * @as(u32, @intCast(i)) + k;
+                }
+                var a: [3]u8 = .{ 0, 0, 0 };
+                var b: [3]u8 = .{ 0, 0, 0 };
+                var c: [3]u8 = .{ 0, 0, 0 };
+                const order = [_]u8{ 2, 0, 1 };
+                for (order, &a, &b, &c) |o, *x, *y, *z| {
+                    x.* = o;
+                    y.* = o * 2;
+                    z.* = o * 3;
+                }
+                var ranged: u32 = 0;
+                for (5..8, order) |r, o| {
+                    ranged += @as(u32, @intCast(r)) * o;
+                }
+                var trailing: u32 = 0;
+                for (
+                    src,
+                    scale,
+                ) |s, k| {
+                    trailing += s * k;
+                }
+                const sum = weighted + a[0] + b[1] + c[2] + ranged + trailing;
+                return @intCast(sum % 256);
+            }
+            """);
+        // Task #108 (std.MultiArrayList): one production for the multi-object `for` in place of nine fixed shapes. A `*`
+        // capture at any position (`|s, *d, k|`), a `0..` object anywhere (`(dst, scale, 0..)`), four objects with three
+        // pointer captures, a bounded range object (`5..8`), and zig fmt's trailing comma. zig returns 130.
+        cs.ShouldContain("byte* d = &__s__1.Ptr[__i];");
+        cs.ShouldContain("ulong i = __i__1;");
+        cs.ShouldContain("byte* x = &__s__6.Ptr[__i__2];");
+        cs.ShouldContain("ulong r = (ulong)(5) + __i__3;");
+    }
+
+    [Theory]
+    [InlineData("var a = [_]u8{ 1, 2 };\n    var t: u8 = 0;\n    for (a, 0..) |x| t += x;\n    return t;", "needs 2 captures; it has 1")]
+    [InlineData("var a = [_]u8{ 1, 2 };\n    var t: u8 = 0;\n    for (a, 0..) |x, *i| t += x + @as(u8, @intCast(i.*));\n    return t;", "cannot be taken by reference")]
+    public void A_multi_object_for_rejects_mismatched_or_by_reference_index_captures(string body, string message)
+    {
+        // Task #108: the objects and captures pair up one to one, and a range's index is a value, not storage.
+        Should.Throw<CompileException>(() => EmitZig("pub fn main() u8 {\n    " + body + "\n}\n")).Message.ShouldContain(message);
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

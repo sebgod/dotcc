@@ -5868,7 +5868,7 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void A_parallel_inline_for_needs_both_operands_to_be_comptime_lists()
+    public void A_parallel_inline_for_needs_every_operand_to_be_a_comptime_list()
     {
         var ex = Should.Throw<CompileException>(() => EmitZig(
             "const P = struct { x: i32, y: i32 };\n" +
@@ -5877,7 +5877,7 @@ public sealed class ZigFrontendTests
             "    inline for (@typeInfo(P).@\"struct\".field_names, a) |n, v| { _ = n; _ = v; }\n" +
             "    return 0;\n" +
             "}\n"));
-        ex.Message.ShouldContain("BOTH to be comptime lists");
+        ex.Message.ShouldContain("requires every operand to be a comptime list");
     }
 
     [Fact]

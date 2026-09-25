@@ -289,6 +289,10 @@ symbols:
   - IfOperand      # 183 `if (c) a else b` as the RIGHT operand of `==` / `!=`, arms at the operand (Bitwise) level
   - AssignArm      # 184 `x op= v` with no `;` of its own, as the THEN arm of an `if` statement with an `else`
   - ProngType      # 185 a container TYPE as a switch prong's value (`.@"union" => |u| struct { … }`)
+  - ForObjs        # 186 the objects of a multi-object `for (a, b, 0.., …)`, two or more
+  - ForObj         # 187 one object: an Expr, an open range `N..`, or a bounded range `N..M`
+  - ForCaps        # 188 the captures of a multi-object `for`: `|x, *y, i, …|`, two or more
+  - ForCap         # 189 one capture: `x` (a per-iteration copy) or `*x` (a pointer into the object)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -681,26 +685,25 @@ productions:
       # the lookahead selects — `..` → range, `)` → slice, `,` → slice+index. (The by-ref `|*x|`
       # forms are below; a non-zero index start `for (s, 5..)` is deferred.)
       - { lhs: LoopStmt, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', Stmt], action: stmtForSlice }
-      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ',', Expr, '..', ')', '|', IDENT, ',', IDENT, '|', Stmt], action: stmtForSliceIdx }
+      # The MULTI-object `for (a, b, 0.., …) |x, *y, i, …|` (task #108): any number of objects (an Expr, an open range
+      # `N..`, a bounded `N..M`) and as many captures, each by value or by reference, plus zig fmt's trailing comma. It
+      # replaced nine fixed shapes (pairs, triples, `(s, 0..)`, by-ref pairs) that std.MultiArrayList outgrew
+      # (`for (a, &b, c) |x, *y, z|`, `for (a, b, 0..)`, four objects). After `for ( Expr`, `)` selects the single-object
+      # forms, `..` the range form or a range object, and `,` this one; after `ForObjs ','`, `)` is the trailing comma.
+      - { lhs: LoopStmt, rhs: ['for', '(', ForObjs, ')', '|', ForCaps, '|', Stmt],      action: stmtForMulti }
+      - { lhs: LoopStmt, rhs: ['for', '(', ForObjs, ',', ')', '|', ForCaps, '|', Stmt], action: stmtForMultiTrail }
       # `for (a, b) |x, y| body` — the PARALLEL form: two operands walked in lockstep, one capture
       # each (road-to-zig-std S6). Conflict-free against the indexed form above by the SAME 1-token
       # lookahead the block already relies on: after `for ( Expr ',' Expr`, `..` selects the indexed
       # production and `)` this one — distinct terminals, so it is a shift either way. Measured in the
       # pinned std this is the DOMINANT member-list shape (`inline for (info.field_names,
       # info.field_types) |field_name, field_type|`, 17 uses vs 11 single-list).
-      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ',', Expr, ')', '|', IDENT, ',', IDENT, '|', Stmt], action: stmtForSlicePair }
       # A THREE-object runtime `for (a, b, c) |x, y, z|` (40 in std; hash_map's `for (metadata, keys,
       # values) |m, k, v|`, road-to-zig-std G5), and a trailing comma after the last object (zig fmt's
       # one-object-per-line layout). After `Expr ',' Expr`, a `,` then `Expr` / `)` extends this family
       # and `..` / `)` select the forms above; each is a distinct terminal, so every decision is a shift.
-      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ',', Expr, ',', ')', '|', IDENT, ',', IDENT, '|', Stmt], action: stmtForSlicePairTrail }
-      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ',', Expr, ',', Expr, ')', '|', IDENT, ',', IDENT, ',', IDENT, '|', Stmt], action: stmtForSliceTriple }
-      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ',', Expr, ',', Expr, ',', ')', '|', IDENT, ',', IDENT, ',', IDENT, '|', Stmt], action: stmtForSliceTripleTrail }
       # BY-REFERENCE captures in the pair form (std.mem.swap's `for (a_bytes, b_bytes) |*ab, *bb|`): a
       # leading `*` (vs IDENT) at each capture position is a distinct terminal, so each shape is a shift.
-      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ',', Expr, ')', '|', '*', IDENT, ',', '*', IDENT, '|', Stmt], action: stmtForPairRefRef }
-      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ',', Expr, ')', '|', '*', IDENT, ',', IDENT, '|', Stmt],      action: stmtForPairRefVal }
-      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ',', Expr, ')', '|', IDENT, ',', '*', IDENT, '|', Stmt],      action: stmtForPairValRef }
       # `for (s) |*x| body` — BY-REFERENCE element capture (Milestone M, part 4): `x` is a `*T` into
       # the slice, so `x.* = …` writes through to the element. After the capture `'|'`, a `'*'`
       # lookahead selects this over the by-value `'|' IDENT '|'` form (distinct tokens) — conflict-free.
@@ -708,7 +711,6 @@ productions:
       # `for (s, 0..) |*x, i| body` — the BY-REFERENCE element capture WITH the usize index (Milestone
       # Z). Same `'*'`-after-`'|'` lookahead selects it over the by-value indexed `'|' IDENT ',' …` form
       # — conflict-free; `x` is a `*T` into the slice and `i` the index.
-      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ',', Expr, '..', ')', '|', '*', IDENT, ',', IDENT, '|', Stmt], action: stmtForSliceIdxRef }
       # A loop is a statement; and a `label:` may prefix one — `outer: while (…) { … break :outer; }`
       # (Milestone L, part 3). `IDENT ':' LoopStmt` reuses the same `:` lookahead trick as the value-
       # block: at statement start an IDENT also begins an Expr, but a Primary is never followed by
@@ -1393,6 +1395,20 @@ productions:
       - { lhs: Arg, rhs: ['enum', '{', EnumFields, '}'],                       action: inlineEnumType }
       - { lhs: Arg, rhs: ['union', '(', 'enum', ')', '{', UnionVariants, '}'], action: inlineUnionEnumType }
       - { lhs: Arg, rhs: ['union', '{', UnionVariants, '}'],                   action: inlineUnionType }
+
+  - derivation: none
+    rules:
+      - { lhs: ForObjs, rhs: [ForObj, ',', ForObj],  action: forObjsTwo }
+      - { lhs: ForObjs, rhs: [ForObjs, ',', ForObj], action: forObjsCons }
+      - { lhs: ForObj, rhs: [Expr],                  action: forObj }
+      - { lhs: ForObj, rhs: [Expr, '..'],            action: forObjFrom }
+      - { lhs: ForObj, rhs: [Expr, '..', Expr],      action: forObjRange }
+      # Any number of captures, one included (a transparent pass-through), so a count mismatch reaches DecomposeForMulti's
+      # check rather than a parse error.
+      - { lhs: ForCaps, rhs: [ForCap] }
+      - { lhs: ForCaps, rhs: [ForCaps, ',', ForCap], action: forCapsCons }
+      - { lhs: ForCap, rhs: [IDENT],                 action: forCapVal }
+      - { lhs: ForCap, rhs: ['*', IDENT],            action: forCapRef }
 
   - derivation: none
     rules:

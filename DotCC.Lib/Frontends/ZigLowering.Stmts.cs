@@ -337,32 +337,11 @@ internal sealed partial class ZigLowering
             // `for (s) |*x| body` — BY-REFERENCE element capture: x is a `*T` into the slice (Milestone M, part 4).
             case Zig.StmtForSliceRef f:  // for '(' Expr ')' '|' '*' IDENT '|' Stmt
                 return LowerForSlice(LowerExpr(f.Arg2), Tok(f.Arg6), null, f.Arg8, byRef: true);
-            // `for (s, 0..) |x, i| body` — also bind the usize index (counter + start).
-            case Zig.StmtForSliceIdx f:  // for '(' Expr ',' Expr '..' ')' '|' IDENT ',' IDENT '|' Stmt
-                return LowerForSlice(LowerExpr(f.Arg2), Tok(f.Arg8), (Tok(f.Arg10), LowerExpr(f.Arg4)), f.Arg12, byRef: false);
-            // `for (a, b) |x, y| body` — the PARALLEL form (road-to-zig-std S6). Only the COMPTIME
-            // form is lowered: a member list has no runtime representation, so the useful case is
-            // always `inline for`. A runtime lockstep walk over two slices is a separate feature.
-            // `for (a, b) |x, y|` / `for (a, b, c) |x, y, z|` at RUNTIME: a lockstep walk (road-to-zig-std
-            // G5). The `inline for` over comptime member lists takes the parallel pair before this.
-            case Zig.StmtForSlicePair f:
-                return LowerForParallel(new[] { f.Arg2, f.Arg4 }, new[] { Tok(f.Arg7), Tok(f.Arg9) }, f.Arg11);
-            case Zig.StmtForSlicePairTrail f:
-                return LowerForParallel(new[] { f.Arg2, f.Arg4 }, new[] { Tok(f.Arg8), Tok(f.Arg10) }, f.Arg12);
-            case Zig.StmtForSliceTriple f:
-                return LowerForParallel(new[] { f.Arg2, f.Arg4, f.Arg6 }, new[] { Tok(f.Arg9), Tok(f.Arg11), Tok(f.Arg13) }, f.Arg15);
-            case Zig.StmtForSliceTripleTrail f:
-                return LowerForParallel(new[] { f.Arg2, f.Arg4, f.Arg6 }, new[] { Tok(f.Arg10), Tok(f.Arg12), Tok(f.Arg14) }, f.Arg16);
-            case Zig.StmtForPairRefRef f:
-                return LowerForParallel(new[] { f.Arg2, f.Arg4 }, new[] { Tok(f.Arg8), Tok(f.Arg11) }, f.Arg13, new[] { true, true });
-            case Zig.StmtForPairRefVal f:
-                return LowerForParallel(new[] { f.Arg2, f.Arg4 }, new[] { Tok(f.Arg8), Tok(f.Arg10) }, f.Arg12, new[] { true, false });
-            case Zig.StmtForPairValRef f:
-                return LowerForParallel(new[] { f.Arg2, f.Arg4 }, new[] { Tok(f.Arg7), Tok(f.Arg10) }, f.Arg12, new[] { false, true });
-            // `for (s, 0..) |*x, i| body` — BY-REFERENCE element capture WITH the usize index
-            // (Milestone Z): `x` is a `*T` into the slice (so `x.* = …` writes through), `i` the index.
-            case Zig.StmtForSliceIdxRef f:  // for '(' Expr ',' Expr '..' ')' '|' '*' IDENT ',' IDENT '|' Stmt
-                return LowerForSlice(LowerExpr(f.Arg2), Tok(f.Arg9), (Tok(f.Arg11), LowerExpr(f.Arg4)), f.Arg13, byRef: true);
+            // The MULTI-object `for (a, b, 0.., …) |x, *y, i, …|` (task #108, one production since the fixed pair / triple /
+            // indexed shapes): `(s, N..)` walks the slice with its index; any other shape walks every object in lockstep. The
+            // `inline for` over comptime member lists takes these before they get here (LowerInlineLoop).
+            case Zig.StmtForMulti f:      return LowerForMulti(f.Arg2, f.Arg5, f.Arg7);
+            case Zig.StmtForMultiTrail f: return LowerForMulti(f.Arg2, f.Arg6, f.Arg8);
 
             // A brace block in statement position (`Stmt -> Block`, pass-through).
             case Zig.Block:
@@ -1407,35 +1386,13 @@ internal sealed partial class ZigLowering
             case Zig.StmtForSlice cf when TryComptimeIterable(cf.Arg2, out var cl):
                 return UnrollComptimeFor(new[] { (cl, Tok(cf.Arg5)) }, cf.Arg7);
 
-            // `inline for (a, b) |x, y|` — two lists walked in lockstep. Measured in the pinned std
-            // this is the DOMINANT member-list shape (`(field_names, field_types)`, 17 uses). Both
-            // operands must be comptime lists: a comptime list paired with a runtime slice cannot be
-            // unrolled at all, so naming that beats a downstream type error.
-            case Zig.StmtForSlicePair cp when TryComptimeIterable(cp.Arg2, out var cl0):
-            {
-                if (!TryComptimeIterable(cp.Arg4, out var cl1))
-                {
-                    throw new IrUnsupportedException(
-                        "`inline for` over parallel operands requires BOTH to be comptime lists "
-                        + $"(`{cl0.Label}` is one; the second operand is not)");
-                }
-                return UnrollComptimeFor(new[] { (cl0, Tok(cp.Arg7)), (cl1, Tok(cp.Arg9)) }, cp.Arg11);
-            }
-
-            // `inline for (list, 0..) |x, i|` — the list alongside its own indices, which is just a
-            // second index-parallel operand (IndexList). The index must start at 0, as everywhere
-            // else dotcc accepts `for (s, N..)`.
-            case Zig.StmtForSliceIdx ci when TryComptimeIterable(ci.Arg2, out var cli):
-            {
-                if (_ir.ConstEval(LowerExpr(ci.Arg4)) is not 0)
-                {
-                    throw new IrUnsupportedException(
-                        "`inline for` over a comptime list with an index capture must start the index at 0 "
-                        + "(`for (list, 0..) |x, i|`)");
-                }
-                return UnrollComptimeFor(
-                    new[] { (cli, Tok(ci.Arg8)), (IndexList(cli.Count), Tok(ci.Arg10)) }, ci.Arg12);
-            }
+            // `inline for (a, b, 0.., …) |x, y, i, …|` — comptime lists walked in lockstep (road-to-zig-std S6; any number
+            // of them since task #108). Measured in the pinned std the pair `(field_names, field_types)` is the DOMINANT
+            // member-list shape (17 uses); `(list, 0..)` binds the list's own indices. See UnrollComptimeMultiFor.
+            case Zig.StmtForMulti cm when FirstForObject(cm.Arg2) is { } first0 && TryComptimeIterable(first0, out _):
+                return UnrollComptimeMultiFor(cm.Arg2, cm.Arg5, cm.Arg7);
+            case Zig.StmtForMultiTrail ct when FirstForObject(ct.Arg2) is { } first1 && TryComptimeIterable(first1, out _):
+                return UnrollComptimeMultiFor(ct.Arg2, ct.Arg6, ct.Arg8);
 
             // `inline for (cs) |c|` over a comptime STRING (std.fmt.parse_float's FloatStream.firstIsLower, a
             // `comptime cs: []const u8` seed): one copy per byte, the capture bound to that byte as a literal.
@@ -3348,10 +3305,7 @@ internal sealed partial class ZigLowering
         Zig.StmtWhile or Zig.StmtWhileCont or Zig.StmtWhileContAssign or Zig.StmtWhileContBlock
         or Zig.StmtWhileCapture or Zig.StmtWhileCaptureElse or Zig.StmtWhileCaptureErrElse
         or Zig.StmtWhileCaptureCont or Zig.StmtWhileCaptureContAssign
-        or Zig.StmtForRange or Zig.StmtForSlice or Zig.StmtForSliceRef or Zig.StmtForSliceIdx
-        or Zig.StmtForSliceIdxRef or Zig.StmtForSlicePair or Zig.StmtForSlicePairTrail
-        or Zig.StmtForSliceTriple or Zig.StmtForSliceTripleTrail
-        or Zig.StmtForPairRefRef or Zig.StmtForPairRefVal or Zig.StmtForPairValRef;
+        or Zig.StmtForRange or Zig.StmtForSlice or Zig.StmtForSliceRef or Zig.StmtForMulti or Zig.StmtForMultiTrail;
 
     /// <summary>Lower a runtime loop with an unlabeled break target (<see cref="LoopBreakTarget"/>), so a
     /// <c>break</c> inside a <c>switch</c> in its body exits the loop, as in zig. The label is emitted
@@ -3714,26 +3668,130 @@ internal sealed partial class ZigLowering
         return new Block(pre);   // { var __un = subject; switch (__un.__tag) { … } }
     }
 
-    /// <summary>Lower a for-over-slice — <c>for (s) |x| body</c> and (when <paramref name="index"/>
-    /// is set) <c>for (s, START..) |x, i| body</c> — to the C IR <c>for</c>:
-    /// <code>{ var __s = s; for (usize __i = 0; __i &lt; __s.Len; __i++) { var x = __s.Ptr[__i];
-    /// [var i = __i + START;] body } }</code>
-    /// The element capture <c>x</c> is a per-iteration copy (Zig's by-value <c>|x|</c>; the by-ref
-    /// <c>|*x|</c> form is deferred). The slice is hoisted to <c>__s</c> unless it is already a bare
-    /// variable, so <c>.Len</c>/<c>.Ptr</c> aren't re-evaluated with side effects.</summary>
-    /// <summary>Lower a runtime multi-object <c>for (a, b, c) |x, y, z| body</c> (road-to-zig-std G5): one
-    /// index walks every object in lockstep, each capture a per-iteration copy of its object's element.
-    /// Each object is a slice (an array coerces to one) read once into a temp. zig asserts the lengths are
-    /// equal; dotcc walks the FIRST object's length and does not check, its ReleaseFast stance on safety
-    /// checks. A <c>_</c> capture binds nothing.</summary>
-    private CStmt LowerForParallel(IReadOnlyList<Item> objectItems, IReadOnlyList<string> captures, Item bodyItem,
-        IReadOnlyList<bool>? byRef = null)
+    /// <summary>One object of a multi-object <c>for</c>: an expression walked element by element, or a RANGE whose capture
+    /// is the running index (<see cref="End"/> is null for an open <c>N..</c>).</summary>
+    private sealed record ForObject(Item Expr, bool IsRange, Item? End);
+
+    /// <summary>The expression of a multi-object <c>for</c>'s first object when it is a plain expression, or null.</summary>
+    private static Item? FirstForObject(Item objsItem)
+        => Flatten(objsItem) is [{ Content: Zig.ForObj first }, ..] ? first.Arg0 : null;
+
+    /// <summary>The objects and captures of a multi-object <c>for</c> (task #108), which must pair up one to one; a range's
+    /// index capture cannot be taken by reference.</summary>
+    private (List<ForObject> Objects, List<(string Name, bool ByRef)> Captures) DecomposeForMulti(Item objsItem, Item capsItem)
+    {
+        var objects = Flatten(objsItem).Select(o => o.Content switch
+        {
+            Zig.ForObj e      => new ForObject(e.Arg0, false, null),
+            Zig.ForObjFrom r  => new ForObject(r.Arg0, true, null),
+            Zig.ForObjRange r => new ForObject(r.Arg0, true, r.Arg2),
+            _ => throw new IrUnsupportedException("zig multi-object `for`: unexpected object " + (o.Content?.GetType().Name ?? "null")),
+        }).ToList();
+        var captures = Flatten(capsItem).Select(c => c.Content switch
+        {
+            Zig.ForCapVal v => (Name: Tok(v.Arg0), ByRef: false),
+            Zig.ForCapRef r => (Name: Tok(r.Arg1), ByRef: true),
+            _ => throw new IrUnsupportedException("zig multi-object `for`: unexpected capture " + (c.Content?.GetType().Name ?? "null")),
+        }).ToList();
+        if (objects.Count != captures.Count)
+        {
+            throw new CompileException($"zig: a `for` over {objects.Count} objects needs {objects.Count} captures; it has {captures.Count}");
+        }
+        for (var k = 0; k < objects.Count; k++)
+        {
+            if (objects[k].IsRange && captures[k].ByRef)
+            {
+                throw new CompileException($"zig: the index capture `{captures[k].Name}` of a range cannot be taken by reference (`|*{captures[k].Name}|`)");
+            }
+        }
+        return (objects, captures);
+    }
+
+    /// <summary>Lower a runtime multi-object <c>for</c> (task #108): <c>for (s, N..) |x, i|</c> is the slice walked with its
+    /// index (<see cref="LowerForSlice"/>, the shape std writes most); any other shape walks every object in lockstep
+    /// (<see cref="LowerForParallel"/>).</summary>
+    private CStmt LowerForMulti(Item objsItem, Item capsItem, Item bodyItem)
+    {
+        var (objects, captures) = DecomposeForMulti(objsItem, capsItem);
+        if (objects is [{ IsRange: false } slice, { IsRange: true, End: null } index])
+        {
+            return LowerForSlice(LowerExpr(slice.Expr), captures[0].Name, (captures[1].Name, LowerExpr(index.Expr)), bodyItem,
+                byRef: captures[0].ByRef);
+        }
+        return LowerForParallel(objects, captures, bodyItem);
+    }
+
+    /// <summary>Unroll an <c>inline for</c> over comptime lists walked in lockstep (road-to-zig-std S6; any number of lists
+    /// since task #108): each object a comptime list, or an index range starting at 0 (the list's own indices). A comptime
+    /// list paired with a runtime slice cannot be unrolled at all, and a comptime list has no storage to capture by
+    /// reference, so each is named rather than left to a downstream type error.</summary>
+    private CStmt UnrollComptimeMultiFor(Item objsItem, Item capsItem, Item bodyItem)
+    {
+        var (objects, captures) = DecomposeForMulti(objsItem, capsItem);
+        var lists = new List<(ZigComptimeList List, string Name)>(objects.Count);
+        ZigComptimeList? first = null;
+        for (var k = 0; k < objects.Count; k++)
+        {
+            if (captures[k].ByRef)
+            {
+                throw new IrUnsupportedException(
+                    $"`inline for` over comptime lists cannot capture `{captures[k].Name}` by reference: a comptime list has no storage");
+            }
+            ZigComptimeList list;
+            if (objects[k].IsRange)
+            {
+                if (objects[k].End is not null || _ir.ConstEval(LowerExpr(objects[k].Expr)) is not 0 || first is null)
+                {
+                    throw new IrUnsupportedException(
+                        "`inline for` over a comptime list with an index capture must start the index at 0 "
+                        + "(`for (list, 0..) |x, i|`)");
+                }
+                list = IndexList(first.Count);
+            }
+            else if (!TryComptimeIterable(objects[k].Expr, out list))
+            {
+                throw new IrUnsupportedException(
+                    "`inline for` over parallel operands requires every operand to be a comptime list "
+                    + $"(`{first?.Label}` is one; operand {k + 1} is not)");
+            }
+            first ??= list;
+            lists.Add((list, captures[k].Name));
+        }
+        return UnrollComptimeFor(lists.ToArray(), bodyItem);
+    }
+
+    /// <summary>Lower a runtime lockstep <c>for (a, b, c) |x, y, z| body</c> (road-to-zig-std G5): one index walks every
+    /// object, each capture a per-iteration copy of its object's element (<c>|*x|</c>: a pointer into it). Each object is a
+    /// slice (an array, or a pointer to one, walks as a slice over it) read once into a temp, or a RANGE (task #108) whose
+    /// capture is its start plus the index. The walk's length is the first slice's (zig asserts equal lengths; dotcc does
+    /// not check, its ReleaseFast stance on safety checks), or a bounded range's when there is no slice. A <c>_</c> capture
+    /// binds nothing.</summary>
+    private CStmt LowerForParallel(IReadOnlyList<ForObject> objects, IReadOnlyList<(string Name, bool ByRef)> captures, Item bodyItem)
     {
         var pre = new List<CStmt>();
-        var slices = new List<(CExpr Ref, CType.Slice Type)>(objectItems.Count);
-        foreach (var item in objectItems)
+        var walks = new List<(CExpr? Slice, CType.Slice? Type, CExpr? Start)>(objects.Count);
+        CExpr? len = null;
+        CExpr Pinned(CExpr value, string name)
         {
-            var value = LowerExpr(item);
+            if (value is VarRef || _ir.ConstEval(value) is not null) { return value; }
+            var tmp = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = value.Type });
+            pre.Add(new DeclStmt(new List<LocalDecl> { new(tmp, value) }));
+            return new VarRef(tmp) { Type = value.Type, IsLValue = true };
+        }
+        foreach (var obj in objects)
+        {
+            if (obj.IsRange)
+            {
+                var start = Pinned(LowerExprSink(obj.Expr, CType.ULong), "__lo");
+                if (obj.End is { } endItem)
+                {
+                    var end = Pinned(LowerExprSink(endItem, CType.ULong), "__hi");
+                    len ??= new Binary(BinOp.Sub, end, start) { Type = CType.ULong };
+                }
+                walks.Add((null, null, start));
+                continue;
+            }
+            var value = LowerExpr(obj.Expr);
             // An array, or a pointer to one (`&used`), walks as a slice over it.
             if (value.Type.Unqualified is CType.Array arr) { value = CoerceToSlice(value, new CType.Slice(arr.Element)); }
             else if (value.Type.Unqualified is CType.Pointer { Pointee: var pte } && pte.Unqualified is CType.Array parr)
@@ -3743,7 +3801,7 @@ internal sealed partial class ZigLowering
             if (value.Type.Unqualified is not CType.Slice slc)
             {
                 throw new IrUnsupportedException(
-                    $"zig multi-object `for`: each object must be a slice or an array; got {value.Type.Describe()}");
+                    $"zig multi-object `for`: each object must be a slice, an array or a range; got {value.Type.Describe()}");
             }
             CExpr sliceRef = value;
             if (value is not VarRef)
@@ -3752,26 +3810,48 @@ internal sealed partial class ZigLowering
                 pre.Add(new DeclStmt(new List<LocalDecl> { new(tmp, value) }));
                 sliceRef = new VarRef(tmp) { Type = value.Type, IsLValue = true };
             }
-            slices.Add((sliceRef, slc));
+            walks.Add((sliceRef, slc, null));
+        }
+        // The first slice's length wins over a bounded range's: it is the object zig checks the others against.
+        if (walks.FirstOrDefault(w => w.Slice is not null) is { Slice: { } firstSlice })
+        {
+            len = new Member(firstSlice, "Len", false) { Type = CType.ULong, IsLValue = true };
+        }
+        if (len is null)
+        {
+            throw new CompileException("zig: a `for` over unbounded ranges only has no length (give a range an end, or add an object)");
         }
         _symbols.EnterScope();
         var iSym = _symbols.Declare(new Symbol { Name = "__i", Kind = SymKind.Var, Type = CType.ULong });
         var iRef = new VarRef(iSym) { Type = CType.ULong, IsLValue = true };
         var init = new DeclStmt(new List<LocalDecl> { new(iSym, new LitInt("0", 0) { Type = CType.ULong }) });
-        var len = new Member(slices[0].Ref, "Len", false) { Type = CType.ULong, IsLValue = true };
         var cond = new Binary(BinOp.Lt, iRef, len) { Type = CType.Int };
         var post = new Unary(UnOp.PostInc, iRef) { Type = CType.ULong };
         var bodyStmts = new List<CStmt>();
-        for (var k = 0; k < slices.Count; k++)
+        for (var k = 0; k < walks.Count; k++)
         {
-            if (captures[k] == "_") { continue; }
-            var (sref, st) = slices[k];
-            var ptr = new Member(sref, "Ptr", false) { Type = new CType.Pointer(st.Element) };
-            var elem = new DotCC.Ir.Index(ptr, iRef) { Type = st.Element, IsLValue = true };
-            // `|*x|` binds a pointer INTO the object (`x.* = …` writes through), `|x|` a per-iteration copy.
-            var capType = byRef is { } br && br[k] ? new CType.Pointer(st.Element) : st.Element;
-            CExpr capInit = capType is CType.Pointer ? new Unary(UnOp.AddrOf, elem) { Type = capType } : elem;
-            var sym = _symbols.Declare(new Symbol { Name = captures[k], Kind = SymKind.Var, Type = capType });
+            if (captures[k].Name == "_") { continue; }
+            var (sref, st, start) = walks[k];
+            CType capType;
+            CExpr capInit;
+            if (start is not null)
+            {
+                capType = CType.ULong;
+                capInit = start is LitInt { Value: 0 } ? iRef : new Binary(BinOp.Add, start, iRef) { Type = CType.ULong };
+            }
+            else if (sref is not null && st is not null)
+            {
+                var ptr = new Member(sref, "Ptr", false) { Type = new CType.Pointer(st.Element) };
+                var elem = new DotCC.Ir.Index(ptr, iRef) { Type = st.Element, IsLValue = true };
+                // `|*x|` binds a pointer INTO the object (`x.* = …` writes through), `|x|` a per-iteration copy.
+                capType = captures[k].ByRef ? new CType.Pointer(st.Element) : st.Element;
+                capInit = captures[k].ByRef ? new Unary(UnOp.AddrOf, elem) { Type = capType } : elem;
+            }
+            else
+            {
+                throw new System.InvalidOperationException("a multi-object `for` walk is neither a range nor a slice");
+            }
+            var sym = _symbols.Declare(new Symbol { Name = captures[k].Name, Kind = SymKind.Var, Type = capType });
             bodyStmts.Add(new DeclStmt(new List<LocalDecl> { new(sym, capInit) }));
         }
         bodyStmts.Add(LowerStmt(bodyItem));
@@ -3782,6 +3862,13 @@ internal sealed partial class ZigLowering
         return new Block(pre);
     }
 
+    /// <summary>Lower a for-over-slice — <c>for (s) |x| body</c> and (when <paramref name="index"/>
+    /// is set) <c>for (s, START..) |x, i| body</c> — to the C IR <c>for</c>:
+    /// <code>{ var __s = s; for (usize __i = 0; __i &lt; __s.Len; __i++) { var x = __s.Ptr[__i];
+    /// [var i = __i + START;] body } }</code>
+    /// The element capture <c>x</c> is a per-iteration copy (Zig's by-value <c>|x|</c>; the by-ref
+    /// <c>|*x|</c> form is deferred). The slice is hoisted to <c>__s</c> unless it is already a bare
+    /// variable, so <c>.Len</c>/<c>.Ptr</c> aren't re-evaluated with side effects.</summary>
     private CStmt LowerForSlice(CExpr sliceExpr, string elemName, (string name, CExpr start)? index, Item bodyItem, bool byRef,
         int? elemBits = null)
     {

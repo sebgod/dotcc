@@ -5887,6 +5887,43 @@ public sealed class ZigOracleTests
             "    const e: Pick(enum { a }) = .second;\n" +
             "    return @intCast(p.lo + p.hi + @intFromBool(q) + @intFromEnum(e));\n" +
             "}\n", 45, "" },
+        // The general multi-object `for` (task #108, std.MultiArrayList's shapes): a `*` capture mid-triple, a `0..` object last,
+        // four objects with three pointer captures, a bounded range object, and zig fmt's trailing comma. zig returns 130.
+        new object[] { "multi_object_for_shapes",
+            "pub fn main() u8 {\n" +
+            "    const src = [_]u8{ 1, 2, 3, 4 };\n" +
+            "    var dst: [4]u8 = undefined;\n" +
+            "    const scale = [_]u8{ 10, 20, 30, 40 };\n" +
+            "    for (src, &dst, scale) |s, *d, k| {\n" +
+            "        d.* = s + k;\n" +
+            "    }\n" +
+            "    var weighted: u32 = 0;\n" +
+            "    for (dst, scale, 0..) |d, k, i| {\n" +
+            "        weighted += @as(u32, d) * @as(u32, @intCast(i)) + k;\n" +
+            "    }\n" +
+            "    var a: [3]u8 = .{ 0, 0, 0 };\n" +
+            "    var b: [3]u8 = .{ 0, 0, 0 };\n" +
+            "    var c: [3]u8 = .{ 0, 0, 0 };\n" +
+            "    const order = [_]u8{ 2, 0, 1 };\n" +
+            "    for (order, &a, &b, &c) |o, *x, *y, *z| {\n" +
+            "        x.* = o;\n" +
+            "        y.* = o * 2;\n" +
+            "        z.* = o * 3;\n" +
+            "    }\n" +
+            "    var ranged: u32 = 0;\n" +
+            "    for (5..8, order) |r, o| {\n" +
+            "        ranged += @as(u32, @intCast(r)) * o;\n" +
+            "    }\n" +
+            "    var trailing: u32 = 0;\n" +
+            "    for (\n" +
+            "        src,\n" +
+            "        scale,\n" +
+            "    ) |s, k| {\n" +
+            "        trailing += s * k;\n" +
+            "    }\n" +
+            "    const sum = weighted + a[0] + b[1] + c[2] + ranged + trailing;\n" +
+            "    return @intCast(sum % 256);\n" +
+            "}\n", 130, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
