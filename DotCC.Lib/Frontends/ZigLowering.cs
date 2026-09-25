@@ -427,6 +427,78 @@ internal sealed partial class ZigLowering
     /// (Milestone H). A function with no <c>errdefer</c> keeps the direct-return form untouched.</summary>
     private bool _currentFnHasErrdefer;
 
+    /// <summary>The function whose body is lowering now (null outside one): the caller of every runtime call edge
+    /// recorded for the comptime-return check (task #92).</summary>
+    private Symbol? _currentFnSym;
+
+    /// <summary>Above zero while lowering code zig evaluates at COMPILE time (a <c>comptime</c> expression or block, a
+    /// type body, an array extent, a global initializer): a call there is not a runtime call (task #92).</summary>
+    private int _comptimeDepth;
+
+    /// <summary>Functions declared <c>inline fn</c> (and their generic instances), by symbol (task #92).</summary>
+    private readonly HashSet<Symbol> _zigInlineFns = new();
+
+    /// <summary>Runtime call edges, caller to callees, of the whole build (task #92): shared through the module graph.</summary>
+    private Dictionary<Symbol, HashSet<Symbol>> _runtimeCalls => _moduleGraph?.RuntimeCalls ?? _ownRuntimeCalls;
+
+    /// <summary>The runtime call edges of a lowering built without a module graph.</summary>
+    private readonly Dictionary<Symbol, HashSet<Symbol>> _ownRuntimeCalls = new();
+
+    /// <summary>Non-inline functions whose body returns from a <c>comptime { }</c> block (task #92), build-wide.</summary>
+    private HashSet<Symbol> _comptimeReturnFns => _moduleGraph?.ComptimeReturnFns ?? _ownComptimeReturnFns;
+
+    /// <summary>The comptime-return functions of a lowering built without a module graph.</summary>
+    private readonly HashSet<Symbol> _ownComptimeReturnFns = new();
+
+    /// <summary>Record that the function lowering now calls <paramref name="callee"/> at runtime (task #92).</summary>
+    private void RecordRuntimeCall(Symbol callee)
+    {
+        if (_comptimeDepth > 0 || _currentFnSym is not { } caller) { return; }
+        if (!_runtimeCalls.TryGetValue(caller, out var callees))
+        {
+            callees = new HashSet<Symbol>();
+            _runtimeCalls[caller] = callees;
+        }
+        callees.Add(callee);
+    }
+
+    /// <summary>zig's "function called at runtime cannot return value at comptime" (task #92): a non-inline function
+    /// returning from a <c>comptime { }</c> block may only be called at compile time. The runtime call graph is walked
+    /// from <paramref name="roots"/> (<c>main</c>, or every top-level function of a program without one), so a function
+    /// reached only through <c>comptime f()</c>, a global initializer or a function nothing calls is not an error, as in
+    /// zig, which analyzes a function only once it is referenced. A comptime-only instance is never entered.</summary>
+    internal static void CheckComptimeReturnsAtRuntime(IEnumerable<Symbol> roots, Dictionary<Symbol, HashSet<Symbol>> calls,
+        HashSet<Symbol> comptimeReturnFns, HashSet<Symbol> comptimeOnlyFns)
+    {
+        if (comptimeReturnFns.Count == 0) { return; }
+        var seen = new HashSet<Symbol>();
+        var work = new Stack<Symbol>();
+        foreach (var root in roots)
+        {
+            if (seen.Add(root)) { work.Push(root); }
+        }
+        while (work.Count > 0)
+        {
+            var fn = work.Pop();
+            if (comptimeReturnFns.Contains(fn))
+            {
+                throw new CompileException($"zig: function called at runtime cannot return value at comptime ('{fn.Name}')");
+            }
+            if (!calls.TryGetValue(fn, out var callees)) { continue; }
+            foreach (var callee in callees)
+            {
+                if (!comptimeOnlyFns.Contains(callee) && seen.Add(callee)) { work.Push(callee); }
+            }
+        }
+    }
+
+    /// <summary>The roots of the runtime call graph for <see cref="CheckComptimeReturnsAtRuntime"/>: this root module's
+    /// <c>main</c>, or every top-level function when it has none (a library).</summary>
+    internal IEnumerable<Symbol> RuntimeRoots()
+        => _exportedFns.TryGetValue("main", out var main)
+            ? new[] { main }
+            : _exportedFns.Values.Where(s => s.Kind == SymKind.Func);
+
     /// <summary>Monotonic counter for destructure temporaries (<c>__tupN</c>): a destructure
     /// <c>const a, const b = e;</c> evaluates <c>e</c> ONCE into <c>__tupN</c>, then binds each
     /// name to its positional element. The temp lives in the enclosing (brace-less
@@ -753,6 +825,7 @@ internal sealed partial class ZigLowering
         {
             throw new IrUnsupportedException($"zig: top-level `const {name}` depends on itself (a dependency loop)");
         }
+        _comptimeDepth++;   // a top-level const's initializer is evaluated at compile time (task #92)
         try
         {
             // `pub const cache_line: comptime_int = switch (builtin.cpu.arch) { … };` (std.atomic): a
@@ -798,6 +871,7 @@ internal sealed partial class ZigLowering
         }
         finally
         {
+            _comptimeDepth--;
             _lazyValueConstsInProgress.Remove(name);
         }
     }
@@ -1671,6 +1745,7 @@ internal sealed partial class ZigLowering
             {
                 fold.Resolved = _ir.ResolveComptimeFold(fold.Inner) ?? throw _ir.ComptimeFoldFailure(fold.Inner);
             }
+            CheckComptimeReturnsAtRuntime(RuntimeRoots(), _ownRuntimeCalls, _ownComptimeReturnFns, _ownComptimeOnlyFns);
             _ir.Functions.RemoveAll(f => _ownComptimeOnlyFns.Contains(f.Sym));
         }
     }
@@ -1727,7 +1802,9 @@ internal sealed partial class ZigLowering
     /// unchanged.</para></summary>
     private void LowerGlobal(Item nameTok, Item? typeItem, Item rhsItem, bool threadLocal = false, bool isConst = false)
     {
-        LowerGlobalCore(nameTok, typeItem, rhsItem, threadLocal, isConst);
+        _comptimeDepth++;   // a container-level initializer is evaluated at compile time (task #92)
+        try { LowerGlobalCore(nameTok, typeItem, rhsItem, threadLocal, isConst); }
+        finally { _comptimeDepth--; }
         // A top-level `const` is immutable: a store to it is zig's "cannot assign to constant" (task #95).
         if (isConst && _symbols.Resolve(Tok(nameTok)) is { IsGlobal: true } declared) { _zigConstBindings.Add(declared); }
     }
@@ -2288,11 +2365,38 @@ internal sealed partial class ZigLowering
         _ => null,
     };
 
+    /// <summary>The name tokens of the <c>inline fn</c> declarations seen (task #92). The <c>inline</c> keyword is
+    /// otherwise erased where a declaration is unwrapped, and zig lets only an inline function <c>return</c> from a
+    /// <c>comptime { }</c> block when it is called at runtime. Keyed by the AST token, which is unique per declaration
+    /// and shared by every lowering of it; weak, so a finished compilation's AST is not kept alive.</summary>
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Item, object> InlineFnNameToks = new();
+
+    /// <summary>Record <paramref name="fnDef"/> as an <c>inline fn</c> (see <see cref="InlineFnNameToks"/>) and return it.</summary>
+    private static Item MarkInline(Item fnDef)
+    {
+        var name = fnDef.Content switch
+        {
+            Zig.FnDef f => f.Arg1,
+            Zig.FnDefNoArgs f => f.Arg1,
+            Zig.FnDefErr f => f.Arg1,
+            Zig.FnDefNoArgsErr f => f.Arg1,
+            _ => null,
+        };
+        if (name is not null) { InlineFnNameToks.AddOrUpdate(name, InlineMark); }
+        return fnDef;
+    }
+
+    /// <summary>The value <see cref="InlineFnNameToks"/> maps to (only presence matters).</summary>
+    private static readonly object InlineMark = new();
+
+    /// <summary>True when the declaration named by <paramref name="nameTok"/> was an <c>inline fn</c>.</summary>
+    private static bool IsInlineFnName(Item nameTok) => InlineFnNameToks.TryGetValue(nameTok, out _);
+
     private static Item Unwrap(Item decl) => decl.Content switch
     {
         Zig.PubFn p         => p.Arg1,   // `pub FnDef`
-        Zig.InlineFn i      => i.Arg1,   // `inline FnDef` (an optimizer hint; lowers as a plain fn)
-        Zig.PubInlineFn pi  => pi.Arg2,  // `pub inline FnDef`
+        Zig.InlineFn i      => MarkInline(i.Arg1),   // `inline FnDef` (an optimizer hint; lowers as a plain fn)
+        Zig.PubInlineFn pi  => MarkInline(pi.Arg2),  // `pub inline FnDef`
         Zig.ExportFn e      => e.Arg1,   // `export FnDef` (Milestone R)
         Zig.PubExportFn pe  => pe.Arg2,  // `pub export FnDef` (Milestone R)
         Zig.PubVar p        => p.Arg1,   // `pub VarDecl` (exported/public data)

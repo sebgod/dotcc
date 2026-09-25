@@ -1391,7 +1391,10 @@ internal sealed partial class ZigLowering
         }
         // An extent is a comptime position, so a CALL in it runs at compile time (`[lenFor(u8)]u8`): the
         // interpreter lowers the callee's body now if it is still pending (the comptime engine's E2).
-        var size = LowerExpr(sizeExpr);
+        CExpr size;
+        _comptimeDepth++;   // an extent is evaluated at compile time (task #92)
+        try { size = LowerExpr(sizeExpr); }
+        finally { _comptimeDepth--; }
         // A comptime_int local bound to a call (`var stack: [stack_size]Range` in std.sort.pdq) folds its initializer.
         if (size is VarRef { Sym: var sizeSym } && _unfoldedConstInits.TryGetValue(sizeSym, out var sizeInit)) { size = sizeInit; }
         return (_ir.ConstEval(size) ?? (_ir.ResolveComptimeFold(size) is { } folded ? _ir.ConstEval(folded) : null)) is { } n

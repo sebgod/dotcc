@@ -23,6 +23,7 @@ internal sealed partial class ZigLowering
         Item nameTok, Item? paramsItem, Item retType, Item body, bool errUnion = false, string? mangledName = null)
     {
         var declared = DeclareFnCore(nameTok, paramsItem, retType, body, errUnion, mangledName);
+        if (IsInlineFnName(nameTok)) { _zigInlineFns.Add(declared.sym); }
         // The raw parameter ASTs, so the body can give each parameter the width its type spelled, and the
         // return width, so a call's result carries it.
         _fnParamInfos[declared.sym] = CollectParamInfos(paramsItem, out _);
@@ -424,6 +425,7 @@ internal sealed partial class ZigLowering
             || stringSeeds is not null;
         _currentFnRet = (funcSym.Type as CType.Func)?.Return;
         _currentFnName = funcSym.Name;   // the mangle prefix for an in-function container (wall-plan W2)
+        _currentFnSym = funcSym;         // the caller of this body's runtime calls (task #92)
         _localContainerShadows.Clear();  // per-function: local containers scope to this body
         _typeAliasShadows.Clear();       // per-function: comptime-type-param seeds scope to this body
         _currentFnHasErrdefer = false;   // set lazily as `errdefer`s are encountered (Milestone H)
@@ -694,8 +696,8 @@ internal sealed partial class ZigLowering
                 case Zig.MemberFieldLast mf: fields.Add(mf.Arg0); break;       // FieldDecl       → StructField
                 case Zig.MemberMethod mm:    methods.Add(mm.Arg0); break;      // FnDef
                 case Zig.MemberPubMethod mm: methods.Add(mm.Arg1); break;      // 'pub' FnDef
-                case Zig.MemberInlineMethod mm:    methods.Add(mm.Arg1); break; // 'inline' FnDef
-                case Zig.MemberPubInlineMethod mm: methods.Add(mm.Arg2); break; // 'pub' 'inline' FnDef
+                case Zig.MemberInlineMethod mm:    methods.Add(MarkInline(mm.Arg1)); break; // 'inline' FnDef
+                case Zig.MemberPubInlineMethod mm: methods.Add(MarkInline(mm.Arg2)); break; // 'pub' 'inline' FnDef
                 case Zig.MemberComptime: break;   // `comptime { … }`: analysis-only, dropped like the top-level form
                 case Zig.MemberTest: break;       // a `test` block: dropped, like the top-level form
                 case Zig.MemberConst mc:     consts.Add(mc.Arg0); break;       // VarDecl
@@ -725,8 +727,8 @@ internal sealed partial class ZigLowering
                 case Zig.EnumMemberFieldLast mf: fields.Add(mf.Arg0); break;   // EnumField
                 case Zig.EnumMemberMethod mm:    methods.Add(mm.Arg0); break;  // FnDef
                 case Zig.EnumMemberPubMethod mm: methods.Add(mm.Arg1); break;  // 'pub' FnDef
-                case Zig.EnumMemberInlineMethod mm:    methods.Add(mm.Arg1); break;  // 'inline' FnDef
-                case Zig.EnumMemberPubInlineMethod mm: methods.Add(mm.Arg2); break;  // 'pub' 'inline' FnDef
+                case Zig.EnumMemberInlineMethod mm:    methods.Add(MarkInline(mm.Arg1)); break;  // 'inline' FnDef
+                case Zig.EnumMemberPubInlineMethod mm: methods.Add(MarkInline(mm.Arg2)); break;  // 'pub' 'inline' FnDef
                 case Zig.EnumMemberComptime: break;   // `comptime { … }`: analysis-only, dropped
                 case Zig.EnumMemberTest: break;       // a `test` block (std.math.Order's `test invert`): dropped
                 case Zig.EnumMemberConst mc:     consts.Add(mc.Arg0); break;   // VarDecl
@@ -788,8 +790,8 @@ internal sealed partial class ZigLowering
                 case Zig.UnionMemberVariantLast mv: variants.Add(mv.Arg0); break;   // UnionVariant
                 case Zig.UnionMemberMethod mm:      methods.Add(mm.Arg0); break;    // FnDef
                 case Zig.UnionMemberPubMethod mm:   methods.Add(mm.Arg1); break;    // 'pub' FnDef
-                case Zig.UnionMemberInlineMethod mm:    methods.Add(mm.Arg1); break;    // 'inline' FnDef
-                case Zig.UnionMemberPubInlineMethod mm: methods.Add(mm.Arg2); break;    // 'pub' 'inline' FnDef
+                case Zig.UnionMemberInlineMethod mm:    methods.Add(MarkInline(mm.Arg1)); break;    // 'inline' FnDef
+                case Zig.UnionMemberPubInlineMethod mm: methods.Add(MarkInline(mm.Arg2)); break;    // 'pub' 'inline' FnDef
                 case Zig.UnionMemberComptime: break;   // `comptime { … }`: analysis-only, dropped
                 case Zig.UnionMemberTest: break;       // a `test` block: dropped
                 case Zig.UnionMemberConst mc:       consts.Add(mc.Arg0); break;     // VarDecl

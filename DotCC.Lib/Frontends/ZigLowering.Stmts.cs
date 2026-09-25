@@ -1640,10 +1640,15 @@ internal sealed partial class ZigLowering
         if (blockItem.Content is Zig.Block { Arg1: var stmtList } && Flatten(stmtList) is { Count: > 0 } stmts
             && stmts[^1].Content is Zig.StmtReturn ret)
         {
+            // Only an `inline fn` may be CALLED AT RUNTIME with such a block (task #92): a plain one is recorded, and a
+            // runtime call reaching it is rejected once the whole call graph is known.
+            if (_currentFnSym is { } owner && !_zigInlineFns.Contains(owner)) { _comptimeReturnFns.Add(owner); }
             return TryComptimeReturnBlock(stmts, ret) ?? LowerBlock(blockItem);
         }
         _symbols.EnterScope();
-        ExecuteComptimeStmt(blockItem);
+        _comptimeDepth++;   // a comptime block's calls run at compile time (task #92)
+        try { ExecuteComptimeStmt(blockItem); }
+        finally { _comptimeDepth--; }
         _symbols.ExitScope();
         return new Seq(new List<CStmt>());   // compile-time-only — nothing runs at runtime
     }

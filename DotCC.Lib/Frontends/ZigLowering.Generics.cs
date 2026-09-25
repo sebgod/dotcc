@@ -678,6 +678,7 @@ internal sealed partial class ZigLowering
                     if (TryEvalComptimeIntBody(g, valueSeeds, optionalSeeds) is { } value) { _comptimeIntValues[instanceSym] = value; }
                 }
                 _instantiations[mangled] = instanceSym;
+                if (_zigInlineFns.Contains(templateSym)) { _zigInlineFns.Add(instanceSym); }
                 _fnParamInfos[instanceSym] = g.Params;
                 if (DeclaredBitsOfTypeArg(g.RetType) is { } instRetBits) { _fnReturnBits[instanceSym] = instRetBits; }
                 if (anytypeBits.Count > 0) { _instanceAnytypeBits[instanceSym] = anytypeBits; }

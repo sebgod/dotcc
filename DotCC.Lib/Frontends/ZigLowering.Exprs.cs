@@ -360,7 +360,10 @@ internal sealed partial class ZigLowering
             // order. The fold carries the inner expression's type.
             case Zig.PreComptime p:
             {
-                var inner = LowerExpr(p.Arg1);
+                CExpr inner;
+                _comptimeDepth++;   // a call under `comptime` runs at compile time (task #92)
+                try { inner = LowerExpr(p.Arg1); }
+                finally { _comptimeDepth--; }
                 var fold = new ComptimeFold(inner) { Type = inner.Type };
                 // Evaluated NOW when it can be (the comptime engine's E2 lowers a pending callee on demand),
                 // so a position that needs the value during lowering has it; otherwise after the drain.
@@ -1432,6 +1435,7 @@ internal sealed partial class ZigLowering
 
     private CExpr BuildCall(Symbol sym, IReadOnlyList<Item> argItems, CExpr? receiver)
     {
+        RecordRuntimeCall(sym);
         var fn = (CType.Func)sym.Type.Unqualified;
         var args = new List<CExpr>(argItems.Count + 1);
         var paramOffset = 0;

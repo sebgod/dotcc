@@ -329,6 +329,18 @@ internal sealed class ZigModuleGraph
     /// for the interpreter, so <see cref="ResolveComptimeFolds"/> drops them from the emitted program.</summary>
     internal HashSet<Symbol> ComptimeOnlyFns { get; } = new();
 
+    /// <summary>Runtime call edges of the build, caller to callees, from any module (task #92).</summary>
+    internal Dictionary<Symbol, HashSet<Symbol>> RuntimeCalls { get; } = new();
+
+    /// <summary>Non-inline functions of the build that return from a <c>comptime { }</c> block (task #92).</summary>
+    internal HashSet<Symbol> ComptimeReturnFns { get; } = new();
+
+    /// <summary>zig's "function called at runtime cannot return value at comptime", once every body is lowered: see
+    /// <see cref="ZigLowering.CheckComptimeReturnsAtRuntime"/>, rooted at each root module's runtime roots.</summary>
+    internal void CheckComptimeReturnsAtRuntime()
+        => ZigLowering.CheckComptimeReturnsAtRuntime(_roots.SelectMany(r => r.RuntimeRoots()), RuntimeCalls, ComptimeReturnFns,
+            ComptimeOnlyFns);
+
     /// <summary>Drain every lazy module's enqueued function bodies at TOP LEVEL, to a fixpoint. Lowering a
     /// body may reference more decls (in this or another module) or prepare a NEW module, so this loops
     /// until no registered module has pending bodies. Called once after the root units are lowered.</summary>

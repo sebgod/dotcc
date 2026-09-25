@@ -86,6 +86,7 @@ internal sealed partial class ZigLowering
         // and must not leak into whatever lowering resumes after this instance is evaluated).
         var outerTypeInfos = new Dictionary<string, ZigTypeInfo>(_typeInfoBindings, System.StringComparer.Ordinal);
         var outerDefaultPtrs = new Dictionary<string, CExpr?>(_typeBodyDefaultPtrs, System.StringComparer.Ordinal);
+        _comptimeDepth++;   // a type body is evaluated at compile time (task #92)
         try
         {
             return WalkTypeBody(fnName, stmts, typeShadows)
@@ -95,6 +96,7 @@ internal sealed partial class ZigLowering
         }
         finally
         {
+            _comptimeDepth--;
             _typeInfoBindings.Clear();
             foreach (var (infoName, info) in outerTypeInfos) { _typeInfoBindings[infoName] = info; }
             _typeBodyDefaultPtrs.Clear();

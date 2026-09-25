@@ -1295,6 +1295,59 @@ public sealed class ZigStdHelperShapesTests
         cs.ShouldContain("? new Slice<byte>(Libc.L(\"ERR\\0\"u8), 3UL) :");
     }
 
+    [Theory]
+    [InlineData("return seven();")]
+    [InlineData("return viaRuntime();")]
+    [InlineData("const s = S{ .v = 1 };\n    return s.v + S.get();")]
+    public void A_runtime_call_of_a_comptime_returning_function_is_rejected(string body)
+    {
+        // Task #92: zig's "function called at runtime cannot return value at comptime", for a plain (non-inline) function
+        // whose `comptime { return … }` block is reached by a runtime call: directly from `main`, through another
+        // function, or as a container method.
+        Should.Throw<CompileException>(() => EmitZig(
+            "fn seven() u8 {\n    comptime {\n        return 7;\n    }\n}\n"
+            + "fn viaRuntime() u8 {\n    return seven() + 1;\n}\n"
+            + "const S = struct {\n    v: u8,\n    fn get() u8 {\n        comptime {\n            return 2;\n        }\n    }\n};\n"
+            + "pub fn main() u8 {\n    " + body + "\n}\n")).Message.ShouldContain("function called at runtime cannot return value at comptime");
+    }
+
+    [Fact]
+    public void A_comptime_returning_function_is_legal_at_compile_time_inline_or_unreferenced()
+    {
+        // Task #92: the same block is legal in an `inline fn`, under `comptime f()`, from a function only a comptime call
+        // reaches, in a top-level initializer, and in a function nothing calls (zig never analyzes it). zig returns 27.
+        var cs = EmitZig("""
+            fn seven() u8 {
+                comptime {
+                    return 7;
+                }
+            }
+
+            inline fn five() u8 {
+                comptime {
+                    return 5;
+                }
+            }
+
+            fn viaHelper() u8 {
+                return seven() + 1;
+            }
+
+            fn neverCalled() u8 {
+                return seven();
+            }
+
+            const top = seven();
+
+            pub fn main() u8 {
+                const a = comptime seven();
+                const b = comptime viaHelper();
+                return a + b + top + five();
+            }
+            """);
+        cs.ShouldContain("seven()");
+    }
+
     [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {

@@ -117,6 +117,8 @@ internal sealed partial class ZigLowering
         private readonly LoopBreakTarget[] _loopBreakTargets;
         private readonly LoopValueTarget[] _loopValues;
         private readonly SymbolTable.SuspendedFunction _symbols;
+        private readonly Symbol? _currentFnSym;
+        private readonly int _comptimeDepth;
 
         internal FnStateScope(ZigLowering o)
         {
@@ -124,6 +126,8 @@ internal sealed partial class ZigLowering
             _inGenericInstance = o._inGenericInstance;
             _currentFnRet = o._currentFnRet;
             _currentFnName = o._currentFnName;
+            _currentFnSym = o._currentFnSym;
+            _comptimeDepth = o._comptimeDepth;
             _currentFnHasErrdefer = o._currentFnHasErrdefer;
             _currentFnErrorSet = o._currentFnErrorSet;
             _currentContainer = o._currentContainer;
@@ -141,6 +145,8 @@ internal sealed partial class ZigLowering
             _loopValues = o._loopValues.ToArray();
             _symbols = o._symbols.SuspendFunction();
 
+            o._currentFnSym = null;
+            o._comptimeDepth = 0;
             o._currentContainer = null;
             o._currentConstContainer = null;
             o._hoist = null;
@@ -162,6 +168,8 @@ internal sealed partial class ZigLowering
             o._inGenericInstance = _inGenericInstance;
             o._currentFnRet = _currentFnRet;
             o._currentFnName = _currentFnName;
+            o._currentFnSym = _currentFnSym;
+            o._comptimeDepth = _comptimeDepth;
             o._currentFnHasErrdefer = _currentFnHasErrdefer;
             o._currentFnErrorSet = _currentFnErrorSet;
             o._currentContainer = _currentContainer;

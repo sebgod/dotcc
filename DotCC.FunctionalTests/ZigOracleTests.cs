@@ -5448,6 +5448,37 @@ public sealed class ZigOracleTests
             "    const r = row(2);\n" +
             "    return @intCast(i + j + good.len * 10 + bad.len + r[0] * r[1] + TABLE[1][0]);\n" +
             "}\n", 77, "" },
+        // Task #92: a plain function returning from a `comptime { }` block is legal where zig evaluates the call at
+        // compile time (`comptime seven()`, a function only a comptime call reaches, a top-level initializer), in an
+        // `inline fn`, and in a function nothing calls; a runtime call of one is rejected (unit-pinned).
+        new object[] { "comptime_return_called_at_compile_time",
+            "fn seven() u8 {\n" +
+            "    comptime {\n" +
+            "        return 7;\n" +
+            "    }\n" +
+            "}\n" +
+            "\n" +
+            "inline fn five() u8 {\n" +
+            "    comptime {\n" +
+            "        return 5;\n" +
+            "    }\n" +
+            "}\n" +
+            "\n" +
+            "fn viaHelper() u8 {\n" +
+            "    return seven() + 1;\n" +
+            "}\n" +
+            "\n" +
+            "fn neverCalled() u8 {\n" +
+            "    return seven();\n" +
+            "}\n" +
+            "\n" +
+            "const top = seven();\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = comptime seven();\n" +
+            "    const b = comptime viaHelper();\n" +
+            "    return a + b + top + five();\n" +
+            "}\n", 27, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

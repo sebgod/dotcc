@@ -96,6 +96,7 @@ internal sealed class ZigFrontend : IFrontend
         // Then every deferred `comptime` fold of every module (Milestone T pass 3): a fold may call a
         // function whose body only the drain lowered (a lazy module's generic instance).
         moduleGraph.ResolveComptimeFolds(ir);
+        moduleGraph.CheckComptimeReturnsAtRuntime();
         ir.DemandFuncBody = null;
         // Carry the flat error set to the backend so it can emit the `@errorName` code→name
         // table (Milestone X). Merge into any existing map (a mixed build lowers C first, but C
