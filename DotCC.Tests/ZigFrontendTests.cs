@@ -1584,14 +1584,14 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_a_bare_enum_literal_without_a_sink()
+    public void Accepts_a_bare_enum_literal_const_without_a_sink()
     {
-        // A bare `.member` with no known result type can't pick an enum — real zig needs the
-        // result type. dotcc rejects rather than miscompiling (an untyped `const`).
-        var ex = Should.Throw<CompileException>(() => EmitZig(
+        // A bare `.member` with no result type is zig's comptime-only `@EnumLiteral()` (task #113): an untyped `const`
+        // of one is valid zig and lives only at compile time, so its declaration emits nothing. (This pin used to reject
+        // it, a cut zig itself does not make.)
+        Should.NotThrow(() => EmitZig(
             "const Color = enum { red, green };\n" +
             "pub fn main() u8 { const c = .red; _ = c; return 0; }\n"));
-        ex.Message.ShouldContain("result type");
     }
 
     [Fact]

@@ -97,6 +97,9 @@ internal sealed class ZigFrontend : IFrontend
         // function whose body only the drain lowered (a lazy module's generic instance).
         moduleGraph.ResolveComptimeFolds(ir);
         moduleGraph.CheckComptimeReturnsAtRuntime();
+        // A function whose signature carries a comptime-only type (task #113) ran only at comptime: the check above
+        // rejected any runtime call to it, so its runtime copy, which C# could not spell, goes.
+        ir.Functions.RemoveAll(f => ZigLowering.HasComptimeOnlySignature(f.Sym));
         ir.DemandFuncBody = null;
         // Carry the flat error set to the backend so it can emit the `@errorName` code→name
         // table (Milestone X). Merge into any existing map (a mixed build lowers C first, but C

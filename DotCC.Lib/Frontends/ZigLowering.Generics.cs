@@ -285,6 +285,23 @@ internal sealed partial class ZigLowering
     /// (<see cref="_comptimeOnlyFns"/>).</summary>
     internal bool IsComptimeOnlyFn(Symbol fn) => _comptimeOnlyFns.Contains(fn);
 
+    /// <summary>Does <paramref name="t"/> hold a comptime-only type (zig's <c>@EnumLiteral()</c>, task #113), which
+    /// has no runtime representation, anywhere inside it?</summary>
+    internal static bool IsComptimeOnlyType(CType t) => t.Unqualified switch
+    {
+        CType.EnumLiteral => true,
+        CType.Tuple tuple => tuple.Elements.Any(IsComptimeOnlyType),
+        CType.Pointer p => IsComptimeOnlyType(p.Pointee),
+        CType.Array a => IsComptimeOnlyType(a.Element),
+        CType.Slice s => IsComptimeOnlyType(s.Element),
+        CType.Optional o => IsComptimeOnlyType(o.Inner),
+        _ => false,
+    };
+
+    /// <summary>Is <paramref name="fn"/> a function whose parameters or result hold a comptime-only type (task #113)?</summary>
+    internal static bool HasComptimeOnlySignature(Symbol fn) =>
+        fn.Type is CType.Func f && (IsComptimeOnlyType(f.Return) || f.Params.Any(IsComptimeOnlyType));
+
     /// <summary>Wrap a call to a comptime-only instance that <paramref name="owner"/> declares in a
     /// deferred <see cref="ComptimeFold"/>, queued for the graph's pass 3 (the comptime-call engine V1,
     /// road-to-zig-std G3): the shared interpreter runs the instance body once every module has drained
@@ -691,6 +708,14 @@ internal sealed partial class ZigLowering
                     if (TryEvalComptimeIntBody(g, valueSeeds, optionalSeeds) is { } value) { _comptimeIntValues[instanceSym] = value; }
                 }
                 _instantiations[mangled] = instanceSym;
+                // A runtime parameter of a comptime-only type (the enum-literal tuple std.StaticStringMap's initSortedKVs
+                // is handed, task #113): zig only calls such a function at comptime, so a runtime call reaching it is
+                // rejected once the call graph is known, and its runtime copy is dropped (see HasComptimeOnlySignature).
+                if (runtimeParams.Any(p => IsComptimeOnlyType(p.Item2)))
+                {
+                    _comptimeReturnFns.TryAdd(instanceSym,
+                        $"zig: a parameter of comptime-only type must be declared comptime ('{templateSym.Name}')");
+                }
                 if (_zigInlineFns.Contains(templateSym)) { _zigInlineFns.Add(instanceSym); }
                 _fnParamInfos[instanceSym] = g.Params;
                 if (DeclaredBitsOfTypeArg(g.RetType) is { } instRetBits) { _fnReturnBits[instanceSym] = instRetBits; }

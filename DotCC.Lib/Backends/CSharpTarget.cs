@@ -70,6 +70,9 @@ internal sealed class CSharpTarget : ITarget
         // would be a parenthesised expression, not a tuple. Empty → the non-generic `System.ValueTuple`;
         // arity > 7 nests via the 8th `TRest` field (`ValueTuple<T1..T7, ValueTuple<T8..>>`).
         CType.Tuple tup => RenderValueTuple(tup.Elements),
+        // zig's comptime-only enum-literal type (task #113) reaching runtime code: zig rejects a runtime value of it too.
+        CType.EnumLiteral el => throw new IrUnsupportedException(
+            $"zig enum literal `.{el.Name}` needs a known result type at runtime (use a typed declaration, a return, an assignment, or a switch on the enum)"),
         _ => throw new IrUnsupportedException("C# target cannot render type " + t.GetType().Name),
     };
 

@@ -85,6 +85,10 @@ internal sealed partial class IrModule
     /// <c>std.math.ceilPowerOfTwo</c>). A success is just its payload, so this is the only error-union value there is.</summary>
     internal sealed record CtError(System.Int128 Code) : ComptimeValue;
 
+    /// <summary>A comptime enum literal with no result type yet (<c>.kw_if</c> in a tuple, task #113): its name, so two
+    /// tuples that differ only in one key their own instances.</summary>
+    internal sealed record CtEnumLiteral(string Name) : ComptimeValue;
+
     internal sealed record CtVoid : ComptimeValue
     {
         /// <summary>The one void value.</summary>
@@ -153,6 +157,7 @@ internal sealed partial class IrModule
                 case CtFloat f: sb.Append('f').Append(f.Value.ToString("R", CultureInfo.InvariantCulture)); break;
                 case CtBool b: sb.Append(b.Value ? 'T' : 'F'); break;
                 case CtNull: sb.Append('n'); break;
+                case CtEnumLiteral el: sb.Append('e').Append(el.Name).Append(';'); break;
                 case CtArray a: sb.Append('['); foreach (var e in a.Elems) { Spell(e); sb.Append(','); } sb.Append(']'); break;
                 case CtSlice sl:
                     sb.Append('<');
@@ -422,6 +427,8 @@ internal sealed partial class IrModule
         CtSlice sl => SpliceSlice(sl),
         // A void result (`comptime std.debug.assert(…)` as a statement): zig's `{}`, which lowers to the same node.
         CtVoid => new DefaultLit { Type = CType.Void },
+        // An enum literal with no result type yet (task #113): the node it came from, coerced where it meets an enum.
+        CtEnumLiteral el => new DefaultLit { Type = new CType.EnumLiteral(el.Name) },
         _ => throw new IrUnsupportedException("comptime value cannot be spliced back (int/float/bool/struct/array)"),
     };
 
@@ -612,6 +619,8 @@ internal sealed partial class IrModule
         }
         // `{}`, the void value (a `context: anytype` passed `{}` to std.mem.sortUnstable).
         if (u is CType.VoidType) { return CtVoid.Value; }
+        // A bare enum literal (task #113): its value is its type's name.
+        if (u is CType.EnumLiteral enumLiteral) { return new CtEnumLiteral(enumLiteral.Name); }
         // An enum tag zeroes to its first value; an optional / pointer to null; a slice to the empty one.
         if (u is CType.Enum) { return new CtInt(System.Int128.Zero, t); }
         if (u is CType.Optional or CType.Pointer) { return new CtNull(t); }

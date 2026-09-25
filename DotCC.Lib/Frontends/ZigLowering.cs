@@ -1745,7 +1745,7 @@ internal sealed partial class ZigLowering
                 fold.Resolved = _ir.ResolveComptimeFold(fold.Inner) ?? throw _ir.ComptimeFoldFailure(fold.Inner);
             }
             CheckComptimeReturnsAtRuntime(RuntimeRoots(), _ownRuntimeCalls, _ownComptimeReturnFns, _ownComptimeOnlyFns);
-            _ir.Functions.RemoveAll(f => _ownComptimeOnlyFns.Contains(f.Sym));
+            _ir.Functions.RemoveAll(f => _ownComptimeOnlyFns.Contains(f.Sym) || HasComptimeOnlySignature(f.Sym));
         }
     }
 

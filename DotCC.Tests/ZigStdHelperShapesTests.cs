@@ -2540,6 +2540,88 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void An_enum_literal_without_a_result_type_coerces_where_it_meets_an_enum()
+    {
+        var cs = EmitZig("""
+            const Color = enum(u8) { red = 1, green = 2, blue = 4 };
+            const Shape = union(enum) { none, circle: u8 };
+
+            const Table = struct {
+                keys: [*]const u8,
+                colors: [*]const Color,
+                len: u32,
+
+                inline fn init(comptime pairs: anytype) Table {
+                    comptime {
+                        var keys: [pairs.len]u8 = undefined;
+                        var colors: [pairs.len]Color = undefined;
+                        fill(pairs, &keys, &colors);
+                        const fin_keys = keys;
+                        const fin_colors = colors;
+                        return .{ .keys = &fin_keys, .colors = &fin_colors, .len = pairs.len };
+                    }
+                }
+
+                fn fill(pairs: anytype, keys: []u8, colors: []Color) void {
+                    for (pairs, 0..) |kv, i| {
+                        keys[i] = kv.@"0";
+                        colors[i] = kv.@"1";
+                    }
+                }
+
+                fn find(t: Table, key: u8) ?Color {
+                    var i: u32 = 0;
+                    while (i < t.len) : (i += 1) {
+                        if (t.keys[i] == key) return t.colors[i];
+                    }
+                    return null;
+                }
+            };
+
+            const warm = Table.init(.{ .{ 'r', .red }, .{ 'g', .green } });
+            const cool = Table.init(.{ .{ 'r', .blue }, .{ 'g', .green } });
+
+            pub fn main() u8 {
+                const lit = .blue;
+                const c: Color = lit;
+                const maybe: ?Color = lit;
+                const none = .none;
+                const s: Shape = none;
+                var total: u8 = @intFromEnum(c) + @intFromEnum(maybe.?);
+                if (s == .none) total += 10;
+                if (warm.find('r')) |w| total += @intFromEnum(w) * 16;
+                if (cool.find('r')) |w| total += @intFromEnum(w) * 32;
+                if (warm.find('x') == null) total += 1;
+                return total;
+            }
+            """);
+        // Task #113: std.StaticStringMap(Kw).initComptime(.{ .{ "if", .kw_if }, … }). zig types a bare `.member` as the
+        // comptime-only `@EnumLiteral()`; dotcc makes each literal a singleton type carrying its name, so it coerces
+        // statically wherever it meets an enum, an optional enum or a tagged union. A `const` of one emits nothing, the
+        // tuples key distinct instances, and the helper whose parameter carries the literal type runs only at comptime,
+        // so its runtime copy is dropped. zig returns 163.
+        cs.ShouldContain("Color c = Color.blue;");
+        cs.ShouldContain("Color? maybe = Color.blue;");
+        cs.ShouldContain("Shape s = new Shape { __tag = Shape_Tag.none };");
+        cs.ShouldContain("colors = Libc.GlobalArrayFrom<Color>(new Color[]{ (Color)(byte)1, (Color)(byte)2 })");
+        cs.ShouldNotContain("Table_fill");
+    }
+
+    [Fact]
+    public void A_var_of_an_enum_literal_is_rejected_like_zig()
+    {
+        Should.Throw<Exception>(() => EmitZig("""
+            const Color = enum { red, blue };
+            pub fn main() u8 {
+                var lit = .blue;
+                _ = &lit;
+                const c: Color = lit;
+                return @intFromEnum(c);
+            }
+            """)).Message.ShouldContain("variable of type '@EnumLiteral()' must be const or comptime");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

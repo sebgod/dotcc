@@ -6219,6 +6219,60 @@ public sealed class ZigOracleTests
             "    if (nums.get('y')) |n| total += n;\n" +
             "    return @intCast(total);\n" +
             "}\n", 86, "" },
+        // An enum literal with no result type (task #113): tuples of enum literals iterated by a comptime-only helper (two tables,
+        // two instances), a const literal coerced to an enum, an optional enum and a tagged union; the StaticStringMap(Kw) shapes. zig returns 163.
+        new object[] { "enum_literal_no_result_type",
+            "const Color = enum(u8) { red = 1, green = 2, blue = 4 };\n" +
+            "const Shape = union(enum) { none, circle: u8 };\n" +
+            "\n" +
+            "const Table = struct {\n" +
+            "    keys: [*]const u8,\n" +
+            "    colors: [*]const Color,\n" +
+            "    len: u32,\n" +
+            "\n" +
+            "    inline fn init(comptime pairs: anytype) Table {\n" +
+            "        comptime {\n" +
+            "            var keys: [pairs.len]u8 = undefined;\n" +
+            "            var colors: [pairs.len]Color = undefined;\n" +
+            "            fill(pairs, &keys, &colors);\n" +
+            "            const fin_keys = keys;\n" +
+            "            const fin_colors = colors;\n" +
+            "            return .{ .keys = &fin_keys, .colors = &fin_colors, .len = pairs.len };\n" +
+            "        }\n" +
+            "    }\n" +
+            "\n" +
+            "    fn fill(pairs: anytype, keys: []u8, colors: []Color) void {\n" +
+            "        for (pairs, 0..) |kv, i| {\n" +
+            "            keys[i] = kv.@\"0\";\n" +
+            "            colors[i] = kv.@\"1\";\n" +
+            "        }\n" +
+            "    }\n" +
+            "\n" +
+            "    fn find(t: Table, key: u8) ?Color {\n" +
+            "        var i: u32 = 0;\n" +
+            "        while (i < t.len) : (i += 1) {\n" +
+            "            if (t.keys[i] == key) return t.colors[i];\n" +
+            "        }\n" +
+            "        return null;\n" +
+            "    }\n" +
+            "};\n" +
+            "\n" +
+            "const warm = Table.init(.{ .{ 'r', .red }, .{ 'g', .green } });\n" +
+            "const cool = Table.init(.{ .{ 'r', .blue }, .{ 'g', .green } });\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const lit = .blue;\n" +
+            "    const c: Color = lit;\n" +
+            "    const maybe: ?Color = lit;\n" +
+            "    const none = .none;\n" +
+            "    const s: Shape = none;\n" +
+            "    var total: u8 = @intFromEnum(c) + @intFromEnum(maybe.?);\n" +
+            "    if (s == .none) total += 10;\n" +
+            "    if (warm.find('r')) |w| total += @intFromEnum(w) * 16;\n" +
+            "    if (cool.find('r')) |w| total += @intFromEnum(w) * 32;\n" +
+            "    if (warm.find('x') == null) total += 1;\n" +
+            "    return total;\n" +
+            "}\n", 163, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

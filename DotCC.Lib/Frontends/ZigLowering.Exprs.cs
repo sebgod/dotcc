@@ -637,9 +637,10 @@ internal sealed partial class ZigLowering
             // A bare enum literal `.member` or anonymous struct literal `.{…}` outside a
             // typed sink — Zig requires a known result type for both, so reject loudly here
             // (the sink-aware paths in LowerExprSink handle the valid cases).
-            case Zig.EnumLit:
-                throw new IrUnsupportedException(
-                    "zig enum literal `.member` needs a known result type (use a typed declaration, a return, an assignment, or a switch on the enum)");
+            // zig types it `@EnumLiteral()`, a comptime-only value that coerces to an enum where it meets one (a tuple
+            // element `.{ "if", .kw_if }`, task #113); see CType.EnumLiteral and LowerExprSink's coercion.
+            case Zig.EnumLit bare:
+                return new DefaultLit { Type = new CType.EnumLiteral(Tok(bare.Arg1)) };
             // A `.{…}` with no sink: a POSITIONAL list is an inferred tuple literal (`const t =
             // .{a, b};`); a NAMED list still needs a struct result type, so LowerStructInit errors
             // there as before (Milestone G routes both through the one method).

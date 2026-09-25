@@ -1036,6 +1036,15 @@ internal sealed partial class ZigLowering
         // A `void` local (`var unit: void = {};`) has no storage and no C# spelling: the name stays
         // declared, so a use of it is an (erasable) void read, and the declaration emits nothing.
         if (type.Unqualified is CType.VoidType && IsErasableVoid(init)) { return new Seq(new List<CStmt>()); }
+        // `const lit = .blue;` (task #113): an enum literal lives only at compile time. Each read carries the member in its
+        // type and coerces where it meets an enum, so the declaration emits nothing; a `var` of one is zig's error.
+        if (type.Unqualified is CType.EnumLiteral)
+        {
+            return isConst
+                ? new Seq(new List<CStmt>())
+                : throw new CompileException(
+                    $"zig: variable of type '@EnumLiteral()' must be const or comptime ('{Tok(nameTok)}')");
+        }
         return new DeclStmt(new List<LocalDecl> { new(sym2, init) });
     }
 

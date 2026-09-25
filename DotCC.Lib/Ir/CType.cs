@@ -84,6 +84,7 @@ public abstract record CType
         Allocator => "std.mem.Allocator",
         ZigList l => "std.ArrayList(" + l.Element.Describe() + ")",
         Tuple t => "struct { " + string.Join(", ", t.Elements.Select(e => e.Describe())) + " }",
+        EnumLiteral el => "@EnumLiteral() ." + el.Name,
         _ => GetType().Name,
     };
 
@@ -108,6 +109,15 @@ public abstract record CType
     public sealed record VoidType : CType
     {
         public override int SizeOf => 1;
+    }
+
+    /// <summary>zig's comptime-only <c>@EnumLiteral()</c>: a bare <c>.member</c> with no result type
+    /// (std.StaticStringMap(Kw)'s <c>.{ "if", .kw_if }</c>, task #113). dotcc makes each literal its own singleton type
+    /// carrying <see cref="Name"/>, so wherever the value meets an enum it coerces statically, whatever expression carried
+    /// it there (a tuple element read in a comptime-called helper). It has no runtime representation.</summary>
+    public sealed record EnumLiteral(string Name) : CType
+    {
+        public override int SizeOf => 0;
     }
 
     /// <summary>A pointer to <see cref="Pointee"/>. (The C# backend lowers it to the

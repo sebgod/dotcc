@@ -1694,6 +1694,27 @@ internal sealed partial class ZigLowering
     /// <c>return</c>, an assignment target, a switch case value, a struct-literal field.</summary>
     private CExpr LowerExprSink(Item expr, CType? sink)
     {
+        var lowered = LowerExprSinkCore(expr, sink);
+        // A value of zig's enum-literal type (task #113) meeting an enum: `sorted_vals[i] = kv.@"1"` with `kv` an element
+        // of `.{ "if", .kw_if }`. The member rides in the type, so the coercion is static whatever carried the value.
+        return lowered.Type?.Unqualified is CType.EnumLiteral literal && CoerceEnumLiteral(literal.Name, sink) is { } coerced
+            ? coerced
+            : lowered;
+    }
+
+    /// <summary>An enum literal <c>.name</c> at <paramref name="sink"/>: the enum's member, an optional enum's payload,
+    /// or a tagged union's void variant; null when the sink is none of those (the literal then stays loud).</summary>
+    private CExpr? CoerceEnumLiteral(string name, CType? sink) => sink?.Unqualified switch
+    {
+        CType.Enum en => ResolveEnumLit(name, en),
+        CType.Optional { Inner.Unqualified: CType.Enum optEnum } => ResolveEnumLit(name, optEnum),
+        CType.Named n when _unions.TryGetValue(n.Name, out var uinfo) => BuildVoidVariant(uinfo, name),
+        _ => null,
+    };
+
+    /// <summary>See <see cref="LowerExprSink"/>.</summary>
+    private CExpr LowerExprSinkCore(Item expr, CType? sink)
+    {
         switch (expr.Content)
         {
             // A lazy module's UNTYPED top-level const read at a sink (`alignment: Alignment = default_alignment`
