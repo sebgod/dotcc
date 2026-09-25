@@ -1336,7 +1336,8 @@ internal sealed partial class ZigLowering
         if (size is VarRef { Sym: var sizeSym } && _unfoldedConstInits.TryGetValue(sizeSym, out var sizeInit)) { size = sizeInit; }
         return (_ir.ConstEval(size) ?? (_ir.ResolveComptimeFold(size) is { } folded ? _ir.ConstEval(folded) : null)) is { } n
             ? (int)n
-            : throw new IrUnsupportedException("a `[N]T` array size must be a constant integer expression");
+            : throw new IrUnsupportedException("a `[N]T` array size must be a constant integer expression"
+                + (_ir.ComptimeMiss is { } why ? $" (the interpreter stopped at {why})" : ""));
     }
 
     /// <summary>Decode a Zig integer literal — decimal, <c>0x</c>/<c>0o</c>/<c>0b</c> radix, with

@@ -1028,6 +1028,13 @@ internal sealed partial class ZigLowering
                 case Zig.EnumFieldInit ef: mName = Tok(ef.Arg0); valExpr = ef.Arg2; break;    // IDENT '=' Expr
                 default: throw new IrUnsupportedException("zig enum member: " + (emItem.Content?.GetType().Name ?? "null"));
             }
+            // `_` marks a NON-EXHAUSTIVE enum (`enum(u8) { a, b, _ }`): it is no member, so it never reaches the emitted
+            // enum, `field_names` or `field_values` (it had been lowered as a member `_ = 2`).
+            if (valExpr is null && mName == "_")
+            {
+                _nonExhaustiveEnums.Add(name);
+                continue;
+            }
             if (valExpr is not null)
             {
                 var lowered = LowerExpr(valExpr);
@@ -2777,6 +2784,13 @@ internal sealed partial class ZigLowering
                 "return, assignment, call argument, or nested inside `@as(T, …)`");
         }
         var operand = LowerExpr(bargs[0]);
+        // `@enumFromInt(f_value)` of a 128-bit operand (a comptime_int element, std.enums): C# converts an Int128 to an
+        // enum only through the enum's underlying integer.
+        if (name == "@enumFromInt" && sink.Unqualified is CType.Enum { Underlying: var enumBase }
+            && operand.Type.Unqualified is CType.Prim { Bytes: 16 })
+        {
+            operand = new Cast(enumBase, operand) { Type = enumBase };
+        }
         return name == "@bitCast"
             ? new BitCast(sink, operand) { Type = sink }
             : new Cast(sink, operand) { Type = sink };

@@ -383,6 +383,9 @@ internal sealed partial class ZigLowering
         var fnSeeds = new List<(string name, ZigLowering owner, Symbol fn)>();
         var aggregateSeeds = new List<(string name, IrModule.ComptimeValue value, CType type)>();
         var comptimeIntArgs = new Dictionary<string, long>(System.StringComparer.Ordinal);
+        // A comptime_int argument beyond `long` (std.sort.pdq's `math.log2(math.maxInt(usize) + 1)`, 2^64): bound as a
+        // comptime global the interpreter reads at full width, since a value seed is a `long`.
+        var wideComptimeIntArgs = new Dictionary<string, System.Int128>(System.StringComparer.Ordinal);
         var runtimeArgItems = new List<Item>();
 
         // Phase 1 — resolve each comptime TYPE arg in the CALLER's environment (a type-arg spelled as an
@@ -400,8 +403,10 @@ internal sealed partial class ZigLowering
                     break;
                 // An `anytype` bound to a `comptime_int` (`log2(pos_max)` in std.math.IntFittingRange) is comptime:
                 // zig instantiates per VALUE, and `@TypeOf(x)` is `comptime_int`, so it is a value seed here.
-                case ParamKind.AnyType when argScope.ComptimeIntArgValue(argItems[i]) is { } ctIntArg:
-                    comptimeIntArgs[g.Params[i].Name] = ctIntArg;
+                // Evaluated ONCE: the argument may run a comptime call, which must not be lowered twice.
+                case ParamKind.AnyType when argScope.ComptimeIntArgValue128(argItems[i]) is { } ctIntArg:
+                    if (ctIntArg >= long.MinValue && ctIntArg <= long.MaxValue) { comptimeIntArgs[g.Params[i].Name] = (long)ctIntArg; }
+                    else { wideComptimeIntArgs[g.Params[i].Name] = ctIntArg; }
                     anytypeSeeds.Add((g.Params[i].Name, CType.ComptimeInt));
                     break;
                 case ParamKind.AnyType:
@@ -497,6 +502,23 @@ internal sealed partial class ZigLowering
                             stringSeeds.Add((g.Params[i].Name, str));
                             break;
                         }
+                        // A comptime SLICE param of a non-byte element (std.enums.valuesFromFields's `comptime field_values:
+                        // []const comptime_int`, fed `@typeInfo(E).@"enum".field_values`): the argument's comptime value, a
+                        // member list or any comptime slice, keys the instance by digest and the body reads it as a comptime
+                        // aggregate.
+                        if (valueParamType is CType.Slice comptimeSlice)
+                        {
+                            if (argScope.ComptimeSliceArg(argItems[i], comptimeSlice) is not { } sliceValue)
+                            {
+                                throw new IrUnsupportedException(
+                                    $"call to generic '{templateSym.Name}': the `comptime {g.Params[i].Name}` argument must be a "
+                                    + "compile-time-known slice (a `@typeInfo` member list, or a comptime array or slice)"
+                                    + (_ir.ComptimeMiss is { } sliceWhy ? $" (the interpreter stopped at {sliceWhy})" : ""));
+                            }
+                            mangleTokens.Add("c" + IrModule.ComptimeDigest(sliceValue));
+                            aggregateSeeds.Add((g.Params[i].Name, sliceValue, valueParamType));
+                            break;
+                        }
                         // A comptime STRUCT param (`comptime cpu: std.Target.Cpu` in std.simd.suggestVectorLengthForCpu,
                         // the target-identity segment T4): the interpreter's value of the argument keys the instance
                         // by a digest of its contents, and the body reads it as a comptime aggregate.
@@ -538,6 +560,10 @@ internal sealed partial class ZigLowering
                     case ParamKind.AnyType when comptimeIntArgs.TryGetValue(g.Params[i].Name, out var ctInt):
                         mangleTokens.Add("ci" + (ctInt >= 0 ? ctInt.ToString(inv) : "n" + (-(System.Int128)ctInt).ToString(inv)));
                         valueSeeds.Add((g.Params[i].Name, ctInt, CType.ComptimeInt));
+                        break;
+                    case ParamKind.AnyType when wideComptimeIntArgs.TryGetValue(g.Params[i].Name, out var wideInt):
+                        mangleTokens.Add("ci" + (wideInt >= 0 ? wideInt.ToString(inv) : "n" + (-wideInt).ToString(inv)));
+                        aggregateSeeds.Add((g.Params[i].Name, new IrModule.CtInt(wideInt, CType.ComptimeInt), CType.ComptimeInt));
                         break;
                     case ParamKind.AnyType:
                         // A hybrid (wall-plan W5): its inferred type keys the specialization AND the
@@ -592,7 +618,8 @@ internal sealed partial class ZigLowering
                         _comptimeOptionalVars[optSym] = (hasValue, value, inner);
                     }
                     runtimeParams = g.Params
-                        .Where(p => p.Kind is ParamKind.Runtime or ParamKind.AnyType && !comptimeIntArgs.ContainsKey(p.Name))
+                        .Where(p => p.Kind is ParamKind.Runtime or ParamKind.AnyType && !comptimeIntArgs.ContainsKey(p.Name)
+                                    && !wideComptimeIntArgs.ContainsKey(p.Name))
                         .Select(p => (p.Name, p.Kind == ParamKind.AnyType ? _anytypeSeeds[p.Name] : LowerType(p.TypeAst)))
                         .ToList();
                     ret = !comptimeOnly ? LowerType(g.RetType)
@@ -740,8 +767,13 @@ internal sealed partial class ZigLowering
     /// one, arithmetic over those), when it evaluates at compile time. Null for anything else, including a
     /// value outside the 64-bit range comptime seeds carry today.</summary>
     private long? ComptimeIntArgValue(Item argItem)
+        => ComptimeIntArgValue128(argItem) is { } v && v >= long.MinValue && v <= long.MaxValue ? (long)v : null;
+
+    /// <summary>The comptime_int VALUE of an <c>anytype</c> argument (a literal, an untyped const, or a
+    /// comptime_int-typed expression) at full 128-bit width, or null for any other argument.</summary>
+    private System.Int128? ComptimeIntArgValue128(Item argItem)
     {
-        if (argItem.Content is Zig.Grouped g) { return ComptimeIntArgValue(g.Arg1); }
+        if (argItem.Content is Zig.Grouped g) { return ComptimeIntArgValue128(g.Arg1); }
         using var _ = EnterThrowawayHoist();
         CExpr lowered;
         try { lowered = LowerExpr(argItem); }
@@ -752,9 +784,8 @@ internal sealed partial class ZigLowering
         {
             return null;
         }
-        return _ir.ConstEval(lowered)
-            ?? (_ir.EvalComptimeValue(lowered) is IrModule.CtInt { Value: var big } && big >= long.MinValue && big <= long.MaxValue
-                ? (long)big : null);
+        return _ir.ConstEval(lowered) is { } small ? small
+            : _ir.EvalComptimeValue(lowered) is IrModule.CtInt { Value: var big } ? big : null;
     }
 
     /// <summary>Lower one queued instantiation body (drained after pass 2). Hands the pre-resolved
@@ -921,6 +952,10 @@ internal sealed partial class ZigLowering
                 }
                 return t.owner._fnValueOfInstance.TryGetValue(inst.Instance, out var fnValue) ? (t.owner, fnValue) : null;
             }
+            // `struct { fn lessThan(…) … }.lessThan` inline as the argument (std.enums.EnumIndexer's comparator for
+            // std.mem.sortUnstable): the closure idiom in expression position, reified at its site.
+            case Zig.StructMemberExpr sme:
+                return (argScope, argScope.ReifyClosureExpr(arg, sme));
             // `ByMod.less` (a comparator passed to std.mem.sort): a method named through its container.
             case Zig.Field { Arg0.Content: Zig.Ident { Arg0: var typeTok }, Arg2: var memberTok }
                 when argScope._containerTypes.TryGetValue(Tok(typeTok), out var containerType)

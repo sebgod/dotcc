@@ -200,6 +200,17 @@ internal sealed partial class ZigLowering
                 case Zig.Block or Zig.BlockEmpty:
                     if (WalkTypeBody(fnName, BodyStatements(stmt), typeShadows) is { } r5) { return r5; }
                     break;
+                // `var field_values = …;` (std.enums.EnumIndexer): a comptime variable the body then mutates in place.
+                case Zig.VarDecl vd:
+                    BindTypeBodyComptimeVar(fnName, Tok(vd.Arg1), null, vd.Arg3);
+                    break;
+                case Zig.VarDeclTyped vt:
+                    BindTypeBodyComptimeVar(fnName, Tok(vt.Arg1), vt.Arg3, vt.Arg5);
+                    break;
+                // `@setEvalBranchQuota(…);`, `std.mem.sortUnstable(comptime_int, &field_values, {}, …);`: comptime code, run now.
+                case Zig.StmtExpr se:
+                    RunTypeBodyStatement(fnName, stmt, se.Arg0);
+                    break;
                 default:
                     throw new IrUnsupportedException(
                         $"type-returning generic '{fnName}': a body statement must be a `const NAME = <type>;` alias, a "
@@ -208,6 +219,86 @@ internal sealed partial class ZigLowering
             }
         }
         return null;
+    }
+
+    /// <summary>Bind a comptime <c>var</c> of a type body (std.enums.EnumIndexer's <c>var field_values =
+    /// @typeInfo(E).@"enum".field_values[0..fields_len].*;</c>): its initializer is evaluated by the comptime interpreter
+    /// and the name bound as a comptime global, so a later statement may mutate it in place (a sort through
+    /// <c>&amp;field_values</c>) and a later <c>const</c> read it. A value that does not evaluate is a loud cut.</summary>
+    private void BindTypeBodyComptimeVar(string fnName, string name, Item? typeAst, Item rhs)
+    {
+        var declared = typeAst is { } ta ? LowerType(ta) : null;
+        // `@typeInfo(E).@"enum".field_values[0..n].*`: a copy of an integer member list, as a comptime array.
+        if (TryComptimeListArray(rhs) is { } listArray)
+        {
+            var listSym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = declared ?? listArray.Type });
+            _ir.ComptimeGlobals[listSym] = listArray;
+            return;
+        }
+        CExpr init;
+        using (EnterThrowawayHoist())
+        {
+            init = declared is { } sink ? LowerExprSink(rhs, sink) : LowerExpr(rhs);
+        }
+        if (_ir.EvalComptimeValue(init) is not { } value)
+        {
+            throw new IrUnsupportedException(
+                $"type-returning generic '{fnName}': `var {name}` must be compile-time-known (a type body is evaluated at compile time)"
+                + (_ir.ComptimeMiss is { } why ? $" (the interpreter stopped at {why})" : ""));
+        }
+        var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = declared ?? init.Type });
+        _ir.ComptimeGlobals[sym] = value;
+    }
+
+    /// <summary>An integer member list read as an ARRAY value (<c>list</c>, <c>list[a..b].*</c>, <c>list.*</c>): a fresh
+    /// comptime array of its <c>comptime_int</c> elements. Null for any other expression.</summary>
+    private IrModule.CtArray? TryComptimeListArray(Item rhs)
+    {
+        var cur = rhs;
+        if (cur.Content is Zig.Deref d) { cur = d.Arg0; }
+        long lo = 0;
+        long? hi = null;
+        if (cur.Content is Zig.SliceRange sr)
+        {
+            using var bounds = EnterThrowawayHoist();
+            if (_ir.ConstEval(LowerExpr(sr.Arg2)) is not { } l || _ir.ConstEval(LowerExpr(sr.Arg4)) is not { } h) { return null; }
+            (lo, hi) = (l, h);
+            cur = sr.Arg0;
+        }
+        if (!(TryFoldTypeInfoList(cur, out var list) || cur.Content is Zig.Ident id && _typeInfoLists.TryGetValue(Tok(id.Arg0), out list))
+            || list.Ints is not { } ints)
+        {
+            return null;
+        }
+        var end = hi ?? ints.Count;
+        if (lo < 0 || end > ints.Count || lo > end)
+        {
+            throw new IrUnsupportedException($"zig `{list.Label}[{lo}..{end}]`: out of bounds for its {ints.Count} members");
+        }
+        var elems = ints.Skip((int)lo).Take((int)(end - lo)).Select(v => (IrModule.ComptimeValue)new IrModule.CtInt(v, CType.ComptimeInt)).ToArray();
+        return new IrModule.CtArray(elems, CType.ComptimeInt, new CType.Array(CType.ComptimeInt, elems.Length));
+    }
+
+    /// <summary>Run an expression statement of a type body at compile time: a void builtin (<c>@setEvalBranchQuota</c>)
+    /// through its statement lowering, and anything else (a call such as <c>std.mem.sortUnstable(comptime_int,
+    /// &amp;field_values, {}, …)</c>) through the comptime interpreter, whose effect on a comptime <c>var</c> the body
+    /// then reads. A statement that does not evaluate is a loud cut, never a silent skip.</summary>
+    private void RunTypeBodyStatement(string fnName, Item stmt, Item expr)
+    {
+        // `@setEvalBranchQuota(3 * fields_len * std.math.log2(@max(fields_len, 1)) + …)` only raises a FLOOR, and dotcc's
+        // budget (IrModule.DefaultComptimeStepBudget) is already far above what a type body asks for; evaluating its
+        // argument would instantiate std.math.log2 for nothing. `@compileLog` prints nothing in dotcc.
+        if (expr.Content is Zig.BuiltinCall { Arg0: var builtinTok } && Tok(builtinTok) is "@setEvalBranchQuota" or "@compileLog")
+        {
+            return;
+        }
+        using var hoist = EnterThrowawayHoist();
+        if (_ir.EvalComptimeValue(LowerExpr(expr)) is null)
+        {
+            throw new IrUnsupportedException(
+                $"type-returning generic '{fnName}': a body statement did not evaluate at compile time"
+                + (_ir.ComptimeMiss is { } why ? $" (the interpreter stopped at {why})" : ""));
+        }
     }
 
     /// <summary>A <c>switch</c> STATEMENT in a type-returning body: the comptime subject selects one prong

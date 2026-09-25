@@ -357,13 +357,21 @@ internal sealed partial class IrModule
         _ => throw new IrUnsupportedException("comptime value cannot be spliced back (int/float/bool/struct/array)"),
     };
 
+    /// <summary>Splice one element of a comptime array or slice at its ELEMENT type: an integer stored into an enum element
+    /// (std.enums' `r.* = @enumFromInt(f_value)`, still a comptime_int) is cast from the enum's underlying type, since C# has
+    /// no conversion from a 128-bit carrier to an enum.</summary>
+    private CExpr SpliceElement(ComptimeValue v, CType element)
+        => element is CType.Enum en && v is CtInt ci
+            ? new Cast(element, SpliceInt(new CtInt(ci.Value, en.Underlying))) { Type = element }
+            : Splice(v);
+
     /// <summary>Splice a comptime array value back as a <see cref="StackArray"/> — a dense element
     /// list (each element recursively spliced). At a local <c>const</c> use site this lowers to a
     /// <c>stackalloc</c>; the post-pass re-homes a global one into a pinned, program-lifetime store.</summary>
     private CExpr SpliceArray(CtArray a)
     {
         var elems = new List<CExpr>(a.Elems.Length);
-        foreach (var e in a.Elems) { elems.Add(Splice(e)); }
+        foreach (var e in a.Elems) { elems.Add(SpliceElement(e, a.Element.Unqualified)); }
         return new StackArray(a.Element, elems) { Type = a.Type };
     }
 
@@ -439,10 +447,19 @@ internal sealed partial class IrModule
     /// not spliced yet.</summary>
     private CExpr SpliceSlice(CtSlice sl)
     {
-        if (sl.Type.Unqualified is not CType.Slice { Element: var elem }
-            || elem.Unqualified is not CType.Prim { Integer: true, Bytes: 1 })
+        if (sl.Type.Unqualified is not CType.Slice { Element: var elem })
         {
-            throw new IrUnsupportedException("comptime slice value cannot be spliced (only a byte slice is, as a string)");
+            throw new IrUnsupportedException("comptime slice value cannot be spliced (not a slice type)");
+        }
+        // Any other element (std.enums' `[]const comptime_int` / `[]const E`): its elements in a pinned, program-lifetime
+        // array, viewed as the slice (the comptime memory a zig slice of comptime data points into).
+        if (elem.Unqualified is not CType.Prim { Integer: true, Bytes: 1 })
+        {
+            var elems = new List<CExpr>((int)sl.Length);
+            for (var k = 0; k < sl.Length; k++) { elems.Add(SpliceElement(sl.Backing.Elems[sl.Offset + k], elem.Unqualified)); }
+            var pinned = new PinnedArray(elem.Unqualified, elems, null) { Type = new CType.Pointer(elem.Unqualified) };
+            var count = new LitInt(sl.Length.ToString(System.Globalization.CultureInfo.InvariantCulture), sl.Length) { Type = CType.ULong };
+            return new SliceNew(pinned, count, elem, elem.IsConst) { Type = sl.Type };
         }
         var sb = new System.Text.StringBuilder("\"");
         for (var k = 0; k < sl.Length; k++)
@@ -492,6 +509,8 @@ internal sealed partial class IrModule
             if (p.Name == "_Bool") { return new CtBool(false); }
             return p.Integer ? new CtInt(System.Int128.Zero, t) : new CtFloat(0.0, t);
         }
+        // `{}`, the void value (a `context: anytype` passed `{}` to std.mem.sortUnstable).
+        if (u is CType.VoidType) { return CtVoid.Value; }
         // An enum tag zeroes to its first value; an optional / pointer to null; a slice to the empty one.
         if (u is CType.Enum) { return new CtInt(System.Int128.Zero, t); }
         if (u is CType.Optional or CType.Pointer) { return new CtNull(t); }
@@ -766,6 +785,23 @@ internal sealed partial class IrModule
             case LitStr ls:
                 return StringBytes(ls);
 
+            // `ZigMem.CopyForwards(dst, src)` / `CopyBackwards`: an array copy (`const final = result;`, `@memcpy`,
+            // `dst[a..b].* = src`) between comptime arrays, element by element. Anything else is not a comptime value.
+            case ZigMemCall { Method: "CopyForwards" or "CopyBackwards", Args: [var copyDst, var copySrc] }:
+            {
+                if (ComptimeArrayWindow(EvalComptime(copyDst)) is not var (dstElems, dstOffset, _)
+                    || EvalComptime(copySrc) is not CtSlice srcSlice)
+                {
+                    return null;
+                }
+                var copyCount = srcSlice.Length;
+                if (dstOffset + copyCount > dstElems.Length) { return null; }
+                var copied = new ComptimeValue[copyCount];
+                for (long k = 0; k < copyCount; k++) { copied[k] = CloneComptime(srcSlice.Backing.Elems[srcSlice.Offset + k]); }
+                for (long k = 0; k < copyCount; k++) { dstElems[dstOffset + k] = copied[k]; }
+                return CtVoid.Value;
+            }
+
             case SliceNew sliceNew:
             {
                 var (backing, at) = EvalComptime(sliceNew.Ptr) switch
@@ -960,16 +996,23 @@ internal sealed partial class IrModule
             BinOp.Mul => new CtInt(unchecked(a * c), ty),
             BinOp.Div => c != System.Int128.Zero ? new CtInt(a / c, ty) : null,
             BinOp.Mod => c != System.Int128.Zero ? new CtInt(a % c, ty) : null,
-            BinOp.Shl => new CtInt(unchecked(a << (int)c), ty),
+            // A count of 128 or more shifts every bit out (a comptime_int is unbounded; C#'s Int128 would mask the count to
+            // 7 bits, so `x >> 128` stayed `x` and std.math.log2's comptime loop never ended).
+            BinOp.Shl => new CtInt(c >= 128 ? System.Int128.Zero : unchecked(a << (int)c), ty),
             // A right shift sees the left operand at its own width: an unsigned one is never sign-extended, so
             // `~@as(u64, 0) >> 42` (std.bit_set's last_item_mask) keeps its 22 low bits, not 128 bits of ones.
-            BinOp.Shr => new CtInt((TypeOf(l).Unqualified is CType.Prim { Integer: true } lp ? WrapToWidth(a, lp) : a) >> (int)c, ty),
+            BinOp.Shr => new CtInt(ShiftRightSaturating(TypeOf(l).Unqualified is CType.Prim { Integer: true } lp ? WrapToWidth(a, lp) : a, c), ty),
             BinOp.BitAnd => new CtInt(a & c, ty),
             BinOp.BitOr => new CtInt(a | c, ty),
             BinOp.BitXor => new CtInt(a ^ c, ty),
             _ => null,
         };
     }
+
+    /// <summary><paramref name="a"/> shifted right by <paramref name="count"/> at full width: a count of 128 or more leaves
+    /// only the sign (0 or -1), where C#'s shift would mask the count.</summary>
+    private static System.Int128 ShiftRightSaturating(System.Int128 a, System.Int128 count)
+        => count >= 128 ? (a < 0 ? System.Int128.NegativeOne : System.Int128.Zero) : a >> (int)count;
 
     private bool Compare(BinOp op, ComptimeValue l, ComptimeValue r)
     {
@@ -1437,6 +1480,12 @@ internal sealed partial class IrModule
                     if (e.Expr is Call { Callee: "memcpy" or "memmove" or "memset" } mem)
                     {
                         throw new ComptimeAbort($"a `{mem.Callee}` over values not known at compile time");
+                    }
+                    // Any other call or memory operation the interpreter could not run has an effect it cannot model:
+                    // skipping it had left an array copy (`const final = result;`) all zeros.
+                    if (e.Expr is Call or ZigMemCall)
+                    {
+                        throw new ComptimeAbort("a call whose effect is not known at compile time");
                     }
                 }
                 break;

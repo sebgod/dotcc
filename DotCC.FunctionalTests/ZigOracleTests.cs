@@ -5177,6 +5177,39 @@ public sealed class ZigOracleTests
             "    m.step();\n" +
             "    return @truncate(m.s[0] +% m.s[2] +% m.count);\n" +
             "}\n", 20, "" },
+        // Task #89 (std.enums.valuesFromFields shape): an inline function whose `comptime { …; return &final; }` block builds a
+        // slice from a `comptime []const comptime_int` argument, as u8 and as an enum. The slice is a pinned static of the evaluated
+        // elements (it had dangled into the frame, and the array copy had been skipped to zeros).
+        new object[] { "comptime_block_static_slice",
+            "const Color = enum(u8) { red = 4, green = 9, blue = 2 };\n" +
+            "\n" +
+            "inline fn table(comptime fv: []const comptime_int) []const u8 {\n" +
+            "    comptime {\n" +
+            "        var result: [fv.len]u8 = undefined;\n" +
+            "        for (&result, fv) |*r, f| {\n" +
+            "            r.* = @intCast(f * 2);\n" +
+            "        }\n" +
+            "        const final = result;\n" +
+            "        return &final;\n" +
+            "    }\n" +
+            "}\n" +
+            "\n" +
+            "inline fn colors(comptime fv: []const comptime_int) []const Color {\n" +
+            "    comptime {\n" +
+            "        var result: [fv.len]Color = undefined;\n" +
+            "        for (&result, fv) |*r, f| {\n" +
+            "            r.* = @enumFromInt(f);\n" +
+            "        }\n" +
+            "        const final = result;\n" +
+            "        return &final;\n" +
+            "    }\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const t = table(&.{ 5, 6, 7 });\n" +
+            "    const c = colors(&.{ 2, 9 });\n" +
+            "    return t[0] + t[1] + t[2] + @intFromEnum(c[0]) * 10 + @intFromEnum(c[1]);\n" +
+            "}\n", 65, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -6458,6 +6491,21 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // std.enums.values from real std (task #89): the enum's members as a comptime slice, walked at runtime.
+    [Fact]
+    public void Dotcc_matches_zig_std_enums_values() =>
+        MatchesZigWithRealStd("std_enums_values",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const Suit = enum { clubs, diamonds, hearts, spades };\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const vs = std.enums.values(Suit);\n" +
+            "    var total: usize = vs.len * 10;\n" +
+            "    for (vs, 0..) |v, i| total += @intFromEnum(v) * i;\n" +
+            "    return @intCast(total);\n" +
+            "}\n", 54);
 
     // std.crypto.hash.Md5 and sha2.Sha224 / Sha256 from real std (task #90): one-shot hashes of three inputs and a streamed
     // update/final, every digest byte printed. The SHA-NI and ARMv8 assembly paths fold away (dotcc's target reports no `sha`).

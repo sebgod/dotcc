@@ -627,6 +627,12 @@ internal sealed partial class ZigLowering
             };
             return true;
         }
+        // `<info>.mode` of an enum (std.enums.EnumIndexer's `if (@typeInfo(E).@"enum".mode == .nonexhaustive)`).
+        if (expr.Content is Zig.Field mf && Tok(mf.Arg2) == "mode" && TryEvalTypeInfo(mf.Arg0, out var mInfo) && mInfo.Tag == "enum")
+        {
+            tag = mInfo.Type.Unqualified is CType.Enum me && _nonExhaustiveEnums.Contains(me.Name) ? "nonexhaustive" : "exhaustive";
+            return true;
+        }
         // `<info>.size` on a SLICE — `.slice`, the one pointer size class dotcc's lowering keeps (a slice is
         // its own `CType.Slice`). `*T` / `[*]T` / `[*c]T` share one C pointer, so for those the size stays the
         // loud cut TryFoldTypeInfoValue raises (std.meta.Elem switches on it).

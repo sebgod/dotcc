@@ -53,6 +53,9 @@ internal sealed partial class ZigLowering
     /// the width and on <c>@sizeOf</c>. Same shape of judgement as `bits` needing a spelling.</summary>
     private readonly HashSet<string> _enumsWithSpelledTag = new(System.StringComparer.Ordinal);
 
+    /// <summary>Enum names declared NON-EXHAUSTIVE (a trailing <c>_</c>), for <c>@typeInfo(E).@"enum".mode</c>.</summary>
+    private readonly HashSet<string> _nonExhaustiveEnums = new(System.StringComparer.Ordinal);
+
     /// <summary>The declared FIELDS of a struct/union type in declaration order, or null when the
     /// type names no registered aggregate. Order is load-bearing: <c>field_names</c> and
     /// <c>field_types</c> are index-parallel, and zig guarantees declaration order.</summary>
@@ -70,6 +73,33 @@ internal sealed partial class ZigLowering
     /// <summary>A tuple's field names, its positions spelled as decimal strings, as zig names them.</summary>
     private static IReadOnlyList<string> TupleFieldNames(CType.Tuple t)
         => Enumerable.Range(0, t.Elements.Count).Select(i => i.ToString(System.Globalization.CultureInfo.InvariantCulture)).ToList();
+
+    /// <summary>The comptime value of an argument bound to a <c>comptime x: []const T</c> parameter: an integer member
+    /// list (<c>@typeInfo(E).@"enum".field_values</c>) as a comptime slice of <c>comptime_int</c>, or any argument the
+    /// interpreter evaluates to a slice or array. Null when it is neither.</summary>
+    private IrModule.ComptimeValue? ComptimeSliceArg(Item arg, CType.Slice sliceType)
+    {
+        if (TryFoldTypeInfoList(arg, out var list) || arg.Content is Zig.Ident id && _typeInfoLists.TryGetValue(Tok(id.Arg0), out list))
+        {
+            if (list.Ints is not { } ints)
+            {
+                throw new IrUnsupportedException(
+                    $"zig `{list.Label}` as a comptime slice argument: only an integer member list (`field_values`) is modeled");
+            }
+            var element = sliceType.Element.Unqualified;
+            var elems = ints.Select(v => (IrModule.ComptimeValue)new IrModule.CtInt(v, element)).ToArray();
+            var backing = new IrModule.CtArray(elems, element, new CType.Array(element, elems.Length));
+            return new IrModule.CtSlice(backing, 0, elems.Length, sliceType);
+        }
+        using var hoist = EnterThrowawayHoist();
+        var value = _ir.EvalComptimeValue(LowerExprSink(arg, sliceType));
+        return value switch
+        {
+            IrModule.CtSlice => value,
+            IrModule.CtArray a => new IrModule.CtSlice(a, 0, a.Elems.Length, sliceType),
+            _ => null,
+        };
+    }
 
     /// <summary>Fold a <c>@typeInfo</c> payload field that yields a member LIST — the parallel
     /// arrays <c>field_names</c> / <c>field_types</c> / <c>field_values</c>. Returns false when the

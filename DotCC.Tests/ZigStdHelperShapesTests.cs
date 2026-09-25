@@ -883,6 +883,67 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_comptime_block_returning_a_local_slice_is_a_static_of_its_evaluated_elements()
+    {
+        var cs = EmitZig("""
+            const Color = enum(u8) { red = 4, green = 9, blue = 2 };
+
+            inline fn table(comptime fv: []const comptime_int) []const u8 {
+                comptime {
+                    var result: [fv.len]u8 = undefined;
+                    for (&result, fv) |*r, f| {
+                        r.* = @intCast(f * 2);
+                    }
+                    const final = result;
+                    return &final;
+                }
+            }
+
+            inline fn colors(comptime fv: []const comptime_int) []const Color {
+                comptime {
+                    var result: [fv.len]Color = undefined;
+                    for (&result, fv) |*r, f| {
+                        r.* = @enumFromInt(f);
+                    }
+                    const final = result;
+                    return &final;
+                }
+            }
+
+            pub fn main() u8 {
+                const t = table(&.{ 5, 6, 7 });
+                const c = colors(&.{ 2, 9 });
+                return t[0] + t[1] + t[2] + @intFromEnum(c[0]) * 10 + @intFromEnum(c[1]);
+            }
+            """);
+        // Task #89 (std.enums.valuesFromFields' shape): the `comptime { …; return &final; }` block runs in the interpreter and
+        // its slice becomes a pinned static. Two silent miscompiles: lowered as runtime code it returned a slice over the
+        // frame's `stackalloc` (dangling), and the interpreter had skipped the `const final = result;` array copy (all zeros).
+        cs.ShouldContain("return new ConstSlice<byte>(Libc.L(\"\\n\\x0C\\x0E\\0\"u8), 3UL);");
+        cs.ShouldContain("new Color[]{ (Color)(byte)2, (Color)(byte)9 }");
+        cs.ShouldNotContain("stackalloc Color");
+    }
+
+    [Fact]
+    public void A_non_exhaustive_enum_has_no_underscore_member_and_reports_its_mode()
+    {
+        var cs = EmitZig("""
+            const E = enum(u8) { a, b, _ };
+
+            pub fn main() u8 {
+                const info = @typeInfo(E).@"enum";
+                const open: u8 = if (info.mode == .nonexhaustive) 10 else 0;
+                const e: E = @enumFromInt(7);
+                return open + @as(u8, info.field_names.len) + @intFromEnum(e);
+            }
+            """);
+        // Task #89: `_` marks the enum non-exhaustive; it had been lowered as a member `_ = 2`, so `field_names.len` said 3.
+        cs.ShouldNotContain("_ = 2,");
+        cs.ShouldContain("byte open = 10;");
+        cs.ShouldContain("return (byte)(open + (byte)2 + (byte)e);");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

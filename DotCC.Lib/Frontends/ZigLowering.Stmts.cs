@@ -1611,14 +1611,43 @@ internal sealed partial class ZigLowering
         // undefined; for (&out, 0..) |*e, i| …; return @as(@Vector(len, T), out); }`) is a computation over
         // comptime operands only, so running it at runtime gives zig's value; it lowers as a plain block.
         if (blockItem.Content is Zig.Block { Arg1: var stmtList } && Flatten(stmtList) is { Count: > 0 } stmts
-            && stmts[^1].Content is Zig.StmtReturn)
+            && stmts[^1].Content is Zig.StmtReturn ret)
         {
-            return LowerBlock(blockItem);
+            return TryComptimeReturnBlock(stmts, ret) ?? LowerBlock(blockItem);
         }
         _symbols.EnterScope();
         ExecuteComptimeStmt(blockItem);
         _symbols.ExitScope();
         return new Seq(new List<CStmt>());   // compile-time-only — nothing runs at runtime
+    }
+
+    /// <summary>A <c>comptime { …; return &amp;final; }</c> block in a SLICE-returning function (std.enums.valuesFromFields):
+    /// zig's slice points into comptime memory, but lowered as runtime code it would point into the frame's
+    /// <c>stackalloc</c> and dangle once the function returns (a silent miscompile). So the block is lowered into a
+    /// throwaway scope, its return value captured, and the whole run by the comptime interpreter; the evaluated slice
+    /// becomes a pinned static. Null when the block does not evaluate at compile time (the caller lowers it plainly).</summary>
+    private CStmt? TryComptimeReturnBlock(IReadOnlyList<Item> stmts, Zig.StmtReturn ret)
+    {
+        if (_currentFnRet?.Unqualified is not CType.Slice retSlice) { return null; }
+        Symbol result;
+        CStmt body;
+        _symbols.EnterScope();
+        try
+        {
+            using var hoist = EnterFreshHoist();
+            var lowered = new List<CStmt>();
+            for (var i = 0; i < stmts.Count - 1; i++) { lowered.Add(LowerStmt(stmts[i])); }
+            var value = LowerExprSink(ret.Arg1, retSlice);
+            lowered.AddRange(_hoist ?? new List<CStmt>());
+            result = _symbols.Declare(new Symbol { Name = "__ctret", Kind = SymKind.Var, Type = retSlice });
+            lowered.Add(new ExprStmt(new Assign(null, new VarRef(result) { Type = retSlice, IsLValue = true }, value) { Type = retSlice }));
+            body = new Block(lowered);
+        }
+        catch (IrUnsupportedException) { return null; }
+        finally { _symbols.ExitScope(); }
+        return _ir.EvalComptimeBlock(body, result) is IrModule.CtSlice slice && _ir.SpliceComptimeValue(slice) is { } spliced
+            ? new Return(spliced)
+            : null;
     }
 
     /// <summary>Execute one statement of a <c>comptime { … }</c> block at lowering time. Supports the
