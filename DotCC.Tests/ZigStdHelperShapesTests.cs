@@ -2121,6 +2121,59 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Enum_reifies_an_enum_as_a_type_returning_function_result()
+    {
+        var cs = EmitZig("""
+            fn Flags(comptime width: u8) type {
+                return @Enum(u8, .exhaustive, &.{ "read", "write", "exec" }, &.{ 1, 2, width });
+            }
+
+            fn Level(comptime n: usize) type {
+                return @Enum(u4, .nonexhaustive, &.{ "low", "high" }, &.{ 0, n -| 1 });
+            }
+
+            fn describe(f: Flags(4)) u8 {
+                return switch (f) {
+                    .read => 10,
+                    .write => 20,
+                    .exec => 40,
+                };
+            }
+
+            pub fn main() u8 {
+                const F = Flags(4);
+                const x: F = .exec;
+                const L = Level(9);
+                const h: L = .high;
+                const sat: u8 = @as(u8, 3) -| 5;
+                const big: u8 = @as(u8, 250) +| 10;
+                return @intFromEnum(x) + describe(.write) + @as(u8, @intFromEnum(h)) + sat + (big - 250);
+            }
+            """);
+        // Task #108 (std.meta.FieldEnum's `return @Enum(IntTag, .exhaustive, field_names, &values)`): a type-returning body
+        // that returns `@Enum(TagInt, mode, names, &values)` registers the enum under the instance's name, members and tag
+        // type as spelled. A saturating op over comptime operands folds (FieldEnum's `field_names.len -| 1`), clamped to the
+        // peer type. zig returns 37.
+        cs.ShouldContain("enum Flags__4 : byte");
+        cs.ShouldContain("exec = 4,");
+        cs.ShouldContain("high = 8,");
+        cs.ShouldContain("byte sat = (byte)0;");
+        cs.ShouldContain("byte big = (byte)255;");
+    }
+
+    [Theory]
+    [InlineData("&.{ \"a\", \"a\" }, &.{ 0, 1 }", "duplicate enum field name 'a'")]
+    [InlineData("&.{ \"a\", \"b\" }, &.{ 1, 1 }", "enum tag value 1 already taken")]
+    [InlineData("&.{ \"a\", \"b\" }, &.{ 1 }", "1 field value(s) for 2 field name(s)")]
+    public void Enum_rejects_duplicate_or_mismatched_members(string lists, string message)
+    {
+        // Task #108: the names and values of an `@Enum` pair up one to one and are each unique, as zig checks.
+        Should.Throw<CompileException>(() => EmitZig(
+            "fn E() type {\n    return @Enum(u8, .exhaustive, " + lists + ");\n}\npub fn main() u8 {\n    const x: E() = .a;\n    return @intFromEnum(x);\n}\n"))
+            .Message.ShouldContain(message);
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

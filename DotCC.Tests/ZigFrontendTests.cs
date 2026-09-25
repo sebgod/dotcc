@@ -4369,9 +4369,11 @@ public sealed class ZigFrontendTests
         // clamp helper. Both operands are already `u8`, so C# infers `T = byte` with no casts.
         var cs = EmitZig(
             "pub fn main() u8 {\n" +
-            "    const a: u8 = 200;\n" +
-            "    const b: u8 = 100;\n" +
-            "    const c: u8 = a +| b;\n" + // 300 -> 255
+            "    var a: u8 = 200;\n" +
+            "    _ = &a;\n" +
+            "    var b: u8 = 100;\n" +
+            "    _ = &b;\n" +
+            "    const c: u8 = a +| b;\n" + // 300 -> 255 (runtime operands: comptime ones fold, task #108)
             "    return c;\n" +
             "}\n");
         cs.ShouldContain("ZigMath.SatAdd(a, b)");
@@ -4383,8 +4385,10 @@ public sealed class ZigFrontendTests
         // `*|` is multiplicative-precedence; routes through `ZigMath.SatMul<T>`.
         var cs = EmitZig(
             "pub fn main() u8 {\n" +
-            "    const a: u8 = 100;\n" +
-            "    const b: u8 = 100;\n" +
+            "    var a: u8 = 100;\n" +
+            "    _ = &a;\n" +
+            "    var b: u8 = 100;\n" +
+            "    _ = &b;\n" +
             "    const c: u8 = a *| b;\n" + // 10000 -> 255
             "    return c;\n" +
             "}\n");
@@ -4398,7 +4402,8 @@ public sealed class ZigFrontendTests
         // cast so C# infers `T = byte` (and the runtime clamps at the u8 range, not int).
         var cs = EmitZig(
             "pub fn main() u8 {\n" +
-            "    const a: u8 = 250;\n" +
+            "    var a: u8 = 250;\n" +
+            "    _ = &a;\n" +
             "    const c: u8 = a +| 5;\n" + // 255 (no saturation, but clamped at u8)
             "    return c;\n" +
             "}\n");
@@ -4411,8 +4416,10 @@ public sealed class ZigFrontendTests
         // Two `i32` operands need no peer casts — C# infers `T = int` directly.
         var cs = EmitZig(
             "pub fn main() u8 {\n" +
-            "    const a: i32 = 100;\n" +
-            "    const b: i32 = 200;\n" +
+            "    var a: i32 = 100;\n" +
+            "    _ = &a;\n" +
+            "    var b: i32 = 200;\n" +
+            "    _ = &b;\n" +
             "    const c: i32 = a +| b;\n" +
             "    return @as(u8, @intCast(c - 258));\n" +
             "}\n");

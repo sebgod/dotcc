@@ -1556,6 +1556,13 @@ internal sealed partial class ZigLowering
                 aggregateSeeds.AddRange(bodyAggregateLocals.Select(l => (l.Name, l.Value, l.Type)));
                 // `return <type expression>;` (the W4 lift): the body DELEGATED — its result is a type that
                 // already exists (another instance, a primitive, `@Int(…)`), so nothing is reified here.
+                // `return @Enum(…);` (task #108): the instance IS the reified enum, registered under its name.
+                if (bodyResult.Enum is { } reifiedEnum)
+                {
+                    var enumType = RegisterReifiedEnum(mangled, reifiedEnum);
+                    _delegatedTypes[mangled] = (enumType, null);
+                    return enumType;
+                }
                 if (!bodyResult.IsStruct && bodyResult.Delegated is { } delegatedType)
                 {
                     _delegatedTypes[mangled] = (delegatedType, bodyResult.DelegatedBits);

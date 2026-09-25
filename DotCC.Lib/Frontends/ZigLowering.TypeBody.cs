@@ -37,9 +37,14 @@ internal sealed partial class ZigLowering
     /// already-resolved type the body delegated to (<see cref="Delegated"/>) together with the declared
     /// integer width it carries (<see cref="DelegatedBits"/> — so <c>fn U() type { return u21; }</c>
     /// still answers 21, not the widened 32). A <c>return @Struct(…)</c> is a struct too, but its fields arrive
-    /// already evaluated (<see cref="Reified"/>) rather than as declarations to lower.</summary>
+    /// already evaluated (<see cref="Reified"/>) rather than as declarations to lower. A <c>return @Enum(…)</c> is an enum
+    /// whose members arrive evaluated (<see cref="Enum"/>), registered under the instance's name.</summary>
     private readonly record struct TypeBodyResult(bool IsStruct, Item? Fields, CType? Delegated, int? DelegatedBits,
-        AggregateLayout Layout = AggregateLayout.Default, IReadOnlyList<ReifiedField>? Reified = null);
+        AggregateLayout Layout = AggregateLayout.Default, IReadOnlyList<ReifiedField>? Reified = null, ReifiedEnum? Enum = null);
+
+    /// <summary>An enum built by <c>@Enum</c> (task #108): its tag type (and the width the source spelled for it), its member
+    /// names and values in order, and whether it is non-exhaustive.</summary>
+    private sealed record ReifiedEnum(CType Tag, int? TagBits, IReadOnlyList<string> Names, IReadOnlyList<long> Values, bool NonExhaustive);
 
     /// <summary>One field of a struct built by <c>@Struct</c>: its name, its type and its default (null when it has
     /// none), all already evaluated at comptime.</summary>
@@ -203,6 +208,10 @@ internal sealed partial class ZigLowering
                 // (std.enums.EnumFieldStruct): a struct built from comptime field lists.
                 case Zig.StmtReturn { Arg1.Content: Zig.BuiltinCall rb } when Tok(rb.Arg0) == "@Struct":
                     return ReifyStructBuiltin(fnName, rb);
+                // `return @Enum(IntTag, .exhaustive, field_names, &std.simd.iota(IntTag, field_names.len));` (std.meta.FieldEnum,
+                // task #108): an enum built from comptime member lists.
+                case Zig.StmtReturn { Arg1.Content: Zig.BuiltinCall eb } when Tok(eb.Arg0) == "@Enum":
+                    return ReifyEnumBuiltin(fnName, eb);
                 case Zig.StmtReturn r:
                 {
                     // `return <type expression>;` — the function's result IS that type (a delegating call,

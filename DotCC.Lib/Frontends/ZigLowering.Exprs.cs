@@ -2670,8 +2670,35 @@ internal sealed partial class ZigLowering
         var right = LowerExpr(r);
         var t = PeerIntType(left, right);
         GuardNo128Saturation(t);
+        if (TryFoldSaturating(helper, left, right, t, DeclaredBitsOfValue(l) ?? DeclaredBitsOfValue(r)) is { } folded) { return folded; }
         var args = new List<CExpr> { CoerceToPeer(left, t), CoerceToPeer(right, t) };
         return new Call($"ZigMath.{helper}", args) { Type = t };
+    }
+
+    /// <summary>Fold a saturating op over two comptime-known operands (std.meta.FieldEnum's
+    /// <c>IntFittingRange(0, field_names.len -| 1)</c>, task #108): the exact result clamped to the peer type's range (its
+    /// declared width when the source spells one), or left unclamped when both are untyped literals, a comptime_int being
+    /// unbounded. Null when either operand is not comptime-known or the result leaves a <c>long</c>.</summary>
+    private CExpr? TryFoldSaturating(string helper, CExpr left, CExpr right, CType t, int? declaredBits)
+    {
+        if (_ir.ConstEval128(left) is not { } a || _ir.ConstEval128(right) is not { } b) { return null; }
+        System.Int128 v = helper switch { "SatAdd" => a + b, "SatSub" => a - b, _ => a * b };
+        if (!(left is LitInt && right is LitInt) && t.Unqualified is CType.Prim { Integer: true, Signed: var signed, Bytes: var bytes })
+        {
+            var bits = declaredBits is { } db and > 0 ? db : bytes * 8;
+            var (min, max) = signed
+                ? (-(System.Int128.One << (bits - 1)), (System.Int128.One << (bits - 1)) - 1)
+                : (System.Int128.Zero, (System.Int128.One << bits) - 1);
+            v = System.Int128.Clamp(v, min, max);
+        }
+        if (v < long.MinValue || v > long.MaxValue) { return null; }
+        var value = (long)v;
+        var literal = new LitInt(value.ToString(System.Globalization.CultureInfo.InvariantCulture), value)
+        {
+            Type = value is >= int.MinValue and <= int.MaxValue ? CType.Int : CType.Long,
+        };
+        // A narrow type's literal renders through a cast (a `u8` result is `(byte)255`, not an unsuffixed-uint `255u`).
+        return literal.Type == t.Unqualified ? literal : new Cast(t, literal) { Type = t };
     }
 
     /// <summary>Reject a saturating op (<c>+|</c>/<c>-|</c>/<c>*|</c>) at a 128-bit operand width.

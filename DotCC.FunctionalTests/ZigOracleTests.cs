@@ -6000,6 +6000,34 @@ public sealed class ZigOracleTests
             "    } else hits += 10;\n" +
             "    return @intCast(total + hits);\n" +
             "}\n", 169, "" },
+        // `@Enum` as a type-returning function's result (task #108, std.meta.FieldEnum's shape): spelled names and values, a
+        // non-exhaustive mode, a value from a comptime param, and typed saturating ops folded at comptime. zig returns 37.
+        new object[] { "enum_builtin_and_saturating_fold",
+            "fn Flags(comptime width: u8) type {\n" +
+            "    return @Enum(u8, .exhaustive, &.{ \"read\", \"write\", \"exec\" }, &.{ 1, 2, width });\n" +
+            "}\n" +
+            "\n" +
+            "fn Level(comptime n: usize) type {\n" +
+            "    return @Enum(u4, .nonexhaustive, &.{ \"low\", \"high\" }, &.{ 0, n -| 1 });\n" +
+            "}\n" +
+            "\n" +
+            "fn describe(f: Flags(4)) u8 {\n" +
+            "    return switch (f) {\n" +
+            "        .read => 10,\n" +
+            "        .write => 20,\n" +
+            "        .exec => 40,\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const F = Flags(4);\n" +
+            "    const x: F = .exec;\n" +
+            "    const L = Level(9);\n" +
+            "    const h: L = .high;\n" +
+            "    const sat: u8 = @as(u8, 3) -| 5;\n" +
+            "    const big: u8 = @as(u8, 250) +| 10;\n" +
+            "    return @intFromEnum(x) + describe(.write) + @as(u8, @intFromEnum(h)) + sat + (big - 250);\n" +
+            "}\n", 37, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

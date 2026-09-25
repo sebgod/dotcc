@@ -100,7 +100,12 @@ internal sealed partial class ZigLowering
                 throw new IrUnsupportedException(
                     "zig `@Struct(…)` is modeled as a type-returning function's result (`fn S(…) type { return "
                     + "@Struct(…); }`), which names the struct after the instance; here it has no name to take");
-            case "@Union" or "@Enum" or "@Pointer" or "@Fn" or "@Tuple":
+            // `@Enum` is modeled as a type-returning function's result, as `@Struct` is (ReifyEnumBuiltin, task #108).
+            case "@Enum":
+                throw new IrUnsupportedException(
+                    "zig `@Enum(…)` is modeled as a type-returning function's result (`fn E(…) type { return "
+                    + "@Enum(…); }`), which names the enum after the instance; here it has no name to take");
+            case "@Union" or "@Pointer" or "@Fn" or "@Tuple":
                 throw new IrUnsupportedException(
                     $"zig `{name}(…)` reifies a type from comptime AGGREGATE arguments (field-name and "
                     + "field-type arrays, an attributes struct), which dotcc has no comptime-aggregate engine "
@@ -153,6 +158,120 @@ internal sealed partial class ZigLowering
             fields.Add(new ReifiedField(names[i], types[i], defaults[i]));
         }
         return new TypeBodyResult(true, null, null, null, layout, fields);
+    }
+
+    /// <summary>Evaluate a type-returning body's <c>return @Enum(TagInt, mode, field_names, field_values);</c> (std.meta.FieldEnum,
+    /// task #108): the tag integer type, whether the enum is non-exhaustive, the member names (as <c>@Struct</c>'s are
+    /// read) and their values (a spelled <c>&amp;.{ … }</c>, or anything the interpreter evaluates to an integer array, as
+    /// <c>&amp;std.simd.iota(IntTag, n)</c>). Registered under the instance's name by the caller.</summary>
+    private TypeBodyResult ReifyEnumBuiltin(string fnName, Zig.BuiltinCall call)
+    {
+        var args = Flatten(call.Arg2);
+        if (args.Count != 4)
+        {
+            throw new IrUnsupportedException(
+                $"zig `@Enum` expects (TagInt, mode, field_names, field_values); got {args.Count} argument(s)");
+        }
+        var tag = LowerType(args[0]).Unqualified;
+        if (tag is not CType.Prim { Integer: true })
+        {
+            throw new CompileException($"zig: `@Enum`'s tag type must be an integer type, not {tag.Describe()}");
+        }
+        var nonExhaustive = ReifiedEnumMode(args[1]);
+        var names = ReifiedFieldNames(fnName, args[2]);
+        var values = ReifiedEnumValues(fnName, args[3], names.Count, tag);
+        var seenNames = new HashSet<string>(System.StringComparer.Ordinal);
+        var seenValues = new HashSet<long>();
+        for (var i = 0; i < names.Count; i++)
+        {
+            if (!seenNames.Add(names[i])) { throw new CompileException($"zig: `@Enum`: duplicate enum field name '{names[i]}'"); }
+            if (!seenValues.Add(values[i])) { throw new CompileException($"zig: `@Enum`: enum tag value {values[i]} already taken"); }
+        }
+        return new TypeBodyResult(false, null, null, null,
+            Enum: new ReifiedEnum(tag, DeclaredBitsOfTypeArg(args[0]), names, values, nonExhaustive));
+    }
+
+    /// <summary><c>@Enum</c>'s mode: <c>.exhaustive</c> (false) or <c>.nonexhaustive</c> (true).</summary>
+    private static bool ReifiedEnumMode(Item arg)
+    {
+        var cur = arg;
+        while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
+        return cur.Content is Zig.EnumLit lit
+            ? Tok(lit.Arg1) switch
+            {
+                "exhaustive" => false,
+                "nonexhaustive" => true,
+                var other => throw new CompileException($"zig: `@Enum`: `.{other}` is not an enum mode"),
+            }
+            : throw new IrUnsupportedException("zig `@Enum`: the mode must be a comptime-known `.exhaustive` or `.nonexhaustive`");
+    }
+
+    /// <summary><c>@Enum</c>'s member values (<c>*const [n]TagInt</c>): a spelled list, each element a constant, or an
+    /// integer array the interpreter evaluates (<c>&amp;std.simd.iota(IntTag, n)</c>). The wrong count is zig's type error.</summary>
+    private List<long> ReifiedEnumValues(string fnName, Item arg, int count, CType tag)
+    {
+        var cur = StripAddrOf(arg);
+        List<long>? values = null;
+        if (cur.Content is Zig.AnonStructInitEmpty) { values = new List<long>(); }
+        else if (cur.Content is Zig.AnonStructInit anon
+                 && Flatten(anon.Arg2) is var inits
+                 && inits.Select(i => i.Content).OfType<Zig.FieldInitPositional>().ToList() is var positional
+                 && positional.Count == inits.Count)
+        {
+            values = positional.Select(p => _ir.ConstEval(LowerExprSink(p.Arg0, tag))
+                ?? throw new IrUnsupportedException($"type-returning generic '{fnName}': an `@Enum` value must be a constant")).ToList();
+        }
+        else
+        {
+            IrModule.ComptimeValue? value;
+            using (EnterThrowawayHoist()) { value = _ir.EvalComptimeValue(LowerExprSink(arg, new CType.Pointer(new CType.Array(tag, count)))); }
+            IEnumerable<IrModule.ComptimeValue>? elems = value switch
+            {
+                IrModule.CtArray arr => arr.Elems,
+                IrModule.CtElemPtr { Index: 0 } ep => ep.Backing.Elems,
+                IrModule.CtSlice sl => sl.Backing.Elems.Skip((int)sl.Offset).Take((int)sl.Length),
+                _ => null,
+            };
+            if (elems?.Select(e => e is IrModule.CtInt ci ? (long?)(long)ci.Value : null).ToList() is { } evaluated
+                && evaluated.All(v => v is not null))
+            {
+                values = evaluated.Select(v => v ?? 0).ToList();
+            }
+        }
+        if (values is null)
+        {
+            throw new IrUnsupportedException(
+                $"type-returning generic '{fnName}': `@Enum`'s field values must be a spelled list or a comptime-known integer array"
+                + (_ir.ComptimeMiss is { } why ? $" (the interpreter stopped at {why})" : ""));
+        }
+        if (values.Count != count)
+        {
+            throw new CompileException($"zig: `@Enum`: {values.Count} field value(s) for {count} field name(s)");
+        }
+        return values;
+    }
+
+    /// <summary>Register an enum <c>@Enum</c> built (<see cref="ReifyEnumBuiltin"/>) under <paramref name="name"/>: its members
+    /// and their symbols, as a declared <c>enum(TagInt) { … }</c> registers them, with the tag type spelled.</summary>
+    private CType.Enum RegisterReifiedEnum(string name, ReifiedEnum reified)
+    {
+        var enumType = new CType.Enum(name, reified.Tag);
+        var members = new List<EnumMember>(reified.Names.Count);
+        var memberSyms = new Dictionary<string, Symbol>(System.StringComparer.Ordinal);
+        for (var i = 0; i < reified.Names.Count; i++)
+        {
+            members.Add(new EnumMember(reified.Names[i], reified.Values[i]));
+            memberSyms[reified.Names[i]] = new Symbol
+            {
+                Name = reified.Names[i], Kind = SymKind.EnumConst, Type = enumType, ConstValue = reified.Values[i], IsGlobal = true,
+            };
+        }
+        _ir.RegisterEnumType(name, reified.Tag, members);
+        _containerTypes[name] = enumType;
+        _enumMembers[name] = memberSyms;
+        _enumsWithSpelledTag.Add(name);
+        if (reified.NonExhaustive) { _nonExhaustiveEnums.Add(name); }
+        return enumType;
     }
 
     /// <summary>Register a struct <c>@Struct</c> built (<see cref="ReifyStructBuiltin"/>): its fields, and each default in
