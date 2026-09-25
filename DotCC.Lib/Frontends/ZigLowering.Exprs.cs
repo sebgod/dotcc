@@ -216,6 +216,13 @@ internal sealed partial class ZigLowering
                 var then = LowerExpr(e.Arg4);
                 return new CondExpr(LowerExpr(e.Arg2), then, LowerExpr(e.Arg6)) { Type = then.Type };
             }
+            // `x != if (c) a else b` (the right operand of a comparison): the same ternary, arms at the operand level.
+            case Zig.IfOperand io:
+            {
+                if (TryFoldComptimeCondition(io.Arg2) is { } takenOperand) { return LowerExpr(takenOperand ? io.Arg4 : io.Arg6); }
+                var thenOperand = LowerExpr(io.Arg4);
+                return new CondExpr(LowerExpr(io.Arg2), thenOperand, LowerExpr(io.Arg6)) { Type = thenOperand.Type };
+            }
             case Zig.IfExprReturnThen ir:
                 return LowerIfReturnThen(ir.Arg2, ir.Arg5, ir.Arg7, null);
             // Value-position captured `if` — `if (opt) |x| thenE else elseE` (S4a). The payload binds
@@ -263,6 +270,8 @@ internal sealed partial class ZigLowering
             // comparison (non-associative in the grammar)
             case Zig.CmpEq a:   return Bin(BinOp.Eq, a.Arg0, a.Arg2);
             case Zig.CmpNe a:   return Bin(BinOp.Ne, a.Arg0, a.Arg2);
+            case Zig.CmpEqIf a: return Bin(BinOp.Eq, a.Arg0, a.Arg2);   // `x == if (c) a else b`
+            case Zig.CmpNeIf a: return Bin(BinOp.Ne, a.Arg0, a.Arg2);
             case Zig.CmpLt a:   return Bin(BinOp.Lt, a.Arg0, a.Arg2);
             case Zig.CmpGt a:   return Bin(BinOp.Gt, a.Arg0, a.Arg2);
             case Zig.CmpLe a:   return Bin(BinOp.Le, a.Arg0, a.Arg2);

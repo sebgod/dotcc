@@ -373,6 +373,8 @@ internal sealed partial class IrModule
         CtArray a => SpliceArray(a),
         CtNull n => new DefaultLit { Type = n.Type },
         CtSlice sl => SpliceSlice(sl),
+        // A void result (`comptime std.debug.assert(…)` as a statement): zig's `{}`, which lowers to the same node.
+        CtVoid => new DefaultLit { Type = CType.Void },
         _ => throw new IrUnsupportedException("comptime value cannot be spliced back (int/float/bool/struct/array)"),
     };
 

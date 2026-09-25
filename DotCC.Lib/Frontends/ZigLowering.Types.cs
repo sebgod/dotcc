@@ -28,6 +28,14 @@ internal sealed partial class ZigLowering
     /// <c>const</c> bindings reach here. A non-<c>std</c> module errors clearly.</summary>
     private bool TryComptimeConstBinding(string name, Item rhs)
     {
+        // `const tables = switch (DT) { u64 => &Backend64_TablesFull, … };` (std.fmt.float.render): a pointer to a container
+        // TYPE is a comptime namespace (task #85). It binds as a type alias, so `tables.T` / `tables.mulShift(…)` resolve as
+        // through the container, and it has no runtime value.
+        if (TryComptimeTypePointer(rhs) is { } pointedType)
+        {
+            _typeAliases[name] = pointedType;
+            return true;
+        }
         if (rhs.Content is Zig.BuiltinCall b && Tok(b.Arg0) == "@import")
         {
             var bargs = Flatten(b.Arg2);
@@ -1188,6 +1196,58 @@ internal sealed partial class ZigLowering
     /// type ALIAS bound to one. Drives <c>Type.func()</c> / <c>EnumName.member</c> resolution (a self
     /// alias maps through to the real container type, so <c>Self.init(…)</c> binds to the same mangled
     /// method as the explicit name).</summary>
+    /// <summary>The container TYPE a comptime pointer-to-type expression names (task #85): <c>&amp;Backend64_TablesFull</c>, a
+    /// name already bound to one, or a comptime <c>if</c> / <c>switch</c> whose taken arm is one. Null for anything else,
+    /// so a caller may probe.</summary>
+    private CType? TryComptimeTypePointer(Item expr)
+    {
+        switch (expr.Content)
+        {
+            case Zig.Grouped g:
+                return TryComptimeTypePointer(g.Arg1);
+            case Zig.PreAddrOf { Arg1.Content: Zig.Ident id } when _symbols.Resolve(Tok(id.Arg0)) is null
+                                                                   && TryLookupContainerType(Tok(id.Arg0), out var named)
+                                                                   && named.Unqualified is CType.Named:
+                return named;
+            case Zig.PreAddrOf { Arg1: { Content: Zig.Field } dotted } when TryResolveQualifiedNestedType(dotted) is { Unqualified: CType.Named } nested:
+                return nested;
+            case Zig.IfExpr ie when TryFoldComptimeCondition(ie.Arg2) is { } taken:
+                return TryComptimeTypePointer(taken ? ie.Arg4 : ie.Arg6);
+            case Zig.SwitchExpr or Zig.SwitchExprTrailing:
+            {
+                var (subject, prongs) = expr.Content switch
+                {
+                    Zig.SwitchExpr s => (s.Arg2, s.Arg5),
+                    Zig.SwitchExprTrailing s => (s.Arg2, s.Arg5),
+                    _ => (expr, expr),
+                };
+                // Only a switch whose EVERY non-`unreachable` arm is a type pointer: an ordinary value switch must not be
+                // selected (or lowered) here.
+                if (!Flatten(prongs).All(p => DecomposeProng(p).Expr is not { } arm || IsUnreachableItem(arm)
+                                              || LooksLikeTypePointer(arm)))
+                {
+                    return null;
+                }
+                if (SelectComptimeProng(subject, prongs, out var payload) is not { Expr: { } armItem } prong) { return null; }
+                EnterComptimeProng(prong, payload);
+                try { return TryComptimeTypePointer(armItem); }
+                finally { ExitComptimeProng(); }
+            }
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>True for an expression SHAPED like a pointer to a type: <c>&amp;Name</c>, <c>&amp;a.b</c>, or a comptime
+    /// <c>if</c> / <c>switch</c> of those (checked without lowering anything).</summary>
+    private static bool LooksLikeTypePointer(Item e) => e.Content switch
+    {
+        Zig.Grouped g => LooksLikeTypePointer(g.Arg1),
+        Zig.PreAddrOf { Arg1.Content: Zig.Ident or Zig.Field } => true,
+        Zig.IfExpr ie => LooksLikeTypePointer(ie.Arg4) && LooksLikeTypePointer(ie.Arg6),
+        _ => false,
+    };
+
     private bool TryLookupContainerType(string name, out CType type)
     {
         var alias = ResolveSelfAlias(name);

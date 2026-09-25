@@ -333,8 +333,12 @@ internal sealed partial class ZigLowering
                         : ParamKind.Runtime));
                     break;
                 case Zig.ParamComptime pm:   // 'comptime' IDENT ':' Type
+                    // `comptime tables: anytype` (std.fmt.float.binaryToDecimal) is an `anytype` whose argument is comptime:
+                    // the anytype path already keys a comptime_int or a pointer to a type by its value (task #85).
                     infos.Add(new ParamInfo(Tok(pm.Arg1), pm.Arg3,
-                        IsTypeKeyword(pm.Arg3) ? ParamKind.ComptimeType : ParamKind.ComptimeValue));
+                        IsTypeKeyword(pm.Arg3) ? ParamKind.ComptimeType
+                        : IsAnyTypeKeyword(pm.Arg3) ? ParamKind.AnyType
+                        : ParamKind.ComptimeValue));
                     break;
                 default:
                     throw new IrUnsupportedException("zig param: " + (ps[i].Content?.GetType().Name ?? "null"));

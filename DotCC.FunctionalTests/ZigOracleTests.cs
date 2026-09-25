@@ -5371,6 +5371,50 @@ public sealed class ZigOracleTests
             "    const got: u8 = if (ptr == null) 1 else 0;\n" +
             "    return x.? + h.a.? + @as(u8, @intCast(h.b.?)) + n + seen + got;\n" +
             "}\n", 54, "" },
+        // Task #85: a pointer to a container TYPE as a comptime `anytype` argument (std.fmt.float.binaryToDecimal's
+        // `comptime tables: anytype` fed `&Backend64_TablesFull`), directly or through a const bound to a comptime `if` of
+        // type pointers; `x != if (c) a else b` as a comparison operand; a type body's `comptime check(...)` statement.
+        new object[] { "comptime_type_pointer_namespace",
+            "const Small = struct {\n" +
+            "    const T = u64;\n" +
+            "    const bound = 21;\n" +
+            "    fn scale(i: u32) u32 {\n" +
+            "        return i * 2;\n" +
+            "    }\n" +
+            "};\n" +
+            "const Full = struct {\n" +
+            "    const T = u64;\n" +
+            "    const bound = 40;\n" +
+            "    fn scale(i: u32) u32 {\n" +
+            "        return i * 3;\n" +
+            "    }\n" +
+            "};\n" +
+            "\n" +
+            "fn use(comptime T: type, x: u32, comptime tables: anytype) u32 {\n" +
+            "    if (T != tables.T) @compileError(\"table type mismatch\");\n" +
+            "    return tables.scale(x) + tables.bound;\n" +
+            "}\n" +
+            "\n" +
+            "fn check(ok: bool) void {\n" +
+            "    if (!ok) unreachable;\n" +
+            "}\n" +
+            "\n" +
+            "fn Checked(comptime n: u8) type {\n" +
+            "    comptime check(n > 1);\n" +
+            "    return struct {\n" +
+            "        v: u8 = n,\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const small = true;\n" +
+            "    const tables = if (!small) &Small else &Full;\n" +
+            "    const t: u32 = use(u64, 3, tables) + use(u64, 1, &Small);\n" +
+            "    const a: u8 = 3;\n" +
+            "    const b: u8 = if (a != if (a > 2) @as(u8, 3) else 0) 7 else 9;\n" +
+            "    const c: Checked(4) = .{};\n" +
+            "    return @intCast(t + b + c.v);\n" +
+            "}\n", 85, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

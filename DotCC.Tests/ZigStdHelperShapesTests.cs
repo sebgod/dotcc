@@ -1198,6 +1198,60 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_pointer_to_a_container_type_is_a_comptime_namespace_argument()
+    {
+        var cs = EmitZig("""
+            const Small = struct {
+                const T = u64;
+                const bound = 21;
+                fn scale(i: u32) u32 {
+                    return i * 2;
+                }
+            };
+            const Full = struct {
+                const T = u64;
+                const bound = 40;
+                fn scale(i: u32) u32 {
+                    return i * 3;
+                }
+            };
+
+            fn use(comptime T: type, x: u32, comptime tables: anytype) u32 {
+                if (T != tables.T) @compileError("table type mismatch");
+                return tables.scale(x) + tables.bound;
+            }
+
+            fn check(ok: bool) void {
+                if (!ok) unreachable;
+            }
+
+            fn Checked(comptime n: u8) type {
+                comptime check(n > 1);
+                return struct {
+                    v: u8 = n,
+                };
+            }
+
+            pub fn main() u8 {
+                const small = true;
+                const tables = if (!small) &Small else &Full;
+                const t: u32 = use(u64, 3, tables) + use(u64, 1, &Small);
+                const a: u8 = 3;
+                const b: u8 = if (a != if (a > 2) @as(u8, 3) else 0) 7 else 9;
+                const c: Checked(4) = .{};
+                return @intCast(t + b + c.v);
+            }
+            """);
+        // Task #85: `comptime tables: anytype` fed `&Full` (or a const bound to a folded `if` of type pointers) is a comptime
+        // TYPE seed, one instance per container and no runtime slot; `x != if (c) a else b` is a comparison operand; a type
+        // body's `comptime check(…);` evaluates to void.
+        cs.ShouldContain("uint t = use__u64_tpFull(3) + use__u64_tpSmall(1);");
+        cs.ShouldContain("internal static unsafe uint use__u64_tpFull(uint x)");
+        cs.ShouldContain("? (byte)3 : (byte)(0)");
+        cs.ShouldContain("Checked__4 c = new Checked__4 { v = 4 };");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

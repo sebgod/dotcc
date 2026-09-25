@@ -286,6 +286,7 @@ symbols:
   - AsmTail        # 180 the `: outputs : inputs : clobbers` sections, each optional from the right
   - AsmItems       # 181 a comma list of operands, possibly empty, trailing comma allowed
   - AsmItem        # 182 `[name] "constraint" (expr)` or `[name] "constraint" (-> Type)`
+  - IfOperand      # 183 `if (c) a else b` as the RIGHT operand of `==` / `!=`, arms at the operand (Bitwise) level
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -1004,6 +1005,14 @@ productions:
     rules:
       - { lhs: Compare, rhs: [Bitwise, '==', Bitwise], action: cmpEq }
       - { lhs: Compare, rhs: [Bitwise, '!=', Bitwise], action: cmpNe }
+      # An `if` expression as the RIGHT operand of `==` / `!=` (std.fmt.float.binaryToDecimal's
+      # `ieee_mantissa != if (explicit_leading_bit) (…) else 0`). No Bitwise starts with `if`, so after the
+      # operator it is a clean shift, exactly as `+ switch` below. Its arms are Bitwise, the level of a
+      # Compare operand: a full-expression else arm (zig's) would make `… else y catch z` ambiguous with a
+      # `catch` around the whole comparison, and resolving that broke every top-level `f() catch return`.
+      - { lhs: Compare, rhs: [Bitwise, '==', IfOperand], action: cmpEqIf }
+      - { lhs: Compare, rhs: [Bitwise, '!=', IfOperand], action: cmpNeIf }
+      - { lhs: IfOperand, rhs: ['if', '(', Expr, ')', Bitwise, 'else', Bitwise], action: ifOperand }
       - { lhs: Compare, rhs: [Bitwise, '<', Bitwise],  action: cmpLt }
       - { lhs: Compare, rhs: [Bitwise, '>', Bitwise],  action: cmpGt }
       - { lhs: Compare, rhs: [Bitwise, '<=', Bitwise], action: cmpLe }

@@ -387,6 +387,8 @@ internal sealed partial class ZigLowering
         // comptime global the interpreter reads at full width, since a value seed is a `long`.
         var wideComptimeIntArgs = new Dictionary<string, System.Int128>(System.StringComparer.Ordinal);
         var runtimeArgItems = new List<Item>();
+        // `anytype` parameters bound to a pointer to a container TYPE (task #85): comptime type seeds, not runtime slots.
+        var typePointerArgs = new HashSet<string>(System.StringComparer.Ordinal);
 
         // Phase 1 — resolve each comptime TYPE arg in the CALLER's environment (a type-arg spelled as an
         // alias resolves to its aliased type, so it keys the same instance as the underlying type), and
@@ -408,6 +410,12 @@ internal sealed partial class ZigLowering
                     if (ctIntArg >= long.MinValue && ctIntArg <= long.MaxValue) { comptimeIntArgs[g.Params[i].Name] = (long)ctIntArg; }
                     else { wideComptimeIntArgs[g.Params[i].Name] = ctIntArg; }
                     anytypeSeeds.Add((g.Params[i].Name, CType.ComptimeInt));
+                    break;
+                // `comptime tables: anytype` fed `&Backend64_TablesFull` (std.fmt.float.binaryToDecimal, task #85): a pointer
+                // to a container TYPE is a comptime namespace, so the parameter binds as that type, like a `comptime T: type`.
+                case ParamKind.AnyType when argScope.TypePointerArg(argItems[i]) is { } pointedType:
+                    typeSeeds.Add(new TypeSeed(g.Params[i].Name, pointedType.Unqualified, null));
+                    typePointerArgs.Add(g.Params[i].Name);
                     break;
                 case ParamKind.AnyType:
                     anytypeSeeds.Add((g.Params[i].Name, argScope.InferArgType(argItems[i])));
@@ -557,6 +565,9 @@ internal sealed partial class ZigLowering
                         mangleTokens.Add(v >= 0 ? v.ToString(inv) : "n" + (-(System.Int128)v).ToString(inv));
                         valueSeeds.Add((g.Params[i].Name, v, LowerType(g.Params[i].TypeAst)));
                         break;
+                    case ParamKind.AnyType when typePointerArgs.Contains(g.Params[i].Name):
+                        mangleTokens.Add("tp" + MangleTypeSeed(typeSeeds.First(s => s.Name == g.Params[i].Name)));
+                        break;
                     case ParamKind.AnyType when comptimeIntArgs.TryGetValue(g.Params[i].Name, out var ctInt):
                         mangleTokens.Add("ci" + (ctInt >= 0 ? ctInt.ToString(inv) : "n" + (-(System.Int128)ctInt).ToString(inv)));
                         valueSeeds.Add((g.Params[i].Name, ctInt, CType.ComptimeInt));
@@ -625,6 +636,7 @@ internal sealed partial class ZigLowering
                     }
                     runtimeParams = g.Params
                         .Where(p => p.Kind is ParamKind.Runtime or ParamKind.AnyType && !comptimeIntArgs.ContainsKey(p.Name)
+                                    && !typePointerArgs.Contains(p.Name)
                                     && !wideComptimeIntArgs.ContainsKey(p.Name))
                         .Select(p => (p.Name, p.Kind == ParamKind.AnyType ? _anytypeSeeds[p.Name] : LowerType(p.TypeAst)))
                         .ToList();
@@ -1015,6 +1027,20 @@ internal sealed partial class ZigLowering
     /// <c>EnumFieldStruct(E, ?Value, @as(?Value, null))</c>). At a <c>??T</c> parameter zig keeps that as a non-null
     /// outer around a null payload, so every field defaults to null; reading it as "no default" is observably the same,
     /// since an omitted optional field is null.</summary>
+    /// <summary>The container type an <c>anytype</c> argument points at, for a comptime namespace argument (task #85):
+    /// <c>&amp;Tables</c>, or a name bound to one (<c>const tables = &amp;Tables;</c> binds a type alias). Null for any
+    /// runtime value.</summary>
+    private CType? TypePointerArg(Item arg)
+    {
+        if (TryComptimeTypePointer(arg) is { } pointed) { return pointed; }
+        var cur = arg;
+        while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
+        return cur.Content is Zig.Ident id && _symbols.Resolve(Tok(id.Arg0)) is null
+               && _typeAliases.TryGetValue(Tok(id.Arg0), out var aliased) && aliased.Unqualified is CType.Named
+            ? aliased
+            : null;
+    }
+
     private static bool IsComptimeNull(Item arg)
     {
         var cur = arg;
