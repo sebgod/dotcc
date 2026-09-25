@@ -5415,6 +5415,39 @@ public sealed class ZigOracleTests
             "    const c: Checked(4) = .{};\n" +
             "    return @intCast(t + b + c.v);\n" +
             "}\n", 85, "" },
+        // Task #96: an `if` statement whose then-arm is an assignment ended by the `else` (`if (c) i += 3 else i -= 1;`,
+        // std.fmt.float.formatScientific); a nested `[3][2]u64` const read by row and element (one flat pinned table);
+        // a string literal as a `catch` fallback for a slice payload.
+        new object[] { "if_assign_arm_and_flat_table",
+            "const TABLE: [3][2]u64 = .{\n" +
+            "    .{ 1, 2 },\n" +
+            "    .{ 3, 4 },\n" +
+            "    .{ 5, 6 },\n" +
+            "};\n" +
+            "\n" +
+            "fn row(i: u32) [2]u64 {\n" +
+            "    return TABLE[i];\n" +
+            "}\n" +
+            "\n" +
+            "fn pick(ok: bool, buf: []u8) error{Nope}![]u8 {\n" +
+            "    if (!ok) return error.Nope;\n" +
+            "    return buf[0..2];\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var i: u32 = 10;\n" +
+            "    var j: u32 = 1;\n" +
+            "    for (0..4) |k| {\n" +
+            "        if (k % 2 == 0) i += 3 else i -= 1;\n" +
+            "        if (k == 3) j = 7 else j *= 2;\n" +
+            "        if (k > 5) j <<= 1 else j |= 1;\n" +
+            "    }\n" +
+            "    var buf = [_]u8{ 'a', 'b', 'c' };\n" +
+            "    const good = pick(true, &buf) catch \"ERR\";\n" +
+            "    const bad = pick(false, &buf) catch \"ERR\";\n" +
+            "    const r = row(2);\n" +
+            "    return @intCast(i + j + good.len * 10 + bad.len + r[0] * r[1] + TABLE[1][0]);\n" +
+            "}\n", 77, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -6696,6 +6729,23 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // Task #96 (with #85): std.fmt.bufPrint of floats from real std, `{d}` and `{e}` of f64 and `{d}` of f32, through
+    // std.fmt.float's render / binaryToDecimal / formatScientific / formatDecimal and its [326][2]u64 power-of-5 tables.
+    [Fact]
+    public void Dotcc_matches_zig_std_fmt_float_formatting() =>
+        MatchesZigWithRealStd("fmt_float_formatting",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf: [64]u8 = undefined;\n" +
+            "    const a = std.fmt.bufPrint(&buf, \"{d}\", .{@as(f64, 3.25)}) catch return 1;\n" +
+            "    var total: usize = a.len * 10 + (a[0] - '0');\n" +
+            "    const b = std.fmt.bufPrint(&buf, \"{e}\", .{@as(f64, 1234.5)}) catch return 2;\n" +
+            "    total += b.len;\n" +
+            "    const c = std.fmt.bufPrint(&buf, \"{d}\", .{@as(f32, 0.1)}) catch return 3;\n" +
+            "    total += c.len * 3;\n" +
+            "    return @intCast(total % 256);\n" +
+            "}\n", 60);
 
     // Task #94: std.EnumMap from real std (init from a struct of optionals, put, remove, getPtr, get, contains,
     // iterator). EnumMap.init walks the keys with `if (@field(init_values, tag)) |*v|`, and its

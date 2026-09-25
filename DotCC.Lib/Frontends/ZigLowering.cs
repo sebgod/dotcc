@@ -775,6 +775,17 @@ internal sealed partial class ZigLowering
                 value = LowerExprSink(vc.rhs, sink);
                 pre = _hoist ?? new List<CStmt>();
             }
+            // An array LITERAL (std.fmt.float's `FLOAT64_POW5_INV_SPLIT: [326][2]u64 = .{ … }`) is one program-lifetime table,
+            // as a root global is: it had been rebuilt as a `stackalloc` on every call of every function that read it.
+            if (pre.Count == 0 && value is StackArray { Type: CType.Array arrayType } table)
+            {
+                var (tableElement, tableElems) = FlattenArrayLiteral(name, table);
+                var tableSym = AddArrayGlobal(QualifyTypeName(name), arrayType,
+                    new PinnedArray(tableElement, tableElems, null) { Type = new CType.Pointer(tableElement) });
+                _ir.ConstGlobalInits[tableSym] = table;
+                _lazyConstStatics[name] = tableSym;
+                return new VarRef(tableSym) { Type = tableSym.Type, IsLValue = true };
+            }
             if (pre.Count == 0) { return value; }
             var qualified = QualifyTypeName(name);
             var global = _symbols.Declare(new Symbol
@@ -1828,8 +1839,12 @@ internal sealed partial class ZigLowering
                 throw new IrUnsupportedException(
                     $"threadlocal '{Tok(nameTok)}': only a zero-initialized scalar threadlocal is supported");
             }
+            // A NESTED array (`const TABLE: [N][2]u64 = .{ .{…}, … }`, std.fmt.float's power-of-5 tables) is one flat
+            // block of scalars, row after row, as every use indexes it (`TABLE + i * 2`); its rows had been emitted as
+            // `stackalloc` pointers inside the static initializer, which neither builds nor outlives the initializer.
+            var (flatElement, flatElems) = FlattenArrayLiteral(Tok(nameTok), sa);
             var arraySym = AddArrayGlobal(Tok(nameTok), (CType.Array)sa.Type,
-                new PinnedArray(sa.Element, sa.Elems, null) { Type = new CType.Pointer(sa.Element) });
+                new PinnedArray(flatElement, flatElems, null) { Type = new CType.Pointer(flatElement) });
             // A const array is comptime-known, so a comptime use may read it (`Mixer(seed_a, 5)` passing it as a
             // `comptime seed: [4]u32` argument): the interpreter evaluates its literal.
             if (isConst) { _ir.ConstGlobalInits[arraySym] = sa; }
@@ -1894,6 +1909,28 @@ internal sealed partial class ZigLowering
     /// <summary>A lazy module's top-level consts whose value needed statements (see <see cref="LowerLazyValueConst"/>),
     /// memoized as static globals: each is evaluated once, as zig evaluates a top-level const once.</summary>
     private readonly Dictionary<string, Symbol> _lazyConstStatics = new(System.StringComparer.Ordinal);
+
+    /// <summary>An array literal's elements as one flat block of scalars under its innermost element type: a row of a nested
+    /// array (<c>[N][2]u64</c>) contributes its own elements in order, which is the layout dotcc indexes a nested array by.
+    /// A row that is not itself a literal cannot be flattened here, and is a loud cut rather than a bad emit.</summary>
+    private static (CType Element, List<CExpr> Elems) FlattenArrayLiteral(string name, StackArray literal)
+    {
+        if (literal.Element.Unqualified is not CType.Array) { return (literal.Element, literal.Elems.ToList()); }
+        var flat = new List<CExpr>();
+        CType? scalar = null;
+        foreach (var row in literal.Elems)
+        {
+            if (row is not StackArray rowLiteral)
+            {
+                throw new IrUnsupportedException(
+                    $"global `{name}`: a nested array row must be an array literal to be laid out flat (got {row.GetType().Name})");
+            }
+            var (rowElement, rowElems) = FlattenArrayLiteral(name, rowLiteral);
+            scalar ??= rowElement;
+            flat.AddRange(rowElems);
+        }
+        return (scalar ?? ((CType.Array)literal.Element.Unqualified).Element, flat);
+    }
 
     /// <summary>Record a <c>[N]T</c> array global: an array-typed static symbol (so references
     /// resolve + <c>sizeof</c> is exact) backed by the pinned <paramref name="pinned"/> store

@@ -224,6 +224,8 @@ internal sealed partial class ZigLowering
             case Zig.StmtIfCaptureReturnElse f:    return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, f.Arg9, null);
             case Zig.StmtIfCaptureReturnErrElse f: return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, f.Arg12, Tok(f.Arg10));
             case Zig.ReturnArm r:                  return Hoisted(() => LowerReturn(r.Arg1));
+            case Zig.StmtIfAssignElse f:           return LowerIfStmt(f.Arg2, f.Arg4, f.Arg6);
+            case Zig.AssignArm a:                  return LowerAssignArm(a);
             case Zig.StmtWhile w:       return new While(LowerExpr(w.Arg2), LowerStmt(w.Arg4));
 
             // `while (cond) : (cont) body` → the C IR `For` (no init): the cont runs after each
@@ -2999,6 +3001,27 @@ internal sealed partial class ZigLowering
         return declared?.Unqualified is CType.Pointer { Pointee: var pointee } && pointee.Unqualified is CType.Array ? pointee : null;
     }
 
+    /// <summary>An assignment then-arm of an <c>if</c> with an <c>else</c> (<c>if (c) i += 1 else i -= 1;</c>, task #96): the
+    /// same lowering as the assignment statement its operator spells.</summary>
+    private CStmt LowerAssignArm(Zig.AssignArm arm) => Tok(arm.Arg1) switch
+    {
+        "=" => LowerAssignStmt(arm.Arg0, arm.Arg2),
+        "+=" or "+%=" => CompoundAssign(arm.Arg0, BinOp.Add, arm.Arg2),
+        "-=" or "-%=" => CompoundAssign(arm.Arg0, BinOp.Sub, arm.Arg2),
+        "*=" or "*%=" => CompoundAssign(arm.Arg0, BinOp.Mul, arm.Arg2),
+        "/=" => CompoundAssign(arm.Arg0, BinOp.Div, arm.Arg2),
+        "%=" => CompoundAssign(arm.Arg0, BinOp.Mod, arm.Arg2),
+        "<<=" => CompoundAssign(arm.Arg0, BinOp.Shl, arm.Arg2),
+        ">>=" => CompoundAssign(arm.Arg0, BinOp.Shr, arm.Arg2),
+        "&=" => CompoundAssign(arm.Arg0, BinOp.BitAnd, arm.Arg2),
+        "|=" => CompoundAssign(arm.Arg0, BinOp.BitOr, arm.Arg2),
+        "^=" => CompoundAssign(arm.Arg0, BinOp.BitXor, arm.Arg2),
+        "+|=" => SatCompoundAssign(arm.Arg0, "SatAdd", arm.Arg2),
+        "-|=" => SatCompoundAssign(arm.Arg0, "SatSub", arm.Arg2),
+        "*|=" => SatCompoundAssign(arm.Arg0, "SatMul", arm.Arg2),
+        var op => throw new IrUnsupportedException($"zig: assignment operator `{op}` in an if arm"),
+    };
+
     private CStmt LowerAssignStmt(Item lhsItem, Item rhsItem)
         => TryAssignComptimeVar(lhsItem, null, rhsItem) ?? RejectConstStore(lhsItem) ?? Hoisted(() =>
         {
@@ -4558,9 +4581,11 @@ internal sealed partial class ZigLowering
         var payload = eu.Payload;
         var pre = new List<CStmt>();
 
+        // The fallback is result-located at the payload type: `bufPrint(…) catch "ERR"` coerces the string literal to the
+        // slice the payload is (it had been left a `byte*` beside a `Slice<byte>`, CS0029).
         if (capName is null)
         {
-            var fb = LowerExpr(fallbackItem);
+            var fb = LowerExprSink(fallbackItem, payload);
             if (IsSimpleReeval(fb)) { return (pre, new ZigCatch(union, fb) { Type = payload }); }
             var ce = HoistCatchUnion(union, pre);
             return (pre, new CondExpr(
@@ -4576,7 +4601,7 @@ internal sealed partial class ZigLowering
             var errSym = _symbols.Declare(new Symbol { Name = capName, Kind = SymKind.Var, Type = CType.ErrorSet });
             pre.Add(new DeclStmt(new List<LocalDecl> { new(errSym, new Member(ceCap, "Code", false) { Type = CType.ErrorSet }) }));
         }
-        var fbCap = LowerExpr(fallbackItem);
+        var fbCap = LowerExprSink(fallbackItem, payload);
         return (pre, new CondExpr(
             new Member(ceCap, "IsErr", false) { Type = CType.Bool },
             fbCap,

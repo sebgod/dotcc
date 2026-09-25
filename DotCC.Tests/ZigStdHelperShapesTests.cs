@@ -1252,6 +1252,50 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void An_if_arm_assignment_a_flat_nested_table_and_a_literal_catch_fallback()
+    {
+        var cs = EmitZig("""
+            const TABLE: [3][2]u64 = .{
+                .{ 1, 2 },
+                .{ 3, 4 },
+                .{ 5, 6 },
+            };
+
+            fn row(i: u32) [2]u64 {
+                return TABLE[i];
+            }
+
+            fn pick(ok: bool, buf: []u8) error{Nope}![]u8 {
+                if (!ok) return error.Nope;
+                return buf[0..2];
+            }
+
+            pub fn main() u8 {
+                var i: u32 = 10;
+                var j: u32 = 1;
+                for (0..4) |k| {
+                    if (k % 2 == 0) i += 3 else i -= 1;
+                    if (k == 3) j = 7 else j *= 2;
+                    if (k > 5) j <<= 1 else j |= 1;
+                }
+                var buf = [_]u8{ 'a', 'b', 'c' };
+                const good = pick(true, &buf) catch "ERR";
+                const bad = pick(false, &buf) catch "ERR";
+                const r = row(2);
+                return @intCast(i + j + good.len * 10 + bad.len + r[0] * r[1] + TABLE[1][0]);
+            }
+            """);
+        // Task #96: `if (c) i += 3 else i -= 1;` (an assignment then-arm ended by the `else`) lowers as the statements it
+        // spells; a nested `[3][2]u64` const is ONE flat pinned block (its rows had been `stackalloc` pointers inside the
+        // static initializer); a `catch "ERR"` fallback is result-located at the payload slice (it had stayed a `byte*`).
+        cs.ShouldContain("i += (uint)(3);");
+        cs.ShouldContain("j = 7;");
+        cs.ShouldContain("j <<= 1;");
+        cs.ShouldContain("public static unsafe ulong* TABLE = Libc.GlobalArrayFrom<ulong>(new ulong[]{ 1, 2, 3, 4, 5, 6 });");
+        cs.ShouldContain("? new Slice<byte>(Libc.L(\"ERR\\0\"u8), 3UL) :");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

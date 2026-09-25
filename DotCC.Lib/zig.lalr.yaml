@@ -287,6 +287,7 @@ symbols:
   - AsmItems       # 181 a comma list of operands, possibly empty, trailing comma allowed
   - AsmItem        # 182 `[name] "constraint" (expr)` or `[name] "constraint" (-> Type)`
   - IfOperand      # 183 `if (c) a else b` as the RIGHT operand of `==` / `!=`, arms at the operand (Bitwise) level
+  - AssignArm      # 184 `x op= v` with no `;` of its own, as the THEN arm of an `if` statement with an `else`
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -527,6 +528,29 @@ productions:
       # After `return Expr`, `else` selects the arm and `;` the ordinary return statement: a 1-token split.
       - { lhs: ReturnArm, rhs: ['return', Expr], action: returnArm }
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', ReturnArm, 'else', Stmt], action: stmtIfReturnElse }
+      # An assignment then-arm with no `;` of its own, ended by the `else` (std.fmt.float.formatScientific's
+      # `if (olength > 1) index += olength - 1 else index -= 1;`, task #96). It shares its whole prefix with the
+      # assignment STATEMENT (`Expr op= RhsExpr ';'`), so the decision is the 1-token split after the value: `;`
+      # ends the statement, `else` the arm. Every operator is spelled out: a reduced AssignOp would have to be
+      # chosen before the value, where the statement form still shifts.
+      - { lhs: AssignArm, rhs: [Expr, '=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '+=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '-=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '*=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '/=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '%=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '<<=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '>>=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '&=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '|=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '^=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '+%=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '-%=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '*%=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '+|=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '-|=', RhsExpr], action: assignArm }
+      - { lhs: AssignArm, rhs: [Expr, '*|=', RhsExpr], action: assignArm }
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', AssignArm, 'else', Stmt], action: stmtIfAssignElse }
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', ReturnArm, 'else', Stmt], action: stmtIfCaptureReturnElse }
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', ReturnArm, 'else', '|', IDENT, '|', Stmt], action: stmtIfCaptureReturnErrElse }
 
