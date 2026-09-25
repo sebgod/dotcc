@@ -1831,6 +1831,37 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Inline_container_types_are_call_arguments_too()
+    {
+        var cs = EmitZig("""
+            fn area(s: anytype) u32 {
+                return @as(u32, s.w) * s.h;
+            }
+
+            pub fn main() u8 {
+                const v = @as(struct { a: u8, b: u8 = 2 }, .{ .a = 4 });
+                const e = @as(enum { x, y, z }, .z);
+                const u = @as(union(enum) { small: u8, big: u16 }, .{ .big = 30 });
+                const T = @TypeOf(@as(union { p: u8, q: u16 }, .{ .p = 1 }));
+                const t: T = .{ .p = 9 };
+                const big: u16 = switch (u) {
+                    .small => |s| s,
+                    .big => |b| b,
+                };
+                const r = area(@as(struct { w: u8, h: u32 }, .{ .w = 3, .h = 5 }));
+                return @intCast(v.a + v.b + @intFromEnum(e) + big + t.p + r);
+            }
+            """);
+        // Task #110: `struct { … }` / `enum { … }` / `union(enum) { … }` / `union { … }` as a call ARGUMENT (`@as`, `@TypeOf`'s
+        // operand, an `anytype` parameter), reified per occurrence as in an annotation (#104). zig returns 62.
+        cs.ShouldContain("__AnonStruct0 v = (__AnonStruct0)new __AnonStruct0 { a = 4, b = 2 };");
+        cs.ShouldContain("__AnonEnum1 e = (__AnonEnum1)__AnonEnum1.z;");
+        cs.ShouldContain("__AnonUnion2 u = (__AnonUnion2)new __AnonUnion2 { __tag = __AnonUnion2_Tag.big");
+        cs.ShouldContain("__AnonUnion3 t = new __AnonUnion3 { p = 9 };");
+        cs.ShouldContain("uint r = area____AnonStruct4((__AnonStruct4)new __AnonStruct4 { w = 3, h = 5 });");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

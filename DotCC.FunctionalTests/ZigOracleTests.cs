@@ -5818,6 +5818,26 @@ public sealed class ZigOracleTests
             "    if (st != .busy) seen += 2;\n" +
             "    return @intCast((acc + bonus + seen + resets) % 256);\n" +
             "}\n", 193, "" },
+        // Inline container types as call arguments (task #110): `@as(struct {…}, …)` with a field default, `@as(enum {…}, .z)`,
+        // `@as(union(enum) {…}, …)`, `@TypeOf(@as(union {…}, …))` and a struct type passed to an `anytype` parameter. zig returns 62.
+        new object[] { "inline_container_type_args",
+            "fn area(s: anytype) u32 {\n" +
+            "    return @as(u32, s.w) * s.h;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const v = @as(struct { a: u8, b: u8 = 2 }, .{ .a = 4 });\n" +
+            "    const e = @as(enum { x, y, z }, .z);\n" +
+            "    const u = @as(union(enum) { small: u8, big: u16 }, .{ .big = 30 });\n" +
+            "    const T = @TypeOf(@as(union { p: u8, q: u16 }, .{ .p = 1 }));\n" +
+            "    const t: T = .{ .p = 9 };\n" +
+            "    const big: u16 = switch (u) {\n" +
+            "        .small => |s| s,\n" +
+            "        .big => |b| b,\n" +
+            "    };\n" +
+            "    const r = area(@as(struct { w: u8, h: u32 }, .{ .w = 3, .h = 5 }));\n" +
+            "    return @intCast(v.a + v.b + @intFromEnum(e) + big + t.p + r);\n" +
+            "}\n", 62, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

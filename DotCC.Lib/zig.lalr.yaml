@@ -1384,6 +1384,14 @@ productions:
       - { lhs: Arg, rhs: [SwitchExpr] }
       # And an if-EXPRESSION (std.Io.Writer.printValue's `w.writeAll(if (i < n) ", " else " }")`).
       - { lhs: Arg, rhs: [IfExpr] }
+      # An inline container TYPE as an argument (`@as(struct { a: u8 }, .{ .a = 4 })`, `@as(enum { x, y }, .y)`,
+      # `@as(union(enum) { … }, …)`, task #110), reusing AType's inline actions. `enum` / `union` are not in
+      # FIRST(Expr); `struct {…}` shares its prefix with the closure idiom `struct {…}.f`, which continues with
+      # `.`, a token no Arg is followed by, so the choice after `}` is still one token.
+      - { lhs: Arg, rhs: ['struct', '{', FieldDecls, '}'],                     action: inlineStructType }
+      - { lhs: Arg, rhs: ['enum', '{', EnumFields, '}'],                       action: inlineEnumType }
+      - { lhs: Arg, rhs: ['union', '(', 'enum', ')', '{', UnionVariants, '}'], action: inlineUnionEnumType }
+      - { lhs: Arg, rhs: ['union', '{', UnionVariants, '}'],                   action: inlineUnionType }
 
   # A named field init's value: an Expr, or `{}` (void; `{` is not in FIRST(Expr), so conflict-free).
   - derivation: none
