@@ -380,9 +380,27 @@ internal sealed partial class ZigLowering
         => TryAssignComptimeVar(targetItem, op, valueItem)
            ?? RejectConstStore(targetItem)
            ?? TryCompoundAssignOptionalPayload(targetItem, op, valueItem)
+           ?? TryCompoundAssignValueControlFlow(targetItem, op, valueItem)
            // A hoist point, as a plain assignment is: `total += if (opt) |_| 100 else 2;` lowers its captured `if`
            // ahead of the statement.
            ?? Hoisted(() => new ExprStmt(CompoundAssignExpr(targetItem, op, valueItem)));
+
+    /// <summary><c>total += switch (u) { .n =&gt; |v| v, … };</c> (task #109): a value <c>switch</c> / <c>if</c> / labeled block
+    /// that needs statements (a capture or block prong) fills a temp at the target's type, as a plain assignment's
+    /// does, and the compound operator then applies it. Null for any other right-hand side.</summary>
+    private CStmt? TryCompoundAssignValueControlFlow(Item targetItem, BinOp op, Item valueItem)
+    {
+        var labeled = IsLabeledValue(valueItem);
+        if (!labeled && !IsValueControlFlowStmt(valueItem)) { return null; }
+        var target = LowerExpr(targetItem);
+        CStmt Apply(Symbol temp)
+        {
+            var value = new VarRef(temp) { Type = temp.Type };
+            if (op is BinOp.Div or BinOp.Mod) { CheckZigDivision(op, target, value); }
+            return new ExprStmt(new Assign(op, target, value) { Type = target.Type });
+        }
+        return labeled ? LowerLabeledValue(valueItem, target.Type, Apply) : LowerValueControlFlowStmt(valueItem, target.Type, Apply);
+    }
 
     /// <summary>A statement that is just <c>unreachable</c> or <c>comptime unreachable</c>.</summary>
     private static bool IsComptimeUnreachableStmt(Item stmt)
@@ -3289,8 +3307,12 @@ internal sealed partial class ZigLowering
     };
 
     /// <summary>An assignment prong body: <c>v =&gt; lhs = rhs</c>, or a compound one (<c>0 =&gt; hits += 1</c>).</summary>
-    private CStmt LowerProngAssign(Zig.ProngAssign pa)
-        => CompoundOpOf(pa.Arg3) is { } op ? CompoundAssign(pa.Arg2, op, pa.Arg4) : LowerAssignStmt(pa.Arg2, pa.Arg4);
+    private CStmt LowerProngAssign(Zig.ProngAssign pa) => LowerAssignProngBody(pa.Arg2, pa.Arg3, pa.Arg4);
+
+    /// <summary>The assignment an assignment prong performs (<c>lhs = rhs</c>, or a compound <c>lhs += rhs</c>), shared by
+    /// the plain form and its capture twin (<c>.on =&gt; |v| total += v</c>, task #109).</summary>
+    private CStmt LowerAssignProngBody(Item lhs, Item opItem, Item rhs)
+        => CompoundOpOf(opItem) is { } op ? CompoundAssign(lhs, op, rhs) : LowerAssignStmt(lhs, rhs);
 
     /// <summary>The binary operator of a compound continue-expression assignment (<c>i += 1</c>), or null
     /// for a plain <c>=</c>.</summary>
@@ -3453,7 +3475,7 @@ internal sealed partial class ZigLowering
             if (prongItem.Content is Zig.ProngCapture or Zig.ProngCaptureRef
                 or Zig.ProngCaptureExpr or Zig.ProngCaptureReturn or Zig.ProngCaptureReturnVoid
                 or Zig.ProngCaptureRefExpr or Zig.ProngCaptureRefReturn or Zig.ProngCaptureRefReturnVoid
-                or Zig.ProngCaptureJump)
+                or Zig.ProngCaptureJump or Zig.ProngCaptureAssign)
             {
                 throw new IrUnsupportedException(
                     "zig switch payload capture `|x|` is only valid on a tagged-union switch");
@@ -3605,10 +3627,15 @@ internal sealed partial class ZigLowering
             // INSIDE the capture scope so it sees the binding.
             Item caseVals; string? captureName; bool captureByRef;
             Item? blockBody = null, exprBody = null, returnBody = null, jumpBody = null;
+            Zig.ProngAssign? assignBody = null;
+            Zig.ProngCaptureAssign? captureAssignBody = null;
             var voidReturn = false;
             switch (prongItem.Content)
             {
                 case Zig.Prong p:                     caseVals = p.Arg0; captureName = null;        captureByRef = false; blockBody  = p.Arg2; break;
+                // `.off => total += 5` (task #109): the assignment prong the plain switch has (#64).
+                case Zig.ProngAssign p:               caseVals = p.Arg0; captureName = null;        captureByRef = false; assignBody = p;      break;
+                case Zig.ProngCaptureAssign p:        caseVals = p.Arg0; captureName = Tok(p.Arg3); captureByRef = false; captureAssignBody = p; break;
                 case Zig.ProngCapture p:              caseVals = p.Arg0; captureName = Tok(p.Arg3); captureByRef = false; blockBody  = p.Arg5; break;
                 case Zig.ProngCaptureRef p:           caseVals = p.Arg0; captureName = Tok(p.Arg4); captureByRef = true;  blockBody  = p.Arg6; break;
                 case Zig.ProngCaptureExpr p:          caseVals = p.Arg0; captureName = Tok(p.Arg3); captureByRef = false; exprBody   = p.Arg5; break;
@@ -3633,6 +3660,9 @@ internal sealed partial class ZigLowering
                 : returnBody is not null ? new List<CStmt> { Hoisted(() => LowerReturn(returnBody)) }
                 : voidReturn             ? new List<CStmt> { LowerReturnVoid() }
                 : jumpBody is not null   ? new List<CStmt> { LowerProngJump(jumpBody) }
+                : assignBody is not null ? new List<CStmt> { LowerProngAssign(assignBody) }
+                : captureAssignBody is not null
+                    ? new List<CStmt> { LowerAssignProngBody(captureAssignBody.Arg5, captureAssignBody.Arg6, captureAssignBody.Arg7) }
                 : throw new IrUnsupportedException("zig switch capture prong has no body");
 
             List<CStmt> body;

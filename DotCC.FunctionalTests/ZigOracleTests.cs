@@ -5774,6 +5774,50 @@ public sealed class ZigOracleTests
             "    total += s.raw.word & 0xff;\n" +
             "    return @intCast(total);\n" +
             "}\n", 76, "" },
+        // Tagged-union switch forms (task #109): assignment and capture-assignment prongs, `u == .tag` / `.tag == u` /
+        // `u != .tag`, and a capture switch after `+=`, over a named and an inline union. zig returns 193.
+        new object[] { "union_switch_assign_and_tag_compare",
+            "const Cmd = union(enum) {\n" +
+            "    add: u16,\n" +
+            "    mul: u16,\n" +
+            "    reset,\n" +
+            "};\n" +
+            "\n" +
+            "fn apply(acc: *u16, c: Cmd) void {\n" +
+            "    switch (c) {\n" +
+            "        .add => |n| acc.* += n,\n" +
+            "        .mul => |n| acc.* *= n,\n" +
+            "        .reset => acc.* = 1,\n" +
+            "    }\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var acc: u16 = 1;\n" +
+            "    const cmds = [_]Cmd{ .{ .add = 4 }, .{ .mul = 3 }, .reset, .{ .add = 9 }, .{ .mul = 2 } };\n" +
+            "    var resets: u8 = 0;\n" +
+            "    for (cmds) |c| {\n" +
+            "        apply(&acc, c);\n" +
+            "        if (c == .reset) resets += 1;\n" +
+            "        if (.add == c) acc += 0;\n" +
+            "    }\n" +
+            "    var bonus: u16 = 0;\n" +
+            "    for (cmds) |c| {\n" +
+            "        bonus += switch (c) {\n" +
+            "            .add => |n| n,\n" +
+            "            .mul => |n| n * 10,\n" +
+            "            .reset => 100,\n" +
+            "        };\n" +
+            "    }\n" +
+            "    var st: union(enum) { idle, busy: u8 } = .{ .busy = 7 };\n" +
+            "    var seen: u16 = 0;\n" +
+            "    switch (st) {\n" +
+            "        .idle => seen = 1,\n" +
+            "        .busy => |b| seen += b,\n" +
+            "    }\n" +
+            "    st = .idle;\n" +
+            "    if (st != .busy) seen += 2;\n" +
+            "    return @intCast((acc + bonus + seen + resets) % 256);\n" +
+            "}\n", 193, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

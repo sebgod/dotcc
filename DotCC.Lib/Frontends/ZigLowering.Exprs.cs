@@ -2748,20 +2748,28 @@ internal sealed partial class ZigLowering
     {
         if (r.Content is Zig.EnumLit rel && l.Content is not Zig.EnumLit)
         {
-            var left = LowerExpr(l);
+            var left = UnionTagOrSelf(LowerExpr(l));
             return left.Type.Unqualified is CType.Enum en
                 ? (left, ResolveEnumLit(Tok(rel.Arg1), en))
                 : (left, LowerExpr(r));
         }
         if (l.Content is Zig.EnumLit lel && r.Content is not Zig.EnumLit)
         {
-            var right = LowerExpr(r);
+            var right = UnionTagOrSelf(LowerExpr(r));
             return right.Type.Unqualified is CType.Enum en
                 ? (ResolveEnumLit(Tok(lel.Arg1), en), right)
                 : (LowerExpr(l), right);
         }
         return (LowerExpr(l), LowerExpr(r));
     }
+
+    /// <summary>A tagged union compared against a tag literal (<c>u == .off</c>, task #109) compares its TAG, as zig
+    /// coerces the union to its tag enum there: the union's tag field, typed as the tag enum. Any other operand is
+    /// returned unchanged.</summary>
+    private CExpr UnionTagOrSelf(CExpr operand)
+        => operand.Type.Unqualified is CType.Named named && _unions.TryGetValue(named.Name, out var info)
+            ? new Member(operand, info.TagFieldName, false) { Type = info.TagType, IsLValue = operand.IsLValue }
+            : operand;
 
     /// <summary>Lower a value-prefix unary op. <c>!x</c> yields an int (the backend
     /// renders it 0/1); <c>-x</c>/<c>~x</c> take the integer-promoted operand type.</summary>

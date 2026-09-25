@@ -1774,6 +1774,63 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Tagged_union_switches_take_assignment_prongs_and_tag_comparisons()
+    {
+        var cs = EmitZig("""
+            const Cmd = union(enum) {
+                add: u16,
+                mul: u16,
+                reset,
+            };
+
+            fn apply(acc: *u16, c: Cmd) void {
+                switch (c) {
+                    .add => |n| acc.* += n,
+                    .mul => |n| acc.* *= n,
+                    .reset => acc.* = 1,
+                }
+            }
+
+            pub fn main() u8 {
+                var acc: u16 = 1;
+                const cmds = [_]Cmd{ .{ .add = 4 }, .{ .mul = 3 }, .reset, .{ .add = 9 }, .{ .mul = 2 } };
+                var resets: u8 = 0;
+                for (cmds) |c| {
+                    apply(&acc, c);
+                    if (c == .reset) resets += 1;
+                    if (.add == c) acc += 0;
+                }
+                var bonus: u16 = 0;
+                for (cmds) |c| {
+                    bonus += switch (c) {
+                        .add => |n| n,
+                        .mul => |n| n * 10,
+                        .reset => 100,
+                    };
+                }
+                var st: union(enum) { idle, busy: u8 } = .{ .busy = 7 };
+                var seen: u16 = 0;
+                switch (st) {
+                    .idle => seen = 1,
+                    .busy => |b| seen += b,
+                }
+                st = .idle;
+                if (st != .busy) seen += 2;
+                return @intCast((acc + bonus + seen + resets) % 256);
+            }
+            """);
+        // Task #109: a union switch takes an assignment prong (`.reset => acc.* = 1`) and its capture twin
+        // (`.add => |n| acc.* += n`); `c == .reset` / `.add == c` / `st != .busy` compare the union's TAG; and a capture
+        // switch after `+=` fills a temp, as after `=`. zig returns 193.
+        cs.ShouldContain("*acc += n;");
+        cs.ShouldContain("*acc *= n__1;");
+        cs.ShouldContain("(int)c.__tag == (int)Cmd_Tag.reset");
+        cs.ShouldContain("(int)st.__tag != (int)__AnonUnion0_Tag.busy");
+        cs.ShouldContain("bonus += __vcf0;");
+        cs.ShouldContain("seen += b;");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""
