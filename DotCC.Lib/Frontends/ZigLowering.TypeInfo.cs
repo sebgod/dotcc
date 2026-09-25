@@ -811,6 +811,10 @@ internal sealed partial class ZigLowering
         Zig.ProngLoop p              => new ZigProng(p.Arg0, null,         null,   null,   null,   false, Loop: p.Arg2),
         Zig.ProngIfCapture p         => new ZigProng(p.Arg0, null,         null,   null,   null,   false,
             Cut: "zig switch prong `=> if (x) |v| …` with no `else` is not supported yet as a selected comptime prong"),
+        // std.meta.FieldEnum's `.@"union" => |u| if (u.tag_type) |EnumTag| { … }` (task #108): it only has to parse while
+        // another prong is selected.
+        Zig.ProngCaptureIfCaptureBlock p => new ZigProng(p.Arg0, Tok(p.Arg3), null, null, null, false,
+            Cut: "zig switch prong `=> |x| if (y) |v| { … }` is not supported yet as a selected comptime prong"),
         Zig.ProngCaptureRef or Zig.ProngCaptureRefExpr or Zig.ProngCaptureRefReturn or Zig.ProngCaptureRefReturnVoid
             => throw new IrUnsupportedException(
                 "zig `switch (@typeInfo(T)) { … => |*x| … }`: a comptime `std.builtin.Type` value has no storage, so it "

@@ -572,6 +572,11 @@ productions:
       # selects this over the plain `… else Stmt` above (no Stmt begins with `'|'`) — conflict-free,
       # exactly like stmtIfCaptureErrElse.
       - { lhs: LoopStmt, rhs: ['while', '(', Expr, ')', '|', IDENT, '|', Stmt, 'else', '|', IDENT, '|', Stmt], action: stmtWhileCaptureErrElse }
+      # `for (…) |…| body else elsebody` (task #108, std.meta.FieldEnum's `for (values, 0..) |v, i| { … break; } else
+      # { return EnumTag; }`): the else runs when the loop ends without a `break`. In this dangling-else group, as the
+      # while-capture else is, so a Stmt body followed by `else` shifts into it.
+      - { lhs: LoopStmt, rhs: ['for', '(', Expr, ')', '|', IDENT, '|', Stmt, 'else', Stmt],           action: stmtForSliceElse }
+      - { lhs: LoopStmt, rhs: ['for', '(', ForObjs, ')', '|', ForCaps, '|', Stmt, 'else', Stmt],      action: stmtForMultiElse }
       # `while (opt) |x| : (cont) body` — capture-while WITH a continue-expression (runs after each
       # iteration AND on `continue`), lowered to the C `For` IR (post = cont) so `continue` runs the
       # cont — faithful to Zig, like the non-capture stmtWhileCont pair. After `'|' IDENT '|'`, a `':'`
@@ -1517,6 +1522,10 @@ productions:
       # An else-less `if` whose body is a BLOCK (std.crypto.sha2's `.x86_64 => if (… comptime cpu.hasAll(…)) { … },`).
       # Ended by `,` / `}`; an if-EXPRESSION prong continues with `else`.
       - { lhs: Prong, rhs: [CaseVals, '=>', 'if', '(', Expr, ')', Block], action: prongIfBlock }
+      # A capture prong whose body is a capture-`if` statement (std.meta.FieldEnum's `.@"union" => |u| if (u.tag_type)
+      # |EnumTag| { … }`, task #108). After the prong's `|x|`, `if` then `(` Expr `)` `|` distinguishes it from the
+      # value-if RhsExpr only at the `{` of its Block, which no RhsExpr's then-arm starts with.
+      - { lhs: Prong, rhs: [CaseVals, '=>', '|', IDENT, '|', 'if', '(', Expr, ')', '|', IDENT, '|', Block], action: prongCaptureIfCaptureBlock }
       # A capture `if` whose body RETURNS (std.Io.Writer.printInt's
       # `.signed => if (std.math.cast(isize, value)) |x| return printIntAny(w, x, …),`). `return` does not
       # start an Expr, so after the capture it is a 1-token split from prongIfCapture.

@@ -2043,6 +2043,84 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_for_else_statement_runs_the_else_only_when_the_loop_ends_without_a_break()
+    {
+        var cs = EmitZig("""
+            fn find(xs: []const u8, want: u8) u8 {
+                for (xs, 0..) |x, i| {
+                    if (x == want) break;
+                    _ = i;
+                } else {
+                    return 100;
+                }
+                return 1;
+            }
+
+            fn firstGap(xs: []const u8) u8 {
+                for (xs, 0..) |x, i| {
+                    if (x != i) return @intCast(i);
+                } else {
+                    return 50;
+                }
+            }
+
+            pub fn main() u8 {
+                const xs = [_]u8{ 0, 1, 2, 7 };
+                var total: u32 = 0;
+                total += find(&xs, 2);
+                total += find(&xs, 9);
+                total += firstGap(&xs);
+                total += firstGap(xs[0..3]);
+                var outer: u32 = 0;
+                while (outer < 5) : (outer += 1) {
+                    for (xs) |x| {
+                        if (x == 99) break;
+                    } else {
+                        if (outer == 2) break;
+                    }
+                }
+                total += outer;
+                var hits: u32 = 0;
+                for (xs) |x| {
+                    if (x > 5) continue;
+                    hits += 1;
+                } else hits += 10;
+                return @intCast(total + hits);
+            }
+            """);
+        // Task #108 (std.meta.FieldEnum's `for (values, 0..) |v, i| { … break; } else { return EnumTag; }`): the loop's own
+        // exit sets a flag that guards the else after the loop, so a `break` skips it and a `break` inside the else still
+        // reaches the OUTER loop; with no break in the body the else follows unguarded (C# then sees it return). zig
+        // returns 169.
+        cs.ShouldContain("CBool __natural = false;");
+        cs.ShouldContain("__natural = true;");
+        cs.ShouldContain("if (Cond.B(__natural))");
+    }
+
+    [Fact]
+    public void A_capture_prong_with_a_capture_if_body_parses_while_another_prong_is_selected()
+    {
+        // Task #108 (std.meta.FieldEnum's `.@"union" => |u| if (u.tag_type) |E| { … }`): a struct subject selects `else`,
+        // so the union prong only has to parse.
+        var cs = EmitZig("""
+            fn Width(comptime T: type) u8 {
+                switch (@typeInfo(T)) {
+                    .@"union" => |u| if (u.tag_type) |E| {
+                        return @sizeOf(E);
+                    },
+                    else => {},
+                }
+                return @sizeOf(T);
+            }
+            const P = struct { a: u32, b: u16 };
+            pub fn main() u8 {
+                return Width(P);
+            }
+            """);
+        cs.ShouldContain("Width");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

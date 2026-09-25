@@ -5956,6 +5956,50 @@ public sealed class ZigOracleTests
             "    const s = c.slice();\n" +
             "    return @intCast(s.total());\n" +
             "}\n", 46, "" },
+        // `for … else` statements (task #108, std.meta.FieldEnum's shape): a break skipping the else, an else that returns, a
+        // break inside the else reaching an outer loop, a one-statement else. zig returns 169.
+        new object[] { "for_else_statements",
+            "fn find(xs: []const u8, want: u8) u8 {\n" +
+            "    for (xs, 0..) |x, i| {\n" +
+            "        if (x == want) break;\n" +
+            "        _ = i;\n" +
+            "    } else {\n" +
+            "        return 100;\n" +
+            "    }\n" +
+            "    return 1;\n" +
+            "}\n" +
+            "\n" +
+            "fn firstGap(xs: []const u8) u8 {\n" +
+            "    for (xs, 0..) |x, i| {\n" +
+            "        if (x != i) return @intCast(i);\n" +
+            "    } else {\n" +
+            "        return 50;\n" +
+            "    }\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const xs = [_]u8{ 0, 1, 2, 7 };\n" +
+            "    var total: u32 = 0;\n" +
+            "    total += find(&xs, 2);\n" +
+            "    total += find(&xs, 9);\n" +
+            "    total += firstGap(&xs);\n" +
+            "    total += firstGap(xs[0..3]);\n" +
+            "    var outer: u32 = 0;\n" +
+            "    while (outer < 5) : (outer += 1) {\n" +
+            "        for (xs) |x| {\n" +
+            "            if (x == 99) break;\n" +
+            "        } else {\n" +
+            "            if (outer == 2) break;\n" +
+            "        }\n" +
+            "    }\n" +
+            "    total += outer;\n" +
+            "    var hits: u32 = 0;\n" +
+            "    for (xs) |x| {\n" +
+            "        if (x > 5) continue;\n" +
+            "        hits += 1;\n" +
+            "    } else hits += 10;\n" +
+            "    return @intCast(total + hits);\n" +
+            "}\n", 169, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

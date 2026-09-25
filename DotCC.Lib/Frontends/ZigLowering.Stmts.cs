@@ -342,6 +342,14 @@ internal sealed partial class ZigLowering
             // `inline for` over comptime member lists takes these before they get here (LowerInlineLoop).
             case Zig.StmtForMulti f:      return LowerForMulti(f.Arg2, f.Arg5, f.Arg7);
             case Zig.StmtForMultiTrail f: return LowerForMulti(f.Arg2, f.Arg6, f.Arg8);
+            // `for (…) |…| body else elsebody` (task #108): the else runs when the loop ends without a `break`.
+            case Zig.StmtForSliceElse f:
+                return LowerForParallel(new[] { new ForObject(f.Arg2, false, null) }, new[] { (Tok(f.Arg5), false) }, f.Arg7, f.Arg9);
+            case Zig.StmtForMultiElse f:
+            {
+                var (objects, captures) = DecomposeForMulti(f.Arg2, f.Arg5);
+                return LowerForParallel(objects, captures, f.Arg7, f.Arg9);
+            }
 
             // A brace block in statement position (`Stmt -> Block`, pass-through).
             case Zig.Block:
@@ -3305,7 +3313,8 @@ internal sealed partial class ZigLowering
         Zig.StmtWhile or Zig.StmtWhileCont or Zig.StmtWhileContAssign or Zig.StmtWhileContBlock
         or Zig.StmtWhileCapture or Zig.StmtWhileCaptureElse or Zig.StmtWhileCaptureErrElse
         or Zig.StmtWhileCaptureCont or Zig.StmtWhileCaptureContAssign
-        or Zig.StmtForRange or Zig.StmtForSlice or Zig.StmtForSliceRef or Zig.StmtForMulti or Zig.StmtForMultiTrail;
+        or Zig.StmtForRange or Zig.StmtForSlice or Zig.StmtForSliceRef or Zig.StmtForMulti or Zig.StmtForMultiTrail
+        or Zig.StmtForSliceElse or Zig.StmtForMultiElse;
 
     /// <summary>Lower a runtime loop with an unlabeled break target (<see cref="LoopBreakTarget"/>), so a
     /// <c>break</c> inside a <c>switch</c> in its body exits the loop, as in zig. The label is emitted
@@ -3765,8 +3774,11 @@ internal sealed partial class ZigLowering
     /// slice (an array, or a pointer to one, walks as a slice over it) read once into a temp, or a RANGE (task #108) whose
     /// capture is its start plus the index. The walk's length is the first slice's (zig asserts equal lengths; dotcc does
     /// not check, its ReleaseFast stance on safety checks), or a bounded range's when there is no slice. A <c>_</c> capture
-    /// binds nothing.</summary>
-    private CStmt LowerForParallel(IReadOnlyList<ForObject> objects, IReadOnlyList<(string Name, bool ByRef)> captures, Item bodyItem)
+    /// binds nothing. With an <paramref name="elseItem"/> (<c>for (…) |…| body else elsebody</c>, task #108) the loop's own
+    /// exit sets a flag the else is guarded by, after the loop: a <c>break</c> skips it, and a <c>break</c> inside the else
+    /// still reaches an OUTER loop, as in zig.</summary>
+    private CStmt LowerForParallel(IReadOnlyList<ForObject> objects, IReadOnlyList<(string Name, bool ByRef)> captures, Item bodyItem,
+        Item? elseItem = null)
     {
         var pre = new List<CStmt>();
         var walks = new List<(CExpr? Slice, CType.Slice? Type, CExpr? Start)>(objects.Count);
@@ -3828,6 +3840,18 @@ internal sealed partial class ZigLowering
         var cond = new Binary(BinOp.Lt, iRef, len) { Type = CType.Int };
         var post = new Unary(UnOp.PostInc, iRef) { Type = CType.ULong };
         var bodyStmts = new List<CStmt>();
+        VarRef? natural = null;
+        if (elseItem is not null)
+        {
+            var flag = _symbols.Declare(new Symbol { Name = "__natural", Kind = SymKind.Var, Type = CType.Bool });
+            natural = new VarRef(flag) { Type = CType.Bool, IsLValue = true };
+            pre.Add(new DeclStmt(new List<LocalDecl> { new(flag, new LitBool(false) { Type = CType.Bool }) }));
+            bodyStmts.Add(new If(new Unary(UnOp.LogNot, cond) { Type = CType.Int }, new Block(new List<CStmt>
+            {
+                new ExprStmt(new Assign(null, natural, new LitBool(true) { Type = CType.Bool }) { Type = CType.Bool }),
+                new Break(),
+            }), null));
+        }
         for (var k = 0; k < walks.Count; k++)
         {
             if (captures[k].Name == "_") { continue; }
@@ -3854,13 +3878,34 @@ internal sealed partial class ZigLowering
             var sym = _symbols.Declare(new Symbol { Name = captures[k].Name, Kind = SymKind.Var, Type = capType });
             bodyStmts.Add(new DeclStmt(new List<LocalDecl> { new(sym, capInit) }));
         }
-        bodyStmts.Add(LowerStmt(bodyItem));
+        var userBody = LowerStmt(bodyItem);
+        bodyStmts.Add(userBody);
         _symbols.ExitScope();
-        var forStmt = new For(init, cond, post, new Block(bodyStmts));
-        if (pre.Count == 0) { return forStmt; }
+        var forStmt = new For(init, natural is null ? cond : null, post, new Block(bodyStmts));
+        if (pre.Count == 0 && elseItem is null) { return forStmt; }
         pre.Add(forStmt);
+        if (elseItem is not null && natural is not null)
+        {
+            // With no `break` out of the body the loop only ends naturally, so the else follows unguarded: C# then sees
+            // an else that returns end the function (`for (…) { if (c) return i; } else return 50;`, CS0161 otherwise).
+            var elseStmt = LowerStmt(elseItem);
+            pre.Add(BreaksOut(userBody) ? new If(natural, elseStmt, null) : elseStmt);
+        }
         return new Block(pre);
     }
+
+    /// <summary>True when <paramref name="s"/> contains a <c>break</c> that leaves the loop it sits in, one not inside a
+    /// nested loop or switch of its own (a labeled break lowers to a <c>goto</c> past the loop, so it counts too).</summary>
+    private static bool BreaksOut(CStmt? s) => s switch
+    {
+        Break or Goto => true,
+        Block b => b.Stmts.Any(BreaksOut),
+        Seq q => q.Stmts.Any(BreaksOut),
+        If f => BreaksOut(f.Then) || BreaksOut(f.Else),
+        Labeled l => BreaksOut(l.Body),
+        For or While or DoWhile or Switch => false,
+        _ => false,
+    };
 
     /// <summary>Lower a for-over-slice — <c>for (s) |x| body</c> and (when <paramref name="index"/>
     /// is set) <c>for (s, START..) |x, i| body</c> — to the C IR <c>for</c>:
