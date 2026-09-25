@@ -376,6 +376,7 @@ internal sealed partial class ZigLowering
     /// type for parity with plain <see cref="Zig.StmtAssign"/> (harmless for a numeric RHS).</summary>
     private CStmt CompoundAssign(Item targetItem, BinOp op, Item valueItem)
         => TryAssignComptimeVar(targetItem, op, valueItem)
+           ?? RejectConstStore(targetItem)
            ?? TryCompoundAssignOptionalPayload(targetItem, op, valueItem)
            // A hoist point, as a plain assignment is: `total += if (opt) |_| 100 else 2;` lowers its captured `if`
            // ahead of the statement.
@@ -841,7 +842,16 @@ internal sealed partial class ZigLowering
     // WHOLE-init catch / control-flow fallback is intercepted at the top of DeclOfInner (its own
     // statement lowering), leaving the buffer empty, so this wrap is a no-op for those.
     private CStmt DeclOf(Item nameTok, Item? typeItem, Item initExpr, bool isConst = false)
-        => Hoisted(() => DeclOfInner(nameTok, typeItem, initExpr, isConst));
+    {
+        var before = _symbols.Resolve(Tok(nameTok));
+        var decl = Hoisted(() => DeclOfInner(nameTok, typeItem, initExpr, isConst));
+        // A `const` local is immutable: a later store to it is zig's "cannot assign to constant" (task #95).
+        if (isConst && _symbols.Resolve(Tok(nameTok)) is { } declared && !ReferenceEquals(declared, before))
+        {
+            _zigConstBindings.Add(declared);
+        }
+        return decl;
+    }
 
     private CStmt DeclOfInner(Item nameTok, Item? typeItem, Item initExpr, bool isConst)
     {
@@ -2386,7 +2396,8 @@ internal sealed partial class ZigLowering
             payloadType = opt.Inner;
             if (byRef)
             {
-                payloadType = new CType.Pointer(opt.Inner);
+                // Into a `const` optional, the capture is a `*const T` (a store through it is rejected, task #95).
+                payloadType = new CType.Pointer(IsConstStorage(condRef) ? opt.Inner.WithQuals(TypeQual.Const) : opt.Inner);
                 payloadInit = new Call("ZigMem.OptionalPayload", new List<CExpr> { AddressOfLValue(condRef) },
                     new List<CType> { new CType.Pointer(cond.Type) }) { Type = payloadType };
             }
@@ -2403,8 +2414,9 @@ internal sealed partial class ZigLowering
             payloadType = cond.Type;
             if (byRef)
             {
-                // `|*p|` of an optional pointer points at the pointer variable itself.
+                // `|*p|` of an optional pointer points at the pointer variable itself (a `*const` one when the variable is).
                 payloadInit = AddressOfLValue(condRef);
+                if (IsConstStorage(condRef)) { payloadInit = payloadInit with { Type = new CType.Pointer(cond.Type.WithQuals(TypeQual.Const)) }; }
                 payloadType = payloadInit.Type;
             }
         }
@@ -2931,8 +2943,64 @@ internal sealed partial class ZigLowering
     /// <summary>Lower an assignment statement <c>lhs = rhs;</c> (also a prong body <c>v =&gt; lhs = rhs</c>): a
     /// discard <c>_ = e</c>, a value-block / value-control-flow RHS temp-filled against the lvalue, or a plain
     /// store with the lvalue's type as the sink. Under an ANF hoist buffer, like every statement.</summary>
+    /// <summary>The zig bindings that are immutable, <c>const</c> locals and globals (a parameter is immutable too, and is
+    /// known by its kind): a store to one, or through a pointer to one, is "cannot assign to constant" (task #95).</summary>
+    private readonly HashSet<Symbol> _zigConstBindings = new();
+
+    /// <summary>Reject a store whose target zig cannot write (task #95): a <c>const</c> binding or parameter, a field or array
+    /// element of one, or anything reached through a pointer or slice to const (<c>&amp;y</c> of a const <c>y</c> is a
+    /// <c>*const T</c>). Always returns null (so it chains with <c>??</c>): a legal store lowers normally.</summary>
+    private CStmt? RejectConstStore(Item targetItem)
+    {
+        if (targetItem.Content is Zig.Ident discard && Tok(discard.Arg0) == "_") { return null; }
+        CExpr target;
+        using (EnterThrowawayHoist()) { target = LowerExpr(targetItem); }
+        if (IsConstStorage(target))
+        {
+            throw new CompileException("zig: cannot assign to constant"
+                + (Unparen(target) is VarRef v ? $" '{v.Sym.Name}'" : ""));
+        }
+        return null;
+    }
+
+    /// <summary>True when the lvalue names storage zig treats as immutable (see <see cref="RejectConstStore"/>).</summary>
+    private bool IsConstStorage(CExpr lvalue) => lvalue switch
+    {
+        Paren p => IsConstStorage(p.Inner),
+        // `p[1] = v` with `p: *[2]u32` indexes the array `p` POINTS AT (PointedArray retypes the pointer to its array), so
+        // the storage is the pointee, not the binding: a `const p` or a parameter still writes through.
+        _ when PointedArrayPointee(lvalue) is { } pointee => pointee.IsConst,
+        VarRef { Sym: var s } => _zigConstBindings.Contains(s) || s.Kind == SymKind.Param,
+        Member { Arrow: true } m => m.Base.Type.Unqualified is CType.Pointer { Pointee.IsConst: true },
+        Member m => IsConstStorage(m.Base),
+        DotCC.Ir.Index ix => ix.Base.Type.Unqualified switch
+        {
+            CType.Array => IsConstStorage(ix.Base),
+            CType.Pointer ptr => ptr.Pointee.IsConst,
+            CType.Slice sl => sl.Element.IsConst,
+            _ => false,
+        },
+        Unary { Op: UnOp.Deref, Operand.Type: var pt } => pt.Unqualified is CType.Pointer { Pointee.IsConst: true },
+        _ => false,
+    };
+
+    /// <summary>The pointee of a pointer-to-array expression that lowering retyped to the array it points at (a variable or
+    /// field declared <c>*[N]T</c>, typed <c>[N]T</c> here), or null when the expression is what it was declared as.</summary>
+    private CType? PointedArrayPointee(CExpr e)
+    {
+        if (e.Type.Unqualified is not CType.Array) { return null; }
+        CType? declared = e switch
+        {
+            VarRef v => v.Sym.Type,
+            Member { Arrow: true } am when am.Base.Type.Unqualified is CType.Pointer { Pointee: var owner } => _ir.StructFieldType(owner, am.Field),
+            Member m => _ir.StructFieldType(m.Base.Type, m.Field),
+            _ => null,
+        };
+        return declared?.Unqualified is CType.Pointer { Pointee: var pointee } && pointee.Unqualified is CType.Array ? pointee : null;
+    }
+
     private CStmt LowerAssignStmt(Item lhsItem, Item rhsItem)
-        => TryAssignComptimeVar(lhsItem, null, rhsItem) ?? Hoisted(() =>
+        => TryAssignComptimeVar(lhsItem, null, rhsItem) ?? RejectConstStore(lhsItem) ?? Hoisted(() =>
         {
             if (lhsItem.Content is Zig.Ident lhs && Tok(lhs.Arg0) == "_")
             {

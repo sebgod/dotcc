@@ -1716,6 +1716,14 @@ internal sealed partial class ZigLowering
     /// unchanged.</para></summary>
     private void LowerGlobal(Item nameTok, Item? typeItem, Item rhsItem, bool threadLocal = false, bool isConst = false)
     {
+        LowerGlobalCore(nameTok, typeItem, rhsItem, threadLocal, isConst);
+        // A top-level `const` is immutable: a store to it is zig's "cannot assign to constant" (task #95).
+        if (isConst && _symbols.Resolve(Tok(nameTok)) is { IsGlobal: true } declared) { _zigConstBindings.Add(declared); }
+    }
+
+    /// <summary>Lower a top-level <c>const</c> / <c>var</c> declaration (see <see cref="LowerGlobal"/>).</summary>
+    private void LowerGlobalCore(Item nameTok, Item? typeItem, Item rhsItem, bool threadLocal, bool isConst)
+    {
         // `threadlocal` V1: a zero-initialized SCALAR only. The array/aggregate
         // paths below don't carry the marker (their pinned backing store is
         // process-wide by construction), and a non-zero initializer breaks under

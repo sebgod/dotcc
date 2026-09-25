@@ -313,11 +313,14 @@ internal sealed partial class ZigLowering
                 // `&arr` of a LOCAL or MEMBER array is its `*[N]T`, and in C# an array already renders as its
                 // element pointer, the same address: so the pointer-to-array is the array expression itself,
                 // retyped (`const p = &arr;` is `byte* p = arr;`, not the element pointer's own address).
+                // `&y` of storage zig cannot write (a `const`, a parameter, a field of one) is a `*const T` (task #95), so a
+                // store through it is rejected like a store to `y`.
+                var pointee = IsConstStorage(operand) ? operand.Type.WithQuals(TypeQual.Const) : operand.Type;
                 if (operand.Type.Unqualified is CType.Array && operand is VarRef { Sym.IsGlobal: false } or Member)
                 {
-                    return operand with { Type = new CType.Pointer(operand.Type) };
+                    return operand with { Type = new CType.Pointer(pointee) };
                 }
-                return new Unary(UnOp.AddrOf, operand) { Type = new CType.Pointer(operand.Type) };
+                return new Unary(UnOp.AddrOf, operand) { Type = new CType.Pointer(pointee) };
             }
             // `try e` — unwrap the error union's payload, or propagate its error by throwing
             // ZigErrorReturn (caught at the enclosing `!T` function's emitted try/catch — the
@@ -2604,7 +2607,7 @@ internal sealed partial class ZigLowering
     /// side effects, so a non-repeatable target (an index/deref reached through a call) is a clear
     /// deferred error rather than a silent double-eval.</summary>
     private CStmt SatCompoundAssign(Item targetItem, string helper, Item valueItem)
-        => new ExprStmt(SatCompoundAssignExpr(targetItem, helper, valueItem));
+        => RejectConstStore(targetItem) ?? new ExprStmt(SatCompoundAssignExpr(targetItem, helper, valueItem));
 
     /// <summary>The <c>Assign</c> CExpr for a saturating compound assignment <c>x op|= y</c>
     /// (<c>x = ZigMath.Sat…(x, y)</c>) — the core shared by the statement form (wrapped in an

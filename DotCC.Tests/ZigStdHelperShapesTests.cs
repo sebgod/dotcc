@@ -1149,6 +1149,54 @@ public sealed class ZigStdHelperShapesTests
             """)).Message.ShouldContain("a by-ref capture of an error union's payload is not modeled");
     }
 
+    [Theory]
+    [InlineData("const y: u8 = 1;\n    y = 2;\n    return y;")]
+    [InlineData("const y: u8 = 1;\n    y += 2;\n    return y;")]
+    [InlineData("const y: u8 = 1;\n    const p = &y;\n    p.* = 2;\n    return y;")]
+    [InlineData("const s: S = .{ .a = 1 };\n    s.a = 2;\n    return s.a;")]
+    [InlineData("const arr = [_]u8{ 1, 2 };\n    arr[0] = 5;\n    return arr[0];")]
+    [InlineData("const x: ?u8 = 1;\n    if (x) |*v| {\n        v.* = 2;\n    }\n    return x.?;")]
+    [InlineData("return f(1);")]
+    [InlineData("var y: u8 = 1;\n    g(&y);\n    return y;")]
+    public void A_store_to_a_const_is_rejected_as_in_zig(string body)
+    {
+        // Task #95: zig's "cannot assign to constant" for a `const` local, a parameter, a field or element of one, and a
+        // store through a pointer to const (`&y` of a const `y` is a `*const T`; so is a by-ref capture of a const).
+        Should.Throw<CompileException>(() => EmitZig(
+            "const S = struct { a: u8 };\n"
+            + "fn f(x: u8) u8 {\n    x = 2;\n    return x;\n}\n"
+            + "fn g(p: *const u8) void {\n    p.* = 2;\n}\n"
+            + "pub fn main() u8 {\n    " + body + "\n}\n")).Message.ShouldContain("cannot assign to constant");
+    }
+
+    [Fact]
+    public void A_store_through_a_pointer_to_mutable_storage_still_lowers()
+    {
+        // Task #95: a `const` binding that HOLDS a pointer (`const p: *[2]u32 = &b;`), a pointer parameter, a `var`, and a
+        // by-ref capture of a `var` optional all write their pointee, as in zig (this program returns 10 there).
+        var cs = EmitZig("""
+            fn fill(buf: *[2]u32, v: u32) void {
+                buf[1] = v;
+            }
+            pub fn main() u8 {
+                var b = [2]u32{ 0, 0 };
+                const p: *[2]u32 = &b;
+                p[1] = 3;
+                const q = &b;
+                q[0] = 4;
+                p.*[0] += 1;
+                fill(&b, 3);
+                var o: ?u8 = 1;
+                if (o) |*v| {
+                    v.* += 1;
+                }
+                return @intCast(b[0] + b[1] + o.?);
+            }
+            """);
+        cs.ShouldContain("buf[1] = v;");
+        cs.ShouldContain("ZigMem.OptionalPayload(&o)");
+    }
+
     [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
