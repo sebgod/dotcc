@@ -678,7 +678,8 @@ returns `Error![]T` (an `ErrUnion<Slice<T>>`, composing with `try`/`catch` above
 allocators ship: the C heap (the `std.heap.page_allocator`/`c_allocator` default, backed by
 `Libc.malloc`/`free`), `std.heap.FixedBufferAllocator` (a deterministic bump allocator over a
 caller buffer), and `std.heap.ArenaAllocator` (Milestone U — a growing arena over a backing
-allocator that frees wholesale at `deinit()`). The full method surface is `alloc`/`free`,
+allocator that frees wholesale at `deinit()`; it grows like zig's, the current chunk in place through the
+backing allocator first, else a new chunk sized from what is needed, task #120). The full method surface is `alloc`/`free`,
 `create`/`destroy` (single-object, Milestone U), and `realloc` (Milestone U).
 
 **Devirtualization is the optimization layer.** At each allocator-method site the lowering asks

@@ -576,25 +576,35 @@ public static unsafe class ZigAlloc
     /// 16-aligned (malloc returns ≥16-aligned), so every handed-out pointer is 16-aligned.</summary>
     internal const int ArenaHeaderBytes = 32;
 
-    /// <summary>The default usable capacity of a freshly-grown arena chunk (a larger request grows a
-    /// chunk sized to fit it instead).</summary>
-    private const nuint ArenaDefaultChunk = 4096;
-
-    /// <summary>Raw arena allocation — bump within the current chunk, growing a new one from the
-    /// backing allocator when the request doesn't fit. Requests are 16-byte-aligned so mixed-type
-    /// allocations stay aligned. Returns null only when the backing allocator is exhausted.</summary>
+    /// <summary>Raw arena allocation — bump within the current chunk, growing when the request doesn't fit the way zig's
+    /// ArenaAllocator does: first the current chunk IN PLACE through the backing allocator's resize (a FixedBufferAllocator
+    /// grows its last allocation), else a new chunk sized from what is needed, <c>alignForward(big + big / 2, 2)</c> with
+    /// <c>big = previous chunk + header + request + 16</c>. A fixed 4 KiB first chunk had failed with OutOfMemory over a
+    /// 1 KiB buffer zig's arena fits in. Requests are 16-byte-aligned so mixed-type allocations stay aligned. Returns null
+    /// only when the backing allocator is exhausted.</summary>
     private static byte* ArenaAlloc(void* ctx, ulong len, Alignment alignment, ulong retAddr)
     {
         var self = (ArenaAllocator*)ctx;
         nuint need = ((nuint)len + 15) & ~(nuint)15;   // round up to a 16-byte multiple
+        if (self->Current is var current && current != null && current->Used + need > current->Cap)
+        {
+            nuint grown = current->Used + need;
+            var held = new Slice<byte>((byte*)current, (ulong)((nuint)ArenaHeaderBytes + current->Cap));
+            if ((int)self->Backing.Vtable.resize(self->Backing.Ctx, held, alignment, (ulong)((nuint)ArenaHeaderBytes + grown), 0) != 0)
+            {
+                current->Cap = grown;
+            }
+        }
         if (self->Current == null || self->Current->Used + need > self->Current->Cap)
         {
-            nuint cap = need > ArenaDefaultChunk ? need : ArenaDefaultChunk;
-            byte* raw = self->Backing.Vtable.alloc(self->Backing.Ctx, (ulong)((nuint)ArenaHeaderBytes + cap), alignment, 0);
+            nuint previous = self->Current == null ? 0 : (nuint)ArenaHeaderBytes + self->Current->Cap;
+            nuint big = previous + (nuint)ArenaHeaderBytes + need + 16;
+            nuint total = (big + big / 2 + 1) & ~(nuint)1;
+            byte* raw = self->Backing.Vtable.alloc(self->Backing.Ctx, (ulong)total, alignment, 0);
             if (raw == null) { return null; }
             var ch = (ArenaChunk*)raw;
             ch->Prev = self->Current;
-            ch->Cap = cap;
+            ch->Cap = total - (nuint)ArenaHeaderBytes;
             ch->Used = 0;
             self->Current = ch;
         }
