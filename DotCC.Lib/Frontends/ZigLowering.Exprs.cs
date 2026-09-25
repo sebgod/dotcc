@@ -2685,10 +2685,7 @@ internal sealed partial class ZigLowering
         System.Int128 v = helper switch { "SatAdd" => a + b, "SatSub" => a - b, _ => a * b };
         if (!(left is LitInt && right is LitInt) && t.Unqualified is CType.Prim { Integer: true, Signed: var signed, Bytes: var bytes })
         {
-            var bits = declaredBits is { } db and > 0 ? db : bytes * 8;
-            var (min, max) = signed
-                ? (-(System.Int128.One << (bits - 1)), (System.Int128.One << (bits - 1)) - 1)
-                : (System.Int128.Zero, (System.Int128.One << bits) - 1);
+            var (min, max) = IntRange(signed, declaredBits is { } db and > 0 ? db : bytes * 8);
             v = System.Int128.Clamp(v, min, max);
         }
         if (v < long.MinValue || v > long.MaxValue) { return null; }
@@ -2851,7 +2848,40 @@ internal sealed partial class ZigLowering
         Zig.BitOr a  => IsComptimeUntypedNumeric(a.Arg0) && IsComptimeUntypedNumeric(a.Arg2),
         Zig.Shl a    => IsComptimeUntypedNumeric(a.Arg0) && IsComptimeUntypedNumeric(a.Arg2),
         Zig.Shr a    => IsComptimeUntypedNumeric(a.Arg0) && IsComptimeUntypedNumeric(a.Arg2),
+        Zig.AddSat a => IsComptimeUntypedNumeric(a.Arg0) && IsComptimeUntypedNumeric(a.Arg2),
+        Zig.SubSat a => IsComptimeUntypedNumeric(a.Arg0) && IsComptimeUntypedNumeric(a.Arg2),
+        Zig.MulSat a => IsComptimeUntypedNumeric(a.Arg0) && IsComptimeUntypedNumeric(a.Arg2),
         _ => false,
     };
+
+    /// <summary>The range of a <paramref name="bits"/>-wide integer, as far as an <see cref="System.Int128"/> reaches: a 128-bit
+    /// type (or a u127) spans every value an Int128 holds on its side of zero, and a shift by 128 would wrap.</summary>
+    private static (System.Int128 Min, System.Int128 Max) IntRange(bool signed, int bits) => signed
+        ? bits >= 128 ? (System.Int128.MinValue, System.Int128.MaxValue)
+                      : (-(System.Int128.One << (bits - 1)), (System.Int128.One << (bits - 1)) - 1)
+        : (System.Int128.Zero, bits >= 127 ? System.Int128.MaxValue : (System.Int128.One << bits) - 1);
+
+    /// <summary>Reject, as zig does, a typed declaration whose untyped comptime integer initializer its type cannot hold
+    /// (task #112): <c>const s: u8 = 300;</c>, <c>-2</c>, <c>3 -| 5</c> (comptime_int arithmetic, so -2) are "type 'u8'
+    /// cannot represent integer value …". The initializer is evaluated as the comptime_int it is, before any narrowing
+    /// to the declared type; the range is the declared width the source spells (a <c>u3</c> holds 0 to 7).</summary>
+    private void RejectUnrepresentableInit(Item? typeItem, CType? declared, Item initExpr)
+    {
+        if (typeItem is null
+            || declared?.Unqualified is not CType.Prim { Integer: true, IsComptimeInt: false, Name: not "_Bool", Signed: var signed, Bytes: var bytes }
+            || !IsComptimeUntypedNumeric(initExpr))
+        {
+            return;
+        }
+        System.Int128? value;
+        using (EnterThrowawayHoist()) { value = _ir.ConstEval128(LowerExpr(initExpr)); }
+        if (value is not { } v) { return; }
+        var bits = DeclaredBitsOfTypeArg(typeItem) is { } db and > 0 ? db : bytes * 8;
+        var (min, max) = IntRange(signed, bits);
+        if (v < min || v > max)
+        {
+            throw new CompileException($"zig: type '{(signed ? "i" : "u")}{bits}' cannot represent integer value '{v}'");
+        }
+    }
 
 }

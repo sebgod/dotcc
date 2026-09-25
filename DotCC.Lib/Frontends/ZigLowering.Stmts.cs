@@ -869,6 +869,7 @@ internal sealed partial class ZigLowering
         // Compute the declared type FIRST: a result-located init (`.member` / `.{…}`) needs
         // it as its sink, so resolve the annotation before lowering the initializer.
         var declared = typeItem is not null ? LowerType(typeItem) : null;
+        RejectUnrepresentableInit(typeItem, declared, initExpr);
         // `const x = blk: { … break :blk v; };` — a labeled value-block initializer. Temp-fill it
         // (the declared type, if any, is the sink), then bind `x` to the result temp.
         if (IsLabeledValue(initExpr))

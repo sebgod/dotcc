@@ -2173,6 +2173,30 @@ public sealed class ZigStdHelperShapesTests
             .Message.ShouldContain(message);
     }
 
+    [Theory]
+    [InlineData("const s: u8 = -2; return s;", "type 'u8' cannot represent integer value '-2'")]
+    [InlineData("const s: u8 = 3 -| 5; return s;", "type 'u8' cannot represent integer value '-2'")]
+    [InlineData("const s: u8 = 300; return s;", "type 'u8' cannot represent integer value '300'")]
+    [InlineData("var s: u3 = 8; _ = &s; return s;", "type 'u3' cannot represent integer value '8'")]
+    [InlineData("const s: i16 = -40000 + 1; return @truncate(@as(u16, @bitCast(s)));", "type 'i16' cannot represent integer value '-39999'")]
+    public void A_typed_declaration_rejects_a_comptime_value_its_type_cannot_hold(string body, string message)
+    {
+        // Task #112: an untyped comptime integer initializer is checked against the declared width, before any narrowing,
+        // with zig's own message (`3 -| 5` is comptime_int arithmetic, so -2). dotcc had narrowed or wrapped it silently.
+        Should.Throw<CompileException>(() => EmitZig("pub fn main() u8 {\n    " + body + "\n}\n")).Message.ShouldContain(message);
+    }
+
+    [Theory]
+    [InlineData("const s: i8 = -128; return @bitCast(s);")]
+    [InlineData("const s: u8 = 255; return s;")]
+    [InlineData("const s: u64 = 0xFFFF_FFFF_FFFF_FFFF; return @truncate(s);")]
+    [InlineData("const s: u8 = @as(u8, 3) -| 5; return s;")]
+    public void A_typed_declaration_accepts_a_comptime_value_at_the_edge_of_its_type(string body)
+    {
+        // Task #112: the extremes of a type fit, and a typed saturating op clamps before the check.
+        Should.NotThrow(() => EmitZig("pub fn main() u8 {\n    " + body + "\n}\n"));
+    }
+
     [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
