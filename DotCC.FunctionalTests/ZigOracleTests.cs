@@ -5924,6 +5924,38 @@ public sealed class ZigOracleTests
             "    const sum = weighted + a[0] + b[1] + c[2] + ranged + trailing;\n" +
             "    return @intCast(sum % 256);\n" +
             "}\n", 130, "" },
+        // A generic instance's value consts sizing its nested container's fields (task #108, std.MultiArrayList's `Slice`):
+        // `ptrs: [names.len]u16` and `bytes: [width]u8` over the instance's consts. zig returns 46.
+        new object[] { "nested_container_reads_instance_consts",
+            "fn Columns(comptime T: type) type {\n" +
+            "    return struct {\n" +
+            "        rows: u8 = 0,\n" +
+            "        const Self = @This();\n" +
+            "        const width = @sizeOf(T);\n" +
+            "        const names = [_][]const u8{ \"lo\", \"mid\", \"hi\" };\n" +
+            "        pub const Slice = struct {\n" +
+            "            ptrs: [names.len]u16,\n" +
+            "            bytes: [width]u8,\n" +
+            "            pub fn total(s: Slice) u32 {\n" +
+            "                var t: u32 = 0;\n" +
+            "                for (s.ptrs) |p| t += p;\n" +
+            "                return t + @as(u32, @intCast(s.bytes.len));\n" +
+            "            }\n" +
+            "        };\n" +
+            "        fn slice(self: Self) Slice {\n" +
+            "            var s: Slice = undefined;\n" +
+            "            for (&s.ptrs, 0..) |*p, i| p.* = @intCast(i * 10 + self.rows);\n" +
+            "            for (&s.bytes) |*b| b.* = 0;\n" +
+            "            return s;\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const c: Columns(u32) = .{ .rows = 4 };\n" +
+            "    const s = c.slice();\n" +
+            "    return @intCast(s.total());\n" +
+            "}\n", 46, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

@@ -2002,6 +2002,47 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_nested_container_of_a_generic_instance_sees_the_instance_value_consts()
+    {
+        var cs = EmitZig("""
+            fn Columns(comptime T: type) type {
+                return struct {
+                    rows: u8 = 0,
+                    const Self = @This();
+                    const width = @sizeOf(T);
+                    const names = [_][]const u8{ "lo", "mid", "hi" };
+                    pub const Slice = struct {
+                        ptrs: [names.len]u16,
+                        bytes: [width]u8,
+                        pub fn total(s: Slice) u32 {
+                            var t: u32 = 0;
+                            for (s.ptrs) |p| t += p;
+                            return t + @as(u32, @intCast(s.bytes.len));
+                        }
+                    };
+                    fn slice(self: Self) Slice {
+                        var s: Slice = undefined;
+                        for (&s.ptrs, 0..) |*p, i| p.* = @intCast(i * 10 + self.rows);
+                        for (&s.bytes) |*b| b.* = 0;
+                        return s;
+                    }
+                };
+            }
+
+            pub fn main() u8 {
+                const c: Columns(u32) = .{ .rows = 4 };
+                const s = c.slice();
+                return @intCast(s.total());
+            }
+            """);
+        // Task #108 (std.MultiArrayList's `Slice` has `ptrs: [field_names.len][*]u8` over the instance's
+        // `const field_names = …`): the instance's value consts register before its nested containers' bodies, so a nested
+        // field's array extent can name one. zig returns 46.
+        cs.ShouldContain("public fixed ushort ptrs[3];");
+        cs.ShouldContain("public fixed byte bytes[4];");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

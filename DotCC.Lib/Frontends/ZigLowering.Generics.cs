@@ -1633,6 +1633,16 @@ internal sealed partial class ZigLowering
                     valueConsts.Add(c);
                 }
                 consts = valueConsts;
+                // `const Self = @This();` → a self alias scoped to the MANGLED container, plus any value
+                // const — both keyed by the mangled name, so a method's `self: *Self` and a `S.NAME` use
+                // resolve exactly like an ordinary container's. Runs after _containerTypes[mangled] is set
+                // (the self alias reads it), before the fields (a field may be sized by one: std.fmt.parse_float's
+                // Decimal has `digits: [max_digits]u8` with `pub const max_digits = if (MantissaT == u64) 768 else 11564;`,
+                // as a top-level container registers its consts first), before the methods (their signatures may
+                // spell `Self`), and before the nested containers' bodies (std.MultiArrayList's `Slice` has
+                // `ptrs: [field_names.len][*]u8` over the instance's `const field_names = …`, task #108).
+                _currentContainer = mangled;
+                RegisterContainerConsts(mangled, consts);
                 // Their bodies: after the type consts, which a nested field may name (`index: Size`).
                 foreach (var (nName, nContent, _) in nestedDecls)
                 {
@@ -1646,14 +1656,6 @@ internal sealed partial class ZigLowering
                         nm.sym, nContainer, nm.ps, nm.body, methodTypeSeeds, valueSeeds, optionalSeeds, typeFnSeeds));
                 }
                 _currentContainer = mangled;
-                // `const Self = @This();` → a self alias scoped to the MANGLED container, plus any value
-                // const — both keyed by the mangled name, so a method's `self: *Self` and a `S.NAME` use
-                // resolve exactly like an ordinary container's. Runs after _containerTypes[mangled] is set
-                // (the self alias reads it), before the fields (a field may be sized by one: std.fmt.parse_float's
-                // Decimal has `digits: [max_digits]u8` with `pub const max_digits = if (MantissaT == u64) 768 else 11564;`,
-                // as a top-level container registers its consts first), and before the methods (their signatures may
-                // spell `Self`).
-                RegisterContainerConsts(mangled, consts);
                 if (bodyResult.Reified is { } reified) { RegisterReifiedStruct(mangled, reified, bodyResult.Layout); }
                 else { RegisterStruct(mangled, fields, bodyResult.Layout); }
                 // Each method: declare the signature NOW — while the comptime type/value seeds are live, so a
