@@ -5328,6 +5328,49 @@ public sealed class ZigOracleTests
             "    var it = b.iter(.{ .step = 2 });\n" +
             "    return total +% it.next() +% b.mask;\n" +
             "}\n", 190, "" },
+        // Task #94: the by-ref capture `if (opt) |*v|` points `v` INTO the optional: a write through it changes the
+        // optional (a local, a struct field, and a missing payload taking the else arm); an optional pointer's capture
+        // is the address of the pointer variable; an rvalue condition is a temporary the capture points into.
+        new object[] { "if_capture_by_ref",
+            "const Holder = struct {\n" +
+            "    a: ?u8 = 5,\n" +
+            "    b: ?u16 = null,\n" +
+            "};\n" +
+            "\n" +
+            "fn maybe(n: u8) ?u8 {\n" +
+            "    return if (n > 2) n else null;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var x: ?u8 = 10;\n" +
+            "    if (x) |*v| {\n" +
+            "        v.* += 3;\n" +
+            "    }\n" +
+            "    var h: Holder = .{};\n" +
+            "    if (h.a) |*p| {\n" +
+            "        p.* *= 2;\n" +
+            "    } else {\n" +
+            "        h.a = 99;\n" +
+            "    }\n" +
+            "    if (h.b) |*q| {\n" +
+            "        q.* = 1;\n" +
+            "    } else {\n" +
+            "        h.b = 7;\n" +
+            "    }\n" +
+            "    var n: u8 = 4;\n" +
+            "    var ptr: ?*u8 = &n;\n" +
+            "    if (ptr) |*pp| {\n" +
+            "        pp.*.* += 1;\n" +
+            "        const same: *u8 = pp.*;\n" +
+            "        same.* += 10;\n" +
+            "    }\n" +
+            "    var seen: u8 = 0;\n" +
+            "    if (maybe(9)) |*m| {\n" +
+            "        seen = m.*;\n" +
+            "    }\n" +
+            "    const got: u8 = if (ptr == null) 1 else 0;\n" +
+            "    return x.? + h.a.? + @as(u8, @intCast(h.b.?)) + n + seen + got;\n" +
+            "}\n", 54, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -6609,6 +6652,27 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // Task #94: std.EnumMap from real std (init from a struct of optionals, put, remove, getPtr, get, contains,
+    // iterator). EnumMap.init walks the keys with `if (@field(init_values, tag)) |*v|`, and its
+    // `EnumFieldStruct(E, ?Value, @as(?Value, null))` passes a typed comptime null.
+    [Fact]
+    public void Dotcc_matches_zig_std_enums_enum_map() =>
+        MatchesZigWithRealStd("enums_enum_map",
+            "const std = @import(\"std\");\n" +
+            "const E = enum { red, green, blue, cyan };\n" +
+            "pub fn main() u8 {\n" +
+            "    var m = std.EnumMap(E, u8).init(.{ .cyan = 9, .red = 1 });\n" +
+            "    m.put(.green, 4);\n" +
+            "    m.remove(.red);\n" +
+            "    if (m.getPtr(.cyan)) |p| p.* += 20;\n" +
+            "    var total: u32 = @intCast(m.count());\n" +
+            "    total += (m.get(.cyan) orelse 0) + (m.get(.green) orelse 0) + (m.get(.red) orelse 50);\n" +
+            "    if (!m.contains(.blue)) total += 100;\n" +
+            "    var it = m.iterator();\n" +
+            "    while (it.next()) |entry| total += @as(u32, @intFromEnum(entry.key)) * 3 + entry.value.*;\n" +
+            "    return @intCast(total % 256);\n" +
+            "}\n", 230);
 
     // Task #93: std.EnumSet (init from a struct of bools, insert, iterator, initMany, unionWith / intersectWith)
     // and std.EnumArray.initDefault from real std. They go through std.enums.EnumFieldStruct's `@Struct` with

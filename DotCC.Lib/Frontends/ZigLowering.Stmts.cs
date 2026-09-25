@@ -216,6 +216,8 @@ internal sealed partial class ZigLowering
             // error-union's success/error (part 3) — in the matching branch. See LowerIfCapture.
             case Zig.StmtIfCapture f:        return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, null, null);
             case Zig.StmtIfCaptureElse f:    return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, f.Arg9, null);
+            case Zig.StmtIfCaptureRef f:     return LowerIfCapture(f.Arg2, Tok(f.Arg6), f.Arg8, null, null, byRef: true);
+            case Zig.StmtIfCaptureRefElse f: return LowerIfCapture(f.Arg2, Tok(f.Arg6), f.Arg8, f.Arg10, null, byRef: true);
             case Zig.StmtIfCaptureErrElse f: return LowerIfCapture(f.Arg2, Tok(f.Arg5), f.Arg7, f.Arg12, Tok(f.Arg10));
             // `if (c) return x else …;` — a `return Expr` then-arm (ReturnArm), otherwise the same `if`.
             case Zig.StmtIfReturnElse f:           return LowerIfStmt(f.Arg2, f.Arg4, f.Arg6);
@@ -2319,13 +2321,23 @@ internal sealed partial class ZigLowering
     private static bool IsUnmodeledPrimitiveType(Item item)
         => item.Content is Zig.Ident id && Tok(id.Arg0) is "f16" or "f80" or "f128" or "c_longdouble" or "u0" or "i0";
 
-    private CStmt LowerIfCapture(Item condItem, string capName, Item thenItem, Item? elseItem, string? errCapName)
+    /// <summary>Lower a captured <c>if</c> statement: <c>if (opt) |x|</c> over an optional, an optional pointer or an
+    /// error union (with <c>else |e|</c>). <paramref name="byRef"/> is the by-ref form <c>if (opt) |*x|</c> (task #94):
+    /// <c>x</c> points AT the payload in place (a value optional's through <c>ZigMem.OptionalPayload</c>, an optional
+    /// pointer's own slot), so the condition is used as the lvalue it names rather than copied.</summary>
+    private CStmt LowerIfCapture(Item condItem, string capName, Item thenItem, Item? elseItem, string? errCapName,
+        bool byRef = false)
     {
         // Comptime fold (S4b): a captured `if` on a comptime-known optional (a `comptime x: ?T` seed)
         // selects the taken branch at lowering time. `null` → the else (empty if absent); a known payload
         // → the then with `x` bound to the literal. Only for the plain optional form (no `else |e|`).
         if (errCapName is null && TryComptimeOptionalCond(condItem, out var copt))
         {
+            if (byRef)
+            {
+                throw new IrUnsupportedException(
+                    "zig `if (opt) |*x|` over a comptime-known optional: a comptime value has no runtime payload to point at");
+            }
             if (!copt.HasValue) { return elseItem is { } el ? LowerStmt(el) : new Seq(new List<CStmt>()); }
             _symbols.EnterScope();
             BindFoldedCapture(capName, copt.Value, copt.Inner);
@@ -2346,7 +2358,9 @@ internal sealed partial class ZigLowering
         // Hoist a side-effecting condition to a single-eval temp (a bare var is already re-readable).
         var pre = new List<CStmt>();
         CExpr condRef;
-        if (cond is VarRef)
+        // By ref, the condition IS the storage the capture points into (`@field(init_values, tag)`), so a repeatable
+        // lvalue is used as is; anything else is a temporary, and the capture points into that.
+        if (cond is VarRef || byRef && cond.IsLValue && IsRepeatableLValue(cond))
         {
             condRef = cond;
         }
@@ -2370,6 +2384,12 @@ internal sealed partial class ZigLowering
             test = new Member(condRef, "HasValue", false) { Type = CType.Bool };
             payloadInit = new Member(condRef, "Value", false) { Type = opt.Inner };
             payloadType = opt.Inner;
+            if (byRef)
+            {
+                payloadType = new CType.Pointer(opt.Inner);
+                payloadInit = new Call("ZigMem.OptionalPayload", new List<CExpr> { AddressOfLValue(condRef) },
+                    new List<CType> { new CType.Pointer(cond.Type) }) { Type = payloadType };
+            }
         }
         else if (ct is CType.Pointer)
         {
@@ -2381,6 +2401,16 @@ internal sealed partial class ZigLowering
             test = condRef;        // Cond.B(void*) tests non-null
             payloadInit = condRef; // the unwrapped pointer is the same value
             payloadType = cond.Type;
+            if (byRef)
+            {
+                // `|*p|` of an optional pointer points at the pointer variable itself.
+                payloadInit = AddressOfLValue(condRef);
+                payloadType = payloadInit.Type;
+            }
+        }
+        else if (ct is CType.ErrorUnion && byRef)
+        {
+            throw new IrUnsupportedException("zig `if (error_union) |*x|`: a by-ref capture of an error union's payload is not modeled");
         }
         else if (ct is CType.ErrorUnion eu)
         {
@@ -2446,6 +2476,15 @@ internal sealed partial class ZigLowering
             return new Block(pre);
         }
         return ifStmt;
+    }
+
+    /// <summary><c>&amp;lvalue</c>, marking the variable at its root address-taken, as <c>&amp;x</c> in source does.</summary>
+    private static CExpr AddressOfLValue(CExpr lvalue)
+    {
+        var root = lvalue;
+        while (root is Member m) { root = m.Base; }
+        if (root is VarRef { Sym: { Kind: SymKind.Var or SymKind.Param } rootSym }) { rootSym.AddressTaken = true; }
+        return new Unary(UnOp.AddrOf, lvalue) { Type = new CType.Pointer(lvalue.Type) };
     }
 
     /// <summary>Lower a VALUE-position captured <c>if</c> — <c>if (opt) |x| thenE else elseE</c> (S4a),

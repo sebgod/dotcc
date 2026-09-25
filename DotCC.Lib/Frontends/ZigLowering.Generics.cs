@@ -1011,10 +1011,18 @@ internal sealed partial class ZigLowering
         return !hasValue ? "optnull" : "opt" + (value >= 0 ? value.ToString(inv) : "n" + (-(System.Int128)value).ToString(inv));
     }
 
+    /// <summary>True for a literal <c>null</c>, parenthesized or typed through <c>@as(?T, null)</c> (std.enums.EnumMap's
+    /// <c>EnumFieldStruct(E, ?Value, @as(?Value, null))</c>). At a <c>??T</c> parameter zig keeps that as a non-null
+    /// outer around a null payload, so every field defaults to null; reading it as "no default" is observably the same,
+    /// since an omitted optional field is null.</summary>
     private static bool IsComptimeNull(Item arg)
     {
         var cur = arg;
         while (cur.Content is Zig.Grouped g) { cur = g.Arg1; }
+        if (cur.Content is Zig.BuiltinCall { Arg0: var asTok } asCall && Tok(asTok) == "@as" && Flatten(asCall.Arg2) is [_, var asValue])
+        {
+            return IsComptimeNull(asValue);
+        }
         return cur.Content is Zig.NullLit;
     }
 

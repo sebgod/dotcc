@@ -1081,6 +1081,75 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_by_ref_if_capture_points_at_the_payload_in_place()
+    {
+        var cs = EmitZig("""
+            const Holder = struct {
+                a: ?u8 = 5,
+                b: ?u16 = null,
+            };
+
+            fn maybe(n: u8) ?u8 {
+                return if (n > 2) n else null;
+            }
+
+            pub fn main() u8 {
+                var x: ?u8 = 10;
+                if (x) |*v| {
+                    v.* += 3;
+                }
+                var h: Holder = .{};
+                if (h.a) |*p| {
+                    p.* *= 2;
+                } else {
+                    h.a = 99;
+                }
+                if (h.b) |*q| {
+                    q.* = 1;
+                } else {
+                    h.b = 7;
+                }
+                var n: u8 = 4;
+                var ptr: ?*u8 = &n;
+                if (ptr) |*pp| {
+                    pp.*.* += 1;
+                    const same: *u8 = pp.*;
+                    same.* += 10;
+                }
+                var seen: u8 = 0;
+                if (maybe(9)) |*m| {
+                    seen = m.*;
+                }
+                const got: u8 = if (ptr == null) 1 else 0;
+                return x.? + h.a.? + @as(u8, @intCast(h.b.?)) + n + seen + got;
+            }
+            """);
+        // Task #94: `if (opt) |*v|` points `v` INTO the optional (no copy, no write-back), an optional pointer's capture
+        // is the address of the pointer variable, and an rvalue condition is a temporary the capture points into.
+        cs.ShouldContain("byte* v = ZigMem.OptionalPayload(&x);");
+        cs.ShouldContain("byte* p = ZigMem.OptionalPayload(&h.a);");
+        cs.ShouldContain("byte** pp = &ptr;");
+        cs.ShouldContain("byte* m = ZigMem.OptionalPayload(&__cap);");
+    }
+
+    [Fact]
+    public void A_by_ref_capture_of_an_error_union_is_a_loud_cut()
+    {
+        Should.Throw<Exception>(() => EmitZig("""
+            fn get(ok: bool) !u8 {
+                return if (ok) 3 else error.Nope;
+            }
+            pub fn main() u8 {
+                var total: u8 = 0;
+                if (get(true)) |*v| {
+                    total = v.*;
+                }
+                return total;
+            }
+            """)).Message.ShouldContain("a by-ref capture of an error union's payload is not modeled");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

@@ -89,4 +89,12 @@ public static class ZigMem
         for (int k = 0; k < sizeof(T); k++) { if (b[k] != 0) { return false; } }
         return true;
     }
+
+    /// <summary>The payload of a value optional, IN PLACE: zig's by-ref capture <c>if (opt) |*v|</c> (std.enums.EnumMap)
+    /// points <c>v</c> at the optional's own payload, so a write through <c>v</c> changes the optional and a later write to
+    /// the optional is seen through <c>v</c>. <see cref="System.Nullable.GetValueRefOrDefaultRef{T}"/> is the BCL's ref to
+    /// that field (no layout assumption); the caller has already tested <c>HasValue</c>.</summary>
+    public static unsafe T* OptionalPayload<T>(T?* optional) where T : unmanaged
+        => (T*)System.Runtime.CompilerServices.Unsafe.AsPointer(
+            ref System.Runtime.CompilerServices.Unsafe.AsRef(in System.Nullable.GetValueRefOrDefaultRef(in *optional)));
 }

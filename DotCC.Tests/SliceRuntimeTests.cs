@@ -84,4 +84,17 @@ public sealed class SliceRuntimeTests
         (cs.Ptr == buf).ShouldBeTrue();
         cs[1].ShouldBe(200);
     }
+
+    [Fact]
+    public unsafe void Optional_payload_points_into_the_optional_in_place()
+    {
+        // zig's `if (opt) |*v|` (task #94): a write through the pointer changes the optional, and a write to the
+        // optional is seen through the pointer.
+        int? opt = 5;
+        int* v = ZigMem.OptionalPayload(&opt);
+        *v += 3;
+        opt.ShouldBe(8);
+        opt = 40;
+        (*v).ShouldBe(40);
+    }
 }

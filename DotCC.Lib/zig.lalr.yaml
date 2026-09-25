@@ -513,6 +513,10 @@ productions:
       # capture (part 3) and the by-ref `|*x|` form (part 4) extend these two productions.
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', Stmt],                 action: stmtIfCapture }
       - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', IDENT, '|', Stmt, 'else', Stmt],   action: stmtIfCaptureElse }
+      # The by-ref capture `if (opt) |*v|` (std.enums.EnumMap.init, task #94): `v` points AT the payload. After
+      # `'|'`, a `'*'` lookahead selects it over the by-value `IDENT` form, conflict-free.
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', '*', IDENT, '|', Stmt],                 action: stmtIfCaptureRef }
+      - { lhs: Stmt, rhs: ['if', '(', Expr, ')', '|', '*', IDENT, '|', Stmt, 'else', Stmt],   action: stmtIfCaptureRefElse }
       # `if (eu) |x| then else |e| elsebody` — error-union capture (Milestone M, part 3): bind the
       # success payload to `x` in the then-branch, the error to `e` in the else-branch. After the
       # then-Stmt's `else`, a `|` lookahead selects this error-capture form over the plain
