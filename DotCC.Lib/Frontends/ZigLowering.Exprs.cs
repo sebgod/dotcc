@@ -1680,7 +1680,8 @@ internal sealed partial class ZigLowering
         // `a.alloc(T, n)` / `a.free(s)` (and the deferred `create`/`destroy`) on a known-default
         // (→ devirt) or an Allocator-typed receiver (→ indirect). A same-named method on a
         // non-allocator receiver falls through to the generic dispatch below.
-        if (methodName is "alloc" or "alignedAlloc" or "dupe" or "free" or "create" or "destroy" or "realloc" or "resize" or "remap"
+        if (methodName is "alloc" or "alignedAlloc" or "dupe" or "dupeSentinel" or "allocSentinel" or "free" or "create" or "destroy"
+                or "realloc" or "resize" or "remap"
             or "rawAlloc" or "rawResize" or "rawRemap" or "rawFree"
             && TryLowerAllocatorMethod(fld, methodName, argItems, out var allocExpr))
         {
@@ -2125,6 +2126,33 @@ internal sealed partial class ZigLowering
                 result = new Call("ZigAlloc.Dupe", new List<CExpr> { allocator, src, OomLit() })
                 {
                     Type = new CType.ErrorUnion(sliceType),
+                };
+                return true;
+            }
+            // (type, slice, sentinel) / (type, count, sentinel) → Error![:s]T (task #107): one element more, the sentinel
+            // stored past the end. dotcc's slice carries no sentinel, so the result is the `len`-long slice before it.
+            case "dupeSentinel":
+            case "allocSentinel":
+            {
+                if (argItems.Count != 3)
+                {
+                    throw new IrUnsupportedException(
+                        $"zig allocator `.{methodName}` expects (type, {(methodName == "dupeSentinel" ? "slice" : "count")}, sentinel); "
+                        + $"got {argItems.Count} argument(s)");
+                }
+                var elem = LowerType(argItems[0]);
+                var source = methodName == "dupeSentinel"
+                    ? LowerExprSink(argItems[1], new CType.Slice(elem.WithQuals(TypeQual.Const)))
+                    : LowerExprSink(argItems[1], CType.ULong);
+                var sentinel = LowerExprSink(argItems[2], elem);
+                var allocator = recv
+                    ?? (kind == AllocKind.Fba && fld.Arg0.Content is Zig.Ident { Arg0: var fbaTok }
+                        ? MaterializeFba(_fbaAllocatorSites[Tok(fbaTok)])
+                        : MaterializeCHeap());
+                var helper = methodName == "dupeSentinel" ? "ZigAlloc.DupeSentinel" : "ZigAlloc.AllocSentinel";
+                result = new Call(helper, new List<CExpr> { allocator, source, new Cast(elem, sentinel) { Type = elem }, OomLit() })
+                {
+                    Type = new CType.ErrorUnion(new CType.Slice(elem)),
                 };
                 return true;
             }

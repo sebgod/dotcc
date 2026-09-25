@@ -363,6 +363,32 @@ public static unsafe class ZigAlloc
         return fresh;
     }
 
+    /// <summary><c>a.dupeSentinel(T, m, s)</c> → <c>Error![:s]T</c>: a copy of <paramref name="src"/> with
+    /// <paramref name="sentinel"/> stored one past its end, so the allocation holds <c>len + 1</c> elements and the
+    /// returned slice the <c>len</c> before the sentinel (zig's <c>[:s]T</c> layout).</summary>
+    public static ErrUnion<Slice<T>> DupeSentinel<T>(Allocator a, ConstSlice<T> src, T sentinel, ushort oom) where T : unmanaged
+    {
+        var fresh = a.Alloc<T>(src.Len + 1, oom);
+        if (fresh.IsErr) { return fresh; }
+        if (src.Len > 0)
+        {
+            ulong bytes = src.Len * (ulong)sizeof(T);
+            Buffer.MemoryCopy(src.Ptr, fresh.Value.Ptr, bytes, bytes);
+        }
+        fresh.Value.Ptr[src.Len] = sentinel;
+        return ErrUnion<Slice<T>>.Ok(new Slice<T>(fresh.Value.Ptr, src.Len));
+    }
+
+    /// <summary><c>a.allocSentinel(T, n, s)</c> → <c>Error![:s]T</c>: <c>n + 1</c> elements with
+    /// <paramref name="sentinel"/> at index <paramref name="n"/>, returned as the <c>n</c>-long slice before it.</summary>
+    public static ErrUnion<Slice<T>> AllocSentinel<T>(Allocator a, ulong n, T sentinel, ushort oom) where T : unmanaged
+    {
+        var fresh = a.Alloc<T>(n + 1, oom);
+        if (fresh.IsErr) { return fresh; }
+        fresh.Value.Ptr[n] = sentinel;
+        return ErrUnion<Slice<T>>.Ok(new Slice<T>(fresh.Value.Ptr, n));
+    }
+
     /// <summary>The <b>devirtualized</b> <c>page_allocator.create(T)</c> — a direct
     /// <see cref="Libc.malloc"/> of <c>sizeof(T)</c> bytes, no vtable. The address is carried as a
     /// <c>nuint</c> (see <see cref="Allocator.Create{T}"/> for why).</summary>

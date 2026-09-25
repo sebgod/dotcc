@@ -54,6 +54,7 @@ current programs.
 |---|---|---|
 | `realpath` | lexical `Path.GetFullPath` only — no symlink dereference | walk components via `FileSystemInfo.LinkTarget`/`ResolveLinkTarget` (net6+, AOT-clean) |
 | Wide-format transcode cache | keyed by pointer **address** — a mutated format buffer at the same address serves stale text | key by content hash, or skip the cache for non-RVA pointers |
+| `free` of a zig sentinel slice (`[:0]T`, task #107) | dotcc's slice carries no sentinel, so `a.free(z)` of a `dupeSentinel` / `allocSentinel` result hands the allocator `len` elements where zig hands `len + 1`. Harmless on every curated allocator (the C heap ignores the size, the arena's free is a no-op, the FBA just does not reclaim it as its last allocation); a custom vtable allocator that checks the length would see one element less | carry the sentinel on `CType.Slice` (it is already parsed), and free `len + 1` for one |
 
 Doc-rot fixed by the audit (no action left): the `signal.h` row's stale "deferred to
 standalone-REPL" note (functions landed), `Float128.cs`'s stale "later stages" header comment

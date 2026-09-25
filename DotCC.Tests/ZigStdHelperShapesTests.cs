@@ -1698,6 +1698,30 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Allocator_dupeSentinel_and_allocSentinel_store_the_sentinel_past_the_end()
+    {
+        var cs = EmitZig("""
+            const std = @import("std");
+            pub fn main() !u8 {
+                var buf: [1024]u8 = undefined;
+                var fba = std.heap.FixedBufferAllocator.init(&buf);
+                const alloc = fba.allocator();
+                const z = try alloc.dupeSentinel(u8, "abcd", 0);
+                const w = try alloc.allocSentinel(u16, 3, 0xffff);
+                w[0] = 1;
+                const h = try std.heap.page_allocator.dupeSentinel(u8, "xy", '!');
+                return @intCast(z.len + z[4] + w.len + w[0] + h[2]);
+            }
+            """);
+        // Task #107: `[:s]T` from an allocator is one element more with the sentinel past the end; dotcc's slice carries no
+        // sentinel, so the result is the `len`-long slice before it (reading `z[4]` still sees it). The real-std probe with
+        // these calls returns 188 on both zig and dotcc.
+        cs.ShouldContain("ZigAlloc.DupeSentinel(ZigAlloc.FbaAllocator(&fba), new ConstSlice<byte>(Libc.L(\"abcd\\0\"u8), 4UL), (byte)0, 1)");
+        cs.ShouldContain("ZigAlloc.AllocSentinel(ZigAlloc.FbaAllocator(&fba), 3, (ushort)65535, 1)");
+        cs.ShouldContain("ZigAlloc.DupeSentinel(ZigAlloc.CHeap(), new ConstSlice<byte>(Libc.L(\"xy\\0\"u8), 2UL), (byte)33, 1)");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""
