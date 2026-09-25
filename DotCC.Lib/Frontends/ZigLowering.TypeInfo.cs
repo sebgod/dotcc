@@ -228,6 +228,11 @@ internal sealed partial class ZigLowering
         Zig.Index ix => DeclaredElemBitsOfValue(ix.Arg0),
         Zig.BuiltinCall bc when Tok(bc.Arg0) == "@as" && Flatten(bc.Arg2) is { Count: 2 } asArgs => DeclaredBitsOfTypeArg(asArgs[0]),
         Zig.BuiltinCall fb when Tok(fb.Arg0) == "@intFromBool" => 1,   // a `u1`
+        // `@clz` / `@ctz` / `@popCount` of an N-bit integer is a `std.math.Log2IntCeil(uN)`: the bits that hold N itself
+        // (a `u3`'s count is a `u2`, a `u64`'s a `u7`), so `@clz(x) * 100` over a `u3` overflows as zig says (task #102).
+        Zig.BuiltinCall cb when Tok(cb.Arg0) is "@clz" or "@ctz" or "@popCount" && Flatten(cb.Arg2) is [var countArg]
+                                && DeclaredBitsOfValue(countArg) is { } countBits and > 0
+            => 64 - System.Numerics.BitOperations.LeadingZeroCount((ulong)countBits),
         // Negation / complement / `try` keep their operand's type (zig has no C integer promotion).
         Zig.PreNeg n => DeclaredBitsOfValue(n.Arg1),
         Zig.PreBitNot n => DeclaredBitsOfValue(n.Arg1),

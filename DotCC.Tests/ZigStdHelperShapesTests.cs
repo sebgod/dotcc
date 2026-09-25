@@ -866,6 +866,9 @@ public sealed class ZigStdHelperShapesTests
     [InlineData("var b = true; _ = &b; return @intFromBool(b) * 10;", "type 'u1' cannot represent integer value '10'")]
     [InlineData("var x: u8 = 3; _ = &x; return x + 300;", "type 'u8' cannot represent integer value '300'")]
     [InlineData("var x: i8 = -3; _ = &x; return @bitCast(x - 128);", "type 'i8' cannot represent integer value '128'")]
+    // Task #102: a `@clz` / `@ctz` / `@popCount` count is a `Log2IntCeil(T)` (a `u3`'s a `u2`, a `u64`'s a `u7`).
+    [InlineData("var s: u3 = 1; _ = &s; return @clz(s) * 100;", "type 'u2' cannot represent integer value '100'")]
+    [InlineData("var w: u64 = 1; _ = &w; return @popCount(w) + 200;", "type 'u7' cannot represent integer value '200'")]
     public void A_comptime_operand_its_type_cannot_hold_is_rejected_as_zig_does(string body, string message)
     {
         // Task #91: a shift amount outside `Log2Int` of the shifted operand, and an integer literal outside its typed peer's
@@ -877,6 +880,9 @@ public sealed class ZigStdHelperShapesTests
     [InlineData("var x: u64 = 3; _ = &x; return @truncate(x >> 63);")]
     [InlineData("const k = 1 << 40; return @truncate(k >> 33);")]
     [InlineData("var b = true; _ = &b; return @as(u8, @intFromBool(b)) * 10;")]
+    // Task #102: the count is UNSIGNED, so a `u2` holds 1 (an `i2` would not); widened, it holds anything.
+    [InlineData("var s: u3 = 1; _ = &s; return @clz(s) + 1;")]
+    [InlineData("var s: u3 = 1; _ = &s; return @as(u8, @clz(s)) * 100;")]
     public void A_comptime_operand_that_fits_or_is_comptime_int_is_accepted(string body)
     {
         Should.NotThrow(() => EmitZig("pub fn main() u8 {\n    " + body + "\n}\n"));

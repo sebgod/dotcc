@@ -5593,6 +5593,16 @@ public sealed class ZigOracleTests
             "    total += @clz(@as(u5, 3));\n" +
             "    return @intCast(total % 256);\n" +
             "}\n", 255, "" },
+        // A `@clz` / `@ctz` / `@popCount` count is an unsigned Log2IntCeil(T) (task #102): a `u3`'s count is a `u2`,
+        // so `@clz(s) + 1` fits and `@popCount(s) * 3` is fine. zig returns 33.
+        new object[] { "clz_count_is_log2_int_ceil",
+            "pub fn main() u8 {\n" +
+            "    var s: u3 = 1;\n" +
+            "    _ = &s;\n" +
+            "    const r = @clz(s) + 1;\n" +
+            "    const q = @popCount(s) * 3;\n" +
+            "    return @as(u8, r) * 10 + q;\n" +
+            "}\n", 33, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

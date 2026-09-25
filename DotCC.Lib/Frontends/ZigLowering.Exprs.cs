@@ -2560,8 +2560,9 @@ internal sealed partial class ZigLowering
             {
                 continue;
             }
-            // `@intFromBool` is a `u1`, whatever carrier it lowers to.
-            var signed = peerPrim.Signed && !(peerItem.Content is Zig.BuiltinCall { Arg0: var peerTok } && Tok(peerTok) == "@intFromBool");
+            // `@intFromBool` is a `u1` and a `@clz` / `@ctz` / `@popCount` count a `Log2IntCeil(T)`, whatever carrier they lower to.
+            var signed = peerPrim.Signed && !(peerItem.Content is Zig.BuiltinCall { Arg0: var peerTok }
+                                              && Tok(peerTok) is "@intFromBool" or "@clz" or "@ctz" or "@popCount");
             var (min, max) = signed
                 ? (-(System.Int128.One << (peerBits - 1)), (System.Int128.One << (peerBits - 1)) - 1)
                 : (System.Int128.Zero, (System.Int128.One << peerBits) - 1);
