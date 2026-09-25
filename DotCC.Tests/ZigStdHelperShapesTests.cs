@@ -2198,6 +2198,68 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_struct_built_by_a_comptime_block_holds_pinned_pointers_not_stack_ones()
+    {
+        var cs = EmitZig("""
+            const Meta = struct {
+                count: u32,
+                first: [*]const u32,
+            };
+
+            const Table = struct {
+                vals: [*]const u32,
+                len: u32,
+                peak: u32 = 0,
+                meta: *const Meta = &empty_meta,
+
+                const empty_vals = [0]u32{};
+                const empty_meta = Meta{ .count = 0, .first = &empty_vals };
+
+                inline fn build(comptime n: u32) Table {
+                    comptime {
+                        var self = Table{ .vals = &empty_vals, .len = n };
+                        if (n == 0) return self;
+                        var arr: [n]u32 = undefined;
+                        for (&arr, 0..) |*e, i| {
+                            e.* = @intCast(i * i);
+                            self.peak = @max(self.peak, e.*);
+                        }
+                        const fin = arr;
+                        self.vals = &fin;
+                        self.meta = &.{ .count = n * 10, .first = &fin };
+                        return self;
+                    }
+                }
+
+                fn at(t: Table, i: u32) u32 {
+                    return t.vals[i];
+                }
+            };
+
+            fn churn(depth: u32) u32 {
+                var buf: [64]u32 = undefined;
+                for (&buf, 0..) |*b, i| b.* = @intCast(i + depth);
+                return if (depth == 0) buf[63] else churn(depth - 1) + buf[0];
+            }
+
+            pub fn main() u8 {
+                const t = Table.build(5);
+                const e = Table.build(0);
+                // Deep calls overwrite the stack a dangling pointer into build's frame would still read.
+                const noise = churn(8);
+                return @intCast((t.at(3) + t.len + t.peak + e.len + t.meta.count + t.meta.first[4] + e.meta.count + noise) % 256);
+            }
+            """);
+        // Task #100, step 1 (SILENT MISCOMPILE): `inline fn build(comptime n) Table { comptime { …; self.vals = &fin;
+        // return self; } }` had lowered as runtime code, so the returned struct pointed into build's dead stack frame. A
+        // struct-returning comptime block is now evaluated by the interpreter (an early `return` is its result) and spliced
+        // with every pointer field's target pinned for the program's life, `&.{ … }` included. zig returns 195.
+        cs.ShouldContain("vals = Libc.GlobalArrayFrom<uint>(new uint[]{ 0u, 1u, 4u, 9u, 16u })");
+        cs.ShouldContain("meta = Libc.GlobalArrayFrom<Meta>(new Meta[]{ new Meta { count = 50u");
+        cs.ShouldNotContain("stackalloc uint[5]");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

@@ -1641,6 +1641,10 @@ internal sealed partial class ZigLowering
         return new Seq(new List<CStmt>());   // compile-time-only — nothing runs at runtime
     }
 
+    /// <summary>The nesting depth of <see cref="TryComptimeReturnBlock"/>'s lowering: statements lowered only for the comptime
+    /// interpreter to evaluate, where an address of comptime memory is not a dangling stack pointer.</summary>
+    private int _loweringForComptimeEval;
+
     /// <summary>A <c>comptime { …; return &amp;final; }</c> block in a SLICE-returning function (std.enums.valuesFromFields):
     /// zig's slice points into comptime memory, but lowered as runtime code it would point into the frame's
     /// <c>stackalloc</c> and dangle once the function returns (a silent miscompile). So the block is lowered into a
@@ -1648,10 +1652,14 @@ internal sealed partial class ZigLowering
     /// becomes a pinned static. Null when the block does not evaluate at compile time (the caller lowers it plainly).</summary>
     private CStmt? TryComptimeReturnBlock(IReadOnlyList<Item> stmts, Zig.StmtReturn ret)
     {
-        if (_currentFnRet?.Unqualified is not CType.Slice retSlice) { return null; }
+        // A STRUCT result too (std.StaticStringMap.initComptime's `comptime { var self = Self{}; …; self.kvs = &.{ … };
+        // return self; }`, task #100): as runtime code its pointers into the block's arrays dangle once the function returns
+        // (a silent miscompile), so the struct is evaluated here and spliced with those arrays pinned.
+        if (_currentFnRet?.Unqualified is not (CType.Slice or CType.Named) || _currentFnRet is not { } retSlice) { return null; }
         Symbol result;
         CStmt body;
         _symbols.EnterScope();
+        _loweringForComptimeEval++;
         try
         {
             using var hoist = EnterFreshHoist();
@@ -1664,8 +1672,13 @@ internal sealed partial class ZigLowering
             body = new Block(lowered);
         }
         catch (IrUnsupportedException) { return null; }
-        finally { _symbols.ExitScope(); }
-        return _ir.EvalComptimeBlock(body, result) is IrModule.CtSlice slice && _ir.SpliceComptimeValue(slice) is { } spliced
+        finally
+        {
+            _loweringForComptimeEval--;
+            _symbols.ExitScope();
+        }
+        return _ir.EvalComptimeBlock(body, result, returnIsResult: true) is (IrModule.CtSlice or IrModule.CtStruct) and var evaluated
+               && _ir.SpliceComptimeValue(evaluated) is { } spliced
             ? new Return(spliced)
             : null;
     }
@@ -2934,6 +2947,9 @@ internal sealed partial class ZigLowering
     private CExpr LowerAddressOfStructLiteral(Item literal, CType pointee)
     {
         var value = LowerExprSink(literal, pointee.Unqualified);
+        // Inside a block the comptime interpreter evaluates (TryComptimeReturnBlock, task #100) the literal is comptime
+        // memory, whatever its fields: the interpreter reads `&` of an aggregate as the aggregate, and the splice pins it.
+        if (_loweringForComptimeEval > 0) { return new Unary(UnOp.AddrOf, value) { Type = new CType.Pointer(pointee) }; }
         if (!IsStaticInitializer(value))
         {
             throw new IrUnsupportedException(

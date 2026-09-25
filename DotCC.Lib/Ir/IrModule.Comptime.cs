@@ -298,7 +298,7 @@ internal sealed partial class IrModule
     /// <paramref name="result"/>: a container const computed by a labeled block (std.hash.crc's
     /// <c>const lookup_table = blk: { … break :blk table; };</c>), which zig evaluates at compile time. Null when the
     /// body is not something the interpreter runs; <see cref="ComptimeMiss"/> then says why.</summary>
-    internal ComptimeValue? EvalComptimeBlock(CStmt body, Symbol result)
+    internal ComptimeValue? EvalComptimeBlock(CStmt body, Symbol result, bool returnIsResult = false)
     {
         var (steps, frame, calls) = (_comptimeSteps, _comptimeFrame, _comptimeAllowCalls);
         _comptimeSteps = 0;
@@ -313,6 +313,8 @@ internal sealed partial class IrModule
         }
         catch (ComptimeAbort ex) { ComptimeMiss ??= ex.Message; return null; }
         catch (ComptimeGoto) { return null; }
+        // A function's whole-body `comptime { … return x; }` (task #100): an early `return` IS the block's result.
+        catch (ComptimeReturn r) when (returnIsResult) { return r.Value is { } rv ? CloneComptime(rv) : null; }
         catch (ComptimeReturn) { ComptimeMiss ??= "a `return` inside a const's initializer block"; return null; }
         finally { (_comptimeSteps, _comptimeFrame, _comptimeAllowCalls) = (steps, frame, calls); }
     }
@@ -421,8 +423,11 @@ internal sealed partial class IrModule
                 if (IsZero(fv)) { continue; }
                 throw new UnspliceableComptime();
             }
-            // An enum field (a union's tag) takes its value as the enum type: C# has no implicit int → enum.
-            var spliced = Splice(fv);
+            // An enum field (a union's tag) takes its value as the enum type: C# has no implicit int → enum. A pointer field
+            // to comptime data (std.StaticStringMap's `kvs = &.{ .keys = &final_keys, … }`, task #100) points at it pinned.
+            var spliced = f.Type.Unqualified is CType.Pointer ptrField && SplicePointerTo(fv, ptrField) is { } pointed
+                ? pointed
+                : Splice(fv);
             if (f.Type.Unqualified is CType.Enum && fv is CtInt) { spliced = new Cast(f.Type, spliced) { Type = f.Type }; }
             members.Add(new FieldInit(f.Name, f.Type, spliced));
         }
@@ -461,6 +466,36 @@ internal sealed partial class IrModule
         }
         catch (UnspliceableComptime) { return null; }
         return (new StructInit(members) { Type = named }, arrays);
+    }
+
+    /// <summary>A pointer to comptime data as a pointer into program-lifetime memory (task #100): E1 evaluates <c>&amp;arr</c> to
+    /// the array and <c>&amp;.{ … }</c> to the struct themselves, so a pointer-typed field holding one pins it in a
+    /// <see cref="PinnedArray"/> and points at its first element; a pointer INTO an array (<see cref="CtElemPtr"/>) pins the
+    /// backing array and offsets. Null for any other value (a null pointer, an integer address), spliced as usual.</summary>
+    private CExpr? SplicePointerTo(ComptimeValue v, CType.Pointer pointerType)
+    {
+        switch (v)
+        {
+            case CtArray a:
+            {
+                var elem = a.Element.Unqualified;
+                var elems = a.Elems.Select(e => SpliceElement(e, elem)).ToList();
+                return new PinnedArray(elem, elems, null) { Type = pointerType };
+            }
+            case CtStruct s when s.Type.Unqualified is CType.Named:
+                return new PinnedArray(s.Type.Unqualified, new List<CExpr> { Splice(s) }, null) { Type = pointerType };
+            case CtElemPtr ep:
+            {
+                var elem = ep.Backing.Element.Unqualified;
+                var elems = ep.Backing.Elems.Select(e => SpliceElement(e, elem)).ToList();
+                CExpr pinned = new PinnedArray(elem, elems, null) { Type = pointerType };
+                if (ep.Index == 0) { return pinned; }
+                var offset = new LitInt(ep.Index.ToString(CultureInfo.InvariantCulture), ep.Index) { Type = CType.Long };
+                return new Binary(BinOp.Add, pinned, offset) { Type = pointerType };
+            }
+            default:
+                return null;
+        }
     }
 
     /// <summary>Splice a comptime slice back. A byte slice (a comptime string, std.fmt's

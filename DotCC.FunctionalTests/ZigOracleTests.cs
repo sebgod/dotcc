@@ -6028,6 +6028,57 @@ public sealed class ZigOracleTests
             "    const big: u8 = @as(u8, 250) +| 10;\n" +
             "    return @intFromEnum(x) + describe(.write) + @as(u8, @intFromEnum(h)) + sat + (big - 250);\n" +
             "}\n", 37, "" },
+        // A struct returned by a function's comptime block (task #100, step 1): an early return, a pointer to a comptime array
+        // and a pointer to a comptime struct literal, read after deep calls that would overwrite a dangling stack frame. zig returns 195.
+        new object[] { "comptime_block_struct_pinned",
+            "const Meta = struct {\n" +
+            "    count: u32,\n" +
+            "    first: [*]const u32,\n" +
+            "};\n" +
+            "\n" +
+            "const Table = struct {\n" +
+            "    vals: [*]const u32,\n" +
+            "    len: u32,\n" +
+            "    peak: u32 = 0,\n" +
+            "    meta: *const Meta = &empty_meta,\n" +
+            "\n" +
+            "    const empty_vals = [0]u32{};\n" +
+            "    const empty_meta = Meta{ .count = 0, .first = &empty_vals };\n" +
+            "\n" +
+            "    inline fn build(comptime n: u32) Table {\n" +
+            "        comptime {\n" +
+            "            var self = Table{ .vals = &empty_vals, .len = n };\n" +
+            "            if (n == 0) return self;\n" +
+            "            var arr: [n]u32 = undefined;\n" +
+            "            for (&arr, 0..) |*e, i| {\n" +
+            "                e.* = @intCast(i * i);\n" +
+            "                self.peak = @max(self.peak, e.*);\n" +
+            "            }\n" +
+            "            const fin = arr;\n" +
+            "            self.vals = &fin;\n" +
+            "            self.meta = &.{ .count = n * 10, .first = &fin };\n" +
+            "            return self;\n" +
+            "        }\n" +
+            "    }\n" +
+            "\n" +
+            "    fn at(t: Table, i: u32) u32 {\n" +
+            "        return t.vals[i];\n" +
+            "    }\n" +
+            "};\n" +
+            "\n" +
+            "fn churn(depth: u32) u32 {\n" +
+            "    var buf: [64]u32 = undefined;\n" +
+            "    for (&buf, 0..) |*b, i| b.* = @intCast(i + depth);\n" +
+            "    return if (depth == 0) buf[63] else churn(depth - 1) + buf[0];\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const t = Table.build(5);\n" +
+            "    const e = Table.build(0);\n" +
+            "    // Deep calls overwrite the stack a dangling pointer into build's frame would still read.\n" +
+            "    const noise = churn(8);\n" +
+            "    return @intCast((t.at(3) + t.len + t.peak + e.len + t.meta.count + t.meta.first[4] + e.meta.count + noise) % 256);\n" +
+            "}\n", 195, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
