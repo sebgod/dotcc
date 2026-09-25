@@ -4345,6 +4345,10 @@ internal sealed partial class ZigLowering
                 Zig.ProngCaptureReturnVoid cv   => (cv.Arg0, Tok(cv.Arg3), () => LowerReturnVoid()),
                 Zig.ProngJump pj                => (pj.Arg0, null, () => LowerProngJump(pj.Arg2)),
                 Zig.ProngCaptureJump cj         => (cj.Arg0, Tok(cj.Arg3), () => LowerProngJump(cj.Arg5)),
+                // A block that always jumps (`error.OutOfMemory => { return; }` in std.PriorityQueue's `ensureTotalCapacity`,
+                // task #103) is `noreturn`, which a value switch accepts like `=> return`.
+                Zig.Prong pb                    => (pb.Arg0, null, () => LowerNoReturnProngBlock(pb.Arg2)),
+                Zig.ProngCapture pcb            => (pcb.Arg0, Tok(pcb.Arg3), () => LowerNoReturnProngBlock(pcb.Arg5)),
                 _ => throw new IrUnsupportedException(
                     "a value-position switch prong must yield a value (`v => expr` or `v => blk: {… break :blk v;}`) "
                     + "or jump (`v => return …`); a void block prong or a `|*x|` capture in a switch expression is not supported yet"),
@@ -4374,6 +4378,21 @@ internal sealed partial class ZigLowering
         if (pre.Count == 0) { return sw; }
         pre.Add(sw);
         return new Seq(pre);
+    }
+
+    /// <summary>Lower a value-position switch prong's BLOCK, which must never complete (every path ends in a
+    /// <c>return</c>, <c>break</c>, <c>continue</c> or <c>unreachable</c>): a block that falls through would yield
+    /// <c>void</c> where the switch needs a value, which zig rejects too.</summary>
+    private CStmt LowerNoReturnProngBlock(Item block)
+    {
+        var lowered = LowerBlock(block);
+        if (!Terminates(lowered))
+        {
+            throw new IrUnsupportedException(
+                "a value-position switch prong must yield a value (`v => expr` or `v => blk: {… break :blk v;}`) "
+                + "or jump (`v => return …`); a void block prong or a `|*x|` capture in a switch expression is not supported yet");
+        }
+        return lowered;
     }
 
     /// <summary>True when a lowered statement list provably ends control flow (so no

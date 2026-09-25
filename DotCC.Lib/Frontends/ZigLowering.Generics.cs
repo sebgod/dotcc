@@ -1501,6 +1501,15 @@ internal sealed partial class ZigLowering
             // A scope for the value/optional comptime seeds (so the body's captured-if conditions + array
             // extents resolve); the type-param seeds already ride _typeAliases, installed by phase 2.
             _symbols.EnterScope();
+            // The comptime FUNCTION seeds stay aliased for the whole reification, not just the body walk: a nested
+            // container's field, a type const or a method signature lowered below may pass one along
+            // (std.PriorityQueue's `Iterator` has `queue: *PriorityQueue(T, Context, compareFn)`, task #103).
+            var fnAliasShadows = new List<(string name, (ZigLowering, Symbol)? prev)>();
+            foreach (var (fnName, fnOwner, fn) in typeFnSeeds)
+            {
+                fnAliasShadows.Add((fnName, _fnAliases.TryGetValue(fnName, out var prevAlias) ? prevAlias : null));
+                _fnAliases[fnName] = (fnOwner, fn);
+            }
             try
             {
                 foreach (var (name, value, type) in valueSeeds)
@@ -1525,22 +1534,12 @@ internal sealed partial class ZigLowering
                 var bodyValueLocals = new List<(string Name, long Value, CType Type)>();
                 var bodyAggregateLocals = new List<(string Name, IrModule.ComptimeValue Value, CType Type)>();
                 (_typeBodyValueLocals, _typeBodyAggregateLocals) = (bodyValueLocals, bodyAggregateLocals);
-                var fnAliasShadows = new List<(string name, (ZigLowering, Symbol)? prev)>();
-                foreach (var (fnName, fnOwner, fn) in typeFnSeeds)
-                {
-                    fnAliasShadows.Add((fnName, _fnAliases.TryGetValue(fnName, out var prevAlias) ? prevAlias : null));
-                    _fnAliases[fnName] = (fnOwner, fn);
-                }
                 try
                 {
                     bodyResult = ProcessTypeReturningBody(templateSym.Name, info.Body, typeShadows);
                 }
                 finally
                 {
-                    foreach (var (fnName, prevAlias) in fnAliasShadows)
-                    {
-                        if (prevAlias is { } restored) { _fnAliases[fnName] = restored; } else { _fnAliases.Remove(fnName); }
-                    }
                     _typeBodiesInProgress.Remove(mangled);
                     (_typeBodyValueLocals, _typeBodyAggregateLocals) = (outerValueLocals, outerAggregateLocals);
                 }
@@ -1667,6 +1666,10 @@ internal sealed partial class ZigLowering
             }
             finally
             {
+                foreach (var (fnName, prevAlias) in fnAliasShadows)
+                {
+                    if (prevAlias is { } restored) { _fnAliases[fnName] = restored; } else { _fnAliases.Remove(fnName); }
+                }
                 _symbols.ExitScope();
             }
             return mangledType;

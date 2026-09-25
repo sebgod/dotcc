@@ -1397,6 +1397,8 @@ public sealed class ZigStdHelperShapesTests
     [InlineData("var a: i32 = 7;\n    a += 0;\n    return @intCast(a % 3);", "signed integers and floats must use @rem or @mod")]
     [InlineData("var a: i32 = 7;\n    a += 0;\n    a /= 2;\n    return @intCast(a);", "signed integers must use @divTrunc, @divFloor, or @divExact")]
     [InlineData("var f: f32 = 7;\n    f += 0;\n    return @intFromFloat(f % 2);", "signed integers and floats must use @rem or @mod")]
+    // Task #103: the ZIG peer type decides, not C#'s promotion: `(i * 3) % 5` over an `i16` is still signed.
+    [InlineData("var i: i16 = 7;\n    i += 0;\n    return @intCast((i * 3) % 5);", "signed integers and floats must use @rem or @mod")]
     public void Division_of_a_runtime_signed_integer_needs_an_explicit_rounding(string body, string message)
     {
         // Task #98: zig rejects `/` and `%` on a signed integer (and `%` on a float) unless both operands are comptime-known.
@@ -1512,6 +1514,105 @@ public sealed class ZigStdHelperShapesTests
         // (`@clz(@as(u3, 1))` was 7, zig 2); `@ctz` of a zero `u5` said 8. zig returns 255 here.
         cs.ShouldContain("total += (uint)((ZigMath.Clz(z) - 3));");
         cs.ShouldContain("total += (uint)(System.Math.Min(ZigMath.Ctz(zero), 5));");
+    }
+
+    [Fact]
+    public void A_comptime_function_argument_reaches_a_nested_container_of_the_instance()
+    {
+        var cs = EmitZig("""
+            const E = error{ Full, Empty };
+
+            fn less(_: void, a: u16, b: u16) bool {
+                return a < b;
+            }
+
+            fn Heap(comptime T: type, comptime Context: type, comptime lessFn: fn (context: Context, a: T, b: T) bool) type {
+                return struct {
+                    items: [8]T = undefined,
+                    len: usize = 0,
+                    context: Context = undefined,
+                    const Self = @This();
+                    pub const Cursor = struct {
+                        heap: *Heap(T, Context, lessFn),
+                        at: usize,
+                        pub fn next(c: *Cursor) ?T {
+                            if (c.at >= c.heap.len) return null;
+                            c.at += 1;
+                            return c.heap.items[c.at - 1];
+                        }
+                    };
+                    fn put(self: *Self, v: T) E!void {
+                        if (self.len == self.items.len) return error.Full;
+                        var i = self.len;
+                        self.items[i] = v;
+                        self.len += 1;
+                        while (i > 0 and lessFn(self.context, self.items[i], self.items[i - 1])) : (i -= 1) {
+                            const t = self.items[i];
+                            self.items[i] = self.items[i - 1];
+                            self.items[i - 1] = t;
+                        }
+                    }
+                    fn cursor(self: *Self) Cursor {
+                        return .{ .heap = self, .at = 0 };
+                    }
+                };
+            }
+
+            fn fill(h: *Heap(u16, void, less), n: u16) u16 {
+                var i: u16 = 0;
+                while (i < n) : (i += 1) {
+                    h.put((i * 37) % 101) catch |e| switch (e) {
+                        error.Full => {
+                            return i;
+                        },
+                        error.Empty => unreachable,
+                    };
+                }
+                return n;
+            }
+
+            pub fn main() u8 {
+                var h: Heap(u16, void, less) = .{};
+                const stored = fill(&h, 20);
+                var c = h.cursor();
+                var sum: u32 = 0;
+                var prev: u16 = 0;
+                var sorted = true;
+                while (c.next()) |v| {
+                    if (v < prev) sorted = false;
+                    prev = v;
+                    sum += v;
+                }
+                if (!sorted) return 1;
+                return @intCast(stored * 10 + sum % 97);
+            }
+            """);
+        // Task #103 (std.PriorityQueue): the nested `Cursor`'s field `*Heap(T, Context, lessFn)` passes the instance's comptime
+        // function along, so the alias stays live for the whole reification, not just the body walk; a value switch takes a
+        // block prong that always returns (`error.Full => { return i; }`); and `(i * 37) % 101` over a `u16` is unsigned
+        // `%`, whatever C#'s promotion makes of it. zig returns 118.
+        cs.ShouldContain("public Heap__u16_void_fnless* heap;");
+        cs.ShouldContain("Heap__u16_void_fnless_put(h, (ushort)(i * 37 % 101))");
+        cs.ShouldContain("return i;");
+    }
+
+    [Fact]
+    public void A_value_switch_block_prong_that_can_complete_is_still_rejected()
+    {
+        // Task #103: only a block that never completes may stand where a switch expression needs a value.
+        Should.Throw<CompileException>(() => EmitZig("""
+            pub fn main() u8 {
+                var v: u8 = 1;
+                _ = &v;
+                const x: u8 = switch (v) {
+                    0 => {
+                        v += 1;
+                    },
+                    else => 1,
+                };
+                return x;
+            }
+            """)).Message.ShouldContain("a void block prong");
     }
 
     [Fact]

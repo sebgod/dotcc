@@ -5603,6 +5603,76 @@ public sealed class ZigOracleTests
             "    const q = @popCount(s) * 3;\n" +
             "    return @as(u8, r) * 10 + q;\n" +
             "}\n", 33, "" },
+        // A type-returning generic's comptime function argument passed along by a nested container's field, a value
+        // switch block prong that always returns, and unsigned `%` over promoted `u16` operands (task #103, std.PriorityQueue's
+        // shapes). zig returns 118.
+        new object[] { "comptime_fn_arg_nested_container",
+            "const E = error{ Full, Empty };\n" +
+            "\n" +
+            "fn less(_: void, a: u16, b: u16) bool {\n" +
+            "    return a < b;\n" +
+            "}\n" +
+            "\n" +
+            "fn Heap(comptime T: type, comptime Context: type, comptime lessFn: fn (context: Context, a: T, b: T) bool) type {\n" +
+            "    return struct {\n" +
+            "        items: [8]T = undefined,\n" +
+            "        len: usize = 0,\n" +
+            "        context: Context = undefined,\n" +
+            "        const Self = @This();\n" +
+            "        pub const Cursor = struct {\n" +
+            "            heap: *Heap(T, Context, lessFn),\n" +
+            "            at: usize,\n" +
+            "            pub fn next(c: *Cursor) ?T {\n" +
+            "                if (c.at >= c.heap.len) return null;\n" +
+            "                c.at += 1;\n" +
+            "                return c.heap.items[c.at - 1];\n" +
+            "            }\n" +
+            "        };\n" +
+            "        fn put(self: *Self, v: T) E!void {\n" +
+            "            if (self.len == self.items.len) return error.Full;\n" +
+            "            var i = self.len;\n" +
+            "            self.items[i] = v;\n" +
+            "            self.len += 1;\n" +
+            "            while (i > 0 and lessFn(self.context, self.items[i], self.items[i - 1])) : (i -= 1) {\n" +
+            "                const t = self.items[i];\n" +
+            "                self.items[i] = self.items[i - 1];\n" +
+            "                self.items[i - 1] = t;\n" +
+            "            }\n" +
+            "        }\n" +
+            "        fn cursor(self: *Self) Cursor {\n" +
+            "            return .{ .heap = self, .at = 0 };\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "fn fill(h: *Heap(u16, void, less), n: u16) u16 {\n" +
+            "    var i: u16 = 0;\n" +
+            "    while (i < n) : (i += 1) {\n" +
+            "        h.put((i * 37) % 101) catch |e| switch (e) {\n" +
+            "            error.Full => {\n" +
+            "                return i;\n" +
+            "            },\n" +
+            "            error.Empty => unreachable,\n" +
+            "        };\n" +
+            "    }\n" +
+            "    return n;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var h: Heap(u16, void, less) = .{};\n" +
+            "    const stored = fill(&h, 20);\n" +
+            "    var c = h.cursor();\n" +
+            "    var sum: u32 = 0;\n" +
+            "    var prev: u16 = 0;\n" +
+            "    var sorted = true;\n" +
+            "    while (c.next()) |v| {\n" +
+            "        if (v < prev) sorted = false;\n" +
+            "        prev = v;\n" +
+            "        sum += v;\n" +
+            "    }\n" +
+            "    if (!sorted) return 1;\n" +
+            "    return @intCast(stored * 10 + sum % 97);\n" +
+            "}\n", 118, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

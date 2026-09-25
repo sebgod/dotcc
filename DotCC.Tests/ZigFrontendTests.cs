@@ -3426,13 +3426,13 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_a_block_bodied_switch_expression_prong()
+    public void Lowers_a_block_bodied_switch_expression_prong_that_returns()
     {
-        // A block-bodied prong in a switch EXPRESSION needs a labeled `break :blk v` (a later L
-        // increment); for now it's a clear error.
-        var ex = Should.Throw<CompileException>(() =>
-            EmitZig("pub fn main() u8 { const x: u8 = switch (1) { 1 => { return 2; }, else => 0 }; return x; }\n"));
-        ex.Message.ShouldContain("yield a value");
+        // A block prong in a switch EXPRESSION that never completes is `noreturn`, which zig accepts where a value is
+        // wanted (task #103); zig returns 2. A block that can complete is still rejected
+        // (ZigStdHelperShapesTests.A_value_switch_block_prong_that_can_complete_is_still_rejected).
+        var cs = EmitZig("pub fn main() u8 { const x: u8 = switch (1) { 1 => { return 2; }, else => 0 }; return x; }\n");
+        cs.ShouldContain("return 2;");
     }
 
     [Fact]
