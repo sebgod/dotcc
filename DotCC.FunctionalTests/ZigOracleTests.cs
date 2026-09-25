@@ -5210,6 +5210,58 @@ public sealed class ZigOracleTests
             "    const c = colors(&.{ 2, 9 });\n" +
             "    return t[0] + t[1] + t[2] + @intFromEnum(c[0]) * 10 + @intFromEnum(c[1]);\n" +
             "}\n", 65, "" },
+        // Task #83: comptime_int arithmetic past 64 bits (`0xFFFF_FFFF_FFFF_FFFF + 1`) folds to a comptime_int; a type-returning
+        // generic runs `@inComptime()` code and `@subWithOverflow` in its body; a `break` of a void call leaves a plain loop;
+        // a comptime-const switch case label folds to the subject's type.
+        new object[] { "comptime_int_wide_and_comptime_generic_body",
+            "fn swapInts(a: *u32, b: *u32) void {\n" +
+            "    if (@inComptime()) {\n" +
+            "        const tmp = a.*;\n" +
+            "        a.* = b.*;\n" +
+            "        b.* = tmp;\n" +
+            "    } else {\n" +
+            "        const tmp = a.*;\n" +
+            "        a.* = b.*;\n" +
+            "        b.* = tmp;\n" +
+            "    }\n" +
+            "}\n" +
+            "\n" +
+            "fn bump(counter: *u32) void {\n" +
+            "    counter.* += 3;\n" +
+            "}\n" +
+            "\n" +
+            "fn Table(comptime n: comptime_int) type {\n" +
+            "    var vals = [_]u32{ 30, n, 20 };\n" +
+            "    swapInts(&vals[0], &vals[2]);\n" +
+            "    const diff = @subWithOverflow(vals[1], vals[0]);\n" +
+            "    const lo = vals[0];\n" +
+            "    const wrapped = diff[1];\n" +
+            "    return struct {\n" +
+            "        const first = lo;\n" +
+            "        const flag = wrapped;\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "fn classify(x: usize) u8 {\n" +
+            "    const limit = 4 * 3;\n" +
+            "    return switch (x) {\n" +
+            "        0 => 1,\n" +
+            "        limit => 2,\n" +
+            "        else => 3,\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const big = 0xFFFF_FFFF_FFFF_FFFF + 1;\n" +
+            "    var counter: u32 = 0;\n" +
+            "    while (true) {\n" +
+            "        if (counter > 5) break bump(&counter);\n" +
+            "        counter += 1;\n" +
+            "    }\n" +
+            "    const T = Table(10);\n" +
+            "    const top: u64 = @intCast(big >> 60);\n" +
+            "    return @intCast(top + counter + T.first + @as(u64, T.flag) * 100 + classify(12) + classify(0));\n" +
+            "}\n", 148, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -6491,6 +6543,37 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // Task #89: std.enums.EnumIndexer, dense (identity layout) and sparse (sorted by value in the type body, `min` bound as
+    // a comptime local and read through an alias in another module).
+    [Fact]
+    public void Dotcc_matches_zig_std_enums_enum_indexer() =>
+        MatchesZigWithRealStd("enums_enum_indexer",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "const Dense = enum { north, east, south, west };\n" +
+            "const Sparse = enum(u8) { low = 9, high = 40, mid = 20 };\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const D = std.enums.EnumIndexer(Dense);\n" +
+            "    const S = std.enums.EnumIndexer(Sparse);\n" +
+            "    var total: usize = D.count * 100 + S.count * 10;\n" +
+            "    total += D.indexOf(.south) + S.indexOf(.high) * 2 + S.indexOf(.mid);\n" +
+            "    total += @intFromEnum(S.keyForIndex(0));\n" +
+            "    return @intCast(total % 256);\n" +
+            "}\n", 190);
+
+    // Task #83: std.mem.sortUnstable is pdqsort; its heuristics take `std.math.log2_int` of a comptime_int length bound
+    // (`maxInt(usize) + 1` must not wrap), and `@inComptime()` guards a swap.
+    [Fact]
+    public void Dotcc_matches_zig_std_mem_sort_unstable() =>
+        MatchesZigWithRealStd("mem_sort_unstable",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var a = [_]u8{ 9, 3, 7, 1, 8, 2, 6, 4, 5, 0, 11, 13, 12, 10, 15, 14, 19, 17, 18, 16, 25, 21, 23, 22, 24, 20, 30, 26, 29, 28, 27 };\n" +
+            "    std.mem.sortUnstable(u8, &a, {}, std.sort.asc(u8));\n" +
+            "    return a[0] + a[30];\n" +
+            "}\n", 30);
 
     // std.enums.values from real std (task #89): the enum's members as a comptime slice, walked at runtime.
     [Fact]

@@ -272,14 +272,27 @@ internal sealed partial class IrModule
         // Re-entrant: a body lowered on demand (DemandFuncBody) may fold a constant of its own while an
         // outer evaluation is suspended mid-call, so the outer frame, budget and mode are put back.
         var (steps, frame, calls) = (_comptimeSteps, _comptimeFrame, _comptimeAllowCalls);
+        // The reason a miss is reported for is the OUTERMOST evaluation's: a nested one (a fold during a body lowered on
+        // demand) keeps its miss to itself, so the outer diagnostic names what actually stopped the outer evaluation.
+        var (outerMiss, nested) = (ComptimeMiss, _topEvalDepth > 0);
+        if (!nested) { ComptimeMiss = null; }
+        _topEvalDepth++;
         _comptimeSteps = 0;
         _comptimeFrame = null;
         _comptimeAllowCalls = allowCalls;
         try { return EvalComptime(e); }
         catch (ComptimeAbort ex) { ComptimeMiss ??= ex.Message; return null; }
         catch (ComptimeGoto) { return null; }   // a backward or stray jump: not evaluated
-        finally { (_comptimeSteps, _comptimeFrame, _comptimeAllowCalls) = (steps, frame, calls); }
+        finally
+        {
+            (_comptimeSteps, _comptimeFrame, _comptimeAllowCalls) = (steps, frame, calls);
+            _topEvalDepth--;
+            if (nested) { ComptimeMiss = outerMiss; }
+        }
     }
+
+    /// <summary>How many <see cref="TryEvalTop"/> evaluations are in progress (re-entrant through on-demand lowering).</summary>
+    private int _topEvalDepth;
 
     /// <summary>Run <paramref name="body"/> in a fresh comptime frame (calls allowed) and return the value it left in
     /// <paramref name="result"/>: a container const computed by a labeled block (std.hash.crc's
@@ -350,6 +363,10 @@ internal sealed partial class IrModule
         CtInt i => SpliceInt(i),
         CtFloat f => new LitFloat(FormatComptimeFloat(f.Value)) { Type = f.Type },
         CtBool b => new LitBool(b.Value) { Type = CType.Bool },
+        // A tuple (an overflow builtin's `.{ result, bit }`): its elements, in order.
+        CtStruct { Type.Unqualified: CType.Tuple tupleType } ts => new TupleNew(
+            tupleType.Elements.Select((_, k) => ts.Fields.TryGetValue(k.ToString(CultureInfo.InvariantCulture), out var tv)
+                ? Splice(tv) : throw new UnspliceableComptime()).ToList(), tupleType) { Type = tupleType },
         CtStruct s => SpliceStruct(s),
         CtArray a => SpliceArray(a),
         CtNull n => new DefaultLit { Type = n.Type },
@@ -592,11 +609,21 @@ internal sealed partial class IrModule
             case LitInt i:
                 // `Value` is the fast path (fits long); past long the magnitude lives in
                 // the decimal `Digits` (a u128-range / i128 literal) — parse it into 128 bits.
-                if (i.Value is { } lv) { return new CtInt(lv, i.Type); }
+                // An unsigned 64-bit literal may carry its bit pattern (`0xFFFF_FFFF_FFFF_FFFF` is -1 as a long): its value
+                // is the unsigned reading.
+                if (i.Value is { } lv)
+                {
+                    return new CtInt(lv < 0 && i.Type.Unqualified is CType.Prim { Integer: true, Signed: false, Bytes: 8 }
+                        ? (System.Int128)unchecked((ulong)lv) : lv, i.Type);
+                }
                 return System.Int128.TryParse(i.Digits, NumberStyles.Integer, CultureInfo.InvariantCulture, out var big)
                     ? new CtInt(big, i.Type)
                     : null;
 
+            // `@inComptime()`: true inside an interpreted call or block; a lowering-time fold (no frame) sees the runtime
+            // `false`, so runtime code keeps its runtime branch.
+            case LitBool { InComptime: true } when _comptimeFrame is not null:
+                return new CtBool(true);
             case LitBool lb:
                 return new CtBool(lb.Value);
 
@@ -802,6 +829,12 @@ internal sealed partial class IrModule
                 return CtVoid.Value;
             }
 
+            // `r[1]` of a comptime tuple (an overflow builtin's result).
+            case TupleIndex ti:
+                return EvalComptime(ti.Tuple) is CtStruct tupleValue
+                       && tupleValue.Fields.TryGetValue(ti.Index.ToString(CultureInfo.InvariantCulture), out var tupleElem)
+                    ? tupleElem : null;
+
             case SliceNew sliceNew:
             {
                 var (backing, at) = EvalComptime(sliceNew.Ptr) switch
@@ -812,6 +845,19 @@ internal sealed partial class IrModule
                 };
                 if (backing is null || EvalComptime(sliceNew.Len) is not CtInt sliceLen) { return null; }
                 return new CtSlice(backing, at, (long)sliceLen.Value, sliceNew.Type);
+            }
+
+            // A pinned static array with its elements (a comptime block's result spliced back, std.enums.valuesFromFields):
+            // the comptime array it was spliced from.
+            case PinnedArray { Elems: { } pinnedElems } pinned:
+            {
+                var values = new ComptimeValue[pinnedElems.Count];
+                for (var k = 0; k < values.Length; k++)
+                {
+                    if (EvalComptime(pinnedElems[k]) is not { } pv) { return null; }
+                    values[k] = RetypeTo(pv, pinned.Element);
+                }
+                return new CtArray(values, pinned.Element, new CType.Array(pinned.Element, values.Length));
             }
 
             // A `[N]T` by-value return (Increment A's node) is transparent at comptime — the heap
@@ -1101,6 +1147,26 @@ internal sealed partial class IrModule
     /// declared return type so the spliced literal carries the right carrier.</summary>
     private ComptimeValue? EvalComptimeCall(Call c)
     {
+        // `@addWithOverflow(a, b)` and friends (std.sort.pdq's `@subWithOverflow`): the wrapped result and the overflow
+        // bit, as the two-element tuple the runtime helper returns (a struct with fields "0" and "1").
+        if (c is { Callee: "ZigMath.AddWithOverflow" or "ZigMath.SubWithOverflow" or "ZigMath.MulWithOverflow", Args: [var ovA, var ovB] }
+            && c.Type.Unqualified is CType.Tuple { Elements: [var ovElem, var ovBit] }
+            && ovElem.Unqualified is CType.Prim { Integer: true } ovPrim)
+        {
+            if (EvalComptime(ovA) is not CtInt oa || EvalComptime(ovB) is not CtInt ob) { return null; }
+            var exactOv = c.Callee switch
+            {
+                "ZigMath.AddWithOverflow" => unchecked(oa.Value + ob.Value),
+                "ZigMath.SubWithOverflow" => unchecked(oa.Value - ob.Value),
+                _ => unchecked(oa.Value * ob.Value),
+            };
+            var wrappedOv = WrapToWidth(exactOv, ovPrim);
+            return new CtStruct(new Dictionary<string, ComptimeValue>(System.StringComparer.Ordinal)
+            {
+                ["0"] = new CtInt(wrappedOv, ovElem),
+                ["1"] = new CtInt(wrappedOv == exactOv ? 0 : 1, ovBit),
+            }, c.Type);
+        }
         // `memcpy(&s.arr, src, bytes)`: how a struct literal's array field is filled (Zig task #78), e.g. std.bit_set's
         // `break :full .{ .masks = masks }` in a const's labeled block. Both ends are comptime arrays, copied by element.
         if (c is { Callee: "memcpy", Args: [var dstArg, var srcArg, var bytesArg] })

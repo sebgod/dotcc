@@ -944,6 +944,37 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Wide_comptime_int_arithmetic_folds_and_comptime_case_labels_fold_to_the_subject()
+    {
+        var cs = EmitZig("""
+            fn classify(x: usize) u8 {
+                const limit = 4 * 3;
+                return switch (x) {
+                    limit => 2,
+                    else => 3,
+                };
+            }
+
+            fn pick() u8 {
+                if (@inComptime()) return 1;
+                return 2;
+            }
+
+            pub fn main() u8 {
+                const big = 0xFFFF_FFFF_FFFF_FFFF + 1;
+                const top: u64 = @intCast(big >> 60);
+                return @intCast(top + classify(12) + pick());
+            }
+            """);
+        // Task #83: `maxInt(u64) + 1` is a comptime_int; it had wrapped at the 64-bit carrier to 0.
+        cs.ShouldContain("System.Int128 big = System.Int128.Parse(\"18446744073709551616\");");
+        // A comptime-const case label folds to a literal at the subject's type.
+        cs.ShouldContain("(x switch { 12UL => 2, _ => 3 })");
+        // `@inComptime()` is false in a function lowered for runtime.
+        cs.ShouldContain("if (Cond.B(false))");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

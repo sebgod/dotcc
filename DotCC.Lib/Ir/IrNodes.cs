@@ -43,7 +43,12 @@ public sealed record LitInt(string Digits, long? Value) : CExpr;
 /// literal node; its <c>true</c>/<c>false</c> are <c>&lt;stdbool.h&gt;</c> macros → 1/0). The
 /// backend renders it as C# <c>true</c>/<c>false</c>; its <see cref="CExpr.Type"/> is
 /// <see cref="CType.Bool"/> (→ the store-normalising <c>CBool</c>, which takes a C# <c>bool</c>).</summary>
-public sealed record LitBool(bool Value) : CExpr;
+public sealed record LitBool(bool Value) : CExpr
+{
+    /// <summary>Zig's <c>@inComptime()</c>: <c>false</c> in emitted code, but TRUE to the comptime interpreter while it
+    /// runs a function or block (std.mem.swap's comptime branch swaps whole values, its runtime one bytes).</summary>
+    public bool InComptime { get; init; }
+}
 
 /// <summary>A floating constant. <see cref="Text"/> is the target-neutral decimal
 /// spelling (a hex-float normalised to round-trippable decimal; a long-double

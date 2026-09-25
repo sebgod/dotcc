@@ -213,6 +213,23 @@ internal sealed partial class ZigLowering
         return false;
     }
 
+    /// <summary>The width zig infers for an untyped enum's tag: the bits of its largest member value (members count up
+    /// from 0), 0 for a single member.</summary>
+    private int InferredTagBits(CType.Enum en)
+    {
+        var members = MembersOfEnum(en)?.Count ?? 0;
+        return members <= 1 ? 0 : 64 - System.Numerics.BitOperations.LeadingZeroCount((ulong)(members - 1));
+    }
+
+    /// <summary>The standard unsigned carrier for an inferred tag of <paramref name="bits"/> bits.</summary>
+    private static CType InferredTagCarrier(int bits) => bits switch
+    {
+        <= 8 => CType.UChar,
+        <= 16 => CType.UShort,
+        <= 32 => CType.UInt,
+        _ => CType.ULong,
+    };
+
     /// <summary>Fold a comptime INDEX into a list of TYPES — the type-position counterpart of
     /// <see cref="TryFoldTypeInfoListValue"/> — plus the <c>tag_type</c> of an enum. Consulted from
     /// <see cref="LowerType"/> and the type-alias RHS.</summary>
@@ -226,19 +243,11 @@ internal sealed partial class ZigLowering
         {
             if (tinfo.Type.Unqualified is CType.Enum en)
             {
-                // Only a SPELLED tag (`enum(u8) {…}`) is answered. zig INFERS one for an untyped enum —
-                // the smallest unsigned int holding the largest member, `u2` for four members — while
-                // dotcc defaults to `int`, so answering there would disagree with zig on the width and
-                // on `@sizeOf(tag_type)`. A wrong type is worse than a named gap.
-                if (!_enumsWithSpelledTag.Contains(en.Name))
-                {
-                    throw new IrUnsupportedException(
-                        $"zig `@typeInfo({en.Name}).@\"enum\".tag_type`: this enum's tag type is INFERRED, and zig infers "
-                        + "the smallest unsigned int that holds its largest member while dotcc defaults to `int` — "
-                        + "reporting that would disagree on the width. Spell the tag (`enum(u8) {…}`) and it is answered "
-                        + "(road-to-zig-std S5c)");
-                }
-                type = en.Underlying;
+                // A SPELLED tag (`enum(u8) {…}`) is the enum's own underlying type. An untyped enum's is zig's INFERRED
+                // one (std.enums.EnumIndexer's `@as(@typeInfo(E).@"enum".tag_type, …)`): the smallest unsigned int that
+                // holds its largest member, `u2` for four, in the smallest standard carrier, with that declared width
+                // riding along (InferredTagBits) so `@bitSizeOf` answers zig's 2, not the carrier's 8.
+                type = _enumsWithSpelledTag.Contains(en.Name) ? en.Underlying : InferredTagCarrier(InferredTagBits(en));
                 return true;
             }
             throw new IrUnsupportedException(

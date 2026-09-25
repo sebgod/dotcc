@@ -5582,12 +5582,8 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void A_spelled_enum_tag_type_resolves_but_an_inferred_one_is_a_loud_cut()
+    public void A_spelled_or_inferred_enum_tag_type_resolves()
     {
-        // zig INFERS an untyped enum's tag type as the smallest unsigned int holding its largest
-        // member (`u2` for four members); dotcc defaults to `int`. Answering there would disagree on
-        // the width and on @sizeOf, so only a SPELLED tag is reported — the same shape of judgement
-        // `bits` makes about a declared width.
         var cs = EmitZig(
             "const E = enum(u8) { a, b };\n" +
             "pub fn main() u8 {\n" +
@@ -5596,14 +5592,17 @@ public sealed class ZigFrontendTests
             "    return t;\n}\n");
         UserCode(cs).ShouldContain("byte t = 42;");
 
-        var ex = Should.Throw<CompileException>(() => EmitZig(
+        // zig INFERS an untyped enum's tag type as the smallest unsigned int holding its largest
+        // member (`u2` for four members). Task #89 (std.enums.EnumIndexer) lifted the old loud cut:
+        // the tag type answers with that width for `bits`, carried in the smallest byte-multiple.
+        cs = EmitZig(
             "const E = enum { a, b, c, d };\n" +
             "pub fn main() u8 {\n" +
             "    const Tag = @typeInfo(E).@\"enum\".tag_type;\n" +
             "    const t: Tag = 3;\n" +
-            "    return t;\n}\n"));
-        ex.Message.ShouldContain("INFERRED");
-        ex.Message.ShouldContain("Spell the tag");
+            "    return @as(u8, @typeInfo(Tag).int.bits) * 10 + t;\n}\n");
+        UserCode(cs).ShouldContain("byte t = 3;");
+        UserCode(cs).ShouldContain("return (byte)((byte)2 * 10 + t);");
     }
 
     [Fact]

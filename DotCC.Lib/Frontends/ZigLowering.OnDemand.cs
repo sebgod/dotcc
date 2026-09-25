@@ -41,10 +41,14 @@ internal sealed partial class ZigLowering
         // A body whose on-demand lowering fails is un-marked, so the top-level drain lowers it again and its
         // error surfaces there: a speculative evaluation (TryEvalComptimeIntBody) that demanded it may swallow
         // the exception, and a body left "started" would otherwise never be lowered at all.
+        // The attempt's in-function containers are forgotten with it, so the retry registers them afresh (it had
+        // reported them as duplicates of its own failed attempt).
+        var localsBefore = new HashSet<string>(_localContainers, System.StringComparer.Ordinal);
         try { return TryLowerBodyOnDemandCore(sym); }
         catch (IrUnsupportedException)
         {
             _bodiesStarted.Remove(sym);
+            _localContainers.RemoveWhere(name => !localsBefore.Contains(name));
             throw;
         }
     }

@@ -976,8 +976,8 @@ vector length feeds TYPES.
   block lowered as a plain block. Oracles `simd_vectors` / `simd_masks` / `inline_for_break_comptime_int`, real-std
   differential `Dotcc_matches_zig_std_mem_index_of_scalar_simd_from_source` (82: hits in the unrolled loop, both tail
   blocks and the scalar remainder); unit `ZigVectorTests`. **Cuts:** a vector width with no .NET type
-  (`@Vector(3, u8)`), `/` `%` and shifts on vectors, `@shuffle`, a runtime bool-vector literal, a comptime_int
-  argument beyond 64 bits (sort's `log2(maxInt(usize) + 1)`, task #41).
+  (`@Vector(3, u8)`), `/` `%` and shifts on vectors, `@shuffle`, a runtime bool-vector literal. (A comptime_int
+  argument beyond 64 bits, sort's `log2(maxInt(usize) + 1)`, landed with tasks #41 and #83.)
 - **T6 (backlog)** arm64 hosts: verify and complete the `Arm` intrinsics → `std.Target.aarch64` mapping when this runs on
   arm64 (the maintainer's request, 2026-09-24; tracked in `docs/plans/deferred.md`, target identity).
 

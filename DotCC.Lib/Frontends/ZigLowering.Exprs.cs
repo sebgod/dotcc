@@ -467,6 +467,16 @@ internal sealed partial class ZigLowering
                     // A namespaced container const — re-lower its RHS (comptime; inlined per use).
                     return LowerContainerConst(cContainer, fieldName, centry.typeItem, centry.rhs);
                 }
+                // The same through an alias of a container ANOTHER module reified (`const D = std.enums.EnumIndexer(E);`
+                // then `D.count`): the const lowers in the module that declares it.
+                if (fld.Arg0.Content is Zig.Ident obid
+                    && _symbols.Resolve(Tok(obid.Arg0)) is null
+                    && TryLookupContainerType(Tok(obid.Arg0), out var obaseTy)
+                    && ContainerTypeName(obaseTy) is { } oContainer
+                    && TryLowerContainerConstAnywhere(oContainer, fieldName) is { } otherConst)
+                {
+                    return otherConst;
+                }
                 // `Decimal(T).min_exponent` — a const of the struct a type-returning CALL names (std.fmt.parse_float's
                 // convertSlow): the call reifies (memoized), and the const lowers in the module that declares it.
                 if (fld.Arg0.Content is Zig.CallArgs or Zig.CallNoArgs
@@ -753,7 +763,7 @@ internal sealed partial class ZigLowering
                     "zig inline assembly (`asm`) is out of scope: dotcc targets .NET, so a reached `asm` has no lowering "
                     + "(std guards its assembly paths behind comptime target checks, which fold away when dotcc's target lacks the feature)");
             case Zig.BuiltinCallNoArgs nb when Tok(nb.Arg0) == "@inComptime":
-                return new LitBool(false) { Type = CType.Bool };
+                return new LitBool(false) { Type = CType.Bool, InComptime = true };
             // `@returnAddress()`: the address an allocator records for its diagnostics (std's `rawAlloc(n, a, @returnAddress())`).
             // Managed code has no return address to give, and nothing dotcc lowers reads it, so it is 0.
             case Zig.BuiltinCallNoArgs nb when Tok(nb.Arg0) == "@returnAddress":
@@ -2378,6 +2388,7 @@ internal sealed partial class ZigLowering
         // `IrBuilder.BinaryType`. (Zig fixed arrays are values and don't decay in arithmetic, so
         // only `CType.Pointer` participates; you slice an array before pointer-walking it.)
         RejectUnrepresentableComptimeOperand(op, l, r, left, right);
+        if (TryFoldWideComptimeInt(op, l, r, left, right) is { } wide) { return wide; }
         var lPtr = left.Type.Unqualified is CType.Pointer;
         var rPtr = right.Type.Unqualified is CType.Pointer;
         var type = op switch
@@ -2390,6 +2401,65 @@ internal sealed partial class ZigLowering
             _ => CType.UsualArithmetic(left.Type, right.Type),
         };
         return new Binary(op, left, right) { Type = type };
+    }
+
+    /// <summary>comptime_int arithmetic that leaves the range its lowered carrier holds (task #83): <c>std.math.maxInt(usize) + 1</c>
+    /// is 2^64 in zig, but its folded operand is a <c>ulong</c> literal, so the C# sum wrapped (or C# rejected the constant,
+    /// CS0220). When both operands are comptime_int values (an untyped literal, an untyped comptime local, a comptime-only
+    /// call's fold, or such an expression) and the exact 128-bit result does not fit the ordinary result type, the
+    /// expression is that result as a comptime_int literal. An in-range result is left to the ordinary lowering.</summary>
+    private CExpr? TryFoldWideComptimeInt(BinOp op, Item l, Item r, CExpr left, CExpr right)
+    {
+        if (op is not (BinOp.Add or BinOp.Sub or BinOp.Mul or BinOp.Shl or BinOp.BitOr or BinOp.BitXor or BinOp.BitAnd))
+        {
+            return null;
+        }
+        if (!IsComptimeIntOperand(l, left) || !IsComptimeIntOperand(r, right)) { return null; }
+        if (_ir.ConstEval128(left) is not { } lhs || _ir.ConstEval128(right) is not { } rhs) { return null; }
+        System.Int128 value;
+        try
+        {
+            value = op switch
+            {
+                BinOp.Add => checked(lhs + rhs),
+                BinOp.Sub => checked(lhs - rhs),
+                BinOp.Mul => checked(lhs * rhs),
+                BinOp.Shl => rhs >= 0 && rhs < 127 ? checked(lhs * (System.Int128.One << (int)rhs)) : throw new System.OverflowException(),
+                BinOp.BitOr => lhs | rhs,
+                BinOp.BitXor => lhs ^ rhs,
+                _ => lhs & rhs,
+            };
+        }
+        catch (System.OverflowException) { return null; }   // beyond 128 bits: left to the ordinary lowering (and its loud cuts)
+        var ordinary = CType.UsualArithmetic(left.Type, right.Type);
+        var fits = ordinary.Unqualified switch
+        {
+            CType.Prim { Integer: true, IsComptimeInt: true } => true,
+            CType.Prim { Integer: true, Bytes: var b and < 16, Signed: var sgn } => sgn
+                ? value >= -(System.Int128.One << (b * 8 - 1)) && value < (System.Int128.One << (b * 8 - 1))
+                : value >= 0 && value < (System.Int128.One << (b * 8)),
+            _ => true,
+        };
+        if (fits) { return null; }
+        var magnitude = System.Int128.Abs(value).ToString(CultureInfo.InvariantCulture);
+        CExpr lit = new LitInt(magnitude, value >= long.MinValue && value <= long.MaxValue ? (long)value : null) { Type = CType.ComptimeInt };
+        return value < 0 ? new Unary(UnOp.Neg, lit) { Type = CType.ComptimeInt } : lit;
+    }
+
+    /// <summary>True for an operand that is a comptime_int VALUE rather than a typed one: an untyped integer literal, an
+    /// untyped comptime local, a comptime-only call's fold (a call that lowered to a literal), or anything already typed
+    /// comptime_int.</summary>
+    private bool IsComptimeIntOperand(Item item, CExpr lowered)
+    {
+        while (item.Content is Zig.Grouped g) { item = g.Arg1; }
+        if (lowered.Type?.Unqualified is CType.Prim { IsComptimeInt: true }) { return true; }
+        return item.Content switch
+        {
+            Zig.IntLit => true,
+            Zig.Ident id => _symbols.Resolve(Tok(id.Arg0)) is { } sym && _comptimeIntLocals.Contains(sym),
+            Zig.CallArgs or Zig.CallNoArgs => lowered is LitInt or ComptimeFold,
+            _ => false,
+        };
     }
 
     /// <summary>Reject, as zig does, a comptime-known operand its operator's type cannot hold (task #91): a literal shift

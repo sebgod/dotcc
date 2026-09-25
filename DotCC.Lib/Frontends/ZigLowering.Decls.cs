@@ -57,6 +57,11 @@ internal sealed partial class ZigLowering
         // evaluated in the owner's scope, with the owner's comptime seeds live.
         if (IsTypeKeyword(retType))
         {
+            // `digest_bits: comptime_int` (std.crypto.sha2's `fn Sha2x32(comptime iv: Iv32, digest_bits: comptime_int) type`):
+            // a parameter of a comptime-only type is comptime without the keyword.
+            allParams = allParams.Select(p => p.Kind == ParamKind.Runtime && p.TypeAst.Content is Zig.Ident { Arg0: var ctTok }
+                                                   && Tok(ctTok) is "comptime_int" or "comptime_float"
+                                               ? p with { Kind = ParamKind.ComptimeValue } : p).ToList();
             if (allParams.Any(p => p.Kind is ParamKind.Runtime or ParamKind.AnyType))
             {
                 throw new IrUnsupportedException(
@@ -318,12 +323,13 @@ internal sealed partial class ZigLowering
                 case Zig.Param pm:
                     // `a: anytype` (wall-plan W5) — an inferred-type parameter (a monomorphization key
                     // AND a runtime slot); a plain `a: T` is an ordinary runtime parameter.
-                    // A parameter of a comptime-ONLY type is comptime without the keyword, as in zig: std.crypto.sha2's
-                    // `fn Sha2x32(comptime iv: Iv32, digest_bits: comptime_int) type`.
+                    // A `type` parameter is comptime without the keyword, as in zig (a type has no runtime value). A
+                    // `comptime_int` one is too, but only a type-returning function needs that (see DeclareFnCore): elsewhere
+                    // it stays a full-width runtime slot, which std.enums.EnumIndexer's comparator `fn lessThan(_: void,
+                    // a: comptime_int, b: comptime_int)` needs when std.sort.pdq's body calls it with its elements.
                     infos.Add(new ParamInfo(Tok(pm.Arg0), pm.Arg2,
                         IsAnyTypeKeyword(pm.Arg2) ? ParamKind.AnyType
                         : IsTypeKeyword(pm.Arg2) ? ParamKind.ComptimeType
-                        : pm.Arg2.Content is Zig.Ident { Arg0: var ctTok } && Tok(ctTok) is "comptime_int" or "comptime_float" ? ParamKind.ComptimeValue
                         : ParamKind.Runtime));
                     break;
                 case Zig.ParamComptime pm:   // 'comptime' IDENT ':' Type

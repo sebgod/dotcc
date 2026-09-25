@@ -1465,6 +1465,10 @@ internal sealed partial class ZigLowering
                 // Process the body: leading `const NAME = <type>;` locals become scoped type aliases (the RHS
                 // may be a captured-if that folds to a type — S4b pt2 / S4c), then the final `return struct {…}`.
                 TypeBodyResult bodyResult;
+                var (outerValueLocals, outerAggregateLocals) = (_typeBodyValueLocals, _typeBodyAggregateLocals);
+                var bodyValueLocals = new List<(string Name, long Value, CType Type)>();
+                var bodyAggregateLocals = new List<(string Name, IrModule.ComptimeValue Value, CType Type)>();
+                (_typeBodyValueLocals, _typeBodyAggregateLocals) = (bodyValueLocals, bodyAggregateLocals);
                 try
                 {
                     bodyResult = ProcessTypeReturningBody(templateSym.Name, info.Body, typeShadows);
@@ -1472,7 +1476,12 @@ internal sealed partial class ZigLowering
                 finally
                 {
                     _typeBodiesInProgress.Remove(mangled);
+                    (_typeBodyValueLocals, _typeBodyAggregateLocals) = (outerValueLocals, outerAggregateLocals);
                 }
+                // The body's comptime VALUE / aggregate locals (std.enums.EnumIndexer's `min`, `fields_len`, `keys`) are what
+                // the returned struct's consts and methods read after the walk, so they ride along as further seeds.
+                valueSeeds = [.. valueSeeds, .. bodyValueLocals.Select(l => (l.Name, l.Value, l.Type))];
+                aggregateSeeds.AddRange(bodyAggregateLocals.Select(l => (l.Name, l.Value, l.Type)));
                 // `return <type expression>;` (the W4 lift): the body DELEGATED — its result is a type that
                 // already exists (another instance, a primitive, `@Int(…)`), so nothing is reified here.
                 if (!bodyResult.IsStruct && bodyResult.Delegated is { } delegatedType)

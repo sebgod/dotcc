@@ -120,6 +120,12 @@ internal sealed partial class ZigLowering
         {
             return DeclaredBitsOfTypeArg(typeIfTaken ? typeIf.Arg4 : typeIf.Arg6);
         }
+        // An untyped enum's inferred `@typeInfo(E).@"enum".tag_type`: zig's width (`u2` for four members).
+        if (cur.Content is Zig.Field { Arg2: var tagTok } tagField && Tok(tagTok) == "tag_type" && TryEvalTypeInfo(tagField.Arg0, out var tagInfo)
+            && tagInfo.Type.Unqualified is CType.Enum tagEnum && !_enumsWithSpelledTag.Contains(tagEnum.Name))
+        {
+            return InferredTagBits(tagEnum);
+        }
         // An error union's width is its payload's (`fn charToDigit(…) (error{InvalidCharacter}!u8)`).
         if (cur.Content is Zig.ErrUnion eu) { return DeclaredBitsOfTypeArg(eu.Arg2); }
         // So is an optional's (`fn cast(comptime T: type, x: anytype) ?T`), so an unwrapped payload keeps it.

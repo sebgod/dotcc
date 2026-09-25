@@ -1000,7 +1000,11 @@ internal sealed partial class ZigLowering
         // A `comptime_int` const whose initializer is a CALL (std.sort.pdq's `const stack_size = math.log2(math.maxInt(usize) + 1);`)
         // does not fold here; an array extent that names it runs the call then (task #73, see ConstEvalArraySize). Only a
         // comptime_int: zig rejects a runtime-typed call result (`const n = f(3);`) as an extent, and so does dotcc.
-        if (isConst && folded is null && init.Type?.Unqualified is CType.Prim { IsComptimeInt: true }) { _unfoldedConstInits[sym2] = init; }
+        // A comptime-only call's fold (`ComptimeFold`, its result carried as an Int128) is a comptime_int as well.
+        if (isConst && folded is null && (init.Type?.Unqualified is CType.Prim { IsComptimeInt: true } || init is ComptimeFold))
+        {
+            _unfoldedConstInits[sym2] = init;
+        }
         RecordValueBits(sym2,
             typeItem is { } ti ? DeclaredBitsOfTypeArg(ti) : DeclaredBitsOfValue(initExpr) ?? DeclaredBitsOfLowered(init),
             typeItem is { } te ? ElemBitsOfTypeAst(te) : DeclaredElemBitsOfValue(initExpr));
@@ -1217,10 +1221,18 @@ internal sealed partial class ZigLowering
     /// name="valueItem"/> from the INNERMOST value-position loop on the stack.</summary>
     private CStmt LowerBreakValue(Item valueItem)
     {
+        // `break sort.insertionContext(a, b, context);` in a plain `while (true)` (std.sort.pdq): a VOID break value is the
+        // loop's own (void) result, so the call runs and the loop ends.
+        if (_loopValues.Count == 0 && valueItem.Content is Zig.CallArgs or Zig.CallNoArgs
+            && LowerExpr(valueItem) is { Type.Unqualified: CType.VoidType } voidCall)
+        {
+            return new Block(new List<CStmt> { new ExprStmt(voidCall), LowerUnlabeledBreak() });
+        }
         if (_loopValues.Count == 0)
         {
             throw new IrUnsupportedException(
-                "`break <value>;` is only valid inside a value-position `while`/`for … else` loop");
+                "`break <value>;` is only valid inside a value-position `while`/`for … else` loop"
+                + (_currentFnName.Length > 0 ? $" (in '{_currentFnName}')" : ""));
         }
         return BuildLoopBreakValue(_loopValues.Peek(), valueItem);
     }
@@ -2024,6 +2036,12 @@ internal sealed partial class ZigLowering
 
     private CStmt LowerIfStmt(Item condItem, Item thenItem, Item? elseItem)
     {
+        // `if (@inComptime()) { … } else { … }` (std.mem.swap): both arms stay. Emitted code takes the runtime one (the
+        // condition renders `false`), and the comptime interpreter, which reads `@inComptime()` as true, the other.
+        if (IsInComptimeTest(condItem))
+        {
+            return new If(LowerExpr(condItem), LowerStmt(thenItem), elseItem is { } inElse ? LowerStmt(inElse) : null);
+        }
         // A COMPTIME TAG condition (road-to-zig-std S3a) — `builtin.cpu.arch == .x86_64`,
         // `builtin.os.tag != .windows`. Folded before the operand is lowered at all, because the
         // untaken arm is exactly the platform code that must not be lowered: the inline asm, the
@@ -2049,6 +2067,15 @@ internal sealed partial class ZigLowering
             return elseItem is { } taken ? LowerStmt(taken) : new Seq(new List<CStmt>());
         }
         return new If(cond, LowerStmt(thenItem), elseItem is { } el ? LowerStmt(el) : null);
+    }
+
+    /// <summary>True for <c>@inComptime()</c> or <c>!@inComptime()</c>, parenthesized or not.</summary>
+    private static bool IsInComptimeTest(Item cond)
+    {
+        while (cond.Content is Zig.Grouped g) { cond = g.Arg1; }
+        if (cond.Content is Zig.PreNot n) { cond = n.Arg1; }
+        while (cond.Content is Zig.Grouped g2) { cond = g2.Arg1; }
+        return cond.Content is Zig.BuiltinCallNoArgs { Arg0: var tok } && Tok(tok) == "@inComptime";
     }
 
     /// <summary>An <c>and</c> whose left operand is a constant false, or an <c>or</c> whose left operand is a constant true:
@@ -3677,10 +3704,23 @@ internal sealed partial class ZigLowering
         foreach (var (lo, hi) in WalkCaseValItems(caseVals))
         {
             labels.Add(hi is null
-                ? new SwitchLabel(LowerExprSink(lo, sink))
-                : new SwitchLabel(LowerExprSink(lo, sink), LowerExprSink(hi, sink)));
+                ? new SwitchLabel(CaseLabelValue(lo, sink))
+                : new SwitchLabel(CaseLabelValue(lo, sink), CaseLabelValue(hi, sink)));
         }
         return labels;
+    }
+
+    /// <summary>One case value: lowered at the subject type, and an integer one that names a comptime const
+    /// (std.sort.pdq's `max_swaps => .decreasing`, `const max_swaps = 4 * 3;`) folded to a literal, since a C# case
+    /// label must be a constant of the subject's type.</summary>
+    private CExpr CaseLabelValue(Item item, CType? sink)
+    {
+        var lowered = LowerExprSink(item, sink);
+        if (lowered is not LitInt && sink?.Unqualified is CType.Prim { Integer: true } && _ir.ConstEval(lowered) is { } v)
+        {
+            return new LitInt(v.ToString(System.Globalization.CultureInfo.InvariantCulture), v) { Type = sink };
+        }
+        return lowered;
     }
 
     /// <summary>Walk a (non-<c>else</c>) <c>CaseVals</c> comma-list into its elements, each a single

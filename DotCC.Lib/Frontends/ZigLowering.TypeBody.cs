@@ -233,6 +233,7 @@ internal sealed partial class ZigLowering
         {
             var listSym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = declared ?? listArray.Type });
             _ir.ComptimeGlobals[listSym] = listArray;
+            _typeBodyAggregateLocals?.Add((name, listArray, listSym.Type));
             return;
         }
         CExpr init;
@@ -248,6 +249,7 @@ internal sealed partial class ZigLowering
         }
         var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = declared ?? init.Type });
         _ir.ComptimeGlobals[sym] = value;
+        _typeBodyAggregateLocals?.Add((name, value, sym.Type));
     }
 
     /// <summary>An integer member list read as an ARRAY value (<c>list</c>, <c>list[a..b].*</c>, <c>list.*</c>): a fresh
@@ -377,14 +379,40 @@ internal sealed partial class ZigLowering
         }
         if (_ir.ConstEval(value) is not { } v)
         {
+            // An aggregate (`const diff = @subWithOverflow(a, b);`, a tuple; a struct; an array) the interpreter evaluates:
+            // a comptime global, like a comptime `var`.
+            if (_ir.EvalComptimeValue(value) is { } aggregate and (IrModule.CtStruct or IrModule.CtArray or IrModule.CtSlice))
+            {
+                var aggSym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = declared ?? value.Type ?? CType.Long });
+                _ir.ComptimeGlobals[aggSym] = aggregate;
+                _typeBodyAggregateLocals?.Add((name, aggregate, aggSym.Type));
+                return;
+            }
             throw new IrUnsupportedException(
                 $"type-returning generic '{fnName}': `const {name}` must be compile-time-known "
-                + "(a type body is evaluated at compile time)");
+                + "(a type body is evaluated at compile time)"
+                + (_ir.ComptimeMiss is { } why ? $" (the interpreter stopped at {why})" : ""));
         }
         var type = declared ?? value.Type ?? CType.Long;
+        // A comptime_int (an element of a `field_values` copy, `const min = field_values[0];`) is an untyped constant:
+        // carried as `int` / `long` like an untyped literal, so it coerces where it is used rather than forcing Int128.
+        if (declared is null && type.Unqualified is CType.Prim { IsComptimeInt: true })
+        {
+            type = v >= int.MinValue && v <= int.MaxValue ? CType.Int : CType.Long;
+        }
         var sym = _symbols.Declare(new Symbol { Name = name, Kind = SymKind.Var, Type = type });
         _comptimeVars[sym] = (v, type);
+        _typeBodyValueLocals?.Add((name, v, type));
     }
+
+    /// <summary>The comptime VALUE locals of the type body being walked (<c>const min = field_values[0];</c> in
+    /// std.enums.EnumIndexer), which the returned struct's consts and methods read after the walk: they join the instance's
+    /// value seeds. Null outside a walk.</summary>
+    private List<(string Name, long Value, CType Type)>? _typeBodyValueLocals;
+
+    /// <summary>The comptime AGGREGATE locals of the type body being walked (<c>var field_values</c>, <c>const keys =
+    /// valuesFromFields(…)</c>), joining the instance's aggregate seeds the same way. Null outside a walk.</summary>
+    private List<(string Name, IrModule.ComptimeValue Value, CType Type)>? _typeBodyAggregateLocals;
 
     /// <summary>A plain <c>if</c> in a type-returning body: only the taken arm is walked (the other may
     /// name a type that does not exist for this instantiation — that is usually why it is there).</summary>
