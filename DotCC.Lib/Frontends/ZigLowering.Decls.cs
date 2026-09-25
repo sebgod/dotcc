@@ -429,6 +429,7 @@ internal sealed partial class ZigLowering
         _currentFnSym = funcSym;         // the caller of this body's runtime calls (task #92)
         _localContainerShadows.Clear();  // per-function: local containers scope to this body
         _typeAliasShadows.Clear();       // per-function: comptime-type-param seeds scope to this body
+        _bodyTypeAliases.Clear();        // per-function: the aliases this body declares (task #124)
         _currentFnHasErrdefer = false;   // set lazily as `errdefer`s are encountered (Milestone H)
         // The declared error set for the foreign-error return check (Milestone X, part 3); resolved
         // NOW (pass 2 — all `const E = error{…}` set decls are processed by here). Null (unconstrained)
@@ -440,6 +441,7 @@ internal sealed partial class ZigLowering
                 : null;
         _symbols.BeginFunction();
         _symbols.EnterScope();
+        var ptrSizeShadows = new List<(string name, string? prev)>();
         // Seed comptime-TYPE parameters (wall-plan W3b): `T ↦ concrete` into _typeAliases, shadow-saved
         // so a colliding outer/sibling alias name is restored at body exit — the instance body then
         // resolves `T` (in a local type / cast / @sizeOf(T)) to the concrete type through LowerTypeName.
@@ -454,6 +456,12 @@ internal sealed partial class ZigLowering
                 // The DECLARED width rides with the type (see _declaredIntBits) so the body's
                 // `@typeInfo(T).int.bits` answers what the caller spelled, not the widened lowering.
                 SetDeclaredIntBits(name, bits);
+            }
+            // So does a pointer's size class; a seed without one CLEARS the name's, so a stale class never answers.
+            foreach (var seed in typeSeeds)
+            {
+                ptrSizeShadows.Add((seed.Name, _declaredPtrSize.GetValueOrDefault(seed.Name)));
+                SetDeclaredPtrSize(seed.Name, seed.PointerSize);
             }
         }
         // Seed comptime-value parameters BEFORE the runtime params + body (wall-plan W3a): a fresh
@@ -518,6 +526,10 @@ internal sealed partial class ZigLowering
             if (prev is { } p) { _typeAliases[nm] = p; } else { _typeAliases.Remove(nm); }
         }
         _typeAliasShadows.Clear();
+        for (int i = ptrSizeShadows.Count - 1; i >= 0; i--)
+        {
+            SetDeclaredPtrSize(ptrSizeShadows[i].name, ptrSizeShadows[i].prev);
+        }
         for (int i = stringShadows.Count - 1; i >= 0; i--)
         {
             var (nm, prev) = stringShadows[i];
@@ -671,7 +683,11 @@ internal sealed partial class ZigLowering
         if (methods.Count > 0 || consts.Count > 0)
         {
             var inst = _currentInstantiation;
-            var typeSeeds = inst?.TypeSeeds ?? System.Array.Empty<TypeSeed>();
+            // The enclosing body's own type aliases are seeds too (task #124): std.Random.init's `const Ptr =
+            // @TypeOf(pointer);` is what its local `gen.fill` casts to, and the deferred method body lowers after
+            // every instance has rebound the function-flat alias, so it must carry THIS instance's binding.
+            IReadOnlyList<TypeSeed> typeSeeds = [.. inst?.TypeSeeds ?? System.Array.Empty<TypeSeed>(),
+                                                 .. BodyAliasSeeds()];
             // A comptime-selected struct's capture (`|vec_size|`) is one more value seed of the struct's members.
             IReadOnlyList<(string, long, CType)> valueSeeds = [.. inst?.ValueSeeds ?? System.Array.Empty<(string, long, CType)>(),
                                                                .. extraValueSeeds ?? System.Array.Empty<(string, long, CType)>()];
@@ -691,6 +707,18 @@ internal sealed partial class ZigLowering
             }
         }
         return new Seq(new List<CStmt>());   // no runtime decl — mirrors a top-level container
+    }
+
+    /// <summary>The type aliases the body being lowered has declared so far (<see cref="_bodyTypeAliases"/>), each as a
+    /// <see cref="TypeSeed"/> of its current binding: its type, declared width and pointer size class.</summary>
+    private IEnumerable<TypeSeed> BodyAliasSeeds()
+    {
+        foreach (var name in _bodyTypeAliases)
+        {
+            if (!_typeAliases.TryGetValue(name, out var type)) { continue; }
+            yield return new TypeSeed(name, type, _declaredIntBits.TryGetValue(name, out var bits) ? bits : null,
+                _declaredPtrSize.GetValueOrDefault(name));
+        }
     }
 
     /// <summary>Register an in-function <c>const E = enum { … };</c> / <c>const U = union(enum) { … };</c> (task #111), the

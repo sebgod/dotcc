@@ -123,8 +123,19 @@ internal sealed partial class ZigLowering
     /// resolved to, and — when the source SPELLED an integer width — that declared width. The width
     /// travels with the seed because the lowered type cannot carry it: dotcc widens `uN`/`iN` to the
     /// smallest standard width, so `u21` and `u32` are the same `CType`. See
-    /// <see cref="_declaredIntBits"/> for why this rides alongside the type rather than on it.</summary>
-    private readonly record struct TypeSeed(string Name, CType Type, int? DeclaredBits);
+    /// <see cref="_declaredIntBits"/> for why this rides alongside the type rather than on it. A pointer's spelled size
+    /// class (<see cref="PointerSizeOfTypeArg"/>) travels the same way, in <c>PointerSize</c>.</summary>
+    private readonly record struct TypeSeed(string Name, CType Type, int? DeclaredBits, string? PointerSize = null)
+    {
+        /// <summary>The name, type and declared width: the three parts most seed sites read (the pointer size class is
+        /// read by name where it matters).</summary>
+        public void Deconstruct(out string name, out CType type, out int? declaredBits)
+        {
+            name = Name;
+            type = Type;
+            declaredBits = DeclaredBits;
+        }
+    }
 
     private sealed record PendingInstantiation(
         Symbol Instance,

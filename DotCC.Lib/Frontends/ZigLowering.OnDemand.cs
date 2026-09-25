@@ -112,6 +112,7 @@ internal sealed partial class ZigLowering
         private readonly int _inlineUnrollDepth;
         private readonly (string Name, CType? Prev)[] _localContainerShadows;
         private readonly (string Name, CType? Prev, int? PrevBits)[] _typeAliasShadows;
+        private readonly string[] _bodyTypeAliases;
         private readonly LabeledBlockTarget[] _labeledBlocks;
         private readonly LabeledLoopTarget[] _labeledLoops;
         private readonly LoopBreakTarget[] _loopBreakTargets;
@@ -139,6 +140,7 @@ internal sealed partial class ZigLowering
             _inlineUnrollDepth = o._inlineUnrollDepth;
             _localContainerShadows = o._localContainerShadows.ToArray();
             _typeAliasShadows = o._typeAliasShadows.ToArray();
+            _bodyTypeAliases = o._bodyTypeAliases.ToArray();
             _labeledBlocks = o._labeledBlocks.ToArray();
             _labeledLoops = o._labeledLoops.ToArray();
             _loopBreakTargets = o._loopBreakTargets.ToArray();
@@ -156,6 +158,7 @@ internal sealed partial class ZigLowering
             o._inlineUnrollDepth = 0;
             o._localContainerShadows.Clear();
             o._typeAliasShadows.Clear();
+            o._bodyTypeAliases.Clear();
             o._labeledBlocks.Clear();
             o._labeledLoops.Clear();
             o._loopBreakTargets.Clear();
@@ -183,6 +186,8 @@ internal sealed partial class ZigLowering
             o._localContainerShadows.AddRange(_localContainerShadows);
             o._typeAliasShadows.Clear();
             o._typeAliasShadows.AddRange(_typeAliasShadows);
+            o._bodyTypeAliases.Clear();
+            o._bodyTypeAliases.AddRange(_bodyTypeAliases);
             Restore(o._labeledBlocks, _labeledBlocks);
             Restore(o._labeledLoops, _labeledLoops);
             Restore(o._loopBreakTargets, _loopBreakTargets);

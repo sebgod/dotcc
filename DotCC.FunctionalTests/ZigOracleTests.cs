@@ -6452,6 +6452,39 @@ public sealed class ZigOracleTests
             "    total += s.a;\n" +
             "    return total;\n" +
             "}\n", 116, "" },
+        // Task #124: an in-function struct's method reads the enclosing generic instance's local type alias (`const P =
+        // @TypeOf(p);`) from ITS instance: two same-layout structs, each cast and dispatched to its own `get`.
+        new object[] { "local_struct_closes_over_alias",
+            "const A = struct {\n" +
+            "    v: u8,\n" +
+            "    fn get(self: *A) u8 {\n" +
+            "        return self.v + 1;\n" +
+            "    }\n" +
+            "};\n" +
+            "\n" +
+            "const B = struct {\n" +
+            "    v: u8,\n" +
+            "    fn get(self: *B) u8 {\n" +
+            "        return self.v * 3;\n" +
+            "    }\n" +
+            "};\n" +
+            "\n" +
+            "fn call(p: anytype) u8 {\n" +
+            "    const P = @TypeOf(p);\n" +
+            "    const gen = struct {\n" +
+            "        fn run(q: *anyopaque) u8 {\n" +
+            "            const self: P = @ptrCast(@alignCast(q));\n" +
+            "            return self.get();\n" +
+            "        }\n" +
+            "    };\n" +
+            "    return gen.run(p);\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    var a = A{ .v = 10 };\n" +
+            "    var b = B{ .v = 10 };\n" +
+            "    return call(&a) + call(&b) * 2;\n" +
+            "}\n", 71, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -7733,6 +7766,20 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // Tasks #119 / #124: two generators in one program (std.Random.Pcg and Sfc64). Each std.Random.init instance's local
+    // `gen.fill` casts to its OWN `Ptr` (the body alias is a seed of the in-function struct's deferred method).
+    [Fact]
+    public void Dotcc_matches_zig_std_random_two_generators() =>
+        MatchesZigWithRealStd("random_two_generators",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var prng = std.Random.Pcg.init(11);\n" +
+            "    var sfc = std.Random.Sfc64.init(5);\n" +
+            "    var buf: [4]u8 = undefined;\n" +
+            "    prng.random().bytes(&buf);\n" +
+            "    return buf[0] +% buf[3] +% sfc.random().int(u8);\n" +
+            "}\n", 221);
 
     // Task #119: std.Random.DefaultPrng (Xoshiro256) from real std: intRangeAtMost, uintLessThan, boolean, shuffle and
     // float. std.Random.init asserts `@typeInfo(Ptr).pointer.size == .one` of the `*Xoshiro256` it is handed; the size

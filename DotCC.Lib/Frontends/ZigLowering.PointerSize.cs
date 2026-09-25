@@ -32,6 +32,10 @@ internal sealed partial class ZigLowering
     /// instance BODY gives them to the parameter symbols (<see cref="RecordParamBits"/>).</summary>
     private readonly Dictionary<Symbol, Dictionary<string, string>> _instanceAnytypePtrSize = new();
 
+    /// <summary>The names of the type aliases the body being lowered declares (<c>const Ptr = @TypeOf(pointer);</c>), in
+    /// order, cleared per body: an in-function struct's deferred methods take them as seeds (task #124).</summary>
+    private readonly List<string> _bodyTypeAliases = new();
+
     /// <summary>Set or clear a type-binding name's pointer size class (see <see cref="_declaredPtrSize"/>).</summary>
     private void SetDeclaredPtrSize(string name, string? size)
     {

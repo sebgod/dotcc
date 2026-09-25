@@ -2869,6 +2869,48 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void An_in_function_struct_method_sees_its_own_instance_alias()
+    {
+        var cs = EmitZig("""
+            const A = struct {
+                v: u8,
+                fn get(self: *A) u8 {
+                    return self.v + 1;
+                }
+            };
+
+            const B = struct {
+                v: u8,
+                fn get(self: *B) u8 {
+                    return self.v * 3;
+                }
+            };
+
+            fn call(p: anytype) u8 {
+                const P = @TypeOf(p);
+                const gen = struct {
+                    fn run(q: *anyopaque) u8 {
+                        const self: P = @ptrCast(@alignCast(q));
+                        return self.get();
+                    }
+                };
+                return gen.run(p);
+            }
+
+            pub fn main() u8 {
+                var a = A{ .v = 10 };
+                var b = B{ .v = 10 };
+                return call(&a) + call(&b) * 2;
+            }
+            """);
+        // Task #124, std.Random.init's local `gen.fill`: the method body lowers after BOTH instances, so the enclosing body's
+        // `const P = @TypeOf(p);` is one of its seeds. Before, both casts named the last instance's `B` (zig 71, dotcc 90).
+        cs.ShouldContain("A* self = (A*)q;");
+        cs.ShouldContain("B* self = (B*)q;");
+        cs.ShouldContain("return A_get(self);");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""
