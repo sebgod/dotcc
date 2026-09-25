@@ -552,8 +552,11 @@ internal sealed partial class ZigLowering
                 var structExpr = LowerExpr(fld.Arg0);
                 var arrow = structExpr.Type.Unqualified is CType.Pointer;   // Zig `p.x` auto-derefs
                 // Slice `.len` / `.ptr` — the runtime Slice<T> exposes `Len` (ulong) and
-                // `Ptr` (T*); a `[]const T`'s `.ptr` is a pointer-to-const.
-                if (structExpr.Type.Unqualified is CType.Slice slc)
+                // `Ptr` (T*); a `[]const T`'s `.ptr` is a pointer-to-const. Through a single pointer to a slice too, which zig
+                // auto-dereferences (`e.key_ptr.len` with `key_ptr: *[]const u8`, std.StringHashMap's iterator, task #118).
+                if ((structExpr.Type.Unqualified as CType.Slice
+                     ?? (structExpr.Type.Unqualified is CType.Pointer { Pointee.Unqualified: CType.Slice pointedSlice } ? pointedSlice : null))
+                    is { } slc)
                 {
                     return fieldName switch
                     {

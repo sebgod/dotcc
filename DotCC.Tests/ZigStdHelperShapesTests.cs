@@ -2622,6 +2622,30 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Slice_fields_read_through_a_single_pointer_to_a_slice()
+    {
+        var cs = EmitZig("""
+            const Entry = struct { key_ptr: *const []const u8, weight: u8 };
+
+            fn score(e: Entry) usize {
+                return e.key_ptr.len * e.weight + e.key_ptr.ptr[0];
+            }
+
+            pub fn main() u8 {
+                const word: []const u8 = "hey";
+                var other: []const u8 = "ab";
+                const p = &other;
+                p.len = 1;
+                return @intCast(score(.{ .key_ptr = &word, .weight = 3 }) + other.len + p.ptr[0]);
+            }
+            """);
+        // Task #118: zig auto-dereferences a single pointer for field access, so `e.key_ptr.len` with `key_ptr: *[]const u8`
+        // (std.StringHashMap's iterator entries) is the slice's length, and `p.len = 1` writes it. zig returns 211.
+        cs.ShouldContain("return e.key_ptr->Len * e.weight + e.key_ptr->Ptr[0];");
+        cs.ShouldContain("p->Len = 1;");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

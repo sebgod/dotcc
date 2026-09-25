@@ -6273,6 +6273,22 @@ public sealed class ZigOracleTests
             "    if (warm.find('x') == null) total += 1;\n" +
             "    return total;\n" +
             "}\n", 163, "" },
+        // Slice fields through a single pointer to a slice (task #118): e.key_ptr.len as std.StringHashMap's iterator entries
+        // read it, and a write through the pointer. zig returns 211.
+        new object[] { "slice_fields_through_pointer",
+            "const Entry = struct { key_ptr: *const []const u8, weight: u8 };\n" +
+            "\n" +
+            "fn score(e: Entry) usize {\n" +
+            "    return e.key_ptr.len * e.weight + e.key_ptr.ptr[0];\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const word: []const u8 = \"hey\";\n" +
+            "    var other: []const u8 = \"ab\";\n" +
+            "    const p = &other;\n" +
+            "    p.len = 1;\n" +
+            "    return @intCast(score(.{ .key_ptr = &word, .weight = 3 }) + other.len + p.ptr[0]);\n" +
+            "}\n", 211, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
