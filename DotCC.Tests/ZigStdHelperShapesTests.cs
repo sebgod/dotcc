@@ -1862,6 +1862,59 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void In_function_enum_and_union_declarations_register_under_the_function()
+    {
+        var cs = EmitZig("""
+            fn score() u16 {
+                const Suit = enum(u8) { clubs = 1, hearts = 3, spades = 7 };
+                const Card = union(enum) { pip: u8, face: Suit, joker };
+                const Raw = union { word: u16, half: u8 };
+                const hand = [_]Card{ .{ .pip = 9 }, .{ .face = .hearts }, .joker, .{ .face = .spades } };
+                var total: u16 = 0;
+                for (hand) |c| {
+                    total += switch (c) {
+                        .pip => |p| p,
+                        .face => |s| @as(u16, @intFromEnum(s)) * 10,
+                        .joker => 50,
+                    };
+                }
+                const r = Raw{ .word = 5 };
+                return total + r.word;
+            }
+
+            fn other() u8 {
+                const Suit = enum { a, b, c };
+                return @intFromEnum(Suit.c);
+            }
+
+            pub fn main() u8 {
+                return @intCast((score() + other()) % 256);
+            }
+            """);
+        // Task #111: an in-function `const E = enum(u8) { … };` / `union(enum)` / `union` registers under `<fn>__<Name>`,
+        // like a local struct (W2), so two functions' `Suit`s never collide. `(score() + other()) % 256` over a `u16` and a
+        // `u8` call is unsigned `%` (a plain function's declared return type is the zig peer type). zig returns 166.
+        cs.ShouldContain("new score__Card { __tag = score__Card_Tag.face, __payload = new score__Card_Payload { face = score__Suit.hearts } }");
+        cs.ShouldContain("score__Raw r = new score__Raw { word = 5 };");
+        cs.ShouldContain("return (byte)((int)other__Suit.c);");
+        cs.ShouldContain("return (byte)((score() + other()) % 256);");
+    }
+
+    [Fact]
+    public void A_signed_call_result_still_needs_an_explicit_remainder()
+    {
+        // Task #111: the call's declared return type is the peer, so an `i16` result is still signed `%`, as zig says.
+        Should.Throw<CompileException>(() => EmitZig("""
+            fn neg() i16 {
+                return -7;
+            }
+            pub fn main() u8 {
+                return @intCast(@mod(neg(), 5) + (neg() % 5));
+            }
+            """)).Message.ShouldContain("signed integers and floats must use @rem or @mod");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

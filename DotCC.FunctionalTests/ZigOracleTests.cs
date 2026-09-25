@@ -5838,6 +5838,34 @@ public sealed class ZigOracleTests
             "    const r = area(@as(struct { w: u8, h: u32 }, .{ .w = 3, .h = 5 }));\n" +
             "    return @intCast(v.a + v.b + @intFromEnum(e) + big + t.p + r);\n" +
             "}\n", 62, "" },
+        // In-function enum / union declarations (task #111): `enum(u8)`, `union(enum)` with an enum payload, an untagged
+        // `union`, and a same-named local enum in a second function; unsigned `%` over two call results. zig returns 166.
+        new object[] { "local_enum_and_union_decls",
+            "fn score() u16 {\n" +
+            "    const Suit = enum(u8) { clubs = 1, hearts = 3, spades = 7 };\n" +
+            "    const Card = union(enum) { pip: u8, face: Suit, joker };\n" +
+            "    const Raw = union { word: u16, half: u8 };\n" +
+            "    const hand = [_]Card{ .{ .pip = 9 }, .{ .face = .hearts }, .joker, .{ .face = .spades } };\n" +
+            "    var total: u16 = 0;\n" +
+            "    for (hand) |c| {\n" +
+            "        total += switch (c) {\n" +
+            "            .pip => |p| p,\n" +
+            "            .face => |s| @as(u16, @intFromEnum(s)) * 10,\n" +
+            "            .joker => 50,\n" +
+            "        };\n" +
+            "    }\n" +
+            "    const r = Raw{ .word = 5 };\n" +
+            "    return total + r.word;\n" +
+            "}\n" +
+            "\n" +
+            "fn other() u8 {\n" +
+            "    const Suit = enum { a, b, c };\n" +
+            "    return @intFromEnum(Suit.c);\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    return @intCast((score() + other()) % 256);\n" +
+            "}\n", 166, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

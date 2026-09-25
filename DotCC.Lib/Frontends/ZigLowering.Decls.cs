@@ -672,6 +672,41 @@ internal sealed partial class ZigLowering
         return new Seq(new List<CStmt>());   // no runtime decl — mirrors a top-level container
     }
 
+    /// <summary>Register an in-function <c>const E = enum { … };</c> / <c>const U = union(enum) { … };</c> (task #111), the
+    /// enum and union twins of <see cref="LowerLocalStruct"/>: registered through the top-level registration under the
+    /// function-mangled name, with the plain name shadowed for the rest of the body. Fields only: a method or <c>const</c>
+    /// member needs a container-level declaration.</summary>
+    private CStmt LowerLocalEnumOrUnion(string name, object decl)
+    {
+        var mangled = _currentFnName.Length > 0 ? $"{_currentFnName}__{name}" : name;
+        if (!_localContainers.Add(mangled))
+        {
+            throw new IrUnsupportedException($"zig: duplicate in-function container `{name}` in `{_currentFnName}`");
+        }
+        _localContainerShadows.Add((name, _containerTypes.TryGetValue(name, out var prev) ? prev : null));
+        if (decl is not Zig.EnumDecl and not Zig.EnumDeclTyped) { _containerTypes[mangled] = new CType.Named(mangled); }
+        List<Item> members;
+        using (EnterContainer(mangled))
+        {
+            members = decl switch
+            {
+                Zig.EnumDecl e          => RegisterEnumZig(mangled, null, e.Arg5),
+                Zig.EnumDeclTyped e     => RegisterEnumZig(mangled, e.Arg5, e.Arg8),
+                Zig.UnionDeclEnum u     => RegisterUnion(mangled, u.Arg8),
+                Zig.UnionDeclTagged u   => RegisterUnionTagged(mangled, Tok(u.Arg5), u.Arg8),
+                Zig.UnionDeclUntagged u => RegisterUnionUntagged(mangled, u.Arg5),
+                _ => throw new System.InvalidOperationException(),
+            };
+        }
+        if (members.Count > 0)
+        {
+            throw new IrUnsupportedException(
+                $"zig: an in-function enum / union (`{name}`) is fields-only; a method needs a container-level declaration");
+        }
+        _containerTypes[name] = _containerTypes[mangled];
+        return new Seq(new List<CStmt>());
+    }
+
     /// <summary>Split a struct container body (<c>FieldDecls</c> = a list of <c>Member</c>) into
     /// its field declarations (each a <see cref="Zig.StructField"/>, for the layout), its methods
     /// (the inner <c>FnDef</c> item of each <c>fn</c>/<c>pub fn</c> member, declared as mangled free
@@ -2808,9 +2843,22 @@ internal sealed partial class ZigLowering
             case Zig.Ident id:  return _symbols.Resolve(Tok(id.Arg0))?.Type?.Unqualified;
             case Zig.BuiltinCall b when Tok(b.Arg0) == "@as" && Flatten(b.Arg2) is [var asType, _]:
                 return LowerType(asType).Unqualified;
+            // A call of a plain function has its declared return type (`score() + other()` over a `u16` and a `u8` is a
+            // `u16`, not C#'s promoted `int`, task #111). A generic one's result depends on its arguments: null.
+            case Zig.CallArgs ca:   return CallReturnIntType(ca.Arg0);
+            case Zig.CallNoArgs cn: return CallReturnIntType(cn.Arg0);
             default: return null;
         }
     }
+
+    /// <summary>The declared integer return type of a call's callee when it is a plain (non-generic) function named by an
+    /// identifier, or null.</summary>
+    private CType? CallReturnIntType(Item callee)
+        => callee.Content is Zig.Ident id
+           && _symbols.Resolve(Tok(id.Arg0)) is { Kind: SymKind.Func, Type: { } ft } fnSym && !_genericFns.ContainsKey(fnSym)
+           && ft.Unqualified is CType.Func { Return: var ret } && ret.Unqualified is CType.Prim { Integer: true }
+            ? ret.Unqualified
+            : null;
 
     /// <summary>The peer type of two zig operands (<see cref="ZigIntOperandType"/>): an untyped side yields
     /// to the typed one; two typed sides take the wider (they are equal in valid zig).</summary>
