@@ -2749,10 +2749,14 @@ internal sealed partial class ZigLowering
         {
             arg = new Cast(zt, arg) { Type = zt };
         }
+        // An arbitrary-width operand (`u5`, `u12`, carried in a byte / ushort) counts within its DECLARED width (task #101):
+        // `@clz(@as(u5, 5))` is 2, not the carrier's 5, and `@ctz` of a zero `u5` is 5, not 8.
+        var carrierBits = arg.Type?.Unqualified is CType.Prim { Integer: true, Bytes: var cb } ? cb * 8 : 0;
+        var declaredBits = DeclaredBitsOfArgument(argItem) is { } db && db > 0 && db < carrierBits ? db : carrierBits;
         if (_ir.ConstEval(arg) is { } v
             && arg.Type?.Unqualified is CType.Prim { Integer: true, Name: not "_Bool", Bytes: 1 or 2 or 4 or 8 } p)
         {
-            var width = p.Bytes * 8;
+            var width = declaredBits > 0 ? declaredBits : p.Bytes * 8;
             var bits = unchecked((ulong)v) & (width == 64 ? ulong.MaxValue : (1UL << width) - 1);
             var n = helper switch
             {
@@ -2762,7 +2766,20 @@ internal sealed partial class ZigLowering
             };
             return new LitInt(n.ToString(System.Globalization.CultureInfo.InvariantCulture), n) { Type = CType.Int };
         }
-        return new Call("ZigMath." + helper, new List<CExpr> { arg }) { Type = CType.Int };
+        CExpr count = new Call("ZigMath." + helper, new List<CExpr> { arg }) { Type = CType.Int };
+        if (declaredBits < carrierBits)
+        {
+            var extra = carrierBits - declaredBits;
+            var declaredLit = new LitInt(declaredBits.ToString(System.Globalization.CultureInfo.InvariantCulture), declaredBits) { Type = CType.Int };
+            count = helper switch
+            {
+                "Clz" => new Binary(BinOp.Sub, count,
+                    new LitInt(extra.ToString(System.Globalization.CultureInfo.InvariantCulture), extra) { Type = CType.Int }) { Type = CType.Int },
+                "Ctz" => new Call("System.Math.Min", new List<CExpr> { count, declaredLit }) { Type = CType.Int },
+                _ => count,
+            };
+        }
+        return count;
     }
 
     /// <summary>The ZIG type of an integer operand expression, or null when it is an untyped

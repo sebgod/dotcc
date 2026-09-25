@@ -1480,6 +1480,35 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Clz_and_ctz_of_an_arbitrary_width_integer_count_within_its_declared_width()
+    {
+        var cs = EmitZig("""
+            pub fn main() u8 {
+                var z: u5 = 5;
+                z += 0;
+                var q: u12 = 0x0f0;
+                q += 0;
+                var s: u3 = 1;
+                s += 0;
+                var zero: u5 = 0;
+                zero += 0;
+                var total: u32 = 0;
+                total += @clz(z);
+                total += @as(u32, @clz(q)) * 10;
+                total += @as(u32, @clz(s)) * 100;
+                total += @ctz(zero);
+                total += @clz(zero);
+                total += @clz(@as(u5, 3));
+                return @intCast(total % 256);
+            }
+            """);
+        // Task #101 (silent miscompile): `@clz` of a `u5` / `u12` / `u3` counted the byte / ushort carrier's leading zeros
+        // (`@clz(@as(u3, 1))` was 7, zig 2); `@ctz` of a zero `u5` said 8. zig returns 255 here.
+        cs.ShouldContain("total += (uint)((ZigMath.Clz(z) - 3));");
+        cs.ShouldContain("total += (uint)(System.Math.Min(ZigMath.Ctz(zero), 5));");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

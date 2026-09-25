@@ -5572,6 +5572,27 @@ public sealed class ZigOracleTests
             "    total += count(.{ 1, 2, 3 }) * 10;\n" +
             "    return @intCast(total);\n" +
             "}\n", 146, "" },
+        // Task #101: `@clz` / `@ctz` of arbitrary-width integers (u3, u5, u12) count within the declared width, zero and
+        // comptime-folded operands included (the carrier byte's count had been used).
+        new object[] { "clz_ctz_arbitrary_width",
+            "pub fn main() u8 {\n" +
+            "    var z: u5 = 5;\n" +
+            "    z += 0;\n" +
+            "    var q: u12 = 0x0f0;\n" +
+            "    q += 0;\n" +
+            "    var s: u3 = 1;\n" +
+            "    s += 0;\n" +
+            "    var zero: u5 = 0;\n" +
+            "    zero += 0;\n" +
+            "    var total: u32 = 0;\n" +
+            "    total += @clz(z);\n" +
+            "    total += @as(u32, @clz(q)) * 10;\n" +
+            "    total += @as(u32, @clz(s)) * 100;\n" +
+            "    total += @ctz(zero);\n" +
+            "    total += @clz(zero);\n" +
+            "    total += @clz(@as(u5, 3));\n" +
+            "    return @intCast(total % 256);\n" +
+            "}\n", 255, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
