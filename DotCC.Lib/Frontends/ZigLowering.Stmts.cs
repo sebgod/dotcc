@@ -4455,6 +4455,7 @@ internal sealed partial class ZigLowering
         // lowering — a loop that yields via `break v` / an `else` value can't be a C# expression.
         Zig.WhileElseExpr or Zig.ForElseExpr or Zig.LabeledWhileElseExpr or Zig.LabeledForElseExpr
             or Zig.WhileElseReturnExpr or Zig.ForElseReturnExpr or Zig.ForRefElseExpr or Zig.ForRefElseReturnExpr
+            or Zig.InlineForElseExpr or Zig.InlineForMultiElseExpr
             or Zig.WhileContAssignElseExpr => true,
         _ => false,
     };
@@ -4492,6 +4493,7 @@ internal sealed partial class ZigLowering
         Zig.ComptimeIfExpr c     => LowerValueControlFlowStmt(c.Arg1, sink, consume),
         Zig.WhileElseExpr or Zig.ForElseExpr or Zig.LabeledWhileElseExpr or Zig.LabeledForElseExpr
             or Zig.WhileElseReturnExpr or Zig.ForElseReturnExpr or Zig.ForRefElseExpr or Zig.ForRefElseReturnExpr
+            or Zig.InlineForElseExpr or Zig.InlineForMultiElseExpr
             or Zig.WhileContAssignElseExpr
             => LowerLoopValue(rhs, sink, consume),
         _ => throw new IrUnsupportedException(
@@ -4550,6 +4552,8 @@ internal sealed partial class ZigLowering
         string? elemName = null;
         var byRef = false;
         (Item Target, Item Op, Item Value)? contAssign = null;
+        // `inline for` (task #131): the comptime lists and captures to unroll over, instead of a runtime loop.
+        (Item Objs, Item Caps, bool Multi)? inlineFor = null;
         switch (rhs.Content)
         {
             case Zig.WhileElseExpr w:        condOrIter = w.Arg2; blockItem = w.Arg4; elseItem = w.Arg6; break;
@@ -4562,6 +4566,10 @@ internal sealed partial class ZigLowering
             case Zig.ForElseReturnExpr f:    condOrIter = f.Arg2; elemName = Tok(f.Arg5); blockItem = f.Arg7; elseItem = f.Arg9; break;
             case Zig.ForRefElseExpr f:       condOrIter = f.Arg2; elemName = Tok(f.Arg6); blockItem = f.Arg8; elseItem = f.Arg10; byRef = true; break;
             case Zig.ForRefElseReturnExpr f: condOrIter = f.Arg2; elemName = Tok(f.Arg6); blockItem = f.Arg8; elseItem = f.Arg10; byRef = true; break;
+            case Zig.InlineForElseExpr f:
+                condOrIter = f.Arg3; inlineFor = (f.Arg3, f.Arg6, false); blockItem = f.Arg8; elseItem = f.Arg10; break;
+            case Zig.InlineForMultiElseExpr f:
+                condOrIter = f.Arg3; inlineFor = (f.Arg3, f.Arg6, true); blockItem = f.Arg8; elseItem = f.Arg10; break;
             default: throw new IrUnsupportedException("internal: loop-value on " + (rhs.Content?.GetType().Name ?? "null"));
         }
 
@@ -4573,8 +4581,16 @@ internal sealed partial class ZigLowering
         // Lower the loop with the value target active so a `break v` inside resolves to it. The cond /
         // iterable is lowered before the body (it can't `break`), so it never references the temp.
         _loopValues.Push(target);
-        // A `for` names its element capture; a `while` has none.
-        CStmt loop = elemName is { } elem
+        // An `inline for` unrolls over its comptime lists (a `break v` in any copy fills the temp and jumps to the end); a
+        // `for` names its element capture; a `while` has none.
+        CStmt loop = inlineFor is { } unrolled
+            ? unrolled.Multi
+                ? UnrollComptimeMultiFor(unrolled.Objs, unrolled.Caps, blockItem)
+                : TryComptimeIterable(unrolled.Objs, out var inlineList)
+                    ? UnrollComptimeFor(new[] { (inlineList, Tok(unrolled.Caps)) }, blockItem)
+                    : throw new IrUnsupportedException(
+                        "a value-position `inline for` must walk a comptime list (a `@typeInfo` member list or a `[_]type{…}`)")
+            : elemName is { } elem
             ? LowerForSlice(LowerExpr(condOrIter), elem, null, blockItem, byRef)
             // `while (c) : (i += 1)` → the C `For` with that post, so a `continue` runs it (as the statement form).
             : contAssign is { } cont

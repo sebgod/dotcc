@@ -1016,6 +1016,11 @@ productions:
       # break yields the element POINTER. After `|`, a `*` or an IDENT decides the capture form in one token.
       - { lhs: LoopExpr, rhs: ['for', '(', Expr, ')', '|', '*', IDENT, '|', Block, 'else', RhsExpr],    action: forRefElseExpr }
       - { lhs: LoopExpr, rhs: ['for', '(', Expr, ')', '|', '*', IDENT, '|', Block, 'else', ReturnArm],  action: forRefElseReturnExpr }
+      # The comptime-unrolled value loop (std.enums.tagName, task #131: `return inline for (field_names, field_values)
+      # |f_name, f_value| { if (@intFromEnum(e) == f_value) break f_name; } else null;`), over one comptime list or several
+      # in lockstep. `inline` is not in FIRST of any other RhsExpr form, so it decides the production in one token.
+      - { lhs: LoopExpr, rhs: ['inline', 'for', '(', Expr, ')', '|', IDENT, '|', Block, 'else', RhsExpr],       action: inlineForElseExpr }
+      - { lhs: LoopExpr, rhs: ['inline', 'for', '(', ForObjs, ')', '|', ForCaps, '|', Block, 'else', RhsExpr], action: inlineForMultiElseExpr }
 
   - derivation: leftmost
     rules:

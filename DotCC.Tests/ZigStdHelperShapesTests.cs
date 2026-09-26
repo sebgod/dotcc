@@ -3215,6 +3215,30 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_value_position_inline_for_unrolls_and_breaks_with_its_value()
+    {
+        var cs = EmitZig("""
+            const E = enum(u8) { alpha, be, gamma };
+            fn nameOf(e: E) ?[:0]const u8 {
+                const names = @typeInfo(E).@"enum".field_names;
+                const values = @typeInfo(E).@"enum".field_values;
+                return inline for (names, values) |n, v| {
+                    if (@intFromEnum(e) == v) break n;
+                } else null;
+            }
+            pub fn main() u8 {
+                return @intCast(nameOf(.alpha).?.len * 10 + nameOf(.gamma).?.len);
+            }
+            """);
+        // Task #131 (std.enums.tagName: `return inline for (field_names, field_values) |f_name, f_value| { … break f_name; }
+        // else null;`): the comptime-unrolled value loop; each copy's `break` fills the result and jumps past the `else`,
+        // and a name captured from `field_names` meets the `?[:0]const u8` result as a slice. zig returns 55.
+        cs.ShouldContain("__lv0_end:");
+        cs.ShouldContain("\"alpha\\0\"u8");
+        cs.ShouldContain("\"gamma\\0\"u8");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

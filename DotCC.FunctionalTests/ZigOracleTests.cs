@@ -6580,6 +6580,24 @@ public sealed class ZigOracleTests
             "    n += b.len * 3 + b[1] + b[3] + b[5] + c.len;\n" +
             "    return @truncate(n);\n" +
             "}\n", 172, "" },
+        // Task #131: a value-position `inline for … else` over a `[_]type{…}` list, single and indexed, yielding through
+        // `break v` or the `else` value.
+        new object[] { "inline_for_value_loop",
+            "fn firstAtLeast(comptime bits: u16) u8 {\n" +
+            "    return inline for ([_]type{ u8, u16, u32, u64 }, 0..) |T, i| {\n" +
+            "        if (@bitSizeOf(T) >= bits) break @intCast(i);\n" +
+            "    } else 255;\n" +
+            "}\n" +
+            "\n" +
+            "fn sizeOfTwo() u8 {\n" +
+            "    return inline for ([_]type{ u8, u16, u32 }) |T| {\n" +
+            "        if (@sizeOf(T) == 2) break @as(u8, @bitSizeOf(T));\n" +
+            "    } else 0;\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    return firstAtLeast(9) * 100 + firstAtLeast(64) * 10 + firstAtLeast(128) % 7 + sizeOfTwo();\n" +
+            "}\n", 149, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -7864,6 +7882,13 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // Task #131: std.enums.tagName from real std (`return inline for (field_names, field_values) … else null;`).
+    [Fact]
+    public void Dotcc_matches_zig_std_enums_tag_name() =>
+        MatchesZigWithRealStd("enums_tag_name",
+            "const std = @import(\"std\");\n" +
+            "const E = enum { alpha, be }; pub fn main() u8 { return @intCast(@tagName(E.alpha).len * 10 + std.enums.tagName(E, .be).?.len); }\n", 52);
 
     // Task #127: std.mem.sliceTo over a mutable array pointer, a const slice and a sentinel many-item pointer.
     [Fact]

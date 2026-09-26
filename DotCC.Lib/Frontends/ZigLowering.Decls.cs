@@ -1761,9 +1761,20 @@ internal sealed partial class ZigLowering
         var lowered = LowerExprSinkCore(expr, sink);
         // A value of zig's enum-literal type (task #113) meeting an enum: `sorted_vals[i] = kv.@"1"` with `kv` an element
         // of `.{ "if", .kw_if }`. The member rides in the type, so the coercion is static whatever carried the value.
-        return lowered.Type?.Unqualified is CType.EnumLiteral literal && CoerceEnumLiteral(literal.Name, sink) is { } coerced
-            ? coerced
-            : lowered;
+        if (lowered.Type?.Unqualified is CType.EnumLiteral literal && CoerceEnumLiteral(literal.Name, sink) is { } coerced)
+        {
+            return coerced;
+        }
+        // A string literal that arrived through a comptime binding rather than spelled here (std.enums.tagName's
+        // `break f_name`, an `inline for` capture over `field_names`, task #131) meeting a slice or optional-slice sink:
+        // the slice over it, as the spelled literal gets (C# wraps a slice into the optional itself).
+        if (lowered is LitStr && lowered.Type?.Unqualified is CType.Array { Element: var litElem }
+            && (sink?.Unqualified is CType.Optional { Inner.Unqualified: CType.Slice } ? ((CType.Optional)sink.Unqualified).Inner.Unqualified : sink?.Unqualified)
+                is CType.Slice litSlice)
+        {
+            return CoerceToSlice(lowered, new CType.Slice(litSlice.Element.IsConst ? litElem.WithQuals(TypeQual.Const) : litElem));
+        }
+        return lowered;
     }
 
     /// <summary>An enum literal <c>.name</c> at <paramref name="sink"/>: the enum's member, an optional enum's payload,
