@@ -1537,6 +1537,10 @@ productions:
       # An else-less `if` whose body is a BLOCK (std.crypto.sha2's `.x86_64 => if (… comptime cpu.hasAll(…)) { … },`).
       # Ended by `,` / `}`; an if-EXPRESSION prong continues with `else`.
       - { lhs: Prong, rhs: [CaseVals, '=>', 'if', '(', Expr, ')', Block], action: prongIfBlock }
+      # An else-less `if` whose body is a plain expression (std.mem.ReverseIterator's `.one => if (@typeInfo(ptr.child)
+      # != .array) @compileError("…"),`, task #141). Ended by `,` / `}` like the capture form; an if-EXPRESSION prong
+      # continues with `else`, so the split is one token after the body.
+      - { lhs: Prong, rhs: [CaseVals, '=>', 'if', '(', Expr, ')', Expr], action: prongIfExpr }
       # A capture prong whose body is a capture-`if` statement (std.meta.FieldEnum's `.@"union" => |u| if (u.tag_type)
       # |EnumTag| { … }`, task #108). After the prong's `|x|`, `if` then `(` Expr `)` `|` distinguishes it from the
       # value-if RhsExpr only at the `{` of its Block, which no RhsExpr's then-arm starts with.

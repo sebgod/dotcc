@@ -3860,6 +3860,76 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void An_else_less_if_prong_over_an_expression_folds_or_lowers_to_an_if()
+    {
+        var cs = EmitZig("""
+            const Kind = enum { one, many, slice };
+            fn check(comptime k: Kind, comptime n: u8) u8 {
+                switch (k) {
+                    .slice => {},
+                    .one => if (n > 3) @compileError("n too big"),
+                    .many => if (n == 0) @compileError("n is zero"),
+                }
+                return n;
+            }
+            fn inc(p: *u8) void {
+                p.* += 2;
+            }
+            fn count(v: u8, hits: *u8) void {
+                switch (v) {
+                    0 => {},
+                    1 => if (hits.* < 10) inc(hits),
+                    else => if (v > 5) inc(hits),
+                }
+            }
+            pub fn main() u8 {
+                var hits: u8 = 0;
+                for ([_]u8{ 0, 1, 7, 3, 9, 1 }) |v| count(v, &hits);
+                return check(.one, 2) + check(.many, 5) + hits;
+            }
+            """);
+        // Task #141 (std.mem.ReverseIterator's `.one => if (…) @compileError("…"),`): a comptime subject keeps the
+        // prong's expression or nothing, so the untaken @compileError never fires; a runtime subject gets an else-less
+        // `if`. zig returns 15.
+        cs.ShouldContain("case 1:\n                if (Cond.B(((CBool)(*hits < 10))))\n                    inc(hits);\n                break;");
+        cs.ShouldContain("default:\n                if (Cond.B(((CBool)(v > 5))))\n                    inc(hits);\n                break;");
+        cs.ShouldContain("internal static unsafe byte check__0_2()\n    {\n        return 2;");
+    }
+
+    [Fact]
+    public void An_else_less_if_prong_fires_its_compile_error_when_the_condition_holds()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig("""
+            const Kind = enum { one, many, slice };
+            fn check(comptime k: Kind, comptime n: u8) u8 {
+                switch (k) {
+                    .slice => {},
+                    .one => if (n > 3) @compileError("n too big"),
+                    .many => if (n == 0) @compileError("n is zero"),
+                }
+                return n;
+            }
+            fn inc(p: *u8) void {
+                p.* += 2;
+            }
+            fn count(v: u8, hits: *u8) void {
+                switch (v) {
+                    0 => {},
+                    1 => if (hits.* < 10) inc(hits),
+                    else => if (v > 5) inc(hits),
+                }
+            }
+            pub fn main() u8 {
+                var hits: u8 = 0;
+                for ([_]u8{ 0, 1, 7, 3, 9, 1 }) |v| count(v, &hits);
+                return check(.one, 5) + hits;
+            }
+            """));
+        // Task #141: `check(.one, 5)` selects `.one => if (n > 3) @compileError("n too big")`, as zig reports.
+        ex.Message.ShouldContain("n too big");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

@@ -6831,6 +6831,32 @@ public sealed class ZigOracleTests
             "    const t: u8 = @intCast(A.top);\n" +
             "    return @as(u8, @truncate(a.value)) +% t +% @as(u8, @intFromBool(A.high())) +% @as(u8, @truncate(b.value >> 56));\n" +
             "}\n", 152, "" },
+        // Task #141: else-less `if` prongs over an expression, with a comptime subject (an untaken @compileError) and a runtime one.
+        new object[] { "else_less_if_prongs",
+            "const Kind = enum { one, many, slice };\n" +
+            "fn check(comptime k: Kind, comptime n: u8) u8 {\n" +
+            "    switch (k) {\n" +
+            "        .slice => {},\n" +
+            "        .one => if (n > 3) @compileError(\"n too big\"),\n" +
+            "        .many => if (n == 0) @compileError(\"n is zero\"),\n" +
+            "    }\n" +
+            "    return n;\n" +
+            "}\n" +
+            "fn inc(p: *u8) void {\n" +
+            "    p.* += 2;\n" +
+            "}\n" +
+            "fn count(v: u8, hits: *u8) void {\n" +
+            "    switch (v) {\n" +
+            "        0 => {},\n" +
+            "        1 => if (hits.* < 10) inc(hits),\n" +
+            "        else => if (v > 5) inc(hits),\n" +
+            "    }\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var hits: u8 = 0;\n" +
+            "    for ([_]u8{ 0, 1, 7, 3, 9, 1 }) |v| count(v, &hits);\n" +
+            "    return check(.one, 2) + check(.many, 5) + hits;\n" +
+            "}\n", 15, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

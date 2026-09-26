@@ -3455,6 +3455,7 @@ internal sealed partial class ZigLowering
         { Assign: { } pa } => LowerProngAssign(pa),
         { IfSwitch: { } isw } => LowerProngIfSwitch(isw),
         { IfBlock: { } ib } => LowerProngIfBlock(ib),
+        { IfExpr: { } ie } => LowerProngIfExpr(ie),
         { IfCaptureReturn: { } icr } => LowerIfCapture(icr.Arg4, Tok(icr.Arg7), icr.Arg9, null, null),
         { Loop: { } loop } => LowerStmt(loop),
         _ => new Seq(new List<CStmt>()),
@@ -3473,6 +3474,19 @@ internal sealed partial class ZigLowering
         }
         var cond = LowerExpr(p.Arg4);
         return new If(cond, LowerBlock(p.Arg6), null);
+    }
+
+    /// <summary>A <c>=&gt; if (c) expr</c> prong body with no <c>else</c> (std.mem.ReverseIterator's <c>.one =&gt; if
+    /// (@typeInfo(ptr.child) != .array) @compileError("…"),</c>, task #141): a comptime-known condition keeps the expression
+    /// statement or nothing, so an untaken <c>@compileError</c> never fires; otherwise a runtime <c>if</c>.</summary>
+    private CStmt LowerProngIfExpr(Zig.ProngIfExpr p)
+    {
+        if ((TryFoldComptimeCondition(p.Arg4) ?? TryFoldTypeIfCondition(p.Arg4)) is { } taken)
+        {
+            return taken ? LowerProngExprStmt(p.Arg6) : new Seq(new List<CStmt>());
+        }
+        var cond = LowerExpr(p.Arg4);
+        return new If(cond, LowerProngExprStmt(p.Arg6), null);
     }
 
     /// <summary>A <c>=&gt; if (c) switch (s) { … }</c> prong body: the switch statement under an else-less <c>if</c>.
@@ -3723,6 +3737,7 @@ internal sealed partial class ZigLowering
                 case Zig.ProngAssign pa:     caseVals = pa.Arg0; body = new List<CStmt> { LowerProngAssign(pa) }; break;
                 case Zig.ProngIfSwitch pis:  caseVals = pis.Arg0; body = new List<CStmt> { LowerProngIfSwitch(pis) }; break;
                 case Zig.ProngIfBlock pib:   caseVals = pib.Arg0; body = new List<CStmt> { LowerProngIfBlock(pib) }; break;
+                case Zig.ProngIfExpr pie:    caseVals = pie.Arg0; body = new List<CStmt> { LowerProngIfExpr(pie) }; break;
                 case Zig.ProngLoop plp:      caseVals = plp.Arg0; body = new List<CStmt> { LowerStmt(plp.Arg2) }; break;
                 case Zig.ProngIfCaptureReturn picr:
                     caseVals = picr.Arg0; body = new List<CStmt> { LowerIfCapture(picr.Arg4, Tok(picr.Arg7), picr.Arg9, null, null) }; break;
