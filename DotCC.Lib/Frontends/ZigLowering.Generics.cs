@@ -1670,6 +1670,12 @@ internal sealed partial class ZigLowering
             // The body below re-targets _currentContainer more than once (DeclareMethod clears it); the
             // guard restores the caller's on every exit path, including the delegated early return.
             using var containerRestore = EnterContainer(_currentContainer);
+            // Nor does it inherit a const's container: a reification may be triggered while a const of ANOTHER container
+            // lowers (std.crypto.keccak_p's State lays out `buf: [rate]u8`, whose `rate = KeccakF(f).block_bytes - …`
+            // reifies KeccakF, task #164), and the instance's own members (`init(bytes: [block_bytes]u8)`) resolve in the
+            // instance, not in that const's container.
+            var outerConstContainer = _currentConstContainer;
+            _currentConstContainer = null;
             // A scope for the value/optional comptime seeds (so the body's captured-if conditions + array
             // extents resolve); the type-param seeds already ride _typeAliases, installed by phase 2.
             _symbols.EnterScope();
@@ -1873,6 +1879,7 @@ internal sealed partial class ZigLowering
                     if (prevAlias is { } restored) { _fnAliases[fnName] = restored; } else { _fnAliases.Remove(fnName); }
                 }
                 _symbols.ExitScope();
+                _currentConstContainer = outerConstContainer;
             }
             return mangledType;
         }

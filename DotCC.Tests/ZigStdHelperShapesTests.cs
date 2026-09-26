@@ -5093,6 +5093,46 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_reification_triggered_by_another_containers_const_resolves_its_own_members()
+    {
+        var cs = EmitZig("""
+            fn F(comptime f: u11) type {
+                return struct {
+                    const Self = @This();
+                    pub const block_bytes = f / 8;
+                    st: [block_bytes]u8 = @splat(0),
+                    pub fn init(bytes: [block_bytes]u8) Self {
+                        var self: Self = undefined;
+                        self.st = bytes;
+                        return self;
+                    }
+                };
+            }
+            fn State(comptime f: u11, comptime capacity: u11) type {
+                return struct {
+                    const Self = @This();
+                    pub const rate = F(f).block_bytes - capacity / 8;
+                    buf: [rate]u8 = undefined,
+                    st: F(f) = .{},
+                    pub fn init(bytes: [f / 8]u8) Self {
+                        return Self{ .st = F(f).init(bytes) };
+                    }
+                };
+            }
+            pub fn main() u8 {
+                var bytes: [5]u8 = @splat(0);
+                bytes[0] = 7;
+                const s = State(40, 16).init(bytes);
+                return @as(u8, @intCast(State(40, 16).rate)) + s.st.st[0];
+            }
+            """);
+        // Task #164 (std.crypto.keccak_p's State lays out `buf: [rate]u8` with `rate = KeccakF(f).block_bytes - …`, which
+        // reifies KeccakF): the instance's `init(bytes: [block_bytes]u8)` resolves `block_bytes` in KeccakF, not in the const
+        // container that triggered it. zig returns 10.
+        cs.ShouldContain("internal static unsafe F__40 F__40_init(byte* bytes)");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

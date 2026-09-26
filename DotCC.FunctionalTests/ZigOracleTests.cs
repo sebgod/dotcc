@@ -7431,6 +7431,37 @@ public sealed class ZigOracleTests
             "pub fn main() u8 {\n" +
             "    return K(1600).max_rounds;\n" +
             "}\n", 24, "" },
+        // Task #164: an instance reified while another container's const lowers (keccak_p's State `buf: [rate]u8`).
+        new object[] { "reify_inside_other_container_const",
+            "fn F(comptime f: u11) type {\n" +
+            "    return struct {\n" +
+            "        const Self = @This();\n" +
+            "        pub const block_bytes = f / 8;\n" +
+            "        st: [block_bytes]u8 = @splat(0),\n" +
+            "        pub fn init(bytes: [block_bytes]u8) Self {\n" +
+            "            var self: Self = undefined;\n" +
+            "            self.st = bytes;\n" +
+            "            return self;\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "fn State(comptime f: u11, comptime capacity: u11) type {\n" +
+            "    return struct {\n" +
+            "        const Self = @This();\n" +
+            "        pub const rate = F(f).block_bytes - capacity / 8;\n" +
+            "        buf: [rate]u8 = undefined,\n" +
+            "        st: F(f) = .{},\n" +
+            "        pub fn init(bytes: [f / 8]u8) Self {\n" +
+            "            return Self{ .st = F(f).init(bytes) };\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var bytes: [5]u8 = @splat(0);\n" +
+            "    bytes[0] = 7;\n" +
+            "    const s = State(40, 16).init(bytes);\n" +
+            "    return @as(u8, @intCast(State(40, 16).rate)) + s.st.st[0];\n" +
+            "}\n", 10, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -8807,6 +8838,17 @@ public sealed class ZigOracleTests
             "    std.crypto.hash.sha2.Sha512.hash(\"abc\", &out, .{});\n" +
             "    return out[0] ^ out[63];\n" +
             "}\n", 66);
+
+    // Task #164: std.crypto.hash.sha3.Sha3_256 from real std (after #161 and #163).
+    [Fact]
+    public void Dotcc_matches_zig_std_crypto_sha3() =>
+        MatchesZigWithRealStd("crypto_sha3",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var out: [32]u8 = undefined;\n" +
+            "    std.crypto.hash.sha3.Sha3_256.hash(\"abc\", &out, .{});\n" +
+            "    return out[0] ^ out[31];\n" +
+            "}\n", 8);
 
     // Task #148: std.math.rotr / rotl from real std over a `@Vector(4, u32)` (Blake3's SIMD rounds rotate this way).
     [Fact]
