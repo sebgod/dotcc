@@ -28,6 +28,8 @@ internal sealed partial class IrBuilder
     private sealed record InitVal(CExpr Value) : Init;
     private sealed record InitGroup(IReadOnlyList<Init> Items) : Init;
     private sealed record InitAt(int Index, CExpr Value) : Init;
+    /// <summary>A member designator <c>.field = value</c> (value: an InitVal or InitGroup).</summary>
+    private sealed record InitMember(string Field, Init Value) : Init;
 
     /// <summary>Parse an <c>InitList</c> (its element list, with the optional
     /// trailing comma) into the structured init tree.</summary>
@@ -90,52 +92,177 @@ internal sealed partial class IrBuilder
             ConstEval(BuildExpr(d.Arg1)) is { } ix && ix >= 0 ? (int)ix
                 : throw new IrUnsupportedException("array designator index must be a constant non-negative integer"),
             BuildExpr(d.Arg4))),
+        C.InitElemMember m => Gated(1999, "designated initializers", it,
+            new InitMember(Tok(m.Arg1), new InitVal(BuildExpr(m.Arg3)))),
+        C.InitElemMemberNest m => Gated(1999, "designated initializers", it,
+            new InitMember(Tok(m.Arg1), new InitGroup(ParseInitList(m.Arg4)))),
         _ => new InitVal(BuildExpr(it)),
     };
 
     // ---- struct / union aggregates ---------------------------------------
 
-    /// <summary>Build a positional struct/union aggregate initializer — zips the
-    /// brace elements onto the fields in declaration order, recursing into a nested
-    /// brace over a struct/union-typed field. Trailing fields the list doesn't
-    /// reach are omitted (C# zero-fills them — C's partial-init rule). This is the
-    /// one place the legacy emitter's positional <c>BuildAggregateInit</c> and the
+    /// <summary>Build a positional struct/union aggregate initializer — the brace
+    /// elements land on the fields in declaration order. Trailing fields the list
+    /// doesn't reach are omitted (C# zero-fills them — C's partial-init rule). This is
+    /// the one place the legacy emitter's positional <c>BuildAggregateInit</c> and the
     /// struct-array element builder converge.</summary>
     private StructInit BuildStructPositional(CType type, IReadOnlyList<Init> items)
+    {
+        var cursor = 0;
+        return BuildStructFrom(type, items, ref cursor, braced: true);
+    }
+
+    /// <summary>Consume <paramref name="items"/> from <paramref name="cursor"/> onto the
+    /// fields of <paramref name="type"/>. Each field takes a braced group, or — C's brace
+    /// elision (C11 §6.7.9p20) — as many of the following items as it needs: a nested
+    /// struct its fields' worth, an array member its element count. A union initializes
+    /// through its FIRST member only (§6.7.9p17) unless a designator names another.
+    /// A member designator <c>.f = v</c> (only in the <paramref name="braced"/> list it
+    /// belongs to — inside an elided sub-aggregate it ends the elision and applies to the
+    /// enclosing braces, §6.7.9p17) initializes <c>f</c>, and the next positional element
+    /// continues with the member after it; a later initializer for the same member
+    /// overrides an earlier one.</summary>
+    private StructInit BuildStructFrom(CType type, IReadOnlyList<Init> items, ref int cursor, bool braced)
     {
         // Anonymous bit-fields (padding) take no initializer in C — drop them so the
         // positional values land on the accessible members in declaration order.
         var fields = StructFieldsOf(type).Where(f => !f.IsAnonBitField).ToList();
-        var members = new List<FieldInit>(Math.Min(items.Count, fields.Count));
-        for (var i = 0; i < items.Count && i < fields.Count; i++)
+        var positionalLimit = IsUnionType(type) ? Math.Min(1, fields.Count) : fields.Count;
+        var members = new List<FieldInit>(fields.Count);
+        void Set(StructField f, CExpr value)
         {
-            var field = fields[i];
-            CExpr value = items[i] switch
+            members.RemoveAll(m => m.Name == f.Name);
+            members.Add(new FieldInit(f.Name, f.Type, value));
+        }
+        var next = 0;
+        while (cursor < items.Count)
+        {
+            if (items[cursor] is InitMember im)
             {
-                InitVal v => v.Value,
-                InitGroup g => BuildStructPositional(field.Type, g.Items), // nested brace → struct/union field
-                _ => throw new IrUnsupportedException("array designator inside a positional struct initializer"),
-            };
-            members.Add(new FieldInit(field.Name, field.Type, value));
+                if (!braced) { break; }
+                var at = fields.FindIndex(f => f.Name == im.Field);
+                if (at < 0)
+                {
+                    throw new IrUnsupportedException($"designator '.{im.Field}' names no member of '{(type.Unqualified as CType.Named)?.Name}'");
+                }
+                var one = 0;
+                Set(fields[at], BuildMemberValue(fields[at].Type, [im.Value], ref one));
+                cursor++;
+                next = at + 1;
+                continue;
+            }
+            if (next >= positionalLimit) { break; }
+            Set(fields[next], BuildMemberValue(fields[next].Type, items, ref cursor));
+            next++;
         }
         return new StructInit(members) { Type = type };
     }
 
-    /// <summary>Build a C99 designated struct/union initializer
-    /// (<c>{ .x = 1, .y = 2 }</c>). The user named the fields, so each member's
-    /// field type comes from the struct table (driving the store coercion) and the
-    /// order may differ from declaration — C# object initializers allow both, and
-    /// omitted fields take their zero default.</summary>
-    private StructInit BuildStructDesignated(CType type, Item memberList)
+    /// <summary>The initializer for one aggregate member (or array element) of type
+    /// <paramref name="ft"/>, consuming one braced item or — brace elision — the run of
+    /// items it needs.</summary>
+    private CExpr BuildMemberValue(CType ft, IReadOnlyList<Init> items, ref int cursor)
     {
-        var fields = StructFieldsOf(type);
-        var members = new List<FieldInit>();
-        foreach (var (field, valueItem) in ParseMemberInits(memberList))
+        var item = items[cursor];
+        if (item is InitAt or InitMember)
         {
-            members.Add(new FieldInit(field, FieldTypeOf(fields, field), BuildExpr(valueItem)));
+            throw new IrUnsupportedException("a designator where a member's value was expected");
         }
-        return new StructInit(members) { Type = type };
+        if (ft.Unqualified is CType.Array arr)
+        {
+            // `char name[8] = "…"` inside a struct — the string's bytes, braced or not.
+            if (item is InitVal sv && StringArrayValue(arr, sv.Value) is { } str) { cursor++; return str; }
+            if (item is InitGroup { Items: [InitVal bsv] } && StringArrayValue(arr, bsv.Value) is { } bstr) { cursor++; return bstr; }
+            if (item is InitGroup g) { cursor++; return BuildArrayValue(arr, g.Items); }
+            return ElidedArrayValue(arr, items, ref cursor);
+        }
+        if (IsAggregateType(ft))
+        {
+            if (item is InitGroup g) { cursor++; return BuildStructPositional(ft, g.Items); }
+            // A whole-struct value (`{ other, 3 }` where `other` is itself a struct).
+            if (item is InitVal v && v.Value.Type.Unqualified is CType.Named vn
+                && ft.Unqualified is CType.Named fn && vn.Name == fn.Name)
+            {
+                cursor++;
+                return v.Value;
+            }
+            return BuildStructFrom(ft, items, ref cursor, braced: false);
+        }
+        cursor++;
+        return item switch
+        {
+            InitVal v => v.Value,
+            InitGroup { Items: [InitVal inner, ..] } => inner.Value,   // `{ 5 }` — a braced scalar
+            _ => throw new IrUnsupportedException("an empty or nested brace around a scalar initializer"),
+        };
     }
+
+    /// <summary>A braced initializer for an array-typed member: designators, nested
+    /// braces and multi-dimensional flattening go through the ordinary array
+    /// interpreter (<see cref="BuildArrayElems"/>).</summary>
+    private ArrayValue BuildArrayValue(CType.Array arr, IReadOnlyList<Init> items)
+    {
+        var dims = ConstDimsOf(arr);
+        var elems = BuildArrayElems(arr.FlatElement, dims, items);
+        if (elems.Count > dims.Aggregate(1, (a, b) => a * b))
+        {
+            throw new IrUnsupportedException("too many initializers for an array member");
+        }
+        return new ArrayValue(arr.FlatElement, elems) { Type = arr };
+    }
+
+    /// <summary>An array member whose braces were elided — it takes the following items,
+    /// one flat element each (a struct element itself elides), up to its extent.</summary>
+    private ArrayValue ElidedArrayValue(CType.Array arr, IReadOnlyList<Init> items, ref int cursor)
+    {
+        var total = ConstDimsOf(arr).Aggregate(1, (a, b) => a * b);
+        var elems = new List<CExpr>();
+        while (elems.Count < total && cursor < items.Count && items[cursor] is not (InitMember or InitAt))
+        {
+            elems.Add(BuildMemberValue(arr.FlatElement, items, ref cursor));
+        }
+        return new ArrayValue(arr.FlatElement, elems) { Type = arr };
+    }
+
+    /// <summary>A string literal initializing a 1-D character array member — its code
+    /// units plus the NUL, truncated to the extent (an exact fit drops the NUL, C's
+    /// rule). Null when <paramref name="value"/> isn't a string literal matching the
+    /// element width.</summary>
+    private static ArrayValue? StringArrayValue(CType.Array arr, CExpr value)
+    {
+        if (arr.Element is CType.Array || arr.Element.Unqualified is not CType.Prim p) { return null; }
+        List<int>? units = value switch
+        {
+            LitStr s when p.Bytes == 1 => DotCC.EmitHelpers.StringByteValues(s.Segments),
+            LitU16Str s when p.Bytes == 2 => DotCC.EmitHelpers.StringU16Values(s.Segments),
+            LitU32Str s when p.Bytes == 4 => DotCC.EmitHelpers.StringU32Values(s.Segments),
+            _ => null,
+        };
+        if (units is null) { return null; }
+        units.Add(0);
+        var extent = arr.Count ?? units.Count;
+        var elems = new List<CExpr>(extent);
+        for (var i = 0; i < units.Count && i < extent; i++)
+        {
+            elems.Add(new LitInt(units[i].ToString(System.Globalization.CultureInfo.InvariantCulture), units[i]) { Type = CType.Int });
+        }
+        return new ArrayValue(arr.Element, elems) { Type = arr };
+    }
+
+    /// <summary>The constant extents of a (possibly nested) array type, outer → inner.</summary>
+    private static List<int> ConstDimsOf(CType.Array arr)
+    {
+        var dims = new List<int>();
+        for (CType t = arr; t is CType.Array a; t = a.Element)
+        {
+            dims.Add(a.Count ?? throw new IrUnsupportedException("initializer for an array member of unknown size"));
+        }
+        return dims;
+    }
+
+    private bool IsAggregateType(CType t) => t.Unqualified is CType.Named n && _structFields.ContainsKey(n.Name);
+
+    private bool IsUnionType(CType t) => t.Unqualified is CType.Named n && _structIsUnion.GetValueOrDefault(n.Name);
 
     /// <summary>The struct/union fields named by <paramref name="type"/>, or throw
     /// if it isn't a known aggregate.</summary>
@@ -151,30 +278,6 @@ internal sealed partial class IrBuilder
     {
         foreach (var f in fields) { if (f.Name == name) { return f.Type; } }
         return CType.Int;   // unknown field — let Roslyn surface the real error
-    }
-
-    /// <summary>Collect a <c>MemberInitList</c>'s <c>.field = value</c> items, in
-    /// source order.</summary>
-    private List<(string field, Item value)> ParseMemberInits(Item memberList)
-    {
-        var outp = new List<(string, Item)>();
-        void Add(Item mi)
-        {
-            if (mi.Content is C.MemberInit m) { outp.Add((Tok(m.Arg1), m.Arg3)); }
-            else { throw new IrUnsupportedException(TypeName(mi.Content)); }
-        }
-        void Walk(Item n)
-        {
-            switch (n.Content)
-            {
-                case C.MemberInitListCons c: Walk(c.Arg0); Add(c.Arg2); break;
-                case C.MemberInitListTrail t: Walk(t.Arg0); break;
-                case C.MemberInitListOne o: Add(o.Arg0); break;
-                default: Add(n); break;
-            }
-        }
-        Walk(memberList);
-        return outp;
     }
 
     // ---- array aggregates ------------------------------------------------
@@ -354,9 +457,6 @@ internal sealed partial class IrBuilder
         if (items is [InitVal one]) { return new Cast(type, one.Value) { Type = type }; }
         throw new IrUnsupportedException($"compound literal of non-aggregate type '{type.Describe()}' needs exactly one value");
     }
-
-    private CExpr BuildCompoundLitDesignated(Item typeItem, Item memberList) =>
-        BuildStructDesignated(ResolveType(typeItem), memberList);
 
     private CExpr BuildCompoundLitEmpty(Item typeItem) =>
         new DefaultLit { Type = ResolveType(typeItem) };

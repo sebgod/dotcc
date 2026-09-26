@@ -236,6 +236,7 @@ internal sealed partial class IrBuilder
         Paren p => SafeExpr(p.Inner, sym, buffer),
         VaArgGet va => SafeExpr(va.Ap, sym, buffer),
         StructInit si => si.Members.All(m => SafeExpr(m.Value, sym, buffer)),
+        ArrayValue av => av.Elems.All(x => SafeExpr(x, sym, buffer)),
         StackArray sa => sa.Elems.All(x => SafeExpr(x, sym, buffer)),
         PinnedArray pa => (pa.Elems?.All(x => SafeExpr(x, sym, buffer)) ?? true) && (pa.Count is null || SafeExpr(pa.Count, sym, buffer)),
         _ => false,   // an unmodeled node: conservatively unsafe
@@ -327,6 +328,7 @@ internal sealed partial class IrBuilder
         Paren p => p with { Inner = RewriteMallocExpr(p.Inner, ctx) },
         VaArgGet va => va with { Ap = RewriteMallocExpr(va.Ap, ctx) },
         StructInit si => si with { Members = si.Members.Select(m => m with { Value = RewriteMallocExpr(m.Value, ctx) }).ToList() },
+        ArrayValue av => av with { Elems = av.Elems.Select(x => RewriteMallocExpr(x, ctx)).ToList() },
         _ => e,
     };
 

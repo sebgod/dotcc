@@ -267,8 +267,52 @@ internal sealed class CSharpBackend
             sb.Append("    public override bool Equals(object o) => o is ").Append(t.Name).Append(" other && this == other;\n");
             sb.Append("    public override int GetHashCode() => 0;\n");
         }
+        if (_arrayInitTypes.Contains(t.Name)) { sb.Append(ArrayMemberInitHelper(t)); }
         sb.Append("}\n\n");
         return wrappers.Append(sb).ToString();
+    }
+
+    /// <summary>The name of the synthesized helper that initializes a struct's
+    /// array members (see <see cref="ArrayMemberInitHelper"/>). Double-underscore:
+    /// reserved in C, so no user member can collide.</summary>
+    private const string ArrayInitHelper = "__dotcc_init";
+
+    /// <summary>The struct types some aggregate initializer gave array-member contents
+    /// — the ones that get an init helper. Filled while rendering code (functions and
+    /// globals render before the type declarations), so a struct nobody initializes
+    /// that way carries no helper.</summary>
+    private readonly HashSet<string> _arrayInitTypes = new(StringComparer.Ordinal);
+
+    /// <summary>For a struct/union with array members, a static helper that copies
+    /// each array member's leading elements from a <c>ReadOnlySpan</c> into a copy of
+    /// the object-initialized value and returns it. An array member is inline storage
+    /// (a <c>fixed</c> buffer or an <c>[InlineArray]</c>), which a C# object initializer
+    /// can't assign, so an aggregate initializer that gives one contents renders as
+    /// <c>S.__dotcc_init(new S { … }, a: [1, 2])</c> — still an expression, so it works
+    /// in every initializer position (locals, static fields, nested aggregates, array
+    /// elements). An omitted span is empty: the member keeps its zero fill. A pointer or
+    /// function-pointer element travels as <c>nint</c> (a pointer can't be a span's type
+    /// argument).</summary>
+    private string ArrayMemberInitHelper(StructTypeDef t)
+    {
+        var arrays = t.Fields.Where(f => !f.IsBitField && f.Type.Unqualified is CType.Array).ToList();
+        if (arrays.Count == 0) { return ""; }
+        var ps = new List<string>();
+        var body = new StringBuilder();
+        foreach (var f in arrays)
+        {
+            var arr = (CType.Array)f.Type.Unqualified;
+            var elemCs = Cs(arr.FlatElement);
+            var fid = DotCC.EmitHelpers.Id(f.Name);
+            var viaNint = IsPointerType(arr.FlatElement);
+            ps.Add($"System.ReadOnlySpan<{(viaNint ? "nint" : elemCs)}> {fid} = default");
+            var src = viaNint ? $"({elemCs}){fid}[__i]" : $"{fid}[__i]";
+            // A fixed buffer indexes directly; an [InlineArray] writes through its element
+            // pointer (the same decay the Member access uses).
+            var dst = IsFixedBufferType(elemCs) ? $"__v.{fid}[__i]" : $"(({elemCs}*)&__v.{fid})[__i]";
+            body.Append($"        for (var __i = 0; __i < {fid}.Length; __i++) {{ {dst} = {src}; }}\n");
+        }
+        return $"\n    public static {t.Name} {ArrayInitHelper}({t.Name} __v, {string.Join(", ", ps)})\n    {{\n{body}        return __v;\n    }}\n";
     }
 
     /// <summary>Render a C enum as a real C# <c>enum Name : underlying { … }</c>.
@@ -1997,6 +2041,20 @@ internal sealed class CSharpBackend
                         $"zig zero-length array field `{m.Field}` has no storage in the emitted C#; reading it (a flexible "
                         + "array's address) is not supported yet");
                 }
+                // An ARRAY member of an rvalue struct (`(struct S){…}.arr[i]`, `f().arr`) is
+                // inline storage with no address — a fixed buffer or [InlineArray] of an
+                // rvalue can't be indexed or decayed (CS1666/CS1612). Materialize the rvalue
+                // into a block-local temp first (C's automatic storage for the unnamed
+                // object), as `&(T){…}` does.
+                if (!m.Arrow && m.Type.Unqualified is CType.Array tempArr && !m.Base.IsLValue && _canHoist)
+                {
+                    var temp = $"__cl{_clCounter++}";
+                    _pending.Add($"{Cs(m.Base.Type)} {temp} = {Expr(m.Base)}");
+                    var tdot = $"{temp}.{DotCC.EmitHelpers.Id(m.Field)}";
+                    return IsFixedBufferType(Cs(tempArr.FlatElement))
+                        ? QualifiedRead(m, tdot, PPostfix)
+                        : ($"({Cs(m.Type)})&{tdot}", PUnary);
+                }
                 var dot = $"{Sub(m.Base, PPostfix)}{(m.Arrow ? "->" : ".")}{DotCC.EmitHelpers.Id(m.Field)}";
                 // A non-primitive array member is stored as an [InlineArray]; its
                 // access decays to the element pointer `(T*)&field` (C#'s InlineArray
@@ -2004,7 +2062,11 @@ internal sealed class CSharpBackend
                 // restoring both over-indexing and array→pointer decay.
                 if (m.Type.Unqualified is CType.Array arr && !IsFixedBufferType(Cs(arr.FlatElement)))
                 {
-                    return ($"({Cs(m.Type)})&{dot}", PUnary);
+                    // Rooted at a global / static local — a moveable C# static field —
+                    // the address goes through Unsafe.AsPointer (as `&global` does).
+                    return RootsAtGlobal(m)
+                        ? ($"({Cs(m.Type)})System.Runtime.CompilerServices.Unsafe.AsPointer(ref {BareLValue(m)})", PUnary)
+                        : ($"({Cs(m.Type)})&{dot}", PUnary);
                 }
                 // A primitive array member of a GLOBAL (a C# static field, moveable) is a fixed buffer C# will not decay to
                 // a pointer outside a `fixed` statement (CS1666; std.MultiArrayList's `for (sizes.bytes, sizes.fields)` over
@@ -2628,10 +2690,32 @@ internal sealed class CSharpBackend
         {
             var m = si.Members[i];
             if (m.FieldType.Unqualified is CType.VoidType) { continue; }   // a `void` field has no storage (see the layout)
+            if (m.Value is ArrayValue) { continue; }   // an array member goes through the init helper below
             if (written++ > 0) { sb.Append(", "); }
             sb.Append(DotCC.EmitHelpers.Id(m.Name)).Append(" = ").Append(Coerced(m.Value, m.FieldType));
         }
-        return sb.Append(" }").ToString();
+        var obj = sb.Append(" }").ToString();
+        // Array members can't be assigned in an object initializer — route their
+        // contents through the struct's init helper (see ArrayMemberInitHelper).
+        var arrays = si.Members.Where(m => m.Value is ArrayValue).ToList();
+        if (arrays.Count == 0) { return obj; }
+        if (si.Type.Unqualified is CType.Named named) { _arrayInitTypes.Add(named.Name); }
+        var spans = arrays.Select(m =>
+        {
+            var av = (ArrayValue)m.Value;
+            return $"{DotCC.EmitHelpers.Id(m.Name)}: [{string.Join(", ", av.Elems.Select(e => ArrayMemberElem(e, av.Element)))}]";
+        });
+        return $"{Cs(si.Type)}.{ArrayInitHelper}({obj}, {string.Join(", ", spans)})";
+    }
+
+    /// <summary>One element of an array member's init span — coerced to the element
+    /// type, or carried as <c>nint</c> for a pointer / function-pointer element.</summary>
+    private string ArrayMemberElem(CExpr e, CType elem)
+    {
+        if (!IsPointerType(elem)) { return Coerced(e, elem); }
+        // Through the element's own pointer type first: `&fn` has no type until it
+        // meets a function-pointer target (CS8812).
+        return e is LitInt { Value: 0 } ? "0" : $"(nint)({Cs(elem)})({Coerced(e, elem)})";
     }
 
     // ---- comma operator --------------------------------------------------
