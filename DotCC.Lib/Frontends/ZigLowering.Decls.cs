@@ -2969,6 +2969,14 @@ internal sealed partial class ZigLowering
                                  && LowerExpr(bargs[0]) is SliceNew { Ptr: var arrayPtr, Len: var arrayLen }
                                  && _ir.ConstEval(arrayLen) is not null:
                 return new Cast(toOne, arrayPtr) { Type = toOne };
+            // The same array pointer bound to a local first (XxHash3's `const last_block = input[…][0..@sizeOf(Block)];`
+            // then `@ptrCast(last_block)`, task #180): dotcc holds it as a slice, whose pointer is the one cast.
+            case "@ptrCast" when sink?.Unqualified is CType.Pointer toOnePtr && bargs.Count == 1
+                                 && LowerExpr(bargs[0]) is { Type.Unqualified: CType.Slice heldSlice } heldExpr && IsPurePath(heldExpr):
+            {
+                var heldPtr = new Member(heldExpr, "Ptr", false) { Type = new CType.Pointer(heldSlice.Element) };
+                return new Cast(toOnePtr, heldPtr) { Type = toOnePtr };
+            }
             // `const a_bytes: []u8 = @ptrCast(a);` with `a: *T` (std.mem.swap): a single item viewed as a slice of
             // the sink's element type, `@sizeOf(T) / @sizeOf(elem)` elements long.
             case "@ptrCast" when sink?.Unqualified is CType.Slice castSlice && bargs.Count == 1

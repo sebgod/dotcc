@@ -852,6 +852,25 @@ internal sealed partial class ZigLowering
             _comptimeUnionPayload = unionPayload;
             return true;
         }
+        // A method of a comptime aggregate returning an enum (`builtin.cpu.arch.endian()`, read through a module-level alias
+        // such as `native_endian`; std.hash.XxHash3's `swap` asks `native_endian == .big`, task #180): the interpreter runs the
+        // method, and its value maps back to the member, so the question folds and the untaken arm is never lowered.
+        if (expr.Content is Zig.CallArgs or Zig.CallNoArgs && IsRootedAtComptimeAggregate(expr))
+        {
+            CExpr? called = null;
+            try
+            {
+                using (EnterThrowawayHoist()) { called = LowerExpr(expr); }
+            }
+            catch (IrUnsupportedException) { }
+            if (called?.Type.Unqualified is CType.Enum calledEnum && _ir.EvalComptimeValue(called) is IrModule.CtInt { Value: var calledValue }
+                && _enumMembers.TryGetValue(calledEnum.Name, out var calledMembers)
+                && calledMembers.FirstOrDefault(m => (System.Int128)m.Value.ConstValue == calledValue).Key is { } calledMember)
+            {
+                tag = calledMember;
+                return true;
+            }
+        }
         return false;
     }
 

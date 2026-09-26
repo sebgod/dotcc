@@ -7866,6 +7866,19 @@ public sealed class ZigOracleTests
             "    @prefetch(@as([*]const u8, &buf) + 2, .{});\n" +
             "    return @truncate(s[0] * 1000 + s[1] * 100 + s[2] * 10 + s[3] + t[0] + t[3]);\n" +
             "}\n", 191, "" },
+        // Task #180 (std.hash.XxHash3's last block): `@ptrCast` of a local holding an array pointer cut from a slice.
+        new object[] { "ptr_cast_held_array_pointer",
+            "const V = @Vector(4, u32);\n" +
+            "fn last(input: []const u8) u32 {\n" +
+            "    const block = input[input.len - @sizeOf(V) ..][0..@sizeOf(V)];\n" +
+            "    const p: *align(1) const V = @ptrCast(block);\n" +
+            "    return p.*[1] >> 24;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf: [40]u8 = undefined;\n" +
+            "    for (&buf, 0..) |*b, i| b.* = @truncate(i * 3);\n" +
+            "    return @truncate(last(buf[0..]) + last(buf[0..30]));\n" +
+            "}\n", 156, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -9386,6 +9399,39 @@ public sealed class ZigOracleTests
             "    return @truncate((a ^ b ^ c) >> 5);\n" +
             "}\n", 34);
 
+    // Task #180: std.hash.XxHash3 from real std past the short-input paths: hashLong over 300 bytes of runtime data (stripes,
+    // `@ptrCast` of the last block, the comptime-folded `native_endian` swap), and the 17 / 200 byte paths over it too.
+    [Fact]
+    public void Dotcc_matches_zig_std_hash_xxhash3_long() =>
+        MatchesZigWithRealStd("hash_xxhash3_long",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf: [300]u8 = undefined;\n" +
+            "    for (&buf, 0..) |*p, i| p.* = @truncate(i *% 31 +% 7);\n" +
+            "    const a = std.hash.XxHash3.hash(5, &buf);\n" +
+            "    const b = std.hash.XxHash3.hash(0, buf[0..17]);\n" +
+            "    const c = std.hash.XxHash3.hash(9, buf[0..200]);\n" +
+            "    return @truncate(a ^ (b >> 8) ^ (c >> 16));\n" +
+            "}\n", 220);
+
+    // Task #180: the streaming std.hash.XxHash3 (init / update / final) over 300 bytes split across two updates, a short
+    // stream that never fills a block, and the one-shot hash of the same bytes.
+    [Fact]
+    public void Dotcc_matches_zig_std_hash_xxhash3_streaming() =>
+        MatchesZigWithRealStd("hash_xxhash3_streaming",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf: [300]u8 = undefined;\n" +
+            "    for (&buf, 0..) |*p, i| p.* = @truncate(i *% 13 +% 1);\n" +
+            "    var h = std.hash.XxHash3.init(7);\n" +
+            "    h.update(buf[0..100]);\n" +
+            "    h.update(buf[100..300]);\n" +
+            "    const s = h.final();\n" +
+            "    var g = std.hash.XxHash3.init(7);\n" +
+            "    g.update(buf[0..20]);\n" +
+            "    return @truncate(s ^ (g.final() >> 24) ^ (std.hash.XxHash3.hash(7, &buf) >> 40));\n" +
+            "}\n", 124);
+
     // Task #148: std.math.rotr / rotl from real std over a `@Vector(4, u32)` (Blake3's SIMD rounds rotate this way).
     [Fact]
     public void Dotcc_matches_zig_std_math_rotr_vector() =>
@@ -10418,6 +10464,66 @@ public sealed class ZigOracleTests
             dotccExit.ShouldBe(zigExit, "dotcc's builtin.cpu.arch diverges from real zig (exit code)");
             dotccExit.ShouldBe(42, "builtin.cpu.arch.endian did not produce the expected result");
             Norm(dotccStdout).ShouldBe(Norm(zigStdout), "dotcc's builtin.cpu.arch diverges from real zig (stdout)");
+        }
+        finally
+        {
+            try { Directory.Delete(workDir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    /// <summary>Task #180 (std.hash.XxHash3's <c>swap</c>): <c>native_endian == .big</c> over a module-level
+    /// <c>const native_endian = builtin.cpu.arch.endian();</c> is answered at compile time, so the <c>@byteSwap</c> arm is
+    /// never lowered. Over a vector it had been <c>ZigMath.ByteSwap&lt;Vector128&lt;uint&gt;&gt;</c>, which C# rejects
+    /// (CS0315). Needs the real std: the synthetic builtin's <c>cpu.arch</c> is a <c>std.Target.Cpu.Arch</c>.</summary>
+    [Fact]
+    public void Dotcc_folds_a_native_endian_question_in_a_module()
+    {
+        if (!ZigRunRequested)
+        {
+            Assert.Skip($"Zig oracle is opt-in. Set {RunZigEnv}=1 to run the native_endian differential.");
+        }
+        if (!ZigOracle.IsAvailable)
+        {
+            Assert.Skip($"{RunZigEnv} requested but no `zig` is on PATH on this host.");
+        }
+        if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOTCC_ZIG_LIB_DIR")))
+        {
+            Assert.Skip("DOTCC_ZIG_LIB_DIR must point at the zig lib dir so dotcc navigates the real std.Target source.");
+        }
+
+        const string program =
+            "const m = @import(\"m.zig\");\n" +
+            "const V = @Vector(4, u32);\n" +
+            "pub fn main() u8 {\n" +
+            "    var v = V{ 1, 2, 3, 4 };\n" +
+            "    _ = &v;\n" +
+            "    const w = m.swap(v);\n" +
+            "    const n = m.swap(@as(u32, 7));\n" +
+            "    return @truncate(w[1] + n);\n" +
+            "}\n";
+        const string module =
+            "const builtin = @import(\"builtin\");\n" +
+            "const native_endian = builtin.cpu.arch.endian();\n" +
+            "pub inline fn swap(x: anytype) @TypeOf(x) {\n" +
+            "    return if (native_endian == .big) @byteSwap(x) else x;\n" +
+            "}\n";
+
+        var workDir = Path.Combine(Path.GetTempPath(), $"dotcc-zig-nativeendian-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(workDir);
+        var mainPath = Path.Combine(workDir, "main.zig");
+        File.WriteAllText(mainPath, program);
+        File.WriteAllText(Path.Combine(workDir, "m.zig"), module);
+        try
+        {
+            var emitted = Compiler.EmitCSharp(new[] { mainPath }, emit: EmitMode.Csproj);
+            emitted.ShouldMatch(@"m__swap__v4_u32\(System\.Runtime\.Intrinsics\.Vector128<uint> x\)\s*\{\s*return x;\s*\}");
+            emitted.ShouldMatch(@"m__swap__u32\(uint x\)\s*\{\s*return x;\s*\}");
+            var (dotccStdout, dotccExit) = FixtureRunner.CompileAndRunCapturingExit(emitted, Array.Empty<string>());
+            var (zigStdout, zigExit) = ZigOracle.CompileAndRun(mainPath, workDir);
+
+            dotccExit.ShouldBe(zigExit, "dotcc's native_endian swap diverges from real zig (exit code)");
+            dotccExit.ShouldBe(9, "the native_endian swap did not produce the expected result");
+            Norm(dotccStdout).ShouldBe(Norm(zigStdout), "dotcc's native_endian swap diverges from real zig (stdout)");
         }
         finally
         {

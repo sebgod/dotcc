@@ -2681,7 +2681,8 @@ internal sealed partial class ZigLowering
     /// width: dotcc widens <c>u21</c> and <c>u32</c> to the same C# <c>uint</c>, but they are different
     /// types in zig, and <c>T == u32</c> must say so.</summary>
     /// <summary>True when an expression is a member access or method call whose innermost base names a comptime
-    /// aggregate the interpreter holds (<see cref="IrModule.ComptimeGlobals"/>): <c>cpu.has(…)</c>, <c>cpu.arch</c>.</summary>
+    /// aggregate the interpreter holds (<see cref="IrModule.ComptimeGlobals"/>): <c>cpu.has(…)</c>, <c>cpu.arch</c>; or the
+    /// synthetic <c>builtin</c> module itself (<c>builtin.cpu.arch.endian()</c>).</summary>
     private bool IsRootedAtComptimeAggregate(Item expr)
     {
         var cur = expr;
@@ -2694,7 +2695,11 @@ internal sealed partial class ZigLowering
                 case Zig.CallArgs ca: cur = ca.Arg0; continue;
                 case Zig.CallNoArgs cn: cur = cn.Arg0; continue;
                 case Zig.Ident id:
-                    return _symbols.Resolve(Tok(id.Arg0)) is { } sym && _ir.ComptimeGlobals.ContainsKey(sym);
+                    return _symbols.Resolve(Tok(id.Arg0)) is { } sym && _ir.ComptimeGlobals.ContainsKey(sym)
+                        // `builtin.cpu.arch.endian()` through `const builtin = @import("builtin");` (task #180): the compiler-provided
+                        // module is comptime by definition, so a question rooted at it is the interpreter's to answer.
+                        || _symbols.Resolve(Tok(id.Arg0)) is null && _importSpecs.TryGetValue(Tok(id.Arg0), out var importSpec)
+                           && importSpec == "builtin";
                 default:
                     return false;
             }

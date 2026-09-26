@@ -5834,6 +5834,27 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_ptr_cast_of_a_local_holding_an_array_pointer_casts_its_pointer()
+    {
+        var cs = EmitZig("""
+            const V = @Vector(4, u32);
+            fn last(input: []const u8) u32 {
+                const block = input[input.len - @sizeOf(V) ..][0..@sizeOf(V)];
+                const p: *align(1) const V = @ptrCast(block);
+                return p.*[1] >> 24;
+            }
+            pub fn main() u8 {
+                var buf: [40]u8 = undefined;
+                for (&buf, 0..) |*b, i| b.* = @truncate(i * 3);
+                return @truncate(last(buf[0..]) + last(buf[0..30]));
+            }
+            """);
+        // Task #180 (XxHash3's `const last_block = input[…][0..@sizeOf(Block)];` then `@ptrCast(last_block)`): dotcc holds
+        // the `*const [16]u8` as a slice, and the cast is of its pointer (it had been of the slice, CS0030). zig returns 156.
+        cs.ShouldContain("System.Runtime.Intrinsics.Vector128<uint>* p = (System.Runtime.Intrinsics.Vector128<uint>*)block.Ptr;");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""
