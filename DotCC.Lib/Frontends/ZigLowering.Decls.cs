@@ -2778,6 +2778,14 @@ internal sealed partial class ZigLowering
                     throw new IrUnsupportedException("zig `@abs` supports an integer or a float operand");
                 }
                 if (!absPrim.Signed) { return absArg; }   // @abs of an unsigned int is the identity
+                // A compile-time-known operand folds to its magnitude (std.math.IntFittingRange's `@abs(from)` over a
+                // comptime_int, task #143), so a switch over it still folds; a comptime_int stays one.
+                if (_ir.ConstEval(absArg) is { } absConst && absConst != long.MinValue)
+                {
+                    var magnitude = System.Math.Abs(absConst);
+                    var magnitudeType = absPrim.IsComptimeInt ? absArg.Type : UnsignedPeerInt(absArg.Type);
+                    return new LitInt(magnitude.ToString(CultureInfo.InvariantCulture), magnitude) { Type = magnitudeType };
+                }
                 var absU = UnsignedPeerInt(absArg.Type);
                 return new Cast(absU, new Call("ZigMath.Abs128", new List<CExpr> { absArg }) { Type = CType.UInt128 }) { Type = absU };
             }
@@ -3229,6 +3237,17 @@ internal sealed partial class ZigLowering
                 "return, assignment, call argument, or nested inside `@as(T, …)`");
         }
         var operand = LowerExpr(bargs[0]);
+        // `@intFromFloat` needs a float operand and `@floatFromInt` an integer one: zig rejects the other kind
+        // ("expected float type, found 'i2'", task #143) where a C# cast would silently convert it.
+        if (name == "@intFromFloat" && operand.Type.Unqualified is CType.Prim { Integer: true })
+        {
+            throw new IrUnsupportedException($"zig `@intFromFloat`: expected float type, found '{operand.Type.Describe()}'");
+        }
+        if (name == "@floatFromInt" && operand.Type.Unqualified is CType.Prim { Integer: false } floatOperand
+            && (floatOperand == CType.Double || floatOperand == CType.Float))
+        {
+            throw new IrUnsupportedException($"zig `@floatFromInt`: expected integer type, found '{operand.Type.Describe()}'");
+        }
         // `@enumFromInt(f_value)` of a 128-bit operand (a comptime_int element, std.enums): C# converts an Int128 to an
         // enum only through the enum's underlying integer.
         if (name == "@enumFromInt" && sink.Unqualified is CType.Enum { Underlying: var enumBase }

@@ -4036,6 +4036,47 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_capture_switch_in_a_sub_expression_folds_over_a_comptime_abs()
+    {
+        var cs = EmitZig("""
+            fn log2(comptime x: comptime_int) comptime_int {
+                var n: comptime_int = 0;
+                var v = x;
+                while (v > 1) : (v >>= 1) n += 1;
+                return n;
+            }
+            fn bitsFor(comptime from: comptime_int, comptime to: comptime_int) u16 {
+                return @as(u16, @intFromBool(from < 0)) + switch (if (from < 0) @max(@abs(from) - 1, to) else to) {
+                    0 => 0,
+                    else => |pos_max| 1 + log2(pos_max),
+                };
+            }
+            pub fn main() u8 {
+                return @intCast(bitsFor(-1, 1) * 10 + bitsFor(0, 9) + bitsFor(0, 0) * 100);
+            }
+            """);
+        // Task #143 (std.math.IntFittingRange, behind std.math.sign): `@abs` of a comptime_int folds to its magnitude, so
+        // the switch over `if (from < 0) @max(@abs(from) - 1, to) else to` folds and binds its `|pos_max|` capture.
+        // zig returns 24.
+        cs.ShouldContain("return (ushort)(unchecked((ushort)unchecked((int)((CBool)((System.Int128)0UL < 0)))) + (1 + (System.Int128)3UL));");
+    }
+
+    [Fact]
+    public void Int_from_float_of_an_integer_is_refused()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig("""
+            pub fn main() u8 {
+                var x: i32 = 5;
+                _ = &x;
+                const y: i32 = @intFromFloat(x);
+                return @intCast(y);
+            }
+            """));
+        // Task #143: zig says "expected float type, found 'i32'" where a C# cast would have converted silently.
+        ex.Message.ShouldContain("expected float type");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

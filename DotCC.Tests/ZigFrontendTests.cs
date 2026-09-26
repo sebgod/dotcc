@@ -522,12 +522,17 @@ public sealed class ZigFrontendTests
     public void Lowers_byteSwap_and_abs_builtins()
     {
         // @byteSwap → ZigMath.ByteSwap<T> (same type); @abs → ZigMath.Abs128 cast to the operand's
-        // UNSIGNED peer (Zig's `@abs(iN)` → `uN`), so `@abs(i8)` → `(byte)…`, `@abs(i32)` → `(uint)…`.
+        // UNSIGNED peer (Zig's `@abs(iN)` → `uN`), so `@abs(i8)` → `(byte)…`, `@abs(i32)` → `(uint)…`. The operands are
+        // runtime values: a compile-time-known one folds to its magnitude (task #143).
         var cs = EmitZig(
             "pub fn main() u8 {\n" +
             "    const bs: u16 = @byteSwap(@as(u16, 0x0102));\n" +
-            "    const a1: u32 = @abs(@as(i8, -5));\n" +
-            "    const a2: u32 = @abs(@as(i32, -100));\n" +
+            "    var n8: i8 = -5;\n" +
+            "    _ = &n8;\n" +
+            "    var n32: i32 = -100;\n" +
+            "    _ = &n32;\n" +
+            "    const a1: u32 = @abs(n8);\n" +
+            "    const a2: u32 = @abs(n32);\n" +
             "    return @intCast((bs & 0xFF) + a1 + a2 - 100);\n" +
             "}\n");
         cs.ShouldContain("ZigMath.ByteSwap");

@@ -6907,6 +6907,23 @@ public sealed class ZigOracleTests
             "    const total = h.chunk.buf.len + h.chunk.buf[3] + sum2(p) + sum2(p + 1) + head.len + tail.len * 2 + a[0] * 3;\n" +
             "    return @intCast(total);\n" +
             "}\n", 42, "" },
+        // Task #143: a capture switch in a sub-expression over `@abs` of a comptime_int (std.math.IntFittingRange's shape).
+        new object[] { "comptime_abs_capture_switch",
+            "fn log2(comptime x: comptime_int) comptime_int {\n" +
+            "    var n: comptime_int = 0;\n" +
+            "    var v = x;\n" +
+            "    while (v > 1) : (v >>= 1) n += 1;\n" +
+            "    return n;\n" +
+            "}\n" +
+            "fn bitsFor(comptime from: comptime_int, comptime to: comptime_int) u16 {\n" +
+            "    return @as(u16, @intFromBool(from < 0)) + switch (if (from < 0) @max(@abs(from) - 1, to) else to) {\n" +
+            "        0 => 0,\n" +
+            "        else => |pos_max| 1 + log2(pos_max),\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    return @intCast(bitsFor(-1, 1) * 10 + bitsFor(0, 9) + bitsFor(0, 0) * 100);\n" +
+            "}\n", 24, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -8191,6 +8208,19 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // Task #143: std.math.sign from real std over i32, i8, u16 and f64.
+    [Fact]
+    public void Dotcc_matches_zig_std_math_sign() =>
+        MatchesZigWithRealStd("math_sign",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = std.math.sign(@as(i32, -7));\n" +
+            "    const b = std.math.sign(@as(i8, 5));\n" +
+            "    const c = std.math.sign(@as(u16, 0));\n" +
+            "    const d = std.math.sign(@as(f64, -2.5));\n" +
+            "    return @intCast(@as(i32, a) + 5 + @as(i32, b) * 10 + @as(i32, c) * 100 + @as(i32, d) * 3 + 20);\n" +
+            "}\n", 31);
 
     // Task #116: a comptime block building a table from `@typeInfo(T).@"enum".field_names` (std.meta.stringToEnum's shape).
     // Local-only: CI's pinned zig 0.16.0 has no `field_names` on builtin.Type.Enum, so it cannot be a CI oracle program.
