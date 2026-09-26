@@ -5322,6 +5322,53 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_method_named_create_on_a_containers_type_const_is_the_types_function()
+    {
+        var cs = EmitZig("""
+            const ns = struct {
+                pub const HB = H(u8);
+            };
+            fn H(comptime T: type) type {
+                return struct {
+                    pub fn create(out: *T, x: T) void {
+                        out.* = x + 1;
+                    }
+                };
+            }
+            pub fn main() u8 {
+                var o: u8 = 0;
+                ns.HB.create(&o, 4);
+                return o;
+            }
+            """);
+        // Task #168 (std.crypto.auth.hmac's `sha2.HmacSha256.create(&out, msg, key)` with `pub const HmacSha256 = Hmac(…);`
+        // in a namespace struct): a dotted base naming a TYPE (a container's type const, a nested container, a module's
+        // type) is not an allocator, so `create` is that type's function. zig returns 5.
+        cs.ShouldContain("H__u8_create(&o, 4);");
+    }
+
+    [Fact]
+    public void A_comptime_int_slice_bound_is_a_usize()
+    {
+        var cs = EmitZig("""
+            fn H(comptime bits: comptime_int) type {
+                return struct {
+                    pub const len = bits / 8;
+                };
+            }
+            pub fn main() u8 {
+                var scratch: [8]u8 = .{ 1, 2, 3, 4, 5, 6, 7, 8 };
+                const tail = scratch[H(32).len..];
+                @memset(scratch[0..H(32).len], 0);
+                return tail[0] + @as(u8, @intCast(tail.len)) + scratch[0];
+            }
+            """);
+        // Task #168 (std.crypto.hmac's `scratch[Hash.digest_length..]`): a `comptime_int` bound rides the 128-bit carrier,
+        // which C# cannot add to a pointer (CS0019, a bad emit); it is a usize, as zig coerces it. zig returns 9.
+        cs.ShouldContain("new Slice<byte>(scratch + unchecked((ulong)((System.Int128)32UL / 8))");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

@@ -1843,6 +1843,11 @@ internal sealed partial class ZigLowering
             // So is one of a type a type-returning call builds (std.crypto.auth.siphash's `SipHash64(2, 4).create(&out,
             // msg, &key)`, task #159); the reification is memoized, and any other call base answers no.
             && !(fld.Arg0.Content is Zig.CallArgs or Zig.CallNoArgs && TryEvalTypeReturningCall(fld.Arg0, out _))
+            // And so is one of a type a dotted path names: a container's type const (std.crypto.auth.hmac's
+            // `sha2.HmacSha256.create(&out, msg, key)`, with `pub const HmacSha256 = Hmac(…);`, task #168), a nested
+            // container, or a type another module declares. Any other dotted base answers no.
+            && !(fld.Arg0.Content is Zig.Field && !IsCuratedStdPath(fld.Arg0)
+                 && (TryResolveQualifiedNestedType(fld.Arg0) is not null || TryResolveModuleNestedType(fld.Arg0) is not null))
             && TryLowerAllocatorMethod(fld, methodName, argItems, out var allocExpr))
         {
             return allocExpr;

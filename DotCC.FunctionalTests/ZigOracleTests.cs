@@ -7527,6 +7527,36 @@ public sealed class ZigOracleTests
             "pub fn main() u8 {\n" +
             "    return f(7);\n" +
             "}\n", 40, "" },
+        // Task #168: `create` on a namespace struct's type const (std.crypto.hmac's `sha2.HmacSha256`), and a comptime_int
+        // slice bound.
+        new object[] { "namespace_type_const_create",
+            "const ns = struct {\n" +
+            "    pub const HB = H(u8);\n" +
+            "};\n" +
+            "fn H(comptime T: type) type {\n" +
+            "    return struct {\n" +
+            "        pub fn create(out: *T, x: T) void {\n" +
+            "            out.* = x + 1;\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var o: u8 = 0;\n" +
+            "    ns.HB.create(&o, 4);\n" +
+            "    return o;\n" +
+            "}\n", 5, "" },
+        new object[] { "comptime_int_slice_bound",
+            "fn H(comptime bits: comptime_int) type {\n" +
+            "    return struct {\n" +
+            "        pub const len = bits / 8;\n" +
+            "    };\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var scratch: [8]u8 = .{ 1, 2, 3, 4, 5, 6, 7, 8 };\n" +
+            "    const tail = scratch[H(32).len..];\n" +
+            "    @memset(scratch[0..H(32).len], 0);\n" +
+            "    return tail[0] + @as(u8, @intCast(tail.len)) + scratch[0];\n" +
+            "}\n", 9, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -8950,6 +8980,17 @@ public sealed class ZigOracleTests
             "pub fn main() u8 {\n" +
             "    return @intCast(f(P));\n" +
             "}\n", 52);
+
+    // Task #168: std.crypto.auth.hmac.sha2.HmacSha256.create from real std.
+    [Fact]
+    public void Dotcc_matches_zig_std_crypto_hmac_sha256() =>
+        MatchesZigWithRealStd("crypto_hmac_sha256",
+            "const std = @import(\"std\");\n" +
+            "pub fn main() u8 {\n" +
+            "    var out: [32]u8 = undefined;\n" +
+            "    std.crypto.auth.hmac.sha2.HmacSha256.create(&out, \"msg\", \"key\");\n" +
+            "    return out[0] ^ out[31];\n" +
+            "}\n", 5);
 
     // Task #148: std.math.rotr / rotl from real std over a `@Vector(4, u32)` (Blake3's SIMD rounds rotate this way).
     [Fact]

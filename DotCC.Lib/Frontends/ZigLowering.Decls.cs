@@ -2451,8 +2451,17 @@ internal sealed partial class ZigLowering
     /// through <c>.Ptr</c>), a bare pointer (no length — open-ended is rejected, as Zig does),
     /// or an array (decays to its element pointer); the element type + const-ness ride into the
     /// resulting <c>[]T</c> / <c>[]const T</c>.</summary>
+    /// <summary>A slice bound on the 128-bit comptime carrier (<c>Int128</c>, a <c>comptime_int</c>) as a <c>usize</c>; any
+    /// other bound unchanged.</summary>
+    private static CExpr AsUsizeBound(CExpr bound)
+        => bound.Type?.Unqualified is CType.Prim { Bytes: 16 } ? new Cast(CType.ULong, bound) { Type = CType.ULong } : bound;
+
     private CExpr BuildSlice(CExpr baseExpr, CExpr lo, CExpr? hi)
     {
+        // A bound on the 128-bit comptime carrier (std.crypto.hmac's `scratch[Hash.digest_length..]`, a `comptime_int` const,
+        // task #168) is a usize index, as zig coerces it: an `Int128` neither adds to a pointer nor subtracts from a length.
+        lo = AsUsizeBound(lo);
+        if (hi is not null) { hi = AsUsizeBound(hi); }
         CExpr basePtr;
         CType element;
         CExpr? sourceLen;   // the known source length, used for an open-ended high bound
