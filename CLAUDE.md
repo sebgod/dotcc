@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | [`docs/ZIG-SUPPORT.md`](docs/ZIG-SUPPORT.md) | Zig front-end coverage + curated `std` surface + the three-tier out-of-scope reasoning. Same update rule. |
 | [`docs/architecture.md`](docs/architecture.md) | The full architecture reference: pipeline stages, every class `DotCC.Lib` contributes, the generated grammar surface, the code-generation strategy table, sibling-or-NuGet LALR.CC wiring, grammar conventions. |
 | [`docs/cli.md`](docs/cli.md) | The full clang-shaped flag reference (`--emit` modes, `-l`/`-L` import mode, `-std=`/`-pedantic`, warning flags, `-fsanitize=address`), predefined macros, `-shared` emit shape. |
-| [`docs/testing.md`](docs/testing.md) | Test-suite anatomy + all opt-in differential oracles (MSVC / gcc-in-WSL / zig / native shared-lib) with their env vars and baseline-regen rules. |
+| [`docs/testing.md`](docs/testing.md) | Test-suite anatomy + all opt-in differential oracles (MSVC / gcc-in-WSL / zig / native shared-lib / CPython) with their env vars and baseline-regen rules. |
 | [`docs/FRONTEND-IDEAS.md`](docs/FRONTEND-IDEAS.md) | Design rationale for growing new front-ends on the shared IR. |
 | `docs/plans/` | Campaign plans — **[`summary.md`](docs/plans/summary.md) is the status index** (one row per plan: where it stands + what's left; `/plan-status` renders it, and the row is what has to be kept true): `fable-c.md` / `fable-zig.md` (exhausted), `fable-wall.md` (the completed W0–W6 generics arc), `road-to-zig-std.md` (current — compiling real zig std from source), `fable-wasm.md` (a binary-`.wasm` frontend, end-goal consuming Embedded Swift; WF0 probe done, WF1 next), `fable-web.md` (**live** — GitHub Pages site + in-browser sandbox running dotcc as wasm via Blazor + the wat backend), `import-mode.md`. **`deferred.md`** is the cross-cutting ledger of deliberate cuts still on the books (parse-only lowering gaps + deferred grammar with reasons); permanent out-of-scope stays in the SUPPORT docs. |
 
@@ -82,7 +82,7 @@ Load-bearing rules:
 
 - **Unit (`DotCC.Tests`)**: emit pins — compile inline sources, assert on the emitted string.
 - **Functional (`DotCC.FunctionalTests`)**: a fixture = a folder under `Fixtures/` with sources + `expected-stdout.txt`; dotcc → Roslyn compile in-process → invoke with console redirected → compare. Adding a fixture is just dropping a folder.
-- **Differential oracles are opt-in env-gated** (MSVC, gcc-in-WSL, zig, native shared-lib round-trip); the committed sidecar IS the cached reference output. **`Process.Start` is confined to oracle modes** — never on the always-on path.
+- **Differential oracles are opt-in env-gated** (MSVC, gcc-in-WSL, zig, native shared-lib round-trip, CPython for `<Python.h>`); the committed sidecar IS the cached reference output. **`Process.Start` is confined to oracle modes** — never on the always-on path.
 - After a `.lalr.yaml` edit, FULL-build before testing (a stale generated parse table makes a correct grammar change look broken). Run suites serially, never two `dotnet test` / build processes in parallel; the functional suite may instead run sharded across several hosts of its prebuilt exe (`Scripts/run-functional-sharded.sh`, see [`docs/testing.md`](docs/testing.md)).
 
 ## Conventions to respect
