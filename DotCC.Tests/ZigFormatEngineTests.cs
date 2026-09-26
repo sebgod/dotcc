@@ -205,7 +205,7 @@ public sealed class ZigFormatEngineTests
                 }
                 """);
             var cs = Compiler.EmitCSharp(new[] { main });
-            cs.ShouldContain("return unchecked((byte)(3 + 39));");
+            cs.ShouldContain("return (byte)(3 + 39);");
         }
         finally
         {

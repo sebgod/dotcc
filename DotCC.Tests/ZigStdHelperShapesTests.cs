@@ -284,7 +284,7 @@ public sealed class ZigStdHelperShapesTests
             }
             """);
         // The runtime builder's slice overload prints exactly `.len` bytes; no NUL is read.
-        cs.ShouldContain(".Arg(new ConstSlice<byte>(word.Ptr + 0, unchecked((ulong)(5 - 0)))).Arg(mut)");
+        cs.ShouldContain(".Arg(new ConstSlice<byte>(word.Ptr + 0, (ulong)(5 - 0))).Arg(mut)");
     }
 
     [Fact]
@@ -490,7 +490,7 @@ public sealed class ZigStdHelperShapesTests
             }
             """);
         // std.unicode.utf8Decode's `utf8Decode2(bytes[0..2].*)` (task #72): the array parameter is its element pointer.
-        cs.ShouldContain("two(new ConstSlice<byte>(s.Ptr + 0, unchecked((ulong)(2 - 0))).Ptr)");
+        cs.ShouldContain("two(new ConstSlice<byte>(s.Ptr + 0, (ulong)(2 - 0)).Ptr)");
     }
 
     [Fact]
@@ -583,7 +583,7 @@ public sealed class ZigStdHelperShapesTests
         // global is its storage pointer, and `.len` reads through a pointer to an array.
         cs.ShouldContain("byte k = 1;");
         cs.ShouldContain("byte* tables = (byte*)small;");
-        cs.ShouldContain("unchecked((byte)(byte)3UL)");
+        cs.ShouldContain("(byte)(byte)3UL");
     }
 
     [Fact]
@@ -4062,7 +4062,7 @@ public sealed class ZigStdHelperShapesTests
         // Task #143 (std.math.IntFittingRange, behind std.math.sign): `@abs` of a comptime_int folds to its magnitude, so
         // the switch over `if (from < 0) @max(@abs(from) - 1, to) else to` folds and binds its `|pos_max|` capture.
         // zig returns 24.
-        cs.ShouldContain("return (ushort)(unchecked((ushort)unchecked((int)((CBool)((System.Int128)0UL < 0)))) + (1 + (System.Int128)3UL));");
+        cs.ShouldContain("return unchecked((ushort)(unchecked((ushort)unchecked((int)((CBool)((System.Int128)0UL < 0)))) + (1 + (System.Int128)3UL)));");
     }
 
     [Fact]
@@ -4102,7 +4102,7 @@ public sealed class ZigStdHelperShapesTests
         // Task #144 (std.unicode.utf8ToUtf16LeImpl): `dest[i..][0..N].* = v;` stores the vector's lanes, `.{ a, b }` into
         // such a view lowers at the viewed array type, and a `@Vector(8, u8)` widens to the `@Vector(8, u16)` parameter.
         // zig returns 142.
-        cs.ShouldContain("ZigVec.Store(v, new Slice<ushort>(new Slice<ushort>(buf + 2, 12UL - (ulong)2).Ptr + 0, unchecked((ulong)(8 - 0))).Ptr);");
+        cs.ShouldContain("ZigVec.Store(v, new Slice<ushort>(new Slice<ushort>(buf + 2, 12UL - (ulong)2).Ptr + 0, (ulong)(8 - 0)).Ptr);");
         cs.ShouldContain("ushort w = total(ZigVec.Widen128(small, (ushort)0));");
     }
 
@@ -4584,7 +4584,7 @@ public sealed class ZigStdHelperShapesTests
         // Task #152 (std.crypto.blake3's `cvs: [][8]u32`): a `[][3]u8` is a slice of the flat element whose `.len` counts
         // rows; slicing `grid[1..3]` advances whole rows, and a `|*r|` capture is the row pointer. zig returns 132.
         cs.ShouldContain("internal static unsafe uint sumRows(ConstSlice<byte> rows)");
-        cs.ShouldContain("Slice<byte> mid = new Slice<byte>(grid + 1 * 3, unchecked((ulong)(3 - 1)));");
+        cs.ShouldContain("Slice<byte> mid = new Slice<byte>(grid + 1 * 3, (ulong)(3 - 1));");
         cs.ShouldContain("byte* r = rows.Ptr + __i * 3;\n            r[1] += (byte)(1);");
     }
 
@@ -5369,7 +5369,7 @@ public sealed class ZigStdHelperShapesTests
             """);
         // Task #168 (std.crypto.hmac's `scratch[Hash.digest_length..]`): a `comptime_int` bound rides the 128-bit carrier,
         // which C# cannot add to a pointer (CS0019, a bad emit); it is a usize, as zig coerces it. zig returns 9.
-        cs.ShouldContain("new Slice<byte>(scratch + unchecked((ulong)((System.Int128)32UL / 8))");
+        cs.ShouldContain("new Slice<byte>(scratch + (ulong)((System.Int128)32UL / 8)");
     }
 
     [Fact]

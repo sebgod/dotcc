@@ -104,7 +104,7 @@ public sealed class ZigHashMapTests
     public void Slices_arrays_and_casts_reach_valid_csharp()
     {
         var cs = EmitZig(Program);
-        cs.ShouldContain("uint r = readU32(new Slice<byte>(data + 0, unchecked((ulong)(4 - 0))).Ptr);");   // slice at a *const [4]u8
+        cs.ShouldContain("uint r = readU32(new Slice<byte>(data + 0, (ulong)(4 - 0)).Ptr);");   // slice at a *const [4]u8
         cs.ShouldContain("return System.Runtime.CompilerServices.Unsafe.ReadUnaligned<uint>(bytes);");       // @bitCast(bytes.*)
         cs.ShouldContain("return (System.UInt128)(*a) * *b;");                                              // not `(T)*a` (a product)
     }

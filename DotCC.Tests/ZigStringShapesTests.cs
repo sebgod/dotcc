@@ -184,7 +184,7 @@ public sealed class ZigStringShapesTests
     public void A_bit_cast_of_a_slice_deref_reads_through_its_data_pointer()
     {
         var cs = EmitZig(Program);
-        cs.ShouldContain("uint w = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<uint>(new ConstSlice<byte>(s.Ptr + 0, unchecked((ulong)(4 - 0))).Ptr);");
+        cs.ShouldContain("uint w = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<uint>(new ConstSlice<byte>(s.Ptr + 0, (ulong)(4 - 0)).Ptr);");
     }
 
     [Fact]

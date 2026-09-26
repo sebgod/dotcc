@@ -1356,8 +1356,9 @@ internal sealed class CSharpBackend
                 _convGate.Narrowing(s, t2, _currentFnName, value.Pos.Line);
             }
             var cast = $"({t2})({Expr(value)})";
-            // An out-of-range CONSTANT cast is CS0221 unless wrapped in unchecked.
-            if (TryConstInt(value, out var k) && !ConstFitsTarget(k, t2) || IsConstExpr(value) && HasPromotingUnary(value))
+            // An out-of-range CONSTANT cast is CS0221 unless wrapped in unchecked. As RenderCast and CoercionCast rule, a constant
+            // EXPRESSION not proven to fit is wrapped too: `unsigned char b = 250u + 10u;` is 260, C's 4, and C# rejected it.
+            if (IsConstExpr(value) && (HasPromotingUnary(value) || !ConstProvenToFit(value, t2)))
             {
                 cast = $"unchecked({cast})";
             }
@@ -1442,6 +1443,62 @@ internal sealed class CSharpBackend
         v = 0;
         return false;
     }
+
+    /// <summary>True when a constant expression's value is known and fits the C# integer type <paramref name="target"/>, so a
+    /// cast of it to that type needs no <c>unchecked</c> (C# rejects only an out-of-range CONSTANT conversion, CS0221).</summary>
+    private bool ConstProvenToFit(CExpr e, string target) =>
+        (TryConstInt(e, out var k) || TryConstIntExact(e, out k)) && ConstFitsTarget(k, target);
+
+    /// <summary>Fold an integer constant expression over <c>+ - * / % &amp; | ^</c> when every value along the way, each
+    /// operand included, fits the C type of the node computing it: then neither C nor C# wraps anywhere and both compute this
+    /// exact value, so <c>return (byte)(21 * 2);</c> stays bare. Anything not so proven (a wrap such as <c>0u - 1u</c>, a
+    /// division by zero, a shift, a non-integer node) is false, and the caller wraps the cast in <c>unchecked</c>.</summary>
+    private bool TryConstIntExact(CExpr e, out long v)
+    {
+        v = 0;
+        Int128 r;
+        switch (e)
+        {
+            case Paren p: return TryConstIntExact(p.Inner, out v);
+            case ComptimeFold { Resolved: { } resolved }: return TryConstIntExact(resolved, out v);
+            // An enum member is its value; the C# enum type has no integer range to check it against.
+            case EnumConstRef ec: v = ec.Sym.ConstValue; return true;
+            case LitInt { Value: { } lv }: r = lv; break;
+            case Unary { Op: UnOp.Plus or UnOp.Neg } u when TryConstIntExact(u.Operand, out var ov):
+                r = u.Op == UnOp.Neg ? -(Int128)ov : ov;
+                break;
+            case Cast c when TryConstIntExact(c.Operand, out var cv): r = cv; break;
+            case Binary b when TryConstIntExact(b.Left, out var l) && TryConstIntExact(b.Right, out var rv)
+                               && FitsConstType(l, b.Type) && FitsConstType(rv, b.Type):
+                switch (b.Op)
+                {
+                    case BinOp.Add: r = (Int128)l + rv; break;
+                    case BinOp.Sub: r = (Int128)l - rv; break;
+                    case BinOp.Mul: r = (Int128)l * rv; break;
+                    case BinOp.Div when rv != 0: r = (Int128)l / rv; break;
+                    case BinOp.Mod when rv != 0: r = (Int128)l % rv; break;
+                    case BinOp.BitAnd: r = (Int128)l & rv; break;
+                    case BinOp.BitOr: r = (Int128)l | rv; break;
+                    case BinOp.BitXor: r = (Int128)l ^ rv; break;
+                    default: return false;
+                }
+                break;
+            default: return false;
+        }
+        if (r < long.MinValue || r > long.MaxValue || !FitsConstType(r, e.Type)) { return false; }
+        v = (long)r;
+        return true;
+    }
+
+    /// <summary>True when <paramref name="r"/> fits the lowered C# integer type of <paramref name="t"/>: the
+    /// <see cref="ConstFitsTarget"/> ranges, plus the 128-bit carriers (zig's comptime arithmetic runs in
+    /// <c>System.Int128</c>).</summary>
+    private bool FitsConstType(Int128 r, CType t) => Cs(t) switch
+    {
+        "System.Int128" => true,
+        "System.UInt128" => r >= 0,
+        var cs => r >= long.MinValue && r <= long.MaxValue && ConstFitsTarget((long)r, cs),
+    };
 
     /// <summary>Render one <c>case</c> value. C requires an integer constant
     /// expression, but chibi spells immediates through pointer-cast macros
@@ -2329,7 +2386,7 @@ internal sealed class CSharpBackend
     private string CoercionCast(CExpr e, string to)
     {
         var text = $"({to})({Sub(e, PUnary)})";
-        return IsIntegerCs(to) && IsConstExpr(e) && (HasPromotingUnary(e) || !(TryConstInt(e, out var v) && ConstFitsTarget(v, to)))
+        return IsIntegerCs(to) && IsConstExpr(e) && (HasPromotingUnary(e) || !ConstProvenToFit(e, to))
             ? $"unchecked({text})"
             : text;
     }
@@ -2369,7 +2426,7 @@ internal sealed class CSharpBackend
         var text = $"({targetText}){operandText}";
         if (c.Target.Unqualified is CType.Prim { Integer: true } pt
             && IsConstExpr(c.Operand)
-            && (HasPromotingUnary(c.Operand) || !(TryConstInt(c.Operand, out var cv) && ConstFitsTarget(cv, Cs(pt)))))
+            && (HasPromotingUnary(c.Operand) || !ConstProvenToFit(c.Operand, Cs(pt))))
         {
             return ($"unchecked({text})", PPrimary);
         }
