@@ -985,7 +985,12 @@ internal sealed partial class ZigLowering
             // A CALL returning `[N]T` (std.mem.reverse's `const left_shuffled: [simd_size]T = reverseVector(…)`)
             // hands back a fresh copy the caller owns (ZigAlloc.CopyArrayResult), so binding it keeps zig's
             // by-value semantics, as the inferred `const t = f();` form already does.
-            // `const c: [3]u8 = a;`: another array's VALUE, so the local gets its own storage and a copy.
+            // `const c: [3]u8 = a;`: another array's VALUE, so the local gets its own storage and a copy. So is
+            // `const t: [n]Vec = vecs.*;` through a pointer to an array (std.crypto.blake3's transposeVecs, task #140).
+            if (arrInit is Unary { Op: UnOp.Deref, Operand: var derefd } && PointedArray(derefd) is ({ } pointedInit, _))
+            {
+                arrInit = pointedInit;
+            }
             if (IsArrayLvalue(arrInit) && !sentinel && arr.Count is { } copyCount)
             {
                 var csym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = arr });

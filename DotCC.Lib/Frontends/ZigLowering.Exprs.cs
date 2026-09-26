@@ -663,7 +663,7 @@ internal sealed partial class ZigLowering
                 if (EvalComptimeValue(ix.Arg0) is LitStr cstr)
                 {
                     CExpr ciExpr;
-                    using (EnterThrowawayHoist()) { ciExpr = LowerExpr(ix.Arg2); }
+                    using (EnterThrowawayHoist()) { ciExpr = LowerUsizeOperand(ix.Arg2); }
                     if (_ir.ConstEval(ciExpr) is { } ci)
                     {
                         var bytes = DotCC.EmitHelpers.StringByteValues(cstr.Segments);
@@ -677,10 +677,7 @@ internal sealed partial class ZigLowering
                 var baseExpr = LowerExpr(ix.Arg0);
                 // An index is a `usize` result location, so a cast builtin there infers it (std.base64's
                 // `encoder.alphabet_chars[@truncate(bits >> 18 & 0x3f)]`).
-                var idx = ix.Arg2.Content is Zig.BuiltinCall { Arg0: var idxCast }
-                          && Tok(idxCast) is "@truncate" or "@intCast" or "@bitCast" or "@enumFromInt"
-                    ? LowerExprSink(ix.Arg2, CType.ULong)
-                    : LowerExpr(ix.Arg2);
+                var idx = LowerUsizeOperand(ix.Arg2);
                 // `v[i]` of a SIMD vector: a lane read (T5).
                 if (baseExpr.Type.Unqualified is CType.Vector laneVector) { return VectorLane(baseExpr, idx, laneVector); }
                 // A tuple subscript `t[N]` (N a literal) reads the Nth element → `.ItemN+1`
@@ -725,21 +722,21 @@ internal sealed partial class ZigLowering
             // may be a slice (re-slice through `.Ptr`), a pointer, or an array (decays); the
             // element type + const-ness ride into the resulting `[]T` / `[]const T`.
             case Zig.SliceRange sr:
-                return BuildSlice(LowerExpr(sr.Arg0), LowerExpr(sr.Arg2), LowerExpr(sr.Arg4));
+                return BuildSlice(LowerExpr(sr.Arg0), LowerUsizeOperand(sr.Arg2), LowerUsizeOperand(sr.Arg4));
 
             // Open-ended slicing `a[lo..]` → the high bound is the source length, so the
             // result is `{ a.ptr + lo, sourceLen - lo }`. Only a known-length source (slice
             // or array) has a length; a bare pointer is rejected (as Zig does).
             case Zig.SliceOpen so:
-                return BuildSlice(LowerExpr(so.Arg0), LowerExpr(so.Arg2), null);
+                return LowerOpenSlice(so.Arg0, so.Arg2);
 
             // Sentinel-terminated slicing `a[lo .. hi :s]` / `a[lo .. :s]`: the same slice, since a
             // sentinel is erased in the type (as `[:0]T`'s is). zig asserts `a[hi] == s` only in a SAFE
             // build mode, and dotcc reports `.ReleaseFast`, so the check is not emitted.
             case Zig.SliceRangeSentinel srs:
-                return BuildSlice(LowerExpr(srs.Arg0), LowerExpr(srs.Arg2), LowerExpr(srs.Arg4));
+                return BuildSlice(LowerExpr(srs.Arg0), LowerUsizeOperand(srs.Arg2), LowerUsizeOperand(srs.Arg4));
             case Zig.SliceOpenSentinel sos:
-                return BuildSlice(LowerExpr(sos.Arg0), LowerExpr(sos.Arg2), null);
+                return LowerOpenSlice(sos.Arg0, sos.Arg2);
 
             // `.?` optional unwrap. A value optional (CType.Optional → C# `T?`) unwraps via
             // `.Value` (panics on none, matching Zig's `.?`-on-null). An optional POINTER is
@@ -1188,8 +1185,8 @@ internal sealed partial class ZigLowering
         long? lo, hi;
         using (EnterThrowawayHoist())
         {
-            lo = _ir.ConstEval(LowerExpr(loItem));
-            hi = hiItem is { } h ? _ir.ConstEval(LowerExpr(h)) : bytes.Count;
+            lo = _ir.ConstEval(LowerUsizeOperand(loItem));
+            hi = hiItem is { } h ? _ir.ConstEval(LowerUsizeOperand(h)) : bytes.Count;
         }
         if (lo is not { } l || hi is not { } e || l < 0 || e > bytes.Count || l > e) { return null; }
         return ComptimeStringFromBytes(bytes.Skip((int)l).Take((int)(e - l)));
@@ -1494,6 +1491,34 @@ internal sealed partial class ZigLowering
     private static bool IsErasableVoid(CExpr e) => e is DefaultLit or VarRef || e is Paren p && IsErasableVoid(p.Inner)
         // A `void` FIELD read (std.sort's `lessThanFn(ctx.sub_ctx, …)` with `context: void`) has no effect either.
         || e is Member { Base: var fieldBase } && IsPurePath(fieldBase);
+
+    /// <summary>An open-ended slice <c>a[lo..]</c>. Over a slice or an array (or a pointer to one) it is the sub-slice to the
+    /// end. Over a MANY-item pointer (<c>[*]T</c> / <c>[*c]T</c>), which has no length, zig's result is the pointer advanced
+    /// by <c>lo</c>, still a many-item pointer (std.crypto.blake3's <c>block[j * 4 ..][0..4]</c> over <c>inputs[i] + offset</c>,
+    /// task #140). A single-item <c>*T</c> is refused, as zig refuses it.</summary>
+    private CExpr LowerOpenSlice(Item baseItem, Item loItem)
+    {
+        var baseExpr = LowerExpr(baseItem);
+        var lo = LowerUsizeOperand(loItem);
+        if (baseExpr.Type.Unqualified is CType.Pointer { Pointee.Unqualified: not CType.Array } manyPtr)
+        {
+            if (PointerSizeOfValue(baseItem) == "one")
+            {
+                throw new IrUnsupportedException("zig: slice of single-item pointer must be bounded (`p[lo..]` needs a many-item pointer, a slice, or an array)");
+            }
+            return new Binary(BinOp.Add, baseExpr, lo) { Type = manyPtr };
+        }
+        return BuildSlice(baseExpr, lo, null);
+    }
+
+    /// <summary>An index or slice bound (<c>a[i]</c>, <c>a[lo..hi]</c>): zig gives it a <c>usize</c> result location, so a
+    /// result-located cast (<c>inp[0..@intCast(subtree_len)]</c> in std.crypto.blake3, task #140; std.base64's
+    /// <c>alphabet_chars[@truncate(bits &gt;&gt; 18 &amp; 0x3f)]</c>) lowers at that sink. Any other operand lowers as before, so
+    /// its emitted shape does not change.</summary>
+    private CExpr LowerUsizeOperand(Item operand) =>
+        operand.Content is Zig.BuiltinCall { Arg0: var bt } && Tok(bt) is "@intCast" or "@truncate" or "@bitCast" or "@enumFromInt" or "@intFromFloat"
+            ? LowerExprSink(operand, CType.ULong)
+            : LowerExpr(operand);
 
     /// <summary>A variable, or a field path off one: reading it has no side effect.</summary>
     private static bool IsPurePath(CExpr e) => e switch

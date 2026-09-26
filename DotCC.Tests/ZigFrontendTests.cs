@@ -2140,13 +2140,13 @@ public sealed class ZigFrontendTests
     }
 
     [Fact]
-    public void Rejects_open_ended_slice_of_a_bare_pointer()
+    public void An_open_slice_of_a_c_pointer_is_a_pointer_without_a_len()
     {
-        // A `[*c]T` C-pointer has no length, so `p[lo..]` cannot infer a high bound —
-        // rejected with a clear error (matching Zig, which also forbids it).
+        // A `[*c]T` C-pointer has no length, so `p[lo..]` is the pointer advanced by `lo` (task #140), still a
+        // `[*c]T`: zig accepts the slice and rejects the `.len` ("type '[*c]u8' does not support field access").
         var ex = Should.Throw<CompileException>(() => EmitZig(
             "fn f(p: [*c]u8) usize { const s = p[1..]; return s.len; }\npub fn main() u8 { return 0; }\n"));
-        ex.Message.ShouldContain("open-ended slice");
+        ex.Message.ShouldContain("no field 'len'");
     }
 
     [Fact]

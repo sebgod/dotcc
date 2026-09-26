@@ -866,7 +866,8 @@ internal sealed partial class ZigLowering
 
     private CExpr? LowerLazyValueConst(string name, CType? useSink = null)
     {
-        if (!_lazy || !_lazyValueConsts.TryGetValue(name, out var vc)) { return null; }
+        if (!_lazy) { return null; }
+        if (!_lazyValueConsts.TryGetValue(name, out var vc)) { return LowerAliasedValueConst(name, useSink); }
         if (!_lazyValueConstsInProgress.Add(name))
         {
             throw new IrUnsupportedException($"zig: top-level `const {name}` depends on itself (a dependency loop)");
@@ -935,6 +936,22 @@ internal sealed partial class ZigLowering
             _comptimeDepth--;
             _lazyValueConstsInProgress.Remove(name);
         }
+    }
+
+    /// <summary>A lazy module's <c>const NAME = other;</c> whose target is itself a value const (std.crypto.blake3's
+    /// <c>const max_simd_degree = simd_degree;</c>, task #140): recorded as a declaration alias, since a bare-name RHS may
+    /// equally re-export a function or a type, so a value read follows it here. Null when the alias names no value const.</summary>
+    private CExpr? LowerAliasedValueConst(string name, CType? useSink)
+    {
+        if (!_declAliases.TryGetValue(name, out var rhs) || rhs.Content is not Zig.Ident { Arg0: var targetTok }) { return null; }
+        var target = Tok(targetTok);
+        if (target == name || !_lazyValueConsts.ContainsKey(target) && !_declAliases.ContainsKey(target)) { return null; }
+        if (!_lazyValueConstsInProgress.Add(name))
+        {
+            throw new IrUnsupportedException($"zig: top-level `const {name}` depends on itself (a dependency loop)");
+        }
+        try { return LowerLazyValueConst(target, useSink); }
+        finally { _lazyValueConstsInProgress.Remove(name); }
     }
 
     /// <summary>Each top-level <c>const</c> whose RHS is a dotted path rooted at an import
@@ -1617,6 +1634,17 @@ internal sealed partial class ZigLowering
                 _containerTypes[plainName] = qualifiedType;
             }
             if (parent is { } parentName) { ScopeNestedContainer(name, content, parentName); }
+        }
+        // Pass 0a2: every struct's consts, recorded (lazily, as ASTs) before ANY struct lays out its fields, so a field
+        // extent may read a const of a struct declared LATER in the file (std.crypto.blake3's `ChunkState { buf:
+        // [Blake3.block_length]u8 }` ahead of `Blake3`, task #140), as zig's order-independent declarations allow.
+        foreach (var (containerName, content, _) in pass0)
+        {
+            if (containerName is not { } name || _failedContainers.ContainsKey(name) || StructConstItems(content) is not { } constItems) { continue; }
+            RegisterContainerIsolated(name, ContainerDeclName(content), () =>
+            {
+                using (EnterContainer(name)) { RegisterContainerConsts(name, constItems); }
+            });
         }
         // Pass 0b: build struct field layouts (field types now resolve through 0a), register each
         // struct's/union's consts, and collect their methods. Each runs with the container as the
@@ -2431,6 +2459,17 @@ internal sealed partial class ZigLowering
             }
         }
     }
+
+    /// <summary>The <c>const</c> / <c>var</c> members of a struct declaration (plain, <c>extern</c> or <c>packed</c>), or null for
+    /// any other container: what pass 0a2 records ahead of every struct's field layout.</summary>
+    private static IReadOnlyList<Item>? StructConstItems(object? content) => content switch
+    {
+        Zig.StructDecl s => SplitMembers(s.Arg5).consts,
+        Zig.ExternStructDecl s => SplitMembers(s.Arg6).consts,
+        Zig.PackedStructDecl s => SplitMembers(s.Arg6).consts,
+        Zig.PackedStructDeclBacked s => SplitMembers(s.Arg9).consts,
+        _ => null,
+    };
 
     /// <summary>The nested containers of a container, depth-first (<c>&lt;parent&gt;__Inner</c>, then its own), each
     /// with its content and parent: pass 0's flattening, for a container that is not top-level.</summary>

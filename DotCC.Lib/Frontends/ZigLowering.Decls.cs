@@ -921,6 +921,9 @@ internal sealed partial class ZigLowering
     /// here and lowered to a real global in pass 1.5 (<see cref="LowerContainerVar"/>).</summary>
     private void RegisterContainerConsts(string container, IReadOnlyList<Item> constItems)
     {
+        // Once per container: pass 0a2 records a top-level struct's consts ahead of every field layout, and its pass 0b
+        // body registration comes back here.
+        if (!_constsRegistered.Add(container)) { return; }
         foreach (var c in constItems)
         {
             Item nameTok; Item? typeItem; Item rhs; bool isVar;
@@ -971,6 +974,9 @@ internal sealed partial class ZigLowering
             }
         }
     }
+
+    /// <summary>The containers whose consts <see cref="RegisterContainerConsts"/> has recorded, so a second call is a no-op.</summary>
+    private readonly HashSet<string> _constsRegistered = new(System.StringComparer.Ordinal);
 
     /// <summary>Register a Zig <c>union(enum)</c> declaration as the faithful C tagged-union shape
     /// (see <see cref="ZigUnionInfo"/>): synthesize the tag enum <c>U_Tag</c> (a member per variant,

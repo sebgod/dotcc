@@ -6872,6 +6872,41 @@ public sealed class ZigOracleTests
             "pub fn main() u8 {\n" +
             "    return g(40) + g(3) * 2 + g(10) * 3;\n" +
             "}\n", 56, "" },
+        // Task #140: std.crypto.blake3's shapes: a late-declared struct const in a field extent, `@intCast` slice bounds,
+        // open slices of a many-item pointer, and an array local copied through a pointer.
+        new object[] { "blake3_shapes",
+            "const Chunk = struct {\n" +
+            "    buf: [Hasher.block_length]u8,\n" +
+            "    len: u8,\n" +
+            "};\n" +
+            "const Hasher = struct {\n" +
+            "    pub const block_length = 4;\n" +
+            "    chunk: Chunk,\n" +
+            "};\n" +
+            "fn sum2(p: [*]const u8) u32 {\n" +
+            "    const q = p[2..];\n" +
+            "    const w = q[0..2];\n" +
+            "    return @as(u32, w[0]) + w[1];\n" +
+            "}\n" +
+            "fn rotate(v: *[3]u8) void {\n" +
+            "    const t: [3]u8 = v.*;\n" +
+            "    v[0] = t[2];\n" +
+            "    v[1] = t[0];\n" +
+            "    v[2] = t[1];\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const h = Hasher{ .chunk = .{ .buf = .{ 1, 2, 3, 4 }, .len = 4 } };\n" +
+            "    const bytes = [_]u8{ 1, 2, 3, 4, 5 };\n" +
+            "    const p: [*]const u8 = &bytes;\n" +
+            "    var n: u64 = 1;\n" +
+            "    _ = &n;\n" +
+            "    const head = bytes[0..@intCast(n)];\n" +
+            "    const tail = bytes[@intCast(n)..];\n" +
+            "    var a = [_]u8{ 1, 2, 3 };\n" +
+            "    rotate(&a);\n" +
+            "    const total = h.chunk.buf.len + h.chunk.buf[3] + sum2(p) + sum2(p + 1) + head.len + tail.len * 2 + a[0] * 3;\n" +
+            "    return @intCast(total);\n" +
+            "}\n", 42, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

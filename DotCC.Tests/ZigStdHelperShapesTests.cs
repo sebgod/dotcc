@@ -3953,6 +3953,89 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void Blake3_shapes_late_consts_cast_bounds_many_pointer_slices_and_array_copies()
+    {
+        var cs = EmitZig("""
+            const Chunk = struct {
+                buf: [Hasher.block_length]u8,
+                len: u8,
+            };
+            const Hasher = struct {
+                pub const block_length = 4;
+                chunk: Chunk,
+            };
+            fn sum2(p: [*]const u8) u32 {
+                const q = p[2..];
+                const w = q[0..2];
+                return @as(u32, w[0]) + w[1];
+            }
+            fn rotate(v: *[3]u8) void {
+                const t: [3]u8 = v.*;
+                v[0] = t[2];
+                v[1] = t[0];
+                v[2] = t[1];
+            }
+            pub fn main() u8 {
+                const h = Hasher{ .chunk = .{ .buf = .{ 1, 2, 3, 4 }, .len = 4 } };
+                const bytes = [_]u8{ 1, 2, 3, 4, 5 };
+                const p: [*]const u8 = &bytes;
+                var n: u64 = 1;
+                _ = &n;
+                const head = bytes[0..@intCast(n)];
+                const tail = bytes[@intCast(n)..];
+                var a = [_]u8{ 1, 2, 3 };
+                rotate(&a);
+                const total = h.chunk.buf.len + h.chunk.buf[3] + sum2(p) + sum2(p + 1) + head.len + tail.len * 2 + a[0] * 3;
+                return @intCast(total);
+            }
+            """);
+        // Task #140 (std.crypto.blake3): a field extent reads a const of a struct declared LATER (`Chunk { buf:
+        // [Hasher.block_length]u8 }`); `@intCast` slice bounds lower at their `usize` result location; `p[lo..]` over a
+        // many-item pointer is the pointer advanced by `lo`; `const t: [3]u8 = v.*;` copies through the pointer.
+        // zig returns 42.
+        cs.ShouldContain("public fixed byte buf[4];");
+        cs.ShouldContain("byte* q = p + 2;");
+        cs.ShouldContain("Slice<byte> tail = new Slice<byte>(bytes + (ulong)n, 5UL - (ulong)(ulong)n);");
+        cs.ShouldContain("byte* t = stackalloc byte[3];");
+    }
+
+    [Fact]
+    public void An_open_slice_of_a_single_item_pointer_is_refused()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig("""
+            fn f(p: *u8) u8 {
+                const q = p[1..];
+                return q[0];
+            }
+            pub fn main() u8 {
+                var x: u8 = 3;
+                return f(&x);
+            }
+            """));
+        // Task #140: only a many-item pointer slices open-ended; zig says "slice of single-item pointer must be bounded".
+        ex.Message.ShouldContain("slice of single-item pointer must be bounded");
+    }
+
+    [Fact]
+    public void A_lazy_module_value_const_aliased_by_name_resolves()
+    {
+        // Task #140 (std.crypto.blake3's `const max_simd_degree = simd_degree;`): a bare-name const recorded as a
+        // declaration alias is followed on a value read, into an array extent and an expression. zig returns 16.
+        var dir = Path.Combine(Path.GetTempPath(), $"dotcc-zigalias-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "m.zig"), "fn pick(comptime T: type) ?comptime_int {\n    return if (@sizeOf(T) == 4) 8 else null;\n}\nconst deg = pick(u32) orelse 1;\nconst max_deg = deg;\nconst max_or_2 = if (max_deg > 2) max_deg else 2;\npub fn f() usize {\n    var a: [max_or_2]u8 = undefined;\n    _ = &a;\n    return a.len + max_deg;\n}\n");
+            var main = Path.Combine(dir, "main.zig");
+            File.WriteAllText(main, "const m = @import(\"m.zig\");\npub fn main() u8 {\n    return @intCast(m.f());\n}\n");
+            var cs = Compiler.EmitCSharp(new[] { main });
+            cs.ShouldContain("byte* a = stackalloc byte[8];");
+            cs.ShouldContain("return 8UL + (ulong)(8);");
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""
