@@ -2366,6 +2366,13 @@ internal sealed partial class ZigLowering
         {
             return bb;
         }
+        // A comptime bool SEED (std.array_hash_map's `if (store_hash) {} else ctx` in an instance with `comptime store_hash:
+        // bool`, task #135): a comptime var holds its value, so the untaken arm is never lowered, as zig never analyses it.
+        if (cur.Content is Zig.Ident sid && _symbols.Resolve(Tok(sid.Arg0)) is { } seedSym
+            && _comptimeVars.TryGetValue(seedSym, out var seed) && seed.Type.Unqualified.Equals(CType.Bool))
+        {
+            return seed.Value != 0;
+        }
         // A module-level comptime bool (`if (runtime_safety)` in debug.zig), folded from its declaration, so
         // the question has an answer while containers are still registering, before any global exists, and
         // stays foldable once it is one (zig forbids a local shadowing a declaration, so the name is it).
@@ -3717,6 +3724,16 @@ internal sealed partial class ZigLowering
             var labels = LowerCaseVals(caseVals, subject.Type); // case values compare against the subject
             if (!EndsInJump(body)) { body.Add(new Break()); }   // no Zig fall-through
             sections.Add(new SwitchSection(labels, body));
+        }
+        // A switch over an enum with no `else` names every member (zig checks it), so no value reaches past it: an
+        // unreachable default says so to C#, which otherwise sees a function whose every prong returns as falling off
+        // its end (std.array_hash_map's capacityIndexSize, CS0161, task #135).
+        if (subject.Type?.Unqualified is CType.Enum && sections.All(s => s.Labels.All(l => l.CaseExpr is not null)))
+        {
+            sections.Add(new SwitchSection(new List<SwitchLabel> { new SwitchLabel(null) }, new List<CStmt>
+            {
+                new ExprStmt(new Call("__dotcc_unreachable", new List<CExpr>(), new List<CType>(), null) { Type = CType.Void }),
+            }));
         }
         return new Switch(subject, sections);
     }

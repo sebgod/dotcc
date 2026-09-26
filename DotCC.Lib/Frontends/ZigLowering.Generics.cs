@@ -1710,26 +1710,44 @@ internal sealed partial class ZigLowering
                 {
                     RegisterContainerName(nName, nContent, nestedMethods);
                     ScopeNestedContainer(nName, nContent, nParent);
+                    // A type const below may need a nested struct's fields before the bodies loop reaches it
+                    // (std.array_hash_map's `DataList = std.MultiArrayList(Data)` reads `@typeInfo(Data)`, task #135):
+                    // it registers on first demand (EnsureNestedBody), the loop then skips it.
+                    _shared.PendingNestedBodies[nName] = (nContent, nestedMethods, mangled, this);
                 }
                 _currentContainer = mangled;
                 // TYPE-returning member functions first: a type const may call one (`KeyIterator = FieldIterator(K)`).
                 methods = DeclareTypeReturningMembers(mangled, methods);
+                // Every untyped const is published first, so a type const is resolvable on demand (TryContainerTypeConst)
+                // by one evaluated before it, or by a nested body registered early (std.array_hash_map's `Data { hash:
+                // Hash, … }` read by `DataList = std.MultiArrayList(Data)`, with `Hash` declared after both, task #135).
+                if (!_containerConsts.TryGetValue(mangled, out var published))
+                {
+                    published = new Dictionary<string, (Item?, Item)>(System.StringComparer.Ordinal);
+                    _containerConsts[mangled] = published;
+                    _shared.ContainerConstOwners[mangled] = this;   // as RegisterContainerConsts records a container it creates
+                }
+                foreach (var c in consts)
+                {
+                    if (c.Content is Zig.ConstDecl untyped) { published.TryAdd(Tok(untyped.Arg1), (null, untyped.Arg3)); }
+                }
                 var valueConsts = new List<Item>();
                 foreach (var c in consts)
                 {
                     if (c.Content is Zig.ConstDecl typeConst && IsTypeConstMember(typeConst.Arg3))
                     {
-                        var (memberType, memberBits) = LowerComptimeTypeExpr(templateSym.Name, typeConst.Arg3);
-                        if (!_selfAliases.TryGetValue(mangled, out var scoped))
+                        if (TryContainerTypeConst(mangled, Tok(typeConst.Arg1)) is null)
                         {
-                            scoped = new Dictionary<string, CType>(System.StringComparer.Ordinal);
-                            _selfAliases[mangled] = scoped;
+                            throw new IrUnsupportedException($"'{templateSym.Name}': the type const '{Tok(typeConst.Arg1)}' did not resolve");
                         }
-                        scoped[Tok(typeConst.Arg1)] = memberType;
-                        if (memberBits is { } mb) { _typeConstBits[(mangled, Tok(typeConst.Arg1))] = mb; }
                         continue;
                     }
                     valueConsts.Add(c);
+                }
+                // The value consts register below as usual (its duplicate check must not see these early entries).
+                foreach (var c in valueConsts)
+                {
+                    if (c.Content is Zig.ConstDecl untypedValue) { published.Remove(Tok(untypedValue.Arg1)); }
                 }
                 consts = valueConsts;
                 // `const Self = @This();` → a self alias scoped to the MANGLED container, plus any value
@@ -1743,9 +1761,9 @@ internal sealed partial class ZigLowering
                 _currentContainer = mangled;
                 RegisterContainerConsts(mangled, consts);
                 // Their bodies: after the type consts, which a nested field may name (`index: Size`).
-                foreach (var (nName, nContent, _) in nestedDecls)
+                foreach (var (nName, _, _) in nestedDecls)
                 {
-                    RegisterContainerBody(nName, nContent, nestedMethods);
+                    EnsureNestedBody(nName);
                 }
                 foreach (var (nContainer, nDef) in nestedMethods)
                 {

@@ -1198,6 +1198,17 @@ internal sealed class CSharpBackend
     /// <summary>The fenced read of a volatile lvalue text — C's volatile read.</summary>
     private static string VolatileRead(string lv) => $"global::System.Threading.Volatile.Read(ref {lv})";
 
+    /// <summary>True for an access zig performs as a zero-size no-op (task #135): a <c>void</c> field (omitted from its
+    /// struct), or a <c>void</c>-as-data (<c>Unit</c>) element or pointee read through a pointer that may be
+    /// <c>undefined</c>.</summary>
+    private static bool IsZeroSizeAccess(CExpr e) => e switch
+    {
+        Member { Type.Unqualified: CType.VoidType } => true,
+        Index { Type.Unqualified: CType.VoidType or CType.Named { Name: "Unit" } } => true,
+        Unary { Op: UnOp.Deref, Type.Unqualified: CType.VoidType or CType.Named { Name: "Unit" } } => true,
+        _ => false,
+    };
+
     /// <summary>True when an lvalue's storage roots at a file-scope global / static
     /// local — a C# static field, hence a moveable variable whose address must go
     /// through <c>Unsafe.AsPointer</c> rather than a bare <c>&amp;</c> (CS0212). A
@@ -1845,6 +1856,9 @@ internal sealed class CSharpBackend
                 var memberAddr = decays ? $"(byte*)__t.{m}" : $"(byte*)&__t.{m}";
                 return ($"((System.Func<ulong>)(() => {{ {Cs(o.StructType)} __t = default; return (ulong)({memberAddr} - (byte*)&__t); }}))()", PPrimary);
             }
+            // A zero-size element read through a pointer loads nothing in zig (see the store above).
+            case Index or Unary { Op: UnOp.Deref } when IsZeroSizeAccess(e):
+                return ("default(Unit)", PPrimary);
             case Index ix:
             {
                 // A PARTIAL subscript of a multi-dimensional array — the result is
@@ -1858,6 +1872,9 @@ internal sealed class CSharpBackend
                 var t = $"{Sub(ix.Base, PPostfix)}[{Expr(DecayEnum(ix.Idx))}]";
                 return QualifiedRead(ix, t, PPostfix);
             }
+            // A `void` field is omitted from its struct (StructText), so reading one is the void value itself.
+            case Member { Type.Unqualified: CType.VoidType }:
+                return ("default(Unit)", PPrimary);
             case Member m:
             {
                 var dot = $"{Sub(m.Base, PPostfix)}{(m.Arrow ? "->" : ".")}{DotCC.EmitHelpers.Id(m.Field)}";
@@ -1996,6 +2013,12 @@ internal sealed class CSharpBackend
                     return Render(co.Items[^1]);
                 }
                 return (CommaValue(co), PPrimary);
+            // A store of a ZERO-SIZE value (task #135): a `void` field, which the struct omits (std.array_hash_map's
+            // `result.hash = …` when `Hash` is `void`), or a `void`-as-data element through a pointer, which zig's
+            // std.MultiArrayList leaves `undefined` for a zero-size field (`items(.hash)[i] = …`). zig stores nothing,
+            // so only the value's own effects remain, as a discard; C#'s one-byte `Unit` would write through that pointer.
+            case Assign { Target: var zeroTarget } zeroStore when IsZeroSizeAccess(zeroTarget):
+                return ($"_ = {Sub(zeroStore.Value, PAssign)}", PAssign);
             case Assign a when a.Target.Type.IsAtomic:
                 {
                     // An atomic lvalue stores seq-cst (Atomic.Store, returns the stored

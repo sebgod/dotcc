@@ -2514,9 +2514,10 @@ public sealed class ZigStdHelperShapesTests
         // Task #114: std.StaticStringMap(void) stores `[*]const V` values, returns `?V`, swaps `*V`. C# has no void element,
         // generic argument or storage, so zig's void as DATA (the element of a slice, many-pointer, array, optional or tuple,
         // and a `*T` with T = void) is the runtime's empty `Unit`, and the void value `{}` stored there is `default(Unit)`.
-        // `{}` parses as a list element too. zig returns 86.
+        // `{}` parses as a list element too. zig returns 86. A store of the zero-size element is a discard (task #135: zig
+        // stores nothing, and a pointer it leaves `undefined` for one must not be written through).
         cs.ShouldContain("Unit* slots = stackalloc Unit[4];");
-        cs.ShouldContain("slots[2] = default(Unit);");
+        cs.ShouldContain("_ = default(Unit);");
         cs.ShouldContain("ConstSlice<Unit> view = new ConstSlice<Unit>(slots, 4UL);");
         cs.ShouldContain("Unit? Map__void_get(Map__void self, byte k)");
         cs.ShouldContain("unit_vals = Libc.GlobalArrayFrom<Unit>(new Unit[]{ default(Unit), default(Unit), default(Unit) });");
@@ -3613,6 +3614,99 @@ public sealed class ZigStdHelperShapesTests
         // Task #108: a struct of mixed field sizes may be laid out differently by zig (reordered) and dotcc, so its
         // `@bitSizeOf` stays the S7 cut; a defaulted field's pointer to its comptime default is not modeled.
         Should.Throw<Exception>(() => EmitZig(source)).Message.ShouldContain(message);
+    }
+
+    [Fact]
+    public void A_type_const_reads_a_nested_structs_fields_before_its_body_registers()
+    {
+        var cs = EmitZig("""
+            fn Mal(comptime T: type) type {
+                const names = @typeInfo(T).@"struct".field_names;
+                return struct {
+                    len: usize = names.len,
+                };
+            }
+
+            fn Custom(comptime K: type, comptime V: type, comptime store_hash: bool) type {
+                return struct {
+                    entries: DataList = .{},
+                    pub const Data = struct {
+                        hash: Hash,
+                        key: K,
+                        value: V,
+                    };
+                    pub const DataList = Mal(Data);
+                    pub const Hash = if (store_hash) u32 else void;
+                };
+            }
+
+            pub fn main() u8 {
+                const a: Custom(u32, u16, false) = .{};
+                const b: Custom(u32, u16, true) = .{};
+                return @intCast(a.entries.len * 10 + b.entries.len);
+            }
+            """);
+        // Task #135 (std.array_hash_map's `DataList = std.MultiArrayList(Data)` over `Data { hash: Hash, … }`, with `Hash`
+        // declared after both): the nested body registers on first demand, and the type const it names resolves on
+        // demand too. zig returns 33.
+        cs.ShouldContain("new Mal__Custom__u32_u16_0__Data { len = ");
+        cs.ShouldContain("unsafe struct Mal__Custom__u32_u16_1__Data");
+    }
+
+    [Fact]
+    public void Void_fields_static_alloc_calls_and_exhaustive_returning_switches()
+    {
+        var cs = EmitZig("""
+            const Header = struct {
+                n: u8,
+                fn alloc(n: u8) Header {
+                    return .{ .n = n };
+                }
+            };
+
+            const Kind = enum { a, b, c };
+
+            fn size(k: Kind) usize {
+                switch (k) {
+                    .a => return 1,
+                    .b => return 2,
+                    .c => return 4,
+                }
+            }
+
+            fn Box(comptime T: type, comptime keep: bool) type {
+                return struct {
+                    tag: Tag,
+                    val: T,
+                    const Tag = if (keep) u32 else void;
+                    fn same(self: @This(), t: Tag) bool {
+                        return self.tag == t;
+                    }
+                    fn pick(self: @This(), other: T) T {
+                        return if (keep) self.val else other;
+                    }
+                };
+            }
+
+            pub fn main() u8 {
+                const h = Header.alloc(5);
+                var b: Box(u8, false) = .{ .tag = {}, .val = 7 };
+                b.tag = {};
+                const c: Box(u8, true) = .{ .tag = 9, .val = 1 };
+                var total: usize = h.n + size(.c) + @sizeOf(void) + @bitSizeOf(void);
+                if (b.same({})) total += 10;
+                if (c.same(9)) total += 100;
+                total += b.pick(20) + c.pick(20);
+                return @intCast(total + b.val + c.val);
+            }
+            """);
+        // Task #135 (std.array_hash_map shapes): `Header.alloc(n)` is a static call, not an allocator method; an enum
+        // switch whose prongs all return gets an unreachable default for C#; `@sizeOf(void)` / `@bitSizeOf(void)` are 0;
+        // `void == void` is true; a store to a `void` field keeps only its effects; a comptime bool seed picks an arm.
+        // zig returns 148.
+        cs.ShouldContain("Header h = Header_alloc(5);");
+        cs.ShouldContain("ulong total = h.n + size(Kind.c) + 0UL + (ulong)(0);");
+        cs.ShouldContain("internal static unsafe CBool Box__u8_0_same(Box__u8_0 self)\n    {\n        return true;");
     }
 
     [Fact]

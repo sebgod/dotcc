@@ -670,6 +670,8 @@ internal sealed partial class ZigLowering
         return t switch
         {
             CType.VoidType => 0,
+            // `void` as data (task #114's runtime `Unit`, std.array_hash_map's `Hash = void`) has no bits, as `void` has.
+            CType.Named { Name: "Unit" } => 0,
             CType.Pointer => 64,
             CType.Enum e => ExactBitWidth(e.Underlying),
             CType.Prim p => p.Bytes * 8,

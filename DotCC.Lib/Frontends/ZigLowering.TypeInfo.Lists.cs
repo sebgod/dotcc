@@ -66,7 +66,24 @@ internal sealed partial class ZigLowering
     /// type names no registered aggregate. Order is load-bearing: <c>field_names</c> and
     /// <c>field_types</c> are index-parallel, and zig guarantees declaration order.</summary>
     private IReadOnlyList<StructField>? FieldsOfAggregate(CType type)
-        => type.Unqualified is CType.Named n ? _ir.StructFieldsOf(n.Name) : null;
+    {
+        if (type.Unqualified is not CType.Named n) { return null; }
+        EnsureNestedBody(n.Name);
+        return _ir.StructFieldsOf(n.Name);
+    }
+
+    /// <summary>Register a pending nested container's body now (task #135), in the module that reifies its instance and
+    /// with that instance current: a type const of the instance may read its fields (from any module, std.MultiArrayList's
+    /// `@typeInfo(Data)`) before the instance's own body loop gets to it. A no-op once registered.</summary>
+    private void EnsureNestedBody(string name)
+    {
+        if (!_shared.PendingNestedBodies.Remove(name, out var pending)) { return; }
+        var owner = pending.Owner;
+        var savedContainer = owner._currentContainer;
+        owner._currentContainer = pending.Instance;
+        try { owner.RegisterContainerBody(name, pending.Content, pending.Methods); }
+        finally { owner._currentContainer = savedContainer; }
+    }
 
     /// <summary>The MEMBERS of an enum type in declaration order, or null when the type is not a
     /// registered enum. Read off <see cref="IrModule.Enums"/> — an ordered list, unlike the

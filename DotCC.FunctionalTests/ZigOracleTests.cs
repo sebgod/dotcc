@@ -6812,6 +6812,51 @@ public sealed class ZigOracleTests
             "    }\n" +
             "    return @intCast(total + @bitSizeOf(D) / 8);\n" +
             "}\n", 144, "" },
+        // Task #135: a static call named `alloc`, an exhaustive returning enum switch, `@sizeOf`/`@bitSizeOf` of `void`,
+        // `void` fields and comparisons, and a comptime bool seed choosing a value arm.
+        new object[] { "void_fields_and_static_alloc",
+            "const Header = struct {\n" +
+            "    n: u8,\n" +
+            "    fn alloc(n: u8) Header {\n" +
+            "        return .{ .n = n };\n" +
+            "    }\n" +
+            "};\n" +
+            "\n" +
+            "const Kind = enum { a, b, c };\n" +
+            "\n" +
+            "fn size(k: Kind) usize {\n" +
+            "    switch (k) {\n" +
+            "        .a => return 1,\n" +
+            "        .b => return 2,\n" +
+            "        .c => return 4,\n" +
+            "    }\n" +
+            "}\n" +
+            "\n" +
+            "fn Box(comptime T: type, comptime keep: bool) type {\n" +
+            "    return struct {\n" +
+            "        tag: Tag,\n" +
+            "        val: T,\n" +
+            "        const Tag = if (keep) u32 else void;\n" +
+            "        fn same(self: @This(), t: Tag) bool {\n" +
+            "            return self.tag == t;\n" +
+            "        }\n" +
+            "        fn pick(self: @This(), other: T) T {\n" +
+            "            return if (keep) self.val else other;\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const h = Header.alloc(5);\n" +
+            "    var b: Box(u8, false) = .{ .tag = {}, .val = 7 };\n" +
+            "    b.tag = {};\n" +
+            "    const c: Box(u8, true) = .{ .tag = 9, .val = 1 };\n" +
+            "    var total: usize = h.n + size(.c) + @sizeOf(void) + @bitSizeOf(void);\n" +
+            "    if (b.same({})) total += 10;\n" +
+            "    if (c.same(9)) total += 100;\n" +
+            "    total += b.pick(20) + c.pick(20);\n" +
+            "    return @intCast(total + b.val + c.val);\n" +
+            "}\n", 148, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",
@@ -8096,6 +8141,52 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // Task #135: std.StringArrayHashMapUnmanaged from real std (a stored u32 hash).
+    [Fact]
+    public void Dotcc_matches_zig_std_string_array_hash_map() =>
+        MatchesZigWithRealStd("string_array_hash_map",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "pub fn main() !u8 {\n" +
+            "    var buf: [65536]u8 = undefined;\n" +
+            "    var fba = std.heap.FixedBufferAllocator.init(&buf);\n" +
+            "    const gpa = fba.allocator();\n" +
+            "    var s: std.StringArrayHashMapUnmanaged(u32) = .empty;\n" +
+            "    defer s.deinit(gpa);\n" +
+            "    try s.put(gpa, \"alpha\", 1);\n" +
+            "    try s.put(gpa, \"beta\", 2);\n" +
+            "    try s.put(gpa, \"alpha\", 5);\n" +
+            "    _ = s.orderedRemove(\"beta\");\n" +
+            "    return @intCast((s.get(\"alpha\") orelse 0) + s.count() * 100 + @as(u32, @intFromBool(s.contains(\"beta\"))) * 10);\n" +
+            "}\n", 105);
+
+    // Task #135: std.AutoArrayHashMapUnmanaged from real std past the linear-scan limit (put, swapRemove, orderedRemove,
+    // getOrPut, keys/values, get, contains).
+    [Fact]
+    public void Dotcc_matches_zig_std_auto_array_hash_map() =>
+        MatchesZigWithRealStd("auto_array_hash_map",
+            "const std = @import(\"std\");\n" +
+            "\n" +
+            "pub fn main() !u8 {\n" +
+            "    var buf: [65536]u8 = undefined;\n" +
+            "    var fba = std.heap.FixedBufferAllocator.init(&buf);\n" +
+            "    const gpa = fba.allocator();\n" +
+            "    var m: std.AutoArrayHashMapUnmanaged(u32, u32) = .empty;\n" +
+            "    defer m.deinit(gpa);\n" +
+            "    var i: u32 = 0;\n" +
+            "    while (i < 40) : (i += 1) try m.put(gpa, i * 7, i);\n" +
+            "    _ = m.swapRemove(14);\n" +
+            "    _ = m.orderedRemove(21);\n" +
+            "    const gop = try m.getOrPut(gpa, 1000);\n" +
+            "    if (!gop.found_existing) gop.value_ptr.* = 77;\n" +
+            "    const again = try m.getOrPut(gpa, 7);\n" +
+            "    var h: u32 = @intFromBool(again.found_existing);\n" +
+            "    for (m.keys(), m.values()) |k, v| h = h *% 31 +% k +% v;\n" +
+            "    h +%= (m.get(35) orelse 0) + @as(u32, @intCast(m.count()));\n" +
+            "    h +%= @as(u32, @intFromBool(m.contains(14))) * 1000;\n" +
+            "    return @truncate(h ^ (h >> 8) ^ (h >> 16));\n" +
+            "}\n", 9);
 
     // Task #108: std.MultiArrayList from real std (append, set, swapRemove, orderedRemove, items, pop).
     [Fact]

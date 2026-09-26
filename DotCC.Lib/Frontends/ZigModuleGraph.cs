@@ -101,6 +101,12 @@ internal sealed class ZigImportScope
     /// so every module gives one shape one type (task #108).</summary>
     public Dictionary<string, string> AnonStructs { get; } = new(StringComparer.Ordinal);
 
+    /// <summary>A reified instance's nested containers whose body is not registered yet, by mangled name (task #135):
+    /// the container's AST, the list its methods are deferred to, the instance that encloses it, and the module
+    /// reifying it. Shared, since another module may be the first to need the fields.</summary>
+    public Dictionary<string, (object? Content, List<(string container, Item fnDef)> Methods, string Instance, ZigLowering Owner)> PendingNestedBodies { get; }
+        = new(StringComparer.Ordinal);
+
     /// <summary>Above zero while ANY module evaluates a type-returning body (compile-time code), shared: std.meta.FieldEnum's
     /// body (meta.zig) instantiates std.simd.iota in simd.zig, whose `@Vector(3, u8)` result is then a compile-time
     /// value (task #108).</summary>

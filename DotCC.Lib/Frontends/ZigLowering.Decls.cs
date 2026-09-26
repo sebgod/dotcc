@@ -2471,7 +2471,14 @@ internal sealed partial class ZigLowering
                 {
                     throw new IrUnsupportedException($"zig `@sizeOf` expects (type); got {bargs.Count} argument(s)");
                 }
-                return new SizeOfExpr(LowerType(bargs[0])) { Type = CType.ULong };
+                // `void` (and void as data, the runtime `Unit`) takes no space: std.MultiArrayList over std.array_hash_map's
+                // `Data { hash: void, … }` sizes it `@sizeOf(void)` (task #135), where C# has no `sizeof(void)`.
+                var sizedType = LowerType(bargs[0]);
+                if (sizedType.Unqualified is CType.VoidType or CType.Named { Name: "Unit" })
+                {
+                    return new LitInt("0", 0) { Type = CType.ULong };
+                }
+                return new SizeOfExpr(sizedType) { Type = CType.ULong };
             case "@bitSizeOf":
                 // `@bitSizeOf(T)` — the width in BITS (road-to-zig-std S7), answered from the declared
                 // spelling so an arbitrary-width `u21` reports 21 and not the 32 it widened to.

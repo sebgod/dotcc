@@ -884,6 +884,21 @@ internal sealed partial class ZigLowering
             }
             if (_lazyConstStatics.TryGetValue(name, out var memo)) { return new VarRef(memo) { Type = memo.Type, IsLValue = true }; }
             var sink = vc.typeItem is { } t ? LowerType(t) : useSink;
+            // A labeled block (std.array_hash_map's `const index_capacities = blk: { … break :blk capacities; };`, task #135)
+            // is evaluated ONCE at compile time into a static, as a container const's block is (task #79).
+            if (vc.rhs.Content is Zig.LabeledBlock)
+            {
+                var qualifiedBlock = QualifyTypeName(name);
+                var (blockType, blockInit) = ComptimeLabeledBlockInit($"'{name}'", qualifiedBlock, vc.rhs, vc.typeItem is null ? null : sink);
+                var blockSym = _symbols.Declare(new Symbol
+                {
+                    Name = qualifiedBlock + "__static", Kind = SymKind.Var, Type = blockType, Storage = Storage.Static, IsGlobal = true,
+                });
+                _ir.Globals.Add(new GlobalVar(blockSym, blockInit));
+                _ir.ConstGlobalInits[blockSym] = blockInit;
+                _lazyConstStatics[name] = blockSym;
+                return new VarRef(blockSym) { Type = blockType, IsLValue = true };
+            }
             // Lowered under a fresh hoist of its own: this module's lowering has no statement in progress at a use site
             // in another module. A value that needed statements first (std.base64's `standard = Codecs{ … }`, whose array
             // fields are copied in after the literal, task #78) becomes a static global with a synthesized initializer.

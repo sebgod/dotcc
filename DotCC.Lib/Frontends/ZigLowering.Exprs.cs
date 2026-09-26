@@ -1347,6 +1347,9 @@ internal sealed partial class ZigLowering
         return null;
     }
 
+    /// <summary>True for <c>void</c> and for void as data (the runtime <c>Unit</c>, task #114).</summary>
+    private static bool IsVoidValueType(CType? t) => t?.Unqualified is CType.VoidType or CType.Named { Name: "Unit" };
+
     /// <summary><c>try e</c> over the already-lowered operand <paramref name="inner"/>: unwrap the error union's payload, or
     /// propagate its error by throwing ZigErrorReturn (caught at the enclosing <c>!T</c> function's emitted try/catch, the
     /// backend's Func wrap). Shared by the sink-free path and a <c>try</c> whose operand needs the result type (task #130).</summary>
@@ -1776,6 +1779,10 @@ internal sealed partial class ZigLowering
         if (methodName is "alloc" or "alignedAlloc" or "dupe" or "dupeSentinel" or "allocSentinel" or "free" or "create" or "destroy"
                 or "realloc" or "resize" or "remap"
             or "rawAlloc" or "rawResize" or "rawRemap" or "rawFree"
+            // A container TYPE's own function of that name (std.array_hash_map's `IndexHeader.alloc(gpa, bit_index)`,
+            // task #135) is a static call, not an allocator method: it takes the `Type.func(args)` path below.
+            && !(fld.Arg0.Content is Zig.Ident typeRecv && _symbols.Resolve(Tok(typeRecv.Arg0)) is null
+                 && TryLookupContainerType(Tok(typeRecv.Arg0), out var recvType) && ContainerTypeName(recvType) is not null)
             && TryLowerAllocatorMethod(fld, methodName, argItems, out var allocExpr))
         {
             return allocExpr;
@@ -2549,6 +2556,12 @@ internal sealed partial class ZigLowering
                 && Tok(shiftCast) is "@intCast" or "@truncate"
                 ? (LowerExpr(l), LowerExprSink(r, CType.Int))
                 : (LowerExpr(l), LowerExpr(r));
+        // `void == void` is true, as zig has it (std.array_hash_map's `hashes_array[i] == h` where both the element and
+        // `h` are `void` when `store_hash` is false, task #135); C# cannot compare the runtime `Unit`.
+        if (op is BinOp.Eq or BinOp.Ne && IsVoidValueType(left.Type) && IsVoidValueType(right.Type))
+        {
+            return new LitBool(op == BinOp.Eq) { Type = CType.Bool };
+        }
         // An operator over a SIMD vector is element-wise, a comparison a lane mask (T5).
         if (TryVectorBinary(op, left, right) is { } vectorOp) { return vectorOp; }
         // `1 << 52` (std.fmt.parse_float's `1 << (1 + fractional_bits)`, FloatInfo's `2 << 52`): an untyped literal is a
