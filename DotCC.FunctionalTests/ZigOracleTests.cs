@@ -6311,70 +6311,6 @@ public sealed class ZigOracleTests
             "    p.len = 1;\n" +
             "    return @intCast(score(.{ .key_ptr = &word, .weight = 3 }) + other.len + p.ptr[0]);\n" +
             "}\n", 211, "" },
-        // A comptime block building a table from field_names (task #116): the std.meta.stringToEnum shape, a plain for over
-        // field_names in a comptime labeled block, @field(T, name) of an enum type, and a comptime slice of tuples keying a generic. zig returns 157.
-        new object[] { "comptime_block_field_names_table",
-            "const Op = enum(u8) { add = 3, sub = 5, mul = 7 };\n" +
-            "\n" +
-            "fn Lookup(comptime T: type) type {\n" +
-            "    return struct {\n" +
-            "        names: [*]const []const u8,\n" +
-            "        values: [*]const T,\n" +
-            "        len: usize,\n" +
-            "\n" +
-            "        const Self = @This();\n" +
-            "\n" +
-            "        inline fn init(comptime pairs: anytype) Self {\n" +
-            "            comptime {\n" +
-            "                var names: [pairs.len][]const u8 = undefined;\n" +
-            "                var values: [pairs.len]T = undefined;\n" +
-            "                fill(pairs, &names, &values);\n" +
-            "                const fin_names = names;\n" +
-            "                const fin_values = values;\n" +
-            "                return .{ .names = &fin_names, .values = &fin_values, .len = pairs.len };\n" +
-            "            }\n" +
-            "        }\n" +
-            "\n" +
-            "        fn fill(pairs: anytype, names: [][]const u8, values: []T) void {\n" +
-            "            for (pairs, 0..) |kv, i| {\n" +
-            "                names[i] = kv.@\"0\";\n" +
-            "                values[i] = kv.@\"1\";\n" +
-            "            }\n" +
-            "        }\n" +
-            "\n" +
-            "        fn get(self: Self, str: []const u8) ?T {\n" +
-            "            var i: usize = 0;\n" +
-            "            while (i < self.len) : (i += 1) {\n" +
-            "                const n = self.names[i];\n" +
-            "                if (n.len != str.len) continue;\n" +
-            "                var j: usize = 0;\n" +
-            "                while (j < n.len and n[j] == str[j]) : (j += 1) {}\n" +
-            "                if (j == n.len) return self.values[i];\n" +
-            "            }\n" +
-            "            return null;\n" +
-            "        }\n" +
-            "    };\n" +
-            "}\n" +
-            "\n" +
-            "fn toEnum(comptime T: type, str: []const u8) ?T {\n" +
-            "    const kvs = comptime build_kvs: {\n" +
-            "        const KV = struct { []const u8, T };\n" +
-            "        var kvs_array: [@typeInfo(T).@\"enum\".field_names.len]KV = undefined;\n" +
-            "        for (@typeInfo(T).@\"enum\".field_names, 0..) |name, i| {\n" +
-            "            kvs_array[i] = .{ name, @field(T, name) };\n" +
-            "        }\n" +
-            "        break :build_kvs kvs_array[0..];\n" +
-            "    };\n" +
-            "    const map = Lookup(T).init(kvs);\n" +
-            "    return map.get(str);\n" +
-            "}\n" +
-            "\n" +
-            "pub fn main() u8 {\n" +
-            "    const a = toEnum(Op, \"sub\") orelse return 99;\n" +
-            "    const b = toEnum(Op, \"mul\") orelse return 98;\n" +
-            "    const c = toEnum(Op, \"div\");\n" +
-            "    return @intFromEnum(a) * 10 + @intFromEnum(b) + @as(u8, if (c == null) 100 else 0);\n" +
-            "}\n", 157, "" },
         // Format guards over a comptime string (task #121, step 1): std.Io.Writer.printValue's b64 / is_any guards settle, so the
         // guarded @compileError arms are never analysed; is_tuple; a struct field's declared width through anytype. zig returns 68.
         new object[] { "comptime_format_guards",
@@ -8179,6 +8115,73 @@ public sealed class ZigOracleTests
             "    std.debug.print(\"{x}\\n\", .{acc});\n" +
             "    return @truncate(acc ^ (acc >> 32) ^ (acc >> 16) ^ (acc >> 8));\n" +
             "}\n", 112);
+
+    // Task #116: a comptime block building a table from `@typeInfo(T).@"enum".field_names` (std.meta.stringToEnum's shape).
+    // Local-only: CI's pinned zig 0.16.0 has no `field_names` on builtin.Type.Enum, so it cannot be a CI oracle program.
+    [Fact]
+    public void Dotcc_matches_zig_comptime_block_field_names_table() =>
+        MatchesZigWithRealStd("comptime_block_field_names_table",
+            "const Op = enum(u8) { add = 3, sub = 5, mul = 7 };\n" +
+            "\n" +
+            "fn Lookup(comptime T: type) type {\n" +
+            "    return struct {\n" +
+            "        names: [*]const []const u8,\n" +
+            "        values: [*]const T,\n" +
+            "        len: usize,\n" +
+            "\n" +
+            "        const Self = @This();\n" +
+            "\n" +
+            "        inline fn init(comptime pairs: anytype) Self {\n" +
+            "            comptime {\n" +
+            "                var names: [pairs.len][]const u8 = undefined;\n" +
+            "                var values: [pairs.len]T = undefined;\n" +
+            "                fill(pairs, &names, &values);\n" +
+            "                const fin_names = names;\n" +
+            "                const fin_values = values;\n" +
+            "                return .{ .names = &fin_names, .values = &fin_values, .len = pairs.len };\n" +
+            "            }\n" +
+            "        }\n" +
+            "\n" +
+            "        fn fill(pairs: anytype, names: [][]const u8, values: []T) void {\n" +
+            "            for (pairs, 0..) |kv, i| {\n" +
+            "                names[i] = kv.@\"0\";\n" +
+            "                values[i] = kv.@\"1\";\n" +
+            "            }\n" +
+            "        }\n" +
+            "\n" +
+            "        fn get(self: Self, str: []const u8) ?T {\n" +
+            "            var i: usize = 0;\n" +
+            "            while (i < self.len) : (i += 1) {\n" +
+            "                const n = self.names[i];\n" +
+            "                if (n.len != str.len) continue;\n" +
+            "                var j: usize = 0;\n" +
+            "                while (j < n.len and n[j] == str[j]) : (j += 1) {}\n" +
+            "                if (j == n.len) return self.values[i];\n" +
+            "            }\n" +
+            "            return null;\n" +
+            "        }\n" +
+            "    };\n" +
+            "}\n" +
+            "\n" +
+            "fn toEnum(comptime T: type, str: []const u8) ?T {\n" +
+            "    const kvs = comptime build_kvs: {\n" +
+            "        const KV = struct { []const u8, T };\n" +
+            "        var kvs_array: [@typeInfo(T).@\"enum\".field_names.len]KV = undefined;\n" +
+            "        for (@typeInfo(T).@\"enum\".field_names, 0..) |name, i| {\n" +
+            "            kvs_array[i] = .{ name, @field(T, name) };\n" +
+            "        }\n" +
+            "        break :build_kvs kvs_array[0..];\n" +
+            "    };\n" +
+            "    const map = Lookup(T).init(kvs);\n" +
+            "    return map.get(str);\n" +
+            "}\n" +
+            "\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = toEnum(Op, \"sub\") orelse return 99;\n" +
+            "    const b = toEnum(Op, \"mul\") orelse return 98;\n" +
+            "    const c = toEnum(Op, \"div\");\n" +
+            "    return @intFromEnum(a) * 10 + @intFromEnum(b) + @as(u8, if (c == null) 100 else 0);\n" +
+            "}\n", 157);
 
     // Task #139: std.hash.Fnv1a_64 from real std.
     [Fact]
