@@ -2575,6 +2575,8 @@ internal sealed partial class ZigLowering
         Zig.PubFn p         => p.Arg1,   // `pub FnDef`
         Zig.InlineFn i      => MarkInline(i.Arg1),   // `inline FnDef` (an optimizer hint; lowers as a plain fn)
         Zig.PubInlineFn pi  => MarkInline(pi.Arg2),  // `pub inline FnDef`
+        Zig.NoinlineFn n    => n.Arg1,   // `noinline FnDef` (an optimizer hint; lowers as a plain fn, task #177)
+        Zig.PubNoinlineFn pn => pn.Arg2, // `pub noinline FnDef`
         Zig.ExportFn e      => e.Arg1,   // `export FnDef` (Milestone R)
         Zig.PubExportFn pe  => pe.Arg2,  // `pub export FnDef` (Milestone R)
         Zig.PubVar p        => p.Arg1,   // `pub VarDecl` (exported/public data)

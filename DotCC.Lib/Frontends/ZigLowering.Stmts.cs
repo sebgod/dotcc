@@ -1002,6 +1002,51 @@ internal sealed partial class ZigLowering
                 }
                 return decl;
             }
+            // `const blk: [4]u64 = @bitCast([_][16]u8{ … });` and `const wide: [2]u64 = @bitCast(@as(u128, a) *% b);`
+            // (std.hash.XxHash3, task #176): the local gets its own storage and the operand's bytes are copied in, an
+            // array from its storage, a scalar through an addressable temp. Both sizes must be known and equal, as zig requires.
+            if (!sentinel && arr.Count is { } bitCount
+                && initExpr.Content is Zig.BuiltinCall { Arg0: var bitCastTok } bitCastCall && Tok(bitCastTok) == "@bitCast"
+                && Flatten(bitCastCall.Arg2) is [var bitCastArg])
+            {
+                var source = LowerExpr(bitCastArg);
+                long destBytes = (long)bitCount * RowFlatCount(arr) * arr.FlatElement.SizeOf;
+                long? sourceBytes = source.Type.Unqualified switch
+                {
+                    CType.Array { Count: { } sourceCount } sourceArr => (long)sourceCount * RowFlatCount(sourceArr) * sourceArr.FlatElement.SizeOf,
+                    CType.Prim { Integer: true, IsComptimeInt: false } or CType.Prim { Integer: false } => source.Type.Unqualified.SizeOf,
+                    _ => null,
+                };
+                if (sourceBytes is not { } knownSource || knownSource != destBytes || destBytes <= 0)
+                {
+                    throw new CompileException(
+                        $"zig: @bitCast size mismatch: '{Tok(nameTok)}' holds {destBytes} bytes, its operand {(sourceBytes is { } sb ? sb + " bytes" : "an unknown size")}");
+                }
+                var bitSym = _symbols.Declare(new Symbol { Name = Tok(nameTok), Kind = SymKind.Var, Type = arr });
+                var flatCount = (arr.Count ?? 0) * RowFlatCount(arr);
+                var bitStmts = new List<CStmt>
+                {
+                    new ArrayDecl(bitSym, arr.FlatElement, new LitInt(flatCount.ToString(CultureInfo.InvariantCulture), flatCount) { Type = CType.Int }, null),
+                };
+                CExpr sourceBytesPtr = source;
+                if (source.Type.Unqualified is CType.Prim)
+                {
+                    var scalarTemp = _symbols.Declare(new Symbol
+                    {
+                        Name = "__bits" + _anfTempCounter++, Kind = SymKind.Var, Type = source.Type.Unqualified, AddressTaken = true,
+                    });
+                    bitStmts.Add(new DeclStmt(new List<LocalDecl> { new(scalarTemp, source) }));
+                    sourceBytesPtr = new Unary(UnOp.AddrOf, new VarRef(scalarTemp) { Type = scalarTemp.Type, IsLValue = true })
+                    { Type = new CType.Pointer(scalarTemp.Type) };
+                }
+                bitStmts.Add(new ExprStmt(new Call("memcpy", new List<CExpr>
+                {
+                    new VarRef(bitSym) { Type = arr, IsLValue = true },
+                    sourceBytesPtr,
+                    new LitInt(destBytes.ToString(CultureInfo.InvariantCulture), destBytes) { Type = CType.Int },
+                }) { Type = new CType.Pointer(CType.Void) }));
+                return new Seq(bitStmts);
+            }
             var arrInit = LowerExprSink(initExpr, arr);
             // A `comptime EXPR` initializer is a ComptimeFold until pass 3 resolves it to a
             // StackArray (e.g. `const t: [N]T = comptime buildTable();`). Route it through the

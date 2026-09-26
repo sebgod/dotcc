@@ -7703,6 +7703,86 @@ public sealed class ZigOracleTests
             "    if (d > 3) n += 64;\n" +
             "    return n;\n" +
             "}\n", 31, "" },
+        // Task #174: an empty `asm volatile` barrier over an input lowers to nothing.
+        new object[] { "empty_asm_barrier",
+            "inline fn barrier(x: anytype) void {\n" +
+            "    if (!@inComptime()) asm volatile (\"\"\n" +
+            "        :\n" +
+            "        : [x] \"r\" (x),\n" +
+            "    );\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var x: u64 = 42;\n" +
+            "    _ = &x;\n" +
+            "    barrier(x);\n" +
+            "    return @intCast(x);\n" +
+            "}\n", 42, "" },
+        // Tasks #175 / #176: bytes viewed as vectors (a slice cast, a single-pointer cast, a lane read through it), and array
+        // locals initialized by `@bitCast` of a 2-D literal with slice-copy rows and of a u128.
+        new object[] { "vector_views_of_bytes",
+            "const Block = @Vector(8, u64);\n" +
+            "fn sum(blocks: []align(1) const Block) u64 {\n" +
+            "    var acc: u64 = 0;\n" +
+            "    for (blocks) |b| acc +%= @reduce(.Add, b);\n" +
+            "    return acc;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf: [128]u8 = undefined;\n" +
+            "    for (&buf, 0..) |*p, i| p.* = @intCast(i);\n" +
+            "    const blocks: []align(1) const Block = @ptrCast(buf[0..64]);\n" +
+            "    const one: *align(1) const Block = @ptrCast(buf[64..128]);\n" +
+            "    return @truncate(sum(blocks) +% one[0]);\n" +
+            "}\n", 32, "" },
+        new object[] { "bit_cast_two_dimensional_rows",
+            "fn mix(input: []const u8, secret: []const u8) u64 {\n" +
+            "    const blk: [4]u64 = @bitCast([_][16]u8{ input[0..16].*, secret[0..16].* });\n" +
+            "    return blk[0] +% blk[1] *% 3 +% blk[2] *% 5 +% blk[3];\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var buf: [32]u8 = undefined;\n" +
+            "    for (&buf, 0..) |*p, i| p.* = @intCast(i * 7 + 1);\n" +
+            "    return @truncate(mix(buf[0..16], buf[16..32]));\n" +
+            "}\n", 138, "" },
+        new object[] { "bit_cast_wide_integer_to_array",
+            "fn fold(a: u64, b: u64) u64 {\n" +
+            "    const wide: [2]u64 = @bitCast(@as(u128, a) *% b);\n" +
+            "    return wide[0] ^ wide[1];\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    var a: u64 = 0x1234_5678_9abc_def1;\n" +
+            "    _ = &a;\n" +
+            "    return @truncate(fold(a, 0xfedc_ba98_7654_3211));\n" +
+            "}\n", 34, "" },
+        // Task #177: `noinline fn` at top level and on struct / enum methods, `pub` or not.
+        new object[] { "noinline_fns",
+            "const S = struct {\n" +
+            "    v: u8,\n" +
+            "    noinline fn get(self: S) u8 {\n" +
+            "        return self.v;\n" +
+            "    }\n" +
+            "    pub noinline fn twice(self: S) u8 {\n" +
+            "        return self.v * 2;\n" +
+            "    }\n" +
+            "};\n" +
+            "const E = enum(u8) {\n" +
+            "    a,\n" +
+            "    b,\n" +
+            "    noinline fn code(e: E) u8 {\n" +
+            "        return @intFromEnum(e) + 1;\n" +
+            "    }\n" +
+            "};\n" +
+            "noinline fn add(a: u8, b: u8) u8 {\n" +
+            "    @branchHint(.unlikely);\n" +
+            "    return a + b;\n" +
+            "}\n" +
+            "pub noinline fn sub(a: u8, b: u8) u8 {\n" +
+            "    return a - b;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const s = S{ .v = 5 };\n" +
+            "    const noinline_count: u8 = 1;\n" +
+            "    return add(s.get(), s.twice()) + E.b.code() + sub(9, 4) + noinline_count;\n" +
+            "}\n", 23, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

@@ -709,6 +709,13 @@ internal sealed partial class ZigLowering
                 var idx = LowerUsizeOperand(ix.Arg2);
                 // `v[i]` of a SIMD vector: a lane read (T5).
                 if (baseExpr.Type.Unqualified is CType.Vector laneVector) { return VectorLane(baseExpr, idx, laneVector); }
+                // `p[i]` through a single-item pointer to a vector (std.hash.XxHash3's `*align(1) const Block`, task #175) reads
+                // a lane of the pointee, as indexing a `*[N]T` reads an element; a `[*]` pointer to vectors indexes vectors.
+                if (baseExpr.Type.Unqualified is CType.Pointer { Pointee.Unqualified: CType.Vector pointeeVector }
+                    && PointerSizeOfValue(ix.Arg0) is not ("many" or "c"))
+                {
+                    return VectorLane(new Unary(UnOp.Deref, baseExpr) { Type = pointeeVector, IsLValue = true }, idx, pointeeVector);
+                }
                 // A tuple subscript `t[N]` (N a literal) reads the Nth element → `.ItemN+1`
                 // (Milestone G). A tuple has no runtime indexing (the field is statically named),
                 // so a non-literal index is rejected.
@@ -796,6 +803,12 @@ internal sealed partial class ZigLowering
             // runs at runtime, so it is `false`; the comptime interpreter never evaluates this node.
             // Inline assembly is parsed so a comptime-dead target path (std.crypto.sha2's SHA-NI rounds) folds away; one
             // that is actually reached has no C# form.
+            // An empty `asm volatile ("" : : [x] "r" (x))` (std.hash.XxHash3's disableAutoVectorization, task #174) emits no
+            // instruction and writes nothing; it only keeps the optimizer from vectorizing across it, so it lowers to nothing.
+            // Only with no outputs and inputs that are plain names (nothing to evaluate); every other `asm` stays cut.
+            case Zig.AsmVolatileExpr { Arg3: var asmTemplate, Arg4.Content: Zig.AsmTailIn { Arg1.Content: Zig.AsmItemsNone, Arg3: var asmInputs } }
+                when Tok(asmTemplate) == "\"\"" && AsmInputsArePlainNames(asmInputs):
+                return new DefaultLit { Type = CType.Void };
             case Zig.AsmExpr or Zig.AsmVolatileExpr:
                 throw new IrUnsupportedException(
                     "zig inline assembly (`asm`) is out of scope: dotcc targets .NET, so a reached `asm` has no lowering "
@@ -1530,6 +1543,16 @@ internal sealed partial class ZigLowering
     /// void value itself, or a read of a void symbol. zig's <c>void</c> has no runtime representation, so
     /// the backend drops void parameters and their arguments; a SIDE-EFFECTING void argument
     /// (<c>f(g())</c> with <c>g</c> returning void) would lose its call that way, so it is rejected.</summary>
+    /// <summary>Is every operand of an <c>asm</c> input list a plain name (<c>[x] "r" (x)</c>)? Such an input has nothing to
+    /// evaluate, so an empty barrier over it lowers to nothing (task #174).</summary>
+    private static bool AsmInputsArePlainNames(Item items) => items.Content switch
+    {
+        Zig.AsmItemsNone => true,
+        Zig.AsmItemsOne one => one.Arg0.Content is Zig.AsmItemExpr { Arg5.Content: Zig.Ident },
+        Zig.AsmItemsCons cons => cons.Arg0.Content is Zig.AsmItemExpr { Arg5.Content: Zig.Ident } && AsmInputsArePlainNames(cons.Arg2),
+        _ => false,
+    };
+
     private static bool IsErasableVoid(CExpr e) => e is DefaultLit or VarRef || e is Paren p && IsErasableVoid(p.Inner)
         // A `void` FIELD read (std.sort's `lessThanFn(ctx.sub_ctx, …)` with `context: void`) has no effect either.
         || e is Member { Base: var fieldBase } && IsPurePath(fieldBase);

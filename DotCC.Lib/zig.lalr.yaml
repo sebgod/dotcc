@@ -295,6 +295,7 @@ symbols:
   - ForCap         # 189 one capture: `x` (a per-iteration copy) or `*x` (a pointer into the object)
   - VoidElem       # 190 `{}`, zig's void value, as a positional list element (`[3]void{ {}, {}, {} }`, task #114)
   - ConcatIf       # 191 `if (c) a else b` as the right operand of a whole-RHS `++` (`"0123456789" ++ if (upper) "ABCDEF" else "abcdef"`, task #170)
+  - 'noinline'     # 192 `noinline fn`: an optimizer hint on a function (std.hash.XxHash3's `noinline fn hashLong`, task #177)
 
 productions:
   # Start: single non-terminal, trimmed at parse time.
@@ -315,6 +316,8 @@ productions:
       # lowers as an ordinary function. `inline` starts no other declaration, so it is a clean shift.
       - { lhs: Decl, rhs: ['inline', FnDef],        action: inlineFn }
       - { lhs: Decl, rhs: ['pub', 'inline', FnDef], action: pubInlineFn }
+      - { lhs: Decl, rhs: ['noinline', FnDef],        action: noinlineFn }
+      - { lhs: Decl, rhs: ['pub', 'noinline', FnDef], action: pubNoinlineFn }
       - { lhs: Decl, rhs: [VarDecl] }
       - { lhs: Decl, rhs: ['pub', VarDecl], action: pubVar }
       # `export fn` / `pub export fn` (Milestone R, part 4) — force C-ABI external linkage. dotcc
@@ -1631,6 +1634,8 @@ productions:
       - { lhs: Member, rhs: ['pub', FnDef],    action: memberPubMethod }
       - { lhs: Member, rhs: ['inline', FnDef],        action: memberInlineMethod }
       - { lhs: Member, rhs: ['pub', 'inline', FnDef], action: memberPubInlineMethod }
+      - { lhs: Member, rhs: ['noinline', FnDef],        action: memberNoinlineMethod }
+      - { lhs: Member, rhs: ['pub', 'noinline', FnDef], action: memberPubNoinlineMethod }
       # A container-level `comptime { … }` block (hash_map.zig's `comptime { assert(@sizeOf(Metadata) == 1); }`):
       # analysis-only, dropped like the top-level form (topComptime). `comptime` starts no other member.
       - { lhs: Member, rhs: ['comptime', Block],      action: memberComptime }
@@ -1703,6 +1708,8 @@ productions:
       - { lhs: EnumMember, rhs: ['pub', FnDef],    action: enumMemberPubMethod }
       - { lhs: EnumMember, rhs: ['inline', FnDef],        action: enumMemberInlineMethod }
       - { lhs: EnumMember, rhs: ['pub', 'inline', FnDef], action: enumMemberPubInlineMethod }
+      - { lhs: EnumMember, rhs: ['noinline', FnDef],        action: enumMemberNoinlineMethod }
+      - { lhs: EnumMember, rhs: ['pub', 'noinline', FnDef], action: enumMemberPubNoinlineMethod }
       - { lhs: EnumMember, rhs: ['comptime', Block],      action: enumMemberComptime }
       - { lhs: EnumMember, rhs: [TestBlock],              action: enumMemberTest }
       - { lhs: EnumMember, rhs: [VarDecl],         action: enumMemberConst }
@@ -1739,6 +1746,8 @@ productions:
       - { lhs: UnionMember, rhs: ['pub', FnDef],       action: unionMemberPubMethod }
       - { lhs: UnionMember, rhs: ['inline', FnDef],        action: unionMemberInlineMethod }
       - { lhs: UnionMember, rhs: ['pub', 'inline', FnDef], action: unionMemberPubInlineMethod }
+      - { lhs: UnionMember, rhs: ['noinline', FnDef],        action: unionMemberNoinlineMethod }
+      - { lhs: UnionMember, rhs: ['pub', 'noinline', FnDef], action: unionMemberPubNoinlineMethod }
       - { lhs: UnionMember, rhs: ['comptime', Block],      action: unionMemberComptime }
       - { lhs: UnionMember, rhs: [TestBlock],              action: unionMemberTest }
       - { lhs: UnionMember, rhs: [VarDecl],            action: unionMemberConst }
@@ -1860,6 +1869,8 @@ lexer:
     - { symbol: 'errdefer', match: 'errdefer' }
     - { symbol: 'comptime', match: 'comptime' }
     - { symbol: 'inline',   match: 'inline' }
+    # `noinline` (8 chars): first-rule-wins on the tie with IDENT; longest-match keeps `noinline_x` an IDENT.
+    - { symbol: 'noinline', match: 'noinline' }
     # `noalias` is a keyword (first-rule-wins on the 7-char tie with IDENT), dropped: see NOALIAS.
     - { symbol: NOALIAS,    match: 'noalias', action: ignore }
     # `test` is a reserved keyword in Zig, so promoting it never steals an identifier. Longest-match

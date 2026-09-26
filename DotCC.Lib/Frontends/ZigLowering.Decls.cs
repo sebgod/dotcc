@@ -807,6 +807,8 @@ internal sealed partial class ZigLowering
                 case Zig.MemberPubMethod mm: methods.Add(mm.Arg1); break;      // 'pub' FnDef
                 case Zig.MemberInlineMethod mm:    methods.Add(MarkInline(mm.Arg1)); break; // 'inline' FnDef
                 case Zig.MemberPubInlineMethod mm: methods.Add(MarkInline(mm.Arg2)); break; // 'pub' 'inline' FnDef
+                case Zig.MemberNoinlineMethod mm:    methods.Add(mm.Arg1); break; // 'noinline' FnDef (an optimizer hint, task #177)
+                case Zig.MemberPubNoinlineMethod mm: methods.Add(mm.Arg2); break; // 'pub' 'noinline' FnDef
                 case Zig.MemberComptime: break;   // `comptime { … }`: analysis-only, dropped like the top-level form
                 case Zig.MemberTest: break;       // a `test` block: dropped, like the top-level form
                 case Zig.MemberConst mc:     consts.Add(mc.Arg0); break;       // VarDecl
@@ -838,6 +840,8 @@ internal sealed partial class ZigLowering
                 case Zig.EnumMemberPubMethod mm: methods.Add(mm.Arg1); break;  // 'pub' FnDef
                 case Zig.EnumMemberInlineMethod mm:    methods.Add(MarkInline(mm.Arg1)); break;  // 'inline' FnDef
                 case Zig.EnumMemberPubInlineMethod mm: methods.Add(MarkInline(mm.Arg2)); break;  // 'pub' 'inline' FnDef
+                case Zig.EnumMemberNoinlineMethod mm:    methods.Add(mm.Arg1); break;  // 'noinline' FnDef (task #177)
+                case Zig.EnumMemberPubNoinlineMethod mm: methods.Add(mm.Arg2); break;  // 'pub' 'noinline' FnDef
                 case Zig.EnumMemberComptime: break;   // `comptime { … }`: analysis-only, dropped
                 case Zig.EnumMemberTest: break;       // a `test` block (std.math.Order's `test invert`): dropped
                 case Zig.EnumMemberConst mc:     consts.Add(mc.Arg0); break;   // VarDecl
@@ -901,6 +905,8 @@ internal sealed partial class ZigLowering
                 case Zig.UnionMemberPubMethod mm:   methods.Add(mm.Arg1); break;    // 'pub' FnDef
                 case Zig.UnionMemberInlineMethod mm:    methods.Add(MarkInline(mm.Arg1)); break;    // 'inline' FnDef
                 case Zig.UnionMemberPubInlineMethod mm: methods.Add(MarkInline(mm.Arg2)); break;    // 'pub' 'inline' FnDef
+                case Zig.UnionMemberNoinlineMethod mm:    methods.Add(mm.Arg1); break;    // 'noinline' FnDef (task #177)
+                case Zig.UnionMemberPubNoinlineMethod mm: methods.Add(mm.Arg2); break;    // 'pub' 'noinline' FnDef
                 case Zig.UnionMemberComptime: break;   // `comptime { … }`: analysis-only, dropped
                 case Zig.UnionMemberTest: break;       // a `test` block: dropped
                 case Zig.UnionMemberConst mc:       consts.Add(mc.Arg0); break;     // VarDecl
@@ -1357,6 +1363,18 @@ internal sealed partial class ZigLowering
         return new TupleNew(elems, tt) { Type = tt };
     }
 
+    /// <summary>Is <paramref name="e"/> a pointer expression with no effects (names, fields, casts, and arithmetic over them), so a
+    /// multi-dimensional literal may read one row through it once per element (task #176)?</summary>
+    private static bool IsPureRowPointer(CExpr e) => e switch
+    {
+        VarRef or LitInt => true,
+        Paren p => IsPureRowPointer(p.Inner),
+        Member m => IsPureRowPointer(m.Base),
+        Cast c => IsPureRowPointer(c.Operand),
+        Binary b => IsPureRowPointer(b.Left) && IsPureRowPointer(b.Right),
+        _ => false,
+    };
+
     /// <summary>Build an array literal (Milestone K) — a positional `.{e0, e1, …}` at a `[N]T` sink,
     /// or a typed `[N]T{…}` / `[_]T{…}` — as a <see cref="StackArray"/> (a stackalloc'd array value;
     /// the backend hoists it to a block-local pointer temp when used outside an initializer). Each
@@ -1389,6 +1407,19 @@ internal sealed partial class ZigLowering
             foreach (var row in elems)
             {
                 if (row is StackArray literalRow) { flat.AddRange(literalRow.Elems); continue; }
+                // A row copied out of a slice with comptime-known bounds (`input[0..16].*`, std.hash.XxHash3's mix16, task #176):
+                // its elements are read off the slice's pointer, a copy by value as a named row's are. The pointer is read once
+                // per element, so only a pure one, and the length must be the row's.
+                if (row is SliceNew { Ptr: var rowPtr, Len: var rowLen, Element: var rowElem }
+                    && _ir.ConstEval(rowLen) == rowCount && IsPureRowPointer(rowPtr)
+                    && rowElem.Unqualified.Equals(arr.FlatElement.Unqualified))
+                {
+                    for (var k = 0; k < rowCount; k++)
+                    {
+                        flat.Add(new DotCC.Ir.Index(rowPtr, new LitInt(k.ToString(CultureInfo.InvariantCulture), k) { Type = CType.Int }) { Type = arr.FlatElement });
+                    }
+                    continue;
+                }
                 if (row is not (VarRef or Member or DotCC.Ir.Index))
                 {
                     throw new IrUnsupportedException(
@@ -2890,6 +2921,29 @@ internal sealed partial class ZigLowering
                     throw new IrUnsupportedException($"zig `@alignCast` expects (value); got {bargs.Count} argument(s)");
                 }
                 return sink is null ? LowerExpr(bargs[0]) : LowerExprSink(bargs[0], sink);
+            // `@ptrCast(bytes)` of a SLICE to a slice of another element (std.hash.XxHash3's `[]align(1) const Block` over its
+            // input bytes, task #175): the same memory, `len * @sizeOf(src) / @sizeOf(dst)` elements long. A constructed
+            // slice reuses its own pointer and length; another slice value is read twice, so only a pure one.
+            case "@ptrCast" when sink?.Unqualified is CType.Slice toSlice && bargs.Count == 1
+                                 && LowerExpr(bargs[0]) is { Type.Unqualified: CType.Slice fromSlice } fromExpr
+                                 && (fromExpr is SliceNew || IsPurePath(fromExpr)):
+            {
+                var fromPtr = fromExpr is SliceNew fromNew ? fromNew.Ptr
+                    : new Member(fromExpr, "Ptr", false) { Type = new CType.Pointer(fromSlice.Element) };
+                CExpr fromLen = fromExpr is SliceNew lenNew ? lenNew.Len : new Member(fromExpr, "Len", false) { Type = CType.ULong };
+                var toElem = toSlice.Element.Unqualified;
+                CExpr bytes = new Binary(BinOp.Mul, fromLen, new SizeOfExpr(fromSlice.Element.Unqualified) { Type = CType.ULong }) { Type = CType.ULong };
+                var toLen = new Binary(BinOp.Div, bytes, new SizeOfExpr(toElem) { Type = CType.ULong }) { Type = CType.ULong };
+                var toPtr = new CType.Pointer(toSlice.Element);
+                return new SliceNew(new Cast(toPtr, fromPtr) { Type = toPtr }, toLen, toElem, toSlice.Element.IsConst) { Type = toSlice };
+            }
+            // `@ptrCast(buf[64..128])` to a single-item pointer (XxHash3's `*align(1) const Block`, task #175): a slice with
+            // comptime-known bounds is zig's `*[N]T`, a pointer, so the cast is of its pointer. A runtime-length slice is not
+            // a pointer and falls to the ordinary lowering.
+            case "@ptrCast" when sink?.Unqualified is CType.Pointer toOne && bargs.Count == 1
+                                 && LowerExpr(bargs[0]) is SliceNew { Ptr: var arrayPtr, Len: var arrayLen }
+                                 && _ir.ConstEval(arrayLen) is not null:
+                return new Cast(toOne, arrayPtr) { Type = toOne };
             // `const a_bytes: []u8 = @ptrCast(a);` with `a: *T` (std.mem.swap): a single item viewed as a slice of
             // the sink's element type, `@sizeOf(T) / @sizeOf(elem)` elements long.
             case "@ptrCast" when sink?.Unqualified is CType.Slice castSlice && bargs.Count == 1

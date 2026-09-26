@@ -5553,6 +5553,162 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void An_empty_asm_barrier_lowers_to_nothing()
+    {
+        var cs = EmitZig("""
+            inline fn barrier(x: anytype) void {
+                if (!@inComptime()) asm volatile (""
+                    :
+                    : [x] "r" (x),
+                );
+            }
+            pub fn main() u8 {
+                var x: u64 = 42;
+                _ = &x;
+                barrier(x);
+                return @intCast(x);
+            }
+            """);
+        // Task #174 (std.hash.XxHash3's disableAutoVectorization): an empty `asm volatile ("" : : [x] "r" (x))` emits no
+        // instruction and writes nothing, only an optimizer barrier, so it lowers to nothing. zig returns 42.
+        cs.ShouldContain("internal static unsafe void barrier__u64(ulong x)");
+        cs.ShouldContain("barrier__u64(x);");
+    }
+
+    [Fact]
+    public void A_non_empty_asm_is_still_out_of_scope()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig("""
+            pub fn main() u8 {
+                var x: u64 = 42;
+                _ = &x;
+                asm volatile ("nop"
+                    :
+                    : [x] "r" (x),
+                );
+                return @intCast(x);
+            }
+            """));
+        // Task #174: only the empty barrier is a no-op; an instruction has no C# form.
+        ex.Message.ShouldContain("zig inline assembly (`asm`) is out of scope");
+    }
+
+    [Fact]
+    public void A_byte_slice_ptr_cast_to_vectors_and_a_lane_read_through_a_vector_pointer()
+    {
+        var cs = EmitZig("""
+            const Block = @Vector(8, u64);
+            fn sum(blocks: []align(1) const Block) u64 {
+                var acc: u64 = 0;
+                for (blocks) |b| acc +%= @reduce(.Add, b);
+                return acc;
+            }
+            pub fn main() u8 {
+                var buf: [128]u8 = undefined;
+                for (&buf, 0..) |*p, i| p.* = @intCast(i);
+                const blocks: []align(1) const Block = @ptrCast(buf[0..64]);
+                const one: *align(1) const Block = @ptrCast(buf[64..128]);
+                return @truncate(sum(blocks) +% one[0]);
+            }
+            """);
+        // Task #175 (std.hash.XxHash3's `[]align(1) const Block` / `*align(1) const Block`, `Block = @Vector(8, u64)`): a
+        // slice cast to a slice of vectors keeps its memory and counts `len * @sizeOf(src) / @sizeOf(dst)` elements; a
+        // comptime-bounds slice cast to a single pointer is its pointer; `p[i]` through that pointer reads a lane. zig returns 32.
+        cs.ShouldContain("/ ((ulong)(sizeof(System.Runtime.Intrinsics.Vector512<ulong>))));");
+        cs.ShouldContain("System.Runtime.Intrinsics.Vector512<ulong>* one = (System.Runtime.Intrinsics.Vector512<ulong>*)(buf + 64);");
+        cs.ShouldContain("ZigVec.Get(*one, 0)");
+    }
+
+    [Fact]
+    public void An_array_local_bit_cast_from_a_two_dimensional_literal_or_a_wide_integer()
+    {
+        var cs = EmitZig("""
+            fn mix(input: []const u8, secret: []const u8) u64 {
+                const blk: [4]u64 = @bitCast([_][16]u8{ input[0..16].*, secret[0..16].* });
+                return blk[0] +% blk[1] *% 3 +% blk[2] *% 5 +% blk[3];
+            }
+            pub fn main() u8 {
+                var buf: [32]u8 = undefined;
+                for (&buf, 0..) |*p, i| p.* = @intCast(i * 7 + 1);
+                return @truncate(mix(buf[0..16], buf[16..32]));
+            }
+            """);
+        var wide = EmitZig("""
+            fn fold(a: u64, b: u64) u64 {
+                const wide: [2]u64 = @bitCast(@as(u128, a) *% b);
+                return wide[0] ^ wide[1];
+            }
+            pub fn main() u8 {
+                var a: u64 = 0x1234_5678_9abc_def1;
+                _ = &a;
+                return @truncate(fold(a, 0xfedc_ba98_7654_3211));
+            }
+            """);
+        // Task #176 (std.hash.XxHash3's mix16 and fold): a 2-D literal row copied out of a slice (`input[0..16].*`) reads
+        // its elements off the slice's pointer, and an array local initialized by `@bitCast` gets its own storage with the
+        // operand's bytes copied in, a scalar through an addressable temp. zig returns 138 and 34.
+        cs.ShouldContain("(secret.Ptr + 0)[15] };");
+        cs.ShouldContain("memcpy(blk, __cl0, 32);");
+        wide.ShouldContain("memcpy(wide, &__bits0, 16);");
+    }
+
+    [Fact]
+    public void An_array_local_bit_cast_of_another_size_is_rejected()
+    {
+        var ex = Should.Throw<CompileException>(() => EmitZig("""
+            pub fn main() u8 {
+                var v: u32 = 1;
+                _ = &v;
+                const x: [3]u8 = @bitCast(v);
+                return x[0];
+            }
+            """));
+        // Task #176: zig refuses a `@bitCast` between sizes (`[3]u8` from a `u32`).
+        ex.Message.ShouldContain("zig: @bitCast size mismatch");
+    }
+
+    [Fact]
+    public void A_noinline_fn_parses_and_lowers_as_a_plain_fn()
+    {
+        var cs = EmitZig("""
+            const S = struct {
+                v: u8,
+                noinline fn get(self: S) u8 {
+                    return self.v;
+                }
+                pub noinline fn twice(self: S) u8 {
+                    return self.v * 2;
+                }
+            };
+            const E = enum(u8) {
+                a,
+                b,
+                noinline fn code(e: E) u8 {
+                    return @intFromEnum(e) + 1;
+                }
+            };
+            noinline fn add(a: u8, b: u8) u8 {
+                @branchHint(.unlikely);
+                return a + b;
+            }
+            pub noinline fn sub(a: u8, b: u8) u8 {
+                return a - b;
+            }
+            pub fn main() u8 {
+                const s = S{ .v = 5 };
+                const noinline_count: u8 = 1;
+                return add(s.get(), s.twice()) + E.b.code() + sub(9, 4) + noinline_count;
+            }
+            """);
+        // Task #177 (std.hash.XxHash3's `noinline fn hashLong`, which had failed xxhash.zig's parse at line 678): `noinline`
+        // on a top-level fn and on struct and enum methods, `pub` or not, is an optimizer hint, so each lowers as a plain fn;
+        // `noinline_count` stays an identifier. zig returns 23.
+        cs.ShouldContain("internal static unsafe byte add(byte a, byte b)");
+        cs.ShouldContain("internal static unsafe byte sub(byte a, byte b)");
+        cs.ShouldContain("byte noinline_count = 1;");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""
