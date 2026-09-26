@@ -1640,10 +1640,8 @@ internal sealed class CSharpBackend
             // coerced to the ctor's `ulong`.
             case SliceNew sn:
             {
-                var name = sn.Const ? "ConstSlice" : "Slice";
-                // A slice of arrays is a slice of the flat element (see CSharpTarget, task #152).
-                var snElement = sn.Element.Unqualified is CType.Array snRows ? snRows.FlatElement.Unqualified : sn.Element.Unqualified;
-                return ($"new {name}<{Cs(snElement)}>({Expr(sn.Ptr)}, {Coerced(sn.Len, CType.ULong)})", PPrimary);
+                // A slice of arrays or of pointers takes the target's own shape (CSharpTarget.SliceType, tasks #152 / #153).
+                return ($"new {_target.SliceType(sn.Element.Unqualified, sn.Const)}({Expr(sn.Ptr)}, {Coerced(sn.Len, CType.ULong)})", PPrimary);
             }
             // A Zig allocator `a.alloc(T, n)` (Milestone F). Receiver null → the DEVIRTUALIZED
             // C-heap default: a direct `ZigAlloc.AllocCHeap<T>(n, oom)` (→ Libc.malloc, no vtable).

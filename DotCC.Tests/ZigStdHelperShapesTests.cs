@@ -4620,6 +4620,44 @@ public sealed class ZigStdHelperShapesTests
     }
 
     [Fact]
+    public void A_slice_of_pointers_is_a_pointer_slice_over_the_pointees()
+    {
+        var cs = EmitZig("""
+            fn total(inputs: []const [*]const u8, n: usize) u32 {
+                var s: u32 = 0;
+                for (inputs) |p| {
+                    var i: usize = 0;
+                    while (i < n) : (i += 1) s += p[i];
+                }
+                return s;
+            }
+            fn swapFirst(ptrs: []*u8) void {
+                const t = ptrs[0].*;
+                ptrs[0].* = ptrs[1].*;
+                ptrs[1].* = t;
+            }
+            pub fn main() u8 {
+                const a = [_]u8{ 1, 2, 3 };
+                const b = [_]u8{ 10, 20, 30 };
+                var ptrs = [_][*]const u8{ &a, &b };
+                const sl: []const [*]const u8 = &ptrs;
+                ptrs[1] = &a;
+                var x: u8 = 5;
+                var y: u8 = 7;
+                var refs = [_]*u8{ &x, &y };
+                swapFirst(&refs);
+                return @intCast(total(sl, 3) + total(sl[0..1], 2) + x * 10 + y + sl.len);
+            }
+            """);
+        // Task #153 (std.crypto.blake3's hashMany `inputs: [][*]const u8`): C# forbids `Slice<byte*>`, so a slice of
+        // pointers is the runtime's PtrSlice over the pointees, whose `.Ptr` is a `T**` (every access spells as before).
+        // zig returns 92.
+        cs.ShouldContain("internal static unsafe uint total(ConstPtrSlice<byte> inputs, ulong n)");
+        cs.ShouldContain("internal static unsafe void swapFirst(PtrSlice<byte> ptrs)");
+        cs.ShouldContain("ConstPtrSlice<byte> sl = new ConstPtrSlice<byte>(ptrs, 2UL);");
+    }
+
+    [Fact]
     public void An_empty_literal_at_a_nonzero_extent_is_still_rejected()
     {
         Should.Throw<Exception>(() => EmitZig("""

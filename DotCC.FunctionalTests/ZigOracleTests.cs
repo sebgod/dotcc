@@ -7139,6 +7139,33 @@ public sealed class ZigOracleTests
             "    const plane = cube[1];\n" +
             "    return cube[1][0][1] * 10 + cube[0][1][0] + plane[1][1] + s.r[1];\n" +
             "}\n", 107, "" },
+        // Task #153: slices of pointers (`[]const [*]const u8`, `[]*u8`): iteration, element derefs, slicing, `&arr`.
+        new object[] { "slice_of_pointers",
+            "fn total(inputs: []const [*]const u8, n: usize) u32 {\n" +
+            "    var s: u32 = 0;\n" +
+            "    for (inputs) |p| {\n" +
+            "        var i: usize = 0;\n" +
+            "        while (i < n) : (i += 1) s += p[i];\n" +
+            "    }\n" +
+            "    return s;\n" +
+            "}\n" +
+            "fn swapFirst(ptrs: []*u8) void {\n" +
+            "    const t = ptrs[0].*;\n" +
+            "    ptrs[0].* = ptrs[1].*;\n" +
+            "    ptrs[1].* = t;\n" +
+            "}\n" +
+            "pub fn main() u8 {\n" +
+            "    const a = [_]u8{ 1, 2, 3 };\n" +
+            "    const b = [_]u8{ 10, 20, 30 };\n" +
+            "    var ptrs = [_][*]const u8{ &a, &b };\n" +
+            "    const sl: []const [*]const u8 = &ptrs;\n" +
+            "    ptrs[1] = &a;\n" +
+            "    var x: u8 = 5;\n" +
+            "    var y: u8 = 7;\n" +
+            "    var refs = [_]*u8{ &x, &y };\n" +
+            "    swapFirst(&refs);\n" +
+            "    return @intCast(total(sl, 3) + total(sl[0..1], 2) + x * 10 + y + sl.len);\n" +
+            "}\n", 92, "" },
         // A call through a fn-pointer FIELD, on a value and through a pointer (std.Io.Writer's
         // `w.vtable.drain(…)` dispatch shape).
         new object[] { "fn_pointer_field_call",

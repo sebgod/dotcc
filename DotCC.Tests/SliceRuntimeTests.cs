@@ -97,4 +97,26 @@ public sealed class SliceRuntimeTests
         opt = 40;
         (*v).ShouldBe(40);
     }
+
+    [Fact]
+    public unsafe void Pointer_slice_indexes_slices_and_converts_to_const()
+    {
+        // zig `[][*]const u8` (task #153): C# forbids `Slice<byte*>`, so a slice of pointers is a PtrSlice over the
+        // pointees, its elements lvalue pointers.
+        byte* a = stackalloc byte[] { 1, 2 };
+        byte* b = stackalloc byte[] { 7, 8 };
+        byte** ptrs = stackalloc byte*[] { a, b };
+        var s = new PtrSlice<byte>(ptrs, 2);
+
+        s[1][0].ShouldBe((byte)7);
+        s[0] = b;
+        (ptrs[0] == b).ShouldBeTrue();
+        var tail = s.Sub(1, 2);
+        tail.Len.ShouldBe((ulong)1);
+        (tail[0] == b).ShouldBeTrue();
+
+        ConstPtrSlice<byte> cs = s;   // implicit []*T -> []const *T
+        cs.Len.ShouldBe((ulong)2);
+        cs[1][1].ShouldBe((byte)8);
+    }
 }

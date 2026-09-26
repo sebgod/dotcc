@@ -108,3 +108,75 @@ public struct ConstSlice<T> where T : unmanaged
     /// <summary>A <see cref="System.ReadOnlySpan{T}"/> view, for span-based BCL APIs.</summary>
     public unsafe System.ReadOnlySpan<T> AsSpan() => new((void*)_ptr, checked((int)Len));
 }
+
+/// <summary>
+/// A Zig slice of POINTERS <c>[]*T</c> / <c>[][*]T</c> (std.crypto.blake3's <c>inputs: [][*]const u8</c>): C# forbids
+/// a pointer type argument, so <c>Slice&lt;T*&gt;</c> cannot exist; this is the same <c>{ ptr, len }</c> fat pointer
+/// over pointees <typeparamref name="T"/>, its data pointer a <c>T**</c> and each element a <c>T*</c>.
+/// </summary>
+public struct PtrSlice<T> where T : unmanaged
+{
+    private nint _ptr;
+
+    /// <summary>The element count (Zig <c>slice.len</c>), writable.</summary>
+    public ulong Len;
+
+    /// <summary>Construct a slice over <paramref name="len"/> pointers at <paramref name="ptr"/>.</summary>
+    public unsafe PtrSlice(T** ptr, ulong len)
+    {
+        _ptr = (nint)ptr;
+        Len = len;
+    }
+
+    /// <summary>The data pointer (Zig <c>slice.ptr</c>), writable.</summary>
+    public unsafe T** Ptr
+    {
+        readonly get => (T**)_ptr;
+        set => _ptr = (nint)value;
+    }
+
+    /// <summary>Element access (Zig <c>slice[i]</c>), an lvalue. Not bounds-checked in this build.</summary>
+    public unsafe ref T* this[ulong i] => ref ((T**)_ptr)[i];
+
+    /// <summary>The sub-slice <c>slice[lo..hi]</c>.</summary>
+    public unsafe PtrSlice<T> Sub(ulong lo, ulong hi) => new((T**)_ptr + lo, hi - lo);
+
+    /// <summary>Zig's <c>[]*T</c> → <c>[]const *T</c> coercion.</summary>
+    public static implicit operator ConstPtrSlice<T>(PtrSlice<T> s) => new(s._ptr, s.Len);
+}
+
+/// <summary>The read-only counterpart of <see cref="PtrSlice{T}"/>: a Zig <c>[]const *T</c> / <c>[]const [*]T</c>.</summary>
+public struct ConstPtrSlice<T> where T : unmanaged
+{
+    private nint _ptr;
+
+    /// <summary>The element count (Zig <c>slice.len</c>), writable.</summary>
+    public ulong Len;
+
+    /// <summary>Construct a const slice over <paramref name="len"/> pointers at <paramref name="ptr"/>.</summary>
+    public unsafe ConstPtrSlice(T** ptr, ulong len)
+    {
+        _ptr = (nint)ptr;
+        Len = len;
+    }
+
+    /// <summary>Construct from a raw stored pointer value (the <see cref="PtrSlice{T}"/> conversion).</summary>
+    internal ConstPtrSlice(nint ptr, ulong len)
+    {
+        _ptr = ptr;
+        Len = len;
+    }
+
+    /// <summary>The data pointer (Zig <c>slice.ptr</c>), writable.</summary>
+    public unsafe T** Ptr
+    {
+        readonly get => (T**)_ptr;
+        set => _ptr = (nint)value;
+    }
+
+    /// <summary>Element access (Zig <c>slice[i]</c>); read-only. Not bounds-checked in this build.</summary>
+    public unsafe T* this[ulong i] => ((T**)_ptr)[i];
+
+    /// <summary>The sub-slice <c>slice[lo..hi]</c>.</summary>
+    public unsafe ConstPtrSlice<T> Sub(ulong lo, ulong hi) => new((T**)_ptr + lo, hi - lo);
+}

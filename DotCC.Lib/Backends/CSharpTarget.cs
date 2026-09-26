@@ -61,10 +61,7 @@ internal sealed class CSharpTarget : ITarget
         // A Zig slice `[]T` → the runtime `Slice<T>` fat-pointer value type; `[]const T`
         // (a const-qualified element) → `ConstSlice<T>`. The element is rendered unqualified
         // (the const lives in the slice type's identity, not a C# `const`).
-        // A slice of ARRAYS (`[][8]u32`, task #152) views rows of one flat run, so it is a slice of the innermost
-        // element (a pointer is no C# type argument); `.Len` still counts rows, and `s[i]` is `s.Ptr + i * N`.
-        CType.Slice { Element.Unqualified: CType.Array rows } s => (s.Element.IsConst ? "ConstSlice<" : "Slice<") + RenderType(rows.FlatElement.Unqualified) + ">",
-        CType.Slice s => (s.Element.IsConst ? "ConstSlice<" : "Slice<") + RenderType(s.Element.Unqualified) + ">",
+        CType.Slice s => SliceType(s.Element.Unqualified, s.Element.IsConst),
         // A Zig `std.mem.Allocator` → the runtime `Allocator` fat-pointer value type
         // (Milestone F). The concrete `FixedBufferAllocator` is a `CType.Named` (renders its name).
         CType.Allocator => "Allocator",
@@ -174,6 +171,27 @@ internal sealed class CSharpTarget : ITarget
         "long double" => "double",
         _ => throw new IrUnsupportedException("C# target has no spelling for primitive " + p.Name),
     };
+
+    /// <summary>The C# slice type over <paramref name="element"/> (a zig <c>[]T</c>, or <c>[]const T</c> when
+    /// <paramref name="isConst"/>). A pointer is no C# type argument, so two element kinds take another shape: a slice of
+    /// ARRAYS (<c>[][8]u32</c>, task #152) views rows of one flat run, so it is a slice of the innermost element whose
+    /// <c>.Len</c> counts rows (<c>s[i]</c> is <c>s.Ptr + i * N</c>); a slice of POINTERS (<c>[][*]const u8</c>, task #153)
+    /// is the runtime's <c>PtrSlice</c> over the pointees, whose <c>.Ptr</c> is a <c>T**</c>.</summary>
+    internal string SliceType(CType element, bool isConst)
+    {
+        if (element is CType.Array rows)
+        {
+            return (isConst ? "ConstSlice<" : "Slice<") + RenderType(rows.FlatElement.Unqualified) + ">";
+        }
+        // A pointer to an array renders as the array's flat element pointer, so its pointee is that element.
+        if (element is CType.Pointer { Pointee: var pointee }
+            && (pointee.Unqualified is CType.Array pointedRows ? pointedRows.FlatElement : pointee).Unqualified
+                is var target && target is not (CType.Pointer or CType.VoidType or CType.Func or CType.Array))
+        {
+            return (isConst ? "ConstPtrSlice<" : "PtrSlice<") + RenderType(target) + ">";
+        }
+        return (isConst ? "ConstSlice<" : "Slice<") + RenderType(element) + ">";
+    }
 
     /// <summary>The generated value types standing for zig optional arrays <c>?[N]T</c> (task #151), by name: the
     /// element's C# spelling and the flat element count. Filled as types render; the backend emits one declaration per
